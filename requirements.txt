@@ -1,0 +1,16 @@
+# formatting
+pre-commit==4.0.1
+
+# build
+regex 
+cmake>=3.26
+packaging>=24.2
+setuptools-scm>=8
+setuptools>=77.0.3,<80.0.0
+wheel
+
+# torch dependency
+torch @ https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu-new/releases/2025.1/IPEX_2.8.10+xpu/RC2/vllm_pytorch_whl_310/torch-2.8.0+xpu-cp310-cp310-linux_x86_64.whl
+pytorch-triton-xpu @ https://ubit-artifactory-ba.intel.com/artifactory/aipc_releases-ba-local/gpu-new/releases/2025.1/IPEX_2.8.10+xpu/RC2/vllm_pytorch_whl_310/pytorch_triton_xpu-3.4.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+
+# may need oneapi packages
