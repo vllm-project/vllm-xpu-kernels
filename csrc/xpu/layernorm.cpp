@@ -9,7 +9,7 @@
 #include "dispatch_utils.h"
 #include <iostream>
 
-namespace {
+namespace vllm {
 template <typename T>
 T permute_sub_group_by_xor(sycl::sub_group g, T x, unsigned int mask,
                            unsigned int logical_sub_group_size = 32)
@@ -96,8 +96,6 @@ void call_rms_norm_kernel(
     torch::Tensor& input,
     torch::Tensor& weight,
     float epsilon) {
-  std::cout <<"calling rms norm kernel" << std::endl;
-
   using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -154,7 +152,6 @@ void fused_add_rms_norm_kernel(
     *s_variance = sycl::rsqrt(variance / hidden_size + epsilon);
   }
 
-  // item_ct1.barrier();
   item_ct1.barrier(sycl::access::fence_space::local_space);
 
   for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
@@ -171,7 +168,6 @@ void call_fused_add_rms_norm_kernel(
     torch::Tensor& residual,
     torch::Tensor& weight,
     float epsilon){
-  std::cout <<"calling fused add rms norm kernel" << std::endl;
   using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -209,7 +205,7 @@ void rms_norm(
     double epsilon) {
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_rms_norm_kernel", [&] {
-        call_rms_norm_kernel<scalar_t>(out, input, weight, epsilon);
+        vllm::call_rms_norm_kernel<scalar_t>(out, input, weight, epsilon);
       });
 }
 
@@ -223,7 +219,7 @@ void fused_add_rms_norm(
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_fused_add_rms_norm_kernel", [&] {
-        call_fused_add_rms_norm_kernel<scalar_t>(
+        vllm::call_fused_add_rms_norm_kernel<scalar_t>(
             input,
             residual,
             weight,
