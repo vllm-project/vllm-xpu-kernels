@@ -3,10 +3,8 @@
 
 import pytest
 import torch
-# from tests.kernels.quant_utils import FP8_DTYPE
+# from tests.utils import opcheck
 from ops import RMSNorm
-
-# from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
@@ -63,14 +61,13 @@ def test_rms_norm(
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
 
-    # FIXME: add back
     # if residual is not None:
-    #     # opcheck(
-    #     torch.ops._C.fused_add_rms_norm(x, residual, layer.weight.data,
-    #       layer.variance_epsilon)
+    #     opcheck(
+    #     torch.ops._C.fused_add_rms_norm,(x, residual, layer.weight.data,
+    #       layer.variance_epsilon))
     # else:
-    #     torch.ops._C.rms_norm(out, x, layer.weight.data,
-    #       layer.variance_epsilon)
+    #     opcheck(torch.ops._C.rms_norm, (out, x, layer.weight.data,
+    #       layer.variance_epsilon))
 
 
 # @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
