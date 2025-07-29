@@ -200,3 +200,5 @@ benchmarks/**/*.json
 actionlint
 shellcheck*/
 
+# benchmark kernel config
+configs

@@ -19,13 +19,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
+      // FIXME: torch op check consider input & weight is mutable in some ut
+      // cases. so we make it mutable here.
+      "rms_norm(Tensor! result, Tensor! input, Tensor! weight, float epsilon) "
+      "-> "
       "()");
   ops.impl("rms_norm", torch::kXPU, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
-  ops.def("fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
-          "float epsilon) -> ()");
+  ops.def(
+      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
+      "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 }
 
