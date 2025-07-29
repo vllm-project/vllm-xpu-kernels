@@ -63,7 +63,7 @@ class CustomOp(nn.Module):
 def fused_add_rms_norm(
         x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
         variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
-    import register_ops as ops
+    import tests.register_ops as ops
     ops.fused_add_rms_norm(
         x,
         residual,
@@ -75,7 +75,7 @@ def fused_add_rms_norm(
 
 def rms_norm(x: torch.Tensor, weight: torch.Tensor,
              variance_epsilon: float) -> torch.Tensor:
-    import register_ops as ops
+    import tests.register_ops as ops
     out = torch.empty_like(x)
     ops.rms_norm(
         out,

@@ -57,3 +57,15 @@ def opcheck(op: Union[torch._ops.OpOverload, torch._ops.OpOverloadPacket,
             kwargs,
             test_utils=test_utils,
             raise_exception=raise_exception) if cond else {}
+
+
+STR_DTYPE_TO_TORCH_DTYPE = {
+    "half": torch.half,
+    "bfloat16": torch.bfloat16,
+    "float": torch.float,
+    "fp8": torch.uint8,
+    "fp8_e4m3": torch.uint8,
+    "fp8_e5m2": torch.uint8,
+    "int8": torch.int8,
+    "fp8_inc": torch.float8_e4m3fn,
+}
