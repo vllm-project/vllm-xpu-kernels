@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     CMAKE_BUILD_TYPE: Optional[str] = None
-    VLLM_TARGET_DEVICE: str = "cuda"
+    VLLM_TARGET_DEVICE: str = "xpu"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
