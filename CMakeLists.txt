@@ -46,6 +46,7 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21")
 set(TORCH_SUPPORTED_VERSION_XPU "2.8.0")
 
 set(ENABLE_MOE_KERNEL OFF)
+set(FA2_ENABLED ON)
 
 #
 # Try to find python package with an executable that exactly matches
@@ -171,6 +172,33 @@ define_gpu_extension_target(
   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
+
+#
+# flash attention _C extension
+#
+
+if (FA2_ENABLED)
+    message(STATUS "Enabling fa2 extension.")
+    file(GLOB FA2_GEN_SRCS "csrc/flash_attn/*.cpp")
+
+    define_gpu_extension_target(
+        _vllm_fa2_C
+        DESTINATION vllm_xpu_kernels
+        LANGUAGE ${VLLM_GPU_LANG}
+        SOURCES
+            csrc/flash_attn/flash_api.cpp
+            ${FA2_GEN_SRCS}
+        COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+        LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
+        ARCHITECTURES ${VLLM_GPU_ARCHES}
+        USE_SABI 3
+        WITH_SOABI)
+
+    # target_include_directories(_vllm_fa2_C PRIVATE
+    #     csrc/flash_attn
+    #     csrc/flash_attn/src)
+endif ()
+
 
 #
 # _moe_C extension
