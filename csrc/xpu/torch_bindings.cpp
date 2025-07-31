@@ -33,4 +33,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 }
 
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
+  // Reshape the key and value tensors and cache them.
+  cache_ops.def(
+      "reshape_and_cache_flash(Tensor key, Tensor value,"
+      "                        Tensor! key_cache,"
+      "                        Tensor! value_cache,"
+      "                        Tensor slot_mapping,"
+      "                        str kv_cache_dtype,"
+      "                        Tensor k_scale, Tensor v_scale) -> ()");
+  cache_ops.impl("reshape_and_cache_flash", torch::kXPU,
+                 &reshape_and_cache_flash);
+}
+
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
