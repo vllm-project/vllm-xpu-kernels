@@ -3,6 +3,17 @@ from typing import Optional
 
 import torch
 
+#isort: off
+try:
+    from . import _vllm_fa2_C  # noqa: F401
+    FA2_UNAVAILABLE_REASON = None
+    FA2_AVAILABLE = True
+except ImportError as e:
+    FA2_UNAVAILABLE_REASON = str(e)
+    FA2_AVAILABLE = False
+
+#isort: on
+
 DEFAULT_FA_VERSION = 2
 
 
