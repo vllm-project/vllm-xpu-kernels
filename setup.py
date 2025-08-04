@@ -125,6 +125,7 @@ class cmake_build_ext(build_ext):
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
+            '-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain.cmake'
         ]
 
         verbose = envs.VERBOSE
