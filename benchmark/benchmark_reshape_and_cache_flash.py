@@ -13,6 +13,7 @@ from tests.utils import (
     create_kv_caches_with_random_flash,
 )
 
+
 @torch.inference_mode()
 def run_benchmark(
     num_tokens: int,
@@ -22,7 +23,6 @@ def run_benchmark(
     num_blocks: int,
     dtype: torch.dtype,
     kv_cache_dtype: str,
-    kv_cache_layout: str,
     num_iters: int,
     device: str = "xpu",
 ) -> float:
@@ -57,7 +57,6 @@ def run_benchmark(
         kv_cache_dtype,
         dtype,
         device=device,
-        cache_layout=kv_cache_layout,
     )
     key_cache, value_cache = key_caches[0], value_caches[0]
 
@@ -98,24 +97,22 @@ def run_benchmark(
 
 def main(args):
     rows = []
-    for layout in ["NHD", "HND"]:
-        for exp in range(1, 12):
-            n_tok = 2**exp
-            lat = run_benchmark(
-                num_tokens=n_tok,
-                num_heads=args.num_heads,
-                head_size=args.head_size,
-                block_size=args.block_size,
-                num_blocks=args.num_blocks,
-                dtype=STR_DTYPE_TO_TORCH_DTYPE[args.dtype],
-                kv_cache_dtype=args.kv_cache_dtype,
-                kv_cache_layout=layout,
-                num_iters=args.iters,
-                device="xpu",
-            )
-            rows.append([n_tok, layout, f"{lat * 1e6:.3f}"])
+    for exp in range(1, 12):
+        n_tok = 2**exp
+        lat = run_benchmark(
+            num_tokens=n_tok,
+            num_heads=args.num_heads,
+            head_size=args.head_size,
+            block_size=args.block_size,
+            num_blocks=args.num_blocks,
+            dtype=STR_DTYPE_TO_TORCH_DTYPE[args.dtype],
+            kv_cache_dtype=args.kv_cache_dtype,
+            num_iters=args.iters,
+            device="xpu",
+        )
+        rows.append([n_tok, f"{lat * 1e6:.3f}"])
 
-    print(tabulate(rows, headers=["num_tokens", "layout", "latency (µs)"]))
+    print(tabulate(rows, headers=["num_tokens", "latency (µs)"]))
 
 
 if __name__ == "__main__":
@@ -130,7 +127,7 @@ if __name__ == "__main__":
         default=64,
     )
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
-    parser.add_argument("--num-blocks", type=int, default=128)
+    parser.add_argument("--num-blocks", type=int, default=512)
 
     parser.add_argument(
         "--dtype",
@@ -142,7 +139,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
-        choices=["auto", "fp8", "fp8_e5m2"],
+        choices=["auto", "fp8"],
         default="auto",
     )
 
