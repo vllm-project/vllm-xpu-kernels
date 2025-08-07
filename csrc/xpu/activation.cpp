@@ -9,7 +9,7 @@ namespace vllm {
 template <typename T>
 inline T silu_kernel(const T& x) {
   // x * sigmoid(x)
-  return (T)(((float)x) / (1.0f + sycl::native::exp((float)-x)));
+  return (T)(((float)x) / (1.0f + sycl::exp((float)-x)));
 }
 
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
@@ -28,8 +28,8 @@ void act_and_mul_kernel(
   const int64_t token_idx = item_ct1.get_group(2);
   for (int64_t idx = item_ct1.get_local_id(2); idx < d;
        idx += item_ct1.get_local_range(2)) {
-    const scalar_t x = (float)input[token_idx * 2 * d + idx];
-    const scalar_t y = (float)input[token_idx * 2 * d + d + idx];
+    const scalar_t x = input[token_idx * 2 * d + idx];
+    const scalar_t y = input[token_idx * 2 * d + d + idx];
     out[token_idx * d + idx] = compute<scalar_t, ACT_FN, act_first>(x, y);
   }
 }
