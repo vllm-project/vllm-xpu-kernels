@@ -1,45 +1,70 @@
 #include "pytorch_shim.h"
 
 #include "core/registration.h"
+#include "xpu/cutlass_kernels/chunk_prefill.hpp"
 #include <torch/all.h>
 
 namespace FLASH_NAMESPACE {
 
 std::vector<at::Tensor> mha_varlen_fwd(
-    at::Tensor&
-        q,  // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
+    const at::Tensor& q,  // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
     const at::Tensor& k,  // total_k x num_heads_k x head_size, total_k :=
                           // \sum_{i=0}^{b} s_i or num_blocks x page_block_size
                           // x num_heads_k x head_size if there's a block_table.
     const at::Tensor& v,  // total_k x num_heads_k x head_size, total_k :=
                           // \sum_{i=0}^{b} s_i or num_blocks x page_block_size
                           // x num_heads_k x head_size if there's a block_table.
-    std::optional<at::Tensor>&
-        out_,  // total_q x num_heads x head_size, total_k := \sum_{i=0}^{b} s_i
+    std::optional<at::Tensor>& out_,  // total_q x num_heads x head_size, total_k := \sum_{i=0}^{b} s_i
     const at::Tensor& cu_seqlens_q,  // b+1
     const at::Tensor& cu_seqlens_k,  // b+1
-    std::optional<at::Tensor>&
-        seqused_k,  // b. If given, only this many elements of each batch
+    std::optional<at::Tensor>& seqused_k,  // b. If given, only this many elements of each batch
                     // element's keys are used.
     std::optional<const at::Tensor>& leftpad_k_,  // batch_size
-    std::optional<at::Tensor>&
-        block_table_,  // batch_size x max_num_blocks_per_seq
+    at::Tensor& block_table_,  // batch_size x max_num_blocks_per_seq
     std::optional<at::Tensor>& alibi_slopes_,  // num_heads or b x num_heads
-    int max_seqlen_q, const int max_seqlen_k, const float p_dropout,
-    const float softmax_scale, const bool zero_tensors, bool is_causal,
-    int window_size_left, int window_size_right, const float softcap,
+    int max_seqlen_q,
+    int max_seqlen_k,
+    float p_dropout,
+    float softmax_scale,
+    const bool zero_tensors,
+    bool is_causal,
+    int window_size_left,
+    int window_size_right,
+    const float softcap,
     const bool return_softmax, std::optional<at::Generator> gen_) {
   at::Tensor out;
-  out = torch::zeros_like(q);
+  if(out_.has_value()) {
+    out = *out_;
+  }
+  else {
+    out = torch::zeros_like(q);
+  }
 
   const auto sizes = q.sizes();
   const int total_q = q.sizes()[0];
   auto opts = q.options();
   int num_heads = sizes[1];
 
-  auto softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
+  cutlass_chunk_prefill_impl(
+      q,
+      k,
+      v,
+      out,
+      block_table_,
+      cu_seqlens_q,
+      cu_seqlens_k,
+      max_seqlen_q,
+      max_seqlen_k,
+      softmax_scale,
+      is_causal);
 
-  return {out, softmax_lse};
+  if(return_softmax) {
+    auto softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
+    return {out, softmax_lse};
+  }
+  else {
+    return {out};
+  }
 }
 }  // namespace FLASH_NAMESPACE
 

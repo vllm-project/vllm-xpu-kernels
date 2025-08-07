@@ -150,6 +150,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
     "csrc/xpu/cutlass_sycl_demo.cpp"
     "csrc/xpu/layernorm.cpp"
     "csrc/xpu/torch_bindings.cpp"
+    "csrc/flash_attn/flash_api.cpp"
   )
   include_directories("/usr/include")
   list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/)
@@ -157,7 +158,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/sycl/syclcompat/)
   message(STATUS "VLLM_INCLUDE_DIR: ${VLLM_INCLUDE_DIR}")
   set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
-  list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
+  list(APPEND VLLM_GPU_FLAGS "-fsycl" "-fsycl-targets=spir64_gen" "-ftemplate-backtrace-limit=0" "-fno-sycl-instrument-device-code" "-DVLLM_BUILD_XPU_OPS" )
   list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64" "-Xspirv-translator" "-spirv-ext=+SPV_INTEL_split_barrier")
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
 
@@ -166,12 +167,12 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CUTLASS_ENABLE_HEADERS_ONLY "ON" CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "v3.9-0.2" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "chunk_prefill_BMG" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   FetchContent_Declare(
       cutlass-sycl
-      GIT_REPOSITORY https://github.com/codeplaysoftware/cutlass-sycl.git
+      GIT_REPOSITORY https://github.com/sunjiweiswift/cutlass-sycl.git
       # Please keep this in sync with CUTLASS_REVISION line above.
       GIT_TAG ${CUTLASS_REVISION}
       GIT_PROGRESS TRUE
@@ -196,7 +197,8 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   FetchContent_MakeAvailable(cutlass-sycl)
   set(CUTLASS_INCLUDE_DIR ${cutlass-sycl_SOURCE_DIR}/include CACHE PATH "CUTLASS Header Library")
   set(CUTLASS_TOOLS_UTIL_INCLUDE_DIR ${cutlass-sycl_SOURCE_DIR}/tools/util/include CACHE INTERNAL "")
-  message(STATUS "cutlass dir: ${CUTLASS_INCLUDE_DIR} and ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}")
+  set(CUTLASS_APP_INCLUDE_DIR ${cutlass-sycl_SOURCE_DIR}/applications CACHE INTERNAL "")
+  message(STATUS "cutlass dir: ${CUTLASS_INCLUDE_DIR} and ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR} and ${CUTLASS_APP_INCLUDE_DIR}")
 
   # header only library
   list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_ENABLE_SYCL")
@@ -218,6 +220,7 @@ define_gpu_extension_target(
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_APP_INCLUDE_DIR}
   INCLUDE_DIRECTORIES ${VLLM_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
@@ -269,6 +272,7 @@ if (ENABLE_MOE_KERNEL)
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
     INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+    INCLUDE_DIRECTORIES ${CUTLASS_APP_INCLUDE_DIR}
     USE_SABI 3
     WITH_SOABI)
 endif()
