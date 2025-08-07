@@ -39,10 +39,11 @@ def test_act_and_mul(
         #fn = ops.silu_and_mul
         fn = torch.ops._C.silu_and_mul
     out = layer(x)
-    ref_out = layer.naive_forward(x)
+    ref_out = layer.forward_native(x)
     # The SiluAndMul, MulAndSilu, GELU and FatReLU implementations are
     # equivalent to the native PyTorch implementations, so we can do exact
     # comparison.
+    assert not torch.isnan(out).any(), "Tensor contains NaN!"
     #torch.testing.assert_close(out, ref_out, atol=0.0, rtol=0.0)
     torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
 
