@@ -240,7 +240,6 @@ template <typename TileShapeQK,
     KernelLauncher<FMHAChunkPrefillKernel, isVarLen> launcher;
 
     launcher.run(args, hw_info);
-    return 0;    
   }
 
   static void dispatch(const chunk_prefill_args_t &args) {
