@@ -150,7 +150,6 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
     "csrc/xpu/cutlass_sycl_demo.cpp"
     "csrc/xpu/layernorm.cpp"
     "csrc/xpu/torch_bindings.cpp"
-    "csrc/flash_attn/flash_api.cpp"
   )
   include_directories("/usr/include")
   list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/)
@@ -243,6 +242,10 @@ if (FA2_ENABLED)
         COMPILE_FLAGS ${VLLM_GPU_FLAGS}
         LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
         ARCHITECTURES ${VLLM_GPU_ARCHES}
+        INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+        INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+        INCLUDE_DIRECTORIES ${CUTLASS_APP_INCLUDE_DIR}
+        INCLUDE_DIRECTORIES ${VLLM_INCLUDE_DIR}
         USE_SABI 3
         WITH_SOABI)
 
