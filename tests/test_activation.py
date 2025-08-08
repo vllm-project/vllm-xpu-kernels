@@ -9,7 +9,9 @@ DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
 D = [512, 13824]  # Arbitrary values for testing
 SEEDS = [0]
-XPU_DEVICES = ["xpu"]
+XPU_DEVICES = [
+    f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
+]
 
 @pytest.mark.parametrize(
     "activation",
@@ -36,10 +38,6 @@ def test_act_and_mul(
         fn = torch.ops._C.silu_and_mul
     out = layer(x)
     ref_out = layer.forward_native(x)
-
-    torch.xpu.synchronize(device=x.device)
-    assert not torch.isnan(out).any(), "Tensor contains NaN!"
-    assert not torch.isnan(ref_out).any(), "Reference Tensor contains NaN!"
 
     torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-3)
 

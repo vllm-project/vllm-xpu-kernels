@@ -49,6 +49,7 @@ void call_silu_and_mul_kernel(torch::Tensor& out, torch::Tensor& input) {
   }                                           
   auto out_ptr = out.data_ptr<scalar_t>();
   auto input_ptr = input.data_ptr<scalar_t>();
+  at::DeviceGuard device_guard(input.device());
   auto& queue = vllm::xpu::vllmGetQueue();
   queue.submit([&](sycl::handler& cgh) {
        cgh.parallel_for(
