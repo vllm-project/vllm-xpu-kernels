@@ -128,6 +128,7 @@ skip_glob = [
     ".buildkite/*",
     "benchmarks/*",
     "examples/*",
+    "tests/register_ops.py"
 ]
 use_parentheses = true
 skip_gitignore = true
