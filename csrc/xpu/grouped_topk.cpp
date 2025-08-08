@@ -394,7 +394,6 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
     scoring_mode = vllm::GroupedTopKImpl::ScoringFunc::DEFAULT;
   }
 
-  int n_experts_aligned = (n_experts + 7) / 8 * 8;  // align to 8
 
   auto topk_weights =
       torch::empty({n_tokens, n_topk}, at::dtype(at::kFloat).device(at::kXPU));
