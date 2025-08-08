@@ -20,7 +20,7 @@ HEAD_SIZES = [64, 80, 120, 256]
 BLOCK_SIZES = [8, 16, 32]
 NUM_BLOCKS = [1024]  # don't make it too large. e.g. [36000] will OOM
 SEEDS = [0]
-DEVICES = [f"xpu:{0}"]
+DEVICES = [f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)]
 KV_CACHE_DTYPE = ["auto"]
 
 
@@ -48,7 +48,9 @@ def test_reshape_and_cache(
     if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
 
-    torch.set_default_device(device)
+    # Note: torch.set_default_device("xpu:1") not works.
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping_lst = random.sample(range(num_slots), num_tokens)
@@ -150,7 +152,9 @@ def test_reshape_and_cache_flash(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
-    torch.set_default_device(device)
+    # Note: torch.set_default_device("xpu:1") not works.
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
 
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
