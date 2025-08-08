@@ -165,6 +165,7 @@ void call_rotary_embedding_kernel(torch::Tensor& positions, torch::Tensor& query
   sycl::range<3> grid(1, 1, num_tokens);
   sycl::range<3> block(1, 1, std::min<int64_t>(num_heads * rot_dim / 2, 512));
 
+  at::DeviceGuard device_guard(query.device());
   auto& queue = vllm::xpu::vllmGetQueue();
   if (is_neox){
     queue.submit([&](sycl::handler& cgh) {
