@@ -1,9 +1,9 @@
-import random
+# SPDX-License-Identifier: Apache-2.0
 import pytest
 import torch
+
 from tests.ops.activation_op import SiluAndMul
 from tests.utils import opcheck, seed_everything
-import vllm_xpu_kernels._C
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
@@ -13,9 +13,8 @@ XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
 ]
 
-@pytest.mark.parametrize(
-    "activation",
-    ["silu_and_mul"])
+
+@pytest.mark.parametrize("activation", ["silu_and_mul"])
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -45,4 +44,3 @@ def test_act_and_mul(
     output_shape = (x.shape[:-1] + (d, ))
     out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
     opcheck(fn, (out, x))
-

@@ -32,7 +32,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 
-  //triple ops
+  // triple ops
   ops.def("silu_and_mul(Tensor! out, Tensor! input) -> ()");
   ops.impl("silu_and_mul", torch::kXPU, &silu_and_mul);
 }

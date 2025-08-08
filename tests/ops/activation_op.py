@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from tests.ops.custom_ops import CustomOp
+
 import tests.register_ops as ops
+from tests.ops.custom_ops import CustomOp
+
 
 class SiluAndMul(CustomOp):
     """An activation function for SwiGLU.
