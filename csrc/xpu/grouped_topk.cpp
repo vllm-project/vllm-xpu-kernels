@@ -409,7 +409,7 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
         bias.has_value() ? reinterpret_cast<scalar_t*>(bias->data_ptr())
                          : nullptr,
         scoring_mode, renormalize, n_tokens, n_experts, n_topk, n_expert_group,
-        n_topk_group, );
+        n_topk_group );
   } else if (gating_output.scalar_type() == at::kHalf) {
     using scalar_t = sycl::half;
     vllm::GroupedTopKImpl::fused_grouped_topk<scalar_t>(
