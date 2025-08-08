@@ -31,6 +31,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
+
+  // Grouped TopK
+  ops.def(
+      "grouped_topk(Tensor hidden_states, Tensor gating_output, int n_topk, "
+      "bool renormalize, int n_expert_group, int n_topk_group, str "
+      "scoring_func, Tensor? bias=None) -> (Tensor, Tensor)");
+  ops.impl("grouped_topk", torch::kXPU, &grouped_topk);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
