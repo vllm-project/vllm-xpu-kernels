@@ -40,11 +40,6 @@ std::vector<at::Tensor> mha_varlen_fwd(
     out = torch::zeros_like(q);
   }
 
-  const auto sizes = q.sizes();
-  const int total_q = q.sizes()[0];
-  auto opts = q.options();
-  int num_heads = sizes[1];
-
   cutlass_chunk_prefill_impl(
       q,
       k,
@@ -59,20 +54,21 @@ std::vector<at::Tensor> mha_varlen_fwd(
       is_causal);
 
   if(return_softmax) {
-    auto softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
+    auto softmax_lse = torch::empty_like(out);
     return {out, softmax_lse};
   }
   else {
-    return {out};
+    at::Tensor softmax_lse;
+    return {out, softmax_lse};
   }
 }
 }  // namespace FLASH_NAMESPACE
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
-      "varlen_fwd(Tensor! q, Tensor k, Tensor v, Tensor!? out, Tensor "
+      "varlen_fwd(Tensor q, Tensor k, Tensor v, Tensor!? out, Tensor "
       "cu_seqlens_q, "
-      "Tensor cu_seqlens_k, Tensor? seqused_k, Tensor? leftpad_k, Tensor? "
+      "Tensor cu_seqlens_k, Tensor? seqused_k, Tensor? leftpad_k, Tensor "
       "block_table, Tensor? alibi_slopes, "
       "int max_seqlen_q, int max_seqlen_k, float p_dropout, float "
       "softmax_scale, bool zero_tensors, "

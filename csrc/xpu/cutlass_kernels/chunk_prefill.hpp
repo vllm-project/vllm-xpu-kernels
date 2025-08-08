@@ -113,7 +113,7 @@ template <class FMHAChunkPrefillKernel, bool isVarLen> struct KernelLauncher {
   }
 
   cutlass::Status run(const chunk_prefill_args_t &args, const cutlass::KernelHardwareInfo &hw_info) {
-
+    std::cout << "into launcher run" << std::endl;
     ProblemShapeType problem_size = initialize(args);
 
     typename FMHAChunkPrefillKernel::Arguments arguments{
@@ -152,9 +152,11 @@ template <class FMHAChunkPrefillKernel, bool isVarLen> struct KernelLauncher {
     run(params);
 
     syclcompat::wait();
+    return cutlass::Status::kSuccess;
   }
 
   static void run(typename FMHAChunkPrefillKernel::Params params) {
+    std::cout << "into final run" << std::endl;
     dim3 const block = FMHAChunkPrefillKernel::get_block_shape();
     dim3 const grid = FMHAChunkPrefillKernel::get_grid_shape(params);
 
@@ -166,12 +168,14 @@ template <class FMHAChunkPrefillKernel, bool isVarLen> struct KernelLauncher {
 
 // Launch parameters depend on whether SYCL compiler supports work-group scratch memory extension
 #if !defined(SYCL_EXT_ONEAPI_WORK_GROUP_SCRATCH_MEMORY)
+    std::cout << "into scratch mem" << std::endl;
     using namespace syclcompat::experimental;
     auto event = launch<cutlass::device_kernel<FMHAChunkPrefillKernel>>(
         launch_policy{sycl_grid, sycl_block, local_mem_size{static_cast<std::size_t>(smem_size)},
                       kernel_properties{sycl_exp::sub_group_size<FMHAChunkPrefillKernel::DispatchPolicy::SubgroupSize>}},
         params);
 #else
+    std::cout << "into no scratch mem" << std::endl;
     syclcompat::experimental::launch_properties launch_props {
       sycl::ext::oneapi::experimental::work_group_scratch_size(smem_size),
     };
@@ -203,6 +207,7 @@ template <typename TileShapeQK,
 
   template <bool isVarLen, bool Causal, bool PagedKV, class Scheduler>
   static void run(const chunk_prefill_args_t &args) {
+    std::cout << "into FMHAKernel run" << std::endl;
     cutlass::KernelHardwareInfo hw_info;
 
     using LayoutQ = cutlass::layout::RowMajor;
@@ -300,6 +305,10 @@ void cutlass_chunk_prefill_impl(
     int max_seqlen_k,
     double sm_scale,
     bool is_causal) {
+  std::cout << "into cutlass_chunk_prefill_impl" << std::endl;
+  std::cout << "query.size(): " << query.sizes().vec() << std::endl;
+  std::cout << "key_cache.size(): " << key_cache.sizes().vec() << std::endl;
+  std::cout << "block_table.size(): " << block_table.sizes().vec() << std::endl;
   int num_block = key_cache.size(0);
   int block_size = key_cache.size(1);
   int num_heads_q = query.size(1);
@@ -309,8 +318,10 @@ void cutlass_chunk_prefill_impl(
   int max_blocks_per_seq = block_table.size(1);
   int total_seqlen_q = query.size(0);
   int total_seqlen_k = num_block * block_size;
-  at::Tensor num_blocks_per_seq = block_table.slice(0, 1) - block_table.slice(0, 0, -1);
-  num_blocks_per_seq = torch::div(num_blocks_per_seq, block_size, "ceil");
+  at::Tensor num_blocks_per_seq = cu_seqlens_k.slice(0, 1) - cu_seqlens_k.slice(0, 0, -1);
+  std::cout << "cu_seqlens_k: " << cu_seqlens_k << std::endl;
+  num_blocks_per_seq = torch::div(num_blocks_per_seq, block_size);
+  std::cout << "num_blocks_per_seq: " << num_blocks_per_seq << std::endl;
 
   chunk_prefill_args_t args = {
       query.data_ptr(),
