@@ -8,24 +8,27 @@
 namespace vllm {
 namespace xpu {
 
-static inline sycl::queue &vllmGetQueue() {
+static inline sycl::queue& vllmGetQueue() {
   auto current_stream = c10::xpu::getCurrentXPUStream();
-  auto &queue = current_stream.queue();
+  auto& queue = current_stream.queue();
   return queue;
 }
 
-template <typename T> struct SyclTypeTrait {
+template <typename T>
+struct SyclTypeTrait {
   using Type = T;
 };
 
-template <> struct SyclTypeTrait<c10::Half> {
+template <>
+struct SyclTypeTrait<c10::Half> {
   using Type = sycl::half;
 };
 
-template <> struct SyclTypeTrait<c10::BFloat16> {
+template <>
+struct SyclTypeTrait<c10::BFloat16> {
   using Type = sycl::ext::oneapi::bfloat16;
 };
 
-} // namespace xpu
+}  // namespace xpu
 
-} // namespace vllm
+}  // namespace vllm
