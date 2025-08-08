@@ -11,7 +11,7 @@ import torch
 
 from tests.ops.rotary_embedding_op import RotaryEmbedding
 from tests.utils import opcheck
-import vllm_xpu_kernels._C
+
 
 def rotary_embedding_opcheck(rot,
                              positions: torch.Tensor,
@@ -23,7 +23,8 @@ def rotary_embedding_opcheck(rot,
     # ops.rotary_embedding()/batched_rotary_embedding()
     # are in-place operations that update the query and key tensors.
     if offsets is not None:
-        raise NotImplementedError("batched_rotary_embedding is not implemented yet.")
+        raise NotImplementedError(
+            "batched_rotary_embedding is not implemented yet.")
     else:
         opcheck(torch.ops._C.rotary_embedding,
                 (positions, query, key, rot.head_size, cos_sin_cache,
@@ -38,9 +39,9 @@ def rotary_embedding_opcheck(rot,
 @pytest.mark.parametrize("seq_len", [11, 1024])
 @pytest.mark.parametrize("use_key", [True, False])
 @pytest.mark.parametrize("head_stride_is_contiguous", [True, False])
-def test_rotary_embedding_opcheck(device, max_position,
-                                  is_neox_style, rotary_dim, head_size,
-                                  seq_len, use_key, head_stride_is_contiguous):
+def test_rotary_embedding_opcheck(device, max_position, is_neox_style,
+                                  rotary_dim, head_size, seq_len, use_key,
+                                  head_stride_is_contiguous):
     batch_size = 1
     base = 10000
     num_heads = 7

@@ -5,8 +5,9 @@ from typing import Optional
 
 import torch
 
-from tests.ops.custom_ops import CustomOp
 import tests.register_ops as ops
+from tests.ops.custom_ops import CustomOp
+
 
 def apply_rotary_emb_torch(
     x: torch.Tensor,
@@ -27,6 +28,7 @@ def apply_rotary_emb_torch(
         return torch.cat((o1, o2), dim=-1)
     else:
         return torch.stack((o1, o2), dim=-1).flatten(-2)
+
 
 class RotaryEmbedding(CustomOp):
     """Original rotary positional embedding."""
@@ -126,14 +128,12 @@ class RotaryEmbedding(CustomOp):
         # ops.rotary_embedding()/batched_rotary_embedding()
         # are in-place operations that update the query and key tensors.
         if offsets is not None:
-            raise NotImplementedError("batched_rotary_embedding is not implemented yet.")
+            raise NotImplementedError(
+                "batched_rotary_embedding is not implemented yet.")
         else:
             ops.rotary_embedding(positions, query, key, self.head_size,
                                  self.cos_sin_cache, self.is_neox_style)
         return query, key
-
-
-
 
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"

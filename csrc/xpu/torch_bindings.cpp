@@ -31,8 +31,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
-  
-  //pos_embedding
+
+  // pos_embedding
   ops.def(
       "rotary_embedding(Tensor positions, Tensor! query,"
       "                 Tensor!? key, int head_size,"

@@ -19,6 +19,7 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
+
 def rotary_embedding(
     positions: torch.Tensor,
     query: torch.Tensor,
