@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+import random
 import unittest
 from collections.abc import Sequence
 from typing import Any, Optional, Union
 
+import numpy as np
 import torch
 from torch._prims_common import TensorLikeType
 
@@ -69,3 +71,9 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "int8": torch.int8,
     "fp8_inc": torch.float8_e4m3fn,
 }
+
+
+def seed_everything(seed) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
