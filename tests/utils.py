@@ -120,7 +120,7 @@ def create_kv_caches_with_random_flash(
     seed: Optional[int] = None,
     device: Optional[str] = "xpu",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    if not seed is None:
+    if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)

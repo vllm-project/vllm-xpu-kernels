@@ -113,27 +113,25 @@ void reshape_and_cache_flash_kernel(
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
   const int n = num_heads * head_size;
-  for (int i = local_idx; i < n; i += local_range) {
-    const int64_t src_key_idx = group_idx * key_stride + i;
-    const int64_t src_value_idx = group_idx * value_stride + i;
-    const int head_idx = i / head_size;
-    const int head_offset = i % head_size;
-    const int64_t dst_idx = block_idx * block_stride +
-                            block_offset * page_stride +
-                            head_idx * head_stride + head_offset;
 
-    scalar_t tgt_key = key[src_key_idx];
-    scalar_t tgt_value = value[src_value_idx];
-    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
-      key_cache[dst_idx] = tgt_key;
-      value_cache[dst_idx] = tgt_value;
-    } else {
-      key_cache[dst_idx] =
-          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_key, *k_scale);
-      value_cache[dst_idx] =
-          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_value, *v_scale);
-    }
-  }
+  // pointers to the beginning of the source row for this token.
+  const scalar_t* __restrict__ key_src = key + group_idx * key_stride;
+  const scalar_t* __restrict__ value_src = value + group_idx * value_stride;
+
+  // find the start position inside the kv-cache for this token.
+  cache_t* __restrict__ key_dst =
+      key_cache + block_idx * block_stride + block_offset * page_stride;
+  cache_t* __restrict__ value_dst =
+      value_cache + block_idx * block_stride + block_offset * page_stride;
+
+  float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
+  float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
+
+  fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+  fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+  fp8::scaled_convert_vec(key_src, key_dst, n, local_idx, local_range, k_op);
+  fp8::scaled_convert_vec(value_src, value_dst, n, local_idx, local_range,
+                          v_op);
 }
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
@@ -148,6 +146,8 @@ void call_reshape_and_cache_flash(
   auto& queue = vllm::xpu::vllmGetQueue();
   int wg = std::min(1024, static_cast<int>(num_heads * head_size));
 
+  TORCH_CHECK(head_stride == head_size,
+              "Only support contiguous heads for vectorization.");
   queue.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<1>(sycl::range<1>(num_tokens * wg), sycl::range<1>(wg)),

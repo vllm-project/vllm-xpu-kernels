@@ -22,6 +22,72 @@ __inline__ Tout scaled_convert(const Tin& x, const float scale) {
   return {};  // Squash missing return statement warning
 }
 
+// Used by vectorization_utils to copy/convert one element
+template <typename OutT, typename InT, Fp8KVCacheDataType kv_dt>
+struct CopyWithScaleOp {
+  float scale;
+
+  inline void operator()(OutT& dst, const InT src) const {
+    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+      dst = static_cast<OutT>(src);
+    } else {
+      dst = fp8::scaled_convert<OutT, InT, kv_dt>(src, scale);
+    }
+  }
+};
+
+template <typename scalar_t>
+struct alignas(8) vec4_t {
+  scalar_t x;
+  scalar_t y;
+  scalar_t z;
+  scalar_t w;
+};
+
+template <typename cache_t>
+struct alignas(4) cachex4_t {
+  static_assert(std::is_same_v<cache_t, float> ||
+                    std::is_same_v<cache_t, at::Half> ||
+                    std::is_same_v<cache_t, at::BFloat16> ||
+                    std::is_same_v<cache_t, at::Float8_e4m3fn> ||
+                    std::is_same_v<cache_t, at::Float8_e5m2>,
+                "Unsupported cache type for cachex4_t");
+  cache_t x;
+  cache_t y;
+  cache_t z;
+  cache_t w;
+};
+
+// The vector width is fixed at 4 to avoid excessive branching in the kernel,
+// which could degrade performance.
+template <typename scalar_t, typename cache_t, typename ScaOp>
+void scaled_convert_vec(const scalar_t* src, cache_t* dst, int num_elems,
+                        int local_idx, int local_range, ScaOp&& scalar_op) {
+  using srcx4_t = vec4_t<scalar_t>;
+  using distx4_t = cachex4_t<cache_t>;
+
+  int64_t const num_vec_elems = num_elems >> 2;
+
+  auto const* vectorized_in = reinterpret_cast<srcx4_t const*>(src);
+  auto* vectorized_out = reinterpret_cast<distx4_t*>(dst);
+
+#pragma unroll 4
+  for (int64_t i = local_idx; i < num_vec_elems; i += local_range) {
+    srcx4_t in_vec = vectorized_in[i];
+    distx4_t out_vec;
+    scalar_op(out_vec.x, in_vec.x);
+    scalar_op(out_vec.y, in_vec.y);
+    scalar_op(out_vec.z, in_vec.z);
+    scalar_op(out_vec.w, in_vec.w);
+    vectorized_out[i] = out_vec;
+  }
+
+  // Handle the remaining elements if num_elems is not divisible by 4
+  for (int64_t i = num_vec_elems * 4 + local_idx; i < num_elems;
+       i += local_range) {
+    scalar_op(dst[i], src[i]);
+  }
+}
 }  // namespace fp8
 }  // namespace vllm
 
