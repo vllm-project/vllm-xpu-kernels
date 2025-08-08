@@ -10,7 +10,7 @@ from tabulate import tabulate
 from tests import register_ops as ops
 from tests.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
-    create_kv_caches_with_random_flash,
+    create_kv_caches_with_random,
 )
 
 
@@ -48,7 +48,7 @@ def run_benchmark(
     slot_mapping_lst = random.sample(range(num_slots), num_tokens)
     slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long, device=device)
 
-    key_caches, value_caches = create_kv_caches_with_random_flash(
+    key_caches, value_caches = create_kv_caches_with_random(
         num_blocks,
         block_size,
         1,  # num_layers
@@ -69,7 +69,7 @@ def run_benchmark(
         torch.xpu.synchronize()
         start = time.perf_counter()
         for _ in range(n_iters):
-            ops.reshape_and_cache_flash(
+            ops.reshape_and_cache(
                 key,
                 value,
                 key_cache,
@@ -143,21 +143,21 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-heads", type=int, default=128)
+    parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument(
         "--head-size",
         type=int,
         choices=[64, 80, 96, 112, 120, 128, 192, 256],
-        default=64,
+        default=256,
     )
-    parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
-    parser.add_argument("--num-blocks", type=int, default=512)
+    parser.add_argument("--block-size", type=int, choices=[16, 32], default=32)
+    parser.add_argument("--num-blocks", type=int, default=1024)
 
     parser.add_argument(
         "--dtype",
         type=str,
         choices=["half", "bfloat16", "float"],
-        default="bfloat16",
+        default="half",
     )
 
     parser.add_argument(

@@ -1,1 +1,1 @@
-from tests.register_ops import reshape_and_cache_flash
+from tests.register_ops import reshape_and_cache, reshape_and_cache_flash
