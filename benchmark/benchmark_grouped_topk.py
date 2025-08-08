@@ -75,7 +75,7 @@ def main(
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description="Benchmark the layernorm kernel.")
+    parser = ArgumentParser(description="Benchmark the grouped topk kernel.")
     parser.add_argument("--num-tokens", type=int, default=64)
     parser.add_argument("--num-experts", type=int, default=128)
     parser.add_argument("--topk", type=int, default=6)
