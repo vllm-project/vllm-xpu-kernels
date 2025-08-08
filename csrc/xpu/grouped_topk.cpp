@@ -429,7 +429,7 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
         bias.has_value() ? reinterpret_cast<scalar_t*>(bias->data_ptr())
                          : nullptr,
         scoring_mode, renormalize, n_tokens, n_experts, n_topk, n_expert_group,
-        n_topk_group, );
+        n_topk_group );
   }
   return std::make_tuple(topk_weights, topk_indices);
 }
