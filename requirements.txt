@@ -12,7 +12,7 @@ wheel
 # torch dependency
 --extra-index-url=https://download.pytorch.org/whl/xpu
 torch==2.8.0+xpu
-pytorch-trion-xpu
+pytorch-triton-xpu
 # may need oneapi packages
 
 # tests
