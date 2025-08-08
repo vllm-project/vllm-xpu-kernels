@@ -101,8 +101,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
+    # Convert dtype string to torch.dtype
+    dtype = getattr(torch, args.dtype)
     main(
-        dtype=args.dtype,
+        dtype=dtype,
         num_tokens=args.num_tokens,
         num_experts=args.num_experts,
         topk=args.topk,
