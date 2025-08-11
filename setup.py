@@ -13,7 +13,6 @@ from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 from torch.utils.cpp_extension import SYCL_HOME
 
-print("************************************* Using SYCL_HOME:", SYCL_HOME)
 
 def load_module_from_path(module_name, path):
     spec = importlib.util.spec_from_file_location(module_name, path)
