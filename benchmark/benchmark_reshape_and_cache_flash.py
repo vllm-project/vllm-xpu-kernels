@@ -55,10 +55,11 @@ def run_benchmark(
                                 dtype=torch.long,
                                 device=device)
 
+    num_layers = 1  # for simplicity, we use a single layer
     key_caches, value_caches = create_kv_caches_with_random_flash(
         num_blocks,
         block_size,
-        1,  # num_layers
+        num_layers,
         num_heads,
         head_size,
         kv_cache_dtype,
@@ -147,27 +148,30 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num-heads", type=int, default=128)
+    parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument(
         "--head-size",
         type=int,
         choices=[64, 80, 96, 112, 120, 128, 192, 256],
-        default=64,
+        default=128,
     )
-    parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
+    parser.add_argument("--block-size",
+                        type=int,
+                        choices=[16, 32, 64],
+                        default=64)
     parser.add_argument("--num-blocks", type=int, default=512)
 
     parser.add_argument(
         "--dtype",
         type=str,
-        choices=["half", "bfloat16", "float"],
-        default="bfloat16",
+        choices=["half", "bfloat16"],
+        default="half",
     )
 
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
-        choices=["auto", "fp8"],
+        choices=["auto", "fp8", "fp8_e4m3", "fp8_e5m2"],
         default="auto",
     )
 

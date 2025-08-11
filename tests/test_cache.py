@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from tests.ops.cache_op import reshape_and_cache, reshape_and_cache_flash
-from tests.utils import (create_kv_caches_with_random,
+from tests.utils import (_convert_from_fp8, create_kv_caches_with_random,
                          create_kv_caches_with_random_flash, opcheck)
 
 DTYPES = [torch.half, torch.bfloat16]
@@ -20,7 +20,7 @@ SEEDS = [0]
 DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
 ]
-KV_CACHE_DTYPE = ["auto"]
+KV_CACHE_DTYPE = ["auto"]  # FIXME: will add "fp8" when accuracy is improved
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -82,8 +82,13 @@ def test_reshape_and_cache(
     key_cache_compact = permute_and_compact(key_cache)
     value_cache_compact = permute_and_compact(value_cache)
 
-    cloned_key_cache = key_cache_compact.clone()
-    cloned_value_cache = value_cache_compact.clone()
+    if kv_cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
+        cloned_key_cache = _convert_from_fp8(key_cache_compact, k_scale.item())
+        cloned_value_cache = _convert_from_fp8(value_cache_compact,
+                                               v_scale.item())
+    else:
+        cloned_key_cache = key_cache_compact.clone()
+        cloned_value_cache = value_cache_compact.clone()
 
     # Call the reshape_and_cache kernel.
     opcheck(
@@ -124,8 +129,21 @@ def test_reshape_and_cache(
         cloned_key_cache[block_idx, :, :, block_offset, :] = reshaped_key[i]
         cloned_value_cache[block_idx, :, :, block_offset] = value[i]
 
-    torch.testing.assert_close(key_cache_compact, cloned_key_cache)
-    torch.testing.assert_close(value_cache_compact, cloned_value_cache)
+    if kv_cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
+        result_key_cache = _convert_from_fp8(key_cache_compact, k_scale.item())
+        result_value_cache = _convert_from_fp8(value_cache_compact,
+                                               v_scale.item())
+        torch.testing.assert_close(result_key_cache,
+                                   cloned_key_cache,
+                                   atol=0.1,
+                                   rtol=0.1)
+        torch.testing.assert_close(result_value_cache,
+                                   cloned_value_cache,
+                                   atol=0.1,
+                                   rtol=0.1)
+    else:
+        torch.testing.assert_close(key_cache_compact, cloned_key_cache)
+        torch.testing.assert_close(value_cache_compact, cloned_value_cache)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -193,8 +211,13 @@ def test_reshape_and_cache_flash(
     value_cache_compact = permute_and_compact(value_cache)
 
     # Clone the KV caches.
-    cloned_key_cache = key_cache_compact.clone()
-    cloned_value_cache = value_cache_compact.clone()
+    if kv_cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
+        cloned_key_cache = _convert_from_fp8(key_cache_compact, k_scale.item())
+        cloned_value_cache = _convert_from_fp8(value_cache_compact,
+                                               v_scale.item())
+    else:
+        cloned_key_cache = key_cache_compact.clone()
+        cloned_value_cache = value_cache_compact.clone()
 
     # Call the reshape_and_cache kernel.
     opcheck(
@@ -233,6 +256,18 @@ def test_reshape_and_cache_flash(
         block_offset = block_offsets_lst[i]
         cloned_key_cache[block_idx, block_offset, :, :] = key[i]
         cloned_value_cache[block_idx, block_offset, :, :] = value[i]
-
-    torch.testing.assert_close(key_cache_compact, cloned_key_cache)
-    torch.testing.assert_close(value_cache_compact, cloned_value_cache)
+    if kv_cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
+        result_key_cache = _convert_from_fp8(key_cache_compact, k_scale.item())
+        result_value_cache = _convert_from_fp8(value_cache_compact,
+                                               v_scale.item())
+        torch.testing.assert_close(result_key_cache,
+                                   cloned_key_cache,
+                                   atol=0.1,
+                                   rtol=0.1)
+        torch.testing.assert_close(result_value_cache,
+                                   cloned_value_cache,
+                                   atol=0.1,
+                                   rtol=0.1)
+    else:
+        torch.testing.assert_close(key_cache_compact, cloned_key_cache)
+        torch.testing.assert_close(value_cache_compact, cloned_value_cache)

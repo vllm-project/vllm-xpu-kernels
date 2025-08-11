@@ -13,9 +13,9 @@ namespace fp8 {
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __inline__ Tout scaled_convert(const Tin& x, const float scale) {
   if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
-    return static_cast<at::Float8_e4m3fn>(x * scale);
+    return static_cast<at::Float8_e4m3fn>(x / scale);
   } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
-    return static_cast<at::Float8_e5m2>(x * scale);
+    return static_cast<at::Float8_e5m2>(x / scale);
   }
 
   assert(false);
