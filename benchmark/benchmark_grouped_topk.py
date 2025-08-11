@@ -3,12 +3,14 @@
 
 import time
 from argparse import ArgumentParser
+from typing import Optional
 
 import torch
 
 from tests.ops.grouped_topk import grouped_topk, grouped_topk_native
 
 dpcpp_device = torch.device("xpu")
+
 
 @torch.compile
 def grouped_topk_compile(
@@ -67,6 +69,7 @@ def grouped_topk_compile(
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
 
 @torch.inference_mode()
 def main(
