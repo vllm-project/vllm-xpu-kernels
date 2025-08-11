@@ -30,6 +30,42 @@ def ref_dynamic_per_tensor_fp8_quant(x, fp8_dtype=torch.float8_e5m2):
         fp8_traits_min, fp8_traits_max).to(fp8_dtype)
     return ref_out, ref_scale.view((1, ))
 
+def ref_dynamic_per_token_quant(x: torch.tensor,
+                                quant_dtype: torch.dtype,
+                                scale_ub: Optional[torch.tensor] = None) \
+        -> tuple[torch.tensor, torch.tensor]:
+
+    assert quant_dtype in [torch.float8_e5m2, torch.float8_e4m3fn]
+    # if scale_ub is not None:
+    #     assert quant_dtype == FP8_DTYPE
+
+    qtype_traits = torch.finfo(quant_dtype)
+    qtype_traits_max = qtype_traits.max
+    qtype_traits_min = qtype_traits.min
+    qtype_max = as_float32_tensor(qtype_traits_max)
+    s_1 = as_float32_tensor(1.0)
+    s_512 = as_float32_tensor(512.0)
+
+    # For fp8, in order to match the cuda kernel output, we have to do exactly
+    # the same operations as in the corresponding fp8 kernel to prevent
+    # rounding errors.
+
+    # Compute scales
+    x_token_max, _ = x.abs().max(dim=-1)
+    x_token_max = as_float32_tensor(x_token_max)
+    if scale_ub is not None:
+        x_token_max = x_token_max.clamp(max=scale_ub)
+    scales = (x_token_max / qtype_max)[:, None]
+
+    # Quant
+    min_scaling_factor = s_1 / (qtype_max * s_512)
+    scales = scales.clamp(min=min_scaling_factor)
+    torch_out = as_float32_tensor(x) / scales
+    torch_out = torch_out.clamp(qtype_traits_min,
+                                qtype_traits_max).to(quant_dtype)
+
+    return torch_out, scales
+
 def seed_everything(seed):
     if seed is not None:
         random.seed(seed)
@@ -64,6 +100,34 @@ def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
     ops_out, ops_scale = scaled_fp8_quant(x)
 
     torch.testing.assert_close(ref_scale, ops_scale)
+    torch.testing.assert_close(ref_out.to(dtype=torch.float32),
+                               ops_out.to(dtype=torch.float32))
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("scale_ub", SCALE_UBS)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
+@torch.inference_mode()
+def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
+                                     dtype: torch.dtype, scale_ub: bool,
+                                     seed: int, fp8_dtype: torch.dtype) -> None:
+    seed_everything(seed)
+
+    x = torch.rand(num_tokens, hidden_size, dtype=dtype,
+                   device="xpu") + 1e-6  # avoid nans
+
+    scale_ub = torch.mean(x).to(dtype=torch.float32, device='xpu') \
+            if scale_ub else None
+    ref_out, ref_scales = ref_dynamic_per_token_quant(x, fp8_dtype, scale_ub)
+
+    ops_out, ops_scales = scaled_fp8_quant(x,
+                                           scale_ub=scale_ub,
+                                           use_per_token_if_dynamic=True)
+
+    torch.testing.assert_close(ref_scales, ops_scales)
     torch.testing.assert_close(ref_out.to(dtype=torch.float32),
                                ops_out.to(dtype=torch.float32))
 
