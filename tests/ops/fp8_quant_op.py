@@ -7,6 +7,12 @@ import torch
 import torch.nn as nn
 import vllm.envs as envs
 
+import sys
+import os
+
+# Add parent directory to Python path
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import tests.register_ops as ops
 
 
@@ -45,7 +51,7 @@ def scaled_fp8_quant(
     assert (input.ndim == 2)
     shape: Union[tuple[int, int], torch.Size] = input.shape
     # out_dtype: torch.dtype = current_platform.fp8_dtype()
-    out_dtype: torch.dtype = torch.fp8_e5m2
+    out_dtype: torch.dtype = torch.float8_e5m2
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     if output is None:

@@ -5,6 +5,7 @@
 #include <sycl/sycl.hpp>
 
 #include "xpu/dispatch_utils.h"
+#include "xpu/ops.h"
 
 #include "fp8_quant.h"
 #include "utils.h"
