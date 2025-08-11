@@ -7,11 +7,10 @@ import time
 
 import torch
 from tabulate import tabulate
+
 from tests import register_ops as ops
-from tests.utils import (
-    STR_DTYPE_TO_TORCH_DTYPE,
-    create_kv_caches_with_random_flash,
-)
+from tests.utils import (STR_DTYPE_TO_TORCH_DTYPE,
+                         create_kv_caches_with_random_flash)
 
 
 @torch.inference_mode()
@@ -29,7 +28,8 @@ def run_benchmark(
     """Return latency (seconds) for given num_tokens."""
 
     if kv_cache_dtype == "fp8" and head_size % 16:
-        raise ValueError("fp8 kv-cache requires head_size to be a multiple of 16.")
+        raise ValueError(
+            "fp8 kv-cache requires head_size to be a multiple of 16.")
 
     seed = 42
     random.seed(seed)
@@ -37,16 +37,23 @@ def run_benchmark(
     torch.set_default_device(device)
 
     # create random key / value tensors [T, H, D].
-    key = torch.randn(num_tokens, num_heads, head_size, dtype=dtype, device=device)
+    key = torch.randn(num_tokens,
+                      num_heads,
+                      head_size,
+                      dtype=dtype,
+                      device=device)
     value = torch.randn_like(key)
 
     # prepare the slot mapping.
     # each token is assigned a unique slot in the KV-cache.
     num_slots = block_size * num_blocks
     if num_tokens > num_slots:
-        raise ValueError("num_tokens cannot exceed the total number of cache slots")
+        raise ValueError(
+            "num_tokens cannot exceed the total number of cache slots")
     slot_mapping_lst = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long, device=device)
+    slot_mapping = torch.tensor(slot_mapping_lst,
+                                dtype=torch.long,
+                                device=device)
 
     key_caches, value_caches = create_kv_caches_with_random_flash(
         num_blocks,
@@ -110,18 +117,16 @@ def main(args):
             num_iters=args.iters,
             device="xpu",
         )
-        rows.append(
-            [
-                n_tok,
-                args.num_heads,
-                args.head_size,
-                args.block_size,
-                args.num_blocks,
-                args.dtype,
-                args.kv_cache_dtype,
-                f"{lat * 1e6:.3f}",
-            ]
-        )
+        rows.append([
+            n_tok,
+            args.num_heads,
+            args.head_size,
+            args.block_size,
+            args.num_blocks,
+            args.dtype,
+            args.kv_cache_dtype,
+            f"{lat * 1e6:.3f}",
+        ])
     print(
         tabulate(
             rows,
@@ -135,8 +140,7 @@ def main(args):
                 "kv_cache_dtype",
                 "latency (us)",
             ],
-        )
-    )
+        ))
 
 
 if __name__ == "__main__":

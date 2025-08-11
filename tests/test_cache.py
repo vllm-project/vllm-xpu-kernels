@@ -6,11 +6,8 @@ import pytest
 import torch
 
 from tests.ops.cache_op import reshape_and_cache, reshape_and_cache_flash
-from tests.utils import (
-    opcheck,
-    create_kv_caches_with_random,
-    create_kv_caches_with_random_flash,
-)
+from tests.utils import (create_kv_caches_with_random,
+                         create_kv_caches_with_random_flash, opcheck)
 
 DTYPES = [torch.half, torch.bfloat16]
 NUM_TOKENS = [42]  # Arbitrary values for testing
@@ -20,7 +17,9 @@ HEAD_SIZES = [64, 80, 120, 256]
 BLOCK_SIZES = [8, 16, 32]
 NUM_BLOCKS = [1024]  # don't make it too large. e.g. [36000] will OOM
 SEEDS = [0]
-DEVICES = [f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)]
+DEVICES = [
+    f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
+]
 KV_CACHE_DTYPE = ["auto"]
 
 
@@ -159,8 +158,15 @@ def test_reshape_and_cache_flash(
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping_lst = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long, device=device)
-    qkv = torch.randn(num_tokens, 3, num_heads, head_size, dtype=dtype, device=device)
+    slot_mapping = torch.tensor(slot_mapping_lst,
+                                dtype=torch.long,
+                                device=device)
+    qkv = torch.randn(num_tokens,
+                      3,
+                      num_heads,
+                      head_size,
+                      dtype=dtype,
+                      device=device)
     _, key, value = qkv.unbind(dim=1)
 
     # Create the KV caches.
