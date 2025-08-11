@@ -125,6 +125,7 @@ class cmake_build_ext(build_ext):
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
+            '-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain.cmake'
         ]
 
         verbose = envs.VERBOSE
@@ -258,6 +259,7 @@ ext_modules = []
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fa2_C"))
 
 if ext_modules:
     cmdclass = {"build_ext": cmake_build_ext}

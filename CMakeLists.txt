@@ -46,6 +46,7 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21")
 set(TORCH_SUPPORTED_VERSION_XPU "2.8.0")
 
 set(ENABLE_MOE_KERNEL OFF)
+set(FA2_ENABLED ON)
 
 #
 # Try to find python package with an executable that exactly matches
@@ -146,16 +147,65 @@ endif()
 
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_SRC
+    "csrc/xpu/cutlass_sycl_demo.cpp"
     "csrc/xpu/layernorm.cpp"
     "csrc/xpu/torch_bindings.cpp"
   )
   include_directories("/usr/include")
-  set(CMPLR_ROOT $ENV{CMPLR_ROOT})
-  set(CMAKE_CXX_COMPILER icpx)
+  list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/)
+  list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/sycl/)
+  list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/sycl/syclcompat/)
+  message(STATUS "VLLM_INCLUDE_DIR: ${VLLM_INCLUDE_DIR}")
   set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
   list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
-  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
+  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64" "-Xspirv-translator" "-spirv-ext=+SPV_INTEL_split_barrier")
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
+
+
+  # add cutlass dependency
+  set(CUTLASS_ENABLE_HEADERS_ONLY "ON" CACHE BOOL "Enable only the header library")
+
+  # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
+  set(CUTLASS_REVISION "chunk_prefill_BMG" CACHE STRING "CUTLASS revision to use")
+
+  # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
+  FetchContent_Declare(
+      cutlass-sycl
+      GIT_REPOSITORY https://github.com/sunjiweiswift/cutlass-sycl.git
+      # Please keep this in sync with CUTLASS_REVISION line above.
+      GIT_TAG ${CUTLASS_REVISION}
+      GIT_PROGRESS TRUE
+
+      # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
+      # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
+      # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
+      GIT_SHALLOW TRUE
+  )
+
+  # cutlass compilation flags
+  set(CUTLASS_ENABLE_SYCL "ON")
+  # set(DPCPP_SYCL_TARGET "intel_gpu_pvc;intel_gpu_bmg_g21" CACHE STRING "DPC++ SYCL target architectures")
+  set(CMAKE_EXPORT_COMPILE_COMMANDS "ON")
+  set(CUTLASS_ENABLE_BENCHMARKS "OFF")
+  # disable cuda
+  set(CUTLASS_ENABLE_GDC_FOR_SM100_DEFAULT OFF CACHE BOOL "DISABLE CUDA")
+  # list(APPEND CMAKE_CXX_FLAGS "-ftemplate-backtrace-limit=0 " )
+  # list(APPEND CMAKE_CXX_FLAGS "-fdiagnostics-color=always " )
+  
+
+  FetchContent_MakeAvailable(cutlass-sycl)
+  set(CUTLASS_INCLUDE_DIR ${cutlass-sycl_SOURCE_DIR}/include CACHE PATH "CUTLASS Header Library")
+  set(CUTLASS_TOOLS_UTIL_INCLUDE_DIR ${cutlass-sycl_SOURCE_DIR}/tools/util/include CACHE INTERNAL "")
+  set(CUTLASS_APP_INCLUDE_DIR ${cutlass-sycl_SOURCE_DIR}/applications CACHE INTERNAL "")
+  message(STATUS "cutlass dir: ${CUTLASS_INCLUDE_DIR} and ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR} and ${CUTLASS_APP_INCLUDE_DIR}")
+
+  # header only library
+  list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_ENABLE_SYCL")
+  list(APPEND VLLM_GPU_FLAGS "-DSYCL_INTEL_TARGET")
+  list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_VERSIONS_GENERATED")
+  list(APPEND VLLM_GPU_FLAGS "-ftemplate-backtrace-limit=0")
+  list(APPEND VLLM_GPU_FLAGS "-fdiagnostics-color=always")
+
 endif()
 
 message(STATUS "Enabling C extension.")
@@ -169,8 +219,46 @@ define_gpu_extension_target(
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_APP_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${VLLM_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
+
+#
+# flash attention _C extension
+#
+
+if (FA2_ENABLED)
+    message(STATUS "Enabling fa2 extension.")
+    file(GLOB FA2_GEN_SRCS "csrc/flash_attn/*.cpp")
+
+    # list(APPEND VLLM_GPU_FLAGS "-ze-opt-large-register-file")
+    list(APPEND VLLM_GPU_FLAGS "-gline-tables-only")
+    list(APPEND VLLM_GPU_FLAGS "-O3")
+    list(APPEND VLLM_GPU_FLAGS "-DNDEBUG")
+
+    define_gpu_extension_target(
+        _vllm_fa2_C
+        DESTINATION vllm_xpu_kernels
+        LANGUAGE ${VLLM_GPU_LANG}
+        SOURCES
+            csrc/flash_attn/flash_api.cpp
+            ${FA2_GEN_SRCS}
+        COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+        LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
+        ARCHITECTURES ${VLLM_GPU_ARCHES}
+        INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+        INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+        INCLUDE_DIRECTORIES ${CUTLASS_APP_INCLUDE_DIR}
+        INCLUDE_DIRECTORIES ${VLLM_INCLUDE_DIR}
+        USE_SABI 3
+        WITH_SOABI)
+
+    # target_include_directories(_vllm_fa2_C PRIVATE
+    #     csrc/flash_attn
+    #     csrc/flash_attn/src)
+endif ()
+
 
 #
 # _moe_C extension
@@ -192,6 +280,7 @@ if (ENABLE_MOE_KERNEL)
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
     INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+    INCLUDE_DIRECTORIES ${CUTLASS_APP_INCLUDE_DIR}
     USE_SABI 3
     WITH_SOABI)
 endif()
