@@ -157,7 +157,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/sycl/syclcompat/)
   message(STATUS "VLLM_INCLUDE_DIR: ${VLLM_INCLUDE_DIR}")
   set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
-  list(APPEND VLLM_GPU_FLAGS "-fsycl" "-fsycl-targets=spir64_gen" "-ftemplate-backtrace-limit=0" "-fno-sycl-instrument-device-code" "-DVLLM_BUILD_XPU_OPS" )
+  list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
   list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64" "-Xspirv-translator" "-spirv-ext=+SPV_INTEL_split_barrier")
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
 
@@ -231,6 +231,11 @@ define_gpu_extension_target(
 if (FA2_ENABLED)
     message(STATUS "Enabling fa2 extension.")
     file(GLOB FA2_GEN_SRCS "csrc/flash_attn/*.cpp")
+
+    # list(APPEND VLLM_GPU_FLAGS "-ze-opt-large-register-file")
+    list(APPEND VLLM_GPU_FLAGS "-gline-tables-only")
+    list(APPEND VLLM_GPU_FLAGS "-O3")
+    list(APPEND VLLM_GPU_FLAGS "-DNDEBUG")
 
     define_gpu_extension_target(
         _vllm_fa2_C
