@@ -149,6 +149,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
     "csrc/xpu/cache.cpp"
     "csrc/xpu/layernorm.cpp"
     "csrc/xpu/activation.cpp"
+    "csrc/xpu/pos_encoding_kernels.cpp"
     "csrc/xpu/torch_bindings.cpp"
   )
   include_directories("/usr/include")
