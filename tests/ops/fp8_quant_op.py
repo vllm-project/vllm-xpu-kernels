@@ -23,6 +23,7 @@ def scaled_fp8_quant(
     scale_ub: Optional[torch.Tensor] = None,
     use_per_token_if_dynamic: bool = False,
     output: Optional[torch.Tensor] = None,
+    fp8_dtype: torch.dtype = torch.float8_e5m2,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP8 and return quantized tensor and scale.
@@ -50,8 +51,7 @@ def scaled_fp8_quant(
     # This code assumes batch_dim and num_tokens are flattened
     assert (input.ndim == 2)
     shape: Union[tuple[int, int], torch.Size] = input.shape
-    # out_dtype: torch.dtype = current_platform.fp8_dtype()
-    out_dtype: torch.dtype = torch.float8_e5m2
+    out_dtype: torch.dtype = fp8_dtype
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     if output is None:

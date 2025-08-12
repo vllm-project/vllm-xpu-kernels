@@ -151,7 +151,6 @@ void static_scaled_fp8_quant(
   at::DeviceGuard device_guard(curDevice);
 
   auto stream = at::xpu::getCurrentXPUStream().queue();
-  // TODO: change name?
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
