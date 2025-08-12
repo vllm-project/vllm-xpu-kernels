@@ -23,6 +23,7 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 
+
 def reshape_and_cache(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -43,6 +44,7 @@ def reshape_and_cache(
         k_scale,
         v_scale,
     )
+
 
 def reshape_and_cache_flash(
     key: torch.Tensor,

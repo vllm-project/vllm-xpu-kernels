@@ -83,6 +83,7 @@ def seed_everything(seed) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+
 def _convert_from_fp8(
     tensor: torch.Tensor,
     scale: float = 1.0,
