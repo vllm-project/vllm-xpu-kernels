@@ -127,7 +127,7 @@ HIDDEN_SIZES += list(range(1024, 1033))  # vectorized conversion edge cases
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 SCALE_UBS = [True, False]
 SEEDS = [0]
-FP8_DTYPES = [torch.float8_e5m2]
+FP8_DTYPES = [torch.float8_e5m2, torch.float8_e4m3fn]
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
