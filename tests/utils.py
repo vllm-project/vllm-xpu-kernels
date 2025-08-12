@@ -44,30 +44,35 @@ def fp8_allclose(
 
 # A special version of op check that has a restricted default set of test_utils
 # and a patched version of allclose that supports fp8 types.
-def opcheck(op: Union[torch._ops.OpOverload, torch._ops.OpOverloadPacket,
-                      torch._library.custom_ops.CustomOpDef],
-            args: tuple[Any, ...],
-            kwargs: Optional[dict[str, Any]] = None,
-            *,
-            test_utils: Union[str, Sequence[str]] = ALL_OPCHECK_TEST_UTILS,
-            raise_exception: bool = True,
-            cond: bool = True) -> dict[str, str]:
-    with unittest.mock.patch('torch.allclose', new=fp8_allclose):
-        return torch.library.opcheck(
-            op,
-            args,
-            kwargs,
-            test_utils=test_utils,
-            raise_exception=raise_exception) if cond else {}
+def opcheck(
+    op: Union[
+        torch._ops.OpOverload,
+        torch._ops.OpOverloadPacket,
+        torch._library.custom_ops.CustomOpDef,
+    ],
+    args: tuple[Any, ...],
+    kwargs: Optional[dict[str, Any]] = None,
+    *,
+    test_utils: Union[str, Sequence[str]] = ALL_OPCHECK_TEST_UTILS,
+    raise_exception: bool = True,
+    cond: bool = True,
+) -> dict[str, str]:
+    with unittest.mock.patch("torch.allclose", new=fp8_allclose):
+        return (torch.library.opcheck(op,
+                                      args,
+                                      kwargs,
+                                      test_utils=test_utils,
+                                      raise_exception=raise_exception)
+                if cond else {})
 
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
-    "fp8": torch.uint8,
-    "fp8_e4m3": torch.uint8,
-    "fp8_e5m2": torch.uint8,
+    "fp8": torch.float8_e4m3fn,
+    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8_e5m2": torch.float8_e5m2,
     "int8": torch.int8,
     "fp8_inc": torch.float8_e4m3fn,
 }
@@ -77,3 +82,141 @@ def seed_everything(seed) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+def _convert_from_fp8(
+    tensor: torch.Tensor,
+    scale: float = 1.0,
+) -> torch.Tensor:
+    return (tensor.to(torch.float32) * scale)
+
+
+def _generate_random_fp8(tensor: torch.Tensor, low: float, high: float,
+                         torch_dtype: torch.dtype) -> torch.Tensor:
+    assert torch_dtype in [torch.float8_e4m3fn, torch.float8_e5m2], \
+        f"Unsupported torch dtype for fp8: {torch_dtype}"
+    tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
+    tensor_tmp.uniform_(low, high)
+    return tensor_tmp.to(torch_dtype)
+
+
+def get_kv_cache_torch_dtype(
+    cache_dtype: Optional[Union[str, torch.dtype]],
+    model_dtype: Optional[Union[str, torch.dtype]] = None,
+) -> torch.dtype:
+    if isinstance(cache_dtype, str):
+        if cache_dtype == "auto":
+            if isinstance(model_dtype,
+                          str) and model_dtype in STR_DTYPE_TO_TORCH_DTYPE:
+                torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
+            elif isinstance(model_dtype, torch.dtype):
+                torch_dtype = model_dtype
+            else:
+                raise ValueError(f"Invalid model dtype: {model_dtype}")
+        elif cache_dtype in STR_DTYPE_TO_TORCH_DTYPE:
+            torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
+        else:
+            raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
+    elif isinstance(cache_dtype, torch.dtype):
+        torch_dtype = cache_dtype
+    else:
+        raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
+    return torch_dtype
+
+
+def create_kv_caches_with_random(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: Optional[Union[str, torch.dtype]],
+    model_dtype: Optional[Union[str, torch.dtype]] = None,
+    seed: Optional[int] = None,
+    device: Optional[str] = "xpu",
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    if cache_dtype == "fp8" and head_size % 16:
+        raise ValueError(
+            f"Does not support key cache of type fp8 with head_size {head_size}"
+        )
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+
+    scale = head_size**-0.5
+    x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
+    key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
+    key_caches: list[torch.Tensor] = []
+    for _ in range(num_layers):
+        key_cache = torch.empty(size=key_cache_shape,
+                                dtype=torch_dtype,
+                                device=device)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_cache.uniform_(-scale, scale)
+        elif cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
+            _generate_random_fp8(key_cache, -scale, scale, torch_dtype)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
+        key_caches.append(key_cache)
+
+    value_cache_shape = (num_blocks, num_heads, head_size, block_size)
+    value_caches: list[torch.Tensor] = []
+    for _ in range(num_layers):
+        value_cache = torch.empty(size=value_cache_shape,
+                                  dtype=torch_dtype,
+                                  device=device)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            value_cache.uniform_(-scale, scale)
+        elif cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
+            _generate_random_fp8(value_cache, -scale, scale, torch_dtype)
+        else:
+            raise ValueError(
+                f"Does not support value cache of type {cache_dtype}")
+        value_caches.append(value_cache)
+    return key_caches, value_caches
+
+
+def create_kv_caches_with_random_flash(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: Optional[Union[str, torch.dtype]],
+    model_dtype: Optional[Union[str, torch.dtype]] = None,
+    seed: Optional[int] = None,
+    device: Optional[str] = "xpu",
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+    generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
+    stride_order = (0, 1, 2, 3, 4)
+
+    kv_cache_allocation_shape = tuple(generic_kv_cache_shape[i]
+                                      for i in stride_order)
+    scale = head_size**-0.5
+
+    key_caches: list[torch.Tensor] = []
+    value_caches: list[torch.Tensor] = []
+
+    for _ in range(num_layers):
+        key_value_cache = torch.empty(size=kv_cache_allocation_shape,
+                                      dtype=torch_dtype,
+                                      device=device).permute(*stride_order)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_value_cache.uniform_(-scale, scale)
+        elif cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
+            key_value_cache = _generate_random_fp8(key_value_cache, -scale,
+                                                   scale, torch_dtype)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
+        key_caches.append(key_value_cache[:, 0])
+        value_caches.append(key_value_cache[:, 1])
+    return key_caches, value_caches
