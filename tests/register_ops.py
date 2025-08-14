@@ -67,6 +67,7 @@ if hasattr(torch.ops._C, "grouped_topk"):
                                    device=hidden_states.device)
         return topk_weights, topk_indices
 
+
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 
