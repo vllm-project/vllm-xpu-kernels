@@ -80,15 +80,13 @@ def reshape_and_cache_flash(
     )
 
 
-def static_scaled_fp8_quant(
-    out: torch.Tensor, input: torch.Tensor, scale: torch.Tensor
-) -> None:
+def static_scaled_fp8_quant(out: torch.Tensor, input: torch.Tensor,
+                            scale: torch.Tensor) -> None:
     torch.ops._C.static_scaled_fp8_quant(out, input, scale)
 
 
-def dynamic_scaled_fp8_quant(
-    out: torch.Tensor, input: torch.Tensor, scale: torch.Tensor
-) -> None:
+def dynamic_scaled_fp8_quant(out: torch.Tensor, input: torch.Tensor,
+                             scale: torch.Tensor) -> None:
     torch.ops._C.dynamic_scaled_fp8_quant(out, input, scale)
 
 
@@ -98,4 +96,5 @@ def dynamic_per_token_scaled_fp8_quant(
     scales: torch.Tensor,
     scale_ub: Optional[torch.Tensor] = None,
 ) -> None:
-    torch.ops._C.dynamic_per_token_scaled_fp8_quant(out, input, scales, scale_ub)
+    torch.ops._C.dynamic_per_token_scaled_fp8_quant(out, input, scales,
+                                                    scale_ub)

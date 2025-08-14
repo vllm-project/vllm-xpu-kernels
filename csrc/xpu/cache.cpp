@@ -5,7 +5,7 @@
 #include <string>
 
 #include "dispatch_utils.h"
-#include "quantization/fp8/quant_utils.hpp"
+#include "quantization/fp8/quant_utils.h"
 #include "utils.h"
 
 namespace vllm {
@@ -90,6 +90,25 @@ void call_reshape_and_cache(
   });
 }
 
+// Used by vectorization_utils to copy/convert one element
+template <typename OutT, typename InT, Fp8KVCacheDataType kv_dt>
+struct CopyWithScaleOp {
+  float scale;
+
+  inline void operator()(OutT& dst, const InT src) const {
+    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+      dst = static_cast<OutT>(src);
+    } else {
+      float x = (float)src / scale;
+      if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
+        dst = static_cast<at::Float8_e4m3fn>(x);
+      } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
+        dst = static_cast<at::Float8_e5m2>(x);
+      }
+    }
+  }
+};
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 void reshape_and_cache_flash_kernel(
     const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
@@ -127,8 +146,8 @@ void reshape_and_cache_flash_kernel(
   float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
   float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
 
-  fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
-  fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
   fp8::scaled_convert_vec(key_src, key_dst, n, local_idx, local_range, k_op);
   fp8::scaled_convert_vec(value_src, value_dst, n, local_idx, local_range,
                           v_op);

@@ -4,16 +4,11 @@
 from typing import Optional, Union
 
 import torch
-import torch.nn as nn
-import vllm.envs as envs
-
-import sys
-import os
-
-# Add parent directory to Python path
-# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import tests.register_ops as ops
+
+# Add parent directory to Python path
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) #noqa: E501
 
 
 def scaled_fp8_quant(
@@ -49,7 +44,7 @@ def scaled_fp8_quant(
             scaling factor.
     """
     # This code assumes batch_dim and num_tokens are flattened
-    assert (input.ndim == 2)
+    assert input.ndim == 2
     shape: Union[tuple[int, int], torch.Size] = input.shape
     out_dtype: torch.dtype = fp8_dtype
     if num_token_padding:
@@ -66,8 +61,8 @@ def scaled_fp8_quant(
             scale = torch.empty((shape[0], 1),
                                 device=input.device,
                                 dtype=torch.float32)
-            ops.dynamic_per_token_scaled_fp8_quant(
-                output, input.contiguous(), scale, scale_ub)
+            ops.dynamic_per_token_scaled_fp8_quant(output, input.contiguous(),
+                                                   scale, scale_ub)
         else:
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             ops.dynamic_scaled_fp8_quant(output, input, scale)

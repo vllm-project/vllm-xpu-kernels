@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import random
+from typing import Optional, Union
+
+import numpy as np
 import pytest
 import torch
-from typing import Optional, Union
-import random
-import numpy as np
 
 from tests.ops.fp8_quant_op import scaled_fp8_quant
 
+
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
-    return torch.as_tensor(x, dtype=torch.float32, device='xpu')
+    return torch.as_tensor(x, dtype=torch.float32, device="xpu")
+
 
 def ref_dynamic_per_tensor_fp8_quant(x, fp8_dtype=torch.float8_e5m2):
 
@@ -26,14 +29,16 @@ def ref_dynamic_per_tensor_fp8_quant(x, fp8_dtype=torch.float8_e5m2):
     x_max = as_float32_tensor(x.abs().max())
     ref_scale = x_max / fp8_max
     ref_iscale = one / ref_scale
-    ref_out = (as_float32_tensor(x) * ref_iscale).clamp(
-        fp8_traits_min, fp8_traits_max).to(fp8_dtype)
+    ref_out = ((as_float32_tensor(x) * ref_iscale).clamp(
+        fp8_traits_min, fp8_traits_max).to(fp8_dtype))
     return ref_out, ref_scale.view((1, ))
 
-def ref_dynamic_per_token_quant(x: torch.tensor,
-                                quant_dtype: torch.dtype,
-                                scale_ub: Optional[torch.tensor] = None) \
-        -> tuple[torch.tensor, torch.tensor]:
+
+def ref_dynamic_per_token_quant(
+    x: torch.tensor,
+    quant_dtype: torch.dtype,
+    scale_ub: Optional[torch.tensor] = None
+) -> tuple[torch.tensor, torch.tensor]:
 
     assert quant_dtype in [torch.float8_e5m2, torch.float8_e4m3fn]
     # if scale_ub is not None:
@@ -66,14 +71,18 @@ def ref_dynamic_per_token_quant(x: torch.tensor,
 
     return torch_out, scales
 
-def assert_close_percentage(a: torch.Tensor, b: torch.Tensor, mismatch_threshold: float = 0.01):
+
+def assert_close_percentage(a: torch.Tensor,
+                            b: torch.Tensor,
+                            mismatch_threshold: float = 0.01):
     """
     Assert that two tensors are close within a mismatch percentage.
 
     Args:
         a (torch.Tensor): First tensor.
         b (torch.Tensor): Second tensor.
-        mismatch_threshold (float): Allowed mismatch ratio (0.01 = 1% mismatch allowed).
+        mismatch_threshold (float): 
+            Allowed mismatch ratio (0.01 = 1% mismatch allowed).
 
     Raises:
         AssertionError: If mismatch percentage exceeds the threshold.
@@ -89,8 +98,8 @@ def assert_close_percentage(a: torch.Tensor, b: torch.Tensor, mismatch_threshold
     if mismatch_ratio > mismatch_threshold:
         raise AssertionError(
             f"Tensors differ in {mismatch_ratio * 100:.2f}% of elements "
-            f"(allowed {mismatch_threshold * 100:.2f}%)"
-        )
+            f"(allowed {mismatch_threshold * 100:.2f}%)")
+
 
 def seed_everything(seed):
     if seed is not None:
@@ -98,9 +107,22 @@ def seed_everything(seed):
         np.random.seed(seed)
         torch.manual_seed(seed)
 
+
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HIDDEN_SIZES = [1, 2, 3, 4, 16, 67, 768, 2048, 5120, 5137, 8192,
-                8193]  # Arbitrary values for testing
+HIDDEN_SIZES = [
+    1,
+    2,
+    3,
+    4,
+    16,
+    67,
+    768,
+    2048,
+    5120,
+    5137,
+    8192,
+    8193,
+]  # Arbitrary values for testing
 HIDDEN_SIZES += list(range(1024, 1033))  # vectorized conversion edge cases
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 SCALE_UBS = [True, False]
@@ -114,9 +136,13 @@ FP8_DTYPES = [torch.float8_e5m2, torch.float8_e4m3fn]
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
-def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
-                                      fp8_dtype: torch.dtype, dtype: torch.dtype,
-                                      seed: int) -> None:
+def test_dynamic_per_tensor_fp8_quant(
+    num_tokens: int,
+    hidden_size: int,
+    fp8_dtype: torch.dtype,
+    dtype: torch.dtype,
+    seed: int,
+) -> None:
     seed_everything(seed)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="xpu")
@@ -137,16 +163,21 @@ def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
 @torch.inference_mode()
-def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
-                                     dtype: torch.dtype, scale_ub: bool,
-                                     seed: int, fp8_dtype: torch.dtype) -> None:
+def test_dynamic_per_token_fp8_quant(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    scale_ub: bool,
+    seed: int,
+    fp8_dtype: torch.dtype,
+) -> None:
     seed_everything(seed)
 
-    x = torch.rand(num_tokens, hidden_size, dtype=dtype,
-                   device="xpu") + 1e-6  # avoid nans
+    x = (torch.rand(num_tokens, hidden_size, dtype=dtype, device="xpu") + 1e-6
+         )  # avoid nans
 
-    scale_ub = torch.mean(x).to(dtype=torch.float32, device='xpu') \
-            if scale_ub else None
+    scale_ub = torch.mean(x).to(dtype=torch.float32,
+                                device="xpu") if scale_ub else None
     ref_out, ref_scales = ref_dynamic_per_token_quant(x, fp8_dtype, scale_ub)
 
     ops_out, ops_scales = scaled_fp8_quant(x,
@@ -155,9 +186,11 @@ def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
                                            fp8_dtype=fp8_dtype)
 
     torch.testing.assert_close(ref_scales, ops_scales)
-    assert_close_percentage(ref_out.to(dtype=torch.float32),
-                            ops_out.to(dtype=torch.float32),
-                            mismatch_threshold=0.005)  # 0.5% mismatch allowed
+    assert_close_percentage(
+        ref_out.to(dtype=torch.float32),
+        ops_out.to(dtype=torch.float32),
+        mismatch_threshold=0.005,
+    )  # 0.5% mismatch allowed
 
 
 # Regression test for a case with large activations where an int32 index cannot
@@ -185,5 +218,7 @@ def test_fp8_quant_large(seed: int, fp8_dtype: torch.dtype) -> None:
 
     torch.testing.assert_close(ref_out, ops_out)
 
+
 if __name__ == "__main__":
-    test_dynamic_per_tensor_fp8_quant(1024, 1024, torch.float8_e5m2, torch.float16, 0)
+    test_dynamic_per_tensor_fp8_quant(1024, 1024, torch.float8_e5m2,
+                                      torch.float16, 0)
