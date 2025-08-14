@@ -63,6 +63,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "()");
   ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kXPU,
            &dynamic_per_token_scaled_fp8_quant);
+
+  // w8a16 onednn gemm
+  ops.def(
+      "fp8_gemm_w8a16(Tensor! A, Tensor! B, bool trans_B, Tensor? B_scale_, "
+      "Tensor? bias_) -> Tensor");
+  ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {

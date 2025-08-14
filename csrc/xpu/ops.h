@@ -36,3 +36,8 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
 void dynamic_per_token_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scales,
     std::optional<at::Tensor> const& scale_ub);
+
+torch::Tensor fp8_gemm_w8a16(const torch::Tensor& A, const torch::Tensor& B,
+                             bool trans_B,
+                             const std::optional<torch::Tensor>& B_scale_,
+                             const std::optional<torch::Tensor>& bias_);

@@ -71,12 +71,6 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 find_package(Torch REQUIRED)
 
 find_package(oneDNN QUIET)
-if(ONEDNN_FOUND)
-  include_directories(${ONEDNN_INCLUDE_DIR})
-  link_libraries(${ONEDNN_LIBRARY})
-else()
-  message(FATAL_ERROR "NOT Found oneDNN")
-endif()
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
@@ -169,6 +163,16 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
   list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
+endif()
+
+if(ONEDNN_FOUND)
+  list(APPEND VLLM_EXT_SRC
+  "csrc/xpu/quantization/onednn/fp8_gemm_w8a16.cpp"
+  )
+  include_directories(${ONEDNN_INCLUDE_DIR})
+  link_libraries(${ONEDNN_LIBRARY})
+else()
+  message(FATAL_ERROR "NOT Found oneDNN")
 endif()
 
 message(STATUS "Enabling C extension.")
