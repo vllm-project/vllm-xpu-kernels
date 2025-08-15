@@ -5,7 +5,7 @@
 #include <string>
 
 #include "dispatch_utils.h"
-#include "quantization/fp8/quant_utils.hpp"
+#include "quantization/fp8/quant_utils.h"
 #include "utils.h"
 
 namespace vllm {

@@ -3,6 +3,7 @@
 import importlib.util
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -175,9 +176,22 @@ class cmake_build_ext(build_ext):
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
+
+        my_env = os.environ.copy()
+        icx_path = shutil.which('icx')
+        icpx_path = shutil.which('icpx')
+        build_option_gpu = {
+            "BUILD_MODULE_TYPE": "GPU",
+            "CMAKE_C_COMPILER": f"{icx_path}",
+            "CMAKE_CXX_COMPILER": f"{icpx_path}",
+        }
+        for key, value in build_option_gpu.items():
+            if value is not None:
+                cmake_args.append("-D{}={}".format(key, value))
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp)
+            cwd=self.build_temp,
+            env=my_env)
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working

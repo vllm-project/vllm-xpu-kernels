@@ -20,6 +20,8 @@ message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/Modules)
+
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
@@ -68,6 +70,7 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 # Import torch cmake configuration.
 find_package(Torch REQUIRED)
 
+find_package(oneDNN QUIET)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
@@ -151,6 +154,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
     "csrc/xpu/activation.cpp"
     "csrc/xpu/pos_encoding_kernels.cpp"
     "csrc/xpu/torch_bindings.cpp"
+    "csrc/xpu/quantization/fp8/fp8_quant.cpp"
   )
   include_directories("/usr/include")
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})
@@ -159,6 +163,16 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
   list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
+endif()
+
+if(ONEDNN_FOUND)
+  list(APPEND VLLM_EXT_SRC
+  "csrc/xpu/onednn/fp8_gemm_w8a16.cpp"
+  )
+  include_directories(${ONEDNN_INCLUDE_DIR})
+  link_libraries(${ONEDNN_LIBRARY})
+else()
+  message(FATAL_ERROR "NOT Found oneDNN")
 endif()
 
 message(STATUS "Enabling C extension.")

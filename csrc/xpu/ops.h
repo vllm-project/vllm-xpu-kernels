@@ -26,3 +26,18 @@ void reshape_and_cache_flash(torch::Tensor& key, torch::Tensor& value,
                              torch::Tensor& slot_mapping,
                              const std::string& kv_cache_dtype,
                              torch::Tensor& k_scale, torch::Tensor& v_scale);
+
+void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
+                             torch::Tensor const& scale);
+
+void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
+                              torch::Tensor& scale);
+
+void dynamic_per_token_scaled_fp8_quant(
+    torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scales,
+    std::optional<at::Tensor> const& scale_ub);
+
+torch::Tensor fp8_gemm_w8a16(const torch::Tensor& A, const torch::Tensor& B,
+                             bool trans_B,
+                             const std::optional<torch::Tensor>& B_scale_,
+                             const std::optional<torch::Tensor>& bias_);
