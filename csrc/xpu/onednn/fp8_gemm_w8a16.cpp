@@ -6,7 +6,7 @@ torch::Tensor fp8_gemm_w8a16(const torch::Tensor& A, const torch::Tensor& B,
                              const std::optional<torch::Tensor>& B_scale_,
                              const std::optional<torch::Tensor>& bias_) {
   TORCH_CHECK(A.dim() == 2 || A.dim() == 3,
-              "fp8_gemm_w8a16 only support 2D and 3D activations!\n");
+              "fp8_gemm_w8a16 only support 2D and 3D inputs!\n");
   TORCH_CHECK(B.dim() == 2, "fp8_gemm_w8a16 only support 2D weights!\n");
 
   std::vector<int64_t> result_shape;

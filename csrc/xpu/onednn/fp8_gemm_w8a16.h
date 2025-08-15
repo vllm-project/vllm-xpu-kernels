@@ -4,7 +4,7 @@
 #include <dnnl.hpp>
 #include <torch/torch.h>
 
-#include "onednn_ext.hpp"
+#include "onednn_ext.h"
 
 namespace oneDNN {
 

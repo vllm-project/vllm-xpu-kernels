@@ -167,7 +167,7 @@ endif()
 
 if(ONEDNN_FOUND)
   list(APPEND VLLM_EXT_SRC
-  "csrc/xpu/quantization/onednn/fp8_gemm_w8a16.cpp"
+  "csrc/xpu/onednn/fp8_gemm_w8a16.cpp"
   )
   include_directories(${ONEDNN_INCLUDE_DIR})
   link_libraries(${ONEDNN_LIBRARY})
