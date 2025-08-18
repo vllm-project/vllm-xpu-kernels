@@ -1,7 +1,7 @@
 #include <sycl/sycl.hpp>
 
-#include "utils.h"
-#include "dispatch_utils.h"
+#include "../utils.h"
+#include "../dispatch_utils.h"
 
 namespace vllm {
 namespace GroupedTopKImpl {
