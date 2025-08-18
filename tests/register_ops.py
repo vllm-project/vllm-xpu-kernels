@@ -4,6 +4,7 @@
 import torch
 from typing import Optional
 import vllm_xpu_kernels._C  # noqa: F401
+import vllm_xpu_kernels._moe_C  # noqa: F401
 
 
 # layer norm ops
@@ -98,3 +99,8 @@ def dynamic_per_token_scaled_fp8_quant(
 ) -> None:
     torch.ops._C.dynamic_per_token_scaled_fp8_quant(out, input, scales,
                                                     scale_ub)
+
+
+# moe
+def moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
+    torch.ops._moe_C.moe_sum(input, output)
