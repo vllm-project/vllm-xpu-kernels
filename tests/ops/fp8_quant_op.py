@@ -5,12 +5,6 @@ from typing import Optional, Union
 
 import torch
 
-import sys
-import os
-
-# Add parent directory to Python path
-# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 import tests.register_ops as ops
 
 # Add parent directory to Python path
