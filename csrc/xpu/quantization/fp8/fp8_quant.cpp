@@ -9,6 +9,7 @@
 
 #include "fp8_quant.h"
 #include "quant_utils.h"
+#include "xpu/utils.h"
 
 namespace vllm {
 
@@ -129,13 +130,13 @@ void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
   at::DeviceGuard device_guard(curDevice);
 
-  auto stream = at::xpu::getCurrentXPUStream().queue();
+  auto& queue = vllm::xpu::vllmGetQueue();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
               // Launch the kernel
-              stream.submit([&](sycl::handler& cgh) {
+              queue.submit([&](sycl::handler& cgh) {
                 auto kernel = vllm::scaled_fp8_quant_kernel<scalar_t, fp8_t>(
                     out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
                     scale.data_ptr<float>(), num_elems);
@@ -157,13 +158,13 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
   at::DeviceGuard device_guard(curDevice);
 
-  auto stream = at::xpu::getCurrentXPUStream().queue();
+  auto& queue = vllm::xpu::vllmGetQueue();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
               // Launch the kernel
-              stream.submit([&](sycl::handler& cgh) {
+              queue.submit([&](sycl::handler& cgh) {
                 auto max_reduce_kernel =
                     vllm::segmented_max_reduction<scalar_t, fp8_t>(
                         scale.data_ptr<float>(), input.data_ptr<scalar_t>(),
@@ -171,7 +172,7 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                 cgh.parallel_for(sycl::nd_range<1>(grid * block, block),
                                  max_reduce_kernel);
               });
-              stream.submit([&](sycl::handler& cgh) {
+              queue.submit([&](sycl::handler& cgh) {
                 auto kernel = vllm::scaled_fp8_quant_kernel<scalar_t, fp8_t>(
                     out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
                     scale.data_ptr<float>(), num_elems);
@@ -197,7 +198,7 @@ void dynamic_per_token_scaled_fp8_quant(
   at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
   at::DeviceGuard device_guard(curDevice);
 
-  auto stream = at::xpu::getCurrentXPUStream().queue();
+  auto& queue = vllm::xpu::vllmGetQueue();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(),
       "dynamic_per_token_scaled_fp8_quant_kernel_scalar_type", [&] {
@@ -205,7 +206,7 @@ void dynamic_per_token_scaled_fp8_quant(
             out.scalar_type(),
             "dynamic_per_token_scaled_fp8_quant_kernel_fp8_type", [&] {
               // Launch the kernel
-              stream
+              queue
                   .submit([&](sycl::handler& cgh) {
                     auto kernel =
                         vllm::dynamic_per_token_scaled_fp8_quant_kernel<
