@@ -14,8 +14,10 @@ inline T silu_kernel(const T& x) {
 
 template <typename T>
 inline T gelu_fast_kernel(const T& x) {
-  // 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x)))
-  return (T)(0.5f * x * (1.0f + sycl::tanh(0.7978845608f * (x + 0.044715f * x * x))));
+  // 0.5 * x * (1.0 + tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
+  const float g = (float)(x * 0.7978845608f * (1.0f + 0.044715f * x * x));
+  const T t = sycl::tanh(g);
+  return (0.5f) * x * (1.0f + t);
 }
 
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
