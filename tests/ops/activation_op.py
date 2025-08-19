@@ -56,9 +56,7 @@ class NewGELU(CustomOp):
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
-        import math
-        c = math.sqrt(2.0 / math.pi)
-        return 0.5 * x * (1.0 + torch.tanh(c *
+        return 0.5 * x * (1.0 + torch.tanh(0.7978845608 *
                                            (x + 0.044715 * torch.pow(x, 3.0))))
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
