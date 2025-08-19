@@ -105,7 +105,8 @@ class rotary_embedding_kernel {
         num_kv_heads(num_kv_heads_),
         head_size(head_size_) {}
 
-  void operator()(const sycl::nd_item<3>& item_ct1) const {
+  void operator() [[intel::reqd_sub_group_size(32)]] (
+      const sycl::nd_item<3>& item_ct1) const {
     // Each thread block is responsible for one token.
     const int token_idx = item_ct1.get_group(2);
     int64_t pos = positions[token_idx];
