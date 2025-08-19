@@ -149,12 +149,42 @@ endif()
 
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_SRC
-    "csrc/xpu/cache.cpp"
-    "csrc/xpu/layernorm.cpp"
-    "csrc/xpu/activation.cpp"
-    "csrc/xpu/pos_encoding_kernels.cpp"
+    "csrc/cache.cpp"
+    "csrc/layernorm.cpp"
+    "csrc/activation.cpp"
+    "csrc/pos_encoding_kernels.cpp"
+    "csrc/torch_bindings.cpp"
+    "csrc/quantization/fp8/fp8_quant.cpp"
+  )
+  include_directories("/usr/include")
+  set(CMPLR_ROOT $ENV{CMPLR_ROOT})
+  set(CMAKE_CXX_COMPILER icpx)
+  set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
+  list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
+  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
+  list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
+endif()
+
+message(STATUS "Enabling C extension.")
+define_gpu_extension_target(
+  _C
+  DESTINATION vllm_xpu_kernels
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  USE_SABI 3
+  WITH_SOABI)
+
+#
+# xpu only ops/kernels, like implemented with oneDNN.
+#
+if(VLLM_GPU_LANG STREQUAL "SYCL")
+  set(VLLM_EXT_XPU_SRC
     "csrc/xpu/torch_bindings.cpp"
-    "csrc/xpu/quantization/fp8/fp8_quant.cpp"
   )
   include_directories("/usr/include")
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})
@@ -166,8 +196,8 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
 endif()
 
 if(ONEDNN_FOUND)
-  list(APPEND VLLM_EXT_SRC
-  "csrc/xpu/onednn/fp8_gemm_w8a16.cpp"
+  list(APPEND VLLM_EXT_XPU_SRC
+    "csrc/xpu/onednn/fp8_gemm_w8a16.cpp"
   )
   include_directories(${ONEDNN_INCLUDE_DIR})
   link_libraries(${ONEDNN_LIBRARY})
@@ -175,12 +205,11 @@ else()
   message(FATAL_ERROR "NOT Found oneDNN")
 endif()
 
-message(STATUS "Enabling C extension.")
 define_gpu_extension_target(
-  _C
+  _xpu_C
   DESTINATION vllm_xpu_kernels
   LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_EXT_SRC}
+  SOURCES ${VLLM_EXT_XPU_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}

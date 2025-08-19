@@ -4,12 +4,12 @@
 
 #include <sycl/sycl.hpp>
 
-#include "xpu/dispatch_utils.h"
-#include "xpu/ops.h"
+#include "dispatch_utils.h"
+#include "ops.h"
 
 #include "fp8_quant.h"
 #include "quant_utils.h"
-#include "xpu/utils.h"
+#include "utils.h"
 
 namespace vllm {
 

@@ -4,7 +4,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import vllm_xpu_kernels._C  # noqa: F401
+import vllm_xpu_kernels._xpu_C  # noqa: F401
 from torch import Tensor
 
 from tests.nn.utils import (DTYPE_BITS_MAPPING, VLLM_ACT_QUANT_MODE_TO_XPU,
@@ -478,7 +478,7 @@ class WeightOnlyQuantizedLinear(nn.Module):
             self.use_optimum_format = False
 
         if self.weight_dtype != "int4_fullrange":
-            return torch.ops._C.fp8_gemm_w8a16(
+            return torch.ops._xpu_C.fp8_gemm_w8a16(
                 input,
                 self.qweight,
                 self.weight_transposed,
