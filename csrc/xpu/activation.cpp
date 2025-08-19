@@ -31,7 +31,7 @@ inline T gelu_new_kernel(const T& x) {
 template <typename T>
 inline T gelu_quick_kernel(const T& x) {
   // x * sigmoid(1.702 * x)
-  return (T)(((float)x) / (1.0f + sycl::native::exp(-1.702f * (float)x)));
+  return (T)(((float)x) / (1.0f + (T)sycl::exp(-1.702f * (float)x)));
 }
 
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),

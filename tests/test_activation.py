@@ -3,6 +3,7 @@ import pytest
 import torch
 
 from tests.ops.activation_op import SiluAndMul, FastGELU, NewGELU, QuickGELU
+from tests.allclose_default import get_default_atol, get_default_rtol
 from tests.utils import opcheck, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -69,7 +70,10 @@ def test_activation(
     fn = activation[1]
     out = layer(x)
     ref_out = layer.forward_native(x)
-    torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(out,
+                               ref_out,
+                               atol=get_default_atol(out),
+                               rtol=get_default_rtol(out))
 
     out = torch.empty_like(x)
     opcheck(fn, (out, x))

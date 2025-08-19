@@ -68,7 +68,7 @@ class QuickGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        self.op = torch.ops._C.gelu_new
+        self.op = torch.ops._C.gelu_quick
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
