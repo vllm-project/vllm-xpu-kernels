@@ -42,6 +42,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_new(Tensor! out, Tensor! input) -> ()");
   ops.impl("gelu_new", torch::kXPU, &gelu_new);
 
+  ops.def("gelu_quick(Tensor! out, Tensor! input) -> ()");
+  ops.impl("gelu_quick", torch::kXPU, &gelu_quick);
+
   // pos_embedding
   ops.def(
       "rotary_embedding(Tensor positions, Tensor! query,"

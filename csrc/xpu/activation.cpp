@@ -28,6 +28,12 @@ inline T gelu_new_kernel(const T& x) {
   return ((T)0.5) * x * (((T)1.0) + t);
 }
 
+template <typename T>
+inline T gelu_quick_kernel(const T& x) {
+  // x * sigmoid(1.702 * x)
+  return (T)(((float)x) / (1.0f + sycl::exp(-1.702f * (float)x)));
+}
+
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
           bool act_first>
 inline scalar_t compute(const scalar_t& x, const scalar_t& y) {
@@ -134,6 +140,29 @@ void call_gelu_new_kernel(torch::Tensor& out, torch::Tensor& input) {
   });
 }
 
+template <typename scalar_t>
+void call_gelu_quick_kernel(torch::Tensor& out, torch::Tensor& input) {
+  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+  int d = input.size(-1);
+  int64_t num_tokens = input.numel() / input.size(-1);
+  sycl::range<3> grid(1, 1, num_tokens);
+  sycl::range<3> block(1, 1, std::min(d, 1024));
+  if (num_tokens == 0) {
+    return;
+  }
+  auto out_ptr = out.data_ptr<scalar_t>();
+  auto input_ptr = input.data_ptr<scalar_t>();
+  at::DeviceGuard device_guard(input.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+  queue.submit([&](sycl::handler& cgh) {
+    cgh.parallel_for(
+        sycl::nd_range<3>(grid * block, block),
+        [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {
+          act_kernel<sycl_t, gelu_quick_kernel>(
+              (sycl_t*)out_ptr, (sycl_t*)input_ptr, d, item_ct1);
+        });
+  });
+}
 }  // namespace vllm
 
 void silu_and_mul(torch::Tensor& out,    // [..., d]
@@ -158,4 +187,12 @@ void gelu_new(torch::Tensor& out,    // [..., d]
     VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_gelu_new_kernel",
       [&] { vllm::call_gelu_new_kernel<scalar_t>(out, input); });
+}
+
+void gelu_quick(torch::Tensor& out,    // [..., d]
+                 torch::Tensor& input)  // [..., d]
+{
+    VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_gelu_quick_kernel",
+      [&] { vllm::call_gelu_quick_kernel<scalar_t>(out, input); });
 }

@@ -14,6 +14,8 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input);
 
+void gelu_quick(torch::Tensor& out, torch::Tensor& input);
+
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);

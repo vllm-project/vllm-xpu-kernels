@@ -63,3 +63,18 @@ class NewGELU(CustomOp):
         out = torch.empty_like(x)
         self.op(out, x)
         return out
+
+class QuickGELU(CustomOp):
+
+    def __init__(self):
+        super().__init__()
+        self.op = torch.ops._C.gelu_new
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        return x * torch.sigmoid(1.702 * x)
+
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x)
+        self.op(out, x)
+        return out

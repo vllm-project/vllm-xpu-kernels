@@ -2,7 +2,7 @@
 import pytest
 import torch
 
-from tests.ops.activation_op import SiluAndMul, FastGELU, NewGELU
+from tests.ops.activation_op import SiluAndMul, FastGELU, NewGELU, QuickGELU
 from tests.utils import opcheck, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -46,8 +46,8 @@ def test_act_and_mul(
     opcheck(fn, (out, x))
 
 @pytest.mark.parametrize("activation", [(FastGELU, torch.ops._C.gelu_fast),
-                                        (NewGELU, torch.ops._C.gelu_new),])
-                                        # (QuickGELU, torch.ops._C.gelu_quick)])
+                                        (NewGELU, torch.ops._C.gelu_new),
+                                        (QuickGELU, torch.ops._C.gelu_quick)])
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
