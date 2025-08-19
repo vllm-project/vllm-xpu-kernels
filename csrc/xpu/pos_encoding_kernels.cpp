@@ -203,19 +203,21 @@ void call_rotary_embedding_kernel(
   auto& queue = vllm::xpu::vllmGetQueue();
   if (is_neox) {
     queue.submit([&](sycl::handler& cgh) {
-      auto kfn = vllm::rotary_embedding_kernel<sycl_t, true>(
-          positions_ptr, (sycl_t*)query_ptr, (sycl_t*)key_ptr,
-          (sycl_t*)cos_sin_cache_ptr, rot_dim, query_stride, key_stride,
-          head_stride, num_heads, num_kv_heads, head_size);
-      cgh.parallel_for(sycl::nd_range<3>(grid * block, block), kfn);
+      cgh.parallel_for(
+          sycl::nd_range<3>(grid * block, block),
+          vllm::rotary_embedding_kernel<sycl_t, true>(
+              positions_ptr, (sycl_t*)query_ptr, (sycl_t*)key_ptr,
+              (sycl_t*)cos_sin_cache_ptr, rot_dim, query_stride, key_stride,
+              head_stride, num_heads, num_kv_heads, head_size));
     });
   } else {
     queue.submit([&](sycl::handler& cgh) {
-      auto kfn = vllm::rotary_embedding_kernel<sycl_t, false>(
-          positions_ptr, (sycl_t*)query_ptr, (sycl_t*)key_ptr,
-          (sycl_t*)cos_sin_cache_ptr, rot_dim, query_stride, key_stride,
-          head_stride, num_heads, num_kv_heads, head_size);
-      cgh.parallel_for(sycl::nd_range<3>(grid * block, block), kfn);
+      cgh.parallel_for(
+          sycl::nd_range<3>(grid * block, block),
+          vllm::rotary_embedding_kernel<sycl_t, false>(
+              positions_ptr, (sycl_t*)query_ptr, (sycl_t*)key_ptr,
+              (sycl_t*)cos_sin_cache_ptr, rot_dim, query_stride, key_stride,
+              head_stride, num_heads, num_kv_heads, head_size));
     });
   }
 }

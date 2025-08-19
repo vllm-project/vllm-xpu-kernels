@@ -60,9 +60,9 @@ void call_silu_and_mul_kernel(torch::Tensor& out, torch::Tensor& input) {
   at::DeviceGuard device_guard(input.device());
   auto& queue = vllm::xpu::vllmGetQueue();
   queue.submit([&](sycl::handler& cgh) {
-    auto kfn = act_and_mul_kernel<sycl_t, silu_kernel, true>(
-        (sycl_t*)out_ptr, (sycl_t*)input_ptr, d);
-    cgh.parallel_for(sycl::nd_range<3>(grid * block, block), kfn);
+    cgh.parallel_for(sycl::nd_range<3>(grid * block, block),
+                     act_and_mul_kernel<sycl_t, silu_kernel, true>(
+                         (sycl_t*)out_ptr, (sycl_t*)input_ptr, d));
   });
 }
 
