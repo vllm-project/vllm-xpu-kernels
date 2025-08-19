@@ -2,7 +2,7 @@
 import pytest
 import torch
 
-from tests.ops.grouped_topk import grouped_topk, grouped_topk_native
+from tests.moe.ops.grouped_topk import grouped_topk, grouped_topk_native
 from tests.utils import opcheck
 
 dpcpp_device = torch.device("xpu")

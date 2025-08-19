@@ -74,7 +74,7 @@ def grouped_topk(
     scoring_func: str = "softmax",
     e_score_correction_bias: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    import tests.register_ops as ops
+    import tests.moe.register_ops as ops
     return ops.grouped_topk(hidden_states, gating_output, topk, renormalize,
                             num_expert_group, topk_group, scoring_func,
                             e_score_correction_bias)
