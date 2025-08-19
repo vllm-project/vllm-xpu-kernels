@@ -80,7 +80,7 @@ class TestTorchMethod:
         assert torch.equal(ref_topk_indices, topk_indices)
 
         opcheck(
-            torch.ops._C.grouped_topk,
+            torch.ops._moe_C.grouped_topk,
             (hidden_states, gating_output, n_topk, renormalize, n_expert_group,
              n_topk_group, scoring_func, bias),
         )

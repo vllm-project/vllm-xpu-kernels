@@ -45,7 +45,7 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21")
 #
 set(TORCH_SUPPORTED_VERSION_XPU "2.8.0")
 
-set(ENABLE_MOE_KERNEL OFF)
+set(ENABLE_MOE_KERNEL ON)
 
 #
 # Try to find python package with an executable that exactly matches
@@ -148,7 +148,6 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_SRC
     "csrc/xpu/cache.cpp"
     "csrc/xpu/layernorm.cpp"
-    "csrc/xpu/moe/grouped_topk.cpp"
     "csrc/xpu/activation.cpp"
     "csrc/xpu/pos_encoding_kernels.cpp"
     "csrc/xpu/torch_bindings.cpp"
@@ -179,11 +178,11 @@ define_gpu_extension_target(
 #
 # _moe_C extension
 #
-# TODO: add this as a placeholder for now.
 
 if (ENABLE_MOE_KERNEL)
   set(VLLM_MOE_EXT_SRC
-    "csrc/moe/torch_bindings.cpp"
+    "csrc/xpu/moe/grouped_topk.cpp"
+    "csrc/xpu/moe/torch_bindings.cpp"
   )
 
   message(STATUS "Enabling moe extension.")
@@ -193,6 +192,7 @@ if (ENABLE_MOE_KERNEL)
     LANGUAGE ${VLLM_GPU_LANG}
     SOURCES ${VLLM_MOE_EXT_SRC}
     COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
     INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}

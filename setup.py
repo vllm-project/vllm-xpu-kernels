@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from shutil import which
 
+import torch
 from packaging.version import Version
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
@@ -254,7 +255,14 @@ class cmake_build_ext(build_ext):
             self.copy_file(file, dst_file)
 
 
+def _is_xpu() -> bool:
+    has_xpu = torch.version.xpu is not None
+    return (VLLM_TARGET_DEVICE == "xpu" and has_xpu)
+
 ext_modules = []
+
+if _is_xpu():
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
