@@ -20,17 +20,28 @@ inline scalar_t compute(const scalar_t& x, const scalar_t& y) {
 
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
           bool act_first>
-void act_and_mul_kernel(scalar_t* __restrict__ out,          // [..., d]
-                        const scalar_t* __restrict__ input,  // [..., 2, d]
-                        const int d, const sycl::nd_item<3>& item_ct1) {
-  const int64_t token_idx = item_ct1.get_group(2);
-  for (int64_t idx = item_ct1.get_local_id(2); idx < d;
-       idx += item_ct1.get_local_range(2)) {
-    const scalar_t x = input[token_idx * 2 * d + idx];
-    const scalar_t y = input[token_idx * 2 * d + d + idx];
-    out[token_idx * d + idx] = compute<scalar_t, ACT_FN, act_first>(x, y);
+class act_and_mul_kernel {
+ public:
+  act_and_mul_kernel(scalar_t* __restrict__ out,          // [..., d]
+                     const scalar_t* __restrict__ input,  // [..., 2, d]
+                     const int d)
+      : out_(out), input_(input), d_(d) {}
+
+  void operator()(const sycl::nd_item<3>& item_ct1) const {
+    const int64_t token_idx = item_ct1.get_group(2);
+    for (int64_t idx = item_ct1.get_local_id(2); idx < d_;
+         idx += item_ct1.get_local_range(2)) {
+      const scalar_t x = input_[token_idx * 2 * d_ + idx];
+      const scalar_t y = input_[token_idx * 2 * d_ + d_ + idx];
+      out_[token_idx * d_ + idx] = compute<scalar_t, ACT_FN, act_first>(x, y);
+    }
   }
-}
+
+ private:
+  scalar_t* __restrict__ out_;          // [..., d]
+  const scalar_t* __restrict__ input_;  // [..., 2, d]
+  const int d_;
+};
 
 template <typename scalar_t>
 void call_silu_and_mul_kernel(torch::Tensor& out, torch::Tensor& input) {
@@ -49,12 +60,9 @@ void call_silu_and_mul_kernel(torch::Tensor& out, torch::Tensor& input) {
   at::DeviceGuard device_guard(input.device());
   auto& queue = vllm::xpu::vllmGetQueue();
   queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<3>(grid * block, block),
-        [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {
-          act_and_mul_kernel<sycl_t, silu_kernel, true>(
-              (sycl_t*)out_ptr, (sycl_t*)input_ptr, d, item_ct1);
-        });
+    auto kfn = act_and_mul_kernel<sycl_t, silu_kernel, true>(
+        (sycl_t*)out_ptr, (sycl_t*)input_ptr, d);
+    cgh.parallel_for(sycl::nd_range<3>(grid * block, block), kfn);
   });
 }
 
