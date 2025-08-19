@@ -5,7 +5,7 @@ import random
 import pytest
 import torch
 
-from tests.ops.cache_op import reshape_and_cache, reshape_and_cache_flash
+from tests.register_ops import reshape_and_cache, reshape_and_cache_flash
 from tests.utils import (_convert_from_fp8, create_kv_caches_with_random,
                          create_kv_caches_with_random_flash, opcheck)
 
