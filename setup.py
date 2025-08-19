@@ -259,6 +259,7 @@ def _is_xpu() -> bool:
     has_xpu = torch.version.xpu is not None
     return (VLLM_TARGET_DEVICE == "xpu" and has_xpu)
 
+
 ext_modules = []
 
 if _is_xpu():

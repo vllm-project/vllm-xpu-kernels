@@ -28,8 +28,9 @@ def grouped_topk(
     e_score_correction_bias: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._moe_C.grouped_topk(hidden_states, gating_output, topk,
-                                     renormalize, num_expert_group, topk_group,
-                                     scoring_func, e_score_correction_bias)
+                                         renormalize, num_expert_group,
+                                         topk_group, scoring_func,
+                                         e_score_correction_bias)
 
 
 if hasattr(torch.ops._moe_C, "grouped_topk"):
