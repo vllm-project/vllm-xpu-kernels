@@ -62,8 +62,7 @@ class swigluoai_and_mul_kernel {
   int64_t num_tokens = input.numel() / input.size(-1);                     \
   sycl::range<1> grid(num_tokens);                                         \
   sycl::range<1> block(std::min(d, 1024));                                 \
-  at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());  \
-  const at::DeviceGuard device_guard(curDevice);                           \
+  at::DeviceGuard device_guard(input.device());                            \
   auto& queue = vllm::xpu::vllmGetQueue();                                 \
   VLLM_DISPATCH_FLOATING_TYPES(                                            \
       input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {        \
