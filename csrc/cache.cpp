@@ -108,12 +108,12 @@ void call_reshape_and_cache(
   int wg = std::min(1024, static_cast<int>(num_heads * head_size));
 
   queue.submit([&](sycl::handler& cgh) {
-    auto kfn = reshape_and_cache_kernel<scalar_t, cache_t, kv_dt>(
-        key, value, key_cache, value_cache, slot_mapping, key_stride,
-        value_stride, num_heads, head_size, block_size, x, k_scale, v_scale);
     cgh.parallel_for(
         sycl::nd_range<1>(sycl::range<1>(num_tokens * wg), sycl::range<1>(wg)),
-        kfn);
+        reshape_and_cache_kernel<scalar_t, cache_t, kv_dt>(
+            key, value, key_cache, value_cache, slot_mapping, key_stride,
+            value_stride, num_heads, head_size, block_size, x, k_scale,
+            v_scale));
   });
 }
 
@@ -210,13 +210,12 @@ void call_reshape_and_cache_flash(
   TORCH_CHECK(head_stride == head_size,
               "Only support contiguous heads for vectorization.");
   queue.submit([&](sycl::handler& cgh) {
-    auto kfn = reshape_and_cache_flash_kernel<scalar_t, cache_t, kv_dt>(
-        key, value, key_cache, value_cache, slot_mapping, block_stride,
-        page_stride, head_stride, key_stride, value_stride, num_heads,
-        head_size, block_size, k_scale, v_scale);
     cgh.parallel_for(
         sycl::nd_range<1>(sycl::range<1>(num_tokens * wg), sycl::range<1>(wg)),
-        kfn);
+        reshape_and_cache_flash_kernel<scalar_t, cache_t, kv_dt>(
+            key, value, key_cache, value_cache, slot_mapping, block_stride,
+            page_stride, head_stride, key_stride, value_stride, num_heads,
+            head_size, block_size, k_scale, v_scale));
   });
 }
 
