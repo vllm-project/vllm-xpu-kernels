@@ -2,8 +2,8 @@
 import pytest
 import torch
 
-from tests.ops.activation_op import SiluAndMul, FastGELU, NewGELU, QuickGELU
 from tests.allclose_default import get_default_atol, get_default_rtol
+from tests.ops.activation_op import FastGELU, NewGELU, QuickGELU, SiluAndMul
 from tests.utils import opcheck, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -45,6 +45,7 @@ def test_act_and_mul(
     output_shape = (x.shape[:-1] + (d, ))
     out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
     opcheck(fn, (out, x))
+
 
 @pytest.mark.parametrize("activation", [(FastGELU, torch.ops._C.gelu_fast),
                                         (NewGELU, torch.ops._C.gelu_new),

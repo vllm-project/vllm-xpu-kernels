@@ -32,6 +32,7 @@ class SiluAndMul(CustomOp):
         self.op(out, x)
         return out
 
+
 class FastGELU(CustomOp):
 
     def __init__(self):
@@ -48,6 +49,7 @@ class FastGELU(CustomOp):
         self.op(out, x)
         return out
 
+
 class NewGELU(CustomOp):
 
     def __init__(self):
@@ -63,6 +65,7 @@ class NewGELU(CustomOp):
         out = torch.empty_like(x)
         self.op(out, x)
         return out
+
 
 class QuickGELU(CustomOp):
 
