@@ -94,7 +94,7 @@ class fused_add_rms_norm_kernel {
       const int64_t input_stride_,
       const scalar_t* __restrict__ weight_,  // [hidden_size]
       const float epsilon_, const int num_tokens_, const int hidden_size_,
-      float* s_variance_)
+      sycl::local_accessor<float, 1> s_variance_)
       : input(input_),
         residual(residual_),
         input_stride(input_stride_),
@@ -106,6 +106,7 @@ class fused_add_rms_norm_kernel {
 
   void operator() [[intel::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
+    float* s_variance_ptr = s_variance.get_pointer();
     float variance = 0.0f;
 
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
@@ -121,7 +122,7 @@ class fused_add_rms_norm_kernel {
         sycl::ext::oneapi::this_work_item::get_work_group<3>(), variance,
         sycl::plus<>());
     if (item_ct1.get_local_id(2) == 0) {
-      *s_variance = sycl::rsqrt(variance / hidden_size + epsilon);
+      *s_variance_ptr = sycl::rsqrt(variance / hidden_size + epsilon);
     }
 
     item_ct1.barrier(sycl::access::fence_space::local_space);
@@ -130,7 +131,7 @@ class fused_add_rms_norm_kernel {
          idx += item_ct1.get_local_range(2)) {
       float x = (float)residual[item_ct1.get_group(2) * hidden_size + idx];
       input[item_ct1.get_group(2) * input_stride + idx] =
-          ((scalar_t)(x * (*s_variance))) * weight[idx];
+          ((scalar_t)(x * (*s_variance_ptr))) * weight[idx];
     }
   }
 
@@ -142,7 +143,7 @@ class fused_add_rms_norm_kernel {
   const float epsilon;
   const int num_tokens;
   const int hidden_size;
-  float* s_variance;  // local memory for variance
+  sycl::local_accessor<float, 1> s_variance;  // local memory for variance
 };
 
 template <typename scalar_t>
@@ -160,13 +161,12 @@ void call_fused_add_rms_norm_kernel(torch::Tensor& input,
   sycl::range<3> block(1, 1, std::min(hidden_size, 1024));
   auto& queue = vllm::xpu::vllmGetQueue();
   queue.submit([&](sycl::handler& cgh) {
-    sycl::local_accessor<float, 1> shared_vals(sycl::range<1>(32), cgh);
     sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
     cgh.parallel_for(sycl::nd_range<3>(grid * block, block),
                      fused_add_rms_norm_kernel<sycl_t>(
                          (sycl_t*)input_ptr, (sycl_t*)residual_ptr,
                          input_stride, (const sycl_t*)weight_ptr, epsilon,
-                         num_tokens, hidden_size, s_variance.get_pointer()));
+                         num_tokens, hidden_size, s_variance));
   });
 }
 
