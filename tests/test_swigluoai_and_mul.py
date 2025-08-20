@@ -3,15 +3,14 @@ import pytest
 import torch
 
 from tests.ops.swigluoai_and_mul_op import SwigluOAIAndMul
-from tests.utils import opcheck
+from tests.utils import opcheck, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
 D = [512, 13824]  # Arbitrary values for testing
 SEEDS = [0]
 XPU_DEVICES = [
-    f"xpu:{0}"
-    for i in range(1)  # Note: torch.set_default_device("xpu:1") does not work.
+    f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
 ]
 
 default_atol = {torch.float16: 1e-3, torch.bfloat16: 1e-3, torch.float: 1e-5}
@@ -50,7 +49,7 @@ def test_act_and_mul(
     seed: int,
     device: str,
 ) -> None:
-    torch.xpu.manual_seed(seed)
+    seed_everything(seed)
     torch.set_default_device(device)
     x = torch.randn(num_tokens, 2 * d, dtype=dtype)
 
