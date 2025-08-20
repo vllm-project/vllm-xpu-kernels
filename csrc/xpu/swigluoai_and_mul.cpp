@@ -57,7 +57,7 @@ class swigluoai_and_mul_kernel {
   const float limit;
 };
 
-#define LAUNCH_SIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                      \
+#define LAUNCH_SWIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                     \
   int d = input.size(-1) / 2;                                              \
   int64_t num_tokens = input.numel() / input.size(-1);                     \
   sycl::range<1> grid(num_tokens);                                         \
@@ -80,5 +80,5 @@ class swigluoai_and_mul_kernel {
 void swigluoai_and_mul(torch::Tensor& out,    // [..., d]
                        torch::Tensor& input,  // [..., 2 * d]
                        double alpha, double limit) {
-  LAUNCH_SIGLUOAI_AND_MUL(vllm::swigluoai_and_mul, alpha, limit);
+  LAUNCH_SWIGLUOAI_AND_MUL(vllm::swigluoai_and_mul, alpha, limit);
 }

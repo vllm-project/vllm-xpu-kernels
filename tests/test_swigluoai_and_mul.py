@@ -11,7 +11,7 @@ D = [512, 13824]  # Arbitrary values for testing
 SEEDS = [0]
 XPU_DEVICES = [
     f"xpu:{0}"
-    for i in range(1)  # Note: torch.set_default_device("xpu:1") not works.
+    for i in range(1)  # Note: torch.set_default_device("xpu:1") does not work.
 ]
 
 default_atol = {torch.float16: 1e-3, torch.bfloat16: 1e-3, torch.float: 1e-5}
@@ -60,7 +60,7 @@ def test_act_and_mul(
     ref_out = layer.forward_native(x)
 
     rtol = {
-        #For fp16, change the relative tolerance from 1e-3 to 2e-3
+        # For fp16, change the relative tolerance from 1e-3 to 2e-3
         torch.float16: 2e-3,
         torch.bfloat16: 2e-2,
         torch.float: 1.3e-6
