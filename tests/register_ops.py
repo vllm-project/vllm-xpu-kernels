@@ -98,3 +98,13 @@ def dynamic_per_token_scaled_fp8_quant(
 ) -> None:
     torch.ops._C.dynamic_per_token_scaled_fp8_quant(out, input, scales,
                                                     scale_ub)
+
+
+def swigluoai_and_mul(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    alpha: float = 1.702,
+    limit: float = 7.0,
+) -> None:
+    """SwigluOAI and Mul activation function."""
+    torch.ops._C.swigluoai_and_mul(out, input, alpha, limit)

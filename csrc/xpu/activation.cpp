@@ -27,7 +27,7 @@ class act_and_mul_kernel {
                      const int d)
       : out_(out), input_(input), d_(d) {}
 
-  void operator() [[intel::reqd_sub_group_size(32)]] (
+  void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
     const int64_t token_idx = item_ct1.get_group(2);
     for (int64_t idx = item_ct1.get_local_id(2); idx < d_;
@@ -46,7 +46,7 @@ class act_and_mul_kernel {
 
 template <typename scalar_t>
 void call_silu_and_mul_kernel(torch::Tensor& out, torch::Tensor& input) {
-  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+  using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int d = input.size(-1) / 2;
   int64_t num_tokens = input.numel() / input.size(-1);
   // dpct::dim3 grid(num_tokens);

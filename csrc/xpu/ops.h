@@ -36,3 +36,6 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
 void dynamic_per_token_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scales,
     std::optional<at::Tensor> const& scale_ub);
+
+void swigluoai_and_mul(torch::Tensor& out, torch::Tensor& input,
+                       double alpha = 1.702, double limit = 7.0);

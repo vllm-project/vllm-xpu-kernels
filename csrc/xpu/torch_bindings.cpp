@@ -63,6 +63,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "()");
   ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kXPU,
            &dynamic_per_token_scaled_fp8_quant);
+
+  // swigluoai_and_mul
+  ops.def(
+      "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
+      "limit=7.0) "
+      "-> ()");
+  ops.impl("swigluoai_and_mul", torch::kXPU, &swigluoai_and_mul);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
