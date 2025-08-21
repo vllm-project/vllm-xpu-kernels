@@ -24,6 +24,7 @@ template <typename T>
 inline T gelu_new_kernel(const T& x) {
   // 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
   const float x3 = (float)(x * x * x);
+  // sycl::tanh does not pass accuracy tests for bfloat16
   const T t = (T)tanhf((T)(0.79788456f * (float)(x + (T)(0.044715f * x3))));
   return ((T)0.5) * x * (((T)1.0) + t);
 }
