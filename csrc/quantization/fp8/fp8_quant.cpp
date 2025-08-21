@@ -1,15 +1,14 @@
 #include <ATen/ATen.h>
 #include <ATen/DeviceGuard.h>
 #include <ATen/xpu/XPUContext.h>
-
 #include <sycl/sycl.hpp>
 
-#include "xpu/dispatch_utils.h"
-#include "xpu/ops.h"
+#include "dispatch_utils.h"
+#include "ops.h"
+#include "utils.h"
 
-#include "fp8_quant.h"
-#include "quant_utils.h"
-#include "xpu/utils.h"
+#include "quantization/fp8/fp8_quant.h"
+#include "quantization/fp8/quant_utils.h"
 
 namespace vllm {
 

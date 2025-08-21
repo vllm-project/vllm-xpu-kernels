@@ -3,9 +3,8 @@
 
 #include <sycl/sycl.hpp>
 
-#include "xpu/dispatch_utils.h"
-#include "xpu/ops.h"
-#include "xpu/utils.h"
+#include "dispatch_utils.h"
+#include "utils.h"
 
 namespace vllm {
 namespace moe {
