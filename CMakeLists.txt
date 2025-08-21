@@ -46,7 +46,8 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21")
 set(TORCH_SUPPORTED_VERSION_XPU "2.8.0")
 
 set(ENABLE_MOE_KERNEL OFF)
-set(FA2_ENABLED ON)
+set(FA2_ENABLED OFF)
+set(FP8_ENABLED ON)
 
 #
 # Try to find python package with an executable that exactly matches
@@ -166,12 +167,12 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CUTLASS_ENABLE_HEADERS_ONLY "ON" CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "chunk_prefill_BMG" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "scaled_mm" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   FetchContent_Declare(
       cutlass-sycl
-      GIT_REPOSITORY https://github.com/sunjiweiswift/cutlass-sycl.git
+      GIT_REPOSITORY https://github.com/Liangliang-Ma/cutlass-sycl.git
       # Please keep this in sync with CUTLASS_REVISION line above.
       GIT_TAG ${CUTLASS_REVISION}
       GIT_PROGRESS TRUE
@@ -191,7 +192,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CUTLASS_ENABLE_GDC_FOR_SM100_DEFAULT OFF CACHE BOOL "DISABLE CUDA")
   # list(APPEND CMAKE_CXX_FLAGS "-ftemplate-backtrace-limit=0 " )
   # list(APPEND CMAKE_CXX_FLAGS "-fdiagnostics-color=always " )
-  
+
 
   FetchContent_MakeAvailable(cutlass-sycl)
   set(CUTLASS_INCLUDE_DIR ${cutlass-sycl_SOURCE_DIR}/include CACHE PATH "CUTLASS Header Library")
@@ -259,6 +260,34 @@ if (FA2_ENABLED)
     #     csrc/flash_attn/src)
 endif ()
 
+if (FP8_ENABLED)
+  message(STATUS "Enabling FP8 extension.")
+    file(GLOB FP8_GEN_SRCS "csrc/quantization/*.cpp")
+
+    # list(APPEND VLLM_GPU_FLAGS "-ze-opt-large-register-file")
+    list(APPEND VLLM_GPU_FLAGS "-gline-tables-only")
+    list(APPEND VLLM_GPU_FLAGS "-O3")
+    list(APPEND VLLM_GPU_FLAGS "-DNDEBUG")
+
+    define_gpu_extension_target(
+        _vllm_fp8_C
+        DESTINATION vllm_xpu_kernels
+        LANGUAGE ${VLLM_GPU_LANG}
+        SOURCES ${FP8_GEN_SRCS}
+        COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+        LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
+        ARCHITECTURES ${VLLM_GPU_ARCHES}
+        INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+        INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+        INCLUDE_DIRECTORIES ${CUTLASS_APP_INCLUDE_DIR}
+        INCLUDE_DIRECTORIES ${VLLM_INCLUDE_DIR}
+        USE_SABI 3
+        WITH_SOABI)
+
+    # target_include_directories(_vllm_fa2_C PRIVATE
+    #     csrc/flash_attn
+    #     csrc/flash_attn/src)
+endif ()
 
 #
 # _moe_C extension
