@@ -14,29 +14,18 @@ inline T silu_kernel(const T& x) {
 
 template <typename T>
 inline T gelu_fast_kernel(const T& x) {
-  // 0.5 * x * (1.0 + tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
-  const float g = (float)(x * 0.7978845608f * (1.0f + 0.044715f * x * x));
-  const T t = sycl::tanh(g);
-  return (0.5f) * x * (1.0f + t);
+  const float f = (float)x;
+  const T t =
+      (T)tanhf(((T)(f * 0.79788456f)) * (((T)1.0) + (T)(0.044715f * f) * x));
+  return ((T)0.5) * x * (((T)1.0) + t);
 }
 
 template <typename T>
 inline T gelu_new_kernel(const T& x) {
   // 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
   const float x3 = (float)(x * x * x);
-  const T t =
-      (T)sycl::tanh((T)(0.79788456f * (float)(x + (T)(0.044715f * x3))));
+  const T t = (T)tanhf((T)(0.79788456f * (float)(x + (T)(0.044715f * x3))));
   return ((T)0.5) * x * (((T)1.0) + t);
-}
-
-using sycl_bf16_t = sycl::ext::oneapi::bfloat16;
-template <>
-inline sycl_bf16_t gelu_new_kernel<sycl_bf16_t>(const sycl_bf16_t& x) {
-  const float x3 = (float)(x * x * x);
-  // sycl::tanh does not pass accuracy tests for bfloat16
-  const sycl_bf16_t t = (sycl_bf16_t)tanhf(
-      (sycl_bf16_t)(0.79788456f * (float)(x + (sycl_bf16_t)(0.044715f * x3))));
-  return ((sycl_bf16_t)0.5) * x * (((sycl_bf16_t)1.0) + t);
 }
 
 template <typename T>
