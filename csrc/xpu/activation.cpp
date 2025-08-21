@@ -29,14 +29,14 @@ inline T gelu_new_kernel(const T& x) {
   return ((T)0.5) * x * (((T)1.0) + t);
 }
 
-using sycl_bf16 = sycl::ext::oneapi::bfloat16;
+using sycl_bf16_t = sycl::ext::oneapi::bfloat16;
 template <>
-inline sycl_bf16 gelu_new_kernel<sycl_bf16>(const sycl_bf16& x) {
+inline sycl_bf16_t gelu_new_kernel<sycl_bf16_t>(const sycl_bf16_t& x) {
   const float x3 = (float)(x * x * x);
   // sycl::tanh does not pass accuracy tests for bfloat16
-  const sycl_bf16 t = (sycl_bf16)tanhf(
-      (sycl_bf16)(0.79788456f * (float)(x + (sycl_bf16)(0.044715f * x3))));
-  return ((sycl_bf16)0.5) * x * (((sycl_bf16)1.0) + t);
+  const sycl_bf16_t t = (sycl_bf16_t)tanhf(
+      (sycl_bf16_t)(0.79788456f * (float)(x + (sycl_bf16_t)(0.044715f * x3))));
+  return ((sycl_bf16_t)0.5) * x * (((sycl_bf16_t)1.0) + t);
 }
 
 template <typename T>
