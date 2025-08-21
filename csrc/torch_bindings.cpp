@@ -36,6 +36,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("silu_and_mul(Tensor! out, Tensor! input) -> ()");
   ops.impl("silu_and_mul", torch::kXPU, &silu_and_mul);
 
+  ops.def("mul_and_silu(Tensor! out, Tensor! input) -> ()");
+  ops.impl("mul_and_silu", torch::kXPU, &mul_and_silu);
+
+  ops.def("gelu_and_mul(Tensor! out, Tensor! input) -> ()");
+  ops.impl("gelu_and_mul", torch::kXPU, &gelu_and_mul);
+
+  ops.def("gelu_tanh_and_mul(Tensor! out, Tensor! input) -> ()");
+  ops.impl("gelu_tanh_and_mul", torch::kXPU, &gelu_tanh_and_mul);
+
   ops.def("gelu_fast(Tensor! out, Tensor! input) -> ()");
   ops.impl("gelu_fast", torch::kXPU, &gelu_fast);
 
