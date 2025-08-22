@@ -259,7 +259,7 @@ ext_modules = []
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
-    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fa2_C"))
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fp8_C"))
 
 if ext_modules:
     cmdclass = {"build_ext": cmake_build_ext}
