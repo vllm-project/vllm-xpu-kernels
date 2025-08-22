@@ -138,7 +138,7 @@ class act_and_mul_kernel {
   });
 
 void silu_and_mul(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., d]
+                  torch::Tensor& input)  // [..., 2 * d]
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "silu_and_mul", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, true);
@@ -146,7 +146,7 @@ void silu_and_mul(torch::Tensor& out,    // [..., d]
 }
 
 void mul_and_silu(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., d]
+                  torch::Tensor& input)  // [..., 2 * d]
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "mul_and_silu", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, false);
@@ -154,7 +154,7 @@ void mul_and_silu(torch::Tensor& out,    // [..., d]
 }
 
 void gelu_and_mul(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., d]
+                  torch::Tensor& input)  // [..., 2 * d]
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_and_mul", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_kernel, true);
@@ -162,7 +162,7 @@ void gelu_and_mul(torch::Tensor& out,    // [..., d]
 }
 
 void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
-                       torch::Tensor& input)  // [..., d]
+                       torch::Tensor& input)  // [..., 2 * d]
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_tanh_and_mul", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_tanh_kernel, true);
