@@ -39,6 +39,18 @@ void reshape_and_cache_flash(torch::Tensor& key, torch::Tensor& value,
                              const std::string& kv_cache_dtype,
                              torch::Tensor& k_scale, torch::Tensor& v_scale);
 
+void concat_and_cache_mla(torch::Tensor& kv_c, torch::Tensor& k_pe,
+                          torch::Tensor& kv_cache, torch::Tensor& slot_mapping,
+                          const std::string& kv_cache_dtype,
+                          torch::Tensor& scale);
+
+void gather_cache(
+    torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
+    torch::Tensor const& dst,          // [TOT_TOKENS, ENTRIES...]
+    torch::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
+    torch::Tensor const& cu_seq_lens,  // [BATCH+1]
+    int64_t batch_size, std::optional<torch::Tensor> seq_starts = std::nullopt);
+
 void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
                              torch::Tensor const& scale);
 

@@ -141,7 +141,6 @@ endif()
 #
 # _C extension
 #
-
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_SRC
     "csrc/cache.cpp"
@@ -210,10 +209,10 @@ define_gpu_extension_target(
   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
+
 #
 # _moe_C extension
 #
-
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cpp")

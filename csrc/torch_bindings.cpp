@@ -103,6 +103,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        Tensor k_scale, Tensor v_scale) -> ()");
   cache_ops.impl("reshape_and_cache_flash", torch::kXPU,
                  &reshape_and_cache_flash);
+
+  // Concat kv_c and k_pe and cache them.
+  cache_ops.def(
+      "concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"
+      "                     Tensor! kv_cache,"
+      "                     Tensor slot_mapping,"
+      "                     str kv_cache_dtype,"
+      "                     Tensor scale) -> ()");
+  cache_ops.impl("concat_and_cache_mla", torch::kXPU, &concat_and_cache_mla);
+
+  // Gather cache blocks from src_cache to dst.
+  cache_ops.def(
+      "gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
+      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
+  cache_ops.impl("gather_cache", torch::kXPU, &gather_cache);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
