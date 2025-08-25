@@ -14,7 +14,6 @@ def swigluoai_and_mul(
     ops.swigluoai_and_mul(out, input, alpha, limit)
 
 
-# @CustomOp.register("swigluoai_and_mul")
 class SwigluOAIAndMul(CustomOp):
     # https://github.com/huggingface/transformers/blob/v4.55.0/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L106-L110
     def __init__(self, alpha: float = 1.702, limit: float = 7.0):
