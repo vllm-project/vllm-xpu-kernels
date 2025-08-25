@@ -4,6 +4,7 @@
 import torch
 from typing import Optional
 import vllm_xpu_kernels._C  # noqa: F401
+import vllm_xpu_kernels._moe_C  # noqa: F401
 
 
 # layer norm ops
@@ -22,6 +23,18 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
+
+
+def gelu_fast(out: torch.Tensor, input: torch.Tensor) -> None:
+    torch.ops._C.gelu_fast(out, input)
+
+
+def gelu_new(out: torch.Tensor, input: torch.Tensor) -> None:
+    torch.ops._C.gelu_new(out, input)
+
+
+def gelu_quick(out: torch.Tensor, input: torch.Tensor) -> None:
+    torch.ops._C.gelu_quick(out, input)
 
 
 def rotary_embedding(
@@ -108,3 +121,8 @@ def swigluoai_and_mul(
 ) -> None:
     """SwigluOAI and Mul activation function."""
     torch.ops._C.swigluoai_and_mul(out, input, alpha, limit)
+
+
+# moe
+def moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
+    torch.ops._moe_C.moe_sum(input, output)

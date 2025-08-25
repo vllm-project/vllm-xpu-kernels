@@ -119,7 +119,7 @@ class cmake_build_ext(build_ext):
 
         # Select the build type.
         # Note: optimization level + debug info are set by the build type
-        default_cfg = "Debug" if self.debug else "RelWithDebInfo"
+        default_cfg = "Debug" if self.debug else "Release"
         cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
         cmake_args = [
@@ -258,6 +258,8 @@ ext_modules = []
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._xpu_C"))
 
 if ext_modules:
     cmdclass = {"build_ext": cmake_build_ext}

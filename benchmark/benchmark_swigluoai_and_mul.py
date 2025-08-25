@@ -9,8 +9,6 @@ import triton
 
 from tests.ops.swigluoai_and_mul_op import SwigluOAIAndMul
 
-dpcpp_device = torch.device("xpu")
-
 
 @torch.compile
 def swigluoai_and_mul_compile(x: torch.Tensor,

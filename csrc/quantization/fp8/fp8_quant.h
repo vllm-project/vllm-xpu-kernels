@@ -6,7 +6,7 @@
 #include <c10/util/Float8_e4m3fn.h>
 #include <c10/util/Float8_e5m2.h>
 
-#include "quant_utils.h"
+#include "quantization/fp8/quant_utils.h"
 
 using namespace at;
 
