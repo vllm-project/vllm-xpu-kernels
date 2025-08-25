@@ -20,6 +20,8 @@ message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/Modules)
+
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
@@ -66,6 +68,7 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 # Import torch cmake configuration.
 find_package(Torch REQUIRED)
 
+find_package(oneDNN QUIET)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
@@ -191,8 +194,10 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
 endif()
 
 if(ONEDNN_FOUND)
+  set(_ONEDNN_SRC)
+  file(GLOB _ONEDNN_SRC csrc/xpu/onednn/*.cpp)
   list(APPEND VLLM_EXT_XPU_SRC
-    "csrc/xpu/onednn/*.cpp"
+    ${_ONEDNN_SRC}
   )
   include_directories(${ONEDNN_INCLUDE_DIR})
   link_libraries(${ONEDNN_LIBRARY})
