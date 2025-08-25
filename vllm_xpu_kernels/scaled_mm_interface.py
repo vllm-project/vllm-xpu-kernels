@@ -1,6 +1,8 @@
 import torch
 from torch.nn.modules.utils import _pair
 from torch import nn, Tensor
+from typing import List
+
 from . import _vllm_fp8_C
 
 def cutlass_basic_gemm(inputA, inputB, inputC, res, alpha=1.0, beta=0.0):
