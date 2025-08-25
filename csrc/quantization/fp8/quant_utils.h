@@ -1,4 +1,9 @@
+#pragma once
+#include <cmath>
+
 #include <ATen/ScalarType.h>
+#include <c10/util/Float8_e4m3fn.h>
+#include <c10/util/Float8_e5m2.h>
 
 namespace vllm {
 
@@ -10,17 +15,44 @@ enum class Fp8KVCacheDataType {
 
 namespace fp8 {
 
-template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
-__inline__ Tout scaled_convert(const Tin& x, const float scale) {
-  if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
-    return static_cast<at::Float8_e4m3fn>(x / scale);
-  } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
-    return static_cast<at::Float8_e5m2>(x / scale);
-  }
+template <typename scalar_t>
+struct alignas(8) vec4_t {
+  scalar_t x;
+  scalar_t y;
+  scalar_t z;
+  scalar_t w;
+};
 
-  assert(false);
-  return {};  // Squash missing return statement warning
-}
+template <typename dtype_t>
+struct alignas(4) dtypex4_t {
+  static_assert(std::is_same_v<dtype_t, float> ||
+                    std::is_same_v<dtype_t, at::Half> ||
+                    std::is_same_v<dtype_t, at::BFloat16> ||
+                    std::is_same_v<dtype_t, at::Float8_e4m3fn> ||
+                    std::is_same_v<dtype_t, at::Float8_e5m2>,
+                "Unsupported cache type for dtypex4_t");
+  dtype_t x;
+  dtype_t y;
+  dtype_t z;
+  dtype_t w;
+};
+
+template <typename T,
+          typename = std::enable_if_t<std::is_same_v<T, at::Float8_e5m2> ||
+                                      std::is_same_v<T, at::Float8_e4m3fn>>>
+struct quant_type_max {
+  static constexpr T val() { return std::numeric_limits<T>::max(); }
+};
+
+template <typename T>
+static constexpr T quant_type_max_v = quant_type_max<T>::val();
+
+template <typename T,
+          typename = std::enable_if_t<std::is_same_v<T, at::Float8_e5m2> ||
+                                      std::is_same_v<T, at::Float8_e4m3fn>>>
+struct min_scaling_factor {
+  static inline float val() { return 1.0f / (quant_type_max_v<T> * 512.0f); }
+};
 
 // Used by vectorization_utils to copy/convert one element
 template <typename OutT, typename InT, Fp8KVCacheDataType kv_dt>
@@ -31,40 +63,36 @@ struct CopyWithScaleOp {
     if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
       dst = static_cast<OutT>(src);
     } else {
-      dst = fp8::scaled_convert<OutT, InT, kv_dt>(src, scale);
+      float x = (float)src / scale;
+      if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
+        dst = static_cast<at::Float8_e4m3fn>(x);
+      } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
+        dst = static_cast<at::Float8_e5m2>(x);
+      }
     }
   }
 };
 
-template <typename scalar_t>
-struct alignas(8) vec4_t {
-  scalar_t x;
-  scalar_t y;
-  scalar_t z;
-  scalar_t w;
-};
+// convert a float value to fp8 type with scaling
+template <bool is_scale_inverted, typename fp8_type>
+struct ConvertWithScaleOp {
+  float scale;
 
-template <typename cache_t>
-struct alignas(4) cachex4_t {
-  static_assert(std::is_same_v<cache_t, float> ||
-                    std::is_same_v<cache_t, at::Half> ||
-                    std::is_same_v<cache_t, at::BFloat16> ||
-                    std::is_same_v<cache_t, at::Float8_e4m3fn> ||
-                    std::is_same_v<cache_t, at::Float8_e5m2>,
-                "Unsupported cache type for cachex4_t");
-  cache_t x;
-  cache_t y;
-  cache_t z;
-  cache_t w;
+  inline void operator()(fp8_type& dst, float const src) const {
+    float x = is_scale_inverted ? (src * scale) : (src / scale);
+    const float fp8_max = static_cast<float>(quant_type_max_v<fp8_type>);
+    float r = sycl::fmax(-fp8_max, sycl::fmin(x, fp8_max));
+    dst = static_cast<fp8_type>(r);
+  }
 };
 
 // The vector width is fixed at 4 to avoid excessive branching in the kernel,
 // which could degrade performance.
-template <typename scalar_t, typename cache_t, typename ScaOp>
-void scaled_convert_vec(const scalar_t* src, cache_t* dst, int num_elems,
+template <typename scalar_t, typename dtype_t, typename ScaOp>
+void scaled_convert_vec(const scalar_t* src, dtype_t* dst, int num_elems,
                         int local_idx, int local_range, ScaOp&& scalar_op) {
   using srcx4_t = vec4_t<scalar_t>;
-  using distx4_t = cachex4_t<cache_t>;
+  using distx4_t = dtypex4_t<dtype_t>;
 
   int64_t const num_vec_elems = num_elems >> 2;
 
@@ -88,6 +116,7 @@ void scaled_convert_vec(const scalar_t* src, cache_t* dst, int num_elems,
     scalar_op(dst[i], src[i]);
   }
 }
+
 }  // namespace fp8
 }  // namespace vllm
 

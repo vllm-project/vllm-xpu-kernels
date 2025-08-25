@@ -8,7 +8,7 @@ from typing import Optional
 import torch
 import triton
 
-from tests.moe.ops.grouped_topk import grouped_topk, grouped_topk_native
+from tests.ops.grouped_topk import grouped_topk, grouped_topk_native
 
 dpcpp_device = torch.device("xpu")
 

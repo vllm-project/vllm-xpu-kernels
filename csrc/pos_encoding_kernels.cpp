@@ -76,30 +76,67 @@ inline void apply_rotary_embedding(
 }
 
 template <typename scalar_t, bool IS_NEOX>
-void rotary_embedding_kernel(
-    const int64_t* __restrict__ positions,  // [batch_size, seq_len] or
-                                            // [num_tokens]
-    scalar_t* __restrict__ query,           // [batch_size, seq_len, num_heads,
-                                   // head_size] or [num_tokens, num_heads,
-                                   // head_size]
-    scalar_t* __restrict__ key,  // nullptr or
-                                 // [batch_size, seq_len, num_kv_heads,
-                                 // head_size] or [num_tokens, num_kv_heads,
-                                 // head_size]
-    const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
-                                                 // 2]
-    const int rot_dim, const int64_t query_stride, const int64_t key_stride,
-    const int64_t head_stride, const int num_heads, const int num_kv_heads,
-    const int head_size, const sycl::nd_item<3>& item_ct1) {
-  // Each thread block is responsible for one token.
-  const int token_idx = item_ct1.get_group(2);
-  int64_t pos = positions[token_idx];
-  const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
+class rotary_embedding_kernel {
+ public:
+  rotary_embedding_kernel(
+      const int64_t* __restrict__ positions_,  // [batch_size, seq_len] or
+                                               // [num_tokens]
+      scalar_t* __restrict__ query_,  // [batch_size, seq_len, num_heads,
+                                      // head_size] or [num_tokens, num_heads,
+                                      // head_size]
+      scalar_t* __restrict__ key_,    // nullptr or
+                                      // [batch_size, seq_len, num_kv_heads,
+      // head_size] or [num_tokens, num_kv_heads,
+      // head_size]
+      const scalar_t* __restrict__ cos_sin_cache_,  // [max_position, 2, rot_dim
+                                                    // // 2]
+      const int rot_dim_, const int64_t query_stride_,
+      const int64_t key_stride_, const int64_t head_stride_,
+      const int num_heads_, const int num_kv_heads_, const int head_size_)
+      : positions(positions_),
+        query(query_),
+        key(key_),
+        cos_sin_cache(cos_sin_cache_),
+        rot_dim(rot_dim_),
+        query_stride(query_stride_),
+        key_stride(key_stride_),
+        head_stride(head_stride_),
+        num_heads(num_heads_),
+        num_kv_heads(num_kv_heads_),
+        head_size(head_size_) {}
 
-  apply_rotary_embedding<scalar_t, IS_NEOX>(
-      query, key, cache_ptr, head_size, num_heads, num_kv_heads, rot_dim,
-      token_idx, query_stride, key_stride, head_stride, item_ct1);
-}
+  void operator() [[intel::reqd_sub_group_size(32)]] (
+      const sycl::nd_item<3>& item_ct1) const {
+    // Each thread block is responsible for one token.
+    const int token_idx = item_ct1.get_group(2);
+    int64_t pos = positions[token_idx];
+    const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
+
+    apply_rotary_embedding<scalar_t, IS_NEOX>(
+        query, key, cache_ptr, head_size, num_heads, num_kv_heads, rot_dim,
+        token_idx, query_stride, key_stride, head_stride, item_ct1);
+  }
+
+ private:
+  const int64_t* __restrict__ positions;  // [batch_size, seq_len] or
+                                          // [num_tokens]
+  scalar_t* __restrict__ query;           // [batch_size, seq_len, num_heads,
+                                 // head_size] or [num_tokens, num_heads,
+                                 // head_size]
+  scalar_t* __restrict__ key;  // nullptr or
+                               // [batch_size, seq_len, num_kv_heads,
+                               // head_size] or [num_tokens, num_kv_heads,
+                               // head_size]
+  const scalar_t* __restrict__ cos_sin_cache;  // [max_position, 2, rot_dim //
+                                               // 2]
+  const int rot_dim;
+  const int64_t query_stride;
+  const int64_t key_stride;
+  const int64_t head_stride;
+  const int num_heads;
+  const int num_kv_heads;
+  const int head_size;
+};
 
 }  // namespace vllm
 
@@ -169,23 +206,19 @@ void call_rotary_embedding_kernel(
     queue.submit([&](sycl::handler& cgh) {
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
-          [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {
-            vllm::rotary_embedding_kernel<sycl_t, true>(
-                positions_ptr, (sycl_t*)query_ptr, (sycl_t*)key_ptr,
-                (sycl_t*)cos_sin_cache_ptr, rot_dim, query_stride, key_stride,
-                head_stride, num_heads, num_kv_heads, head_size, item_ct1);
-          });
+          vllm::rotary_embedding_kernel<sycl_t, true>(
+              positions_ptr, (sycl_t*)query_ptr, (sycl_t*)key_ptr,
+              (sycl_t*)cos_sin_cache_ptr, rot_dim, query_stride, key_stride,
+              head_stride, num_heads, num_kv_heads, head_size));
     });
   } else {
     queue.submit([&](sycl::handler& cgh) {
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
-          [=](sycl::nd_item<3> item_ct1) [[intel::reqd_sub_group_size(32)]] {
-            vllm::rotary_embedding_kernel<sycl_t, false>(
-                positions_ptr, (sycl_t*)query_ptr, (sycl_t*)key_ptr,
-                (sycl_t*)cos_sin_cache_ptr, rot_dim, query_stride, key_stride,
-                head_stride, num_heads, num_kv_heads, head_size, item_ct1);
-          });
+          vllm::rotary_embedding_kernel<sycl_t, false>(
+              positions_ptr, (sycl_t*)query_ptr, (sycl_t*)key_ptr,
+              (sycl_t*)cos_sin_cache_ptr, rot_dim, query_stride, key_stride,
+              head_stride, num_heads, num_kv_heads, head_size));
     });
   }
 }

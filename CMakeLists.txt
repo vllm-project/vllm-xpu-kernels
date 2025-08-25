@@ -45,8 +45,6 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21")
 #
 set(TORCH_SUPPORTED_VERSION_XPU "2.8.0")
 
-set(ENABLE_MOE_KERNEL ON)
-
 #
 # Try to find python package with an executable that exactly matches
 # `VLLM_PYTHON_EXECUTABLE` and is one of the supported versions.
@@ -146,11 +144,12 @@ endif()
 
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_SRC
-    "csrc/xpu/cache.cpp"
-    "csrc/xpu/layernorm.cpp"
-    "csrc/xpu/activation.cpp"
-    "csrc/xpu/pos_encoding_kernels.cpp"
-    "csrc/xpu/torch_bindings.cpp"
+    "csrc/cache.cpp"
+    "csrc/layernorm.cpp"
+    "csrc/activation.cpp"
+    "csrc/pos_encoding_kernels.cpp"
+    "csrc/torch_bindings.cpp"
+    "csrc/quantization/fp8/fp8_quant.cpp"
   )
   include_directories("/usr/include")
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})
@@ -176,27 +175,60 @@ define_gpu_extension_target(
   WITH_SOABI)
 
 #
+# xpu only ops/kernels, implemented with cutlass/onednn/sycl.
+#
+if(VLLM_GPU_LANG STREQUAL "SYCL")
+  set(VLLM_EXT_XPU_SRC
+    "csrc/xpu/torch_bindings.cpp"
+  )
+  include_directories("/usr/include")
+  set(CMPLR_ROOT $ENV{CMPLR_ROOT})
+  set(CMAKE_CXX_COMPILER icpx)
+  set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
+  list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
+  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
+  list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
+endif()
+
+if(ONEDNN_FOUND)
+  list(APPEND VLLM_EXT_XPU_SRC
+    "csrc/xpu/onednn/*.cpp"
+  )
+  include_directories(${ONEDNN_INCLUDE_DIR})
+  link_libraries(${ONEDNN_LIBRARY})
+endif()
+
+define_gpu_extension_target(
+  _xpu_C
+  DESTINATION vllm_xpu_kernels
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_EXT_XPU_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  USE_SABI 3
+  WITH_SOABI)
+#
 # _moe_C extension
 #
 
-if (ENABLE_MOE_KERNEL)
-  set(VLLM_MOE_EXT_SRC
-    "csrc/xpu/moe/grouped_topk.cpp"
-    "csrc/xpu/moe/torch_bindings.cpp"
-  )
+set(VLLM_MOE_EXT_SRC
+  "csrc/moe/torch_bindings.cpp"
+  "csrc/moe/grouped_topk.cpp"
+  "csrc/moe/moe_align_sum_kernels.cpp")
 
-  message(STATUS "Enabling moe extension.")
-  define_gpu_extension_target(
-    _moe_C
-    DESTINATION vllm_xpu_kernels
-    LANGUAGE ${VLLM_GPU_LANG}
-    SOURCES ${VLLM_MOE_EXT_SRC}
-    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-    LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
-    ARCHITECTURES ${VLLM_GPU_ARCHES}
-    INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
-    INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-    USE_SABI 3
-    WITH_SOABI)
-endif()
-
+message(STATUS "Enabling moe extension.")
+define_gpu_extension_target(
+  _moe_C
+  DESTINATION vllm_xpu_kernels
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_MOE_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  USE_SABI 3
+  WITH_SOABI)
