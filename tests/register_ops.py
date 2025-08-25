@@ -37,6 +37,18 @@ def gelu_quick(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.gelu_quick(out, input)
 
 
+def mul_and_silu(out: torch.Tensor, input: torch.Tensor) -> None:
+    torch.ops._C.mul_and_silu(out, input)
+
+
+def gelu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
+    torch.ops._C.gelu_and_mul(out, input)
+
+
+def gelu_tanh_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
+    torch.ops._C.gelu_tanh_and_mul(out, input)
+
+
 def rotary_embedding(
     positions: torch.Tensor,
     query: torch.Tensor,
