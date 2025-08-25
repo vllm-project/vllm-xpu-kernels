@@ -17,6 +17,7 @@ else:
     except ImportError:
         from torch.library import impl_abstract as register_fake
 
+
 # layer norm ops
 def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
              epsilon: float) -> None:
@@ -126,6 +127,7 @@ def dynamic_per_token_scaled_fp8_quant(
 # moe
 def moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
     torch.ops._moe_C.moe_sum(input, output)
+
 
 def grouped_topk(
     hidden_states: torch.Tensor,
