@@ -98,6 +98,8 @@ using ElementOutput = float;          // <- data type of elements in output matr
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 
+namespace gpu::cutlass_kernel {
+namespace grouped_gemm {
 // Command line options parsing
 struct Options {
 
@@ -661,3 +663,90 @@ int main(int argc, const char** argv)
   launcher<cutlass::float_e4m3_t>(options);
   return 0;
 }
+
+void kernel_functor(
+    sycl::queue* stream,
+    void* input,
+    void* weight,
+    void* mnks,
+    void* res){
+ //
+  // Run examples
+  //
+
+  // The KernelHardwareInfo struct holds the number of EUs on the GPU with a given device ID. This
+  // information is used by the underlying kernel.
+  cutlass::KernelHardwareInfo hw_info;
+
+  // Change device_id to another value if you are running on a machine with multiple GPUs and wish
+  // to use a GPU other than that with device ID 0.
+  hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+
+  using LayoutA = cutlass::layout::RowMajor;
+  using LayoutB = cutlass::layout::RowMajor;
+  using LayoutC = cutlass::layout::RowMajor;
+  using LayoutD = cutlass::layout::RowMajor;
+
+  using GmemTiledCopyA = XE_2D_U8x32x32_LD_V;
+  using GmemTiledCopyB = XE_2D_U8x32x32_LD_V;
+
+  // Workgroup-level tile
+  using TileShape = Shape<_256, _256, _32>;
+
+  using TiledMma =
+      typename TiledMMAHelper<MMA_Atom<XE_8x16x16_F32F16F16F32_TT>, Layout<TileShape>,
+      Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>>::TiledMMA;
+
+  constexpr int PipelineStages = 2;
+  // Dispatch to grouped gemm algorithm
+  using GEMMDispatchPolicy = cutlass::gemm::MainloopIntelXeXMX16GroupFP8<PipelineStages>;
+  using EpilogueDispatchPolicy = cutlass::epilogue::IntelXeXMX16Group;
+
+  using EpilogueOp = cutlass::epilogue::fusion::LinearCombination<ElementOutput, ElementComputeEpilogue,
+          ElementAccumulator, ElementAccumulator, cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using FusionCallBacks = cutlass::epilogue::fusion::FusionCallbacks<EpilogueDispatchPolicy, EpilogueOp, TileShape,
+          decltype(tile_shape(TiledMma()))>;
+  using CollectiveEpilogue = cutlass::epilogue::collective::CollectiveEpilogue<
+          EpilogueDispatchPolicy,
+          TileShape,
+          ElementAccumulator,
+          cutlass::gemm::TagToStrideC_t<LayoutC*>,
+          ElementOutput,
+          cutlass::gemm::TagToStrideC_t<LayoutD*>,
+          FusionCallBacks,
+          XE_2D_U32x8x16_LD_N,
+          void, void,
+          XE_2D_U32x8x16_ST_N,
+          void, void>;
+
+// Mainloop
+  using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
+          GEMMDispatchPolicy,
+          TileShape,
+          ElementType,
+          cutlass::gemm::TagToStrideA_t<LayoutA*>,
+          ElementType,
+          cutlass::gemm::TagToStrideB_t<LayoutB*>,
+          TiledMma,
+          GmemTiledCopyA, void, void, cute::identity,  // A
+          GmemTiledCopyB, void, void, cute::identity   // B
+  >;
+
+  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
+  ProblemShape,
+  CollectiveMainloop,
+  CollectiveEpilogue,
+  cutlass::gemm::GroupScheduler
+  >;
+
+  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+
+  ExampleRunner<Gemm> runner;
+
+  CUTLASS_CHECK(runner.template run<ElementType>(options, hw_info));
+
+}
+
+} // namespace grouped_gemm
+} // namespace gpu::cutlass_kernel
