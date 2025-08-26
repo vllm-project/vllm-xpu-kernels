@@ -43,3 +43,19 @@ VLLM_TARGET_DEVICE=xpu python3 setup.py bdist_wheel
 
 ### how to use in vLLM
 Please refer to temporary branch https://github.com/jikunshang/vllm/tree/xpu_kernel to install & test vllm which replaces `rms_norm` kernel from IPEX to vllm-xpu-kernels.
+
+### Why Static Linking DNNL Instead of Shared Linking?
+
+We chose to **statically link oneDNN (DNNL)** rather than using it as a shared library for the following reasons:
+
+#### 1. **Version Compatibility**
+
+Static linking ensures our application always uses the exact version of DNNL. With shared libraries, there's a risk that system-installed versions might be incompatible or introduce subtle bugs due to API/ABI changes.
+
+#### 2. **Performance Consistency**
+
+By linking statically, we avoid potential performance variability introduced by different builds or configurations of DNNL that might be present on the host system.
+
+#### 3. **Avoiding Runtime Errors**
+
+Using shared libraries requires correct paths and environment setup (`LD_LIBRARY_PATH` on Linux). Static linking avoids issues where DNNL cannot be found or loaded at runtime.
