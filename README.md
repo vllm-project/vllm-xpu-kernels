@@ -59,3 +59,7 @@ By linking statically, we avoid potential performance variability introduced by 
 #### 3. **Avoiding Runtime Errors**
 
 Using shared libraries requires correct paths and environment setup (`LD_LIBRARY_PATH` on Linux). Static linking avoids issues where DNNL cannot be found or loaded at runtime.
+
+#### 4. **Aligning with PyTorch**
+
+One key reason to use static linking is to maintain consistency with the PyTorch ecosystem. PyTorch itself statically links libraries like DNNL to ensure deterministic and reliable behavior across different environments.

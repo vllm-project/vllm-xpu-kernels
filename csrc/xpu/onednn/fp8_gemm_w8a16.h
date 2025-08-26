@@ -126,8 +126,8 @@ static inline void dnnl_matmul_w8a16_fp8(
       {scratchpad_size}, mat1.options().dtype(at::kByte), c10::nullopt);
   arg_handles.emplace_back(DNNL_ARG_SCRATCHPAD, scratchpad_tensor.data_ptr());
 
-  auto strm = GpuStreamManager::Instance().get_stream();
-  DPCPP_ONEDNN_EXEC_WITH_ARGHANDLES(matmul_ext, strm, engine, arg_handles,
-                                    arg_off);
+  auto& strm = GpuStreamManager::Instance().get_stream();
+  auto qfp8_matmul_event =
+      matmul_ext.execute(strm, engine, std::move(arg_handles), arg_off);
 }
 }  // namespace oneDNN

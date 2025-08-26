@@ -12,41 +12,6 @@ inline constexpr std::string_view FP64_ERROR_FROM_MKL(
     "double type is not supported");
 inline constexpr std::string_view OUT_OF_RESOURCES("PI_ERROR_OUT_OF_RESOURCES");
 
-#define DPCPP_EXCEP_TRY try {
-#define DPCPP_EXCEP_CATCH                                                  \
-  }                                                                        \
-  catch (const sycl::exception& ep) {                                      \
-    const std::string_view err_msg(ep.what());                             \
-    if (err_msg.find(USES_FP64_MATH) != std::string::npos ||               \
-        err_msg.find(ASPECT_FP64_IS_NOT_SUPPORTED) != std::string::npos || \
-        err_msg.find(FP64_ERROR_FROM_MKL) != std::string::npos) {          \
-      throw std::runtime_error(                                            \
-          "FP64 data type is unsupported on current platform.");           \
-    } else if (err_msg.find(OUT_OF_RESOURCES) != std::string::npos) {      \
-      throw std::runtime_error(                                            \
-          "Allocation is out of device memory on current platform.");      \
-    } else {                                                               \
-      throw ep;                                                            \
-    }                                                                      \
-  }
-
-#define DPCPP_EXT_SUBMIT(q, str, ker_submit) \
-  {                                          \
-    DPCPP_EXCEP_TRY                          \
-    auto e = (ker_submit);                   \
-    (q).throw_asynchronous();                \
-    DPCPP_EXCEP_CATCH                        \
-  }
-
-#define DPCPP_ONEDNN_EXEC_WITH_ARGHANDLES(prim_ext, stream, engine,           \
-                                          arg_handles, ...)                   \
-  {                                                                           \
-    auto q = dnnl::sycl_interop::get_queue((stream));                         \
-    DPCPP_EXT_SUBMIT((q), "onednn_ext_kernel",                                \
-                     prim_ext.execute(stream, engine, std::move(arg_handles), \
-                                      ##__VA_ARGS__));                        \
-  }
-
 namespace oneDNN {
 
 static inline dnnl::memory::data_type get_onednn_dtype(

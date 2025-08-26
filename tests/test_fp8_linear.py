@@ -3,8 +3,7 @@ import pytest
 import torch
 
 from tests.ops.fp8_quant_op import scaled_fp8_quant
-from vllm_xpu_kernels.layers.quantization.fp8_linear import (
-    QuantDtype, WeightOnlyQuantizedLinear)
+from tests.quantization.fp8_linear import QuantDtype, WeightOnlyQuantizedLinear
 
 
 @pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])

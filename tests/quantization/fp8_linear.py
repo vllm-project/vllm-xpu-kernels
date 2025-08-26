@@ -23,7 +23,7 @@ USE_W4A8_GEMM = os.environ.get("USE_W4A8_COMPUTE", "OFF").upper() in [
 class GPTQShuffle(nn.Module):
 
     def __init__(self, bits=4, blocksize=128):
-        super()
+        super().__init__()
         self.bits = bits
         self.blocksize = blocksize
 
@@ -102,8 +102,8 @@ def convert_dtype_str2torch(str_dtype):
     elif "fp8" in str_dtype:
         return torch.float32
     else:
-        AssertionError(
-            False), "Unsupported str dtype {} to torch dtype".format(str_dtype)
+        raise AssertionError(
+            "Unsupported str dtype {} to torch dtype".format(str_dtype))
 
 
 AWQ_PACK_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]
@@ -407,7 +407,7 @@ class WeightOnlyQuantizedLinear(nn.Module):
         cls_inst = WeightOnlyQuantizedLinear(
             in_features=in_feature,
             out_features=out_feature,
-            bias=True if bias is not None else False,  # noqa: SIM210
+            bias=bias is not None,
             compute_dtype="fp32",
             compress_statistics=True,
             weight_dtype=(
