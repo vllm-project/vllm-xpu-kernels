@@ -10,6 +10,12 @@ void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
+void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
+
+void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
+
+void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
+
 void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input);

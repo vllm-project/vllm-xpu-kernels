@@ -3,7 +3,8 @@ import pytest
 import torch
 
 from tests.allclose_default import get_default_atol, get_default_rtol
-from tests.ops.activation_op import FastGELU, NewGELU, QuickGELU, SiluAndMul
+from tests.ops.activation_op import (FastGELU, GeluAndMul, MulAndSilu, NewGELU,
+                                     QuickGELU, SiluAndMul)
 from tests.utils import opcheck, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -15,7 +16,8 @@ XPU_DEVICES = [
 ]
 
 
-@pytest.mark.parametrize("activation", ["silu_and_mul"])
+@pytest.mark.parametrize("activation",
+                         ["silu_and_mul", "mul_and_silu", "gelu", "gelu_tanh"])
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -36,6 +38,15 @@ def test_act_and_mul(
     if activation == "silu_and_mul":
         layer = SiluAndMul()
         fn = torch.ops._C.silu_and_mul
+    elif activation == "mul_and_silu":
+        layer = MulAndSilu()
+        fn = torch.ops._C.mul_and_silu
+    elif activation == "gelu":
+        layer = GeluAndMul(approximate="none")
+        fn = torch.ops._C.gelu_and_mul
+    elif activation == "gelu_tanh":
+        layer = GeluAndMul(approximate="tanh")
+        fn = torch.ops._C.gelu_tanh_and_mul
     out = layer(x)
     ref_out = layer.forward_native(x)
 
