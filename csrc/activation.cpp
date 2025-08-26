@@ -164,8 +164,8 @@ class swigluoai_and_mul_kernel {
   const int d;
   const float alpha;
   const float limit;
-}; 
- 
+};
+
 }  // namespace vllm
 
 // Launch activation and gating kernel.
