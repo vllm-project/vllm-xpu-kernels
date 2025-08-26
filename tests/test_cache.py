@@ -4,12 +4,12 @@ import random
 
 import pytest
 import torch
-from vllm.platforms import current_platform
 
 from tests import register_ops as ops
 from tests.register_ops import reshape_and_cache, reshape_and_cache_flash
 from tests.utils import (_convert_from_fp8, create_kv_caches_with_random,
-                         create_kv_caches_with_random_flash, opcheck)
+                         create_kv_caches_with_random_flash, opcheck,
+                         seed_everything)
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
@@ -335,7 +335,7 @@ def test_concat_and_cache_mla(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    seed_everything(seed)
     torch.set_default_device(device)
 
     total_slots = num_blocks * block_size
