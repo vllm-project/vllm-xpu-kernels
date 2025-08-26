@@ -80,7 +80,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("cutlass_gemm", torch::kXPU, gpu::cutlass_kernel::basic_gemm_func);
 
   ops.def("cutlass_scaled_mm(Tensor inputA, Tensor inputB, Tensor scaleA, Tensor scaleB, Tensor res, float alpha, float beta) -> Tensor");
-  ops.impl("cutlass_scaled_gemm", torch::kXPU, gpu::cutlass_kernel::scaled_mm_func);
+  ops.impl("cutlass_scaled_mm", torch::kXPU, gpu::cutlass_kernel::scaled_mm_func);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME);
