@@ -11,8 +11,8 @@ def test_base_gemm(dtype):
     # ipdb.set_trace()
     torch.set_default_device("xpu")
 
-    m = 4096
-    n = 4096
+    m = 1024
+    n = 2048
     k = 4096
 
     inputA = torch.randn(m, k, dtype=dtype)
@@ -23,7 +23,9 @@ def test_base_gemm(dtype):
     alpha = 1.0
     beta = 0.1
     ref_D = alpha * (inputA @ inputB) + beta * inputC
-    cutlass_basic_gemm(inputA, inputB, inputC, res, alpha, beta)
+    cutlass_B = inputB.t()
+    print("cutlassB ", cutlass_B.shape, cutlass_B.stride())
+    cutlass_basic_gemm(inputA, cutlass_B, inputC, res, alpha, beta)
     print(res)
     print(ref_D)
 
