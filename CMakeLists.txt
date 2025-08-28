@@ -68,7 +68,7 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 # Import torch cmake configuration.
 find_package(Torch REQUIRED)
 
-find_package(oneDNN QUIET)
+find_package(oneDNN REQUIRED)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.

@@ -12,7 +12,7 @@ python3 setup.py develop - will be local install if we use develop build or syst
 
 On vllm side, we will `import vllm_xpu_kernels._C` at start time which should register all custom ops so we can directly use.
 
-### prepare
+### Prepare
 
 Install oneapi 2025.1 deep learning essential [dependency](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html).
 
@@ -22,7 +22,7 @@ Create a new virtual env, install build dependency and torch dependency
 pip install -r requirements.txt
 ```
 
-### build & install
+### Build & Install
 Build development installation to current directory:
 
 ```
@@ -41,7 +41,7 @@ or build wheel (generated .whl in dist folder)
 VLLM_TARGET_DEVICE=xpu python3 setup.py bdist_wheel
 ```
 
-### how to use in vLLM
+### How to use in vLLM
 Please refer to temporary branch https://github.com/jikunshang/vllm/tree/xpu_kernel to install & test vllm which replaces `rms_norm` kernel from IPEX to vllm-xpu-kernels.
 
 ### Why Static Linking DNNL Instead of Shared Linking?
