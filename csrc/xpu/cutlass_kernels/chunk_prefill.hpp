@@ -32,6 +32,7 @@ struct chunk_prefill_args_t {
   void* num_blocks_per_seq;
   void* cu_seqlens_q;
   void* cu_seqlens_k;
+  void* cu_seqlens_k_zeros;
   int max_queries;
   int max_keys;
   int total_seqlen_q;
@@ -88,8 +89,8 @@ template <class FMHAChunkPrefillKernel, bool isVarLen> struct KernelLauncher {
                         args.num_heads_q,
                         args.num_heads_k,
                         cutlass::fmha::collective::VariableLength{args.max_queries}, // cu_q
-                        cutlass::fmha::collective::VariableLength{args.max_keys}, // cu_k
-                        cutlass::fmha::collective::VariableLength{args.max_keys}, // cu_v
+                        cutlass::fmha::collective::VariableLength{0}, // cu_kv
+                        cutlass::fmha::collective::VariableLength{args.max_keys}, // cu_kv_cache
                         args.head_size,
                         args.head_size);
     auto [batch, num_heads_q, num_heads_kv, seq_len_qo, seq_len_kv, seq_len_kv_cache, head_size_qk, head_size_vo] = problem_shape;
@@ -106,7 +107,7 @@ template <class FMHAChunkPrefillKernel, bool isVarLen> struct KernelLauncher {
     stride_O = cutlass::make_cute_packed_stride(StrideO{}, cute::make_shape(seq_len_qo * group_q_size, group_q_num * head_size_vo, batch));
 
     get<3>(problem_shape_out).cumulative_length = reinterpret_cast<int*>(args.cu_seqlens_q);
-    get<4>(problem_shape_out).cumulative_length = reinterpret_cast<int*>(args.cu_seqlens_k);
+    get<4>(problem_shape_out).cumulative_length = reinterpret_cast<int*>(args.cu_seqlens_k_zeros);
     get<5>(problem_shape_out).cumulative_length = reinterpret_cast<int*>(args.cu_seqlens_k);
 
     return problem_shape_out;
@@ -256,7 +257,7 @@ template<typename chunk_policy>
 void policy_dispatch(
     CutlassType cuType,
     const chunk_prefill_args_t& args) {
-  const int PipelineStages = 2;
+  const int PipelineStages = 0;
   if(cuType == CutlassType::half) {
     FMHAKernel<typename chunk_policy::ShapeQK, typename chunk_policy::ShapePV,
                typename chunk_policy::ShapeOutPut, typename chunk_policy::SubgroupLayout, PipelineStages,
@@ -303,6 +304,7 @@ void cutlass_chunk_prefill_impl(
   int total_seqlen_q = query.size(0);
   int total_seqlen_k = num_block * block_size;
   at::Tensor num_blocks_per_seq = torch::div(cu_seqlens_k, block_size);
+  at::Tensor cu_seqlens_k_zeros = torch.zeros_like(cu_seqlens_k);
 
   chunk_prefill_args_t args = {
       query.data_ptr(),
@@ -313,6 +315,7 @@ void cutlass_chunk_prefill_impl(
       num_blocks_per_seq.data_ptr(),
       cu_seqlens_q.data_ptr(),
       cu_seqlens_k.data_ptr(),
+      cu_seqlens_k_zeros.data_ptr(),
       max_seqlen_q,
       max_seqlen_k,
       total_seqlen_q,

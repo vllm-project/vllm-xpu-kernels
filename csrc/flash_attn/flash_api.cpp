@@ -37,7 +37,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     out = *out_;
   }
   else {
-    out = torch::zeros_like(q);
+    out = torch::zeros_like(q).to(torch::kFloat32);
   }
 
   cutlass_chunk_prefill_impl(
