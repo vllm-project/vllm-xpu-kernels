@@ -34,9 +34,9 @@ DEVICE = "xpu"
 # @pytest.mark.parametrize("ep_size", EP_SIZE)
 # @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_fused_moe(
-    m: int,
-    n: int,
-    k: int,
+    m: int, # num of tokens
+    n: int, # intermediate_size
+    k: int, # hidden_size
     e: int,
     topk: int,
     ep_size: int,
@@ -44,16 +44,28 @@ def test_fused_moe(
   ):
     # todo: seed
 
-    #
     # Setup test data
-    #
-
     a = torch.randn((m, k), device=DEVICE, dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device=DEVICE, dtype=dtype) / 10
+    w13 = torch.randn((e, 2 * n, k), device=DEVICE, dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device=DEVICE, dtype=dtype) / 10
 
-    score = torch.randn((m, e), device=DEVICE, dtype=dtype)
-    cutlass_fused_moe()
+    # moe gate
+    scores = torch.randn((m, e), device=DEVICE, dtype=dtype)
+    expert_indices, expert_scores = torch.topk(scores, k=topk, dim=-1, sorted=False)
+    flat_expert_indices = expert_indices.view(-1)
+    flat_expert_weights = expert_scores.view(-1, 1)
+
+    cutlass_fused_moe(hidden_states=a,
+                      w13=w1,
+                      w2=w2,
+                      topk_weights=flat_expert_weights,
+                      topk_ids=flat_expert_indices,
+                      n_experts_per_token=topk,
+                      inplace=True,
+                      activation="silu",
+                      num_experts=e)
+
+    print("result", hidden_states)
 
 if __name__ == "__main__":
     test_fused_moe(

@@ -13,15 +13,20 @@
 
 namespace gpu::cutlass_kernel {
 
+/* gemm2(group_A, w2, output, offset) */
+
 at::Tensor grouped_gemm_func(
     at::Tensor& input,
     at::Tensor& weight, 
-    at::Tensor& mnks, // [M, K], half
-    at::Tensor& res
+    at::Tensor& res,
+    at::Tensor& offset,
+    int64_t hidden_size,
+    int64_t intermediate_size,
+    int64_t num_of_expert
    ) {
   auto dpcpp_queue = vllm::xpu::vllmGetQueue();
-  if (input.scalar_type() != at::kFloat8_e4m3fn) {
-    std::cout << "error:wrong datatype" << std::endl;
+  if (input.scalar_type() != at::at::kBFloat16) {
+    std::cout << "error:wrong datatype, current only support bfloat16" << std::endl;
     return at::Tensor();
   }
 
@@ -29,8 +34,11 @@ at::Tensor grouped_gemm_func(
       &dpcpp_queue,
       input.data_ptr(),
       weight.data_ptr(),
-      mnks.data_ptr(),
-      res.data_ptr()
+      res.data_ptr(),
+      offset.data_ptr(),
+      hidden_size,
+      intermediate_size,
+      num_of_expert
       );
   return res;
 }
@@ -38,7 +46,7 @@ at::Tensor grouped_gemm_func(
 } // namespace gpu::cutlass_kernel
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
-  ops.def("cutlass_grouped_gemm(Tensor input, Tensor weight, Tensor mnks) -> Tensor");
+  ops.def("cutlass_grouped_gemm(Tensor input, Tensor weight, Tensor res, Tensor offset, int64_t hidden_size, int64_t intermediate_size, int64_t num_of_expert) -> Tensor");
   ops.impl("cutlass_grouped_gemm", torch::kXPU, gpu::cutlass_kernel::grouped_gemm_func);
 }
 
