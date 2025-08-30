@@ -113,19 +113,26 @@ struct Options {
   int m, n, k, groups;
   std::vector<typename ProblemShape::UnderlyingProblemShape> problem_sizes_host;
   
-  int hidden_size;
-  int intermediate_size;
+
   int* offset;
   int num_of_expert;
 
-  Options() : error(false), help(false), alpha(FLT_MAX), beta(FLT_MAX), iterations(100),
-              m(5120), n(4096), k(4096), groups(2) {
-    problem_sizes_host.reserve(groups);
-    for(int i = 0; i < groups; i++) {
-      problem_sizes_host.push_back({m, n, k});
+  Options(int* offset, int N, int K, int ne):
+    num_of_expert(ne), n(N), k(K), error(false), help(false), alpha(FLT_MAX), beta(FLT_MAX), iterations(100) {
+    int group_cnt = 0;
+    for (int i = 0; i < num_of_expert; ++i){
+      if (offset[i] != 0){
+        group_cnt++;
+      } 
     }
-  }
-
+    
+    problem_sizes_host.reserve(group_cnt);
+    for (int i = 0; i < num_of_expert; ++i){
+      if (offset[i] != 0){
+        problem_sizes_host.push_back({offset[i], n, k});
+      } 
+    }
+    groups = group_cnt;
 };
 
 
@@ -158,82 +165,238 @@ struct GroupedGemmRunner {
 
   using ProblemShapeType = typename Gemm::GemmKernel::ProblemShape;
 
-  StrideA stride_A;
-  StrideB stride_B;
-  StrideC stride_C;
-  StrideD stride_D;
-  StrideScaleA stride_scaleA;
-  StrideScaleB stride_scaleB;
+  // Host-side allocations
+  std::vector<int64_t> offset_A;
+  std::vector<int64_t> offset_B;
+  std::vector<int64_t> offset_C;
+  std::vector<int64_t> offset_D;
 
-  void initialize(const ProblemShapeType& problem_size) {
-    auto problem_shape_MNKL = cute::append<4>(problem_size, 1);
-    auto [M, N, K, L] = problem_shape_MNKL;
+  std::vector<StrideA> stride_A_host;
+  std::vector<StrideB> stride_B_host;
+  std::vector<StrideC> stride_C_host;
+  std::vector<StrideD> stride_D_host;
 
-    stride_A =
-        cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, L));
-    stride_B =
-        cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(N, K, L));
-    stride_C =
-        cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(M, N, L));
-    stride_D =
-        cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(M, N, L));
-    stride_scaleA = cutlass::make_cute_packed_stride(
-        StrideScaleA{}, cute::make_shape(M, K, L));
-    stride_scaleB = cutlass::make_cute_packed_stride(
-        StrideScaleB{}, cute::make_shape(N, K, L));
+  std::vector<ElementAccumulator> alpha_host;
+  std::vector<ElementAccumulator> beta_host;
+
+  // Device-side allocations
+  cutlass::DeviceAllocation<typename ProblemShape::UnderlyingProblemShape> problem_sizes;
+
+  // This example defines all matrices in a single allocation (e.g. block_A), but this is not a
+  // requirement. Matrix base pointers are read from device allocation (e.g. ptr_A)
+  cutlass::DeviceAllocation<const ElementA *> ptr_A;
+  cutlass::DeviceAllocation<const ElementB *> ptr_B;
+  cutlass::DeviceAllocation<const ElementC *> ptr_C;
+  cutlass::DeviceAllocation<ElementOutput *> ptr_D;
+  cutlass::DeviceAllocation<ElementOutput *> ptr_ref_D;
+
+  cutlass::DeviceAllocation<StrideA> stride_A;
+  cutlass::DeviceAllocation<StrideB> stride_B;
+  cutlass::DeviceAllocation<StrideC> stride_C;
+  cutlass::DeviceAllocation<StrideD> stride_D;
+
+  cutlass::DeviceAllocation<ElementC> block_C;
+  // Note, this is an array of pointers to alpha and beta scaling values per group
+  cutlass::DeviceAllocation<ElementAccumulator*> alpha_device;
+  cutlass::DeviceAllocation<ElementAccumulator*> beta_device;
+  cutlass::DeviceAllocation<ElementAccumulator> block_alpha;
+  cutlass::DeviceAllocation<ElementAccumulator> block_beta;
+
+  /// Allocates device-side data
+void allocate(const Options &options, int* offset) {
+  int64_t total_elements_A = 0;
+  int64_t total_elements_B = 0;
+  int64_t total_elements_C = 0;
+  int64_t total_elements_D = 0;
+
+  // Compute total allocation sizes across group
+  for (int32_t i = 0; i < options.num_of_expert; ++i) {
+    if (offset[i] == 0){
+      total_elements_B += options.n * options.k;
+      continue
+    }
+
+    auto problem = options.problem_sizes_host.at(i);
+    auto M = get<0>(problem);
+    auto N = get<1>(problem);
+    auto K = get<2>(problem);
+
+    // Offset into block allocation of each matrix base pointer
+    offset_A.push_back(total_elements_A);
+    offset_B.push_back(total_elements_B);
+    offset_C.push_back(total_elements_C);
+    offset_D.push_back(total_elements_D);
+
+    int64_t elements_A = M * K;
+    int64_t elements_B = K * N;
+    int64_t elements_C = M * N;
+    int64_t elements_D = M * N;
+
+    total_elements_A += elements_A;
+    total_elements_B += elements_B;
+    total_elements_C += elements_C;
+    total_elements_D += elements_D;
+
+    stride_A_host.push_back(cutlass::make_cute_packed_stride(StrideA{}, {M, K, 1}));
+    stride_B_host.push_back(cutlass::make_cute_packed_stride(StrideB{}, {N, K, 1}));
+    stride_C_host.push_back(cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1}));
+    stride_D_host.push_back(cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1}));
+  }
+  block_C.reset(total_elements_C);
+  block_alpha.reset(options.groups);
+  block_beta.reset(options.groups);
+}
+
+  void initialize(const Options &options, ElementA * block_A, ElementB * block_B,
+      ElementD* block_D) {
+    problem_sizes.reset(options.groups);
+    problem_sizes.copy_from_host(options.problem_sizes_host.data());
+   
+    std::vector<ElementA *> ptr_A_host(options.groups);
+    std::vector<ElementB *> ptr_B_host(options.groups);
+    std::vector<ElementC *> ptr_C_host(options.groups);
+    std::vector<ElementC *> ptr_D_host(options.groups);
+    std::vector<ElementAccumulator *> ptr_alpha_host(options.groups);
+    std::vector<ElementAccumulator *> ptr_beta_host(options.groups);
+
+    // Compute offsets, alpha & beta over group on host
+    for (int32_t i = 0; i < options.groups; ++i) {
+      ptr_A_host.at(i) = block_A + offset_A.at(i);
+      ptr_B_host.at(i) = block_B + offset_B.at(i);
+      ptr_C_host.at(i) = block_C.get() + offset_C.at(i);
+      ptr_D_host.at(i) = block_D + offset_D.at(i);
+      // Fill host vector of alpha & beta with random values if using per-group values
+      alpha_host.push_back(static_cast<ElementAccumulator>((rand() % 5) + 1));
+      beta_host.push_back(static_cast<ElementAccumulator>(rand() % 5));
+      // Fill host ptr vectors with offset addresses into device alpha/beta blocks
+      ptr_alpha_host.at(i) = block_alpha.get() + i;
+      ptr_beta_host.at(i) = block_beta.get() + i;
+    }
+
+    // Allocate device memory & copy from host
+    ptr_A.reset(options.groups);
+    // Per-group alpha and beta
+    ptr_A.copy_from_host(ptr_A_host.data());
+
+    ptr_B.reset(options.groups);
+    ptr_B.copy_from_host(ptr_B_host.data());
+
+    ptr_C.reset(options.groups);
+    ptr_C.copy_from_host(ptr_C_host.data());
+
+    ptr_D.reset(options.groups);
+    ptr_D.copy_from_host(ptr_D_host.data());
+
+    stride_A.reset(options.groups);
+    stride_A.copy_from_host(stride_A_host.data());
+
+    stride_B.reset(options.groups);
+    stride_B.copy_from_host(stride_B_host.data());
+
+    stride_C.reset(options.groups);
+    stride_C.copy_from_host(stride_C_host.data());
+
+    stride_D.reset(options.groups);
+    stride_D.copy_from_host(stride_D_host.data());
+
+    // Per-group alpha and beta ptrs
+    alpha_device.reset(options.groups);
+    alpha_device.copy_from_host(ptr_alpha_host.data());
+    beta_device.reset(options.groups);
+    beta_device.copy_from_host(ptr_beta_host.data());
+
+
+    initialize_block(block_C, 666 + 2025);
+    // Per-group alpha and beta values - note these are not directly passed to kernel - the pointers
+    // (alpha_device/beta_device) are passed instead
+    block_alpha.copy_from_host(alpha_host.data());
+    block_beta.copy_from_host(beta_host.data());
+
   }
 
+  /// Populates a Gemm::Arguments structure from the given commandline options
+  typename Gemm::Arguments args_from_options(const Options &options, const cutlass::KernelHardwareInfo& hw_info, bool host_problem_shapes_available = true)
+  {
+    typename Gemm::Arguments arguments;
+    decltype(arguments.epilogue.thread) fusion_args;
+
+    if (options.alpha != FLT_MAX && options.beta != FLT_MAX) {
+      // If both alpha/beta are provided (via cmd line args) and are scalar, i.e., same alpha/beta applies to all batches.
+      fusion_args.alpha = options.alpha;
+      fusion_args.beta = options.beta;
+      fusion_args.alpha_ptr = nullptr;
+      fusion_args.beta_ptr = nullptr;
+      fusion_args.alpha_ptr_array = nullptr;
+      fusion_args.beta_ptr_array = nullptr;
+      // Single alpha and beta for all groups
+      fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 0};
+      fusion_args.dBeta = {cute::_0{}, cute::_0{}, 0};
+    }
+    else {
+      // If pointers to alpha/beta are provided, i.e., alpha/beta can differ between batches/groups.
+      fusion_args.alpha = 0;
+      fusion_args.beta = 0;
+      fusion_args.alpha_ptr = nullptr;
+      fusion_args.beta_ptr = nullptr;
+      fusion_args.alpha_ptr_array = alpha_device.get();
+      fusion_args.beta_ptr_array = beta_device.get();
+      // One alpha and beta per each group
+      fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 1};
+      fusion_args.dBeta = {cute::_0{}, cute::_0{}, 1};
+    }
+    using RasterOrderOptions = typename cutlass::gemm::kernel::detail::PersistentTileSchedulerXeGroup<ProblemShape>::RasterOrderOptions;
+
+    // Per-GEMM problem shape info may only exist on the device.
+    if (host_problem_shapes_available) {
+      arguments = typename Gemm::Arguments {
+        cutlass::gemm::GemmUniversalMode::kGrouped,
+        {options.groups, problem_sizes.get(), options.problem_sizes_host.data()},
+        {ptr_A.get(), stride_A.get(), ptr_B.get(), stride_B.get()},
+        {fusion_args, ptr_C.get(), stride_C.get(), ptr_D.get(), stride_D.get()},
+        hw_info,
+        {1, RasterOrderOptions::AlongN}
+      };
+    }
+    else {
+      arguments = typename Gemm::Arguments {
+        cutlass::gemm::GemmUniversalMode::kGrouped,
+        {options.groups, problem_sizes.get(), nullptr},
+        {ptr_A.get(), stride_A.get(), ptr_B.get(), stride_B.get()},
+        {fusion_args, ptr_C.get(), stride_C.get(), ptr_D.get(), stride_D.get()},
+        hw_info,
+        {1, RasterOrderOptions::AlongN}
+      };
+    }
+
+    return arguments;
+  }
+
+
   cutlass::Status run(
+      const Options& options,
       sycl::queue* stream,
       const cutlass::KernelHardwareInfo& hw_info,
       ElementA* inputA,
       ElementB* inputB,
       ElementOffset* offset,
-      ElementOutput* res,
-      int64_t hidden_size,
-      int64_t intermediate_size,
-      int64_t num_of_expert) {
-  
-    Options options(offset, hidden_size, intermediate_size, num_of_expert);
-
-    initialize(problem_size);
-
-    typename Gemm::GemmKernel::Arguments arguments{
-        cutlass::gemm::GemmUniversalMode::kGemm,
-        problem_size,
-        {inputA,
-         stride_A,
-         inputB,
-         stride_B,
-         scaleA,
-         stride_scaleA,
-         scaleB,
-         stride_scaleB},
-        {{args.alpha, args.beta}, nullptr, stride_C, res, stride_D},
-        hw_info};
-
+      ElementOutput* res) {
+    
+    allocate(options, offset);
+    initialize(options, inputA, inputB, res);
     Gemm gemm_op;
+
+    auto arguments = args_from_options(options, hw_info, true);
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
-    if (args.n < 16) {
-      std::cout
-          << "Invalid Problem Size: N must be >= 16 for FP8 input with F16 MMA (XE_8x16x16_F32F16F16F32_TT). Got N="
-          << args.n << std::endl;
-      std::exit(1);
-    }
+    CUTLASS_CHECK(gemm_op.can_implement(arguments));
 
-    if (gemm_op.can_implement(arguments) != cutlass::Status::kSuccess) {
-      std::cout << "Invalid Problem Size: " << args.m << 'x' << args.n << 'x'
-                << args.k << 'x' << args.l << std::endl;
-      std::exit(1);
-    }
-
-    gemm_op.initialize(arguments, workspace.get());
+    CUTLASS_CHECK(gemm_op.initialize(arguments, workspace.get()));
 
     // Run the GEMM
-    gemm_op.run(stream);
+    CUTLASS_CHECK(gemm_op.run());
+
 
     stream->throw_asynchronous();
 
@@ -253,7 +416,9 @@ void kernel_functor(
  //
   // Run examples
   //
-
+ 
+  auto offset_ptr = reinterpret_cast<int64_t*> offset;
+  Options options(offset_ptr, hidden_size, intermediate_size, num_of_expert);
   // The KernelHardwareInfo struct holds the number of EUs on the GPU with a given device ID. This
   // information is used by the underlying kernel.
   cutlass::KernelHardwareInfo hw_info;
@@ -335,15 +500,14 @@ void kernel_functor(
 
   GroupedGemmRunner<Gemm> runner;
   runner.run(
+      options,
       stream,
       hw_info,
       reinterpret_cast<ElementA*>(input),
       reinterpret_cast<ElementB*>(weight),
       reinterpret_cast<ElementOffset*>(offset),
-      reinterpret_cast<ElementOutput*>(res),
-      hidden_size,
-      intermediate_size,
-      num_of_expert);
+      reinterpret_cast<ElementOutput*>(res)
+      );
  
 }
 
