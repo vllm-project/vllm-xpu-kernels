@@ -66,6 +66,9 @@
     To avoid register spills, build the example by setting the environment variable:
       $ export IGC_VectorAliasBBThreshold=10000
 */
+
+#pragma once
+
 #include "cutlass/epilogue/collective/default_epilogue.hpp"
 #include "cutlass/epilogue/collective/xe_array_epilogue.hpp"
 #include "cutlass/epilogue/fusion/xe_callbacks.hpp"
@@ -114,10 +117,9 @@ struct Options {
   std::vector<typename ProblemShape::UnderlyingProblemShape> problem_sizes_host;
   
 
-  int* offset;
   int num_of_expert;
 
-  Options(int* offset, int N, int K, int ne):
+  Options(int64_t * offset, int N, int K, int ne):
     num_of_expert(ne), n(N), k(K), error(false), help(false), alpha(FLT_MAX), beta(FLT_MAX), iterations(100) {
     int group_cnt = 0;
     for (int i = 0; i < num_of_expert; ++i){
@@ -129,19 +131,22 @@ struct Options {
     problem_sizes_host.reserve(group_cnt);
     for (int i = 0; i < num_of_expert; ++i){
       if (offset[i] != 0){
-        problem_sizes_host.push_back({offset[i], n, k});
+        problem_sizes_host.push_back({static_cast<int>(offset[i]), n, k});
       } 
     }
     groups = group_cnt;
+
+  }
 };
 
 
 template <class Gemm>
 struct GroupedGemmRunner {
-  using StrideA = typename Gemm::GemmKernel::StrideA;
-  using StrideB = typename Gemm::GemmKernel::StrideB;
-  using StrideC = typename Gemm::GemmKernel::StrideC;
-  using StrideD = typename Gemm::GemmKernel::StrideD;
+  using StrideA = typename Gemm::GemmKernel::InternalStrideA;
+  using StrideB = typename Gemm::GemmKernel::InternalStrideB;
+  using StrideC = typename Gemm::GemmKernel::InternalStrideC;
+  using StrideD = typename Gemm::GemmKernel::InternalStrideD;
+
   using StrideScaleA = typename Gemm::GemmKernel::StrideA;
   using StrideScaleB = typename Gemm::GemmKernel::StrideB;
 
@@ -160,8 +165,8 @@ struct GroupedGemmRunner {
 
   using CollectiveEpilogue = typename Gemm::CollectiveEpilogue;
   using ElementOutput = typename CollectiveEpilogue::ElementOutput;
-  using ElementCompute = typename CollectiveEpilogue::ElementCompute;
-  using ElementAccumulator = typename CollectiveEpilogue::ElementAccumulator;
+  using ElementAccumulator = ElementOutput;
+
 
   using ProblemShapeType = typename Gemm::GemmKernel::ProblemShape;
 
@@ -203,7 +208,7 @@ struct GroupedGemmRunner {
   cutlass::DeviceAllocation<ElementAccumulator> block_beta;
 
   /// Allocates device-side data
-void allocate(const Options &options, int* offset) {
+void allocate(const Options &options, int64_t* offset) {
   int64_t total_elements_A = 0;
   int64_t total_elements_B = 0;
   int64_t total_elements_C = 0;
@@ -213,7 +218,7 @@ void allocate(const Options &options, int* offset) {
   for (int32_t i = 0; i < options.num_of_expert; ++i) {
     if (offset[i] == 0){
       total_elements_B += options.n * options.k;
-      continue
+      continue;
     }
 
     auto problem = options.problem_sizes_host.at(i);
@@ -248,7 +253,7 @@ void allocate(const Options &options, int* offset) {
 }
 
   void initialize(const Options &options, ElementA * block_A, ElementB * block_B,
-      ElementD* block_D) {
+      ElementOutput* block_D) {
     problem_sizes.reset(options.groups);
     problem_sizes.copy_from_host(options.problem_sizes_host.data());
    
@@ -417,7 +422,7 @@ void kernel_functor(
   // Run examples
   //
  
-  auto offset_ptr = reinterpret_cast<int64_t*> offset;
+  auto offset_ptr = reinterpret_cast<int64_t*>(offset);
   Options options(offset_ptr, hidden_size, intermediate_size, num_of_expert);
   // The KernelHardwareInfo struct holds the number of EUs on the GPU with a given device ID. This
   // information is used by the underlying kernel.

@@ -56,7 +56,7 @@ def test_fused_moe(
     flat_expert_weights = expert_scores.view(-1, 1)
 
     cutlass_fused_moe(hidden_states=a,
-                      w13=w1,
+                      w13=w13,
                       w2=w2,
                       topk_weights=flat_expert_weights,
                       topk_ids=flat_expert_indices,

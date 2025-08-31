@@ -1,5 +1,6 @@
 #pragma once
-
+#pragma push_macro("printf")
+#undef printf
 #include <Python.h>
 
 #define _CONCAT(A, B) A##B
@@ -26,3 +27,4 @@
                                         nullptr, nullptr, nullptr, nullptr};   \
     return PyModule_Create(&module);                                           \
   }
+#pragma pop_macro("printf")
