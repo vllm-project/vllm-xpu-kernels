@@ -65,7 +65,7 @@ def test_fused_moe(
                       activation="silu",
                       num_experts=e)
 
-    print("result", hidden_states)
+    # print("result", a, a.shape)
 
 if __name__ == "__main__":
     test_fused_moe(

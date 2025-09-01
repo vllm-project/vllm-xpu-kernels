@@ -58,8 +58,14 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     # cutlass_grouped_gemm(Tensor input, Tensor weight, Tensor res, Tensor offset, int64_t hidden_size, int64_t intermediate_size,             int64_t num_of_expert) -> Tensor
     print("enter kernel")
 
-
-    offset = torch.tensor([6, 12, 8, 4, 3, 6, 12, 8, 4, 3, 0, 0, 0, 0, 0, 0] ,dtype=torch.int64, device='xpu' )
+    ## tests only
+    num_experts = 2
+    hidden_size = 4096
+    intermediate_size = 4096
+    group_A = torch.ones((2048, intermediate_size), dtype=torch.bfloat16, device="xpu")
+    w2 = torch.ones((num_experts, hidden_size, intermediate_size), dtype=torch.bfloat16, device="xpu")
+    output = torch.zeros((2048, hidden_size), dtype=torch.float32, device="xpu")
+    offset = torch.tensor([1024, 1024] ,dtype=torch.int64, device="cpu" )
 
     hidden_states = torch.ops._vllm_fp8_C.cutlass_grouped_gemm(group_A, w2, output, offset, hidden_size, intermediate_size, num_experts)
-    print(hidden_states)
+    print(hidden_states, hidden_states.shape)

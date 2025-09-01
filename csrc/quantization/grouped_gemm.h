@@ -121,13 +121,14 @@ struct Options {
 
   Options(int64_t * offset, int N, int K, int ne):
     num_of_expert(ne), n(N), k(K), error(false), help(false), alpha(FLT_MAX), beta(FLT_MAX), iterations(100) {
+      std::cout << "init options" << std::endl;
     int group_cnt = 0;
     for (int i = 0; i < num_of_expert; ++i){
       if (offset[i] != 0){
         group_cnt++;
       } 
     }
-    
+    std::cout << "group_cnt: " << group_cnt << std::endl;    
     problem_sizes_host.reserve(group_cnt);
     for (int i = 0; i < num_of_expert; ++i){
       if (offset[i] != 0){
@@ -135,7 +136,7 @@ struct Options {
       } 
     }
     groups = group_cnt;
-
+    std::cout << "finish options" << std::endl;
   }
 };
 
@@ -193,7 +194,6 @@ struct GroupedGemmRunner {
   cutlass::DeviceAllocation<const ElementB *> ptr_B;
   cutlass::DeviceAllocation<const ElementC *> ptr_C;
   cutlass::DeviceAllocation<ElementOutput *> ptr_D;
-  cutlass::DeviceAllocation<ElementOutput *> ptr_ref_D;
 
   cutlass::DeviceAllocation<StrideA> stride_A;
   cutlass::DeviceAllocation<StrideB> stride_B;
@@ -271,8 +271,8 @@ void allocate(const Options &options, int64_t* offset) {
       ptr_C_host.at(i) = block_C.get() + offset_C.at(i);
       ptr_D_host.at(i) = block_D + offset_D.at(i);
       // Fill host vector of alpha & beta with random values if using per-group values
-      alpha_host.push_back(static_cast<ElementAccumulator>((rand() % 5) + 1));
-      beta_host.push_back(static_cast<ElementAccumulator>(rand() % 5));
+      alpha_host.push_back(static_cast<ElementAccumulator>(1));
+      beta_host.push_back(static_cast<ElementAccumulator>(0));
       // Fill host ptr vectors with offset addresses into device alpha/beta blocks
       ptr_alpha_host.at(i) = block_alpha.get() + i;
       ptr_beta_host.at(i) = block_beta.get() + i;
@@ -311,7 +311,7 @@ void allocate(const Options &options, int64_t* offset) {
     beta_device.copy_from_host(ptr_beta_host.data());
 
 
-    initialize_block(block_C, 666 + 2025);
+    initialize_block(block_C, 0);
     // Per-group alpha and beta values - note these are not directly passed to kernel - the pointers
     // (alpha_device/beta_device) are passed instead
     block_alpha.copy_from_host(alpha_host.data());
@@ -385,6 +385,7 @@ void allocate(const Options &options, int64_t* offset) {
       ElementB* inputB,
       ElementOffset* offset,
       ElementOutput* res) {
+    std::cout << "enter run" << std::endl;
     
     allocate(options, offset);
     initialize(options, inputA, inputB, res);
@@ -398,7 +399,8 @@ void allocate(const Options &options, int64_t* offset) {
     CUTLASS_CHECK(gemm_op.can_implement(arguments));
 
     CUTLASS_CHECK(gemm_op.initialize(arguments, workspace.get()));
-
+    
+    std::cout << "before run kernel" << std::endl;
     // Run the GEMM
     CUTLASS_CHECK(gemm_op.run());
 
@@ -421,7 +423,7 @@ void kernel_functor(
  //
   // Run examples
   //
- 
+  std::cout << "enter functor" << std::endl; 
   auto offset_ptr = reinterpret_cast<int64_t*>(offset);
   Options options(offset_ptr, hidden_size, intermediate_size, num_of_expert);
   // The KernelHardwareInfo struct holds the number of EUs on the GPU with a given device ID. This
