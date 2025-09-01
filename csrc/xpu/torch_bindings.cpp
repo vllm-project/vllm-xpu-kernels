@@ -1,5 +1,6 @@
 #include "core/registration.h"
 #include "xpu/ops.h"
+#include "xpu/lora/lora_ops.h"
 
 #include <torch/library.h>
 #include <torch/version.h>
@@ -11,6 +12,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "fp8_gemm_w8a16(Tensor! A, Tensor! B, bool trans_B, Tensor? B_scale_, "
       "Tensor? bias_) -> Tensor");
   xpu_ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
+
+  xpu_ops.def(
+      "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
+      "indices, float scale) -> ()");
+  xpu_ops.impl("bgmv_shrink", torch::kXPU, &bgmv_shrink);
+
+  xpu_ops.def(
+      "bgmv_expand(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
+      "indices, bool add_to_output) -> ()");
+  xpu_ops.impl("bgmv_expand", torch::kXPU, &bgmv_expand);
+
+  xpu_ops.def(
+      "bgmv_expand_slice(Tensor! outputs, Tensor inputs, Tensor weights, "
+      "Tensor indices, int slice_offset,bool add_to_output) -> ()");
+  xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
