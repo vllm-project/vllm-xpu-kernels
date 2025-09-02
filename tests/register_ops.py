@@ -116,3 +116,11 @@ def dynamic_per_token_scaled_fp8_quant(
 # moe
 def moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
     torch.ops._moe_C.moe_sum(input, output)
+
+
+def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
+                 num_expert_group: int, topk_group: int, topk: int,
+                 renormalize: bool, routed_scaling_factor: float):
+    return torch.ops._moe_C.grouped_topk(scores, scores_with_bias,
+                                         num_expert_group, topk_group, topk,
+                                         renormalize, routed_scaling_factor)
