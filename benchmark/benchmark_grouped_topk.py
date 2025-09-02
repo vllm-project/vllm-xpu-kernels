@@ -8,7 +8,7 @@ from typing import Optional
 import torch
 import triton
 
-from tests.ops.grouped_topk_op import grouped_topk, fused_grouped_topk
+from tests.ops.grouped_topk_op import fused_grouped_topk, grouped_topk
 
 
 @torch.compile
@@ -92,8 +92,8 @@ def get_benchmark():
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=[
-                "n_token", "n_expert", "topk", "renormalize",
-                "topk_group", "scoring_func", "dtype"
+                "n_token", "n_expert", "topk", "renormalize", "topk_group",
+                "scoring_func", "dtype"
             ],
             x_vals=[tuple(_) for _ in configs],
             line_arg="provider",
@@ -119,14 +119,14 @@ def get_benchmark():
         routed_scaling_factor = 1.0
         num_expert_group = 8
         hidden_states = torch.randn((n_token, n_hidden),
-                                dtype=dtype,
-                                device="xpu")
+                                    dtype=dtype,
+                                    device="xpu")
         gating_output = torch.randn((n_token, n_expert),
                                     dtype=dtype,
                                     device="xpu")
         e_score_correction_bias = torch.randn((n_expert, ),
-                                            dtype=torch.float32,
-                                            device="xpu")
+                                              dtype=torch.float32,
+                                              device="xpu")
 
         quantiles = [0.5, 0.2, 0.8]
 
@@ -141,8 +141,7 @@ def get_benchmark():
                     topk_group=topk_group,
                     scoring_func=scoring_func,
                     routed_scaling_factor=routed_scaling_factor,
-                    e_score_correction_bias=e_score_correction_bias
-                ),
+                    e_score_correction_bias=e_score_correction_bias),
                 quantiles=quantiles,
             )
         elif provider == "native":
@@ -156,8 +155,7 @@ def get_benchmark():
                     topk_group=topk_group,
                     scoring_func=scoring_func,
                     routed_scaling_factor=routed_scaling_factor,
-                    e_score_correction_bias=e_score_correction_bias
-                ),
+                    e_score_correction_bias=e_score_correction_bias),
                 quantiles=quantiles,
             )
         else:
@@ -171,8 +169,7 @@ def get_benchmark():
                     topk_group=topk_group,
                     scoring_func=scoring_func,
                     routed_scaling_factor=routed_scaling_factor,
-                    e_score_correction_bias=e_score_correction_bias
-                ),
+                    e_score_correction_bias=e_score_correction_bias),
                 quantiles=quantiles,
             )
 
