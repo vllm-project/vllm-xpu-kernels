@@ -5,14 +5,16 @@ from typing import List
 import numpy
 
 from . import _vllm_fp8_C
+
+def cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts):
+    torch.ops._vllm_fp8_C.cutlass_grouped_gemm(input_A, w2, output, offset, n, k, num_experts)
+
 def ref_gemm1(x, w13):
     w1, w3 = torch.split(w13, int(list(w13.shape)[0]/2), dim=0)
     act_fn = torch.nn.SiLU()
     gate = act_fn(x @ w1.T)
     up = x @ w3.T
     return gate * up
-
-
 
 def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_per_token, inplace, activation, num_experts):
     token_cnt, hidden_size = list(hidden_states.shape)
@@ -28,10 +30,11 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     token_idxs = idxs // num_per_tok
     experts_intermediate = []
     print("tokens_per_expert", tokens_per_expert)
-
+    offset = []
     for expert_id, end_idx in enumerate(tokens_per_expert):
         print("expert id: ", expert_id)
         start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
+        offset.append(end_idx - start_idx)
         if start_idx == end_idx:
             continue
 
@@ -49,8 +52,9 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
         experts_intermediate.append(expert_out)
 
     group_A = torch.cat(experts_intermediate, dim=0).contiguous()
-    output = torch.empty((list(group_A.shape)[0], hidden_size), dtype=hidden_states.dtype, device=hidden_states.device)
-    offset = torch.tensor(tokens_per_expert, dtype=torch.int64, device='xpu')
+    output = torch.empty((list(group_A.shape)[0], hidden_size), dtype=torch.float32, device=hidden_states.device)
+    # offset = torch.tensor(tokens_per_expert, dtype=torch.int64, device='xpu')
+    offset = torch.tensor(offset, dtype=torch.int64, device='cpu')
     print("groupA [num_tokens, inter]:", group_A.shape)
     print("weight2 [expert, hidden, inter(ld)]", w2.shape)
     print("output [num_tokens, hidden]", output.shape)
@@ -58,14 +62,4 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     # cutlass_grouped_gemm(Tensor input, Tensor weight, Tensor res, Tensor offset, int64_t hidden_size, int64_t intermediate_size,             int64_t num_of_expert) -> Tensor
     print("enter kernel")
 
-    ## tests only
-    num_experts = 2
-    hidden_size = 4096
-    intermediate_size = 4096
-    group_A = torch.ones((2048, intermediate_size), dtype=torch.bfloat16, device="xpu")
-    w2 = torch.ones((num_experts, hidden_size, intermediate_size), dtype=torch.bfloat16, device="xpu")
-    output = torch.zeros((2048, hidden_size), dtype=torch.float32, device="xpu")
-    offset = torch.tensor([1024, 1024] ,dtype=torch.int64, device="cpu" )
 
-    hidden_states = torch.ops._vllm_fp8_C.cutlass_grouped_gemm(group_A, w2, output, offset, hidden_size, intermediate_size, num_experts)
-    print(hidden_states, hidden_states.shape)

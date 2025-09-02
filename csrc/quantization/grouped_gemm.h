@@ -99,7 +99,7 @@ using ElementComputeEpilogue = float; // <- data type of epilogue operations
 using ElementA = bfloat16_t;          // <- data type of elements in input matrix A
 using ElementB = bfloat16_t;          // <- data type of elements in input matrix B
 using ElementOutput = float;          // <- data type of elements in output matrix D
-
+bool debug = false;
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -121,14 +121,15 @@ struct Options {
 
   Options(int64_t * offset, int N, int K, int ne):
     num_of_expert(ne), n(N), k(K), error(false), help(false), alpha(FLT_MAX), beta(FLT_MAX), iterations(100) {
-      std::cout << "init options" << std::endl;
+      if (debug) {
+        std::cout << "Options()" << std::endl;
+      }
     int group_cnt = 0;
     for (int i = 0; i < num_of_expert; ++i){
       if (offset[i] != 0){
         group_cnt++;
       } 
     }
-    std::cout << "group_cnt: " << group_cnt << std::endl;    
     problem_sizes_host.reserve(group_cnt);
     for (int i = 0; i < num_of_expert; ++i){
       if (offset[i] != 0){
@@ -136,7 +137,6 @@ struct Options {
       } 
     }
     groups = group_cnt;
-    std::cout << "finish options" << std::endl;
   }
 };
 
@@ -209,17 +209,23 @@ struct GroupedGemmRunner {
 
   /// Allocates device-side data
 void allocate(const Options &options, int64_t* offset) {
+  if (debug){
+    std::cout << "void allocate()" << std::endl;
+  }
   int64_t total_elements_A = 0;
   int64_t total_elements_B = 0;
   int64_t total_elements_C = 0;
   int64_t total_elements_D = 0;
-
+  
+  int offset_iter = 0;
   // Compute total allocation sizes across group
-  for (int32_t i = 0; i < options.num_of_expert; ++i) {
-    if (offset[i] == 0){
+  for (int32_t i = 0; i < options.groups; ++i) {
+    while (offset[offset_iter] == 0){
       total_elements_B += options.n * options.k;
+      offset_iter++;
       continue;
     }
+    offset_iter++;
 
     auto problem = options.problem_sizes_host.at(i);
     auto M = get<0>(problem);
@@ -254,6 +260,9 @@ void allocate(const Options &options, int64_t* offset) {
 
   void initialize(const Options &options, ElementA * block_A, ElementB * block_B,
       ElementOutput* block_D) {
+    if (debug){
+      std::cout << "void initialize()" << std::endl;
+    }
     problem_sizes.reset(options.groups);
     problem_sizes.copy_from_host(options.problem_sizes_host.data());
    
@@ -385,7 +394,9 @@ void allocate(const Options &options, int64_t* offset) {
       ElementB* inputB,
       ElementOffset* offset,
       ElementOutput* res) {
-    std::cout << "enter run" << std::endl;
+    if (debug){
+      std::cout << "enter run" << std::endl;
+    }
     
     allocate(options, offset);
     initialize(options, inputA, inputB, res);
@@ -400,7 +411,9 @@ void allocate(const Options &options, int64_t* offset) {
 
     CUTLASS_CHECK(gemm_op.initialize(arguments, workspace.get()));
     
-    std::cout << "before run kernel" << std::endl;
+    if (debug){
+      std::cout << "before run kernel" << std::endl;
+    }
     // Run the GEMM
     CUTLASS_CHECK(gemm_op.run());
 
@@ -423,7 +436,6 @@ void kernel_functor(
  //
   // Run examples
   //
-  std::cout << "enter functor" << std::endl; 
   auto offset_ptr = reinterpret_cast<int64_t*>(offset);
   Options options(offset_ptr, hidden_size, intermediate_size, num_of_expert);
   // The KernelHardwareInfo struct holds the number of EUs on the GPU with a given device ID. This

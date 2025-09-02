@@ -2,7 +2,7 @@ import pytest
 import torch
 from math import ceil
 from typing import Callable, Optional, Union
-from vllm_xpu_kernels.fused_moe_interface import cutlass_fused_moe
+from vllm_xpu_kernels.fused_moe_interface import cutlass_fused_moe, cutlass_grouped_gemm
 
 NUM_EXPERTS = [8, 64, 192]
 EP_SIZE = [1, 4]
@@ -27,6 +27,38 @@ FUSED_MOE_WN16_MNK_FACTORS = [
 ]
 
 DEVICE = "xpu"
+
+def test_grouped_gemm(num_experts, n, k, token_per_group):
+    # input
+    input_A = torch.randn((sum(token_per_group), k), dtype=torch.bfloat16, device="xpu")
+
+    # weight
+    input_B = torch.randn((num_experts, n, k), dtype=torch.bfloat16, device="xpu")
+    input_B = input_B.transpose(-1, -2).contiguous().transpose(-1, -2)
+
+    # output offset
+    output = torch.empty((sum(token_per_group), n), dtype=torch.float32, device="xpu")
+    offset = torch.tensor(token_per_group, dtype=torch.int64, device="cpu" )
+
+    cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts)
+
+    # ref gg
+    ref = []
+    pre_token_sum = 0
+    for i in range(num_experts):
+        cur_token_num = token_per_group[i]
+        if cur_token_num == 0:
+            continue
+        input = input_A[pre_token_sum:pre_token_sum + cur_token_num, :]
+        weight = input_B[i, :, :]
+        expert_output = input @ weight.T
+        ref.append(expert_output)
+        pre_token_sum += cur_token_num
+    ref = torch.cat(ref, dim=0).float()
+
+    print(torch.allclose(output, ref, rtol=1, atol=1))
+    max_diff = (output - ref).abs().max()
+    print("Max absolute difference:", max_diff)
 
 # @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 # @pytest.mark.parametrize("e", NUM_EXPERTS)
@@ -77,3 +109,4 @@ if __name__ == "__main__":
         ep_size = 1,
         dtype = torch.bfloat16
     )
+    # test_grouped_gemm(num_experts=16, n=5120, k=8192, token_per_group=[1,2,6,8,12,0,1,5,1,2,6,8,12,0,1,5])
