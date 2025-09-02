@@ -303,8 +303,15 @@ void cutlass_chunk_prefill_impl(
   int max_blocks_per_seq = block_table.size(1);
   int total_seqlen_q = query.size(0);
   int total_seqlen_k = num_block * block_size;
-  at::Tensor num_blocks_per_seq = torch::div(cu_seqlens_k, block_size);
-  at::Tensor cu_seqlens_k_zeros = torch.zeros_like(cu_seqlens_k);
+  at::Tensor num_blocks_per_seq = torch::div(cu_seqlens_k, block_size).to(torch::kInt32);
+  at::Tensor cu_seqlens_k_zeros = torch::zeros_like(cu_seqlens_k);
+
+  std::cout << "batch_size: " << batch_size << std::endl;
+  std::cout << "block_table: " << block_table << std::endl;
+  std::cout << "num_blocks_per_seq: " << num_blocks_per_seq << std::endl;
+  std::cout << "out: " << out.sizes() << " " << out.dtype() << std::endl;
+  std::cout << "cu_seqlens_q: " << cu_seqlens_q << std::endl;
+  std::cout << "cu_seqlens_k: " << cu_seqlens_k << std::endl;
 
   chunk_prefill_args_t args = {
       query.data_ptr(),
