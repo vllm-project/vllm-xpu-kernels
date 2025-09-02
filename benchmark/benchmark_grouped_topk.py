@@ -69,18 +69,16 @@ def grouped_topk_compile(
 
 
 n_token_range = [1, 64, 256]
-n_expert_range = [64, 128, 256]
+n_expert_range = [16, 64, 128]
 topk_range = [2, 4]
-renormalize_range = [True, False]
 topk_group_range = [4, 8]
 scoring_func_range = ["sigmoid", "softmax"]
-dtype_range = [torch.float16, torch.bfloat16]
+dtype_range = [torch.float16]
 configs = list(
     itertools.product(
         n_token_range,
         n_expert_range,
         topk_range,
-        renormalize_range,
         topk_group_range,
         scoring_func_range,
         dtype_range,
@@ -92,8 +90,8 @@ def get_benchmark():
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=[
-                "n_token", "n_expert", "topk", "renormalize", "topk_group",
-                "scoring_func", "dtype"
+                "n_token", "n_expert", "topk", "topk_group", "scoring_func",
+                "dtype"
             ],
             x_vals=[tuple(_) for _ in configs],
             line_arg="provider",
@@ -109,7 +107,6 @@ def get_benchmark():
         n_token: int,
         n_expert: int,
         topk: int,
-        renormalize: bool,
         topk_group: int,
         scoring_func: str,
         dtype: torch.dtype,
@@ -118,6 +115,7 @@ def get_benchmark():
         n_hidden = 1024
         routed_scaling_factor = 1.0
         num_expert_group = 8
+        renormalize = True
         hidden_states = torch.randn((n_token, n_hidden),
                                     dtype=dtype,
                                     device="xpu")
