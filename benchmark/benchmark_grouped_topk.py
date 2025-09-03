@@ -73,7 +73,7 @@ n_expert_range = [16, 64, 128]
 topk_range = [2, 4]
 topk_group_range = [4, 8]
 scoring_func_range = ["sigmoid", "softmax"]
-dtype_range = [torch.float16]
+dtype_range = [torch.float16, torch.bfloat16, torch.float32]
 configs = list(
     itertools.product(
         n_token_range,

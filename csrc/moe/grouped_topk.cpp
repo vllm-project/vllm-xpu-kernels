@@ -541,8 +541,7 @@ class group_idx_and_topk_idx_kernel {
         }
         pre_count_equal_to_top_value = count_equal_to_top_value;
         count_equal_to_top_value = sycl::reduce_over_group(
-            sg, (value == kNegInfinity) ? 1 : 0,
-            sycl::plus<>());
+            sg, (value == kNegInfinity) ? 1 : 0, sycl::plus<>());
       }
       num_equalto_topkth_group = target_num_min - pre_count_equal_to_top_value;
     }
@@ -556,8 +555,7 @@ class group_idx_and_topk_idx_kernel {
               item.get_local_range(0));
 
     int count_equalto_topkth_group = 0;
-    bool if_proceed_next_topk =
-        (topk_group_value != kNegInfinity);
+    bool if_proceed_next_topk = (topk_group_value != kNegInfinity);
     if (case_id < num_tokens && if_proceed_next_topk) {
       for (int i_group = 0; i_group < n_group; i_group++) {
         if ((current_group_scores[i_group] > topk_group_value) ||
