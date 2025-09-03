@@ -7,6 +7,7 @@
 namespace vllm {
 namespace moe {
 
+constexpr float kNegInfinity = INFINITY * -1;
 constexpr int32_t WARP_SIZE = 32;
 constexpr int32_t BLOCK_SIZE = 512;
 constexpr int32_t NUM_WARPS_PER_BLOCK = BLOCK_SIZE / WARP_SIZE;
@@ -512,8 +513,8 @@ class group_idx_and_topk_idx_kernel {
         warp_id * topk;
     s_topk_idx += warp_id * topk;
 
-    T value = std::numeric_limits<T>::min();
-    T topk_group_value = std::numeric_limits<T>::min();
+    T value = kNegInfinity;
+    T topk_group_value = kNegInfinity;
     int32_t num_equalto_topkth_group;
 
     if (case_id < num_tokens) {
@@ -536,15 +537,11 @@ class group_idx_and_topk_idx_kernel {
             sycl::reduce_over_group(sg, value_f, sycl::maximum<float>());
         topk_group_value = sycl_cast<T, float>(topk_group_value_f);
         if (value_f == topk_group_value_f) {
-          value = std::numeric_limits<T>::min();
+          value = kNegInfinity;
         }
-        // topk_group_value = sycl::reduce_over_group(sg, value,
-        // sycl::maximum<T>()); if (value == topk_group_value) {
-        //   value = std::numeric_limits<T>::min();
-        // }
         pre_count_equal_to_top_value = count_equal_to_top_value;
         count_equal_to_top_value = sycl::reduce_over_group(
-            sg, (value == std::numeric_limits<T>::min()) ? 1 : 0,
+            sg, (value == kNegInfinity) ? 1 : 0,
             sycl::plus<>());
       }
       num_equalto_topkth_group = target_num_min - pre_count_equal_to_top_value;
@@ -560,7 +557,7 @@ class group_idx_and_topk_idx_kernel {
 
     int count_equalto_topkth_group = 0;
     bool if_proceed_next_topk =
-        (topk_group_value != std::numeric_limits<T>::min());
+        (topk_group_value != kNegInfinity);
     if (case_id < num_tokens && if_proceed_next_topk) {
       for (int i_group = 0; i_group < n_group; i_group++) {
         if ((current_group_scores[i_group] > topk_group_value) ||
@@ -573,7 +570,7 @@ class group_idx_and_topk_idx_kernel {
                                    std::isfinite(sycl_cast<float, T>(
                                        current_scores_with_bias[offset + i]))
                                ? current_scores_with_bias[offset + i]
-                               : std::numeric_limits<T>::min();
+                               : sycl_cast<T, float>(kNegInfinity);
             queue.add(candidates, offset + i, sg, local_id);
           }
           if (current_group_scores[i_group] == topk_group_value) {
