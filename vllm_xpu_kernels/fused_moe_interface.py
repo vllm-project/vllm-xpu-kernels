@@ -7,7 +7,7 @@ import numpy
 from . import _vllm_fp8_C
 
 def cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts):
-    torch.ops._vllm_fp8_C.cutlass_grouped_gemm(input_A, w2, output, offset, n, k, num_experts)
+    torch.ops._vllm_fp8_C.cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts)
 
 def ref_gemm1(x, w13):
     w1, w3 = torch.split(w13, int(list(w13.shape)[0]/2), dim=0)
@@ -16,11 +16,11 @@ def ref_gemm1(x, w13):
     up = x @ w3.T
     return gate * up
 
-def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_per_token, inplace, activation, num_experts):
+def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_per_token, activation, num_experts):
     token_cnt, hidden_size = list(hidden_states.shape)
     intermediate_size = list(w2.shape)[-1]
-    expert_cache = torch.empty((token_cnt, intermediate_size),
-                           dtype=hidden_states.dtype,
+    expert_cache = torch.empty((token_cnt, hidden_size),
+                           dtype=torch.float32,
                            device=hidden_states.device)
 
     idxs = topk_ids.argsort()
@@ -32,7 +32,6 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     print("tokens_per_expert", tokens_per_expert)
     offset = []
     for expert_id, end_idx in enumerate(tokens_per_expert):
-        print("expert id: ", expert_id)
         start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
         offset.append(end_idx - start_idx)
         if start_idx == end_idx:
@@ -58,8 +57,30 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     print("groupA [num_tokens, inter]:", group_A.shape)
     print("weight2 [expert, hidden, inter(ld)]", w2.shape)
     print("output [num_tokens, hidden]", output.shape)
-    print("offset [expert]", offset.shape)
-    # cutlass_grouped_gemm(Tensor input, Tensor weight, Tensor res, Tensor offset, int64_t hidden_size, int64_t intermediate_size,             int64_t num_of_expert) -> Tensor
-    print("enter kernel")
+    print("offset [expert]", offset,  offset.shape)
+    w2 = w2.transpose(-1, -2).contiguous().transpose(-1, -2)
+    cutlass_grouped_gemm(input_A=group_A,
+                         input_B=w2,
+                         output=output,
+                         offset=offset,
+                         n=hidden_size,
+                         k=intermediate_size,
+                         num_experts=num_experts)
 
+    for expert_id, end_idx in enumerate(tokens_per_expert):
+        start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
+        if start_idx == end_idx:
+            continue
 
+        exp_token_idxs = token_idxs[start_idx:end_idx]
+        expert_tokens = hidden_states[exp_token_idxs]
+        expert_out = output[start_idx:end_idx]
+        expert_out.mul_(topk_weights[idxs[start_idx:end_idx]])
+        expert_cache.scatter_reduce_(
+            0,
+            exp_token_idxs.view(-1, 1).repeat(1, hidden_size),
+            expert_out,
+            reduce='sum'
+        )
+
+    return expert_cache

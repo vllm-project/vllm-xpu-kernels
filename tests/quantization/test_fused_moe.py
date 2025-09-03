@@ -60,6 +60,45 @@ def test_grouped_gemm(num_experts, n, k, token_per_group):
     max_diff = (output - ref).abs().max()
     print("Max absolute difference:", max_diff)
 
+def ref_fused_moe(x,
+                  w13,
+                  w2,
+                  flat_expert_weights,
+                  flat_expert_indices,
+                  num_per_tok,
+                  activation,
+                  num_experts):
+
+    expert_cache = torch.zeros_like(x).float()
+    idxs = flat_expert_indices.argsort()
+    counts = flat_expert_indices.bincount().cpu().numpy()
+    tokens_per_expert = counts.cumsum()
+    token_idxs = idxs // num_per_tok
+    for expert_id, end_idx in enumerate(tokens_per_expert):
+        start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
+        if start_idx == end_idx:
+            continue
+
+        exp_token_idxs = token_idxs[start_idx:end_idx]
+        expert_tokens = x[exp_token_idxs]
+
+        expert_w13 = w13[expert_id, :, :]
+        w1, w3 = torch.split(expert_w13, int(list(expert_w13.shape)[0]/2), dim=0)
+        act_fn = torch.nn.SiLU()
+        gate = act_fn(expert_tokens @ w1.T)
+        up = expert_tokens @ w3.T
+        expert_out = (gate * up) @ w2[expert_id, :, :].T
+        expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
+        expert_cache.scatter_reduce_(
+            0,
+            exp_token_idxs.view(-1, 1).repeat(1, x.shape[-1]),
+            expert_out.float(),
+            reduce='sum'
+        )
+
+    return expert_cache
+
+
 # @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 # @pytest.mark.parametrize("e", NUM_EXPERTS)
 # @pytest.mark.parametrize("topk", TOP_KS)
@@ -75,7 +114,7 @@ def test_fused_moe(
     dtype: torch.dtype,
   ):
     # todo: seed
-
+    verbose = False
     # Setup test data
     a = torch.randn((m, k), device=DEVICE, dtype=dtype) / 10
     w13 = torch.randn((e, 2 * n, k), device=DEVICE, dtype=dtype) / 10
@@ -83,21 +122,40 @@ def test_fused_moe(
 
     # moe gate
     scores = torch.randn((m, e), device=DEVICE, dtype=dtype)
-    expert_indices, expert_scores = torch.topk(scores, k=topk, dim=-1, sorted=False)
+    expert_scores, expert_indices = torch.topk(scores, k=topk, dim=-1, sorted=False)
+
+    if verbose:
+        print("expert_indices: ", expert_indices, expert_indices.shape)
+        print("expert_scores: ", expert_scores, expert_scores.shape)
+
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_scores.view(-1, 1)
 
-    cutlass_fused_moe(hidden_states=a,
-                      w13=w13,
-                      w2=w2,
-                      topk_weights=flat_expert_weights,
-                      topk_ids=flat_expert_indices,
-                      n_experts_per_token=topk,
-                      inplace=True,
-                      activation="silu",
-                      num_experts=e)
+    out = cutlass_fused_moe(hidden_states=a,
+                            w13=w13,
+                            w2=w2,
+                            topk_weights=flat_expert_weights,
+                            topk_ids=flat_expert_indices,
+                            n_experts_per_token=topk,
+                            activation="silu",
+                            num_experts=e)
 
-    # print("result", a, a.shape)
+    ref_out = ref_fused_moe(a,
+                  w13,
+                  w2,
+                  flat_expert_weights,
+                  flat_expert_indices,
+                  topk,
+                  "silu",
+                  e)
+
+    print("ref result", ref_out, ref_out.shape)
+    print("kernel result", out, out.shape)
+    print(torch.allclose(out, ref_out, rtol=1, atol=1))
+    max_diff = (out - ref_out).abs().max()
+    print("Max absolute difference:", max_diff)
+
+
 
 if __name__ == "__main__":
     test_fused_moe(
