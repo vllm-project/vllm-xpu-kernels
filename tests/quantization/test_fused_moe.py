@@ -85,7 +85,8 @@ def ref_fused_moe(x,
         expert_w13 = w13[expert_id, :, :]
         w1, w3 = torch.split(expert_w13, int(list(expert_w13.shape)[0]/2), dim=0)
         act_fn = torch.nn.SiLU()
-        gate = act_fn(expert_tokens @ w1.T)
+        gemm1 = expert_tokens @ w1.T
+        gate = act_fn(gemm1)
         up = expert_tokens @ w3.T
         expert_out = (gate * up) @ w2[expert_id, :, :].T
         expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
