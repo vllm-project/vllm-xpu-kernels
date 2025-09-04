@@ -20,6 +20,8 @@ message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/Modules)
+
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
@@ -45,7 +47,6 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21")
 #
 set(TORCH_SUPPORTED_VERSION_XPU "2.8.0")
 
-set(ENABLE_MOE_KERNEL OFF)
 set(FA2_ENABLED ON)
 
 #
@@ -69,6 +70,7 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 # Import torch cmake configuration.
 find_package(Torch REQUIRED)
 
+find_package(oneDNN REQUIRED)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
@@ -133,7 +135,8 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   #
   # TODO: check SYCL flags
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS}")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+  set(SYCL_FIRST_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/csrc/sycl_first.h")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include ${SYCL_FIRST_HEADER}")
 endif()
 
 #
@@ -144,11 +147,14 @@ endif()
 #
 # _C extension
 #
-
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_SRC
-    "csrc/xpu/layernorm.cpp"
-    "csrc/xpu/torch_bindings.cpp"
+    "csrc/cache.cpp"
+    "csrc/layernorm.cpp"
+    "csrc/activation.cpp"
+    "csrc/pos_encoding_kernels.cpp"
+    "csrc/torch_bindings.cpp"
+    "csrc/quantization/fp8/fp8_quant.cpp"
   )
   include_directories("/usr/include")
   list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/)
@@ -260,29 +266,62 @@ if (FA2_ENABLED)
         WITH_SOABI)
 endif ()
 
+#
+# xpu only ops/kernels, implemented with cutlass/onednn/sycl.
+#
+if(VLLM_GPU_LANG STREQUAL "SYCL")
+  set(VLLM_EXT_XPU_SRC
+    "csrc/xpu/torch_bindings.cpp"
+  )
+  include_directories("/usr/include")
+  set(CMPLR_ROOT $ENV{CMPLR_ROOT})
+  set(CMAKE_CXX_COMPILER icpx)
+  set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
+  list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
+  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
+  list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
+endif()
+
+if(ONEDNN_FOUND)
+  set(_ONEDNN_SRC)
+  file(GLOB _ONEDNN_SRC csrc/xpu/onednn/*.cpp)
+  list(APPEND VLLM_EXT_XPU_SRC
+    ${_ONEDNN_SRC}
+  )
+  include_directories(${ONEDNN_INCLUDE_DIR})
+  link_libraries(${ONEDNN_LIBRARY})
+endif()
+
+define_gpu_extension_target(
+  _xpu_C
+  DESTINATION vllm_xpu_kernels
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_EXT_XPU_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  USE_SABI 3
+  WITH_SOABI)
 
 #
 # _moe_C extension
 #
-# TODO: add this as a placeholder for now.
+set(VLLM_MOE_EXT_SRC
+  "csrc/moe/torch_bindings.cpp"
+  "csrc/moe/moe_align_sum_kernels.cpp")
 
-if (ENABLE_MOE_KERNEL)
-  set(VLLM_MOE_EXT_SRC
-    "csrc/moe/torch_bindings.cpp"
-  )
-
-  message(STATUS "Enabling moe extension.")
-  define_gpu_extension_target(
-    _moe_C
-    DESTINATION vllm_xpu_kernels
-    LANGUAGE ${VLLM_GPU_LANG}
-    SOURCES ${VLLM_MOE_EXT_SRC}
-    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-    ARCHITECTURES ${VLLM_GPU_ARCHES}
-    INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
-    INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-    INCLUDE_DIRECTORIES ${CUTLASS_APP_INCLUDE_DIR}
-    USE_SABI 3
-    WITH_SOABI)
-endif()
-
+message(STATUS "Enabling moe extension.")
+define_gpu_extension_target(
+  _moe_C
+  DESTINATION vllm_xpu_kernels
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_MOE_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+  USE_SABI 3
+  WITH_SOABI)

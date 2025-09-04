@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from tests.ops import RMSNorm
+from tests.ops.layernorm_op import RMSNorm
 from tests.utils import opcheck
 
 DTYPES = [torch.half, torch.bfloat16]
