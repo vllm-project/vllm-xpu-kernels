@@ -197,7 +197,7 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
         print("❌ Implementations differ")
 
 
-def get_benchmark(use_residual,):
+def get_benchmark(use_residual, dtype):
 
     @triton.testing.perf_report(
         triton.testing.Benchmark(
@@ -213,7 +213,7 @@ def get_benchmark(use_residual,):
             args={},
         ))
     def benchmark(head_num, batch_size, seq_len, provider):
-        dtype = torch.bfloat16
+        #dtype = torch.bfloat16
         hidden_size = head_num * 128  # assuming head_dim = 128
 
         x = torch.randn(batch_size,
@@ -301,7 +301,7 @@ def parse_args():
     parser.add_argument(
         "--dtype",
         type=str,
-        default=None,
+        default=torch.bfloat16,
         help="Data type from model config",
     )
     parser.add_argument(
@@ -403,6 +403,6 @@ if __name__ == "__main__":
     )
 
     # Get the benchmark function with proper use_residual setting
-    benchmark = get_benchmark(args.use_residual)
+    benchmark = get_benchmark(args.use_residual,args.dtype)
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=args.save_path)
