@@ -1,63 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
 from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 
-logger = logging.getLogger("vllm_xpu_kernel")
-
-
-class CustomOp(nn.Module):
-    """
-    Base class for custom ops.
-    Dispatches the forward method to the appropriate backend.
-    """
-
-    def __new__(cls, *args, **kwargs):
-        try:
-            op_name = cls.__name__
-        except AttributeError:
-            raise TypeError(
-                f"Cannot instantiate '{cls.__name__}': its 'name' attribute "
-                f"was not set, possibly because it was not decorated with "
-                f"@CustomOp.register, or it's the CustomOp base class itself."
-            ) from None
-        logger.debug("Instantiating custom op: %s", op_name)
-        op_cls_to_instantiate = cls
-        return super().__new__(op_cls_to_instantiate)
-
-    def __init__(self):
-        super().__init__()
-        self._forward_method = self.dispatch_forward()
-
-    def forward(self, *args, **kwargs):
-        return self._forward_method(*args, **kwargs)
-
-    def forward_native(self, *args, **kwargs):
-        """PyTorch-native implementation of the forward method.
-        This method is optional. If implemented, it can be used with compilers
-        such as torch.compile or PyTorch XLA. Also, it can be used for testing
-        purposes.
-        """
-        raise NotImplementedError
-
-    def forward_cuda(self, *args, **kwargs):
-        raise NotImplementedError
-
-    def forward_xpu(self, *args, **kwargs):
-        # By default, we assume that XPU ops are compatible with the
-        # PyTorch-native implementation.
-        return self.forward_native(*args, **kwargs)
-
-    def forward_cpu(self, *args, **kwargs):
-        # By default, we assume that CPU ops are compatible with CUDA ops.
-        return self.forward_cuda(*args, **kwargs)
-
-    def dispatch_forward(self):
-        return self.forward_xpu
+from tests.ops.custom_ops import CustomOp
 
 
 def fused_add_rms_norm(
@@ -181,17 +130,7 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        if self.variance_size_override is not None:
-            return self.forward_native(x, residual)
-
-        add_residual = residual is not None
-        norm_func = dispatch_cuda_rmsnorm_func(add_residual)
-
-        if add_residual:
-            return norm_func(x, residual, self.weight.data,
-                             self.variance_epsilon)
-        else:
-            return norm_func(x, self.weight.data, self.variance_epsilon)
+        return self.forward_cuda(x, residual)
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"

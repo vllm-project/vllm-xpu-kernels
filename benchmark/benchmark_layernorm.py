@@ -6,7 +6,7 @@ from argparse import ArgumentParser
 
 import torch
 
-from tests.ops import RMSNorm
+from tests.ops.layernorm_op import RMSNorm
 from tests.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 
