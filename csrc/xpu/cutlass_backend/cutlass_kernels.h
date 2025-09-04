@@ -7,10 +7,9 @@
 // #include <ATen/Tensor.h>
 /* #include "pytorch_shim.h" */
 
-#include "core/registration.h"
 #include <torch/all.h>
-#include "xpu/utils.h"
 #include "grouped_gemm.h"
+#include "utils.h"
 
 namespace gpu::cutlass_kernel {
 
@@ -46,9 +45,4 @@ at::Tensor grouped_gemm_func(
 
 } // namespace gpu::cutlass_kernel
 
-TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
-  ops.def("cutlass_grouped_gemm(Tensor input, Tensor weight, Tensor res, Tensor offset, int hidden_size, int intermediate_size, int num_of_expert) -> Tensor");
-  ops.impl("cutlass_grouped_gemm", torch::kXPU, gpu::cutlass_kernel::grouped_gemm_func);
-}
 
-REGISTER_EXTENSION(TORCH_EXTENSION_NAME);

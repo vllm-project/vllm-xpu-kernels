@@ -3,11 +3,10 @@ from torch.nn.modules.utils import _pair
 from torch import nn, Tensor
 from typing import List
 import numpy
-
-from . import _vllm_fp8_C
+import vllm_xpu_kernels._xpu_C
 
 def cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts):
-    torch.ops._vllm_fp8_C.cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts)
+    torch.ops._xpu_C.cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts)
 
 def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_per_token, activation, num_experts):
     token_cnt, hidden_size = list(hidden_states.shape)
