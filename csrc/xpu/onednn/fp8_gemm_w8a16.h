@@ -74,7 +74,7 @@ static inline void dnnl_matmul_w8a16_fp8(
         bias_dtype = bias_data_type_t::f16;
         break;
       default:
-        TORCH_CHECK(false, "Unsupported data type for bias in int4 matmul: ",
+        TORCH_CHECK(false, "Unsupported data type for bias in fp8 matmul: ",
                     b.scalar_type());
     }
   } else {
