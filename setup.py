@@ -3,6 +3,7 @@
 import importlib.util
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -119,13 +120,12 @@ class cmake_build_ext(build_ext):
 
         # Select the build type.
         # Note: optimization level + debug info are set by the build type
-        default_cfg = "Debug" if self.debug else "RelWithDebInfo"
+        default_cfg = "Debug" if self.debug else "Release"
         cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
-            '-DCMAKE_TOOLCHAIN_FILE=cmake/toolchain.cmake'
         ]
 
         verbose = envs.VERBOSE
@@ -176,9 +176,21 @@ class cmake_build_ext(build_ext):
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
+        my_env = os.environ.copy()
+        icx_path = shutil.which('icx')
+        icpx_path = shutil.which('icpx')
+        build_option_gpu = {
+            "BUILD_MODULE_TYPE": "GPU",
+            "CMAKE_C_COMPILER": f"{icx_path}",
+            "CMAKE_CXX_COMPILER": f"{icpx_path}",
+        }
+        for key, value in build_option_gpu.items():
+            if value is not None:
+                cmake_args.append("-D{}={}".format(key, value))
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp)
+            cwd=self.build_temp,
+            env=my_env)
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working
@@ -259,6 +271,7 @@ ext_modules = []
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._xpu_C"))
 
 if ext_modules:
