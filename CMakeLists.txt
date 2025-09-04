@@ -154,12 +154,40 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
     "csrc/torch_bindings.cpp"
     "csrc/quantization/fp8/fp8_quant.cpp"
   )
+
+  set(PERF_LINK_OPTS "-doubleGRF")
+  set(PERF_LINK_OPTS "${PERF_LINK_OPTS} -vc-disable-indvars-opt")
+  set(PERF_LINK_OPTS "${PERF_LINK_OPTS} -vc-codegen")
+  set(PERF_LINK_OPTS "${PERF_LINK_OPTS} -Xfinalizer -printregusage")
+  set(PERF_LINK_OPTS "${PERF_LINK_OPTS} -Xfinalizer -enableBCR")
+  set(PERF_LINK_OPTS "${PERF_LINK_OPTS} -Xfinalizer -DPASTokenReduction")
+
+  set(LINKE_OPTS ${LINKE_OPTS}
+      -fsycl
+      -fsycl-device-code-split=per_kernel
+  )
+  # TODO: make AOT device list configurable
+  set(USE_AOT_DEVLIST "pvc,bmg")
+
+  if (USE_AOT_DEVLIST)
+    set(LINKE_OPTS ${LINKE_OPTS} -fsycl-targets=spir64_gen)
+  endif()
+
+  set(LINKE_OPTS ${LINKE_OPTS} -Xs )
+
+  if (USE_AOT_DEVLIST)
+    set(LINKE_OPTS ${LINKE_OPTS} "-device ${USE_AOT_DEVLIST} -options '${PERF_LINK_OPTS}'")
+  else()
+    set(LINKE_OPTS ${LINKE_OPTS} "${PERF_LINK_OPTS}")
+  endif()
+
+  set(SYCL_LINK_OPTION  ${LINKE_OPTS})
   include_directories("/usr/include")
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})
   set(CMAKE_CXX_COMPILER icpx)
   set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
   list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
-  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
+  list(APPEND VLLM_GPU_LINK_FLAGS  ${SYCL_LINK_OPTION})
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
 endif()
 
