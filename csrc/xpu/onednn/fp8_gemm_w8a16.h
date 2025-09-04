@@ -8,7 +8,6 @@
 
 namespace oneDNN {
 
-using bias_type_t = at::native::onednn::bias_type_t;
 using trans_type_t = at::native::onednn::trans_type_t;
 using GpuStreamManager = at::native::onednn::GpuStreamManager;
 using GpuEngineManager = at::native::onednn::GpuEngineManager;
@@ -45,26 +44,45 @@ static inline void dnnl_matmul_w8a16_fp8(
   }
 
   // get bias type
-  bias_type_t b_type;
+  bias_shape_t bias_shape;
+  bias_data_type_t bias_dtype;
   if (bias.has_value() && bias.value().defined()) {
     auto& b = bias.value();
     const auto nuelm = b.numel();
     if (nuelm == 1) {
-      b_type = bias_type_t::scalar;
+      bias_shape = bias_shape_t::scalar;
     } else if (nuelm == m * n) {
-      b_type = bias_type_t::mn;
+      bias_shape = bias_shape_t::mn;
     } else if (b.size(b.dim() - 1) == n && nuelm == n) {
-      b_type = bias_type_t::n;
+      bias_shape = bias_shape_t::n;
     } else if (b.size(b.dim() - 1) == 1 && nuelm == m) {
-      b_type = bias_type_t::m;
+      bias_shape = bias_shape_t::m;
     } else if (nuelm == 0) {
-      b_type = bias_type_t::none;
+      bias_shape = bias_shape_t::none;
     } else {
       TORCH_CHECK(0, "unsupported bias dim in matmul ...", b.sizes());
     }
+
+    switch (b.scalar_type()) {
+      case at::ScalarType::Float:
+        bias_dtype = bias_data_type_t::f32;
+        break;
+      case at::ScalarType::BFloat16:
+        bias_dtype = bias_data_type_t::bf16;
+        break;
+      case at::ScalarType::Half:
+        bias_dtype = bias_data_type_t::f16;
+        break;
+      default:
+        TORCH_CHECK(false, "Unsupported data type for bias in int4 matmul: ",
+                    b.scalar_type());
+    }
   } else {
-    b_type = bias_type_t::none;
+    bias_shape = bias_shape_t::none;
+    bias_dtype = bias_data_type_t::none;
   }
+
+  bias_type_t b_type = make_bias_type(bias_shape, bias_dtype);
 
   trans_type_t tt = trans_type_t::nn;
   if (trans_b) {
@@ -91,6 +109,8 @@ static inline void dnnl_matmul_w8a16_fp8(
 
   auto f_attr = [&](dnnl::primitive_attr& pattr) {
     pattr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
+    pattr.set_scales(DNNL_ARG_WEIGHTS,
+                     /* mask */ 0, {}, get_onednn_dtype(m2_sc));
   };
 
   int arg_off = 0;
@@ -117,10 +137,9 @@ static inline void dnnl_matmul_w8a16_fp8(
   arg_handles.emplace_back(DNNL_ARG_SRC, mat1.data_ptr());
   arg_handles.emplace_back(DNNL_ARG_WEIGHTS, mat2.data_ptr());
   arg_handles.emplace_back(DNNL_ARG_DST, result.data_ptr());
-  if (b_type != bias_type_t::none) {
+  if (bias_shape != bias_shape_t::none) {
     arg_handles.emplace_back(DNNL_ARG_BIAS, bias.value().data_ptr());
   }
-
   int scratchpad_size = matmul_ext.get_scratchpad_size();
   torch::Tensor scratchpad_tensor = at::empty(
       {scratchpad_size}, mat1.options().dtype(at::kByte), c10::nullopt);
