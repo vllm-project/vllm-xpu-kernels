@@ -1,4 +1,3 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from .flash_attn_interface import flash_attn_varlen_func  # noqa: F401
 from .fused_moe_interface import cutlass_fused_moe, cutlass_grouped_gemm
