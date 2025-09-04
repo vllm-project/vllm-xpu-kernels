@@ -11,7 +11,6 @@ from torch import nn
 from tests import register_ops as vllm_ops
 from tests import utils
 
-
 try:
     import intel_extension_for_pytorch as ipex
     HAS_IPEX = True
@@ -130,10 +129,10 @@ def rmsnorm_ipex(
     """IPEX implementation using ipex.llm.functional.rms_norm"""
     if not HAS_IPEX:
         raise RuntimeError("IPEX is not available")
-    
+
     orig_shape = x.shape
     x = x.view(-1, x.shape[-1])
-    
+
     if residual is not None:
         residual = residual.view(-1, residual.shape[-1])
         if hasattr(ipex.llm.functional, 'fused_add_rms_norm'):
@@ -147,7 +146,7 @@ def rmsnorm_ipex(
     else:
         output = ipex.llm.functional.rms_norm(x, weight, eps)
         output = output.view(orig_shape)
-    
+
     return output
 
 
@@ -183,7 +182,7 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
             if use_residual:
                 output_ipex = output_ipex[0]
             print(f"IPEX output={output_ipex}")
-            
+
             if torch.allclose(output_naive, output_ipex, atol=1e-2, rtol=1e-2):
                 print("✅ IPEX implementation matches naive")
             else:
@@ -204,9 +203,14 @@ def get_benchmark(use_residual, dtype):
             x_names=["head_num", "batch_size", "seq_len"],
             x_vals=[tuple(_) for _ in configs],
             line_arg="provider",
-            line_vals=["huggingface", "vllm", "t.compile", "ipex"] if HAS_IPEX else ["huggingface", "vllm", "t.compile"],
-            line_names=["HuggingFace", "vLLM", "t.compile", "IPEX"] if HAS_IPEX else ["HuggingFace", "vLLM", "t.compile"],
-            styles=[("blue", "-"), ("green", "-"), ("orange", "-"), ("red", "-")] if HAS_IPEX else [("blue", "-"), ("green", "-"), ("orange", "-")],
+            line_vals=["huggingface", "vllm", "t.compile", "ipex"]
+            if HAS_IPEX else ["huggingface", "vllm", "t.compile"],
+            line_names=["HuggingFace", "vLLM", "t.compile", "IPEX"]
+            if HAS_IPEX else ["HuggingFace", "vLLM", "t.compile"],
+            styles=[("blue", "-"), ("green", "-"), ("orange", "-"),
+                    ("red", "-")] if HAS_IPEX else [("blue", "-"),
+                                                    ("green", "-"),
+                                                    ("orange", "-")],
             ylabel="us",
             plot_name=
             f"rmsnorm-perf-{'with' if use_residual else 'without'}-residual",
@@ -266,6 +270,7 @@ def get_benchmark(use_residual, dtype):
 
     return benchmark
 
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -289,13 +294,13 @@ def parse_args():
     parser.add_argument(
         "--intermediate-size",
         type=int,
-        default=None,  
+        default=None,
         help="Intermediate size for FFN layers",
     )
     parser.add_argument(
         "--num-groups",
         type=int,
-        default=None,  
+        default=None,
         help="Number of expert groups for MoE models",
     )
     parser.add_argument(
@@ -313,9 +318,10 @@ def parse_args():
     parser.add_argument(
         "--head-num-range",
         type=int,
-        nargs='+', 
-        default=[12, 32, 40, 48, 64, 96, 128],  
-        help="Range of attention head numbers to test/use. Default: 12 32 40 48 64 96 128"
+        nargs='+',
+        default=[12, 32, 40, 48, 64, 96, 128],
+        help=
+        "Range of attention head numbers to test/use. Default: 12 32 40 48 64 96 128"
     )
     parser.add_argument(
         "--tp-size",
@@ -334,45 +340,47 @@ def parse_args():
     )
 
     args = parser.parse_args()
-    
+
     if args.model_name:
         model_config = utils.get_model_config(args.model_name, args.tp_size)
-        
-        if args.hidden_size == 4096:  
+
+        if args.hidden_size == 4096:
             args.hidden_size = model_config["hidden_size"]
-        
+
         if args.intermediate_size is None:
             args.intermediate_size = model_config["intermediate_size"]
-        
+
         if args.num_groups is None:
             args.num_groups = model_config["num_groups"]
-        
+
         if args.dtype is None:
             args.dtype = model_config["dtype"]
-        
+
         if args.head_num_range == [12, 32, 40, 48, 64, 96, 128]:
             model_heads = model_config.get("num_attention_heads", 32)
             if model_heads not in args.head_num_range:
                 args.head_num_range.append(model_heads)
-                args.head_num_range.sort() 
-                print(f"Added model's head number {model_heads} to head_num_range")
-            
+                args.head_num_range.sort()
+                print(
+                    f"Added model's head number {model_heads} to head_num_range"
+                )
+
         print(f"Using model configuration from: {args.model_name}")
         print(f"Updated hidden_size: {args.hidden_size}")
         print(f"Updated intermediate_size: {args.intermediate_size}")
         print(f"Updated num_groups: {args.num_groups}")
         print(f"Updated head_num_range: {args.head_num_range}")
         print(f"Updated dtype: {args.dtype}")
-    
+
     return args
 
 
 if __name__ == "__main__":
-    
+
     import argparse
 
     args = parse_args()
-    
+
     print(f"Final configuration:")
     print(f"  Batch size: {args.batch_size}")
     print(f"  Sequence length: {args.seq_len}")
@@ -386,7 +394,7 @@ if __name__ == "__main__":
     seq_length_range = [2**i for i in range(6, 10, 1)]
     head_num_range = args.head_num_range
     configs = list(
-    itertools.product(head_num_range, batch_size_range, seq_length_range))
+        itertools.product(head_num_range, batch_size_range, seq_length_range))
 
     if HAS_IPEX:
         print("✅ IPEX is available")
@@ -403,6 +411,6 @@ if __name__ == "__main__":
     )
 
     # Get the benchmark function with proper use_residual setting
-    benchmark = get_benchmark(args.use_residual,args.dtype)
+    benchmark = get_benchmark(args.use_residual, args.dtype)
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=args.save_path)
