@@ -2,6 +2,7 @@
 
 #include "core/registration.h"
 #include "xpu/cutlass_kernels/chunk_prefill.hpp"
+#include "xpu/utils.h"
 #include <torch/all.h>
 
 namespace FLASH_NAMESPACE {
@@ -32,15 +33,18 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int window_size_right,
     const float softcap,
     const bool return_softmax, std::optional<at::Generator> gen_) {
+  auto& queue = vllm::xpu::vllmGetQueue();
+
   at::Tensor out;
   if(out_.has_value()) {
     out = *out_;
   }
   else {
-    out = torch::zeros_like(q).to(torch::kFloat32);
+    out = torch::zeros_like(q);
   }
 
   cutlass_chunk_prefill_impl(
+      queue,
       q,
       k,
       v,
