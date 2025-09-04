@@ -2,7 +2,7 @@
 
 #include "core/registration.h"
 #include "xpu/cutlass_kernels/chunk_prefill.hpp"
-#include "xpu/utils.h"
+#include "utils.h"
 #include <torch/all.h>
 
 namespace FLASH_NAMESPACE {
