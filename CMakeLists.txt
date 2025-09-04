@@ -135,26 +135,8 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS}")
   set(SYCL_FIRST_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/csrc/sycl_first.h")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include ${SYCL_FIRST_HEADER}")
-endif()
 
-#
-# Define other extension targets
-#
-
-
-#
-# _C extension
-#
-if(VLLM_GPU_LANG STREQUAL "SYCL")
-  set(VLLM_EXT_SRC
-    "csrc/cache.cpp"
-    "csrc/layernorm.cpp"
-    "csrc/activation.cpp"
-    "csrc/pos_encoding_kernels.cpp"
-    "csrc/torch_bindings.cpp"
-    "csrc/quantization/fp8/fp8_quant.cpp"
-  )
-
+  # define link options for SYCL, including AOT targets and optimizations
   set(PERF_LINK_OPTS "-doubleGRF")
   set(PERF_LINK_OPTS "${PERF_LINK_OPTS} -vc-disable-indvars-opt")
   set(PERF_LINK_OPTS "${PERF_LINK_OPTS} -vc-codegen")
@@ -180,14 +162,34 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   else()
     set(LINKE_OPTS ${LINKE_OPTS} "${PERF_LINK_OPTS}")
   endif()
-
   set(SYCL_LINK_OPTION  ${LINKE_OPTS})
+
+endif()
+
+#
+# Define other extension targets
+#
+
+
+#
+# _C extension
+#
+if(VLLM_GPU_LANG STREQUAL "SYCL")
+  set(VLLM_EXT_SRC
+    "csrc/cache.cpp"
+    "csrc/layernorm.cpp"
+    "csrc/activation.cpp"
+    "csrc/pos_encoding_kernels.cpp"
+    "csrc/torch_bindings.cpp"
+    "csrc/quantization/fp8/fp8_quant.cpp"
+  )
+
   include_directories("/usr/include")
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})
   set(CMAKE_CXX_COMPILER icpx)
   set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
-  list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
-  list(APPEND VLLM_GPU_LINK_FLAGS  ${SYCL_LINK_OPTION})
+  list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" -fsycl-targets=spir64_gen,spir64 )
+  list(APPEND VLLM_GPU_LINK_FLAGS ${SYCL_LINK_OPTION})
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
 endif()
 
@@ -217,7 +219,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CMAKE_CXX_COMPILER icpx)
   set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
   list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
-  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
+  list(APPEND VLLM_GPU_LINK_FLAGS ${SYCL_LINK_OPTION})
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
 endif()
 
