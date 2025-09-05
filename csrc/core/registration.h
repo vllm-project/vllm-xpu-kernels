@@ -1,5 +1,6 @@
 #pragma once
-
+#pragma push_macro("printf")
+#undef printf
 #include <Python.h>
 
 #define _CONCAT(A, B) A##B
@@ -22,6 +23,8 @@
 #define REGISTER_EXTENSION(NAME)                                               \
   PyMODINIT_FUNC CONCAT(PyInit_, NAME)() {                                     \
     static struct PyModuleDef module = {PyModuleDef_HEAD_INIT,                 \
-                                        STRINGIFY(NAME), nullptr, 0, nullptr}; \
+                                        STRINGIFY(NAME), nullptr, 0, nullptr,  \
+                                        nullptr, nullptr, nullptr, nullptr};   \
     return PyModule_Create(&module);                                           \
   }
+#pragma pop_macro("printf")
