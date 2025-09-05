@@ -100,6 +100,7 @@ using ElementA = bfloat16_t;          // <- data type of elements in input matri
 using ElementB = bfloat16_t;          // <- data type of elements in input matrix B
 using ElementOutput = float;          // <- data type of elements in output matrix D
 bool debug = false;
+bool collect_gflops = false;
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 
@@ -138,6 +139,24 @@ struct Options {
     }
     groups = group_cnt;
   }
+  
+  /// Compute performance in GFLOP/s
+  double gflops(double runtime_s, std::vector<typename ProblemShape::UnderlyingProblemShape> problem_sizes_host) const
+  {
+    // Number of real-valued multiply-adds
+    uint64_t fmas = uint64_t();
+
+    for (auto const & problem : problem_sizes_host) {
+      fmas += static_cast<uint64_t>(get<0>(problem)) *
+              static_cast<uint64_t>(get<1>(problem)) *
+              static_cast<uint64_t>(get<2>(problem));
+    }
+    // Two flops per multiply-add
+    uint64_t flop = uint64_t(2) * uint64_t(fmas);
+    double gflop = double(flop) / double(1.0e9);
+    return gflop / runtime_s;
+  }
+
 };
 
 
@@ -416,9 +435,23 @@ void allocate(const Options &options, int64_t* offset) {
     }
     // Run the GEMM
     CUTLASS_CHECK(gemm_op.run());
+  
+    if (collect_gflops){
+      GPU_Clock timer;
+      timer.start();
+      for (int iter = 0; iter < 100; ++iter) {
+        CUTLASS_CHECK(gemm_op.run());
+      }
+      syclcompat::wait();
 
+      float cute_time = timer.seconds() * 1000;
+      double cute_average_time = double(cute_time) / double(options.iterations);
+      double gflops = options.gflops(cute_average_time / 1000.0, options.problem_sizes_host);
+      std::cout << "  Avg runtime : " << cute_average_time << " ms" << std::endl;
+      std::cout << "  GFLOPS      : " << gflops << std::endl;
 
-    stream->throw_asynchronous();
+    }
+        stream->throw_asynchronous();
 
     return cutlass::Status::kSuccess;
   }
@@ -455,7 +488,7 @@ void kernel_functor(
   using ElementScale = cutlass::bfloat16_t;
 
   using LayoutA = cutlass::layout::RowMajor;
-  using LayoutB = cutlass::layout::RowMajor;
+  using LayoutB = cutlass::layout::ColumnMajor;
   using LayoutC = cutlass::layout::RowMajor;
   using LayoutD = cutlass::layout::RowMajor;
 

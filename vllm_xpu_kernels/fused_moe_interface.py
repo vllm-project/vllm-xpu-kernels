@@ -36,7 +36,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
 
     # gemm1
     input_A = torch.cat(grouped_input_A, dim=0).contiguous()
-    input_B = w13.transpose(-1, -2).contiguous().transpose(-1, -2)
+    input_B = w13 #.transpose(-1, -2).contiguous().transpose(-1, -2)
     assert(list(input_A.shape)[0] == total_input_size)
     gemm1_output = torch.empty((total_input_size, 2*intermediate_size), dtype=torch.float32,device=hidden_states.device)
     offset = torch.tensor(offset, dtype=torch.int64, device='cpu')
@@ -56,7 +56,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     # gemm 2
     group_A = act_output.to(torch.bfloat16).contiguous()
     output = torch.empty((list(group_A.shape)[0], hidden_size), dtype=torch.float32, device=hidden_states.device)
-    w2 = w2.transpose(-1, -2).contiguous().transpose(-1, -2)
+    w2 = w2 #.transpose(-1, -2).contiguous().transpose(-1, -2)
     cutlass_grouped_gemm(input_A=group_A,
                          input_B=w2,
                          output=output,
