@@ -35,4 +35,5 @@ jobs:
       - name: Run unit tests
         run: |
           source /opt/oneapi/2025.1.2/setvars.sh  --force
+          export ZE_AFFINITY_MASK=0
           pytest -v -s tests/
