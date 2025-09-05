@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import torch
 from typing import Optional
+import torch
 import vllm_xpu_kernels._C  # noqa: F401
 import vllm_xpu_kernels._moe_C  # noqa: F401
 
