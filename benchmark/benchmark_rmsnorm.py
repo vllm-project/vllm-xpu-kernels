@@ -315,14 +315,12 @@ def parse_args():
         default=None,
         help="Model name to load configuration from",
     )
-    parser.add_argument(
-        "--head-num-range",
-        type=int,
-        nargs='+',
-        default=[12, 32, 40, 48, 64, 96, 128],
-        help=
-        "Range of attention head numbers to test/use. Default: 12 32 40 48 64 96 128"
-    )
+    parser.add_argument("--head-num-range",
+                        type=int,
+                        nargs='+',
+                        default=[12, 32, 40, 48, 64, 96, 128],
+                        help=("Range of attention head numbers to test/use. "
+                              "Default: 12 32 40 48 64 96 128"))
     parser.add_argument(
         "--tp-size",
         type=int,
@@ -381,7 +379,7 @@ if __name__ == "__main__":
 
     args = parse_args()
 
-    print(f"Final configuration:")
+    print("Final configuration:")
     print(f"  Batch size: {args.batch_size}")
     print(f"  Sequence length: {args.seq_len}")
     print(f"  Hidden size: {args.hidden_size}")
