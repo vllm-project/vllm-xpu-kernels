@@ -17,15 +17,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install dependencies
+      - name: build docker image
         run: |
-          pip install -r requirements.txt
+          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
 
-      - name: build library
+      - name: test 
         run: |
-          python setup.py develop
-
-      - name: Run unit tests
+          docker run \
+          --device /dev/dri \
+          -v /dev/dri/by-path:/dev/dri/by-path \
+          --name vllm-xpu-kernel-ci \
+          xpu-kernel-ci-image \
+          /bin/bash -c '
+          pytest -v -s /workspace/vllm-xpu-kernels/tests/
+          '
+      - name: Remove container
         run: |
-          export ZE_AFFINITY_MASK=1
-          pytest -v -s tests/
+          docker rm -f vllm-xpu-kernel-ci || true
