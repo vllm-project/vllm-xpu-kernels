@@ -9,14 +9,12 @@ import triton
 from torch import nn
 
 from tests import register_ops as vllm_ops
-from tests import utils
+from tests.utils import check_ipex_availability, get_model_config
 
-try:
+HAS_IPEX = check_ipex_availability()
+
+if HAS_IPEX:
     import intel_extension_for_pytorch as ipex
-    HAS_IPEX = True
-except ImportError:
-    HAS_IPEX = False
-    print("Warning: IPEX not available, skipping IPEX benchmarks")
 
 
 class HuggingFaceRMSNorm(nn.Module):
@@ -340,7 +338,7 @@ def parse_args():
     args = parser.parse_args()
 
     if args.model_name:
-        model_config = utils.get_model_config(args.model_name, args.tp_size)
+        model_config = get_model_config(args.model_name, args.tp_size)
 
         if args.hidden_size == 4096:
             args.hidden_size = model_config["hidden_size"]

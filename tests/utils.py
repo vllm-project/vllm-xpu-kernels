@@ -336,3 +336,18 @@ def get_model_config(model_name: str, tp_size: int = 1):
             print(f"  {key}: {value}")
 
     return shape_configs
+
+
+def check_ipex_availability():
+    """
+    Check if Intel Extension for PyTorch (IPEX) is available.
+    
+    Returns:
+        bool: True if IPEX is available, False otherwise
+    """
+    import importlib.util
+    if importlib.util.find_spec("intel_extension_for_pytorch") is not None:
+        return True
+    else:
+        print("Warning: IPEX not available, skipping IPEX benchmarks")
+        return False
