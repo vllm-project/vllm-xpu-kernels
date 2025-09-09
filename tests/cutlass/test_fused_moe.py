@@ -28,6 +28,25 @@ FUSED_MOE_WN16_MNK_FACTORS = [
 
 DEVICE = "xpu"
 
+
+def calculate_device_mem(m, k, n, e, topk, dtype):
+    total = 0
+    x = m*k
+    w13 = e*2*n*k
+    w2 = e*k*n
+    topk_w = topk*m
+    topk_id = topk*m
+    expert_cache = x
+    gemm1_out = m*2*n
+    gemm2_out = m*k
+    total += x + w13 + w2 + topk_w + topk_id + expert_cache + gemm1_out + gemm2_out
+    byte_per_data = 4
+    if dtype == torch.bfloat16:
+        byte_per_data = 2
+    total_bytes_G = total * byte_per_data / 1000 / 1000 / 1000
+    print("fused moe should take device memory: ", total_bytes_G, "G")
+
+
 def test_grouped_gemm(num_experts, n, k, token_per_group):
     # input
     input_A = torch.randn((sum(token_per_group), k), dtype=torch.bfloat16, device="xpu")

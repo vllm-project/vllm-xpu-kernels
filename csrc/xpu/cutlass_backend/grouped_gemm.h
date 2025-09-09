@@ -272,7 +272,7 @@ void allocate(const Options &options, int64_t* offset) {
     stride_C_host.push_back(cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1}));
     stride_D_host.push_back(cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1}));
   }
-  block_C.reset(total_elements_C);
+  // block_C.reset(total_elements_C);
   block_alpha.reset(options.groups);
   block_beta.reset(options.groups);
 }
@@ -339,7 +339,7 @@ void allocate(const Options &options, int64_t* offset) {
     beta_device.copy_from_host(ptr_beta_host.data());
 
 
-    initialize_block(block_C, 0);
+    // initialize_block(block_C, 666);
     // Per-group alpha and beta values - note these are not directly passed to kernel - the pointers
     // (alpha_device/beta_device) are passed instead
     block_alpha.copy_from_host(alpha_host.data());
@@ -437,6 +437,7 @@ void allocate(const Options &options, int64_t* offset) {
     CUTLASS_CHECK(gemm_op.run());
   
     if (collect_gflops){
+      std::cout << "collect_gflops:" << collect_gflops << std::endl;
       GPU_Clock timer;
       timer.start();
       for (int iter = 0; iter < 100; ++iter) {
@@ -451,7 +452,7 @@ void allocate(const Options &options, int64_t* offset) {
       std::cout << "  GFLOPS      : " << gflops << std::endl;
 
     }
-        stream->throw_asynchronous();
+    stream->throw_asynchronous();
 
     return cutlass::Status::kSuccess;
   }
