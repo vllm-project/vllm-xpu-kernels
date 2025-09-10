@@ -266,7 +266,7 @@ static inline void get_strides(memory::dims& src_strides,
                                const int64_t ldb, const int64_t ldc) {}
 
 template <>
-static inline void get_strides<trans_type_t::nt>(memory::dims& src_strides,
+void get_strides<trans_type_t::nt>(memory::dims& src_strides,
                                                  memory::dims& wei_strides,
                                                  memory::dims& dst_strides,
                                                  const int64_t lda,
@@ -278,7 +278,7 @@ static inline void get_strides<trans_type_t::nt>(memory::dims& src_strides,
 }
 
 template <>
-static inline void get_strides<trans_type_t::nn>(memory::dims& src_strides,
+void get_strides<trans_type_t::nn>(memory::dims& src_strides,
                                                  memory::dims& wei_strides,
                                                  memory::dims& dst_strides,
                                                  const int64_t lda,

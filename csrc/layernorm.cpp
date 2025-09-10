@@ -23,9 +23,9 @@ class rms_norm_kernel {
         hidden_size(hidden_size_),
         s_variance(s_variance_) {}
 
-  void operator() [[intel::reqd_sub_group_size(32)]] (
+  void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
-    float* s_variance_ptr = s_variance.get_pointer();
+    float* s_variance_ptr = s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
     float variance = 0.0f;
 
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
@@ -65,7 +65,7 @@ class rms_norm_kernel {
 template <typename scalar_t>
 void call_rms_norm_kernel(torch::Tensor& out, torch::Tensor& input,
                           torch::Tensor& weight, float epsilon) {
-  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+  using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
   int64_t input_stride = input.stride(-2);
@@ -104,9 +104,9 @@ class fused_add_rms_norm_kernel {
         hidden_size(hidden_size_),
         s_variance(s_variance_) {}
 
-  void operator() [[intel::reqd_sub_group_size(32)]] (
+  void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
-    float* s_variance_ptr = s_variance.get_pointer();
+    float* s_variance_ptr = s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
     float variance = 0.0f;
 
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
@@ -150,7 +150,7 @@ template <typename scalar_t>
 void call_fused_add_rms_norm_kernel(torch::Tensor& input,
                                     torch::Tensor& residual,
                                     torch::Tensor& weight, float epsilon) {
-  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+  using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
   auto input_ptr = input.data_ptr<scalar_t>();
