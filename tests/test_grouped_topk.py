@@ -2,7 +2,8 @@
 import pytest
 import torch
 
-from tests.ops.grouped_topk_op import fused_grouped_topk, grouped_topk
+from tests.ops.grouped_topk_op import (fused_grouped_topk,
+                                       fused_grouped_topk_sycl, grouped_topk)
 from tests.utils import seed_everything
 
 
@@ -25,7 +26,7 @@ def test_grouped_topk(n_token: int, n_hidden: int, n_expert: int, topk: int,
     hidden_states = torch.randn((n_token, n_hidden), dtype=dtype, device="xpu")
     gating_output = torch.randn((n_token, n_expert), dtype=dtype, device="xpu")
     e_score_correction_bias = torch.randn((n_expert, ),
-                                          dtype=torch.float32,
+                                          dtype=dtype,
                                           device="xpu")
 
     baseline_topk_weights, baseline_topk_ids = grouped_topk(
@@ -50,13 +51,32 @@ def test_grouped_topk(n_token: int, n_hidden: int, n_expert: int, topk: int,
         routed_scaling_factor=routed_scaling_factor,
         e_score_correction_bias=e_score_correction_bias)
 
+    test_topk_weights_sycl, test_topk_ids_sycl = fused_grouped_topk_sycl(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=renormalize,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        scoring_func=scoring_func,
+        routed_scaling_factor=routed_scaling_factor,
+        e_score_correction_bias=e_score_correction_bias)
+
     if renormalize:
         torch.testing.assert_close(baseline_topk_weights,
                                    test_topk_weights,
                                    atol=2e-2,
                                    rtol=0)
+        torch.testing.assert_close(baseline_topk_weights,
+                                   test_topk_weights_sycl,
+                                   atol=2e-2,
+                                   rtol=0)
 
     torch.testing.assert_close(baseline_topk_ids,
                                test_topk_ids,
+                               atol=0,
+                               rtol=0)
+    torch.testing.assert_close(baseline_topk_ids,
+                               test_topk_ids_sycl,
                                atol=0,
                                rtol=0)

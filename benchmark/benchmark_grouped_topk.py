@@ -8,7 +8,8 @@ from typing import Optional
 import torch
 import triton
 
-from tests.ops.grouped_topk_op import fused_grouped_topk, grouped_topk
+from tests.ops.grouped_topk_op import (fused_grouped_topk,
+                                       fused_grouped_topk_sycl, grouped_topk)
 
 
 @torch.compile
@@ -95,8 +96,8 @@ def get_benchmark():
             ],
             x_vals=[tuple(_) for _ in configs],
             line_arg="provider",
-            line_vals=["vllm", "native", "compile"],
-            line_names=["vllm", "native", "compile"],
+            line_vals=["vllm", "native", "compile", "sycl"],
+            line_names=["vllm", "native", "compile", "sycl"],
             styles=[("blue", "-"), ("green", "-"), ("orange", "-"),
                     ("red", "-")],
             ylabel="us",
@@ -156,9 +157,23 @@ def get_benchmark():
                     e_score_correction_bias=e_score_correction_bias),
                 quantiles=quantiles,
             )
-        else:
+        elif provider == "compile":
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: grouped_topk_compile(
+                    hidden_states=hidden_states,
+                    gating_output=gating_output,
+                    topk=topk,
+                    renormalize=renormalize,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    scoring_func=scoring_func,
+                    routed_scaling_factor=routed_scaling_factor,
+                    e_score_correction_bias=e_score_correction_bias),
+                quantiles=quantiles,
+            )
+        elif provider == "sycl":
+            ms, min_ms, max_ms = triton.testing.do_bench(
+                lambda: fused_grouped_topk_sycl(
                     hidden_states=hidden_states,
                     gating_output=gating_output,
                     topk=topk,

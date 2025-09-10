@@ -90,3 +90,20 @@ def fused_grouped_topk(
         scores, scores_with_bias.to(scores.dtype), num_expert_group,
         topk_group, topk, renormalize, routed_scaling_factor)
     return topk_values.to(torch.float32), topk_indices.to(torch.int32)
+
+
+def fused_grouped_topk_sycl(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int,
+    topk_group: int,
+    scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return ops.fused_grouped_topk(hidden_states, gating_output, topk,
+                                  renormalize, num_expert_group, topk_group,
+                                  scoring_func, routed_scaling_factor,
+                                  e_score_correction_bias)
