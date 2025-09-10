@@ -25,7 +25,8 @@ class rms_norm_kernel {
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
-    float* s_variance_ptr = s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
+    float* s_variance_ptr =
+        s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
     float variance = 0.0f;
 
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
@@ -106,7 +107,8 @@ class fused_add_rms_norm_kernel {
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
-    float* s_variance_ptr = s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
+    float* s_variance_ptr =
+        s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
     float variance = 0.0f;
 
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
