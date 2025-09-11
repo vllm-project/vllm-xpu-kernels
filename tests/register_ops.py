@@ -5,6 +5,7 @@ import torch
 from typing import Optional
 import vllm_xpu_kernels._C  # noqa: F401
 import vllm_xpu_kernels._moe_C  # noqa: F401
+import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 
 # layer norm ops
@@ -59,6 +60,20 @@ def rotary_embedding(
 ) -> None:
     torch.ops._C.rotary_embedding(positions, query, key, head_size,
                                   cos_sin_cache, is_neox)
+
+
+def deepseek_scaling_rope(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    offsets_opt: Optional[torch.Tensor],
+    cos_sin_cache: Optional[torch.Tensor],
+    rotary_dim: int,
+    is_neox_style: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._xpu_C.deepseek_scaling_rope(positions, query, key,
+                                                  offsets_opt, cos_sin_cache,
+                                                  rotary_dim, is_neox_style)
 
 
 def reshape_and_cache(

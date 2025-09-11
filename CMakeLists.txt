@@ -198,6 +198,7 @@ if(ONEDNN_FOUND)
   file(GLOB _ONEDNN_SRC csrc/xpu/onednn/*.cpp)
   list(APPEND VLLM_EXT_XPU_SRC
     ${_ONEDNN_SRC}
+    "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
   )
   include_directories(${ONEDNN_INCLUDE_DIR})
   link_libraries(${ONEDNN_LIBRARY})
