@@ -215,7 +215,6 @@ def get_benchmark(use_residual, dtype):
             args={},
         ))
     def benchmark(head_num, batch_size, seq_len, provider):
-        #dtype = torch.bfloat16
         hidden_size = head_num * 128  # assuming head_dim = 128
 
         x = torch.randn(batch_size,
