@@ -222,6 +222,16 @@ struct GroupedGemmRunner {
   // cutlass::DeviceAllocation<ElementAccumulator> block_alpha;
   // cutlass::DeviceAllocation<ElementAccumulator> block_beta;
 
+  void release(){
+    problem_sizes.release();
+    ptr_C.release();
+    stride_A.release();
+    stride_B.release();
+    stride_C.release();
+    stride_D.release();
+    block_C.release();
+  }
+
   /// Allocates device-side data
 void allocate(const Options &options) {
   if (debug){
@@ -445,7 +455,7 @@ void allocate(const Options &options) {
 
     }
     stream->throw_asynchronous();
-
+    release();
     return cutlass::Status::kSuccess;
   }
 };

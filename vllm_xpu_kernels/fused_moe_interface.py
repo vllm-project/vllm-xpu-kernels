@@ -75,6 +75,7 @@ def cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts):
     torch.ops._xpu_C.cutlass_grouped_gemm(offset=offset, N=n, K=k, **gemm_args)
 
 def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_per_token, activation, num_experts):
+
     token_cnt, hidden_size = list(hidden_states.shape)
     intermediate_size = list(w2.shape)[-1]
     expert_cache = torch.empty((token_cnt, hidden_size),
@@ -99,7 +100,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
         grouped_input_A.append(expert_tokens)
 
     total_input_size = token_cnt * num_per_tok
-
+    print("@@@@@@@ cutlass fused moe enter")
     # gemm1
     input_A = torch.cat(grouped_input_A, dim=0).contiguous()
     input_B = w13.transpose(-1, -2).contiguous().transpose(-1, -2)
