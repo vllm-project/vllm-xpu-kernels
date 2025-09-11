@@ -206,7 +206,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   FetchContent_Declare(
       cutlass-sycl
-      GIT_REPOSITORY https://github.com/intel/cutlass-sycl.git
+      GIT_REPOSITORY https://github.com/Liangliang-Ma/cutlass-sycl.git
       # Please keep this in sync with CUTLASS_REVISION line above.
       GIT_TAG ${CUTLASS_REVISION}
       GIT_PROGRESS TRUE

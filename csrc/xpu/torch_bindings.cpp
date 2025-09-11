@@ -13,7 +13,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor? bias_) -> Tensor");
   xpu_ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
   
-  xpu_ops.def("cutlass_grouped_gemm(Tensor input, Tensor weight, Tensor res, Tensor offset, int hidden_size, int intermediate_size, int num_of_expert) -> Tensor");
+  xpu_ops.def("cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor ptr_D, Tensor ptr_alpha, Tensor ptr_beta, Tensor offset, int N, int K, int groups) -> Tensor");
   xpu_ops.impl("cutlass_grouped_gemm", torch::kXPU, gpu::cutlass_kernel::grouped_gemm_func);
 }
 

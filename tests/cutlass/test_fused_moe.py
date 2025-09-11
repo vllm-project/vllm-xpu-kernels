@@ -49,7 +49,7 @@ def calculate_device_mem(m, k, n, e, topk, dtype):
 
 def test_grouped_gemm(num_experts, n, k, token_per_group):
     # input
-    input_A = torch.randn((sum(token_per_group), k), dtype=torch.bfloat16, device="xpu")
+    input_A = torch.randn((sum(token_per_group), k), dtype=torch.bfloat16, device="xpu").contiguous()
 
     # weight
     input_B = torch.randn((num_experts, n, k), dtype=torch.bfloat16, device="xpu")
@@ -69,12 +69,15 @@ def test_grouped_gemm(num_experts, n, k, token_per_group):
         if cur_token_num == 0:
             continue
         input = input_A[pre_token_sum:pre_token_sum + cur_token_num, :]
+        print("refA ptr",i, ":", hex(input.data_ptr()))
         weight = input_B[i, :, :]
         expert_output = input @ weight.T
         ref.append(expert_output)
         pre_token_sum += cur_token_num
     ref = torch.cat(ref, dim=0).float()
 
+    print("kernel:", output)
+    print("reference:",  ref)
     print(torch.allclose(output, ref, rtol=1, atol=1))
     max_diff = (output - ref).abs().max()
     print("Max absolute difference:", max_diff)
@@ -187,4 +190,4 @@ if __name__ == "__main__":
         ep_size = 1,
         dtype = torch.bfloat16
     )
-    # test_grouped_gemm(num_experts=16, n=5120, k=8192, token_per_group=[1,2,6,8,12,0,1,5,1,2,6,8,12,0,1,5])
+    # test_grouped_gemm(num_experts=2, n=4096, k=4096, token_per_group=[512,512])

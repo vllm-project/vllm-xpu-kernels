@@ -16,31 +16,28 @@ namespace gpu::cutlass_kernel {
 /* gemm2(group_A, w2, output, offset) */
 
 at::Tensor grouped_gemm_func(
-    at::Tensor& input,
-    at::Tensor& weight, 
-    at::Tensor& res,
+    at::Tensor& ptr_A,
+    at::Tensor& ptr_B,
+    at::Tensor& ptr_D,
+    at::Tensor& ptr_alpha,
+    at::Tensor& ptr_beta,
     at::Tensor& offset,
-    int64_t hidden_size,
-    int64_t intermediate_size,
-    int64_t num_of_expert
-   ) {
+    int64_t N,
+    int64_t K,
+    int64_t groups) {
   auto dpcpp_queue = vllm::xpu::vllmGetQueue();
-  if (input.scalar_type() != at::kBFloat16) {
-    std::cout << "error:wrong datatype, current only support bfloat16" << std::endl;
-    return at::Tensor();
-  }
-
-  grouped_gemm::kernel_functor(
+    grouped_gemm::kernel_functor(
       &dpcpp_queue,
-      input.data_ptr(),
-      weight.data_ptr(),
-      res.data_ptr(),
+      ptr_A.data_ptr(),
+      ptr_B.data_ptr(),
+      ptr_D.data_ptr(),
+      ptr_alpha.data_ptr(),
+      ptr_beta.data_ptr(),
       offset.data_ptr(),
-      hidden_size,
-      intermediate_size,
-      num_of_expert
-      );
-  return res;
+      N,
+      K,
+      groups);
+  return ptr_D;
 }
 
 } // namespace gpu::cutlass_kernel
