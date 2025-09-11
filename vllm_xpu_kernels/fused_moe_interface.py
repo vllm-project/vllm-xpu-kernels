@@ -110,7 +110,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     gemm_args = prepare_gemm_args(2*intermediate_size, hidden_size, offset, input_A, input_B, gemm1_output, alpha, beta)
     offset_t = torch.tensor(offset, dtype=torch.int64, device='cpu')
     torch.ops._xpu_C.cutlass_grouped_gemm(offset=offset_t, N=2*intermediate_size, K=hidden_size, **gemm_args)
-
+    print("@@@@@@@ cutlass fused moe gemm1 done")
     # act
     gate, up = torch.split(gemm1_output, intermediate_size, dim=1)
     act = torch.nn.SiLU()
@@ -140,5 +140,5 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
             expert_out,
             reduce='sum'
         )
-
+    print("@@@@@@@ cutlass fused moe gemm2 done")
     return expert_cache
