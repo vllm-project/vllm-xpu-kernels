@@ -174,7 +174,7 @@ def test_fused_moe(
 
     print("ref result", ref_out, ref_out.shape)
     print("kernel result", out, out.shape)
-    print(torch.allclose(out, ref_out, rtol=1, atol=1))
+    print(torch.allclose(out.float(), ref_out, rtol=1, atol=1))
     max_diff = (out - ref_out).abs().max()
     print("Max absolute difference:", max_diff)
 

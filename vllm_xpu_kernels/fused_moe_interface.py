@@ -5,20 +5,37 @@ from typing import List
 import numpy
 import vllm_xpu_kernels._xpu_C
 
-def prepare_gemm_args(n, k, offset, A, B, D, alpha, beta):
-    gemm_args = {}
-    device = A.device
+def prepare_gemm_args(n, k, offset, A, B, D, alpha, beta, e):
+
+    if not hasattr(prepare_gemm_args, "gemm_args"):
+        print("@cutlass fusedMoe allocate gemm args once")
+        gemm_args = {}
+        device = A.device
+        ptr_A = torch.empty(e*8, dtype=torch.uint8, device=device).contiguous()
+        ptr_B = torch.empty(e*8, dtype=torch.uint8, device=device).contiguous()
+        ptr_D = torch.empty(e*8, dtype=torch.uint8, device=device).contiguous()
+        ptr_alpha = torch.empty(e*8, dtype=torch.uint8, device=device).contiguous()
+        ptr_beta = torch.empty(e*8, dtype=torch.uint8, device=device).contiguous()
+        gemm_args["ptr_A"] = ptr_A
+        gemm_args["ptr_B"] = ptr_B
+        gemm_args["ptr_D"] = ptr_D
+        gemm_args["ptr_alpha"] = ptr_alpha
+        gemm_args["ptr_beta"] = ptr_beta
+        prepare_gemm_args.gemm_args = gemm_args
+
+    # gemm_args = {}
+
     # problem_sizes = []
-    ptr_A = []
-    ptr_B = []
-    ptr_D = []
-    ptr_alpha = []
-    ptr_beta = []
+    ptr_A = prepare_gemm_args.gemm_args["ptr_A"]
+    ptr_B = prepare_gemm_args.gemm_args["ptr_B"]
+    ptr_D = prepare_gemm_args.gemm_args["ptr_D"]
+    ptr_alpha = prepare_gemm_args.gemm_args["ptr_alpha"]
+    ptr_beta = prepare_gemm_args.gemm_args["ptr_beta"]
     total_elements_A = 0
     total_elements_B = 0
     total_elements_D = 0
 
-    def process_data_ptr(tensor, offset, addr_list, dim):
+    def process_data_ptr(tensor, offset, addr_tensor, dim, group):
         mul = 2
         if tensor.dtype == torch.float32:
             mul = 4
@@ -34,37 +51,37 @@ def prepare_gemm_args(n, k, offset, A, B, D, alpha, beta):
             addr = tensor[offset, :, :].data_ptr()
         for i in range(8):                  # 64bit -> 8 bytes
             byte_val = (addr >> (i * 8)) & 0xFF
-            addr_list.append(byte_val)
+            addr_tensor[8*group + i] = byte_val
 
     groups = 0
     for m in offset:
         if m != 0:
             # problem_sizes.extend([m, n, k])
-            process_data_ptr(A, total_elements_A, ptr_A, 2)
-            process_data_ptr(B, total_elements_B, ptr_B, 3)
-            process_data_ptr(D, total_elements_D, ptr_D, 2)
-            process_data_ptr(alpha, groups, ptr_alpha, 1)
-            process_data_ptr(beta, groups, ptr_beta, 1)
+            process_data_ptr(A, total_elements_A, ptr_A, 2, groups)
+            process_data_ptr(B, total_elements_B, ptr_B, 3, groups)
+            process_data_ptr(D, total_elements_D, ptr_D, 2, groups)
+            process_data_ptr(alpha, groups, ptr_alpha, 1, groups)
+            process_data_ptr(beta, groups, ptr_beta, 1, groups)
             total_elements_A += m;
             total_elements_D += m;
             groups += 1
         total_elements_B += 1;
 
     # problem_sizes = torch.tensor(problem_sizes, dtype=torch.int64, device='cpu').contiguous()
-    ptr_A = torch.tensor(ptr_A, dtype=torch.uint8, device=device).contiguous()
-    ptr_B = torch.tensor(ptr_B, dtype=torch.uint8, device=device).contiguous()
-    ptr_D = torch.tensor(ptr_D, dtype=torch.uint8, device=device).contiguous()
-    ptr_alpha = torch.tensor(ptr_alpha, dtype=torch.uint8, device=device).contiguous()
-    ptr_beta = torch.tensor(ptr_beta, dtype=torch.uint8, device=device).contiguous()
+    # ptr_A = torch.tensor(ptr_A, dtype=torch.uint8, device=device).contiguous()
+    # ptr_B = torch.tensor(ptr_B, dtype=torch.uint8, device=device).contiguous()
+    # ptr_D = torch.tensor(ptr_D, dtype=torch.uint8, device=device).contiguous()
+    # ptr_alpha = torch.tensor(ptr_alpha, dtype=torch.uint8, device=device).contiguous()
+    # ptr_beta = torch.tensor(ptr_beta, dtype=torch.uint8, device=device).contiguous()
 
     # gemm_args["problem_sizes"] = problem_sizes
-    gemm_args["ptr_A"] = ptr_A
-    gemm_args["ptr_B"] = ptr_B
-    gemm_args["ptr_D"] = ptr_D
-    gemm_args["ptr_alpha"] = ptr_alpha
-    gemm_args["ptr_beta"] = ptr_beta
-    gemm_args["groups"] = groups
-    return gemm_args
+    # gemm_args["ptr_A"] = ptr_A
+    # gemm_args["ptr_B"] = ptr_B
+    # gemm_args["ptr_D"] = ptr_D
+    # gemm_args["ptr_alpha"] = ptr_alpha
+    # gemm_args["ptr_beta"] = ptr_beta
+    prepare_gemm_args.gemm_args["groups"] = groups
+    return prepare_gemm_args.gemm_args
 
 
 def cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts):
@@ -108,7 +125,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     gemm1_output = torch.empty((total_input_size, 2*intermediate_size), dtype=torch.float32,device=hidden_states.device)
     alpha = torch.ones(num_experts, dtype=torch.float32, device=input_A.device)
     beta = torch.zeros(num_experts, dtype=torch.float32, device=input_A.device)
-    gemm_args = prepare_gemm_args(2*intermediate_size, hidden_size, offset, input_A, input_B, gemm1_output, alpha, beta)
+    gemm_args = prepare_gemm_args(2*intermediate_size, hidden_size, offset, input_A, input_B, gemm1_output, alpha, beta, num_experts)
     offset_t = torch.tensor(offset, dtype=torch.int64, device='cpu')
     torch.ops._xpu_C.cutlass_grouped_gemm(offset=offset_t, N=2*intermediate_size, K=hidden_size, **gemm_args)
     print("@@@@@@@ cutlass fused moe gemm1 done")
@@ -122,7 +139,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     input_A = act_output.to(torch.bfloat16).contiguous()
     output = torch.empty((list(input_A.shape)[0], hidden_size), dtype=torch.float32, device=hidden_states.device)
     input_B = w2.transpose(-1, -2).contiguous().transpose(-1, -2)
-    gemm_args = prepare_gemm_args(hidden_size, intermediate_size, offset, input_A, input_B, output, alpha, beta)
+    gemm_args = prepare_gemm_args(hidden_size, intermediate_size, offset, input_A, input_B, output, alpha, beta, num_experts)
     torch.ops._xpu_C.cutlass_grouped_gemm(offset=offset_t, N=hidden_size, K=intermediate_size, **gemm_args)
 
     # apply scores
@@ -142,4 +159,5 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
             reduce='sum'
         )
     print("@@@@@@@ cutlass fused moe gemm2 done")
-    return expert_cache
+    hidden_states = expert_cache.to(hidden_states.dtype)
+    return hidden_states
