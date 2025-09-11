@@ -120,7 +120,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     print("@@@@@@@ cutlass fused moe enter")
     # gemm1
     input_A = torch.cat(grouped_input_A, dim=0).contiguous()
-    input_B = w13.transpose(-1, -2).contiguous().transpose(-1, -2)
+    input_B = w13#.transpose(-1, -2).contiguous().transpose(-1, -2)
     assert(list(input_A.shape)[0] == total_input_size)
     gemm1_output = torch.empty((total_input_size, 2*intermediate_size), dtype=torch.float32,device=hidden_states.device)
     alpha = torch.ones(num_experts, dtype=torch.float32, device=input_A.device)
@@ -138,7 +138,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     # gemm 2
     input_A = act_output.to(torch.bfloat16).contiguous()
     output = torch.empty((list(input_A.shape)[0], hidden_size), dtype=torch.float32, device=hidden_states.device)
-    input_B = w2.transpose(-1, -2).contiguous().transpose(-1, -2)
+    input_B = w2#.transpose(-1, -2).contiguous().transpose(-1, -2)
     gemm_args = prepare_gemm_args(hidden_size, intermediate_size, offset, input_A, input_B, output, alpha, beta, num_experts)
     torch.ops._xpu_C.cutlass_grouped_gemm(offset=offset_t, N=hidden_size, K=intermediate_size, **gemm_args)
 
@@ -159,5 +159,5 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
             reduce='sum'
         )
     print("@@@@@@@ cutlass fused moe gemm2 done")
-    hidden_states = expert_cache.to(hidden_states.dtype)
+    hidden_states.copy_(expert_cache.to(hidden_states.dtype))
     return hidden_states
