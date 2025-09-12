@@ -9,6 +9,12 @@ import triton
 from torch import nn
 
 from tests import register_ops as vllm_ops
+from tests.utils import check_ipex_availability, get_model_config
+
+HAS_IPEX = check_ipex_availability()
+
+if HAS_IPEX:
+    import intel_extension_for_pytorch as ipex
 
 
 class HuggingFaceRMSNorm(nn.Module):
@@ -112,6 +118,36 @@ def rmsnorm_vllm(
     return output
 
 
+def rmsnorm_ipex(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    residual: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+):
+    """IPEX implementation using ipex.llm.functional.rms_norm"""
+    if not HAS_IPEX:
+        raise RuntimeError("IPEX is not available")
+
+    orig_shape = x.shape
+    x = x.view(-1, x.shape[-1])
+
+    if residual is not None:
+        residual = residual.view(-1, residual.shape[-1])
+        if hasattr(ipex.llm.functional, 'fused_add_rms_norm'):
+            output, residual_out = ipex.llm.functional.fused_add_rms_norm(
+                x, residual, weight, eps)
+            output = (output.view(orig_shape), residual_out.view(orig_shape))
+        else:
+            x = x + residual
+            output = ipex.llm.functional.rms_norm(x, weight, eps)
+            output = (output.view(orig_shape), x.view(orig_shape))
+    else:
+        output = ipex.llm.functional.rms_norm(x, weight, eps)
+        output = output.view(orig_shape)
+
+    return output
+
+
 def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
     dtype = torch.bfloat16
     x = torch.randn(batch_size,
@@ -136,42 +172,49 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
     print(f"Naive output={output_naive}")
     print(f"vLLM output={output_vllm}")
 
+    if HAS_IPEX:
+        try:
+            output_ipex = rmsnorm_ipex(
+                x.clone(), weight,
+                residual.clone() if residual is not None else None)
+            if use_residual:
+                output_ipex = output_ipex[0]
+            print(f"IPEX output={output_ipex}")
+
+            if torch.allclose(output_naive, output_ipex, atol=1e-2, rtol=1e-2):
+                print("✅ IPEX implementation matches naive")
+            else:
+                print("❌ IPEX implementation differs from naive")
+        except Exception as e:
+            print(f"❌ IPEX implementation failed: {e}")
+
     if torch.allclose(output_naive, output_vllm, atol=1e-2, rtol=1e-2):
         print("✅ All implementations match")
     else:
         print("❌ Implementations differ")
 
 
-batch_size_range = [2**i for i in range(0, 7, 2)]
-seq_length_range = [2**i for i in range(6, 10, 1)]
-head_num_range = [
-    32,  #Llama
-    40,  #Qwen 14B/32B
-    48,
-    64,  #Llama 2 70B
-    128,  # Deepseek R1
-]
-configs = list(
-    itertools.product(head_num_range, batch_size_range, seq_length_range))
-
-
-def get_benchmark(use_residual):
+def get_benchmark(use_residual, dtype):
 
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["head_num", "batch_size", "seq_len"],
             x_vals=[tuple(_) for _ in configs],
             line_arg="provider",
-            line_vals=["huggingface", "vllm", "t.compile"],
-            line_names=["HuggingFace", "vLLM", "t.compile"],
-            styles=[("blue", "-"), ("green", "-"), ("orange", "-")],
+            line_vals=["huggingface", "vllm", "t.compile", "ipex"]
+            if HAS_IPEX else ["huggingface", "vllm", "t.compile"],
+            line_names=["HuggingFace", "vLLM", "t.compile", "IPEX"]
+            if HAS_IPEX else ["HuggingFace", "vLLM", "t.compile"],
+            styles=[("blue", "-"), ("green", "-"), ("orange", "-"),
+                    ("red", "-")] if HAS_IPEX else [("blue", "-"),
+                                                    ("green", "-"),
+                                                    ("orange", "-")],
             ylabel="us",
             plot_name=
             f"rmsnorm-perf-{'with' if use_residual else 'without'}-residual",
             args={},
         ))
     def benchmark(head_num, batch_size, seq_len, provider):
-        dtype = torch.bfloat16
         hidden_size = head_num * 128  # assuming head_dim = 128
 
         x = torch.randn(batch_size,
@@ -202,6 +245,15 @@ def get_benchmark(use_residual):
                 ),
                 quantiles=quantiles,
             )
+        elif provider == "ipex" and HAS_IPEX:
+            ms, min_ms, max_ms = triton.testing.do_bench(
+                lambda: rmsnorm_ipex(
+                    x.clone(),
+                    weight,
+                    residual.clone() if residual is not None else None,
+                ),
+                quantiles=quantiles,
+            )
         else:
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: rmsnorm_vllm(
@@ -216,9 +268,7 @@ def get_benchmark(use_residual):
     return benchmark
 
 
-if __name__ == "__main__":
-    import argparse
-
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--batch-size",
@@ -238,6 +288,42 @@ if __name__ == "__main__":
         default=4096,
         help="Hidden size (2nd dimension) of the sequence",
     )
+    parser.add_argument(
+        "--intermediate-size",
+        type=int,
+        default=None,
+        help="Intermediate size for FFN layers",
+    )
+    parser.add_argument(
+        "--num-groups",
+        type=int,
+        default=None,
+        help="Number of expert groups for MoE models",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default=torch.bfloat16,
+        help="Data type from model config",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default=None,
+        help="Model name to load configuration from",
+    )
+    parser.add_argument("--head-num-range",
+                        type=int,
+                        nargs='+',
+                        default=[12, 32, 40, 48, 64, 96, 128],
+                        help=("Range of attention head numbers to test/use. "
+                              "Default: 12 32 40 48 64 96 128"))
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=1,
+        help="Tensor parallelism size",
+    )
     parser.add_argument("--use-residual",
                         action="store_true",
                         help="Whether to use residual connection")
@@ -250,6 +336,67 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if args.model_name:
+        model_config = get_model_config(args.model_name, args.tp_size)
+
+        if args.hidden_size == 4096:
+            args.hidden_size = model_config["hidden_size"]
+
+        if args.intermediate_size is None:
+            args.intermediate_size = model_config["intermediate_size"]
+
+        if args.num_groups is None:
+            args.num_groups = model_config["num_groups"]
+
+        if args.dtype is None:
+            args.dtype = model_config["dtype"]
+
+        if args.head_num_range == [12, 32, 40, 48, 64, 96, 128]:
+            model_heads = model_config.get("num_attention_heads", 32)
+            if model_heads not in args.head_num_range:
+                args.head_num_range.append(model_heads)
+                args.head_num_range.sort()
+                print(
+                    f"Added model's head number {model_heads} to head_num_range"
+                )
+
+        print(f"Using model configuration from: {args.model_name}")
+        print(f"Updated hidden_size: {args.hidden_size}")
+        print(f"Updated intermediate_size: {args.intermediate_size}")
+        print(f"Updated num_groups: {args.num_groups}")
+        print(f"Updated head_num_range: {args.head_num_range}")
+        print(f"Updated dtype: {args.dtype}")
+
+    return args
+
+
+if __name__ == "__main__":
+
+    import argparse
+
+    args = parse_args()
+
+    print("Final configuration:")
+    print(f"  Batch size: {args.batch_size}")
+    print(f"  Sequence length: {args.seq_len}")
+    print(f"  Hidden size: {args.hidden_size}")
+    print(f"  Intermediate size: {args.intermediate_size}")
+    print(f"  Number of groups: {args.num_groups}")
+    print(f"  Data type: {args.dtype}")
+    print(f"  Use residual: {args.use_residual}")
+
+    batch_size_range = [2**i for i in range(0, 7, 2)]
+    seq_length_range = [2**i for i in range(6, 10, 1)]
+    head_num_range = args.head_num_range
+    configs = list(
+        itertools.product(head_num_range, batch_size_range, seq_length_range))
+
+    if HAS_IPEX:
+        print("✅ IPEX is available")
+        print(f"IPEX version: {ipex.__version__}")
+    else:
+        print("⚠️  IPEX is not available, skipping IPEX benchmarks")
+
     # Run correctness test
     calculate_diff(
         batch_size=args.batch_size,
@@ -259,6 +406,6 @@ if __name__ == "__main__":
     )
 
     # Get the benchmark function with proper use_residual setting
-    benchmark = get_benchmark(args.use_residual)
+    benchmark = get_benchmark(args.use_residual, args.dtype)
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=args.save_path)
