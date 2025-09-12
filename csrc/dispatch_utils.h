@@ -21,6 +21,11 @@
 #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
+#define VLLM_DISPATCH_FLOATING_TYPES_AND2(SCALARTYPE1, SCALARTYPE2, TYPE, \
+                                          NAME, ...)                      \
+  AT_DISPATCH_FLOATING_TYPES_AND2(SCALARTYPE1, SCALARTYPE2, TYPE, NAME,   \
+                                  __VA_ARGS__)
+
 #define VLLM_DISPATCH_CASE_FP8_TYPES(...)                          \
   AT_DISPATCH_FP8_CASE(at::ScalarType::Float8_e4m3fn, __VA_ARGS__) \
   AT_DISPATCH_FP8_CASE(at::ScalarType::Float8_e5m2, __VA_ARGS__)
