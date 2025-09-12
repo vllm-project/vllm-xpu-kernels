@@ -183,6 +183,8 @@ define_gpu_extension_target(
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_XPU_SRC
     "csrc/xpu/torch_bindings.cpp"
+    "csrc/xpu/lora/lora_shrink.cpp"
+    "csrc/xpu/lora/lora_expand.cpp"
   )
   include_directories("/usr/include")
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})
