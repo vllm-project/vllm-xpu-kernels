@@ -95,6 +95,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
 
     token_cnt, hidden_size = list(hidden_states.shape)
     intermediate_size = list(w2.shape)[-1]
+    total_input_size = token_cnt * n_experts_per_token
     if not hasattr(cutlass_fused_moe, "moe_buffer"):
         print("@cutlass fusedMoe allocate moe_buffer once")
         moe_buffer = {}
@@ -102,10 +103,27 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
         moe_buffer["expert_cache"] = torch.empty((token_cnt* hidden_size),
                                      dtype=hidden_states.dtype,
                                      device=hidden_states.device)
-        # gemm_args["ptr_A"] = ptr_A
+        moe_buffer["gemm1_input"] = torch.empty((total_input_size, hidden_size),
+                                                       dtype=hidden_states.dtype,
+                                                       device=hidden_states.device)
+        moe_buffer["gemm1_output"] = torch.empty((total_input_size, 2*intermediate_size),
+                                                 dtype=hidden_states.dtype,
+                                                 device=hidden_states.device)
+        moe_buffer["gemm2_output"] = torch.empty((total_input_size, hidden_size),
+                                                 dtype=hidden_states.dtype,
+                                                 device=hidden_states.device)
+        moe_buffer["alpha"] = torch.ones(num_experts, dtype=torch.float32, device=hidden_states.device)
+        moe_buffer["beta"] = torch.zeros(num_experts, dtype=torch.float32, device=hidden_states.device)
+
         cutlass_fused_moe.moe_buffer = moe_buffer
 
-    expert_cache = moe_buffer["expert_cache"][:hidden_states.numel()].view_as(hidden_states).zero_()
+    expert_cache = cutlass_fused_moe.moe_buffer["expert_cache"][:hidden_states.numel()].view_as(hidden_states).zero_()
+    input_A = cutlass_fused_moe.moe_buffer["gemm1_input"][:total_input_size, :]
+    gemm1_output = cutlass_fused_moe.moe_buffer["gemm1_output"][:total_input_size, :]
+    gemm2_output = cutlass_fused_moe.moe_buffer["gemm2_output"][:total_input_size, :]
+    alpha = cutlass_fused_moe.moe_buffer["alpha"]
+    beta = cutlass_fused_moe.moe_buffer["beta"]
+
 
     # map token to experts
     idxs = topk_ids.argsort()
@@ -113,7 +131,6 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     tokens_per_expert = counts.cumsum()
     num_per_tok = n_experts_per_token
     token_idxs = idxs // num_per_tok
-    grouped_input_A = []
     offset = []
     for expert_id, end_idx in enumerate(tokens_per_expert):
         start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
@@ -121,18 +138,15 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
         if start_idx == end_idx:
             continue
         exp_token_idxs = token_idxs[start_idx:end_idx]
-        expert_tokens = hidden_states[exp_token_idxs]
-        grouped_input_A.append(expert_tokens)
+        # expert_tokens = hidden_states[exp_token_idxs]
+        # grouped_input_A.append(expert_tokens)
+        input_A[start_idx:end_idx, :].copy_(hidden_states[exp_token_idxs])
 
-    total_input_size = token_cnt * num_per_tok
+
+    ########### gemm1 ##################
     print("@@@@@@@ cutlass fused moe enter")
-    # gemm1
-    input_A = torch.cat(grouped_input_A, dim=0).contiguous()
-    input_B = w13#.transpose(-1, -2).contiguous().transpose(-1, -2)
+    input_B = w13 #.transpose(-1, -2).contiguous().transpose(-1, -2)
     assert(list(input_A.shape)[0] == total_input_size)
-    gemm1_output = torch.empty((total_input_size, 2*intermediate_size), dtype=hidden_states.dtype, device=hidden_states.device)
-    alpha = torch.ones(num_experts, dtype=torch.float32, device=input_A.device)
-    beta = torch.zeros(num_experts, dtype=torch.float32, device=input_A.device)
     gemm_args = prepare_gemm_args(2*intermediate_size, hidden_size, offset, input_A, input_B, gemm1_output, alpha, beta, num_experts)
     offset_t = torch.tensor(offset, dtype=torch.int64, device='cpu')
     torch.ops._xpu_C.cutlass_grouped_gemm(offset=offset_t, N=2*intermediate_size, K=hidden_size, **gemm_args)
@@ -143,11 +157,10 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     act_output = act(gate) * up
 
 
-    # gemm 2
-    input_A = act_output.to(torch.bfloat16).contiguous()
-    output = torch.empty((list(input_A.shape)[0], hidden_size), dtype=hidden_states.dtype, device=hidden_states.device)
-    input_B = w2#.transpose(-1, -2).contiguous().transpose(-1, -2)
-    gemm_args = prepare_gemm_args(hidden_size, intermediate_size, offset, input_A, input_B, output, alpha, beta, num_experts)
+    ########### gemm2 ##################
+    input_A = act_output.contiguous()
+    input_B = w2 #.transpose(-1, -2).contiguous().transpose(-1, -2)
+    gemm_args = prepare_gemm_args(hidden_size, intermediate_size, offset, input_A, input_B, gemm2_output, alpha, beta, num_experts)
     torch.ops._xpu_C.cutlass_grouped_gemm(offset=offset_t, N=hidden_size, K=intermediate_size, **gemm_args)
 
     # apply scores
@@ -157,7 +170,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
             continue
 
         exp_token_idxs = token_idxs[start_idx:end_idx]
-        expert_out = output[start_idx:end_idx]
+        expert_out = gemm2_output[start_idx:end_idx]
         expert_out.mul_(topk_weights[idxs[start_idx:end_idx]])
         expert_cache.scatter_reduce_(
             0,

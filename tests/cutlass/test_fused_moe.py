@@ -154,14 +154,16 @@ def test_fused_moe(
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_scores.view(-1, 1)
 
-    out = cutlass_fused_moe(hidden_states=a,
-                            w13=w13,
-                            w2=w2,
-                            topk_weights=flat_expert_weights,
-                            topk_ids=flat_expert_indices,
-                            n_experts_per_token=topk,
-                            activation="silu",
-                            num_experts=e)
+    iteration = 1
+    for _ in range(iteration):
+        out = cutlass_fused_moe(hidden_states=a,
+                                w13=w13,
+                                w2=w2,
+                                topk_weights=flat_expert_weights,
+                                topk_ids=flat_expert_indices,
+                                n_experts_per_token=topk,
+                                activation="silu",
+                                num_experts=e)
 
     ref_out = ref_fused_moe(a,
                   w13,
