@@ -72,6 +72,7 @@
 #include "cutlass/epilogue/collective/default_epilogue.hpp"
 #include "cutlass/epilogue/collective/xe_array_epilogue.hpp"
 #include "cutlass/epilogue/fusion/xe_callbacks.hpp"
+#include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/group_array_problem_shape.hpp"
 #include "cutlass/gemm/device/gemm_universal.h"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
@@ -98,7 +99,7 @@ using ElementAccumulator = float;     // <- data type of accumulator
 using ElementComputeEpilogue = float; // <- data type of epilogue operations
 using ElementA = bfloat16_t;          // <- data type of elements in input matrix A
 using ElementB = bfloat16_t;          // <- data type of elements in input matrix B
-using ElementOutput = float;          // <- data type of elements in output matrix D
+using ElementOutput = bfloat16_t;          // <- data type of elements in output matrix D
 bool debug = false;
 bool collect_gflops = false;
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -178,14 +179,11 @@ struct GroupedGemmRunner {
   using ElementA = typename Gemm::ElementA;
   using ElementB = typename Gemm::ElementB;
   using ElementC = typename Gemm::ElementC;
-  using ElementAcc = typename Gemm::ElementAccumulator;
-  using ElementScaleA = cutlass::half_t;
-  using ElementScaleB = cutlass::half_t;
-  using ElementOffset = int64_t;
 
   using CollectiveEpilogue = typename Gemm::CollectiveEpilogue;
-  using ElementOutput = typename CollectiveEpilogue::ElementOutput;
-  using ElementAccumulator = ElementOutput;
+  // using ElementOutput = typename CollectiveEpilogue::ElementOutput;
+  using ElementOutput = bfloat16_t;
+  using ElementAccumulator = float_t;
 
 
   using ProblemShapeType = typename Gemm::GemmKernel::ProblemShape;
@@ -488,12 +486,11 @@ void kernel_functor(
   using ElementComputeEpilogue = float;
   using ElementA = cutlass::bfloat16_t;
   using ElementB = cutlass::bfloat16_t;
-  using ElementOffset = int64_t;
-  using ElementOutput = float;
+  using ElementOutput = bfloat16_t;
   using ElementScale = cutlass::bfloat16_t;
 
   using LayoutA = cutlass::layout::RowMajor;
-  using LayoutB = cutlass::layout::RowMajor;
+  using LayoutB = cutlass::layout::ColumnMajor;
   using LayoutC = cutlass::layout::RowMajor;
   using LayoutD = cutlass::layout::RowMajor;
 
@@ -515,23 +512,33 @@ void kernel_functor(
   using GEMMDispatchPolicy = cutlass::gemm::MainloopIntelXeXMX16Group<PipelineStages>;
   using EpilogueDispatchPolicy = cutlass::epilogue::IntelXeXMX16Group;
 
-  using EpilogueOp = cutlass::epilogue::fusion::LinearCombination<ElementOutput, ElementComputeEpilogue,
-          ElementAccumulator, ElementAccumulator, cutlass::FloatRoundStyle::round_to_nearest>;
+  // using EpilogueOp = cutlass::epilogue::fusion::LinearCombination<ElementOutput, ElementComputeEpilogue,
+  //         ElementAccumulator, ElementAccumulator, cutlass::FloatRoundStyle::round_to_nearest>;
 
-  using FusionCallBacks = cutlass::epilogue::fusion::FusionCallbacks<EpilogueDispatchPolicy, EpilogueOp, TileShape,
-          decltype(tile_shape(TiledMma()))>;
-  using CollectiveEpilogue = cutlass::epilogue::collective::CollectiveEpilogue<
-          EpilogueDispatchPolicy,
-          TileShape,
-          ElementAccumulator,
-          cutlass::gemm::TagToStrideC_t<LayoutC*>,
-          ElementOutput,
-          cutlass::gemm::TagToStrideC_t<LayoutD*>,
-          FusionCallBacks,
-          XE_2D_U32x8x16_LD_N,
-          void, void,
-          XE_2D_U32x8x16_ST_N,
-          void, void>;
+  // using FusionCallBacks = cutlass::epilogue::fusion::FusionCallbacks<EpilogueDispatchPolicy, EpilogueOp, TileShape,
+  //         decltype(tile_shape(TiledMma()))>;
+  // using CollectiveEpilogue = cutlass::epilogue::collective::CollectiveEpilogue<
+  //         EpilogueDispatchPolicy,
+  //         TileShape,
+  //         ElementAccumulator,
+  //         cutlass::gemm::TagToStrideC_t<LayoutC*>,
+  //         ElementOutput,
+  //         cutlass::gemm::TagToStrideC_t<LayoutD*>,
+  //         FusionCallBacks,
+  //         XE_2D_U32x8x16_LD_N,
+  //         void, void,
+  //         XE_2D_U16x8x16_ST_N,
+  //         void, void>;
+  using EpilogueOp =
+      cutlass::epilogue::fusion::LinearCombination<float_t, float_t>;
+
+  using CollectiveEpilogue =
+      typename cutlass::epilogue::collective::CollectiveBuilder<
+          cutlass::arch::IntelXe, cutlass::arch::OpClassTensorOp, TileShape,
+          Shape<_1, _1, _1>, cutlass::epilogue::collective::EpilogueTileAuto,
+          float, float, float, LayoutC, 1, ElementOutput, LayoutC, 1,
+          EpilogueDispatchPolicy, EpilogueOp>::CollectiveOp;
+
 
 // Mainloop
   using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
@@ -540,7 +547,7 @@ void kernel_functor(
           ElementA,
           cutlass::gemm::TagToStrideA_t<LayoutA*>,
           ElementB,
-          cutlass::gemm::TagToStrideB_t<LayoutB*>,
+          cutlass::gemm::TagToStrideA_t<LayoutB*>,
           TiledMma,
           GmemTiledCopyA, void, void, cute::identity,  // A
           GmemTiledCopyB, void, void, cute::identity   // B
