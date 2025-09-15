@@ -168,9 +168,6 @@ struct GroupedGemmRunner {
   using StrideC = typename Gemm::GemmKernel::InternalStrideC;
   using StrideD = typename Gemm::GemmKernel::InternalStrideD;
 
-  using StrideScaleA = typename Gemm::GemmKernel::StrideA;
-  using StrideScaleB = typename Gemm::GemmKernel::StrideB;
-
   using LayoutA = typename Gemm::LayoutA;
   using LayoutB = typename Gemm::LayoutB;
   using LayoutC = typename Gemm::LayoutC;
@@ -181,53 +178,33 @@ struct GroupedGemmRunner {
   using ElementC = typename Gemm::ElementC;
 
   using CollectiveEpilogue = typename Gemm::CollectiveEpilogue;
-  // using ElementOutput = typename CollectiveEpilogue::ElementOutput;
   using ElementOutput = bfloat16_t;
   using ElementAccumulator = float_t;
 
 
   using ProblemShapeType = typename Gemm::GemmKernel::ProblemShape;
 
-  // Host-side allocations
-  std::vector<int64_t> offset_C;
-  // std::vector<int64_t> offset_D;
-
   std::vector<StrideA> stride_A_host;
   std::vector<StrideB> stride_B_host;
   std::vector<StrideC> stride_C_host;
   std::vector<StrideD> stride_D_host;
 
-  // std::vector<ElementAccumulator> alpha_host;
-  // std::vector<ElementAccumulator> beta_host;
-
   // Device-side allocations
   cutlass::DeviceAllocation<typename ProblemShape::UnderlyingProblemShape> problem_sizes;
-
-  // This example defines all matrices in a single allocation (e.g. block_A), but this is not a
-  // requirement. Matrix base pointers are read from device allocation (e.g. ptr_A)
-  cutlass::DeviceAllocation<const ElementC *> ptr_C;
-  // cutlass::DeviceAllocation<ElementOutput *> ptr_D;
 
   cutlass::DeviceAllocation<StrideA> stride_A;
   cutlass::DeviceAllocation<StrideB> stride_B;
   cutlass::DeviceAllocation<StrideC> stride_C;
   cutlass::DeviceAllocation<StrideD> stride_D;
 
-  cutlass::DeviceAllocation<ElementC> block_C;
-  // Note, this is an array of pointers to alpha and beta scaling values per group
-  // cutlass::DeviceAllocation<ElementAccumulator*> alpha_device;
-  // cutlass::DeviceAllocation<ElementAccumulator*> beta_device;
-  // cutlass::DeviceAllocation<ElementAccumulator> block_alpha;
-  // cutlass::DeviceAllocation<ElementAccumulator> block_beta;
-
-  void release(){
+void release(){
     problem_sizes.release();
-    ptr_C.release();
+    // ptr_C.release();
     stride_A.release();
     stride_B.release();
     stride_C.release();
     stride_D.release();
-    block_C.release();
+    // block_C.release();
   }
 
   /// Allocates device-side data
@@ -235,10 +212,6 @@ void allocate(const Options &options) {
   if (debug){
     std::cout << "void allocate()" << std::endl;
   }
-  int64_t total_elements_C = 0;
-  // int64_t total_elements_D = 0;
-  
-  // Compute total allocation sizes across group
   for (int32_t i = 0; i < options.groups; ++i) {
     
 
@@ -247,24 +220,11 @@ void allocate(const Options &options) {
     auto N = get<1>(problem);
     auto K = get<2>(problem);
 
-    // Offset into block allocation of each matrix base pointer
-    offset_C.push_back(total_elements_C);
-    // offset_D.push_back(total_elements_D);
-
-    int64_t elements_C = M * N;
-    // int64_t elements_D = M * N;
-
-    total_elements_C += elements_C;
-    // total_elements_D += elements_D;
-
     stride_A_host.push_back(cutlass::make_cute_packed_stride(StrideA{}, {M, K, 1}));
     stride_B_host.push_back(cutlass::make_cute_packed_stride(StrideB{}, {N, K, 1}));
     stride_C_host.push_back(cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1}));
     stride_D_host.push_back(cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1}));
   }
-  // block_C.reset(total_elements_C);
-  // block_alpha.reset(options.groups);
-  // block_beta.reset(options.groups);
 }
 
   void initialize(const Options &options) {
@@ -274,29 +234,6 @@ void allocate(const Options &options) {
     problem_sizes.reset(options.groups);
     problem_sizes.copy_from_host(options.problem_sizes_host.data());
    
-    std::vector<ElementC *> ptr_C_host(options.groups);
-    // std::vector<ElementC *> ptr_D_host(options.groups);
-    // std::vector<ElementAccumulator *> ptr_alpha_host(options.groups);
-    // std::vector<ElementAccumulator *> ptr_beta_host(options.groups);
-
-    // Compute offsets, alpha & beta over group on host
-    for (int32_t i = 0; i < options.groups; ++i) {
-      ptr_C_host.at(i) = block_C.get() + offset_C.at(i);
-      // ptr_D_host.at(i) = block_D + offset_D.at(i);
-      // Fill host vector of alpha & beta with random values if using per-group values
-      // alpha_host.push_back(static_cast<ElementAccumulator>(1));
-      // beta_host.push_back(static_cast<ElementAccumulator>(0));
-      // // Fill host ptr vectors with offset addresses into device alpha/beta blocks
-      // ptr_alpha_host.at(i) = block_alpha.get() + i;
-      // ptr_beta_host.at(i) = block_beta.get() + i;
-    }
-
-    // // Allocate device memory & copy from host
-    ptr_C.reset(options.groups);
-    ptr_C.copy_from_host(ptr_C_host.data());
-
-    // ptr_D.reset(options.groups);
-    // ptr_D.copy_from_host(ptr_D_host.data());
 
     stride_A.reset(options.groups);
     stride_A.copy_from_host(stride_A_host.data());
@@ -309,19 +246,6 @@ void allocate(const Options &options) {
 
     stride_D.reset(options.groups);
     stride_D.copy_from_host(stride_D_host.data());
-
-    // Per-group alpha and beta ptrs
-    // alpha_device.reset(options.groups);
-    // alpha_device.copy_from_host(ptr_alpha_host.data());
-    // beta_device.reset(options.groups);
-    // beta_device.copy_from_host(ptr_beta_host.data());
-
-
-    // initialize_block(block_C, 666);
-    // Per-group alpha and beta values - note these are not directly passed to kernel - the pointers
-    // (alpha_device/beta_device) are passed instead
-    // block_alpha.copy_from_host(alpha_host.data());
-    // block_beta.copy_from_host(beta_host.data());
 
   }
 
@@ -338,30 +262,17 @@ void allocate(const Options &options) {
     typename Gemm::Arguments arguments;
     decltype(arguments.epilogue.thread) fusion_args;
 
-    if (options.alpha != FLT_MAX && options.beta != FLT_MAX) {
-      // If both alpha/beta are provided (via cmd line args) and are scalar, i.e., same alpha/beta applies to all batches.
-      fusion_args.alpha = options.alpha;
-      fusion_args.beta = options.beta;
-      fusion_args.alpha_ptr = nullptr;
-      fusion_args.beta_ptr = nullptr;
-      fusion_args.alpha_ptr_array = nullptr;
-      fusion_args.beta_ptr_array = nullptr;
-      // Single alpha and beta for all groups
-      fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 0};
-      fusion_args.dBeta = {cute::_0{}, cute::_0{}, 0};
-    }
-    else {
+
       // If pointers to alpha/beta are provided, i.e., alpha/beta can differ between batches/groups.
-      fusion_args.alpha = 0;
-      fusion_args.beta = 0;
-      fusion_args.alpha_ptr = nullptr;
-      fusion_args.beta_ptr = nullptr;
-      fusion_args.alpha_ptr_array = ptr_alpha;
-      fusion_args.beta_ptr_array = ptr_beta;
-      // One alpha and beta per each group
-      fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 1};
-      fusion_args.dBeta = {cute::_0{}, cute::_0{}, 1};
-    }
+    fusion_args.alpha = 0;
+    fusion_args.beta = 0;
+    fusion_args.alpha_ptr = nullptr;
+    fusion_args.beta_ptr = nullptr;
+    fusion_args.alpha_ptr_array = ptr_alpha;
+    fusion_args.beta_ptr_array = ptr_beta;
+    // One alpha and beta per each group
+    fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 1};
+    fusion_args.dBeta = {cute::_0{}, cute::_0{}, 1};
     using RasterOrderOptions = typename cutlass::gemm::kernel::detail::PersistentTileSchedulerXeGroup<ProblemShape>::RasterOrderOptions;
 
     // Per-GEMM problem shape info may only exist on the device.
@@ -370,7 +281,7 @@ void allocate(const Options &options) {
         cutlass::gemm::GemmUniversalMode::kGrouped,
         {options.groups, problem_sizes.get(), options.problem_sizes_host.data()},
         {ptr_A, stride_A.get(), ptr_B, stride_B.get()},
-        {fusion_args, ptr_C.get(), stride_C.get(), ptr_D, stride_D.get()},
+        {fusion_args, nullptr, stride_C.get(), ptr_D, stride_D.get()},
         hw_info,
         {1, RasterOrderOptions::AlongN}
       };
@@ -380,7 +291,7 @@ void allocate(const Options &options) {
         cutlass::gemm::GemmUniversalMode::kGrouped,
         {options.groups, problem_sizes.get(), nullptr},
         {ptr_A, stride_A.get(), ptr_B, stride_B.get()},
-        {fusion_args, ptr_C.get(), stride_C.get(), ptr_D, stride_D.get()},
+        {fusion_args, nullptr, stride_C.get(), ptr_D, stride_D.get()},
         hw_info,
         {1, RasterOrderOptions::AlongN}
       };
@@ -402,14 +313,6 @@ void allocate(const Options &options) {
     if (debug){
       std::cout << "enter run" << std::endl;
     }
-
-    // std::vector<ElementA *> ptr_AA_host(options.groups);
-    
-    // stream->memcpy(ptr_AA_host.data(), ptr_AA, options.groups * sizeof(int64_t)).wait();
-    // // cutlass::device_memory::copy_from_device(ptr_A_host.data(), ptr_A, options.groups);
-    // for (int i = 0; i < options.groups; ++i){
-    //   std::cout << "AA ptr:" << ptr_AA_host.at(i) << std::endl;
-    // }
 
     allocate(options);
     initialize(options);
@@ -511,24 +414,6 @@ void kernel_functor(
   constexpr int PipelineStages = 2;
   using GEMMDispatchPolicy = cutlass::gemm::MainloopIntelXeXMX16Group<PipelineStages>;
   using EpilogueDispatchPolicy = cutlass::epilogue::IntelXeXMX16Group;
-
-  // using EpilogueOp = cutlass::epilogue::fusion::LinearCombination<ElementOutput, ElementComputeEpilogue,
-  //         ElementAccumulator, ElementAccumulator, cutlass::FloatRoundStyle::round_to_nearest>;
-
-  // using FusionCallBacks = cutlass::epilogue::fusion::FusionCallbacks<EpilogueDispatchPolicy, EpilogueOp, TileShape,
-  //         decltype(tile_shape(TiledMma()))>;
-  // using CollectiveEpilogue = cutlass::epilogue::collective::CollectiveEpilogue<
-  //         EpilogueDispatchPolicy,
-  //         TileShape,
-  //         ElementAccumulator,
-  //         cutlass::gemm::TagToStrideC_t<LayoutC*>,
-  //         ElementOutput,
-  //         cutlass::gemm::TagToStrideC_t<LayoutD*>,
-  //         FusionCallBacks,
-  //         XE_2D_U32x8x16_LD_N,
-  //         void, void,
-  //         XE_2D_U16x8x16_ST_N,
-  //         void, void>;
   using EpilogueOp =
       cutlass::epilogue::fusion::LinearCombination<float_t, float_t>;
 
