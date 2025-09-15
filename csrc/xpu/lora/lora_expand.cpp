@@ -327,11 +327,11 @@ void bgmv_expand_slice(torch::Tensor& outputs, const torch::Tensor& inputs,
   uint32_t rank = inputs.size(1);
   uint32_t hidden = weights.size(1);
   uint32_t output_hidden = outputs.size(1);
-  VLLM_DISPATCH_FLOATING_TYPES_AND2(
+  AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, inputs.scalar_type(),
       "bgmv_expand_slice_in", [&]() {
         using input_t = scalar_t;
-        VLLM_DISPATCH_FLOATING_TYPES_AND2(
+        AT_DISPATCH_FLOATING_TYPES_AND2(
             at::ScalarType::Half, at::ScalarType::BFloat16,
             outputs.scalar_type(), "bgmv_expand_slice_out", [&]() {
               using output_t = scalar_t;

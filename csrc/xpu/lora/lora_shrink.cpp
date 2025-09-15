@@ -325,11 +325,11 @@ void bgmv_shrink(torch::Tensor& outputs, const torch::Tensor& inputs,
 
   auto scale_f = static_cast<float>(scale);
   // 5. Dispatch based on output type
-  VLLM_DISPATCH_FLOATING_TYPES_AND2(
+  AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, outputs.scalar_type(),
       "bgmv_shrink_out", [&]() {
         using output_t = scalar_t;
-        VLLM_DISPATCH_FLOATING_TYPES_AND2(
+        AT_DISPATCH_FLOATING_TYPES_AND2(
             at::ScalarType::Half, at::ScalarType::BFloat16,
             inputs.scalar_type(), "bgmv_shrink_in", [&]() {
               using input_t = scalar_t;

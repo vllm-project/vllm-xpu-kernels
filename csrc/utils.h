@@ -31,7 +31,7 @@ struct SyclTypeTrait<c10::BFloat16> {
 template <typename T>
 struct AccumulateType {
  private:
-  static constexpr bool is_half = std::is_same_v<T, at::Half> ||
+  static constexpr bool is_lowp = std::is_same_v<T, at::Half> ||
                                   std::is_same_v<T, at::BFloat16> ||
                                   std::is_same_v<T, c10::Float8_e4m3fn> ||
                                   std::is_same_v<T, c10::Float8_e5m2>;
@@ -46,7 +46,7 @@ struct AccumulateType {
 
  public:
   using type = std::conditional_t<
-      is_half, float,
+      is_lowp, float,
       std::conditional_t<
           std::is_floating_point_v<T>, T,
           std::conditional_t<is_integer, int64_t,
