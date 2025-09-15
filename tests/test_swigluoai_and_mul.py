@@ -13,6 +13,14 @@ XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
 ]
 
+#override pytest parameters when 'USE_SIMULATOR' eq 1
+SIMULATOR_PYTEST_PARAMS = {
+    "default": {
+        "num_tokens": [1, 7],
+        "d": [32, 64],
+    },
+}
+
 default_atol = {torch.float16: 1e-3, torch.bfloat16: 1e-3, torch.float: 1e-5}
 default_rtol = {
     torch.float16: 1e-3,

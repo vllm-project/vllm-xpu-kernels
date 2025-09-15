@@ -15,6 +15,14 @@ XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
 ]
 
+#override pytest parameters when 'USE_SIMULATOR' eq 1
+SIMULATOR_PYTEST_PARAMS = {
+    "default": {
+        "num_tokens": [333],
+        "d": [128, 256],
+    },
+}
+
 
 @pytest.mark.parametrize("activation",
                          ["silu_and_mul", "mul_and_silu", "gelu", "gelu_tanh"])

@@ -6,6 +6,13 @@ from tests.register_ops import deepseek_scaling_rope
 
 DEVICE = torch.device("xpu")
 
+#override pytest parameters when 'USE_SIMULATOR' eq 1
+SIMULATOR_PYTEST_PARAMS = {
+    "default": {
+        "batch": [1],
+    },
+}
+
 
 def _rotate_neox(x):
     x1 = x[..., :x.shape[-1] // 2]

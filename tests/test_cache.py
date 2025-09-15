@@ -36,6 +36,18 @@ DEVICES = [
 
 KV_CACHE_DTYPE = ["auto"]  # FIXME: will add "fp8" when accuracy is improved
 
+#override pytest parameters when 'USE_SIMULATOR' eq 1
+SIMULATOR_PYTEST_PARAMS = {
+    "default": {
+        "num_tokens": [1],
+        "head_size": [64, 80],
+    },
+    "test_gather_cache_mla": {
+        "num_blocks": [128],
+        "max_seq_len": [64],
+    },
+}
+
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
