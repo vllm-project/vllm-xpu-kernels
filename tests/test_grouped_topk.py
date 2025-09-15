@@ -6,6 +6,13 @@ from tests.ops.grouped_topk_op import (fused_grouped_topk,
                                        fused_grouped_topk_sycl, grouped_topk)
 from tests.utils import seed_everything
 
+#override pytest parameters when 'USE_SIMULATOR' eq 1
+SIMULATOR_PYTEST_PARAMS = {
+    "default": {
+        "n_hidden": [128, 256],
+    },
+}
+
 
 @pytest.mark.parametrize("n_token", [1, 33, 64])
 @pytest.mark.parametrize("n_hidden", [1024, 2048])
