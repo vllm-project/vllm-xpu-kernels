@@ -19,7 +19,7 @@
 #include "./collective/chunk_prefill_softmax.hpp"
 #include "chunk_prefill_kernel.hpp"
 
-#include "utils.hpp"
+#include "fmha_utils.hpp"
 
 using namespace cute;
 

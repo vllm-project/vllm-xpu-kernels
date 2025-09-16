@@ -21,7 +21,7 @@ inline CutlassType aten_to_Cutlass_dtype(const at::Tensor& input) {
   } else {
     TORCH_INTERNAL_ASSERT(
         false,
-        "");
+        "Current cutlass kernel only support half/bf16 data type.");
   }
   return cuType;
 }

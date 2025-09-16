@@ -50,6 +50,7 @@ def flash_attn_varlen_func(
     num_splits: int = 0,
     # Version selector
     fa_version: int = DEFAULT_FA_VERSION,
+    s_aux: Optional[torch.Tensor] = None,
 ):
     assert cu_seqlens_k is not None or seqused_k is not None, \
         "cu_seqlens_k or seqused_k must be provided"
