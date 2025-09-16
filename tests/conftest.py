@@ -3,13 +3,13 @@ import os
 
 
 def pytest_generate_tests(metafunc):
-    use_simulator = os.getenv("USE_SIMULATOR", "0") == "1"
-    if not use_simulator:
+    use_mini_pytest_profile = os.getenv("PYTEST_PROFILE", "") == "MINI"
+    if not use_mini_pytest_profile:
         return
 
     module = metafunc.module
 
-    func_pytest_params = getattr(module, "SIMULATOR_PYTEST_PARAMS", {})
+    func_pytest_params = getattr(module, "MINI_PYTEST_PARAMS", {})
     profile = func_pytest_params.get(metafunc.function.__name__, None)
 
     if not profile:

@@ -31,8 +31,8 @@ def rotary_embedding_opcheck(rot,
                  rot.is_neox_style))
 
 
-#override pytest parameters when 'USE_SIMULATOR' eq 1
-SIMULATOR_PYTEST_PARAMS = {
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
     "default": {
         "max_position": [11, 256],
         "head_size": [32],

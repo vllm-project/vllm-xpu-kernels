@@ -36,8 +36,8 @@ DEVICES = [
 
 KV_CACHE_DTYPE = ["auto"]  # FIXME: will add "fp8" when accuracy is improved
 
-#override pytest parameters when 'USE_SIMULATOR' eq 1
-SIMULATOR_PYTEST_PARAMS = {
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
     "default": {
         "num_tokens": [1],
         "head_size": [64, 80],

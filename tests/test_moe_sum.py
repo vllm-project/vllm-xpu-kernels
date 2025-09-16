@@ -12,8 +12,8 @@ from tests.utils import opcheck
 
 TOP_KS = [2, 6]
 
-#override pytest parameters when 'USE_SIMULATOR' eq 1
-SIMULATOR_PYTEST_PARAMS = {
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
     "default": {
         "m": [1, 33],
         "k": [128, 256],

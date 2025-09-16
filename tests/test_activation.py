@@ -15,8 +15,8 @@ XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
 ]
 
-#override pytest parameters when 'USE_SIMULATOR' eq 1
-SIMULATOR_PYTEST_PARAMS = {
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
     "default": {
         "num_tokens": [1],
         "d": [128],
