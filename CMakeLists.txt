@@ -272,6 +272,8 @@ endif ()
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_XPU_SRC
     "csrc/xpu/torch_bindings.cpp"
+    "csrc/xpu/lora/lora_shrink.cpp"
+    "csrc/xpu/lora/lora_expand.cpp"
   )
   include_directories("/usr/include")
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})
@@ -287,6 +289,7 @@ if(ONEDNN_FOUND)
   file(GLOB _ONEDNN_SRC csrc/xpu/onednn/*.cpp)
   list(APPEND VLLM_EXT_XPU_SRC
     ${_ONEDNN_SRC}
+    "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
   )
   include_directories(${ONEDNN_INCLUDE_DIR})
   link_libraries(${ONEDNN_LIBRARY})
@@ -310,6 +313,8 @@ define_gpu_extension_target(
 #
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
+  "csrc/moe/grouped_topk.cpp"
+  "csrc/moe/fused_grouped_topk.cpp"
   "csrc/moe/moe_align_sum_kernels.cpp")
 
 message(STATUS "Enabling moe extension.")

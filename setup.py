@@ -181,7 +181,6 @@ class cmake_build_ext(build_ext):
         icx_path = shutil.which('icx')
         icpx_path = shutil.which('icpx')
         build_option_gpu = {
-            "BUILD_MODULE_TYPE": "GPU",
             "CMAKE_C_COMPILER": f"{icx_path}",
             "CMAKE_CXX_COMPILER": f"{icpx_path}",
         }

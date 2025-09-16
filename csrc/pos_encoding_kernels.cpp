@@ -105,7 +105,7 @@ class rotary_embedding_kernel {
         num_kv_heads(num_kv_heads_),
         head_size(head_size_) {}
 
-  void operator() [[intel::reqd_sub_group_size(32)]] (
+  void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
     // Each thread block is responsible for one token.
     const int token_idx = item_ct1.get_group(2);
@@ -146,7 +146,7 @@ void call_rotary_embedding_kernel(
     std::optional<torch::Tensor> key, int64_t head_size,
     torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
     bool is_neox) {
-  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+  using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   // num_tokens = batch_size * seq_len
   int64_t num_tokens = positions.numel();
   int positions_ndim = positions.dim();

@@ -221,3 +221,133 @@ def create_kv_caches_with_random_flash(
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
+
+
+def get_model_config(model_name: str, tp_size: int = 1):
+    from transformers import AutoConfig
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    model_arch = config.architectures[0] if config.architectures else "Unknown"
+
+    if model_arch == "DbrxForCausalLM":
+        original_num_groups = config.ffn_config.moe_num_experts
+        original_intermediate_size = config.ffn_config.ffn_hidden_size
+    elif model_arch == "JambaForCausalLM":
+        original_num_groups = config.num_experts
+        original_intermediate_size = config.intermediate_size
+    elif model_arch in ["Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"]:
+        original_num_groups = config.num_experts
+        original_intermediate_size = config.moe_intermediate_size
+    elif model_arch in ["DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM"]:
+        original_num_groups = config.n_routed_experts
+        original_intermediate_size = config.moe_intermediate_size
+    elif model_arch == "LlamaForCausalLM":
+        original_num_groups = 1
+        original_intermediate_size = config.intermediate_size
+    else:
+        original_num_groups = getattr(config, 'num_local_experts', 1)
+        original_intermediate_size = getattr(config, 'intermediate_size',
+                                             config.hidden_size * 4)
+
+    effective_hidden_size = config.hidden_size
+    effective_intermediate_size = original_intermediate_size
+    effective_num_groups = original_num_groups
+
+    if tp_size > 1:
+        effective_hidden_size = config.hidden_size
+        effective_intermediate_size = original_intermediate_size // tp_size
+        if original_num_groups > 1:
+            effective_num_groups = original_num_groups
+
+    moe_config = {}
+    if original_num_groups > 1:
+        moe_config = {
+            "moe_top_k":
+            getattr(config, 'num_experts_per_tok', getattr(config, 'top_k',
+                                                           2)),
+            "moe_min_capacity":
+            getattr(config, 'moe_min_capacity', 4),
+            "moe_capacity_factor":
+            getattr(config, 'moe_capacity_factor', 1.0),
+            "moe_aux_loss_coef":
+            getattr(config, 'moe_aux_loss_coef', 0.01),
+        }
+
+    shape_configs = {
+        "num_groups":
+        effective_num_groups,
+        "hidden_size":
+        effective_hidden_size,
+        "intermediate_size":
+        effective_intermediate_size,
+        "dtype":
+        config.torch_dtype,
+        "model_arch":
+        model_arch,
+        "vocab_size":
+        getattr(config, 'vocab_size', 32000),
+        "num_layers":
+        getattr(config, 'num_hidden_layers', getattr(config, 'n_layer', 32)),
+        "num_attention_heads":
+        getattr(config, 'num_attention_heads', getattr(config, 'n_head', 32)),
+        "num_key_value_heads":
+        getattr(config, 'num_key_value_heads',
+                getattr(config, 'num_attention_heads', 32)),
+        "head_dim":
+        getattr(
+            config, 'head_dim',
+            config.hidden_size // getattr(config, 'num_attention_heads', 32)),
+        "hidden_act":
+        getattr(config, 'hidden_act', 'silu'),
+        "max_position_embeddings":
+        getattr(config, 'max_position_embeddings', 2048),
+        "rope_theta":
+        getattr(config, 'rope_theta', 10000.0),
+        "rope_scaling":
+        getattr(config, 'rope_scaling', None),
+        "rms_norm_eps":
+        getattr(config, 'rms_norm_eps', 1e-6),
+        "layer_norm_eps":
+        getattr(config, 'layer_norm_eps', 1e-5),
+        "attention_dropout":
+        getattr(config, 'attention_dropout', 0.0),
+        "hidden_dropout":
+        getattr(config, 'hidden_dropout', 0.0),
+        "moe_config":
+        moe_config,
+        "is_moe":
+        original_num_groups > 1,
+        "original_config": {
+            "hidden_size": config.hidden_size,
+            "intermediate_size": original_intermediate_size,
+            "num_groups": original_num_groups,
+        },
+        "tp_size":
+        tp_size,
+        "model_type":
+        getattr(config, 'model_type', 'unknown'),
+        "torch_dtype":
+        str(config.torch_dtype)
+        if hasattr(config, 'torch_dtype') else 'float32',
+    }
+
+    print(f"Full model config with TP={tp_size}:")
+    for key, value in shape_configs.items():
+        if key != "original_config":
+            print(f"  {key}: {value}")
+
+    return shape_configs
+
+
+def check_ipex_availability():
+    """
+    Check if Intel Extension for PyTorch (IPEX) is available.
+    
+    Returns:
+        bool: True if IPEX is available, False otherwise
+    """
+    import importlib.util
+    if importlib.util.find_spec("intel_extension_for_pytorch") is not None:
+        return True
+    else:
+        print("Warning: IPEX not available, skipping IPEX benchmarks")
+        return False

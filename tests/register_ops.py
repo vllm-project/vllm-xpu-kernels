@@ -5,6 +5,7 @@ import torch
 from typing import Optional
 import vllm_xpu_kernels._C  # noqa: F401
 import vllm_xpu_kernels._moe_C  # noqa: F401
+import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 
 # layer norm ops
@@ -59,6 +60,20 @@ def rotary_embedding(
 ) -> None:
     torch.ops._C.rotary_embedding(positions, query, key, head_size,
                                   cos_sin_cache, is_neox)
+
+
+def deepseek_scaling_rope(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    offsets_opt: Optional[torch.Tensor],
+    cos_sin_cache: Optional[torch.Tensor],
+    rotary_dim: int,
+    is_neox_style: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._xpu_C.deepseek_scaling_rope(positions, query, key,
+                                                  offsets_opt, cos_sin_cache,
+                                                  rotary_dim, is_neox_style)
 
 
 def reshape_and_cache(
@@ -161,3 +176,30 @@ def swigluoai_and_mul(
 # moe
 def moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
     torch.ops._moe_C.moe_sum(input, output)
+
+
+def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
+                 num_expert_group: int, topk_group: int, topk: int,
+                 renormalize: bool, routed_scaling_factor: float):
+    return torch.ops._moe_C.grouped_topk(scores, scores_with_bias,
+                                         num_expert_group, topk_group, topk,
+                                         renormalize, routed_scaling_factor)
+
+
+def fused_grouped_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int,
+    topk_group: int,
+    scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: Optional[torch.Tensor] = None,
+):
+    return torch.ops._moe_C.fused_grouped_topk(hidden_states, gating_output,
+                                               topk, renormalize,
+                                               num_expert_group, topk_group,
+                                               scoring_func,
+                                               routed_scaling_factor,
+                                               e_score_correction_bias)
