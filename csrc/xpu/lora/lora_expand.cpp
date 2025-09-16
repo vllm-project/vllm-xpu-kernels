@@ -327,21 +327,27 @@ void bgmv_expand_slice(torch::Tensor& outputs, const torch::Tensor& inputs,
   uint32_t rank = inputs.size(1);
   uint32_t hidden = weights.size(1);
   uint32_t output_hidden = outputs.size(1);
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-      at::ScalarType::Half, at::ScalarType::BFloat16, inputs.scalar_type(),
-      "bgmv_expand_slice_in", [&]() {
-        using input_t = scalar_t;
-        AT_DISPATCH_FLOATING_TYPES_AND2(
-            at::ScalarType::Half, at::ScalarType::BFloat16,
-            outputs.scalar_type(), "bgmv_expand_slice_out", [&]() {
-              using output_t = scalar_t;
-              launch_bgmv_expand_with_slice<output_t, input_t>(
-                  outputs.data_ptr<output_t>(), inputs.data_ptr<input_t>(),
-                  weights.data_ptr<output_t>(), indices.data_ptr<int64_t>(),
-                  batch_size, rank, hidden, output_hidden, slice_offset,
-                  add_to_output);
-            });
-      });
+  VLLM_DISPATCH_HALF_TYPES(inputs.scalar_type(), "bgmv_expand_slice", [&]() {
+    using input_t = scalar_t;
+    switch (outputs.scalar_type()) {
+      case at::ScalarType::Half:
+        launch_bgmv_expand_with_slice<at::Half, input_t>(
+            outputs.data_ptr<at::Half>(), inputs.data_ptr<input_t>(),
+            weights.data_ptr<at::Half>(), indices.data_ptr<int64_t>(),
+            batch_size, rank, hidden, output_hidden, slice_offset,
+            add_to_output);
+        break;
+      case at::ScalarType::BFloat16:
+        launch_bgmv_expand_with_slice<at::BFloat16, input_t>(
+            outputs.data_ptr<at::BFloat16>(), inputs.data_ptr<input_t>(),
+            weights.data_ptr<at::BFloat16>(), indices.data_ptr<int64_t>(),
+            batch_size, rank, hidden, output_hidden, slice_offset,
+            add_to_output);
+        break;
+      default:
+        TORCH_CHECK(false, "Unsupported output type: ", inputs.scalar_type());
+    }
+  });
 };
 
 void bgmv_expand(torch::Tensor& outputs, const torch::Tensor& inputs,

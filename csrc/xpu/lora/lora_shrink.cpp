@@ -325,18 +325,24 @@ void bgmv_shrink(torch::Tensor& outputs, const torch::Tensor& inputs,
 
   auto scale_f = static_cast<float>(scale);
   // 5. Dispatch based on output type
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-      at::ScalarType::Half, at::ScalarType::BFloat16, outputs.scalar_type(),
-      "bgmv_shrink_out", [&]() {
-        using output_t = scalar_t;
-        AT_DISPATCH_FLOATING_TYPES_AND2(
-            at::ScalarType::Half, at::ScalarType::BFloat16,
-            inputs.scalar_type(), "bgmv_shrink_in", [&]() {
-              using input_t = scalar_t;
-              launch_bgmv_shrink<output_t, input_t>(
-                  outputs.data_ptr<output_t>(), inputs.data_ptr<input_t>(),
-                  weights.data_ptr<input_t>(), indices.data_ptr<int64_t>(),
-                  batch_size, hidden, rank, scale_f);
-            });
-      });
+  VLLM_DISPATCH_FLOATING_TYPES(outputs.scalar_type(), "bgmv_shrink", [&]() {
+    using output_t = scalar_t;
+    switch (inputs.scalar_type()) {
+      case at::ScalarType::Half:
+        launch_bgmv_shrink<output_t, at::Half>(
+            outputs.data_ptr<output_t>(), inputs.data_ptr<at::Half>(),
+            weights.data_ptr<at::Half>(), indices.data_ptr<int64_t>(),
+            batch_size, hidden, rank, scale_f);
+        break;
+      case at::ScalarType::BFloat16:
+        launch_bgmv_shrink<output_t, at::BFloat16>(
+            outputs.data_ptr<output_t>(), inputs.data_ptr<at::BFloat16>(),
+            weights.data_ptr<at::BFloat16>(), indices.data_ptr<int64_t>(),
+            batch_size, hidden, rank, scale_f);
+        break;
+      default:
+        TORCH_CHECK(false, "Unsupported input type: ", inputs.scalar_type());
+        break;
+    }
+  });
 }
