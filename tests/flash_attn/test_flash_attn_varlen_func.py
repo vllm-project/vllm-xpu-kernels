@@ -20,18 +20,16 @@ SOFT_CAPS = [None]
 SLIDING_WINDOWS = [None]
 
 
-def ref_paged_attn(
-    query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    query_lens: list[int],
-    kv_lens: list[int],
-    block_tables: torch.Tensor,
-    scale: float,
-    sliding_window: Optional[int] = None,
-    soft_cap: Optional[float] = None,
-    casual: Optional[bool] = False
-) -> torch.Tensor:
+def ref_paged_attn(query: torch.Tensor,
+                   key_cache: torch.Tensor,
+                   value_cache: torch.Tensor,
+                   query_lens: list[int],
+                   kv_lens: list[int],
+                   block_tables: torch.Tensor,
+                   scale: float,
+                   sliding_window: Optional[int] = None,
+                   soft_cap: Optional[float] = None,
+                   casual: Optional[bool] = False) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     _, block_size, num_kv_heads, head_size = key_cache.shape
@@ -115,8 +113,9 @@ def test_varlen_with_paged_kv(
     assert num_query_heads % num_kv_heads == 0
     max_query_len = max(query_lens)
     max_kv_len = max(kv_lens)
-    window_size = ((sliding_window - 1, 0) if sliding_window is not None else
-                   (-1, -1))
+    window_size = (  #noqa: F841
+        (sliding_window - 1, 0) if sliding_window is not None else  #noqa: F841
+        (-1, -1))  #noqa: F841
     scale = head_size**-0.5
 
     query = torch.randn(sum(query_lens),
@@ -133,8 +132,8 @@ def test_varlen_with_paged_kv(
                                  dtype=torch.int32).cumsum(dim=0,
                                                            dtype=torch.int32)
     cu_kv_lens = torch.tensor([0] + kv_lens,
-                                 dtype=torch.int32).cumsum(dim=0,
-                                                           dtype=torch.int32)
+                              dtype=torch.int32).cumsum(dim=0,
+                                                        dtype=torch.int32)
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
@@ -145,9 +144,9 @@ def test_varlen_with_paged_kv(
     maybe_quantized_query = query
     maybe_quantized_key_cache = key_cache
     maybe_quantized_value_cache = value_cache
-    q_descale = None
-    k_descale = None
-    v_descale = None
+    q_descale = None  #noqa: F841
+    k_descale = None  #noqa: F841
+    v_descale = None  #noqa: F841
     if q_dtype is not None:
         # QKV are drawn from N(0, 1): no need for a fp8 scaling factor
         maybe_quantized_query = query.to(q_dtype)
@@ -155,33 +154,29 @@ def test_varlen_with_paged_kv(
         maybe_quantized_value_cache = value_cache.to(q_dtype)
 
         scale_shape = (num_seqs, num_kv_heads)
-        q_descale = torch.ones(scale_shape, dtype=torch.float32)
-        k_descale = torch.ones(scale_shape, dtype=torch.float32)
-        v_descale = torch.ones(scale_shape, dtype=torch.float32)
+        q_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
+        k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
+        v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
 
-    output = flash_attn_varlen_func(
-        maybe_quantized_query,
-        maybe_quantized_key_cache,
-        maybe_quantized_value_cache,
-        max_query_len,
-        cu_query_lens,
-        max_kv_len,
-        cu_kv_lens,
-        softmax_scale=scale,
-        causal=False,
-        block_table=block_tables,
-    )
+    output = flash_attn_varlen_func(maybe_quantized_query,
+                                    maybe_quantized_key_cache,
+                                    maybe_quantized_value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    cu_kv_lens,
+                                    softmax_scale=scale,
+                                    causal=False,
+                                    block_table=block_tables)
 
-    ref_output = ref_paged_attn(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        query_lens=query_lens,
-        kv_lens=kv_lens,
-        block_tables=block_tables,
-        scale=scale,
-        casual=False,
-    )
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False)
     atol, rtol = 1.5e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1

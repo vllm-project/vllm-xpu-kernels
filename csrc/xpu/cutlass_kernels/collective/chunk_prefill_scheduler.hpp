@@ -41,7 +41,6 @@ namespace cutlass::flash_attention {
 namespace kernel {
 
 struct XeFlashIndividualTileScheduler {
-
   struct Params {
     dim3 grid;
     // FastDivmod divmod_num_heads;
@@ -51,12 +50,12 @@ struct XeFlashIndividualTileScheduler {
   Params params;
 
   CUTLASS_DEVICE
-  XeFlashIndividualTileScheduler(Params const &params) : params(params) {}
+  XeFlashIndividualTileScheduler(Params const& params) : params(params) {}
 
   template <class ProblemSize, class TileShape>
-  static Params to_underlying_arguments(ProblemSize const &problem_size,
+  static Params to_underlying_arguments(ProblemSize const& problem_size,
                                         KernelHardwareInfo hw_info,
-                                        TileShape const &tile_shape) {
+                                        TileShape const& tile_shape) {
     using namespace cute;
     // problem_size = [batch, num_heads_q , num_heads_kv, seq_len_qo,
     // seq_len_kv, seq_len_kv_cache, head_size_qk, head_size_vo]
@@ -69,9 +68,9 @@ struct XeFlashIndividualTileScheduler {
     int num_heads_q = size<1>(problem_size);
     int num_heads_kv = size<2>(problem_size);
     int seq_len_qo =
-        size<3>(problem_size); // if varlen seq_len_qo = max_seq_len
+        size<3>(problem_size);  // if varlen seq_len_qo = max_seq_len
     int seq_len_kv =
-        size<4>(problem_size); // if varlen seq_len_qo = max_seq_len
+        size<4>(problem_size);  // if varlen seq_len_qo = max_seq_len
     int seq_len_kv_cache = size<5>(problem_size);
     int head_size_qk = size<6>(problem_size);
     int head_size_vo = size<7>(problem_size);
@@ -82,8 +81,8 @@ struct XeFlashIndividualTileScheduler {
     return Params{grid};
   }
 
-
-  template <int Num_SGs> static dim3 get_grid_shape(Params const &params) {
+  template <int Num_SGs>
+  static dim3 get_grid_shape(Params const& params) {
     return params.grid;
   }
 
@@ -106,7 +105,7 @@ struct XeFlashIndividualTileScheduler {
   }
 
   CUTLASS_DEVICE
-  XeFlashIndividualTileScheduler &operator++() {
+  XeFlashIndividualTileScheduler& operator++() {
     valid_ = false;
     return *this;
   }
@@ -115,7 +114,6 @@ struct XeFlashIndividualTileScheduler {
 ////////////////////////////////////////////////////////////////////////////////
 
 struct XeFlashPersistentTileScheduler {
-
   struct Params {
     int num_blocks;
     FastDivmod divmod_seq_len_block;
@@ -129,13 +127,13 @@ struct XeFlashPersistentTileScheduler {
   Params params;
 
   CUTLASS_DEVICE
-  XeFlashPersistentTileScheduler(Params const &params)
+  XeFlashPersistentTileScheduler(Params const& params)
       : block_idx(BlockIdxX()), params(params) {}
 
   template <class ProblemSize, class TileShape>
-  static Params to_underlying_arguments(ProblemSize const &problem_size,
+  static Params to_underlying_arguments(ProblemSize const& problem_size,
                                         KernelHardwareInfo hw_info,
-                                        TileShape const &tile_shape) {
+                                        TileShape const& tile_shape) {
     using namespace cute;
     // Get SM count if needed, otherwise use user supplied SM count
     int sm_count = hw_info.sm_count;
@@ -169,7 +167,8 @@ struct XeFlashPersistentTileScheduler {
                   hw_info};
   }
 
-  template <int Num_SGs> static dim3 get_grid_shape(Params const &params) {
+  template <int Num_SGs>
+  static dim3 get_grid_shape(Params const& params) {
     auto queue = syclcompat::get_default_queue();
     auto dev = queue.get_device();
     const size_t maxSubgroups =
@@ -198,14 +197,14 @@ struct XeFlashPersistentTileScheduler {
   }
 
   CUTLASS_DEVICE
-  XeFlashPersistentTileScheduler &operator++() {
+  XeFlashPersistentTileScheduler& operator++() {
     block_idx += GridDimX();
     return *this;
   }
 };
 
 ////////////////////////////////////////////////////////////////////////////////
-} // namespace kernel
+}  // namespace kernel
 
 struct IndividualScheduler {};
 struct PersistentScheduler {};
@@ -240,8 +239,8 @@ struct TileSchedulerSelector<
     cute::enable_if_t<cute::is_same_v<ArchTag, cutlass::arch::IntelXe>>> {
   using Scheduler = kernel::XeFlashPersistentTileScheduler;
 };
-} // namespace detail
+}  // namespace detail
 
 ////////////////////////////////////////////////////////////////////////////////
 
-} // namespace cutlass::flash_attention
+}  // namespace cutlass::flash_attention

@@ -20,8 +20,7 @@ inline CutlassType aten_to_Cutlass_dtype(const at::Tensor& input) {
     cuType = CutlassType::bfloat16;
   } else {
     TORCH_INTERNAL_ASSERT(
-        false,
-        "Current cutlass kernel only support half/bf16 data type.");
+        false, "Current cutlass kernel only support half/bf16 data type.");
   }
   return cuType;
 }
@@ -38,7 +37,7 @@ struct chunk_policy_head128 {
   using ShapeQK = Shape<_128, _64, _64>;
   using ShapePV = Shape<_128, _32, _64>;
   using ShapeOutPut = Shape<_128, _128, _64>;
-  using SubgroupLayout = Layout<Shape<_16, _1, _1>, Stride<_1, _1, _1>>; 
+  using SubgroupLayout = Layout<Shape<_16, _1, _1>, Stride<_1, _1, _1>>;
 };
 
 struct chunk_policy_head256 {

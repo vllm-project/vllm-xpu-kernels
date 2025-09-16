@@ -39,11 +39,8 @@
 #include "cute/atom/mma_atom.hpp"
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
 
-
 ////////////////////////////////////////////////////////////
-namespace {
-
-}
+namespace {}
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace cutlass::flash_attention::collective {
@@ -69,7 +66,8 @@ template <int Stages, class ProblemShapeType_, class ElementQ_, class StrideQ_,
           class ElementK_, class StrideK_, class ElementV_, class StrideV_,
           class MMAOperation_, class TileShapeQK_, class TileShapePV_,
           class SubgroupLayout_, class GmemTiledCopyQ_, class GmemTiledCopyK_,
-          class GmemTiledCopyV_, bool CausalMask_, bool LocalMask_, bool PagedKV_>
+          class GmemTiledCopyV_, bool CausalMask_, bool LocalMask_,
+          bool PagedKV_>
 struct FlashChunkPrefillMma<
     gemm::MainloopIntelXeXMX16<Stages>, ProblemShapeType_, ElementQ_, StrideQ_,
     ElementK_, StrideK_, ElementV_, StrideV_, MMAOperation_, TileShapeQK_,
@@ -125,13 +123,13 @@ struct FlashChunkPrefillMma<
   // This TiledMma is only required to serve the specific tiling requirements
   // for matrix K. This is due to the consumption of matrix K by all subgroups
   // within a workgroup.
-  static constexpr auto QK_ATOM_M = PV_ATOM_M; // 8
-  static constexpr auto QK_ATOM_N = PV_ATOM_N; // 1
-  static constexpr auto QK_ATOM_K = PV_ATOM_K; // 1
+  static constexpr auto QK_ATOM_M = PV_ATOM_M;  // 8
+  static constexpr auto QK_ATOM_N = PV_ATOM_N;  // 1
+  static constexpr auto QK_ATOM_K = PV_ATOM_K;  // 1
 
   using SubgroupTileShapeQK = decltype(cute::shape_div(
       TileShapeQK{},
-      SubgroupLayout{}.shape())); // 128, 64, 32 / 16, 1, 1 = (8, 64, 32 )
+      SubgroupLayout{}.shape()));  // 128, 64, 32 / 16, 1, 1 = (8, 64, 32 )
 
   static constexpr auto QK_SG_M = get<0>(SubgroupTileShapeQK{});
   static constexpr auto QK_SG_N = get<1>(SubgroupTileShapeQK{});
@@ -143,11 +141,11 @@ struct FlashChunkPrefillMma<
 
   using FragsShapeS = decltype(cute::shape_div(
       take<0, 2>(SubgroupTileShapeQK{}),
-      take<0, 2>(MmaAtomShape()))); // 8, 64, 32 /  8, 16, 16 (1, 4)
+      take<0, 2>(MmaAtomShape())));  // 8, 64, 32 /  8, 16, 16 (1, 4)
   static constexpr int Vec =
-      (get<0>(MmaAtomShape()) * get<1>(MmaAtomShape())) / SubgroupSize; // 8
+      (get<0>(MmaAtomShape()) * get<1>(MmaAtomShape())) / SubgroupSize;  // 8
   static constexpr int FragsM = get<0>(FragsShapeS{});
-  static constexpr int FragsNS = get<1>(FragsShapeS{}); // 4
+  static constexpr int FragsNS = get<1>(FragsShapeS{});  // 4
 
   static constexpr uint32_t MaxThreadsPerBlock =
       size(SubgroupLayout{}) * SubgroupSize;
@@ -176,18 +174,18 @@ struct FlashChunkPrefillMma<
 
   // Host side kernel arguments
   struct Arguments {
-    ElementQ const *ptr_Q;
+    ElementQ const* ptr_Q;
     StrideQ dQ;
-    ElementK const *ptr_K;
+    ElementK const* ptr_K;
     StrideK dK;
-    ElementV const *ptr_V;
+    ElementV const* ptr_V;
     StrideV dV;
-    ElementK const *ptr_K_cache;
+    ElementK const* ptr_K_cache;
     StrideK dK_cache;
-    ElementV const *ptr_V_cache;
+    ElementV const* ptr_V_cache;
     StrideV dV_cache;
     // Paged KV Cache
-    int const *ptr_page_table;
+    int const* ptr_page_table;
     int page_size;
     int const max_pages_per_seq;
     int const total_seqlen_k;
@@ -202,7 +200,7 @@ struct FlashChunkPrefillMma<
     XE_Copy_K gmem_tiled_copy_k_cache;
     XE_Copy_V gmem_tiled_copy_v_cache;
     // Paged KV Cache
-    int const *ptr_page_table;
+    int const* ptr_page_table;
     int page_size;
     int const max_pages_per_seq;
     int const total_seqlen_k;
@@ -216,9 +214,9 @@ struct FlashChunkPrefillMma<
 
   FlashChunkPrefillMma() = default;
 
-  static constexpr Params
-  to_underlying_arguments(ProblemShapeType const &problem_shape,
-                          Arguments const &args, void *workspace) {
+  static constexpr Params to_underlying_arguments(
+      ProblemShapeType const& problem_shape, Arguments const& args,
+      void* workspace) {
     (void)workspace;
 
     auto [batch, num_heads_q, num_heads_kv, seq_len_qo, seq_len_kv,
@@ -241,11 +239,11 @@ struct FlashChunkPrefillMma<
         make_gmem_ptr(args.ptr_V),
         make_layout(make_shape(head_size_vo * num_heads_kv, seq_len_kv, batch),
                     args.dV));
-    auto tensorK_cache =
-        make_tensor(make_gmem_ptr(args.ptr_K_cache),
-                    make_layout(make_shape(seq_len_kv_cache,
-                                           num_heads_kv * head_size_qk, batch),
-                                args.dK_cache));
+    auto tensorK_cache = make_tensor(
+        make_gmem_ptr(args.ptr_K_cache),
+        make_layout(
+            make_shape(seq_len_kv_cache, num_heads_kv * head_size_qk, batch),
+            args.dK_cache));
     auto tensorV_cache = make_tensor(
         make_gmem_ptr(args.ptr_V_cache),
         make_layout(
@@ -258,20 +256,24 @@ struct FlashChunkPrefillMma<
     XE_Copy_K copyK_cache{XE_Copy_K{}.with(tensorK_cache)};
     XE_Copy_V copyV_cache{XE_Copy_V{}.with(tensorV_cache)};
 
-    return Params{copyQ,            copyK,
-                  copyV,            copyK_cache,
-                  copyV_cache,      args.ptr_page_table,
-                  args.page_size,   args.max_pages_per_seq,
+    return Params{copyQ,
+                  copyK,
+                  copyV,
+                  copyK_cache,
+                  copyV_cache,
+                  args.ptr_page_table,
+                  args.page_size,
+                  args.max_pages_per_seq,
                   args.total_seqlen_k,
-                  args.window_left, args.window_right};
+                  args.window_left,
+                  args.window_right};
   }
 
   template <class FragQccum, class TensorQ, class TensorK, class FragSrc>
-  CUTLASS_DEVICE void mmaQK(FragQccum &accum, TensorQ gQ, TensorK gK,
-                            FragSrc const &frag_src, int const &k_tile_count,
-                            Params const &params, bool is_KV_cache) {
-
-    auto &gmem_tiled_copy_k =
+  CUTLASS_DEVICE void mmaQK(FragQccum& accum, TensorQ gQ, TensorK gK,
+                            FragSrc const& frag_src, int const& k_tile_count,
+                            Params const& params, bool is_KV_cache) {
+    auto& gmem_tiled_copy_k =
         is_KV_cache ? params.gmem_tiled_copy_k_cache : params.gmem_tiled_copy_k;
 
     int thread_idx = static_cast<int>(ThreadIdxX());
@@ -314,10 +316,10 @@ struct FlashChunkPrefillMma<
       copy(gmem_tiled_copy_k, tKgK(_, _, _, k_tile), tKrK);
       cute::gemm(tiled_mma, accum, tCrQ, tCrK, frag_src);
 #if 0
-#define PRINT(x)                                                               \
-  print(#x ": ");                                                              \
-  print(x);                                                                    \
-  print("\n");
+  #define PRINT(x)  \
+    print(#x ": "); \
+    print(x);       \
+    print("\n");
     if (cute::thread(0, 0)) {
       print("======================= Q: \n");
       PRINT(gQ);
@@ -337,29 +339,28 @@ struct FlashChunkPrefillMma<
       PRINT(MaxThreadsPerBlock);
       PRINT(SubgroupTileShapeQK{});
     }
-#undef PRINT
+  #undef PRINT
 #endif
     }
   }
 
   template <typename To_type, typename Engine, typename Layout>
-  CUTLASS_DEVICE auto convert_type(Tensor<Engine, Layout> const &tensor) {
-      using From_type = typename Engine::value_type;
-      constexpr int numel = decltype(size(tensor))::value;
-      cutlass::NumericArrayConverter<To_type, From_type, numel> convert_op;
-      auto frag =
-      convert_op(*reinterpret_cast<const cutlass::Array<From_type, numel> *>(
-          tensor.data()));
-          return make_tensor(make_rmem_ptr<To_type>(&frag), tensor.layout());
+  CUTLASS_DEVICE auto convert_type(Tensor<Engine, Layout> const& tensor) {
+    using From_type = typename Engine::value_type;
+    constexpr int numel = decltype(size(tensor))::value;
+    cutlass::NumericArrayConverter<To_type, From_type, numel> convert_op;
+    auto frag =
+        convert_op(*reinterpret_cast<const cutlass::Array<From_type, numel>*>(
+            tensor.data()));
+    return make_tensor(make_rmem_ptr<To_type>(&frag), tensor.layout());
   }
 
   template <int tile_count, class FragQccum, class FragS, class TensorV,
             class FragSrc>
-  CUTLASS_DEVICE void mmaPV(FragQccum &accum, FragS const &tSr, TensorV gV,
-                            FragSrc const &frag_src, Params const &params,
+  CUTLASS_DEVICE void mmaPV(FragQccum& accum, FragS const& tSr, TensorV gV,
+                            FragSrc const& frag_src, Params const& params,
                             bool is_KV_cache) {
-
-    auto &gmem_tiled_copy_v =
+    auto& gmem_tiled_copy_v =
         is_KV_cache ? params.gmem_tiled_copy_v_cache : params.gmem_tiled_copy_v;
 
     int thread_idx = static_cast<int>(ThreadIdxX());
@@ -383,10 +384,10 @@ struct FlashChunkPrefillMma<
     Tensor tVgV = gmem_thr_copy_V.retile_S(tCgV);
 
 #if CUTLASS_ENABLE_DEBUG_PRINTS
-#define PRINT(x)                                                               \
-  print(#x ": ");                                                              \
-  print(x);                                                                    \
-  print("\n");
+  #define PRINT(x)  \
+    print(#x ": "); \
+    print(x);       \
+    print("\n");
     if (cute::thread(LOG_THREAD, LOG_GROUP)) {
       print("=====================  V :\n");
       PRINT(gV);
@@ -399,7 +400,7 @@ struct FlashChunkPrefillMma<
       PRINT(MaxThreadsPerBlock);
       PRINT(SubgroupTileShapePV{});
     }
-#undef PRINT
+  #undef PRINT
 #endif
 
     // 7) Convert S to P (FP32 -> BF16)
@@ -423,10 +424,10 @@ struct FlashChunkPrefillMma<
   // int, int, int> For Variable Sequence Length, ProblemShape = Shape<int, int,
   // int, VariableSeqlen, VariableSeqlen, VariableSeqlen, int, int>
   template <class ProblemShape, class SequenceLengthShape>
-  CUTLASS_DEVICE static constexpr Params
-  get_updated_copies(Params const &params, ProblemShape const &problem_shape,
-                     SequenceLengthShape const &sequence_length_shape,
-                     int const &l_coord, int const &q_head_coord = 0) {
+  CUTLASS_DEVICE static constexpr Params get_updated_copies(
+      Params const& params, ProblemShape const& problem_shape,
+      SequenceLengthShape const& sequence_length_shape, int const& l_coord,
+      int const& q_head_coord = 0) {
     auto [num_heads_q, num_heads_kv, head_size_qk, head_size_vo] =
         select<1, 2, 6, 7>(problem_shape);
     auto [seq_len_qo, seq_len_kv, seq_len_kv_cache] = sequence_length_shape;
@@ -450,16 +451,18 @@ struct FlashChunkPrefillMma<
                  kv_head_coord * head_size_qk;
       offset_v = num_heads_kv * head_size_vo * kv_cumulative_length[l_coord] +
                  kv_head_coord * head_size_vo;
-      offset_k_cache = seq_len_kv_cache == 0
-                           ? 0
-                           : PagedKV ? kv_head_coord * head_size_qk :
-                                num_heads_kv * head_size_qk * kv_cached_cumulative_length[l_coord] +
-                                kv_head_coord * head_size_qk;
-      offset_v_cache = seq_len_kv_cache == 0
-                           ? 0
-                           : PagedKV ? kv_head_coord * head_size_vo :
-                                num_heads_kv * head_size_vo * kv_cached_cumulative_length[l_coord] + 
-                                kv_head_coord * head_size_vo;
+      offset_k_cache = seq_len_kv_cache == 0 ? 0
+                       : PagedKV
+                           ? kv_head_coord * head_size_qk
+                           : num_heads_kv * head_size_qk *
+                                     kv_cached_cumulative_length[l_coord] +
+                                 kv_head_coord * head_size_qk;
+      offset_v_cache = seq_len_kv_cache == 0 ? 0
+                       : PagedKV
+                           ? kv_head_coord * head_size_vo
+                           : num_heads_kv * head_size_vo *
+                                     kv_cached_cumulative_length[l_coord] +
+                                 kv_head_coord * head_size_vo;
     } else {
       // int offset_q = num_heads_q/*q_group_nums * q_group_size*/ *
       // head_size_qk * qo_cumulative_length[l_coord];
@@ -472,38 +475,36 @@ struct FlashChunkPrefillMma<
 
       offset_q = num_heads_q /*q_group_nums * q_group_size*/ * head_size_qk *
                      seq_len_qo * l_coord +
-                q_head_coord * head_size_qk;
+                 q_head_coord * head_size_qk;
 
       offset_k = num_heads_kv * head_size_qk * seq_len_kv * l_coord +
                  kv_head_coord * head_size_qk;
       offset_v = num_heads_kv * head_size_vo * seq_len_kv * l_coord +
                  kv_head_coord * head_size_vo;
       offset_k_cache =
-          seq_len_kv_cache == 0
-              ? 0
-              : PagedKV ? kv_head_coord * head_size_qk :
-              num_heads_kv * head_size_qk * seq_len_kv_cache * l_coord + kv_head_coord * head_size_qk;
+          seq_len_kv_cache == 0 ? 0
+          : PagedKV             ? kv_head_coord * head_size_qk
+                    : num_heads_kv * head_size_qk * seq_len_kv_cache * l_coord +
+                          kv_head_coord * head_size_qk;
       offset_v_cache =
-          seq_len_kv_cache == 0
-              ? 0 : PagedKV ? kv_head_coord * head_size_vo :
-              num_heads_kv * head_size_vo * seq_len_kv_cache * l_coord + kv_head_coord * head_size_vo;
+          seq_len_kv_cache == 0 ? 0
+          : PagedKV             ? kv_head_coord * head_size_vo
+                    : num_heads_kv * head_size_vo * seq_len_kv_cache * l_coord +
+                          kv_head_coord * head_size_vo;
     }
 
-    auto q_traits =
-        static_cast<traits_load_Q const &>(params.gmem_tiled_copy_q);
-    const ElementQ *q_ptr = (const ElementQ *)q_traits.base_ptr;
-    auto k_traits =
-        static_cast<traits_load_K const &>(params.gmem_tiled_copy_k);
-    const ElementK *k_ptr = (const ElementK *)k_traits.base_ptr;
-    auto v_traits =
-        static_cast<traits_load_V const &>(params.gmem_tiled_copy_v);
-    const ElementV *v_ptr = (const ElementV *)v_traits.base_ptr;
+    auto q_traits = static_cast<traits_load_Q const&>(params.gmem_tiled_copy_q);
+    const ElementQ* q_ptr = (const ElementQ*)q_traits.base_ptr;
+    auto k_traits = static_cast<traits_load_K const&>(params.gmem_tiled_copy_k);
+    const ElementK* k_ptr = (const ElementK*)k_traits.base_ptr;
+    auto v_traits = static_cast<traits_load_V const&>(params.gmem_tiled_copy_v);
+    const ElementV* v_ptr = (const ElementV*)v_traits.base_ptr;
     auto k_traits_cache =
-        static_cast<traits_load_K const &>(params.gmem_tiled_copy_k_cache);
-    const ElementK *k_cache_ptr = (const ElementK *)k_traits_cache.base_ptr;
+        static_cast<traits_load_K const&>(params.gmem_tiled_copy_k_cache);
+    const ElementK* k_cache_ptr = (const ElementK*)k_traits_cache.base_ptr;
     auto v_traits_cache =
-        static_cast<traits_load_V const &>(params.gmem_tiled_copy_v_cache);
-    const ElementV *v_cache_ptr = (const ElementV *)v_traits_cache.base_ptr;
+        static_cast<traits_load_V const&>(params.gmem_tiled_copy_v_cache);
+    const ElementV* v_cache_ptr = (const ElementV*)v_traits_cache.base_ptr;
     auto shape_q =
         make_shape(static_cast<int>(seq_len_qo), head_size_qk * num_heads_q, 1);
     StrideQ stride_q = cutlass::make_cute_packed_stride(StrideQ{}, shape_q);
@@ -555,6 +556,6 @@ struct FlashChunkPrefillMma<
   }
 };
 
-} // namespace cutlass::flash_attention::collective
+}  // namespace cutlass::flash_attention::collective
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
