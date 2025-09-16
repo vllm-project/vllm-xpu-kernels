@@ -58,6 +58,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
       is_causal);
 
   if(return_softmax) {
+    // FIXME: current do not support store softmax_lse out
     auto softmax_lse = torch::empty_like(out);
     return {out, softmax_lse};
   }
