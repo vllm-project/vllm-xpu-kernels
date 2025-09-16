@@ -3,8 +3,9 @@ import os
 
 
 def pytest_generate_tests(metafunc):
-    use_mini_pytest_profile = os.getenv("PYTEST_PROFILE", "") == "MINI"
-    if not use_mini_pytest_profile:
+    use_mini_pytest_profiler = os.getenv("XPU_KERNEL_PYTEST_PROFILER",
+                                         "") == "MINI"
+    if not use_mini_pytest_profiler:
         return
 
     module = metafunc.module
