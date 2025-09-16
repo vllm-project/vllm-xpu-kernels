@@ -3,14 +3,9 @@
 #include "cutlass/epilogue/collective/default_epilogue.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
-#include "flash_attention_v2/kernel/tile_scheduler_chunk_prefill.hpp"
 #include "cutlass/util/packed_stride.hpp"
-#include "flash_attention_v2/kernel/xe_chunk_prefill.hpp"
-#include "flash_attention_v2/collective/xe_flash_attn_chunk_prefill_epilogue.hpp"
-#include "flash_attention_v2/collective/xe_flash_attn_chunk_prefill_softmax_epilogue.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/sycl_event_manager.hpp"
-
 #include <cute/tensor.hpp>
 #include <random>
 
@@ -18,6 +13,11 @@
 #include "cutlass/util/device_memory.h"
 #include "cutlass/util/reference/device/gemm_complex.h"
 #include "cutlass/util/reference/device/tensor_compare.h"
+
+#include "./collective/chunk_prefill_scheduler.hpp"
+#include "./collective/chunk_prefill_epilogue.hpp"
+#include "./collective/chunk_prefill_softmax.hpp"
+#include "chunk_prefill_kernel.hpp"
 
 #include "utils.hpp"
 
@@ -264,20 +264,6 @@ void policy_dispatch(
   }
 }
 
-void chunk_prefill_kernel(
-    sycl::queue& queue,
-    CutlassType cuType,
-    const chunk_prefill_args_t& args) {
-  if(args.head_size == HEAD_SIZE_LIMIT_0) {
-    policy_dispatch<chunk_policy_head64>(queue, cuType, args);
-  } else if(args.head_size == HEAD_SIZE_LIMIT_1) {
-    policy_dispatch<chunk_policy_head128>(queue, cuType, args);
-  }
-  else if(args.head_size == HEAD_SIZE_LIMIT_2) {
-    policy_dispatch<chunk_policy_head256>(queue, cuType, args);
-  }
-}
-
 void cutlass_chunk_prefill_impl(
     sycl::queue& queue,
     const at::Tensor& query, // [seq_q, heads, head_size]
@@ -323,5 +309,13 @@ void cutlass_chunk_prefill_impl(
       is_causal
   };
   CutlassType cuType = aten_to_Cutlass_dtype(query);
-  chunk_prefill_kernel(queue, cuType, args);
+
+  if(args.head_size == HEAD_SIZE_LIMIT_0) {
+    policy_dispatch<chunk_policy_head64>(queue, cuType, args);
+  } else if(args.head_size == HEAD_SIZE_LIMIT_1) {
+    policy_dispatch<chunk_policy_head128>(queue, cuType, args);
+  }
+  else if(args.head_size == HEAD_SIZE_LIMIT_2) {
+    policy_dispatch<chunk_policy_head256>(queue, cuType, args);
+  }
 }
