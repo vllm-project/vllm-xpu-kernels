@@ -22,6 +22,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "scoring_func, float routed_scaling_factor, Tensor? bias=None) -> "
       "(Tensor, Tensor)");
   m.impl("fused_grouped_topk", torch::kXPU, &fused_grouped_topk);
+  // Apply topk softmax to the gating outputs.
+  m.def(
+      "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
+      "token_expert_indices, Tensor gating_output) -> ()");
+  m.impl("topk_softmax", torch::kXPU, &topk_softmax);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

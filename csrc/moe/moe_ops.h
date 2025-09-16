@@ -15,3 +15,7 @@ std::tuple<torch::Tensor, torch::Tensor> fused_grouped_topk(
     const int64_t n_topk_group, const c10::string_view scoring_func,
     const double routed_scaling_factor,
     const c10::optional<torch::Tensor>& bias);
+
+void topk_softmax(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
+                  torch::Tensor& token_expert_indices,
+                  torch::Tensor& gating_output);

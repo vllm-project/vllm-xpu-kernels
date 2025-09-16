@@ -203,3 +203,10 @@ def fused_grouped_topk(
                                                scoring_func,
                                                routed_scaling_factor,
                                                e_score_correction_bias)
+
+def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                 token_expert_indices: torch.Tensor,
+                 gating_output: torch.Tensor) -> None:
+    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids, token_expert_indices,
+                                  gating_output)
+
