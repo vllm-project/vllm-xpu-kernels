@@ -68,7 +68,7 @@ def get_benchmark():
         n_token: int,
         n_expert: int,
         topk: int,
-        renormalize: int,
+        renormalize: bool,
         dtype: torch.dtype,
         provider: str = "vllm",
     ):
