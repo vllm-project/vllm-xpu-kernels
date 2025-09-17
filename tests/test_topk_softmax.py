@@ -5,6 +5,14 @@ import torch
 from tests.ops.topk_softmax_op import fused_topk, topk_softmax
 from tests.utils import seed_everything
 
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "n_token": [1],
+        "n_expert": [16, 512],
+    },
+}
+
 
 @pytest.mark.parametrize("n_token", [1, 33, 64])
 @pytest.mark.parametrize("n_hidden", [1024])
