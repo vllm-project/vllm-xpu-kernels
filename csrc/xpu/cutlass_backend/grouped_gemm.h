@@ -127,11 +127,15 @@ struct Options {
         std::cout << "Options()" << std::endl;
       }
     int group_cnt = 0;
+    std::cout << "****Options() num_of_expert  " << num_of_expert << std::endl;
     for (int i = 0; i < num_of_expert; ++i){
+      std::cout << "****Options() i  " << i << std::endl;
+      std::cout << "****Options() offset[i]  " << offset[i] << std::endl;
       if (offset[i] != 0){
         group_cnt++;
       } 
     }
+    std::cout << "****Options() group_cnt  " << group_cnt << std::endl; 
     problem_sizes_host.reserve(group_cnt);
     for (int i = 0; i < num_of_expert; ++i){
       if (offset[i] != 0){
@@ -274,6 +278,9 @@ void allocate(const Options &options) {
     fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 1};
     fusion_args.dBeta = {cute::_0{}, cute::_0{}, 1};
     using RasterOrderOptions = typename cutlass::gemm::kernel::detail::PersistentTileSchedulerXeGroup<ProblemShape>::RasterOrderOptions;
+
+    std::cout << "grouped_gemm arguments" << std::endl;
+    std::cout << "options.groups " << options.groups << std::endl;
 
     // Per-GEMM problem shape info may only exist on the device.
     if (host_problem_shapes_available) {

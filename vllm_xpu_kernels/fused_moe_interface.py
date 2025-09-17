@@ -80,7 +80,7 @@ def prepare_gemm_args(n, k, offset, A, B, D, alpha, beta, e):
     # gemm_args["ptr_D"] = ptr_D
     # gemm_args["ptr_alpha"] = ptr_alpha
     # gemm_args["ptr_beta"] = ptr_beta
-    prepare_gemm_args.gemm_args["groups"] = groups
+    prepare_gemm_args.gemm_args["groups"] = e # FIXME: groups
     return prepare_gemm_args.gemm_args
 
 
@@ -88,7 +88,8 @@ def cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts):
     device = "xpu"
     alpha = torch.ones(num_experts, dtype=torch.float32, device=input_A.device)
     beta = torch.zeros(num_experts, dtype=torch.float32, device=input_A.device)
-    gemm_args = prepare_gemm_args(n, k, offset, input_A, input_B, output, alpha, beta)
+    gemm_args = prepare_gemm_args(n, k, offset, input_A, input_B, output, alpha, beta, num_experts)
+    offset = torch.tensor(offset, dtype=torch.int64, device="cpu" )
     torch.ops._xpu_C.cutlass_grouped_gemm(offset=offset, N=n, K=k, **gemm_args)
 
 def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_per_token, activation, num_experts):
@@ -142,19 +143,26 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
         # grouped_input_A.append(expert_tokens)
         input_A[start_idx:end_idx, :].copy_(hidden_states[exp_token_idxs])
 
+    while len(offset) < num_experts:
+        offset.append(0)
 
+    # import ipdb
+    # ipdb.set_trace()
     ########### gemm1 ##################
     print("@@@@@@@ cutlass fused moe enter")
     input_B = w13 #.transpose(-1, -2).contiguous().transpose(-1, -2)
     assert(list(input_A.shape)[0] == total_input_size)
     gemm_args = prepare_gemm_args(2*intermediate_size, hidden_size, offset, input_A, input_B, gemm1_output, alpha, beta, num_experts)
+    print("**python offset", offset)
     offset_t = torch.tensor(offset, dtype=torch.int64, device='cpu')
+    print("**python offset_t", offset_t)
     torch.ops._xpu_C.cutlass_grouped_gemm(offset=offset_t, N=2*intermediate_size, K=hidden_size, **gemm_args)
     print("@@@@@@@ cutlass fused moe gemm1 done")
+    print("gemm1 out", gemm1_output)
     # act
-    gate, up = torch.split(gemm1_output, intermediate_size, dim=1)
+    gate, up_ = torch.split(gemm1_output, intermediate_size, dim=1)
     act = torch.nn.SiLU()
-    act_output = act(gate) * up
+    act_output = act(gate) * up_
 
 
     ########### gemm2 ##################

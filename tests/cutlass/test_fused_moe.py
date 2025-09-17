@@ -50,16 +50,15 @@ def calculate_device_mem(m, k, n, e, topk, dtype):
 def test_grouped_gemm(num_experts, n, k, token_per_group):
     # input
     input_A = torch.randn((sum(token_per_group), k), dtype=torch.bfloat16, device="xpu").contiguous()
-
+    ref_A = input_A.clone()
     # weight
     input_B = torch.randn((num_experts, n, k), dtype=torch.bfloat16, device="xpu")
-    input_B = input_B.transpose(-1, -2).contiguous().transpose(-1, -2)
+    input_B = input_B #.transpose(-1, -2).contiguous().transpose(-1, -2)
 
     # output offset
-    output = torch.empty((sum(token_per_group), n), dtype=torch.float32, device="xpu")
-    offset = torch.tensor(token_per_group, dtype=torch.int64, device="cpu" )
+    output = torch.empty((sum(token_per_group), n), dtype=torch.bfloat16, device="xpu")
 
-    cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts)
+    cutlass_grouped_gemm(input_A, input_B, output, token_per_group, n, k, num_experts)
 
     # ref gg
     ref = []
@@ -68,19 +67,25 @@ def test_grouped_gemm(num_experts, n, k, token_per_group):
         cur_token_num = token_per_group[i]
         if cur_token_num == 0:
             continue
-        input = input_A[pre_token_sum:pre_token_sum + cur_token_num, :]
+        input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :]
         print("refA ptr",i, ":", hex(input.data_ptr()))
         weight = input_B[i, :, :]
         expert_output = input @ weight.T
         ref.append(expert_output)
         pre_token_sum += cur_token_num
-    ref = torch.cat(ref, dim=0).float()
+    ref = torch.cat(ref, dim=0)
 
     print("kernel:", output)
     print("reference:",  ref)
     print(torch.allclose(output, ref, rtol=1, atol=1))
     max_diff = (output - ref).abs().max()
     print("Max absolute difference:", max_diff)
+    try:
+        torch.testing.assert_close(output, ref, rtol=1, atol=1)
+        print("a 和 b 足够接近 ✅")
+    except AssertionError as e:
+        print("a 和 b 有差异 ❌")
+        print(e)
 
 def ref_fused_moe(x,
                   w13,
@@ -90,8 +95,9 @@ def ref_fused_moe(x,
                   num_per_tok,
                   activation,
                   num_experts):
-
-    expert_cache = torch.zeros_like(x).float()
+    # import ipdb
+    # ipdb.set_trace()
+    expert_cache = torch.zeros_like(x)
     idxs = flat_expert_indices.argsort()
     counts = flat_expert_indices.bincount().cpu().numpy()
     tokens_per_expert = counts.cumsum()
@@ -115,7 +121,7 @@ def ref_fused_moe(x,
         expert_cache.scatter_reduce_(
             0,
             exp_token_idxs.view(-1, 1).repeat(1, x.shape[-1]),
-            expert_out.float(),
+            expert_out,
             reduce='sum'
         )
 
@@ -139,9 +145,10 @@ def test_fused_moe(
     # todo: seed
     verbose = False
     # Setup test data
-    a = torch.randn((m, k), device=DEVICE, dtype=dtype) / 10
+    a = torch.ones((m, k), device=DEVICE, dtype=dtype) / 10
     w13 = torch.randn((e, 2 * n, k), device=DEVICE, dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device=DEVICE, dtype=dtype) / 10
+    ref_a = a.clone()
 
     # moe gate
     scores = torch.randn((m, e), device=DEVICE, dtype=dtype)
@@ -165,7 +172,7 @@ def test_fused_moe(
                                 activation="silu",
                                 num_experts=e)
 
-    ref_out = ref_fused_moe(a,
+    ref_out = ref_fused_moe(ref_a,
                   w13,
                   w2,
                   flat_expert_weights,
@@ -176,20 +183,20 @@ def test_fused_moe(
 
     print("ref result", ref_out, ref_out.shape)
     print("kernel result", out, out.shape)
-    print(torch.allclose(out.float(), ref_out, rtol=1, atol=1))
+    print(torch.allclose(out, ref_out, rtol=1, atol=1))
     max_diff = (out - ref_out).abs().max()
     print("Max absolute difference:", max_diff)
 
 
 
 if __name__ == "__main__":
-    test_fused_moe(
-        m = 33,
-        n = 2048,
-        k = 128,
-        e = 16,
-        topk = 2,
-        ep_size = 1,
-        dtype = torch.bfloat16
-    )
-    # test_grouped_gemm(num_experts=2, n=4096, k=4096, token_per_group=[512,512])
+    # test_fused_moe(
+    #     m = 4,
+    #     n = 8192,
+    #     k = 5120,
+    #     e = 16,
+    #     topk = 1,
+    #     ep_size = 1,
+    #     dtype = torch.bfloat16
+    # )
+    test_grouped_gemm(num_experts=2, n=4096, k=4096, token_per_group=[512,512])
