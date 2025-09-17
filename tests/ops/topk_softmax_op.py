@@ -51,14 +51,11 @@ def fused_topk(
                                        dtype=torch.int32,
                                        device=hidden_states.device)
 
-    # remove this line after ops.topk_softmax supports fp16/bf16
-    gating_output_float = gating_output.float()
-
     ops.topk_softmax(
         topk_weights,
         topk_ids,
         token_expert_indices,
-        gating_output_float,
+        gating_output,
         renormalize,
     )
 

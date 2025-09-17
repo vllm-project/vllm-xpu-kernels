@@ -9,26 +9,13 @@ static constexpr int WARP_SIZE = 32;
 
 namespace vllm {
 namespace moe {
-
-/// Aligned array type
-template <
-    typename T,
-    /// Number of elements in the array
-    int N,
-    /// Alignment requirement in bytes
-    int Alignment = sizeof(T) * N
->
-class alignas(Alignment) AlignedArray {
-    float data[N];
-};
-
 // ====================== Softmax things ===============================
 // We have our own implementation of softmax here so we can support transposing the output
 // in the softmax kernel when we extend this module to support expert-choice routing.
-template <int TPB>
+template <int TPB, typename InputdType>
 class moeSoftmax{
 public:
-    moeSoftmax(sycl::local_accessor<float, 1>& slm, const float* input, const bool* finished, float* output, const int num_cols):
+    moeSoftmax(sycl::local_accessor<float, 1>& slm, const InputdType* input, const bool* finished, float* output, const int num_cols):
         slm(slm), input(input), finished(finished), output(output), num_cols(num_cols) {}
 
 void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const{
@@ -36,8 +23,7 @@ void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) 
       static_cast<void*>(
         slm.template get_multi_ptr<sycl::access::decorated::no>().get());
 
-    float* tmpStorage = reinterpret_cast<float*>(slm_ptr);
-    float* normalizing_factor = tmpStorage + TPB;
+    float* normalizing_factor = reinterpret_cast<float*>(slm_ptr);
     float* float_max = normalizing_factor+ 1;
 
     auto group = item.get_group();
@@ -93,7 +79,7 @@ void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) 
 
 private:
 sycl::local_accessor<float, 1> slm;
-const float* input;
+const InputdType* input;
 const bool* finished;
 float* output;
 const int num_cols;
@@ -227,10 +213,10 @@ private:
   2) This implementation assumes k is small, but will work for any k.
 */
 
-template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, int WARP_SIZE_PARAM, typename IndType>
+template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, int WARP_SIZE_PARAM, typename InputdType, typename IndType>
 class topkGatingSoftmax{
 public:
-  topkGatingSoftmax(const float* input, const bool* finished, float* output, const int num_rows, IndType* indices,
+  topkGatingSoftmax(const InputdType* input, const bool* finished, float* output, const int num_rows, IndType* indices,
         int* source_rows, const int k, const int start_expert, const int end_expert, const bool renormalize):
         input(input), finished(finished), output(output), num_rows(num_rows), indices(indices),
         source_rows(source_rows), k(k), start_expert(start_expert), end_expert(end_expert), renormalize(renormalize) {}
@@ -245,7 +231,7 @@ public:
     static_assert(BYTES_PER_LDG <= 16, "BYTES_PER_LDG must be leq 16");
 
     // Number of bytes each thread pulls in per load
-    static constexpr int ELTS_PER_LDG = BYTES_PER_LDG / sizeof(float);
+    static constexpr int ELTS_PER_LDG = BYTES_PER_LDG / sizeof(InputdType);
     static constexpr int ELTS_PER_ROW = NUM_EXPERTS;
     static constexpr int THREADS_PER_ROW = ELTS_PER_ROW / VPT;
     static constexpr int LDG_PER_THREAD = VPT / ELTS_PER_LDG;
@@ -287,25 +273,27 @@ public:
 
     // We finally start setting up the read pointers for each thread. First, each thread jumps to the start of the
     // row it will read.
-    const float* thread_row_ptr = input + thread_row * ELTS_PER_ROW;
+    const InputdType* thread_row_ptr = input + thread_row * ELTS_PER_ROW;
 
     // Now, we compute the group each thread belong to in order to determine the first column to start loads.
     const int thread_group_idx = local_id_x % THREADS_PER_ROW;
     const int first_elt_read_by_thread = thread_group_idx * ELTS_PER_LDG;
-    const float* thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
-
-    // Determine the pointer type to use to read in the data depending on the BYTES_PER_LDG template param. In theory,
-    // this can support all powers of 2 up to 16.
-    using AccessType = AlignedArray<float, ELTS_PER_LDG>;
+    const InputdType* thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
 
     // Finally, we pull in the data from global mem
-    float row_chunk[VPT];
-    AccessType* row_chunk_vec_ptr = reinterpret_cast<AccessType*>(&row_chunk);
-    const AccessType* vec_thread_read_ptr = reinterpret_cast<const AccessType*>(thread_read_ptr);
+    InputdType row_chunk_load[VPT];
 #pragma unroll
-    for (int ii = 0; ii < LDG_PER_THREAD; ++ii)
-    {
-        row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
+    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+#pragma unroll
+        for (int jj = 0; jj < ELTS_PER_LDG; ++jj) {
+            row_chunk_load[ii * ELTS_PER_LDG + jj] = thread_read_ptr[ii * THREADS_PER_ROW * ELTS_PER_LDG + jj];
+        }
+    }
+
+    float row_chunk[VPT];
+#pragma unroll
+    for(int ii = 0; ii < VPT; ++ii){
+        row_chunk[ii] = static_cast<float>(row_chunk_load[ii]);
     }
 
     // First, we perform a max reduce within the thread. We can do the max in fp16 safely (I think) and just
@@ -444,7 +432,7 @@ public:
 }
 
 private:
-  const float* input;
+  const InputdType* input;
   const bool* finished;
   float* output;
   const int num_rows;
@@ -459,10 +447,10 @@ private:
 namespace detail
 {
 // Constructs some constants needed to partition the work across threads at compile time.
-template <int EXPERTS, int BYTES_PER_LDG, int WARP_SIZE_PARAM>
+template <int EXPERTS, int BYTES_PER_LDG, int WARP_SIZE_PARAM, typename InputdType>
 struct TopkConstants
 {
-    static constexpr int ELTS_PER_LDG = BYTES_PER_LDG / sizeof(float);
+    static constexpr int ELTS_PER_LDG = BYTES_PER_LDG / sizeof(InputdType);
     static_assert(EXPERTS / (ELTS_PER_LDG * WARP_SIZE_PARAM) == 0 || EXPERTS % (ELTS_PER_LDG * WARP_SIZE_PARAM) == 0, "");
     static constexpr int VECs_PER_THREAD = MAX(1, EXPERTS / (ELTS_PER_LDG * WARP_SIZE_PARAM));
     static constexpr int VPT = VECs_PER_THREAD * ELTS_PER_LDG;
@@ -471,12 +459,12 @@ struct TopkConstants
 };
 } // namespace detail
 
-template <int EXPERTS, int WARPS_PER_TB, int WARP_SIZE_PARAM, int MAX_BYTES_PER_LDG, typename IndType>
-void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, float* output, IndType* indices,
+template <int EXPERTS, int WARPS_PER_TB, int WARP_SIZE_PARAM, int MAX_BYTES_PER_LDG, typename InputdType, typename IndType>
+void topkGatingSoftmaxLauncherHelper(const InputdType* input, const bool* finished, float* output, IndType* indices,
     int* source_row, const int num_rows, const int k, const int start_expert, const int end_expert, bool renormalize, sycl::queue& queue)
 {
-    static constexpr int BYTES_PER_LDG = MIN(MAX_BYTES_PER_LDG, sizeof(float) * EXPERTS);
-    using Constants = detail::TopkConstants<EXPERTS, BYTES_PER_LDG, WARP_SIZE_PARAM>;
+    static constexpr int BYTES_PER_LDG = MIN(MAX_BYTES_PER_LDG, sizeof(InputdType) * EXPERTS);
+    using Constants = detail::TopkConstants<EXPERTS, BYTES_PER_LDG, WARP_SIZE_PARAM, InputdType>;
     static constexpr int VPT = Constants::VPT;
     static constexpr int ROWS_PER_WARP = Constants::ROWS_PER_WARP;
     const int num_warps = (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
@@ -486,7 +474,7 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
     sycl::range<2> block(WARPS_PER_TB, WARP_SIZE_PARAM);
     queue.submit([&](sycl::handler& cgh) {
       cgh.parallel_for(sycl::nd_range<2>(grid * block, block),
-                      topkGatingSoftmax<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType>(
+                      topkGatingSoftmax<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, InputdType, IndType>(
                           input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert, renormalize));
     });
 }
@@ -497,9 +485,9 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
         gating_output, nullptr, topk_weights, topk_indices,                           \
         token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, queue);
 
-template <typename IndType>
+template <typename InputdType, typename IndType>
 void topkGatingSoftmaxKernelLauncher(
-    const float* gating_output,
+    const InputdType* gating_output,
     float* topk_weights,
     IndType* topk_indices,
     int* token_expert_indices,
@@ -511,7 +499,7 @@ void topkGatingSoftmaxKernelLauncher(
     sycl::queue& queue) {
     static constexpr int WARPS_PER_TB = 4;
     static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
-    static constexpr int BYTES_PER_LDG_MULTIPLE_64 = 8;
+    static constexpr int BYTES_PER_LDG_MULTIPLE_64 = 2 * sizeof(InputdType);
 
     switch (num_experts) {
         case 1:
@@ -568,7 +556,7 @@ void topkGatingSoftmaxKernelLauncher(
             queue.submit([&](sycl::handler& cgh) {
               sycl::local_accessor<float, 1> slm(sycl::range<1>(2),cgh);
               cgh.parallel_for(sycl::nd_range<1>(grid1 * block1, block1),
-                              moeSoftmax<TPB>(
+                              moeSoftmax<TPB, InputdType>(
                                   slm, gating_output, nullptr, softmax_workspace, num_experts));
             });
 
@@ -603,11 +591,11 @@ void topk_softmax(
 
     const at::DeviceGuard device_guard(gating_output.device());   
     auto& queue = vllm::xpu::vllmGetQueue();
-    torch::Tensor softmax_workspace = torch::empty({workspace_size}, gating_output.options());
+    torch::Tensor softmax_workspace = torch::empty({workspace_size}, gating_output.options().dtype(torch::kFloat));
 
     #define LAUNCH_TOPK_SOFTMAX(INPUTDTYPE, INDTYPE) \
         vllm::moe::topkGatingSoftmaxKernelLauncher( \
-            gating_output.data_ptr<INPUTDTYPE>(), \
+            reinterpret_cast<INPUTDTYPE*>(gating_output.mutable_data_ptr()), \
             topk_weights.data_ptr<float>(), \
             topk_indices.data_ptr<INDTYPE>(), \
             token_expert_indices.data_ptr<int>(), \
@@ -620,15 +608,30 @@ void topk_softmax(
 
     if(topk_indices.scalar_type() == at::ScalarType::Int)
     {
-        LAUNCH_TOPK_SOFTMAX(float, int)
+        if(gating_output.scalar_type() == at::ScalarType::Float)
+            LAUNCH_TOPK_SOFTMAX(float, int)
+        else if(gating_output.scalar_type() == at::ScalarType::Half)
+            LAUNCH_TOPK_SOFTMAX(sycl::half, int)
+        else
+            LAUNCH_TOPK_SOFTMAX(sycl::ext::oneapi::bfloat16, int)
     }
     else if (topk_indices.scalar_type() == at::ScalarType::UInt32)
     {
-        LAUNCH_TOPK_SOFTMAX(float, uint32_t)
+        if(gating_output.scalar_type() == at::ScalarType::Float)
+            LAUNCH_TOPK_SOFTMAX(float, uint32_t)
+        else if(gating_output.scalar_type() == at::ScalarType::Half)
+            LAUNCH_TOPK_SOFTMAX(sycl::half, uint32_t)
+        else
+            LAUNCH_TOPK_SOFTMAX(sycl::ext::oneapi::bfloat16, uint32_t)
     }
     else {
         TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
-        LAUNCH_TOPK_SOFTMAX(float, int64_t)
+        if(gating_output.scalar_type() == at::ScalarType::Float)
+            LAUNCH_TOPK_SOFTMAX(float, int64_t)
+        else if(gating_output.scalar_type() == at::ScalarType::Half)
+            LAUNCH_TOPK_SOFTMAX(sycl::half, int64_t)
+        else
+            LAUNCH_TOPK_SOFTMAX(sycl::ext::oneapi::bfloat16, int64_t)
     }
 
     #undef LAUNCH_TOPK_SOFTMAX

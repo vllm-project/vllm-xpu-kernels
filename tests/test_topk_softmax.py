@@ -8,18 +8,11 @@ from tests.utils import seed_everything
 
 @pytest.mark.parametrize("n_token", [1, 33, 64])
 @pytest.mark.parametrize("n_hidden", [1024])
-@pytest.mark.parametrize("n_expert", [16, 128, 512, 1024])
+@pytest.mark.parametrize("n_expert", [16, 192, 512, 1024])
 @pytest.mark.parametrize("topk", [2])
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("dtype",
                          [torch.float16, torch.bfloat16, torch.float32])
-# @pytest.mark.parametrize("n_token", [64])
-# @pytest.mark.parametrize("n_hidden", [1024])
-# @pytest.mark.parametrize("n_expert", [512])
-# @pytest.mark.parametrize("topk", [2])
-# @pytest.mark.parametrize("renormalize", [True])
-# @pytest.mark.parametrize("dtype",
-#                          [torch.float32])
 def test_fused_topk(n_token: int, n_hidden: int, n_expert: int, topk: int,
                       renormalize: bool, dtype: torch.dtype):
     seed_everything(0)
