@@ -18,9 +18,6 @@ def test_fused_topk(n_token: int, n_hidden: int, n_expert: int, topk: int,
     seed_everything(0)
     hidden_states = torch.randn((n_token, n_hidden), dtype=dtype, device="xpu")
     gating_output = torch.randn((n_token, n_expert), dtype=dtype, device="xpu")
-    e_score_correction_bias = torch.randn((n_expert, ),
-                                          dtype=dtype,
-                                          device="xpu")
 
     baseline_topk_weights, baseline_topk_ids = topk_softmax(
         hidden_states=hidden_states,
