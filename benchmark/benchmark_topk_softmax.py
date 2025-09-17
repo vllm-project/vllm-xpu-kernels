@@ -8,7 +8,7 @@ from typing import Optional
 import torch
 import triton
 
-from tests.ops.topk_softmax_op import (topk_softmax, fused_topk)
+from tests.ops.topk_softmax_op import fused_topk, topk_softmax
 
 
 @torch.compile
@@ -20,9 +20,7 @@ def topk_softmax_compile(
     indices_type: Optional[torch.dtype] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
-    routing_weights = torch.softmax(gating_output,
-                                    dim=-1,
-                                    dtype=torch.float32)
+    routing_weights = torch.softmax(gating_output, dim=-1, dtype=torch.float32)
     topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
 
     if renormalize:
@@ -50,7 +48,11 @@ def get_benchmark():
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=[
-                "n_token", "n_expert", "topk", "renormalize", "dtype",
+                "n_token",
+                "n_expert",
+                "topk",
+                "renormalize",
+                "dtype",
             ],
             x_vals=[tuple(_) for _ in configs],
             line_arg="provider",
@@ -82,29 +84,26 @@ def get_benchmark():
 
         if provider == "vllm":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: fused_topk(
-                    hidden_states=hidden_states,
-                    gating_output=gating_output,
-                    topk=topk,
-                    renormalize=renormalize),
+                lambda: fused_topk(hidden_states=hidden_states,
+                                   gating_output=gating_output,
+                                   topk=topk,
+                                   renormalize=renormalize),
                 quantiles=quantiles,
             )
         elif provider == "native":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: topk_softmax(
-                    hidden_states=hidden_states,
-                    gating_output=gating_output,
-                    topk=topk,
-                    renormalize=renormalize),
+                lambda: topk_softmax(hidden_states=hidden_states,
+                                     gating_output=gating_output,
+                                     topk=topk,
+                                     renormalize=renormalize),
                 quantiles=quantiles,
             )
         elif provider == "compile":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: topk_softmax_compile(
-                    hidden_states=hidden_states,
-                    gating_output=gating_output,
-                    topk=topk,
-                    renormalize=renormalize),
+                lambda: topk_softmax_compile(hidden_states=hidden_states,
+                                             gating_output=gating_output,
+                                             topk=topk,
+                                             renormalize=renormalize),
                 quantiles=quantiles,
             )
 

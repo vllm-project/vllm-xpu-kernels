@@ -16,14 +16,13 @@ def topk_softmax(
     indices_type: Optional[torch.dtype] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
-    routing_weights = torch.softmax(gating_output,
-                                    dim=-1,
-                                    dtype=torch.float32)
+    routing_weights = torch.softmax(gating_output, dim=-1, dtype=torch.float32)
     topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
 
 def fused_topk(
     hidden_states: torch.Tensor,

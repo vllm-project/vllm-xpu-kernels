@@ -2,7 +2,7 @@
 import pytest
 import torch
 
-from tests.ops.topk_softmax_op import (topk_softmax, fused_topk)
+from tests.ops.topk_softmax_op import fused_topk, topk_softmax
 from tests.utils import seed_everything
 
 
@@ -14,7 +14,7 @@ from tests.utils import seed_everything
 @pytest.mark.parametrize("dtype",
                          [torch.float16, torch.bfloat16, torch.float32])
 def test_fused_topk(n_token: int, n_hidden: int, n_expert: int, topk: int,
-                      renormalize: bool, dtype: torch.dtype):
+                    renormalize: bool, dtype: torch.dtype):
     seed_everything(0)
     hidden_states = torch.randn((n_token, n_hidden), dtype=dtype, device="xpu")
     gating_output = torch.randn((n_token, n_expert), dtype=dtype, device="xpu")
@@ -28,11 +28,10 @@ def test_fused_topk(n_token: int, n_hidden: int, n_expert: int, topk: int,
         topk=topk,
         renormalize=renormalize)
 
-    test_topk_weights, test_topk_ids = fused_topk(
-        hidden_states=hidden_states,
-        gating_output=gating_output,
-        topk=topk,
-        renormalize=renormalize)
+    test_topk_weights, test_topk_ids = fused_topk(hidden_states=hidden_states,
+                                                  gating_output=gating_output,
+                                                  topk=topk,
+                                                  renormalize=renormalize)
 
     if renormalize:
         torch.testing.assert_close(baseline_topk_weights,
