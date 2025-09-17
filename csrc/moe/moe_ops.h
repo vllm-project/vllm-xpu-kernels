@@ -18,4 +18,4 @@ std::tuple<torch::Tensor, torch::Tensor> fused_grouped_topk(
 
 void topk_softmax(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
                   torch::Tensor& token_expert_indices,
-                  torch::Tensor& gating_output);
+                  torch::Tensor& gating_output, const bool renormalize);

@@ -59,10 +59,7 @@ def fused_topk(
         topk_ids,
         token_expert_indices,
         gating_output_float,
+        renormalize,
     )
-
-    # remove this line after ops.topk_softmax supports renormalize
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     return topk_weights, topk_ids

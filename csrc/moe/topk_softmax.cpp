@@ -111,7 +111,8 @@ public:
     const int num_experts,
     const int k,
     const int start_expert,
-    const int end_expert):
+    const int end_expert,
+    const bool renormalize):
     inputs_after_softmax(inputs_after_softmax),
     finished(finished),
     output(output),
@@ -120,7 +121,8 @@ public:
     num_experts(num_experts),
     k(k),
     start_expert(start_expert),
-    end_expert(end_expert) {}
+    end_expert(end_expert),
+    renormalize(renormalize) {}
 
 void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const{
     int kIdx;
@@ -135,6 +137,7 @@ void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) 
 
     const bool row_is_active = finished ? !finished[block_row] : true;
     const int thread_read_offset = group_id_x * num_experts;
+    float sum_val = 0.0f;
     for (int k_idx = 0; k_idx < k; ++k_idx)
     {
         kIdx = 0;
@@ -168,6 +171,7 @@ void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) 
 
         const float resultVal = sycl::reduce_over_group(group, kVal, sycl::maximum<float>());
         const int resultIdx = sycl::reduce_over_group(group, resultVal == kVal ? kIdx : 0x7FFFFFFF, sycl::minimum<int>());
+        sum_val += resultVal;
 
         if (local_id_x == 0)
         {
@@ -184,6 +188,15 @@ void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) 
         }
         item.barrier(sycl::access::fence_space::local_space);
     }
+
+    if(renormalize){
+        auto local_range_x = item.get_local_range(0);
+        for (int k_idx = local_id_x; k_idx < k; k_idx += local_range_x)
+        {
+            const int idx = k * block_row + k_idx;
+            output[idx] /= sum_val;
+        }
+    }
 }
 private:
     const float* inputs_after_softmax;
@@ -195,6 +208,7 @@ private:
     const int k;
     const int start_expert;
     const int end_expert;
+    const bool renormalize;
 };
 
 // ====================== TopK softmax things ===============================
@@ -217,9 +231,9 @@ template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, int WA
 class topkGatingSoftmax{
 public:
   topkGatingSoftmax(const float* input, const bool* finished, float* output, const int num_rows, IndType* indices,
-        int* source_rows, const int k, const int start_expert, const int end_expert):
+        int* source_rows, const int k, const int start_expert, const int end_expert, const bool renormalize):
         input(input), finished(finished), output(output), num_rows(num_rows), indices(indices),
-        source_rows(source_rows), k(k), start_expert(start_expert), end_expert(end_expert) {}
+        source_rows(source_rows), k(k), start_expert(start_expert), end_expert(end_expert), renormalize(renormalize) {}
 
   void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<2> item) const{
     auto sg = item.get_sub_group();
@@ -344,6 +358,7 @@ public:
     // with the max index.
     int start_col = first_elt_read_by_thread;
     static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
+    float sum_val = 0.0f;
 
     for (int k_idx = 0; k_idx < k; ++k_idx)
     {
@@ -385,6 +400,8 @@ public:
             }
         }
 
+        sum_val += max_val;
+
         // Write the max for this k iteration to global memory.
         if (thread_group_idx == 0)
         {
@@ -415,6 +432,15 @@ public:
             }
         }
     }
+
+    if(renormalize){
+        for (int k_idx = thread_group_idx; k_idx < k; k_idx += THREADS_PER_ROW)
+        {
+            const int idx = k * thread_row + k_idx;
+            output[idx] /= sum_val;
+        }
+    }
+                
 }
 
 private:
@@ -427,6 +453,7 @@ private:
   const int k;
   const int start_expert;
   const int end_expert;
+  const bool renormalize;
 };
 
 namespace detail
@@ -446,7 +473,7 @@ struct TopkConstants
 
 template <int EXPERTS, int WARPS_PER_TB, int WARP_SIZE_PARAM, int MAX_BYTES_PER_LDG, typename IndType>
 void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, float* output, IndType* indices,
-    int* source_row, const int num_rows, const int k, const int start_expert, const int end_expert, sycl::queue& queue)
+    int* source_row, const int num_rows, const int k, const int start_expert, const int end_expert, bool renormalize, sycl::queue& queue)
 {
     static constexpr int BYTES_PER_LDG = MIN(MAX_BYTES_PER_LDG, sizeof(float) * EXPERTS);
     using Constants = detail::TopkConstants<EXPERTS, BYTES_PER_LDG, WARP_SIZE_PARAM>;
@@ -460,7 +487,7 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
     queue.submit([&](sycl::handler& cgh) {
       cgh.parallel_for(sycl::nd_range<2>(grid * block, block),
                       topkGatingSoftmax<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType>(
-                          input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert));
+                          input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert, renormalize));
     });
 }
 
@@ -468,7 +495,7 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
     static_assert(WARP_SIZE == 32, "Unsupported warp size. Only 32 is supported for XPU");            \
     topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, WARP_SIZE, MAX_BYTES>( \
         gating_output, nullptr, topk_weights, topk_indices,                           \
-        token_expert_indices, num_tokens, topk, 0, num_experts, queue);
+        token_expert_indices, num_tokens, topk, 0, num_experts, renormalize, queue);
 
 template <typename IndType>
 void topkGatingSoftmaxKernelLauncher(
@@ -480,6 +507,7 @@ void topkGatingSoftmaxKernelLauncher(
     const int num_tokens,
     const int num_experts,
     const int topk,
+    const bool renormalize,
     sycl::queue& queue) {
     static constexpr int WARPS_PER_TB = 4;
     static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
@@ -549,7 +577,7 @@ void topkGatingSoftmaxKernelLauncher(
             queue.submit([&](sycl::handler& cgh) {
               cgh.parallel_for(sycl::nd_range<1>(grid2 * block2, block2),
                               moeTopK<TPB, IndType>(
-                                  softmax_workspace, nullptr, topk_weights, topk_indices, token_expert_indices,num_experts, topk, 0, num_experts));
+                                  softmax_workspace, nullptr, topk_weights, topk_indices, token_expert_indices,num_experts, topk, 0, num_experts, renormalize));
             });
         }
     }
@@ -562,7 +590,8 @@ void topk_softmax(
     torch::Tensor& topk_weights,                // [num_tokens, topk]
     torch::Tensor& topk_indices,                // [num_tokens, topk]
     torch::Tensor& token_expert_indices,        // [num_tokens, topk]
-    torch::Tensor& gating_output)               // [num_tokens, num_experts]
+    torch::Tensor& gating_output,               // [num_tokens, num_experts]
+    const bool renormalize)
 {
     const int num_experts = gating_output.size(-1);
     const auto num_tokens = gating_output.numel() / num_experts;
@@ -576,43 +605,31 @@ void topk_softmax(
     auto& queue = vllm::xpu::vllmGetQueue();
     torch::Tensor softmax_workspace = torch::empty({workspace_size}, gating_output.options());
 
+    #define LAUNCH_TOPK_SOFTMAX(INPUTDTYPE, INDTYPE) \
+        vllm::moe::topkGatingSoftmaxKernelLauncher( \
+            gating_output.data_ptr<INPUTDTYPE>(), \
+            topk_weights.data_ptr<float>(), \
+            topk_indices.data_ptr<INDTYPE>(), \
+            token_expert_indices.data_ptr<int>(), \
+            softmax_workspace.data_ptr<float>(), \
+            num_tokens, \
+            num_experts, \
+            topk, \
+            renormalize, \
+            queue);
+
     if(topk_indices.scalar_type() == at::ScalarType::Int)
     {
-        vllm::moe::topkGatingSoftmaxKernelLauncher(
-            gating_output.data_ptr<float>(),
-            topk_weights.data_ptr<float>(),
-            topk_indices.data_ptr<int>(),
-            token_expert_indices.data_ptr<int>(),
-            softmax_workspace.data_ptr<float>(),
-            num_tokens,
-            num_experts,
-            topk,
-            queue);
+        LAUNCH_TOPK_SOFTMAX(float, int)
     }
     else if (topk_indices.scalar_type() == at::ScalarType::UInt32)
     {
-        vllm::moe::topkGatingSoftmaxKernelLauncher(
-            gating_output.data_ptr<float>(),
-            topk_weights.data_ptr<float>(),
-            topk_indices.data_ptr<uint32_t>(),
-            token_expert_indices.data_ptr<int>(),
-            softmax_workspace.data_ptr<float>(),
-            num_tokens,
-            num_experts,
-            topk,
-            queue);
+        LAUNCH_TOPK_SOFTMAX(float, uint32_t)
     }
     else {
         TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
-        vllm::moe::topkGatingSoftmaxKernelLauncher(
-            gating_output.data_ptr<float>(),
-            topk_weights.data_ptr<float>(),
-            topk_indices.data_ptr<int64_t>(),
-            token_expert_indices.data_ptr<int>(),
-            softmax_workspace.data_ptr<float>(),
-            num_tokens,
-            num_experts,
-            topk,
-            queue);
+        LAUNCH_TOPK_SOFTMAX(float, int64_t)
     }
+
+    #undef LAUNCH_TOPK_SOFTMAX
 }
