@@ -146,8 +146,8 @@ class FlashChunkPrefillEpilogue<
   static constexpr Params to_underlying_arguments(
       ProblemShape const& problem_shape, Arguments const& args,
       [[maybe_unused]] void* workspace) {
-    auto [batch, num_heads_q, num_heads_kv, seq_len_qo, seq_len_kv,
-          seq_len_kv_cache, head_size_qk, head_size_vo] = problem_shape;
+    auto [batch, num_heads_q, num_heads_kv, seq_len_qo, seq_len_kv_cache,
+          head_size_qk, head_size_vo] = problem_shape;
     auto q_group_size = num_heads_q / num_heads_kv;
     auto q_group_num = num_heads_q / q_group_size;
     auto tensorO =
@@ -225,7 +225,7 @@ class FlashChunkPrefillEpilogue<
 
     // Indexing variables
     auto [batch, num_heads_q, num_heads_kv, head_size_vo] =
-        select<0, 1, 2, 7>(problem_shape);
+        select<0, 1, 2, 6>(problem_shape);
     auto [seq_len_qo] = select<0>(sequence_length_shape);
     // Represent the full output tensor
     auto q_group_size = num_heads_q / num_heads_kv;
@@ -276,7 +276,7 @@ class FlashChunkPrefillEpilogue<
       SequenceLengthShapeType const& sequence_length_shape, int const& l_coord,
       int const& q_head_coord) {
     auto [num_heads_q, num_heads_kv, head_size_vo] =
-        select<1, 2, 7>(problem_shape);
+        select<1, 2, 6>(problem_shape);
     auto [seq_len_qo] = select<0>(sequence_length_shape);
     int offset_o = 0;
     if constexpr (VarLen) {

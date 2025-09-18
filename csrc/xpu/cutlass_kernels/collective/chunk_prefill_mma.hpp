@@ -176,10 +176,6 @@ struct FlashChunkPrefillMma<
   struct Arguments {
     ElementQ const* ptr_Q;
     StrideQ dQ;
-    ElementK const* ptr_K;
-    StrideK dK;
-    ElementV const* ptr_V;
-    StrideV dV;
     ElementK const* ptr_K_cache;
     StrideK dK_cache;
     ElementV const* ptr_V_cache;
@@ -195,8 +191,6 @@ struct FlashChunkPrefillMma<
 
   struct Params {
     XE_Copy_Q gmem_tiled_copy_q;
-    XE_Copy_K gmem_tiled_copy_k;
-    XE_Copy_V gmem_tiled_copy_v;
     XE_Copy_K gmem_tiled_copy_k_cache;
     XE_Copy_V gmem_tiled_copy_v_cache;
     // Paged KV Cache
@@ -219,26 +213,14 @@ struct FlashChunkPrefillMma<
       void* workspace) {
     (void)workspace;
 
-    auto [batch, num_heads_q, num_heads_kv, seq_len_qo, seq_len_kv,
-          seq_len_kv_cache, head_size_qk, head_size_vo] = problem_shape;
+    auto [batch, num_heads_q, num_heads_kv, seq_len_qo, seq_len_kv_cache,
+          head_size_qk, head_size_vo] = problem_shape;
     auto q_group_size = num_heads_q / num_heads_kv;
-    // auto tensorQ = make_tensor(
-    //     make_gmem_ptr(args.ptr_Q),
-    //     make_layout(make_shape(seq_len_qo * q_group_size, head_size_qk,
-    //                            batch * (num_heads_q / q_group_size)),
-    //                 args.dQ));
+
     auto tensorQ = make_tensor(
         make_gmem_ptr(args.ptr_Q),
         make_layout(make_shape(seq_len_qo, num_heads_q * head_size_qk, batch),
                     args.dQ));
-    auto tensorK = make_tensor(
-        make_gmem_ptr(args.ptr_K),
-        make_layout(make_shape(seq_len_kv, num_heads_kv * head_size_qk, batch),
-                    args.dK));
-    auto tensorV = make_tensor(
-        make_gmem_ptr(args.ptr_V),
-        make_layout(make_shape(head_size_vo * num_heads_kv, seq_len_kv, batch),
-                    args.dV));
     auto tensorK_cache = make_tensor(
         make_gmem_ptr(args.ptr_K_cache),
         make_layout(
@@ -251,14 +233,10 @@ struct FlashChunkPrefillMma<
             args.dV_cache));
 
     XE_Copy_Q copyQ{XE_Copy_Q{}.with(tensorQ)};
-    XE_Copy_K copyK{XE_Copy_K{}.with(tensorK)};
-    XE_Copy_V copyV{XE_Copy_V{}.with(tensorV)};
     XE_Copy_K copyK_cache{XE_Copy_K{}.with(tensorK_cache)};
     XE_Copy_V copyV_cache{XE_Copy_V{}.with(tensorV_cache)};
 
     return Params{copyQ,
-                  copyK,
-                  copyV,
                   copyK_cache,
                   copyV_cache,
                   args.ptr_page_table,
@@ -272,9 +250,8 @@ struct FlashChunkPrefillMma<
   template <class FragQccum, class TensorQ, class TensorK, class FragSrc>
   CUTLASS_DEVICE void mmaQK(FragQccum& accum, TensorQ gQ, TensorK gK,
                             FragSrc const& frag_src, int const& k_tile_count,
-                            Params const& params, bool is_KV_cache) {
-    auto& gmem_tiled_copy_k =
-        is_KV_cache ? params.gmem_tiled_copy_k_cache : params.gmem_tiled_copy_k;
+                            Params const& params) {
+    auto& gmem_tiled_copy_k = params.gmem_tiled_copy_k_cache;
 
     int thread_idx = static_cast<int>(ThreadIdxX());
     auto thr_copy_Q = params.gmem_tiled_copy_q.get_slice(thread_idx);
@@ -358,10 +335,8 @@ struct FlashChunkPrefillMma<
   template <int tile_count, class FragQccum, class FragS, class TensorV,
             class FragSrc>
   CUTLASS_DEVICE void mmaPV(FragQccum& accum, FragS const& tSr, TensorV gV,
-                            FragSrc const& frag_src, Params const& params,
-                            bool is_KV_cache) {
-    auto& gmem_tiled_copy_v =
-        is_KV_cache ? params.gmem_tiled_copy_v_cache : params.gmem_tiled_copy_v;
+                            FragSrc const& frag_src, Params const& params) {
+    auto& gmem_tiled_copy_v = params.gmem_tiled_copy_v_cache;
 
     int thread_idx = static_cast<int>(ThreadIdxX());
     // Instantiate the MMA object
@@ -419,18 +394,17 @@ struct FlashChunkPrefillMma<
     }
   }
 
-  // SequenceLengthShape = Shape<int, int, int>
-  // For Fixed Sequence Length, ProblemShape = Shape<int, int, int, int, int,
-  // int, int, int> For Variable Sequence Length, ProblemShape = Shape<int, int,
-  // int, VariableSeqlen, VariableSeqlen, VariableSeqlen, int, int>
+  // SequenceLengthShape = Shape<int, int>
+  // For Variable Sequence Length, ProblemShape = Shape<int, int,
+  // int, VariableSeqlen, VariableSeqlen, int, int>
   template <class ProblemShape, class SequenceLengthShape>
   CUTLASS_DEVICE static constexpr Params get_updated_copies(
       Params const& params, ProblemShape const& problem_shape,
       SequenceLengthShape const& sequence_length_shape, int const& l_coord,
       int const& q_head_coord = 0) {
     auto [num_heads_q, num_heads_kv, head_size_qk, head_size_vo] =
-        select<1, 2, 6, 7>(problem_shape);
-    auto [seq_len_qo, seq_len_kv, seq_len_kv_cache] = sequence_length_shape;
+        select<1, 2, 5, 6>(problem_shape);
+    auto [seq_len_qo, seq_len_kv_cache] = sequence_length_shape;
     if constexpr (PagedKV) {
       seq_len_kv_cache = params.total_seqlen_k;
     }
@@ -440,17 +414,11 @@ struct FlashChunkPrefillMma<
         offset_v_cache = 0;
     if constexpr (is_var_len) {
       auto qo_cumulative_length = get<3>(problem_shape).cumulative_length;
-      auto kv_cumulative_length = get<4>(problem_shape).cumulative_length;
       auto kv_cached_cumulative_length =
-          get<5>(problem_shape).cumulative_length;
+          get<4>(problem_shape).cumulative_length;
 
       offset_q = num_heads_q * head_size_qk * qo_cumulative_length[l_coord] +
                  q_head_coord * head_size_qk;
-
-      offset_k = num_heads_kv * head_size_qk * kv_cumulative_length[l_coord] +
-                 kv_head_coord * head_size_qk;
-      offset_v = num_heads_kv * head_size_vo * kv_cumulative_length[l_coord] +
-                 kv_head_coord * head_size_vo;
       offset_k_cache = seq_len_kv_cache == 0 ? 0
                        : PagedKV
                            ? kv_head_coord * head_size_qk
@@ -464,23 +432,9 @@ struct FlashChunkPrefillMma<
                                      kv_cached_cumulative_length[l_coord] +
                                  kv_head_coord * head_size_vo;
     } else {
-      // int offset_q = num_heads_q/*q_group_nums * q_group_size*/ *
-      // head_size_qk * qo_cumulative_length[l_coord];
-
-      // Tensor mQ = make_tensor(make_gmem_ptr(params.ptr_Q +
-      // seqlen_info.offset_q * get<0>(params.stride_Q)), params.shape_Q_packed,
-      // params.stride_Q_packed)(_, _, bidh, !is_varlen_q ? bidb : 0); Tensor gQ
-      // = local_tile(mQ, select<0, 2>(TileShape_MNK{}), make_coord(m_block,
-      // _0{}));  // (M, K)
-
       offset_q = num_heads_q /*q_group_nums * q_group_size*/ * head_size_qk *
                      seq_len_qo * l_coord +
                  q_head_coord * head_size_qk;
-
-      offset_k = num_heads_kv * head_size_qk * seq_len_kv * l_coord +
-                 kv_head_coord * head_size_qk;
-      offset_v = num_heads_kv * head_size_vo * seq_len_kv * l_coord +
-                 kv_head_coord * head_size_vo;
       offset_k_cache =
           seq_len_kv_cache == 0 ? 0
           : PagedKV             ? kv_head_coord * head_size_qk
@@ -495,28 +449,16 @@ struct FlashChunkPrefillMma<
 
     auto q_traits = static_cast<traits_load_Q const&>(params.gmem_tiled_copy_q);
     const ElementQ* q_ptr = (const ElementQ*)q_traits.base_ptr;
-    auto k_traits = static_cast<traits_load_K const&>(params.gmem_tiled_copy_k);
-    const ElementK* k_ptr = (const ElementK*)k_traits.base_ptr;
-    auto v_traits = static_cast<traits_load_V const&>(params.gmem_tiled_copy_v);
-    const ElementV* v_ptr = (const ElementV*)v_traits.base_ptr;
     auto k_traits_cache =
         static_cast<traits_load_K const&>(params.gmem_tiled_copy_k_cache);
     const ElementK* k_cache_ptr = (const ElementK*)k_traits_cache.base_ptr;
     auto v_traits_cache =
         static_cast<traits_load_V const&>(params.gmem_tiled_copy_v_cache);
     const ElementV* v_cache_ptr = (const ElementV*)v_traits_cache.base_ptr;
+
     auto shape_q =
         make_shape(static_cast<int>(seq_len_qo), head_size_qk * num_heads_q, 1);
     StrideQ stride_q = cutlass::make_cute_packed_stride(StrideQ{}, shape_q);
-    auto shape_k = make_shape(static_cast<int>(seq_len_kv),
-                              num_heads_kv * head_size_qk, 1);
-    StrideK stride_k = cutlass::make_cute_packed_stride(StrideK{}, shape_k);
-
-    auto shape_v = make_shape(head_size_vo * num_heads_kv,
-                              static_cast<int>(seq_len_kv), 1);
-    // auto shape_v =
-    //     make_shape(head_size_vo, static_cast<int>(seq_len_kv), num_heads_kv);
-    StrideV stride_v = cutlass::make_cute_packed_stride(StrideV{}, shape_v);
     auto shape_k_cache = make_shape(static_cast<int>(seq_len_kv_cache),
                                     head_size_qk * num_heads_kv, 1);
     StrideK stride_k_cache =
@@ -527,10 +469,6 @@ struct FlashChunkPrefillMma<
         cutlass::make_cute_packed_stride(StrideV{}, shape_v_cache);
     auto tensorQ = make_tensor(make_gmem_ptr(q_ptr + offset_q),
                                make_layout(shape_q, stride_q));
-    auto tensorK = make_tensor(make_gmem_ptr(k_ptr + offset_k),
-                               make_layout(shape_k, stride_k));
-    auto tensorV = make_tensor(make_gmem_ptr(v_ptr + offset_v),
-                               make_layout(shape_v, stride_v));
     auto tensorK_cache =
         make_tensor(make_gmem_ptr(k_cache_ptr + offset_k_cache),
                     make_layout(shape_k_cache, stride_k_cache));
@@ -538,13 +476,9 @@ struct FlashChunkPrefillMma<
         make_tensor(make_gmem_ptr(v_cache_ptr + offset_v_cache),
                     make_layout(shape_v_cache, stride_v_cache));
     XE_Copy_Q copyQ{XE_Copy_Q{}.with(tensorQ)};
-    XE_Copy_K copyK{XE_Copy_K{}.with(tensorK)};
-    XE_Copy_V copyV{XE_Copy_V{}.with(tensorV)};
     XE_Copy_K copyK_cache{XE_Copy_K{}.with(tensorK_cache)};
     XE_Copy_V copyV_cache{XE_Copy_V{}.with(tensorV_cache)};
     return Params{copyQ,
-                  copyK,
-                  copyV,
                   copyK_cache,
                   copyV_cache,
                   params.ptr_page_table,

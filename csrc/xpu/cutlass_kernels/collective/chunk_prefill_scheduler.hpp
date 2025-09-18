@@ -57,24 +57,6 @@ struct XeFlashIndividualTileScheduler {
                                         KernelHardwareInfo hw_info,
                                         TileShape const& tile_shape) {
     using namespace cute;
-    // problem_size = [batch, num_heads_q , num_heads_kv, seq_len_qo,
-    // seq_len_kv, seq_len_kv_cache, head_size_qk, head_size_vo]
-
-    // dim3 grid(size(ceil_div(shape<7>(problem_size), shape<1>(tile_shape))),
-    //           size(ceil_div(shape<3>(problem_size), shape<0>(tile_shape))),
-    //           size(shape<0>(problem_size) * shape<1>(problem_size)));
-
-    int batch = size<0>(problem_size);
-    int num_heads_q = size<1>(problem_size);
-    int num_heads_kv = size<2>(problem_size);
-    int seq_len_qo =
-        size<3>(problem_size);  // if varlen seq_len_qo = max_seq_len
-    int seq_len_kv =
-        size<4>(problem_size);  // if varlen seq_len_qo = max_seq_len
-    int seq_len_kv_cache = size<5>(problem_size);
-    int head_size_qk = size<6>(problem_size);
-    int head_size_vo = size<7>(problem_size);
-    auto group_heads_q = num_heads_q / num_heads_kv;
 
     dim3 grid(size(ceil_div(shape<3>(problem_size), shape<0>(tile_shape))),
               size(shape<1>(problem_size)), size(shape<0>(problem_size)));
@@ -91,17 +73,7 @@ struct XeFlashIndividualTileScheduler {
 
   CUTLASS_DEVICE
   auto get_block_coord() {
-    using namespace cute;
-    // int block_decode = BlockIdxZ(); // batch * num_heads_q
-    // int bidh;
-    // params.divmod_num_heads(block_decode, bidh, block_decode);
-
-    // block_decode = BlockIdxZ / num_heads_q
-    // bidh = BlockIdxZ % num_heads_q
-
-    // return make_coord(BlockIdxX(), BlockIdxY(), BlockIdxZ());
     return make_coord(BlockIdxX(), BlockIdxY(), BlockIdxZ());
-    // return make_coord(BlockIdxX(), BlockIdxY(), block_decode, bidh);
   }
 
   CUTLASS_DEVICE

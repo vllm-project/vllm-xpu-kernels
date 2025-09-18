@@ -67,40 +67,29 @@ struct KernelLauncher {
 
   /// Initialization
   StrideQ stride_Q;
-  StrideK stride_K;
-  StrideV stride_V;
   StrideK stride_K_cache;
   StrideV stride_V_cache;
   StrideO stride_O;
   uint64_t seed = 0;
 
   ProblemShapeType initialize(const chunk_prefill_args_t& args) {
-    auto problem_shape =
-        cute::make_tuple(1, args.num_heads_q, args.num_heads_k,
-                         args.total_seqlen_q, args.total_seqlen_k,
-                         args.total_seqlen_k, args.head_size, args.head_size);
+    auto problem_shape = cute::make_tuple(
+        1, args.num_heads_q, args.num_heads_k, args.total_seqlen_q,
+        args.total_seqlen_k, args.head_size, args.head_size);
     auto problem_shape_out = cute::make_tuple(
         args.batch_size, args.num_heads_q, args.num_heads_k,
         cutlass::fmha::collective::VariableLength{args.max_queries},  // cu_q
-        cutlass::fmha::collective::VariableLength{args.max_keys},     // cu_kv
         cutlass::fmha::collective::VariableLength{
             args.max_keys},  // cu_kv_cache
         args.head_size, args.head_size);
-    auto [batch, num_heads_q, num_heads_kv, seq_len_qo, seq_len_kv,
-          seq_len_kv_cache, head_size_qk, head_size_vo] = problem_shape;
+    auto [batch, num_heads_q, num_heads_kv, seq_len_qo, seq_len_kv_cache,
+          head_size_qk, head_size_vo] = problem_shape;
     auto group_q_size = num_heads_q / num_heads_kv;
     auto group_q_num = num_heads_q / group_q_size;
 
     stride_Q = cutlass::make_cute_packed_stride(
         StrideQ{},
         cute::make_shape(seq_len_qo, num_heads_q * head_size_qk, batch));
-    stride_K = cutlass::make_cute_packed_stride(
-        StrideK{},
-        cute::make_shape(seq_len_kv, num_heads_kv * head_size_qk, batch));
-    stride_V = cutlass::make_cute_packed_stride(
-        StrideV{},
-        cute::make_shape(head_size_vo * num_heads_kv, seq_len_kv, batch));
-
     stride_K_cache = cutlass::make_cute_packed_stride(
         StrideK{},
         cute::make_shape(seq_len_kv_cache, num_heads_kv * head_size_qk, batch));
@@ -116,8 +105,6 @@ struct KernelLauncher {
         reinterpret_cast<int*>(args.cu_seqlens_q);
     get<4>(problem_shape_out).cumulative_length =
         reinterpret_cast<int*>(args.cu_seqlens_k);
-    get<5>(problem_shape_out).cumulative_length =
-        reinterpret_cast<int*>(args.cu_seqlens_k);
 
     return problem_shape_out;
   }
@@ -130,12 +117,9 @@ struct KernelLauncher {
         cutlass::gemm::GemmUniversalMode::kGemm,
         problem_size,
         {reinterpret_cast<ElementQ*>(args.query), stride_Q,
-         reinterpret_cast<ElementK*>(args.key), stride_K,
-         reinterpret_cast<ElementV*>(args.value), stride_V,
          reinterpret_cast<ElementK*>(args.key), stride_K_cache,
          reinterpret_cast<ElementV*>(args.value), stride_V_cache,
          static_cast<int*>(args.block_table), args.block_size,
-         // static_cast<int*>(args.num_blocks_per_seq),
          args.max_blocks_per_seq, args.total_seqlen_k, -1, -1},
         {args.sm_scale},
         {reinterpret_cast<ElementOutput*>(args.out), stride_O},
@@ -228,12 +212,10 @@ struct FMHAKernel {
         cutlass::flash_attention::collective::FlashChunkPrefillSoftmaxEpilogue<
             Causal, Local, EpilogueDispatchPolicy, ElementAccumulator>;
 
-    using ProblemShapeRegular =
-        cute::tuple<int, int, int, int, int, int, int, int>;
+    using ProblemShapeRegular = cute::tuple<int, int, int, int, int, int, int>;
     using namespace cutlass::fmha::collective;
     using ProblemShapeVarlen =
-        cute::tuple<int, int, int, VariableLength, VariableLength,
-                    VariableLength, int, int>;
+        cute::tuple<int, int, int, VariableLength, VariableLength, int, int>;
     using ProblemShapeType =
         std::conditional_t<isVarLen, ProblemShapeVarlen, ProblemShapeRegular>;
 
