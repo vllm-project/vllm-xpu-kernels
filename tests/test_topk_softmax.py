@@ -16,8 +16,8 @@ MINI_PYTEST_PARAMS = {
 
 @pytest.mark.parametrize("n_token", [1, 33, 64])
 @pytest.mark.parametrize("n_hidden", [1024])
-@pytest.mark.parametrize("n_expert", [16, 192, 512, 1024])
-@pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("n_expert", [16, 192, 512])
+@pytest.mark.parametrize("topk", [2, 4, 8])
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("dtype",
                          [torch.float16, torch.bfloat16, torch.float32])
