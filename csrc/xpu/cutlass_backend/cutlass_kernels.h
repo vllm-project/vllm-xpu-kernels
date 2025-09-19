@@ -25,9 +25,9 @@ at::Tensor grouped_gemm_func(
     int64_t N,
     int64_t K,
     int64_t groups) {
-  auto dpcpp_queue = vllm::xpu::vllmGetQueue();
+  auto& dpcpp_queue = vllm::xpu::vllmGetQueue();
     grouped_gemm::kernel_functor(
-      &dpcpp_queue,
+      dpcpp_queue,
       ptr_A.data_ptr(),
       ptr_B.data_ptr(),
       ptr_D.data_ptr(),

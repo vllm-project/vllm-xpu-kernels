@@ -150,7 +150,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
     # ipdb.set_trace()
     ########### gemm1 ##################
     print("@@@@@@@ cutlass fused moe enter")
-    input_B = w13 #.transpose(-1, -2).contiguous().transpose(-1, -2)
+    input_B = w13.transpose(-1, -2).contiguous().transpose(-1, -2)
     assert(list(input_A.shape)[0] == total_input_size)
     gemm_args = prepare_gemm_args(2*intermediate_size, hidden_size, offset, input_A, input_B, gemm1_output, alpha, beta, num_experts)
     print("**python offset", offset)
@@ -167,7 +167,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids, n_experts_
 
     ########### gemm2 ##################
     input_A = act_output.contiguous()
-    input_B = w2 #.transpose(-1, -2).contiguous().transpose(-1, -2)
+    input_B = w2.transpose(-1, -2).contiguous().transpose(-1, -2)
     gemm_args = prepare_gemm_args(hidden_size, intermediate_size, offset, input_A, input_B, gemm2_output, alpha, beta, num_experts)
     torch.ops._xpu_C.cutlass_grouped_gemm(offset=offset_t, N=hidden_size, K=intermediate_size, **gemm_args)
 

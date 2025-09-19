@@ -53,13 +53,16 @@ def test_grouped_gemm(num_experts, n, k, token_per_group):
     ref_A = input_A.clone()
     # weight
     input_B = torch.randn((num_experts, n, k), dtype=torch.bfloat16, device="xpu")
-    input_B = input_B #.transpose(-1, -2).contiguous().transpose(-1, -2)
+    input_B = input_B.transpose(-1, -2).contiguous().transpose(-1, -2)
 
     # output offset
     output = torch.empty((sum(token_per_group), n), dtype=torch.bfloat16, device="xpu")
 
+    print("input A is ", input_A)
+    print("input_B is ", input_B)
+    print("K sum is ", input_B[0].sum(dim=-1))
     cutlass_grouped_gemm(input_A, input_B, output, token_per_group, n, k, num_experts)
-
+    torch.xpu.synchronize()
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -68,7 +71,8 @@ def test_grouped_gemm(num_experts, n, k, token_per_group):
         if cur_token_num == 0:
             continue
         input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :]
-        print("refA ptr",i, ":", hex(input.data_ptr()))
+        # print("refA ptr",i, ":", hex(input.data_ptr()))
+        print("refA ", ref_A, ref_A.shape)
         weight = input_B[i, :, :]
         expert_output = input @ weight.T
         ref.append(expert_output)
@@ -77,11 +81,11 @@ def test_grouped_gemm(num_experts, n, k, token_per_group):
 
     print("kernel:", output)
     print("reference:",  ref)
-    print(torch.allclose(output, ref, rtol=1, atol=1))
+    print(torch.allclose(output, ref, rtol=1e-2, atol=1e-2))
     max_diff = (output - ref).abs().max()
     print("Max absolute difference:", max_diff)
     try:
-        torch.testing.assert_close(output, ref, rtol=1, atol=1)
+        torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
         print("a 和 b 足够接近 ✅")
     except AssertionError as e:
         print("a 和 b 有差异 ❌")
@@ -145,7 +149,7 @@ def test_fused_moe(
     # todo: seed
     verbose = False
     # Setup test data
-    a = torch.ones((m, k), device=DEVICE, dtype=dtype) / 10
+    a = torch.randn((m, k), device=DEVICE, dtype=dtype) / 10
     w13 = torch.randn((e, 2 * n, k), device=DEVICE, dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device=DEVICE, dtype=dtype) / 10
     ref_a = a.clone()
@@ -186,17 +190,22 @@ def test_fused_moe(
     print(torch.allclose(out, ref_out, rtol=1, atol=1))
     max_diff = (out - ref_out).abs().max()
     print("Max absolute difference:", max_diff)
-
+    try:
+        torch.testing.assert_close(out, ref_out, rtol=1e-2, atol=1e-2)
+        print("a 和 b 足够接近 ✅")
+    except AssertionError as e:
+        print("a 和 b 有差异 ❌")
+        print(e)
 
 
 if __name__ == "__main__":
-    # test_fused_moe(
-    #     m = 4,
-    #     n = 8192,
-    #     k = 5120,
-    #     e = 16,
-    #     topk = 1,
-    #     ep_size = 1,
-    #     dtype = torch.bfloat16
-    # )
-    test_grouped_gemm(num_experts=2, n=4096, k=4096, token_per_group=[512,512])
+    test_fused_moe(
+        m = 4,
+        n = 8192,
+        k = 5120,
+        e = 16,
+        topk = 1,
+        ep_size = 1,
+        dtype = torch.bfloat16
+    )
+    # test_grouped_gemm(num_experts=2, n=5120, k=8192, token_per_group=[2,2])

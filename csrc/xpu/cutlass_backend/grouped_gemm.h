@@ -310,7 +310,7 @@ void allocate(const Options &options) {
 
   cutlass::Status run(
       const Options& options,
-      sycl::queue* stream,
+      sycl::queue& stream,
       const cutlass::KernelHardwareInfo& hw_info,
       const ElementA** ptr_A,
       const ElementB** ptr_B,
@@ -344,14 +344,14 @@ void allocate(const Options &options) {
       std::cout << "before run kernel" << std::endl;
     }
     // Run the GEMM
-    CUTLASS_CHECK(gemm_op.run());
-  
+    CUTLASS_CHECK(gemm_op.run(stream));
+    // syclcompat::wait();
     if (collect_gflops){
       std::cout << "collect_gflops:" << collect_gflops << std::endl;
       GPU_Clock timer;
       timer.start();
       for (int iter = 0; iter < 100; ++iter) {
-        CUTLASS_CHECK(gemm_op.run());
+        CUTLASS_CHECK(gemm_op.run(stream));
       }
       syclcompat::wait();
 
@@ -362,14 +362,14 @@ void allocate(const Options &options) {
       std::cout << "  GFLOPS      : " << gflops << std::endl;
 
     }
-    stream->throw_asynchronous();
+    stream.throw_asynchronous();
     release();
     return cutlass::Status::kSuccess;
   }
 };
 
 void kernel_functor(
-    sycl::queue* stream,
+    sycl::queue& stream,
     void* ptr_A,
     void* ptr_B,
     void* ptr_D,
@@ -400,7 +400,7 @@ void kernel_functor(
   using ElementScale = cutlass::bfloat16_t;
 
   using LayoutA = cutlass::layout::RowMajor;
-  using LayoutB = cutlass::layout::ColumnMajor;
+  using LayoutB = cutlass::layout::RowMajor;
   using LayoutC = cutlass::layout::RowMajor;
   using LayoutD = cutlass::layout::RowMajor;
 
@@ -439,7 +439,7 @@ void kernel_functor(
           ElementA,
           cutlass::gemm::TagToStrideA_t<LayoutA*>,
           ElementB,
-          cutlass::gemm::TagToStrideA_t<LayoutB*>,
+          cutlass::gemm::TagToStrideB_t<LayoutB*>,
           TiledMma,
           GmemTiledCopyA, void, void, cute::identity,  // A
           GmemTiledCopyB, void, void, cute::identity   // B
