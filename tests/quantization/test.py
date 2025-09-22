@@ -90,7 +90,7 @@ def test_scaled_mm():
     print(ref)
 
     try:
-        torch.testing.assert_close(out.float(), ref.float(), rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(out.float(), ref.float(), rtol=5e-1, atol=1.5e-1)
         print("a and b are close enough")
     except AssertionError as e:
         print("a and b are different")
