@@ -170,21 +170,22 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # add cutlass dependency
   set(CUTLASS_ENABLE_HEADERS_ONLY "ON" CACHE BOOL "Enable only the header library")
 
+  # FIXME: use commit id not works.
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "main" CACHE STRING "CUTLASS revision to use")
+  #set(CUTLASS_REVISION "main" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   FetchContent_Declare(
       cutlass-sycl
       GIT_REPOSITORY https://github.com/intel/cutlass-sycl
       # Please keep this in sync with CUTLASS_REVISION line above.
-      GIT_TAG ${CUTLASS_REVISION}
+      GIT_TAG 5089907af1fec6656b6cdf224ed04c9bcccc3e6a
       GIT_PROGRESS TRUE
 
       # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
       # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
       # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-      GIT_SHALLOW TRUE
+      GIT_SHALLOW OFF
   )
 
   # cutlass compilation flags
