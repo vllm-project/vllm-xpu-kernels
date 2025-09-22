@@ -112,7 +112,7 @@ class FlashChunkPrefillSoftmaxEpilogue<CausalMask_, LocalMask_,
             class FragSum>
   CUTLASS_DEVICE void scale_exp_log2(FragAcc& frag_s, FragMax const& max,
                                      FragSum& sum) {
-    auto g = syclcompat::get_nd_item<1>().get_sub_group();
+    auto g = compat::get_nd_item<1>().get_sub_group();
     const auto max_scale = max * params.scale;
     CUTLASS_PRAGMA_UNROLL
     for (int index = 0; index < Vec * FragsM; index++) {
@@ -140,7 +140,7 @@ class FlashChunkPrefillSoftmaxEpilogue<CausalMask_, LocalMask_,
 
   template <int Vec, int FragsM, int FragsN, class FragSrc, class FragMax>
   CUTLASS_DEVICE void reduce_max(FragSrc& src, FragMax& max) {
-    auto sg = syclcompat::get_nd_item<1>().get_sub_group();
+    auto sg = compat::get_nd_item<1>().get_sub_group();
     CUTLASS_PRAGMA_UNROLL
     for (int index = 0; index < Vec * FragsM; index++) {
       auto maxptr = group_broadcast(sg, max, index);
@@ -175,7 +175,7 @@ class FlashChunkPrefillSoftmaxEpilogue<CausalMask_, LocalMask_,
                   " No. of attention rows per subgroup should be >= 1 MMA Atom "
                   "worth of rows.");
     if (!is_first) {
-      auto sg = syclcompat::get_nd_item<1>().get_sub_group();
+      auto sg = compat::get_nd_item<1>().get_sub_group();
       Element max_scale{max * params.scale};
       Element exp_scale;
       if constexpr (LocalMask) {

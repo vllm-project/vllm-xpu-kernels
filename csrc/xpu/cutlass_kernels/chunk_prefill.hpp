@@ -173,18 +173,18 @@ struct KernelLauncher {
     // configure smem size and carveout
     int smem_size = FMHAChunkPrefillKernel::SharedStorageSize;
 
-    const auto sycl_block = syclcompat::dim3(block.x, block.y, block.z);
-    const auto sycl_grid = syclcompat::dim3(grid.x, grid.y, grid.z);
+    const auto sycl_block = compat::dim3(block.x, block.y, block.z);
+    const auto sycl_grid = compat::dim3(grid.x, grid.y, grid.z);
 
-    syclcompat::experimental::launch_properties launch_props{
+    compat::experimental::launch_properties launch_props{
         sycl::ext::oneapi::experimental::work_group_scratch_size(smem_size),
     };
-    syclcompat::experimental::kernel_properties kernel_props{
+    compat::experimental::kernel_properties kernel_props{
         sycl::ext::oneapi::experimental::sub_group_size<
             FMHAChunkPrefillKernel::DispatchPolicy::SubgroupSize>};
-    syclcompat::experimental::launch_policy policy{sycl_grid, sycl_block,
-                                                   launch_props, kernel_props};
-    auto event = syclcompat::experimental::launch<
+    compat::experimental::launch_policy policy{sycl_grid, sycl_block,
+                                               launch_props, kernel_props};
+    auto event = compat::experimental::launch<
         cutlass::device_kernel<FMHAChunkPrefillKernel>>(policy, queue, params);
 
     EventManager::getInstance().addEvent(event);
