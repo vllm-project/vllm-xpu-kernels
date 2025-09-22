@@ -171,7 +171,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CUTLASS_ENABLE_HEADERS_ONLY "ON" CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "main" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "9baca2cff3a28590fcd03e55515e2d91ff2cbc8b" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   FetchContent_Declare(
@@ -184,7 +184,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
       # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
       # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
       # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-      GIT_SHALLOW TRUE
+      GIT_SHALLOW FALSE
   )
 
   # cutlass compilation flags
