@@ -446,29 +446,12 @@ def parse_args():
     if args.model_name:
         model_config = get_model_config(args.model_name, args.tp_size)
 
-        if args.hidden_size == 4096:
-            args.hidden_size = model_config["hidden_size"]
-
-        if args.intermediate_size is None:
-            args.intermediate_size = model_config["intermediate_size"]
-
-        if args.num_groups is None:
-            args.num_groups = model_config["num_groups"]
-
-        if args.dtype is None:
-            args.dtype = model_config["dtype"]
-
-        if args.head_size is None:
-            args.head_size = model_config["head_dim"]
-
-        if args.head_num_range == [12, 32, 40, 48, 64, 96, 128]:
-            model_heads = model_config.get("num_attention_heads", 32)
-            if model_heads not in args.head_num_range:
-                args.head_num_range.append(model_heads)
-                args.head_num_range.sort()
-                print(
-                    f"Added model's head number {model_heads} to head_num_range"
-                )
+        args.hidden_size = model_config["hidden_size"]
+        args.intermediate_size = model_config["intermediate_size"]
+        args.num_groups = model_config["num_groups"]
+        args.dtype = model_config["dtype"]
+        args.head_size = model_config["head_dim"]
+        args.head_num_range = [model_config.get("num_attention_heads", 32)]
 
         print(f"Using model configuration from: {args.model_name}")
         print(f"Updated hidden_size: {args.hidden_size}")
