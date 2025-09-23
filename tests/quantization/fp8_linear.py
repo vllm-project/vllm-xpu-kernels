@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 from .utils import (DTYPE_BITS_MAPPING, VLLM_ACT_QUANT_MODE_TO_XPU,

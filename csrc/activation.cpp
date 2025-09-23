@@ -73,7 +73,7 @@ class act_kernel {
              const int d)
       : out_(out), input_(input), d_(d) {}
 
-  void operator() [[intel::reqd_sub_group_size(32)]] (
+  void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
     const int64_t token_idx = item_ct1.get_group(2);
     for (int64_t idx = item_ct1.get_local_id(2); idx < d_;
@@ -98,7 +98,7 @@ class act_and_mul_kernel {
                      const int d)
       : out_(out), input_(input), d_(d) {}
 
-  void operator() [[intel::reqd_sub_group_size(32)]] (
+  void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
     const int64_t token_idx = item_ct1.get_group(2);
     for (int64_t idx = item_ct1.get_local_id(2); idx < d_;

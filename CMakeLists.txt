@@ -177,6 +177,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   FetchContent_Declare(
       cutlass-sycl
       GIT_REPOSITORY https://github.com/Liangliang-Ma/cutlass-sycl
+   
       # Please keep this in sync with CUTLASS_REVISION line above.
       GIT_TAG ${CUTLASS_REVISION}
       GIT_PROGRESS TRUE
@@ -196,7 +197,6 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CUTLASS_ENABLE_GDC_FOR_SM100_DEFAULT OFF CACHE BOOL "DISABLE CUDA")
   # list(APPEND CMAKE_CXX_FLAGS "-ftemplate-backtrace-limit=0 " )
   # list(APPEND CMAKE_CXX_FLAGS "-fdiagnostics-color=always " )
-
 
   FetchContent_MakeAvailable(cutlass-sycl)
   set(CUTLASS_INCLUDE_DIR ${cutlass-sycl_SOURCE_DIR}/include CACHE PATH "CUTLASS Header Library")
@@ -277,7 +277,6 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
     "csrc/xpu/torch_bindings.cpp"
     "csrc/xpu/lora/lora_shrink.cpp"
     "csrc/xpu/lora/lora_expand.cpp"
-    ${CUTLASS_BACKEND_SRCS}
   )
   include_directories("/usr/include")
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})

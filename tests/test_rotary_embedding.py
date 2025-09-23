@@ -31,6 +31,16 @@ def rotary_embedding_opcheck(rot,
                  rot.is_neox_style))
 
 
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "max_position": [11, 256],
+        "head_size": [32],
+        "seq_len": [11, 128],
+    },
+}
+
+
 @pytest.mark.parametrize("device", ["xpu"])
 @pytest.mark.parametrize("max_position", [11, 4096, 32768])
 @pytest.mark.parametrize("is_neox_style", [True, False])

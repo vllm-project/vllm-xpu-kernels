@@ -12,6 +12,14 @@ from tests.utils import opcheck
 
 TOP_KS = [2, 6]
 
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "m": [1, 33],
+        "k": [128, 256],
+    },
+}
+
 
 @pytest.mark.parametrize("m", [1, 33, 64, 222])
 @pytest.mark.parametrize("topk", TOP_KS)

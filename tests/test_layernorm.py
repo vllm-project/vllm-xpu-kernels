@@ -17,6 +17,14 @@ XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
 ]
 
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "num_tokens": [7],
+        "hidden_size": [8],
+    },
+}
+
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)

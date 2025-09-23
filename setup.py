@@ -181,7 +181,6 @@ class cmake_build_ext(build_ext):
         icx_path = shutil.which('icx')
         icpx_path = shutil.which('icpx')
         build_option_gpu = {
-            "BUILD_MODULE_TYPE": "GPU",
             "CMAKE_C_COMPILER": f"{icx_path}",
             "CMAKE_CXX_COMPILER": f"{icpx_path}",
         }
@@ -272,6 +271,7 @@ ext_modules = []
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fa2_C"))
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._xpu_C"))
 
