@@ -127,15 +127,15 @@ struct Options {
         std::cout << "Options()" << std::endl;
       }
     int group_cnt = 0;
-    std::cout << "****Options() num_of_expert  " << num_of_expert << std::endl;
+    // std::cout << "****Options() num_of_expert  " << num_of_expert << std::endl;
     for (int i = 0; i < num_of_expert; ++i){
-      std::cout << "****Options() i  " << i << std::endl;
-      std::cout << "****Options() offset[i]  " << offset[i] << std::endl;
+      // std::cout << "****Options() i  " << i << std::endl;
+      // std::cout << "****Options() offset[i]  " << offset[i] << std::endl;
       if (offset[i] != 0){
         group_cnt++;
       } 
     }
-    std::cout << "****Options() group_cnt  " << group_cnt << std::endl; 
+    // std::cout << "****Options() group_cnt  " << group_cnt << std::endl; 
     problem_sizes_host.reserve(group_cnt);
     for (int i = 0; i < num_of_expert; ++i){
       if (offset[i] != 0){
@@ -344,7 +344,18 @@ void allocate(const Options &options) {
       std::cout << "before run kernel" << std::endl;
     }
     // Run the GEMM
+    
+    GPU_Clock timer;
+    timer.start();
     CUTLASS_CHECK(gemm_op.run(stream));
+    stream.wait();
+    // syclcompat::wait();
+    // stream.throw_asynchronous();
+    float cute_time = timer.seconds() * 1000;
+    double cute_average_time = double(cute_time) / double(1);
+    std::cout << "  Avg runtimei : " << cute_average_time << " ms" << std::endl;
+
+
     // syclcompat::wait();
     if (collect_gflops){
       std::cout << "collect_gflops:" << collect_gflops << std::endl;
@@ -379,7 +390,7 @@ void kernel_functor(
     int64_t N,
     int64_t K,
     int64_t groups){
- //
+  //
   // Run examples
   //
   auto offset_ptr = reinterpret_cast<int64_t*>(offset);
@@ -464,7 +475,6 @@ void kernel_functor(
       reinterpret_cast<ElementOutput**>(ptr_D),
       reinterpret_cast<ElementAccumulator**>(ptr_alpha),
       reinterpret_cast<ElementAccumulator**>(ptr_beta));
- 
 }
 
 } // namespace grouped_gemm
