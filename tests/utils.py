@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+import argparse
 import random
 import unittest
 from collections.abc import Sequence
 from typing import Any, Optional, Union
 
-import argparse
 import numpy as np
 import torch
 from torch._prims_common import TensorLikeType
@@ -352,6 +352,7 @@ def check_ipex_availability():
     else:
         print("Warning: IPEX not available, skipping IPEX benchmarks")
         return False
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
