@@ -69,14 +69,14 @@
 
 #pragma once
 
-#include "cutlass/epilogue/collective/default_epilogue.hpp"
-#include "cutlass/epilogue/collective/xe_array_epilogue.hpp"
-#include "cutlass/epilogue/fusion/xe_callbacks.hpp"
-#include "cutlass/epilogue/collective/collective_builder.hpp"
+// #include "cutlass/epilogue/collective/default_epilogue.hpp"
+// #include "cutlass/epilogue/collective/xe_array_epilogue.hpp"
+// #include "cutlass/epilogue/fusion/xe_callbacks.hpp"
+// #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/group_array_problem_shape.hpp"
 #include "cutlass/gemm/device/gemm_universal.h"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/collective/collective_mma.hpp"
+// #include "cutlass/gemm/collective/collective_mma.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
 
 #include <cute/tensor.hpp>
@@ -88,8 +88,17 @@
 #include "cutlass/util/reference/device/gemm_complex.h"
 #include "cutlass/util/reference/device/tensor_compare.h"
 #include "helper.h"
-
 #include <cfloat>
+
+#include "cutlass/gemm/collective/collective_mma_decl.hpp"
+// #include "./collective/gemm/gemm_universal.h"
+#include "./collective/gemm/xe_array_mma.hpp"
+#include "./collective/gemm/xe_array_epilogue.hpp"
+#include "./collective/gemm/xe_builder.hpp"
+#include "./collective/gemm/xe_callbacks.hpp"
+// #include "./collective/gemm/xe_gemm_array_cooperative.hpp"
+// #include "./collective/gemm/gemm_universal_adapter.hpp"
+
 
 using namespace cute;
 using ProblemShape = cutlass::gemm::GroupProblemShape<Shape<int,int,int>>; // <M,N,K> per group
