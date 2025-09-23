@@ -8,10 +8,24 @@
 /* #include "pytorch_shim.h" */
 
 #include <torch/all.h>
-#include "grouped_gemm.h"
 #include "utils.h"
 
 namespace gpu::cutlass_kernel {
+
+namespace grouped_gemm {
+  void kernel_functor(
+     sycl::queue& stream,
+     void* ptr_A,
+     void* ptr_B,
+     void* ptr_D,
+     void* ptr_alpha,
+     void* ptr_beta,
+     void* offset,
+     int64_t N,
+     int64_t K,
+     int64_t groups);
+} 
+
 
 /* gemm2(group_A, w2, output, offset) */
 

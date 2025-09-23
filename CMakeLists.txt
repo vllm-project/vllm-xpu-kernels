@@ -177,7 +177,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   FetchContent_Declare(
       cutlass-sycl
       GIT_REPOSITORY https://github.com/Liangliang-Ma/cutlass-sycl
-   
+
       # Please keep this in sync with CUTLASS_REVISION line above.
       GIT_TAG ${CUTLASS_REVISION}
       GIT_PROGRESS TRUE
@@ -270,13 +270,14 @@ endif ()
 # xpu only ops/kernels, implemented with cutlass/onednn/sycl.
 #
 file(GLOB CUTLASS_BACKEND_SRCS
-  csrc/xpu/cutlass_backend/*.cpp
+  csrc/xpu/cutlass_kernels/*.cpp
 )
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_EXT_XPU_SRC
     "csrc/xpu/torch_bindings.cpp"
     "csrc/xpu/lora/lora_shrink.cpp"
     "csrc/xpu/lora/lora_expand.cpp"
+    ${CUTLASS_BACKEND_SRCS}
   )
   include_directories("/usr/include")
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})
