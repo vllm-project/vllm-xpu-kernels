@@ -29,7 +29,8 @@ jobs:
           --name vllm-xpu-kernel-ci \
           xpu-kernel-ci-image \
           /bin/bash -c '
-          pytest -v -s /workspace/vllm-xpu-kernels/tests/
+          cd /workspace/vllm-xpu-kernels
+          pytest -v -s tests/
           '
       - name: Remove container
         run: |
