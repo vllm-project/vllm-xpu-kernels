@@ -2,19 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import random
 from typing import Optional
 
 import torch
 import triton
-import random
 from torch import Tensor
 
 from tests import register_ops as vllm_ops
-from tests.utils import (
-    check_ipex_availability,
-    create_kv_caches_with_random,
-    parse_args,
-)
+from tests.utils import (check_ipex_availability, create_kv_caches_with_random,
+                         parse_args)
 
 HAS_IPEX = check_ipex_availability()
 
@@ -33,8 +30,8 @@ def reshape_and_cache_vllm(
     v_scale: Optional[float] = None,
 ) -> None:
     """vLLM's fused kernel for reshaping and caching K/V tensors."""
-    vllm_ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping,
-                               kv_cache_dtype, k_scale, v_scale)
+    vllm_ops.reshape_and_cache(key, value, key_cache, value_cache,
+                               slot_mapping, kv_cache_dtype, k_scale, v_scale)
 
 
 def reshape_and_cache_ipex(
@@ -52,9 +49,9 @@ def reshape_and_cache_ipex(
         raise RuntimeError("IPEX is not available")
     assert kv_cache_dtype == "auto", "IPEX reshape_and_cache uses 'auto' mode"
 
-    ipex.llm.modules.PagedAttention.reshape_and_cache(
-        key, value, key_cache, value_cache, slot_mapping
-    )
+    ipex.llm.modules.PagedAttention.reshape_and_cache(key, value, key_cache,
+                                                      value_cache,
+                                                      slot_mapping)
 
 
 def get_benchmark(
@@ -64,20 +61,29 @@ def get_benchmark(
 
     @triton.testing.perf_report(
         triton.testing.Benchmark(
-            x_names=["num_tokens", "num_heads", "head_size", "block_size", "num_blocks"],
+            x_names=[
+                "num_tokens", "num_heads", "head_size", "block_size",
+                "num_blocks"
+            ],
             x_vals=configs,
             line_arg="provider",
             line_vals=["vllm", "ipex"] if HAS_IPEX else ["vllm"],
             line_names=["vLLM", "IPEX"] if HAS_IPEX else ["vLLM"],
-            styles=[("blue", "-"), ("red", "-")] if HAS_IPEX else [("blue", "-")],
+            styles=[("blue", "-"),
+                    ("red", "-")] if HAS_IPEX else [("blue", "-")],
             ylabel="latency (us)",
             plot_name="reshape_and_cache-benchmark",
             args={},
-        )
-    )
+        ))
     @torch.inference_mode()
-    def benchmark(num_tokens, num_heads, head_size, block_size, num_blocks, provider, kv_cache_dtype="auto"):
-        
+    def benchmark(num_tokens,
+                  num_heads,
+                  head_size,
+                  block_size,
+                  num_blocks,
+                  provider,
+                  kv_cache_dtype="auto"):
+
         if kv_cache_dtype == "fp8" and head_size % 16:
             raise ValueError(
                 "fp8 kv-cache requires head_size to be a multiple of 16.")
@@ -86,10 +92,10 @@ def get_benchmark(
         torch.set_default_device(device)
 
         key = torch.randn(num_tokens,
-                      num_heads,
-                      head_size,
-                      dtype=dtype,
-                      device=device)
+                          num_heads,
+                          head_size,
+                          dtype=dtype,
+                          device=device)
         value = torch.randn_like(key)
         num_slots = block_size * num_blocks
         if num_tokens > num_slots:
@@ -97,8 +103,8 @@ def get_benchmark(
                 "num_tokens cannot exceed the total number of cache slots")
         slot_mapping_lst = random.sample(range(num_slots), num_tokens)
         slot_mapping = torch.tensor(slot_mapping_lst,
-                                dtype=torch.long,
-                                device=device)
+                                    dtype=torch.long,
+                                    device=device)
 
         num_layers = 1  # for simplicity, we use a single layer
         key_caches, value_caches = create_kv_caches_with_random(
@@ -122,24 +128,24 @@ def get_benchmark(
         for _ in range(5):
             if provider == "vllm":
                 reshape_and_cache_vllm(
-                    key, 
-                    value, 
-                    key_cache, 
-                    value_cache, 
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
                     slot_mapping,
-                    kv_cache_dtype, 
-                    k_scale, 
+                    kv_cache_dtype,
+                    k_scale,
                     v_scale,
                 )
             elif provider == "ipex" and HAS_IPEX:
                 reshape_and_cache_ipex(
-                    key, 
-                    value, 
-                    key_cache, 
-                    value_cache, 
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
                     slot_mapping,
-                    kv_cache_dtype, 
-                    k_scale, 
+                    kv_cache_dtype,
+                    k_scale,
                     v_scale,
                 )
 
@@ -150,8 +156,14 @@ def get_benchmark(
                 "vllm": reshape_and_cache_vllm,
                 "ipex": reshape_and_cache_ipex
             }[provider](
-                key, value, key_cache, value_cache, slot_mapping,
-                kv_cache_dtype, k_scale, v_scale,
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                kv_cache_dtype,
+                k_scale,
+                v_scale,
             ),
             quantiles=quantiles,
         )
@@ -171,7 +183,7 @@ if __name__ == "__main__":
     print(f"  Block Size: {args.block_size}")
     print(f"  Num Blocks: {args.num_blocks}")
     print(f"  Data Type: {args.dtype}")
-    print(f"  KV Cache Dtype: auto (IPEX & vLLM)")
+    print("  KV Cache Dtype: auto (IPEX & vLLM)")
     print(f"  Device: {device}")
     if HAS_IPEX:
         print(f"✅ IPEX {ipex.__version__} is available.")
@@ -184,8 +196,9 @@ if __name__ == "__main__":
     block_size_range = [args.block_size]
     num_blocks_range = [args.num_blocks]
     configs = list(
-        itertools.product(num_token_range, head_num_range, head_size_range, block_size_range, num_blocks_range))
-    
+        itertools.product(num_token_range, head_num_range, head_size_range,
+                          block_size_range, num_blocks_range))
+
     benchmark = get_benchmark(
         dtype=args.dtype,
         device=device,
