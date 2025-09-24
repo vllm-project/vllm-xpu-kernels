@@ -35,4 +35,4 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     -r requirements.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 setup.py develop
+    python3 setup.py install
