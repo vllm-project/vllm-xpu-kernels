@@ -268,6 +268,13 @@ if (FP8_ENABLED)
     list(APPEND VLLM_GPU_FLAGS "-gline-tables-only")
     list(APPEND VLLM_GPU_FLAGS "-O3")
     list(APPEND VLLM_GPU_FLAGS "-DNDEBUG")
+    # XPU FLAGS
+    list(APPEND VLLM_GPU_FLAGS "-O3" "-DNDEBUG")
+    list(APPEND VLLM_GPU_FLAGS "-gline-tables-only")
+    list(APPEND VLLM_GPU_FLAGS "-fsycl" "-fsycl-targets=spir64_gen" "-ftemplate-backtrace-limit=10")
+
+    list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64_gen")
+    list(APPEND VLLM_GPU_LINK_FLAGS -Xsycl-target-backend=spir64_gen "-device bmg-g21-a0 -internal_options -cl-intel-256-GRF-per-thread")
 
     define_gpu_extension_target(
         _vllm_fp8_C

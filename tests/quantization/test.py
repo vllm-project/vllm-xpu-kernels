@@ -67,9 +67,9 @@ def ref_scaled_mm(inputA_fp8, inputB_fp8, scaleA, scaleB, block_size):
 def test_scaled_mm():
     torch.set_default_device("xpu")
 
-    m = 4096
-    n = 4096
-    k = 4096
+    m = 8192
+    k = 7168
+    n = 1536
     block_n, block_k = (16, 16)
 
     dtype = torch.float8_e4m3fn
@@ -99,9 +99,9 @@ def test_scaled_mm():
 def profile_scaled_mm():
     torch.set_default_device("xpu")
 
-    m = 4096
-    n = 4096
-    k = 4096
+    m = 8192
+    k = 7168
+    n = 1536
     block_n, block_k = (16, 16)
 
     dtype = torch.float8_e4m3fn
