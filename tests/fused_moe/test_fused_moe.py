@@ -153,14 +153,3 @@ def check_fused_moe(
     print("ref result", ref_out, ref_out.shape)
     print("kernel result", out, out.shape)
 
-
-if __name__ == "__main__":
-    # check_fused_moe(
-    #     m = 4,
-    #     n = 8192,
-    #     k = 5120,
-    #     e = 16,
-    #     topk = 1,
-    #     dtype = torch.bfloat16
-    # )
-    test_grouped_gemm(num_experts=16, n=5120, k=8192, token_per_group=[512]*16)
