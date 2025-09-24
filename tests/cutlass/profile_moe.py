@@ -13,10 +13,10 @@ def test_moe_gemm(n_experts, intermediate_size, hidden_size, tokens, topk, dtype
 
     total_m = tokens * topk
 
-    input_a1 = torch.randn(total_m, hidden_size, dtype=dtype, device="xpu")
+    input_a1 = torch.randn(total_m, hidden_size, dtype=dtype, device="xpu") / 10
     input_a2 = input_a1.clone()
-    w13 = torch.randn(n_experts, 2*intermediate_size, hidden_size, dtype=dtype, device="xpu")
-    w2 = torch.randn(n_experts, hidden_size, intermediate_size, dtype=dtype, device="xpu")
+    w13 = torch.randn(n_experts, 2*intermediate_size, hidden_size, dtype=dtype, device="xpu") / 10
+    w2 = torch.randn(n_experts, hidden_size, intermediate_size, dtype=dtype, device="xpu") / 10
     w13 = w13.transpose(1, 2).contiguous()
     w2 = w2.transpose(1, 2).contiguous()
 

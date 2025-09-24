@@ -1,51 +1,10 @@
-import pytest
-import torch
 from math import ceil
+import torch
+import pytest
 from typing import Callable, Optional, Union
 from vllm_xpu_kernels.fused_moe_interface import cutlass_fused_moe, cutlass_grouped_gemm
 
-NUM_EXPERTS = [8, 64, 192]
-EP_SIZE = [1, 4]
-TOP_KS = [2, 6]
-
-FUSED_MOE_MNK_FACTORS = [
-    (1, 128, 128),
-    (1, 2048, 128),
-    (33, 2048, 128),
-    (222, 1024, 1024),
-    (32768, 128, 128),
-    (32768, 2048, 511),
-    (40000, 1024, 1024),
-]
-
-FUSED_MOE_WN16_MNK_FACTORS = [
-    (1, 128, 128),
-    (1, 1024, 1024),
-    (32, 2048, 128),
-    (32, 1024, 1024),
-    (222, 2048, 1024),
-]
-
 DEVICE = "xpu"
-
-
-def calculate_device_mem(m, k, n, e, topk, dtype):
-    total = 0
-    x = m*k
-    w13 = e*2*n*k
-    w2 = e*k*n
-    topk_w = topk*m
-    topk_id = topk*m
-    expert_cache = x
-    gemm1_out = m*2*n
-    gemm2_out = m*k
-    total += x + w13 + w2 + topk_w + topk_id + expert_cache + gemm1_out + gemm2_out
-    byte_per_data = 4
-    if dtype == torch.bfloat16:
-        byte_per_data = 2
-    total_bytes_G = total * byte_per_data / 1000 / 1000 / 1000
-    print("fused moe should take device memory: ", total_bytes_G, "G")
-
 
 def test_grouped_gemm(num_experts, n, k, token_per_group):
     # input
@@ -86,9 +45,9 @@ def test_grouped_gemm(num_experts, n, k, token_per_group):
     print("Max absolute difference:", max_diff)
     try:
         torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
-        print("a 和 b 足够接近 ✅")
+        print("a and b close enough")
     except AssertionError as e:
-        print("a 和 b 有差异 ❌")
+        print("a and b diffs")
         print(e)
 
 def ref_fused_moe(x,
@@ -99,8 +58,6 @@ def ref_fused_moe(x,
                   num_per_tok,
                   activation,
                   num_experts):
-    # import ipdb
-    # ipdb.set_trace()
     expert_cache = torch.zeros_like(x)
     idxs = flat_expert_indices.argsort()
     counts = flat_expert_indices.bincount().cpu().numpy()
@@ -131,19 +88,12 @@ def ref_fused_moe(x,
 
     return expert_cache
 
-
-# @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
-# @pytest.mark.parametrize("e", NUM_EXPERTS)
-# @pytest.mark.parametrize("topk", TOP_KS)
-# @pytest.mark.parametrize("ep_size", EP_SIZE)
-# @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_fused_moe(
     m: int, # num of tokens
     n: int, # intermediate_size
     k: int, # hidden_size
     e: int,
     topk: int,
-    ep_size: int,
     dtype: torch.dtype,
   ):
     # todo: seed
@@ -187,14 +137,11 @@ def test_fused_moe(
 
     print("ref result", ref_out, ref_out.shape)
     print("kernel result", out, out.shape)
-    print(torch.allclose(out, ref_out, rtol=1, atol=1))
-    max_diff = (out - ref_out).abs().max()
-    print("Max absolute difference:", max_diff)
     try:
         torch.testing.assert_close(out, ref_out, rtol=1e-2, atol=1e-2)
-        print("a 和 b 足够接近 ✅")
+        print("a and b close enough")
     except AssertionError as e:
-        print("a 和 b 有差异 ❌")
+        print("a and b diffs")
         print(e)
 
 
@@ -205,7 +152,6 @@ if __name__ == "__main__":
         k = 5120,
         e = 16,
         topk = 1,
-        ep_size = 1,
         dtype = torch.bfloat16
     )
     # test_grouped_gemm(num_experts=2, n=5120, k=8192, token_per_group=[2,2])

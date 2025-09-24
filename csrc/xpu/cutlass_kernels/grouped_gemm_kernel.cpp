@@ -288,9 +288,6 @@ void allocate(const Options &options) {
     fusion_args.dBeta = {cute::_0{}, cute::_0{}, 1};
     using RasterOrderOptions = typename cutlass::gemm::kernel::detail::PersistentTileSchedulerXeGroup<ProblemShape>::RasterOrderOptions;
 
-    std::cout << "grouped_gemm arguments" << std::endl;
-    std::cout << "options.groups " << options.groups << std::endl;
-
     // Per-GEMM problem shape info may only exist on the device.
     if (host_problem_shapes_available) {
       arguments = typename Gemm::Arguments {
@@ -357,15 +354,13 @@ void allocate(const Options &options) {
     GPU_Clock timer;
     timer.start();
     CUTLASS_CHECK(gemm_op.run(stream));
-    stream.wait();
-    // syclcompat::wait();
-    // stream.throw_asynchronous();
-    float cute_time = timer.seconds() * 1000;
-    double cute_average_time = double(cute_time) / double(1);
-    std::cout << "  Avg runtimei : " << cute_average_time << " ms" << std::endl;
-
-
-    // syclcompat::wait();
+    if (collect_gflops){
+      stream.wait();
+      float cute_time = timer.seconds() * 1000;
+      double cute_average_time = double(cute_time) / double(1);
+      std::cout << "  Avg runtimei : " << cute_average_time << " ms" << std::endl;
+    }
+    
     if (collect_gflops){
       std::cout << "collect_gflops:" << collect_gflops << std::endl;
       GPU_Clock timer;
@@ -373,8 +368,7 @@ void allocate(const Options &options) {
       for (int iter = 0; iter < 100; ++iter) {
         CUTLASS_CHECK(gemm_op.run(stream));
       }
-      syclcompat::wait();
-
+      stream.wait();
       float cute_time = timer.seconds() * 1000;
       double cute_average_time = double(cute_time) / double(options.iterations);
       double gflops = options.gflops(cute_average_time / 1000.0, options.problem_sizes_host);
