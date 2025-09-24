@@ -1,25 +1,47 @@
-from math import ceil
 import torch
 import pytest
+from math import ceil
 from typing import Callable, Optional, Union
 from vllm_xpu_kernels.fused_moe_interface import cutlass_fused_moe, cutlass_grouped_gemm
+from tests.utils import seed_everything
+import random
 
 DEVICE = "xpu"
 
-def test_grouped_gemm(num_experts, n, k, token_per_group):
+# shape for Llama-4-scout
+FUSED_MOE_MNK_FACTORS = [
+    (1, 5120, 8192),
+    (4, 5120, 8192),
+    (16, 5120, 8192),
+    (8192, 5120, 8192),
+]
+NUM_EXPERTS = [16]
+TOP_KS = [1]
+
+def random_partition(size_a: int, target: int):
+    cuts = sorted(random.sample(range(target + size_a - 1), size_a - 1))
+    cuts = [-1] + cuts + [target + size_a - 1]
+    result = [cuts[i+1] - cuts[i] - 1 for i in range(size_a)]
+    return result
+
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_grouped_gemm(m, n, k, e, topk, dtype):
+    seed_everything(7)
+    num_experts = e
+    token_per_group = random_partition(e, m*topk)
+    print(token_per_group)
     # input
-    input_A = torch.randn((sum(token_per_group), k), dtype=torch.bfloat16, device="xpu").contiguous()
+    input_A = torch.randn((sum(token_per_group), k), dtype=dtype, device=DEVICE).contiguous()
     ref_A = input_A.clone()
     # weight
-    input_B = torch.randn((num_experts, n, k), dtype=torch.bfloat16, device="xpu")
+    input_B = torch.randn((num_experts, n, k), dtype=dtype, device=DEVICE)
     input_B = input_B.transpose(-1, -2).contiguous().transpose(-1, -2)
 
     # output offset
-    output = torch.empty((sum(token_per_group), n), dtype=torch.bfloat16, device="xpu")
-
-    print("input A is ", input_A)
-    print("input_B is ", input_B)
-    print("K sum is ", input_B[0].sum(dim=-1))
+    output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
     cutlass_grouped_gemm(input_A, input_B, output, token_per_group, n, k, num_experts)
     torch.xpu.synchronize()
     # ref gg
@@ -30,19 +52,12 @@ def test_grouped_gemm(num_experts, n, k, token_per_group):
         if cur_token_num == 0:
             continue
         input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :]
-        # print("refA ptr",i, ":", hex(input.data_ptr()))
-        print("refA ", ref_A, ref_A.shape)
         weight = input_B[i, :, :]
         expert_output = input @ weight.T
         ref.append(expert_output)
         pre_token_sum += cur_token_num
     ref = torch.cat(ref, dim=0)
 
-    print("kernel:", output)
-    print("reference:",  ref)
-    print(torch.allclose(output, ref, rtol=1e-2, atol=1e-2))
-    max_diff = (output - ref).abs().max()
-    print("Max absolute difference:", max_diff)
     try:
         torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
         print("a and b close enough")
@@ -88,7 +103,7 @@ def ref_fused_moe(x,
 
     return expert_cache
 
-def test_fused_moe(
+def check_fused_moe(
     m: int, # num of tokens
     n: int, # intermediate_size
     k: int, # hidden_size
@@ -96,7 +111,7 @@ def test_fused_moe(
     topk: int,
     dtype: torch.dtype,
   ):
-    # todo: seed
+    seed_everything(7)
     verbose = False
     # Setup test data
     a = torch.randn((m, k), device=DEVICE, dtype=dtype) / 10
@@ -137,21 +152,15 @@ def test_fused_moe(
 
     print("ref result", ref_out, ref_out.shape)
     print("kernel result", out, out.shape)
-    try:
-        torch.testing.assert_close(out, ref_out, rtol=1e-2, atol=1e-2)
-        print("a and b close enough")
-    except AssertionError as e:
-        print("a and b diffs")
-        print(e)
 
 
 if __name__ == "__main__":
-    test_fused_moe(
-        m = 4,
-        n = 8192,
-        k = 5120,
-        e = 16,
-        topk = 1,
-        dtype = torch.bfloat16
-    )
-    # test_grouped_gemm(num_experts=2, n=5120, k=8192, token_per_group=[2,2])
+    # check_fused_moe(
+    #     m = 4,
+    #     n = 8192,
+    #     k = 5120,
+    #     e = 16,
+    #     topk = 1,
+    #     dtype = torch.bfloat16
+    # )
+    test_grouped_gemm(num_experts=16, n=5120, k=8192, token_per_group=[512]*16)

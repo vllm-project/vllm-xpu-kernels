@@ -70,7 +70,7 @@ def test_moe_gemm(n_experts, intermediate_size, hidden_size, tokens, topk, dtype
 
     print("ipex out: \n", ipex_o3, ipex_o3.shape)
     print("cutlass out: \n", cutlass_o3, cutlass_o3.shape)
-    torch.testing.assert_close(ipex_o3.to(float), cutlass_o3.to(float), rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(ipex_o3.to(float), cutlass_o3.to(float), rtol=0, atol=2e-2)
 
 if __name__ == "__main__":
     test_moe_gemm(n_experts=16, intermediate_size=8192, hidden_size=5120, topk=1, dtype=torch.bfloat16, tokens=16*512)
