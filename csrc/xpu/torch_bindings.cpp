@@ -13,9 +13,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "fp8_gemm_w8a16(Tensor! A, Tensor! B, bool trans_B, Tensor? B_scale_, "
       "Tensor? bias_) -> Tensor");
   xpu_ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
-  
-  xpu_ops.def("cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor ptr_D, Tensor ptr_alpha, Tensor ptr_beta, Tensor offset, int N, int K, int groups) -> Tensor");
-  xpu_ops.impl("cutlass_grouped_gemm", torch::kXPU, gpu::cutlass_kernel::grouped_gemm_func);
+
+  xpu_ops.def(
+      "cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor ptr_D, Tensor "
+      "ptr_alpha, Tensor ptr_beta, Tensor offset, int N, int K, int groups) -> "
+      "Tensor");
+  xpu_ops.impl("cutlass_grouped_gemm", torch::kXPU,
+               gpu::cutlass_kernel::grouped_gemm_func);
 
   xpu_ops.def(
       "deepseek_scaling_rope(Tensor! positions, Tensor! query, Tensor! key, "

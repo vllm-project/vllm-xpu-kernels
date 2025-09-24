@@ -1,10 +1,12 @@
-import torch
-import pytest
-from math import ceil
-from typing import Callable, Optional, Union
-from vllm_xpu_kernels.fused_moe_interface import cutlass_fused_moe, cutlass_grouped_gemm
-from tests.utils import seed_everything
+# SPDX-License-Identifier: Apache-2.0
 import random
+
+import pytest
+import torch
+
+from tests.utils import seed_everything
+from vllm_xpu_kernels.fused_moe_interface import (cutlass_fused_moe,
+                                                  cutlass_grouped_gemm)
 
 DEVICE = "xpu"
 
@@ -18,11 +20,13 @@ FUSED_MOE_MNK_FACTORS = [
 NUM_EXPERTS = [16]
 TOP_KS = [1]
 
+
 def random_partition(size_a: int, target: int):
     cuts = sorted(random.sample(range(target + size_a - 1), size_a - 1))
     cuts = [-1] + cuts + [target + size_a - 1]
-    result = [cuts[i+1] - cuts[i] - 1 for i in range(size_a)]
+    result = [cuts[i + 1] - cuts[i] - 1 for i in range(size_a)]
     return result
+
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
@@ -31,10 +35,12 @@ def random_partition(size_a: int, target: int):
 def test_grouped_gemm(m, n, k, e, topk, dtype):
     seed_everything(7)
     num_experts = e
-    token_per_group = random_partition(e, m*topk)
+    token_per_group = random_partition(e, m * topk)
     print(token_per_group)
     # input
-    input_A = torch.randn((sum(token_per_group), k), dtype=dtype, device=DEVICE).contiguous()
+    input_A = torch.randn((sum(token_per_group), k),
+                          dtype=dtype,
+                          device=DEVICE).contiguous()
     ref_A = input_A.clone()
     # weight
     input_B = torch.randn((num_experts, n, k), dtype=dtype, device=DEVICE)
@@ -42,7 +48,8 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
 
     # output offset
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
-    cutlass_grouped_gemm(input_A, input_B, output, token_per_group, n, k, num_experts)
+    cutlass_grouped_gemm(input_A, input_B, output, token_per_group, n, k,
+                         num_experts)
     torch.xpu.synchronize()
     # ref gg
     ref = []
@@ -65,14 +72,9 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
         print("a and b diffs")
         print(e)
 
-def ref_fused_moe(x,
-                  w13,
-                  w2,
-                  flat_expert_weights,
-                  flat_expert_indices,
-                  num_per_tok,
-                  activation,
-                  num_experts):
+
+def ref_fused_moe(x, w13, w2, flat_expert_weights, flat_expert_indices,
+                  num_per_tok, activation, num_experts):
     expert_cache = torch.zeros_like(x)
     idxs = flat_expert_indices.argsort()
     counts = flat_expert_indices.bincount().cpu().numpy()
@@ -87,30 +89,32 @@ def ref_fused_moe(x,
         expert_tokens = x[exp_token_idxs]
 
         expert_w13 = w13[expert_id, :, :]
-        w1, w3 = torch.split(expert_w13, int(list(expert_w13.shape)[0]/2), dim=0)
+        w1, w3 = torch.split(expert_w13,
+                             int(list(expert_w13.shape)[0] / 2),
+                             dim=0)
         act_fn = torch.nn.SiLU()
         gemm1 = expert_tokens @ w1.T
         gate = act_fn(gemm1)
         up = expert_tokens @ w3.T
         expert_out = (gate * up) @ w2[expert_id, :, :].T
         expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
-        expert_cache.scatter_reduce_(
-            0,
-            exp_token_idxs.view(-1, 1).repeat(1, x.shape[-1]),
-            expert_out,
-            reduce='sum'
-        )
+        expert_cache.scatter_reduce_(0,
+                                     exp_token_idxs.view(-1, 1).repeat(
+                                         1, x.shape[-1]),
+                                     expert_out,
+                                     reduce='sum')
 
     return expert_cache
 
+
 def check_fused_moe(
-    m: int, # num of tokens
-    n: int, # intermediate_size
-    k: int, # hidden_size
+    m: int,  # num of tokens
+    n: int,  # intermediate_size
+    k: int,  # hidden_size
     e: int,
     topk: int,
     dtype: torch.dtype,
-  ):
+):
     seed_everything(7)
     verbose = False
     # Setup test data
@@ -121,7 +125,10 @@ def check_fused_moe(
 
     # moe gate
     scores = torch.randn((m, e), device=DEVICE, dtype=dtype)
-    expert_scores, expert_indices = torch.topk(scores, k=topk, dim=-1, sorted=False)
+    expert_scores, expert_indices = torch.topk(scores,
+                                               k=topk,
+                                               dim=-1,
+                                               sorted=False)
 
     if verbose:
         print("expert_indices: ", expert_indices, expert_indices.shape)
@@ -141,15 +148,8 @@ def check_fused_moe(
                                 activation="silu",
                                 num_experts=e)
 
-    ref_out = ref_fused_moe(ref_a,
-                  w13,
-                  w2,
-                  flat_expert_weights,
-                  flat_expert_indices,
-                  topk,
-                  "silu",
-                  e)
+    ref_out = ref_fused_moe(ref_a, w13, w2, flat_expert_weights,
+                            flat_expert_indices, topk, "silu", e)
 
     print("ref result", ref_out, ref_out.shape)
     print("kernel result", out, out.shape)
-
