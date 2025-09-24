@@ -171,7 +171,7 @@ struct KernelLauncher {
     auto event = syclcompat::experimental::launch<
         cutlass::device_kernel<FMHAChunkPrefillKernel>>(policy, queue, params);
 
-    EventManager::getInstance().addEvent(event);
+    // EventManager::getInstance().addEvent(event);
   }
 };
 
@@ -256,7 +256,7 @@ struct FMHAKernel {
 template <typename chunk_policy>
 void policy_dispatch(sycl::queue& queue, CutlassType cuType,
                      const chunk_prefill_args_t& args) {
-  const int PipelineStages = 0;
+  const int PipelineStages = 2;
   if (cuType == CutlassType::half) {
     FMHAKernel<typename chunk_policy::ShapeQK, typename chunk_policy::ShapePV,
                typename chunk_policy::ShapeOutPut,

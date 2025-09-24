@@ -376,8 +376,7 @@ class FMHAPrefillChunk {
       CollectiveMainloop collective_mma;
 
       // 2 for wg level, 3 for sg level
-      // TODO: try for perf
-      static constexpr int barrier_scope = 2;
+      static constexpr int barrier_scope = CausalMask ? 3 : 2;
 
       int q_start_coord = blk_m_coord * QK_BLK_M;
       int q_end_coord = cute::min(q_start_coord + QK_BLK_M, seq_len_qo);
@@ -395,7 +394,9 @@ class FMHAPrefillChunk {
         int kv_start_coord = split * QK_BLK_N;
 
         if constexpr (CausalMask) {
-          if (kv_start_coord >= q_end_coord + seq_diff) break;
+          if (kv_start_coord >= q_end_coord + seq_diff) {
+            break;
+          }
         }
 
         // 1) Load KV (performed inside mmaQK)
@@ -483,6 +484,7 @@ class FMHAPrefillChunk {
         auto& tiled_prefetch_v_ = tiled_prefetch_v_cache;
         auto& pVgV_ = pVgV_cache;
         int v_prefetch_idx = PagedKV ? cached_nblock : split;
+        CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < size<1>(pVgV_); i++) {
           prefetch(tiled_prefetch_v_, pVgV_(_, i, _, v_prefetch_idx));
         }
