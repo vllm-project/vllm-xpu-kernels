@@ -33,5 +33,6 @@ jobs:
           pytest -v -s tests/
           '
       - name: Remove container
+        if: ${{ always() }} 
         run: |
           docker rm -f vllm-xpu-kernel-ci || true
