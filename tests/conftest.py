@@ -20,7 +20,8 @@ def pytest_generate_tests(metafunc):
         return
 
     for param_name, values in profile.items():
-        if param_name in metafunc.fixturenames:
+        split_names = [name.strip() for name in param_name.split(",")]
+        if all(name in metafunc.fixturenames for name in split_names):
             new_markers = []
             for mark in metafunc.definition.own_markers:
                 if mark.name == "parametrize" and mark.args[0] != param_name:

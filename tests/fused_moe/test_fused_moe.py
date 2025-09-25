@@ -27,6 +27,7 @@ def random_partition(size_a: int, target: int):
     result = [cuts[i + 1] - cuts[i] - 1 for i in range(size_a)]
     return result
 
+
 MINI_PYTEST_PARAMS = {
     "default": {
         "m,n,k": [(1, 256, 128), (4, 512, 256), (16, 512, 512)],
