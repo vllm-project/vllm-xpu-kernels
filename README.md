@@ -26,19 +26,31 @@ pip install -r requirements.txt
 Build development installation to current directory:
 
 ```
-VLLM_TARGET_DEVICE=xpu python3 setup.py develop
+pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+# or
+pip install --no-build-isolation -e . -v
 ```
 
 or installation to system directory:
 
 ```
-VLLM_TARGET_DEVICE=xpu python3 setup.py install
+pip install --extra-index-url=https://download.pytorch.org/whl/xpu  .
+# or
+pip install --no-build-isolation . 
 ```
 
 or build wheel (generated .whl in dist folder)
 
 ```
-VLLM_TARGET_DEVICE=xpu python3 setup.py bdist_wheel
+pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu  .
+# or
+pip wheel --no-build-isolation  .
+```
+
+Incremental build
+
+```
+python3 -m build --wheel --no-isolation
 ```
 
 ### How to use in vLLM
