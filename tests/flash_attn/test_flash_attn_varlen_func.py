@@ -75,6 +75,16 @@ def ref_paged_attn(query: torch.Tensor,
     return torch.cat(outputs, dim=0)
 
 
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
+        "head_size": [64, 128],
+        "num_blocks": [64],
+    }
+}
+
+
 @pytest.mark.parametrize("seq_lens",
                          [[(1, 1328), (5, 18),
                            (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
