@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
 
+try:
+    from . import _xpu_C  # noqa: F401
+    FUSEDMOE_UNAVAILABLE_REASON = None
+    FUSEDMOE_AVAILABLE = True
+except ImportError as e:
+    FUSEDMOE_UNAVAILABLE_REASON = str(e)
+    FUSEDMOE_AVAILABLE = False
+
 
 def prepare_gemm_args(n, k, offset, A, B, D, alpha, beta, e):
 
@@ -30,14 +38,9 @@ def prepare_gemm_args(n, k, offset, A, B, D, alpha, beta, e):
     ptr_alpha = prepare_gemm_args.gemm_args["ptr_alpha"]
     ptr_beta = prepare_gemm_args.gemm_args["ptr_beta"]
     total_elements_A = 0
-    total_elements_B = 0
     total_elements_D = 0
 
     def process_data_ptr(tensor, offset, addr_tensor, dim, group):
-        mul = 2
-        if tensor.dtype == torch.float32:
-            mul = 4
-
         if dim == 1:
             addr = tensor[offset].data_ptr()
         elif dim == 2:
@@ -49,25 +52,23 @@ def prepare_gemm_args(n, k, offset, A, B, D, alpha, beta, e):
             addr_tensor[8 * group + i] = byte_val
 
     groups = 0
-    for m in offset:
+    for expert_i, m in enumerate(offset):
         if m != 0:
             # problem_sizes.extend([m, n, k])
             process_data_ptr(A, total_elements_A, ptr_A, 2, groups)
-            process_data_ptr(B, total_elements_B, ptr_B, 3, groups)
+            process_data_ptr(B, expert_i, ptr_B, 3, groups)
             process_data_ptr(D, total_elements_D, ptr_D, 2, groups)
             process_data_ptr(alpha, groups, ptr_alpha, 1, groups)
             process_data_ptr(beta, groups, ptr_beta, 1, groups)
             total_elements_A += m
             total_elements_D += m
             groups += 1
-        total_elements_B += 1
 
     prepare_gemm_args.gemm_args["groups"] = e  # FIXME: groups
     return prepare_gemm_args.gemm_args
 
 
 def cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts):
-    device = "xpu"
     alpha = torch.ones(num_experts, dtype=torch.float32, device=input_A.device)
     beta = torch.zeros(num_experts, dtype=torch.float32, device=input_A.device)
     gemm_args = prepare_gemm_args(n, k, offset, input_A, input_B, output,
@@ -84,7 +85,6 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
     total_input_size = token_cnt * n_experts_per_token
     if not hasattr(cutlass_fused_moe, "moe_buffer"):
         moe_buffer = {}
-        device = hidden_states.device
         moe_buffer["expert_cache"] = torch.empty((token_cnt * hidden_size),
                                                  dtype=hidden_states.dtype,
                                                  device=hidden_states.device)

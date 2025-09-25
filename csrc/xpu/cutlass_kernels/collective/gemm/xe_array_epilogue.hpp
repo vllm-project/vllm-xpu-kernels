@@ -355,7 +355,7 @@ class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
     static constexpr auto BLK_N = get<1>(CtaTileMNK{});
     static constexpr auto BLK_K = get<2>(CtaTileMNK{});
     // static_assert(is_same_v<typename TiledMma::ThrLayoutVMNK, int>,
-    // "assertation fail");
+    // "assertion fail");
     static constexpr auto ATOM_M =
         get<1>(typename TiledMma::ThrLayoutVMNK{}.shape());
     static constexpr auto ATOM_N =
@@ -488,7 +488,7 @@ class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
       CUTLASS_PRAGMA_UNROLL
       for (int epi_m = 0; epi_m < FragsM; epi_m++) {
         if (is_C_load_needed) {
-          // cordinates for C and D are the same
+          // coordinates for C and D are the same
           copy(params.xe_load_c.with(get<0>(load_store_tensors)),
                tCgD(_, epi_m, epi_n), trC);
         }
