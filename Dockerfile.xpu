@@ -35,4 +35,4 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     -r requirements.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --extra-index-url=https://download.pytorch.org/whl/xpu . -v
+    pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
