@@ -104,73 +104,89 @@ struct onednn_types_mapper;
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::f16_int4> {
-  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type>
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
   get() {
     return std::make_tuple(dnnl::memory::data_type::f16,
-                           dnnl::memory::data_type::u4);
+                           dnnl::memory::data_type::u4,
+                           dnnl::memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::bf16_int4> {
-  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type>
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
   get() {
     return std::make_tuple(dnnl::memory::data_type::bf16,
-                           dnnl::memory::data_type::u4);
+                           dnnl::memory::data_type::u4,
+                           dnnl::memory::data_type::bf16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::s8_int4> {
-  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type>
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
   get() {
     return std::make_tuple(dnnl::memory::data_type::s8,
-                           dnnl::memory::data_type::u4);
+                           dnnl::memory::data_type::u4,
+                           dnnl::memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::u8_int4> {
-  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type>
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
   get() {
     return std::make_tuple(dnnl::memory::data_type::u8,
-                           dnnl::memory::data_type::u4);
+                           dnnl::memory::data_type::u4,
+                           dnnl::memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::f16_f8_e5m2> {
-  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type>
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
   get() {
     return std::make_tuple(dnnl::memory::data_type::f16,
-                           dnnl::memory::data_type::f8_e5m2);
+                           dnnl::memory::data_type::f8_e5m2,
+                           dnnl::memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::bf16_f8_e5m2> {
-  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type>
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
   get() {
     return std::make_tuple(dnnl::memory::data_type::bf16,
-                           dnnl::memory::data_type::f8_e5m2);
+                           dnnl::memory::data_type::f8_e5m2,
+                           dnnl::memory::data_type::bf16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::f16_f8_e4m3> {
-  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type>
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
   get() {
     return std::make_tuple(dnnl::memory::data_type::f16,
-                           dnnl::memory::data_type::f8_e4m3);
+                           dnnl::memory::data_type::f8_e4m3,
+                           dnnl::memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::bf16_f8_e4m3> {
-  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type>
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
   get() {
     return std::make_tuple(dnnl::memory::data_type::bf16,
-                           dnnl::memory::data_type::f8_e4m3);
+                           dnnl::memory::data_type::f8_e4m3,
+                           dnnl::memory::data_type::bf16);
   }
 };
 
@@ -194,8 +210,45 @@ enum class bias_data_type_t : uint8_t {
 enum class bias_type_t : uint16_t {};
 
 // Encode function (constexpr)
-constexpr bias_type_t make_bias_type(bias_shape_t shape,
-                                     bias_data_type_t dtype) {
+constexpr bias_type_t get_bias_type(const std::optional<at::Tensor>& bias,
+                                    int m, int n) {
+  bias_shape_t shape;
+  bias_data_type_t dtype;
+  if (bias.has_value() && bias.value().defined()) {
+    auto& b = bias.value();
+    const auto nuelm = b.numel();
+    if (nuelm == 1) {
+      shape = bias_shape_t::scalar;
+    } else if (nuelm == m * n) {
+      shape = bias_shape_t::mn;
+    } else if (b.size(b.dim() - 1) == n && nuelm == n) {
+      shape = bias_shape_t::n;
+    } else if (b.size(b.dim() - 1) == 1 && nuelm == m) {
+      shape = bias_shape_t::m;
+    } else if (nuelm == 0) {
+      shape = bias_shape_t::none;
+    } else {
+      TORCH_CHECK(0, "unsupported bias dim in matmul ...", b.sizes());
+    }
+
+    switch (b.scalar_type()) {
+      case at::ScalarType::Float:
+        dtype = bias_data_type_t::f32;
+        break;
+      case at::ScalarType::BFloat16:
+        dtype = bias_data_type_t::bf16;
+        break;
+      case at::ScalarType::Half:
+        dtype = bias_data_type_t::f16;
+        break;
+      default:
+        TORCH_CHECK(false, "Unsupported data type for bias in int4 matmul: ",
+                    b.scalar_type());
+    }
+  } else {
+    shape = bias_shape_t::none;
+    dtype = bias_data_type_t::none;
+  }
   return static_cast<bias_type_t>((uint16_t(shape) << 8) | uint16_t(dtype));
 }
 
@@ -208,8 +261,9 @@ constexpr bias_data_type_t get_dtype(bias_type_t type) {
   return static_cast<bias_data_type_t>(static_cast<uint16_t>(type) & 0xFF);
 }
 
-static inline dnnl::memory::dims get_bias_shape_type(bias_type_t b_type,
-                                                     const int m, const int n) {
+static inline dnnl::memory::dims get_onednn_bias_dims(bias_type_t b_type,
+                                                      const int m,
+                                                      const int n) {
   bias_shape_t b_shape = get_shape(b_type);
   switch (b_shape) {
     case bias_shape_t::none:
@@ -227,7 +281,8 @@ static inline dnnl::memory::dims get_bias_shape_type(bias_type_t b_type,
   }
 }
 
-static inline dnnl::memory::data_type get_bias_data_type(bias_type_t b_type) {
+static inline dnnl::memory::data_type get_onednn_bias_data_type(
+    bias_type_t b_type) {
   bias_data_type_t b_dtype = get_dtype(b_type);
   switch (b_dtype) {
     case bias_data_type_t::none:
@@ -243,7 +298,7 @@ static inline dnnl::memory::data_type get_bias_data_type(bias_type_t b_type) {
   }
 }
 
-static inline dnnl::memory::format_tag get_bias_format_type(
+static inline dnnl::memory::format_tag get_onednn_bias_format_type(
     bias_type_t b_type) {
   bias_shape_t b_shape = get_shape(b_type);
   if (b_shape == bias_shape_t::none) {
@@ -302,20 +357,14 @@ struct matmul_primitive_cache_t {
                                               zp_group_size);
     auto iter = cached.find(pri_key);
     if (iter == cached.end()) {
-      auto [src_dt, wei_dt] = onednn_types_mapper<Ts>::get();
+      auto [src_dt, wei_dt, dst_dt] = onednn_types_mapper<Ts>::get();
 
       auto src_md = dnnl::memory::desc({m, k}, src_dt, src_strides);
       auto wei_md = dnnl::memory::desc({k, n}, wei_dt, wei_strides);
-      // TODO: should decide dst dt in a better way?
-      auto dst_dt = (((src_dt == dnnl::memory::data_type::s8 ||
-                       src_dt == dnnl::memory::data_type::u8) &&
-                      (wei_dt == dnnl::memory::data_type::u4))
-                         ? dnnl::memory::data_type::f16
-                         : src_dt);
       auto dst_md = dnnl::memory::desc({m, n}, dst_dt, dst_strides);
-      auto bias_md = memory::desc(
-          get_bias_shape_type(b_type, m, n), get_bias_data_type(b_type),
-          get_bias_format_type(b_type));  // {m, n} or {1, n}
+      auto bias_md = dnnl::memory::desc(
+          get_onednn_bias_dims(b_type, m, n), get_onednn_bias_data_type(b_type),
+          get_onednn_bias_format_type(b_type));  // {m, n} or {1, n}
 
       primitive_attr pattr;
       f_attr(pattr);

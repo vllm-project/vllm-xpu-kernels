@@ -20,6 +20,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor");
   xpu_ops.impl("cutlass_grouped_gemm", torch::kXPU,
                gpu::cutlass_kernel::grouped_gemm_func);
+      "int4_gemm_w4a16(Tensor! A, Tensor! B, Tensor? bias, Tensor B_scale, "
+      "Tensor B_zp, int group_size, bool trans_B, Tensor? g_idx) -> Tensor");
+  xpu_ops.impl("int4_gemm_w4a16", torch::kXPU, &int4_gemm_w4a16);
 
   xpu_ops.def(
       "deepseek_scaling_rope(Tensor! positions, Tensor! query, Tensor! key, "
