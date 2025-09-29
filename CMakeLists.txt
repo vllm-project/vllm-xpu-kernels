@@ -171,7 +171,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CUTLASS_ENABLE_HEADERS_ONLY "ON" CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "2eeb05da5b801b34114b6b394dcef836fc9a7cc9" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "6e2fb8c40e04e14cd0ccb37db684df1a8cde3ece" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   FetchContent_Declare(

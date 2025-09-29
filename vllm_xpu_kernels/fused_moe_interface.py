@@ -62,7 +62,7 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
     # map token to experts
     idxs = topk_ids.argsort()
     counts = topk_ids.to(torch.int).bincount()
-    tokens_per_expert = counts.cumsum().to(torch.int32)
+    tokens_per_expert = counts.cumsum()
     num_per_tok = n_experts_per_token
     token_idxs = idxs // num_per_tok
 
