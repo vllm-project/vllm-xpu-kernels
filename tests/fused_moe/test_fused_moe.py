@@ -46,18 +46,20 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
     seed_everything(7)
     num_experts = e
     token_per_group = random_partition(e, m * topk)
+    num_tokens_after_duplication = sum(token_per_group)
+    num_tokens_per_group = torch.tensor(token_per_group, dtype=torch.int32, device=DEVICE)
+
     # input
-    input_A = torch.randn((sum(token_per_group), k),
+    input_A = torch.randn((num_tokens_after_duplication, k),
                           dtype=dtype,
                           device=DEVICE).contiguous()
     ref_A = input_A.clone()
     # weight
     input_B = torch.randn((num_experts, n, k), dtype=dtype, device=DEVICE)
-    input_B = input_B.transpose(-1, -2).contiguous().transpose(-1, -2)
 
     # output offset
-    output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
-    cutlass_grouped_gemm(input_A, input_B, output, token_per_group, n, k,
+    output = torch.empty((num_tokens_after_duplication, n), dtype=dtype, device=DEVICE)
+    cutlass_grouped_gemm(input_A, input_B, output, num_tokens_per_group, n, k,
                          num_experts)
     torch.xpu.synchronize()
     # ref gg

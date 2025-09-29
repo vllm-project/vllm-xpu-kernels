@@ -14,21 +14,18 @@ namespace gpu::cutlass_kernel {
 
 namespace grouped_gemm {
 void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_D,
-                    void* ptr_alpha, void* ptr_beta, void* offset, int64_t N,
-                    int64_t K, int64_t groups);
+                    void* offset, int32_t N, int32_t K, int32_t groups);
 }
 
 /* gemm2(group_A, w2, output, offset) */
 
 at::Tensor grouped_gemm_func(at::Tensor& ptr_A, at::Tensor& ptr_B,
-                             at::Tensor& ptr_D, at::Tensor& ptr_alpha,
-                             at::Tensor& ptr_beta, at::Tensor& offset,
+                             at::Tensor& ptr_D, at::Tensor& tokens_per_expert,
                              int64_t N, int64_t K, int64_t groups) {
   auto& dpcpp_queue = vllm::xpu::vllmGetQueue();
   grouped_gemm::kernel_functor(dpcpp_queue, ptr_A.data_ptr(), ptr_B.data_ptr(),
-                               ptr_D.data_ptr(), ptr_alpha.data_ptr(),
-                               ptr_beta.data_ptr(), offset.data_ptr(), N, K,
-                               groups);
+                               ptr_D.data_ptr(), tokens_per_expert.data_ptr(), (int32_t)N, (int32_t)K,
+                               (int32_t)groups);
   return ptr_D;
 }
 
