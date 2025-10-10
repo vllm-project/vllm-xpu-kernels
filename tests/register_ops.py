@@ -173,6 +173,23 @@ def swigluoai_and_mul(
     torch.ops._C.swigluoai_and_mul(out, input, alpha, limit)
 
 
+# onednn gemm
+def int4_gemm_w4a16(input: torch.Tensor, weight: torch.Tensor,
+                    bias: Optional[torch.Tensor], scales: torch.Tensor,
+                    zero_points: torch.Tensor, group_size: int, trans_B: bool,
+                    g_idx: Optional[torch.Tensor]):
+    return torch.ops._xpu_C.int4_gemm_w4a16(input, weight, bias, scales,
+                                            zero_points, group_size, trans_B,
+                                            g_idx)
+
+
+def fp8_gemm_w8a16(input: torch.Tensor, weight: torch.Tensor, trans_B: bool,
+                   scale_wei: Optional[torch.Tensor],
+                   scale_act: Optional[torch.Tensor]):
+    return torch.ops._xpu_C.fp8_gemm_w8a16(input, weight, trans_B, scale_wei,
+                                           scale_act)
+
+
 # moe
 def moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
     torch.ops._moe_C.moe_sum(input, output)
