@@ -41,6 +41,7 @@ torch::Tensor fp8_gemm_w8a16(const torch::Tensor& A, const torch::Tensor& B,
                              bool trans_B,
                              const std::optional<torch::Tensor>& B_scale_,
                              const std::optional<torch::Tensor>& bias_) {
+  const at::DeviceGuard device_guard(A.device());
   torch::Tensor result = check_and_create_output_tensor(A, B, trans_B);
   TORCH_CHECK(B.scalar_type() == at::ScalarType::Float8_e5m2 ||
                   B.scalar_type() == at::ScalarType::Float8_e4m3fn,
@@ -64,6 +65,8 @@ torch::Tensor int4_gemm_w4a16(
     const torch::Tensor& B_zp,     // [k/group_size, n/8]
     int64_t group_size, bool trans_B,
     const std::optional<torch::Tensor>& g_idx) {
+  const at::DeviceGuard device_guard(A_.device());
+
   // For GPTQ with desc_act=True scenario
   auto A = g_idx.has_value() ? A_.index_select(-1, g_idx.value()) : A_;
   torch::Tensor result = check_and_create_output_tensor(A, B, trans_B);

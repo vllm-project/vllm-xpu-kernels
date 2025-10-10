@@ -62,7 +62,7 @@ static inline void dnnl_matmul_w4a16_int4(
     leading_dim = mat1_strides[0] < mat1_strides[1] ? 0 : 1;
   } else {
     TORCH_CHECK(false,
-                "Unsupported input dimension for fp8 matmul: ", mat1.dim());
+                "Unsupported input dimension for int4 matmul: ", mat1.dim());
   }
   int64_t lda = mat1_strides[leading_dim];
   int64_t ldb = mat2.strides()[mat2.dim() - 1] == 1
@@ -75,9 +75,14 @@ static inline void dnnl_matmul_w4a16_int4(
     pattr.set_scales(DNNL_ARG_WEIGHTS,
                      /* mask */ (1 << 0) + (1 << 1), {group_size, 1},
                      get_onednn_dtype(scale));
-    pattr.set_zero_points(DNNL_ARG_WEIGHTS,
-                          /* mask */ (1 << 0) + (1 << 1), {group_size, 1},
-                          memory::data_type::u4);
+    if (zp.dim() == 1) {
+      pattr.set_zero_points(DNNL_ARG_WEIGHTS,
+                            /* mask */ 0, {}, memory::data_type::s8);
+    } else {
+      pattr.set_zero_points(DNNL_ARG_WEIGHTS,
+                            /* mask */ (1 << 0) + (1 << 1), {group_size, 1},
+                            memory::data_type::u4);
+    }
     pattr.set_fpmath_mode(dnnl::fpmath_mode::f16, true);
     if (in_dtype == at::ScalarType::BFloat16) {
       pattr.set_fpmath_mode(dnnl::fpmath_mode::bf16, true);
@@ -94,10 +99,10 @@ static inline void dnnl_matmul_w4a16_int4(
   const int dev_id = c10::xpu::getCurrentXPUStream().device_index();
   at::Device curDevice = at::Device(at::kXPU, dev_id);
   auto engine = GpuEngineManager::Instance().get_engine(curDevice);
-
-  auto& matmul_ext =
-      matmul_primitive_create_and_cache(jd, tt, b_type, m, n, k, lda, ldb, ldc,
-                                        dev_id, f_attr, group_size, group_size);
+  int64_t zp_group_size = zp.dim() == 1 ? 1 : group_size;
+  auto& matmul_ext = matmul_primitive_create_and_cache(
+      jd, tt, b_type, m, n, k, lda, ldb, ldc, dev_id, f_attr, group_size,
+      zp_group_size);
 
   int arg_off = 0;
   // set scale and zero point for matmul args
@@ -122,8 +127,9 @@ static inline void dnnl_matmul_w4a16_int4(
         arg_off++, DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS, zp.data_ptr(),
         [&]() {
           auto num_groups = k / group_size;
-          dnnl::memory zp_B_u4_m({{num_groups, n}, memory::data_type::u4, {n, 1}},
-                           engine, zp.data_ptr());
+          dnnl::memory zp_B_u4_m(
+              {{num_groups, n}, memory::data_type::u4, {n, 1}}, engine,
+              zp.data_ptr());
           return zp_B_u4_m;
         });
   }
