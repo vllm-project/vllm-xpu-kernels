@@ -390,6 +390,8 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_D,
   //
   // Run examples
   //
+  syclcompat::set_default_queue(stream);
+
   auto offset_ptr = reinterpret_cast<int64_t*>(offset);
   Options options(offset_ptr, N, K, groups);
   // The KernelHardwareInfo struct holds the number of EUs on the GPU with a
