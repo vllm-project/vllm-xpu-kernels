@@ -162,3 +162,21 @@ def check_fused_moe(
 
     print("ref result", ref_out, ref_out.shape)
     print("kernel result", out, out.shape)
+    try:
+        torch.testing.assert_close(out, ref_out, rtol=1e-2, atol=1e-2)
+        print("a and b close enough")
+    except AssertionError as e:
+        print("a and b diffs")
+        print(e)
+
+
+
+if __name__ == "__main__":
+    check_fused_moe(
+        m = 8192,
+        n = 8192,
+        k = 5120,
+        e = 16,
+        topk = 1,
+        dtype = torch.bfloat16
+    )

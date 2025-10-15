@@ -1,6 +1,6 @@
 #include "core/registration.h"
 #include "xpu/ops.h"
-#include "xpu/cutlass_kernels/grouped_gemm.hpp"
+#include "xpu/cutlass_kernels/fused_moe_kernels.hpp"
 #include "xpu/lora/lora_ops.h"
 
 #include <torch/library.h>
