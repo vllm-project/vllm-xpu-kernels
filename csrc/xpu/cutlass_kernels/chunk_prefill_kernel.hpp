@@ -292,10 +292,10 @@ class FMHAPrefillChunk {
 
       Tensor mQ_mkl = cute::get_xe_tensor(
           make_shape(seq_len_qo, head_size_qk, 1));  //(m,k,l)
-      Tensor mK_cache_nkl = cute::get_xe_tensor(make_shape(
-          seq_len_kv_cache, head_size_qk * num_heads_kv, 1));  // (n_cache,k,l)
-      Tensor mV_cache_nkl = cute::get_xe_tensor(make_shape(
-          head_size_vo * num_heads_kv, seq_len_kv_cache, 1));  // (n_cache,k,l)
+      Tensor mK_cache_nkl = cute::get_xe_tensor(
+          make_shape(seq_len_kv_cache, head_size_qk, 1));  // (n_cache,k,l)
+      Tensor mV_cache_nkl = cute::get_xe_tensor(
+          make_shape(head_size_vo, seq_len_kv_cache, 1));  // (n_cache,k,l)
 
       Tensor mQ_mk = mQ_mkl(_, _, 0);
       Tensor mK_cache_nk = mK_cache_nkl(_, _, 0);  // (n_cache, k)
