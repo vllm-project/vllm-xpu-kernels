@@ -181,3 +181,17 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
                                      expert_out,
                                      reduce='sum')
     return expert_cache
+
+def xpu_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
+                      n_experts_per_token, activation, num_experts):
+
+    output = torch.zeros_like(hidden_states)
+    torch.ops._xpu_C.fused_moe(output=output,
+                               input=hidden_states,
+                               token_selected_experts=topk_ids,
+                               token_final_scales=topk_weights,
+                               fc1_expert_weights=w13,
+                               fc2_expert_weights=w2)
+    return output
+
+

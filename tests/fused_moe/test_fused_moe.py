@@ -6,7 +6,8 @@ import torch
 
 from tests.utils import seed_everything
 from vllm_xpu_kernels.fused_moe_interface import (cutlass_fused_moe,
-                                                  cutlass_grouped_gemm)
+                                                  cutlass_grouped_gemm,
+                                                  xpu_fused_moe)
 
 DEVICE = "xpu"
 
@@ -145,6 +146,17 @@ def check_fused_moe(
 
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_scores.view(-1, 1)
+
+    output = xpu_fused_moe(hidden_states=a,
+                           w13=w13,
+                           w2=w2,
+                           topk_weights=expert_scores,
+                           topk_ids=expert_indices,
+                           n_experts_per_token=topk,
+                           activation="silu",
+                           num_experts=e)
+    print("fusedmoe out ", output, output.shape)
+    return
 
     iteration = 1
     for _ in range(iteration):

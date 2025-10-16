@@ -16,3 +16,11 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     const at::Tensor& positions, const at::Tensor& query, const at::Tensor& key,
     const c10::optional<at::Tensor>& offsets_opt,
     const at::Tensor& cos_sin_cache, int64_t rotary_dim, bool is_neox);
+
+void fused_moe(torch::Tensor output, 
+               torch::Tensor input,
+               torch::Tensor token_selected_experts,
+               torch::Tensor token_final_scales,
+               torch::Tensor fc1_expert_weights,
+               torch::Tensor fc2_expert_weights);
+               

@@ -1,7 +1,8 @@
 #include "core/registration.h"
 #include "xpu/ops.h"
-#include "xpu/cutlass_kernels/fused_moe_kernels.hpp"
+#include "xpu/cutlass_kernels/grouped_gemm.hpp"
 #include "xpu/lora/lora_ops.h"
+#include "xpu/cutlass_kernels/fused_moe.hpp"
 
 #include <torch/library.h>
 #include <torch/version.h>
@@ -42,6 +43,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "bgmv_expand_slice(Tensor! outputs, Tensor inputs, Tensor weights, "
       "Tensor indices, int slice_offset,bool add_to_output) -> ()");
   xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
+  
+  xpu_ops.def(
+      "fused_moe(Tensor output, Tensor input, Tensor token_selected_experts, Tensor "
+      "token_final_scales, Tensor fc1_expert_weights, Tensor fc2_expert_weights) -> "
+      "()");
+  xpu_ops.impl("fused_moe", torch::kXPU, &fused_moe);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
