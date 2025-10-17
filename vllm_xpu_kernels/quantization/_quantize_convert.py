@@ -24,13 +24,6 @@ class GPTQUtils:
         return ret_idx.to(torch.int32)
 
     def unpack_weight(self, qweight_int32):
-        """
-        Unpacks a 32-bit packed integer matrix into a 8-bit integer matrix.
-        Args:
-            qmatrix (torch.Tensor): matrix of packed integers
-        Returns:
-            imatrix (torch.Tensor): matrix of integers
-        """
         s32_bits = 32
 
         assert self.bits == 4
