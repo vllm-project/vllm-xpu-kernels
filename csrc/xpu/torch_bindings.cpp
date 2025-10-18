@@ -46,7 +46,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   
   xpu_ops.def(
       "fused_moe(Tensor output, Tensor input, Tensor token_selected_experts, Tensor "
-      "token_final_scales, Tensor fc1_expert_weights, Tensor fc2_expert_weights) -> "
+      "token_final_scales, Tensor fc1_expert_weights, Tensor fc2_expert_weights, Tensor workspace) -> "
       "()");
   xpu_ops.impl("fused_moe", torch::kXPU, &fused_moe);
 }

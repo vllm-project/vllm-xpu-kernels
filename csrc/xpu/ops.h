@@ -22,5 +22,6 @@ void fused_moe(torch::Tensor output,
                torch::Tensor token_selected_experts,
                torch::Tensor token_final_scales,
                torch::Tensor fc1_expert_weights,
-               torch::Tensor fc2_expert_weights);
+               torch::Tensor fc2_expert_weights,
+               torch::Tensor workspace);
                
