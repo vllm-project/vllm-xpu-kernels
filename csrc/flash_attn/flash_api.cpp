@@ -36,7 +36,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
   if (out_.has_value()) {
     out = *out_;
   } else {
-    out = torch::zeros_like(q);
+    out = torch::empty_like(q);
   }
 
   cutlass_chunk_prefill_impl(queue, q, k, v, out, block_table_, cu_seqlens_q,
