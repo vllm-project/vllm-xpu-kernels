@@ -1,14 +1,11 @@
 #include <torch/all.h>
 #include "utils.h"
 #include <iostream>
+#include "fused_moe_prologue.hpp"
 
 typedef at::BFloat16 bfloat16;
 
 std::map<std::string, std::pair<size_t, size_t>> ws_map;
-int align64(int size){
-  // todo
-  return size;
-}
 
 void fused_moe(torch::Tensor output, 
                torch::Tensor input,
@@ -29,6 +26,7 @@ void fused_moe(torch::Tensor output,
   auto& stream =
       at::xpu::getCurrentXPUStream(output.device().index()).queue();
   
+  auto const* token_selected_experts_ = reinterpret_cast<int const*>(token_selected_experts.data_ptr());
   auto const* input_activations = reinterpret_cast<bfloat16 const*>(input.data_ptr());
   auto const* fc1_expert_weights_ = reinterpret_cast<bfloat16 const*>(fc1_expert_weights.data_ptr());
   auto const* fc2_expert_weights_ = reinterpret_cast<bfloat16 const*>(fc2_expert_weights.data_ptr());  
@@ -52,8 +50,9 @@ void fused_moe(torch::Tensor output,
   size_t const permuted_token_selected_experts_size = num_moe_inputs * sizeof(int);  
   size_t src_to_dest_map_size = experts_per_token * num_rows * sizeof(int);
   size_t const expert_first_token_offset_size = (num_experts_per_node + 1) * sizeof(int64_t);
-  
-  size_t const num_blocks_per_seq = 1;
+ 
+  int64_t const num_tokens_per_block = computeNumTokensPerBlock(num_rows, num_experts_per_node);
+  int64_t const num_blocks_per_seq = ceilDiv(num_rows, num_tokens_per_block);
   size_t const blocked_expert_counts_size = num_experts_per_node * num_blocks_per_seq * sizeof(int);
   size_t const blocked_expert_counts_cumsum_size = blocked_expert_counts_size;
   size_t const blocked_row_to_unpermuted_row_size = num_experts_per_node * num_rows * sizeof(int);
@@ -98,19 +97,19 @@ void fused_moe(torch::Tensor output,
 
 
   // TODO: fused prologe
-  // threeStepBuildExpertMapsSortFirstToken(token_selected_experts, 
-  //                                        permuted_token_selected_experts_,
-  //                                        permuted_row_to_unpermuted_row_,
-  //                                        unpermuted_row_to_permuted_row,
-  //                                        expert_first_token_offset_, 
-  //                                        blocked_expert_counts_,
-  //                                        blocked_expert_counts_cumsum_,
-  //                                        blocked_row_to_unpermuted_row_, 
-  //                                        num_rows,
-  //                                        num_experts_per_node, 
-  //                                        experts_per_token, 
-  //                                        start_expert, 
-  //                                        stream);
+  threeStepBuildExpertMapsSortFirstToken(token_selected_experts_, 
+                                         permuted_token_selected_experts_,
+                                         permuted_row_to_unpermuted_row_,
+                                         unpermuted_row_to_permuted_row,
+                                         expert_first_token_offset_, 
+                                         blocked_expert_counts_,
+                                         blocked_expert_counts_cumsum_,
+                                         blocked_row_to_unpermuted_row_, 
+                                         num_rows,
+                                         num_experts_per_node, 
+                                         experts_per_token, 
+                                         start_expert, 
+                                         stream);
 
 
 
