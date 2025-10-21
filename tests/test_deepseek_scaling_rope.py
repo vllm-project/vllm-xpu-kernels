@@ -10,6 +10,11 @@ DEVICE = torch.device("xpu")
 MINI_PYTEST_PARAMS = {
     "default": {
         "batch": [1],
+        "seed": [123],
+        "q_num_head,k_num_head": [(16, 1)],
+        "rotary_dim": [64],
+        "q_head_pad,k_head_pad": [(0, 0)],
+        "is_neox": [True],
     },
 }
 

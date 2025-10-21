@@ -34,9 +34,9 @@ def rotary_embedding_opcheck(rot,
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
     "default": {
-        "max_position": [11, 256],
+        "max_position": [11],
         "head_size": [32],
-        "seq_len": [11, 128],
+        "seq_len": [11],
     },
 }
 

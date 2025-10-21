@@ -30,9 +30,9 @@ def random_partition(size_a: int, target: int):
 
 MINI_PYTEST_PARAMS = {
     "default": {
-        "m,n,k": [(1, 256, 128), (4, 512, 256), (16, 512, 512)],
-        "e": [16, 8],
-        "topk": [1, 2],
+        "m,n,k": [(1, 256, 128)],
+        "e": [1],
+        "topk": [1],
         "dtype": [torch.bfloat16]
     }
 }

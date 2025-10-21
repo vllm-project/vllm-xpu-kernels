@@ -132,8 +132,8 @@ FP8_DTYPES = [torch.float8_e5m2, torch.float8_e4m3fn]
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
     "default": {
-        "num_tokens": [1, 7, 83],
-        "hidden_size": [1, 2, 3, 4, 16],
+        "num_tokens": [1],
+        "hidden_size": [1],
     },
 }
 
