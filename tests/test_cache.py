@@ -40,15 +40,19 @@ KV_CACHE_DTYPE = ["auto"]  # FIXME: will add "fp8" when accuracy is improved
 MINI_PYTEST_PARAMS = {
     "default": {
         "num_tokens": [1],
-        "head_size": [64, 80],
+        "head_size": [8],
+        "num_blocks": [4],
+        "block_size": [8],
     },
     "test_concat_and_cache_mla": {
         "num_tokens": [1],
-        "num_blocks": [32],
+        "num_blocks": [4],
+        "block_size": [8],
     },
     "test_gather_cache_mla": {
-        "num_blocks": [32],
-        "max_seq_len": [64],
+        "num_blocks": [4],
+        "block_size": [8],
+        "max_seq_len": [4],
     },
 }
 

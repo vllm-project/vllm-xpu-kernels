@@ -9,7 +9,11 @@ from tests.utils import seed_everything
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
     "default": {
-        "n_hidden": [128, 256],
+        "n_hidden": [4],
+        "n_token": [1],
+        "routed_scaling_factor": [1.0],
+        "scoring_func": ["softmax"],
+        "renormalize": [True],
     },
 }
 
