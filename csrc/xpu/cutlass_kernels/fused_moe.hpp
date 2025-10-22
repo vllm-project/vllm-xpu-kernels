@@ -95,7 +95,7 @@ void fused_moe(torch::Tensor output,
   auto blocked_expert_counts_cumsum_ = getWsPtr(int{}, "blocked_expert_counts_cumsum");
   auto blocked_row_to_unpermuted_row_ = getWsPtr(int{}, "blocked_row_to_unpermuted_row");
 
-
+  at::DeviceGuard device_guard(input.device());
   // TODO: fused prologe
   threeStepBuildExpertMapsSortFirstToken(token_selected_experts_, 
                                          permuted_token_selected_experts_,
