@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import argparse
 import random
 import unittest
 from collections.abc import Sequence
@@ -351,3 +352,108 @@ def check_ipex_availability():
     else:
         print("Warning: IPEX not available, skipping IPEX benchmarks")
         return False
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help="Batch size",
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=128,
+        help="Sequence length",
+    )
+    parser.add_argument(
+        "--hidden-size",
+        type=int,
+        default=4096,
+        help="Hidden size (2nd dimension) of the sequence",
+    )
+    parser.add_argument(
+        "--intermediate-size",
+        type=int,
+        default=None,
+        help="Intermediate size for FFN layers",
+    )
+    parser.add_argument(
+        "--num-groups",
+        type=int,
+        default=None,
+        help="Number of expert groups for MoE models",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default=torch.bfloat16,
+        help="Data type from model config",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default=None,
+        help="Model name to load configuration from",
+    )
+    parser.add_argument(
+        "--head-size",
+        type=int,
+        choices=[64, 80, 96, 112, 120, 128, 192, 256],
+        default=128,
+    )
+    parser.add_argument("--num-blocks", type=int, default=1024)
+    parser.add_argument(
+        "--kv-cache-dtype",
+        type=str,
+        choices=["auto", "fp8", "fp8_e4m3", "fp8_e5m2"],
+        default="auto",
+    )
+    parser.add_argument("--block-size",
+                        type=int,
+                        choices=[16, 32, 64],
+                        default=64)
+    parser.add_argument("--head-num-range",
+                        type=int,
+                        nargs='+',
+                        default=[12, 32, 40, 48, 64, 96, 128],
+                        help=("Range of attention head numbers to test/use. "
+                              "Default: 12 32 40 48 64 96 128"))
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=1,
+        help="Tensor parallelism size",
+    )
+    parser.add_argument("--use-residual",
+                        action="store_true",
+                        help="Whether to use residual connection")
+    parser.add_argument(
+        "--save-path",
+        type=str,
+        default="./configs/rmsnorm/",
+        help="Path to save rmsnorm benchmark results",
+    )
+
+    args = parser.parse_args()
+
+    if args.model_name:
+        model_config = get_model_config(args.model_name, args.tp_size)
+
+        args.hidden_size = model_config["hidden_size"]
+        args.intermediate_size = model_config["intermediate_size"]
+        args.num_groups = model_config["num_groups"]
+        args.dtype = model_config["dtype"]
+        args.head_size = model_config["head_dim"]
+        args.head_num_range = [model_config.get("num_attention_heads", 32)]
+
+        print(f"Using model configuration from: {args.model_name}")
+        print(f"Updated hidden_size: {args.hidden_size}")
+        print(f"Updated intermediate_size: {args.intermediate_size}")
+        print(f"Updated num_groups: {args.num_groups}")
+        print(f"Updated head_num_range: {args.head_num_range}")
+        print(f"Updated dtype: {args.dtype}")
+
+    return args
