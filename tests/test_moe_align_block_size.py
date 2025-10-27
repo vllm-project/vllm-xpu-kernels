@@ -10,7 +10,7 @@ import torch
 
 from tests.ops.moe_align_block_size_ops import (batched_moe_align_block_size,
                                                 moe_align_block_size)
-from tests.utils import round_up, seed_everything
+from tests.utils import opcheck, round_up, seed_everything
 
 NUM_TOKENS = [1, 3, 256, 2256, 4096]
 NUM_EXPERTS = [32, 160, 256, 257]
@@ -399,3 +399,76 @@ def test_batched_moe_align_block_size(
                                num_tokens_post_pad,
                                atol=0,
                                rtol=0)
+
+
+def test_moe_align_block_size_opcheck():
+    num_experts = 4
+    block_size = 4
+    topk_ids = torch.randint(0,
+                             num_experts, (3, 4),
+                             dtype=torch.int32,
+                             device="xpu")
+
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    sorted_ids = torch.empty((max_num_tokens_padded, ),
+                             dtype=torch.int32,
+                             device=topk_ids.device)
+    sorted_ids.fill_(topk_ids.numel())
+    max_num_m_blocks = max_num_tokens_padded // block_size
+    expert_ids = torch.empty((max_num_m_blocks, ),
+                             dtype=torch.int32,
+                             device=topk_ids.device)
+    num_tokens_post_pad = torch.empty((1),
+                                      dtype=torch.int32,
+                                      device=topk_ids.device)
+
+    opcheck(
+        torch.ops._moe_C.moe_align_block_size,
+        (
+            topk_ids,
+            num_experts,
+            block_size,
+            sorted_ids,
+            expert_ids,
+            num_tokens_post_pad,
+        ),
+    )
+
+
+def test_batched_moe_align_block_size_opcheck():
+    max_tokens_per_batch = 512
+    num_experts = 4
+    block_size = 16
+
+    expert_num_tokens = torch.randint(
+        low=0,
+        high=max_tokens_per_batch,
+        size=(num_experts, ),
+        dtype=torch.int32,
+        device="xpu",
+    )
+
+    max_num_tokens_padded = num_experts * max(max_tokens_per_batch, block_size)
+    sorted_ids = torch.empty((max_num_tokens_padded, ),
+                             dtype=torch.int32,
+                             device="xpu")
+
+    assert max_num_tokens_padded % block_size == 0
+    max_num_m_blocks = max_num_tokens_padded // block_size
+    expert_ids = torch.empty((max_num_m_blocks, ),
+                             dtype=torch.int32,
+                             device="xpu")
+
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device="xpu")
+
+    opcheck(
+        torch.ops._moe_C.batched_moe_align_block_size,
+        (
+            max_tokens_per_batch,
+            block_size,
+            expert_num_tokens,
+            sorted_ids,
+            expert_ids,
+            num_tokens_post_pad,
+        ),
+    )
