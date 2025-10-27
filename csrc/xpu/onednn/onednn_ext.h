@@ -97,6 +97,10 @@ enum class joint_dtypes_t {
   bf16_f8_e5m2,
   f16_f8_e4m3,
   bf16_f8_e4m3,
+  f8_e5m2_f16,
+  f8_e5m2_bf16,
+  f8_e4m3_f16,
+  f8_e4m3_bf16,
 };
 
 template <joint_dtypes_t Ts>
@@ -185,6 +189,50 @@ struct onednn_types_mapper<joint_dtypes_t::bf16_f8_e4m3> {
                            dnnl::memory::data_type>
   get() {
     return std::make_tuple(dnnl::memory::data_type::bf16,
+                           dnnl::memory::data_type::f8_e4m3,
+                           dnnl::memory::data_type::bf16);
+  }
+};
+
+template <>
+struct onednn_types_mapper<joint_dtypes_t::f8_e5m2_f16> {
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
+  get() {
+    return std::make_tuple(dnnl::memory::data_type::f8_e5m2,
+                           dnnl::memory::data_type::f8_e5m2,
+                           dnnl::memory::data_type::f16);
+  }
+};
+
+template <>
+struct onednn_types_mapper<joint_dtypes_t::f8_e5m2_bf16> {
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
+  get() {
+    return std::make_tuple(dnnl::memory::data_type::f8_e5m2,
+                           dnnl::memory::data_type::f8_e5m2,
+                           dnnl::memory::data_type::bf16);
+  }
+};
+
+template <>
+struct onednn_types_mapper<joint_dtypes_t::f8_e4m3_f16> {
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
+  get() {
+    return std::make_tuple(dnnl::memory::data_type::f8_e4m3,
+                           dnnl::memory::data_type::f8_e4m3,
+                           dnnl::memory::data_type::f16);
+  }
+};
+
+template <>
+struct onednn_types_mapper<joint_dtypes_t::f8_e4m3_bf16> {
+  static inline std::tuple<dnnl::memory::data_type, dnnl::memory::data_type,
+                           dnnl::memory::data_type>
+  get() {
+    return std::make_tuple(dnnl::memory::data_type::f8_e4m3,
                            dnnl::memory::data_type::f8_e4m3,
                            dnnl::memory::data_type::bf16);
   }
@@ -461,6 +509,22 @@ static inline primitive_ext& matmul_primitive_create_and_cache(
           zp_group_size);
     case joint_dtypes_t::bf16_f8_e4m3:
       return matmul_primitive_create_and_cache<joint_dtypes_t::bf16_f8_e4m3, F>(
+          Tt, b_type, m, n, k, lda, ldb, ldc, device_id, attr, scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::f8_e5m2_f16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::f8_e5m2_f16, F>(
+          Tt, b_type, m, n, k, lda, ldb, ldc, device_id, attr, scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::f8_e5m2_bf16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::f8_e5m2_bf16, F>(
+          Tt, b_type, m, n, k, lda, ldb, ldc, device_id, attr, scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::f8_e4m3_f16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::f8_e4m3_f16, F>(
+          Tt, b_type, m, n, k, lda, ldb, ldc, device_id, attr, scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::f8_e4m3_bf16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::f8_e4m3_bf16, F>(
           Tt, b_type, m, n, k, lda, ldb, ldc, device_id, attr, scale_group_size,
           zp_group_size);
     default:

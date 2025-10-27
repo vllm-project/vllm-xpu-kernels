@@ -183,6 +183,14 @@ def int4_gemm_w4a16(input: torch.Tensor, weight: torch.Tensor,
                                             g_idx)
 
 
+def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
+             out_dtype: Optional[torch.dtype], trans_B: bool,
+             scale_act: Optional[torch.Tensor],
+             scale_wei: Optional[torch.Tensor], bias: Optional[torch.Tensor]):
+    return torch.ops._xpu_C.fp8_gemm(input, weight, out_dtype, trans_B,
+                                     scale_act, scale_wei, bias)
+
+
 def fp8_gemm_w8a16(input: torch.Tensor, weight: torch.Tensor, trans_B: bool,
                    scale_wei: Optional[torch.Tensor],
                    scale_act: Optional[torch.Tensor]):
