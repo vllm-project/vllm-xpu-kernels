@@ -195,6 +195,42 @@ def moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
     torch.ops._moe_C.moe_sum(input, output)
 
 
+def moe_align_block_size(
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    block_size: int,
+    sorted_token_ids: torch.Tensor,
+    experts_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+) -> None:
+    torch.ops._moe_C.moe_align_block_size(
+        topk_ids,
+        num_experts,
+        block_size,
+        sorted_token_ids,
+        experts_ids,
+        num_tokens_post_pad,
+    )
+
+
+def batched_moe_align_block_size(
+    max_tokens_per_batch: int,
+    block_size: int,
+    expert_num_tokens: torch.Tensor,
+    sorted_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+) -> None:
+    torch.ops._moe_C.batched_moe_align_block_size(
+        max_tokens_per_batch,
+        block_size,
+        expert_num_tokens,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+    )
+
+
 def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
                  num_expert_group: int, topk_group: int, topk: int,
                  renormalize: bool, routed_scaling_factor: float):

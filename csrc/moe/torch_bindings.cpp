@@ -7,6 +7,26 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.def("moe_sum(Tensor input, Tensor! output) -> ()");
   m.impl("moe_sum", torch::kXPU, &moe_sum);
 
+  // Aligning the number of tokens to be processed by each expert such
+  // that it is divisible by the block size.
+  m.def(
+      "moe_align_block_size(Tensor topk_ids, int num_experts,"
+      "                     int block_size, Tensor! sorted_token_ids,"
+      "                     Tensor! experts_ids,"
+      "                     Tensor! num_tokens_post_pad) -> ()");
+  m.impl("moe_align_block_size", torch::kXPU, &moe_align_block_size);
+
+  // Aligning the number of tokens to be processed by each expert such
+  // that it is divisible by the block size, but for the batched case.
+  m.def(
+      "batched_moe_align_block_size(int max_tokens_per_batch,"
+      "                     int block_size, Tensor expert_num_tokens,"
+      "                     Tensor! sorted_token_ids,"
+      "                     Tensor! experts_ids,"
+      "                     Tensor! num_tokens_post_pad) -> ()");
+  m.impl("batched_moe_align_block_size", torch::kXPU,
+         &batched_moe_align_block_size);
+
   // Apply grouped topk routing to select experts.
   m.def(
       "grouped_topk(Tensor scores, Tensor scores_with_bias, int n_group, int "

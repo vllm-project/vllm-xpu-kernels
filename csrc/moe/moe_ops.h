@@ -4,6 +4,18 @@
 
 void moe_sum(torch::Tensor& input, torch::Tensor& output);
 
+void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
+                          int64_t block_size, torch::Tensor sorted_token_ids,
+                          torch::Tensor experts_ids,
+                          torch::Tensor num_tokens_post_pad);
+
+void batched_moe_align_block_size(int64_t max_tokens_per_batch,
+                                  int64_t block_size,
+                                  torch::Tensor const& expert_num_tokens,
+                                  torch::Tensor sorted_ids,
+                                  torch::Tensor expert_ids,
+                                  torch::Tensor num_tokens_post_pad);
+
 std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
     torch::Tensor const& scores, torch::Tensor const& scores_with_bias,
     int64_t n_group, int64_t topk_group, int64_t topk, bool renormalize,

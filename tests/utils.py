@@ -351,3 +351,7 @@ def check_ipex_availability():
     else:
         print("Warning: IPEX not available, skipping IPEX benchmarks")
         return False
+
+
+def round_up(x: int, y: int) -> int:
+    return ((x + y - 1) // y) * y
