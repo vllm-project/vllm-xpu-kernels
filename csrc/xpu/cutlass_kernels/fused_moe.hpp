@@ -25,13 +25,14 @@ void fused_moe(torch::Tensor output,
   auto const num_experts_total = static_cast<int>(num_experts_on_rank * ep_size);
   auto& stream =
       at::xpu::getCurrentXPUStream(output.device().index()).queue();
-  
-  auto const* token_selected_experts_ = reinterpret_cast<int const*>(token_selected_experts.data_ptr());
+ 
+  assert(token_selected_experts.dtype() == torch::kInt64);
+  auto const* token_selected_experts_ = reinterpret_cast<int64_t const*>(token_selected_experts.data_ptr());
   auto const* input_activations = reinterpret_cast<bfloat16 const*>(input.data_ptr());
   auto const* fc1_expert_weights_ = reinterpret_cast<bfloat16 const*>(fc1_expert_weights.data_ptr());
   auto const* fc2_expert_weights_ = reinterpret_cast<bfloat16 const*>(fc2_expert_weights.data_ptr());  
   auto* final_output = reinterpret_cast<bfloat16*>(output.data_ptr()); 
-  auto const* token_topk_unpermuted_scales = reinterpret_cast<bfloat16 const*>(token_final_scales.data_ptr());
+  auto const* token_topk_unpermuted_scales = reinterpret_cast<float const*>(token_final_scales.data_ptr());
   int const num_experts_per_node = num_experts_total / ep_size;
   int start_expert = num_experts_per_node * 0;
   int end_expert = start_expert + num_experts_per_node;

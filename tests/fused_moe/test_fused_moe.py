@@ -126,7 +126,7 @@ def check_fused_moe(
     dtype: torch.dtype,
 ):
     seed_everything(7)
-    verbose = False
+    verbose = True
     # Setup test data
     a = torch.randn((m, k), device=DEVICE, dtype=dtype) / 10
     w13 = torch.randn((e, 2 * n, k), device=DEVICE, dtype=dtype) / 10
@@ -141,11 +141,15 @@ def check_fused_moe(
                                                sorted=False)
 
     if verbose:
-        print("expert_indices: ", expert_indices, expert_indices.shape)
-        print("expert_scores: ", expert_scores, expert_scores.shape)
+        print("num tokens: ", m)
+        print("num experts: ", e)
+        print("token per expert: ", topk)
+        print("expert_indices: ", expert_indices.view(2,32), expert_indices.shape, expert_indices.dtype)
+        # print("expert_scores: ", expert_scores, expert_scores.shape)
 
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_scores.view(-1, 1)
+
 
     output = xpu_fused_moe(hidden_states=a,
                            w13=w13,
@@ -185,7 +189,7 @@ def check_fused_moe(
 
 if __name__ == "__main__":
     check_fused_moe(
-        m = 8192,
+        m = 64,
         n = 8192,
         k = 5120,
         e = 16,
