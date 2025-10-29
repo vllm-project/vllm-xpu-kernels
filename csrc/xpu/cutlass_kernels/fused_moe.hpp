@@ -79,12 +79,6 @@ void fused_moe(torch::Tensor output,
 
   std::cout << "total workspace size(byte): " << map_offset << std::endl;
 
-
-
-
-
-   
-
   auto getWsPtr = [&](auto type, std::string const& name) {
     return ws_map.at(name).first
                ? reinterpret_cast<decltype(type)*>(ws_ptr + ws_map.at(name).second)

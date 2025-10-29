@@ -562,14 +562,6 @@ class ExpandInputRowsKernel {
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item) const {
-    constexpr bool is_mxfp8 = false;
-    constexpr bool is_mxfp8_input = is_mxfp8;
-    constexpr bool need_mxfp8_quant = is_mxfp8;
-    constexpr bool is_nvfp4 = false;
-    constexpr bool is_nvfp4_input = false;
-    constexpr bool need_nvfp4_quant = false;
-
-    // constexpr int64_t ELEM_PER_THREAD = 128 / sizeof_bits<InputActivationsType>::value;
 
     int64_t const num_valid_tokens = expert_first_token_offset[num_experts_per_node];
     for (int64_t permuted_row = item.get_group(2) ; permuted_row < num_valid_tokens;
@@ -602,6 +594,10 @@ class ExpandInputRowsKernel {
       // assert(hidden_size % ELEM_PER_THREAD == 0);
       for (int elem_index = start_offset; elem_index < num_elems_in_col; elem_index += stride) {
         dest_row_ptr[elem_index] = source_row_ptr[elem_index];
+      }
+      if (permuted_scales && item.get_local_id(2) == 0) {
+        int64_t const source_k_idx = source_row * k + source_k_rank;
+        permuted_scales[permuted_row] = unpermuted_scales ? unpermuted_scales[source_k_idx] : 1.0f;
       }
     }
   }
