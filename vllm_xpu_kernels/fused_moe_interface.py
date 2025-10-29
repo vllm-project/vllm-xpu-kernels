@@ -182,6 +182,16 @@ def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
                                      reduce='sum')
     return expert_cache
 
+def ceilDiv(a, b):
+    return (a + b - 1) // b
+
+def compute_num_tokens_per_block(num_tokens, num_experts_per_node):
+    for num_tokens_per_block in [32, 64, 128, 256, 512, 1024]:
+        num_blocks_per_seq = ceilDiv(num_tokens, num_tokens_per_block)
+        if num_blocks_per_seq * num_experts_per_node <= num_tokens_per_block:
+            return num_tokens_per_block
+    return 1024
+
 def xpu_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
                       n_experts_per_token, activation, num_experts):
 
@@ -194,6 +204,52 @@ def xpu_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
                                fc1_expert_weights=w13,
                                fc2_expert_weights=w2,
                                workspace=workspace)
+
+    # TODO: will all integrated in Cpp func. Temporary expose before gemm fusion
+    num_rows, hidden_size = list(hidden_states.shape)
+    inter_size = list(w2.shape)[-1]
+    num_experts_per_node = num_experts
+    experts_per_token = n_experts_per_token
+    num_moe_inputs = n_experts_per_token * num_rows
+    permuted_elems = num_moe_inputs * hidden_size
+    interbuf_elems = num_moe_inputs * inter_size
+    permuted_row_to_unpermuted_row_size = num_moe_inputs * 4
+    permuted_token_selected_experts_size = num_moe_inputs * 4
+    src_to_dest_map_size = experts_per_token * num_rows * 4
+    expert_first_token_offset_size = (num_experts_per_node + 1) * 8
+    num_tokens_per_block = compute_num_tokens_per_block(num_rows, num_experts_per_node)
+    num_blocks_per_seq = ceilDiv(num_rows, num_tokens_per_block)
+    blocked_expert_counts_size = num_experts_per_node * num_blocks_per_seq * 4
+    blocked_expert_counts_cumsum_size = blocked_expert_counts_size
+    blocked_row_to_unpermuted_row_size = num_experts_per_node * num_rows * 4
+    permuted_data_size = permuted_elems * 2
+
+    ws_map = {}
+    map_offset = 0
+    ws_map["permuted_token_selected_experts"] = (permuted_token_selected_experts_size, map_offset)
+    map_offset += permuted_token_selected_experts_size
+    ws_map["permuted_row_to_unpermuted_row"] = (permuted_row_to_unpermuted_row_size, map_offset)
+    map_offset += permuted_row_to_unpermuted_row_size
+    ws_map["src_to_dest_map"] = (src_to_dest_map_size, map_offset)
+    map_offset += src_to_dest_map_size
+    ws_map["expert_first_token_offset"] = (expert_first_token_offset_size, map_offset)
+    map_offset += expert_first_token_offset_size
+    ws_map["blocked_expert_counts"] = (blocked_expert_counts_size, map_offset)
+    map_offset += blocked_expert_counts_size
+    ws_map["blocked_expert_counts_cumsum"] = (blocked_expert_counts_cumsum_size, map_offset)
+    map_offset += blocked_expert_counts_cumsum_size
+    ws_map["blocked_row_to_unpermuted_row"] = (blocked_row_to_unpermuted_row_size, map_offset)
+    map_offset += blocked_row_to_unpermuted_row_size
+    ws_map["overlapped_gemm1_gemm2_inputs"] = (permuted_data_size, map_offset)
+    map_offset += permuted_data_size
+
+    expert_first_token_offset = workspace[ws_map["expert_first_token_offset"][1]:]
+    gemm1_input = workspace[ws_map["overlapped_gemm1_gemm2_inputs"][1]:]
+    gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
+                                dtype=hidden_states.dtype,
+                                device=hidden_states.device)
+
+
     return output
 
 
