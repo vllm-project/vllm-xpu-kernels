@@ -19,6 +19,7 @@ namespace vllm {
 namespace moe {
 
 constexpr int32_t WARP_SIZE = 32;
+constexpr int32_t EXCLUSIVE_SIZE = 1024;
 
 namespace batched_moe_align_block_size {
 
@@ -94,7 +95,7 @@ class batched_moe_align_block_size_kernel {
 
     int cumsum_val;
     sycl::joint_exclusive_scan(item.get_group(), temp_storage,
-                               temp_storage + 1024, temp_storage, 0,
+                               temp_storage + EXCLUSIVE_SIZE, temp_storage, 0,
                                sycl::plus<int>{});
     cumsum_val = temp_storage[local_id_x];
 
@@ -166,7 +167,7 @@ class moe_align_block_size_kernel {
     int32_t* temp_storage = static_cast<int32_t*>(
         slm.template get_multi_ptr<sycl::access::decorated::no>().get());
 
-    int32_t* shared_counts = temp_storage + 1024;
+    int32_t* shared_counts = temp_storage + EXCLUSIVE_SIZE;
 
     // Initialize sorted_token_ids with numel
     for (size_t it = local_id_x; it < max_num_tokens_padded;
@@ -220,7 +221,7 @@ class moe_align_block_size_kernel {
 
     int cumsum_val;
     sycl::joint_exclusive_scan(item.get_group(), temp_storage,
-                               temp_storage + 1024, temp_storage, 0,
+                               temp_storage + EXCLUSIVE_SIZE, temp_storage, 0,
                                sycl::plus<int>{});
     cumsum_val = temp_storage[local_id_x];
     if (expert_id <= num_experts) {
@@ -484,7 +485,8 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
           using align_kernel = vllm::moe::moe_align_block_size_kernel<scalar_t>;
 
           size_t num_warps = CEILDIV(padded_num_experts, experts_per_warp);
-          size_t shared_mem_num = 1024 + num_warps * experts_per_warp;
+          size_t shared_mem_num =
+              vllm::moe::EXCLUSIVE_SIZE + num_warps * experts_per_warp;
 
           (*queue).submit([&](sycl::handler& cgh) {
             sycl::local_accessor<int32_t, 1> slm(sycl::range<1>(shared_mem_num),
@@ -547,7 +549,8 @@ void batched_moe_align_block_size(int64_t max_tokens_per_batch,
   sycl::range<1> block(batched_kernel::num_threads);
 
   (*queue).submit([&](sycl::handler& cgh) {
-    sycl::local_accessor<int32_t, 1> slm(sycl::range<1>(1024), cgh);
+    sycl::local_accessor<int32_t, 1> slm(
+        sycl::range<1>(vllm::moe::EXCLUSIVE_SIZE), cgh);
     cgh.parallel_for(
         sycl::nd_range<1>(grid * block, block),
         batched_kernel::batched_moe_align_block_size_kernel(
