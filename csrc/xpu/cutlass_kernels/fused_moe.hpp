@@ -124,7 +124,7 @@ void fused_moe(torch::Tensor output,
         expert_first_token_offset_, nullptr, stream);
   auto const* gemm1_input = gemm1_input_expand;
 
-
+  std::cout << "finish expand\n" << std::endl;
 
 }
  
