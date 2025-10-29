@@ -174,19 +174,30 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CUTLASS_REVISION "9baca2cff3a28590fcd03e55515e2d91ff2cbc8b" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
-  FetchContent_Declare(
-      cutlass-sycl
-      GIT_REPOSITORY https://github.com/intel/cutlass-sycl
+  if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
+    set(VLLM_CUTLASS_SRC_DIR $ENV{VLLM_CUTLASS_SRC_DIR})
+  endif()
+  if(VLLM_CUTLASS_SRC_DIR)
+    if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
+      get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
+    endif()
+    message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
+    FetchContent_Declare(cutlass-sycl SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
+  else()
+    FetchContent_Declare(
+        cutlass-sycl
+        GIT_REPOSITORY https://github.com/intel/cutlass-sycl
 
-      # Please keep this in sync with CUTLASS_REVISION line above.
-      GIT_TAG ${CUTLASS_REVISION}
-      GIT_PROGRESS TRUE
+        # Please keep this in sync with CUTLASS_REVISION line above.
+        GIT_TAG ${CUTLASS_REVISION}
+        GIT_PROGRESS TRUE
 
-      # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
-      # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
-      # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-      GIT_SHALLOW FALSE
-  )
+        # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
+        # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
+        # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
+        GIT_SHALLOW FALSE
+    )
+  endif()
 
   # cutlass compilation flags
   set(CUTLASS_ENABLE_SYCL "ON")
