@@ -124,17 +124,19 @@ struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
   using MainloopTensors = cute::tuple<TensorMKL, TensorNKL>;
   // Host side kernel arguments
   struct Arguments {
-    ElementA const** ptr_A;
+    ElementA const* ptr_A;
     StrideA dA;
     ElementB const** ptr_B;
     StrideB dB;
+    int64_t const* expert_first_token_offset;
   };
 
   struct Params {
-    ElementA const** ptr_A;
+    ElementA const* ptr_A;
     StrideA dA;
     ElementB const** ptr_B;
     StrideB dB;
+    int64_t const* expert_first_token_offset;
   };
 
   //
@@ -156,7 +158,7 @@ struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
     auto init_N = get<1>(problem_shape_MNK);
     auto init_K = get<2>(problem_shape_MNK);
 
-    return Params{args.ptr_A, args.dA, args.ptr_B, args.dB};
+    return Params{args.ptr_A, args.dA, args.ptr_B, args.dB, args.expert_first_token_offset};
   }
 
   template <class ProblemShape>
@@ -338,9 +340,10 @@ struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
     const int32_t M = get<0>(problem_shape_mnkl);
     const int32_t N = get<1>(problem_shape_mnkl);
     const int32_t K = get<2>(problem_shape_mnkl);
+    auto expert_first_token_offset = mainloop_params.expert_first_token_offset;
 
     ElementA const* ptr_A_curr_batch =
-        reinterpret_cast<ElementA const*>(mainloop_params.ptr_A[next_group]);
+        reinterpret_cast<ElementA const*>(mainloop_params.ptr_A) + expert_first_token_offset[next_group] * K;
     ElementB const* ptr_B_curr_batch =
         reinterpret_cast<ElementB const*>(mainloop_params.ptr_B[next_group]);
 

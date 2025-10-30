@@ -17,7 +17,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def(
       "cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor ptr_D, Tensor "
-      "ptr_alpha, Tensor ptr_beta, Tensor offset, int N, int K, int groups) -> "
+      "ptr_alpha, Tensor ptr_beta, Tensor offset, Tensor expert_first_token_offset, int N, int K, int groups) -> "
       "Tensor");
   xpu_ops.impl("cutlass_grouped_gemm", torch::kXPU,
                gpu::cutlass_kernel::grouped_gemm_func);

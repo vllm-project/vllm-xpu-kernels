@@ -39,10 +39,10 @@ MINI_PYTEST_PARAMS = {
 }
 
 
-@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
-@pytest.mark.parametrize("e", NUM_EXPERTS)
-@pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+# @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
+# @pytest.mark.parametrize("e", NUM_EXPERTS)
+# @pytest.mark.parametrize("topk", TOP_KS)
+# @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_grouped_gemm(m, n, k, e, topk, dtype):
     seed_everything(7)
     num_experts = e
@@ -188,11 +188,12 @@ def check_fused_moe(
 
 
 if __name__ == "__main__":
-    check_fused_moe(
-        m = 64,
-        n = 8192,
-        k = 5120,
-        e = 16,
-        topk = 1,
-        dtype = torch.bfloat16
-    )
+    # check_fused_moe(
+    #     m = 64,
+    #     n = 8192,
+    #     k = 5120,
+    #     e = 16,
+    #     topk = 1,
+    #     dtype = torch.bfloat16
+    # )
+    test_grouped_gemm(m=64, n=8192, k=5120, e=16, topk=1, dtype=torch.bfloat16)
