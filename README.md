@@ -27,7 +27,7 @@ Build development installation to current directory:
 
 ```
 pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
-# or
+# or for faster build, you can use --no-build-isolation
 pip install --no-build-isolation -e . -v
 ```
 
@@ -35,7 +35,7 @@ or installation to system directory:
 
 ```
 pip install --extra-index-url=https://download.pytorch.org/whl/xpu  .
-# or
+# or for faster build, you can use --no-build-isolation
 pip install --no-build-isolation . 
 ```
 
@@ -43,7 +43,7 @@ or build wheel (generated .whl in dist folder)
 
 ```
 pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu  .
-# or
+# or for faster build, you can use --no-build-isolation
 pip wheel --no-build-isolation  .
 ```
 
