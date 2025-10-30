@@ -73,7 +73,6 @@ def test_int4_gemm(dtype, act_order, mnk_factors, qmode: QuantMode):
         scales,
         zero_points,
         group_size,
-        False,
         g_idx4kernel,
     )
 

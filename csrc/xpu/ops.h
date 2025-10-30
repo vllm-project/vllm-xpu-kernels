@@ -2,14 +2,21 @@
 
 #include <torch/all.h>
 
+/**
+ * Make sure the shape of A and B is correctly setting before calling below gemm
+ * method implemented with OneDNN.
+ *  A should be one of [b, m, k] and [m, k]
+ *  B should be [k, n] or [k//8, n] in int4 precision, where [k//8, n] indicates
+ * a packed representation with 8 int4 values packed into one byte along the k
+ * dimension.
+ */
 torch::Tensor fp8_gemm(const torch::Tensor& A, const torch::Tensor& B,
-                       std::optional<c10::ScalarType> out_dtype, bool trans_B,
+                       std::optional<c10::ScalarType> out_dtype,
                        const std::optional<torch::Tensor>& A_scale_,
                        const std::optional<torch::Tensor>& B_scale_,
                        const std::optional<torch::Tensor>& bias_);
 
 torch::Tensor fp8_gemm_w8a16(const torch::Tensor& A, const torch::Tensor& B,
-                             bool trans_B,
                              const std::optional<torch::Tensor>& B_scale_,
                              const std::optional<torch::Tensor>& bias_);
 
@@ -17,7 +24,6 @@ torch::Tensor int4_gemm_w4a16(const torch::Tensor& A_, const torch::Tensor& B,
                               const std::optional<torch::Tensor>& bias,
                               const torch::Tensor& B_scale,
                               const torch::Tensor& B_zp, int64_t group_size,
-                              bool trans_B,
                               const std::optional<torch::Tensor>& g_idx);
 
 torch::Tensor cutlass_grouped_gemm(torch::Tensor ptr_A, torch::Tensor ptr_B,
