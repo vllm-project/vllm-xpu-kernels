@@ -76,9 +76,6 @@ static inline void dnnl_matmul_w8a8_fp8(
                        /* mask */ 0, {}, get_onednn_dtype(m1_sc));
       /* per tensor quant */
     } else {
-      TORCH_CHECK(m1_sc.size(0) == m,
-                  "Input activation scale shape mismatch. Expected shape: [", m,
-                  "], got ", m1_sc.sizes());
       pattr.set_scales(DNNL_ARG_SRC,
                        /* mask */ (1 << 1), {}, get_onednn_dtype(m1_sc));
       /* per token quant */
