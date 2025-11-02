@@ -58,6 +58,7 @@ void fused_moe(torch::Tensor output,
   size_t const blocked_expert_counts_cumsum_size = blocked_expert_counts_size;
   size_t const blocked_row_to_unpermuted_row_size = num_experts_per_node * num_rows * sizeof(int);
   size_t const permuted_data_size = permuted_elems * dtype_size;
+  size_t const permuted_token_final_scales_size = num_moe_inputs * sizeof(float);
 
   int map_offset = 0;
   ws_map["permuted_token_selected_experts"] = std::pair{permuted_token_selected_experts_size, map_offset};  
@@ -74,8 +75,13 @@ void fused_moe(torch::Tensor output,
   map_offset += blocked_expert_counts_cumsum_size;
   ws_map["blocked_row_to_unpermuted_row"] = std::pair{blocked_row_to_unpermuted_row_size, map_offset};
   map_offset += blocked_row_to_unpermuted_row_size;
+  if (map_offset % 256 != 0){
+    map_offset += 256 - (map_offset % 256);
+  }
   ws_map["overlapped_gemm1_gemm2_inputs"] = std::pair{permuted_data_size, map_offset};
   map_offset += permuted_data_size;
+  ws_map["permuted_token_final_scales"] = std::pair{permuted_token_final_scales_size, map_offset};
+  map_offset += permuted_token_final_scales_size;
 
   std::cout << "total workspace size(byte): " << map_offset << std::endl;
 
@@ -92,7 +98,7 @@ void fused_moe(torch::Tensor output,
   auto blocked_expert_counts_cumsum_ = getWsPtr(int{}, "blocked_expert_counts_cumsum");
   auto blocked_row_to_unpermuted_row_ = getWsPtr(int{}, "blocked_row_to_unpermuted_row");
   auto permuted_data_ = getWsPtr(bfloat16{}, "overlapped_gemm1_gemm2_inputs");
-  auto permuted_token_final_scales_ = nullptr;
+  auto permuted_token_final_scales_ = getWsPtr(float{}, "permuted_token_final_scales");
   bool use_per_expert_act_scale = false;
   at::DeviceGuard device_guard(input.device());
   // TODO: fused prologe

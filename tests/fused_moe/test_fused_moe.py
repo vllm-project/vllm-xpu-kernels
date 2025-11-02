@@ -39,10 +39,10 @@ MINI_PYTEST_PARAMS = {
 }
 
 
-# @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
-# @pytest.mark.parametrize("e", NUM_EXPERTS)
-# @pytest.mark.parametrize("topk", TOP_KS)
-# @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_grouped_gemm(m, n, k, e, topk, dtype):
     seed_everything(7)
     num_experts = e
@@ -70,7 +70,6 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
         if cur_token_num == 0:
             continue
         input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :]
-        # print("ref input addr: ", hex(input.data_ptr()))
         weight = input_B[i, :, :]
         expert_output = input @ weight.T
         ref.append(expert_output)
@@ -92,11 +91,11 @@ def ref_fused_moe(x, w13, w2, flat_expert_weights, flat_expert_indices,
     counts = flat_expert_indices.bincount().cpu().numpy()
     tokens_per_expert = counts.cumsum()
     token_idxs = idxs // num_per_tok
+    print("ref offset: ", tokens_per_expert)
     for expert_id, end_idx in enumerate(tokens_per_expert):
         start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
         if start_idx == end_idx:
             continue
-
         exp_token_idxs = token_idxs[start_idx:end_idx]
         expert_tokens = x[exp_token_idxs]
 
@@ -108,7 +107,14 @@ def ref_fused_moe(x, w13, w2, flat_expert_weights, flat_expert_indices,
         gemm1 = expert_tokens @ w1.T
         gate = act_fn(gemm1)
         up = expert_tokens @ w3.T
+        # if True or expert_id == 0:
+        #     print("ref input_A at ", expert_id, " : ", expert_tokens[0,:])
+            # print("ref gemm1 output ", expert_id, " : ", gemm1, gemm1.shape)
+            # print("ref gemm1 output ", expert_id, " : ", gemm1, gemm1.shape)
+
         expert_out = (gate * up) @ w2[expert_id, :, :].T
+        if expert_id == 0:
+            print("ref gemm2 output ", expert_id, " : ", expert_out, expert_out.shape)
         expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
         expert_cache.scatter_reduce_(0,
                                      exp_token_idxs.view(-1, 1).repeat(
@@ -162,26 +168,25 @@ def check_fused_moe(
                            activation="silu",
                            num_experts=e)
     print("fusedmoe out ", output, output.shape)
-    return
 
-    iteration = 1
-    for _ in range(iteration):
-        out = cutlass_fused_moe(hidden_states=a,
-                                w13=w13,
-                                w2=w2,
-                                topk_weights=flat_expert_weights,
-                                topk_ids=flat_expert_indices,
-                                n_experts_per_token=topk,
-                                activation="silu",
-                                num_experts=e)
+    # iteration = 1
+    # for _ in range(iteration):
+    #     out = cutlass_fused_moe(hidden_states=a,
+    #                             w13=w13,
+    #                             w2=w2,
+    #                             topk_weights=flat_expert_weights,
+    #                             topk_ids=flat_expert_indices,
+    #                             n_experts_per_token=topk,
+    #                             activation="silu",
+    #                             num_experts=e)
 
     ref_out = ref_fused_moe(ref_a, w13, w2, flat_expert_weights,
                             flat_expert_indices, topk, "silu", e)
 
     print("ref result", ref_out, ref_out.shape)
-    print("kernel result", out, out.shape)
+    print("kernel result", output, output.shape)
     try:
-        torch.testing.assert_close(out, ref_out, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(output, ref_out, rtol=1e-2, atol=1e-2)
         print("a and b close enough")
     except AssertionError as e:
         print("a and b diffs")
@@ -190,12 +195,12 @@ def check_fused_moe(
 
 
 if __name__ == "__main__":
-    # check_fused_moe(
-    #     m = 64,
-    #     n = 8192,
-    #     k = 5120,
-    #     e = 16,
-    #     topk = 1,
-    #     dtype = torch.bfloat16
-    # )
-    test_grouped_gemm(m=64, n=8192, k=5120, e=16, topk=1, dtype=torch.bfloat16)
+    check_fused_moe(
+        m = 64,
+        n = 8192,
+        k = 5120,
+        e = 16,
+        topk = 1,
+        dtype = torch.bfloat16
+    )
+    # test_grouped_gemm(m=64, n=8192, k=5120, e=16, topk=1, dtype=torch.bfloat16)

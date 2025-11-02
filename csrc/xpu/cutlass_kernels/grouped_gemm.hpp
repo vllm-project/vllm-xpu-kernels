@@ -14,21 +14,19 @@ namespace gpu::cutlass_kernel {
 
 namespace grouped_gemm {
 void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_D,
-                    void* ptr_alpha, void* ptr_beta, void* offset, void* expert_first_token_offset, int64_t N,
+                    void* expert_token_count, void* expert_first_token_offset, int64_t N,
                     int64_t K, int64_t groups);
 }
 
 /* gemm2(group_A, w2, output, offset) */
 
 at::Tensor grouped_gemm_func(at::Tensor& ptr_A, at::Tensor& ptr_B,
-                             at::Tensor& ptr_D, at::Tensor& ptr_alpha,
-                             at::Tensor& ptr_beta, at::Tensor& offset, at::Tensor& expert_first_token_offset,
+                             at::Tensor& ptr_D, at::Tensor& expert_token_count, at::Tensor& expert_first_token_offset,
                              int64_t N, int64_t K, int64_t groups) {
   auto& dpcpp_queue =
       at::xpu::getCurrentXPUStream(ptr_A.device().index()).queue();
   grouped_gemm::kernel_functor(dpcpp_queue, ptr_A.data_ptr(), ptr_B.data_ptr(),
-                               ptr_D.data_ptr(), ptr_alpha.data_ptr(),
-                               ptr_beta.data_ptr(), offset.data_ptr(), expert_first_token_offset.data_ptr(), N, K,
+                               ptr_D.data_ptr(), expert_token_count.data_ptr(), expert_first_token_offset.data_ptr(), N, K,
                                groups);
   return ptr_D;
 }

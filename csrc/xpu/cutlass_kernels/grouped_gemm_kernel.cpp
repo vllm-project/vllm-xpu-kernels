@@ -280,7 +280,6 @@ struct GroupedGemmRunner {
   typename Gemm::Arguments args_from_options(
       const Options& options, const cutlass::KernelHardwareInfo& hw_info, int64_t const* expert_first_token_offset,
       const ElementA* ptr_A, const ElementB* ptr_B, ElementOutput* ptr_D,
-      ElementAccumulator** ptr_alpha, ElementAccumulator** ptr_beta,
       bool host_problem_shapes_available = true) {
     typename Gemm::Arguments arguments;
     decltype(arguments.epilogue.thread) fusion_args;
@@ -327,8 +326,7 @@ struct GroupedGemmRunner {
                       const cutlass::KernelHardwareInfo& hw_info,
                       int64_t const* expert_first_token_offset,
                       const ElementA* ptr_A, const ElementB* ptr_B,
-                      ElementOutput* ptr_D, ElementAccumulator** ptr_alpha,
-                      ElementAccumulator** ptr_beta) {
+                      ElementOutput* ptr_D) {
     if (debug) {
       std::cout << "enter run" << std::endl;
     }
@@ -337,8 +335,7 @@ struct GroupedGemmRunner {
     initialize(options);
     Gemm gemm_op;
 
-    auto arguments = args_from_options(options, hw_info, expert_first_token_offset, ptr_A, ptr_B, ptr_D,
-                                       ptr_alpha, ptr_beta, true);
+    auto arguments = args_from_options(options, hw_info, expert_first_token_offset, ptr_A, ptr_B, ptr_D);
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
@@ -386,14 +383,14 @@ struct GroupedGemmRunner {
 };
 
 void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_D,
-                    void* ptr_alpha, void* ptr_beta, void* offset, void* expert_first_token_offset,  int64_t N,
+                    void* expert_token_count, void* expert_first_token_offset,  int64_t N,
                     int64_t K, int64_t groups) {
   //
   // Run examples
   //
   syclcompat::set_default_queue(stream);
 
-  auto offset_ptr = reinterpret_cast<int64_t*>(offset);
+  auto offset_ptr = reinterpret_cast<int64_t*>(expert_token_count);
   Options options(offset_ptr, N, K, groups);
   // The KernelHardwareInfo struct holds the number of EUs on the GPU with a
   // given device ID. This information is used by the underlying kernel.
@@ -466,9 +463,7 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_D,
              reinterpret_cast<const int64_t*>(expert_first_token_offset),
              reinterpret_cast<const ElementA*>(ptr_A),
              reinterpret_cast<const ElementB*>(ptr_B),
-             reinterpret_cast<ElementOutput*>(ptr_D),
-             reinterpret_cast<ElementAccumulator**>(ptr_alpha),
-             reinterpret_cast<ElementAccumulator**>(ptr_beta));
+             reinterpret_cast<ElementOutput*>(ptr_D));
 }
 
 }  // namespace grouped_gemm
