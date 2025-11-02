@@ -47,11 +47,12 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
     seed_everything(7)
     num_experts = e
     token_per_group = random_partition(e, m * topk)
+    assert(len(token_per_group) == e)
     # input
     input_A = torch.randn((sum(token_per_group), k),
                           dtype=dtype,
                           device=DEVICE).contiguous()
-    ref_A = input_A.clone()
+    ref_A = input_A
     # weight
     input_B = torch.randn((num_experts, n, k), dtype=dtype, device=DEVICE)
     input_B = input_B.transpose(-1, -2).contiguous().transpose(-1, -2)
@@ -69,6 +70,7 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
         if cur_token_num == 0:
             continue
         input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :]
+        # print("ref input addr: ", hex(input.data_ptr()))
         weight = input_B[i, :, :]
         expert_output = input @ weight.T
         ref.append(expert_output)

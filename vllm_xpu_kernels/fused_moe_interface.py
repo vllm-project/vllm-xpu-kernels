@@ -26,15 +26,15 @@ def prepare_gemm_args(n, k, offset, A, B, D, alpha, beta, e):
         ptr_beta = torch.empty(e * 8, dtype=torch.uint8,
                                device=device).contiguous()
         # gemm_args["ptr_A"] = ptr_A
-        gemm_args["ptr_B"] = ptr_B
-        gemm_args["ptr_D"] = ptr_D
+        # gemm_args["ptr_B"] = ptr_B
+        # gemm_args["ptr_D"] = ptr_D
         gemm_args["ptr_alpha"] = ptr_alpha
         gemm_args["ptr_beta"] = ptr_beta
         prepare_gemm_args.gemm_args = gemm_args
 
     # ptr_A = prepare_gemm_args.gemm_args["ptr_A"]
-    ptr_B = prepare_gemm_args.gemm_args["ptr_B"]
-    ptr_D = prepare_gemm_args.gemm_args["ptr_D"]
+    # ptr_B = prepare_gemm_args.gemm_args["ptr_B"]
+    # ptr_D = prepare_gemm_args.gemm_args["ptr_D"]
     ptr_alpha = prepare_gemm_args.gemm_args["ptr_alpha"]
     ptr_beta = prepare_gemm_args.gemm_args["ptr_beta"]
     total_elements_A = 0
@@ -56,8 +56,8 @@ def prepare_gemm_args(n, k, offset, A, B, D, alpha, beta, e):
         if m != 0:
             # problem_sizes.extend([m, n, k])
             # process_data_ptr(A, total_elements_A, ptr_A, 2, groups)
-            process_data_ptr(B, expert_i, ptr_B, 3, groups)
-            process_data_ptr(D, total_elements_D, ptr_D, 2, groups)
+            # process_data_ptr(B, expert_i, ptr_B, 3, groups)
+            # process_data_ptr(D, total_elements_D, ptr_D, 2, groups)
             process_data_ptr(alpha, groups, ptr_alpha, 1, groups)
             process_data_ptr(beta, groups, ptr_beta, 1, groups)
             total_elements_A += m
@@ -74,13 +74,26 @@ def cutlass_grouped_gemm(input_A, input_B, output, offset, n, k, num_experts):
     gemm_args = prepare_gemm_args(n, k, offset, input_A, input_B, output,
                                   alpha, beta, num_experts)
     offset_ = torch.tensor(offset, dtype=torch.int64, device="cpu")
+    # print("input_A: ", input_A.shape, hex(input_A.data_ptr()))
+    print("offset: ", offset_)
     def exclusive_prefix_sum(arr):
         prefix = [0]
-        for x in arr:
+        for i, x in enumerate(arr):
+            # if x == 0:
+            #     continue
             prefix.append(prefix[-1] + x)
         return prefix
     expert_offset = torch.tensor(exclusive_prefix_sum(offset), dtype=torch.int64, device="xpu")
-    torch.ops._xpu_C.cutlass_grouped_gemm(ptr_A=input_A, expert_first_token_offset=expert_offset, offset=offset_, N=n, K=k, **gemm_args)
+    # print("offset cumsum:", expert_offset)
+    # debug = True
+    # if debug:
+    #     for start in exclusive_prefix_sum(offset):
+    #         if start < input_A.shape[0]:
+    #             # print("offset: ", start, " 0-10:", input_A.view(-1)[start:start+10])
+    #             print("offset: ", start, " addr:", hex(input_A.view(-1)[start*input_A.shape[1]].data_ptr()))
+    # print("log: ", expert_offset, expert_offset.numel())
+    # assert(expert_offset.numel() == num_experts + 1)
+    torch.ops._xpu_C.cutlass_grouped_gemm(ptr_A=input_A, ptr_B=input_B, ptr_D=output, expert_first_token_offset=expert_offset, offset=offset_, N=n, K=k, **gemm_args)
 
 
 def cutlass_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
