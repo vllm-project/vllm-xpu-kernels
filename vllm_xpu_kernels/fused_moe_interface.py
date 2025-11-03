@@ -360,30 +360,35 @@ def xpu_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
 
     print("ker gemm2 output:", gemm2_output, gemm2_output.shape)
 
-    # # apply expert weights
+    # apply expert weights
     # for permuted_row, expanded_token in enumerate(permuted_row_to_unpermuted_row):
     #     origin_idx = expanded_token.item() % num_rows
     #     output[origin_idx, :] += gemm2_output[permuted_row, :] * permuted_token_final_scales[permuted_row]
 
 
     # map token to experts
-    topk_ids = topk_ids.view(-1)
+    # topk_ids = topk_ids.view(-1)
     topk_weights = topk_weights.view(-1,1)
-    idxs = topk_ids.argsort()
-    counts = topk_ids.to(torch.long).bincount().cpu().numpy()
-    tokens_per_expert = counts.cumsum()
-    num_per_tok = n_experts_per_token
-    token_idxs = idxs // num_per_tok
+    # idxs = topk_ids.argsort()
+    # counts = topk_ids.to(torch.long).bincount().cpu().numpy()
+    # tokens_per_expert = counts.cumsum()
+    # num_per_tok = n_experts_per_token
+    # token_idxs = idxs // num_per_tok
     expert_cache = output
+
+    # print("ref idxs:", idxs)
+    # print("ref token_idxs:", token_idxs)
+    # print("permuted_row_to_unpermuted_row:", permuted_row_to_unpermuted_row, permuted_row_to_unpermuted_row.shape)
+    # print("permuted_token_final_scales:", permuted_token_final_scales, permuted_token_final_scales.shape)
     # apply scores
-    for expert_id, end_idx in enumerate(tokens_per_expert):
-        start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
+    for expert_id, end_idx in enumerate(expert_first_token_offset):
+        start_idx = 0 if expert_id == 0 else expert_first_token_offset[expert_id - 1]
         if start_idx == end_idx:
             continue
 
-        exp_token_idxs = token_idxs[start_idx:end_idx]
+        exp_token_idxs = permuted_row_to_unpermuted_row[start_idx:end_idx] % num_rows
         expert_out = gemm2_output[start_idx:end_idx]
-        expert_out.mul_(topk_weights[idxs[start_idx:end_idx]])
+        expert_out.mul_(topk_weights[permuted_row_to_unpermuted_row[start_idx:end_idx] % num_rows])
         expert_cache.scatter_reduce_(0,
                                      exp_token_idxs.view(-1, 1).repeat(
                                          1, hidden_size),

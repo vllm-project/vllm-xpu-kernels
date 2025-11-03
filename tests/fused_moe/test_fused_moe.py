@@ -107,14 +107,8 @@ def ref_fused_moe(x, w13, w2, flat_expert_weights, flat_expert_indices,
         gemm1 = expert_tokens @ w1.T
         gate = act_fn(gemm1)
         up = expert_tokens @ w3.T
-        # if True or expert_id == 0:
-        #     print("ref input_A at ", expert_id, " : ", expert_tokens[0,:])
-            # print("ref gemm1 output ", expert_id, " : ", gemm1, gemm1.shape)
-            # print("ref gemm1 output ", expert_id, " : ", gemm1, gemm1.shape)
 
         expert_out = (gate * up) @ w2[expert_id, :, :].T
-        if expert_id == 0:
-            print("ref gemm2 output ", expert_id, " : ", expert_out, expert_out.shape)
         expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
         expert_cache.scatter_reduce_(0,
                                      exp_token_idxs.view(-1, 1).repeat(
@@ -148,13 +142,6 @@ def check_fused_moe(
                                                dim=-1,
                                                sorted=False)
 
-    if verbose:
-        print("num tokens: ", m)
-        print("num experts: ", e)
-        print("token per expert: ", topk)
-        print("expert_indices: ", expert_indices.view(2,32), expert_indices.shape, expert_indices.dtype)
-        # print("expert_scores: ", expert_scores, expert_scores.shape)
-
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_scores.view(-1, 1)
 
@@ -169,17 +156,6 @@ def check_fused_moe(
                            num_experts=e)
     print("fusedmoe out ", output, output.shape)
 
-    # iteration = 1
-    # for _ in range(iteration):
-    #     out = cutlass_fused_moe(hidden_states=a,
-    #                             w13=w13,
-    #                             w2=w2,
-    #                             topk_weights=flat_expert_weights,
-    #                             topk_ids=flat_expert_indices,
-    #                             n_experts_per_token=topk,
-    #                             activation="silu",
-    #                             num_experts=e)
-
     ref_out = ref_fused_moe(ref_a, w13, w2, flat_expert_weights,
                             flat_expert_indices, topk, "silu", e)
 
@@ -192,15 +168,3 @@ def check_fused_moe(
         print("a and b diffs")
         print(e)
 
-
-
-if __name__ == "__main__":
-    check_fused_moe(
-        m = 64,
-        n = 8192,
-        k = 5120,
-        e = 16,
-        topk = 1,
-        dtype = torch.bfloat16
-    )
-    # test_grouped_gemm(m=64, n=8192, k=5120, e=16, topk=1, dtype=torch.bfloat16)
