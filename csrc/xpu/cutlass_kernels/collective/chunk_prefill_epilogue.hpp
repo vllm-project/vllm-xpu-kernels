@@ -1,5 +1,5 @@
 /***************************************************************************************************
- * Copyright (c) 2024 - 2025 Codeplay Software Ltd. All rights reserved.
+ * Copyright (C) 2025 Intel Corporation, All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Redistribution and use in source and binary forms, with or without
@@ -29,9 +29,6 @@
  *POSSIBILITY OF SUCH DAMAGE.
  *
  **************************************************************************************************/
-/*! \file
-  \brief Functor performing elementwise operations used by epilogues.
-*/
 
 #pragma once
 
@@ -42,333 +39,278 @@
 #include "cutlass/epilogue/collective/detail.hpp"
 #include "cutlass/detail/layout.hpp"
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
-namespace cutlass {
-namespace flash_attention {
-namespace collective {
+#include "cute/algorithm/subgroup_algorithms.hpp"
+#include "cute/algorithm/tensor_algorithms.hpp"
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
+#include "flash_attention_v2/collective/copy_block_slm.hpp"
 
-template <
-    bool Sink_,
-    class DispatchPolicy,
-    class MMAOperation_,
-    class TileShapeOutput_,
-    class SubgroupLayout_,
-    class... Args>
-class FlashChunkPrefillEpilogue {
-  static_assert(
-      cutlass::detail::dependent_false<DispatchPolicy>,
-      "Could not find an epilogue specialization.");
-};
+namespace cutlass::fmha::collective {
 
-template <
-    bool Sink_,
-    class MMAOperation_,
-    class TileShapeOutput_,
-    class SubgroupLayout_,
-    class ElementCompute_,
-    class ElementO_,
-    class StrideO_,
-    class ElementLSE_,
-    class CopyOpO_,
-    class ElementSink_>
-class FlashChunkPrefillEpilogue<
-    Sink_,
-    epilogue::IntelXeXMX16,
-    MMAOperation_,
-    TileShapeOutput_,
-    SubgroupLayout_,
-    ElementCompute_,
-    ElementO_,
-    StrideO_,
-    ElementLSE_,
-    CopyOpO_,
-    ElementSink_> {
+using namespace cute;
+
+template <class CollectiveMainloop,  // Attention mainloop
+          class TileShapeO_,  // Shape of output tile, may be larger than P*V
+                              // GEMM
+          class TensorO_,     // 2D slice of global output tensor
+          class TiledCopyO_ = void>  // Optional TiledCopy for loading O
+class FMHAFwdEpilogue {
  public:
   //
   // Type Aliases
   //
-  using DispatchPolicy = epilogue::IntelXeXMX16;
-  using ElementO = ElementO_;
-  using StrideO = StrideO_;
-  using ElementLSE = ElementLSE_;
-  using CopyOpO = CopyOpO_;
-  using SubgroupLayout = SubgroupLayout_;
-  using TileShapeOutput = TileShapeOutput_;
-  using TiledMmaOutput = typename TiledMMAHelper<
-      MMA_Atom<MMAOperation_>,
-      Layout<TileShapeOutput>,
-      SubgroupLayout>::TiledMMA;
-  using GmemTiledCopyO = CopyOpO;
-  using ElementOutput = ElementO_;
-  using ElementCompute = ElementCompute_;
-  using ElementAccumulator = ElementCompute_;
-  using SubgroupTileShape =
-      decltype(cute::shape_div(TileShapeOutput{}, (SubgroupLayout{}.shape())));
+  using TiledMMAPV = typename CollectiveMainloop::TiledMMAPV;
+  using TileShapePV = decltype(TiledMMAPV{}.tile_mnk());
+  using TileShapeO = TileShapeO_;
+  using SGPerWG = decltype(product(
+      take<1, 4>(shape(typename TiledMMAPV::ThrLayoutVMNK{}))));
 
-  // softmax sink
-  static constexpr bool Sink = Sink_;
-  using ElementSink = ElementSink_;
+  using TensorO = TensorO_;
+  using TensorO2D =
+      decltype(TensorO_{}(append<rank_v<TensorO_>>(make_coord(_, _), 0)));
+  using ElementO = typename TensorO_::value_type;
 
-  static constexpr int SubgroupSize = DispatchPolicy::SubgroupSize;
+  using FragA = typename CollectiveMainloop::FragA;
+  using FragARow = typename CollectiveMainloop::FragARow;
+  using ElementA = typename FragA::value_type;
 
-  static_assert(
-      cute::rank(TileShapeOutput{}) == 3,
-      "TileShapeOutput must be rank-3: [CTA_M_QO, CTA_N_VO, CTA_K_PV]");
-  static_assert(
-      cute::rank(StrideO{}) == 3,
-      "StrideO must be rank-3: [seq_len_qo, head_size_vo, batch * num_heads]");
+  // Split k-reduced tiles between participating subgroups.
+  // Assumption: the A tile is contiguous.
+  using ReduceK = decltype(size<3>(typename TiledMMAPV::ThrLayoutVMNK{}));
 
-  using CopyThreadShape = Shape<_1, Int<SubgroupSize>>;
+  static auto reduce_sg_v_helper() {
+    constexpr auto v_total_sg = get<1>(SGTileShapeA{}) / intel::_SGSize{};
+    constexpr auto v_avail_sg = ReduceK{} / ReduceSGQ{};
+    return Int<(v_total_sg > v_avail_sg) ? cute::gcd(v_total_sg, v_avail_sg)
+                                         : v_total_sg>{};
+  }
 
-  using traits_store_O = Copy_Traits<GmemTiledCopyO, StrideO>;
-  using atom_load_O = Copy_Atom<traits_store_O, ElementO>;
-  using val_layout_load_O = decltype(make_layout(
-      shape_div(typename traits_store_O::BlockShape{}, CopyThreadShape{})));
-  using XE_Copy_O = decltype(make_tiled_copy(
-      atom_load_O{}, Layout<CopyThreadShape>{}, val_layout_load_O{}));
+  using SGTileShapeA = decltype(atuple_coshape(FragA{}.tv_layout()));
+  using ReduceSGQ = decltype(cute::gcd(get<0>(SGTileShapeA{}), ReduceK{}));
+  using ReduceSGV = decltype(reduce_sg_v_helper());
+  using ReduceSGLayout =
+      decltype(make_identity_layout(Shape<ReduceSGQ, ReduceSGV>{}));
+
+  using SGTileShapeO =
+      decltype(shape_div(take<0, 2>(SGTileShapeA{}), shape(ReduceSGLayout{})));
+
+  using ReduceFragA = decltype(make_subgroup_tensor<ElementA>(
+      make_layout(select<1, 0>(SGTileShapeO{}), Stride<E<1>, E<0>>{})));
+  using ReduceFragARow = decltype(reduce<1>(ReduceFragA{}, sycl::plus<void>{}));
+
+  static auto default_tiled_copy_O_helper() {
+    if constexpr (ReduceK{} == _1{})
+      return make_block_2d_copy_C(TiledMMAPV{}, TensorO2D{});
+    else
+      return make_block_2d_copy_C_subtiled(TiledMMAPV{},
+                                           ReduceFragA{}.tv_layout(),
+                                           ReduceSGLayout{}, TensorO2D{});
+  }
+
+  using DefaultTiledCopyO = decltype(default_tiled_copy_O_helper());
+  using TiledCopyO =
+      conditional_t<is_void_v<TiledCopyO_>, DefaultTiledCopyO, TiledCopyO_>;
+
+  // Stateless design -- no arguments or parameters.
+  struct Arguments {};
+  struct Params {};
+
+  // Shared memory storage
+  // Note sum/max tiles are padded to 16 elements, due to limitations in CuTe
+  // block load infrastructure.
+  using AlignedSGTileA_Q =
+      C<((size<0>(SGTileShapeA{}) + intel::sg_size - 1) / intel::sg_size) *
+        intel::sg_size>;
+
+  struct SharedStorageNone {};
+  struct SharedStorageReduceK {
+    cute::array<ElementA, size(SGTileShapeA{}) * SGPerWG{}> a_data;
+    cute::array<ElementA, AlignedSGTileA_Q{} * SGPerWG{}> a_sum_data,
+        a_max_data;
+  };
+
+  using SharedStorage = conditional_t<(ReduceK{} > _1{}), SharedStorageReduceK,
+                                      SharedStorageNone>;
 
  private:
-  constexpr static bool is_destination_supported =
-      not cute::is_void_v<ElementO>;
+  SharedStorage& shared;
 
  public:
-  using EmptyType = cute::tuple<>;
-
-  struct TensorStorageImpl : cute::tuple<EmptyType, EmptyType> {};
-
-  struct SharedStorage {
-    using TensorStorage = TensorStorageImpl;
-
-    TensorStorage tensors;
-  };
-  using TensorStorage = typename SharedStorage::TensorStorage;
-
-  // Host side epilogue arguments
-  struct Arguments {
-    ElementO const* ptr_O;
-    StrideO dO;
-    ElementSink const* ptr_sink;
-  };
-
-  // Device side epilogue params
-  struct Params {
-    XE_Copy_O xe_store_o;
-    ElementSink const* ptr_sink;
-  };
-
-  //
-  // Methods
-  //
-  template <typename To_type, typename Engine, typename Layout>
-  CUTLASS_DEVICE auto convert_type(Tensor<Engine, Layout> const& tensor) {
-    using From_type = typename Engine::value_type;
-    constexpr int numel = decltype(size(tensor))::value;
-    cutlass::NumericArrayConverter<To_type, From_type, numel> convert_op;
-    auto frag =
-        convert_op(*reinterpret_cast<const cutlass::Array<From_type, numel>*>(
-            tensor.data()));
-    return make_tensor(make_rmem_ptr<To_type>(&frag), tensor.layout());
+  static constexpr Params to_underlying_arguments(Arguments const& args,
+                                                  void* /* workspace */) {
+    return {};
   }
 
-  template <class ProblemShape>
-  static constexpr Params to_underlying_arguments(
-      ProblemShape const& problem_shape,
-      Arguments const& args,
-      [[maybe_unused]] void* workspace) {
-    auto
-        [batch,
-         num_heads_q,
-         num_heads_kv,
-         seq_len_qo,
-         seq_len_kv_cache,
-         head_size_qk,
-         head_size_vo] = problem_shape;
-    auto q_group_size = num_heads_q / num_heads_kv;
-    auto q_group_num = num_heads_q / q_group_size;
-    auto tensorO = make_tensor(
-        make_gmem_ptr(static_cast<ElementO const*>(args.ptr_O)),
-        make_layout(
-            make_shape(
-                seq_len_qo * q_group_size, head_size_vo, batch * q_group_num),
-            args.dO));
-    XE_Copy_O xe_store_o{XE_Copy_O{}.with(tensorO)};
-    return {xe_store_o, args.ptr_sink};
-  }
-
-  template <class ProblemShape>
-  static size_t
-  get_workspace_size(ProblemShape const& problem_shape, Arguments const& args) {
-    return 0;
-  }
-
-  template <class ProblemShape>
-  static cutlass::Status initialize_workspace(
-      ProblemShape const& problem_shape,
-      Arguments const& args,
-      void* workspace,
-      cudaStream_t stream,
-      CudaHostAdapter* cuda_adapter = nullptr) {
-    return Status::kSuccess;
-  }
-
-  template <class ProblemShape>
-  CUTLASS_HOST_DEVICE static bool can_implement(
-      ProblemShape const& problem_shape,
-      [[maybe_unused]] Arguments const& args) {
+  CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
     return true;
   }
 
   CUTLASS_HOST_DEVICE
-  FlashChunkPrefillEpilogue(Params const& params_, TensorStorage const&)
-      : params(params_) {}
+  FMHAFwdEpilogue(Params const&, SharedStorage& shared_) : shared(shared_) {}
 
-  template <
-      class ProblemShape,
-      class SequenceLengthShape,
-      class TileCoord,
-      class FragOut,
-      class FragMax,
-      class FragSum,
-      class FragSink>
+  template <typename QVCoord>
   CUTLASS_DEVICE void operator()(
-      ProblemShape problem_shape,
-      SequenceLengthShape sequence_length_shape,
-      TileCoord tile_coord,
-      FragOut& out,
-      FragMax const& max,
-      FragSum& sum,
-      [[maybe_unused]] FragSink const& sink) {
+      TensorO2D const& O,  // Global O tensor: (q,v)
+      FragA& tArA,         // O accumulator:   (q,v)
+      FragARow& tA_max,    // Softmax row-wise max accumulator
+      FragARow& tA_sum,    // Softmax row-wise sum accumulator
+      QVCoord blk_qv,      // WG tile indices: (q,v)
+      int thr_id) {        // Work-item ID
+
     using namespace cute;
+    using ElementA = typename FragA::element_type;
 
-    static constexpr bool is_var_len =
-        cutlass::fmha::collective::is_variable_length_v<
-            tuple_element_t<2, ProblemShape>>;
+    // Reduce k-blocks of A and A_sum across WG, if needed.
+    auto [rA, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
 
-    using FragOutLayout = typename FragOut::layout_type;
+    /* Some subgroups may not have any work to do; if so, quit early. */
+    if (!active) return;
 
-    constexpr int Vec = shape<0>(FragOutLayout{});
-    constexpr int FragsM = shape<1>(FragOutLayout{});
-    constexpr int FragsN = size(select<2, 3>(shape(FragOutLayout{})));
-
-    auto sg = syclcompat::get_nd_item<1>().get_sub_group();
-    auto out_reg = make_tensor(
-        static_cast<decltype(out)&&>(out).data(),
-        Shape<Int<Vec>, Int<FragsM>, Int<FragsN>>{});
+    /* Complete softmax, dividing out sums. */
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < rA_sum.size(); i++) rA_sum(i) = ElementA(1) / rA_sum(i);
 
     CUTLASS_PRAGMA_UNROLL
-    for (int y = 0; y < FragsM; y++) {
-      CUTLASS_PRAGMA_UNROLL
-      for (int x = 0; x < Vec; x++) {
-        int index = y * Vec + x;
-        auto cur_sum = reduce_over_group(sg, sum(index), sycl::plus<>());
+    for (int i = 0; i < rA.size(); i++) rA(i) *= broadcast<0>(rA_sum, rA, i);
 
-        if constexpr (Sink) {
-          constexpr double kLog2e = 1.4426950408889634074;
-          auto max_scale_bcast = group_broadcast(sg, max, index);
-          cur_sum += sycl::native::exp2(
-              static_cast<ElementAccumulator>(sink * kLog2e) - max_scale_bcast);
+    /* Tile output */
+    Tensor cO = make_identity_tensor(O.shape());       // (q,v)
+    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);  // (q,v)
+
+    /* Prepare slices */
+    TiledCopyO copy_o{O};
+    auto thr_copy_o = copy_o.get_slice(thr_id);
+
+    auto tOrO = thr_copy_o.partition_sg_fragment_S(gO);
+    auto tOgO = thr_copy_o.partition_D(gO);
+
+    /* Reorder tile and write out */
+    reorder(rA, tOrO);
+    copy(copy_o, tOrO, tOgO);
+  }
+
+  // Reduce k-blocks of A and A_sum across WG, if needed.
+  // Note that each k block has its own scale factor based on A_max,
+  //   so A/A_sum contributions need to be rescaled to match.
+  template <typename FragA, typename FragARow>
+  CUTLASS_DEVICE decltype(auto) reduce_A(
+      FragA& tArA,       // O accumulator:   (q,v)
+      FragARow& tA_max,  // Softmax row-wise max accumulator
+      FragARow& tA_sum,  // Softmax row-wise sum accumulator
+      int thr_id) {      // Work-item ID
+
+    using namespace sycl::ext::oneapi::this_work_item;
+
+    if constexpr (ReduceK{} == _1{}) {
+      return std::make_tuple(tArA, tA_sum, true);
+    } else {
+      /* Identify A tile ID and k block for this subgroup. */
+      auto thr_vak = group<1, 3>(TiledMMAPV{}.get_thr_layout_vmnk())
+                         .get_flat_coord(assert_uniform(thr_id));
+      auto a_tile = get<1>(thr_vak);
+      auto k_blk = get<2>(thr_vak);
+
+      /* Set up SLM tensors and partition A tiles among participating subgroups
+       */
+      auto shape_A =
+          append(append(SGTileShapeA{}, ReduceK{}), SGPerWG{} / ReduceK{});
+      auto shape_A_row =
+          make_shape(get<0>(SGTileShapeO{}), shape(ReduceSGLayout{}), ReduceK{},
+                     SGPerWG{} / ReduceK{});
+
+      /* Physical layouts, with subtile modes broken out */
+      auto sA_layout = group<2, 4>(
+          flat_divide(make_ordered_layout(shape_A, Step<_1, _0, _2, _3>{}),
+                      SGTileShapeO{}));
+      auto sA_row_stride =
+          make_stride(_1{}, make_stride(get<0>(shape_A_row), _0{}),
+                      AlignedSGTileA_Q{}, AlignedSGTileA_Q{} * ReduceK{});
+      auto sA_row_layout = make_layout(shape_A_row, sA_row_stride);
+
+      /* Coordinate layouts, with subtile modes broken out */
+      auto basis2 = make_basis_like(SGTileShapeO{});
+      auto sA_coords = make_layout(
+          append(SGTileShapeO{}, shape(ReduceSGLayout{})),
+          append(basis2, product_each(zip(SGTileShapeO{}, basis2))));
+
+      auto sA = make_tensor(make_smem_ptr<ElementA>(&shared.a_data),
+                            sA_layout);  // (q,v,rblk_dst,rblk_src,a_tile)
+      auto sA_max = make_tensor(make_smem_ptr<ElementA>(&shared.a_max_data),
+                                sA_row_layout);  // (q,rblk_dst,rblk_src,a_tile)
+      auto sA_sum = make_tensor(make_smem_ptr<ElementA>(&shared.a_sum_data),
+                                sA_row_layout);  // (q,rblk_dst,rblk_src,a_tile)
+
+      /* Write my contributions to SLM. */
+      copy_block_r2s(tA_max, sA_max(_, _, k_blk, a_tile));
+      barrier_arrive(ScopeWorkgroup, SemanticsRelease | SemanticsWGMemory);
+      copy_block_r2s(tA_sum, sA_sum(_, _, k_blk, a_tile));
+      copy_block_r2s(tArA, sA(_, _, _, k_blk, a_tile), sA_coords);
+
+      bool active = (k_blk < size(ReduceSGLayout{})) ||
+                    (ReduceK{} == size(ReduceSGLayout{}));  // help compiler out
+
+      /* Wait for maxima to be available, signal other data available */
+      barrier_wait(ScopeWorkgroup, SemanticsAcquire | SemanticsWGMemory);
+      barrier_arrive(ScopeWorkgroup, SemanticsRelease | SemanticsWGMemory);
+
+      ReduceFragA rA;
+      ReduceFragARow rA_sum, rA_max, rA_kmax[ReduceK{}];
+
+      if (active) {
+        /* Read A_max back from SLM and reduce. */
+        CUTLASS_PRAGMA_UNROLL
+        for (int kr = 0; kr < ReduceK{}; kr++) {
+          copy_block_s2r(sA_max(_, k_blk, kr, a_tile), rA_kmax[kr]);
         }
 
-        auto cur_scale = (cur_sum == 0.f || cur_sum != cur_sum)
-                             ? 1.0f
-                             : sycl::native::recip(cur_sum);
-        CUTLASS_PRAGMA_UNROLL
-        for (int z = 0; z < FragsN; z++) {
-          out_reg(x, y, z) *= cur_scale;
+        rA_max = rA_kmax[0];
+        for (int kr = 1; kr < ReduceK{}; kr++)
+          cute::transform(rA_max, rA_kmax[kr], rA_max, cute::max_fn{});
+
+        /* Calculate scale factors for aligning per-block maxima. */
+        for (int kr = 0; kr < ReduceK{}; kr++) {
+          cute::transform(rA_max, rA_kmax[kr], rA_kmax[kr],
+                          [](auto gmax, auto kmax) {
+                            return sycl::native::exp2(kmax - gmax);
+                          });
         }
       }
+
+      /* Wait for A/A_sum data to be available */
+      barrier_wait(ScopeWorkgroup, SemanticsAcquire | SemanticsWGMemory);
+
+      if (active) {
+        /* Read A/A_sum back from SLM, align scaling to new maxima, and reduce.
+         */
+        clear(rA_sum);
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int kr = 0; kr < ReduceK{}; kr++) {
+          ReduceFragARow rA_sum_read;
+          copy_block_s2r(sA_sum(_, k_blk, kr, a_tile), rA_sum_read);
+
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < rA_sum_read.size(); i++) {
+            rA_sum(i) += rA_sum_read(i) * rA_kmax[kr](i);
+          }
+        }
+
+        clear(rA);
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int kr = 0; kr < ReduceK{}; kr++) {
+          ReduceFragA rA_read;
+          copy_block_s2r(sA(_, _, k_blk, kr, a_tile), sA_coords(_, _, 0),
+                         rA_read);
+
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < rA_read.size(); i++) {
+            rA(i) += rA_read(i) * broadcast<0>(rA_kmax[kr], rA, i);
+          }
+        }
+      }
+      return std::make_tuple(rA, rA_sum, active);
     }
-
-    // Indexing variables
-    auto [batch, num_heads_q, num_heads_kv, head_size_vo] =
-        select<0, 1, 2, 6>(problem_shape);
-    auto [seq_len_qo] = select<0>(sequence_length_shape);
-    // Represent the full output tensor
-    auto q_group_size = num_heads_q / num_heads_kv;
-    auto q_group_nums = num_heads_q / q_group_size;
-    // Tensor mO_mnl = cute::get_xe_tensor(make_shape(seq_len_qo * q_group_size
-    // , head_size_vo, (is_var_len ? 1: batch) * q_group_nums));
-    Tensor mO_mnl =
-        cute::get_xe_tensor(make_shape(seq_len_qo, head_size_vo, 1));
-
-    auto [m_coord, n_coord, k_coord, l_coord] = tile_coord;
-    // Tile the output tensor per WG
-    Tensor g_wg_O = local_tile(
-        mO_mnl,
-        select<0, 1>(TileShapeOutput{}),
-        make_coord(m_coord, n_coord, 0));  // (BLK_M,BLK_N,m,n,l)
-    static constexpr auto ATOM_N =
-        get<2>(typename TiledMmaOutput::ThrLayoutVMNK{}.shape());
-    auto m_sg = get_sub_group_id() / ATOM_N;
-    auto n_sg = get_sub_group_id() % ATOM_N;
-    // Tile the output tensor per SG
-    Tensor gO = local_tile(
-        g_wg_O,
-        SubgroupTileShape{},
-        make_coord(m_sg, n_sg, _),
-        Step<_1, _1, X>{});  // (BLK_M,BLK_N,m,n,l)
-    auto thread_xe_store_o = params.xe_store_o.get_thread_slice(ThreadIdxX());
-    Tensor tOgO = thread_xe_store_o.partition_D(gO);
-
-    Tensor final_out_reg = make_fragment_like<ElementOutput>(out_reg);
-    // iff ElementOutput == ElementAccumulator, then convert_type doesn't do the
-    // right conversion so we call copy() which internally performs a
-    // static_cast op on the data. for ElementOutput == bf16 | fp16,
-    // convert_type calls relevant NumericConverter specialization.
-    if constexpr (cute::is_same_v<ElementOutput, ElementCompute>) {
-      copy(out_reg, final_out_reg);
-    } else {
-      Tensor temp = convert_type<ElementOutput>(out_reg);
-      copy(temp, final_out_reg);
-    }
-    copy(params.xe_store_o, final_out_reg, tOgO);
   }
-
-  // SequenceLengthShapeType = Shape<int, int, int>
-  // For Fixed Sequence Length, ProblemShapeType = Shape<int, int, int, int,
-  // int, int, int, int> For Variable Sequence Length, ProblemShapeType =
-  // Shape<int, int, int, VariableSeqlen, VariableSeqlen, VariableSeqlen, int,
-  // int>
-  template <bool VarLen, class ProblemShapeType, class SequenceLengthShapeType>
-  CUTLASS_DEVICE static constexpr Params get_updated_copies(
-      Params const& params,
-      ProblemShapeType const& problem_shape,
-      SequenceLengthShapeType const& sequence_length_shape,
-      int const& l_coord,
-      int const& q_head_coord) {
-    auto [num_heads_q, num_heads_kv, head_size_vo] =
-        select<1, 2, 6>(problem_shape);
-    auto [seq_len_qo] = select<0>(sequence_length_shape);
-    int offset_o = 0;
-    if constexpr (VarLen) {
-      auto qo_cumulative_length = get<3>(problem_shape).cumulative_length;
-      offset_o = num_heads_q * head_size_vo * qo_cumulative_length[l_coord] +
-                 q_head_coord * head_size_vo;
-    } else {
-      offset_o = num_heads_q * head_size_vo * seq_len_qo * l_coord +
-                 q_head_coord * head_size_vo;
-    }
-    auto store_traits = static_cast<traits_store_O const&>(params.xe_store_o);
-    ElementO* base_ptr = (ElementO*)store_traits.base_ptr;
-    auto shape_o =
-        make_shape(static_cast<int>(seq_len_qo), num_heads_q * head_size_vo, 1);
-    StrideO stride_o = cutlass::make_cute_packed_stride(StrideO{}, shape_o);
-    auto tensorO = make_tensor(
-        make_gmem_ptr(base_ptr + offset_o), make_layout(shape_o, stride_o));
-    XE_Copy_O xe_store_o{XE_Copy_O{}.with(tensorO)};
-    return Params{xe_store_o, params.ptr_sink};
-  }
-
- private:
-  Params const& params;
 };
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
-
-}  // namespace collective
-}  // namespace flash_attention
-}  // namespace cutlass
-
-/////////////////////////////////////////////////////////////////////////////////////////////////
+}  // namespace cutlass::fmha::collective

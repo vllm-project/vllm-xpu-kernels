@@ -28,29 +28,37 @@ inline CutlassType aten_to_Cutlass_dtype(const at::Tensor& input) {
 
 using namespace cute;
 struct chunk_policy_head64 {
-  using ShapeQK = Shape<_128, _64, _64>;
+  using ShapeQK = Shape<_128, _64, _32>;
   using ShapePV = Shape<_128, _32, _64>;
-  using ShapeOutPut = Shape<_128, _64, _64>;
-  using SubgroupLayout = Layout<Shape<_8, _1, _1>, Stride<_1, _1, _1>>;
+  using ShapeOut = Shape<_128, _64>;
+  using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
+};
+
+struct chunk_policy_head96 {
+  using ShapeQK = Shape<_128, _64, _32>;
+  using ShapePV = Shape<_128, _32, _64>;
+  using ShapeOut = Shape<_128, _96>;
+  using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
 };
 
 struct chunk_policy_head128 {
-  using ShapeQK = Shape<_128, _64, _64>;
+  using ShapeQK = Shape<_128, _64, _32>;
   using ShapePV = Shape<_128, _32, _64>;
-  using ShapeOutPut = Shape<_128, _128, _64>;
-  using SubgroupLayout = Layout<Shape<_16, _1, _1>, Stride<_1, _1, _1>>;
+  using ShapeOut = Shape<_128, _128>;
+  using SubgroupLayoutQK = Layout<Shape<_16, _1, _1>>;
 };
 
 struct chunk_policy_head192 {
-  using ShapeQK = Shape<_256, _64, _64>;
+  using ShapeQK = Shape<_256, _64, _32>;
   using ShapePV = Shape<_256, _32, _64>;
-  using ShapeOutPut = Shape<_256, _192, _64>;
-  using SubgroupLayout = Layout<Shape<_32, _1, _1>, Stride<_1, _1, _1>>;
+  using ShapeOut = Shape<_256, _192>;
+  using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };
 
+
 struct chunk_policy_head256 {
-  using ShapeQK = Shape<_256, _64, _64>;
+  using ShapeQK = Shape<_256, _64, _32>;
   using ShapePV = Shape<_256, _32, _64>;
-  using ShapeOutPut = Shape<_256, _256, _64>;
-  using SubgroupLayout = Layout<Shape<_32, _1, _1>, Stride<_1, _1, _1>>;
+  using ShapeOut = Shape<_256, _256>;
+  using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };

@@ -14,9 +14,10 @@
 #include "cutlass/util/reference/device/gemm_complex.h"
 #include "cutlass/util/reference/device/tensor_compare.h"
 
+#include <sycl/ext/intel/experimental/grf_size_properties.hpp>
+
 #include "./collective/chunk_prefill_scheduler.hpp"
 #include "./collective/chunk_prefill_epilogue.hpp"
-#include "./collective/chunk_prefill_softmax.hpp"
 #include "chunk_prefill_kernel.hpp"
 
 #include "fmha_utils.hpp"
@@ -50,252 +51,193 @@ struct chunk_prefill_args_t {
   bool is_sink = false;
 };
 
-template <class FMHAChunkPrefillKernel>
+template <class FMHAKernel, bool isVarLen>
 struct KernelLauncher {
-  using StrideQ = typename FMHAChunkPrefillKernel::StrideQ;
-  using StrideK = typename FMHAChunkPrefillKernel::StrideK;
-  using StrideV = typename FMHAChunkPrefillKernel::StrideV;
-  using StrideO = typename FMHAChunkPrefillKernel::StrideO;
+  using StrideQ = typename FMHAKernel::StrideQ;
+  using StrideK = typename FMHAKernel::StrideK;
+  using StrideV = typename FMHAKernel::StrideV;
+  using StrideO = typename FMHAKernel::StrideO;
 
-  using ElementQ = typename FMHAChunkPrefillKernel::ElementQ;
-  using ElementK = typename FMHAChunkPrefillKernel::ElementK;
-  using ElementV = typename FMHAChunkPrefillKernel::ElementV;
-  using ElementAcc = typename FMHAChunkPrefillKernel::ElementAccumulator;
+  using ElementQ = typename FMHAKernel::ElementQ;
+  using ElementK = typename FMHAKernel::ElementK;
+  using ElementV = typename FMHAKernel::ElementV;
+  using ElementO = typename FMHAKernel::ElementO;
 
-  using CollectiveEpilogue =
-      typename FMHAChunkPrefillKernel::CollectiveEpilogue;
-  using ElementOutput = typename CollectiveEpilogue::ElementOutput;
-  using ElementCompute = typename CollectiveEpilogue::ElementCompute;
-  using ElementAccumulator = typename CollectiveEpilogue::ElementAccumulator;
-  using ElementSink = typename CollectiveEpilogue::ElementSink;
+  using CollectiveMainloop = typename FMHAKernel::CollectiveMainloop;
+  using ElementS = typename CollectiveMainloop::ElementS;
 
-  using ProblemShapeType = typename FMHAChunkPrefillKernel::ProblemShape;
+  using ProblemShapeType = typename FMHAKernel::ProblemShape;
 
   /// Initialization
   StrideQ stride_Q;
-  StrideK stride_K_cache;
-  StrideV stride_V_cache;
+  StrideK stride_K;
+  StrideV stride_V;
   StrideO stride_O;
-  uint64_t seed = 0;
 
   ProblemShapeType initialize(const chunk_prefill_args_t& args) {
-    auto problem_shape = cute::make_tuple(
-        1,
-        args.num_heads_q,
-        args.num_heads_k,
-        args.total_seqlen_q,
-        args.total_seqlen_k,
-        args.head_size,
-        args.head_size);
-    auto problem_shape_out = cute::make_tuple(
-        args.batch_size,
-        args.num_heads_q,
-        args.num_heads_k,
-        cutlass::fmha::collective::VariableLength{args.max_queries},  // cu_q
-        cutlass::fmha::collective::VariableLength{
-            args.max_keys},  // cu_kv_cache
-        args.head_size,
-        args.head_size);
-    auto
-        [batch,
-         num_heads_q,
-         num_heads_kv,
-         seq_len_qo,
-         seq_len_kv_cache,
-         head_size_qk,
-         head_size_vo] = problem_shape;
-    auto group_q_size = num_heads_q / num_heads_kv;
-    auto group_q_num = num_heads_q / group_q_size;
+    ProblemShapeType shape;
+    auto batch = shape.batch = args.batch_size;
+    auto num_heads_q = shape.num_heads_q = args.num_heads_q;
+    auto num_heads_kv = shape.num_heads_kv = args.num_heads_k;
+    auto seq_len_qo = shape.seq_len_qo = args.total_seqlen_q;
+    auto seq_len_kv = shape.seq_len_kv = args.total_seqlen_k;
+    auto head_size_qk = shape.head_size_qk = args.head_size;
+    auto head_size_vo = shape.head_size_vo = args.head_size;
 
     stride_Q = cutlass::make_cute_packed_stride(
         StrideQ{},
-        cute::make_shape(seq_len_qo, num_heads_q * head_size_qk, batch));
-    stride_K_cache = cutlass::make_cute_packed_stride(
+        cute::make_shape(seq_len_qo, head_size_qk, num_heads_q, batch));
+    stride_K = cutlass::make_cute_packed_stride(
         StrideK{},
-        cute::make_shape(seq_len_kv_cache, num_heads_kv * head_size_qk, batch));
-    stride_V_cache = cutlass::make_cute_packed_stride(
+        cute::make_shape(seq_len_kv, head_size_qk, num_heads_kv, batch));
+    stride_V = cutlass::make_cute_packed_stride(
         StrideV{},
-        cute::make_shape(head_size_vo * num_heads_kv, seq_len_kv_cache, batch));
-
+        cute::make_shape(head_size_vo, seq_len_kv, num_heads_kv, batch));
     stride_O = cutlass::make_cute_packed_stride(
         StrideO{},
-        cute::make_shape(
-            seq_len_qo * group_q_size, group_q_num * head_size_vo, batch));
+        cute::make_shape(seq_len_qo, head_size_vo, num_heads_q, batch));
 
-    get<3>(problem_shape_out).cumulative_length =
-        reinterpret_cast<int*>(args.cu_seqlens_q);
-    get<4>(problem_shape_out).cumulative_length =
-        reinterpret_cast<int*>(args.cu_seqlens_k);
+    print("Stride_Q: ");
+    print(stride_Q);
+    print("\n");
+    print("stride_V: ");
+    print(stride_V);
+    print("\n");
 
-    return problem_shape_out;
+    return shape;
   }
 
-  cutlass::Status
-  run(sycl::queue& queue,
-      const chunk_prefill_args_t& args,
-      const cutlass::KernelHardwareInfo& hw_info) {
-    ProblemShapeType problem_size = initialize(args);
+  cutlass::Status run(sycl::queue& queue, const chunk_prefill_args_t& args,
+                      const cutlass::KernelHardwareInfo& hw_info) {
+    ProblemShapeType shape = initialize(args);
 
-    typename FMHAChunkPrefillKernel::Arguments arguments{
-        cutlass::gemm::GemmUniversalMode::kGemm,
-        problem_size,
-        {reinterpret_cast<ElementQ*>(args.query),
-         stride_Q,
-         reinterpret_cast<ElementK*>(args.key),
-         stride_K_cache,
-         reinterpret_cast<ElementV*>(args.value),
-         stride_V_cache,
-         static_cast<int*>(args.block_table),
-         args.block_size,
-         args.max_blocks_per_seq,
-         args.total_seqlen_k,
-         args.window_size_left,
-         args.window_size_right},
+    typename FMHAKernel::Arguments arguments{
+        {shape, reinterpret_cast<ElementQ*>(args.query), stride_Q,
+         reinterpret_cast<ElementK*>(args.key), stride_K,
+         reinterpret_cast<ElementV*>(args.value), stride_V,
+         reinterpret_cast<ElementO*>(args.out), stride_O},
         {args.sm_scale},
-        {reinterpret_cast<ElementOutput*>(args.out),
-         stride_O,
-         reinterpret_cast<ElementSink*>(args.sm_sink)},
+        {},
         hw_info};
 
     // Define device-global scratch memory
-    size_t workspace_size =
-        FMHAChunkPrefillKernel::get_workspace_size(arguments);
+    size_t workspace_size = FMHAKernel::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
-    if (!FMHAChunkPrefillKernel::can_implement(arguments)) {
-      std::cout << "Invalid Problem Size: " << std::endl;
-      return cutlass::Status::kErrorInvalidProblem;
-    }
-
     // Initialize the workspace
-    FMHAChunkPrefillKernel::initialize_workspace(arguments, workspace.get());
+    FMHAKernel::initialize_workspace(arguments, workspace.get());
 
     // Convert host-side arguments to device-side arguments to be passed to the
     // kernel
-    auto params = FMHAChunkPrefillKernel::to_underlying_arguments(
-        arguments, workspace.get());
+    auto params =
+        FMHAKernel::to_underlying_arguments(arguments, workspace.get());
 
-    // Run the Flash Attention implementation.
     run(queue, params);
 
     return cutlass::Status::kSuccess;
   }
 
-  static void
-  run(sycl::queue& queue, typename FMHAChunkPrefillKernel::Params params) {
-    dim3 const block = FMHAChunkPrefillKernel::get_block_shape();
-    dim3 const grid = FMHAChunkPrefillKernel::get_grid_shape(params);
+  static void run(sycl::queue& queue, typename FMHAKernel::Params params) {
+    namespace syclex = sycl::ext::oneapi::experimental;
+    namespace intelex = sycl::ext::intel::experimental;
+
+    dim3 const block = FMHAKernel::get_block_shape();
+    dim3 const grid = FMHAKernel::get_grid_shape(params);
 
     // configure smem size and carveout
-    int smem_size = FMHAChunkPrefillKernel::SharedStorageSize;
+    int smem_size = FMHAKernel::SharedStorageSize;
 
-    const auto sycl_block = syclcompat::dim3(block.x, block.y, block.z);
-    const auto sycl_grid = syclcompat::dim3(grid.x, grid.y, grid.z);
+    const auto sycl_block = compat::dim3(block.x, block.y, block.z);
+    const auto sycl_grid = compat::dim3(grid.x, grid.y, grid.z);
 
-    syclcompat::experimental::launch_properties launch_props{
-        sycl::ext::oneapi::experimental::work_group_scratch_size(smem_size),
+    // Launch parameters depend on whether SYCL compiler supports work-group
+    // scratch memory extension
+    compat::experimental::launch_properties launch_props{
+        syclex::work_group_scratch_size(smem_size),
     };
-    syclcompat::experimental::kernel_properties kernel_props{
-        sycl::ext::oneapi::experimental::sub_group_size<
-            FMHAChunkPrefillKernel::DispatchPolicy::SubgroupSize>};
-    syclcompat::experimental::launch_policy policy{
-        sycl_grid, sycl_block, launch_props, kernel_props};
-    auto event = syclcompat::experimental::launch<
-        cutlass::device_kernel<FMHAChunkPrefillKernel>>(policy, queue, params);
+    compat::experimental::kernel_properties kernel_props{
+        syclex::sub_group_size<cute::intel::sg_size>, intelex::grf_size<256>};
+    compat::experimental::launch_policy policy{sycl_grid, sycl_block,
+                                               launch_props, kernel_props};
+    auto event =
+        compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
+            policy, queue, params);
 
-    // EventManager::getInstance().addEvent(event);
+    EventManager::getInstance().addEvent(event);
   }
 };
 
-template <
-    typename TileShapeQK,
-    typename TileShapePV,
-    typename TileShapeOutput,
-    typename SubgroupLayout,
-    int PipelineStages,
-    typename ElementInputQ = bfloat16_t,
-    typename MMAOperation = XE_8x16x16_F32BF16BF16F32_TT,
-    typename GmemTiledCopyQ = XE_2D_U16x8x32_LD_N,
-    typename GmemTiledCopyK = XE_2D_U16x16x16_LD_T,
-    typename GmemTiledCopyV = XE_2D_U16x16x32_LD_V,
-    typename ElementAccumulator = float,
-    typename ElementComputeEpilogue = float,
-    typename GmemTiledCopyStore = XE_2D_U16x8x16_ST_N>
-struct FMHAKernel {
-  template <class Scheduler, bool Causal, bool Local, bool Sink>
+template <typename TileShapeQK, typename TileShapePV, typename TileShapeOutput,
+          typename SubgroupLayoutQK,
+          typename SubgroupLayoutPV_, /* void -> default */
+          int PipelineStages, typename ElementQ = bfloat16_t,
+          typename ElementK = bfloat16_t, typename ElementV = bfloat16_t,
+          typename ElementO = float,
+          typename MMAOperation_ = void, /* void -> default */
+          typename StrideQ = Stride<int, _1, int, int>,
+          typename StrideK = Stride<int, _1, int, int>,
+          typename StrideV = Stride<_1, int, int, int>,
+          typename StrideO = Stride<int, _1, int, int>,
+          typename GmemTiledCopyQ = void, /* void -> default block 2D */
+          typename GmemTiledCopyK = void, typename GmemTiledCopyV = void,
+          typename GmemTiledCopyO = void>
+struct FMHAConfig {
+  static constexpr int SGTileQ =
+      get<0>(shape_div(TileShapeQK{}, shape(SubgroupLayoutQK{})))();
+  using MMAOperation =
+      cute::conditional_t<is_void_v<MMAOperation_>,
+                          XE_DPAS_TT<cute::gcd(SGTileQ, 8), float, ElementQ>,
+                          MMAOperation_>;
+  using SubgroupLayoutPV =
+      cute::conditional_t<is_void_v<SubgroupLayoutPV_>,
+                          decltype(cutlass::fmha::collective::get_sg_layout_pv(
+                              SubgroupLayoutQK{})),
+                          SubgroupLayoutPV_>;
+
+  template <bool isVarLen, bool Causal, bool PagedKV, bool Local,
+            class Scheduler>
   static void run(sycl::queue& queue, const chunk_prefill_args_t& args) {
     cutlass::KernelHardwareInfo hw_info;
 
-    static constexpr bool PagedKV = true;
-    using LayoutQ = cutlass::layout::RowMajor;
-    using LayoutK = cutlass::layout::ColumnMajor;
-    using LayoutV = cutlass::layout::RowMajor;
-    using LayoutO = cutlass::layout::RowMajor;
+    using ProblemShapeType = cutlass::fmha::kernel::FMHAProblemShape;
 
-    using ElementInputKV = ElementInputQ;
-    using ElementOutput = ElementInputQ;
-    using ElementSink = ElementInputQ;
+    using TiledMMAQK =
+        typename TiledMMAHelper<MMA_Atom<MMAOperation>, Layout<TileShapeQK>,
+                                SubgroupLayoutQK>::TiledMMA;
+    using TiledMMAPV =
+        typename TiledMMAHelper<MMA_Atom<MMAOperation>, Layout<TileShapePV>,
+                                SubgroupLayoutPV>::TiledMMA;
 
-    using GEMMDispatchPolicy =
-        cutlass::gemm::MainloopIntelXeXMX16<PipelineStages>;
-    using EpilogueDispatchPolicy = cutlass::epilogue::IntelXeXMX16;
-    using CollectiveEpilogue =
-        cutlass::flash_attention::collective::FlashChunkPrefillEpilogue<
-            Sink,
-            EpilogueDispatchPolicy,
-            MMAOperation,
-            TileShapeOutput,
-            SubgroupLayout,
-            ElementComputeEpilogue,
-            ElementOutput,
-            cutlass::gemm::TagToStrideC_t<LayoutO>,
-            ElementOutput,
-            GmemTiledCopyStore,
-            ElementSink>;
-    using CollectiveSoftmaxEpilogue =
-        cutlass::flash_attention::collective::FlashChunkPrefillSoftmaxEpilogue<
-            Causal,
-            Local,
-            EpilogueDispatchPolicy,
-            ElementAccumulator>;
+    static_assert(
+        get<0>(TileShapeOutput{}) == get<0>(TileShapePV{}),
+        "Output tile and P*V tile have different sizes in Q dimension");
+    constexpr int VTiles = get<1>(TileShapeOutput{}) / get<1>(TileShapePV{});
 
-    using ProblemShapeRegular = cute::tuple<int, int, int, int, int, int, int>;
-    using namespace cutlass::fmha::collective;
-    using ProblemShapeVarlen =
-        cute::tuple<int, int, int, VariableLength, VariableLength, int, int>;
-    using ProblemShapeType = ProblemShapeVarlen;
+    auto make_dummy_tensor = [&](auto val, auto stride) {
+      return make_tensor(
+          make_gmem_ptr(&val),
+          make_layout(repeat<rank_v<decltype(stride)>>(1), stride));
+    };
+
+    using TensorQ = decltype(make_dummy_tensor(ElementQ{}, StrideQ{}));
+    using TensorK = decltype(make_dummy_tensor(ElementK{}, StrideK{}));
+    using TensorV = decltype(make_dummy_tensor(ElementV{}, StrideV{}));
+    using TensorO = decltype(make_dummy_tensor(ElementO{}, StrideO{}));
 
     // Mainloop
-    using CollectiveMainloop =
-        cutlass::flash_attention::collective::FlashChunkPrefillMma<
-            GEMMDispatchPolicy,
-            ProblemShapeType,
-            ElementInputQ,
-            cutlass::gemm::TagToStrideA_t<LayoutQ>,
-            ElementInputKV,
-            cutlass::gemm::TagToStrideB_t<LayoutK>,
-            ElementInputKV,
-            cutlass::gemm::TagToStrideB_t<LayoutV>,
-            MMAOperation,
-            TileShapeQK,
-            TileShapePV,
-            SubgroupLayout,
-            GmemTiledCopyQ,  // Q
-            GmemTiledCopyK,  // K
-            GmemTiledCopyV,  // V,
-            Causal,
-            Local,
-            PagedKV>;
+    using MainloopDispatchPolicy = cutlass::fmha::XeDefault<PipelineStages>;
+    using CollectiveMainloop = cutlass::fmha::collective::FMHAFwdMainloop<
+        MainloopDispatchPolicy, Causal, TiledMMAQK, TiledMMAPV, VTiles, TensorQ,
+        TensorK, TensorV, GmemTiledCopyQ, GmemTiledCopyK, GmemTiledCopyV>;
 
-    using FMHAChunkPrefillKernel =
-        cutlass::flash_attention::kernel::FMHAPrefillChunk<
-            ProblemShapeType,
-            CollectiveMainloop,
-            CollectiveSoftmaxEpilogue,
-            CollectiveEpilogue,
-            Scheduler>;
+    // Epilogue
+    using CollectiveEpilogue = cutlass::fmha::collective::FMHAFwdEpilogue<
+        CollectiveMainloop, TileShapeOutput, TensorO, GmemTiledCopyO>;
 
-    KernelLauncher<FMHAChunkPrefillKernel> launcher;
+    using FMHAKernel = cutlass::fmha::kernel::XeFMHAFwdKernel<
+        ProblemShapeType, CollectiveMainloop, CollectiveEpilogue, Scheduler>;
+
+    KernelLauncher<FMHAKernel, isVarLen> launcher;
 
     launcher.run(queue, args, hw_info);
   }
@@ -323,25 +265,18 @@ void policy_dispatch(
     sycl::queue& queue, CutlassType cuType, const chunk_prefill_args_t& args) {
   const int PipelineStages = 2;
   if (cuType == CutlassType::half) {
-    FMHAKernel<
-        typename chunk_policy::ShapeQK,
-        typename chunk_policy::ShapePV,
-        typename chunk_policy::ShapeOutPut,
-        typename chunk_policy::SubgroupLayout,
-        PipelineStages,
-        cutlass::half_t,
-        XE_8x16x16_F32F16F16F32_TT>::
-        kernel_dispatch(
-            queue, args, args.is_causal, args.is_local, args.is_sink);
+    return FMHAConfig<typename chunk_policy::ShapeQK,
+                      typename chunk_policy::ShapePV,
+                      typename chunk_policy::ShapeOut,
+                      typename chunk_policy::SubgroupLayoutQK, void,
+                      PipelineStages, half_t, half_t, half_t>::dispatch(queue,
+                                                                        args);
   } else {
-    FMHAKernel<
-        typename chunk_policy::ShapeQK,
-        typename chunk_policy::ShapePV,
-        typename chunk_policy::ShapeOutPut,
-        typename chunk_policy::SubgroupLayout,
-        PipelineStages>::
-        kernel_dispatch(
-            queue, args, args.is_causal, args.is_local, args.is_sink);
+    return FMHAConfig<typename chunk_policy::ShapeQK,
+                      typename chunk_policy::ShapePV,
+                      typename chunk_policy::ShapeOut,
+                      typename chunk_policy::SubgroupLayoutQK, void,
+                      PipelineStages>::dispatch(queue, args);
   }
 }
 
@@ -349,29 +284,29 @@ void cutlass_chunk_prefill_impl(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]
     const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
-    const at::Tensor& value_cache,
-    at::Tensor& out,
-    const at::Tensor& block_table,
-    const at::Tensor& cu_seqlens_q,
-    const at::Tensor& cu_seqlens_k,
-    int max_seqlen_q,
-    int max_seqlen_k,
-    double sm_scale,
-    std::optional<const at::Tensor>& sm_sink_,
-    int window_size_left,
-    int window_size_right,
-    bool is_causal,
-    bool is_local,
+    const at::Tensor& value_cache, at::Tensor& out,
+    const at::Tensor& block_table, const at::Tensor& cu_seqlens_q,
+    const at::Tensor& cu_seqlens_k, int max_seqlen_q, int max_seqlen_k,
+    double sm_scale, std::optional<const at::Tensor>& sm_sink_,
+    int window_size_left, int window_size_right, bool is_causal, bool is_local,
     bool is_sink) {
+  int batch_size = query.size(0);
+  max_seqlen_q = query.size(2);
+  max_seqlen_k = key_cache.size(2);
+  int total_seqlen_q = max_seqlen_q;
+  int total_seqlen_k = max_seqlen_k;
+  int head_size = query.size(3);
+  int num_heads_kv = key_cache.size(1);
+
   int num_block = key_cache.size(0);
   int block_size = key_cache.size(1);
   int num_heads_q = query.size(1);
-  int num_heads_kv = key_cache.size(2);
-  int head_size = query.size(2);
-  int batch_size = cu_seqlens_q.numel() - 1;
+  // int num_heads_kv = key_cache.size(2);
+  // int head_size = query.size(2);
+  // int batch_size = cu_seqlens_q.numel() - 1;
   int max_blocks_per_seq = block_table.size(1);
-  int total_seqlen_q = query.size(0);
-  int total_seqlen_k = num_block * block_size;
+  // int total_seqlen_q = query.size(0);
+  // int total_seqlen_k = num_block * block_size;
 
   if (is_local) {
     window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
