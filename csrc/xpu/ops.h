@@ -8,7 +8,9 @@ torch::Tensor fp8_gemm_w8a16(const torch::Tensor& A, const torch::Tensor& B,
                              const std::optional<torch::Tensor>& bias_);
 
 torch::Tensor cutlass_grouped_gemm(torch::Tensor ptr_A, torch::Tensor ptr_B,
-                                   torch::Tensor ptr_D, torch::Tensor expert_token_count, torch::Tensor expert_first_token_offset,
+                                   torch::Tensor ptr_D,
+                                   torch::Tensor expert_token_count,
+                                   torch::Tensor expert_first_token_offset,
                                    int64_t N, int64_t K, int64_t groups);
 
 std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
@@ -16,11 +18,8 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     const c10::optional<at::Tensor>& offsets_opt,
     const at::Tensor& cos_sin_cache, int64_t rotary_dim, bool is_neox);
 
-void fused_moe(torch::Tensor output, 
-               torch::Tensor input,
+void fused_moe(torch::Tensor output, torch::Tensor input,
                torch::Tensor token_selected_experts,
                torch::Tensor token_final_scales,
                torch::Tensor fc1_expert_weights,
-               torch::Tensor fc2_expert_weights,
-               torch::Tensor workspace);
-               
+               torch::Tensor fc2_expert_weights, torch::Tensor workspace);

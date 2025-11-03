@@ -278,8 +278,9 @@ struct GroupedGemmRunner {
 
   /// Populates a Gemm::Arguments structure from the given commandline options
   typename Gemm::Arguments args_from_options(
-      const Options& options, const cutlass::KernelHardwareInfo& hw_info, int64_t const* expert_first_token_offset,
-      const ElementA* ptr_A, const ElementB* ptr_B, ElementOutput* ptr_D,
+      const Options& options, const cutlass::KernelHardwareInfo& hw_info,
+      int64_t const* expert_first_token_offset, const ElementA* ptr_A,
+      const ElementB* ptr_B, ElementOutput* ptr_D,
       bool host_problem_shapes_available = true) {
     typename Gemm::Arguments arguments;
     decltype(arguments.epilogue.thread) fusion_args;
@@ -301,20 +302,24 @@ struct GroupedGemmRunner {
 
     // Per-GEMM problem shape info may only exist on the device.
     if (host_problem_shapes_available) {
-      arguments = typename Gemm::Arguments{
-          cutlass::gemm::GemmUniversalMode::kGrouped,
-          {options.groups, problem_sizes.get(),
-           options.problem_sizes_host.data()},
-          {ptr_A, stride_A.get(), ptr_B, stride_B.get(), expert_first_token_offset},
-          {fusion_args, nullptr, stride_C.get(), ptr_D, stride_D.get(), expert_first_token_offset},
-          hw_info,
-          {1, RasterOrderOptions::AlongN}};
+      arguments =
+          typename Gemm::Arguments{cutlass::gemm::GemmUniversalMode::kGrouped,
+                                   {options.groups, problem_sizes.get(),
+                                    options.problem_sizes_host.data()},
+                                   {ptr_A, stride_A.get(), ptr_B,
+                                    stride_B.get(), expert_first_token_offset},
+                                   {fusion_args, nullptr, stride_C.get(), ptr_D,
+                                    stride_D.get(), expert_first_token_offset},
+                                   hw_info,
+                                   {1, RasterOrderOptions::AlongN}};
     } else {
       arguments = typename Gemm::Arguments{
           cutlass::gemm::GemmUniversalMode::kGrouped,
           {options.groups, problem_sizes.get(), nullptr},
-          {ptr_A, stride_A.get(), ptr_B, stride_B.get(), expert_first_token_offset},
-          {fusion_args, nullptr, stride_C.get(), ptr_D, stride_D.get(), expert_first_token_offset},
+          {ptr_A, stride_A.get(), ptr_B, stride_B.get(),
+           expert_first_token_offset},
+          {fusion_args, nullptr, stride_C.get(), ptr_D, stride_D.get(),
+           expert_first_token_offset},
           hw_info,
           {1, RasterOrderOptions::AlongN}};
     }
@@ -335,7 +340,8 @@ struct GroupedGemmRunner {
     initialize(options);
     Gemm gemm_op;
 
-    auto arguments = args_from_options(options, hw_info, expert_first_token_offset, ptr_A, ptr_B, ptr_D);
+    auto arguments = args_from_options(
+        options, hw_info, expert_first_token_offset, ptr_A, ptr_B, ptr_D);
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
@@ -383,8 +389,8 @@ struct GroupedGemmRunner {
 };
 
 void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_D,
-                    void* expert_token_count, void* expert_first_token_offset,  int64_t N,
-                    int64_t K, int64_t groups) {
+                    void* expert_token_count, void* expert_first_token_offset,
+                    int64_t N, int64_t K, int64_t groups) {
   //
   // Run examples
   //

@@ -540,13 +540,14 @@ class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
           make_tensor(make_gmem_ptr(ptr_C_curr_batch),
                       make_layout(make_shape(M, N, L), params.dC[next_group]));
     }
-    
+
     auto expert_first_token_offset = params.expert_first_token_offset;
 
-    /* FIXME: use a problem vistor */
+    /* FIXME: use a problem visitor */
     int calc_group{0}, real_group{0};
-    while (calc_group < next_group + 1){
-      if(expert_first_token_offset[real_group] != expert_first_token_offset[real_group + 1]){
+    while (calc_group < next_group + 1) {
+      if (expert_first_token_offset[real_group] !=
+          expert_first_token_offset[real_group + 1]) {
         calc_group++;
       }
       real_group++;
@@ -554,8 +555,8 @@ class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
     real_group -= 1;
 
     if constexpr (is_destination_supported) {
-      ElementD* ptr_D_curr_batch =
-          reinterpret_cast<ElementD*>(params.ptr_D) + expert_first_token_offset[real_group] * N;
+      ElementD* ptr_D_curr_batch = reinterpret_cast<ElementD*>(params.ptr_D) +
+                                   expert_first_token_offset[real_group] * N;
       mD_mnl =
           make_tensor(make_gmem_ptr(ptr_D_curr_batch),
                       make_layout(make_shape(M, N, L), params.dD[next_group]));

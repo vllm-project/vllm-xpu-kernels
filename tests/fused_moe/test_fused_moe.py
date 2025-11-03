@@ -5,8 +5,7 @@ import pytest
 import torch
 
 from tests.utils import seed_everything
-from vllm_xpu_kernels.fused_moe_interface import (cutlass_fused_moe,
-                                                  cutlass_grouped_gemm,
+from vllm_xpu_kernels.fused_moe_interface import (cutlass_grouped_gemm,
                                                   xpu_fused_moe)
 
 DEVICE = "xpu"
@@ -47,7 +46,7 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
     seed_everything(7)
     num_experts = e
     token_per_group = random_partition(e, m * topk)
-    assert(len(token_per_group) == e)
+    assert (len(token_per_group) == e)
     # input
     input_A = torch.randn((sum(token_per_group), k),
                           dtype=dtype,
@@ -127,7 +126,6 @@ def check_fused_moe(
     dtype: torch.dtype,
 ):
     seed_everything(7)
-    verbose = True
     # Setup test data
     a = torch.randn((m, k), device=DEVICE, dtype=dtype) / 10
     w13 = torch.randn((e, 2 * n, k), device=DEVICE, dtype=dtype) / 10
@@ -143,7 +141,6 @@ def check_fused_moe(
 
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_scores.view(-1, 1)
-
 
     output = xpu_fused_moe(hidden_states=a,
                            w13=w13,
@@ -165,4 +162,3 @@ def check_fused_moe(
     except AssertionError as e:
         print("a and b diffs")
         print(e)
-

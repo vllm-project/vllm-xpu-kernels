@@ -158,7 +158,8 @@ struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
     auto init_N = get<1>(problem_shape_MNK);
     auto init_K = get<2>(problem_shape_MNK);
 
-    return Params{args.ptr_A, args.dA, args.ptr_B, args.dB, args.expert_first_token_offset};
+    return Params{args.ptr_A, args.dA, args.ptr_B, args.dB,
+                  args.expert_first_token_offset};
   }
 
   template <class ProblemShape>
@@ -342,20 +343,23 @@ struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
     const int32_t K = get<2>(problem_shape_mnkl);
     auto expert_first_token_offset = mainloop_params.expert_first_token_offset;
 
-    /* FIXME: use a problem vistor */
+    /* FIXME: use a problem visitor */
     int calc_group{0}, real_group{0};
-    while (calc_group < next_group + 1){
-      if(expert_first_token_offset[real_group] != expert_first_token_offset[real_group + 1]){
+    while (calc_group < next_group + 1) {
+      if (expert_first_token_offset[real_group] !=
+          expert_first_token_offset[real_group + 1]) {
         calc_group++;
       }
       real_group++;
     }
     real_group -= 1;
     ElementA const* ptr_A_curr_batch =
-        reinterpret_cast<ElementA const*>(mainloop_params.ptr_A) + expert_first_token_offset[real_group] * K;
+        reinterpret_cast<ElementA const*>(mainloop_params.ptr_A) +
+        expert_first_token_offset[real_group] * K;
     ElementB const* ptr_B_curr_batch =
-        reinterpret_cast<ElementB const*>(mainloop_params.ptr_B) + real_group*N*K;
-   
+        reinterpret_cast<ElementB const*>(mainloop_params.ptr_B) +
+        real_group * N * K;
+
     Tensor mA = make_tensor(make_gmem_ptr(ptr_A_curr_batch),
                             make_shape(M, K, (int32_t)1),
                             mainloop_params.dA[next_group]);
