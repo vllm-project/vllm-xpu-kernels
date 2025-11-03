@@ -5,8 +5,6 @@
 
 typedef at::BFloat16 bfloat16;
 
-std::map<std::string, std::pair<size_t, size_t>> ws_map;
-
 void fused_moe(torch::Tensor output, torch::Tensor input,
                torch::Tensor token_selected_experts,
                torch::Tensor token_final_scales,
@@ -69,35 +67,26 @@ void fused_moe(torch::Tensor output, torch::Tensor input,
       num_moe_inputs * sizeof(float);
 
   int map_offset = 0;
-  ws_map["permuted_token_selected_experts"] =
-      std::pair{permuted_token_selected_experts_size, map_offset};
-  map_offset += permuted_token_selected_experts_size;
-  ws_map["permuted_row_to_unpermuted_row"] =
-      std::pair{permuted_row_to_unpermuted_row_size, map_offset};
-  map_offset += permuted_row_to_unpermuted_row_size;
-  ws_map["src_to_dest_map"] = std::pair{src_to_dest_map_size, map_offset};
-  map_offset += src_to_dest_map_size;
-  ws_map["expert_first_token_offset"] =
-      std::pair{expert_first_token_offset_size, map_offset};
-  map_offset += expert_first_token_offset_size;
-  ws_map["blocked_expert_counts"] =
-      std::pair{blocked_expert_counts_size, map_offset};
-  map_offset += blocked_expert_counts_size;
-  ws_map["blocked_expert_counts_cumsum"] =
-      std::pair{blocked_expert_counts_cumsum_size, map_offset};
-  map_offset += blocked_expert_counts_cumsum_size;
-  ws_map["blocked_row_to_unpermuted_row"] =
-      std::pair{blocked_row_to_unpermuted_row_size, map_offset};
-  map_offset += blocked_row_to_unpermuted_row_size;
-  if (map_offset % 256 != 0) {
-    map_offset += 256 - (map_offset % 256);
-  }
-  ws_map["overlapped_gemm1_gemm2_inputs"] =
-      std::pair{permuted_data_size, map_offset};
-  map_offset += permuted_data_size;
-  ws_map["permuted_token_final_scales"] =
-      std::pair{permuted_token_final_scales_size, map_offset};
-  map_offset += permuted_token_final_scales_size;
+  std::map<std::string, std::pair<size_t, size_t>> ws_map;
+
+#define ADD_NAME(name, size)                             \
+  do {                                                   \
+    size_t aligned_size = ((size) + 255) & ~255ULL;      \
+    ws_map[#name] = std::pair{aligned_size, map_offset}; \
+    map_offset += aligned_size;                          \
+  } while (false)
+#define ADD(name) ADD_NAME(name, name##_size)
+
+  ADD(permuted_row_to_unpermuted_row);
+  ADD(permuted_token_selected_experts);
+  ADD_NAME(unpermuted_row_to_permuted_row, src_to_dest_map_size);
+  ADD(blocked_expert_counts);
+  ADD(blocked_expert_counts_cumsum);
+  ADD(blocked_row_to_unpermuted_row);
+  ADD(expert_first_token_offset);
+  ADD(permuted_token_final_scales);
+  ADD_NAME(overlapped_gemm1_gemm2_inputs, permuted_data_size);
+  std::cout << "CPP total offset: " << map_offset << std::endl;
 
   auto getWsPtr = [&](auto type, std::string const& name) {
     return ws_map.at(name).first ? reinterpret_cast<decltype(type)*>(
@@ -108,7 +97,8 @@ void fused_moe(torch::Tensor output, torch::Tensor input,
       getWsPtr(int{}, "permuted_token_selected_experts");
   auto permuted_row_to_unpermuted_row_ =
       getWsPtr(int{}, "permuted_row_to_unpermuted_row");
-  auto unpermuted_row_to_permuted_row = getWsPtr(int{}, "src_to_dest_map");
+  auto unpermuted_row_to_permuted_row =
+      getWsPtr(int{}, "unpermuted_row_to_permuted_row");
   auto expert_first_token_offset_ =
       getWsPtr(int64_t{}, "expert_first_token_offset");
   auto blocked_expert_counts_ = getWsPtr(int{}, "blocked_expert_counts");
