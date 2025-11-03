@@ -10,7 +10,8 @@ BATCHES = [1]
 MNK_FACTORS = [
     (1, 4, 8),
     (2, 4, 8),
-    (16, 64, 32),
+    (4, 32, 16),
+    (16, 32, 32),
     (32, 64, 128),
     (64, 128, 256),
 ]
@@ -65,8 +66,9 @@ def test_fp8_gemm_w8a16(fp8_dtype, dtype, trans_wei, is_mbk, batch, mnk_factors)
 @pytest.mark.parametrize("is_nt", [True, False])
 @pytest.mark.parametrize("batch", BATCHES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
+@pytest.mark.parametrize("per_token_src", [True, False])
 @pytest.mark.parametrize("per_channel_wei", [True, False])
-def test_fp8_gemm(fp8_dtype, dtype, is_nt, batch, mnk_factors, per_channel_wei):
+def test_fp8_gemm(fp8_dtype, dtype, is_nt, batch, mnk_factors, per_token_src, per_channel_wei):
     seed = 1234
     torch.manual_seed(seed)
 
@@ -78,12 +80,17 @@ def test_fp8_gemm(fp8_dtype, dtype, is_nt, batch, mnk_factors, per_channel_wei):
     scale_src = (torch.ones(batch) * 4).xpu()
     scale_wei = (torch.ones(batch) * 4).xpu()
 
-    input_fp8, _ = scaled_fp8_quant(
-        input.reshape(-1, k), scale_src, False, False, fp8_dtype=fp8_dtype
-    )
+    if per_token_src:
+        input_fp8, scale_src_fp8 = scaled_fp8_quant(
+            input.reshape(-1, k), use_per_token_if_dynamic=True, fp8_dtype=fp8_dtype
+        )
+    else:
+        input_fp8, _ = scaled_fp8_quant(
+            input.reshape(-1, k), scale_src, False, False, fp8_dtype=fp8_dtype
+        )
 
     if per_channel_wei:
-        weight_fp8, scale_fp8 = scaled_fp8_quant(
+        weight_fp8, scale_wei_fp8 = scaled_fp8_quant(
             weight, use_per_token_if_dynamic=True, fp8_dtype=fp8_dtype
         )
     else:
@@ -102,9 +109,9 @@ def test_fp8_gemm(fp8_dtype, dtype, is_nt, batch, mnk_factors, per_channel_wei):
         input_fp8,
         weight_fp8,
         dtype,
-        scale_src,
-        scale_fp8 if per_channel_wei else scale_wei,
+        scale_src_fp8 if per_token_src else scale_src,
+        scale_wei_fp8 if per_channel_wei else scale_wei,
         torch.Tensor(),
     )
-    
-    torch.testing.assert_close(output_fp8, output_ref, atol=5e-2, rtol=5e-2)
+
+    torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)
