@@ -91,7 +91,6 @@ def ref_fused_moe(x, w13, w2, flat_expert_weights, flat_expert_indices,
     counts = flat_expert_indices.bincount().cpu().numpy()
     tokens_per_expert = counts.cumsum()
     token_idxs = idxs // num_per_tok
-    print("ref offset: ", tokens_per_expert)
     for expert_id, end_idx in enumerate(tokens_per_expert):
         start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
         if start_idx == end_idx:
@@ -154,7 +153,6 @@ def check_fused_moe(
                            n_experts_per_token=topk,
                            activation="silu",
                            num_experts=e)
-    print("fusedmoe out ", output, output.shape)
 
     ref_out = ref_fused_moe(ref_a, w13, w2, flat_expert_weights,
                             flat_expert_indices, topk, "silu", e)

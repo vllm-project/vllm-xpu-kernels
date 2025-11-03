@@ -355,21 +355,7 @@ struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
         reinterpret_cast<ElementA const*>(mainloop_params.ptr_A) + expert_first_token_offset[real_group] * K;
     ElementB const* ptr_B_curr_batch =
         reinterpret_cast<ElementB const*>(mainloop_params.ptr_B) + real_group*N*K;
-    if (false && cutlass::thread(1, 0)) {
-        print("+++++++++++next_group\n");
-        print(next_group);
-        print("\n");
-        print("+++++++++++++MNK\n");
-        print(M);
-        print("\n");
-        print(N);
-        print("\n");
-        print(K);
-        print("\n");
-        print("======================= ptr_A_curr_batch: \n");
-        print(ptr_A_curr_batch);
-        print("\n");
-    }
+   
     Tensor mA = make_tensor(make_gmem_ptr(ptr_A_curr_batch),
                             make_shape(M, K, (int32_t)1),
                             mainloop_params.dA[next_group]);

@@ -14,7 +14,6 @@ void fused_moe(torch::Tensor output,
                torch::Tensor fc1_expert_weights,
                torch::Tensor fc2_expert_weights,
                torch::Tensor workspace){
-  std::cout << "register fused_moe" << std::endl;
   int experts_per_token = token_selected_experts.size(1);
   int64_t num_rows = input.size(0);
   int64_t hidden_size = fc2_expert_weights.size(1);
@@ -83,8 +82,6 @@ void fused_moe(torch::Tensor output,
   ws_map["permuted_token_final_scales"] = std::pair{permuted_token_final_scales_size, map_offset};
   map_offset += permuted_token_final_scales_size;
 
-  std::cout << "total workspace size(byte): " << map_offset << std::endl;
-
   auto getWsPtr = [&](auto type, std::string const& name) {
     return ws_map.at(name).first
                ? reinterpret_cast<decltype(type)*>(ws_ptr + ws_map.at(name).second)
@@ -123,8 +120,5 @@ void fused_moe(torch::Tensor output,
         experts_per_token, num_experts_per_node, use_per_expert_act_scale,
         expert_first_token_offset_, nullptr, stream);
   auto const* gemm1_input = gemm1_input_expand;
-
-  std::cout << "finish expand\n" << std::endl;
-
 }
  

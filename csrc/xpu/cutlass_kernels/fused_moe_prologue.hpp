@@ -134,30 +134,14 @@ inline T exclusive_scan_over_group(
 
   T inclusive_output;
   inclusive_scan_over_subgroup(sg, input, inclusive_output);
-  
-  // if(item.get_group(2) == 0 && item.get_group(1) == 0){
-  //    sycl::ext::oneapi::experimental::printf(
-  //      "item_id%d, input=%d, inclusive_output=%d \n",
-  //      item.get_local_id(2), input, inclusive_output);
-  // }
 
   int lane_id = sg.get_local_linear_id();
   T exclusive_output = shuffle_up(sg, inclusive_output, 1);
-  // if(item.get_group(2) == 0 && item.get_group(1) == 0){
-  //    sycl::ext::oneapi::experimental::printf(
-  //      "item_id%d, exclusive_output=%d \n",
-  //      item.get_local_id(2), exclusive_output);
-  // }
   auto group = item.get_group();
 
   T subgroup_prefix = get_subgroup_prefix(
       group, sg, inclusive_output, group_aggregate);
   auto subgroup_id = sg.get_group_linear_id();
-  // if(item.get_group(2) == 0 && item.get_group(1) == 0){
-  //    sycl::ext::oneapi::experimental::printf(
-  //      "item_id%d, subgroup_prefix=%d \n",
-  //      item.get_local_id(2), subgroup_prefix);
-  // }
 
   if (subgroup_id != 0) {
     exclusive_output = subgroup_prefix + exclusive_output;
@@ -166,11 +150,6 @@ inline T exclusive_scan_over_group(
       exclusive_output = subgroup_prefix;
     }
   }
-  // if(item.get_group(2) == 0 && item.get_group(1) == 0){
-  //    sycl::ext::oneapi::experimental::printf(
-  //      "item_id%d, return%d group_aggregate%d\n",
-  //      item.get_local_id(2), exclusive_output, group_aggregate);
-  // }
 
   return exclusive_output;
 }
@@ -215,7 +194,6 @@ class blockExpertPrefixSumKernel {
 
   int const has_matched = expanded_token_id >= 0 ? 1 : 0;
   int index, group_aggregate;
-  // BlockScan(temp_storage).ExclusiveSum(has_matched, index);
   index = exclusive_scan_over_group(item_ct1, has_matched, group_aggregate);
  
   if (has_matched) {
@@ -225,7 +203,6 @@ class blockExpertPrefixSumKernel {
   if (item_ct1.get_local_id(2) == kNumTokensPerBlock - 1) {
     blocked_expert_counts[target_expert_id * num_blocks_per_seq + block_id] = index + has_matched;
   }
-  // sycl_print_decimal(item_ct1, blocked_row_to_unpermuted_row, 64, "blocked_row_to_unpermuted_row");
 }
 
   
@@ -363,8 +340,6 @@ class GlobalExpertPrefixSumKernel {
       expert_first_token_offset[num_experts_per_node] = cumsum + cnt;
     }
   }
-  // sycl_print_decimal(item, blocked_expert_counts_cumsum, 32, "blocked_expert_counts_cumsum");
-  // sycl_print_decimal(item, expert_first_token_offset, 17, "expert_first_token_offset");
  }
 
  private:
@@ -457,15 +432,10 @@ class MergeExpertPrefixSumKernel {
           blocked_row_to_unpermuted_row[target_expert_id * num_tokens + token_id];
       int const permuted_row = offset + item.get_local_id(2);
       
-      // sycl::ext::oneapi::experimental::printf(
-      // "target_expert_id=%d, token_id=%d, offset=%d, unpermuted_row=%d, permuted_row=%d\n",
-      // target_expert_id, token_id, offset, unpermuted_row, permuted_row);
       permuted_row_to_unpermuted_row[permuted_row] = unpermuted_row;
       permuted_token_selected_experts[permuted_row] = target_expert_id;
       unpermuted_row_to_permuted_row[unpermuted_row] = permuted_row;
     }
-    // sycl_print_decimal(item, permuted_row_to_unpermuted_row, 64, "permuted_row_to_unpermuted_row");
-    // sycl_print_decimal(item, permuted_token_selected_experts, 64, "permuted_token_selected_experts");
   }
 
  private:
@@ -506,7 +476,6 @@ void threeStepBuildExpertMapsSortFirstToken(
     int* blocked_expert_counts_cumsum, int* blocked_row_to_unpermuted_row, int64_t const num_tokens,
     int64_t const num_experts_per_node, int64_t const num_experts_per_token,
     int const start_expert_id, sycl::queue& stream){
-  std::cout << "three steps" << std::endl;
   int64_t const num_tokens_per_block = computeNumTokensPerBlock(num_tokens, num_experts_per_node);
   int64_t const num_blocks_per_seq = ceilDiv(num_tokens, num_tokens_per_block);
 
@@ -514,20 +483,16 @@ void threeStepBuildExpertMapsSortFirstToken(
                        num_tokens, num_experts_per_node, num_experts_per_token,
                        num_tokens_per_block, num_blocks_per_seq, start_expert_id, stream);
 
-  stream.wait();
   globalExpertPrefixSum(blocked_expert_counts, blocked_expert_counts_cumsum,
                         expert_first_token_offset, num_experts_per_node, num_tokens_per_block,
                         num_blocks_per_seq, stream);
 
-  stream.wait();
   mergeExpertPrefixSum(blocked_expert_counts, blocked_expert_counts_cumsum,
                        blocked_row_to_unpermuted_row, permuted_token_selected_experts,
                        permuted_row_to_unpermuted_row, unpermuted_row_to_permuted_row, num_tokens,
                        num_experts_per_node, num_tokens_per_block, num_blocks_per_seq,
                        stream);
 
-  stream.wait();
-  std::cout << "finish 3 steps" << std::endl;
 }
 
 template <class InputActivationsType,
@@ -570,17 +535,6 @@ class ExpandInputRowsKernel {
 
       // Load 128-bits per thread
 
-//       constexpr int64_t ELEM_PER_BYTE = is_nvfp4_input ? 2 : 1;
-//       using DataElem = std::conditional_t<
-//         is_nvfp4_input, uint32_t,
-//         std::conditional_t<is_mxfp8_input, uint64_t,
-//                            cutlass::Array<InputActivationsType, ELEM_PER_THREAD>>>;
-//       using OutputElem = std::conditional_t<
-//         is_nvfp4, uint32_t,
-//         std::conditional_t<is_mxfp8, uint64_t,
-//                            cutlass::Array<ExpandedActivationsType, ELEM_PER_THREAD>>>;
-
-//       // Duplicate and permute rows
       int64_t const source_k_rank = unpermuted_row / num_tokens;
       int64_t const source_row = unpermuted_row % num_tokens;
 
