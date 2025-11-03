@@ -5,7 +5,6 @@
 
 typedef at::BFloat16 bfloat16;
 
-
 void fused_moe(torch::Tensor output, torch::Tensor input,
                torch::Tensor token_selected_experts,
                torch::Tensor token_final_scales,
@@ -70,13 +69,13 @@ void fused_moe(torch::Tensor output, torch::Tensor input,
   int map_offset = 0;
   std::map<std::string, std::pair<size_t, size_t>> ws_map;
 
-  #define ADD_NAME(name, size)                                  \
-  do {                                                        \
-    size_t aligned_size = ((size) + 255) & ~255ULL;           \
-    ws_map[#name] = std::pair{aligned_size, map_offset};     \
-    map_offset += aligned_size;                               \
+#define ADD_NAME(name, size)                             \
+  do {                                                   \
+    size_t aligned_size = ((size) + 255) & ~255ULL;      \
+    ws_map[#name] = std::pair{aligned_size, map_offset}; \
+    map_offset += aligned_size;                          \
   } while (false)
-  #define ADD(name) ADD_NAME(name, name##_size)
+#define ADD(name) ADD_NAME(name, name##_size)
 
   ADD(permuted_row_to_unpermuted_row);
   ADD(permuted_token_selected_experts);
@@ -98,7 +97,8 @@ void fused_moe(torch::Tensor output, torch::Tensor input,
       getWsPtr(int{}, "permuted_token_selected_experts");
   auto permuted_row_to_unpermuted_row_ =
       getWsPtr(int{}, "permuted_row_to_unpermuted_row");
-  auto unpermuted_row_to_permuted_row = getWsPtr(int{}, "unpermuted_row_to_permuted_row");
+  auto unpermuted_row_to_permuted_row =
+      getWsPtr(int{}, "unpermuted_row_to_permuted_row");
   auto expert_first_token_offset_ =
       getWsPtr(int64_t{}, "expert_first_token_offset");
   auto blocked_expert_counts_ = getWsPtr(int{}, "blocked_expert_counts");
