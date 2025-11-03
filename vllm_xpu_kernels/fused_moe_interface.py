@@ -76,34 +76,24 @@ def xpu_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
 
     ws_map = {}
     map_offset = 0
-    ws_map["permuted_token_selected_experts"] = (
-        permuted_token_selected_experts_size, map_offset)
-    map_offset += permuted_token_selected_experts_size
-    ws_map["permuted_row_to_unpermuted_row"] = (
-        permuted_row_to_unpermuted_row_size, map_offset)
-    map_offset += permuted_row_to_unpermuted_row_size
-    ws_map["src_to_dest_map"] = (src_to_dest_map_size, map_offset)
-    map_offset += src_to_dest_map_size
-    ws_map["expert_first_token_offset"] = (expert_first_token_offset_size,
-                                           map_offset)
-    map_offset += expert_first_token_offset_size
-    ws_map["blocked_expert_counts"] = (blocked_expert_counts_size, map_offset)
-    map_offset += blocked_expert_counts_size
-    ws_map["blocked_expert_counts_cumsum"] = (
-        blocked_expert_counts_cumsum_size, map_offset)
-    map_offset += blocked_expert_counts_cumsum_size
-    ws_map["blocked_row_to_unpermuted_row"] = (
-        blocked_row_to_unpermuted_row_size, map_offset)
-    map_offset += blocked_row_to_unpermuted_row_size
-    if map_offset % 256 != 0:
-        map_offset += 256 - (map_offset % 256)
+    def config_ws(name, size):
+        nonlocal map_offset
+        if size % 256 != 0:
+            size += 256 - size % 256
+        ws_map[name] = (size, map_offset)
+        map_offset += size
 
-    ws_map["overlapped_gemm1_gemm2_inputs"] = (permuted_data_size, map_offset)
-    map_offset += permuted_data_size
-    ws_map["permuted_token_final_scales"] = (permuted_token_final_scales_size,
-                                             map_offset)
-    map_offset += permuted_token_final_scales_size
+    config_ws("permuted_row_to_unpermuted_row", permuted_row_to_unpermuted_row_size)
+    config_ws("permuted_token_selected_experts", permuted_token_selected_experts_size)
+    config_ws("unpermuted_row_to_permuted_row", src_to_dest_map_size)
+    config_ws("blocked_expert_counts", blocked_expert_counts_size);
+    config_ws("blocked_expert_counts_cumsum", blocked_expert_counts_cumsum_size);
+    config_ws("blocked_row_to_unpermuted_row", blocked_row_to_unpermuted_row_size);
+    config_ws("expert_first_token_offset", expert_first_token_offset_size);
+    config_ws("permuted_token_final_scales", permuted_token_final_scales_size);
+    config_ws("overlapped_gemm1_gemm2_inputs", permuted_data_size);
 
+    print("python total offset: ", map_offset)
     workspace = torch.zeros(map_offset,
                             dtype=torch.uint8,
                             device=hidden_states.device)
