@@ -218,6 +218,7 @@ def transpose_onednn_woq_format(layer: torch.nn.Module,
             qzeros = torch.Tensor([8]).to(torch.int8).to("xpu")
         else:
             qzeros = layer.qzeros + 0x11111111
+        layer.qzeros.as_strided_(qzeros.shape, qzeros.stride())
         layer.qzeros.copy_(qzeros)
 
 
