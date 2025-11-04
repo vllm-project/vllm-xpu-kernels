@@ -100,6 +100,9 @@ class FMHAPrefillChunk {
   using EpilogueParams = typename CollectiveEpilogue::Params;
   using TileShapeOutput = typename CollectiveEpilogue::TileShapeOutput;
   using TiledMmaOutput = typename CollectiveEpilogue::TiledMmaOutput;
+  // sink
+  using ElementSink = typename CollectiveEpilogue::ElementSink;
+  static constexpr bool Sink = CollectiveEpilogue::Sink;
 
   static_assert(
       cute::is_same_v<ElementAccumulator,
@@ -111,7 +114,8 @@ class FMHAPrefillChunk {
   static constexpr bool CausalMask = CollectiveMainloop::CausalMask;
   static constexpr bool LocalMask = CollectiveMainloop::LocalMask;
 
-  static_assert(!(CausalMask && LocalMask), "Cannot be both causal and local");
+  // static_assert(!(CausalMask && LocalMask), "Cannot be both causal and
+  // local");
   static constexpr bool PagedKV = CollectiveMainloop::PagedKV;
 
   static constexpr int SubgroupSize =
@@ -455,8 +459,7 @@ class FMHAPrefillChunk {
         if constexpr (LocalMask) {
           // mask the elements of each tile where j - left > i || j + right < i
           const int item_id = thread_idx % SubgroupSize;
-          int col_idx = item_id;
-          col_idx += split * cute::min(QK_BLK_N, seq_len_kv_cache);
+          int col_idx = item_id + split * cute::min(QK_BLK_N, seq_len_kv_cache);
 
           CUTLASS_PRAGMA_UNROLL
           for (int n = 0; n < FragsN;
@@ -464,14 +467,15 @@ class FMHAPrefillChunk {
             CUTLASS_PRAGMA_UNROLL
             for (int m = 0; m < FragsM; m++) {  // 2
               int row_idx = m * Vec + seq_coord;
+              int col_ref = seq_len_kv_cache - seq_len_qo;
               CUTLASS_PRAGMA_UNROLL
               for (int row = 0; row < Vec; row++) {  // 8
                 bool left_mask =
-                    col_idx < cute::max(0, row + row_idx + seq_len_kv_cache -
+                    col_idx < cute::max(0, row + row_idx + col_ref -
                                                mainloop_params.window_left);
                 bool right_mask =
                     col_idx > cute::min(seq_len_kv_cache,
-                                        row + row_idx + seq_len_kv_cache +
+                                        row + row_idx + col_ref +
                                             mainloop_params.window_right);
                 if (left_mask || right_mask) {
                   tSr(row, m, n) = ElementAccumulator{-INFINITY};
@@ -544,8 +548,15 @@ class FMHAPrefillChunk {
               batch_coord, q_head_coord);
       CollectiveEpilogue epilogue{epilogue_params, shared_storage.epilogue};
       auto blk_coord_mnkl = make_coord(blk_m_coord, blk_n_coord, _, 0);
-      epilogue(params.problem_shape, sequence_length_shape, blk_coord_mnkl,
-               out_reg, max_reg, sum_reg);
+      if constexpr (Sink) {
+        ElementAccumulator max_scale{max_reg * params.softmax.scale};
+        epilogue(params.problem_shape, sequence_length_shape, blk_coord_mnkl,
+                 out_reg, max_scale, sum_reg,
+                 params.epilogue.ptr_sink[q_head_coord]);
+      } else {
+        epilogue(params.problem_shape, sequence_length_shape, blk_coord_mnkl,
+                 out_reg, max_reg, sum_reg, 0);
+      }
     }
   }
 };

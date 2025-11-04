@@ -36,16 +36,21 @@ struct chunk_prefill_args_t {
   int total_seqlen_q;
   int total_seqlen_k;
   float sm_scale;
+  void* sm_sink;
   int batch_size;
   int num_heads_q;
   int num_heads_k;
   int head_size;
   int max_blocks_per_seq;
   int block_size;
-  bool is_causal;
+  int window_size_left = -1;
+  int window_size_right = -1;
+  bool is_causal = false;
+  bool is_local = false;
+  bool is_sink = false;
 };
 
-template <class FMHAChunkPrefillKernel, bool isVarLen>
+template <class FMHAChunkPrefillKernel>
 struct KernelLauncher {
   using StrideQ = typename FMHAChunkPrefillKernel::StrideQ;
   using StrideK = typename FMHAChunkPrefillKernel::StrideK;
@@ -62,6 +67,7 @@ struct KernelLauncher {
   using ElementOutput = typename CollectiveEpilogue::ElementOutput;
   using ElementCompute = typename CollectiveEpilogue::ElementCompute;
   using ElementAccumulator = typename CollectiveEpilogue::ElementAccumulator;
+  using ElementSink = typename CollectiveEpilogue::ElementSink;
 
   using ProblemShapeType = typename FMHAChunkPrefillKernel::ProblemShape;
 
@@ -120,9 +126,11 @@ struct KernelLauncher {
          reinterpret_cast<ElementK*>(args.key), stride_K_cache,
          reinterpret_cast<ElementV*>(args.value), stride_V_cache,
          static_cast<int*>(args.block_table), args.block_size,
-         args.max_blocks_per_seq, args.total_seqlen_k, -1, -1},
+         args.max_blocks_per_seq, args.total_seqlen_k, args.window_size_left,
+         args.window_size_right},
         {args.sm_scale},
-        {reinterpret_cast<ElementOutput*>(args.out), stride_O},
+        {reinterpret_cast<ElementOutput*>(args.out), stride_O,
+         reinterpret_cast<ElementSink*>(args.sm_sink)},
         hw_info};
 
     // Define device-global scratch memory
@@ -186,11 +194,11 @@ template <typename TileShapeQK, typename TileShapePV, typename TileShapeOutput,
           typename ElementComputeEpilogue = float,
           typename GmemTiledCopyStore = XE_2D_U16x8x16_ST_N>
 struct FMHAKernel {
-  template <bool isVarLen, bool Causal, bool PagedKV, bool Local,
-            class Scheduler>
+  template <class Scheduler, bool Causal, bool Local, bool Sink>
   static void run(sycl::queue& queue, const chunk_prefill_args_t& args) {
     cutlass::KernelHardwareInfo hw_info;
 
+    static constexpr bool PagedKV = true;
     using LayoutQ = cutlass::layout::RowMajor;
     using LayoutK = cutlass::layout::ColumnMajor;
     using LayoutV = cutlass::layout::RowMajor;
@@ -198,16 +206,17 @@ struct FMHAKernel {
 
     using ElementInputKV = ElementInputQ;
     using ElementOutput = ElementInputQ;
+    using ElementSink = ElementInputQ;
 
     using GEMMDispatchPolicy =
         cutlass::gemm::MainloopIntelXeXMX16<PipelineStages>;
     using EpilogueDispatchPolicy = cutlass::epilogue::IntelXeXMX16;
     using CollectiveEpilogue =
         cutlass::flash_attention::collective::FlashChunkPrefillEpilogue<
-            EpilogueDispatchPolicy, MMAOperation, TileShapeOutput,
+            Sink, EpilogueDispatchPolicy, MMAOperation, TileShapeOutput,
             SubgroupLayout, ElementComputeEpilogue, ElementOutput,
             cutlass::gemm::TagToStrideC_t<LayoutO>, ElementOutput,
-            GmemTiledCopyStore>;
+            GmemTiledCopyStore, ElementSink>;
     using CollectiveSoftmaxEpilogue =
         cutlass::flash_attention::collective::FlashChunkPrefillSoftmaxEpilogue<
             Causal, Local, EpilogueDispatchPolicy, ElementAccumulator>;
@@ -216,8 +225,7 @@ struct FMHAKernel {
     using namespace cutlass::fmha::collective;
     using ProblemShapeVarlen =
         cute::tuple<int, int, int, VariableLength, VariableLength, int, int>;
-    using ProblemShapeType =
-        std::conditional_t<isVarLen, ProblemShapeVarlen, ProblemShapeRegular>;
+    using ProblemShapeType = ProblemShapeVarlen;
 
     // Mainloop
     using CollectiveMainloop =
@@ -237,18 +245,26 @@ struct FMHAKernel {
             ProblemShapeType, CollectiveMainloop, CollectiveSoftmaxEpilogue,
             CollectiveEpilogue, Scheduler>;
 
-    KernelLauncher<FMHAChunkPrefillKernel, isVarLen> launcher;
+    KernelLauncher<FMHAChunkPrefillKernel> launcher;
 
     launcher.run(queue, args, hw_info);
   }
 
-  static void dispatch(sycl::queue& queue, const chunk_prefill_args_t& args) {
-    if (args.is_causal) {
-      run<true, true, true, false,
-          cutlass::flash_attention::IndividualScheduler>(queue, args);
+  template <bool... Bs>
+  static void kernel_dispatch(sycl::queue& queue,
+                              const chunk_prefill_args_t& args) {
+    return run<cutlass::flash_attention::IndividualScheduler, Bs...>(queue,
+                                                                     args);
+  }
+
+  template <bool... Bs, typename... Ts>
+  static void kernel_dispatch(sycl::queue& queue,
+                              const chunk_prefill_args_t& args, bool b,
+                              Ts... ts) {
+    if (b) {
+      kernel_dispatch<Bs..., true>(queue, args, ts...);
     } else {
-      run<true, false, true, false,
-          cutlass::flash_attention::IndividualScheduler>(queue, args);
+      kernel_dispatch<Bs..., false>(queue, args, ts...);
     }
   }
 };
@@ -261,13 +277,17 @@ void policy_dispatch(sycl::queue& queue, CutlassType cuType,
     FMHAKernel<typename chunk_policy::ShapeQK, typename chunk_policy::ShapePV,
                typename chunk_policy::ShapeOutPut,
                typename chunk_policy::SubgroupLayout, PipelineStages,
-               cutlass::half_t, XE_8x16x16_F32F16F16F32_TT>::dispatch(queue,
-                                                                      args);
+               cutlass::half_t,
+               XE_8x16x16_F32F16F16F32_TT>::kernel_dispatch(queue, args,
+                                                            args.is_causal,
+                                                            args.is_local,
+                                                            args.is_sink);
   } else {
     FMHAKernel<typename chunk_policy::ShapeQK, typename chunk_policy::ShapePV,
                typename chunk_policy::ShapeOutPut,
                typename chunk_policy::SubgroupLayout,
-               PipelineStages>::dispatch(queue, args);
+               PipelineStages>::kernel_dispatch(queue, args, args.is_causal,
+                                                args.is_local, args.is_sink);
   }
 }
 
@@ -278,7 +298,9 @@ void cutlass_chunk_prefill_impl(
     const at::Tensor& value_cache, at::Tensor& out,
     const at::Tensor& block_table, const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k, int max_seqlen_q, int max_seqlen_k,
-    double sm_scale, bool is_causal) {
+    double sm_scale, std::optional<const at::Tensor>& sm_sink_,
+    int window_size_left, int window_size_right, bool is_causal, bool is_local,
+    bool is_sink) {
   int num_block = key_cache.size(0);
   int block_size = key_cache.size(1);
   int num_heads_q = query.size(1);
@@ -288,6 +310,12 @@ void cutlass_chunk_prefill_impl(
   int max_blocks_per_seq = block_table.size(1);
   int total_seqlen_q = query.size(0);
   int total_seqlen_k = num_block * block_size;
+
+  if (is_local) {
+    window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
+    window_size_right =
+        window_size_right == -1 ? max_seqlen_k : window_size_right;
+  }
 
   chunk_prefill_args_t args = {query.data_ptr(),
                                key_cache.data_ptr(),
@@ -301,13 +329,18 @@ void cutlass_chunk_prefill_impl(
                                total_seqlen_q,
                                total_seqlen_k,
                                static_cast<float>(sm_scale),
+                               is_sink ? sm_sink_.value().data_ptr() : nullptr,
                                batch_size,
                                num_heads_q,
                                num_heads_kv,
                                head_size,
                                max_blocks_per_seq,
                                block_size,
-                               is_causal};
+                               window_size_left,
+                               window_size_right,
+                               is_causal,
+                               is_local,
+                               is_sink};
   CutlassType cuType = aten_to_Cutlass_dtype(query);
 
   if (args.head_size == HEAD_SIZE_LIMIT_0) {

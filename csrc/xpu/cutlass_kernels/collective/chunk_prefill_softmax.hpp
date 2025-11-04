@@ -168,9 +168,6 @@ class FlashChunkPrefillSoftmaxEpilogue<CausalMask_, LocalMask_,
     constexpr int FragsNAcc = get<2>(FragAccLayout{}.shape());
     constexpr int FragsNOut = size(select<2, 3>(FragOutLayout{}.shape()));
     reduce_max<Vec, FragsM, FragsNAcc>(frag_s, max);
-    // if (max == INFINITY) {
-    //   max = 0.f;
-    // }
     static_assert(Vec * FragsM % 8 == 0,
                   " No. of attention rows per subgroup should be >= 1 MMA Atom "
                   "worth of rows.");
@@ -208,7 +205,6 @@ class FlashChunkPrefillSoftmaxEpilogue<CausalMask_, LocalMask_,
             }
           } else {
             Element eq = frag_s(base_index) - max_scale_bcast;
-            // eq = eq < -65400.f ? 0.f : eq;
             frag_s(base_index) = sycl::native::exp2(eq);
           }
           sum(index) += frag_s(base_index);

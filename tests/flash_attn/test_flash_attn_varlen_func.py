@@ -17,7 +17,9 @@ QDTYPES = [None]
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
 SOFT_CAPS = [None]
-SLIDING_WINDOWS = [None]
+SLIDING_WINDOWS = [(-1, 2), (2, -1), (11, 3), (-1, -1)]
+SINK = [False, True]
+CASUAL = [False, True]
 
 
 def ref_paged_attn(query: torch.Tensor,
@@ -27,9 +29,11 @@ def ref_paged_attn(query: torch.Tensor,
                    kv_lens: list[int],
                    block_tables: torch.Tensor,
                    scale: float,
-                   sliding_window: Optional[int] = None,
+                   window_size_left: Optional[int] = None,
+                   window_size_right: Optional[int] = None,
                    soft_cap: Optional[float] = None,
-                   casual: Optional[bool] = False) -> torch.Tensor:
+                   casual: Optional[bool] = False,
+                   sink: Optional[torch.Tensor] = None) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     _, block_size, num_kv_heads, head_size = key_cache.shape
@@ -56,17 +60,32 @@ def ref_paged_attn(query: torch.Tensor,
         attn = torch.einsum("qhd,khd->hqk", q, k).float()
         empty_mask = torch.ones(query_len, kv_len)
         mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
-        if sliding_window is not None:
-            sliding_window_mask = torch.triu(empty_mask,
-                                             diagonal=kv_len -
-                                             (query_len + sliding_window) +
-                                             1).bool().logical_not()
-            mask |= sliding_window_mask
+        if window_size_right > 0 or window_size_left > 0:
+            if window_size_right < 0:
+                window_size_right = max(kv_lens)
+            if window_size_left < 0:
+                window_size_left = max(kv_lens)
+
+            mask_right = torch.triu(empty_mask,
+                                    diagonal=kv_len - query_len +
+                                    window_size_right + 1).bool()
+            mask_left = torch.triu(empty_mask,
+                                   diagonal=kv_len - query_len -
+                                   window_size_left).bool().logical_not()
+            mask_local = mask_right | mask_left
+            attn.masked_fill_(mask_local, float("-inf"))
         if soft_cap is not None:
             attn = soft_cap * torch.tanh(attn / soft_cap)
         if casual:
             attn.masked_fill_(mask, float("-inf"))
+        if sink is not None:
+            sink_expanded = sink.view(sink.size()[0], 1,
+                                      1).expand(attn.size()[0],
+                                                attn.size()[1], 1)
+            attn = torch.cat([attn, sink_expanded], dim=-1)
         attn = torch.softmax(attn, dim=-1).to(v.dtype)
+        if sink is not None:
+            attn = attn[..., :-1]
         out = torch.einsum("hqk,khd->qhd", attn, v)
 
         outputs.append(out)
@@ -91,24 +110,28 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("soft_cap", SOFT_CAPS)
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("fa_version", [2])
 @pytest.mark.parametrize("q_dtype", QDTYPES)
+@pytest.mark.parametrize("is_sink", SINK)
+@pytest.mark.parametrize("is_casual", CASUAL)
 @torch.inference_mode()
 def test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
-    sliding_window: Optional[int],
+    window_size: tuple[int, int],
     dtype: torch.dtype,
     block_size: int,
     soft_cap: Optional[float],
     num_blocks: int,
     fa_version: int,
     q_dtype: Optional[torch.dtype],
+    is_sink: bool,
+    is_casual: bool,
 ) -> None:
     torch.set_default_device("xpu")
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
@@ -123,9 +146,6 @@ def test_varlen_with_paged_kv(
     assert num_query_heads % num_kv_heads == 0
     max_query_len = max(query_lens)
     max_kv_len = max(kv_lens)
-    window_size = (  #noqa: F841
-        (sliding_window - 1, 0) if sliding_window is not None else  #noqa: F841
-        (-1, -1))  #noqa: F841
     scale = head_size**-0.5
 
     query = torch.randn(sum(query_lens),
@@ -150,6 +170,9 @@ def test_varlen_with_paged_kv(
                                  num_blocks,
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
+    sink = None
+    if is_sink:
+        sink = torch.randn(num_query_heads, dtype=dtype)
 
     maybe_quantized_query = query
     maybe_quantized_key_cache = key_cache
@@ -176,8 +199,10 @@ def test_varlen_with_paged_kv(
                                     max_kv_len,
                                     cu_kv_lens,
                                     softmax_scale=scale,
-                                    causal=False,
-                                    block_table=block_tables)
+                                    causal=is_casual,
+                                    block_table=block_tables,
+                                    window_size=window_size,
+                                    s_aux=sink)
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
@@ -186,7 +211,10 @@ def test_varlen_with_paged_kv(
                                 kv_lens=kv_lens,
                                 block_tables=block_tables,
                                 scale=scale,
-                                casual=False)
+                                casual=is_casual,
+                                sink=sink,
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1])
     atol, rtol = 1.5e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1

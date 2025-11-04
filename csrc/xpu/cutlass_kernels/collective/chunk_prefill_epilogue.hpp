@@ -49,19 +49,20 @@ namespace collective {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <class DispatchPolicy, class MMAOperation_, class TileShapeOutput_,
-          class SubgroupLayout_, class... Args>
+template <bool Sink_, class DispatchPolicy, class MMAOperation_,
+          class TileShapeOutput_, class SubgroupLayout_, class... Args>
 class FlashChunkPrefillEpilogue {
   static_assert(cutlass::detail::dependent_false<DispatchPolicy>,
                 "Could not find an epilogue specialization.");
 };
 
-template <class MMAOperation_, class TileShapeOutput_, class SubgroupLayout_,
-          class ElementCompute_, class ElementO_, class StrideO_,
-          class ElementLSE_, class CopyOpO_>
-class FlashChunkPrefillEpilogue<
-    epilogue::IntelXeXMX16, MMAOperation_, TileShapeOutput_, SubgroupLayout_,
-    ElementCompute_, ElementO_, StrideO_, ElementLSE_, CopyOpO_> {
+template <bool Sink_, class MMAOperation_, class TileShapeOutput_,
+          class SubgroupLayout_, class ElementCompute_, class ElementO_,
+          class StrideO_, class ElementLSE_, class CopyOpO_, class ElementSink_>
+class FlashChunkPrefillEpilogue<Sink_, epilogue::IntelXeXMX16, MMAOperation_,
+                                TileShapeOutput_, SubgroupLayout_,
+                                ElementCompute_, ElementO_, StrideO_,
+                                ElementLSE_, CopyOpO_, ElementSink_> {
  public:
   //
   // Type Aliases
@@ -82,6 +83,10 @@ class FlashChunkPrefillEpilogue<
   using ElementAccumulator = ElementCompute_;
   using SubgroupTileShape =
       decltype(cute::shape_div(TileShapeOutput{}, (SubgroupLayout{}.shape())));
+
+  // softmax sink
+  static constexpr bool Sink = Sink_;
+  using ElementSink = ElementSink_;
 
   static constexpr int SubgroupSize = DispatchPolicy::SubgroupSize;
 
@@ -121,11 +126,13 @@ class FlashChunkPrefillEpilogue<
   struct Arguments {
     ElementO const* ptr_O;
     StrideO dO;
+    ElementSink const* ptr_sink;
   };
 
   // Device side epilogue params
   struct Params {
     XE_Copy_O xe_store_o;
+    ElementSink const* ptr_sink;
   };
 
   //
@@ -156,9 +163,7 @@ class FlashChunkPrefillEpilogue<
                                            head_size_vo, batch * q_group_num),
                                 args.dO));
     XE_Copy_O xe_store_o{XE_Copy_O{}.with(tensorO)};
-    return {
-        xe_store_o,
-    };
+    return {xe_store_o, args.ptr_sink};
   }
 
   template <class ProblemShape>
@@ -186,11 +191,12 @@ class FlashChunkPrefillEpilogue<
       : params(params_) {}
 
   template <class ProblemShape, class SequenceLengthShape, class TileCoord,
-            class FragOut, class FragMax, class FragSum>
+            class FragOut, class FragMax, class FragSum, class FragSink>
   CUTLASS_DEVICE void operator()(ProblemShape problem_shape,
                                  SequenceLengthShape sequence_length_shape,
                                  TileCoord tile_coord, FragOut& out,
-                                 FragMax const& max, FragSum& sum) {
+                                 FragMax const& max, FragSum& sum,
+                                 [[maybe_unused]] FragSink const& sink) {
     using namespace cute;
 
     static constexpr bool is_var_len =
@@ -213,6 +219,14 @@ class FlashChunkPrefillEpilogue<
       for (int x = 0; x < Vec; x++) {
         int index = y * Vec + x;
         auto cur_sum = reduce_over_group(sg, sum(index), sycl::plus<>());
+
+        if constexpr (Sink) {
+          constexpr double kLog2e = 1.4426950408889634074;
+          auto max_scale_bcast = group_broadcast(sg, max, index);
+          cur_sum += sycl::native::exp2(
+              static_cast<ElementAccumulator>(sink * kLog2e) - max_scale_bcast);
+        }
+
         auto cur_scale = (cur_sum == 0.f || cur_sum != cur_sum)
                              ? 1.0f
                              : sycl::native::recip(cur_sum);
@@ -295,7 +309,7 @@ class FlashChunkPrefillEpilogue<
     auto tensorO = make_tensor(make_gmem_ptr(base_ptr + offset_o),
                                make_layout(shape_o, stride_o));
     XE_Copy_O xe_store_o{XE_Copy_O{}.with(tensorO)};
-    return Params{xe_store_o};
+    return Params{xe_store_o, params.ptr_sink};
   }
 
  private:

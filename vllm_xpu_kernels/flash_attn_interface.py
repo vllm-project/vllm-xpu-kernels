@@ -95,6 +95,7 @@ def flash_attn_varlen_func(
             max_seqlen_k,
             dropout_p,
             softmax_scale,
+            s_aux,
             False,
             causal,
             real_window_size[0],

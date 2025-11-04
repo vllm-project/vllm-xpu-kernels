@@ -8,27 +8,18 @@
 namespace FLASH_NAMESPACE {
 
 std::vector<at::Tensor> mha_varlen_fwd(
-    const at::Tensor&
-        q,  // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
-    const at::Tensor& k,  // total_k x num_heads_k x head_size, total_k :=
-                          // \sum_{i=0}^{b} s_i or num_blocks x page_block_size
-                          // x num_heads_k x head_size if there's a block_table.
-    const at::Tensor& v,  // total_k x num_heads_k x head_size, total_k :=
-                          // \sum_{i=0}^{b} s_i or num_blocks x page_block_size
-                          // x num_heads_k x head_size if there's a block_table.
-    std::optional<at::Tensor>&
-        out_,  // total_q x num_heads x head_size, total_k := \sum_{i=0}^{b} s_i
+    const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+    std::optional<at::Tensor>& out_,
     const at::Tensor& cu_seqlens_q,  // b+1
     const at::Tensor& cu_seqlens_k,  // b+1
-    std::optional<at::Tensor>&
-        seqused_k,  // b. If given, only this many elements of each batch
-                    // element's keys are used.
+    std::optional<at::Tensor>& seqused_k,
     std::optional<const at::Tensor>& leftpad_k_,  // batch_size
     at::Tensor& block_table_,  // batch_size x max_num_blocks_per_seq
     std::optional<at::Tensor>& alibi_slopes_,  // num_heads or b x num_heads
     int max_seqlen_q, int max_seqlen_k, float p_dropout, float softmax_scale,
-    const bool zero_tensors, bool is_causal, int window_size_left,
-    int window_size_right, const float softcap, const bool return_softmax,
+    std::optional<const at::Tensor>& softmax_sink_, const bool zero_tensors,
+    bool is_causal, int window_size_left, int window_size_right,
+    const float softcap, const bool return_softmax,
     std::optional<at::Generator> gen_) {
   auto& queue = vllm::xpu::vllmGetQueue();
 
@@ -39,9 +30,13 @@ std::vector<at::Tensor> mha_varlen_fwd(
     out = torch::empty_like(q);
   }
 
+  bool is_local = (window_size_left != -1) | (window_size_right != -1);
+  bool is_sink = softmax_sink_.has_value();
+
   cutlass_chunk_prefill_impl(queue, q, k, v, out, block_table_, cu_seqlens_q,
                              cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-                             softmax_scale, is_causal);
+                             softmax_scale, softmax_sink_, window_size_left,
+                             window_size_right, is_causal, is_local, is_sink);
 
   if (return_softmax) {
     // FIXME: current do not support store softmax_lse out
@@ -61,7 +56,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor cu_seqlens_k, Tensor? seqused_k, Tensor? leftpad_k, Tensor "
       "block_table, Tensor? alibi_slopes, "
       "int max_seqlen_q, int max_seqlen_k, float p_dropout, float "
-      "softmax_scale, bool zero_tensors, "
+      "softmax_scale, Tensor? softmax_sink, bool zero_tensors, "
       "bool is_causal, int window_size_left, int window_size_right, float "
       "softcap, bool return_softmax, "
       "Generator? gen) -> Tensor[]");
