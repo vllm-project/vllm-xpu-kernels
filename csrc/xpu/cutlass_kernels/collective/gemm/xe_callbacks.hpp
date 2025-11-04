@@ -708,7 +708,7 @@ template <class ElementOutput_, class ElementCompute_, class ElementSource_,
           class ElementScalar_, FloatRoundStyle RoundStyle_,
           class CtaTileShapeMNK_, class EpilogueTile_>
 struct FusionCallbacks<
-    epilogue::IntelXeXMX16Group,
+    epilogue::MoE16Group,
     fusion::LinearCombination<ElementOutput_, ElementCompute_, ElementSource_,
                               ElementScalar_, RoundStyle_>,
     CtaTileShapeMNK_, EpilogueTile_>

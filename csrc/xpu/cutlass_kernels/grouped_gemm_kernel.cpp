@@ -103,7 +103,7 @@
 #include "./collective/gemm/gemm_universal_adapter.h"
 #include "./collective/gemm/xe_array_mma.hpp"
 #include "./collective/gemm/xe_array_epilogue.hpp"
-#include "./collective/gemm/xe_builder.hpp"
+/* #include "./collective/gemm/xe_builder.hpp" */
 #include "./collective/gemm/xe_callbacks.hpp"
 // #include "./collective/gemm/xe_gemm_array_cooperative.hpp"
 // #include "./collective/gemm/gemm_universal_adapter.hpp"
@@ -437,16 +437,24 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_D,
   constexpr int PipelineStages = 2;
   using GEMMDispatchPolicy =
       cutlass::gemm::MainloopIntelXeXMX16Group<PipelineStages>;
-  using EpilogueDispatchPolicy = cutlass::epilogue::IntelXeXMX16Group;
+  using EpilogueDispatchPolicy = cutlass::epilogue::MoE16Group;
   using EpilogueOp =
-      cutlass::epilogue::fusion::LinearCombination<float_t, float_t>;
+      cutlass::epilogue::fusion::LinearCombination<float_t, float_t,
+                                                   float_t, float_t, cutlass::FloatRoundStyle::round_to_nearest>;
 
+  using FusionCallbacks = 
+    cutlass::epilogue::fusion::FusionCallbacks<EpilogueDispatchPolicy,
+        EpilogueOp, TileShape, decltype(tile_shape(TiledMma()))>; 
   using CollectiveEpilogue =
-      typename cutlass::epilogue::collective::CollectiveBuilder<
-          cutlass::arch::IntelXe, cutlass::arch::OpClassTensorOp, TileShape,
-          Shape<_1, _1, _1>, cutlass::epilogue::collective::EpilogueTileAuto,
-          float, float, float, LayoutC, 1, ElementOutput, LayoutC, 1,
-          EpilogueDispatchPolicy, EpilogueOp>::CollectiveOp;
+     cutlass::epilogue::collective::CollectiveEpilogue<
+      EpilogueDispatchPolicy, TileShape, 
+      ElementAccumulator, 
+      cutlass::detail::TagToStrideC_t<LayoutC*>,
+      ElementOutput,
+      cutlass::detail::TagToStrideC_t<LayoutD*>,
+      FusionCallbacks,
+      XE_2D_U32x8x16_LD_N, void, void,
+      XE_2D_U16x8x16_ST_N, void, void>;
 
   // Mainloop
   using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<

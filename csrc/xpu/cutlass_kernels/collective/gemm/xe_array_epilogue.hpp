@@ -53,6 +53,7 @@ namespace cutlass::epilogue::collective {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+
 template <class DispatchPolicy, class... Args>
 class CollectiveEpilogue {
   static_assert(cutlass::detail::dependent_false<DispatchPolicy>,
@@ -69,6 +70,11 @@ class CollectiveEpilogue {
 
 namespace cutlass {
 namespace epilogue {
+
+struct MoE16Group {
+  static constexpr int SubgroupSize = 16;
+};
+
 namespace collective {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -77,7 +83,7 @@ template <class CtaTileMNK_, class ElementC_, class StrideC_, class ElementD_,
           class StrideD_, class FusionCallbacks_, class CopyOpG2R_,
           class SmemLayoutAtomC_, class CopyOpS2R_, class CopyOpR2G_,
           class SmemLayoutAtomD_, class CopyOpR2S_>
-class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
+class CollectiveEpilogue<MoE16Group, CtaTileMNK_, ElementC_, StrideC_,
                          ElementD_, StrideD_, FusionCallbacks_, CopyOpG2R_,
                          SmemLayoutAtomC_, CopyOpS2R_, CopyOpR2G_,
                          SmemLayoutAtomD_, CopyOpR2S_> {
@@ -85,7 +91,7 @@ class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
   //
   // Type Aliases
   //
-  using DispatchPolicy = IntelXeXMX16Group;
+  using DispatchPolicy = MoE16Group;
   using CtaTileMNK = CtaTileMNK_;
   using FusionCallbacks = FusionCallbacks_;
   using ElementC = ElementC_;
