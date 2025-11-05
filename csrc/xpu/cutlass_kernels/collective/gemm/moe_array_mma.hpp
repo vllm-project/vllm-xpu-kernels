@@ -39,7 +39,22 @@
 #include "cute/algorithm/gemm.hpp"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
+namespace cutlass::gemm {
 
+struct KernelMoEArrayCooperative {};
+
+template <int Stages_, class KernelSchedule = KernelMoEArrayCooperative>
+struct MainloopMoE16Group {
+  constexpr static int Stages = Stages_;
+  constexpr static int SubgroupSize = 16;
+  using ArchTag = arch::IntelXe;
+  using Schedule = KernelSchedule;
+  using ClusterShape = Shape<_1, _1, _1>;
+};
+
+}  // namespace cutlass::gemm
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
 namespace cutlass::gemm::collective {
 using namespace cute;
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -49,7 +64,7 @@ template <int Stages, class Schedule, class TileShape_, class ElementA_,
           class GmemTiledCopyA_, class SmemLayoutAtomA_, class SmemCopyAtomA_,
           class TransformA_, class GmemTiledCopyB_, class SmemLayoutAtomB_,
           class SmemCopyAtomB_, class TransformB_>
-struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
+struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
                      ElementA_, StrideA_, ElementB_, StrideB_, TiledMma_,
                      GmemTiledCopyA_, SmemLayoutAtomA_, SmemCopyAtomA_,
                      TransformA_, GmemTiledCopyB_, SmemLayoutAtomB_,
@@ -57,7 +72,7 @@ struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
   //
   // Type Aliases
   //
-  using DispatchPolicy = MainloopIntelXeXMX16Group<Stages, Schedule>;
+  using DispatchPolicy = MainloopMoE16Group<Stages, Schedule>;
   using WorkgroupTileShape = TileShape_;
   using ElementA = ElementA_;
   using StrideA = StrideA_;
