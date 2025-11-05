@@ -101,11 +101,11 @@
 #include "cutlass/gemm/collective/collective_mma_decl.hpp"
 #include "./collective/gemm/gemm_universal.h"
 #include "./collective/gemm/gemm_universal_adapter.h"
-#include "./collective/gemm/xe_array_mma.hpp"
-#include "./collective/gemm/xe_array_epilogue.hpp"
+#include "collective/gemm/moe_array_mma.hpp"
+#include "collective/gemm/moe_array_epilogue.hpp"
 /* #include "./collective/gemm/xe_builder.hpp" */
-#include "./collective/gemm/xe_callbacks.hpp"
-// #include "./collective/gemm/xe_gemm_array_cooperative.hpp"
+#include "collective/gemm/moe_callbacks.hpp"
+#include "collective/gemm/moe_gemm_array_cooperative.hpp"
 // #include "./collective/gemm/gemm_universal_adapter.hpp"
 
 using namespace cute;
@@ -436,7 +436,7 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_D,
 
   constexpr int PipelineStages = 2;
   using GEMMDispatchPolicy =
-      cutlass::gemm::MainloopIntelXeXMX16Group<PipelineStages>;
+      cutlass::gemm::MainloopMoE16Group<PipelineStages>;
   using EpilogueDispatchPolicy = cutlass::epilogue::MoE16Group;
   using EpilogueOp =
       cutlass::epilogue::fusion::LinearCombination<float_t, float_t,

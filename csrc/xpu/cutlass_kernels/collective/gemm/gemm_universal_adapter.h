@@ -44,6 +44,7 @@
 #include "cutlass/detail/layout.hpp"
 #include "cutlass/detail/mma.hpp"
 #include "cutlass/cuda_host_adapter.hpp"
+#include "cutlass/gemm/dispatch_policy.hpp"
 
 #include "cutlass/kernel_launch.h"
 #if !defined(__CUDACC_RTC__)

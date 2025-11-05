@@ -54,4 +54,3 @@ struct IsCutlass3ArrayKernel<
 }  // namespace cutlass::gemm::kernel
 
 ////////////////////////////////////////////////////////////////////////////////
-#include "xe_gemm_array_cooperative.hpp"
