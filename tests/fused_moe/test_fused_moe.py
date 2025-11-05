@@ -162,13 +162,3 @@ def check_fused_moe(
     except AssertionError as e:
         print("a and b diffs")
         print(e)
-
-if __name__ == "__main__":
-    check_fused_moe(
-        m = 64,
-        n = 8192,
-        k = 5120,
-        e = 16,
-        topk = 1,
-        dtype = torch.bfloat16
-    )

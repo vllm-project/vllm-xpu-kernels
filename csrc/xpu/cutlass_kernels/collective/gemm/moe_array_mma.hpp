@@ -38,22 +38,21 @@
 #include "cute/atom/mma_atom.hpp"
 #include "cute/algorithm/gemm.hpp"
 
-
 /////////////////////////////////////////////////////////////////////////////////////////////////
 namespace cutlass::gemm {
 
-struct KernelMoEArrayCooperative { };
-  
-template<int Stages_, class KernelSchedule = KernelMoEArrayCooperative>
+struct KernelMoEArrayCooperative {};
+
+template <int Stages_, class KernelSchedule = KernelMoEArrayCooperative>
 struct MainloopMoE16Group {
   constexpr static int Stages = Stages_;
   constexpr static int SubgroupSize = 16;
   using ArchTag = arch::IntelXe;
   using Schedule = KernelSchedule;
-  using ClusterShape = Shape<_1,_1,_1>;
+  using ClusterShape = Shape<_1, _1, _1>;
 };
 
-}
+}  // namespace cutlass::gemm
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 namespace cutlass::gemm::collective {

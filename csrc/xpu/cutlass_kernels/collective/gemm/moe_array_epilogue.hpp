@@ -53,7 +53,6 @@ namespace cutlass::epilogue::collective {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-
 template <class DispatchPolicy, class... Args>
 class CollectiveEpilogue {
   static_assert(cutlass::detail::dependent_false<DispatchPolicy>,

@@ -435,26 +435,20 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_D,
                     Layout<Shape<_16, _4, _4>, Stride<_1, _64, _16>>, _32>>;
 
   constexpr int PipelineStages = 2;
-  using GEMMDispatchPolicy =
-      cutlass::gemm::MainloopMoE16Group<PipelineStages>;
+  using GEMMDispatchPolicy = cutlass::gemm::MainloopMoE16Group<PipelineStages>;
   using EpilogueDispatchPolicy = cutlass::epilogue::MoE16Group;
-  using EpilogueOp =
-      cutlass::epilogue::fusion::LinearCombination<float_t, float_t,
-                                                   float_t, float_t, cutlass::FloatRoundStyle::round_to_nearest>;
+  using EpilogueOp = cutlass::epilogue::fusion::LinearCombination<
+      float_t, float_t, float_t, float_t,
+      cutlass::FloatRoundStyle::round_to_nearest>;
 
-  using FusionCallbacks = 
-    cutlass::epilogue::fusion::FusionCallbacks<EpilogueDispatchPolicy,
-        EpilogueOp, TileShape, decltype(tile_shape(TiledMma()))>; 
-  using CollectiveEpilogue =
-     cutlass::epilogue::collective::CollectiveEpilogue<
-      EpilogueDispatchPolicy, TileShape, 
-      ElementAccumulator, 
-      cutlass::detail::TagToStrideC_t<LayoutC*>,
-      ElementOutput,
-      cutlass::detail::TagToStrideC_t<LayoutD*>,
-      FusionCallbacks,
-      XE_2D_U32x8x16_LD_N, void, void,
-      XE_2D_U16x8x16_ST_N, void, void>;
+  using FusionCallbacks = cutlass::epilogue::fusion::FusionCallbacks<
+      EpilogueDispatchPolicy, EpilogueOp, TileShape,
+      decltype(tile_shape(TiledMma()))>;
+  using CollectiveEpilogue = cutlass::epilogue::collective::CollectiveEpilogue<
+      EpilogueDispatchPolicy, TileShape, ElementAccumulator,
+      cutlass::detail::TagToStrideC_t<LayoutC*>, ElementOutput,
+      cutlass::detail::TagToStrideC_t<LayoutD*>, FusionCallbacks,
+      XE_2D_U32x8x16_LD_N, void, void, XE_2D_U16x8x16_ST_N, void, void>;
 
   // Mainloop
   using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
