@@ -82,8 +82,8 @@
 // #include "cutlass/epilogue/fusion/xe_callbacks.hpp"
 // #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/group_array_problem_shape.hpp"
-// #include "cutlass/gemm/device/gemm_universal.h"
-// #include "cutlass/gemm/device/gemm_universal_adapter.h"
+#include "cutlass/gemm/device/gemm_universal.h"
+#include "cutlass/gemm/device/gemm_universal_adapter.h"
 // #include "cutlass/gemm/collective/collective_mma.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
 
@@ -99,8 +99,8 @@
 #include <cfloat>
 
 #include "cutlass/gemm/collective/collective_mma_decl.hpp"
-#include "./collective/gemm/gemm_universal.h"
-#include "./collective/gemm/gemm_universal_adapter.h"
+/* #include "./collective/gemm/gemm_universal.h" */
+/* #include "./collective/gemm/gemm_universal_adapter.h" */
 #include "collective/gemm/moe_array_mma.hpp"
 #include "collective/gemm/moe_array_epilogue.hpp"
 /* #include "./collective/gemm/xe_builder.hpp" */
@@ -357,7 +357,7 @@ struct GroupedGemmRunner {
 
     GPU_Clock timer;
     timer.start();
-    CUTLASS_CHECK(gemm_op.run(stream));
+    CUTLASS_CHECK(gemm_op.run());
     if (collect_gflops) {
       stream.wait();
       float cute_time = timer.seconds() * 1000;
@@ -371,7 +371,7 @@ struct GroupedGemmRunner {
       GPU_Clock timer;
       timer.start();
       for (int iter = 0; iter < 100; ++iter) {
-        CUTLASS_CHECK(gemm_op.run(stream));
+        CUTLASS_CHECK(gemm_op.run());
       }
       stream.wait();
       float cute_time = timer.seconds() * 1000;
