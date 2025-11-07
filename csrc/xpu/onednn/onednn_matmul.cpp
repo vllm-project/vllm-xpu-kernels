@@ -56,10 +56,8 @@ torch::Tensor fp8_gemm(const torch::Tensor& A,  // [b, m ,k]
   // check if nt format
   bool is_nt = B.strides()[B.dim() - 2] == 1;
 
-  torch::Tensor A_scale =
-      A_scale_.value_or(at::ones({1}, A.options().dtype(A.dtype())));
-  torch::Tensor B_scale =
-      B_scale_.value_or(at::ones({1}, B.options().dtype(A.dtype())));
+  torch::Tensor A_scale = A_scale_.value_or(at::ones({1}, torch::kFloat));
+  torch::Tensor B_scale = B_scale_.value_or(at::ones({1}, torch::kFloat));
   oneDNN::dnnl_matmul_w8a8_fp8(result, A, B, is_nt, bias_, A_scale, B_scale);
   return result;
 }
