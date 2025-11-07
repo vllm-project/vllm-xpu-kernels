@@ -179,23 +179,21 @@ def int4_gemm_w4a16(input: torch.Tensor, weight: torch.Tensor,
                     zero_points: torch.Tensor, group_size: int,
                     g_idx: Optional[torch.Tensor]):
     return torch.ops._xpu_C.int4_gemm_w4a16(input, weight, bias, scales,
-                                            zero_points, group_size,
-                                            g_idx)
+                                            zero_points, group_size, g_idx)
 
 
 def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
              out_dtype: Optional[torch.dtype],
              scale_act: Optional[torch.Tensor],
              scale_wei: Optional[torch.Tensor], bias: Optional[torch.Tensor]):
-    return torch.ops._xpu_C.fp8_gemm(input, weight, out_dtype,
-                                     scale_act, scale_wei, bias)
+    return torch.ops._xpu_C.fp8_gemm(input, weight, out_dtype, scale_act,
+                                     scale_wei, bias)
 
 
 def fp8_gemm_w8a16(input: torch.Tensor, weight: torch.Tensor,
                    scale_wei: Optional[torch.Tensor],
                    scale_act: Optional[torch.Tensor]):
-    return torch.ops._xpu_C.fp8_gemm_w8a16(input, weight, scale_wei,
-                                           scale_act)
+    return torch.ops._xpu_C.fp8_gemm_w8a16(input, weight, scale_wei, scale_act)
 
 
 # moe

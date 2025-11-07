@@ -77,7 +77,8 @@ static inline void dnnl_matmul_w8a8_fp8(
       /* per tensor quant */
     } else {
       pattr.set_scales(DNNL_ARG_SRC,
-                       /* mask */ (1 << 0) + (1 << 1), {1, k}, get_onednn_dtype(m1_sc));
+                       /* mask */ (1 << 0) + (1 << 1), {1, k},
+                       get_onednn_dtype(m1_sc));
       /* per token quant */
     }
 
