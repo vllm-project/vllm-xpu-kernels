@@ -3,7 +3,7 @@
 #include "fp8_gemm_w8a16.h"
 #include "int4_gemm_w4a16.h"
 
-inline bool is_fp8_supported(at::ScalarType t) {
+inline bool is_supported_fp8(at::ScalarType t) {
   return (t == at::ScalarType::Float8_e5m2) ||
          (t == at::ScalarType::Float8_e4m3fn);
 }
@@ -48,7 +48,7 @@ torch::Tensor fp8_gemm(const torch::Tensor& A,  // [b, m ,k]
   torch::Tensor result = check_and_create_output_tensor(A, B, out_dtype);
   auto a_st = A.scalar_type();
   auto b_st = B.scalar_type();
-  TORCH_CHECK(is_fp8_supported(a_st) && is_fp8_supported(b_st) && a_st == b_st,
+  TORCH_CHECK(is_supported_fp8(a_st) && is_supported_fp8(b_st) && a_st == b_st,
               "input and weight must be f8_e5m2 or f8_e4m3fn for fp8 matmul");
   TORCH_CHECK(result.scalar_type() == torch::kFloat16 ||
                   result.scalar_type() == torch::kBFloat16,
@@ -67,7 +67,7 @@ torch::Tensor fp8_gemm_w8a16(const torch::Tensor& A, const torch::Tensor& B,
                              const std::optional<torch::Tensor>& bias_) {
   const at::DeviceGuard device_guard(A.device());
   torch::Tensor result = check_and_create_output_tensor(A, B, A.scalar_type());
-  TORCH_CHECK(is_fp8_supported(B.scalar_type()),
+  TORCH_CHECK(is_supported_fp8(B.scalar_type()),
               "weight must be f8_e5m2 or f8_e4m3fn for fp8 matmul");
   // check if nt format
   bool is_nt = B.strides()[B.dim() - 2] == 1;
