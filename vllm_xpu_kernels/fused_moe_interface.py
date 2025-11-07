@@ -10,8 +10,8 @@ except ImportError as e:
     FUSEDMOE_AVAILABLE = False
 
 
-def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n, k,
-                         num_experts):
+def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
+                         k, num_experts):
     expert_token_count_ = torch.tensor(expert_token_count,
                                        dtype=torch.int64,
                                        device="cpu")
@@ -23,7 +23,8 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n, 
         return prefix
 
     if bias is not None:
-        bias = bias.repeat_interleave(expert_token_count_.to(bias.device), dim=0).float()
+        bias = bias.repeat_interleave(expert_token_count_.to(bias.device),
+                                      dim=0).float()
 
     expert_offset = torch.tensor(exclusive_prefix_sum(expert_token_count),
                                  dtype=torch.int64,
@@ -52,8 +53,8 @@ def compute_num_tokens_per_block(num_tokens, num_experts_per_node):
     return 1024
 
 
-def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights, topk_ids,
-                  n_experts_per_token, activation, num_experts):
+def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
+                  topk_ids, n_experts_per_token, activation, num_experts):
 
     output = torch.zeros_like(hidden_states)
 
@@ -130,13 +131,17 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights, topk_
     #     ws_map["permuted_token_final_scales"][1] +
     #     permuted_token_final_scales_size].view(torch.float)
     expert_token_count = (expert_first_token_offset[1:] -
-                          expert_first_token_offset[:-1]).to(
-                              torch.int64)
+                          expert_first_token_offset[:-1]).to(torch.int64)
     if w13_bias is None:
-        w13_bias = torch.zeros((num_experts, 2*inter_size), dtype=torch.float, device=hidden_states.device)
-        w2_bias = torch.zeros((num_experts, hidden_size), dtype=torch.float, device=hidden_states.device)
-    if w13_bias.shape == (num_experts, 2*inter_size):
-        w13_bias = w13_bias.repeat_interleave(expert_token_count, dim=0).float()
+        w13_bias = torch.zeros((num_experts, 2 * inter_size),
+                               dtype=torch.float,
+                               device=hidden_states.device)
+        w2_bias = torch.zeros((num_experts, hidden_size),
+                              dtype=torch.float,
+                              device=hidden_states.device)
+    if w13_bias.shape == (num_experts, 2 * inter_size):
+        w13_bias = w13_bias.repeat_interleave(expert_token_count,
+                                              dim=0).float()
     if w2_bias.shape == (num_experts, hidden_size):
         w2_bias = w2_bias.repeat_interleave(expert_token_count, dim=0).float()
     expert_token_count = expert_token_count.cpu()
@@ -151,7 +156,7 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights, topk_
     torch.ops._xpu_C.cutlass_grouped_gemm(
         ptr_A=gemm1_input,
         ptr_B=input_B,
-        bias = w13_bias,
+        bias=w13_bias,
         ptr_D=gemm1_output,
         expert_first_token_offset=expert_first_token_offset,
         expert_token_count=expert_token_count,

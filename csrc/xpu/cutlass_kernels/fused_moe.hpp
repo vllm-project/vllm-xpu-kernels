@@ -86,7 +86,6 @@ void fused_moe(torch::Tensor output, torch::Tensor input,
   ADD(expert_first_token_offset);
   ADD(permuted_token_final_scales);
   ADD_NAME(overlapped_gemm1_gemm2_inputs, permuted_data_size);
-  /* std::cout << "CPP total offset: " << map_offset << std::endl; */
 
   auto getWsPtr = [&](auto type, std::string const& name) {
     return ws_map.at(name).first ? reinterpret_cast<decltype(type)*>(

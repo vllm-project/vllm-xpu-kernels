@@ -160,7 +160,6 @@ class CollectiveEpilogue<MoE16Group, CtaTileMNK_, ElementC_, StrideC_,
 
  private:
   constexpr static bool is_source_supported = not cute::is_void_v<ElementC>;
-  /* constexpr static bool is_source_supported = false; */
   constexpr static bool is_destination_supported =
       not cute::is_void_v<ElementD> && not cute::is_void_v<CopyOpR2G>;
 
@@ -411,7 +410,7 @@ class CollectiveEpilogue<MoE16Group, CtaTileMNK_, ElementC_, StrideC_,
     auto sg_coord = make_coord(sg_m_coord, sg_n_coord, k_coord, l_coord);
 
     bool is_C_load_needed = is_source_supported;
-        /* is_source_supported && fusion_callbacks.is_C_load_needed(); */
+    /* is_source_supported && fusion_callbacks.is_C_load_needed(); */
 
     // Represent the full output tensor
     Tensor mD_mnl = cute::get_xe_tensor(make_shape(M, N, L));
@@ -548,17 +547,16 @@ class CollectiveEpilogue<MoE16Group, CtaTileMNK_, ElementC_, StrideC_,
     }
     real_group -= 1;
 
-
     TensorC mC_mnl;
     TensorD mD_mnl;
     if constexpr (is_source_supported) {
       ElementC const* ptr_C_curr_batch =
-          reinterpret_cast<ElementC const*>(params.ptr_C) + expert_first_token_offset[real_group] * N;
+          reinterpret_cast<ElementC const*>(params.ptr_C) +
+          expert_first_token_offset[real_group] * N;
       mC_mnl =
           make_tensor(make_gmem_ptr(ptr_C_curr_batch),
                       make_layout(make_shape(M, N, L), params.dC[next_group]));
     }
-
 
     if constexpr (is_destination_supported) {
       ElementD* ptr_D_curr_batch = reinterpret_cast<ElementD*>(params.ptr_D) +

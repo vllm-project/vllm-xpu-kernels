@@ -331,8 +331,7 @@ struct GroupedGemmRunner {
                       const cutlass::KernelHardwareInfo& hw_info,
                       int64_t const* expert_first_token_offset,
                       const ElementA* ptr_A, const ElementB* ptr_B,
-                      const ElementC* ptr_C,
-                      ElementOutput* ptr_D) {
+                      const ElementC* ptr_C, ElementOutput* ptr_D) {
     if (debug) {
       std::cout << "enter run" << std::endl;
     }
@@ -341,8 +340,9 @@ struct GroupedGemmRunner {
     initialize(options);
     Gemm gemm_op;
 
-    auto arguments = args_from_options(
-        options, hw_info, expert_first_token_offset, ptr_A, ptr_B, ptr_C, ptr_D);
+    auto arguments =
+        args_from_options(options, hw_info, expert_first_token_offset, ptr_A,
+                          ptr_B, ptr_C, ptr_D);
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
@@ -389,9 +389,10 @@ struct GroupedGemmRunner {
   }
 };
 
-void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_bias, void* ptr_D,
-                    void* expert_token_count, void* expert_first_token_offset,
-                    int64_t N, int64_t K, int64_t groups) {
+void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
+                    void* ptr_bias, void* ptr_D, void* expert_token_count,
+                    void* expert_first_token_offset, int64_t N, int64_t K,
+                    int64_t groups) {
   //
   // Run examples
   //

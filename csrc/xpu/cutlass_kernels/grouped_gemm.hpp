@@ -13,21 +13,23 @@
 namespace gpu::cutlass_kernel {
 
 namespace grouped_gemm {
-void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_bias, void* ptr_D,
-                    void* expert_token_count, void* expert_first_token_offset,
-                    int64_t N, int64_t K, int64_t groups);
+void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
+                    void* ptr_bias, void* ptr_D, void* expert_token_count,
+                    void* expert_first_token_offset, int64_t N, int64_t K,
+                    int64_t groups);
 }
 
 /* gemm2(group_A, w2, output, offset) */
 
-at::Tensor grouped_gemm_func(at::Tensor& ptr_A, at::Tensor& ptr_B, const c10::optional<at::Tensor>& bias,
+at::Tensor grouped_gemm_func(at::Tensor& ptr_A, at::Tensor& ptr_B,
+                             const c10::optional<at::Tensor>& bias,
                              at::Tensor& ptr_D, at::Tensor& expert_token_count,
                              at::Tensor& expert_first_token_offset, int64_t N,
                              int64_t K, int64_t groups) {
   auto& dpcpp_queue =
       at::xpu::getCurrentXPUStream(ptr_A.device().index()).queue();
   grouped_gemm::kernel_functor(dpcpp_queue, ptr_A.data_ptr(), ptr_B.data_ptr(),
-                               bias.has_value()? bias->data_ptr() : nullptr,
+                               bias.has_value() ? bias->data_ptr() : nullptr,
                                ptr_D.data_ptr(), expert_token_count.data_ptr(),
                                expert_first_token_offset.data_ptr(), N, K,
                                groups);

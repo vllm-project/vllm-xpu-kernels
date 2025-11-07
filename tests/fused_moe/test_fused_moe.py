@@ -34,7 +34,7 @@ MINI_PYTEST_PARAMS = {
         "e": [2],
         "topk": [1],
         "dtype": [torch.bfloat16],
-        "has_bias":[False]
+        "has_bias": [False]
     }
 }
 
@@ -43,7 +43,7 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("has_bias",[True, False])
+@pytest.mark.parametrize("has_bias", [True, False])
 def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     seed_everything(7)
     num_experts = e
@@ -90,8 +90,8 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
         print(e)
 
 
-def ref_fused_moe(x, w13, w13_bias, w2, w2_bias, flat_expert_weights, flat_expert_indices,
-                  num_per_tok, activation, num_experts):
+def ref_fused_moe(x, w13, w13_bias, w2, w2_bias, flat_expert_weights,
+                  flat_expert_indices, num_per_tok, activation, num_experts):
     expert_cache = torch.zeros_like(x)
     idxs = flat_expert_indices.argsort()
     counts = flat_expert_indices.bincount().cpu().numpy()
@@ -147,7 +147,8 @@ def check_fused_moe(
     w2 = torch.randn((e, k, n), device=DEVICE, dtype=dtype) / 10
     ref_a = a.clone()
     if has_bias:
-        w13_bias = torch.randn((e, 2 * n), device=DEVICE, dtype=torch.float) / 10
+        w13_bias = torch.randn(
+            (e, 2 * n), device=DEVICE, dtype=torch.float) / 10
         w2_bias = torch.randn((e, k), device=DEVICE, dtype=torch.float) / 10
     else:
         w13_bias = None
@@ -173,8 +174,9 @@ def check_fused_moe(
                            activation="silu",
                            num_experts=e)
 
-    ref_out = ref_fused_moe(ref_a, w13, w13_bias, w2, w2_bias, flat_expert_weights,
-                            flat_expert_indices, topk, "silu", e)
+    ref_out = ref_fused_moe(ref_a, w13, w13_bias, w2, w2_bias,
+                            flat_expert_weights, flat_expert_indices, topk,
+                            "silu", e)
 
     print("ref result", ref_out, ref_out.shape)
     print("kernel result", output, output.shape)
