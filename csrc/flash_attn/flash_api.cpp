@@ -21,7 +21,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     bool is_causal, int window_size_left, int window_size_right,
     const float softcap, const bool return_softmax,
     std::optional<at::Generator> gen_) {
-  auto& queue = vllm::xpu::vllmGetQueue();
+  auto& queue = vllm::xpu::vllmGetQueue(q.device().index());
 
   at::Tensor out;
   if (out_.has_value()) {

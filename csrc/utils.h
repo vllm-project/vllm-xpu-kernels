@@ -7,8 +7,8 @@
 namespace vllm {
 namespace xpu {
 
-static inline sycl::queue& vllmGetQueue() {
-  auto current_stream = c10::xpu::getCurrentXPUStream();
+static inline sycl::queue& vllmGetQueue(at::DeviceIndex device_index = -1) {
+  auto current_stream = c10::xpu::getCurrentXPUStream(device_index);
   auto& queue = current_stream.queue();
   return queue;
 }
