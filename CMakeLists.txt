@@ -328,7 +328,8 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/grouped_topk.cpp"
   "csrc/moe/fused_grouped_topk.cpp"
   "csrc/moe/topk_softmax.cpp"
-  "csrc/moe/moe_align_sum_kernels.cpp")
+  "csrc/moe/moe_align_sum_kernels.cpp"
+  "csrc/moe/moe_lora_align_sum_kernels.cpp")
 
 message(STATUS "Enabling moe extension.")
 define_gpu_extension_target(
