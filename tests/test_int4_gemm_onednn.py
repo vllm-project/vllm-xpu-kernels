@@ -15,6 +15,18 @@ MNK_FACTORS = [
     (32, 4096, 4096),
 ]
 
+MINI_MNK_FACTORS = [
+    (1, 16, 32),
+    (4, 32, 64),
+    (8, 32, 32),
+]
+
+MINI_PYTEST_PARAMS = {
+    "test_int4_gemm": {
+        "mnk_factors": MINI_MNK_FACTORS,
+    },
+}
+
 
 def rand_int4(size, dtype=torch.int32, device="xpu"):
     rand = torch.randint(-128, 128, [size // 2], device=device).to(torch.int8)

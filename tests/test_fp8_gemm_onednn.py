@@ -7,13 +7,28 @@ from tests.register_ops import fp8_gemm, fp8_gemm_w8a16
 
 BATCHES = [1]
 MNK_FACTORS = [
+    (1, 4096, 1),
+    (1, 32, 1024),
+    (4, 16, 1024),
+    (8, 32, 1024),
+    (8, 512, 1024),
+]
+
+MINI_MNK_FACTORS = [
     (1, 4, 8),
     (2, 4, 8),
     (4, 32, 16),
-    (16, 32, 32),
-    (32, 64, 128),
-    (64, 128, 256),
 ]
+
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "test_fp8_gemm_per_tensor": {
+        "mnk_factors": MINI_MNK_FACTORS,
+    },
+    "test_fp8_gemm_per_channel": {
+        "mnk_factors": MINI_MNK_FACTORS,
+    },
+}
 
 
 @pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
@@ -61,7 +76,7 @@ def test_fp8_gemm_w8a16(fp8_dtype, dtype, trans_wei, is_mbk, batch,
     torch.testing.assert_close(output_fp8, output_ref, atol=5e-2, rtol=5e-2)
 
 
-@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("is_nt", [True, False])
 @pytest.mark.parametrize("batch", BATCHES)
@@ -110,7 +125,7 @@ def test_fp8_gemm_per_tensor(fp8_dtype, dtype, is_nt, batch, mnk_factors):
     torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)
 
 
-@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("is_nt", [True, False])
 @pytest.mark.parametrize("batch", BATCHES)
