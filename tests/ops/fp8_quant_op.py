@@ -58,7 +58,7 @@ def scaled_fp8_quant(
 
     if scale is None:
         if use_per_token_if_dynamic:
-            scale = torch.empty((shape[0], 1),
+            scale = torch.zeros((shape[0], 1),
                                 device=input.device,
                                 dtype=torch.float32)
             ops.dynamic_per_token_scaled_fp8_quant(output, input.contiguous(),

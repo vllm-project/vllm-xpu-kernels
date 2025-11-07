@@ -35,7 +35,8 @@
 #include "cutlass/workspace.h"
 #include "cutlass/kernel_hardware_info.hpp"
 #include "cutlass/gemm/gemm.h"
-#include "cutlass/gemm/dispatch_policy.hpp"
+/* #include "cutlass/gemm/dispatch_policy.hpp" */
+#include "moe_array_mma.hpp"
 #include "cutlass/gemm/kernel/tile_scheduler.hpp"
 #include "cute/tensor.hpp"
 
@@ -50,7 +51,7 @@ template <class ProblemShape_, class CollectiveMainloop_,
 class GemmUniversal<
     ProblemShape_, CollectiveMainloop_, CollectiveEpilogue_, TileScheduler_,
     cute::enable_if_t<cute::is_base_of_v<
-        KernelXePtrArrayCooperative,
+        KernelMoEArrayCooperative,
         typename CollectiveMainloop_::DispatchPolicy::Schedule>>> {
  public:
   //

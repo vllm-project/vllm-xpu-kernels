@@ -12,12 +12,12 @@ using trans_type_t = at::native::onednn::trans_type_t;
 using GpuStreamManager = at::native::onednn::GpuStreamManager;
 using GpuEngineManager = at::native::onednn::GpuEngineManager;
 
-static inline void dnnl_matmul_w8a16_fp8(
+static inline void dnnl_matmul_w8a8_fp8(
     torch::Tensor& result,      // dst, [b, m, n]
     const torch::Tensor& mat1,  // src, [b, m, k]
     const torch::Tensor& mat2,  // quantized weight, [k, n] transpose
     bool is_nt, const std::optional<torch::Tensor>& bias,
-    const torch::Tensor& m2_sc, const int64_t group_size = 0) {
+    const torch::Tensor& m1_sc, const torch::Tensor& m2_sc) {
   auto src_sz = mat1.sizes();
   auto o_sz = result.sizes();
 
@@ -30,13 +30,14 @@ static inline void dnnl_matmul_w8a16_fp8(
   joint_dtypes_t jd;
   auto in_dtype = mat1.scalar_type();
   auto wei_dtype = mat2.scalar_type();
-  if (in_dtype == at::ScalarType::Half) {
-    jd = wei_dtype == at::ScalarType::Float8_e5m2 ? joint_dtypes_t::f16_f8_e5m2
-                                                  : joint_dtypes_t::f16_f8_e4m3;
-  } else if (in_dtype == at::ScalarType::BFloat16) {
-    jd = wei_dtype == at::ScalarType::Float8_e5m2
-             ? joint_dtypes_t::bf16_f8_e5m2
-             : joint_dtypes_t::bf16_f8_e4m3;
+  auto out_dtype = result.scalar_type();
+
+  if (in_dtype == at::ScalarType::Float8_e5m2) {
+    jd = out_dtype == at::ScalarType::BFloat16 ? joint_dtypes_t::f8_e5m2_bf16
+                                               : joint_dtypes_t::f8_e5m2_f16;
+  } else if (in_dtype == at::ScalarType::Float8_e4m3fn) {
+    jd = out_dtype == at::ScalarType::BFloat16 ? joint_dtypes_t::f8_e4m3_bf16
+                                               : joint_dtypes_t::f8_e4m3_f16;
   } else {
     TORCH_INTERNAL_ASSERT(
         false, "Unsupported data type for fp8 matmul: ", mat1.scalar_type());
@@ -70,8 +71,26 @@ static inline void dnnl_matmul_w8a16_fp8(
 
   auto f_attr = [&](dnnl::primitive_attr& pattr) {
     pattr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
-    pattr.set_scales(DNNL_ARG_WEIGHTS,
-                     /* mask */ 0, {}, get_onednn_dtype(m2_sc));
+    if (m1_sc.dim() == 1) {
+      pattr.set_scales(DNNL_ARG_SRC,
+                       /* mask */ 0, {}, get_onednn_dtype(m1_sc));
+      /* per tensor quant */
+    } else {
+      pattr.set_scales(DNNL_ARG_SRC,
+                       /* mask */ (1 << 0) + (1 << 1), {1, k},
+                       get_onednn_dtype(m1_sc));
+      /* per token quant */
+    }
+
+    if (m2_sc.dim() == 1) {
+      pattr.set_scales(DNNL_ARG_WEIGHTS,
+                       /* mask */ 0, {}, get_onednn_dtype(m2_sc));
+      /* per tensor quant */
+    } else {
+      pattr.set_scales(DNNL_ARG_WEIGHTS,
+                       /* mask */ (1 << 1), {}, get_onednn_dtype(m2_sc));
+      /* per channel quant */
+    }
   };
 
   int arg_off = 0;
@@ -82,8 +101,11 @@ static inline void dnnl_matmul_w8a16_fp8(
   at::Device curDevice = at::Device(at::kXPU, dev_id);
   auto engine = GpuEngineManager::Instance().get_engine(curDevice);
 
+  int m1_sc_group_size = m1_sc.numel();
+  int m2_sc_group_size = m2_sc.numel();
+  int sc_group_size = (m1_sc_group_size << 8) | m2_sc_group_size;
   auto& matmul_ext = matmul_primitive_create_and_cache(
-      jd, tt, b_type, m, n, k, lda, ldb, ldc, dev_id, f_attr, group_size);
+      jd, tt, b_type, m, n, k, lda, ldb, ldc, dev_id, f_attr, sc_group_size);
 
   matmul_ext.set_attribute(arg_off++, DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS,
                            m2_sc.data_ptr(), [&]() {
@@ -91,6 +113,11 @@ static inline void dnnl_matmul_w8a16_fp8(
                                  get_onednn_md(m2_sc), engine,
                                  m2_sc.data_ptr());
                            });
+  matmul_ext.set_attribute(
+      arg_off++, DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, m1_sc.data_ptr(), [&]() {
+        return at::native::onednn::make_onednn_memory(get_onednn_md(m1_sc),
+                                                      engine, m1_sc.data_ptr());
+      });
 
   std::vector<std::pair<int, void*>> arg_handles;
   arg_handles.reserve(8);

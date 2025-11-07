@@ -39,7 +39,22 @@
 #include "cute/algorithm/gemm.hpp"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
+namespace cutlass::gemm {
 
+struct KernelMoEArrayCooperative {};
+
+template <int Stages_, class KernelSchedule = KernelMoEArrayCooperative>
+struct MainloopMoE16Group {
+  constexpr static int Stages = Stages_;
+  constexpr static int SubgroupSize = 16;
+  using ArchTag = arch::IntelXe;
+  using Schedule = KernelSchedule;
+  using ClusterShape = Shape<_1, _1, _1>;
+};
+
+}  // namespace cutlass::gemm
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
 namespace cutlass::gemm::collective {
 using namespace cute;
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -49,7 +64,7 @@ template <int Stages, class Schedule, class TileShape_, class ElementA_,
           class GmemTiledCopyA_, class SmemLayoutAtomA_, class SmemCopyAtomA_,
           class TransformA_, class GmemTiledCopyB_, class SmemLayoutAtomB_,
           class SmemCopyAtomB_, class TransformB_>
-struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
+struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
                      ElementA_, StrideA_, ElementB_, StrideB_, TiledMma_,
                      GmemTiledCopyA_, SmemLayoutAtomA_, SmemCopyAtomA_,
                      TransformA_, GmemTiledCopyB_, SmemLayoutAtomB_,
@@ -57,7 +72,7 @@ struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
   //
   // Type Aliases
   //
-  using DispatchPolicy = MainloopIntelXeXMX16Group<Stages, Schedule>;
+  using DispatchPolicy = MainloopMoE16Group<Stages, Schedule>;
   using WorkgroupTileShape = TileShape_;
   using ElementA = ElementA_;
   using StrideA = StrideA_;
@@ -124,17 +139,19 @@ struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
   using MainloopTensors = cute::tuple<TensorMKL, TensorNKL>;
   // Host side kernel arguments
   struct Arguments {
-    ElementA const** ptr_A;
+    ElementA const* ptr_A;
     StrideA dA;
-    ElementB const** ptr_B;
+    ElementB const* ptr_B;
     StrideB dB;
+    int64_t const* expert_first_token_offset;
   };
 
   struct Params {
-    ElementA const** ptr_A;
+    ElementA const* ptr_A;
     StrideA dA;
-    ElementB const** ptr_B;
+    ElementB const* ptr_B;
     StrideB dB;
+    int64_t const* expert_first_token_offset;
   };
 
   //
@@ -156,7 +173,8 @@ struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
     auto init_N = get<1>(problem_shape_MNK);
     auto init_K = get<2>(problem_shape_MNK);
 
-    return Params{args.ptr_A, args.dA, args.ptr_B, args.dB};
+    return Params{args.ptr_A, args.dA, args.ptr_B, args.dB,
+                  args.expert_first_token_offset};
   }
 
   template <class ProblemShape>
@@ -338,11 +356,24 @@ struct CollectiveMma<MainloopIntelXeXMX16Group<Stages, Schedule>, TileShape_,
     const int32_t M = get<0>(problem_shape_mnkl);
     const int32_t N = get<1>(problem_shape_mnkl);
     const int32_t K = get<2>(problem_shape_mnkl);
+    auto expert_first_token_offset = mainloop_params.expert_first_token_offset;
 
+    /* FIXME: use a problem visitor */
+    int calc_group{0}, real_group{0};
+    while (calc_group < next_group + 1) {
+      if (expert_first_token_offset[real_group] !=
+          expert_first_token_offset[real_group + 1]) {
+        calc_group++;
+      }
+      real_group++;
+    }
+    real_group -= 1;
     ElementA const* ptr_A_curr_batch =
-        reinterpret_cast<ElementA const*>(mainloop_params.ptr_A[next_group]);
+        reinterpret_cast<ElementA const*>(mainloop_params.ptr_A) +
+        expert_first_token_offset[real_group] * K;
     ElementB const* ptr_B_curr_batch =
-        reinterpret_cast<ElementB const*>(mainloop_params.ptr_B[next_group]);
+        reinterpret_cast<ElementB const*>(mainloop_params.ptr_B) +
+        real_group * N * K;
 
     Tensor mA = make_tensor(make_gmem_ptr(ptr_A_curr_batch),
                             make_shape(M, K, (int32_t)1),

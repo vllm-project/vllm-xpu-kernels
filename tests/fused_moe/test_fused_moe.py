@@ -5,8 +5,8 @@ import pytest
 import torch
 
 from tests.utils import seed_everything
-from vllm_xpu_kernels.fused_moe_interface import (cutlass_fused_moe,
-                                                  cutlass_grouped_gemm)
+from vllm_xpu_kernels.fused_moe_interface import (cutlass_grouped_gemm,
+                                                  xpu_fused_moe)
 
 DEVICE = "xpu"
 
@@ -46,11 +46,12 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
     seed_everything(7)
     num_experts = e
     token_per_group = random_partition(e, m * topk)
+    assert (len(token_per_group) == e)
     # input
     input_A = torch.randn((sum(token_per_group), k),
                           dtype=dtype,
                           device=DEVICE).contiguous()
-    ref_A = input_A.clone()
+    ref_A = input_A
     # weight
     input_B = torch.randn((num_experts, n, k), dtype=dtype, device=DEVICE)
     input_B = input_B.transpose(-1, -2).contiguous().transpose(-1, -2)
@@ -93,7 +94,6 @@ def ref_fused_moe(x, w13, w2, flat_expert_weights, flat_expert_indices,
         start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
         if start_idx == end_idx:
             continue
-
         exp_token_idxs = token_idxs[start_idx:end_idx]
         expert_tokens = x[exp_token_idxs]
 
@@ -105,6 +105,7 @@ def ref_fused_moe(x, w13, w2, flat_expert_weights, flat_expert_indices,
         gemm1 = expert_tokens @ w1.T
         gate = act_fn(gemm1)
         up = expert_tokens @ w3.T
+
         expert_out = (gate * up) @ w2[expert_id, :, :].T
         expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
         expert_cache.scatter_reduce_(0,
@@ -125,7 +126,6 @@ def check_fused_moe(
     dtype: torch.dtype,
 ):
     seed_everything(7)
-    verbose = False
     # Setup test data
     a = torch.randn((m, k), device=DEVICE, dtype=dtype) / 10
     w13 = torch.randn((e, 2 * n, k), device=DEVICE, dtype=dtype) / 10
@@ -139,26 +139,26 @@ def check_fused_moe(
                                                dim=-1,
                                                sorted=False)
 
-    if verbose:
-        print("expert_indices: ", expert_indices, expert_indices.shape)
-        print("expert_scores: ", expert_scores, expert_scores.shape)
-
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_scores.view(-1, 1)
 
-    iteration = 1
-    for _ in range(iteration):
-        out = cutlass_fused_moe(hidden_states=a,
-                                w13=w13,
-                                w2=w2,
-                                topk_weights=flat_expert_weights,
-                                topk_ids=flat_expert_indices,
-                                n_experts_per_token=topk,
-                                activation="silu",
-                                num_experts=e)
+    output = xpu_fused_moe(hidden_states=a,
+                           w13=w13,
+                           w2=w2,
+                           topk_weights=expert_scores,
+                           topk_ids=expert_indices,
+                           n_experts_per_token=topk,
+                           activation="silu",
+                           num_experts=e)
 
     ref_out = ref_fused_moe(ref_a, w13, w2, flat_expert_weights,
                             flat_expert_indices, topk, "silu", e)
 
     print("ref result", ref_out, ref_out.shape)
-    print("kernel result", out, out.shape)
+    print("kernel result", output, output.shape)
+    try:
+        torch.testing.assert_close(output, ref_out, rtol=1e-2, atol=1e-2)
+        print("a and b close enough")
+    except AssertionError as e:
+        print("a and b diffs")
+        print(e)

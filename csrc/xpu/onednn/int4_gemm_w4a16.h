@@ -16,7 +16,7 @@ static inline void dnnl_matmul_w4a16_int4(
     torch::Tensor& result,      // dst, [b, m, n]
     const torch::Tensor& mat1,  // src, [b, m, k]
     const torch::Tensor& mat2,  // quantized weight, [k/8, n] transpose
-    bool trans_b, const std::optional<torch::Tensor>& bias,
+    bool is_nt, const std::optional<torch::Tensor>& bias,
     const torch::Tensor& scale,  // [k/group_size, n]
     const torch::Tensor& zp,     // [k/group_size, n/8]
     int64_t group_size) {
@@ -48,7 +48,7 @@ static inline void dnnl_matmul_w4a16_int4(
   bias_type_t b_type = get_bias_type(bias, m, n);
 
   trans_type_t tt = trans_type_t::nn;
-  if (trans_b) {
+  if (is_nt) {
     // transpose mat2
     tt = trans_type_t::nt;
   }

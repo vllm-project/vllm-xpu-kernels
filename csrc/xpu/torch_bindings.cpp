@@ -2,6 +2,7 @@
 #include "xpu/ops.h"
 #include "xpu/cutlass_kernels/grouped_gemm.hpp"
 #include "xpu/lora/lora_ops.h"
+#include "xpu/cutlass_kernels/fused_moe.hpp"
 
 #include <torch/library.h>
 #include <torch/version.h>
@@ -10,18 +11,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
 
   xpu_ops.def(
-      "fp8_gemm_w8a16(Tensor! A, Tensor! B, bool trans_B, Tensor? B_scale_, "
+      "fp8_gemm(Tensor! A, Tensor! B, ScalarType? out_dtype, Tensor? A_scale_, "
+      "Tensor? B_scale_, Tensor? bias_) -> Tensor");
+  xpu_ops.impl("fp8_gemm", torch::kXPU, &fp8_gemm);
+
+  xpu_ops.def(
+      "fp8_gemm_w8a16(Tensor! A, Tensor! B, Tensor? B_scale_, "
       "Tensor? bias_) -> Tensor");
   xpu_ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
 
   xpu_ops.def(
       "int4_gemm_w4a16(Tensor! A, Tensor! B, Tensor? bias, Tensor B_scale, "
-      "Tensor B_zp, int group_size, bool trans_B, Tensor? g_idx) -> Tensor");
+      "Tensor B_zp, int group_size, Tensor? g_idx) -> Tensor");
   xpu_ops.impl("int4_gemm_w4a16", torch::kXPU, &int4_gemm_w4a16);
 
   xpu_ops.def(
       "cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor ptr_D, Tensor "
-      "ptr_alpha, Tensor ptr_beta, Tensor offset, int N, int K, int groups) -> "
+      "expert_token_count, Tensor expert_first_token_offset, int N, int K, int "
+      "groups) -> "
       "Tensor");
   xpu_ops.impl("cutlass_grouped_gemm", torch::kXPU,
                gpu::cutlass_kernel::grouped_gemm_func);
@@ -47,6 +54,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "bgmv_expand_slice(Tensor! outputs, Tensor inputs, Tensor weights, "
       "Tensor indices, int slice_offset,bool add_to_output) -> ()");
   xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
+
+  xpu_ops.def(
+      "fused_moe(Tensor output, Tensor input, Tensor token_selected_experts, "
+      "Tensor "
+      "token_final_scales, Tensor fc1_expert_weights, Tensor "
+      "fc2_expert_weights, Tensor workspace) -> "
+      "()");
+  xpu_ops.impl("fused_moe", torch::kXPU, &fused_moe);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

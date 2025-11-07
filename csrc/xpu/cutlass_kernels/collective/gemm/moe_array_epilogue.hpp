@@ -69,6 +69,11 @@ class CollectiveEpilogue {
 
 namespace cutlass {
 namespace epilogue {
+
+struct MoE16Group {
+  static constexpr int SubgroupSize = 16;
+};
+
 namespace collective {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -77,7 +82,7 @@ template <class CtaTileMNK_, class ElementC_, class StrideC_, class ElementD_,
           class StrideD_, class FusionCallbacks_, class CopyOpG2R_,
           class SmemLayoutAtomC_, class CopyOpS2R_, class CopyOpR2G_,
           class SmemLayoutAtomD_, class CopyOpR2S_>
-class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
+class CollectiveEpilogue<MoE16Group, CtaTileMNK_, ElementC_, StrideC_,
                          ElementD_, StrideD_, FusionCallbacks_, CopyOpG2R_,
                          SmemLayoutAtomC_, CopyOpS2R_, CopyOpR2G_,
                          SmemLayoutAtomD_, CopyOpR2S_> {
@@ -85,7 +90,7 @@ class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
   //
   // Type Aliases
   //
-  using DispatchPolicy = IntelXeXMX16Group;
+  using DispatchPolicy = MoE16Group;
   using CtaTileMNK = CtaTileMNK_;
   using FusionCallbacks = FusionCallbacks_;
   using ElementC = ElementC_;
@@ -189,8 +194,9 @@ class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
     typename FusionCallbacks::Arguments thread{};
     ElementC const** ptr_C;
     StrideC dC;
-    ElementD** ptr_D;
+    ElementD* ptr_D;
     StrideD dD;
+    int64_t const* expert_first_token_offset;
   };
 
   // Device side epilogue params
@@ -200,8 +206,9 @@ class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
     XE_Copy_D xe_store_d;
     ElementC const** ptr_C;
     StrideC dC;
-    ElementD** ptr_D;
+    ElementD* ptr_D;
     StrideD dD;
+    int64_t const* expert_first_token_offset;
   };
 
   //
@@ -244,7 +251,8 @@ class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
             args.ptr_C,
             args.dC,
             args.ptr_D,
-            args.dD};
+            args.dD,
+            args.expert_first_token_offset};
   }
 
   template <class ProblemShape>
@@ -538,9 +546,22 @@ class CollectiveEpilogue<IntelXeXMX16Group, CtaTileMNK_, ElementC_, StrideC_,
                       make_layout(make_shape(M, N, L), params.dC[next_group]));
     }
 
+    auto expert_first_token_offset = params.expert_first_token_offset;
+
+    /* FIXME: use a problem visitor */
+    int calc_group{0}, real_group{0};
+    while (calc_group < next_group + 1) {
+      if (expert_first_token_offset[real_group] !=
+          expert_first_token_offset[real_group + 1]) {
+        calc_group++;
+      }
+      real_group++;
+    }
+    real_group -= 1;
+
     if constexpr (is_destination_supported) {
-      ElementD* ptr_D_curr_batch =
-          reinterpret_cast<ElementD*>(params.ptr_D[next_group]);
+      ElementD* ptr_D_curr_batch = reinterpret_cast<ElementD*>(params.ptr_D) +
+                                   expert_first_token_offset[real_group] * N;
       mD_mnl =
           make_tensor(make_gmem_ptr(ptr_D_curr_batch),
                       make_layout(make_shape(M, N, L), params.dD[next_group]));
