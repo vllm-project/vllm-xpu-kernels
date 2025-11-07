@@ -15,6 +15,7 @@ torch::Tensor int4_gemm_w4a16(const torch::Tensor& A_, const torch::Tensor& B,
                               const std::optional<torch::Tensor>& g_idx);
 
 torch::Tensor cutlass_grouped_gemm(torch::Tensor ptr_A, torch::Tensor ptr_B,
+                                   const c10::optional<at::Tensor>& bias,
                                    torch::Tensor ptr_D,
                                    torch::Tensor expert_token_count,
                                    torch::Tensor expert_first_token_offset,

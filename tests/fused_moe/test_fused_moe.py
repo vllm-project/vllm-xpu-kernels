@@ -33,7 +33,8 @@ MINI_PYTEST_PARAMS = {
         "m,n,k": [(1, 256, 128)],
         "e": [2],
         "topk": [1],
-        "dtype": [torch.bfloat16]
+        "dtype": [torch.bfloat16],
+        "has_bias":[False]
     }
 }
 
@@ -42,7 +43,8 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-def test_grouped_gemm(m, n, k, e, topk, dtype):
+@pytest.mark.parametrize("has_bias",[True, False])
+def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     seed_everything(7)
     num_experts = e
     token_per_group = random_partition(e, m * topk)
@@ -55,12 +57,15 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
     # weight
     input_B = torch.randn((num_experts, n, k), dtype=dtype, device=DEVICE)
     input_B = input_B.transpose(-1, -2).contiguous().transpose(-1, -2)
+    if has_bias:
+        bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE)
+    else:
+        bias = torch.zeros((num_experts, n), dtype=dtype, device=DEVICE)
 
     # output offset
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
-    cutlass_grouped_gemm(input_A, input_B, output, token_per_group, n, k,
+    cutlass_grouped_gemm(input_A, input_B, bias, output, token_per_group, n, k,
                          num_experts)
-    torch.xpu.synchronize()
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -71,6 +76,8 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
         input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :]
         weight = input_B[i, :, :]
         expert_output = input @ weight.T
+        if has_bias:
+            expert_output += bias[i]
         ref.append(expert_output)
         pre_token_sum += cur_token_num
     ref = torch.cat(ref, dim=0)
@@ -83,7 +90,7 @@ def test_grouped_gemm(m, n, k, e, topk, dtype):
         print(e)
 
 
-def ref_fused_moe(x, w13, w2, flat_expert_weights, flat_expert_indices,
+def ref_fused_moe(x, w13, w13_bias, w2, w2_bias, flat_expert_weights, flat_expert_indices,
                   num_per_tok, activation, num_experts):
     expert_cache = torch.zeros_like(x)
     idxs = flat_expert_indices.argsort()
@@ -101,12 +108,19 @@ def ref_fused_moe(x, w13, w2, flat_expert_weights, flat_expert_indices,
         w1, w3 = torch.split(expert_w13,
                              int(list(expert_w13.shape)[0] / 2),
                              dim=0)
+        if w13_bias is not None:
+            w1_bias, w3_bias = w13_bias[expert_id, :].chunk(2)
         act_fn = torch.nn.SiLU()
         gemm1 = expert_tokens @ w1.T
+        if w13_bias is not None:
+            gemm1 += w1_bias
         gate = act_fn(gemm1)
         up = expert_tokens @ w3.T
-
+        if w13_bias is not None:
+            up += w3_bias
         expert_out = (gate * up) @ w2[expert_id, :, :].T
+        if w2_bias is not None:
+            expert_out += w2_bias[expert_id, :]
         expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
         expert_cache.scatter_reduce_(0,
                                      exp_token_idxs.view(-1, 1).repeat(
@@ -123,6 +137,7 @@ def check_fused_moe(
     k: int,  # hidden_size
     e: int,
     topk: int,
+    has_bias: bool,
     dtype: torch.dtype,
 ):
     seed_everything(7)
@@ -131,7 +146,12 @@ def check_fused_moe(
     w13 = torch.randn((e, 2 * n, k), device=DEVICE, dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device=DEVICE, dtype=dtype) / 10
     ref_a = a.clone()
-
+    if has_bias:
+        w13_bias = torch.randn((e, 2 * n), device=DEVICE, dtype=torch.float) / 10
+        w2_bias = torch.randn((e, k), device=DEVICE, dtype=torch.float) / 10
+    else:
+        w13_bias = None
+        w2_bias = None
     # moe gate
     scores = torch.randn((m, e), device=DEVICE, dtype=dtype)
     expert_scores, expert_indices = torch.topk(scores,
@@ -144,14 +164,16 @@ def check_fused_moe(
 
     output = xpu_fused_moe(hidden_states=a,
                            w13=w13,
+                           w13_bias=w13_bias,
                            w2=w2,
+                           w2_bias=w2_bias,
                            topk_weights=expert_scores,
                            topk_ids=expert_indices,
                            n_experts_per_token=topk,
                            activation="silu",
                            num_experts=e)
 
-    ref_out = ref_fused_moe(ref_a, w13, w2, flat_expert_weights,
+    ref_out = ref_fused_moe(ref_a, w13, w13_bias, w2, w2_bias, flat_expert_weights,
                             flat_expert_indices, topk, "silu", e)
 
     print("ref result", ref_out, ref_out.shape)

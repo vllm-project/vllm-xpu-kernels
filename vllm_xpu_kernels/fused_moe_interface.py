@@ -10,7 +10,7 @@ except ImportError as e:
     FUSEDMOE_AVAILABLE = False
 
 
-def cutlass_grouped_gemm(input_A, input_B, output, expert_token_count, n, k,
+def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n, k,
                          num_experts):
     expert_token_count_ = torch.tensor(expert_token_count,
                                        dtype=torch.int64,
@@ -22,12 +22,16 @@ def cutlass_grouped_gemm(input_A, input_B, output, expert_token_count, n, k,
             prefix.append(prefix[-1] + x)
         return prefix
 
+    if bias is not None:
+        bias = bias.repeat_interleave(expert_token_count_.to(bias.device), dim=0).float()
+
     expert_offset = torch.tensor(exclusive_prefix_sum(expert_token_count),
                                  dtype=torch.int64,
                                  device="xpu")
     torch.ops._xpu_C.cutlass_grouped_gemm(
         ptr_A=input_A,
         ptr_B=input_B,
+        bias=bias,
         ptr_D=output,
         expert_first_token_offset=expert_offset,
         expert_token_count=expert_token_count_,
@@ -48,7 +52,7 @@ def compute_num_tokens_per_block(num_tokens, num_experts_per_node):
     return 1024
 
 
-def xpu_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
+def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights, topk_ids,
                   n_experts_per_token, activation, num_experts):
 
     output = torch.zeros_like(hidden_states)
@@ -98,7 +102,6 @@ def xpu_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
     config_ws("permuted_token_final_scales", permuted_token_final_scales_size)
     config_ws("overlapped_gemm1_gemm2_inputs", permuted_data_size)
 
-    print("python total offset: ", map_offset)
     workspace = torch.zeros(map_offset,
                             dtype=torch.uint8,
                             device=hidden_states.device)
@@ -126,19 +129,29 @@ def xpu_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
     #     ws_map["permuted_token_final_scales"][1]:
     #     ws_map["permuted_token_final_scales"][1] +
     #     permuted_token_final_scales_size].view(torch.float)
+    expert_token_count = (expert_first_token_offset[1:] -
+                          expert_first_token_offset[:-1]).to(
+                              torch.int64)
+    if w13_bias is None:
+        w13_bias = torch.zeros((num_experts, 2*inter_size), dtype=torch.float, device=hidden_states.device)
+        w2_bias = torch.zeros((num_experts, hidden_size), dtype=torch.float, device=hidden_states.device)
+    if w13_bias.shape == (num_experts, 2*inter_size):
+        w13_bias = w13_bias.repeat_interleave(expert_token_count, dim=0).float()
+    if w2_bias.shape == (num_experts, hidden_size):
+        w2_bias = w2_bias.repeat_interleave(expert_token_count, dim=0).float()
+    expert_token_count = expert_token_count.cpu()
+
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
 
     ########### gemm1 ##################
     input_B = w13.transpose(-1, -2).contiguous().transpose(-1, -2)
-    expert_token_count = (expert_first_token_offset[1:] -
-                          expert_first_token_offset[:-1]).to(
-                              torch.int64).cpu()
 
     torch.ops._xpu_C.cutlass_grouped_gemm(
         ptr_A=gemm1_input,
         ptr_B=input_B,
+        bias = w13_bias,
         ptr_D=gemm1_output,
         expert_first_token_offset=expert_first_token_offset,
         expert_token_count=expert_token_count,
@@ -160,6 +173,7 @@ def xpu_fused_moe(hidden_states, w13, w2, topk_weights, topk_ids,
     torch.ops._xpu_C.cutlass_grouped_gemm(
         ptr_A=input_A,
         ptr_B=input_B,
+        bias=w2_bias,
         ptr_D=gemm2_output,
         expert_first_token_offset=expert_first_token_offset,
         expert_token_count=expert_token_count,

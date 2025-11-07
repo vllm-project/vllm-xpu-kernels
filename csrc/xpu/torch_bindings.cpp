@@ -21,7 +21,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("int4_gemm_w4a16", torch::kXPU, &int4_gemm_w4a16);
 
   xpu_ops.def(
-      "cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor ptr_D, Tensor "
+      "cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor? bias, Tensor ptr_D, Tensor "
       "expert_token_count, Tensor expert_first_token_offset, int N, int K, int "
       "groups) -> "
       "Tensor");

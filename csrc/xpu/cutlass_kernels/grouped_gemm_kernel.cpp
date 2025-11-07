@@ -280,7 +280,7 @@ struct GroupedGemmRunner {
   typename Gemm::Arguments args_from_options(
       const Options& options, const cutlass::KernelHardwareInfo& hw_info,
       int64_t const* expert_first_token_offset, const ElementA* ptr_A,
-      const ElementB* ptr_B, ElementOutput* ptr_D,
+      const ElementB* ptr_B, const ElementC* ptr_C, ElementOutput* ptr_D,
       bool host_problem_shapes_available = true) {
     typename Gemm::Arguments arguments;
     decltype(arguments.epilogue.thread) fusion_args;
@@ -288,7 +288,7 @@ struct GroupedGemmRunner {
     // If pointers to alpha/beta are provided, i.e., alpha/beta can differ
     // between batches/groups.
     fusion_args.alpha = 1;
-    fusion_args.beta = 0;
+    fusion_args.beta = ptr_C ? 1 : 0;
     fusion_args.alpha_ptr = nullptr;
     fusion_args.beta_ptr = nullptr;
     fusion_args.alpha_ptr_array = nullptr;
@@ -308,7 +308,7 @@ struct GroupedGemmRunner {
                                     options.problem_sizes_host.data()},
                                    {ptr_A, stride_A.get(), ptr_B,
                                     stride_B.get(), expert_first_token_offset},
-                                   {fusion_args, nullptr, stride_C.get(), ptr_D,
+                                   {fusion_args, ptr_C, stride_C.get(), ptr_D,
                                     stride_D.get(), expert_first_token_offset},
                                    hw_info,
                                    {1, RasterOrderOptions::AlongN}};
@@ -318,7 +318,7 @@ struct GroupedGemmRunner {
           {options.groups, problem_sizes.get(), nullptr},
           {ptr_A, stride_A.get(), ptr_B, stride_B.get(),
            expert_first_token_offset},
-          {fusion_args, nullptr, stride_C.get(), ptr_D, stride_D.get(),
+          {fusion_args, ptr_C, stride_C.get(), ptr_D, stride_D.get(),
            expert_first_token_offset},
           hw_info,
           {1, RasterOrderOptions::AlongN}};
@@ -331,6 +331,7 @@ struct GroupedGemmRunner {
                       const cutlass::KernelHardwareInfo& hw_info,
                       int64_t const* expert_first_token_offset,
                       const ElementA* ptr_A, const ElementB* ptr_B,
+                      const ElementC* ptr_C,
                       ElementOutput* ptr_D) {
     if (debug) {
       std::cout << "enter run" << std::endl;
@@ -341,7 +342,7 @@ struct GroupedGemmRunner {
     Gemm gemm_op;
 
     auto arguments = args_from_options(
-        options, hw_info, expert_first_token_offset, ptr_A, ptr_B, ptr_D);
+        options, hw_info, expert_first_token_offset, ptr_A, ptr_B, ptr_C, ptr_D);
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
@@ -388,7 +389,7 @@ struct GroupedGemmRunner {
   }
 };
 
-void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_D,
+void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_bias, void* ptr_D,
                     void* expert_token_count, void* expert_first_token_offset,
                     int64_t N, int64_t K, int64_t groups) {
   //
@@ -471,6 +472,7 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_D,
              reinterpret_cast<const int64_t*>(expert_first_token_offset),
              reinterpret_cast<const ElementA*>(ptr_A),
              reinterpret_cast<const ElementB*>(ptr_B),
+             reinterpret_cast<const ElementAccumulator*>(ptr_bias),
              reinterpret_cast<ElementOutput*>(ptr_D));
 }
 
