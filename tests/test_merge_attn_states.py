@@ -8,9 +8,13 @@ Run `pytest tests/test_merge_attn_states.py`.
 
 import pytest
 import torch
+import logging
 
 from tests.register_ops import merge_attn_states as merge_attn_states_xpu
-from tests.utils import opcheck, round_up, seed_everything
+
+logger = logging.getLogger("vllm_xpu_kernel")
+
+
 
 # Naive PyTorch Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 # can be used to combine partial attention results (in the split-KV case)
@@ -51,14 +55,25 @@ DTYPES = [torch.float32, torch.half, torch.bfloat16]
 
 all_case_info: list[tuple] = []
 
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "test_merge_attn_states": {
+        "num_tokens": [16],
+        "head_size": [32],
+        "num_query_heads": [4],
+        "output_dtype": [torch.half, torch.bfloat16],
+    },
+}
+
+
 
 def generate_markdown_table():
     global all_case_info
     table_header = (
         "| tokens | heads | headsize | dtype "
-        "| device | torch | triton | cuda | speedup |"
+        "| device | torch | cuda | speedup |"
     )
-    table_separator = "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    table_separator = "| --- | --- | --- | --- | --- | --- | --- | --- |"
 
     def shortly_dtype(dtype: torch.dtype) -> str:
         return str(dtype).removeprefix("torch.")
@@ -76,7 +91,6 @@ def generate_markdown_table():
             dtype,
             device,
             avg_time_torch_kernel,
-            avg_time_triton_kernel,
             avg_time_xpu_kernel,
             performance_improved,
         ) = info
@@ -85,7 +99,6 @@ def generate_markdown_table():
         print(
             f"| {num_tokens} | {num_heads} | {head_size} "
             f"| {dtype} | {device} | {avg_time_torch_kernel:.5f}ms "
-            f"| {avg_time_triton_kernel:.5f}ms "
             f"| {avg_time_xpu_kernel:.5f}ms "
             f"| {performance_improved:.4f}x |"
         )
@@ -104,7 +117,7 @@ def test_merge_attn_states(
     NUM_HEADS = num_query_heads
     HEAD_SIZE = head_size
 
-    print(
+    logger.debug(
         f"\nNUM_TOKENS:{NUM_TOKENS}, NUM_HEADS:{NUM_HEADS}, "
         f"HEAD_SIZE:{HEAD_SIZE}, DTYPE: {output_dtype}, "
         f"Device: xpu."
@@ -211,14 +224,14 @@ def test_merge_attn_states(
 
     avg_time_xpu_kernel = total_time_xpu_kernel / repeat_times
 
-    # 3. Performance compare
+    # 2. Performance compare
     performance_improved = avg_time_torch_kernel / avg_time_xpu_kernel
-    print(f" Torch time: {avg_time_torch_kernel:.6f}ms")
-    print(
+    logger.debug(f" Torch time: {avg_time_torch_kernel:.6f}ms")
+    logger.debug(
         f"  XPU time: {avg_time_xpu_kernel:.6f}ms, "
         f"Performance: {performance_improved:.5f}x"
     )
-    print("-" * 100)
+    logger.debug("-" * 100)
 
     # 4. Correctness compare
     # Liger Kernel: Efficient Triton Kernels for LLM Training
@@ -236,22 +249,22 @@ def test_merge_attn_states(
     torch.testing.assert_close(
         output_xpu.float(), output_torch.float(), atol=1e-3, rtol=rtol
     )
-    print("Output all match, max abs diff:")
-    print(f"  (XPU vs Torch) : {diff(output_torch, output_xpu)}")
-    print("-" * 100)
+    logger.debug("Output all match, max abs diff:")
+    logger.debug(f"  (XPU vs Torch) : {diff(output_torch, output_xpu)}")
+    logger.debug("-" * 100)
 
     torch.testing.assert_close(
         output_lse_xpu.float(), output_lse_torch.float(), atol=1e-3, rtol=rtol
     )
-    print("Output LSE all match, max abs diff:")
-    print(f"  (XPU vs Torch) : {diff(output_lse_torch, output_lse_xpu)}")
-    print("-" * 100)
+    logger.debug("Output LSE all match, max abs diff:")
+    logger.debug(f"  (XPU vs Torch) : {diff(output_lse_torch, output_lse_xpu)}")
+    logger.debug("-" * 100)
 
-    print(
+    logger.debug(
         "All output values test passed! All inf values "
         "are correctly replaced with -inf."
     )
-    print("-" * 100)
+    logger.debug("-" * 100)
 
     device = "xpu"
     all_case_info.append(

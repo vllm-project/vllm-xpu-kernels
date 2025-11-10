@@ -1,8 +1,11 @@
+#include <ATen/ATen.h>
+#include <ATen/DeviceGuard.h>
+
 #include <sycl/sycl.hpp>
-#include <dpct/dpct.hpp>
 #include <optional>
 #include <torch/all.h>
 #include <algorithm>
+#include "utils.h"
 
 namespace vllm {
 
@@ -63,17 +66,17 @@ void merge_attn_states_kernel(scalar_t* output, float* output_lse,
     pack_128b_t o_out_pack;
 
 #pragma unroll
-    for (uint i = 0; i < pack_size; ++i) {
+  for (uint i = 0; i < pack_size; ++i) {
       // Always use float for FMA to keep high precision.
       // half(uint16_t), bfloat16, float -> float.
       const float p_out_f =
-          vllm::to_float(reinterpret_cast<const scalar_t*>(&p_out_pack)[i]);
+          vllm::xpu::to_float(reinterpret_cast<const scalar_t*>(&p_out_pack)[i]);
       const float s_out_f =
-          vllm::to_float(reinterpret_cast<const scalar_t*>(&s_out_pack)[i]);
+          vllm::xpu::to_float(reinterpret_cast<const scalar_t*>(&s_out_pack)[i]);
       // fma: a * b + c = p_out_f * p_scale + (s_out_f * s_scale)
       const float o_out_f = p_out_f * p_scale + (s_out_f * s_scale);
       // float -> half(uint16_t), bfloat16, float.
-      vllm::from_float(reinterpret_cast<scalar_t*>(&o_out_pack)[i], o_out_f);
+      vllm::xpu::from_float(reinterpret_cast<scalar_t*>(&o_out_pack)[i], o_out_f);
     }
 
     // Pack 128b storage
@@ -97,7 +100,7 @@ void merge_attn_states_kernel(scalar_t* output, float* output_lse,
     if (scalar_dtype == at::ScalarType::Float) {                        \
       fn(float);                                                        \
     } else if (scalar_dtype == at::ScalarType::Half) {                  \
-      fn(uint16_t);                                                     \
+      fn(sycl::half);                                                     \
     } else if (scalar_dtype == at::ScalarType::BFloat16) {              \
       fn(sycl::ext::oneapi::bfloat16);                                  \
     } else {                                                            \
@@ -107,7 +110,7 @@ void merge_attn_states_kernel(scalar_t* output, float* output_lse,
 
 #define LAUNCH_MERGE_ATTN_STATES(scalar_t, NUM_THREADS)                  \
   {                                                                      \
-    ((sycl::queue*)(queue))->submit([&](sycl::handler& cgh) {           \
+    ((sycl::queue)(queue)).submit([&](sycl::handler& cgh) {           \
       auto output_data_ptr_ct0 =                                         \
           reinterpret_cast<scalar_t*>(output.data_ptr());                \
       auto output_lse_ptr_ct1 = output_lse_ptr;                          \
@@ -178,8 +181,8 @@ void merge_attn_states_launcher(torch::Tensor& output,
   const uint threads_per_head = head_size / pack_size;
   const uint total_threads = num_tokens * num_heads * threads_per_head;
 
-  dpct::dim3 block(NUM_THREADS);
-  dpct::dim3 grid((total_threads + NUM_THREADS - 1) / NUM_THREADS);
+  sycl::range<3> block(1,1,NUM_THREADS);
+  sycl::range<3> grid(1,1,(total_threads + NUM_THREADS - 1) / NUM_THREADS);
 
   at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
   at::DeviceGuard device_guard(curDevice);
