@@ -175,6 +175,7 @@ def get_benchmark(
 if __name__ == "__main__":
     args = parse_args()
 
+    # TODO: to refine the device detect in the future
     device = "xpu"
 
     print("Benchmark Configuration:")
