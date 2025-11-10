@@ -285,7 +285,7 @@ void gelu_quick(torch::Tensor& out,    // [..., d]
 }
 
 void swigluoai_and_mul(torch::Tensor& out,    // [..., d]
-                       torch::Tensor& input,  // [..., 2 * d]
+                       const torch::Tensor& input,  // [..., 2 * d]
                        double alpha, double limit) {
   LAUNCH_SWIGLUOAI_AND_MUL(vllm::swigluoai_and_mul, alpha, limit);
 }

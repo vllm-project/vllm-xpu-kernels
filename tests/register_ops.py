@@ -76,6 +76,19 @@ def deepseek_scaling_rope(
                                                   rotary_dim, is_neox_style)
 
 
+# merge attn states ops
+def merge_attn_states(
+    output: torch.Tensor,
+    prefix_output: torch.Tensor,
+    prefix_lse: torch.Tensor,
+    suffix_output: torch.Tensor,
+    suffix_lse: torch.Tensor,
+    output_lse: torch.Tensor | None = None,
+) -> None:
+    torch.ops._C.merge_attn_states(
+        output, output_lse, prefix_output, prefix_lse, suffix_output, suffix_lse
+    )
+
 def reshape_and_cache(
     key: torch.Tensor,
     value: torch.Tensor,
