@@ -461,3 +461,10 @@ def parse_args():
         print(f"Updated dtype: {args.dtype}")
 
     return args
+<<<<<<< HEAD
+=======
+
+
+def round_up(x: int, y: int) -> int:
+    return ((x + y - 1) // y) * y
+>>>>>>> 60d1ad6 (format fix)
