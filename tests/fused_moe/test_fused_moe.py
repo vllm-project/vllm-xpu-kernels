@@ -60,7 +60,7 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     if has_bias:
         bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE)
     else:
-        bias = torch.zeros((num_experts, n), dtype=dtype, device=DEVICE)
+        bias = None
 
     # output offset
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)

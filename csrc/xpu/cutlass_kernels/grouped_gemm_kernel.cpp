@@ -302,16 +302,16 @@ struct GroupedGemmRunner {
 
     // Per-GEMM problem shape info may only exist on the device.
     if (host_problem_shapes_available) {
-      arguments =
-          typename Gemm::Arguments{cutlass::gemm::GemmUniversalMode::kGrouped,
-                                   {options.groups, problem_sizes.get(),
-                                    options.problem_sizes_host.data()},
-                                   {ptr_A, stride_A.get(), ptr_B,
-                                    stride_B.get(), expert_first_token_offset},
-                                   {fusion_args, ptr_C, stride_C.get(), ptr_D,
-                                    stride_D.get(), expert_first_token_offset},
-                                   hw_info,
-                                   {1, RasterOrderOptions::AlongN}};
+      arguments = typename Gemm::Arguments{
+          cutlass::gemm::GemmUniversalMode::kGrouped,
+          {options.groups, problem_sizes.get(),
+           options.problem_sizes_host.data()},
+          {ptr_A, stride_A.get(), ptr_B, stride_B.get(),
+           expert_first_token_offset},
+          {fusion_args, ptr_C, stride_C.get(), ptr_D, stride_D.get(),
+           expert_first_token_offset, ptr_C ? true : false},
+          hw_info,
+          {1, RasterOrderOptions::AlongN}};
     } else {
       arguments = typename Gemm::Arguments{
           cutlass::gemm::GemmUniversalMode::kGrouped,
@@ -319,7 +319,7 @@ struct GroupedGemmRunner {
           {ptr_A, stride_A.get(), ptr_B, stride_B.get(),
            expert_first_token_offset},
           {fusion_args, ptr_C, stride_C.get(), ptr_D, stride_D.get(),
-           expert_first_token_offset},
+           expert_first_token_offset, ptr_C ? true : false},
           hw_info,
           {1, RasterOrderOptions::AlongN}};
     }

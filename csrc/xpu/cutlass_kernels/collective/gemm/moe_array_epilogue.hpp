@@ -196,6 +196,7 @@ class CollectiveEpilogue<MoE16Group, CtaTileMNK_, ElementC_, StrideC_,
     ElementD* ptr_D;
     StrideD dD;
     int64_t const* expert_first_token_offset;
+    bool has_bias;
   };
 
   // Device side epilogue params
@@ -208,6 +209,7 @@ class CollectiveEpilogue<MoE16Group, CtaTileMNK_, ElementC_, StrideC_,
     ElementD* ptr_D;
     StrideD dD;
     int64_t const* expert_first_token_offset;
+    bool has_bias;
   };
 
   //
@@ -251,7 +253,8 @@ class CollectiveEpilogue<MoE16Group, CtaTileMNK_, ElementC_, StrideC_,
             args.dC,
             args.ptr_D,
             args.dD,
-            args.expert_first_token_offset};
+            args.expert_first_token_offset,
+            args.has_bias};
   }
 
   template <class ProblemShape>
@@ -409,7 +412,7 @@ class CollectiveEpilogue<MoE16Group, CtaTileMNK_, ElementC_, StrideC_,
     auto sg_n_coord = n_coord * ATOM_N + sg_local_n_coord;
     auto sg_coord = make_coord(sg_m_coord, sg_n_coord, k_coord, l_coord);
 
-    bool is_C_load_needed = is_source_supported;
+    bool is_C_load_needed = is_source_supported && params.has_bias;
     /* is_source_supported && fusion_callbacks.is_C_load_needed(); */
 
     // Represent the full output tensor

@@ -133,12 +133,8 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
     expert_token_count = (expert_first_token_offset[1:] -
                           expert_first_token_offset[:-1]).to(torch.int64)
     if w13_bias is None:
-        w13_bias = torch.zeros((num_experts, 2 * inter_size),
-                               dtype=torch.float,
-                               device=hidden_states.device)
-        w2_bias = torch.zeros((num_experts, hidden_size),
-                              dtype=torch.float,
-                              device=hidden_states.device)
+        w13_bias = None
+        w2_bias = None
     if w13_bias.shape == (num_experts, 2 * inter_size):
         w13_bias = w13_bias.repeat_interleave(expert_token_count,
                                               dim=0).float()
