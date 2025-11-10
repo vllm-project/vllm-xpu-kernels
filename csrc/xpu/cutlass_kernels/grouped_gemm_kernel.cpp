@@ -105,6 +105,7 @@
 #include "collective/gemm/moe_array_epilogue.hpp"
 /* #include "./collective/gemm/xe_builder.hpp" */
 #include "collective/gemm/moe_callbacks.hpp"
+#include "collective/gemm/moe_dtype_policy.hpp"
 #include "collective/gemm/moe_gemm_array_cooperative.hpp"
 // #include "./collective/gemm/gemm_universal_adapter.hpp"
 
@@ -113,12 +114,6 @@ using ProblemShape =
     cutlass::gemm::GroupProblemShape<Shape<int, int, int>>;  // <M,N,K> per
                                                              // group
 
-using ElementAccumulator = float;      // <- data type of accumulator
-using ElementComputeEpilogue = float;  // <- data type of epilogue operations
-using ElementA = bfloat16_t;  // <- data type of elements in input matrix A
-using ElementB = bfloat16_t;  // <- data type of elements in input matrix B
-using ElementOutput =
-    bfloat16_t;  // <- data type of elements in output matrix D
 bool debug = false;
 bool collect_gflops = false;
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -205,7 +200,7 @@ struct GroupedGemmRunner {
   using ElementC = typename Gemm::ElementC;
 
   using CollectiveEpilogue = typename Gemm::CollectiveEpilogue;
-  using ElementOutput = bfloat16_t;
+  using ElementOutput = typename Gemm::ElementA;
   using ElementAccumulator = float_t;
 
   using ProblemShapeType = typename Gemm::GemmKernel::ProblemShape;
@@ -389,6 +384,7 @@ struct GroupedGemmRunner {
   }
 };
 
+template <class moe_policy>
 void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
                     void* ptr_bias, void* ptr_D, void* expert_token_count,
                     void* expert_first_token_offset, int64_t N, int64_t K,
@@ -410,12 +406,12 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
       cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
           hw_info.device_id);
 
-  using ElementAccumulator = float;
-  using ElementComputeEpilogue = float;
-  using ElementA = cutlass::bfloat16_t;
-  using ElementB = cutlass::bfloat16_t;
-  using ElementOutput = bfloat16_t;
-  using ElementScale = cutlass::bfloat16_t;
+  using ElementAccumulator = typename moe_policy::ElementAccumulator;
+  using ElementComputeEpilogue = typename moe_policy::ElementComputeEpilogue;
+  using ElementA = typename moe_policy::ElementA;
+  using ElementB = typename moe_policy::ElementB;
+  using ElementOutput = typename moe_policy::ElementOutput;
+  using ElementScale = typename moe_policy::ElementScale;
 
   using LayoutA = cutlass::layout::RowMajor;
   using LayoutB = cutlass::layout::RowMajor;
@@ -429,9 +425,13 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
   using GmemTiledCopyB =
       XE_2D_U16x32x32_LD_V;  // Note: This shape has to match the shape used for
                              // the scaling factors
+  using MMAOperation =
+      std::conditional_t<std::is_same_v<moe_policy, moe_bf16_policy>,
+                         XE_8x16x16_F32BF16BF16F32_TT,
+                         XE_8x16x16_F32F16F16F32_TT>;
 
   using TiledMma =
-      TiledMMA<MMA_Atom<XE_8x16x16_F32BF16BF16F32_TT>,
+      TiledMMA<MMA_Atom<MMAOperation>,
                Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>,
                Tile<Layout<Shape<_8, _8, _4>, Stride<_1, _32, _8>>,
                     Layout<Shape<_16, _4, _4>, Stride<_1, _64, _16>>, _32>>;
@@ -476,6 +476,15 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
              reinterpret_cast<const ElementAccumulator*>(ptr_bias),
              reinterpret_cast<ElementOutput*>(ptr_D));
 }
+
+template void kernel_functor<moe_bf16_policy>(
+    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_bias, void* ptr_D,
+    void* expert_token_count, void* expert_first_token_offset, int64_t N,
+    int64_t K, int64_t groups);
+template void kernel_functor<moe_fp16_policy>(
+    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_bias, void* ptr_D,
+    void* expert_token_count, void* expert_first_token_offset, int64_t N,
+    int64_t K, int64_t groups);
 
 }  // namespace grouped_gemm
 }  // namespace gpu::cutlass_kernel

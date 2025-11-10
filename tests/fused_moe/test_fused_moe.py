@@ -42,7 +42,7 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     seed_everything(7)
