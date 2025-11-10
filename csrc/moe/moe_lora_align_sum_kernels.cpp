@@ -24,6 +24,8 @@ struct moe_lora_align_sum_kernel {
   int32_t* expert_ids;
   int32_t topk_num;
   int32_t* total_tokens_post_pad;
+  int32_t* adapter_enabled;
+  int32_t* lora_ids;
 
   // local accessors (shared mem)
   // size = num_experts + 1
@@ -32,25 +34,28 @@ struct moe_lora_align_sum_kernel {
   sycl::local_accessor<token_cnts_t, 1> tokens_cnts_local;
 
   moe_lora_align_sum_kernel(
-      scalar_t* topk_ids_, int32_t* token_lora_mapping_,
-      int32_t* sorted_token_ids_, int32_t* expert_ids_,
-      int32_t* total_tokens_post_pad_, int64_t block_size_,
-      int32_t num_experts_, int32_t max_loras_, size_t numel_,
-      int32_t max_num_tokens_padded_, int32_t max_num_m_blocks_,
-      int32_t topk_num_, sycl::local_accessor<int32_t, 1> cumsum_local_,
+      scalar_t* __restrict__ topk_ids_, int32_t* token_lora_mapping_,
+      int64_t block_size_, int num_experts_, int max_loras_, size_t numel_,
+      int max_num_tokens_padded_, int max_num_m_blocks_,
+      int32_t* __restrict__ sorted_token_ids_,
+      int32_t* __restrict__ expert_ids_, int topk_num_,
+      int32_t* total_tokens_post_pad_, int32_t* adapter_enabled_,
+      int32_t* lora_ids_, sycl::local_accessor<int32_t, 1> cumsum_local_,
       sycl::local_accessor<token_cnts_t, 1> tokens_cnts_local_)
       : topk_ids(topk_ids_),
         token_lora_mapping(token_lora_mapping_),
-        sorted_token_ids(sorted_token_ids_),
-        expert_ids(expert_ids_),
-        total_tokens_post_pad(total_tokens_post_pad_),
         block_size(block_size_),
         num_experts(num_experts_),
         max_loras(max_loras_),
         numel(numel_),
         max_num_tokens_padded(max_num_tokens_padded_),
         max_num_m_blocks(max_num_m_blocks_),
+        sorted_token_ids(sorted_token_ids_),
+        expert_ids(expert_ids_),
         topk_num(topk_num_),
+        total_tokens_post_pad(total_tokens_post_pad_),
+        adapter_enabled(adapter_enabled_),
+        lora_ids(lora_ids_),
         cumsum_local(cumsum_local_),
         tokens_cnts_local(tokens_cnts_local_) {}
 
@@ -61,8 +66,11 @@ struct moe_lora_align_sum_kernel {
     const int32_t blockIdx_x = (int32_t)it.get_group(0);
 
     const size_t local_idx = threadIdx_x;  // equiv threadIdx.x
-    const int32_t lora_id = blockIdx_x;    // equiv blockIdx.x
 
+    int lora_id = lora_ids[blockIdx_x];
+    if (lora_id == -1 || adapter_enabled[lora_id] == 0) {
+      return;
+    }
     const size_t tokens_per_thread = div_ceil(numel, blockDim_x);
     const size_t start_idx = local_idx * tokens_per_thread;
 
@@ -197,7 +205,8 @@ void launch_moe_lora_align_sum_kernel(
     int32_t* token_lora_mapping, int64_t block_size, int32_t num_experts,
     int32_t max_loras, size_t numel, int32_t max_num_tokens_padded,
     int32_t max_num_m_blocks, int32_t* sorted_token_ids, int32_t* expert_ids,
-    int32_t topk_num, int32_t* total_tokens_post_pad) {
+    int32_t topk_num, int32_t* total_tokens_post_pad, int32_t* adapter_enabled,
+    int32_t* lora_ids) {
   sycl::range<1> local_range((size_t)num_thread);
   sycl::range<1> global_range((size_t)max_loras * (size_t)num_thread);
   // Local shared sizes:
@@ -218,22 +227,21 @@ void launch_moe_lora_align_sum_kernel(
         sycl::range<1>(tokens_cnts_elems), h);
 
     vllm::moe::moe_lora_align_sum_kernel<scalar_t, token_cnts_t> kfn(
-        topk_ids, token_lora_mapping, sorted_token_ids, expert_ids,
-        total_tokens_post_pad, block_size, num_experts, max_loras, numel,
-        max_num_tokens_padded, max_num_m_blocks, topk_num, cumsum_local,
-        tokens_cnts_local);
+        topk_ids, token_lora_mapping, block_size, num_experts, max_loras, numel,
+        max_num_tokens_padded, max_num_m_blocks, sorted_token_ids, expert_ids,
+        topk_num, total_tokens_post_pad, adapter_enabled, lora_ids,
+        cumsum_local, tokens_cnts_local);
     h.parallel_for(sycl::nd_range<1>(global_range, local_range), kfn);
   });
 };
 
-void moe_lora_align_block_size(torch::Tensor topk_ids,
-                               torch::Tensor token_lora_mapping,
-                               int64_t num_experts, int64_t block_size,
-                               int64_t max_loras, int64_t max_num_tokens_padded,
-                               int64_t max_num_m_blocks,
-                               torch::Tensor sorted_token_ids,
-                               torch::Tensor expert_ids,
-                               torch::Tensor num_tokens_post_pad) {
+void moe_lora_align_block_size(
+    torch::Tensor topk_ids, torch::Tensor token_lora_mapping,
+    int64_t num_experts, int64_t block_size, int64_t max_loras,
+    int64_t max_num_tokens_padded, int64_t max_num_m_blocks,
+    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
+    torch::Tensor num_tokens_post_pad, torch::Tensor adapter_enabled,
+    torch::Tensor lora_ids) {
   const int topk_num = topk_ids.size(1);
   TORCH_CHECK(block_size > 0, "block_size should be greater than 0.");
 
@@ -263,6 +271,7 @@ void moe_lora_align_block_size(torch::Tensor topk_ids,
             max_loras, topk_ids.numel(), max_num_tokens_padded,
             max_num_m_blocks, sorted_token_ids.data_ptr<int32_t>(),
             expert_ids.data_ptr<int32_t>(), topk_num,
-            num_tokens_post_pad.data_ptr<int32_t>());
+            num_tokens_post_pad.data_ptr<int32_t>(),
+            adapter_enabled.data_ptr<int32_t>(), lora_ids.data_ptr<int32_t>());
       });
 }

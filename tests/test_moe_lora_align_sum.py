@@ -71,7 +71,10 @@ def test_moe_lora_align_block_size(num_tokens, topk_num, num_experts,
     num_tokens_post_pad = torch.zeros((max_loras, ),
                                       dtype=torch.int32,
                                       device="xpu")
-
+    adapter_enabled = torch.ones((max_loras + 1, ),
+                                 dtype=torch.int32,
+                                 device="xpu")
+    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32, device="xpu")
     # call kernel
     ops.moe_lora_align_block_size(
         topk_ids,
@@ -84,6 +87,8 @@ def test_moe_lora_align_block_size(num_tokens, topk_num, num_experts,
         sorted_token_ids,
         expert_ids,
         num_tokens_post_pad,
+        adapter_enabled,
+        lora_ids,
     )
 
     # verify values
