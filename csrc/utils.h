@@ -69,23 +69,18 @@ struct alignas(sizeof(scalar_t) * vec_size) aligned_vec {
 // From float to float.
 inline void from_float(float& dst, float src) { dst = src; }
 // From float32 to float16.
-inline void from_float(sycl::half& dst, float src) {
-  dst = sycl::half(src);
-}
+inline void from_float(sycl::half& dst, float src) { dst = sycl::half(src); }
 // From float32 to bfloat16.
 inline void from_float(sycl::ext::oneapi::bfloat16& dst, float src) {
   dst = sycl::ext::oneapi::bfloat16(src);
 }
 
 // From float to float.
-inline  float to_float(float u) { return u; }
+inline float to_float(float u) { return u; }
 // From float16 to float32.
 inline float to_float(sycl::half u) { return float(u); }
 // From bfloat16 to float32.
-inline float to_float(sycl::ext::oneapi::bfloat16 u) {
-  return float(u);
-}
-
+inline float to_float(sycl::ext::oneapi::bfloat16 u) { return float(u); }
 
 }  // namespace xpu
 

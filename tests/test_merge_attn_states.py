@@ -1,30 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 """Tests for merge_attn_states function.
 
 Run `pytest tests/test_merge_attn_states.py`.
 """
 
+import logging
+
 import pytest
 import torch
-import logging
 
 from tests.register_ops import merge_attn_states as merge_attn_states_xpu
 
 logger = logging.getLogger("vllm_xpu_kernel")
 
 
-
 # Naive PyTorch Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 # can be used to combine partial attention results (in the split-KV case)
 def merge_attn_states_torch(
-    output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    prefix_output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    prefix_lse: torch.Tensor,  # [NUM_HEADS, NUM_TOKENS]
-    suffix_output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    suffix_lse: torch.Tensor,  # [NUM_HEADS, NUM_TOKENS]
-    output_lse: torch.Tensor | None = None,  # [NUM_HEADS, NUM_TOKENS]
+        output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+        prefix_output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+        prefix_lse: torch.Tensor,  # [NUM_HEADS, NUM_TOKENS]
+        suffix_output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+        suffix_lse: torch.Tensor,  # [NUM_HEADS, NUM_TOKENS]
+        output_lse: torch.Tensor | None = None,  # [NUM_HEADS, NUM_TOKENS]
 ):
     p_lse = prefix_lse
     s_lse = suffix_lse
@@ -42,8 +41,10 @@ def merge_attn_states_torch(
         output_lse = torch.log(out_se) + max_lse
     p_scale = p_lse_exp / out_se  # [NUM_HEADS, NUM_TOKENS]
     s_scale = s_lse_exp / out_se  # [NUM_HEADS, NUM_TOKENS]
-    p_scale = torch.transpose(p_scale, 0, 1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
-    s_scale = torch.transpose(s_scale, 0, 1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
+    p_scale = torch.transpose(p_scale, 0,
+                              1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
+    s_scale = torch.transpose(s_scale, 0,
+                              1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
     output = prefix_output * p_scale + suffix_output * s_scale
     return output, output_lse
 
@@ -66,13 +67,10 @@ MINI_PYTEST_PARAMS = {
 }
 
 
-
 def generate_markdown_table():
     global all_case_info
-    table_header = (
-        "| tokens | heads | headsize | dtype "
-        "| device | torch | cuda | speedup |"
-    )
+    table_header = ("| tokens | heads | headsize | dtype "
+                    "| device | torch | cuda | speedup |")
     table_separator = "| --- | --- | --- | --- | --- | --- | --- | --- |"
 
     def shortly_dtype(dtype: torch.dtype) -> str:
@@ -96,12 +94,10 @@ def generate_markdown_table():
         ) = info
         dtype = shortly_dtype(dtype)
         device = shortly_device(device)
-        print(
-            f"| {num_tokens} | {num_heads} | {head_size} "
-            f"| {dtype} | {device} | {avg_time_torch_kernel:.5f}ms "
-            f"| {avg_time_xpu_kernel:.5f}ms "
-            f"| {performance_improved:.4f}x |"
-        )
+        print(f"| {num_tokens} | {num_heads} | {head_size} "
+              f"| {dtype} | {device} | {avg_time_torch_kernel:.5f}ms "
+              f"| {avg_time_xpu_kernel:.5f}ms "
+              f"| {performance_improved:.4f}x |")
 
 
 @pytest.mark.parametrize("num_tokens", NUM_BATCH_TOKENS)
@@ -109,23 +105,22 @@ def generate_markdown_table():
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("output_dtype", DTYPES)
 @torch.inference_mode()
-def test_merge_attn_states(
-    num_tokens: int, num_query_heads: int, head_size: int, output_dtype: torch.dtype
-):
+def test_merge_attn_states(num_tokens: int, num_query_heads: int,
+                           head_size: int, output_dtype: torch.dtype):
 
     NUM_TOKENS = num_tokens
     NUM_HEADS = num_query_heads
     HEAD_SIZE = head_size
 
-    logger.debug(
-        f"\nNUM_TOKENS:{NUM_TOKENS}, NUM_HEADS:{NUM_HEADS}, "
-        f"HEAD_SIZE:{HEAD_SIZE}, DTYPE: {output_dtype}, "
-        f"Device: xpu."
-    )
-
     # prefix_lse and suffix_lse contain inf and normal values
-    prefix_lse = torch.randn(NUM_HEADS, NUM_TOKENS, dtype=torch.float32, device="xpu")
-    suffix_lse = torch.randn(NUM_HEADS, NUM_TOKENS, dtype=torch.float32, device="xpu")
+    prefix_lse = torch.randn(NUM_HEADS,
+                             NUM_TOKENS,
+                             dtype=torch.float32,
+                             device="xpu")
+    suffix_lse = torch.randn(NUM_HEADS,
+                             NUM_TOKENS,
+                             dtype=torch.float32,
+                             device="xpu")
 
     # Generate boolean masks
     mask_prefix = torch.rand(NUM_HEADS, NUM_TOKENS) < 0.1
@@ -140,18 +135,18 @@ def test_merge_attn_states(
 
     # Other input tensors (need to be initialized but
     # no actual calculation needed)
-    output = torch.zeros(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="xpu"
-    )
-    output_lse = torch.zeros(
-        (NUM_HEADS, NUM_TOKENS), dtype=torch.float32, device="xpu"
-    )
-    prefix_output = torch.randn(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="xpu"
-    )
-    suffix_output = torch.randn(
-        (NUM_TOKENS, NUM_HEADS, HEAD_SIZE), dtype=output_dtype, device="xpu"
-    )
+    output = torch.zeros((NUM_TOKENS, NUM_HEADS, HEAD_SIZE),
+                         dtype=output_dtype,
+                         device="xpu")
+    output_lse = torch.zeros((NUM_HEADS, NUM_TOKENS),
+                             dtype=torch.float32,
+                             device="xpu")
+    prefix_output = torch.randn((NUM_TOKENS, NUM_HEADS, HEAD_SIZE),
+                                dtype=output_dtype,
+                                device="xpu")
+    suffix_output = torch.randn((NUM_TOKENS, NUM_HEADS, HEAD_SIZE),
+                                dtype=output_dtype,
+                                device="xpu")
 
     warmup_times = 2
     repeat_times = 20
@@ -226,60 +221,39 @@ def test_merge_attn_states(
 
     # 2. Performance compare
     performance_improved = avg_time_torch_kernel / avg_time_xpu_kernel
-    logger.debug(f" Torch time: {avg_time_torch_kernel:.6f}ms")
-    logger.debug(
-        f"  XPU time: {avg_time_xpu_kernel:.6f}ms, "
-        f"Performance: {performance_improved:.5f}x"
-    )
-    logger.debug("-" * 100)
+    # print(f" Torch time: {avg_time_torch_kernel:.6f}ms")
+    # print(f"  XPU time: {avg_time_xpu_kernel:.6f}ms, "
+    #              f"Performance: {performance_improved:.5f}x")
+    # print("-" * 100)
 
-    # 4. Correctness compare
+    # 3. Correctness compare
     # Liger Kernel: Efficient Triton Kernels for LLM Training
     # https://arxiv.org/pdf/2410.10989, 3.3 Correctness
     # use rtol = 1e-2 for bfloat16.
     rtol = 1e-2 if output_dtype == torch.bfloat16 else 1e-3
 
-    def diff(a: torch.Tensor, b: torch.Tensor):
-        max_diff = torch.max(torch.abs(a.float() - b.float()))
-        return max_diff
+    # Use torch output as reference
+    torch.testing.assert_close(output_xpu.float(),
+                               output_torch.float(),
+                               atol=1e-3,
+                               rtol=rtol)
 
-    # Use Triton output as reference because we want to replace
-    # the Triton kernel with custom XPU kernel for merge attn
-    # states operation.
-    torch.testing.assert_close(
-        output_xpu.float(), output_torch.float(), atol=1e-3, rtol=rtol
-    )
-    logger.debug("Output all match, max abs diff:")
-    logger.debug(f"  (XPU vs Torch) : {diff(output_torch, output_xpu)}")
-    logger.debug("-" * 100)
-
-    torch.testing.assert_close(
-        output_lse_xpu.float(), output_lse_torch.float(), atol=1e-3, rtol=rtol
-    )
-    logger.debug("Output LSE all match, max abs diff:")
-    logger.debug(f"  (XPU vs Torch) : {diff(output_lse_torch, output_lse_xpu)}")
-    logger.debug("-" * 100)
-
-    logger.debug(
-        "All output values test passed! All inf values "
-        "are correctly replaced with -inf."
-    )
-    logger.debug("-" * 100)
+    torch.testing.assert_close(output_lse_xpu.float(),
+                               output_lse_torch.float(),
+                               atol=1e-3,
+                               rtol=rtol)
 
     device = "xpu"
-    all_case_info.append(
-        (
-            NUM_TOKENS,
-            NUM_HEADS,
-            HEAD_SIZE,
-            output_dtype,
-            device,
-            avg_time_torch_kernel,
-            avg_time_xpu_kernel,
-            performance_improved,
-        )
-    )
-    if len(all_case_info) == (
-        len(NUM_BATCH_TOKENS) * len(HEAD_SIZES) * len(NUM_QUERY_HEADS) * len(DTYPES)
-    ):
+    all_case_info.append((
+        NUM_TOKENS,
+        NUM_HEADS,
+        HEAD_SIZE,
+        output_dtype,
+        device,
+        avg_time_torch_kernel,
+        avg_time_xpu_kernel,
+        performance_improved,
+    ))
+    if len(all_case_info) == (len(NUM_BATCH_TOKENS) * len(HEAD_SIZES) *
+                              len(NUM_QUERY_HEADS) * len(DTYPES)):
         generate_markdown_table()
