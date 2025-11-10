@@ -71,7 +71,7 @@ static inline void dnnl_matmul_w8a8_fp8(
 
   auto f_attr = [&](dnnl::primitive_attr& pattr) {
     pattr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
-    if (m1_sc.dim() == 1) {
+    if (m1_sc.numel() == 1) {
       pattr.set_scales(DNNL_ARG_SRC,
                        /* mask */ 0, {}, get_onednn_dtype(m1_sc));
       /* per tensor quant */
@@ -82,7 +82,7 @@ static inline void dnnl_matmul_w8a8_fp8(
       /* per token quant */
     }
 
-    if (m2_sc.dim() == 1) {
+    if (m2_sc.numel() == 1) {
       pattr.set_scales(DNNL_ARG_WEIGHTS,
                        /* mask */ 0, {}, get_onednn_dtype(m2_sc));
       /* per tensor quant */
