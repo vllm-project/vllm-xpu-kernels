@@ -22,17 +22,17 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
 /* gemm2(group_A, w2, output, offset) */
 
 at::Tensor grouped_gemm_func(at::Tensor& ptr_A, at::Tensor& ptr_B,
-                             const c10::optional<at::Tensor>& bias,
+                             const c10::optional<at::Tensor>& ptr_bias,
                              at::Tensor& ptr_D, at::Tensor& expert_token_count,
                              at::Tensor& expert_first_token_offset, int64_t N,
                              int64_t K, int64_t groups) {
   auto& dpcpp_queue =
       at::xpu::getCurrentXPUStream(ptr_A.device().index()).queue();
-  grouped_gemm::kernel_functor(dpcpp_queue, ptr_A.data_ptr(), ptr_B.data_ptr(),
-                               bias.has_value() ? bias->data_ptr() : nullptr,
-                               ptr_D.data_ptr(), expert_token_count.data_ptr(),
-                               expert_first_token_offset.data_ptr(), N, K,
-                               groups);
+  grouped_gemm::kernel_functor(
+      dpcpp_queue, ptr_A.data_ptr(), ptr_B.data_ptr(),
+      ptr_bias.has_value() ? ptr_bias->data_ptr() : nullptr, ptr_D.data_ptr(),
+      expert_token_count.data_ptr(), expert_first_token_offset.data_ptr(), N, K,
+      groups);
   return ptr_D;
 }
 

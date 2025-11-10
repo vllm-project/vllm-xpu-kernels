@@ -34,7 +34,7 @@ MINI_PYTEST_PARAMS = {
         "e": [2],
         "topk": [1],
         "dtype": [torch.bfloat16],
-        "has_bias": [False]
+        "has_bias": [True]
     }
 }
 
