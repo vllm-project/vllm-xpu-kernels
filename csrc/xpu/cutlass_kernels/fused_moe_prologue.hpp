@@ -13,7 +13,8 @@ inline T ceilDiv(T a, T b) {
 
 // TODO: this function causes a build error
 // template <int RANGE_DIM, typename T>
-// inline void sycl_print_decimal(sycl::nd_item<RANGE_DIM> item, T* data, int size,
+// inline void sycl_print_decimal(sycl::nd_item<RANGE_DIM> item, T* data, int
+// size,
 //                                char* name) {
 //   int local_id = item.get_local_id(2);
 //   int group_id_x = item.get_group(2);
