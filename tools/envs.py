@@ -91,11 +91,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "NVCC_THREADS":
     lambda: os.getenv("NVCC_THREADS", None),
 
-    # If set, vllm will use precompiled binaries (*.so)
-    "VLLM_USE_PRECOMPILED":
-    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
-        os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
-
     # Whether to force using nightly wheel in python build.
     # This is used for testing the nightly wheel in python build.
     "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL":
@@ -123,6 +118,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "VLLM_CONFIG_ROOT",
             os.path.join(get_default_config_root(), "vllm"),
         )),
+    # If set, vllm-xpu-kernels will use precompiled binaries (*.so)
+    "VLLM_USE_PRECOMPILED":
+    lambda: os.environ.get("VLLM_USE_PRECOMPILED", "").strip().lower() in
+    ("1", "true") or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
 }
 
 # --8<-- [end:env-vars-definition]
