@@ -61,6 +61,7 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
     # TODO: will all integrated in Cpp func. Temporary expose before gemm fusion
     num_rows, hidden_size = list(hidden_states.shape)
     inter_size = list(w2.shape)[-1]
+    topk = list(topk_ids.shape)[-1]
     num_experts_per_node = num_experts
     experts_per_token = n_experts_per_token
     num_moe_inputs = n_experts_per_token * num_rows
@@ -143,7 +144,6 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
             w2_bias = w2_bias.repeat_interleave(expert_token_count,
                                                 dim=0).float()
     expert_token_count = expert_token_count.cpu()
-
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
@@ -184,23 +184,24 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
         K=inter_size,
         groups=num_experts_per_node)
 
-    topk_weights = topk_weights.view(-1, 1)
     expert_cache = output
 
-    for expert_id, end_idx in enumerate(expert_first_token_offset):
-        start_idx = 0 if expert_id == 0 else expert_first_token_offset[
+    iter_for_weight_apply = expert_first_token_offset[1:]
+    for expert_id, end_idx in enumerate(iter_for_weight_apply):
+        start_idx = 0 if expert_id == 0 else iter_for_weight_apply[
             expert_id - 1]
         if start_idx == end_idx:
             continue
 
         exp_token_idxs = permuted_row_to_unpermuted_row[
-            start_idx:end_idx] % num_rows
+            start_idx:end_idx]
+        scores_expert_ids = exp_token_idxs % num_rows
+        scores_k_slot = exp_token_idxs // num_rows
+        scores = topk_weights[scores_expert_ids, scores_k_slot]
         expert_out = gemm2_output[start_idx:end_idx]
-        expert_out.mul_(
-            topk_weights[permuted_row_to_unpermuted_row[start_idx:end_idx] %
-                         num_rows])
+        expert_out.mul_(scores.view(-1,1))
         expert_cache.scatter_reduce_(0,
-                                     exp_token_idxs.view(-1, 1).repeat(
+                                     scores_expert_ids.view(-1, 1).repeat(
                                          1, hidden_size),
                                      expert_out,
                                      reduce='sum')
