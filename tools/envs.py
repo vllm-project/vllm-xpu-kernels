@@ -115,6 +115,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "VLLM_CONFIG_ROOT",
             os.path.join(get_default_config_root(), "vllm"),
         )),
+    # If set, vllm-xpu-kernels will use precompiled binaries (*.so)
+    "VLLM_USE_PRECOMPILED":
+    lambda: os.environ.get("VLLM_USE_PRECOMPILED", "").strip().lower() in
+    ("1", "true") or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
 }
 
 # --8<-- [end:env-vars-definition]
