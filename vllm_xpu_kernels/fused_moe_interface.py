@@ -135,11 +135,13 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
     if w13_bias is None:
         w13_bias = None
         w2_bias = None
-    if w13_bias.shape == (num_experts, 2 * inter_size):
-        w13_bias = w13_bias.repeat_interleave(expert_token_count,
-                                              dim=0).float()
-    if w2_bias.shape == (num_experts, hidden_size):
-        w2_bias = w2_bias.repeat_interleave(expert_token_count, dim=0).float()
+    else:
+        if w13_bias.shape == (num_experts, 2 * inter_size):
+            w13_bias = w13_bias.repeat_interleave(expert_token_count,
+                                                  dim=0).float()
+        if w2_bias.shape == (num_experts, hidden_size):
+            w2_bias = w2_bias.repeat_interleave(expert_token_count,
+                                                dim=0).float()
     expert_token_count = expert_token_count.cpu()
 
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
