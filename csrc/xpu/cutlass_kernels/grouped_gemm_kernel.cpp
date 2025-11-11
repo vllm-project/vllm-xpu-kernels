@@ -425,10 +425,7 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
   using GmemTiledCopyB =
       XE_2D_U16x32x32_LD_V;  // Note: This shape has to match the shape used for
                              // the scaling factors
-  using MMAOperation =
-      std::conditional_t<std::is_same_v<moe_policy, moe_bf16_policy>,
-                         XE_8x16x16_F32BF16BF16F32_TT,
-                         XE_8x16x16_F32F16F16F32_TT>;
+  using MMAOperation = moe_policy::MMAOperation;
 
   using TiledMma =
       TiledMMA<MMA_Atom<MMAOperation>,

@@ -1,3 +1,4 @@
+#pragma once
 #include <torch/all.h>
 #include "utils.h"
 
@@ -10,22 +11,23 @@ inline T ceilDiv(T a, T b) {
   return (a + b - 1) / b;
 }
 
-template <int RANGE_DIM, typename T>
-inline void sycl_print_decimal(sycl::nd_item<RANGE_DIM> item, T* data, int size,
-                               char* name) {
-  int local_id = item.get_local_id(2);
-  int group_id_x = item.get_group(2);
-  int group_id_y = item.get_group(1);
+// TODO: this function causes a build error
+// template <int RANGE_DIM, typename T>
+// inline void sycl_print_decimal(sycl::nd_item<RANGE_DIM> item, T* data, int size,
+//                                char* name) {
+//   int local_id = item.get_local_id(2);
+//   int group_id_x = item.get_group(2);
+//   int group_id_y = item.get_group(1);
 
-  if (group_id_x == 0 && group_id_y == 0 && local_id == 0) {
-    sycl::ext::oneapi::experimental::printf("%s:\n", name);
-    for (int i = 0; i < size; ++i) {
-      sycl::ext::oneapi::experimental::printf("  idx=%d, val=%d", i,
-                                              static_cast<int>(data[i]));
-    }
-    sycl::ext::oneapi::experimental::printf("\n");
-  }
-}
+//   if (group_id_x == 0 && group_id_y == 0 && local_id == 0) {
+//     sycl::ext::oneapi::experimental::printf("%s:\n", name);
+//     for (int i = 0; i < size; ++i) {
+//       sycl::ext::oneapi::experimental::printf("  idx=%d, val=%d", i,
+//                                               static_cast<int>(data[i]));
+//     }
+//     sycl::ext::oneapi::experimental::printf("\n");
+//   }
+// }
 
 int64_t computeNumTokensPerBlock(int64_t const num_tokens,
                                  int64_t const num_experts_per_node) {
