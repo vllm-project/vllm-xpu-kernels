@@ -74,7 +74,7 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
         if cur_token_num == 0:
             continue
         # mma uses fp32 as calculate dtype
-        # so here use fp32 to aviod accuracy error
+        # so here use fp32 to avoid accuracy error
         input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(
             torch.float32)
         weight = input_B[i, :, :].to(torch.float32)
@@ -143,7 +143,7 @@ def test_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
         if cur_token_num == 0:
             continue
         # mma uses fp32 as calculate dtype
-        # so here use fp32 to aviod accuracy error
+        # so here use fp32 to avoid accuracy error
         input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(
             torch.float32)
         weight = input_B_dequatize[i, :, :].to(torch.float32)
