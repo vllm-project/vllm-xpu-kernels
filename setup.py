@@ -429,12 +429,10 @@ class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
 
     def run(self) -> None:
-        print("Skipping build")
-        pass
+        return
 
     def build_extensions(self) -> None:
         print("Skipping build_ext: using precompiled extensions.")
-        return
 
 
 ext_modules = []
