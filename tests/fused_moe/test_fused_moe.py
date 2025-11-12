@@ -64,8 +64,8 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
 
     # output offset
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
-    cutlass_grouped_gemm(input_A, input_B, None, bias, output, token_per_group, n, k,
-                        num_experts)
+    cutlass_grouped_gemm(input_A, input_B, None, bias, output, token_per_group,
+                         n, k, num_experts)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -75,7 +75,8 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
             continue
         # mma uses fp32 as calculate dtype
         # so here use fp32 to aviod accuracy error
-        input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(torch.float32)
+        input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(
+            torch.float32)
         weight = input_B[i, :, :].to(torch.float32)
         expert_output_fp32 = input @ weight
         if has_bias:
@@ -89,7 +90,8 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
         print("a and b close enough")
     except AssertionError as e:
         print("a and b diffs")
-        raise(e)
+        raise (e)
+
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
@@ -110,7 +112,7 @@ def test_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     # weight
     input_B = torch.randn((num_experts, k, n), dtype=dtype, device=DEVICE)
     # scale
-    random_exponents = torch.randint(-3, 4, (num_experts,), device=DEVICE)
+    random_exponents = torch.randint(-3, 4, (num_experts, ), device=DEVICE)
     scale_B = torch.pow(2.0, random_exponents.float()).to(dtype)
     if has_bias:
         bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE)
@@ -121,18 +123,18 @@ def test_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     input_B_fp8 = torch.empty_like(input_B, dtype=fp8_dtype)
     for i in range(num_experts):
         input_B_fp8[i], _ = scaled_fp8_quant(input_B[i],
-                                            scale_B[i].to(torch.float32),
-                                            False,
-                                            False,
-                                            fp8_dtype=fp8_dtype)
+                                             scale_B[i].to(torch.float32),
+                                             False,
+                                             False,
+                                             fp8_dtype=fp8_dtype)
     input_B_dequatize = torch.empty_like(input_B, dtype=dtype)
     for i in range(num_experts):
         input_B_dequatize[i] = input_B_fp8[i].to(dtype) * scale_B[i]
 
     # output offset
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
-    cutlass_grouped_gemm(input_A, input_B_fp8, scale_B, bias, output, token_per_group, n, k,
-                        num_experts)
+    cutlass_grouped_gemm(input_A, input_B_fp8, scale_B, bias, output,
+                         token_per_group, n, k, num_experts)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -142,7 +144,8 @@ def test_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
             continue
         # mma uses fp32 as calculate dtype
         # so here use fp32 to aviod accuracy error
-        input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(torch.float32)
+        input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(
+            torch.float32)
         weight = input_B_dequatize[i, :, :].to(torch.float32)
         expert_output_fp32 = input @ weight
         if has_bias:
@@ -156,7 +159,7 @@ def test_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
         print("a and b close enough")
     except AssertionError as e:
         print("a and b diffs")
-        raise(e)
+        raise (e)
 
 
 def ref_fused_moe(x, w13, w13_bias, w2, w2_bias, flat_expert_weights,
