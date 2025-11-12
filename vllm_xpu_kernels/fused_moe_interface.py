@@ -106,6 +106,8 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
     workspace = torch.zeros(map_offset,
                             dtype=torch.uint8,
                             device=hidden_states.device)
+    if topk_ids.dtype == torch.int32:
+        topk_ids = topk_ids.to(torch.int64)
     torch.ops._xpu_C.fused_moe(output=output,
                                input=hidden_states,
                                token_selected_experts=topk_ids,
