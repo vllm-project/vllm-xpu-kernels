@@ -41,6 +41,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
               "Input tensor must have contiguous last dimension");
   TORCH_CHECK(v.stride(-1) == 1,
               "Input tensor must have contiguous last dimension");
+  TORCH_CHECK(q.dim() == 3, "query must be in ragged format");
 
   CHECK_DEVICE(block_table_);
   TORCH_CHECK(block_table_.dtype() == torch::kInt32,
@@ -48,7 +49,6 @@ std::vector<at::Tensor> mha_varlen_fwd(
   TORCH_CHECK(block_table_.stride(-1) == 1,
               "page_table must have contiguous last dimension");
 
-  TORCH_CHECK(q.dim() == 3, "query must be in ragged format");
   CHECK_DEVICE(cu_seqlens_q);
   CHECK_CONTIGUOUS(cu_seqlens_q);
   TORCH_CHECK(cu_seqlens_q.dtype() == torch::kInt32,
