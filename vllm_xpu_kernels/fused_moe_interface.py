@@ -10,7 +10,7 @@ except ImportError as e:
     FUSEDMOE_AVAILABLE = False
 
 
-def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
+def cutlass_grouped_gemm(input_A, input_B, scale_B, bias, output, expert_token_count, n,
                          k, num_experts):
     expert_token_count_ = torch.tensor(expert_token_count,
                                        dtype=torch.int64,
@@ -32,6 +32,7 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
     torch.ops._xpu_C.cutlass_grouped_gemm(
         ptr_A=input_A,
         ptr_B=input_B,
+        ptr_B_scale=scale_B,
         ptr_bias=bias,
         ptr_D=output,
         expert_first_token_offset=expert_offset,
@@ -53,7 +54,7 @@ def compute_num_tokens_per_block(num_tokens, num_experts_per_node):
     return 1024
 
 
-def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
+def xpu_fused_moe(hidden_states, w13, w13_scale, w13_bias, w2, w2_scale, w2_bias, topk_weights,
                   topk_ids, n_experts_per_token, activation, num_experts):
 
     output = torch.zeros_like(hidden_states)
@@ -154,6 +155,7 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
     torch.ops._xpu_C.cutlass_grouped_gemm(
         ptr_A=gemm1_input,
         ptr_B=input_B,
+        ptr_B_scale=w13_scale,
         ptr_bias=w13_bias,
         ptr_D=gemm1_output,
         expert_first_token_offset=expert_first_token_offset,
@@ -176,6 +178,7 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
     torch.ops._xpu_C.cutlass_grouped_gemm(
         ptr_A=input_A,
         ptr_B=input_B,
+        ptr_B_scale=w2_scale,
         ptr_bias=w2_bias,
         ptr_D=gemm2_output,
         expert_first_token_offset=expert_first_token_offset,

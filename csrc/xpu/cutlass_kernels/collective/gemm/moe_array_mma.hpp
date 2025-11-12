@@ -37,6 +37,7 @@
 #include "cute/algorithm/functional.hpp"
 #include "cute/atom/mma_atom.hpp"
 #include "cute/algorithm/gemm.hpp"
+#include "cutlass/fp8_to_fp16.h"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 namespace cutlass::gemm {
@@ -60,12 +61,12 @@ using namespace cute;
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <int Stages, class Schedule, class TileShape_, class ElementA_,
-          class StrideA_, class ElementB_, class StrideB_, class TiledMma_,
+          class StrideA_, class ElementBOptionalTuple_, class StrideB_, class TiledMma_,
           class GmemTiledCopyA_, class SmemLayoutAtomA_, class SmemCopyAtomA_,
           class TransformA_, class GmemTiledCopyB_, class SmemLayoutAtomB_,
           class SmemCopyAtomB_, class TransformB_>
 struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
-                     ElementA_, StrideA_, ElementB_, StrideB_, TiledMma_,
+                     ElementA_, StrideA_, ElementBOptionalTuple_, StrideB_, TiledMma_,
                      GmemTiledCopyA_, SmemLayoutAtomA_, SmemCopyAtomA_,
                      TransformA_, GmemTiledCopyB_, SmemLayoutAtomB_,
                      SmemCopyAtomB_, TransformB_> {
@@ -77,7 +78,15 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
   using ElementA = ElementA_;
   using StrideA = StrideA_;
   using InternalStrideA = cute::remove_pointer_t<StrideA>;
-  using ElementB = ElementB_;
+  using ElementB = detail::deduce_mixed_width_dtype_t<0, ElementBOptionalTuple_>;
+  static constexpr bool is_B_fp8_type = std::is_same_v<ElementB, cutlass::float_e5m2_t> || 
+                               std::is_same_v<ElementB, cutlass::float_e4m3_t>;
+  using StorageTypeB = std::conditional_t<
+        is_B_fp8_type,
+        uint8_t,
+        ElementB
+    >;
+  using ElementScaleB = detail::deduce_mixed_width_dtype_t<1, ElementBOptionalTuple_>;
   using StrideB = StrideB_;
   using InternalStrideB = cute::remove_pointer_t<StrideB>;
   using TiledMma = TiledMma_;
@@ -93,8 +102,9 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
   using ArchTag = typename DispatchPolicy::ArchTag;
 
   static_assert(
-      platform::is_same<ElementA, ElementB>::value,
-      "MainloopIntelXeXMX16Array requires that A and B have same type.");
+      (!is_B_fp8_type && platform::is_same<ElementA, ElementB>::value) ||
+      is_B_fp8_type,
+      "MainloopIntelXeXMX16Array requires that A and B have same type or B is fp8 dtype.");
 
   static_assert(std::is_same_v<TransformA, cute::identity>,
                 "Transformation for A is not currently supported on Intel PVC");
@@ -136,13 +146,17 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
   using TensorNKL =
       decltype(make_tensor(make_gmem_ptr(static_cast<ElementB const*>(nullptr)),
                            make_shape(0, 0, 0), InternalStrideB{}));  //(n, k)
-  using MainloopTensors = cute::tuple<TensorMKL, TensorNKL>;
+  using TensorScale =
+      decltype(make_tensor(make_gmem_ptr(static_cast<ElementScaleB const*>(nullptr)),
+                           make_shape(0, 0, 0)));  //(1, 1)
+  using MainloopTensors = cute::tuple<TensorMKL, TensorNKL, TensorScale>;
   // Host side kernel arguments
   struct Arguments {
     ElementA const* ptr_A;
     StrideA dA;
     ElementB const* ptr_B;
     StrideB dB;
+    void const* ptr_B_scale;
     int64_t const* expert_first_token_offset;
   };
 
@@ -151,6 +165,7 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
     StrideA dA;
     ElementB const* ptr_B;
     StrideB dB;
+    void const* ptr_B_scale;
     int64_t const* expert_first_token_offset;
   };
 
@@ -173,7 +188,7 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
     auto init_N = get<1>(problem_shape_MNK);
     auto init_K = get<2>(problem_shape_MNK);
 
-    return Params{args.ptr_A, args.dA, args.ptr_B, args.dB,
+    return Params{args.ptr_A, args.dA, args.ptr_B, args.dB, args.ptr_B_scale,
                   args.expert_first_token_offset};
   }
 
@@ -261,7 +276,7 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
 
     Tensor tCrA = make_tensor<ElementA>(
         make_fragment_layout(tiled_copy_a, tCgA(_, _, _, 0).shape()));
-    Tensor tCrB = make_tensor<ElementB>(
+    Tensor tCrB = make_tensor<StorageTypeB>(
         make_fragment_layout(tiled_copy_b, tCgB(_, _, _, 0).shape()));
 
     // Retile registers for copies
@@ -344,8 +359,25 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
         prefetch(tiled_prefetch_b, pBgB(_, _, _, prefetch_k));
       }
 
-      cute::gemm(tiled_mma, tCrA, tCrB, accum);
+      if constexpr (is_B_fp8_type) {
+        constexpr int numel = decltype(size(tCrB))::value;
+        cutlass::NumericArrayConverter<ElementA, ElementB, numel> convert_op;
+        auto frag =
+          convert_op(*reinterpret_cast<const cutlass::Array<ElementB, numel>*>(
+              tCrB.data()));
+        Tensor tCrB_xx16 = make_tensor(make_rmem_ptr<ElementA>(&frag), tCrB.layout());
+        cute::gemm(tiled_mma, tCrA, tCrB_xx16, accum);
+      }else{
+        cute::gemm(tiled_mma, tCrA, tCrB, accum);
+      }
       barrier_wait(barrier_scope);
+    }
+    if constexpr (is_B_fp8_type) {
+      ElementAccumulator B_scale = ElementAccumulator(get<2>(load_tensors)[0]);
+CUTLASS_PRAGMA_UNROLL
+      for(int i = 0; i < size(accum); ++i){
+        accum(i) *= B_scale;
+      }
     }
   }
 
@@ -382,7 +414,20 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
                             make_shape(N, K, (int32_t)1),
                             mainloop_params.dB[next_group]);
 
-    return cute::make_tuple(mA, mB);
+    if constexpr (is_B_fp8_type) {
+      ElementScaleB const* ptr_B_scale_curr_batch = 
+        reinterpret_cast<ElementScaleB const*>(mainloop_params.ptr_B_scale) +
+        real_group;
+    auto ShapeScaleB =
+        make_shape(1, 1, (int32_t)1);
+      Tensor mB_scale = make_tensor(make_gmem_ptr(ptr_B_scale_curr_batch),
+                            ShapeScaleB);
+      return cute::make_tuple(mA, mB, mB_scale);
+    } else {
+      Tensor mB_scale_empty = make_tensor(make_gmem_ptr(static_cast<ElementScaleB const*>(nullptr)),
+                            make_shape(0, 0, (int32_t)0));
+      return cute::make_tuple(mA, mB, mB_scale_empty);
+    }
   }
 };
 
