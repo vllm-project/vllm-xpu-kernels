@@ -21,6 +21,35 @@ std::vector<at::Tensor> mha_varlen_fwd(
     bool is_causal, int window_size_left, int window_size_right,
     const float softcap, const bool return_softmax,
     std::optional<at::Generator> gen_) {
+  auto q_type = q.scalar_type();
+  TORCH_CHECK(
+      q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16,
+      "VLLM Kernel XPU only supports fp16 and bf16 type");
+
+  TORCH_CHECK(k.scalar_type() == q_type, "query and key must have the same dtype");
+  TORCH_CHECK(v.scalar_type() == q_type, "query and value must have the same dtype");
+
+  CHECK_DEVICE(q);
+  CHECK_DEVICE(k);
+  CHECK_DEVICE(v);
+
+  TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+  TORCH_CHECK(k.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+  TORCH_CHECK(v.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+
+  CHECK_DEVICE(block_table_);
+  TORCH_CHECK(block_table_.dtype() == torch::kInt32, "page_table must have dtype torch.int32");
+  TORCH_CHECK(block_table_.stride(-1) == 1, "page_table must have contiguous last dimension");
+
+  TORCH_CHECK(q.dim() == 3, "query must be in ragged format");
+  CHECK_DEVICE(cu_seqlens_q);
+  CHECK_CONTIGUOUS(cu_seqlens_q);
+  TORCH_CHECK(cu_seqlens_q.dtype() == torch::kInt32, "cu_seqlens_q must have dtype torch.int32");
+
+  CHECK_DEVICE(cu_seqlens_k);
+  CHECK_CONTIGUOUS(cu_seqlens_k);
+  TORCH_CHECK(cu_seqlens_k.dtype() == torch::kInt32, "cu_seqlens_k must have dtype torch.int32");
+
   auto& queue = vllm::xpu::vllmGetQueue(q.device().index());
 
   at::Tensor out;

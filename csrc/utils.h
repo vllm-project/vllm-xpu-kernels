@@ -4,6 +4,9 @@
 #include <c10/xpu/XPUStream.h>
 #include <sycl/sycl.hpp>
 
+#define CHECK_DEVICE(x) TORCH_CHECK(x.is_xpu(), #x " must be on XPU")
+#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+
 namespace vllm {
 namespace xpu {
 

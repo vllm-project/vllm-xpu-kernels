@@ -343,11 +343,21 @@ void cutlass_chunk_prefill_impl(
                                is_sink};
   CutlassType cuType = aten_to_Cutlass_dtype(query);
 
+  static constexpr int max_head_size = 256;
+  TORCH_CHECK(
+      head_size <= max_head_size,
+      "FMHA forward only supports head dimension at most " + std::to_string(max_head_size));
+
   if (args.head_size == HEAD_SIZE_LIMIT_0) {
     policy_dispatch<chunk_policy_head64>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_1) {
     policy_dispatch<chunk_policy_head128>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_2) {
+    policy_dispatch<chunk_policy_head192>(queue, cuType, args);
+  } else if (args.head_size == HEAD_SIZE_LIMIT_3) {
     policy_dispatch<chunk_policy_head256>(queue, cuType, args);
+  }
+  else {
+    TORCH_CHECK(false, "Unsupported head size for fmha");
   }
 }
