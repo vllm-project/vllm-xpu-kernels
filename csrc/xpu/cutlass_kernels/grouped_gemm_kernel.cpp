@@ -230,7 +230,7 @@ void kernel_functor(
   //
   // Run examples
   //
-  syclcompat::set_default_queue(stream);
+  compat::set_default_queue(stream);
 
   // The KernelHardwareInfo struct holds the number of EUs on the GPU with a
   // given device ID. This information is used by the underlying kernel.
@@ -255,21 +255,14 @@ void kernel_functor(
   using LayoutD = cutlass::layout::RowMajor;
 
   using TileShape = Shape<_256, _256, _32>;
-  using GmemTiledCopyA =
-      XE_2D_U16x32x32_LD_N;  // Note: This shape has to match the shape used for
+  using GmemTiledCopyA = void; //XE_LOAD_2D<16, 32, 32>; //XE_2D_U16x32x32_LD_N;  // Note: This shape has to match the shape used for
                              // the scaling factors
-  using GmemTiledCopyB =
-      XE_2D_U16x32x32_LD_V;  // Note: This shape has to match the shape used for
+  using GmemTiledCopyB = void; //XE_LOAD_2D_VNNI<16, 32, 32>;
+      //XE_2D_U16x32x32_LD_V;  // Note: This shape has to match the shape used for
                              // the scaling factors
   using MMAOperation = moe_policy::MMAOperation;
 
-  using TiledMma = TiledMMA<
-      MMA_Atom<MMAOperation>,
-      Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>,
-      Tile<
-          Layout<Shape<_8, _8, _4>, Stride<_1, _32, _8>>,
-          Layout<Shape<_16, _4, _4>, Stride<_1, _64, _16>>,
-          _32>>;
+  using TiledMma = typename TiledMMAHelper<MMA_Atom<XE_DPAS_TT<8, ElementAccumulator, ElementA>>, Layout<TileShape>, Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>>::TiledMMA;
 
   constexpr int PipelineStages = 2;
   using GEMMDispatchPolicy = cutlass::gemm::MainloopMoE16Group<PipelineStages>;

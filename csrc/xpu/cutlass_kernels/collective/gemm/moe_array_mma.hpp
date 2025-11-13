@@ -150,11 +150,6 @@ struct CollectiveMma<
   static constexpr auto Num_SGs = ATOM_N * ATOM_M * ATOM_K;
   static constexpr uint32_t MaxThreadsPerBlock = size(TiledMma{});
 
-  using Copy_A = typename Copy_Traits<GmemTiledCopyA, InternalStrideA>::
-      template DefaultTiledCopy<ElementA>;
-  using Copy_B = typename Copy_Traits<GmemTiledCopyB, InternalStrideB>::
-      template DefaultTiledCopy<ElementB>;
-
   using TensorMKL = decltype(make_tensor(
       make_gmem_ptr(static_cast<ElementA const*>(nullptr)),
       make_shape(0, 0, 0),
@@ -252,84 +247,57 @@ struct CollectiveMma<
 
     (void)thread_idx;
 
-    Copy_A tiled_copy_a{Copy_A{}.with(get<0>(load_tensors))};
-    Copy_B tiled_copy_b{Copy_B{}.with(get<1>(load_tensors))};
-
-    auto thr_copy_A = tiled_copy_a.get_slice(thread_idx);
-    auto thr_copy_B = tiled_copy_b.get_slice(thread_idx);
-
     // Instantiate the MMA object and get thread slice
     TiledMma tiled_mma;
-    // TODO(Codeplay): see if we can make this nicer
-    // To make all work items in a subgroup have the same global tensors pass in
-    // the index of work item 0 in each subgroup
-    auto sg = syclcompat::get_nd_item<1>().get_sub_group();
-    auto first_thread_in_sg_idx =
-        sg.get_group_linear_id() * DispatchPolicy::SubgroupSize;
-    auto thr_mma = tiled_mma.get_slice(first_thread_in_sg_idx);
+    auto thr_mma = tiled_mma.get_slice(thread_idx);
 
-    // Partition global counting tensors for MMA
-    Tensor tCgA = thr_mma.partition_A(gA);
-    Tensor tCgB = thr_mma.partition_B(gB);
+    auto tiled_copy_a = get_block_2d_copy_A<GmemTiledCopyA>(TiledMma{}, get<0>(load_tensors)(_, _, 0));
+    auto tiled_copy_b = get_block_2d_copy_B<GmemTiledCopyB>(TiledMma{}, get<1>(load_tensors)(_, _, 0));
 
-    Tensor tCrA = make_tensor<ElementA>(
-        make_fragment_layout(tiled_copy_a, tCgA(_, _, _, 0).shape()));
-    Tensor tCrB = make_tensor<ElementB>(
-        make_fragment_layout(tiled_copy_b, tCgB(_, _, _, 0).shape()));
+    auto thr_copy_a = tiled_copy_a.get_slice(thread_idx);
+    auto thr_copy_b = tiled_copy_b.get_slice(thread_idx);
 
-    // Retile registers for copies
-    Tensor tArA = thr_copy_A.retile_D(tCrA);
-    Tensor tBrB = thr_copy_B.retile_D(tCrB);
+    /* Register fragments for MMA */
+    auto tCrA = thr_mma.partition_sg_fragment_A(gA(_,_,0));
+    auto tCrB = thr_mma.partition_sg_fragment_B(gB(_,_,0));
 
-    // Retile global counting tensors for copies
-    Tensor tAgA = thr_copy_A.retile_S(tCgA);
-    Tensor tBgB = thr_copy_B.retile_S(tCgB);
+    /* Register fragments for copies */
+    auto tArA = thr_copy_a.partition_sg_fragment_D(gA(_,_,0));
+    auto tBrB = thr_copy_b.partition_sg_fragment_D(gB(_,_,0));
 
-    auto tiled_prefetch_a =
-        cute::prefetch_selector<Shape<Int<BLK_M>, Int<BLK_K>>, Num_SGs>(
-            tiled_copy_a);
-    auto tiled_prefetch_b =
-        cute::prefetch_selector<Shape<Int<BLK_N>, Int<BLK_K>>, Num_SGs>(
-            tiled_copy_b);
-    auto thr_prefetch_A = tiled_prefetch_a.get_slice(thread_idx);
-    auto thr_prefetch_B = tiled_prefetch_b.get_slice(thread_idx);
+    /* Partition global tensor (proxies) for copies */
+    Tensor tAgA = thr_copy_a.partition_S(gA);
+    Tensor tBgB = thr_copy_b.partition_S(gB);
 
-    // Partition global tile for prefetch
+    /* Create prefetch TiledCopy instances */
+    auto prefetch_a = make_block_2d_prefetch(tiled_copy_a);
+    auto prefetch_b = make_block_2d_prefetch(tiled_copy_b);
+
+    auto thr_prefetch_A = prefetch_a.get_slice(thread_idx);
+    auto thr_prefetch_B = prefetch_b.get_slice(thread_idx);
+
+    /* Partition global tensor (proxies) for prefetch */
     auto pAgA = thr_prefetch_A.partition_S(gA);
     auto pBgB = thr_prefetch_B.partition_S(gB);
 
 #if CUTLASS_ENABLE_DEBUG_PRINTS
-    if (cutlass::thread(LOG_THREAD, LOG_GROUP)) {
+   #define PRINT(x) print(#x ": "); print(x); print("\n");
+    if (cute::thread(LOG_THREAD, LOG_GROUP)) {
       print("======================= A: \n");
-      print("  gA : ");
-      print(gA);
-      print("\n");
-      print("tCgA : ");
-      print(tCgA);
-      print("\n");
-      print("tAgA : ");
-      print(tAgA);
-      print("\n");
+      PRINT(tAgA);
 
-      print("=====================  B :\n");
-      print("  gB : ");
-      print(gB);
-      print("\n");
-      print("tCgB : ");
-      print(tCgB);
-      print("\n");
-      print("tBgB : ");
-      print(tBgB);
-      print("\n");
+      PRINT(tCrA);
+      PRINT(tArA);
+      PRINT(mainloop.copy_a);
 
-      print("=====================  Config: \n");
-      print("  threads per workgroup : ");
-      print(MaxThreadsPerBlock);
-      print("\n");
-      print("  SubgroupTileShape : ");
-      print(SubgroupTileShape{});
-      print("\n");
+      print("======================= B: \n");
+      PRINT(tBgB);
+
+      PRINT(tCrB);
+      PRINT(tBrB);
+      PRINT(mainloop.copy_b); 
     }
+#undef PRINT
 #endif
 
     //
@@ -341,8 +309,8 @@ struct CollectiveMma<
 
     CUTLASS_PRAGMA_UNROLL
     for (; prefetch_k < DispatchPolicy::Stages; prefetch_k++) {
-      prefetch(tiled_prefetch_a, pAgA(_, _, _, prefetch_k));
-      prefetch(tiled_prefetch_b, pBgB(_, _, _, prefetch_k));
+      prefetch(prefetch_a, pAgA(_, _, _, prefetch_k));
+      prefetch(prefetch_b, pBgB(_, _, _, prefetch_k));
     }
 
     for (int k_tile = k_start_idx; k_tile < k_tile_count + k_start_idx;
@@ -353,9 +321,12 @@ struct CollectiveMma<
       copy(tiled_copy_b, tBgB(_, _, _, k_tile), tBrB);
 
       if (prefetch_k < k_tile_count) {
-        prefetch(tiled_prefetch_a, pAgA(_, _, _, prefetch_k));
-        prefetch(tiled_prefetch_b, pBgB(_, _, _, prefetch_k));
+        prefetch(prefetch_a, pAgA(_, _, _, prefetch_k));
+        prefetch(prefetch_b, pBgB(_, _, _, prefetch_k));
       }
+       /* Shuffle data from copy fragments to MMA fragments */
+      reorder(tArA, tCrA);
+      reorder(tBrB, tCrB);
 
       cute::gemm(tiled_mma, tCrA, tCrB, accum);
       barrier_wait(barrier_scope);
