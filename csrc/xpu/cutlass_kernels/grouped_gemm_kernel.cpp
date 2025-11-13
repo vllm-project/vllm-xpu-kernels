@@ -183,7 +183,7 @@ struct Options {
   }
 };
 
-template <class Gemm>
+template <class Gemm, typename ElementScale>
 struct GroupedGemmRunner {
   using StrideA = typename Gemm::GemmKernel::InternalStrideA;
   using StrideB = typename Gemm::GemmKernel::InternalStrideB;
@@ -275,7 +275,8 @@ struct GroupedGemmRunner {
   typename Gemm::Arguments args_from_options(
       const Options& options, const cutlass::KernelHardwareInfo& hw_info,
       int64_t const* expert_first_token_offset, const ElementA* ptr_A,
-      const ElementB* ptr_B, const ElementC* ptr_C, ElementOutput* ptr_D,
+      const ElementB* ptr_B, const ElementScale* ptr_B_scale,
+      const ElementC* ptr_C, ElementOutput* ptr_D,
       bool host_problem_shapes_available = true) {
     typename Gemm::Arguments arguments;
     decltype(arguments.epilogue.thread) fusion_args;
@@ -301,7 +302,7 @@ struct GroupedGemmRunner {
           cutlass::gemm::GemmUniversalMode::kGrouped,
           {options.groups, problem_sizes.get(),
            options.problem_sizes_host.data()},
-          {ptr_A, stride_A.get(), ptr_B, stride_B.get(),
+          {ptr_A, stride_A.get(), ptr_B, stride_B.get(), ptr_B_scale,
            expert_first_token_offset},
           {fusion_args, ptr_C, stride_C.get(), ptr_D, stride_D.get(),
            expert_first_token_offset, ptr_C ? true : false},
@@ -311,7 +312,7 @@ struct GroupedGemmRunner {
       arguments = typename Gemm::Arguments{
           cutlass::gemm::GemmUniversalMode::kGrouped,
           {options.groups, problem_sizes.get(), nullptr},
-          {ptr_A, stride_A.get(), ptr_B, stride_B.get(),
+          {ptr_A, stride_A.get(), ptr_B, stride_B.get(), ptr_B_scale,
            expert_first_token_offset},
           {fusion_args, ptr_C, stride_C.get(), ptr_D, stride_D.get(),
            expert_first_token_offset, ptr_C ? true : false},
@@ -326,7 +327,8 @@ struct GroupedGemmRunner {
                       const cutlass::KernelHardwareInfo& hw_info,
                       int64_t const* expert_first_token_offset,
                       const ElementA* ptr_A, const ElementB* ptr_B,
-                      const ElementC* ptr_C, ElementOutput* ptr_D) {
+                      const ElementScale* ptr_B_scale, const ElementC* ptr_C,
+                      ElementOutput* ptr_D) {
     if (debug) {
       std::cout << "enter run" << std::endl;
     }
@@ -337,7 +339,7 @@ struct GroupedGemmRunner {
 
     auto arguments =
         args_from_options(options, hw_info, expert_first_token_offset, ptr_A,
-                          ptr_B, ptr_C, ptr_D);
+                          ptr_B, ptr_B_scale, ptr_C, ptr_D);
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
@@ -386,9 +388,9 @@ struct GroupedGemmRunner {
 
 template <class moe_policy>
 void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
-                    void* ptr_bias, void* ptr_D, void* expert_token_count,
-                    void* expert_first_token_offset, int64_t N, int64_t K,
-                    int64_t groups) {
+                    void* ptr_B_scale, void* ptr_bias, void* ptr_D,
+                    void* expert_token_count, void* expert_first_token_offset,
+                    int64_t N, int64_t K, int64_t groups) {
   //
   // Run examples
   //
@@ -420,12 +422,14 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
 
   using TileShape = Shape<_256, _256, _32>;
   using GmemTiledCopyA =
-      XE_2D_U16x32x32_LD_N;  // Note: This shape has to match the shape used for
-                             // the scaling factors
+      typename moe_policy::GmemTiledCopyA;  // Note: This shape has to match the
+                                            // shape used for the scaling
+                                            // factors
   using GmemTiledCopyB =
-      XE_2D_U16x32x32_LD_V;  // Note: This shape has to match the shape used for
-                             // the scaling factors
-  using MMAOperation = moe_policy::MMAOperation;
+      typename moe_policy::GmemTiledCopyB;  // Note: This shape has to match the
+                                            // shape used for the scaling
+                                            // factors
+  using MMAOperation = typename moe_policy::MMAOperation;
 
   using TiledMma =
       TiledMMA<MMA_Atom<MMAOperation>,
@@ -452,7 +456,8 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
   // Mainloop
   using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
       GEMMDispatchPolicy, TileShape, ElementA,
-      cutlass::gemm::TagToStrideA_t<LayoutA*>, ElementB,
+      cutlass::gemm::TagToStrideA_t<LayoutA*>,
+      cute::tuple<ElementB, ElementScale>,
       cutlass::gemm::TagToStrideB_t<LayoutB*>, TiledMma, GmemTiledCopyA, void,
       void, cute::identity,                       // A
       GmemTiledCopyB, void, void, cute::identity  // B
@@ -465,23 +470,40 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
 
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
-  GroupedGemmRunner<Gemm> runner;
+  GroupedGemmRunner<Gemm, ElementScale> runner;
   runner.run(options, stream, hw_info,
              reinterpret_cast<const int64_t*>(expert_first_token_offset),
              reinterpret_cast<const ElementA*>(ptr_A),
              reinterpret_cast<const ElementB*>(ptr_B),
+             reinterpret_cast<const ElementScale*>(ptr_B_scale),
              reinterpret_cast<const ElementAccumulator*>(ptr_bias),
              reinterpret_cast<ElementOutput*>(ptr_D));
 }
 
 template void kernel_functor<moe_bf16_policy>(
-    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_bias, void* ptr_D,
-    void* expert_token_count, void* expert_first_token_offset, int64_t N,
-    int64_t K, int64_t groups);
+    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_B_scale,
+    void* ptr_bias, void* ptr_D, void* expert_token_count,
+    void* expert_first_token_offset, int64_t N, int64_t K, int64_t groups);
 template void kernel_functor<moe_fp16_policy>(
-    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_bias, void* ptr_D,
-    void* expert_token_count, void* expert_first_token_offset, int64_t N,
-    int64_t K, int64_t groups);
+    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_B_scale,
+    void* ptr_bias, void* ptr_D, void* expert_token_count,
+    void* expert_first_token_offset, int64_t N, int64_t K, int64_t groups);
+template void kernel_functor<moe_e4m3fp16_policy>(
+    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_B_scale,
+    void* ptr_bias, void* ptr_D, void* expert_token_count,
+    void* expert_first_token_offset, int64_t N, int64_t K, int64_t groups);
+template void kernel_functor<moe_e5m2fp16_policy>(
+    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_B_scale,
+    void* ptr_bias, void* ptr_D, void* expert_token_count,
+    void* expert_first_token_offset, int64_t N, int64_t K, int64_t groups);
+template void kernel_functor<moe_e4m3bf16_policy>(
+    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_B_scale,
+    void* ptr_bias, void* ptr_D, void* expert_token_count,
+    void* expert_first_token_offset, int64_t N, int64_t K, int64_t groups);
+template void kernel_functor<moe_e5m2bf16_policy>(
+    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_B_scale,
+    void* ptr_bias, void* ptr_D, void* expert_token_count,
+    void* expert_first_token_offset, int64_t N, int64_t K, int64_t groups);
 
 }  // namespace grouped_gemm
 }  // namespace gpu::cutlass_kernel

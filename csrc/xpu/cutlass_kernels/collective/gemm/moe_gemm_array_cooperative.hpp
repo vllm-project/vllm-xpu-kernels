@@ -73,6 +73,7 @@ class GemmUniversal<
   using StrideA = typename CollectiveMainloop::StrideA;
   using InternalStrideA = typename CollectiveMainloop::InternalStrideA;
   using ElementB = typename CollectiveMainloop::ElementB;
+  using ElementScaleB = typename CollectiveMainloop::ElementScaleB;
   using StrideB = typename CollectiveMainloop::StrideB;
   using InternalStrideB = typename CollectiveMainloop::InternalStrideB;
   using DispatchPolicy = typename CollectiveMainloop::DispatchPolicy;
@@ -281,7 +282,7 @@ class GemmUniversal<
     int32_t curr_group = -1;
     using ProblemShapeMNKL = Shape<int, int, int, int>;
     ProblemShapeMNKL problem_shape_MNKL;
-    MainloopTensors AB_tensors;
+    MainloopTensors ABS_tensors;
     EpilogueTensors CD_tensors;
 
     if (work_tile_info.is_valid()) {
@@ -309,7 +310,7 @@ class GemmUniversal<
 
       CollectiveMainloop collective_mma;
       if (did_group_change) {
-        AB_tensors = collective_mma.update_tensor_shape_stride(
+        ABS_tensors = collective_mma.update_tensor_shape_stride(
             params.mainloop, curr_group, problem_shape_MNKL);
       }
       auto tile_coord = make_coord(m_coord, n_coord, _, 0);
@@ -330,7 +331,7 @@ class GemmUniversal<
       // Perform the collective scoped MMA
       collective_mma(accumulators, gA_mkl, gB_nkl, accumulators, k_tile_iter,
                      work_k_tile_count, tile_coord, K, thread_idx,
-                     params.mainloop, AB_tensors);
+                     params.mainloop, ABS_tensors);
 
       TileScheduler::fixup(params.scheduler, work_tile_info, accumulators, -1,
                            -1);
