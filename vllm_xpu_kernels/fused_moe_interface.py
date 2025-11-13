@@ -2,6 +2,7 @@
 import torch
 
 try:
+    from . import _C  # noqa: F401
     from . import _xpu_C  # noqa: F401
     FUSEDMOE_UNAVAILABLE_REASON = None
     FUSEDMOE_AVAILABLE = True
@@ -57,6 +58,10 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
                   topk_ids, n_experts_per_token, activation, num_experts):
 
     output = torch.zeros_like(hidden_states)
+    if w13.is_contiguous():
+        # transpose and replace original data once
+        w13.data = w13.transpose(-1, -2).contiguous().transpose(-1, -2)
+        w2.data = w2.transpose(-1, -2).contiguous().transpose(-1, -2)
 
     # TODO: will all integrated in Cpp func. Temporary expose before gemm fusion
     num_rows, hidden_size = list(hidden_states.shape)
@@ -150,7 +155,7 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
                                device=hidden_states.device)
 
     ########### gemm1 ##################
-    input_B = w13.transpose(-1, -2).contiguous().transpose(-1, -2)
+    input_B = w13
 
     torch.ops._xpu_C.cutlass_grouped_gemm(
         ptr_A=gemm1_input,
@@ -164,13 +169,21 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
         groups=num_experts_per_node)
 
     # act
-    gate, up_ = torch.split(gemm1_output, inter_size, dim=1)
-    act = torch.nn.SiLU()
-    act_output = act(gate) * up_
+    act_output = torch.empty((num_moe_inputs, inter_size),
+                             dtype=gemm1_output.dtype,
+                             device=gemm1_output.device)
+    if activation == "silu":
+        torch.ops._C.silu_and_mul(act_output, gemm1_output)
+    elif activation == "gelu":
+        torch.ops._C.gelu_and_mul(act_output, gemm1_output)
+    elif activation == "swigluoai":
+        torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
+    else:
+        raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
     ########### gemm2 ##################
     input_A = act_output.contiguous()
-    input_B = w2.transpose(-1, -2).contiguous().transpose(-1, -2)
+    input_B = w2
     gemm2_output = torch.empty((num_moe_inputs, hidden_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
@@ -195,13 +208,13 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
             continue
 
         exp_token_idxs = permuted_row_to_unpermuted_row[start_idx:end_idx]
-        scores_expert_ids = exp_token_idxs % num_rows
+        scores_token_ids = exp_token_idxs % num_rows
         scores_k_slot = exp_token_idxs // num_rows
-        scores = topk_weights[scores_expert_ids, scores_k_slot]
+        scores = topk_weights[scores_token_ids, scores_k_slot]
         expert_out = gemm2_output[start_idx:end_idx]
         expert_out.mul_(scores.view(-1, 1))
         expert_cache.scatter_reduce_(0,
-                                     scores_expert_ids.view(-1, 1).repeat(
+                                     scores_token_ids.view(-1, 1).repeat(
                                          1, hidden_size),
                                      expert_out,
                                      reduce='sum')
