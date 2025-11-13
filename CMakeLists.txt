@@ -155,6 +155,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
     "csrc/pos_encoding_kernels.cpp"
     "csrc/torch_bindings.cpp"
     "csrc/quantization/fp8/fp8_quant.cpp"
+    "csrc/attention/merge_attn_states.cpp"
   )
   include_directories("/usr/include")
   list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/)
