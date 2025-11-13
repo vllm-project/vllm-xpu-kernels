@@ -55,6 +55,137 @@ struct MainloopMoE16Group {
 
 }  // namespace cutlass::gemm
 
+namespace cutlass {
+CUTLASS_HOST_DEVICE
+static cutlass::half_t convert_e5m2_to_half(uint8_t const& src) {
+  uint16_t bits_fp16 = src << 8;
+  cutlass::half_t result = reinterpret_cast<cutlass::half_t&>(bits_fp16);
+  return result;
+}
+
+CUTLASS_HOST_DEVICE
+static cutlass::bfloat16_t convert_e5m2_to_bf16(uint8_t const& src) {
+  constexpr uint16_t fast_cvt_u16 = 0x7780;
+  const cutlass::bfloat16_t fast_cvt_bf16 =
+      reinterpret_cast<const cutlass::bfloat16_t&>(fast_cvt_u16);
+
+  uint16_t shifted = src << 8;
+  int16_t adjusted = (int16_t)shifted >> 3;
+  uint16_t masked = adjusted & 0x8FFF;
+  cutlass::bfloat16_t result =
+      reinterpret_cast<cutlass::bfloat16_t&>(masked) * fast_cvt_bf16;
+  return result;
+}
+
+CUTLASS_HOST_DEVICE
+static cutlass::half_t convert_e4m3_to_half(uint8_t const& src) {
+  constexpr uint16_t fast_cvt_u16_1 = 0x7880;
+  constexpr uint16_t fast_cvt_u16_2 = 0x1F1C;
+  const cutlass::half_t fast_cvt_fp16_1 =
+      reinterpret_cast<const cutlass::half_t&>(fast_cvt_u16_1);
+  const cutlass::half_t fast_cvt_fp16_2 =
+      reinterpret_cast<const cutlass::half_t&>(fast_cvt_u16_2);
+
+  uint16_t shifted = src << 8;
+  int16_t adjusted = reinterpret_cast<int16_t&>(shifted) >> 1;
+  uint16_t masked = reinterpret_cast<uint16_t&>(adjusted) & 0xBFFF;
+  cutlass::half_t intermediate =
+      reinterpret_cast<cutlass::half_t&>(masked) * fast_cvt_fp16_1;
+  cutlass::half_t result = intermediate * fast_cvt_fp16_2;
+  return result;
+}
+
+CUTLASS_HOST_DEVICE
+static cutlass::bfloat16_t convert_e4m3_to_bf16(uint8_t const& src) {
+  constexpr uint16_t fast_cvt_u16 = 0x7B80;
+  const cutlass::bfloat16_t fast_cvt_bf16 =
+      reinterpret_cast<const cutlass::bfloat16_t&>(fast_cvt_u16);
+  constexpr uint16_t fast_cmp_u16 = 0x7F0;
+  const cutlass::half_t fast_cmp_fp16 =
+      reinterpret_cast<const cutlass::half_t&>(fast_cmp_u16);
+
+  uint16_t shifted = src << 8;
+  int16_t adjusted = (int16_t)shifted >> 4;
+  uint16_t masked = adjusted & 0x87FF;
+  bool is_large =
+      abs(reinterpret_cast<cutlass::half_t&>(masked)) >= fast_cmp_fp16;
+
+  cutlass::bfloat16_t result =
+      reinterpret_cast<cutlass::bfloat16_t&>(masked) * fast_cvt_bf16;
+
+  if (is_large) {
+    uint16_t temp = reinterpret_cast<uint16_t&>(result) | 0x7FFF;
+    result = reinterpret_cast<cutlass::bfloat16_t&>(temp);
+  }
+
+  return result;
+}
+
+template <>
+struct NumericConverter<cutlass::half_t, cutlass::float_e5m2_t,
+                        FloatRoundStyle::round_to_nearest> {
+  using result_type = cutlass::half_t;
+  using source_type = cutlass::float_e5m2_t;
+  static FloatRoundStyle const round_style = FloatRoundStyle::round_to_nearest;
+
+  CUTLASS_HOST_DEVICE
+  static result_type convert(source_type const& s) {
+    return convert_e5m2_to_half(s.storage);
+  }
+
+  CUTLASS_HOST_DEVICE
+  result_type operator()(source_type const& s) const { return convert(s); }
+};
+
+template <>
+struct NumericConverter<cutlass::bfloat16_t, cutlass::float_e5m2_t,
+                        FloatRoundStyle::round_to_nearest> {
+  using result_type = cutlass::bfloat16_t;
+  using source_type = cutlass::float_e5m2_t;
+  static FloatRoundStyle const round_style = FloatRoundStyle::round_to_nearest;
+
+  CUTLASS_HOST_DEVICE
+  static result_type convert(source_type const& s) {
+    return convert_e5m2_to_bf16(s.storage);
+  }
+
+  CUTLASS_HOST_DEVICE
+  result_type operator()(source_type const& s) const { return convert(s); }
+};
+
+template <>
+struct NumericConverter<cutlass::half_t, cutlass::float_e4m3_t,
+                        FloatRoundStyle::round_to_nearest> {
+  using result_type = cutlass::half_t;
+  using source_type = cutlass::float_e4m3_t;
+  static FloatRoundStyle const round_style = FloatRoundStyle::round_to_nearest;
+
+  CUTLASS_HOST_DEVICE
+  static result_type convert(source_type const& s) {
+    return convert_e4m3_to_half(s.storage);
+  }
+
+  CUTLASS_HOST_DEVICE
+  result_type operator()(source_type const& s) const { return convert(s); }
+};
+
+template <>
+struct NumericConverter<cutlass::bfloat16_t, cutlass::float_e4m3_t,
+                        FloatRoundStyle::round_to_nearest> {
+  using result_type = cutlass::bfloat16_t;
+  using source_type = cutlass::float_e4m3_t;
+  static FloatRoundStyle const round_style = FloatRoundStyle::round_to_nearest;
+
+  CUTLASS_HOST_DEVICE
+  static result_type convert(source_type const& s) {
+    return convert_e4m3_to_bf16(s.storage);
+  }
+
+  CUTLASS_HOST_DEVICE
+  result_type operator()(source_type const& s) const { return convert(s); }
+};
+}  // namespace cutlass
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 namespace cutlass::gemm::collective {
 using namespace cute;
