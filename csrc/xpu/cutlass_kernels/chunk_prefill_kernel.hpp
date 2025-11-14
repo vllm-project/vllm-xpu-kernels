@@ -51,9 +51,8 @@ using namespace cute;
 ///////////////////////////////////////////////////////////////////////////////
 template <bool IsVarLen_ = false>
 struct FMHAProblemShape {
-  using SeqLenType =
-      cute::conditional_t<IsVarLen_, cutlass::fmha::collective::VariableLength,
-                          int>;
+  using SeqLenType = cute::
+      conditional_t<IsVarLen_, cutlass::fmha::collective::VariableLength, int>;
   int batch;
   int num_heads_q, num_heads_kv;
   SeqLenType seq_len_qo, seq_len_kv;
@@ -62,8 +61,11 @@ struct FMHAProblemShape {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template <class ProblemShape_, class CollectiveMainloop_,
-          class CollectiveEpilogue_, class TileScheduler_>
+template <
+    class ProblemShape_,
+    class CollectiveMainloop_,
+    class CollectiveEpilogue_,
+    class TileScheduler_>
 class XeFMHAFwdKernel {
  public:
   //
@@ -154,14 +156,14 @@ class XeFMHAFwdKernel {
   // Methods
   //
 
-  static Params to_underlying_arguments(Arguments const& args,
-                                        void* workspace) {
+  static Params
+  to_underlying_arguments(Arguments const& args, void* workspace) {
     return {
         args.kernel,
         CollectiveMainloop::to_underlying_arguments(args.mainloop, workspace),
         CollectiveEpilogue::to_underlying_arguments(args.epilogue, workspace),
-        TileScheduler::to_underlying_arguments(args.kernel.shape, args.hw_info,
-                                               TileShapeO{})};
+        TileScheduler::to_underlying_arguments(
+            args.kernel.shape, args.hw_info, TileShapeO{})};
   }
 
   static bool can_implement(Arguments const& args) {
@@ -189,16 +191,16 @@ class XeFMHAFwdKernel {
   }
 
   CUTLASS_DEVICE
-  Shape<int, int> get_sequence_length_shape(ProblemShape const& problem_shape,
-                                            int const& batch) {
+  Shape<int, int> get_sequence_length_shape(
+      ProblemShape const& problem_shape, int const& batch) {
     if constexpr (is_var_len) {
       return cutlass::fmha::collective::apply_variable_length(
-          Shape<VariableLength, VariableLength>{problem_shape.seq_len_qo,
-                                                problem_shape.seq_len_kv},
+          Shape<VariableLength, VariableLength>{
+              problem_shape.seq_len_qo, problem_shape.seq_len_kv},
           batch);
     } else {
-      return Shape<int, int>{problem_shape.seq_len_qo,
-                             problem_shape.seq_len_kv};
+      return Shape<int, int>{
+          problem_shape.seq_len_qo, problem_shape.seq_len_kv};
     }
   }
 
@@ -306,11 +308,23 @@ class XeFMHAFwdKernel {
       // Main loop
       int l_coord = is_var_len ? 0 : idx_b;
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
-      mainloop(Q(_, _, head_q, l_coord), K(_, _, head, l_coord),
-               V(_, _, head, l_coord), tArA, tA_max, tA_sum, blk_qv, 0,
-               k_blocks, thr_id, seq_len, full_tile_offset, discard_seq_coord);
-      if constexpr (!is_empty_v<MainloopSharedStorage> &&
-                    !is_empty_v<EpilogueSharedStorage>) {
+      mainloop(
+          Q(_, _, head_q, l_coord),
+          K(_, _, head, l_coord),
+          V(_, _, head, l_coord),
+          tArA,
+          tA_max,
+          tA_sum,
+          blk_qv,
+          0,
+          k_blocks,
+          thr_id,
+          seq_len,
+          full_tile_offset,
+          discard_seq_coord);
+      if constexpr (
+          !is_empty_v<MainloopSharedStorage> &&
+          !is_empty_v<EpilogueSharedStorage>) {
         sycl::group_barrier(get_work_group<3>());
       }
 

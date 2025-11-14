@@ -52,14 +52,16 @@ struct XeFHMAIndividualTileScheduler {
   XeFHMAIndividualTileScheduler(Params const& params) : params(params) {}
 
   template <class ProblemShape, class TileShape>
-  static Params to_underlying_arguments(ProblemShape const& shape,
-                                        KernelHardwareInfo hw_info,
-                                        TileShape const& tile_shape) {
+  static Params to_underlying_arguments(
+      ProblemShape const& shape,
+      KernelHardwareInfo hw_info,
+      TileShape const& tile_shape) {
     using namespace cute;
 
-    dim3 grid(size(ceil_div(shape.head_size_vo, get<1>(tile_shape))),  // V
-              size(ceil_div(shape.seq_len_qo, get<0>(tile_shape))),    // Q
-              size(shape.batch * shape.num_heads_q));  // (h,b) -- split later
+    dim3 grid(
+        size(ceil_div(shape.head_size_vo, get<1>(tile_shape))),  // V
+        size(ceil_div(shape.seq_len_qo, get<0>(tile_shape))),    // Q
+        size(shape.batch * shape.num_heads_q));  // (h,b) -- split later
     return Params{grid, {shape.num_heads_q}};
   }
 

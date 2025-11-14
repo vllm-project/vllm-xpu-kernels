@@ -48,11 +48,12 @@ namespace cutlass::fmha::collective {
 
 using namespace cute;
 
-template <class CollectiveMainloop,  // Attention mainloop
-          class TileShapeO_,  // Shape of output tile, may be larger than P*V
-                              // GEMM
-          class TensorO_,     // 2D slice of global output tensor
-          class TiledCopyO_ = void>  // Optional TiledCopy for loading O
+template <
+    class CollectiveMainloop,  // Attention mainloop
+    class TileShapeO_,         // Shape of output tile, may be larger than P*V
+                               // GEMM
+    class TensorO_,            // 2D slice of global output tensor
+    class TiledCopyO_ = void>  // Optional TiledCopy for loading O
 class FMHAFwdEpilogue {
  public:
   //
@@ -80,8 +81,9 @@ class FMHAFwdEpilogue {
   static auto reduce_sg_v_helper() {
     constexpr auto v_total_sg = get<1>(SGTileShapeA{}) / intel::_SGSize{};
     constexpr auto v_avail_sg = ReduceK{} / ReduceSGQ{};
-    return Int<(v_total_sg > v_avail_sg) ? cute::gcd(v_total_sg, v_avail_sg)
-                                         : v_total_sg>{};
+    return Int<
+        (v_total_sg > v_avail_sg) ? cute::gcd(v_total_sg, v_avail_sg)
+                                  : v_total_sg>{};
   }
 
   using SGTileShapeA = decltype(atuple_coshape(FragA{}.tv_layout()));
@@ -101,9 +103,11 @@ class FMHAFwdEpilogue {
     if constexpr (ReduceK{} == _1{})
       return make_block_2d_copy_D(TiledMMAPV{}, TensorO2D{});
     else
-      return make_block_2d_copy_D_subtiled(TiledMMAPV{},
-                                           ReduceFragA{}.tv_layout(),
-                                           ReduceSGLayout{}, TensorO2D{});
+      return make_block_2d_copy_D_subtiled(
+          TiledMMAPV{},
+          ReduceFragA{}.tv_layout(),
+          ReduceSGLayout{},
+          TensorO2D{});
   }
 
   using DefaultTiledCopyO = decltype(default_tiled_copy_O_helper());
@@ -128,15 +132,17 @@ class FMHAFwdEpilogue {
         a_max_data;
   };
 
-  using SharedStorage = conditional_t<(ReduceK{} > _1{}), SharedStorageReduceK,
-                                      SharedStorageNone>;
+  using SharedStorage = conditional_t<
+      (ReduceK{} > _1{}),
+      SharedStorageReduceK,
+      SharedStorageNone>;
 
  private:
   SharedStorage& shared;
 
  public:
-  static constexpr Params to_underlying_arguments(Arguments const& args,
-                                                  void* /* workspace */) {
+  static constexpr Params
+  to_underlying_arguments(Arguments const& args, void* /* workspace */) {
     return {};
   }
 
@@ -167,10 +173,12 @@ class FMHAFwdEpilogue {
 
     /* Complete softmax, dividing out sums. */
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < rA_sum.size(); i++) rA_sum(i) = ElementA(1) / rA_sum(i);
+    for (int i = 0; i < rA_sum.size(); i++)
+      rA_sum(i) = ElementA(1) / rA_sum(i);
 
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < rA.size(); i++) rA(i) *= broadcast<0>(rA_sum, rA, i);
+    for (int i = 0; i < rA.size(); i++)
+      rA(i) *= broadcast<0>(rA_sum, rA, i);
 
     /* Tile output */
     Tensor cO = make_identity_tensor(O.shape());       // (q,v)
@@ -213,17 +221,21 @@ class FMHAFwdEpilogue {
        */
       auto shape_A =
           append(append(SGTileShapeA{}, ReduceK{}), SGPerWG{} / ReduceK{});
-      auto shape_A_row =
-          make_shape(get<0>(SGTileShapeO{}), shape(ReduceSGLayout{}), ReduceK{},
-                     SGPerWG{} / ReduceK{});
+      auto shape_A_row = make_shape(
+          get<0>(SGTileShapeO{}),
+          shape(ReduceSGLayout{}),
+          ReduceK{},
+          SGPerWG{} / ReduceK{});
 
       /* Physical layouts, with subtile modes broken out */
-      auto sA_layout = group<2, 4>(
-          flat_divide(make_ordered_layout(shape_A, Step<_1, _0, _2, _3>{}),
-                      SGTileShapeO{}));
-      auto sA_row_stride =
-          make_stride(_1{}, make_stride(get<0>(shape_A_row), _0{}),
-                      AlignedSGTileA_Q{}, AlignedSGTileA_Q{} * ReduceK{});
+      auto sA_layout = group<2, 4>(flat_divide(
+          make_ordered_layout(shape_A, Step<_1, _0, _2, _3>{}),
+          SGTileShapeO{}));
+      auto sA_row_stride = make_stride(
+          _1{},
+          make_stride(get<0>(shape_A_row), _0{}),
+          AlignedSGTileA_Q{},
+          AlignedSGTileA_Q{} * ReduceK{});
       auto sA_row_layout = make_layout(shape_A_row, sA_row_stride);
 
       /* Coordinate layouts, with subtile modes broken out */
@@ -232,12 +244,15 @@ class FMHAFwdEpilogue {
           append(SGTileShapeO{}, shape(ReduceSGLayout{})),
           append(basis2, product_each(zip(SGTileShapeO{}, basis2))));
 
-      auto sA = make_tensor(make_smem_ptr<ElementA>(&shared.a_data),
-                            sA_layout);  // (q,v,rblk_dst,rblk_src,a_tile)
-      auto sA_max = make_tensor(make_smem_ptr<ElementA>(&shared.a_max_data),
-                                sA_row_layout);  // (q,rblk_dst,rblk_src,a_tile)
-      auto sA_sum = make_tensor(make_smem_ptr<ElementA>(&shared.a_sum_data),
-                                sA_row_layout);  // (q,rblk_dst,rblk_src,a_tile)
+      auto sA = make_tensor(
+          make_smem_ptr<ElementA>(&shared.a_data),
+          sA_layout);  // (q,v,rblk_dst,rblk_src,a_tile)
+      auto sA_max = make_tensor(
+          make_smem_ptr<ElementA>(&shared.a_max_data),
+          sA_row_layout);  // (q,rblk_dst,rblk_src,a_tile)
+      auto sA_sum = make_tensor(
+          make_smem_ptr<ElementA>(&shared.a_sum_data),
+          sA_row_layout);  // (q,rblk_dst,rblk_src,a_tile)
 
       /* Write my contributions to SLM. */
       copy_block_r2s(tA_max, sA_max(_, _, k_blk, a_tile));
@@ -268,10 +283,10 @@ class FMHAFwdEpilogue {
 
         /* Calculate scale factors for aligning per-block maxima. */
         for (int kr = 0; kr < ReduceK{}; kr++) {
-          cute::transform(rA_max, rA_kmax[kr], rA_kmax[kr],
-                          [](auto gmax, auto kmax) {
-                            return sycl::native::exp2(kmax - gmax);
-                          });
+          cute::transform(
+              rA_max, rA_kmax[kr], rA_kmax[kr], [](auto gmax, auto kmax) {
+                return sycl::native::exp2(kmax - gmax);
+              });
         }
       }
 
@@ -299,8 +314,8 @@ class FMHAFwdEpilogue {
         CUTLASS_PRAGMA_UNROLL
         for (int kr = 0; kr < ReduceK{}; kr++) {
           ReduceFragA rA_read;
-          copy_block_s2r(sA(_, _, k_blk, kr, a_tile), sA_coords(_, _, 0),
-                         rA_read);
+          copy_block_s2r(
+              sA(_, _, k_blk, kr, a_tile), sA_coords(_, _, 0), rA_read);
 
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < rA_read.size(); i++) {

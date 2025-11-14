@@ -54,28 +54,50 @@ using namespace cute;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <class DispatchPolicy_, bool CausalMask_,
-          class TiledMMAQK_,  // Tiling for Q*K GEMM
-          class TiledMMAPV_,  // Tiling for P*V GEMM
-          int VTiles_,        // # of tiles in V dimension
-          class TensorQ_,     // Global Q/K/V tensors
-          class TensorK_, class TensorV_,
-          class TiledCopyQ_ = void,  // Optional TiledCopy for loading Q
-          class TiledCopyK_ = void,  // Optional TiledCopy for loading K
-          class TiledCopyV_ = void>  // Optional TiledCopy for loading V
+template <
+    class DispatchPolicy_,
+    bool CausalMask_,
+    class TiledMMAQK_,  // Tiling for Q*K GEMM
+    class TiledMMAPV_,  // Tiling for P*V GEMM
+    int VTiles_,        // # of tiles in V dimension
+    class TensorQ_,     // Global Q/K/V tensors
+    class TensorK_,
+    class TensorV_,
+    class TiledCopyQ_ = void,  // Optional TiledCopy for loading Q
+    class TiledCopyK_ = void,  // Optional TiledCopy for loading K
+    class TiledCopyV_ = void>  // Optional TiledCopy for loading V
 struct FMHAFwdMainloop {
-  static_assert(cutlass::detail::dependent_false<DispatchPolicy_>,
-                "Could not find a mainloop specialization.");
+  static_assert(
+      cutlass::detail::dependent_false<DispatchPolicy_>,
+      "Could not find a mainloop specialization.");
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int Stages, bool CausalMask_, class TiledMMAQK_, class TiledMMAPV_,
-          int VTiles_, class TensorQ_, class TensorK_, class TensorV_,
-          class TiledCopyQ_, class TiledCopyK_, class TiledCopyV_>
-struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, TiledMMAQK_, TiledMMAPV_,
-                       VTiles_, TensorQ_, TensorK_, TensorV_, TiledCopyQ_,
-                       TiledCopyK_, TiledCopyV_> {
+template <
+    int Stages,
+    bool CausalMask_,
+    class TiledMMAQK_,
+    class TiledMMAPV_,
+    int VTiles_,
+    class TensorQ_,
+    class TensorK_,
+    class TensorV_,
+    class TiledCopyQ_,
+    class TiledCopyK_,
+    class TiledCopyV_>
+struct FMHAFwdMainloop<
+    XeDefault<Stages>,
+    CausalMask_,
+    TiledMMAQK_,
+    TiledMMAPV_,
+    VTiles_,
+    TensorQ_,
+    TensorK_,
+    TensorV_,
+    TiledCopyQ_,
+    TiledCopyK_,
+    TiledCopyV_> {
   //
   // Type Aliases
   //
@@ -99,18 +121,18 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, TiledMMAQK_, TiledMMAPV_,
   using TensorV2D =
       decltype(TensorV_{}(append<rank_v<TensorV_>>(make_coord(_, _), 0)));
 
-  using TiledCopyQ =
-      conditional_t<is_void_v<TiledCopyQ_>,
-                    decltype(make_block_2d_copy_A(TiledMMAQK{}, TensorQ2D{})),
-                    TiledCopyQ_>;
-  using TiledCopyK =
-      conditional_t<is_void_v<TiledCopyK_>,
-                    decltype(make_block_2d_copy_B(TiledMMAQK{}, TensorK2D{})),
-                    TiledCopyK_>;
-  using TiledCopyV =
-      conditional_t<is_void_v<TiledCopyV_>,
-                    decltype(make_block_2d_copy_B(TiledMMAPV{}, TensorV2D{})),
-                    TiledCopyV_>;
+  using TiledCopyQ = conditional_t<
+      is_void_v<TiledCopyQ_>,
+      decltype(make_block_2d_copy_A(TiledMMAQK{}, TensorQ2D{})),
+      TiledCopyQ_>;
+  using TiledCopyK = conditional_t<
+      is_void_v<TiledCopyK_>,
+      decltype(make_block_2d_copy_B(TiledMMAQK{}, TensorK2D{})),
+      TiledCopyK_>;
+  using TiledCopyV = conditional_t<
+      is_void_v<TiledCopyV_>,
+      decltype(make_block_2d_copy_B(TiledMMAPV{}, TensorV2D{})),
+      TiledCopyV_>;
 
   // TODO: static_asserts on TiledMMAPV here...
 
@@ -159,8 +181,8 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, TiledMMAQK_, TiledMMAPV_,
 
   FMHAFwdMainloop(Params const& params_, SharedStorage&) : params(params_) {}
 
-  static constexpr Params to_underlying_arguments(Arguments const& args,
-                                                  void* /* workspace */) {
+  static constexpr Params
+  to_underlying_arguments(Arguments const& args, void* /* workspace */) {
     constexpr double kLog2e = 1.4426950408889634074;  // log_2(e)
     ElementS val = args.scale * static_cast<ElementS>(kLog2e);
     return Params{val};
@@ -180,7 +202,10 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, TiledMMAQK_, TiledMMAPV_,
       FragARow& tA_sum,       // Softmax row-wise sum accumulator
       QVCoord blk_qv,         // WG tile indices: (Q,V)
       int blk_k0,             // K block range: [K0,K1)
-      int blk_k1, int thr_id, int seq_len, int full_tile_offset,
+      int blk_k1,
+      int thr_id,
+      int seq_len,
+      int full_tile_offset,
       int discard_seq_coord) {
     using namespace sycl::ext::oneapi::this_work_item;
 
@@ -203,14 +228,20 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, TiledMMAQK_, TiledMMAPV_,
     Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));  // (q,k)
 
     /* Partition global tensors into workgroup tiles */
-    Tensor gQ = local_tile(cQ, TileShapeQK{}, append(blk_qv, _),
-                           Step<_1, X, _1>{});  // (q,d,D)
-    Tensor gK = local_tile(cK, TileShapeQK{}, make_coord(_, _, _),
-                           Step<X, _1, _1>{});  // (k,d,K,D)
+    Tensor gQ = local_tile(
+        cQ, TileShapeQK{}, append(blk_qv, _), Step<_1, X, _1>{});  // (q,d,D)
+    Tensor gK = local_tile(
+        cK,
+        TileShapeQK{},
+        make_coord(_, _, _),
+        Step<X, _1, _1>{});  // (k,d,K,D)
     Tensor gV =
         local_tile(cV, tile_shape_v, make_coord(get<1>(blk_qv), _));  // (v,k,K)
-    Tensor gV_split = local_tile(gV, TileShapePV{}, make_coord(_, _, 0),
-                                 Step<X, _1, _1>{});  // (v,k,VV,K)
+    Tensor gV_split = local_tile(
+        gV,
+        TileShapePV{},
+        make_coord(_, _, 0),
+        Step<X, _1, _1>{});  // (v,k,VV,K)
 
     /* Create global -> register copies */
     TiledCopyQ copy_q{Q_2D};
@@ -308,8 +339,8 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, TiledMMAQK_, TiledMMAPV_,
         if (K == blk_k1 - 1) {
           // Need to get global col and row indices to mask the elements
           Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
-          Tensor gP = local_tile(cPgP, take<0, 2>(TileShapeQK{}),
-                                 make_coord(get<0>(blk_qv), K));
+          Tensor gP = local_tile(
+              cPgP, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
           auto cS_thread = thr_mma_qk.partition_C(gP);
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tSrS.size(); ++i) {
@@ -359,11 +390,12 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, TiledMMAQK_, TiledMMAPV_,
 
   // Single step of blocked softmax.
   CUTLASS_DEVICE
-  void softmax(bool first_block,  // First softmax block?
-               FragS& tS,         // Softmax src/dst block
-               FragSRow& tS_max,  // Softmax row-wise max accumulator
-               FragSRow& tS_sum,  // Softmax row-wise sum accumulator
-               FragA& tA) {       // O accumulator (for rescaling)
+  void softmax(
+      bool first_block,  // First softmax block?
+      FragS& tS,         // Softmax src/dst block
+      FragSRow& tS_max,  // Softmax row-wise max accumulator
+      FragSRow& tS_sum,  // Softmax row-wise sum accumulator
+      FragA& tA) {       // O accumulator (for rescaling)
 
     /* Compute row-wise maxima for this block */
     auto tS_bmax = reduce<1>(tS, sycl::maximum{});
@@ -378,8 +410,8 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, TiledMMAQK_, TiledMMAPV_,
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++)
-      tS(i) = sycl::native::exp2(params.scale * tS(i) -
-                                 broadcast<0>(tS_max, tS, i));
+      tS(i) = sycl::native::exp2(
+          params.scale * tS(i) - broadcast<0>(tS_max, tS, i));
 
     /* Rescale existing S sums and O accumulator */
     if (!first_block) {
@@ -392,27 +424,34 @@ struct FMHAFwdMainloop<XeDefault<Stages>, CausalMask_, TiledMMAQK_, TiledMMAPV_,
       }
 
       CUTLASS_PRAGMA_UNROLL
-      for (int i = 0; i < tA.size(); i++) tA(i) *= broadcast<0>(rescale, tA, i);
+      for (int i = 0; i < tA.size(); i++)
+        tA(i) *= broadcast<0>(rescale, tA, i);
     }
 
     /* Update sums */
     auto tS_bsum = reduce<1>(tS, sycl::plus<void>{});
-    for (int i = 0; i < tS_sum.size(); i++) tS_sum(i) += tS_bsum(i);
+    for (int i = 0; i < tS_sum.size(); i++)
+      tS_sum(i) += tS_bsum(i);
   }
 };
 
 template <typename SGLayoutQK>
 CUTLASS_HOST_DEVICE constexpr auto get_sg_layout_pv(SGLayoutQK const&) {
-  return make_layout(get<0>(SGLayoutQK{}), Layout<_1, _0>{},
-                     get<1>(SGLayoutQK{}));
+  return make_layout(
+      get<0>(SGLayoutQK{}), Layout<_1, _0>{}, get<1>(SGLayoutQK{}));
 }
 
 // Get a P*V TiledMMA given K*Q tile size and SG configuration, for mainloops
 //   not supporting S data interchange among subgroups (e.g. XeDefault).
-template <typename MMAOp, typename WGTileQK, typename SGLayoutQK,
-          typename TileV>
+template <
+    typename MMAOp,
+    typename WGTileQK,
+    typename SGLayoutQK,
+    typename TileV>
 CUTLASS_HOST_DEVICE constexpr auto get_tiled_mma_pv(
-    MMAOp const&, WGTileQK const& wg_tile_qk, SGLayoutQK const& sg_layout_qk,
+    MMAOp const&,
+    WGTileQK const& wg_tile_qk,
+    SGLayoutQK const& sg_layout_qk,
     TileV const&) {
   using TileQ = decltype(get<0>(wg_tile_qk));
   using TileK = decltype(get<1>(wg_tile_qk));
@@ -420,8 +459,9 @@ CUTLASS_HOST_DEVICE constexpr auto get_tiled_mma_pv(
   using WGTilePV = Shape<TileQ, TileV, TileK>;
   using SGLayoutPV = decltype(get_sg_layout_pv(sg_layout_qk));
 
-  static_assert(size(SGLayoutPV{}) == size(SGLayoutQK{}),
-                "Q*K cannot be parallelized in the head size dimension");
+  static_assert(
+      size(SGLayoutPV{}) == size(SGLayoutQK{}),
+      "Q*K cannot be parallelized in the head size dimension");
 
   return TiledMMAHelper<MMAOp, WGTilePV, SGLayoutPV>{};
 }

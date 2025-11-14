@@ -83,10 +83,24 @@ std::vector<at::Tensor> mha_varlen_fwd(
   // FIXME: dont use float
   out = out.to(torch::kFloat);
 
-  cutlass_chunk_prefill_impl(queue, q, k, v, out, block_table_, cu_seqlens_q,
-                             cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-                             softmax_scale, softmax_sink_, window_size_left,
-                             window_size_right, is_causal, is_local, is_sink);
+  cutlass_chunk_prefill_impl(
+      queue,
+      q,
+      k,
+      v,
+      out,
+      block_table_,
+      cu_seqlens_q,
+      cu_seqlens_k,
+      max_seqlen_q,
+      max_seqlen_k,
+      softmax_scale,
+      softmax_sink_,
+      window_size_left,
+      window_size_right,
+      is_causal,
+      is_local,
+      is_sink);
 
   if (return_softmax) {
     // FIXME: current do not support store softmax_lse out

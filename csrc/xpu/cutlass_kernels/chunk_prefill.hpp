@@ -127,15 +127,22 @@ struct KernelLauncher {
     return shape;
   }
 
-  cutlass::Status run(sycl::queue& queue, const chunk_prefill_args_t& args,
-                      const cutlass::KernelHardwareInfo& hw_info) {
+  cutlass::Status
+  run(sycl::queue& queue,
+      const chunk_prefill_args_t& args,
+      const cutlass::KernelHardwareInfo& hw_info) {
     ProblemShapeType shape = initialize(args);
 
     typename FMHAKernel::Arguments arguments{
-        {shape, reinterpret_cast<ElementQ*>(args.query), stride_Q,
-         reinterpret_cast<ElementK*>(args.key), stride_K,
-         reinterpret_cast<ElementV*>(args.value), stride_V,
-         reinterpret_cast<ElementO*>(args.out), stride_O},
+        {shape,
+         reinterpret_cast<ElementQ*>(args.query),
+         stride_Q,
+         reinterpret_cast<ElementK*>(args.key),
+         stride_K,
+         reinterpret_cast<ElementV*>(args.value),
+         stride_V,
+         reinterpret_cast<ElementO*>(args.out),
+         stride_O},
         {args.sm_scale},
         {},
         hw_info};
@@ -177,8 +184,8 @@ struct KernelLauncher {
     };
     compat::experimental::kernel_properties kernel_props{
         syclex::sub_group_size<cute::intel::sg_size>, intelex::grf_size<256>};
-    compat::experimental::launch_policy policy{sycl_grid, sycl_block,
-                                               launch_props, kernel_props};
+    compat::experimental::launch_policy policy{
+        sycl_grid, sycl_block, launch_props, kernel_props};
     auto event =
         compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
             policy, queue, params);
@@ -187,46 +194,58 @@ struct KernelLauncher {
   }
 };
 
-template <typename TileShapeQK, typename TileShapePV, typename TileShapeOutput,
-          typename SubgroupLayoutQK,
-          typename SubgroupLayoutPV_, /* void -> default */
-          int PipelineStages, typename ElementQ = bfloat16_t,
-          typename ElementK = bfloat16_t, typename ElementV = bfloat16_t,
-          typename ElementO = float,
-          typename MMAOperation_ = void, /* void -> default */
-          typename StrideQ = Stride<int, _1, int, int>,
-          typename StrideK = Stride<int, _1, int, int>,
-          typename StrideV = Stride<_1, int, int, int>,
-          typename StrideO = Stride<int, _1, int, int>,
-          typename GmemTiledCopyQ = void, /* void -> default block 2D */
-          typename GmemTiledCopyK = void, typename GmemTiledCopyV = void,
-          typename GmemTiledCopyO = void>
+template <
+    typename TileShapeQK,
+    typename TileShapePV,
+    typename TileShapeOutput,
+    typename SubgroupLayoutQK,
+    typename SubgroupLayoutPV_, /* void -> default */
+    int PipelineStages,
+    typename ElementQ = bfloat16_t,
+    typename ElementK = bfloat16_t,
+    typename ElementV = bfloat16_t,
+    typename ElementO = float,
+    typename MMAOperation_ = void, /* void -> default */
+    typename StrideQ = Stride<int, _1, int, int>,
+    typename StrideK = Stride<int, _1, int, int>,
+    typename StrideV = Stride<_1, int, int, int>,
+    typename StrideO = Stride<int, _1, int, int>,
+    typename GmemTiledCopyQ = void, /* void -> default block 2D */
+    typename GmemTiledCopyK = void,
+    typename GmemTiledCopyV = void,
+    typename GmemTiledCopyO = void>
 struct FMHAConfig {
   static constexpr int SGTileQ =
       get<0>(shape_div(TileShapeQK{}, shape(SubgroupLayoutQK{})))();
-  using MMAOperation =
-      cute::conditional_t<is_void_v<MMAOperation_>,
-                          XE_DPAS_TT<cute::gcd(SGTileQ, 8), float, ElementQ>,
-                          MMAOperation_>;
-  using SubgroupLayoutPV =
-      cute::conditional_t<is_void_v<SubgroupLayoutPV_>,
-                          decltype(cutlass::fmha::collective::get_sg_layout_pv(
-                              SubgroupLayoutQK{})),
-                          SubgroupLayoutPV_>;
+  using MMAOperation = cute::conditional_t<
+      is_void_v<MMAOperation_>,
+      XE_DPAS_TT<cute::gcd(SGTileQ, 8), float, ElementQ>,
+      MMAOperation_>;
+  using SubgroupLayoutPV = cute::conditional_t<
+      is_void_v<SubgroupLayoutPV_>,
+      decltype(cutlass::fmha::collective::get_sg_layout_pv(SubgroupLayoutQK{})),
+      SubgroupLayoutPV_>;
 
-  template <class Scheduler, bool VarLen, bool Paged, bool Causal, bool Local,
-            bool Sink>
+  template <
+      class Scheduler,
+      bool VarLen,
+      bool Paged,
+      bool Causal,
+      bool Local,
+      bool Sink>
   static void run(sycl::queue& queue, const chunk_prefill_args_t& args) {
     cutlass::KernelHardwareInfo hw_info;
 
     using ProblemShapeType = cutlass::fmha::kernel::FMHAProblemShape<VarLen>;
 
-    using TiledMMAQK =
-        typename TiledMMAHelper<MMA_Atom<MMAOperation>, Layout<TileShapeQK>,
-                                SubgroupLayoutQK>::TiledMMA;
-    using TiledMMAPV =
-        typename TiledMMAHelper<MMA_Atom<MMAOperation>, Layout<TileShapePV>,
-                                SubgroupLayoutPV>::TiledMMA;
+    using TiledMMAQK = typename TiledMMAHelper<
+        MMA_Atom<MMAOperation>,
+        Layout<TileShapeQK>,
+        SubgroupLayoutQK>::TiledMMA;
+    using TiledMMAPV = typename TiledMMAHelper<
+        MMA_Atom<MMAOperation>,
+        Layout<TileShapePV>,
+        SubgroupLayoutPV>::TiledMMA;
 
     static_assert(
         get<0>(TileShapeOutput{}) == get<0>(TileShapePV{}),
@@ -247,15 +266,30 @@ struct FMHAConfig {
     // Mainloop
     using MainloopDispatchPolicy = cutlass::fmha::XeDefault<PipelineStages>;
     using CollectiveMainloop = cutlass::fmha::collective::FMHAFwdMainloop<
-        MainloopDispatchPolicy, Causal, TiledMMAQK, TiledMMAPV, VTiles, TensorQ,
-        TensorK, TensorV, GmemTiledCopyQ, GmemTiledCopyK, GmemTiledCopyV>;
+        MainloopDispatchPolicy,
+        Causal,
+        TiledMMAQK,
+        TiledMMAPV,
+        VTiles,
+        TensorQ,
+        TensorK,
+        TensorV,
+        GmemTiledCopyQ,
+        GmemTiledCopyK,
+        GmemTiledCopyV>;
 
     // Epilogue
     using CollectiveEpilogue = cutlass::fmha::collective::FMHAFwdEpilogue<
-        CollectiveMainloop, TileShapeOutput, TensorO, GmemTiledCopyO>;
+        CollectiveMainloop,
+        TileShapeOutput,
+        TensorO,
+        GmemTiledCopyO>;
 
     using FMHAKernel = cutlass::fmha::kernel::XeFMHAFwdKernel<
-        ProblemShapeType, CollectiveMainloop, CollectiveEpilogue, Scheduler>;
+        ProblemShapeType,
+        CollectiveMainloop,
+        CollectiveEpilogue,
+        Scheduler>;
 
     KernelLauncher<FMHAKernel, VarLen> launcher;
 
@@ -263,8 +297,8 @@ struct FMHAConfig {
   }
 
   template <bool... Bs>
-  static void kernel_dispatch(sycl::queue& queue,
-                              const chunk_prefill_args_t& args) {
+  static void
+  kernel_dispatch(sycl::queue& queue, const chunk_prefill_args_t& args) {
     return run<cutlass::fmha::kernel::XeFHMAIndividualTileScheduler, Bs...>(
         queue, args);
   }
@@ -286,26 +320,39 @@ void policy_dispatch(
   const int PipelineStages = 2;
   if (cuType == CutlassType::half) {
     return FMHAConfig<
-        typename chunk_policy::ShapeQK, typename chunk_policy::ShapePV,
+        typename chunk_policy::ShapeQK,
+        typename chunk_policy::ShapePV,
         typename chunk_policy::ShapeOut,
-        typename chunk_policy::SubgroupLayoutQK, void, PipelineStages, half_t,
-        half_t, half_t>::kernel_dispatch(queue, args,
-                                         false,  // varlen
-                                         false,  // paged
-                                         args.is_causal,
-                                         false,   // args.is_local,
-                                         false);  // args.is_sink);
+        typename chunk_policy::SubgroupLayoutQK,
+        void,
+        PipelineStages,
+        half_t,
+        half_t,
+        half_t>::
+        kernel_dispatch(
+            queue,
+            args,
+            false,  // varlen
+            false,  // paged
+            args.is_causal,
+            false,   // args.is_local,
+            false);  // args.is_sink);
   } else {
     return FMHAConfig<
-        typename chunk_policy::ShapeQK, typename chunk_policy::ShapePV,
+        typename chunk_policy::ShapeQK,
+        typename chunk_policy::ShapePV,
         typename chunk_policy::ShapeOut,
-        typename chunk_policy::SubgroupLayoutQK, void,
-        PipelineStages>::kernel_dispatch(queue, args,
-                                         false,  // varlen
-                                         false,  // paged
-                                         args.is_causal,
-                                         false,   // args.is_local,
-                                         false);  // args.is_sink);
+        typename chunk_policy::SubgroupLayoutQK,
+        void,
+        PipelineStages>::
+        kernel_dispatch(
+            queue,
+            args,
+            false,  // varlen
+            false,  // paged
+            args.is_causal,
+            false,   // args.is_local,
+            false);  // args.is_sink);
   }
 }
 
@@ -313,82 +360,92 @@ void cutlass_chunk_prefill_impl(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]
     const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
-    const at::Tensor& value_cache, at::Tensor& out,
-    const at::Tensor& block_table, const at::Tensor& cu_seqlens_q,
-    const at::Tensor& cu_seqlens_k, int max_seqlen_q, int max_seqlen_k,
-    double sm_scale, std::optional<const at::Tensor>& sm_sink_,
-    int window_size_left, int window_size_right, bool is_causal, bool is_local,
+    const at::Tensor& value_cache,
+    at::Tensor& out,
+    const at::Tensor& block_table,
+    const at::Tensor& cu_seqlens_q,
+    const at::Tensor& cu_seqlens_k,
+    int max_seqlen_q,
+    int max_seqlen_k,
+    double sm_scale,
+    std::optional<const at::Tensor>& sm_sink_,
+    int window_size_left,
+    int window_size_right,
+    bool is_causal,
+    bool is_local,
     bool is_sink) {
     double sm_scale, std::optional<const at::Tensor>& sm_sink_,
     int window_size_left, int window_size_right, bool is_causal, bool is_local,
     bool is_sink) {
-  int batch_size = query.size(0);
-  max_seqlen_q = query.size(2);
-  max_seqlen_k = key_cache.size(2);
-  int total_seqlen_q = max_seqlen_q;
-  int total_seqlen_k = max_seqlen_k;
+      int batch_size = query.size(0);
+      max_seqlen_q = query.size(2);
+      max_seqlen_k = key_cache.size(2);
+      int total_seqlen_q = max_seqlen_q;
+      int total_seqlen_k = max_seqlen_k;
 
-  int num_block = key_cache.size(0);
-  int block_size = key_cache.size(1);
-  int num_heads_q = query.size(1);
-  int num_heads_kv = key_cache.size(1);
-  int head_size = query.size(3);
-  // int batch_size = cu_seqlens_q.numel() - 1;
-  int max_blocks_per_seq = block_table.size(1);
-  // int total_seqlen_q = query.size(0);
-  // int total_seqlen_k = num_block * block_size;
-  // int total_seqlen_q = query.size(0);
-  // int total_seqlen_k = num_block * block_size;
+      int num_block = key_cache.size(0);
+      int block_size = key_cache.size(1);
+      int num_heads_q = query.size(1);
+      int num_heads_kv = key_cache.size(1);
+      int head_size = query.size(3);
+      // int batch_size = cu_seqlens_q.numel() - 1;
+      int max_blocks_per_seq = block_table.size(1);
+      // int total_seqlen_q = query.size(0);
+      // int total_seqlen_k = num_block * block_size;
+      // int total_seqlen_q = query.size(0);
+      // int total_seqlen_k = num_block * block_size;
 
-  if (is_local) {
-    window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
-    window_size_right =
-        window_size_right == -1 ? max_seqlen_k : window_size_right;
-  }
+      if (is_local) {
+        window_size_left =
+            window_size_left == -1 ? max_seqlen_k : window_size_left;
+        window_size_right =
+            window_size_right == -1 ? max_seqlen_k : window_size_right;
+      }
 
-  chunk_prefill_args_t args = {query.data_ptr(),
-                               key_cache.data_ptr(),
-                               value_cache.data_ptr(),
-                               out.data_ptr(),
-                               block_table.data_ptr(),
-                               cu_seqlens_q.data_ptr(),
-                               cu_seqlens_k.data_ptr(),
-                               max_seqlen_q,
-                               max_seqlen_k,
-                               total_seqlen_q,
-                               total_seqlen_k,
-                               static_cast<float>(sm_scale),
-                               is_sink ? sm_sink_.value().data_ptr() : nullptr,
-                               batch_size,
-                               num_heads_q,
-                               num_heads_kv,
-                               head_size,
-                               max_blocks_per_seq,
-                               block_size,
-                               window_size_left,
-                               window_size_right,
-                               false,  // varlen
-                               false,  // paged
-                               is_causal,
-                               is_local,
-                               is_sink};
-  CutlassType cuType = aten_to_Cutlass_dtype(query);
+      chunk_prefill_args_t args = {
+          query.data_ptr(),
+          key_cache.data_ptr(),
+          value_cache.data_ptr(),
+          out.data_ptr(),
+          block_table.data_ptr(),
+          cu_seqlens_q.data_ptr(),
+          cu_seqlens_k.data_ptr(),
+          max_seqlen_q,
+          max_seqlen_k,
+          total_seqlen_q,
+          total_seqlen_k,
+          static_cast<float>(sm_scale),
+          is_sink ? sm_sink_.value().data_ptr() : nullptr,
+          batch_size,
+          num_heads_q,
+          num_heads_kv,
+          head_size,
+          max_blocks_per_seq,
+          block_size,
+          window_size_left,
+          window_size_right,
+          false,  // varlen
+          false,  // paged
+          is_causal,
+          is_local,
+          is_sink};
+      CutlassType cuType = aten_to_Cutlass_dtype(query);
 
-  static constexpr int max_head_size = 256;
-  TORCH_CHECK(
-      head_size <= max_head_size,
-      "FMHA forward only supports head dimension at most " +
-          std::to_string(max_head_size));
+      static constexpr int max_head_size = 256;
+      TORCH_CHECK(
+          head_size <= max_head_size,
+          "FMHA forward only supports head dimension at most " +
+              std::to_string(max_head_size));
 
-  if (args.head_size == HEAD_SIZE_LIMIT_0) {
-    policy_dispatch<chunk_policy_head64>(queue, cuType, args);
-  } else if (args.head_size == HEAD_SIZE_LIMIT_1) {
-    policy_dispatch<chunk_policy_head128>(queue, cuType, args);
-  } else if (args.head_size == HEAD_SIZE_LIMIT_2) {
-    policy_dispatch<chunk_policy_head192>(queue, cuType, args);
-  } else if (args.head_size == HEAD_SIZE_LIMIT_3) {
-    policy_dispatch<chunk_policy_head256>(queue, cuType, args);
-  } else {
-    TORCH_CHECK(false, "Unsupported head size for fmha");
-  }
-}
+      if (args.head_size == HEAD_SIZE_LIMIT_0) {
+        policy_dispatch<chunk_policy_head64>(queue, cuType, args);
+      } else if (args.head_size == HEAD_SIZE_LIMIT_1) {
+        policy_dispatch<chunk_policy_head128>(queue, cuType, args);
+      } else if (args.head_size == HEAD_SIZE_LIMIT_2) {
+        policy_dispatch<chunk_policy_head192>(queue, cuType, args);
+      } else if (args.head_size == HEAD_SIZE_LIMIT_3) {
+        policy_dispatch<chunk_policy_head256>(queue, cuType, args);
+      } else {
+        TORCH_CHECK(false, "Unsupported head size for fmha");
+      }
+    }
