@@ -277,7 +277,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
     "csrc/xpu/torch_bindings.cpp"
     "csrc/xpu/lora/lora_shrink.cpp"
     "csrc/xpu/lora/lora_expand.cpp"
-    ${CUTLASS_BACKEND_SRCS}
+    # ${CUTLASS_BACKEND_SRCS}
   )
   include_directories("/usr/include")
   set(CMPLR_ROOT $ENV{CMPLR_ROOT})

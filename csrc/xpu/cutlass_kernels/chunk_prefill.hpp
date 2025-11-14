@@ -46,6 +46,8 @@ struct chunk_prefill_args_t {
   int block_size;
   int window_size_left = -1;
   int window_size_right = -1;
+  bool is_varlen = false;
+  bool is_paged = false;
   bool is_causal = false;
   bool is_local = false;
   bool is_sink = false;
@@ -121,10 +123,6 @@ struct KernelLauncher {
     stride_O = cutlass::make_cute_packed_stride(
         StrideO{},
         cute::make_shape(seq_len_qo, head_size_vo, num_heads_q, batch));
-
-    print("stirde_Q: ");
-    print(stride_Q);
-    print("\n");
 
     return shape;
   }
@@ -216,12 +214,12 @@ struct FMHAConfig {
                               SubgroupLayoutQK{})),
                           SubgroupLayoutPV_>;
 
-  template <bool isVarLen, bool Causal, bool PagedKV, bool Local,
-            class Scheduler>
+  template <class Scheduler, bool VarLen, bool Paged, bool Causal, bool Local,
+            bool Sink>
   static void run(sycl::queue& queue, const chunk_prefill_args_t& args) {
     cutlass::KernelHardwareInfo hw_info;
 
-    using ProblemShapeType = cutlass::fmha::kernel::FMHAProblemShape<isVarLen>;
+    using ProblemShapeType = cutlass::fmha::kernel::FMHAProblemShape<VarLen>;
 
     using TiledMMAQK =
         typename TiledMMAHelper<MMA_Atom<MMAOperation>, Layout<TileShapeQK>,
@@ -259,15 +257,15 @@ struct FMHAConfig {
     using FMHAKernel = cutlass::fmha::kernel::XeFMHAFwdKernel<
         ProblemShapeType, CollectiveMainloop, CollectiveEpilogue, Scheduler>;
 
-    KernelLauncher<FMHAKernel, isVarLen> launcher;
+    KernelLauncher<FMHAKernel, VarLen> launcher;
 
     launcher.run(queue, args, hw_info);
   }
 
   template <bool... Bs>
-  static void
-  kernel_dispatch(sycl::queue& queue, const chunk_prefill_args_t& args) {
-    return run<cutlass::flash_attention::IndividualScheduler, Bs...>(
+  static void kernel_dispatch(sycl::queue& queue,
+                              const chunk_prefill_args_t& args) {
+    return run<cutlass::fmha::kernel::XeFHMAIndividualTileScheduler, Bs...>(
         queue, args);
   }
 
@@ -287,18 +285,27 @@ void policy_dispatch(
     sycl::queue& queue, CutlassType cuType, const chunk_prefill_args_t& args) {
   const int PipelineStages = 2;
   if (cuType == CutlassType::half) {
-    return FMHAConfig<typename chunk_policy::ShapeQK,
-                      typename chunk_policy::ShapePV,
-                      typename chunk_policy::ShapeOut,
-                      typename chunk_policy::SubgroupLayoutQK, void,
-                      PipelineStages, half_t, half_t, half_t>::dispatch(queue,
-                                                                        args);
+    return FMHAConfig<
+        typename chunk_policy::ShapeQK, typename chunk_policy::ShapePV,
+        typename chunk_policy::ShapeOut,
+        typename chunk_policy::SubgroupLayoutQK, void, PipelineStages, half_t,
+        half_t, half_t>::kernel_dispatch(queue, args,
+                                         false,  // varlen
+                                         false,  // paged
+                                         args.is_causal,
+                                         false,   // args.is_local,
+                                         false);  // args.is_sink);
   } else {
-    return FMHAConfig<typename chunk_policy::ShapeQK,
-                      typename chunk_policy::ShapePV,
-                      typename chunk_policy::ShapeOut,
-                      typename chunk_policy::SubgroupLayoutQK, void,
-                      PipelineStages>::dispatch(queue, args);
+    return FMHAConfig<
+        typename chunk_policy::ShapeQK, typename chunk_policy::ShapePV,
+        typename chunk_policy::ShapeOut,
+        typename chunk_policy::SubgroupLayoutQK, void,
+        PipelineStages>::kernel_dispatch(queue, args,
+                                         false,  // varlen
+                                         false,  // paged
+                                         args.is_causal,
+                                         false,   // args.is_local,
+                                         false);  // args.is_sink);
   }
 }
 
@@ -312,21 +319,24 @@ void cutlass_chunk_prefill_impl(
     double sm_scale, std::optional<const at::Tensor>& sm_sink_,
     int window_size_left, int window_size_right, bool is_causal, bool is_local,
     bool is_sink) {
+    double sm_scale, std::optional<const at::Tensor>& sm_sink_,
+    int window_size_left, int window_size_right, bool is_causal, bool is_local,
+    bool is_sink) {
   int batch_size = query.size(0);
   max_seqlen_q = query.size(2);
   max_seqlen_k = key_cache.size(2);
   int total_seqlen_q = max_seqlen_q;
   int total_seqlen_k = max_seqlen_k;
-  int head_size = query.size(3);
-  int num_heads_kv = key_cache.size(1);
 
   int num_block = key_cache.size(0);
   int block_size = key_cache.size(1);
   int num_heads_q = query.size(1);
-  // int num_heads_kv = key_cache.size(2);
-  // int head_size = query.size(2);
+  int num_heads_kv = key_cache.size(1);
+  int head_size = query.size(3);
   // int batch_size = cu_seqlens_q.numel() - 1;
   int max_blocks_per_seq = block_table.size(1);
+  // int total_seqlen_q = query.size(0);
+  // int total_seqlen_k = num_block * block_size;
   // int total_seqlen_q = query.size(0);
   // int total_seqlen_k = num_block * block_size;
 
@@ -336,31 +346,32 @@ void cutlass_chunk_prefill_impl(
         window_size_right == -1 ? max_seqlen_k : window_size_right;
   }
 
-  chunk_prefill_args_t args = {
-      query.data_ptr(),
-      key_cache.data_ptr(),
-      value_cache.data_ptr(),
-      out.data_ptr(),
-      block_table.data_ptr(),
-      cu_seqlens_q.data_ptr(),
-      cu_seqlens_k.data_ptr(),
-      max_seqlen_q,
-      max_seqlen_k,
-      total_seqlen_q,
-      total_seqlen_k,
-      static_cast<float>(sm_scale),
-      is_sink ? sm_sink_.value().data_ptr() : nullptr,
-      batch_size,
-      num_heads_q,
-      num_heads_kv,
-      head_size,
-      max_blocks_per_seq,
-      block_size,
-      window_size_left,
-      window_size_right,
-      is_causal,
-      is_local,
-      is_sink};
+  chunk_prefill_args_t args = {query.data_ptr(),
+                               key_cache.data_ptr(),
+                               value_cache.data_ptr(),
+                               out.data_ptr(),
+                               block_table.data_ptr(),
+                               cu_seqlens_q.data_ptr(),
+                               cu_seqlens_k.data_ptr(),
+                               max_seqlen_q,
+                               max_seqlen_k,
+                               total_seqlen_q,
+                               total_seqlen_k,
+                               static_cast<float>(sm_scale),
+                               is_sink ? sm_sink_.value().data_ptr() : nullptr,
+                               batch_size,
+                               num_heads_q,
+                               num_heads_kv,
+                               head_size,
+                               max_blocks_per_seq,
+                               block_size,
+                               window_size_left,
+                               window_size_right,
+                               false,  // varlen
+                               false,  // paged
+                               is_causal,
+                               is_local,
+                               is_sink};
   CutlassType cuType = aten_to_Cutlass_dtype(query);
 
   static constexpr int max_head_size = 256;
