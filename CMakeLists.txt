@@ -186,7 +186,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   else()
     FetchContent_Declare(
         cutlass-sycl
-        GIT_REPOSITORY https://github.com/intel/cutlass-sycl
+        GIT_REPOSITORY https://github.com/intel/sycl-tla
 
         # Please keep this in sync with CUTLASS_REVISION line above.
         GIT_TAG ${CUTLASS_REVISION}
