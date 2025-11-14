@@ -209,6 +209,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_VERSIONS_GENERATED")
   list(APPEND VLLM_GPU_FLAGS "-ftemplate-backtrace-limit=0")
   list(APPEND VLLM_GPU_FLAGS "-fdiagnostics-color=always")
+  list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_SYCL_BUILTIN_ENABLE")
 
 endif()
 
