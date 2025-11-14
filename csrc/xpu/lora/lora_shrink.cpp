@@ -302,7 +302,6 @@ void validate_lora_a_tensors(
   if (lora_a_weights.dim() == 4) {  // shape: (lora_num,1,rank,hidden_size)
     TORCH_CHECK(
         lora_a_weights.size(1) == 1, "lora_a_weights.size(1) must be 1");
-    lora_weights = lora_a_weights.squeeze(1);  // squeeze dim 1
   } else {
     TORCH_CHECK(
         lora_a_weights.dim() == 3,
@@ -342,6 +341,10 @@ void bgmv_shrink(
   // 1. Input validation
   validate_lora_a_tensors(inputs, weights, outputs, indices);
 
+  at::Tensor lora_weights = weights;
+  if (lora_weights.dim() == 4) {  // shape: (lora_num,1,rank,hidden_size)
+    lora_weights = lora_weights.squeeze(1);  // squeeze dim 1
+  }
   // 2. Get dimension information
   uint32_t batch_size = inputs.size(0);
   uint32_t hidden = inputs.size(1);
@@ -356,7 +359,7 @@ void bgmv_shrink(
         launch_bgmv_shrink<output_t, at::Half>(
             outputs.data_ptr<output_t>(),
             inputs.data_ptr<at::Half>(),
-            weights.data_ptr<at::Half>(),
+            lora_weights.data_ptr<at::Half>(),
             indices.data_ptr<int64_t>(),
             batch_size,
             hidden,
@@ -367,7 +370,7 @@ void bgmv_shrink(
         launch_bgmv_shrink<output_t, at::BFloat16>(
             outputs.data_ptr<output_t>(),
             inputs.data_ptr<at::BFloat16>(),
-            weights.data_ptr<at::BFloat16>(),
+            lora_weights.data_ptr<at::BFloat16>(),
             indices.data_ptr<int64_t>(),
             batch_size,
             hidden,

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 
+import pytest
+
 
 def pytest_generate_tests(metafunc):
     use_mini_pytest_profiler = os.getenv("XPU_KERNEL_PYTEST_PROFILER",
@@ -28,3 +30,16 @@ def pytest_generate_tests(metafunc):
                     new_markers.append(mark)
                 metafunc.definition.own_markers = new_markers
             metafunc.parametrize(param_name, values)
+
+
+@pytest.fixture
+def reset_default_device():
+    """
+    Some tests, such as `test_punica_ops.py`, explicitly set the
+    default device, which can affect subsequent tests. Adding this fixture
+    helps avoid this problem.
+    """
+    import torch
+    original_device = torch.get_default_device()
+    yield
+    torch.set_default_device(original_device)

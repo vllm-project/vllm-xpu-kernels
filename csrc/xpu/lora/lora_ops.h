@@ -63,7 +63,8 @@ void bgmv_expand_slice(
     const torch::Tensor& inputs,
     const torch::Tensor& weights,
     const torch::Tensor& indices,
-    int64_t slice_offset,
+    const int64_t slice_offset,
+    const int64_t slice_size,
     bool add_to_output);
 
 //------------------------------------------------------------------------------
