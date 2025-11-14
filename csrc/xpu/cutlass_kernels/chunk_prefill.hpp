@@ -66,7 +66,8 @@ struct KernelLauncher {
   using CollectiveMainloop = typename FMHAKernel::CollectiveMainloop;
   using ElementS = typename CollectiveMainloop::ElementS;
 
-  using ProblemShapeType = typename FMHAKernel::ProblemShape;
+  using ProblemShapeType = cutlass::fmha::kernel::FMHAProblemShape<isVarLen>;
+  using ProblemShapeTypeInit = cutlass::fmha::kernel::FMHAProblemShape<false>;
 
   /// Initialization
   StrideQ stride_Q;
@@ -76,13 +77,37 @@ struct KernelLauncher {
 
   ProblemShapeType initialize(const chunk_prefill_args_t& args) {
     ProblemShapeType shape;
-    auto batch = shape.batch = args.batch_size;
-    auto num_heads_q = shape.num_heads_q = args.num_heads_q;
-    auto num_heads_kv = shape.num_heads_kv = args.num_heads_k;
-    auto seq_len_qo = shape.seq_len_qo = args.total_seqlen_q;
-    auto seq_len_kv = shape.seq_len_kv = args.total_seqlen_k;
-    auto head_size_qk = shape.head_size_qk = args.head_size;
-    auto head_size_vo = shape.head_size_vo = args.head_size;
+    ProblemShapeTypeInit shape_init;
+    auto batch = shape.batch = shape_init.batch = args.batch_size;
+    auto num_heads_q = shape.num_heads_q = shape_init.num_heads_q =
+        args.num_heads_q;
+    auto num_heads_kv = shape.num_heads_kv = shape_init.num_heads_kv =
+        args.num_heads_k;
+    auto head_size_qk = shape.head_size_qk = shape_init.head_size_qk =
+        args.head_size;
+    auto head_size_vo = shape.head_size_vo = shape_init.head_size_vo =
+        args.head_size;
+
+    if constexpr (isVarLen) {
+      batch = shape_init.batch = 1;
+      shape_init.seq_len_qo = args.total_seqlen_q;
+      shape_init.seq_len_kv = args.total_seqlen_k;
+
+      shape.seq_len_qo =
+          cutlass::fmha::collective::VariableLength{args.max_queries};
+      shape.seq_len_qo.cumulative_length =
+          reinterpret_cast<int*>(args.cu_seqlens_q);
+      shape.seq_len_kv =
+          cutlass::fmha::collective::VariableLength{args.max_keys};
+      shape.seq_len_kv.cumulative_length =
+          reinterpret_cast<int*>(args.cu_seqlens_k);
+    } else {
+      shape.seq_len_qo = shape_init.seq_len_qo = args.max_queries;
+      shape.seq_len_kv = shape_init.seq_len_kv = args.max_keys;
+    }
+
+    auto seq_len_qo = shape_init.seq_len_qo;
+    auto seq_len_kv = shape_init.seq_len_kv;
 
     stride_Q = cutlass::make_cute_packed_stride(
         StrideQ{},
@@ -97,11 +122,8 @@ struct KernelLauncher {
         StrideO{},
         cute::make_shape(seq_len_qo, head_size_vo, num_heads_q, batch));
 
-    print("Stride_Q: ");
+    print("stirde_Q: ");
     print(stride_Q);
-    print("\n");
-    print("stride_V: ");
-    print(stride_V);
     print("\n");
 
     return shape;
@@ -199,7 +221,7 @@ struct FMHAConfig {
   static void run(sycl::queue& queue, const chunk_prefill_args_t& args) {
     cutlass::KernelHardwareInfo hw_info;
 
-    using ProblemShapeType = cutlass::fmha::kernel::FMHAProblemShape;
+    using ProblemShapeType = cutlass::fmha::kernel::FMHAProblemShape<isVarLen>;
 
     using TiledMMAQK =
         typename TiledMMAHelper<MMA_Atom<MMAOperation>, Layout<TileShapeQK>,

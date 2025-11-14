@@ -99,9 +99,9 @@ class FMHAFwdEpilogue {
 
   static auto default_tiled_copy_O_helper() {
     if constexpr (ReduceK{} == _1{})
-      return make_block_2d_copy_C(TiledMMAPV{}, TensorO2D{});
+      return make_block_2d_copy_D(TiledMMAPV{}, TensorO2D{});
     else
-      return make_block_2d_copy_C_subtiled(TiledMMAPV{},
+      return make_block_2d_copy_D_subtiled(TiledMMAPV{},
                                            ReduceFragA{}.tv_layout(),
                                            ReduceSGLayout{}, TensorO2D{});
   }
