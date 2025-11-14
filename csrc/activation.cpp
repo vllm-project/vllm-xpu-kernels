@@ -59,8 +59,10 @@ inline T gelu_tanh_kernel(const T& x) {
   return (T)(0.5f * f * (1.0f + sycl::tanh(inner)));
 }
 
-template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
-          bool act_first>
+template <
+    typename scalar_t,
+    scalar_t (*ACT_FN)(const scalar_t&),
+    bool act_first>
 inline scalar_t compute(const scalar_t& x, const scalar_t& y) {
   return act_first ? ACT_FN(x) * y : x * ACT_FN(y);
 }
@@ -68,9 +70,10 @@ inline scalar_t compute(const scalar_t& x, const scalar_t& y) {
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&)>
 class act_kernel {
  public:
-  act_kernel(scalar_t* __restrict__ out,          // [..., d]
-             const scalar_t* __restrict__ input,  // [..., d]
-             const int d)
+  act_kernel(
+      scalar_t* __restrict__ out,          // [..., d]
+      const scalar_t* __restrict__ input,  // [..., d]
+      const int d)
       : out_(out), input_(input), d_(d) {}
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
@@ -89,13 +92,16 @@ class act_kernel {
   const int d_;
 };
 
-template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
-          bool act_first>
+template <
+    typename scalar_t,
+    scalar_t (*ACT_FN)(const scalar_t&),
+    bool act_first>
 class act_and_mul_kernel {
  public:
-  act_and_mul_kernel(scalar_t* __restrict__ out,          // [..., d]
-                     const scalar_t* __restrict__ input,  // [..., 2, d]
-                     const int d)
+  act_and_mul_kernel(
+      scalar_t* __restrict__ out,          // [..., d]
+      const scalar_t* __restrict__ input,  // [..., 2, d]
+      const int d)
       : out_(out), input_(input), d_(d) {}
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
@@ -135,14 +141,18 @@ swigluoai_and_mul(const T& gate, const T& up, float alpha, float limit) {
   return (T)((clamped_up + 1.0f) * glu);
 }
 
-template <typename scalar_t,
-          scalar_t (*ACT_FN)(const scalar_t&, const scalar_t&, const float,
-                             const float)>
+template <
+    typename scalar_t,
+    scalar_t (*ACT_FN)(
+        const scalar_t&, const scalar_t&, const float, const float)>
 class swigluoai_and_mul_kernel {
  public:
-  swigluoai_and_mul_kernel(scalar_t* __restrict__ out,          // [..., d]
-                           const scalar_t* __restrict__ input,  // [..., 2, d]
-                           const int d, const float alpha, const float limit)
+  swigluoai_and_mul_kernel(
+      scalar_t* __restrict__ out,          // [..., d]
+      const scalar_t* __restrict__ input,  // [..., 2, d]
+      const int d,
+      const float alpha,
+      const float limit)
       : out(out), input(input), d(d), alpha(alpha), limit(limit) {}
 
   void operator()(sycl::nd_item<1> item) const {
@@ -171,51 +181,56 @@ class swigluoai_and_mul_kernel {
 // Launch activation and gating kernel.
 // Use ACT_FIRST (bool) indicating whether to apply the activation function
 // first.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)                  \
-  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;                \
-  int d = input.size(-1) / 2;                                             \
-  int64_t num_tokens = input.numel() / input.size(-1);                    \
-  sycl::range<3> grid(1, 1, num_tokens);                                  \
-  sycl::range<3> block(1, 1, std::min(d, 1024));                          \
-  if (num_tokens == 0) {                                                  \
-    return;                                                               \
-  }                                                                       \
-  auto out_ptr = out.data_ptr<scalar_t>();                                \
-  auto input_ptr = input.data_ptr<scalar_t>();                            \
-  at::DeviceGuard device_guard(input.device());                           \
-  auto& queue = vllm::xpu::vllmGetQueue();                                \
-  queue.submit([&](sycl::handler& cgh) {                                  \
-    cgh.parallel_for(sycl::nd_range<3>(grid * block, block),              \
-                     vllm::act_and_mul_kernel<sycl_t, KERNEL, ACT_FIRST>( \
-                         (sycl_t*)out_ptr, (sycl_t*)input_ptr, d));       \
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)     \
+  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;   \
+  int d = input.size(-1) / 2;                                \
+  int64_t num_tokens = input.numel() / input.size(-1);       \
+  sycl::range<3> grid(1, 1, num_tokens);                     \
+  sycl::range<3> block(1, 1, std::min(d, 1024));             \
+  if (num_tokens == 0) {                                     \
+    return;                                                  \
+  }                                                          \
+  auto out_ptr = out.data_ptr<scalar_t>();                   \
+  auto input_ptr = input.data_ptr<scalar_t>();               \
+  at::DeviceGuard device_guard(input.device());              \
+  auto& queue = vllm::xpu::vllmGetQueue();                   \
+  queue.submit([&](sycl::handler& cgh) {                     \
+    cgh.parallel_for(                                        \
+        sycl::nd_range<3>(grid * block, block),              \
+        vllm::act_and_mul_kernel<sycl_t, KERNEL, ACT_FIRST>( \
+            (sycl_t*)out_ptr, (sycl_t*)input_ptr, d));       \
   });
 
-void silu_and_mul(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., 2 * d]
+void silu_and_mul(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input)  // [..., 2 * d]
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "silu_and_mul", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, true);
   });
 }
 
-void mul_and_silu(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., 2 * d]
+void mul_and_silu(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input)  // [..., 2 * d]
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "mul_and_silu", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, false);
   });
 }
 
-void gelu_and_mul(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., 2 * d]
+void gelu_and_mul(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input)  // [..., 2 * d]
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_and_mul", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_kernel, true);
   });
 }
 
-void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
-                       torch::Tensor& input)  // [..., 2 * d]
+void gelu_tanh_and_mul(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input)  // [..., 2 * d]
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_tanh_and_mul", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_tanh_kernel, true);
@@ -223,69 +238,78 @@ void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
 }
 
 // Launch element-wise activation kernel.
-#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                       \
-  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;                     \
-  int d = input.size(-1);                                                      \
-  int64_t num_tokens = input.numel() / input.size(-1);                         \
-  sycl::range<3> grid(1, 1, num_tokens);                                       \
-  sycl::range<3> block(1, 1, std::min(d, 1024));                               \
-  if (num_tokens == 0) {                                                       \
-    return;                                                                    \
-  }                                                                            \
-  auto out_ptr = out.data_ptr<scalar_t>();                                     \
-  auto input_ptr = input.data_ptr<scalar_t>();                                 \
-  at::DeviceGuard device_guard(input.device());                                \
-  auto& queue = vllm::xpu::vllmGetQueue();                                     \
-  queue.submit([&](sycl::handler& cgh) {                                       \
-    cgh.parallel_for(sycl::nd_range<3>(grid * block, block),                   \
-                     vllm::act_kernel<sycl_t, KERNEL>((sycl_t*)out_ptr,        \
-                                                      (sycl_t*)input_ptr, d)); \
+#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                   \
+  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type; \
+  int d = input.size(-1);                                  \
+  int64_t num_tokens = input.numel() / input.size(-1);     \
+  sycl::range<3> grid(1, 1, num_tokens);                   \
+  sycl::range<3> block(1, 1, std::min(d, 1024));           \
+  if (num_tokens == 0) {                                   \
+    return;                                                \
+  }                                                        \
+  auto out_ptr = out.data_ptr<scalar_t>();                 \
+  auto input_ptr = input.data_ptr<scalar_t>();             \
+  at::DeviceGuard device_guard(input.device());            \
+  auto& queue = vllm::xpu::vllmGetQueue();                 \
+  queue.submit([&](sycl::handler& cgh) {                   \
+    cgh.parallel_for(                                      \
+        sycl::nd_range<3>(grid * block, block),            \
+        vllm::act_kernel<sycl_t, KERNEL>(                  \
+            (sycl_t*)out_ptr, (sycl_t*)input_ptr, d));     \
   });
 
-#define LAUNCH_SWIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                     \
-  int d = input.size(-1) / 2;                                              \
-  int64_t num_tokens = input.numel() / input.size(-1);                     \
-  sycl::range<1> grid(num_tokens);                                         \
-  sycl::range<1> block(std::min(d, 1024));                                 \
-  at::DeviceGuard device_guard(input.device());                            \
-  auto& queue = vllm::xpu::vllmGetQueue();                                 \
-  VLLM_DISPATCH_FLOATING_TYPES(                                            \
-      input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {        \
-        queue.submit([&](sycl::handler& cgh) {                             \
-          cgh.parallel_for(                                                \
-              sycl::nd_range<1>(grid * block, block),                      \
-              vllm::swigluoai_and_mul_kernel<scalar_t, KERNEL<scalar_t>>(  \
-                  out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d, \
-                  ALPHA, LIMIT));                                          \
-        });                                                                \
+#define LAUNCH_SWIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                    \
+  int d = input.size(-1) / 2;                                             \
+  int64_t num_tokens = input.numel() / input.size(-1);                    \
+  sycl::range<1> grid(num_tokens);                                        \
+  sycl::range<1> block(std::min(d, 1024));                                \
+  at::DeviceGuard device_guard(input.device());                           \
+  auto& queue = vllm::xpu::vllmGetQueue();                                \
+  VLLM_DISPATCH_FLOATING_TYPES(                                           \
+      input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {       \
+        queue.submit([&](sycl::handler& cgh) {                            \
+          cgh.parallel_for(                                               \
+              sycl::nd_range<1>(grid * block, block),                     \
+              vllm::swigluoai_and_mul_kernel<scalar_t, KERNEL<scalar_t>>( \
+                  out.data_ptr<scalar_t>(),                               \
+                  input.data_ptr<scalar_t>(),                             \
+                  d,                                                      \
+                  ALPHA,                                                  \
+                  LIMIT));                                                \
+        });                                                               \
       });
 
-void gelu_new(torch::Tensor& out,    // [..., d]
-              torch::Tensor& input)  // [..., d]
+void gelu_new(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input)  // [..., d]
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_new", [&] {
     LAUNCH_ACTIVATION_KERNEL(vllm::gelu_new_kernel);
   });
 }
 
-void gelu_fast(torch::Tensor& out,    // [..., d]
-               torch::Tensor& input)  // [..., d]
+void gelu_fast(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input)  // [..., d]
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_fast", [&] {
     LAUNCH_ACTIVATION_KERNEL(vllm::gelu_fast_kernel);
   });
 }
 
-void gelu_quick(torch::Tensor& out,    // [..., d]
-                torch::Tensor& input)  // [..., d]
+void gelu_quick(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input)  // [..., d]
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_quick", [&] {
     LAUNCH_ACTIVATION_KERNEL(vllm::gelu_quick_kernel);
   });
 }
 
-void swigluoai_and_mul(torch::Tensor& out,    // [..., d]
-                       torch::Tensor& input,  // [..., 2 * d]
-                       double alpha, double limit) {
+void swigluoai_and_mul(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input,  // [..., 2 * d]
+    double alpha,
+    double limit) {
   LAUNCH_SWIGLUOAI_AND_MUL(vllm::swigluoai_and_mul, alpha, limit);
 }

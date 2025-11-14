@@ -38,14 +38,20 @@
 #include "./collective/chunk_prefill_mma.hpp"
 namespace cutlass::flash_attention::kernel {
 
-template <class ProblemShape_, class CollectiveMainloop_,
-          class CollectiveSoftmaxEpilogue_, class CollectiveEpilogue_,
-          class TileScheduler_ = void>
+template <
+    class ProblemShape_,
+    class CollectiveMainloop_,
+    class CollectiveSoftmaxEpilogue_,
+    class CollectiveEpilogue_,
+    class TileScheduler_ = void>
 class FMHAPrefillChunk;
 ///////////////////////////////////////////////////////////////////////////////
-template <class ProblemShape_, class CollectiveMainloop_,
-          class CollectiveSoftmaxEpilogue_, class CollectiveEpilogue_,
-          class TileScheduler_>
+template <
+    class ProblemShape_,
+    class CollectiveMainloop_,
+    class CollectiveSoftmaxEpilogue_,
+    class CollectiveEpilogue_,
+    class TileScheduler_>
 class FMHAPrefillChunk {
  public:
   //
@@ -81,14 +87,14 @@ class FMHAPrefillChunk {
   using SoftmaxArguments = typename CollectiveSoftmaxEpilogue::Arguments;
   using SoftmaxParams = typename CollectiveSoftmaxEpilogue::Params;
 
-  static_assert(cute::is_void_v<TileScheduler_> or
-                    cute::is_same_v<TileScheduler_, PersistentScheduler> or
-                    cute::is_same_v<TileScheduler_, IndividualScheduler>,
-                "Unsupported TileScheduler for Intel Xe.");
+  static_assert(
+      cute::is_void_v<TileScheduler_> or
+          cute::is_same_v<TileScheduler_, PersistentScheduler> or
+          cute::is_same_v<TileScheduler_, IndividualScheduler>,
+      "Unsupported TileScheduler for Intel Xe.");
   using TileSchedulerTag = TileScheduler_;
-  using TileScheduler =
-      typename detail::TileSchedulerSelector<TileScheduler_,
-                                             ArchTag>::Scheduler;
+  using TileScheduler = typename detail::
+      TileSchedulerSelector<TileScheduler_, ArchTag>::Scheduler;
   using TileSchedulerParams = typename TileScheduler::Params;
 
   // Epilogue derived types
@@ -105,8 +111,9 @@ class FMHAPrefillChunk {
   static constexpr bool Sink = CollectiveEpilogue::Sink;
 
   static_assert(
-      cute::is_same_v<ElementAccumulator,
-                      typename CollectiveEpilogue::ElementAccumulator>,
+      cute::is_same_v<
+          ElementAccumulator,
+          typename CollectiveEpilogue::ElementAccumulator>,
       "Mainloop and epilogue do not agree on accumulator value type.");
   // MSVC requires the cast to fix a warning-as-error.
   static constexpr int SharedStorageSize = 0;
@@ -151,7 +158,9 @@ class FMHAPrefillChunk {
       get<1>(TileShapeOutput{}) /
       (get<1>(TileShapePV{}) * PV_ATOM_N);  // ceil_div(FragsNOut,FragsNS);
   using AccumeShape = decltype(make_shape(
-      Int<Vec>{}, Int<FragsM>{}, get<1>(TileShapePV{}) / get<1>(MmaAtomShape()),
+      Int<Vec>{},
+      Int<FragsM>{},
+      get<1>(TileShapePV{}) / get<1>(MmaAtomShape()),
       Int<VSlicer>{}));
 
   static constexpr bool is_var_len = CollectiveMainloop::is_var_len;
@@ -187,18 +196,19 @@ class FMHAPrefillChunk {
 
   // Convert to underlying arguments. In this case, a simple copy for the
   // aliased type.
-  static Params to_underlying_arguments(Arguments const& args,
-                                        void* workspace) {
+  static Params
+  to_underlying_arguments(Arguments const& args, void* workspace) {
     (void)workspace;
-    return {args.mode,
-            args.problem_shape,
-            CollectiveMainloop::to_underlying_arguments(
-                args.problem_shape, args.mainloop, workspace),
-            CollectiveSoftmaxEpilogue::to_underlying_arguments(args.softmax),
-            CollectiveEpilogue::to_underlying_arguments(
-                args.problem_shape, args.epilogue, workspace),
-            TileScheduler::to_underlying_arguments(
-                args.problem_shape, args.hw_info, TileShapeOutput{})};
+    return {
+        args.mode,
+        args.problem_shape,
+        CollectiveMainloop::to_underlying_arguments(
+            args.problem_shape, args.mainloop, workspace),
+        CollectiveSoftmaxEpilogue::to_underlying_arguments(args.softmax),
+        CollectiveEpilogue::to_underlying_arguments(
+            args.problem_shape, args.epilogue, workspace),
+        TileScheduler::to_underlying_arguments(
+            args.problem_shape, args.hw_info, TileShapeOutput{})};
   }
 
   static bool can_implement(Arguments const& args) {
@@ -211,8 +221,10 @@ class FMHAPrefillChunk {
   static int get_workspace_size(Arguments const& args) { return 0; }
 
   static cutlass::Status initialize_workspace(
-      Arguments const& args, void* workspace = nullptr,
-      cudaStream_t stream = nullptr, CudaHostAdapter* cuda_adapter = nullptr) {
+      Arguments const& args,
+      void* workspace = nullptr,
+      cudaStream_t stream = nullptr,
+      CudaHostAdapter* cuda_adapter = nullptr) {
     return Status::kSuccess;
   }
 
@@ -223,8 +235,8 @@ class FMHAPrefillChunk {
   static dim3 get_block_shape() { return dim3(MaxThreadsPerBlock, 1, 1); }
 
   CUTLASS_DEVICE
-  Shape<int, int> get_sequence_length_shape(ProblemShape const& problem_shape,
-                                            int const& batch) {
+  Shape<int, int> get_sequence_length_shape(
+      ProblemShape const& problem_shape, int const& batch) {
     if constexpr (is_var_len) {
       return cutlass::fmha::collective::apply_variable_length(
           select<3, 4>(problem_shape), batch);
@@ -250,15 +262,18 @@ class FMHAPrefillChunk {
     auto& head_size_qk = get<5>(params.problem_shape);
     auto& head_size_vo = get<6>(params.problem_shape);
     // Preconditions
-    static_assert(cute::rank(StrideQ{}) == 3,
-                  "StrideQ must be rank-3: [seq_len_qo, head_size_qk, batch * "
-                  "num_heads_q].");
-    static_assert(cute::rank(StrideK{}) == 3,
-                  "StrideK must be rank-3: [head_size_qk, seq_len_kv, batch * "
-                  "num_heads_kv].");
-    static_assert(cute::rank(StrideV{}) == 3,
-                  "StrideV must be rank-3: [seq_len_kv, head_size_vo, batch * "
-                  "num_heads_kv].");
+    static_assert(
+        cute::rank(StrideQ{}) == 3,
+        "StrideQ must be rank-3: [seq_len_qo, head_size_qk, batch * "
+        "num_heads_q].");
+    static_assert(
+        cute::rank(StrideK{}) == 3,
+        "StrideK must be rank-3: [head_size_qk, seq_len_kv, batch * "
+        "num_heads_kv].");
+    static_assert(
+        cute::rank(StrideV{}) == 3,
+        "StrideV must be rank-3: [seq_len_kv, head_size_vo, batch * "
+        "num_heads_kv].");
 
     int thread_idx = int(ThreadIdxX());
     auto sub_group_id = get_sub_group_id();
@@ -305,17 +320,25 @@ class FMHAPrefillChunk {
       Tensor mK_cache_nk = mK_cache_nkl(_, _, 0);  // (n_cache, k)
       Tensor mV_cache_nk = mV_cache_nkl(_, _, 0);  // (n_cache, k)
 
-      auto gQ = local_tile(mQ_mk, TileShapeQK{}, make_coord(blk_m_coord, _, _),
-                           Step<_1, X, _1>{});
-      auto gK_cache = local_tile(mK_cache_nk, TileShapeQK{},
-                                 make_coord(_, _, _), Step<X, _1, _1>{});
-      auto gV_cache =
-          local_tile(mV_cache_nk, TileShapeOutput{},
-                     make_coord(_, blk_n_coord, _), Step<X, _1, _1>{});
+      auto gQ = local_tile(
+          mQ_mk,
+          TileShapeQK{},
+          make_coord(blk_m_coord, _, _),
+          Step<_1, X, _1>{});
+      auto gK_cache = local_tile(
+          mK_cache_nk, TileShapeQK{}, make_coord(_, _, _), Step<X, _1, _1>{});
+      auto gV_cache = local_tile(
+          mV_cache_nk,
+          TileShapeOutput{},
+          make_coord(_, blk_n_coord, _),
+          Step<X, _1, _1>{});
 
       auto mainloop_params = CollectiveMainloop::get_updated_copies(
-          params.mainloop, params.problem_shape, sequence_length_shape,
-          batch_coord, q_head_coord);
+          params.mainloop,
+          params.problem_shape,
+          sequence_length_shape,
+          batch_coord,
+          q_head_coord);
 
       // we limit the horizontal size to two subgroup, the empirical results
       // show that reading the two cacheline side by side in gives better
@@ -329,8 +352,9 @@ class FMHAPrefillChunk {
           Shape<Int<QK_BLK_N>, Int<cute::max(cute::gcd(QK_BLK_K, 64), 32)>>,
           Num_SGs>(mainloop_params.gmem_tiled_copy_k_cache);
       auto tiled_prefetch_v_cache = cute::prefetch_selector<
-          Shape<Int<cute::max(cute::gcd(Epilogue_BLK_N, 64), 32)>,
-                Int<Epilogue_BLK_K>>,
+          Shape<
+              Int<cute::max(cute::gcd(Epilogue_BLK_N, 64), 32)>,
+              Int<Epilogue_BLK_K>>,
           Num_SGs>(mainloop_params.gmem_tiled_copy_v_cache);
       auto thr_prefetch_Q = tiled_prefetch_q.get_slice(thread_idx);
       auto thr_prefetch_K = tiled_prefetch_k_cache.get_slice(thread_idx);
@@ -411,8 +435,13 @@ class FMHAPrefillChunk {
             Shape<Int<Vec>, Int<FragsM>, Int<FragsN>>{});
         clear(tSr);
         // 3) Perform GEMM S = Q*K
-        collective_mma.mmaQK(tSr, gQ, gK_, tSr,
-                             ceil_div(head_size_qk, QK_BLK_K), mainloop_params);
+        collective_mma.mmaQK(
+            tSr,
+            gQ,
+            gK_,
+            tSr,
+            ceil_div(head_size_qk, QK_BLK_K),
+            mainloop_params);
 
         // mask padding
         int col_start = local_id + kv_start_coord;
@@ -470,13 +499,15 @@ class FMHAPrefillChunk {
               int col_ref = seq_len_kv_cache - seq_len_qo;
               CUTLASS_PRAGMA_UNROLL
               for (int row = 0; row < Vec; row++) {  // 8
-                bool left_mask =
-                    col_idx < cute::max(0, row + row_idx + col_ref -
-                                               mainloop_params.window_left);
+                bool left_mask = col_idx < cute::max(
+                                               0,
+                                               row + row_idx + col_ref -
+                                                   mainloop_params.window_left);
                 bool right_mask =
-                    col_idx > cute::min(seq_len_kv_cache,
-                                        row + row_idx + col_ref +
-                                            mainloop_params.window_right);
+                    col_idx >
+                    cute::min(
+                        seq_len_kv_cache,
+                        row + row_idx + col_ref + mainloop_params.window_right);
                 if (left_mask || right_mask) {
                   tSr(row, m, n) = ElementAccumulator{-INFINITY};
                 }
@@ -516,8 +547,8 @@ class FMHAPrefillChunk {
         CollectiveSoftmaxEpilogue softmax(params.softmax);
         softmax(split == 0, tSr, max_reg, sum_reg, out_reg);
         // 5) Perform GEMM O = S*V
-        collective_mma.template mmaPV<VSlicer>(out_reg, tSr, gV_, out_reg,
-                                               mainloop_params);
+        collective_mma.template mmaPV<VSlicer>(
+            out_reg, tSr, gV_, out_reg, mainloop_params);
 
         // ... prefetch next tile ...
         // Prefetch the next Q tile
@@ -544,18 +575,32 @@ class FMHAPrefillChunk {
       // Epilogue
       auto epilogue_params =
           CollectiveEpilogue::template get_updated_copies<is_var_len>(
-              params.epilogue, params.problem_shape, sequence_length_shape,
-              batch_coord, q_head_coord);
+              params.epilogue,
+              params.problem_shape,
+              sequence_length_shape,
+              batch_coord,
+              q_head_coord);
       CollectiveEpilogue epilogue{epilogue_params, shared_storage.epilogue};
       auto blk_coord_mnkl = make_coord(blk_m_coord, blk_n_coord, _, 0);
       if constexpr (Sink) {
         ElementAccumulator max_scale{max_reg * params.softmax.scale};
-        epilogue(params.problem_shape, sequence_length_shape, blk_coord_mnkl,
-                 out_reg, max_scale, sum_reg,
-                 params.epilogue.ptr_sink[q_head_coord]);
+        epilogue(
+            params.problem_shape,
+            sequence_length_shape,
+            blk_coord_mnkl,
+            out_reg,
+            max_scale,
+            sum_reg,
+            params.epilogue.ptr_sink[q_head_coord]);
       } else {
-        epilogue(params.problem_shape, sequence_length_shape, blk_coord_mnkl,
-                 out_reg, max_reg, sum_reg, 0);
+        epilogue(
+            params.problem_shape,
+            sequence_length_shape,
+            blk_coord_mnkl,
+            out_reg,
+            max_reg,
+            sum_reg,
+            0);
       }
     }
   }

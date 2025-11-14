@@ -49,20 +49,42 @@ namespace collective {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <bool Sink_, class DispatchPolicy, class MMAOperation_,
-          class TileShapeOutput_, class SubgroupLayout_, class... Args>
+template <
+    bool Sink_,
+    class DispatchPolicy,
+    class MMAOperation_,
+    class TileShapeOutput_,
+    class SubgroupLayout_,
+    class... Args>
 class FlashChunkPrefillEpilogue {
-  static_assert(cutlass::detail::dependent_false<DispatchPolicy>,
-                "Could not find an epilogue specialization.");
+  static_assert(
+      cutlass::detail::dependent_false<DispatchPolicy>,
+      "Could not find an epilogue specialization.");
 };
 
-template <bool Sink_, class MMAOperation_, class TileShapeOutput_,
-          class SubgroupLayout_, class ElementCompute_, class ElementO_,
-          class StrideO_, class ElementLSE_, class CopyOpO_, class ElementSink_>
-class FlashChunkPrefillEpilogue<Sink_, epilogue::IntelXeXMX16, MMAOperation_,
-                                TileShapeOutput_, SubgroupLayout_,
-                                ElementCompute_, ElementO_, StrideO_,
-                                ElementLSE_, CopyOpO_, ElementSink_> {
+template <
+    bool Sink_,
+    class MMAOperation_,
+    class TileShapeOutput_,
+    class SubgroupLayout_,
+    class ElementCompute_,
+    class ElementO_,
+    class StrideO_,
+    class ElementLSE_,
+    class CopyOpO_,
+    class ElementSink_>
+class FlashChunkPrefillEpilogue<
+    Sink_,
+    epilogue::IntelXeXMX16,
+    MMAOperation_,
+    TileShapeOutput_,
+    SubgroupLayout_,
+    ElementCompute_,
+    ElementO_,
+    StrideO_,
+    ElementLSE_,
+    CopyOpO_,
+    ElementSink_> {
  public:
   //
   // Type Aliases
@@ -74,9 +96,10 @@ class FlashChunkPrefillEpilogue<Sink_, epilogue::IntelXeXMX16, MMAOperation_,
   using CopyOpO = CopyOpO_;
   using SubgroupLayout = SubgroupLayout_;
   using TileShapeOutput = TileShapeOutput_;
-  using TiledMmaOutput =
-      typename TiledMMAHelper<MMA_Atom<MMAOperation_>, Layout<TileShapeOutput>,
-                              SubgroupLayout>::TiledMMA;
+  using TiledMmaOutput = typename TiledMMAHelper<
+      MMA_Atom<MMAOperation_>,
+      Layout<TileShapeOutput>,
+      SubgroupLayout>::TiledMMA;
   using GmemTiledCopyO = CopyOpO;
   using ElementOutput = ElementO_;
   using ElementCompute = ElementCompute_;
@@ -151,31 +174,42 @@ class FlashChunkPrefillEpilogue<Sink_, epilogue::IntelXeXMX16, MMAOperation_,
 
   template <class ProblemShape>
   static constexpr Params to_underlying_arguments(
-      ProblemShape const& problem_shape, Arguments const& args,
+      ProblemShape const& problem_shape,
+      Arguments const& args,
       [[maybe_unused]] void* workspace) {
-    auto [batch, num_heads_q, num_heads_kv, seq_len_qo, seq_len_kv_cache,
-          head_size_qk, head_size_vo] = problem_shape;
+    auto
+        [batch,
+         num_heads_q,
+         num_heads_kv,
+         seq_len_qo,
+         seq_len_kv_cache,
+         head_size_qk,
+         head_size_vo] = problem_shape;
     auto q_group_size = num_heads_q / num_heads_kv;
     auto q_group_num = num_heads_q / q_group_size;
-    auto tensorO =
-        make_tensor(make_gmem_ptr(static_cast<ElementO const*>(args.ptr_O)),
-                    make_layout(make_shape(seq_len_qo * q_group_size,
-                                           head_size_vo, batch * q_group_num),
-                                args.dO));
+    auto tensorO = make_tensor(
+        make_gmem_ptr(static_cast<ElementO const*>(args.ptr_O)),
+        make_layout(
+            make_shape(
+                seq_len_qo * q_group_size, head_size_vo, batch * q_group_num),
+            args.dO));
     XE_Copy_O xe_store_o{XE_Copy_O{}.with(tensorO)};
     return {xe_store_o, args.ptr_sink};
   }
 
   template <class ProblemShape>
-  static size_t get_workspace_size(ProblemShape const& problem_shape,
-                                   Arguments const& args) {
+  static size_t
+  get_workspace_size(ProblemShape const& problem_shape, Arguments const& args) {
     return 0;
   }
 
   template <class ProblemShape>
   static cutlass::Status initialize_workspace(
-      ProblemShape const& problem_shape, Arguments const& args, void* workspace,
-      cudaStream_t stream, CudaHostAdapter* cuda_adapter = nullptr) {
+      ProblemShape const& problem_shape,
+      Arguments const& args,
+      void* workspace,
+      cudaStream_t stream,
+      CudaHostAdapter* cuda_adapter = nullptr) {
     return Status::kSuccess;
   }
 
@@ -190,13 +224,22 @@ class FlashChunkPrefillEpilogue<Sink_, epilogue::IntelXeXMX16, MMAOperation_,
   FlashChunkPrefillEpilogue(Params const& params_, TensorStorage const&)
       : params(params_) {}
 
-  template <class ProblemShape, class SequenceLengthShape, class TileCoord,
-            class FragOut, class FragMax, class FragSum, class FragSink>
-  CUTLASS_DEVICE void operator()(ProblemShape problem_shape,
-                                 SequenceLengthShape sequence_length_shape,
-                                 TileCoord tile_coord, FragOut& out,
-                                 FragMax const& max, FragSum& sum,
-                                 [[maybe_unused]] FragSink const& sink) {
+  template <
+      class ProblemShape,
+      class SequenceLengthShape,
+      class TileCoord,
+      class FragOut,
+      class FragMax,
+      class FragSum,
+      class FragSink>
+  CUTLASS_DEVICE void operator()(
+      ProblemShape problem_shape,
+      SequenceLengthShape sequence_length_shape,
+      TileCoord tile_coord,
+      FragOut& out,
+      FragMax const& max,
+      FragSum& sum,
+      [[maybe_unused]] FragSink const& sink) {
     using namespace cute;
 
     static constexpr bool is_var_len =
@@ -210,8 +253,9 @@ class FlashChunkPrefillEpilogue<Sink_, epilogue::IntelXeXMX16, MMAOperation_,
     constexpr int FragsN = size(select<2, 3>(shape(FragOutLayout{})));
 
     auto sg = syclcompat::get_nd_item<1>().get_sub_group();
-    auto out_reg = make_tensor(static_cast<decltype(out)&&>(out).data(),
-                               Shape<Int<Vec>, Int<FragsM>, Int<FragsN>>{});
+    auto out_reg = make_tensor(
+        static_cast<decltype(out)&&>(out).data(),
+        Shape<Int<Vec>, Int<FragsM>, Int<FragsN>>{});
 
     CUTLASS_PRAGMA_UNROLL
     for (int y = 0; y < FragsM; y++) {
@@ -251,17 +295,20 @@ class FlashChunkPrefillEpilogue<Sink_, epilogue::IntelXeXMX16, MMAOperation_,
 
     auto [m_coord, n_coord, k_coord, l_coord] = tile_coord;
     // Tile the output tensor per WG
-    Tensor g_wg_O =
-        local_tile(mO_mnl, select<0, 1>(TileShapeOutput{}),
-                   make_coord(m_coord, n_coord, 0));  // (BLK_M,BLK_N,m,n,l)
+    Tensor g_wg_O = local_tile(
+        mO_mnl,
+        select<0, 1>(TileShapeOutput{}),
+        make_coord(m_coord, n_coord, 0));  // (BLK_M,BLK_N,m,n,l)
     static constexpr auto ATOM_N =
         get<2>(typename TiledMmaOutput::ThrLayoutVMNK{}.shape());
     auto m_sg = get_sub_group_id() / ATOM_N;
     auto n_sg = get_sub_group_id() % ATOM_N;
     // Tile the output tensor per SG
-    Tensor gO =
-        local_tile(g_wg_O, SubgroupTileShape{}, make_coord(m_sg, n_sg, _),
-                   Step<_1, _1, X>{});  // (BLK_M,BLK_N,m,n,l)
+    Tensor gO = local_tile(
+        g_wg_O,
+        SubgroupTileShape{},
+        make_coord(m_sg, n_sg, _),
+        Step<_1, _1, X>{});  // (BLK_M,BLK_N,m,n,l)
     auto thread_xe_store_o = params.xe_store_o.get_thread_slice(ThreadIdxX());
     Tensor tOgO = thread_xe_store_o.partition_D(gO);
 
@@ -286,8 +333,10 @@ class FlashChunkPrefillEpilogue<Sink_, epilogue::IntelXeXMX16, MMAOperation_,
   // int>
   template <bool VarLen, class ProblemShapeType, class SequenceLengthShapeType>
   CUTLASS_DEVICE static constexpr Params get_updated_copies(
-      Params const& params, ProblemShapeType const& problem_shape,
-      SequenceLengthShapeType const& sequence_length_shape, int const& l_coord,
+      Params const& params,
+      ProblemShapeType const& problem_shape,
+      SequenceLengthShapeType const& sequence_length_shape,
+      int const& l_coord,
       int const& q_head_coord) {
     auto [num_heads_q, num_heads_kv, head_size_vo] =
         select<1, 2, 6>(problem_shape);
@@ -306,8 +355,8 @@ class FlashChunkPrefillEpilogue<Sink_, epilogue::IntelXeXMX16, MMAOperation_,
     auto shape_o =
         make_shape(static_cast<int>(seq_len_qo), num_heads_q * head_size_vo, 1);
     StrideO stride_o = cutlass::make_cute_packed_stride(StrideO{}, shape_o);
-    auto tensorO = make_tensor(make_gmem_ptr(base_ptr + offset_o),
-                               make_layout(shape_o, stride_o));
+    auto tensorO = make_tensor(
+        make_gmem_ptr(base_ptr + offset_o), make_layout(shape_o, stride_o));
     XE_Copy_O xe_store_o{XE_Copy_O{}.with(tensorO)};
     return Params{xe_store_o, params.ptr_sink};
   }

@@ -23,9 +23,12 @@
 //   indices  - LoRA index mapping
 //   scale    - Scaling factor applied to the result
 //------------------------------------------------------------------------------
-void bgmv_shrink(torch::Tensor& outputs, const torch::Tensor& inputs,
-                 const torch::Tensor& weights, const torch::Tensor& indices,
-                 double scale);
+void bgmv_shrink(
+    torch::Tensor& outputs,
+    const torch::Tensor& inputs,
+    const torch::Tensor& weights,
+    const torch::Tensor& indices,
+    double scale);
 
 //------------------------------------------------------------------------------
 // bgmv_expand_slice
@@ -55,10 +58,13 @@ void bgmv_shrink(torch::Tensor& outputs, const torch::Tensor& inputs,
 //   add_to_output - If true, add results to existing output; otherwise
 //   overwrite
 //------------------------------------------------------------------------------
-void bgmv_expand_slice(torch::Tensor& outputs, const torch::Tensor& inputs,
-                       const torch::Tensor& weights,
-                       const torch::Tensor& indices, int64_t slice_offset,
-                       bool add_to_output);
+void bgmv_expand_slice(
+    torch::Tensor& outputs,
+    const torch::Tensor& inputs,
+    const torch::Tensor& weights,
+    const torch::Tensor& indices,
+    int64_t slice_offset,
+    bool add_to_output);
 
 //------------------------------------------------------------------------------
 // bgmv_expand
@@ -84,6 +90,9 @@ void bgmv_expand_slice(torch::Tensor& outputs, const torch::Tensor& inputs,
 //   add_to_output - If true, add results to existing output; otherwise
 //   overwrite
 //------------------------------------------------------------------------------
-void bgmv_expand(torch::Tensor& outputs, const torch::Tensor& inputs,
-                 const torch::Tensor& weights, const torch::Tensor& indices,
-                 bool add_to_output);
+void bgmv_expand(
+    torch::Tensor& outputs,
+    const torch::Tensor& inputs,
+    const torch::Tensor& weights,
+    const torch::Tensor& indices,
+    bool add_to_output);

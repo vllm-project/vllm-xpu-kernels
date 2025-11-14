@@ -13,8 +13,11 @@ using namespace at;
 namespace vllm {
 
 template <typename scalar_t>
-inline float thread_max_vec(scalar_t const* input, int64_t const num_elems,
-                            int const tid, int const step) {
+inline float thread_max_vec(
+    scalar_t const* input,
+    int64_t const num_elems,
+    int const tid,
+    int const step) {
   // Vectorized input/output to better utilize memory bandwidth.
   using vec4_t = fp8::vec4_t<scalar_t>;
   vec4_t const* vectorized_in = reinterpret_cast<vec4_t const*>(input);
@@ -52,8 +55,8 @@ class segmented_max_reduction {
   int64_t num_elems;
 
  public:
-  segmented_max_reduction(float* scale_, const scalar_t* input_,
-                          int64_t num_elems_)
+  segmented_max_reduction(
+      float* scale_, const scalar_t* input_, int64_t num_elems_)
       : scale(scale_), input(input_), num_elems(num_elems_) {}
   void operator()(sycl::nd_item<1> item) const {
     auto& cache =
@@ -87,10 +90,11 @@ class segmented_max_reduction {
     // atomically write the max to the target location
     // TODO: Do we need if statement?
     if (item.get_local_id(0) == 0) {
-      using atomic_t =
-          sycl::atomic_ref<float, sycl::memory_order::relaxed,
-                           sycl::memory_scope::device,
-                           sycl::access::address_space::global_space>;
+      using atomic_t = sycl::atomic_ref<
+          float,
+          sycl::memory_order::relaxed,
+          sycl::memory_scope::device,
+          sycl::access::address_space::global_space>;
       atomic_t atomic_max(*scale);
       atomic_max.fetch_max(cache[0] / fp8::quant_type_max_v<fp8_type>);
     }

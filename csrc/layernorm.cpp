@@ -9,11 +9,15 @@ namespace vllm {
 template <typename scalar_t>
 class rms_norm_kernel {
  public:
-  rms_norm_kernel(scalar_t* out_, const scalar_t* input_,
-                  const int64_t input_stride_, const scalar_t* weight_,
-                  const float epsilon_, const int num_tokens_,
-                  const int hidden_size_,
-                  sycl::local_accessor<float, 1> s_variance_)
+  rms_norm_kernel(
+      scalar_t* out_,
+      const scalar_t* input_,
+      const int64_t input_stride_,
+      const scalar_t* weight_,
+      const float epsilon_,
+      const int num_tokens_,
+      const int hidden_size_,
+      sycl::local_accessor<float, 1> s_variance_)
       : out(out_),
         input(input_),
         input_stride(input_stride_),
@@ -36,7 +40,8 @@ class rms_norm_kernel {
     }
 
     variance = sycl::reduce_over_group(
-        sycl::ext::oneapi::this_work_item::get_work_group<3>(), variance,
+        sycl::ext::oneapi::this_work_item::get_work_group<3>(),
+        variance,
         sycl::plus<>());
     if (item_ct1.get_local_id(2) == 0) {
       *s_variance_ptr = sycl::rsqrt(variance / hidden_size + epsilon);
@@ -64,8 +69,11 @@ class rms_norm_kernel {
 };
 
 template <typename scalar_t>
-void call_rms_norm_kernel(torch::Tensor& out, torch::Tensor& input,
-                          torch::Tensor& weight, float epsilon) {
+void call_rms_norm_kernel(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    float epsilon) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -78,11 +86,17 @@ void call_rms_norm_kernel(torch::Tensor& out, torch::Tensor& input,
   auto& queue = vllm::xpu::vllmGetQueue();
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
-    cgh.parallel_for(sycl::nd_range<3>(grid * block, block),
-                     vllm::rms_norm_kernel<sycl_t>(
-                         (sycl_t*)out_ptr, (const sycl_t*)input_ptr,
-                         input_stride, (const sycl_t*)weight_ptr, epsilon,
-                         num_tokens, hidden_size, s_variance));
+    cgh.parallel_for(
+        sycl::nd_range<3>(grid * block, block),
+        vllm::rms_norm_kernel<sycl_t>(
+            (sycl_t*)out_ptr,
+            (const sycl_t*)input_ptr,
+            input_stride,
+            (const sycl_t*)weight_ptr,
+            epsilon,
+            num_tokens,
+            hidden_size,
+            s_variance));
   });
 }
 
@@ -94,7 +108,9 @@ class fused_add_rms_norm_kernel {
       scalar_t* __restrict__ residual_,  // [..., hidden_size]
       const int64_t input_stride_,
       const scalar_t* __restrict__ weight_,  // [hidden_size]
-      const float epsilon_, const int num_tokens_, const int hidden_size_,
+      const float epsilon_,
+      const int num_tokens_,
+      const int hidden_size_,
       sycl::local_accessor<float, 1> s_variance_)
       : input(input_),
         residual(residual_),
@@ -121,7 +137,8 @@ class fused_add_rms_norm_kernel {
     }
 
     variance = sycl::reduce_over_group(
-        sycl::ext::oneapi::this_work_item::get_work_group<3>(), variance,
+        sycl::ext::oneapi::this_work_item::get_work_group<3>(),
+        variance,
         sycl::plus<>());
     if (item_ct1.get_local_id(2) == 0) {
       *s_variance_ptr = sycl::rsqrt(variance / hidden_size + epsilon);
@@ -149,9 +166,11 @@ class fused_add_rms_norm_kernel {
 };
 
 template <typename scalar_t>
-void call_fused_add_rms_norm_kernel(torch::Tensor& input,
-                                    torch::Tensor& residual,
-                                    torch::Tensor& weight, float epsilon) {
+void call_fused_add_rms_norm_kernel(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    float epsilon) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -164,32 +183,44 @@ void call_fused_add_rms_norm_kernel(torch::Tensor& input,
   auto& queue = vllm::xpu::vllmGetQueue();
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
-    cgh.parallel_for(sycl::nd_range<3>(grid * block, block),
-                     fused_add_rms_norm_kernel<sycl_t>(
-                         (sycl_t*)input_ptr, (sycl_t*)residual_ptr,
-                         input_stride, (const sycl_t*)weight_ptr, epsilon,
-                         num_tokens, hidden_size, s_variance));
+    cgh.parallel_for(
+        sycl::nd_range<3>(grid * block, block),
+        fused_add_rms_norm_kernel<sycl_t>(
+            (sycl_t*)input_ptr,
+            (sycl_t*)residual_ptr,
+            input_stride,
+            (const sycl_t*)weight_ptr,
+            epsilon,
+            num_tokens,
+            hidden_size,
+            s_variance));
   });
 }
 
 }  // namespace vllm
 
-void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
-              double epsilon) {
+void rms_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    double epsilon) {
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_rms_norm_kernel", [&] {
         vllm::call_rms_norm_kernel<scalar_t>(out, input, weight, epsilon);
       });
 }
 
-void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
-                        torch::Tensor& weight, double epsilon) {
+void fused_add_rms_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    double epsilon) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
 
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(),
-                               "call_fused_add_rms_norm_kernel", [&] {
-                                 vllm::call_fused_add_rms_norm_kernel<scalar_t>(
-                                     input, residual, weight, epsilon);
-                               });
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_fused_add_rms_norm_kernel", [&] {
+        vllm::call_fused_add_rms_norm_kernel<scalar_t>(
+            input, residual, weight, epsilon);
+      });
 }

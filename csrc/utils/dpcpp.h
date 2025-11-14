@@ -12,8 +12,8 @@ namespace xpu {
 // - Without template: queries device default limit
 // ============================================================================
 template <class KernelClass = void>
-static int64_t getMaxWorkGroupSize(
-    at::DeviceIndex dev_id = c10::xpu::current_device()) {
+static int64_t
+getMaxWorkGroupSize(at::DeviceIndex dev_id = c10::xpu::current_device()) {
   auto q = c10::xpu::getCurrentXPUStream(dev_id).queue();
   auto ctx = q.get_context();
   auto dev = q.get_device();

@@ -32,8 +32,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "expert_token_count, Tensor expert_first_token_offset, int N, int K, int "
       "groups) -> "
       "Tensor");
-  xpu_ops.impl("cutlass_grouped_gemm", torch::kXPU,
-               gpu::cutlass_kernel::grouped_gemm_func);
+  xpu_ops.impl(
+      "cutlass_grouped_gemm",
+      torch::kXPU,
+      gpu::cutlass_kernel::grouped_gemm_func);
 
   xpu_ops.def(
       "deepseek_scaling_rope(Tensor! positions, Tensor! query, Tensor! key, "

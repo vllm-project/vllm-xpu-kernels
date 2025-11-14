@@ -24,8 +24,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad) -> ()");
-  m.impl("batched_moe_align_block_size", torch::kXPU,
-         &batched_moe_align_block_size);
+  m.impl(
+      "batched_moe_align_block_size",
+      torch::kXPU,
+      &batched_moe_align_block_size);
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.

@@ -53,13 +53,16 @@ struct XeFlashIndividualTileScheduler {
   XeFlashIndividualTileScheduler(Params const& params) : params(params) {}
 
   template <class ProblemSize, class TileShape>
-  static Params to_underlying_arguments(ProblemSize const& problem_size,
-                                        KernelHardwareInfo hw_info,
-                                        TileShape const& tile_shape) {
+  static Params to_underlying_arguments(
+      ProblemSize const& problem_size,
+      KernelHardwareInfo hw_info,
+      TileShape const& tile_shape) {
     using namespace cute;
 
-    dim3 grid(size(ceil_div(shape<3>(problem_size), shape<0>(tile_shape))),
-              size(shape<1>(problem_size)), size(shape<0>(problem_size)));
+    dim3 grid(
+        size(ceil_div(shape<3>(problem_size), shape<0>(tile_shape))),
+        size(shape<1>(problem_size)),
+        size(shape<0>(problem_size)));
     return Params{grid};
   }
 
@@ -103,9 +106,10 @@ struct XeFlashPersistentTileScheduler {
       : block_idx(BlockIdxX()), params(params) {}
 
   template <class ProblemSize, class TileShape>
-  static Params to_underlying_arguments(ProblemSize const& problem_size,
-                                        KernelHardwareInfo hw_info,
-                                        TileShape const& tile_shape) {
+  static Params to_underlying_arguments(
+      ProblemSize const& problem_size,
+      KernelHardwareInfo hw_info,
+      TileShape const& tile_shape) {
     using namespace cute;
     // Get SM count if needed, otherwise use user supplied SM count
     int sm_count = hw_info.sm_count;
@@ -132,11 +136,12 @@ struct XeFlashPersistentTileScheduler {
     int num_blocks = num_seq_len_blocks * num_head_size_blocks *
                      size(shape<0>(problem_size) * shape<1>(problem_size));
 
-    return Params{num_blocks,
-                  {num_seq_len_blocks},
-                  {num_head_size_blocks},
-                  {shape<1>(problem_size)},
-                  hw_info};
+    return Params{
+        num_blocks,
+        {num_seq_len_blocks},
+        {num_head_size_blocks},
+        {shape<1>(problem_size)},
+        hw_info};
   }
 
   template <int Num_SGs>
@@ -148,9 +153,11 @@ struct XeFlashPersistentTileScheduler {
     // TODO (Codeplay): revert this back to std::min(params.num_blocks,
     // params.hw_info.sm_count) once performance issue is fixed.
     dim3 grid(
-        std::min(params.num_blocks,
-                 ceil_div(params.hw_info.sm_count * maxSubgroups, Num_SGs)),
-        1, 1);
+        std::min(
+            params.num_blocks,
+            ceil_div(params.hw_info.sm_count * maxSubgroups, Num_SGs)),
+        1,
+        1);
     return grid;
   }
 
@@ -185,14 +192,16 @@ namespace detail {
 
 template <class TileSchedulerTag, class ArchTag, class Enable = void>
 struct TileSchedulerSelector {
-  static_assert(cutlass::detail::dependent_false<ArchTag>,
-                "Could not select a tile scheduler for given parameters.");
+  static_assert(
+      cutlass::detail::dependent_false<ArchTag>,
+      "Could not select a tile scheduler for given parameters.");
 };
 
 // Default (void) maps to XeFlashIndividualTileScheduler
 template <class ArchTag>
 struct TileSchedulerSelector<
-    void, ArchTag,
+    void,
+    ArchTag,
     cute::enable_if_t<cute::is_same_v<ArchTag, cutlass::arch::IntelXe>>> {
   using Scheduler =
       typename TileSchedulerSelector<IndividualScheduler, ArchTag>::Scheduler;
@@ -200,14 +209,16 @@ struct TileSchedulerSelector<
 
 template <class ArchTag>
 struct TileSchedulerSelector<
-    IndividualScheduler, ArchTag,
+    IndividualScheduler,
+    ArchTag,
     cute::enable_if_t<cute::is_same_v<ArchTag, cutlass::arch::IntelXe>>> {
   using Scheduler = kernel::XeFlashIndividualTileScheduler;
 };
 
 template <class ArchTag>
 struct TileSchedulerSelector<
-    PersistentScheduler, ArchTag,
+    PersistentScheduler,
+    ArchTag,
     cute::enable_if_t<cute::is_same_v<ArchTag, cutlass::arch::IntelXe>>> {
   using Scheduler = kernel::XeFlashPersistentTileScheduler;
 };

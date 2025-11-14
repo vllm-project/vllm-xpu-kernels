@@ -59,16 +59,39 @@ namespace cutlass::gemm::collective {
 using namespace cute;
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int Stages, class Schedule, class TileShape_, class ElementA_,
-          class StrideA_, class ElementB_, class StrideB_, class TiledMma_,
-          class GmemTiledCopyA_, class SmemLayoutAtomA_, class SmemCopyAtomA_,
-          class TransformA_, class GmemTiledCopyB_, class SmemLayoutAtomB_,
-          class SmemCopyAtomB_, class TransformB_>
-struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
-                     ElementA_, StrideA_, ElementB_, StrideB_, TiledMma_,
-                     GmemTiledCopyA_, SmemLayoutAtomA_, SmemCopyAtomA_,
-                     TransformA_, GmemTiledCopyB_, SmemLayoutAtomB_,
-                     SmemCopyAtomB_, TransformB_> {
+template <
+    int Stages,
+    class Schedule,
+    class TileShape_,
+    class ElementA_,
+    class StrideA_,
+    class ElementB_,
+    class StrideB_,
+    class TiledMma_,
+    class GmemTiledCopyA_,
+    class SmemLayoutAtomA_,
+    class SmemCopyAtomA_,
+    class TransformA_,
+    class GmemTiledCopyB_,
+    class SmemLayoutAtomB_,
+    class SmemCopyAtomB_,
+    class TransformB_>
+struct CollectiveMma<
+    MainloopMoE16Group<Stages, Schedule>,
+    TileShape_,
+    ElementA_,
+    StrideA_,
+    ElementB_,
+    StrideB_,
+    TiledMma_,
+    GmemTiledCopyA_,
+    SmemLayoutAtomA_,
+    SmemCopyAtomA_,
+    TransformA_,
+    GmemTiledCopyB_,
+    SmemLayoutAtomB_,
+    SmemCopyAtomB_,
+    TransformB_> {
   //
   // Type Aliases
   //
@@ -96,10 +119,12 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
       platform::is_same<ElementA, ElementB>::value,
       "MainloopIntelXeXMX16Array requires that A and B have same type.");
 
-  static_assert(std::is_same_v<TransformA, cute::identity>,
-                "Transformation for A is not currently supported on Intel PVC");
-  static_assert(std::is_same_v<TransformB, cute::identity>,
-                "Transformation for B is not currently supported on Intel PVC");
+  static_assert(
+      std::is_same_v<TransformA, cute::identity>,
+      "Transformation for A is not currently supported on Intel PVC");
+  static_assert(
+      std::is_same_v<TransformB, cute::identity>,
+      "Transformation for B is not currently supported on Intel PVC");
 
   static constexpr int SubgroupSize = DispatchPolicy::SubgroupSize;
 
@@ -125,17 +150,19 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
   static constexpr auto Num_SGs = ATOM_N * ATOM_M * ATOM_K;
   static constexpr uint32_t MaxThreadsPerBlock = size(TiledMma{});
 
-  using Copy_A = typename Copy_Traits<
-      GmemTiledCopyA, InternalStrideA>::template DefaultTiledCopy<ElementA>;
-  using Copy_B = typename Copy_Traits<
-      GmemTiledCopyB, InternalStrideB>::template DefaultTiledCopy<ElementB>;
+  using Copy_A = typename Copy_Traits<GmemTiledCopyA, InternalStrideA>::
+      template DefaultTiledCopy<ElementA>;
+  using Copy_B = typename Copy_Traits<GmemTiledCopyB, InternalStrideB>::
+      template DefaultTiledCopy<ElementB>;
 
-  using TensorMKL =
-      decltype(make_tensor(make_gmem_ptr(static_cast<ElementA const*>(nullptr)),
-                           make_shape(0, 0, 0), InternalStrideA{}));  //(m, k)
-  using TensorNKL =
-      decltype(make_tensor(make_gmem_ptr(static_cast<ElementB const*>(nullptr)),
-                           make_shape(0, 0, 0), InternalStrideB{}));  //(n, k)
+  using TensorMKL = decltype(make_tensor(
+      make_gmem_ptr(static_cast<ElementA const*>(nullptr)),
+      make_shape(0, 0, 0),
+      InternalStrideA{}));  //(m, k)
+  using TensorNKL = decltype(make_tensor(
+      make_gmem_ptr(static_cast<ElementB const*>(nullptr)),
+      make_shape(0, 0, 0),
+      InternalStrideB{}));  //(n, k)
   using MainloopTensors = cute::tuple<TensorMKL, TensorNKL>;
   // Host side kernel arguments
   struct Arguments {
@@ -162,7 +189,8 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
 
   template <class ProblemShape>
   static constexpr Params to_underlying_arguments(
-      ProblemShape const& problem_shape, Arguments const& args,
+      ProblemShape const& problem_shape,
+      Arguments const& args,
       void* workspace) {
     (void)workspace;
 
@@ -173,13 +201,17 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
     auto init_N = get<1>(problem_shape_MNK);
     auto init_K = get<2>(problem_shape_MNK);
 
-    return Params{args.ptr_A, args.dA, args.ptr_B, args.dB,
-                  args.expert_first_token_offset};
+    return Params{
+        args.ptr_A,
+        args.dA,
+        args.ptr_B,
+        args.dB,
+        args.expert_first_token_offset};
   }
 
   template <class ProblemShape>
-  static bool can_implement(ProblemShape problem_shapes,
-                            Arguments const& args) {
+  static bool
+  can_implement(ProblemShape problem_shapes, Arguments const& args) {
     constexpr int copy_alignment_bits = 128;
     constexpr int batch_alignment_bits = 512;
     auto problem_shape_MNKL = append<4>(problem_shapes, 1);
@@ -223,19 +255,30 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
   }
 
   /// Perform a subgroup-scoped matrix multiply-accumulate
-  template <class FrgTensorD, class TensorA, class TensorB, class FrgTensorC,
-            class KTileIterator, class BlkCoord, class LoadTensors>
-  CUTLASS_DEVICE void operator()(FrgTensorD& accum, TensorA gA, TensorB gB,
-                                 FrgTensorC const& src_accum,
-                                 KTileIterator k_tile_iter,
-                                 int const& k_tile_count,
-                                 BlkCoord const& blk_coord, int const& K_start,
-                                 int const& thread_idx, Params const& mainloop,
-                                 LoadTensors const& load_tensors) {
-    static_assert(is_rmem<FrgTensorD>::value,
-                  "D tensor must be rmem resident.");
-    static_assert(is_rmem<FrgTensorC>::value,
-                  "C tensor must be rmem resident.");
+  template <
+      class FrgTensorD,
+      class TensorA,
+      class TensorB,
+      class FrgTensorC,
+      class KTileIterator,
+      class BlkCoord,
+      class LoadTensors>
+  CUTLASS_DEVICE void operator()(
+      FrgTensorD& accum,
+      TensorA gA,
+      TensorB gB,
+      FrgTensorC const& src_accum,
+      KTileIterator k_tile_iter,
+      int const& k_tile_count,
+      BlkCoord const& blk_coord,
+      int const& K_start,
+      int const& thread_idx,
+      Params const& mainloop,
+      LoadTensors const& load_tensors) {
+    static_assert(
+        is_rmem<FrgTensorD>::value, "D tensor must be rmem resident.");
+    static_assert(
+        is_rmem<FrgTensorC>::value, "C tensor must be rmem resident.");
 
     (void)thread_idx;
 
@@ -351,7 +394,8 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
 
   template <typename ProblemShape_MNKL>
   CUTLASS_DEVICE auto update_tensor_shape_stride(
-      Params const& mainloop_params, int32_t const& next_group,
+      Params const& mainloop_params,
+      int32_t const& next_group,
       ProblemShape_MNKL const& problem_shape_mnkl) {
     const int32_t M = get<0>(problem_shape_mnkl);
     const int32_t N = get<1>(problem_shape_mnkl);
@@ -375,12 +419,14 @@ struct CollectiveMma<MainloopMoE16Group<Stages, Schedule>, TileShape_,
         reinterpret_cast<ElementB const*>(mainloop_params.ptr_B) +
         real_group * N * K;
 
-    Tensor mA = make_tensor(make_gmem_ptr(ptr_A_curr_batch),
-                            make_shape(M, K, (int32_t)1),
-                            mainloop_params.dA[next_group]);
-    Tensor mB = make_tensor(make_gmem_ptr(ptr_B_curr_batch),
-                            make_shape(N, K, (int32_t)1),
-                            mainloop_params.dB[next_group]);
+    Tensor mA = make_tensor(
+        make_gmem_ptr(ptr_A_curr_batch),
+        make_shape(M, K, (int32_t)1),
+        mainloop_params.dA[next_group]);
+    Tensor mB = make_tensor(
+        make_gmem_ptr(ptr_B_curr_batch),
+        make_shape(N, K, (int32_t)1),
+        mainloop_params.dB[next_group]);
 
     return cute::make_tuple(mA, mB);
   }

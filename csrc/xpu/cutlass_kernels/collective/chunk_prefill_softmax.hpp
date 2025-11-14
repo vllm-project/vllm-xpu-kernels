@@ -50,16 +50,23 @@ namespace collective {
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <bool CausalMask_, bool LocalMask_, class DispatchPolicy,
-          class... Args>
+template <
+    bool CausalMask_,
+    bool LocalMask_,
+    class DispatchPolicy,
+    class... Args>
 class FlashChunkPrefillSoftmaxEpilogue {
-  static_assert(cutlass::detail::dependent_false<DispatchPolicy>,
-                "Could not find an epilogue specialization.");
+  static_assert(
+      cutlass::detail::dependent_false<DispatchPolicy>,
+      "Could not find an epilogue specialization.");
 };
 
 template <bool CausalMask_, bool LocalMask_, class Element_>
-class FlashChunkPrefillSoftmaxEpilogue<CausalMask_, LocalMask_,
-                                       epilogue::IntelXeXMX16, Element_> {
+class FlashChunkPrefillSoftmaxEpilogue<
+    CausalMask_,
+    LocalMask_,
+    epilogue::IntelXeXMX16,
+    Element_> {
  public:
   //
   // Type Aliases
@@ -108,10 +115,15 @@ class FlashChunkPrefillSoftmaxEpilogue<CausalMask_, LocalMask_,
   CUTLASS_HOST_DEVICE
   FlashChunkPrefillSoftmaxEpilogue(Params const& params_) : params(params_) {}
 
-  template <int Vec, int FragsM, int FragsN, class FragAcc, class FragMax,
-            class FragSum>
-  CUTLASS_DEVICE void scale_exp_log2(FragAcc& frag_s, FragMax const& max,
-                                     FragSum& sum) {
+  template <
+      int Vec,
+      int FragsM,
+      int FragsN,
+      class FragAcc,
+      class FragMax,
+      class FragSum>
+  CUTLASS_DEVICE void
+  scale_exp_log2(FragAcc& frag_s, FragMax const& max, FragSum& sum) {
     auto g = syclcompat::get_nd_item<1>().get_sub_group();
     const auto max_scale = max * params.scale;
     CUTLASS_PRAGMA_UNROLL
@@ -158,8 +170,12 @@ class FlashChunkPrefillSoftmaxEpilogue<CausalMask_, LocalMask_,
   }
 
   template <class FragAcc, class FragMax, class FragSum, class FragOut>
-  CUTLASS_DEVICE void operator()(bool is_first, FragAcc& frag_s, FragMax& max,
-                                 FragSum& sum, FragOut& out) {
+  CUTLASS_DEVICE void operator()(
+      bool is_first,
+      FragAcc& frag_s,
+      FragMax& max,
+      FragSum& sum,
+      FragOut& out) {
     auto max_prev = max;
     using FragAccLayout = typename FragAcc::layout_type;
     using FragOutLayout = typename FragOut::layout_type;
@@ -168,9 +184,10 @@ class FlashChunkPrefillSoftmaxEpilogue<CausalMask_, LocalMask_,
     constexpr int FragsNAcc = get<2>(FragAccLayout{}.shape());
     constexpr int FragsNOut = size(select<2, 3>(FragOutLayout{}.shape()));
     reduce_max<Vec, FragsM, FragsNAcc>(frag_s, max);
-    static_assert(Vec * FragsM % 8 == 0,
-                  " No. of attention rows per subgroup should be >= 1 MMA Atom "
-                  "worth of rows.");
+    static_assert(
+        Vec * FragsM % 8 == 0,
+        " No. of attention rows per subgroup should be >= 1 MMA Atom "
+        "worth of rows.");
     if (!is_first) {
       auto sg = syclcompat::get_nd_item<1>().get_sub_group();
       Element max_scale{max * params.scale};

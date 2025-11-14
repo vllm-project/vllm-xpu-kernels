@@ -25,21 +25,23 @@ struct alignas(8) vec4_t {
 
 template <typename dtype_t>
 struct alignas(4) dtypex4_t {
-  static_assert(std::is_same_v<dtype_t, float> ||
-                    std::is_same_v<dtype_t, at::Half> ||
-                    std::is_same_v<dtype_t, at::BFloat16> ||
-                    std::is_same_v<dtype_t, at::Float8_e4m3fn> ||
-                    std::is_same_v<dtype_t, at::Float8_e5m2>,
-                "Unsupported cache type for dtypex4_t");
+  static_assert(
+      std::is_same_v<dtype_t, float> || std::is_same_v<dtype_t, at::Half> ||
+          std::is_same_v<dtype_t, at::BFloat16> ||
+          std::is_same_v<dtype_t, at::Float8_e4m3fn> ||
+          std::is_same_v<dtype_t, at::Float8_e5m2>,
+      "Unsupported cache type for dtypex4_t");
   dtype_t x;
   dtype_t y;
   dtype_t z;
   dtype_t w;
 };
 
-template <typename T,
-          typename = std::enable_if_t<std::is_same_v<T, at::Float8_e5m2> ||
-                                      std::is_same_v<T, at::Float8_e4m3fn>>>
+template <
+    typename T,
+    typename = std::enable_if_t<
+        std::is_same_v<T, at::Float8_e5m2> ||
+        std::is_same_v<T, at::Float8_e4m3fn>>>
 struct quant_type_max {
   static constexpr T val() { return std::numeric_limits<T>::max(); }
 };
@@ -47,9 +49,11 @@ struct quant_type_max {
 template <typename T>
 static constexpr T quant_type_max_v = quant_type_max<T>::val();
 
-template <typename T,
-          typename = std::enable_if_t<std::is_same_v<T, at::Float8_e5m2> ||
-                                      std::is_same_v<T, at::Float8_e4m3fn>>>
+template <
+    typename T,
+    typename = std::enable_if_t<
+        std::is_same_v<T, at::Float8_e5m2> ||
+        std::is_same_v<T, at::Float8_e4m3fn>>>
 struct min_scaling_factor {
   static inline float val() { return 1.0f / (quant_type_max_v<T> * 512.0f); }
 };
@@ -89,8 +93,13 @@ struct ConvertWithScaleOp {
 // The vector width is fixed at 4 to avoid excessive branching in the kernel,
 // which could degrade performance.
 template <typename scalar_t, typename dtype_t, typename ScaOp>
-void scaled_convert_vec(const scalar_t* src, dtype_t* dst, int num_elems,
-                        int local_idx, int local_range, ScaOp&& scalar_op) {
+void scaled_convert_vec(
+    const scalar_t* src,
+    dtype_t* dst,
+    int num_elems,
+    int local_idx,
+    int local_range,
+    ScaOp&& scalar_op) {
   using srcx4_t = vec4_t<scalar_t>;
   using distx4_t = dtypex4_t<dtype_t>;
 
@@ -142,7 +151,8 @@ void scaled_convert_vec(const scalar_t* src, dtype_t* dst, int num_elems,
       } else if (SRC_DTYPE == at::ScalarType::Half) {                          \
         FN(at::Half, at::Float8_e4m3fn, vllm::Fp8KVCacheDataType::kFp8E4M3);   \
       } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                      \
-        FN(at::BFloat16, at::Float8_e4m3fn,                                    \
+        FN(at::BFloat16,                                                       \
+           at::Float8_e4m3fn,                                                  \
            vllm::Fp8KVCacheDataType::kFp8E4M3);                                \
       } else {                                                                 \
         TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE); \

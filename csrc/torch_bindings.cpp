@@ -79,8 +79,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
       "Tensor! scale, Tensor? scale_ub) -> "
       "()");
-  ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kXPU,
-           &dynamic_per_token_scaled_fp8_quant);
+  ops.impl(
+      "dynamic_per_token_scaled_fp8_quant",
+      torch::kXPU,
+      &dynamic_per_token_scaled_fp8_quant);
   // swigluoai_and_mul
   ops.def(
       "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
@@ -107,8 +109,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        Tensor slot_mapping,"
       "                        str kv_cache_dtype,"
       "                        Tensor k_scale, Tensor v_scale) -> ()");
-  cache_ops.impl("reshape_and_cache_flash", torch::kXPU,
-                 &reshape_and_cache_flash);
+  cache_ops.impl(
+      "reshape_and_cache_flash", torch::kXPU, &reshape_and_cache_flash);
 
   // Concat kv_c and k_pe and cache them.
   cache_ops.def(

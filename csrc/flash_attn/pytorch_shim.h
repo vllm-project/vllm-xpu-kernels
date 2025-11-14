@@ -57,8 +57,8 @@ struct pytorch_library_compatible_type<std::optional<T>&> {
 template <typename T>
 struct pytorch_library_compatible_type<std::optional<T>> {
   using type = std::optional<pytorch_library_compatible_type_t<T>>;
-  static std::optional<pytorch_library_compatible_type_t<T>> convert_from_type(
-      std::optional<T> arg) {
+  static std::optional<pytorch_library_compatible_type_t<T>>
+  convert_from_type(std::optional<T> arg) {
     return arg;
   }
 };
@@ -67,8 +67,8 @@ struct pytorch_library_compatible_type<std::optional<T>> {
 template <>
 struct pytorch_library_compatible_type<std::optional<const at::Tensor>&> {
   using type = const std::optional<at::Tensor>&;
-  static std::optional<const at::Tensor>& convert_from_type(
-      const std::optional<at::Tensor>& arg) {
+  static std::optional<const at::Tensor>&
+  convert_from_type(const std::optional<at::Tensor>& arg) {
     return const_cast<std::optional<const at::Tensor>&>(
         reinterpret_cast<const std::optional<const at::Tensor>&>(arg));
   }
@@ -79,10 +79,12 @@ template <>
 struct pytorch_library_compatible_type<int> {
   using type = int64_t;
   static int convert_from_type(int64_t arg) {
-    TORCH_CHECK(arg <= std::numeric_limits<int>::max(),
-                "int64_t value is too large to be converted to int");
-    TORCH_CHECK(arg >= std::numeric_limits<int>::min(),
-                "int64_t value is too small to be converted to int");
+    TORCH_CHECK(
+        arg <= std::numeric_limits<int>::max(),
+        "int64_t value is too large to be converted to int");
+    TORCH_CHECK(
+        arg >= std::numeric_limits<int>::min(),
+        "int64_t value is too small to be converted to int");
     return arg;
   }
 };
@@ -92,8 +94,9 @@ template <>
 struct pytorch_library_compatible_type<float> {
   using type = double;
   static float convert_from_type(double arg) {
-    TORCH_CHECK(std::abs(arg) <= std::numeric_limits<float>::max(),
-                "double value is too large to be converted to float");
+    TORCH_CHECK(
+        std::abs(arg) <= std::numeric_limits<float>::max(),
+        "double value is too large to be converted to float");
     return arg;
   }
 };

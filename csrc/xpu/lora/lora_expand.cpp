@@ -32,8 +32,12 @@ namespace vllm::lora {
  *     outputs[b] = inputs[b] @ weights[indices[b]]
  *                  + (add_inputs ? inputs[b] : 0)
  */
-template <typename output_t, typename input_t, uint32_t vec_size,
-          uint32_t subgroup_size, bool use_aligned_vector>
+template <
+    typename output_t,
+    typename input_t,
+    uint32_t vec_size,
+    uint32_t subgroup_size,
+    bool use_aligned_vector>
 class bgmv_expand_kernel {
   using accscalar_t = vllm::xpu::acc_type<output_t>;
   using input_vec_t = vllm::xpu::aligned_vec<input_t, vec_size>;
@@ -76,13 +80,21 @@ class bgmv_expand_kernel {
    * @param sg_per_wg Number of subgroups per workgroup
    */
   bgmv_expand_kernel(
-      output_t* __restrict__ outputs, const input_t* __restrict__ inputs,
-      const output_t* __restrict__ weights, const int64_t* __restrict__ indices,
-      const uint32_t batch_size, const uint32_t rank, const uint32_t hidden,
-      const uint32_t output_hidden, const uint32_t slice_offset,
-      const bool add_to_output, WorkgroupLocal<accscalar_t> slm,
-      const uint32_t workitem_per_hidden, const uint32_t hidden_per_subgroup,
-      const uint32_t subgroup_num, const uint32_t sg_per_wg)
+      output_t* __restrict__ outputs,
+      const input_t* __restrict__ inputs,
+      const output_t* __restrict__ weights,
+      const int64_t* __restrict__ indices,
+      const uint32_t batch_size,
+      const uint32_t rank,
+      const uint32_t hidden,
+      const uint32_t output_hidden,
+      const uint32_t slice_offset,
+      const bool add_to_output,
+      WorkgroupLocal<accscalar_t> slm,
+      const uint32_t workitem_per_hidden,
+      const uint32_t hidden_per_subgroup,
+      const uint32_t subgroup_num,
+      const uint32_t sg_per_wg)
       : outputs_(outputs),
         inputs_(inputs),
         weights_(weights),
@@ -199,10 +211,16 @@ class bgmv_expand_kernel {
  */
 template <typename output_t, typename input_t>
 void launch_bgmv_expand_with_slice(
-    output_t* outputs, const input_t* inputs, const output_t* weights,
-    const int64_t* indices, const uint32_t batch_size, const uint32_t rank,
-    const uint32_t hidden, const uint32_t output_hidden,
-    const uint32_t slice_offset, const bool add_to_output) {
+    output_t* outputs,
+    const input_t* inputs,
+    const output_t* weights,
+    const int64_t* indices,
+    const uint32_t batch_size,
+    const uint32_t rank,
+    const uint32_t hidden,
+    const uint32_t output_hidden,
+    const uint32_t slice_offset,
+    const bool add_to_output) {
   if (batch_size == 0 || rank == 0 || hidden == 0) return;
 
   constexpr uint32_t vec_size = 16 / sizeof(input_t);
@@ -236,90 +254,126 @@ void launch_bgmv_expand_with_slice(
     WorkgroupLocal<vllm::xpu::acc_type<output_t>> slm(
         sycl::range(workgroup_size), cgh);
     if (use_aligned_vector) {
-      vllm::lora::bgmv_expand_kernel<output_t, input_t, vec_size, subgroup_size,
-                                     true>
-          kfn(outputs, inputs, weights, indices, batch_size, rank, hidden,
-              output_hidden, slice_offset, add_to_output, slm,
-              workitem_per_hidden, hidden_per_subgroup, subgroup_num,
-              sg_per_wg);
+      vllm::lora::
+          bgmv_expand_kernel<output_t, input_t, vec_size, subgroup_size, true>
+              kfn(outputs,
+                  inputs,
+                  weights,
+                  indices,
+                  batch_size,
+                  rank,
+                  hidden,
+                  output_hidden,
+                  slice_offset,
+                  add_to_output,
+                  slm,
+                  workitem_per_hidden,
+                  hidden_per_subgroup,
+                  subgroup_num,
+                  sg_per_wg);
       cgh.parallel_for(sycl::nd_range<1>(global_range, local_range), kfn);
     } else {
-      vllm::lora::bgmv_expand_kernel<output_t, input_t, vec_size, subgroup_size,
-                                     false>
-          kfn(outputs, inputs, weights, indices, batch_size, rank, hidden,
-              output_hidden, slice_offset, add_to_output, slm,
-              workitem_per_hidden, hidden_per_subgroup, subgroup_num,
-              sg_per_wg);
+      vllm::lora::
+          bgmv_expand_kernel<output_t, input_t, vec_size, subgroup_size, false>
+              kfn(outputs,
+                  inputs,
+                  weights,
+                  indices,
+                  batch_size,
+                  rank,
+                  hidden,
+                  output_hidden,
+                  slice_offset,
+                  add_to_output,
+                  slm,
+                  workitem_per_hidden,
+                  hidden_per_subgroup,
+                  subgroup_num,
+                  sg_per_wg);
       cgh.parallel_for(sycl::nd_range<1>(global_range, local_range), kfn);
     }
   });
 }
 
-void validate_lora_b_tensors(const at::Tensor& inputs,
-                             const at::Tensor& lora_b_weights,
-                             const at::Tensor& output_tensor,
-                             const at::Tensor& lora_indices_tensor) {
+void validate_lora_b_tensors(
+    const at::Tensor& inputs,
+    const at::Tensor& lora_b_weights,
+    const at::Tensor& output_tensor,
+    const at::Tensor& lora_indices_tensor) {
   TORCH_CHECK(inputs.is_xpu(), "inputs must be on XPU");
   TORCH_CHECK(lora_b_weights.is_xpu(), "lora_b_weights must be on XPU");
   TORCH_CHECK(output_tensor.is_xpu(), "output_tensor must be on XPU");
-  TORCH_CHECK(lora_indices_tensor.is_xpu(),
-              "lora_indices_tensor must be on XPU");
+  TORCH_CHECK(
+      lora_indices_tensor.is_xpu(), "lora_indices_tensor must be on XPU");
 
   // Contiguous checks
   TORCH_CHECK(inputs.is_contiguous(), "inputs must be contiguous");
-  TORCH_CHECK(lora_b_weights.is_contiguous(),
-              "lora_b_weights must be contiguous");
-  TORCH_CHECK(output_tensor.is_contiguous(),
-              "output_tensor must be contiguous");
-  TORCH_CHECK(lora_indices_tensor.is_contiguous(),
-              "lora_indices_tensor must be contiguous");
+  TORCH_CHECK(
+      lora_b_weights.is_contiguous(), "lora_b_weights must be contiguous");
+  TORCH_CHECK(
+      output_tensor.is_contiguous(), "output_tensor must be contiguous");
+  TORCH_CHECK(
+      lora_indices_tensor.is_contiguous(),
+      "lora_indices_tensor must be contiguous");
 
   // Dtype checks
-  TORCH_CHECK(inputs.scalar_type() == at::kFloat ||
-                  inputs.scalar_type() == at::kBFloat16 ||
-                  inputs.scalar_type() == at::kHalf,
-              "inputs must be float16, bfloat16, or float32");
+  TORCH_CHECK(
+      inputs.scalar_type() == at::kFloat ||
+          inputs.scalar_type() == at::kBFloat16 ||
+          inputs.scalar_type() == at::kHalf,
+      "inputs must be float16, bfloat16, or float32");
 
-  TORCH_CHECK(lora_b_weights.scalar_type() == at::kBFloat16 ||
-                  lora_b_weights.scalar_type() == at::kHalf,
-              "lora_b_weights must be float16 or bfloat16");
+  TORCH_CHECK(
+      lora_b_weights.scalar_type() == at::kBFloat16 ||
+          lora_b_weights.scalar_type() == at::kHalf,
+      "lora_b_weights must be float16 or bfloat16");
 
-  TORCH_CHECK(output_tensor.scalar_type() == lora_b_weights.scalar_type(),
-              "output_tensor dtype must match lora_b_weights dtype");
+  TORCH_CHECK(
+      output_tensor.scalar_type() == lora_b_weights.scalar_type(),
+      "output_tensor dtype must match lora_b_weights dtype");
 
-  TORCH_CHECK(lora_indices_tensor.scalar_type() == at::kLong,
-              "lora_indices_tensor must be int64");
+  TORCH_CHECK(
+      lora_indices_tensor.scalar_type() == at::kLong,
+      "lora_indices_tensor must be int64");
 
   // Dimension checks
   TORCH_CHECK(inputs.dim() == 2, "inputs must be 2D [batch_size, hidden_size]");
-  TORCH_CHECK(output_tensor.dim() == 2,
-              "output_tensor must be 2D [batch_size, rank]");
-  TORCH_CHECK(lora_indices_tensor.dim() == 1,
-              "lora_indices_tensor must be 1D [batch_size]");
+  TORCH_CHECK(
+      output_tensor.dim() == 2, "output_tensor must be 2D [batch_size, rank]");
+  TORCH_CHECK(
+      lora_indices_tensor.dim() == 1,
+      "lora_indices_tensor must be 1D [batch_size]");
 
   at::Tensor lora_weights = lora_b_weights;
   if (lora_b_weights.dim() == 4) {  // shape: (lora_num,1,hidden_size,rank)
-    TORCH_CHECK(lora_b_weights.size(1) == 1,
-                "lora_b_weights.size(1) must be 1");
+    TORCH_CHECK(
+        lora_b_weights.size(1) == 1, "lora_b_weights.size(1) must be 1");
     lora_weights = lora_b_weights.squeeze(1);  // squeeze dim 1
   } else {
-    TORCH_CHECK(lora_b_weights.dim() == 3,
-                "lora_b_weights must be 3D [lora_num, hidden_size, rank]");
+    TORCH_CHECK(
+        lora_b_weights.dim() == 3,
+        "lora_b_weights must be 3D [lora_num, hidden_size, rank]");
   }
 
   // Shape consistency checks
-  TORCH_CHECK(inputs.size(1) == lora_weights.size(-1),
-              "inputs.size(1) must match lora_b_weights.size(-1)");
-  TORCH_CHECK(inputs.size(0) == output_tensor.size(0),
-              "inputs.size(0) must match output_tensor.size(0)");
-  TORCH_CHECK(inputs.size(0) == lora_indices_tensor.size(0),
-              "inputs.size(0) must match lora_indices_tensor.size(0)");
+  TORCH_CHECK(
+      inputs.size(1) == lora_weights.size(-1),
+      "inputs.size(1) must match lora_b_weights.size(-1)");
+  TORCH_CHECK(
+      inputs.size(0) == output_tensor.size(0),
+      "inputs.size(0) must match output_tensor.size(0)");
+  TORCH_CHECK(
+      inputs.size(0) == lora_indices_tensor.size(0),
+      "inputs.size(0) must match lora_indices_tensor.size(0)");
 }
 
-void bgmv_expand_slice(torch::Tensor& outputs, const torch::Tensor& inputs,
-                       const torch::Tensor& weights,
-                       const torch::Tensor& indices, const int64_t slice_offset,
-                       const bool add_to_output) {
+void bgmv_expand_slice(
+    torch::Tensor& outputs,
+    const torch::Tensor& inputs,
+    const torch::Tensor& weights,
+    const torch::Tensor& indices,
+    const int64_t slice_offset,
+    const bool add_to_output) {
   validate_lora_b_tensors(inputs, weights, outputs, indices);
   TORCH_CHECK(slice_offset >= 0, "slice_offset must be non-negative");
 
@@ -332,16 +386,28 @@ void bgmv_expand_slice(torch::Tensor& outputs, const torch::Tensor& inputs,
     switch (outputs.scalar_type()) {
       case at::ScalarType::Half:
         launch_bgmv_expand_with_slice<at::Half, input_t>(
-            outputs.data_ptr<at::Half>(), inputs.data_ptr<input_t>(),
-            weights.data_ptr<at::Half>(), indices.data_ptr<int64_t>(),
-            batch_size, rank, hidden, output_hidden, slice_offset,
+            outputs.data_ptr<at::Half>(),
+            inputs.data_ptr<input_t>(),
+            weights.data_ptr<at::Half>(),
+            indices.data_ptr<int64_t>(),
+            batch_size,
+            rank,
+            hidden,
+            output_hidden,
+            slice_offset,
             add_to_output);
         break;
       case at::ScalarType::BFloat16:
         launch_bgmv_expand_with_slice<at::BFloat16, input_t>(
-            outputs.data_ptr<at::BFloat16>(), inputs.data_ptr<input_t>(),
-            weights.data_ptr<at::BFloat16>(), indices.data_ptr<int64_t>(),
-            batch_size, rank, hidden, output_hidden, slice_offset,
+            outputs.data_ptr<at::BFloat16>(),
+            inputs.data_ptr<input_t>(),
+            weights.data_ptr<at::BFloat16>(),
+            indices.data_ptr<int64_t>(),
+            batch_size,
+            rank,
+            hidden,
+            output_hidden,
+            slice_offset,
             add_to_output);
         break;
       default:
@@ -350,10 +416,13 @@ void bgmv_expand_slice(torch::Tensor& outputs, const torch::Tensor& inputs,
   });
 };
 
-void bgmv_expand(torch::Tensor& outputs, const torch::Tensor& inputs,
-                 const torch::Tensor& weights, const torch::Tensor& indices,
-                 bool add_to_output) {
+void bgmv_expand(
+    torch::Tensor& outputs,
+    const torch::Tensor& inputs,
+    const torch::Tensor& weights,
+    const torch::Tensor& indices,
+    bool add_to_output) {
   validate_lora_b_tensors(inputs, weights, outputs, indices);
-  bgmv_expand_slice(outputs, inputs, weights, indices, /*slice_offset=*/0,
-                    add_to_output);
+  bgmv_expand_slice(
+      outputs, inputs, weights, indices, /*slice_offset=*/0, add_to_output);
 };

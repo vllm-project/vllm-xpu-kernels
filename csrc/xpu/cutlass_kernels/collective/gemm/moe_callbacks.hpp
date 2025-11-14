@@ -57,28 +57,47 @@ namespace cutlass::epilogue::fusion {
 /////////////////////////////////////////////////////////////////////////////////////////////
 // D = alpha * acc + beta * C, where beta and alpha can be vectors for each
 // batch
-template <class ElementOutput_, class ElementCompute_, class ElementSource_,
-          class ElementScalar_, FloatRoundStyle RoundStyle_,
-          class CtaTileShapeMNK_, class EpilogueTile_>
+template <
+    class ElementOutput_,
+    class ElementCompute_,
+    class ElementSource_,
+    class ElementScalar_,
+    FloatRoundStyle RoundStyle_,
+    class CtaTileShapeMNK_,
+    class EpilogueTile_>
 struct FusionCallbacks<
     epilogue::MoE16Group,
-    fusion::LinearCombination<ElementOutput_, ElementCompute_, ElementSource_,
-                              ElementScalar_, RoundStyle_>,
-    CtaTileShapeMNK_, EpilogueTile_>
+    fusion::LinearCombination<
+        ElementOutput_,
+        ElementCompute_,
+        ElementSource_,
+        ElementScalar_,
+        RoundStyle_>,
+    CtaTileShapeMNK_,
+    EpilogueTile_>
     : Sm90LinearCombinationPtrArray<
           typename cutlass::detail::get_unpacked_element_type<
               ElementOutput_>::type,
-          ElementCompute_, ElementSource_, ElementScalar_, RoundStyle_> {
+          ElementCompute_,
+          ElementSource_,
+          ElementScalar_,
+          RoundStyle_> {
   using Impl = Sm90LinearCombinationPtrArray<
       typename cutlass::detail::get_unpacked_element_type<ElementOutput_>::type,
-      ElementCompute_, ElementSource_, ElementScalar_, RoundStyle_>;
+      ElementCompute_,
+      ElementSource_,
+      ElementScalar_,
+      RoundStyle_>;
   using ElementOutput = ElementOutput_;
   using ElementCompute = ElementCompute_;
   using ElementSource = ElementSource_;
   using ElementScalar = ElementScalar_;
-  using Operation =
-      fusion::LinearCombination<ElementOutput, ElementCompute, ElementSource,
-                                ElementScalar, RoundStyle_>;
+  using Operation = fusion::LinearCombination<
+      ElementOutput,
+      ElementCompute,
+      ElementSource,
+      ElementScalar,
+      RoundStyle_>;
 
   struct Arguments {
     ElementScalar alpha = ElementScalar(1);

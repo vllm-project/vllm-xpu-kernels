@@ -5,11 +5,14 @@
 
 typedef at::BFloat16 bfloat16;
 
-void fused_moe(torch::Tensor output, torch::Tensor input,
-               torch::Tensor token_selected_experts,
-               torch::Tensor token_final_scales,
-               torch::Tensor fc1_expert_weights,
-               torch::Tensor fc2_expert_weights, torch::Tensor workspace) {
+void fused_moe(
+    torch::Tensor output,
+    torch::Tensor input,
+    torch::Tensor token_selected_experts,
+    torch::Tensor token_final_scales,
+    torch::Tensor fc1_expert_weights,
+    torch::Tensor fc2_expert_weights,
+    torch::Tensor workspace) {
   int experts_per_token = token_selected_experts.size(1);
   int64_t num_rows = input.size(0);
   int64_t hidden_size = fc2_expert_weights.size(1);
@@ -112,17 +115,34 @@ void fused_moe(torch::Tensor output, torch::Tensor input,
   at::DeviceGuard device_guard(input.device());
   // TODO: fused prologe
   threeStepBuildExpertMapsSortFirstToken(
-      token_selected_experts_, permuted_token_selected_experts_,
-      permuted_row_to_unpermuted_row_, unpermuted_row_to_permuted_row,
-      expert_first_token_offset_, blocked_expert_counts_,
-      blocked_expert_counts_cumsum_, blocked_row_to_unpermuted_row_, num_rows,
-      num_experts_per_node, experts_per_token, start_expert, stream);
+      token_selected_experts_,
+      permuted_token_selected_experts_,
+      permuted_row_to_unpermuted_row_,
+      unpermuted_row_to_permuted_row,
+      expert_first_token_offset_,
+      blocked_expert_counts_,
+      blocked_expert_counts_cumsum_,
+      blocked_row_to_unpermuted_row_,
+      num_rows,
+      num_experts_per_node,
+      experts_per_token,
+      start_expert,
+      stream);
 
   bfloat16* gemm1_input_expand = reinterpret_cast<bfloat16*>(permuted_data_);
   expandInputRowsKernelLauncher(
-      input_activations, gemm1_input_expand, token_topk_unpermuted_scales,
-      permuted_token_final_scales_, permuted_row_to_unpermuted_row_, num_rows,
-      hidden_size, experts_per_token, num_experts_per_node,
-      use_per_expert_act_scale, expert_first_token_offset_, nullptr, stream);
+      input_activations,
+      gemm1_input_expand,
+      token_topk_unpermuted_scales,
+      permuted_token_final_scales_,
+      permuted_row_to_unpermuted_row_,
+      num_rows,
+      hidden_size,
+      experts_per_token,
+      num_experts_per_node,
+      use_per_expert_act_scale,
+      expert_first_token_offset_,
+      nullptr,
+      stream);
   auto const* gemm1_input = gemm1_input_expand;
 }

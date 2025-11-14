@@ -19,12 +19,19 @@ struct Fused_Grouped_Topk {
   static constexpr int malloc_per_item = MAX_EXPERT_GROUPS;
   static constexpr float kNegInfinity = INFINITY * -1;
 
-  Fused_Grouped_Topk(float* topk_weights, int* topk_ids, const T* gating_output,
-                     const T* e_score_correction_bias,
-                     const double routed_scaling_factor,
-                     const ScoringFunc scoring_mode, const bool renormalize,
-                     const int tokens, const int experts, const int top_k,
-                     const int num_expert_group, const int topk_group)
+  Fused_Grouped_Topk(
+      float* topk_weights,
+      int* topk_ids,
+      const T* gating_output,
+      const T* e_score_correction_bias,
+      const double routed_scaling_factor,
+      const ScoringFunc scoring_mode,
+      const bool renormalize,
+      const int tokens,
+      const int experts,
+      const int top_k,
+      const int num_expert_group,
+      const int topk_group)
       : topk_weights(topk_weights),
         topk_ids(topk_ids),
         gating_output(gating_output),
@@ -38,8 +45,8 @@ struct Fused_Grouped_Topk {
         num_expert_group(num_expert_group),
         topk_group(topk_group) {}
 
-  static inline sycl::nd_range<3> get_nd_range(const int tokens,
-                                               const int experts) {
+  static inline sycl::nd_range<3>
+  get_nd_range(const int tokens, const int experts) {
     int calc_per_item = (experts + sub_group_size - 1) / sub_group_size;
     int group_size = (experts + calc_per_item - 1) / calc_per_item;
     group_size = group_size < sub_group_size ? sub_group_size : group_size;
@@ -59,8 +66,8 @@ struct Fused_Grouped_Topk {
     return 1.0f / (1.0f + sycl::native::exp(-x));
   }
 
-  [[sycl::reqd_sub_group_size(sub_group_size)]] void operator()(
-      sycl::nd_item<3> item) const {
+  [[sycl::reqd_sub_group_size(sub_group_size)]] void
+  operator()(sycl::nd_item<3> item) const {
     int group_id = item.get_group_linear_id();
     int local_range = item.get_local_range(2);
     int sub_groups_per_group = local_range / sub_group_size;
@@ -307,53 +314,91 @@ struct Fused_Grouped_Topk {
 
 template <typename T, int MAX_EXPERT_GROUPS>
 void launch_fused_grouped_topk(
-    sycl::queue& queue, float* topk_weights, int* topk_ids,
-    const T* gating_output, const T* e_score_correction_bias,
-    const double routed_scaling_factor, const ScoringFunc scoring_mode,
-    const bool renormalize, const int tokens, const int experts,
-    const int top_k, const int num_expert_group, const int topk_group) {
+    sycl::queue& queue,
+    float* topk_weights,
+    int* topk_ids,
+    const T* gating_output,
+    const T* e_score_correction_bias,
+    const double routed_scaling_factor,
+    const ScoringFunc scoring_mode,
+    const bool renormalize,
+    const int tokens,
+    const int experts,
+    const int top_k,
+    const int num_expert_group,
+    const int topk_group) {
   using Kernel = Fused_Grouped_Topk<T, MAX_EXPERT_GROUPS>;
   auto range = Kernel::get_nd_range(tokens, experts);
 
   queue.submit([&](sycl::handler& cgh) {
-    Kernel task(topk_weights, topk_ids, gating_output, e_score_correction_bias,
-                routed_scaling_factor, scoring_mode, renormalize, tokens,
-                experts, top_k, num_expert_group, topk_group);
+    Kernel task(
+        topk_weights,
+        topk_ids,
+        gating_output,
+        e_score_correction_bias,
+        routed_scaling_factor,
+        scoring_mode,
+        renormalize,
+        tokens,
+        experts,
+        top_k,
+        num_expert_group,
+        topk_group);
     cgh.parallel_for(range, task);
   });
 }
 
 template <typename T>
-void fused_grouped_topk(float* topk_weights, int* topk_ids,
-                        const T* gating_output,
-                        const T* e_score_correction_bias,
-                        const double routed_scaling_factor,
-                        const ScoringFunc scoring_mode, const bool renormalize,
-                        const int tokens, const int experts, const int top_k,
-                        const int num_expert_group, const int topk_group) {
+void fused_grouped_topk(
+    float* topk_weights,
+    int* topk_ids,
+    const T* gating_output,
+    const T* e_score_correction_bias,
+    const double routed_scaling_factor,
+    const ScoringFunc scoring_mode,
+    const bool renormalize,
+    const int tokens,
+    const int experts,
+    const int top_k,
+    const int num_expert_group,
+    const int topk_group) {
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  TORCH_CHECK(topk_group <= num_expert_group,
-              "topk_group must be less than or equal to num_expert_group");
-  TORCH_CHECK(experts % num_expert_group == 0,
-              "The number of experts (experts=", experts,
-              ") must be divisible by num_expert_group (", num_expert_group,
-              ").");
+  TORCH_CHECK(
+      topk_group <= num_expert_group,
+      "topk_group must be less than or equal to num_expert_group");
+  TORCH_CHECK(
+      experts % num_expert_group == 0,
+      "The number of experts (experts=",
+      experts,
+      ") must be divisible by num_expert_group (",
+      num_expert_group,
+      ").");
 
   int max_expert_group = ((num_expert_group + 7) / 8) * 8;
-#define CASE_TOPK(K)                                                           \
-  case K:                                                                      \
-    launch_fused_grouped_topk<T, K>(                                           \
-        queue, topk_weights, topk_ids, gating_output, e_score_correction_bias, \
-        routed_scaling_factor, scoring_mode, renormalize, tokens, experts,     \
-        top_k, num_expert_group, topk_group);                                  \
+#define CASE_TOPK(K)                 \
+  case K:                            \
+    launch_fused_grouped_topk<T, K>( \
+        queue,                       \
+        topk_weights,                \
+        topk_ids,                    \
+        gating_output,               \
+        e_score_correction_bias,     \
+        routed_scaling_factor,       \
+        scoring_mode,                \
+        renormalize,                 \
+        tokens,                      \
+        experts,                     \
+        top_k,                       \
+        num_expert_group,            \
+        topk_group);                 \
     break;
   switch (max_expert_group) {
     CASE_TOPK(8)
     CASE_TOPK(16)
     default:
-      TORCH_CHECK(false, "error: not support num_expert_group=%d,\n",
-                  num_expert_group);
+      TORCH_CHECK(
+          false, "error: not support num_expert_group=%d,\n", num_expert_group);
   }
 #undef CASE_TOPK
 }
@@ -369,22 +414,32 @@ void fused_grouped_topk(float* topk_weights, int* topk_ids,
  * @return A tuple of tensors (topk_weights, topk_indices).
  */
 std::tuple<torch::Tensor, torch::Tensor> fused_grouped_topk(
-    const torch::Tensor& hidden_states, const torch::Tensor& gating_output,
-    const int64_t n_topk, const bool renormalize, const int64_t n_expert_group,
-    const int64_t n_topk_group, const c10::string_view scoring_func,
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& gating_output,
+    const int64_t n_topk,
+    const bool renormalize,
+    const int64_t n_expert_group,
+    const int64_t n_topk_group,
+    const c10::string_view scoring_func,
     const double routed_scaling_factor,
     const c10::optional<torch::Tensor>& bias) {
   auto shape = gating_output.sizes().vec();
-  TORCH_CHECK(hidden_states.sizes()[0] == gating_output.sizes()[0],
-              "Number of tokens mismatch")
-  TORCH_CHECK(shape.size() == 2, "gating_output must be 2D tensor, but got ",
-              shape.size(), "D");
+  TORCH_CHECK(
+      hidden_states.sizes()[0] == gating_output.sizes()[0],
+      "Number of tokens mismatch")
+  TORCH_CHECK(
+      shape.size() == 2,
+      "gating_output must be 2D tensor, but got ",
+      shape.size(),
+      "D");
   if (bias.has_value()) {
     auto shape_bias = bias->sizes().vec();
     TORCH_CHECK(
         shape_bias[0] == shape[1],
         "gating_output and bias must has same innermost dimension, but got ",
-        shape, " and ", shape_bias);
+        shape,
+        " and ",
+        shape_bias);
   }
   int n_tokens = shape[0];
   int n_experts = shape[1];
@@ -411,8 +466,14 @@ std::tuple<torch::Tensor, torch::Tensor> fused_grouped_topk(
         reinterpret_cast<scalar_t*>(gating_output.data_ptr()),
         bias.has_value() ? reinterpret_cast<scalar_t*>(bias->data_ptr())
                          : nullptr,
-        routed_scaling_factor, scoring_mode, renormalize, n_tokens, n_experts,
-        n_topk, n_expert_group, n_topk_group);
+        routed_scaling_factor,
+        scoring_mode,
+        renormalize,
+        n_tokens,
+        n_experts,
+        n_topk,
+        n_expert_group,
+        n_topk_group);
   } else if (gating_output.scalar_type() == at::kHalf) {
     using scalar_t = sycl::half;
     vllm::GroupedTopKImpl::fused_grouped_topk<scalar_t>(
@@ -421,8 +482,14 @@ std::tuple<torch::Tensor, torch::Tensor> fused_grouped_topk(
         reinterpret_cast<scalar_t*>(gating_output.data_ptr()),
         bias.has_value() ? reinterpret_cast<scalar_t*>(bias->data_ptr())
                          : nullptr,
-        routed_scaling_factor, scoring_mode, renormalize, n_tokens, n_experts,
-        n_topk, n_expert_group, n_topk_group);
+        routed_scaling_factor,
+        scoring_mode,
+        renormalize,
+        n_tokens,
+        n_experts,
+        n_topk,
+        n_expert_group,
+        n_topk_group);
   } else {
     using scalar_t = float;
     vllm::GroupedTopKImpl::fused_grouped_topk<scalar_t>(
@@ -431,8 +498,14 @@ std::tuple<torch::Tensor, torch::Tensor> fused_grouped_topk(
         reinterpret_cast<scalar_t*>(gating_output.data_ptr()),
         bias.has_value() ? reinterpret_cast<scalar_t*>(bias->data_ptr())
                          : nullptr,
-        routed_scaling_factor, scoring_mode, renormalize, n_tokens, n_experts,
-        n_topk, n_expert_group, n_topk_group);
+        routed_scaling_factor,
+        scoring_mode,
+        renormalize,
+        n_tokens,
+        n_experts,
+        n_topk,
+        n_expert_group,
+        n_topk_group);
   }
   return std::make_tuple(topk_weights, topk_indices);
 }

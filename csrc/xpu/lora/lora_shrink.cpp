@@ -54,10 +54,14 @@ class bgmv_shrink_kernel {
    * @param rank LoRA rank
    * @param scale Scaling factor
    */
-  bgmv_shrink_kernel(output_t* outputs, const input_t* inputs,
-                     const input_t* weights, const int64_t* indices,
-                     const uint32_t hidden, const uint32_t rank,
-                     const float scale)
+  bgmv_shrink_kernel(
+      output_t* outputs,
+      const input_t* inputs,
+      const input_t* weights,
+      const int64_t* indices,
+      const uint32_t hidden,
+      const uint32_t rank,
+      const float scale)
       : outputs_(outputs),
         inputs_(inputs),
         weights_(weights),
@@ -135,8 +139,8 @@ class bgmv_shrink_kernel {
     // Workgroup reduction: sum all local_sum values within workgroup
     // Result: complete dot product sum_h(inputs[batch_id, h] *
     // weights[lora_idx, rank_id, h])
-    const acc_t group_sum = sycl::reduce_over_group(item.get_group(), local_sum,
-                                                    sycl::plus<acc_t>());
+    const acc_t group_sum = sycl::reduce_over_group(
+        item.get_group(), local_sum, sycl::plus<acc_t>());
 
     // Only first thread in workgroup writes the result
     if (local_id == 0) {
@@ -183,10 +187,15 @@ void dispatch_vec_size(int vec_size, Fn&& fn) {
  * @param scale      - Scaling factor
  */
 template <typename output_t, typename input_t>
-void launch_bgmv_shrink(output_t* outputs, input_t* inputs, input_t* weights,
-                        int64_t* indices, const uint32_t batch_size,
-                        const uint32_t hidden, const uint32_t rank,
-                        const float scale) {
+void launch_bgmv_shrink(
+    output_t* outputs,
+    input_t* inputs,
+    input_t* weights,
+    int64_t* indices,
+    const uint32_t batch_size,
+    const uint32_t hidden,
+    const uint32_t rank,
+    const float scale) {
   // 1. Calculate optimal vector size
   uint32_t vec_bytes = 16;  // Start with 16 bytes
   const auto input_align = reinterpret_cast<uintptr_t>(inputs);
@@ -239,68 +248,80 @@ void launch_bgmv_shrink(output_t* outputs, input_t* inputs, input_t* weights,
   });
 }
 
-void validate_lora_a_tensors(const at::Tensor& inputs,
-                             const at::Tensor& lora_a_weights,
-                             const at::Tensor& output_tensor,
-                             const at::Tensor& lora_indices_tensor) {
+void validate_lora_a_tensors(
+    const at::Tensor& inputs,
+    const at::Tensor& lora_a_weights,
+    const at::Tensor& output_tensor,
+    const at::Tensor& lora_indices_tensor) {
   // Device checks
   TORCH_CHECK(inputs.is_xpu(), "inputs must be on XPU");
   TORCH_CHECK(lora_a_weights.is_xpu(), "lora_a_weights must be on XPU");
   TORCH_CHECK(output_tensor.is_xpu(), "output_tensor must be on XPU");
-  TORCH_CHECK(lora_indices_tensor.is_xpu(),
-              "lora_indices_tensor must be on XPU");
+  TORCH_CHECK(
+      lora_indices_tensor.is_xpu(), "lora_indices_tensor must be on XPU");
 
   // Contiguous checks
   TORCH_CHECK(inputs.is_contiguous(), "inputs must be contiguous");
-  TORCH_CHECK(lora_a_weights.is_contiguous(),
-              "lora_a_weights must be contiguous");
-  TORCH_CHECK(output_tensor.is_contiguous(),
-              "output_tensor must be contiguous");
-  TORCH_CHECK(lora_indices_tensor.is_contiguous(),
-              "lora_indices_tensor must be contiguous");
+  TORCH_CHECK(
+      lora_a_weights.is_contiguous(), "lora_a_weights must be contiguous");
+  TORCH_CHECK(
+      output_tensor.is_contiguous(), "output_tensor must be contiguous");
+  TORCH_CHECK(
+      lora_indices_tensor.is_contiguous(),
+      "lora_indices_tensor must be contiguous");
 
   // Dtype checks
-  TORCH_CHECK(inputs.scalar_type() == lora_a_weights.scalar_type(),
-              "inputs dtype must match lora_a_weights dtype");
+  TORCH_CHECK(
+      inputs.scalar_type() == lora_a_weights.scalar_type(),
+      "inputs dtype must match lora_a_weights dtype");
 
-  TORCH_CHECK(inputs.scalar_type() == at::kHalf ||
-                  inputs.scalar_type() == at::kBFloat16,
-              "inputs must be float16 or bfloat16");
+  TORCH_CHECK(
+      inputs.scalar_type() == at::kHalf ||
+          inputs.scalar_type() == at::kBFloat16,
+      "inputs must be float16 or bfloat16");
 
-  TORCH_CHECK(output_tensor.scalar_type() == at::kHalf ||
-                  output_tensor.scalar_type() == at::kBFloat16 ||
-                  output_tensor.scalar_type() == at::kFloat,
-              "output_tensor must be float16, bfloat16, or float32");
+  TORCH_CHECK(
+      output_tensor.scalar_type() == at::kHalf ||
+          output_tensor.scalar_type() == at::kBFloat16 ||
+          output_tensor.scalar_type() == at::kFloat,
+      "output_tensor must be float16, bfloat16, or float32");
 
-  TORCH_CHECK(lora_indices_tensor.scalar_type() == at::kLong,
-              "lora_indices_tensor must be int64");
+  TORCH_CHECK(
+      lora_indices_tensor.scalar_type() == at::kLong,
+      "lora_indices_tensor must be int64");
 
   // Dimension checks
   TORCH_CHECK(inputs.dim() == 2, "inputs must be 2D [batch_size, hidden_size]");
-  TORCH_CHECK(output_tensor.dim() == 2,
-              "output_tensor must be 2D [batch_size, rank]");
-  TORCH_CHECK(lora_indices_tensor.dim() == 1,
-              "lora_indices_tensor must be 1D [batch_size]");
+  TORCH_CHECK(
+      output_tensor.dim() == 2, "output_tensor must be 2D [batch_size, rank]");
+  TORCH_CHECK(
+      lora_indices_tensor.dim() == 1,
+      "lora_indices_tensor must be 1D [batch_size]");
 
   at::Tensor lora_weights = lora_a_weights;
   if (lora_a_weights.dim() == 4) {  // shape: (lora_num,1,rank,hidden_size)
-    TORCH_CHECK(lora_a_weights.size(1) == 1,
-                "lora_a_weights.size(1) must be 1");
+    TORCH_CHECK(
+        lora_a_weights.size(1) == 1, "lora_a_weights.size(1) must be 1");
     lora_weights = lora_a_weights.squeeze(1);  // squeeze dim 1
   } else {
-    TORCH_CHECK(lora_a_weights.dim() == 3,
-                "lora_a_weights must be 3D [lora_num, rank, hidden_size]");
+    TORCH_CHECK(
+        lora_a_weights.dim() == 3,
+        "lora_a_weights must be 3D [lora_num, rank, hidden_size]");
   }
 
   // Shape consistency checks
-  TORCH_CHECK(inputs.size(1) == lora_weights.size(-1),
-              "inputs.size(1) must match lora_a_weights.size(-1)");
-  TORCH_CHECK(output_tensor.size(1) == lora_weights.size(-2),
-              "output_tensor.size(1) must match lora_a_weights.size(-2)");
-  TORCH_CHECK(inputs.size(0) == output_tensor.size(0),
-              "inputs.size(0) must match output_tensor.size(0)");
-  TORCH_CHECK(inputs.size(0) == lora_indices_tensor.size(0),
-              "inputs.size(0) must match lora_indices_tensor.size(0)");
+  TORCH_CHECK(
+      inputs.size(1) == lora_weights.size(-1),
+      "inputs.size(1) must match lora_a_weights.size(-1)");
+  TORCH_CHECK(
+      output_tensor.size(1) == lora_weights.size(-2),
+      "output_tensor.size(1) must match lora_a_weights.size(-2)");
+  TORCH_CHECK(
+      inputs.size(0) == output_tensor.size(0),
+      "inputs.size(0) must match output_tensor.size(0)");
+  TORCH_CHECK(
+      inputs.size(0) == lora_indices_tensor.size(0),
+      "inputs.size(0) must match lora_indices_tensor.size(0)");
 }
 
 /**
@@ -312,9 +333,12 @@ void validate_lora_a_tensors(const at::Tensor& inputs,
  * @param indices [batch_size] - LoRA index for each sample
  * @param scale - Scaling factor
  */
-void bgmv_shrink(torch::Tensor& outputs, const torch::Tensor& inputs,
-                 const torch::Tensor& weights, const torch::Tensor& indices,
-                 double scale) {
+void bgmv_shrink(
+    torch::Tensor& outputs,
+    const torch::Tensor& inputs,
+    const torch::Tensor& weights,
+    const torch::Tensor& indices,
+    double scale) {
   // 1. Input validation
   validate_lora_a_tensors(inputs, weights, outputs, indices);
 
@@ -330,15 +354,25 @@ void bgmv_shrink(torch::Tensor& outputs, const torch::Tensor& inputs,
     switch (inputs.scalar_type()) {
       case at::ScalarType::Half:
         launch_bgmv_shrink<output_t, at::Half>(
-            outputs.data_ptr<output_t>(), inputs.data_ptr<at::Half>(),
-            weights.data_ptr<at::Half>(), indices.data_ptr<int64_t>(),
-            batch_size, hidden, rank, scale_f);
+            outputs.data_ptr<output_t>(),
+            inputs.data_ptr<at::Half>(),
+            weights.data_ptr<at::Half>(),
+            indices.data_ptr<int64_t>(),
+            batch_size,
+            hidden,
+            rank,
+            scale_f);
         break;
       case at::ScalarType::BFloat16:
         launch_bgmv_shrink<output_t, at::BFloat16>(
-            outputs.data_ptr<output_t>(), inputs.data_ptr<at::BFloat16>(),
-            weights.data_ptr<at::BFloat16>(), indices.data_ptr<int64_t>(),
-            batch_size, hidden, rank, scale_f);
+            outputs.data_ptr<output_t>(),
+            inputs.data_ptr<at::BFloat16>(),
+            weights.data_ptr<at::BFloat16>(),
+            indices.data_ptr<int64_t>(),
+            batch_size,
+            hidden,
+            rank,
+            scale_f);
         break;
       default:
         TORCH_CHECK(false, "Unsupported input type: ", inputs.scalar_type());

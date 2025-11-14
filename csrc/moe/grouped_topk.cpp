@@ -48,17 +48,25 @@ template <typename T, typename idxT>
 int calc_smem_size_for_block_wide(int num_of_warp, int64_t k) {
   uint64_t cache_topk = (sizeof(T) + sizeof(idxT)) * num_of_warp * k;
   uint64_t n = std::max<int>(num_of_warp / 2 * k, num_of_warp * WARP_SIZE);
-  return std::max(cache_topk, round_up_to_multiple_of<256>(n * sizeof(T)) +
-                                  n * sizeof(idxT));
+  return std::max(
+      cache_topk,
+      round_up_to_multiple_of<256>(n * sizeof(T)) + n * sizeof(idxT));
 }
 
-template <int size, bool ascending, bool reverse, typename T, typename idxT,
-          bool is_stable>
+template <
+    int size,
+    bool ascending,
+    bool reverse,
+    typename T,
+    typename idxT,
+    bool is_stable>
 struct BitonicMerge {
   // input should be a bitonic sequence, and sort it to be a monotonic sequence
   [[intel::device_indirectly_callable]] static void merge(
-      T* __restrict__ val_arr, idxT* __restrict__ idx_arr,
-      sycl::sub_group const& sg, const int local_id) {
+      T* __restrict__ val_arr,
+      idxT* __restrict__ idx_arr,
+      sycl::sub_group const& sg,
+      const int local_id) {
     static_assert(isPowerOf2(size));
     static_assert(size >= 2 * WARP_SIZE);
     constexpr int arr_len = size / WARP_SIZE;
@@ -70,8 +78,8 @@ struct BitonicMerge {
       T& other_val = val_arr[other_i];
       bool is_better;
       if constexpr (is_stable) {
-        is_better = is_better_than<ascending>(val, other_val, idx_arr[i],
-                                              idx_arr[other_i]);
+        is_better = is_better_than<ascending>(
+            val, other_val, idx_arr[i], idx_arr[other_i]);
       } else {
         is_better = is_better_than<ascending>(val, other_val);
       }
@@ -97,14 +105,16 @@ struct BitonicMerge {
 template <int size, bool ascending, typename T, typename idxT, bool is_stable>
 struct BitonicSort {
   [[intel::device_indirectly_callable]] static void sort(
-      T* __restrict__ val_arr, idxT* __restrict__ idx_arr,
-      sycl::sub_group const& sg, const int local_id) {
+      T* __restrict__ val_arr,
+      idxT* __restrict__ idx_arr,
+      sycl::sub_group const& sg,
+      const int local_id) {
     static_assert(isPowerOf2(size));
     static_assert(size >= 2 * WARP_SIZE);
     constexpr int arr_len = size / WARP_SIZE;
 
-    BitonicSort<size / 2, true, T, idxT, is_stable>::sort(val_arr, idx_arr, sg,
-                                                          local_id);
+    BitonicSort<size / 2, true, T, idxT, is_stable>::sort(
+        val_arr, idx_arr, sg, local_id);
     BitonicSort<size / 2, false, T, idxT, is_stable>::sort(
         val_arr + arr_len / 2, idx_arr + arr_len / 2, sg, local_id);
     BitonicMerge<size, ascending, ascending, T, idxT, is_stable>::merge(
@@ -115,8 +125,10 @@ struct BitonicSort {
 template <bool ascending, typename T, typename idxT, bool is_stable>
 struct BitonicSort<32, ascending, T, idxT, is_stable> {
   [[intel::device_indirectly_callable]] static void sort(
-      T* __restrict__ val_arr, idxT* __restrict__ idx_arr,
-      sycl::sub_group const& sg, const int local_id) {
+      T* __restrict__ val_arr,
+      idxT* __restrict__ idx_arr,
+      sycl::sub_group const& sg,
+      const int local_id) {
     int const lane = local_id % WARP_SIZE;
 
     // ascending doesn't matter before merging since all we need is a bitonic
@@ -141,8 +153,9 @@ struct BitonicSort<32, ascending, T, idxT, is_stable> {
                         (reverse != is_second);
           }
         } else {
-          is_better = (*val_arr != other &&
-                       (*val_arr > other) != (reverse != is_second));
+          is_better =
+              (*val_arr != other &&
+               (*val_arr > other) != (reverse != is_second));
         }
         if (is_better) {
           *val_arr = other;
@@ -156,12 +169,18 @@ struct BitonicSort<32, ascending, T, idxT, is_stable> {
   }
 };
 
-template <bool ascending, bool reverse, typename T, typename idxT,
-          bool is_stable>
+template <
+    bool ascending,
+    bool reverse,
+    typename T,
+    typename idxT,
+    bool is_stable>
 struct BitonicMerge<32, ascending, reverse, T, idxT, is_stable> {
   [[intel::device_indirectly_callable]] static void merge(
-      T* __restrict__ val_arr, idxT* __restrict__ idx_arr,
-      sycl::sub_group const& sg, const int local_id) {
+      T* __restrict__ val_arr,
+      idxT* __restrict__ idx_arr,
+      sycl::sub_group const& sg,
+      const int local_id) {
     int const lane = local_id % WARP_SIZE;
     for (int stride = WARP_SIZE / 2; stride > 0; stride /= 2) {
       bool is_second = lane & stride;
@@ -197,8 +216,8 @@ struct BitonicMerge<32, ascending, reverse, T, idxT, is_stable> {
 template <int capacity, bool greater, typename T, typename idxT, bool is_stable>
 class WarpSort {
  public:
-  [[intel::device_indirectly_callable]] WarpSort(idxT k, T dummy,
-                                                 const int local_id)
+  [[intel::device_indirectly_callable]] WarpSort(
+      idxT k, T dummy, const int local_id)
       : lane_(local_id % WARP_SIZE), k_(k), dummy_(dummy) {
     static_assert(capacity >= WARP_SIZE && isPowerOf2(capacity));
 
@@ -208,8 +227,8 @@ class WarpSort {
     }
   }
 
-  [[intel::device_indirectly_callable]] void dump(
-      T* __restrict__ out, idxT* __restrict__ out_idx) const {
+  [[intel::device_indirectly_callable]] void
+  dump(T* __restrict__ out, idxT* __restrict__ out_idx) const {
     for (int i = 0; i < max_arr_len_; ++i) {
       idxT out_i = i * WARP_SIZE + lane_;
       if (out_i < k_) {
@@ -219,8 +238,8 @@ class WarpSort {
     }
   }
 
-  [[intel::device_indirectly_callable]] void dumpIdx(
-      idxT* __restrict__ out_idx) const {
+  [[intel::device_indirectly_callable]] void
+  dumpIdx(idxT* __restrict__ out_idx) const {
     for (int i = 0; i < max_arr_len_; ++i) {
       idxT out_i = i * WARP_SIZE + lane_;
       if (out_i < k_) {
@@ -244,10 +263,12 @@ class WarpSort {
 template <int capacity, bool greater, typename T, typename idxT, bool is_stable>
 class WarpSelect : public WarpSort<capacity, greater, T, idxT, is_stable> {
  public:
-  [[intel::device_indirectly_callable]] WarpSelect(idxT k, T dummy,
-                                                   char* smem_buf,  // slm_buf
-                                                   const int local_id,
-                                                   const int local_range)
+  [[intel::device_indirectly_callable]] WarpSelect(
+      idxT k,
+      T dummy,
+      char* smem_buf,  // slm_buf
+      const int local_id,
+      const int local_range)
       : WarpSort<capacity, greater, T, idxT, is_stable>(k, dummy, local_id),
         k_th_(dummy),
         k_th_lane_((k - 1) % WARP_SIZE) {
@@ -261,10 +282,12 @@ class WarpSelect : public WarpSort<capacity, greater, T, idxT, is_stable> {
     idx_smem_ += warp_id * WARP_SIZE;
   }
 
-  [[intel::device_indirectly_callable]] void add(T const* in, idxT start,
-                                                 idxT end,
-                                                 sycl::sub_group const& sg,
-                                                 const int local_id) {
+  [[intel::device_indirectly_callable]] void
+  add(T const* in,
+      idxT start,
+      idxT end,
+      sycl::sub_group const& sg,
+      const int local_id) {
     idxT const end_for_fullwarp =
         round_up_to_multiple_of<WARP_SIZE>(end - start) + start;
     for (idxT i = start + lane_; i < end_for_fullwarp; i += WARP_SIZE) {
@@ -273,9 +296,8 @@ class WarpSelect : public WarpSort<capacity, greater, T, idxT, is_stable> {
     }
   }
 
-  [[intel::device_indirectly_callable]] void add(T val, idxT idx,
-                                                 sycl::sub_group const& sg,
-                                                 const int local_id) {
+  [[intel::device_indirectly_callable]] void
+  add(T val, idxT idx, sycl::sub_group const& sg, const int local_id) {
     bool do_add;
     if constexpr (is_stable) {
       do_add = is_better_than<greater>(val, k_th_, idx, k_th_idx_);
@@ -306,8 +328,8 @@ class WarpSelect : public WarpSort<capacity, greater, T, idxT, is_stable> {
     }
   }
 
-  [[intel::device_indirectly_callable]] void done(sycl::sub_group const& sg,
-                                                  const int local_id) {
+  [[intel::device_indirectly_callable]] void
+  done(sycl::sub_group const& sg, const int local_id) {
     if (smem_buf_len_) {
       T val = (lane_ < smem_buf_len_) ? val_smem_[lane_] : dummy_;
       idxT idx = (lane_ < smem_buf_len_) ? idx_smem_[lane_] : 0;
@@ -316,8 +338,8 @@ class WarpSelect : public WarpSort<capacity, greater, T, idxT, is_stable> {
   }
 
  private:
-  [[intel::device_indirectly_callable]] void set_k_th_(
-      sycl::sub_group const& sg) {
+  [[intel::device_indirectly_callable]] void
+  set_k_th_(sycl::sub_group const& sg) {
     k_th_ = sycl::select_from_group(sg, val_arr_[max_arr_len_ - 1], k_th_lane_);
     if constexpr (is_stable) {
       k_th_idx_ =
@@ -325,10 +347,10 @@ class WarpSelect : public WarpSort<capacity, greater, T, idxT, is_stable> {
     }
   }
 
-  [[intel::device_indirectly_callable]] void merge_buf_(
-      T val, idxT idx, sycl::sub_group const& sg, const int local_id) {
-    BitonicSort<WARP_SIZE, greater, T, idxT, is_stable>::sort(&val, &idx, sg,
-                                                              local_id);
+  [[intel::device_indirectly_callable]] void
+  merge_buf_(T val, idxT idx, sycl::sub_group const& sg, const int local_id) {
+    BitonicSort<WARP_SIZE, greater, T, idxT, is_stable>::sort(
+        &val, &idx, sg, local_id);
 
     T& old = val_arr_[max_arr_len_ - 1];
 
@@ -381,7 +403,10 @@ sycl_cast<float, sycl::ext::oneapi::bfloat16>(sycl::ext::oneapi::bfloat16 val) {
 
 template <typename T>
 [[intel::device_indirectly_callable]] inline void topk_with_k2(
-    T* output, T const* input, sycl::sub_group const& sg, int32_t const lane_id,
+    T* output,
+    T const* input,
+    sycl::sub_group const& sg,
+    int32_t const lane_id,
     int const num_experts_per_group) {
   // Get the top2 per thread
   float largest = -INFINITY;
@@ -424,9 +449,13 @@ template <typename T>
 template <typename T>
 class topk_with_k2_kernel {
  public:
-  topk_with_k2_kernel(T* output, T* input, int64_t const num_tokens,
-                      int64_t const num_cases, int64_t const n_group,
-                      int64_t const num_experts_per_group)
+  topk_with_k2_kernel(
+      T* output,
+      T* input,
+      int64_t const num_tokens,
+      int64_t const num_cases,
+      int64_t const n_group,
+      int64_t const num_experts_per_group)
       : output(output),
         input(input),
         num_tokens(num_tokens),
@@ -446,8 +475,8 @@ class topk_with_k2_kernel {
       auto current_input = input + case_id * num_experts_per_group;
       auto current_output = output + case_id;
       auto sg = item.get_sub_group();
-      topk_with_k2(current_output, current_input, sg, lane_id,
-                   num_experts_per_group);
+      topk_with_k2(
+          current_output, current_input, sg, lane_id, num_experts_per_group);
     }
   }
 
@@ -463,14 +492,21 @@ class topk_with_k2_kernel {
 template <typename T, typename IdxT>
 class group_idx_and_topk_idx_kernel {
  public:
-  group_idx_and_topk_idx_kernel(sycl::local_accessor<char, 1>& slm, T* scores,
-                                T const* group_scores, T* topk_values,
-                                IdxT* topk_indices, T* scores_with_bias,
-                                int64_t const num_tokens, int64_t const n_group,
-                                int64_t const topk_group, int64_t const topk,
-                                int64_t const num_experts,
-                                int64_t const num_experts_per_group,
-                                bool renormalize, double routed_scaling_factor)
+  group_idx_and_topk_idx_kernel(
+      sycl::local_accessor<char, 1>& slm,
+      T* scores,
+      T const* group_scores,
+      T* topk_values,
+      IdxT* topk_indices,
+      T* scores_with_bias,
+      int64_t const num_tokens,
+      int64_t const n_group,
+      int64_t const topk_group,
+      int64_t const topk,
+      int64_t const num_experts,
+      int64_t const num_experts_per_group,
+      bool renormalize,
+      double routed_scaling_factor)
       : slm(slm),
         scores(scores),
         group_scores(group_scores),
@@ -521,9 +557,10 @@ class group_idx_and_topk_idx_kernel {
       // calculate group_idx
       int32_t target_num_min = WARP_SIZE - n_group + topk_group;
       if (lane_id < n_group &&
-          (std::isfinite(sycl_cast<float, T>(
-              current_group_scores[lane_id]))))  // The check is necessary to
-                                                 // avoid abnormal input
+          (std::isfinite(
+              sycl_cast<float, T>(
+                  current_group_scores[lane_id]))))  // The check is necessary
+                                                     // to avoid abnormal input
       {
         value = current_group_scores[lane_id];
       }
@@ -548,11 +585,17 @@ class group_idx_and_topk_idx_kernel {
 
     item.barrier(sycl::access::fence_space::local_space);
 
-    warp_topk::WarpSelect</*capability*/ WARP_SIZE, /*greater*/ true, T,
+    warp_topk::WarpSelect</*capability*/ WARP_SIZE,
+                          /*greater*/ true,
+                          T,
                           int32_t,
                           /* is_stable */ true>
-        queue((int32_t)topk, -INFINITY, smem_buf, local_id,
-              item.get_local_range(0));
+        queue(
+            (int32_t)topk,
+            -INFINITY,
+            smem_buf,
+            local_id,
+            item.get_local_range(0));
 
     int count_equalto_topkth_group = 0;
     bool if_proceed_next_topk = (topk_group_value != kNegInfinity);
@@ -564,11 +607,13 @@ class group_idx_and_topk_idx_kernel {
           int32_t offset = i_group * num_experts_per_group;
           for (int32_t i = lane_id; i < align_num_experts_per_group;
                i += WARP_SIZE) {
-            T candidates = (i < num_experts_per_group) &&
-                                   std::isfinite(sycl_cast<float, T>(
-                                       current_scores_with_bias[offset + i]))
-                               ? current_scores_with_bias[offset + i]
-                               : sycl_cast<T, float>(kNegInfinity);
+            T candidates =
+                (i < num_experts_per_group) &&
+                        std::isfinite(
+                            sycl_cast<float, T>(
+                                current_scores_with_bias[offset + i]))
+                    ? current_scores_with_bias[offset + i]
+                    : sycl_cast<T, float>(kNegInfinity);
             queue.add(candidates, offset + i, sg, local_id);
           }
           if (current_group_scores[i_group] == topk_group_value) {
@@ -600,8 +645,8 @@ class group_idx_and_topk_idx_kernel {
         if (i < topk) {
           s_topk_value[i] = value;
         }
-        topk_sum += sycl::reduce_over_group(sg, sycl_cast<float, T>(value),
-                                            sycl::plus<>());
+        topk_sum += sycl::reduce_over_group(
+            sg, sycl_cast<float, T>(value), sycl::plus<>());
       }
     }
 
@@ -650,13 +695,21 @@ class group_idx_and_topk_idx_kernel {
 };
 
 template <typename T, typename IdxT>
-void invokeNoAuxTc(T* scores, T* group_scores, T* topk_values,
-                   IdxT* topk_indices, T* scores_with_bias,
-                   int64_t const num_tokens, int64_t const num_experts,
-                   int64_t const n_group, int64_t const topk_group,
-                   int64_t const topk, bool const renormalize,
-                   double const routed_scaling_factor, bool enable_pdl,
-                   sycl::queue& queue) {
+void invokeNoAuxTc(
+    T* scores,
+    T* group_scores,
+    T* topk_values,
+    IdxT* topk_indices,
+    T* scores_with_bias,
+    int64_t const num_tokens,
+    int64_t const num_experts,
+    int64_t const n_group,
+    int64_t const topk_group,
+    int64_t const topk,
+    bool const renormalize,
+    double const routed_scaling_factor,
+    bool enable_pdl,
+    sycl::queue& queue) {
   int64_t num_cases = num_tokens * n_group;
   int64_t topk_with_k2_num_blocks = (num_cases - 1) / NUM_WARPS_PER_BLOCK + 1;
   sycl::range<1> grid(topk_with_k2_num_blocks);
@@ -664,36 +717,60 @@ void invokeNoAuxTc(T* scores, T* group_scores, T* topk_values,
   queue.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<1>(grid * block, block),
-        topk_with_k2_kernel<T>(group_scores, scores_with_bias, num_tokens,
-                               num_cases, n_group, num_experts / n_group));
+        topk_with_k2_kernel<T>(
+            group_scores,
+            scores_with_bias,
+            num_tokens,
+            num_cases,
+            n_group,
+            num_experts / n_group));
   });
 
   int64_t topk_with_k_group_num_blocks =
       (num_tokens - 1) / NUM_WARPS_PER_BLOCK + 1;
   size_t dynamic_smem_in_bytes =
-      warp_topk::calc_smem_size_for_block_wide<T, int32_t>(NUM_WARPS_PER_BLOCK,
-                                                           topk);
+      warp_topk::calc_smem_size_for_block_wide<T, int32_t>(
+          NUM_WARPS_PER_BLOCK, topk);
   sycl::range<1> grid2(topk_with_k_group_num_blocks);
   sycl::range<1> block2(BLOCK_SIZE);
   queue.submit([&](sycl::handler& cgh) {
-    sycl::local_accessor<char, 1> slm(sycl::range<1>(dynamic_smem_in_bytes),
-                                      cgh);
-    cgh.parallel_for(sycl::nd_range<1>(grid * block, block),
-                     group_idx_and_topk_idx_kernel<T, IdxT>(
-                         slm, scores, group_scores, topk_values, topk_indices,
-                         scores_with_bias, num_tokens, n_group, topk_group,
-                         topk, num_experts, num_experts / n_group, renormalize,
-                         routed_scaling_factor));
+    sycl::local_accessor<char, 1> slm(
+        sycl::range<1>(dynamic_smem_in_bytes), cgh);
+    cgh.parallel_for(
+        sycl::nd_range<1>(grid * block, block),
+        group_idx_and_topk_idx_kernel<T, IdxT>(
+            slm,
+            scores,
+            group_scores,
+            topk_values,
+            topk_indices,
+            scores_with_bias,
+            num_tokens,
+            n_group,
+            topk_group,
+            topk,
+            num_experts,
+            num_experts / n_group,
+            renormalize,
+            routed_scaling_factor));
   });
 }
 
-#define INSTANTIATE_NOAUX_TC(T, IdxT)                                       \
-  template void invokeNoAuxTc<T, IdxT>(                                     \
-      T * scores, T * group_scores, T * topk_values, IdxT * topk_indices,   \
-      T * scores_with_bias, int64_t const num_tokens,                       \
-      int64_t const num_experts, int64_t const n_group,                     \
-      int64_t const topk_group, int64_t const topk, bool const renormalize, \
-      double const routed_scaling_factor, bool enable_pdl,                  \
+#define INSTANTIATE_NOAUX_TC(T, IdxT)     \
+  template void invokeNoAuxTc<T, IdxT>(   \
+      T * scores,                         \
+      T * group_scores,                   \
+      T * topk_values,                    \
+      IdxT * topk_indices,                \
+      T * scores_with_bias,               \
+      int64_t const num_tokens,           \
+      int64_t const num_experts,          \
+      int64_t const n_group,              \
+      int64_t const topk_group,           \
+      int64_t const topk,                 \
+      bool const renormalize,             \
+      double const routed_scaling_factor, \
+      bool enable_pdl,                    \
       sycl::queue& queue);
 
 INSTANTIATE_NOAUX_TC(float, int32_t);
@@ -703,18 +780,22 @@ INSTANTIATE_NOAUX_TC(sycl::ext::oneapi::bfloat16, int32_t);
 }  // namespace vllm
 
 std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
-    torch::Tensor const& scores, torch::Tensor const& scores_with_bias,
-    int64_t n_group, int64_t topk_group, int64_t topk, bool renormalize,
+    torch::Tensor const& scores,
+    torch::Tensor const& scores_with_bias,
+    int64_t n_group,
+    int64_t topk_group,
+    int64_t topk,
+    bool renormalize,
     double routed_scaling_factor) {
   auto data_type = scores_with_bias.scalar_type();
   auto input_size = scores_with_bias.sizes();
   int64_t num_tokens = input_size[0];
   int64_t num_experts = input_size[1];
   TORCH_CHECK(input_size.size() == 2, "scores_with_bias must be a 2D Tensor");
-  TORCH_CHECK(num_experts % n_group == 0,
-              "num_experts should be divisible by n_group");
-  TORCH_CHECK(n_group <= 32,
-              "n_group should be smaller than or equal to 32 for now");
+  TORCH_CHECK(
+      num_experts % n_group == 0, "num_experts should be divisible by n_group");
+  TORCH_CHECK(
+      n_group <= 32, "n_group should be smaller than or equal to 32 for now");
   TORCH_CHECK(topk <= 32, "topk should be smaller than or equal to 32 for now");
 
   torch::Tensor group_scores = torch::empty(
@@ -735,8 +816,15 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
           reinterpret_cast<sycl::half*>(topk_values.mutable_data_ptr()),
           reinterpret_cast<int32_t*>(topk_indices.mutable_data_ptr()),
           reinterpret_cast<sycl::half*>(scores_with_bias.data_ptr()),
-          num_tokens, num_experts, n_group, topk_group, topk, renormalize,
-          routed_scaling_factor, false, queue);
+          num_tokens,
+          num_experts,
+          n_group,
+          topk_group,
+          topk,
+          renormalize,
+          routed_scaling_factor,
+          false,
+          queue);
       break;
     case torch::kFloat32:
       // Handle Float32
@@ -745,9 +833,16 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
           reinterpret_cast<float*>(group_scores.mutable_data_ptr()),
           reinterpret_cast<float*>(topk_values.mutable_data_ptr()),
           reinterpret_cast<int32_t*>(topk_indices.mutable_data_ptr()),
-          reinterpret_cast<float*>(scores_with_bias.data_ptr()), num_tokens,
-          num_experts, n_group, topk_group, topk, renormalize,
-          routed_scaling_factor, false, queue);
+          reinterpret_cast<float*>(scores_with_bias.data_ptr()),
+          num_tokens,
+          num_experts,
+          n_group,
+          topk_group,
+          topk,
+          renormalize,
+          routed_scaling_factor,
+          false,
+          queue);
       break;
     case torch::kBFloat16:
       // Handle BFloat16
@@ -761,8 +856,15 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
           reinterpret_cast<int32_t*>(topk_indices.mutable_data_ptr()),
           reinterpret_cast<sycl::ext::oneapi::bfloat16*>(
               scores_with_bias.data_ptr()),
-          num_tokens, num_experts, n_group, topk_group, topk, renormalize,
-          routed_scaling_factor, false, queue);
+          num_tokens,
+          num_experts,
+          n_group,
+          topk_group,
+          topk,
+          renormalize,
+          routed_scaling_factor,
+          false,
+          queue);
       break;
     default:
       // Handle other data types

@@ -50,11 +50,15 @@ struct AccumulateType {
 
  public:
   using type = std::conditional_t<
-      is_narrow_float, float,
+      is_narrow_float,
+      float,
       std::conditional_t<
-          std::is_floating_point_v<T>, T,
-          std::conditional_t<is_integer, int64_t,
-                             std::conditional_t<is_complex, T, T>>>>;
+          std::is_floating_point_v<T>,
+          T,
+          std::conditional_t<
+              is_integer,
+              int64_t,
+              std::conditional_t<is_complex, T, T>>>>;
 };
 
 template <typename T>

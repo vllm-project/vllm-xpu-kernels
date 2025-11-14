@@ -165,9 +165,10 @@ struct Options {
   }
 
   /// Compute performance in GFLOP/s
-  double gflops(double runtime_s,
-                std::vector<typename ProblemShape::UnderlyingProblemShape>
-                    problem_sizes_host) const {
+  double gflops(
+      double runtime_s,
+      std::vector<typename ProblemShape::UnderlyingProblemShape>
+          problem_sizes_host) const {
     // Number of real-valued multiply-adds
     uint64_t fmas = uint64_t();
 
@@ -273,9 +274,13 @@ struct GroupedGemmRunner {
 
   /// Populates a Gemm::Arguments structure from the given commandline options
   typename Gemm::Arguments args_from_options(
-      const Options& options, const cutlass::KernelHardwareInfo& hw_info,
-      int64_t const* expert_first_token_offset, const ElementA* ptr_A,
-      const ElementB* ptr_B, const ElementC* ptr_C, ElementOutput* ptr_D,
+      const Options& options,
+      const cutlass::KernelHardwareInfo& hw_info,
+      int64_t const* expert_first_token_offset,
+      const ElementA* ptr_A,
+      const ElementB* ptr_B,
+      const ElementC* ptr_C,
+      ElementOutput* ptr_D,
       bool host_problem_shapes_available = true) {
     typename Gemm::Arguments arguments;
     decltype(arguments.epilogue.thread) fusion_args;
@@ -299,22 +304,39 @@ struct GroupedGemmRunner {
     if (host_problem_shapes_available) {
       arguments = typename Gemm::Arguments{
           cutlass::gemm::GemmUniversalMode::kGrouped,
-          {options.groups, problem_sizes.get(),
+          {options.groups,
+           problem_sizes.get(),
            options.problem_sizes_host.data()},
-          {ptr_A, stride_A.get(), ptr_B, stride_B.get(),
+          {ptr_A,
+           stride_A.get(),
+           ptr_B,
+           stride_B.get(),
            expert_first_token_offset},
-          {fusion_args, ptr_C, stride_C.get(), ptr_D, stride_D.get(),
-           expert_first_token_offset, ptr_C ? true : false},
+          {fusion_args,
+           ptr_C,
+           stride_C.get(),
+           ptr_D,
+           stride_D.get(),
+           expert_first_token_offset,
+           ptr_C ? true : false},
           hw_info,
           {1, RasterOrderOptions::AlongN}};
     } else {
       arguments = typename Gemm::Arguments{
           cutlass::gemm::GemmUniversalMode::kGrouped,
           {options.groups, problem_sizes.get(), nullptr},
-          {ptr_A, stride_A.get(), ptr_B, stride_B.get(),
+          {ptr_A,
+           stride_A.get(),
+           ptr_B,
+           stride_B.get(),
            expert_first_token_offset},
-          {fusion_args, ptr_C, stride_C.get(), ptr_D, stride_D.get(),
-           expert_first_token_offset, ptr_C ? true : false},
+          {fusion_args,
+           ptr_C,
+           stride_C.get(),
+           ptr_D,
+           stride_D.get(),
+           expert_first_token_offset,
+           ptr_C ? true : false},
           hw_info,
           {1, RasterOrderOptions::AlongN}};
     }
@@ -322,11 +344,15 @@ struct GroupedGemmRunner {
     return arguments;
   }
 
-  cutlass::Status run(const Options& options, sycl::queue& stream,
-                      const cutlass::KernelHardwareInfo& hw_info,
-                      int64_t const* expert_first_token_offset,
-                      const ElementA* ptr_A, const ElementB* ptr_B,
-                      const ElementC* ptr_C, ElementOutput* ptr_D) {
+  cutlass::Status
+  run(const Options& options,
+      sycl::queue& stream,
+      const cutlass::KernelHardwareInfo& hw_info,
+      int64_t const* expert_first_token_offset,
+      const ElementA* ptr_A,
+      const ElementB* ptr_B,
+      const ElementC* ptr_C,
+      ElementOutput* ptr_D) {
     if (debug) {
       std::cout << "enter run" << std::endl;
     }
@@ -335,9 +361,14 @@ struct GroupedGemmRunner {
     initialize(options);
     Gemm gemm_op;
 
-    auto arguments =
-        args_from_options(options, hw_info, expert_first_token_offset, ptr_A,
-                          ptr_B, ptr_C, ptr_D);
+    auto arguments = args_from_options(
+        options,
+        hw_info,
+        expert_first_token_offset,
+        ptr_A,
+        ptr_B,
+        ptr_C,
+        ptr_D);
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
@@ -372,8 +403,8 @@ struct GroupedGemmRunner {
       stream.wait();
       float cute_time = timer.seconds() * 1000;
       double cute_average_time = double(cute_time) / double(options.iterations);
-      double gflops = options.gflops(cute_average_time / 1000.0,
-                                     options.problem_sizes_host);
+      double gflops = options.gflops(
+          cute_average_time / 1000.0, options.problem_sizes_host);
       std::cout << "  Avg runtime : " << cute_average_time << " ms"
                 << std::endl;
       std::cout << "  GFLOPS      : " << gflops << std::endl;
@@ -385,10 +416,17 @@ struct GroupedGemmRunner {
 };
 
 template <class moe_policy>
-void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
-                    void* ptr_bias, void* ptr_D, void* expert_token_count,
-                    void* expert_first_token_offset, int64_t N, int64_t K,
-                    int64_t groups) {
+void kernel_functor(
+    sycl::queue& stream,
+    void* ptr_A,
+    void* ptr_B,
+    void* ptr_bias,
+    void* ptr_D,
+    void* expert_token_count,
+    void* expert_first_token_offset,
+    int64_t N,
+    int64_t K,
+    int64_t groups) {
   //
   // Run examples
   //
@@ -427,61 +465,105 @@ void kernel_functor(sycl::queue& stream, void* ptr_A, void* ptr_B,
                              // the scaling factors
   using MMAOperation = moe_policy::MMAOperation;
 
-  using TiledMma =
-      TiledMMA<MMA_Atom<MMAOperation>,
-               Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>,
-               Tile<Layout<Shape<_8, _8, _4>, Stride<_1, _32, _8>>,
-                    Layout<Shape<_16, _4, _4>, Stride<_1, _64, _16>>, _32>>;
+  using TiledMma = TiledMMA<
+      MMA_Atom<MMAOperation>,
+      Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>,
+      Tile<
+          Layout<Shape<_8, _8, _4>, Stride<_1, _32, _8>>,
+          Layout<Shape<_16, _4, _4>, Stride<_1, _64, _16>>,
+          _32>>;
 
   constexpr int PipelineStages = 2;
   using GEMMDispatchPolicy = cutlass::gemm::MainloopMoE16Group<PipelineStages>;
   using EpilogueDispatchPolicy = cutlass::epilogue::MoE16Group;
   using EpilogueOp = cutlass::epilogue::fusion::LinearCombination<
-      float_t, float_t, float_t, float_t,
+      float_t,
+      float_t,
+      float_t,
+      float_t,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
   using FusionCallbacks = cutlass::epilogue::fusion::FusionCallbacks<
-      EpilogueDispatchPolicy, EpilogueOp, TileShape,
+      EpilogueDispatchPolicy,
+      EpilogueOp,
+      TileShape,
       decltype(tile_shape(TiledMma()))>;
   using CollectiveEpilogue = cutlass::epilogue::collective::CollectiveEpilogue<
-      EpilogueDispatchPolicy, TileShape, ElementAccumulator,
-      cutlass::detail::TagToStrideC_t<LayoutC*>, ElementOutput,
-      cutlass::detail::TagToStrideC_t<LayoutD*>, FusionCallbacks,
-      XE_2D_U32x8x16_LD_N, void, void, XE_2D_U16x8x16_ST_N, void, void>;
+      EpilogueDispatchPolicy,
+      TileShape,
+      ElementAccumulator,
+      cutlass::detail::TagToStrideC_t<LayoutC*>,
+      ElementOutput,
+      cutlass::detail::TagToStrideC_t<LayoutD*>,
+      FusionCallbacks,
+      XE_2D_U32x8x16_LD_N,
+      void,
+      void,
+      XE_2D_U16x8x16_ST_N,
+      void,
+      void>;
 
   // Mainloop
   using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
-      GEMMDispatchPolicy, TileShape, ElementA,
-      cutlass::gemm::TagToStrideA_t<LayoutA*>, ElementB,
-      cutlass::gemm::TagToStrideB_t<LayoutB*>, TiledMma, GmemTiledCopyA, void,
-      void, cute::identity,                       // A
-      GmemTiledCopyB, void, void, cute::identity  // B
+      GEMMDispatchPolicy,
+      TileShape,
+      ElementA,
+      cutlass::gemm::TagToStrideA_t<LayoutA*>,
+      ElementB,
+      cutlass::gemm::TagToStrideB_t<LayoutB*>,
+      TiledMma,
+      GmemTiledCopyA,
+      void,
+      void,
+      cute::identity,  // A
+      GmemTiledCopyB,
+      void,
+      void,
+      cute::identity  // B
       >;
 
-  using GemmKernel =
-      cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop,
-                                           CollectiveEpilogue,
-                                           cutlass::gemm::GroupScheduler>;
+  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
+      ProblemShape,
+      CollectiveMainloop,
+      CollectiveEpilogue,
+      cutlass::gemm::GroupScheduler>;
 
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
   GroupedGemmRunner<Gemm> runner;
-  runner.run(options, stream, hw_info,
-             reinterpret_cast<const int64_t*>(expert_first_token_offset),
-             reinterpret_cast<const ElementA*>(ptr_A),
-             reinterpret_cast<const ElementB*>(ptr_B),
-             reinterpret_cast<const ElementAccumulator*>(ptr_bias),
-             reinterpret_cast<ElementOutput*>(ptr_D));
+  runner.run(
+      options,
+      stream,
+      hw_info,
+      reinterpret_cast<const int64_t*>(expert_first_token_offset),
+      reinterpret_cast<const ElementA*>(ptr_A),
+      reinterpret_cast<const ElementB*>(ptr_B),
+      reinterpret_cast<const ElementAccumulator*>(ptr_bias),
+      reinterpret_cast<ElementOutput*>(ptr_D));
 }
 
 template void kernel_functor<moe_bf16_policy>(
-    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_bias, void* ptr_D,
-    void* expert_token_count, void* expert_first_token_offset, int64_t N,
-    int64_t K, int64_t groups);
+    sycl::queue& stream,
+    void* ptr_A,
+    void* ptr_B,
+    void* ptr_bias,
+    void* ptr_D,
+    void* expert_token_count,
+    void* expert_first_token_offset,
+    int64_t N,
+    int64_t K,
+    int64_t groups);
 template void kernel_functor<moe_fp16_policy>(
-    sycl::queue& stream, void* ptr_A, void* ptr_B, void* ptr_bias, void* ptr_D,
-    void* expert_token_count, void* expert_first_token_offset, int64_t N,
-    int64_t K, int64_t groups);
+    sycl::queue& stream,
+    void* ptr_A,
+    void* ptr_B,
+    void* ptr_bias,
+    void* ptr_D,
+    void* expert_token_count,
+    void* expert_first_token_offset,
+    int64_t N,
+    int64_t K,
+    int64_t groups);
 
 }  // namespace grouped_gemm
 }  // namespace gpu::cutlass_kernel

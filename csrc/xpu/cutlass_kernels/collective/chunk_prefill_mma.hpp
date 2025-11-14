@@ -49,30 +49,71 @@ using namespace cute;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <class DispatchPolicy, class ProblemShapeType_, class ElementQ_,
-          class StrideQ_, class ElementK_, class StrideK_, class ElementV_,
-          class StrideV_, class MMAOperation_, class TileShapeQK_,
-          class TileShapePV_, class SubgroupLayout_, class GmemTiledCopyQ_,
-          class GmemTiledCopyK_, class GmemTiledCopyV_, bool CausalMask_,
-          bool LocalMask_, bool PagedKV_>
+template <
+    class DispatchPolicy,
+    class ProblemShapeType_,
+    class ElementQ_,
+    class StrideQ_,
+    class ElementK_,
+    class StrideK_,
+    class ElementV_,
+    class StrideV_,
+    class MMAOperation_,
+    class TileShapeQK_,
+    class TileShapePV_,
+    class SubgroupLayout_,
+    class GmemTiledCopyQ_,
+    class GmemTiledCopyK_,
+    class GmemTiledCopyV_,
+    bool CausalMask_,
+    bool LocalMask_,
+    bool PagedKV_>
 struct FlashChunkPrefillMma {
-  static_assert(cutlass::detail::dependent_false<ElementQ_>,
-                "Could not find a mainloop specialization.");
+  static_assert(
+      cutlass::detail::dependent_false<ElementQ_>,
+      "Could not find a mainloop specialization.");
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int Stages, class ProblemShapeType_, class ElementQ_, class StrideQ_,
-          class ElementK_, class StrideK_, class ElementV_, class StrideV_,
-          class MMAOperation_, class TileShapeQK_, class TileShapePV_,
-          class SubgroupLayout_, class GmemTiledCopyQ_, class GmemTiledCopyK_,
-          class GmemTiledCopyV_, bool CausalMask_, bool LocalMask_,
-          bool PagedKV_>
+template <
+    int Stages,
+    class ProblemShapeType_,
+    class ElementQ_,
+    class StrideQ_,
+    class ElementK_,
+    class StrideK_,
+    class ElementV_,
+    class StrideV_,
+    class MMAOperation_,
+    class TileShapeQK_,
+    class TileShapePV_,
+    class SubgroupLayout_,
+    class GmemTiledCopyQ_,
+    class GmemTiledCopyK_,
+    class GmemTiledCopyV_,
+    bool CausalMask_,
+    bool LocalMask_,
+    bool PagedKV_>
 struct FlashChunkPrefillMma<
-    gemm::MainloopIntelXeXMX16<Stages>, ProblemShapeType_, ElementQ_, StrideQ_,
-    ElementK_, StrideK_, ElementV_, StrideV_, MMAOperation_, TileShapeQK_,
-    TileShapePV_, SubgroupLayout_, GmemTiledCopyQ_, GmemTiledCopyK_,
-    GmemTiledCopyV_, CausalMask_, LocalMask_, PagedKV_> {
+    gemm::MainloopIntelXeXMX16<Stages>,
+    ProblemShapeType_,
+    ElementQ_,
+    StrideQ_,
+    ElementK_,
+    StrideK_,
+    ElementV_,
+    StrideV_,
+    MMAOperation_,
+    TileShapeQK_,
+    TileShapePV_,
+    SubgroupLayout_,
+    GmemTiledCopyQ_,
+    GmemTiledCopyK_,
+    GmemTiledCopyV_,
+    CausalMask_,
+    LocalMask_,
+    PagedKV_> {
   //
   // Type Aliases
   //
@@ -93,11 +134,13 @@ struct FlashChunkPrefillMma<
   using ArchTag = typename DispatchPolicy::ArchTag;
   using MmaAtom = MMA_Atom<MMAOperation_>;
 
-  using TiledMmaQK = typename TiledMMAHelper<MmaAtom, Layout<TileShapeQK>,
-                                             SubgroupLayout>::TiledMMA;
+  using TiledMmaQK =
+      typename TiledMMAHelper<MmaAtom, Layout<TileShapeQK>, SubgroupLayout>::
+          TiledMMA;
 
-  using TiledMmaPV = typename TiledMMAHelper<MmaAtom, Layout<TileShapePV>,
-                                             SubgroupLayout>::TiledMMA;
+  using TiledMmaPV =
+      typename TiledMMAHelper<MmaAtom, Layout<TileShapePV>, SubgroupLayout>::
+          TiledMMA;
   using ElementAccumulator = typename TiledMmaQK::ValTypeC;
   static constexpr bool CausalMask = CausalMask_;
   static constexpr bool LocalMask = LocalMask_;
@@ -209,18 +252,26 @@ struct FlashChunkPrefillMma<
   FlashChunkPrefillMma() = default;
 
   static constexpr Params to_underlying_arguments(
-      ProblemShapeType const& problem_shape, Arguments const& args,
+      ProblemShapeType const& problem_shape,
+      Arguments const& args,
       void* workspace) {
     (void)workspace;
 
-    auto [batch, num_heads_q, num_heads_kv, seq_len_qo, seq_len_kv_cache,
-          head_size_qk, head_size_vo] = problem_shape;
+    auto
+        [batch,
+         num_heads_q,
+         num_heads_kv,
+         seq_len_qo,
+         seq_len_kv_cache,
+         head_size_qk,
+         head_size_vo] = problem_shape;
     auto q_group_size = num_heads_q / num_heads_kv;
 
     auto tensorQ = make_tensor(
         make_gmem_ptr(args.ptr_Q),
-        make_layout(make_shape(seq_len_qo, num_heads_q * head_size_qk, batch),
-                    args.dQ));
+        make_layout(
+            make_shape(seq_len_qo, num_heads_q * head_size_qk, batch),
+            args.dQ));
     auto tensorK_cache = make_tensor(
         make_gmem_ptr(args.ptr_K_cache),
         make_layout(
@@ -236,21 +287,26 @@ struct FlashChunkPrefillMma<
     XE_Copy_K copyK_cache{XE_Copy_K{}.with(tensorK_cache)};
     XE_Copy_V copyV_cache{XE_Copy_V{}.with(tensorV_cache)};
 
-    return Params{copyQ,
-                  copyK_cache,
-                  copyV_cache,
-                  args.ptr_page_table,
-                  args.page_size,
-                  args.max_pages_per_seq,
-                  args.total_seqlen_k,
-                  args.window_left,
-                  args.window_right};
+    return Params{
+        copyQ,
+        copyK_cache,
+        copyV_cache,
+        args.ptr_page_table,
+        args.page_size,
+        args.max_pages_per_seq,
+        args.total_seqlen_k,
+        args.window_left,
+        args.window_right};
   }
 
   template <class FragQccum, class TensorQ, class TensorK, class FragSrc>
-  CUTLASS_DEVICE void mmaQK(FragQccum& accum, TensorQ gQ, TensorK gK,
-                            FragSrc const& frag_src, int const& k_tile_count,
-                            Params const& params) {
+  CUTLASS_DEVICE void mmaQK(
+      FragQccum& accum,
+      TensorQ gQ,
+      TensorK gK,
+      FragSrc const& frag_src,
+      int const& k_tile_count,
+      Params const& params) {
     auto& gmem_tiled_copy_k = params.gmem_tiled_copy_k_cache;
 
     int thread_idx = static_cast<int>(ThreadIdxX());
@@ -332,10 +388,18 @@ struct FlashChunkPrefillMma<
     return make_tensor(make_rmem_ptr<To_type>(&frag), tensor.layout());
   }
 
-  template <int tile_count, class FragQccum, class FragS, class TensorV,
-            class FragSrc>
-  CUTLASS_DEVICE void mmaPV(FragQccum& accum, FragS const& tSr, TensorV gV,
-                            FragSrc const& frag_src, Params const& params) {
+  template <
+      int tile_count,
+      class FragQccum,
+      class FragS,
+      class TensorV,
+      class FragSrc>
+  CUTLASS_DEVICE void mmaPV(
+      FragQccum& accum,
+      FragS const& tSr,
+      TensorV gV,
+      FragSrc const& frag_src,
+      Params const& params) {
     auto& gmem_tiled_copy_v = params.gmem_tiled_copy_v_cache;
 
     int thread_idx = static_cast<int>(ThreadIdxX());
@@ -399,8 +463,10 @@ struct FlashChunkPrefillMma<
   // int, VariableSeqlen, VariableSeqlen, int, int>
   template <class ProblemShape, class SequenceLengthShape>
   CUTLASS_DEVICE static constexpr Params get_updated_copies(
-      Params const& params, ProblemShape const& problem_shape,
-      SequenceLengthShape const& sequence_length_shape, int const& l_coord,
+      Params const& params,
+      ProblemShape const& problem_shape,
+      SequenceLengthShape const& sequence_length_shape,
+      int const& l_coord,
       int const& q_head_coord = 0) {
     auto [num_heads_q, num_heads_kv, head_size_qk, head_size_vo] =
         select<1, 2, 5, 6>(problem_shape);
@@ -459,34 +525,35 @@ struct FlashChunkPrefillMma<
     auto shape_q =
         make_shape(static_cast<int>(seq_len_qo), head_size_qk * num_heads_q, 1);
     StrideQ stride_q = cutlass::make_cute_packed_stride(StrideQ{}, shape_q);
-    auto shape_k_cache = make_shape(static_cast<int>(seq_len_kv_cache),
-                                    head_size_qk * num_heads_kv, 1);
+    auto shape_k_cache = make_shape(
+        static_cast<int>(seq_len_kv_cache), head_size_qk * num_heads_kv, 1);
     StrideK stride_k_cache =
         cutlass::make_cute_packed_stride(StrideK{}, shape_k_cache);
-    auto shape_v_cache = make_shape(head_size_vo * num_heads_kv,
-                                    static_cast<int>(seq_len_kv_cache), 1);
+    auto shape_v_cache = make_shape(
+        head_size_vo * num_heads_kv, static_cast<int>(seq_len_kv_cache), 1);
     StrideV stride_v_cache =
         cutlass::make_cute_packed_stride(StrideV{}, shape_v_cache);
-    auto tensorQ = make_tensor(make_gmem_ptr(q_ptr + offset_q),
-                               make_layout(shape_q, stride_q));
-    auto tensorK_cache =
-        make_tensor(make_gmem_ptr(k_cache_ptr + offset_k_cache),
-                    make_layout(shape_k_cache, stride_k_cache));
-    auto tensorV_cache =
-        make_tensor(make_gmem_ptr(v_cache_ptr + offset_v_cache),
-                    make_layout(shape_v_cache, stride_v_cache));
+    auto tensorQ = make_tensor(
+        make_gmem_ptr(q_ptr + offset_q), make_layout(shape_q, stride_q));
+    auto tensorK_cache = make_tensor(
+        make_gmem_ptr(k_cache_ptr + offset_k_cache),
+        make_layout(shape_k_cache, stride_k_cache));
+    auto tensorV_cache = make_tensor(
+        make_gmem_ptr(v_cache_ptr + offset_v_cache),
+        make_layout(shape_v_cache, stride_v_cache));
     XE_Copy_Q copyQ{XE_Copy_Q{}.with(tensorQ)};
     XE_Copy_K copyK_cache{XE_Copy_K{}.with(tensorK_cache)};
     XE_Copy_V copyV_cache{XE_Copy_V{}.with(tensorV_cache)};
-    return Params{copyQ,
-                  copyK_cache,
-                  copyV_cache,
-                  params.ptr_page_table,
-                  params.page_size,
-                  params.max_pages_per_seq,
-                  params.total_seqlen_k,
-                  params.window_left,
-                  params.window_right};
+    return Params{
+        copyQ,
+        copyK_cache,
+        copyV_cache,
+        params.ptr_page_table,
+        params.page_size,
+        params.max_pages_per_seq,
+        params.total_seqlen_k,
+        params.window_left,
+        params.window_right};
   }
 };
 

@@ -46,10 +46,16 @@ namespace cutlass::gemm::kernel {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template <class ProblemShape_, class CollectiveMainloop_,
-          class CollectiveEpilogue_, class TileScheduler_>
+template <
+    class ProblemShape_,
+    class CollectiveMainloop_,
+    class CollectiveEpilogue_,
+    class TileScheduler_>
 class GemmUniversal<
-    ProblemShape_, CollectiveMainloop_, CollectiveEpilogue_, TileScheduler_,
+    ProblemShape_,
+    CollectiveMainloop_,
+    CollectiveEpilogue_,
+    TileScheduler_,
     cute::enable_if_t<cute::is_base_of_v<
         KernelMoEArrayCooperative,
         typename CollectiveMainloop_::DispatchPolicy::Schedule>>> {
@@ -92,13 +98,17 @@ class GemmUniversal<
   using EpilogueArguments = typename CollectiveEpilogue::Arguments;
   using EpilogueParams = typename CollectiveEpilogue::Params;
 
-  static_assert(cute::is_same_v<TileScheduler_, GroupScheduler>,
-                "Only Group Scheduler is supported with this code.");
+  static_assert(
+      cute::is_same_v<TileScheduler_, GroupScheduler>,
+      "Only Group Scheduler is supported with this code.");
   using TileSchedulerTag = TileScheduler_;
-  using TileScheduler =
-      typename detail::TileSchedulerSelector<TileScheduler_, ArchTag, TileShape,
-                                             ClusterShape, 0,
-                                             ProblemShape>::Scheduler;
+  using TileScheduler = typename detail::TileSchedulerSelector<
+      TileScheduler_,
+      ArchTag,
+      TileShape,
+      ClusterShape,
+      0,
+      ProblemShape>::Scheduler;
   using TileSchedulerArguments = typename TileScheduler::Arguments;
   using TileSchedulerParams = typename TileScheduler::Params;
 
@@ -149,8 +159,8 @@ class GemmUniversal<
 
   // Convert to underlying arguments. In this case, a simple copy for the
   // aliased type.
-  static Params to_underlying_arguments(Arguments const& args,
-                                        void* workspace) {
+  static Params
+  to_underlying_arguments(Arguments const& args, void* workspace) {
     CUTLASS_TRACE_HOST("to_underlying_arguments():");
 
     auto problem_shape = args.problem_shape;
@@ -176,18 +186,23 @@ class GemmUniversal<
     uint8_t* workspace_ptr = reinterpret_cast<uint8_t*>(workspace);
 
     TileSchedulerParams scheduler = TileScheduler::to_underlying_arguments(
-        problem_shape, TileShape{}, ClusterShape{}, hw_info, args.scheduler,
+        problem_shape,
+        TileShape{},
+        ClusterShape{},
+        hw_info,
+        args.scheduler,
         workspace_ptr);
 
-    return {args.mode,
-            problem_shape,
-            CollectiveMainloop::to_underlying_arguments(
-                args.problem_shape, args.mainloop, workspace_ptr),
-            CollectiveEpilogue::to_underlying_arguments(
-                args.problem_shape, args.epilogue, workspace_ptr),
-            hw_info,
-            scheduler,
-            workspace};
+    return {
+        args.mode,
+        problem_shape,
+        CollectiveMainloop::to_underlying_arguments(
+            args.problem_shape, args.mainloop, workspace_ptr),
+        CollectiveEpilogue::to_underlying_arguments(
+            args.problem_shape, args.epilogue, workspace_ptr),
+        hw_info,
+        scheduler,
+        workspace};
   }
 
   static bool can_implement(Arguments const& args) {
@@ -213,22 +228,32 @@ class GemmUniversal<
   static size_t get_workspace_size(Arguments const& args) {
     size_t workspace_size = 0;
     workspace_size += TileScheduler::template get_workspace_size<
-        typename ProblemShape::UnderlyingProblemShape, ElementAccumulator>(
-        args.scheduler, typename ProblemShape::UnderlyingProblemShape{},
-        args.hw_info, -1);
+        typename ProblemShape::UnderlyingProblemShape,
+        ElementAccumulator>(
+        args.scheduler,
+        typename ProblemShape::UnderlyingProblemShape{},
+        args.hw_info,
+        -1);
     return workspace_size;
   }
 
   static cutlass::Status initialize_workspace(
-      Arguments const& args, void* workspace = nullptr,
-      cudaStream_t stream = nullptr, CudaHostAdapter* cuda_adapter = nullptr) {
+      Arguments const& args,
+      void* workspace = nullptr,
+      cudaStream_t stream = nullptr,
+      CudaHostAdapter* cuda_adapter = nullptr) {
     Status status = Status::kSuccess;
     uint8_t* workspace_ptr = reinterpret_cast<uint8_t*>(workspace);
 
     status = TileScheduler::template initialize_workspace<
-        typename ProblemShape::UnderlyingProblemShape, ElementAccumulator>(
-        args.scheduler, workspace_ptr, stream,
-        typename ProblemShape::UnderlyingProblemShape{}, args.hw_info, -1);
+        typename ProblemShape::UnderlyingProblemShape,
+        ElementAccumulator>(
+        args.scheduler,
+        workspace_ptr,
+        stream,
+        typename ProblemShape::UnderlyingProblemShape{},
+        args.hw_info,
+        -1);
 
     return status;
   }
@@ -242,9 +267,13 @@ class GemmUniversal<
         params.scheduler.raster_order_ == TileScheduler::RasterOrder::AlongN
             ? TileScheduler::RasterOrderOptions::AlongN
             : TileScheduler::RasterOrderOptions::AlongM;
-    return TileScheduler::get_grid_shape(params.scheduler, params.problem_shape,
-                                         TileShape{}, ClusterShape{},
-                                         params.hw_info, args);
+    return TileScheduler::get_grid_shape(
+        params.scheduler,
+        params.problem_shape,
+        TileShape{},
+        ClusterShape{},
+        params.hw_info,
+        args);
   }
 
   static dim3 get_block_shape() { return dim3(MaxThreadsPerBlock, 1, 1); }
@@ -254,18 +283,22 @@ class GemmUniversal<
     // Preconditions
     CUTE_STATIC_ASSERT(is_static<WorkgroupTileShape>::value);
 
-    static_assert(cute::rank(InternalStrideA{}) == 3,
-                  "StrideA must be rank-3: [M, K, L]. If batch mode is not "
-                  "needed, set L stride to Int<0>.");
-    static_assert(cute::rank(InternalStrideB{}) == 3,
-                  "StrideB must be rank-3: [N, K, L]. If batch mode is not "
-                  "needed, set L stride to Int<0>.");
-    static_assert(cute::rank(InternalStrideC{}) == 3,
-                  "StrideC must be rank-3: [M, N, L]. If batch mode is not "
-                  "needed, set L stride to Int<0>.");
-    static_assert(cute::rank(InternalStrideD{}) == 3,
-                  "StrideD must be rank-3: [M, N, L]. If batch mode is not "
-                  "needed, set L stride to Int<0>.");
+    static_assert(
+        cute::rank(InternalStrideA{}) == 3,
+        "StrideA must be rank-3: [M, K, L]. If batch mode is not "
+        "needed, set L stride to Int<0>.");
+    static_assert(
+        cute::rank(InternalStrideB{}) == 3,
+        "StrideB must be rank-3: [N, K, L]. If batch mode is not "
+        "needed, set L stride to Int<0>.");
+    static_assert(
+        cute::rank(InternalStrideC{}) == 3,
+        "StrideC must be rank-3: [M, N, L]. If batch mode is not "
+        "needed, set L stride to Int<0>.");
+    static_assert(
+        cute::rank(InternalStrideD{}) == 3,
+        "StrideD must be rank-3: [M, N, L]. If batch mode is not "
+        "needed, set L stride to Int<0>.");
 
     // Kernel level shared memory storage
     SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(smem_buf);
@@ -302,10 +335,10 @@ class GemmUniversal<
       auto m_coord = work_tile_info.M_idx;
       auto n_coord = work_tile_info.N_idx;
 
-      auto gA_mkl = local_tile(mA_mkl, select<0, 2>(workgroup_shape),
-                               make_coord(m_coord, _, 0));
-      auto gB_nkl = local_tile(mB_nkl, select<1, 2>(workgroup_shape),
-                               make_coord(n_coord, _, 0));
+      auto gA_mkl = local_tile(
+          mA_mkl, select<0, 2>(workgroup_shape), make_coord(m_coord, _, 0));
+      auto gB_nkl = local_tile(
+          mB_nkl, select<1, 2>(workgroup_shape), make_coord(n_coord, _, 0));
 
       CollectiveMainloop collective_mma;
       if (did_group_change) {
@@ -328,24 +361,39 @@ class GemmUniversal<
           partition_fragment_C(tiled_mma, take<0, 2>(workgroup_shape));
 
       // Perform the collective scoped MMA
-      collective_mma(accumulators, gA_mkl, gB_nkl, accumulators, k_tile_iter,
-                     work_k_tile_count, tile_coord, K, thread_idx,
-                     params.mainloop, AB_tensors);
+      collective_mma(
+          accumulators,
+          gA_mkl,
+          gB_nkl,
+          accumulators,
+          k_tile_iter,
+          work_k_tile_count,
+          tile_coord,
+          K,
+          thread_idx,
+          params.mainloop,
+          AB_tensors);
 
-      TileScheduler::fixup(params.scheduler, work_tile_info, accumulators, -1,
-                           -1);
+      TileScheduler::fixup(
+          params.scheduler, work_tile_info, accumulators, -1, -1);
 
       if (TileScheduler::compute_epilogue(work_tile_info, params.scheduler)) {
         CollectiveEpilogue epilogue{params.epilogue, shared_storage.epilogue};
 
         if (did_group_change) {
-          CD_tensors = epilogue.update_tensor_shape_stride(curr_group,
-                                                           problem_shape_MNKL);
+          CD_tensors = epilogue.update_tensor_shape_stride(
+              curr_group, problem_shape_MNKL);
           did_group_change = false;
         }
 
-        epilogue(problem_shape_MNKL, subgroup_shape, tile_coord, accumulators,
-                 tiled_mma, thread_idx, CD_tensors);
+        epilogue(
+            problem_shape_MNKL,
+            subgroup_shape,
+            tile_coord,
+            accumulators,
+            tiled_mma,
+            thread_idx,
+            CD_tensors);
       }
 
       // Get next work tile
