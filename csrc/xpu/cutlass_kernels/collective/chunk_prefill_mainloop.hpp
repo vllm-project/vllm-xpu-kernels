@@ -152,6 +152,7 @@ struct FMHAFwdMainloop<
 
   using FragS = FragC<TiledMMAQK>;
   using FragSRow = decltype(reduce<1>(FragS{}, sycl::plus<void>{}));
+  using FragSCol = decltype(reduce<0>(FragS{}, sycl::plus<void>{}));
   using ElementS = typename TiledMMAQK::ValTypeD;
 
   using SingleFragA = FragC<TiledMMAPV>;  // (atom val,q',v')
@@ -288,6 +289,33 @@ struct FMHAFwdMainloop<
     auto pKgK = prefetch_k.get_slice(thr_id).partition_S(gK);
     auto pVgV = prefetch_v.get_slice(thr_id).partition_S(gV);
 
+    // if (cute::thread(0, 0)) {
+    //   print("Q_2D: "); print(Q_2D); print("\n");
+    //   print("cQ: "); print(cQ); print("\n");
+    //   print("gQ: "); print(gQ); print("\n");
+    //   print("tQgQ: "); print(tQgQ); print("\n");
+    //   print("tQrQ: "); print(tQrQ); print("\n");
+    //   print("K_2D: "); print(K_2D); print("\n");
+    //   print("cK: "); print(cK); print("\n");
+    //   print("gK: "); print(gK); print("\n");
+    //   print("tKgK: "); print(tKgK); print("\n");
+    //   print("tKrK: "); print(tKrK); print("\n");
+
+    //   int k = get<0>(tKgK(0, 0, 0, blk_k1 - 1, 0)) +
+    //   get_sub_group().get_local_id()[0]; FragSRow k_rem_mask; print("tKgK(0,
+    //   0, 0, blk_k1 - 1, 0): "); print(tKgK(0, 0, 0, blk_k1 - 1, 0));
+    //   print("\n"); print("get<0>tKgK: "); print(k); print("\n");
+    //   print("tKgK(0, 0, 0, 0, 0): "); print(tKgK(0, 0, 0, 0, 0));
+    //   print("\n"); print("k_rem_mask.size(): "); print(k_rem_mask.size());
+    //   print("\n"); print("tSrS: "); print(tSrS); print("\n"); print("FragS{}:
+    //   "); print(FragS{}); print("\n"); print("reduce<0>(FragS{},
+    //   sycl::plus<void>{}): "); print(reduce<0>(FragS{}, sycl::plus<void>{}));
+    //   print("\n"); print("reduce<1>(FragS{}, sycl::plus<void>{}): ");
+    //   print(reduce<1>(FragS{}, sycl::plus<void>{})); print("\n");
+    //   print("tArA: "); print(tArA); print("\n");
+    //   print("tA_max: "); print(tA_max); print("\n");
+    // }
+
     // ------
     // Kernel
     // ------
@@ -331,6 +359,10 @@ struct FMHAFwdMainloop<
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
       }
 
+      // if (cute::thread(0, 0)) {
+      //   print("tSrS before padding: "); print_tensor(tSrS); print("\n");
+      // }
+
       /* V prefetch for GEMM 2 */
       prefetch(prefetch_v, pVgV(_, _, _, K));
 
@@ -354,7 +386,7 @@ struct FMHAFwdMainloop<
       }
       /* k masking for remainder tiles */
       if (check_remainder_k && K == blk_k1 - 1) {
-        FragSRow k_rem_mask;
+        FragSCol k_rem_mask;
         int k = get<0>(tKgK(0, 0, 0, K, 0)) + get_sub_group().get_local_id()[0];
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < k_rem_mask.size(); i++, k += intel::sg_size) {
@@ -366,6 +398,11 @@ struct FMHAFwdMainloop<
           tSrS(i) = sycl::fmin(tSrS(i), broadcast<1>(k_rem_mask, tSrS, i));
         }
       }
+
+      // if (cute::thread(0, 0)) {
+      //   print("check_remainder_k: "); print(check_remainder_k); print("\n");
+      //   print("tSrS after padding: "); print_tensor(tSrS); print("\n");
+      // }
 
       /* Apply softmax and scaling */
       softmax(K == 0, tSrS, tA_max, tA_sum, tArA);
@@ -406,6 +443,17 @@ struct FMHAFwdMainloop<
     for (int i = 0; i < tS_max.size(); i++) {
       tS_max(i) = sycl::max(tS_max(i), params.scale * tS_bmax(i));
     }
+
+    // if (cute::thread(0, 0)) {
+    //   print("tS: "); print_tensor(tS); print("\n");
+    //   print("tS_bmax: "); print_tensor(tS_bmax); print("\n");
+    //   print("tS_max: "); print_tensor(tS_max); print("\n");
+    //   for (int i = 0; i < tS.size(); i++) {
+    //     print("i: "); print(i); print("\n");
+    //     auto broadcast_max = broadcast<1>(tS_max, tS, i);
+    //     print("broadcast_max: "); print(broadcast_max); print("\n");
+    //   }
+    // }
 
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL

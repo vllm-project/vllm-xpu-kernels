@@ -245,6 +245,7 @@ class XeFMHAFwdKernel {
 
       if (CollectiveMainloop::CausalMask && seq_coord < discard_seq_coord)
         continue;
+      // calc sg level seq_len_kv
       const int seq_len =
           CollectiveMainloop::CausalMask
               ? full_tile_offset +
@@ -279,27 +280,23 @@ class XeFMHAFwdKernel {
       auto dcV = const_cast<ElementV*>(p.V + offset_v);
       auto ptrO = p.O + offset_o;
 
-      auto stride_q = is_var_len
-                          ? cutlass::make_cute_packed_stride(StrideQ{}, shape_Q)
-                          : p.dQ;
-      auto stride_k = is_var_len
-                          ? cutlass::make_cute_packed_stride(StrideK{}, shape_K)
-                          : p.dK;
-      auto stride_v = is_var_len
-                          ? cutlass::make_cute_packed_stride(StrideV{}, shape_V)
-                          : p.dV;
-      auto stride_o = is_var_len
-                          ? cutlass::make_cute_packed_stride(StrideO{}, shape_O)
-                          : p.dO;
+      auto layout_q = is_var_len
+                          ? make_ordered_layout(shape_Q, Step<_2, _0, _1, _3>{})
+                          : make_layout(shape_Q, p.dQ);
+      auto layout_k = is_var_len
+                          ? make_ordered_layout(shape_K, Step<_2, _0, _1, _3>{})
+                          : make_layout(shape_K, p.dK);
+      auto layout_v = is_var_len
+                          ? make_ordered_layout(shape_V, Step<_0, _2, _1, _3>{})
+                          : make_layout(shape_V, p.dV);
+      auto layout_o = is_var_len
+                          ? make_ordered_layout(shape_O, Step<_2, _0, _1, _3>{})
+                          : make_layout(shape_O, p.dO);
 
-      Tensor Q =
-          make_tensor(make_gmem_ptr(dcQ), make_layout(shape_Q, stride_q));
-      Tensor K =
-          make_tensor(make_gmem_ptr(dcK), make_layout(shape_K, stride_k));
-      Tensor V =
-          make_tensor(make_gmem_ptr(dcV), make_layout(shape_V, stride_v));
-      Tensor O =
-          make_tensor(make_gmem_ptr(ptrO), make_layout(shape_O, stride_o));
+      Tensor Q = make_tensor(make_gmem_ptr(dcQ), layout_q);
+      Tensor K = make_tensor(make_gmem_ptr(dcK), layout_k);
+      Tensor V = make_tensor(make_gmem_ptr(dcV), layout_v);
+      Tensor O = make_tensor(make_gmem_ptr(ptrO), layout_o);
 
       // O accumulator types
       FragA tArA;
