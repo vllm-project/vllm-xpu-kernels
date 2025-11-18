@@ -37,7 +37,8 @@
 #include "cutlass/gemm/gemm.h"
 /* #include "cutlass/gemm/dispatch_policy.hpp" */
 #include "moe_array_mma.hpp"
-#include "cutlass/gemm/kernel/tile_scheduler.hpp"
+#include "moe_tile_scheduler.hpp"
+// #include "cutlass/gemm/kernel/tile_scheduler.hpp"
 #include "cute/tensor.hpp"
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -102,13 +103,14 @@ class GemmUniversal<
       cute::is_same_v<TileScheduler_, GroupScheduler>,
       "Only Group Scheduler is supported with this code.");
   using TileSchedulerTag = TileScheduler_;
-  using TileScheduler = typename detail::TileSchedulerSelector<
-      TileScheduler_,
-      ArchTag,
-      TileShape,
-      ClusterShape,
-      0,
-      ProblemShape>::Scheduler;
+  // using TileScheduler = typename detail::TileSchedulerSelector<
+  //     TileScheduler_,
+  //     ArchTag,
+  //     TileShape,
+  //     ClusterShape,
+  //     0,
+  //     ProblemShape>::Scheduler;
+  using TileScheduler = typename cutlass::gemm::kernel::detail::PersistentTileSchedulerMoE<ProblemShape>;
   using TileSchedulerArguments = typename TileScheduler::Arguments;
   using TileSchedulerParams = typename TileScheduler::Params;
 

@@ -99,15 +99,12 @@
 #include <cfloat>
 
 #include "cutlass/gemm/collective/collective_mma_decl.hpp"
-/* #include "./collective/gemm/gemm_universal.h" */
-/* #include "./collective/gemm/gemm_universal_adapter.h" */
 #include "collective/gemm/moe_array_mma.hpp"
 #include "collective/gemm/moe_array_epilogue.hpp"
-/* #include "./collective/gemm/xe_builder.hpp" */
 #include "collective/gemm/moe_callbacks.hpp"
 #include "collective/gemm/moe_dtype_policy.hpp"
 #include "collective/gemm/moe_gemm_array_cooperative.hpp"
-// #include "./collective/gemm/gemm_universal_adapter.hpp"
+#include "collective/gemm/moe_tile_scheduler.hpp"
 
 using namespace cute;
 using ProblemShape =
@@ -297,7 +294,7 @@ struct GroupedGemmRunner {
     fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 1};
     fusion_args.dBeta = {cute::_0{}, cute::_0{}, 1};
     using RasterOrderOptions =
-        typename cutlass::gemm::kernel::detail::PersistentTileSchedulerXeGroup<
+        typename cutlass::gemm::kernel::detail::PersistentTileSchedulerMoE<
             ProblemShape>::RasterOrderOptions;
 
     // Per-GEMM problem shape info may only exist on the device.
