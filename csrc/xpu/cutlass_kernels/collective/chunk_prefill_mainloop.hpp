@@ -57,6 +57,7 @@ using namespace cute;
 template <
     class DispatchPolicy_,
     bool CausalMask_,
+    bool PagedKV_,
     class TiledMMAQK_,  // Tiling for Q*K GEMM
     class TiledMMAPV_,  // Tiling for P*V GEMM
     int VTiles_,        // # of tiles in V dimension
@@ -77,6 +78,7 @@ struct FMHAFwdMainloop {
 template <
     int Stages,
     bool CausalMask_,
+    bool PagedKV_,
     class TiledMMAQK_,
     class TiledMMAPV_,
     int VTiles_,
@@ -89,6 +91,7 @@ template <
 struct FMHAFwdMainloop<
     XeDefault<Stages>,
     CausalMask_,
+    PagedKV_,
     TiledMMAQK_,
     TiledMMAPV_,
     VTiles_,
@@ -162,10 +165,17 @@ struct FMHAFwdMainloop<
   using ElementA = typename TiledMMAPV::ValTypeD;
 
   static constexpr bool CausalMask = CausalMask_;
+  static constexpr bool PagedKV = PagedKV_;
 
   // User-facing arguments
   struct Arguments {
     ElementS const scale;
+
+    // Paged KV Cache
+    int const* ptr_page_table;
+    int page_size;
+    int const max_pages_per_seq;
+    int const total_seqlen_kv;
   };
 
   // Kernel-facing parameters
@@ -186,7 +196,12 @@ struct FMHAFwdMainloop<
   to_underlying_arguments(Arguments const& args, void* /* workspace */) {
     constexpr double kLog2e = 1.4426950408889634074;  // log_2(e)
     ElementS val = args.scale * static_cast<ElementS>(kLog2e);
-    return Params{val};
+    return Params{
+        val,
+        args.ptr_page_table,
+        args.page_size,
+        args.max_pages_per_seq,
+        args.total_seqlen_kv};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -202,6 +217,7 @@ struct FMHAFwdMainloop<
       FragARow& tA_max,       // Softmax row-wise max accumulator
       FragARow& tA_sum,       // Softmax row-wise sum accumulator
       QVCoord blk_qv,         // WG tile indices: (Q,V)
+      int const& idx_b,       // WG tile indices: (B)
       int blk_k0,             // K block range: [K0,K1)
       int blk_k1,
       int thr_id,
@@ -342,6 +358,14 @@ struct FMHAFwdMainloop<
     /* Check if */
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
 
+    // PagedKV
+    int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
+    int page_idx;
+    if constexpr (PagedKV) {
+      int b_offset = idx_b * params.max_pages_per_seq;
+      page_idx = params.ptr_page_table[b_offset] * tiles_per_page;
+    }
+
     /* Main loop, blocked in k. */
     for (int K = blk_k0; K < blk_k1; K++) {
       /* Split barrier to keep threads together */
@@ -351,7 +375,7 @@ struct FMHAFwdMainloop<
       clear(tSrS); /* TODO: fuse w/ initial gemm call */
       for (int D = 0; D < size<4>(tKgK); D++) {
         copy(copy_q, tQgQ(_, _, _, D), tQrQ);
-        copy(copy_k, tKgK(_, _, _, K, D), tKrK);
+        copy(copy_k, tKgK(_, _, _, page_idx, D), tKrK);
 
         reorder(tQrQ, tSrQ);
         reorder(tKrK, tSrK);
@@ -411,9 +435,28 @@ struct FMHAFwdMainloop<
       /* GEMM 2: A += P * V, split in v dimension */
       CUTLASS_PRAGMA_UNROLL
       for (int VV = 0; VV < VTiles; VV++) {
-        copy(copy_v, tVgV(_, _, _, VV, K), tVrV);
+        copy(copy_v, tVgV(_, _, _, VV, page_idx), tVrV);
         reorder(tVrV, tArV);
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
+      }
+
+      // next paged_idx
+      if constexpr (PagedKV) {
+        int next_page_idx = K + 1;
+        int next_page_local_idx =
+            next_page_idx * get<1>(TileShapeQK{}) / params.page_size;
+        int b_offset = idx_b * params.max_pages_per_seq;
+        if (next_page_local_idx < params.max_pages_per_seq) {
+          next_page_idx =
+              params.ptr_page_table[b_offset + next_page_local_idx] *
+                  tiles_per_page +
+              next_page_idx % tiles_per_page;
+        } else {
+          // set to last page
+          next_page_idx = params.max_pages_per_seq * tiles_per_page;
+        }
+
+        page_idx = next_page_idx;
       }
 
       /* K prefetch */

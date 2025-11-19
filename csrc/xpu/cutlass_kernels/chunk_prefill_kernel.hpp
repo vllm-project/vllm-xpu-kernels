@@ -112,6 +112,10 @@ class XeFMHAFwdKernel {
   using ElementO = typename CollectiveEpilogue::TensorO::element_type;
   using StrideO = decltype(stride(typename CollectiveEpilogue::TensorO{}));
 
+  // Template Features
+  static constexpr bool PagedKV = CollectiveMainloop::PagedKV;
+  static constexpr bool CausalMask = CollectiveMainloop::CausalMask;
+
   // Kernel level shared memory storage
   using MainloopSharedStorage = typename CollectiveMainloop::SharedStorage;
   using EpilogueSharedStorage = typename CollectiveEpilogue::SharedStorage;
@@ -243,11 +247,10 @@ class XeFMHAFwdKernel {
       int seq_coord =
           cute::min(seq_len_qo, (blk_q * get<0>(TileShapeQK{}) + q_offset_sg));
 
-      if (CollectiveMainloop::CausalMask && seq_coord < discard_seq_coord)
-        continue;
+      if (CausalMask && seq_coord < discard_seq_coord) continue;
       // calc sg level seq_len_kv
       const int seq_len =
-          CollectiveMainloop::CausalMask
+          CausalMask
               ? full_tile_offset +
                     cute::min(seq_len_kv, seq_coord - discard_seq_coord) +
                     q_sg_tile
@@ -266,12 +269,14 @@ class XeFMHAFwdKernel {
       }
 
       auto batch_dim = is_var_len ? 1 : s.batch;
+      auto total_seqlen_kv =
+          PagedKV ? params.mainloop.total_seqlen_kv : seq_len_kv;
       auto shape_Q =
           make_shape(seq_len_qo, s.head_size_qk, s.num_heads_q, batch_dim);
-      auto shape_K =
-          make_shape(seq_len_kv, s.head_size_qk, s.num_heads_kv, batch_dim);
-      auto shape_V =
-          make_shape(s.head_size_vo, seq_len_kv, s.num_heads_kv, batch_dim);
+      auto shape_K = make_shape(
+          total_seqlen_kv, s.head_size_qk, s.num_heads_kv, batch_dim);
+      auto shape_V = make_shape(
+          s.head_size_vo, total_seqlen_kv, s.num_heads_kv, batch_dim);
       auto shape_O =
           make_shape(seq_len_qo, s.head_size_vo, s.num_heads_kv, batch_dim);
 
@@ -313,6 +318,7 @@ class XeFMHAFwdKernel {
           tA_max,
           tA_sum,
           blk_qv,
+          idx_b,
           0,
           k_blocks,
           thr_id,

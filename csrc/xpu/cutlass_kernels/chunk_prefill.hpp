@@ -143,7 +143,11 @@ struct KernelLauncher {
          stride_V,
          reinterpret_cast<ElementO*>(args.out),
          stride_O},
-        {args.sm_scale},
+        {args.sm_scale,
+         static_cast<int*>(args.block_table),
+         args.block_size,
+         args.max_blocks_per_seq,
+         args.total_seqlen_k},
         {},
         hw_info};
 
@@ -268,6 +272,7 @@ struct FMHAConfig {
     using CollectiveMainloop = cutlass::fmha::collective::FMHAFwdMainloop<
         MainloopDispatchPolicy,
         Causal,
+        Paged,
         TiledMMAQK,
         TiledMMAPV,
         VTiles,
@@ -333,7 +338,7 @@ void policy_dispatch(
             queue,
             args,
             args.is_varlen,
-            false,  // paged
+            args.is_paged,
             args.is_causal,
             false,   // args.is_local,
             false);  // args.is_sink);
@@ -349,7 +354,7 @@ void policy_dispatch(
             queue,
             args,
             args.is_varlen,
-            false,  // paged
+            args.is_paged,
             args.is_causal,
             false,   // args.is_local,
             false);  // args.is_sink);
@@ -372,6 +377,7 @@ void cutlass_chunk_prefill_impl(
     int window_size_left,
     int window_size_right,
     bool is_varlen,
+    bool is_paged,
     bool is_causal,
     bool is_local,
     bool is_sink) {
@@ -397,6 +403,14 @@ void cutlass_chunk_prefill_impl(
     max_seqlen_q = query.size(2);
     max_seqlen_k = key_cache.size(2);
   }
+  if (is_paged) {
+    num_blocks = key_cache.size(0);
+    block_size = key_cache.size(1);
+    num_heads_kv = key_cache.size(2);
+    max_blocks_per_seq = block_table.size(1);
+    total_seqlen_k = num_blocks * block_size;
+  }
+  std::cout << "block_table.size() " << block_table.sizes() << std::endl;
 
   if (is_local) {
     window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
@@ -427,7 +441,7 @@ void cutlass_chunk_prefill_impl(
       window_size_left,
       window_size_right,
       is_varlen,  // varlen
-      false,      // paged
+      is_paged,   // paged
       is_causal,
       is_local,
       is_sink};
