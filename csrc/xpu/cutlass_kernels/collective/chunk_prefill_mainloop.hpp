@@ -453,17 +453,6 @@ struct FMHAFwdMainloop<
       tS_max(i) = sycl::max(tS_max(i), params.scale * tS_bmax(i));
     }
 
-    // if (cute::thread(0, 0)) {
-    //   print("tS: "); print_tensor(tS); print("\n");
-    //   print("tS_bmax: "); print_tensor(tS_bmax); print("\n");
-    //   print("tS_max: "); print_tensor(tS_max); print("\n");
-    //   for (int i = 0; i < tS.size(); i++) {
-    //     print("i: "); print(i); print("\n");
-    //     auto broadcast_max = broadcast<1>(tS_max, tS, i);
-    //     print("broadcast_max: "); print(broadcast_max); print("\n");
-    //   }
-    // }
-
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++)
