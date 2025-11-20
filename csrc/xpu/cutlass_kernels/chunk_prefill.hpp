@@ -337,9 +337,9 @@ void policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            args.is_varlen,
-            args.is_paged,
-            args.is_causal,
+            true, // args.is_varlen,
+            true, // args.is_paged,
+            false, // args.is_causal,
             false,   // args.is_local,
             false);  // args.is_sink);
   } else {
@@ -353,9 +353,9 @@ void policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            args.is_varlen,
-            args.is_paged,
-            args.is_causal,
+            true, // args.is_varlen,
+            true, // args.is_paged,
+            false, // args.is_causal,
             false,   // args.is_local,
             false);  // args.is_sink);
   }
@@ -410,7 +410,6 @@ void cutlass_chunk_prefill_impl(
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
   }
-  std::cout << "block_table.size() " << block_table.sizes() << std::endl;
 
   if (is_local) {
     window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;

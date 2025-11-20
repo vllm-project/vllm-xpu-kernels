@@ -171,7 +171,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CUTLASS_ENABLE_HEADERS_ONLY "ON" CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "main" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "3f2a337e885db0fb97b2a6ba514eb7a2a734ac4a" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   FetchContent_Declare(
@@ -195,8 +195,6 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CUTLASS_ENABLE_BENCHMARKS "OFF")
   # disable cuda
   set(CUTLASS_ENABLE_GDC_FOR_SM100_DEFAULT OFF CACHE BOOL "DISABLE CUDA")
-  # list(APPEND CMAKE_CXX_FLAGS "-ftemplate-backtrace-limit=0 " )
-  # list(APPEND CMAKE_CXX_FLAGS "-fdiagnostics-color=always " )
 
   FetchContent_MakeAvailable(cutlass-sycl)
   set(CUTLASS_INCLUDE_DIR ${cutlass-sycl_SOURCE_DIR}/include CACHE PATH "CUTLASS Header Library")
@@ -205,6 +203,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   message(STATUS "cutlass dir: ${CUTLASS_INCLUDE_DIR} and ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR} and ${CUTLASS_APP_INCLUDE_DIR}")
 
   # header only library
+  list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_ENABLE_HEADERS_ONLY")
   list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_ENABLE_SYCL")
   list(APPEND VLLM_GPU_FLAGS "-DSYCL_INTEL_TARGET")
   list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_VERSIONS_GENERATED")

@@ -172,10 +172,10 @@ struct FMHAFwdMainloop<
     ElementS const scale;
 
     // Paged KV Cache
-    int const* ptr_page_table;
+    int* ptr_page_table;
     int page_size;
-    int const max_pages_per_seq;
-    int const total_seqlen_kv;
+    int max_pages_per_seq;
+    int total_seqlen_kv;
   };
 
   // Kernel-facing parameters
@@ -305,36 +305,17 @@ struct FMHAFwdMainloop<
     auto pKgK = prefetch_k.get_slice(thr_id).partition_S(gK);
     auto pVgV = prefetch_v.get_slice(thr_id).partition_S(gV);
 
-    // if (cute::thread(0, 0)) {
-    //   print("Q_2D: "); print(Q_2D); print("\n");
-    //   print("cQ: "); print(cQ); print("\n");
-    //   print("gQ: "); print(gQ); print("\n");
-    //   print("tQgQ: "); print(tQgQ); print("\n");
-    //   print("tQrQ: "); print(tQrQ); print("\n");
-    //   print("K_2D: "); print(K_2D); print("\n");
-    //   print("cK: "); print(cK); print("\n");
-    //   print("gK: "); print(gK); print("\n");
-    //   print("tKgK: "); print(tKgK); print("\n");
-    //   print("tKrK: "); print(tKrK); print("\n");
-
-    //   int k = get<0>(tKgK(0, 0, 0, blk_k1 - 1, 0)) +
-    //   get_sub_group().get_local_id()[0]; FragSRow k_rem_mask; print("tKgK(0,
-    //   0, 0, blk_k1 - 1, 0): "); print(tKgK(0, 0, 0, blk_k1 - 1, 0));
-    //   print("\n"); print("get<0>tKgK: "); print(k); print("\n");
-    //   print("tKgK(0, 0, 0, 0, 0): "); print(tKgK(0, 0, 0, 0, 0));
-    //   print("\n"); print("k_rem_mask.size(): "); print(k_rem_mask.size());
-    //   print("\n"); print("tSrS: "); print(tSrS); print("\n"); print("FragS{}:
-    //   "); print(FragS{}); print("\n"); print("reduce<0>(FragS{},
-    //   sycl::plus<void>{}): "); print(reduce<0>(FragS{}, sycl::plus<void>{}));
-    //   print("\n"); print("reduce<1>(FragS{}, sycl::plus<void>{}): ");
-    //   print(reduce<1>(FragS{}, sycl::plus<void>{})); print("\n");
-    //   print("tArA: "); print(tArA); print("\n");
-    //   print("tA_max: "); print(tA_max); print("\n");
-    // }
-
     // ------
     // Kernel
     // ------
+
+    // PagedKV
+    int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
+    int page_idx, next_page_idx;
+    int b_offset = idx_b * params.max_pages_per_seq;
+    if constexpr (PagedKV) {
+      page_idx = params.ptr_page_table[b_offset] * tiles_per_page;
+    }
 
     /* Initialization steps for first block: Q/K prefetch, O init */
     /* TODO: limit D prefetch for large head size, and reorder K prefetches */
@@ -344,10 +325,7 @@ struct FMHAFwdMainloop<
       }
 
       for (int D = 0; D < size<4>(pKgK); D++) {
-        CUTLASS_PRAGMA_UNROLL
-        for (int K = 0; K < Stages; K++) {
-          prefetch(prefetch_k, pKgK(_, _, _, K, D));
-        }
+        prefetch(prefetch_k, pKgK(_, _, _, page_idx, D));
       }
 
       clear(tArA);
@@ -358,37 +336,27 @@ struct FMHAFwdMainloop<
     /* Check if */
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
 
-    // PagedKV
-    int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
-    int page_idx;
-    if constexpr (PagedKV) {
-      int b_offset = idx_b * params.max_pages_per_seq;
-      page_idx = params.ptr_page_table[b_offset] * tiles_per_page;
-    }
-
     /* Main loop, blocked in k. */
     for (int K = blk_k0; K < blk_k1; K++) {
       /* Split barrier to keep threads together */
-      barrier_arrive(ScopeWorkgroup);
+      // barrier_arrive(ScopeSubgroup);
+
+      auto tKgK_cache = PagedKV ? tKgK(_, _, _, page_idx, _) : tKgK(_, _, _, K, _);
+      auto tVgV_cache = PagedKV ? tVgV(_, _, _, _, page_idx) : tVgV(_, _, _, _, K);
 
       /* GEMM 1: S = K * Q */
       clear(tSrS); /* TODO: fuse w/ initial gemm call */
       for (int D = 0; D < size<4>(tKgK); D++) {
         copy(copy_q, tQgQ(_, _, _, D), tQrQ);
-        copy(copy_k, tKgK(_, _, _, page_idx, D), tKrK);
+        copy(copy_k, tKgK_cache(_, _, _, D), tKrK);
 
         reorder(tQrQ, tSrQ);
         reorder(tKrK, tSrK);
-
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
       }
 
-      // if (cute::thread(0, 0)) {
-      //   print("tSrS before padding: "); print_tensor(tSrS); print("\n");
-      // }
-
       /* V prefetch for GEMM 2 */
-      prefetch(prefetch_v, pVgV(_, _, _, K));
+      prefetch(prefetch_v, pVgV(_, _, _, page_idx));
 
       /* Causal masking */
       if constexpr (CausalMask) {
@@ -423,11 +391,6 @@ struct FMHAFwdMainloop<
         }
       }
 
-      // if (cute::thread(0, 0)) {
-      //   print("check_remainder_k: "); print(check_remainder_k); print("\n");
-      //   print("tSrS after padding: "); print_tensor(tSrS); print("\n");
-      // }
-
       /* Apply softmax and scaling */
       softmax(K == 0, tSrS, tA_max, tA_sum, tArA);
       reorder(tSrS, tArP);
@@ -435,36 +398,37 @@ struct FMHAFwdMainloop<
       /* GEMM 2: A += P * V, split in v dimension */
       CUTLASS_PRAGMA_UNROLL
       for (int VV = 0; VV < VTiles; VV++) {
-        copy(copy_v, tVgV(_, _, _, VV, page_idx), tVrV);
+        copy(copy_v, tVgV_cache(_, _, _, VV), tVrV);
         reorder(tVrV, tArV);
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
 
+      sycl::group_barrier(compat::get_nd_item<1>().get_group());
+
       // next paged_idx
+      next_page_idx = K + 1;
       if constexpr (PagedKV) {
-        int next_page_idx = K + 1;
         int next_page_local_idx =
             next_page_idx * get<1>(TileShapeQK{}) / params.page_size;
-        int b_offset = idx_b * params.max_pages_per_seq;
-        if (next_page_local_idx < params.max_pages_per_seq) {
+        bool valid_page = next_page_local_idx < params.max_pages_per_seq;
+        if (valid_page) {
           next_page_idx =
               params.ptr_page_table[b_offset + next_page_local_idx] *
                   tiles_per_page +
               next_page_idx % tiles_per_page;
         } else {
           // set to last page
-          next_page_idx = params.max_pages_per_seq * tiles_per_page;
+          next_page_idx = params.max_pages_per_seq * tiles_per_page - 1;
         }
-
-        page_idx = next_page_idx;
       }
+      page_idx = next_page_idx;
 
       /* K prefetch */
       for (int D = 0; D < size<4>(pKgK); D++) {
-        prefetch(prefetch_k, pKgK(_, _, _, K + Stages, D));
+        prefetch(prefetch_k, pKgK(_, _, _, page_idx, D));
       }
 
-      barrier_wait(ScopeWorkgroup);
+      // barrier_wait(ScopeSubgroup);
     }
   }
 
