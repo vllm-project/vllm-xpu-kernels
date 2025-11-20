@@ -263,8 +263,12 @@ class XeFMHAFwdKernel {
         auto qo_cumulative = s.seq_len_qo.cumulative_length;
         auto kv_cumulative = s.seq_len_kv.cumulative_length;
         offset_q = s.num_heads_q * s.head_size_qk * qo_cumulative[idx_b];
-        offset_k = PagedKV ? 0 : s.num_heads_kv * s.head_size_qk * kv_cumulative[idx_b];
-        offset_v = PagedKV ? 0 : s.num_heads_kv * s.head_size_vo * kv_cumulative[idx_b];
+        offset_k = PagedKV
+                       ? 0
+                       : s.num_heads_kv * s.head_size_qk * kv_cumulative[idx_b];
+        offset_v = PagedKV
+                       ? 0
+                       : s.num_heads_kv * s.head_size_vo * kv_cumulative[idx_b];
         offset_o = s.num_heads_q * s.head_size_vo * qo_cumulative[idx_b];
       }
 

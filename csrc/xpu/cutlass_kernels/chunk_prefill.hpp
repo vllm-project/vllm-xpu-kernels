@@ -337,9 +337,9 @@ void policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            true, // args.is_varlen,
-            true, // args.is_paged,
-            false, // args.is_causal,
+            true,    // args.is_varlen,
+            true,    // args.is_paged,
+            false,   // args.is_causal,
             false,   // args.is_local,
             false);  // args.is_sink);
   } else {
@@ -353,9 +353,9 @@ void policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            true, // args.is_varlen,
-            true, // args.is_paged,
-            false, // args.is_causal,
+            true,    // args.is_varlen,
+            true,    // args.is_paged,
+            false,   // args.is_causal,
             false,   // args.is_local,
             false);  // args.is_sink);
   }

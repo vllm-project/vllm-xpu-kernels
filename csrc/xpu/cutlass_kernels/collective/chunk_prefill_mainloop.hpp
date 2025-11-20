@@ -341,8 +341,10 @@ struct FMHAFwdMainloop<
       /* Split barrier to keep threads together */
       // barrier_arrive(ScopeSubgroup);
 
-      auto tKgK_cache = PagedKV ? tKgK(_, _, _, page_idx, _) : tKgK(_, _, _, K, _);
-      auto tVgV_cache = PagedKV ? tVgV(_, _, _, _, page_idx) : tVgV(_, _, _, _, K);
+      auto tKgK_cache =
+          PagedKV ? tKgK(_, _, _, page_idx, _) : tKgK(_, _, _, K, _);
+      auto tVgV_cache =
+          PagedKV ? tVgV(_, _, _, _, page_idx) : tVgV(_, _, _, _, K);
 
       /* GEMM 1: S = K * Q */
       clear(tSrS); /* TODO: fuse w/ initial gemm call */
