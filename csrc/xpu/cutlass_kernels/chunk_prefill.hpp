@@ -208,7 +208,7 @@ template <
     typename ElementQ = bfloat16_t,
     typename ElementK = bfloat16_t,
     typename ElementV = bfloat16_t,
-    typename ElementO = float,
+    typename ElementO = bfloat16_t,
     typename MMAOperation_ = void, /* void -> default */
     typename StrideQ = Stride<int, _1, int, int>,
     typename StrideK = Stride<int, _1, int, int>,
@@ -331,6 +331,7 @@ void policy_dispatch(
         typename chunk_policy::SubgroupLayoutQK,
         void,
         PipelineStages,
+        half_t,
         half_t,
         half_t,
         half_t>::
