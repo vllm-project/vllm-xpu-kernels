@@ -26,7 +26,7 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
 #install umd
 COPY umd /opt/umd
-RUN dpkg -i /opt/umd/*deb -y
+RUN dpkg -i /opt/umd/*deb
 
 RUN python3 -m pip config set global.break-system-packages true 
 
