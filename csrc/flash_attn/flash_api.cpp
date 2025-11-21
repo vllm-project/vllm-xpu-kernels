@@ -81,6 +81,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     out = torch::empty_like(q);
   }
 
+  bool is_varlen = true;
+  bool is_paged = true;
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
 
@@ -99,6 +101,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
       softmax_sink_,
       window_size_left,
       window_size_right,
+      is_varlen,
+      is_paged,
       is_causal,
       is_local,
       is_sink);

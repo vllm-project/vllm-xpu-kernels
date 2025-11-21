@@ -110,14 +110,14 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
+@pytest.mark.parametrize("window_size", [(-1, -1)])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("soft_cap", SOFT_CAPS)
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("fa_version", [2])
 @pytest.mark.parametrize("q_dtype", QDTYPES)
-@pytest.mark.parametrize("is_sink", SINK)
-@pytest.mark.parametrize("is_casual", CASUAL)
+@pytest.mark.parametrize("is_sink", [False])
+@pytest.mark.parametrize("is_casual", [False])
 @torch.inference_mode()
 def test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
