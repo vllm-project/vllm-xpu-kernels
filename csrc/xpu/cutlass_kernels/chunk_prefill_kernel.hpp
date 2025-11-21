@@ -282,12 +282,12 @@ class XeFMHAFwdKernel {
       auto shape_V = make_shape(
           s.head_size_vo, total_seqlen_kv, s.num_heads_kv, batch_dim);
       auto shape_O =
-          make_shape(seq_len_qo, s.head_size_vo, s.num_heads_kv, batch_dim);
+          make_shape(seq_len_qo, s.head_size_vo, s.num_heads_q, batch_dim);
 
       auto dcQ = const_cast<ElementQ*>(p.Q + offset_q);
       auto dcK = const_cast<ElementK*>(p.K + offset_k);
       auto dcV = const_cast<ElementV*>(p.V + offset_v);
-      auto ptrO = p.O + offset_o;
+      auto dcO = const_cast<ElementO*>(p.O + offset_o);
 
       auto layout_q = is_var_len
                           ? make_ordered_layout(shape_Q, Step<_2, _0, _1, _3>{})
@@ -305,7 +305,7 @@ class XeFMHAFwdKernel {
       Tensor Q = make_tensor(make_gmem_ptr(dcQ), layout_q);
       Tensor K = make_tensor(make_gmem_ptr(dcK), layout_k);
       Tensor V = make_tensor(make_gmem_ptr(dcV), layout_v);
-      Tensor O = make_tensor(make_gmem_ptr(ptrO), layout_o);
+      Tensor O = make_tensor(make_gmem_ptr(dcO), layout_o);
 
       // O accumulator types
       FragA tArA;
