@@ -53,6 +53,12 @@ Incremental build
 python3 -m build --wheel --no-isolation
 ```
 
+if you want to use a custom cutlass-sycl code base, you can follow step:
+```
+#prepare cutlass source code
+VLLM_CUTLASS_SRC_DIR=/PATH/TO/CUTLASS pip wheel --no-build-isolation . -v
+```
+
 ### How to use in vLLM
 Please refer to temporary branch https://github.com/jikunshang/vllm/tree/xpu_kernel to install & test vllm which replaces `rms_norm` kernel from IPEX to vllm-xpu-kernels.
 
