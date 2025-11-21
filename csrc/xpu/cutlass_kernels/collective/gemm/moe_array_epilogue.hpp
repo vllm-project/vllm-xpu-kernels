@@ -246,8 +246,7 @@ class CollectiveEpilogue<
 
   template <class ProblemShape>
   static constexpr Params to_underlying_arguments(
-      Arguments const& args,
-      [[maybe_unused]] void* workspace) {
+      Arguments const& args, [[maybe_unused]] void* workspace) {
     // Optionally append 1s until problem shape is rank-4 in case its is only
     // rank-3 (MNK)
     auto problem_shape_MNL = repeat_like(
@@ -312,9 +311,8 @@ class CollectiveEpilogue<
     if constexpr (is_destination_supported) {
       constexpr int min_aligned_elements_D =
           copy_alignment_bits / sizeof_bits<ElementD>::value;
-      implementable &=
-          cutlass::detail::check_alignment<min_aligned_elements_D>(
-              cute::make_shape(M, N, L), InternalStrideD{});
+      implementable &= cutlass::detail::check_alignment<min_aligned_elements_D>(
+          cute::make_shape(M, N, L), InternalStrideD{});
       if (L > 1) {
         constexpr int min_batch_aligned_elements_D =
             batch_alignment_bits / sizeof_bits<ElementD>::value;
@@ -326,9 +324,8 @@ class CollectiveEpilogue<
     if constexpr (is_source_supported) {
       constexpr int min_aligned_elements_C =
           copy_alignment_bits / sizeof_bits<ElementC>::value;
-      implementable &=
-          cutlass::detail::check_alignment<min_aligned_elements_C>(
-              cute::make_shape(M, N, L), InternalStrideC{});
+      implementable &= cutlass::detail::check_alignment<min_aligned_elements_C>(
+          cute::make_shape(M, N, L), InternalStrideC{});
       if (L > 1) {
         constexpr int min_batch_aligned_elements_C =
             batch_alignment_bits / sizeof_bits<ElementC>::value;
@@ -584,9 +581,11 @@ class CollectiveEpilogue<
 
   template <typename ProblemShape_MNKL>
   CUTLASS_DEVICE auto update_tensor_shape_stride(
-      int32_t const& next_group, ProblemShape_MNKL const& problem_shape_mnkl, const int64_t* expert_first_token_offset) {
+      int32_t const& next_group,
+      ProblemShape_MNKL const& problem_shape_mnkl,
+      const int64_t* expert_first_token_offset) {
     auto [M, N, K, L] = problem_shape_mnkl;
-    
+
     TensorC mC_mnl;
     TensorD mD_mnl;
     if constexpr (is_source_supported) {
@@ -595,7 +594,9 @@ class CollectiveEpilogue<
           expert_first_token_offset[next_group] * N;
       mC_mnl = make_tensor(
           make_gmem_ptr(ptr_C_curr_batch),
-          make_layout(make_shape(M, N, L), cutlass::make_cute_packed_stride(InternalStrideC{}, {M, N, 1})));
+          make_layout(
+              make_shape(M, N, L),
+              cutlass::make_cute_packed_stride(InternalStrideC{}, {M, N, 1})));
     }
 
     if constexpr (is_destination_supported) {
@@ -603,7 +604,9 @@ class CollectiveEpilogue<
                                    expert_first_token_offset[next_group] * N;
       mD_mnl = make_tensor(
           make_gmem_ptr(ptr_D_curr_batch),
-          make_layout(make_shape(M, N, L), cutlass::make_cute_packed_stride(InternalStrideD{}, {M, N, 1})));
+          make_layout(
+              make_shape(M, N, L),
+              cutlass::make_cute_packed_stride(InternalStrideD{}, {M, N, 1})));
     }
     return cute::make_tuple(mC_mnl, mD_mnl);
   }

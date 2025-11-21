@@ -183,18 +183,12 @@ struct CollectiveMma<
 
   CollectiveMma() = default;
 
-  static constexpr Params to_underlying_arguments(
-      Arguments const& args) {
-
-        return Params{
-        args.ptr_A,
-        args.ptr_B,
-        args.dB};
+  static constexpr Params to_underlying_arguments(Arguments const& args) {
+    return Params{args.ptr_A, args.ptr_B, args.dB};
   }
 
   template <class ProblemShape>
-  static bool
-  can_implement(int64_t N, int64_t K, Arguments const& args) {
+  static bool can_implement(int64_t N, int64_t K, Arguments const& args) {
     constexpr int copy_alignment_bits = 128;
     constexpr int batch_alignment_bits = 512;
     int M, L = 1;

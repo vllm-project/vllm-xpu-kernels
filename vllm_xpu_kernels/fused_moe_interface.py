@@ -24,8 +24,7 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
         return prefix
 
     if bias is not None:
-        bias = bias.repeat_interleave(expert_token_count_,
-                                      dim=0).float()
+        bias = bias.repeat_interleave(expert_token_count_, dim=0).float()
 
     expert_offset = torch.tensor(exclusive_prefix_sum(expert_token_count),
                                  dtype=torch.int64,

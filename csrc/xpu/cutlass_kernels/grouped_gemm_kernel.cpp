@@ -139,7 +139,9 @@ struct GroupedGemmRunner {
       const ElementB* ptr_B,
       const ElementC* ptr_C,
       ElementOutput* ptr_D,
-      int64_t N, int64_t K, int64_t groups) {
+      int64_t N,
+      int64_t K,
+      int64_t groups) {
     typename Gemm::Arguments arguments;
     decltype(arguments.epilogue.thread) fusion_args;
 
@@ -154,8 +156,8 @@ struct GroupedGemmRunner {
     // One alpha and beta per each group
     fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 1};
     fusion_args.dBeta = {cute::_0{}, cute::_0{}, 1};
-    using RasterOrderOptions =
-        typename cutlass::gemm::kernel::detail::PersistentTileSchedulerMoE::RasterOrderOptions;
+    using RasterOrderOptions = typename cutlass::gemm::kernel::detail::
+        PersistentTileSchedulerMoE::RasterOrderOptions;
 
     bool has_bias = ptr_C ? true : false;
     // Per-GEMM problem shape info may only exist on the device.
@@ -163,13 +165,13 @@ struct GroupedGemmRunner {
         cutlass::gemm::GemmUniversalMode::kGrouped,
         {ptr_A,
          ptr_B,
-         cutlass::make_cute_packed_stride(StrideB{}, {static_cast<int>(N), static_cast<int>(K), 1})},
-        {fusion_args,
-         ptr_C,
-         ptr_D,
-         has_bias},
+         cutlass::make_cute_packed_stride(
+             StrideB{}, {static_cast<int>(N), static_cast<int>(K), 1})},
+        {fusion_args, ptr_C, ptr_D, has_bias},
         expert_first_token_offset,
-        N, K, groups,
+        N,
+        K,
+        groups,
         hw_info,
         {1, RasterOrderOptions::AlongN}};
 
@@ -184,8 +186,9 @@ struct GroupedGemmRunner {
       const ElementB* ptr_B,
       const ElementC* ptr_C,
       ElementOutput* ptr_D,
-      int64_t N, int64_t K, int64_t groups) {
-
+      int64_t N,
+      int64_t K,
+      int64_t groups) {
     Gemm gemm_op;
 
     auto arguments = args_from_options(
@@ -195,7 +198,9 @@ struct GroupedGemmRunner {
         ptr_B,
         ptr_C,
         ptr_D,
-        N, K, groups);
+        N,
+        K,
+        groups);
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
@@ -332,7 +337,9 @@ void kernel_functor(
       reinterpret_cast<const ElementB*>(ptr_B),
       reinterpret_cast<const ElementAccumulator*>(ptr_bias),
       reinterpret_cast<ElementOutput*>(ptr_D),
-      N, K, groups);
+      N,
+      K,
+      groups);
 }
 
 template void kernel_functor<moe_bf16_policy>(

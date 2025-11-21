@@ -27,6 +27,7 @@ def random_partition(size_a: int, target: int):
     result = [cuts[i + 1] - cuts[i] - 1 for i in range(size_a)]
     return result
 
+
 MINI_PYTEST_PARAMS = {
     "default": {
         "m,n,k": [(1, 256, 128)],
@@ -82,6 +83,7 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     ref = torch.cat(ref, dim=0)
 
     torch.testing.assert_close(output, ref, rtol=2e-2, atol=1e-2)
+
 
 def ref_fused_moe(x, w13, w13_bias, w2, w2_bias, flat_expert_weights,
                   flat_expert_indices, num_per_tok, activation, num_experts):
