@@ -24,7 +24,10 @@ RUN apt clean && apt-get update -y && \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
-RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing intel-ocloc
+#install umd
+COPY umd /opt/umd
+RUN dpkg -i /opt/umd/*deb -y
+
 RUN python3 -m pip config set global.break-system-packages true 
 
 WORKDIR /workspace/vllm-xpu-kernels
