@@ -22,6 +22,9 @@ MINI_MNK_FACTORS = [
 
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
+    "test_fp8_gemm_w8a16": {
+        "mnk_factors": MINI_MNK_FACTORS[:1],
+    },
     "test_fp8_gemm_per_tensor": {
         "mnk_factors": MINI_MNK_FACTORS,
     },

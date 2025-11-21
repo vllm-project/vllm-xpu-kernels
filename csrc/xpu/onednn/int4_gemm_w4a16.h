@@ -8,7 +8,6 @@
 
 namespace oneDNN {
 
-using trans_type_t = at::native::onednn::trans_type_t;
 using GpuStreamManager = at::native::onednn::GpuStreamManager;
 using GpuEngineManager = at::native::onednn::GpuEngineManager;
 

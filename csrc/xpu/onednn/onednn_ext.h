@@ -3,6 +3,7 @@
 #include <ATen/native/mkldnn/xpu/detail/DnnlExt.h>
 #include <ATen/native/mkldnn/xpu/detail/LRUCache.h>
 #include <ATen/native/mkldnn/xpu/detail/oneDNNContext.h>
+#include <dnnl.h>
 #include <dnnl.hpp>
 
 inline constexpr std::string_view USES_FP64_MATH("uses-fp64-math");
@@ -12,82 +13,18 @@ inline constexpr std::string_view
     FP64_ERROR_FROM_MKL("double type is not supported");
 inline constexpr std::string_view OUT_OF_RESOURCES("PI_ERROR_OUT_OF_RESOURCES");
 
+using namespace dnnl;
 namespace oneDNN {
 
-static inline dnnl::memory::data_type
-get_onednn_dtype(const at::Tensor& tensor, bool allow_undef = false) {
-  switch (tensor.scalar_type()) {
-    case at::ScalarType::Byte:
-      return dnnl::memory::data_type::u8;
-    case at::ScalarType::Char:
-      return dnnl::memory::data_type::s8;
-    case at::ScalarType::QInt8:
-      return dnnl::memory::data_type::s8;
-    case at::ScalarType::QUInt8:
-      return dnnl::memory::data_type::u8;
-    case at::ScalarType::Int:
-      return dnnl::memory::data_type::s32;
-    case at::ScalarType::Half:
-      return dnnl::memory::data_type::f16;
-    case at::ScalarType::Float:
-      return dnnl::memory::data_type::f32;
-    case at::ScalarType::BFloat16:
-      return dnnl::memory::data_type::bf16;
-    case at::ScalarType::Float8_e4m3fn:
-      return dnnl::memory::data_type::f8_e4m3;
-    case at::ScalarType::Float8_e5m2:
-      return dnnl::memory::data_type::f8_e5m2;
-    default:
-      if (!allow_undef) {
-        TORCH_CHECK(
-            false,
-            c10::toString(tensor.scalar_type()),
-            " is not supported in oneDNN!");
-      }
-      return dnnl::memory::data_type::undef;
-  };
-}
+// Specifies the transposition state of input and weight tensors.
+// Convention: first letter = input, second letter = weight.
+// 'n' = not transposed, 't' = transposed.
+// For example, 'nt' means input is not transposed, weight is transposed.
+enum class trans_type_t { nn = 0, nt, tn, tt };
 
-static inline dnnl::memory::data_type get_onednn_dtype_include_double(
-    const at::Tensor& tensor, bool allow_undef = false) {
-  c10::DeviceIndex curDevID = at::xpu::current_device();
-  c10::xpu::DeviceProp dev_prop;
-  c10::xpu::get_device_properties(&dev_prop, curDevID);
-  bool fp64_valid = dev_prop.has_fp64;
-
-  if (tensor.scalar_type() == at::ScalarType::Double) {
-    if (fp64_valid)
-      return dnnl::memory::data_type::f64;
-    else if (allow_undef)
-      return dnnl::memory::data_type::undef;
-    else
-      TORCH_CHECK(false, "Double is not supported on this device!");
-  }
-
-  return get_onednn_dtype(tensor, allow_undef);
-}
-
-static inline memory::dims get_onednn_dims(const at::Tensor& tensor) {
-  memory::dims dims;
-  for (int i = 0; i < tensor.sizes().size(); i++)
-    dims.push_back(tensor.size(i));
-  return dims;
-}
-
-static inline memory::dims get_onednn_strides(const at::Tensor& tensor) {
-  memory::dims strides;
-  for (int i = 0; i < tensor.strides().size(); i++)
-    strides.push_back(tensor.stride(i));
-  return strides;
-}
-
-static inline dnnl::memory::desc get_onednn_md(const at::Tensor& tensor) {
-  return {
-      get_onednn_dims(tensor),
-      get_onednn_dtype_include_double(tensor),
-      get_onednn_strides(tensor)};
-}
-
+// Specifies the combined data types of input and weight tensors.
+// For example, f32 means both input and weight are FP32,
+// bf16_int4 means input is BF16 and weight is INT4.
 enum class joint_dtypes_t {
   f32 = 0,
   f16,
@@ -112,171 +49,196 @@ struct onednn_types_mapper;
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::f16_int4> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::f16,
-        dnnl::memory::data_type::u4,
-        dnnl::memory::data_type::f16);
+        memory::data_type::f16, memory::data_type::u4, memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::bf16_int4> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::bf16,
-        dnnl::memory::data_type::u4,
-        dnnl::memory::data_type::bf16);
+        memory::data_type::bf16,
+        memory::data_type::u4,
+        memory::data_type::bf16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::s8_int4> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::s8,
-        dnnl::memory::data_type::u4,
-        dnnl::memory::data_type::f16);
+        memory::data_type::s8, memory::data_type::u4, memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::u8_int4> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::u8,
-        dnnl::memory::data_type::u4,
-        dnnl::memory::data_type::f16);
+        memory::data_type::u8, memory::data_type::u4, memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::f16_f8_e5m2> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::f16,
-        dnnl::memory::data_type::f8_e5m2,
-        dnnl::memory::data_type::f16);
+        memory::data_type::f16,
+        memory::data_type::f8_e5m2,
+        memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::bf16_f8_e5m2> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::bf16,
-        dnnl::memory::data_type::f8_e5m2,
-        dnnl::memory::data_type::bf16);
+        memory::data_type::bf16,
+        memory::data_type::f8_e5m2,
+        memory::data_type::bf16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::f16_f8_e4m3> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::f16,
-        dnnl::memory::data_type::f8_e4m3,
-        dnnl::memory::data_type::f16);
+        memory::data_type::f16,
+        memory::data_type::f8_e4m3,
+        memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::bf16_f8_e4m3> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::bf16,
-        dnnl::memory::data_type::f8_e4m3,
-        dnnl::memory::data_type::bf16);
+        memory::data_type::bf16,
+        memory::data_type::f8_e4m3,
+        memory::data_type::bf16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::f8_e5m2_f16> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::f8_e5m2,
-        dnnl::memory::data_type::f8_e5m2,
-        dnnl::memory::data_type::f16);
+        memory::data_type::f8_e5m2,
+        memory::data_type::f8_e5m2,
+        memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::f8_e5m2_bf16> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::f8_e5m2,
-        dnnl::memory::data_type::f8_e5m2,
-        dnnl::memory::data_type::bf16);
+        memory::data_type::f8_e5m2,
+        memory::data_type::f8_e5m2,
+        memory::data_type::bf16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::f8_e4m3_f16> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::f8_e4m3,
-        dnnl::memory::data_type::f8_e4m3,
-        dnnl::memory::data_type::f16);
+        memory::data_type::f8_e4m3,
+        memory::data_type::f8_e4m3,
+        memory::data_type::f16);
   }
 };
 
 template <>
 struct onednn_types_mapper<joint_dtypes_t::f8_e4m3_bf16> {
-  static inline std::tuple<
-      dnnl::memory::data_type,
-      dnnl::memory::data_type,
-      dnnl::memory::data_type>
-  get() {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
     return std::make_tuple(
-        dnnl::memory::data_type::f8_e4m3,
-        dnnl::memory::data_type::f8_e4m3,
-        dnnl::memory::data_type::bf16);
+        memory::data_type::f8_e4m3,
+        memory::data_type::f8_e4m3,
+        memory::data_type::bf16);
   }
 };
+
+static inline memory::data_type
+get_onednn_dtype(const at::Tensor& tensor, bool allow_undef = false) {
+  switch (tensor.scalar_type()) {
+    case at::ScalarType::Byte:
+      return memory::data_type::u8;
+    case at::ScalarType::Char:
+      return memory::data_type::s8;
+    case at::ScalarType::QInt8:
+      return memory::data_type::s8;
+    case at::ScalarType::QUInt8:
+      return memory::data_type::u8;
+    case at::ScalarType::Int:
+      return memory::data_type::s32;
+    case at::ScalarType::Half:
+      return memory::data_type::f16;
+    case at::ScalarType::Float:
+      return memory::data_type::f32;
+    case at::ScalarType::BFloat16:
+      return memory::data_type::bf16;
+    case at::ScalarType::Float8_e4m3fn:
+      return memory::data_type::f8_e4m3;
+    case at::ScalarType::Float8_e5m2:
+      return memory::data_type::f8_e5m2;
+    default:
+      if (!allow_undef) {
+        TORCH_CHECK(
+            false,
+            c10::toString(tensor.scalar_type()),
+            " is not supported in oneDNN!");
+      }
+      return memory::data_type::undef;
+  };
+}
+
+static inline memory::dims get_onednn_dims(const at::Tensor& tensor) {
+  memory::dims dims;
+  for (int i = 0; i < tensor.sizes().size(); i++)
+    dims.push_back(tensor.size(i));
+  return dims;
+}
+
+static inline memory::dims get_onednn_strides(const at::Tensor& tensor) {
+  memory::dims strides;
+  for (int i = 0; i < tensor.strides().size(); i++)
+    strides.push_back(tensor.stride(i));
+  return strides;
+}
+
+static inline memory::desc get_onednn_md(const at::Tensor& tensor) {
+  return {
+      get_onednn_dims(tensor),
+      get_onednn_dtype(tensor),
+      get_onednn_strides(tensor)};
+}
 
 enum class bias_shape_t : uint8_t {
   none = 0,
@@ -351,7 +313,7 @@ constexpr bias_data_type_t get_dtype(bias_type_t type) {
   return static_cast<bias_data_type_t>(static_cast<uint16_t>(type) & 0xFF);
 }
 
-static inline dnnl::memory::dims
+static inline memory::dims
 get_onednn_bias_dims(bias_type_t b_type, const int m, const int n) {
   bias_shape_t b_shape = get_shape(b_type);
   switch (b_shape) {
@@ -370,38 +332,31 @@ get_onednn_bias_dims(bias_type_t b_type, const int m, const int n) {
   }
 }
 
-static inline dnnl::memory::data_type
-get_onednn_bias_data_type(bias_type_t b_type) {
+static inline memory::data_type get_onednn_bias_data_type(bias_type_t b_type) {
   bias_data_type_t b_dtype = get_dtype(b_type);
   switch (b_dtype) {
     case bias_data_type_t::none:
-      return dnnl::memory::data_type::undef;
+      return memory::data_type::undef;
     case bias_data_type_t::f32:
-      return dnnl::memory::data_type::f32;
+      return memory::data_type::f32;
     case bias_data_type_t::f16:
-      return dnnl::memory::data_type::f16;
+      return memory::data_type::f16;
     case bias_data_type_t::bf16:
-      return dnnl::memory::data_type::bf16;
+      return memory::data_type::bf16;
     default:
       throw std::runtime_error("unsupported bias dtype ...");
   }
 }
 
-static inline dnnl::memory::format_tag
+static inline memory::format_tag
 get_onednn_bias_format_type(bias_type_t b_type) {
   bias_shape_t b_shape = get_shape(b_type);
   if (b_shape == bias_shape_t::none) {
-    return dnnl::memory::format_tag::undef;
+    return memory::format_tag::undef;
   } else {
-    return dnnl::memory::format_tag::ab;
+    return memory::format_tag::ab;
   }
 }
-
-using trans_type_t = at::native::onednn::trans_type_t;
-using GpuEngineManager = at::native::onednn::GpuEngineManager;
-using primitive_ext = at::native::onednn::primitive_ext;
-using primitive_cache =
-    at::native::onednn::lru_cache<dnnl::memory::dims, primitive_ext>;
 
 template <trans_type_t Tt>
 static inline void get_strides(
@@ -438,6 +393,273 @@ void get_strides<trans_type_t::nn>(
   dst_strides = {ldc, 1};
 }
 
+class primitive_ext : public primitive {
+  static constexpr int max_args = 12;
+
+ public:
+  primitive_ext(const primitive& base) : primitive(base) {}
+  primitive_ext(primitive&& base) : primitive(std::move(base)) {}
+
+  /// Returns a memory descriptor.
+  ///
+  /// @note
+  ///     There are also convenience methods
+  ///     #primitive_desc_base::src_desc(),
+  ///     #primitive_desc_base::dst_desc(), and others.
+  ///
+  /// @param what The kind of parameter to query; can be
+  ///     #query::src_md, #query::dst_md, etc.
+  /// @param idx Index of the parameter. For example, convolution bias can
+  ///     be queried with what = #query::weights_md and idx = 1.
+  /// @returns The requested memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     parameter of the specified kind or index.
+  const_dnnl_memory_desc_t query_md(query what, int idx = 0) const {
+    std::vector<query> valid_q{
+        query::src_md,
+        query::diff_src_md,
+        query::weights_md,
+        query::diff_weights_md,
+        query::dst_md,
+        query::diff_dst_md,
+        query::workspace_md,
+        query::scratchpad_md,
+        query::exec_arg_md};
+    if (!std::any_of(valid_q.cbegin(), valid_q.cend(), [=](query q) {
+          return what == q;
+        }))
+      DNNL_THROW_ERROR(
+          dnnl_invalid_arguments, "memory descriptor query is invalid");
+
+    const_dnnl_memory_desc_t cdesc = dnnl_primitive_desc_query_md(
+        this->get_primitive_desc(), convert_to_c(what), idx);
+
+    return cdesc ? cdesc : nullptr;
+  }
+
+  /// Returns a source memory descriptor.
+  /// @param idx Source index.
+  /// @returns Source memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     source parameter with index @p idx.
+  const_dnnl_memory_desc_t src_desc(int idx) const {
+    return query_md(query::src_md, idx);
+  }
+
+  /// Returns a destination memory descriptor.
+  /// @param idx Destination index.
+  /// @returns Destination memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     destination parameter with index @p idx.
+  const_dnnl_memory_desc_t dst_desc(int idx) const {
+    return query_md(query::dst_md, idx);
+  }
+
+  /// Returns a weights memory descriptor.
+  /// @param idx Weights index.
+  /// @returns Weights memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     weights parameter with index @p idx.
+  const_dnnl_memory_desc_t weights_desc(int idx) const {
+    return query_md(query::weights_md, idx);
+  }
+
+  /// Returns a diff source memory descriptor.
+  /// @param idx Diff source index.
+  /// @returns Diff source memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     diff source parameter with index @p idx.
+  const_dnnl_memory_desc_t diff_src_desc(int idx) const {
+    return query_md(query::diff_src_md, idx);
+  }
+
+  /// Returns a diff destination memory descriptor.
+  /// @param idx Diff destination index.
+  /// @returns Diff destination memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     diff destination parameter with index @p idx.
+  const_dnnl_memory_desc_t diff_dst_desc(int idx) const {
+    return query_md(query::diff_dst_md, idx);
+  }
+
+  /// Returns a diff weights memory descriptor.
+  /// @param idx Diff weights index.
+  /// @returns Diff weights memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     diff weights parameter with index @p idx.
+  const_dnnl_memory_desc_t diff_weights_desc(int idx) const {
+    return query_md(query::diff_weights_md, idx);
+  }
+
+  const_dnnl_memory_desc_t exec_arg_desc(int idx) const {
+    return query_md(query::exec_arg_md, idx);
+  }
+
+  // Separate versions without the index argument for documentation
+  // purposes.
+
+  /// Returns a source memory descriptor.
+  /// @returns Source memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     source parameter.
+  const_dnnl_memory_desc_t src_desc() const { return src_desc(0); }
+
+  /// Returns a destination memory descriptor.
+  /// @returns Destination memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     destination parameter.
+  const_dnnl_memory_desc_t dst_desc() const { return dst_desc(0); }
+
+  /// Returns a weights memory descriptor.
+  /// @returns Weights memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     weights parameter.
+  const_dnnl_memory_desc_t weights_desc() const { return weights_desc(0); }
+
+  /// Returns a diff source memory descriptor.
+  /// @returns Diff source memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     diff source memory with.
+  const_dnnl_memory_desc_t diff_src_desc() const { return diff_src_desc(0); }
+
+  /// Returns a diff destination memory descriptor.
+  /// @returns Diff destination memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     diff destination parameter.
+  const_dnnl_memory_desc_t diff_dst_desc() const { return diff_dst_desc(0); }
+
+  /// Returns a diff weights memory descriptor.
+  /// @returns Diff weights memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not have a
+  ///     diff weights parameter.
+  const_dnnl_memory_desc_t diff_weights_desc() const {
+    return diff_weights_desc(0);
+  }
+
+  /// Returns the workspace memory descriptor.
+  /// @returns Workspace memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not require
+  ///     workspace parameter.
+  const_dnnl_memory_desc_t workspace_desc() const {
+    return query_md(query::workspace_md, 0);
+  }
+
+  /// Returns the scratchpad memory descriptor.
+  /// @returns scratchpad memory descriptor.
+  /// @returns A zero memory descriptor if the primitive does not require
+  ///     scratchpad parameter.
+  /// @sa @ref dev_guide_attributes_scratchpad
+  const_dnnl_memory_desc_t scratchpad_desc() const {
+    return query_md(query::scratchpad_md, 0);
+  }
+
+  inline memory make_memory(
+      const_dnnl_memory_desc_t md_t,
+      const engine& aengine,
+      void* handle = DNNL_MEMORY_ALLOCATE) const {
+    sycl_interop::memory_kind kind = sycl_interop::memory_kind::usm;
+    dnnl_memory_t c_memory;
+    error::wrap_c_api(
+        dnnl_sycl_interop_memory_create(
+            &c_memory, md_t, aengine.get(), convert_to_c(kind), handle),
+        "could not create a memory");
+    return memory(c_memory);
+  }
+
+  memory
+  make_src(const engine& aengine, void* handle = DNNL_MEMORY_ALLOCATE) const {
+    return make_memory(src_desc(), aengine, handle);
+  }
+
+  memory make_weight(
+      const engine& aengine, void* handle = DNNL_MEMORY_ALLOCATE) const {
+    return make_memory(weights_desc(), aengine, handle);
+  }
+
+  memory
+  make_bias(const engine& aengine, void* handle = DNNL_MEMORY_ALLOCATE) const {
+    return make_memory(weights_desc(1), aengine, handle);
+  }
+
+  memory
+  make_dst(const engine& aengine, void* handle = DNNL_MEMORY_ALLOCATE) const {
+    return make_memory(dst_desc(), aengine, handle);
+  }
+
+  memory make_scratchpad(
+      const engine& aengine, void* handle = DNNL_MEMORY_ALLOCATE) const {
+    return make_memory(scratchpad_desc(), aengine, handle);
+  }
+
+  size_t get_scratchpad_size() const {
+    return dnnl_memory_desc_get_size(scratchpad_desc());
+  }
+
+  memory make_args(int arg_class, const engine& aengine, void* handle) const {
+    switch (arg_class) {
+      case DNNL_ARG_SRC:
+        return make_src(aengine, handle);
+      case DNNL_ARG_WEIGHTS:
+        return make_weight(aengine, handle);
+      case DNNL_ARG_SCRATCHPAD:
+        return make_scratchpad(aengine, handle);
+      case DNNL_ARG_DST:
+        return make_dst(aengine, handle);
+      case DNNL_ARG_BIAS:
+        return make_bias(aengine, handle);
+      default:
+        TORCH_INTERNAL_ASSERT(
+            false, "unsupported argument class for primitive_ext");
+    }
+  }
+
+  template <typename M>
+  void set_attribute(int slot, int arg_class, void* handle, M constructor) {
+    if (mem_arg_cache[slot])
+      mem_arg_cache[slot].set_data_handle(handle);
+    else {
+      mem_arg_cache[slot] = constructor();
+      c_args[slot].arg = arg_class;
+      c_args[slot].memory = mem_arg_cache[slot].get();
+    }
+  }
+
+  sycl::event execute(
+      const stream& astream,
+      const engine& aengine,
+      std::vector<std::pair<int, void*>>&& handles,
+      int slot_off = 2) {
+    auto off = slot_off;
+    for (const auto& p : handles) {
+      auto& m_arg = mem_arg_cache[off];
+      if (m_arg)
+        m_arg.set_data_handle(p.second);
+      else {
+        m_arg = make_args(p.first, aengine, p.second);
+        c_args[off].arg = p.first;
+        c_args[off].memory = m_arg.get();
+      }
+      ++off;
+    }
+
+    sycl::event return_event;
+    std::vector<sycl::event> deps{};
+    error::wrap_c_api(
+        dnnl_sycl_interop_primitive_execute(
+            this->get(), astream.get(), off, c_args, &deps, &return_event),
+        "could not execute a primitive");
+    return return_event;
+  }
+
+ private:
+  memory mem_arg_cache[max_args];
+  dnnl_exec_arg_t c_args[max_args];
+};
+
+using GpuEngineManager = at::native::onednn::GpuEngineManager;
+using primitive_cache =
+    at::native::onednn::lru_cache<memory::dims, primitive_ext>;
+
 template <trans_type_t Tt, joint_dtypes_t Ts, typename F>
 struct matmul_primitive_cache_t {
   static inline primitive_ext&
@@ -454,7 +676,7 @@ struct matmul_primitive_cache_t {
       const int scale_group_size,
       const int zp_group_size) {
     auto& cached = get_cache(device_id);
-    dnnl::memory::dims src_strides, wei_strides, dst_strides;
+    memory::dims src_strides, wei_strides, dst_strides;
     get_strides<Tt>(src_strides, wei_strides, dst_strides, lda, ldb, ldc);
     auto pri_key = at::native::onednn::concat(
         src_strides,
@@ -469,10 +691,10 @@ struct matmul_primitive_cache_t {
     if (iter == cached.end()) {
       auto [src_dt, wei_dt, dst_dt] = onednn_types_mapper<Ts>::get();
 
-      auto src_md = dnnl::memory::desc({m, k}, src_dt, src_strides);
-      auto wei_md = dnnl::memory::desc({k, n}, wei_dt, wei_strides);
-      auto dst_md = dnnl::memory::desc({m, n}, dst_dt, dst_strides);
-      auto bias_md = dnnl::memory::desc(
+      auto src_md = memory::desc({m, k}, src_dt, src_strides);
+      auto wei_md = memory::desc({k, n}, wei_dt, wei_strides);
+      auto dst_md = memory::desc({m, n}, dst_dt, dst_strides);
+      auto bias_md = memory::desc(
           get_onednn_bias_dims(b_type, m, n),
           get_onednn_bias_data_type(b_type),
           get_onednn_bias_format_type(b_type));  // {m, n} or {1, n}
@@ -480,18 +702,18 @@ struct matmul_primitive_cache_t {
       primitive_attr pattr;
       f_attr(pattr);
 
-      dnnl::matmul::primitive_desc matmul_pd;
+      matmul::primitive_desc matmul_pd;
       at::Device curDevice = at::Device(at::kXPU, device_id);
       auto aengine = GpuEngineManager::Instance().get_engine(curDevice);
       if (get_shape(b_type) == bias_shape_t::none) {
-        matmul_pd = dnnl::matmul::primitive_desc(
-            aengine, src_md, wei_md, dst_md, pattr);
+        matmul_pd =
+            matmul::primitive_desc(aengine, src_md, wei_md, dst_md, pattr);
       } else {
-        matmul_pd = dnnl::matmul::primitive_desc(
+        matmul_pd = matmul::primitive_desc(
             aengine, src_md, wei_md, bias_md, dst_md, pattr);
       }
 
-      return cached.insert({pri_key, primitive_ext(dnnl::matmul(matmul_pd))})
+      return cached.insert({pri_key, primitive_ext(matmul(matmul_pd))})
           .first->second;
     } else {
       return iter->second;
