@@ -226,10 +226,7 @@ class CollectiveEpilogue<
   struct Arguments {
     typename FusionCallbacks::Arguments thread{};
     ElementC const* ptr_C;
-    StrideC dC;
     ElementD* ptr_D;
-    StrideD dD;
-    int64_t const* expert_first_token_offset;
     bool has_bias;
   };
 
@@ -239,10 +236,7 @@ class CollectiveEpilogue<
     XE_Copy_C xe_load_c;
     XE_Copy_D xe_store_d;
     ElementC const* ptr_C;
-    StrideC dC;
     ElementD* ptr_D;
-    StrideD dD;
-    int64_t const* expert_first_token_offset;
     bool has_bias;
   };
 
@@ -252,9 +246,7 @@ class CollectiveEpilogue<
 
   template <class ProblemShape>
   static constexpr Params to_underlying_arguments(
-      ProblemShape const& problem_shape,
-      Arguments const& args,
-      [[maybe_unused]] void* workspace) {
+      Arguments const& args, [[maybe_unused]] void* workspace) {
     // Optionally append 1s until problem shape is rank-4 in case its is only
     // rank-3 (MNK)
     auto problem_shape_MNL = repeat_like(
@@ -282,14 +274,11 @@ class CollectiveEpilogue<
 
     return {
         FusionCallbacks::to_underlying_arguments(
-            problem_shape, args.thread, workspace),
+            nullptr, args.thread, workspace),
         xe_load_c,
         xe_store_d,
         args.ptr_C,
-        args.dC,
         args.ptr_D,
-        args.dD,
-        args.expert_first_token_offset,
         args.has_bias};
   }
 
@@ -310,50 +299,44 @@ class CollectiveEpilogue<
   }
 
   template <class ProblemShape>
-  static bool can_implement(ProblemShape problem_shape, Arguments const& args) {
+  static bool can_implement(int64_t N_, int64_t K_, Arguments const& args) {
     constexpr int copy_alignment_bits = 128;
     constexpr int batch_alignment_bits = 512;
 
     bool implementable = true;
     bool fusion_implementable = true;
 
-    for (int i = 0; i < problem_shape.groups(); ++i) {
-      auto problem_shape_MNKL =
-          append<4>(problem_shape.get_host_problem_shape(i), 1);
-      auto [M, N, K, L] = problem_shape_MNKL;
-
-      if constexpr (is_destination_supported) {
-        constexpr int min_aligned_elements_D =
-            copy_alignment_bits / sizeof_bits<ElementD>::value;
+    auto problem_shape_MNKL = cutlass::Shape(1, N_, K_, 1);
+    auto [M, N, K, L] = problem_shape_MNKL;
+    if constexpr (is_destination_supported) {
+      constexpr int min_aligned_elements_D =
+          copy_alignment_bits / sizeof_bits<ElementD>::value;
+      implementable &= cutlass::detail::check_alignment<min_aligned_elements_D>(
+          cute::make_shape(M, N, L), InternalStrideD{});
+      if (L > 1) {
+        constexpr int min_batch_aligned_elements_D =
+            batch_alignment_bits / sizeof_bits<ElementD>::value;
         implementable &=
-            cutlass::detail::check_alignment<min_aligned_elements_D>(
-                cute::make_shape(M, N, L), InternalStrideD{});
-        if (L > 1) {
-          constexpr int min_batch_aligned_elements_D =
-              batch_alignment_bits / sizeof_bits<ElementD>::value;
-          implementable &=
-              get<2>(InternalStrideD{}) % min_batch_aligned_elements_D == 0;
-        }
+            get<2>(InternalStrideD{}) % min_batch_aligned_elements_D == 0;
       }
-
-      if constexpr (is_source_supported) {
-        constexpr int min_aligned_elements_C =
-            copy_alignment_bits / sizeof_bits<ElementC>::value;
-        implementable &=
-            cutlass::detail::check_alignment<min_aligned_elements_C>(
-                cute::make_shape(M, N, L), InternalStrideC{});
-        if (L > 1) {
-          constexpr int min_batch_aligned_elements_C =
-              batch_alignment_bits / sizeof_bits<ElementC>::value;
-          implementable &=
-              get<2>(InternalStrideC{}) % min_batch_aligned_elements_C == 0;
-        }
-      }
-
-      fusion_implementable =
-          fusion_implementable &&
-          FusionCallbacks::can_implement(problem_shape_MNKL, args.thread);
     }
+
+    if constexpr (is_source_supported) {
+      constexpr int min_aligned_elements_C =
+          copy_alignment_bits / sizeof_bits<ElementC>::value;
+      implementable &= cutlass::detail::check_alignment<min_aligned_elements_C>(
+          cute::make_shape(M, N, L), InternalStrideC{});
+      if (L > 1) {
+        constexpr int min_batch_aligned_elements_C =
+            batch_alignment_bits / sizeof_bits<ElementC>::value;
+        implementable &=
+            get<2>(InternalStrideC{}) % min_batch_aligned_elements_C == 0;
+      }
+    }
+
+    fusion_implementable =
+        fusion_implementable &&
+        FusionCallbacks::can_implement(problem_shape_MNKL, args.thread);
 
     if (!implementable) {
       CUTLASS_TRACE_HOST(
@@ -598,38 +581,32 @@ class CollectiveEpilogue<
 
   template <typename ProblemShape_MNKL>
   CUTLASS_DEVICE auto update_tensor_shape_stride(
-      int32_t const& next_group, ProblemShape_MNKL const& problem_shape_mnkl) {
+      int32_t const& next_group,
+      ProblemShape_MNKL const& problem_shape_mnkl,
+      const int64_t* expert_first_token_offset) {
     auto [M, N, K, L] = problem_shape_mnkl;
-
-    auto expert_first_token_offset = params.expert_first_token_offset;
-    /* FIXME: use a problem visitor */
-    int calc_group{0}, real_group{0};
-    while (calc_group < next_group + 1) {
-      if (expert_first_token_offset[real_group] !=
-          expert_first_token_offset[real_group + 1]) {
-        calc_group++;
-      }
-      real_group++;
-    }
-    real_group -= 1;
 
     TensorC mC_mnl;
     TensorD mD_mnl;
     if constexpr (is_source_supported) {
       ElementC const* ptr_C_curr_batch =
           reinterpret_cast<ElementC const*>(params.ptr_C) +
-          expert_first_token_offset[real_group] * N;
+          expert_first_token_offset[next_group] * N;
       mC_mnl = make_tensor(
           make_gmem_ptr(ptr_C_curr_batch),
-          make_layout(make_shape(M, N, L), params.dC[next_group]));
+          make_layout(
+              make_shape(M, N, L),
+              cutlass::make_cute_packed_stride(InternalStrideC{}, {M, N, 1})));
     }
 
     if constexpr (is_destination_supported) {
       ElementD* ptr_D_curr_batch = reinterpret_cast<ElementD*>(params.ptr_D) +
-                                   expert_first_token_offset[real_group] * N;
+                                   expert_first_token_offset[next_group] * N;
       mD_mnl = make_tensor(
           make_gmem_ptr(ptr_D_curr_batch),
-          make_layout(make_shape(M, N, L), params.dD[next_group]));
+          make_layout(
+              make_shape(M, N, L),
+              cutlass::make_cute_packed_stride(InternalStrideD{}, {M, N, 1})));
     }
     return cute::make_tuple(mC_mnl, mD_mnl);
   }

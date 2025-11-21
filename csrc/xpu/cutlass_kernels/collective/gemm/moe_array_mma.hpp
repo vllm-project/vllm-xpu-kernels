@@ -167,18 +167,14 @@ struct CollectiveMma<
   // Host side kernel arguments
   struct Arguments {
     ElementA const* ptr_A;
-    StrideA dA;
     ElementB const* ptr_B;
     StrideB dB;
-    int64_t const* expert_first_token_offset;
   };
 
   struct Params {
     ElementA const* ptr_A;
-    StrideA dA;
     ElementB const* ptr_B;
     StrideB dB;
-    int64_t const* expert_first_token_offset;
   };
 
   //
@@ -187,36 +183,15 @@ struct CollectiveMma<
 
   CollectiveMma() = default;
 
-  template <class ProblemShape>
-  static constexpr Params to_underlying_arguments(
-      ProblemShape const& problem_shape,
-      Arguments const& args,
-      void* workspace) {
-    (void)workspace;
-
-    auto problem_shape_MNK = repeat_like(
-        typename ProblemShape::UnderlyingProblemShape{}, int32_t(1));
-    ;
-    auto init_M = get<0>(problem_shape_MNK);
-    auto init_N = get<1>(problem_shape_MNK);
-    auto init_K = get<2>(problem_shape_MNK);
-
-    return Params{
-        args.ptr_A,
-        args.dA,
-        args.ptr_B,
-        args.dB,
-        args.expert_first_token_offset};
+  static constexpr Params to_underlying_arguments(Arguments const& args) {
+    return Params{args.ptr_A, args.ptr_B, args.dB};
   }
 
   template <class ProblemShape>
-  static bool
-  can_implement(ProblemShape problem_shapes, Arguments const& args) {
+  static bool can_implement(int64_t N, int64_t K, Arguments const& args) {
     constexpr int copy_alignment_bits = 128;
     constexpr int batch_alignment_bits = 512;
-    auto problem_shape_MNKL = append<4>(problem_shapes, 1);
-    auto [M, N, K, L] = problem_shape_MNKL;
-
+    int M, L = 1;
     bool implementable = true;
 
     constexpr int min_aligned_elements_A =
@@ -227,22 +202,17 @@ struct CollectiveMma<
         batch_alignment_bits / sizeof_bits<ElementA>::value;
     constexpr int min_batch_aligned_elements_B =
         batch_alignment_bits / sizeof_bits<ElementB>::value;
-    for (int i = 0; i < problem_shapes.groups(); i++) {
-      auto problem_shape_MNKL =
-          append<4>(problem_shapes.get_host_problem_shape(i), 1);
-      auto [M, N, K, L] = problem_shape_MNKL;
 
-      implementable &= cutlass::detail::check_alignment<min_aligned_elements_A>(
-          cute::make_shape(M, K, L), InternalStrideA{});
-      implementable &= cutlass::detail::check_alignment<min_aligned_elements_B>(
-          cute::make_shape(N, K, L), InternalStrideB{});
+    implementable &= cutlass::detail::check_alignment<min_aligned_elements_A>(
+        cute::make_shape(M, K, L), InternalStrideA{});
+    implementable &= cutlass::detail::check_alignment<min_aligned_elements_B>(
+        cute::make_shape(N, K, L), InternalStrideB{});
 
-      if (L > 1) {
-        implementable &=
-            get<2>(InternalStrideA{}) % min_batch_aligned_elements_A == 0;
-        implementable &=
-            get<2>(InternalStrideB{}) % min_batch_aligned_elements_B == 0;
-      }
+    if (L > 1) {
+      implementable &=
+          get<2>(InternalStrideA{}) % min_batch_aligned_elements_A == 0;
+      implementable &=
+          get<2>(InternalStrideB{}) % min_batch_aligned_elements_B == 0;
     }
 
     if (!implementable) {
@@ -396,37 +366,27 @@ struct CollectiveMma<
   CUTLASS_DEVICE auto update_tensor_shape_stride(
       Params const& mainloop_params,
       int32_t const& next_group,
-      ProblemShape_MNKL const& problem_shape_mnkl) {
+      ProblemShape_MNKL const& problem_shape_mnkl,
+      const int64_t* expert_first_token_offset) {
     const int32_t M = get<0>(problem_shape_mnkl);
     const int32_t N = get<1>(problem_shape_mnkl);
     const int32_t K = get<2>(problem_shape_mnkl);
-    auto expert_first_token_offset = mainloop_params.expert_first_token_offset;
 
-    /* FIXME: use a problem visitor */
-    int calc_group{0}, real_group{0};
-    while (calc_group < next_group + 1) {
-      if (expert_first_token_offset[real_group] !=
-          expert_first_token_offset[real_group + 1]) {
-        calc_group++;
-      }
-      real_group++;
-    }
-    real_group -= 1;
     ElementA const* ptr_A_curr_batch =
         reinterpret_cast<ElementA const*>(mainloop_params.ptr_A) +
-        expert_first_token_offset[real_group] * K;
+        expert_first_token_offset[next_group] * K;
     ElementB const* ptr_B_curr_batch =
         reinterpret_cast<ElementB const*>(mainloop_params.ptr_B) +
-        real_group * N * K;
+        next_group * N * K;
 
     Tensor mA = make_tensor(
         make_gmem_ptr(ptr_A_curr_batch),
         make_shape(M, K, (int32_t)1),
-        mainloop_params.dA[next_group]);
+        cutlass::make_cute_packed_stride(InternalStrideA{}, {M, K, 1}));
     Tensor mB = make_tensor(
         make_gmem_ptr(ptr_B_curr_batch),
         make_shape(N, K, (int32_t)1),
-        mainloop_params.dB[next_group]);
+        mainloop_params.dB);
 
     return cute::make_tuple(mA, mB);
   }
