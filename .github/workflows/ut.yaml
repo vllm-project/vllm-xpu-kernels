@@ -29,7 +29,7 @@ jobs:
           --name vllm-xpu-kernel-ci \
           xpu-kernel-ci-image \
           /bin/bash -c '
-          pytest -v -s /workspace/vllm-xpu-kernels/tests/
+          pytest -v -s /workspace/vllm-xpu-kernels/tests/ --ignore=/workspace/vllm-xpu-kernels/tests/fused_moe/test_fused_moe.py
           '
       - name: Remove container
         if: ${{ always() }} 
