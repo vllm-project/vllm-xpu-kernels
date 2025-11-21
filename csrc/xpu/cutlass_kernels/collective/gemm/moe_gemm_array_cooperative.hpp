@@ -103,14 +103,7 @@ class GemmUniversal<
       cute::is_same_v<TileScheduler_, GroupScheduler>,
       "Only Group Scheduler is supported with this code.");
   using TileSchedulerTag = TileScheduler_;
-  // using TileScheduler = typename detail::TileSchedulerSelector<
-  //     TileScheduler_,
-  //     ArchTag,
-  //     TileShape,
-  //     ClusterShape,
-  //     0,
-  //     ProblemShape>::Scheduler;
-  using TileScheduler = typename cutlass::gemm::kernel::detail::PersistentTileSchedulerMoE<ProblemShape>;
+  using TileScheduler = typename cutlass::gemm::kernel::detail::PersistentTileSchedulerMoE;
   using TileSchedulerArguments = typename TileScheduler::Arguments;
   using TileSchedulerParams = typename TileScheduler::Params;
 
@@ -137,9 +130,12 @@ class GemmUniversal<
   // Device side arguments
   struct Arguments {
     GemmUniversalMode mode{};
-    ProblemShape problem_shape{};
     MainloopArguments mainloop{};
     EpilogueArguments epilogue{};
+    const int64_t* expert_first_token_offset{nullptr};
+    int64_t N;
+    int64_t K;
+    int64_t groups;
     KernelHardwareInfo hw_info{};
     TileSchedulerArguments scheduler{};
   };
@@ -147,12 +143,15 @@ class GemmUniversal<
   // Kernel entry point API
   struct Params {
     GemmUniversalMode mode{};
-    ProblemShape problem_shape{};
     MainloopParams mainloop{};
     EpilogueParams epilogue{};
     KernelHardwareInfo hw_info{};
     TileSchedulerParams scheduler{};
     void* workspace{nullptr};
+    const int64_t* expert_first_token_offset{nullptr};
+    int64_t N;
+    int64_t K;
+    int64_t groups;
   };
 
   //
@@ -164,8 +163,6 @@ class GemmUniversal<
   static Params
   to_underlying_arguments(Arguments const& args, void* workspace) {
     CUTLASS_TRACE_HOST("to_underlying_arguments():");
-
-    auto problem_shape = args.problem_shape;
 
     // Get SM count if needed, otherwise use user supplied SM count
     int sm_count = args.hw_info.sm_count;
@@ -188,7 +185,6 @@ class GemmUniversal<
     uint8_t* workspace_ptr = reinterpret_cast<uint8_t*>(workspace);
 
     TileSchedulerParams scheduler = TileScheduler::to_underlying_arguments(
-        problem_shape,
         TileShape{},
         ClusterShape{},
         hw_info,
@@ -197,19 +193,19 @@ class GemmUniversal<
 
     return {
         args.mode,
-        problem_shape,
-        CollectiveMainloop::to_underlying_arguments(
-            args.problem_shape, args.mainloop, workspace_ptr),
-        CollectiveEpilogue::to_underlying_arguments(
-            args.problem_shape, args.epilogue, workspace_ptr),
+        CollectiveMainloop::to_underlying_arguments(args.mainloop), 
+        CollectiveEpilogue::template to_underlying_arguments<ProblemShape>(args.epilogue, workspace_ptr), 
         hw_info,
         scheduler,
-        workspace};
+        workspace,
+        args.expert_first_token_offset,
+        args.N,
+        args.K,
+        args.groups};
   }
 
   static bool can_implement(Arguments const& args) {
     bool implementable = true;
-
     implementable =
         implementable &&
         (args.mode == GemmUniversalMode::kGrouped ||
@@ -219,10 +215,9 @@ class GemmUniversal<
     implementable =
         implementable && TileScheduler::can_implement(args.scheduler);
 
+    implementable &= CollectiveMainloop::template can_implement<ProblemShape>(args.N, args.K, args.mainloop);
     implementable &=
-        CollectiveMainloop::can_implement(args.problem_shape, args.mainloop);
-    implementable &=
-        CollectiveEpilogue::can_implement(args.problem_shape, args.epilogue);
+        CollectiveEpilogue::template can_implement<ProblemShape>(args.N, args.K, args.epilogue);
 
     return implementable;
   }
@@ -230,10 +225,8 @@ class GemmUniversal<
   static size_t get_workspace_size(Arguments const& args) {
     size_t workspace_size = 0;
     workspace_size += TileScheduler::template get_workspace_size<
-        typename ProblemShape::UnderlyingProblemShape,
         ElementAccumulator>(
         args.scheduler,
-        typename ProblemShape::UnderlyingProblemShape{},
         args.hw_info,
         -1);
     return workspace_size;
@@ -248,12 +241,10 @@ class GemmUniversal<
     uint8_t* workspace_ptr = reinterpret_cast<uint8_t*>(workspace);
 
     status = TileScheduler::template initialize_workspace<
-        typename ProblemShape::UnderlyingProblemShape,
         ElementAccumulator>(
         args.scheduler,
         workspace_ptr,
         stream,
-        typename ProblemShape::UnderlyingProblemShape{},
         args.hw_info,
         -1);
 
@@ -271,7 +262,6 @@ class GemmUniversal<
             : TileScheduler::RasterOrderOptions::AlongM;
     return TileScheduler::get_grid_shape(
         params.scheduler,
-        params.problem_shape,
         TileShape{},
         ClusterShape{},
         params.hw_info,
@@ -305,7 +295,10 @@ class GemmUniversal<
     // Kernel level shared memory storage
     SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(smem_buf);
 
-    TileScheduler scheduler{params.scheduler};
+    TileScheduler scheduler{params.scheduler, params.expert_first_token_offset, params.N, params.K, params.groups};
+    const int32_t N = params.N;
+    const int32_t K = params.K;
+
     auto work_tile_info = scheduler.initial_work_tile_info(ClusterShape{});
     constexpr auto workgroup_shape =
         WorkgroupTileShape{};  // (BLK_M,BLK_N,BLK_K)
@@ -321,8 +314,8 @@ class GemmUniversal<
 
     if (work_tile_info.is_valid()) {
       curr_group = work_tile_info.L_idx;
-      problem_shape_MNKL =
-          append<4>(params.problem_shape.get_problem_shape(curr_group), 1);
+      auto M_ = static_cast<int>(params.expert_first_token_offset[curr_group+1] - params.expert_first_token_offset[curr_group]);
+      problem_shape_MNKL = append<4>(Shape<int, int, int>{M_, N, K}, 1);
     }
 
     while (work_tile_info.is_valid()) {
@@ -345,14 +338,14 @@ class GemmUniversal<
       CollectiveMainloop collective_mma;
       if (did_group_change) {
         AB_tensors = collective_mma.update_tensor_shape_stride(
-            params.mainloop, curr_group, problem_shape_MNKL);
+            params.mainloop, curr_group, problem_shape_MNKL, params.expert_first_token_offset);
       }
       auto tile_coord = make_coord(m_coord, n_coord, _, 0);
 
       // Get the number of K tiles to compute for this work as well as the
       // starting K tile offset of the work.
       int work_k_tile_count = TileScheduler::get_work_k_tile_count(
-          work_tile_info, problem_shape_MNKL, workgroup_shape);
+          work_tile_info, K, workgroup_shape);
       int work_k_tile_start =
           TileScheduler::get_work_k_tile_start(work_tile_info);
       auto k_tile_iter = cute::make_coord_iterator(
@@ -384,7 +377,7 @@ class GemmUniversal<
 
         if (did_group_change) {
           CD_tensors = epilogue.update_tensor_shape_stride(
-              curr_group, problem_shape_MNKL);
+              curr_group, problem_shape_MNKL, params.expert_first_token_offset);
           did_group_change = false;
         }
 
@@ -407,8 +400,8 @@ class GemmUniversal<
 
       if (did_group_change && work_tile_info.is_valid()) {
         curr_group = work_tile_info.L_idx;
-        problem_shape_MNKL =
-            append<4>(params.problem_shape.get_problem_shape(curr_group), 1);
+        auto M_ = static_cast<int>(params.expert_first_token_offset[curr_group+1] - params.expert_first_token_offset[curr_group]);
+        problem_shape_MNKL = append<4>(Shape<int, int, int>{M_, N, K}, 1);
       }
     }
   }

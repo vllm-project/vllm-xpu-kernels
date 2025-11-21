@@ -15,7 +15,7 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
                          k, num_experts):
     expert_token_count_ = torch.tensor(expert_token_count,
                                        dtype=torch.int64,
-                                       device="cpu")
+                                       device=input_A.device)
 
     def exclusive_prefix_sum(arr):
         prefix = [0]
@@ -24,7 +24,7 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
         return prefix
 
     if bias is not None:
-        bias = bias.repeat_interleave(expert_token_count_.to(bias.device),
+        bias = bias.repeat_interleave(expert_token_count_,
                                       dim=0).float()
 
     expert_offset = torch.tensor(exclusive_prefix_sum(expert_token_count),
@@ -36,7 +36,6 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
         ptr_bias=bias,
         ptr_D=output,
         expert_first_token_offset=expert_offset,
-        expert_token_count=expert_token_count_,
         N=n,
         K=k,
         groups=num_experts)
@@ -149,7 +148,6 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
         if w2_bias.shape == (num_experts, hidden_size):
             w2_bias = w2_bias.repeat_interleave(expert_token_count,
                                                 dim=0).float()
-    expert_token_count = expert_token_count.cpu()
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
@@ -163,7 +161,6 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
         ptr_bias=w13_bias,
         ptr_D=gemm1_output,
         expert_first_token_offset=expert_first_token_offset,
-        expert_token_count=expert_token_count,
         N=2 * inter_size,
         K=hidden_size,
         groups=num_experts_per_node)
@@ -193,7 +190,6 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
         ptr_bias=w2_bias,
         ptr_D=gemm2_output,
         expert_first_token_offset=expert_first_token_offset,
-        expert_token_count=expert_token_count,
         N=hidden_size,
         K=inter_size,
         groups=num_experts_per_node)

@@ -29,7 +29,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor? ptr_bias, "
       "Tensor "
       "ptr_D, Tensor "
-      "expert_token_count, Tensor expert_first_token_offset, int N, int K, int "
+      "expert_first_token_offset, int N, int K, int "
       "groups) -> "
       "Tensor");
   xpu_ops.impl(

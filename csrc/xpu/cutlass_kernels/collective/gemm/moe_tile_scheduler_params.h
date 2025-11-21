@@ -50,7 +50,6 @@ namespace kernel {
 namespace detail {
 
 // Parameters for SM90 persistent group scheduler (only used for Grouped Gemms)
-template<class GroupProblemShape>
 struct PersistentTileSchedulerMoEParams {
   using RasterOrder = cutlass::gemm::kernel::detail::RasterOrder;
   using RasterOrderOptions = cutlass::gemm::kernel::detail::RasterOrderOptions;
@@ -61,11 +60,10 @@ struct PersistentTileSchedulerMoEParams {
   FastDivmodU64 divmod_cta_shape_n_{};
 
   uint64_t blocks_across_problem_ = 0;
-  bool pre_processed_problem_shapes = true;
+  bool pre_processed_problem_shapes = false;
   int32_t log_swizzle_size_ = 0;
   RasterOrder raster_order_ = RasterOrder::AlongN;
 
-  GroupProblemShape problem_shapes_;
   GemmCoord cta_shape_;
   GemmCoord cluster_shape_;
 
@@ -75,7 +73,6 @@ struct PersistentTileSchedulerMoEParams {
   void
   initialize(
     dim3 problem_blocks,
-    GroupProblemShape problem_shapes,
     GemmCoord cta_shape,
     GemmCoord cluster_shape,
     KernelHardwareInfo const& hw_info,
@@ -99,12 +96,11 @@ struct PersistentTileSchedulerMoEParams {
     //
     // Set members
     //
-    problem_shapes_ = problem_shapes;
     cta_shape_ = cta_shape;
     cluster_shape_ = cluster_shape;
 
     blocks_across_problem_ = problem_blocks.x * problem_blocks.y * problem_blocks.z;
-    pre_processed_problem_shapes = problem_shapes.is_host_problem_shape_available();
+    pre_processed_problem_shapes = false;
     log_swizzle_size_ = log_swizzle_size;
     raster_order_ = raster_order;
 
