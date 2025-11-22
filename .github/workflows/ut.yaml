@@ -19,7 +19,7 @@ jobs:
 
       - name: build docker image
         run: |
-          cp -r $HOME/umd ./umd
+          cp -r "$HOME/umd" ./umd
           docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
 
       - name: test 
@@ -27,6 +27,7 @@ jobs:
           docker run \
           --device /dev/dri \
           -v /dev/dri/by-path:/dev/dri/by-path \
+          --privileged \
           --name vllm-xpu-kernel-ci \
           xpu-kernel-ci-image \
           /bin/bash -c '
