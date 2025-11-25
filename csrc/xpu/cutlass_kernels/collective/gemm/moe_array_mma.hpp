@@ -251,19 +251,21 @@ struct CollectiveMma<
     TiledMma tiled_mma;
     auto thr_mma = tiled_mma.get_slice(thread_idx);
 
-    auto tiled_copy_a = get_block_2d_copy_A<GmemTiledCopyA>(TiledMma{}, get<0>(load_tensors)(_, _, 0));
-    auto tiled_copy_b = get_block_2d_copy_B<GmemTiledCopyB>(TiledMma{}, get<1>(load_tensors)(_, _, 0));
+    auto tiled_copy_a = get_block_2d_copy_A<GmemTiledCopyA>(
+        TiledMma{}, get<0>(load_tensors)(_, _, 0));
+    auto tiled_copy_b = get_block_2d_copy_B<GmemTiledCopyB>(
+        TiledMma{}, get<1>(load_tensors)(_, _, 0));
 
     auto thr_copy_a = tiled_copy_a.get_slice(thread_idx);
     auto thr_copy_b = tiled_copy_b.get_slice(thread_idx);
 
     /* Register fragments for MMA */
-    auto tCrA = thr_mma.partition_sg_fragment_A(gA(_,_,0));
-    auto tCrB = thr_mma.partition_sg_fragment_B(gB(_,_,0));
+    auto tCrA = thr_mma.partition_sg_fragment_A(gA(_, _, 0));
+    auto tCrB = thr_mma.partition_sg_fragment_B(gB(_, _, 0));
 
     /* Register fragments for copies */
-    auto tArA = thr_copy_a.partition_sg_fragment_D(gA(_,_,0));
-    auto tBrB = thr_copy_b.partition_sg_fragment_D(gB(_,_,0));
+    auto tArA = thr_copy_a.partition_sg_fragment_D(gA(_, _, 0));
+    auto tBrB = thr_copy_b.partition_sg_fragment_D(gB(_, _, 0));
 
     /* Partition global tensor (proxies) for copies */
     Tensor tAgA = thr_copy_a.partition_S(gA);
@@ -281,7 +283,10 @@ struct CollectiveMma<
     auto pBgB = thr_prefetch_B.partition_S(gB);
 
 #if CUTLASS_ENABLE_DEBUG_PRINTS
-   #define PRINT(x) print(#x ": "); print(x); print("\n");
+  #define PRINT(x)  \
+    print(#x ": "); \
+    print(x);       \
+    print("\n");
     if (cute::thread(LOG_THREAD, LOG_GROUP)) {
       print("======================= A: \n");
       PRINT(tAgA);
@@ -295,9 +300,9 @@ struct CollectiveMma<
 
       PRINT(tCrB);
       PRINT(tBrB);
-      PRINT(mainloop.copy_b); 
+      PRINT(mainloop.copy_b);
     }
-#undef PRINT
+  #undef PRINT
 #endif
 
     //
@@ -324,7 +329,7 @@ struct CollectiveMma<
         prefetch(prefetch_a, pAgA(_, _, _, prefetch_k));
         prefetch(prefetch_b, pBgB(_, _, _, prefetch_k));
       }
-       /* Shuffle data from copy fragments to MMA fragments */
+      /* Shuffle data from copy fragments to MMA fragments */
       reorder(tArA, tCrA);
       reorder(tBrB, tCrB);
 
