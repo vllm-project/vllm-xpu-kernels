@@ -220,6 +220,7 @@ struct FMHAFwdMainloop<
       int const& idx_b,       // WG tile indices: (B)
       int blk_k0,             // K block range: [K0,K1)
       int blk_k1,
+      int blk_k1_causal,
       int thr_id,
       int seq_len,
       int full_tile_offset,
@@ -362,7 +363,7 @@ struct FMHAFwdMainloop<
 
       /* Causal masking */
       if constexpr (CausalMask) {
-        if (K == blk_k1 - 1) {
+        if (K >= blk_k1_causal) {
           // Need to get global col and row indices to mask the elements
           Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
           Tensor gP = local_tile(

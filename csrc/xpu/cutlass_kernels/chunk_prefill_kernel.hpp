@@ -256,6 +256,7 @@ class XeFMHAFwdKernel {
                     q_sg_tile
               : seq_len_kv;
       const int k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
+      const int k_causal_blocks = CausalMask ? (seq_len - q_sg_tile) / get<1>(TileShapeQK{}) : 0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       if constexpr (is_var_len) {
@@ -325,6 +326,7 @@ class XeFMHAFwdKernel {
           idx_b,
           0,
           k_blocks,
+          k_causal_blocks,
           thr_id,
           seq_len,
           full_tile_offset,
