@@ -10,7 +10,7 @@ from tests.utils import opcheck
 DTYPES = [torch.half, torch.bfloat16]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
 #TODO: add back  5120, 5124, 5125, 5126, 8192, 8199 after ci env issue fixed
-HIDDEN_SIZES = [8, 768, 769, 770, 771]
+HIDDEN_SIZES = [8, 768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192, 8199]
 
 ADD_RESIDUAL = [False, True]
 SEEDS = [0]
