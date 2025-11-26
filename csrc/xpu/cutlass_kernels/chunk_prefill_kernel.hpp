@@ -261,7 +261,8 @@ class XeFMHAFwdKernel {
                     q_sg_tile
               : seq_len_kv;
       const int k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
-      const int k_causal_blocks = CausalMask ? (seq_len - q_sg_tile) / get<1>(TileShapeQK{}) : 0;
+      const int k_causal_blocks =
+          CausalMask ? (seq_len - q_sg_tile) / get<1>(TileShapeQK{}) : 0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       if constexpr (is_var_len) {
@@ -346,9 +347,23 @@ class XeFMHAFwdKernel {
       CollectiveEpilogue epilogue{params.epilogue, shared_storage.epilogue};
       if constexpr (Sink) {
         ElementSink s_head = p.ptr_S[head_q];
-        epilogue(O(_, _, head_q, l_coord), tArA, tA_max, tA_sum, blk_qv, s_head, thr_id);
+        epilogue(
+            O(_, _, head_q, l_coord),
+            tArA,
+            tA_max,
+            tA_sum,
+            blk_qv,
+            s_head,
+            thr_id);
       } else {
-        epilogue(O(_, _, head_q, l_coord), tArA, tA_max, tA_sum, blk_qv, static_cast<ElementSink>(0), thr_id);
+        epilogue(
+            O(_, _, head_q, l_coord),
+            tArA,
+            tA_max,
+            tA_sum,
+            blk_qv,
+            static_cast<ElementSink>(0),
+            thr_id);
       }
     }
   }

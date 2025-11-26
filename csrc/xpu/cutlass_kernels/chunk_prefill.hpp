@@ -340,10 +340,10 @@ void policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            true,    // args.is_varlen,
-            true,    // args.is_paged,
+            true,  // args.is_varlen,
+            true,  // args.is_paged,
             args.is_causal,
-            false,   // args.is_local,
+            false,  // args.is_local,
             args.is_sink);
   } else {
     return FMHAConfig<
@@ -356,10 +356,10 @@ void policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            true,    // args.is_varlen,
-            true,    // args.is_paged,
+            true,  // args.is_varlen,
+            true,  // args.is_paged,
             args.is_causal,
-            false,   // args.is_local,
+            false,  // args.is_local,
             args.is_sink);
   }
 }

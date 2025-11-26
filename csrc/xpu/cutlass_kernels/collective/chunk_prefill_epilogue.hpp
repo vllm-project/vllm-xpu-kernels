@@ -160,13 +160,13 @@ class FMHAFwdEpilogue {
 
   template <typename QVCoord>
   CUTLASS_DEVICE void operator()(
-      TensorO2D const& O,  // Global O tensor: (q,v)
-      FragA& tArA,         // O accumulator:   (q,v)
-      FragARow& tA_max,    // Softmax row-wise max accumulator
-      FragARow& tA_sum,    // Softmax row-wise sum accumulator
-      QVCoord blk_qv,      // WG tile indices: (q,v)
-      ElementSink const& tSink,     // Sink for current head
-      int thr_id) {        // Work-item ID
+      TensorO2D const& O,        // Global O tensor: (q,v)
+      FragA& tArA,               // O accumulator:   (q,v)
+      FragARow& tA_max,          // Softmax row-wise max accumulator
+      FragARow& tA_sum,          // Softmax row-wise sum accumulator
+      QVCoord blk_qv,            // WG tile indices: (q,v)
+      ElementSink const& tSink,  // Sink for current head
+      int thr_id) {              // Work-item ID
 
     using namespace cute;
     using ElementA = typename FragA::element_type;
@@ -182,7 +182,8 @@ class FMHAFwdEpilogue {
     for (int i = 0; i < rA_sum.size(); i++) {
       if constexpr (Sink) {
         constexpr double kLog2e = 1.4426950408889634074;
-        rA_sum(i) += sycl::native::exp2(static_cast<ElementA>(tSink * kLog2e) - tA_max(i));
+        rA_sum(i) += sycl::native::exp2(
+            static_cast<ElementA>(tSink * kLog2e) - tA_max(i));
       }
       rA_sum(i) = ElementA(1) / rA_sum(i);
     }
