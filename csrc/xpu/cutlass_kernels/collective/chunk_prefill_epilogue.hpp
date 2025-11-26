@@ -49,6 +49,7 @@ namespace cutlass::fmha::collective {
 using namespace cute;
 
 template <
+    bool Sink_,
     class CollectiveMainloop,  // Attention mainloop
     class TileShapeO_,         // Shape of output tile, may be larger than P*V
                                // GEMM
@@ -73,6 +74,10 @@ class FMHAFwdEpilogue {
   using FragA = typename CollectiveMainloop::FragA;
   using FragARow = typename CollectiveMainloop::FragARow;
   using ElementA = typename FragA::value_type;
+
+  // softmax sink, same dtype
+  static constexpr bool Sink = Sink_;
+  using ElementSink = typename CollectiveMainloop::TensorQ::element_type;
 
   // Split k-reduced tiles between participating subgroups.
   // Assumption: the A tile is contiguous.
@@ -160,6 +165,7 @@ class FMHAFwdEpilogue {
       FragARow& tA_max,    // Softmax row-wise max accumulator
       FragARow& tA_sum,    // Softmax row-wise sum accumulator
       QVCoord blk_qv,      // WG tile indices: (q,v)
+      ElementSink const& tSink,     // Sink for current head
       int thr_id) {        // Work-item ID
 
     using namespace cute;
@@ -173,8 +179,13 @@ class FMHAFwdEpilogue {
 
     /* Complete softmax, dividing out sums. */
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < rA_sum.size(); i++)
+    for (int i = 0; i < rA_sum.size(); i++) {
+      if constexpr (Sink) {
+        constexpr double kLog2e = 1.4426950408889634074;
+        rA_sum(i) += sycl::native::exp2(static_cast<ElementA>(tSink * kLog2e) - tA_max(i));
+      }
       rA_sum(i) = ElementA(1) / rA_sum(i);
+    }
 
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < rA.size(); i++)
