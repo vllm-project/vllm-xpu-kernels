@@ -19,7 +19,7 @@ jobs:
 
       - name: build docker image
         run: |
-          cp -r $HOME/umd ./umd
+          cp -r "$HOME/umd" ./umd
           docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
 
       - name: test 
@@ -27,10 +27,11 @@ jobs:
           docker run \
           --device /dev/dri \
           -v /dev/dri/by-path:/dev/dri/by-path \
+          --privileged \
           --name vllm-xpu-kernel-ci \
           xpu-kernel-ci-image \
           /bin/bash -c '
-          pytest -v -s /workspace/vllm-xpu-kernels/tests/ --ignore=/workspace/vllm-xpu-kernels/tests/fused_moe/test_fused_moe.py
+          ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/
           '
       - name: Remove container
         if: ${{ always() }} 

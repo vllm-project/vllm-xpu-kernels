@@ -18,6 +18,17 @@ TOP_KS = [1, 2, 16, 32]
 BLOCK_SIZES = [32, 128]
 seed_everything(0)
 
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "m": [1],
+        "num_experts": [32],
+        "topk": [1],
+        "block_size": [32],
+        "max_tokens_per_batch": [13]
+    },
+}
+
 
 def _group_tokens_by_expert(
     sorted_ids: torch.Tensor,
@@ -281,9 +292,12 @@ def test_moe_align_block_size_with_expert_map(m: int, topk: int,
     )
 
 
-def test_moe_align_block_size_deterministic():
-    m, topk, num_experts, block_size = 128, 2, 32, 64
-
+@pytest.mark.parametrize("m", [128])
+@pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("num_experts", [32])
+@pytest.mark.parametrize("block_size", [64])
+def test_moe_align_block_size_deterministic(m: int, topk: int,
+                                            num_experts: int, block_size: int):
     torch.manual_seed(42)
     topk_ids = torch.randint(0,
                              num_experts, (m, topk),
@@ -435,11 +449,14 @@ def test_moe_align_block_size_opcheck():
     )
 
 
-def test_batched_moe_align_block_size_opcheck():
-    max_tokens_per_batch = 512
-    num_experts = 4
-    block_size = 16
-
+@pytest.mark.parametrize("max_tokens_per_batch", [512])
+@pytest.mark.parametrize("num_experts", [4])
+@pytest.mark.parametrize("block_size", [16])
+def test_batched_moe_align_block_size_opcheck(
+    max_tokens_per_batch: int,
+    num_experts: int,
+    block_size: int,
+):
     expert_num_tokens = torch.randint(
         low=0,
         high=max_tokens_per_batch,

@@ -77,14 +77,9 @@
 
 #pragma once
 
-// #include "cutlass/epilogue/collective/default_epilogue.hpp"
-// #include "cutlass/epilogue/collective/xe_array_epilogue.hpp"
-// #include "cutlass/epilogue/fusion/xe_callbacks.hpp"
-// #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/group_array_problem_shape.hpp"
 #include "cutlass/gemm/device/gemm_universal.h"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
-// #include "cutlass/gemm/collective/collective_mma.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
 
 #include <cute/tensor.hpp>
@@ -99,90 +94,22 @@
 #include <cfloat>
 
 #include "cutlass/gemm/collective/collective_mma_decl.hpp"
-/* #include "./collective/gemm/gemm_universal.h" */
-/* #include "./collective/gemm/gemm_universal_adapter.h" */
 #include "collective/gemm/moe_array_mma.hpp"
 #include "collective/gemm/moe_array_epilogue.hpp"
-/* #include "./collective/gemm/xe_builder.hpp" */
 #include "collective/gemm/moe_callbacks.hpp"
 #include "collective/gemm/moe_dtype_policy.hpp"
 #include "collective/gemm/moe_gemm_array_cooperative.hpp"
-// #include "./collective/gemm/gemm_universal_adapter.hpp"
+#include "collective/gemm/moe_tile_scheduler.hpp"
 
 using namespace cute;
 using ProblemShape =
     cutlass::gemm::GroupProblemShape<Shape<int, int, int>>;  // <M,N,K> per
                                                              // group
 
-bool debug = false;
-bool collect_gflops = false;
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace gpu::cutlass_kernel {
 namespace grouped_gemm {
-
-struct Options {
-  bool error = false;
-  bool help = false;
-
-  float alpha, beta;
-  int iterations;
-  int m, n, k, groups;
-  std::vector<typename ProblemShape::UnderlyingProblemShape> problem_sizes_host;
-
-  int num_of_expert;
-
-  Options(int64_t* offset, int N, int K, int ne)
-      : num_of_expert(ne),
-        n(N),
-        k(K),
-        error(false),
-        help(false),
-        alpha(FLT_MAX),
-        beta(FLT_MAX),
-        iterations(100) {
-    if (debug) {
-      std::cout << "Options()" << std::endl;
-    }
-    int group_cnt = 0;
-    // std::cout << "****Options() num_of_expert  " << num_of_expert <<
-    // std::endl;
-    for (int i = 0; i < num_of_expert; ++i) {
-      // std::cout << "****Options() i  " << i << std::endl;
-      // std::cout << "****Options() offset[i]  " << offset[i] << std::endl;
-      if (offset[i] != 0) {
-        group_cnt++;
-      }
-    }
-    // std::cout << "****Options() group_cnt  " << group_cnt << std::endl;
-    problem_sizes_host.reserve(group_cnt);
-    for (int i = 0; i < num_of_expert; ++i) {
-      if (offset[i] != 0) {
-        problem_sizes_host.push_back({static_cast<int>(offset[i]), n, k});
-      }
-    }
-    groups = group_cnt;
-  }
-
-  /// Compute performance in GFLOP/s
-  double gflops(
-      double runtime_s,
-      std::vector<typename ProblemShape::UnderlyingProblemShape>
-          problem_sizes_host) const {
-    // Number of real-valued multiply-adds
-    uint64_t fmas = uint64_t();
-
-    for (auto const& problem : problem_sizes_host) {
-      fmas += static_cast<uint64_t>(get<0>(problem)) *
-              static_cast<uint64_t>(get<1>(problem)) *
-              static_cast<uint64_t>(get<2>(problem));
-    }
-    // Two flops per multiply-add
-    uint64_t flop = uint64_t(2) * uint64_t(fmas);
-    double gflop = double(flop) / double(1.0e9);
-    return gflop / runtime_s;
-  }
-};
 
 template <class Gemm>
 struct GroupedGemmRunner {
@@ -204,84 +131,17 @@ struct GroupedGemmRunner {
   using ElementOutput = typename Gemm::ElementA;
   using ElementAccumulator = float_t;
 
-  using ProblemShapeType = typename Gemm::GemmKernel::ProblemShape;
-
-  std::vector<StrideA> stride_A_host;
-  std::vector<StrideB> stride_B_host;
-  std::vector<StrideC> stride_C_host;
-  std::vector<StrideD> stride_D_host;
-
-  // Device-side allocations
-  cutlass::DeviceAllocation<typename ProblemShape::UnderlyingProblemShape>
-      problem_sizes;
-
-  cutlass::DeviceAllocation<StrideA> stride_A;
-  cutlass::DeviceAllocation<StrideB> stride_B;
-  cutlass::DeviceAllocation<StrideC> stride_C;
-  cutlass::DeviceAllocation<StrideD> stride_D;
-
-  void release() {
-    problem_sizes.release();
-    // ptr_C.release();
-    stride_A.release();
-    stride_B.release();
-    stride_C.release();
-    stride_D.release();
-    // block_C.release();
-  }
-
-  /// Allocates device-side data
-  void allocate(const Options& options) {
-    if (debug) {
-      std::cout << "void allocate()" << std::endl;
-    }
-    for (int32_t i = 0; i < options.groups; ++i) {
-      auto problem = options.problem_sizes_host.at(i);
-      auto M = get<0>(problem);
-      auto N = get<1>(problem);
-      auto K = get<2>(problem);
-
-      stride_A_host.push_back(
-          cutlass::make_cute_packed_stride(StrideA{}, {M, K, 1}));
-      stride_B_host.push_back(
-          cutlass::make_cute_packed_stride(StrideB{}, {N, K, 1}));
-      stride_C_host.push_back(
-          cutlass::make_cute_packed_stride(StrideC{}, {M, N, 1}));
-      stride_D_host.push_back(
-          cutlass::make_cute_packed_stride(StrideD{}, {M, N, 1}));
-    }
-  }
-
-  void initialize(const Options& options) {
-    if (debug) {
-      std::cout << "void initialize()" << std::endl;
-    }
-    problem_sizes.reset(options.groups);
-    problem_sizes.copy_from_host(options.problem_sizes_host.data());
-
-    stride_A.reset(options.groups);
-    stride_A.copy_from_host(stride_A_host.data());
-
-    stride_B.reset(options.groups);
-    stride_B.copy_from_host(stride_B_host.data());
-
-    stride_C.reset(options.groups);
-    stride_C.copy_from_host(stride_C_host.data());
-
-    stride_D.reset(options.groups);
-    stride_D.copy_from_host(stride_D_host.data());
-  }
-
   /// Populates a Gemm::Arguments structure from the given commandline options
   typename Gemm::Arguments args_from_options(
-      const Options& options,
       const cutlass::KernelHardwareInfo& hw_info,
       int64_t const* expert_first_token_offset,
       const ElementA* ptr_A,
       const ElementB* ptr_B,
       const ElementC* ptr_C,
       ElementOutput* ptr_D,
-      bool host_problem_shapes_available = true) {
+      int64_t N,
+      int64_t K,
+      int64_t groups) {
     typename Gemm::Arguments arguments;
     decltype(arguments.epilogue.thread) fusion_args;
 
@@ -296,79 +156,51 @@ struct GroupedGemmRunner {
     // One alpha and beta per each group
     fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 1};
     fusion_args.dBeta = {cute::_0{}, cute::_0{}, 1};
-    using RasterOrderOptions =
-        typename cutlass::gemm::kernel::detail::PersistentTileSchedulerXeGroup<
-            ProblemShape>::RasterOrderOptions;
+    using RasterOrderOptions = typename cutlass::gemm::kernel::detail::
+        PersistentTileSchedulerMoE::RasterOrderOptions;
 
+    bool has_bias = ptr_C ? true : false;
     // Per-GEMM problem shape info may only exist on the device.
-    if (host_problem_shapes_available) {
-      arguments = typename Gemm::Arguments{
-          cutlass::gemm::GemmUniversalMode::kGrouped,
-          {options.groups,
-           problem_sizes.get(),
-           options.problem_sizes_host.data()},
-          {ptr_A,
-           stride_A.get(),
-           ptr_B,
-           stride_B.get(),
-           expert_first_token_offset},
-          {fusion_args,
-           ptr_C,
-           stride_C.get(),
-           ptr_D,
-           stride_D.get(),
-           expert_first_token_offset,
-           ptr_C ? true : false},
-          hw_info,
-          {1, RasterOrderOptions::AlongN}};
-    } else {
-      arguments = typename Gemm::Arguments{
-          cutlass::gemm::GemmUniversalMode::kGrouped,
-          {options.groups, problem_sizes.get(), nullptr},
-          {ptr_A,
-           stride_A.get(),
-           ptr_B,
-           stride_B.get(),
-           expert_first_token_offset},
-          {fusion_args,
-           ptr_C,
-           stride_C.get(),
-           ptr_D,
-           stride_D.get(),
-           expert_first_token_offset,
-           ptr_C ? true : false},
-          hw_info,
-          {1, RasterOrderOptions::AlongN}};
-    }
+    arguments = typename Gemm::Arguments{
+        cutlass::gemm::GemmUniversalMode::kGrouped,
+        {ptr_A,
+         ptr_B,
+         cutlass::make_cute_packed_stride(
+             StrideB{}, {static_cast<int>(N), static_cast<int>(K), 1})},
+        {fusion_args, ptr_C, ptr_D, has_bias},
+        expert_first_token_offset,
+        N,
+        K,
+        groups,
+        hw_info,
+        {1, RasterOrderOptions::AlongN}};
 
     return arguments;
   }
 
   cutlass::Status
-  run(const Options& options,
-      sycl::queue& stream,
+  run(sycl::queue& stream,
       const cutlass::KernelHardwareInfo& hw_info,
       int64_t const* expert_first_token_offset,
       const ElementA* ptr_A,
       const ElementB* ptr_B,
       const ElementC* ptr_C,
-      ElementOutput* ptr_D) {
-    if (debug) {
-      std::cout << "enter run" << std::endl;
-    }
-
-    allocate(options);
-    initialize(options);
+      ElementOutput* ptr_D,
+      int64_t N,
+      int64_t K,
+      int64_t groups) {
     Gemm gemm_op;
 
     auto arguments = args_from_options(
-        options,
         hw_info,
         expert_first_token_offset,
         ptr_A,
         ptr_B,
         ptr_C,
-        ptr_D);
+        ptr_D,
+        N,
+        K,
+        groups);
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
@@ -377,40 +209,9 @@ struct GroupedGemmRunner {
 
     CUTLASS_CHECK(gemm_op.initialize(arguments, workspace.get()));
 
-    if (debug) {
-      std::cout << "before run kernel" << std::endl;
-    }
     // Run the GEMM
-
-    GPU_Clock timer;
-    timer.start();
     CUTLASS_CHECK(gemm_op.run());
-    if (collect_gflops) {
-      stream.wait();
-      float cute_time = timer.seconds() * 1000;
-      double cute_average_time = double(cute_time) / double(1);
-      std::cout << "  Avg runtimei : " << cute_average_time << " ms"
-                << std::endl;
-    }
-
-    if (collect_gflops) {
-      std::cout << "collect_gflops:" << collect_gflops << std::endl;
-      GPU_Clock timer;
-      timer.start();
-      for (int iter = 0; iter < 100; ++iter) {
-        CUTLASS_CHECK(gemm_op.run());
-      }
-      stream.wait();
-      float cute_time = timer.seconds() * 1000;
-      double cute_average_time = double(cute_time) / double(options.iterations);
-      double gflops = options.gflops(
-          cute_average_time / 1000.0, options.problem_sizes_host);
-      std::cout << "  Avg runtime : " << cute_average_time << " ms"
-                << std::endl;
-      std::cout << "  GFLOPS      : " << gflops << std::endl;
-    }
     stream.throw_asynchronous();
-    release();
     return cutlass::Status::kSuccess;
   }
 };
@@ -422,7 +223,6 @@ void kernel_functor(
     void* ptr_B,
     void* ptr_bias,
     void* ptr_D,
-    void* expert_token_count,
     void* expert_first_token_offset,
     int64_t N,
     int64_t K,
@@ -430,10 +230,8 @@ void kernel_functor(
   //
   // Run examples
   //
-  syclcompat::set_default_queue(stream);
+  compat::set_default_queue(stream);
 
-  auto offset_ptr = reinterpret_cast<int64_t*>(expert_token_count);
-  Options options(offset_ptr, N, K, groups);
   // The KernelHardwareInfo struct holds the number of EUs on the GPU with a
   // given device ID. This information is used by the underlying kernel.
   cutlass::KernelHardwareInfo hw_info;
@@ -457,21 +255,20 @@ void kernel_functor(
   using LayoutD = cutlass::layout::RowMajor;
 
   using TileShape = Shape<_256, _256, _32>;
-  using GmemTiledCopyA =
-      XE_2D_U16x32x32_LD_N;  // Note: This shape has to match the shape used for
-                             // the scaling factors
-  using GmemTiledCopyB =
-      XE_2D_U16x32x32_LD_V;  // Note: This shape has to match the shape used for
-                             // the scaling factors
+  using GmemTiledCopyA = void;  // XE_LOAD_2D<16, 32, 32>;
+                                // Note: This
+                                // shape has to match the shape used for
+                                //  the scaling factors
+  using GmemTiledCopyB = void;  // XE_LOAD_2D_VNNI<16, 32, 32>;
+                                // Note: This shape
+                                // has to match the shape used for
+                                //  the scaling factors
   using MMAOperation = moe_policy::MMAOperation;
 
-  using TiledMma = TiledMMA<
-      MMA_Atom<MMAOperation>,
-      Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>,
-      Tile<
-          Layout<Shape<_8, _8, _4>, Stride<_1, _32, _8>>,
-          Layout<Shape<_16, _4, _4>, Stride<_1, _64, _16>>,
-          _32>>;
+  using TiledMma = typename TiledMMAHelper<
+      MMA_Atom<XE_DPAS_TT<8, ElementAccumulator, ElementA>>,
+      Layout<TileShape>,
+      Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>>::TiledMMA;
 
   constexpr int PipelineStages = 2;
   using GEMMDispatchPolicy = cutlass::gemm::MainloopMoE16Group<PipelineStages>;
@@ -508,9 +305,9 @@ void kernel_functor(
       GEMMDispatchPolicy,
       TileShape,
       ElementA,
-      cutlass::gemm::TagToStrideA_t<LayoutA*>,
+      cutlass::gemm::TagToStrideA_t<LayoutA>,
       ElementB,
-      cutlass::gemm::TagToStrideB_t<LayoutB*>,
+      cutlass::gemm::TagToStrideB_t<LayoutB>,
       TiledMma,
       GmemTiledCopyA,
       void,
@@ -532,14 +329,16 @@ void kernel_functor(
 
   GroupedGemmRunner<Gemm> runner;
   runner.run(
-      options,
       stream,
       hw_info,
       reinterpret_cast<const int64_t*>(expert_first_token_offset),
       reinterpret_cast<const ElementA*>(ptr_A),
       reinterpret_cast<const ElementB*>(ptr_B),
       reinterpret_cast<const ElementAccumulator*>(ptr_bias),
-      reinterpret_cast<ElementOutput*>(ptr_D));
+      reinterpret_cast<ElementOutput*>(ptr_D),
+      N,
+      K,
+      groups);
 }
 
 template void kernel_functor<moe_bf16_policy>(
@@ -548,7 +347,6 @@ template void kernel_functor<moe_bf16_policy>(
     void* ptr_B,
     void* ptr_bias,
     void* ptr_D,
-    void* expert_token_count,
     void* expert_first_token_offset,
     int64_t N,
     int64_t K,
@@ -559,7 +357,6 @@ template void kernel_functor<moe_fp16_policy>(
     void* ptr_B,
     void* ptr_bias,
     void* ptr_D,
-    void* expert_token_count,
     void* expert_first_token_offset,
     int64_t N,
     int64_t K,
