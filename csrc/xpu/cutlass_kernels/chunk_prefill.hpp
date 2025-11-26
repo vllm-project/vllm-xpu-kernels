@@ -343,8 +343,8 @@ void policy_dispatch(
             true,    // args.is_varlen,
             true,    // args.is_paged,
             args.is_causal,
-            args.is_local,
-            false);  // args.is_sink);
+            false,   // args.is_local,
+            args.is_sink);
   } else {
     return FMHAConfig<
         typename chunk_policy::ShapeQK,
@@ -359,8 +359,8 @@ void policy_dispatch(
             true,    // args.is_varlen,
             true,    // args.is_paged,
             args.is_causal,
-            args.is_local,
-            false);  // args.is_sink);
+            false,   // args.is_local,
+            args.is_sink);
   }
 }
 
