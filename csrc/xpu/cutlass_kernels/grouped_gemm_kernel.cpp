@@ -255,12 +255,12 @@ void kernel_functor(
   using LayoutD = cutlass::layout::RowMajor;
 
   using TileShape = Shape<_256, _256, _32>;
-  using GmemTiledCopyA =
-      void;  // XE_LOAD_2D<16, 32, 32>; //XE_2D_U16x32x32_LD_N;  // Note: This
-             // shape has to match the shape used for
-             //  the scaling factors
+  using GmemTiledCopyA = void;  // XE_LOAD_2D<16, 32, 32>;
+                                // Note: This
+                                // shape has to match the shape used for
+                                //  the scaling factors
   using GmemTiledCopyB = void;  // XE_LOAD_2D_VNNI<16, 32, 32>;
-                                // XE_2D_U16x32x32_LD_V;  // Note: This shape
+                                // Note: This shape
                                 // has to match the shape used for
                                 //  the scaling factors
   using MMAOperation = moe_policy::MMAOperation;
