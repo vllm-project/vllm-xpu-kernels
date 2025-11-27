@@ -40,8 +40,9 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("is_mbk", [True, False])
 @pytest.mark.parametrize("batch", BATCHES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
+@pytest.mark.parametrize("per_channel", [True, False])
 def test_fp8_gemm_w8a16(fp8_dtype, dtype, trans_wei, is_mbk, batch,
-                        mnk_factors):
+                        mnk_factors, per_channel):
     seed = 1234
     torch.manual_seed(seed)
 
@@ -54,10 +55,14 @@ def test_fp8_gemm_w8a16(fp8_dtype, dtype, trans_wei, is_mbk, batch,
     else:
         weight = torch.ones([k, n], dtype=dtype).xpu()
     scale_wei = (torch.ones(batch) * 4).xpu()
-    scale_shape = None
 
-    weight_fp8, _ = scaled_fp8_quant(weight, scale_wei, False, False,
-                                     fp8_dtype, scale_shape)
+    if per_channel:
+        weight_fp8, scale_wei_fp8 = scaled_fp8_quant(
+            weight, use_per_token_if_dynamic=True, fp8_dtype=fp8_dtype)
+    else:
+        weight_fp8, _ = scaled_fp8_quant(weight,
+                                         scale=scale_wei,
+                                         fp8_dtype=fp8_dtype)
 
     # reference fp16 gemm
     if trans_wei:
@@ -71,7 +76,7 @@ def test_fp8_gemm_w8a16(fp8_dtype, dtype, trans_wei, is_mbk, batch,
     output_fp8 = fp8_gemm_w8a16(
         input,
         weight_fp8.transpose(0, 1) if trans_wei else weight_fp8,
-        scale_wei,
+        scale_wei if not per_channel else scale_wei_fp8,
         torch.Tensor(),
     )
     output_fp8 = output_fp8.transpose(0, 1) if is_mbk else output_fp8
