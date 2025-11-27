@@ -148,7 +148,9 @@ struct KernelLauncher {
          static_cast<int*>(args.block_table),
          args.block_size,
          args.max_blocks_per_seq,
-         args.total_seqlen_k},
+         args.total_seqlen_k,
+         args.window_size_left,
+         args.window_size_right},
         {},
         hw_info};
 
@@ -273,6 +275,7 @@ struct FMHAConfig {
     using CollectiveMainloop = cutlass::fmha::collective::FMHAFwdMainloop<
         MainloopDispatchPolicy,
         Causal,
+        Local,
         Paged,
         TiledMMAQK,
         TiledMMAPV,
@@ -340,11 +343,11 @@ void policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            true,  // args.is_varlen,
-            true,  // args.is_paged,
-            args.is_causal,
-            false,  // args.is_local,
-            args.is_sink);
+            true,   // args.is_varlen,
+            true,   // args.is_paged,
+            false,  // args.is_causal,
+            args.is_local,
+            false);  // args.is_sink);
   } else {
     return FMHAConfig<
         typename chunk_policy::ShapeQK,
@@ -356,11 +359,11 @@ void policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            true,  // args.is_varlen,
-            true,  // args.is_paged,
-            args.is_causal,
-            false,  // args.is_local,
-            args.is_sink);
+            true,   // args.is_varlen,
+            true,   // args.is_paged,
+            false,  // args.is_causal,
+            args.is_local,
+            false);  // args.is_sink);
   }
 }
 
@@ -459,11 +462,11 @@ void cutlass_chunk_prefill_impl(
   if (args.head_size == HEAD_SIZE_LIMIT_0) {
     policy_dispatch<chunk_policy_head64>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_1) {
-    policy_dispatch<chunk_policy_head128>(queue, cuType, args);
+    // policy_dispatch<chunk_policy_head128>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_2) {
-    policy_dispatch<chunk_policy_head192>(queue, cuType, args);
+    // policy_dispatch<chunk_policy_head192>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_3) {
-    policy_dispatch<chunk_policy_head256>(queue, cuType, args);
+    // policy_dispatch<chunk_policy_head256>(queue, cuType, args);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
   }
