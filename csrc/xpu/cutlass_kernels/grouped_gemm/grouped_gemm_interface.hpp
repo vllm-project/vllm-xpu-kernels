@@ -272,7 +272,7 @@ at::Tensor cutlass_xe_grouped_gemm(
   TORCH_CHECK(B_E == groups, "ptr_B.size(0) must match groups");
   TORCH_CHECK(A_total_M == D_total_M, "ptr_A.size(0) must match ptr_D.size(0)");
   TORCH_CHECK(
-      A_K == B_K && B_K == K, "ptr_A.size(1) must match lptr_B.size(1)");
+      A_K == B_K && B_K == K, "ptr_A.size(1) must match ptr_B.size(1)");
   TORCH_CHECK(B_N == D_N && D_N == N, "ptr_B.size(2) must match ptr_D.size(1)");
   if (ptr_bias.has_value()) {
     TORCH_CHECK(
