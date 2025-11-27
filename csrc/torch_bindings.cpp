@@ -1,6 +1,6 @@
 #include "core/registration.h"
 #include "ops.h"
-#include "xpu/cutlass_kernels/grouped_gemm.hpp"
+
 #include <torch/library.h>
 #include <torch/version.h>
 // Note on op signatures:
