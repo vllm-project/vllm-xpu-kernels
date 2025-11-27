@@ -39,16 +39,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       gpu::cutlass_kernel::grouped_gemm_func);
 
   xpu_ops.def(
-      "cutlass_xe_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor? ptr_scales, Tensor? ptr_bias, "
+      "cutlass_xe_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor? ptr_scales, "
+      "Tensor? ptr_bias, "
       "Tensor "
       "ptr_D, Tensor "
       "num_rows_per_expert_device, int N, int K, int "
       "groups) -> "
       "Tensor");
   xpu_ops.impl(
-      "cutlass_xe_grouped_gemm",
-      torch::kXPU,
-      MoE::cutlass_xe_grouped_gemm);
+      "cutlass_xe_grouped_gemm", torch::kXPU, MoE::cutlass_xe_grouped_gemm);
 
   xpu_ops.def(
       "deepseek_scaling_rope(Tensor! positions, Tensor! query, Tensor! key, "

@@ -86,6 +86,7 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
 
     torch.testing.assert_close(output, ref, rtol=2e-2, atol=1e-2)
 
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -110,11 +111,11 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
 
     # output offset
     num_rows_per_expert = torch.tensor(token_per_group,
-                                        dtype=torch.int32,
-                                        device=input_A.device)
+                                       dtype=torch.int32,
+                                       device=input_A.device)
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
-    cutlass_xe_grouped_gemm(input_A, input_B, None, bias, output, num_rows_per_expert, n, k,
-                         num_experts)
+    cutlass_xe_grouped_gemm(input_A, input_B, None, bias, output,
+                            num_rows_per_expert, n, k, num_experts)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -122,7 +123,8 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
         cur_token_num = token_per_group[i]
         if cur_token_num == 0:
             continue
-        input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(torch.float32)
+        input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(
+            torch.float32)
         weight = input_B[i, :, :].to(torch.float32)
         expert_output_fp32 = input @ weight
         if has_bias:
@@ -174,10 +176,10 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
 
     # output offset
     num_rows_per_expert = torch.tensor(token_per_group,
-                                        dtype=torch.int32,
-                                        device=input_A.device)
+                                       dtype=torch.int32,
+                                       device=input_A.device)
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
-    cutlass_xe_grouped_gemm(input_A, input_B_fp8, scale_B, bias, output, 
+    cutlass_xe_grouped_gemm(input_A, input_B_fp8, scale_B, bias, output,
                             num_rows_per_expert, n, k, num_experts)
     # ref gg
     ref = []
@@ -204,6 +206,7 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     except AssertionError as e:
         print("a and b diffs")
         raise (e)
+
 
 def ref_fused_moe(x, w13, w13_bias, w2, w2_bias, flat_expert_weights,
                   flat_expert_indices, num_per_tok, activation, num_experts):

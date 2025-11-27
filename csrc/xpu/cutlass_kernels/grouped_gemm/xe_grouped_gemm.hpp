@@ -48,25 +48,42 @@ namespace MoE {
 using namespace cute;
 
 template <typename T, char LayoutKind>
-CUTE_DEVICE auto make_moe_tensor(T *ptr, int r, int c) {
+CUTE_DEVICE auto make_moe_tensor(T* ptr, int r, int c) {
   auto shape = make_shape(r, c);
   if constexpr (LayoutKind == 'C')
-    return make_tensor(make_gmem_ptr<T>(ptr),
-                       make_layout(shape, make_stride(_1{}, r)));
+    return make_tensor(
+        make_gmem_ptr<T>(ptr), make_layout(shape, make_stride(_1{}, r)));
   else
-    return make_tensor(make_gmem_ptr<T>(ptr),
-                       make_layout(shape, make_stride(c, _1{})));
+    return make_tensor(
+        make_gmem_ptr<T>(ptr), make_layout(shape, make_stride(c, _1{})));
 }
 
-template <class GmemTiledCopyA, class GmemTiledCopyB, class GmemTiledCopyD,
-          char LayoutKindA, char LayoutKindB, char LayoutKindD, class TiledMMA,
-          typename ElementA, typename ElementB, typename ElementS, typename ElementBI,
-          typename ElementD>
-CUTE_DEVICE void
-MoEGEMM(const ElementA *Activations, const ElementB *Weights,
-        const ElementS *Scales, const ElementBI *Bias, ElementD *Outputs, TiledMMA const &mma,
-        const int32_t *rows_for_experts, const int32_t num_experts, const int32_t gemm_n,
-        const int32_t gemm_k, int32_t* atomic_buffer, const sycl::local_accessor<int32_t, 1>& slm_mem_const) {
+template <
+    class GmemTiledCopyA,
+    class GmemTiledCopyB,
+    class GmemTiledCopyD,
+    char LayoutKindA,
+    char LayoutKindB,
+    char LayoutKindD,
+    class TiledMMA,
+    typename ElementA,
+    typename ElementB,
+    typename ElementS,
+    typename ElementBI,
+    typename ElementD>
+CUTE_DEVICE void MoEGEMM(
+    const ElementA* Activations,
+    const ElementB* Weights,
+    const ElementS* Scales,
+    const ElementBI* Bias,
+    ElementD* Outputs,
+    TiledMMA const& mma,
+    const int32_t* rows_for_experts,
+    const int32_t num_experts,
+    const int32_t gemm_n,
+    const int32_t gemm_k,
+    int32_t* atomic_buffer,
+    const sycl::local_accessor<int32_t, 1>& slm_mem_const) {
   constexpr char actual_layout_of_B = LayoutKindB ^ ('R' ^ 'C');
 
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
@@ -84,12 +101,14 @@ MoEGEMM(const ElementA *Activations, const ElementB *Weights,
   int pre_tiles = 0;
 
   int32_t* slm_mem = static_cast<int32_t*>(
-        slm_mem_const.template get_multi_ptr<sycl::access::decorated::no>().get());
+      slm_mem_const.template get_multi_ptr<sycl::access::decorated::no>()
+          .get());
 
   for (int i = 0; i < num_experts; ++i) {
     int gemm_m = rows_for_experts[i];
     int cumsum_rows_for_experts = gemm_m + pre_rows;
-    int cumsum_tiles_for_experts = (gemm_m + wg_tile_m - 1) / wg_tile_m + pre_tiles;
+    int cumsum_tiles_for_experts =
+        (gemm_m + wg_tile_m - 1) / wg_tile_m + pre_tiles;
 
     if (group_m_id >= cumsum_tiles_for_experts) {
       pre_rows = cumsum_rows_for_experts;
@@ -99,20 +118,24 @@ MoEGEMM(const ElementA *Activations, const ElementB *Weights,
 
     int expert_id = i;
     int64_t B_offset = static_cast<int64_t>(expert_id) *
-          static_cast<int64_t>(gemm_n) * static_cast<int64_t>(gemm_k);
-    ElementA *ptr_A_curr_batch = const_cast<ElementA *>(Activations) + pre_rows * gemm_k;
-    ElementB *ptr_B_curr_batch = const_cast<ElementB *>(Weights) + B_offset;
-    ElementD *ptr_D_curr_batch = Outputs + pre_rows * gemm_n;
-    ElementS *ptr_Scales_curr_batch = const_cast<ElementS *>(Scales) + expert_id;
-    ElementBI *ptr_Bias_curr_batch = nullptr;
-    if (Bias != static_cast<ElementBI *>(nullptr)){
-      ptr_Bias_curr_batch = const_cast<ElementBI *>(Bias) + expert_id * gemm_n;
+                       static_cast<int64_t>(gemm_n) *
+                       static_cast<int64_t>(gemm_k);
+    ElementA* ptr_A_curr_batch =
+        const_cast<ElementA*>(Activations) + pre_rows * gemm_k;
+    ElementB* ptr_B_curr_batch = const_cast<ElementB*>(Weights) + B_offset;
+    ElementD* ptr_D_curr_batch = Outputs + pre_rows * gemm_n;
+    ElementS* ptr_Scales_curr_batch = const_cast<ElementS*>(Scales) + expert_id;
+    ElementBI* ptr_Bias_curr_batch = nullptr;
+    if (Bias != static_cast<ElementBI*>(nullptr)) {
+      ptr_Bias_curr_batch = const_cast<ElementBI*>(Bias) + expert_id * gemm_n;
     }
 
-    auto A_tensor = make_moe_tensor<ElementA, LayoutKindA>(ptr_A_curr_batch, gemm_m, gemm_k);
-    auto B_tensor =
-        make_moe_tensor<ElementB, actual_layout_of_B>(ptr_B_curr_batch, gemm_n, gemm_k);
-    auto D_tensor = make_moe_tensor<ElementD, LayoutKindD>(ptr_D_curr_batch, gemm_m, gemm_n);
+    auto A_tensor = make_moe_tensor<ElementA, LayoutKindA>(
+        ptr_A_curr_batch, gemm_m, gemm_k);
+    auto B_tensor = make_moe_tensor<ElementB, actual_layout_of_B>(
+        ptr_B_curr_batch, gemm_n, gemm_k);
+    auto D_tensor = make_moe_tensor<ElementD, LayoutKindD>(
+        ptr_D_curr_batch, gemm_m, gemm_n);
 
     while (group_m_id < cumsum_tiles_for_experts) {
       int n_coord = (group_id * wg_tile_n) % gemm_n_pad / wg_tile_n;
@@ -120,7 +143,13 @@ MoEGEMM(const ElementA *Activations, const ElementB *Weights,
       auto tile_coord = make_coord(m_coord, n_coord, _, 0);
 
       moe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
-          A_tensor, B_tensor, ptr_Scales_curr_batch, ptr_Bias_curr_batch, D_tensor, tile_coord, mma);
+          A_tensor,
+          B_tensor,
+          ptr_Scales_curr_batch,
+          ptr_Bias_curr_batch,
+          D_tensor,
+          tile_coord,
+          mma);
 
       if (local_id == 0) {
         slm_mem[0] = cutlass::atomicAdd(atomic_buffer, 1);
@@ -134,4 +163,4 @@ MoEGEMM(const ElementA *Activations, const ElementB *Weights,
   }
 }
 
-} // namespace MoE
+}  // namespace MoE

@@ -53,16 +53,23 @@ namespace MoE {
 using namespace cute;
 
 template <
-    class GmemTiledCopyA, class GmemTiledCopyB, class GmemTiledCopyC,
-    class ATensor, class BTensor, class DTensor, class TiledMMA,
-    typename ElementS, typename ElementBI>
-CUTE_DEVICE void moe_gemm(ATensor const &A, // (M,K)
-                          BTensor const &B, // (N,K)
-                          const ElementS *Scales,
-                          const ElementBI *Bias,
-                          DTensor &C,       // (M,N)
-                          Coord<int, int, cute::Underscore, int> blk_coord,
-                          TiledMMA const &mma) {
+    class GmemTiledCopyA,
+    class GmemTiledCopyB,
+    class GmemTiledCopyC,
+    class ATensor,
+    class BTensor,
+    class DTensor,
+    class TiledMMA,
+    typename ElementS,
+    typename ElementBI>
+CUTE_DEVICE void moe_gemm(
+    ATensor const& A,  // (M,K)
+    BTensor const& B,  // (N,K)
+    const ElementS* Scales,
+    const ElementBI* Bias,
+    DTensor& C,  // (M,N)
+    Coord<int, int, cute::Underscore, int> blk_coord,
+    TiledMMA const& mma) {
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   auto wg_m = get<0>(blk_coord);
   auto wg_n = get<1>(blk_coord);
@@ -71,13 +78,16 @@ CUTE_DEVICE void moe_gemm(ATensor const &A, // (M,K)
   Tensor cA = make_identity_tensor(A.shape());
   Tensor cB = make_identity_tensor(B.shape());
   Tensor cC = make_identity_tensor(C.shape());
-  
+
   auto wg_tile = mma.tile_mnk();
   auto wg_coord = make_coord(wg_m, wg_n, 0);
 
-  Tensor gA = local_tile(cA, select<0, 2>(wg_tile), make_coord(wg_m, _));  // (BLK_M,BLK_K,k)
-  Tensor gB = local_tile(cB, select<1, 2>(wg_tile), make_coord(wg_n, _));  // (BLK_N,BLK_K,k)
-  Tensor gC = local_tile(cC, wg_tile, wg_coord, Step<_1, _1, X>{});        // (BLK_M,BLK_N)
+  Tensor gA = local_tile(
+      cA, select<0, 2>(wg_tile), make_coord(wg_m, _));  // (BLK_M,BLK_K,k)
+  Tensor gB = local_tile(
+      cB, select<1, 2>(wg_tile), make_coord(wg_n, _));  // (BLK_N,BLK_K,k)
+  Tensor gC =
+      local_tile(cC, wg_tile, wg_coord, Step<_1, _1, X>{});  // (BLK_M,BLK_N)
 
   auto copy_a = get_block_2d_copy_A<GmemTiledCopyA>(mma, A);
   auto copy_b = get_block_2d_copy_B<GmemTiledCopyB>(mma, B);
@@ -110,7 +120,7 @@ CUTE_DEVICE void moe_gemm(ATensor const &A, // (M,K)
 
   auto pAgA = thr_prefetch_A.partition_S(gA);
   auto pBgB = thr_prefetch_B.partition_S(gB);
-  
+
   const int prefetch_dist = 3;
 
   constexpr int barrier_scope = 2;
@@ -119,7 +129,7 @@ CUTE_DEVICE void moe_gemm(ATensor const &A, // (M,K)
   int k_tile_prefetch = 0;
 
   clear(tCrC);
-  
+
   using ElementB = typename BTensor::element_type;
   static constexpr bool is_B_fp8_type =
       std::is_same_v<ElementB, cutlass::float_e5m2_t> ||
@@ -131,8 +141,7 @@ CUTE_DEVICE void moe_gemm(ATensor const &A, // (M,K)
     prefetch(prefetch_b, pBgB(_, _, _, k_tile_prefetch));
   }
 
-  for (int k_tile = 0; k_tile < k_tile_count;
-       k_tile++, k_tile_prefetch++) {
+  for (int k_tile = 0; k_tile < k_tile_count; k_tile++, k_tile_prefetch++) {
     barrier_arrive(barrier_scope);
 
     copy(copy_a, tAgA(_, _, _, k_tile), tArA);
@@ -150,7 +159,7 @@ CUTE_DEVICE void moe_gemm(ATensor const &A, // (M,K)
     barrier_wait(barrier_scope);
   }
 
-  if constexpr (is_B_fp8_type){
+  if constexpr (is_B_fp8_type) {
     float B_scale = Scales[0];
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tCrC.size(); ++i) {
@@ -158,7 +167,7 @@ CUTE_DEVICE void moe_gemm(ATensor const &A, // (M,K)
     }
   }
 
-  if (Bias != nullptr){
+  if (Bias != nullptr) {
     static constexpr auto ATOM_M =
         get<1>(typename TiledMMA::ThrLayoutVMNK{}.shape());
     static constexpr auto ATOM_N =
@@ -170,8 +179,8 @@ CUTE_DEVICE void moe_gemm(ATensor const &A, // (M,K)
     static constexpr auto tile_n = get<1>(wg_tile);
 
     // 32 * 64
-    static constexpr auto SG_M = tile_m / ATOM_M; // BLK_M / ATOM_M;
-    static constexpr auto SG_N = tile_n / ATOM_N; // BLK_N / ATOM_N;
+    static constexpr auto SG_M = tile_m / ATOM_M;  // BLK_M / ATOM_M;
+    static constexpr auto SG_N = tile_n / ATOM_N;  // BLK_N / ATOM_N;
 
     int sg_local_id = cutlass::get_sub_group_local_id();
     static constexpr int sg_local_range = 16;
@@ -181,7 +190,7 @@ CUTE_DEVICE void moe_gemm(ATensor const &A, // (M,K)
     int n_sg_start = sg_local_n_coord * SG_N;
 
     CUTLASS_PRAGMA_UNROLL
-    for(int i = 0; i < tCrC.size(); ++i){
+    for (int i = 0; i < tCrC.size(); ++i) {
       int sg_local_m = i % SG_M;
       int sg_local_n = i / SG_M * sg_local_range + sg_local_id;
       float b_float = Bias[n_tile_start + n_sg_start + sg_local_n];
@@ -193,4 +202,4 @@ CUTE_DEVICE void moe_gemm(ATensor const &A, // (M,K)
   copy(copy_c, tCrC_final, tCgC);
 }
 
-} // namespace MoE
+}  // namespace MoE

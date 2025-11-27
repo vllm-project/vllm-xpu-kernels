@@ -65,23 +65,39 @@ namespace MoE {
 using namespace cute;
 
 // type tag to define a unique sycl kernel name
-template <typename, typename, typename, char, char> class GemmCuteName;
+template <typename, typename, typename, char, char>
+class GemmCuteName;
 
-template <char layoutA, char layoutB, typename ElementA, typename ElementB,
-          typename ElementS, typename ElementBI,typename ElementD>
-void MoEGEMMLauncher(sycl::queue& stream, const ElementA *activations, const ElementB *weights,
-                     const ElementS *scales, const ElementBI *bias, ElementD *outputs,
-                     const int gemm_n, const int gemm_k,
-                     const int *num_rows_per_expert_device,
-                     const int num_experts, int32_t* atomic_buffer) {
+template <
+    char layoutA,
+    char layoutB,
+    typename ElementA,
+    typename ElementB,
+    typename ElementS,
+    typename ElementBI,
+    typename ElementD>
+void MoEGEMMLauncher(
+    sycl::queue& stream,
+    const ElementA* activations,
+    const ElementB* weights,
+    const ElementS* scales,
+    const ElementBI* bias,
+    ElementD* outputs,
+    const int gemm_n,
+    const int gemm_k,
+    const int* num_rows_per_expert_device,
+    const int num_experts,
+    int32_t* atomic_buffer) {
   using ElementA_non_CV = cutlass::platform::remove_cv_t<ElementA>;
   auto op = XE_DPAS_TT<8, float, ElementA_non_CV, ElementA_non_CV>{};
-  using WGTile = Shape<_256, _256, _32>; // 256x256 WG tile size
+  using WGTile = Shape<_256, _256, _32>;  // 256x256 WG tile size
   using SGLayout =
-      Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>; // 8x4 SG tiling, n-major
+      Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>;  // 8x4 SG tiling, n-major
 
-  using MMA = typename TiledMMAHelper<MMA_Atom<decltype(op)>, Layout<WGTile>,
-                                      SGLayout>::TiledMMA;
+  using MMA = typename TiledMMAHelper<
+      MMA_Atom<decltype(op)>,
+      Layout<WGTile>,
+      SGLayout>::TiledMMA;
   auto mma = MMA{};
 
   int sm_count =
@@ -94,61 +110,121 @@ void MoEGEMMLauncher(sycl::queue& stream, const ElementA *activations, const Ele
   namespace syclex = sycl::ext::oneapi::experimental;
   namespace intelex = sycl::ext::intel::experimental;
 
-  syclex::properties kernel_props{syclex::sub_group_size<16>,
-                                  intelex::grf_size<256>};
+  syclex::properties kernel_props{
+      syclex::sub_group_size<16>, intelex::grf_size<256>};
 
   static constexpr bool is_B_fp8_type =
       std::is_same_v<ElementB, cutlass::float_e5m2_t> ||
       std::is_same_v<ElementB, cutlass::float_e4m3_t>;
 
   using GmemTiledCopyA = XE_LOAD_2D<16, 32, 32, 16>;
-  using GmemTiledCopyB = std::conditional_t<is_B_fp8_type, XE_LOAD_2D_VNNI<8, 32, 16, 16>, XE_LOAD_2D_VNNI<16, 32, 16, 16>>;
+  using GmemTiledCopyB = std::conditional_t<
+      is_B_fp8_type,
+      XE_LOAD_2D_VNNI<8, 32, 16, 16>,
+      XE_LOAD_2D_VNNI<16, 32, 16, 16>>;
   using GmemTiledCopyD = XE_STORE_2D<16, 8, 32>;
 
   auto event = stream.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<int32_t, 1> local_mem(sycl::range<1>(1), cgh);
     cgh.parallel_for<
-      GemmCuteName<ElementA, ElementB, ElementD, layoutA, layoutB>>(
-      sycl::nd_range<3>{global * local, local}, kernel_props, [=](auto) {
-        MoE::MoEGEMM<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD,
-                     'R', 'R', 'R'>(activations, weights, scales, bias, outputs, mma,
-                                    num_rows_per_expert_device, num_experts,
-                                    gemm_n, gemm_k, atomic_buffer, local_mem);
-      });
+        GemmCuteName<ElementA, ElementB, ElementD, layoutA, layoutB>>(
+        sycl::nd_range<3>{global * local, local}, kernel_props, [=](auto) {
+          MoE::MoEGEMM<
+              GmemTiledCopyA,
+              GmemTiledCopyB,
+              GmemTiledCopyD,
+              'R',
+              'R',
+              'R'>(
+              activations,
+              weights,
+              scales,
+              bias,
+              outputs,
+              mma,
+              num_rows_per_expert_device,
+              num_experts,
+              gemm_n,
+              gemm_k,
+              atomic_buffer,
+              local_mem);
+        });
   });
   EventManager::getInstance().addEvent(event);
 }
 
-template void MoEGEMMLauncher<'R', 'R'>(sycl::queue& stream, const bfloat16_t *activations, const bfloat16_t *weights,
-                     const bfloat16_t *scales, const bfloat16_t *bias, bfloat16_t *outputs,
-                     const int gemm_n, const int gemm_k,
-                     const int *num_rows_per_expert_device,
-                     const int num_experts, int32_t* atomic_buffer);
-template void MoEGEMMLauncher<'R', 'R'>(sycl::queue& stream, const half_t *activations, const half_t *weights,
-                     const half_t *scales, const half_t *bias, half_t *outputs,
-                     const int gemm_n, const int gemm_k,
-                     const int *num_rows_per_expert_device,
-                     const int num_experts, int32_t* atomic_buffer);
-template void MoEGEMMLauncher<'R', 'R'>(sycl::queue& stream, const bfloat16_t *activations, const float_e5m2_t *weights,
-                     const bfloat16_t *scales, const bfloat16_t *bias, bfloat16_t *outputs,
-                     const int gemm_n, const int gemm_k,
-                     const int *num_rows_per_expert_device,
-                     const int num_experts, int32_t* atomic_buffer);
-template void MoEGEMMLauncher<'R', 'R'>(sycl::queue& stream, const bfloat16_t *activations, const float_e4m3_t *weights,
-                     const bfloat16_t *scales, const bfloat16_t *bias, bfloat16_t *outputs,
-                     const int gemm_n, const int gemm_k,
-                     const int *num_rows_per_expert_device,
-                     const int num_experts, int32_t* atomic_buffer);
-template void MoEGEMMLauncher<'R', 'R'>(sycl::queue& stream, const half_t *activations, const float_e5m2_t *weights,
-                     const half_t *scales, const half_t *bias, half_t *outputs,
-                     const int gemm_n, const int gemm_k,
-                     const int *num_rows_per_expert_device,
-                     const int num_experts, int32_t* atomic_buffer);
-template void MoEGEMMLauncher<'R', 'R'>(sycl::queue& stream, const half_t *activations, const float_e4m3_t *weights,
-                     const half_t *scales, const half_t *bias, half_t *outputs,
-                     const int gemm_n, const int gemm_k,
-                     const int *num_rows_per_expert_device,
-                     const int num_experts, int32_t* atomic_buffer);
+template void MoEGEMMLauncher<'R', 'R'>(
+    sycl::queue& stream,
+    const bfloat16_t* activations,
+    const bfloat16_t* weights,
+    const bfloat16_t* scales,
+    const bfloat16_t* bias,
+    bfloat16_t* outputs,
+    const int gemm_n,
+    const int gemm_k,
+    const int* num_rows_per_expert_device,
+    const int num_experts,
+    int32_t* atomic_buffer);
+template void MoEGEMMLauncher<'R', 'R'>(
+    sycl::queue& stream,
+    const half_t* activations,
+    const half_t* weights,
+    const half_t* scales,
+    const half_t* bias,
+    half_t* outputs,
+    const int gemm_n,
+    const int gemm_k,
+    const int* num_rows_per_expert_device,
+    const int num_experts,
+    int32_t* atomic_buffer);
+template void MoEGEMMLauncher<'R', 'R'>(
+    sycl::queue& stream,
+    const bfloat16_t* activations,
+    const float_e5m2_t* weights,
+    const bfloat16_t* scales,
+    const bfloat16_t* bias,
+    bfloat16_t* outputs,
+    const int gemm_n,
+    const int gemm_k,
+    const int* num_rows_per_expert_device,
+    const int num_experts,
+    int32_t* atomic_buffer);
+template void MoEGEMMLauncher<'R', 'R'>(
+    sycl::queue& stream,
+    const bfloat16_t* activations,
+    const float_e4m3_t* weights,
+    const bfloat16_t* scales,
+    const bfloat16_t* bias,
+    bfloat16_t* outputs,
+    const int gemm_n,
+    const int gemm_k,
+    const int* num_rows_per_expert_device,
+    const int num_experts,
+    int32_t* atomic_buffer);
+template void MoEGEMMLauncher<'R', 'R'>(
+    sycl::queue& stream,
+    const half_t* activations,
+    const float_e5m2_t* weights,
+    const half_t* scales,
+    const half_t* bias,
+    half_t* outputs,
+    const int gemm_n,
+    const int gemm_k,
+    const int* num_rows_per_expert_device,
+    const int num_experts,
+    int32_t* atomic_buffer);
+template void MoEGEMMLauncher<'R', 'R'>(
+    sycl::queue& stream,
+    const half_t* activations,
+    const float_e4m3_t* weights,
+    const half_t* scales,
+    const half_t* bias,
+    half_t* outputs,
+    const int gemm_n,
+    const int gemm_k,
+    const int* num_rows_per_expert_device,
+    const int num_experts,
+    int32_t* atomic_buffer);
 
 at::Tensor cutlass_xe_grouped_gemm(
     at::Tensor& ptr_A,
@@ -172,14 +248,14 @@ at::Tensor cutlass_xe_grouped_gemm(
   TORCH_CHECK(ptr_A.dim() == 2, "ptr_A must be 2D [Total_M, K]");
   TORCH_CHECK(ptr_B.dim() == 3, "ptr_B must be 3D [groups, K, N]");
   TORCH_CHECK(ptr_D.dim() == 2, "ptr_D must be 2D [Total_M, N]");
-  if(ptr_bias.has_value()){
+  if (ptr_bias.has_value()) {
     TORCH_CHECK(ptr_bias->dim() == 2, "ptr_bias must be 2D [groups, N]");
   }
 
   TORCH_CHECK(ptr_A.is_contiguous(), "ptr_A must be contiguous");
   TORCH_CHECK(ptr_B.is_contiguous(), "ptr_B must be contiguous");
   TORCH_CHECK(ptr_D.is_contiguous(), "ptr_D must be contiguous");
-  if(ptr_bias.has_value()){
+  if (ptr_bias.has_value()) {
     TORCH_CHECK(ptr_bias->is_contiguous(), "ptr_bias must be contiguous");
   }
 
@@ -192,13 +268,15 @@ at::Tensor cutlass_xe_grouped_gemm(
 
   int D_total_M = ptr_D.size(0);
   int D_N = ptr_D.size(1);
-  
+
   TORCH_CHECK(B_E == groups, "ptr_B.size(0) must match groups");
   TORCH_CHECK(A_total_M == D_total_M, "ptr_A.size(0) must match ptr_D.size(0)");
-  TORCH_CHECK(A_K == B_K && B_K == K, "ptr_A.size(1) must match lptr_B.size(1)");
+  TORCH_CHECK(
+      A_K == B_K && B_K == K, "ptr_A.size(1) must match lptr_B.size(1)");
   TORCH_CHECK(B_N == D_N && D_N == N, "ptr_B.size(2) must match ptr_D.size(1)");
-  if(ptr_bias.has_value()){
-    TORCH_CHECK(ptr_bias->size(0) == groups, "ptr_bias.size(0) must match groups");
+  if (ptr_bias.has_value()) {
+    TORCH_CHECK(
+        ptr_bias->size(0) == groups, "ptr_bias.size(0) must match groups");
     TORCH_CHECK(ptr_bias->size(1) == N, "ptr_bias.size(1) must match N");
   }
 
@@ -208,75 +286,87 @@ at::Tensor cutlass_xe_grouped_gemm(
   if (is_weight_fp8) {
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
     TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");
-    TORCH_CHECK(ptr_scales->dim() == 1, "ptr_scales of fp8 must be 1D [groups]");
-    TORCH_CHECK(ptr_scales->size(0) == groups, "ptr_scales.size(0) of fp8 must match groups");
+    TORCH_CHECK(
+        ptr_scales->dim() == 1, "ptr_scales of fp8 must be 1D [groups]");
+    TORCH_CHECK(
+        ptr_scales->size(0) == groups,
+        "ptr_scales.size(0) of fp8 must match groups");
     if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {
       using scalar_t = half_t;
       MoEGEMMLauncher<'R', 'R'>(
-        dpcpp_queue,
-        reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
-        reinterpret_cast<float_e4m3_t*>(ptr_B.data_ptr()),
-        ptr_scales.has_value() ? reinterpret_cast<scalar_t*>(ptr_scales->data_ptr())
-                         : static_cast<scalar_t*>(nullptr),
-        ptr_bias.has_value() ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
-                         : static_cast<scalar_t*>(nullptr),
-        reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
-        N,
-        K,
-        reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-        groups,
-        static_cast<int*>(atomic_buffer.data_ptr()));
+          dpcpp_queue,
+          reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
+          reinterpret_cast<float_e4m3_t*>(ptr_B.data_ptr()),
+          ptr_scales.has_value()
+              ? reinterpret_cast<scalar_t*>(ptr_scales->data_ptr())
+              : static_cast<scalar_t*>(nullptr),
+          ptr_bias.has_value()
+              ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
+              : static_cast<scalar_t*>(nullptr),
+          reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
+          N,
+          K,
+          reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
+          groups,
+          static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {
       using scalar_t = half_t;
       MoEGEMMLauncher<'R', 'R'>(
-        dpcpp_queue,
-        reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
-        reinterpret_cast<float_e5m2_t*>(ptr_B.data_ptr()),
-        ptr_scales.has_value() ? reinterpret_cast<scalar_t*>(ptr_scales->data_ptr())
-                         : static_cast<scalar_t*>(nullptr),
-        ptr_bias.has_value() ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
-                         : static_cast<scalar_t*>(nullptr),
-        reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
-        N,
-        K,
-        reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-        groups,
-        static_cast<int*>(atomic_buffer.data_ptr()));
+          dpcpp_queue,
+          reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
+          reinterpret_cast<float_e5m2_t*>(ptr_B.data_ptr()),
+          ptr_scales.has_value()
+              ? reinterpret_cast<scalar_t*>(ptr_scales->data_ptr())
+              : static_cast<scalar_t*>(nullptr),
+          ptr_bias.has_value()
+              ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
+              : static_cast<scalar_t*>(nullptr),
+          reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
+          N,
+          K,
+          reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
+          groups,
+          static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {
       using scalar_t = bfloat16_t;
       MoEGEMMLauncher<'R', 'R'>(
-        dpcpp_queue,
-        reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
-        reinterpret_cast<float_e4m3_t*>(ptr_B.data_ptr()),
-        ptr_scales.has_value() ? reinterpret_cast<scalar_t*>(ptr_scales->data_ptr())
-                         : static_cast<scalar_t*>(nullptr),
-        ptr_bias.has_value() ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
-                         : static_cast<scalar_t*>(nullptr),
-        reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
-        N,
-        K,
-        reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-        groups,
-        static_cast<int*>(atomic_buffer.data_ptr()));
+          dpcpp_queue,
+          reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
+          reinterpret_cast<float_e4m3_t*>(ptr_B.data_ptr()),
+          ptr_scales.has_value()
+              ? reinterpret_cast<scalar_t*>(ptr_scales->data_ptr())
+              : static_cast<scalar_t*>(nullptr),
+          ptr_bias.has_value()
+              ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
+              : static_cast<scalar_t*>(nullptr),
+          reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
+          N,
+          K,
+          reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
+          groups,
+          static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {
       using scalar_t = bfloat16_t;
       MoEGEMMLauncher<'R', 'R'>(
-        dpcpp_queue,
-        reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
-        reinterpret_cast<float_e5m2_t*>(ptr_B.data_ptr()),
-        ptr_scales.has_value() ? reinterpret_cast<scalar_t*>(ptr_scales->data_ptr())
-                         : static_cast<scalar_t*>(nullptr),
-        ptr_bias.has_value() ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
-                         : static_cast<scalar_t*>(nullptr),
-        reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
-        N,
-        K,
-        reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-        groups,
-        static_cast<int*>(atomic_buffer.data_ptr()));
+          dpcpp_queue,
+          reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
+          reinterpret_cast<float_e5m2_t*>(ptr_B.data_ptr()),
+          ptr_scales.has_value()
+              ? reinterpret_cast<scalar_t*>(ptr_scales->data_ptr())
+              : static_cast<scalar_t*>(nullptr),
+          ptr_bias.has_value()
+              ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
+              : static_cast<scalar_t*>(nullptr),
+          reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
+          N,
+          K,
+          reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
+          groups,
+          static_cast<int*>(atomic_buffer.data_ptr()));
     }
   } else {
-    TORCH_CHECK(!ptr_scales.has_value(), "w16a16 grouped gemm must not have scales");
+    TORCH_CHECK(
+        !ptr_scales.has_value(), "w16a16 grouped gemm must not have scales");
     if (A_dtype == at::kBFloat16) {
       using scalar_t = bfloat16_t;
       MoEGEMMLauncher<'R', 'R'>(
@@ -284,8 +374,9 @@ at::Tensor cutlass_xe_grouped_gemm(
           reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
           reinterpret_cast<scalar_t*>(ptr_B.data_ptr()),
           static_cast<scalar_t*>(nullptr),
-          ptr_bias.has_value() ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
-                          : static_cast<scalar_t*>(nullptr),
+          ptr_bias.has_value()
+              ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
+              : static_cast<scalar_t*>(nullptr),
           reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
           N,
           K,
@@ -299,8 +390,9 @@ at::Tensor cutlass_xe_grouped_gemm(
           reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
           reinterpret_cast<scalar_t*>(ptr_B.data_ptr()),
           static_cast<scalar_t*>(nullptr),
-          ptr_bias.has_value() ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
-                          : static_cast<scalar_t*>(nullptr),
+          ptr_bias.has_value()
+              ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
+              : static_cast<scalar_t*>(nullptr),
           reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
           N,
           K,
@@ -310,10 +402,11 @@ at::Tensor cutlass_xe_grouped_gemm(
     } else {
       TORCH_CHECK(
           false,
-          "cutlass_xe_grouped_gemm only supports BFloat16 and Half dtypes, but got: ",
+          "cutlass_xe_grouped_gemm only supports BFloat16 and Half dtypes, but "
+          "got: ",
           A_dtype);
     }
   }
   return ptr_D;
 }
-} // namespace MoE
+}  // namespace MoE
