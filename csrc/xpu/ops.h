@@ -43,6 +43,18 @@ torch::Tensor cutlass_grouped_gemm(
     int64_t K,
     int64_t groups);
 
+torch::Tensor cutlass_xe_grouped_gemm(
+    torch::Tensor ptr_A,
+    torch::Tensor ptr_B,
+    const c10::optional<at::Tensor>& ptr_scales,
+    const c10::optional<at::Tensor>& ptr_bias,
+    torch::Tensor ptr_D,
+    torch::Tensor expert_first_token_offset,
+    torch::Tensor num_rows_per_expert_device,
+    int64_t N,
+    int64_t K,
+    int64_t groups);
+
 std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     const at::Tensor& positions,
     const at::Tensor& query,
