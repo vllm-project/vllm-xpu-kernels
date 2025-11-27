@@ -44,7 +44,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor "
       "ptr_D, Tensor "
       "num_rows_per_expert_device, int N, int K, int "
-      "groups) -> "
+      "groups, bool is_B_int4) -> "
       "Tensor");
   xpu_ops.impl(
       "cutlass_xe_grouped_gemm", torch::kXPU, MoE::cutlass_xe_grouped_gemm);

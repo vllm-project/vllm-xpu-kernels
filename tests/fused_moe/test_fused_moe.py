@@ -115,7 +115,7 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
                                        device=input_A.device)
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
     cutlass_xe_grouped_gemm(input_A, input_B, None, bias, output,
-                            num_rows_per_expert, n, k, num_experts)
+                            num_rows_per_expert, n, k, num_experts, False)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -180,7 +180,7 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
                                        device=input_A.device)
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
     cutlass_xe_grouped_gemm(input_A, input_B_fp8, scale_B, bias, output,
-                            num_rows_per_expert, n, k, num_experts)
+                            num_rows_per_expert, n, k, num_experts, False)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -207,6 +207,99 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
         print("a and b diffs")
         raise (e)
 
+def dequantize_int4(qweight, scales, group_size):
+    import numpy as np
+    k = qweight.shape[1] * 2
+    n = qweight.shape[0]
+    unpack_idx = np.array([0, 1])
+    data = qweight[:, [i // 2 for i in range(k)]]
+    shift = (
+        torch.tensor(
+            unpack_idx[[i % 2 for i in range(k)]], dtype=torch.int32, device="xpu"
+        )[None, :].expand([n, -1])
+        * 4
+    )
+    dst_data = (data >> shift) & 0xF
+    expand_scales = scales[:, [i // group_size for i in range(k)]]
+    # weight_16 = (dst_data - 8) * expand_scales
+
+    # print("dst_data", dst_data)
+    weight_16 = (dst_data - 8)
+
+    return weight_16.to(scales.dtype)
+
+
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
+    seed_everything(7)
+    num_experts = e
+    group_size = 128
+    group_num = k // group_size
+    token_per_group = random_partition(e, m * topk)
+    assert (len(token_per_group) == e)
+    # input
+    input_A = torch.randn((sum(token_per_group), k),
+                          dtype=dtype,
+                          device=DEVICE).contiguous()
+    ref_A = input_A
+    # weight
+    input_B_int4 = (
+        torch.randint(0, 0xff, [num_experts, n, k // 2], device=DEVICE)
+    ).to(torch.uint8)
+    # scale
+    random_exponents = torch.randint(-3, 4, (num_experts, n, group_num), device=DEVICE)
+    scale_B = torch.pow(2.0, random_exponents.float()).to(dtype)
+
+    if has_bias:
+        bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE) * 100
+    else:
+        bias = None
+
+
+    input_B_16 = torch.empty(
+        num_experts, n, k, dtype=dtype, device=DEVICE
+    )
+    for i in range(num_experts):
+        input_B_16[i] = dequantize_int4(
+            input_B_int4[i], scale_B[i], group_size
+        )
+
+    # output offset
+    num_rows_per_expert = torch.tensor(token_per_group,
+                                       dtype=torch.int32,
+                                       device=input_A.device)
+    output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
+    cutlass_xe_grouped_gemm(input_A, input_B_int4, scale_B, bias, output,
+                            num_rows_per_expert, n, k, num_experts, True)
+    # ref gg
+    ref = []
+    pre_token_sum = 0
+    for i in range(num_experts):
+        cur_token_num = token_per_group[i]
+        if cur_token_num == 0:
+            continue
+        # mma uses fp32 as calculate dtype
+        # so here use fp32 to avoid accuracy error
+        input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(
+            torch.float32)
+        weight = input_B_16[i, :, :].to(torch.float32)
+        expert_output_fp32 = input @ weight.T
+        if has_bias:
+            expert_output_fp32 += bias[i]
+        ref.append(expert_output_fp32.to(dtype))
+        pre_token_sum += cur_token_num
+    ref = torch.cat(ref, dim=0)
+
+    try:
+        torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
+        print("a and b close enough")
+    except AssertionError as e:
+        print("a and b diffs")
+        raise (e)
 
 def ref_fused_moe(x, w13, w13_bias, w2, w2_bias, flat_expert_weights,
                   flat_expert_indices, num_per_tok, activation, num_experts):

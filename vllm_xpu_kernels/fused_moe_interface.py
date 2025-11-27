@@ -41,7 +41,7 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
 
 
 def cutlass_xe_grouped_gemm(input_A, input_B, scales, bias, output,
-                            num_rows_per_expert, n, k, num_experts):
+                            num_rows_per_expert, n, k, num_experts, is_B_int4):
     torch.ops._xpu_C.cutlass_xe_grouped_gemm(
         ptr_A=input_A,
         ptr_B=input_B,
@@ -51,7 +51,8 @@ def cutlass_xe_grouped_gemm(input_A, input_B, scales, bias, output,
         num_rows_per_expert_device=num_rows_per_expert,
         N=n,
         K=k,
-        groups=num_experts)
+        groups=num_experts,
+        is_B_int4=is_B_int4)
 
 
 def ceilDiv(a, b):

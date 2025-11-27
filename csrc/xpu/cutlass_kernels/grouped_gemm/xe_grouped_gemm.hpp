@@ -52,10 +52,10 @@ CUTE_DEVICE auto make_moe_tensor(T* ptr, int r, int c) {
   auto shape = make_shape(r, c);
   if constexpr (LayoutKind == 'C')
     return make_tensor(
-        make_gmem_ptr<T>(ptr), make_layout(shape, make_stride(_1{}, r)));
+        make_gmem_ptr(ptr), make_layout(shape, make_stride(_1{}, r)));
   else
     return make_tensor(
-        make_gmem_ptr<T>(ptr), make_layout(shape, make_stride(c, _1{})));
+        make_gmem_ptr(ptr), make_layout(shape, make_stride(c, _1{})));
 }
 
 template <
@@ -85,6 +85,7 @@ CUTE_DEVICE void MoEGEMM(
     int32_t* atomic_buffer,
     const sycl::local_accessor<int32_t, 1>& slm_mem_const) {
   constexpr char actual_layout_of_B = LayoutKindB ^ ('R' ^ 'C');
+  static constexpr bool is_B_4bits = std::is_same_v<ElementB, uint8_t>;
 
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   auto wg_tile = mma.tile_mnk();
@@ -120,6 +121,9 @@ CUTE_DEVICE void MoEGEMM(
     int64_t B_offset = static_cast<int64_t>(expert_id) *
                        static_cast<int64_t>(gemm_n) *
                        static_cast<int64_t>(gemm_k);
+    if constexpr (is_B_4bits){
+      B_offset /= 2;
+    }
     ElementA* ptr_A_curr_batch =
         const_cast<ElementA*>(Activations) + pre_rows * gemm_k;
     ElementB* ptr_B_curr_batch = const_cast<ElementB*>(Weights) + B_offset;
@@ -132,8 +136,15 @@ CUTE_DEVICE void MoEGEMM(
 
     auto A_tensor = make_moe_tensor<ElementA, LayoutKindA>(
         ptr_A_curr_batch, gemm_m, gemm_k);
-    auto B_tensor = make_moe_tensor<ElementB, actual_layout_of_B>(
-        ptr_B_curr_batch, gemm_n, gemm_k);
+    auto B_tensor = [&]() {
+      if constexpr (is_B_4bits) {
+          return make_moe_tensor<uint4_t, actual_layout_of_B>(
+              reinterpret_cast<uint4_t*>(ptr_B_curr_batch), gemm_n, gemm_k);
+      } else {
+          return make_moe_tensor<ElementB, actual_layout_of_B>(
+              ptr_B_curr_batch, gemm_n, gemm_k);
+      }
+    }();
     auto D_tensor = make_moe_tensor<ElementD, LayoutKindD>(
         ptr_D_curr_batch, gemm_m, gemm_n);
 

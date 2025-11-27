@@ -70,6 +70,8 @@ CUTE_DEVICE void moe_gemm(
     DTensor& C,  // (M,N)
     Coord<int, int, cute::Underscore, int> blk_coord,
     TiledMMA const& mma) {
+  using TA = typename ATensor::element_type;
+  using TB = typename BTensor::element_type;
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   auto wg_m = get<0>(blk_coord);
   auto wg_n = get<1>(blk_coord);
@@ -90,7 +92,13 @@ CUTE_DEVICE void moe_gemm(
       local_tile(cC, wg_tile, wg_coord, Step<_1, _1, X>{});  // (BLK_M,BLK_N)
 
   auto copy_a = get_block_2d_copy_A<GmemTiledCopyA>(mma, A);
-  auto copy_b = get_block_2d_copy_B<GmemTiledCopyB>(mma, B);
+  auto copy_b = [&]() {
+    if constexpr (std::is_same_v<TB, uint4_t>) {
+        return make_block_2d_copy_B(mma, B);
+    } else {
+        return get_block_2d_copy_B<GmemTiledCopyB>(mma, B);
+    }
+  }();
   auto copy_c = get_block_2d_copy_D<GmemTiledCopyC>(mma, C);
 
   auto thr_mma = mma.get_slice(local_id);
@@ -154,6 +162,12 @@ CUTE_DEVICE void moe_gemm(
 
     reorder(tArA, tCrA);
     reorder(tBrB, tCrB);
+    if constexpr(std::is_same_v<TB, uint4_t>) {
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < tCrB.size(); ++i) {
+        tCrB(i) -= static_cast<TA>(8);
+      }
+    }
 
     cute::gemm(mma, tCrA, tCrB, tCrC);
     barrier_wait(barrier_scope);
