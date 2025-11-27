@@ -115,6 +115,8 @@ class XeFMHAFwdKernel {
   // Template Features
   static constexpr bool PagedKV = CollectiveMainloop::PagedKV;
   static constexpr bool CausalMask = CollectiveMainloop::CausalMask;
+  static constexpr bool Sink = CollectiveEpilogue::Sink;
+  using ElementSink = typename CollectiveEpilogue::ElementSink;
 
   // Kernel level shared memory storage
   using MainloopSharedStorage = typename CollectiveMainloop::SharedStorage;
@@ -138,6 +140,9 @@ class XeFMHAFwdKernel {
     StrideV dV;
     ElementO* O;
     StrideO dO;
+
+    // softmax sink
+    const ElementSink* ptr_S;
   };
   using KernelParams = KernelArguments;
 
@@ -256,6 +261,8 @@ class XeFMHAFwdKernel {
                     q_sg_tile
               : seq_len_kv;
       const int k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
+      const int k_causal_blocks =
+          CausalMask ? (seq_len - q_sg_tile) / get<1>(TileShapeQK{}) : 0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       if constexpr (is_var_len) {
@@ -325,6 +332,7 @@ class XeFMHAFwdKernel {
           idx_b,
           0,
           k_blocks,
+          k_causal_blocks,
           thr_id,
           seq_len,
           full_tile_offset,
@@ -337,7 +345,26 @@ class XeFMHAFwdKernel {
 
       // Epilogue
       CollectiveEpilogue epilogue{params.epilogue, shared_storage.epilogue};
-      epilogue(O(_, _, head_q, l_coord), tArA, tA_max, tA_sum, blk_qv, thr_id);
+      if constexpr (Sink) {
+        ElementSink s_head = p.ptr_S[head_q];
+        epilogue(
+            O(_, _, head_q, l_coord),
+            tArA,
+            tA_max,
+            tA_sum,
+            blk_qv,
+            s_head,
+            thr_id);
+      } else {
+        epilogue(
+            O(_, _, head_q, l_coord),
+            tArA,
+            tA_max,
+            tA_sum,
+            blk_qv,
+            static_cast<ElementSink>(0),
+            thr_id);
+      }
     }
   }
 };

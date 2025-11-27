@@ -142,7 +142,8 @@ struct KernelLauncher {
          reinterpret_cast<ElementV*>(args.value),
          stride_V,
          reinterpret_cast<ElementO*>(args.out),
-         stride_O},
+         stride_O,
+         reinterpret_cast<ElementQ*>(args.sm_sink)},
         {args.sm_scale,
          static_cast<int*>(args.block_table),
          args.block_size,
@@ -285,6 +286,7 @@ struct FMHAConfig {
 
     // Epilogue
     using CollectiveEpilogue = cutlass::fmha::collective::FMHAFwdEpilogue<
+        Sink,
         CollectiveMainloop,
         TileShapeOutput,
         TensorO,
@@ -338,11 +340,11 @@ void policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            true,    // args.is_varlen,
-            true,    // args.is_paged,
-            false,   // args.is_causal,
-            false,   // args.is_local,
-            false);  // args.is_sink);
+            true,  // args.is_varlen,
+            true,  // args.is_paged,
+            args.is_causal,
+            false,  // args.is_local,
+            args.is_sink);
   } else {
     return FMHAConfig<
         typename chunk_policy::ShapeQK,
@@ -354,11 +356,11 @@ void policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            true,    // args.is_varlen,
-            true,    // args.is_paged,
-            false,   // args.is_causal,
-            false,   // args.is_local,
-            false);  // args.is_sink);
+            true,  // args.is_varlen,
+            true,  // args.is_paged,
+            args.is_causal,
+            false,  // args.is_local,
+            args.is_sink);
   }
 }
 
