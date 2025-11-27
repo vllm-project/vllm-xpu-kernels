@@ -155,6 +155,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
     "csrc/pos_encoding_kernels.cpp"
     "csrc/torch_bindings.cpp"
     "csrc/quantization/fp8/fp8_quant.cpp"
+    "csrc/xpu_view.cpp"
   )
   include_directories("/usr/include")
   list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/)
@@ -209,6 +210,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_VERSIONS_GENERATED")
   list(APPEND VLLM_GPU_FLAGS "-ftemplate-backtrace-limit=0")
   list(APPEND VLLM_GPU_FLAGS "-fdiagnostics-color=always")
+  list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_SYCL_BUILTIN_ENABLE")
 
 endif()
 
