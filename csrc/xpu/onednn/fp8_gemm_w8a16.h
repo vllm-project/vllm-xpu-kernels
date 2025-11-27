@@ -8,6 +8,7 @@
 
 namespace oneDNN {
 
+using trans_type_t = at::native::onednn::trans_type_t;
 using GpuStreamManager = at::native::onednn::GpuStreamManager;
 using GpuEngineManager = at::native::onednn::GpuEngineManager;
 
@@ -17,8 +18,7 @@ static inline void dnnl_matmul_w8a16_fp8(
     const torch::Tensor& mat2,  // quantized weight, [k, n] transpose
     bool is_nt,
     const std::optional<torch::Tensor>& bias,
-    const torch::Tensor& m2_sc,
-    const int64_t group_size = 0) {
+    const torch::Tensor& m2_sc) {
   auto src_sz = mat1.sizes();
   auto o_sz = result.sizes();
 
@@ -71,11 +71,21 @@ static inline void dnnl_matmul_w8a16_fp8(
 
   auto f_attr = [&](dnnl::primitive_attr& pattr) {
     pattr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
-    pattr.set_scales(
-        DNNL_ARG_WEIGHTS,
-        /* mask */ 0,
-        {},
-        get_onednn_dtype(m2_sc));
+    if (m2_sc.numel() == 1) {
+      pattr.set_scales(
+          DNNL_ARG_WEIGHTS,
+          /* mask */ 0,
+          {},
+          get_onednn_dtype(m2_sc));
+      /* per tensor quant */
+    } else {
+      pattr.set_scales(
+          DNNL_ARG_WEIGHTS,
+          /* mask */ (1 << 1),
+          {},
+          get_onednn_dtype(m2_sc));
+      /* per channel quant */
+    }
   };
 
   int arg_off = 0;
@@ -86,8 +96,9 @@ static inline void dnnl_matmul_w8a16_fp8(
   at::Device curDevice = at::Device(at::kXPU, dev_id);
   auto engine = GpuEngineManager::Instance().get_engine(curDevice);
 
+  int m2_sc_group_size = m2_sc.numel();
   auto& matmul_ext = matmul_primitive_create_and_cache(
-      jd, tt, b_type, m, n, k, lda, ldb, ldc, dev_id, f_attr, group_size);
+      jd, tt, b_type, m, n, k, lda, ldb, ldc, dev_id, f_attr, m2_sc_group_size);
 
   matmul_ext.set_attribute(
       arg_off++,
