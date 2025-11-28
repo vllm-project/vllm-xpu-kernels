@@ -221,10 +221,7 @@ def dequantize_int4(qweight, scales, group_size):
     )
     dst_data = (data >> shift) & 0xF
     expand_scales = scales[:, [i // group_size for i in range(k)]]
-    # weight_16 = (dst_data - 8) * expand_scales
-
-    # print("dst_data", dst_data)
-    weight_16 = (dst_data - 8)
+    weight_16 = (dst_data - 8) * expand_scales
 
     return weight_16.to(scales.dtype)
 

@@ -52,7 +52,7 @@ torch::Tensor cutlass_xe_grouped_gemm(
     torch::Tensor num_rows_per_expert_device,
     int64_t N,
     int64_t K,
-    int64_t groups,
+    int64_t num_experts,
     bool is_B_int4);
 
 std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(

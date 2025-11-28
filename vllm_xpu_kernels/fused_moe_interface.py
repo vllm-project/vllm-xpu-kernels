@@ -51,7 +51,7 @@ def cutlass_xe_grouped_gemm(input_A, input_B, scales, bias, output,
         num_rows_per_expert_device=num_rows_per_expert,
         N=n,
         K=k,
-        groups=num_experts,
+        num_experts=num_experts,
         is_B_int4=is_B_int4)
 
 

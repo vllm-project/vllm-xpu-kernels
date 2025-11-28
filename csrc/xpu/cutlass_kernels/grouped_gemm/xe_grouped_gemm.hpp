@@ -80,6 +80,7 @@ CUTE_DEVICE void MoEGEMM(
     TiledMMA const& mma,
     const int32_t* rows_for_experts,
     const int32_t num_experts,
+    const int32_t group_size,
     const int32_t gemm_n,
     const int32_t gemm_k,
     int32_t* atomic_buffer,
@@ -129,6 +130,9 @@ CUTE_DEVICE void MoEGEMM(
     ElementB* ptr_B_curr_batch = const_cast<ElementB*>(Weights) + B_offset;
     ElementD* ptr_D_curr_batch = Outputs + pre_rows * gemm_n;
     ElementS* ptr_Scales_curr_batch = const_cast<ElementS*>(Scales) + expert_id;
+    if constexpr (is_B_4bits){
+      ptr_Scales_curr_batch = const_cast<ElementS*>(Scales) + B_offset * 2 / group_size;
+    }
     ElementBI* ptr_Bias_curr_batch = nullptr;
     if (Bias != static_cast<ElementBI*>(nullptr)) {
       ptr_Bias_curr_batch = const_cast<ElementBI*>(Bias) + expert_id * gemm_n;
@@ -153,14 +157,15 @@ CUTE_DEVICE void MoEGEMM(
       int m_coord = (group_m_id - pre_tiles);
       auto tile_coord = make_coord(m_coord, n_coord, _, 0);
 
-      moe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
+      xe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
           A_tensor,
           B_tensor,
           ptr_Scales_curr_batch,
           ptr_Bias_curr_batch,
           D_tensor,
           tile_coord,
-          mma);
+          mma,
+          group_size);
 
       if (local_id == 0) {
         slm_mem[0] = cutlass::atomicAdd(atomic_buffer, 1);

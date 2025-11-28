@@ -62,14 +62,15 @@ template <
     class TiledMMA,
     typename ElementS,
     typename ElementBI>
-CUTE_DEVICE void moe_gemm(
+CUTE_DEVICE void xe_gemm(
     ATensor const& A,  // (M,K)
     BTensor const& B,  // (N,K)
     const ElementS* Scales,
     const ElementBI* Bias,
     DTensor& C,  // (M,N)
     Coord<int, int, cute::Underscore, int> blk_coord,
-    TiledMMA const& mma) {
+    TiledMMA const& mma,
+    const int32_t group_size) {
   using TA = typename ATensor::element_type;
   using TB = typename BTensor::element_type;
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
@@ -117,6 +118,7 @@ CUTE_DEVICE void moe_gemm(
   /* Partition C */
   auto thr_copy_c = copy_c.get_slice(local_id);
   SubgroupTensor tCrC = thr_mma.partition_sg_fragment_C(gC);
+  SubgroupTensor tCrC_scaled = thr_mma.partition_sg_fragment_C(gC);
   SubgroupTensor tCrC_final = thr_copy_c.partition_sg_fragment_S(gC);
   auto tCgC = thr_copy_c.partition_D(gC);
 
@@ -137,6 +139,9 @@ CUTE_DEVICE void moe_gemm(
   int k_tile_prefetch = 0;
 
   clear(tCrC);
+  if constexpr(std::is_same_v<TB, uint4_t>) {
+    clear(tCrC_scaled);
+  }
 
   using ElementB = typename BTensor::element_type;
   static constexpr bool is_B_fp8_type =
@@ -167,9 +172,54 @@ CUTE_DEVICE void moe_gemm(
       for (int i = 0; i < tCrB.size(); ++i) {
         tCrB(i) -= static_cast<TA>(8);
       }
-    }
+ 
+      cute::gemm(mma, tCrA, tCrB, tCrC_scaled);
 
-    cute::gemm(mma, tCrA, tCrB, tCrC);
+      static constexpr auto ATOM_M =
+        get<1>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+      static constexpr auto ATOM_N =
+        get<2>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+      static constexpr auto ATOM_K =
+        get<3>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+      
+      static constexpr auto tile_m = get<0>(wg_tile);
+      static constexpr auto tile_n = get<1>(wg_tile);
+      static constexpr auto tile_k = get<2>(wg_tile);
+
+      static constexpr auto SG_M = tile_m / ATOM_M;  // BLK_M / ATOM_M;
+      static constexpr auto SG_N = tile_n / ATOM_N;  // BLK_N / ATOM_N;
+      static constexpr auto SG_K = tile_k / ATOM_K;  // BLK_K / ATOM_K;
+
+      auto sg_local_n_coord = cutlass::get_sub_group_id() % ATOM_N;
+      int sg_local_id = cutlass::get_sub_group_local_id();
+      static constexpr int sg_local_range = 16;
+
+      int n_tile_start = wg_n * tile_n;
+      int n_sg_start = sg_local_n_coord * SG_N;
+
+      int group_num = get<1>(A.shape()) / group_size;
+
+      if(((k_tile + 1) * tile_k) % group_size == 0){
+        int group_idx = (k_tile * tile_k) / group_size;
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tCrC_scaled.size(); ++i) {
+          int sg_local_m = i % SG_M;
+          int sg_local_n = i / SG_M * sg_local_range + sg_local_id;
+          float scale_float = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx];
+          tCrC_scaled(i) *= scale_float;
+        }
+
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tCrC.size(); ++i) {
+          tCrC(i) += tCrC_scaled(i);
+        }
+        clear(tCrC_scaled);
+      }
+    } else {
+      cute::gemm(mma, tCrA, tCrB, tCrC);
+    }
     barrier_wait(barrier_scope);
   }
 
@@ -198,7 +248,6 @@ CUTE_DEVICE void moe_gemm(
 
     int sg_local_id = cutlass::get_sub_group_local_id();
     static constexpr int sg_local_range = 16;
-    int local_nums = tCrC.size();
 
     int n_tile_start = wg_n * tile_n;
     int n_sg_start = sg_local_n_coord * SG_N;

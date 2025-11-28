@@ -87,6 +87,7 @@ void MoEGEMMLauncher(
     const int gemm_k,
     const int* num_rows_per_expert_device,
     const int num_experts,
+    const int group_size,
     int32_t* atomic_buffer) {
   using ElementA_non_CV = cutlass::platform::remove_cv_t<ElementA>;
   auto op = XE_DPAS_TT<8, float, ElementA_non_CV>{};
@@ -145,6 +146,7 @@ void MoEGEMMLauncher(
               mma,
               num_rows_per_expert_device,
               num_experts,
+              group_size,
               gemm_n,
               gemm_k,
               atomic_buffer,
@@ -163,7 +165,7 @@ at::Tensor cutlass_xe_grouped_gemm(
     at::Tensor& num_rows_per_expert_device,
     int64_t N,
     int64_t K,
-    int64_t groups,
+    int64_t num_experts,
     bool is_B_int4) {
   auto& dpcpp_queue =
       at::xpu::getCurrentXPUStream(ptr_A.device().index()).queue();
@@ -175,10 +177,10 @@ at::Tensor cutlass_xe_grouped_gemm(
   TORCH_CHECK(N % 32 == 0, "N must be divisible by 32");
 
   TORCH_CHECK(ptr_A.dim() == 2, "ptr_A must be 2D [Total_M, K]");
-  TORCH_CHECK(ptr_B.dim() == 3, "ptr_B must be 3D [groups, K, N]");
+  TORCH_CHECK(ptr_B.dim() == 3, "ptr_B must be 3D [num_experts, K, N]");
   TORCH_CHECK(ptr_D.dim() == 2, "ptr_D must be 2D [Total_M, N]");
   if (ptr_bias.has_value()) {
-    TORCH_CHECK(ptr_bias->dim() == 2, "ptr_bias must be 2D [groups, N]");
+    TORCH_CHECK(ptr_bias->dim() == 2, "ptr_bias must be 2D [num_experts, N]");
   }
 
   TORCH_CHECK(ptr_A.is_contiguous(), "ptr_A must be contiguous");
@@ -201,14 +203,15 @@ at::Tensor cutlass_xe_grouped_gemm(
 
   int D_total_M = ptr_D.size(0);
   int D_N = ptr_D.size(1);
+  int group_size = -1;
 
-  TORCH_CHECK(B_E == groups, "ptr_B.size(0) must match groups");
+  TORCH_CHECK(B_E == num_experts, "ptr_B.size(0) must match num_experts");
   TORCH_CHECK(A_total_M == D_total_M, "ptr_A.size(0) must match ptr_D.size(0)");
   TORCH_CHECK(A_K == B_K && B_K == K, "ptr_A.size(1) must match ptr_B.size(1)");
   TORCH_CHECK(B_N == D_N && D_N == N, "ptr_B.size(2) must match ptr_D.size(1)");
   if (ptr_bias.has_value()) {
     TORCH_CHECK(
-        ptr_bias->size(0) == groups, "ptr_bias.size(0) must match groups");
+        ptr_bias->size(0) == num_experts, "ptr_bias.size(0) must match num_experts");
     TORCH_CHECK(ptr_bias->size(1) == N, "ptr_bias.size(1) must match N");
   }
 
@@ -219,18 +222,18 @@ at::Tensor cutlass_xe_grouped_gemm(
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
     TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");
     TORCH_CHECK(
-        ptr_scales->dim() == 3, "ptr_scales of int4 must be 3D [groups, group_num, N]");
+        ptr_scales->dim() == 3, "ptr_scales of int4 must be 3D [num_experts, group_num, N]");
     TORCH_CHECK(
-        ptr_scales->size(0) == groups,
-        "ptr_scales.size(0) of int4 must match groups");
+        ptr_scales->size(0) == num_experts,
+        "ptr_scales.size(0) of int4 must match num_experts");
     TORCH_CHECK(
         K % ptr_scales->size(2) == 0,
-        "ptr_scales.size(1) of int4 must be divisible by K");
+        "ptr_scales.size(2) of int4 must be divisible by K");
     TORCH_CHECK(
         ptr_scales->size(1) == N,
-        "ptr_scales.size(2) of int4 must match N");
-    int group_num = ptr_scales->size(1);
-    int group_size = K / group_num;
+        "ptr_scales.size(1) of int4 must match N");
+    int group_num = ptr_scales->size(2);
+    group_size = K / group_num;
 
     if (A_dtype == at::kBFloat16) {
       using scalar_t = bfloat16_t;
@@ -246,7 +249,8 @@ at::Tensor cutlass_xe_grouped_gemm(
           N,
           K,
           reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-          groups,
+          num_experts,
+          group_size,
           static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (A_dtype == at::kHalf) {
       using scalar_t = half_t;
@@ -262,7 +266,8 @@ at::Tensor cutlass_xe_grouped_gemm(
           N,
           K,
           reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-          groups,
+          num_experts,
+          group_size,
           static_cast<int*>(atomic_buffer.data_ptr()));
     } else {
       TORCH_CHECK(
@@ -276,10 +281,10 @@ at::Tensor cutlass_xe_grouped_gemm(
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
     TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");
     TORCH_CHECK(
-        ptr_scales->dim() == 1, "ptr_scales of fp8 must be 1D [groups]");
+        ptr_scales->dim() == 1, "ptr_scales of fp8 must be 1D [num_experts]");
     TORCH_CHECK(
-        ptr_scales->size(0) == groups,
-        "ptr_scales.size(0) of fp8 must match groups");
+        ptr_scales->size(0) == num_experts,
+        "ptr_scales.size(0) of fp8 must match num_experts");
     if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {
       using scalar_t = half_t;
       MoEGEMMLauncher<'R', 'R'>(
@@ -296,7 +301,8 @@ at::Tensor cutlass_xe_grouped_gemm(
           N,
           K,
           reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-          groups,
+          num_experts,
+          group_size,
           static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {
       using scalar_t = half_t;
@@ -314,7 +320,8 @@ at::Tensor cutlass_xe_grouped_gemm(
           N,
           K,
           reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-          groups,
+          num_experts,
+          group_size,
           static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {
       using scalar_t = bfloat16_t;
@@ -332,7 +339,8 @@ at::Tensor cutlass_xe_grouped_gemm(
           N,
           K,
           reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-          groups,
+          num_experts,
+          group_size,
           static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {
       using scalar_t = bfloat16_t;
@@ -350,7 +358,8 @@ at::Tensor cutlass_xe_grouped_gemm(
           N,
           K,
           reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-          groups,
+          num_experts,
+          group_size,
           static_cast<int*>(atomic_buffer.data_ptr()));
     }
   } else {
@@ -370,7 +379,8 @@ at::Tensor cutlass_xe_grouped_gemm(
           N,
           K,
           reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-          groups,
+          num_experts,
+          group_size,
           static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (A_dtype == at::kHalf) {
       using scalar_t = half_t;
@@ -386,7 +396,8 @@ at::Tensor cutlass_xe_grouped_gemm(
           N,
           K,
           reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-          groups,
+          num_experts,
+          group_size,
           static_cast<int*>(atomic_buffer.data_ptr()));
     } else {
       TORCH_CHECK(
