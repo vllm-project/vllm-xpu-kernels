@@ -73,6 +73,7 @@ CUTE_DEVICE void xe_gemm(
     const int32_t group_size) {
   using TA = typename ATensor::element_type;
   using TB = typename BTensor::element_type;
+  static constexpr bool is_B_4bits = std::is_same_v<TB, uint4_t> || std::is_same_v<TB, float_e2m1_t>;
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   auto wg_m = get<0>(blk_coord);
   auto wg_n = get<1>(blk_coord);
@@ -94,7 +95,7 @@ CUTE_DEVICE void xe_gemm(
 
   auto copy_a = get_block_2d_copy_A<GmemTiledCopyA>(mma, A);
   auto copy_b = [&]() {
-    if constexpr (std::is_same_v<TB, uint4_t>) {
+    if constexpr (is_B_4bits) {
         return make_block_2d_copy_B(mma, B);
     } else {
         return get_block_2d_copy_B<GmemTiledCopyB>(mma, B);
@@ -139,7 +140,7 @@ CUTE_DEVICE void xe_gemm(
   int k_tile_prefetch = 0;
 
   clear(tCrC);
-  if constexpr(std::is_same_v<TB, uint4_t>) {
+  if constexpr(is_B_4bits) {
     clear(tCrC_scaled);
   }
 
@@ -167,10 +168,12 @@ CUTE_DEVICE void xe_gemm(
 
     reorder(tArA, tCrA);
     reorder(tBrB, tCrB);
-    if constexpr(std::is_same_v<TB, uint4_t>) {
-      CUTLASS_PRAGMA_UNROLL
-      for (int i = 0; i < tCrB.size(); ++i) {
-        tCrB(i) -= static_cast<TA>(8);
+    if constexpr(is_B_4bits) {
+      if constexpr(std::is_same_v<TB, uint4_t>){
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tCrB.size(); ++i) {
+          tCrB(i) -= static_cast<TA>(8);
+        }
       }
  
       cute::gemm(mma, tCrA, tCrB, tCrC_scaled);
@@ -206,8 +209,15 @@ CUTE_DEVICE void xe_gemm(
         for (int i = 0; i < tCrC_scaled.size(); ++i) {
           int sg_local_m = i % SG_M;
           int sg_local_n = i / SG_M * sg_local_range + sg_local_id;
-          float scale_float = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx];
-          tCrC_scaled(i) *= scale_float;
+
+          if constexpr(std::is_same_v<TB, uint4_t>){
+            float scale_float = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx];
+            tCrC_scaled(i) *= scale_float;
+          } else if constexpr(std::is_same_v<TB, float_e2m1_t>) {
+            uint32_t scale_u32 = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx] << 23;
+            float scale_float = reinterpret_cast<float&>(scale_u32);
+            tCrC_scaled(i) *= scale_float;
+          }
         }
 
 

@@ -53,7 +53,8 @@ torch::Tensor cutlass_xe_grouped_gemm(
     int64_t N,
     int64_t K,
     int64_t num_experts,
-    bool is_B_int4);
+    bool is_B_int4,
+    bool is_B_mxfp4);
 
 std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     const at::Tensor& positions,

@@ -65,7 +65,7 @@ namespace MoE {
 using namespace cute;
 
 // type tag to define a unique sycl kernel name
-template <typename, typename, typename, char, char>
+template <typename, typename, typename, typename, char, char>
 class GemmCuteName;
 
 template <
@@ -129,7 +129,7 @@ void MoEGEMMLauncher(
   auto event = stream.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<int32_t, 1> local_mem(sycl::range<1>(1), cgh);
     cgh.parallel_for<
-        GemmCuteName<ElementA, ElementB, ElementD, layoutA, layoutB>>(
+        GemmCuteName<ElementA, ElementB, ElementS, ElementD, layoutA, layoutB>>(
         sycl::nd_range<3>{global * local, local}, kernel_props, [=](auto) {
           MoE::MoEGEMM<
               GmemTiledCopyA,
@@ -166,7 +166,8 @@ at::Tensor cutlass_xe_grouped_gemm(
     int64_t N,
     int64_t K,
     int64_t num_experts,
-    bool is_B_int4) {
+    bool is_B_int4,
+    bool is_B_mxfp4) {
   auto& dpcpp_queue =
       at::xpu::getCurrentXPUStream(ptr_A.device().index()).queue();
   auto A_dtype = ptr_A.dtype();
@@ -196,7 +197,7 @@ at::Tensor cutlass_xe_grouped_gemm(
   int B_E = ptr_B.size(0);
   int B_K = ptr_B.size(1);
   int B_N = ptr_B.size(2);
-  if(is_B_int4){
+  if(is_B_int4 || is_B_mxfp4){
     B_K = ptr_B.size(2) * 2;
     B_N = ptr_B.size(1);
   }
@@ -218,7 +219,7 @@ at::Tensor cutlass_xe_grouped_gemm(
   at::Tensor atomic_buffer =
       at::zeros({static_cast<long>(1)}, ptr_A.options().dtype(at::kInt));
 
-  if(is_B_int4){
+  if(is_B_int4 || is_B_mxfp4){
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
     TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");
     TORCH_CHECK(
@@ -235,48 +236,79 @@ at::Tensor cutlass_xe_grouped_gemm(
     int group_num = ptr_scales->size(2);
     group_size = K / group_num;
 
-    if (A_dtype == at::kBFloat16) {
-      using scalar_t = bfloat16_t;
-      MoEGEMMLauncher<'R', 'C'>(
-          dpcpp_queue,
-          reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
-          reinterpret_cast<uint8_t*>(ptr_B.data_ptr()),
-          reinterpret_cast<scalar_t*>(ptr_scales->data_ptr()),
-          ptr_bias.has_value()
-              ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
-              : static_cast<scalar_t*>(nullptr),
-          reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
-          N,
-          K,
-          reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-          num_experts,
-          group_size,
-          static_cast<int*>(atomic_buffer.data_ptr()));
-    } else if (A_dtype == at::kHalf) {
-      using scalar_t = half_t;
-      MoEGEMMLauncher<'R', 'C'>(
-          dpcpp_queue,
-          reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
-          reinterpret_cast<uint8_t*>(ptr_B.data_ptr()),
-          reinterpret_cast<scalar_t*>(ptr_scales->data_ptr()),
-          ptr_bias.has_value()
-              ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
-              : static_cast<scalar_t*>(nullptr),
-          reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
-          N,
-          K,
-          reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
-          num_experts,
-          group_size,
-          static_cast<int*>(atomic_buffer.data_ptr()));
-    } else {
-      TORCH_CHECK(
-          false,
-          "cutlass_xe_grouped_gemm only supports BFloat16 and Half dtypes, but "
-          "got: ",
-          A_dtype);
+    if(is_B_int4){
+        if (A_dtype == at::kBFloat16) {
+            using scalar_t = bfloat16_t;
+            MoEGEMMLauncher<'R', 'C'>(
+                dpcpp_queue,
+                reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
+                reinterpret_cast<uint8_t*>(ptr_B.data_ptr()),
+                reinterpret_cast<scalar_t*>(ptr_scales->data_ptr()),
+                ptr_bias.has_value()
+                    ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
+                    : static_cast<scalar_t*>(nullptr),
+                reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
+                N,
+                K,
+                reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
+                num_experts,
+                group_size,
+                static_cast<int*>(atomic_buffer.data_ptr()));
+            } else if (A_dtype == at::kHalf) {
+            using scalar_t = half_t;
+            MoEGEMMLauncher<'R', 'C'>(
+                dpcpp_queue,
+                reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
+                reinterpret_cast<uint8_t*>(ptr_B.data_ptr()),
+                reinterpret_cast<scalar_t*>(ptr_scales->data_ptr()),
+                ptr_bias.has_value()
+                    ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
+                    : static_cast<scalar_t*>(nullptr),
+                reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
+                N,
+                K,
+                reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
+                num_experts,
+                group_size,
+                static_cast<int*>(atomic_buffer.data_ptr()));
+        }
+    } else if(is_B_mxfp4){
+        if (A_dtype == at::kBFloat16) {
+            using scalar_t = bfloat16_t;
+            MoEGEMMLauncher<'R', 'C'>(
+                dpcpp_queue,
+                reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
+                reinterpret_cast<uint8_t*>(ptr_B.data_ptr()),
+                reinterpret_cast<uint8_t*>(ptr_scales->data_ptr()),
+                ptr_bias.has_value()
+                    ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
+                    : static_cast<scalar_t*>(nullptr),
+                reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
+                N,
+                K,
+                reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
+                num_experts,
+                group_size,
+                static_cast<int*>(atomic_buffer.data_ptr()));
+            } else if (A_dtype == at::kHalf) {
+            using scalar_t = half_t;
+            MoEGEMMLauncher<'R', 'C'>(
+                dpcpp_queue,
+                reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
+                reinterpret_cast<uint8_t*>(ptr_B.data_ptr()),
+                reinterpret_cast<uint8_t*>(ptr_scales->data_ptr()),
+                ptr_bias.has_value()
+                    ? reinterpret_cast<scalar_t*>(ptr_bias->data_ptr())
+                    : static_cast<scalar_t*>(nullptr),
+                reinterpret_cast<scalar_t*>(ptr_D.data_ptr()),
+                N,
+                K,
+                reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),
+                num_experts,
+                group_size,
+                static_cast<int*>(atomic_buffer.data_ptr()));
+        }
     }
-
   } else if (is_weight_fp8) {
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
     TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");
@@ -399,12 +431,6 @@ at::Tensor cutlass_xe_grouped_gemm(
           num_experts,
           group_size,
           static_cast<int*>(atomic_buffer.data_ptr()));
-    } else {
-      TORCH_CHECK(
-          false,
-          "cutlass_xe_grouped_gemm only supports BFloat16 and Half dtypes, but "
-          "got: ",
-          A_dtype);
     }
   }
   return ptr_D;
