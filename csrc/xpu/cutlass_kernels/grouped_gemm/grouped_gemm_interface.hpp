@@ -126,6 +126,9 @@ void MoEGEMMLauncher(
       XE_LOAD_2D_VNNI<16, 32, 16, 16>>;
   using GmemTiledCopyD = XE_STORE_2D<16, 8, 32>;
 
+  GPU_Clock timer;
+  timer.start();
+
   auto event = stream.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<int32_t, 1> local_mem(sycl::range<1>(1), cgh);
     cgh.parallel_for<
@@ -154,6 +157,14 @@ void MoEGEMMLauncher(
         });
   });
   EventManager::getInstance().addEvent(event);
+  event.wait();
+  double during_time = timer.seconds(); // s
+
+  int total_m = 1;
+  int64_t FLOPS = 2 * static_cast<int64_t>(total_m) * static_cast<int64_t>(gemm_k) * static_cast<int64_t>(gemm_n);
+  std::cout << "during_time: " << during_time * 1e3 << "ms" << std::endl;
+  std::cout << "FLOPS: " << FLOPS << std::endl;
+  std::cout << "TFLOPS: " << (FLOPS / during_time / 1e12) << " TFLOPS" << std::endl;
 }
 
 at::Tensor cutlass_xe_grouped_gemm(

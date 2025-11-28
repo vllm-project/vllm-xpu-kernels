@@ -119,7 +119,6 @@ CUTE_DEVICE void xe_gemm(
   /* Partition C */
   auto thr_copy_c = copy_c.get_slice(local_id);
   SubgroupTensor tCrC = thr_mma.partition_sg_fragment_C(gC);
-  SubgroupTensor tCrC_scaled = thr_mma.partition_sg_fragment_C(gC);
   SubgroupTensor tCrC_final = thr_copy_c.partition_sg_fragment_S(gC);
   auto tCgC = thr_copy_c.partition_D(gC);
 
@@ -139,10 +138,12 @@ CUTE_DEVICE void xe_gemm(
   int k_tile_count = ceil_div(shape<1>(A), get<2>(wg_tile));
   int k_tile_prefetch = 0;
 
+  static constexpr auto thr_N = get<1>(tCrB.shape());
+  static constexpr auto channel_num = 2;
+
+  TA scales[get<1>(tCrB.shape()) * 2];
+
   clear(tCrC);
-  if constexpr(is_B_4bits) {
-    clear(tCrC_scaled);
-  }
 
   using ElementB = typename BTensor::element_type;
   static constexpr bool is_B_fp8_type =
@@ -161,6 +162,56 @@ CUTE_DEVICE void xe_gemm(
     copy(copy_a, tAgA(_, _, _, k_tile), tArA);
     copy(copy_b, tBgB(_, _, _, k_tile), tBrB);
 
+    static constexpr auto tile_k = get<2>(wg_tile);
+
+    if constexpr(is_B_4bits) {
+      if(k_tile * tile_k % group_size == 0){
+        static constexpr auto ATOM_M =
+          get<1>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+        static constexpr auto ATOM_N =
+          get<2>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+        static constexpr auto ATOM_K =
+          get<3>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+        
+        static constexpr auto tile_m = get<0>(wg_tile);
+        static constexpr auto tile_n = get<1>(wg_tile);
+        // static constexpr auto tile_k = get<2>(wg_tile);
+
+        static constexpr auto SG_M = tile_m / ATOM_M;  // BLK_M / ATOM_M;
+        static constexpr auto SG_N = tile_n / ATOM_N;  // BLK_N / ATOM_N;
+        static constexpr auto SG_K = tile_k / ATOM_K;  // BLK_K / ATOM_K;
+
+        auto sg_local_n_coord = cutlass::get_sub_group_id() % ATOM_N;
+        int sg_local_id = cutlass::get_sub_group_local_id();
+        static constexpr int sg_local_range = 16;
+
+        int n_tile_start = wg_n * tile_n;
+        int n_sg_start = sg_local_n_coord * SG_N;
+
+        int group_num = get<1>(A.shape()) / group_size;
+
+        int group_idx = (k_tile * tile_k) / group_size;
+        
+        CUTLASS_PRAGMA_UNROLL
+        for (int n = 0; n < thr_N; ++n) {
+          CUTLASS_PRAGMA_UNROLL
+          for(int c = 0; c < channel_num; ++c){
+            int x_idx = sg_local_id / channel_num;
+            int real_idx = x_idx + c * (sg_local_range / channel_num);
+            int sg_local_n = n * sg_local_range + real_idx;
+            TA scale;
+            if constexpr(std::is_same_v<TB, uint4_t>){
+              scale = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx];
+            } else if constexpr(std::is_same_v<TB, float_e2m1_t>) {
+              uint32_t scale_u32 = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx] << 23;
+              scale = static_cast<TA>(reinterpret_cast<float&>(scale_u32));
+            }
+            scales[n * channel_num + c] = scale;
+          }
+        }
+      }
+    }
+
     if (k_tile_prefetch < k_tile_count) {
       prefetch(prefetch_a, pAgA(_, _, _, k_tile_prefetch));
       prefetch(prefetch_b, pBgB(_, _, _, k_tile_prefetch));
@@ -175,61 +226,70 @@ CUTE_DEVICE void xe_gemm(
           tCrB(i) -= static_cast<TA>(8);
         }
       }
- 
-      cute::gemm(mma, tCrA, tCrB, tCrC_scaled);
 
-      static constexpr auto ATOM_M =
-        get<1>(typename TiledMMA::ThrLayoutVMNK{}.shape());
-      static constexpr auto ATOM_N =
-        get<2>(typename TiledMMA::ThrLayoutVMNK{}.shape());
-      static constexpr auto ATOM_K =
-        get<3>(typename TiledMMA::ThrLayoutVMNK{}.shape());
-      
-      static constexpr auto tile_m = get<0>(wg_tile);
-      static constexpr auto tile_n = get<1>(wg_tile);
-      static constexpr auto tile_k = get<2>(wg_tile);
-
-      static constexpr auto SG_M = tile_m / ATOM_M;  // BLK_M / ATOM_M;
-      static constexpr auto SG_N = tile_n / ATOM_N;  // BLK_N / ATOM_N;
-      static constexpr auto SG_K = tile_k / ATOM_K;  // BLK_K / ATOM_K;
-
-      auto sg_local_n_coord = cutlass::get_sub_group_id() % ATOM_N;
-      int sg_local_id = cutlass::get_sub_group_local_id();
-      static constexpr int sg_local_range = 16;
-
-      int n_tile_start = wg_n * tile_n;
-      int n_sg_start = sg_local_n_coord * SG_N;
-
-      int group_num = get<1>(A.shape()) / group_size;
-
-      if(((k_tile + 1) * tile_k) % group_size == 0){
-        int group_idx = (k_tile * tile_k) / group_size;
-
+      CUTLASS_PRAGMA_UNROLL
+      for (int n = 0; n < thr_N; ++n) {
         CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < tCrC_scaled.size(); ++i) {
-          int sg_local_m = i % SG_M;
-          int sg_local_n = i / SG_M * sg_local_range + sg_local_id;
-
-          if constexpr(std::is_same_v<TB, uint4_t>){
-            float scale_float = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx];
-            tCrC_scaled(i) *= scale_float;
-          } else if constexpr(std::is_same_v<TB, float_e2m1_t>) {
-            uint32_t scale_u32 = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx] << 23;
-            float scale_float = reinterpret_cast<float&>(scale_u32);
-            tCrC_scaled(i) *= scale_float;
+        for(int c = 0; c < channel_num; ++c){
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < tCrB.size() / thr_N / channel_num; ++i) {
+            tCrB(cute::tuple(c, _), n, _)[i] *= scales[n * channel_num + c];
           }
         }
-
-
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < tCrC.size(); ++i) {
-          tCrC(i) += tCrC_scaled(i);
-        }
-        clear(tCrC_scaled);
       }
-    } else {
-      cute::gemm(mma, tCrA, tCrB, tCrC);
+
+      // static constexpr auto ATOM_M =
+      //   get<1>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+      // static constexpr auto ATOM_N =
+      //   get<2>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+      // static constexpr auto ATOM_K =
+      //   get<3>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+      
+      // static constexpr auto tile_m = get<0>(wg_tile);
+      // static constexpr auto tile_n = get<1>(wg_tile);
+      // static constexpr auto tile_k = get<2>(wg_tile);
+
+      // static constexpr auto SG_M = tile_m / ATOM_M;  // BLK_M / ATOM_M;
+      // static constexpr auto SG_N = tile_n / ATOM_N;  // BLK_N / ATOM_N;
+      // static constexpr auto SG_K = tile_k / ATOM_K;  // BLK_K / ATOM_K;
+
+      // auto sg_local_n_coord = cutlass::get_sub_group_id() % ATOM_N;
+      // int sg_local_id = cutlass::get_sub_group_local_id();
+      // static constexpr int sg_local_range = 16;
+
+      // int n_tile_start = wg_n * tile_n;
+      // int n_sg_start = sg_local_n_coord * SG_N;
+
+      // int group_num = get<1>(A.shape()) / group_size;
+
+      // int group_idx = (k_tile * tile_k) / group_size;
+      
+      // static constexpr auto thr_N = get<1>(tCrB.shape());
+      // static constexpr auto channel_num = 2;
+      // CUTLASS_PRAGMA_UNROLL
+      // for (int n = 0; n < thr_N; ++n) {
+      //   CUTLASS_PRAGMA_UNROLL
+      //   for(int c = 0; c < channel_num; ++c){
+      //     int x_idx = sg_local_id / channel_num;
+      //     int real_idx = x_idx + c * (sg_local_range / channel_num);
+      //     int sg_local_n = n * sg_local_range + real_idx;
+      //     TA scale;
+      //     if constexpr(std::is_same_v<TB, uint4_t>){
+      //       scale = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx];
+      //     } else if constexpr(std::is_same_v<TB, float_e2m1_t>) {
+      //       uint32_t scale_u32 = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx] << 23;
+      //       scale = static_cast<TA>(reinterpret_cast<float&>(scale_u32));
+      //     }
+      //     CUTLASS_PRAGMA_UNROLL
+      //     for (int i = 0; i < tCrB.size() / thr_N / channel_num; ++i) {
+      //       tCrB(cute::tuple(c, _), n, _)[i] *= scale;
+      //     }
+      //   }
+      // }
     }
+
+    cute::gemm(mma, tCrA, tCrB, tCrC);
+
     barrier_wait(barrier_scope);
   }
 
