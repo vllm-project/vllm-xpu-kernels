@@ -482,9 +482,10 @@ struct FMHAFwdMainloop<
 
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < tS.size(); i++)
+    for (int i = 0; i < tS.size(); i++) {
       tS(i) = sycl::native::exp2(
           params.scale * tS(i) - broadcast<0>(tS_max, tS, i));
+    }
 
     /* Rescale existing S sums and O accumulator */
     if (!first_block) {
