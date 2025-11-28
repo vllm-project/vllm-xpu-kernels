@@ -247,7 +247,7 @@ class XeFMHAFwdKernel {
       auto [seq_len_qo, seq_len_kv] = sequence_length_shape;
       if (blk_q * get<0>(TileShapeQK{}) >= seq_len_qo) continue;
 
-      auto offset = cute::min(seq_len_qo, seq_len_kv);
+      auto offset = seq_len_qo;
       auto discard_seq_coord = seq_len_qo - offset;
       auto full_tile_offset = seq_len_kv - offset;
       int seq_coord =
@@ -257,21 +257,25 @@ class XeFMHAFwdKernel {
       // calc sg level seq_len_kv
       const int seq_len =
           CausalMask
-              ? full_tile_offset +
-                    cute::min(seq_len_kv, seq_coord - discard_seq_coord) +
-                    q_sg_tile
+              ? LocalMask
+                    ? cute::min(
+                          seq_len_kv,
+                          full_tile_offset + seq_coord + q_sg_tile +
+                              params.mainloop.local_right)
+                    : cute::min(
+                          seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
               : seq_len_kv;
-      const int k_block0 = LocalMask
-                               ? (seq_len - q_sg_tile) / get<1>(TileShapeQK{}) -
-                                     params.mainloop.local_left
-                               : 0;
-      const int k_blocks = LocalMask
-                               ? cute::ceil_div(
-                                     seq_len + params.mainloop.local_right,
-                                     get<1>(TileShapeQK{}))
-                               : cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
+      const int k_block0 =
+          LocalMask
+              ? cute::max(
+                    seq_coord + full_tile_offset - params.mainloop.local_left,
+                    0) /
+                    get<1>(TileShapeQK{})
+              : 0;
+      const int k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
       const int k_blocks_causal =
-          CausalMask ? (seq_len - q_sg_tile) / get<1>(TileShapeQK{}) : 0;
+          CausalMask ? (seq_coord + full_tile_offset) / get<1>(TileShapeQK{})
+                     : 0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       if constexpr (is_var_len) {
