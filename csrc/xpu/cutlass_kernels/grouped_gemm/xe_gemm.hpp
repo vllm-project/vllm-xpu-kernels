@@ -194,11 +194,13 @@ CUTE_DEVICE void xe_gemm(
     int n_sg_start = sg_local_n_coord * SG_N;
 
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < tCrC.size(); ++i) {
-      int sg_local_m = i % SG_M;
-      int sg_local_n = i / SG_M * sg_local_range + sg_local_id;
+    for (int sn = 0; sn < SG_N / sg_local_range; ++sn) {
+      int sg_local_n = sn * sg_local_range + sg_local_id;
       float b_float = Bias[n_tile_start + n_sg_start + sg_local_n];
-      tCrC(i) += b_float;
+      CUTLASS_PRAGMA_UNROLL
+      for (int sm = 0; sm < SG_M; ++sm) {
+        tCrC(sn * SG_M + sm) += b_float;
+      }
     }
   }
 
@@ -227,7 +229,6 @@ CUTE_DEVICE void xe_gemm_4bits(
     const int32_t group_size) {
   using TA = typename ATensor::element_type;
   using TB = typename BTensor::element_type;
-  static constexpr bool is_B_4bits = std::is_same_v<TB, uint4_t> || std::is_same_v<TB, float_e2m1_t>;
   static constexpr int sg_local_range = 16;
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   auto wg_m = get<0>(blk_coord);
@@ -288,11 +289,11 @@ CUTE_DEVICE void xe_gemm_4bits(
   int k_tile_prefetch = 0;
 
   static constexpr auto ATOM_M =
-    get<1>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+      get<1>(typename TiledMMA::ThrLayoutVMNK{}.shape());
   static constexpr auto ATOM_N =
-    get<2>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+      get<2>(typename TiledMMA::ThrLayoutVMNK{}.shape());
   static constexpr auto ATOM_K =
-    get<3>(typename TiledMMA::ThrLayoutVMNK{}.shape());
+      get<3>(typename TiledMMA::ThrLayoutVMNK{}.shape());
 
   static constexpr auto tile_m = get<0>(wg_tile);
   static constexpr auto tile_n = get<1>(wg_tile);
@@ -306,15 +307,11 @@ CUTE_DEVICE void xe_gemm_4bits(
   static constexpr auto channel_num = get<0>(get<0>(tCrB.shape()));
   auto n_tile_start = wg_n * tile_n;
 
-  TA scales[thr_N * channel_num];
-
   auto sg_local_n_coord = cutlass::get_sub_group_id() % ATOM_N;
   int sg_local_id = cutlass::get_sub_group_local_id();
   int n_sg_start = sg_local_n_coord * SG_N;
   int group_num = get<1>(A.shape()) / group_size;
   int x_idx = sg_local_id / channel_num;
-
-  const TA ZERO_P = static_cast<TA>(8);
 
   clear(tCrC);
 
@@ -335,27 +332,6 @@ CUTE_DEVICE void xe_gemm_4bits(
     copy(copy_a, tAgA(_, _, _, k_tile), tArA);
     copy(copy_b, tBgB(_, _, _, k_tile), tBrB);
 
-    if(k_tile * tile_k % group_size == 0){
-      int group_idx = (k_tile * tile_k) / group_size;
-
-      CUTLASS_PRAGMA_UNROLL
-      for(int c = 0; c < channel_num; ++c){
-        int real_idx = x_idx + c * (sg_local_range / channel_num);
-        CUTLASS_PRAGMA_UNROLL
-        for (int n = 0; n < thr_N; ++n) {
-          int sg_local_n = n * sg_local_range + real_idx;
-          TA scale;
-          if constexpr(std::is_same_v<TB, uint4_t>){
-            scale = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx];
-          } else if constexpr(std::is_same_v<TB, float_e2m1_t>) {
-            uint32_t scale_u32 = Scales[(n_tile_start + n_sg_start + sg_local_n) * group_num + group_idx] << 23;
-            scale = static_cast<TA>(reinterpret_cast<float&>(scale_u32));
-          }
-          scales[n * channel_num + c] = scale;
-        }
-      }
-    }
-
     if (k_tile_prefetch < k_tile_count) {
       prefetch(prefetch_a, pAgA(_, _, _, k_tile_prefetch));
       prefetch(prefetch_b, pBgB(_, _, _, k_tile_prefetch));
@@ -364,20 +340,31 @@ CUTE_DEVICE void xe_gemm_4bits(
     reorder(tArA, tCrA);
     reorder(tBrB, tCrB);
 
-    if constexpr(std::is_same_v<TB, uint4_t>){
-      CUTLASS_PRAGMA_UNROLL
-      for (int i = 0; i < tCrB.size(); ++i) {
-        tCrB(i) -= ZERO_P;
-      }
-    }
+    int group_idx = (k_tile * tile_k) / group_size;
 
     CUTLASS_PRAGMA_UNROLL
     for (int n = 0; n < thr_N; ++n) {
       CUTLASS_PRAGMA_UNROLL
-      for(int c = 0; c < channel_num; ++c){
+      for (int c = 0; c < channel_num; ++c) {
+        int real_idx = x_idx + c * (sg_local_range / channel_num);
+        int sg_local_n = n * sg_local_range + real_idx;
+        TA scale;
+        if constexpr (std::is_same_v<TB, int4_t>) {
+          scale = Scales
+              [(n_tile_start + n_sg_start + sg_local_n) * group_num +
+               group_idx];
+        } else if constexpr (std::is_same_v<TB, float_e2m1_t>) {
+          uint32_t scale_u32 =
+              Scales
+                  [(n_tile_start + n_sg_start + sg_local_n) * group_num +
+                   group_idx]
+              << 23;
+          scale = static_cast<TA>(reinterpret_cast<float&>(scale_u32));
+        }
+
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < tCrB.size() / thr_N / channel_num; ++i) {
-          tCrB(cute::tuple(c, _), n, _)[i] *= scales[n * channel_num + c];
+          tCrB(cute::tuple(c, _), n, _)[i] *= scale;
         }
       }
     }
@@ -387,21 +374,15 @@ CUTE_DEVICE void xe_gemm_4bits(
     barrier_wait(barrier_scope);
   }
 
-  if constexpr (is_B_fp8_type) {
-    float B_scale = Scales[0];
-    CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < tCrC.size(); ++i) {
-      tCrC(i) *= B_scale;
-    }
-  }
-
   if (Bias != nullptr) {
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < tCrC.size(); ++i) {
-      int sg_local_m = i % SG_M;
-      int sg_local_n = i / SG_M * sg_local_range + sg_local_id;
+    for (int sn = 0; sn < SG_N / sg_local_range; ++sn) {
+      int sg_local_n = sn * sg_local_range + sg_local_id;
       float b_float = Bias[n_tile_start + n_sg_start + sg_local_n];
-      tCrC(i) += b_float;
+      CUTLASS_PRAGMA_UNROLL
+      for (int sm = 0; sm < SG_M; ++sm) {
+        tCrC(sn * SG_M + sm) += b_float;
+      }
     }
   }
 

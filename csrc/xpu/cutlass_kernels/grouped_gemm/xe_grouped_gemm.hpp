@@ -86,8 +86,10 @@ CUTE_DEVICE void MoEGEMM(
     int32_t* atomic_buffer,
     const sycl::local_accessor<int32_t, 1>& slm_mem_const) {
   constexpr char actual_layout_of_B = LayoutKindB ^ ('R' ^ 'C');
-  static constexpr bool is_B_uint4 = (std::is_same_v<ElementB, uint8_t>) && (!std::is_same_v<ElementS, uint8_t>);
-  static constexpr bool is_B_mxfp4 = (std::is_same_v<ElementB, uint8_t>) && (std::is_same_v<ElementS, uint8_t>);
+  static constexpr bool is_B_int4 = (std::is_same_v<ElementB, uint8_t>) &&
+                                    (!std::is_same_v<ElementS, uint8_t>);
+  static constexpr bool is_B_mxfp4 = (std::is_same_v<ElementB, uint8_t>) &&
+                                     (std::is_same_v<ElementS, uint8_t>);
   static constexpr bool is_B_4bits = std::is_same_v<ElementB, uint8_t>;
 
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
@@ -124,7 +126,7 @@ CUTE_DEVICE void MoEGEMM(
     int64_t B_offset = static_cast<int64_t>(expert_id) *
                        static_cast<int64_t>(gemm_n) *
                        static_cast<int64_t>(gemm_k);
-    if constexpr (is_B_4bits){
+    if constexpr (is_B_4bits) {
       B_offset /= 2;
     }
     ElementA* ptr_A_curr_batch =
@@ -132,8 +134,9 @@ CUTE_DEVICE void MoEGEMM(
     ElementB* ptr_B_curr_batch = const_cast<ElementB*>(Weights) + B_offset;
     ElementD* ptr_D_curr_batch = Outputs + pre_rows * gemm_n;
     ElementS* ptr_Scales_curr_batch = const_cast<ElementS*>(Scales) + expert_id;
-    if constexpr (is_B_4bits){
-      ptr_Scales_curr_batch = const_cast<ElementS*>(Scales) + B_offset * 2 / group_size;
+    if constexpr (is_B_4bits) {
+      ptr_Scales_curr_batch =
+          const_cast<ElementS*>(Scales) + B_offset * 2 / group_size;
     }
     ElementBI* ptr_Bias_curr_batch = nullptr;
     if (Bias != static_cast<ElementBI*>(nullptr)) {
@@ -143,15 +146,15 @@ CUTE_DEVICE void MoEGEMM(
     auto A_tensor = make_moe_tensor<ElementA, LayoutKindA>(
         ptr_A_curr_batch, gemm_m, gemm_k);
     auto B_tensor = [&]() {
-      if constexpr (is_B_uint4) {
-          return make_moe_tensor<uint4_t, actual_layout_of_B>(
-              reinterpret_cast<uint4_t*>(ptr_B_curr_batch), gemm_n, gemm_k);
+      if constexpr (is_B_int4) {
+        return make_moe_tensor<int4_t, actual_layout_of_B>(
+            reinterpret_cast<int4_t*>(ptr_B_curr_batch), gemm_n, gemm_k);
       } else if constexpr (is_B_mxfp4) {
-          return make_moe_tensor<float_e2m1_t, actual_layout_of_B>(
-              reinterpret_cast<float_e2m1_t*>(ptr_B_curr_batch), gemm_n, gemm_k);
+        return make_moe_tensor<float_e2m1_t, actual_layout_of_B>(
+            reinterpret_cast<float_e2m1_t*>(ptr_B_curr_batch), gemm_n, gemm_k);
       } else {
-          return make_moe_tensor<ElementB, actual_layout_of_B>(
-              ptr_B_curr_batch, gemm_n, gemm_k);
+        return make_moe_tensor<ElementB, actual_layout_of_B>(
+            ptr_B_curr_batch, gemm_n, gemm_k);
       }
     }();
     auto D_tensor = make_moe_tensor<ElementD, LayoutKindD>(
@@ -162,7 +165,7 @@ CUTE_DEVICE void MoEGEMM(
       int m_coord = (group_m_id - pre_tiles);
       auto tile_coord = make_coord(m_coord, n_coord, _, 0);
 
-      if constexpr (is_B_4bits){
+      if constexpr (is_B_4bits) {
         xe_gemm_4bits<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
             A_tensor,
             B_tensor,

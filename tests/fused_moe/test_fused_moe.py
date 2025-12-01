@@ -14,7 +14,6 @@ DEVICE = "xpu"
 
 # shape for Llama-4-scout
 FUSED_MOE_MNK_FACTORS = [
-    # (256, 256, 256),
     (1, 5120, 8192),
     (4, 5120, 8192),
     (16, 5120, 8192),
@@ -94,15 +93,6 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
-    print("test_xe_grouped_gemm",
-          ", m=", m,
-          ", n=", n,
-          ", k=", k,
-          ", e=", e,
-          ", topk=", topk,
-          ", dtype=", dtype,
-          ", has_bias=", has_bias,
-          )
     seed_everything(7)
     num_experts = e
     token_per_group = random_partition(e, m * topk)
@@ -125,7 +115,8 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
                                        device=input_A.device)
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
     cutlass_xe_grouped_gemm(input_A, input_B, None, bias, output,
-                            num_rows_per_expert, n, k, num_experts, False, False)
+                            num_rows_per_expert, n, k, num_experts, False,
+                            False)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -153,16 +144,6 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
 @pytest.mark.parametrize("fp8_dtype", [torch.float8_e5m2, torch.float8_e4m3fn])
 @pytest.mark.parametrize("has_bias", [False, True])
 def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
-    print("test_xe_grouped_gemm_fp8",
-          ", m=", m,
-          ", n=", n,
-          ", k=", k,
-          ", e=", e,
-          ", topk=", topk,
-          ", dtype=", dtype,
-          ", fp8_dtype=", fp8_dtype,
-          ", has_bias=", has_bias,
-          )
     seed_everything(7)
     num_experts = e
     token_per_group = random_partition(e, m * topk)
@@ -200,7 +181,8 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
                                        device=input_A.device)
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
     cutlass_xe_grouped_gemm(input_A, input_B_fp8, scale_B, bias, output,
-                            num_rows_per_expert, n, k, num_experts, False, False)
+                            num_rows_per_expert, n, k, num_experts, False,
+                            False)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -220,32 +202,53 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
         pre_token_sum += cur_token_num
     ref = torch.cat(ref, dim=0)
 
-    try:
-        torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
-        print("a and b close enough")
-    except AssertionError as e:
-        print("a and b diffs")
-        raise (e)
+    torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
 
-def dequantize_int4(qweight, scales, group_size):
+
+def dequantize_uint4(qweight, scales, group_size):
     import numpy as np
     k = qweight.shape[1] * 2
     n = qweight.shape[0]
     unpack_idx = np.array([0, 1])
     data = qweight[:, [i // 2 for i in range(k)]]
-    shift = (
-        torch.tensor(
-            unpack_idx[[i % 2 for i in range(k)]], dtype=torch.int32, device="xpu"
-        )[None, :].expand([n, -1])
-        * 4
-    )
+    shift = (torch.tensor(unpack_idx[[i % 2 for i in range(k)]],
+                          dtype=torch.int32,
+                          device="xpu")[None, :].expand([n, -1]) * 4)
     dst_data = (data >> shift) & 0xF
     expand_scales = scales[:, [i // group_size for i in range(k)]]
     weight_16 = (dst_data - 8) * expand_scales
     # weight_16 = dst_data * expand_scales
-    # weight_16 = (dst_data - 8)
 
     return weight_16.to(scales.dtype)
+
+
+def implement_zp(qweight, zp=None):
+    assert qweight.dtype == torch.uint8, "Input tensor must be uint8"
+
+    high_u4 = (qweight >> 4) & 0x0F
+    low_u4 = qweight & 0x0F
+
+    high_s8 = high_u4.to(torch.int8)
+    low_s8 = low_u4.to(torch.int8)
+
+    high_s8 = high_s8 - 8
+    low_s8 = low_s8 - 8
+
+    def pack_compact(a, b):
+
+        def process_number(x):
+            sign = (x < 0).to(torch.uint8)
+            abs_low3 = (x.view(torch.uint8) & 0x7).to(torch.uint8)
+            return (sign << 3) | abs_low3
+
+        packed_a = process_number(a)
+        packed_b = process_number(b)
+
+        return (packed_a << 4) | packed_b
+
+    result = pack_compact(high_s8, low_s8)
+
+    return result
 
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
@@ -254,15 +257,6 @@ def dequantize_int4(qweight, scales, group_size):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("has_bias", [False, True])
 def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
-    print("test_xe_grouped_gemm_int4",
-          ", m=", m,
-          ", n=", n,
-          ", k=", k,
-          ", e=", e,
-          ", topk=", topk,
-          ", dtype=", dtype,
-          ", has_bias=", has_bias,
-          )
     seed_everything(7)
     num_experts = e
     group_size = 128
@@ -273,40 +267,29 @@ def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
     input_A = torch.randn((sum(token_per_group), k),
                           dtype=dtype,
                           device=DEVICE).contiguous()
-    # input_A = torch.ones((sum(token_per_group), k),
-    #                       dtype=dtype,
-    #                       device=DEVICE).contiguous()
     ref_A = input_A
     # weight
-    input_B_int4 = (
-        torch.randint(0, 0xff, [num_experts, n, k // 2], device=DEVICE)
-    ).to(torch.uint8)
-    # input_B_int4 = torch.ones((num_experts, n, k // 2),
-    #                       dtype=torch.uint8,
-    #                       device=DEVICE).contiguous() * 0x99
+    input_B_uint4 = (torch.randint(0,
+                                   0xff, [num_experts, n, k // 2],
+                                   device=DEVICE)).to(torch.uint8)
     # scale
-    random_exponents = torch.randint(-3, 4, (num_experts, n, group_num), device=DEVICE)
+    random_exponents = torch.randint(-3,
+                                     4, (num_experts, n, group_num),
+                                     device=DEVICE)
     scale_B = torch.pow(2.0, random_exponents.float()).to(dtype)
-
-    # scale_B = torch.ones((num_experts, n, group_num),
-    #                       dtype=dtype,
-    #                       device=DEVICE).contiguous()
-    # for i in range(n):
-    #     scale_B[:,i,:] = i
 
     if has_bias:
         bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE) * 100
     else:
         bias = None
 
-
-    input_B_16 = torch.empty(
-        num_experts, n, k, dtype=dtype, device=DEVICE
-    )
+    input_B_16 = torch.empty(num_experts, n, k, dtype=dtype, device=DEVICE)
+    input_B_int4 = torch.empty_like(input_B_uint4)
     for i in range(num_experts):
-        input_B_16[i] = dequantize_int4(
-            input_B_int4[i], scale_B[i], group_size
-        )
+        # default zp=8
+        input_B_16[i] = dequantize_uint4(input_B_uint4[i], scale_B[i],
+                                         group_size)
+        input_B_int4[i] = implement_zp(input_B_uint4[i], None)
 
     # output offset
     num_rows_per_expert = torch.tensor(token_per_group,
@@ -314,7 +297,8 @@ def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
                                        device=input_A.device)
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
     cutlass_xe_grouped_gemm(input_A, input_B_int4, scale_B, bias, output,
-                            num_rows_per_expert, n, k, num_experts, True, False)
+                            num_rows_per_expert, n, k, num_experts, True,
+                            False)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -334,16 +318,8 @@ def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
         pre_token_sum += cur_token_num
     ref = torch.cat(ref, dim=0)
 
-    # torch.set_printoptions(threshold=float('inf'), linewidth=200)
-    # print("output", output)
-    # print("ref", ref)
+    torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
 
-    try:
-        torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
-        print("a and b close enough")
-    except AssertionError as e:
-        print("a and b diffs")
-        raise (e)
 
 def dequantize_mxfp4(qweight, scales, group_size, dtype):
     import numpy as np
@@ -351,35 +327,35 @@ def dequantize_mxfp4(qweight, scales, group_size, dtype):
     n = qweight.shape[0]
     unpack_idx = np.array([0, 1])
     data = qweight[:, [i // 2 for i in range(k)]]
-    shift = (
-        torch.tensor(
-            unpack_idx[[i % 2 for i in range(k)]], dtype=torch.int32, device="xpu"
-        )[None, :].expand([n, -1])
-        * 4
-    )
+    shift = (torch.tensor(unpack_idx[[i % 2 for i in range(k)]],
+                          dtype=torch.int32,
+                          device="xpu")[None, :].expand([n, -1]) * 4)
     dst_data = (data >> shift) & 0xF
 
-    table = torch.tensor(
-            [+0.0,
-             0.5,
-             1.0,
-             1.5,
-             2.0,
-             3.0,
-             4.0,
-             6.0,
-             -0.0,
-             -0.5,
-             -1.0,
-             -1.5,
-             -2.0,
-             -3.0,
-             -4.0,
-             -6.0,
-            ], dtype=dtype, device="xpu")
+    table = torch.tensor([
+        +0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        -0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
+    ],
+                         dtype=dtype,
+                         device="xpu")
     dst_data = table[dst_data]
     expand_scales = scales[:, [i // group_size for i in range(k)]]
-    dst_scale = (expand_scales.to(torch.int32) << 7).to(torch.uint16).view(torch.bfloat16).to(dtype)
+    dst_scale = (expand_scales.to(torch.int32) << 7).to(torch.uint16).view(
+        torch.bfloat16).to(dtype)
     weight_16 = dst_data * dst_scale
     # weight_16 = dst_data
 
@@ -392,15 +368,6 @@ def dequantize_mxfp4(qweight, scales, group_size, dtype):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("has_bias", [False, True])
 def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
-    print("test_xe_grouped_gemm_mxfp4",
-          ", m=", m,
-          ", n=", n,
-          ", k=", k,
-          ", e=", e,
-          ", topk=", topk,
-          ", dtype=", dtype,
-          ", has_bias=", has_bias,
-          )
     seed_everything(7)
     num_experts = e
     group_size = 32
@@ -413,25 +380,24 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
                           device=DEVICE).contiguous()
     ref_A = input_A
     # weight
-    input_B_int4 = (
-        torch.randint(0, 0xff, [num_experts, n, k // 2], device=DEVICE)
-    ).to(torch.uint8)
+    input_B_int4 = (torch.randint(0,
+                                  0xff, [num_experts, n, k // 2],
+                                  device=DEVICE)).to(torch.uint8)
     # scale
-    scale_B = torch.randint(0, 0x7f, (num_experts, n, group_num), dtype=torch.uint8, device="xpu")
+    scale_B = torch.randint(0,
+                            0x7f, (num_experts, n, group_num),
+                            dtype=torch.uint8,
+                            device="xpu")
 
     if has_bias:
         bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE) * 100
     else:
         bias = None
 
-
-    input_B_16 = torch.empty(
-        num_experts, n, k, dtype=dtype, device=DEVICE
-    )
+    input_B_16 = torch.empty(num_experts, n, k, dtype=dtype, device=DEVICE)
     for i in range(num_experts):
-        input_B_16[i] = dequantize_mxfp4(
-            input_B_int4[i], scale_B[i], group_size, dtype
-        )
+        input_B_16[i] = dequantize_mxfp4(input_B_int4[i], scale_B[i],
+                                         group_size, dtype)
 
     # output offset
     num_rows_per_expert = torch.tensor(token_per_group,
@@ -439,7 +405,8 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
                                        device=input_A.device)
     output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
     cutlass_xe_grouped_gemm(input_A, input_B_int4, scale_B, bias, output,
-                            num_rows_per_expert, n, k, num_experts, False, True)
+                            num_rows_per_expert, n, k, num_experts, False,
+                            True)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -459,12 +426,8 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
         pre_token_sum += cur_token_num
     ref = torch.cat(ref, dim=0)
 
-    try:
-        torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
-        print("a and b close enough")
-    except AssertionError as e:
-        print("a and b diffs")
-        raise (e)
+    torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
+
 
 def ref_fused_moe(x, w13, w13_bias, w2, w2_bias, flat_expert_weights,
                   flat_expert_indices, num_per_tok, activation, num_experts):
