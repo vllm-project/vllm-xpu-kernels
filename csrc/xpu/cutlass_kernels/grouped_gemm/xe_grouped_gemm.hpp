@@ -144,8 +144,8 @@ CUTE_DEVICE void MoEGEMM(
         ptr_A_curr_batch, gemm_m, gemm_k);
     auto B_tensor = [&]() {
       if constexpr (is_B_uint4) {
-          return make_moe_tensor<uint4_t, actual_layout_of_B>(
-              reinterpret_cast<uint4_t*>(ptr_B_curr_batch), gemm_n, gemm_k);
+          return make_moe_tensor<int4_t, actual_layout_of_B>(
+              reinterpret_cast<int4_t*>(ptr_B_curr_batch), gemm_n, gemm_k);
       } else if constexpr (is_B_mxfp4) {
           return make_moe_tensor<float_e2m1_t, actual_layout_of_B>(
               reinterpret_cast<float_e2m1_t*>(ptr_B_curr_batch), gemm_n, gemm_k);
@@ -162,15 +162,26 @@ CUTE_DEVICE void MoEGEMM(
       int m_coord = (group_m_id - pre_tiles);
       auto tile_coord = make_coord(m_coord, n_coord, _, 0);
 
-      xe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
-          A_tensor,
-          B_tensor,
-          ptr_Scales_curr_batch,
-          ptr_Bias_curr_batch,
-          D_tensor,
-          tile_coord,
-          mma,
-          group_size);
+      if constexpr (is_B_4bits){
+        xe_gemm_4bits<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
+            A_tensor,
+            B_tensor,
+            ptr_Scales_curr_batch,
+            ptr_Bias_curr_batch,
+            D_tensor,
+            tile_coord,
+            mma,
+            group_size);
+      } else {
+        xe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
+            A_tensor,
+            B_tensor,
+            ptr_Scales_curr_batch,
+            ptr_Bias_curr_batch,
+            D_tensor,
+            tile_coord,
+            mma);
+      }
 
       if (local_id == 0) {
         slm_mem[0] = cutlass::atomicAdd(atomic_buffer, 1);
