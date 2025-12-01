@@ -462,11 +462,11 @@ void cutlass_chunk_prefill_impl(
   if (args.head_size == HEAD_SIZE_LIMIT_0) {
     policy_dispatch<chunk_policy_head64>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_1) {
-    // policy_dispatch<chunk_policy_head128>(queue, cuType, args);
+    policy_dispatch<chunk_policy_head128>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_2) {
-    // policy_dispatch<chunk_policy_head192>(queue, cuType, args);
+    policy_dispatch<chunk_policy_head192>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_3) {
-    // policy_dispatch<chunk_policy_head256>(queue, cuType, args);
+    policy_dispatch<chunk_policy_head256>(queue, cuType, args);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
   }
