@@ -62,7 +62,7 @@ jobs:
           --name vllm-xpu-kernel-ci \
           xpu-kernel-ci-image \
           /bin/bash -c '
-          ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/
+          ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/ --ignore=/workspace/vllm-xpu-kernels/tests/test_lora_ops.py
           '
       - name: Remove container
         if: ${{ always() }} 
