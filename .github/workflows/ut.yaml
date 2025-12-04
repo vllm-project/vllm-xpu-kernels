@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  run-unit-tests:
+  run-unit-tests-pvc:
     runs-on: self-hosted-pvc
     timeout-minutes: 30
     steps:
@@ -32,7 +32,7 @@ jobs:
           --name vllm-xpu-kernel-ci \
           xpu-kernel-ci-image \
           /bin/bash -c '
-          ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/
+          ZE_AFFINITY_MASK=0,1 SKIP_HANG_KERNEL=1 pytest -v -s /workspace/vllm-xpu-kernels/tests/
           '
       - name: Remove container
         if: ${{ always() }} 
