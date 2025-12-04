@@ -250,6 +250,7 @@ class cmake_build_ext(build_ext):
             subprocess.check_call(install_args, cwd=self.build_temp)
 
     def run(self):
+        self.build_temp = "build/temp"
         # First, run the standard build_ext command to compile the extensions
         super().run()
 

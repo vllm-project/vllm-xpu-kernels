@@ -137,6 +137,50 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS}")
   set(SYCL_FIRST_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/csrc/sycl_first.h")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include ${SYCL_FIRST_HEADER}")
+
+  # define SYCL relate COMPILE flags here
+  set(SYCL_FLAGS "")
+  set(SYCL_KERNEL_OPTIONS)
+
+  list(APPEND SYCL_FLAGS "-fsycl")
+
+  set(SYCL_COMPILE_FLAGS ${SYCL_FLAGS})
+
+  set(SYCL_TARGETS_OPTION -fsycl-targets=spir64_gen)
+  set(SYCL_KERNEL_OPTIONS ${SYCL_KERNEL_OPTIONS} ${SYCL_TARGETS_OPTION})
+
+  set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} ${SYCL_KERNEL_OPTIONS})
+
+  # LINK 
+  set(SYCL_LINK_FLAGS "")
+  list(APPEND SYCL_LINK_FLAGS "-fsycl")
+  set(SYCL_DEVICE_LINK_FLAGS ${SYCL_LINK_FLAGS})
+  set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS} ${SYCL_TARGETS_OPTION})
+  # set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS} -fsycl-max-parallel-link-jobs=16)
+  # set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS} --offload-compress)
+
+  set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS} "-Xspirv-translator;-spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,+SPV_INTEL_subgroup_matrix_multiply_accumulate")
+
+  # set AOT options
+  set(AOT_DEVICES "pvc,bmg")
+  set(SYCL_AOT_OPTIONS "-device pvc,bmg")
+
+  # Final build option be like:
+  # icpx -fsycl -fsycl-target=spir64_gen ${SYCL_KERNEL_OPTIONS} -fsycl-host-compiler=gcc -fsycl-host-compiler-options='${CMAKE_HOST_FLAGS}' kernel.cpp -o kernel.o
+
+
+  # Final link option be like:
+  # icpx -fsycl -fsycl-target=spir64_gen -fsycl-link ${SYCL_DEVICE_LINK_FLAGS} -Xs '${SYCL_OFFLINE_COMPILER_FLAGS}' kernel.o -o device-code.o
+  set(FINAL_LINK_OPTIONS "")
+  list(APPEND FINAL_LINK_OPTIONS ${SYCL_DEVICE_LINK_FLAGS})
+  # set(FINAL_LINK_OPTIONS ${FINAL_LINK_OPTIONS} "-Xs ")
+  # set(FINAL_LINK_OPTIONS ${FINAL_LINK_OPTIONS} "-Xsycl-target-backend=spir64_gen -device ${AOT_DEVICES}")
+  list(APPEND FINAL_LINK_OPTIONS -Xsycl-target-backend=spir64_gen "-device pvc,bmg-g21-a0 -internal_options -cl-intel-256-GRF-per-thread")
+  # list(APPEND VLLM_GPU_LINK_FLAGS -Xsycl-target-backend=spir64_gen "-device bmg-g21-a0 -internal_options -cl-intel-256-GRF-per-thread")
+
+  set(VLLM_GPU_LINK_FLAGS ${FINAL_LINK_OPTIONS})
+
+  message(STATUS "Final SYCL link options: ${FINAL_LINK_OPTIONS}")
 endif()
 
 #
@@ -164,7 +208,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   message(STATUS "VLLM_INCLUDE_DIR: ${VLLM_INCLUDE_DIR}")
   set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
   list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
-  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64" "-Xspirv-translator" "-spirv-ext=+SPV_INTEL_split_barrier")
+  # list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64" "-Xspirv-translator" "-spirv-ext=+SPV_INTEL_split_barrier")
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
 
 
@@ -257,7 +301,7 @@ if (FA2_ENABLED)
             csrc/flash_attn/flash_api.cpp
             ${FA2_GEN_SRCS}
         COMPILE_FLAGS ${CUTLASS_GPU_FLAGS}
-        LINK_FLAGS ${CUTLASS_LINK_FLAGS}
+        LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
         ARCHITECTURES ${VLLM_GPU_ARCHES}
         INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
         INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
@@ -285,14 +329,14 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(CMAKE_CXX_COMPILER icpx)
   set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
   list(APPEND VLLM_GPU_FLAGS "-DVLLM_BUILD_XPU_OPS" )
-  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
+  # list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64")
   list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
   # CUTLASS FLAGS
   list(APPEND VLLM_GPU_FLAGS "-O3" "-DNDEBUG")
   list(APPEND VLLM_GPU_FLAGS "-gline-tables-only")
   list(APPEND VLLM_GPU_FLAGS "-fsycl" "-fsycl-targets=spir64_gen" "-ftemplate-backtrace-limit=10")
-  list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64_gen")
-  list(APPEND VLLM_GPU_LINK_FLAGS -Xsycl-target-backend=spir64_gen "-device bmg-g21-a0 -internal_options -cl-intel-256-GRF-per-thread")
+  # list(APPEND VLLM_GPU_LINK_FLAGS "-fsycl" "-fsycl-targets=spir64_gen")
+  # list(APPEND VLLM_GPU_LINK_FLAGS -Xsycl-target-backend=spir64_gen "-device bmg-g21-a0 -internal_options -cl-intel-256-GRF-per-thread")
 endif()
 
 if(ONEDNN_FOUND)
