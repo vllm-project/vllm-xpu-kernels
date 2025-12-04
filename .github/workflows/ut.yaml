@@ -1,4 +1,4 @@
-name: run unit tests on Intel PVC 1100.
+name: run unit tests on Intel GPU.
 
 on: 
   pull_request:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   run-unit-tests:
-    runs-on: self-hosted
+    runs-on: self-hosted-pvc
     timeout-minutes: 30
     steps:
       - name: Checkout
