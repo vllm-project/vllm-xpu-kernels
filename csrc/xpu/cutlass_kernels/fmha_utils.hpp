@@ -42,8 +42,8 @@ struct chunk_policy_head96 {
 };
 
 struct chunk_policy_head128 {
-  using ShapeQK = Shape<_128, _32, _32>;
-  using ShapePV = Shape<_128, _32, _32>;
+  using ShapeQK = Shape<_128, _64, _32>;
+  using ShapePV = Shape<_128, _32, _64>;
   using ShapeOut = Shape<_128, _128>;
   using SubgroupLayoutQK = Layout<Shape<_16, _1, _1>>;
 };

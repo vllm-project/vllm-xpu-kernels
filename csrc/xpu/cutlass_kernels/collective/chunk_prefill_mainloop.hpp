@@ -50,6 +50,17 @@ class XeDefault {};  // Default FMHA mainloop, P in registers.
 
 namespace cutlass::fmha::collective {
 
+static inline void sbarrier_wait() { asm volatile("sbarrier.wait\n"); }
+
+static inline void sbarrier_signal() { asm volatile("sbarrier.signal\n"); }
+
+static inline void gfence() { asm volatile("lsc_fence.ugm.none.group\n"); }
+
+static inline void barrier() {
+  asm volatile("lsc_fence.ugm.none.group\n");
+  asm volatile("barrier\n");
+}
+
 using namespace cute;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -432,7 +443,8 @@ struct FMHAFwdMainloop<
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
 
-      sycl::group_barrier(compat::get_nd_item<1>().get_group());
+      // sycl::group_barrier(compat::get_nd_item<1>().get_group());
+      barrier();
 
       // next paged_idx
       next_page_idx = K + 1;
