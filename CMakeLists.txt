@@ -45,7 +45,7 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21")
 #
 # TODO: we need to align torch version with used in vLLM.
 #
-set(TORCH_SUPPORTED_VERSION_XPU "2.8.0")
+set(TORCH_SUPPORTED_VERSION_XPU "2.9.0")
 
 set(BASIC_KERNELS_ENABLED ON)
 set(FA2_KERNELS_ENABLED ON)
@@ -218,7 +218,8 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
 
   # cutlass compilation flags
   set(CUTLASS_ENABLE_SYCL "ON")
-  # set(DPCPP_SYCL_TARGET "intel_gpu_pvc;intel_gpu_bmg_g21" CACHE STRING "DPC++ SYCL target architectures")
+  # TODO: make this a list 
+  set(DPCPP_SYCL_TARGET "intel_gpu_bmg_g21" CACHE STRING "DPC++ SYCL target architectures")
   set(CMAKE_EXPORT_COMPILE_COMMANDS "ON")
   set(CUTLASS_ENABLE_BENCHMARKS "OFF")
   # disable cuda
