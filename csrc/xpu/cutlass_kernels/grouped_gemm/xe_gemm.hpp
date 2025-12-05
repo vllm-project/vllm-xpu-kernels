@@ -212,6 +212,7 @@ template <
     class GmemTiledCopyA,
     class GmemTiledCopyB,
     class GmemTiledCopyC,
+    int GroupSize,
     class ATensor,
     class BTensor,
     class DTensor,
@@ -225,10 +226,10 @@ CUTE_DEVICE void xe_gemm_4bits(
     const ElementBI* Bias,
     DTensor& C,  // (M,N)
     Coord<int, int, cute::Underscore, int> blk_coord,
-    TiledMMA const& mma,
-    const int32_t group_size) {
+    TiledMMA const& mma) {
   using TA = typename ATensor::element_type;
   using TB = typename BTensor::element_type;
+  static constexpr int group_size = GroupSize;
   static constexpr int sg_local_range = 16;
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   auto wg_m = get<0>(blk_coord);
@@ -250,7 +251,7 @@ CUTE_DEVICE void xe_gemm_4bits(
       local_tile(cC, wg_tile, wg_coord, Step<_1, _1, X>{});  // (BLK_M,BLK_N)
 
   auto copy_a = get_block_2d_copy_A<GmemTiledCopyA>(mma, A);
-  auto copy_b = make_block_2d_copy_B(mma, B);
+  auto copy_b = get_block_2d_copy_B<GmemTiledCopyB>(mma, B);
   auto copy_c = get_block_2d_copy_D<GmemTiledCopyC>(mma, C);
 
   auto thr_mma = mma.get_slice(local_id);

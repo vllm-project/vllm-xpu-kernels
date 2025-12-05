@@ -56,6 +56,7 @@
 #include "cutlass/util/reference/host/tensor_fill.h"
 #include "cutlass/util/sycl_event_manager.hpp"
 
+#include "xe_gemm_policy.hpp"
 #include "xe_grouped_gemm.hpp"
 
 #pragma clang diagnostic ignored "-Wpass-failed"
@@ -71,6 +72,7 @@ class GemmCuteName;
 template <
     char layoutA,
     char layoutB,
+    class policy,
     typename ElementA,
     typename ElementB,
     typename ElementS,
@@ -91,13 +93,9 @@ void MoEGEMMLauncher(
     int32_t* atomic_buffer) {
   using ElementA_non_CV = cutlass::platform::remove_cv_t<ElementA>;
   auto op = XE_DPAS_TT<8, float, ElementA_non_CV>{};
-  static constexpr bool is_B_4bits = std::is_same_v<ElementB, uint8_t>;
-  using WGTile = Shape<_256, _256, _32>;  // 256x256 WG tile size
-  using SGLayout8x4 =
-      Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>;  // 8x4 SG tiling, n-major
-  using SGLayout4x8 =
-      Layout<Shape<_4, _8, _1>, Stride<_8, _1, _0>>;  // 4x8 SG tiling, n-major
-  using SGLayout = conditional_t<is_B_4bits, SGLayout4x8, SGLayout8x4>;
+
+  using WGTile = typename policy::WGTile;
+  using SGLayout = typename policy::SGLayout;
   using MMA = typename TiledMMAHelper<
       MMA_Atom<decltype(op)>,
       Layout<WGTile>,
@@ -117,16 +115,9 @@ void MoEGEMMLauncher(
   syclex::properties kernel_props{
       syclex::sub_group_size<16>, intelex::grf_size<256>};
 
-  static constexpr bool is_B_fp8_type =
-      std::is_same_v<ElementB, cutlass::float_e5m2_t> ||
-      std::is_same_v<ElementB, cutlass::float_e4m3_t>;
-
-  using GmemTiledCopyA = XE_LOAD_2D<16, 32, 32, 16>;
-  using GmemTiledCopyB = std::conditional_t<
-      is_B_fp8_type,
-      XE_LOAD_2D_VNNI<8, 32, 16, 16>,
-      XE_LOAD_2D_VNNI<16, 32, 16, 16>>;
-  using GmemTiledCopyD = XE_STORE_2D<16, 8, 32>;
+  using GmemTiledCopyA = typename policy::GmemTiledCopyA;
+  using GmemTiledCopyB = typename policy::GmemTiledCopyB;
+  using GmemTiledCopyD = typename policy::GmemTiledCopyD;
 
   auto event = stream.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<int32_t, 1> local_mem(sycl::range<1>(1), cgh);
@@ -220,7 +211,7 @@ at::Tensor cutlass_xe_grouped_gemm(
   }
 
   at::Tensor atomic_buffer =
-      at::zeros({static_cast<long>(1)}, ptr_A.options().dtype(at::kInt));
+      at::empty({static_cast<long>(1)}, ptr_A.options().dtype(at::kInt));
 
   if (is_B_int4 || is_B_mxfp4) {
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
@@ -239,10 +230,16 @@ at::Tensor cutlass_xe_grouped_gemm(
     int group_num = ptr_scales->size(2);
     group_size = K / group_num;
 
+    TORCH_CHECK(
+        group_size == 32 || group_size == 64 || group_size == 128 ||
+            group_size == 256,
+        "group_size must be 32, 64, 128 or 256");
+
+    using policy = w4a16_policy;
     if (is_B_int4) {
       if (A_dtype == at::kBFloat16) {
         using scalar_t = bfloat16_t;
-        MoEGEMMLauncher<'R', 'C'>(
+        MoEGEMMLauncher<'R', 'C', policy>(
             dpcpp_queue,
             reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
             reinterpret_cast<uint8_t*>(ptr_B.data_ptr()),
@@ -259,7 +256,7 @@ at::Tensor cutlass_xe_grouped_gemm(
             static_cast<int*>(atomic_buffer.data_ptr()));
       } else if (A_dtype == at::kHalf) {
         using scalar_t = half_t;
-        MoEGEMMLauncher<'R', 'C'>(
+        MoEGEMMLauncher<'R', 'C', policy>(
             dpcpp_queue,
             reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
             reinterpret_cast<uint8_t*>(ptr_B.data_ptr()),
@@ -278,7 +275,7 @@ at::Tensor cutlass_xe_grouped_gemm(
     } else if (is_B_mxfp4) {
       if (A_dtype == at::kBFloat16) {
         using scalar_t = bfloat16_t;
-        MoEGEMMLauncher<'R', 'C'>(
+        MoEGEMMLauncher<'R', 'C', policy>(
             dpcpp_queue,
             reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
             reinterpret_cast<uint8_t*>(ptr_B.data_ptr()),
@@ -295,7 +292,7 @@ at::Tensor cutlass_xe_grouped_gemm(
             static_cast<int*>(atomic_buffer.data_ptr()));
       } else if (A_dtype == at::kHalf) {
         using scalar_t = half_t;
-        MoEGEMMLauncher<'R', 'C'>(
+        MoEGEMMLauncher<'R', 'C', policy>(
             dpcpp_queue,
             reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
             reinterpret_cast<uint8_t*>(ptr_B.data_ptr()),
@@ -320,9 +317,11 @@ at::Tensor cutlass_xe_grouped_gemm(
     TORCH_CHECK(
         ptr_scales->size(0) == num_experts,
         "ptr_scales.size(0) of fp8 must match num_experts");
+
+    using policy = w8a16_policy;
     if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {
       using scalar_t = half_t;
-      MoEGEMMLauncher<'R', 'R'>(
+      MoEGEMMLauncher<'R', 'R', policy>(
           dpcpp_queue,
           reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
           reinterpret_cast<float_e4m3_t*>(ptr_B.data_ptr()),
@@ -341,7 +340,7 @@ at::Tensor cutlass_xe_grouped_gemm(
           static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {
       using scalar_t = half_t;
-      MoEGEMMLauncher<'R', 'R'>(
+      MoEGEMMLauncher<'R', 'R', policy>(
           dpcpp_queue,
           reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
           reinterpret_cast<float_e5m2_t*>(ptr_B.data_ptr()),
@@ -360,7 +359,7 @@ at::Tensor cutlass_xe_grouped_gemm(
           static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {
       using scalar_t = bfloat16_t;
-      MoEGEMMLauncher<'R', 'R'>(
+      MoEGEMMLauncher<'R', 'R', policy>(
           dpcpp_queue,
           reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
           reinterpret_cast<float_e4m3_t*>(ptr_B.data_ptr()),
@@ -379,7 +378,7 @@ at::Tensor cutlass_xe_grouped_gemm(
           static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {
       using scalar_t = bfloat16_t;
-      MoEGEMMLauncher<'R', 'R'>(
+      MoEGEMMLauncher<'R', 'R', policy>(
           dpcpp_queue,
           reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
           reinterpret_cast<float_e5m2_t*>(ptr_B.data_ptr()),
@@ -400,9 +399,10 @@ at::Tensor cutlass_xe_grouped_gemm(
   } else {
     TORCH_CHECK(
         !ptr_scales.has_value(), "w16a16 grouped gemm must not have scales");
+    using policy = w16a16_policy;
     if (A_dtype == at::kBFloat16) {
       using scalar_t = bfloat16_t;
-      MoEGEMMLauncher<'R', 'R'>(
+      MoEGEMMLauncher<'R', 'R', policy>(
           dpcpp_queue,
           reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
           reinterpret_cast<scalar_t*>(ptr_B.data_ptr()),
@@ -419,7 +419,7 @@ at::Tensor cutlass_xe_grouped_gemm(
           static_cast<int*>(atomic_buffer.data_ptr()));
     } else if (A_dtype == at::kHalf) {
       using scalar_t = half_t;
-      MoEGEMMLauncher<'R', 'R'>(
+      MoEGEMMLauncher<'R', 'R', policy>(
           dpcpp_queue,
           reinterpret_cast<scalar_t*>(ptr_A.data_ptr()),
           reinterpret_cast<scalar_t*>(ptr_B.data_ptr()),

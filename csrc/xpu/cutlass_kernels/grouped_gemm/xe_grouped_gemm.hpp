@@ -103,6 +103,15 @@ CUTE_DEVICE void MoEGEMM(
   int group_range = item.get_group_range(1);
   int local_id = item.get_local_linear_id();
 
+  if (group_id == 0 && local_id == 0) {
+    auto atm = sycl::atomic_ref<
+        int,
+        sycl::memory_order::relaxed,
+        sycl::memory_scope::device,
+        sycl::access::address_space::global_space>(atomic_buffer[0]);
+    atm.store(0);
+  }
+
   int pre_rows = 0;
   int pre_tiles = 0;
 
@@ -166,15 +175,25 @@ CUTE_DEVICE void MoEGEMM(
       auto tile_coord = make_coord(m_coord, n_coord, _, 0);
 
       if constexpr (is_B_4bits) {
-        xe_gemm_4bits<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
-            A_tensor,
-            B_tensor,
-            ptr_Scales_curr_batch,
-            ptr_Bias_curr_batch,
-            D_tensor,
-            tile_coord,
-            mma,
-            group_size);
+#define XE_GEMM_4BITS_CALLER(GroupSize)                                     \
+  xe_gemm_4bits<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD, GroupSize>( \
+      A_tensor,                                                             \
+      B_tensor,                                                             \
+      ptr_Scales_curr_batch,                                                \
+      ptr_Bias_curr_batch,                                                  \
+      D_tensor,                                                             \
+      tile_coord,                                                           \
+      mma);
+        if (group_size == 32) {
+          XE_GEMM_4BITS_CALLER(32)
+        } else if (group_size == 64) {
+          XE_GEMM_4BITS_CALLER(64)
+        } else if (group_size == 128) {
+          XE_GEMM_4BITS_CALLER(128)
+        } else if (group_size == 256) {
+          XE_GEMM_4BITS_CALLER(256)
+        }
+#undef XE_GEMM_4BITS_CALLER
       } else {
         xe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
             A_tensor,
