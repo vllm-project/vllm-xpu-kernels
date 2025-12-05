@@ -89,6 +89,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "limit=7.0) "
       "-> ()");
   ops.impl("swigluoai_and_mul", torch::kXPU, &swigluoai_and_mul);
+
+  ops.def(
+      "get_xpu_view_from_cpu_tensor(Tensor cpu_tensor) -> "
+      "Tensor");
+  ops.impl(
+      "get_xpu_view_from_cpu_tensor",
+      torch::kCPU,
+      &get_xpu_view_from_cpu_tensor);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {

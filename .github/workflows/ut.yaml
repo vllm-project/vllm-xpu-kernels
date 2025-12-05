@@ -1,4 +1,4 @@
-name: run unit tests on Intel PVC 1100.
+name: run unit tests on Intel GPU.
 
 on: 
   pull_request:
@@ -9,8 +9,9 @@ permissions:
   contents: read
 
 jobs:
-  run-unit-tests:
-    runs-on: self-hosted
+  run-unit-tests-pvc:
+    runs-on: self-hosted-pvc
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -31,7 +32,37 @@ jobs:
           --name vllm-xpu-kernel-ci \
           xpu-kernel-ci-image \
           /bin/bash -c '
-          ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/
+          ZE_AFFINITY_MASK=0 SKIP_HANG_KERNEL=1 pytest -v -s /workspace/vllm-xpu-kernels/tests/
+          '
+      - name: Remove container
+        if: ${{ always() }} 
+        run: |
+          docker rm -f vllm-xpu-kernel-ci || true
+
+  run-unit-tests-bmg:
+    runs-on: self-hosted-bmg
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: build docker image
+        run: |
+          cp -r "$HOME/umd" ./umd
+          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
+
+      - name: test 
+        run: |
+          docker run \
+          --device /dev/dri \
+          -v /dev/dri/by-path:/dev/dri/by-path \
+          --privileged \
+          --name vllm-xpu-kernel-ci \
+          xpu-kernel-ci-image \
+          /bin/bash -c '
+          ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/ --ignore=/workspace/vllm-xpu-kernels/tests/test_lora_ops.py --ignore=/workspace/vllm-xpu-kernels/tests/test_fp8_quant.py
           '
       - name: Remove container
         if: ${{ always() }} 

@@ -51,8 +51,8 @@ class rms_norm_kernel {
 
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
          idx += item_ct1.get_local_range(2)) {
-      float x = (float)input[item_ct1.get_group(2) * hidden_size + idx];
-      out[item_ct1.get_group(2) * input_stride + idx] =
+      float x = (float)input[item_ct1.get_group(2) * input_stride + idx];
+      out[item_ct1.get_group(2) * hidden_size + idx] =
           ((scalar_t)(x * (*s_variance_ptr))) * weight[idx];
     }
   }
