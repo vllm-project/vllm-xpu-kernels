@@ -153,6 +153,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(SYCL_KERNEL_OPTIONS ${SYCL_KERNEL_OPTIONS} ${SYCL_TARGETS_OPTION})
   set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} ${SYCL_KERNEL_OPTIONS})
 
+  set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} "-O3" "-DNDEBUG")
   # Final build option be like:
   # icpx -fsycl -fsycl-target=spir64_gen ${SYCL_KERNEL_OPTIONS} -fsycl-host-compiler=gcc -fsycl-host-compiler-options='${CMAKE_HOST_FLAGS}' kernel.cpp -o kernel.o
   set(VLLM_GPU_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS})
@@ -335,10 +336,8 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     set(CMAKE_CXX_COMPILER icpx)
     set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
     list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
-    # CUTLASS FLAGS
-    list(APPEND VLLM_GPU_FLAGS "-O3" "-DNDEBUG")
-    list(APPEND VLLM_GPU_FLAGS "-gline-tables-only")
-    list(APPEND VLLM_GPU_FLAGS "-fsycl" "-fsycl-targets=spir64_gen" "-ftemplate-backtrace-limit=10")
+    # TODO: check if we need this flags 
+    #list(APPEND VLLM_GPU_FLAGS "-gline-tables-only")
   endif()
 
   if(ONEDNN_FOUND)
