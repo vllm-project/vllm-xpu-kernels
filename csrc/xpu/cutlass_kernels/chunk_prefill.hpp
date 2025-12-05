@@ -148,7 +148,9 @@ struct KernelLauncher {
          static_cast<int*>(args.block_table),
          args.block_size,
          args.max_blocks_per_seq,
-         args.total_seqlen_k},
+         args.total_seqlen_k,
+         args.window_size_left,
+         args.window_size_right},
         {},
         hw_info};
 
@@ -231,14 +233,10 @@ struct FMHAConfig {
       decltype(cutlass::fmha::collective::get_sg_layout_pv(SubgroupLayoutQK{})),
       SubgroupLayoutPV_>;
 
-  template <
-      class Scheduler,
-      bool VarLen,
-      bool Paged,
-      bool Causal,
-      bool Local,
-      bool Sink>
+  template <class Scheduler, bool Causal, bool Local, bool Sink>
   static void run(sycl::queue& queue, const chunk_prefill_args_t& args) {
+    constexpr bool VarLen = true;
+    constexpr bool Paged = true;
     cutlass::KernelHardwareInfo hw_info;
 
     using ProblemShapeType = cutlass::fmha::kernel::FMHAProblemShape<VarLen>;
@@ -273,6 +271,7 @@ struct FMHAConfig {
     using CollectiveMainloop = cutlass::fmha::collective::FMHAFwdMainloop<
         MainloopDispatchPolicy,
         Causal,
+        Local,
         Paged,
         TiledMMAQK,
         TiledMMAPV,
@@ -338,13 +337,7 @@ void policy_dispatch(
         half_t,
         half_t>::
         kernel_dispatch(
-            queue,
-            args,
-            true,  // args.is_varlen,
-            true,  // args.is_paged,
-            args.is_causal,
-            false,  // args.is_local,
-            args.is_sink);
+            queue, args, args.is_causal, args.is_local, args.is_sink);
   } else {
     return FMHAConfig<
         typename chunk_policy::ShapeQK,
@@ -354,13 +347,7 @@ void policy_dispatch(
         void,
         PipelineStages>::
         kernel_dispatch(
-            queue,
-            args,
-            true,  // args.is_varlen,
-            true,  // args.is_paged,
-            args.is_causal,
-            false,  // args.is_local,
-            args.is_sink);
+            queue, args, args.is_causal, args.is_local, args.is_sink);
   }
 }
 
@@ -418,6 +405,10 @@ void cutlass_chunk_prefill_impl(
     window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
     window_size_right =
         window_size_right == -1 ? max_seqlen_k : window_size_right;
+    if (is_causal) {
+      window_size_right = 0;
+      is_causal = false;
+    }
   }
 
   chunk_prefill_args_t args = {

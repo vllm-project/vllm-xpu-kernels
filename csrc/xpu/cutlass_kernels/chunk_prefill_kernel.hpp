@@ -115,6 +115,7 @@ class XeFMHAFwdKernel {
   // Template Features
   static constexpr bool PagedKV = CollectiveMainloop::PagedKV;
   static constexpr bool CausalMask = CollectiveMainloop::CausalMask;
+  static constexpr bool LocalMask = CollectiveMainloop::LocalMask;
   static constexpr bool Sink = CollectiveEpilogue::Sink;
   using ElementSink = typename CollectiveEpilogue::ElementSink;
 
@@ -246,7 +247,7 @@ class XeFMHAFwdKernel {
       auto [seq_len_qo, seq_len_kv] = sequence_length_shape;
       if (blk_q * get<0>(TileShapeQK{}) >= seq_len_qo) continue;
 
-      auto offset = cute::min(seq_len_qo, seq_len_kv);
+      auto offset = seq_len_qo;
       auto discard_seq_coord = seq_len_qo - offset;
       auto full_tile_offset = seq_len_kv - offset;
       int seq_coord =
@@ -256,13 +257,25 @@ class XeFMHAFwdKernel {
       // calc sg level seq_len_kv
       const int seq_len =
           CausalMask
-              ? full_tile_offset +
-                    cute::min(seq_len_kv, seq_coord - discard_seq_coord) +
-                    q_sg_tile
+              ? LocalMask
+                    ? cute::min(
+                          seq_len_kv,
+                          full_tile_offset + seq_coord + q_sg_tile +
+                              params.mainloop.local_right)
+                    : cute::min(
+                          seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
               : seq_len_kv;
+      const int k_block0 =
+          LocalMask
+              ? cute::max(
+                    seq_coord + full_tile_offset - params.mainloop.local_left,
+                    0) /
+                    get<1>(TileShapeQK{})
+              : 0;
       const int k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
-      const int k_causal_blocks =
-          CausalMask ? (seq_len - q_sg_tile) / get<1>(TileShapeQK{}) : 0;
+      const int k_blocks_causal =
+          CausalMask ? (seq_coord + full_tile_offset) / get<1>(TileShapeQK{})
+                     : 0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       if constexpr (is_var_len) {
@@ -330,9 +343,9 @@ class XeFMHAFwdKernel {
           tA_sum,
           blk_qv,
           idx_b,
-          0,
+          k_block0,
           k_blocks,
-          k_causal_blocks,
+          k_blocks_causal,
           thr_id,
           seq_len,
           full_tile_offset,

@@ -28,8 +28,8 @@ inline CutlassType aten_to_Cutlass_dtype(const at::Tensor& input) {
 
 using namespace cute;
 struct chunk_policy_head64 {
-  using ShapeQK = Shape<_128, _64, _32>;
-  using ShapePV = Shape<_128, _32, _64>;
+  using ShapeQK = Shape<_128, _32, _32>;
+  using ShapePV = Shape<_128, _32, _32>;
   using ShapeOut = Shape<_128, _64>;
   using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
 };
@@ -49,15 +49,15 @@ struct chunk_policy_head128 {
 };
 
 struct chunk_policy_head192 {
-  using ShapeQK = Shape<_256, _64, _32>;
-  using ShapePV = Shape<_256, _32, _64>;
+  using ShapeQK = Shape<_256, _32, _32>;
+  using ShapePV = Shape<_256, _32, _32>;
   using ShapeOut = Shape<_256, _192>;
   using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };
 
 struct chunk_policy_head256 {
-  using ShapeQK = Shape<_256, _64, _32>;
-  using ShapePV = Shape<_256, _32, _64>;
+  using ShapeQK = Shape<_256, _32, _32>;
+  using ShapePV = Shape<_256, _32, _32>;
   using ShapeOut = Shape<_256, _256>;
   using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };

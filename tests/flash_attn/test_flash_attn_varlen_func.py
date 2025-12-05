@@ -18,7 +18,7 @@ QDTYPES = [None]
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
 SOFT_CAPS = [None]
-SLIDING_WINDOWS = [(-1, 2), (2, -1), (11, 3), (-1, -1)]
+SLIDING_WINDOWS = [(-1, 127), (127, -1), (127, 127), (-1, -1)]
 SINK = [False, True]
 CASUAL = [False, True]
 
@@ -111,7 +111,7 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("window_size", [(-1, -1)])
+@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("soft_cap", SOFT_CAPS)
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
@@ -221,7 +221,7 @@ def test_varlen_with_paged_kv(
                                 sink=sink,
                                 window_size_left=window_size[0],
                                 window_size_right=window_size[1])
-    atol, rtol = 1.5e-2, 1e-2
+    atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \

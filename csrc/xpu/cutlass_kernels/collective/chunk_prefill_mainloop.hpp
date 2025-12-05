@@ -50,6 +50,17 @@ class XeDefault {};  // Default FMHA mainloop, P in registers.
 
 namespace cutlass::fmha::collective {
 
+static inline void sbarrier_wait() { asm volatile("sbarrier.wait\n"); }
+
+static inline void sbarrier_signal() { asm volatile("sbarrier.signal\n"); }
+
+static inline void gfence() { asm volatile("lsc_fence.ugm.none.group\n"); }
+
+static inline void barrier() {
+  asm volatile("lsc_fence.ugm.none.group\n");
+  asm volatile("barrier\n");
+}
+
 using namespace cute;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -57,6 +68,7 @@ using namespace cute;
 template <
     class DispatchPolicy_,
     bool CausalMask_,
+    bool LocalMask_,
     bool PagedKV_,
     class TiledMMAQK_,  // Tiling for Q*K GEMM
     class TiledMMAPV_,  // Tiling for P*V GEMM
@@ -78,6 +90,7 @@ struct FMHAFwdMainloop {
 template <
     int Stages,
     bool CausalMask_,
+    bool LocalMask_,
     bool PagedKV_,
     class TiledMMAQK_,
     class TiledMMAPV_,
@@ -91,6 +104,7 @@ template <
 struct FMHAFwdMainloop<
     XeDefault<Stages>,
     CausalMask_,
+    LocalMask_,
     PagedKV_,
     TiledMMAQK_,
     TiledMMAPV_,
@@ -165,6 +179,7 @@ struct FMHAFwdMainloop<
   using ElementA = typename TiledMMAPV::ValTypeD;
 
   static constexpr bool CausalMask = CausalMask_;
+  static constexpr bool LocalMask = LocalMask_;
   static constexpr bool PagedKV = PagedKV_;
 
   // User-facing arguments
@@ -176,6 +191,8 @@ struct FMHAFwdMainloop<
     int page_size;
     int max_pages_per_seq;
     int total_seqlen_kv;
+    // Local Mask
+    int local_left, local_right;
   };
 
   // Kernel-facing parameters
@@ -201,7 +218,9 @@ struct FMHAFwdMainloop<
         args.ptr_page_table,
         args.page_size,
         args.max_pages_per_seq,
-        args.total_seqlen_kv};
+        args.total_seqlen_kv,
+        args.local_left,
+        args.local_right};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -312,27 +331,28 @@ struct FMHAFwdMainloop<
 
     // PagedKV
     int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
-    int page_idx, next_page_idx;
+    int page_idx = blk_k0, next_page_idx;
     int b_offset = idx_b * params.max_pages_per_seq;
     if constexpr (PagedKV) {
-      page_idx = params.ptr_page_table[b_offset] * tiles_per_page;
+      int page_local_idx = page_idx * get<1>(TileShapeQK{}) / params.page_size;
+      page_idx =
+          params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page +
+          page_idx % tiles_per_page;
     }
 
     /* Initialization steps for first block: Q/K prefetch, O init */
     /* TODO: limit D prefetch for large head size, and reorder K prefetches */
-    if (blk_k0 == 0) {
-      for (int D = 0; D < size<3>(pQgQ); D++) {
-        prefetch(prefetch_q, pQgQ(_, _, _, D));
-      }
-
-      for (int D = 0; D < size<4>(pKgK); D++) {
-        prefetch(prefetch_k, pKgK(_, _, _, page_idx, D));
-      }
-
-      clear(tArA);
-      fill(tA_max, cutlass::platform::numeric_limits<ElementA>::lowest());
-      clear(tA_sum);
+    for (int D = 0; D < size<3>(pQgQ); D++) {
+      prefetch(prefetch_q, pQgQ(_, _, _, D));
     }
+
+    for (int D = 0; D < size<4>(pKgK); D++) {
+      prefetch(prefetch_k, pKgK(_, _, _, page_idx, D));
+    }
+
+    clear(tArA);
+    fill(tA_max, cutlass::platform::numeric_limits<ElementA>::lowest());
+    clear(tA_sum);
 
     /* Check if */
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
@@ -379,6 +399,23 @@ struct FMHAFwdMainloop<
           }
         }
       }
+      /* Local masking */
+      if constexpr (LocalMask) {
+        Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
+        Tensor gP = local_tile(
+            cPgP, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
+        auto cS_thread = thr_mma_qk.partition_C(gP);
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS.size(); ++i) {
+          int row_idx = get<0>(cS_thread(i)) - discard_seq_coord;
+          int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
+          bool left_mask = col_idx < row_idx - params.local_left;
+          bool right_mask = col_idx > row_idx + params.local_right;
+          if (left_mask || right_mask) {
+            tSrS(i) = ElementS(-INFINITY);
+          }
+        }
+      }
       /* k masking for remainder tiles */
       if (check_remainder_k && K == blk_k1 - 1) {
         FragSCol k_rem_mask;
@@ -406,7 +443,8 @@ struct FMHAFwdMainloop<
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
 
-      sycl::group_barrier(compat::get_nd_item<1>().get_group());
+      // sycl::group_barrier(compat::get_nd_item<1>().get_group());
+      barrier();
 
       // next paged_idx
       next_page_idx = K + 1;
@@ -456,9 +494,10 @@ struct FMHAFwdMainloop<
 
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < tS.size(); i++)
+    for (int i = 0; i < tS.size(); i++) {
       tS(i) = sycl::native::exp2(
           params.scale * tS(i) - broadcast<0>(tS_max, tS, i));
+    }
 
     /* Rescale existing S sums and O accumulator */
     if (!first_block) {
