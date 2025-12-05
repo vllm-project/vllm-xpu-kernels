@@ -18,7 +18,7 @@ QDTYPES = [None]
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
 SOFT_CAPS = [None]
-SLIDING_WINDOWS = [(-1, 2), (2, -1), (11, 3), (-1, -1)]
+SLIDING_WINDOWS = [(-1, 127), (127, -1), (127, 127), (-1, -1)]
 SINK = [False, True]
 CASUAL = [False, True]
 
@@ -221,7 +221,7 @@ def test_varlen_with_paged_kv(
                                 sink=sink,
                                 window_size_left=window_size[0],
                                 window_size_right=window_size[1])
-    atol, rtol = 1.5e-2, 1e-2
+    atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \

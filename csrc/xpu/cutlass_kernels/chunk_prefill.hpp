@@ -405,6 +405,10 @@ void cutlass_chunk_prefill_impl(
     window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
     window_size_right =
         window_size_right == -1 ? max_seqlen_k : window_size_right;
+    if (is_causal) {
+      window_size_right = 0;
+      is_causal = false;
+    }
   }
 
   chunk_prefill_args_t args = {
