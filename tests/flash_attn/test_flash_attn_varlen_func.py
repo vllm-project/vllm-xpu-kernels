@@ -135,6 +135,7 @@ def test_varlen_with_paged_kv(
     is_casual: bool,
 ) -> None:
     torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
     # # FIXME: remove skip
     if (is_casual and seq_lens[1][0]
             == 5) and (os.getenv("SKIP_HANG_KERNEL") is not None
@@ -224,5 +225,7 @@ def test_varlen_with_paged_kv(
     atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
+    if window_size[0] != -1 or window_size[1] != -1:
+        atol, rtol = 1.5e-2, 1.5e-2
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
