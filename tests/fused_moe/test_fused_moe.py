@@ -87,6 +87,17 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     torch.testing.assert_close(output, ref, rtol=2e-2, atol=1e-2)
 
 
+def init_rows_for_experts(tokens, topk, num_rows_per_expert):
+    if num_rows_per_expert.shape[0] == 1:
+        num_rows_per_expert[0] = tokens * topk
+        return
+    n_experts = num_rows_per_expert.numel()
+    rand = torch.rand(tokens, n_experts, device=num_rows_per_expert.device)
+    topk_idx = torch.topk(rand, topk, dim=1).indices  # [tokens, topk]
+    flat_idx = topk_idx.flatten()
+    num_rows_per_expert += torch.bincount(flat_idx, minlength=n_experts)
+
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -95,11 +106,9 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
 def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     seed_everything(7)
     num_experts = e
-    token_per_group = random_partition(e, m * topk)
-    assert (len(token_per_group) == e)
+    total_m = m * topk
     # input
-    input_A = torch.randn((sum(token_per_group), k),
-                          dtype=dtype,
+    input_A = torch.randn((total_m, k), dtype=dtype,
                           device=DEVICE).contiguous()
     ref_A = input_A
     # weight
@@ -110,18 +119,21 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
         bias = None
 
     # output offset
-    num_rows_per_expert = torch.tensor(token_per_group,
-                                       dtype=torch.int32,
-                                       device=input_A.device)
-    output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
+    num_rows_per_expert = torch.zeros(num_experts,
+                                      device=DEVICE,
+                                      dtype=torch.int32)
+    init_rows_for_experts(m, topk, num_rows_per_expert)
+    output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
+
     cutlass_xe_grouped_gemm(input_A, input_B, None, bias, output,
                             num_rows_per_expert, n, k, num_experts, False,
                             False)
+
     # ref gg
     ref = []
     pre_token_sum = 0
     for i in range(num_experts):
-        cur_token_num = token_per_group[i]
+        cur_token_num = num_rows_per_expert[i]
         if cur_token_num == 0:
             continue
         input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(
@@ -146,11 +158,9 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
 def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     seed_everything(7)
     num_experts = e
-    token_per_group = random_partition(e, m * topk)
-    assert (len(token_per_group) == e)
+    total_m = m * topk
     # input
-    input_A = torch.randn((sum(token_per_group), k),
-                          dtype=dtype,
+    input_A = torch.randn((total_m, k), dtype=dtype,
                           device=DEVICE).contiguous()
     ref_A = input_A
     # weight
@@ -176,10 +186,12 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
         input_B_dequatize[i] = input_B_fp8[i].to(dtype) * scale_B[i]
 
     # output offset
-    num_rows_per_expert = torch.tensor(token_per_group,
-                                       dtype=torch.int32,
-                                       device=input_A.device)
-    output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
+    num_rows_per_expert = torch.zeros(num_experts,
+                                      device=DEVICE,
+                                      dtype=torch.int32)
+    init_rows_for_experts(m, topk, num_rows_per_expert)
+    output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
+
     cutlass_xe_grouped_gemm(input_A, input_B_fp8, scale_B, bias, output,
                             num_rows_per_expert, n, k, num_experts, False,
                             False)
@@ -187,7 +199,7 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     ref = []
     pre_token_sum = 0
     for i in range(num_experts):
-        cur_token_num = token_per_group[i]
+        cur_token_num = num_rows_per_expert[i]
         if cur_token_num == 0:
             continue
         # mma uses fp32 as calculate dtype
@@ -217,7 +229,6 @@ def dequantize_uint4(qweight, scales, group_size):
     dst_data = (data >> shift) & 0xF
     expand_scales = scales[:, [i // group_size for i in range(k)]]
     weight_16 = (dst_data - 8) * expand_scales
-    # weight_16 = dst_data * expand_scales
 
     return weight_16.to(scales.dtype)
 
@@ -261,11 +272,9 @@ def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
     num_experts = e
     group_size = 128
     group_num = k // group_size
-    token_per_group = random_partition(e, m * topk)
-    assert (len(token_per_group) == e)
+    total_m = m * topk
     # input
-    input_A = torch.randn((sum(token_per_group), k),
-                          dtype=dtype,
+    input_A = torch.randn((total_m, k), dtype=dtype,
                           device=DEVICE).contiguous()
     ref_A = input_A
     # weight
@@ -292,10 +301,12 @@ def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
         input_B_int4[i] = implement_zp(input_B_uint4[i], None)
 
     # output offset
-    num_rows_per_expert = torch.tensor(token_per_group,
-                                       dtype=torch.int32,
-                                       device=input_A.device)
-    output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
+    num_rows_per_expert = torch.zeros(num_experts,
+                                      device=DEVICE,
+                                      dtype=torch.int32)
+    init_rows_for_experts(m, topk, num_rows_per_expert)
+
+    output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
     cutlass_xe_grouped_gemm(input_A, input_B_int4, scale_B, bias, output,
                             num_rows_per_expert, n, k, num_experts, True,
                             False)
@@ -303,7 +314,7 @@ def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
     ref = []
     pre_token_sum = 0
     for i in range(num_experts):
-        cur_token_num = token_per_group[i]
+        cur_token_num = num_rows_per_expert[i]
         if cur_token_num == 0:
             continue
         # mma uses fp32 as calculate dtype
@@ -372,11 +383,9 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
     num_experts = e
     group_size = 32
     group_num = k // group_size
-    token_per_group = random_partition(e, m * topk)
-    assert (len(token_per_group) == e)
+    total_m = m * topk
     # input
-    input_A = torch.randn((sum(token_per_group), k),
-                          dtype=dtype,
+    input_A = torch.randn((total_m, k), dtype=dtype,
                           device=DEVICE).contiguous()
     ref_A = input_A
     # weight
@@ -400,10 +409,12 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
                                          group_size, dtype)
 
     # output offset
-    num_rows_per_expert = torch.tensor(token_per_group,
-                                       dtype=torch.int32,
-                                       device=input_A.device)
-    output = torch.empty((sum(token_per_group), n), dtype=dtype, device=DEVICE)
+    num_rows_per_expert = torch.zeros(num_experts,
+                                      device=DEVICE,
+                                      dtype=torch.int32)
+    init_rows_for_experts(m, topk, num_rows_per_expert)
+
+    output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
     cutlass_xe_grouped_gemm(input_A, input_B_int4, scale_B, bias, output,
                             num_rows_per_expert, n, k, num_experts, False,
                             True)
@@ -411,7 +422,7 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
     ref = []
     pre_token_sum = 0
     for i in range(num_experts):
-        cur_token_num = token_per_group[i]
+        cur_token_num = num_rows_per_expert[i]
         if cur_token_num == 0:
             continue
         # mma uses fp32 as calculate dtype

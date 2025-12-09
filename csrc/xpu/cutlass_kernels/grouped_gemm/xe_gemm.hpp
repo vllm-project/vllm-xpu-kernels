@@ -109,10 +109,15 @@ CUTE_DEVICE void xe_gemm(
   Tensor tBgB = thr_copy_b.partition_S(gB);
 
   /* Partition C */
-  auto thr_copy_c = copy_c.get_slice(local_id);
+  Tensor tCgC = thr_mma.partition_C(gC);
   SubgroupTensor tCrC = thr_mma.partition_sg_fragment_C(gC);
-  SubgroupTensor tCrC_final = thr_copy_c.partition_sg_fragment_S(gC);
-  auto tCgC = thr_copy_c.partition_D(gC);
+
+  using TD = typename DTensor::element_type;
+  TD tCrC_final_frag[tCrC.size()];
+  Tensor tCrC_final_tensor =
+      make_tensor(make_rmem_ptr(tCrC_final_frag), tCrC.layout());
+  SubgroupTensor tCrC_final_sg_tensor =
+      make_subgroup_tensor(tCrC_final_tensor, tCrC.tv_layout());
 
   auto prefetch_a = make_block_2d_prefetch(copy_a);
   auto prefetch_b = make_block_2d_prefetch(copy_b);
@@ -129,8 +134,6 @@ CUTE_DEVICE void xe_gemm(
 
   int k_tile_count = ceil_div(shape<1>(A), get<2>(wg_tile));
   int k_tile_prefetch = 0;
-
-  TA scales[get<1>(tCrB.shape()) * 2];
 
   clear(tCrC);
 
@@ -204,8 +207,8 @@ CUTE_DEVICE void xe_gemm(
     }
   }
 
-  reorder(tCrC, tCrC_final);
-  copy(copy_c, tCrC_final, tCgC);
+  reorder(tCrC, tCrC_final_sg_tensor);
+  copy(copy_c, tCrC_final_sg_tensor, tCgC);
 }
 
 template <
@@ -268,10 +271,15 @@ CUTE_DEVICE void xe_gemm_4bits(
   Tensor tBgB = thr_copy_b.partition_S(gB);
 
   /* Partition C */
-  auto thr_copy_c = copy_c.get_slice(local_id);
+  Tensor tCgC = thr_mma.partition_C(gC);
   SubgroupTensor tCrC = thr_mma.partition_sg_fragment_C(gC);
-  SubgroupTensor tCrC_final = thr_copy_c.partition_sg_fragment_S(gC);
-  auto tCgC = thr_copy_c.partition_D(gC);
+
+  using TD = typename DTensor::element_type;
+  TD tCrC_final_frag[tCrC.size()];
+  Tensor tCrC_final_tensor =
+      make_tensor(make_rmem_ptr(tCrC_final_frag), tCrC.layout());
+  SubgroupTensor tCrC_final_sg_tensor =
+      make_subgroup_tensor(tCrC_final_tensor, tCrC.tv_layout());
 
   auto prefetch_a = make_block_2d_prefetch(copy_a);
   auto prefetch_b = make_block_2d_prefetch(copy_b);
@@ -314,6 +322,8 @@ CUTE_DEVICE void xe_gemm_4bits(
   int group_num = get<1>(A.shape()) / group_size;
   int x_idx = sg_local_id / channel_num;
 
+  TA scales[thr_N * channel_num];
+
   clear(tCrC);
 
   using ElementB = typename BTensor::element_type;
@@ -333,6 +343,34 @@ CUTE_DEVICE void xe_gemm_4bits(
     copy(copy_a, tAgA(_, _, _, k_tile), tArA);
     copy(copy_b, tBgB(_, _, _, k_tile), tBrB);
 
+    if (k_tile * tile_k % group_size == 0) {
+      int group_idx = (k_tile * tile_k) / group_size;
+
+      CUTLASS_PRAGMA_UNROLL
+      for (int n = 0; n < thr_N; ++n) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int c = 0; c < channel_num; ++c) {
+          int real_idx = x_idx + c * (sg_local_range / channel_num);
+          int sg_local_n = n * sg_local_range + real_idx;
+          TA scale;
+          if constexpr (std::is_same_v<TB, int4_t>) {
+            scale = Scales
+                [(n_tile_start + n_sg_start + sg_local_n) * group_num +
+                 group_idx];
+          } else if constexpr (std::is_same_v<TB, float_e2m1_t>) {
+            uint32_t scale_u32 =
+                Scales
+                    [(n_tile_start + n_sg_start + sg_local_n) * group_num +
+                     group_idx]
+                << 23;
+            scale = static_cast<TA>(reinterpret_cast<float&>(scale_u32));
+          }
+
+          scales[n * channel_num + c] = scale;
+        }
+      }
+    }
+
     if (k_tile_prefetch < k_tile_count) {
       prefetch(prefetch_a, pAgA(_, _, _, k_tile_prefetch));
       prefetch(prefetch_b, pBgB(_, _, _, k_tile_prefetch));
@@ -341,31 +379,13 @@ CUTE_DEVICE void xe_gemm_4bits(
     reorder(tArA, tCrA);
     reorder(tBrB, tCrB);
 
-    int group_idx = (k_tile * tile_k) / group_size;
-
     CUTLASS_PRAGMA_UNROLL
     for (int n = 0; n < thr_N; ++n) {
       CUTLASS_PRAGMA_UNROLL
       for (int c = 0; c < channel_num; ++c) {
-        int real_idx = x_idx + c * (sg_local_range / channel_num);
-        int sg_local_n = n * sg_local_range + real_idx;
-        TA scale;
-        if constexpr (std::is_same_v<TB, int4_t>) {
-          scale = Scales
-              [(n_tile_start + n_sg_start + sg_local_n) * group_num +
-               group_idx];
-        } else if constexpr (std::is_same_v<TB, float_e2m1_t>) {
-          uint32_t scale_u32 =
-              Scales
-                  [(n_tile_start + n_sg_start + sg_local_n) * group_num +
-                   group_idx]
-              << 23;
-          scale = static_cast<TA>(reinterpret_cast<float&>(scale_u32));
-        }
-
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < tCrB.size() / thr_N / channel_num; ++i) {
-          tCrB(cute::tuple(c, _), n, _)[i] *= scale;
+          tCrB(cute::tuple(c, _), n, _)[i] *= scales[n * channel_num + c];
         }
       }
     }
@@ -387,8 +407,8 @@ CUTE_DEVICE void xe_gemm_4bits(
     }
   }
 
-  reorder(tCrC, tCrC_final);
-  copy(copy_c, tCrC_final, tCgC);
+  reorder(tCrC, tCrC_final_sg_tensor);
+  copy(copy_c, tCrC_final_sg_tensor, tCgC);
 }
 
 }  // namespace MoE

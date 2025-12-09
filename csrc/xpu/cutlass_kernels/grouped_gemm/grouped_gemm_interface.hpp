@@ -66,7 +66,7 @@ namespace MoE {
 using namespace cute;
 
 // type tag to define a unique sycl kernel name
-template <typename, typename, typename, typename, char, char>
+template <typename, typename, typename, typename, char, char, class>
 class GemmCuteName;
 
 template <
@@ -128,8 +128,14 @@ void MoEGEMMLauncher(
 
   auto event = stream.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<int32_t, 1> local_mem(sycl::range<1>(1), cgh);
-    cgh.parallel_for<
-        GemmCuteName<ElementA, ElementB, ElementS, ElementD, layoutA, layoutB>>(
+    cgh.parallel_for<GemmCuteName<
+        ElementA,
+        ElementB,
+        ElementS,
+        ElementD,
+        layoutA,
+        layoutB,
+        policy>>(
         sycl::nd_range<3>{global * local, local}, kernel_props, [=](auto) {
           MoE::MoEGEMM<
               GmemTiledCopyA,
@@ -205,6 +211,7 @@ at::Tensor cutlass_xe_grouped_gemm(
   int D_total_M = ptr_D.size(0);
   int D_N = ptr_D.size(1);
   int group_size = -1;
+  int A_avg_M = A_total_M / num_experts;
 
   TORCH_CHECK(B_E == num_experts, "ptr_B.size(0) must match num_experts");
   TORCH_CHECK(A_total_M == D_total_M, "ptr_A.size(0) must match ptr_D.size(0)");
@@ -261,24 +268,36 @@ at::Tensor cutlass_xe_grouped_gemm(
             group_size == 256,
         "group_size must be 32, 64, 128 or 256");
 
-    using policy = w4a16_policy;
-    if (is_B_int4) {
-      if (A_dtype == at::kBFloat16) {
-        using scalar_t = bfloat16_t;
-        MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, scalar_t);
-      } else if (A_dtype == at::kHalf) {
-        using scalar_t = half_t;
-        MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, scalar_t);
-      }
-    } else if (is_B_mxfp4) {
-      if (A_dtype == at::kBFloat16) {
-        using scalar_t = bfloat16_t;
-        MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, uint8_t);
-      } else if (A_dtype == at::kHalf) {
-        using scalar_t = half_t;
-        MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, uint8_t);
-      }
+#define W4A16LauncherCallER(policy)                                         \
+  if (is_B_int4) {                                                          \
+    if (A_dtype == at::kBFloat16) {                                         \
+      using scalar_t = bfloat16_t;                                          \
+      MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, scalar_t); \
+    } else if (A_dtype == at::kHalf) {                                      \
+      using scalar_t = half_t;                                              \
+      MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, scalar_t); \
+    }                                                                       \
+  } else if (is_B_mxfp4) {                                                  \
+    if (A_dtype == at::kBFloat16) {                                         \
+      using scalar_t = bfloat16_t;                                          \
+      MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, uint8_t);  \
+    } else if (A_dtype == at::kHalf) {                                      \
+      using scalar_t = half_t;                                              \
+      MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, uint8_t);  \
+    }                                                                       \
+  }
+
+    if (A_avg_M <= 32) {
+      using policy = w4a16_policy_m_16;
+      W4A16LauncherCallER(policy);
+    } else if (A_avg_M <= 128) {
+      using policy = w4a16_policy_m_32;
+      W4A16LauncherCallER(policy);
+    } else {
+      using policy = w4a16_policy;
+      W4A16LauncherCallER(policy);
     }
+#undef W4A16LauncherCallER
   } else if (is_weight_fp8) {
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
     TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");
@@ -288,31 +307,53 @@ at::Tensor cutlass_xe_grouped_gemm(
         ptr_scales->size(0) == num_experts,
         "ptr_scales.size(0) of fp8 must match num_experts");
 
-    using policy = w8a16_policy;
-    if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {
-      using scalar_t = half_t;
-      MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, scalar_t);
-    } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {
-      using scalar_t = half_t;
-      MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, scalar_t);
-    } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {
-      using scalar_t = bfloat16_t;
-      MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, scalar_t);
-    } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {
-      using scalar_t = bfloat16_t;
-      MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, scalar_t);
+#define W8A16LauncherCallER(policy)                                            \
+  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {                 \
+    using scalar_t = half_t;                                                   \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, scalar_t); \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {            \
+    using scalar_t = half_t;                                                   \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, scalar_t); \
+  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {      \
+    using scalar_t = bfloat16_t;                                               \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, scalar_t); \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {        \
+    using scalar_t = bfloat16_t;                                               \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, scalar_t); \
+  }
+
+    if (A_avg_M <= 32) {
+      using policy = w8a16_policy_m_16;
+      W8A16LauncherCallER(policy);
+    } else if (A_avg_M <= 128) {
+      using policy = w8a16_policy_m_32;
+      W8A16LauncherCallER(policy);
+    } else {
+      using policy = w8a16_policy;
+      W8A16LauncherCallER(policy);
     }
+#undef W8A16LauncherCallER
   } else {
     TORCH_CHECK(
         !ptr_scales.has_value(), "w16a16 grouped gemm must not have scales");
-    using policy = w16a16_policy;
-    if (A_dtype == at::kBFloat16) {
-      using scalar_t = bfloat16_t;
-      MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, scalar_t, scalar_t);
-    } else if (A_dtype == at::kHalf) {
-      using scalar_t = half_t;
-      MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, scalar_t, scalar_t);
+
+#define W16A16LauncherCallER(policy)                                       \
+  if (A_dtype == at::kBFloat16) {                                          \
+    using scalar_t = bfloat16_t;                                           \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, scalar_t, scalar_t); \
+  } else if (A_dtype == at::kHalf) {                                       \
+    using scalar_t = half_t;                                               \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, scalar_t, scalar_t); \
+  }
+
+    if (A_avg_M <= 4) {
+      using policy = w16a16_policy_m_16;
+      W16A16LauncherCallER(policy);
+    } else {
+      using policy = w16a16_policy;
+      W16A16LauncherCallER(policy);
     }
+#undef W16A16LauncherCallER
   }
 #undef MoEGEMMLauncherCallER
   return ptr_D;
