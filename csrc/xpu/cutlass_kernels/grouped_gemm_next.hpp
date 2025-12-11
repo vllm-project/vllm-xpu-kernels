@@ -33,6 +33,8 @@
     \brief CUTLASS Intel BMG MoE API example based on sycl-tla Group GEMM
 
 */
+#pragma once
+
 #include <torch/all.h>
 #include "utils.h"
 
@@ -105,6 +107,10 @@ struct KernelLauncher {
          args.group_size,
          args.gemm_n,
          args.gemm_k,
+         static_cast<int*>(args.atomic_buffer)},
+        {reinterpret_cast<int*>(args.rows_for_experts),
+         args.num_experts,
+         args.gemm_n,
          static_cast<int*>(args.atomic_buffer)}};
 
     auto params = GroupedGEMMKernel::to_underlying_arguments(arguments);
@@ -189,11 +195,15 @@ struct GroupedGEMMConfig {
             ElementBI,
             ElementD>>;
 
+    using CollectiveEpilogue = void;
+    using TileScheduler =
+        cutlass::grouped_gemm::scheduler::XeGroupedGEMMTileScheduler;
+
     using GroupedGEMMKernel =
         cutlass::grouped_gemm::kernel::XeGroupedGEMMKernel<
             CollectiveMainloop,
-            void,
-            void,
+            CollectiveEpilogue,
+            TileScheduler,
             layoutA,
             layoutB,
             'R'>;

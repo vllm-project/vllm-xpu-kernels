@@ -29,6 +29,7 @@
  *POSSIBILITY OF SUCH DAMAGE.
  *
  **************************************************************************************************/
+#pragma once
 
 #include <sycl/sycl.hpp>
 #include <cute/util/compat.hpp>

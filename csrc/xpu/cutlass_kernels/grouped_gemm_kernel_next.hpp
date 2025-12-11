@@ -39,6 +39,7 @@
 #include "cutlass/kernel_hardware_info.hpp"
 #include "cutlass/platform/platform.h"
 #include "collective/grouped_gemm/grouped_gemm_mainloop.hpp"
+#include "collective/grouped_gemm/grouped_gemm_scheduler.hpp"
 #include <cute/util/compat.hpp>
 
 #pragma clang diagnostic ignored "-Wpass-failed"
@@ -80,8 +81,14 @@ class XeGroupedGEMMKernel {
 
   using CollectiveEpilogue = CollectiveEpilogue_;
   using TileScheduler = TileScheduler_;
+  using TileSchedulerArguments = typename TileScheduler::Arguments;
+  using TileSchedulerParams = typename TileScheduler::Params;
 
   static constexpr TiledMMA mma{};
+  static constexpr auto wg_tile = mma.tile_mnk();
+  static constexpr auto wg_tile_m = get<0>(wg_tile);
+  static constexpr auto wg_tile_n = get<1>(wg_tile);
+
   static constexpr char actual_layout_of_B = LayoutKindB ^ ('R' ^ 'C');
   static constexpr bool is_B_int4 = (std::is_same_v<ElementB, uint8_t>) &&
                                     (!std::is_same_v<ElementS, uint8_t>);
@@ -109,7 +116,7 @@ class XeGroupedGEMMKernel {
     KernelArguments kernel{};
     // MainloopArguments mainloop{};
     // EpilogueArguments epilogue{};
-    // KernelHardwareInfo hw_info{};
+    TileSchedulerArguments scheduler{};
   };
 
   // Kernel entry point API
@@ -117,15 +124,14 @@ class XeGroupedGEMMKernel {
     KernelParams kernel;
     // MainloopParams mainloop;
     // EpilogueParams epilogue;
-    // TileSchedulerParams scheduler;
+    TileSchedulerParams scheduler;
   };
 
   static Params to_underlying_arguments(Arguments const& args) {
-    return {args.kernel};
+    return {args.kernel, args.scheduler};
     // CollectiveMainloop::to_underlying_arguments(args.mainloop, workspace),
     // CollectiveEpilogue::to_underlying_arguments(args.epilogue, workspace),
-    // TileScheduler::to_underlying_arguments(
-    //     args.kernel.shape, args.hw_info, TileShapeO{})};
+    // TileScheduler::to_underlying_arguments(args.scheduler)};
   }
 
   static bool can_implement(Arguments const& args) {
@@ -165,51 +171,27 @@ class XeGroupedGEMMKernel {
     auto& p = params.kernel;
 
     CollectiveMainloop mainloop{};
+    TileScheduler scheduler(params.scheduler, wg_tile_m, wg_tile_n, smem_buf);
 
-    auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-    auto wg_tile = mma.tile_mnk();
-    auto wg_tile_m = get<0>(wg_tile);
-    auto wg_tile_n = get<1>(wg_tile);
+    // loop all gemms
+    while (true) {
+      auto work_gemm_info = scheduler.get_next_gemm();
 
-    int group_id = item.get_group_linear_id();
-    int gemm_n_pad = (p.gemm_n + wg_tile_n - 1) / wg_tile_n * wg_tile_n;
-    int group_m_id = (group_id * wg_tile_n) / gemm_n_pad;
-    int group_range = item.get_group_range(1);
-    int local_id = item.get_local_linear_id();
+      int expert_id = get<0>(work_gemm_info);
+      int pre_rows = get<1>(work_gemm_info);
+      int gemm_m = get<2>(work_gemm_info);
 
-    if (group_id == 0 && local_id == 0) {
-      auto atm = sycl::atomic_ref<
-          int,
-          sycl::memory_order::relaxed,
-          sycl::memory_scope::device,
-          sycl::access::address_space::global_space>(p.atomic_buffer[0]);
-      atm.store(0);
-    }
-
-    int pre_rows = 0;
-    int pre_tiles = 0;
-
-    int32_t* slm_mem = reinterpret_cast<int32_t*>(smem_buf);
-
-    for (int i = 0; i < p.num_experts; ++i) {
-      int gemm_m = p.rows_for_experts[i];
-      int cumsum_rows_for_experts = gemm_m + pre_rows;
-      int cumsum_tiles_for_experts =
-          (gemm_m + wg_tile_m - 1) / wg_tile_m + pre_tiles;
-
-      if (group_m_id >= cumsum_tiles_for_experts) {
-        pre_rows = cumsum_rows_for_experts;
-        pre_tiles = cumsum_tiles_for_experts;
-        continue;
+      if (expert_id >= p.num_experts) {
+        break;
       }
 
-      int expert_id = i;
       int64_t B_offset = static_cast<int64_t>(expert_id) *
                          static_cast<int64_t>(p.gemm_n) *
                          static_cast<int64_t>(p.gemm_k);
       if constexpr (is_B_4bits) {
         B_offset /= 2;
       }
+
       ElementA* ptr_A_curr_batch =
           const_cast<ElementA*>(p.Activations) + pre_rows * p.gemm_k;
       ElementB* ptr_B_curr_batch = const_cast<ElementB*>(p.Weights) + B_offset;
@@ -220,6 +202,7 @@ class XeGroupedGEMMKernel {
         ptr_Scales_curr_batch =
             const_cast<ElementS*>(p.Scales) + B_offset * 2 / p.group_size;
       }
+
       ElementBI* ptr_Bias_curr_batch = nullptr;
       if (p.Bias != static_cast<ElementBI*>(nullptr)) {
         ptr_Bias_curr_batch =
@@ -245,10 +228,9 @@ class XeGroupedGEMMKernel {
       auto D_tensor = make_moe_tensor<ElementD, LayoutKindD>(
           ptr_D_curr_batch, gemm_m, p.gemm_n);
 
-      while (group_m_id < cumsum_tiles_for_experts) {
-        int n_coord = (group_id * wg_tile_n) % gemm_n_pad / wg_tile_n;
-        int m_coord = (group_m_id - pre_tiles);
-        auto tile_coord = make_coord(m_coord, n_coord, _, 0);
+      // loop all tiles of current gemm
+      while (true) {
+        auto tile_coord = scheduler.get_next_tile_coord();
 
         if constexpr (is_B_4bits) {
 #define XE_GEMM_4BITS_CALLER(GroupSize)    \
@@ -283,15 +265,10 @@ class XeGroupedGEMMKernel {
               mma);
         }
 
-        if (local_id == 0) {
-          slm_mem[0] = cutlass::atomicAdd(p.atomic_buffer, 1);
+        if (scheduler.is_get_next_gemm()) {
+          break;
         }
-        item.barrier(sycl::access::fence_space::local_space);
-        group_id = group_range + slm_mem[0];
-        group_m_id = (group_id * wg_tile_n) / gemm_n_pad;
       }
-      pre_rows = cumsum_rows_for_experts;
-      pre_tiles = cumsum_tiles_for_experts;
     }
   }
 };
