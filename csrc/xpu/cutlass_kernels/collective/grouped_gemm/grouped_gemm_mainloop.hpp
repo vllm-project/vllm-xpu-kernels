@@ -95,6 +95,9 @@ struct XeGEMMMainloop {
 
   static constexpr int sg_local_range = 16;
 
+  using FragC = decltype(TiledMMA{}.get_slice(0).partition_sg_fragment_C(
+      make_identity_tensor(select<0, 1>(wg_tile))));
+
   // User-facing arguments
   struct Arguments {};
 
@@ -251,6 +254,9 @@ struct XeGEMMMainloop4Bits {
 
   static constexpr int sg_local_range = 16;
 
+  using FragC = decltype(TiledMMA{}.get_slice(0).partition_sg_fragment_C(
+      make_identity_tensor(select<0, 1>(wg_tile))));
+
   // User-facing arguments
   struct Arguments {};
 
@@ -262,8 +268,6 @@ struct XeGEMMMainloop4Bits {
   static constexpr Params to_underlying_arguments(Arguments const& args) {
     return {};
   }
-
-  static constexpr void to_underlying_arguments() {}
 
   CUTLASS_HOST_DEVICE static bool can_implement() { return true; }
 

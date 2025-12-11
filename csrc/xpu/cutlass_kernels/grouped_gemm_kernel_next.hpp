@@ -81,6 +81,7 @@ class XeGroupedGEMMKernel {
   using ElementS = typename CollectiveMainloop::ElementS;
   using ElementBI = typename CollectiveMainloop::ElementBI;
   using ElementD = typename CollectiveMainloop::ElementD;
+  using FragC = typename CollectiveMainloop::FragC;
 
   using CollectiveEpilogue = CollectiveEpilogue_;
   using EpilogueArguments = typename CollectiveEpilogue::Arguments;
@@ -171,8 +172,8 @@ class XeGroupedGEMMKernel {
 
   CUTLASS_DEVICE
   void operator()(Params const& params, char* smem_buf) const {
-    auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-    int local_id = item.get_local_linear_id();
+    // auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    // int local_id = item.get_local_linear_id();
 
     auto& p = params.kernel;
 
@@ -239,25 +240,7 @@ class XeGroupedGEMMKernel {
       while (true) {
         auto tile_coord = scheduler.get_next_tile_coord();
 
-        auto wg_coord = make_coord(get<0>(tile_coord), get<1>(tile_coord), 0);
-
-        Tensor cC = make_identity_tensor(D_tensor.shape());
-        Tensor gC = local_tile(
-            cC, wg_tile, wg_coord, Step<_1, _1, X>{});  // (BLK_M,BLK_N)
-
-        auto copy_c = get_block_2d_copy_D<GmemTiledCopyC>(mma, D_tensor);
-
-        auto thr_mma = mma.get_slice(local_id);
-
-        /* Partition C */
-        Tensor tCgC = thr_mma.partition_C(gC);
-        SubgroupTensor tCrC = thr_mma.partition_sg_fragment_C(gC);
-
-        ElementD tCrC_final_frag[tCrC.size()];
-        Tensor tCrC_final_tensor =
-            make_tensor(make_rmem_ptr(tCrC_final_frag), tCrC.layout());
-        SubgroupTensor tCrC_final_sg_tensor =
-            make_subgroup_tensor(tCrC_final_tensor, tCrC.tv_layout());
+        FragC Accum;
 
         if constexpr (is_B_4bits) {
 #define XE_GEMM_4BITS_CALLER(GroupSize)    \
@@ -266,7 +249,7 @@ class XeGroupedGEMMKernel {
       B_tensor,                            \
       ptr_Scales_curr_batch,               \
       ptr_Bias_curr_batch,                 \
-      tCrC,                                \
+      Accum,                               \
       tile_coord,                          \
       mma);
 
@@ -287,18 +270,12 @@ class XeGroupedGEMMKernel {
               B_tensor,
               ptr_Scales_curr_batch,
               ptr_Bias_curr_batch,
-              tCrC,
+              Accum,
               tile_coord,
               mma);
         }
 
-        epilogue(
-            tCrC,
-            tCrC_final_sg_tensor,
-            tCgC,
-            ptr_Bias_curr_batch,
-            tile_coord,
-            copy_c);
+        epilogue(D_tensor, Accum, ptr_Bias_curr_batch, tile_coord);
 
         if (scheduler.is_get_next_gemm()) {
           break;
