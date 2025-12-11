@@ -172,9 +172,6 @@ class XeGroupedGEMMKernel {
 
   CUTLASS_DEVICE
   void operator()(Params const& params, char* smem_buf) const {
-    // auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-    // int local_id = item.get_local_linear_id();
-
     auto& p = params.kernel;
 
     CollectiveMainloop mainloop{};
