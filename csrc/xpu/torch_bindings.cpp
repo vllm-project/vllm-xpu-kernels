@@ -47,7 +47,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "num_experts, bool is_B_int4, bool is_B_mxfp4) -> "
       "Tensor");
   xpu_ops.impl(
-      "cutlass_xe_grouped_gemm", torch::kXPU, cutlass::grouped_gemm::cutlass_xe_grouped_gemm);
+      "cutlass_xe_grouped_gemm",
+      torch::kXPU,
+      cutlass::grouped_gemm::cutlass_xe_grouped_gemm);
 
   xpu_ops.def(
       "deepseek_scaling_rope(Tensor! positions, Tensor! query, Tensor! key, "
