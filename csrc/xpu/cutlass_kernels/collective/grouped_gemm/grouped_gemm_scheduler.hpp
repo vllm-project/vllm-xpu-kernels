@@ -50,7 +50,7 @@ struct XeGroupedGEMMTileScheduler {
 
   using Params = Arguments;
 
-  Params to_underlying_arguments(Arguments const& args) { return args; }
+  static Params to_underlying_arguments(Arguments const& args) { return args; }
 
   CUTLASS_DEVICE
   XeGroupedGEMMTileScheduler(
@@ -113,7 +113,7 @@ struct XeGroupedGEMMTileScheduler {
     int n_coord = (group_id * wg_tile_n) % gemm_n_pad / wg_tile_n;
     int m_coord = (group_m_id - pre_tiles);
 
-    return make_coord(m_coord, n_coord, _, 0);
+    return make_coord(m_coord, n_coord, 0);
   }
 
   CUTLASS_DEVICE

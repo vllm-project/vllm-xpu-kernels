@@ -40,6 +40,7 @@
 #include "cutlass/platform/platform.h"
 #include "collective/grouped_gemm/grouped_gemm_mainloop.hpp"
 #include "collective/grouped_gemm/grouped_gemm_scheduler.hpp"
+#include "collective/grouped_gemm/grouped_gemm_epilogue.hpp"
 #include <cute/util/compat.hpp>
 
 #pragma clang diagnostic ignored "-Wpass-failed"
@@ -69,6 +70,8 @@ template <
 class XeGroupedGEMMKernel {
  public:
   using CollectiveMainloop = CollectiveMainloop_;
+  using MainloopArguments = typename CollectiveMainloop::Arguments;
+  using MainloopParams = typename CollectiveMainloop::Params;
   using GmemTiledCopyA = typename CollectiveMainloop::GmemTiledCopyA;
   using GmemTiledCopyB = typename CollectiveMainloop::GmemTiledCopyB;
   using GmemTiledCopyC = typename CollectiveMainloop::GmemTiledCopyC;
@@ -80,6 +83,9 @@ class XeGroupedGEMMKernel {
   using ElementD = typename CollectiveMainloop::ElementD;
 
   using CollectiveEpilogue = CollectiveEpilogue_;
+  using EpilogueArguments = typename CollectiveEpilogue::Arguments;
+  using EpilogueParams = typename CollectiveEpilogue::Params;
+
   using TileScheduler = TileScheduler_;
   using TileSchedulerArguments = typename TileScheduler::Arguments;
   using TileSchedulerParams = typename TileScheduler::Params;
@@ -114,31 +120,28 @@ class XeGroupedGEMMKernel {
 
   struct Arguments {
     KernelArguments kernel{};
-    // MainloopArguments mainloop{};
-    // EpilogueArguments epilogue{};
+    MainloopArguments mainloop{};
+    EpilogueArguments epilogue{};
     TileSchedulerArguments scheduler{};
   };
 
   // Kernel entry point API
   struct Params {
     KernelParams kernel;
-    // MainloopParams mainloop;
-    // EpilogueParams epilogue;
+    MainloopParams mainloop;
+    EpilogueParams epilogue;
     TileSchedulerParams scheduler;
   };
 
   static Params to_underlying_arguments(Arguments const& args) {
-    return {args.kernel, args.scheduler};
-    // CollectiveMainloop::to_underlying_arguments(args.mainloop, workspace),
-    // CollectiveEpilogue::to_underlying_arguments(args.epilogue, workspace),
-    // TileScheduler::to_underlying_arguments(args.scheduler)};
+    return {
+        args.kernel,
+        CollectiveMainloop::to_underlying_arguments(args.mainloop),
+        CollectiveEpilogue::to_underlying_arguments(args.epilogue),
+        TileScheduler::to_underlying_arguments(args.scheduler)};
   }
 
-  static bool can_implement(Arguments const& args) {
-    return true;
-    // return CollectiveMainloop::can_implement(args.mainloop) &&
-    //    CollectiveEpilogue::can_implement(args.epilogue);
-  }
+  static bool can_implement(Arguments const& args) { return true; }
 
   static int get_workspace_size(Arguments const& args) { return 0; }
 
@@ -168,9 +171,13 @@ class XeGroupedGEMMKernel {
 
   CUTLASS_DEVICE
   void operator()(Params const& params, char* smem_buf) const {
+    auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+    int local_id = item.get_local_linear_id();
+
     auto& p = params.kernel;
 
     CollectiveMainloop mainloop{};
+    CollectiveEpilogue epilogue{};
     TileScheduler scheduler(params.scheduler, wg_tile_m, wg_tile_n, smem_buf);
 
     // loop all gemms
@@ -232,6 +239,26 @@ class XeGroupedGEMMKernel {
       while (true) {
         auto tile_coord = scheduler.get_next_tile_coord();
 
+        auto wg_coord = make_coord(get<0>(tile_coord), get<1>(tile_coord), 0);
+
+        Tensor cC = make_identity_tensor(D_tensor.shape());
+        Tensor gC = local_tile(
+            cC, wg_tile, wg_coord, Step<_1, _1, X>{});  // (BLK_M,BLK_N)
+
+        auto copy_c = get_block_2d_copy_D<GmemTiledCopyC>(mma, D_tensor);
+
+        auto thr_mma = mma.get_slice(local_id);
+
+        /* Partition C */
+        Tensor tCgC = thr_mma.partition_C(gC);
+        SubgroupTensor tCrC = thr_mma.partition_sg_fragment_C(gC);
+
+        ElementD tCrC_final_frag[tCrC.size()];
+        Tensor tCrC_final_tensor =
+            make_tensor(make_rmem_ptr(tCrC_final_frag), tCrC.layout());
+        SubgroupTensor tCrC_final_sg_tensor =
+            make_subgroup_tensor(tCrC_final_tensor, tCrC.tv_layout());
+
         if constexpr (is_B_4bits) {
 #define XE_GEMM_4BITS_CALLER(GroupSize)    \
   mainloop.template operator()<GroupSize>( \
@@ -239,7 +266,7 @@ class XeGroupedGEMMKernel {
       B_tensor,                            \
       ptr_Scales_curr_batch,               \
       ptr_Bias_curr_batch,                 \
-      D_tensor,                            \
+      tCrC,                                \
       tile_coord,                          \
       mma);
 
@@ -260,10 +287,18 @@ class XeGroupedGEMMKernel {
               B_tensor,
               ptr_Scales_curr_batch,
               ptr_Bias_curr_batch,
-              D_tensor,
+              tCrC,
               tile_coord,
               mma);
         }
+
+        epilogue(
+            tCrC,
+            tCrC_final_sg_tensor,
+            tCgC,
+            ptr_Bias_curr_batch,
+            tile_coord,
+            copy_c);
 
         if (scheduler.is_get_next_gemm()) {
           break;

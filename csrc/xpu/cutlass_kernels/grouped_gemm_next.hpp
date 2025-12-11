@@ -108,6 +108,8 @@ struct KernelLauncher {
          args.gemm_n,
          args.gemm_k,
          static_cast<int*>(args.atomic_buffer)},
+        {},
+        {},
         {reinterpret_cast<int*>(args.rows_for_experts),
          args.num_experts,
          args.gemm_n,
@@ -195,7 +197,9 @@ struct GroupedGEMMConfig {
             ElementBI,
             ElementD>>;
 
-    using CollectiveEpilogue = void;
+    using CollectiveEpilogue =
+        cutlass::grouped_gemm::epilogue::GroupedGEMMEpilogue<
+            CollectiveMainloop>;
     using TileScheduler =
         cutlass::grouped_gemm::scheduler::XeGroupedGEMMTileScheduler;
 
