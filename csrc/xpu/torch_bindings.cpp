@@ -12,19 +12,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
 
   xpu_ops.def(
-      "fp8_gemm(Tensor! A, Tensor! B, ScalarType? out_dtype, Tensor? A_scale_, "
+      "fp8_gemm(Tensor A, Tensor B, ScalarType? out_dtype, Tensor? A_scale_, "
       "Tensor? B_scale_, Tensor? bias_) -> Tensor");
   xpu_ops.impl("fp8_gemm", torch::kXPU, &fp8_gemm);
 
   xpu_ops.def(
-      "fp8_gemm_w8a16(Tensor! A, Tensor! B, Tensor? B_scale_, "
+      "fp8_gemm_w8a16(Tensor A, Tensor B, Tensor? B_scale_, "
       "Tensor? bias_) -> Tensor");
   xpu_ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
 
   xpu_ops.def(
-      "int4_gemm_w4a16(Tensor! A, Tensor! B, Tensor? bias, Tensor B_scale, "
+      "int4_gemm_w4a16(Tensor A, Tensor B, Tensor? bias, Tensor B_scale, "
       "Tensor B_zp, int group_size, Tensor? g_idx) -> Tensor");
   xpu_ops.impl("int4_gemm_w4a16", torch::kXPU, &int4_gemm_w4a16);
+
+  xpu_ops.def(
+      "int4_gemm_w4a8(Tensor A_, Tensor A_scale, Tensor A_zp, Tensor B, "
+      "Tensor B_scale, Tensor B_zp, int group_size, Tensor? g_idx, Tensor? "
+      "bias) -> Tensor");
+  xpu_ops.impl("int4_gemm_w4a8", torch::kXPU, &int4_gemm_w4a8);
 
   xpu_ops.def(
       "cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor? ptr_bias, "

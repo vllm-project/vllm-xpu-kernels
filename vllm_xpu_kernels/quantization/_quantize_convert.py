@@ -240,3 +240,67 @@ def dequantize(qweight, scales, qzeros, group_size, g_idx=None):
         gptq_zeros = gptq_utils.unpack_zp(qzeros)
         gptq_zeros = gptq_zeros.reshape(scales.shape)
         return (weight - gptq_zeros[g_idx]) * scales[g_idx]
+
+
+def dequantize_s8_to_float(quantized, scale, zero_point):
+    repeat_dims = [1] * (quantized.dim() - 1) + [quantized.shape[-1]]
+    return (quantized -
+            zero_point.repeat(repeat_dims)) * scale.repeat(repeat_dims)
+
+
+def dynamic_per_token_quant_ref(input, use_sym_quant, bits):
+    original_sizes = input.size()
+    input = input.view(
+        -1, original_sizes[-1])  # Flatten except for the last dimension
+    k = input.shape[-1]
+    qmin = -(2**(bits - 1)) if use_sym_quant else 0
+    qmax = 2**(bits - 1) - 1 if use_sym_quant else 2**bits - 1
+    min_val = torch.min(input, dim=-1)[0].to(dtype=torch.float32).unsqueeze(-1)
+    max_val = torch.max(input, dim=-1)[0].to(dtype=torch.float32).unsqueeze(-1)
+    if use_sym_quant:
+        scale = torch.maximum(torch.abs(min_val), torch.abs(max_val)) / qmax
+        zero_point = torch.zeros_like(scale).to(dtype=torch.int32)
+    else:
+        scale = (max_val - min_val) / qmax
+        zero_point = -1 * torch.round(min_val / scale).to(dtype=torch.int32)
+    scale = scale.to(dtype=input.dtype)
+    quantized = torch.clamp(
+        torch.round(input / scale.repeat(1, k).to(dtype=torch.float32) +
+                    zero_point.repeat(1, k)),
+        qmin,
+        qmax,
+    ).to(dtype=torch.int8 if use_sym_quant else torch.uint8)
+    return (
+        quantized.view(original_sizes),
+        scale.view(original_sizes[:-1] + (1, )),
+        zero_point.view(original_sizes[:-1] + (1, )),
+    )
+
+
+def dynamic_per_tensor_quant_ref(input, use_sym_quant, bits):
+    original_sizes = input.size()
+    input = input.view(
+        -1, original_sizes[-1])  # Flatten except for the last dimension
+    qmin = -(2**(bits - 1)) if use_sym_quant else 0
+    qmax = 2**(bits - 1) - 1 if use_sym_quant else 2**bits - 1
+    min_val = torch.min(input)
+    max_val = torch.max(input)
+    if use_sym_quant:
+        scale_val = torch.maximum(torch.abs(min_val),
+                                  torch.abs(max_val)) / qmax
+        scale = torch.tensor([scale_val]).to("xpu")
+        zero_point = torch.tensor([0], dtype=torch.int32, device="xpu")
+    else:
+        scale = (max_val - min_val) / qmax
+        zero_point = -1 * torch.round(min_val / scale).to(dtype=torch.int32)
+    scale = scale.to(dtype=input.dtype)
+    quantized = torch.clamp(
+        torch.round(input / scale.to(dtype=torch.float32) + zero_point),
+        qmin,
+        qmax,
+    ).to(dtype=torch.int8 if use_sym_quant else torch.uint8)
+    return (
+        quantized.view(original_sizes),
+        scale,
+        zero_point,
+    )
