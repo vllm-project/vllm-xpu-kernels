@@ -1,7 +1,7 @@
 #include "core/registration.h"
 #include "xpu/ops.h"
 #include "xpu/cutlass_kernels/grouped_gemm.hpp"
-#include "xpu/cutlass_kernels/grouped_gemm/grouped_gemm_interface.hpp"
+#include "xpu/cutlass_kernels/grouped_gemm_next.hpp"
 #include "xpu/lora/lora_ops.h"
 #include "xpu/cutlass_kernels/fused_moe.hpp"
 
@@ -47,7 +47,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "num_experts, bool is_B_int4, bool is_B_mxfp4) -> "
       "Tensor");
   xpu_ops.impl(
-      "cutlass_xe_grouped_gemm", torch::kXPU, MoE::cutlass_xe_grouped_gemm);
+      "cutlass_xe_grouped_gemm", torch::kXPU, cutlass::grouped_gemm::cutlass_xe_grouped_gemm);
 
   xpu_ops.def(
       "deepseek_scaling_rope(Tensor! positions, Tensor! query, Tensor! key, "
