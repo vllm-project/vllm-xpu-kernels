@@ -3,7 +3,7 @@
 #include "cute/atom/mma_atom.hpp"
 #include "cutlass/numeric_types.h"
 
-namespace MoE {
+namespace cutlass::grouped_gemm::policy {
 using namespace cute;
 
 class xe_gemm_policy_base {
@@ -85,4 +85,4 @@ class w4a16_policy_m_32 : public xe_gemm_policy_base {
   using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
 };
 
-}  // namespace MoE
+}  // namespace cutlass::grouped_gemm::policy
