@@ -1,5 +1,5 @@
 /***************************************************************************************************
- * Copyright (c) 2024 - 2025 Codeplay Software Ltd. All rights reserved.
+ * Copyright 2025 Intel corporation. All rights reserved.
  * SPDX-License-Identifier: BSD-3-Clause
  *
  * Redistribution and use in source and binary forms, with or without
@@ -31,385 +31,253 @@
  **************************************************************************************************/
 #pragma once
 
-#include "cutlass/cutlass.h"
-#include "cutlass/workspace.h"
-#include "cutlass/kernel_hardware_info.hpp"
-#include "cutlass/gemm/gemm.h"
-#include "moe_array_mma.hpp"
-#include "moe_tile_scheduler.hpp"
 #include "cute/tensor.hpp"
+#include "cutlass/cutlass.h"
+#include "cutlass/gemm/gemm.h"
+#include "cutlass/gemm/group_array_problem_shape.hpp"
+#include "cutlass/gemm/kernel/tile_scheduler.hpp"
+#include "cutlass/kernel_hardware_info.hpp"
+#include "cutlass/platform/platform.h"
+#include "moe_mainloop.hpp"
+#include "moe_tile_scheduler.hpp"
+#include "moe_array_epilogue.hpp"
+#include <cute/util/compat.hpp>
 
-///////////////////////////////////////////////////////////////////////////////
+#pragma clang diagnostic ignored "-Wpass-failed"
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
-namespace cutlass::gemm::kernel {
+namespace cutlass::grouped_gemm::kernel {
+using namespace cute;
 
-///////////////////////////////////////////////////////////////////////////////
+template <typename T, char LayoutKind>
+CUTE_DEVICE auto make_moe_tensor(T* ptr, int r, int c) {
+  auto shape = make_shape(r, c);
+  if constexpr (LayoutKind == 'C')
+    return make_tensor(
+        make_gmem_ptr(ptr), make_layout(shape, make_stride(_1{}, r)));
+  else
+    return make_tensor(
+        make_gmem_ptr(ptr), make_layout(shape, make_stride(c, _1{})));
+}
 
 template <
-    class ProblemShape_,
     class CollectiveMainloop_,
     class CollectiveEpilogue_,
-    class TileScheduler_>
-class GemmUniversal<
-    ProblemShape_,
-    CollectiveMainloop_,
-    CollectiveEpilogue_,
-    TileScheduler_,
-    cute::enable_if_t<cute::is_base_of_v<
-        KernelMoEArrayCooperative,
-        typename CollectiveMainloop_::DispatchPolicy::Schedule>>> {
+    class TileScheduler_,
+    char LayoutKindA,
+    char LayoutKindB,
+    char LayoutKindD>
+class XeGroupedGEMMKernel {
  public:
-  //
-  // Type Aliases
-  //
-  using ProblemShape = ProblemShape_;
-  static_assert(
-      cute::rank(typename ProblemShape::UnderlyingProblemShape{}) == 3 or
-          cute::rank(typename ProblemShape::UnderlyingProblemShape{}) == 4,
-      "ProblemShape{} should be <M,N,K> or <M,N,K,L>");
-
-  // Mainloop derived types
   using CollectiveMainloop = CollectiveMainloop_;
-  using TileShape = typename CollectiveMainloop::WorkgroupTileShape;
-  using WorkgroupTileShape = TileShape;
-  using TiledMma = typename CollectiveMainloop::TiledMma;
-  using ArchTag = typename CollectiveMainloop::ArchTag;
-  using ElementA = typename CollectiveMainloop::ElementA;
-  using StrideA = typename CollectiveMainloop::StrideA;
-  using InternalStrideA = typename CollectiveMainloop::InternalStrideA;
-  using ElementB = typename CollectiveMainloop::ElementB;
-  using StrideB = typename CollectiveMainloop::StrideB;
-  using InternalStrideB = typename CollectiveMainloop::InternalStrideB;
-  using DispatchPolicy = typename CollectiveMainloop::DispatchPolicy;
-  using ElementAccumulator = typename CollectiveMainloop::ElementAccumulator;
-  using ClusterShape = typename DispatchPolicy::ClusterShape;
   using MainloopArguments = typename CollectiveMainloop::Arguments;
   using MainloopParams = typename CollectiveMainloop::Params;
+  using GmemTiledCopyA = typename CollectiveMainloop::GmemTiledCopyA;
+  using GmemTiledCopyB = typename CollectiveMainloop::GmemTiledCopyB;
+  using GmemTiledCopyC = typename CollectiveMainloop::GmemTiledCopyC;
+  using TiledMMA = typename CollectiveMainloop::TiledMMA;
+  using ElementA = typename CollectiveMainloop::ElementA;
+  using ElementB = typename CollectiveMainloop::ElementB;
+  using ElementS = typename CollectiveMainloop::ElementS;
+  using ElementBI = typename CollectiveMainloop::ElementBI;
+  using ElementD = typename CollectiveMainloop::ElementD;
+  using FragC = typename CollectiveMainloop::FragC;
 
-  // Epilogue derived types
   using CollectiveEpilogue = CollectiveEpilogue_;
-  using ElementC = typename CollectiveEpilogue::ElementC;
-  using StrideC = typename CollectiveEpilogue::StrideC;
-  using InternalStrideC = typename CollectiveEpilogue::InternalStrideC;
-  using ElementD = typename CollectiveEpilogue::ElementD;
-  using StrideD = typename CollectiveEpilogue::StrideD;
-  using InternalStrideD = typename CollectiveEpilogue::InternalStrideD;
   using EpilogueArguments = typename CollectiveEpilogue::Arguments;
   using EpilogueParams = typename CollectiveEpilogue::Params;
 
-  static_assert(
-      cute::is_same_v<TileScheduler_, GroupScheduler>,
-      "Only Group Scheduler is supported with this code.");
-  using TileSchedulerTag = TileScheduler_;
-  using TileScheduler =
-      typename cutlass::gemm::kernel::detail::PersistentTileSchedulerMoE;
+  using TileScheduler = TileScheduler_;
   using TileSchedulerArguments = typename TileScheduler::Arguments;
   using TileSchedulerParams = typename TileScheduler::Params;
 
-  static constexpr int SubgroupSize =
-      CollectiveMainloop::SubgroupSize;  // sub_group size
-  static constexpr uint32_t MaxThreadsPerBlock =
-      CollectiveMainloop::MaxThreadsPerBlock;
-  using MmaAtomShape = typename CollectiveMainloop::MmaAtomShape;
-  using SubgroupTileShape = typename CollectiveMainloop::SubgroupTileShape;
+  static constexpr TiledMMA mma{};
+  static constexpr auto wg_tile = mma.tile_mnk();
+  static constexpr auto wg_tile_m = get<0>(wg_tile);
+  static constexpr auto wg_tile_n = get<1>(wg_tile);
 
-  using MainloopTensors = typename CollectiveMainloop::MainloopTensors;
-  using EpilogueTensors = typename CollectiveEpilogue::EpilogueTensors;
-
-  // Kernel level shared memory storage
-  struct SharedStorage {
-    using EpilogueTensorStorage = typename CollectiveEpilogue::TensorStorage;
-    EpilogueTensorStorage epilogue;
-  };
-
-  static constexpr int SharedStorageSize = sizeof(SharedStorage);
-
-  static_assert(cute::is_same_v<ClusterShape, cute::Shape<_1, _1, _1>>);
+  static constexpr char actual_layout_of_B = LayoutKindB ^ ('R' ^ 'C');
+  static constexpr bool is_B_int4 = (std::is_same_v<ElementB, uint8_t>) &&
+                                    (!std::is_same_v<ElementS, uint8_t>);
+  static constexpr bool is_B_mxfp4 = (std::is_same_v<ElementB, uint8_t>) &&
+                                     (std::is_same_v<ElementS, uint8_t>);
+  static constexpr bool is_B_4bits = std::is_same_v<ElementB, uint8_t>;
 
   // Device side arguments
+  struct KernelArguments {
+    const ElementA* Activations;
+    const ElementB* Weights;
+    const ElementS* Scales;
+    const ElementBI* Bias;
+    ElementD* Outputs;
+    const int32_t num_experts;
+    const int32_t group_size;
+    const int32_t gemm_n;
+    const int32_t gemm_k;
+  };
+  using KernelParams = KernelArguments;
+
   struct Arguments {
-    GemmUniversalMode mode{};
+    KernelArguments kernel{};
     MainloopArguments mainloop{};
     EpilogueArguments epilogue{};
-    const int64_t* expert_first_token_offset{nullptr};
-    int64_t N;
-    int64_t K;
-    int64_t groups;
-    KernelHardwareInfo hw_info{};
     TileSchedulerArguments scheduler{};
   };
 
   // Kernel entry point API
   struct Params {
-    GemmUniversalMode mode{};
-    MainloopParams mainloop{};
-    EpilogueParams epilogue{};
-    KernelHardwareInfo hw_info{};
-    TileSchedulerParams scheduler{};
-    void* workspace{nullptr};
-    const int64_t* expert_first_token_offset{nullptr};
-    int64_t N;
-    int64_t K;
-    int64_t groups;
+    KernelParams kernel;
+    MainloopParams mainloop;
+    EpilogueParams epilogue;
+    TileSchedulerParams scheduler;
   };
 
-  //
-  // Methods
-  //
-
-  // Convert to underlying arguments. In this case, a simple copy for the
-  // aliased type.
-  static Params
-  to_underlying_arguments(Arguments const& args, void* workspace) {
-    CUTLASS_TRACE_HOST("to_underlying_arguments():");
-
-    // Get SM count if needed, otherwise use user supplied SM count
-    int sm_count = args.hw_info.sm_count;
-    if (sm_count <= 0) {
-      CUTLASS_TRACE_HOST(
-          "  WARNING: Arguments do not include a valid SM count.\n"
-          "  For optimal performance, populate the arguments "
-          "KernelHardwareInfo struct with the SM count.");
-      sm_count = KernelHardwareInfo::query_device_multiprocessor_count(
-          args.hw_info.device_id);
-    }
-
-    CUTLASS_TRACE_HOST(
-        "to_underlying_arguments(): Setting persistent grid SM count to "
-        << sm_count);
-
-    KernelHardwareInfo hw_info{args.hw_info.device_id, sm_count};
-
-    // Calculate workspace pointers
-    uint8_t* workspace_ptr = reinterpret_cast<uint8_t*>(workspace);
-
-    TileSchedulerParams scheduler = TileScheduler::to_underlying_arguments(
-        TileShape{}, ClusterShape{}, hw_info, args.scheduler, workspace_ptr);
-
+  static Params to_underlying_arguments(Arguments const& args) {
     return {
-        args.mode,
+        args.kernel,
         CollectiveMainloop::to_underlying_arguments(args.mainloop),
-        CollectiveEpilogue::template to_underlying_arguments<ProblemShape>(
-            args.epilogue, workspace_ptr),
-        hw_info,
-        scheduler,
-        workspace,
-        args.expert_first_token_offset,
-        args.N,
-        args.K,
-        args.groups};
+        CollectiveEpilogue::to_underlying_arguments(args.epilogue),
+        TileScheduler::to_underlying_arguments(args.scheduler)};
   }
 
-  static bool can_implement(Arguments const& args) {
-    bool implementable = true;
-    implementable =
-        implementable &&
-        (args.mode == GemmUniversalMode::kGrouped ||
-         (args.mode == GemmUniversalMode::kBatched &&
-          rank(typename ProblemShape::UnderlyingProblemShape{}) == 3));
+  static bool can_implement(Arguments const& args) { return true; }
 
-    implementable =
-        implementable && TileScheduler::can_implement(args.scheduler);
-
-    implementable &= CollectiveMainloop::template can_implement<ProblemShape>(
-        args.N, args.K, args.mainloop);
-    implementable &= CollectiveEpilogue::template can_implement<ProblemShape>(
-        args.N, args.K, args.epilogue);
-
-    return implementable;
-  }
-
-  static size_t get_workspace_size(Arguments const& args) {
-    size_t workspace_size = 0;
-    workspace_size +=
-        TileScheduler::template get_workspace_size<ElementAccumulator>(
-            args.scheduler, args.hw_info, -1);
-    return workspace_size;
-  }
+  static int get_workspace_size(Arguments const& args) { return 0; }
 
   static cutlass::Status initialize_workspace(
       Arguments const& args,
       void* workspace = nullptr,
       cudaStream_t stream = nullptr,
       CudaHostAdapter* cuda_adapter = nullptr) {
-    Status status = Status::kSuccess;
-    uint8_t* workspace_ptr = reinterpret_cast<uint8_t*>(workspace);
-
-    status = TileScheduler::template initialize_workspace<ElementAccumulator>(
-        args.scheduler, workspace_ptr, stream, args.hw_info, -1);
-
-    return status;
+    return Status::kSuccess;
   }
 
-  // Computes the kernel launch grid shape based on runtime parameters
-  static dim3 get_grid_shape(Params const& params) {
-    // Given device SM count, set grid size s.t. we do not launch more thread
-    // blocks than we can run concurrently
-    TileSchedulerArguments args{};
-    args.raster_order =
-        params.scheduler.raster_order_ == TileScheduler::RasterOrder::AlongN
-            ? TileScheduler::RasterOrderOptions::AlongN
-            : TileScheduler::RasterOrderOptions::AlongM;
-    return TileScheduler::get_grid_shape(
-        params.scheduler,
-        TileShape{},
-        ClusterShape{},
-        params.hw_info,
-        args,
-        MaxThreadsPerBlock);
+  static dim3 get_grid_shape() {
+    int sm_count =
+        cutlass::KernelHardwareInfo::query_device_multiprocessor_count(0);
+    auto MaxThreadsPerWorkgroup = size(mma);
+    static constexpr int MaxThreadsPerSM = 512;
+    TORCH_CHECK(
+        MaxThreadsPerSM % MaxThreadsPerWorkgroup == 0,
+        "MaxThreadsPerSM must be divisible by MaxThreadsPerWorkgroup")
+    return dim3(1, sm_count * MaxThreadsPerSM / MaxThreadsPerWorkgroup, 1);
   }
 
-  static dim3 get_block_shape() { return dim3(MaxThreadsPerBlock, 1, 1); }
+  static dim3 get_block_shape() {
+    auto MaxThreadsPerWorkgroup = size(mma);
+    return dim3(MaxThreadsPerWorkgroup, 1, 1);
+  }
 
   CUTLASS_DEVICE
-  void operator()(Params const& params, char* smem_buf) {
-    // Preconditions
-    CUTE_STATIC_ASSERT(is_static<WorkgroupTileShape>::value);
+  void operator()(Params const& params, char* smem_buf) const {
+    auto& p = params.kernel;
 
-    static_assert(
-        cute::rank(InternalStrideA{}) == 3,
-        "StrideA must be rank-3: [M, K, L]. If batch mode is not "
-        "needed, set L stride to Int<0>.");
-    static_assert(
-        cute::rank(InternalStrideB{}) == 3,
-        "StrideB must be rank-3: [N, K, L]. If batch mode is not "
-        "needed, set L stride to Int<0>.");
-    static_assert(
-        cute::rank(InternalStrideC{}) == 3,
-        "StrideC must be rank-3: [M, N, L]. If batch mode is not "
-        "needed, set L stride to Int<0>.");
-    static_assert(
-        cute::rank(InternalStrideD{}) == 3,
-        "StrideD must be rank-3: [M, N, L]. If batch mode is not "
-        "needed, set L stride to Int<0>.");
+    CollectiveMainloop mainloop{};
+    CollectiveEpilogue epilogue{};
+    TileScheduler scheduler(params.scheduler, wg_tile_m, wg_tile_n, smem_buf);
 
-    // Kernel level shared memory storage
-    SharedStorage& shared_storage = *reinterpret_cast<SharedStorage*>(smem_buf);
+    // loop all gemms
+    while (true) {
+      auto work_gemm_info = scheduler.get_next_gemm();
 
-    TileScheduler scheduler{
-        params.scheduler,
-        params.expert_first_token_offset,
-        params.N,
-        params.K,
-        params.groups};
-    const int32_t N = params.N;
-    const int32_t K = params.K;
+      int expert_id = get<0>(work_gemm_info);
+      int pre_rows = get<1>(work_gemm_info);
+      int gemm_m = get<2>(work_gemm_info);
 
-    auto work_tile_info = scheduler.initial_work_tile_info(ClusterShape{});
-    constexpr auto workgroup_shape =
-        WorkgroupTileShape{};  // (BLK_M,BLK_N,BLK_K)
-
-    int thread_idx = int(ThreadIdxX());
-    constexpr auto subgroup_shape = SubgroupTileShape{};  // (SUB_M,SUB_N,SUB_K)
-    bool did_group_change = true;
-    int32_t curr_group = -1;
-    using ProblemShapeMNKL = Shape<int, int, int, int>;
-    ProblemShapeMNKL problem_shape_MNKL;
-    MainloopTensors AB_tensors;
-    EpilogueTensors CD_tensors;
-
-    if (work_tile_info.is_valid()) {
-      curr_group = work_tile_info.L_idx;
-      auto M_ = static_cast<int>(
-          params.expert_first_token_offset[curr_group + 1] -
-          params.expert_first_token_offset[curr_group]);
-      problem_shape_MNKL = append<4>(Shape<int, int, int>{M_, N, K}, 1);
-    }
-
-    while (work_tile_info.is_valid()) {
-      auto M = get<0>(problem_shape_MNKL);
-      auto N = get<1>(problem_shape_MNKL);
-      auto K = get<2>(problem_shape_MNKL);
-      auto L = get<3>(problem_shape_MNKL);
-
-      Tensor mA_mkl = cute::get_xe_tensor(make_shape(M, K, L));  //(m,k,l)
-      Tensor mB_nkl = cute::get_xe_tensor(make_shape(N, K, L));  //(n,k,l)
-
-      auto m_coord = work_tile_info.M_idx;
-      auto n_coord = work_tile_info.N_idx;
-
-      auto gA_mkl = local_tile(
-          mA_mkl, select<0, 2>(workgroup_shape), make_coord(m_coord, _, 0));
-      auto gB_nkl = local_tile(
-          mB_nkl, select<1, 2>(workgroup_shape), make_coord(n_coord, _, 0));
-
-      CollectiveMainloop collective_mma;
-      if (did_group_change) {
-        AB_tensors = collective_mma.update_tensor_shape_stride(
-            params.mainloop,
-            curr_group,
-            problem_shape_MNKL,
-            params.expert_first_token_offset);
+      if (expert_id >= p.num_experts) {
+        break;
       }
-      auto tile_coord = make_coord(m_coord, n_coord, _, 0);
 
-      // Get the number of K tiles to compute for this work as well as the
-      // starting K tile offset of the work.
-      int work_k_tile_count = TileScheduler::get_work_k_tile_count(
-          work_tile_info, K, workgroup_shape);
-      int work_k_tile_start =
-          TileScheduler::get_work_k_tile_start(work_tile_info);
-      auto k_tile_iter = cute::make_coord_iterator(
-          idx2crd(work_k_tile_start, make_shape(K)), make_shape(K));
+      int64_t B_offset = static_cast<int64_t>(expert_id) *
+                         static_cast<int64_t>(p.gemm_n) *
+                         static_cast<int64_t>(p.gemm_k);
+      if constexpr (is_B_4bits) {
+        B_offset /= 2;
+      }
 
-      TiledMma tiled_mma;
-      Tensor accumulators =
-          partition_fragment_C(tiled_mma, take<0, 2>(workgroup_shape));
+      ElementA* ptr_A_curr_batch =
+          const_cast<ElementA*>(p.Activations) + pre_rows * p.gemm_k;
+      ElementB* ptr_B_curr_batch = const_cast<ElementB*>(p.Weights) + B_offset;
+      ElementD* ptr_D_curr_batch = p.Outputs + pre_rows * p.gemm_n;
+      ElementS* ptr_Scales_curr_batch =
+          const_cast<ElementS*>(p.Scales) + expert_id;
+      if constexpr (is_B_4bits) {
+        ptr_Scales_curr_batch =
+            const_cast<ElementS*>(p.Scales) + B_offset * 2 / p.group_size;
+      }
 
-      // Perform the collective scoped MMA
-      collective_mma(
-          accumulators,
-          gA_mkl,
-          gB_nkl,
-          accumulators,
-          k_tile_iter,
-          work_k_tile_count,
-          tile_coord,
-          K,
-          thread_idx,
-          params.mainloop,
-          AB_tensors);
+      ElementBI* ptr_Bias_curr_batch = nullptr;
+      if (p.Bias != static_cast<ElementBI*>(nullptr)) {
+        ptr_Bias_curr_batch =
+            const_cast<ElementBI*>(p.Bias) + expert_id * p.gemm_n;
+      }
 
-      TileScheduler::fixup(
-          params.scheduler, work_tile_info, accumulators, -1, -1);
+      auto A_tensor = make_moe_tensor<ElementA, LayoutKindA>(
+          ptr_A_curr_batch, gemm_m, p.gemm_k);
+      auto B_tensor = [&]() {
+        if constexpr (is_B_int4) {
+          return make_moe_tensor<int4_t, actual_layout_of_B>(
+              reinterpret_cast<int4_t*>(ptr_B_curr_batch), p.gemm_n, p.gemm_k);
+        } else if constexpr (is_B_mxfp4) {
+          return make_moe_tensor<float_e2m1_t, actual_layout_of_B>(
+              reinterpret_cast<float_e2m1_t*>(ptr_B_curr_batch),
+              p.gemm_n,
+              p.gemm_k);
+        } else {
+          return make_moe_tensor<ElementB, actual_layout_of_B>(
+              ptr_B_curr_batch, p.gemm_n, p.gemm_k);
+        }
+      }();
+      auto D_tensor = make_moe_tensor<ElementD, LayoutKindD>(
+          ptr_D_curr_batch, gemm_m, p.gemm_n);
 
-      if (TileScheduler::compute_epilogue(work_tile_info, params.scheduler)) {
-        CollectiveEpilogue epilogue{params.epilogue, shared_storage.epilogue};
+      // loop all tiles of current gemm
+      while (true) {
+        auto tile_coord = scheduler.get_next_tile_coord();
 
-        if (did_group_change) {
-          CD_tensors = epilogue.update_tensor_shape_stride(
-              curr_group, problem_shape_MNKL, params.expert_first_token_offset);
-          did_group_change = false;
+        FragC Accum;
+
+        if constexpr (is_B_4bits) {
+#define XE_GEMM_4BITS_CALLER(GroupSize)    \
+  mainloop.template operator()<GroupSize>( \
+      A_tensor,                            \
+      B_tensor,                            \
+      ptr_Scales_curr_batch,               \
+      ptr_Bias_curr_batch,                 \
+      Accum,                               \
+      tile_coord,                          \
+      mma);
+
+          if (p.group_size == 32) {
+            XE_GEMM_4BITS_CALLER(32)
+          } else if (p.group_size == 64) {
+            XE_GEMM_4BITS_CALLER(64)
+          } else if (p.group_size == 128) {
+            XE_GEMM_4BITS_CALLER(128)
+          } else if (p.group_size == 256) {
+            XE_GEMM_4BITS_CALLER(256)
+          }
+
+#undef XE_GEMM_4BITS_CALLER
+        } else {
+          mainloop(
+              A_tensor,
+              B_tensor,
+              ptr_Scales_curr_batch,
+              ptr_Bias_curr_batch,
+              Accum,
+              tile_coord,
+              mma);
         }
 
-        epilogue(
-            problem_shape_MNKL,
-            subgroup_shape,
-            tile_coord,
-            accumulators,
-            tiled_mma,
-            thread_idx,
-            CD_tensors);
-      }
+        epilogue(D_tensor, Accum, ptr_Bias_curr_batch, tile_coord);
 
-      // Get next work tile
-      auto [next_work_tile_info, temp] =
-          scheduler.fetch_next_work(work_tile_info);
-      work_tile_info = next_work_tile_info;
-
-      did_group_change = curr_group != work_tile_info.L_idx;
-
-      if (did_group_change && work_tile_info.is_valid()) {
-        curr_group = work_tile_info.L_idx;
-        auto M_ = static_cast<int>(
-            params.expert_first_token_offset[curr_group + 1] -
-            params.expert_first_token_offset[curr_group]);
-        problem_shape_MNKL = append<4>(Shape<int, int, int>{M_, N, K}, 1);
+        if (scheduler.is_get_next_gemm()) {
+          break;
+        }
       }
     }
   }
 };
 
-///////////////////////////////////////////////////////////////////////////////
-
-}  // namespace cutlass::gemm::kernel
+}  // namespace cutlass::grouped_gemm::kernel

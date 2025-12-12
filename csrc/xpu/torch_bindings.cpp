@@ -1,7 +1,6 @@
 #include "core/registration.h"
 #include "xpu/ops.h"
 #include "xpu/cutlass_kernels/grouped_gemm.hpp"
-#include "xpu/cutlass_kernels/grouped_gemm/grouped_gemm_interface.hpp"
 #include "xpu/lora/lora_ops.h"
 #include "xpu/cutlass_kernels/fused_moe.hpp"
 
@@ -27,27 +26,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("int4_gemm_w4a16", torch::kXPU, &int4_gemm_w4a16);
 
   xpu_ops.def(
-      "cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor? ptr_bias, "
+      "cutlass_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor? ptr_scales, "
+      "Tensor? ptr_bias, "
       "Tensor "
       "ptr_D, Tensor "
       "expert_first_token_offset, int N, int K, int "
-      "groups) -> "
+      "num_experts, bool is_B_int4, bool is_B_mxfp4) -> "
       "Tensor");
   xpu_ops.impl(
       "cutlass_grouped_gemm",
       torch::kXPU,
-      gpu::cutlass_kernel::grouped_gemm_func);
-
-  xpu_ops.def(
-      "cutlass_xe_grouped_gemm(Tensor ptr_A, Tensor ptr_B, Tensor? ptr_scales, "
-      "Tensor? ptr_bias, "
-      "Tensor "
-      "ptr_D, Tensor "
-      "num_rows_per_expert_device, int N, int K, int "
-      "num_experts, bool is_B_int4, bool is_B_mxfp4) -> "
-      "Tensor");
-  xpu_ops.impl(
-      "cutlass_xe_grouped_gemm", torch::kXPU, MoE::cutlass_xe_grouped_gemm);
+      cutlass::grouped_gemm::cutlass_grouped_gemm);
 
   xpu_ops.def(
       "deepseek_scaling_rope(Tensor! positions, Tensor! query, Tensor! key, "
@@ -75,8 +64,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.def(
       "fused_moe(Tensor output, Tensor input, Tensor token_selected_experts, "
       "Tensor "
-      "token_final_scales, Tensor fc1_expert_weights, Tensor "
-      "fc2_expert_weights, Tensor workspace) -> "
+      "token_final_scales, Tensor workspace, int hidden_size, int inter_size, "
+      "int num_experts_on_rank) -> "
       "()");
   xpu_ops.impl("fused_moe", torch::kXPU, &fused_moe);
 }

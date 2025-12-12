@@ -11,45 +11,22 @@ except ImportError as e:
     FUSEDMOE_AVAILABLE = False
 
 
-def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
-                         k, num_experts):
-    expert_token_count_ = torch.tensor(expert_token_count,
-                                       dtype=torch.int64,
-                                       device=input_A.device)
-
-    def exclusive_prefix_sum(arr):
-        prefix = [0]
-        for i, x in enumerate(arr):
-            prefix.append(prefix[-1] + x)
-        return prefix
-
-    if bias is not None:
-        bias = bias.repeat_interleave(expert_token_count_, dim=0).float()
-
-    expert_offset = torch.tensor(exclusive_prefix_sum(expert_token_count),
-                                 dtype=torch.int64,
-                                 device="xpu")
+def cutlass_grouped_gemm(input_A, input_B, scales, bias, output,
+                         num_rows_per_expert, n, k, num_experts, is_B_int4,
+                         is_B_mxfp4):
+    expert_first_token_offset = torch.cat([
+        torch.tensor([0],
+                     dtype=num_rows_per_expert.dtype,
+                     device=num_rows_per_expert.device),
+        torch.cumsum(num_rows_per_expert, dim=0)
+    ]).to(torch.int64)
     torch.ops._xpu_C.cutlass_grouped_gemm(
-        ptr_A=input_A,
-        ptr_B=input_B,
-        ptr_bias=bias,
-        ptr_D=output,
-        expert_first_token_offset=expert_offset,
-        N=n,
-        K=k,
-        groups=num_experts)
-
-
-def cutlass_xe_grouped_gemm(input_A, input_B, scales, bias, output,
-                            num_rows_per_expert, n, k, num_experts, is_B_int4,
-                            is_B_mxfp4):
-    torch.ops._xpu_C.cutlass_xe_grouped_gemm(
         ptr_A=input_A,
         ptr_B=input_B,
         ptr_scales=scales,
         ptr_bias=bias,
         ptr_D=output,
-        num_rows_per_expert_device=num_rows_per_expert,
+        expert_first_token_offset=expert_first_token_offset,
         N=n,
         K=k,
         num_experts=num_experts,
@@ -69,18 +46,93 @@ def compute_num_tokens_per_block(num_tokens, num_experts_per_node):
     return 1024
 
 
-def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
-                  topk_ids, n_experts_per_token, activation, num_experts):
+def implement_zp(qweight):
+    # change u4 to s4 to avoid zero point in gemm kernel
+    # only support default zero point now
+    assert qweight.dtype == torch.uint8, "Input tensor must be uint8"
+
+    high_u4 = (qweight >> 4) & 0x0F
+    low_u4 = qweight & 0x0F
+
+    high_s8 = high_u4.to(torch.int8)
+    low_s8 = low_u4.to(torch.int8)
+
+    high_s8 = high_s8 - 8
+    low_s8 = low_s8 - 8
+
+    def pack_compact(a, b):
+
+        def process_number(x):
+            sign = (x < 0).to(torch.uint8)
+            abs_low3 = (x.view(torch.uint8) & 0x7).to(torch.uint8)
+            return (sign << 3) | abs_low3
+
+        packed_a = process_number(a)
+        packed_b = process_number(b)
+
+        return (packed_a << 4) | packed_b
+
+    result = pack_compact(high_s8, low_s8)
+
+    return result
+
+
+def xpu_fused_moe(hidden_states,
+                  w13,
+                  w13_scales,
+                  w13_bias,
+                  w2,
+                  w2_scales,
+                  w2_bias,
+                  topk_weights,
+                  topk_ids,
+                  n_experts_per_token,
+                  activation,
+                  num_experts,
+                  is_int4=False,
+                  is_mxfp4=False):
+    '''
+    hidden_states: [num_rows, hidden_size]
+    w13: [num_experts, 2*inter_size, hidden_size]
+    w13_scales: 
+        None for bf16/fp16 
+        or [num_experts] for fp8 
+        or [num_experts, 2*inter_size, hidden_size // group_size] for 4bits
+    w13_bias: [num_experts, 2*inter_size] or None
+    w2: [num_experts, hidden_size, inter_size]
+    w2_scales:
+        None for bf16/fp16 
+        or [num_experts] for fp8 
+        or [num_experts, hidden_size, inter_size // group_size] for 4bits
+    w2_bias: [num_experts, hidden_size] or None
+    topk_weights: [num_rows, topk]
+    topk_ids: [num_rows, topk]
+    n_experts_per_token: int
+    activation: str
+    num_experts: int
+    is_int4: bool
+    is_mxfp4: bool
+    '''
 
     output = torch.zeros_like(hidden_states)
-    if w13.is_contiguous():
-        # transpose and replace original data once
-        w13.data = w13.transpose(-1, -2).contiguous().transpose(-1, -2)
-        w2.data = w2.transpose(-1, -2).contiguous().transpose(-1, -2)
+
+    inter_size = list(w13.shape)[-2] // 2
+
+    # 4bits support [E, N, K]
+    # other types [E, K, N]
+    if not is_int4 and not is_mxfp4:
+        w13.data = w13.transpose(-1, -2).contiguous()
+        w2.data = w2.transpose(-1, -2).contiguous()
+
+    if is_int4:
+        for i in range(num_experts):
+            w13[i] = implement_zp(w13[i])
+            w2[i] = implement_zp(w2[i])
+        w13.contiguous()
+        w2.contiguous()
 
     # TODO: will all integrated in Cpp func. Temporary expose before gemm fusion
     num_rows, hidden_size = list(hidden_states.shape)
-    inter_size = list(w2.shape)[-1]
     num_experts_per_node = num_experts
     experts_per_token = n_experts_per_token
     num_moe_inputs = n_experts_per_token * num_rows
@@ -132,9 +184,10 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
                                input=hidden_states,
                                token_selected_experts=topk_ids,
                                token_final_scales=topk_weights,
-                               fc1_expert_weights=w13,
-                               fc2_expert_weights=w2,
-                               workspace=workspace)
+                               workspace=workspace,
+                               hidden_size=hidden_size,
+                               inter_size=inter_size,
+                               num_experts_on_rank=num_experts_per_node)
 
     expert_first_token_offset = workspace[
         ws_map["expert_first_token_offset"][1]:
@@ -152,18 +205,8 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
     #     ws_map["permuted_token_final_scales"][1]:
     #     ws_map["permuted_token_final_scales"][1] +
     #     permuted_token_final_scales_size].view(torch.float)
-    expert_token_count = (expert_first_token_offset[1:] -
-                          expert_first_token_offset[:-1]).to(torch.int64)
-    if w13_bias is None:
-        w13_bias = None
-        w2_bias = None
-    else:
-        if w13_bias.shape == (num_experts, 2 * inter_size):
-            w13_bias = w13_bias.repeat_interleave(expert_token_count,
-                                                  dim=0).float()
-        if w2_bias.shape == (num_experts, hidden_size):
-            w2_bias = w2_bias.repeat_interleave(expert_token_count,
-                                                dim=0).float()
+    # expert_token_count = (expert_first_token_offset[1:] -
+    #                       expert_first_token_offset[:-1]).to(torch.int32)
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
@@ -174,12 +217,15 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
     torch.ops._xpu_C.cutlass_grouped_gemm(
         ptr_A=gemm1_input,
         ptr_B=input_B,
+        ptr_scales=w13_scales,
         ptr_bias=w13_bias,
         ptr_D=gemm1_output,
         expert_first_token_offset=expert_first_token_offset,
         N=2 * inter_size,
         K=hidden_size,
-        groups=num_experts_per_node)
+        num_experts=num_experts_per_node,
+        is_B_int4=is_int4,
+        is_B_mxfp4=is_mxfp4)
 
     # act
     act_output = torch.empty((num_moe_inputs, inter_size),
@@ -203,12 +249,15 @@ def xpu_fused_moe(hidden_states, w13, w13_bias, w2, w2_bias, topk_weights,
     torch.ops._xpu_C.cutlass_grouped_gemm(
         ptr_A=input_A,
         ptr_B=input_B,
+        ptr_scales=w2_scales,
         ptr_bias=w2_bias,
         ptr_D=gemm2_output,
         expert_first_token_offset=expert_first_token_offset,
         N=hidden_size,
         K=inter_size,
-        groups=num_experts_per_node)
+        num_experts=num_experts_per_node,
+        is_B_int4=is_int4,
+        is_B_mxfp4=is_mxfp4)
 
     expert_cache = output
 

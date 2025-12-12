@@ -1,71 +1,88 @@
 #pragma once
-#include "cutlass/epilogue/fusion/xe_callbacks.hpp"
-#include "cutlass/gemm/device/gemm_universal.h"
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/collective/collective_mma.hpp"
-#include "cutlass/util/GPU_Clock.hpp"
 
-#include <cute/tensor.hpp>
-#include <random>
+#include "cute/atom/mma_atom.hpp"
+#include "cutlass/numeric_types.h"
 
-#include "cutlass/util/command_line.h"
-#include "cutlass/util/device_memory.h"
-#include "cutlass/util/packed_stride.hpp"
-#include "cutlass/util/reference/device/gemm_complex.h"
-#include "cutlass/util/reference/device/tensor_compare.h"
-#include "cutlass/util/mixed_dtype_utils.hpp"
-#include <cfloat>
-
-#include "moe_array_mma.hpp"
-#include "moe_array_epilogue.hpp"
-#include "moe_callbacks.hpp"
-#include "moe_dtype_policy.hpp"
-#include "moe_gemm_array_cooperative.hpp"
-#include "moe_tile_scheduler.hpp"
+namespace cutlass::grouped_gemm::policy {
 using namespace cute;
 
-namespace gpu::cutlass_kernel {
-namespace grouped_gemm {
-
-class moe_policy_base {
+class xe_gemm_policy_base {
  public:
-  using ElementAccumulator = float;
-  using ElementComputeEpilogue = float;
-  using ElementA = float;
-  using ElementB = float;
-  using ElementOutput = float;
-  using ElementScale = float;
-  using TileShape = Shape<_256, _256, _32>;
+  using WGTile = Shape<_256, _256, _32>;
   using SGLayout = Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>;
+
+  // Copy can be turned for better performance
+  using GmemTiledCopyA = void;  // same as make_block_2d_copy_A
+  using GmemTiledCopyB = void;  // same as make_block_2d_copy_B
+  using GmemTiledCopyD = void;  // same as make_block_2d_copy_D
 };
 
-class moe_bf16_policy : public moe_policy_base {
- public:
-  using ElementA = cutlass::bfloat16_t;
-  using ElementB = cutlass::bfloat16_t;
-  using ElementOutput = cutlass::bfloat16_t;
-  using ElementScale = cutlass::bfloat16_t;
-};
+class w16a16_policy : public xe_gemm_policy_base {};
 
-class moe_bf16_decode_policy : public moe_bf16_policy {
+class w16a16_policy_m_8 : public xe_gemm_policy_base {
  public:
-  using TileShape = Shape<_16, _64, _32>;
+  using WGTile = Shape<_8, _64, _32>;
   using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
 };
 
-class moe_fp16_policy : public moe_policy_base {
+class w16a16_policy_m_16 : public xe_gemm_policy_base {
  public:
-  using ElementA = cutlass::half_t;
-  using ElementB = cutlass::half_t;
-  using ElementOutput = cutlass::half_t;
-  using ElementScale = cutlass::half_t;
-};
-
-class moe_fp16_decode_policy : public moe_fp16_policy {
- public:
-  using TileShape = Shape<_16, _64, _32>;
+  using WGTile = Shape<_16, _64, _32>;
   using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
 };
 
-}  // namespace grouped_gemm
-}  // namespace gpu::cutlass_kernel
+class w16a16_policy_m_32 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_32, _64, _32>;
+  using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
+};
+
+class w8a16_policy : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_128, _256, _32>;
+  using SGLayout = Layout<Shape<_4, _8, _1>, Stride<_8, _1, _0>>;
+};
+
+class w8a16_policy_m_8 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_8, _64, _32>;
+  using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
+};
+
+class w8a16_policy_m_16 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_16, _64, _32>;
+  using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
+};
+
+class w8a16_policy_m_32 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_32, _64, _32>;
+  using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
+};
+
+class w4a16_policy : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_128, _256, _32>;
+  using SGLayout = Layout<Shape<_4, _8, _1>, Stride<_8, _1, _0>>;
+};
+
+class w4a16_policy_m_8 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_8, _64, _32>;
+  using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
+};
+
+class w4a16_policy_m_16 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_16, _64, _32>;
+  using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
+};
+
+class w4a16_policy_m_32 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_32, _64, _32>;
+  using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
+};
+
+}  // namespace cutlass::grouped_gemm::policy
