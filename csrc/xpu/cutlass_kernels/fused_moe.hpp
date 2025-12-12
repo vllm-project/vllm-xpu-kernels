@@ -10,14 +10,15 @@ void fused_moe(
     torch::Tensor input,
     torch::Tensor token_selected_experts,
     torch::Tensor token_final_scales,
-    torch::Tensor fc1_expert_weights,
-    torch::Tensor fc2_expert_weights,
-    torch::Tensor workspace) {
+    torch::Tensor workspace,
+    int64_t hidden_size,
+    int64_t inter_size,
+    int64_t num_experts_on_rank) {
   int experts_per_token = token_selected_experts.size(1);
   int64_t num_rows = input.size(0);
-  int64_t hidden_size = fc2_expert_weights.size(1);
-  int64_t inter_size = fc2_expert_weights.size(2);
-  int const num_experts_on_rank = fc2_expert_weights.size(0);
+  //   int64_t hidden_size = fc2_expert_weights.size(1);
+  //   int64_t inter_size = fc2_expert_weights.size(2);
+  //   int const num_experts_on_rank = fc2_expert_weights.size(0);
   // TODO: EP
   int ep_size = 1;
   auto const num_experts_total =
@@ -29,10 +30,10 @@ void fused_moe(
       reinterpret_cast<int64_t const*>(token_selected_experts.data_ptr());
   auto const* input_activations =
       reinterpret_cast<bfloat16 const*>(input.data_ptr());
-  auto const* fc1_expert_weights_ =
-      reinterpret_cast<bfloat16 const*>(fc1_expert_weights.data_ptr());
-  auto const* fc2_expert_weights_ =
-      reinterpret_cast<bfloat16 const*>(fc2_expert_weights.data_ptr());
+  //   auto const* fc1_expert_weights_ =
+  //       reinterpret_cast<bfloat16 const*>(fc1_expert_weights.data_ptr());
+  //   auto const* fc2_expert_weights_ =
+  //       reinterpret_cast<bfloat16 const*>(fc2_expert_weights.data_ptr());
   auto* final_output = reinterpret_cast<bfloat16*>(output.data_ptr());
   auto const* token_topk_unpermuted_scales =
       reinterpret_cast<float const*>(token_final_scales.data_ptr());
