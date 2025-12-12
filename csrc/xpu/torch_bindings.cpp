@@ -68,7 +68,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def(
       "bgmv_expand_slice(Tensor! outputs, Tensor inputs, Tensor weights, "
-      "Tensor indices, int slice_offset,bool add_to_output) -> ()");
+      "Tensor indices, int slice_offset, int slice_size, bool add_to_output) "
+      "-> ()");
   xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
 
   xpu_ops.def(

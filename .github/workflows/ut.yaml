@@ -63,6 +63,8 @@ jobs:
           xpu-kernel-ci-image \
           /bin/bash -c '
           ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/ --ignore=/workspace/vllm-xpu-kernels/tests/test_lora_ops.py --ignore=/workspace/vllm-xpu-kernels/tests/test_fp8_quant.py
+          # fixme: Running lora UT separately to avoid OOM when running together with other tests.
+          ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/test_lora_ops.py
           '
       - name: Remove container
         if: ${{ always() }} 
