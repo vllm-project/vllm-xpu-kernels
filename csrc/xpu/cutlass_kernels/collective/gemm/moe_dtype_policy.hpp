@@ -48,9 +48,9 @@ class moe_bf16_policy : public moe_policy_base {
 };
 
 class moe_bf16_decode_policy : public moe_bf16_policy {
-  public:
-    using TileShape = Shape<_16, _64, _32>;
-    using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
+ public:
+  using TileShape = Shape<_16, _64, _32>;
+  using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
 };
 
 class moe_fp16_policy : public moe_policy_base {
@@ -62,11 +62,10 @@ class moe_fp16_policy : public moe_policy_base {
 };
 
 class moe_fp16_decode_policy : public moe_fp16_policy {
-  public:
-    using TileShape = Shape<_16, _64, _32>;
-    using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
+ public:
+  using TileShape = Shape<_16, _64, _32>;
+  using SGLayout = Layout<Shape<_1, _4, _1>, Stride<_4, _1, _0>>;
 };
-
 
 }  // namespace grouped_gemm
 }  // namespace gpu::cutlass_kernel

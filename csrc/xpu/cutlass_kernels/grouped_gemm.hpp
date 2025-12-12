@@ -43,19 +43,21 @@ at::Tensor grouped_gemm_func(
   auto A_dtype = ptr_A.dtype();
   auto avg_tokens_cnt = ptr_A.size(0) / groups;
 
-#define CALL_KERNEL_WITH_POLICY(POLICY) \
-  grouped_gemm::kernel_functor<POLICY>(dpcpp_queue, \
-                         ptr_A.data_ptr(), \
-                         ptr_B.data_ptr(), \
-                         ptr_bias ? ptr_bias->data_ptr() : nullptr, \
-                         ptr_D.data_ptr(), \
-                         expert_first_token_offset.data_ptr(), \
-                         N, K, groups)
-
+#define CALL_KERNEL_WITH_POLICY(POLICY)          \
+  grouped_gemm::kernel_functor<POLICY>(          \
+      dpcpp_queue,                               \
+      ptr_A.data_ptr(),                          \
+      ptr_B.data_ptr(),                          \
+      ptr_bias ? ptr_bias->data_ptr() : nullptr, \
+      ptr_D.data_ptr(),                          \
+      expert_first_token_offset.data_ptr(),      \
+      N,                                         \
+      K,                                         \
+      groups)
 
   if (A_dtype == at::kBFloat16) {
     // TODO: add more fine-grained dispatch
-    if (avg_tokens_cnt > 4){
+    if (avg_tokens_cnt > 4) {
       using moe_policy = grouped_gemm::moe_bf16_policy;
       CALL_KERNEL_WITH_POLICY(moe_policy);
     } else {
@@ -63,7 +65,7 @@ at::Tensor grouped_gemm_func(
       CALL_KERNEL_WITH_POLICY(moe_policy);
     }
   } else if (A_dtype == at::kHalf) {
-    if (avg_tokens_cnt > 4){
+    if (avg_tokens_cnt > 4) {
       using moe_policy = grouped_gemm::moe_fp16_policy;
       CALL_KERNEL_WITH_POLICY(moe_policy);
     } else {

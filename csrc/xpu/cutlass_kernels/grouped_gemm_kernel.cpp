@@ -319,17 +319,17 @@ void kernel_functor(
       groups);
 }
 
-#define INSTANTIATE_KERNEL(POLICY)                         \
-    template void kernel_functor<POLICY>(                  \
-        sycl::queue& stream,                               \
-        void* ptr_A,                                       \
-        void* ptr_B,                                       \
-        void* ptr_bias,                                    \
-        void* ptr_D,                                       \
-        void* expert_first_token_offset,                   \
-        int64_t N,                                         \
-        int64_t K,                                         \
-        int64_t groups);
+#define INSTANTIATE_KERNEL(POLICY)      \
+  template void kernel_functor<POLICY>( \
+      sycl::queue & stream,             \
+      void* ptr_A,                      \
+      void* ptr_B,                      \
+      void* ptr_bias,                   \
+      void* ptr_D,                      \
+      void* expert_first_token_offset,  \
+      int64_t N,                        \
+      int64_t K,                        \
+      int64_t groups);
 
 INSTANTIATE_KERNEL(moe_bf16_policy)
 INSTANTIATE_KERNEL(moe_bf16_decode_policy)
