@@ -30,7 +30,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor? ptr_bias, "
       "Tensor "
       "ptr_D, Tensor "
-      "num_rows_per_expert_device, int N, int K, int "
+      "expert_first_token_offset, int N, int K, int "
       "num_experts, bool is_B_int4, bool is_B_mxfp4) -> "
       "Tensor");
   xpu_ops.impl(

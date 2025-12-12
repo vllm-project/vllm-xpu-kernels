@@ -42,7 +42,7 @@ namespace cutlass::grouped_gemm::scheduler {
 struct XeGroupedGEMMTileScheduler {
  public:
   struct Arguments {
-    int* rows_for_experts;
+    int64_t* expert_first_token_offset;
     int num_experts;
     int gemm_n;
     int* atomic_buffer;
@@ -92,8 +92,11 @@ struct XeGroupedGEMMTileScheduler {
     int gemm_m = 0;
 
     for (++next_gemm_id; next_gemm_id < params.num_experts; ++next_gemm_id) {
-      gemm_m = params.rows_for_experts[next_gemm_id];
-      cumsum_rows = gemm_m + pre_rows;
+      // gemm_m = params.expert_first_token_offset[next_gemm_id + 1] -
+      //          params.expert_first_token_offset[next_gemm_id];
+      // cumsum_rows = gemm_m + pre_rows;
+      cumsum_rows = params.expert_first_token_offset[next_gemm_id + 1];
+      gemm_m = cumsum_rows - pre_rows;
       cumsum_tiles = (gemm_m + wg_tile_m - 1) / wg_tile_m + pre_tiles;
 
       if (group_m_id >= cumsum_tiles) {

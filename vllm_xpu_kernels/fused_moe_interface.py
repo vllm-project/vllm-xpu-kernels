@@ -14,13 +14,19 @@ except ImportError as e:
 def cutlass_grouped_gemm(input_A, input_B, scales, bias, output,
                          num_rows_per_expert, n, k, num_experts, is_B_int4,
                          is_B_mxfp4):
+    expert_first_token_offset = torch.cat([
+        torch.tensor([0],
+                     dtype=num_rows_per_expert.dtype,
+                     device=num_rows_per_expert.device),
+        torch.cumsum(num_rows_per_expert, dim=0)
+    ]).to(torch.int64)
     torch.ops._xpu_C.cutlass_grouped_gemm(
         ptr_A=input_A,
         ptr_B=input_B,
         ptr_scales=scales,
         ptr_bias=bias,
         ptr_D=output,
-        num_rows_per_expert_device=num_rows_per_expert,
+        expert_first_token_offset=expert_first_token_offset,
         N=n,
         K=k,
         num_experts=num_experts,
@@ -199,8 +205,8 @@ def xpu_fused_moe(hidden_states,
     #     ws_map["permuted_token_final_scales"][1]:
     #     ws_map["permuted_token_final_scales"][1] +
     #     permuted_token_final_scales_size].view(torch.float)
-    expert_token_count = (expert_first_token_offset[1:] -
-                          expert_first_token_offset[:-1]).to(torch.int32)
+    # expert_token_count = (expert_first_token_offset[1:] -
+    #                       expert_first_token_offset[:-1]).to(torch.int32)
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
@@ -214,7 +220,7 @@ def xpu_fused_moe(hidden_states,
         ptr_scales=w13_scales,
         ptr_bias=w13_bias,
         ptr_D=gemm1_output,
-        num_rows_per_expert_device=expert_token_count,
+        expert_first_token_offset=expert_first_token_offset,
         N=2 * inter_size,
         K=hidden_size,
         num_experts=num_experts_per_node,
@@ -246,7 +252,7 @@ def xpu_fused_moe(hidden_states,
         ptr_scales=w2_scales,
         ptr_bias=w2_bias,
         ptr_D=gemm2_output,
-        num_rows_per_expert_device=expert_token_count,
+        expert_first_token_offset=expert_first_token_offset,
         N=hidden_size,
         K=inter_size,
         num_experts=num_experts_per_node,

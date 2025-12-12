@@ -73,7 +73,7 @@ struct grouped_gemm_args_t {
   void* Scales;
   void* Bias;
   void* Outputs;
-  void* rows_for_experts;
+  void* expert_first_token_offset;
   int32_t num_experts;
   int32_t group_size;
   int32_t gemm_n;
@@ -102,15 +102,13 @@ struct KernelLauncher {
          args.Bias == nullptr ? nullptr
                               : reinterpret_cast<ElementBI*>(args.Bias),
          reinterpret_cast<ElementD*>(args.Outputs),
-         reinterpret_cast<int*>(args.rows_for_experts),
          args.num_experts,
          args.group_size,
          args.gemm_n,
-         args.gemm_k,
-         static_cast<int*>(args.atomic_buffer)},
+         args.gemm_k},
         {},
         {},
-        {reinterpret_cast<int*>(args.rows_for_experts),
+        {reinterpret_cast<int64_t*>(args.expert_first_token_offset),
          args.num_experts,
          args.gemm_n,
          static_cast<int*>(args.atomic_buffer)}};
@@ -223,7 +221,7 @@ at::Tensor cutlass_grouped_gemm(
     const c10::optional<at::Tensor>& ptr_scales,
     const c10::optional<at::Tensor>& ptr_bias,
     at::Tensor& ptr_D,
-    at::Tensor& num_rows_per_expert_device,
+    at::Tensor& expert_first_token_offset,
     int64_t N,
     int64_t K,
     int64_t num_experts,
@@ -288,7 +286,7 @@ at::Tensor cutlass_grouped_gemm(
       ptr_scales.has_value() ? ptr_scales->data_ptr() : nullptr,
       ptr_bias.has_value() ? ptr_bias->data_ptr() : nullptr,
       ptr_D.data_ptr(),
-      num_rows_per_expert_device.data_ptr(),
+      expert_first_token_offset.data_ptr(),
       static_cast<int32_t>(num_experts),
       static_cast<int32_t>(group_size),
       static_cast<int32_t>(N),

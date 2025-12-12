@@ -110,12 +110,10 @@ class XeGroupedGEMMKernel {
     const ElementS* Scales;
     const ElementBI* Bias;
     ElementD* Outputs;
-    const int32_t* rows_for_experts;
     const int32_t num_experts;
     const int32_t group_size;
     const int32_t gemm_n;
     const int32_t gemm_k;
-    int32_t* atomic_buffer;
   };
   using KernelParams = KernelArguments;
 
