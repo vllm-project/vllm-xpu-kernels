@@ -251,7 +251,7 @@ class GemmUniversal<
             ? TileScheduler::RasterOrderOptions::AlongN
             : TileScheduler::RasterOrderOptions::AlongM;
     return TileScheduler::get_grid_shape(
-        params.scheduler, TileShape{}, ClusterShape{}, params.hw_info, args);
+        params.scheduler, TileShape{}, ClusterShape{}, params.hw_info, args, MaxThreadsPerBlock);
   }
 
   static dim3 get_block_shape() { return dim3(MaxThreadsPerBlock, 1, 1); }

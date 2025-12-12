@@ -76,30 +76,8 @@
 */
 
 #pragma once
-
-#include "cutlass/gemm/group_array_problem_shape.hpp"
-#include "cutlass/gemm/device/gemm_universal.h"
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/util/GPU_Clock.hpp"
-
-#include <cute/tensor.hpp>
-#include <random>
-
-#include "cutlass/util/command_line.h"
-#include "cutlass/util/device_memory.h"
-#include "cutlass/util/packed_stride.hpp"
-#include "cutlass/util/reference/device/gemm_complex.h"
-#include "cutlass/util/reference/device/tensor_compare.h"
 #include "helper.h"
-#include <cfloat>
-
-#include "cutlass/gemm/collective/collective_mma_decl.hpp"
-#include "collective/gemm/moe_array_mma.hpp"
-#include "collective/gemm/moe_array_epilogue.hpp"
-#include "collective/gemm/moe_callbacks.hpp"
 #include "collective/gemm/moe_dtype_policy.hpp"
-#include "collective/gemm/moe_gemm_array_cooperative.hpp"
-#include "collective/gemm/moe_tile_scheduler.hpp"
 
 using namespace cute;
 using ProblemShape =
@@ -154,8 +132,8 @@ struct GroupedGemmRunner {
     fusion_args.alpha_ptr_array = nullptr;
     fusion_args.beta_ptr_array = nullptr;
     // One alpha and beta per each group
-    fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 1};
-    fusion_args.dBeta = {cute::_0{}, cute::_0{}, 1};
+    fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 0};
+    fusion_args.dBeta = {cute::_0{}, cute::_0{}, 0};
     using RasterOrderOptions = typename cutlass::gemm::kernel::detail::
         PersistentTileSchedulerMoE::RasterOrderOptions;
 
@@ -254,7 +232,9 @@ void kernel_functor(
   using LayoutC = cutlass::layout::RowMajor;
   using LayoutD = cutlass::layout::RowMajor;
 
-  using TileShape = Shape<_256, _256, _32>;
+  using TileShape = typename moe_policy::TileShape;
+  using SGLayout = typename moe_policy::SGLayout;
+
   using GmemTiledCopyA = void;  // XE_LOAD_2D<16, 32, 32>;
                                 // Note: This
                                 // shape has to match the shape used for
@@ -263,21 +243,19 @@ void kernel_functor(
                                 // Note: This shape
                                 // has to match the shape used for
                                 //  the scaling factors
-  using MMAOperation = moe_policy::MMAOperation;
-
   using TiledMma = typename TiledMMAHelper<
       MMA_Atom<XE_DPAS_TT<8, ElementAccumulator, ElementA>>,
       Layout<TileShape>,
-      Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>>::TiledMMA;
+      SGLayout>::TiledMMA;
 
   constexpr int PipelineStages = 2;
   using GEMMDispatchPolicy = cutlass::gemm::MainloopMoE16Group<PipelineStages>;
   using EpilogueDispatchPolicy = cutlass::epilogue::MoE16Group;
   using EpilogueOp = cutlass::epilogue::fusion::LinearCombination<
-      float_t,
-      float_t,
-      float_t,
-      float_t,
+      ElementAccumulator,
+      ElementComputeEpilogue,
+      ElementAccumulator,
+      ElementAccumulator,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
   using FusionCallbacks = cutlass::epilogue::fusion::FusionCallbacks<
@@ -341,26 +319,22 @@ void kernel_functor(
       groups);
 }
 
-template void kernel_functor<moe_bf16_policy>(
-    sycl::queue& stream,
-    void* ptr_A,
-    void* ptr_B,
-    void* ptr_bias,
-    void* ptr_D,
-    void* expert_first_token_offset,
-    int64_t N,
-    int64_t K,
-    int64_t groups);
-template void kernel_functor<moe_fp16_policy>(
-    sycl::queue& stream,
-    void* ptr_A,
-    void* ptr_B,
-    void* ptr_bias,
-    void* ptr_D,
-    void* expert_first_token_offset,
-    int64_t N,
-    int64_t K,
-    int64_t groups);
+#define INSTANTIATE_KERNEL(POLICY)                         \
+    template void kernel_functor<POLICY>(                  \
+        sycl::queue& stream,                               \
+        void* ptr_A,                                       \
+        void* ptr_B,                                       \
+        void* ptr_bias,                                    \
+        void* ptr_D,                                       \
+        void* expert_first_token_offset,                   \
+        int64_t N,                                         \
+        int64_t K,                                         \
+        int64_t groups);
+
+INSTANTIATE_KERNEL(moe_bf16_policy)
+INSTANTIATE_KERNEL(moe_bf16_decode_policy)
+INSTANTIATE_KERNEL(moe_fp16_policy)
+INSTANTIATE_KERNEL(moe_fp16_decode_policy)
 
 }  // namespace grouped_gemm
 }  // namespace gpu::cutlass_kernel

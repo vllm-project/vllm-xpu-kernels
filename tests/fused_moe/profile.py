@@ -11,10 +11,10 @@ def random_partition(size_a: int, target: int, randomp: bool):
         result = [cuts[i + 1] - cuts[i] - 1 for i in range(size_a)]
         return result
     else:
-        return [target//size_a] * size_a 
+        return [target//size_a] * size_a
 
 def test_moe_gemm(n_experts, intermediate_size, hidden_size, tokens, topk, dtype, gemm1=True):
-    
+
     iterations = 10
 
     total_m = tokens * topk
@@ -29,7 +29,7 @@ def test_moe_gemm(n_experts, intermediate_size, hidden_size, tokens, topk, dtype
     w13_r = torch.randn(n_experts, hidden_size, 2*intermediate_size, dtype=dtype, device="xpu") / 10
     w2_r = torch.randn(n_experts, intermediate_size, hidden_size, dtype=dtype, device="xpu") / 10
 
-    token_per_group = random_partition(n_experts, total_m, True)  
+    token_per_group = random_partition(n_experts, total_m, True)
     token_per_group_r = torch.tensor(token_per_group, device="xpu", dtype=torch.int32)
     bias = None
     print("distribution:" , token_per_group)
@@ -64,7 +64,7 @@ def test_moe_gemm(n_experts, intermediate_size, hidden_size, tokens, topk, dtype
                 cutlass_grouped_gemm(input_a1, w13, bias, cutlass_o1, token_per_group, 2*intermediate_size, hidden_size, n_experts)
         else:
             cutlass_o2 = (cutlass_o1[:, :intermediate_size])
-            for _ in range(iterations): 
+            for _ in range(iterations):
                 cutlass_grouped_gemm(cutlass_o2, w2, bias, cutlass_o3, token_per_group, hidden_size, intermediate_size, n_experts)
 
 
@@ -75,6 +75,6 @@ def test_moe_gemm(n_experts, intermediate_size, hidden_size, tokens, topk, dtype
 
 if __name__ == "__main__":
     # prefill
-    # test_moe_gemm(n_experts=16, intermediate_size=8192, hidden_size=5120, topk=1, dtype=torch.bfloat16, tokens=8192, gemm1=True) 
-    # decode 
+    # test_moe_gemm(n_experts=16, intermediate_size=8192, hidden_size=5120, topk=1, dtype=torch.bfloat16, tokens=8192, gemm1=True)
+    # decode
     test_moe_gemm(n_experts=16, intermediate_size=8192, hidden_size=5120, topk=1, dtype=torch.bfloat16, tokens=8, gemm1=True)

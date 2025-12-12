@@ -31,7 +31,6 @@
  **************************************************************************************************/
 
 #pragma once
-
 /*! \file
     \brief Parameters structures for persistent tile schedulers
 */

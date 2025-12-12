@@ -139,18 +139,33 @@ class PersistentTileSchedulerMoE {
       ClusterShape cluster_shape,
       KernelHardwareInfo hw_info,
       Arguments arguments,
+      uint32_t MaxThreadsPerBlock,
       bool truncate_by_problem_size = true) {
-    dim3 problem_blocks =
-        get_tiled_cta_shape_mnl(hw_info, tile_shape, cluster_shape);
+    
+    if constexpr (cute::is_same_v<ClusterShape, cute::Shape<_1,_1,_1>>){
+      static constexpr int MaxThreadsPerSM = 512;
+      int sm_count = hw_info.sm_count;
+      dim3 launch_grid;
+      launch_grid = dim3(1, sm_count * MaxThreadsPerSM / MaxThreadsPerBlock, 1);
+      return launch_grid;
 
-    return Params::get_grid_shape(
+    } else {
+      dim3 problem_blocks =
+        get_tiled_cta_shape_mnl(hw_info, tile_shape, cluster_shape);
+       return Params::get_grid_shape(
         problem_blocks,
         to_gemm_coord(cluster_shape),
         hw_info,
         arguments.max_swizzle_size,
         arguments.raster_order,
         /* truncate_by_problem_size = */ true);
-  }
+
+
+    }
+
+
+
+     }
 
   // Given the inputs, computes the total number of output blocks this problem
   // will compute over Note that this is only the logical size of our grid, not
