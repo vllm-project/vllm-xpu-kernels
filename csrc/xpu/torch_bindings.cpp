@@ -39,7 +39,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       gpu::cutlass_kernel::grouped_gemm_func);
 
   xpu_ops.def(
-      "cutlass_grouped_gemm_XE2(Tensor ptr_A, Tensor ptr_B, Tensor? ptr_scales, "
+      "cutlass_grouped_gemm_XE2(Tensor ptr_A, Tensor ptr_B, Tensor? "
+      "ptr_scales, "
       "Tensor? ptr_bias, "
       "Tensor "
       "ptr_D, Tensor "

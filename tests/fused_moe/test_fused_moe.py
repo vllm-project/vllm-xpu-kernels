@@ -210,8 +210,6 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
                             flat_expert_weights, flat_expert_indices, topk,
                             "silu", e)
 
-    
-
     output = xpu_fused_moe(hidden_states=a,
                            w13=w13,
                            w13_scales=w13_scales,

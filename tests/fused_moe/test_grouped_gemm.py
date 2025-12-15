@@ -125,8 +125,8 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
 
     cutlass_grouped_gemm_XE2(input_A, input_B, None, bias, output,
-                            num_rows_per_expert, n, k, num_experts, False,
-                            False)
+                             num_rows_per_expert, n, k, num_experts, False,
+                             False)
 
     # ref gg
     ref = []
@@ -192,8 +192,8 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
 
     cutlass_grouped_gemm_XE2(input_A, input_B_fp8, scale_B, bias, output,
-                            num_rows_per_expert, n, k, num_experts, False,
-                            False)
+                             num_rows_per_expert, n, k, num_experts, False,
+                             False)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -307,8 +307,8 @@ def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
 
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
     cutlass_grouped_gemm_XE2(input_A, input_B_int4, scale_B, bias, output,
-                            num_rows_per_expert, n, k, num_experts, True,
-                            False)
+                             num_rows_per_expert, n, k, num_experts, True,
+                             False)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -415,8 +415,8 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
 
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
     cutlass_grouped_gemm_XE2(input_A, input_B_int4, scale_B, bias, output,
-                            num_rows_per_expert, n, k, num_experts, False,
-                            True)
+                             num_rows_per_expert, n, k, num_experts, False,
+                             True)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -437,4 +437,3 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
     ref = torch.cat(ref, dim=0)
 
     torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
-

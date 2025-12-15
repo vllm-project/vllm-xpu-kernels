@@ -41,8 +41,8 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
 
 
 def cutlass_grouped_gemm_XE2(input_A, input_B, scales, bias, output,
-                            num_rows_per_expert, n, k, num_experts, is_B_int4,
-                            is_B_mxfp4):
+                             num_rows_per_expert, n, k, num_experts, is_B_int4,
+                             is_B_mxfp4):
     expert_first_token_offset = torch.cat([
         torch.tensor([0],
                      dtype=num_rows_per_expert.dtype,
@@ -104,6 +104,7 @@ def implement_zp(qweight):
     result = pack_compact(high_s8, low_s8)
 
     return result
+
 
 def xpu_fused_moe(hidden_states,
                   w13,
@@ -235,14 +236,14 @@ def xpu_fused_moe(hidden_states,
     #     permuted_token_final_scales_size].view(torch.float)
     if not is_fp8 and not is_int4 and not is_mxfp4:
         expert_token_count = (expert_first_token_offset[1:] -
-                            expert_first_token_offset[:-1]).to(torch.int64)
+                              expert_first_token_offset[:-1]).to(torch.int64)
         if w13_bias is None:
             w13_bias = None
             w2_bias = None
         else:
             if w13_bias.shape == (num_experts, 2 * inter_size):
                 w13_bias = w13_bias.repeat_interleave(expert_token_count,
-                                                    dim=0).float()
+                                                      dim=0).float()
             if w2_bias.shape == (num_experts, hidden_size):
                 w2_bias = w2_bias.repeat_interleave(expert_token_count,
                                                     dim=0).float()
