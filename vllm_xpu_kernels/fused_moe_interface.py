@@ -147,6 +147,8 @@ def xpu_fused_moe(hidden_states,
     output = torch.zeros_like(hidden_states)
     inter_size = list(w13.shape)[-2] // 2
 
+    assert w13.is_contiguous() and w2.is_contiguous()
+
     # 4bits support [E, N, K]
     # other types [E, K, N]
     if not is_int4 and not is_mxfp4:

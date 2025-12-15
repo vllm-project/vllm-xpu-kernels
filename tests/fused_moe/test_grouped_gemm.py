@@ -57,7 +57,7 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     ref_A = input_A
     # weight
     input_B = torch.randn((num_experts, n, k), dtype=dtype, device=DEVICE)
-    input_B = input_B.transpose(-1, -2).contiguous().transpose(-1, -2)
+    input_B = input_B.transpose(-1, -2).contiguous()
     if has_bias:
         bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE)
     else:
@@ -76,7 +76,7 @@ def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
             continue
         input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :]
         weight = input_B[i, :, :]
-        expert_output = input @ weight.T
+        expert_output = input @ weight
         if has_bias:
             expert_output += bias[i]
         ref.append(expert_output)
