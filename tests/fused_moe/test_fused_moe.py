@@ -7,7 +7,7 @@ import torch
 from tests.ops.fp8_quant_op import scaled_fp8_quant
 from tests.utils import seed_everything
 from vllm_xpu_kernels.fused_moe_interface import (cutlass_grouped_gemm,
-                                                  cutlass_xe_grouped_gemm,
+                                                  cutlass_grouped_gemm_XE2,
                                                   xpu_fused_moe)
 
 DEVICE = "xpu"
@@ -125,7 +125,7 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     init_rows_for_experts(m, topk, num_rows_per_expert)
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
 
-    cutlass_xe_grouped_gemm(input_A, input_B, None, bias, output,
+    cutlass_grouped_gemm_XE2(input_A, input_B, None, bias, output,
                             num_rows_per_expert, n, k, num_experts, False,
                             False)
 
@@ -192,7 +192,7 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     init_rows_for_experts(m, topk, num_rows_per_expert)
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
 
-    cutlass_xe_grouped_gemm(input_A, input_B_fp8, scale_B, bias, output,
+    cutlass_grouped_gemm_XE2(input_A, input_B_fp8, scale_B, bias, output,
                             num_rows_per_expert, n, k, num_experts, False,
                             False)
     # ref gg
@@ -307,7 +307,7 @@ def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
     init_rows_for_experts(m, topk, num_rows_per_expert)
 
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
-    cutlass_xe_grouped_gemm(input_A, input_B_int4, scale_B, bias, output,
+    cutlass_grouped_gemm_XE2(input_A, input_B_int4, scale_B, bias, output,
                             num_rows_per_expert, n, k, num_experts, True,
                             False)
     # ref gg
@@ -415,7 +415,7 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
     init_rows_for_experts(m, topk, num_rows_per_expert)
 
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
-    cutlass_xe_grouped_gemm(input_A, input_B_int4, scale_B, bias, output,
+    cutlass_grouped_gemm_XE2(input_A, input_B_int4, scale_B, bias, output,
                             num_rows_per_expert, n, k, num_experts, False,
                             True)
     # ref gg

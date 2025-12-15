@@ -40,16 +40,22 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
         groups=num_experts)
 
 
-def cutlass_xe_grouped_gemm(input_A, input_B, scales, bias, output,
+def cutlass_grouped_gemm_XE2(input_A, input_B, scales, bias, output,
                             num_rows_per_expert, n, k, num_experts, is_B_int4,
                             is_B_mxfp4):
-    torch.ops._xpu_C.cutlass_xe_grouped_gemm(
+    expert_first_token_offset = torch.cat([
+        torch.tensor([0],
+                     dtype=num_rows_per_expert.dtype,
+                     device=num_rows_per_expert.device),
+        torch.cumsum(num_rows_per_expert, dim=0)
+    ]).to(torch.int64)
+    torch.ops._xpu_C.cutlass_grouped_gemm_XE2(
         ptr_A=input_A,
         ptr_B=input_B,
         ptr_scales=scales,
         ptr_bias=bias,
         ptr_D=output,
-        num_rows_per_expert_device=num_rows_per_expert,
+        expert_first_token_offset=expert_first_token_offset,
         N=n,
         K=k,
         num_experts=num_experts,

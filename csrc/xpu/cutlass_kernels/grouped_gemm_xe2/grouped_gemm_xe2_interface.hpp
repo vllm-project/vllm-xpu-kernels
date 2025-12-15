@@ -56,8 +56,8 @@
 #include "cutlass/util/reference/host/tensor_fill.h"
 #include "cutlass/util/sycl_event_manager.hpp"
 
-#include "xe_gemm_policy.hpp"
-#include "xe_grouped_gemm.hpp"
+#include "gemm_xe2_policy.hpp"
+#include "grouped_gemm_xe2.hpp"
 
 #pragma clang diagnostic ignored "-Wpass-failed"
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -87,7 +87,7 @@ void MoEGEMMLauncher(
     ElementD* outputs,
     const int gemm_n,
     const int gemm_k,
-    const int* num_rows_per_expert_device,
+    const int64_t* expert_first_token_offset,
     const int num_experts,
     const int group_size,
     int32_t* atomic_buffer) {
@@ -150,7 +150,7 @@ void MoEGEMMLauncher(
               bias,
               outputs,
               mma,
-              num_rows_per_expert_device,
+              expert_first_token_offset,
               num_experts,
               group_size,
               gemm_n,
@@ -162,13 +162,13 @@ void MoEGEMMLauncher(
   EventManager::getInstance().addEvent(event);
 }
 
-at::Tensor cutlass_xe_grouped_gemm(
+at::Tensor cutlass_grouped_gemm_XE2(
     at::Tensor& ptr_A,
     at::Tensor& ptr_B,
     const c10::optional<at::Tensor>& ptr_scales,
     const c10::optional<at::Tensor>& ptr_bias,
     at::Tensor& ptr_D,
-    at::Tensor& num_rows_per_expert_device,
+    at::Tensor& expert_first_token_offset,
     int64_t N,
     int64_t K,
     int64_t num_experts,
@@ -241,7 +241,7 @@ at::Tensor cutlass_xe_grouped_gemm(
       reinterpret_cast<ElementA*>(ptr_D.data_ptr()),                           \
       N,                                                                       \
       K,                                                                       \
-      reinterpret_cast<int*>(num_rows_per_expert_device.data_ptr()),           \
+      reinterpret_cast<int64_t*>(expert_first_token_offset.data_ptr()),           \
       num_experts,                                                             \
       group_size,                                                              \
       static_cast<int*>(atomic_buffer.data_ptr()));

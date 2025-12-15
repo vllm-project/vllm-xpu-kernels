@@ -38,7 +38,7 @@
 #include "cutlass/gemm/kernel/tile_scheduler.hpp"
 #include "cutlass/kernel_hardware_info.hpp"
 #include "cutlass/platform/platform.h"
-#include "xe_gemm.hpp"
+#include "gemm_xe2.hpp"
 #include <cute/util/compat.hpp>
 
 #pragma clang diagnostic ignored "-Wpass-failed"
@@ -78,7 +78,7 @@ CUTE_DEVICE void MoEGEMM(
     const ElementBI* Bias,
     ElementD* Outputs,
     TiledMMA const& mma,
-    const int32_t* rows_for_experts,
+    const int64_t* expert_first_token_offset,
     const int32_t num_experts,
     const int32_t group_size,
     const int32_t gemm_n,
@@ -120,8 +120,8 @@ CUTE_DEVICE void MoEGEMM(
           .get());
 
   for (int i = 0; i < num_experts; ++i) {
-    int gemm_m = rows_for_experts[i];
-    int cumsum_rows_for_experts = gemm_m + pre_rows;
+    int cumsum_rows_for_experts = expert_first_token_offset[i + 1];
+    int gemm_m = cumsum_rows_for_experts - pre_rows;
     int cumsum_tiles_for_experts =
         (gemm_m + wg_tile_m - 1) / wg_tile_m + pre_tiles;
 
