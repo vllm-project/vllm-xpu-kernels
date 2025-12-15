@@ -43,7 +43,7 @@ torch::Tensor cutlass_grouped_gemm(
     int64_t K,
     int64_t groups);
 
-torch::Tensor cutlass_grouped_gemm_XE2(
+torch::Tensor cutlass_grouped_gemm_xe2(
     torch::Tensor ptr_A,
     torch::Tensor ptr_B,
     const c10::optional<at::Tensor>& ptr_scales,

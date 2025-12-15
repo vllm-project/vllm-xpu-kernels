@@ -40,7 +40,7 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
         groups=num_experts)
 
 
-def cutlass_grouped_gemm_XE2(input_A, input_B, scales, bias, output,
+def cutlass_grouped_gemm_xe2(input_A, input_B, scales, bias, output,
                              num_rows_per_expert, n, k, num_experts, is_B_int4,
                              is_B_mxfp4):
     expert_first_token_offset = torch.cat([
@@ -49,7 +49,7 @@ def cutlass_grouped_gemm_XE2(input_A, input_B, scales, bias, output,
                      device=num_rows_per_expert.device),
         torch.cumsum(num_rows_per_expert, dim=0)
     ]).to(torch.int64)
-    torch.ops._xpu_C.cutlass_grouped_gemm_XE2(
+    torch.ops._xpu_C.cutlass_grouped_gemm_xe2(
         ptr_A=input_A,
         ptr_B=input_B,
         ptr_scales=scales,
@@ -152,8 +152,13 @@ def xpu_fused_moe(hidden_states,
     # 4bits support [E, N, K]
     # other types [E, K, N]
     if not is_int4 and not is_mxfp4:
-        w13.data = w13.transpose(-1, -2).contiguous()
-        w2.data = w2.transpose(-1, -2).contiguous()
+        if not hasattr(w13, 'xpu_fused_moe'):
+            w13.data = w13.transpose(-1, -2).contiguous()
+            w2.data = w2.transpose(-1, -2).contiguous()
+            w13.xpu_fused_moe = True
+            w13.inter_size = inter_size
+        else:
+            inter_size = w13.inter_size
 
     if is_int4:
         for i in range(num_experts):
@@ -267,7 +272,7 @@ def xpu_fused_moe(hidden_states,
             K=hidden_size,
             groups=num_experts_per_node)
     else:
-        torch.ops._xpu_C.cutlass_grouped_gemm_XE2(
+        torch.ops._xpu_C.cutlass_grouped_gemm_xe2(
             ptr_A=gemm1_input,
             ptr_B=input_B,
             ptr_scales=w13_scales,
@@ -310,7 +315,7 @@ def xpu_fused_moe(hidden_states,
             K=inter_size,
             groups=num_experts_per_node)
     else:
-        torch.ops._xpu_C.cutlass_grouped_gemm_XE2(
+        torch.ops._xpu_C.cutlass_grouped_gemm_xe2(
             ptr_A=input_A,
             ptr_B=input_B,
             ptr_scales=w2_scales,
