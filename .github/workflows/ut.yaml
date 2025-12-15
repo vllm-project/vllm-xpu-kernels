@@ -38,6 +38,8 @@ jobs:
         if: ${{ always() }} 
         run: |
           docker rm -f vllm-xpu-kernel-ci || true
+          docker image rm -f vllm-xpu-kernel-ci || true;
+          docker system prune -f || true;
 
   run-unit-tests-bmg:
     runs-on: self-hosted-bmg
@@ -70,3 +72,5 @@ jobs:
         if: ${{ always() }} 
         run: |
           docker rm -f vllm-xpu-kernel-ci || true
+          docker image rm -f vllm-xpu-kernel-ci || true;
+          docker system prune -f || true;
