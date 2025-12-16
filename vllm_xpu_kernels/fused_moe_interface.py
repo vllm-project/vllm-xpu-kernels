@@ -160,12 +160,17 @@ def xpu_fused_moe(hidden_states,
         else:
             inter_size = w13.inter_size
 
-    if is_int4:
+    if is_int4 and not hasattr(w13, 'xpu_fused_moe'):
+        w13_tmp = torch.empty_like(w13)
+        w2_tmp = torch.empty_like(w2)
         for i in range(num_experts):
-            w13[i] = implement_zp(w13[i])
-            w2[i] = implement_zp(w2[i])
-        w13.contiguous()
-        w2.contiguous()
+            w13_tmp[i] = implement_zp(w13[i])
+            w2_tmp[i] = implement_zp(w2[i])
+        w13_tmp = w13_tmp.contiguous()
+        w2_tmp = w2_tmp.contiguous()
+        w13.data = w13_tmp
+        w2.data = w2_tmp
+        w13.xpu_fused_moe = True
 
     # TODO: will all integrated in Cpp func. Temporary expose before gemm fusion
     num_rows, hidden_size = list(hidden_states.shape)
