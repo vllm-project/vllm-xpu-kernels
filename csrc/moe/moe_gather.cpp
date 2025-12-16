@@ -47,7 +47,7 @@ class MoeGather {
       moe_ids[i] = unpermuted_row_to_permuted_row[token_idx * TOPK + i];
     }
 
-    T scores[TOPK];
+    float scores[TOPK];
 #pragma unroll
     for (int i = 0; i < TOPK; ++i) {
       scores[i] = topk_weights[token_idx * TOPK + i];
@@ -58,16 +58,16 @@ class MoeGather {
     for (int i = 0; i < loop_count; ++i) {
       const int hidden_idx = i * Stride + local_id_x * ElemsPerItem;
       if (hidden_idx < hidden_size) {
-        T accum[ElemsPerItem];
+        float accum[ElemsPerItem];
 #pragma unroll
         for (int e = 0; e < ElemsPerItem; ++e) {
-          accum[e] = static_cast<T>(0);
+          accum[e] = 0.0f;
         }
 #pragma unroll
         for (int k = 0; k < TOPK; ++k) {
 #pragma unroll
           for (int e = 0; e < ElemsPerItem; ++e) {
-            accum[e] += moe_output[moe_ids[k] * hidden_size + hidden_idx + e] *
+            accum[e] += static_cast<float>(moe_output[moe_ids[k] * hidden_size + hidden_idx + e]) *
                         scores[k];
           }
         }
