@@ -228,14 +228,6 @@ def xpu_fused_moe(hidden_states,
         ws_map["expert_first_token_offset"][1]:
         ws_map["expert_first_token_offset"][1] +
         expert_first_token_offset_size].view(torch.int64)
-    # permuted_row_to_unpermuted_row = workspace[
-    #     ws_map["permuted_row_to_unpermuted_row"][1]:
-    #     ws_map["permuted_row_to_unpermuted_row"][1] +
-    #     permuted_row_to_unpermuted_row_size].view(torch.int32)
-    # permuted_token_selected_experts = workspace[
-    #     ws_map["permuted_token_selected_experts"][1]:
-    #     ws_map["permuted_token_selected_experts"][1] +
-    #     permuted_token_selected_experts_size].view(torch.int32)
     unpermuted_row_to_permuted_row = workspace[
         ws_map["unpermuted_row_to_permuted_row"][1]:
         ws_map["unpermuted_row_to_permuted_row"][1] +
