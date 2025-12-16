@@ -67,8 +67,10 @@ class MoeGather {
         for (int k = 0; k < TOPK; ++k) {
 #pragma unroll
           for (int e = 0; e < ElemsPerItem; ++e) {
-            accum[e] += static_cast<float>(moe_output[moe_ids[k] * hidden_size + hidden_idx + e]) *
-                        scores[k];
+            accum[e] +=
+                static_cast<float>(
+                    moe_output[moe_ids[k] * hidden_size + hidden_idx + e]) *
+                scores[k];
           }
         }
 #pragma unroll
