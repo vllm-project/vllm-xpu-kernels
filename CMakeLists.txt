@@ -376,13 +376,7 @@ endif()
 #
 if(MOE_KERNELS_ENABLED)
   message(STATUS "Enabling _moe_C extension.")
-  set(VLLM_MOE_EXT_SRC
-    "csrc/moe/torch_bindings.cpp"
-    "csrc/moe/grouped_topk.cpp"
-    "csrc/moe/fused_grouped_topk.cpp"
-    "csrc/moe/topk_softmax.cpp"
-    "csrc/moe/moe_align_sum_kernels.cpp"
-    "csrc/moe/moe_lora_align_sum_kernels.cpp")
+  file(GLOB VLLM_MOE_EXT_SRC "csrc/moe/*.cpp")
 
   define_gpu_extension_target(
     _moe_C

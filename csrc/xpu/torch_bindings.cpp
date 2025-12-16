@@ -80,7 +80,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
 
   xpu_ops.def(
-      "fused_moe(Tensor output, Tensor input, Tensor token_selected_experts, "
+      "fused_moe(Tensor input, Tensor token_selected_experts, "
       "Tensor "
       "token_final_scales, Tensor workspace, int hidden_size, int inter_size, "
       "int num_experts_on_rank) -> "

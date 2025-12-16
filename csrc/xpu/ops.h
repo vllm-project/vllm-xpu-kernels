@@ -77,7 +77,6 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     bool is_neox);
 
 void fused_moe(
-    torch::Tensor output,
     torch::Tensor input,
     torch::Tensor token_selected_experts,
     torch::Tensor token_final_scales,

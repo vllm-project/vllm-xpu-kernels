@@ -60,3 +60,10 @@ void topk_softmax(
     torch::Tensor& token_expert_indices,
     torch::Tensor& gating_output,
     const bool renormalize);
+
+void moe_gather(
+    torch::Tensor& output,
+    const torch::Tensor& moe_output,
+    const torch::Tensor& topk_weights,
+    const torch::Tensor& unpermuted_row_to_permuted_row,
+    const int64_t num_experts);

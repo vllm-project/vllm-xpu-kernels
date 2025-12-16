@@ -6,7 +6,6 @@
 typedef at::BFloat16 bfloat16;
 
 void fused_moe(
-    torch::Tensor output,
     torch::Tensor input,
     torch::Tensor token_selected_experts,
     torch::Tensor token_final_scales,
@@ -20,14 +19,13 @@ void fused_moe(
   int ep_size = 1;
   auto const num_experts_total =
       static_cast<int>(num_experts_on_rank * ep_size);
-  auto& stream = at::xpu::getCurrentXPUStream(output.device().index()).queue();
+  auto& stream = at::xpu::getCurrentXPUStream(input.device().index()).queue();
 
   assert(token_selected_experts.dtype() == torch::kInt64);
   auto const* token_selected_experts_ =
       reinterpret_cast<int64_t const*>(token_selected_experts.data_ptr());
   auto const* input_activations =
       reinterpret_cast<bfloat16 const*>(input.data_ptr());
-  auto* final_output = reinterpret_cast<bfloat16*>(output.data_ptr());
   auto const* token_topk_unpermuted_scales =
       reinterpret_cast<float const*>(token_final_scales.data_ptr());
   int const num_experts_per_node = num_experts_total / ep_size;

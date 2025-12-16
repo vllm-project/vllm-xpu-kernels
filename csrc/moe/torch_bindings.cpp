@@ -65,6 +65,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize) -> ()");
   m.impl("topk_softmax", torch::kXPU, &topk_softmax);
+  // Apply topk softmax to the gating outputs.
+  m.def(
+      "moe_gather(Tensor! output, Tensor moe_output, Tensor topk_weights, "
+      "Tensor "
+      "unpermuted_row_to_permuted_row, int num_experts) -> ()");
+  m.impl("moe_gather", torch::kXPU, &moe_gather);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
