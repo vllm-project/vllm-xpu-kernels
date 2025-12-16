@@ -6,7 +6,7 @@
 namespace vllm {
 namespace moe {
 
-template <typename T, int TOPK>
+template <typename T, int TOPK, int ElemsPerItem>
 class MoeGather {
  public:
   MoeGather(
@@ -25,7 +25,6 @@ class MoeGather {
 
   static constexpr int GroupWorkItem = 256;
   static constexpr int WARP_SIZE = 32;
-  static constexpr int ElemsPerItem = sizeof(float) * 4 / sizeof(T);
   static constexpr int Stride = GroupWorkItem * ElemsPerItem;
 
   static inline sycl::nd_range<1> get_nd_range(const int num_tokens) {
@@ -99,31 +98,48 @@ void MoeGatherLauncher(
     const int topk,
     const int hidden_size,
     sycl::queue& queue) {
-#define CASE_TOPK(TOPK)                                 \
-  case TOPK:                                            \
-    queue.submit([&](sycl::handler& cgh) {              \
-      cgh.parallel_for(                                 \
-          MoeGather<T, TOPK>::get_nd_range(num_tokens), \
-          MoeGather<T, TOPK>{                           \
-              output,                                   \
-              moe_output,                               \
-              topk_weights,                             \
-              unpermuted_row_to_permuted_row,           \
-              num_tokens,                               \
-              hidden_size});                            \
-    });                                                 \
+  int elems_per_item = sizeof(float) * 4 / sizeof(T);
+  while (hidden_size % elems_per_item != 0) {
+    elems_per_item /= 2;
+  }
+#define CASE_TOPK(TOPK, ElemsPerItem)                                 \
+  case TOPK:                                                          \
+    queue.submit([&](sycl::handler& cgh) {                            \
+      cgh.parallel_for(                                               \
+          MoeGather<T, TOPK, ElemsPerItem>::get_nd_range(num_tokens), \
+          MoeGather<T, TOPK, ElemsPerItem>{                           \
+              output,                                                 \
+              moe_output,                                             \
+              topk_weights,                                           \
+              unpermuted_row_to_permuted_row,                         \
+              num_tokens,                                             \
+              hidden_size});                                          \
+    });                                                               \
     break;
 
-  switch (topk) {
-    CASE_TOPK(1)
-    CASE_TOPK(2)
-    CASE_TOPK(4)
-    CASE_TOPK(6)
-    CASE_TOPK(8)
-    CASE_TOPK(10)
-    default:
-      TORCH_CHECK(false, "error: not support topk=" + std::to_string(topk));
+#define CASE_ElemsPerItem(TOPK, ElemsPerItem)                                  \
+  case ElemsPerItem:                                                           \
+    switch (TOPK) {                                                            \
+      CASE_TOPK(1, ElemsPerItem)                                               \
+      CASE_TOPK(2, ElemsPerItem)                                               \
+      CASE_TOPK(4, ElemsPerItem)                                               \
+      CASE_TOPK(6, ElemsPerItem)                                               \
+      CASE_TOPK(8, ElemsPerItem)                                               \
+      CASE_TOPK(10, ElemsPerItem)                                              \
+      default:                                                                 \
+        TORCH_CHECK(false, "error: not support TOPK=" + std::to_string(TOPK)); \
+    }                                                                          \
+    break;
+
+  switch (elems_per_item) {
+    CASE_ElemsPerItem(topk, 1) CASE_ElemsPerItem(topk, 2)
+        CASE_ElemsPerItem(topk, 4) CASE_ElemsPerItem(topk, 8) default
+        : TORCH_CHECK(
+              false,
+              "error: not support elems_per_item=" +
+                  std::to_string(elems_per_item));
   }
+#undef CASE_ElemsPerItem
 #undef CASE_TOPK
 }
 
