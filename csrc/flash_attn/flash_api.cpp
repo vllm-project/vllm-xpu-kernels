@@ -1,7 +1,7 @@
 #include "pytorch_shim.h"
 
 #include "core/registration.h"
-#include "xpu/cutlass_kernels/chunk_prefill.hpp"
+#include "xpu/cutlass_kernels/attn/attn_interface.h"
 #include "utils.h"
 #include <torch/all.h>
 
@@ -86,7 +86,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
 
-  cutlass_chunk_prefill_impl(
+  cutlass_chunk_prefill_interface(
       queue,
       q,
       k,

@@ -41,8 +41,8 @@
 
 #include "cute/util/type_traits.hpp"
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
-#include "./collective/chunk_prefill_mainloop.hpp"
-#include "./collective/chunk_prefill_epilogue.hpp"
+#include "../collective/chunk_prefill_mainloop.hpp"
+#include "../collective/chunk_prefill_epilogue.hpp"
 
 namespace cutlass::fmha::kernel {
 

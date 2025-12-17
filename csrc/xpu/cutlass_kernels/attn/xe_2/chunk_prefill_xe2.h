@@ -1,0 +1,22 @@
+#include <torch/all.h>
+
+void cutlass_chunk_prefill_xe2(
+    sycl::queue& queue,
+    const at::Tensor& query,      // [seq_q, heads, head_size]
+    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& value_cache,
+    at::Tensor& out,
+    const at::Tensor& block_table,
+    const at::Tensor& cu_seqlens_q,
+    const at::Tensor& cu_seqlens_k,
+    int max_seqlen_q,
+    int max_seqlen_k,
+    double sm_scale,
+    std::optional<const at::Tensor>& sm_sink_,
+    int window_size_left,
+    int window_size_right,
+    bool is_varlen,
+    bool is_paged,
+    bool is_causal,
+    bool is_local,
+    bool is_sink);

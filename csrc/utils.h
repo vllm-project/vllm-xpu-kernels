@@ -2,6 +2,7 @@
 #include <memory>
 #include <ATen/ATen.h>
 #include <c10/xpu/XPUStream.h>
+#include <c10/xpu/XPUFunctions.h>
 #include <sycl/sycl.hpp>
 
 #define CHECK_DEVICE(x) TORCH_CHECK(x.is_xpu(), #x " must be on XPU")
@@ -15,6 +16,30 @@ static inline sycl::queue& vllmGetQueue(at::DeviceIndex device_index = -1) {
   auto current_stream = c10::xpu::getCurrentXPUStream(device_index);
   auto& queue = current_stream.queue();
   return queue;
+}
+
+namespace syclex = sycl::ext::oneapi::experimental;
+
+static bool is_bmg() {
+  auto device_id = c10::xpu::current_device();
+  auto raw_device = c10::xpu::get_raw_device(device_id);
+  auto architecture = raw_device.get_info<syclex::info::device::architecture>();
+  return architecture == syclex::architecture::intel_gpu_bmg_g21;
+}
+
+static bool is_pvc() {
+  auto device_id = c10::xpu::current_device();
+  auto raw_device = c10::xpu::get_raw_device(device_id);
+  auto architecture = raw_device.get_info<syclex::info::device::architecture>();
+  return architecture == syclex::architecture::intel_gpu_pvc;
+}
+
+static bool is_xe2_arch() {
+  auto device_id = c10::xpu::current_device();
+  auto raw_device = c10::xpu::get_raw_device(device_id);
+  auto architecture = raw_device.get_info<syclex::info::device::architecture>();
+  return architecture == syclex::architecture::intel_gpu_bmg_g21 ||
+         architecture == syclex::architecture::intel_gpu_pvc;
 }
 
 template <typename T>
