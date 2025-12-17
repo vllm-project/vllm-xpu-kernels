@@ -1,7 +1,7 @@
 #include "pytorch_shim.h"
 
 #include "core/registration.h"
-#include "xpu/cutlass_kernels/attn/attn_interface.h"
+#include "xpu/attn/attn_interface.h"
 #include "utils.h"
 #include <torch/all.h>
 

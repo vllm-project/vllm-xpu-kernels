@@ -95,10 +95,6 @@ else()
   message(FATAL_ERROR "Can't find non-XPU installation.")
 endif()
 
-# set(PROJECT_ROOT_DIR ${CMAKE_SOURCE_DIR}/src)
-# message()
-
-
 if(VLLM_TARGET_DEVICE STREQUAL "xpu")
   #
   # For other GPU targets override the GPU architectures detected by cmake/torch
@@ -299,7 +295,7 @@ if(FA2_KERNELS_ENABLED)
   list(APPEND FA2_KERNELS_COMPILE_FLAGS ${VLLM_CUTLASS_FLAGS})
   message(STATUS "FA2_KERNELS_COMPILE_FLAGS: ${FA2_KERNELS_COMPILE_FLAGS}")
   set(FA2_VLLM_INCLUDE_DIRS ${CUTLASS_INCLUDE_DIR} ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR} ${CUTLASS_APP_INCLUDE_DIR})
-  add_subdirectory(csrc/xpu/cutlass_kernels/attn)
+  add_subdirectory(csrc/xpu/attn)
 
   define_gpu_extension_target(
     _vllm_fa2_C
