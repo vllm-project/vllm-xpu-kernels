@@ -162,7 +162,9 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
         w13_bias = None
         w2_bias = None
     # moe gate
-    scores = torch.randn((input_len, num_experts), device=DEVICE, dtype=dtype)
+    scores = torch.randn((input_len, num_experts),
+                         device=DEVICE,
+                         dtype=torch.float32)
     expert_scores, expert_indices = torch.topk(scores,
                                                k=topk,
                                                dim=-1,
@@ -280,7 +282,9 @@ def test_fused_moe_int4(m, n, k, e, topk, dtype, has_bias):
         w13_bias = None
         w2_bias = None
     # moe gate
-    scores = torch.randn((input_len, num_experts), device=DEVICE, dtype=dtype)
+    scores = torch.randn((input_len, num_experts),
+                         device=DEVICE,
+                         dtype=torch.float32)
     expert_scores, expert_indices = torch.topk(scores,
                                                k=topk,
                                                dim=-1,
@@ -380,7 +384,9 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
         w13_bias = None
         w2_bias = None
     # moe gate
-    scores = torch.randn((input_len, num_experts), device=DEVICE, dtype=dtype)
+    scores = torch.randn((input_len, num_experts),
+                         device=DEVICE,
+                         dtype=torch.float32)
     expert_scores, expert_indices = torch.topk(scores,
                                                k=topk,
                                                dim=-1,

@@ -26,7 +26,9 @@ def ref_moe_gather(output, moe_output, topk_weights,
                    unpermuted_row_to_permuted_row, num_experts):
     input_len = output.shape[0]
     topk = topk_weights.shape[1]
-    moe_indices = unpermuted_row_to_permuted_row.view(input_len, topk)
+    moe_indices = unpermuted_row_to_permuted_row.view(topk,
+                                                      input_len).transpose(
+                                                          0, 1)
 
     selected_outputs = moe_output[
         moe_indices]  # (input_len, topk, hidden_size)
@@ -52,7 +54,9 @@ def test_moe_gather(input_len, hidden_size, num_experts, topk, dtype):
                              dtype=dtype,
                              device=DEVICE)
 
-    scores = torch.randn((input_len, num_experts), device=DEVICE, dtype=dtype)
+    scores = torch.randn((input_len, num_experts),
+                         device=DEVICE,
+                         dtype=torch.float32)
     expert_scores, _ = torch.topk(scores, k=topk, dim=-1, sorted=False)
 
     unpermuted_row_to_permuted_row = torch.randperm((input_len * topk),

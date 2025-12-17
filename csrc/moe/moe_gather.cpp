@@ -12,7 +12,7 @@ class MoeGather {
   MoeGather(
       T* output,
       const T* moe_output,
-      const T* topk_weights,
+      const float* topk_weights,
       const int* unpermuted_row_to_permuted_row,
       const int num_tokens,
       const int hidden_size)
@@ -44,7 +44,7 @@ class MoeGather {
     int moe_ids[TOPK];
 #pragma unroll
     for (int i = 0; i < TOPK; ++i) {
-      moe_ids[i] = unpermuted_row_to_permuted_row[token_idx * TOPK + i];
+      moe_ids[i] = unpermuted_row_to_permuted_row[token_idx + i * num_tokens];
     }
 
     float scores[TOPK];
@@ -84,7 +84,7 @@ class MoeGather {
  private:
   T* output;
   const T* moe_output;
-  const T* topk_weights;
+  const float* topk_weights;
   const int* unpermuted_row_to_permuted_row;
   const int num_tokens;
   const int hidden_size;
@@ -94,7 +94,7 @@ template <typename T>
 void MoeGatherLauncher(
     T* output,
     const T* moe_output,
-    const T* topk_weights,
+    const float* topk_weights,
     const int* unpermuted_row_to_permuted_row,
     const int num_tokens,
     const int topk,
@@ -159,6 +159,10 @@ void moe_gather(
   const int topk = topk_weights.size(1);
   const int hidden_size = output.size(1);
 
+  TORCH_CHECK(
+      topk_weights.scalar_type() == torch::kFloat32,
+      "topk_weights must be float32");
+
   const at::DeviceGuard device_guard(output.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 
@@ -166,7 +170,7 @@ void moe_gather(
   vllm::moe::MoeGatherLauncher<T>(                                       \
       reinterpret_cast<T*>(output.data_ptr()),                           \
       reinterpret_cast<T*>(moe_output.data_ptr()),                       \
-      reinterpret_cast<T*>(topk_weights.data_ptr()),                     \
+      reinterpret_cast<float*>(topk_weights.data_ptr()),                 \
       reinterpret_cast<int*>(unpermuted_row_to_permuted_row.data_ptr()), \
       num_tokens,                                                        \
       topk,                                                              \
