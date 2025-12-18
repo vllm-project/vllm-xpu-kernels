@@ -17,6 +17,7 @@ target_include_directories(attn_kernels
 )
 
 set(ATTN_LINK_LIBS)
+set(VLLM_XPU_ENABLE_XE2 ON)
 if(VLLM_XPU_ENABLE_XE2)
     add_subdirectory(xe_2)
     list(APPEND ATTN_LINK_LIBS attn_kernels_xe_2)
