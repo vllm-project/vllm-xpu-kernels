@@ -360,7 +360,8 @@ class topkGatingSoftmax {
 #pragma unroll
     for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
       auto other_thread_max = sycl::permute_group_by_xor(sg, thread_max, mask);
-      thread_max = thread_max > other_thread_max ? thread_max : other_thread_max;
+      thread_max =
+          thread_max > other_thread_max ? thread_max : other_thread_max;
     }
 
     // From this point, thread max in all the threads have the max within the
@@ -422,10 +423,11 @@ class topkGatingSoftmax {
         }
       }
 
-// Now, we perform the argmax reduce. We use the butterfly pattern so threads
-// reach consensus about the max. This will be useful for K > 1 so that the
-// threads can agree on "who" had the max value. That thread can then blank out
-// their max with -inf and the warp can run more iterations...
+      // Now, we perform the argmax reduce. We use the butterfly pattern so
+      // threads reach consensus about the max. This will be useful for K > 1 so
+      // that the threads can agree on "who" had the max value. That thread can
+      // then blank out their max with -inf and the warp can run more
+      // iterations...
       int expert = expert_local;
 #pragma unroll
       for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
@@ -462,7 +464,7 @@ class topkGatingSoftmax {
 
       // Finally, we clear the value in the thread with the current max if there
       // is another iteration to run.
-      if(expert == expert_local){
+      if (expert == expert_local) {
         row_chunk[max_val_idx] = -10000.f;
       }
     }
