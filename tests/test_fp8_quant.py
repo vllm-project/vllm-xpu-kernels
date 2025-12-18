@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import random
 from typing import Optional, Union
 
@@ -8,6 +9,8 @@ import pytest
 import torch
 
 from tests.ops.fp8_quant_op import scaled_fp8_quant
+
+SKIP_TEST_FOR_MINI_SCOPE = os.getenv("XPU_KERNEL_PYTEST_PROFILER") == "MINI"
 
 
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
@@ -206,6 +209,9 @@ def test_dynamic_per_token_fp8_quant(
 @torch.inference_mode()
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
+@pytest.mark.skipif(
+    SKIP_TEST_FOR_MINI_SCOPE,
+    reason="skip fp8 quant large shape test for the mini pytest profiler.")
 def test_fp8_quant_large(seed: int, fp8_dtype: torch.dtype) -> None:
     seed_everything(seed)
 
