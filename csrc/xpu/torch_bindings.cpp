@@ -1,8 +1,5 @@
 #include "core/registration.h"
 #include "xpu/ops.h"
-// #include "xpu/cutlass_kernels/grouped_gemm.hpp"
-// #include
-// "xpu/cutlass_kernels/grouped_gemm_xe2/grouped_gemm_xe2_interface.hpp"
 #include "xpu/grouped_gemm/grouped_gemm_interface.h"
 #include "xpu/lora/lora_ops.h"
 

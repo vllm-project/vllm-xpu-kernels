@@ -182,7 +182,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_GPU_LINK_FLAGS ${FINAL_LINK_OPTIONS})
 
   message(STATUS "Final SYCL compile options: ${VLLM_GPU_COMPILE_FLAGS}")
-  message(STATUS "Final SYCL link options: ${FINAL_LINK_OPTIONS}")
+  message(STATUS "Final SYCL link options: ${VLLM_GPU_LINK_FLAGS}")
 endif()
 
 # sycl-tla setup. Fetch SYCL-TLA code base, and setup related FLAGs
@@ -255,7 +255,7 @@ if(BUILD_SYCL_TLA_KERNELS)
   set(SYCL_TLA_KERNELS_COMPILE_FLAGS ${VLLM_GPU_COMPILE_FLAGS})
   list(APPEND SYCL_TLA_KERNELS_COMPILE_FLAGS ${VLLM_CUTLASS_FLAGS})
 
-  # compile static library for attn and grouped_gemm
+  # compile static library for attn and grouped_gemm, link this library to vLLM extensions shared library
   add_subdirectory(csrc/xpu/attn)
   list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels")
 
@@ -264,7 +264,16 @@ if(BUILD_SYCL_TLA_KERNELS)
 
 endif()
 
+# define vLLM XPU cmake variables
 
+set(VLLM_XPU_INCLUDE_DIR "")
+list(APPEND VLLM_XPU_INCLUDE_DIR ${CMPLR_ROOT}/include/)
+list(APPEND VLLM_XPU_INCLUDE_DIR ${CMPLR_ROOT}/include/sycl/)
+list(APPEND VLLM_XPU_INCLUDE_DIR ${CMPLR_ROOT}/include/syclcompat/)
+message(STATUS "VLLM_XPU_INCLUDE_DIR: ${VLLM_XPU_INCLUDE_DIR}")
+
+set(VLLM_XPU_LINK_LIBRARIES "")
+list(APPEND VLLM_XPU_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
 
 #
 # Define other extension targets
@@ -286,12 +295,6 @@ if(BASIC_KERNELS_ENABLED)
     "csrc/xpu_view.cpp"
   )
   include_directories("/usr/include")
-  list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/)
-  list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/sycl/)
-  list(APPEND VLLM_INCLUDE_DIR ${CMPLR_ROOT}/include/syclcompat/)
-  message(STATUS "VLLM_INCLUDE_DIR: ${VLLM_INCLUDE_DIR}")
-  set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
-  list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
 
   define_gpu_extension_target(
     _C
@@ -301,10 +304,7 @@ if(BASIC_KERNELS_ENABLED)
     COMPILE_FLAGS ${VLLM_GPU_COMPILE_FLAGS}
     LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
-    INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
-    INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-    INCLUDE_DIRECTORIES ${CUTLASS_APP_INCLUDE_DIR}
-    INCLUDE_DIRECTORIES ${VLLM_INCLUDE_DIR}
+    INCLUDE_DIRECTORIES ${VLLM_XPU_INCLUDE_DIR}
     USE_SABI 3
     WITH_SOABI)
 
@@ -318,21 +318,15 @@ if(FA2_KERNELS_ENABLED)
   message(STATUS "Enabling fa2 extension.")
   file(GLOB FA2_GEN_SRCS "csrc/flash_attn/*.cpp")
 
-  # set(FA2_KERNELS_COMPILE_FLAGS ${VLLM_GPU_COMPILE_FLAGS})
-  # list(APPEND FA2_KERNELS_COMPILE_FLAGS ${VLLM_CUTLASS_FLAGS})
-  # message(STATUS "FA2_KERNELS_COMPILE_FLAGS: ${FA2_KERNELS_COMPILE_FLAGS}")
-  # set(FA2_VLLM_INCLUDE_DIRS ${CUTLASS_INCLUDE_DIR} ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR} ${CUTLASS_APP_INCLUDE_DIR})
-  # add_subdirectory(csrc/xpu/attn)
-
   define_gpu_extension_target(
     _vllm_fa2_C
     DESTINATION vllm_xpu_kernels
     LANGUAGE ${VLLM_GPU_LANG}
     SOURCES ${FA2_GEN_SRCS}
-    COMPILE_FLAGS ${FA2_KERNELS_COMPILE_FLAGS}
+    COMPILE_FLAGS ${VLLM_GPU_COMPILE_FLAGS}
     LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
-    INCLUDE_DIRECTORIES ${VLLM_INCLUDE_DIR}
+    INCLUDE_DIRECTORIES ${VLLM_XPU_INCLUDE_DIR}
     USE_SABI 3
     LIBRARIES ${ATTN_KERNEL_LIB_NAME}
     WITH_SOABI)
@@ -345,47 +339,37 @@ endif()
 if(XPU_SPECIFIC_KERNELS_ENABLED)
   message(STATUS "Enabling _xpu_C extension.")
 
-  if(VLLM_GPU_LANG STREQUAL "SYCL")
-    set(VLLM_EXT_XPU_SRC
-      "csrc/xpu/torch_bindings.cpp"
-      "csrc/xpu/lora/lora_shrink.cpp"
-      "csrc/xpu/lora/lora_expand.cpp"
-    )
-    include_directories("/usr/include")
-    set(CMPLR_ROOT $ENV{CMPLR_ROOT})
-    set(VLLM_EXTRA_INCLUDE_DIRECTORIES ${CMPLR_ROOT}/include/sycl)
-    list(APPEND VLLM_LINK_LIBRARIES "sycl" "OpenCL" "pthread" "m" "dl" "torch" )
-    # TODO: check if we need this flags 
-    #list(APPEND VLLM_GPU_FLAGS "-gline-tables-only")
-  endif()
+  set(VLLM_EXT_XPU_SRC
+    "csrc/xpu/torch_bindings.cpp"
+    "csrc/xpu/lora/lora_shrink.cpp"
+    "csrc/xpu/lora/lora_expand.cpp"
+    "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
+  )
+  include_directories("/usr/include")
+  # TODO: check if we need this flags 
+  #list(APPEND VLLM_GPU_FLAGS "-gline-tables-only")
 
   if(ONEDNN_FOUND)
     set(_ONEDNN_SRC)
     file(GLOB _ONEDNN_SRC csrc/xpu/onednn/*.cpp)
     list(APPEND VLLM_EXT_XPU_SRC
       ${_ONEDNN_SRC}
-      "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
     )
     include_directories(${ONEDNN_INCLUDE_DIR})
     link_libraries(${ONEDNN_LIBRARY})
+  else()
+    message(FATAL_ERROR "onednn not found but xpu specific kernels are enabled.")
   endif()
-
-  set(XPU_SPECIFIC_KERNELS_COMPILE_FLAGS ${VLLM_GPU_COMPILE_FLAGS})
-  list(APPEND XPU_SPECIFIC_KERNELS_COMPILE_FLAGS ${VLLM_CUTLASS_FLAGS})
-
 
   define_gpu_extension_target(
     _xpu_C
     DESTINATION vllm_xpu_kernels
     LANGUAGE ${VLLM_GPU_LANG}
     SOURCES ${VLLM_EXT_XPU_SRC}
-    COMPILE_FLAGS ${XPU_SPECIFIC_KERNELS_COMPILE_FLAGS}
+    COMPILE_FLAGS ${VLLM_GPU_COMPILE_FLAGS}
     LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
-    INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
-    INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-    INCLUDE_DIRECTORIES ${CUTLASS_APP_INCLUDE_DIR}
-    INCLUDE_DIRECTORIES ${VLLM_INCLUDE_DIR}
+    INCLUDE_DIRECTORIES ${VLLM_XPU_INCLUDE_DIR}
     LIBRARIES ${GROUPED_GEMM_LIB_NAME}
     USE_SABI 3
     WITH_SOABI)
@@ -407,7 +391,7 @@ if(MOE_KERNELS_ENABLED)
     COMPILE_FLAGS ${VLLM_GPU_COMPILE_FLAGS}
     LINK_FLAGS ${VLLM_GPU_LINK_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
-    INCLUDE_DIRECTORIES ${VLLM_INCLUDE_DIR}
+    INCLUDE_DIRECTORIES ${VLLM_XPU_INCLUDE_DIR}
     USE_SABI 3
     WITH_SOABI)
 endif()

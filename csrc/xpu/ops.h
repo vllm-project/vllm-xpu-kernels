@@ -57,29 +57,6 @@ torch::Tensor cutlass_grouped_gemm_interface(
     bool is_B_int4,
     bool is_B_mxfp4);
 
-// torch::Tensor cutlass_grouped_gemm(
-//     torch::Tensor ptr_A,
-//     torch::Tensor ptr_B,
-//     const c10::optional<at::Tensor>& ptr_bias,
-//     torch::Tensor ptr_D,
-//     torch::Tensor expert_first_token_offset,
-//     int64_t N,
-//     int64_t K,
-//     int64_t groups);
-
-// torch::Tensor cutlass_grouped_gemm_xe2(
-//     torch::Tensor ptr_A,
-//     torch::Tensor ptr_B,
-//     const c10::optional<at::Tensor>& ptr_scales,
-//     const c10::optional<at::Tensor>& ptr_bias,
-//     torch::Tensor ptr_D,
-//     torch::Tensor expert_first_token_offset,
-//     int64_t N,
-//     int64_t K,
-//     int64_t num_experts,
-//     bool is_B_int4,
-//     bool is_B_mxfp4);
-
 std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     const at::Tensor& positions,
     const at::Tensor& query,
