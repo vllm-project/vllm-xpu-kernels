@@ -16,9 +16,9 @@ target_include_directories(attn_kernels_xe_2
         ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
-target_compile_options(attn_kernels_xe_2 PRIVATE ${FA2_KERNELS_COMPILE_FLAGS} -fPIC)
+target_compile_options(attn_kernels_xe_2 PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC)
 target_compile_definitions(attn_kernels_xe_2 PRIVATE -DVLLM_XPU_ENABLE_XE2)
-target_include_directories(attn_kernels_xe_2 PRIVATE ${FA2_VLLM_INCLUDE_DIRS})
+target_include_directories(attn_kernels_xe_2 PRIVATE ${SYCL_TLA_INCLUDE_DIRS})
 
 target_link_libraries(attn_kernels_xe_2 PRIVATE torch)
 target_link_libraries(attn_kernels_xe_2 PRIVATE ${TORCH_LIBRARIES})

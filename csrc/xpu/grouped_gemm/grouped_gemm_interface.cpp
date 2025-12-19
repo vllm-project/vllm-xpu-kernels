@@ -2,9 +2,13 @@
 #include "grouped_gemm_interface.h"
 #include <stdio.h>
 #define VLLM_XPU_ENABLE_XE2
+#define VLLM_XPU_ENABLE_XE_DEFAULT
 
 #ifdef VLLM_XPU_ENABLE_XE2
   #include "xe_2/grouped_gemm_xe2.h"
+#endif
+#ifdef VLLM_XPU_ENABLE_XE_DEFAULT
+  #include "xe_default/grouped_gemm_xe_default.h"
 #endif
 
 torch::Tensor cutlass_grouped_gemm_interface(
@@ -38,18 +42,14 @@ torch::Tensor cutlass_grouped_gemm_interface(
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif
   } else {
-#if 0
+#ifdef VLLM_XPU_ENABLE_XE_DEFAULT
     // FIXME: confirm groups meaning here.
     int64_t groups = num_experts;
-    return cutlass_grouped_gemm_default(
-        ptr_A,
-        ptr_B,
-        ptr_bias,
-        ptr_D,
-        expert_first_token_offset,
-        N,
-        K,
-        groups);
+    return cutlass_grouped_gemm_xe_default(
+        ptr_A, ptr_B, ptr_bias, ptr_D, expert_first_token_offset, N, K, groups);
+#else
+    TORCH_CHECK(
+        false, "XE default cutlass kernel is not enabled in this build.");
 #endif
   }
 }

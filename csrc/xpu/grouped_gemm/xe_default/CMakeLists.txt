@@ -15,9 +15,9 @@ target_include_directories(grouped_gemm_xe_default
 )
 
 
-target_compile_options(grouped_gemm_xe_default PRIVATE ${GROUPED_GEMM_KERNELS_COMPILE_FLAGS} -fPIC)
+target_compile_options(grouped_gemm_xe_default PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC)
 target_compile_definitions(grouped_gemm_xe_default PRIVATE -DVLLM_XPU_ENABLE_XE2)
-target_include_directories(grouped_gemm_xe_default PRIVATE ${GROUPED_GEMM_KERNELS_INCLUDE_DIRS})
+target_include_directories(grouped_gemm_xe_default PRIVATE ${SYCL_TLA_INCLUDE_DIRS})
 
 target_link_libraries(grouped_gemm_xe_default PRIVATE torch)
 target_link_libraries(grouped_gemm_xe_default PRIVATE ${TORCH_LIBRARIES})

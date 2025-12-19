@@ -16,15 +16,14 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
     # expert_token_count_ = torch.tensor(expert_token_count,
     #                                    dtype=torch.int64,
     #                                    device=input_A.device)
+    # if bias is not None:
+    #     bias = bias.repeat_interleave(expert_token_count_, dim=0).float()
 
     def exclusive_prefix_sum(arr):
         prefix = [0]
         for i, x in enumerate(arr):
             prefix.append(prefix[-1] + x)
         return prefix
-
-    # if bias is not None:
-    #     bias = bias.repeat_interleave(expert_token_count_, dim=0).float()
 
     expert_offset = torch.tensor(exclusive_prefix_sum(expert_token_count),
                                  dtype=torch.int64,
@@ -249,19 +248,6 @@ def xpu_fused_moe(hidden_states,
     #     ws_map["permuted_token_final_scales"][1]:
     #     ws_map["permuted_token_final_scales"][1] +
     #     permuted_token_final_scales_size].view(torch.float)
-    if not is_fp8 and not is_int4 and not is_mxfp4:
-        expert_token_count = (expert_first_token_offset[1:] -
-                              expert_first_token_offset[:-1]).to(torch.int64)
-        if w13_bias is None:
-            w13_bias = None
-            w2_bias = None
-        else:
-            if w13_bias.shape == (num_experts, 2 * inter_size):
-                w13_bias = w13_bias.repeat_interleave(expert_token_count,
-                                                      dim=0).float()
-            if w2_bias.shape == (num_experts, hidden_size):
-                w2_bias = w2_bias.repeat_interleave(expert_token_count,
-                                                    dim=0).float()
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)

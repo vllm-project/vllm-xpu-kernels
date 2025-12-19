@@ -9,7 +9,7 @@
 #include <torch/all.h>
 
 #include "../collective/gemm/moe_dtype_policy.hpp"
-#include "utils.h"
+#include "csrc/utils.h"
 
 namespace gpu::cutlass_kernel {
 
