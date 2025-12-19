@@ -34,7 +34,7 @@
 
 */
 #include <torch/all.h>
-#include "utils.h"
+#include "csrc/utils.h"
 
 #include <cute/tensor.hpp>
 #include <random>
@@ -162,7 +162,7 @@ void MoEGEMMLauncher(
   EventManager::getInstance().addEvent(event);
 }
 
-at::Tensor cutlass_grouped_gemm_xe2(
+at::Tensor cutlass_grouped_gemm_xe2_impl(
     at::Tensor& ptr_A,
     at::Tensor& ptr_B,
     const c10::optional<at::Tensor>& ptr_scales,
