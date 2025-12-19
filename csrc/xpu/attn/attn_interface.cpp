@@ -1,6 +1,5 @@
 #include "csrc/utils.h"
 #include "attn_interface.h"
-#define VLLM_XPU_ENABLE_XE2
 
 #ifdef VLLM_XPU_ENABLE_XE2
   #include "attn/xe_2/chunk_prefill_xe2.h"

@@ -16,11 +16,13 @@ target_include_directories(attn_kernels
         ${CMAKE_SOURCE_DIR}
 )
 
-set(ATTN_LINK_LIBS)
+set(ATTN_LINK_LIBS "")
+set(ATTN_COMPLIE_OPTIONS "")
 if(VLLM_XPU_ENABLE_XE2)
     add_subdirectory(xe_2)
     list(APPEND ATTN_LINK_LIBS attn_kernels_xe_2)
+    list(APPEND ATTN_COMPLIE_OPTIONS VLLM_XPU_ENABLE_XE2)
 endif()
 
 target_link_libraries(attn_kernels PUBLIC ${ATTN_LINK_LIBS} torch)
-target_compile_options(attn_kernels PRIVATE -fPIC)
+target_compile_options(attn_kernels PRIVATE -fPIC ${ATTN_COMPLIE_OPTIONS})
