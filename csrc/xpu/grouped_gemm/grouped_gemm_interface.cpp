@@ -1,8 +1,6 @@
 #include "csrc/utils.h"
 #include "grouped_gemm_interface.h"
 #include <stdio.h>
-#define VLLM_XPU_ENABLE_XE2
-#define VLLM_XPU_ENABLE_XE_DEFAULT
 
 #ifdef VLLM_XPU_ENABLE_XE2
   #include "xe_2/grouped_gemm_xe2.h"

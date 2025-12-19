@@ -522,3 +522,115 @@ function (define_gpu_extension_target GPU_MOD_NAME)
 
   install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION} COMPONENT ${GPU_MOD_NAME})
 endfunction()
+
+#
+# Create a static library for XE2 kernels with common configuration.
+# 
+# Arguments:
+#   LIBRARY_NAME: Name of the library to create (e.g., attn_kernels_xe_2)
+#   INCLUDE_CMAKE_SOURCE_DIR: Optional flag to include ${CMAKE_SOURCE_DIR} in include directories
+#
+function(add_xe2_kernel_library LIBRARY_NAME)
+  cmake_parse_arguments(
+    PARSE_ARGV 1
+    ARG
+    "INCLUDE_CMAKE_SOURCE_DIR"  # Boolean options
+    ""                           # Single value keywords
+    ""                           # Multi-value keywords
+  )
+
+  # Set C++ standard
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+  # Find all source files
+  file(GLOB_RECURSE KERNEL_SOURCES "*.cpp")
+
+  # Create static library
+  add_library(${LIBRARY_NAME} STATIC ${KERNEL_SOURCES})
+
+  # Set include directories
+  target_include_directories(${LIBRARY_NAME}
+    PUBLIC
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/..
+  )
+
+  # Optionally add CMAKE_SOURCE_DIR
+  if(ARG_INCLUDE_CMAKE_SOURCE_DIR)
+    target_include_directories(${LIBRARY_NAME}
+      PUBLIC
+        ${CMAKE_SOURCE_DIR}
+    )
+  endif()
+
+  # Set compile options and definitions
+  target_compile_options(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DVLLM_XPU_ENABLE_XE2)
+  target_include_directories(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_INCLUDE_DIRS})
+
+  # Link torch libraries
+  target_link_libraries(${LIBRARY_NAME} PRIVATE torch)
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${TORCH_LIBRARIES})
+
+  # Set link options for XE2 devices
+  set(XE2_GPU_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
+  list(APPEND XE2_GPU_LINK_FLAGS -Xsycl-target-backend=spir64_gen "-device ${XE2_AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
+  target_link_options(${LIBRARY_NAME} PRIVATE ${XE2_GPU_LINK_FLAGS})
+endfunction()
+
+#
+# Create a static library for XE default kernels with common configuration.
+# 
+# Arguments:
+#   LIBRARY_NAME: Name of the library to create (e.g., grouped_gemm_xe_default)
+#   INCLUDE_CMAKE_SOURCE_DIR: Optional flag to include ${CMAKE_SOURCE_DIR} in include directories
+#
+function(add_xe_default_kernel_library LIBRARY_NAME)
+  cmake_parse_arguments(
+    PARSE_ARGV 1
+    ARG
+    "INCLUDE_CMAKE_SOURCE_DIR"  # Boolean options
+    ""                           # Single value keywords
+    ""                           # Multi-value keywords
+  )
+
+  # Set C++ standard
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+  # Find all source files
+  file(GLOB_RECURSE KERNEL_SOURCES "*.cpp")
+
+  # Create static library
+  add_library(${LIBRARY_NAME} STATIC ${KERNEL_SOURCES})
+
+  # Set include directories
+  target_include_directories(${LIBRARY_NAME}
+    PUBLIC
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${CMAKE_CURRENT_SOURCE_DIR}/..
+  )
+
+  # Optionally add CMAKE_SOURCE_DIR
+  if(ARG_INCLUDE_CMAKE_SOURCE_DIR)
+    target_include_directories(${LIBRARY_NAME}
+      PUBLIC
+        ${CMAKE_SOURCE_DIR}
+    )
+  endif()
+
+  # Set compile options and definitions
+  target_compile_options(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DVLLM_XPU_ENABLE_XE_DEFAULT)
+  target_include_directories(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_INCLUDE_DIRS})
+
+  # Link torch libraries
+  target_link_libraries(${LIBRARY_NAME} PRIVATE torch)
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${TORCH_LIBRARIES})
+
+  # Set link options for default devices (AOT_DEVICES instead of XE2_AOT_DEVICES)
+  set(XE_DEFAULT_GPU_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
+  list(APPEND XE_DEFAULT_GPU_LINK_FLAGS -Xsycl-target-backend=spir64_gen "-device ${AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
+  target_link_options(${LIBRARY_NAME} PRIVATE ${XE_DEFAULT_GPU_LINK_FLAGS})
+endfunction()

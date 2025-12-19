@@ -16,12 +16,10 @@ target_include_directories(grouped_gemm
 )
 
 set(GROUPED_GEMM_LINK_LIBS)
-set(VLLM_XPU_ENABLE_XE2 ON)
 if(VLLM_XPU_ENABLE_XE2)
     add_subdirectory(xe_2)
     list(APPEND GROUPED_GEMM_LINK_LIBS grouped_gemm_xe_2)
 endif()
-set(VLLM_XPU_ENABLE_XE_DEFAULT ON)
 if(VLLM_XPU_ENABLE_XE_DEFAULT)
     add_subdirectory(xe_default)
     list(APPEND GROUPED_GEMM_LINK_LIBS grouped_gemm_xe_default)
