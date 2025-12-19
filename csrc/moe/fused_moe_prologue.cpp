@@ -1,11 +1,12 @@
 #include <torch/all.h>
 #include "utils.h"
 #include <iostream>
+#include "fused_moe_prologue.h"
 #include "fused_moe_prologue.hpp"
 
 typedef at::BFloat16 bfloat16;
 
-void fused_moe(
+void fused_moe_prologue(
     torch::Tensor input,
     torch::Tensor token_selected_experts,
     torch::Tensor token_final_scales,

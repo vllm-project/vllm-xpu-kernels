@@ -3,7 +3,6 @@
 #include "xpu/cutlass_kernels/grouped_gemm.hpp"
 #include "xpu/cutlass_kernels/grouped_gemm_xe2/grouped_gemm_xe2_interface.hpp"
 #include "xpu/lora/lora_ops.h"
-#include "xpu/cutlass_kernels/fused_moe.hpp"
 
 #include <torch/library.h>
 #include <torch/version.h>
@@ -78,14 +77,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor indices, int slice_offset, int slice_size, bool add_to_output) "
       "-> ()");
   xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
-
-  xpu_ops.def(
-      "fused_moe(Tensor input, Tensor token_selected_experts, "
-      "Tensor "
-      "token_final_scales, Tensor workspace, int hidden_size, int inter_size, "
-      "int num_experts_on_rank) -> "
-      "()");
-  xpu_ops.impl("fused_moe", torch::kXPU, &fused_moe);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

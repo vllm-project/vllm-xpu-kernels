@@ -221,13 +221,14 @@ def xpu_fused_moe(hidden_states,
                             device=hidden_states.device)
     if topk_ids.dtype == torch.int32:
         topk_ids = topk_ids.to(torch.int64)
-    torch.ops._xpu_C.fused_moe(input=hidden_states,
-                               token_selected_experts=topk_ids,
-                               token_final_scales=topk_weights,
-                               workspace=workspace,
-                               hidden_size=hidden_size,
-                               inter_size=inter_size,
-                               num_experts_on_rank=num_experts_per_node)
+    torch.ops._moe_C.fused_moe_prologue(
+        input=hidden_states,
+        token_selected_experts=topk_ids,
+        token_final_scales=topk_weights,
+        workspace=workspace,
+        hidden_size=hidden_size,
+        inter_size=inter_size,
+        num_experts_on_rank=num_experts_per_node)
 
     expert_first_token_offset = workspace[
         ws_map["expert_first_token_offset"][1]:

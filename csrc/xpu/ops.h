@@ -75,12 +75,3 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     const at::Tensor& cos_sin_cache,
     int64_t rotary_dim,
     bool is_neox);
-
-void fused_moe(
-    torch::Tensor input,
-    torch::Tensor token_selected_experts,
-    torch::Tensor token_final_scales,
-    torch::Tensor workspace,
-    int64_t hidden_size,
-    int64_t inter_size,
-    int64_t num_experts_on_rank);
