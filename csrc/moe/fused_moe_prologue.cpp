@@ -1,7 +1,5 @@
 #include <torch/all.h>
 #include "utils.h"
-#include <iostream>
-#include "fused_moe_prologue.h"
 #include "fused_moe_prologue.hpp"
 
 typedef at::BFloat16 bfloat16;
