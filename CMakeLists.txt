@@ -166,6 +166,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
 
   # TODO: make AOT configurable
   set(AOT_DEVICES "pvc,bmg-g21-a0")
+  set(XE2_AOT_DEVICES "pvc,bmg-g21-a0")
 
   # Final link option be like:
   # icpx -fsycl -fsycl-target=spir64_gen ${SYCL_DEVICE_LINK_FLAGS} -Xsycl-target-backend=spir64_gen '${SYCL_OFFLINE_COMPILER_FLAGS}' kernel.o -o device-code.o
@@ -322,15 +323,12 @@ endif()
 #
 if(XPU_SPECIFIC_KERNELS_ENABLED)
   message(STATUS "Enabling _xpu_C extension.")
-  file(GLOB CUTLASS_BACKEND_SRCS
-    csrc/xpu/cutlass_kernels/*.cpp
-  )
+
   if(VLLM_GPU_LANG STREQUAL "SYCL")
     set(VLLM_EXT_XPU_SRC
       "csrc/xpu/torch_bindings.cpp"
       "csrc/xpu/lora/lora_shrink.cpp"
       "csrc/xpu/lora/lora_expand.cpp"
-      ${CUTLASS_BACKEND_SRCS}
     )
     include_directories("/usr/include")
     set(CMPLR_ROOT $ENV{CMPLR_ROOT})

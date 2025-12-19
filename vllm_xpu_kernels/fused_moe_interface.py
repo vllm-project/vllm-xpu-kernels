@@ -13,9 +13,9 @@ except ImportError as e:
 
 def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
                          k, num_experts):
-    expert_token_count_ = torch.tensor(expert_token_count,
-                                       dtype=torch.int64,
-                                       device=input_A.device)
+    # expert_token_count_ = torch.tensor(expert_token_count,
+    #                                    dtype=torch.int64,
+    #                                    device=input_A.device)
 
     def exclusive_prefix_sum(arr):
         prefix = [0]
@@ -23,21 +23,24 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
             prefix.append(prefix[-1] + x)
         return prefix
 
-    if bias is not None:
-        bias = bias.repeat_interleave(expert_token_count_, dim=0).float()
+    # if bias is not None:
+    #     bias = bias.repeat_interleave(expert_token_count_, dim=0).float()
 
     expert_offset = torch.tensor(exclusive_prefix_sum(expert_token_count),
                                  dtype=torch.int64,
                                  device="xpu")
-    torch.ops._xpu_C.cutlass_grouped_gemm(
+    torch.ops._xpu_C.cutlass_grouped_gemm_interface(
         ptr_A=input_A,
         ptr_B=input_B,
+        ptr_scales=None,
         ptr_bias=bias,
         ptr_D=output,
         expert_first_token_offset=expert_offset,
         N=n,
         K=k,
-        groups=num_experts)
+        num_experts=num_experts,
+        is_B_int4=False,
+        is_B_mxfp4=False)
 
 
 def cutlass_grouped_gemm_xe2(input_A, input_B, scales, bias, output,
@@ -49,7 +52,7 @@ def cutlass_grouped_gemm_xe2(input_A, input_B, scales, bias, output,
                      device=num_rows_per_expert.device),
         torch.cumsum(num_rows_per_expert, dim=0)
     ]).to(torch.int64)
-    torch.ops._xpu_C.cutlass_grouped_gemm_xe2(
+    torch.ops._xpu_C.cutlass_grouped_gemm_interface(
         ptr_A=input_A,
         ptr_B=input_B,
         ptr_scales=scales,
@@ -267,17 +270,20 @@ def xpu_fused_moe(hidden_states,
     input_B = w13
 
     if not is_fp8 and not is_int4 and not is_mxfp4:
-        torch.ops._xpu_C.cutlass_grouped_gemm(
+        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
             ptr_A=gemm1_input,
             ptr_B=input_B,
+            ptr_scales=None,
             ptr_bias=w13_bias,
             ptr_D=gemm1_output,
             expert_first_token_offset=expert_first_token_offset,
             N=2 * inter_size,
             K=hidden_size,
-            groups=num_experts_per_node)
+            num_experts=num_experts_per_node,
+            is_B_int4=is_int4,
+            is_B_mxfp4=is_mxfp4)
     else:
-        torch.ops._xpu_C.cutlass_grouped_gemm_xe2(
+        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
             ptr_A=gemm1_input,
             ptr_B=input_B,
             ptr_scales=w13_scales,
@@ -310,17 +316,20 @@ def xpu_fused_moe(hidden_states,
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
     if not is_fp8 and not is_int4 and not is_mxfp4:
-        torch.ops._xpu_C.cutlass_grouped_gemm(
+        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
             ptr_A=input_A,
             ptr_B=input_B,
+            ptr_scales=None,
             ptr_bias=w2_bias,
             ptr_D=gemm2_output,
             expert_first_token_offset=expert_first_token_offset,
             N=hidden_size,
             K=inter_size,
-            groups=num_experts_per_node)
+            num_experts=num_experts_per_node,
+            is_B_int4=is_int4,
+            is_B_mxfp4=is_mxfp4)
     else:
-        torch.ops._xpu_C.cutlass_grouped_gemm_xe2(
+        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
             ptr_A=input_A,
             ptr_B=input_B,
             ptr_scales=w2_scales,
