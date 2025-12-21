@@ -29,4 +29,5 @@ if(VLLM_XPU_ENABLE_XE_DEFAULT)
 endif()
 
 target_link_libraries(grouped_gemm PUBLIC ${GROUPED_GEMM_LINK_LIBS} torch)
-target_compile_options(grouped_gemm PRIVATE -fPIC ${GROUPED_GEMM_COMPLIE_OPTIONS})
+target_compile_options(grouped_gemm PRIVATE -fPIC)
+add_compile_definitions(grouped_gemm PRIVATE ${GROUPED_GEMM_COMPLIE_OPTIONS})

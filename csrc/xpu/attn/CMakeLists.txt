@@ -25,4 +25,5 @@ if(VLLM_XPU_ENABLE_XE2)
 endif()
 
 target_link_libraries(attn_kernels PUBLIC ${ATTN_LINK_LIBS} torch)
-target_compile_options(attn_kernels PRIVATE -fPIC ${ATTN_COMPLIE_OPTIONS})
+target_compile_options(attn_kernels PRIVATE -fPIC)
+add_compile_definitions(attn_kernels PRIVATE ${ATTN_COMPLIE_OPTIONS})
