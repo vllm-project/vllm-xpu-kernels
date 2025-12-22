@@ -1,5 +1,9 @@
 FROM intel/deep-learning-essentials:2025.2.2-0-devel-ubuntu24.04 AS vllm-base
 
+RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
+    add-apt-repository -y ppa:kobuk-team/intel-graphics
+
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     curl \
@@ -20,11 +24,7 @@ RUN apt clean && apt-get update -y && \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
-RUN apt remove -y intel-opencl-icd libze-intel-gpu1 libze-dev libze-intel-gpu1 libze1 libigc2 libigdfcl2
-RUN apt install -y intel-ocloc
-#install umd
-COPY umd /opt/umd
-RUN dpkg -i --force-all /opt/umd/*deb || true && apt install -f -yqq 
+RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing intel-ocloc
 
 RUN python3 -m pip config set global.break-system-packages true 
 
