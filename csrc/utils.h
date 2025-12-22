@@ -20,26 +20,28 @@ static inline sycl::queue& vllmGetQueue(at::DeviceIndex device_index = -1) {
 
 namespace syclex = sycl::ext::oneapi::experimental;
 
-static bool is_bmg() {
-  auto device_id = c10::xpu::current_device();
+static inline syclex::architecture
+get_device_architecture(at::DeviceIndex device_index = -1) {
+  auto device_id =
+      (device_index == -1) ? c10::xpu::current_device() : device_index;
   auto raw_device = c10::xpu::get_raw_device(device_id);
-  auto architecture = raw_device.get_info<syclex::info::device::architecture>();
-  return architecture == syclex::architecture::intel_gpu_bmg_g21;
+  return raw_device.get_info<syclex::info::device::architecture>();
 }
 
-static bool is_pvc() {
-  auto device_id = c10::xpu::current_device();
-  auto raw_device = c10::xpu::get_raw_device(device_id);
-  auto architecture = raw_device.get_info<syclex::info::device::architecture>();
-  return architecture == syclex::architecture::intel_gpu_pvc;
+static inline bool is_bmg(at::DeviceIndex device_index = -1) {
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_bmg_g21;
 }
 
-static bool is_xe2_arch() {
-  auto device_id = c10::xpu::current_device();
-  auto raw_device = c10::xpu::get_raw_device(device_id);
-  auto architecture = raw_device.get_info<syclex::info::device::architecture>();
-  return architecture == syclex::architecture::intel_gpu_bmg_g21 ||
-         architecture == syclex::architecture::intel_gpu_pvc;
+static inline bool is_pvc(at::DeviceIndex device_index = -1) {
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_pvc;
+}
+
+static inline bool is_xe2_arch(at::DeviceIndex device_index = -1) {
+  auto arch = get_device_architecture(device_index);
+  return arch == syclex::architecture::intel_gpu_bmg_g21 ||
+         arch == syclex::architecture::intel_gpu_pvc;
 }
 
 template <typename T>
