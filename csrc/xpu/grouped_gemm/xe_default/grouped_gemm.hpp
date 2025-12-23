@@ -8,7 +8,7 @@
 /* #include "pytorch_shim.h" */
 #include <torch/all.h>
 
-#include "../collective/gemm/moe_dtype_policy.hpp"
+#include "csrc/xpu/grouped_gemm/collective/gemm/moe_dtype_policy.hpp"
 #include "csrc/utils.h"
 
 namespace gpu::cutlass_kernel {

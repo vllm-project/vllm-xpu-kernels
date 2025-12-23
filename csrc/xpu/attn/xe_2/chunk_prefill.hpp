@@ -16,8 +16,8 @@
 
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
-#include "../collective/chunk_prefill_scheduler.hpp"
-#include "../collective/chunk_prefill_epilogue.hpp"
+#include "csrc/xpu/attn/collective/chunk_prefill_scheduler.hpp"
+#include "csrc/xpu/attn/collective/chunk_prefill_epilogue.hpp"
 #include "chunk_prefill_kernel.hpp"
 
 #include "fmha_utils.hpp"
