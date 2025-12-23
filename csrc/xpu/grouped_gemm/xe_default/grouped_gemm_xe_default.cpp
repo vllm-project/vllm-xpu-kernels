@@ -13,7 +13,8 @@ torch::Tensor cutlass_grouped_gemm_xe_default(
     int64_t num_experts) {
   auto ptr_bias_ = ptr_bias;
   if (ptr_bias.has_value()) {
-    auto expert_token_count = (expert_first_token_offset.slice(0, 1) -
+    auto expert_token_count = (expert_first_token_offset.slice(
+                                   0, 1, expert_first_token_offset.size(0)) -
                                expert_first_token_offset.slice(0, 0, -1))
                                   .to(torch::kInt64);
     ptr_bias_ =
