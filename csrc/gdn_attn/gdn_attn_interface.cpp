@@ -4,6 +4,7 @@
 #include "../dispatch_utils.h"
 
 #include "causal_conv1d.hpp"
+#include "gated_delta_rule.hpp"
 
 void gdn_attention(
     torch::Tensor& core_attn_out,
@@ -55,11 +56,11 @@ void gdn_attention(
     auto& queue = vllm::xpu::vllmGetQueue();
     auto dtype = projected_states_qkvz.dtype();
     auto device = projected_states_qkvz.device();
-    torch::Tensor q_out = torch::empty({num_actual_tokens, num_k_heads * head_k_dim},
+    torch::Tensor q = torch::empty({num_actual_tokens, num_k_heads * head_k_dim},
                             torch::dtype(dtype).device(device).requires_grad(false));
-    torch::Tensor k_out = torch::empty({num_actual_tokens, num_k_heads * head_k_dim},
+    torch::Tensor k = torch::empty({num_actual_tokens, num_k_heads * head_k_dim},
                             torch::dtype(dtype).device(device).requires_grad(false));
-    torch::Tensor v_out = torch::empty({num_actual_tokens, num_v_heads * head_v_dim},
+    torch::Tensor v = torch::empty({num_actual_tokens, num_v_heads * head_v_dim},
                             torch::dtype(dtype).device(device).requires_grad(false));
     gdn::ActMode act_mode;
 
@@ -74,9 +75,9 @@ void gdn_attention(
 
     gdn::causal_conv1d(
         queue,
-        q_out,
-        k_out,
-        v_out,
+        q,
+        k,
+        v,
         z,
         head_k_dim,
         head_v_dim,
@@ -92,6 +93,21 @@ void gdn_attention(
         act_mode,
         pad_slot_id,
         num_actual_tokens
+    );
+
+    gdn::gated_delta_rule(
+        queue,
+        core_attn_out,
+        q,
+        k,
+        v,
+        projected_states_ba,
+        A_log,
+        dt_bias,
+        initial_state,
+        ssm_state,
+        non_spec_query_start_loc,
+        non_spec_state_indices_tensor,
     );
 
 
