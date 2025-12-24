@@ -27,8 +27,8 @@ public:
         T* z_out,
         const int head_k_dim,
         const int head_v_dim,
-        const int num_k_heads,
         const int num_v_heads,
+        const int num_k_heads,
         const T* input,
         const T* weight,
         const T* bias,
@@ -49,8 +49,8 @@ public:
         z_out(z_out),
         head_k_dim(head_k_dim),
         head_v_dim(head_v_dim),
-        num_k_heads(num_k_heads),
         num_v_heads(num_v_heads),
+        num_k_heads(num_k_heads),
         input(input),
         weight(weight),
         bias(bias),
@@ -151,7 +151,7 @@ public:
     }
 
     const T* initial_states_ptr = 
-        (has_initial_state != nullptr && has_initial_state[batch_id])
+        has_initial_state[batch_id]
         ? conv_states + states_id * (Width - 1) * dim
         : nullptr;
 
@@ -218,8 +218,8 @@ private:
     T* z_out;
     const int head_k_dim;
     const int head_v_dim;
-    const int num_k_heads;
     const int num_v_heads;
+    const int num_k_heads;
     const T* input;
     const T* weight;
     const T* bias;
@@ -244,8 +244,8 @@ void kernel_launcher(
     T* z_out,
     const int head_k_dim,
     const int head_v_dim,
-    const int num_k_heads,
     const int num_v_heads,
+    const int num_k_heads,
     const T* input,
     const T* weight,
     const T* bias,
@@ -270,8 +270,8 @@ void kernel_launcher(
             z_out,
             head_k_dim,
             head_v_dim,
-            num_k_heads,
             num_v_heads,
+            num_k_heads,
             input,
             weight,
             bias,
@@ -298,15 +298,15 @@ void causal_conv1d(
     torch::Tensor& z_out,
     const int head_k_dim,
     const int head_v_dim,
-    const int num_k_heads,
     const int num_v_heads,
+    const int num_k_heads,
     const torch::Tensor& input,
     const torch::Tensor& weight,
-    const std::optional<torch::Tensor>& bias,
+    const torch::Tensor& bias,
     torch::Tensor& conv_states,
     const torch::Tensor& query_start_loc,
     const torch::Tensor& cache_indices,
-    const std::optional<torch::Tensor>& has_initial_state,
+    const torch::Tensor& has_initial_state,
     const ActMode& act_mode,
     const int& pad_slot_id,
     const int& num_actual_tokens
@@ -324,15 +324,15 @@ void causal_conv1d(
         reinterpret_cast<scalar_t*>(z_out.data_ptr()),       \
         head_k_dim,       \
         head_v_dim,       \
-        num_k_heads,       \
         num_v_heads,       \
+        num_k_heads,       \
         reinterpret_cast<scalar_t*>(input.data_ptr()),       \
         reinterpret_cast<scalar_t*>(weight.data_ptr()),       \
-        bias.has_value()? reinterpret_cast<scalar_t*>(bias->data_ptr()) : nullptr,       \
+        reinterpret_cast<scalar_t*>(bias.data_ptr()),       \
         reinterpret_cast<scalar_t*>(conv_states.data_ptr()),       \
         reinterpret_cast<int*>(query_start_loc.data_ptr()),       \
         reinterpret_cast<int*>(cache_indices.data_ptr()),       \
-        bias.has_value()? reinterpret_cast<bool*>(has_initial_state->data_ptr()) : nullptr,       \
+        reinterpret_cast<bool*>(has_initial_state.data_ptr()),       \
         act_mode,       \
         pad_slot_id,       \
         num_actual_tokens,            \

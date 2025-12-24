@@ -51,4 +51,48 @@ void gdn_attention(
 
     // check projected_states_ba shape
     TORCH_CHECK(projected_states_ba.size(1) == 2 * num_v_heads / tp_size);
+
+    auto& queue = vllm::xpu::vllmGetQueue();
+    auto dtype = projected_states_qkvz.dtype();
+    auto device = projected_states_qkvz.device();
+    torch::Tensor q_out = torch::empty({num_actual_tokens, num_k_heads * head_k_dim},
+                            torch::dtype(dtype).device(device).requires_grad(false));
+    torch::Tensor k_out = torch::empty({num_actual_tokens, num_k_heads * head_k_dim},
+                            torch::dtype(dtype).device(device).requires_grad(false));
+    torch::Tensor v_out = torch::empty({num_actual_tokens, num_v_heads * head_v_dim},
+                            torch::dtype(dtype).device(device).requires_grad(false));
+    gdn::ActMode act_mode;
+
+    if(activation == "silu"){
+        act_mode = gdn::ActMode::silu;
+    }else if(activation == "swish"){
+        act_mode = gdn::ActMode::swish;
+    }else{
+        TORCH_CHECK(false);
+    }
+    const int pad_slot_id = -1;
+
+    gdn::causal_conv1d(
+        queue,
+        q_out,
+        k_out,
+        v_out,
+        z,
+        head_k_dim,
+        head_v_dim,
+        num_k_heads,
+        num_v_heads,
+        projected_states_qkvz,
+        conv_weights,
+        conv_bias,
+        conv_state,
+        non_spec_query_start_loc,
+        non_spec_state_indices_tensor,
+        has_initial_state,
+        act_mode,
+        pad_slot_id,
+        num_actual_tokens
+    );
+
+
 }
