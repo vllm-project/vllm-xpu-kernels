@@ -179,9 +179,9 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
 
         # scale
         random_exponents = torch.randint(-3, 4, (num_experts, ), device=DEVICE)
-        w13_scales = torch.pow(2.0, random_exponents.float()).to(dtype)
+        w13_scales = torch.pow(2.0, random_exponents.float())
         random_exponents = torch.randint(-3, 4, (num_experts, ), device=DEVICE)
-        w2_scales = torch.pow(2.0, random_exponents.float()).to(dtype)
+        w2_scales = torch.pow(2.0, random_exponents.float())
 
         for i in range(num_experts):
             w13_fp8[i], _ = scaled_fp8_quant(w13[i],

@@ -306,20 +306,21 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     TORCH_CHECK(
         ptr_scales->size(0) == num_experts,
         "ptr_scales.size(0) of fp8 must match num_experts");
+    TORCH_CHECK(ptr_scales->dtype() == at::kFloat, "ptr_scales must be float");
 
-#define W8A16LauncherCallER(policy)                                            \
-  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {                 \
-    using scalar_t = half_t;                                                   \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, scalar_t); \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {            \
-    using scalar_t = half_t;                                                   \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, scalar_t); \
-  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {      \
-    using scalar_t = bfloat16_t;                                               \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, scalar_t); \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {        \
-    using scalar_t = bfloat16_t;                                               \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, scalar_t); \
+#define W8A16LauncherCallER(policy)                                         \
+  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {              \
+    using scalar_t = half_t;                                                \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, float); \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {         \
+    using scalar_t = half_t;                                                \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, float); \
+  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {   \
+    using scalar_t = bfloat16_t;                                            \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, float); \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {     \
+    using scalar_t = bfloat16_t;                                            \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, float); \
   }
 
     if (A_avg_M <= 32) {

@@ -166,7 +166,7 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     input_B = torch.randn((num_experts, k, n), dtype=dtype, device=DEVICE)
     # scale
     random_exponents = torch.randint(-3, 4, (num_experts, ), device=DEVICE)
-    scale_B = torch.pow(2.0, random_exponents.float()).to(dtype)
+    scale_B = torch.pow(2.0, random_exponents.float())
     if has_bias:
         bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE) * 100
     else:
@@ -182,7 +182,8 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
                                              fp8_dtype=fp8_dtype)
     input_B_dequatize = torch.empty_like(input_B, dtype=dtype)
     for i in range(num_experts):
-        input_B_dequatize[i] = input_B_fp8[i].to(dtype) * scale_B[i]
+        input_B_dequatize[i] = (input_B_fp8[i].to(torch.float32) *
+                                scale_B[i]).to(dtype)
 
     # output offset
     num_rows_per_expert = torch.zeros(num_experts,
