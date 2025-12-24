@@ -5,12 +5,12 @@
 #include "../utils.h"
 #include "../dispatch_utils.h"
 
-namespace gdn_attention{
+namespace gdn{
 
 enum class ActMode{
-    silu = 0;
-    swish = 1;
-}
+    silu = 0,
+    swish = 1,
+};
 
 template<typename T, int Width>
 struct causal_conv1d_kernel
@@ -34,7 +34,7 @@ public:
         const T* bias,
         T* conv_states,
         const int* query_start_loc,
-        const T* cache_indices,
+        const int* cache_indices,
         const bool* has_initial_state,
         const ActMode& act_mode,
         const int& pad_slot_id,
@@ -74,13 +74,17 @@ public:
         return sycl::nd_range<2>(global * local, local);
     }
 
-    static inline void silu(float& x){}
-    static inline void swish(float& x){}
+    static inline void act_swish(float& x, float beta=1.0f){
+        x = x / (1.0f + sycl::exp(-x * beta));
+    }
+    static inline void act_silu(float& x){
+        act_swish(x, 1.0f);
+    }
 
   [[sycl::reqd_sub_group_size(32)]] void
   operator()(sycl::nd_item<2> item) const {
-    const int token_id = item.get_group_id(0);
-    const int local_group_id = item.get_group_id(1);
+    const int token_id = item.get_group(0);
+    const int local_group_id = item.get_group(1);
     const int local_id = item.get_group_linear_id();
     const int input_dim_id = local_group_id * elems_per_group + local_id;
 
@@ -132,8 +136,8 @@ public:
     }
 
     if(is_z){
-        int z_dim_id = num_k_heads * z_dim + qkvz_dim_id - (q_dim + k_dim + v_dim);
-        z_out[token_id * z_dim + z_dim_id] = input[token_id * qkvz_dim + qkvz_dim_id];
+        int z_dim_id = k_heads_id * z_dim + qkvz_dim_id - (q_dim + k_dim + v_dim);
+        z_out[token_id * num_k_heads * z_dim + z_dim_id] = input[token_id * input_dim + input_dim_id];
         return;
     }
 
@@ -148,10 +152,10 @@ public:
 
     const T* initial_states_ptr = 
         has_initial_state[batch_id]
-        ? conv_states + batch_id * (Width - 1) * dim
+        ? conv_states + states_id * (Width - 1) * dim
         : nullptr;
 
-    T* states_out_ptr = conv_states + batch_id * (Width - 1) * dim;
+    T* states_out_ptr = conv_states + states_id * (Width - 1) * dim;
 
     T local_weights[Width];
     #pragma unroll
@@ -165,20 +169,31 @@ public:
         local_input[i] = 0;
     }
 
-    int input_start_seq_offset = token_id - seq_start_offset - Width;
+    int seq_cu_len = token_id - seq_start_offset + 1;
+    int input_load_len = seq_cu_len > Width ? Width : seq_cu_len;
+    int states_load_len = seq_cu_len > Width ? 0 : Width - input_load_len;
+    if(states_load_len != 0 && initial_states_ptr != nullptr){
+        for(int i = 0; i < states_load_len; ++i){
+            local_input[i] = initial_states_ptr[(Width - states_load_len + i) * dim + reordered_dim_id];
+        }
+    }
 
-    for(int i = 0; i < Width; ++i){
-        local_input[i] = input[token_id * qkvz_dim + qkvz_dim_id];
+    for(int i = 0; i < input_load_len; ++i){
+        local_input[states_load_len + i] = input[(token_id - input_load_len + i) * input_dim + input_dim_id];
     }
 
     float res = 0.0f;
     #pragma unroll
     for(int i = 0; i < Width; ++i){
-        res += local_input[i] * local_weights[i];
+        res += static_cast<float>(local_input[i]) * static_cast<float>(local_weights[i]);
     }
 
     if(bias != nullptr){
         res += bias[reordered_dim_id];
+    }
+
+    if(seq_end_offset - token_id < Width){
+        states_out_ptr[(Width - 1 - (seq_end_offset - token_id)) * dim + reordered_dim_id] = res;
     }
 
     if(act_mode == ActMode::silu){
@@ -197,10 +212,10 @@ public:
 
   }
 private:
-    const T* q_out;
-    const T* k_out;
-    const T* v_out;
-    const T* z_out;
+    T* q_out;
+    T* k_out;
+    T* v_out;
+    T* z_out;
     const int head_k_dim;
     const int head_v_dim;
     const int num_v_heads;
@@ -210,9 +225,9 @@ private:
     const T* bias;
     T* conv_states;
     const int32_t* query_start_loc;
-    const T* cache_indices;
+    const int* cache_indices;
     const bool* has_initial_state;
-    const ActMode* act_mode;
+    const ActMode act_mode;
     const int pad_slot_id;
     const int num_actual_tokens;
     const int batch_size;
@@ -246,9 +261,9 @@ void kernel_launcher(
 ){
     using KERNEL = causal_conv1d_kernel<T, Width>;
     const int input_dim = num_k_heads * (2 * head_k_dim + 2 * head_v_dim * num_v_heads / num_k_heads);
-    auto range = KERNEL::get_nd_range(seqlen, input_dim);
+    auto range = KERNEL::get_nd_range(num_actual_tokens, input_dim);
     queue.submit([&](sycl::handler& cgh) {
-        Kernel task(
+        KERNEL task(
             q_out,
             k_out,
             v_out,
@@ -296,7 +311,7 @@ void causal_conv1d(
     const int& pad_slot_id,
     const int& num_actual_tokens
 ){
-    const int batch_size = query_start_loc.size() - 1;
+    const int batch_size = query_start_loc.size(0) - 1;
     const int dim = weight.size(0);
     const int width = weight.size(1);
 
@@ -327,19 +342,19 @@ void causal_conv1d(
 
 #define WIDTH_DISPATCH(scalar_t, width)       \
     switch (width){       \
-        case width == 1:       \
+        case 1:       \
             KERNEL_LAUNCHER(scalar_t, 1)       \
             break;       \
-        case width == 2:       \
+        case 2:       \
             KERNEL_LAUNCHER(scalar_t, 2)       \
             break;       \
-        case width == 3:       \
+        case 3:       \
             KERNEL_LAUNCHER(scalar_t, 3)       \
             break;       \
-        case width == 4:       \
+        case 4:       \
             KERNEL_LAUNCHER(scalar_t, 4)       \
             break;       \
-        case width == 5:       \
+        case 5:       \
             KERNEL_LAUNCHER(scalar_t, 5)       \
             break;       \
         default:       \
