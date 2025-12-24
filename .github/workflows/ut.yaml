@@ -33,6 +33,7 @@ jobs:
           xpu-kernel-ci-image \
           /bin/bash -c '
           ZE_AFFINITY_MASK=0 SKIP_HANG_KERNEL=1 pytest -v -s /workspace/vllm-xpu-kernels/tests/
+          VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 pytest -v -s /workspace/vllm-xpu-kernels/tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm
           '
       - name: Remove container
         if: ${{ always() }} 
@@ -67,6 +68,7 @@ jobs:
           ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/ --ignore=/workspace/vllm-xpu-kernels/tests/test_lora_ops.py --ignore=/workspace/vllm-xpu-kernels/tests/test_fp8_quant.py
           # fixme: Running lora UT separately to avoid OOM when running together with other tests.
           ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/test_lora_ops.py
+          VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 pytest -v -s /workspace/vllm-xpu-kernels/tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm
           '
       - name: Remove container
         if: ${{ always() }} 

@@ -21,7 +21,18 @@ torch::Tensor cutlass_grouped_gemm_interface(
     int64_t num_experts,
     bool is_B_int4,
     bool is_B_mxfp4) {
-  if (vllm::xpu::is_xe2_arch()) {
+  if (vllm::xpu::force_xe_default_kernel()) {
+#ifdef VLLM_XPU_ENABLE_XE_DEFAULT
+    int64_t groups = num_experts;
+    return cutlass_grouped_gemm_xe_default(
+        ptr_A, ptr_B, ptr_bias, ptr_D, expert_first_token_offset, N, K, groups);
+#else
+    TORCH_CHECK(
+        false,
+        "XE default cutlass kernel is not enabled in this build, force use XE "
+        "default kernel failed.");
+#endif
+  } else if (vllm::xpu::is_xe2_arch()) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel
     return cutlass_grouped_gemm_xe2(
@@ -41,7 +52,6 @@ torch::Tensor cutlass_grouped_gemm_interface(
 #endif
   } else {
 #ifdef VLLM_XPU_ENABLE_XE_DEFAULT
-    // FIXME: confirm groups meaning here.
     int64_t groups = num_experts;
     return cutlass_grouped_gemm_xe_default(
         ptr_A, ptr_B, ptr_bias, ptr_D, expert_first_token_offset, N, K, groups);

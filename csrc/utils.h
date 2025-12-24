@@ -44,6 +44,20 @@ static inline bool is_xe2_arch(at::DeviceIndex device_index = -1) {
          arch == syclex::architecture::intel_gpu_pvc;
 }
 
+static inline std::optional<std::string> getEnv(const char* name) {
+  if (const char* val = std::getenv(name)) return val;
+  return std::nullopt;
+}
+
+static inline bool force_xe_default_kernel() {
+  auto env_val = getEnv("VLLM_XPU_FORCE_XE_DEFAULT_KERNEL");
+  if (env_val.has_value()) {
+    return env_val.value() == "1" || env_val.value() == "true" ||
+           env_val.value() == "TRUE";
+  }
+  return false;
+}
+
 template <typename T>
 struct SyclTypeTrait {
   using Type = T;
