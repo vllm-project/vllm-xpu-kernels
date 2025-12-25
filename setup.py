@@ -273,6 +273,7 @@ ext_modules = []
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fa2_C"))
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._gdn_C"))
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._xpu_C"))
 
