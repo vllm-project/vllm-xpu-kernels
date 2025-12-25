@@ -177,10 +177,10 @@ public:
     }
 
     // save state
-    #pragma unroll
-    for(int i = 0; i < k_bucket_size; ++i){
-        ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (i * sub_group_size + sg_local_id) * head_v_dim + head_v_dim_id] = state_local[i];
-    } 
+    // #pragma unroll
+    // for(int i = 0; i < k_bucket_size; ++i){
+    //     ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (i * sub_group_size + sg_local_id) * head_v_dim + head_v_dim_id] = state_local[i];
+    // } 
   }
 private:
   T* core_attn_out;

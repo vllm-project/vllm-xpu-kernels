@@ -96,7 +96,7 @@ public:
   operator()(sycl::nd_item<2> item) const {
     const int token_id = item.get_group(0);
     const int local_group_id = item.get_group(1);
-    const int local_id = item.get_group_linear_id();
+    const int local_id = item.get_local_linear_id();
     const int qkvz_elems_id = local_group_id * elems_per_group + local_id;
 
     if(qkvz_elems_id >= qkvz_elems){
@@ -113,7 +113,7 @@ public:
     int qkvz_dim_id = qkvz_elems_id % qkvz_dim;
 
     // reoder b,a
-    if(qkvz_dim_id < num_v_heads / num_k_heads){
+    if(qkvz_dim_id < (num_v_heads / num_k_heads)){
         int step = token_id * num_v_heads + k_heads_id * num_v_heads / num_k_heads;
         b_out[step + qkvz_dim_id] = mixed_ba[step * 2 + qkvz_dim_id];
         a_out[step + qkvz_dim_id] = mixed_ba[step * 2 + num_v_heads / num_k_heads + qkvz_dim_id];
@@ -309,7 +309,7 @@ public:
         T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
         const T* conv_states_tmp_ptr = conv_states_tmp + batch_id * (width - 1) * conv_elems;
         for(int i = elems_start_offset_group + local_id; i < conv_elems; i += group_size){
-            conv_states_ptr[width_id * conv_elems + i] = conv_states_tmp_ptr[width_id * conv_elems + i];
+            // conv_states_ptr[width_id * conv_elems + i] = conv_states_tmp_ptr[width_id * conv_elems + i];
         }
     }
 private:
