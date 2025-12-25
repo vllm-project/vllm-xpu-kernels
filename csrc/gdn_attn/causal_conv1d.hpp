@@ -164,11 +164,11 @@ public:
     // reoder index to map weights
     int reordered_elems_id = 0;
     if(is_q){
-        reordered_elems_id = k_heads_id * q_dim + qkvz_elems_id;
+        reordered_elems_id = k_heads_id * q_dim + qkvz_dim_id;
     }else if(is_k){
-        reordered_elems_id = num_k_heads * q_dim + k_heads_id * k_dim + qkvz_elems_id - q_dim;
+        reordered_elems_id = num_k_heads * q_dim + k_heads_id * k_dim + qkvz_dim_id - q_dim;
     }else if(is_v){
-        reordered_elems_id = num_k_heads * (q_dim + v_dim) + k_heads_id * v_dim + qkvz_elems_id - (q_dim + k_dim);
+        reordered_elems_id = num_k_heads * (q_dim + k_dim) + k_heads_id * v_dim + qkvz_dim_id - (q_dim + k_dim);
     }
 
     // get states cache ptr
@@ -228,11 +228,11 @@ public:
 
     // reoder q, k, v
     if(is_q){
-        q_out[token_id * num_k_heads * q_dim + k_heads_id * q_dim + qkvz_elems_id] = res;
+        q_out[token_id * num_k_heads * q_dim + k_heads_id * q_dim + qkvz_dim_id] = res;
     }else if(is_k){
-        k_out[token_id * num_k_heads * k_dim + k_heads_id * k_dim + qkvz_elems_id - q_dim] = res;
+        k_out[token_id * num_k_heads * k_dim + k_heads_id * k_dim + qkvz_dim_id - q_dim] = res;
     }else if(is_v){
-        v_out[token_id * num_k_heads * v_dim + k_heads_id * v_dim + qkvz_elems_id - (q_dim + k_dim)] = res;
+        v_out[token_id * num_k_heads * v_dim + k_heads_id * v_dim + qkvz_dim_id - (q_dim + k_dim)] = res;
     }
   }
 private:
