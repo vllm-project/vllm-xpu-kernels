@@ -16,6 +16,7 @@ template<typename T, int Width>
 struct causal_conv1d_kernel
 {
 public:
+    static constexpr int sub_group_size = 32;
     static constexpr int group_size = 256;
     static constexpr int elems_per_item = 1;
     static constexpr int elems_per_group = group_size * elems_per_item;
@@ -25,50 +26,56 @@ public:
         T* k_out,
         T* v_out,
         T* z_out,
-        const int head_k_dim,
-        const int head_v_dim,
-        const int num_k_heads,
-        const int num_v_heads,
-        const T* input,
-        const T* weight,
-        const T* bias,
+        T* b_out,
+        T* a_out,
+        const T* mixed_qkvz,
+        const T* mixed_ba,
+        const T* conv_weights,
+        const T* conv_bias,
         T* conv_states,
-        const int* query_start_loc,
-        const int* cache_indices,
-        const bool* has_initial_state,
+        int* query_start_loc,
+        int* cache_indices,
+        bool* has_initial_state,
         const ActMode& act_mode,
         const int& pad_slot_id,
-        const int& num_actual_tokens,
         const int& batch_size,
-        const int& dim,
-        const int& input_dim
+        const int& num_actual_tokens,
+        const int& num_k_heads,
+        const int& head_k_dim,
+        const int& num_v_heads,
+        const int& head_v_dim,
+        const int & qkvz_dim,
+        const int& conv_dim
     ):
         q_out(q_out),
         k_out(k_out),
         v_out(v_out),
         z_out(z_out),
-        head_k_dim(head_k_dim),
-        head_v_dim(head_v_dim),
-        num_k_heads(num_k_heads),
-        num_v_heads(num_v_heads),
-        input(input),
-        weight(weight),
-        bias(bias),
+        b_out(b_out),
+        a_out(a_out),
+        mixed_qkvz(mixed_qkvz),
+        mixed_ba(mixed_ba),
+        conv_weights(conv_weights),
+        conv_bias(conv_bias),
         conv_states(conv_states),
         query_start_loc(query_start_loc),
         cache_indices(cache_indices),
         has_initial_state(has_initial_state),
         act_mode(act_mode),
         pad_slot_id(pad_slot_id),
-        num_actual_tokens(num_actual_tokens),
         batch_size(batch_size),
-        dim(dim),
-        input_dim(input_dim)
+        num_actual_tokens(num_actual_tokens),
+        num_k_heads(num_k_heads),
+        head_k_dim(head_k_dim),
+        num_v_heads(num_v_heads),
+        head_v_dim(head_v_dim),
+        qkvz_dim(qkvz_dim),
+        conv_dim(conv_dim)
     {}
 
     static inline sycl::nd_range<2>
-    get_nd_range(const int seqlen, const int input_dim) {
-        const int groups_per_dim = (input_dim + elems_per_group - 1) / elems_per_group;
+    get_nd_range(const int seqlen, const int qkvz_dim) {
+        const int groups_per_dim = (qkvz_dim + elems_per_group - 1) / elems_per_group;
         sycl::range<2> local(1, group_size);
         sycl::range<2> global(seqlen, groups_per_dim);
         return sycl::nd_range<2>(global * local, local);
@@ -81,7 +88,7 @@ public:
         act_swish(x, 1.0f);
     }
 
-  [[sycl::reqd_sub_group_size(32)]] void
+  [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<2> item) const {
     const int token_id = item.get_group(0);
     const int local_group_id = item.get_group(1);
@@ -137,7 +144,7 @@ public:
 
     if(is_z){
         int z_dim_id = k_heads_id * z_dim + qkvz_dim_id - (q_dim + k_dim + v_dim);
-        z_out[token_id * num_k_heads * z_dim + z_dim_id] = input[token_id * input_dim + input_dim_id];
+        z_out[token_id * num_k_heads * z_dim + z_dim_id] = mixed_qkvz[token_id * input_dim + input_dim_id];
         return;
     }
 
@@ -179,7 +186,7 @@ public:
     }
 
     for(int i = 0; i < input_load_len; ++i){
-        local_input[states_load_len + i] = input[(token_id - input_load_len + i) * input_dim + input_dim_id];
+        local_input[states_load_len + i] = mixed_qkvz[(token_id - input_load_len + i) * input_dim + input_dim_id];
     }
 
     float res = 0.0f;
@@ -216,23 +223,26 @@ private:
     T* k_out;
     T* v_out;
     T* z_out;
-    const int head_k_dim;
-    const int head_v_dim;
-    const int num_k_heads;
-    const int num_v_heads;
-    const T* input;
-    const T* weight;
-    const T* bias;
+    T* b_out;
+    T* a_out;
+    const T* mixed_qkvz;
+    const T* mixed_ba;
+    const T* conv_weights;
+    const T* conv_bias;
     T* conv_states;
     const int32_t* query_start_loc;
     const int* cache_indices;
     const bool* has_initial_state;
     const ActMode act_mode;
     const int pad_slot_id;
-    const int num_actual_tokens;
     const int batch_size;
-    const int dim;
-    const int input_dim;
+    const int num_actual_tokens;
+    const int num_k_heads;
+    const int head_k_dim;
+    const int num_v_heads;
+    const int head_v_dim;
+    const int qkvz_dim;
+    const int conv_dim;
 };
 
 template<typename T, int Width>
@@ -242,49 +252,55 @@ void kernel_launcher(
     T* k_out,
     T* v_out,
     T* z_out,
-    const int head_k_dim,
-    const int head_v_dim,
-    const int num_k_heads,
-    const int num_v_heads,
-    const T* input,
-    const T* weight,
-    const T* bias,
+    T* b_out,
+    T* a_out,
+    const T* mixed_qkvz,
+    const T* mixed_ba,
+    const T* conv_weights,
+    const T* conv_bias,
     T* conv_states,
     int* query_start_loc,
     int* cache_indices,
     bool* has_initial_state,
     const ActMode& act_mode,
     const int& pad_slot_id,
-    const int& num_actual_tokens,
     const int& batch_size,
-    const int& dim
+    const int& num_actual_tokens,
+    const int& num_k_heads,
+    const int& head_k_dim,
+    const int& num_v_heads,
+    const int& head_v_dim,
+    const int & qkvz_dim,
+    const int& conv_dim
 ){
     using KERNEL = causal_conv1d_kernel<T, Width>;
-    const int input_dim = num_k_heads * (2 * head_k_dim + 2 * head_v_dim * num_v_heads / num_k_heads);
-    auto range = KERNEL::get_nd_range(num_actual_tokens, input_dim);
+    auto range = KERNEL::get_nd_range(num_actual_tokens, qkvz_dim);
     queue.submit([&](sycl::handler& cgh) {
         KERNEL task(
             q_out,
             k_out,
             v_out,
             z_out,
-            head_k_dim,
-            head_v_dim,
-            num_k_heads,
-            num_v_heads,
-            input,
-            weight,
-            bias,
+            b_out,
+            a_out,
+            mixed_qkvz,
+            mixed_ba,
+            conv_weights,
+            conv_bias,
             conv_states,
             query_start_loc,
             cache_indices,
             has_initial_state,
             act_mode,
             pad_slot_id,
-            num_actual_tokens,
             batch_size,
-            dim,
-            input_dim
+            num_actual_tokens,
+            num_k_heads,
+            head_k_dim,
+            num_v_heads,
+            head_v_dim,
+            qkvz_dim,
+            conv_dim
         );
         cgh.parallel_for(range, task);
     });
@@ -292,28 +308,32 @@ void kernel_launcher(
 
 void causal_conv1d(
     sycl::queue& queue,
-    torch::Tensor& q_out,
-    torch::Tensor& k_out,
-    torch::Tensor& v_out,
-    torch::Tensor& z_out,
-    const int head_k_dim,
-    const int head_v_dim,
-    const int num_k_heads,
-    const int num_v_heads,
-    const torch::Tensor& input,
-    const torch::Tensor& weight,
-    const std::optional<torch::Tensor>& bias,
-    torch::Tensor& conv_states,
-    const torch::Tensor& query_start_loc,
-    const torch::Tensor& cache_indices,
-    const std::optional<torch::Tensor>& has_initial_state,
-    const ActMode& act_mode,
-    const int& pad_slot_id,
-    const int& num_actual_tokens
+    torch::Tensor& q_out, // [total_seqlen, num_k_heads, head_k_dim]
+    torch::Tensor& k_out, // [total_seqlen, num_k_heads, head_k_dim]
+    torch::Tensor& v_out, // [total_seqlen, num_v_heads, head_v_dim]
+    torch::Tensor& z_out, // [total_seqlen, num_v_heads, head_v_dim]
+    torch::Tensor& b_out, // [total_seqlen, num_v_heads]
+    torch::Tensor& a_out, // [total_seqlen, num_v_heads]
+    const torch::Tensor& mixed_qkvz, // [total_seqlen, num_k_heads * (2 * head_k_dim + 2 * head_v_dim * num_v_heads / num_k_heads)]
+    const torch::Tensor& mixed_ba,  // [total_seqlen, num_k_heads * (2 * num_v_heads / num_k_heads)]
+    const torch::Tensor& conv_weights, // [2 * num_k_heads *  head_k_dim, width]
+    const std::optional<torch::Tensor>& conv_bias, // [2 * num_k_heads *  head_k_dim] or None
+    torch::Tensor& conv_states, // [cache_batch_size, width - 1, 2 * num_k_heads *  head_k_dim]
+    const torch::Tensor& query_start_loc, // [batch_size + 1]
+    const torch::Tensor& cache_indices, // [batch_size]
+    const std::optional<torch::Tensor>& has_initial_state, // [batch_size] or None
+    const ActMode& act_mode, // silu or swish
+    const int& pad_slot_id, // -1
 ){
     const int batch_size = query_start_loc.size(0) - 1;
-    const int dim = weight.size(0);
-    const int width = weight.size(1);
+    const int num_actual_tokens = q_out.size(0);
+    const int num_k_heads = q_out.size(1);
+    const int head_k_dim = q_out.size(2);
+    const int num_v_heads = v_out.size(1);
+    const int head_v_dim = v_out.size(2);
+    const int qkvz_dim = mixed_qkvz.size(2);
+    const int conv_dim = conv_weights.size(0);
+    const int width = conv_weights.size(1);
 
 #define KERNEL_LAUNCHER(scalar_t, width)       \
     kernel_launcher<scalar_t, width>(       \
@@ -322,22 +342,27 @@ void causal_conv1d(
         reinterpret_cast<scalar_t*>(k_out.data_ptr()),       \
         reinterpret_cast<scalar_t*>(v_out.data_ptr()),       \
         reinterpret_cast<scalar_t*>(z_out.data_ptr()),       \
-        head_k_dim,       \
-        head_v_dim,       \
-        num_k_heads,       \
-        num_v_heads,       \
-        reinterpret_cast<scalar_t*>(input.data_ptr()),       \
-        reinterpret_cast<scalar_t*>(weight.data_ptr()),       \
-        bias.has_value()? reinterpret_cast<scalar_t*>(bias->data_ptr()) : nullptr,       \
+        reinterpret_cast<scalar_t*>(b_out.data_ptr()),       \
+        reinterpret_cast<scalar_t*>(a_out.data_ptr()),       \
+        reinterpret_cast<scalar_t*>(mixed_qkvz.data_ptr()),       \
+        reinterpret_cast<scalar_t*>(mixed_ba.data_ptr()),       \
+        reinterpret_cast<scalar_t*>(conv_weights.data_ptr()),       \
+        conv_bias.has_value()? reinterpret_cast<scalar_t*>(conv_bias->data_ptr()) : nullptr,       \
         reinterpret_cast<scalar_t*>(conv_states.data_ptr()),       \
         reinterpret_cast<int*>(query_start_loc.data_ptr()),       \
         reinterpret_cast<int*>(cache_indices.data_ptr()),       \
-        bias.has_value()? reinterpret_cast<bool*>(has_initial_state->data_ptr()) : nullptr,       \
+        has_initial_state.has_value()? reinterpret_cast<bool*>(has_initial_state->data_ptr()) : nullptr,       \
         act_mode,       \
         pad_slot_id,       \
-        num_actual_tokens,            \
         batch_size,          \
-        dim \
+        num_actual_tokens,            \
+        num_k_heads, \
+        head_k_dim, \
+        num_v_heads, \
+        num_k_heads, \
+        head_v_dim, \
+        qkvz_dim, \
+        conv_dim \
     );
 
 #define WIDTH_DISPATCH(scalar_t, width)       \
@@ -361,10 +386,10 @@ void causal_conv1d(
             break;       \
     }
 
-    if(input.scalar_type() == at::kBFloat16){
+    if(mixed_qkvz.scalar_type() == at::kBFloat16){
         using scalar_t = sycl::ext::oneapi::bfloat16;
         WIDTH_DISPATCH(scalar_t, width)
-    }else if(input.scalar_type() == at::kHalf){
+    }else if(mixed_qkvz.scalar_type() == at::kHalf){
         using scalar_t = sycl::half;
         WIDTH_DISPATCH(scalar_t, width)
     }else{

@@ -11,7 +11,6 @@ void gdn_attention(
     const int64_t num_v_heads,
     const int64_t head_k_dim,
     const int64_t head_v_dim,
-    const int64_t tp_size,
     torch::Tensor& conv_state,
     torch::Tensor& ssm_state,
     const torch::Tensor& conv_weights,
