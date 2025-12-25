@@ -33,6 +33,8 @@ public:
         const T* conv_weights,
         const T* conv_bias,
         T* conv_states,
+        const int conv_states_stride_0,
+        T* conv_states_tmp,
         int* query_start_loc,
         int* cache_indices,
         bool* has_initial_state,
@@ -44,8 +46,8 @@ public:
         const int& head_k_dim,
         const int& num_v_heads,
         const int& head_v_dim,
-        const int & qkvz_dim,
-        const int& conv_dim
+        const int& qkvz_elems,
+        const int& conv_elems
     ):
         q_out(q_out),
         k_out(k_out),
@@ -58,6 +60,8 @@ public:
         conv_weights(conv_weights),
         conv_bias(conv_bias),
         conv_states(conv_states),
+        conv_states_stride_0(conv_states_stride_0),
+        conv_states_tmp(conv_states_tmp),
         query_start_loc(query_start_loc),
         cache_indices(cache_indices),
         has_initial_state(has_initial_state),
@@ -69,15 +73,15 @@ public:
         head_k_dim(head_k_dim),
         num_v_heads(num_v_heads),
         head_v_dim(head_v_dim),
-        qkvz_dim(qkvz_dim),
-        conv_dim(conv_dim)
+        qkvz_elems(qkvz_elems),
+        conv_elems(conv_elems)
     {}
 
     static inline sycl::nd_range<2>
-    get_nd_range(const int seqlen, const int qkvz_dim) {
-        const int groups_per_dim = (qkvz_dim + elems_per_group - 1) / elems_per_group;
+    get_nd_range(const int total_seqlen, const int qkvz_elems) {
+        const int groups_per_token = (qkvz_elems + elems_per_group - 1) / elems_per_group;
         sycl::range<2> local(1, group_size);
-        sycl::range<2> global(seqlen, groups_per_dim);
+        sycl::range<2> global(total_seqlen, groups_per_token);
         return sycl::nd_range<2>(global * local, local);
     }
 
@@ -93,7 +97,11 @@ public:
     const int token_id = item.get_group(0);
     const int local_group_id = item.get_group(1);
     const int local_id = item.get_group_linear_id();
-    const int input_dim_id = local_group_id * elems_per_group + local_id;
+    const int qkvz_elems_id = local_group_id * elems_per_group + local_id;
+
+    if(qkvz_elems_id >= qkvz_elems){
+        return;
+    }
 
     const int q_dim = head_k_dim;
     const int k_dim = head_k_dim;
@@ -101,7 +109,17 @@ public:
     const int z_dim = head_v_dim * num_v_heads / num_k_heads;
     const int qkvz_dim = q_dim + k_dim + v_dim + z_dim;
 
+    int k_heads_id = qkvz_elems_id / qkvz_dim;
+    int qkvz_dim_id = qkvz_elems_id % qkvz_dim;
 
+    // reoder b,a
+    if(qkvz_dim_id < num_v_heads / num_k_heads){
+        int step = token_id * num_v_heads + k_heads_id * num_v_heads / num_k_heads;
+        b_out[step + qkvz_dim_id] = mixed_ba[step * 2 + qkvz_dim_id];
+        a_out[step + qkvz_dim_id] = mixed_ba[step * 2 + num_v_heads / num_k_heads + qkvz_dim_id];
+    }
+
+    // get current seq start, end
     int batch_id = batch_size - 1;
     int seq_start_offset = 0;
     int seq_end_offset = 0;
@@ -114,18 +132,12 @@ public:
         }
     }
 
+    // get states cache location
     int states_id = cache_indices[batch_id];
 
     if (states_id == pad_slot_id){
         return;
     }
-
-    if(input_dim_id >= input_dim){
-        return;
-    }
-
-    int k_heads_id = input_dim_id / qkvz_dim;
-    int qkvz_dim_id = input_dim_id % qkvz_dim;
 
     bool is_q = false;
     bool is_k = false;
@@ -142,34 +154,37 @@ public:
         is_z = true;
     }
 
+    // reoder z
     if(is_z){
-        int z_dim_id = k_heads_id * z_dim + qkvz_dim_id - (q_dim + k_dim + v_dim);
-        z_out[token_id * num_k_heads * z_dim + z_dim_id] = mixed_qkvz[token_id * input_dim + input_dim_id];
+        int z_elems_id = k_heads_id * z_dim + qkvz_dim_id - (q_dim + k_dim + v_dim);
+        z_out[token_id * num_k_heads * z_dim + z_elems_id] = mixed_qkvz[token_id * qkvz_elems + qkvz_elems_id];
         return;
     }
 
-    int reordered_dim_id = 0;
+    // reoder index to map weights
+    int reordered_elems_id = 0;
     if(is_q){
-        reordered_dim_id = k_heads_id * q_dim + qkvz_dim_id;
+        reordered_elems_id = k_heads_id * q_dim + qkvz_elems_id;
     }else if(is_k){
-        reordered_dim_id = num_k_heads * q_dim + k_heads_id * k_dim + qkvz_dim_id - q_dim;
+        reordered_elems_id = num_k_heads * q_dim + k_heads_id * k_dim + qkvz_elems_id - q_dim;
     }else if(is_v){
-        reordered_dim_id = num_k_heads * (q_dim + v_dim) + k_heads_id * v_dim + qkvz_dim_id - (q_dim + k_dim);
+        reordered_elems_id = num_k_heads * (q_dim + v_dim) + k_heads_id * v_dim + qkvz_elems_id - (q_dim + k_dim);
     }
 
-    const T* initial_states_ptr = 
+    // get states cache ptr
+    const T* conv_states_ptr = 
         (has_initial_state != nullptr && has_initial_state[batch_id])
-        ? conv_states + states_id * (Width - 1) * dim
+        ? conv_states + states_id * conv_states_stride_0
         : nullptr;
 
-    T* states_out_ptr = conv_states + states_id * (Width - 1) * dim;
-
+    // load weights
     T local_weights[Width];
     #pragma unroll
     for(int i = 0; i < Width; ++i){
-        local_weights[i] = weight[reordered_dim_id * Width + i];
+        local_weights[i] = conv_weights[reordered_elems_id * Width + i];
     }
 
+    // load input
     T local_input[Width];
     #pragma unroll
     for(int i = 0; i < Width; ++i){
@@ -177,16 +192,16 @@ public:
     }
 
     int seq_cu_len = token_id - seq_start_offset + 1;
-    int input_load_len = seq_cu_len > Width ? Width : seq_cu_len;
-    int states_load_len = seq_cu_len > Width ? 0 : Width - input_load_len;
-    if(states_load_len != 0 && initial_states_ptr != nullptr){
+    int input_load_len = seq_cu_len >= Width ? Width : seq_cu_len;
+    int states_load_len = seq_cu_len >= Width ? 0 : Width - input_load_len;
+    if(states_load_len != 0 && conv_states_ptr != nullptr){
         for(int i = 0; i < states_load_len; ++i){
-            local_input[i] = initial_states_ptr[(Width - states_load_len + i) * dim + reordered_dim_id];
+            local_input[i] = conv_states_ptr[(Width - 1 - states_load_len + i) * conv_elems + reordered_elems_id];
         }
     }
 
     for(int i = 0; i < input_load_len; ++i){
-        local_input[states_load_len + i] = mixed_qkvz[(token_id - input_load_len + i) * input_dim + input_dim_id];
+        local_input[states_load_len + i] = mixed_qkvz[(token_id - input_load_len + 1 + i) * qkvz_elems + qkvz_elems_id];
     }
 
     float res = 0.0f;
@@ -195,12 +210,14 @@ public:
         res += static_cast<float>(local_input[i]) * static_cast<float>(local_weights[i]);
     }
 
-    if(bias != nullptr){
-        res += bias[reordered_dim_id];
+    if(conv_bias != nullptr){
+        res += conv_bias[reordered_elems_id];
     }
 
+    // save states
+    // hard to update states inplace, because current group is unable to know if old states are needed by other group
     if(seq_end_offset - token_id < Width){
-        states_out_ptr[(Width - 1 - (seq_end_offset - token_id)) * dim + reordered_dim_id] = res;
+        conv_states_tmp[batch_id * (Width - 1) * conv_elems + (Width - 1 - (seq_end_offset - token_id)) * conv_elems + reordered_elems_id] = res;
     }
 
     if(act_mode == ActMode::silu){
@@ -209,14 +226,14 @@ public:
         act_swish(res);
     }
 
+    // reoder q, k, v
     if(is_q){
-        q_out[token_id * num_k_heads * q_dim + k_heads_id * q_dim + qkvz_dim_id] = res;
+        q_out[token_id * num_k_heads * q_dim + k_heads_id * q_dim + qkvz_elems_id] = res;
     }else if(is_k){
-        k_out[token_id * num_k_heads * k_dim + k_heads_id * k_dim + qkvz_dim_id - q_dim] = res;
+        k_out[token_id * num_k_heads * k_dim + k_heads_id * k_dim + qkvz_elems_id - q_dim] = res;
     }else if(is_v){
-        v_out[token_id * num_k_heads * v_dim + k_heads_id * v_dim + qkvz_dim_id - (q_dim + k_dim)] = res;
+        v_out[token_id * num_k_heads * v_dim + k_heads_id * v_dim + qkvz_elems_id - (q_dim + k_dim)] = res;
     }
-
   }
 private:
     T* q_out;
@@ -230,6 +247,8 @@ private:
     const T* conv_weights;
     const T* conv_bias;
     T* conv_states;
+    const int conv_states_stride_0;
+    T* conv_states_tmp;
     const int32_t* query_start_loc;
     const int* cache_indices;
     const bool* has_initial_state;
@@ -241,8 +260,65 @@ private:
     const int head_k_dim;
     const int num_v_heads;
     const int head_v_dim;
-    const int qkvz_dim;
-    const int conv_dim;
+    const int qkvz_elems;
+    const int conv_elems;
+};
+
+template<typename T>
+struct update_states_kernel
+{
+public:
+    static constexpr int sub_group_size = 32;
+    static constexpr int group_size = 256;
+    static constexpr int elems_per_item = 4;
+    static constexpr int elems_per_group = group_size * elems_per_item;
+
+    update_states_kernel(
+        T* conv_states,
+        const int conv_states_stride_0,
+        const T* conv_states_tmp,
+        const int* cache_indices,
+        const int width,
+        const int conv_elems
+    ):
+        conv_states(conv_states),
+        conv_states_stride_0(conv_states_stride_0),
+        conv_states_tmp(conv_states_tmp),
+        cache_indices(cache_indices),
+        width(width),
+        conv_elems(conv_elems)
+    {}
+
+    static inline sycl::nd_range<3>
+    get_nd_range(const int batch_size, const int width, const int conv_elems) {
+        const int groups_per_token = (conv_elems + elems_per_group - 1) / elems_per_group;
+        sycl::range<3> local(1, 1, group_size);
+        sycl::range<3> global(batch_size, (width - 1), groups_per_token);
+        return sycl::nd_range<3>(global * local, local);
+    }
+
+    [[sycl::reqd_sub_group_size(sub_group_size)]] void
+    operator()(sycl::nd_item<3> item) const {
+        const int batch_id = item.get_group(0);
+        const int width_id = item.get_group(1);
+        const int local_group_id = item.get_group(2);
+        const int local_id = item.get_local_linear_id();
+        const int elems_start_offset_group = local_group_id * elems_per_group;
+
+        int states_id = cache_indices[batch_id];
+        T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
+        const T* conv_states_tmp_ptr = conv_states_tmp + batch_id * (width - 1) * conv_elems;
+        for(int i = elems_start_offset_group + local_id; i < conv_elems; i += group_size){
+            conv_states_ptr[width_id * conv_elems + i] = conv_states_tmp_ptr[width_id * conv_elems + i];
+        }
+    }
+private:
+    T* conv_states;
+    const int conv_states_stride_0;
+    const T* conv_states_tmp;
+    const int* cache_indices;
+    const int width;
+    const int conv_elems;
 };
 
 template<typename T, int Width>
@@ -259,6 +335,8 @@ void kernel_launcher(
     const T* conv_weights,
     const T* conv_bias,
     T* conv_states,
+    const int conv_states_stride_0,
+    T* conv_states_tmp,
     int* query_start_loc,
     int* cache_indices,
     bool* has_initial_state,
@@ -270,13 +348,13 @@ void kernel_launcher(
     const int& head_k_dim,
     const int& num_v_heads,
     const int& head_v_dim,
-    const int & qkvz_dim,
-    const int& conv_dim
+    const int& qkvz_elems,
+    const int& conv_elems
 ){
-    using KERNEL = causal_conv1d_kernel<T, Width>;
-    auto range = KERNEL::get_nd_range(num_actual_tokens, qkvz_dim);
+    using KERNEL_MAIN = causal_conv1d_kernel<T, Width>;
+    auto range_main = KERNEL_MAIN::get_nd_range(num_actual_tokens, qkvz_elems);
     queue.submit([&](sycl::handler& cgh) {
-        KERNEL task(
+        KERNEL_MAIN task(
             q_out,
             k_out,
             v_out,
@@ -288,6 +366,8 @@ void kernel_launcher(
             conv_weights,
             conv_bias,
             conv_states,
+            conv_states_stride_0,
+            conv_states_tmp,
             query_start_loc,
             cache_indices,
             has_initial_state,
@@ -299,10 +379,24 @@ void kernel_launcher(
             head_k_dim,
             num_v_heads,
             head_v_dim,
-            qkvz_dim,
-            conv_dim
+            qkvz_elems,
+            conv_elems
         );
-        cgh.parallel_for(range, task);
+        cgh.parallel_for(range_main, task);
+    });
+
+    using KERNEL_UPDATE = update_states_kernel<T>;
+    auto range_update = KERNEL_UPDATE::get_nd_range(batch_size, Width, conv_elems);
+    queue.submit([&](sycl::handler& cgh) {
+        KERNEL_UPDATE task(
+            conv_states,
+            conv_states_stride_0,
+            conv_states_tmp,
+            cache_indices,
+            Width,
+            conv_elems
+        );
+        cgh.parallel_for(range_update, task);
     });
 }
 
@@ -316,14 +410,14 @@ void causal_conv1d(
     torch::Tensor& a_out, // [total_seqlen, num_v_heads]
     const torch::Tensor& mixed_qkvz, // [total_seqlen, num_k_heads * (2 * head_k_dim + 2 * head_v_dim * num_v_heads / num_k_heads)]
     const torch::Tensor& mixed_ba,  // [total_seqlen, num_k_heads * (2 * num_v_heads / num_k_heads)]
-    const torch::Tensor& conv_weights, // [2 * num_k_heads *  head_k_dim, width]
-    const std::optional<torch::Tensor>& conv_bias, // [2 * num_k_heads *  head_k_dim] or None
-    torch::Tensor& conv_states, // [cache_batch_size, width - 1, 2 * num_k_heads *  head_k_dim]
+    const torch::Tensor& conv_weights, // [num_k_heads * (2 * head_k_dim + head_v_dim * num_v_heads / num_k_heads), width]
+    const std::optional<torch::Tensor>& conv_bias, // [num_k_heads * (2 * head_k_dim + head_v_dim * num_v_heads / num_k_heads)] or None
+    torch::Tensor& conv_states, // [cache_batch_size, width - 1, num_k_heads * (2 * head_k_dim + head_v_dim * num_v_heads / num_k_heads)]
     const torch::Tensor& query_start_loc, // [batch_size + 1]
     const torch::Tensor& cache_indices, // [batch_size]
     const std::optional<torch::Tensor>& has_initial_state, // [batch_size] or None
     const ActMode& act_mode, // silu or swish
-    const int& pad_slot_id, // -1
+    const int& pad_slot_id // -1
 ){
     const int batch_size = query_start_loc.size(0) - 1;
     const int num_actual_tokens = q_out.size(0);
@@ -331,9 +425,15 @@ void causal_conv1d(
     const int head_k_dim = q_out.size(2);
     const int num_v_heads = v_out.size(1);
     const int head_v_dim = v_out.size(2);
-    const int qkvz_dim = mixed_qkvz.size(2);
-    const int conv_dim = conv_weights.size(0);
+    const int qkvz_elems = mixed_qkvz.size(1);
+    const int conv_elems = conv_weights.size(0);
     const int width = conv_weights.size(1);
+    const int conv_states_stride_0 = conv_states.stride(0);
+
+    auto dtype = conv_states.dtype();
+    auto device = conv_states.device();
+    torch::Tensor conv_states_tmp = torch::empty({batch_size, width - 1, conv_elems},
+                            torch::dtype(dtype).device(device).requires_grad(false));
 
 #define KERNEL_LAUNCHER(scalar_t, width)       \
     kernel_launcher<scalar_t, width>(       \
@@ -349,6 +449,8 @@ void causal_conv1d(
         reinterpret_cast<scalar_t*>(conv_weights.data_ptr()),       \
         conv_bias.has_value()? reinterpret_cast<scalar_t*>(conv_bias->data_ptr()) : nullptr,       \
         reinterpret_cast<scalar_t*>(conv_states.data_ptr()),       \
+        conv_states_stride_0, \
+        reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),       \
         reinterpret_cast<int*>(query_start_loc.data_ptr()),       \
         reinterpret_cast<int*>(cache_indices.data_ptr()),       \
         has_initial_state.has_value()? reinterpret_cast<bool*>(has_initial_state->data_ptr()) : nullptr,       \
@@ -359,10 +461,9 @@ void causal_conv1d(
         num_k_heads, \
         head_k_dim, \
         num_v_heads, \
-        num_k_heads, \
         head_v_dim, \
-        qkvz_dim, \
-        conv_dim \
+        qkvz_elems, \
+        conv_elems \
     );
 
 #define WIDTH_DISPATCH(scalar_t, width)       \
@@ -396,6 +497,8 @@ void causal_conv1d(
         using scalar_t = float;
         WIDTH_DISPATCH(scalar_t, width)
     }
+#undef WIDTH_DISPATCH
+#undef KERNEL_LAUNCHER
 }
 
 }

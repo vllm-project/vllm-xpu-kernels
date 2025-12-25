@@ -15,10 +15,10 @@ void gdn_attention(
     const int64_t num_v_heads,
     const int64_t head_k_dim,
     const int64_t head_v_dim,
-    torch::Tensor& conv_state,  // [cache_batch_size, width - 1, 2 * num_k_heads *  head_k_dim]
+    torch::Tensor& conv_state,  // [cache_batch_size, width - 1, num_k_heads * (2 * head_k_dim + head_v_dim * num_v_heads / num_k_heads)]
     torch::Tensor& ssm_state,   // [cache_batch_size, num_v_heads, head_k_dim, head_v_dim]
-    const torch::Tensor& conv_weights,   // [2 * num_k_heads *  head_k_dim, width]
-    const std::optional<torch::Tensor>& conv_bias, // [2 * num_k_heads *  head_k_dim] or None
+    const torch::Tensor& conv_weights,   // [num_k_heads * (2 * head_k_dim + head_v_dim * num_v_heads / num_k_heads), width]
+    const std::optional<torch::Tensor>& conv_bias, // [num_k_heads * (2 * head_k_dim + head_v_dim * num_v_heads / num_k_heads)] or None
     const std::string& activation,
     const torch::Tensor& A_log,  // [num_v_heads]
     const torch::Tensor& dt_bias, // [num_v_heads]
@@ -29,13 +29,20 @@ void gdn_attention(
     const torch::Tensor& non_spec_state_indices_tensor,  // [batch_size]
     const int64_t num_actual_tokens
 ) {
+    TORCH_CHECK(core_attn_out.is_contiguous(), "core_attn_out must be contiguous");
+    TORCH_CHECK(z.is_contiguous(), "z must be contiguous");
     TORCH_CHECK(projected_states_qkvz.is_contiguous(), "projected_states_qkvz must be contiguous");
     TORCH_CHECK(projected_states_ba.is_contiguous(), "projected_states_ba must be contiguous");
-    TORCH_CHECK(core_attn_out.is_contiguous(), "core_attn_out must be contiguous");
+    TORCH_CHECK(conv_state[0].is_contiguous(), "conv_state of each batch must be contiguous");
+    TORCH_CHECK(ssm_state[0].is_contiguous(), "ssm_state of each batch must be contiguous");
+    TORCH_CHECK(conv_weights.is_contiguous(), "conv_weights must be contiguous");
+    TORCH_CHECK(A_log.is_contiguous(), "A_log must be contiguous");
+    TORCH_CHECK(dt_bias.is_contiguous(), "dt_bias must be contiguous");
+    TORCH_CHECK(non_spec_query_start_loc.is_contiguous(), "non_spec_query_start_loc must be contiguous");
+    TORCH_CHECK(non_spec_state_indices_tensor.is_contiguous(), "non_spec_state_indices_tensor must be contiguous");
 
     // check core_attn_out shape
-    int num_tokens = core_attn_out.size(0);
-    TORCH_CHECK(num_tokens == num_actual_tokens);
+    TORCH_CHECK(core_attn_out.size(0) == num_actual_tokens);
     TORCH_CHECK(core_attn_out.size(1) == num_v_heads);
     TORCH_CHECK(core_attn_out.size(2) == head_v_dim);
 
@@ -45,9 +52,11 @@ void gdn_attention(
     TORCH_CHECK(z.size(2) == core_attn_out.size(2));
 
     // check projected_states_qkvz shape
+    TORCH_CHECK(projected_states_qkvz.size(0) == num_actual_tokens);
     TORCH_CHECK(projected_states_qkvz.size(1) == num_k_heads * (2 * head_k_dim + 2 * head_v_dim * num_v_heads / num_k_heads));
 
     // check projected_states_ba shape
+    TORCH_CHECK(projected_states_ba.size(0) == num_actual_tokens);
     TORCH_CHECK(projected_states_ba.size(1) == 2 * num_v_heads);
 
     auto& queue = vllm::xpu::vllmGetQueue();
@@ -74,7 +83,7 @@ void gdn_attention(
     }
     const int pad_slot_id = -1;
 
-    // conv q,k and split q,k,v,z,b,a for next op
+    // conv q,k,v and split q,k,v,z,b,a for next op
     gdn::causal_conv1d(
         queue,
         q,
@@ -109,8 +118,7 @@ void gdn_attention(
         ssm_state,
         non_spec_query_start_loc,
         non_spec_state_indices_tensor,
-        has_initial_state,
+        has_initial_state
     );
-
 
 }

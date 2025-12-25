@@ -21,10 +21,11 @@ public:
         const T* k,
         const T* v,
         const T* b,
-        const T* as,
+        const T* a,
         const T* A_log,
         const T* dt_bias,
         T* ssm_state,
+        const int ssm_state_stride_0,
         const int* query_start_loc,
         const int* cache_indices,
         const bool* has_initial_state,
@@ -44,6 +45,7 @@ public:
         A_log(A_log),
         dt_bias(dt_bias),
         ssm_state(ssm_state),
+        ssm_state_stride_0(ssm_state_stride_0),
         query_start_loc(query_start_loc),
         cache_indices(cache_indices),
         has_initial_state(has_initial_state),
@@ -60,7 +62,7 @@ public:
         int num_v_bucket = (head_v_dim + sg_per_group - 1) / sg_per_group;
         sycl::range<3> local(1, 1, group_size);
         sycl::range<3> global(batch_size, num_v_heads, num_v_bucket);
-        return sycl::nd_range<2>(global * local, local);
+        return sycl::nd_range<3>(global * local, local);
     }
 
     static inline float act_sigmiod(float& x){
@@ -97,7 +99,7 @@ public:
     float q_local[k_bucket_size];
     float k_local[k_bucket_size];
 
-    T* ssm_state_ptr = ssm_state + cache_indices[batch_id] * num_v_heads * head_k_dim * head_v_dim;
+    T* ssm_state_ptr = ssm_state + cache_indices[batch_id] * ssm_state_stride_0;
 
     // load state
     if(has_initial_state == nullptr || has_initial_state[batch_id]){
@@ -118,12 +120,12 @@ public:
     // The state of each token is calculated iteratively.
     // O(t) = S(t) * q(t)
     // S(t) = g(t)* S(t - 1) + (v(t) - g(t) * S(t - 1)* k(t)) * beta(t) * k(t)
-    for(int t = seq_start_offset; t < seq_end_offset, ++t){
+    for(int t = seq_start_offset; t < seq_end_offset; ++t){
         // act beta(t), g(t)
         float b_local = b[t * num_v_heads + num_v_heads_id];
         float beta = act_sigmiod(b_local);
-        float a_local = a[t * num_v_heads + num_v_heads_id];
-        float g = -A_log_local * act_softplus(a_local + dt_bias_local);
+        float a_local = a[t * num_v_heads + num_v_heads_id] + dt_bias_local;
+        float g = -A_log_local * act_softplus(a_local);
 
         float q_sum = 0.0f;
         float k_sum = 0.0f;
@@ -156,7 +158,7 @@ public:
         kv_mem = sycl::reduce_over_group(sg, kv_mem, sycl::plus<>());
 
         // get (v(t) - g(t) * S(t - 1)* k(t)) * beta(t)
-        delta = (v[t * num_v_heads * head_v_dim + num_v_heads_id * head_v_dim + head_v_dim_id] - kv_mem) * beta;
+        float delta = (v[t * num_v_heads * head_v_dim + num_v_heads_id * head_v_dim + head_v_dim_id] - kv_mem) * beta;
 
         float res = 0.0f;
         #pragma unroll
@@ -186,10 +188,11 @@ private:
   const T* k;
   const T* v;
   const T* b;
-  const T* a
+  const T* a;
   const T* A_log;
   const T* dt_bias;
   T* ssm_state;
+  const int ssm_state_stride_0;
   const int* query_start_loc;
   const int* cache_indices;
   const bool* has_initial_state;
@@ -213,6 +216,7 @@ void kernel_launcher(
     const T* A_log,
     const T* dt_bias,
     T* ssm_state,
+    const int ssm_state_stride_0,
     const int* query_start_loc,
     const int* cache_indices,
     const bool* has_initial_state,
@@ -236,6 +240,7 @@ void kernel_launcher(
             A_log,
             dt_bias,
             ssm_state,
+            ssm_state_stride_0,
             query_start_loc,
             cache_indices,
             has_initial_state,
@@ -250,7 +255,7 @@ void kernel_launcher(
     });
 }
 
-void causal_conv1d(
+void gated_delta_rule(
     sycl::queue& queue,
     torch::Tensor& core_attn_out, // [total_seqlen, num_v_heads, head_v_dim]
     const torch::Tensor& q, // [total_seqlen, num_k_heads, head_k_dim]
@@ -271,6 +276,7 @@ void causal_conv1d(
     const int head_k_dim = q.size(2);
     const int num_v_heads = v.size(1);
     const int head_v_dim = v.size(2);
+    const int ssm_state_stride_0 = ssm_state.stride(0);
 
     TORCH_CHECK(num_v_heads % num_k_heads == 0);
     TORCH_CHECK(head_k_dim % sub_group_size == 0);
@@ -288,6 +294,7 @@ void causal_conv1d(
         reinterpret_cast<scalar_t*>(A_log.data_ptr()),       \
         reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),       \
         reinterpret_cast<scalar_t*>(ssm_state.data_ptr()),       \
+        ssm_state_stride_0,\
         reinterpret_cast<int*>(query_start_loc.data_ptr()),       \
         reinterpret_cast<int*>(cache_indices.data_ptr()),       \
         has_initial_state.has_value()? reinterpret_cast<bool*>(has_initial_state->data_ptr()) : nullptr,       \
@@ -317,16 +324,18 @@ void causal_conv1d(
             TORCH_CHECK(false); \
     }
 
-    if(input.scalar_type() == at::kBFloat16){
+    if(core_attn_out.scalar_type() == at::kBFloat16){
         using scalar_t = sycl::ext::oneapi::bfloat16;
         BUCKET_DISPATCH(scalar_t, k_bucket_size)
-    }else if(input.scalar_type() == at::kHalf){
+    }else if(core_attn_out.scalar_type() == at::kHalf){
         using scalar_t = sycl::half;
         BUCKET_DISPATCH(scalar_t, k_bucket_size)
     }else{
         using scalar_t = float;
         BUCKET_DISPATCH(scalar_t, k_bucket_size)
     }
+#undef BUCKET_DISPATCH
+#undef KERNEL_LAUNCHER
 }
 
 }
