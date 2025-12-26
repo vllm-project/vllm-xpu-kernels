@@ -2,77 +2,131 @@ name: run unit tests on Intel GPU.
 
 on: 
   pull_request:
+    branches: [main]
   push:
     branches: [main]
 
 permissions: 
   contents: read
 
+env:
+  REGISTRY: localhost:5000
+
 jobs:
+
+  build-docker-image-latest-pvc:
+    runs-on: self-hosted-pvc
+    steps:
+      - name: Clean workspace
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          git clean -ffdx || true
+          git reset --hard || true
+          
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+          clean: true
+
+      - name: build docker image & push to local
+        id: build-image
+        run: |
+          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
+          docker tag xpu-kernel-ci-image:latest ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
+          docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
+
+  build-docker-image-latest-bmg:
+    runs-on: self-hosted-bmg
+    steps:
+      - name: Clean workspace
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          git clean -ffdx || true
+          git reset --hard || true
+          
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+          clean: true
+
+      - name: build docker image & push to local
+        id: build-image
+        run: |
+          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
+          docker tag xpu-kernel-ci-image:latest ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
+          docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
+
   run-unit-tests-pvc:
     runs-on: self-hosted-pvc
+    needs: build-docker-image-latest-pvc
     timeout-minutes: 30
+    container:                      
+      image: localhost:5000/xpu-kernel-ci-image:latest
+      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+          set-safe-directory: true
 
-      - name: build docker image
+      - name: build & install wheel
         run: |
-          cp -r "$HOME/umd" ./umd
-          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
+          python3 -m pip config set global.break-system-packages true
+          pip install -r requirements.txt
+          pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
 
       - name: test 
         run: |
-          docker run \
-          --device /dev/dri \
-          -v /dev/dri/by-path:/dev/dri/by-path \
-          --privileged \
-          --name vllm-xpu-kernel-ci \
-          xpu-kernel-ci-image \
-          /bin/bash -c '
-          ZE_AFFINITY_MASK=0 SKIP_HANG_KERNEL=1 pytest -v -s /workspace/vllm-xpu-kernels/tests/
-          VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 pytest -v -s /workspace/vllm-xpu-kernels/tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm
-          '
-      - name: Remove container
-        if: ${{ always() }} 
+          ZE_AFFINITY_MASK=0,1 SKIP_HANG_KERNEL=1 pytest -v -s tests/
+          VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 ZE_AFFINITY_MASK=0,1 pytest -v -s tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm
+
+  clean-repo-pvc:
+    runs-on: self-hosted-pvc
+    needs: run-unit-tests-pvc
+    steps:
+      - name: Clean workspace
         run: |
-          docker rm -f vllm-xpu-kernel-ci || true
-          docker image rm -f vllm-xpu-kernel-ci || true
-          docker system prune -f || true
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          git clean -ffdx || true
+          git reset --hard || true
 
   run-unit-tests-bmg:
     runs-on: self-hosted-bmg
+    needs: build-docker-image-latest-bmg
     timeout-minutes: 30
+    container: 
+      image: localhost:5000/xpu-kernel-ci-image:latest
+      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged 
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+          set-safe-directory: true
 
-      - name: build docker image
+      - name: build & install wheel
         run: |
-          cp -r "$HOME/umd" ./umd
-          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
+          python3 -m pip config set global.break-system-packages true
+          pip install -r requirements.txt
+          pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
 
       - name: test 
         run: |
-          docker run \
-          --device /dev/dri \
-          -v /dev/dri/by-path:/dev/dri/by-path \
-          --privileged \
-          --name vllm-xpu-kernel-ci \
-          xpu-kernel-ci-image \
-          /bin/bash -c '
-          ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/ --ignore=/workspace/vllm-xpu-kernels/tests/test_lora_ops.py --ignore=/workspace/vllm-xpu-kernels/tests/test_fp8_quant.py
-          # fixme: Running lora UT separately to avoid OOM when running together with other tests.
-          ZE_AFFINITY_MASK=0,1 pytest -v -s /workspace/vllm-xpu-kernels/tests/test_lora_ops.py
-          VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 pytest -v -s /workspace/vllm-xpu-kernels/tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm
-          '
-      - name: Remove container
-        if: ${{ always() }} 
+          ZE_AFFINITY_MASK=0,1 pytest -v -s tests/ --ignore=tests/test_lora_ops.py --ignore=tests/test_fp8_quant.py
+          ZE_AFFINITY_MASK=0,1 pytest -v -s tests/test_lora_ops.py
+          VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 ZE_AFFINITY_MASK=0,1 pytest -v -s tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm
+
+  clean-repo-bmg:
+    runs-on: self-hosted-bmg
+    needs: run-unit-tests-bmg
+    steps:
+      - name: Clean workspace
         run: |
-          docker rm -f vllm-xpu-kernel-ci || true
-          docker image rm -f vllm-xpu-kernel-ci || true
-          docker system prune -f || true
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          git clean -ffdx || true
+          git reset --hard || true

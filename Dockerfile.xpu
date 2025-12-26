@@ -28,12 +28,12 @@ RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-inte
 
 RUN python3 -m pip config set global.break-system-packages true 
 
-WORKDIR /workspace/vllm-xpu-kernels
-COPY . .
+# WORKDIR /workspace/vllm-xpu-kernels
+# COPY . .
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir \
-    -r requirements.txt
+# RUN --mount=type=cache,target=/root/.cache/pip \
+#     pip install --no-cache-dir \
+#     -r requirements.txt
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+# RUN --mount=type=cache,target=/root/.cache/pip \
+#     pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v

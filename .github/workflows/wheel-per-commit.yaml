@@ -1,0 +1,115 @@
+name: wheel-per-commit
+
+on:
+  workflow_run:
+    workflows: ["run unit tests on Intel GPU."]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:  # allow manual trigger
+
+permissions:
+  contents: read
+  actions: write  # to post comments
+
+env:
+  REGISTRY: localhost:5000
+
+jobs:
+  build-wheel-on-pvc:
+    runs-on: self-hosted-pvc
+    if: |
+      github.event_name == 'workflow_dispatch' || 
+      github.event.workflow_run.conclusion == 'success' && 
+      github.event.workflow_run.event == 'push'
+    container:                      
+      image: localhost:5000/xpu-kernel-ci-image:latest   
+      options: --user root
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+
+      - name: Get build metadata
+        id: metadata
+        run: |
+          cat >> "$GITHUB_OUTPUT" << EOF
+          short_sha=$(git rev-parse --short HEAD)
+          commit_msg=$(git log -1 --pretty=%s | head -c 50)
+          build_date=$(date +'%Y%m%d-%H%M%S')
+          branch=${GITHUB_REF#refs/heads/}
+          EOF
+
+      - name: build wheel
+        run: |
+          python3 -m pip config set global.break-system-packages true
+          pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+
+      - name: Create build info file
+        run: |
+          cat > build_info.txt << EOF
+          Build Information
+          =================
+          Commit: ${{ github.sha }}
+          Short SHA: ${{ steps.metadata.outputs.short_sha }}
+          Branch: ${{ steps.metadata.outputs.branch }}
+          Commit Message: ${{ steps.metadata.outputs.commit_msg }}
+          Build Date: ${{ steps.metadata.outputs.build_date }}
+          Build Number: ${{ github.run_number }}
+          Workflow: ${{ github.workflow }}
+          Actor: ${{ github.actor }}
+          EOF
+
+      - name: Upload wheel to artifact
+        id: upload-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vllm-xpu-kernels-${{ steps.metadata.outputs.short_sha }}-${{ steps.metadata.outputs.build_date }}
+          path: |
+            vllm_xpu_kernels*.whl
+            build_info.txt
+          retention-days: 30
+
+      - name: Generate download summary
+        if: success()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## 🎉 Wheel Build Successful
+          
+          ### Build Information
+          - **Commit**: [\`${{ steps.metadata.outputs.short_sha }}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+          - **Branch**: \`${{ steps.metadata.outputs.branch }}\`
+          - **Date**: ${{ steps.metadata.outputs.build_date }}
+          - **Commit Message**: ${{ steps.metadata.outputs.commit_msg }}
+          
+          ### Download
+          - **Artifact Name**: \`vllm-xpu-kernels-${{ steps.metadata.outputs.short_sha }}-${{ steps.metadata.outputs.build_date }}\`
+          - **Direct Link**: [Download from Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          
+          ### Usage
+          \`\`\`bash
+          # Download via GitHub CLI
+          gh run download ${{ github.run_id }} -n vllm-xpu-kernels-${{ steps.metadata.outputs.short_sha }}-${{ steps.metadata.outputs.build_date }}
+          
+          # Or use the web interface
+          # Visit: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          \`\`\`
+          EOF
+
+      - name: Comment on commit (optional)
+        if: success() && github.event_name == 'push'
+        continue-on-error: true
+        run: |
+          echo "Wheel built successfully for commit ${{ github.sha }}"
+          echo "Download: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  clean-repo-pvc:
+    runs-on: self-hosted-pvc
+    needs: build-wheel-on-pvc
+    steps:
+      - name: Clean workspace
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          git clean -ffdx || true
+          git reset --hard || true
