@@ -24,9 +24,8 @@ jobs:
           git reset --hard || true
           
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-          fetch-depth: 0
           set-safe-directory: true
           clean: true
 
@@ -47,9 +46,8 @@ jobs:
           git reset --hard || true
           
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-          fetch-depth: 0
           set-safe-directory: true
           clean: true
 
@@ -69,9 +67,8 @@ jobs:
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-          fetch-depth: 0
           set-safe-directory: true
 
       - name: build & install wheel
@@ -104,9 +101,8 @@ jobs:
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged 
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-          fetch-depth: 0
           set-safe-directory: true
 
       - name: build & install wheel
