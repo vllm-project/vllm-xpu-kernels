@@ -23,7 +23,8 @@ void gdn_attention(
     const std::optional<torch::Tensor>& has_initial_state,
     const torch::Tensor& non_spec_query_start_loc,
     const torch::Tensor& non_spec_state_indices_tensor,
-    const int64_t num_actual_tokens
+    const int64_t num_actual_tokens,
+    const int64_t tp_size
 );
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> causal_conv1d(
@@ -47,7 +48,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     const std::optional<torch::Tensor>& has_initial_state, // [batch_size] or None 
     const torch::Tensor& non_spec_query_start_loc,   // [batch_size + 1]
     const torch::Tensor& non_spec_state_indices_tensor,  // [batch_size]
-    const int64_t num_actual_tokens
+    const int64_t num_actual_tokens,
+    const int64_t tp_size
 );
 
 void gated_delta_rule(
@@ -62,5 +64,7 @@ void gated_delta_rule(
     torch::Tensor& ssm_state, // [cache_batch_size, num_v_heads, head_k_dim, head_v_dim]
     const torch::Tensor& query_start_loc,  // [batch_size + 1]
     const torch::Tensor& cache_indices, // [batch_size]
-    const std::optional<torch::Tensor>& has_initial_state // [batch_size] or None
+    const std::optional<torch::Tensor>& has_initial_state, // [batch_size] or None
+    const int64_t num_prefills,
+    const int64_t num_decodes
 );

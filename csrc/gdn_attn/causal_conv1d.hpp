@@ -123,13 +123,19 @@ public:
     int batch_id = batch_size - 1;
     int seq_start_offset = 0;
     int seq_end_offset = 0;
-    for(int i = batch_size; i > 0; --i){
-        if(token_id < query_start_loc[i]){
-            batch_id = i - 1;
-            seq_start_offset = query_start_loc[i - 1];
-            seq_end_offset = query_start_loc[i];
-            break;
+    if(query_start_loc != nullptr){
+        for(int i = 0; i < batch_size; ++i){
+            if(token_id < query_start_loc[i + 1]){
+                batch_id = i;
+                seq_start_offset = query_start_loc[i];
+                seq_end_offset = query_start_loc[i + 1];
+                break;
+            }
         }
+    }else{
+        batch_id = token_id;
+        seq_start_offset = token_id;
+        seq_end_offset = token_id + 1;
     }
 
     // get states cache location
@@ -173,7 +179,7 @@ public:
 
     // get states cache ptr
     const T* conv_states_ptr = 
-        (has_initial_state != nullptr && has_initial_state[batch_id])
+        (has_initial_state == nullptr || (has_initial_state!= nullptr && has_initial_state[batch_id]))
         ? conv_states + states_id * conv_states_stride_0
         : nullptr;
 
@@ -195,11 +201,13 @@ public:
     int input_load_len = seq_cu_len >= Width ? Width : seq_cu_len;
     int states_load_len = seq_cu_len >= Width ? 0 : Width - input_load_len;
     if(states_load_len != 0 && conv_states_ptr != nullptr){
+        #pragma unroll
         for(int i = 0; i < states_load_len; ++i){
             local_input[i] = conv_states_ptr[(Width - 1 - states_load_len + i) * conv_elems + reordered_elems_id];
         }
     }
 
+    #pragma unroll
     for(int i = 0; i < input_load_len; ++i){
         local_input[states_load_len + i] = mixed_qkvz[(token_id - input_load_len + 1 + i) * qkvz_elems + qkvz_elems_id];
     }
@@ -216,8 +224,11 @@ public:
 
     // save states
     // hard to update states inplace, because current group is unable to know if old states are needed by other group
-    if(seq_end_offset - token_id < Width){
-        conv_states_tmp[batch_id * (Width - 1) * conv_elems + (Width - 1 - (seq_end_offset - token_id)) * conv_elems + reordered_elems_id] = res;
+    if(seq_end_offset - 1 == token_id){
+        #pragma unroll
+        for(int i = 0; i < Width - 1; ++i){
+            conv_states_tmp[batch_id * (Width - 1) * conv_elems + i * conv_elems + reordered_elems_id] = local_input[i + 1];
+        }
     }
 
     if(act_mode == ActMode::silu){
@@ -308,8 +319,8 @@ public:
         int states_id = cache_indices[batch_id];
         T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
         const T* conv_states_tmp_ptr = conv_states_tmp + batch_id * (width - 1) * conv_elems;
-        for(int i = elems_start_offset_group + local_id; i < conv_elems; i += group_size){
-            // conv_states_ptr[width_id * conv_elems + i] = conv_states_tmp_ptr[width_id * conv_elems + i];
+        for(int i = elems_start_offset_group + local_id; i < (local_group_id + 1) * elems_per_group; i += group_size){
+            conv_states_ptr[width_id * conv_elems + i] = conv_states_tmp_ptr[width_id * conv_elems + i];
         }
     }
 private:
@@ -417,9 +428,18 @@ void causal_conv1d(
     const torch::Tensor& cache_indices, // [batch_size]
     const std::optional<torch::Tensor>& has_initial_state, // [batch_size] or None
     const ActMode& act_mode, // silu or swish
-    const int& pad_slot_id // -1
+    const int& pad_slot_id, // -1
+    const int num_prefills,
+    const int num_decodes
 ){
-    const int batch_size = query_start_loc.size(0) - 1;
+    if(num_prefills == 0 && num_decodes == 0){
+        return;
+    }
+
+    int batch_size = query_start_loc.size(0) - 1;
+    if(num_prefills == 0 && num_decodes > 0){
+        batch_size = mixed_qkvz.size(0);
+    }
     const int num_actual_tokens = q_out.size(0);
     const int num_k_heads = q_out.size(1);
     const int head_k_dim = q_out.size(2);
@@ -451,7 +471,7 @@ void causal_conv1d(
         reinterpret_cast<scalar_t*>(conv_states.data_ptr()),       \
         conv_states_stride_0, \
         reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),       \
-        reinterpret_cast<int*>(query_start_loc.data_ptr()),       \
+        num_prefills > 0 ? reinterpret_cast<int*>(query_start_loc.data_ptr()) : nullptr,       \
         reinterpret_cast<int*>(cache_indices.data_ptr()),       \
         has_initial_state.has_value()? reinterpret_cast<bool*>(has_initial_state->data_ptr()) : nullptr,       \
         act_mode,       \

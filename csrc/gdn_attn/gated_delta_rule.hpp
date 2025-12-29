@@ -268,9 +268,18 @@ void gated_delta_rule(
     torch::Tensor& ssm_state, // [cache_batch_size, num_v_heads, head_k_dim, head_v_dim]
     const torch::Tensor& query_start_loc,  // [batch_size + 1]
     const torch::Tensor& cache_indices, // [batch_size]
-    const std::optional<torch::Tensor>& has_initial_state // [batch_size] or None
+    const std::optional<torch::Tensor>& has_initial_state, // [batch_size] or None
+    const int num_prefills,
+    const int num_decodes
 ){
-    const int batch_size = query_start_loc.size(0) - 1;
+    if(num_prefills == 0 && num_decodes == 0){
+        return;
+    }
+
+    int batch_size = query_start_loc.size(0) - 1;
+    if (num_decodes > 0){
+        batch_size = num_decodes;
+    }
     const int total_seqlen = q.size(0);
     const int num_k_heads = q.size(1);
     const int head_k_dim = q.size(2);
