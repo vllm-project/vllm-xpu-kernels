@@ -65,12 +65,14 @@ public:
         return sycl::nd_range<3>(global * local, local);
     }
 
-    static inline float act_sigmiod(float& x){
+    static inline float act_sigmoid(float& x){
         return 1.0f / (1.0f + sycl::exp(-x));
     }
 
-    static inline float act_softplus(float& x){
-        return sycl::log(1.0f + sycl::exp(x));
+    static inline float act_softplus(float& x, float beta = 1.0f, float threshold=20.0f){
+        if(beta * x < threshold){
+            return sycl::log(1.0f + sycl::exp(beta * x)) / beta;
+        }else return x;
     }
 
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
@@ -91,9 +93,10 @@ public:
         return;
     }
 
+    const float scale = 1.0f / sycl::sqrt(float(head_k_dim));
     float A_log_local = A_log[num_v_heads_id];
     float dt_bias_local = dt_bias[num_v_heads_id];
-    A_log_local = sycl::exp(A_log_local);
+    A_log_local = -sycl::exp(A_log_local);
 
     float state_local[k_bucket_size];
     float q_local[k_bucket_size];
@@ -123,13 +126,13 @@ public:
     for(int t = seq_start_offset; t < seq_end_offset; ++t){
         // act beta(t), g(t)
         float b_local = b[t * num_v_heads + num_v_heads_id];
-        float beta = act_sigmiod(b_local);
+        float beta = act_sigmoid(b_local);
         float a_local = a[t * num_v_heads + num_v_heads_id] + dt_bias_local;
-        float g = -A_log_local * act_softplus(a_local);
+        float g = sycl::exp(A_log_local * act_softplus(a_local));
 
         float q_sum = 0.0f;
         float k_sum = 0.0f;
-        // locad q(t), k(t) and l2norm
+        // load q(t), k(t) and l2norm
         #pragma unroll
         for(int i = 0; i < k_bucket_size; ++i){
             q_local[i] = q[t * num_k_heads * head_k_dim + (num_v_heads_id / kv_ratio) * head_k_dim + i * sub_group_size + sg_local_id];
@@ -144,6 +147,7 @@ public:
         #pragma unroll
         for(int i = 0; i < k_bucket_size; ++i){
             q_local[i] /= sycl::sqrt(q_sum);
+            q_local[i] *= scale;
             k_local[i] /= sycl::sqrt(k_sum);
         }
 
