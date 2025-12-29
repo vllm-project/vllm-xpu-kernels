@@ -134,8 +134,8 @@ public:
         for(int i = 0; i < k_bucket_size; ++i){
             q_local[i] = q[t * num_k_heads * head_k_dim + (num_v_heads_id / kv_ratio) * head_k_dim + i * sub_group_size + sg_local_id];
             k_local[i] = k[t * num_k_heads * head_k_dim + (num_v_heads_id / kv_ratio) * head_k_dim + i * sub_group_size + sg_local_id];
-            q_sum = q_local[i] * q_local[i];
-            k_sum = k_local[i] * k_local[i];
+            q_sum += q_local[i] * q_local[i];
+            k_sum += k_local[i] * k_local[i];
         }
         q_sum = sycl::reduce_over_group(sg, q_sum, sycl::plus<>());
         k_sum = sycl::reduce_over_group(sg, k_sum, sycl::plus<>());
@@ -148,13 +148,12 @@ public:
         }
 
         float kv_mem = 0.0f;
+        // get g(t) * S(t - 1)* k(t)
         #pragma unroll
         for(int i = 0; i < k_bucket_size; ++i){
-            // get g(t)* S(t - 1)
             state_local[i] *= g;
             kv_mem += state_local[i] * k_local[i];
         }
-        // get g(t) * S(t - 1)* k(t)
         kv_mem = sycl::reduce_over_group(sg, kv_mem, sycl::plus<>());
 
         // get (v(t) - g(t) * S(t - 1)* k(t)) * beta(t)
@@ -176,11 +175,11 @@ public:
         }
     }
 
-    // save state
-    // #pragma unroll
-    // for(int i = 0; i < k_bucket_size; ++i){
-    //     ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (i * sub_group_size + sg_local_id) * head_v_dim + head_v_dim_id] = state_local[i];
-    // } 
+    // update state
+    #pragma unroll
+    for(int i = 0; i < k_bucket_size; ++i){
+        ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (i * sub_group_size + sg_local_id) * head_v_dim + head_v_dim_id] = state_local[i];
+    } 
   }
 private:
   T* core_attn_out;
@@ -277,7 +276,7 @@ void gated_delta_rule(
     }
 
     int batch_size = query_start_loc.size(0) - 1;
-    if (num_decodes > 0){
+    if (num_prefills == 0 && num_decodes > 0){
         batch_size = num_decodes;
     }
     const int total_seqlen = q.size(0);
