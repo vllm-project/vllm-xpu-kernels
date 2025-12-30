@@ -44,7 +44,9 @@ Documentation="https://docs.vllm.ai/en/latest/"
 # no extra settings needed, presence enables setuptools-scm
 
 [tool.setuptools]
-packages = ["vllm_xpu_kernels", "vllm_xpu_kernels.quantization"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vllm_xpu_kernels*"]
 
 [tool.yapfignore]
 ignore_patterns = [
