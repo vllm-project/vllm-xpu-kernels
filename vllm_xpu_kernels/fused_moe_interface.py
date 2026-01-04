@@ -120,6 +120,7 @@ def xpu_fused_moe(hidden_states,
                   n_experts_per_token,
                   activation,
                   num_experts,
+                  experts_start_id=0,
                   is_fp8=False,
                   is_int4=False,
                   is_mxfp4=False):
@@ -252,35 +253,28 @@ def xpu_fused_moe(hidden_states,
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
 
+    if not is_fp8 and not is_int4 and not is_mxfp4:
+        gemm1_scales = None
+        gemm2_scales = None
+    else:
+        gemm1_scales = w13_scales
+        gemm2_scales = w2_scales
+
     ########### gemm1 ##################
     input_B = w13
 
-    if not is_fp8 and not is_int4 and not is_mxfp4:
-        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
-            ptr_A=gemm1_input,
-            ptr_B=input_B,
-            ptr_scales=None,
-            ptr_bias=w13_bias,
-            ptr_D=gemm1_output,
-            expert_first_token_offset=expert_first_token_offset,
-            N=2 * inter_size,
-            K=hidden_size,
-            num_experts=num_experts_per_node,
-            is_B_int4=is_int4,
-            is_B_mxfp4=is_mxfp4)
-    else:
-        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
-            ptr_A=gemm1_input,
-            ptr_B=input_B,
-            ptr_scales=w13_scales,
-            ptr_bias=w13_bias,
-            ptr_D=gemm1_output,
-            expert_first_token_offset=expert_first_token_offset,
-            N=2 * inter_size,
-            K=hidden_size,
-            num_experts=num_experts_per_node,
-            is_B_int4=is_int4,
-            is_B_mxfp4=is_mxfp4)
+    torch.ops._xpu_C.cutlass_grouped_gemm_interface(
+        ptr_A=gemm1_input,
+        ptr_B=input_B,
+        ptr_scales=gemm1_scales,
+        ptr_bias=w13_bias,
+        ptr_D=gemm1_output,
+        expert_first_token_offset=expert_first_token_offset,
+        N=2 * inter_size,
+        K=hidden_size,
+        num_experts=num_experts_per_node,
+        is_B_int4=is_int4,
+        is_B_mxfp4=is_mxfp4)
 
     # act
     act_output = torch.empty((num_moe_inputs, inter_size),
@@ -301,32 +295,19 @@ def xpu_fused_moe(hidden_states,
     gemm2_output = torch.empty((num_moe_inputs, hidden_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
-    if not is_fp8 and not is_int4 and not is_mxfp4:
-        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
-            ptr_A=input_A,
-            ptr_B=input_B,
-            ptr_scales=None,
-            ptr_bias=w2_bias,
-            ptr_D=gemm2_output,
-            expert_first_token_offset=expert_first_token_offset,
-            N=hidden_size,
-            K=inter_size,
-            num_experts=num_experts_per_node,
-            is_B_int4=is_int4,
-            is_B_mxfp4=is_mxfp4)
-    else:
-        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
-            ptr_A=input_A,
-            ptr_B=input_B,
-            ptr_scales=w2_scales,
-            ptr_bias=w2_bias,
-            ptr_D=gemm2_output,
-            expert_first_token_offset=expert_first_token_offset,
-            N=hidden_size,
-            K=inter_size,
-            num_experts=num_experts_per_node,
-            is_B_int4=is_int4,
-            is_B_mxfp4=is_mxfp4)
+
+    torch.ops._xpu_C.cutlass_grouped_gemm_interface(
+        ptr_A=input_A,
+        ptr_B=input_B,
+        ptr_scales=gemm2_scales,
+        ptr_bias=w2_bias,
+        ptr_D=gemm2_output,
+        expert_first_token_offset=expert_first_token_offset,
+        N=hidden_size,
+        K=inter_size,
+        num_experts=num_experts_per_node,
+        is_B_int4=is_int4,
+        is_B_mxfp4=is_mxfp4)
 
     torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
                                 unpermuted_row_to_permuted_row,
