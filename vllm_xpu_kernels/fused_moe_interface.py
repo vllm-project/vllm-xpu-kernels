@@ -252,10 +252,6 @@ def xpu_fused_moe(hidden_states,
                             ws_map["overlapped_gemm1_gemm2_inputs"][1] +
                             permuted_data_size].view(hidden_states.dtype).view(
                                 num_moe_inputs, hidden_size)
-    # permuted_token_final_scales = workspace[
-    #     ws_map["permuted_token_final_scales"][1]:
-    #     ws_map["permuted_token_final_scales"][1] +
-    #     permuted_token_final_scales_size].view(torch.float)
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)

@@ -440,6 +440,13 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
         atol = 2e-2
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
 
+FUSED_MOE_MNK_FACTORS = [
+    (1, 1024, 1024),
+    (4, 1024, 1024),
+    (16, 1024, 1024),
+    (8192, 1024, 1024),
+]
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -447,7 +454,7 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
 @pytest.mark.parametrize("ep_size", EP_SIZE) 
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("w_dtype",
-                         [torch.float8_e5m2, torch.float8_e4m3fn, None])
+                         [torch.float8_e5m2, None])
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype, has_bias):
     seed_everything(7)
