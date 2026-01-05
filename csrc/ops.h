@@ -2,6 +2,8 @@
 
 #include <torch/all.h>
 
+torch::Tensor weak_ref_tensor(torch::Tensor& tensor);
+
 void rms_norm(
     torch::Tensor& out,
     torch::Tensor& input,

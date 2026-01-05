@@ -306,6 +306,7 @@ if(BASIC_KERNELS_ENABLED)
     "csrc/torch_bindings.cpp"
     "csrc/quantization/fp8/fp8_quant.cpp"
     "csrc/xpu_view.cpp"
+    "csrc/tensor_utils.cpp"
   )
   include_directories("/usr/include")
 

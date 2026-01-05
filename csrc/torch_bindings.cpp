@@ -16,6 +16,9 @@
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
 
+  ops.def("weak_ref_tensor(Tensor input) -> Tensor");
+  ops.impl("weak_ref_tensor", torch::kXPU, &weak_ref_tensor);
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
