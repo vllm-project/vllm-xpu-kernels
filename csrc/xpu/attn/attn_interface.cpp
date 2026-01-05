@@ -2,7 +2,7 @@
 #include "attn_interface.h"
 
 #ifdef VLLM_XPU_ENABLE_XE2
-  #include "attn/xe_2/chunk_prefill_xe2.h"
+  #include "attn/xe_2/fmha_xe2.h"
 #endif
 
 void cutlass_chunk_prefill_interface(

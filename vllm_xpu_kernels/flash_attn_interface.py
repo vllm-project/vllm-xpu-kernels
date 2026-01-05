@@ -56,6 +56,10 @@ def flash_attn_varlen_func(
         "cu_seqlens_k or seqused_k must be provided"
     assert cu_seqlens_k is None or seqused_k is None, \
         "cu_seqlens_k and seqused_k cannot be provided at the same time"
+    assert block_table is None or seqused_k is not None, \
+        "when enable block_table, seqused_k is needed"
+    assert block_table is not None or cu_seqlens_k is None, \
+        "when not enable block_table, cu_seqlens_k is needed"
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)

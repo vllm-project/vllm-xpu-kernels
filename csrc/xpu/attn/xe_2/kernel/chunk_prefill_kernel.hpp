@@ -41,8 +41,8 @@
 
 #include "cute/util/type_traits.hpp"
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
-#include "csrc/xpu/attn/collective/chunk_prefill_mainloop.hpp"
-#include "csrc/xpu/attn/collective/chunk_prefill_epilogue.hpp"
+#include "csrc/xpu/attn/xe_2/collective/chunk_prefill_mainloop.hpp"
+#include "csrc/xpu/attn/xe_2/collective/chunk_prefill_epilogue.hpp"
 
 namespace cutlass::fmha::kernel {
 
@@ -204,10 +204,17 @@ class XeFMHAFwdKernel {
   Shape<int, int> get_sequence_length_shape(
       ProblemShape const& problem_shape, int const& batch) {
     if constexpr (is_var_len) {
-      return cutlass::fmha::collective::apply_variable_length(
-          Shape<VariableLength, VariableLength>{
-              problem_shape.seq_len_qo, problem_shape.seq_len_kv},
-          batch);
+      if constexpr (PagedKV) {
+        auto q_len = cutlass::fmha::collective::apply_variable_length(
+            Shape<VariableLength>{problem_shape.seq_len_qo}, batch);
+        return Shape<int, int>{
+            get<0>(q_len), problem_shape.seq_len_kv.cumulative_length[batch]};
+      } else {
+        return cutlass::fmha::collective::apply_variable_length(
+            Shape<VariableLength, VariableLength>{
+                problem_shape.seq_len_qo, problem_shape.seq_len_kv},
+            batch);
+      }
     } else {
       return Shape<int, int>{
           problem_shape.seq_len_qo, problem_shape.seq_len_kv};

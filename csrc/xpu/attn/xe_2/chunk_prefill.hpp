@@ -16,9 +16,9 @@
 
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
-#include "csrc/xpu/attn/collective/chunk_prefill_scheduler.hpp"
-#include "csrc/xpu/attn/collective/chunk_prefill_epilogue.hpp"
-#include "chunk_prefill_kernel.hpp"
+#include "collective/chunk_prefill_scheduler.hpp"
+#include "collective/chunk_prefill_epilogue.hpp"
+#include "kernel/chunk_prefill_kernel.hpp"
 
 #include "fmha_utils.hpp"
 
@@ -233,10 +233,10 @@ struct FMHAConfig {
       decltype(cutlass::fmha::collective::get_sg_layout_pv(SubgroupLayoutQK{})),
       SubgroupLayoutPV_>;
 
-  template <class Scheduler, bool Causal, bool Local, bool Sink>
+  template <class Scheduler, bool Paged, bool Causal, bool Local, bool Sink>
   static void run(sycl::queue& queue, const chunk_prefill_args_t& args) {
     constexpr bool VarLen = true;
-    constexpr bool Paged = true;
+    // constexpr bool Paged = true;
     cutlass::KernelHardwareInfo hw_info;
 
     using ProblemShapeType = cutlass::fmha::kernel::FMHAProblemShape<VarLen>;
@@ -337,7 +337,12 @@ void policy_dispatch(
         half_t,
         half_t>::
         kernel_dispatch(
-            queue, args, args.is_causal, args.is_local, args.is_sink);
+            queue,
+            args,
+            args.is_paged,
+            args.is_causal,
+            args.is_local,
+            args.is_sink);
   } else {
     return FMHAConfig<
         typename chunk_policy::ShapeQK,
@@ -347,7 +352,12 @@ void policy_dispatch(
         void,
         PipelineStages>::
         kernel_dispatch(
-            queue, args, args.is_causal, args.is_local, args.is_sink);
+            queue,
+            args,
+            args.is_paged,
+            args.is_causal,
+            args.is_local,
+            args.is_sink);
   }
 }
 

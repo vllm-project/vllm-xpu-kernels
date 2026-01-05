@@ -174,9 +174,10 @@ def test_varlen_with_paged_kv(
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
                                                            dtype=torch.int32)
-    cu_kv_lens = torch.tensor([0] + kv_lens,
-                              dtype=torch.int32).cumsum(dim=0,
-                                                        dtype=torch.int32)
+    cu_kv_lens = torch.tensor(  #noqa: F841
+        [0] + kv_lens,  #noqa: F841
+        dtype=torch.int32).cumsum(dim=0, dtype=torch.int32)  #noqa: F841
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
@@ -210,7 +211,7 @@ def test_varlen_with_paged_kv(
                                     max_query_len,
                                     cu_query_lens,
                                     max_kv_len,
-                                    cu_kv_lens,
+                                    seqused_k=seq_k,
                                     softmax_scale=scale,
                                     causal=is_casual,
                                     block_table=block_tables,

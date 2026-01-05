@@ -1,4 +1,4 @@
-#include "chunk_prefill_xe2.h"
+#include "fmha_xe2.h"
 #include "chunk_prefill.hpp"
 
 void cutlass_chunk_prefill_xe2(

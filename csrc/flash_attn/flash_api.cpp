@@ -16,7 +16,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     const at::Tensor& cu_seqlens_k,  // b+1
     std::optional<at::Tensor>& seqused_k,
     std::optional<const at::Tensor>& leftpad_k_,  // batch_size
-    at::Tensor& block_table_,  // batch_size x max_num_blocks_per_seq
+    std::optional<at::Tensor>&
+        block_table_,  // batch_size x max_num_blocks_per_seq
     std::optional<at::Tensor>& alibi_slopes_,  // num_heads or b x num_heads
     int max_seqlen_q,
     int max_seqlen_k,
@@ -52,13 +53,18 @@ std::vector<at::Tensor> mha_varlen_fwd(
       v.stride(-1) == 1, "Input tensor must have contiguous last dimension");
   TORCH_CHECK(q.dim() == 3, "query must be in ragged format");
 
-  CHECK_DEVICE(block_table_);
-  TORCH_CHECK(
-      block_table_.dtype() == torch::kInt32,
-      "page_table must have dtype torch.int32");
-  TORCH_CHECK(
-      block_table_.stride(-1) == 1,
-      "page_table must have contiguous last dimension");
+  at::Tensor block_table;
+  bool is_paged = block_table_.has_value();
+  if (is_paged) {
+    block_table = *block_table_;
+    CHECK_DEVICE(block_table);
+    TORCH_CHECK(
+        block_table.dtype() == torch::kInt32,
+        "page_table must have dtype torch.int32");
+    TORCH_CHECK(
+        block_table.stride(-1) == 1,
+        "page_table must have contiguous last dimension");
+  }
 
   CHECK_DEVICE(cu_seqlens_q);
   CHECK_CONTIGUOUS(cu_seqlens_q);
@@ -82,9 +88,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
   }
 
   bool is_varlen = true;
-  bool is_paged = true;
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
+
+  at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
 
   cutlass_chunk_prefill_interface(
       queue,
@@ -92,9 +99,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
       k,
       v,
       out,
-      block_table_,
+      block_table,
       cu_seqlens_q,
-      cu_seqlens_k,
+      seqlens_k,
       max_seqlen_q,
       max_seqlen_k,
       softmax_scale,
@@ -122,7 +129,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "varlen_fwd(Tensor q, Tensor k, Tensor v, Tensor!? out, Tensor "
       "cu_seqlens_q, "
-      "Tensor cu_seqlens_k, Tensor? seqused_k, Tensor? leftpad_k, Tensor "
+      "Tensor cu_seqlens_k, Tensor? seqused_k, Tensor? leftpad_k, Tensor? "
       "block_table, Tensor? alibi_slopes, "
       "int max_seqlen_q, int max_seqlen_k, float p_dropout, float "
       "softmax_scale, Tensor? softmax_sink, bool zero_tensors, "
