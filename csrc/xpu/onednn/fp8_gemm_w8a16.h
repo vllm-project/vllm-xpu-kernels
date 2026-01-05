@@ -1,15 +1,14 @@
 #pragma once
 
 #include <c10/xpu/XPUStream.h>
-#include <dnnl.hpp>
 #include <torch/torch.h>
 
+#include <dnnl.hpp>
+
 #include "onednn_ext.h"
+#include "onednn_runtime.h"
 
 namespace oneDNN {
-
-using GpuStreamManager = at::native::onednn::GpuStreamManager;
-using GpuEngineManager = at::native::onednn::GpuEngineManager;
 
 static inline void dnnl_matmul_w8a16_fp8(
     torch::Tensor& result,      // dst, [b, m, n]
@@ -94,7 +93,7 @@ static inline void dnnl_matmul_w8a16_fp8(
       DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS,
       m2_sc.data_ptr(),
       [&]() {
-        return at::native::onednn::make_onednn_memory(
+        return make_onednn_memory(
             get_onednn_md(m2_sc), engine, m2_sc.data_ptr());
       });
 

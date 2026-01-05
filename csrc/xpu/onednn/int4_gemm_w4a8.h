@@ -5,11 +5,9 @@
 #include <torch/torch.h>
 
 #include "onednn_ext.h"
+#include "onednn_runtime.h"
 
 namespace oneDNN {
-
-using GpuStreamManager = at::native::onednn::GpuStreamManager;
-using GpuEngineManager = at::native::onednn::GpuEngineManager;
 
 static inline void dnnl_matmul_w4a8_int4(
     torch::Tensor& result,       // dst, [m, n]
@@ -139,7 +137,7 @@ static inline void dnnl_matmul_w4a8_int4(
   // set m2_sc and zero point for matmul args
   matmul_ext.set_attribute(
       arg_off++, DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, m1_sc.data_ptr(), [&]() {
-        return at::native::onednn::make_onednn_memory(
+        return make_onednn_memory(
             get_onednn_md(m1_sc), engine, m1_sc.data_ptr());
       });
   matmul_ext.set_attribute(
@@ -147,7 +145,7 @@ static inline void dnnl_matmul_w4a8_int4(
       DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC,
       m1_zp.data_ptr(),
       [&]() {
-        return at::native::onednn::make_onednn_memory(
+        return make_onednn_memory(
             get_onednn_md(m1_zp), engine, m1_zp.data_ptr());
       });
 
@@ -156,7 +154,7 @@ static inline void dnnl_matmul_w4a8_int4(
       DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS,
       m2_sc.data_ptr(),
       [&]() {
-        return at::native::onednn::make_onednn_memory(
+        return make_onednn_memory(
             get_onednn_md(m2_sc), engine, m2_sc.data_ptr());
       });
 
@@ -167,7 +165,7 @@ static inline void dnnl_matmul_w4a8_int4(
         DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS,
         m2_zp.data_ptr(),
         [&]() {
-          return at::native::onednn::make_onednn_memory(
+          return make_onednn_memory(
               get_onednn_md(m2_zp), engine, m2_zp.data_ptr());
         });
   } else {

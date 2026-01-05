@@ -1,20 +1,30 @@
 #pragma once
 #include <ATen/ATen.h>
-#include <ATen/native/mkldnn/xpu/detail/DnnlExt.h>
 #include <ATen/native/mkldnn/xpu/detail/LRUCache.h>
-#include <ATen/native/mkldnn/xpu/detail/oneDNNContext.h>
+
 #include <dnnl.h>
 #include <dnnl.hpp>
 
-inline constexpr std::string_view USES_FP64_MATH("uses-fp64-math");
-inline constexpr std::string_view
-    ASPECT_FP64_IS_NOT_SUPPORTED("aspect fp64 is not supported");
-inline constexpr std::string_view
-    FP64_ERROR_FROM_MKL("double type is not supported");
-inline constexpr std::string_view OUT_OF_RESOURCES("PI_ERROR_OUT_OF_RESOURCES");
+#include "onednn_runtime.h"
+
+namespace std {
+
+template <>
+struct hash<dnnl::memory::dims> {
+  size_t operator()(dnnl::memory::dims const& vec) const {
+    size_t seed = vec.size();
+    for (auto& i : vec) {
+      seed ^= i + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    }
+    return seed;
+  }
+};
+
+}  // namespace std
+
+namespace oneDNN {
 
 using namespace dnnl;
-namespace oneDNN {
 
 // Specifies the transposition state of input and weight tensors.
 // Convention: first letter = input, second letter = weight.
@@ -656,7 +666,47 @@ class primitive_ext : public primitive {
   dnnl_exec_arg_t c_args[max_args];
 };
 
-using GpuEngineManager = at::native::onednn::GpuEngineManager;
+template <typename T>
+T concat(const T& t1, at::ScalarType d) {
+  T t;
+  t.insert(t.end(), t1.begin(), t1.end());
+  t.push_back((int64_t)d);
+
+  return t;
+}
+
+template <typename T>
+T concat(const T& t1, bool b) {
+  T t;
+  t.insert(t.end(), t1.begin(), t1.end());
+  t.push_back(b);
+
+  return t;
+}
+
+template <typename T>
+T concat(const T& t1, int b) {
+  T t;
+  t.insert(t.end(), t1.begin(), t1.end());
+  t.push_back(b);
+
+  return t;
+}
+
+template <typename T>
+T concat(const T& t1, const T& t2) {
+  T t;
+  t.insert(t.end(), t1.begin(), t1.end());
+  t.insert(t.end(), t2.begin(), t2.end());
+
+  return t;
+}
+
+template <typename T1, typename T2, typename... Ts>
+T1 concat(const T1& t1, const T2& t2, const Ts&... ts) {
+  return concat(concat(t1, t2), ts...);
+}
+
 using primitive_cache =
     at::native::onednn::lru_cache<memory::dims, primitive_ext>;
 
@@ -678,7 +728,7 @@ struct matmul_primitive_cache_t {
     auto& cached = get_cache(device_id);
     memory::dims src_strides, wei_strides, dst_strides;
     get_strides<Tt>(src_strides, wei_strides, dst_strides, lda, ldb, ldc);
-    auto pri_key = at::native::onednn::concat(
+    auto pri_key = concat(
         src_strides,
         wei_strides,
         m,
