@@ -120,7 +120,8 @@ def xpu_fused_moe(hidden_states,
                   n_experts_per_token,
                   activation,
                   num_experts,
-                  experts_start_id=0,
+                  ep_rank=0,
+                  ep_size=1,
                   is_fp8=False,
                   is_int4=False,
                   is_mxfp4=False):
@@ -231,12 +232,18 @@ def xpu_fused_moe(hidden_states,
         workspace=workspace,
         hidden_size=hidden_size,
         inter_size=inter_size,
+        ep_rank=ep_rank,
+        ep_size=ep_size,
         num_experts_on_rank=num_experts_per_node)
 
     expert_first_token_offset = workspace[
         ws_map["expert_first_token_offset"][1]:
         ws_map["expert_first_token_offset"][1] +
         expert_first_token_offset_size].view(torch.int64)
+    permuted_row_to_unpermuted_row = workspace[
+        ws_map["permuted_row_to_unpermuted_row"][1]:
+        ws_map["permuted_row_to_unpermuted_row"][1] +
+        permuted_row_to_unpermuted_row_size].view(torch.int32)
     unpermuted_row_to_permuted_row = workspace[
         ws_map["unpermuted_row_to_permuted_row"][1]:
         ws_map["unpermuted_row_to_permuted_row"][1] +
@@ -310,6 +317,9 @@ def xpu_fused_moe(hidden_states,
         is_B_mxfp4=is_mxfp4)
 
     torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
+                                permuted_row_to_unpermuted_row,
                                 unpermuted_row_to_permuted_row,
+                                expert_first_token_offset,
                                 num_experts_per_node)
+
     return output
