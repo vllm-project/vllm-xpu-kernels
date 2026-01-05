@@ -89,8 +89,18 @@ def dequantize_mxfp4(qweight, scales, group_size, dtype):
     return weight_16.to(dtype)
 
 
-def ref_fused_moe(x, w13, w13_bias, w2, w2_bias, flat_expert_weights,
-                  flat_expert_indices, num_per_tok, activation, num_experts, ep_rank=0, ep_size=1):
+def ref_fused_moe(x,
+                  w13,
+                  w13_bias,
+                  w2,
+                  w2_bias,
+                  flat_expert_weights,
+                  flat_expert_indices,
+                  num_per_tok,
+                  activation,
+                  num_experts,
+                  ep_rank=0,
+                  ep_size=1):
     expert_start_id = num_experts * ep_rank
     expert_end_id = expert_start_id + num_experts
     expert_cache = torch.zeros_like(x)
@@ -100,7 +110,9 @@ def ref_fused_moe(x, w13, w13_bias, w2, w2_bias, flat_expert_weights,
     token_idxs = idxs // num_per_tok
     for expert_id, end_idx in enumerate(tokens_per_expert):
         start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
-        if (start_idx == end_idx) or (expert_id < expert_start_id) or (expert_id >= expert_end_id):
+        if (start_idx == end_idx) or (expert_id
+                                      < expert_start_id) or (expert_id
+                                                             >= expert_end_id):
             continue
         exp_token_idxs = token_idxs[start_idx:end_idx]
         expert_tokens = x[exp_token_idxs]
@@ -440,6 +452,7 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
         atol = 2e-2
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
 
+
 FUSED_MOE_MNK_FACTORS = [
     (1, 1024, 1024),
     (4, 1024, 1024),
@@ -447,16 +460,17 @@ FUSED_MOE_MNK_FACTORS = [
     (8192, 1024, 1024),
 ]
 
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_rank", EP_RANK)
-@pytest.mark.parametrize("ep_size", EP_SIZE) 
+@pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("w_dtype",
-                         [torch.float8_e5m2, None])
+@pytest.mark.parametrize("w_dtype", [torch.float8_e5m2, None])
 @pytest.mark.parametrize("has_bias", [True, False])
-def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype, has_bias):
+def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype,
+                      has_bias):
     seed_everything(7)
 
     input_len = m
@@ -538,12 +552,16 @@ def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype, has_bi
     expert_end_id = expert_start_id + e
 
     output = xpu_fused_moe(hidden_states=a,
-                           w13=w13[expert_start_id: expert_end_id],
-                           w13_scales=w13_scales[expert_start_id: expert_end_id] if w13_scales is not None else None,
-                           w13_bias=w13_bias[expert_start_id: expert_end_id] if w13_bias is not None else None,
-                           w2=w2[expert_start_id: expert_end_id],
-                           w2_scales=w2_scales[expert_start_id: expert_end_id] if w2_scales is not None else None,
-                           w2_bias=w2_bias[expert_start_id: expert_end_id] if w2_bias is not None else None,
+                           w13=w13[expert_start_id:expert_end_id],
+                           w13_scales=w13_scales[expert_start_id:expert_end_id]
+                           if w13_scales is not None else None,
+                           w13_bias=w13_bias[expert_start_id:expert_end_id]
+                           if w13_bias is not None else None,
+                           w2=w2[expert_start_id:expert_end_id],
+                           w2_scales=w2_scales[expert_start_id:expert_end_id]
+                           if w2_scales is not None else None,
+                           w2_bias=w2_bias[expert_start_id:expert_end_id]
+                           if w2_bias is not None else None,
                            topk_weights=expert_scores,
                            topk_ids=expert_indices,
                            n_experts_per_token=topk,
@@ -561,14 +579,16 @@ def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype, has_bi
         atol = 2e-2
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
 
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_rank", EP_RANK)
-@pytest.mark.parametrize("ep_size", EP_SIZE) 
+@pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("has_bias", [True, False])
-def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, has_bias):
+def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
+                           has_bias):
     seed_everything(7)
     torch.xpu.empty_cache()
     gc.collect()
@@ -646,12 +666,16 @@ def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, has_bias):
     expert_end_id = expert_start_id + e
 
     output = xpu_fused_moe(hidden_states=a,
-                           w13=w13[expert_start_id: expert_end_id],
-                           w13_scales=w13_scales[expert_start_id: expert_end_id] if w13_scales is not None else None,
-                           w13_bias=w13_bias[expert_start_id: expert_end_id] if w13_bias is not None else None,
-                           w2=w2[expert_start_id: expert_end_id],
-                           w2_scales=w2_scales[expert_start_id: expert_end_id] if w2_scales is not None else None,
-                           w2_bias=w2_bias[expert_start_id: expert_end_id] if w2_bias is not None else None,
+                           w13=w13[expert_start_id:expert_end_id],
+                           w13_scales=w13_scales[expert_start_id:expert_end_id]
+                           if w13_scales is not None else None,
+                           w13_bias=w13_bias[expert_start_id:expert_end_id]
+                           if w13_bias is not None else None,
+                           w2=w2[expert_start_id:expert_end_id],
+                           w2_scales=w2_scales[expert_start_id:expert_end_id]
+                           if w2_scales is not None else None,
+                           w2_bias=w2_bias[expert_start_id:expert_end_id]
+                           if w2_bias is not None else None,
                            topk_weights=expert_scores,
                            topk_ids=expert_indices,
                            n_experts_per_token=topk,
@@ -674,10 +698,11 @@ def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, has_bias):
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_rank", EP_RANK)
-@pytest.mark.parametrize("ep_size", EP_SIZE) 
+@pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("has_bias", [True, False])
-def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, has_bias):
+def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
+                            has_bias):
     seed_everything(7)
 
     torch.xpu.empty_cache()
@@ -757,12 +782,16 @@ def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, has_bias)
     expert_end_id = expert_start_id + e
 
     output = xpu_fused_moe(hidden_states=a,
-                           w13=w13[expert_start_id: expert_end_id],
-                           w13_scales=w13_scales[expert_start_id: expert_end_id] if w13_scales is not None else None,
-                           w13_bias=w13_bias[expert_start_id: expert_end_id] if w13_bias is not None else None,
-                           w2=w2[expert_start_id: expert_end_id],
-                           w2_scales=w2_scales[expert_start_id: expert_end_id] if w2_scales is not None else None,
-                           w2_bias=w2_bias[expert_start_id: expert_end_id] if w2_bias is not None else None,
+                           w13=w13[expert_start_id:expert_end_id],
+                           w13_scales=w13_scales[expert_start_id:expert_end_id]
+                           if w13_scales is not None else None,
+                           w13_bias=w13_bias[expert_start_id:expert_end_id]
+                           if w13_bias is not None else None,
+                           w2=w2[expert_start_id:expert_end_id],
+                           w2_scales=w2_scales[expert_start_id:expert_end_id]
+                           if w2_scales is not None else None,
+                           w2_bias=w2_bias[expert_start_id:expert_end_id]
+                           if w2_bias is not None else None,
                            topk_weights=expert_scores,
                            topk_ids=expert_indices,
                            n_experts_per_token=topk,

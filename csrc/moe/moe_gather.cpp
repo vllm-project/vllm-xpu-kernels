@@ -58,7 +58,9 @@ class MoeGather {
 #pragma unroll
     for (int i = 0; i < TOPK; ++i) {
       // check invalid idx for EP
-      if(rows_sum == 0 || (moe_ids[i] == 0 && (permuted_row_to_unpermuted_row_0 != token_idx + i * num_tokens))){
+      if (rows_sum == 0 ||
+          (moe_ids[i] == 0 &&
+           (permuted_row_to_unpermuted_row_0 != token_idx + i * num_tokens))) {
         moe_ids[i] = -1;
       }
     }
@@ -81,7 +83,7 @@ class MoeGather {
         }
 #pragma unroll
         for (int k = 0; k < TOPK; ++k) {
-          if(moe_ids[k] == -1){
+          if (moe_ids[k] == -1) {
             // skip invalid index for EP
             continue;
           }
@@ -139,10 +141,10 @@ void MoeGatherLauncher(
               output,                                                 \
               moe_output,                                             \
               topk_weights,                                           \
-              permuted_row_to_unpermuted_row,\
+              permuted_row_to_unpermuted_row,                         \
               unpermuted_row_to_permuted_row,                         \
-              expert_first_token_offset,\
-              num_experts,\
+              expert_first_token_offset,                              \
+              num_experts,                                            \
               num_tokens,                                             \
               hidden_size});                                          \
     });                                                               \
@@ -183,7 +185,7 @@ void moe_gather(
     const torch::Tensor& topk_weights,  // [num_tokens, topk]
     const torch::Tensor& permuted_row_to_unpermuted_row,  // [num_tokens * topk]
     const torch::Tensor& unpermuted_row_to_permuted_row,  // [num_tokens * topk]
-    const torch::Tensor& expert_first_token_offset,  // [num_experts + 1]
+    const torch::Tensor& expert_first_token_offset,       // [num_experts + 1]
     const int64_t num_experts) {
   // Implementation of the gather operation
   const int num_tokens = topk_weights.size(0);
@@ -204,8 +206,8 @@ void moe_gather(
       reinterpret_cast<float*>(topk_weights.data_ptr()),                 \
       reinterpret_cast<int*>(permuted_row_to_unpermuted_row.data_ptr()), \
       reinterpret_cast<int*>(unpermuted_row_to_permuted_row.data_ptr()), \
-      reinterpret_cast<int64_t*>(expert_first_token_offset.data_ptr()), \
-      num_experts, \
+      reinterpret_cast<int64_t*>(expert_first_token_offset.data_ptr()),  \
+      num_experts,                                                       \
       num_tokens,                                                        \
       topk,                                                              \
       hidden_size,                                                       \
