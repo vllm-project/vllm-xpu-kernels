@@ -157,21 +157,22 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
 
     input_len = m
     hidden_size = k
-    immediate_size = n
+    intermediate_size = n
     num_experts = e
 
     a = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
-    w13 = torch.randn((num_experts, 2 * immediate_size, hidden_size),
+    w13 = torch.randn((num_experts, 2 * intermediate_size, hidden_size),
                       device=DEVICE,
                       dtype=dtype) / 16
-    w2 = torch.randn(
-        (num_experts, hidden_size, immediate_size), device=DEVICE,
-        dtype=dtype) / 16
+    w2 = torch.randn((num_experts, hidden_size, intermediate_size),
+                     device=DEVICE,
+                     dtype=dtype) / 16
     ref_a = a.clone()
 
     if has_bias:
         w13_bias = torch.randn(
-            (num_experts, 2 * immediate_size), device=DEVICE, dtype=dtype) / 16
+            (num_experts, 2 * intermediate_size), device=DEVICE,
+            dtype=dtype) / 16
         w2_bias = torch.randn(
             (num_experts, hidden_size), device=DEVICE, dtype=dtype) / 16
     else:
@@ -263,25 +264,28 @@ def test_fused_moe_int4(m, n, k, e, topk, dtype, has_bias):
 
     input_len = m
     hidden_size = n
-    immediate_size = k
+    intermediate_size = k
     num_experts = e
     group_size = 128
 
     a = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
-    w13 = (torch.randint(0,
-                         0xff,
-                         [num_experts, 2 * immediate_size, hidden_size // 2],
-                         device=DEVICE)).to(torch.uint8)
+    w13 = (torch.randint(
+        0,
+        0xff, [num_experts, 2 * intermediate_size, hidden_size // 2],
+        device=DEVICE)).to(torch.uint8)
     w2 = (torch.randint(0,
-                        0xff, [num_experts, hidden_size, immediate_size // 2],
+                        0xff,
+                        [num_experts, hidden_size, intermediate_size // 2],
                         device=DEVICE)).to(torch.uint8)
     ref_a = a.clone()
 
     # scale
     group_num_13 = hidden_size // group_size
-    group_num_2 = immediate_size // group_size
+    group_num_2 = intermediate_size // group_size
     random_exponents = torch.randint(
-        -5, -4, (num_experts, 2 * immediate_size, group_num_13), device=DEVICE)
+        -5,
+        -4, (num_experts, 2 * intermediate_size, group_num_13),
+        device=DEVICE)
     w13_scales = torch.pow(2.0, random_exponents.float()).to(dtype)
     random_exponents = torch.randint(-5,
                                      -4,
@@ -291,7 +295,8 @@ def test_fused_moe_int4(m, n, k, e, topk, dtype, has_bias):
 
     if has_bias:
         w13_bias = torch.randn(
-            (num_experts, 2 * immediate_size), device=DEVICE, dtype=dtype) / 16
+            (num_experts, 2 * intermediate_size), device=DEVICE,
+            dtype=dtype) / 16
         w2_bias = torch.randn(
             (num_experts, hidden_size), device=DEVICE, dtype=dtype) / 16
     else:
@@ -310,13 +315,13 @@ def test_fused_moe_int4(m, n, k, e, topk, dtype, has_bias):
     flat_expert_weights = expert_scores.view(-1, 1)
 
     ref_13 = torch.empty(num_experts,
-                         2 * immediate_size,
+                         2 * intermediate_size,
                          hidden_size,
                          dtype=dtype,
                          device=DEVICE)
     ref_2 = torch.empty(num_experts,
                         hidden_size,
-                        immediate_size,
+                        intermediate_size,
                         dtype=dtype,
                         device=DEVICE)
 
@@ -364,28 +369,29 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
 
     input_len = m
     hidden_size = n
-    immediate_size = k
+    intermediate_size = k
     num_experts = e
     group_size = 32
 
     a = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
-    w13 = (torch.randint(0,
-                         0xff,
-                         [num_experts, 2 * immediate_size, hidden_size // 2],
-                         device=DEVICE)).to(torch.uint8)
+    w13 = (torch.randint(
+        0,
+        0xff, [num_experts, 2 * intermediate_size, hidden_size // 2],
+        device=DEVICE)).to(torch.uint8)
     w2 = (torch.randint(0,
-                        0xff, [num_experts, hidden_size, immediate_size // 2],
+                        0xff,
+                        [num_experts, hidden_size, intermediate_size // 2],
                         device=DEVICE)).to(torch.uint8)
     ref_a = a.clone()
 
     # scale
     group_num_13 = hidden_size // group_size
-    group_num_2 = immediate_size // group_size
-    w13_scales = torch.randint(0,
-                               0x6f,
-                               (num_experts, 2 * immediate_size, group_num_13),
-                               dtype=torch.uint8,
-                               device=DEVICE)
+    group_num_2 = intermediate_size // group_size
+    w13_scales = torch.randint(
+        0,
+        0x6f, (num_experts, 2 * intermediate_size, group_num_13),
+        dtype=torch.uint8,
+        device=DEVICE)
     w2_scales = torch.randint(0,
                               0x6f, (num_experts, hidden_size, group_num_2),
                               dtype=torch.uint8,
@@ -393,7 +399,8 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
 
     if has_bias:
         w13_bias = torch.randn(
-            (num_experts, 2 * immediate_size), device=DEVICE, dtype=dtype) / 16
+            (num_experts, 2 * intermediate_size), device=DEVICE,
+            dtype=dtype) / 16
         w2_bias = torch.randn(
             (num_experts, hidden_size), device=DEVICE, dtype=dtype) / 16
     else:
@@ -412,13 +419,13 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
     flat_expert_weights = expert_scores.view(-1, 1)
 
     ref_13 = torch.empty(num_experts,
-                         2 * immediate_size,
+                         2 * intermediate_size,
                          hidden_size,
                          dtype=dtype,
                          device=DEVICE)
     ref_2 = torch.empty(num_experts,
                         hidden_size,
-                        immediate_size,
+                        intermediate_size,
                         dtype=dtype,
                         device=DEVICE)
 
@@ -475,21 +482,22 @@ def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype,
 
     input_len = m
     hidden_size = k
-    immediate_size = n
+    intermediate_size = n
     num_experts = e
 
     a = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
-    w13 = torch.randn((num_experts, 2 * immediate_size, hidden_size),
+    w13 = torch.randn((num_experts, 2 * intermediate_size, hidden_size),
                       device=DEVICE,
                       dtype=dtype) / 16
-    w2 = torch.randn(
-        (num_experts, hidden_size, immediate_size), device=DEVICE,
-        dtype=dtype) / 16
+    w2 = torch.randn((num_experts, hidden_size, intermediate_size),
+                     device=DEVICE,
+                     dtype=dtype) / 16
     ref_a = a.clone()
 
     if has_bias:
         w13_bias = torch.randn(
-            (num_experts, 2 * immediate_size), device=DEVICE, dtype=dtype) / 16
+            (num_experts, 2 * intermediate_size), device=DEVICE,
+            dtype=dtype) / 16
         w2_bias = torch.randn(
             (num_experts, hidden_size), device=DEVICE, dtype=dtype) / 16
     else:
@@ -595,25 +603,28 @@ def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
 
     input_len = m
     hidden_size = n
-    immediate_size = k
+    intermediate_size = k
     num_experts = e
     group_size = 128
 
     a = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
-    w13 = (torch.randint(0,
-                         0xff,
-                         [num_experts, 2 * immediate_size, hidden_size // 2],
-                         device=DEVICE)).to(torch.uint8)
+    w13 = (torch.randint(
+        0,
+        0xff, [num_experts, 2 * intermediate_size, hidden_size // 2],
+        device=DEVICE)).to(torch.uint8)
     w2 = (torch.randint(0,
-                        0xff, [num_experts, hidden_size, immediate_size // 2],
+                        0xff,
+                        [num_experts, hidden_size, intermediate_size // 2],
                         device=DEVICE)).to(torch.uint8)
     ref_a = a.clone()
 
     # scale
     group_num_13 = hidden_size // group_size
-    group_num_2 = immediate_size // group_size
+    group_num_2 = intermediate_size // group_size
     random_exponents = torch.randint(
-        -5, -4, (num_experts, 2 * immediate_size, group_num_13), device=DEVICE)
+        -5,
+        -4, (num_experts, 2 * intermediate_size, group_num_13),
+        device=DEVICE)
     w13_scales = torch.pow(2.0, random_exponents.float()).to(dtype)
     random_exponents = torch.randint(-5,
                                      -4,
@@ -623,7 +634,8 @@ def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
 
     if has_bias:
         w13_bias = torch.randn(
-            (num_experts, 2 * immediate_size), device=DEVICE, dtype=dtype) / 16
+            (num_experts, 2 * intermediate_size), device=DEVICE,
+            dtype=dtype) / 16
         w2_bias = torch.randn(
             (num_experts, hidden_size), device=DEVICE, dtype=dtype) / 16
     else:
@@ -642,13 +654,13 @@ def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
     flat_expert_weights = expert_scores.view(-1, 1)
 
     ref_13 = torch.empty(num_experts,
-                         2 * immediate_size,
+                         2 * intermediate_size,
                          hidden_size,
                          dtype=dtype,
                          device=DEVICE)
     ref_2 = torch.empty(num_experts,
                         hidden_size,
-                        immediate_size,
+                        intermediate_size,
                         dtype=dtype,
                         device=DEVICE)
 
@@ -710,28 +722,29 @@ def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
 
     input_len = m
     hidden_size = n
-    immediate_size = k
+    intermediate_size = k
     num_experts = e
     group_size = 32
 
     a = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
-    w13 = (torch.randint(0,
-                         0xff,
-                         [num_experts, 2 * immediate_size, hidden_size // 2],
-                         device=DEVICE)).to(torch.uint8)
+    w13 = (torch.randint(
+        0,
+        0xff, [num_experts, 2 * intermediate_size, hidden_size // 2],
+        device=DEVICE)).to(torch.uint8)
     w2 = (torch.randint(0,
-                        0xff, [num_experts, hidden_size, immediate_size // 2],
+                        0xff,
+                        [num_experts, hidden_size, intermediate_size // 2],
                         device=DEVICE)).to(torch.uint8)
     ref_a = a.clone()
 
     # scale
     group_num_13 = hidden_size // group_size
-    group_num_2 = immediate_size // group_size
-    w13_scales = torch.randint(0,
-                               0x6f,
-                               (num_experts, 2 * immediate_size, group_num_13),
-                               dtype=torch.uint8,
-                               device=DEVICE)
+    group_num_2 = intermediate_size // group_size
+    w13_scales = torch.randint(
+        0,
+        0x6f, (num_experts, 2 * intermediate_size, group_num_13),
+        dtype=torch.uint8,
+        device=DEVICE)
     w2_scales = torch.randint(0,
                               0x6f, (num_experts, hidden_size, group_num_2),
                               dtype=torch.uint8,
@@ -739,7 +752,8 @@ def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
 
     if has_bias:
         w13_bias = torch.randn(
-            (num_experts, 2 * immediate_size), device=DEVICE, dtype=dtype) / 16
+            (num_experts, 2 * intermediate_size), device=DEVICE,
+            dtype=dtype) / 16
         w2_bias = torch.randn(
             (num_experts, hidden_size), device=DEVICE, dtype=dtype) / 16
     else:
@@ -758,13 +772,13 @@ def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
     flat_expert_weights = expert_scores.view(-1, 1)
 
     ref_13 = torch.empty(num_experts,
-                         2 * immediate_size,
+                         2 * intermediate_size,
                          hidden_size,
                          dtype=dtype,
                          device=DEVICE)
     ref_2 = torch.empty(num_experts,
                         hidden_size,
-                        immediate_size,
+                        intermediate_size,
                         dtype=dtype,
                         device=DEVICE)
 
