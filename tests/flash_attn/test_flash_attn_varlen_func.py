@@ -21,6 +21,7 @@ SOFT_CAPS = [None]
 SLIDING_WINDOWS = [(-1, 127), (127, -1), (127, 127), (-1, -1)]
 SINK = [False, True]
 CASUAL = [False, True]
+PAGED = [False, True]
 
 
 def ref_paged_attn(query: torch.Tensor,
@@ -33,27 +34,36 @@ def ref_paged_attn(query: torch.Tensor,
                    window_size_left: Optional[int] = None,
                    window_size_right: Optional[int] = None,
                    soft_cap: Optional[float] = None,
+                   is_paged: Optional[bool] = True,
                    casual: Optional[bool] = False,
                    sink: Optional[torch.Tensor] = None) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
-    _, block_size, num_kv_heads, head_size = key_cache.shape
+    if is_paged:
+        _, block_size, num_kv_heads, head_size = key_cache.shape
+    else:
+        _, num_kv_heads, head_size = key_cache.shape
 
     outputs: list[torch.Tensor] = []
     start_idx = 0
+    start_idx_kv = 0
     for i in range(num_seqs):
         query_len = query_lens[i]
         kv_len = kv_lens[i]
         q = query[start_idx:start_idx + query_len]
         q *= scale
 
-        num_kv_blocks = (kv_len + block_size - 1) // block_size
-        block_indices = block_tables[i, :num_kv_blocks]
+        if is_paged:
+            num_kv_blocks = (kv_len + block_size - 1) // block_size
+            block_indices = block_tables[i, :num_kv_blocks]
 
-        k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
-        k = k[:kv_len]
-        v = value_cache[block_indices].view(-1, num_kv_heads, head_size)
-        v = v[:kv_len]
+            k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
+            k = k[:kv_len]
+            v = value_cache[block_indices].view(-1, num_kv_heads, head_size)
+            v = v[:kv_len]
+        else:
+            k = key_cache[start_idx_kv:start_idx_kv + kv_len]
+            v = value_cache[start_idx_kv:start_idx_kv + kv_len]
 
         if q.shape[1] != k.shape[1]:
             k = torch.repeat_interleave(k, q.shape[1] // k.shape[1],
@@ -93,6 +103,7 @@ def ref_paged_attn(query: torch.Tensor,
 
         outputs.append(out)
         start_idx += query_len
+        start_idx_kv += kv_len
 
     return torch.cat(outputs, dim=0)
 
@@ -121,6 +132,7 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("q_dtype", QDTYPES)
 @pytest.mark.parametrize("is_sink", SINK)
 @pytest.mark.parametrize("is_casual", CASUAL)
+@pytest.mark.parametrize("is_paged", PAGED)
 @torch.inference_mode()
 def test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -135,6 +147,7 @@ def test_varlen_with_paged_kv(
     q_dtype: Optional[torch.dtype],
     is_sink: bool,
     is_casual: bool,
+    is_paged: bool,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -165,18 +178,25 @@ def test_varlen_with_paged_kv(
                         num_query_heads,
                         head_size,
                         dtype=dtype)
-    key_cache = torch.randn(num_blocks,
-                            block_size,
-                            num_kv_heads,
-                            head_size,
-                            dtype=dtype)
+    if is_paged:
+        key_cache = torch.randn(num_blocks,
+                                block_size,
+                                num_kv_heads,
+                                head_size,
+                                dtype=dtype)
+    else:
+        key_cache = torch.randn(sum(kv_lens),
+                                num_query_heads,
+                                head_size,
+                                dtype=dtype)
     value_cache = torch.randn_like(key_cache)
+
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
                                                            dtype=torch.int32)
-    cu_kv_lens = torch.tensor(  #noqa: F841
-        [0] + kv_lens,  #noqa: F841
-        dtype=torch.int32).cumsum(dim=0, dtype=torch.int32)  #noqa: F841
+    cu_kv_lens = torch.tensor([0] + kv_lens,
+                              dtype=torch.int32).cumsum(dim=0,
+                                                        dtype=torch.int32)
     seq_k = torch.tensor(kv_lens, dtype=torch.int32)
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
@@ -205,18 +225,32 @@ def test_varlen_with_paged_kv(
         k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
 
-    output = flash_attn_varlen_func(maybe_quantized_query,
-                                    maybe_quantized_key_cache,
-                                    maybe_quantized_value_cache,
-                                    max_query_len,
-                                    cu_query_lens,
-                                    max_kv_len,
-                                    seqused_k=seq_k,
-                                    softmax_scale=scale,
-                                    causal=is_casual,
-                                    block_table=block_tables,
-                                    window_size=window_size,
-                                    s_aux=sink)
+    if is_paged:
+        output = flash_attn_varlen_func(maybe_quantized_query,
+                                        maybe_quantized_key_cache,
+                                        maybe_quantized_value_cache,
+                                        max_query_len,
+                                        cu_query_lens,
+                                        max_kv_len,
+                                        seqused_k=seq_k,
+                                        softmax_scale=scale,
+                                        causal=is_casual,
+                                        block_table=block_tables,
+                                        window_size=window_size,
+                                        s_aux=sink)
+    else:
+        output = flash_attn_varlen_func(maybe_quantized_query,
+                                        maybe_quantized_key_cache,
+                                        maybe_quantized_value_cache,
+                                        max_query_len,
+                                        cu_query_lens,
+                                        max_kv_len,
+                                        cu_seqlens_k=cu_kv_lens,
+                                        softmax_scale=scale,
+                                        causal=is_casual,
+                                        block_table=block_tables,
+                                        window_size=window_size,
+                                        s_aux=sink)
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
@@ -226,6 +260,7 @@ def test_varlen_with_paged_kv(
                                 block_tables=block_tables,
                                 scale=scale,
                                 casual=is_casual,
+                                is_paged=is_paged,
                                 sink=sink,
                                 window_size_left=window_size[0],
                                 window_size_right=window_size[1])

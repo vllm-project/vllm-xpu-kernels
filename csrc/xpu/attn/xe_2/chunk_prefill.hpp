@@ -426,7 +426,7 @@ void cutlass_chunk_prefill_impl(
       key_cache.data_ptr(),
       value_cache.data_ptr(),
       out.data_ptr(),
-      block_table.data_ptr(),
+      is_paged ? block_table.data_ptr() : nullptr,
       cu_seqlens_q.data_ptr(),
       cu_seqlens_k.data_ptr(),
       max_seqlen_q,
