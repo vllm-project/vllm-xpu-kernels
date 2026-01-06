@@ -18,7 +18,7 @@ struct causal_conv1d_kernel
 public:
     static constexpr int sub_group_size = 32;
     static constexpr int group_size = 256;
-    static constexpr int elems_per_item = 1;
+    static constexpr int elems_per_item = 4;
     static constexpr int elems_per_group = group_size * elems_per_item;
 
     causal_conv1d_kernel(
@@ -97,7 +97,7 @@ public:
     const int token_id = item.get_group(0);
     const int local_group_id = item.get_group(1);
     const int local_id = item.get_local_linear_id();
-    const int qkvz_elems_id = local_group_id * elems_per_group + local_id;
+    const int qkvz_elems_id = local_group_id * elems_per_group + local_id * elems_per_item;
 
     if(qkvz_elems_id >= qkvz_elems){
         return;
@@ -115,8 +115,11 @@ public:
     // reoder b,a
     if(qkvz_dim_id < (num_v_heads / num_k_heads)){
         int step = token_id * num_v_heads + k_heads_id * num_v_heads / num_k_heads;
-        b_out[step + qkvz_dim_id] = mixed_ba[step * 2 + qkvz_dim_id];
-        a_out[step + qkvz_dim_id] = mixed_ba[step * 2 + num_v_heads / num_k_heads + qkvz_dim_id];
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            b_out[step + qkvz_dim_id + e] = mixed_ba[step * 2 + qkvz_dim_id + e];
+            a_out[step + qkvz_dim_id + e] = mixed_ba[step * 2 + num_v_heads / num_k_heads + qkvz_dim_id + e];
+        }
     }
 
     // get current seq start, end
@@ -157,7 +160,10 @@ public:
     // reoder z
     if(is_z){
         int z_elems_id = k_heads_id * z_dim + qkvz_dim_id - (q_dim + k_dim + v_dim);
-        z_out[token_id * num_k_heads * z_dim + z_elems_id] = mixed_qkvz[token_id * qkvz_elems + qkvz_elems_id];
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            z_out[token_id * num_k_heads * z_dim + z_elems_id + e] = mixed_qkvz[token_id * qkvz_elems + qkvz_elems_id + e];
+        }
         return;
     }
 
@@ -176,17 +182,23 @@ public:
     T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
 
     // load weights
-    T local_weights[Width];
+    T local_weights[Width * elems_per_item];
     #pragma unroll
     for(int i = 0; i < Width; ++i){
-        local_weights[i] = conv_weights[reordered_elems_id * Width + i];
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            local_weights[Width * e + i] = conv_weights[(reordered_elems_id + e) * Width + i];
+        }
     }
 
     // load input
-    T local_input[Width];
+    T local_input[Width * elems_per_item];
     #pragma unroll
     for(int i = 0; i < Width; ++i){
-        local_input[i] = 0;
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            local_input[Width * e + i] = 0.0f;
+        }
     }
 
     int seq_cu_len = token_id - seq_start_offset + 1;
@@ -195,23 +207,39 @@ public:
     if(states_load_len != 0 && has_init_conv_states){
         #pragma unroll
         for(int i = 0; i < states_load_len; ++i){
-            local_input[i] = conv_states_ptr[(Width - 1 - states_load_len + i) * conv_elems + reordered_elems_id];
+            #pragma unroll
+            for(int e = 0; e < elems_per_item; ++e){
+                local_input[Width * e + i] = conv_states_ptr[(Width - 1 - states_load_len + i) * conv_elems + reordered_elems_id + e];
+            }
         }
     }
 
     #pragma unroll
     for(int i = 0; i < input_load_len; ++i){
-        local_input[states_load_len + i] = mixed_qkvz[(token_id - input_load_len + 1 + i) * qkvz_elems + qkvz_elems_id];
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            local_input[Width * e + states_load_len + i] = mixed_qkvz[(token_id - input_load_len + 1 + i) * qkvz_elems + qkvz_elems_id + e];
+        }
     }
 
-    float res = 0.0f;
+    float res[elems_per_item];
+    #pragma unroll
+    for(int i = 0; i < elems_per_item; ++i){
+        res[i] = 0.0f;
+    }
     #pragma unroll
     for(int i = 0; i < Width; ++i){
-        res += static_cast<float>(local_input[i]) * static_cast<float>(local_weights[i]);
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            res[e] += static_cast<float>(local_input[Width * e + i]) * static_cast<float>(local_weights[Width * e + i]);
+        }
     }
 
     if(conv_bias != nullptr){
-        res += conv_bias[reordered_elems_id];
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            res[e] += conv_bias[reordered_elems_id + e];
+        }
     }
 
     // save states
@@ -221,30 +249,51 @@ public:
         if(seq_end_offset - 1 == token_id){
             #pragma unroll
             for(int i = 0; i < Width - 1; ++i){
-                conv_states_tmp[batch_id * (Width - 1) * conv_elems + i * conv_elems + reordered_elems_id] = local_input[i + 1];
+                #pragma unroll
+                for(int e = 0; e < elems_per_item; ++e){
+                    conv_states_tmp[batch_id * (Width - 1) * conv_elems + i * conv_elems + reordered_elems_id + e] = local_input[Width * e + i + 1];
+                }
             }
         }
     }else{
         // update states inplace if decode
         #pragma unroll
         for(int i = 0; i < Width - 1; ++i){
-            conv_states_ptr[i * conv_elems + reordered_elems_id] = local_input[i + 1];
+            #pragma unroll
+            for(int e = 0; e < elems_per_item; ++e){
+                conv_states_ptr[i * conv_elems + reordered_elems_id + e] = local_input[Width * e + i + 1];
+            }
         }
     }
 
     if(act_mode == ActMode::silu){
-        act_silu(res);
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            act_silu(res[e]);
+        }
     }else if(act_mode == ActMode::swish){
-        act_swish(res);
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            act_swish(res[e]);
+        }
     }
 
     // reoder q, k, v
     if(is_q){
-        q_out[token_id * num_k_heads * q_dim + k_heads_id * q_dim + qkvz_dim_id] = res;
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            q_out[token_id * num_k_heads * q_dim + k_heads_id * q_dim + qkvz_dim_id + e] = res[e];
+        }
     }else if(is_k){
-        k_out[token_id * num_k_heads * k_dim + k_heads_id * k_dim + qkvz_dim_id - q_dim] = res;
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            k_out[token_id * num_k_heads * k_dim + k_heads_id * k_dim + qkvz_dim_id - q_dim + e] = res[e];
+        }
     }else if(is_v){
-        v_out[token_id * num_k_heads * v_dim + k_heads_id * v_dim + qkvz_dim_id - (q_dim + k_dim)] = res;
+        #pragma unroll
+        for(int e = 0; e < elems_per_item; ++e){
+            v_out[token_id * num_k_heads * v_dim + k_heads_id * v_dim + qkvz_dim_id - (q_dim + k_dim) + e] = res[e];
+        }
     }
   }
 private:
@@ -380,6 +429,7 @@ void kernel_launcher(
 ){
     using KERNEL_MAIN = causal_conv1d_kernel<T, Width>;
     auto range_main = KERNEL_MAIN::get_nd_range(num_actual_tokens, qkvz_elems);
+    assert(head_k_dim % KERNEL_MAIN::elems_per_item == 0);
     queue.submit([&](sycl::handler& cgh) {
         KERNEL_MAIN task(
             q_out,
