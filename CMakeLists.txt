@@ -134,6 +134,10 @@ include(FetchContent)
 file(MAKE_DIRECTORY ${FETCHCONTENT_BASE_DIR}) # Ensure the directory exists
 message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
+# Set RPATH to $ORIGIN so that the extensions can find their shared libraries
+# when loaded by Python.
+set(CMAKE_INSTALL_RPATH "$ORIGIN")
+
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   #
   # For SYCL we want to use the same flags as CUDA, so we set them here.
@@ -256,11 +260,20 @@ if(BUILD_SYCL_TLA_KERNELS)
   list(APPEND SYCL_TLA_KERNELS_COMPILE_FLAGS ${VLLM_CUTLASS_FLAGS})
 
   # compile static library for attn and grouped_gemm, link this library to vLLM extensions shared library
-  add_subdirectory(csrc/xpu/attn)
-  list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels")
-
-  add_subdirectory(csrc/xpu/grouped_gemm)
-  list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm")
+  set(SYCL_TLA_COMPILE_OPTIONS "")
+  if(VLLM_XPU_ENABLE_XE_DEFAULT)
+    add_subdirectory(csrc/xpu/grouped_gemm/xe_default)
+    list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_default")
+    list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE_DEFAULT)
+  endif()
+  if(VLLM_XPU_ENABLE_XE2)
+    add_subdirectory(csrc/xpu/grouped_gemm/xe_2)  
+    add_subdirectory(csrc/xpu/attn/xe_2)
+    list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_2")
+    list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels_xe_2")
+    list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
+  endif()
+  list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
 
 endif()
 
@@ -316,7 +329,7 @@ endif()
 #
 if(FA2_KERNELS_ENABLED)
   message(STATUS "Enabling fa2 extension.")
-  file(GLOB FA2_GEN_SRCS "csrc/flash_attn/*.cpp")
+  file(GLOB FA2_GEN_SRCS "csrc/flash_attn/*.cpp" "csrc/xpu/attn/attn_interface.cpp")
 
   define_gpu_extension_target(
     _vllm_fa2_C
@@ -344,6 +357,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     "csrc/xpu/lora/lora_shrink.cpp"
     "csrc/xpu/lora/lora_expand.cpp"
     "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
+    "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp"
   )
   include_directories("/usr/include")
   # TODO: check if we need this flags 

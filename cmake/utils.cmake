@@ -528,6 +528,7 @@ endfunction()
 # 
 # Arguments:
 #   LIBRARY_NAME: Name of the library to create (e.g., attn_kernels_xe_2)
+#   DESTINATION: Installation destination directory (optional, defaults to vllm_xpu_kernels)
 #   INCLUDE_CMAKE_SOURCE_DIR: Optional flag to include ${CMAKE_SOURCE_DIR} in include directories
 #
 function(add_xe2_kernel_library LIBRARY_NAME)
@@ -535,9 +536,14 @@ function(add_xe2_kernel_library LIBRARY_NAME)
     PARSE_ARGV 1
     ARG
     "INCLUDE_CMAKE_SOURCE_DIR"  # Boolean options
-    ""                           # Single value keywords
+    "DESTINATION"                # Single value keywords
     ""                           # Multi-value keywords
   )
+  
+  # Set default destination if not provided
+  if(NOT ARG_DESTINATION)
+    set(ARG_DESTINATION "vllm_xpu_kernels")
+  endif()
 
   # Set C++ standard
   set(CMAKE_CXX_STANDARD 17)
@@ -547,7 +553,7 @@ function(add_xe2_kernel_library LIBRARY_NAME)
   file(GLOB_RECURSE KERNEL_SOURCES "*.cpp")
 
   # Create static library
-  add_library(${LIBRARY_NAME} STATIC ${KERNEL_SOURCES})
+  add_library(${LIBRARY_NAME} SHARED ${KERNEL_SOURCES})
 
   # Set include directories
   target_include_directories(${LIBRARY_NAME}
@@ -573,6 +579,12 @@ function(add_xe2_kernel_library LIBRARY_NAME)
   target_link_libraries(${LIBRARY_NAME} PRIVATE torch)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${TORCH_LIBRARIES})
 
+  message(STATUS "CMAKE_BINARY_DIR: ${CMAKE_BINARY_DIR}")
+  set_target_properties(${LIBRARY_NAME} PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/"
+  )
+  install(TARGETS ${LIBRARY_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} COMPONENT ${LIBRARY_NAME})
+
   # Set link options for XE2 devices
   set(XE2_GPU_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
   list(APPEND XE2_GPU_LINK_FLAGS -Xsycl-target-backend=spir64_gen "-device ${XE2_AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
@@ -584,6 +596,7 @@ endfunction()
 # 
 # Arguments:
 #   LIBRARY_NAME: Name of the library to create (e.g., grouped_gemm_xe_default)
+#   DESTINATION: Installation destination directory (optional, defaults to vllm_xpu_kernels)
 #   INCLUDE_CMAKE_SOURCE_DIR: Optional flag to include ${CMAKE_SOURCE_DIR} in include directories
 #
 function(add_xe_default_kernel_library LIBRARY_NAME)
@@ -591,9 +604,14 @@ function(add_xe_default_kernel_library LIBRARY_NAME)
     PARSE_ARGV 1
     ARG
     "INCLUDE_CMAKE_SOURCE_DIR"  # Boolean options
-    ""                           # Single value keywords
+    "DESTINATION"                # Single value keywords
     ""                           # Multi-value keywords
   )
+  
+  # Set default destination if not provided
+  if(NOT ARG_DESTINATION)
+    set(ARG_DESTINATION "vllm_xpu_kernels")
+  endif()
 
   # Set C++ standard
   set(CMAKE_CXX_STANDARD 17)
@@ -603,7 +621,7 @@ function(add_xe_default_kernel_library LIBRARY_NAME)
   file(GLOB_RECURSE KERNEL_SOURCES "*.cpp")
 
   # Create static library
-  add_library(${LIBRARY_NAME} STATIC ${KERNEL_SOURCES})
+  add_library(${LIBRARY_NAME} SHARED ${KERNEL_SOURCES})
 
   # Set include directories
   target_include_directories(${LIBRARY_NAME}
@@ -628,6 +646,10 @@ function(add_xe_default_kernel_library LIBRARY_NAME)
   # Link torch libraries
   target_link_libraries(${LIBRARY_NAME} PRIVATE torch)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${TORCH_LIBRARIES})
+  set_target_properties(${LIBRARY_NAME} PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/"
+  )
+  install(TARGETS ${LIBRARY_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} COMPONENT ${LIBRARY_NAME})
 
   # Set link options for default devices (AOT_DEVICES instead of XE2_AOT_DEVICES)
   set(XE_DEFAULT_GPU_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
