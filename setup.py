@@ -282,22 +282,12 @@ class cmake_build_ext(build_ext):
         # First, run the standard build_ext command to compile the extensions
         super().run()
 
-        # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
-        # directory so that they can be included in the editable build
         import glob
-        files = glob.glob(os.path.join(self.build_lib, "vllm",
-                                       "vllm_flash_attn", "**", "*.py"),
-                          recursive=True)
-        files += glob.glob(
+        files = glob.glob(
             os.path.join(self.build_lib, "vllm_xpu_kernels", "lib*.so"))
-        for file in files:
-            dst_file = os.path.join("vllm/vllm_flash_attn",
-                                    file.split("vllm/vllm_flash_attn/")[-1])
-            print(f"Copying {file} to {dst_file}")
-            os.makedirs(os.path.dirname(dst_file), exist_ok=True)
-            self.copy_file(file, dst_file)
-            # if is editable install, also copy to local inplace directory
-            if self.inplace:
+        # if is editable install, also copy to local inplace directory
+        if self.inplace:
+            for file in files:
                 inplace_dst_file = os.path.join(
                     os.path.dirname(__file__),
                     "vllm_xpu_kernels",
@@ -328,7 +318,6 @@ if ext_modules:
 package_data = {
     "vllm-xpu-kernels": [
         "py.typed",
-        "libattn_kernels_xe_2.so",
     ]
 }
 

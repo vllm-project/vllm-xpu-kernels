@@ -579,7 +579,7 @@ function(add_xe2_kernel_library LIBRARY_NAME)
   target_link_libraries(${LIBRARY_NAME} PRIVATE torch)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${TORCH_LIBRARIES})
 
-  message(STATUS "CMAKE_BINARY_DIR: ${CMAKE_BINARY_DIR}")
+  message(STATUS "Setting library output directory for target '${LIBRARY_NAME}' to '${CMAKE_BINARY_DIR}/'.")
   set_target_properties(${LIBRARY_NAME} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/"
   )
