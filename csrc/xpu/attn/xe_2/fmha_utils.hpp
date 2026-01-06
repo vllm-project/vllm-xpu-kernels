@@ -3,10 +3,10 @@
 #include <cute/tensor.hpp>
 
 #define HEAD_SIZE_LIMIT_0 64
-#define HEAD_SIZE_LIMIT_1 128
-#define HEAD_SIZE_LIMIT_2 192
-#define HEAD_SIZE_LIMIT_3 256
-#define HEAD_SIZE_LIMIT_4 512
+#define HEAD_SIZE_LIMIT_1 96
+#define HEAD_SIZE_LIMIT_2 128
+#define HEAD_SIZE_LIMIT_3 192
+#define HEAD_SIZE_LIMIT_4 256
 
 enum class CutlassType {
   half,

@@ -248,7 +248,7 @@ def test_varlen_with_paged_kv(
                                         cu_seqlens_k=cu_kv_lens,
                                         softmax_scale=scale,
                                         causal=is_casual,
-                                        block_table=block_tables,
+                                        block_table=None,
                                         window_size=window_size,
                                         s_aux=sink)
 
