@@ -123,19 +123,13 @@ public:
     int batch_id = batch_size - 1;
     int seq_start_offset = 0;
     int seq_end_offset = 0;
-    if(query_start_loc != nullptr){
-        for(int i = 0; i < batch_size; ++i){
-            if(token_id < query_start_loc[i + 1]){
-                batch_id = i;
-                seq_start_offset = query_start_loc[i];
-                seq_end_offset = query_start_loc[i + 1];
-                break;
-            }
+    for(int i = 0; i < batch_size; ++i){
+        if(token_id < query_start_loc[i + 1]){
+            batch_id = i;
+            seq_start_offset = query_start_loc[i];
+            seq_end_offset = query_start_loc[i + 1];
+            break;
         }
-    }else{
-        batch_id = token_id;
-        seq_start_offset = token_id;
-        seq_end_offset = token_id + 1;
     }
 
     // get states cache location
@@ -178,10 +172,8 @@ public:
     }
 
     // get states cache ptr
-    const T* conv_states_ptr = 
-        (has_initial_state == nullptr || (has_initial_state!= nullptr && has_initial_state[batch_id]))
-        ? conv_states + states_id * conv_states_stride_0
-        : nullptr;
+    const bool has_init_conv_states = (has_initial_state == nullptr || (has_initial_state!= nullptr && has_initial_state[batch_id]));
+    T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
 
     // load weights
     T local_weights[Width];
@@ -200,7 +192,7 @@ public:
     int seq_cu_len = token_id - seq_start_offset + 1;
     int input_load_len = seq_cu_len >= Width ? Width : seq_cu_len;
     int states_load_len = seq_cu_len >= Width ? 0 : Width - input_load_len;
-    if(states_load_len != 0 && conv_states_ptr != nullptr){
+    if(states_load_len != 0 && has_init_conv_states){
         #pragma unroll
         for(int i = 0; i < states_load_len; ++i){
             local_input[i] = conv_states_ptr[(Width - 1 - states_load_len + i) * conv_elems + reordered_elems_id];
@@ -223,11 +215,20 @@ public:
     }
 
     // save states
-    // hard to update states inplace, because current group is unable to know if old states are needed by other group
-    if(seq_end_offset - 1 == token_id){
+    if(seq_end_offset - seq_start_offset > 1){
+        // because current group is unable to know if old states are needed by other group,
+        // hard to update states inplace if prefill
+        if(seq_end_offset - 1 == token_id){
+            #pragma unroll
+            for(int i = 0; i < Width - 1; ++i){
+                conv_states_tmp[batch_id * (Width - 1) * conv_elems + i * conv_elems + reordered_elems_id] = local_input[i + 1];
+            }
+        }
+    }else{
+        // update states inplace if decode
         #pragma unroll
         for(int i = 0; i < Width - 1; ++i){
-            conv_states_tmp[batch_id * (Width - 1) * conv_elems + i * conv_elems + reordered_elems_id] = local_input[i + 1];
+            conv_states_ptr[i * conv_elems + reordered_elems_id] = local_input[i + 1];
         }
     }
 
@@ -290,14 +291,18 @@ public:
         const T* conv_states_tmp,
         const int* cache_indices,
         const int width,
-        const int conv_elems
+        const int conv_elems,
+        const int32_t* query_start_loc,
+        const int batch_size
     ):
         conv_states(conv_states),
         conv_states_stride_0(conv_states_stride_0),
         conv_states_tmp(conv_states_tmp),
         cache_indices(cache_indices),
         width(width),
-        conv_elems(conv_elems)
+        conv_elems(conv_elems),
+        query_start_loc(query_start_loc),
+        batch_size(batch_size)
     {}
 
     static inline sycl::nd_range<3>
@@ -316,6 +321,13 @@ public:
         const int local_id = item.get_local_linear_id();
         const int elems_start_offset_group = local_group_id * elems_per_group;
 
+        int seq_start_offset = query_start_loc[batch_id];
+        int seq_end_offset = query_start_loc[batch_id + 1];
+        if(seq_end_offset - seq_start_offset == 1){
+            // only update if prefill
+            return;
+        }
+
         int states_id = cache_indices[batch_id];
         T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
         const T* conv_states_tmp_ptr = conv_states_tmp + batch_id * (width - 1) * conv_elems;
@@ -330,6 +342,8 @@ private:
     const int* cache_indices;
     const int width;
     const int conv_elems;
+    const int32_t* query_start_loc;
+    const int batch_size;
 };
 
 template<typename T, int Width>
@@ -360,7 +374,9 @@ void kernel_launcher(
     const int& num_v_heads,
     const int& head_v_dim,
     const int& qkvz_elems,
-    const int& conv_elems
+    const int& conv_elems,
+    const int& num_prefills,
+    const int& num_decodes
 ){
     using KERNEL_MAIN = causal_conv1d_kernel<T, Width>;
     auto range_main = KERNEL_MAIN::get_nd_range(num_actual_tokens, qkvz_elems);
@@ -395,20 +411,23 @@ void kernel_launcher(
         );
         cgh.parallel_for(range_main, task);
     });
-
-    using KERNEL_UPDATE = update_states_kernel<T>;
-    auto range_update = KERNEL_UPDATE::get_nd_range(batch_size, Width, conv_elems);
-    queue.submit([&](sycl::handler& cgh) {
-        KERNEL_UPDATE task(
-            conv_states,
-            conv_states_stride_0,
-            conv_states_tmp,
-            cache_indices,
-            Width,
-            conv_elems
-        );
-        cgh.parallel_for(range_update, task);
-    });
+    if(num_prefills > 0){
+        using KERNEL_UPDATE = update_states_kernel<T>;
+        auto range_update = KERNEL_UPDATE::get_nd_range(batch_size, Width, conv_elems);
+        queue.submit([&](sycl::handler& cgh) {
+            KERNEL_UPDATE task(
+                conv_states,
+                conv_states_stride_0,
+                conv_states_tmp,
+                cache_indices,
+                Width,
+                conv_elems,
+                query_start_loc,
+                batch_size
+            );
+            cgh.parallel_for(range_update, task);
+        });
+    }
 }
 
 void causal_conv1d(
@@ -436,10 +455,7 @@ void causal_conv1d(
         return;
     }
 
-    int batch_size = query_start_loc.size(0) - 1;
-    if(num_prefills == 0 && num_decodes > 0){
-        batch_size = mixed_qkvz.size(0);
-    }
+    const int batch_size = query_start_loc.size(0) - 1;
     const int num_actual_tokens = q_out.size(0);
     const int num_k_heads = q_out.size(1);
     const int head_k_dim = q_out.size(2);
@@ -471,7 +487,7 @@ void causal_conv1d(
         reinterpret_cast<scalar_t*>(conv_states.data_ptr()),       \
         conv_states_stride_0, \
         reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),       \
-        num_prefills > 0 ? reinterpret_cast<int*>(query_start_loc.data_ptr()) : nullptr,       \
+        reinterpret_cast<int*>(query_start_loc.data_ptr()), \
         reinterpret_cast<int*>(cache_indices.data_ptr()),       \
         has_initial_state.has_value()? reinterpret_cast<bool*>(has_initial_state->data_ptr()) : nullptr,       \
         act_mode,       \
@@ -483,7 +499,9 @@ void causal_conv1d(
         num_v_heads, \
         head_v_dim, \
         qkvz_elems, \
-        conv_elems \
+        conv_elems, \
+        num_prefills, \
+        num_decodes \
     );
 
 #define WIDTH_DISPATCH(scalar_t, width)       \
