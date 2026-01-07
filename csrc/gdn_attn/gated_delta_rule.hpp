@@ -13,6 +13,8 @@ struct gated_delta_rule_kernel
 public:
     static constexpr int group_size = 256;
     static constexpr int sg_per_group = group_size / sub_group_size;
+    static constexpr int v_dim_per_sg = 4;
+    static constexpr int v_dim_per_group = v_dim_per_sg * sg_per_group;
     static constexpr float eps = 0.000001;
 
     gated_delta_rule_kernel(
@@ -59,7 +61,7 @@ public:
 
     static inline sycl::nd_range<3>
     get_nd_range(const int batch_size, const int num_v_heads, const int head_v_dim) {
-        int num_v_bucket = (head_v_dim + sg_per_group - 1) / sg_per_group;
+        int num_v_bucket = (head_v_dim + v_dim_per_group - 1) / v_dim_per_group;
         sycl::range<3> local(1, 1, group_size);
         sycl::range<3> global(batch_size, num_v_heads, num_v_bucket);
         return sycl::nd_range<3>(global * local, local);
@@ -87,7 +89,7 @@ public:
 
     // assume num_v_heads is always bigger than num_k_heads
     int kv_ratio = num_v_heads / num_k_heads;
-    int head_v_dim_id = v_bucket_id * sg_per_group + sg_id;
+    int head_v_dim_id = v_bucket_id * v_dim_per_group + sg_id * v_dim_per_sg;
 
     if(head_v_dim_id >= head_v_dim){
         return;
@@ -98,9 +100,10 @@ public:
     float dt_bias_local = dt_bias[num_v_heads_id];
     A_log_local = -sycl::exp(A_log_local);
 
-    float state_local[k_bucket_size];
+    float state_local[k_bucket_size * v_dim_per_sg];
     float q_local[k_bucket_size];
     float k_local[k_bucket_size];
+    float v_local[v_dim_per_sg];
 
     T* ssm_state_ptr = ssm_state + cache_indices[batch_id] * ssm_state_stride_0;
 
@@ -108,12 +111,18 @@ public:
     if(has_initial_state == nullptr || has_initial_state[batch_id]){
         #pragma unroll
         for(int i = 0; i < k_bucket_size; ++i){
-            state_local[i] = ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (i * sub_group_size + sg_local_id) * head_v_dim + head_v_dim_id];
+            #pragma unroll
+            for(int j = 0; j < v_dim_per_sg; ++j){
+                state_local[i * v_dim_per_sg + j] = ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (i * sub_group_size + sg_local_id) * head_v_dim + head_v_dim_id + j];
+            }
         } 
     }else {
         #pragma unroll
         for(int i = 0; i < k_bucket_size; ++i){
-            state_local[i] = 0.0f;
+            #pragma unroll
+            for(int j = 0; j < v_dim_per_sg; ++j){
+                state_local[i * v_dim_per_sg + j] = 0.0f;
+            }
         } 
     }
 
@@ -151,38 +160,72 @@ public:
             k_local[i] /= sycl::sqrt(k_sum);
         }
 
-        float kv_mem = 0.0f;
+        float kv_mem[v_dim_per_sg];
+        #pragma unroll
+        for(int i = 0; i < v_dim_per_sg; ++i){
+            kv_mem[i] = 0.0f;
+        }
         // get g(t) * S(t - 1)* k(t)
         #pragma unroll
         for(int i = 0; i < k_bucket_size; ++i){
-            state_local[i] *= g;
-            kv_mem += state_local[i] * k_local[i];
+            #pragma unroll
+            for(int j = 0; j < v_dim_per_sg; ++j){
+                state_local[i * v_dim_per_sg + j] *= g;
+                kv_mem[j] += state_local[i * v_dim_per_sg + j] * k_local[i];
+            }
         }
-        kv_mem = sycl::reduce_over_group(sg, kv_mem, sycl::plus<>());
+        #pragma unroll
+        for(int i = 0; i < v_dim_per_sg; ++i){
+            kv_mem[i] = sycl::reduce_over_group(sg, kv_mem[i], sycl::plus<>());
+        }
 
         // get (v(t) - g(t) * S(t - 1)* k(t)) * beta(t)
-        float delta = (v[t * num_v_heads * head_v_dim + num_v_heads_id * head_v_dim + head_v_dim_id] - kv_mem) * beta;
+        #pragma unroll
+        for(int i = 0; i < v_dim_per_sg; ++i){
+            v_local[i] = v[t * num_v_heads * head_v_dim + num_v_heads_id * head_v_dim + head_v_dim_id + i];
+        }
+        float delta[v_dim_per_sg];
+        #pragma unroll
+        for(int i = 0; i < v_dim_per_sg; ++i){
+            delta[i] = (v_local[i] - kv_mem[i]) * beta;
+        }
 
-        float res = 0.0f;
+        float res[v_dim_per_sg];
+        #pragma unroll
+        for(int i = 0; i < v_dim_per_sg; ++i){
+            res[i] = 0.0f;
+        }
         #pragma unroll
         for(int i = 0; i < k_bucket_size; ++i){
-            // get S(t)
-            state_local[i] += k_local[i] * delta;
-            // get O(t)
-            res += state_local[i] * q_local[i];
+            #pragma unroll
+            for(int j = 0; j < v_dim_per_sg; ++j){
+                // get S(t)
+                state_local[i * v_dim_per_sg + j] += k_local[i] * delta[j];
+                // get O(t)
+                res[j] += state_local[i * v_dim_per_sg + j] * q_local[i];
+            }
         }
-        res = sycl::reduce_over_group(sg, res, sycl::plus<>());
+        #pragma unroll
+        for(int i = 0; i < v_dim_per_sg; ++i){
+            res[i] = sycl::reduce_over_group(sg, res[i], sycl::plus<>());
+        }
 
         // store O(t)
         if(sg_local_id == 0){
-            core_attn_out[t * num_v_heads * head_v_dim + num_v_heads_id * head_v_dim + head_v_dim_id] = res;
+            #pragma unroll
+            for(int i = 0; i < v_dim_per_sg; ++i){
+                core_attn_out[t * num_v_heads * head_v_dim + num_v_heads_id * head_v_dim + head_v_dim_id + i] = res[i];
+            }
         }
     }
 
     // update state
     #pragma unroll
     for(int i = 0; i < k_bucket_size; ++i){
-        ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (i * sub_group_size + sg_local_id) * head_v_dim + head_v_dim_id] = state_local[i];
+        #pragma unroll
+        for(int j = 0; j < v_dim_per_sg; ++j){
+            ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (i * sub_group_size + sg_local_id) * head_v_dim + head_v_dim_id + j] = state_local[i * v_dim_per_sg + j];
+        }
     } 
   }
 private:
@@ -232,6 +275,7 @@ void kernel_launcher(
 ){
     using KERNEL = gated_delta_rule_kernel<T, k_bucket_size>;
     auto range = KERNEL::get_nd_range(batch_size, num_v_heads, head_v_dim);
+    assert(head_v_dim % KERNEL::v_dim_per_group == 0);
     queue.submit([&](sycl::handler& cgh) {
         KERNEL task(
             core_attn_out,
