@@ -5,11 +5,9 @@
 #include <torch/torch.h>
 
 #include "onednn_ext.h"
+#include "onednn_runtime.h"
 
 namespace oneDNN {
-
-using GpuStreamManager = at::native::onednn::GpuStreamManager;
-using GpuEngineManager = at::native::onednn::GpuEngineManager;
 
 static inline void dnnl_matmul_w4a16_int4(
     torch::Tensor& result,      // dst, [b, m, n]
@@ -113,7 +111,7 @@ static inline void dnnl_matmul_w4a16_int4(
       DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS,
       scale.data_ptr(),
       [&]() {
-        return at::native::onednn::make_onednn_memory(
+        return make_onednn_memory(
             get_onednn_md(scale), engine, scale.data_ptr());
       });
 
@@ -124,8 +122,7 @@ static inline void dnnl_matmul_w4a16_int4(
         DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS,
         zp.data_ptr(),
         [&]() {
-          return at::native::onednn::make_onednn_memory(
-              get_onednn_md(zp), engine, zp.data_ptr());
+          return make_onednn_memory(get_onednn_md(zp), engine, zp.data_ptr());
         });
   } else {
     // set zp_md for asymmetric quantization
