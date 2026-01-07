@@ -95,7 +95,7 @@ jobs:
   run-unit-tests-bmg:
     runs-on: self-hosted-bmg
     needs: build-docker-image-latest-bmg
-    timeout-minutes: 30
+    timeout-minutes: 40
     container: 
       image: localhost:5000/xpu-kernel-ci-image:test_2025_3
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged 
