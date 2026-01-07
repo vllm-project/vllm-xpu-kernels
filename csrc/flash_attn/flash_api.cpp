@@ -86,26 +86,72 @@ std::vector<at::Tensor> mha_varlen_fwd(
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
 
-  cutlass_chunk_prefill_interface(
-      queue,
-      q,
-      k,
-      v,
-      out,
-      block_table_,
-      cu_seqlens_q,
-      cu_seqlens_k,
-      max_seqlen_q,
-      max_seqlen_k,
-      softmax_scale,
-      softmax_sink_,
-      window_size_left,
-      window_size_right,
-      is_varlen,
-      is_paged,
-      is_causal,
-      is_local,
-      is_sink);
+  if (max_seqlen_q > 1 || 
+      window_size_left != -1 || window_size_right != -1 ||
+      softmax_sink_.has_value() {
+    cutlass_chunk_prefill_interface(
+        queue,
+        q,
+        k,
+        v,
+        out,
+        block_table_,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        softmax_scale,
+        softmax_sink_,
+        window_size_left,
+        window_size_right,
+        is_varlen,
+        is_paged,
+        is_causal,
+        is_local,
+        is_sink);
+  } else {
+    // TODO: tune num_kv_splits
+    int num_kv_splits = 2;
+    int num_tokens = q.size(0);
+    int num_heads_q = q.size(1);
+    int head_dim = q.size(2);
+    int num_heads_kv = k.size(2);
+    int block_size = k.size(1);
+    at::Tensor tmp_out = at::empty(
+        {num_tokens, num_heads_q * num_kv_splits, head_dim}, 
+        q.options().dtype(at::kFloat).device(q.device()));
+    at::Tensor max_logits = at::empty(
+        {num_tokens, num_heads_q, num_kv_splits},
+        q.options().dtype(at::kFloat).device(q.device()));
+    at::Tensor exp_sums = at::empty(
+        {num_tokens, num_heads_q, num_kv_splits},
+        q.options().dtype(at::kFloat).device(q.device()));
+    out = out.to(at::kFloat);
+    cutlass_paged_decode_interface(
+        queue,
+        q,
+        k,
+        v,
+        out,
+        tmp_out,
+        exp_sums,
+        max_logits,
+        block_table_,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        softmax_scale,
+        softmax_sink_,
+        window_size_left,
+        window_size_right,
+        is_varlen,
+        is_paged,
+        is_causal,
+        is_local,
+        is_sink);
+
+  }
 
   if (return_softmax) {
     // FIXME: current do not support store softmax_lse out
