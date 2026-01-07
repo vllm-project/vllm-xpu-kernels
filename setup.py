@@ -241,7 +241,6 @@ class cmake_build_ext(build_ext):
             prefix = outdir
             if '.' in ext.name:
                 prefix = prefix.parent
-
             # prefix here should actually be the same for all components
             install_args = [
                 "cmake", "--install", ".", "--prefix", prefix, "--component",
@@ -249,26 +248,63 @@ class cmake_build_ext(build_ext):
             ]
             subprocess.check_call(install_args, cwd=self.build_temp)
 
+        # Install additional shared libraries (intermediate build artifacts)
+        # These are compiled as separate libraries but need to be packaged in
+        # the wheel
+        if self.extensions:
+            # Use the same prefix as the extensions
+            first_ext = self.extensions[0]
+            outdir = Path(self.get_ext_fullpath(
+                first_ext.name)).parent.absolute()
+            prefix = outdir.parent if '.' in first_ext.name else outdir
+
+            for lib_name, file_path in additional_libraries.items():
+                install_args = [
+                    "cmake",
+                    "--install",
+                    ".",
+                    "--prefix",
+                    prefix,
+                    "--component",
+                    lib_name,
+                    "--verbose",
+                ]
+                try:
+                    subprocess.check_call(install_args,
+                                          cwd=self.build_temp + file_path)
+                except subprocess.CalledProcessError as e:
+                    logger.warning("Failed to install library %s: %s",
+                                   lib_name, e)
+                    # Continue with other libraries even if one fails
+
     def run(self):
         self.build_temp = "build/temp"
         # First, run the standard build_ext command to compile the extensions
         super().run()
 
-        # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
-        # directory so that they can be included in the editable build
         import glob
-        files = glob.glob(os.path.join(self.build_lib, "vllm",
-                                       "vllm_flash_attn", "**", "*.py"),
-                          recursive=True)
-        for file in files:
-            dst_file = os.path.join("vllm/vllm_flash_attn",
-                                    file.split("vllm/vllm_flash_attn/")[-1])
-            print(f"Copying {file} to {dst_file}")
-            os.makedirs(os.path.dirname(dst_file), exist_ok=True)
-            self.copy_file(file, dst_file)
+        files = glob.glob(
+            os.path.join(self.build_lib, "vllm_xpu_kernels", "lib*.so"))
+        # if is editable install, also copy to local inplace directory
+        if self.inplace:
+            for file in files:
+                inplace_dst_file = os.path.join(
+                    os.path.dirname(__file__),
+                    "vllm_xpu_kernels",
+                    file.split("vllm_xpu_kernels/")[-1],
+                )
+                print(f"Copying {file} to {inplace_dst_file}")
+                self.copy_file(file, inplace_dst_file)
 
 
 ext_modules = []
+
+# List of additional shared libraries to install (intermediate build artifacts)
+additional_libraries = {
+    "attn_kernels_xe_2": "/csrc/xpu/attn/xe_2",
+    "grouped_gemm_xe_default": "/csrc/xpu/grouped_gemm/xe_default",
+    "grouped_gemm_xe_2": "/csrc/xpu/grouped_gemm/xe_2",
+}
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
