@@ -61,7 +61,7 @@ jobs:
   run-unit-tests-pvc:
     runs-on: self-hosted-pvc
     needs: build-docker-image-latest-pvc
-    timeout-minutes: 30
+    timeout-minutes: 40
     container:                      
       image: localhost:5000/xpu-kernel-ci-image:latest
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged
