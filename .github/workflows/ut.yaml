@@ -32,7 +32,7 @@ jobs:
       - name: build docker image & push to local
         id: build-image
         run: |
-          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
+          docker build -t xpu-kernel-ci-image:test_2025_3 -f Dockerfile.xpu .
           docker tag xpu-kernel-ci-image:test_2025_3 ${{ env.REGISTRY }}/xpu-kernel-ci-image:test_2025_3
           docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:test_2025_3
 
@@ -54,7 +54,7 @@ jobs:
       - name: build docker image & push to local
         id: build-image
         run: |
-          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
+          docker build -t xpu-kernel-ci-image:test_2025_3 -f Dockerfile.xpu .
           docker tag xpu-kernel-ci-image:test_2025_3 ${{ env.REGISTRY }}/xpu-kernel-ci-image:test_2025_3
           docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:test_2025_3
 
