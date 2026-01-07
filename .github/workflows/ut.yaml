@@ -75,7 +75,7 @@ jobs:
         run: |
           python3 -m pip config set global.break-system-packages true
           pip install -r requirements.txt
-          pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+          pip install --extra-index-url=https://download.pytorch.org/whl/test/xpu -e . -v
 
       - name: test 
         run: |
@@ -109,7 +109,7 @@ jobs:
         run: |
           python3 -m pip config set global.break-system-packages true
           pip install -r requirements.txt
-          pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+          pip install --extra-index-url=https://download.pytorch.org/whl/test/xpu -e . -v
 
       - name: test 
         run: |
