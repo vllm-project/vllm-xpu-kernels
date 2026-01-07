@@ -3,6 +3,7 @@
 
 #ifdef VLLM_XPU_ENABLE_XE2
   #include "attn/xe_2/chunk_prefill_xe2.h"
+  #include "attn/xe_2/paged_decode_xe2.h"
 #endif
 
 void cutlass_chunk_prefill_interface(
@@ -105,7 +106,8 @@ void cutlass_paged_decode_interface(
         is_paged,
         is_causal,
         is_local,
-        is_sink);
+        is_sink,
+        num_kv_splits);
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif

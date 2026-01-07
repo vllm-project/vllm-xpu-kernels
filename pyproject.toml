@@ -17,8 +17,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vllm-xpu-kernels"
 authors = [{name = "vLLM Team"}]
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+# license = "Apache-2.0"
+license = { file = "LICENSE" }
+# license-files = ["LICENSE"]
 readme = "README.md"
 description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
 classifiers = [
@@ -44,6 +45,7 @@ Documentation="https://docs.vllm.ai/en/latest/"
 # no extra settings needed, presence enables setuptools-scm
 
 [tool.setuptools]
+license-files = ["LICENSE"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vllm_xpu_kernels*"]

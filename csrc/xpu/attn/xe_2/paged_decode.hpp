@@ -16,8 +16,8 @@
 
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
-#include "./collective/chunk_prefill_scheduler.hpp"
-#include "./collective/chunk_prefill_epilogue.hpp"
+#include "csrc/xpu/attn/collective/chunk_prefill_scheduler.hpp"
+#include "csrc/xpu/attn/collective/chunk_prefill_epilogue.hpp"
 #include "paged_decode_kernel.hpp"
 
 #include "fmha_utils.hpp"
@@ -319,12 +319,12 @@ struct PagedDecodeConfig {
 
   template <
       class Scheduler,
-      bool VarLen,
-      bool Paged,
       bool Causal,
       bool Local,
       bool Sink>
   static void run(sycl::queue& queue, const paged_decode_args_t& args) {
+    constexpr bool VarLen = true;
+    constexpr bool Paged = true;
     cutlass::KernelHardwareInfo hw_info;
     hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
 
@@ -370,6 +370,7 @@ struct PagedDecodeConfig {
     using MainloopDispatchPolicy = cutlass::fmha::XeDefault<PipelineStages>;
     using CollectiveMainloop = cutlass::fmha::collective::DecodeFwdMainloop<
         MainloopDispatchPolicy,
+        Paged,
         Causal,
         TiledMMAQK,
         TiledMMAPV,
@@ -440,11 +441,9 @@ void decode_policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            false,    // args.is_varlen,
-            false,    // args.is_paged,
-            false,   // args.is_causal,
-            false,   // args.is_local,
-            false);  // args.is_sink);
+            args.is_causal,
+            args.is_local,
+            args.is_sink);
   } else {
     return PagedDecodeConfig<
         typename decode_policy::ShapeQK,
@@ -460,11 +459,9 @@ void decode_policy_dispatch(
         kernel_dispatch(
             queue,
             args,
-            false,    // args.is_varlen,
-            false,    // args.is_paged,
-            false,   // args.is_causal,
-            false,   // args.is_local,
-            false);  // args.is_sink);
+            args.is_causal,
+            args.is_local,
+            args.is_sink);  // args.is_sink);
   }
 }
 

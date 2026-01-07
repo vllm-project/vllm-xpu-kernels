@@ -1,5 +1,5 @@
-#include "chunk_prefill_xe2.h"
-#include "chunk_prefill.hpp"
+#include "paged_decode_xe2.h"
+#include "paged_decode.hpp"
 
 void cutlass_paged_decode_xe2(
     sycl::queue& queue,
@@ -25,7 +25,7 @@ void cutlass_paged_decode_xe2(
     bool is_local,
     bool is_sink,
     int num_kv_splits) {
-  cutlass_chunk_prefill_impl(
+  cutlass_paged_decode_impl(
       queue,
       query,
       key_cache,
@@ -47,5 +47,6 @@ void cutlass_paged_decode_xe2(
       is_paged,
       is_causal,
       is_local,
-      is_sink);
+      is_sink,
+      num_kv_splits);
 }

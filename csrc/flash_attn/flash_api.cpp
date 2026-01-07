@@ -88,7 +88,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
   if (max_seqlen_q > 1 || 
       window_size_left != -1 || window_size_right != -1 ||
-      softmax_sink_.has_value() {
+      softmax_sink_.has_value()) {
     cutlass_chunk_prefill_interface(
         queue,
         q,
@@ -149,8 +149,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_paged,
         is_causal,
         is_local,
-        is_sink);
-
+        is_sink,
+        num_kv_splits);
   }
 
   if (return_softmax) {
