@@ -320,7 +320,7 @@ public:
 
       auto layout_q = make_ordered_layout(shape_Q, Step<_1, _0, _2, _3>{});
       auto layout_k = make_ordered_layout(shape_K, Step<_2, _0, _1, _3>{});
-      auto layout_v = make_ordered_layout(shape_V, Step<_2, _0, _1, _3>{});
+      auto layout_v = make_ordered_layout(shape_V, Step<_0, _2, _1, _3>{});
       
       auto layout_o = make_ordered_layout(shape_O, Step<_1, _0, _2, _3, _4>{});
       auto layout_exp_sums = make_ordered_layout(shape_exp_sums, Step<_1, _0, _2, _3>{});
