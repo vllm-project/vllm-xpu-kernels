@@ -100,7 +100,7 @@ public:
     float dt_bias_local = dt_bias[num_v_heads_id];
     A_log_local = -sycl::exp(A_log_local);
 
-    float state_local[k_bucket_size * v_dim_per_sg];
+    float state_local[v_dim_per_sg * k_bucket_size];
     float q_local[k_bucket_size];
     float k_local[k_bucket_size];
     float v_local[v_dim_per_sg];
@@ -109,11 +109,12 @@ public:
 
     // load state
     if(has_initial_state == nullptr || has_initial_state[batch_id]){
+        // #pragma unroll
         #pragma unroll
-        for(int i = 0; i < k_bucket_size; ++i){
+        for(int j = 0; j < v_dim_per_sg; ++j){
             #pragma unroll
-            for(int j = 0; j < v_dim_per_sg; ++j){
-                state_local[i * v_dim_per_sg + j] = ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (i * sub_group_size + sg_local_id) * head_v_dim + head_v_dim_id + j];
+            for(int i = 0; i < k_bucket_size; ++i){
+                state_local[j * k_bucket_size + i] = ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (k_bucket_size * sg_local_id + i) + (head_v_dim_id + j) * head_k_dim];
             }
         } 
     }else {
@@ -144,8 +145,8 @@ public:
         // load q(t), k(t) and l2norm
         #pragma unroll
         for(int i = 0; i < k_bucket_size; ++i){
-            q_local[i] = q[t * num_k_heads * head_k_dim + (num_v_heads_id / kv_ratio) * head_k_dim + i * sub_group_size + sg_local_id];
-            k_local[i] = k[t * num_k_heads * head_k_dim + (num_v_heads_id / kv_ratio) * head_k_dim + i * sub_group_size + sg_local_id];
+            q_local[i] = q[t * num_k_heads * head_k_dim + (num_v_heads_id / kv_ratio) * head_k_dim + (k_bucket_size * sg_local_id + i)];
+            k_local[i] = k[t * num_k_heads * head_k_dim + (num_v_heads_id / kv_ratio) * head_k_dim + (k_bucket_size * sg_local_id + i)];
             q_sum += q_local[i] * q_local[i];
             k_sum += k_local[i] * k_local[i];
         }
@@ -167,11 +168,11 @@ public:
         }
         // get g(t) * S(t - 1)* k(t)
         #pragma unroll
-        for(int i = 0; i < k_bucket_size; ++i){
+        for(int j = 0; j < v_dim_per_sg; ++j){
             #pragma unroll
-            for(int j = 0; j < v_dim_per_sg; ++j){
-                state_local[i * v_dim_per_sg + j] *= g;
-                kv_mem[j] += state_local[i * v_dim_per_sg + j] * k_local[i];
+            for(int i = 0; i < k_bucket_size; ++i){
+                state_local[j * k_bucket_size + i] *= g;
+                kv_mem[j] += state_local[j * k_bucket_size + i] * k_local[i];
             }
         }
         #pragma unroll
@@ -196,13 +197,13 @@ public:
             res[i] = 0.0f;
         }
         #pragma unroll
-        for(int i = 0; i < k_bucket_size; ++i){
+        for(int j = 0; j < v_dim_per_sg; ++j){
             #pragma unroll
-            for(int j = 0; j < v_dim_per_sg; ++j){
+            for(int i = 0; i < k_bucket_size; ++i){
                 // get S(t)
-                state_local[i * v_dim_per_sg + j] += k_local[i] * delta[j];
+                state_local[j * k_bucket_size + i] += k_local[i] * delta[j];
                 // get O(t)
-                res[j] += state_local[i * v_dim_per_sg + j] * q_local[i];
+                res[j] += state_local[j * k_bucket_size + i] * q_local[i];
             }
         }
         #pragma unroll
@@ -221,10 +222,10 @@ public:
 
     // update state
     #pragma unroll
-    for(int i = 0; i < k_bucket_size; ++i){
+    for(int j = 0; j < v_dim_per_sg; ++j){
         #pragma unroll
-        for(int j = 0; j < v_dim_per_sg; ++j){
-            ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (i * sub_group_size + sg_local_id) * head_v_dim + head_v_dim_id + j] = state_local[i * v_dim_per_sg + j];
+        for(int i = 0; i < k_bucket_size; ++i){
+            ssm_state_ptr[num_v_heads_id * head_k_dim * head_v_dim + (k_bucket_size * sg_local_id + i) + (head_v_dim_id + j) * head_k_dim] = state_local[j * k_bucket_size + i];
         }
     } 
   }
@@ -312,7 +313,7 @@ void gated_delta_rule(
     const torch::Tensor& a, // [total_seqlen, num_v_heads]
     const torch::Tensor& A_log, // [num_v_heads]
     const torch::Tensor& dt_bias, // [num_v_heads]
-    torch::Tensor& ssm_state, // [cache_batch_size, num_v_heads, head_k_dim, head_v_dim]
+    torch::Tensor& ssm_state, // [cache_batch_size, num_v_heads, head_v_dim, head_k_dim]
     const torch::Tensor& query_start_loc,  // [batch_size + 1]
     const torch::Tensor& cache_indices, // [batch_size]
     const std::optional<torch::Tensor>& has_initial_state, // [batch_size] or None
