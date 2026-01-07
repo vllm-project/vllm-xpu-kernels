@@ -66,6 +66,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor indices, int slice_offset, int slice_size, bool add_to_output) "
       "-> ()");
   xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
+
+  xpu_ops.def(
+      "gdn_attention(Tensor! core_attn_out, Tensor! z, Tensor "
+      "projected_states_qkvz, Tensor projected_states_ba,"
+      "int num_k_heads, int num_v_heads, int head_k_dim, int head_v_dim,"
+      "Tensor! conv_state, Tensor! ssm_state, Tensor conv_weights, Tensor? "
+      "conv_bias, str activation, Tensor A_log, Tensor dt_bias,"
+      "int num_prefills, int num_decodes, Tensor? has_initial_state, Tensor "
+      "non_spec_query_start_loc,"
+      "Tensor non_spec_state_indices_tensor, int num_actual_tokens, int "
+      "tp_size) -> ()");
+  xpu_ops.impl("gdn_attention", torch::kXPU, &gdn_attention);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
