@@ -150,13 +150,13 @@ struct DecodeKernelLauncher {
            shape.seq_len_qo,
            shape.seq_len_kv);
 
-    cute::print("stride_Q: "); cute::print(stride_Q); cute::print("\n");
-    cute::print("stride_K: "); cute::print(stride_K); cute::print("\n");
-    cute::print("stride_V: "); cute::print(stride_V); cute::print("\n");
-    cute::print("stride_O: "); cute::print(stride_O); cute::print("\n");
-    cute::print("stride_Oaccum: "); cute::print(stride_Oaccum); cute::print("\n");
-    cute::print("stride_exp_sums: "); cute::print(stride_exp_sums); cute::print("\n");
-    cute::print("stride_max_logits: "); cute::print(stride_max_logits); cute::print("\n");
+    // cute::print("stride_Q: "); cute::print(stride_Q); cute::print("\n");
+    // cute::print("stride_K: "); cute::print(stride_K); cute::print("\n");
+    // cute::print("stride_V: "); cute::print(stride_V); cute::print("\n");
+    // cute::print("stride_O: "); cute::print(stride_O); cute::print("\n");
+    // cute::print("stride_Oaccum: "); cute::print(stride_Oaccum); cute::print("\n");
+    // cute::print("stride_exp_sums: "); cute::print(stride_exp_sums); cute::print("\n");
+    // cute::print("stride_max_logits: "); cute::print(stride_max_logits); cute::print("\n");
 
     return shape;
   }
@@ -339,20 +339,20 @@ struct PagedDecodeConfig {
         Layout<TileShapePV>,
         SubgroupLayoutPV>::TiledMMA;
 
-    cute::print("TiledMMAQK : "); cute::print(TiledMMAQK{}); cute::print("\n");
-    cute::print("TiledMMAPV : "); cute::print(TiledMMAPV{}); cute::print("\n");
+    // cute::print("TiledMMAQK : "); cute::print(TiledMMAQK{}); cute::print("\n");
+    // cute::print("TiledMMAPV : "); cute::print(TiledMMAPV{}); cute::print("\n");
 
     static_assert(
         get<0>(TileShapeOutput{}) == get<0>(TileShapePV{}),
         "Output tile and P*V tile have different sizes in Q dimension");
     constexpr int VTiles = get<1>(TileShapeOutput{}) / get<1>(TileShapePV{});
     
-    cute::print("SubgroupLayoutQK : "); cute::print(SubgroupLayoutQK{}); cute::print("\n");
-    cute::print("SubgroupLayoutPV : "); cute::print(SubgroupLayoutPV{}); cute::print("\n");
-    cute::print("TileShapeOutput: "); cute::print(TileShapeOutput{}); cute::print("\n");
-    cute::print("TileShapeQK: "); cute::print(TileShapeQK{}); cute::print("\n");
-    cute::print("TileShapePV: "); cute::print(TileShapePV{}); cute::print("\n");
-    cute::print("VTiles: "); cute::print(VTiles); cute::print("\n");
+    // cute::print("SubgroupLayoutQK : "); cute::print(SubgroupLayoutQK{}); cute::print("\n");
+    // cute::print("SubgroupLayoutPV : "); cute::print(SubgroupLayoutPV{}); cute::print("\n");
+    // cute::print("TileShapeOutput: "); cute::print(TileShapeOutput{}); cute::print("\n");
+    // cute::print("TileShapeQK: "); cute::print(TileShapeQK{}); cute::print("\n");
+    // cute::print("TileShapePV: "); cute::print(TileShapePV{}); cute::print("\n");
+    // cute::print("VTiles: "); cute::print(VTiles); cute::print("\n");
 
     auto make_dummy_tensor = [&](auto val, auto stride) {
       return make_tensor(
@@ -521,13 +521,25 @@ void cutlass_paged_decode_impl(
     total_seqlen_k = num_blocks * block_size;
   }
 
-  printf("batch_size: %d, num_heads_q: %d, num_heads_kv: %d, head_size: %d, max_seqlen_q: %d, max_seqlen_k: %d\n",
+  printf("** batch: %d, num_heads_q: %d, num_heads_kv: %d, head_size: %d, max_seqlen_q: %d, max_seqlen_k: %d, total_seqlen_q: %d, total_seqlen_k: %d, num_blocks: %d, block_size: %d, max_blocks_per_seq: %d, sm_scale: %.6f, is_varlen: %d, is_paged: %d, is_causal: %d, is_local: %d, is_sink: %d, num_kv_splits: %d\n",
          batch_size,
          num_heads_q,
          num_heads_kv,
          head_size,
          max_seqlen_q,
-         max_seqlen_k);
+         max_seqlen_k,
+         total_seqlen_q,
+         total_seqlen_k,
+         num_blocks,
+         block_size,
+         max_blocks_per_seq,
+         sm_scale,
+         is_varlen,
+         is_paged,
+         is_causal,
+         is_local,
+         is_sink,
+         num_kv_splits);
 
   if (is_local) {
     window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
@@ -575,14 +587,16 @@ void cutlass_paged_decode_impl(
       "FMHA forward only supports head dimension at most " +
           std::to_string(max_head_size));
 
+  // cute::print("shapeQK: "); cute::print(decode_policy_head128::ShapeQK{}); cute::print("\n");
+
   if (args.head_size == HEAD_SIZE_LIMIT_0) {
-    decode_policy_dispatch<decode_policy_head64>(queue, cuType, args);
+    // decode_policy_dispatch<decode_policy_head64>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_1) {
     decode_policy_dispatch<decode_policy_head128>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_2) {
-    decode_policy_dispatch<decode_policy_head192>(queue, cuType, args);
+    // decode_policy_dispatch<decode_policy_head192>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_3) {
-    decode_policy_dispatch<decode_policy_head256>(queue, cuType, args);
+    // decode_policy_dispatch<decode_policy_head256>(queue, cuType, args);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
   }

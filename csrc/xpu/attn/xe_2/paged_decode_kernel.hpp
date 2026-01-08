@@ -222,16 +222,19 @@ public:
     int sub_group_id = thr_id / intel::sg_size;
     int q_sg_tile = get<0>(shape_div(TileShapeQK{}, shape(SubgroupLayoutQK{})));
 
+#if 0
     if (ThreadIdxX() == 0 && BlockIdxZ() == 0) {
       cute::print("TileShapeQK: ");cute::print(TileShapeQK{});print("\n");
       cute::print("TileShapePV: ");cute::print(TileShapePV{});print("\n");
     }
+#endif
 
     auto cS = make_identity_tensor(take<0,2>(TiledMMAQK{}.tile_mnk()));
     auto tScS = TiledMMAQK{}.get_slice(thr_id).partition_C(cS);
     auto q_offset_wi = get<0>(tScS(0));
     auto q_offset_sg = group_broadcast(sycl::ext::oneapi::this_work_item::get_sub_group(), q_offset_wi, 0);
 
+#if 0
     if (ThreadIdxX() == 0 && BlockIdxZ() == 0) {
       cute::print("cS: ");cute::print(cS);print("\n");
       cute::print("tScS: ");cute::print(tScS);print("\n");
@@ -240,6 +243,7 @@ public:
       cute::print("q_offset_wi: ");cute::print(q_offset_wi);print("\n");
       cute::print("q_offset_sg: ");cute::print(q_offset_sg);print("\n");
     }
+#endif
 
 
     TileScheduler tile_scheduler{params.scheduler};
@@ -274,7 +278,6 @@ public:
         auto qo_cumulative = s.seq_len_qo.cumulative_length;
         
         offset_q = s.num_heads_q * s.head_size_qk * qo_cumulative[idx_b];
-        // TODO: these offsets need to considered 
         offset_o = s.num_heads_q * s.head_size_vo * num_kv_splits * qo_cumulative[idx_b];
         offset_exp_sums = s.num_heads_q * num_kv_splits * qo_cumulative[idx_b];
         offset_max_logits = s.num_heads_q * num_kv_splits * qo_cumulative[idx_b];
@@ -306,7 +309,7 @@ public:
 
 #if 0
       if (thr_id == 0) {
-        cute::print("\nidx_kv_split: %d, kv_split_offset: %d, num_effective_kv_blocks: %d, k_blocks: %d, num_blocks_per_split: %d\n",
+        cute::print(">>>idx_kv_split: %d, kv_split_offset: %d, num_effective_kv_blocks: %d, k_blocks: %d, num_blocks_per_split: %d\n",
             idx_kv_split, kv_split_offset, num_effective_kv_blocks, k_blocks, num_blocks_per_split);
       }
 #endif
@@ -335,11 +338,10 @@ public:
 
 #if 0
       if (thr_id == 0 && BlockIdxZ() == 0 && idx_kv_split == 0 && head_q_start == 0) {
-        cute::print("\nidx_kv_split: %d, idx_b: %d, head_q_start: %d, O shape: ", idx_kv_split, idx_b, head_q_start);cute::print(O.shape());print("\n");
-        cute::print("K shape: ");cute::print(K.shape());cute::print(K.stride());cute::print("\n");
-        cute::print("V shape: ");cute::print(V.shape());cute::print(V.stride());cute::print("\n");
-        cute::print("O stride: ");cute::print(O.stride());cute::print("\n");
-        cute::print("stride_o: ");cute::print(stride_o);cute::print("\n");
+        // cute::print("\nidx_kv_split: %d, idx_b: %d, head_q_start: %d, O shape: ", idx_kv_split, idx_b, head_q_start);cute::print(O.shape());print("\n");
+        cute::print("K shape: ");cute::print(K);cute::print("\n");
+        cute::print("V shape: ");cute::print(V);cute::print("\n");
+        cute::print("O layout: ");cute::print(O);cute::print("\n");
       }
 #endif
 
@@ -347,10 +349,12 @@ public:
       FragA tArA;
       FragARow tA_max, tA_sum;
 
+#if 0
       if (ThreadIdxX() == 0 && BlockIdxZ() == 0) {
         cute::print("FragA: ");cute::print(FragA{});print("\n");
         cute::print("FragARow: ");cute::print(FragARow{});print("\n");
       }
+#endif
 
       // Main loop
       int l_coord = is_var_len ? 0 : idx_b;
@@ -374,7 +378,7 @@ public:
               thr_id, seq_len,
               full_tile_offset, discard_seq_coord);
 
-#if 1
+#if 0
       // static_assert(is_same_v<FragARow, float>, "dtype mismatch");
       if (idx_kv_split == 0 && head == 0 && thr_id == 0) {
         // cute::print("idx_kv_split: %d, idx_b: %d, head_q: %d, Q(0,0,head_q,l_coord): %f\n", idx_kv_split, idx_b, head_q, float(Q(0,34,head_q,l_coord)));
