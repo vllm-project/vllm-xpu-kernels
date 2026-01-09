@@ -8,6 +8,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import vllm_xpu_kernels._xpu_C  # noqa: F401
+
 # QWEN NEXT shape
 NUM_TOKENS = [1, 32, 1024, 8192]
 BATCH_SIZE = [32]
@@ -245,7 +247,7 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                                       1) if batch_size > 1 else 1
 
     num_decodes = batch_size - num_prefills
-    cache_batch_size = 10000
+    cache_batch_size = 100
 
     mixed_qkvz_size = num_k_heads // tp_size * (
         2 * head_k_dim + 2 * head_v_dim * num_v_heads // num_k_heads)
