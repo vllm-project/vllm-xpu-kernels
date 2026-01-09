@@ -111,8 +111,10 @@ struct causal_conv1d_kernel {
     if (qkvz_dim_id < (num_v_heads / num_k_heads)) {
       int step =
           token_id * num_v_heads + k_heads_id * num_v_heads / num_k_heads;
+      const int ba_elems_per_item =
+          sycl::min(elems_per_item, num_v_heads / num_k_heads);
 #pragma unroll
-      for (int e = 0; e < elems_per_item; ++e) {
+      for (int e = 0; e < ba_elems_per_item; ++e) {
         b_out[step + qkvz_dim_id + e] = mixed_ba[step * 2 + qkvz_dim_id + e];
         a_out[step + qkvz_dim_id + e] =
             mixed_ba[step * 2 + num_v_heads / num_k_heads + qkvz_dim_id + e];

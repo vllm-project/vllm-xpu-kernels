@@ -102,7 +102,9 @@ struct gated_delta_rule_kernel {
     float k_local[k_bucket_size];
     float v_local[v_dim_per_sg];
 
-    T* ssm_state_ptr = ssm_state + cache_indices[batch_id] * ssm_state_stride_0;
+    T* ssm_state_ptr =
+        ssm_state +
+        static_cast<int64_t>(cache_indices[batch_id]) * ssm_state_stride_0;
 
     // load state
     if (has_initial_state == nullptr || has_initial_state[batch_id]) {
