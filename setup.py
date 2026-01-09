@@ -12,6 +12,7 @@ from shutil import which
 from packaging.version import Version
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
+from setuptools_scm import get_version
 from torch.utils.cpp_extension import SYCL_HOME
 
 
@@ -102,10 +103,9 @@ class cmake_build_ext(build_ext):
             except AttributeError:
                 num_jobs = os.cpu_count()
 
-        nvcc_threads = None
         get_oneapi_version()
 
-        return num_jobs, nvcc_threads
+        return num_jobs
 
     #
     # Perform cmake configuration for a single extension.
@@ -163,10 +163,7 @@ class cmake_build_ext(build_ext):
         #
         # Setup parallelism and build tool
         #
-        num_jobs, nvcc_threads = self.compute_num_jobs()
-
-        if nvcc_threads:
-            cmake_args += ['-DNVCC_THREADS={}'.format(nvcc_threads)]
+        num_jobs = self.compute_num_jobs()
 
         if is_ninja_available():
             build_tool = ['-G', 'Ninja']
@@ -213,7 +210,7 @@ class cmake_build_ext(build_ext):
             self.configure(ext)
             targets.append(target_name(ext.name))
 
-        num_jobs, _ = self.compute_num_jobs()
+        num_jobs = self.compute_num_jobs()
 
         build_args = [
             "--build",
@@ -321,8 +318,22 @@ package_data = {
     ]
 }
 
+
+def get_vllm_version() -> str:
+    # Allow overriding the version. This is useful to build platform-specific
+    # wheels (e.g. CPU, TPU) without modifying the source.
+    if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
+        print(f"Overriding VLLM version with {env_version}")
+        os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
+        return get_version(write_to="_version.py")
+
+    version = get_version(write_to="_version.py")
+
+    return version
+
+
 setup(
-    version="0.0.1",
+    version=get_vllm_version(),
     ext_modules=ext_modules,
     cmdclass=cmdclass,
     package_data=package_data,
