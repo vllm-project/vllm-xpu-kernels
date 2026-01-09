@@ -610,8 +610,25 @@ public:
 
       // broadcast to all other threads
       global_max_logits = sycl::group_broadcast(get_work_group<1>(), global_max_logits, 0);
-
+      
       // step 2: rescale Oaccum and write back to O
+      // if (thr_id < num_kv_splits)  {
+      //   if (thr_id * num_blocks_per_split > k_blocks) break;
+        
+      //   ElementO local_max_logit = shared_storage.max_logits_slm_array[thr_id];
+      //   ElementO local_exp_sum = shared_storage.exp_sums_slm_array[thr_id];
+
+      //   ElementO rescale = sycl::native::exp2(local_max_logit - global_max_logits);
+      //   ElementO rescaled_exp_sum = local_exp_sum * rescale;
+
+      //   global_exp_sums += rescaled_exp_sum;
+      // }
+      // sycl::group_barrier(get_work_group<3>());
+      // global_exp_sums = reduce_over_group(get_work_group<1>(), global_exp_sums, sycl::plus<>());
+
+      // global_exp_sums = sycl::group_broadcast(get_work_group<1>(), global_exp_sums, 0);
+      
+      bool got_global_exp_sums = false;
       for (int idx = thr_id; idx < s.head_size_vo; idx += SGPerWG::value * intel::sg_size) {
         ElementO acc = 0;
         for (int i = 0; i < num_kv_splits; ++i) {
@@ -622,16 +639,22 @@ public:
           ElementO local_exp_sum = shared_storage.exp_sums_slm_array[i];
 
           ElementO rescale = sycl::native::exp2(local_max_logit - global_max_logits);
+          ElementO rescaled_exp_sum = local_exp_sum * rescale;
 
           // in FMHA epilogue, it's divided by local_exp_sum
           // assume seq_len_q == 1
-          ElementO adjusted_o_accum = Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord) * local_exp_sum;
-          acc += adjusted_o_accum * rescale;
+          ElementO adjusted_o_accum = Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord) * rescaled_exp_sum;
+          acc += adjusted_o_accum;
 
           // update global exp sum
-          global_exp_sums += local_exp_sum * rescale;
+          if (!got_global_exp_sums) global_exp_sums += rescaled_exp_sum;
+          
+          if (i == num_kv_splits -1) got_global_exp_sums = true;
         }
 
+        if (cute::thread(0, 0)) {
+          cute::print(">>> head_q: %d, idx: %d, global_exp_sums: %f\n", head_q, idx, float(global_exp_sums));
+        }
         ElementO inv_global_exp_sums = 1. / global_exp_sums;
         acc *= inv_global_exp_sums;
         O(seq_idx, idx, head_q, l_coord) = acc;

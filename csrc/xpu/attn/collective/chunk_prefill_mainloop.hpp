@@ -795,7 +795,7 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
       int page_local_idx = tile_idx * get<1>(TileShapeQK{}) / params.page_size;
       tile_idx = params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page 
                  + tile_idx % tiles_per_page;
-#if 1
+#if 0
       if (cute::thread(0, 8)) {
         cute::print("page_size: "); cute::print(params.page_size); cute::print("\n");
         cute::print("tile_size: "); cute::print(get<1>(TileShapeQK{})); cute::print("\n");
@@ -836,7 +836,7 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
       auto tKgK_cache = PagedKV ? tKgK(_,_,_,tile_idx,_) : tKgK(_,_,_,K,_);
       auto tVgV_cache = PagedKV ? tVgV(_,_,_,_,tile_idx) : tVgV(_,_,_,_,K);
 
-#if 1
+#if 0
       if (cute::thread(0, 8)) {
         cute::print(">>>K: "); cute::print(K); cute::print("\n");
         cute::print("tile_idx: "); cute::print(tile_idx); cute::print("\n");
@@ -849,7 +849,7 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
       for (int D = 0; D < size<4>(tKgK); D++) {
         copy(copy_q, tQgQ(_,_,_,D),   tQrQ);
         copy(copy_k, tKgK_cache(_,_,_,D), tKrK);
-#if 1
+#if 0
         if (cute::thread(0, 8)) {
           cute::print("D: "); cute::print(D); cute::print("\n");
           cute::print("tKgK_cache: "); cute::print(tKgK_cache); cute::print("\n");

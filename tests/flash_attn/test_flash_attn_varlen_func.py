@@ -34,6 +34,7 @@ def decode_attention_ref(q,
                          scale,
                          num_kv_splits):
     # upcast
+    log2_e = 1.4426950408889634074
     q = q.to(torch.float32)
     k_cache = k_cache.to(torch.float32)
     v_cache = v_cache.to(torch.float32)
@@ -86,14 +87,21 @@ def decode_attention_ref(q,
             max_logits[start_idx:start_idx + query_len, :, j] = scores_max.values[..., 0]
         # reduce part
         global_max_logits = torch.max(max_logits[start_idx:start_idx + query_len], dim=-1, keepdim=True).values
-        rescaled_exp_sums = exp_sums[start_idx:start_idx + query_len] * torch.exp(max_logits[start_idx:start_idx + query_len] - global_max_logits)
+        rescaled_exp_sums = exp_sums[start_idx:start_idx + query_len] \
+            * torch.exp(max_logits[start_idx:start_idx + query_len] - global_max_logits)
         global_exp_sum = torch.sum(rescaled_exp_sums, dim=-1, keepdim=True)
+        print(f"ref global_max_logits: {global_max_logits * log2_e}, \
+              ref rescaled_exp_sums: {rescaled_exp_sums}, \
+              ref global_exp_sum: {global_exp_sum}")
         rescaled_factor = rescaled_exp_sums / global_exp_sum
         acc = torch.empty_like(tmp_out[start_idx:start_idx + query_len]).to(torch.float32)
         for j in range(num_kv_splits):
             acc[:, j] = tmp_out[start_idx:start_idx + query_len, j] * rescaled_factor[:, :, j].unsqueeze(-1)
         output[start_idx:start_idx + query_len] = torch.sum(acc, dim=1)
         start_idx += query_len
+
+    # for compatibility with flash attention output
+    max_logits *= log2_e
 
     return tmp_out, exp_sums, max_logits, output
 
@@ -319,12 +327,20 @@ def test_varlen_with_paged_kv(
     tmp_out = tmp_out.view(-1, num_kv_splits, num_query_heads, head_size)
     ref_output_1 = ref_output_1.to(ref_output.dtype)
 
+    print(f"max_logits: {max_logits}")
+    print(f"ref_max_logits: {ref_max_logits}")
 
     # tmp_out = torch.load("tmp_out.pt", weithts_only=False)
     # print(f"tmp_out shape: {tmp_out.shape}")
     torch.testing.assert_close(tmp_out, ref_tmp_out, atol=1e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(tmp_out - ref_tmp_out))}"
     print("Passed tmp_out check")
+    torch.testing.assert_close(exp_sums, ref_exp_sums, atol=1e-2, rtol=1e-2), \
+        f"{torch.max(torch.abs(exp_sums - ref_exp_sums))}"
+    print("Passed exp_sums check")
+    torch.testing.assert_close(max_logits, ref_max_logits, atol=1e-2, rtol=1e-2), \
+        f"{torch.max(torch.abs(max_logits - ref_max_logits))}"
+    print("Passed exp_sums check")
 
     # torch.set_printoptions(profile="full")
     print(" *" * 50)
@@ -338,13 +354,19 @@ def test_varlen_with_paged_kv(
         atol, rtol = 1.5e-1, 1.5e-1
     if window_size[0] != -1 or window_size[1] != -1:
         atol, rtol = 1.5e-2, 1.5e-2
-    torch.testing.assert_close(ref_output_1, ref_output, atol=atol, rtol=rtol), \
-        f"{torch.max(torch.abs(ref_output_1 - ref_output))}"
+
+    torch.testing.assert_close(output, ref_output_1, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output_1))}"
+    print("Passed ref_output_1 check")
+
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    print("Passed output check")
 
 
 if __name__ == "__main__":
-    test_varlen_with_paged_kv([(1, 4096)],
-                              (8, 8),
+    test_varlen_with_paged_kv([(1, 4096), (1, 2048)],
+                              (5, 1),
                               128,
                               (-1, -1),
                               torch.float16,
