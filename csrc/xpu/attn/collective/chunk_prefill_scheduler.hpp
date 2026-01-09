@@ -118,7 +118,7 @@ struct DecodeTileScheduler {
               size(shape.batch * shape.num_heads_q));                  // (h,b) -- split later
     std::cout << "seq len qo: " << shape.seq_len_qo << ", seq_len_kv: " << shape.seq_len_kv << "\n";
     int num_head = shape.num_heads_q;
-    if (num_kv_splits > 1) {
+    if (num_kv_splits >= 1) {
       // for splitKV, each wg handles group query heads
       grid.z = size(shape.batch * shape.num_heads_kv);
       grid.z *= num_kv_splits;
@@ -145,7 +145,7 @@ struct DecodeTileScheduler {
     int idx_kv_split = BlockIdxZ();
     int head, idx_b;
 
-    if (params.num_kv_splits_ > 1) {
+    if (params.num_kv_splits_ >= 1) {
       params.divmod_batch(idx_kv_split, idx_b, idx_kv_split);
       params.divmod_num_heads(idx_b, head, idx_b);
       return make_coord(BlockIdxY(), BlockIdxX(), head, idx_b, idx_kv_split);

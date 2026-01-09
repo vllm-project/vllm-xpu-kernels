@@ -314,7 +314,8 @@ def test_varlen_with_paged_kv(
                                 window_size_left=window_size[0],
                                 window_size_right=window_size[1])
 
-    num_kv_splits = 1
+    partition_size = 2048
+    num_kv_splits = (max_kv_len + partition_size - 1) // partition_size
     ref_tmp_out, ref_exp_sums, ref_max_logits, ref_output_1 = decode_attention_ref(
                                     maybe_quantized_query,
                                     maybe_quantized_key_cache,
@@ -340,7 +341,7 @@ def test_varlen_with_paged_kv(
     print("Passed exp_sums check")
     torch.testing.assert_close(max_logits, ref_max_logits, atol=1e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(max_logits - ref_max_logits))}"
-    print("Passed exp_sums check")
+    print("Passed max_logits check")
 
     # torch.set_printoptions(profile="full")
     # print(" *" * 50)
@@ -366,7 +367,7 @@ def test_varlen_with_paged_kv(
 
 if __name__ == "__main__":
     test_varlen_with_paged_kv([(1, 4096)],
-                              (5, 1),
+                              (8, 8),
                               128,
                               (-1, -1),
                               torch.float16,

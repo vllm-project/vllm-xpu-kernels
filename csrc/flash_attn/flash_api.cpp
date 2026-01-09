@@ -86,7 +86,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
     
-  int num_kv_splits = 1;
+  constexpr int partition_size = 2048;
+  int num_kv_splits = (max_seqlen_k + partition_size - 1) / partition_size;
+  
   int num_tokens = q.size(0);
   int num_heads_q = q.size(1);
   int head_dim = q.size(2);
@@ -102,31 +104,31 @@ std::vector<at::Tensor> mha_varlen_fwd(
       {num_tokens, num_heads_q, num_kv_splits},
       q.options().dtype(at::kFloat).device(q.device()));
 
+    
   if (max_seqlen_q > 1 || 
       window_size_left != -1 || window_size_right != -1 ||
       softmax_sink_.has_value()) {
-    // cutlass_chunk_prefill_interface(
-    //     queue,
-    //     q,
-    //     k,
-    //     v,
-    //     out,
-    //     block_table_,
-    //     cu_seqlens_q,
-    //     cu_seqlens_k,
-    //     max_seqlen_q,
-    //     max_seqlen_k,
-    //     softmax_scale,
-    //     softmax_sink_,
-    //     window_size_left,
-    //     window_size_right,
-    //     is_varlen,
-    //     is_paged,
-    //     is_causal,
-    //     is_local,
-    //     is_sink);
+    cutlass_chunk_prefill_interface(
+        queue,
+        q,
+        k,
+        v,
+        out,
+        block_table_,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        softmax_scale,
+        softmax_sink_,
+        window_size_left,
+        window_size_right,
+        is_varlen,
+        is_paged,
+        is_causal,
+        is_local,
+        is_sink);
   } else {
-    // TODO: tune num_kv_splits
     out = out.to(at::kFloat);
     std::cout << "q shape: " << q.sizes() << std::endl;
     std::cout << "k shape: " << k.sizes() << std::endl;
