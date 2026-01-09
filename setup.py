@@ -320,8 +320,7 @@ package_data = {
 
 
 def get_vllm_version() -> str:
-    # Allow overriding the version. This is useful to build platform-specific
-    # wheels (e.g. CPU, TPU) without modifying the source.
+    # Allow overriding the version.
     if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
         print(f"Overriding VLLM version with {env_version}")
         os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
