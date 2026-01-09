@@ -470,6 +470,7 @@ public:
   struct SharedStorage {
     cutlass::Array<ElementO, FMHAKernel_::max_num_kv_splits> max_logits_slm_array;
     cutlass::Array<ElementO, FMHAKernel_::max_num_kv_splits> exp_sums_slm_array;
+    cutlass::Array<ElementO, FMHAKernel_::max_num_kv_splits> rescaled_exp_sums_array;
   };
 
   static constexpr int SharedStorageSize = is_empty_v<SharedStorage> ? size_t(0)
@@ -612,50 +613,38 @@ public:
       global_max_logits = sycl::group_broadcast(get_work_group<1>(), global_max_logits, 0);
       
       // step 2: rescale Oaccum and write back to O
-      // if (thr_id < num_kv_splits)  {
-      //   if (thr_id * num_blocks_per_split > k_blocks) break;
+      if (thr_id < num_kv_splits)  {
+        if (thr_id * num_blocks_per_split > k_blocks) break;
         
-      //   ElementO local_max_logit = shared_storage.max_logits_slm_array[thr_id];
-      //   ElementO local_exp_sum = shared_storage.exp_sums_slm_array[thr_id];
+        ElementO local_max_logit = shared_storage.max_logits_slm_array[thr_id];
+        ElementO local_exp_sum = shared_storage.exp_sums_slm_array[thr_id];
 
-      //   ElementO rescale = sycl::native::exp2(local_max_logit - global_max_logits);
-      //   ElementO rescaled_exp_sum = local_exp_sum * rescale;
+        ElementO rescale = sycl::native::exp2(local_max_logit - global_max_logits);
+        ElementO rescaled_exp_sum = local_exp_sum * rescale;
+        shared_storage.rescaled_exp_sums_array[thr_id] = rescaled_exp_sum;
 
-      //   global_exp_sums += rescaled_exp_sum;
-      // }
-      // sycl::group_barrier(get_work_group<3>());
-      // global_exp_sums = reduce_over_group(get_work_group<1>(), global_exp_sums, sycl::plus<>());
-
-      // global_exp_sums = sycl::group_broadcast(get_work_group<1>(), global_exp_sums, 0);
+        global_exp_sums += rescaled_exp_sum;
+      }
+      sycl::group_barrier(get_work_group<3>());
+      global_exp_sums = reduce_over_group(get_work_group<1>(), global_exp_sums, sycl::plus<>());
+      global_exp_sums = sycl::group_broadcast(get_work_group<1>(), global_exp_sums, 0);
       
-      bool got_global_exp_sums = false;
+      ElementO inv_global_exp_sums = 1. / global_exp_sums;
       for (int idx = thr_id; idx < s.head_size_vo; idx += SGPerWG::value * intel::sg_size) {
         ElementO acc = 0;
         for (int i = 0; i < num_kv_splits; ++i) {
           if (i * num_blocks_per_split > k_blocks) {
             break;
           }
-          ElementO local_max_logit = shared_storage.max_logits_slm_array[i];
-          ElementO local_exp_sum = shared_storage.exp_sums_slm_array[i];
-
-          ElementO rescale = sycl::native::exp2(local_max_logit - global_max_logits);
-          ElementO rescaled_exp_sum = local_exp_sum * rescale;
-
-          // in FMHA epilogue, it's divided by local_exp_sum
           // assume seq_len_q == 1
-          ElementO adjusted_o_accum = Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord) * rescaled_exp_sum;
+          ElementO adjusted_o_accum = Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord) * 
+                                      shared_storage.rescaled_exp_sums_array[i];
           acc += adjusted_o_accum;
-
-          // update global exp sum
-          if (!got_global_exp_sums) global_exp_sums += rescaled_exp_sum;
-          
-          if (i == num_kv_splits -1) got_global_exp_sums = true;
         }
 
         if (cute::thread(0, 0)) {
           cute::print(">>> head_q: %d, idx: %d, global_exp_sums: %f\n", head_q, idx, float(global_exp_sums));
         }
-        ElementO inv_global_exp_sums = 1. / global_exp_sums;
         acc *= inv_global_exp_sums;
         O(seq_idx, idx, head_q, l_coord) = acc;
       }

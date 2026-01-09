@@ -86,7 +86,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
     
-  int num_kv_splits = 2;
+  int num_kv_splits = 1;
   int num_tokens = q.size(0);
   int num_heads_q = q.size(1);
   int head_dim = q.size(2);

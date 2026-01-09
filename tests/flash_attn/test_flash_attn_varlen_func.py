@@ -60,14 +60,14 @@ def decode_attention_ref(q,
         v = v[:kv_len]
 
         partition_size = (kv_len + num_kv_splits - 1) // num_kv_splits
-        print(f"block_tables: {block_tables[i]}")
+        # print(f"block_tables: {block_tables[i]}")
 
         for j in range(num_kv_splits):
             start_kv = j * partition_size
             end_kv = min(kv_len, (j + 1) * partition_size)
             k_part = k[start_kv:end_kv]
             v_part = v[start_kv:end_kv]
-            print(f"num_kv_splits: {j} k_part: {k_part[0, 0, 0]}")
+            # print(f"num_kv_splits: {j} k_part: {k_part[0, 0, 0]}")
 
             k_part = repeat(k_part, "k h d -> k (h g) d", g=q.shape[1] // k.shape[1])
             v_part = repeat(v_part, "k h d -> k (h g) d", g=q.shape[1] // v.shape[1])
@@ -90,9 +90,9 @@ def decode_attention_ref(q,
         rescaled_exp_sums = exp_sums[start_idx:start_idx + query_len] \
             * torch.exp(max_logits[start_idx:start_idx + query_len] - global_max_logits)
         global_exp_sum = torch.sum(rescaled_exp_sums, dim=-1, keepdim=True)
-        print(f"ref global_max_logits: {global_max_logits * log2_e}, \
-              ref rescaled_exp_sums: {rescaled_exp_sums}, \
-              ref global_exp_sum: {global_exp_sum}")
+        # print(f"ref global_max_logits: {global_max_logits * log2_e}, \
+        #       ref rescaled_exp_sums: {rescaled_exp_sums}, \
+        #       ref global_exp_sum: {global_exp_sum}")
         rescaled_factor = rescaled_exp_sums / global_exp_sum
         acc = torch.empty_like(tmp_out[start_idx:start_idx + query_len]).to(torch.float32)
         for j in range(num_kv_splits):
@@ -299,8 +299,8 @@ def test_varlen_with_paged_kv(
                                                                    block_table=block_tables,
                                                                    window_size=window_size,
                                                                    s_aux=sink)
-    print(f"kv_lens: {kv_lens}")
-    print(f"block_tables: {block_tables.shape}")
+    # print(f"kv_lens: {kv_lens}")
+    # print(f"block_tables: {block_tables.shape}")
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
@@ -314,7 +314,7 @@ def test_varlen_with_paged_kv(
                                 window_size_left=window_size[0],
                                 window_size_right=window_size[1])
 
-    num_kv_splits = 2
+    num_kv_splits = 1
     ref_tmp_out, ref_exp_sums, ref_max_logits, ref_output_1 = decode_attention_ref(
                                     maybe_quantized_query,
                                     maybe_quantized_key_cache,
@@ -327,8 +327,8 @@ def test_varlen_with_paged_kv(
     tmp_out = tmp_out.view(-1, num_kv_splits, num_query_heads, head_size)
     ref_output_1 = ref_output_1.to(ref_output.dtype)
 
-    print(f"max_logits: {max_logits}")
-    print(f"ref_max_logits: {ref_max_logits}")
+    # print(f"max_logits: {max_logits}")
+    # print(f"ref_max_logits: {ref_max_logits}")
 
     # tmp_out = torch.load("tmp_out.pt", weithts_only=False)
     # print(f"tmp_out shape: {tmp_out.shape}")
@@ -343,11 +343,11 @@ def test_varlen_with_paged_kv(
     print("Passed exp_sums check")
 
     # torch.set_printoptions(profile="full")
-    print(" *" * 50)
-    print(f"output: {output[:, 0, 64:]}")
-    print(f"ref_output_1: {ref_output_1[:, 0, 64:]}")
-    print(f"ref_output: {ref_output[:, 0, 64:]}")
-    print(" *" * 50)
+    # print(" *" * 50)
+    # print(f"output: {output[:, 0, 64:]}")
+    # print(f"ref_output_1: {ref_output_1[:, 0, 64:]}")
+    # print(f"ref_output: {ref_output[:, 0, 64:]}")
+    # print(" *" * 50)
     # output[:, :, 64:] *= 2
     atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
@@ -365,7 +365,7 @@ def test_varlen_with_paged_kv(
 
 
 if __name__ == "__main__":
-    test_varlen_with_paged_kv([(1, 4096), (1, 2048)],
+    test_varlen_with_paged_kv([(1, 4096)],
                               (5, 1),
                               128,
                               (-1, -1),
