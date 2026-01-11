@@ -46,6 +46,11 @@
 
 namespace cutlass::fmha::collective {
 
+static inline void ep_barrier() {
+  asm volatile("lsc_fence.ugm.none.group\n");
+  asm volatile("barrier\n");
+}
+
 using namespace cute;
 
 template <
@@ -345,7 +350,8 @@ template <class CollectiveMainloop, // Attention mainloop
           class TileShapeO_,        // Shape of output tile, may be larger than P*V GEMM
           class TensorO_,           // 2D slice of global output tensor
           class TensorLSE_ = void,    // Optional tensor for storing intermediate exp sums and max logits
-          class TiledCopyO_ = void> // Optional TiledCopy for loading O
+          class TiledCopyO_ = void, // Optional TiledCopy for loading O
+          bool Sink_ = false>      // Whether to sink softmax into epilogue
 class DecodeFwdEpilogue {
 
 public:
@@ -368,6 +374,10 @@ public:
   using FragA = typename CollectiveMainloop::FragA;
   using FragARow = typename CollectiveMainloop::FragARow;
   using ElementA = typename FragA::value_type;
+ 
+  // softmax sink, same dtype
+  static constexpr bool Sink = Sink_;
+  using ElementSink = typename CollectiveMainloop::TensorQ::element_type;
 
   // Split k-reduced tiles between participating subgroups.
   // Assumption: the A tile is contiguous.
@@ -479,7 +489,7 @@ public:
   }
 
   // splitK version
-  template <typename QVCoord>
+  template <typename QVCoord, class TensorSink>
   CUTLASS_DEVICE
   void
   operator()(TensorO2D const& O,        // Global O tensor: (q,v)
@@ -491,7 +501,8 @@ public:
              const TensorLSE2D & exp_sums, // Global exp sum tensor
              const TensorLSE2D & max_logits, // Global max logits tensor
              int idx_kv_split,
-             int head_group_q
+             int head_group_q,
+             TensorSink     & tSink   // Sink for current head
       ) {
 
     using namespace cute;
@@ -509,6 +520,30 @@ public:
 
     // Reduce k-blocks of A and A_sum across WG, if needed.
     auto [rA, rA_max, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
+    
+    if (cute::thread(0, 0)) {
+      cute::print("rA: "); cute::print_tensor(rA); cute::print("\n");
+      cute::print("rA_sum: "); cute::print_tensor(rA_sum); cute::print("\n");
+      cute::print("rA_max: "); cute::print_tensor(rA_max); cute::print("\n");
+      cute::print("exp_sums: "); cute::print(exp_sums); cute::print("\n");
+      cute::print("max_logits: "); cute::print(max_logits); cute::print("\n");
+    }
+    
+    if constexpr (Sink) {
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < rA_sum.size(); i++) {
+        constexpr double kLog2e = 1.4426950408889634074;
+        if (idx_kv_split == 0) {
+          for (int head_q = 0; head_q < head_group_q; head_q++) {
+            rA_sum(i) += sycl::native::exp2(static_cast<ElementA>(tSink(head_q) * kLog2e) - rA_max(i));
+          }
+        }
+      }
+    }
+
+    if (cute::thread(0, 0)) {
+      cute::print(" after sink rA_sum: "); cute::print_tensor(rA_sum); cute::print("\n");
+    }
 
     // store exp sum and max logits for current KV split
     // assume seq_len_qo == 1
@@ -522,8 +557,9 @@ public:
 
     /* Complete softmax, dividing out sums. */
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < rA_sum.size(); i++)
+    for (int i = 0; i < rA_sum.size(); i++) {
       rA_sum(i) = ElementA(1) / rA_sum(i);
+    }
 
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < rA.size(); i++)

@@ -176,6 +176,7 @@ struct DecodeKernelLauncher {
          reinterpret_cast<ElementO*>(args.tem_out), stride_Oaccum,
          reinterpret_cast<ElementO*>(args.exp_sums), stride_exp_sums,
          reinterpret_cast<ElementO*>(args.max_logits), stride_max_logits,
+         reinterpret_cast<ElementQ*>(args.sm_sink),
         },
         {args.sm_scale,
          static_cast<int*>(args.block_table),
@@ -388,7 +389,8 @@ struct PagedDecodeConfig {
         TileShapeOutput,
         TensorO,
         TensorLSE,
-        void>;
+        void,
+        Sink>;
 
     using FMHAKernel = cutlass::fmha::kernel::XeFMHAFwdSplitKVKernel<
         ProblemShapeType,
@@ -461,7 +463,7 @@ void decode_policy_dispatch(
             args,
             args.is_causal,
             args.is_local,
-            args.is_sink);  // args.is_sink);
+            args.is_sink);
   }
 }
 
@@ -590,13 +592,13 @@ void cutlass_paged_decode_impl(
   // cute::print("shapeQK: "); cute::print(decode_policy_head128::ShapeQK{}); cute::print("\n");
 
   if (args.head_size == HEAD_SIZE_LIMIT_0) {
-    // decode_policy_dispatch<decode_policy_head64>(queue, cuType, args);
+    decode_policy_dispatch<decode_policy_head64>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_1) {
     decode_policy_dispatch<decode_policy_head128>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_2) {
-    // decode_policy_dispatch<decode_policy_head192>(queue, cuType, args);
+    decode_policy_dispatch<decode_policy_head192>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_3) {
-    // decode_policy_dispatch<decode_policy_head256>(queue, cuType, args);
+    decode_policy_dispatch<decode_policy_head256>(queue, cuType, args);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
   }

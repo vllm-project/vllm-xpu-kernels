@@ -106,8 +106,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
     
   if (max_seqlen_q > 1 || 
-      window_size_left != -1 || window_size_right != -1 ||
-      softmax_sink_.has_value()) {
+      window_size_left != -1 || window_size_right != -1) {
     cutlass_chunk_prefill_interface(
         queue,
         q,

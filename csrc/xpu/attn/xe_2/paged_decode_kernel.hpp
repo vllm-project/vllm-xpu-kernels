@@ -117,6 +117,8 @@ public:
 
   static constexpr int max_num_kv_splits = SGPerWG::value * intel::sg_size;
   static constexpr int dpas_max_repeat_count = 8;
+  static constexpr bool Sink = CollectiveEpilogue::Sink;
+  using ElementSink = typename CollectiveEpilogue::ElementSink;
 
   // Device side arguments
   struct KernelArguments {
@@ -136,6 +138,8 @@ public:
     StrideO dExp_sums;
     ElementO *max_logits;
     StrideO dMax_logits;
+
+    const ElementSink *sm_sink;
   };
   using KernelParams = KernelArguments;
 
@@ -297,6 +301,7 @@ public:
       auto shape_O = make_shape(head_group_q, s.head_size_vo, s.num_heads_kv, num_kv_splits, batch_dim);
       auto shape_exp_sums = make_shape(head_group_q, num_kv_splits, s.num_heads_kv, batch_dim);
       auto shape_max_logits = make_shape(head_group_q, num_kv_splits, s.num_heads_kv, batch_dim);
+      auto shape_sink = make_shape(s.num_heads_kv, head_group_q);
 
       int num_blocks_per_split = cute::ceil_div(k_blocks, num_kv_splits);
       int kv_split_offset = idx_kv_split * num_blocks_per_split;
@@ -328,6 +333,7 @@ public:
       auto layout_o = make_ordered_layout(shape_O, Step<_1, _0, _2, _3, _4>{});
       auto layout_exp_sums = make_ordered_layout(shape_exp_sums, Step<_1, _0, _2, _3>{});
       auto layout_max_logits = make_ordered_layout(shape_max_logits, Step<_1, _0, _2, _3>{});
+      auto layout_sink = make_ordered_layout(shape_sink, Step<_1, _0>{});
 
       Tensor Q = make_tensor(make_gmem_ptr(dcQ), layout_q);
       Tensor K = make_tensor(make_gmem_ptr(dcK), layout_k);
@@ -335,6 +341,11 @@ public:
       Tensor O = make_tensor(make_gmem_ptr(ptrO), layout_o);
       Tensor exp_sums = make_tensor(make_gmem_ptr(ptrExp_sums), layout_exp_sums);
       Tensor max_logits = make_tensor(make_gmem_ptr(ptrMax_logits), layout_max_logits);
+      Tensor sinks = make_tensor(make_gmem_ptr(const_cast<ElementSink*>(p.sm_sink)), layout_sink);
+
+      if (cute::thread(0, 0)) {
+        cute::print("sinks: ");cute::print(sinks);print("\n");
+      }
 
 #if 0
       if (thr_id == 0 && BlockIdxZ() == 0 && idx_kv_split == 0 && head_q_start == 0) {
@@ -400,12 +411,25 @@ public:
 
       // Epilogue
       CollectiveEpilogue epilogue{params.epilogue, shared_storage.epilogue};
-      epilogue(O(_,_,head,idx_kv_split,l_coord),
-                tArA, tA_max, tA_sum,
-                blk_qv, thr_id,
-                exp_sums(_,_,head,l_coord),
-                max_logits(_,_,head,l_coord),
-                idx_kv_split, head_group_q);
+      if constexpr (Sink) {
+        if (cute::thread(0, 0)) {
+          cute::print(">>> sink \n");
+        }
+        auto sinks_per_kv = sinks(head, _);
+        epilogue(O(_,_,head,idx_kv_split,l_coord),
+                  tArA, tA_max, tA_sum,
+                  blk_qv, thr_id,
+                  exp_sums(_,_,head,l_coord),
+                  max_logits(_,_,head,l_coord),
+                  idx_kv_split, head_group_q, sinks_per_kv);
+      } else {
+        epilogue(O(_,_,head,idx_kv_split,l_coord),
+                  tArA, tA_max, tA_sum,
+                  blk_qv, thr_id,
+                  exp_sums(_,_,head,l_coord),
+                  max_logits(_,_,head,l_coord),
+                  idx_kv_split, head_group_q, sinks);
+      }
     }
   }
 };
