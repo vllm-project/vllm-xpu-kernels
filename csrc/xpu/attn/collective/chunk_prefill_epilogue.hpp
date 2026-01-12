@@ -510,19 +510,17 @@ public:
 
     // Reduce k-blocks of A and A_sum across WG, if needed.
     auto [rA, rA_max, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
-    
+
     if constexpr (Sink) {
       CUTLASS_PRAGMA_UNROLL
       for (int i = 0; i < rA_sum.size(); i++) {
         constexpr double kLog2e = 1.4426950408889634074;
         if (idx_kv_split == 0) {
-          for (int head_q = 0; head_q < head_group_q; head_q++) {
-            rA_sum(i) += sycl::native::exp2(static_cast<ElementA>(tSink(head_q) * kLog2e) - rA_max(i));
-          }
+          rA_sum(i) += sycl::native::exp2(static_cast<ElementA>(tSink(thr_id % 8) * kLog2e) - rA_max(i));
         }
-      }
-    }
-
+      }      
+    }        
+             
     // store exp sum and max logits for current KV split
     // assume seq_len_qo == 1
     if (ThreadIdxX() < head_group_q) {
