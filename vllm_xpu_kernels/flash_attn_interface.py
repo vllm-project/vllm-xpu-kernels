@@ -78,7 +78,7 @@ def flash_attn_varlen_func(
                 "k_descale, v_descale")
         if num_splits > 1:
             raise NotImplementedError("FA2 does not support num_splits > 1")
-        out, softmax_lse, tmp_out, exp_sum, max_logits = torch.ops._vllm_fa2_C.varlen_fwd(
+        out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
             q,
             k,
             v,
@@ -106,4 +106,4 @@ def flash_attn_varlen_func(
         )
     else:
         raise NotImplementedError("not support yet")
-    return (out, softmax_lse) if return_softmax_lse else (out, tmp_out, exp_sum, max_logits)
+    return (out, softmax_lse) if return_softmax_lse else (out)
