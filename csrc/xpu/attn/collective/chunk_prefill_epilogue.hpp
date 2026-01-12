@@ -508,26 +508,8 @@ public:
     using namespace cute;
     using ElementA = typename FragA::element_type;
 
-#if 0
-      if (ThreadIdxX() == 0 && BlockIdxZ() == 0) {
-        // cute::print("idx_kv_split: %d, idx_b: %d, head_q: %d, Q(0,0,head_q,l_coord): %f\n", idx_kv_split, idx_b, head_q, float(Q(0,34,head_q,l_coord)));
-        cute::print(" fwd epilogue tA_max(0): %f\n", float(tA_max(0)));
-        cute::print(" fwd epilogue tA_sum(0): %f\n", float(tA_sum(0)));
-        cute::print(" fwd epilogue tArA(0): %f\n", float(tArA(0)));
-        cute::print(" blk_qk: (%d, %d)\n", get<0>(blk_qv), get<1>(blk_qv));
-      }
-#endif
-
     // Reduce k-blocks of A and A_sum across WG, if needed.
     auto [rA, rA_max, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
-    
-    if (cute::thread(0, 0)) {
-      cute::print("rA: "); cute::print_tensor(rA); cute::print("\n");
-      cute::print("rA_sum: "); cute::print_tensor(rA_sum); cute::print("\n");
-      cute::print("rA_max: "); cute::print_tensor(rA_max); cute::print("\n");
-      cute::print("exp_sums: "); cute::print(exp_sums); cute::print("\n");
-      cute::print("max_logits: "); cute::print(max_logits); cute::print("\n");
-    }
     
     if constexpr (Sink) {
       CUTLASS_PRAGMA_UNROLL
@@ -539,10 +521,6 @@ public:
           }
         }
       }
-    }
-
-    if (cute::thread(0, 0)) {
-      cute::print(" after sink rA_sum: "); cute::print_tensor(rA_sum); cute::print("\n");
     }
 
     // store exp sum and max logits for current KV split

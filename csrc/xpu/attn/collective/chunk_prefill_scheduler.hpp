@@ -112,11 +112,9 @@ struct DecodeTileScheduler {
   {
     using namespace cute;
 
-    cute::print("tile_shape: "); cute::print(tile_shape); cute::print("\n");
     dim3 grid(size(ceil_div(shape.head_size_vo, get<1>(tile_shape))),     // V
               size(ceil_div(shape.seq_len_qo,   get<0>(tile_shape))),     // Q
               size(shape.batch * shape.num_heads_q));                  // (h,b) -- split later
-    std::cout << "seq len qo: " << shape.seq_len_qo << ", seq_len_kv: " << shape.seq_len_kv << "\n";
     int num_head = shape.num_heads_q;
     if (num_kv_splits >= 1) {
       // for splitKV, each wg handles group query heads
@@ -124,8 +122,6 @@ struct DecodeTileScheduler {
       grid.z *= num_kv_splits;
       num_head = shape.num_heads_kv;
     }
-    printf("batch: %d, num_heads_kv: %d, num_kv_splits: %d\n", shape.batch, shape.num_heads_kv, num_kv_splits);
-    std::cout << "DecodeTileScheduler Grid: (" << grid.x << ", " << grid.y << ", " << grid.z << ")\n";
     return Params{grid, {num_head}, {shape.batch * num_head}, num_kv_splits};
   }
 
@@ -186,7 +182,6 @@ struct XeReduceSplitKTileScheduler {
     using namespace cute;
 
     dim3 grid(shape.seq_len_qo, shape.num_heads_q, shape.batch);
-    std::cout << "Reduce Split K Grid: (" << grid.x << ", " << grid.y << ", " << grid.z << ")\n";
     return Params{grid, {shape.num_heads_q}, num_kv_splits};
   }
 

@@ -141,23 +141,6 @@ struct DecodeKernelLauncher {
 
     stride_max_logits = cutlass::make_cute_packed_stride(StrideO{}, cute::make_shape(seq_len_qo, num_kv_splits, num_heads_q, batch));
 
-    printf("*** shape: batch: %d, num_heads_q: %d, num_heads_kv: %d, head_size_qk: %d, head_size_vo: %d, seq_len_qo: %d, seq_len_kv: %d\n",
-           shape.batch,
-           shape.num_heads_q,
-           shape.num_heads_kv,
-           shape.head_size_qk,
-           shape.head_size_vo,
-           shape.seq_len_qo,
-           shape.seq_len_kv);
-
-    // cute::print("stride_Q: "); cute::print(stride_Q); cute::print("\n");
-    // cute::print("stride_K: "); cute::print(stride_K); cute::print("\n");
-    // cute::print("stride_V: "); cute::print(stride_V); cute::print("\n");
-    // cute::print("stride_O: "); cute::print(stride_O); cute::print("\n");
-    // cute::print("stride_Oaccum: "); cute::print(stride_Oaccum); cute::print("\n");
-    // cute::print("stride_exp_sums: "); cute::print(stride_exp_sums); cute::print("\n");
-    // cute::print("stride_max_logits: "); cute::print(stride_max_logits); cute::print("\n");
-
     return shape;
   }
 
@@ -196,8 +179,6 @@ struct DecodeKernelLauncher {
        hw_info,
        args.num_kv_splits
     };
-
-    printf("*** sm_count: %d\n", hw_info.sm_count);
 
     // Define device-global scratch memory
     size_t workspace_size = FMHAKernel::get_workspace_size(arguments);
@@ -240,11 +221,6 @@ struct DecodeKernelLauncher {
     const auto sycl_block = compat::dim3(block.x, block.y, block.z);
     const auto sycl_grid = compat::dim3(grid.x, grid.y, grid.z);
 
-    printf("launch FMHAKernel with grid (%d, %d, %d) block (%d, %d, %d) smem_size %d\n",
-           grid.x, grid.y, grid.z,
-           block.x, block.y, block.z,
-           smem_size);
-
     // Launch parameters depend on whether SYCL compiler supports work-group scratch memory extension
     compat::experimental::launch_properties launch_props {
       syclex::work_group_scratch_size(smem_size),
@@ -256,16 +232,12 @@ struct DecodeKernelLauncher {
     compat::experimental::launch_policy policy{sycl_grid, sycl_block, launch_props, kernel_props};
     auto event = compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(policy, queue, params);
     
-    event.wait();
+    // event.wait();
 
     dim3 const reduce_grid = ReductionSplitKernel::get_grid_shape(reduce_params);
     int reduce_smem_size = ReductionSplitKernel::SharedStorageSize;
     const auto reduce_sycl_block = compat::dim3(block.x, block.y, block.z);
     const auto reduce_sycl_grid = compat::dim3(reduce_grid.x, reduce_grid.y, reduce_grid.z);
-    printf("launch ReductionSplitKernel with grid (%d, %d, %d) block (%d, %d, %d) smem_size %d\n",
-           reduce_grid.x, reduce_grid.y, reduce_grid.z,
-           block.x, block.y, block.z,
-           reduce_smem_size);
     compat::experimental::launch_properties launch_props_reduce {
       syclex::work_group_scratch_size(reduce_smem_size),
     };
@@ -276,7 +248,7 @@ struct DecodeKernelLauncher {
 
     auto reduce_event = compat::experimental::launch<cutlass::device_kernel<ReductionSplitKernel>>(reduce_policy, queue, reduce_params);
 
-    reduce_event.wait();
+    // reduce_event.wait();
 
     EventManager::getInstance().addEvent(event);
     EventManager::getInstance().addEvent(reduce_event);
@@ -340,21 +312,11 @@ struct PagedDecodeConfig {
         Layout<TileShapePV>,
         SubgroupLayoutPV>::TiledMMA;
 
-    // cute::print("TiledMMAQK : "); cute::print(TiledMMAQK{}); cute::print("\n");
-    // cute::print("TiledMMAPV : "); cute::print(TiledMMAPV{}); cute::print("\n");
-
     static_assert(
         get<0>(TileShapeOutput{}) == get<0>(TileShapePV{}),
         "Output tile and P*V tile have different sizes in Q dimension");
     constexpr int VTiles = get<1>(TileShapeOutput{}) / get<1>(TileShapePV{});
     
-    // cute::print("SubgroupLayoutQK : "); cute::print(SubgroupLayoutQK{}); cute::print("\n");
-    // cute::print("SubgroupLayoutPV : "); cute::print(SubgroupLayoutPV{}); cute::print("\n");
-    // cute::print("TileShapeOutput: "); cute::print(TileShapeOutput{}); cute::print("\n");
-    // cute::print("TileShapeQK: "); cute::print(TileShapeQK{}); cute::print("\n");
-    // cute::print("TileShapePV: "); cute::print(TileShapePV{}); cute::print("\n");
-    // cute::print("VTiles: "); cute::print(VTiles); cute::print("\n");
-
     auto make_dummy_tensor = [&](auto val, auto stride) {
       return make_tensor(
           make_gmem_ptr(&val),
@@ -523,26 +485,6 @@ void cutlass_paged_decode_impl(
     total_seqlen_k = num_blocks * block_size;
   }
 
-  printf("** batch: %d, num_heads_q: %d, num_heads_kv: %d, head_size: %d, max_seqlen_q: %d, max_seqlen_k: %d, total_seqlen_q: %d, total_seqlen_k: %d, num_blocks: %d, block_size: %d, max_blocks_per_seq: %d, sm_scale: %.6f, is_varlen: %d, is_paged: %d, is_causal: %d, is_local: %d, is_sink: %d, num_kv_splits: %d\n",
-         batch_size,
-         num_heads_q,
-         num_heads_kv,
-         head_size,
-         max_seqlen_q,
-         max_seqlen_k,
-         total_seqlen_q,
-         total_seqlen_k,
-         num_blocks,
-         block_size,
-         max_blocks_per_seq,
-         sm_scale,
-         is_varlen,
-         is_paged,
-         is_causal,
-         is_local,
-         is_sink,
-         num_kv_splits);
-
   if (is_local) {
     window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
     window_size_right =
@@ -588,8 +530,6 @@ void cutlass_paged_decode_impl(
       head_size <= max_head_size,
       "FMHA forward only supports head dimension at most " +
           std::to_string(max_head_size));
-
-  // cute::print("shapeQK: "); cute::print(decode_policy_head128::ShapeQK{}); cute::print("\n");
 
   if (args.head_size == HEAD_SIZE_LIMIT_0) {
     decode_policy_dispatch<decode_policy_head64>(queue, cuType, args);

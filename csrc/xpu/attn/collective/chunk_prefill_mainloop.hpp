@@ -680,39 +680,16 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
     Tensor cV = make_identity_tensor(V_2D.shape());             // (v,k)
     Tensor cP = make_identity_tensor(take<0,2>(TileShapeQK{})); // (q,k)
 
-#if 0
-    if (ThreadIdxX() == 0 && BlockIdxZ() == 0) {
-      cute::print("tile_shape_v: "); cute::print(tile_shape_v); cute::print("\n");
-      cute::print("cQ: "); cute::print(cQ); cute::print("\n");
-      cute::print("cK: "); cute::print(cK); cute::print("\n");
-      cute::print("cV: "); cute::print(cV); cute::print("\n");
-      cute::print("cP: "); cute::print(cP); cute::print("\n");
-    }
-#endif
-
     /* Partition global tensors into workgroup tiles */
     Tensor gQ       = local_tile(cQ, TileShapeQK{}, append(blk_qv,_),             Step<_1,X,_1>{});   // (q,d,D)
     Tensor gK       = local_tile(cK, TileShapeQK{}, make_coord(_,_,_),            Step<X,_1,_1>{});   // (k,d,K,D)
     Tensor gV       = local_tile(cV, tile_shape_v,  make_coord(get<1>(blk_qv),_));                    // (v,k,K)
     Tensor gV_split = local_tile(gV, TileShapePV{}, make_coord(_,_,0),            Step<X,_1,_1>{});   // (v,k,VV,K)
 
-#if 0
-    if (ThreadIdxX() == 0 && BlockIdxZ() == 0) {
-      cute::print("blk_qv: "); cute::print(blk_qv); cute::print("\n");
-      cute::print("gQ shape: "); cute::print(gQ); cute::print("\n");
-      cute::print("gK shape: "); cute::print(gK); cute::print("\n");
-      cute::print("gV shape: "); cute::print(gV); cute::print("\n");
-      cute::print("gV_split shape: "); cute::print(gV_split); cute::print("\n");
-    }
-#endif
-
     /* Create global -> register copies */
     TiledCopyQ copy_q{Q_2D};
     TiledCopyK copy_k{K_2D};
     TiledCopyV copy_v{V_2D};
-    // if (cute::thread(0, 0)) {
-    //   cute::print("K_2D: "); cute::print_tensor(K_2D); cute::print("\n");
-    // }
 
     /* Create MMAs */
     TiledMMAQK mma_qk{};
@@ -720,17 +697,6 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
 
     auto copyQ = make_block_2d_copy_A(TiledMMAQK{}, TensorQ2D{});
     
-#if 0
-    if (ThreadIdxX() == 0 && BlockIdxZ() == 0) {
-      cute::print("TiledCopyQ: "); cute::print(TiledCopyQ{}); cute::print("\n");
-      cute::print("copy_q: "); cute::print(copy_q); cute::print("\n");
-      cute::print("TiledCopyK: "); cute::print(TiledCopyK{}); cute::print("\n");
-      // cute::print("TiledCopyV: "); cute::print(TiledCopyV{}); cute::print("\n");
-      // cute::print("TiledMMAQK: "); cute::print(TiledMMAQK{}); cute::print("\n");
-      // cute::print("TiledMMAPV: "); cute::print(TiledMMAPV{}); cute::print("\n");
-    }
-#endif
-
     /* Slice TiledCopy/TiledMMA operations down to to work-item level */
     auto thr_copy_q = copy_q.get_slice(thr_id);
     auto thr_copy_k = copy_k.get_slice(thr_id);
@@ -756,23 +722,6 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
     auto tVrV = thr_copy_v.partition_sg_fragment_D(gV_split(_,_,0,0));
     auto tArV = thr_mma_pv.partition_sg_fragment_B(gV_split(_,_,0,0));
 
-#if 0
-    if (ThreadIdxX() == 0 && BlockIdxZ() == 0) {
-      cute::print("thr_copy_q: "); cute::print(thr_copy_q); cute::print("\n");
-      cute::print("tQgQ shape: "); cute::print(tQgQ); cute::print("\n");
-      cute::print("tKgK shape: "); cute::print(tKgK); cute::print("\n");
-      cute::print("tVgV shape: "); cute::print(tVgV); cute::print("\n");
-      cute::print("tQrQ shape: "); cute::print(tQrQ); cute::print("\n");
-      cute::print("tSrQ shape: "); cute::print(tSrQ); cute::print("\n");
-      cute::print("tKrK shape: "); cute::print(tKrK); cute::print("\n");
-      cute::print("tSrK shape: "); cute::print(tSrK); cute::print("\n");
-      cute::print("tSrS shape: "); cute::print(tSrS); cute::print("\n");
-      cute::print("tArP shape: "); cute::print(tArP); cute::print("\n");
-      cute::print("tVrV shape: "); cute::print(tVrV); cute::print("\n");
-      cute::print("tArV shape: "); cute::print(tArV); cute::print("\n");
-    }
-#endif
-
     /* Create TiledCopy objects for prefetches */
     auto prefetch_q = make_block_2d_prefetch(copy_q);
     auto prefetch_k = make_block_2d_prefetch(copy_k);
@@ -795,19 +744,6 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
       int page_local_idx = tile_idx * get<1>(TileShapeQK{}) / params.page_size;
       tile_idx = params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page 
                  + tile_idx % tiles_per_page;
-#if 0
-      if (cute::thread(0, 8)) {
-        cute::print("page_size: "); cute::print(params.page_size); cute::print("\n");
-        cute::print("tile_size: "); cute::print(get<1>(TileShapeQK{})); cute::print("\n");
-        cute::print("tiles_per_page: "); cute::print(tiles_per_page); cute::print("\n");
-        cute::print("blk_k0: "); cute::print(blk_k0); cute::print("\n");
-        cute::print("blk_k1: "); cute::print(blk_k1); cute::print("\n");
-        cute::print("max_pages_per_seq: "); cute::print(params.max_pages_per_seq); cute::print("\n");
-        cute::print("b_offset: "); cute::print(b_offset); cute::print("\n");
-        cute::print("page_local_idx: "); cute::print(page_local_idx); cute::print("\n");
-        cute::print("tile_idx: "); cute::print(tile_idx); cute::print("\n");
-      }
-#endif
     }
 
     /* Initialization steps for first block: Q/K prefetch, O init */
@@ -836,39 +772,17 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
       auto tKgK_cache = PagedKV ? tKgK(_,_,_,tile_idx,_) : tKgK(_,_,_,K,_);
       auto tVgV_cache = PagedKV ? tVgV(_,_,_,_,tile_idx) : tVgV(_,_,_,_,K);
 
-#if 0
-      if (cute::thread(0, 8)) {
-        cute::print(">>>K: "); cute::print(K); cute::print("\n");
-        cute::print("tile_idx: "); cute::print(tile_idx); cute::print("\n");
-        cute::print("tKgK: "); cute::print(tKgK); cute::print("\n");
-      }
-#endif
-
       /* GEMM 1: S = K * Q */
       clear(tSrS);    /* TODO: fuse w/ initial gemm call */
       for (int D = 0; D < size<4>(tKgK); D++) {
         copy(copy_q, tQgQ(_,_,_,D),   tQrQ);
         copy(copy_k, tKgK_cache(_,_,_,D), tKrK);
-#if 0
-        if (cute::thread(0, 8)) {
-          cute::print("D: "); cute::print(D); cute::print("\n");
-          cute::print("tKgK_cache: "); cute::print(tKgK_cache); cute::print("\n");
-          cute::print("tKrK: "); cute::print_tensor(tKrK); cute::print("\n");
-        }
-#endif
 
         reorder(tQrQ, tSrQ);
         reorder(tKrK, tSrK);
 
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
       }
-#if 0
-      if (cute::thread(0, 0)) {
-        cute::print("After GEMM QK tSrQ: "); cute::print_tensor(tSrQ); cute::print("\n");
-        cute::print("After GEMM QK tSrK: "); cute::print_tensor(tSrK); cute::print("\n");
-        cute::print("After GEMM QK tSrS: "); cute::print_tensor(tSrS); cute::print("\n");
-      }
-#endif
 
       /* V prefetch for GEMM 2 */
       prefetch(prefetch_v, pVgV(_,_,_,tile_idx));

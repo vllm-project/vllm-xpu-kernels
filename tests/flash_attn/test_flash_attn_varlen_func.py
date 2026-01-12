@@ -376,7 +376,7 @@ def test_varlen_with_paged_kv(
 
 
 if __name__ == "__main__":
-    test_varlen_with_paged_kv([(1, 4096)],
+    test_varlen_with_paged_kv([(1, 4096), (1, 500)],
                               (8, 1),
                               128,
                               (-1, -1),

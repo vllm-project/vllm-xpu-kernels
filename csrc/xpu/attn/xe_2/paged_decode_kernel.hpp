@@ -226,29 +226,10 @@ public:
     int sub_group_id = thr_id / intel::sg_size;
     int q_sg_tile = get<0>(shape_div(TileShapeQK{}, shape(SubgroupLayoutQK{})));
 
-#if 0
-    if (ThreadIdxX() == 0 && BlockIdxZ() == 0) {
-      cute::print("TileShapeQK: ");cute::print(TileShapeQK{});print("\n");
-      cute::print("TileShapePV: ");cute::print(TileShapePV{});print("\n");
-    }
-#endif
-
     auto cS = make_identity_tensor(take<0,2>(TiledMMAQK{}.tile_mnk()));
     auto tScS = TiledMMAQK{}.get_slice(thr_id).partition_C(cS);
     auto q_offset_wi = get<0>(tScS(0));
     auto q_offset_sg = group_broadcast(sycl::ext::oneapi::this_work_item::get_sub_group(), q_offset_wi, 0);
-
-#if 0
-    if (ThreadIdxX() == 0 && BlockIdxZ() == 0) {
-      cute::print("cS: ");cute::print(cS);print("\n");
-      cute::print("tScS: ");cute::print(tScS);print("\n");
-      cute::print("tScS(0): ");cute::print(tScS(0));print("\n");
-      cute::print("tScS(1): ");cute::print(tScS(1));print("\n");
-      cute::print("q_offset_wi: ");cute::print(q_offset_wi);print("\n");
-      cute::print("q_offset_sg: ");cute::print(q_offset_sg);print("\n");
-    }
-#endif
-
 
     TileScheduler tile_scheduler{params.scheduler};
     auto num_kv_splits = params.scheduler.num_kv_splits_;
@@ -312,13 +293,6 @@ public:
         continue;
       }
 
-#if 0
-      if (thr_id == 0) {
-        cute::print(">>>idx_kv_split: %d, kv_split_offset: %d, num_effective_kv_blocks: %d, k_blocks: %d, num_blocks_per_split: %d\n",
-            idx_kv_split, kv_split_offset, num_effective_kv_blocks, k_blocks, num_blocks_per_split);
-      }
-#endif
-
       auto dcQ = const_cast<ElementQ*>(p.Q + offset_q);
       auto dcK = const_cast<ElementK*>(p.K);
       auto dcV = const_cast<ElementV*>(p.V);
@@ -343,41 +317,15 @@ public:
       Tensor max_logits = make_tensor(make_gmem_ptr(ptrMax_logits), layout_max_logits);
       Tensor sinks = make_tensor(make_gmem_ptr(const_cast<ElementSink*>(p.sm_sink)), layout_sink);
 
-      if (cute::thread(0, 0)) {
-        cute::print("sinks: ");cute::print(sinks);print("\n");
-      }
-
-#if 0
-      if (thr_id == 0 && BlockIdxZ() == 0 && idx_kv_split == 0 && head_q_start == 0) {
-        // cute::print("\nidx_kv_split: %d, idx_b: %d, head_q_start: %d, O shape: ", idx_kv_split, idx_b, head_q_start);cute::print(O.shape());print("\n");
-        cute::print("K shape: ");cute::print(K);cute::print("\n");
-        cute::print("V shape: ");cute::print(V);cute::print("\n");
-        cute::print("O layout: ");cute::print(O);cute::print("\n");
-      }
-#endif
-
       // O accumulator types
       FragA tArA;
       FragARow tA_max, tA_sum;
-
-#if 0
-      if (ThreadIdxX() == 0 && BlockIdxZ() == 0) {
-        cute::print("FragA: ");cute::print(FragA{});print("\n");
-        cute::print("FragARow: ");cute::print(FragARow{});print("\n");
-      }
-#endif
 
       // Main loop
       int l_coord = is_var_len ? 0 : idx_b;
 
       int start_blk = kv_split_offset;
       int end_blk = kv_split_offset + num_effective_kv_blocks;
-
-#if 0
-      if (thr_id == 0) {
-        cute::print("\nidx_kv_split: %d, idx_b: %d, head_q_start: %d, start_blk: %d, end_blk: %d\n", idx_kv_split, idx_b, head_q_start, start_blk, end_blk);
-      }
-#endif
 
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
 
@@ -389,22 +337,6 @@ public:
               thr_id, seq_len,
               full_tile_offset, discard_seq_coord);
 
-#if 0
-      // static_assert(is_same_v<FragARow, float>, "dtype mismatch");
-      if (idx_kv_split == 0 && head == 0 && thr_id == 0) {
-        // cute::print("idx_kv_split: %d, idx_b: %d, head_q: %d, Q(0,0,head_q,l_coord): %f\n", idx_kv_split, idx_b, head_q, float(Q(0,34,head_q,l_coord)));
-        cute::print("idx_kv_split: 0, head_q: 0, tid: 0, tA_max(0): %f\n", float(tA_max(0)));
-        cute::print("idx_kv_split: 0, head_q: 0, tid: 0, tA_sum(0): %f\n", float(tA_sum(0)));
-        cute::print("idx_kv_split: 0, head_q: 0, tid: 0, tArA(0): %f\n", float(tArA(0)));
-      }
-
-      if (idx_kv_split == 1 && head == 0 && thr_id == 0) {
-        // cute::print("idx_kv_split: %d, idx_b: %d, head_q: %d, Q(0,0,head_q,l_coord): %f\n", idx_kv_split, idx_b, head_q, float(Q(0,34,head_q,l_coord)));
-        cute::print("idx_kv_split: 1, head_q: 0, tid: 0, tA_max(0): %f\n", float(tA_max(0)));
-        cute::print("idx_kv_split: 1, head_q: 0, tid: 0, tArA(0): %f\n", float(tArA(0)));
-      }
-#endif
-
       if constexpr (!is_empty_v<MainloopSharedStorage> && !is_empty_v<EpilogueSharedStorage>) {
         sycl::group_barrier(get_work_group<3>());
       }
@@ -412,9 +344,6 @@ public:
       // Epilogue
       CollectiveEpilogue epilogue{params.epilogue, shared_storage.epilogue};
       if constexpr (Sink) {
-        if (cute::thread(0, 0)) {
-          cute::print(">>> sink \n");
-        }
         auto sinks_per_kv = sinks(head, _);
         epilogue(O(_,_,head,idx_kv_split,l_coord),
                   tArA, tA_max, tA_sum,
@@ -666,9 +595,6 @@ public:
           acc += adjusted_o_accum;
         }
 
-        if (cute::thread(0, 0)) {
-          cute::print(">>> head_q: %d, idx: %d, global_exp_sums: %f\n", head_q, idx, float(global_exp_sums));
-        }
         acc *= inv_global_exp_sums;
         O(seq_idx, idx, head_q, l_coord) = acc;
       }
