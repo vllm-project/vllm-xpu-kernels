@@ -119,14 +119,14 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int block_size = k.size(1);
     at::Tensor tmp_out = at::empty(
         {num_tokens, num_heads_q * num_kv_splits, head_dim}, 
-        q.options().dtype(at::kFloat).device(q.device()));
+        q.options().device(q.device()));
     at::Tensor max_logits = at::empty(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
     at::Tensor exp_sums = at::empty(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
-    out = out.to(at::kFloat);
+    // out = out.to(at::kFloat);
     cutlass_paged_decode_interface(
         queue,
         q,
@@ -151,7 +151,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_local,
         is_sink,
         num_kv_splits);
-    out = out.to(q_type);
+    // out = out.to(q_type);
   }
 
   if (return_softmax) {

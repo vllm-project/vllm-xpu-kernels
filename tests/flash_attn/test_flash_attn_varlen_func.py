@@ -360,7 +360,7 @@ def test_decode_attn_with_paged_kv(
 
 
 if __name__ == "__main__":
-    test_decode_attn_with_paged_kv([[(1, 523), (1, 37), (1, 2011)]],
+    test_decode_attn_with_paged_kv([(1, 37)],
                                    (8, 2),
                                    128,
                                    torch.half,

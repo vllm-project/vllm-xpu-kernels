@@ -102,6 +102,7 @@ public:
 
   using TileShapeO = typename CollectiveEpilogue::TileShapeO;
   using ElementO = typename CollectiveEpilogue::TensorO::element_type;
+  using ElementLSE = typename CollectiveEpilogue::ElementLSE;
   using StrideO = decltype(stride(typename CollectiveEpilogue::TensorO{}));
 
   // Kernel level shared memory storage
@@ -129,14 +130,11 @@ public:
     StrideK dK;
     const ElementV *V;
     StrideV dV;
-    ElementO *O;
-    StrideO dO;
-    // TODO: whether same dtype as output or accum?
     ElementO *Oaccum;
     StrideO dOaccum;
-    ElementO *exp_sums;
+    ElementLSE *exp_sums;
     StrideO dExp_sums;
-    ElementO *max_logits;
+    ElementLSE *max_logits;
     StrideO dMax_logits;
 
     const ElementSink *sm_sink;
@@ -383,6 +381,8 @@ public:
   using TileShapeO = typename FMHAKernel_::TileShapeO;
   using TileShapeQK = typename FMHAKernel_::TileShapeQK;
 
+  using ElementLSE = typename FMHAKernel_::ElementLSE;
+
   using SGPerWG = typename FMHAKernel_::SGPerWG;
 
   // num values (head_dim) processed by each thread
@@ -401,9 +401,9 @@ public:
     // TODO: whether same dtype as output or accum?
     const ElementO *Oaccum;
     StrideO dOaccum;
-    const ElementO *exp_sums;
+    const ElementLSE *exp_sums;
     StrideO dExp_sums;
-    const ElementO *max_logits;
+    const ElementLSE *max_logits;
     StrideO dMax_logits;
   };
   using KernelParams = KernelArguments;
@@ -421,9 +421,9 @@ public:
   };
 
   struct SharedStorage {
-    cutlass::Array<ElementO, FMHAKernel_::max_num_kv_splits> max_logits_slm_array;
-    cutlass::Array<ElementO, FMHAKernel_::max_num_kv_splits> exp_sums_slm_array;
-    cutlass::Array<ElementO, FMHAKernel_::max_num_kv_splits> rescaled_exp_sums_array;
+    cutlass::Array<ElementLSE, FMHAKernel_::max_num_kv_splits> max_logits_slm_array;
+    cutlass::Array<ElementLSE, FMHAKernel_::max_num_kv_splits> exp_sums_slm_array;
+    cutlass::Array<ElementLSE, FMHAKernel_::max_num_kv_splits> rescaled_exp_sums_array;
   };
 
   static constexpr int SharedStorageSize = is_empty_v<SharedStorage> ? size_t(0)
@@ -524,8 +524,8 @@ public:
       auto shape_max_logits = make_shape(seq_len_qo, num_kv_splits, num_heads_q, batch_dim);
 
       auto dcOaccum = const_cast<ElementO*>(p.Oaccum + offset_o_accum);
-      auto ptrExp_sums = const_cast<ElementO*>(p.exp_sums + offset_exp_sums);
-      auto ptrMax_logits = const_cast<ElementO*>(p.max_logits + offset_max_logits);
+      auto ptrExp_sums = const_cast<ElementLSE*>(p.exp_sums + offset_exp_sums);
+      auto ptrMax_logits = const_cast<ElementLSE*>(p.max_logits + offset_max_logits);
       auto ptrO = p.O + offset_o;
 
       auto stride_o = is_var_len ? cutlass::make_cute_packed_stride(StrideO{}, shape_O) : p.dO;
@@ -544,15 +544,15 @@ public:
       // Step 1: reduce max logits across different partitions
       // store into SLM for later use
 
-      ElementO global_max_logits = cutlass::platform::numeric_limits<ElementO>::lowest();
-      ElementO global_exp_sums = static_cast<ElementO>(0.0);
+      ElementLSE global_max_logits = cutlass::platform::numeric_limits<ElementLSE>::lowest();
+      ElementLSE global_exp_sums {0};
       // only first subgroup participates
       if (thr_id < num_kv_splits) {
-        ElementO cur_max_logit = max_logits(seq_idx, thr_id, head_q, l_coord);
+        ElementLSE cur_max_logit = max_logits(seq_idx, thr_id, head_q, l_coord);
         global_max_logits = sycl::max(global_max_logits, cur_max_logit);
         shared_storage.max_logits_slm_array[thr_id] = cur_max_logit;
 
-        ElementO cur_exp_sum = exp_sums(seq_idx, thr_id, head_q, l_coord);
+        ElementLSE cur_exp_sum = exp_sums(seq_idx, thr_id, head_q, l_coord);
         shared_storage.exp_sums_slm_array[thr_id] = cur_exp_sum;
       }
 
@@ -569,11 +569,11 @@ public:
       if (thr_id < num_kv_splits)  {
         if (thr_id * num_blocks_per_split > k_blocks) break;
         
-        ElementO local_max_logit = shared_storage.max_logits_slm_array[thr_id];
-        ElementO local_exp_sum = shared_storage.exp_sums_slm_array[thr_id];
+        ElementLSE local_max_logit = shared_storage.max_logits_slm_array[thr_id];
+        ElementLSE local_exp_sum = shared_storage.exp_sums_slm_array[thr_id];
 
-        ElementO rescale = sycl::native::exp2(local_max_logit - global_max_logits);
-        ElementO rescaled_exp_sum = local_exp_sum * rescale;
+        ElementLSE rescale = sycl::native::exp2(local_max_logit - global_max_logits);
+        ElementLSE rescaled_exp_sum = local_exp_sum * rescale;
         shared_storage.rescaled_exp_sums_array[thr_id] = rescaled_exp_sum;
 
         global_exp_sums += rescaled_exp_sum;
@@ -582,21 +582,21 @@ public:
       global_exp_sums = reduce_over_group(get_work_group<1>(), global_exp_sums, sycl::plus<>());
       global_exp_sums = sycl::group_broadcast(get_work_group<1>(), global_exp_sums, 0);
       
-      ElementO inv_global_exp_sums = 1. / global_exp_sums;
+      ElementLSE inv_global_exp_sums = 1. / global_exp_sums;
       for (int idx = thr_id; idx < s.head_size_vo; idx += SGPerWG::value * intel::sg_size) {
-        ElementO acc = 0;
+        ElementLSE acc = 0;
         for (int i = 0; i < num_kv_splits; ++i) {
           if (i * num_blocks_per_split > k_blocks) {
             break;
           }
           // assume seq_len_q == 1
-          ElementO adjusted_o_accum = Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord) * 
+          ElementLSE adjusted_o_accum = static_cast<ElementLSE>(Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord)) * 
                                       shared_storage.rescaled_exp_sums_array[i];
           acc += adjusted_o_accum;
         }
 
         acc *= inv_global_exp_sums;
-        O(seq_idx, idx, head_q, l_coord) = acc;
+        O(seq_idx, idx, head_q, l_coord) = static_cast<ElementO>(acc);
       }
     }
   }

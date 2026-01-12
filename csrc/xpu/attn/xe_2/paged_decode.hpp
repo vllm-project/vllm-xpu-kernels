@@ -68,7 +68,7 @@ struct DecodeKernelLauncher {
   using ElementK = typename FMHAKernel::ElementK;
   using ElementV = typename FMHAKernel::ElementV;
   using ElementO = typename FMHAKernel::ElementO;
-  // using ElementOaccum = typename FMHAKernel::ElementOaccum;
+  using ElementLSE = typename FMHAKernel::ElementLSE;
 
   using CollectiveMainloop = typename FMHAKernel::CollectiveMainloop;
   using ElementS = typename CollectiveMainloop::ElementS;
@@ -155,10 +155,9 @@ struct DecodeKernelLauncher {
          reinterpret_cast<ElementQ*>(args.query), stride_Q,
          reinterpret_cast<ElementK*>(args.key), stride_K,
          reinterpret_cast<ElementV*>(args.value), stride_V,
-         reinterpret_cast<ElementO*>(args.out), stride_O,
          reinterpret_cast<ElementO*>(args.tem_out), stride_Oaccum,
-         reinterpret_cast<ElementO*>(args.exp_sums), stride_exp_sums,
-         reinterpret_cast<ElementO*>(args.max_logits), stride_max_logits,
+         reinterpret_cast<ElementLSE*>(args.exp_sums), stride_exp_sums,
+         reinterpret_cast<ElementLSE*>(args.max_logits), stride_max_logits,
          reinterpret_cast<ElementQ*>(args.sm_sink),
         },
         {args.sm_scale,
@@ -174,8 +173,8 @@ struct DecodeKernelLauncher {
       {shape,
        reinterpret_cast<ElementO*>(args.out), stride_O,
        reinterpret_cast<ElementO*>(args.tem_out), stride_Oaccum,
-       reinterpret_cast<ElementO*>(args.exp_sums), stride_exp_sums,
-       reinterpret_cast<ElementO*>(args.max_logits), stride_max_logits},
+       reinterpret_cast<ElementLSE*>(args.exp_sums), stride_exp_sums,
+       reinterpret_cast<ElementLSE*>(args.max_logits), stride_max_logits},
        hw_info,
        args.num_kv_splits
     };
@@ -267,7 +266,6 @@ template <
     typename ElementK = bfloat16_t,
     typename ElementV = bfloat16_t,
     typename ElementO = float,
-    typename ElementOaccum = float,
     typename MMAOperation_ = void, /* void -> default */
     typename StrideQ = Stride<int, _1, int, int>,
     typename StrideK = Stride<int, _1, int, int>,
@@ -326,7 +324,7 @@ struct PagedDecodeConfig {
     using TensorQ = decltype(make_dummy_tensor(ElementQ{}, StrideQ{}));
     using TensorK = decltype(make_dummy_tensor(ElementK{}, StrideK{}));
     using TensorV = decltype(make_dummy_tensor(ElementV{}, StrideV{}));
-    using TensorO = decltype(make_dummy_tensor(ElementOaccum{}, StrideOaccum{}));
+    using TensorO = decltype(make_dummy_tensor(ElementO{}, StrideOaccum{}));
     using TensorLSE = decltype(make_dummy_tensor(float{}, StrideO{}));
 
     // Mainloop
@@ -401,7 +399,7 @@ void decode_policy_dispatch(
         half_t,
         half_t,
         half_t,
-        float>::
+        half_t>::
         kernel_dispatch(
             queue,
             args,
@@ -419,7 +417,7 @@ void decode_policy_dispatch(
         bfloat16_t,
         bfloat16_t,
         bfloat16_t,
-        float>::
+        bfloat16_t>::
         kernel_dispatch(
             queue,
             args,
