@@ -110,7 +110,7 @@ MINI_PYTEST_PARAMS = {
 
 @pytest.mark.parametrize("seq_lens",
                          [[(1, 1328), (5, 18),
-                           (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
+                           (129, 463)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
@@ -241,7 +241,8 @@ def test_varlen_with_paged_kv(
 
 
 @pytest.mark.parametrize("seq_lens",
-                         [[(1, 8000), (1, 500), (1, 1024)], [(1, 13000)], [(1, 1024) * 32]])
+                         [[(1, 8000), (1, 500), (1, 1024)], [(1, 13000)], [(1, 1024) * 32],
+                          [(1, 523), (1, 37), (1, 2011)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
