@@ -110,4 +110,4 @@ def flash_attn_varlen_func(
         )
     else:
         raise NotImplementedError("not support yet")
-    return (out, softmax_lse) if return_softmax_lse else out
+    return (out, softmax_lse) if return_softmax_lse else (out)
