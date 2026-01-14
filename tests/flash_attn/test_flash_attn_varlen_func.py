@@ -332,6 +332,8 @@ def test_decode_with_paged_kv(
                               dtype=torch.int32).cumsum(dim=0,
                                                         dtype=torch.int32)
 
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
                                  num_blocks,
@@ -364,7 +366,7 @@ def test_decode_with_paged_kv(
                                     max_query_len,
                                     cu_query_lens,
                                     max_kv_len,
-                                    cu_kv_lens,
+                                    seqused_k=seq_k,
                                     softmax_scale=scale,
                                     causal=False,
                                     block_table=block_tables,
@@ -379,6 +381,7 @@ def test_decode_with_paged_kv(
                                 block_tables=block_tables,
                                 scale=scale,
                                 casual=False,
+                                is_paged=True,
                                 sink=sink,
                                 window_size_left=-1,
                                 window_size_right=-1)

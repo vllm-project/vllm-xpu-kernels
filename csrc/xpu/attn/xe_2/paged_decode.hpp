@@ -16,9 +16,9 @@
 
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
-#include "csrc/xpu/attn/collective/chunk_prefill_scheduler.hpp"
-#include "csrc/xpu/attn/collective/chunk_prefill_epilogue.hpp"
-#include "paged_decode_kernel.hpp"
+#include "collective/chunk_prefill_scheduler.hpp"
+#include "collective/chunk_prefill_epilogue.hpp"
+#include "kernel/paged_decode_kernel.hpp"
 
 #include "fmha_utils.hpp"
 
@@ -532,10 +532,12 @@ void cutlass_paged_decode_impl(
   if (args.head_size == HEAD_SIZE_LIMIT_0) {
     decode_policy_dispatch<decode_policy_head64>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_1) {
-    decode_policy_dispatch<decode_policy_head128>(queue, cuType, args);
+    decode_policy_dispatch<decode_policy_head96>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_2) {
-    decode_policy_dispatch<decode_policy_head192>(queue, cuType, args);
+    decode_policy_dispatch<decode_policy_head128>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_3) {
+    decode_policy_dispatch<decode_policy_head192>(queue, cuType, args);
+  } else if (args.head_size == HEAD_SIZE_LIMIT_4) {
     decode_policy_dispatch<decode_policy_head256>(queue, cuType, args);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");

@@ -203,7 +203,10 @@ public:
   CUTLASS_DEVICE
   Shape<int, int> get_sequence_length_shape(ProblemShape const& problem_shape, int const& batch) {
     if constexpr (is_var_len) {
-      return cutlass::fmha::collective::apply_variable_length(Shape<VariableLength, VariableLength>{problem_shape.seq_len_qo, problem_shape.seq_len_kv}, batch);
+      auto q_len = cutlass::fmha::collective::apply_variable_length(
+          Shape<VariableLength>{problem_shape.seq_len_qo}, batch);
+      return Shape<int, int>{
+          get<0>(q_len), problem_shape.seq_len_kv.cumulative_length[batch]};
     } else {
       return Shape<int, int>{problem_shape.seq_len_qo, problem_shape.seq_len_kv};
     }
@@ -464,7 +467,10 @@ public:
   CUTLASS_DEVICE
   Shape<int, int> get_sequence_length_shape(ProblemShape const& problem_shape, int const& batch) {
     if constexpr (is_var_len) {
-      return cutlass::fmha::collective::apply_variable_length(Shape<VariableLength, VariableLength>{problem_shape.seq_len_qo, problem_shape.seq_len_kv}, batch);
+      auto q_len = cutlass::fmha::collective::apply_variable_length(
+          Shape<VariableLength>{problem_shape.seq_len_qo}, batch);
+      return Shape<int, int>{
+          get<0>(q_len), problem_shape.seq_len_kv.cumulative_length[batch]};
     } else {
       return Shape<int, int>{problem_shape.seq_len_qo, problem_shape.seq_len_kv};
     }
