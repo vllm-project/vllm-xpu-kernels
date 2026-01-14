@@ -31,8 +31,8 @@ void fused_moe_prologue_impl(
       reinterpret_cast<TA const*>(input.data_ptr());
   
   TB const* input_activation_scales;
-  if constexpr (!std::is_same_v(TB, NoScale)){
-    input_activation_scales = reinterpret_cast<TB const*>(input_scales.data_ptr());
+  if constexpr (!std::is_same_v<TB, NoScale>){
+    input_activation_scales = reinterpret_cast<TB const*>(input_scales->data_ptr());
   }
 
   auto const* token_topk_unpermuted_scales =
@@ -140,7 +140,7 @@ void fused_moe_prologue_impl(
   expandInputRowsKernelLauncher(
       input_activations,
       input_expand,
-      input_activation_scales
+      input_activation_scales,
       input_scales_expand,
       block_k,
       token_topk_unpermuted_scales,
@@ -159,7 +159,6 @@ void fused_moe_prologue_impl(
 void fused_moe_prologue(
     torch::Tensor input,
     const c10::optional<torch::Tensor>& input_scales,
-    torch::Tensor input_scales,
     torch::Tensor token_selected_experts,
     torch::Tensor token_final_scales,
     torch::Tensor workspace,
@@ -184,15 +183,15 @@ void fused_moe_prologue(
   } else if (input_type == at::kFloat8_e4m3fn){
     if(!input_scales){
       call_impl(at::Float8_e4m3fn{}, NoScale{});
-    } else if(input_scales.dtype() == at::kFloat){
-      call_impl(at::Float8_e4m3fn{}, at::Float{});
-    } else if (input_scales.dtype() == at::kFloat8_e8m0fnu){
+    } else if(input_scales->dtype() == at::kFloat){
+      call_impl(at::Float8_e4m3fn{}, float{});
+    } else if (input_scales->dtype() == at::kFloat8_e8m0fnu){
       call_impl(at::Float8_e4m3fn{}, at::Float8_e8m0fnu{});
     }
   } else if (input_type == at::kFloat4_e2m1fn_x2){
     if(!input_scales){
       call_impl(at::Float4_e2m1fn_x2{}, NoScale{});
-    } else if (input_scales.dtype() == at::kFloat8_e8m0fnu){
+    } else if (input_scales->dtype() == at::kFloat8_e8m0fnu){
       call_impl(at::Float4_e2m1fn_x2{}, at::Float8_e8m0fnu{});
     }
   }

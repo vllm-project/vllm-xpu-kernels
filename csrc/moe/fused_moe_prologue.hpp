@@ -605,8 +605,9 @@ class ExpandInputRowsKernel {
       int64_t const source_row = unpermuted_row % num_tokens;
 
       auto const* source_row_ptr = unpermuted_input + source_row * hidden_size;
-      // Cast first to handle when this is FP4
       auto* dest_row_ptr = permuted_input + permuted_row * hidden_size;
+      auto const* source_row_ptr_scale = unpermuted_input_scales + source_row * int(hidden_size / block_k); 
+      auto* dest_row_ptr_scale = permuted_input_scales + permuted_row * int(hidden_size / block_k);
 
       int64_t const start_offset = item.get_local_id(2);
       int64_t const stride = EXPAND_THREADS_PER_BLOCK;
@@ -616,6 +617,11 @@ class ExpandInputRowsKernel {
            elem_index += stride) {
         dest_row_ptr[elem_index] = source_row_ptr[elem_index];
       }
+
+      for(int elem_index = start_offset; elem_index < num_elems_in_col / block_k; elem_index += stride){
+        dest_row_ptr_scale[elem_index] = source_row_ptr_scale[elem_index];
+      }
+
       if (permuted_token_scales && item.get_local_id(2) == 0) {
         int64_t const source_k_idx = source_row * k + source_k_rank;
         permuted_token_scales[permuted_row] =
@@ -627,9 +633,9 @@ class ExpandInputRowsKernel {
  private:
   InputActivationsType const* unpermuted_input;
   ExpandedActivationsType* permuted_input;
-  ActivationsScaleType const* unpermuted_input_scales,
-  ActivationsScaleType* permuted_input_scales,
-  int block_k,
+  ActivationsScaleType const* unpermuted_input_scales;
+  ActivationsScaleType* permuted_input_scales;
+  int block_k;
   float const* unpermuted_token_scales;
   float* permuted_token_scales;
   int const* permuted_row_to_unpermuted_row;

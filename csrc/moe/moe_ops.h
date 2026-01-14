@@ -72,7 +72,7 @@ void moe_gather(
 
 void fused_moe_prologue(
     torch::Tensor input,
-    const c10::optional<Torch::Tensor>& input_scales,
+    const c10::optional<torch::Tensor>& input_scales,
     torch::Tensor token_selected_experts,
     torch::Tensor token_final_scales,
     torch::Tensor workspace,
