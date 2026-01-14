@@ -9,7 +9,7 @@ import torch
 
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
-NUM_HEADS = [(4, 4), (8, 2)]
+NUM_HEADS = [(4, 4), (8, 2), (10, 2)]
 HEAD_SIZES = [64, 128, 192, 256]
 BLOCK_SIZES = [64]
 DTYPES = [torch.bfloat16, torch.half]
@@ -19,7 +19,7 @@ QDTYPES = [None]
 NUM_BLOCKS = [2048]
 SOFT_CAPS = [None]
 SLIDING_WINDOWS = [(-1, 127), (127, -1), (127, 127), (-1, -1)]
-SINK = [False]
+SINK = [False, True]
 CASUAL = [False, True]
 
 
@@ -351,15 +351,3 @@ def test_decode_with_paged_kv(
         atol, rtol = 1.5e-1, 1.5e-1
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
-
-if __name__ == "__main__":
-    test_decode_with_paged_kv([(1, 523), (1, 37), (1, 2011)],
-                              (8, 2),
-                              128,
-                              torch.bfloat16,
-                              64,
-                              None,
-                              2048,
-                              2,
-                              None,
-                              False)

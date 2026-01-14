@@ -547,7 +547,7 @@ public:
       ElementLSE global_max_logits = cutlass::platform::numeric_limits<ElementLSE>::lowest();
       ElementLSE global_exp_sums {0};
       // only first subgroup participates
-      if (thr_id < num_kv_splits) {
+      if (thr_id < num_kv_splits && thr_id * num_blocks_per_split < k_blocks)  {
         ElementLSE cur_max_logit = max_logits(seq_idx, thr_id, head_q, l_coord);
         global_max_logits = sycl::max(global_max_logits, cur_max_logit);
         shared_storage.max_logits_slm_array[thr_id] = cur_max_logit;
@@ -566,8 +566,7 @@ public:
       global_max_logits = sycl::group_broadcast(get_work_group<1>(), global_max_logits, 0);
       
       // step 2: rescale Oaccum and write back to O
-      if (thr_id < num_kv_splits)  {
-        if (thr_id * num_blocks_per_split > k_blocks) break;
+      if (thr_id < num_kv_splits && thr_id * num_blocks_per_split < k_blocks)  {
         
         ElementLSE local_max_logit = shared_storage.max_logits_slm_array[thr_id];
         ElementLSE local_exp_sum = shared_storage.exp_sums_slm_array[thr_id];
@@ -586,7 +585,7 @@ public:
       for (int idx = thr_id; idx < s.head_size_vo; idx += SGPerWG::value * intel::sg_size) {
         ElementLSE acc = 0;
         for (int i = 0; i < num_kv_splits; ++i) {
-          if (i * num_blocks_per_split > k_blocks) {
+          if (i * num_blocks_per_split >= k_blocks) {
             break;
           }
           // assume seq_len_q == 1
