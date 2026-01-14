@@ -72,11 +72,13 @@ void moe_gather(
 
 void fused_moe_prologue(
     torch::Tensor input,
+    const c10::optional<Torch::Tensor>& input_scales,
     torch::Tensor token_selected_experts,
     torch::Tensor token_final_scales,
     torch::Tensor workspace,
     int64_t hidden_size,
     int64_t inter_size,
+    int64_t block_k,
     int64_t ep_rank,
     int64_t ep_size,
     int64_t num_experts_on_rank);

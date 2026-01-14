@@ -31,12 +31,13 @@ MINI_PYTEST_PARAMS = {
 }
 
 RECIPE_TO_DTYPE = {
-    "bf16": torch.bfloat16,
-    "fp16": torch.float16,
-    "mxfp8": torch.float8_e4m3fn,
-    "fp8block": torch.float8_e4m3fn,
-    "mxfp4": torch.float4_e2m1fn_x2,
+    "bf16": (torch.bfloat16, None),
+    "fp16": (torch.float16, None),
+    "mxfp8": (torch.float8_e4m3fn, torch.float8_e8m0fnu),
+    "fp8block": (torch.float8_e4m3fn, torch.float32),
+    "mxfp4": (torch.float4_e2m1fn_x2, torch.float8_e8m0fnu),
 }
+
 
 def ceilDiv(a, b):
     return (a + b - 1) // b
@@ -65,7 +66,7 @@ def ref_prologue(x,
     tokens_per_expert = counts.cumsum()
     token_idxs = idxs // num_per_tok
 
-    dtype = RECIPE_TO_DTYPE.get(recipe)
+    data_dtype, scale_dtype = RECIPE_TO_DTYPE.get(recipe, (None, None))
     if recipe in ["mxfp8", "mxfp4"]:
         scales = scales.view(torch.uint8)
 
@@ -90,7 +91,7 @@ def ref_prologue(x,
     if recipe is "mxfp4":
         expand_input = expand_input.to(torch.uint8).view(torch.float4_e2m1fn_x2)
     else:
-        expand_input = expand_input.to(dtype)
+        expand_input = expand_input.to(data_dtype)
 
     expand_scales = None if scales is None else torch.cat(expand_scales, dim=0)
     if recipe in ["mxfp8", "mxfp4"]:
@@ -105,33 +106,34 @@ def ref_prologue(x,
 @pytest.mark.parametrize("recipe", ["bf16", "fp16", "mxfp8", "mxfp4", "fp8block"])
 def test_prologue(m, n, k, e, topk, recipe):
     seed_everything(7)
-    dtype = RECIPE_TO_DTYPE.get(recipe)
+    data_dtype, scale_dtype = RECIPE_TO_DTYPE.get(recipe, (None, None))
 
     input_len = m
     hidden_size = k
     inter_size = n
     num_experts = e
-    fp8_block_k = 128
-    mxfp_block_k = 32
+    block_k = 0
 
-    if dtype in [torch.bfloat16, torch.float16]:
-        hidden_states = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
+    if data_dtype in [torch.bfloat16, torch.float16]:
+        hidden_states = torch.randn((input_len, hidden_size), device=DEVICE, dtype=data_dtype) / 16
         ref_a = hidden_states.clone()
         scales = None
-    elif dtype is torch.float8_e4m3fn:
+    elif data_dtype is torch.float8_e4m3fn:
         hidden_states_fp32 = torch.randn((input_len, hidden_size), device=DEVICE, dtype=torch.float32)
         hidden_states = hidden_states_fp32.to(torch.float8_e4m3fn)
         ref_a = hidden_states_fp32
         if recipe == "fp8block":
-            scales = torch.randn((input_len, hidden_size // fp8_block_k), device=DEVICE, dtype=torch.float32)
+            block_k = 128
+            scales = torch.randn((input_len, hidden_size // block_k), device=DEVICE, dtype=torch.float32)
         elif recipe == "mxfp8":
-            scales = torch.randint(1,256,(input_len, hidden_size // mxfp_block_k), device=DEVICE, dtype=torch.uint8).view(torch.float8_e8m0fnu)
-
-    elif dtype is torch.float4_e2m1fn_x2:
+            block_k = 16 # two input elem in a 8bit
+            scales = torch.randint(1,256,(input_len, hidden_size // block_k), device=DEVICE, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+    elif data_dtype is torch.float4_e2m1fn_x2:
+        block_k = 32
         hidden_states_fp32 = torch.randn((input_len, hidden_size // 2), device=DEVICE, dtype=torch.bfloat16)
         hidden_states = hidden_states_fp32.to(torch.uint8).view(torch.float4_e2m1fn_x2)
         ref_a = hidden_states_fp32
-        scales = torch.randint(1,256,(input_len, hidden_size // mxfp_block_k), device=DEVICE, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+        scales = torch.randint(1,256,(input_len, hidden_size // block_k), device=DEVICE, dtype=torch.uint8).view(torch.float8_e8m0fnu)
 
     # moe gate
     scores = torch.randn((input_len, num_experts),
@@ -165,7 +167,8 @@ def test_prologue(m, n, k, e, topk, recipe):
     blocked_expert_counts_size = num_experts_per_node * num_blocks_per_seq * 4
     blocked_expert_counts_cumsum_size = blocked_expert_counts_size
     blocked_row_to_unpermuted_row_size = num_experts_per_node * num_rows * 4
-    permuted_data_size = permuted_elems * dtype.itemsize
+    permuted_data_size = permuted_elems * data_dtype.itemsize if scales is not None else 0
+    permuted_act_scales_size = (permuted_elems // block_k) * scale_dtype.itemsize
     permuted_token_final_scales_size = num_moe_inputs * 4
 
     ws_map = {}
@@ -191,6 +194,7 @@ def test_prologue(m, n, k, e, topk, recipe):
     config_ws("expert_first_token_offset", expert_first_token_offset_size)
     config_ws("permuted_token_final_scales", permuted_token_final_scales_size)
     config_ws("overlapped_gemm1_gemm2_inputs", permuted_data_size)
+    config_ws("permuted_act_scales", permuted_act_scales_size)
 
     workspace = torch.zeros(map_offset,
                             dtype=torch.uint8,
@@ -199,11 +203,13 @@ def test_prologue(m, n, k, e, topk, recipe):
         topk_ids = topk_ids.to(torch.int64)
     torch.ops._moe_C.fused_moe_prologue(
         input=hidden_states,
+        input_scales=scales,
         token_selected_experts=topk_ids,
         token_final_scales=topk_weights,
         workspace=workspace,
         hidden_size=hidden_size,
         inter_size=inter_size,
+        block_k=block_k,
         ep_rank=0,
         ep_size=1,
         num_experts_on_rank=num_experts_per_node)
@@ -223,15 +229,14 @@ def test_prologue(m, n, k, e, topk, recipe):
     expand_input = workspace[ws_map["overlapped_gemm1_gemm2_inputs"][1]:
                             ws_map["overlapped_gemm1_gemm2_inputs"][1] +
                             permuted_data_size].view(hidden_states.dtype).view(num_moe_inputs, hidden_size)
+    expand_scales = workspace[ws_map["permuted_act_scales"][1]: ws_map["permuted_act_scales"][1] + permuted_act_scales_size].view(scale_dtype).view(num_moe_inputs, hidden_size//block_k)
 
     torch.testing.assert_close(ref_expert_offset.cpu(), expert_first_token_offset[1:1+ref_expert_offset.numel()].cpu(), rtol=0, atol=0)
-
-    # print(ref_expand_scales.shape)
-
-    if dtype is not torch.float4_e2m1fn_x2:
+    if data_dtype is not torch.float4_e2m1fn_x2:
         torch.testing.assert_close(ref_expand_input, expand_input, rtol=0, atol=0)
     else:
         torch.testing.assert_close(ref_expand_input.view(torch.uint8), expand_input.view(torch.uint8), rtol=0, atol=0)
+    torch.testing.assert_close(ref_expand_scales, expand_scales, rtol=0, atol=0)
 
 if __name__ == "__main__":
     test_prologue(m=100, n=512, k=1024, e=16, topk=2, recipe="bf16")
