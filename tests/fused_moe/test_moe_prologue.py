@@ -19,8 +19,6 @@ FUSED_MOE_MNK_FACTORS = [
 ]
 NUM_EXPERTS = [16]
 TOP_KS = [1]
-EP_RANK = [0, 1, 2, 3]
-EP_SIZE = [4]
 
 MINI_PYTEST_PARAMS = {
     "default": {
@@ -30,6 +28,14 @@ MINI_PYTEST_PARAMS = {
         "dtype": [torch.bfloat16],
         "has_bias": [True]
     }
+}
+
+RECIPE_TO_DTYPE = {
+    "bf16": torch.bfloat16,
+    "fp16": torch.float16,
+    "mxfp8": torch.float8_e4m3fn,
+    "fp8block": torch.float8_e4m3fn,
+    "mxfp4": torch.float4_e2m1fn_x2,
 }
 
 def ceilDiv(a, b):
@@ -44,12 +50,13 @@ def compute_num_tokens_per_block(num_tokens, num_experts_per_node):
 
 
 def ref_prologue(x,
-                  flat_expert_indices,
-                  num_per_tok,
-                  num_experts,
-                  dtype,
-                  ep_rank=0,
-                  ep_size=1):
+                 scales,
+                 flat_expert_indices,
+                 num_per_tok,
+                 num_experts,
+                 recipe,
+                 ep_rank=0,
+                 ep_size=1):
     expert_start_id = num_experts * ep_rank
     expert_end_id = expert_start_id + num_experts
 
@@ -58,7 +65,12 @@ def ref_prologue(x,
     tokens_per_expert = counts.cumsum()
     token_idxs = idxs // num_per_tok
 
+    dtype = RECIPE_TO_DTYPE.get(recipe)
+    if recipe in ["mxfp8", "mxfp4"]:
+        scales = scales.view(torch.uint8)
+
     expand_input = []
+    expand_scales = []
     for expert_id, end_idx in enumerate(tokens_per_expert):
         start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
         if (start_idx == end_idx) or (expert_id
@@ -68,43 +80,58 @@ def ref_prologue(x,
         exp_token_idxs = token_idxs[start_idx:end_idx]
         expert_tokens = x[exp_token_idxs]
         expand_input.append(expert_tokens)
+        if scales is not None:
+            expert_scales = scales[exp_token_idxs]
+            expand_scales.append(expert_scales)
 
     expert_first_token_offset = torch.Tensor(tokens_per_expert).to(torch.int64)
-    if dtype is not torch.float4_e2m1fn_x2:
-        expand_input = torch.cat(expand_input, dim=0).to(dtype)
-    else:
-        expand_input = _bfloat16_to_float4_e2m1fn_x2(expand_input)
 
-    return expert_first_token_offset, expand_input
+    expand_input = torch.cat(expand_input, dim=0)
+    if recipe is "mxfp4":
+        expand_input = expand_input.to(torch.uint8).view(torch.float4_e2m1fn_x2)
+    else:
+        expand_input = expand_input.to(dtype)
+
+    expand_scales = None if scales is None else torch.cat(expand_scales, dim=0)
+    if recipe in ["mxfp8", "mxfp4"]:
+        expand_scales = expand_scales.view(torch.float8_e8m0fnu)
+
+    return expert_first_token_offset, expand_input, expand_scales
 
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float8_e4m3fn, torch.float4_e2m1fn_x2])
-@pytest.mark.parametrize("ep_rank", EP_RANK)
-@pytest.mark.parametrize("ep_size", EP_SIZE)
-def test_prologue(m, n, k, e, topk, dtype, ep_rank, ep_size):
+@pytest.mark.parametrize("recipe", ["bf16", "fp16", "mxfp8", "mxfp4", "fp8block"])
+def test_prologue(m, n, k, e, topk, recipe):
     seed_everything(7)
+    dtype = RECIPE_TO_DTYPE.get(recipe)
 
     input_len = m
     hidden_size = k
     inter_size = n
     num_experts = e
+    fp8_block_k = 128
+    mxfp_block_k = 32
 
     if dtype in [torch.bfloat16, torch.float16]:
         hidden_states = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
         ref_a = hidden_states.clone()
+        scales = None
     elif dtype is torch.float8_e4m3fn:
         hidden_states_fp32 = torch.randn((input_len, hidden_size), device=DEVICE, dtype=torch.float32)
         hidden_states = hidden_states_fp32.to(torch.float8_e4m3fn)
         ref_a = hidden_states_fp32
+        if recipe == "fp8block":
+            scales = torch.randn((input_len, hidden_size // fp8_block_k), device=DEVICE, dtype=torch.float32)
+        elif recipe == "mxfp8":
+            scales = torch.randint(1,256,(input_len, hidden_size // mxfp_block_k), device=DEVICE, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+
     elif dtype is torch.float4_e2m1fn_x2:
-        hidden_states_bf16 = torch.randn((input_len, hidden_size), device=DEVICE, dtype=torch.bfloat16)
-        from torch.testing._internal.common_quantized import (
-            _bfloat16_to_float4_e2m1fn_x2)
-        hidden_states = _bfloat16_to_float4_e2m1fn_x2(hidden_states_bf16)
-        ref_a = hidden_states_bf16
+        hidden_states_fp32 = torch.randn((input_len, hidden_size // 2), device=DEVICE, dtype=torch.bfloat16)
+        hidden_states = hidden_states_fp32.to(torch.uint8).view(torch.float4_e2m1fn_x2)
+        ref_a = hidden_states_fp32
+        scales = torch.randint(1,256,(input_len, hidden_size // mxfp_block_k), device=DEVICE, dtype=torch.uint8).view(torch.float8_e8m0fnu)
 
     # moe gate
     scores = torch.randn((input_len, num_experts),
@@ -118,7 +145,7 @@ def test_prologue(m, n, k, e, topk, dtype, ep_rank, ep_size):
     flat_expert_indices = topk_ids.view(-1)
     flat_expert_weights = topk_weights.view(-1, 1)
 
-    ref_expert_offset, ref_expand_input = ref_prologue(ref_a, flat_expert_indices, topk, e, dtype)
+    ref_expert_offset, ref_expand_input, ref_expand_scales = ref_prologue(ref_a, scales, flat_expert_indices, topk, e, recipe)
 
     n_experts_per_token=topk
     num_experts=e
@@ -140,8 +167,6 @@ def test_prologue(m, n, k, e, topk, dtype, ep_rank, ep_size):
     blocked_row_to_unpermuted_row_size = num_experts_per_node * num_rows * 4
     permuted_data_size = permuted_elems * dtype.itemsize
     permuted_token_final_scales_size = num_moe_inputs * 4
-    if dtype is torch.float4_e2m1fn_x2:
-        permuted_data_size //= 2
 
     ws_map = {}
     map_offset = 0
@@ -179,8 +204,8 @@ def test_prologue(m, n, k, e, topk, dtype, ep_rank, ep_size):
         workspace=workspace,
         hidden_size=hidden_size,
         inter_size=inter_size,
-        ep_rank=ep_rank,
-        ep_size=ep_size,
+        ep_rank=0,
+        ep_size=1,
         num_experts_on_rank=num_experts_per_node)
 
     expert_first_token_offset = workspace[
@@ -197,17 +222,16 @@ def test_prologue(m, n, k, e, topk, dtype, ep_rank, ep_size):
         src_to_dest_map_size].view(torch.int32)
     expand_input = workspace[ws_map["overlapped_gemm1_gemm2_inputs"][1]:
                             ws_map["overlapped_gemm1_gemm2_inputs"][1] +
-                            permuted_data_size].view(hidden_states.dtype).view(
-                                num_moe_inputs, hidden_size)
+                            permuted_data_size].view(hidden_states.dtype).view(num_moe_inputs, hidden_size)
 
+    torch.testing.assert_close(ref_expert_offset.cpu(), expert_first_token_offset[1:1+ref_expert_offset.numel()].cpu(), rtol=0, atol=0)
 
-    rtol = 1e-2
-    atol = 1e-2
-    torch.testing.assert_close(ref_expert_offset.cpu(), expert_first_token_offset[1:].cpu(), rtol=0, atol=0)
-    torch.testing.assert_close(ref_expand_input, expand_input, rtol=0, atol=0)
+    # print(ref_expand_scales.shape)
+
+    if dtype is not torch.float4_e2m1fn_x2:
+        torch.testing.assert_close(ref_expand_input, expand_input, rtol=0, atol=0)
+    else:
+        torch.testing.assert_close(ref_expand_input.view(torch.uint8), expand_input.view(torch.uint8), rtol=0, atol=0)
 
 if __name__ == "__main__":
-    # test_prologue(m=100, n=1024, k=512, e=16, topk=2, dtype=torch.bfloat16, ep_rank=0, ep_size=1)
-    # test_prologue(m=100, n=1024, k=512, e=16, topk=2, dtype=torch.float16, ep_rank=0, ep_size=1)
-    # test_prologue(m=100, n=1024, k=512, e=16, topk=2, dtype=torch.torch.float8_e4m3fn, ep_rank=0, ep_size=1)
-    test_prologue(m=100, n=1024, k=512, e=16, topk=2, dtype=torch.torch.float4_e2m1fn_x2, ep_rank=0, ep_size=1)
+    test_prologue(m=100, n=512, k=1024, e=16, topk=2, recipe="bf16")

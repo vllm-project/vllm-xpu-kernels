@@ -20,9 +20,6 @@ void fused_moe_prologue_impl(
   auto const num_experts_total =
       static_cast<int>(num_experts_on_rank * ep_size);
   auto& stream = at::xpu::getCurrentXPUStream(input.device().index()).queue();
-  if constexpr(std::is_same_v<TA, at::Float4_e2m1fn_x2>){
-    hidden_size = hidden_size / 2;
-  }
 
   assert(token_selected_experts.dtype() == torch::kInt64);
   auto const* token_selected_experts_ =
