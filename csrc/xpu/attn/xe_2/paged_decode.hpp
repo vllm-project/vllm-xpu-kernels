@@ -369,9 +369,7 @@ struct PagedDecodeConfig {
   template <bool... Bs>
   static void
   kernel_dispatch(sycl::queue& queue, const paged_decode_args_t& args) {
-    // return run<cutlass::fmha::kernel::DecodeTileScheduler, Bs...>(
-    //     queue, args);
-    return run<cutlass::fmha::kernel::DecodeTileScheduler, false, false, true>(
+    return run<cutlass::fmha::kernel::DecodeTileScheduler, Bs...>(
         queue, args);
   }
 
@@ -532,13 +530,13 @@ void cutlass_paged_decode_impl(
           std::to_string(max_head_size));
 
   if (args.head_size == HEAD_SIZE_LIMIT_0) {
-    // decode_policy_dispatch<decode_policy_head64>(queue, cuType, args);
+    decode_policy_dispatch<decode_policy_head64>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_1) {
     decode_policy_dispatch<decode_policy_head128>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_2) {
-    // decode_policy_dispatch<decode_policy_head192>(queue, cuType, args);
+    decode_policy_dispatch<decode_policy_head192>(queue, cuType, args);
   } else if (args.head_size == HEAD_SIZE_LIMIT_3) {
-    // decode_policy_dispatch<decode_policy_head256>(queue, cuType, args);
+    decode_policy_dispatch<decode_policy_head256>(queue, cuType, args);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
   }

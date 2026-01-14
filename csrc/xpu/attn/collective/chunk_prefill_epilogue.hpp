@@ -520,54 +520,7 @@ public:
     auto [rA, rA_max, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
 
     int thr_id_sg = thr_id % intel::sg_size;
-    // if constexpr (Sink) {
-    //   constexpr double kLog2e = 1.4426950408889634074;
-    //   if (idx_kv_split == 0 && thr_id_sg < head_group_q) {
-    //     rA_sum(0) += sycl::native::exp2(static_cast<ElementA>(tSink(thr_id_sg) * kLog2e) - rA_max(0));
-    //   }
-    // }
     
-    if (cute::thread(0, 0)) {
-      cute::print("0, 0 tArA: "); cute::print(tArA); cute::print("\n");
-      cute::print("0, 0 tA_sum: "); cute::print(tA_sum); cute::print("\n");
-      cute::print("0, 0 rA: "); cute::print(rA); cute::print("\n");
-      cute::print("0, 0 rA_max: "); cute::print_tensor(rA_max); cute::print("\n");
-      cute::print("0, 0 rA_sum: "); cute::print_tensor(rA_sum); cute::print("\n");
-    }
-    ep_barrier();
-    if (cute::thread(1, 0)) {
-      cute::print("1, 0 tArA: "); cute::print(tArA); cute::print("\n");
-      cute::print("1, 0 tA_sum: "); cute::print(tA_sum); cute::print("\n");
-      cute::print("1, 0 rA: "); cute::print(rA); cute::print("\n");
-      cute::print("1, 0 rA_max: "); cute::print_tensor(rA_max); cute::print("\n");
-      cute::print("1, 0 rA_sum: "); cute::print_tensor(rA_sum); cute::print("\n");
-    }
-    ep_barrier();
-    if (cute::thread(4, 0)) {
-      cute::print("4, 0 tArA: "); cute::print(tArA); cute::print("\n");
-      cute::print("4, 0 tA_sum: "); cute::print(tA_sum); cute::print("\n");
-      cute::print("4, 0 rA: "); cute::print(rA); cute::print("\n");
-      cute::print("4, 0 rA_max: "); cute::print_tensor(rA_max); cute::print("\n");
-      cute::print("4, 0 rA_sum: "); cute::print_tensor(rA_sum); cute::print("\n");
-    }
-    ep_barrier();
-    if (cute::thread(8, 0)) {
-      cute::print("8, 0 tArA: "); cute::print(tArA); cute::print("\n");
-      cute::print("8, 0 tA_sum: "); cute::print(tA_sum); cute::print("\n");
-      cute::print("8, 0 rA: "); cute::print(rA); cute::print("\n");
-      cute::print("8, 0 rA_max: "); cute::print_tensor(rA_max); cute::print("\n");
-      cute::print("8, 0 rA_sum: "); cute::print_tensor(rA_sum); cute::print("\n");
-    }
-    ep_barrier();
-    if (cute::thread(16, 0)) {
-      cute::print("16, 0 tArA: "); cute::print(tArA); cute::print("\n");
-      cute::print("16, 0 tA_sum: "); cute::print(tA_sum); cute::print("\n");
-      cute::print("16, 0 rA: "); cute::print(rA); cute::print("\n");
-      cute::print("16, 0 rA_max: "); cute::print_tensor(rA_max); cute::print("\n");
-      cute::print("16, 0 rA_sum: "); cute::print_tensor(rA_sum); cute::print("\n");
-    }
-    ep_barrier();
-
     // store exp sum and max logits for current KV split
     // assume seq_len_qo == 1
     if (thr_id < head_group_q) {
@@ -589,13 +542,6 @@ public:
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < rA.size(); i++) {
       rA(i) *= broadcast<0>(rA_sum, rA, i);
-      if (cute::thread(16, 0)) {
-        cute::print("16, 0 broadcast rA_sum: "); cute::print(broadcast<0>(rA_sum, rA, i)); cute::print("\n");
-      }
-      ep_barrier();
-      if (cute::thread(8, 0)) {
-        cute::print("8, 0 broadcast rA_sum: "); cute::print(broadcast<0>(rA_sum, rA, i)); cute::print("\n");
-      }
     }
 
     /* Tile output */
@@ -654,18 +600,7 @@ public:
       auto sA     = make_tensor(make_smem_ptr<ElementA>(&shared.a_data),     sA_layout);      // (q,v,rblk_dst,rblk_src,a_tile)
       auto sA_max = make_tensor(make_smem_ptr<ElementA>(&shared.a_max_data), sA_row_layout);  // (q,rblk_dst,rblk_src,a_tile)
       auto sA_sum = make_tensor(make_smem_ptr<ElementA>(&shared.a_sum_data), sA_row_layout);  // (q,rblk_dst,rblk_src,a_tile)
-                                                                                              //
 
-      if (cute::thread(0, 0)) {
-        cute::print("thr_vak: "); cute::print(thr_vak); cute::print("\n");
-        cute::print("shape_A_row: "); cute::print(shape_A_row); cute::print("\n");
-        cute::print("sA_layout: "); cute::print(sA_layout); cute::print("\n");
-        cute::print("sA_row_layout: "); cute::print(sA_row_layout); cute::print("\n");
-        cute::print("ReduceK: "); cute::print(ReduceK{}); cute::print("\n");
-        cute::print("SGTileShapeO: "); cute::print(SGTileShapeO{}); cute::print("\n");
-        cute::print("ReduceFragA: "); cute::print(ReduceFragA{}); cute::print("\n");
-        cute::print("ReduceFragARow: "); cute::print(ReduceFragARow{}); cute::print("\n");
-      }
       /* Write my contributions to SLM. */
       copy_block_r2s(tA_max, sA_max(_,_,k_blk,a_tile));
       barrier_arrive(ScopeWorkgroup, SemanticsRelease | SemanticsWGMemory);
