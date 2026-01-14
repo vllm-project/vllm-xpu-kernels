@@ -655,7 +655,7 @@ void expandInputRowsKernelLauncher(
   stream.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<3>(grid * block, block),
-        ExpandInputRowsKernel<bfloat16, bfloat16>(
+        ExpandInputRowsKernel<InputActivationsType, ExpandedActivationsType>(
             unpermuted_input,
             permuted_output,
             unpermuted_scales,

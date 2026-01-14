@@ -47,6 +47,7 @@ def ref_prologue(x,
                   flat_expert_indices,
                   num_per_tok,
                   num_experts,
+                  dtype,
                   ep_rank=0,
                   ep_size=1):
     expert_start_id = num_experts * ep_rank
@@ -69,7 +70,10 @@ def ref_prologue(x,
         expand_input.append(expert_tokens)
 
     expert_first_token_offset = torch.Tensor(tokens_per_expert).to(torch.int64)
-    expand_input = torch.cat(expand_input, dim=0)
+    if dtype is not torch.float4_e2m1fn_x2:
+        expand_input = torch.cat(expand_input, dim=0).to(dtype)
+    else:
+        expand_input = _bfloat16_to_float4_e2m1fn_x2(expand_input)
 
     return expert_first_token_offset, expand_input
 
@@ -77,7 +81,7 @@ def ref_prologue(x,
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float8_e4m3fn, torch.float4_e2m1fn_x2])
 @pytest.mark.parametrize("ep_rank", EP_RANK)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 def test_prologue(m, n, k, e, topk, dtype, ep_rank, ep_size):
@@ -88,8 +92,19 @@ def test_prologue(m, n, k, e, topk, dtype, ep_rank, ep_size):
     inter_size = n
     num_experts = e
 
-    hidden_states = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
-    ref_a = hidden_states.clone()
+    if dtype in [torch.bfloat16, torch.float16]:
+        hidden_states = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
+        ref_a = hidden_states.clone()
+    elif dtype is torch.float8_e4m3fn:
+        hidden_states_fp32 = torch.randn((input_len, hidden_size), device=DEVICE, dtype=torch.float32)
+        hidden_states = hidden_states_fp32.to(torch.float8_e4m3fn)
+        ref_a = hidden_states_fp32
+    elif dtype is torch.float4_e2m1fn_x2:
+        hidden_states_bf16 = torch.randn((input_len, hidden_size), device=DEVICE, dtype=torch.bfloat16)
+        from torch.testing._internal.common_quantized import (
+            _bfloat16_to_float4_e2m1fn_x2)
+        hidden_states = _bfloat16_to_float4_e2m1fn_x2(hidden_states_bf16)
+        ref_a = hidden_states_bf16
 
     # moe gate
     scores = torch.randn((input_len, num_experts),
@@ -103,7 +118,7 @@ def test_prologue(m, n, k, e, topk, dtype, ep_rank, ep_size):
     flat_expert_indices = topk_ids.view(-1)
     flat_expert_weights = topk_weights.view(-1, 1)
 
-    ref_expert_offset, ref_expand_input = ref_prologue(ref_a, flat_expert_indices, topk, e)
+    ref_expert_offset, ref_expand_input = ref_prologue(ref_a, flat_expert_indices, topk, e, dtype)
 
     n_experts_per_token=topk
     num_experts=e
@@ -123,8 +138,10 @@ def test_prologue(m, n, k, e, topk, dtype, ep_rank, ep_size):
     blocked_expert_counts_size = num_experts_per_node * num_blocks_per_seq * 4
     blocked_expert_counts_cumsum_size = blocked_expert_counts_size
     blocked_row_to_unpermuted_row_size = num_experts_per_node * num_rows * 4
-    permuted_data_size = permuted_elems * 2
+    permuted_data_size = permuted_elems * dtype.itemsize
     permuted_token_final_scales_size = num_moe_inputs * 4
+    if dtype is torch.float4_e2m1fn_x2:
+        permuted_data_size //= 2
 
     ws_map = {}
     map_offset = 0
@@ -192,4 +209,5 @@ def test_prologue(m, n, k, e, topk, dtype, ep_rank, ep_size):
 if __name__ == "__main__":
     # test_prologue(m=100, n=1024, k=512, e=16, topk=2, dtype=torch.bfloat16, ep_rank=0, ep_size=1)
     # test_prologue(m=100, n=1024, k=512, e=16, topk=2, dtype=torch.float16, ep_rank=0, ep_size=1)
-    test_prologue(m=100, n=1024, k=512, e=16, topk=2, dtype=torch.torch.float8_e4m3, ep_rank=0, ep_size=1)
+    # test_prologue(m=100, n=1024, k=512, e=16, topk=2, dtype=torch.torch.float8_e4m3fn, ep_rank=0, ep_size=1)
+    test_prologue(m=100, n=1024, k=512, e=16, topk=2, dtype=torch.torch.float4_e2m1fn_x2, ep_rank=0, ep_size=1)
