@@ -46,11 +46,6 @@
 
 namespace cutlass::fmha::collective {
 
-static inline void ep_barrier() {
-  asm volatile("lsc_fence.ugm.none.group\n");
-  asm volatile("barrier\n");
-}
-
 using namespace cute;
 
 template <

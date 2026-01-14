@@ -62,7 +62,7 @@ struct chunk_policy_head256 {
   using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };
 
-// define marco for decode policy
+// define macro for decode policy
 #define DECODE_NUM_SG _4
 #define DECODE_KV_TILE _64 // KV tile size is set to 64 for page size is 64
 #define DECODE_Q_PACKED_TILE _8
