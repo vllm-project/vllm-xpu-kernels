@@ -69,7 +69,12 @@ void fused_moe_prologue_impl(
   size_t const blocked_row_to_unpermuted_row_size =
       num_experts_per_node * num_rows * sizeof(int);
   size_t const permuted_data_size = permuted_elems * dtype_size;
-  size_t const permuted_act_scales_size = permuted_act_scales_elems * act_scales_dtype_size;
+  size_t permuted_act_scales_size;
+  if constexpr (std::is_same_v<TB, NoScale>) {
+    permuted_act_scales_size = 0;
+  } else {
+    permuted_act_scales_size = permuted_act_scales_elems * act_scales_dtype_size;
+  }
   size_t const permuted_token_final_scales_size =
       num_moe_inputs * sizeof(float);
 
@@ -114,7 +119,12 @@ void fused_moe_prologue_impl(
   auto blocked_row_to_unpermuted_row_ =
       getWsPtr(int{}, "blocked_row_to_unpermuted_row");
   auto permuted_data_ = getWsPtr(TA{}, "overlapped_gemm1_gemm2_inputs");
-  auto permuted_act_scales_ = getWsPtr(TB{}, "permuted_act_scales");
+  TB* permuted_act_scales_;
+  if constexpr(std::is_same_v<TB, NoScale>){
+    permuted_act_scales_ = nullptr;
+  } else {
+    permuted_act_scales_ = getWsPtr(TB{}, "permuted_act_scales");
+  }
   auto permuted_token_final_scales_ =
       getWsPtr(float{}, "permuted_token_final_scales");
   bool use_per_expert_act_scale = false;
@@ -181,19 +191,13 @@ void fused_moe_prologue(
   } else if (input_type == at::kHalf) {
     call_impl(at::Half{}, NoScale{});
   } else if (input_type == at::kFloat8_e4m3fn){
-    if(!input_scales){
-      call_impl(at::Float8_e4m3fn{}, NoScale{});
-    } else if(input_scales->dtype() == at::kFloat){
+    if(input_scales->dtype() == at::kFloat){
       call_impl(at::Float8_e4m3fn{}, float{});
     } else if (input_scales->dtype() == at::kFloat8_e8m0fnu){
       call_impl(at::Float8_e4m3fn{}, at::Float8_e8m0fnu{});
     }
-  } else if (input_type == at::kFloat4_e2m1fn_x2){
-    if(!input_scales){
-      call_impl(at::Float4_e2m1fn_x2{}, NoScale{});
-    } else if (input_scales->dtype() == at::kFloat8_e8m0fnu){
+  } else if (input_type == at::kFloat4_e2m1fn_x2 && input_scales->dtype() == at::kFloat8_e8m0fnu){
       call_impl(at::Float4_e2m1fn_x2{}, at::Float8_e8m0fnu{});
-    }
   }
 }
 

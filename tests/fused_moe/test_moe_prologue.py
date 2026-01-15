@@ -18,7 +18,7 @@ FUSED_MOE_MNK_FACTORS = [
     (8192, 5120, 8192),
 ]
 NUM_EXPERTS = [16]
-TOP_KS = [1]
+TOP_KS = [1, 2]
 
 MINI_PYTEST_PARAMS = {
     "default": {
@@ -109,7 +109,7 @@ def test_prologue(m, n, k, e, topk, recipe):
     hidden_size = k
     inter_size = n
     num_experts = e
-    block_k = 0
+    block_k = 1
 
     if data_dtype in [torch.bfloat16, torch.float16]:
         hidden_states = torch.randn((input_len, hidden_size), device=DEVICE, dtype=data_dtype) / 16
@@ -130,7 +130,7 @@ def test_prologue(m, n, k, e, topk, recipe):
         hidden_states_fp32 = torch.randn((input_len, hidden_size // 2), device=DEVICE, dtype=torch.bfloat16)
         hidden_states = hidden_states_fp32.to(torch.uint8).view(torch.float4_e2m1fn_x2)
         ref_a = hidden_states_fp32
-        scales = torch.randint(1,256,(input_len, hidden_size // block_k), device=DEVICE, dtype=torch.uint8).view(torch.float8_e8m0fnu)
+        scales = torch.randint(1,256,(input_len, hidden_size // 2 // block_k), device=DEVICE, dtype=torch.uint8).view(torch.float8_e8m0fnu)
 
     # moe gate
     scores = torch.randn((input_len, num_experts),
@@ -153,7 +153,6 @@ def test_prologue(m, n, k, e, topk, recipe):
     experts_per_token = n_experts_per_token
     num_moe_inputs = n_experts_per_token * num_rows
     permuted_elems = num_moe_inputs * hidden_size
-    # interbuf_elems = num_moe_inputs * inter_size
     permuted_row_to_unpermuted_row_size = num_moe_inputs * 4
     permuted_token_selected_experts_size = num_moe_inputs * 4
     src_to_dest_map_size = experts_per_token * num_rows * 4
@@ -164,7 +163,7 @@ def test_prologue(m, n, k, e, topk, recipe):
     blocked_expert_counts_size = num_experts_per_node * num_blocks_per_seq * 4
     blocked_expert_counts_cumsum_size = blocked_expert_counts_size
     blocked_row_to_unpermuted_row_size = num_experts_per_node * num_rows * 4
-    permuted_data_size = permuted_elems * data_dtype.itemsize if scales is not None else 0
+    permuted_data_size = permuted_elems * data_dtype.itemsize
     permuted_act_scales_size = (permuted_elems // block_k) * scale_dtype.itemsize if scales is not None else 0
     permuted_token_final_scales_size = num_moe_inputs * 4
 
@@ -227,9 +226,10 @@ def test_prologue(m, n, k, e, topk, recipe):
                             ws_map["overlapped_gemm1_gemm2_inputs"][1] +
                             permuted_data_size].view(hidden_states.dtype).view(num_moe_inputs, hidden_size)
     expand_scales = workspace[ws_map["permuted_act_scales"][1]: ws_map["permuted_act_scales"][1] + permuted_act_scales_size]
-    if scale_dtype == torch.float32:
-        expand_scales = expand_scales.view(torch.float32)
-    expand_scales = expand_scales.view(num_moe_inputs, hidden_size//block_k)
+    if scales is not None:
+        if scale_dtype == torch.float32:
+            expand_scales = expand_scales.view(torch.float32)
+        expand_scales = expand_scales.view(num_moe_inputs, hidden_size//block_k)
 
     torch.testing.assert_close(ref_expert_offset.cpu(), expert_first_token_offset[1:1+ref_expert_offset.numel()].cpu(), rtol=0, atol=0)
     if data_dtype is not torch.float4_e2m1fn_x2:
@@ -240,4 +240,4 @@ def test_prologue(m, n, k, e, topk, recipe):
         torch.testing.assert_close(ref_expand_scales, expand_scales, rtol=0, atol=0)
 
 if __name__ == "__main__":
-    test_prologue(m=100, n=512, k=1024, e=16, topk=2, recipe="fp8block")
+    test_prologue(m=100, n=512, k=1024, e=16, topk=2, recipe="bf16")
