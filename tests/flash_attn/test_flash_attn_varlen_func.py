@@ -327,9 +327,6 @@ def test_decode_with_paged_kv(
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
                                                            dtype=torch.int32)
-    cu_kv_lens = torch.tensor([0] + kv_lens,
-                              dtype=torch.int32).cumsum(dim=0,
-                                                        dtype=torch.int32)
 
     seq_k = torch.tensor(kv_lens, dtype=torch.int32)
 
