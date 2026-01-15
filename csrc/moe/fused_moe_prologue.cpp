@@ -2,8 +2,7 @@
 #include "utils.h"
 #include "fused_moe_prologue.hpp"
 
-
-template<typename TA, typename TB>
+template <typename TA, typename TB>
 void fused_moe_prologue_impl(
     torch::Tensor input,
     const c10::optional<torch::Tensor>& input_scales,
@@ -27,12 +26,12 @@ void fused_moe_prologue_impl(
   assert(token_selected_experts.dtype() == torch::kInt64);
   auto const* token_selected_experts_ =
       reinterpret_cast<int64_t const*>(token_selected_experts.data_ptr());
-  auto const* input_activations =
-      reinterpret_cast<TA const*>(input.data_ptr());
-  
+  auto const* input_activations = reinterpret_cast<TA const*>(input.data_ptr());
+
   TB const* input_activation_scales;
-  if constexpr (!std::is_same_v<TB, NoScale>){
-    input_activation_scales = reinterpret_cast<TB const*>(input_scales->data_ptr());
+  if constexpr (!std::is_same_v<TB, NoScale>) {
+    input_activation_scales =
+        reinterpret_cast<TB const*>(input_scales->data_ptr());
   }
 
   auto const* token_topk_unpermuted_scales =
@@ -47,7 +46,8 @@ void fused_moe_prologue_impl(
   size_t num_moe_inputs = experts_per_token * num_rows;
   size_t const permuted_elems = num_moe_inputs * hidden_size;
   size_t const interbuf_elems = num_moe_inputs * inter_size;
-  size_t const permuted_act_scales_elems = num_moe_inputs * hidden_size / block_k;
+  size_t const permuted_act_scales_elems =
+      num_moe_inputs * hidden_size / block_k;
 
   constexpr int dtype_size = sizeof(TA);
   constexpr int act_scales_dtype_size = sizeof(TB);
@@ -73,7 +73,8 @@ void fused_moe_prologue_impl(
   if constexpr (std::is_same_v<TB, NoScale>) {
     permuted_act_scales_size = 0;
   } else {
-    permuted_act_scales_size = permuted_act_scales_elems * act_scales_dtype_size;
+    permuted_act_scales_size =
+        permuted_act_scales_elems * act_scales_dtype_size;
   }
   size_t const permuted_token_final_scales_size =
       num_moe_inputs * sizeof(float);
@@ -120,7 +121,7 @@ void fused_moe_prologue_impl(
       getWsPtr(int{}, "blocked_row_to_unpermuted_row");
   auto permuted_data_ = getWsPtr(TA{}, "overlapped_gemm1_gemm2_inputs");
   TB* permuted_act_scales_;
-  if constexpr(std::is_same_v<TB, NoScale>){
+  if constexpr (std::is_same_v<TB, NoScale>) {
     permuted_act_scales_ = nullptr;
   } else {
     permuted_act_scales_ = getWsPtr(TB{}, "permuted_act_scales");
@@ -145,8 +146,8 @@ void fused_moe_prologue_impl(
       start_expert,
       stream);
 
-  TA * input_expand = reinterpret_cast<TA *>(permuted_data_);
-  TB * input_scales_expand = reinterpret_cast<TB *>(permuted_act_scales_); 
+  TA* input_expand = reinterpret_cast<TA*>(permuted_data_);
+  TB* input_scales_expand = reinterpret_cast<TB*>(permuted_act_scales_);
   expandInputRowsKernelLauncher(
       input_activations,
       input_expand,
@@ -179,26 +180,37 @@ void fused_moe_prologue(
     int64_t ep_size,
     int64_t num_experts_on_rank) {
   auto input_type = input.dtype();
-  
+
   auto call_impl = [&](auto data_type, auto scale_type) {
     using TA = decltype(data_type);
     using TS = decltype(scale_type);
-    fused_moe_prologue_impl<TA, TS>(input, input_scales, token_selected_experts, token_final_scales, workspace, hidden_size, inter_size, block_k, ep_rank, ep_size, num_experts_on_rank);
+    fused_moe_prologue_impl<TA, TS>(
+        input,
+        input_scales,
+        token_selected_experts,
+        token_final_scales,
+        workspace,
+        hidden_size,
+        inter_size,
+        block_k,
+        ep_rank,
+        ep_size,
+        num_experts_on_rank);
   };
 
-  if (input_type == at::kBFloat16){
+  if (input_type == at::kBFloat16) {
     call_impl(at::BFloat16{}, NoScale{});
   } else if (input_type == at::kHalf) {
     call_impl(at::Half{}, NoScale{});
-  } else if (input_type == at::kFloat8_e4m3fn){
-    if(input_scales->dtype() == at::kFloat){
+  } else if (input_type == at::kFloat8_e4m3fn) {
+    if (input_scales->dtype() == at::kFloat) {
       call_impl(at::Float8_e4m3fn{}, float{});
-    } else if (input_scales->dtype() == at::kFloat8_e8m0fnu){
+    } else if (input_scales->dtype() == at::kFloat8_e8m0fnu) {
       call_impl(at::Float8_e4m3fn{}, at::Float8_e8m0fnu{});
     }
-  } else if (input_type == at::kFloat4_e2m1fn_x2 && input_scales->dtype() == at::kFloat8_e8m0fnu){
-      call_impl(at::Float4_e2m1fn_x2{}, at::Float8_e8m0fnu{});
+  } else if (
+      input_type == at::kFloat4_e2m1fn_x2 &&
+      input_scales->dtype() == at::kFloat8_e8m0fnu) {
+    call_impl(at::Float4_e2m1fn_x2{}, at::Float8_e8m0fnu{});
   }
 }
-
-

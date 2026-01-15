@@ -554,7 +554,10 @@ void threeStepBuildExpertMapsSortFirstToken(
       stream);
 }
 
-template <class InputActivationsType, class ExpandedActivationsType, class ActivationsScaleType>
+template <
+    class InputActivationsType,
+    class ExpandedActivationsType,
+    class ActivationsScaleType>
 class ExpandInputRowsKernel {
  public:
   ExpandInputRowsKernel(
@@ -615,20 +618,24 @@ class ExpandInputRowsKernel {
            elem_index += stride) {
         dest_row_ptr[elem_index] = source_row_ptr[elem_index];
       }
-      
+
       if constexpr (!std::is_same_v<ActivationsScaleType, NoScale>) {
-        auto const* source_row_ptr_scale = unpermuted_input_scales + source_row * int(hidden_size / block_k); 
-        auto* dest_row_ptr_scale = permuted_input_scales + permuted_row * int(hidden_size / block_k);
-        for(int elem_index = start_offset; elem_index < num_elems_in_col / block_k; elem_index += stride){
+        auto const* source_row_ptr_scale =
+            unpermuted_input_scales + source_row * int(hidden_size / block_k);
+        auto* dest_row_ptr_scale =
+            permuted_input_scales + permuted_row * int(hidden_size / block_k);
+        for (int elem_index = start_offset;
+             elem_index < num_elems_in_col / block_k;
+             elem_index += stride) {
           dest_row_ptr_scale[elem_index] = source_row_ptr_scale[elem_index];
         }
       }
-      
 
       if (permuted_token_scales && item.get_local_id(2) == 0) {
         int64_t const source_k_idx = source_row * k + source_k_rank;
         permuted_token_scales[permuted_row] =
-            unpermuted_token_scales ? unpermuted_token_scales[source_k_idx] : 1.0f;
+            unpermuted_token_scales ? unpermuted_token_scales[source_k_idx]
+                                    : 1.0f;
       }
     }
   }
@@ -651,7 +658,10 @@ class ExpandInputRowsKernel {
   InputActivationsType const* prequant_scales;
 };
 
-template <class InputActivationsType, class ExpandedActivationsType, class ActivationsScaleType>
+template <
+    class InputActivationsType,
+    class ExpandedActivationsType,
+    class ActivationsScaleType>
 void expandInputRowsKernelLauncher(
     InputActivationsType const* unpermuted_input,
     ExpandedActivationsType* permuted_input,
@@ -678,7 +688,10 @@ void expandInputRowsKernelLauncher(
   stream.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<3>(grid * block, block),
-        ExpandInputRowsKernel<InputActivationsType, ExpandedActivationsType, ActivationsScaleType >(
+        ExpandInputRowsKernel<
+            InputActivationsType,
+            ExpandedActivationsType,
+            ActivationsScaleType>(
             unpermuted_input,
             permuted_input,
             unpermuted_input_scales,

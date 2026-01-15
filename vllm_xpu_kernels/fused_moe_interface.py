@@ -128,15 +128,15 @@ def xpu_fused_moe(hidden_states,
     '''
     hidden_states: [num_rows, hidden_size]
     w13: [num_experts, 2*inter_size, hidden_size]
-    w13_scales: 
-        None for bf16/fp16 
-        or [num_experts] for fp8 
+    w13_scales:
+        None for bf16/fp16
+        or [num_experts] for fp8
         or [num_experts, 2*inter_size, hidden_size // group_size] for 4bits
     w13_bias: [num_experts, 2*inter_size] or None
     w2: [num_experts, hidden_size, inter_size]
     w2_scales:
-        None for bf16/fp16 
-        or [num_experts] for fp8 
+        None for bf16/fp16
+        or [num_experts] for fp8
         or [num_experts, hidden_size, inter_size // group_size] for 4bits
     w2_bias: [num_experts, hidden_size] or None
     topk_weights: [num_rows, topk]
@@ -227,11 +227,13 @@ def xpu_fused_moe(hidden_states,
         topk_ids = topk_ids.to(torch.int64)
     torch.ops._moe_C.fused_moe_prologue(
         input=hidden_states,
+        input_scales=None,
         token_selected_experts=topk_ids,
         token_final_scales=topk_weights,
         workspace=workspace,
         hidden_size=hidden_size,
         inter_size=inter_size,
+        block_k=1,
         ep_rank=ep_rank,
         ep_size=ep_size,
         num_experts_on_rank=num_experts_per_node)
