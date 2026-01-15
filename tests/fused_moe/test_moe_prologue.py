@@ -88,14 +88,11 @@ def ref_prologue(x,
     expert_first_token_offset = torch.Tensor(tokens_per_expert).to(torch.int64)
 
     expand_input = torch.cat(expand_input, dim=0)
-    if recipe is "mxfp4":
+    if recipe == "mxfp4":
         expand_input = expand_input.to(torch.uint8).view(torch.float4_e2m1fn_x2)
     else:
         expand_input = expand_input.to(data_dtype)
-
     expand_scales = None if scales is None else torch.cat(expand_scales, dim=0)
-    if recipe in ["mxfp8", "mxfp4"]:
-        expand_scales = expand_scales.view(torch.float8_e8m0fnu)
 
     return expert_first_token_offset, expand_input, expand_scales
 
@@ -126,10 +123,10 @@ def test_prologue(m, n, k, e, topk, recipe):
             block_k = 128
             scales = torch.randn((input_len, hidden_size // block_k), device=DEVICE, dtype=torch.float32)
         elif recipe == "mxfp8":
-            block_k = 16 # two input elem in a 8bit
+            block_k = 32
             scales = torch.randint(1,256,(input_len, hidden_size // block_k), device=DEVICE, dtype=torch.uint8).view(torch.float8_e8m0fnu)
     elif data_dtype is torch.float4_e2m1fn_x2:
-        block_k = 32
+        block_k = 16  # two input elem in a 8bit
         hidden_states_fp32 = torch.randn((input_len, hidden_size // 2), device=DEVICE, dtype=torch.bfloat16)
         hidden_states = hidden_states_fp32.to(torch.uint8).view(torch.float4_e2m1fn_x2)
         ref_a = hidden_states_fp32
@@ -168,7 +165,7 @@ def test_prologue(m, n, k, e, topk, recipe):
     blocked_expert_counts_cumsum_size = blocked_expert_counts_size
     blocked_row_to_unpermuted_row_size = num_experts_per_node * num_rows * 4
     permuted_data_size = permuted_elems * data_dtype.itemsize if scales is not None else 0
-    permuted_act_scales_size = (permuted_elems // block_k) * scale_dtype.itemsize
+    permuted_act_scales_size = (permuted_elems // block_k) * scale_dtype.itemsize if scales is not None else 0
     permuted_token_final_scales_size = num_moe_inputs * 4
 
     ws_map = {}
@@ -229,14 +226,15 @@ def test_prologue(m, n, k, e, topk, recipe):
     expand_input = workspace[ws_map["overlapped_gemm1_gemm2_inputs"][1]:
                             ws_map["overlapped_gemm1_gemm2_inputs"][1] +
                             permuted_data_size].view(hidden_states.dtype).view(num_moe_inputs, hidden_size)
-    expand_scales = workspace[ws_map["permuted_act_scales"][1]: ws_map["permuted_act_scales"][1] + permuted_act_scales_size].view(scale_dtype).view(num_moe_inputs, hidden_size//block_k)
+    expand_scales = workspace[ws_map["permuted_act_scales"][1]: ws_map["permuted_act_scales"][1] + permuted_act_scales_size].view(num_moe_inputs, hidden_size//block_k)
 
     torch.testing.assert_close(ref_expert_offset.cpu(), expert_first_token_offset[1:1+ref_expert_offset.numel()].cpu(), rtol=0, atol=0)
     if data_dtype is not torch.float4_e2m1fn_x2:
         torch.testing.assert_close(ref_expand_input, expand_input, rtol=0, atol=0)
     else:
         torch.testing.assert_close(ref_expand_input.view(torch.uint8), expand_input.view(torch.uint8), rtol=0, atol=0)
-    torch.testing.assert_close(ref_expand_scales, expand_scales, rtol=0, atol=0)
+    if scales is not None:
+        torch.testing.assert_close(ref_expand_scales, expand_scales, rtol=0, atol=0)
 
 if __name__ == "__main__":
-    test_prologue(m=100, n=512, k=1024, e=16, topk=2, recipe="bf16")
+    test_prologue(m=100, n=512, k=1024, e=16, topk=2, recipe="mxfp8")

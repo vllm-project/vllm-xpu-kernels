@@ -114,7 +114,7 @@ void fused_moe_prologue_impl(
   auto blocked_row_to_unpermuted_row_ =
       getWsPtr(int{}, "blocked_row_to_unpermuted_row");
   auto permuted_data_ = getWsPtr(TA{}, "overlapped_gemm1_gemm2_inputs");
-  auto permuted_act_scales_ = getWsPtr(TB{}, "permuted_scales");
+  auto permuted_act_scales_ = getWsPtr(TB{}, "permuted_act_scales");
   auto permuted_token_final_scales_ =
       getWsPtr(float{}, "permuted_token_final_scales");
   bool use_per_expert_act_scale = false;
