@@ -89,9 +89,7 @@ struct XeFHMAIndividualTileScheduler {
   }
 };
 
-
 struct DecodeTileScheduler {
-
   struct Params {
     dim3 grid;
     FastDivmod divmod_num_heads;
@@ -107,14 +105,16 @@ struct DecodeTileScheduler {
 
   template <class ProblemShape, class TileShape>
   static Params to_underlying_arguments(
-      ProblemShape const& shape, KernelHardwareInfo hw_info,
-      TileShape const& tile_shape, const int &num_kv_splits = -1)
-  {
+      ProblemShape const& shape,
+      KernelHardwareInfo hw_info,
+      TileShape const& tile_shape,
+      const int& num_kv_splits = -1) {
     using namespace cute;
 
-    dim3 grid(size(ceil_div(shape.head_size_vo, get<1>(tile_shape))),     // V
-              size(ceil_div(shape.seq_len_qo,   get<0>(tile_shape))),     // Q
-              size(shape.batch * shape.num_heads_q));                  // (h,b) -- split later
+    dim3 grid(
+        size(ceil_div(shape.head_size_vo, get<1>(tile_shape))),  // V
+        size(ceil_div(shape.seq_len_qo, get<0>(tile_shape))),    // Q
+        size(shape.batch * shape.num_heads_q));  // (h,b) -- split later
     int num_head = shape.num_heads_q;
     if (num_kv_splits >= 1) {
       // for splitKV, each wg handles group query heads
@@ -131,9 +131,7 @@ struct DecodeTileScheduler {
   }
 
   CUTLASS_DEVICE
-  bool is_valid() {
-    return valid_;
-  }
+  bool is_valid() { return valid_; }
 
   CUTLASS_DEVICE
   auto get_block_coord() {
@@ -159,9 +157,7 @@ struct DecodeTileScheduler {
   }
 };
 
-
 struct XeReduceSplitKTileScheduler {
-
   struct Params {
     dim3 grid;
     FastDivmod divmod_num_heads;
@@ -176,9 +172,10 @@ struct XeReduceSplitKTileScheduler {
 
   template <class ProblemShape, class TileShape>
   static Params to_underlying_arguments(
-      ProblemShape const& shape, KernelHardwareInfo hw_info,
-      TileShape const& tile_shape, const int &num_kv_splits = -1)
-  {
+      ProblemShape const& shape,
+      KernelHardwareInfo hw_info,
+      TileShape const& tile_shape,
+      const int& num_kv_splits = -1) {
     using namespace cute;
 
     dim3 grid(shape.seq_len_qo, shape.num_heads_q, shape.batch);
@@ -191,9 +188,7 @@ struct XeReduceSplitKTileScheduler {
   }
 
   CUTLASS_DEVICE
-  bool is_valid() {
-    return valid_;
-  }
+  bool is_valid() { return valid_; }
 
   CUTLASS_DEVICE
   auto get_block_coord() {
@@ -208,6 +203,5 @@ struct XeReduceSplitKTileScheduler {
     return *this;
   }
 };
-
 
 }  // namespace cutlass::fmha::kernel

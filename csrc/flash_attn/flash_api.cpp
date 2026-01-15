@@ -93,11 +93,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
   bool is_varlen = true;
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
-    
-  if (max_seqlen_q > 1 || 
-      is_local ||
-      !is_paged ||
-      is_causal) {
+
+  if (max_seqlen_q > 1 || is_local || !is_paged || is_causal) {
     at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
 
     cutlass_chunk_prefill_interface(
@@ -124,14 +121,14 @@ std::vector<at::Tensor> mha_varlen_fwd(
     constexpr int partition_size = 512;
     int num_kv_splits = (max_seqlen_k + partition_size - 1) / partition_size;
     if (num_kv_splits > 20) num_kv_splits = 20;
-    
+
     int num_tokens = q.size(0);
     int num_heads_q = q.size(1);
     int head_dim = q.size(2);
     int num_heads_kv = k.size(2);
     int block_size = k.size(1);
     at::Tensor tmp_out = at::empty(
-        {num_tokens, num_heads_q * num_kv_splits, head_dim}, 
+        {num_tokens, num_heads_q * num_kv_splits, head_dim},
         q.options().device(q.device()));
     at::Tensor max_logits = at::empty(
         {num_tokens, num_heads_q, num_kv_splits},
@@ -139,9 +136,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
     at::Tensor exp_sums = at::empty(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
-    
+
     at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
-    
+
     cutlass_paged_decode_interface(
         queue,
         q,

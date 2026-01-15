@@ -64,7 +64,7 @@ struct chunk_policy_head256 {
 
 // define macro for decode policy
 #define DECODE_NUM_SG _4
-#define DECODE_KV_TILE _64 // KV tile size is set to 64 for page size is 64
+#define DECODE_KV_TILE _64  // KV tile size is set to 64 for page size is 64
 #define DECODE_Q_PACKED_TILE _8
 
 struct decode_policy_head64 {

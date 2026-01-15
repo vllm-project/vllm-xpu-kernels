@@ -521,35 +521,53 @@ struct FMHAFwdMainloop<
   }
 };
 
-
-template <class DispatchPolicy_,
-          bool PagedKV_,
-          bool CausalMask_,
-          class TiledMMAQK_,          // Tiling for Q*K GEMM
-          class TiledMMAPV_,          // Tiling for P*V GEMM
-          int VTiles_,                // # of tiles in V dimension
-          class TensorQ_,             // Global Q/K/V tensors
-          class TensorK_,
-          class TensorV_,
-          class TiledCopyQ_ = void,   // Optional TiledCopy for loading Q
-          class TiledCopyK_ = void,   // Optional TiledCopy for loading K
-          class TiledCopyV_ = void>   // Optional TiledCopy for loading V
+template <
+    class DispatchPolicy_,
+    bool PagedKV_,
+    bool CausalMask_,
+    class TiledMMAQK_,  // Tiling for Q*K GEMM
+    class TiledMMAPV_,  // Tiling for P*V GEMM
+    int VTiles_,        // # of tiles in V dimension
+    class TensorQ_,     // Global Q/K/V tensors
+    class TensorK_,
+    class TensorV_,
+    class TiledCopyQ_ = void,  // Optional TiledCopy for loading Q
+    class TiledCopyK_ = void,  // Optional TiledCopy for loading K
+    class TiledCopyV_ = void>  // Optional TiledCopy for loading V
 struct DecodeFwdMainloop {
-  static_assert(cutlass::detail::dependent_false<DispatchPolicy_>, "Could not find a mainloop specialization.");
+  static_assert(
+      cutlass::detail::dependent_false<DispatchPolicy_>,
+      "Could not find a mainloop specialization.");
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template <int Stages,
-          bool PagedKV_,
-          bool CausalMask_,
-          class TiledMMAQK_, class TiledMMAPV_, int VTiles_,
-          class TensorQ_, class TensorK_, class TensorV_,
-          class TiledCopyQ_, class TiledCopyK_, class TiledCopyV_>
-struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
-                       TiledMMAQK_, TiledMMAPV_, VTiles_,
-                       TensorQ_, TensorK_, TensorV_,
-                       TiledCopyQ_, TiledCopyK_, TiledCopyV_> {
+template <
+    int Stages,
+    bool PagedKV_,
+    bool CausalMask_,
+    class TiledMMAQK_,
+    class TiledMMAPV_,
+    int VTiles_,
+    class TensorQ_,
+    class TensorK_,
+    class TensorV_,
+    class TiledCopyQ_,
+    class TiledCopyK_,
+    class TiledCopyV_>
+struct DecodeFwdMainloop<
+    XeDefault<Stages>,
+    PagedKV_,
+    CausalMask_,
+    TiledMMAQK_,
+    TiledMMAPV_,
+    VTiles_,
+    TensorQ_,
+    TensorK_,
+    TensorV_,
+    TiledCopyQ_,
+    TiledCopyK_,
+    TiledCopyV_> {
   //
   // Type Aliases
   //
@@ -559,19 +577,32 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
   using TileShapePV = decltype(TiledMMAPV{}.tile_mnk());
   static constexpr int VTiles = VTiles_;
   using SubgroupLayoutQK = decltype(TiledMMAQK{}.get_atom_layout_mnk());
-  using SGPerWG = decltype(product(take<1,4>(shape(typename TiledMMAQK::ThrLayoutVMNK{}))));
+  using SGPerWG = decltype(product(
+      take<1, 4>(shape(typename TiledMMAQK::ThrLayoutVMNK{}))));
 
   using TensorQ = TensorQ_;
   using TensorK = TensorK_;
   using TensorV = TensorV_;
 
-  using TensorQ2D = decltype(TensorQ_{}(append<rank_v<TensorQ_>>(make_coord(_,_),0)));
-  using TensorK2D = decltype(TensorK_{}(append<rank_v<TensorK_>>(make_coord(_,_),0)));
-  using TensorV2D = decltype(TensorV_{}(append<rank_v<TensorV_>>(make_coord(_,_),0)));
+  using TensorQ2D =
+      decltype(TensorQ_{}(append<rank_v<TensorQ_>>(make_coord(_, _), 0)));
+  using TensorK2D =
+      decltype(TensorK_{}(append<rank_v<TensorK_>>(make_coord(_, _), 0)));
+  using TensorV2D =
+      decltype(TensorV_{}(append<rank_v<TensorV_>>(make_coord(_, _), 0)));
 
-  using TiledCopyQ = conditional_t<is_void_v<TiledCopyQ_>, decltype(make_block_2d_copy_A(TiledMMAQK{}, TensorQ2D{})), TiledCopyQ_>;
-  using TiledCopyK = conditional_t<is_void_v<TiledCopyK_>, decltype(make_block_2d_copy_B(TiledMMAQK{}, TensorK2D{})), TiledCopyK_>;
-  using TiledCopyV = conditional_t<is_void_v<TiledCopyV_>, decltype(make_block_2d_copy_B(TiledMMAPV{}, TensorV2D{})), TiledCopyV_>;
+  using TiledCopyQ = conditional_t<
+      is_void_v<TiledCopyQ_>,
+      decltype(make_block_2d_copy_A(TiledMMAQK{}, TensorQ2D{})),
+      TiledCopyQ_>;
+  using TiledCopyK = conditional_t<
+      is_void_v<TiledCopyK_>,
+      decltype(make_block_2d_copy_B(TiledMMAQK{}, TensorK2D{})),
+      TiledCopyK_>;
+  using TiledCopyV = conditional_t<
+      is_void_v<TiledCopyV_>,
+      decltype(make_block_2d_copy_B(TiledMMAPV{}, TensorV2D{})),
+      TiledCopyV_>;
 
   // TODO: static_asserts on TiledMMAPV here...
 
@@ -587,17 +618,19 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
   //
   template <typename TiledMMA>
   using FragC = decltype(TiledMMA{}.get_slice(0).partition_sg_fragment_C(
-                           make_identity_tensor(select<0,1>(TiledMMA{}.tile_mnk()))));
+      make_identity_tensor(select<0, 1>(TiledMMA{}.tile_mnk()))));
 
   using FragS = FragC<TiledMMAQK>;
   using FragSRow = decltype(reduce<1>(FragS{}, sycl::plus<void>{}));
   using FragSCol = decltype(reduce<0>(FragS{}, sycl::plus<void>{}));
   using ElementS = typename TiledMMAQK::ValTypeD;
 
-  using SingleFragA = FragC<TiledMMAPV>;                          // (atom val,q',v')
-  using FragA = expand_sg_fragment_t<SingleFragA, 1, VTiles>;     // (atom val,q',v',VV)
+  using SingleFragA = FragC<TiledMMAPV>;  // (atom val,q',v')
+  using FragA =
+      expand_sg_fragment_t<SingleFragA, 1, VTiles>;  // (atom val,q',v',VV)
   using FragARow = decltype(reduce<1>(FragA{}, sycl::plus<void>{}));
-  // static_assert(is_same_v<decltype(FragSRow{}.shape()), float>, "dtype mismatched");
+  // static_assert(is_same_v<decltype(FragSRow{}.shape()), float>, "dtype
+  // mismatched");
   using ElementA = typename TiledMMAPV::ValTypeD;
 
   static constexpr bool PagedKV = PagedKV_;
@@ -627,40 +660,39 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
 
   DecodeFwdMainloop(Params const& params_, SharedStorage&) : params(params_) {}
 
-  static constexpr
-  Params to_underlying_arguments(Arguments const &args, void * /* workspace */) {
-    constexpr double kLog2e = 1.4426950408889634074;            // log_2(e)
+  static constexpr Params
+  to_underlying_arguments(Arguments const& args, void* /* workspace */) {
+    constexpr double kLog2e = 1.4426950408889634074;  // log_2(e)
     ElementS val = args.scale * static_cast<ElementS>(kLog2e);
-    return Params{val,
-                  args.ptr_page_table,
-                  args.page_size,
-                  args.max_pages_per_seq,
-                  args.total_seqlen_kv};
+    return Params{
+        val,
+        args.ptr_page_table,
+        args.page_size,
+        args.max_pages_per_seq,
+        args.total_seqlen_kv};
   }
 
-  CUTLASS_HOST_DEVICE static
-  bool can_implement(Arguments const&) {
+  CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
     return true;
   }
 
   template <typename QVCoord>
-  CUTLASS_DEVICE
-  void
-  operator()(TensorQ2D const& Q_2D,     // (q,d)
-             TensorK2D const& K_2D,     // (k,d)
-             TensorV2D const& V_2D,     // (d,k)
-             FragA          & tArA,     // Output accumulator (q,v)
-             FragARow       & tA_max,   // Softmax row-wise max accumulator
-             FragARow       & tA_sum,   // Softmax row-wise sum accumulator
-             QVCoord          blk_qv,   // WG tile indices: (Q,V)
-             int const      & idx_b,    // WG tile indices: (B)
-             int              blk_k0,   // K block range: [K0,K1)
-             int              blk_k1,
-             int              total_blk, // Total # of K blocks
-             int              thr_id,
-             int              seq_len,
-             int              full_tile_offset,
-             int              discard_seq_coord) {
+  CUTLASS_DEVICE void operator()(
+      TensorQ2D const& Q_2D,  // (q,d)
+      TensorK2D const& K_2D,  // (k,d)
+      TensorV2D const& V_2D,  // (d,k)
+      FragA& tArA,            // Output accumulator (q,v)
+      FragARow& tA_max,       // Softmax row-wise max accumulator
+      FragARow& tA_sum,       // Softmax row-wise sum accumulator
+      QVCoord blk_qv,         // WG tile indices: (Q,V)
+      int const& idx_b,       // WG tile indices: (B)
+      int blk_k0,             // K block range: [K0,K1)
+      int blk_k1,
+      int total_blk,  // Total # of K blocks
+      int thr_id,
+      int seq_len,
+      int full_tile_offset,
+      int discard_seq_coord) {
     using namespace sycl::ext::oneapi::this_work_item;
 
     // Short dimension names:
@@ -672,19 +704,30 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
     // Capital letters (Q, K, ...) refer to WG block indices.
     // Primed letters (q', k', ...) refer to atom block indices.
 
-    auto tile_shape_v = make_shape(get<1>(TileShapePV{}) * C<VTiles>{}, get<2>(TileShapePV{}));
+    auto tile_shape_v =
+        make_shape(get<1>(TileShapePV{}) * C<VTiles>{}, get<2>(TileShapePV{}));
 
     /* Create proxy coordinate tensors for Q/K/P/V */
-    Tensor cQ = make_identity_tensor(Q_2D.shape());             // (q,d)
-    Tensor cK = make_identity_tensor(K_2D.shape());             // (k,d)
-    Tensor cV = make_identity_tensor(V_2D.shape());             // (v,k)
-    Tensor cP = make_identity_tensor(take<0,2>(TileShapeQK{})); // (q,k)
+    Tensor cQ = make_identity_tensor(Q_2D.shape());               // (q,d)
+    Tensor cK = make_identity_tensor(K_2D.shape());               // (k,d)
+    Tensor cV = make_identity_tensor(V_2D.shape());               // (v,k)
+    Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));  // (q,k)
 
     /* Partition global tensors into workgroup tiles */
-    Tensor gQ       = local_tile(cQ, TileShapeQK{}, append(blk_qv,_),             Step<_1,X,_1>{});   // (q,d,D)
-    Tensor gK       = local_tile(cK, TileShapeQK{}, make_coord(_,_,_),            Step<X,_1,_1>{});   // (k,d,K,D)
-    Tensor gV       = local_tile(cV, tile_shape_v,  make_coord(get<1>(blk_qv),_));                    // (v,k,K)
-    Tensor gV_split = local_tile(gV, TileShapePV{}, make_coord(_,_,0),            Step<X,_1,_1>{});   // (v,k,VV,K)
+    Tensor gQ = local_tile(
+        cQ, TileShapeQK{}, append(blk_qv, _), Step<_1, X, _1>{});  // (q,d,D)
+    Tensor gK = local_tile(
+        cK,
+        TileShapeQK{},
+        make_coord(_, _, _),
+        Step<X, _1, _1>{});  // (k,d,K,D)
+    Tensor gV =
+        local_tile(cV, tile_shape_v, make_coord(get<1>(blk_qv), _));  // (v,k,K)
+    Tensor gV_split = local_tile(
+        gV,
+        TileShapePV{},
+        make_coord(_, _, 0),
+        Step<X, _1, _1>{});  // (v,k,VV,K)
 
     /* Create global -> register copies */
     TiledCopyQ copy_q{Q_2D};
@@ -696,7 +739,7 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
     TiledMMAPV mma_pv{};
 
     auto copyQ = make_block_2d_copy_A(TiledMMAQK{}, TensorQ2D{});
-    
+
     /* Slice TiledCopy/TiledMMA operations down to to work-item level */
     auto thr_copy_q = copy_q.get_slice(thr_id);
     auto thr_copy_k = copy_k.get_slice(thr_id);
@@ -705,27 +748,28 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
     auto thr_mma_pv = mma_pv.get_slice(thr_id);
 
     /* Partition coordinate tensors for copy */
-    auto tQgQ = thr_copy_q.partition_S(gQ);                // (atom_val,q',d',D)
-    auto tKgK = thr_copy_k.partition_S(gK);                // (atom_val,k',d',K,D)
-    auto tVgV = thr_copy_v.partition_S(gV_split);          // (atom_val,v',k',VV,K)
+    auto tQgQ = thr_copy_q.partition_S(gQ);        // (atom_val,q',d',D)
+    auto tKgK = thr_copy_k.partition_S(gK);        // (atom_val,k',d',K,D)
+    auto tVgV = thr_copy_v.partition_S(gV_split);  // (atom_val,v',k',VV,K)
 
     /* Create register fragments for MMA and copies */
-    auto tQrQ = thr_copy_q.partition_sg_fragment_D(gQ(_,_,0));
-    auto tSrQ = thr_mma_qk.partition_sg_fragment_A(gQ(_,_,0));
+    auto tQrQ = thr_copy_q.partition_sg_fragment_D(gQ(_, _, 0));
+    auto tSrQ = thr_mma_qk.partition_sg_fragment_A(gQ(_, _, 0));
 
-    auto tKrK = thr_copy_k.partition_sg_fragment_D(gK(_,_,0,0));
-    auto tSrK = thr_mma_qk.partition_sg_fragment_B(gK(_,_,0,0));
+    auto tKrK = thr_copy_k.partition_sg_fragment_D(gK(_, _, 0, 0));
+    auto tSrK = thr_mma_qk.partition_sg_fragment_B(gK(_, _, 0, 0));
 
     auto tSrS = thr_mma_qk.partition_sg_fragment_C(cP);
     auto tArP = thr_mma_pv.partition_sg_fragment_A(cP);
 
-    auto tVrV = thr_copy_v.partition_sg_fragment_D(gV_split(_,_,0,0));
-    auto tArV = thr_mma_pv.partition_sg_fragment_B(gV_split(_,_,0,0));
+    auto tVrV = thr_copy_v.partition_sg_fragment_D(gV_split(_, _, 0, 0));
+    auto tArV = thr_mma_pv.partition_sg_fragment_B(gV_split(_, _, 0, 0));
 
     /* Create TiledCopy objects for prefetches */
     auto prefetch_q = make_block_2d_prefetch(copy_q);
     auto prefetch_k = make_block_2d_prefetch(copy_k);
-    auto prefetch_v = make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D);
+    auto prefetch_v =
+        make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D);
 
     /* Partition global tensors for prefetch */
     auto pQgQ = prefetch_q.get_slice(thr_id).partition_S(gQ);
@@ -735,25 +779,26 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
     // ------
     // Kernel
     // ------
-    
+
     // PagedKV
     int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
     int tile_idx = blk_k0;
     int b_offset = idx_b * params.max_pages_per_seq;
     if constexpr (PagedKV) {
       int page_local_idx = tile_idx * get<1>(TileShapeQK{}) / params.page_size;
-      tile_idx = params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page 
-                 + tile_idx % tiles_per_page;
+      tile_idx =
+          params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page +
+          tile_idx % tiles_per_page;
     }
 
     /* Initialization steps for first block: Q/K prefetch, O init */
     /* TODO: limit D prefetch for large head size, and reorder K prefetches */
     for (int D = 0; D < size<3>(pQgQ); D++) {
-      prefetch(prefetch_q, pQgQ(_,_,_,D));
+      prefetch(prefetch_q, pQgQ(_, _, _, D));
     }
 
     for (int D = 0; D < size<4>(pKgK); D++) {
-      prefetch(prefetch_k, pKgK(_,_,_,tile_idx,D));
+      prefetch(prefetch_k, pKgK(_, _, _, tile_idx, D));
     }
 
     clear(tArA);
@@ -769,14 +814,16 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
       /* Split barrier to keep threads together */
       // barrier_arrive(ScopeWorkgroup);
 
-      auto tKgK_cache = PagedKV ? tKgK(_,_,_,tile_idx,_) : tKgK(_,_,_,K,_);
-      auto tVgV_cache = PagedKV ? tVgV(_,_,_,_,tile_idx) : tVgV(_,_,_,_,K);
+      auto tKgK_cache =
+          PagedKV ? tKgK(_, _, _, tile_idx, _) : tKgK(_, _, _, K, _);
+      auto tVgV_cache =
+          PagedKV ? tVgV(_, _, _, _, tile_idx) : tVgV(_, _, _, _, K);
 
       /* GEMM 1: S = K * Q */
-      clear(tSrS);    /* TODO: fuse w/ initial gemm call */
+      clear(tSrS); /* TODO: fuse w/ initial gemm call */
       for (int D = 0; D < size<4>(tKgK); D++) {
-        copy(copy_q, tQgQ(_,_,_,D),   tQrQ);
-        copy(copy_k, tKgK_cache(_,_,_,D), tKrK);
+        copy(copy_q, tQgQ(_, _, _, D), tQrQ);
+        copy(copy_k, tKgK_cache(_, _, _, D), tKrK);
 
         reorder(tQrQ, tSrQ);
         reorder(tKrK, tSrK);
@@ -785,7 +832,7 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
       }
 
       /* V prefetch for GEMM 2 */
-      prefetch(prefetch_v, pVgV(_,_,_,tile_idx));
+      prefetch(prefetch_v, pVgV(_, _, _, tile_idx));
 
       /* Causal masking */
       // No Causal masking in decoding
@@ -793,10 +840,10 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
       //   if (K == blk_k1 - 1) {
       //     // Need to get global col and row indices to mask the elements
       //     Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
-      //     Tensor gP = local_tile(cPgP, take<0,2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
-      //     auto cS_thread = thr_mma_qk.partition_C(gP);
-      //     CUTLASS_PRAGMA_UNROLL
-      //     for (int i = 0; i < tSrS.size(); ++i) {
+      //     Tensor gP = local_tile(cPgP, take<0,2>(TileShapeQK{}),
+      //     make_coord(get<0>(blk_qv), K)); auto cS_thread =
+      //     thr_mma_qk.partition_C(gP); CUTLASS_PRAGMA_UNROLL for (int i = 0; i
+      //     < tSrS.size(); ++i) {
       //       int row_idx = get<0>(cS_thread(i));
       //       int col_idx = get<1>(cS_thread(i));
       //       if (col_idx - full_tile_offset > row_idx - discard_seq_coord) {
@@ -805,14 +852,15 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
       //     }
       //   }
       // }
-      
+
       /* k masking for remainder tiles */
       if (check_remainder_k && K == blk_k1 - 1) {
         FragSCol k_rem_mask;
-        int k = get<0>(tKgK(0,0,0,K,0)) + get_sub_group().get_local_id()[0];
+        int k = get<0>(tKgK(0, 0, 0, K, 0)) + get_sub_group().get_local_id()[0];
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < k_rem_mask.size(); i++, k += intel::sg_size) {
-          k_rem_mask(i) = (k < seq_len) ? ElementS(sycl::nan(0u)) : ElementS(-INFINITY);
+          k_rem_mask(i) =
+              (k < seq_len) ? ElementS(sycl::nan(0u)) : ElementS(-INFINITY);
         }
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < tSrS.size(); i++) {
@@ -827,9 +875,9 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
       /* GEMM 2: A += P * V, split in v dimension */
       CUTLASS_PRAGMA_UNROLL
       for (int VV = 0; VV < VTiles; VV++) {
-        copy(copy_v, tVgV_cache(_,_,_,VV), tVrV);
+        copy(copy_v, tVgV_cache(_, _, _, VV), tVrV);
         reorder(tVrV, tArV);
-        cute::gemm(mma_pv, tArP, tArV, tArA(_,_,_,VV));
+        cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
 
       barrier();
@@ -853,7 +901,7 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
 
       /* K prefetch */
       for (int D = 0; D < size<4>(pKgK); D++) {
-        prefetch(prefetch_k, pKgK(_,_,_,tile_idx,D));
+        prefetch(prefetch_k, pKgK(_, _, _, tile_idx, D));
       }
 
       // barrier_wait(ScopeWorkgroup);
@@ -862,12 +910,12 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
 
   // Single step of blocked softmax.
   CUTLASS_DEVICE
-  void
-  softmax(bool       first_block, // First softmax block?
-          FragS    & tS,          // Softmax src/dst block
-          FragSRow & tS_max,      // Softmax row-wise max accumulator
-          FragSRow & tS_sum,      // Softmax row-wise sum accumulator
-          FragA    & tA) {        // O accumulator (for rescaling)
+  void softmax(
+      bool first_block,  // First softmax block?
+      FragS& tS,         // Softmax src/dst block
+      FragSRow& tS_max,  // Softmax row-wise max accumulator
+      FragSRow& tS_sum,  // Softmax row-wise sum accumulator
+      FragA& tA) {       // O accumulator (for rescaling)
 
     /* Compute row-wise maxima for this block */
     auto tS_bmax = reduce<1>(tS, sycl::maximum{});
@@ -882,7 +930,8 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++)
-      tS(i) = sycl::native::exp2(params.scale * tS(i) - broadcast<0>(tS_max, tS, i));
+      tS(i) = sycl::native::exp2(
+          params.scale * tS(i) - broadcast<0>(tS_max, tS, i));
 
     /* Rescale existing S sums and O accumulator */
     if (!first_block) {
@@ -905,7 +954,6 @@ struct DecodeFwdMainloop<XeDefault<Stages>, PagedKV_, CausalMask_,
       tS_sum(i) += tS_bsum(i);
   }
 };
-
 
 template <typename SGLayoutQK>
 CUTLASS_HOST_DEVICE constexpr auto get_sg_layout_pv(SGLayoutQK const&) {

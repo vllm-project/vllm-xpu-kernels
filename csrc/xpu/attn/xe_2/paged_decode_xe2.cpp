@@ -7,9 +7,10 @@ void cutlass_paged_decode_xe2(
     const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
-    at::Tensor& temp_out,     // [batch, num_head_q, seq_q, head_size, num_kv_splits]
-    at::Tensor& exp_sums,     // [batch, num_head_q, seq_q, num_kv_splits]
-    at::Tensor& max_logits,   // [batch, num_head_q, seq_q, num_kv_splits]
+    at::Tensor&
+        temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
+    at::Tensor& exp_sums,    // [batch, num_head_q, seq_q, num_kv_splits]
+    at::Tensor& max_logits,  // [batch, num_head_q, seq_q, num_kv_splits]
     const at::Tensor& block_table,
     const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k,
