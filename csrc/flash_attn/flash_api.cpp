@@ -121,8 +121,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_local,
         is_sink);
   } else {
-    constexpr int partition_size = 2048;
+    constexpr int partition_size = 512;
     int num_kv_splits = (max_seqlen_k + partition_size - 1) / partition_size;
+    if (num_kv_splits > 20) num_kv_splits = 20;
     
     int num_tokens = q.size(0);
     int num_heads_q = q.size(1);
