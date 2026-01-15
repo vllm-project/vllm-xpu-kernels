@@ -226,7 +226,10 @@ def test_prologue(m, n, k, e, topk, recipe):
     expand_input = workspace[ws_map["overlapped_gemm1_gemm2_inputs"][1]:
                             ws_map["overlapped_gemm1_gemm2_inputs"][1] +
                             permuted_data_size].view(hidden_states.dtype).view(num_moe_inputs, hidden_size)
-    expand_scales = workspace[ws_map["permuted_act_scales"][1]: ws_map["permuted_act_scales"][1] + permuted_act_scales_size].view(num_moe_inputs, hidden_size//block_k)
+    expand_scales = workspace[ws_map["permuted_act_scales"][1]: ws_map["permuted_act_scales"][1] + permuted_act_scales_size]
+    if scale_dtype == torch.float32:
+        expand_scales = expand_scales.view(torch.float32)
+    expand_scales = expand_scales.view(num_moe_inputs, hidden_size//block_k)
 
     torch.testing.assert_close(ref_expert_offset.cpu(), expert_first_token_offset[1:1+ref_expert_offset.numel()].cpu(), rtol=0, atol=0)
     if data_dtype is not torch.float4_e2m1fn_x2:
@@ -237,4 +240,4 @@ def test_prologue(m, n, k, e, topk, recipe):
         torch.testing.assert_close(ref_expand_scales, expand_scales, rtol=0, atol=0)
 
 if __name__ == "__main__":
-    test_prologue(m=100, n=512, k=1024, e=16, topk=2, recipe="mxfp8")
+    test_prologue(m=100, n=512, k=1024, e=16, topk=2, recipe="fp8block")
