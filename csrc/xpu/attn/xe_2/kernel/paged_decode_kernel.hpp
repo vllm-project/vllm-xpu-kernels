@@ -186,12 +186,6 @@ class XeFMHAFwdSplitKVKernel {
       return false;
     }
 
-    // when GQA packing enabled, limit head group size to 8
-    if (args.kernel.shape.num_heads_q / args.kernel.shape.num_heads_kv >
-        dpas_max_repeat_count) {
-      return false;
-    }
-
     return CollectiveMainloop::can_implement(args.mainloop) &&
            CollectiveEpilogue::can_implement(args.epilogue);
   }

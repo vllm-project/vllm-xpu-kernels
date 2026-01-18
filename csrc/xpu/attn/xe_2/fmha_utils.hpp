@@ -66,38 +66,20 @@ struct chunk_policy_head256 {
 #define DECODE_NUM_SG _4
 #define DECODE_KV_TILE _64  // KV tile size is set to 64 for page size is 64
 #define DECODE_Q_PACKED_TILE _8
+#define DECODE_Q_PACKED_TILE_DUAL _16
 
-struct decode_policy_head64 {
+template <class head_dim>
+struct decode_policy_head {
   using ShapeQK = Shape<DECODE_Q_PACKED_TILE, DECODE_KV_TILE, _64>;
   using ShapePV = Shape<DECODE_Q_PACKED_TILE, _32, DECODE_KV_TILE>;
-  using ShapeOut = Shape<DECODE_Q_PACKED_TILE, _64>;
+  using ShapeOut = Shape<DECODE_Q_PACKED_TILE, head_dim>;
   using SubgroupLayoutQK = Layout<Shape<_1, DECODE_NUM_SG, _1>>;
 };
 
-struct decode_policy_head96 {
-  using ShapeQK = Shape<DECODE_Q_PACKED_TILE, DECODE_KV_TILE, _64>;
-  using ShapePV = Shape<DECODE_Q_PACKED_TILE, _32, DECODE_KV_TILE>;
-  using ShapeOut = Shape<DECODE_Q_PACKED_TILE, _96>;
-  using SubgroupLayoutQK = Layout<Shape<_1, DECODE_NUM_SG, _1>>;
-};
-
-struct decode_policy_head128 {
-  using ShapeQK = Shape<DECODE_Q_PACKED_TILE, DECODE_KV_TILE, _64>;
-  using ShapePV = Shape<DECODE_Q_PACKED_TILE, _32, DECODE_KV_TILE>;
-  using ShapeOut = Shape<DECODE_Q_PACKED_TILE, _128>;
-  using SubgroupLayoutQK = Layout<Shape<_1, DECODE_NUM_SG, _1>>;
-};
-
-struct decode_policy_head192 {
-  using ShapeQK = Shape<DECODE_Q_PACKED_TILE, DECODE_KV_TILE, _64>;
-  using ShapePV = Shape<DECODE_Q_PACKED_TILE, _32, DECODE_KV_TILE>;
-  using ShapeOut = Shape<DECODE_Q_PACKED_TILE, _192>;
-  using SubgroupLayoutQK = Layout<Shape<_1, DECODE_NUM_SG, _1>>;
-};
-
-struct decode_policy_head256 {
-  using ShapeQK = Shape<DECODE_Q_PACKED_TILE, DECODE_KV_TILE, _64>;
-  using ShapePV = Shape<DECODE_Q_PACKED_TILE, _32, DECODE_KV_TILE>;
-  using ShapeOut = Shape<DECODE_Q_PACKED_TILE, _256>;
+template <class head_dim>
+struct decode_policy_dual_q_head {
+  using ShapeQK = Shape<DECODE_Q_PACKED_TILE_DUAL, DECODE_KV_TILE, _64>;
+  using ShapePV = Shape<DECODE_Q_PACKED_TILE_DUAL, _32, DECODE_KV_TILE>;
+  using ShapeOut = Shape<DECODE_Q_PACKED_TILE_DUAL, head_dim>;
   using SubgroupLayoutQK = Layout<Shape<_1, DECODE_NUM_SG, _1>>;
 };
