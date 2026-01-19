@@ -448,6 +448,41 @@ void decode_policy_dispatch(
   }
 }
 
+
+template <class QGroup>
+inline void dispatch_by_head_size(
+    const int head_case,
+    sycl::queue& queue,
+    CutlassType cuType,
+    const paged_decode_args_t& args) {
+
+  switch (head_case) {
+    case 0:
+      decode_policy_dispatch<
+          decode_policy_qpacked_head<QGroup, _64>>(queue, cuType, args);
+      break;
+    case 1:
+      decode_policy_dispatch<
+          decode_policy_qpacked_head<QGroup, _96>>(queue, cuType, args);
+      break;
+    case 2:
+      decode_policy_dispatch<
+          decode_policy_qpacked_head<QGroup, _128>>(queue, cuType, args);
+      break;
+    case 3:
+      decode_policy_dispatch<
+          decode_policy_qpacked_head<QGroup, _192>>(queue, cuType, args);
+      break;
+    case 4:
+      decode_policy_dispatch<
+          decode_policy_qpacked_head<QGroup, _256>>(queue, cuType, args);
+      break;
+    default:
+      TORCH_CHECK(false, "Unsupported head size for fmha");
+  }
+}
+
+
 void cutlass_paged_decode_impl(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]
@@ -562,53 +597,13 @@ void cutlass_paged_decode_impl(
 
   int head_case = get_head_size_case(args.head_size);
   int num_q_group_size = num_heads_q / num_heads_kv;
-
+  
   if (num_q_group_size <= 8) {
-    switch (head_case) {
-      case 0:
-        decode_policy_dispatch<decode_policy_head<_64>>(queue, cuType, args);
-        break;
-      case 1:
-        decode_policy_dispatch<decode_policy_head<_96>>(queue, cuType, args);
-        break;
-      case 2:
-        decode_policy_dispatch<decode_policy_head<_128>>(queue, cuType, args);
-        break;
-      case 3:
-        decode_policy_dispatch<decode_policy_head<_192>>(queue, cuType, args);
-        break;
-      case 4:
-        decode_policy_dispatch<decode_policy_head<_256>>(queue, cuType, args);
-        break;
-      default:
-        TORCH_CHECK(false, "Unsupported head size for fmha");
-    }
+    dispatch_by_head_size<_8>(head_case, queue, cuType, args);
   } else if (num_q_group_size <= 16) {
-    switch (head_case) {
-      case 0:
-        decode_policy_dispatch<decode_policy_dual_q_head<_64>>(
-            queue, cuType, args);
-        break;
-      case 1:
-        decode_policy_dispatch<decode_policy_dual_q_head<_96>>(
-            queue, cuType, args);
-        break;
-      case 2:
-        decode_policy_dispatch<decode_policy_dual_q_head<_128>>(
-            queue, cuType, args);
-        break;
-      case 3:
-        decode_policy_dispatch<decode_policy_dual_q_head<_192>>(
-            queue, cuType, args);
-        break;
-      case 4:
-        decode_policy_dispatch<decode_policy_dual_q_head<_256>>(
-            queue, cuType, args);
-        break;
-      default:
-        TORCH_CHECK(false, "Unsupported head size for fmha");
-    }
+    dispatch_by_head_size<_16>(head_case, queue, cuType, args);
   } else {
-    TORCH_CHECK(false, "Unsupported num_heads_q / num_heads_kv for fmha");
+    TORCH_CHECK(false,
+        "Unsupported num_heads_q / num_heads_kv for fmha");
   }
 }

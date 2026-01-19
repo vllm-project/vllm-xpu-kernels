@@ -65,21 +65,11 @@ struct chunk_policy_head256 {
 // define macro for decode policy
 #define DECODE_NUM_SG _4
 #define DECODE_KV_TILE _64  // KV tile size is set to 64 for page size is 64
-#define DECODE_Q_PACKED_TILE _8
-#define DECODE_Q_PACKED_TILE_DUAL _16
 
-template <class head_dim>
-struct decode_policy_head {
-  using ShapeQK = Shape<DECODE_Q_PACKED_TILE, DECODE_KV_TILE, _64>;
-  using ShapePV = Shape<DECODE_Q_PACKED_TILE, _32, DECODE_KV_TILE>;
-  using ShapeOut = Shape<DECODE_Q_PACKED_TILE, head_dim>;
-  using SubgroupLayoutQK = Layout<Shape<_1, DECODE_NUM_SG, _1>>;
-};
-
-template <class head_dim>
-struct decode_policy_dual_q_head {
-  using ShapeQK = Shape<DECODE_Q_PACKED_TILE_DUAL, DECODE_KV_TILE, _64>;
-  using ShapePV = Shape<DECODE_Q_PACKED_TILE_DUAL, _32, DECODE_KV_TILE>;
-  using ShapeOut = Shape<DECODE_Q_PACKED_TILE_DUAL, head_dim>;
+template <class q_packed, class head_dim>
+struct decode_policy_qpacked_head {
+  using ShapeQK = Shape<q_packed, DECODE_KV_TILE, _64>;
+  using ShapePV = Shape<q_packed, _32, DECODE_KV_TILE>;
+  using ShapeOut = Shape<q_packed, head_dim>;
   using SubgroupLayoutQK = Layout<Shape<_1, DECODE_NUM_SG, _1>>;
 };
