@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 import torch
 
-from tests.ops.fp8_quant_op import scaled_fp8_quant
+from tests.ops.fp8_quant_op import per_token_group_quant_fp8, scaled_fp8_quant
+from tests.ops.mx_utils import to_mxfp
 
 SKIP_TEST_FOR_MINI_SCOPE = os.getenv("XPU_KERNEL_PYTEST_PROFILER") == "MINI"
 
@@ -75,6 +76,65 @@ def ref_dynamic_per_token_quant(
     return torch_out, scales
 
 
+def ref_per_block_quant(
+    x: torch.Tensor,
+    block_m: int = 1,
+    block_n: int = 128,
+    fp8_dtype=torch.float8_e4m3fn,
+    eps: float = 1e-10,
+):
+    """
+    Reference FP8 2D block quantization
+
+    Args:
+        x: [M, N] float tensor (fp16/fp32)
+        block_m: block rows
+        block_n: block cols
+        fp8_dtype: torch.float8_e4m3fn or e5m2
+    Returns:
+        q: FP8 tensor [M, N]
+        scales: FP32 tensor [ceil(M/BM), ceil(N/BN)]
+    """
+    assert fp8_dtype == torch.float8_e4m3fn
+    assert x.dim() == 2
+    M, N = x.shape
+    device = x.device
+
+    assert (
+        block_m <= M and block_n <= N and M % block_m == 0 and N % block_n == 0
+    ), f"Invalid block size: block_m={block_m}, block_n={block_n}, M={M}, N={N}"
+    BM, BN = block_m, block_n
+    grid_m = (M + BM - 1) // BM
+    grid_n = (N + BN - 1) // BN
+
+    scales = torch.empty((grid_m, grid_n), device=device, dtype=torch.float32)
+    q = torch.empty_like(x, dtype=fp8_dtype)
+
+    FP8_MAX = 448.0
+
+    for gm in range(grid_m):
+        for gn in range(grid_n):
+            m0 = gm * BM
+            n0 = gn * BN
+            m1 = min(m0 + BM, M)
+            n1 = min(n0 + BN, N)
+
+            block = x[m0:m1, n0:n1]
+
+            # absmax
+            amax = block.abs().max()
+            scale = amax / FP8_MAX
+            scale = torch.clamp(scale, min=eps)
+
+            scales[gm, gn] = scale
+
+            # quantize
+            q_block = (block / scale).to(fp8_dtype)
+            q[m0:m1, n0:n1] = q_block
+
+    return q, scales
+
+
 def assert_close_percentage(a: torch.Tensor,
                             b: torch.Tensor,
                             mismatch_threshold: float = 0.01):
@@ -84,7 +144,7 @@ def assert_close_percentage(a: torch.Tensor,
     Args:
         a (torch.Tensor): First tensor.
         b (torch.Tensor): Second tensor.
-        mismatch_threshold (float): 
+        mismatch_threshold (float):
             Allowed mismatch ratio (0.01 = 1% mismatch allowed).
 
     Raises:
@@ -131,6 +191,12 @@ NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 SCALE_UBS = [True, False]
 SEEDS = [0]
 FP8_DTYPES = [torch.float8_e5m2, torch.float8_e4m3fn]
+
+#block quant parameters
+MXFP8_HP_DTYPES = [torch.float, torch.bfloat16]
+NUM_TOKENS_BLOCK_QUANT = [1, 2, 4, 8]
+HIDDEN_SIZES_BLOCK_QUANT = [256]
+GROUP_SIZE = [32, 64, 128]
 
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
@@ -202,6 +268,78 @@ def test_dynamic_per_token_fp8_quant(
         ops_out.to(dtype=torch.float32),
         mismatch_threshold=0.005,
     )  # 0.5% mismatch allowed
+
+
+@pytest.mark.parametrize("num_tokens_block_quant", NUM_TOKENS_BLOCK_QUANT)
+@pytest.mark.parametrize("hidden_size_block_quant", HIDDEN_SIZES_BLOCK_QUANT)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("group_size", GROUP_SIZE)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_per_block_fp8_quant(
+    num_tokens_block_quant: int,
+    hidden_size_block_quant: int,
+    dtype: torch.dtype,
+    group_size: int,
+    seed: int,
+) -> None:
+    seed_everything(seed)
+
+    x = (torch.rand(num_tokens_block_quant,
+                    hidden_size_block_quant,
+                    dtype=dtype,
+                    device="xpu") + 1e-6)  # avoid nans
+
+    ref_out, ref_scales = ref_per_block_quant(x, 1, group_size)
+
+    ops_out, ops_scales = per_token_group_quant_fp8(x,
+                                                    group_size=group_size,
+                                                    dtype=torch.float8_e4m3fn,
+                                                    use_ue8m0=False)
+
+    assert torch.allclose(ref_out.float(),
+                          ops_out.float(),
+                          atol=0.15,
+                          rtol=0.15)
+    assert torch.allclose(ref_scales.float(),
+                          ops_scales.float(),
+                          atol=0.01,
+                          rtol=0.01)
+
+
+@pytest.mark.parametrize("num_tokens_block_quant", NUM_TOKENS_BLOCK_QUANT)
+@pytest.mark.parametrize("hidden_size_block_quant", HIDDEN_SIZES_BLOCK_QUANT)
+@pytest.mark.parametrize("mxfp8_hp_dtypes", MXFP8_HP_DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_per_block_mxfp8_quant(
+    num_tokens_block_quant: int,
+    hidden_size_block_quant: int,
+    mxfp8_hp_dtypes: torch.dtype,
+    seed: int,
+) -> None:
+    seed_everything(seed)
+
+    x = (torch.rand(num_tokens_block_quant,
+                    hidden_size_block_quant,
+                    dtype=mxfp8_hp_dtypes,
+                    device="xpu") + 1e-6)  # avoid nans
+
+    ref_scales, ref_out = to_mxfp(x)
+
+    ops_out, ops_scales = per_token_group_quant_fp8(x,
+                                                    group_size=32,
+                                                    dtype=torch.float8_e4m3fn,
+                                                    use_ue8m0=True)
+
+    assert torch.allclose(ref_out.float(),
+                          ops_out.float(),
+                          atol=0.15,
+                          rtol=0.15)
+    assert torch.allclose(ref_scales.float(),
+                          ops_scales.float(),
+                          atol=0.01,
+                          rtol=0.01)
 
 
 # Regression test for a case with large activations where an int32 index cannot
