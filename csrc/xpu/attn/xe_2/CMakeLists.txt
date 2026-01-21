@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 
+set(ATTN_KERNEL_SRCS_GEN)  # output
 include("chunk_prefill_configure.cmake")
-fmha_forward_configure()
+fmha_forward_configure(chunk_prefill_kernel)
 
 add_xe2_kernel_library(attn_kernels_xe_2 INCLUDE_CMAKE_SOURCE_DIR)
 
