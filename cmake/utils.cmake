@@ -550,7 +550,7 @@ function(add_xe2_kernel_library LIBRARY_NAME)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
   # Find all source files
-  file(GLOB_RECURSE KERNEL_SOURCES "*.cpp" ${FMHA_FORWARD_KERNEL_SRCS})
+  file(GLOB_RECURSE KERNEL_SOURCES "*.cpp" ${ATTN_KERNEL_SRCS_GEN})
 
   # Create static library
   add_library(${LIBRARY_NAME} SHARED ${KERNEL_SOURCES})
