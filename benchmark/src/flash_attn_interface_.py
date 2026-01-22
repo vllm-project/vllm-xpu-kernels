@@ -1,0 +1,165 @@
+# SPDX-License-Identifier: Apache-2.0
+from typing import Optional
+
+import torch
+
+#isort: off
+try:
+    from . import _vllm_fa2_C  # noqa: F401
+    FA2_UNAVAILABLE_REASON = None
+    FA2_AVAILABLE = True
+except ImportError as e:
+    FA2_UNAVAILABLE_REASON = str(e)
+    FA2_AVAILABLE = False
+
+#isort: on
+
+DEFAULT_FA_VERSION = 2
+
+
+def maybe_contiguous(x):
+    return x.contiguous() if x is not None and x.stride(-1) != 1 else x
+
+
+# vllm_xpu_kernel,main,
+#   https://github.com/vllm-project/vllm-xpu-kernels/tree/3cf991b
+def flash_attn_varlen_func_CalKernelTime(
+    q,
+    k,
+    v,
+    max_seqlen_q,
+    cu_seqlens_q,
+    max_seqlen_k,
+    cu_seqlens_k=None,  # only used for non-paged prefill
+    seqused_k=None,
+    q_v=None,
+    dropout_p=0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size: Optional[list[int]] = None,
+    softcap=0.0,  # 0.0 means deactivated
+    alibi_slopes=None,
+    deterministic=False,
+    return_attn_probs=False,
+    block_table=None,
+    return_softmax_lse=False,
+    out=None,
+    # FA3 Only
+    scheduler_metadata=None,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
+    num_splits: int = 0,
+    # Version selector
+    fa_version: int = DEFAULT_FA_VERSION,
+    s_aux: Optional[torch.Tensor] = None,
+    num_splits_kv: Optional[int] = None,
+    start_event: Optional[torch.Event] = None,
+    end_event: Optional[torch.Event] = None,
+    device: str = "xpu",
+):
+    """
+    FlashAttention interface for variable-length sequences, with optional
+    paged KV cache support.
+
+    Args:
+        q, k, v: Query, key, value tensors.
+        max_seqlen_q: Maximum query sequence length in the batch.
+        cu_seqlens_q: Cumulative sequence lengths for queries.
+        max_seqlen_k: Maximum key/value sequence length in the batch.
+        cu_seqlens_k: Cumulative sequence lengths for keys/values when not
+            using paged KV cache.
+        seqused_k: Number of tokens used per sequence when using paged KV.
+        block_table: Optional block table for paged KV cache.
+        num_splits: Backend-specific split parameter (non-KV specific),
+            typically used to control work partitioning in some FA versions.
+        num_splits_kv: Optional number of splits applied to KV **blocks**
+            when using paged KV cache. This is forwarded to the underlying
+            C++ FlashAttention op as its ``num_splits`` parameter; the split
+            unit is KV blocks, not individual tokens or pages.
+        fa_version: FlashAttention backend version selector.
+    """
+    assert cu_seqlens_k is not None or seqused_k is not None, \
+        "cu_seqlens_k or seqused_k must be provided"
+    assert cu_seqlens_k is None or seqused_k is None, \
+        "cu_seqlens_k and seqused_k cannot be provided at the same time"
+    assert block_table is None or seqused_k is not None, \
+        "when enable block_table, seqused_k is needed"
+    assert block_table is not None or cu_seqlens_k is not None, \
+        "when block_table is disabled, cu_seqlens_k is needed"
+
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1]**(-0.5)
+    if k_descale is not None:
+        assert sum(k_descale.stride()) == 0 and \
+            k_descale.dtype == torch.float32, \
+            "k_descale must be view of single float32 scalar tensor"
+    if v_descale is not None:
+        assert sum(v_descale.stride()) == 0 and \
+            v_descale.dtype == torch.float32, \
+            "v_descale must be view of single float32 scalar tensor"
+    # custom op does not support non-tuple input
+    real_window_size: tuple[int, int]
+    if window_size is None:
+        real_window_size = (-1, -1)
+    else:
+        assert len(window_size) == 2
+        real_window_size = (window_size[0], window_size[1])
+    q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
+
+    dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
+
+    if fa_version == 2:
+        if scheduler_metadata is not None and q_descale is not None \
+            and k_descale is not None and v_descale is not None:
+            raise NotImplementedError(
+                "FA2 does not support scheduler_metadata, q_descale, "
+                "k_descale, v_descale")
+        if num_splits > 1:
+            raise NotImplementedError("FA2 does not support num_splits > 1")
+        if q_descale is not None:
+            raise NotImplementedError("FA2 does not support q_descale")
+        if scheduler_metadata is not None:
+            raise NotImplementedError(
+                "FA2 does not support scheduler_metadata")
+        if (k_descale is not None
+                and v_descale is None) or (k_descale is None
+                                           and v_descale is not None):
+            raise NotImplementedError(
+                "FA2 only supports both KV cache descaled")
+
+        start_event.record()
+        out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
+            q,
+            k,
+            v,
+            out,
+            cu_seqlens_q,
+            # cu_seqlens_k not used since we use seqused_k, but flash_api.cpp
+            # still wants it so we pass all zeros
+            dummy_cu_seqlens_k if cu_seqlens_k is None else cu_seqlens_k,
+            seqused_k,
+            None,
+            block_table,
+            alibi_slopes,
+            max_seqlen_q,
+            max_seqlen_k,
+            dropout_p,
+            k_descale,
+            v_descale,
+            softmax_scale,
+            s_aux,
+            False,
+            causal,
+            real_window_size[0],
+            real_window_size[1],
+            softcap,
+            return_softmax_lse and dropout_p > 0,
+            None,
+            num_splits_kv,
+        )
+        end_event.record()
+        end_event.synchronize()
+    else:
+        raise NotImplementedError("not support yet")
+    return (out, softmax_lse) if return_softmax_lse else (out)
