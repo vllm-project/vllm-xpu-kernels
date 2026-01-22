@@ -1,5 +1,7 @@
 #include "paged_decode.hpp"
 
+using namespace cute;
+
 // Runtime dispatcher helper
 template <typename decode_policy, bool... Bs>
 void decode_policy_dispatch_impl(

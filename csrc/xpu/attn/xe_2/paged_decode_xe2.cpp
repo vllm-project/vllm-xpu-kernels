@@ -1,5 +1,5 @@
 #include "paged_decode_xe2.h"
-#include "paged_decode.hpp"
+#include "paged.hpp"
 
 void cutlass_paged_decode_xe2(
     sycl::queue& queue,

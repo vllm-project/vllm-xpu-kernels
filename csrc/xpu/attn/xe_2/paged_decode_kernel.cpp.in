@@ -26,8 +26,6 @@ using namespace cute;
 // clang-format off
 // macros to be filled in CMake
 #define IMPL_POLICY ${IMPL_POLICY}
-#define IMPL_QGROUP ${IMPL_QGROUP}
-#define IMPL_HEADSIZE ${IMPL_HEADSIZE}
 #cmakedefine01 IMPL_KISCAUSAL
 #cmakedefine01 IMPL_KISLOCAL
 #cmakedefine01 IMPL_KISSINK
@@ -35,7 +33,7 @@ using namespace cute;
 
 #define INSTANTIATE_KERNEL() \
   template void decode_policy_dispatch< \
-  decode_policy_qpacked_head<IMPL_QGROUP, IMPL_HEADSIZE>, \
+  IMPL_POLICY, \
   static_cast<bool>(IMPL_KISCAUSAL), \
   static_cast<bool>(IMPL_KISLOCAL), \
   static_cast<bool>(IMPL_KISSINK)>(sycl::queue& queue, CutlassType cuType, const paged_decode_args_t& args);

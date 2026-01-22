@@ -1,6 +1,8 @@
 #include "paged.hpp"
 #include "paged_decode_extern.hpp"
 
+using namespace cute;
+
 void cutlass_paged_decode_impl(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]

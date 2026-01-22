@@ -24,6 +24,17 @@
 
 using namespace cute;
 
+using decode_policy_q8_h64 = decode_policy_qpacked_head<_8, _64>;
+using decode_policy_q8_h96 = decode_policy_qpacked_head<_8, _96>;
+using decode_policy_q8_h128 = decode_policy_qpacked_head<_8, _128>;
+using decode_policy_q8_h192 = decode_policy_qpacked_head<_8, _192>;
+using decode_policy_q8_h256 = decode_policy_qpacked_head<_8, _256>;
+using decode_policy_q16_h64 = decode_policy_qpacked_head<_16, _64>;
+using decode_policy_q16_h96 = decode_policy_qpacked_head<_16, _96>;
+using decode_policy_q16_h128 = decode_policy_qpacked_head<_16, _128>;
+using decode_policy_q16_h192 = decode_policy_qpacked_head<_16, _192>;
+using decode_policy_q16_h256 = decode_policy_qpacked_head<_16, _256>;
+
 struct paged_decode_args_t {
   void* query;
   void* key;
