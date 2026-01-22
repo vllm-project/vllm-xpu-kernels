@@ -1,4 +1,4 @@
-#include "paged_decode.hpp"
+#include "paged.hpp"
 #include "paged_decode_extern.hpp"
 
 void cutlass_paged_decode_impl(
