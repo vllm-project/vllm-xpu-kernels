@@ -4,23 +4,23 @@ using namespace cute;
 
 // Runtime dispatcher helper
 template <typename decode_policy, bool... Bs>
-void decode_policy_dispatch_impl(
+void decode_policy_dispatch_func(
     sycl::queue& queue, CutlassType cuType, const paged_decode_args_t& args) {
-  decode_policy_dispatch<decode_policy, Bs...>(queue, cuType, args);
+  decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuType, args);
 }
 
 template <typename decode_policy, bool... Bs, typename... Ts>
-void decode_policy_dispatch_impl(
+void decode_policy_dispatch_func(
     sycl::queue& queue,
     CutlassType cuType,
     const paged_decode_args_t& args,
     bool b,
     Ts... ts) {
   if (b) {
-    decode_policy_dispatch_impl<decode_policy, Bs..., true>(
+    decode_policy_dispatch_func<decode_policy, Bs..., true>(
         queue, cuType, args, ts...);
   } else {
-    decode_policy_dispatch_impl<decode_policy, Bs..., false>(
+    decode_policy_dispatch_func<decode_policy, Bs..., false>(
         queue, cuType, args, ts...);
   }
 }
@@ -33,23 +33,23 @@ inline void dispatch_by_head_size(
     const paged_decode_args_t& args) {
   switch (head_case) {
     case 0:
-      decode_policy_dispatch_impl<decode_policy_qpacked_head<QGroup, _64>>(
+      decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _64>>(
           queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 1:
-      decode_policy_dispatch_impl<decode_policy_qpacked_head<QGroup, _96>>(
+      decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _96>>(
           queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 2:
-      decode_policy_dispatch_impl<decode_policy_qpacked_head<QGroup, _128>>(
+      decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _128>>(
           queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 3:
-      decode_policy_dispatch_impl<decode_policy_qpacked_head<QGroup, _192>>(
+      decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _192>>(
           queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 4:
-      decode_policy_dispatch_impl<decode_policy_qpacked_head<QGroup, _256>>(
+      decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _256>>(
           queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     default:

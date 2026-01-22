@@ -18,12 +18,12 @@ using namespace cute;
 // =============================================================================
 // Explicit Template Instantiation
 // =============================================================================
-// Instantiate the decode_policy_dispatch function template with the specific
+// Instantiate the decode_policy_dispatch_impl function template with the specific
 // policy and boolean flag combinations provided by CMake. This produces one
 // compiled kernel per source file.
 
 #define INSTANTIATE_KERNEL() \
-  template void decode_policy_dispatch< \
+  template void decode_policy_dispatch_impl< \
   IMPL_POLICY, \
   static_cast<bool>(IMPL_KISCAUSAL), \
   static_cast<bool>(IMPL_KISLOCAL), \
