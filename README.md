@@ -3,7 +3,7 @@
 This repo is designed as a vLLM plugin which provides custom kernels for Intel GPU (known as XPU in PyTorch).
 
 ## Getting started
-Currently we use PyTorch 2.8, oneapi 2025.1.
+Currently we use PyTorch 2.10, oneapi 2025.3.
 
 ### How it works
 python3 setup.py build - will build a `_C.abi3.so` under build directory
@@ -14,7 +14,7 @@ On vllm side, we will `import vllm_xpu_kernels._C` at start time which should re
 
 ### Prepare
 
-Install oneapi 2025.1 deep learning essential [dependency](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html).
+Install oneapi 2025.3 deep learning essential [dependency](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html).
 
 Create a new virtual env, install build dependency and torch dependency
 
@@ -75,3 +75,7 @@ Using shared libraries requires correct paths and environment setup (`LD_LIBRARY
 #### 4. **Aligning with PyTorch**
 
 One key reason to use static linking is to maintain consistency with the PyTorch ecosystem. PyTorch itself statically links libraries like DNNL to ensure deterministic and reliable behavior across different environments.
+
+## License
+
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
