@@ -8,16 +8,16 @@
 // To add a new decode policy, define aliases to avoid comma issues in macros
 
 // X-Macro list using aliases
-#define DECODE_POLICY_LIST(X) \
-  X(decode_policy_q8_h64)     \
-  X(decode_policy_q8_h96)     \
-  X(decode_policy_q8_h128)    \
-  X(decode_policy_q8_h192)    \
-  X(decode_policy_q8_h256)    \
-  X(decode_policy_q16_h64)    \
-  X(decode_policy_q16_h96)    \
-  X(decode_policy_q16_h128)   \
-  X(decode_policy_q16_h192)   \
+#define PAGED_DECODE_POLICY_LIST(X) \
+  X(decode_policy_q8_h64)           \
+  X(decode_policy_q8_h96)           \
+  X(decode_policy_q8_h128)          \
+  X(decode_policy_q8_h192)          \
+  X(decode_policy_q8_h256)          \
+  X(decode_policy_q16_h64)          \
+  X(decode_policy_q16_h96)          \
+  X(decode_policy_q16_h128)         \
+  X(decode_policy_q16_h192)         \
   X(decode_policy_q16_h256)
 
 // =============================================================================
@@ -54,7 +54,7 @@
   DECLARE_FOR_LOCAL(POLICY, true)
 
 // Apply the bool combination generator to all policies
-DECODE_POLICY_LIST(DECLARE_ALL_BOOL_COMBINATIONS)
+PAGED_DECODE_POLICY_LIST(DECLARE_ALL_BOOL_COMBINATIONS)
 
 // Cleanup macros
 #undef DECLARE_ALL_BOOL_COMBINATIONS
