@@ -1,4 +1,5 @@
 #include "paged_decode.hpp"
+#include "paged_decode_extern.hpp"
 
 void cutlass_paged_decode_impl(
     sycl::queue& queue,
