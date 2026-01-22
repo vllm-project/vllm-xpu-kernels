@@ -312,21 +312,10 @@ struct FMHAConfig {
     return run<cutlass::fmha::kernel::XeFHMAIndividualTileScheduler>(
         queue, args);
   }
-
-  // template <bool... Bs, typename... Ts>
-  // static void kernel_dispatch(
-  //     sycl::queue& queue, const chunk_prefill_args_t& args, bool b, Ts... ts)
-  //     {
-  //   if (b) {
-  //     kernel_dispatch<Bs..., true>(queue, args, ts...);
-  //   } else {
-  //     kernel_dispatch<Bs..., false>(queue, args, ts...);
-  //   }
-  // }
 };
 
 template <typename chunk_policy, bool Paged, bool Causal, bool Local, bool Sink>
-void policy_dispatch(
+void policy_dispatch_impl(
     sycl::queue& queue, CutlassType cuType, const chunk_prefill_args_t& args) {
   const int PipelineStages = 2;
   if (cuType == CutlassType::half) {
