@@ -306,7 +306,6 @@ struct FMHAConfig {
     launcher.run(queue, args, hw_info);
   }
 
-  // template <bool... Bs>
   static void
   kernel_dispatch(sycl::queue& queue, const chunk_prefill_args_t& args) {
     return run<cutlass::fmha::kernel::XeFHMAIndividualTileScheduler>(

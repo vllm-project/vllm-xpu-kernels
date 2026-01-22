@@ -13,12 +13,15 @@ using namespace cute;
 #cmakedefine01 IMPL_KISLOCAL
 // clang-format on
 
-#define INSTANTIATE_KERNEL() \
-  template void policy_dispatch_impl< \
-  IMPL_POLICY, \
-  static_cast<bool>(IMPL_KISPAGED), \
-  static_cast<bool>(IMPL_KISCAUSAL), \
-  static_cast<bool>(IMPL_KISLOCAL), \
-  static_cast<bool>(IMPL_KISSINK)>(sycl::queue& queue, CutlassType cuType, const chunk_prefill_args_t& args);
+#define INSTANTIATE_KERNEL()             \
+  template void policy_dispatch_impl<    \
+      IMPL_POLICY,                       \
+      static_cast<bool>(IMPL_KISPAGED),  \
+      static_cast<bool>(IMPL_KISCAUSAL), \
+      static_cast<bool>(IMPL_KISLOCAL),  \
+      static_cast<bool>(IMPL_KISSINK)>(  \
+      sycl::queue & queue,               \
+      CutlassType cuType,                \
+      const chunk_prefill_args_t& args);
 
 INSTANTIATE_KERNEL()
