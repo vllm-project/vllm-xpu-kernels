@@ -22,6 +22,7 @@ SLIDING_WINDOWS = [(-1, 127), (127, -1), (127, 127), (-1, -1)]
 SINK = [False, True]
 CASUAL = [False, True]
 PAGED = [False, True]
+FP8KV = [torch.float8_e5m2, torch.float8_e4m3fn, None]
 
 
 def ref_paged_attn(query: torch.Tensor,
@@ -36,13 +37,18 @@ def ref_paged_attn(query: torch.Tensor,
                    soft_cap: Optional[float] = None,
                    is_paged: Optional[bool] = True,
                    casual: Optional[bool] = False,
-                   sink: Optional[torch.Tensor] = None) -> torch.Tensor:
+                   sink: Optional[torch.Tensor] = None,
+                   is_fp8kv: bool = False) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     if is_paged:
         _, block_size, num_kv_heads, head_size = key_cache.shape
     else:
         _, num_kv_heads, head_size = key_cache.shape
+
+    if is_fp8kv:
+        key_cache = key_cache.to(query.dtype)
+        value_cache = value_cache.to(query.dtype)
 
     outputs: list[torch.Tensor] = []
     start_idx = 0
@@ -131,6 +137,7 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("is_sink", SINK)
 @pytest.mark.parametrize("is_casual", CASUAL)
 @pytest.mark.parametrize("is_paged", PAGED)
+@pytest.mark.parametrize("fp8_dtype", FP8KV)
 @torch.inference_mode()
 def test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -146,6 +153,7 @@ def test_varlen_with_paged_kv(
     is_sink: bool,
     is_casual: bool,
     is_paged: bool,
+    fp8_dtype: Optional[torch.dtype],
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -222,6 +230,11 @@ def test_varlen_with_paged_kv(
         q_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
+    is_fp8kv = False
+    if fp8_dtype is not None:
+        is_fp8kv = True
+        maybe_quantized_key_cache = key_cache.to(fp8_dtype)
+        maybe_quantized_value_cache = value_cache.to(fp8_dtype)
 
     if is_paged:
         output = flash_attn_varlen_func(maybe_quantized_query,
@@ -261,7 +274,8 @@ def test_varlen_with_paged_kv(
                                 is_paged=is_paged,
                                 sink=sink,
                                 window_size_left=window_size[0],
-                                window_size_right=window_size[1])
+                                window_size_right=window_size[1],
+                                is_fp8kv=is_fp8kv)
     atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1

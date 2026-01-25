@@ -11,6 +11,8 @@ void cutlass_chunk_prefill_xe2(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    float k_scale,
+    float v_scale,
     double sm_scale,
     std::optional<const at::Tensor>& sm_sink_,
     int window_size_left,

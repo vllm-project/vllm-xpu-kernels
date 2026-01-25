@@ -63,6 +63,10 @@ def flash_attn_varlen_func(
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
+    if k_descale is None:
+        k_descale = 1.0
+    if v_descale is None:
+        v_descale = 1.0
     # custom op does not support non-tuple input
     real_window_size: tuple[int, int]
     if window_size is None:
@@ -82,6 +86,16 @@ def flash_attn_varlen_func(
                 "k_descale, v_descale")
         if num_splits > 1:
             raise NotImplementedError("FA2 does not support num_splits > 1")
+        if q_descale is not None:
+            raise NotImplementedError("FA2 does not support q_descale")
+        if scheduler_metadata is not None:
+            raise NotImplementedError(
+                "FA2 does not support scheduler_metadata")
+        if (k_descale is not None
+                and v_descale is None) or (k_descale is None
+                                           and v_descale is not None):
+            raise NotImplementedError(
+                "FA2 only supports both KV cache descaled")
         out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
             q,
             k,
@@ -98,6 +112,8 @@ def flash_attn_varlen_func(
             max_seqlen_q,
             max_seqlen_k,
             dropout_p,
+            k_descale,
+            v_descale,
             softmax_scale,
             s_aux,
             False,
