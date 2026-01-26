@@ -283,6 +283,7 @@ def test_varlen_with_paged_kv(
         atol, rtol = 1.5e-2, 1.5e-2
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
 
 
 @pytest.mark.parametrize("seq_lens",
@@ -400,3 +401,4 @@ def test_decode_with_paged_kv(
         atol, rtol = 1.5e-1, 1.5e-1
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()

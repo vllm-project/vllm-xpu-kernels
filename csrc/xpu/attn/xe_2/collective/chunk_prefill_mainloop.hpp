@@ -456,9 +456,10 @@ struct FMHAFwdMainloop<
         copy(copy_v, tVgV_cache(_, _, _, VV), tVrV);
         reorder(tVrV, tArV);
         if constexpr (Fp8KV) {
+          CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tArV.size(); ++i) {
             tArV(i) = static_cast<ElementQ>(
-                params.scale_k * static_cast<float>(tArV(i)));
+                params.scale_v * static_cast<float>(tArV(i)));
           }
         }
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
