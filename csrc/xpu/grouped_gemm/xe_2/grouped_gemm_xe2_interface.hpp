@@ -50,7 +50,6 @@
 #include "cutlass/tensor_ref.h"
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/device_memory.h"
-#include "cutlass/util/initialize_block.hpp"
 #include "cutlass/util/reference/device/gemm_complex.h"
 #include "cutlass/util/reference/device/tensor_compare.h"
 #include "cutlass/util/reference/host/tensor_fill.h"
