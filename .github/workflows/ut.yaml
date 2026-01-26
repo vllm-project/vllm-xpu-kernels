@@ -32,7 +32,7 @@ jobs:
       - name: build docker image & push to local
         id: build-image
         run: |
-          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
+          docker build -t xpu-kernel-ci-image:latest -f Dockerfile.xpu .
           docker tag xpu-kernel-ci-image:latest ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
           docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
 
@@ -54,7 +54,7 @@ jobs:
       - name: build docker image & push to local
         id: build-image
         run: |
-          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
+          docker build -t xpu-kernel-ci-image:latest -f Dockerfile.xpu .
           docker tag xpu-kernel-ci-image:latest ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
           docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
 
@@ -95,7 +95,7 @@ jobs:
   run-unit-tests-bmg:
     runs-on: self-hosted-bmg
     needs: build-docker-image-latest-bmg
-    timeout-minutes: 30
+    timeout-minutes: 40
     container: 
       image: localhost:5000/xpu-kernel-ci-image:latest
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged 
