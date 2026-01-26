@@ -264,8 +264,8 @@ def test_varlen_with_paged_kv(
                                         s_aux=sink)
 
     ref_output = ref_paged_attn(query=query,
-                                key_cache=key_cache,
-                                value_cache=value_cache,
+                                key_cache=maybe_quantized_key_cache,
+                                value_cache=maybe_quantized_value_cache,
                                 query_lens=query_lens,
                                 kv_lens=kv_lens,
                                 block_tables=block_tables,
