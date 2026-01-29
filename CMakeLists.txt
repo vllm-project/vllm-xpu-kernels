@@ -410,7 +410,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
   set(VLLM_EXT_XPU_SRC
       "csrc/xpu/torch_bindings.cpp" "csrc/xpu/lora/lora_shrink.cpp"
       "csrc/xpu/lora/lora_expand.cpp" "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
-      "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp")
+      "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp" "csrc/xpu/utils.cpp")
   include_directories("/usr/include")
   # TODO: check if we need this flags list(APPEND VLLM_GPU_FLAGS
   # "-gline-tables-only")

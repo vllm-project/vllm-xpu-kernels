@@ -66,6 +66,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor indices, int slice_offset, int slice_size, bool add_to_output) "
       "-> ()");
   xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
+
+  // for empty tensor functions, we don't need dispatch key like torch::kXPU
+  xpu_ops.def("is_bmg(int device_index) -> bool");
+  xpu_ops.impl("is_bmg", &is_bmg);
+
+  xpu_ops.def("is_pvc(int device_index) -> bool");
+  xpu_ops.impl("is_pvc", &is_pvc);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
