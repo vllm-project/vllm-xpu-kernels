@@ -2,33 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from typing import Optional, Union
 
 import torch
 import triton
-from torch import nn
 
 from tests.utils import parse_args, STR_DTYPE_TO_TORCH_DTYPE
 from tests.ops.fp8_quant_op import scaled_fp8_quant
 from tests.register_ops import fp8_gemm_w8a16
 
 
-def fp8_gemm_naive(*args, **kwargs):
-    input, weight, trans_wei = args
+def fp8_gemm_naive(input, weight, trans_wei):
     if trans_wei:
         output_ref = torch.matmul(input, weight.t())
     else:
         output_ref = torch.matmul(input, weight)
     return output_ref
 
-
-@torch.compile
-def fp8_gemm_compile(*args, **kwargs):
-   pass
-
-
-def fp8_gemm_vllm(*args, **kwargs):
-    input, weight_fp8, trans_wei, scale_wei, is_mbk = args
+def fp8_gemm_vllm(input, weight_fp8, trans_wei, scale_wei, is_mbk):
     if is_mbk:
         input = input.transpose(0, 1)
     output_fp8 = fp8_gemm_w8a16(
@@ -40,11 +30,6 @@ def fp8_gemm_vllm(*args, **kwargs):
     output_fp8 = output_fp8.transpose(0, 1) if is_mbk else output_fp8
     return output_fp8
 
-
-def fp8_gemm_ipex(*args, **kwargs):
-    pass
-
-
 def data_preparation(dtype, fp8_dtype, trans_wei, batch, m, n, k):
     input = torch.randn([batch, m, k], dtype=dtype,
                         device=torch.device("xpu")) / 10.0
@@ -54,10 +39,15 @@ def data_preparation(dtype, fp8_dtype, trans_wei, batch, m, n, k):
         weight = torch.ones([k, n], dtype=dtype).xpu()
     scale_wei = (torch.ones(batch) * 4).xpu()
     scale_shape = None
-    weight_fp8, _ = scaled_fp8_quant(weight, scale_wei, False, False,
-                                     fp8_dtype, scale_shape)
+    weight_fp8, _ = scaled_fp8_quant(
+        weight,
+        scale=scale_wei,
+        use_per_token_if_dynamic=False,
+        output=None,
+        fp8_dtype=fp8_dtype,
+        scale_ub=scale_shape,
+    )
     return input, weight, weight_fp8, scale_wei
-
 
 
 def calculate_diff(config):
@@ -73,8 +63,8 @@ def calculate_diff(config):
     output_naive = fp8_gemm_naive(input.clone(), weight, trans_wei)
     output_vllm = fp8_gemm_vllm(input.clone(), weight_fp8, trans_wei, scale_wei, is_mbk)
 
-    print(f"Naive output={output_naive}")
-    print(f"vLLM output={output_vllm}")
+    #print(f"Naive output={output_naive}")
+    #print(f"vLLM output={output_vllm}")
 
     if torch.allclose(output_naive, output_vllm, atol=5e-2, rtol=5e-2):
         print("✅ All implementations match")
@@ -157,7 +147,7 @@ if __name__ == "__main__":
     configs = list(
         itertools.product(dtype, fp8_dtype, trans_wei, is_mbk,
                           batch_size, MNK_FACTORS))
-    # Run correctness test
+    # fp8_numerical_sanity_check
     for config in configs:
         calculate_diff(config)
 
