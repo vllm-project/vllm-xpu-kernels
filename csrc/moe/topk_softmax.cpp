@@ -105,7 +105,8 @@ class moeTopK {
       const int k,
       const int start_expert,
       const int end_expert,
-      const bool renormalize)
+      const bool renormalize,
+      const float* bias)
       : inputs_after_softmax(inputs_after_softmax),
         finished(finished),
         output(output),
@@ -115,7 +116,8 @@ class moeTopK {
         k(k),
         start_expert(start_expert),
         end_expert(end_expert),
-        renormalize(renormalize) {}
+        renormalize(renormalize),
+        bias(bias) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
@@ -141,7 +143,9 @@ class moeTopK {
       for (int expert = local_id_x; expert < num_experts; expert += TPB) {
         const int idx = thread_read_offset + expert;
         inpIdx = expert;
-        inpVal = inputs_after_softmax[idx];
+        // inpVal = inputs_after_softmax[idx];
+        inpVal =
+            inputs_after_softmax[idx] + (bias != nullptr ? bias[expert] : 0.0f);
 
         for (int prior_k = 0; prior_k < k_idx; ++prior_k) {
           const int prior_winning_expert = indices[k * block_row + prior_k];
@@ -162,7 +166,8 @@ class moeTopK {
           sycl::reduce_over_group(group, kVal, sycl::maximum<float>());
       const int resultIdx = sycl::reduce_over_group(
           group, resultVal == kVal ? kIdx : 0x7FFFFFFF, sycl::minimum<int>());
-      sum_val += resultVal;
+      // sum_val += resultVal;
+      sum_val += inputs_after_softmax[thread_read_offset + resultIdx];
 
       if (local_id_x == 0) {
         // Ignore experts the node isn't responsible for with expert parallelism
@@ -172,7 +177,8 @@ class moeTopK {
         const bool should_process_row = row_is_active && node_uses_expert;
 
         const int idx = k * block_row + k_idx;
-        output[idx] = resultVal;
+        // output[idx] = resultVal;
+        output[idx] = inputs_after_softmax[thread_read_offset + expert];
         indices[idx] =
             should_process_row ? (expert - start_expert) : num_experts;
         assert(indices[idx] >= 0);
@@ -201,6 +207,7 @@ class moeTopK {
   const int start_expert;
   const int end_expert;
   const bool renormalize;
+  const float* bias;
 };
 
 // ====================== TopK softmax things ===============================
@@ -240,7 +247,8 @@ class topkGatingSoftmax {
       const int k,
       const int start_expert,
       const int end_expert,
-      const bool renormalize)
+      const bool renormalize,
+      const float* bias)
       : input(input),
         finished(finished),
         output(output),
@@ -250,7 +258,8 @@ class topkGatingSoftmax {
         k(k),
         start_expert(start_expert),
         end_expert(end_expert),
-        renormalize(renormalize) {}
+        renormalize(renormalize),
+        bias(bias) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<2> item) const {
@@ -395,14 +404,38 @@ class topkGatingSoftmax {
       row_chunk[ii] = row_chunk[ii] * reciprocal_row_sum;
     }
 
+    static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
+
+    // If bias is not null, use biased value for selection
+    float row_chunk_with_bias[VPT];
+    // Apply correction bias
+    if (bias != nullptr) {
+#pragma unroll
+      for (int ldg = 0; ldg < LDG_PER_THREAD; ++ldg) {
+#pragma unroll
+        for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
+          const int expert =
+              first_elt_read_by_thread + ldg * COLS_PER_GROUP_LDG + ii;
+          float bias_val = expert < NUM_EXPERTS ? bias[expert] : 0.0f;
+          row_chunk_with_bias[ldg * ELTS_PER_LDG + ii] =
+              row_chunk[ldg * ELTS_PER_LDG + ii] + bias_val;
+        }
+      }
+    } else {
+#pragma unroll
+      for (int ii = 0; ii < VPT; ++ii) {
+        row_chunk_with_bias[ii] = row_chunk[ii];
+      }
+    }
+
     // Now, softmax_res contains the softmax of the row chunk. Now, I want to
     // find the topk elements in each row, along with the max index.
     int start_col = first_elt_read_by_thread;
-    static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
     float sum_val = 0.0f;
 
     for (int k_idx = 0; k_idx < k; ++k_idx) {
       // First, each thread does the local argmax
+      float max_val_with_bias = row_chunk_with_bias[0];
       float max_val = row_chunk[0];
       int expert_local = start_col;
       int max_val_idx = 0;
@@ -411,11 +444,13 @@ class topkGatingSoftmax {
            ++ldg, col += COLS_PER_GROUP_LDG) {
 #pragma unroll
         for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
+          float val_with_bias = row_chunk_with_bias[ldg * ELTS_PER_LDG + ii];
           float val = row_chunk[ldg * ELTS_PER_LDG + ii];
 
           // No check on the experts here since columns with the smallest index
           // are processed first and only updated if > (not >=)
-          if (val > max_val) {
+          if (val_with_bias > max_val_with_bias) {
+            max_val_with_bias = val_with_bias;
             max_val = val;
             expert_local = col + ii;
             max_val_idx = ldg * ELTS_PER_LDG + ii;
@@ -431,13 +466,19 @@ class topkGatingSoftmax {
       int expert = expert_local;
 #pragma unroll
       for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+        float other_max_with_bias =
+            sycl::permute_group_by_xor(sg, max_val_with_bias, mask);
         float other_max = sycl::permute_group_by_xor(sg, max_val, mask);
         int other_expert = sycl::permute_group_by_xor(sg, expert, mask);
 
         // We want lower indices to "win" in every thread so we break ties this
         // way
-        if (other_max > max_val ||
-            (other_max == max_val && other_expert < expert)) {
+        // if (other_max > max_val ||
+        //     (other_max == max_val && other_expert < expert)) {
+        if (other_max_with_bias > max_val_with_bias ||
+            (other_max_with_bias == max_val_with_bias &&
+             other_expert < expert)) {
+          max_val_with_bias = other_max_with_bias;
           max_val = other_max;
           expert = other_expert;
         }
@@ -465,7 +506,8 @@ class topkGatingSoftmax {
       // Finally, we clear the value in the thread with the current max if there
       // is another iteration to run.
       if (expert == expert_local) {
-        row_chunk[max_val_idx] = -10000.f;
+        row_chunk_with_bias[max_val_idx] = -10000.f;
+        // row_chunk[max_val_idx] = -10000.f;
       }
     }
 
@@ -488,6 +530,7 @@ class topkGatingSoftmax {
   const int start_expert;
   const int end_expert;
   const bool renormalize;
+  const float* bias;
 };
 
 namespace detail {
@@ -530,6 +573,7 @@ void topkGatingSoftmaxLauncherHelper(
     const int start_expert,
     const int end_expert,
     bool renormalize,
+    float* bias,
     sycl::queue& queue) {
   static constexpr int BYTES_PER_LDG =
       MIN(MAX_BYTES_PER_LDG, sizeof(InputdType) * EXPERTS);
@@ -562,7 +606,8 @@ void topkGatingSoftmaxLauncherHelper(
             k,
             start_expert,
             end_expert,
-            renormalize));
+            renormalize,
+            bias));
   });
 }
 
@@ -584,6 +629,7 @@ void topkGatingSoftmaxLauncherHelper(
       0,                                                                       \
       num_experts,                                                             \
       renormalize,                                                             \
+      bias,                                                                    \
       queue);
 
 template <typename InputdType, typename IndType>
@@ -597,6 +643,7 @@ void topkGatingSoftmaxKernelLauncher(
     const int num_experts,
     const int topk,
     const bool renormalize,
+    float* bias,
     sycl::queue& queue) {
   static constexpr int WARPS_PER_TB = 4;
   static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
@@ -679,7 +726,8 @@ void topkGatingSoftmaxKernelLauncher(
                 topk,
                 0,
                 num_experts,
-                renormalize));
+                renormalize,
+                bias));
       });
     }
   }
@@ -693,7 +741,8 @@ void topk_softmax(
     torch::Tensor& topk_indices,          // [num_tokens, topk]
     torch::Tensor& token_expert_indices,  // [num_tokens, topk]
     torch::Tensor& gating_output,         // [num_tokens, num_experts]
-    const bool renormalize) {
+    const bool renormalize,
+    std::optional<torch::Tensor> bias) {
   const int num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
   const int topk = topk_weights.size(-1);
@@ -719,6 +768,7 @@ void topk_softmax(
       num_experts,                                                     \
       topk,                                                            \
       renormalize,                                                     \
+      bias.has_value() ? bias->data_ptr<float>() : nullptr,            \
       queue);
 
   if (topk_indices.scalar_type() == at::ScalarType::Int) {
