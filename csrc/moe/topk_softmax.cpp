@@ -143,7 +143,6 @@ class moeTopK {
       for (int expert = local_id_x; expert < num_experts; expert += TPB) {
         const int idx = thread_read_offset + expert;
         inpIdx = expert;
-        // inpVal = inputs_after_softmax[idx];
         inpVal =
             inputs_after_softmax[idx] + (bias != nullptr ? bias[expert] : 0.0f);
 
@@ -166,7 +165,6 @@ class moeTopK {
           sycl::reduce_over_group(group, kVal, sycl::maximum<float>());
       const int resultIdx = sycl::reduce_over_group(
           group, resultVal == kVal ? kIdx : 0x7FFFFFFF, sycl::minimum<int>());
-      // sum_val += resultVal;
       sum_val += inputs_after_softmax[thread_read_offset + resultIdx];
 
       if (local_id_x == 0) {
@@ -177,7 +175,6 @@ class moeTopK {
         const bool should_process_row = row_is_active && node_uses_expert;
 
         const int idx = k * block_row + k_idx;
-        // output[idx] = resultVal;
         output[idx] = inputs_after_softmax[thread_read_offset + expert];
         indices[idx] =
             should_process_row ? (expert - start_expert) : num_experts;
@@ -473,8 +470,6 @@ class topkGatingSoftmax {
 
         // We want lower indices to "win" in every thread so we break ties this
         // way
-        // if (other_max > max_val ||
-        //     (other_max == max_val && other_expert < expert)) {
         if (other_max_with_bias > max_val_with_bias ||
             (other_max_with_bias == max_val_with_bias &&
              other_expert < expert)) {
@@ -507,7 +502,6 @@ class topkGatingSoftmax {
       // is another iteration to run.
       if (expert == expert_local) {
         row_chunk_with_bias[max_val_idx] = -10000.f;
-        // row_chunk[max_val_idx] = -10000.f;
       }
     }
 
