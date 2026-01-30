@@ -13,11 +13,17 @@ def topk_softmax(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
+    bias: Optional[torch.Tensor] = None,
     indices_type: Optional[torch.dtype] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
     routing_weights = torch.softmax(gating_output, dim=-1, dtype=torch.float32)
-    topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+    if bias is not None:
+        routing_weights_with_bias = routing_weights + bias.unsqueeze(0)
+        _, topk_ids = torch.topk(routing_weights_with_bias, topk, dim=-1)
+        topk_weights = routing_weights.gather(1, topk_ids)
+    else:
+        topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
@@ -29,6 +35,7 @@ def fused_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
+    bias: Optional[torch.Tensor] = None,
     indices_type: Optional[torch.dtype] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), (
@@ -56,6 +63,7 @@ def fused_topk(
         token_expert_indices,
         gating_output,
         renormalize,
+        bias,
     )
 
     return topk_weights, topk_ids
