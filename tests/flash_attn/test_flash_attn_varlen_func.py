@@ -119,7 +119,10 @@ MINI_PYTEST_PARAMS = {
     "test_varlen_with_paged_kv": {
         "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
         "head_size": [64, 128],
+        "num_heads": [(8, 2)],
         "num_blocks": [64],
+        "window_size": [(-1, -1), (127, 127)],
+        "is_paged": [True]
     },
     "test_decode_with_paged_kv": {
         "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
