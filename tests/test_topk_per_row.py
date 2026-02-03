@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 # tested in upstream repo instead
 
 # Test parameters
-NUM_ROWS = [1, 32, 2050]
+NUM_ROWS = [1, 32, 2050, 8239]
 TOP_K_VALUES = [2048, 3000]
 BATCH_SIZE = [1, 2, 2048]
 NEXT_N = [1, 8]
@@ -213,6 +213,8 @@ def _run_top_k_per_row_decode_test(
     mask_hi = (torch_indices - (row_ends - row_starts)[:, None]) < 0
     mask = mask_lo & mask_hi
     torch_indices = torch_indices.masked_fill(~mask, -1)
+
+    torch.xpu.synchronize()
 
     # Compare results
     assert compare_top_k_results(
