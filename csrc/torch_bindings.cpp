@@ -91,9 +91,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "per_token_group_fp8_quant(Tensor input, Tensor! output_q, Tensor! "
       "output_s, "
-      "int group_size, float eps, bool scale_ue8m0) -> ()");
+      "int group_size, float eps, float fp8_min, float fp8_max, bool "
+      "scale_ue8m0) -> ()");
   ops.impl(
-      "per_token_group_fp8_quant", torch::kXPU, &per_token_group_fp8_quant);
+      "per_token_group_fp8_quant", torch::kXPU, &per_token_group_quant_fp8);
 
   // swigluoai_and_mul
   ops.def(

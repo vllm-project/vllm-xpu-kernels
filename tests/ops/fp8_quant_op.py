@@ -88,9 +88,8 @@ def per_token_group_quant_fp8(
         x: The input tensor with ndim >= 2.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
-        dtype: The dype of output tensor. Note that only `torch.float8_e4m3fn`
+        dtype: The dtype of output tensor. Note that only `torch.float8_e4m3fn`
         is supported for now.
-        column_major_scales: Outputs scales in column major.
         out_q: Optional output tensor. If not provided, function will create.
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
@@ -102,6 +101,10 @@ def per_token_group_quant_fp8(
         f"by `group_size` {group_size}")
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
+    finfo = torch.finfo(dtype)
+    fp8_min = finfo.min
+    fp8_max = finfo.max
+
     assert out_q is None or out_q.shape == x.shape
     x_q = out_q
     if x_q is None:
@@ -112,7 +115,7 @@ def per_token_group_quant_fp8(
 
     # TODO(bnell): this causes some fp8 moe test to fail.
     torch.ops._C.per_token_group_fp8_quant(x, x_q, x_s, group_size, eps,
-                                           use_ue8m0)
+                                           fp8_min, fp8_max, use_ue8m0)
 
     if use_ue8m0:
         x_s = x_s.to(torch.float8_e8m0fnu)

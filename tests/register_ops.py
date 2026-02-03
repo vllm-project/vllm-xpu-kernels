@@ -168,9 +168,12 @@ def per_token_group_fp8_quant(input: torch.Tensor,
                               output_s: torch.Tensor,
                               group_size: int = 128,
                               eps: float = 1e-10,
+                              fp8_min: float = -448.0,
+                              fp8_max: float = 448.0,
                               scale_ue8m0: bool = False) -> None:
     torch.ops._C.per_token_group_fp8_quant(input, output_q, output_s,
-                                           group_size, eps, scale_ue8m0)
+                                           group_size, eps, fp8_min, fp8_max,
+                                           scale_ue8m0)
 
 
 def swigluoai_and_mul(

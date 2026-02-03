@@ -192,13 +192,13 @@ SCALE_UBS = [True, False]
 SEEDS = [0]
 FP8_DTYPES = [torch.float8_e5m2, torch.float8_e4m3fn]
 
-#block quant parameters
+# block quant parameters
 MXFP8_HP_DTYPES = [torch.float, torch.bfloat16]
 NUM_TOKENS_BLOCK_QUANT = [1, 2, 4, 8]
 HIDDEN_SIZES_BLOCK_QUANT = [256]
 GROUP_SIZE = [32, 64, 128]
 
-#override pytest parameters when enable mini pytest
+# override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
     "default": {
         "num_tokens": [1],

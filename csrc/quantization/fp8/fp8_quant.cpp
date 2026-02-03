@@ -300,12 +300,14 @@ void dynamic_scaled_fp8_quant(
       });
 }
 
-void per_token_group_fp8_quant(
+void per_token_group_quant_fp8(
     const torch::Tensor& input,
     torch::Tensor& output_q,
     torch::Tensor& output_s,
     int64_t group_size,
     double eps,
+    double fp8_min,
+    double fp8_max,
     bool scale_ue8m0) {
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(output_q.is_contiguous());
