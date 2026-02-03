@@ -303,11 +303,8 @@ void _moe_align_block_size_small_batch_expert(
       sorted_token_ids[sorted_token_ids_offset + it] =
           static_cast<int32_t>(numel);
     }
-
-    item.barrier(sycl::access::fence_space::local_space);
-    return;
   }
-
+  item.barrier(sycl::access::fence_space::local_space);
   const size_t tid = local_id_x - fill_threads;
   const size_t stride = local_range_x - fill_threads;
 
@@ -316,76 +313,84 @@ void _moe_align_block_size_small_batch_expert(
   int32_t* cumsum = reinterpret_cast<int32_t*>(slm_ptr);
   int32_t* tokens_cnts = cumsum + num_experts + 1;
 
-  for (int i = 0; i < num_experts; ++i) {
-    tokens_cnts[(tid + 1) * num_experts + i] = 0;
-  }
-
-  item.barrier(sycl::access::fence_space::local_space);
-
-  for (size_t i = tid; i < numel; i += stride) {
-    int32_t expert_id = static_cast<int32_t>(topk_ids[i]);
-    if (has_expert_map) {
-      expert_id = expert_map[expert_id];
-      // filter invalid expert
-      if (expert_id == -1) continue;
+  if (local_id_x >= fill_threads) {
+    for (int i = 0; i < num_experts; ++i) {
+      tokens_cnts[(tid + 1) * num_experts + i] = 0;
     }
-    int mask = token_mask == nullptr ? 1 : token_mask[i / topk_num];
-    tokens_cnts[(tid + 1) * num_experts + expert_id] += mask;
   }
 
   item.barrier(sycl::access::fence_space::local_space);
-
-  if (tid < num_experts) {
-    tokens_cnts[tid] = 0;
-    for (int i = 1; i <= stride; ++i) {
-      tokens_cnts[i * num_experts + tid] +=
-          tokens_cnts[(i - 1) * num_experts + tid];
+  if (local_id_x >= fill_threads) {
+    for (size_t i = tid; i < numel; i += stride) {
+      int32_t expert_id = static_cast<int32_t>(topk_ids[i]);
+      if (has_expert_map) {
+        expert_id = expert_map[expert_id];
+        // filter invalid expert
+        if (expert_id == -1) continue;
+      }
+      int mask = token_mask == nullptr ? 1 : token_mask[i / topk_num];
+      tokens_cnts[(tid + 1) * num_experts + expert_id] += mask;
     }
   }
 
   item.barrier(sycl::access::fence_space::local_space);
 
-  if (tid == 0) {
-    cumsum[0] = 0;
-    for (int i = 1; i <= num_experts; ++i) {
-      cumsum[i] =
-          cumsum[i - 1] +
-          CEILDIV(tokens_cnts[stride * num_experts + i - 1], block_size) *
-              block_size;
+  if (local_id_x >= fill_threads) {
+    if (tid < num_experts) {
+      tokens_cnts[tid] = 0;
+      for (int i = 1; i <= stride; ++i) {
+        tokens_cnts[i * num_experts + tid] +=
+            tokens_cnts[(i - 1) * num_experts + tid];
+      }
     }
-    total_tokens_post_pad[model_offset] =
-        static_cast<int32_t>(cumsum[num_experts]);
   }
 
   item.barrier(sycl::access::fence_space::local_space);
 
-  if (tid < num_experts) {
-    for (int i = cumsum[tid]; i < cumsum[tid + 1]; i += block_size) {
-      expert_ids[expert_ids_offset + i / block_size] =
-          static_cast<int32_t>(tid);
+  if (local_id_x >= fill_threads) {
+    if (tid == 0) {
+      cumsum[0] = 0;
+      for (int i = 1; i <= num_experts; ++i) {
+        cumsum[i] =
+            cumsum[i - 1] +
+            CEILDIV(tokens_cnts[stride * num_experts + i - 1], block_size) *
+                block_size;
+      }
+      total_tokens_post_pad[model_offset] =
+          static_cast<int32_t>(cumsum[num_experts]);
     }
   }
 
-  // Fill remaining expert_ids with inactive_expert_id
-  const size_t fill_start_idx = cumsum[num_experts] / block_size + tid;
-  for (size_t i = fill_start_idx; i < max_num_m_blocks; i += stride) {
-    expert_ids[expert_ids_offset + i] = inactive_expert_id;
-  }
-
-  for (size_t i = tid; i < numel; i += stride) {
-    int32_t expert_id = static_cast<int32_t>(topk_ids[i]);
-    if (has_expert_map) {
-      expert_id = expert_map[expert_id];
-      // filter invalid expert
-      if (expert_id == -1) continue;
+  item.barrier(sycl::access::fence_space::local_space);
+  if (local_id_x >= fill_threads) {
+    if (tid < num_experts) {
+      for (int i = cumsum[tid]; i < cumsum[tid + 1]; i += block_size) {
+        expert_ids[expert_ids_offset + i / block_size] =
+            static_cast<int32_t>(tid);
+      }
     }
-    int32_t rank_post_pad =
-        tokens_cnts[tid * num_experts + expert_id] + cumsum[expert_id];
 
-    if (token_mask == nullptr || token_mask[i / topk_num]) {
-      sorted_token_ids[sorted_token_ids_offset + rank_post_pad] =
-          static_cast<int32_t>(i);
-      ++tokens_cnts[tid * num_experts + expert_id];
+    // Fill remaining expert_ids with inactive_expert_id
+    const size_t fill_start_idx = cumsum[num_experts] / block_size + tid;
+    for (size_t i = fill_start_idx; i < max_num_m_blocks; i += stride) {
+      expert_ids[expert_ids_offset + i] = inactive_expert_id;
+    }
+
+    for (size_t i = tid; i < numel; i += stride) {
+      int32_t expert_id = static_cast<int32_t>(topk_ids[i]);
+      if (has_expert_map) {
+        expert_id = expert_map[expert_id];
+        // filter invalid expert
+        if (expert_id == -1) continue;
+      }
+      int32_t rank_post_pad =
+          tokens_cnts[tid * num_experts + expert_id] + cumsum[expert_id];
+
+      if (token_mask == nullptr || token_mask[i / topk_num]) {
+        sorted_token_ids[sorted_token_ids_offset + rank_post_pad] =
+            static_cast<int32_t>(i);
+        ++tokens_cnts[tid * num_experts + expert_id];
+      }
     }
   }
 }
