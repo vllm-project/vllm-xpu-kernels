@@ -401,7 +401,8 @@ class XeFMHAFwdSplitKVKernel {
             max_logits(_, _, head, l_coord),
             idx_kv_split,
             head_group_q,
-            sinks_per_kv);
+            sinks_per_kv,
+            num_kv_splits);
       } else {
         epilogue(
             O(_, _, head, idx_kv_split, l_coord),
@@ -414,7 +415,8 @@ class XeFMHAFwdSplitKVKernel {
             max_logits(_, _, head, l_coord),
             idx_kv_split,
             head_group_q,
-            sinks);
+            sinks,
+            num_kv_splits);
       }
     }
   }

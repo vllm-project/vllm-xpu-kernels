@@ -32,7 +32,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int window_size_right,
     const float softcap,
     const bool return_softmax,
-    std::optional<at::Generator> gen_) {
+    std::optional<at::Generator> gen_,
+    std::optional<int> num_splits) {
   auto q_type = q.scalar_type();
   auto k_type = k.scalar_type();
   TORCH_CHECK(
@@ -134,13 +135,15 @@ std::vector<at::Tensor> mha_varlen_fwd(
     constexpr int partition_size = 512;
     int num_kv_splits = (max_seqlen_k + partition_size - 1) / partition_size;
     if (num_kv_splits > 20) num_kv_splits = 20;
+    num_kv_splits = num_splits.value_or(num_kv_splits);
+    // printf("VLLM XPU Flash Attention: using %d kv splits\n", num_kv_splits);
 
     int num_tokens = q.size(0);
     int num_heads_q = q.size(1);
     int head_dim = q.size(2);
     int num_heads_kv = k.size(2);
     int block_size = k.size(1);
-    at::Tensor tmp_out = at::empty(
+    at::Tensor tmp_out = num_kv_splits == 1 ? out ? at::empty(
         {num_tokens, num_heads_q * num_kv_splits, head_dim},
         q.options().device(q.device()));
     at::Tensor max_logits = at::empty(
@@ -200,7 +203,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float softmax_scale, Tensor? softmax_sink, bool zero_tensors, "
       "bool is_causal, int window_size_left, int window_size_right, float "
       "softcap, bool return_softmax, "
-      "Generator? gen) -> Tensor[]");
+      "Generator? gen, int? num_splits) -> Tensor[]");
   ops.impl(
       "varlen_fwd",
       torch::kXPU,

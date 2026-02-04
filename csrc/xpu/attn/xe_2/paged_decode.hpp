@@ -234,7 +234,7 @@ struct DecodeKernelLauncher {
 
     ReductionSplitKernel::initialize_workspace(
         reduce_arg, workspace.get() + workspace_size);
-    run(queue, params, reduce_params);
+    run(queue, params, reduce_params, args.num_kv_splits > 1);
 
     return cutlass::Status::kSuccess;
   }
@@ -242,7 +242,8 @@ struct DecodeKernelLauncher {
   static void
   run(sycl::queue& queue,
       typename FMHAKernel::Params params,
-      typename ReductionSplitKernel::Params reduce_params) {
+      typename ReductionSplitKernel::Params reduce_params,
+      bool need_reduce) {
     namespace syclex = sycl::ext::oneapi::experimental;
     namespace intelex = sycl::ext::intel::experimental;
 
@@ -267,32 +268,34 @@ struct DecodeKernelLauncher {
     auto event =
         compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
             policy, queue, params);
+    EventManager::getInstance().addEvent(event);
 
     // event.wait();
 
-    dim3 const reduce_grid =
-        ReductionSplitKernel::get_grid_shape(reduce_params);
-    int reduce_smem_size = ReductionSplitKernel::SharedStorageSize;
-    const auto reduce_sycl_block = compat::dim3(block.x, block.y, block.z);
-    const auto reduce_sycl_grid =
-        compat::dim3(reduce_grid.x, reduce_grid.y, reduce_grid.z);
-    compat::experimental::launch_properties launch_props_reduce{
-        syclex::work_group_scratch_size(reduce_smem_size),
-    };
-    compat::experimental::launch_policy reduce_policy{
-        reduce_sycl_grid, reduce_sycl_block, launch_props_reduce, kernel_props};
+    if (need_reduce) {
+      dim3 const reduce_grid =
+          ReductionSplitKernel::get_grid_shape(reduce_params);
+      int reduce_smem_size = ReductionSplitKernel::SharedStorageSize;
+      const auto reduce_sycl_block = compat::dim3(block.x, block.y, block.z);
+      const auto reduce_sycl_grid =
+          compat::dim3(reduce_grid.x, reduce_grid.y, reduce_grid.z);
+      compat::experimental::launch_properties launch_props_reduce{
+          syclex::work_group_scratch_size(reduce_smem_size),
+      };
+      compat::experimental::launch_policy reduce_policy{
+          reduce_sycl_grid, reduce_sycl_block, launch_props_reduce, kernel_props};
 
-    // wait for FA kernel finished
-    // maybe no need wait here if launched with in-order queue
+      // wait for FA kernel finished
+      // maybe no need wait here if launched with in-order queue
 
-    auto reduce_event = compat::experimental::launch<
-        cutlass::device_kernel<ReductionSplitKernel>>(
-        reduce_policy, queue, reduce_params);
+      auto reduce_event = compat::experimental::launch<
+          cutlass::device_kernel<ReductionSplitKernel>>(
+          reduce_policy, queue, reduce_params);
 
-    // reduce_event.wait();
+      // reduce_event.wait();
 
-    EventManager::getInstance().addEvent(event);
-    EventManager::getInstance().addEvent(reduce_event);
+      EventManager::getInstance().addEvent(reduce_event);
+    }
   }
 };
 
