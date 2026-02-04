@@ -61,7 +61,8 @@ void topk_softmax(
     torch::Tensor& topk_indices,
     torch::Tensor& token_expert_indices,
     torch::Tensor& gating_output,
-    const bool renormalize);
+    const bool renormalize,
+    std::optional<torch::Tensor> bias);
 
 void moe_gather(
     torch::Tensor& output,
