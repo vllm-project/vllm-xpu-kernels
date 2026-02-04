@@ -143,7 +143,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int head_dim = q.size(2);
     int num_heads_kv = k.size(2);
     int block_size = k.size(1);
-    at::Tensor tmp_out = num_kv_splits == 1 ? out ? at::empty(
+    at::Tensor tmp_out = num_kv_splits == 1 ? out : at::empty(
         {num_tokens, num_heads_q * num_kv_splits, head_dim},
         q.options().device(q.device()));
     at::Tensor max_logits = at::empty(

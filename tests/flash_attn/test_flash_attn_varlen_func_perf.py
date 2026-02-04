@@ -466,17 +466,25 @@ def test_decode_with_paged_kv(
 
 if __name__ == "__main__":
     batch = 32
+    block_size = 128
+    head_size = 128
     # num_splits_kv = 2
-    for head_pair in [(32, 8)]:
+    for head_pair in [(16, 1)]:
         for kv_len in [1024]:
             max_value = int((kv_len + 127) / 128)
+            max_value = min(max_value, 20)
             for num_splits_kv in range(1, max_value + 1):
-                print(f"batch={batch}, kv_len={kv_len}, heads={head_pair}, num_splits_kv={num_splits_kv}")
+                print(f"batch={batch},"
+                      f" kv_len={kv_len},"
+                      f" heads={head_pair},"
+                      f" num_splits_kv={num_splits_kv},"
+                      f" head_size={head_size},"
+                      f" block_size={block_size}")
                 test_decode_with_paged_kv([(1, kv_len)] * batch,
                                           head_pair,
-                                          128,
+                                          head_size,
                                           torch.bfloat16,
-                                          128,
+                                          block_size,
                                           None,
                                           32768,
                                           2,
