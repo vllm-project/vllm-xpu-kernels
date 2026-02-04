@@ -197,6 +197,7 @@ MXFP8_HP_DTYPES = [torch.float, torch.bfloat16]
 NUM_TOKENS_BLOCK_QUANT = [1, 2, 4, 8]
 HIDDEN_SIZES_BLOCK_QUANT = [256]
 GROUP_SIZE = [32, 64, 128]
+COLUMN_MAJOR_SCALE = [True, False]
 
 # override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
@@ -275,6 +276,7 @@ def test_dynamic_per_token_fp8_quant(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("group_size", GROUP_SIZE)
 @pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("column_major_scale", COLUMN_MAJOR_SCALE)
 @torch.inference_mode()
 def test_per_block_fp8_quant(
     num_tokens_block_quant: int,
@@ -282,6 +284,7 @@ def test_per_block_fp8_quant(
     dtype: torch.dtype,
     group_size: int,
     seed: int,
+    column_major_scale: bool,
 ) -> None:
     seed_everything(seed)
 
@@ -292,10 +295,12 @@ def test_per_block_fp8_quant(
 
     ref_out, ref_scales = ref_per_block_quant(x, 1, group_size)
 
-    ops_out, ops_scales = per_token_group_quant_fp8(x,
-                                                    group_size=group_size,
-                                                    dtype=torch.float8_e4m3fn,
-                                                    use_ue8m0=False)
+    ops_out, ops_scales = per_token_group_quant_fp8(
+        x,
+        group_size=group_size,
+        dtype=torch.float8_e4m3fn,
+        use_ue8m0=False,
+        column_major_scales=column_major_scale)
 
     assert torch.allclose(ref_out.float(),
                           ops_out.float(),
@@ -311,12 +316,14 @@ def test_per_block_fp8_quant(
 @pytest.mark.parametrize("hidden_size_block_quant", HIDDEN_SIZES_BLOCK_QUANT)
 @pytest.mark.parametrize("mxfp8_hp_dtypes", MXFP8_HP_DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("column_major_scale", COLUMN_MAJOR_SCALE)
 @torch.inference_mode()
 def test_per_block_mxfp8_quant(
     num_tokens_block_quant: int,
     hidden_size_block_quant: int,
     mxfp8_hp_dtypes: torch.dtype,
     seed: int,
+    column_major_scale: bool,
 ) -> None:
     seed_everything(seed)
 
@@ -327,10 +334,12 @@ def test_per_block_mxfp8_quant(
 
     ref_scales, ref_out = to_mxfp(x)
 
-    ops_out, ops_scales = per_token_group_quant_fp8(x,
-                                                    group_size=32,
-                                                    dtype=torch.float8_e4m3fn,
-                                                    use_ue8m0=True)
+    ops_out, ops_scales = per_token_group_quant_fp8(
+        x,
+        group_size=32,
+        dtype=torch.float8_e4m3fn,
+        use_ue8m0=True,
+        column_major_scales=column_major_scale)
 
     assert torch.allclose(ref_out.float(),
                           ops_out.float(),

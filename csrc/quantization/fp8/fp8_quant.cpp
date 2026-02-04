@@ -54,6 +54,9 @@ class per_token_group_quant_8bit_kernel {
   const int groups_per_block;
   float eps;
   bool scale_ue8m0;
+  const int scale_num_rows;
+  const int scale_stride;
+  bool is_column_major;
 
  public:
   per_token_group_quant_8bit_kernel(
@@ -63,14 +66,20 @@ class per_token_group_quant_8bit_kernel {
       const int group_size_,
       const int groups_per_block_,
       float eps_,
-      bool scale_ue8m0_)
+      bool scale_ue8m0_,
+      const int scale_num_rows_ = 0,
+      const int scale_stride_ = 0,
+      bool is_column_major_ = false)
       : out(out_),
         scale(scale_),
         input(input_),
         group_size(group_size_),
         groups_per_block(groups_per_block_),
         eps(eps_),
-        scale_ue8m0(scale_ue8m0_) {}
+        scale_ue8m0(scale_ue8m0_),
+        scale_num_rows(scale_num_rows_),
+        scale_stride(scale_stride_),
+        is_column_major(is_column_major_) {}
   void operator()
       [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
     constexpr int threads_per_group = 32;
@@ -88,10 +97,18 @@ class per_token_group_quant_8bit_kernel {
         static_cast<int64_t>(global_group_id) * group_size;
 
     float local_absmax = eps;
+    float* scale_output;
 
     scalar_t const* group_input = &input[block_group_offset];
     fp8_type* group_output = &out[block_group_offset];
-    float* scale_output = &scale[global_group_id];
+    if (is_column_major) {
+      const int row_idx = global_group_id / scale_num_rows;
+      const int col_idx = global_group_id % scale_num_rows;
+      scale_output =
+          reinterpret_cast<float*>(scale) + (col_idx * scale_stride + row_idx);
+    } else {
+      scale_output = &scale[global_group_id];
+    }
 
     bool const can_vectorize = group_size % 4 == 0;
 
@@ -338,6 +355,10 @@ void per_token_group_quant_fp8(
   const int num_blocks = num_groups / groups_per_block;
   const int num_threads = groups_per_block * THREADS_PER_GROUP;
 
+  const bool is_column_major = output_s.stride(0) < output_s.stride(1);
+  const int scale_num_rows = output_s.size(1);
+  const int scale_stride = output_s.stride(1);
+
   sycl::range<1> grid(num_blocks);
   sycl::range<1> block(num_threads);
   auto& queue = vllm::xpu::vllmGetQueue();
@@ -357,7 +378,10 @@ void per_token_group_quant_fp8(
                         group_size,
                         groups_per_block,
                         eps,
-                        scale_ue8m0);
+                        scale_ue8m0,
+                        scale_num_rows,
+                        scale_stride,
+                        is_column_major);
                 cgh.parallel_for(
                     sycl::nd_range<1>(grid * block, block), kernel);
               });

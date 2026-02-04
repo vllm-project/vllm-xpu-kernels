@@ -79,6 +79,7 @@ def per_token_group_quant_fp8(
     eps: float = 1e-10,
     dtype: torch.dtype = torch.float8_e4m3fn,
     out_q: torch.Tensor | None = None,
+    column_major_scales: bool = False,
     use_ue8m0: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
@@ -91,6 +92,7 @@ def per_token_group_quant_fp8(
         dtype: The dtype of output tensor. Note that only `torch.float8_e4m3fn`
         is supported for now.
         out_q: Optional output tensor. If not provided, function will create.
+        column_major_scales: Outputs scales in column major.
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor.
@@ -110,8 +112,13 @@ def per_token_group_quant_fp8(
     if x_q is None:
         x_q = torch.empty_like(x, device=x.device, dtype=dtype)
 
-    shape = x.shape[:-1] + (x.shape[-1] // group_size, )
-    x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+    if column_major_scales:
+        shape = (x.shape[-1] // group_size, ) + x.shape[:-1]
+        x_s = torch.empty(shape, device=x.device,
+                          dtype=torch.float32).permute(-1, -2)
+    else:
+        shape = x.shape[:-1] + (x.shape[-1] // group_size, )
+        x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
     # TODO(bnell): this causes some fp8 moe test to fail.
     torch.ops._C.per_token_group_fp8_quant(x, x_q, x_s, group_size, eps,
