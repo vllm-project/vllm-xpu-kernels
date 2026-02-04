@@ -62,7 +62,7 @@ void cutlass_paged_decode_impl(
     const at::Tensor& value_cache,
     at::Tensor& out,
     at::Tensor&
-        temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
+        temp_out,  // [batch, num_kv_splits, num_head_q, seq_q, head_size]
     at::Tensor& exp_sums,    // [batch, num_head_q, seq_q, num_kv_splits]
     at::Tensor& max_logits,  // [batch, num_head_q, seq_q, num_kv_splits]
     const at::Tensor& block_table,

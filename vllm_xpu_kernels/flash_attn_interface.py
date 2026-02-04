@@ -51,6 +51,7 @@ def flash_attn_varlen_func(
     # Version selector
     fa_version: int = DEFAULT_FA_VERSION,
     s_aux: Optional[torch.Tensor] = None,
+    num_splits_kv: Optional[int] = None,
 ):
     assert cu_seqlens_k is not None or seqused_k is not None, \
         "cu_seqlens_k or seqused_k must be provided"
@@ -127,6 +128,7 @@ def flash_attn_varlen_func(
             softcap,
             return_softmax_lse and dropout_p > 0,
             None,
+            num_splits_kv,
         )
     else:
         raise NotImplementedError("not support yet")
