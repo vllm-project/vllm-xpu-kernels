@@ -132,11 +132,11 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_local,
         is_sink);
   } else {
-    constexpr int partition_size = 512;
+    constexpr int partition_size = 2048;
     int num_kv_splits = (max_seqlen_k + partition_size - 1) / partition_size;
     if (num_kv_splits > 20) num_kv_splits = 20;
-    num_kv_splits = num_splits.value_or(num_kv_splits);
-    // printf("VLLM XPU Flash Attention: using %d kv splits\n", num_kv_splits);
+    // num_kv_splits = num_splits.value_or(num_kv_splits);
+    num_kv_splits = 1;
 
     int num_tokens = q.size(0);
     int num_heads_q = q.size(1);
