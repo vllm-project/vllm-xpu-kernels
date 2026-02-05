@@ -73,6 +73,7 @@ jobs:
 
       - name: build & install wheel
         run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           python3 -m pip config set global.break-system-packages true
           pip install -r requirements.txt
           pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
@@ -107,6 +108,7 @@ jobs:
 
       - name: build & install wheel
         run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           python3 -m pip config set global.break-system-packages true
           pip install -r requirements.txt
           pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
