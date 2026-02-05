@@ -13,7 +13,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "moe_align_block_size(Tensor topk_ids, int num_experts,"
       "                     int block_size, Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
-      "                     Tensor! num_tokens_post_pad) -> ()");
+      "                     Tensor! num_tokens_post_pad,"
+      "                     Tensor? maybe_expert_map) -> ()");
   m.impl("moe_align_block_size", torch::kXPU, &moe_align_block_size);
 
   // Aligning the number of tokens to be processed by each expert such
@@ -38,11 +39,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     int block_size, int max_loras, "
       "                     int max_num_tokens_padded, "
       "                     int max_num_m_blocks, "
-      "                     Tensor !sorted_token_ids,"
-      "                     Tensor !experts_ids,"
-      "                     Tensor !num_tokens_post_pad,"
-      "                     Tensor !adapter_enabled,"
-      "                     Tensor !lora_ids) -> () ");
+      "                     Tensor! sorted_token_ids,"
+      "                     Tensor! experts_ids,"
+      "                     Tensor! num_tokens_post_pad,"
+      "                     Tensor! adapter_enabled,"
+      "                     Tensor! lora_ids,"
+      "                     Tensor? maybe_expert_map) -> () ");
   m.impl("moe_lora_align_block_size", torch::kXPU, &moe_lora_align_block_size);
 
   // Apply grouped topk routing to select experts.
@@ -63,7 +65,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Apply topk softmax to the gating outputs.
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
-      "token_expert_indices, Tensor gating_output, bool renormalize) -> ()");
+      "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
+      "bias) -> ()");
   m.impl("topk_softmax", torch::kXPU, &topk_softmax);
   // Apply topk softmax to the gating outputs.
   m.def(
