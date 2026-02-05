@@ -26,7 +26,7 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
 RUN apt install -y libze1 libze-dev
 
-RUN mkdir neo && cd neo \
+RUN mkdir neo && cd neo && \
     wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.22.2/intel-igc-core-2_2.22.2+20121_amd64.deb && \
     wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.22.2/intel-igc-opencl-2_2.22.2+20121_amd64.deb && \
     wget https://github.com/intel/compute-runtime/releases/download/25.44.36015.8/intel-ocloc_25.44.36015.8-0_amd64.deb && \
