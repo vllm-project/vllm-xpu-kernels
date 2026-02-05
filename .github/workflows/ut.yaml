@@ -76,7 +76,7 @@ jobs:
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           python3 -m pip config set global.break-system-packages true
           pip install -r requirements.txt
-          MAX_JOBS=32 pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+          MAX_JOB=128 pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
 
       - name: test 
         run: |
@@ -111,7 +111,7 @@ jobs:
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           python3 -m pip config set global.break-system-packages true
           pip install -r requirements.txt
-          MAX_JOBS=32 pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+          MAX_JOBS=128 pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
 
       - name: test 
         run: |
