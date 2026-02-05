@@ -24,7 +24,7 @@ RUN apt clean && apt-get update -y && \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
-RUN apt install -y libze1 libze-dev
+RUN apt install -y libze1 libze-dev intel-ocloc
 
 RUN mkdir neo && cd neo \
     wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.22.2/intel-igc-core-2_2.22.2+20121_amd64.deb \
