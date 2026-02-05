@@ -465,12 +465,12 @@ def test_decode_with_paged_kv(
 
 
 if __name__ == "__main__":
-    batch = 32
+    batch = 50
     block_size = 128
     head_size = 128
     # num_splits_kv = 2
-    for head_pair in [(16, 1)]:
-        for kv_len in [1024]:
+    for head_pair in [(32, 8)]:
+        for kv_len in [1500]:
             max_value = int((kv_len + 127) / 128)
             max_value = min(max_value, 20)
             for num_splits_kv in range(1, max_value + 1):

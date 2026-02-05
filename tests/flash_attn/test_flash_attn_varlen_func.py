@@ -11,8 +11,8 @@ from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 NUM_HEADS = [(4, 4), (8, 2), (10, 2), (16, 1)]
 HEAD_SIZES = [64, 128, 192, 256]
-BLOCK_SIZES = [128]
-DTYPES = [torch.bfloat16, torch.half]
+BLOCK_SIZES = [64, 128]
+DTYPES = [torch.half, torch.bfloat16]
 QDTYPES = [None]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
@@ -350,6 +350,8 @@ def test_decode_with_paged_kv(
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
+    if num_heads == (16, 1) and head_size == 256:
+        pytest.skip("skip test cases that may run out of SLM.")
     torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -403,6 +405,16 @@ def test_decode_with_paged_kv(
         k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
 
+    num_splits_kv = int((max_kv_len + 511) / 512)
+    num_splits_kv = min(num_splits_kv, 20)
+    print(f"batch_size: {num_seqs},"
+          f" num_heads: ({num_query_heads}, {num_kv_heads}),"
+          f" max_kv_len: {max_kv_len},"
+          f" head_size: {head_size},"
+          f" dtype: {dtype},"
+          f" num_splits_kv: {num_splits_kv}")
+
+
     output = flash_attn_varlen_func(maybe_quantized_query,
                                     maybe_quantized_key_cache,
                                     maybe_quantized_value_cache,
@@ -414,7 +426,8 @@ def test_decode_with_paged_kv(
                                     causal=False,
                                     block_table=block_tables,
                                     window_size=(-1, -1),
-                                    s_aux=sink)
+                                    s_aux=sink,
+                                    num_splits_kv=num_splits_kv)
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
@@ -434,3 +447,19 @@ def test_decode_with_paged_kv(
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
     torch.xpu.empty_cache()
+    print("test_decode_with_paged_kv passed!")
+
+
+if __name__ == "__main__":
+    for i in range(1):
+        test_decode_with_paged_kv([(1, 523), (1, 37),
+                                            (1, 2011)],
+                                  (16, 1),
+                                  64,
+                                  torch.half,
+                                  128,
+                                  None,
+                                  32768,
+                                  2,
+                                  None,
+                                  False)
