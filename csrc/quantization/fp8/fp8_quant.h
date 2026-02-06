@@ -64,6 +64,11 @@ class segmented_max_reduction {
             item.get_group());
     int64_t i = item.get_global_linear_id();
 
+    if (i == 0) {
+      scale[0] = std::numeric_limits<float>::lowest();
+    }
+    item.barrier(sycl::access::fence_space::global_and_local);
+
     // First store maximum for all values processes by
     // the current thread in cache[item.get_local_id(0)]
     float tmp = 0.0;
