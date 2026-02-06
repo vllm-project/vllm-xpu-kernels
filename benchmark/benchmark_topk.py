@@ -8,7 +8,7 @@ from typing import Optional
 import torch
 import triton
 
-from tests.ops.tok_op import (fused_topk_sigmoid, fused_topk_softmax,
+from tests.ops.topk_op import (fused_topk_sigmoid, fused_topk_softmax,
                               topk_sigmoid, topk_softmax)
 
 
