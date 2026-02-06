@@ -122,6 +122,7 @@ def xpu_fused_moe(hidden_states,
                   num_experts,
                   ep_rank=0,
                   ep_size=1,
+                  output=None,
                   is_fp8=False,
                   is_int4=False,
                   is_mxfp4=False):
@@ -147,8 +148,11 @@ def xpu_fused_moe(hidden_states,
     is_int4: bool
     is_mxfp4: bool
     '''
-
-    output = torch.empty_like(hidden_states)
+    if output is None:
+        output = torch.empty_like(hidden_states)
+    else:
+        assert output.shape == hidden_states.shape, \
+            "output shape must be the same as hidden_states shape"
     inter_size = list(w13.shape)[-2] // 2
 
     assert w13.is_contiguous() and w2.is_contiguous()

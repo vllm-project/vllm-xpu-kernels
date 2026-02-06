@@ -205,10 +205,7 @@ void rms_norm(
     torch::Tensor& weight,
     double epsilon) {
   TORCH_CHECK(out.is_contiguous());
-  if (input.stride(-1) != 1) {
-    input = input.contiguous();
-  }
-  TORCH_CHECK(input.stride(-1) == 1);
+  input = input.contiguous();
   TORCH_CHECK(weight.is_contiguous());
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_rms_norm_kernel", [&] {

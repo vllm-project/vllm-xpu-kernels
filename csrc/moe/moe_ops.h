@@ -10,7 +10,8 @@ void moe_align_block_size(
     int64_t block_size,
     torch::Tensor sorted_token_ids,
     torch::Tensor experts_ids,
-    torch::Tensor num_tokens_post_pad);
+    torch::Tensor num_tokens_post_pad,
+    std::optional<torch::Tensor> maybe_expert_map);
 
 void batched_moe_align_block_size(
     int64_t max_tokens_per_batch,
@@ -32,7 +33,8 @@ void moe_lora_align_block_size(
     torch::Tensor expert_ids,
     torch::Tensor num_tokens_post_pad,
     torch::Tensor adapter_enabled,
-    torch::Tensor lora_ids);
+    torch::Tensor lora_ids,
+    std::optional<torch::Tensor> maybe_expert_map);
 
 std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
     torch::Tensor const& scores,
@@ -59,7 +61,8 @@ void topk_softmax(
     torch::Tensor& topk_indices,
     torch::Tensor& token_expert_indices,
     torch::Tensor& gating_output,
-    const bool renormalize);
+    const bool renormalize,
+    std::optional<torch::Tensor> bias);
 
 void moe_gather(
     torch::Tensor& output,

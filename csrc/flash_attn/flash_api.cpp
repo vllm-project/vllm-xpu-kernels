@@ -22,6 +22,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int max_seqlen_q,
     int max_seqlen_k,
     float p_dropout,
+    float k_scale,
+    float v_scale,
     float softmax_scale,
     std::optional<const at::Tensor>& softmax_sink_,
     const bool zero_tensors,
@@ -32,14 +34,23 @@ std::vector<at::Tensor> mha_varlen_fwd(
     const bool return_softmax,
     std::optional<at::Generator> gen_) {
   auto q_type = q.scalar_type();
+  auto k_type = k.scalar_type();
   TORCH_CHECK(
       q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16,
       "VLLM Kernel XPU only supports fp16 and bf16 type");
 
   TORCH_CHECK(
-      k.scalar_type() == q_type, "query and key must have the same dtype");
-  TORCH_CHECK(
-      v.scalar_type() == q_type, "query and value must have the same dtype");
+      v.scalar_type() == k_type, "key and value must have the same dtype");
+  bool is_fp8kv = false;
+  if (k_type == at::ScalarType::Float8_e5m2 ||
+      k_type == at::ScalarType::Float8_e4m3fn) {
+    is_fp8kv = true;
+  } else {
+    TORCH_CHECK(
+        k.scalar_type() == q_type, "query and key must have the same dtype");
+    TORCH_CHECK(
+        v.scalar_type() == q_type, "query and value must have the same dtype");
+  }
 
   CHECK_DEVICE(q);
   CHECK_DEVICE(k);
@@ -94,7 +105,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
 
-  if (max_seqlen_q > 1 || is_local || !is_paged) {
+  if (max_seqlen_q > 1 || is_local || !is_paged || is_fp8kv) {
     at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
 
     cutlass_chunk_prefill_interface(
@@ -108,6 +119,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
         seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
+        k_scale,
+        v_scale,
         softmax_scale,
         softmax_sink_,
         window_size_left,
@@ -182,8 +195,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cu_seqlens_q, "
       "Tensor cu_seqlens_k, Tensor? seqused_k, Tensor? leftpad_k, Tensor? "
       "block_table, Tensor? alibi_slopes, "
-      "int max_seqlen_q, int max_seqlen_k, float p_dropout, float "
-      "softmax_scale, Tensor? softmax_sink, bool zero_tensors, "
+      "int max_seqlen_q, int max_seqlen_k, float p_dropout, float k_scale, "
+      "float v_scale, "
+      "float softmax_scale, Tensor? softmax_sink, bool zero_tensors, "
       "bool is_causal, int window_size_left, int window_size_right, float "
       "softcap, bool return_softmax, "
       "Generator? gen) -> Tensor[]");

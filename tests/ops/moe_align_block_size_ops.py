@@ -7,12 +7,17 @@ import tests.register_ops as ops
 from tests.utils import round_up
 
 
+def cdiv(a: int, b: int) -> int:
+    return (a + b - 1) // b if b > 0 else 0
+
+
 def moe_align_block_size(
     topk_ids: torch.Tensor,
     block_size: int,
     num_experts: int,
     expert_map: torch.Tensor | None = None,
     pad_sorted_ids: bool = False,
+    ignore_invalid_experts: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -66,10 +71,13 @@ def moe_align_block_size(
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     if pad_sorted_ids:
         max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+    if topk_ids.numel() < num_experts:
+        max_num_tokens_padded = min(topk_ids.numel() * block_size,
+                                    max_num_tokens_padded)
     sorted_ids = torch.empty((max_num_tokens_padded, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
-    max_num_m_blocks = (max_num_tokens_padded + block_size - 1) // block_size
+    max_num_m_blocks = cdiv(max_num_tokens_padded, block_size)
     expert_ids = torch.empty((max_num_m_blocks, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
@@ -77,9 +85,17 @@ def moe_align_block_size(
                                       dtype=torch.int32,
                                       device=topk_ids.device)
 
-    ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
-                             expert_ids, num_tokens_post_pad)
-    if expert_map is not None:
+    ops.moe_align_block_size(
+        topk_ids,
+        num_experts,
+        block_size,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+        expert_map if ignore_invalid_experts else None,
+    )
+
+    if expert_map is not None and not ignore_invalid_experts:
         expert_ids = expert_map[expert_ids]
 
     return sorted_ids, expert_ids, num_tokens_post_pad

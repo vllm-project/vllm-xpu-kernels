@@ -131,6 +131,9 @@ struct FMHAFwdMainloop<
   using TensorK = TensorK_;
   using TensorV = TensorV_;
 
+  using ElementQ = typename TensorQ::engine_type::value_type;
+  using ElementK = typename TensorK::engine_type::value_type;
+
   using TensorQ2D =
       decltype(TensorQ_{}(append<rank_v<TensorQ_>>(make_coord(_, _), 0)));
   using TensorK2D =
@@ -178,6 +181,8 @@ struct FMHAFwdMainloop<
   using FragARow = decltype(reduce<1>(FragA{}, sycl::plus<void>{}));
   using ElementA = typename TiledMMAPV::ValTypeD;
 
+  static constexpr bool Fp8KV =
+      is_any_of_v<ElementK, float_e5m2_t, float_e4m3_t>;
   static constexpr bool CausalMask = CausalMask_;
   static constexpr bool LocalMask = LocalMask_;
   static constexpr bool PagedKV = PagedKV_;
@@ -185,6 +190,8 @@ struct FMHAFwdMainloop<
   // User-facing arguments
   struct Arguments {
     ElementS const scale;
+    ElementS const scale_k;
+    ElementS const scale_v;
 
     // Paged KV Cache
     int* ptr_page_table;
@@ -215,6 +222,8 @@ struct FMHAFwdMainloop<
     ElementS val = args.scale * static_cast<ElementS>(kLog2e);
     return Params{
         val,
+        args.scale_k,
+        args.scale_v,
         args.ptr_page_table,
         args.page_size,
         args.max_pages_per_seq,
@@ -375,6 +384,12 @@ struct FMHAFwdMainloop<
 
         reorder(tQrQ, tSrQ);
         reorder(tKrK, tSrK);
+        if constexpr (Fp8KV) {
+          for (int i = 0; i < tSrK.size(); ++i) {
+            tSrK(i) = static_cast<ElementQ>(
+                params.scale_k * static_cast<float>(tSrK(i)));
+          }
+        }
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
       }
 
@@ -440,6 +455,13 @@ struct FMHAFwdMainloop<
       for (int VV = 0; VV < VTiles; VV++) {
         copy(copy_v, tVgV_cache(_, _, _, VV), tVrV);
         reorder(tVrV, tArV);
+        if constexpr (Fp8KV) {
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < tArV.size(); ++i) {
+            tArV(i) = static_cast<ElementQ>(
+                params.scale_v * static_cast<float>(tArV(i)));
+          }
+        }
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
 
