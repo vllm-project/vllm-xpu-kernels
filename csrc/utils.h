@@ -30,7 +30,9 @@ get_device_architecture(at::DeviceIndex device_index = -1) {
 
 static inline bool is_bmg(at::DeviceIndex device_index = -1) {
   return get_device_architecture(device_index) ==
-         syclex::architecture::intel_gpu_bmg_g21;
+             syclex::architecture::intel_gpu_bmg_g21 ||
+         get_device_architecture(device_index) ==
+             syclex::architecture::intel_gpu_bmg_g31;
 }
 
 static inline bool is_pvc(at::DeviceIndex device_index = -1) {
@@ -41,6 +43,7 @@ static inline bool is_pvc(at::DeviceIndex device_index = -1) {
 static inline bool is_xe2_arch(at::DeviceIndex device_index = -1) {
   auto arch = get_device_architecture(device_index);
   return arch == syclex::architecture::intel_gpu_bmg_g21 ||
+         arch == syclex::architecture::intel_gpu_bmg_g31 ||
          arch == syclex::architecture::intel_gpu_pvc;
 }
 
