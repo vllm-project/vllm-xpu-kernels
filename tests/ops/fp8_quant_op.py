@@ -71,3 +71,60 @@ def scaled_fp8_quant(
         ops.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale
+
+
+def per_token_group_quant_fp8(
+    x: torch.Tensor,
+    group_size: int,
+    eps: float = 1e-10,
+    dtype: torch.dtype = torch.float8_e4m3fn,
+    out_q: torch.Tensor | None = None,
+    column_major_scales: bool = False,
+    use_ue8m0: bool | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Function to perform per-token-group quantization on an input tensor `x`.
+    It converts the tensor values into signed float8 values and returns the
+    quantized tensor along with the scaling factor used for quantization.
+    Args:
+        x: The input tensor with ndim >= 2.
+        group_size: The group size used for quantization.
+        eps: The minimum to avoid dividing zero.
+        dtype: The dtype of output tensor. Note that only `torch.float8_e4m3fn`
+        is supported for now.
+        out_q: Optional output tensor. If not provided, function will create.
+        column_major_scales: Outputs scales in column major.
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
+        scaling factor.
+    """
+
+    assert x.shape[-1] % group_size == 0, (
+        f"the last dimension of `x` {x.shape[-1]} must be divisible "
+        f"by `group_size` {group_size}")
+    assert x.stride(-1) == 1, "`x` groups must be contiguous"
+
+    finfo = torch.finfo(dtype)
+    fp8_min = finfo.min
+    fp8_max = finfo.max
+
+    assert out_q is None or out_q.shape == x.shape
+    x_q = out_q
+    if x_q is None:
+        x_q = torch.empty_like(x, device=x.device, dtype=dtype)
+
+    if column_major_scales:
+        shape = (x.shape[-1] // group_size, ) + x.shape[:-1]
+        x_s = torch.empty(shape, device=x.device,
+                          dtype=torch.float32).permute(-1, -2)
+    else:
+        shape = x.shape[:-1] + (x.shape[-1] // group_size, )
+        x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+
+    # TODO(bnell): this causes some fp8 moe test to fail.
+    torch.ops._C.per_token_group_fp8_quant(x, x_q, x_s, group_size, eps,
+                                           fp8_min, fp8_max, use_ue8m0)
+
+    if use_ue8m0:
+        x_s = x_s.to(torch.float8_e8m0fnu)
+
+    return x_q, x_s
