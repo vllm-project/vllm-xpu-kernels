@@ -4,10 +4,13 @@
 #include <c10/xpu/XPUFunctions.h>
 #include <c10/xpu/XPUStream.h>
 #include <memory>
+#include <sstream>
 
 #include <oneapi/dnnl/dnnl.h>
 #include <oneapi/dnnl/dnnl.hpp>
 #include <oneapi/dnnl/dnnl_sycl.hpp>
+
+std::string get_onednn_version();
 
 namespace oneDNN {
 

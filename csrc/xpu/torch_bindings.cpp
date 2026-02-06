@@ -66,6 +66,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor indices, int slice_offset, int slice_size, bool add_to_output) "
       "-> ()");
   xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
+
+  xpu_ops.def("get_onednn_version() -> str");
+  xpu_ops.impl("get_onednn_version", &get_onednn_version);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
