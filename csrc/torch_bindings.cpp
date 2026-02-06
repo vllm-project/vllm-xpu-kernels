@@ -86,6 +86,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "dynamic_per_token_scaled_fp8_quant",
       torch::kXPU,
       &dynamic_per_token_scaled_fp8_quant);
+
+  // Compute per-token-group FP8 quantized tensor and scaling factor.
+  ops.def(
+      "per_token_group_fp8_quant(Tensor input, Tensor! output_q, Tensor! "
+      "output_s, "
+      "int group_size, float eps, float fp8_min, float fp8_max, bool "
+      "scale_ue8m0) -> ()");
+  ops.impl(
+      "per_token_group_fp8_quant", torch::kXPU, &per_token_group_quant_fp8);
+
   // swigluoai_and_mul
   ops.def(
       "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
