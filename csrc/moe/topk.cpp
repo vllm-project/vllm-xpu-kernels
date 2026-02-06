@@ -9,6 +9,14 @@ static constexpr int WARP_SIZE = 32;
 
 namespace vllm {
 namespace moe {
+enum class ScoringFunc {
+  SOFTMAX = 0,
+  SIGMOID = 1,
+};
+
+static inline float Sigmoid(float x) {
+  return 1.0f / (1.0f + sycl::native::exp(-x));
+}
 // ====================== Softmax things ===============================
 // We have our own implementation of softmax here so we can support transposing
 // the output in the softmax kernel when we extend this module to support
@@ -86,6 +94,41 @@ class moeSoftmax {
 
  private:
   sycl::local_accessor<float, 1> slm;
+  const InputdType* input;
+  const bool* finished;
+  float* output;
+  const int num_cols;
+};
+
+template <int TPB, typename InputdType>
+class moeSigmoid {
+ public:
+  moeSigmoid(
+      const InputdType* input,
+      const bool* finished,
+      float* output,
+      const int num_cols)
+      : input(input), finished(finished), output(output), num_cols(num_cols) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
+    auto local_id_x = item.get_local_id(0);
+    auto group_id_x = item.get_group(0);
+
+    const int thread_row_offset = group_id_x * num_cols;
+
+    // Don't touch finished rows.
+    if ((finished != nullptr) && finished[group_id_x]) {
+      return;
+    }
+
+    for (int ii = local_id_x; ii < num_cols; ii += TPB) {
+      const int idx = thread_row_offset + ii;
+      output[idx] = Sigmoid(static_cast<float>(input[idx]));
+    }
+  }
+
+ private:
   const InputdType* input;
   const bool* finished;
   float* output;
@@ -231,10 +274,11 @@ template <
     int BYTES_PER_LDG,
     int WARP_SIZE_PARAM,
     typename InputdType,
-    typename IndType>
-class topkGatingSoftmax {
+    typename IndType,
+    ScoringFunc ScoringFuncParam>
+class topkGating {
  public:
-  topkGatingSoftmax(
+  topkGating(
       const InputdType* input,
       const bool* finished,
       float* output,
@@ -355,50 +399,58 @@ class topkGatingSoftmax {
     // First, we perform a max reduce within the thread. We can do the max in
     // fp16 safely (I think) and just convert to float afterwards for the exp +
     // sum reduction.
-    float thread_max = row_chunk[0];
+    if constexpr (ScoringFuncParam == ScoringFunc::SOFTMAX) {
+      float thread_max = row_chunk[0];
 #pragma unroll
-    for (int ii = 1; ii < VPT; ++ii) {
-      thread_max = MAX(thread_max, row_chunk[ii]);
-    }
+      for (int ii = 1; ii < VPT; ++ii) {
+        thread_max = MAX(thread_max, row_chunk[ii]);
+      }
 
 // Now, we find the max within the thread group and distribute among the
 // threads. We use a butterfly reduce.
 #pragma unroll
-    for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-      auto other_thread_max = sycl::permute_group_by_xor(sg, thread_max, mask);
-      thread_max =
-          thread_max > other_thread_max ? thread_max : other_thread_max;
-    }
+      for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+        auto other_thread_max =
+            sycl::permute_group_by_xor(sg, thread_max, mask);
+        thread_max =
+            thread_max > other_thread_max ? thread_max : other_thread_max;
+      }
 
-    // From this point, thread max in all the threads have the max within the
-    // row. Now, we subtract the max from each element in the thread and take
-    // the exp. We also compute the thread local sum.
-    float row_sum = 0;
+      // From this point, thread max in all the threads have the max within the
+      // row. Now, we subtract the max from each element in the thread and take
+      // the exp. We also compute the thread local sum.
+      float row_sum = 0;
 #pragma unroll
-    for (int ii = 0; ii < VPT; ++ii) {
-      row_chunk[ii] = sycl::exp(row_chunk[ii] - thread_max);
-      row_sum += row_chunk[ii];
-    }
+      for (int ii = 0; ii < VPT; ++ii) {
+        row_chunk[ii] = sycl::exp(row_chunk[ii] - thread_max);
+        row_sum += row_chunk[ii];
+      }
 
 // Now, we perform the sum reduce within each thread group. Similar to the max
 // reduce, we use a bufferfly pattern.
 #pragma unroll
-    for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-      row_sum += sycl::permute_group_by_xor(sg, row_sum, mask);
-    }
+      for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+        row_sum += sycl::permute_group_by_xor(sg, row_sum, mask);
+      }
 
-    // From this point, all threads have the max and the sum for their rows in
-    // the thread_max and thread_sum variables respectively. Finally, we can
-    // scale the rows for the softmax. Technically, for top-k gating we don't
-    // need to compute the entire softmax row. We can likely look at the maxes
-    // and only compute for the top-k values in the row. However, this kernel
-    // will likely not be a bottle neck and it seems better to closer match
-    // torch and find the argmax after computing the softmax.
-    const float reciprocal_row_sum = 1.f / row_sum;
+      // From this point, all threads have the max and the sum for their rows in
+      // the thread_max and thread_sum variables respectively. Finally, we can
+      // scale the rows for the softmax. Technically, for top-k gating we don't
+      // need to compute the entire softmax row. We can likely look at the maxes
+      // and only compute for the top-k values in the row. However, this kernel
+      // will likely not be a bottle neck and it seems better to closer match
+      // torch and find the argmax after computing the softmax.
+      const float reciprocal_row_sum = 1.f / row_sum;
 
 #pragma unroll
-    for (int ii = 0; ii < VPT; ++ii) {
-      row_chunk[ii] = row_chunk[ii] * reciprocal_row_sum;
+      for (int ii = 0; ii < VPT; ++ii) {
+        row_chunk[ii] = row_chunk[ii] * reciprocal_row_sum;
+      }
+    } else {
+#pragma unroll
+      for (int ii = 0; ii < VPT; ++ii) {
+        row_chunk[ii] = Sigmoid(row_chunk[ii]);
+      }
     }
 
     static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
@@ -555,8 +607,9 @@ template <
     int WARP_SIZE_PARAM,
     int MAX_BYTES_PER_LDG,
     typename InputdType,
-    typename IndType>
-void topkGatingSoftmaxLauncherHelper(
+    typename IndType,
+    ScoringFunc ScoringFuncParam>
+void topkGatingLauncherHelper(
     const InputdType* input,
     const bool* finished,
     float* output,
@@ -583,14 +636,15 @@ void topkGatingSoftmaxLauncherHelper(
   queue.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<2>(grid * block, block),
-        topkGatingSoftmax<
+        topkGating<
             VPT,
             EXPERTS,
             WARPS_PER_TB,
             BYTES_PER_LDG,
             WARP_SIZE_PARAM,
             InputdType,
-            IndType>(
+            IndType,
+            ScoringFuncParam>(
             input,
             finished,
             output,
@@ -605,14 +659,17 @@ void topkGatingSoftmaxLauncherHelper(
   });
 }
 
-#define LAUNCH_SOFTMAX(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)                   \
+#define LAUNCH_TOPK(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES, SCORING_FUNC)        \
   static_assert(                                                               \
       WARP_SIZE == 32, "Unsupported warp size. Only 32 is supported for XPU"); \
-  topkGatingSoftmaxLauncherHelper<                                             \
+  topkGatingLauncherHelper<                                                    \
       NUM_EXPERTS,                                                             \
       WARPS_PER_TB,                                                            \
       WARP_SIZE,                                                               \
-      MAX_BYTES>(                                                              \
+      MAX_BYTES,                                                               \
+      InputdType,                                                              \
+      IndType,                                                                 \
+      SCORING_FUNC>(                                                           \
       gating_output,                                                           \
       nullptr,                                                                 \
       topk_weights,                                                            \
@@ -626,13 +683,13 @@ void topkGatingSoftmaxLauncherHelper(
       bias,                                                                    \
       queue);
 
-template <typename InputdType, typename IndType>
-void topkGatingSoftmaxKernelLauncher(
+template <typename InputdType, typename IndType, ScoringFunc ScoringFuncParam>
+void topkGatingKernelLauncher(
     const InputdType* gating_output,
     float* topk_weights,
     IndType* topk_indices,
     int* token_expert_indices,
-    float* softmax_workspace,
+    float* scoring_workspace,
     const int num_tokens,
     const int num_experts,
     const int topk,
@@ -645,65 +702,96 @@ void topkGatingSoftmaxKernelLauncher(
 
   switch (num_experts) {
     case 1:
-      LAUNCH_SOFTMAX(1, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+      LAUNCH_TOPK(
+          1, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 2:
-      LAUNCH_SOFTMAX(2, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+      LAUNCH_TOPK(
+          2, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 4:
-      LAUNCH_SOFTMAX(4, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+      LAUNCH_TOPK(
+          4, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 8:
-      LAUNCH_SOFTMAX(8, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+      LAUNCH_TOPK(
+          8, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 16:
-      LAUNCH_SOFTMAX(16, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+      LAUNCH_TOPK(
+          16, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 32:
-      LAUNCH_SOFTMAX(32, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+      LAUNCH_TOPK(
+          32, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 64:
-      LAUNCH_SOFTMAX(64, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+      LAUNCH_TOPK(
+          64, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 128:
-      LAUNCH_SOFTMAX(128, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+      LAUNCH_TOPK(
+          128, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 256:
-      LAUNCH_SOFTMAX(256, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+      LAUNCH_TOPK(
+          256, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 512:
-      LAUNCH_SOFTMAX(512, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
+      LAUNCH_TOPK(
+          512, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 192:
-      LAUNCH_SOFTMAX(192, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
+      LAUNCH_TOPK(
+          192, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64, ScoringFuncParam);
       break;
     case 320:
-      LAUNCH_SOFTMAX(320, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
+      LAUNCH_TOPK(
+          320, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64, ScoringFuncParam);
       break;
     case 384:
-      LAUNCH_SOFTMAX(384, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
+      LAUNCH_TOPK(
+          384, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64, ScoringFuncParam);
       break;
     case 448:
-      LAUNCH_SOFTMAX(448, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
+      LAUNCH_TOPK(
+          448, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64, ScoringFuncParam);
       break;
     case 576:
-      LAUNCH_SOFTMAX(576, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
+      LAUNCH_TOPK(
+          576, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64, ScoringFuncParam);
       break;
     default: {
       TORCH_CHECK(
-          softmax_workspace != nullptr,
-          "softmax_workspace must be provided for num_experts that are "
+          scoring_workspace != nullptr,
+          "scoring_workspace must be provided for num_experts that are "
           "not a power of 2 or multiple of 64.");
       static constexpr int TPB = 256;
       sycl::range<1> grid1(num_tokens);
       sycl::range<1> block1(TPB);
-      queue.submit([&](sycl::handler& cgh) {
-        sycl::local_accessor<float, 1> slm(sycl::range<1>(2), cgh);
-        cgh.parallel_for(
-            sycl::nd_range<1>(grid1 * block1, block1),
-            moeSoftmax<TPB, InputdType>(
-                slm, gating_output, nullptr, softmax_workspace, num_experts));
-      });
+      if constexpr (ScoringFuncParam == ScoringFunc::SOFTMAX) {
+        queue.submit([&](sycl::handler& cgh) {
+          sycl::local_accessor<float, 1> slm(sycl::range<1>(2), cgh);
+          cgh.parallel_for(
+              sycl::nd_range<1>(grid1 * block1, block1),
+              moeSoftmax<TPB, InputdType>(
+                  slm,
+                  gating_output,
+                  nullptr,
+                  scoring_workspace,
+                  num_experts));
+        });
+      } else {
+        queue.submit([&](sycl::handler& cgh) {
+          cgh.parallel_for(
+              sycl::nd_range<1>(grid1 * block1, block1),
+              moeSigmoid<TPB, InputdType>(
+                  gating_output,
+                  nullptr,
+                  scoring_workspace,
+                  num_experts));
+        });
+      }
 
       sycl::range<1> grid2(num_tokens);
       sycl::range<1> block2(TPB);
@@ -711,7 +799,7 @@ void topkGatingSoftmaxKernelLauncher(
         cgh.parallel_for(
             sycl::nd_range<1>(grid2 * block2, block2),
             moeTopK<TPB, IndType>(
-                softmax_workspace,
+                scoring_workspace,
                 nullptr,
                 topk_weights,
                 topk_indices,
@@ -726,6 +814,8 @@ void topkGatingSoftmaxKernelLauncher(
     }
   }
 }
+
+#undef LAUNCH_TOPK
 
 }  // namespace moe
 }  // namespace vllm
@@ -748,16 +838,19 @@ void topk_softmax(
 
   const at::DeviceGuard device_guard(gating_output.device());
   auto& queue = vllm::xpu::vllmGetQueue();
-  torch::Tensor softmax_workspace = torch::empty(
+  torch::Tensor scoring_workspace = torch::empty(
       {workspace_size}, gating_output.options().dtype(torch::kFloat));
 
-#define LAUNCH_TOPK_SOFTMAX(INPUTDTYPE, INDTYPE)                       \
-  vllm::moe::topkGatingSoftmaxKernelLauncher(                          \
+#define LAUNCH_TOPK(INPUTDTYPE, INDTYPE)                               \
+  vllm::moe::topkGatingKernelLauncher<                                 \
+      INPUTDTYPE,                                                      \
+      INDTYPE,                                                         \
+      vllm::moe::ScoringFunc::SOFTMAX>(                                \
       reinterpret_cast<INPUTDTYPE*>(gating_output.mutable_data_ptr()), \
       topk_weights.data_ptr<float>(),                                  \
       topk_indices.data_ptr<INDTYPE>(),                                \
       token_expert_indices.data_ptr<int>(),                            \
-      softmax_workspace.data_ptr<float>(),                             \
+      scoring_workspace.data_ptr<float>(),                             \
       num_tokens,                                                      \
       num_experts,                                                     \
       topk,                                                            \
@@ -767,27 +860,92 @@ void topk_softmax(
 
   if (topk_indices.scalar_type() == at::ScalarType::Int) {
     if (gating_output.scalar_type() == at::ScalarType::Float)
-      LAUNCH_TOPK_SOFTMAX(float, int)
+      LAUNCH_TOPK(float, int)
     else if (gating_output.scalar_type() == at::ScalarType::Half)
-      LAUNCH_TOPK_SOFTMAX(sycl::half, int)
+      LAUNCH_TOPK(sycl::half, int)
     else
-      LAUNCH_TOPK_SOFTMAX(sycl::ext::oneapi::bfloat16, int)
+      LAUNCH_TOPK(sycl::ext::oneapi::bfloat16, int)
   } else if (topk_indices.scalar_type() == at::ScalarType::UInt32) {
     if (gating_output.scalar_type() == at::ScalarType::Float)
-      LAUNCH_TOPK_SOFTMAX(float, uint32_t)
+      LAUNCH_TOPK(float, uint32_t)
     else if (gating_output.scalar_type() == at::ScalarType::Half)
-      LAUNCH_TOPK_SOFTMAX(sycl::half, uint32_t)
+      LAUNCH_TOPK(sycl::half, uint32_t)
     else
-      LAUNCH_TOPK_SOFTMAX(sycl::ext::oneapi::bfloat16, uint32_t)
+      LAUNCH_TOPK(sycl::ext::oneapi::bfloat16, uint32_t)
   } else {
     TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
     if (gating_output.scalar_type() == at::ScalarType::Float)
-      LAUNCH_TOPK_SOFTMAX(float, int64_t)
+      LAUNCH_TOPK(float, int64_t)
     else if (gating_output.scalar_type() == at::ScalarType::Half)
-      LAUNCH_TOPK_SOFTMAX(sycl::half, int64_t)
+      LAUNCH_TOPK(sycl::half, int64_t)
     else
-      LAUNCH_TOPK_SOFTMAX(sycl::ext::oneapi::bfloat16, int64_t)
+      LAUNCH_TOPK(sycl::ext::oneapi::bfloat16, int64_t)
   }
 
-#undef LAUNCH_TOPK_SOFTMAX
+#undef LAUNCH_TOPK
+}
+
+void topk_sigmoid(
+    torch::Tensor& topk_weights,          // [num_tokens, topk]
+    torch::Tensor& topk_indices,          // [num_tokens, topk]
+    torch::Tensor& token_expert_indices,  // [num_tokens, topk]
+    torch::Tensor& gating_output,         // [num_tokens, num_experts]
+    const bool renormalize,
+    std::optional<torch::Tensor> bias) {
+  const int num_experts = gating_output.size(-1);
+  const auto num_tokens = gating_output.numel() / num_experts;
+  const int topk = topk_weights.size(-1);
+
+  const bool is_pow_2 =
+      (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
+  const bool needs_workspace = !is_pow_2 || num_experts > 256;
+  const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
+
+  const at::DeviceGuard device_guard(gating_output.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+  torch::Tensor scoring_workspace = torch::empty(
+      {workspace_size}, gating_output.options().dtype(torch::kFloat));
+
+#define LAUNCH_TOPK(INPUTDTYPE, INDTYPE)                               \
+  vllm::moe::topkGatingKernelLauncher<                                 \
+      INPUTDTYPE,                                                      \
+      INDTYPE,                                                         \
+      vllm::moe::ScoringFunc::SIGMOID>(                                \
+      reinterpret_cast<INPUTDTYPE*>(gating_output.mutable_data_ptr()), \
+      topk_weights.data_ptr<float>(),                                  \
+      topk_indices.data_ptr<INDTYPE>(),                                \
+      token_expert_indices.data_ptr<int>(),                            \
+      scoring_workspace.data_ptr<float>(),                             \
+      num_tokens,                                                      \
+      num_experts,                                                     \
+      topk,                                                            \
+      renormalize,                                                     \
+      bias.has_value() ? bias->data_ptr<float>() : nullptr,            \
+      queue);
+
+  if (topk_indices.scalar_type() == at::ScalarType::Int) {
+    if (gating_output.scalar_type() == at::ScalarType::Float)
+      LAUNCH_TOPK(float, int)
+    else if (gating_output.scalar_type() == at::ScalarType::Half)
+      LAUNCH_TOPK(sycl::half, int)
+    else
+      LAUNCH_TOPK(sycl::ext::oneapi::bfloat16, int)
+  } else if (topk_indices.scalar_type() == at::ScalarType::UInt32) {
+    if (gating_output.scalar_type() == at::ScalarType::Float)
+      LAUNCH_TOPK(float, uint32_t)
+    else if (gating_output.scalar_type() == at::ScalarType::Half)
+      LAUNCH_TOPK(sycl::half, uint32_t)
+    else
+      LAUNCH_TOPK(sycl::ext::oneapi::bfloat16, uint32_t)
+  } else {
+    TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
+    if (gating_output.scalar_type() == at::ScalarType::Float)
+      LAUNCH_TOPK(float, int64_t)
+    else if (gating_output.scalar_type() == at::ScalarType::Half)
+      LAUNCH_TOPK(sycl::half, int64_t)
+    else
+      LAUNCH_TOPK(sycl::ext::oneapi::bfloat16, int64_t)
+  }
+
+#undef LAUNCH_TOPK
 }
