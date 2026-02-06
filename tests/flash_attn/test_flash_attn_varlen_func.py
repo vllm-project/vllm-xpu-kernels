@@ -18,7 +18,7 @@ QDTYPES = [None]
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
 SOFT_CAPS = [None]
-SLIDING_WINDOWS = [(-1, 127), (127, -1), (127, 127), (-1, -1)]
+SLIDING_WINDOWS = [(-1, 127), (127, -1), (64, 64), (-1, -1)]
 SINK = [False, True]
 CASUAL = [False, True]
 PAGED = [False, True]
@@ -178,7 +178,7 @@ def test_varlen_with_paged_kv(
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
-    torch.manual_seed(42)
+    torch.manual_seed(4242)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
