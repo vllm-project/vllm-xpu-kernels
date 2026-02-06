@@ -3,7 +3,7 @@ import pytest
 import torch
 
 from tests.ops.fp8_quant_op import scaled_fp8_quant
-from tests.register_ops import fp8_gemm, fp8_gemm_w8a16
+from tests.register_ops import fp8_gemm, fp8_gemm_w8a16, get_onednn_version
 
 BATCHES = [1]
 MNK_FACTORS = [
@@ -32,6 +32,20 @@ MINI_PYTEST_PARAMS = {
         "mnk_factors": MINI_MNK_FACTORS,
     },
 }
+
+
+def test_onednn_version():
+    version = get_onednn_version()
+    major, minor, patch, hash = version.split(".")
+    hash = hash[:7]  # only compare the first 7 characters of the hash
+    ref_major = 3
+    ref_minor = 10
+    ref_patch = 0
+    ref_hash = "704b0d6"
+    assert (int(major), int(minor), int(patch),
+            hash) == (ref_major, ref_minor, ref_patch,
+                      ref_hash), f"Expected oneDNN version \
+        {ref_major}.{ref_minor}.{ref_patch}.{ref_hash}, but got {version}"
 
 
 @pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
