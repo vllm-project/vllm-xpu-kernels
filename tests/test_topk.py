@@ -2,7 +2,7 @@
 import pytest
 import torch
 
-from tests.ops.tok_op import (fused_topk_softmax, fused_topk_sigmoid,
+from tests.ops.topk_op import (fused_topk_softmax, fused_topk_sigmoid,
                               topk_softmax, topk_sigmoid)
 from tests.utils import seed_everything
 
