@@ -9,7 +9,7 @@
 
 namespace vllm {
 
-static constexpr int WARP_SIZE = 16;
+static constexpr int WARP_SIZE = 32;
 
 // The number of slots for the final pass.
 static constexpr int kNumFinalItems = 2048;
@@ -398,8 +398,15 @@ static void topKPerRowJob(const sycl::nd_item<3>& item,
 
   char* smem_buf =
         slm.template get_multi_ptr<sycl::access::decorated::no>().get();
-  SharedStates* sharedStates = reinterpret_cast<SharedStates*>(smem_buf);
-  int32_t* smemOutput = reinterpret_cast<int32_t*>(smem_buf + sizeof(SharedStates));
+
+  int sharedStatesOffset = topK * sizeof(int32_t);
+  if constexpr (multipleBlocksPerRow) {
+    sharedStatesOffset += topK * sizeof(float);
+  }
+
+  int32_t* smemOutput = reinterpret_cast<int32_t*>(smem_buf);
+  SharedStates* sharedStates =
+      reinterpret_cast<SharedStates*>(smem_buf + sharedStatesOffset);
 
   // Shared memory references
   auto& smemFinal = sharedStates->smemFinal;
@@ -558,7 +565,7 @@ class top_k_per_row_prefill_kernel {
         stride1_(stride1),
         topK_(topK),
         offsetIndex_(offsetIndex) {}
-  void operator()(const sycl::nd_item<3>& item) const {
+  void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]](const sycl::nd_item<3>& item) const {
     int64_t group_idx = item.get_group(0);
     int64_t local_idx = item.get_local_id(0);
     int local_range = item.get_local_range(0);
@@ -630,7 +637,7 @@ class top_k_per_row_decode_kernel {
     numBlocksToMerge_(numBlocksToMerge),
     indices_(indices) {}
 
-  void operator()(const sycl::nd_item<3>& item) const {
+  void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]](const sycl::nd_item<3>& item) const {
     auto blockIdx_x = item.get_group(0);
     auto blockIdx_y = item.get_group(1);
     auto gridDim_y = item.get_group_range(1);
@@ -765,7 +772,7 @@ void top_k_per_row_decode(
     });
   } else {
     // Long sequences are run in two steps
-      constexpr auto multipleBlocksPerRowConfig = 10;
+    constexpr auto multipleBlocksPerRowConfig = 10;
 
     const auto outIndicesAux =
         torch::empty({numRows, multipleBlocksPerRowConfig, topK},
@@ -815,8 +822,8 @@ void top_k_per_row_decode(
             outLogitsAux.data_ptr<float>(),
             seqLens.data_ptr<int32_t>(),
             indices.data_ptr<int32_t>(),
-            stride0,
-            stride1,
+            outLogitsAux.stride(0),
+            1,
             topK,
             next_n,
             /*outLogits=*/nullptr,

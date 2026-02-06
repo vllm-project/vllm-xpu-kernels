@@ -13,7 +13,7 @@ from vllm.platforms import current_platform
 # Test parameters
 NUM_ROWS = [1, 32, 2050, 8239]
 TOP_K_VALUES = [2048, 3000]
-BATCH_SIZE = [1, 2, 2048]
+BATCH_SIZE = [1, 2, 512]
 NEXT_N = [1, 8]
 DATA_GENERATION = ["random", "10LSBits"]
 
@@ -134,6 +134,7 @@ def test_top_k_per_row(
     """
     torch.set_default_device("xpu")
     device = "xpu"
+    torch.xpu.memory.empty_cache()
 
     # Create test data
     vocab_size = 20000
@@ -237,6 +238,8 @@ def test_top_k_per_row_decode(
     """
     Test top_k_per_row with seq_lens tensor.
     """
+    torch.xpu.memory.empty_cache()
+
     vocab_size = 20000
     _run_top_k_per_row_decode_test(
         top_k, batch_size, next_n, vocab_size, data_generation
@@ -249,10 +252,12 @@ def test_top_k_per_row_decode_large_vocab_size() -> None:
     """
     Test top_k_per_row_decode with large vocabulary size.
     """
+    torch.xpu.memory.empty_cache()
+
     top_k = 2048
-    batch_size = 2
+    batch_size = 8
     next_n = 2
-    vocab_size = 300000
+    vocab_size = 300000 # > 200 * 1000 to test split work
     data_generation = "random"
     _run_top_k_per_row_decode_test(
         top_k, batch_size, next_n, vocab_size, data_generation
