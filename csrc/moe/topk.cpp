@@ -14,9 +14,7 @@ enum class ScoringFunc {
   SIGMOID = 1,
 };
 
-static inline float Sigmoid(float x) {
-  return 1.0f / (1.0f + sycl::exp(-x));
-}
+static inline float Sigmoid(float x) { return 1.0f / (1.0f + sycl::exp(-x)); }
 
 template <typename T>
 static inline float SigmoidTyped(T x) {
@@ -708,32 +706,25 @@ void topkGatingKernelLauncher(
 
   switch (num_experts) {
     case 1:
-      LAUNCH_TOPK(
-          1, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
+      LAUNCH_TOPK(1, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 2:
-      LAUNCH_TOPK(
-          2, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
+      LAUNCH_TOPK(2, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 4:
-      LAUNCH_TOPK(
-          4, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
+      LAUNCH_TOPK(4, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 8:
-      LAUNCH_TOPK(
-          8, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
+      LAUNCH_TOPK(8, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 16:
-      LAUNCH_TOPK(
-          16, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
+      LAUNCH_TOPK(16, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 32:
-      LAUNCH_TOPK(
-          32, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
+      LAUNCH_TOPK(32, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 64:
-      LAUNCH_TOPK(
-          64, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
+      LAUNCH_TOPK(64, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 128:
       LAUNCH_TOPK(
@@ -781,21 +772,14 @@ void topkGatingKernelLauncher(
           cgh.parallel_for(
               sycl::nd_range<1>(grid1 * block1, block1),
               moeSoftmax<TPB, InputdType>(
-                  slm,
-                  gating_output,
-                  nullptr,
-                  scoring_workspace,
-                  num_experts));
+                  slm, gating_output, nullptr, scoring_workspace, num_experts));
         });
       } else {
         queue.submit([&](sycl::handler& cgh) {
           cgh.parallel_for(
               sycl::nd_range<1>(grid1 * block1, block1),
               moeSigmoid<TPB, InputdType>(
-                  gating_output,
-                  nullptr,
-                  scoring_workspace,
-                  num_experts));
+                  gating_output, nullptr, scoring_workspace, num_experts));
         });
       }
 
