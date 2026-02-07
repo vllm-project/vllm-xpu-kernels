@@ -59,15 +59,11 @@ class segmented_max_reduction {
       float* scale_, const scalar_t* input_, int64_t num_elems_)
       : scale(scale_), input(input_), num_elems(num_elems_) {}
   void operator()(sycl::nd_item<1> item) const {
+    // NOTE: `scale` must be initialized before lanching the reduction kernel.
     auto& cache =
         *sycl::ext::oneapi::group_local_memory_for_overwrite<float[1024]>(
             item.get_group());
     int64_t i = item.get_global_linear_id();
-
-    if (i == 0) {
-      scale[0] = std::numeric_limits<float>::lowest();
-    }
-    item.barrier(sycl::access::fence_space::global_and_local);
 
     // First store maximum for all values processes by
     // the current thread in cache[item.get_local_id(0)]
