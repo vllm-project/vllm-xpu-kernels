@@ -3,7 +3,7 @@ import pytest
 import torch
 
 from tests.ops.topk_op import (fused_topk_softmax, fused_topk_sigmoid,
-                              topk_softmax, topk_sigmoid)
+                               topk_softmax, topk_sigmoid)
 from tests.utils import seed_everything
 
 #override pytest parameters when enable mini pytest
@@ -52,7 +52,10 @@ def test_fused_topk_softmax(n_token: int, n_hidden: int, n_expert: int,
                                atol=2e-2,
                                rtol=0)
 
-    torch.testing.assert_close(baseline_topk_ids, test_topk_ids, atol=0, rtol=0)
+    torch.testing.assert_close(baseline_topk_ids,
+                               test_topk_ids,
+                               atol=0,
+                               rtol=0)
 
 
 @pytest.mark.parametrize("n_token", [1, 33, 64])
@@ -92,4 +95,7 @@ def test_fused_topk_sigmoid(n_token: int, n_hidden: int, n_expert: int,
                                atol=2e-2,
                                rtol=0)
 
-    torch.testing.assert_close(baseline_topk_ids, test_topk_ids, atol=0, rtol=0)
+    torch.testing.assert_close(baseline_topk_ids,
+                               test_topk_ids,
+                               atol=0,
+                               rtol=0)
