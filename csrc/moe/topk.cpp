@@ -15,7 +15,7 @@ enum class ScoringFunc {
 };
 
 static inline float Sigmoid(float x) {
-  return 1.0f / (1.0f + sycl::native::exp(-x));
+  return 1.0f / (1.0f + sycl::exp(-x));
 }
 // ====================== Softmax things ===============================
 // We have our own implementation of softmax here so we can support transposing
