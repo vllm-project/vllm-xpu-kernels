@@ -294,6 +294,7 @@ void dynamic_scaled_fp8_quant(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
+              queue.memset(scale.data_ptr<float>(), 0, sizeof(float));
               // Launch the kernel
               queue.submit([&](sycl::handler& cgh) {
                 auto max_reduce_kernel =
