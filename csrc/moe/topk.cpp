@@ -17,6 +17,12 @@ enum class ScoringFunc {
 static inline float Sigmoid(float x) {
   return 1.0f / (1.0f + sycl::exp(-x));
 }
+
+template <typename T>
+static inline float SigmoidTyped(T x) {
+  const float val = Sigmoid(static_cast<float>(x));
+  return static_cast<float>(static_cast<T>(val));
+}
 // ====================== Softmax things ===============================
 // We have our own implementation of softmax here so we can support transposing
 // the output in the softmax kernel when we extend this module to support
@@ -124,7 +130,7 @@ class moeSigmoid {
 
     for (int ii = local_id_x; ii < num_cols; ii += TPB) {
       const int idx = thread_row_offset + ii;
-      output[idx] = Sigmoid(static_cast<float>(input[idx]));
+      output[idx] = SigmoidTyped(input[idx]);
     }
   }
 
@@ -449,7 +455,7 @@ class topkGating {
     } else {
 #pragma unroll
       for (int ii = 0; ii < VPT; ++ii) {
-        row_chunk[ii] = Sigmoid(row_chunk[ii]);
+        row_chunk[ii] = SigmoidTyped(static_cast<InputdType>(row_chunk[ii]));
       }
     }
 
