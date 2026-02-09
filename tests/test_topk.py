@@ -2,8 +2,8 @@
 import pytest
 import torch
 
-from tests.ops.topk_op import (fused_topk_softmax, fused_topk_sigmoid,
-                               topk_softmax, topk_sigmoid)
+from tests.ops.topk_op import (fused_topk_sigmoid, fused_topk_softmax,
+                               topk_sigmoid, topk_softmax)
 from tests.utils import seed_everything
 
 #override pytest parameters when enable mini pytest
