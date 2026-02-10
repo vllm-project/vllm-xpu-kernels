@@ -99,7 +99,7 @@ class scaled_fp8_quant_kernel_strided_group_shape {
             token_out + gj * group_n,
             group_n,
             tid,
-            item.get_local_range(gj),
+            item.get_local_range(0),
             op);
       }
     } else {
@@ -498,7 +498,6 @@ void static_scaled_fp8_quant(
         "D");
   }
 
-  int64_t num_elems = input.numel();
   sycl::range<1> grid(num_tokens);
   sycl::range<1> block(1024);
 
@@ -554,7 +553,6 @@ void dynamic_scaled_fp8_quant(
 
   int64_t hidden_size = input.size(-1);
   int64_t num_tokens = input.numel() / hidden_size;
-  int64_t num_elems = input.numel();
   sycl::range<1> grid(num_tokens);
   sycl::range<1> block(1024);
 

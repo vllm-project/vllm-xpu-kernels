@@ -109,7 +109,7 @@ void scaled_convert_vec(
     using srcx4_t = vec4_t<scalar_t>;
     using distx4_t = dtypex4_t<dtype_t>;
 
-    int64_t const num_vec_elems = num_elems >> 2;
+    int64_t const num_vec_elems = num_elems / VEC_SIZE;
 
     auto const* vectorized_in = reinterpret_cast<srcx4_t const*>(src);
     auto* vectorized_out = reinterpret_cast<distx4_t*>(dst);
@@ -132,7 +132,7 @@ void scaled_convert_vec(
   prefix_elems /= sizeof(scalar_t);
   prefix_elems = sycl::min(prefix_elems, num_elems);
 
-  // 1. prefill the when it is unsafe to vectorize
+  // 1. prefill elements when it is unsafe to vectorize
   for (int i = local_idx; i < prefix_elems; i += local_range) {
     scalar_op(dst[i], src[i]);
   }
