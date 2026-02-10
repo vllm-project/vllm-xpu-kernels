@@ -653,7 +653,7 @@ class ReduceSplitK {
       ElementLSE global_max_logits{cutlass::platform::numeric_limits<ElementLSE>::lowest()};
       ElementLSE global_exp_sums{0};
       // only first subgroup participates
-      if (thr_id < num_kv_splits) {
+      if (thr_id < num_kv_splits && thr_id * num_blocks_per_split < k_blocks) {
         ElementLSE cur_max_logit = max_logits(seq_idx, thr_id, head_q, l_coord);
         global_max_logits = sycl::max(global_max_logits, cur_max_logit);
         shared_storage.max_logits_slm_array[thr_id] = cur_max_logit;

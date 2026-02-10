@@ -482,7 +482,7 @@ struct FMHAFwdMainloop<
       /* K prefetch */
       CUTLASS_PRAGMA_UNROLL
       for (int D = 0; D < size<4>(pKgK); D++) {
-        prefetch(prefetch_k, pKgK(_, _, _, page_idx, D));
+        prefetch(prefetch_k, pKgK(_, _, _, next_page_idx, D));
       }
 
       // barrier_wait(ScopeSubgroup);
