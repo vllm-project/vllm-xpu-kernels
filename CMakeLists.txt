@@ -10,7 +10,7 @@ cmake_minimum_required(VERSION 3.26)
 # If you want to only build one target, make sure to install it manually: cmake
 # --build . --target _C cmake --install . --component _C
 project(vllm_extensions LANGUAGES CXX)
-
+set(CMAKE_VERBOSE_MAKEFILE ON)
 # XPU by default, used by setup.py
 set(VLLM_TARGET_DEVICE
     "xpu"
@@ -331,6 +331,70 @@ list(
 #
 # Define other extension targets
 #
+
+#
+# xpumem_allocator extension - XPU memory allocator with Python callbacks
+#
+set(XPUMEM_ALLOCATOR_ENABLED ON CACHE BOOL "Build xpumem_allocator extension")
+if(XPUMEM_ALLOCATOR_ENABLED)
+  message(STATUS "Enabling xpumem_allocator extension.")
+
+  set(XPUMEM_ALLOCATOR_SRC
+    "csrc/xpu/xpu_mem.cpp"
+  )
+  include_directories("/usr/include")
+
+  # Create Python module for xpumem_allocator
+  # This is a standalone Python extension (not a torch extension)
+  # Use the same SABI settings as other extensions for consistency
+  find_package(Python REQUIRED COMPONENTS Development)
+  find_package(Torch REQUIRED)
+  list(APPEND PYTORCH_INCLUDES
+    ${TORCH_INCLUDE_DIRS}
+    #${TORCH_INCLUDE_DIRS}/torch/csrc/api/include
+    )
+  message(STATUS "All Torch include dirs: ${TORCH_INCLUDE_DIRS}")
+  Python_add_library(xpumem_allocator MODULE USE_SABI 3 WITH_SOABI "${XPUMEM_ALLOCATOR_SRC}")
+
+  set_property(TARGET xpumem_allocator PROPERTY CXX_STANDARD 17)
+
+  # Set compile options for SYCL
+  if(VLLM_GPU_LANG STREQUAL "SYCL")
+    target_compile_options(xpumem_allocator PRIVATE ${VLLM_GPU_COMPILE_FLAGS})
+  endif()
+  get_target_property(EXISTING_DEFS xpumem_allocator COMPILE_DEFINITIONS)
+  if(EXISTING_DEFS)
+    list(REMOVE_ITEM EXISTING_DEFS "Py_LIMITED_API=3")
+    set_target_properties(xpumem_allocator PROPERTIES COMPILE_DEFINITIONS "${EXISTING_DEFS}")
+  endif()
+  message("!!!!!output")
+  message(${Python_INCLUDE_DIRS})
+  # Include directories
+  target_include_directories(xpumem_allocator PRIVATE
+    ${Python_INCLUDE_DIRS}
+    ${PYTORCH_INCLUDES}
+    csrc
+    #${VLLM_XPU_INCLUDE_DIR}
+    #${Python_INCLUDE_DIRS}
+    #${PYTORCH_INCLUDES}
+  )
+
+  # Link libraries
+  target_link_libraries(xpumem_allocator PRIVATE
+    torch
+    ${TORCH_LIBRARIES}
+  )
+
+  # Link options for SYCL
+  if(VLLM_GPU_LANG STREQUAL "SYCL")
+    target_link_options(xpumem_allocator PRIVATE ${VLLM_GPU_LINK_FLAGS})
+  endif()
+
+  # Install the module
+  install(TARGETS xpumem_allocator
+    LIBRARY DESTINATION vllm_xpu_kernels
+    COMPONENT xpumem_allocator)
+endif()
 
 #
 # _C extension
