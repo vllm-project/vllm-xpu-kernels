@@ -19,6 +19,7 @@ def scaled_fp8_quant(
     use_per_token_if_dynamic: bool = False,
     output: Optional[torch.Tensor] = None,
     fp8_dtype: torch.dtype = torch.float8_e5m2,
+    group_shape: tuple[int, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP8 and return quantized tensor and scale.
@@ -67,8 +68,7 @@ def scaled_fp8_quant(
             scale = torch.empty(1, device=input.device, dtype=torch.float32)
             ops.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        assert scale.numel() == 1, f"{scale.shape}"
-        ops.static_scaled_fp8_quant(output, input, scale)
+        ops.static_scaled_fp8_quant(output, input, scale, group_shape)
 
     return output, scale
 
@@ -128,3 +128,75 @@ def per_token_group_quant_fp8(
         x_s = x_s.to(torch.float8_e8m0fnu)
 
     return x_q, x_s
+
+
+class GroupShape:
+    row: int
+    col: int
+
+
+# Normalize the group_shape to the full extent for any dims that are -1
+def _normalize_quant_group_shape(x: torch.Tensor, group_shape: GroupShape):
+    # -1 means full extent
+    return (
+        group_shape[0] if group_shape[0] > 0 else x.shape[-2],
+        group_shape[1] if group_shape[1] > 0 else x.shape[-1],
+    )
+
+
+# Quantize assuming once scale per group of elements with shape group_shape,
+# example group shapes:
+#  * (-1, -1)   for per-tensor quantization
+#  * (1, -1)    for per-row quantization
+#  * (-1, 1)    for per-column quantization
+#  * (128, 128) for 128x128 deepseek style block quantization
+#  * (1, 128)   for deepseek style activation quantization
+#               (i.e. per-token-per-group)
+def scaled_quantize(
+    x: torch.Tensor,
+    group_shape: GroupShape,
+    quant_dtype: torch.dtype,
+    compute_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Args:
+        x: Input tensor to quantize
+        group_shape: Shape of quantization groups
+        quant_dtype: Target quantized dtype (e.g., torch.float8_e4m3fn)
+        compute_dtype: Optional dtype for intermediate computations.
+            If None, uses input dtype. Use torch.float32 for higher precision.
+    """
+    group_shape = _normalize_quant_group_shape(x, group_shape)
+    assert quant_dtype.is_floating_point, (
+        "currently `scaled_quantize` only supports floating point dtypes "
+        "but could be extended to support other dtypes")
+
+    finfo = torch.finfo(quant_dtype)
+
+    # Convert to compute dtype if specified
+    x_compute = x if compute_dtype is None else x.to(compute_dtype)
+
+    # Reshape (M, N) into (BLK_M, BLOCK_SIZE_M, BLK_N, BLOCK_SIZE_N)
+    assert x.ndim == 2
+    assert x.shape[0] % group_shape[0] == 0 and x.shape[1] % group_shape[1] == 0
+    blk_m, blk_n = x.shape[0] // group_shape[0], x.shape[1] // group_shape[1]
+    x_blkd = x_compute.reshape(blk_m, group_shape[0], blk_n, group_shape[1])
+
+    # Permute to (BLK_M, BLK_N, BLOCK_SIZE_M, BLOCK_SIZE_N)
+    x_blkd_permd = x_blkd.permute(0, 2, 1, 3)
+    # Flatten to (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N)
+    x_blkd_permd = x_blkd_permd.flatten(start_dim=2)
+
+    # Compute scales
+    min_val, max_val = x_blkd_permd.aminmax(dim=-1)
+    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
+    scale = finfo.max / amax
+
+    # Apply scale and convert from:
+    # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
+    x_scl_sat = ((x_blkd_permd * scale.unsqueeze(-1)).clamp(
+        min=finfo.min,
+        max=finfo.max).reshape(blk_m, blk_n, group_shape[0],
+                               group_shape[1]).permute(0, 2, 1,
+                                                       3).reshape(x.shape))
+    return x_scl_sat.to(quant_dtype).contiguous(), scale.float().reciprocal()
