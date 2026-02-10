@@ -126,11 +126,11 @@ void scaled_convert_vec(
     return;
   }
 
-  int misalignment_offset = addr & (WIDTH - 1);       // addr % 64
-  int alignment_bytes = WIDTH - misalignment_offset;  // 64 - (addr % 64)
-  int prefix_elems = alignment_bytes & (WIDTH - 1);   // handle 64
+  int misalignment_offset = addr & (WIDTH - 1);
+  int alignment_bytes = WIDTH - misalignment_offset;
+  int prefix_elems = alignment_bytes & (WIDTH - 1);
   prefix_elems /= sizeof(scalar_t);
-  prefix_elems = sycl::min(prefix_elems, num_elems);  // 0 ≤ prefix < 16
+  prefix_elems = sycl::min(prefix_elems, num_elems);
 
   // 1. prefill the when it is unsafe to vectorize
   for (int i = local_idx; i < prefix_elems; i += local_range) {
