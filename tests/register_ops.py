@@ -191,6 +191,10 @@ def swigluoai_and_mul(
 
 
 # onednn gemm
+def get_onednn_version():
+    return torch.ops._xpu_C.get_onednn_version()
+
+
 def int4_gemm_w4a16(input: torch.Tensor, weight: torch.Tensor,
                     bias: Optional[torch.Tensor], scales: torch.Tensor,
                     zero_points: torch.Tensor, group_size: int,
