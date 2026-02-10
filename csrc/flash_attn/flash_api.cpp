@@ -7,6 +7,23 @@
 
 namespace FLASH_NAMESPACE {
 
+inline int get_num_splits(const int& batch_size, const int& num_heads_kv, const int& max_seqlen_k, const int& block_size) {
+  constexpr int parallel_ = 20;
+  constexpr int parallel_2 = 40;
+
+  int cur_parallel_d = batch_size * num_heads_kv;
+
+  int num_splits = (parallel_ + cur_parallel_d - 1) / cur_parallel_d;
+
+  if (cur_parallel_d * num_splits > parallel_ && num_splits > 1) {
+    num_splits = std::ceil(parallel_2 / static_cast<float>(cur_parallel_d)) - 1;
+  }
+  
+  int max_splits = (max_seqlen_k + block_size - 1) / block_size;
+  max_splits = std::min(max_splits, parallel_);
+  return std::min(num_splits, max_splits);
+}
+
 std::vector<at::Tensor> mha_varlen_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
@@ -132,17 +149,14 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_local,
         is_sink);
   } else {
-    constexpr int partition_size = 2048;
-    int num_kv_splits = (max_seqlen_k + partition_size - 1) / partition_size;
-    if (num_kv_splits > 20) num_kv_splits = 20;
-    // num_kv_splits = num_splits.value_or(num_kv_splits);
-    num_kv_splits = 1;
-
     int num_tokens = q.size(0);
     int num_heads_q = q.size(1);
     int head_dim = q.size(2);
     int num_heads_kv = k.size(2);
     int block_size = k.size(1);
+    
+    int num_kv_splits = num_splits.value_or(get_num_splits(num_tokens, num_heads_kv, max_seqlen_k, block_size));
+
     at::Tensor tmp_out = num_kv_splits == 1 ? out : at::empty(
         {num_tokens, num_heads_q * num_kv_splits, head_dim},
         q.options().device(q.device()));

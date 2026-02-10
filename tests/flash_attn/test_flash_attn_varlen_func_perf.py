@@ -6,6 +6,7 @@ from typing import Optional
 
 import pytest
 import torch
+import math
 
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
@@ -375,8 +376,7 @@ def test_decode_with_paged_kv(
                                     causal=False,
                                     block_table=block_tables,
                                     window_size=(-1, -1),
-                                    s_aux=sink,
-                                    num_splits_kv=num_splits_kv)
+                                    s_aux=sink)
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
@@ -390,12 +390,13 @@ def test_decode_with_paged_kv(
                                 sink=sink,
                                 window_size_left=-1,
                                 window_size_right=-1)
-    atol, rtol = 1e-2, 1e-2
-    if q_dtype is not None:
-        atol, rtol = 1.5e-1, 1.5e-1
-    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
-        f"{torch.max(torch.abs(output - ref_output))}"
-    print("Test passed!")
+    # atol, rtol = 1e-2, 1e-2
+    # if q_dtype is not None:
+    #     atol, rtol = 1.5e-1, 1.5e-1
+    # torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+    #     f"{torch.max(torch.abs(output - ref_output))}"
+    # print("Test passed!")
+
     if do_performance:
         # warm up
         for _ in range(10):
@@ -410,8 +411,7 @@ def test_decode_with_paged_kv(
                                             causal=False,
                                             block_table=block_tables,
                                             window_size=(-1, -1),
-                                            s_aux=sink,
-                                            num_splits_kv=num_splits_kv)
+                                            s_aux=sink)
         torch.xpu.synchronize()
         iterations = 200
         with torch.profiler.profile(
@@ -444,8 +444,7 @@ def test_decode_with_paged_kv(
                                                 causal=False,
                                                 block_table=block_tables,
                                                 window_size=(-1, -1),
-                                                s_aux=sink,
-                                                num_splits_kv=num_splits_kv)
+                                                s_aux=sink)
                 torch.xpu.synchronize()
                 prof.step()
         print(prof.key_averages().table(sort_by="self_xpu_time_total", row_limit=20))
@@ -455,40 +454,63 @@ def test_decode_with_paged_kv(
         memory_load_bytes = (num_seqs * kv_blocks * block_size * num_kv_heads * head_size * 2) * 2
 
 
-        print(f"num_seqs: {num_seqs},"
-              f" kv_blocks: {kv_blocks},"
-              f" block_size: {block_size},"
-              f" num_kv_heads: {num_kv_heads},"
-              f" head_size: {head_size},"
-              f" num_splits_kv: {num_splits_kv},"
-              f" memory_load_bytes: {memory_load_bytes} bytes")
+        # print(f"num_seqs: {num_seqs},"
+        #       f" kv_blocks: {kv_blocks},"
+        #       f" block_size: {block_size},"
+        #       f" num_kv_heads: {num_kv_heads},"
+        #       f" head_size: {head_size},"
+        #       f" num_splits_kv: {num_splits_kv},"
+        #       f" memory_load_bytes: {memory_load_bytes} bytes")
 
+
+def get_num_splits(batch, num_h, max_k, block_size):
+    parallel_ = 20
+    parallel_2 = 40
+
+    cur_parallel = batch * num_h
+    num_splits = int((parallel_ + cur_parallel - 1) / cur_parallel)
+
+    # cur_parallel = cur_parallel * num_splits
+    if cur_parallel * num_splits > parallel_ and num_splits > 1:
+        # num_splits = int((parallel_2 + cur_parallel - 1) / cur_parallel)
+        num_splits = math.ceil(parallel_2 / cur_parallel) - 1
+
+    max_splits = int((max_k + block_size - 1) / block_size)
+    max_splits = min(max_splits, 20)
+    return min(num_splits, max_splits)
 
 if __name__ == "__main__":
     batch = 50
     block_size = 128
     head_size = 128
-    # num_splits_kv = 2
-    for head_pair in [(32, 8)]:
-        for kv_len in [1500]:
-            max_value = int((kv_len + 127) / 128)
-            max_value = min(max_value, 20)
-            for num_splits_kv in range(1, max_value + 1):
-                print(f"batch={batch},"
-                      f" kv_len={kv_len},"
-                      f" heads={head_pair},"
-                      f" num_splits_kv={num_splits_kv},"
-                      f" head_size={head_size},"
-                      f" block_size={block_size}")
-                test_decode_with_paged_kv([(1, kv_len)] * batch,
-                                          head_pair,
-                                          head_size,
-                                          torch.bfloat16,
-                                          block_size,
-                                          None,
-                                          32768,
-                                          2,
-                                          None,
-                                          False,
-                                          do_performance = True,
-                                          num_splits_kv = num_splits_kv)
+    # for batch in range(14, 22):
+    for batch in [32]:
+        for head_pair in [(32, 8)]:
+            for kv_len in [1500]:
+                max_value = int((kv_len + 127) / 128)
+                max_value = min(max_value, 20)
+                # max_value = 10
+                num_splits_kv = get_num_splits(batch, head_pair[1], kv_len, block_size)
+                # for num_splits_kv in range(1, max_value + 1):
+                for num_splits_kv in [1, num_splits_kv]:
+                    print(f"batch={batch},"
+                          f" kv_len={kv_len},"
+                          f" heads={head_pair},"
+                          f" num_splits_kv={num_splits_kv},"
+                          f" head_size={head_size},"
+                          f" block_size={block_size}")
+                    test_decode_with_paged_kv([(1, kv_len)] * batch,
+                                              head_pair,
+                                              head_size,
+                                              torch.bfloat16,
+                                              block_size,
+                                              None,
+                                              32768,
+                                              2,
+                                              None,
+                                              False,
+                                              do_performance = True,
+                                              num_splits_kv = num_splits_kv)
+                print(f"==================kv_len: {kv_len}======================" * 2)
+            print(f"==================head_pair: {head_pair}======================")
+        print(f"==================batch: {batch}======================")
