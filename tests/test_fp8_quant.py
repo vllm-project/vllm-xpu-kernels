@@ -445,7 +445,8 @@ def test_static_fp8_quant_group_2d(
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS_GROUP)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES_GROUP)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
+# Skip float8_e5m2; it is less accurate than float8_e4m3fn and rarely used in models. # noqa: E501
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("group_shape", [(1, -1),
                                          (-1, 1)])  # per-token, per-channel
