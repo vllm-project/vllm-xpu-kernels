@@ -36,8 +36,8 @@ struct chunk_prefill_args_t {
   int max_keys;
   int total_seqlen_q;
   int total_seqlen_k;
-  float k_scale = 1.0;
-  float v_scale = 1.0;
+  void* k_scale;
+  void* v_scale;
   float sm_scale;
   void* sm_sink;
   int batch_size;
