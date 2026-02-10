@@ -173,6 +173,7 @@ def seed_everything(seed):
 
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
+DTYPES1 = [torch.half]
 HIDDEN_SIZES = [
     1,
     2,
