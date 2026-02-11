@@ -13,7 +13,7 @@ NUM_HEADS = [(4, 4), (8, 2), (10, 2), (16, 1)]
 HEAD_SIZES = [64, 128, 192, 256]
 BLOCK_SIZES = [64]
 DTYPES = [torch.bfloat16, torch.half]
-QDTYPES = [None]
+QDTYPES = [torch.float8_e5m2, torch.float8_e4m3fn, None]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
@@ -130,7 +130,9 @@ MINI_PYTEST_PARAMS = {
         "num_heads": [(8, 2)],
         "num_blocks": [64],
         "window_size": [(-1, -1), (127, 127)],
-        "is_paged": [True]
+        "is_paged": [True],
+        "fp8_dtypes": [torch.float8_e4m3fn, None],
+        "q_dtypes": [torch.float8_e4m3fn, None]
     },
     "test_decode_with_paged_kv": {
         "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
@@ -183,9 +185,10 @@ def test_varlen_with_paged_kv(
             != -1) and (os.getenv("SKIP_HANG_KERNEL") is not None
                         and os.getenv("SKIP_HANG_KERNEL") == "1"):
         pytest.skip("skip local attn to avoid runtime hang on CI.")
-    # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
-    #     pytest.skip("Flash attention with quantized inputs is only "
-    #                 "supported on version 3 with bfloat16 base type")
+    is_fp8_query = q_dtype is not None
+    is_fp8kv = fp8_dtype is not None
+    if is_fp8_query and q_dtype != fp8_dtype:
+        pytest.skip("skip cases with fp8 query and non-fp8 kv")
     torch.manual_seed(4242)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -201,6 +204,7 @@ def test_varlen_with_paged_kv(
                         num_query_heads,
                         head_size,
                         dtype=dtype)
+    output = torch.empty_like(query)
     if is_paged:
         key_cache = torch.randn(num_blocks,
                                 block_size,
@@ -238,11 +242,9 @@ def test_varlen_with_paged_kv(
     k_descale = None  #noqa: F841
     v_descale = None  #noqa: F841
     scale_shape = (num_seqs, num_kv_heads)
-    is_fp8_query = q_dtype is not None
     if is_fp8_query:
         q_descale = (torch.abs(query).max() / 200).to(torch.float32)
         maybe_quantized_query = (query / q_descale).to(q_dtype)
-    is_fp8kv = fp8_dtype is not None
     if is_fp8kv:
         k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
         v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
@@ -267,6 +269,7 @@ def test_varlen_with_paged_kv(
                                         causal=is_casual,
                                         block_table=block_tables,
                                         window_size=window_size,
+                                        out=output,
                                         s_aux=sink)
     else:
         output = flash_attn_varlen_func(maybe_quantized_query,
@@ -286,9 +289,10 @@ def test_varlen_with_paged_kv(
                                         causal=is_casual,
                                         block_table=None,
                                         window_size=window_size,
+                                        out=output,
                                         s_aux=sink)
 
-    ref_output = ref_paged_attn(query=query,
+    ref_output = ref_paged_attn(query=maybe_quantized_query,
                                 key_cache=maybe_quantized_key_cache,
                                 value_cache=maybe_quantized_value_cache,
                                 query_lens=query_lens,
@@ -347,9 +351,9 @@ def test_decode_with_paged_kv(
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
     # # FIXME: remove skip
-    # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
-    #     pytest.skip("Flash attention with quantized inputs is only "
-    #                 "supported on version 3 with bfloat16 base type")
+    is_fp8_query = q_dtype is not None
+    if is_fp8_query:
+        pytest.skip("skip cases with fp8 query")
     torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]

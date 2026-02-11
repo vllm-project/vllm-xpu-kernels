@@ -26,7 +26,7 @@
   extern template void                                                     \
   policy_dispatch_impl<POLICY, PAGED, CAUSAL, LOCAL, SINK>(                \
       sycl::queue & queue,                                                 \
-      CutlassQKType & cuQKType,                                            \
+      CutlassQKOType & cuQKOType,                                          \
       const chunk_prefill_args_t& args);
 
 // Generate all 16 bool combinations for a given policy using nested macros
