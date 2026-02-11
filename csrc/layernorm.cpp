@@ -11,7 +11,9 @@ struct alignas(8) vec4_t {
   scalar_t val[4];
 };
 
-template <typename scalar_t, int NUM_DIMS>
+// The vector width is fixed at 4 to avoid excessive branching in the kernel,
+// which could degrade performance.
+template <typename scalar_t, int NUM_DIMS, int VEC_SIZE=4>
 class rms_norm_kernel {
  public:
   rms_norm_kernel(
@@ -66,8 +68,8 @@ class rms_norm_kernel {
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
     }
 
-    auto vec_op = [&variance](const vec4_t<scalar_t>& vec) {
-      for (int i = 0; i < 4; ++i) {
+    auto vec_op = [&variance](const vec4_t<scalar_t>& vec, int VEC_SIZE=4) {
+      for (int i = 0; i < VEC_SIZE; ++i) {
         float x = static_cast<float>(vec.val[i]);
         variance += x * x;
       }
@@ -77,14 +79,15 @@ class rms_norm_kernel {
       variance += x * x;
     };
 
-    constexpr int WIDTH = 4 * sizeof(scalar_t);
+
+    constexpr int WIDTH = VEC_SIZE * sizeof(scalar_t);
     uintptr_t addr = reinterpret_cast<uintptr_t>(input_row);
 
     // fast path when the whole region is already aligned
     bool can_vec =
-        ((addr & (WIDTH - 1)) == 0) && ((hidden_size & (4 - 1)) == 0);
+        ((addr & (WIDTH - 1)) == 0) && ((hidden_size & (VEC_SIZE - 1)) == 0);
     if (can_vec) {
-      int64_t const num_vec_elems = hidden_size >> 2;
+      int64_t const num_vec_elems = hidden_size / VEC_SIZE;
       auto const* vec_in = reinterpret_cast<const vec4_t<scalar_t>*>(input_row);
       for (int i = item_ct1.get_local_id(2); i < num_vec_elems;
            i += item_ct1.get_local_range(2)) {
@@ -104,7 +107,7 @@ class rms_norm_kernel {
         scalar_op(input_row[i]);
       }
 
-      int64_t const num_vec_elems = (hidden_size - prefix_elems) >> 2;
+      int64_t const num_vec_elems = (hidden_size - prefix_elems) / VEC_SIZE;
       auto const* vec_in =
           reinterpret_cast<const vec4_t<scalar_t>*>(input_row + prefix_elems);
       for (int i = item_ct1.get_local_id(2); i < num_vec_elems;
@@ -114,7 +117,7 @@ class rms_norm_kernel {
       }
 
       // 3. handle remaining tail elements.
-      for (int i = item_ct1.get_local_id(2) + num_vec_elems * 4;
+      for (int i = item_ct1.get_local_id(2) + num_vec_elems * VEC_SIZE;
            i < hidden_size - prefix_elems;
            i += item_ct1.get_local_range(2)) {
         scalar_op(input_row[i]);
@@ -133,18 +136,18 @@ class rms_norm_kernel {
 
     scalar_t* out_row = out + item_ct1.get_group(2) * hidden_size;
     addr = reinterpret_cast<uintptr_t>(out_row);
-    can_vec = ((addr & (WIDTH - 1)) == 0) && ((hidden_size & (4 - 1)) == 0);
+    can_vec = ((addr & (WIDTH - 1)) == 0) && ((hidden_size & (VEC_SIZE - 1)) == 0);
     if (can_vec) {
       auto* v_in = reinterpret_cast<const vec4_t<scalar_t>*>(input_row);
       auto* v_w = reinterpret_cast<const vec4_t<scalar_t>*>(weight);
       auto* v_out = reinterpret_cast<vec4_t<scalar_t>*>(out_row);
-      int64_t const out_num_vec_elems = hidden_size >> 2;
+      int64_t const out_num_vec_elems = hidden_size / VEC_SIZE;
       for (int idx = item_ct1.get_local_id(2); idx < out_num_vec_elems;
            idx += item_ct1.get_local_range(2)) {
         vec4_t<scalar_t> dst;
         vec4_t<scalar_t> src1 = v_in[idx];
         vec4_t<scalar_t> src2 = v_w[idx];
-        for (int j = 0; j < 4; j++) {
+        for (int j = 0; j < VEC_SIZE; j++) {
           float x = static_cast<float>(src1.val[j]);
           dst.val[j] = ((scalar_t)(x * (*s_variance_ptr))) * src2.val[j];
         }
