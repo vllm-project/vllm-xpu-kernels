@@ -187,7 +187,7 @@ void cutlass_paged_decode_impl(
       is_sink,
       num_kv_splits};
 
-  CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
+  CutlassQKOType cuQKOType = aten_to_Cutlass_qko_dtype(query, key_cache, out);
 
   static constexpr int max_head_size = 256;
   TORCH_CHECK(
@@ -208,9 +208,9 @@ void cutlass_paged_decode_impl(
   int num_q_group_size = num_heads_q / num_heads_kv;
 
   if (num_q_group_size <= 8) {
-    dispatch_by_page_size<_8>(block_size, head_case, queue, cuQKType, args);
+    dispatch_by_page_size<_8>(block_size, head_case, queue, cuQKOType, args);
   } else if (num_q_group_size <= 16) {
-    dispatch_by_page_size<_16>(block_size, head_case, queue, cuQKType, args);
+    dispatch_by_page_size<_16>(block_size, head_case, queue, cuQKOType, args);
   } else {
     TORCH_CHECK(false, "Unsupported num_heads_q / num_heads_kv for fmha");
   }
