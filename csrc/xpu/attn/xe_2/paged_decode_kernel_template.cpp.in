@@ -29,7 +29,7 @@ using namespace cute;
       static_cast<bool>(IMPL_KISLOCAL),      \
       static_cast<bool>(IMPL_KISSINK)>(      \
       sycl::queue & queue,                   \
-      CutlassQKType & cuQKType,              \
+      CutlassQKOType & cuQKOType,              \
       const paged_decode_args_t& args);
 
 INSTANTIATE_KERNEL()
