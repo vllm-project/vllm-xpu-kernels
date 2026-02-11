@@ -518,7 +518,8 @@ class DecodeFwdEpilogue {
       const TensorLSE2D& max_logits,  // Global max logits tensor
       int idx_kv_split,
       int head_group_q,
-      TensorSink& tSink  // Sink for current head
+      TensorSink& tSink,  // Sink for current head
+      int num_kv_splits
   ) {
     using namespace cute;
     using ElementA = typename FragA::element_type;
@@ -535,11 +536,9 @@ class DecodeFwdEpilogue {
 
     auto [rA, rA_max, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
 
-    int thr_id_sg = thr_id % intel::sg_size;
-
     // store exp sum and max logits for current KV split
     // assume seq_len_qo == 1
-    if (thr_id < head_group_q) {
+    if (thr_id < head_group_q && num_kv_splits > 1) {
       exp_sums(thr_id, idx_kv_split) = rA_sum(0);
       max_logits(thr_id, idx_kv_split) = rA_max(0);
     }

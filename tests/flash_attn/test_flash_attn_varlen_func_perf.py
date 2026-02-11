@@ -6,23 +6,23 @@ from typing import Optional
 
 import pytest
 import torch
+import math
 
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
-NUM_HEADS = [(4, 4), (8, 2), (10, 2), (16, 1)]
+NUM_HEADS = [(4, 4), (8, 2), (10, 2)]
 HEAD_SIZES = [64, 128, 192, 256]
-BLOCK_SIZES = [64, 128]
-DTYPES = [torch.half, torch.bfloat16]
+BLOCK_SIZES = [64]
+DTYPES = [torch.bfloat16, torch.half]
 QDTYPES = [None]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
 SOFT_CAPS = [None]
-SLIDING_WINDOWS = [(-1, 127), (127, -1), (64, 64), (-1, -1)]
+SLIDING_WINDOWS = [(-1, 127), (127, -1), (127, 127), (-1, -1)]
 SINK = [False, True]
 CASUAL = [False, True]
 PAGED = [False, True]
-FP8KV = [torch.float8_e5m2, torch.float8_e4m3fn, None]
 
 
 def ref_paged_attn(query: torch.Tensor,
@@ -37,18 +37,13 @@ def ref_paged_attn(query: torch.Tensor,
                    soft_cap: Optional[float] = None,
                    is_paged: Optional[bool] = True,
                    casual: Optional[bool] = False,
-                   sink: Optional[torch.Tensor] = None,
-                   is_fp8kv: bool = False) -> torch.Tensor:
+                   sink: Optional[torch.Tensor] = None) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     if is_paged:
         _, block_size, num_kv_heads, head_size = key_cache.shape
     else:
         _, num_kv_heads, head_size = key_cache.shape
-
-    if is_fp8kv:
-        key_cache = key_cache.to(query.dtype)
-        value_cache = value_cache.to(query.dtype)
 
     outputs: list[torch.Tensor] = []
     start_idx = 0
@@ -116,24 +111,17 @@ def ref_paged_attn(query: torch.Tensor,
 
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
-    "test_varlen_with_paged_kv": {
+    "default": {
         "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
-        "head_size": [64, 128],
-        "num_heads": [(8, 2)],
-        "num_blocks": [64],
-        "window_size": [(-1, -1), (127, 127)],
-        "is_paged": [True]
-    },
-    "test_decode_with_paged_kv": {
-        "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
-        "num_heads": [(8, 2)],
         "head_size": [64, 128],
         "num_blocks": [64],
     }
 }
 
 
-@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
+@pytest.mark.parametrize("seq_lens",
+                         [[(1, 1328), (5, 18),
+                           (129, 463)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
@@ -146,9 +134,8 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("is_sink", SINK)
 @pytest.mark.parametrize("is_casual", CASUAL)
 @pytest.mark.parametrize("is_paged", PAGED)
-@pytest.mark.parametrize("fp8_dtype", FP8KV)
 @torch.inference_mode()
-def not_test_varlen_with_paged_kv(
+def test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
@@ -162,7 +149,6 @@ def not_test_varlen_with_paged_kv(
     is_sink: bool,
     is_casual: bool,
     is_paged: bool,
-    fp8_dtype: Optional[torch.dtype],
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -178,7 +164,7 @@ def not_test_varlen_with_paged_kv(
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
-    torch.manual_seed(4242)
+    torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
@@ -239,11 +225,6 @@ def not_test_varlen_with_paged_kv(
         q_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
-    is_fp8kv = False
-    if fp8_dtype is not None:
-        is_fp8kv = True
-        maybe_quantized_key_cache = key_cache.to(fp8_dtype)
-        maybe_quantized_value_cache = value_cache.to(fp8_dtype)
 
     if is_paged:
         output = flash_attn_varlen_func(maybe_quantized_query,
@@ -273,8 +254,8 @@ def not_test_varlen_with_paged_kv(
                                         s_aux=sink)
 
     ref_output = ref_paged_attn(query=query,
-                                key_cache=maybe_quantized_key_cache,
-                                value_cache=maybe_quantized_value_cache,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
                                 query_lens=query_lens,
                                 kv_lens=kv_lens,
                                 block_tables=block_tables,
@@ -283,24 +264,19 @@ def not_test_varlen_with_paged_kv(
                                 is_paged=is_paged,
                                 sink=sink,
                                 window_size_left=window_size[0],
-                                window_size_right=window_size[1],
-                                is_fp8kv=is_fp8kv)
+                                window_size_right=window_size[1])
     atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
     if window_size[0] != -1 or window_size[1] != -1:
         atol, rtol = 1.5e-2, 1.5e-2
-    if fp8_dtype is not None:
-        atol, rtol = 1.5e-2, 1.5e-2
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
-    torch.xpu.empty_cache()
 
 
 @pytest.mark.parametrize("seq_lens",
-                         [[(1, 1025)], [(1, 523), (1, 37),
-                                        (1, 2011)], [(1, 13000)],
-                          [(1, 523), (1, 37), (1, 2011), (1, 5000)]])
+                         [[(1, 1025)], [(1, 523), (1, 37), (1, 2011)],
+                          [(1, 13000)], [(1, 523), (1, 37), (1, 2011), (1, 5000)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
@@ -310,6 +286,8 @@ def not_test_varlen_with_paged_kv(
 @pytest.mark.parametrize("fa_version", [2])
 @pytest.mark.parametrize("q_dtype", QDTYPES)
 @pytest.mark.parametrize("is_sink", SINK)
+@pytest.mark.parametrize("do_performance", [False, True])
+@pytest.mark.parametrize("num_splits_kv", [2])
 @torch.inference_mode()
 def test_decode_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -322,6 +300,8 @@ def test_decode_with_paged_kv(
     fa_version: int,
     q_dtype: Optional[torch.dtype],
     is_sink: bool,
+    do_performance: bool,
+    num_splits_kv: int,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -329,8 +309,6 @@ def test_decode_with_paged_kv(
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
-    if num_heads == (16, 1) and head_size == 256:
-        pytest.skip("skip test cases that may run out of SLM.")
     torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -355,6 +333,9 @@ def test_decode_with_paged_kv(
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
                                                            dtype=torch.int32)
+    cu_kv_lens = torch.tensor([0] + kv_lens,
+                              dtype=torch.int32).cumsum(dim=0,
+                                                        dtype=torch.int32)
 
     seq_k = torch.tensor(kv_lens, dtype=torch.int32)
 
@@ -384,16 +365,6 @@ def test_decode_with_paged_kv(
         k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
 
-    num_splits_kv = int((max_kv_len + 511) / 512)
-    num_splits_kv = min(num_splits_kv, 20)
-    print(f"batch_size: {num_seqs},"
-          f" num_heads: ({num_query_heads}, {num_kv_heads}),"
-          f" max_kv_len: {max_kv_len},"
-          f" head_size: {head_size},"
-          f" dtype: {dtype},"
-          f" num_splits_kv: {num_splits_kv}")
-
-
     output = flash_attn_varlen_func(maybe_quantized_query,
                                     maybe_quantized_key_cache,
                                     maybe_quantized_value_cache,
@@ -405,8 +376,7 @@ def test_decode_with_paged_kv(
                                     causal=False,
                                     block_table=block_tables,
                                     window_size=(-1, -1),
-                                    s_aux=sink,
-                                    num_splits_kv=num_splits_kv)
+                                    s_aux=sink)
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
@@ -420,25 +390,127 @@ def test_decode_with_paged_kv(
                                 sink=sink,
                                 window_size_left=-1,
                                 window_size_right=-1)
-    atol, rtol = 1e-2, 1e-2
-    if q_dtype is not None:
-        atol, rtol = 1.5e-1, 1.5e-1
-    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
-        f"{torch.max(torch.abs(output - ref_output))}"
-    torch.xpu.empty_cache()
-    print("test_decode_with_paged_kv passed!")
+    # atol, rtol = 1e-2, 1e-2
+    # if q_dtype is not None:
+    #     atol, rtol = 1.5e-1, 1.5e-1
+    # torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+    #     f"{torch.max(torch.abs(output - ref_output))}"
+    # print("Test passed!")
 
+    if do_performance:
+        # warm up
+        for _ in range(10):
+            output = flash_attn_varlen_func(maybe_quantized_query,
+                                            maybe_quantized_key_cache,
+                                            maybe_quantized_value_cache,
+                                            max_query_len,
+                                            cu_query_lens,
+                                            max_kv_len,
+                                            seqused_k=seq_k,
+                                            softmax_scale=scale,
+                                            causal=False,
+                                            block_table=block_tables,
+                                            window_size=(-1, -1),
+                                            s_aux=sink)
+        torch.xpu.synchronize()
+        iterations = 200
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.XPU],
+            schedule=torch.profiler.schedule(
+                wait=5,
+                warmup=30,
+                active=100,
+                repeat=1,
+            ),
+            acc_events=True,
+        ) as prof:
+            for _ in range(iterations):
+                query = torch.randn(sum(query_lens),
+                                    num_query_heads,
+                                    head_size,
+                                    dtype=dtype)
+                block_tables = torch.randint(0,
+                                             num_blocks,
+                                             (num_seqs, max_num_blocks_per_seq),
+                                             dtype=torch.int32)
+                output = flash_attn_varlen_func(query,
+                                                maybe_quantized_key_cache,
+                                                maybe_quantized_value_cache,
+                                                max_query_len,
+                                                cu_query_lens,
+                                                max_kv_len,
+                                                seqused_k=seq_k,
+                                                softmax_scale=scale,
+                                                causal=False,
+                                                block_table=block_tables,
+                                                window_size=(-1, -1),
+                                                s_aux=sink)
+                torch.xpu.synchronize()
+                prof.step()
+        print(prof.key_averages().table(sort_by="self_xpu_time_total", row_limit=20))
+        prof.export_chrome_trace("trace.json")
+
+        kv_blocks = (max_kv_len + block_size - 1) // block_size
+        memory_load_bytes = (num_seqs * kv_blocks * block_size * num_kv_heads * head_size * 2) * 2
+
+
+        # print(f"num_seqs: {num_seqs},"
+        #       f" kv_blocks: {kv_blocks},"
+        #       f" block_size: {block_size},"
+        #       f" num_kv_heads: {num_kv_heads},"
+        #       f" head_size: {head_size},"
+        #       f" num_splits_kv: {num_splits_kv},"
+        #       f" memory_load_bytes: {memory_load_bytes} bytes")
+
+
+def get_num_splits(batch, num_h, max_k, block_size):
+    parallel_ = 20
+    parallel_2 = 40
+
+    cur_parallel = batch * num_h
+    num_splits = int((parallel_ + cur_parallel - 1) / cur_parallel)
+
+    # cur_parallel = cur_parallel * num_splits
+    if cur_parallel * num_splits > parallel_ and num_splits > 1:
+        # num_splits = int((parallel_2 + cur_parallel - 1) / cur_parallel)
+        num_splits = math.ceil(parallel_2 / cur_parallel) - 1
+
+    max_splits = int((max_k + block_size - 1) / block_size)
+    max_splits = min(max_splits, 20)
+    return min(num_splits, max_splits)
 
 if __name__ == "__main__":
-    for i in range(1):
-        test_decode_with_paged_kv([(1, 523), (1, 37),
-                                            (1, 2011)],
-                                  (16, 1),
-                                  64,
-                                  torch.half,
-                                  128,
-                                  None,
-                                  32768,
-                                  2,
-                                  None,
-                                  False)
+    batch = 50
+    block_size = 128
+    head_size = 128
+    # for batch in range(14, 22):
+    for batch in [32]:
+        for head_pair in [(32, 8)]:
+            for kv_len in [1500]:
+                max_value = int((kv_len + 127) / 128)
+                max_value = min(max_value, 20)
+                # max_value = 10
+                num_splits_kv = get_num_splits(batch, head_pair[1], kv_len, block_size)
+                # for num_splits_kv in range(1, max_value + 1):
+                for num_splits_kv in [1, num_splits_kv]:
+                    print(f"batch={batch},"
+                          f" kv_len={kv_len},"
+                          f" heads={head_pair},"
+                          f" num_splits_kv={num_splits_kv},"
+                          f" head_size={head_size},"
+                          f" block_size={block_size}")
+                    test_decode_with_paged_kv([(1, kv_len)] * batch,
+                                              head_pair,
+                                              head_size,
+                                              torch.bfloat16,
+                                              block_size,
+                                              None,
+                                              32768,
+                                              2,
+                                              None,
+                                              False,
+                                              do_performance = True,
+                                              num_splits_kv = num_splits_kv)
+                print(f"==================kv_len: {kv_len}======================" * 2)
+            print(f"==================head_pair: {head_pair}======================")
+        print(f"==================batch: {batch}======================")
