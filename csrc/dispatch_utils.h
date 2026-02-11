@@ -86,6 +86,8 @@
   } else {                                        \
     constexpr bool const_expr = false;            \
     __VA_ARGS__();                                \
+  }
+
 
 #define VLLM_DISPATCH_RANK234(NUM_DIMS, ...)                                   \
   switch (NUM_DIMS) {                                                          \

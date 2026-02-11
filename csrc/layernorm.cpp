@@ -68,8 +68,8 @@ class rms_norm_kernel {
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
     }
 
-    auto vec_op = [&variance](const vec4_t<scalar_t>& vec, int VEC_SIZE=4) {
-      for (int i = 0; i < VEC_SIZE; ++i) {
+    auto vec_op = [&variance](const vec4_t<scalar_t>& vec, int vec_size=VEC_SIZE) {
+      for (int i = 0; i < vec_size; ++i) {
         float x = static_cast<float>(vec.val[i]);
         variance += x * x;
       }
