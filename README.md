@@ -6,11 +6,7 @@ This repo is designed as a vLLM plugin which provides custom kernels for Intel G
 Currently we use PyTorch 2.10, oneapi 2025.3.
 
 ### How it works
-python3 setup.py build - will build a `_C.abi3.so` under build directory
-python3 setup.py install - will copy above .so to `vllm_xpu_kernels` folder
-python3 setup.py develop - will be local install if we use develop build or system/virtual env lib path if we use install.
-
-On vllm side, we will `import vllm_xpu_kernels._C` at start time which should register all custom ops so we can directly use.
+vLLM define and implement a lot custom torch ops/kernels in vllm code base for cuda. as a torch supported device, Intel GPU can also do similar work to provide same ops/kernels in vLLM for xpu device. We followed torch op register/dispatch method in this repo. On vllm side, we will do `import vllm_xpu_kernels._C` at start time which should register all custom ops so we can directly use.
 
 ### Prepare
 
@@ -54,7 +50,7 @@ python3 -m build --wheel --no-isolation
 ```
 
 ### How to use in vLLM
-Please refer to temporary branch https://github.com/jikunshang/vllm/tree/xpu_kernel to install & test vllm which replaces `rms_norm` kernel from IPEX to vllm-xpu-kernels.
+As vLLM [RFC#33214](https://github.com/vllm-project/vllm/issues/33214) completed, vLLM-xpu is migrated to vLLM-xpu-kernels based implementation. You can pull latest vllm code and install vllm-xpu manually now.
 
 ### Why Static Linking DNNL Instead of Shared Linking?
 
