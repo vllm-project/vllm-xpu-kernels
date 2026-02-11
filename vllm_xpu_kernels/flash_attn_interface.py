@@ -113,7 +113,8 @@ def flash_attn_varlen_func(
         if num_splits > 1:
             raise NotImplementedError("FA2 does not support num_splits > 1")
         if q_descale is not None:
-            raise NotImplementedError("FA2 does not support q_descale")
+            assert out is not None, \
+                "output must be provided when q_descale is used"
         if scheduler_metadata is not None:
             raise NotImplementedError(
                 "FA2 does not support scheduler_metadata")
@@ -138,6 +139,7 @@ def flash_attn_varlen_func(
             max_seqlen_q,
             max_seqlen_k,
             dropout_p,
+            q_descale,
             k_descale,
             v_descale,
             softmax_scale,

@@ -10,15 +10,16 @@
 
 enum class CutlassDType { half, bfloat16, float8_e4m3, float8_e5m2 };
 
-// Struct to carry separate Q and K dtypes without breaking existing API
-struct CutlassQKType {
+// Struct to carry separate Q, K, and O dtypes without breaking existing API
+struct CutlassQKOType {
   CutlassDType q_type;
   CutlassDType k_type;
+  CutlassDType o_type;
 
   // Convenience: construct with identical types
-  explicit CutlassQKType(CutlassDType t) : q_type(t), k_type(t) {}
-  CutlassQKType(CutlassDType q_t, CutlassDType k_t)
-      : q_type(q_t), k_type(k_t) {}
+  explicit CutlassQKOType(CutlassDType t) : q_type(t), k_type(t), o_type(t) {}
+  CutlassQKOType(CutlassDType q_t, CutlassDType k_t, CutlassDType o_t)
+      : q_type(q_t), k_type(k_t), o_type(o_t) {}
 };
 
 inline CutlassDType aten_to_dtype(const at::ScalarType st) {
@@ -34,17 +35,17 @@ inline CutlassDType aten_to_dtype(const at::ScalarType st) {
   TORCH_INTERNAL_ASSERT(
       false,
       "Unsupported dtype: only half/bfloat16/float8_e4m3/float8_e5m2 supported "
-      "for Q/K.");
+      "for Q/K/O.");
 }
 
 inline CutlassDType aten_to_dtype(const at::Tensor& t) {
   return aten_to_dtype(t.scalar_type());
 }
 
-// Helper to build Q/K dtype pair from tensors
-inline CutlassQKType
-aten_to_Cutlass_qk_dtype(const at::Tensor& q, const at::Tensor& k) {
-  return CutlassQKType(aten_to_dtype(q), aten_to_dtype(k));
+// Helper to build Q/K/O dtype triplet from tensors
+inline CutlassQKOType aten_to_Cutlass_qko_dtype(
+    const at::Tensor& q, const at::Tensor& k, const at::Tensor& o) {
+  return CutlassQKOType(aten_to_dtype(q), aten_to_dtype(k), aten_to_dtype(o));
 }
 
 using namespace cute;

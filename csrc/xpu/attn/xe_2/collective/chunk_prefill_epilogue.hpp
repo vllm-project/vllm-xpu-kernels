@@ -77,7 +77,7 @@ class FMHAFwdEpilogue {
 
   // softmax sink, same dtype
   static constexpr bool Sink = Sink_;
-  using ElementSink = typename CollectiveMainloop::TensorQ::element_type;
+  using ElementSink = typename CollectiveMainloop::TensorO::element_type;
 
   // Split k-reduced tiles between participating subgroups.
   // Assumption: the A tile is contiguous.
