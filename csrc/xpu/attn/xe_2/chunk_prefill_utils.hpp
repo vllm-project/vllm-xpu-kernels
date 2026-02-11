@@ -5,24 +5,24 @@ using namespace cute;
 template <typename chunk_policy, bool... Bs>
 void policy_dispatch_func(
     sycl::queue& queue,
-    CutlassQKType& cuQKType,
+    CutlassQKOType& cuQKOType,
     const chunk_prefill_args_t& args) {
-  policy_dispatch_impl<chunk_policy, Bs...>(queue, cuQKType, args);
+  policy_dispatch_impl<chunk_policy, Bs...>(queue, cuQKOType, args);
 }
 
 template <typename chunk_policy, bool... Bs, typename... Ts>
 void policy_dispatch_func(
     sycl::queue& queue,
-    CutlassQKType& cuQKType,
+    CutlassQKOType& cuQKOType,
     const chunk_prefill_args_t& args,
     bool b,
     Ts... ts) {
   if (b) {
     policy_dispatch_func<chunk_policy, Bs..., true>(
-        queue, cuQKType, args, ts...);
+        queue, cuQKOType, args, ts...);
   } else {
     policy_dispatch_func<chunk_policy, Bs..., false>(
-        queue, cuQKType, args, ts...);
+        queue, cuQKOType, args, ts...);
   }
 }
 
@@ -37,6 +37,7 @@ void cutlass_chunk_prefill_impl(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,

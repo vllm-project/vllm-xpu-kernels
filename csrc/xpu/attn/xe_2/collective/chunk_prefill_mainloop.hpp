@@ -76,6 +76,7 @@ template <
     class TensorQ_,     // Global Q/K/V tensors
     class TensorK_,
     class TensorV_,
+    class TensorO_,
     class TiledCopyQ_ = void,  // Optional TiledCopy for loading Q
     class TiledCopyK_ = void,  // Optional TiledCopy for loading K
     class TiledCopyV_ = void>  // Optional TiledCopy for loading V
@@ -98,6 +99,7 @@ template <
     class TensorQ_,
     class TensorK_,
     class TensorV_,
+    class TensorO_,
     class TiledCopyQ_,
     class TiledCopyK_,
     class TiledCopyV_>
@@ -112,6 +114,7 @@ struct FMHAFwdMainloop<
     TensorQ_,
     TensorK_,
     TensorV_,
+    TensorO_,
     TiledCopyQ_,
     TiledCopyK_,
     TiledCopyV_> {
@@ -130,9 +133,11 @@ struct FMHAFwdMainloop<
   using TensorQ = TensorQ_;
   using TensorK = TensorK_;
   using TensorV = TensorV_;
+  using TensorO = TensorO_;
 
   using ElementQ = typename TensorQ::engine_type::value_type;
   using ElementK = typename TensorK::engine_type::value_type;
+  using ElementO = typename TensorO::engine_type::value_type;
 
   using TensorQ2D =
       decltype(TensorQ_{}(append<rank_v<TensorQ_>>(make_coord(_, _), 0)));
@@ -181,6 +186,8 @@ struct FMHAFwdMainloop<
   using FragARow = decltype(reduce<1>(FragA{}, sycl::plus<void>{}));
   using ElementA = typename TiledMMAPV::ValTypeD;
 
+  static constexpr bool Fp8Q =
+      is_any_of_v<ElementQ, float_e5m2_t, float_e4m3_t>;
   static constexpr bool Fp8KV =
       is_any_of_v<ElementK, float_e5m2_t, float_e4m3_t>;
   static constexpr bool CausalMask = CausalMask_;
@@ -190,6 +197,7 @@ struct FMHAFwdMainloop<
   // User-facing arguments
   struct Arguments {
     ElementS const scale;
+    void* const scale_q;
     void* const scale_k;
     void* const scale_v;
 
@@ -222,6 +230,7 @@ struct FMHAFwdMainloop<
     ElementS val = args.scale * static_cast<ElementS>(kLog2e);
     return Params{
         val,
+        args.scale_q,
         args.scale_k,
         args.scale_v,
         args.ptr_page_table,
@@ -367,7 +376,10 @@ struct FMHAFwdMainloop<
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
 
     // FP8 KV Scale: Currently we only support per-tensor scale for KV
-    float scale_k = 1.f, scale_v = 1.f;
+    float scale_q = 1.f, scale_k = 1.f, scale_v = 1.f;
+    if constexpr (Fp8Q) {
+      scale_q = *static_cast<const float*>(params.scale_q);
+    }
     if constexpr (Fp8KV) {
       scale_k = *static_cast<const float*>(params.scale_k);
       scale_v = *static_cast<const float*>(params.scale_v);
@@ -390,11 +402,17 @@ struct FMHAFwdMainloop<
         copy(copy_k, tKgK_cache(_, _, _, D), tKrK);
 
         reorder(tQrQ, tSrQ);
+        if constexpr (Fp8Q) {
+          for (int i = 0; i < tSrQ.size(); ++i) {
+            tSrQ(i) =
+                static_cast<ElementO>(scale_q * static_cast<float>(tSrQ(i)));
+          }
+        }
         reorder(tKrK, tSrK);
         if constexpr (Fp8KV) {
           for (int i = 0; i < tSrK.size(); ++i) {
             tSrK(i) =
-                static_cast<ElementQ>(scale_k * static_cast<float>(tSrK(i)));
+                static_cast<ElementO>(scale_k * static_cast<float>(tSrK(i)));
           }
         }
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
@@ -466,7 +484,7 @@ struct FMHAFwdMainloop<
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tArV.size(); ++i) {
             tArV(i) =
-                static_cast<ElementQ>(scale_v * static_cast<float>(tArV(i)));
+                static_cast<ElementO>(scale_v * static_cast<float>(tArV(i)));
           }
         }
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
