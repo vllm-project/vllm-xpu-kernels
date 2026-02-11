@@ -15,8 +15,9 @@ void cutlass_chunk_prefill_xe2(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
-    float k_scale,
-    float v_scale,
+    std::optional<const at::Tensor>& q_scale,
+    std::optional<const at::Tensor>& k_scale,
+    std::optional<const at::Tensor>& v_scale,
     double sm_scale,
     std::optional<const at::Tensor>& sm_sink_,
     int window_size_left,
@@ -37,6 +38,7 @@ void cutlass_chunk_prefill_xe2(
       cu_seqlens_k,
       max_seqlen_q,
       max_seqlen_k,
+      q_scale,
       k_scale,
       v_scale,
       sm_scale,
@@ -61,8 +63,9 @@ void cutlass_chunk_prefill_impl(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
-    float k_scale,
-    float v_scale,
+    std::optional<const at::Tensor>& q_scale,
+    std::optional<const at::Tensor>& k_scale,
+    std::optional<const at::Tensor>& v_scale,
     double sm_scale,
     std::optional<const at::Tensor>& sm_sink_,
     int window_size_left,
@@ -112,6 +115,12 @@ void cutlass_chunk_prefill_impl(
     }
   }
 
+  bool is_fp8_q = query.scalar_type() == at::ScalarType::Float8_e5m2 ||
+                  query.scalar_type() == at::ScalarType::Float8_e4m3fn;
+  bool is_fp8_kv =
+      (key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
+       key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn);
+
   chunk_prefill_args_t args = {
       query.data_ptr(),
       key_cache.data_ptr(),
@@ -124,8 +133,9 @@ void cutlass_chunk_prefill_impl(
       max_seqlen_k,
       total_seqlen_q,
       total_seqlen_k,
-      k_scale,
-      v_scale,
+      is_fp8_q ? q_scale.value().data_ptr() : nullptr,
+      is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
+      is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
       is_sink ? sm_sink_.value().data_ptr() : nullptr,
       batch_size,
@@ -142,7 +152,7 @@ void cutlass_chunk_prefill_impl(
       is_local,
       is_sink};
 
-  CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
+  CutlassQKOType cuQKOType = aten_to_Cutlass_qko_dtype(query, key_cache, out);
 
   static constexpr int max_head_size = 256;
   TORCH_CHECK(
@@ -152,19 +162,19 @@ void cutlass_chunk_prefill_impl(
 
   if (args.head_size <= HEAD_SIZE_LIMIT_0) {
     policy_dispatch_func<chunk_policy_head64>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
     policy_dispatch_func<chunk_policy_head96>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
     policy_dispatch_func<chunk_policy_head128>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
     policy_dispatch_func<chunk_policy_head192>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
     policy_dispatch_func<chunk_policy_head256>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
   }
