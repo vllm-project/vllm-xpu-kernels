@@ -88,7 +88,6 @@
     __VA_ARGS__();                                \
   }
 
-
 #define VLLM_DISPATCH_RANK234(NUM_DIMS, ...)                                   \
   switch (NUM_DIMS) {                                                          \
     case 2: {                                                                  \

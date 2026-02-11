@@ -13,7 +13,7 @@ struct alignas(8) vec4_t {
 
 // The vector width is fixed at 4 to avoid excessive branching in the kernel,
 // which could degrade performance.
-template <typename scalar_t, int NUM_DIMS, int VEC_SIZE=4>
+template <typename scalar_t, int NUM_DIMS, int VEC_SIZE = 4>
 class rms_norm_kernel {
  public:
   rms_norm_kernel(
@@ -68,7 +68,8 @@ class rms_norm_kernel {
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
     }
 
-    auto vec_op = [&variance](const vec4_t<scalar_t>& vec, int vec_size=VEC_SIZE) {
+    auto vec_op = [&variance](
+                      const vec4_t<scalar_t>& vec, int vec_size = VEC_SIZE) {
       for (int i = 0; i < vec_size; ++i) {
         float x = static_cast<float>(vec.val[i]);
         variance += x * x;
@@ -78,7 +79,6 @@ class rms_norm_kernel {
       float x = static_cast<float>(val);
       variance += x * x;
     };
-
 
     constexpr int WIDTH = VEC_SIZE * sizeof(scalar_t);
     uintptr_t addr = reinterpret_cast<uintptr_t>(input_row);
@@ -136,7 +136,8 @@ class rms_norm_kernel {
 
     scalar_t* out_row = out + item_ct1.get_group(2) * hidden_size;
     addr = reinterpret_cast<uintptr_t>(out_row);
-    can_vec = ((addr & (WIDTH - 1)) == 0) && ((hidden_size & (VEC_SIZE - 1)) == 0);
+    can_vec =
+        ((addr & (WIDTH - 1)) == 0) && ((hidden_size & (VEC_SIZE - 1)) == 0);
     if (can_vec) {
       auto* v_in = reinterpret_cast<const vec4_t<scalar_t>*>(input_row);
       auto* v_w = reinterpret_cast<const vec4_t<scalar_t>*>(weight);
