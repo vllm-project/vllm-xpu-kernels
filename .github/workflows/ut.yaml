@@ -32,9 +32,9 @@ jobs:
       - name: build docker image & push to local
         id: build-image
         run: |
-          docker build -t xpu-kernel-ci-image:latest -f Dockerfile.xpu .
-          docker tag xpu-kernel-ci-image:latest ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
-          docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
+          docker build -t xpu-kernel-ci-image:test-211 -f Dockerfile.xpu .
+          docker tag xpu-kernel-ci-image:test-211 ${{ env.REGISTRY }}/xpu-kernel-ci-image:test-211
+          docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:test-211
 
   build-docker-image-latest-bmg:
     runs-on: self-hosted-bmg
@@ -54,16 +54,16 @@ jobs:
       - name: build docker image & push to local
         id: build-image
         run: |
-          docker build -t xpu-kernel-ci-image:latest -f Dockerfile.xpu .
-          docker tag xpu-kernel-ci-image:latest ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
-          docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
+          docker build -t xpu-kernel-ci-image:test-211 -f Dockerfile.xpu .
+          docker tag xpu-kernel-ci-image:test-211 ${{ env.REGISTRY }}/xpu-kernel-ci-image:test-211
+          docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:test-211
 
   run-unit-tests-pvc:
     runs-on: self-hosted-pvc
     needs: build-docker-image-latest-pvc
     timeout-minutes: 40
     container:                      
-      image: localhost:5000/xpu-kernel-ci-image:latest
+      image: localhost:5000/xpu-kernel-ci-image:test-211
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged
     steps:
       - name: Checkout
@@ -97,7 +97,7 @@ jobs:
     needs: build-docker-image-latest-bmg
     timeout-minutes: 40
     container: 
-      image: localhost:5000/xpu-kernel-ci-image:latest
+      image: localhost:5000/xpu-kernel-ci-image:test-211
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged 
     steps:
       - name: Checkout
