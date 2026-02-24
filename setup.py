@@ -299,6 +299,7 @@ ext_modules = []
 # List of additional shared libraries to install (intermediate build artifacts)
 additional_libraries = {
     "attn_kernels_xe_2": "/csrc/xpu/attn/xe_2",
+    "gdn_attn_kernels_xe_2": "/csrc/xpu/gdn_attn/xe_2",
     "grouped_gemm_xe_default": "/csrc/xpu/grouped_gemm/xe_default",
     "grouped_gemm_xe_2": "/csrc/xpu/grouped_gemm/xe_2",
 }
