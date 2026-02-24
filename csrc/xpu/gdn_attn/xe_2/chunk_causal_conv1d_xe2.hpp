@@ -1,0 +1,759 @@
+#pragma once
+
+#include <sycl/sycl.hpp>
+#include <torch/all.h>
+
+#include "../gdn_attn_utils.h"
+
+namespace gdn {
+static constexpr int chunk_size = gdn::chunk_size_xe2;
+
+template <typename T, int Width>
+struct chunk_causal_conv1d_kernel {
+ public:
+  static constexpr int sub_group_size = 32;
+  static constexpr int elems_per_item = 4;
+
+  static inline float act_sigmoid(float& x) {
+    return 1.0f / (1.0f + sycl::exp(-x));
+  }
+
+  chunk_causal_conv1d_kernel(
+      T* q_out,
+      T* k_out,
+      T* v_out,
+      T* z_out,
+      float* b_out,
+      float* a_out,
+      const T* mixed_qkvz,
+      const T* mixed_ba,
+      const T* conv_weights,
+      const T* conv_bias,
+      T* conv_states,
+      const int conv_states_stride_0,
+      T* conv_states_tmp,
+      int* query_start_loc,
+      int* cache_indices,
+      bool* has_initial_state,
+      const ActMode& act_mode,
+      const int& pad_slot_id,
+      const int& batch_size,
+      const int& num_actual_tokens,
+      const int& num_virtual_tokens,
+      const int& num_k_heads,
+      const int& head_k_dim,
+      const int& num_v_heads,
+      const int& head_v_dim,
+      const int& qkvz_elems,
+      const int& conv_elems)
+      : q_out(q_out),
+        k_out(k_out),
+        v_out(v_out),
+        z_out(z_out),
+        b_out(b_out),
+        a_out(a_out),
+        mixed_qkvz(mixed_qkvz),
+        mixed_ba(mixed_ba),
+        conv_weights(conv_weights),
+        conv_bias(conv_bias),
+        conv_states(conv_states),
+        conv_states_stride_0(conv_states_stride_0),
+        conv_states_tmp(conv_states_tmp),
+        query_start_loc(query_start_loc),
+        cache_indices(cache_indices),
+        has_initial_state(has_initial_state),
+        act_mode(act_mode),
+        pad_slot_id(pad_slot_id),
+        batch_size(batch_size),
+        num_actual_tokens(num_actual_tokens),
+        num_virtual_tokens(num_virtual_tokens),
+        num_k_heads(num_k_heads),
+        head_k_dim(head_k_dim),
+        num_v_heads(num_v_heads),
+        head_v_dim(head_v_dim),
+        qkvz_elems(qkvz_elems),
+        conv_elems(conv_elems) {}
+
+  static inline sycl::nd_range<2> get_nd_range(
+      const int total_seqlen,
+      const int num_k_heads,
+      const int head_k_dim,
+      const int num_v_heads,
+      const int head_v_dim) {
+    const int group_size =
+        (2 * head_k_dim + head_v_dim * num_v_heads / num_k_heads) /
+        elems_per_item;
+    assert(num_v_heads % num_k_heads == 0);
+    assert(head_k_dim % elems_per_item == 0);
+    assert(head_v_dim % elems_per_item == 0);
+    sycl::range<2> local(1, group_size);
+    sycl::range<2> global(total_seqlen, num_k_heads);
+    return sycl::nd_range<2>(global * local, local);
+  }
+
+  static inline void act_swish(float& x, float beta = 1.0f) {
+    x = x / (1.0f + sycl::exp(-x * beta));
+  }
+  static inline void act_silu(float& x) { act_swish(x, 1.0f); }
+
+  [[sycl::reqd_sub_group_size(sub_group_size)]] void
+  operator()(sycl::nd_item<2> item) const {
+    const int token_id = item.get_group(0);
+    const int k_head_id = item.get_group(1);
+    const int local_id = item.get_local_linear_id();
+    const int qkv_dim_offset = local_id * elems_per_item;
+
+    const int q_dim = head_k_dim;
+    const int k_dim = head_k_dim;
+    const int v_dim = head_v_dim * num_v_heads / num_k_heads;
+    const int z_dim = head_v_dim * num_v_heads / num_k_heads;
+    const int qkv_dim = q_dim + k_dim + v_dim;
+    const int qkvz_dim = q_dim + k_dim + v_dim + z_dim;
+
+    const int qkvz_elems_offset = k_head_id * qkvz_dim + qkv_dim_offset;
+
+    // get current seq start, end
+    int batch_id = batch_size - 1;
+    int seq_start_offset = 0;
+    int seq_end_offset = 0;
+    int out_token_id = token_id;
+    int pre_chunks = 0;
+    for (int i = 0; i < batch_size; ++i) {
+      int current_seq_start = query_start_loc[i];
+      int current_seq_end = query_start_loc[i + 1];
+      int current_seq_len = current_seq_end - current_seq_start;
+      if (token_id < current_seq_end) {
+        batch_id = i;
+        seq_start_offset = current_seq_start;
+        seq_end_offset = current_seq_end;
+        out_token_id = token_id - seq_start_offset + pre_chunks * chunk_size;
+        break;
+      }
+      pre_chunks += (current_seq_len + chunk_size - 1) / chunk_size;
+    }
+
+    // get states cache location
+    int states_id = cache_indices[batch_id];
+
+    if (states_id == pad_slot_id) {
+      return;
+    }
+
+    bool is_q = false;
+    bool is_k = false;
+    bool is_v = false;
+
+    if (qkv_dim_offset < q_dim) {
+      is_q = true;
+    } else if (qkv_dim_offset < q_dim + k_dim) {
+      is_k = true;
+    } else {
+      is_v = true;
+    }
+
+    // reorder index to map weights
+    int reordered_elems_offset = 0;
+    if (is_q) {
+      reordered_elems_offset = k_head_id * q_dim + qkv_dim_offset;
+    } else if (is_k) {
+      reordered_elems_offset =
+          num_k_heads * q_dim + k_head_id * k_dim + qkv_dim_offset - q_dim;
+    } else if (is_v) {
+      reordered_elems_offset = num_k_heads * (q_dim + k_dim) +
+                               k_head_id * v_dim + qkv_dim_offset -
+                               (q_dim + k_dim);
+    }
+
+    // get states cache ptr
+    const bool has_init_conv_states =
+        (has_initial_state == nullptr ||
+         (has_initial_state != nullptr && has_initial_state[batch_id]));
+    T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
+
+    // load weights
+    T local_weights[Width * elems_per_item];
+#pragma unroll
+    for (int i = 0; i < Width; ++i) {
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        local_weights[Width * e + i] =
+            conv_weights[(reordered_elems_offset + e) * Width + i];
+      }
+    }
+
+    // load input
+    T local_input[Width * elems_per_item];
+#pragma unroll
+    for (int i = 0; i < Width; ++i) {
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        local_input[Width * e + i] = 0.0f;
+      }
+    }
+
+    int seq_cu_len = token_id - seq_start_offset + 1;
+    int input_load_len = seq_cu_len >= Width ? Width : seq_cu_len;
+    int states_load_len = seq_cu_len >= Width ? 0 : Width - input_load_len;
+    if (states_load_len != 0 && has_init_conv_states) {
+#pragma unroll
+      for (int i = 0; i < states_load_len; ++i) {
+#pragma unroll
+        for (int e = 0; e < elems_per_item; ++e) {
+          local_input[Width * e + i] = conv_states_ptr
+              [(Width - 1 - states_load_len + i) * conv_elems +
+               reordered_elems_offset + e];
+        }
+      }
+    }
+
+#pragma unroll
+    for (int i = 0; i < input_load_len; ++i) {
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        local_input[Width * e + states_load_len + i] = mixed_qkvz
+            [(token_id - input_load_len + 1 + i) * qkvz_elems +
+             qkvz_elems_offset + e];
+      }
+    }
+
+    float res[elems_per_item];
+#pragma unroll
+    for (int i = 0; i < elems_per_item; ++i) {
+      res[i] = 0.0f;
+    }
+#pragma unroll
+    for (int i = 0; i < Width; ++i) {
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        res[e] += static_cast<float>(local_input[Width * e + i]) *
+                  static_cast<float>(local_weights[Width * e + i]);
+      }
+    }
+
+    if (conv_bias != nullptr) {
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        res[e] += conv_bias[reordered_elems_offset + e];
+      }
+    }
+
+    // save states
+    if (seq_end_offset - seq_start_offset > 1) {
+      // because current group is unable to know if old states are needed by
+      // other group, hard to update states inplace if prefill
+      if (seq_end_offset - 1 == token_id) {
+#pragma unroll
+        for (int i = 0; i < Width - 1; ++i) {
+#pragma unroll
+          for (int e = 0; e < elems_per_item; ++e) {
+            conv_states_tmp
+                [batch_id * (Width - 1) * conv_elems + i * conv_elems +
+                 reordered_elems_offset + e] = local_input[Width * e + i + 1];
+          }
+        }
+      }
+    } else {
+// update states inplace if decode
+#pragma unroll
+      for (int i = 0; i < Width - 1; ++i) {
+#pragma unroll
+        for (int e = 0; e < elems_per_item; ++e) {
+          conv_states_ptr[i * conv_elems + reordered_elems_offset + e] =
+              local_input[Width * e + i + 1];
+        }
+      }
+    }
+
+    if (act_mode == ActMode::silu) {
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        act_silu(res[e]);
+      }
+    } else if (act_mode == ActMode::swish) {
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        act_swish(res[e]);
+      }
+    }
+
+    // reorder q, k, v
+    if (is_q) {
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        q_out
+            [out_token_id * num_k_heads * q_dim + k_head_id * q_dim +
+             qkv_dim_offset + e] = res[e];
+      }
+    } else if (is_k) {
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        k_out
+            [out_token_id * num_k_heads * k_dim + k_head_id * k_dim +
+             qkv_dim_offset - q_dim + e] = res[e];
+      }
+    } else if (is_v) {
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        v_out
+            [out_token_id * num_k_heads * v_dim + k_head_id * v_dim +
+             qkv_dim_offset - (q_dim + k_dim) + e] = res[e];
+      }
+    }
+  }
+
+ private:
+  T* q_out;
+  T* k_out;
+  T* v_out;
+  T* z_out;
+  float* b_out;
+  float* a_out;
+  const T* mixed_qkvz;
+  const T* mixed_ba;
+  const T* conv_weights;
+  const T* conv_bias;
+  T* conv_states;
+  const int conv_states_stride_0;
+  T* conv_states_tmp;
+  const int32_t* query_start_loc;
+  const int* cache_indices;
+  const bool* has_initial_state;
+  const ActMode act_mode;
+  const int pad_slot_id;
+  const int batch_size;
+  const int num_actual_tokens;
+  const int num_virtual_tokens;
+  const int num_k_heads;
+  const int head_k_dim;
+  const int num_v_heads;
+  const int head_v_dim;
+  const int qkvz_elems;
+  const int conv_elems;
+};
+
+template <typename T>
+struct chunk_reorder_zba_kernel {
+ public:
+  static constexpr int sub_group_size = 32;
+  static constexpr int group_size = 256;
+  static constexpr int load_size = 4;
+
+  static inline float act_sigmoid(float& x) {
+    return 1.0f / (1.0f + sycl::exp(-x));
+  }
+
+  chunk_reorder_zba_kernel(
+      T* z_out,
+      float* b_out,
+      float* a_out,
+      const T* mixed_qkvz,
+      const T* mixed_ba,
+      const int32_t* query_start_loc,
+      const int batch_size,
+      const int& num_virtual_tokens,
+      const int& num_k_heads,
+      const int& head_k_dim,
+      const int& num_v_heads,
+      const int& head_v_dim)
+      : z_out(z_out),
+        b_out(b_out),
+        a_out(a_out),
+        mixed_qkvz(mixed_qkvz),
+        mixed_ba(mixed_ba),
+        query_start_loc(query_start_loc),
+        batch_size(batch_size),
+        num_virtual_tokens(num_virtual_tokens),
+        num_k_heads(num_k_heads),
+        head_k_dim(head_k_dim),
+        num_v_heads(num_v_heads),
+        head_v_dim(head_v_dim) {}
+
+  static inline sycl::nd_range<2>
+  get_nd_range(const int total_seqlen, const int num_k_heads, const int z_dim) {
+    assert(z_dim % load_size == 0);
+    sycl::range<2> local(1, z_dim / load_size);
+    sycl::range<2> global(total_seqlen, num_k_heads);
+    return sycl::nd_range<2>(global * local, local);
+  }
+
+  [[sycl::reqd_sub_group_size(sub_group_size)]] void
+  operator()(sycl::nd_item<2> item) const {
+    const int token_id = item.get_group(0);
+    const int k_head_id = item.get_group(1);
+    const int dim_offset = item.get_local_id(1);
+
+    const int q_dim = head_k_dim;
+    const int k_dim = head_k_dim;
+    const int v_dim = head_v_dim * num_v_heads / num_k_heads;
+    const int z_dim = head_v_dim * num_v_heads / num_k_heads;
+    const int qkv_dim = q_dim + k_dim + v_dim;
+    const int qkvz_dim = q_dim + k_dim + v_dim + z_dim;
+
+    const int kv_ratio = num_v_heads / num_k_heads;
+
+    // reorder b,a
+    if (dim_offset == 0) {
+      int pre_chunks = 0;
+      int out_token_id = token_id;
+      for (int i = 0; i < batch_size; ++i) {
+        int current_seq_start = query_start_loc[i];
+        int current_seq_end = query_start_loc[i + 1];
+        int current_seq_len = current_seq_end - current_seq_start;
+        if (token_id < current_seq_end) {
+          out_token_id = token_id - current_seq_start + pre_chunks * chunk_size;
+          break;
+        }
+        pre_chunks += (current_seq_len + chunk_size - 1) / chunk_size;
+      }
+
+      int step =
+          (token_id * num_v_heads + k_head_id * num_v_heads / num_k_heads) * 2;
+#pragma unroll
+      for (int e = 0; e < kv_ratio; ++e) {
+        float b_value = mixed_ba[step + dim_offset + e];
+        float a_value = mixed_ba[step + kv_ratio + dim_offset + e];
+        b_value = act_sigmoid(b_value);
+        b_out
+            [(k_head_id * kv_ratio + dim_offset + e) * num_virtual_tokens +
+             out_token_id] = b_value;
+        a_out
+            [(k_head_id * kv_ratio + dim_offset + e) * num_virtual_tokens +
+             out_token_id] = a_value;
+      }
+    }
+
+    // reorder z
+#pragma unroll
+    for (int e = 0; e < load_size; ++e) {
+      int z_dim_id = dim_offset * load_size + e;
+      z_out[token_id * num_k_heads * z_dim + k_head_id * z_dim + z_dim_id] =
+          mixed_qkvz
+              [token_id * num_k_heads * qkvz_dim + k_head_id * qkvz_dim +
+               qkv_dim + z_dim_id];
+    }
+  }
+
+ private:
+  T* z_out;
+  float* b_out;
+  float* a_out;
+  const T* mixed_qkvz;
+  const T* mixed_ba;
+  const int32_t* query_start_loc;
+  const int batch_size;
+  const int num_virtual_tokens;
+  const int num_k_heads;
+  const int head_k_dim;
+  const int num_v_heads;
+  const int head_v_dim;
+};
+
+template <typename T>
+struct chunk_update_states_kernel {
+ public:
+  static constexpr int sub_group_size = 32;
+  static constexpr int group_size = 256;
+  static constexpr int elems_per_item = 4;
+  static constexpr int elems_per_group = group_size * elems_per_item;
+
+  chunk_update_states_kernel(
+      T* conv_states,
+      const int conv_states_stride_0,
+      const T* conv_states_tmp,
+      const int* cache_indices,
+      const int width,
+      const int conv_elems,
+      const int32_t* query_start_loc,
+      const int batch_size)
+      : conv_states(conv_states),
+        conv_states_stride_0(conv_states_stride_0),
+        conv_states_tmp(conv_states_tmp),
+        cache_indices(cache_indices),
+        width(width),
+        conv_elems(conv_elems),
+        query_start_loc(query_start_loc),
+        batch_size(batch_size) {}
+
+  static inline sycl::nd_range<3>
+  get_nd_range(const int batch_size, const int width, const int conv_elems) {
+    const int groups_per_token =
+        (conv_elems + elems_per_group - 1) / elems_per_group;
+    sycl::range<3> local(1, 1, group_size);
+    sycl::range<3> global(batch_size, (width - 1), groups_per_token);
+    return sycl::nd_range<3>(global * local, local);
+  }
+
+  [[sycl::reqd_sub_group_size(sub_group_size)]] void
+  operator()(sycl::nd_item<3> item) const {
+    const int batch_id = item.get_group(0);
+    const int width_id = item.get_group(1);
+    const int local_group_id = item.get_group(2);
+    const int local_id = item.get_local_linear_id();
+    const int elems_start_offset_group = local_group_id * elems_per_group;
+
+    int seq_start_offset = query_start_loc[batch_id];
+    int seq_end_offset = query_start_loc[batch_id + 1];
+    if (seq_end_offset - seq_start_offset == 1) {
+      // only update if prefill
+      return;
+    }
+
+    int states_id = cache_indices[batch_id];
+    T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
+    const T* conv_states_tmp_ptr =
+        conv_states_tmp + batch_id * (width - 1) * conv_elems;
+    for (int i = elems_start_offset_group + local_id;
+         i < (local_group_id + 1) * elems_per_group;
+         i += group_size) {
+      conv_states_ptr[width_id * conv_elems + i] =
+          conv_states_tmp_ptr[width_id * conv_elems + i];
+    }
+  }
+
+ private:
+  T* conv_states;
+  const int conv_states_stride_0;
+  const T* conv_states_tmp;
+  const int* cache_indices;
+  const int width;
+  const int conv_elems;
+  const int32_t* query_start_loc;
+  const int batch_size;
+};
+
+template <typename T, int Width>
+void kernel_launcher(
+    sycl::queue& queue,
+    T* q_out,
+    T* k_out,
+    T* v_out,
+    T* z_out,
+    float* b_out,
+    float* a_out,
+    const T* mixed_qkvz,
+    const T* mixed_ba,
+    const T* conv_weights,
+    const T* conv_bias,
+    T* conv_states,
+    const int conv_states_stride_0,
+    T* conv_states_tmp,
+    int* query_start_loc,
+    int* cache_indices,
+    bool* has_initial_state,
+    const ActMode& act_mode,
+    const int& pad_slot_id,
+    const int& batch_size,
+    const int& num_actual_tokens,
+    const int& num_virtual_tokens,
+    const int& num_k_heads,
+    const int& head_k_dim,
+    const int& num_v_heads,
+    const int& head_v_dim,
+    const int& qkvz_elems,
+    const int& conv_elems,
+    const int& num_prefills,
+    const int& num_decodes) {
+  using KERNEL_MAIN = chunk_causal_conv1d_kernel<T, Width>;
+  auto range_main = KERNEL_MAIN::get_nd_range(
+      num_actual_tokens, num_k_heads, head_k_dim, num_v_heads, head_v_dim);
+  queue.submit([&](sycl::handler& cgh) {
+    KERNEL_MAIN task(
+        q_out,
+        k_out,
+        v_out,
+        z_out,
+        b_out,
+        a_out,
+        mixed_qkvz,
+        mixed_ba,
+        conv_weights,
+        conv_bias,
+        conv_states,
+        conv_states_stride_0,
+        conv_states_tmp,
+        query_start_loc,
+        cache_indices,
+        has_initial_state,
+        act_mode,
+        pad_slot_id,
+        batch_size,
+        num_actual_tokens,
+        num_virtual_tokens,
+        num_k_heads,
+        head_k_dim,
+        num_v_heads,
+        head_v_dim,
+        qkvz_elems,
+        conv_elems);
+    cgh.parallel_for(range_main, task);
+  });
+
+  using KERNEL_ZBA = chunk_reorder_zba_kernel<T>;
+  const int z_dim = head_v_dim * num_v_heads / num_k_heads;
+  auto range_zba =
+      KERNEL_ZBA::get_nd_range(num_actual_tokens, num_k_heads, z_dim);
+  assert(
+      (head_v_dim * num_v_heads / num_k_heads) %
+          (KERNEL_ZBA::group_size / num_k_heads) ==
+      0);
+  queue.submit([&](sycl::handler& cgh) {
+    KERNEL_ZBA task(
+        z_out,
+        b_out,
+        a_out,
+        mixed_qkvz,
+        mixed_ba,
+        query_start_loc,
+        batch_size,
+        num_virtual_tokens,
+        num_k_heads,
+        head_k_dim,
+        num_v_heads,
+        head_v_dim);
+    cgh.parallel_for(range_zba, task);
+  });
+
+  if (num_prefills > 0) {
+    using KERNEL_UPDATE = chunk_update_states_kernel<T>;
+    auto range_update =
+        KERNEL_UPDATE::get_nd_range(batch_size, Width, conv_elems);
+    queue.submit([&](sycl::handler& cgh) {
+      KERNEL_UPDATE task(
+          conv_states,
+          conv_states_stride_0,
+          conv_states_tmp,
+          cache_indices,
+          Width,
+          conv_elems,
+          query_start_loc,
+          batch_size);
+      cgh.parallel_for(range_update, task);
+    });
+  }
+}
+
+void chunk_causal_conv1d_xe2(
+    sycl::queue& queue,
+    torch::Tensor& q_out,  // [total_seqlen, num_k_heads, head_k_dim]
+    torch::Tensor& k_out,  // [total_seqlen, num_k_heads, head_k_dim]
+    torch::Tensor& v_out,  // [total_seqlen, num_v_heads, head_v_dim]
+    torch::Tensor& z_out,  // [total_seqlen, num_v_heads, head_v_dim]
+    torch::Tensor& b_out,  // [num_v_heads, total_seqlen]
+    torch::Tensor& a_out,  // [num_v_heads, total_seqlen]
+    const torch::Tensor&
+        mixed_qkvz,  // [total_seqlen, num_k_heads * (2 * head_k_dim + 2 *
+                     // head_v_dim * num_v_heads / num_k_heads)]
+    const torch::Tensor& mixed_ba,  // [total_seqlen, num_k_heads * (2 *
+                                    // num_v_heads / num_k_heads)]
+    const torch::Tensor&
+        conv_weights,  // [num_k_heads * (2 * head_k_dim + head_v_dim *
+                       // num_v_heads / num_k_heads), width]
+    const std::optional<torch::Tensor>&
+        conv_bias,  // [num_k_heads * (2 * head_k_dim + head_v_dim * num_v_heads
+                    // / num_k_heads)] or None
+    torch::Tensor&
+        conv_states,  // [cache_batch_size, width - 1, num_k_heads * (2 *
+                      // head_k_dim + head_v_dim * num_v_heads / num_k_heads)]
+    const torch::Tensor& query_start_loc,  // [batch_size + 1]
+    const torch::Tensor& cache_indices,    // [batch_size]
+    const std::optional<torch::Tensor>&
+        has_initial_state,    // [batch_size] or None
+    const ActMode& act_mode,  // silu or swish
+    const int& pad_slot_id,   // -1
+    const int num_prefills,
+    const int num_decodes) {
+  if (num_prefills == 0 && num_decodes == 0) {
+    return;
+  }
+
+  const int batch_size = query_start_loc.size(0) - 1;
+  const int num_actual_tokens = mixed_qkvz.size(0);
+  const int num_virtual_tokens = q_out.size(0);
+  const int num_k_heads = q_out.size(1);
+  const int head_k_dim = q_out.size(2);
+  const int num_v_heads = v_out.size(1);
+  const int head_v_dim = v_out.size(2);
+  const int qkvz_elems = mixed_qkvz.size(1);
+  const int conv_elems = conv_weights.size(0);
+  const int width = conv_weights.size(1);
+  const int conv_states_stride_0 = conv_states.stride(0);
+
+  auto dtype = conv_states.dtype();
+  auto device = conv_states.device();
+  torch::Tensor conv_states_tmp = torch::empty(
+      {batch_size, width - 1, conv_elems},
+      torch::dtype(dtype).device(device).requires_grad(false));
+
+#define KERNEL_LAUNCHER(scalar_t, width)                           \
+  kernel_launcher<scalar_t, width>(                                \
+      queue,                                                       \
+      reinterpret_cast<scalar_t*>(q_out.data_ptr()),               \
+      reinterpret_cast<scalar_t*>(k_out.data_ptr()),               \
+      reinterpret_cast<scalar_t*>(v_out.data_ptr()),               \
+      reinterpret_cast<scalar_t*>(z_out.data_ptr()),               \
+      reinterpret_cast<float*>(b_out.data_ptr()),                  \
+      reinterpret_cast<float*>(a_out.data_ptr()),                  \
+      reinterpret_cast<scalar_t*>(mixed_qkvz.data_ptr()),          \
+      reinterpret_cast<scalar_t*>(mixed_ba.data_ptr()),            \
+      reinterpret_cast<scalar_t*>(conv_weights.data_ptr()),        \
+      conv_bias.has_value()                                        \
+          ? reinterpret_cast<scalar_t*>(conv_bias->data_ptr())     \
+          : nullptr,                                               \
+      reinterpret_cast<scalar_t*>(conv_states.data_ptr()),         \
+      conv_states_stride_0,                                        \
+      reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),     \
+      reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
+      reinterpret_cast<int*>(cache_indices.data_ptr()),            \
+      has_initial_state.has_value()                                \
+          ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
+          : nullptr,                                               \
+      act_mode,                                                    \
+      pad_slot_id,                                                 \
+      batch_size,                                                  \
+      num_actual_tokens,                                           \
+      num_virtual_tokens,                                          \
+      num_k_heads,                                                 \
+      head_k_dim,                                                  \
+      num_v_heads,                                                 \
+      head_v_dim,                                                  \
+      qkvz_elems,                                                  \
+      conv_elems,                                                  \
+      num_prefills,                                                \
+      num_decodes);
+
+#define WIDTH_DISPATCH(scalar_t, width) \
+  switch (width) {                      \
+    case 1:                             \
+      KERNEL_LAUNCHER(scalar_t, 1)      \
+      break;                            \
+    case 2:                             \
+      KERNEL_LAUNCHER(scalar_t, 2)      \
+      break;                            \
+    case 3:                             \
+      KERNEL_LAUNCHER(scalar_t, 3)      \
+      break;                            \
+    case 4:                             \
+      KERNEL_LAUNCHER(scalar_t, 4)      \
+      break;                            \
+    case 5:                             \
+      KERNEL_LAUNCHER(scalar_t, 5)      \
+      break;                            \
+    default:                            \
+      break;                            \
+  }
+
+  if (mixed_qkvz.scalar_type() == at::kBFloat16) {
+    using scalar_t = sycl::ext::oneapi::bfloat16;
+    WIDTH_DISPATCH(scalar_t, width)
+  } else if (mixed_qkvz.scalar_type() == at::kHalf) {
+    using scalar_t = sycl::half;
+    WIDTH_DISPATCH(scalar_t, width)
+  } else {
+    using scalar_t = float;
+    WIDTH_DISPATCH(scalar_t, width)
+  }
+#undef WIDTH_DISPATCH
+#undef KERNEL_LAUNCHER
+}
+
+}  // namespace gdn
