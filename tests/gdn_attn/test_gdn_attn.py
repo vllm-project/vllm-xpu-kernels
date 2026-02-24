@@ -8,6 +8,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import vllm_xpu_kernels._xpu_C  # noqa: F401
+
 # QWEN NEXT shape
 NUM_TOKENS = [1, 32, 1024, 8192]
 BATCH_SIZE = [32]
@@ -57,7 +59,6 @@ def ref_gdn_attention(
     eps = 0.000001
     scale = 1.0 / math.sqrt(head_k_dim)
     dtype = projected_states_qkvz.dtype
-    device = projected_states_qkvz.device
     batch_size = non_spec_query_start_loc.shape[0] - 1
 
     split_arg_list_ba = [
