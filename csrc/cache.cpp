@@ -7,6 +7,7 @@
 #include "dispatch_utils.h"
 #include "quantization/fp8/quant_utils.h"
 #include "utils.h"
+#include "utils/memory.h"
 
 namespace vllm {
 
@@ -635,4 +636,57 @@ void gather_cache(
   } else {
     TORCH_CHECK(false, "Unsupported data type width: ", dtype_bits);
   }
+}
+
+void swap_blocks(
+    at::Tensor& src,
+    at::Tensor& dst,
+    int64_t block_size_in_bytes,
+    const torch::Tensor& block_map  // [num_pairs, 2]
+) {
+  at::Device src_device = src.device();
+  at::Device dst_device = dst.device();
+
+  const at::OptionalDeviceGuard device_guard(
+      src_device.is_xpu()
+          ? src_device
+          : (dst_device.is_xpu() ? dst_device : at::Device(at::kCPU)));
+
+  vllm::xpu::xpuMemcpyKind cpy_kind;
+  if (src_device.is_xpu() && dst_device.is_xpu()) {
+    TORCH_CHECK(
+        src_device.index() == dst_device.index(),
+        "src and dst must be on the same XPU");
+    cpy_kind = vllm::xpu::xpuMemcpyKind::DeviceToDevice;
+  } else if (src_device.is_xpu() && dst_device.is_cpu()) {
+    cpy_kind = vllm::xpu::xpuMemcpyKind::DeviceToHost;
+  } else if (src_device.is_cpu() && dst_device.is_xpu()) {
+    cpy_kind = vllm::xpu::xpuMemcpyKind::HostToDevice;
+  } else {
+    TORCH_CHECK(false, "Invalid device combination");
+  }
+
+  TORCH_CHECK(block_map.device().is_cpu(), "block_map must be on CPU");
+
+  char* src_ptr = static_cast<char*>(src.data_ptr());
+  char* dst_ptr = static_cast<char*>(dst.data_ptr());
+
+  const int64_t* block_map_data = block_map.data_ptr<int64_t>();
+  const int64_t num_blocks = block_map.size(0);
+
+  for (int64_t i = 0; i < num_blocks; i++) {
+    int64_t src_block_number = block_map_data[i * 2];
+    int64_t dst_block_number = block_map_data[i * 2 + 1];
+
+    int64_t src_offset = src_block_number * block_size_in_bytes;
+    int64_t dst_offset = dst_block_number * block_size_in_bytes;
+
+    xpuMemcpy(
+        dst_ptr + dst_offset,
+        src_ptr + src_offset,
+        block_size_in_bytes,
+        cpy_kind);
+  }
+
+  return;
 }

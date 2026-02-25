@@ -106,3 +106,9 @@ void swigluoai_and_mul(
     double limit = 7.0);
 
 torch::Tensor get_xpu_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
+
+void swap_blocks(
+    torch::Tensor& src,
+    torch::Tensor& dst,
+    int64_t block_size_in_bytes,
+    const torch::Tensor& block_mapping);

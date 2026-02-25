@@ -3,6 +3,8 @@ import os
 
 import pytest
 
+from tests.utils import create_kv_caches_with_random
+
 
 def pytest_generate_tests(metafunc):
     use_mini_pytest_profiler = os.getenv("XPU_KERNEL_PYTEST_PROFILER",
@@ -43,3 +45,8 @@ def reset_default_device():
     original_device = torch.get_default_device()
     yield
     torch.set_default_device(original_device)
+
+
+@pytest.fixture()
+def kv_cache_factory():
+    return create_kv_caches_with_random

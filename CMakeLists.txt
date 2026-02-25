@@ -345,7 +345,8 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/torch_bindings.cpp"
       "csrc/quantization/fp8/fp8_quant.cpp"
       "csrc/xpu_view.cpp"
-      "csrc/tensor_utils.cpp")
+      "csrc/tensor_utils.cpp"
+      "csrc/utils/memory.cpp")
   include_directories("/usr/include")
 
   define_gpu_extension_target(
