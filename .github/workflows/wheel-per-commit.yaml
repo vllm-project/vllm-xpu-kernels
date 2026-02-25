@@ -42,7 +42,7 @@ jobs:
 
       - name: build wheel
         run: |
-          uv pip wheel -e . -v
+          python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
       - name: Create build info file
         run: |
@@ -65,7 +65,7 @@ jobs:
         with:
           name: vllm-xpu-kernels-${{ steps.metadata.outputs.short_sha }}-${{ steps.metadata.outputs.build_date }}
           path: |
-            vllm_xpu_kernels*.whl
+            dist/vllm_xpu_kernels*.whl
             build_info.txt
           retention-days: 30
 
