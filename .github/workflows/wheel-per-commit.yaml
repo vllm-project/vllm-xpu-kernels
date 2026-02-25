@@ -42,8 +42,7 @@ jobs:
 
       - name: build wheel
         run: |
-          python3 -m pip config set global.break-system-packages true
-          pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+          uv pip wheel -e . -v
 
       - name: Create build info file
         run: |
