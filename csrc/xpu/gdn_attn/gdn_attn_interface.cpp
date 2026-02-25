@@ -221,7 +221,7 @@ void gdn_attention(
         num_prefills,
         num_decodes);
   }
-#elif
+#else
   torch::Tensor q = torch::empty(
       {num_actual_tokens, num_k_heads / tp_size, head_k_dim},
       torch::dtype(dtype).device(device).requires_grad(false));

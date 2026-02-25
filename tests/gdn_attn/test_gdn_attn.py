@@ -24,7 +24,7 @@ ACTIVATION = ["silu"]
 MODE = ["prefill", "decode", "mix_mode"]
 DTYPES = [torch.float16]
 
-#override pytest parameters when enable mini pytest
+# Override pytest parameters when enabling mini pytest
 MINI_PYTEST_PARAMS = {
     "default": {
         "num_actual_tokens": [32],

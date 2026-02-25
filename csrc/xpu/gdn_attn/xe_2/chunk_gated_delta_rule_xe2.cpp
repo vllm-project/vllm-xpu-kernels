@@ -11,7 +11,7 @@ void chunk_gated_delta_rule_xe2(
     const torch::Tensor& k,  // [total_virtual_seqlen, num_k_heads, head_k_dim]
     const torch::Tensor& v,  // [total_virtual_seqlen, num_v_heads, head_v_dim]
     const torch::Tensor& b,  // [num_v_heads, total_virtual_seqlen]
-    const torch::Tensor& a,  // [num_v_heads，total_virtual_seqlen]
+    const torch::Tensor& a,  // [num_v_heads, total_virtual_seqlen]
     const torch::Tensor& A_log,    // [num_v_heads]
     const torch::Tensor& dt_bias,  // [num_v_heads]
     torch::Tensor&
