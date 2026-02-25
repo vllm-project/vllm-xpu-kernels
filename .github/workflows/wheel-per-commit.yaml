@@ -42,6 +42,7 @@ jobs:
 
       - name: build wheel
         run: |
+          uv pip install -r requirements.txt
           python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
       - name: Create build info file
