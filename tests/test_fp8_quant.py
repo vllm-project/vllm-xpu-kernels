@@ -8,7 +8,9 @@ import numpy as np
 import pytest
 import torch
 
-from tests.ops.fp8_quant_op import scaled_fp8_quant
+from tests.ops.fp8_quant_op import (per_token_group_quant_fp8,
+                                    scaled_fp8_quant, scaled_quantize)
+from tests.ops.mx_utils import to_mxfp
 
 SKIP_TEST_FOR_MINI_SCOPE = os.getenv("XPU_KERNEL_PYTEST_PROFILER") == "MINI"
 
@@ -75,6 +77,65 @@ def ref_dynamic_per_token_quant(
     return torch_out, scales
 
 
+def ref_per_block_quant(
+    x: torch.Tensor,
+    block_m: int = 1,
+    block_n: int = 128,
+    fp8_dtype=torch.float8_e4m3fn,
+    eps: float = 1e-10,
+):
+    """
+    Reference FP8 2D block quantization
+
+    Args:
+        x: [M, N] float tensor (fp16/fp32)
+        block_m: block rows
+        block_n: block cols
+        fp8_dtype: torch.float8_e4m3fn or e5m2
+    Returns:
+        q: FP8 tensor [M, N]
+        scales: FP32 tensor [ceil(M/BM), ceil(N/BN)]
+    """
+    assert fp8_dtype == torch.float8_e4m3fn
+    assert x.dim() == 2
+    M, N = x.shape
+    device = x.device
+
+    assert (
+        block_m <= M and block_n <= N and M % block_m == 0 and N % block_n == 0
+    ), f"Invalid block size: block_m={block_m}, block_n={block_n}, M={M}, N={N}"
+    BM, BN = block_m, block_n
+    grid_m = (M + BM - 1) // BM
+    grid_n = (N + BN - 1) // BN
+
+    scales = torch.empty((grid_m, grid_n), device=device, dtype=torch.float32)
+    q = torch.empty_like(x, dtype=fp8_dtype)
+
+    FP8_MAX = 448.0
+
+    for gm in range(grid_m):
+        for gn in range(grid_n):
+            m0 = gm * BM
+            n0 = gn * BN
+            m1 = min(m0 + BM, M)
+            n1 = min(n0 + BN, N)
+
+            block = x[m0:m1, n0:n1]
+
+            # absmax
+            amax = block.abs().max()
+            scale = amax / FP8_MAX
+            scale = torch.clamp(scale, min=eps)
+
+            scales[gm, gn] = scale
+
+            # quantize
+            q_block = (block / scale).to(fp8_dtype)
+            q[m0:m1, n0:n1] = q_block
+
+    return q, scales
+
+
 def assert_close_percentage(a: torch.Tensor,
                             b: torch.Tensor,
                             mismatch_threshold: float = 0.01):
@@ -84,7 +145,7 @@ def assert_close_percentage(a: torch.Tensor,
     Args:
         a (torch.Tensor): First tensor.
         b (torch.Tensor): Second tensor.
-        mismatch_threshold (float): 
+        mismatch_threshold (float):
             Allowed mismatch ratio (0.01 = 1% mismatch allowed).
 
     Raises:
@@ -132,7 +193,30 @@ SCALE_UBS = [True, False]
 SEEDS = [0]
 FP8_DTYPES = [torch.float8_e5m2, torch.float8_e4m3fn]
 
-#override pytest parameters when enable mini pytest
+# block quant parameters
+MXFP8_HP_DTYPES = [torch.float, torch.bfloat16]
+NUM_TOKENS_BLOCK_QUANT = [1, 2, 4, 8]
+HIDDEN_SIZES_BLOCK_QUANT = [256]
+GROUP_SIZE = [32, 64, 128]
+COLUMN_MAJOR_SCALE = [True, False]
+
+# Test static FP8 quantization with 2D group scales
+GROUP_SHAPES_2D = [
+    (-1, -1),  # Per-tensor
+    (-1, 1),  # Per-channel
+    (1, -1),  # Per-token
+    (-1, 128),  # Per-head quantization
+    (1, 128),  # DeepSeek-style per-token-per-group (group_m=1, group_n=128)
+    (128, 128),  # DeepSeek-style block quantization
+    (1, 64),  # Smaller group size
+    (1, 16),  # Small group (scalar path in kernel)
+    (4, 256),  # Non-trivial both dimensions
+]
+# Use sizes divisible by all group shapes
+NUM_TOKENS_GROUP = [128, 512]
+HIDDEN_SIZES_GROUP = [256, 1024, 2048]
+
+# override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
     "default": {
         "num_tokens": [1],
@@ -204,6 +288,86 @@ def test_dynamic_per_token_fp8_quant(
     )  # 0.5% mismatch allowed
 
 
+@pytest.mark.parametrize("num_tokens_block_quant", NUM_TOKENS_BLOCK_QUANT)
+@pytest.mark.parametrize("hidden_size_block_quant", HIDDEN_SIZES_BLOCK_QUANT)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("group_size", GROUP_SIZE)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("column_major_scale", COLUMN_MAJOR_SCALE)
+@torch.inference_mode()
+def test_per_block_fp8_quant(
+    num_tokens_block_quant: int,
+    hidden_size_block_quant: int,
+    dtype: torch.dtype,
+    group_size: int,
+    seed: int,
+    column_major_scale: bool,
+) -> None:
+    seed_everything(seed)
+
+    x = (torch.rand(num_tokens_block_quant,
+                    hidden_size_block_quant,
+                    dtype=dtype,
+                    device="xpu") + 1e-6)  # avoid nans
+
+    ref_out, ref_scales = ref_per_block_quant(x, 1, group_size)
+
+    ops_out, ops_scales = per_token_group_quant_fp8(
+        x,
+        group_size=group_size,
+        dtype=torch.float8_e4m3fn,
+        use_ue8m0=False,
+        column_major_scales=column_major_scale)
+
+    assert torch.allclose(ref_out.float(),
+                          ops_out.float(),
+                          atol=0.15,
+                          rtol=0.15)
+    assert torch.allclose(ref_scales.float(),
+                          ops_scales.float(),
+                          atol=0.01,
+                          rtol=0.01)
+
+
+@pytest.mark.parametrize("num_tokens_block_quant", NUM_TOKENS_BLOCK_QUANT)
+@pytest.mark.parametrize("hidden_size_block_quant", HIDDEN_SIZES_BLOCK_QUANT)
+@pytest.mark.parametrize("mxfp8_hp_dtypes", MXFP8_HP_DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("column_major_scale", COLUMN_MAJOR_SCALE)
+@torch.inference_mode()
+def test_per_block_mxfp8_quant(
+    num_tokens_block_quant: int,
+    hidden_size_block_quant: int,
+    mxfp8_hp_dtypes: torch.dtype,
+    seed: int,
+    column_major_scale: bool,
+) -> None:
+    seed_everything(seed)
+
+    x = (torch.rand(num_tokens_block_quant,
+                    hidden_size_block_quant,
+                    dtype=mxfp8_hp_dtypes,
+                    device="xpu") + 1e-6)  # avoid nans
+
+    ref_scales, ref_out = to_mxfp(x)
+
+    ops_out, ops_scales = per_token_group_quant_fp8(
+        x,
+        group_size=32,
+        dtype=torch.float8_e4m3fn,
+        use_ue8m0=True,
+        column_major_scales=column_major_scale)
+
+    assert torch.allclose(ref_out.float(),
+                          ops_out.float(),
+                          atol=0.15,
+                          rtol=0.15)
+    assert torch.allclose(ref_scales.float(),
+                          ops_scales.float(),
+                          atol=0.01,
+                          rtol=0.01)
+
+
 # Regression test for a case with large activations where an int32 index cannot
 # represent the number of elements.
 @torch.inference_mode()
@@ -231,6 +395,91 @@ def test_fp8_quant_large(seed: int, fp8_dtype: torch.dtype) -> None:
     ops_out = ops_out.to(dtype=dtype)
 
     torch.testing.assert_close(ref_out, ops_out)
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS_GROUP)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES_GROUP)
+@pytest.mark.parametrize("group_shape", GROUP_SHAPES_2D)
+@pytest.mark.parametrize("dtype", DTYPES)
+# Skip float8_e5m2; it is less accurate than float8_e4m3fn and rarely used in models. # noqa: E501
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_static_fp8_quant_group_2d(
+    num_tokens: int,
+    hidden_size: int,
+    group_shape: tuple[int, int],
+    dtype: torch.dtype,
+    fp8_dtype: torch.dtype,
+    seed: int,
+) -> None:
+    """Test static FP8 quantization with 2D group scales using scaled_quantize."""  # noqa: E501
+    # Normalize group_shape (-1 means full extent)
+    norm_group_m = num_tokens if group_shape[0] == -1 else group_shape[0]
+    norm_group_n = hidden_size if group_shape[1] == -1 else group_shape[1]
+
+    # Skip if sizes are not divisible by group shape
+    if num_tokens % norm_group_m != 0 or hidden_size % norm_group_n != 0:
+        pytest.skip(
+            f"Skipping: ({num_tokens}, {hidden_size}) not divisible by "
+            f"group_shape ({group_shape[0]}, {group_shape[1]})")
+
+    seed_everything(seed)
+
+    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="xpu")
+    ref_out, scale = scaled_quantize(x,
+                                     group_shape,
+                                     fp8_dtype,
+                                     compute_dtype=torch.float32)
+    ops_out, ops_scale = scaled_fp8_quant(x,
+                                          scale=scale,
+                                          fp8_dtype=fp8_dtype,
+                                          group_shape=group_shape)
+    torch.testing.assert_close(scale, ops_scale)
+    torch.testing.assert_close(ref_out.float(),
+                               ops_out.float(),
+                               rtol=1.2e-1,
+                               atol=1e-5)
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS_GROUP)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES_GROUP)
+@pytest.mark.parametrize("dtype", DTYPES)
+# Skip float8_e5m2; it is less accurate than float8_e4m3fn and rarely used in models. # noqa: E501
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("group_shape", [(1, -1),
+                                         (-1, 1)])  # per-token, per-channel
+@torch.inference_mode()
+def test_static_fp8_quant_1d_scale(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    fp8_dtype: torch.dtype,
+    seed: int,
+    group_shape: tuple[int, int],
+) -> None:
+    """Test static FP8 quantization with 1D scale (per-token or per-channel)."""
+    seed_everything(seed)
+
+    x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="xpu")
+    ref_out, scale_2d = scaled_quantize(x,
+                                        group_shape,
+                                        fp8_dtype,
+                                        compute_dtype=torch.float32)
+
+    # Flatten scale to 1D for testing 1D scale path
+    scale_1d = scale_2d.flatten()
+    ops_out, ops_scale = scaled_fp8_quant(x,
+                                          scale=scale_1d,
+                                          fp8_dtype=fp8_dtype,
+                                          group_shape=group_shape)
+
+    torch.testing.assert_close(scale_1d, ops_scale)
+    torch.testing.assert_close(ref_out.float(),
+                               ops_out.float(),
+                               rtol=0.12,
+                               atol=0.0)
 
 
 if __name__ == "__main__":

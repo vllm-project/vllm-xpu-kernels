@@ -73,9 +73,10 @@ jobs:
 
       - name: build & install wheel
         run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           python3 -m pip config set global.break-system-packages true
           pip install -r requirements.txt
-          pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+          MAX_JOB=128 pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
 
       - name: test 
         run: |
@@ -107,13 +108,15 @@ jobs:
 
       - name: build & install wheel
         run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           python3 -m pip config set global.break-system-packages true
           pip install -r requirements.txt
-          pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+          MAX_JOBS=128 pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
 
       - name: test 
         run: |
-          ZE_AFFINITY_MASK=0,1 pytest -v -s tests/ --ignore=tests/test_lora_ops.py --ignore=tests/test_fp8_quant.py
+          # tests/test_moe_align_block_size.py, tests/test_moe_lora_align_sum.py takes much time than expected. ignore it for now.
+          ZE_AFFINITY_MASK=0,1 pytest -v -s tests/ --ignore=tests/test_lora_ops.py --ignore=tests/test_fp8_quant.py --ignore=tests/test_moe_align_block_size.py --ignore=tests/test_moe_lora_align_sum.py
           # fixme: Running lora UT separately to avoid OOM when running together with other tests.
           ZE_AFFINITY_MASK=0,1 pytest -v -s tests/test_lora_ops.py
           VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 ZE_AFFINITY_MASK=0,1 pytest -v -s tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm

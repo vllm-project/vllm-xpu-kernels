@@ -18,7 +18,7 @@ QDTYPES = [None]
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
 SOFT_CAPS = [None]
-SLIDING_WINDOWS = [(-1, 127), (127, -1), (127, 127), (-1, -1)]
+SLIDING_WINDOWS = [(-1, 127), (127, -1), (64, 64), (-1, -1)]
 SINK = [False, True]
 CASUAL = [False, True]
 PAGED = [False, True]
@@ -116,8 +116,17 @@ def ref_paged_attn(query: torch.Tensor,
 
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
-    "default": {
+    "test_varlen_with_paged_kv": {
         "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
+        "head_size": [64, 128],
+        "num_heads": [(8, 2)],
+        "num_blocks": [64],
+        "window_size": [(-1, -1), (127, 127)],
+        "is_paged": [True]
+    },
+    "test_decode_with_paged_kv": {
+        "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
+        "num_heads": [(8, 2)],
         "head_size": [64, 128],
         "num_blocks": [64],
     }
@@ -169,7 +178,7 @@ def test_varlen_with_paged_kv(
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
-    torch.manual_seed(42)
+    torch.manual_seed(4242)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]

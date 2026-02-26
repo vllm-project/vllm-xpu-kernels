@@ -143,9 +143,13 @@ def gather_cache(src_cache: torch.Tensor,
                                         cu_seq_lens, batch_size, seq_starts)
 
 
-def static_scaled_fp8_quant(out: torch.Tensor, input: torch.Tensor,
-                            scale: torch.Tensor) -> None:
-    torch.ops._C.static_scaled_fp8_quant(out, input, scale)
+def static_scaled_fp8_quant(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    scale: torch.Tensor,
+    group_shape: tuple[int, int] | None = None,
+) -> None:
+    torch.ops._C.static_scaled_fp8_quant(out, input, scale, group_shape)
 
 
 def dynamic_scaled_fp8_quant(out: torch.Tensor, input: torch.Tensor,
@@ -161,6 +165,19 @@ def dynamic_per_token_scaled_fp8_quant(
 ) -> None:
     torch.ops._C.dynamic_per_token_scaled_fp8_quant(out, input, scales,
                                                     scale_ub)
+
+
+def per_token_group_fp8_quant(input: torch.Tensor,
+                              output_q: torch.Tensor,
+                              output_s: torch.Tensor,
+                              group_size: int = 128,
+                              eps: float = 1e-10,
+                              fp8_min: float = -448.0,
+                              fp8_max: float = 448.0,
+                              scale_ue8m0: bool = False) -> None:
+    torch.ops._C.per_token_group_fp8_quant(input, output_q, output_s,
+                                           group_size, eps, fp8_min, fp8_max,
+                                           scale_ue8m0)
 
 
 def swigluoai_and_mul(
@@ -229,6 +246,7 @@ def moe_lora_align_block_size(
     num_tokens_post_pad: torch.Tensor,
     adapter_enabled: torch.Tensor,
     lora_ids: torch.Tensor,
+    expert_map: torch.Tensor | None = None,
 ) -> None:
     torch.ops._moe_C.moe_lora_align_block_size(
         topk_ids,
@@ -243,6 +261,7 @@ def moe_lora_align_block_size(
         num_tokens_post_pad,
         adapter_enabled,
         lora_ids,
+        expert_map,
     )
 
 
@@ -253,6 +272,7 @@ def moe_align_block_size(
     sorted_token_ids: torch.Tensor,
     experts_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
+    expert_map: torch.Tensor | None = None,
 ) -> None:
     torch.ops._moe_C.moe_align_block_size(
         topk_ids,
@@ -261,6 +281,7 @@ def moe_align_block_size(
         sorted_token_ids,
         experts_ids,
         num_tokens_post_pad,
+        expert_map,
     )
 
 
@@ -311,6 +332,7 @@ def fused_grouped_topk(
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indices: torch.Tensor,
-                 gating_output: torch.Tensor, renormalize: bool) -> None:
+                 gating_output: torch.Tensor, renormalize: bool,
+                 bias: Optional[torch.Tensor]) -> None:
     torch.ops._moe_C.topk_softmax(topk_weights, topk_ids, token_expert_indices,
-                                  gating_output, renormalize)
+                                  gating_output, renormalize, bias)

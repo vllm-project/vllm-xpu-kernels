@@ -35,7 +35,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
 # Supported Intel GPU architectures.
-set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21")
+set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
 
 #
 # Supported/expected torch versions for XPU.
@@ -180,8 +180,8 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   )
 
   # TODO: make AOT configurable
-  set(AOT_DEVICES "pvc,bmg-g21-a0")
-  set(XE2_AOT_DEVICES "pvc,bmg-g21-a0")
+  set(AOT_DEVICES "pvc,bmg-g21-a0,bmg-g31-a0")
+  set(XE2_AOT_DEVICES "pvc,bmg-g21-a0,bmg-g31-a0")
 
   # Final link option be like: icpx -fsycl -fsycl-target=spir64_gen
   # ${SYCL_DEVICE_LINK_FLAGS} -Xsycl-target-backend=spir64_gen

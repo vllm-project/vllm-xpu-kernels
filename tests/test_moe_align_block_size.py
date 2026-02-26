@@ -111,6 +111,8 @@ def torch_moe_align_block_size(
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     if pad_sorted_ids:
         max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+    if topk_ids.numel() < num_experts:
+        max_num_tokens_padded = topk_ids.numel() * block_size
 
     flattened_token_indices = torch.arange(topk_ids.numel(),
                                            device=topk_ids.device,
@@ -132,6 +134,8 @@ def torch_moe_align_block_size(
                                        device=topk_ids.device)
     for expert_id in range(num_experts):
         original_count = expert_token_counts[expert_id]
+        if expert_map is not None and expert_map[expert_id] == -1:
+            continue
         if original_count > 0:
             expert_padded_counts[expert_id] = (
                 (original_count + block_size - 1) // block_size) * block_size
@@ -150,6 +154,9 @@ def torch_moe_align_block_size(
     current_pos = 0
     current_block = 0
     for expert_id in range(num_experts):
+        if expert_map is not None and expert_map[expert_id] == -1:
+            continue
+
         expert_mask = sorted_expert_ids == expert_id
         expert_tokens = sorted_token_indices[expert_mask]
         num_expert_tokens = expert_tokens.shape[0]
@@ -159,8 +166,11 @@ def torch_moe_align_block_size(
                              num_expert_tokens] = (expert_tokens)
 
             expert_blocks_needed = expert_padded_counts[expert_id] // block_size
+            expert_id_new = expert_id
+            if expert_map is not None:
+                expert_id_new = expert_map[expert_id]
             expert_ids[current_block:current_block +
-                       expert_blocks_needed] = expert_id
+                       expert_blocks_needed] = (expert_id_new)
 
             current_pos += expert_padded_counts[expert_id]
             current_block += expert_blocks_needed
@@ -170,8 +180,6 @@ def torch_moe_align_block_size(
                                        dtype=torch.int32,
                                        device=topk_ids.device)
 
-    if expert_map is not None:
-        expert_ids = expert_map[expert_ids]
     return sorted_token_ids, expert_ids, num_tokens_post_pad
 
 
@@ -259,13 +267,14 @@ def test_moe_align_block_size_with_expert_map(m: int, topk: int,
     for i, expert_id in enumerate(local_experts):
         expert_map[expert_id] = i
 
-    actual_sorted_ids, actual_expert_ids, actual_num_tokens = \
+    actual_sorted_ids, actual_expert_ids, actual_num_tokens = (
         moe_align_block_size(
             topk_ids=topk_ids,
             block_size=block_size,
             num_experts=num_experts,
             expert_map=expert_map,
-        )
+            ignore_invalid_experts=True,
+        ))
     golden_sorted_ids, golden_expert_ids, golden_num_tokens = (
         torch_moe_align_block_size(
             topk_ids=topk_ids,
@@ -415,9 +424,26 @@ def test_batched_moe_align_block_size(
                                rtol=0)
 
 
-def test_moe_align_block_size_opcheck():
+@pytest.mark.parametrize("ep_size", [1, 2])
+def test_moe_align_block_size_opcheck(ep_size):
     num_experts = 4
     block_size = 4
+
+    expert_map = None
+    if ep_size != 1:
+        local_num_experts = num_experts // ep_size
+        expert_ids = torch.randint(0,
+                                   num_experts, (local_num_experts, ),
+                                   device="xpu",
+                                   dtype=torch.int32)
+        expert_map = torch.full((num_experts, ),
+                                -1,
+                                device="xpu",
+                                dtype=torch.int32)
+        expert_map[expert_ids] = torch.arange(local_num_experts,
+                                              device="xpu",
+                                              dtype=torch.int32)
+
     topk_ids = torch.randint(0,
                              num_experts, (3, 4),
                              dtype=torch.int32,
@@ -445,6 +471,7 @@ def test_moe_align_block_size_opcheck():
             sorted_ids,
             expert_ids,
             num_tokens_post_pad,
+            expert_map,
         ),
     )
 
