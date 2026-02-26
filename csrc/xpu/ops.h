@@ -67,4 +67,5 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     bool is_neox);
 
 bool is_bmg(int64_t device_index);
+
 bool is_pvc(int64_t device_index);
