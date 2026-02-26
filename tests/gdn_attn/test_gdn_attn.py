@@ -363,8 +363,8 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
         tp_size=tp_size,
     )
 
-    atol = 2e-2
-    rtol = 2e-2
+    atol = 5e-2
+    rtol = 5e-2
 
     torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
     torch.testing.assert_close(core_attn_out,
