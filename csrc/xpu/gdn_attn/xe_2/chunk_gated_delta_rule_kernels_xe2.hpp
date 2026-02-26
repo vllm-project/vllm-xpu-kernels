@@ -1092,6 +1092,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
           reorder(tCrU_c, tCrU_d);
           copy(copy_U_d, tCrU_d, tCgU_d);
         }
+        item.barrier(sycl::access::fence_space::local_space);
       }
 
       auto q_ptr = q + chunk_offset * num_k_heads * head_k_dim +

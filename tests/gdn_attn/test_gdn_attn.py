@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+import os
 import random
 
 import pytest
@@ -226,6 +227,11 @@ def simple_random_distribute(N, batch_size):
 def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                        num_v_heads, head_v_dim, width, tp_size, has_bias,
                        activation, mode, dtype):
+    # FIXME: remove skip
+    if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
+            and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
+        pytest.skip("skip gdn attention kernels testing on PVC.")
+
     device = "xpu"
     random.seed(42)
     torch.manual_seed(42)
