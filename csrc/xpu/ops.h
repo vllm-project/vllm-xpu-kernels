@@ -65,3 +65,7 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     const at::Tensor& cos_sin_cache,
     int64_t rotary_dim,
     bool is_neox);
+
+bool is_bmg(int64_t device_index);
+
+bool is_pvc(int64_t device_index);
