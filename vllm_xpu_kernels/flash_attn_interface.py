@@ -44,9 +44,9 @@ def flash_attn_varlen_func(
     out=None,
     # FA3 Only
     scheduler_metadata=None,
-    q_descale=None,
-    k_descale=None,
-    v_descale=None,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
     num_splits: int = 0,
     # Version selector
     fa_version: int = DEFAULT_FA_VERSION,
@@ -64,10 +64,14 @@ def flash_attn_varlen_func(
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
-    if k_descale is None:
-        k_descale = 1.0
-    if v_descale is None:
-        v_descale = 1.0
+    if k_descale is not None:
+        assert sum(k_descale.stride()) == 0 and \
+            k_descale.dtype == torch.float32, \
+            "k_descale must be view of single float32 scalar tensor"
+    if v_descale is not None:
+        assert sum(v_descale.stride()) == 0 and \
+            v_descale.dtype == torch.float32, \
+            "v_descale must be view of single float32 scalar tensor"
     # custom op does not support non-tuple input
     real_window_size: tuple[int, int]
     if window_size is None:
