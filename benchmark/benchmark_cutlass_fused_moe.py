@@ -150,7 +150,7 @@ def calculate_diff(config):
         num_experts,
     )
 
-    if torch.allclose(output_naive, output_vllm, atol=2e-2, rtol=0):
+    if torch.allclose(output_naive, output_vllm, atol=1e-3, rtol=0):
         print("✅ All implementations match")
     else:
         print("❌ Implementations differ, ", config)
