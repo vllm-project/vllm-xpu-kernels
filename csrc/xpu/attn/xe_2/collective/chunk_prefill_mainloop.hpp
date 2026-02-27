@@ -241,7 +241,8 @@ struct FMHAFwdMainloop<
     int b_offset = idx_b * params.max_pages_per_seq;
     int page_local_idx = K * get<1>(TileShapeQK{}) / params.page_size;
 
-    return params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page + K % tiles_per_page;
+    return params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page +
+           K % tiles_per_page;
   }
 
   template <typename QVCoord>
