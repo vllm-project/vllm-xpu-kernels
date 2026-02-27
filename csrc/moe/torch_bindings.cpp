@@ -68,6 +68,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
       "bias) -> ()");
   m.impl("topk_softmax", torch::kXPU, &topk_softmax);
+  // Apply topk sigmoid to the gating outputs.
+  m.def(
+      "topk_sigmoid(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
+      "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
+      "bias) -> ()");
+  m.impl("topk_sigmoid", torch::kXPU, &topk_sigmoid);
   // Apply topk softmax to the gating outputs.
   m.def(
       "moe_gather(Tensor! output, Tensor moe_output, Tensor topk_weights, "

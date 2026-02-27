@@ -8,7 +8,8 @@ from typing import Optional
 import torch
 import triton
 
-from tests.ops.topk_softmax_op import fused_topk, topk_softmax
+from tests.ops.topk_op import (fused_topk_sigmoid, fused_topk_softmax,
+                               topk_sigmoid, topk_softmax)
 
 
 @torch.compile
@@ -21,6 +22,23 @@ def topk_softmax_compile(
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
     routing_weights = torch.softmax(gating_output, dim=-1, dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
+@torch.compile
+def topk_sigmoid_compile(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    indices_type: Optional[torch.dtype] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+
+    routing_weights = torch.sigmoid(gating_output).to(torch.float32)
     topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
 
     if renormalize:
@@ -43,7 +61,19 @@ configs = list(
     ))
 
 
-def get_benchmark():
+def get_benchmark(scoring_func: str):
+    if scoring_func == "softmax":
+        fused_fn = fused_topk_softmax
+        native_fn = topk_softmax
+        compile_fn = topk_softmax_compile
+        plot_name = "topk_softmax-perf"
+    elif scoring_func == "sigmoid":
+        fused_fn = fused_topk_sigmoid
+        native_fn = topk_sigmoid
+        compile_fn = topk_sigmoid_compile
+        plot_name = "topk_sigmoid-perf"
+    else:
+        raise ValueError(f"Unsupported scoring_func: {scoring_func}")
 
     @triton.testing.perf_report(
         triton.testing.Benchmark(
@@ -61,7 +91,7 @@ def get_benchmark():
             styles=[("blue", "-"), ("green", "-"), ("orange", "-"),
                     ("red", "-")],
             ylabel="us",
-            plot_name="topk_softmax-perf",
+            plot_name=plot_name,
             args={},
         ))
     def benchmark(
@@ -84,26 +114,26 @@ def get_benchmark():
 
         if provider == "vllm":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: fused_topk(hidden_states=hidden_states,
-                                   gating_output=gating_output,
-                                   topk=topk,
-                                   renormalize=renormalize),
+                lambda: fused_fn(hidden_states=hidden_states,
+                                 gating_output=gating_output,
+                                 topk=topk,
+                                 renormalize=renormalize),
                 quantiles=quantiles,
             )
         elif provider == "native":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: topk_softmax(hidden_states=hidden_states,
-                                     gating_output=gating_output,
-                                     topk=topk,
-                                     renormalize=renormalize),
+                lambda: native_fn(hidden_states=hidden_states,
+                                  gating_output=gating_output,
+                                  topk=topk,
+                                  renormalize=renormalize),
                 quantiles=quantiles,
             )
         elif provider == "compile":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: topk_softmax_compile(hidden_states=hidden_states,
-                                             gating_output=gating_output,
-                                             topk=topk,
-                                             renormalize=renormalize),
+                lambda: compile_fn(hidden_states=hidden_states,
+                                   gating_output=gating_output,
+                                   topk=topk,
+                                   renormalize=renormalize),
                 quantiles=quantiles,
             )
 
@@ -113,15 +143,22 @@ def get_benchmark():
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description="Benchmark the topk_softmax kernel.")
+    parser = ArgumentParser(description="Benchmark the topk kernel.")
+    parser.add_argument(
+        "--scoring-func",
+        choices=["softmax", "sigmoid"],
+        default="softmax",
+        help="Scoring function to benchmark",
+    )
     parser.add_argument(
         "--save-path",
         type=str,
-        default="./configs/topk_softmax/",
-        help="Path to save topk_softmax benchmark results",
+        default="./configs/topk/",
+        help="Path to save topk benchmark results",
     )
 
     args = parser.parse_args()
 
-    benchmark = get_benchmark()
-    benchmark.run(print_data=True, save_path=args.save_path)
+    benchmark = get_benchmark(args.scoring_func)
+    save_path = f"{args.save_path.rstrip('/')}/{args.scoring_func}"
+    benchmark.run(print_data=True, save_path=save_path)
