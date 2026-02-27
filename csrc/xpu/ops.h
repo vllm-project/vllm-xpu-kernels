@@ -89,3 +89,7 @@ void gdn_attention(
     const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
     const int64_t tp_size);
+
+bool is_bmg(int64_t device_index);
+
+bool is_pvc(int64_t device_index);
