@@ -75,7 +75,10 @@ void gather_cache(
     std::optional<torch::Tensor> seq_starts = std::nullopt);
 
 void static_scaled_fp8_quant(
-    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale);
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& scale,
+    std::optional<std::tuple<int64_t, int64_t>> group_shape = std::nullopt);
 
 void dynamic_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale);

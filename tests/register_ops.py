@@ -143,9 +143,13 @@ def gather_cache(src_cache: torch.Tensor,
                                         cu_seq_lens, batch_size, seq_starts)
 
 
-def static_scaled_fp8_quant(out: torch.Tensor, input: torch.Tensor,
-                            scale: torch.Tensor) -> None:
-    torch.ops._C.static_scaled_fp8_quant(out, input, scale)
+def static_scaled_fp8_quant(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    scale: torch.Tensor,
+    group_shape: tuple[int, int] | None = None,
+) -> None:
+    torch.ops._C.static_scaled_fp8_quant(out, input, scale, group_shape)
 
 
 def dynamic_scaled_fp8_quant(out: torch.Tensor, input: torch.Tensor,

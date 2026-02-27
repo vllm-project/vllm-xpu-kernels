@@ -78,3 +78,12 @@
 #define VLLM_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(                                              \
       TYPE, NAME, VLLM_DISPATCH_CASE_INTEGRAL_AND_UNSIGNED_TYPES(__VA_ARGS__))
+
+#define VLLM_DISPATCH_BOOL(expr, const_expr, ...) \
+  if (expr) {                                     \
+    constexpr bool const_expr = true;             \
+    __VA_ARGS__();                                \
+  } else {                                        \
+    constexpr bool const_expr = false;            \
+    __VA_ARGS__();                                \
+  }
