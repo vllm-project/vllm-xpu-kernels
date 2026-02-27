@@ -108,4 +108,3 @@ struct decode_policy_qpacked_head<q_packed, head_dim, _128> {
   using ShapeOut = Shape<q_packed, head_dim>;
   using SubgroupLayoutQK = Layout<Shape<_1, _8, _1>>;
 };
-

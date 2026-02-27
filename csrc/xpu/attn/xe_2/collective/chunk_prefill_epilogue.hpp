@@ -519,8 +519,7 @@ class DecodeFwdEpilogue {
       int idx_kv_split,
       int head_group_q,
       TensorSink& tSink,  // Sink for current head
-      int num_kv_splits
-  ) {
+      int num_kv_splits) {
     using namespace cute;
     using ElementA = typename FragA::element_type;
 

@@ -37,7 +37,7 @@ function(paged_decode_configure FILENAME_SUFFIX)
   set(policy_8_128_64 "decode_policy_q8_h128_p64")
   set(policy_8_192_64 "decode_policy_q8_h192_p64")
   set(policy_8_256_64 "decode_policy_q8_h256_p64")
-  
+
   set(policy_8_64_128 "decode_policy_q8_h64_p128")
   set(policy_8_96_128 "decode_policy_q8_h96_p128")
   set(policy_8_128_128 "decode_policy_q8_h128_p128")
@@ -50,7 +50,7 @@ function(paged_decode_configure FILENAME_SUFFIX)
   set(policy_16_128_64 "decode_policy_q16_h128_p64")
   set(policy_16_192_64 "decode_policy_q16_h192_p64")
   set(policy_16_256_64 "decode_policy_q16_h256_p64")
-  
+
   set(policy_16_64_128 "decode_policy_q16_h64_p128")
   set(policy_16_96_128 "decode_policy_q16_h96_p128")
   set(policy_16_128_128 "decode_policy_q16_h128_p128")
@@ -71,13 +71,15 @@ function(paged_decode_configure FILENAME_SUFFIX)
     foreach(IMPL_HEADSIZE ${headsize_list})
       foreach(IMPL_PAGESIZE ${pagesize_list})
         # Lookup policy name from mapping
-        set(IMPL_POLICY ${policy_${IMPL_QGROUP}_${IMPL_HEADSIZE}_${IMPL_PAGESIZE}})
+        set(IMPL_POLICY
+            ${policy_${IMPL_QGROUP}_${IMPL_HEADSIZE}_${IMPL_PAGESIZE}})
 
         foreach(IMPL_KISCAUSAL ${L_BOOLS})
           foreach(IMPL_KISLOCAL ${L_BOOLS})
             foreach(IMPL_KISSINK ${L_BOOLS})
               # Construct unique filename suffix: e.g., _q8_h64_fff
-              set(FILE_SUFFIX "_q${IMPL_QGROUP}_h${IMPL_HEADSIZE}_p${IMPL_PAGESIZE}_")
+              set(FILE_SUFFIX
+                  "_q${IMPL_QGROUP}_h${IMPL_HEADSIZE}_p${IMPL_PAGESIZE}_")
               set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
               set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
               set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
@@ -88,7 +90,8 @@ function(paged_decode_configure FILENAME_SUFFIX)
 
               # Add to output list
               list(
-                APPEND GEN_KERNEL_SRCS
+                APPEND
+                GEN_KERNEL_SRCS
                 "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}${FILE_SUFFIX}.cpp"
               )
             endforeach()
