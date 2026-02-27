@@ -300,7 +300,7 @@ class XeFMHAFwdKernel {
       }
 
       auto batch_dim_qo = is_var_len ? 1 : s.batch;
-      auto batch_dim_kv = PagedKV ? 1 : s.batch;
+      auto batch_dim_kv = (PagedKV || is_var_len) ? 1 : s.batch;
       auto total_seqlen_kv =
           PagedKV ? params.mainloop.total_seqlen_kv : seq_len_kv;
       auto shape_Q =
@@ -320,10 +320,10 @@ class XeFMHAFwdKernel {
       auto layout_q = is_var_len
                           ? make_ordered_layout(shape_Q, Step<_2, _0, _1, _3>{})
                           : make_layout(shape_Q, p.dQ);
-      auto layout_k = PagedKV
+      auto layout_k = (PagedKV || is_var_len)
                           ? make_ordered_layout(shape_K, Step<_2, _0, _1, _3>{})
                           : make_layout(shape_K, p.dK);
-      auto layout_v = PagedKV
+      auto layout_v = (PagedKV || is_var_len)
                           ? make_ordered_layout(shape_V, Step<_0, _2, _1, _3>{})
                           : make_layout(shape_V, p.dV);
       auto layout_o = is_var_len
@@ -341,7 +341,7 @@ class XeFMHAFwdKernel {
 
       // Main loop
       int l_coord_qo = is_var_len ? 0 : idx_b;
-      int l_coord_kv = PagedKV ? 0 : idx_b;
+      int l_coord_kv = (PagedKV || is_var_len) ? 0 : idx_b;
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
       mainloop(
           Q(_, _, head_q, l_coord_qo),
