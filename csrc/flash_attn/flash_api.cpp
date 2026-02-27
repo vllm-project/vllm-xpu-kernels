@@ -22,8 +22,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int max_seqlen_q,
     int max_seqlen_k,
     float p_dropout,
-    float k_scale,
-    float v_scale,
+    std::optional<const at::Tensor>& k_scale,
+    std::optional<const at::Tensor>& v_scale,
     float softmax_scale,
     std::optional<const at::Tensor>& softmax_sink_,
     const bool zero_tensors,
@@ -195,8 +195,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cu_seqlens_q, "
       "Tensor cu_seqlens_k, Tensor? seqused_k, Tensor? leftpad_k, Tensor? "
       "block_table, Tensor? alibi_slopes, "
-      "int max_seqlen_q, int max_seqlen_k, float p_dropout, float k_scale, "
-      "float v_scale, "
+      "int max_seqlen_q, int max_seqlen_k, float p_dropout, Tensor? k_scale, "
+      "Tensor? v_scale, "
       "float softmax_scale, Tensor? softmax_sink, bool zero_tensors, "
       "bool is_causal, int window_size_left, int window_size_right, float "
       "softcap, bool return_softmax, "
