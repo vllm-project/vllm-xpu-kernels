@@ -147,6 +147,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("gather_cache", torch::kXPU, &gather_cache);
+
+  // Cache ops
+  // Swap in (out) the cache blocks from src to dst.
+  cache_ops.def(
+      "swap_blocks(Tensor src, Tensor! dst,"
+      "            int block_size_in_bytes, Tensor block_mapping) -> ()");
+  cache_ops.impl("swap_blocks", torch::kXPU, &swap_blocks);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
