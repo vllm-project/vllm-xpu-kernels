@@ -261,7 +261,9 @@ struct DecodeKernelLauncher {
     dim3 const block = FMHAKernel::get_block_shape();
     dim3 const grid = FMHAKernel::get_grid_shape(params);
 
-    // cute::print("Launching FMHAKernel with grid: "); cute::print("%d x %d x %d ", grid.x, grid.y, grid.z); cute::print("and block: "); cute::print("%d x %d x %d\n", block.x, block.y, block.z);
+    // cute::print("Launching FMHAKernel with grid: "); cute::print("%d x %d x
+    // %d ", grid.x, grid.y, grid.z); cute::print("and block: ");
+    // cute::print("%d x %d x %d\n", block.x, block.y, block.z);
 
     // configure smem size and carveout
     int smem_size = FMHAKernel::SharedStorageSize;
@@ -296,7 +298,10 @@ struct DecodeKernelLauncher {
           syclex::work_group_scratch_size(reduce_smem_size),
       };
       compat::experimental::launch_policy reduce_policy{
-          reduce_sycl_grid, reduce_sycl_block, launch_props_reduce, kernel_props};
+          reduce_sycl_grid,
+          reduce_sycl_block,
+          launch_props_reduce,
+          kernel_props};
 
       auto reduce_event = compat::experimental::launch<
           cutlass::device_kernel<ReductionSplitKernel>>(

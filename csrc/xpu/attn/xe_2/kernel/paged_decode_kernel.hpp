@@ -650,7 +650,8 @@ class ReduceSplitK {
       // Step 1: reduce max logits across different partitions
       // store into SLM for later use
 
-      ElementLSE global_max_logits{cutlass::platform::numeric_limits<ElementLSE>::lowest()};
+      ElementLSE global_max_logits{
+          cutlass::platform::numeric_limits<ElementLSE>::lowest()};
       ElementLSE global_exp_sums{0};
       // only first subgroup participates
       if (thr_id < num_kv_splits && thr_id * num_blocks_per_split < k_blocks) {
@@ -684,10 +685,15 @@ class ReduceSplitK {
           ElementLSE local_max_logit = shared_storage.max_logits_slm_array[i];
           ElementLSE local_exp_sum = shared_storage.exp_sums_slm_array[i];
 
-          ElementLSE rescale = sycl::native::exp2(local_max_logit - global_max_logits);
+          ElementLSE rescale =
+              sycl::native::exp2(local_max_logit - global_max_logits);
 
-          // in FMHA epilogue, it's divided by local_exp_sum, here we multiply back
-          ElementLSE adjusted_o_accum = static_cast<ElementLSE>(Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord)) * local_exp_sum;
+          // in FMHA epilogue, it's divided by local_exp_sum, here we multiply
+          // back
+          ElementLSE adjusted_o_accum =
+              static_cast<ElementLSE>(
+                  Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord)) *
+              local_exp_sum;
           acc += adjusted_o_accum * rescale;
 
           // update global exp sum

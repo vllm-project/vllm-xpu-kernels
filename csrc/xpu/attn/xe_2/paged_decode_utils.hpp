@@ -33,23 +33,28 @@ inline void dispatch_by_head_size(
     const paged_decode_args_t& args) {
   switch (head_case) {
     case 0:
-      decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _64, PageSize>>(
+      decode_policy_dispatch_func<
+          decode_policy_qpacked_head<QGroup, _64, PageSize>>(
           queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 1:
-      decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _96, PageSize>>(
+      decode_policy_dispatch_func<
+          decode_policy_qpacked_head<QGroup, _96, PageSize>>(
           queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 2:
-      decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _128, PageSize>>(
+      decode_policy_dispatch_func<
+          decode_policy_qpacked_head<QGroup, _128, PageSize>>(
           queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 3:
-      decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _192, PageSize>>(
+      decode_policy_dispatch_func<
+          decode_policy_qpacked_head<QGroup, _192, PageSize>>(
           queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 4:
-      decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _256, PageSize>>(
+      decode_policy_dispatch_func<
+          decode_policy_qpacked_head<QGroup, _256, PageSize>>(
           queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     default:
@@ -66,18 +71,15 @@ inline void dispatch_by_page_size(
     const paged_decode_args_t& args) {
   switch (page_size) {
     case 64:
-      dispatch_by_head_size<QGroup, _64>(
-          head_case, queue, cuType, args);
+      dispatch_by_head_size<QGroup, _64>(head_case, queue, cuType, args);
       break;
     case 128:
-      dispatch_by_head_size<QGroup, _128>(
-          head_case, queue, cuType, args);
+      dispatch_by_head_size<QGroup, _128>(head_case, queue, cuType, args);
       break;
     default:
       TORCH_CHECK(false, "Unsupported page size for fmha");
   }
 }
-
 
 void cutlass_paged_decode_impl(
     sycl::queue& queue,
