@@ -71,7 +71,6 @@ def naive_moe(
 
         output[t] = out
 
-    torch.xpu.synchronize()
     return output
 
 
@@ -105,7 +104,6 @@ def fused_moe_xpu(
 def calculate_diff(config):
     m, num_experts, topk, hidden_size, dtype = config
     activation = "silu"
-    torch.manual_seed(0)
     inter_size = 4 * hidden_size  # realistic MoE ratio
 
     hidden_states = torch.randn(
@@ -158,7 +156,7 @@ def calculate_diff(config):
         print("❌ Implementations differ, ", config)
 
 
-def get_benchmark(configs, activation="silu"):
+def get_benchmark():
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["m", "num_experts", "topk", "hidden_size", "dtype"],
@@ -173,7 +171,7 @@ def get_benchmark(configs, activation="silu"):
         )
     )
     def benchmark(m, num_experts, topk, hidden_size, dtype, provider):
-        torch.manual_seed(0)
+        activation = "silu"
 
         inter_size = 4 * hidden_size  # realistic MoE ratio
 
@@ -185,7 +183,7 @@ def get_benchmark(configs, activation="silu"):
             m, num_experts, topk, device=DEVICE
         )
         topk_weights = gen_topk_weights(
-            m, topk, device=DEVICE, dtype=dtype
+            m, topk, device=DEVICE, dtype=torch.float32
         )
 
         w13 = torch.randn(
@@ -246,7 +244,7 @@ if __name__ == "__main__":
     m = [32, 64, 256, 512, 1024]
     experts = [8, 16, 32, 64]
     topk = [1, 2, 4]
-    hidden_size = [4096, 8192]
+    hidden_size = [4096]    # 8192 causes OOM
     dtype = [torch.float16, torch.bfloat16]     # float32 not supported by cutlass kernels: permuted_data_size = permuted_elems * 2
     print("Final configuration:")
     print(f"  m: {m}")
@@ -259,11 +257,11 @@ if __name__ == "__main__":
         itertools.product(m, experts, topk, hidden_size, dtype))
 
     for config in configs:
-        try:
-            calculate_diff(config)
-        except RuntimeError as e:
-            clear_xpu_cache()
-            print(f"Error in config {config}: {e}")
+       try:
+           calculate_diff(config)
+       except RuntimeError as e:
+           clear_xpu_cache()
+           print(f"Error in config {config}: {e}")
 
     benchmark = get_benchmark()
     # Run performance benchmark
