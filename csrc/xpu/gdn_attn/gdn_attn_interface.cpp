@@ -108,6 +108,61 @@ void gdn_attention(
   }
   const int pad_slot_id = -1;
 
+#define NATIVE_LAUNCHER                                           \
+  do {                                                            \
+    torch::Tensor q = torch::empty(                               \
+        {num_actual_tokens, num_k_heads / tp_size, head_k_dim},   \
+        torch::dtype(dtype).device(device).requires_grad(false)); \
+    torch::Tensor k = torch::empty(                               \
+        {num_actual_tokens, num_k_heads / tp_size, head_k_dim},   \
+        torch::dtype(dtype).device(device).requires_grad(false)); \
+    torch::Tensor v = torch::empty(                               \
+        {num_actual_tokens, num_v_heads / tp_size, head_v_dim},   \
+        torch::dtype(dtype).device(device).requires_grad(false)); \
+    torch::Tensor b = torch::empty(                               \
+        {num_actual_tokens, num_v_heads / tp_size},               \
+        torch::dtype(dtype).device(device).requires_grad(false)); \
+    torch::Tensor a = torch::empty(                               \
+        {num_actual_tokens, num_v_heads / tp_size},               \
+        torch::dtype(dtype).device(device).requires_grad(false)); \
+    gdn::causal_conv1d(                                           \
+        queue,                                                    \
+        q,                                                        \
+        k,                                                        \
+        v,                                                        \
+        z,                                                        \
+        b,                                                        \
+        a,                                                        \
+        projected_states_qkvz,                                    \
+        projected_states_ba,                                      \
+        conv_weights,                                             \
+        conv_bias,                                                \
+        conv_state,                                               \
+        non_spec_query_start_loc,                                 \
+        non_spec_state_indices_tensor,                            \
+        has_initial_state,                                        \
+        act_mode,                                                 \
+        pad_slot_id,                                              \
+        num_prefills,                                             \
+        num_decodes);                                             \
+    gdn::gated_delta_rule(                                        \
+        queue,                                                    \
+        core_attn_out,                                            \
+        q,                                                        \
+        k,                                                        \
+        v,                                                        \
+        b,                                                        \
+        a,                                                        \
+        A_log,                                                    \
+        dt_bias,                                                  \
+        ssm_state,                                                \
+        non_spec_query_start_loc,                                 \
+        non_spec_state_indices_tensor,                            \
+        has_initial_state,                                        \
+        num_prefills,                                             \
+        num_decodes);                                             \
+  } while (0)
+
 #ifdef VLLM_XPU_ENABLE_XE2
   if (num_prefills > 0) {
     int batch_size = non_spec_query_start_loc.size(0) - 1;
@@ -167,113 +222,10 @@ void gdn_attention(
         num_prefills,
         num_decodes);
   } else {
-    torch::Tensor q = torch::empty(
-        {num_actual_tokens, num_k_heads / tp_size, head_k_dim},
-        torch::dtype(dtype).device(device).requires_grad(false));
-    torch::Tensor k = torch::empty(
-        {num_actual_tokens, num_k_heads / tp_size, head_k_dim},
-        torch::dtype(dtype).device(device).requires_grad(false));
-    torch::Tensor v = torch::empty(
-        {num_actual_tokens, num_v_heads / tp_size, head_v_dim},
-        torch::dtype(dtype).device(device).requires_grad(false));
-    torch::Tensor b = torch::empty(
-        {num_actual_tokens, num_v_heads / tp_size},
-        torch::dtype(dtype).device(device).requires_grad(false));
-    torch::Tensor a = torch::empty(
-        {num_actual_tokens, num_v_heads / tp_size},
-        torch::dtype(dtype).device(device).requires_grad(false));
-
-    gdn::causal_conv1d(
-        queue,
-        q,
-        k,
-        v,
-        z,
-        b,
-        a,
-        projected_states_qkvz,
-        projected_states_ba,
-        conv_weights,
-        conv_bias,
-        conv_state,
-        non_spec_query_start_loc,
-        non_spec_state_indices_tensor,
-        has_initial_state,
-        act_mode,
-        pad_slot_id,
-        num_prefills,
-        num_decodes);
-
-    gdn::gated_delta_rule(
-        queue,
-        core_attn_out,
-        q,
-        k,
-        v,
-        b,
-        a,
-        A_log,
-        dt_bias,
-        ssm_state,
-        non_spec_query_start_loc,
-        non_spec_state_indices_tensor,
-        has_initial_state,
-        num_prefills,
-        num_decodes);
+    NATIVE_LAUNCHER;
   }
 #else
-  torch::Tensor q = torch::empty(
-      {num_actual_tokens, num_k_heads / tp_size, head_k_dim},
-      torch::dtype(dtype).device(device).requires_grad(false));
-  torch::Tensor k = torch::empty(
-      {num_actual_tokens, num_k_heads / tp_size, head_k_dim},
-      torch::dtype(dtype).device(device).requires_grad(false));
-  torch::Tensor v = torch::empty(
-      {num_actual_tokens, num_v_heads / tp_size, head_v_dim},
-      torch::dtype(dtype).device(device).requires_grad(false));
-  torch::Tensor b = torch::empty(
-      {num_actual_tokens, num_v_heads / tp_size},
-      torch::dtype(dtype).device(device).requires_grad(false));
-  torch::Tensor a = torch::empty(
-      {num_actual_tokens, num_v_heads / tp_size},
-      torch::dtype(dtype).device(device).requires_grad(false));
-
-  gdn::causal_conv1d(
-      queue,
-      q,
-      k,
-      v,
-      z,
-      b,
-      a,
-      projected_states_qkvz,
-      projected_states_ba,
-      conv_weights,
-      conv_bias,
-      conv_state,
-      non_spec_query_start_loc,
-      non_spec_state_indices_tensor,
-      has_initial_state,
-      act_mode,
-      pad_slot_id,
-      num_prefills,
-      num_decodes);
-
-  gdn::gated_delta_rule(
-      queue,
-      core_attn_out,
-      q,
-      k,
-      v,
-      b,
-      a,
-      A_log,
-      dt_bias,
-      ssm_state,
-      non_spec_query_start_loc,
-      non_spec_state_indices_tensor,
-      has_initial_state,
-      num_prefills,
-      num_decodes);
+  NATIVE_LAUNCHER;
 #endif
+#undef NATIVE_LAUNCHER
 }

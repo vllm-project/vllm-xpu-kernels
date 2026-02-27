@@ -3,7 +3,7 @@
 #include <sycl/sycl.hpp>
 #include <torch/all.h>
 
-#include "../gdn_attn_utils.h"
+#include "gdn_attn_utils.h"
 
 namespace gdn {
 static constexpr int chunk_size = gdn::chunk_size_xe2;

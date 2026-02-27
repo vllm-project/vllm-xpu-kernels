@@ -4,9 +4,8 @@
 #include <torch/all.h>
 
 #include "gemm.hpp"
-#include "../gdn_attn_utils.h"
-
-#define INVERSE_OPT
+#include "gdn_attn_utils.h"
+#include "csrc/utils.h"
 
 namespace gdn {
 using namespace cute;
@@ -1260,6 +1259,9 @@ template <typename T>
 class ChunkComputeAKernel;
 
 template <typename T>
+class ChunkInverseOptKernel;
+
+template <typename T>
 class ChunkInverseKernel;
 
 template <typename T>
@@ -1373,70 +1375,72 @@ void kernel_launcher(
   });
   EventManager::getInstance().addEvent(event_compute_A);
 
-#ifdef INVERSE_OPT
-  using WGTileInverse = chunk_gemm_policy_inverse::WGTile;
-  using SGLayoutInverse = chunk_gemm_policy_inverse::SGLayout;
-  using MMAInverse = typename TiledMMAHelper<
-      MMA_Atom<decltype(op)>,
-      Layout<WGTileInverse>,
-      SGLayoutInverse>::TiledMMA;
-  auto mma_inverse = MMAInverse{};
-  int MaxThreadsPerWorkgroupInverse = size(mma_inverse);
+  if (vllm::xpu::is_bmg()) {
+    using WGTileInverse = chunk_gemm_policy_inverse::WGTile;
+    using SGLayoutInverse = chunk_gemm_policy_inverse::SGLayout;
+    using MMAInverse = typename TiledMMAHelper<
+        MMA_Atom<decltype(op)>,
+        Layout<WGTileInverse>,
+        SGLayoutInverse>::TiledMMA;
+    auto mma_inverse = MMAInverse{};
+    int MaxThreadsPerWorkgroupInverse = size(mma_inverse);
 
-  sycl::range<3> local_inverse(1, 1, MaxThreadsPerWorkgroupInverse);
-  sycl::range<3> global_inverse(
-      1,
-      (sm_count * MaxThreadsPerSM / MaxThreadsPerWorkgroupInverse +
-       num_v_heads - 1) /
-          num_v_heads * num_v_heads,
-      1);
+    sycl::range<3> local_inverse(1, 1, MaxThreadsPerWorkgroupInverse);
+    sycl::range<3> global_inverse(
+        1,
+        (sm_count * MaxThreadsPerSM / MaxThreadsPerWorkgroupInverse +
+         num_v_heads - 1) /
+            num_v_heads * num_v_heads,
+        1);
 
-  auto event_inverse = queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for<ChunkInverseKernel<T>>(
-        sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
-        kernel_props,
-        [=](auto) {
-          chunk_inverse_opt_kernel<T, MMAInverse>(
-              A,
-              query_start_loc,
-              total_virtual_seqlen,
-              batch_size,
-              num_k_heads,
-              head_k_dim,
-              num_v_heads,
-              head_v_dim);
-        });
-  });
-  EventManager::getInstance().addEvent(event_inverse);
-#else
-  // inverse A
-  int inverse_items = 16 * 2;
-  sycl::range<3> local_inverse(1, 1, inverse_items);
-  sycl::range<3> global_inverse(
-      1, sm_count * MaxThreadsPerSM / inverse_items, 1);
-  int slm_size_inverse = chunk_size * chunk_size * 2;
+    auto event_inverse = queue.submit([&](sycl::handler& cgh) {
+      cgh.parallel_for<ChunkInverseOptKernel<T>>(
+          sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
+          kernel_props,
+          [=](auto) {
+            chunk_inverse_opt_kernel<T, MMAInverse>(
+                A,
+                query_start_loc,
+                total_virtual_seqlen,
+                batch_size,
+                num_k_heads,
+                head_k_dim,
+                num_v_heads,
+                head_v_dim);
+          });
+    });
+    EventManager::getInstance().addEvent(event_inverse);
+  } else {
+    // PVC has acc issue of sycl tla, so use native implementation for inverse
+    // Once issue is fixed, remove this workaround and use the same MMA-based
+    // kernel as BMG
+    int inverse_items = 16 * 2;
+    sycl::range<3> local_inverse(1, 1, inverse_items);
+    sycl::range<3> global_inverse(
+        1, sm_count * MaxThreadsPerSM / inverse_items, 1);
+    int slm_size_inverse = chunk_size * chunk_size * 2;
 
-  auto event_inverse = queue.submit([&](sycl::handler& cgh) {
-    sycl::local_accessor<float, 1> local_mem(
-        sycl::range<1>(slm_size_inverse), cgh);
-    cgh.parallel_for<ChunkInverseKernel<T>>(
-        sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
-        kernel_props,
-        [=](auto) {
-          chunk_inverse_kernel<T>(
-              local_mem,
-              A,
-              query_start_loc,
-              total_virtual_seqlen,
-              batch_size,
-              num_k_heads,
-              head_k_dim,
-              num_v_heads,
-              head_v_dim);
-        });
-  });
-  EventManager::getInstance().addEvent(event_inverse);
-#endif
+    auto event_inverse = queue.submit([&](sycl::handler& cgh) {
+      sycl::local_accessor<float, 1> local_mem(
+          sycl::range<1>(slm_size_inverse), cgh);
+      cgh.parallel_for<ChunkInverseKernel<T>>(
+          sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
+          kernel_props,
+          [=](auto) {
+            chunk_inverse_kernel<T>(
+                local_mem,
+                A,
+                query_start_loc,
+                total_virtual_seqlen,
+                batch_size,
+                num_k_heads,
+                head_k_dim,
+                num_v_heads,
+                head_v_dim);
+          });
+    });
+    EventManager::getInstance().addEvent(event_inverse);
+  }
 
   // compute W U
   using WGTileComputeWU = chunk_gemm_policy_compute_wu::WGTile;
