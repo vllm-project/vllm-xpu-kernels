@@ -38,7 +38,12 @@ def ref_paged_attn(query: torch.Tensor,
                    is_paged: Optional[bool] = True,
                    casual: Optional[bool] = False,
                    sink: Optional[torch.Tensor] = None,
-                   is_fp8kv: bool = False) -> torch.Tensor:
+                   q_descale: Optional[torch.Tensor] = None,
+                   k_descale: Optional[torch.Tensor] = None,
+                   v_descale: Optional[torch.Tensor] = None,
+                   is_fp8kv: bool = False,
+                   is_fp8_query: bool = False,
+                   dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     if is_paged:
@@ -46,9 +51,8 @@ def ref_paged_attn(query: torch.Tensor,
     else:
         _, num_kv_heads, head_size = key_cache.shape
 
-    if is_fp8kv:
-        key_cache = key_cache.to(query.dtype)
-        value_cache = value_cache.to(query.dtype)
+    if is_fp8_query:
+        query = (query.to(torch.float32) * q_descale).to(dtype)
 
     outputs: list[torch.Tensor] = []
     start_idx = 0
@@ -76,6 +80,10 @@ def ref_paged_attn(query: torch.Tensor,
                                         dim=1).contiguous()
             v = torch.repeat_interleave(v, q.shape[1] // v.shape[1],
                                         dim=1).contiguous()
+
+        if is_fp8kv:
+            k = (k.to(torch.float32) * k_descale).to(dtype)
+            v = (v.to(torch.float32) * v_descale).to(dtype)
         attn = torch.einsum("qhd,khd->hqk", q, k).float()
         empty_mask = torch.ones(query_len, kv_len)
         mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
@@ -231,21 +239,17 @@ def test_varlen_with_paged_kv(
     q_descale = None  #noqa: F841
     k_descale = None  #noqa: F841
     v_descale = None  #noqa: F841
-    if q_dtype is not None:
-        # QKV are drawn from N(0, 1): no need for a fp8 scaling factor
-        maybe_quantized_query = query.to(q_dtype)
-        maybe_quantized_key_cache = key_cache.to(q_dtype)
-        maybe_quantized_value_cache = value_cache.to(q_dtype)
-
-        scale_shape = (num_seqs, num_kv_heads)
-        q_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
-        k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
-        v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
-    is_fp8kv = False
-    if fp8_dtype is not None:
-        is_fp8kv = True
-        maybe_quantized_key_cache = key_cache.to(fp8_dtype)
-        maybe_quantized_value_cache = value_cache.to(fp8_dtype)
+    scale_shape = (num_seqs, num_kv_heads)
+    is_fp8_query = q_dtype is not None
+    if is_fp8_query:
+        q_descale = (torch.abs(query).max() / 200).to(torch.float32)
+        maybe_quantized_query = (query / q_descale).to(q_dtype)
+    is_fp8kv = fp8_dtype is not None
+    if is_fp8kv:
+        k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
+        v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
+        maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
+        maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
 
     if is_paged:
         output = flash_attn_varlen_func(maybe_quantized_query,
@@ -255,6 +259,12 @@ def test_varlen_with_paged_kv(
                                         cu_query_lens,
                                         max_kv_len,
                                         seqused_k=seq_k,
+                                        q_descale=q_descale.expand(scale_shape)
+                                        if q_descale is not None else None,
+                                        k_descale=k_descale.expand(scale_shape)
+                                        if k_descale is not None else None,
+                                        v_descale=v_descale.expand(scale_shape)
+                                        if v_descale is not None else None,
                                         softmax_scale=scale,
                                         causal=is_casual,
                                         block_table=block_tables,
@@ -268,6 +278,12 @@ def test_varlen_with_paged_kv(
                                         cu_query_lens,
                                         max_kv_len,
                                         cu_seqlens_k=cu_kv_lens,
+                                        q_descale=q_descale.expand(scale_shape)
+                                        if q_descale is not None else None,
+                                        k_descale=k_descale.expand(scale_shape)
+                                        if k_descale is not None else None,
+                                        v_descale=v_descale.expand(scale_shape)
+                                        if v_descale is not None else None,
                                         softmax_scale=scale,
                                         causal=is_casual,
                                         block_table=None,
@@ -284,9 +300,14 @@ def test_varlen_with_paged_kv(
                                 casual=is_casual,
                                 is_paged=is_paged,
                                 sink=sink,
+                                q_descale=q_descale,
+                                k_descale=k_descale,
+                                v_descale=v_descale,
                                 window_size_left=window_size[0],
                                 window_size_right=window_size[1],
-                                is_fp8kv=is_fp8kv)
+                                is_fp8kv=is_fp8kv,
+                                is_fp8_query=is_fp8_query,
+                                dtype=dtype)
     atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
@@ -333,7 +354,7 @@ def test_decode_with_paged_kv(
     #                 "supported on version 3 with bfloat16 base type")
     if num_heads == (16, 1) and head_size == 256:
         pytest.skip("skip test cases that may run out of SLM.")
-    torch.manual_seed(43)
+    torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
@@ -386,9 +407,6 @@ def test_decode_with_paged_kv(
         k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
 
-    num_splits_kv = int((max_kv_len + 511) / 512)
-    num_splits_kv = min(num_splits_kv, 20)
-
     output = flash_attn_varlen_func(maybe_quantized_query,
                                     maybe_quantized_key_cache,
                                     maybe_quantized_value_cache,
@@ -400,8 +418,7 @@ def test_decode_with_paged_kv(
                                     causal=False,
                                     block_table=block_tables,
                                     window_size=(-1, -1),
-                                    s_aux=sink,
-                                    num_splits_kv=num_splits_kv)
+                                    s_aux=sink)
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
