@@ -7,6 +7,27 @@
 
 namespace FLASH_NAMESPACE {
 
+inline int get_num_splits(
+    const int& batch_size,
+    const int& num_heads_kv,
+    const int& max_seqlen_k,
+    const int& block_size) {
+  constexpr int parallel_ = 20;
+  constexpr int parallel_2 = 40;
+
+  int cur_parallel_d = batch_size * num_heads_kv;
+
+  int num_splits = (parallel_ + cur_parallel_d - 1) / cur_parallel_d;
+
+  if (cur_parallel_d * num_splits > parallel_ && num_splits > 1) {
+    num_splits = std::ceil(parallel_2 / static_cast<float>(cur_parallel_d)) - 1;
+  }
+
+  int max_splits = (max_seqlen_k + block_size - 1) / block_size;
+  max_splits = std::min(max_splits, parallel_);
+  return std::min(num_splits, max_splits);
+}
+
 std::vector<at::Tensor> mha_varlen_fwd(
     const at::Tensor& q,
     const at::Tensor& k,
@@ -32,7 +53,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int window_size_right,
     const float softcap,
     const bool return_softmax,
-    std::optional<at::Generator> gen_) {
+    std::optional<at::Generator> gen_,
+    std::optional<int> num_splits) {
   auto q_type = q.scalar_type();
   auto k_type = k.scalar_type();
   TORCH_CHECK(
@@ -131,18 +153,22 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_local,
         is_sink);
   } else {
-    constexpr int partition_size = 512;
-    int num_kv_splits = (max_seqlen_k + partition_size - 1) / partition_size;
-    if (num_kv_splits > 20) num_kv_splits = 20;
-
     int num_tokens = q.size(0);
+    int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
     int num_heads_q = q.size(1);
     int head_dim = q.size(2);
     int num_heads_kv = k.size(2);
     int block_size = k.size(1);
-    at::Tensor tmp_out = at::empty(
-        {num_tokens, num_heads_q * num_kv_splits, head_dim},
-        q.options().device(q.device()));
+
+    int num_kv_splits = num_splits.value_or(
+        get_num_splits(batch_size, num_heads_kv, max_seqlen_k, block_size));
+
+    at::Tensor tmp_out =
+        num_kv_splits == 1
+            ? out
+            : at::empty(
+                  {num_tokens, num_heads_q * num_kv_splits, head_dim},
+                  q.options().device(q.device()));
     at::Tensor max_logits = at::empty(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
@@ -200,7 +226,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float softmax_scale, Tensor? softmax_sink, bool zero_tensors, "
       "bool is_causal, int window_size_left, int window_size_right, float "
       "softcap, bool return_softmax, "
-      "Generator? gen) -> Tensor[]");
+      "Generator? gen, int? num_splits) -> Tensor[]");
   ops.impl(
       "varlen_fwd",
       torch::kXPU,

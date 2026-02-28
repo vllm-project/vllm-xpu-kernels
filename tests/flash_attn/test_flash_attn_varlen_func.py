@@ -11,7 +11,7 @@ from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 NUM_HEADS = [(4, 4), (8, 2), (10, 2), (16, 1)]
 HEAD_SIZES = [64, 128, 192, 256]
-BLOCK_SIZES = [64]
+BLOCK_SIZES = [64, 128]
 DTYPES = [torch.bfloat16, torch.half]
 QDTYPES = [None]
 # one value large enough to test overflow in index calculation.
@@ -183,6 +183,8 @@ def test_varlen_with_paged_kv(
             != -1) and (os.getenv("SKIP_HANG_KERNEL") is not None
                         and os.getenv("SKIP_HANG_KERNEL") == "1"):
         pytest.skip("skip local attn to avoid runtime hang on CI.")
+    if block_size == 128 and num_blocks == 32768 and head_size >= 192:
+        pytest.skip("skip test cases that may run out of Memory.")
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
@@ -350,6 +352,8 @@ def test_decode_with_paged_kv(
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
+    if num_heads == (16, 1) and head_size == 256:
+        pytest.skip("skip test cases that may run out of SLM.")
     torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
