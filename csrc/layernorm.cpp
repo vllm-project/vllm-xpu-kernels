@@ -81,11 +81,11 @@ class rms_norm_kernel {
     };
 
     constexpr int WIDTH = VEC_SIZE * sizeof(scalar_t);
-    uintptr_t addr = reinterpret_cast<uintptr_t>(input_row);
+    uintptr_t addr_in = reinterpret_cast<uintptr_t>(input_row);
 
     // fast path when the whole region is already aligned
     bool can_vec =
-        ((addr & (WIDTH - 1)) == 0) && ((hidden_size & (VEC_SIZE - 1)) == 0);
+        ((addr_in & (WIDTH - 1)) == 0) && ((hidden_size & (VEC_SIZE - 1)) == 0);
     if (can_vec) {
       int64_t const num_vec_elems = hidden_size / VEC_SIZE;
       auto const* vec_in = reinterpret_cast<const vec4_t<scalar_t>*>(input_row);
@@ -95,7 +95,7 @@ class rms_norm_kernel {
         vec_op(tmp);
       }
     } else {
-      int misalignment_offset = addr & (WIDTH - 1);
+      int misalignment_offset = addr_in & (WIDTH - 1);
       int alignment_bytes = WIDTH - misalignment_offset;
       int prefix_elems = alignment_bytes & (WIDTH - 1);
       prefix_elems /= sizeof(scalar_t);
@@ -120,7 +120,7 @@ class rms_norm_kernel {
       for (int i = item_ct1.get_local_id(2) + num_vec_elems * VEC_SIZE;
            i < hidden_size - prefix_elems;
            i += item_ct1.get_local_range(2)) {
-        scalar_op(input_row[i]);
+        scalar_op((input_row + prefix_elems)[i]);
       }
     }
 
@@ -135,14 +135,18 @@ class rms_norm_kernel {
     item_ct1.barrier(sycl::access::fence_space::local_space);
 
     scalar_t* out_row = out + item_ct1.get_group(2) * hidden_size;
-    addr = reinterpret_cast<uintptr_t>(out_row);
-    can_vec =
-        ((addr & (WIDTH - 1)) == 0) && ((hidden_size & (VEC_SIZE - 1)) == 0);
-    if (can_vec) {
+    uintptr_t addr_weight = reinterpret_cast<uintptr_t>(weight);
+    uintptr_t addr_out = reinterpret_cast<uintptr_t>(out_row);
+    bool can_vec_out = ((addr_in & (WIDTH - 1)) == 0) &&
+                       ((addr_weight & (WIDTH - 1)) == 0) &&
+                       ((addr_out & (WIDTH - 1)) == 0) &&
+                       ((hidden_size & (VEC_SIZE - 1)) == 0);
+    if (can_vec_out) {
       auto* v_in = reinterpret_cast<const vec4_t<scalar_t>*>(input_row);
       auto* v_w = reinterpret_cast<const vec4_t<scalar_t>*>(weight);
       auto* v_out = reinterpret_cast<vec4_t<scalar_t>*>(out_row);
       int64_t const out_num_vec_elems = hidden_size / VEC_SIZE;
+      float s_variance_val = *s_variance_ptr;
       for (int idx = item_ct1.get_local_id(2); idx < out_num_vec_elems;
            idx += item_ct1.get_local_range(2)) {
         vec4_t<scalar_t> dst;
@@ -150,7 +154,7 @@ class rms_norm_kernel {
         vec4_t<scalar_t> src2 = v_w[idx];
         for (int j = 0; j < VEC_SIZE; j++) {
           float x = static_cast<float>(src1.val[j]);
-          dst.val[j] = ((scalar_t)(x * (*s_variance_ptr))) * src2.val[j];
+          dst.val[j] = ((scalar_t)(x * s_variance_val)) * src2.val[j];
         }
         v_out[idx] = dst;
       }
