@@ -64,8 +64,6 @@ std::vector<at::Tensor> mha_varlen_fwd(
       v.stride(-1) == 1, "Input tensor must have contiguous last dimension");
   TORCH_CHECK(q.dim() == 3, "query must be in ragged format");
   CHECK_CONTIGUOUS(q);
-  CHECK_CONTIGUOUS(k);
-  CHECK_CONTIGUOUS(v);
 
   at::Tensor block_table;
   bool is_paged = block_table_.has_value();

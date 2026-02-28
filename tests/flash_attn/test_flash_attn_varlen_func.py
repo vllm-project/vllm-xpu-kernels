@@ -137,6 +137,13 @@ MINI_PYTEST_PARAMS = {
         "num_heads": [(8, 2)],
         "head_size": [64, 128],
         "num_blocks": [64],
+    },
+    "test_decode_with_paged_kv_mla": {
+        "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
+        "num_heads": [(8, 1)],
+        "head_size": [128],
+        "num_blocks": [2048],
+        "combined_head_dim_factor": [2],
     }
 }
 
@@ -431,6 +438,108 @@ def test_decode_with_paged_kv(
     atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize("seq_lens",
+                         [[(1, 1025)], [(1, 523), (1, 37), (1, 2011)],
+                          [(1, 523), (1, 37), (1, 2011), (1, 5000)]])
+@pytest.mark.parametrize("num_heads", [(8, 1), (16, 1), (8, 2)])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("num_blocks", [2048])
+@pytest.mark.parametrize("combined_head_dim_factor", [2, 3])
+@torch.inference_mode()
+def test_decode_with_paged_kv_mla(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+    block_size: int,
+    num_blocks: int,
+    combined_head_dim_factor: int,
+) -> None:
+    """Test paged decode with non-contiguous KV cache (MLA-like layout).
+
+    MLA stores K and V in a combined buffer. This test simulates that by
+    allocating a cache with combined_head_dim = head_size * factor and slicing
+    K/V from it, producing non-contiguous tensors with stride(-1)==1.
+    """
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(42)
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+
+    # MLA-like combined KV cache: K and V share a single buffer
+    combined_head_dim = head_size * combined_head_dim_factor
+    combined_kv_cache = torch.randn(num_blocks,
+                                    block_size,
+                                    num_kv_heads,
+                                    combined_head_dim,
+                                    dtype=dtype)
+
+    # Non-contiguous slices simulating MLA K/V extraction
+    key_cache = combined_kv_cache[..., :head_size]
+    value_cache = combined_kv_cache[..., head_size:2 * head_size]
+
+    assert not key_cache.is_contiguous(), "key_cache should be non-contiguous"
+    assert not value_cache.is_contiguous(), \
+        "value_cache should be non-contiguous"
+    assert key_cache.stride(-1) == 1
+    assert value_cache.stride(-1) == 1
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    output = flash_attn_varlen_func(query,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=False,
+                                    block_table=block_tables,
+                                    window_size=(-1, -1))
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False,
+                                is_paged=True,
+                                sink=None,
+                                window_size_left=-1,
+                                window_size_right=-1)
+    atol, rtol = 1e-2, 1e-2
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
     torch.xpu.empty_cache()

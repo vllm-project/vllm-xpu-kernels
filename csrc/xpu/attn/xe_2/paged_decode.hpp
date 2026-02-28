@@ -66,6 +66,13 @@ struct paged_decode_args_t {
   bool is_local = false;
   bool is_sink = false;
   int num_kv_splits = 1;
+  // KV cache strides [num_blocks, block_size, num_heads_kv, head_size]
+  int64_t k_stride_page = 0;
+  int64_t k_stride_seq = 0;
+  int64_t k_stride_heads = 0;
+  int64_t v_stride_page = 0;
+  int64_t v_stride_seq = 0;
+  int64_t v_stride_heads = 0;
 };
 
 template <class FMHAKernel, class ReductionSplitKernel, bool isVarLen>
@@ -137,12 +144,27 @@ struct DecodeKernelLauncher {
     stride_Q = cutlass::make_cute_packed_stride(
         StrideQ{},
         cute::make_shape(seq_len_qo, head_size_qk, num_heads_q, batch));
-    stride_K = cutlass::make_cute_packed_stride(
-        StrideK{},
-        cute::make_shape(seq_len_kv, head_size_qk, num_heads_kv, batch));
-    stride_V = cutlass::make_cute_packed_stride(
-        StrideV{},
-        cute::make_shape(head_size_vo, seq_len_kv, num_heads_kv, batch));
+    if (args.k_stride_seq > 0) {
+      // Use actual strides from KV cache tensors (supports non-contiguous
+      // layouts such as MLA combined KV cache)
+      stride_K = StrideK{
+          static_cast<int>(args.k_stride_seq),
+          _1{},
+          static_cast<int>(args.k_stride_heads),
+          static_cast<int>(args.k_stride_page)};
+      stride_V = StrideV{
+          _1{},
+          static_cast<int>(args.v_stride_seq),
+          static_cast<int>(args.v_stride_heads),
+          static_cast<int>(args.v_stride_page)};
+    } else {
+      stride_K = cutlass::make_cute_packed_stride(
+          StrideK{},
+          cute::make_shape(seq_len_kv, head_size_qk, num_heads_kv, batch));
+      stride_V = cutlass::make_cute_packed_stride(
+          StrideV{},
+          cute::make_shape(head_size_vo, seq_len_kv, num_heads_kv, batch));
+    }
     stride_O = cutlass::make_cute_packed_stride(
         StrideO{},
         cute::make_shape(seq_len_qo, head_size_vo, num_heads_q, batch));
