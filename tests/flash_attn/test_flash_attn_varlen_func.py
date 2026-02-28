@@ -325,6 +325,7 @@ def test_varlen_with_paged_kv(
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("soft_cap", SOFT_CAPS)
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
@@ -336,6 +337,7 @@ def test_decode_with_paged_kv(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
+    window_size: tuple[int, int],
     dtype: torch.dtype,
     block_size: int,
     soft_cap: Optional[float],
@@ -413,7 +415,7 @@ def test_decode_with_paged_kv(
                                     softmax_scale=scale,
                                     causal=False,
                                     block_table=block_tables,
-                                    window_size=(-1, -1),
+                                    window_size=window_size,
                                     s_aux=sink)
 
     ref_output = ref_paged_attn(query=query,
@@ -426,9 +428,11 @@ def test_decode_with_paged_kv(
                                 casual=False,
                                 is_paged=True,
                                 sink=sink,
-                                window_size_left=-1,
-                                window_size_right=-1)
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1])
     atol, rtol = 1e-2, 1e-2
+    if window_size[0] != -1 or window_size[1] != -1:
+        atol, rtol = 2e-2, 2e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
