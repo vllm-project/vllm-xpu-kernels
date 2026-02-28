@@ -547,6 +547,9 @@ void dynamic_scaled_fp8_quant(
     torch::Tensor& scale)        // [1]
 {
   TORCH_CHECK(
+      scale.scalar_type() == at::kFloat, "scale must be a float tensor");
+  TORCH_CHECK(scale.numel() == 1, "scale must be a single-element tensor");
+  TORCH_CHECK(
       input.stride(-1) == 1, "last dimension of input must be contiguous");
   TORCH_CHECK(
       out.stride(-1) == 1, "last dimension of output must be contiguous");
