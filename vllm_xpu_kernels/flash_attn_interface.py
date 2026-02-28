@@ -53,6 +53,27 @@ def flash_attn_varlen_func(
     s_aux: Optional[torch.Tensor] = None,
     num_splits_kv: Optional[int] = None,
 ):
+    """
+    FlashAttention interface for variable-length sequences, with optional
+    paged KV cache support.
+
+    Args:
+        q, k, v: Query, key, value tensors.
+        max_seqlen_q: Maximum query sequence length in the batch.
+        cu_seqlens_q: Cumulative sequence lengths for queries.
+        max_seqlen_k: Maximum key/value sequence length in the batch.
+        cu_seqlens_k: Cumulative sequence lengths for keys/values when not
+            using paged KV cache.
+        seqused_k: Number of tokens used per sequence when using paged KV.
+        block_table: Optional block table for paged KV cache.
+        num_splits: Backend-specific split parameter (non-KV specific),
+            typically used to control work partitioning in some FA versions.
+        num_splits_kv: Optional number of splits applied to KV **blocks**
+            when using paged KV cache. This is forwarded to the underlying
+            C++ FlashAttention op as its ``num_splits`` parameter; the split
+            unit is KV blocks, not individual tokens or pages.
+        fa_version: FlashAttention backend version selector.
+    """
     assert cu_seqlens_k is not None or seqused_k is not None, \
         "cu_seqlens_k or seqused_k must be provided"
     assert cu_seqlens_k is None or seqused_k is None, \

@@ -154,13 +154,14 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_sink);
   } else {
     int num_tokens = q.size(0);
+    int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
     int num_heads_q = q.size(1);
     int head_dim = q.size(2);
     int num_heads_kv = k.size(2);
     int block_size = k.size(1);
 
     int num_kv_splits = num_splits.value_or(
-        get_num_splits(num_tokens, num_heads_kv, max_seqlen_k, block_size));
+        get_num_splits(batch_size, num_heads_kv, max_seqlen_k, block_size));
 
     at::Tensor tmp_out =
         num_kv_splits == 1

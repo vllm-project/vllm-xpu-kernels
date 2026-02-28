@@ -241,6 +241,11 @@ struct FMHAFwdMainloop<
     int b_offset = idx_b * params.max_pages_per_seq;
     int page_local_idx = K * get<1>(TileShapeQK{}) / params.page_size;
 
+    // Clamp page_local_idx to the valid range [0, max_pages_per_seq - 1]
+    if (page_local_idx >= params.max_pages_per_seq) {
+      page_local_idx = params.max_pages_per_seq - 1;
+    }
+
     return params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page +
            K % tiles_per_page;
   }
