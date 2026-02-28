@@ -9,17 +9,19 @@ from tests.utils import opcheck
 
 DTYPES = [torch.half, torch.bfloat16]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
-#TODO: add back  5120, 5124, 5125, 5126, 8192, 8199 after ci env issue fixed
+# TODO: add back  5120, 5124, 5125, 5126, 8192, 8199 after ci env issue fixed
 HIDDEN_SIZES = [8, 768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192,
                 8199]  # Arbitrary values for testing
-
+HEAD_DIMS = [128, 64]
+NUM_Q_HEADS = [32, 40, 64]
+NUM_KV_HEADS = [8, 32]
 ADD_RESIDUAL = [False, True]
 SEEDS = [0]
 XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
 ]
 
-#override pytest parameters when enable mini pytest
+# override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
     "default": {
         "num_tokens": [7],
@@ -78,3 +80,42 @@ def test_rms_norm(
     else:
         opcheck(torch.ops._C.rms_norm,
                 (out, x, layer.weight.data, layer.variance_epsilon))
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("head_dim", HEAD_DIMS)
+@pytest.mark.parametrize("num_q_heads", NUM_Q_HEADS)
+@pytest.mark.parametrize("num_kv_heads", NUM_KV_HEADS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_rms_norm_uncontigous(
+    num_tokens: int,
+    head_dim: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    dtype: torch.dtype,
+    device: str,
+    seed: int,
+) -> None:
+    torch.manual_seed(seed)
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
+
+    hidden_size = (num_q_heads + 2 * num_kv_heads) * head_dim
+    qkv = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    q_size = num_q_heads * head_dim
+    kv_size = num_kv_heads * head_dim
+    q, _, _ = qkv.split([q_size, kv_size, kv_size], dim=-1)
+    q_by_head = q.view(*q.shape[:-1], q.shape[-1] // head_dim, head_dim)
+
+    layer = RMSNorm(head_dim).to(dtype=dtype)
+    ref_out = layer.forward_native(q_by_head)
+    out = layer(q_by_head)
+    torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+    opcheck(
+        torch.ops._C.rms_norm,
+        (out, q_by_head, layer.weight.data, layer.variance_epsilon),
+    )
