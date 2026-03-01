@@ -88,10 +88,8 @@ void cutlass_paged_decode_impl(
     int num_kv_splits) {
   bool is_fp8_kv = key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
                    key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn;
-  float k_scale_val =
-      is_fp8_kv ? k_scale.value().item<float>() : 1.0f;
-  float v_scale_val =
-      is_fp8_kv ? v_scale.value().item<float>() : 1.0f;
+  float k_scale_val = is_fp8_kv ? k_scale.value().item<float>() : 1.0f;
+  float v_scale_val = is_fp8_kv ? v_scale.value().item<float>() : 1.0f;
 
   // general params
   int batch_size, num_heads_q, num_heads_kv, head_size;
