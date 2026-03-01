@@ -50,6 +50,8 @@ struct paged_decode_args_t {
   int max_keys;
   int total_seqlen_q;
   int total_seqlen_k;
+  float k_scale = 1.0;
+  float v_scale = 1.0;
   float sm_scale;
   void* sm_sink;
   int batch_size;
@@ -186,6 +188,8 @@ struct DecodeKernelLauncher {
             reinterpret_cast<ElementQ*>(args.sm_sink),
         },
         {args.sm_scale,
+         args.k_scale,
+         args.v_scale,
          static_cast<int*>(args.block_table),
          args.block_size,
          args.max_blocks_per_seq,
@@ -419,37 +423,103 @@ struct PagedDecodeConfig {
 // Template function for explicit instantiation
 template <typename decode_policy, bool Causal, bool Local, bool Sink>
 void decode_policy_dispatch_impl(
-    sycl::queue& queue, CutlassDType cuType, const paged_decode_args_t& args) {
+    sycl::queue& queue,
+    CutlassQKType& cuQKType,
+    const paged_decode_args_t& args) {
   const int PipelineStages = 1;
-  if (cuType == CutlassDType::half) {
-    return PagedDecodeConfig<
-        typename decode_policy::ShapeQK,
-        typename decode_policy::ShapePV,
-        typename decode_policy::ShapeOut,
-        typename decode_policy::SubgroupLayoutQK,
-        void,
-        PipelineStages,
-        Causal,
-        Local,
-        Sink,
-        half_t,
-        half_t,
-        half_t,
-        half_t>::kernel_dispatch(queue, args);
+  if (cuQKType.q_type == CutlassDType::half) {
+    if (cuQKType.k_type == CutlassDType::half) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          half_t,
+          half_t,
+          half_t,
+          half_t>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          half_t,
+          float_e4m3_t,
+          float_e4m3_t,
+          half_t>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          half_t,
+          float_e5m2_t,
+          float_e5m2_t,
+          half_t>::kernel_dispatch(queue, args);
+    }
   } else {
-    return PagedDecodeConfig<
-        typename decode_policy::ShapeQK,
-        typename decode_policy::ShapePV,
-        typename decode_policy::ShapeOut,
-        typename decode_policy::SubgroupLayoutQK,
-        void,
-        PipelineStages,
-        Causal,
-        Local,
-        Sink,
-        bfloat16_t,
-        bfloat16_t,
-        bfloat16_t,
-        bfloat16_t>::kernel_dispatch(queue, args);
+    if (cuQKType.k_type == CutlassDType::bfloat16) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          bfloat16_t,
+          bfloat16_t,
+          bfloat16_t,
+          bfloat16_t>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          bfloat16_t,
+          float_e4m3_t,
+          float_e4m3_t,
+          bfloat16_t>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          bfloat16_t,
+          float_e5m2_t,
+          float_e5m2_t,
+          bfloat16_t>::kernel_dispatch(queue, args);
+    }
   }
 }

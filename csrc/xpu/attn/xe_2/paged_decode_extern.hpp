@@ -32,7 +32,7 @@
   extern template void                                              \
   decode_policy_dispatch_impl<POLICY, CAUSAL, LOCAL, SINK>(         \
       sycl::queue & queue,                                          \
-      CutlassDType cuType,                                          \
+      CutlassQKType & cuQKType,                                     \
       const paged_decode_args_t& args);
 
 // Generate all 8 bool combinations for a given policy using nested macros
