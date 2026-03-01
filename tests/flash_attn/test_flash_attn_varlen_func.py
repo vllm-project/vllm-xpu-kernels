@@ -422,9 +422,10 @@ def test_decode_with_paged_kv(
     torch.xpu.empty_cache()
 
 
-@pytest.mark.parametrize("seq_lens",
-                         [[(1, 1025)], [(1, 523), (1, 37), (1, 2011)],
-                          [(1, 523), (1, 37), (1, 2011), (1, 5000)]])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [[(1, 1025)], [(1, 523), (1, 37),
+                   (1, 2011)], [(1, 523), (1, 37), (1, 2011), (1, 5000)]])
 @pytest.mark.parametrize("num_heads", [(8, 1), (16, 1), (8, 2)])
 @pytest.mark.parametrize("head_size", [64, 128])
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
