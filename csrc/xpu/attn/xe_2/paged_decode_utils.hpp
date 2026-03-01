@@ -5,23 +5,25 @@ using namespace cute;
 // Runtime dispatcher helper
 template <typename decode_policy, bool... Bs>
 void decode_policy_dispatch_func(
-    sycl::queue& queue, CutlassDType cuType, const paged_decode_args_t& args) {
-  decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuType, args);
+    sycl::queue& queue,
+    CutlassQKType& cuQKType,
+    const paged_decode_args_t& args) {
+  decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuQKType, args);
 }
 
 template <typename decode_policy, bool... Bs, typename... Ts>
 void decode_policy_dispatch_func(
     sycl::queue& queue,
-    CutlassDType cuType,
+    CutlassQKType& cuQKType,
     const paged_decode_args_t& args,
     bool b,
     Ts... ts) {
   if (b) {
     decode_policy_dispatch_func<decode_policy, Bs..., true>(
-        queue, cuType, args, ts...);
+        queue, cuQKType, args, ts...);
   } else {
     decode_policy_dispatch_func<decode_policy, Bs..., false>(
-        queue, cuType, args, ts...);
+        queue, cuQKType, args, ts...);
   }
 }
 
@@ -29,28 +31,28 @@ template <class QGroup>
 inline void dispatch_by_head_size(
     const int head_case,
     sycl::queue& queue,
-    CutlassDType cuType,
+    CutlassQKType& cuQKType,
     const paged_decode_args_t& args) {
   switch (head_case) {
     case 0:
       decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _64>>(
-          queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
+          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 1:
       decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _96>>(
-          queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
+          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 2:
       decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _128>>(
-          queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
+          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 3:
       decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _192>>(
-          queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
+          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 4:
       decode_policy_dispatch_func<decode_policy_qpacked_head<QGroup, _256>>(
-          queue, cuType, args, args.is_causal, args.is_local, args.is_sink);
+          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     default:
       TORCH_CHECK(false, "Unsupported head size for fmha");
@@ -72,6 +74,8 @@ void cutlass_paged_decode_impl(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& k_scale,
+    std::optional<const at::Tensor>& v_scale,
     double sm_scale,
     std::optional<const at::Tensor>& sm_sink_,
     int window_size_left,
