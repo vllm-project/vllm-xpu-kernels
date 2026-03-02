@@ -874,8 +874,8 @@ struct DecodeFwdMainloop<
         reorder(tKrK, tSrK);
         if constexpr (Fp8KV) {
           for (int i = 0; i < tSrK.size(); ++i) {
-            tSrK(i) = static_cast<ElementQ>(
-                scale_k * static_cast<float>(tSrK(i)));
+            tSrK(i) =
+                static_cast<ElementQ>(scale_k * static_cast<float>(tSrK(i)));
           }
         }
 
@@ -931,8 +931,8 @@ struct DecodeFwdMainloop<
         if constexpr (Fp8KV) {
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tArV.size(); ++i) {
-            tArV(i) = static_cast<ElementQ>(
-                scale_v * static_cast<float>(tArV(i)));
+            tArV(i) =
+                static_cast<ElementQ>(scale_v * static_cast<float>(tArV(i)));
           }
         }
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
