@@ -70,8 +70,8 @@ def calculate_diff(config):
         moe_align_block_size_vllm(topk_ids.clone(), num_experts,
                                  block_size, pad_sorted_ids)
 
-    if torch.testing.assert_close(num_tokens_native, num_tokens_vllm, atol=0, rtol=0) and \
-        torch.testing.assert_close(expert_ids_native, expert_ids_vllm, atol=0, rtol=0):
+    if torch.allclose(num_tokens_native, num_tokens_vllm, atol=0, rtol=0) and \
+        torch.allclose(expert_ids_native, expert_ids_vllm, atol=0, rtol=0):
         print("✅ All implementations match")
     else:
         print("❌ Implementations differ")
@@ -120,8 +120,8 @@ def calculate_diff_with_expert_map(config):
     sorted_ids_vllm, expert_ids_vllm, num_tokens_vllm = \
         moe_align_block_size_with_expert_map_vllm(topk_ids.clone(), num_experts,
                                  block_size, expert_map.clone())
-    if torch.testing.assert_close(num_tokens_native, num_tokens_vllm, atol=0, rtol=0) and \
-        torch.testing.assert_close(expert_ids_native, expert_ids_vllm, atol=0, rtol=0):
+    if torch.allclose(num_tokens_native, num_tokens_vllm, atol=0, rtol=0) and \
+        torch.allclose(expert_ids_native, expert_ids_vllm, atol=0, rtol=0):
         print("✅ All implementations match")
     else:
         print("❌ Implementations differ")
@@ -242,9 +242,9 @@ def test_batched_moe_align_block_size(config):
     assert ref_num_tokens_post_pad.size() == num_tokens_post_pad.size(), (
         f"{ref_num_tokens_post_pad.size()} vs {num_tokens_post_pad.size()}")
     
-    if torch.testing.assert_close(ref_sorted_ids, sorted_ids, atol=0, rtol=0) and \
-            torch.testing.assert_close(ref_expert_ids, expert_ids, atol=0, rtol=0) and \
-            torch.testing.assert_close(ref_num_tokens_post_pad, num_tokens_post_pad, atol=0, rtol=0):
+    if torch.allclose(ref_sorted_ids, sorted_ids, atol=0, rtol=0) and \
+            torch.allclose(ref_expert_ids, expert_ids, atol=0, rtol=0) and \
+            torch.allclose(ref_num_tokens_post_pad, num_tokens_post_pad, atol=0, rtol=0):
         print("✅ All implementations match")
     else:
         print("❌ Implementations differ")
