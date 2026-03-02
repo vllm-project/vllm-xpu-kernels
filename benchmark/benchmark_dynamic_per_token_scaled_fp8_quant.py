@@ -77,9 +77,9 @@ def calculate_diff(config):
             atol=1e-5,
         )
         torch.testing.assert_close(cuda_scale, torch_eager_scale, rtol=1e-3, atol=1e-5)
-        print("✅ All implementations match")
+        print("✅ All implementations match, ", config)
     except AssertionError as e:
-        print("❌ Implementations differ")
+        print("❌ Implementations differ, ", config)
         print(e)
 
 

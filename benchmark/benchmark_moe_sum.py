@@ -30,9 +30,9 @@ def calculate_diff(config):
     output_vllm = moe_sum_vllm(m, k, input.clone(), dtype)
 
     if torch.allclose(output_naive, output_vllm, atol=2e-2, rtol=0):
-        print("✅ All implementations match")
+        print("✅ All implementations match, ", config)
     else:
-        print("❌ Implementations differ")
+        print("❌ Implementations differ, ", config)
 
     opcheck(torch.ops._moe_C.moe_sum, (input, output_vllm))
 

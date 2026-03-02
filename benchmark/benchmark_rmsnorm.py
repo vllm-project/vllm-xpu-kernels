@@ -189,9 +189,9 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
             print(f"❌ IPEX implementation failed: {e}")
 
     if torch.allclose(output_naive, output_vllm, atol=1e-2, rtol=1e-2):
-        print("✅ All implementations match")
+        print("✅ All implementations match, ", (batch_size, seq_len, hidden_size, use_residual))
     else:
-        print("❌ Implementations differ")
+        print("❌ Implementations differ, ", (batch_size, seq_len, hidden_size, use_residual))
 
 
 def get_benchmark(use_residual, dtype):

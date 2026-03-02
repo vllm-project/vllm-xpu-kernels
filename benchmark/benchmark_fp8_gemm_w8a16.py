@@ -67,9 +67,9 @@ def calculate_diff(config):
     #print(f"vLLM output={output_vllm}")
 
     if torch.allclose(output_naive, output_vllm, atol=5e-2, rtol=5e-2):
-        print("✅ All implementations match")
+        print("✅ All implementations match, ", config)
     else:
-        print("❌ Implementations differ")
+        print("❌ Implementations differ, ", config)
 
 
 def get_benchmark():

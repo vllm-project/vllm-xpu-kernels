@@ -72,9 +72,9 @@ def calculate_diff(config):
 
     if torch.allclose(num_tokens_native, num_tokens_vllm, atol=0, rtol=0) and \
         torch.allclose(expert_ids_native, expert_ids_vllm, atol=0, rtol=0):
-        print("✅ All implementations match")
+        print("✅ All implementations match, ", config)
     else:
-        print("❌ Implementations differ")
+        print("❌ Implementations differ, ", config)
 
     _verify_expert_level_sorting(
         sorted_ids_vllm,
@@ -122,9 +122,9 @@ def calculate_diff_with_expert_map(config):
                                  block_size, expert_map.clone())
     if torch.allclose(num_tokens_native, num_tokens_vllm, atol=0, rtol=0) and \
         torch.allclose(expert_ids_native, expert_ids_vllm, atol=0, rtol=0):
-        print("✅ All implementations match")
+        print("✅ All implementations match, ", config)
     else:
-        print("❌ Implementations differ")
+        print("❌ Implementations differ, ", config)
 
     _verify_expert_level_sorting(
         sorted_ids_vllm,
@@ -245,9 +245,9 @@ def test_batched_moe_align_block_size(config):
     if torch.allclose(ref_sorted_ids, sorted_ids, atol=0, rtol=0) and \
             torch.allclose(ref_expert_ids, expert_ids, atol=0, rtol=0) and \
             torch.allclose(ref_num_tokens_post_pad, num_tokens_post_pad, atol=0, rtol=0):
-        print("✅ All implementations match")
+        print("✅ All implementations match, ", config)
     else:
-        print("❌ Implementations differ")
+        print("❌ Implementations differ, ", config)
 
 
 def moe_align_block_size_opcheck():
