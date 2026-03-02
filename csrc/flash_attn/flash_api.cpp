@@ -8,12 +8,18 @@
 namespace FLASH_NAMESPACE {
 
 inline int get_num_splits(
+    const sycl::queue& queue,
     const int& batch_size,
     const int& num_heads_kv,
     const int& max_seqlen_k,
     const int& block_size) {
-  constexpr int parallel_ = 20;
-  constexpr int parallel_2 = 40;
+  auto device = queue.get_device();
+  int num_xe_cores =
+      device.get_info<sycl::ext::intel::info::device::gpu_slices>() *
+      device
+          .get_info<sycl::ext::intel::info::device::gpu_subslices_per_slice>();
+  int parallel_ = num_xe_cores;
+  int parallel_2 = num_xe_cores * 2;
 
   int cur_parallel_d = batch_size * num_heads_kv;
 
@@ -160,8 +166,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int num_heads_kv = k.size(2);
     int block_size = k.size(1);
 
-    int num_kv_splits = num_splits.value_or(
-        get_num_splits(batch_size, num_heads_kv, max_seqlen_k, block_size));
+    int num_kv_splits = num_splits.value_or(get_num_splits(
+        queue, batch_size, num_heads_kv, max_seqlen_k, block_size));
 
     at::Tensor tmp_out =
         num_kv_splits == 1
