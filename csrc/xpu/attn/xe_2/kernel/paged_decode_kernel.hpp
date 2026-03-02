@@ -266,12 +266,28 @@ class XeFMHAFwdSplitKVKernel {
       if (CollectiveMainloop::CausalMask && seq_coord < discard_seq_coord)
         continue;
       const int seq_len =
-          CollectiveMainloop::CausalMask
-              ? full_tile_offset +
-                    cute::min(seq_len_kv, seq_coord - discard_seq_coord) +
-                    q_sg_tile
-              : seq_len_kv;
+          CollectiveMainloop::LocalMask
+              ? cute::min(
+                    seq_len_kv,
+                    full_tile_offset + seq_coord + q_sg_tile +
+                        params.mainloop.window_size_right)
+              : CollectiveMainloop::CausalMask
+                    ? full_tile_offset +
+                          cute::min(
+                              seq_len_kv, seq_coord - discard_seq_coord) +
+                          q_sg_tile
+                    : seq_len_kv;
+      // For decode, all packed GQA heads are at position seq_len_kv - 1.
+      // Use seq_len - 1 (= seq_len_kv - 1) as the decode position for
+      // k_block0 to match ReduceSplitK's computation.
+      const int k_block0 =
+          CollectiveMainloop::LocalMask
+              ? cute::max(
+                    seq_len - 1 - params.mainloop.window_size_left, 0) /
+                    get<1>(TileShapeQK{})
+              : 0;
       const int k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
+      const int windowed_k_blocks = k_blocks - k_block0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       int offset_exp_sums = 0, offset_max_logits = 0;
@@ -312,10 +328,13 @@ class XeFMHAFwdSplitKVKernel {
           make_shape(head_group_q, num_kv_splits, s.num_heads_kv, batch_dim);
       auto shape_sink = make_shape(s.num_heads_kv, head_group_q);
 
-      int num_blocks_per_split = cute::ceil_div(k_blocks, num_kv_splits);
-      int kv_split_offset = idx_kv_split * num_blocks_per_split;
-      int num_effective_kv_blocks =
-          cute::min(k_blocks - kv_split_offset, num_blocks_per_split);
+      int num_blocks_per_split =
+          cute::ceil_div(windowed_k_blocks, num_kv_splits);
+      int kv_split_offset =
+          k_block0 + idx_kv_split * num_blocks_per_split;
+      int num_effective_kv_blocks = cute::min(
+          windowed_k_blocks - idx_kv_split * num_blocks_per_split,
+          num_blocks_per_split);
 
       if (num_effective_kv_blocks <= 0) {
         // no need computation
@@ -468,6 +487,7 @@ class ReduceSplitK {
     StrideO dExp_sums;
     const ElementLSE* max_logits;
     StrideO dMax_logits;
+    int window_size_left = -1;
   };
   using KernelParams = KernelArguments;
 
@@ -579,7 +599,17 @@ class ReduceSplitK {
       if (seq_idx >= seq_len_qo) continue;
 
       const int k_blocks = cute::ceil_div(seq_len_kv, get<1>(TileShapeQK{}));
-      int num_blocks_per_split = cute::ceil_div(k_blocks, num_kv_splits);
+      // Sliding window: skip blocks before the window
+      constexpr bool LocalMask =
+          FMHAKernel_::CollectiveMainloop::LocalMask;
+      const int k_block0 =
+          LocalMask
+              ? cute::max(seq_len_kv - 1 - p.window_size_left, 0) /
+                    get<1>(TileShapeQK{})
+              : 0;
+      const int windowed_k_blocks = k_blocks - k_block0;
+      int num_blocks_per_split =
+          cute::ceil_div(windowed_k_blocks, num_kv_splits);
 
       int offset_o = 0, offset_o_accum = 0;
       int offset_exp_sums = 0, offset_max_logits = 0;
@@ -654,7 +684,8 @@ class ReduceSplitK {
           cutlass::platform::numeric_limits<ElementLSE>::lowest()};
       ElementLSE global_exp_sums{0};
       // only first subgroup participates
-      if (thr_id < num_kv_splits && thr_id * num_blocks_per_split < k_blocks) {
+      if (thr_id < num_kv_splits &&
+          thr_id * num_blocks_per_split < windowed_k_blocks) {
         ElementLSE cur_max_logit = max_logits(seq_idx, thr_id, head_q, l_coord);
         global_max_logits = sycl::max(global_max_logits, cur_max_logit);
         shared_storage.max_logits_slm_array[thr_id] = cur_max_logit;
@@ -674,12 +705,14 @@ class ReduceSplitK {
       global_max_logits =
           sycl::group_broadcast(get_work_group<1>(), global_max_logits, 0);
 
+
+
       for (int idx = thr_id; idx < s.head_size_vo;
            idx += SGPerWG::value * intel::sg_size) {
         ElementLSE acc = 0;
         global_exp_sums = 0;
         for (int i = 0; i < num_kv_splits; ++i) {
-          if (i * num_blocks_per_split >= k_blocks) {
+          if (i * num_blocks_per_split >= windowed_k_blocks) {
             break;
           }
           ElementLSE local_max_logit = shared_storage.max_logits_slm_array[i];
