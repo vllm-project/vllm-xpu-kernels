@@ -13,7 +13,6 @@
 #include "cutlass/util/packed_stride.hpp"
 #include "cutlass/util/reference/device/gemm_complex.h"
 #include "cutlass/util/reference/device/tensor_compare.h"
-#include "cutlass/util/mixed_dtype_utils.hpp"
 #include <cfloat>
 
 #include "moe_array_mma.hpp"

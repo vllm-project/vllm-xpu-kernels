@@ -34,6 +34,18 @@ repos:
   - id: clang-format
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
+- repo: https://github.com/cheshirekow/cmake-format-precommit
+  rev: v0.6.13
+  hooks:
+  - id: cmake-format
+    additional_dependencies: [pyyaml]
+    files: '\.(cmake|cmake\.in)$|CMakeLists\.txt$'
+    exclude: '^(build/|third_party/|\.deps/)'
+  - id: cmake-lint
+    additional_dependencies: [pyyaml]
+    files: '\.(cmake|cmake\.in)$|CMakeLists\.txt$'
+    exclude: '^(build/|third_party/|\.deps/)'
+    args: [--disabled-codes, C0103, C0301]
 - repo: https://github.com/jackdewinter/pymarkdown
   rev: v0.9.29
   hooks:

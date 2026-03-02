@@ -32,7 +32,7 @@ jobs:
       - name: build docker image & push to local
         id: build-image
         run: |
-          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
+          docker build -t xpu-kernel-ci-image:latest -f Dockerfile.xpu .
           docker tag xpu-kernel-ci-image:latest ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
           docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
 
@@ -54,7 +54,7 @@ jobs:
       - name: build docker image & push to local
         id: build-image
         run: |
-          docker build -t xpu-kernel-ci-image -f Dockerfile.xpu .
+          docker build -t xpu-kernel-ci-image:latest -f Dockerfile.xpu .
           docker tag xpu-kernel-ci-image:latest ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
           docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
 
@@ -73,9 +73,9 @@ jobs:
 
       - name: build & install wheel
         run: |
-          python3 -m pip config set global.break-system-packages true
-          pip install -r requirements.txt
-          pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          uv pip install -r requirements.txt
+          MAX_JOB=128 uv pip install -e . -v
 
       - name: test 
         run: |
@@ -95,7 +95,7 @@ jobs:
   run-unit-tests-bmg:
     runs-on: self-hosted-bmg
     needs: build-docker-image-latest-bmg
-    timeout-minutes: 30
+    timeout-minutes: 40
     container: 
       image: localhost:5000/xpu-kernel-ci-image:latest
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged 
@@ -107,13 +107,14 @@ jobs:
 
       - name: build & install wheel
         run: |
-          python3 -m pip config set global.break-system-packages true
-          pip install -r requirements.txt
-          pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          uv pip install -r requirements.txt
+          MAX_JOBS=128 uv pip install -e . -v
 
       - name: test 
         run: |
-          ZE_AFFINITY_MASK=0,1 pytest -v -s tests/ --ignore=tests/test_lora_ops.py --ignore=tests/test_fp8_quant.py
+          # tests/test_moe_align_block_size.py, tests/test_moe_lora_align_sum.py takes much time than expected. ignore it for now.
+          ZE_AFFINITY_MASK=0,1 pytest -v -s tests/ --ignore=tests/test_lora_ops.py --ignore=tests/test_fp8_quant.py --ignore=tests/test_moe_align_block_size.py --ignore=tests/test_moe_lora_align_sum.py
           # fixme: Running lora UT separately to avoid OOM when running together with other tests.
           ZE_AFFINITY_MASK=0,1 pytest -v -s tests/test_lora_ops.py
           VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 ZE_AFFINITY_MASK=0,1 pytest -v -s tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm

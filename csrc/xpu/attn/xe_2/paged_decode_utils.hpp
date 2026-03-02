@@ -5,14 +5,14 @@ using namespace cute;
 // Runtime dispatcher helper
 template <typename decode_policy, bool... Bs>
 void decode_policy_dispatch_func(
-    sycl::queue& queue, CutlassType cuType, const paged_decode_args_t& args) {
+    sycl::queue& queue, CutlassDType cuType, const paged_decode_args_t& args) {
   decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuType, args);
 }
 
 template <typename decode_policy, bool... Bs, typename... Ts>
 void decode_policy_dispatch_func(
     sycl::queue& queue,
-    CutlassType cuType,
+    CutlassDType cuType,
     const paged_decode_args_t& args,
     bool b,
     Ts... ts) {
@@ -29,7 +29,7 @@ template <class QGroup>
 inline void dispatch_by_head_size(
     const int head_case,
     sycl::queue& queue,
-    CutlassType cuType,
+    CutlassDType cuType,
     const paged_decode_args_t& args) {
   switch (head_case) {
     case 0:

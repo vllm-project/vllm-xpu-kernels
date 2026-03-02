@@ -419,9 +419,9 @@ struct PagedDecodeConfig {
 // Template function for explicit instantiation
 template <typename decode_policy, bool Causal, bool Local, bool Sink>
 void decode_policy_dispatch_impl(
-    sycl::queue& queue, CutlassType cuType, const paged_decode_args_t& args) {
+    sycl::queue& queue, CutlassDType cuType, const paged_decode_args_t& args) {
   const int PipelineStages = 1;
-  if (cuType == CutlassType::half) {
+  if (cuType == CutlassDType::half) {
     return PagedDecodeConfig<
         typename decode_policy::ShapeQK,
         typename decode_policy::ShapePV,

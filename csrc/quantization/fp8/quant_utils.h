@@ -92,7 +92,7 @@ struct ConvertWithScaleOp {
 
 // The vector width is fixed at 4 to avoid excessive branching in the kernel,
 // which could degrade performance.
-template <typename scalar_t, typename dtype_t, typename ScaOp>
+template <int VEC_SIZE = 4, typename scalar_t, typename dtype_t, typename ScaOp>
 void scaled_convert_vec(
     const scalar_t* src,
     dtype_t* dst,
@@ -100,28 +100,68 @@ void scaled_convert_vec(
     int local_idx,
     int local_range,
     ScaOp&& scalar_op) {
+  constexpr int WIDTH = VEC_SIZE * sizeof(scalar_t);
+  uintptr_t addr = reinterpret_cast<uintptr_t>(src);
+
+  bool can_vec =
+      ((addr & (WIDTH - 1)) == 0) && ((num_elems & (VEC_SIZE - 1)) == 0);
+  if (can_vec) {
+    using srcx4_t = vec4_t<scalar_t>;
+    using distx4_t = dtypex4_t<dtype_t>;
+
+    int64_t const num_vec_elems = num_elems / VEC_SIZE;
+
+    auto const* vectorized_in = reinterpret_cast<srcx4_t const*>(src);
+    auto* vectorized_out = reinterpret_cast<distx4_t*>(dst);
+
+    for (int64_t i = local_idx; i < num_vec_elems; i += local_range) {
+      srcx4_t in_vec = vectorized_in[i];
+      distx4_t out_vec;
+      scalar_op(out_vec.x, in_vec.x);
+      scalar_op(out_vec.y, in_vec.y);
+      scalar_op(out_vec.z, in_vec.z);
+      scalar_op(out_vec.w, in_vec.w);
+      vectorized_out[i] = out_vec;
+    }
+    return;
+  }
+
+  int misalignment_offset = addr & (WIDTH - 1);
+  int alignment_bytes = WIDTH - misalignment_offset;
+  int prefix_elems = alignment_bytes & (WIDTH - 1);
+  prefix_elems /= sizeof(scalar_t);
+  prefix_elems = sycl::min(prefix_elems, num_elems);
+
+  // 1. prefill elements when it is unsafe to vectorize
+  for (int i = local_idx; i < prefix_elems; i += local_range) {
+    scalar_op(dst[i], src[i]);
+  }
+
+  src += prefix_elems;
+  dst += prefix_elems;
+  num_elems -= prefix_elems;
+
+  int num_vec = num_elems / VEC_SIZE;
   using srcx4_t = vec4_t<scalar_t>;
   using distx4_t = dtypex4_t<dtype_t>;
-
-  int64_t const num_vec_elems = num_elems >> 2;
-
   auto const* vectorized_in = reinterpret_cast<srcx4_t const*>(src);
   auto* vectorized_out = reinterpret_cast<distx4_t*>(dst);
 
-#pragma unroll 4
-  for (int64_t i = local_idx; i < num_vec_elems; i += local_range) {
-    srcx4_t in_vec = vectorized_in[i];
-    distx4_t out_vec;
-    scalar_op(out_vec.x, in_vec.x);
-    scalar_op(out_vec.y, in_vec.y);
-    scalar_op(out_vec.z, in_vec.z);
-    scalar_op(out_vec.w, in_vec.w);
-    vectorized_out[i] = out_vec;
+  // 2. vectorize the main part
+  for (int i = local_idx; i < num_vec; i += local_range) {
+    distx4_t tmp;
+    // Make a local copy of the entire pack
+    srcx4_t in_vec = vectorized_in[i];  // <- encourages a single vector ld
+    scalar_op(tmp.x, in_vec.x);
+    scalar_op(tmp.y, in_vec.y);
+    scalar_op(tmp.z, in_vec.z);
+    scalar_op(tmp.w, in_vec.w);
+    vectorized_out[i] = tmp;  // <- encourages a single vector st
   }
 
-  // Handle the remaining elements if num_elems is not divisible by 4
-  for (int64_t i = num_vec_elems * 4 + local_idx; i < num_elems;
-       i += local_range) {
+  // 3. handle the tail
+  int tail_start = num_vec * VEC_SIZE;
+  for (int i = local_idx + tail_start; i < num_elems; i += local_range) {
     scalar_op(dst[i], src[i]);
   }
 }

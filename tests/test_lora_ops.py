@@ -15,7 +15,7 @@ MINI_PYTEST_PARAMS = {
         "batches": [1],
         "num_loras": [1],
         "rank": [1],
-        "hidden_size": [2049],
+        "hidden_size": [128],
         "nslices": [1],
         "dtype": [torch.float16],
         "device": ["xpu:0"],

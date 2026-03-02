@@ -8,22 +8,43 @@
 #define HEAD_SIZE_LIMIT_3 192
 #define HEAD_SIZE_LIMIT_4 256
 
-enum class CutlassType {
-  half,
-  bfloat16,
+enum class CutlassDType { half, bfloat16, float8_e4m3, float8_e5m2 };
+
+// Struct to carry separate Q and K dtypes without breaking existing API
+struct CutlassQKType {
+  CutlassDType q_type;
+  CutlassDType k_type;
+
+  // Convenience: construct with identical types
+  explicit CutlassQKType(CutlassDType t) : q_type(t), k_type(t) {}
+  CutlassQKType(CutlassDType q_t, CutlassDType k_t)
+      : q_type(q_t), k_type(k_t) {}
 };
 
-inline CutlassType aten_to_Cutlass_dtype(const at::Tensor& input) {
-  CutlassType cuType;
-  if (input.scalar_type() == torch::kHalf) {
-    cuType = CutlassType::half;
-  } else if (input.scalar_type() == torch::kBFloat16) {
-    cuType = CutlassType::bfloat16;
-  } else {
-    TORCH_INTERNAL_ASSERT(
-        false, "Current cutlass kernel only support half/bf16 data type.");
+inline CutlassDType aten_to_dtype(const at::ScalarType st) {
+  if (st == torch::kHalf) {
+    return CutlassDType::half;
+  } else if (st == torch::kBFloat16) {
+    return CutlassDType::bfloat16;
+  } else if (st == torch::kFloat8_e4m3fn) {
+    return CutlassDType::float8_e4m3;
+  } else if (st == torch::kFloat8_e5m2) {
+    return CutlassDType::float8_e5m2;
   }
-  return cuType;
+  TORCH_INTERNAL_ASSERT(
+      false,
+      "Unsupported dtype: only half/bfloat16/float8_e4m3/float8_e5m2 supported "
+      "for Q/K.");
+}
+
+inline CutlassDType aten_to_dtype(const at::Tensor& t) {
+  return aten_to_dtype(t.scalar_type());
+}
+
+// Helper to build Q/K dtype pair from tensors
+inline CutlassQKType
+aten_to_Cutlass_qk_dtype(const at::Tensor& q, const at::Tensor& k) {
+  return CutlassQKType(aten_to_dtype(q), aten_to_dtype(k));
 }
 
 using namespace cute;

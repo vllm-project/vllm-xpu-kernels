@@ -75,7 +75,10 @@ void gather_cache(
     std::optional<torch::Tensor> seq_starts = std::nullopt);
 
 void static_scaled_fp8_quant(
-    torch::Tensor& out, torch::Tensor const& input, torch::Tensor const& scale);
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& scale,
+    std::optional<std::tuple<int64_t, int64_t>> group_shape = std::nullopt);
 
 void dynamic_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale);
@@ -85,6 +88,16 @@ void dynamic_per_token_scaled_fp8_quant(
     torch::Tensor const& input,
     torch::Tensor& scales,
     std::optional<at::Tensor> const& scale_ub);
+
+void per_token_group_quant_fp8(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    int64_t group_size,
+    double eps,
+    double fp8_min,
+    double fp8_max,
+    bool scale_ue8m0);
 
 void swigluoai_and_mul(
     torch::Tensor& out,

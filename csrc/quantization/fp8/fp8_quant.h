@@ -48,48 +48,60 @@ inline float thread_max_vec(
 }
 
 template <typename scalar_t, typename fp8_type>
-class segmented_max_reduction {
+class segmented_max_reduction_strided {
  private:
   float* scale;
   const scalar_t* input;
-  int64_t num_elems;
+  int64_t hidden_size;
+  int64_t in_row_stride;
+  int64_t num_tokens;
 
  public:
-  segmented_max_reduction(
-      float* scale_, const scalar_t* input_, int64_t num_elems_)
-      : scale(scale_), input(input_), num_elems(num_elems_) {}
+  segmented_max_reduction_strided(
+      float* scale_,
+      const scalar_t* input_,
+      int64_t hidden_size_,
+      int64_t in_row_stride_,
+      int64_t num_tokens_)
+      : scale(scale_),
+        input(input_),
+        hidden_size(hidden_size_),
+        in_row_stride(in_row_stride_),
+        num_tokens(num_tokens_) {}
   void operator()(sycl::nd_item<1> item) const {
+    // NOTE: `scale` must be initialized before lanching the reduction kernel.
     auto& cache =
         *sycl::ext::oneapi::group_local_memory_for_overwrite<float[1024]>(
             item.get_group());
-    int64_t i = item.get_global_linear_id();
+    const int tid = item.get_local_id(0);
+    int64_t token_idx = item.get_group(0);
 
-    // First store maximum for all values processes by
-    // the current thread in cache[item.get_local_id(0)]
-    float tmp = 0.0;
-    while (i < num_elems) {
-      float x = static_cast<float>(input[i]);
-      tmp = sycl::max(tmp, sycl::fabs(x));
-      i += item.get_local_range(0) * item.get_group_range(0);
+    // one block per token. Guard in case gridDim.x > num_tokens.
+    if (token_idx >= num_tokens) {
+      return;
     }
-    cache[item.get_local_id(0)] = tmp;
 
+    const scalar_t* row_ptr = input + token_idx * in_row_stride;
+
+    // each thread scans elements of the row in a strided fashion.
+    float thread_max = 0.0f;
+    for (int e = tid; e < hidden_size; e += item.get_local_range(0)) {
+      float x = static_cast<float>(row_ptr[e]);
+      thread_max = sycl::max(thread_max, sycl::fabs(x));
+    }
+    cache[tid] = thread_max;
     group_barrier(item.get_group());
 
-    // Now perform parallel reduction within the thread block
-    int ib = item.get_local_range(0) / 2;
-    while (ib != 0) {
-      if (item.get_local_id(0) < ib &&
-          cache[item.get_local_id(0) + ib] > cache[item.get_local_id(0)]) {
-        cache[item.get_local_id(0)] = cache[item.get_local_id(0) + ib];
+    // parallel reduction to find row max.
+    for (int offset = item.get_local_range(0) / 2; offset > 0; offset >>= 1) {
+      if (tid < offset) {
+        cache[tid] = sycl::max(cache[tid], cache[tid + offset]);
       }
       group_barrier(item.get_group());
-      ib /= 2;
     }
-    // Finally, since cache[0] contains the maximum for this thread block,
-    // atomically write the max to the target location
-    // TODO: Do we need if statement?
-    if (item.get_local_id(0) == 0) {
+
+    // thread 0 updates global scale (per-tensor) atomically.
+    if (tid == 0) {
       using atomic_t = sycl::atomic_ref<
           float,
           sycl::memory_order::relaxed,

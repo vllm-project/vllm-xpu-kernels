@@ -1,4 +1,9 @@
-FROM intel/deep-learning-essentials:2025.2.2-0-devel-ubuntu24.04 AS vllm-base
+FROM intel/deep-learning-essentials:2025.3.2-0-devel-ubuntu24.04 AS vllm-base
+
+WORKDIR /workspace/
+
+ARG PYTHON_VERSION=3.12
+ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/xpu"
 
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
@@ -18,22 +23,29 @@ RUN apt clean && apt-get update -y && \
     wget \
     vim \
     python3.12 \
-    python3.12-dev \
-    python3-pip
+    python3.12-dev
 
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
+RUN apt install -y libze1 libze-dev
 
-RUN apt install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing intel-ocloc
+RUN mkdir neo && cd neo && \
+    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.22.2/intel-igc-core-2_2.22.2+20121_amd64.deb && \
+    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.22.2/intel-igc-opencl-2_2.22.2+20121_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/25.44.36015.8/intel-ocloc_25.44.36015.8-0_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/25.44.36015.8/intel-opencl-icd_25.44.36015.8-0_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/25.44.36015.8/libigdgmm12_22.8.2_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/25.44.36015.8/libze-intel-gpu1_25.44.36015.8-0_amd64.deb && \
+    dpkg -i *.deb && cd .. && rm -rf neo
 
-RUN python3 -m pip config set global.break-system-packages true 
+ENV PATH="/root/.local/bin:$PATH"
+ENV VIRTUAL_ENV="/opt/venv"
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# WORKDIR /workspace/vllm-xpu-kernels
-# COPY . .
+ENV UV_HTTP_TIMEOUT=500
 
-# RUN --mount=type=cache,target=/root/.cache/pip \
-#     pip install --no-cache-dir \
-#     -r requirements.txt
-
-# RUN --mount=type=cache,target=/root/.cache/pip \
-#     pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_LINK_MODE="copy"

@@ -150,7 +150,7 @@ void cutlass_paged_decode_impl(
       is_sink,
       num_kv_splits};
 
-  CutlassType cuType = aten_to_Cutlass_dtype(query);
+  CutlassDType cuType = aten_to_dtype(query);
 
   static constexpr int max_head_size = 256;
   TORCH_CHECK(
