@@ -190,8 +190,8 @@ struct FMHAFwdMainloop<
   // User-facing arguments
   struct Arguments {
     ElementS const scale;
-    ElementS const scale_k;
-    ElementS const scale_v;
+    void* const scale_k;
+    void* const scale_v;
 
     // Paged KV Cache
     int* ptr_page_table;
@@ -366,6 +366,13 @@ struct FMHAFwdMainloop<
     /* Check if */
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
 
+    // FP8 KV Scale: Currently we only support per-tensor scale for KV
+    float scale_k = 1.f, scale_v = 1.f;
+    if constexpr (Fp8KV) {
+      scale_k = *static_cast<const float*>(params.scale_k);
+      scale_v = *static_cast<const float*>(params.scale_v);
+    }
+
     /* Main loop, blocked in k. */
     for (int K = blk_k0; K < blk_k1; K++) {
       /* Split barrier to keep threads together */
@@ -386,8 +393,8 @@ struct FMHAFwdMainloop<
         reorder(tKrK, tSrK);
         if constexpr (Fp8KV) {
           for (int i = 0; i < tSrK.size(); ++i) {
-            tSrK(i) = static_cast<ElementQ>(
-                params.scale_k * static_cast<float>(tSrK(i)));
+            tSrK(i) =
+                static_cast<ElementQ>(scale_k * static_cast<float>(tSrK(i)));
           }
         }
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
@@ -458,8 +465,8 @@ struct FMHAFwdMainloop<
         if constexpr (Fp8KV) {
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tArV.size(); ++i) {
-            tArV(i) = static_cast<ElementQ>(
-                params.scale_v * static_cast<float>(tArV(i)));
+            tArV(i) =
+                static_cast<ElementQ>(scale_v * static_cast<float>(tArV(i)));
           }
         }
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
