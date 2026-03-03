@@ -57,13 +57,15 @@ def get_benchmark():
         quantiles = [0.5, 0.2, 0.8]
 
         if provider == "native":
+            input_clone = input.clone()
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: moe_sum_naive(input.clone()),
+                lambda: moe_sum_naive(input_clone),
                 quantiles=quantiles,
             )
         else:
+            input_clone = input.clone()
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: moe_sum_vllm(m, k, input.clone(), dtype),
+                lambda: moe_sum_vllm(m, k, input_clone, dtype),
                 quantiles=quantiles,
             )
         return 1000 * ms, 1000 * max_ms, 1000 * min_ms

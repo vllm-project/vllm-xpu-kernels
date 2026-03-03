@@ -346,9 +346,10 @@ def get_benchmark(configs):
         quantiles = [0.5, 0.2, 0.8]
 
         if provider == "native":
+            topk_ids_clone = topk_ids.clone()
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: torch_moe_align_block_size(
-                    topk_ids=topk_ids.clone(),
+                    topk_ids=topk_ids_clone,
                     block_size=block_size,
                     num_experts=num_experts,
                     pad_sorted_ids=pad_sorted_ids,
@@ -356,9 +357,10 @@ def get_benchmark(configs):
                 quantiles=quantiles,
             )
         else:
+            topk_ids_clone = topk_ids.clone()
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: moe_align_block_size(
-                    topk_ids=topk_ids.clone(),
+                    topk_ids=topk_ids_clone,
                     block_size=block_size,
                     num_experts=num_experts,
                     pad_sorted_ids=pad_sorted_ids,
@@ -401,9 +403,10 @@ def get_benchmark_with_expert_map(configs):
         quantiles = [0.5, 0.2, 0.8]
 
         if provider == "native":
+            topk_ids_clone = topk_ids.clone()
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: torch_moe_align_block_size(
-                    topk_ids=topk_ids,
+                    topk_ids=topk_ids_clone,
                     block_size=block_size,
                     num_experts=num_experts,
                     expert_map=expert_map
@@ -411,9 +414,10 @@ def get_benchmark_with_expert_map(configs):
                 quantiles=quantiles,
             )
         else:
+            topk_ids_clone = topk_ids.clone()
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: moe_align_block_size(
-                    topk_ids=topk_ids,
+                    topk_ids=topk_ids_clone,
                     block_size=block_size,
                     num_experts=num_experts,
                     expert_map=expert_map
@@ -489,7 +493,7 @@ def get_benchmark_batched_moe_align_block_size(configs):
             low=0,
             high=max_tokens_per_batch,
             size=(num_experts, ),
-            device="cpu",
+            device=DEVICE,
             dtype=torch.int32,
         )
         if simulate_empty_batches:
@@ -509,7 +513,7 @@ def get_benchmark_batched_moe_align_block_size(configs):
         else:
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: batched_moe_align_block_size(
-                    max_tokens_per_batch, block_size, expert_num_tokens.to(DEVICE)
+                    max_tokens_per_batch, block_size, expert_num_tokens
                 ),
                 quantiles=quantiles,
             )

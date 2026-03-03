@@ -138,15 +138,18 @@ def benchmark_quantization(
     quant_fp8 = QuantFP8(False, group_shape, column_major_scales=col_major)
 
     if provider == "torch":
-        fn = lambda: bench_compile(quant_fp8.forward_native)(x.clone())
+        x_clone = x.clone()
+        fn = lambda: bench_compile(quant_fp8.forward_native)(x_clone)
     elif provider == DEVICE:
-        fn = lambda: quant_fp8.forward_cuda(x.clone())
+        x_clone = x.clone()
+        fn = lambda: quant_fp8.forward_cuda(x_clone)
     elif provider == "triton":
         if not group_shape.is_per_group():
             # Triton only supported for per-group
             return 0, 0, 0
 
-        fn = lambda: with_triton_mode(quant_fp8.forward_cuda)(x.clone())
+        x_clone = x.clone()
+        fn = lambda: with_triton_mode(quant_fp8.forward_cuda)(x_clone)
 
     ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(fn, quantiles=quantiles)
 

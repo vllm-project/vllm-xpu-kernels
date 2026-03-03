@@ -98,23 +98,29 @@ def get_benchmark():
         key = key[..., :head_size] if use_key else None
 
         if provider == "native":
+            positions_clone = positions.clone()
+            query_clone = query.clone()
+            key_clone = key.clone() if use_key else None
             rot_native.cos_sin_cache = rot_native.cos_sin_cache.to(device=query.device, dtype=query.dtype)
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: rot_native.forward_native(
-                    positions.clone(), 
-                    query.clone(), 
-                    key.clone() if use_key else None, 
+                    positions_clone, 
+                    query_clone, 
+                    key_clone, 
                     offsets
                 ),
                 quantiles=quantiles,
             )
         else:
+            positions_clone = positions.clone()
+            query_clone = query.clone()
+            key_clone = key.clone() if use_key else None
             rot_vllm.cos_sin_cache = rot_vllm.cos_sin_cache.to(device=query.device, dtype=query.dtype)
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: rot_vllm.forward_xpu(
-                    positions.clone(), 
-                    query.clone(), 
-                    key.clone() if use_key else None, 
+                    positions_clone, 
+                    query_clone, 
+                    key_clone, 
                     offsets
                 ),
                 quantiles=quantiles,

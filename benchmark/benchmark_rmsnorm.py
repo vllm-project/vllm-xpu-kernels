@@ -237,29 +237,35 @@ def get_benchmark(use_residual, dtype):
                 quantiles=quantiles,
             )
         elif provider == "t.compile":
+            x_clone = x.clone()
+            residual_clone = residual.clone() if residual is not None else None
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: rmsnorm_compile(
-                    x.clone(),
+                    x_clone,
                     weight,
-                    residual.clone() if residual is not None else None,
+                    residual_clone,
                 ),
                 quantiles=quantiles,
             )
         elif provider == "ipex" and HAS_IPEX:
+            x_clone = x.clone()
+            residual_clone = residual.clone() if residual is not None else None
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: rmsnorm_ipex(
-                    x.clone(),
+                    x_clone,
                     weight,
-                    residual.clone() if residual is not None else None,
+                    residual_clone,
                 ),
                 quantiles=quantiles,
             )
         else:
+            x_clone = x.clone()
+            residual_clone = residual.clone() if residual is not None else None
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: rmsnorm_vllm(
-                    x.clone(),
+                    x_clone,
                     weight,
-                    residual.clone() if residual is not None else None,
+                    residual_clone,
                 ),
                 quantiles=quantiles,
             )

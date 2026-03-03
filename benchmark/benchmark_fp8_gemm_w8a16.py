@@ -97,17 +97,19 @@ def get_benchmark():
         quantiles = [0.5, 0.2, 0.8]
 
         if provider == "native":
+            input_clone = input.clone()
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: fp8_gemm_naive(
-                    input.clone(),
+                    input_clone,
                     weight, trans_wei
                 ),
                 quantiles=quantiles,
             )
         else:
+            input_clone = input.clone()
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: fp8_gemm_vllm(
-                    input.clone(),
+                    input_clone,
                     weight_fp8, trans_wei, scale_wei,
                     is_mbk
                 ),
