@@ -44,22 +44,22 @@ class HuggingFaceRMSNorm(nn.Module):
             return x, residual
 
 
-def rmsnorm_naive(
+def rmsnorm_native(
     x: torch.Tensor,
     weight: torch.Tensor,
     residual: Optional[torch.Tensor] = None,
     eps: float = 1e-6,
 ):
-    naive_norm = HuggingFaceRMSNorm(x.shape[-1], eps=eps)
-    naive_norm.weight = nn.Parameter(weight)
-    naive_norm = naive_norm.to(x.device)
+    native_norm = HuggingFaceRMSNorm(x.shape[-1], eps=eps)
+    native_norm.weight = nn.Parameter(weight)
+    native_norm = native_norm.to(x.device)
 
     orig_shape = x.shape
     x = x.view(-1, x.shape[-1])
     if residual is not None:
         residual = residual.view(-1, residual.shape[-1])
 
-    output = naive_norm(x, residual)
+    output = native_norm(x, residual)
 
     if isinstance(output, tuple):
         output = (output[0].view(orig_shape), output[1].view(orig_shape))
@@ -158,7 +158,7 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
     weight = torch.ones(hidden_size, dtype=dtype, device="xpu")
     residual = torch.randn_like(x) if use_residual else None
 
-    output_naive = rmsnorm_naive(
+    output_native = rmsnorm_native(
         x.clone(), weight,
         residual.clone() if residual is not None else None)
     output_vllm = rmsnorm_vllm(
@@ -166,10 +166,10 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
         residual.clone() if residual is not None else None)
 
     if use_residual:
-        output_naive = output_naive[0]
+        output_native = output_native[0]
         output_vllm = output_vllm[0]
 
-    print(f"Naive output={output_naive}")
+    print(f"native output={output_native}")
     print(f"vLLM output={output_vllm}")
 
     if HAS_IPEX:
@@ -181,14 +181,14 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
                 output_ipex = output_ipex[0]
             print(f"IPEX output={output_ipex}")
 
-            if torch.allclose(output_naive, output_ipex, atol=1e-2, rtol=1e-2):
-                print("✅ IPEX implementation matches naive")
+            if torch.allclose(output_native, output_ipex, atol=1e-2, rtol=1e-2):
+                print("✅ IPEX implementation matches native")
             else:
-                print("❌ IPEX implementation differs from naive")
+                print("❌ IPEX implementation differs from native")
         except Exception as e:
             print(f"❌ IPEX implementation failed: {e}")
 
-    if torch.allclose(output_naive, output_vllm, atol=1e-2, rtol=1e-2):
+    if torch.allclose(output_native, output_vllm, atol=1e-2, rtol=1e-2):
         print("✅ All implementations match, ", (batch_size, seq_len, hidden_size, use_residual))
     else:
         print("❌ Implementations differ, ", (batch_size, seq_len, hidden_size, use_residual))
@@ -229,7 +229,7 @@ def get_benchmark(use_residual, dtype):
 
         if provider == "huggingface":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: rmsnorm_naive(
+                lambda: rmsnorm_native(
                     x.clone(),
                     weight,
                     residual.clone() if residual is not None else None,

@@ -13,7 +13,7 @@ from tests.utils import parse_args, opcheck
 DEVICE = "xpu"
 
 
-def moe_sum_naive(input):
+def moe_sum_native(input):
     return input.sum(dim=1)
 
 
@@ -26,10 +26,10 @@ def moe_sum_vllm(m, k, input, dtype):
 def calculate_diff(config):
     m, topk, k, dtype = config
     input = torch.randn((m, topk, k), device=DEVICE, dtype=dtype)
-    output_naive = moe_sum_naive(input.clone())
+    output_native = moe_sum_native(input.clone())
     output_vllm = moe_sum_vllm(m, k, input.clone(), dtype)
 
-    if torch.allclose(output_naive, output_vllm, atol=2e-2, rtol=0):
+    if torch.allclose(output_native, output_vllm, atol=2e-2, rtol=0):
         print("✅ All implementations match, ", config)
     else:
         print("❌ Implementations differ, ", config)
@@ -59,7 +59,7 @@ def get_benchmark():
         if provider == "native":
             input_clone = input.clone()
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: moe_sum_naive(input_clone),
+                lambda: moe_sum_native(input_clone),
                 quantiles=quantiles,
             )
         else:

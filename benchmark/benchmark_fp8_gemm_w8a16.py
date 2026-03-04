@@ -11,7 +11,7 @@ from tests.ops.fp8_quant_op import scaled_fp8_quant
 from tests.register_ops import fp8_gemm_w8a16
 
 
-def fp8_gemm_naive(input, weight, trans_wei):
+def fp8_gemm_native(input, weight, trans_wei):
     if trans_wei:
         output_ref = torch.matmul(input, weight.t())
     else:
@@ -60,13 +60,13 @@ def calculate_diff(config):
     )
 
     # onednn fp8 gemm
-    output_naive = fp8_gemm_naive(input.clone(), weight, trans_wei)
+    output_native = fp8_gemm_native(input.clone(), weight, trans_wei)
     output_vllm = fp8_gemm_vllm(input.clone(), weight_fp8, trans_wei, scale_wei, is_mbk)
 
-    #print(f"Naive output={output_naive}")
+    #print(f"Native output={output_native}")
     #print(f"vLLM output={output_vllm}")
 
-    if torch.allclose(output_naive, output_vllm, atol=5e-2, rtol=5e-2):
+    if torch.allclose(output_native, output_vllm, atol=5e-2, rtol=5e-2):
         print("✅ All implementations match, ", config)
     else:
         print("❌ Implementations differ, ", config)
@@ -99,7 +99,7 @@ def get_benchmark():
         if provider == "native":
             input_clone = input.clone()
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: fp8_gemm_naive(
+                lambda: fp8_gemm_native(
                     input_clone,
                     weight, trans_wei
                 ),
