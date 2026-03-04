@@ -159,9 +159,12 @@ def calculate_diff_varlen_paged_kv(config):
         atol, rtol = 1.5e-2, 1.5e-2
     if fp8_dtype is not None:
         atol, rtol = 1.5e-2, 1.5e-2
-    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
-        f"{torch.max(torch.abs(output - ref_output))}"
-    torch.xpu.empty_cache()
+    try:
+        torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+            f"{torch.max(torch.abs(output - ref_output))}"
+        print("✅ All implementations match, ", config)
+    except AssertionError as e:
+        print("❌ Implementations differ, ", config, " error: ", e)
 
 
 def benchmark_varlen_with_paged_kv(
@@ -174,7 +177,7 @@ def benchmark_varlen_with_paged_kv(
         query_lens, kv_lens, is_fp8kv, is_fp8_query = make_varlen_with_paged_kv_input(config=(seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype))
     quantiles = [0.5, 0.2, 0.8]
 
-    if provider == "naive":
+    if provider == "native":
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: ref_paged_attn(query=query,
             key_cache=maybe_quantized_key_cache,
@@ -250,11 +253,11 @@ def get_benchmark_varlen_with_paged_kv():
             x_names=["seq_lens", "num_heads", "head_size", "block_size", "window_size", "dtype", "soft_cap", "num_blocks", "fa_versions", "q_dtype", "is_sink", "is_causal", "is_paged", "fp8_dtype"],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
-            line_vals=["naive", "flash"],
-            line_names=["Naive", "FlashAttention"],
+            line_vals=["native", "flash"],
+            line_names=["Native", "FlashAttention"],
             styles=[("red", "-"), ("blue", "-")],
             ylabel="Latency (us)",
-            plot_name="flash-attn-varlen-vs-naive",
+            plot_name="flash-attn-varlen-vs-native",
             args={},
         )
     )
@@ -321,11 +324,8 @@ if __name__ == "__main__":
     )
 
     for config in configs:
-       try:
-           calculate_diff_varlen_paged_kv(config)
-       except RuntimeError as e:
-           clear_xpu_cache()
-           print(f"Error in config {config}: {e}")
+        calculate_diff_varlen_paged_kv(config)
+        clear_xpu_cache()
 
     benchmark = get_benchmark_varlen_with_paged_kv()
     # Run performance benchmark
