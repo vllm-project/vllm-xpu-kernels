@@ -35,7 +35,7 @@ def gen_topk_weights(num_tokens, topk, device=DEVICE, dtype=torch.float16):
     return w / w.sum(dim=-1, keepdim=True)
 
 
-def naive_moe(
+def native_moe(
     hidden_states,   # [T, H]
     w13, w13_bias,
     w2, w2_bias,
@@ -134,7 +134,7 @@ def calculate_diff(config):
         num_experts, hidden_size,
         device=DEVICE, dtype=dtype
     )
-    output_naive = naive_moe(
+    output_native = native_moe(
         hidden_states,
         w13, w13_bias,
         w2, w2_bias,
@@ -150,7 +150,7 @@ def calculate_diff(config):
         num_experts,
     )
 
-    if torch.allclose(output_naive, output_vllm, atol=1e-3, rtol=0):
+    if torch.allclose(output_native, output_vllm, atol=1e-3, rtol=0):
         print("✅ All implementations match, ", config)
     else:
         print("❌ Implementations differ, ", config)
@@ -162,11 +162,11 @@ def get_benchmark():
             x_names=["m", "num_experts", "topk", "hidden_size", "dtype"],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
-            line_vals=["naive", "fused"],
-            line_names=["Naive", "Cutlass Fused"],
+            line_vals=["native", "fused"],
+            line_names=["native", "Cutlass Fused"],
             styles=[("red", "-"), ("blue", "-")],
             ylabel="Latency (us)",
-            plot_name="moe-cutlass-vs-naive",
+            plot_name="moe-cutlass-vs-native",
             args={},
         )
     )
@@ -206,9 +206,9 @@ def get_benchmark():
 
         quantiles = [0.5, 0.2, 0.8]
 
-        if provider == "naive":
+        if provider == "native":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: naive_moe(
+                lambda: native_moe(
                     hidden_states,
                     w13, w13_bias,
                     w2, w2_bias,
