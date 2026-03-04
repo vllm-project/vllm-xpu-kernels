@@ -10,6 +10,65 @@ import tests.register_ops as ops
 # Add parent directory to Python path
 # sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) #noqa: E501
 
+FP8_E4M3_MAX = 448.0
+
+
+def fp8_block_quant_2d(
+    x: torch.Tensor,
+    block_m: int,
+    block_n: int,
+    fp8_dtype=torch.float8_e4m3fn,
+    eps: float = 1e-6,
+):
+    """
+    Reference FP8 2D block quantization
+
+    Args:
+        x: [M, N] float tensor (fp16/fp32)
+        block_m: block rows
+        block_n: block cols
+        fp8_dtype: torch.float8_e4m3fn or e5m2
+    Returns:
+        q: FP8 tensor [M, N]
+        scales: FP32 tensor [ceil(M/BM), ceil(N/BN)]
+    """
+    assert x.dim() == 2
+    M, N = x.shape
+    device = x.device
+
+    assert (block_m <= M and block_n <= N and M % block_m == 0
+            and N % block_n == 0)
+    BM, BN = block_m, block_n
+    grid_m = (M + BM - 1) // BM
+    grid_n = (N + BN - 1) // BN
+
+    scales = torch.empty((grid_m, grid_n), device=device, dtype=torch.float32)
+    q = torch.empty_like(x, dtype=fp8_dtype)
+
+    FP8_MAX = FP8_E4M3_MAX
+
+    for gm in range(grid_m):
+        for gn in range(grid_n):
+            m0 = gm * BM
+            n0 = gn * BN
+            m1 = min(m0 + BM, M)
+            n1 = min(n0 + BN, N)
+
+            block = x[m0:m1, n0:n1]
+
+            # absmax
+            amax = block.abs().max()
+            scale = amax / FP8_MAX
+            scale = torch.clamp(scale, min=eps)
+
+            scales[gm, gn] = scale
+
+            # quantize
+            q_block = (block / scale).to(fp8_dtype)
+            q[m0:m1, n0:n1] = q_block
+
+    return q, scales
+
 
 def scaled_fp8_quant(
     input: torch.Tensor,
