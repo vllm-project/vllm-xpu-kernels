@@ -10,223 +10,175 @@ import triton.testing
 from vllm.platforms import current_platform
 from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 from tests.utils import parse_args
+from tests.ops.fp8_quant_op import scaled_fp8_quant
+from tests.fused_moe.test_fused_moe import ref_fused_moe
 
 
 DEVICE = "xpu"
-FP8_DTYPE = current_platform.fp8_dtype()
-
-
 def clear_xpu_cache():
     torch.xpu.empty_cache()
     gc.collect()
     torch.xpu.synchronize()
 
 
-# Test token imblance by sampling topk ids from a Zipf distribution, which is common in MoE models
-def gen_zipf_topk_ids(num_tokens, num_experts, topk, alpha=1.2, device=DEVICE):
-    probs = torch.arange(1, num_experts + 1, device=device).float().pow(-alpha)
-    probs /= probs.sum()
-    ids = torch.multinomial(probs, num_tokens * topk, replacement=True)
-    return ids.view(num_tokens, topk)
+def make_fused_moe_input(config):
+    mnk, e, topk, dtype, w_dtype, has_bias = config
+    m, n, k = mnk
+    input_len = m
+    hidden_size = k
+    intermediate_size = n
+    num_experts = e
 
+    a = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
+    w13 = torch.randn((num_experts, 2 * intermediate_size, hidden_size),
+                      device=DEVICE,
+                      dtype=dtype) / 16
+    w2 = torch.randn((num_experts, hidden_size, intermediate_size),
+                     device=DEVICE,
+                     dtype=dtype) / 16
+    ref_a = a.clone()
 
-def gen_topk_weights(num_tokens, topk, device=DEVICE, dtype=torch.float16):
-    w = torch.rand(num_tokens, topk, device=device, dtype=dtype)
-    return w / w.sum(dim=-1, keepdim=True)
+    if has_bias:
+        w13_bias = torch.randn(
+            (num_experts, 2 * intermediate_size), device=DEVICE,
+            dtype=dtype) / 16
+        w2_bias = torch.randn(
+            (num_experts, hidden_size), device=DEVICE, dtype=dtype) / 16
+    else:
+        w13_bias = None
+        w2_bias = None
+    # moe gate
+    scores = torch.randn((input_len, num_experts),
+                         device=DEVICE,
+                         dtype=torch.float32)
+    expert_scores, expert_indices = torch.topk(scores,
+                                               k=topk,
+                                               dim=-1,
+                                               sorted=False)
 
+    flat_expert_indices = expert_indices.view(-1)
+    flat_expert_weights = expert_scores.view(-1, 1)
 
-def native_moe(
-    hidden_states,   # [T, H]
-    w13, w13_bias,
-    w2, w2_bias,
-    topk_ids, topk_weights,
-    activation="silu",
-):
-    T, H = hidden_states.shape
-    topk = topk_ids.shape[1]
-    I = w13.shape[1] // 2
+    if w_dtype is not None:
+        w13_fp8 = torch.empty_like(w13, dtype=w_dtype)
+        w2_fp8 = torch.empty_like(w2, dtype=w_dtype)
 
-    output = torch.zeros_like(hidden_states)
+        # scale
+        random_exponents = torch.randint(-3, 4, (num_experts, ), device=DEVICE)
+        w13_scales = torch.pow(2.0, random_exponents.float())
+        random_exponents = torch.randint(-3, 4, (num_experts, ), device=DEVICE)
+        w2_scales = torch.pow(2.0, random_exponents.float())
 
-    for t in range(T):
-        x = hidden_states[t]
-        out = torch.zeros(H, device=x.device, dtype=x.dtype)
+        for i in range(num_experts):
+            w13_fp8[i], _ = scaled_fp8_quant(w13[i],
+                                             w13_scales[i].to(torch.float32),
+                                             False,
+                                             False,
+                                             fp8_dtype=w_dtype)
+            w2_fp8[i], _ = scaled_fp8_quant(w2[i],
+                                            w2_scales[i].to(torch.float32),
+                                            False,
+                                            False,
+                                            fp8_dtype=w_dtype)
+        w13 = w13_fp8
+        w2 = w2_fp8
 
-        for i in range(topk):
-            e = int(topk_ids[t, i])
-            w = topk_weights[t, i]
+        ref_w13 = torch.empty_like(w13_fp8, dtype=dtype)
+        ref_w2 = torch.empty_like(w2_fp8, dtype=dtype)
+        for i in range(num_experts):
+            ref_w13[i] = w13_fp8[i].to(dtype) * w13_scales[i]
+            ref_w2[i] = w2_fp8[i].to(dtype) * w2_scales[i]
+    else:
+        w13_scales = None
+        w2_scales = None
+        ref_w13 = w13
+        ref_w2 = w2
 
-            y = F.linear(x, w13[e], w13_bias[e] if w13_bias is not None else None)
-            g, u = y.split(I, dim=0)
-
-            if activation == "silu":
-                h = F.silu(g) * u
-            elif activation == "gelu":
-                h = F.gelu(g) * u
-            else:
-                raise NotImplementedError
-
-            z = F.linear(h, w2[e], w2_bias[e] if w2_bias is not None else None)
-            out += w * z
-
-        output[t] = out
-
-    return output
-
-
-def fused_moe_xpu(
-    hidden_states,
-    w13, w13_scales, w13_bias,
-    w2, w2_scales, w2_bias,
-    topk_ids, topk_weights,
-    activation,
-    num_experts,
-):
-    return xpu_fused_moe(
-        hidden_states=hidden_states,
-        w13=w13,
-        w13_scales=w13_scales,
-        w13_bias=w13_bias,
-        w2=w2,
-        w2_scales=w2_scales,
-        w2_bias=w2_bias,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        n_experts_per_token=topk_ids.shape[1],
-        activation=activation,
-        num_experts=num_experts,
-        is_fp8=False,
-        is_int4=False,
-        is_mxfp4=False,
-    )
+    return (ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights,
+            flat_expert_indices, a, w13, w13_scales, w2, w2_scales,
+            expert_scores, expert_indices)
 
 
 def calculate_diff(config):
-    m, num_experts, topk, hidden_size, dtype = config
-    activation = "silu"
-    inter_size = 4 * hidden_size  # realistic MoE ratio
+    _, e, topk, dtype, w_dtype, _ = config
+    ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
+        flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
+            expert_scores, expert_indices = make_fused_moe_input(config)
 
-    hidden_states = torch.randn(
-        (m, hidden_size), device=DEVICE, dtype=dtype
-    )
-
-    topk_ids = gen_zipf_topk_ids(
-        m, num_experts, topk, device=DEVICE
-    )
-    topk_weights = gen_topk_weights(
-        m, topk, device=DEVICE, dtype=torch.float32
-    )
-
-    w13 = torch.randn(
-        num_experts, 2 * inter_size, hidden_size,
-        device=DEVICE, dtype=dtype
-    )
-    w2 = torch.randn(
-        num_experts, hidden_size, inter_size,
-        device=DEVICE, dtype=dtype
-    )
-
-    w13_bias = torch.randn(
-        num_experts, 2 * inter_size,
-        device=DEVICE, dtype=dtype
-    )
-    w2_bias = torch.randn(
-        num_experts, hidden_size,
-        device=DEVICE, dtype=dtype
-    )
-    output_native = native_moe(
-        hidden_states,
-        w13, w13_bias,
-        w2, w2_bias,
-        topk_ids, topk_weights,
-        activation,
-    )
-    output_vllm = fused_moe_xpu(
-        hidden_states,
-        w13, None, w13_bias,
-        w2, None, w2_bias,
-        topk_ids, topk_weights,
-        activation,
-        num_experts,
-    )
-
-    if torch.allclose(output_native, output_vllm, atol=1e-3, rtol=0):
-        print("✅ All implementations match, ", config)
+    ref_out = ref_fused_moe(ref_a, ref_w13, w13_bias, ref_w2, w2_bias,
+                            flat_expert_weights, flat_expert_indices, topk,
+                            "silu", e)
+    output = xpu_fused_moe(hidden_states=a,
+                           w13=w13,
+                           w13_scales=w13_scales,
+                           w13_bias=w13_bias,
+                           w2=w2,
+                           w2_scales=w2_scales,
+                           w2_bias=w2_bias,
+                           topk_weights=expert_scores,
+                           topk_ids=expert_indices,
+                           n_experts_per_token=topk,
+                           activation="silu",
+                           num_experts=e,
+                           is_fp8=(w_dtype is not None))
+    if dtype == torch.float16:
+        rtol = 1e-2
+        atol = 1e-2
     else:
-        print("❌ Implementations differ, ", config)
+        rtol = 2e-2
+        atol = 2e-2
+
+    try:
+        torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
+        print("✅ All implementations match, ", config)
+    except AssertionError as e:
+        print("❌ Implementations differ, ", config, " error: ", e)
 
 
 def get_benchmark():
     @triton.testing.perf_report(
         triton.testing.Benchmark(
-            x_names=["m", "num_experts", "topk", "hidden_size", "dtype"],
+            x_names=["mnk", "num_experts", "topk", "dtype", "w_dtype", "has_bias"],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
-            line_vals=["native", "fused"],
-            line_names=["native", "Cutlass Fused"],
+            line_vals=["native", "vllm"],
+            line_names=["native", "vllm"],
             styles=[("red", "-"), ("blue", "-")],
             ylabel="Latency (us)",
             plot_name="moe-cutlass-vs-native",
             args={},
         )
     )
-    def benchmark(m, num_experts, topk, hidden_size, dtype, provider):
-        activation = "silu"
-
-        inter_size = 4 * hidden_size  # realistic MoE ratio
-
-        hidden_states = torch.randn(
-            (m, hidden_size), device=DEVICE, dtype=dtype
-        )
-
-        topk_ids = gen_zipf_topk_ids(
-            m, num_experts, topk, device=DEVICE
-        )
-        topk_weights = gen_topk_weights(
-            m, topk, device=DEVICE, dtype=torch.float32
-        )
-
-        w13 = torch.randn(
-            num_experts, 2 * inter_size, hidden_size,
-            device=DEVICE, dtype=dtype
-        )
-        w2 = torch.randn(
-            num_experts, hidden_size, inter_size,
-            device=DEVICE, dtype=dtype
-        )
-
-        w13_bias = torch.randn(
-            num_experts, 2 * inter_size,
-            device=DEVICE, dtype=dtype
-        )
-        w2_bias = torch.randn(
-            num_experts, hidden_size,
-            device=DEVICE, dtype=dtype
-        )
+    def benchmark(mnk, num_experts, topk, dtype, w_dtype, has_bias, provider):
+        e = num_experts
+        ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
+        flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
+            expert_scores, expert_indices = make_fused_moe_input((mnk, num_experts, topk, dtype, w_dtype, has_bias))
 
         quantiles = [0.5, 0.2, 0.8]
 
         if provider == "native":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: native_moe(
-                    hidden_states,
-                    w13, w13_bias,
-                    w2, w2_bias,
-                    topk_ids, topk_weights,
-                    activation,
-                ),
+                lambda: ref_fused_moe(ref_a, ref_w13, w13_bias, ref_w2, w2_bias,
+                flat_expert_weights, flat_expert_indices, topk,
+                "silu", e),
                 quantiles=quantiles,
             )
         else:
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: fused_moe_xpu(
-                    hidden_states,
-                    w13, None, w13_bias,
-                    w2, None, w2_bias,
-                    topk_ids, topk_weights,
-                    activation,
-                    num_experts,
-                ),
+                lambda: xpu_fused_moe(hidden_states=a,
+                w13=w13,
+                w13_scales=w13_scales,
+                w13_bias=w13_bias,
+                w2=w2,
+                w2_scales=w2_scales,
+                w2_bias=w2_bias,
+                topk_weights=expert_scores,
+                topk_ids=expert_indices,
+                n_experts_per_token=topk,
+                activation="silu",
+                num_experts=e,
+                is_fp8=(w_dtype is not None)),
                 quantiles=quantiles,
             )
         clear_xpu_cache()
@@ -241,27 +193,31 @@ if __name__ == "__main__":
     seed = 1234
     torch.manual_seed(seed)
 
-    m = [32, 64, 256, 512, 1024]
-    experts = [8, 16, 32, 64]
-    topk = [1, 2, 4]
-    hidden_size = [4096]    # 8192 causes OOM
-    dtype = [torch.float16, torch.bfloat16]     # float32 not supported by cutlass kernels: permuted_data_size = permuted_elems * 2
+    mnk =[
+        (1, 5120, 8192),
+        (4, 5120, 8192),
+        (16, 5120, 8192),
+        (8192, 5120, 8192),
+    ]
+    experts = [16]
+    topk = [1]
+    dtype = [torch.float16, torch.bfloat16]
+    w_dtype = [torch.float8_e5m2, torch.float8_e4m3fn, None]
+    has_bias = [True, False]
     print("Final configuration:")
-    print(f"  m: {m}")
-    print(f"  num_experts: {experts}")
+    print(f"  m,n,k: {mnk}")
+    print(f"  experts: {experts}")
     print(f"  topk: {topk}")
-    print(f"  hidden_size: {hidden_size}")
     print(f"  dtype: {dtype}")
+    print(f"  w_dtype: {w_dtype}")
+    print(f"  has_bias: {has_bias}")
 
     configs = list(
-        itertools.product(m, experts, topk, hidden_size, dtype))
+        itertools.product(mnk, experts, topk, dtype, w_dtype, has_bias))
 
     for config in configs:
-       try:
-           calculate_diff(config)
-       except RuntimeError as e:
-           clear_xpu_cache()
-           print(f"Error in config {config}: {e}")
+        calculate_diff(config)
+        clear_xpu_cache()
 
     benchmark = get_benchmark()
     # Run performance benchmark
