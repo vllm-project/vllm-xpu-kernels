@@ -46,7 +46,7 @@ jobs:
           pip install -r requirements.txt
           python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/conda/lib/python3.11/site-packages/torch/lib/
-          auditwheel repair dist/vllm_xpu_kernels*.whl -w dist/
+          for f in dist/*-linux_x86_64.whl; do mv "$f" "${f/linux_x86_64/manylinux_2_28_x86_64}"; done
 
       - name: Create build info file
         run: |
