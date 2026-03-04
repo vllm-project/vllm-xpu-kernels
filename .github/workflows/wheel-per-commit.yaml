@@ -45,6 +45,8 @@ jobs:
           source /opt/intel/oneapi/2025.3/oneapi-vars.sh
           pip install -r requirements.txt
           python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/conda/lib/python3.11/site-packages/torch/lib/
+          auditwheel repair dist/vllm_xpu_kernels*.whl -w dist/
 
       - name: Create build info file
         run: |
