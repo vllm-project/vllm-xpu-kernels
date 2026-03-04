@@ -321,8 +321,7 @@ def test_varlen_with_paged_kv(
     torch.xpu.empty_cache()
 
 
-DECODE_SLIDING_WINDOWS = [(-1, -1), (127, -1), (64, -1), (511, -1),
-                          (1024, -1)]
+DECODE_SLIDING_WINDOWS = [(-1, -1), (127, -1), (64, -1), (511, -1), (1024, -1)]
 
 
 @pytest.mark.parametrize("seq_lens",

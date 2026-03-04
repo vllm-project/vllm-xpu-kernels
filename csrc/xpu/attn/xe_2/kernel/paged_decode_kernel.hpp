@@ -271,19 +271,17 @@ class XeFMHAFwdSplitKVKernel {
                     seq_len_kv,
                     full_tile_offset + seq_coord + q_sg_tile +
                         params.mainloop.window_size_right)
-              : CollectiveMainloop::CausalMask
-                    ? full_tile_offset +
-                          cute::min(
-                              seq_len_kv, seq_coord - discard_seq_coord) +
-                          q_sg_tile
-                    : seq_len_kv;
+          : CollectiveMainloop::CausalMask
+              ? full_tile_offset +
+                    cute::min(seq_len_kv, seq_coord - discard_seq_coord) +
+                    q_sg_tile
+              : seq_len_kv;
       // For decode, all packed GQA heads are at position seq_len_kv - 1.
       // Use seq_len - 1 (= seq_len_kv - 1) as the decode position for
       // k_block0 to match ReduceSplitK's computation.
       const int k_block0 =
           CollectiveMainloop::LocalMask
-              ? cute::max(
-                    seq_len - 1 - params.mainloop.window_size_left, 0) /
+              ? cute::max(seq_len - 1 - params.mainloop.window_size_left, 0) /
                     get<1>(TileShapeQK{})
               : 0;
       const int k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
@@ -330,8 +328,7 @@ class XeFMHAFwdSplitKVKernel {
 
       int num_blocks_per_split =
           cute::ceil_div(windowed_k_blocks, num_kv_splits);
-      int kv_split_offset =
-          k_block0 + idx_kv_split * num_blocks_per_split;
+      int kv_split_offset = k_block0 + idx_kv_split * num_blocks_per_split;
       int num_effective_kv_blocks = cute::min(
           windowed_k_blocks - idx_kv_split * num_blocks_per_split,
           num_blocks_per_split);
@@ -600,13 +597,11 @@ class ReduceSplitK {
 
       const int k_blocks = cute::ceil_div(seq_len_kv, get<1>(TileShapeQK{}));
       // Sliding window: skip blocks before the window
-      constexpr bool LocalMask =
-          FMHAKernel_::CollectiveMainloop::LocalMask;
+      constexpr bool LocalMask = FMHAKernel_::CollectiveMainloop::LocalMask;
       const int k_block0 =
-          LocalMask
-              ? cute::max(seq_len_kv - 1 - p.window_size_left, 0) /
-                    get<1>(TileShapeQK{})
-              : 0;
+          LocalMask ? cute::max(seq_len_kv - 1 - p.window_size_left, 0) /
+                          get<1>(TileShapeQK{})
+                    : 0;
       const int windowed_k_blocks = k_blocks - k_block0;
       int num_blocks_per_split =
           cute::ceil_div(windowed_k_blocks, num_kv_splits);
@@ -704,8 +699,6 @@ class ReduceSplitK {
       // broadcast to all other threads
       global_max_logits =
           sycl::group_broadcast(get_work_group<1>(), global_max_logits, 0);
-
-
 
       for (int idx = thr_id; idx < s.head_size_vo;
            idx += SGPerWG::value * intel::sg_size) {
