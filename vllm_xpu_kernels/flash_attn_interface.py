@@ -44,14 +44,36 @@ def flash_attn_varlen_func(
     out=None,
     # FA3 Only
     scheduler_metadata=None,
-    q_descale=None,
-    k_descale=None,
-    v_descale=None,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
     num_splits: int = 0,
     # Version selector
     fa_version: int = DEFAULT_FA_VERSION,
     s_aux: Optional[torch.Tensor] = None,
+    num_splits_kv: Optional[int] = None,
 ):
+    """
+    FlashAttention interface for variable-length sequences, with optional
+    paged KV cache support.
+
+    Args:
+        q, k, v: Query, key, value tensors.
+        max_seqlen_q: Maximum query sequence length in the batch.
+        cu_seqlens_q: Cumulative sequence lengths for queries.
+        max_seqlen_k: Maximum key/value sequence length in the batch.
+        cu_seqlens_k: Cumulative sequence lengths for keys/values when not
+            using paged KV cache.
+        seqused_k: Number of tokens used per sequence when using paged KV.
+        block_table: Optional block table for paged KV cache.
+        num_splits: Backend-specific split parameter (non-KV specific),
+            typically used to control work partitioning in some FA versions.
+        num_splits_kv: Optional number of splits applied to KV **blocks**
+            when using paged KV cache. This is forwarded to the underlying
+            C++ FlashAttention op as its ``num_splits`` parameter; the split
+            unit is KV blocks, not individual tokens or pages.
+        fa_version: FlashAttention backend version selector.
+    """
     assert cu_seqlens_k is not None or seqused_k is not None, \
         "cu_seqlens_k or seqused_k must be provided"
     assert cu_seqlens_k is None or seqused_k is None, \
@@ -63,10 +85,14 @@ def flash_attn_varlen_func(
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
-    if k_descale is None:
-        k_descale = 1.0
-    if v_descale is None:
-        v_descale = 1.0
+    if k_descale is not None:
+        assert sum(k_descale.stride()) == 0 and \
+            k_descale.dtype == torch.float32, \
+            "k_descale must be view of single float32 scalar tensor"
+    if v_descale is not None:
+        assert sum(v_descale.stride()) == 0 and \
+            v_descale.dtype == torch.float32, \
+            "v_descale must be view of single float32 scalar tensor"
     # custom op does not support non-tuple input
     real_window_size: tuple[int, int]
     if window_size is None:
@@ -123,6 +149,7 @@ def flash_attn_varlen_func(
             softcap,
             return_softmax_lse and dropout_p > 0,
             None,
+            num_splits_kv,
         )
     else:
         raise NotImplementedError("not support yet")

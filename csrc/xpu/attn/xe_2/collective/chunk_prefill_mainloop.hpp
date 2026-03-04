@@ -190,11 +190,11 @@ struct FMHAFwdMainloop<
   // User-facing arguments
   struct Arguments {
     ElementS const scale;
-    ElementS const scale_k;
-    ElementS const scale_v;
+    void* const scale_k;
+    void* const scale_v;
 
     // Paged KV Cache
-    int* ptr_page_table;
+    const int* ptr_page_table;
     int page_size;
     int max_pages_per_seq;
     int total_seqlen_kv;
@@ -234,6 +234,20 @@ struct FMHAFwdMainloop<
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
     return true;
+  }
+
+  CUTLASS_DEVICE int get_paged_idx(int K, int idx_b) {
+    int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
+    int b_offset = idx_b * params.max_pages_per_seq;
+    int page_local_idx = K * get<1>(TileShapeQK{}) / params.page_size;
+
+    // Clamp page_local_idx to the valid range [0, max_pages_per_seq - 1]
+    if (page_local_idx >= params.max_pages_per_seq) {
+      page_local_idx = params.max_pages_per_seq - 1;
+    }
+
+    return params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page +
+           K % tiles_per_page;
   }
 
   template <typename QVCoord>
@@ -339,24 +353,21 @@ struct FMHAFwdMainloop<
     // ------
 
     // PagedKV
-    int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
-    int page_idx = blk_k0, next_page_idx;
-    int b_offset = idx_b * params.max_pages_per_seq;
+    int page_idx, next_page_idx;
     if constexpr (PagedKV) {
-      int page_local_idx = page_idx * get<1>(TileShapeQK{}) / params.page_size;
-      page_idx =
-          params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page +
-          page_idx % tiles_per_page;
+      next_page_idx = get_paged_idx(blk_k0, idx_b);
     }
 
     /* Initialization steps for first block: Q/K prefetch, O init */
     /* TODO: limit D prefetch for large head size, and reorder K prefetches */
+    CUTLASS_PRAGMA_UNROLL
     for (int D = 0; D < size<3>(pQgQ); D++) {
       prefetch(prefetch_q, pQgQ(_, _, _, D));
     }
 
+    CUTLASS_PRAGMA_UNROLL
     for (int D = 0; D < size<4>(pKgK); D++) {
-      prefetch(prefetch_k, pKgK(_, _, _, page_idx, D));
+      prefetch(prefetch_k, pKgK(_, _, _, next_page_idx, D));
     }
 
     clear(tArA);
@@ -366,10 +377,23 @@ struct FMHAFwdMainloop<
     /* Check if */
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
 
+    // FP8 KV Scale: Currently we only support per-tensor scale for KV
+    float scale_k = 1.f, scale_v = 1.f;
+    if constexpr (Fp8KV) {
+      scale_k = *static_cast<const float*>(params.scale_k);
+      scale_v = *static_cast<const float*>(params.scale_v);
+    }
+
     /* Main loop, blocked in k. */
     for (int K = blk_k0; K < blk_k1; K++) {
       /* Split barrier to keep threads together */
       // barrier_arrive(ScopeSubgroup);
+
+      page_idx = next_page_idx;
+      // next paged_idx
+      if constexpr (PagedKV) {
+        next_page_idx = get_paged_idx(K + 1, idx_b);
+      }
 
       auto tKgK_cache =
           PagedKV ? tKgK(_, _, _, page_idx, _) : tKgK(_, _, _, K, _);
@@ -386,8 +410,8 @@ struct FMHAFwdMainloop<
         reorder(tKrK, tSrK);
         if constexpr (Fp8KV) {
           for (int i = 0; i < tSrK.size(); ++i) {
-            tSrK(i) = static_cast<ElementQ>(
-                params.scale_k * static_cast<float>(tSrK(i)));
+            tSrK(i) =
+                static_cast<ElementQ>(scale_k * static_cast<float>(tSrK(i)));
           }
         }
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
@@ -458,37 +482,20 @@ struct FMHAFwdMainloop<
         if constexpr (Fp8KV) {
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tArV.size(); ++i) {
-            tArV(i) = static_cast<ElementQ>(
-                params.scale_v * static_cast<float>(tArV(i)));
+            tArV(i) =
+                static_cast<ElementQ>(scale_v * static_cast<float>(tArV(i)));
           }
         }
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
 
       // sycl::group_barrier(compat::get_nd_item<1>().get_group());
-      barrier();
-
-      // next paged_idx
-      next_page_idx = K + 1;
-      if constexpr (PagedKV) {
-        int next_page_local_idx =
-            next_page_idx * get<1>(TileShapeQK{}) / params.page_size;
-        bool valid_page = next_page_local_idx < params.max_pages_per_seq;
-        if (valid_page) {
-          next_page_idx =
-              params.ptr_page_table[b_offset + next_page_local_idx] *
-                  tiles_per_page +
-              next_page_idx % tiles_per_page;
-        } else {
-          // set to last page
-          next_page_idx = params.max_pages_per_seq * tiles_per_page - 1;
-        }
-      }
-      page_idx = next_page_idx;
+      // barrier();
 
       /* K prefetch */
+      CUTLASS_PRAGMA_UNROLL
       for (int D = 0; D < size<4>(pKgK); D++) {
-        prefetch(prefetch_k, pKgK(_, _, _, page_idx, D));
+        prefetch(prefetch_k, pKgK(_, _, _, next_page_idx, D));
       }
 
       // barrier_wait(ScopeSubgroup);

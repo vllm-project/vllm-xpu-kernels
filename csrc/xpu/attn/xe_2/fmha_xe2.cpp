@@ -15,8 +15,8 @@ void cutlass_chunk_prefill_xe2(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
-    float k_scale,
-    float v_scale,
+    std::optional<const at::Tensor>& k_scale,
+    std::optional<const at::Tensor>& v_scale,
     double sm_scale,
     std::optional<const at::Tensor>& sm_sink_,
     int window_size_left,
@@ -61,8 +61,8 @@ void cutlass_chunk_prefill_impl(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
-    float k_scale,
-    float v_scale,
+    std::optional<const at::Tensor>& k_scale,
+    std::optional<const at::Tensor>& v_scale,
     double sm_scale,
     std::optional<const at::Tensor>& sm_sink_,
     int window_size_left,
@@ -89,10 +89,10 @@ void cutlass_chunk_prefill_impl(
     // query: [batch, num_heads, seq, head_size]
     batch_size = query.size(0);
     num_heads_q = query.size(1);
-    num_heads_kv = key_cache.size(1);
+    num_heads_kv = is_paged ? key_cache.size(2) : key_cache.size(1);
     head_size = query.size(3);
     max_seqlen_q = query.size(2);
-    max_seqlen_k = key_cache.size(2);
+    max_seqlen_k = is_paged ? max_seqlen_q : key_cache.size(2);
   }
   if (is_paged) {
     num_blocks = key_cache.size(0);
@@ -112,6 +112,10 @@ void cutlass_chunk_prefill_impl(
     }
   }
 
+  bool is_fp8_kv =
+      (key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
+       key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn);
+
   chunk_prefill_args_t args = {
       query.data_ptr(),
       key_cache.data_ptr(),
@@ -124,8 +128,8 @@ void cutlass_chunk_prefill_impl(
       max_seqlen_k,
       total_seqlen_q,
       total_seqlen_k,
-      k_scale,
-      v_scale,
+      is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
+      is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
       is_sink ? sm_sink_.value().data_ptr() : nullptr,
       batch_size,

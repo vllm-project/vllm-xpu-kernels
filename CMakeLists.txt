@@ -56,6 +56,7 @@ set(VLLM_XPU_ENABLE_XE_DEFAULT ON)
 
 set(BASIC_KERNELS_ENABLED ON)
 set(FA2_KERNELS_ENABLED ON)
+set(GND_KERNELS_ENABLED ON)
 set(MOE_KERNELS_ENABLED ON)
 set(XPU_SPECIFIC_KERNELS_ENABLED ON)
 
@@ -280,6 +281,7 @@ endif()
 
 set(ATTN_KERNEL_LIB_NAME "")
 set(GROUPED_GEMM_LIB_NAME "")
+set(GDN_ATTN_LIB_NAME "")
 
 if(BUILD_SYCL_TLA_KERNELS)
 
@@ -301,8 +303,10 @@ if(BUILD_SYCL_TLA_KERNELS)
   if(VLLM_XPU_ENABLE_XE2)
     add_subdirectory(csrc/xpu/grouped_gemm/xe_2)
     add_subdirectory(csrc/xpu/attn/xe_2)
+    add_subdirectory(csrc/xpu/gdn_attn/xe_2)
     list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_2")
     list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels_xe_2")
+    list(APPEND GDN_ATTN_LIB_NAME "gdn_attn_kernels_xe_2")
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
@@ -408,9 +412,13 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
   message(STATUS "Enabling _xpu_C extension.")
 
   set(VLLM_EXT_XPU_SRC
-      "csrc/xpu/torch_bindings.cpp" "csrc/xpu/lora/lora_shrink.cpp"
-      "csrc/xpu/lora/lora_expand.cpp" "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
-      "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp" "csrc/xpu/utils.cpp")
+      "csrc/xpu/torch_bindings.cpp"
+      "csrc/xpu/lora/lora_shrink.cpp"
+      "csrc/xpu/lora/lora_expand.cpp"
+      "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
+      "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp"
+      "csrc/xpu/utils.cpp"
+      "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
   include_directories("/usr/include")
   # TODO: check if we need this flags list(APPEND VLLM_GPU_FLAGS
   # "-gline-tables-only")
@@ -443,7 +451,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     INCLUDE_DIRECTORIES
     ${VLLM_XPU_INCLUDE_DIR}
     LIBRARIES
-    ${GROUPED_GEMM_LIB_NAME}
+    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME}
     USE_SABI
     3
     WITH_SOABI)
