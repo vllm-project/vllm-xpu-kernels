@@ -7,7 +7,7 @@ import torch
 import triton.testing
 
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
-from tests.flash_attn import ref_paged_attn
+from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
 from tests.utils import parse_args
 
 
@@ -88,6 +88,8 @@ def make_varlen_with_paged_kv_input(config):
 
 
 def calculate_diff_varlen_paged_kv(config):
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
     _, _, _, _, window_size, dtype, _, _, _, q_dtype, _, is_causal, is_paged, fp8_dtype = config
     maybe_quantized_query, maybe_quantized_key_cache, maybe_quantized_value_cache, \
         max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, \
@@ -141,7 +143,7 @@ def calculate_diff_varlen_paged_kv(config):
                                 kv_lens=kv_lens,
                                 block_tables=block_tables,
                                 scale=scale,
-                                causal=is_causal,
+                                casual=is_causal,
                                 is_paged=is_paged,
                                 sink=sink,
                                 q_descale=q_descale,
@@ -170,6 +172,8 @@ def calculate_diff_varlen_paged_kv(config):
 def benchmark_varlen_with_paged_kv(
     seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype, provider
 ):
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
     maybe_quantized_query, maybe_quantized_key_cache, maybe_quantized_value_cache, \
         max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, \
         seq_k, q_descale, k_descale, v_descale, scale, is_causal, \
@@ -186,7 +190,7 @@ def benchmark_varlen_with_paged_kv(
             kv_lens=kv_lens,
             block_tables=block_tables,
             scale=scale,
-            causal=is_causal,
+            casual=is_causal,
             is_paged=is_paged,
             sink=sink,
             q_descale=q_descale,
@@ -289,7 +293,7 @@ if __name__ == "__main__":
     seed = 1234
     torch.manual_seed(seed)
 
-    seq_lens = [(1, 1328), (5, 18), (129, 463)]
+    seq_lens = [[(1, 1328), (5, 18), (129, 463)]]
     num_heads = [(4, 4), (8, 2), (10, 2), (16, 1)]
     head_size = [64, 128, 192, 256]
     block_size = [64, 128]

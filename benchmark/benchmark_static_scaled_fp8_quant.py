@@ -56,7 +56,7 @@ def get_benchmark():
             line_names=["Native", "vLLM"],
             styles=[("blue", "-"), ("green", "-")],
             ylabel="us",
-            plot_name="fp8-gemm-perf",
+            plot_name="static_scaled_fp8_quant-perf",
             args={},
         )
     )
