@@ -154,53 +154,6 @@ void cutlass_chunk_prefill_impl(
       "FMHA forward only supports head dimension at most " +
           std::to_string(max_head_size));
 
-  if (args.head_size <= HEAD_SIZE_LIMIT_0) {
-    if (is_paged && block_size < 32) {
-      policy_dispatch_func<chunk_policy_head64_p16, true>(
-          queue, cuQKType, args, is_causal, is_local, is_sink);
-    } else {
-      policy_dispatch_func<chunk_policy_head64>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
-    }
-  } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
-    if (is_paged && block_size < 32) {
-      policy_dispatch_func<chunk_policy_head96_p16, true>(
-          queue, cuQKType, args, is_causal, is_local, is_sink);
-    } else if (is_paged && block_size < 64) {
-      policy_dispatch_func<chunk_policy_head96_p32, true>(
-          queue, cuQKType, args, is_causal, is_local, is_sink);
-    } else {
-      policy_dispatch_func<chunk_policy_head96>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
-    }
-  } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
-    if (is_paged && block_size < 32) {
-      policy_dispatch_func<chunk_policy_head128_p16, true>(
-          queue, cuQKType, args, is_causal, is_local, is_sink);
-    } else if (is_paged && block_size < 64) {
-      policy_dispatch_func<chunk_policy_head128_p32, true>(
-          queue, cuQKType, args, is_causal, is_local, is_sink);
-    } else {
-      policy_dispatch_func<chunk_policy_head128>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
-    }
-  } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
-    if (is_paged && block_size < 32) {
-      policy_dispatch_func<chunk_policy_head192_p16, true>(
-          queue, cuQKType, args, is_causal, is_local, is_sink);
-    } else {
-      policy_dispatch_func<chunk_policy_head192>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
-    }
-  } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
-    if (is_paged && block_size < 32) {
-      policy_dispatch_func<chunk_policy_head256_p16, true>(
-          queue, cuQKType, args, is_causal, is_local, is_sink);
-    } else {
-      policy_dispatch_func<chunk_policy_head256>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
-    }
-  } else {
-    TORCH_CHECK(false, "Unsupported head size for fmha");
-  }
+  dispatch_by_page_size(
+      queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
 }
