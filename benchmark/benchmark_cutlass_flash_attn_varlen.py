@@ -7,276 +7,247 @@ import torch
 import triton.testing
 
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+from tests.flash_attn import ref_paged_attn
 from tests.utils import parse_args
 
 
 DEVICE = "xpu"
-
-
 def clear_xpu_cache():
     torch.xpu.empty_cache()
     gc.collect()
     torch.xpu.synchronize()
 
 
-import torch
-import math
+def make_varlen_with_paged_kv_input(config):
+    seq_lens, num_heads, head_size, block_size, window_size, dtype, _, num_blocks, _, q_dtype, is_sink, is_causal, is_paged, fp8_dtype = config
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
 
-def naive_varlen_attention(
-    q, k, v,
-    cu_seqlens_q,
-    cu_seqlens_k,
-    max_seqlen_q,
-    max_seqlen_k,
-    causal=False,
-    softmax_scale=None,
-    out=None,
-):
-    """
-    q, k, v: [total_tokens, num_heads, head_dim]
-    cu_seqlens_q/k: [batch+1]
-    """
-
-    if softmax_scale is None:
-        softmax_scale = q.shape[-1] ** -0.5
-
-    total_tokens, nheads, d = q.shape
-    device = q.device
-    dtype = q.dtype
-
-    if out is None:
-        out = torch.empty_like(q)
-
-    batch = cu_seqlens_q.numel() - 1
-
-    for b in range(batch):
-        qs, qe = cu_seqlens_q[b].item(), cu_seqlens_q[b + 1].item()
-        ks, ke = cu_seqlens_k[b].item(), cu_seqlens_k[b + 1].item()
-
-        q_b = q[qs:qe]      # [Lq, H, D]
-        k_b = k[ks:ke]      # [Lk, H, D]
-        v_b = v[ks:ke]      # [Lk, H, D]
-
-        # transpose for matmul
-        # q: [H, Lq, D], k: [H, D, Lk]
-        qh = q_b.transpose(0, 1)
-        kh = k_b.transpose(0, 1)
-        vh = v_b.transpose(0, 1)
-
-        # attention scores
-        attn = torch.matmul(qh, kh.transpose(-2, -1)) * softmax_scale
-        # [H, Lq, Lk]
-
-        if causal:
-            Lq, Lk = attn.shape[-2:]
-            causal_mask = torch.triu(
-                torch.ones(Lq, Lk, device=device, dtype=torch.bool),
-                diagonal=1,
-            )
-            attn = attn.masked_fill(causal_mask, float("-inf"))
-
-        attn = torch.softmax(attn, dim=-1)
-
-        out_b = torch.matmul(attn, vh)  # [H, Lq, D]
-        out[qs:qe] = out_b.transpose(0, 1)
-
-    return out
-
-
-def fa_varlen_attention_naive(
-    q, k, v,
-    cu_seqlens_q,
-    cu_seqlens_k,
-    max_seqlen_q,
-    max_seqlen_k,
-    causal=False,
-    softmax_scale=None,
-    block_q=64,
-    block_k=64,
-    out=None,
-):
-    """
-    FlashAttention-style PyTorch naive implementation (varlen).
-
-    q, k, v: [total_tokens, num_heads, head_dim]
-    cu_seqlens_q/k: [batch + 1]
-    """
-
-    if softmax_scale is None:
-        softmax_scale = q.shape[-1] ** -0.5
-
-    device = q.device
-    dtype = q.dtype
-    total_tokens, nheads, d = q.shape
-    batch = cu_seqlens_q.numel() - 1
-
-    if out is None:
-        out = torch.empty_like(q)
-
-    for b in range(batch):
-        qs, qe = cu_seqlens_q[b].item(), cu_seqlens_q[b + 1].item()
-        ks, ke = cu_seqlens_k[b].item(), cu_seqlens_k[b + 1].item()
-
-        q_b = q[qs:qe]   # [Lq, H, D]
-        k_b = k[ks:ke]   # [Lk, H, D]
-        v_b = v[ks:ke]   # [Lk, H, D]
-
-        Lq = qe - qs
-        Lk = ke - ks
-
-        # transpose to [H, L, D]
-        qh = q_b.transpose(0, 1)
-        kh = k_b.transpose(0, 1)
-        vh = v_b.transpose(0, 1)
-
-        out_h = torch.empty((nheads, Lq, d), device=device, dtype=dtype)
-
-        for h in range(nheads):
-            qh_h = qh[h]   # [Lq, D]
-            kh_h = kh[h]   # [Lk, D]
-            vh_h = vh[h]   # [Lk, D]
-
-            for q0 in range(0, Lq, block_q):
-                q1 = min(q0 + block_q, Lq)
-                q_blk = qh_h[q0:q1]  # [BQ, D]
-
-                # online softmax state
-                m = torch.full((q1 - q0,), -float("inf"),
-                               device=device, dtype=dtype)
-                l = torch.zeros((q1 - q0,),
-                                device=device, dtype=dtype)
-                o = torch.zeros((q1 - q0, d),
-                                device=device, dtype=dtype)
-
-                for k0 in range(0, Lk, block_k):
-                    k1 = min(k0 + block_k, Lk)
-
-                    # causal mask
-                    if causal and k0 >= q1:
-                        break
-
-                    k_blk = kh_h[k0:k1]   # [BK, D]
-                    v_blk = vh_h[k0:k1]   # [BK, D]
-
-                    scores = (q_blk @ k_blk.T) * softmax_scale  # [BQ, BK]
-
-                    if causal:
-                        qi = torch.arange(q0, q1, device=device).unsqueeze(1)
-                        ki = torch.arange(k0, k1, device=device).unsqueeze(0)
-                        scores = scores.masked_fill(ki > qi, -float("inf"))
-
-                    m_new = torch.maximum(m, scores.max(dim=-1).values)
-                    exp_scores = torch.exp(scores - m_new[:, None])
-
-                    l = l * torch.exp(m - m_new) + exp_scores.sum(dim=-1)
-                    o = o * torch.exp(m - m_new)[:, None] + exp_scores @ v_blk
-                    m = m_new
-
-                out_h[h, q0:q1] = o / l[:, None]
-
-        out[qs:qe] = out_h.transpose(0, 1)
-
-    return out
-
-
-def make_varlen_inputs(
-    batch,
-    max_seqlen,
-    num_heads,
-    head_dim,
-    dtype,
-    device=DEVICE,
-):
-    seqlens = torch.randint(
-        low=max_seqlen // 4,
-        high=max_seqlen,
-        size=(batch,),
-        device=device,
-    )
-
-    cu_seqlens = torch.zeros(batch + 1, device=device, dtype=torch.int32)
-    cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
-
-    total_tokens = cu_seqlens[-1].item()
-
-    q = torch.randn(total_tokens, num_heads, head_dim, device=device, dtype=dtype)
-    k = torch.randn_like(q)
-    v = torch.randn_like(q)
-
-    return q, k, v, cu_seqlens, seqlens.max().item()
-
-
-def calculate_diff(config):
-    batch, max_seqlen, num_heads, head_dim, dtype = config
-    q, k, v, cu_seqlens, max_seqlen_real = make_varlen_inputs(
-        batch, max_seqlen, num_heads, head_dim, dtype
-    )
-
-    out_naive = fa_varlen_attention_naive(
-        q, k, v,
-        cu_seqlens, cu_seqlens,
-        max_seqlen_real, max_seqlen_real,
-        causal=True,
-    )
-    out_vllm = flash_attn_varlen_func(
-        q, k, v,
-        max_seqlen_real,
-        cu_seqlens,
-        max_seqlen_real,
-        cu_seqlens,
-        causal=True,
-    )
-    if torch.allclose(out_naive, out_vllm, atol=1e-3, rtol=0):
-        print("✅ All implementations match, ", config)
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    if is_paged:
+        key_cache = torch.randn(num_blocks,
+                                block_size,
+                                num_kv_heads,
+                                head_size,
+                                dtype=dtype)
     else:
-        print("❌ Implementations differ, ", config)
+        key_cache = torch.randn(sum(kv_lens),
+                                num_query_heads,
+                                head_size,
+                                dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    cu_kv_lens = torch.tensor([0] + kv_lens,
+                              dtype=torch.int32).cumsum(dim=0,
+                                                        dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+    sink = None
+    if is_sink:
+        sink = torch.randn(num_query_heads, dtype=dtype)
+
+    maybe_quantized_query = query
+    maybe_quantized_key_cache = key_cache
+    maybe_quantized_value_cache = value_cache
+    q_descale = None  #noqa: F841
+    k_descale = None  #noqa: F841
+    v_descale = None  #noqa: F841
+    scale_shape = (num_seqs, num_kv_heads)
+    is_fp8_query = q_dtype is not None
+    if is_fp8_query:
+        q_descale = (torch.abs(query).max() / 200).to(torch.float32)
+        maybe_quantized_query = (query / q_descale).to(q_dtype)
+    is_fp8kv = fp8_dtype is not None
+    if is_fp8kv:
+        k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
+        v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
+        maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
+        maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
+    return (maybe_quantized_query, maybe_quantized_key_cache, maybe_quantized_value_cache, 
+            max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, seq_k, 
+            q_descale, k_descale, v_descale, scale, is_causal, block_tables, 
+            window_size, sink, scale_shape, query, query_lens, kv_lens, is_fp8kv, is_fp8_query)
 
 
-def benchmark_flash_vs_naive(
-    batch,
-    max_seqlen,
-    num_heads,
-    head_dim,
-    dtype,
-    provider,
+def calculate_diff_varlen_paged_kv(config):
+    _, _, _, _, window_size, dtype, _, _, _, q_dtype, _, is_causal, is_paged, fp8_dtype = config
+    maybe_quantized_query, maybe_quantized_key_cache, maybe_quantized_value_cache, \
+        max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, \
+        seq_k, q_descale, k_descale, v_descale, scale, is_causal, \
+        block_tables, window_size, sink, scale_shape, query, \
+        query_lens, kv_lens, is_fp8kv, is_fp8_query = make_varlen_with_paged_kv_input(config)
+
+    if is_paged:
+        output = flash_attn_varlen_func(maybe_quantized_query,
+                                        maybe_quantized_key_cache,
+                                        maybe_quantized_value_cache,
+                                        max_query_len,
+                                        cu_query_lens,
+                                        max_kv_len,
+                                        seqused_k=seq_k,
+                                        q_descale=q_descale.expand(scale_shape)
+                                        if q_descale is not None else None,
+                                        k_descale=k_descale.expand(scale_shape)
+                                        if k_descale is not None else None,
+                                        v_descale=v_descale.expand(scale_shape)
+                                        if v_descale is not None else None,
+                                        softmax_scale=scale,
+                                        causal=is_causal,
+                                        block_table=block_tables,
+                                        window_size=window_size,
+                                        s_aux=sink)
+    else:
+        output = flash_attn_varlen_func(maybe_quantized_query,
+                                        maybe_quantized_key_cache,
+                                        maybe_quantized_value_cache,
+                                        max_query_len,
+                                        cu_query_lens,
+                                        max_kv_len,
+                                        cu_seqlens_k=cu_kv_lens,
+                                        q_descale=q_descale.expand(scale_shape)
+                                        if q_descale is not None else None,
+                                        k_descale=k_descale.expand(scale_shape)
+                                        if k_descale is not None else None,
+                                        v_descale=v_descale.expand(scale_shape)
+                                        if v_descale is not None else None,
+                                        softmax_scale=scale,
+                                        causal=is_causal,
+                                        block_table=None,
+                                        window_size=window_size,
+                                        s_aux=sink)
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=maybe_quantized_key_cache,
+                                value_cache=maybe_quantized_value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                causal=is_causal,
+                                is_paged=is_paged,
+                                sink=sink,
+                                q_descale=q_descale,
+                                k_descale=k_descale,
+                                v_descale=v_descale,
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1],
+                                is_fp8kv=is_fp8kv,
+                                is_fp8_query=is_fp8_query,
+                                dtype=dtype)
+    atol, rtol = 1e-2, 1e-2
+    if q_dtype is not None:
+        atol, rtol = 1.5e-1, 1.5e-1
+    if window_size[0] != -1 or window_size[1] != -1:
+        atol, rtol = 1.5e-2, 1.5e-2
+    if fp8_dtype is not None:
+        atol, rtol = 1.5e-2, 1.5e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
+def benchmark_varlen_with_paged_kv(
+    seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype, provider
 ):
-    q, k, v, cu_seqlens, max_seqlen_real = make_varlen_inputs(
-        batch, max_seqlen, num_heads, head_dim, dtype
-    )
-
+    maybe_quantized_query, maybe_quantized_key_cache, maybe_quantized_value_cache, \
+        max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, \
+        seq_k, q_descale, k_descale, v_descale, scale, is_causal, \
+        block_tables, window_size, sink, scale_shape, query, \
+        query_lens, kv_lens, is_fp8kv, is_fp8_query = make_varlen_with_paged_kv_input(config=(seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype))
     quantiles = [0.5, 0.2, 0.8]
 
     if provider == "naive":
         ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: fa_varlen_attention_naive(
-                q, k, v,
-                cu_seqlens, cu_seqlens,
-                max_seqlen_real,
-                max_seqlen_real,
-                causal=True,
-            ),
+            lambda: ref_paged_attn(query=query,
+            key_cache=maybe_quantized_key_cache,
+            value_cache=maybe_quantized_value_cache,
+            query_lens=query_lens,
+            kv_lens=kv_lens,
+            block_tables=block_tables,
+            scale=scale,
+            causal=is_causal,
+            is_paged=is_paged,
+            sink=sink,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            window_size_left=window_size[0],
+            window_size_right=window_size[1],
+            is_fp8kv=is_fp8kv,
+            is_fp8_query=is_fp8_query,
+            dtype=dtype),
+            quantiles=quantiles,
+        )
+    elif is_paged:
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: flash_attn_varlen_func(maybe_quantized_query,
+            maybe_quantized_key_cache,
+            maybe_quantized_value_cache,
+            max_query_len,
+            cu_query_lens,
+            max_kv_len,
+            seqused_k=seq_k,
+            q_descale=q_descale.expand(scale_shape)
+            if q_descale is not None else None,
+            k_descale=k_descale.expand(scale_shape)
+            if k_descale is not None else None,
+            v_descale=v_descale.expand(scale_shape)
+            if v_descale is not None else None,
+            softmax_scale=scale,
+            causal=is_causal,
+            block_table=block_tables,
+            window_size=window_size,
+            s_aux=sink),
             quantiles=quantiles,
         )
     else:
         ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: flash_attn_varlen_func(
-                q, k, v,
-                max_seqlen_real,
-                cu_seqlens,
-                max_seqlen_real,
-                cu_seqlens,
-                causal=True,
-            ),
+            lambda: flash_attn_varlen_func(maybe_quantized_query,
+            maybe_quantized_key_cache,
+            maybe_quantized_value_cache,
+            max_query_len,
+            cu_query_lens,
+            max_kv_len,
+            cu_seqlens_k=cu_kv_lens,
+            q_descale=q_descale.expand(scale_shape)
+            if q_descale is not None else None,
+            k_descale=k_descale.expand(scale_shape)
+            if k_descale is not None else None,
+            v_descale=v_descale.expand(scale_shape)
+            if v_descale is not None else None,
+            softmax_scale=scale,
+            causal=is_causal,
+            block_table=None,
+            window_size=window_size,
+            s_aux=sink),
             quantiles=quantiles,
         )
 
     return 1000 * ms, 1000 * max_ms, 1000 * min_ms
 
 
-def get_benchmark():
+def get_benchmark_varlen_with_paged_kv():
     @triton.testing.perf_report(
         triton.testing.Benchmark(
-            x_names=["batch", "max_seqlen", "num_heads", "head_dim", "dtype"],
+            x_names=["seq_lens", "num_heads", "head_size", "block_size", "window_size", "dtype", "soft_cap", "num_blocks", "fa_versions", "q_dtype", "is_sink", "is_causal", "is_paged", "fp8_dtype"],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
             line_vals=["naive", "flash"],
@@ -287,13 +258,22 @@ def get_benchmark():
             args={},
         )
     )
-    def benchmark(batch, max_seqlen, num_heads, head_dim, dtype, provider):
-        return benchmark_flash_vs_naive(
-            batch=batch,
-            max_seqlen=max_seqlen,
+    def benchmark(seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype, provider):
+        return benchmark_varlen_with_paged_kv(
+            seq_lens=seq_lens,
             num_heads=num_heads,
-            head_dim=head_dim,
+            head_size=head_size,
+            block_size=block_size,
+            window_size=window_size,
             dtype=dtype,
+            soft_cap=soft_cap,
+            num_blocks=num_blocks,
+            fa_versions=fa_versions,
+            q_dtype=q_dtype,
+            is_sink=is_sink,
+            is_causal=is_causal,
+            is_paged=is_paged,
+            fp8_dtype=fp8_dtype,
             provider=provider,
         )
 
@@ -306,28 +286,47 @@ if __name__ == "__main__":
     seed = 1234
     torch.manual_seed(seed)
 
-    batch = [1, 4, 8]
-    max_seqlen = [16, 512, 1024, 2048]
-    num_heads = [16]
-    head_dim = [128]
-    dtype = [torch.float16, torch.bfloat16]  # float32 not support, VLLM Kernel XPU only supports fp16 and bf16 type
+    seq_lens = [(1, 1328), (5, 18), (129, 463)]
+    num_heads = [(4, 4), (8, 2), (10, 2), (16, 1)]
+    head_size = [64, 128, 192, 256]
+    block_size = [64, 128]
+    window_size = [(-1, 127), (127, -1), (64, 64), (-1, -1)]
+    dtype = [torch.float16, torch.bfloat16]
+    soft_cap = [None]
+    num_blocks = [32768, 2048]
+    fa_versions = [2]
+    q_dtype = [None]
+    is_sink = [False, True]
+    is_causal = [False, True]
+    is_paged = [False, True]
+    fp8_dtype = [torch.float8_e5m2, torch.float8_e4m3fn, None]
     print("Final configuration:")
-    print(f"  batch: {batch}")
-    print(f"  max_seqlen: {max_seqlen}")
-    print(f"  num_heads: {num_heads}")
-    print(f"  head_dim: {head_dim}")
-    print(f"  dtype: {dtype}")
+    print(f"seq_lens: {seq_lens}")
+    print(f"num_heads: {num_heads}")
+    print(f"head_size: {head_size}")
+    print(f"block_size: {block_size}")
+    print(f"window_size: {window_size}")
+    print(f"dtype: {dtype}")
+    print(f"soft_cap: {soft_cap}")
+    print(f"num_blocks: {num_blocks}")
+    print(f"fa_versions: {fa_versions}")
+    print(f"q_dtype: {q_dtype}")
+    print(f"is_sink: {is_sink}")
+    print(f"is_causal: {is_causal}")
+    print(f"is_paged: {is_paged}")
+    print(f"fp8_dtype: {fp8_dtype}")
 
     configs = list(
-        itertools.product(batch, max_seqlen, num_heads, head_dim, dtype))
+        itertools.product(seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype)
+    )
 
     for config in configs:
        try:
-           calculate_diff(config)
+           calculate_diff_varlen_paged_kv(config)
        except RuntimeError as e:
            clear_xpu_cache()
            print(f"Error in config {config}: {e}")
 
-    benchmark = get_benchmark()
+    benchmark = get_benchmark_varlen_with_paged_kv()
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=args.save_path)
