@@ -24,6 +24,28 @@
 
 using namespace cute;
 
+using decode_policy_q8_h64_p16 = decode_policy_qpacked_head<_8, _64, _16>;
+using decode_policy_q8_h96_p16 = decode_policy_qpacked_head<_8, _96, _16>;
+using decode_policy_q8_h128_p16 = decode_policy_qpacked_head<_8, _128, _16>;
+using decode_policy_q8_h192_p16 = decode_policy_qpacked_head<_8, _192, _16>;
+using decode_policy_q8_h256_p16 = decode_policy_qpacked_head<_8, _256, _16>;
+using decode_policy_q16_h64_p16 = decode_policy_qpacked_head<_16, _64, _16>;
+using decode_policy_q16_h96_p16 = decode_policy_qpacked_head<_16, _96, _16>;
+using decode_policy_q16_h128_p16 = decode_policy_qpacked_head<_16, _128, _16>;
+using decode_policy_q16_h192_p16 = decode_policy_qpacked_head<_16, _192, _16>;
+using decode_policy_q16_h256_p16 = decode_policy_qpacked_head<_16, _256, _16>;
+
+using decode_policy_q8_h64_p32 = decode_policy_qpacked_head<_8, _64, _32>;
+using decode_policy_q8_h96_p32 = decode_policy_qpacked_head<_8, _96, _32>;
+using decode_policy_q8_h128_p32 = decode_policy_qpacked_head<_8, _128, _32>;
+using decode_policy_q8_h192_p32 = decode_policy_qpacked_head<_8, _192, _32>;
+using decode_policy_q8_h256_p32 = decode_policy_qpacked_head<_8, _256, _32>;
+using decode_policy_q16_h64_p32 = decode_policy_qpacked_head<_16, _64, _32>;
+using decode_policy_q16_h96_p32 = decode_policy_qpacked_head<_16, _96, _32>;
+using decode_policy_q16_h128_p32 = decode_policy_qpacked_head<_16, _128, _32>;
+using decode_policy_q16_h192_p32 = decode_policy_qpacked_head<_16, _192, _32>;
+using decode_policy_q16_h256_p32 = decode_policy_qpacked_head<_16, _256, _32>;
+
 using decode_policy_q8_h64_p64 = decode_policy_qpacked_head<_8, _64, _64>;
 using decode_policy_q8_h96_p64 = decode_policy_qpacked_head<_8, _96, _64>;
 using decode_policy_q8_h128_p64 = decode_policy_qpacked_head<_8, _128, _64>;

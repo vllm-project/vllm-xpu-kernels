@@ -168,6 +168,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
     int num_kv_splits = num_splits.value_or(get_num_splits(
         queue, batch_size, num_heads_kv, max_seqlen_k, block_size));
+    // Cap num_kv_splits to block_size which equals the decode kernel's
+    // max_num_kv_splits (SGPerWG * sg_size) for all page-size policies.
+    num_kv_splits = std::min(num_kv_splits, block_size);
 
     at::Tensor tmp_out =
         num_kv_splits == 1

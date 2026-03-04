@@ -56,6 +56,25 @@
 // Apply the bool combination generator to all policies
 CHUNK_POLICY_LIST(DECLARE_ALL_BOOL_COMBINATIONS)
 
+// Page-size-specific paged-only policies (only Paged=true instantiations)
+#define CHUNK_PAGED_POLICY_LIST(X) \
+  X(chunk_policy_head64_p16)       \
+  X(chunk_policy_head96_p16)       \
+  X(chunk_policy_head128_p16)      \
+  X(chunk_policy_head192_p16)      \
+  X(chunk_policy_head256_p16)      \
+  X(chunk_policy_head96_p32)       \
+  X(chunk_policy_head128_p32)
+
+#define DECLARE_ALL_BOOL_PAGED_ONLY(POLICY) \
+  DECLARE_FOR_CAUSAL(POLICY, true)
+
+CHUNK_PAGED_POLICY_LIST(DECLARE_ALL_BOOL_PAGED_ONLY)
+
+// Cleanup macros
+#undef DECLARE_ALL_BOOL_PAGED_ONLY
+#undef CHUNK_PAGED_POLICY_LIST
+
 // Cleanup macros
 #undef DECLARE_ALL_BOOL_COMBINATIONS
 #undef DECLARE_FOR_CAUSAL
