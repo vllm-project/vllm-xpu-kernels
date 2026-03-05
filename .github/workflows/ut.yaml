@@ -78,10 +78,17 @@ jobs:
           export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
           export CCACHE_NOHASHDIR=1
           export CCACHE_COMPILERCHECK=content
+          export CCACHE_LOGFILE=/tmp/ccache.log
+          export CCACHE_DEBUG=1
           ccache -s || true
+          ccache -p || true
           uv pip install -r requirements.txt
           MAX_JOBS=128 uv pip install --no-build-isolation -e . -v
           ccache -s || true
+          grep -c "Result: cache miss" /tmp/ccache.log || true
+          grep -c "Result: cache hit" /tmp/ccache.log || true
+          grep "Result: unsupported" /tmp/ccache.log | head -5 || true
+          grep "Result: called for" /tmp/ccache.log | head -5 || true
 
       - name: test 
         run: |
@@ -118,10 +125,17 @@ jobs:
           export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
           export CCACHE_NOHASHDIR=1
           export CCACHE_COMPILERCHECK=content
+          export CCACHE_LOGFILE=/tmp/ccache.log
+          export CCACHE_DEBUG=1
           ccache -s || true
+          ccache -p || true
           uv pip install -r requirements.txt
           MAX_JOBS=128 uv pip install --no-build-isolation -e . -v
           ccache -s || true
+          grep -c "Result: cache miss" /tmp/ccache.log || true
+          grep -c "Result: cache hit" /tmp/ccache.log || true
+          grep "Result: unsupported" /tmp/ccache.log | head -5 || true
+          grep "Result: called for" /tmp/ccache.log | head -5 || true
 
       - name: test 
         run: |
