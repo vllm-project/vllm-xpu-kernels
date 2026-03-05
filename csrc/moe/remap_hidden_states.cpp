@@ -186,13 +186,13 @@ class RemapHiddenStates {
     int first_token_offset = expert_first_token_offset[local_expert_id];
     rows_offset += first_token_offset;
 
-    if(local_id == 0){
-        unpermuted_row_to_permuted_row[row * n_experts_per_token + topi] = rows_offset;
-    }
-
     #pragma unroll
     for(int i = local_id; i < hidden_size; i += GroupWorkItem){
         remapped_hidden_states[rows_offset * hidden_size + i] = hidden_states[row * hidden_size + i];
+    }
+
+    if(local_id == 0){
+        unpermuted_row_to_permuted_row[row * n_experts_per_token + topi] = rows_offset;
     }
 
   }
