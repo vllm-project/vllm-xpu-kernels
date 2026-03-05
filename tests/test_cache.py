@@ -35,6 +35,7 @@ DEVICES = [
 ]
 
 KV_CACHE_DTYPE = ["auto"]  # FIXME: will add "fp8" when accuracy is improved
+KV_CACHE_DTYPE_ALL = ["auto", "fp8"]
 
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
@@ -189,7 +190,7 @@ def test_reshape_and_cache(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE_ALL)
 @torch.inference_mode()
 def test_reshape_and_cache_flash(
     num_tokens: int,

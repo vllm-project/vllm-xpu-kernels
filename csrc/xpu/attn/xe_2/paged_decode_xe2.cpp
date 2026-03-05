@@ -62,7 +62,7 @@ void cutlass_paged_decode_impl(
     const at::Tensor& value_cache,
     at::Tensor& out,
     at::Tensor&
-        temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
+        temp_out,  // [batch, num_kv_splits, num_head_q, seq_q, head_size]
     at::Tensor& exp_sums,    // [batch, num_head_q, seq_q, num_kv_splits]
     at::Tensor& max_logits,  // [batch, num_head_q, seq_q, num_kv_splits]
     const at::Tensor& block_table,
@@ -171,9 +171,9 @@ void cutlass_paged_decode_impl(
   int num_q_group_size = num_heads_q / num_heads_kv;
 
   if (num_q_group_size <= 8) {
-    dispatch_by_head_size<_8>(head_case, queue, cuType, args);
+    dispatch_by_page_size<_8>(block_size, head_case, queue, cuType, args);
   } else if (num_q_group_size <= 16) {
-    dispatch_by_head_size<_16>(head_case, queue, cuType, args);
+    dispatch_by_page_size<_16>(block_size, head_case, queue, cuType, args);
   } else {
     TORCH_CHECK(false, "Unsupported num_heads_q / num_heads_kv for fmha");
   }
