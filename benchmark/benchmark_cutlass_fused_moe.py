@@ -142,8 +142,8 @@ def calculate_diff(config):
 def get_benchmark():
     @triton.testing.perf_report(
         triton.testing.Benchmark(
-            x_names=["mnk", "num_experts", "topk", "dtype", "w_dtype", "has_bias"],
-            x_vals=[tuple(c) for c in configs],
+            x_names=["m", "n", "k", "num_experts", "topk", "dtype", "w_dtype", "has_bias"],
+            x_vals=[(*tuple(c)[0], *tuple(c)[1:]) for c in configs],
             line_arg="provider",
             line_vals=["native", "vllm"],
             line_names=["native", "vllm"],
@@ -153,14 +153,14 @@ def get_benchmark():
             args={},
         )
     )
-    def benchmark(mnk, num_experts, topk, dtype, w_dtype, has_bias, provider):
+    def benchmark(m, n, k, num_experts, topk, dtype, w_dtype, has_bias, provider):
         quantiles = [0.5, 0.2, 0.8]
 
-        print(f"Running config: {(mnk, num_experts, topk, dtype, w_dtype, has_bias)}, Provider: {provider}", flush=True)
+        print(f"Running config: {(m, n, k, num_experts, topk, dtype, w_dtype, has_bias)}, Provider: {provider}", flush=True)
         if provider == "native":
             ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
             flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
-                expert_scores, expert_indices = make_fused_moe_input(config=(mnk, num_experts, topk, dtype, w_dtype, has_bias))
+                expert_scores, expert_indices = make_fused_moe_input(config=((m, n, k), num_experts, topk, dtype, w_dtype, has_bias))
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: ref_fused_moe(ref_a, ref_w13, w13_bias, ref_w2, w2_bias,
                 flat_expert_weights, flat_expert_indices, topk,
@@ -170,7 +170,7 @@ def get_benchmark():
         else:
             ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
             flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
-                expert_scores, expert_indices = make_fused_moe_input(config=(mnk, num_experts, topk, dtype, w_dtype, has_bias))
+                expert_scores, expert_indices = make_fused_moe_input(config=((m, n, k), num_experts, topk, dtype, w_dtype, has_bias))
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: xpu_fused_moe(hidden_states=a,
                 w13=w13,
