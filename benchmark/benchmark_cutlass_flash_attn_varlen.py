@@ -92,7 +92,7 @@ def make_varlen_with_paged_kv_input(config):
 def calculate_diff_varlen_paged_kv(config):
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
-    _, _, _, _, window_size, dtype, _, _, _, q_dtype, _, is_causal, is_paged, fp8_dtype = config
+    _, _, _, _, _, _, window_size, dtype, _, _, _, q_dtype, _, is_causal, is_paged, fp8_dtype = config
     maybe_quantized_query, maybe_quantized_key_cache, maybe_quantized_value_cache, \
         max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, \
         seq_k, q_descale, k_descale, v_descale, scale, is_causal, \
