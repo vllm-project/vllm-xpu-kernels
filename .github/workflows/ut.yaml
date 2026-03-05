@@ -80,7 +80,7 @@ jobs:
           export CCACHE_COMPILERCHECK=content
           ccache -s || true
           uv pip install -r requirements.txt
-          MAX_JOBS=128 uv pip install -e . -v
+          MAX_JOBS=128 uv pip install -e --no-build-isolation . -v
           ccache -s || true
 
       - name: test 
@@ -120,7 +120,7 @@ jobs:
           export CCACHE_COMPILERCHECK=content
           ccache -s || true
           uv pip install -r requirements.txt
-          MAX_JOBS=128 uv pip install -e . -v
+          MAX_JOBS=128 uv pip install -e --no-build-isolation . -v
           ccache -s || true
 
       - name: test 
