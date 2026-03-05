@@ -317,7 +317,9 @@ if __name__ == "__main__":
     is_paged = [False, True]
     fp8_dtype = [torch.float8_e5m2, torch.float8_e4m3fn, None]
     print("Final configuration:")
-    print(f"seq_lens: {seq_lens}")
+    print(f"num_seqs: {num_seqs}")
+    print(f"query_lens: {query_lens}")
+    print(f"kv_lens: {kv_lens}")
     print(f"num_heads: {num_heads}")
     print(f"head_size: {head_size}")
     print(f"block_size: {block_size}")
