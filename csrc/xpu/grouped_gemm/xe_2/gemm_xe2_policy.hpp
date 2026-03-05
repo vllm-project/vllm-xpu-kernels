@@ -8,8 +8,8 @@ using namespace cute;
 
 class xe_gemm_policy_base {
  public:
-  using WGTile = Shape<_256, _256, _32>;
-  using SGLayout = Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>;
+  using WGTile = Shape<_256, _128, _32>;
+  using SGLayout = Layout<Shape<_8, _2, _1>, Stride<_2, _1, _0>>;
 
   // Copy can be turned for better performance
   using GmemTiledCopyA = void;  // same as make_block_2d_copy_A
