@@ -109,7 +109,7 @@ jobs:
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           uv pip install -r requirements.txt
-          MAX_JOBS=128 uv pip install -e . -v
+          MAX_JOBS=96 uv pip install -e . -v
 
       - name: test 
         run: |
