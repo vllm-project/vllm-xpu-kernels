@@ -20,10 +20,11 @@ def clear_xpu_cache():
 
 
 def make_varlen_with_paged_kv_input(config):
-    seq_lens, num_heads, head_size, block_size, window_size, dtype, _, num_blocks, _, q_dtype, is_sink, is_causal, is_paged, fp8_dtype = config
-    num_seqs = len(seq_lens)
-    query_lens = [x[0] for x in seq_lens]
-    kv_lens = [x[1] for x in seq_lens]
+    num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, _, num_blocks, _, q_dtype, is_sink, is_causal, is_paged, fp8_dtype = config
+    query_lens = query_lens.split(",")
+    query_lens = [int(x) for x in query_lens]
+    kv_lens = kv_lens.split(",")
+    kv_lens = [int(x) for x in kv_lens]
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
     assert num_query_heads % num_kv_heads == 0
@@ -171,7 +172,7 @@ def calculate_diff_varlen_paged_kv(config):
 
 
 def benchmark_varlen_with_paged_kv(
-    seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype, provider
+    num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype, provider
 ):
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -179,10 +180,10 @@ def benchmark_varlen_with_paged_kv(
         max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, \
         seq_k, q_descale, k_descale, v_descale, scale, is_causal, \
         block_tables, window_size, sink, scale_shape, query, \
-        query_lens, kv_lens, is_fp8kv, is_fp8_query = make_varlen_with_paged_kv_input(config=(seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype))
+        query_lens, kv_lens, is_fp8kv, is_fp8_query = make_varlen_with_paged_kv_input(config=(num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype))
     quantiles = [0.5, 0.2, 0.8]
 
-    print(f"Running config: {(seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype)}, Provider: {provider}", flush=True)
+    print(f"Running config: {(num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype)}, Provider: {provider}", flush=True)
     if provider == "native":
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: ref_paged_attn(query=query,
@@ -256,7 +257,7 @@ def benchmark_varlen_with_paged_kv(
 def get_benchmark_varlen_with_paged_kv():
     @triton.testing.perf_report(
         triton.testing.Benchmark(
-            x_names=["seq_lens", "num_heads", "head_size", "block_size", "window_size", "dtype", "soft_cap", "num_blocks", "fa_versions", "q_dtype", "is_sink", "is_causal", "is_paged", "fp8_dtype"],
+            x_names=["num_seqs", "query_lens", "kv_lens", "num_heads", "head_size", "block_size", "window_size", "dtype", "soft_cap", "num_blocks", "fa_versions", "q_dtype", "is_sink", "is_causal", "is_paged", "fp8_dtype"],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
             line_vals=["native", "flash"],
@@ -267,9 +268,11 @@ def get_benchmark_varlen_with_paged_kv():
             args={},
         )
     )
-    def benchmark(seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype, provider):
+    def benchmark(num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype, provider):
         return benchmark_varlen_with_paged_kv(
-            seq_lens=seq_lens,
+            num_seqs=num_seqs,
+            query_lens=query_lens,
+            kv_lens=kv_lens,
             num_heads=num_heads,
             head_size=head_size,
             block_size=block_size,
@@ -295,7 +298,11 @@ if __name__ == "__main__":
     seed = 1234
     seed_everything(seed)
 
-    seq_lens = [[(1, 1328), (5, 18), (129, 463)]]
+    # seq_lens = [[(1, 1328), (5, 18), (129, 463)]]
+    num_seqs = [3]
+    query_lens = ["1,5,129"]
+    kv_lens = ["1328,18,463"]
+
     num_heads = [(4, 4), (8, 2), (10, 2), (16, 1)]
     head_size = [64, 128, 192, 256]
     block_size = [64, 128]
@@ -326,15 +333,15 @@ if __name__ == "__main__":
     print(f"fp8_dtype: {fp8_dtype}")
 
     configs = list(
-        itertools.product(seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype)
+        itertools.product(num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype)
     )
 
     for config in configs:
-        try:
-            calculate_diff_varlen_paged_kv(config)
-        except Exception as e:
-            print("Error in config: ", config, " error: ", e)
-        clear_xpu_cache()
+       try:
+           calculate_diff_varlen_paged_kv(config)
+       except Exception as e:
+           print("Error in config: ", config, " error: ", e)
+       clear_xpu_cache()
 
     benchmark = get_benchmark_varlen_with_paged_kv()
     # Run performance benchmark
