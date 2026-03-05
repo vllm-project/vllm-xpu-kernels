@@ -95,6 +95,7 @@ def get_benchmark():
         )
 
         quantiles = [0.5, 0.2, 0.8]
+        print(f"Running config: {(dtype, fp8_dtype, trans_wei, is_mbk, batch, m_n_k)}, Provider: {provider}", flush=True)
 
         if provider == "native":
             input_clone = input.clone()

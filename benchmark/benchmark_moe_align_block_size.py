@@ -401,6 +401,7 @@ def get_benchmark_with_expert_map(configs):
             expert_map[expert_id] = i
 
         quantiles = [0.5, 0.2, 0.8]
+        print(f"Running config: {(m, topk, num_experts, block_size)}, Provider: {provider}", flush=True)
 
         if provider == "native":
             topk_ids_clone = topk_ids.clone()

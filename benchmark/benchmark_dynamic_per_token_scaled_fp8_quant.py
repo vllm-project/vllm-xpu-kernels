@@ -47,6 +47,7 @@ def benchmark_quantization(
     scale_ub = torch.mean(x).to(dtype=torch.float32,
         device=DEVICE) if scale_ub else None
     quantiles = [0.5, 0.2, 0.8]
+    print(f"Running config: {(num_tokens, hidden_size, dtype, scale_ub, fp8_dtype)}, Provider: {provider}", flush=True)
 
     if provider == "native":
         x_clone = x.clone()

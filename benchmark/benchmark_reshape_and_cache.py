@@ -90,6 +90,7 @@ def get_benchmark(
 
         torch.manual_seed(42)
         torch.set_default_device(device)
+        print(f"Running config: {(num_tokens, num_heads, head_size, block_size, num_blocks, dtype, kv_cache_dtype)}, Provider: {provider}", flush=True)
 
         key = torch.randn(num_tokens,
                           num_heads,

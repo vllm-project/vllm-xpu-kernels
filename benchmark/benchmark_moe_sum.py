@@ -47,7 +47,7 @@ def get_benchmark():
             line_names=["Native", "vLLM"],
             styles=[("blue", "-"), ("green", "-")],
             ylabel="us",
-            plot_name="fp8-gemm-perf",
+            plot_name="moe_sum-perf",
             args={},
         )
     )
@@ -55,6 +55,7 @@ def get_benchmark():
         input = torch.randn((m, topk, k), device=DEVICE, dtype=dtype)
 
         quantiles = [0.5, 0.2, 0.8]
+        print(f"Running config: {(m, topk, k, dtype)}, Provider: {provider}", flush=True)
 
         if provider == "native":
             input_clone = input.clone()

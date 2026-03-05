@@ -63,6 +63,7 @@ def get_benchmark():
     def benchmark(num_tokens, hidden_size, dtype, fp8_dtype, group_shape, provider):
         x = torch.rand(num_tokens, hidden_size, dtype=dtype, device=DEVICE)
         quantiles = [0.5, 0.2, 0.8]
+        print(f"Running config: {(num_tokens, hidden_size, dtype, fp8_dtype, group_shape)}, Provider: {provider}", flush=True)
 
         if provider == "native":
             x_clone = x.clone()

@@ -96,6 +96,7 @@ def get_benchmark():
         key = torch.randn_like(query) if use_key else None
         query = query[..., :head_size]
         key = key[..., :head_size] if use_key else None
+        print(f"Running config: {(max_position, is_neox_style, rotary_dim, head_size, seq_len, use_key, head_stride_is_contiguous)}, Provider: {provider}", flush=True)
 
         if provider == "native":
             positions_clone = positions.clone()
