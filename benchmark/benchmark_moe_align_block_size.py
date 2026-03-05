@@ -11,7 +11,7 @@ from tests.ops.moe_align_block_size_ops import (batched_moe_align_block_size,
 from tests.utils import parse_args, opcheck, round_up, seed_everything
 from tests.test_moe_align_block_size import torch_moe_align_block_size, _verify_expert_level_sorting
 
-seed_everything(0)
+
 DEVICE = "xpu"
 
 def moe_align_block_size_native(topk_ids, num_experts, block_size,
@@ -596,7 +596,7 @@ if __name__ == "__main__":
 
     args = parse_args()
     seed = 1234
-    torch.manual_seed(seed)
+    seed_everything(seed)
 
     sanity_check()
     sanity_check_with_expert_map()

@@ -135,9 +135,6 @@ def calculate_diff(config):
         output_native = output_native[0]
         output_vllm = output_vllm[0]
 
-    print(f"native output={output_native}")
-    print(f"vLLM output={output_vllm}")
-
     if torch.allclose(output_native, output_vllm, atol=1e-2, rtol=1e-2):
         print("✅ All implementations match, ", config)
     else:

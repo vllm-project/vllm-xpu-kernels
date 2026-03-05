@@ -98,7 +98,7 @@ if __name__ == "__main__":
     args = parse_args()
     seed_everything(0)
 
-    num_toknes = [1, 7, 83, 4096]
+    num_tokens = [1, 7, 83, 4096]
     HIDDEN_SIZES = [
         1,
         2,
@@ -119,14 +119,14 @@ if __name__ == "__main__":
     fp8_dtype = [torch.float8_e4m3fn]
     group_shape = [(1, -1), (-1, 1)]
     print("Final configuration:")
-    print(f"  num_tokens: {num_toknes}")
+    print(f"  num_tokens: {num_tokens}")
     print(f"  hidden_size: {hidden_size}")
     print(f"  dtype: {dtype}")
     print(f"  fp8_dtype: {fp8_dtype}")
     print(f"  group_shape: {group_shape}")
 
     configs = list(
-        itertools.product(num_toknes, hidden_size, dtype, fp8_dtype, group_shape))
+        itertools.product(num_tokens, hidden_size, dtype, fp8_dtype, group_shape))
 
     for config in configs:
         calculate_diff(config)

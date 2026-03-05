@@ -25,7 +25,7 @@ def check_correctness(config):
     positions = torch.randint(0,
                               max_position, (batch_size, seq_len),
                               device=device)
-    head_stride = head_size + (64 if head_stride_is_contiguous else 0)
+    head_stride = head_size + (0 if head_stride_is_contiguous else 64)
 
     query = torch.randn(batch_size,
                         seq_len,
