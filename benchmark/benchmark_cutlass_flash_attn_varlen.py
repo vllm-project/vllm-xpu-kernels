@@ -8,6 +8,7 @@ import triton.testing
 
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
+from tests.utils import seed_everything
 from tests.utils import parse_args
 
 
@@ -181,6 +182,7 @@ def benchmark_varlen_with_paged_kv(
         query_lens, kv_lens, is_fp8kv, is_fp8_query = make_varlen_with_paged_kv_input(config=(seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype))
     quantiles = [0.5, 0.2, 0.8]
 
+    print(f"Running config: {(seq_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype)}, Provider: {provider}", flush=True)
     if provider == "native":
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: ref_paged_attn(query=query,
@@ -291,7 +293,7 @@ if __name__ == "__main__":
 
     args = parse_args()
     seed = 1234
-    torch.manual_seed(seed)
+    seed_everything(seed)
 
     seq_lens = [[(1, 1328), (5, 18), (129, 463)]]
     num_heads = [(4, 4), (8, 2), (10, 2), (16, 1)]
@@ -328,7 +330,10 @@ if __name__ == "__main__":
     )
 
     for config in configs:
-        calculate_diff_varlen_paged_kv(config)
+        try:
+            calculate_diff_varlen_paged_kv(config)
+        except Exception as e:
+            print("Error in config: ", config, " error: ", e)
         clear_xpu_cache()
 
     benchmark = get_benchmark_varlen_with_paged_kv()

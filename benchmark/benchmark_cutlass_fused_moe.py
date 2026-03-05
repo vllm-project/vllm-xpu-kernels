@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.testing
-from vllm.platforms import current_platform
+from tests.utils import seed_everything
 from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 from tests.utils import parse_args
 from tests.ops.fp8_quant_op import scaled_fp8_quant
@@ -108,6 +108,10 @@ def calculate_diff(config):
     ref_out = ref_fused_moe(ref_a, ref_w13, w13_bias, ref_w2, w2_bias,
                             flat_expert_weights, flat_expert_indices, topk,
                             "silu", e)
+
+    ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
+        flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
+            expert_scores, expert_indices = make_fused_moe_input(config)
     output = xpu_fused_moe(hidden_states=a,
                            w13=w13,
                            w13_scales=w13_scales,
@@ -150,21 +154,23 @@ def get_benchmark():
         )
     )
     def benchmark(mnk, num_experts, topk, dtype, w_dtype, has_bias, provider):
-        e = num_experts
-        ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
-        flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
-            expert_scores, expert_indices = make_fused_moe_input((mnk, num_experts, topk, dtype, w_dtype, has_bias))
-
         quantiles = [0.5, 0.2, 0.8]
 
+        print(f"Running config: {(mnk, num_experts, topk, dtype, w_dtype, has_bias)}, Provider: {provider}", flush=True)
         if provider == "native":
+            ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
+            flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
+                expert_scores, expert_indices = make_fused_moe_input(config=(mnk, num_experts, topk, dtype, w_dtype, has_bias))
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: ref_fused_moe(ref_a, ref_w13, w13_bias, ref_w2, w2_bias,
                 flat_expert_weights, flat_expert_indices, topk,
-                "silu", e),
+                "silu", num_experts),
                 quantiles=quantiles,
             )
         else:
+            ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
+            flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
+                expert_scores, expert_indices = make_fused_moe_input(config=(mnk, num_experts, topk, dtype, w_dtype, has_bias))
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: xpu_fused_moe(hidden_states=a,
                 w13=w13,
@@ -177,7 +183,7 @@ def get_benchmark():
                 topk_ids=expert_indices,
                 n_experts_per_token=topk,
                 activation="silu",
-                num_experts=e,
+                num_experts=num_experts,
                 is_fp8=(w_dtype is not None)),
                 quantiles=quantiles,
             )
@@ -191,7 +197,7 @@ if __name__ == "__main__":
 
     args = parse_args()
     seed = 1234
-    torch.manual_seed(seed)
+    seed_everything(seed)
 
     mnk =[
         (1, 5120, 8192),
@@ -216,7 +222,10 @@ if __name__ == "__main__":
         itertools.product(mnk, experts, topk, dtype, w_dtype, has_bias))
 
     for config in configs:
-        calculate_diff(config)
+        try:
+            calculate_diff(config)
+        except Exception as e:
+            print("Error in config: ", config, " error: ", e)
         clear_xpu_cache()
 
     benchmark = get_benchmark()
