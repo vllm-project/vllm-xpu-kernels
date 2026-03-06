@@ -148,7 +148,14 @@ void cutlass_paged_decode_impl(
       is_causal,
       is_local,
       is_sink,
-      num_kv_splits};
+      num_kv_splits,
+      // KV cache strides
+      key_cache.stride(0),
+      key_cache.stride(1),
+      key_cache.stride(2),
+      value_cache.stride(0),
+      value_cache.stride(1),
+      value_cache.stride(2)};
 
   CutlassDType cuType = aten_to_dtype(query);
 
