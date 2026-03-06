@@ -93,3 +93,23 @@ void fused_moe_prologue(
     int64_t ep_rank,
     int64_t ep_size,
     int64_t num_experts_on_rank);
+
+void init_expert_map(
+    torch::Tensor& expert_map,
+    const int64_t num_experts,
+    const int64_t ep_rank,
+    const int64_t ep_size);
+
+void remap_hidden_states(
+    torch::Tensor& hidden_states,
+    torch::Tensor& remapped_hidden_states,
+    torch::Tensor& expert_map,
+    torch::Tensor& expert_first_token_offset,
+    torch::Tensor& unpermuted_row_to_permuted_row,
+    torch::Tensor& topk_ids,
+    torch::Tensor& topk_weights,
+    int64_t num_rows,
+    int64_t hidden_size,
+    int64_t n_experts_per_token,
+    int64_t total_experts_num,
+    int64_t local_experts_num);
