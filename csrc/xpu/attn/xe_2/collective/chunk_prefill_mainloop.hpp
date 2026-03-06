@@ -554,6 +554,7 @@ template <
     class DispatchPolicy_,
     bool PagedKV_,
     bool CausalMask_,
+    bool LocalMask_,
     class TiledMMAQK_,  // Tiling for Q*K GEMM
     class TiledMMAPV_,  // Tiling for P*V GEMM
     int VTiles_,        // # of tiles in V dimension
@@ -575,6 +576,7 @@ template <
     int Stages,
     bool PagedKV_,
     bool CausalMask_,
+    bool LocalMask_,
     class TiledMMAQK_,
     class TiledMMAPV_,
     int VTiles_,
@@ -588,6 +590,7 @@ struct DecodeFwdMainloop<
     XeDefault<Stages>,
     PagedKV_,
     CausalMask_,
+    LocalMask_,
     TiledMMAQK_,
     TiledMMAPV_,
     VTiles_,
@@ -664,6 +667,7 @@ struct DecodeFwdMainloop<
 
   static constexpr bool PagedKV = PagedKV_;
   static constexpr bool CausalMask = CausalMask_;
+  static constexpr bool LocalMask = LocalMask_;
 
   // User-facing arguments
   struct Arguments {
@@ -673,6 +677,8 @@ struct DecodeFwdMainloop<
     int page_size;
     int max_pages_per_seq;
     int total_seqlen_kv;
+    // Local Mask
+    int local_left, local_right;
   };
 
   // Kernel-facing parameters
@@ -698,7 +704,9 @@ struct DecodeFwdMainloop<
         args.ptr_page_table,
         args.page_size,
         args.max_pages_per_seq,
-        args.total_seqlen_kv};
+        args.total_seqlen_kv,
+        args.local_left,
+        args.local_right};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -881,6 +889,23 @@ struct DecodeFwdMainloop<
       //     }
       //   }
       // }
+
+      if constexpr (LocalMask) {
+        Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
+        Tensor gP = local_tile(
+            cPgP, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
+        auto cS_thread = thr_mma_qk.partition_C(gP);
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS.size(); ++i) {
+          int row_idx = get<0>(cS_thread(i)) - discard_seq_coord;
+          int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
+          bool left_mask = col_idx < row_idx - params.local_left;
+          bool right_mask = col_idx > row_idx + params.local_right;
+          if (left_mask || right_mask) {
+            tSrS(i) = ElementS(-INFINITY);
+          }
+        }
+      }
 
       /* k masking for remainder tiles */
       if (check_remainder_k && K == blk_k1 - 1) {
