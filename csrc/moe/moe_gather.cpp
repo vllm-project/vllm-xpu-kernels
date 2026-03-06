@@ -50,20 +50,8 @@ class MoeGather {
     int moe_ids[TOPK];
 #pragma unroll
     for (int i = 0; i < TOPK; ++i) {
-      moe_ids[i] = unpermuted_row_to_permuted_row[token_idx + i * num_tokens];
+      moe_ids[i] = unpermuted_row_to_permuted_row[token_idx * TOPK + i];
     }
-
-//     int permuted_row_to_unpermuted_row_0 = permuted_row_to_unpermuted_row[0];
-//     int rows_sum = expert_first_token_offset[num_experts];
-// #pragma unroll
-//     for (int i = 0; i < TOPK; ++i) {
-//       // check invalid idx for EP
-//       if (rows_sum == 0 ||
-//           (moe_ids[i] == 0 &&
-//            (permuted_row_to_unpermuted_row_0 != token_idx + i * num_tokens))) {
-//         moe_ids[i] = -1;
-//       }
-//     }
 
     float scores[TOPK];
 #pragma unroll

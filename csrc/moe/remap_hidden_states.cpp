@@ -79,6 +79,7 @@ class CalculateFristTokenOffset {
         local_experts_num(local_experts_num) {}
 
   static constexpr int WARP_SIZE = 32;
+  static constexpr int MAX_LOCAL_STORAGE = 32;
 
   static inline sycl::nd_range<1> get_nd_range() {
     sycl::range<1> local(WARP_SIZE);
@@ -97,13 +98,15 @@ class CalculateFristTokenOffset {
     int local_start = elems_per_item * sg_local_id;
     int remained_elems = local_experts_num - local_start;
     int local_elems = remained_elems > elems_per_item ? elems_per_item : remained_elems;
+
+    int local_storage[MAX_LOCAL_STORAGE];
     
     if(remained_elems > 0){
         #pragma unroll
         for(int i = 0; i < local_elems; ++i){
             int idx = local_start + i;
-            int rows_num = expert_first_token_offset[idx + 1];
-            local_sum += rows_num;
+            local_storage[i] = expert_first_token_offset[idx + 1];
+            local_sum += local_storage[i];
         }
     }
 
@@ -113,7 +116,8 @@ class CalculateFristTokenOffset {
         #pragma unroll
         for(int i = 0; i < local_elems; ++i){
             int idx = local_start + i;
-            expert_first_token_offset[idx + 1] += global_sum;
+            global_sum += local_storage[i];
+            expert_first_token_offset[idx + 1] = global_sum;
         }
     }
 
@@ -186,13 +190,15 @@ class RemapHiddenStates {
     int first_token_offset = expert_first_token_offset[local_expert_id];
     rows_offset += first_token_offset;
 
-    #pragma unroll
-    for(int i = local_id; i < hidden_size; i += GroupWorkItem){
-        remapped_hidden_states[rows_offset * hidden_size + i] = hidden_states[row * hidden_size + i];
-    }
+    item.barrier(sycl::access::fence_space::local_space);
 
     if(local_id == 0){
         unpermuted_row_to_permuted_row[row * n_experts_per_token + topi] = rows_offset;
+    }
+
+    #pragma unroll
+    for(int i = local_id; i < hidden_size; i += GroupWorkItem){
+        remapped_hidden_states[rows_offset * hidden_size + i] = hidden_states[row * hidden_size + i];
     }
 
   }
@@ -227,6 +233,9 @@ void RemapHiddenStatesLauncher(
     const int total_experts_num,
     const int local_experts_num,
     sycl::queue& queue) {
+
+
+    assert(local_experts_num <= CalculateFristTokenOffset::MAX_LOCAL_STORAGE * CalculateFristTokenOffset::WARP_SIZE);
 
     queue.submit([&](sycl::handler& cgh) {                            
       cgh.parallel_for(                                               
