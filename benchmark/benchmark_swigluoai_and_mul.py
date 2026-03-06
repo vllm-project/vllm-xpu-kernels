@@ -60,6 +60,7 @@ def get_benchmark():
         layer = SwigluOAIAndMul()
 
         quantiles = [0.5, 0.2, 0.8]
+        print(f"Running config: {(num_tokens, d, dtype)}, Provider: {provider}", flush=True)
 
         if provider == "vllm":
             ms, min_ms, max_ms = triton.testing.do_bench(

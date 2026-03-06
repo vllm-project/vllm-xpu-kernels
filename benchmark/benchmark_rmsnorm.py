@@ -9,12 +9,7 @@ import triton
 from torch import nn
 
 from tests import register_ops as vllm_ops
-from tests.utils import check_ipex_availability, parse_args
-
-HAS_IPEX = check_ipex_availability()
-
-if HAS_IPEX:
-    import intel_extension_for_pytorch as ipex
+from tests.utils import parse_args
 
 
 class HuggingFaceRMSNorm(nn.Module):
@@ -44,22 +39,22 @@ class HuggingFaceRMSNorm(nn.Module):
             return x, residual
 
 
-def rmsnorm_naive(
+def rmsnorm_native(
     x: torch.Tensor,
     weight: torch.Tensor,
     residual: Optional[torch.Tensor] = None,
     eps: float = 1e-6,
 ):
-    naive_norm = HuggingFaceRMSNorm(x.shape[-1], eps=eps)
-    naive_norm.weight = nn.Parameter(weight)
-    naive_norm = naive_norm.to(x.device)
+    native_norm = HuggingFaceRMSNorm(x.shape[-1], eps=eps)
+    native_norm.weight = nn.Parameter(weight)
+    native_norm = native_norm.to(x.device)
 
     orig_shape = x.shape
     x = x.view(-1, x.shape[-1])
     if residual is not None:
         residual = residual.view(-1, residual.shape[-1])
 
-    output = naive_norm(x, residual)
+    output = native_norm(x, residual)
 
     if isinstance(output, tuple):
         output = (output[0].view(orig_shape), output[1].view(orig_shape))
@@ -118,38 +113,9 @@ def rmsnorm_vllm(
     return output
 
 
-def rmsnorm_ipex(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    residual: Optional[torch.Tensor] = None,
-    eps: float = 1e-6,
-):
-    """IPEX implementation using ipex.llm.functional.rms_norm"""
-    if not HAS_IPEX:
-        raise RuntimeError("IPEX is not available")
-
-    orig_shape = x.shape
-    x = x.view(-1, x.shape[-1])
-
-    if residual is not None:
-        residual = residual.view(-1, residual.shape[-1])
-        if hasattr(ipex.llm.functional, 'fused_add_rms_norm'):
-            output, residual_out = ipex.llm.functional.fused_add_rms_norm(
-                x, residual, weight, eps)
-            output = (output.view(orig_shape), residual_out.view(orig_shape))
-        else:
-            x = x + residual
-            output = ipex.llm.functional.rms_norm(x, weight, eps)
-            output = (output.view(orig_shape), x.view(orig_shape))
-    else:
-        output = ipex.llm.functional.rms_norm(x, weight, eps)
-        output = output.view(orig_shape)
-
-    return output
-
-
-def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
-    dtype = torch.bfloat16
+def calculate_diff(config):
+    head_num, batch_size, seq_len, use_residual, dtype = config
+    hidden_size = head_num * 128  # assuming head_dim = 128
     x = torch.randn(batch_size,
                     seq_len,
                     hidden_size,
@@ -158,7 +124,7 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
     weight = torch.ones(hidden_size, dtype=dtype, device="xpu")
     residual = torch.randn_like(x) if use_residual else None
 
-    output_naive = rmsnorm_naive(
+    output_native = rmsnorm_native(
         x.clone(), weight,
         residual.clone() if residual is not None else None)
     output_vllm = rmsnorm_vllm(
@@ -166,55 +132,30 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
         residual.clone() if residual is not None else None)
 
     if use_residual:
-        output_naive = output_naive[0]
+        output_native = output_native[0]
         output_vllm = output_vllm[0]
 
-    print(f"Naive output={output_naive}")
-    print(f"vLLM output={output_vllm}")
-
-    if HAS_IPEX:
-        try:
-            output_ipex = rmsnorm_ipex(
-                x.clone(), weight,
-                residual.clone() if residual is not None else None)
-            if use_residual:
-                output_ipex = output_ipex[0]
-            print(f"IPEX output={output_ipex}")
-
-            if torch.allclose(output_naive, output_ipex, atol=1e-2, rtol=1e-2):
-                print("✅ IPEX implementation matches naive")
-            else:
-                print("❌ IPEX implementation differs from naive")
-        except Exception as e:
-            print(f"❌ IPEX implementation failed: {e}")
-
-    if torch.allclose(output_naive, output_vllm, atol=1e-2, rtol=1e-2):
-        print("✅ All implementations match")
+    if torch.allclose(output_native, output_vllm, atol=1e-2, rtol=1e-2):
+        print("✅ All implementations match, ", config)
     else:
-        print("❌ Implementations differ")
+        print("❌ Implementations differ, ", config)
 
 
-def get_benchmark(use_residual, dtype):
-
+def get_benchmark():
     @triton.testing.perf_report(
         triton.testing.Benchmark(
-            x_names=["head_num", "batch_size", "seq_len"],
+            x_names=["head_num", "batch_size", "seq_len", "use_residual", "dtype"],
             x_vals=[tuple(_) for _ in configs],
             line_arg="provider",
-            line_vals=["huggingface", "vllm", "t.compile", "ipex"]
-            if HAS_IPEX else ["huggingface", "vllm", "t.compile"],
-            line_names=["HuggingFace", "vLLM", "t.compile", "IPEX"]
-            if HAS_IPEX else ["HuggingFace", "vLLM", "t.compile"],
-            styles=[("blue", "-"), ("green", "-"), ("orange", "-"),
-                    ("red", "-")] if HAS_IPEX else [("blue", "-"),
-                                                    ("green", "-"),
-                                                    ("orange", "-")],
+            line_vals=["huggingface", "vllm", "t.compile"],
+            line_names=["HuggingFace", "vLLM", "t.compile"],
+            styles=[("blue", "-"), ("green", "-"), ("orange", "-")],
             ylabel="us",
             plot_name=
-            f"rmsnorm-perf-{'with' if use_residual else 'without'}-residual",
+            f"rmsnorm-perf",
             args={},
         ))
-    def benchmark(head_num, batch_size, seq_len, provider):
+    def benchmark(head_num, batch_size, seq_len, use_residual, dtype, provider):
         hidden_size = head_num * 128  # assuming head_dim = 128
 
         x = torch.randn(batch_size,
@@ -226,10 +167,11 @@ def get_benchmark(use_residual, dtype):
         residual = torch.randn_like(x) if use_residual else None
 
         quantiles = [0.5, 0.2, 0.8]
+        print(f"Running config: {(head_num, batch_size, seq_len, use_residual, dtype)}, Provider: {provider}", flush=True)
 
         if provider == "huggingface":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: rmsnorm_naive(
+                lambda: rmsnorm_native(
                     x.clone(),
                     weight,
                     residual.clone() if residual is not None else None,
@@ -237,29 +179,24 @@ def get_benchmark(use_residual, dtype):
                 quantiles=quantiles,
             )
         elif provider == "t.compile":
+            x_clone = x.clone()
+            residual_clone = residual.clone() if residual is not None else None
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: rmsnorm_compile(
-                    x.clone(),
+                    x_clone,
                     weight,
-                    residual.clone() if residual is not None else None,
-                ),
-                quantiles=quantiles,
-            )
-        elif provider == "ipex" and HAS_IPEX:
-            ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: rmsnorm_ipex(
-                    x.clone(),
-                    weight,
-                    residual.clone() if residual is not None else None,
+                    residual_clone,
                 ),
                 quantiles=quantiles,
             )
         else:
+            x_clone = x.clone()
+            residual_clone = residual.clone() if residual is not None else None
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: rmsnorm_vllm(
-                    x.clone(),
+                    x_clone,
                     weight,
-                    residual.clone() if residual is not None else None,
+                    residual_clone,
                 ),
                 quantiles=quantiles,
             )
@@ -284,24 +221,19 @@ if __name__ == "__main__":
     batch_size_range = [2**i for i in range(0, 7, 2)]
     seq_length_range = [2**i for i in range(6, 10, 1)]
     head_num_range = args.head_num_range
+    use_residual = [True, False]
+    dtype = [torch.float16, torch.bfloat16]
     configs = list(
-        itertools.product(head_num_range, batch_size_range, seq_length_range))
+        itertools.product(head_num_range, batch_size_range, seq_length_range, use_residual, dtype))
 
-    if HAS_IPEX:
-        print("✅ IPEX is available")
-        print(f"IPEX version: {ipex.__version__}")
-    else:
-        print("⚠️  IPEX is not available, skipping IPEX benchmarks")
 
     # Run correctness test
-    calculate_diff(
-        batch_size=args.batch_size,
-        seq_len=args.seq_len,
-        hidden_size=args.hidden_size,
-        use_residual=args.use_residual,
-    )
+    for config in configs:
+        calculate_diff(
+            config
+        )
 
     # Get the benchmark function with proper use_residual setting
-    benchmark = get_benchmark(args.use_residual, args.dtype)
+    benchmark = get_benchmark()
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=args.save_path)
