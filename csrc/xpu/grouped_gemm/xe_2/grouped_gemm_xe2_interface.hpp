@@ -346,8 +346,14 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, scalar_t, scalar_t); \
   }
 
-    if (A_avg_M <= 4) {
+    if (A_avg_M <= 8) {
+      using policy = w16a16_policy_m_8;
+      W16A16LauncherCallER(policy);
+    } else if (A_avg_M <= 16) {
       using policy = w16a16_policy_m_16;
+      W16A16LauncherCallER(policy);
+    } else if (A_avg_M <= 32) {
+      using policy = w16a16_policy_m_32;
       W16A16LauncherCallER(policy);
     } else {
       using policy = w16a16_policy;
