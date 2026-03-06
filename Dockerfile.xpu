@@ -6,6 +6,7 @@ ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/xpu"
 
 RUN apt clean && apt-get update -y && \
+    apt remove libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing intel-ocloc libigc2 -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     curl \
     ffmpeg \

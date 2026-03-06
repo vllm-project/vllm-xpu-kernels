@@ -184,6 +184,7 @@ class cmake_build_ext(build_ext):
         for key, value in build_option_gpu.items():
             if value is not None:
                 cmake_args.append("-D{}={}".format(key, value))
+        print(f"cmake args {cmake_args}")
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
             cwd=self.build_temp,
