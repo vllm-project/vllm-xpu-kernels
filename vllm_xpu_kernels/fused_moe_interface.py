@@ -198,33 +198,39 @@ def xpu_fused_moe(hidden_states,
         gemm2_scales = w2_scales
 
     if expert_map is None:
-        expert_map = torch.empty((num_experts * ep_size), dtype=torch.int32, device=hidden_states.device)
-        torch.ops._moe_C.init_expert_map(expert_map, num_experts, ep_rank, ep_size)
+        expert_map = torch.empty((num_experts * ep_size),
+                                 dtype=torch.int32,
+                                 device=hidden_states.device)
+        torch.ops._moe_C.init_expert_map(expert_map, num_experts, ep_rank,
+                                         ep_size)
     else:
         pass
-    
+
     total_experts_num = expert_map.shape[0]
     local_experts_num = num_experts
 
-    remapped_hidden_states = torch.empty((num_rows * n_experts_per_token, hidden_size), dtype=hidden_states.dtype, device=hidden_states.device)
-    expert_first_token_offset = torch.zeros((num_experts + 1), dtype=torch.int64, device=hidden_states.device)
-    unpermuted_row_to_permuted_row = torch.empty((num_rows, n_experts_per_token), dtype=torch.int32, device=hidden_states.device)
-    permuted_row_to_unpermuted_row = torch.empty((num_rows, n_experts_per_token), dtype=torch.int32, device=hidden_states.device)
+    remapped_hidden_states = torch.empty(
+        (num_rows * n_experts_per_token, hidden_size),
+        dtype=hidden_states.dtype,
+        device=hidden_states.device)
+    expert_first_token_offset = torch.zeros((num_experts + 1),
+                                            dtype=torch.int64,
+                                            device=hidden_states.device)
+    unpermuted_row_to_permuted_row = torch.empty(
+        (num_rows, n_experts_per_token),
+        dtype=torch.int32,
+        device=hidden_states.device)
+    permuted_row_to_unpermuted_row = torch.empty(
+        (num_rows, n_experts_per_token),
+        dtype=torch.int32,
+        device=hidden_states.device)
 
-    torch.ops._moe_C.remap_hidden_states(
-        hidden_states,
-        remapped_hidden_states,
-        expert_map,
-        expert_first_token_offset,
-        unpermuted_row_to_permuted_row,
-        topk_ids,
-        topk_weights,
-        num_rows,
-        hidden_size,
-        n_experts_per_token,
-        total_experts_num,
-        local_experts_num
-        )
+    torch.ops._moe_C.remap_hidden_states(hidden_states, remapped_hidden_states,
+                                         expert_map, expert_first_token_offset,
+                                         unpermuted_row_to_permuted_row,
+                                         topk_ids, topk_weights, num_rows,
+                                         hidden_size, n_experts_per_token,
+                                         total_experts_num, local_experts_num)
 
     ########### gemm1 ##################
     input_B = w13
@@ -278,7 +284,6 @@ def xpu_fused_moe(hidden_states,
     torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
                                 permuted_row_to_unpermuted_row,
                                 unpermuted_row_to_permuted_row,
-                                expert_first_token_offset,
-                                num_experts)
+                                expert_first_token_offset, num_experts)
 
     return output

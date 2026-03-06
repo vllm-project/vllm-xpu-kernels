@@ -103,7 +103,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor unpermuted_row_to_permuted_row, Tensor topk_ids,"
       "Tensor topk_weights,"
       "int num_rows, "
-      "int hidden_size, int n_experts_per_token, int total_experts_num, int local_experts_num) -> "
+      "int hidden_size, int n_experts_per_token, int total_experts_num, int "
+      "local_experts_num) -> "
       "()");
   m.impl("remap_hidden_states", torch::kXPU, &remap_hidden_states);
 }
