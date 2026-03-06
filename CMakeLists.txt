@@ -181,8 +181,8 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   )
 
   # TODO: make AOT configurable
-  set(AOT_DEVICES "pvc,bmg-g21-a0,bmg-g31-a0")
-  set(XE2_AOT_DEVICES "pvc,bmg-g21-a0,bmg-g31-a0")
+  set(AOT_DEVICES "pvc,bmg-g21-a0")
+  set(XE2_AOT_DEVICES "pvc,bmg-g21-a0")
 
   # Final link option be like: icpx -fsycl -fsycl-target=spir64_gen
   # ${SYCL_DEVICE_LINK_FLAGS} -Xsycl-target-backend=spir64_gen
@@ -344,6 +344,7 @@ if(BASIC_KERNELS_ENABLED)
   set(VLLM_EXT_SRC
       "csrc/cache.cpp"
       "csrc/layernorm.cpp"
+      "csrc/layernorm_quant.cpp"
       "csrc/activation.cpp"
       "csrc/pos_encoding_kernels.cpp"
       "csrc/torch_bindings.cpp"
