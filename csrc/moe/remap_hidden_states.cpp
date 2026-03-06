@@ -159,9 +159,13 @@ class RemapHiddenStates {
   static constexpr int WARP_SIZE = 32;
   static constexpr int ElemsPerItem = 4;
 
-  static inline sycl::nd_range<1> get_nd_range(const int num_rows, const int n_experts_per_token) {
+  static inline sycl::nd_range<1> get_nd_range(const int num_rows, const int n_experts_per_token, const int hidden_size) {
     int group_nums = num_rows * n_experts_per_token;
-    sycl::range<1> local(GroupWorkItem);
+    int local_nums = GroupWorkItem;
+    if(GroupWorkItem * ElemsPerItem > hidden_size){
+      local_nums = (hidden_size + ElemsPerItem - 1) / ElemsPerItem;
+    }
+    sycl::range<1> local(local_nums);
     sycl::range<1> group(group_nums);
     return sycl::nd_range<1>(local * group, local);
   }
@@ -169,6 +173,7 @@ class RemapHiddenStates {
   void operator()
       [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
     auto local_id = item.get_local_id(0);
+    auto local_range = item.get_local_range(0);
     auto group_id = item.get_group(0);
 
     int row = group_id / n_experts_per_token;
@@ -196,9 +201,24 @@ class RemapHiddenStates {
         unpermuted_row_to_permuted_row[row * n_experts_per_token + topi] = rows_offset;
     }
 
-    #pragma unroll
-    for(int i = local_id; i < hidden_size; i += GroupWorkItem){
-        remapped_hidden_states[rows_offset * hidden_size + i] = hidden_states[row * hidden_size + i];
+    int loop_count = (hidden_size + local_range * ElemsPerItem - 1) / (local_range * ElemsPerItem);
+
+    for(int l = 0; l < loop_count; ++l){
+      int start_id = l * local_range * ElemsPerItem + local_id * ElemsPerItem;
+      int remained_elems = hidden_size - start_id;
+      if(remained_elems >= ElemsPerItem){
+        #pragma unroll
+        for(int i = 0; i < ElemsPerItem; ++i){
+          int idx = start_id + i;
+          remapped_hidden_states[rows_offset * hidden_size + idx] = hidden_states[row * hidden_size + idx];
+        }
+      }else if(remained_elems > 0){
+        #pragma unroll
+        for(int i = 0; i < remained_elems; ++i){
+          int idx = start_id + i;
+          remapped_hidden_states[rows_offset * hidden_size + idx] = hidden_states[row * hidden_size + idx];
+        }
+      }
     }
 
   }
@@ -259,7 +279,7 @@ void RemapHiddenStatesLauncher(
 
     queue.submit([&](sycl::handler& cgh) {                            
       cgh.parallel_for(                                               
-          RemapHiddenStates<T>::get_nd_range(num_rows, n_experts_per_token), 
+          RemapHiddenStates<T>::get_nd_range(num_rows, n_experts_per_token, hidden_size), 
           RemapHiddenStates<T>{                           
                 hidden_states,
                 remapped_hidden_states,

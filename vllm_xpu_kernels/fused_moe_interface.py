@@ -183,82 +183,9 @@ def xpu_fused_moe(hidden_states,
 
     # TODO: will all integrated in Cpp func. Temporary expose before gemm fusion
     num_rows, hidden_size = list(hidden_states.shape)
-    # num_experts_per_node = num_experts
-    # experts_per_token = n_experts_per_token
     num_moe_inputs = n_experts_per_token * num_rows
-    # permuted_elems = num_moe_inputs * hidden_size
-    # # interbuf_elems = num_moe_inputs * inter_size
-    # permuted_row_to_unpermuted_row_size = num_moe_inputs * 4
-    # permuted_token_selected_experts_size = num_moe_inputs * 4
-    # src_to_dest_map_size = experts_per_token * num_rows * 4
-    # expert_first_token_offset_size = (num_experts_per_node + 1) * 8
-    # num_tokens_per_block = compute_num_tokens_per_block(
-    #     num_rows, num_experts_per_node)
-    # num_blocks_per_seq = ceilDiv(num_rows, num_tokens_per_block)
-    # blocked_expert_counts_size = num_experts_per_node * num_blocks_per_seq * 4
-    # blocked_expert_counts_cumsum_size = blocked_expert_counts_size
-    # blocked_row_to_unpermuted_row_size = num_experts_per_node * num_rows * 4
-    # permuted_data_size = permuted_elems * 2
-    # permuted_token_final_scales_size = num_moe_inputs * 4
-
-    # ws_map = {}
-    # map_offset = 0
-
-    # def config_ws(name, size):
-    #     nonlocal map_offset
-    #     if size % 256 != 0:
-    #         size += 256 - size % 256
-    #     ws_map[name] = (size, map_offset)
-    #     map_offset += size
-
-    # config_ws("permuted_row_to_unpermuted_row",
-    #           permuted_row_to_unpermuted_row_size)
-    # config_ws("permuted_token_selected_experts",
-    #           permuted_token_selected_experts_size)
-    # config_ws("unpermuted_row_to_permuted_row", src_to_dest_map_size)
-    # config_ws("blocked_expert_counts", blocked_expert_counts_size)
-    # config_ws("blocked_expert_counts_cumsum",
-    #           blocked_expert_counts_cumsum_size)
-    # config_ws("blocked_row_to_unpermuted_row",
-    #           blocked_row_to_unpermuted_row_size)
-    # config_ws("expert_first_token_offset", expert_first_token_offset_size)
-    # config_ws("permuted_token_final_scales", permuted_token_final_scales_size)
-    # config_ws("overlapped_gemm1_gemm2_inputs", permuted_data_size)
-
-    # workspace = torch.zeros(map_offset,
-    #                         dtype=torch.uint8,
-    #                         device=hidden_states.device)
     if topk_ids.dtype == torch.int32:
         topk_ids = topk_ids.to(torch.int64)
-    # torch.ops._moe_C.fused_moe_prologue(
-    #     input=hidden_states,
-    #     input_scales=None,
-    #     token_selected_experts=topk_ids,
-    #     token_final_scales=topk_weights,
-    #     workspace=workspace,
-    #     hidden_size=hidden_size,
-    #     inter_size=inter_size,
-    #     block_k=1,
-    #     ep_rank=ep_rank,
-    #     ep_size=ep_size,
-    #     num_experts_on_rank=num_experts_per_node)
-
-    # expert_first_token_offset = workspace[
-    #     ws_map["expert_first_token_offset"][1]:
-    #     ws_map["expert_first_token_offset"][1] +
-    #     expert_first_token_offset_size].view(torch.int64)
-    # permuted_row_to_unpermuted_row = workspace[
-    #     ws_map["permuted_row_to_unpermuted_row"][1]:
-    #     ws_map["permuted_row_to_unpermuted_row"][1] +
-    #     permuted_row_to_unpermuted_row_size].view(torch.int32)
-    # unpermuted_row_to_permuted_row = workspace[
-    #     ws_map["unpermuted_row_to_permuted_row"][1]:
-    #     ws_map["unpermuted_row_to_permuted_row"][1] +
-    #     src_to_dest_map_size].view(torch.int32)
-    # gemm1_input = workspace[ws_map["overlapped_gemm1_gemm2_inputs"][1]:
-    #                         ws_map["overlapped_gemm1_gemm2_inputs"][1] +
-    #                         permuted_data_size].view(hidden_states.dtype).view(
-    #                             num_moe_inputs, hidden_size)
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
