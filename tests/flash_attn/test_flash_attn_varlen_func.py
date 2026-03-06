@@ -60,8 +60,7 @@ def ref_paged_attn(query: torch.Tensor,
     for i in range(num_seqs):
         query_len = query_lens[i]
         kv_len = kv_lens[i]
-        q = query[start_idx:start_idx + query_len]
-        q *= scale
+        q = query[start_idx:start_idx + query_len] * scale
 
         if is_paged:
             num_kv_blocks = (kv_len + block_size - 1) // block_size
