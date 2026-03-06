@@ -184,6 +184,11 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
     at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
 
+    // For paged decode (single query per sequence), causal masking is a
+    // no-op: seqused_k already constrains KV to only the valid past tokens,
+    // so there are no "future" tokens to mask. Passing is_causal=true
+    // triggers a seq_len formula that adds +q_sg_tile extra KV positions,
+    // causing invalid cache entries to pollute the attention output.
     cutlass_paged_decode_interface(
         queue,
         q,
@@ -204,7 +209,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
         window_size_right,
         is_varlen,
         is_paged,
-        is_causal,
+        false,  // is_causal: always false for decode; see comment above
         is_local,
         is_sink,
         num_kv_splits);
