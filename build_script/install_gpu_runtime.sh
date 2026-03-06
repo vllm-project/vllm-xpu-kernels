@@ -56,7 +56,10 @@ while IFS= read -r url; do
 done <<< "${URLS}"
 
 echo "==> Installing .deb packages ..."
-dpkg -i "${WORKDIR}"/*.deb
+ls -al "${WORKDIR}"
+dpkg -i "${WORKDIR}"/intel-igc-core*
+dpkg -i "${WORKDIR}"/*.deb #|| true
+# apt-get install -f -y --no-install-recommends
 
 echo "==> Cleaning up ..."
 rm -rf "${WORKDIR}"
