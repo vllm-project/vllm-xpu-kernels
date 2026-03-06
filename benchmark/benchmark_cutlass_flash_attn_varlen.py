@@ -4,7 +4,7 @@
 import itertools
 import gc
 import torch
-import triton.testing
+import triton
 
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
@@ -83,10 +83,11 @@ def make_varlen_with_paged_kv_input(config):
         v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
         maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
         maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
-    return (maybe_quantized_query, maybe_quantized_key_cache, maybe_quantized_value_cache, 
-            max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, seq_k, 
-            q_descale, k_descale, v_descale, scale, is_causal, block_tables, 
-            window_size, sink, scale_shape, query, query_lens, kv_lens, is_fp8kv, is_fp8_query)
+    return (maybe_quantized_query, maybe_quantized_key_cache, maybe_quantized_value_cache,
+            max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, seq_k,
+            q_descale, k_descale, v_descale, scale, is_causal, block_tables,
+            window_size, sink, scale_shape, query, query_lens, kv_lens,
+            is_fp8kv, is_fp8_query, max_num_blocks_per_seq)
 
 
 def calculate_diff_varlen_paged_kv(config):
@@ -97,7 +98,7 @@ def calculate_diff_varlen_paged_kv(config):
         max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, \
         seq_k, q_descale, k_descale, v_descale, scale, is_causal, \
         block_tables, window_size, sink, scale_shape, query, \
-        query_lens, kv_lens, is_fp8kv, is_fp8_query = make_varlen_with_paged_kv_input(config)
+        query_lens, kv_lens, is_fp8kv, is_fp8_query, _ = make_varlen_with_paged_kv_input(config)
 
     if is_paged:
         output = flash_attn_varlen_func(maybe_quantized_query,
@@ -172,7 +173,11 @@ def calculate_diff_varlen_paged_kv(config):
 
 
 def benchmark_varlen_with_paged_kv(
-    num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype, provider
+    num_seqs, query_lens, kv_lens, num_heads, 
+    head_size, block_size, window_size, dtype, 
+    soft_cap, num_blocks, fa_versions, q_dtype, 
+    is_sink, is_causal, is_paged, fp8_dtype, 
+    provider, iterations=20
 ):
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -180,56 +185,98 @@ def benchmark_varlen_with_paged_kv(
         max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, \
         seq_k, q_descale, k_descale, v_descale, scale, is_causal, \
         block_tables, window_size, sink, scale_shape, query, \
-        query_lens, kv_lens, is_fp8kv, is_fp8_query = make_varlen_with_paged_kv_input(config=(num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype))
-    quantiles = [0.5, 0.2, 0.8]
+        query_lens, kv_lens, is_fp8kv, is_fp8_query, max_num_blocks_per_seq = \
+            make_varlen_with_paged_kv_input(config=(num_seqs,
+                query_lens, kv_lens, num_heads, head_size,
+                block_size, window_size, dtype, soft_cap,
+                num_blocks, fa_versions, q_dtype, is_sink,
+                is_causal, is_paged, fp8_dtype))
 
-    print(f"Running config: {(num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype)}, Provider: {provider}", flush=True)
+    print(f"Running config: {(num_seqs, query_lens, kv_lens,
+                              num_heads, head_size, block_size,
+                              window_size, dtype, soft_cap, num_blocks,
+                              fa_versions, q_dtype, is_sink, is_causal,
+                              is_paged, fp8_dtype)}, Provider: {provider}", flush=True)
+    assert iterations > 5, "Number of iterations should be greater than 5 to account for warmup"
+
     if provider == "native":
-        ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: ref_paged_attn(query=query,
-            key_cache=maybe_quantized_key_cache,
-            value_cache=maybe_quantized_value_cache,
-            query_lens=query_lens,
-            kv_lens=kv_lens,
-            block_tables=block_tables,
-            scale=scale,
-            casual=is_causal,
-            is_paged=is_paged,
-            sink=sink,
-            q_descale=q_descale,
-            k_descale=k_descale,
-            v_descale=v_descale,
-            window_size_left=window_size[0],
-            window_size_right=window_size[1],
-            is_fp8kv=is_fp8kv,
-            is_fp8_query=is_fp8_query,
-            dtype=dtype),
-            quantiles=quantiles,
-        )
+        start = torch.xpu.Event(enable_timing=True)
+        end = torch.xpu.Event(enable_timing=True)
+        total_latency = 0.0
+        ms = 0.0
+
+        for index in range(iterations):
+            block_tables = torch.randint(0,
+                                        num_blocks,
+                                        (num_seqs, max_num_blocks_per_seq),
+                                        dtype=torch.int32)
+            start.record()
+            ref_paged_attn(query=query,
+                key_cache=maybe_quantized_key_cache,
+                value_cache=maybe_quantized_value_cache,
+                query_lens=query_lens,
+                kv_lens=kv_lens,
+                block_tables=block_tables,
+                scale=scale,
+                casual=is_causal,
+                is_paged=is_paged,
+                sink=sink,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                window_size_left=window_size[0],
+                window_size_right=window_size[1],
+                is_fp8kv=is_fp8kv,
+                is_fp8_query=is_fp8_query,
+                dtype=dtype)
+            end.record()
+            torch.xpu.synchronize()
+            if index >= 5:  # skip the first 5 iterations for warmup
+                total_latency += start.elapsed_time(end)
+        ms = total_latency / (iterations - 5)
     elif is_paged:
-        ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: flash_attn_varlen_func(maybe_quantized_query,
-            maybe_quantized_key_cache,
-            maybe_quantized_value_cache,
-            max_query_len,
-            cu_query_lens,
-            max_kv_len,
-            seqused_k=seq_k,
-            q_descale=q_descale.expand(scale_shape)
-            if q_descale is not None else None,
-            k_descale=k_descale.expand(scale_shape)
-            if k_descale is not None else None,
-            v_descale=v_descale.expand(scale_shape)
-            if v_descale is not None else None,
-            softmax_scale=scale,
-            causal=is_causal,
-            block_table=block_tables,
-            window_size=window_size,
-            s_aux=sink),
-            quantiles=quantiles,
-        )
+        num_query_heads = num_heads[0]
+
+        start = torch.xpu.Event(enable_timing=True)
+        end = torch.xpu.Event(enable_timing=True)
+        total_latency = 0.0
+        ms = 0.0
+
+        for index in range(iterations):
+            query = torch.randn(sum(query_lens),
+                                num_query_heads,
+                                head_size,
+                                dtype=dtype)
+            block_tables = torch.randint(0,
+                                        num_blocks,
+                                        (num_seqs, max_num_blocks_per_seq),
+                                        dtype=torch.int32)
+            start.record()
+            flash_attn_varlen_func(maybe_quantized_query,
+                                maybe_quantized_key_cache,
+                                maybe_quantized_value_cache,
+                                max_query_len,
+                                cu_query_lens,
+                                max_kv_len,
+                                seqused_k=seq_k,
+                                q_descale=q_descale.expand(scale_shape)
+                                if q_descale is not None else None,
+                                k_descale=k_descale.expand(scale_shape)
+                                if k_descale is not None else None,
+                                v_descale=v_descale.expand(scale_shape)
+                                if v_descale is not None else None,
+                                softmax_scale=scale,
+                                causal=is_causal,
+                                block_table=block_tables,
+                                window_size=window_size,
+                                s_aux=sink)
+            end.record()
+            torch.xpu.synchronize()
+            if index >= 5:  # skip the first 5 iterations for warmup
+                total_latency += start.elapsed_time(end)
+        ms = total_latency / (iterations - 5)
     else:
-        ms, min_ms, max_ms = triton.testing.do_bench(
+        ms= triton.testing.do_bench(
             lambda: flash_attn_varlen_func(maybe_quantized_query,
             maybe_quantized_key_cache,
             maybe_quantized_value_cache,
@@ -247,14 +294,13 @@ def benchmark_varlen_with_paged_kv(
             causal=is_causal,
             block_table=None,
             window_size=window_size,
-            s_aux=sink),
-            quantiles=quantiles,
+            s_aux=sink)
         )
 
-    return 1000 * ms, 1000 * max_ms, 1000 * min_ms
+    return 1000 * ms
 
 
-def get_benchmark_varlen_with_paged_kv():
+def get_benchmark_varlen_with_paged_kv(iterations=20):
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["num_seqs", "query_lens", "kv_lens", "num_heads", "head_size", "block_size", "window_size", "dtype", "soft_cap", "num_blocks", "fa_versions", "q_dtype", "is_sink", "is_causal", "is_paged", "fp8_dtype"],
@@ -287,6 +333,7 @@ def get_benchmark_varlen_with_paged_kv():
             is_paged=is_paged,
             fp8_dtype=fp8_dtype,
             provider=provider,
+            iterations=iterations,
         )
 
     return benchmark
@@ -297,6 +344,7 @@ if __name__ == "__main__":
     args = parse_args()
     seed = 1234
     seed_everything(seed)
+    iterations = 20
 
     # seq_lens = [[(1, 1328), (5, 18), (129, 463)]]
     num_seqs = [3]
@@ -316,6 +364,7 @@ if __name__ == "__main__":
     is_causal = [False, True]
     is_paged = [False, True]
     fp8_dtype = [torch.float8_e5m2, torch.float8_e4m3fn, None]
+
     print("Final configuration:")
     print(f"num_seqs: {num_seqs}")
     print(f"query_lens: {query_lens}")
@@ -345,6 +394,6 @@ if __name__ == "__main__":
            print("Error in config: ", config, " error: ", e)
        clear_xpu_cache()
 
-    benchmark = get_benchmark_varlen_with_paged_kv()
+    benchmark = get_benchmark_varlen_with_paged_kv(iterations=iterations)
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=args.save_path)
