@@ -162,19 +162,59 @@ void cutlass_chunk_prefill_impl(
 
   if (args.head_size <= HEAD_SIZE_LIMIT_0) {
     policy_dispatch_func<chunk_policy_head64>(
-        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
+        queue,
+        args,
+        cuQKOType.q_type,
+        cuQKOType.k_type,
+        cuQKOType.o_type,
+        is_paged,
+        is_causal,
+        is_local,
+        is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
     policy_dispatch_func<chunk_policy_head96>(
-        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
+        queue,
+        args,
+        cuQKOType.q_type,
+        cuQKOType.k_type,
+        cuQKOType.o_type,
+        is_paged,
+        is_causal,
+        is_local,
+        is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
     policy_dispatch_func<chunk_policy_head128>(
-        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
+        queue,
+        args,
+        cuQKOType.q_type,
+        cuQKOType.k_type,
+        cuQKOType.o_type,
+        is_paged,
+        is_causal,
+        is_local,
+        is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
     policy_dispatch_func<chunk_policy_head192>(
-        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
+        queue,
+        args,
+        cuQKOType.q_type,
+        cuQKOType.k_type,
+        cuQKOType.o_type,
+        is_paged,
+        is_causal,
+        is_local,
+        is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
     policy_dispatch_func<chunk_policy_head256>(
-        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
+        queue,
+        args,
+        cuQKOType.q_type,
+        cuQKOType.k_type,
+        cuQKOType.o_type,
+        is_paged,
+        is_causal,
+        is_local,
+        is_sink);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
   }
