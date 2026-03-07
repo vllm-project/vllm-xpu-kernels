@@ -1,6 +1,7 @@
 #include "fmha_xe2.h"
 #include "chunk_prefill_utils.hpp"
 #include "chunk_prefill_extern.hpp"
+#include "fmha_utils.hpp"
 
 using namespace cute;
 
