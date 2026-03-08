@@ -317,21 +317,45 @@ struct FMHAConfig {
   }
 };
 
+template <
+    typename chunk_policy,
+    bool Paged,
+    bool Causal,
+    bool Local,
+    bool Sink,
+    typename ElementQ,
+    typename ElementK,
+    typename ElementV,
+    typename ElementO>
+void policy_dispatch_typed_impl(
+    sycl::queue& queue, const chunk_prefill_args_t& args) {
+  const int PipelineStages = 2;
+  return FMHAConfig<
+      typename chunk_policy::ShapeQK,
+      typename chunk_policy::ShapePV,
+      typename chunk_policy::ShapeOut,
+      typename chunk_policy::SubgroupLayoutQK,
+      void,
+      PipelineStages,
+      Paged,
+      Causal,
+      Local,
+      Sink,
+      ElementQ,
+      ElementK,
+      ElementV,
+      ElementO>::kernel_dispatch(queue, args);
+}
+
 template <typename chunk_policy, bool Paged, bool Causal, bool Local, bool Sink>
 void policy_dispatch_impl(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args) {
-  const int PipelineStages = 2;
   if (cuQKType.q_type == CutlassDType::half) {
     if (cuQKType.k_type == CutlassDType::half) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
+      return policy_dispatch_typed_impl<
+          chunk_policy,
           Paged,
           Causal,
           Local,
@@ -339,15 +363,10 @@ void policy_dispatch_impl(
           half_t,
           half_t,
           half_t,
-          half_t>::kernel_dispatch(queue, args);
+          half_t>(queue, args);
     } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
+      return policy_dispatch_typed_impl<
+          chunk_policy,
           Paged,
           Causal,
           Local,
@@ -355,15 +374,10 @@ void policy_dispatch_impl(
           half_t,
           float_e4m3_t,
           float_e4m3_t,
-          half_t>::kernel_dispatch(queue, args);
+          half_t>(queue, args);
     } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
+      return policy_dispatch_typed_impl<
+          chunk_policy,
           Paged,
           Causal,
           Local,
@@ -371,17 +385,12 @@ void policy_dispatch_impl(
           half_t,
           float_e5m2_t,
           float_e5m2_t,
-          half_t>::kernel_dispatch(queue, args);
+          half_t>(queue, args);
     }
   } else {
     if (cuQKType.k_type == CutlassDType::bfloat16) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
+      return policy_dispatch_typed_impl<
+          chunk_policy,
           Paged,
           Causal,
           Local,
@@ -389,15 +398,10 @@ void policy_dispatch_impl(
           bfloat16_t,
           bfloat16_t,
           bfloat16_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
+          bfloat16_t>(queue, args);
     } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
+      return policy_dispatch_typed_impl<
+          chunk_policy,
           Paged,
           Causal,
           Local,
@@ -405,15 +409,10 @@ void policy_dispatch_impl(
           bfloat16_t,
           float_e4m3_t,
           float_e4m3_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
+          bfloat16_t>(queue, args);
     } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
+      return policy_dispatch_typed_impl<
+          chunk_policy,
           Paged,
           Causal,
           Local,
@@ -421,7 +420,7 @@ void policy_dispatch_impl(
           bfloat16_t,
           float_e5m2_t,
           float_e5m2_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
+          bfloat16_t>(queue, args);
     }
   }
 }
