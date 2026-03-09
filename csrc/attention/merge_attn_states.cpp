@@ -12,13 +12,17 @@ namespace vllm {
 // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 // can be used to combine partial attention results (in the split-KV case)
 template <typename scalar_t, const uint NUM_THREADS>
-void merge_attn_states_kernel(scalar_t* output, float* output_lse,
-                              const scalar_t* prefix_output,
-                              const float* prefix_lse,
-                              const scalar_t* suffix_output,
-                              const float* suffix_lse, const uint num_tokens,
-                              const uint num_heads, const uint head_size,
-                              const sycl::nd_item<3>& item_ct1) {
+void merge_attn_states_kernel(
+    scalar_t* output,
+    float* output_lse,
+    const scalar_t* prefix_output,
+    const float* prefix_lse,
+    const scalar_t* suffix_output,
+    const float* suffix_lse,
+    const uint num_tokens,
+    const uint num_heads,
+    const uint head_size,
+    const sycl::nd_item<3>& item_ct1) {
   using pack_128b_t = sycl::uint4;
   const uint pack_size = 16 / sizeof(scalar_t);
   const uint threads_per_head = head_size / pack_size;
@@ -76,8 +80,8 @@ void merge_attn_states_kernel(scalar_t* output, float* output_lse,
       // fma: a * b + c = p_out_f * p_scale + (s_out_f * s_scale)
       const float o_out_f = p_out_f * p_scale + (s_out_f * s_scale);
       // float -> half(uint16_t), bfloat16, float.
-      vllm::xpu::from_float(reinterpret_cast<scalar_t*>(&o_out_pack)[i],
-                            o_out_f);
+      vllm::xpu::from_float(
+          reinterpret_cast<scalar_t*>(&o_out_pack)[i], o_out_f);
     }
 
     // Pack 128b storage
@@ -109,34 +113,40 @@ void merge_attn_states_kernel(scalar_t* output, float* output_lse,
     }                                                                   \
   }
 
-#define LAUNCH_MERGE_ATTN_STATES(scalar_t, NUM_THREADS)                  \
-  {                                                                      \
-    ((sycl::queue)(queue)).submit([&](sycl::handler& cgh) {              \
-      auto output_data_ptr_ct0 =                                         \
-          reinterpret_cast<scalar_t*>(output.data_ptr());                \
-      auto output_lse_ptr_ct1 = output_lse_ptr;                          \
-      auto prefix_output_data_ptr_ct2 =                                  \
-          reinterpret_cast<scalar_t*>(prefix_output.data_ptr());         \
-      auto prefix_lse_data_ptr_ct3 =                                     \
-          reinterpret_cast<float*>(prefix_lse.data_ptr());               \
-      auto suffix_output_data_ptr_ct4 =                                  \
-          reinterpret_cast<scalar_t*>(suffix_output.data_ptr());         \
-      auto suffix_lse_data_ptr_ct5 =                                     \
-          reinterpret_cast<float*>(suffix_lse.data_ptr());               \
-      auto num_tokens_ct6 = num_tokens;                                  \
-      auto num_heads_ct7 = num_heads;                                    \
-      auto head_size_ct8 = head_size;                                    \
-                                                                         \
-      cgh.parallel_for(                                                  \
-          sycl::nd_range<3>(grid * block, block),                        \
-          [=](sycl::nd_item<3> item_ct1) {                               \
-            vllm::merge_attn_states_kernel<scalar_t, NUM_THREADS>(       \
-                output_data_ptr_ct0, output_lse_ptr_ct1,                 \
-                prefix_output_data_ptr_ct2, prefix_lse_data_ptr_ct3,     \
-                suffix_output_data_ptr_ct4, suffix_lse_data_ptr_ct5,     \
-                num_tokens_ct6, num_heads_ct7, head_size_ct8, item_ct1); \
-          });                                                            \
-    });                                                                  \
+#define LAUNCH_MERGE_ATTN_STATES(scalar_t, NUM_THREADS)            \
+  {                                                                \
+    ((sycl::queue)(queue)).submit([&](sycl::handler& cgh) {        \
+      auto output_data_ptr_ct0 =                                   \
+          reinterpret_cast<scalar_t*>(output.data_ptr());          \
+      auto output_lse_ptr_ct1 = output_lse_ptr;                    \
+      auto prefix_output_data_ptr_ct2 =                            \
+          reinterpret_cast<scalar_t*>(prefix_output.data_ptr());   \
+      auto prefix_lse_data_ptr_ct3 =                               \
+          reinterpret_cast<float*>(prefix_lse.data_ptr());         \
+      auto suffix_output_data_ptr_ct4 =                            \
+          reinterpret_cast<scalar_t*>(suffix_output.data_ptr());   \
+      auto suffix_lse_data_ptr_ct5 =                               \
+          reinterpret_cast<float*>(suffix_lse.data_ptr());         \
+      auto num_tokens_ct6 = num_tokens;                            \
+      auto num_heads_ct7 = num_heads;                              \
+      auto head_size_ct8 = head_size;                              \
+                                                                   \
+      cgh.parallel_for(                                            \
+          sycl::nd_range<3>(grid * block, block),                  \
+          [=](sycl::nd_item<3> item_ct1) {                         \
+            vllm::merge_attn_states_kernel<scalar_t, NUM_THREADS>( \
+                output_data_ptr_ct0,                               \
+                output_lse_ptr_ct1,                                \
+                prefix_output_data_ptr_ct2,                        \
+                prefix_lse_data_ptr_ct3,                           \
+                suffix_output_data_ptr_ct4,                        \
+                suffix_lse_data_ptr_ct5,                           \
+                num_tokens_ct6,                                    \
+                num_heads_ct7,                                     \
+                head_size_ct8,                                     \
+                item_ct1);                                         \
+          });                                                      \
+    });                                                            \
   }
 
 /*@brief Merges the attention states from prefix and suffix
@@ -152,21 +162,25 @@ void merge_attn_states_kernel(scalar_t* output, float* output_lse,
  * states.
  */
 template <typename scalar_t>
-void merge_attn_states_launcher(torch::Tensor& output,
-                                std::optional<torch::Tensor> output_lse,
-                                const torch::Tensor& prefix_output,
-                                const torch::Tensor& prefix_lse,
-                                const torch::Tensor& suffix_output,
-                                const torch::Tensor& suffix_lse) {
+void merge_attn_states_launcher(
+    torch::Tensor& output,
+    std::optional<torch::Tensor> output_lse,
+    const torch::Tensor& prefix_output,
+    const torch::Tensor& prefix_lse,
+    const torch::Tensor& suffix_output,
+    const torch::Tensor& suffix_lse) {
   constexpr uint NUM_THREADS = 128;
   const uint num_tokens = output.size(0);
   const uint num_heads = output.size(1);
   const uint head_size = output.size(2);
   const uint pack_size = 16 / sizeof(scalar_t);
-  TORCH_CHECK(head_size % pack_size == 0,
-              "headsize must be multiple of pack_size:", pack_size);
-  TORCH_CHECK(output.stride(-2) == head_size && output.stride(-1) == 1,
-              "output heads must be contiguous in memory");
+  TORCH_CHECK(
+      head_size % pack_size == 0,
+      "headsize must be multiple of pack_size:",
+      pack_size);
+  TORCH_CHECK(
+      output.stride(-2) == head_size && output.stride(-1) == 1,
+      "output heads must be contiguous in memory");
   TORCH_CHECK(
       prefix_output.stride(-2) == head_size && prefix_output.stride(-1) == 1,
       "prefix_output heads must be contiguous in memory");
@@ -192,18 +206,23 @@ void merge_attn_states_launcher(torch::Tensor& output,
   LAUNCH_MERGE_ATTN_STATES(scalar_t, NUM_THREADS);
 }
 
-#define CALL_MERGE_ATTN_STATES_LAUNCHER(scalar_t)                           \
-  {                                                                         \
-    merge_attn_states_launcher<scalar_t>(output, output_lse, prefix_output, \
-                                         prefix_lse, suffix_output,         \
-                                         suffix_lse);                       \
+#define CALL_MERGE_ATTN_STATES_LAUNCHER(scalar_t) \
+  {                                               \
+    merge_attn_states_launcher<scalar_t>(         \
+        output,                                   \
+        output_lse,                               \
+        prefix_output,                            \
+        prefix_lse,                               \
+        suffix_output,                            \
+        suffix_lse);                              \
   }
 
-void merge_attn_states(torch::Tensor& output,
-                       std::optional<torch::Tensor> output_lse,
-                       const torch::Tensor& prefix_output,
-                       const torch::Tensor& prefix_lse,
-                       const torch::Tensor& suffix_output,
-                       const torch::Tensor& suffix_lse) {
+void merge_attn_states(
+    torch::Tensor& output,
+    std::optional<torch::Tensor> output_lse,
+    const torch::Tensor& prefix_output,
+    const torch::Tensor& prefix_lse,
+    const torch::Tensor& suffix_output,
+    const torch::Tensor& suffix_lse) {
   DISPATCH_BY_SCALAR_DTYPE(output.dtype(), CALL_MERGE_ATTN_STATES_LAUNCHER);
 }
