@@ -7,6 +7,7 @@ import torch
 import triton
 
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+from benchmark.src.flash_attn_interface_ import flash_attn_varlen_func_CalKernelTime
 from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
 from tests.utils import seed_everything
 from tests.utils import parse_args
@@ -91,8 +92,6 @@ def make_varlen_with_paged_kv_input(config):
 
 
 def calculate_diff_varlen_paged_kv(config):
-    torch.set_default_device("xpu")
-    torch.xpu.set_device("xpu:0")
     _, _, _, _, _, _, window_size, dtype, _, _, _, q_dtype, _, is_causal, is_paged, fp8_dtype = config
     maybe_quantized_query, maybe_quantized_key_cache, maybe_quantized_value_cache, \
         max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, \
@@ -179,8 +178,6 @@ def benchmark_varlen_with_paged_kv(
     is_sink, is_causal, is_paged, fp8_dtype, 
     provider, iterations=20
 ):
-    torch.set_default_device("xpu")
-    torch.xpu.set_device("xpu:0")
     maybe_quantized_query, maybe_quantized_key_cache, maybe_quantized_value_cache, \
         max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, \
         seq_k, q_descale, k_descale, v_descale, scale, is_causal, \
@@ -191,6 +188,7 @@ def benchmark_varlen_with_paged_kv(
                 block_size, window_size, dtype, soft_cap,
                 num_blocks, fa_versions, q_dtype, is_sink,
                 is_causal, is_paged, fp8_dtype))
+    num_query_heads = num_heads[0]
 
     print(f"Running config: {(num_seqs, query_lens, kv_lens,
                               num_heads, head_size, block_size,
@@ -199,12 +197,12 @@ def benchmark_varlen_with_paged_kv(
                               is_paged, fp8_dtype)}, Provider: {provider}", flush=True)
     assert iterations > 5, "Number of iterations should be greater than 5 to account for warmup"
 
-    if provider == "native":
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
-        total_latency = 0.0
-        ms = 0.0
+    start = torch.xpu.Event(enable_timing=True)
+    end = torch.xpu.Event(enable_timing=True)
+    total_latency = 0.0
+    ms = 0.0
 
+    if provider == "native":
         for index in range(iterations):
             block_tables = torch.randint(0,
                                         num_blocks,
@@ -235,13 +233,6 @@ def benchmark_varlen_with_paged_kv(
                 total_latency += start.elapsed_time(end)
         ms = total_latency / (iterations - 5)
     elif is_paged:
-        num_query_heads = num_heads[0]
-
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
-        total_latency = 0.0
-        ms = 0.0
-
         for index in range(iterations):
             query = torch.randn(sum(query_lens),
                                 num_query_heads,
@@ -251,8 +242,8 @@ def benchmark_varlen_with_paged_kv(
                                         num_blocks,
                                         (num_seqs, max_num_blocks_per_seq),
                                         dtype=torch.int32)
-            start.record()
-            flash_attn_varlen_func(maybe_quantized_query,
+            if provider == "flash_kernel_time":
+                flash_attn_varlen_func_CalKernelTime(maybe_quantized_query,
                                 maybe_quantized_key_cache,
                                 maybe_quantized_value_cache,
                                 max_query_len,
@@ -269,33 +260,83 @@ def benchmark_varlen_with_paged_kv(
                                 causal=is_causal,
                                 block_table=block_tables,
                                 window_size=window_size,
-                                s_aux=sink)
-            end.record()
+                                s_aux=sink,
+                                start_event=start,
+                                end_event=end)
+            else:
+                start.record()
+                flash_attn_varlen_func(maybe_quantized_query,
+                                    maybe_quantized_key_cache,
+                                    maybe_quantized_value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    q_descale=q_descale.expand(scale_shape)
+                                    if q_descale is not None else None,
+                                    k_descale=k_descale.expand(scale_shape)
+                                    if k_descale is not None else None,
+                                    v_descale=v_descale.expand(scale_shape)
+                                    if v_descale is not None else None,
+                                    softmax_scale=scale,
+                                    causal=is_causal,
+                                    block_table=block_tables,
+                                    window_size=window_size,
+                                    s_aux=sink)
+                end.record()
             torch.xpu.synchronize()
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
         ms = total_latency / (iterations - 5)
     else:
-        ms= triton.testing.do_bench(
-            lambda: flash_attn_varlen_func(maybe_quantized_query,
-            maybe_quantized_key_cache,
-            maybe_quantized_value_cache,
-            max_query_len,
-            cu_query_lens,
-            max_kv_len,
-            cu_seqlens_k=cu_kv_lens,
-            q_descale=q_descale.expand(scale_shape)
-            if q_descale is not None else None,
-            k_descale=k_descale.expand(scale_shape)
-            if k_descale is not None else None,
-            v_descale=v_descale.expand(scale_shape)
-            if v_descale is not None else None,
-            softmax_scale=scale,
-            causal=is_causal,
-            block_table=None,
-            window_size=window_size,
-            s_aux=sink)
-        )
+        for index in range(iterations):
+            if provider == "flash_kernel_time":
+                flash_attn_varlen_func_CalKernelTime(maybe_quantized_query,
+                    maybe_quantized_key_cache,
+                    maybe_quantized_value_cache,
+                    max_query_len,
+                    cu_query_lens,
+                    max_kv_len,
+                    cu_seqlens_k=cu_kv_lens,
+                    q_descale=q_descale.expand(scale_shape)
+                    if q_descale is not None else None,
+                    k_descale=k_descale.expand(scale_shape)
+                    if k_descale is not None else None,
+                    v_descale=v_descale.expand(scale_shape)
+                    if v_descale is not None else None,
+                    softmax_scale=scale,
+                    causal=is_causal,
+                    block_table=None,
+                    window_size=window_size,
+                    s_aux=sink,
+                    start_event=start,
+                    end_event=end)
+            else:
+                start.record()
+                flash_attn_varlen_func(maybe_quantized_query,
+                    maybe_quantized_key_cache,
+                    maybe_quantized_value_cache,
+                    max_query_len,
+                    cu_query_lens,
+                    max_kv_len,
+                    cu_seqlens_k=cu_kv_lens,
+                    q_descale=q_descale.expand(scale_shape)
+                    if q_descale is not None else None,
+                    k_descale=k_descale.expand(scale_shape)
+                    if k_descale is not None else None,
+                    v_descale=v_descale.expand(scale_shape)
+                    if v_descale is not None else None,
+                    softmax_scale=scale,
+                    causal=is_causal,
+                    block_table=None,
+                    window_size=window_size,
+                    s_aux=sink)
+                end.record()
+            torch.xpu.synchronize()
+            if index >= 5:  # skip the first 5 iterations for warmup
+                total_latency += start.elapsed_time(end)
+        ms = total_latency / (iterations - 5)
+    clear_xpu_cache()
 
     return 1000 * ms
 
@@ -306,9 +347,9 @@ def get_benchmark_varlen_with_paged_kv(iterations=20):
             x_names=["num_seqs", "query_lens", "kv_lens", "num_heads", "head_size", "block_size", "window_size", "dtype", "soft_cap", "num_blocks", "fa_versions", "q_dtype", "is_sink", "is_causal", "is_paged", "fp8_dtype"],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
-            line_vals=["native", "flash"],
-            line_names=["Native", "FlashAttention"],
-            styles=[("red", "-"), ("blue", "-")],
+            line_vals=["native", "flash", "flash_kernel_time"],
+            line_names=["Native", "FlashAttention", "FlashAttention Kernel Time"],
+            styles=[("red", "-"), ("blue", "-"), ("green", "-")],
             ylabel="Latency (us)",
             plot_name="flash-attn-varlen-vs-native",
             args={},
@@ -345,6 +386,8 @@ if __name__ == "__main__":
     seed = 1234
     seed_everything(seed)
     iterations = 20
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
 
     # seq_lens = [[(1, 1328), (5, 18), (129, 463)]]
     num_seqs = [3]

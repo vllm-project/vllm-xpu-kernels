@@ -7,6 +7,7 @@ import torch
 import triton
 
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+from benchmark.src.flash_attn_interface_ import flash_attn_varlen_func_CalKernelTime
 from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
 from tests.utils import seed_everything
 from tests.utils import parse_args
@@ -139,13 +140,12 @@ def benchmark_decode_with_paged_kv(
     print(f"Running config: {(seq_lens, num_heads, head_size, block_size, 
                               dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink)}, Provider: {provider}", flush=True)
     assert iterations > 5, "Number of iterations should be greater than 5 to account for warmup"
+    start = torch.xpu.Event(enable_timing=True)
+    end = torch.xpu.Event(enable_timing=True)
+    total_latency = 0.0
+    ms = 0.0
 
     if provider == "native":
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
-        total_latency = 0.0
-        ms = 0.0
-
         for index in range(iterations):
             block_tables = torch.randint(0,
                                  num_blocks,
@@ -169,12 +169,7 @@ def benchmark_decode_with_paged_kv(
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
         ms = total_latency / (iterations - 5)
-    else:
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
-        total_latency = 0.0
-        ms = 0.0
-
+    elif provider == "flash":
         for index in range(iterations):
             block_tables = torch.randint(0,
                                         num_blocks,
@@ -198,6 +193,31 @@ def benchmark_decode_with_paged_kv(
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
         ms = total_latency / (iterations - 5)
+    else:
+        for index in range(iterations):
+            block_tables = torch.randint(0,
+                                        num_blocks,
+                                        (num_seqs, max_num_blocks_per_seq),
+                                        dtype=torch.int32)
+            
+            flash_attn_varlen_func_CalKernelTime(maybe_quantized_query,
+                maybe_quantized_key_cache,
+                maybe_quantized_value_cache,
+                max_query_len,
+                cu_query_lens,
+                max_kv_len,
+                seqused_k=seq_k,
+                softmax_scale=scale,
+                causal=False,
+                block_table=block_tables,
+                window_size=(-1, -1),
+                s_aux=sink,
+                start_event=start,
+                end_event=end)
+            torch.xpu.synchronize()
+            if index >= 5:  # skip the first 5 iterations for warmup
+                total_latency += start.elapsed_time(end)
+        ms = total_latency / (iterations - 5)
     clear_xpu_cache()
 
     return 1000 * ms
@@ -210,11 +230,11 @@ def get_benchmark_decode_with_paged_kv(iterations=20):
                      "num_blocks", "fa_versions", "q_dtype", "is_sink"],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
-            line_vals=["native", "flash"],
-            line_names=["Native", "FlashAttention"],
-            styles=[("red", "-"), ("blue", "-")],
+            line_vals=["native", "flash", "flash_kernelTime"],
+            line_names=["Native", "FlashAttention", "FlashAttention Kernel Time"],
+            styles=[("red", "-"), ("blue", "-"), ("green", "-")],
             ylabel="Latency (us)",
-            plot_name="flash-attn-varlen-vs-native",
+            plot_name="flash-attn-decode-vs-native",
             args={},
         )
     )
