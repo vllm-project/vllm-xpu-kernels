@@ -140,6 +140,8 @@ message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 # when loaded by Python.
 set(CMAKE_INSTALL_RPATH "$ORIGIN")
 
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
+
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   #
   # For SYCL we want to use the same flags as CUDA, so we set them here. Note

@@ -200,7 +200,9 @@ struct DecodeKernelLauncher {
          static_cast<int*>(args.block_table),
          args.block_size,
          args.max_blocks_per_seq,
-         args.total_seqlen_k},
+         args.total_seqlen_k,
+         args.window_size_left,
+         args.window_size_right},
         {},
         hw_info,
         args.num_kv_splits};
@@ -214,7 +216,8 @@ struct DecodeKernelLauncher {
          reinterpret_cast<ElementLSE*>(args.exp_sums),
          stride_exp_sums,
          reinterpret_cast<ElementLSE*>(args.max_logits),
-         stride_max_logits},
+         stride_max_logits,
+         args.window_size_left},
         hw_info,
         args.num_kv_splits};
 
@@ -401,7 +404,8 @@ struct PagedDecodeConfig {
         TensorV,
         GmemTiledCopyQ,
         GmemTiledCopyK,
-        GmemTiledCopyV>;
+        GmemTiledCopyV,
+        Local>;
 
     // Epilogue
     using CollectiveEpilogue = cutlass::fmha::collective::DecodeFwdEpilogue<

@@ -218,6 +218,15 @@ HIDDEN_SIZES_GROUP = [256, 1024, 2048]
 
 # override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
+    "test_per_block_fp8_quant": {
+        "num_tokens_block_quant": [1],
+        "hidden_size_block_quant": [64],
+        "group_size": [32],
+    },
+    "test_per_block_mxfp8_quant": {
+        "num_tokens_block_quant": [1],
+        "hidden_size_block_quant": [64],
+    },
     "default": {
         "num_tokens": [1],
         "hidden_size": [1],
