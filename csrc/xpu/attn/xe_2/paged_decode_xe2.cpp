@@ -88,6 +88,19 @@ void cutlass_paged_decode_impl(
     int num_kv_splits) {
   bool is_fp8_kv = key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
                    key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn;
+  if (is_fp8_kv) {
+    TORCH_CHECK(
+        k_scale.has_value() && v_scale.has_value(),
+        "FP8 KV cache requires both k_scale and v_scale tensors to be provided.");
+    TORCH_CHECK(
+        k_scale->scalar_type() == at::ScalarType::Float &&
+            k_scale->numel() == 1,
+        "FP8 KV k_scale must be a float32 tensor with a single element.");
+    TORCH_CHECK(
+        v_scale->scalar_type() == at::ScalarType::Float &&
+            v_scale->numel() == 1,
+        "FP8 KV v_scale must be a float32 tensor with a single element.");
+  }
 
   // general params
   int batch_size, num_heads_q, num_heads_kv, head_size;
