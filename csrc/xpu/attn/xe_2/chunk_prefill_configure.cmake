@@ -1,5 +1,7 @@
 function(fmha_forward_configure FILENAME_SUFFIX)
   set(GEN_KERNEL_SRCS) # output
+  set(GEN_KERNEL_SRCS_FP8Q)
+  set(GEN_KERNEL_SRCS_NON_FP8Q)
   set(L_BOOLS "false" "true")
   set(BOOL_FLAG_false "f")
   set(BOOL_FLAG_true "t")
@@ -40,11 +42,16 @@ function(fmha_forward_configure FILENAME_SUFFIX)
               set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
               configure_file(${FILENAME_SUFFIX}.cpp.in
                              "${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
-              list(
-                APPEND
-                GEN_KERNEL_SRCS
-                "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp"
+              set(GEN_SRC
+                  "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp"
               )
+              list(APPEND GEN_KERNEL_SRCS ${GEN_SRC})
+
+              if(DTYPE_TAG MATCHES "^(e4_e4|e5_e5)_")
+                list(APPEND GEN_KERNEL_SRCS_FP8Q ${GEN_SRC})
+              else()
+                list(APPEND GEN_KERNEL_SRCS_NON_FP8Q ${GEN_SRC})
+              endif()
             endforeach()
           endforeach()
         endforeach()
@@ -53,12 +60,30 @@ function(fmha_forward_configure FILENAME_SUFFIX)
   endforeach()
 
   list(REMOVE_DUPLICATES GEN_KERNEL_SRCS)
+  list(REMOVE_DUPLICATES GEN_KERNEL_SRCS_FP8Q)
+  list(REMOVE_DUPLICATES GEN_KERNEL_SRCS_NON_FP8Q)
   list(LENGTH GEN_KERNEL_SRCS GEN_KERNEL_SRCS_LENGTH)
+  list(LENGTH GEN_KERNEL_SRCS_FP8Q GEN_KERNEL_SRCS_FP8Q_LENGTH)
+  list(LENGTH GEN_KERNEL_SRCS_NON_FP8Q GEN_KERNEL_SRCS_NON_FP8Q_LENGTH)
   message(
     STATUS
       "Generated ${FILENAME_SUFFIX} kernel sources: ${GEN_KERNEL_SRCS_LENGTH}")
+  message(
+    STATUS
+      "Generated ${FILENAME_SUFFIX} fp8-q kernel sources: ${GEN_KERNEL_SRCS_FP8Q_LENGTH}"
+  )
+  message(
+    STATUS
+      "Generated ${FILENAME_SUFFIX} non-fp8-q kernel sources: ${GEN_KERNEL_SRCS_NON_FP8Q_LENGTH}"
+  )
   set(GEN_KERNEL_SRCS
       ${GEN_KERNEL_SRCS}
+      PARENT_SCOPE)
+  set(GEN_KERNEL_SRCS_FP8Q
+      ${GEN_KERNEL_SRCS_FP8Q}
+      PARENT_SCOPE)
+  set(GEN_KERNEL_SRCS_NON_FP8Q
+      ${GEN_KERNEL_SRCS_NON_FP8Q}
       PARENT_SCOPE)
   set(GEN_KERNEL_SRCS_LENGTH
       ${GEN_KERNEL_SRCS_LENGTH}
@@ -69,4 +94,10 @@ function(fmha_forward_configure FILENAME_SUFFIX)
       ${ATTN_KERNEL_SRCS_GEN}
       PARENT_SCOPE)
 
+  set(ATTN_KERNEL_SRCS_GEN_FP8Q
+      ${GEN_KERNEL_SRCS_FP8Q}
+      PARENT_SCOPE)
+  set(ATTN_KERNEL_SRCS_GEN_NON_FP8Q
+      ${GEN_KERNEL_SRCS_NON_FP8Q}
+      PARENT_SCOPE)
 endfunction()

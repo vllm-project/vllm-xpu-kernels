@@ -548,7 +548,7 @@ function(add_xe2_kernel_library LIBRARY_NAME)
   cmake_parse_arguments(
     PARSE_ARGV 1 ARG "INCLUDE_CMAKE_SOURCE_DIR" # Boolean options
     "DESTINATION" # Single value keywords
-    "" # Multi-value keywords
+    "SOURCES" # Multi-value keywords
   )
 
   # Set default destination if not provided
@@ -560,8 +560,12 @@ function(add_xe2_kernel_library LIBRARY_NAME)
   set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-  # Find all source files
-  file(GLOB_RECURSE KERNEL_SOURCES "*.cpp" ${ATTN_KERNEL_SRCS_GEN})
+  # Find source files (use explicit list when provided).
+  if(ARG_SOURCES)
+    set(KERNEL_SOURCES ${ARG_SOURCES})
+  else()
+    file(GLOB_RECURSE KERNEL_SOURCES "*.cpp" ${ATTN_KERNEL_SRCS_GEN})
+  endif()
 
   # Create static library
   add_library(${LIBRARY_NAME} SHARED ${KERNEL_SOURCES})
