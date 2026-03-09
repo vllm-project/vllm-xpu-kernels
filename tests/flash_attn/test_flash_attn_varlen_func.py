@@ -321,9 +321,6 @@ def test_varlen_with_paged_kv(
     torch.xpu.empty_cache()
 
 
-DECODE_SLIDING_WINDOWS = [(-1, -1), (127, -1), (64, -1), (511, -1), (1024, -1)]
-
-
 @pytest.mark.parametrize("seq_lens",
                          [[(1, 1025)], [(1, 523), (1, 37),
                                         (1, 2011)], [(1, 13000)],
@@ -337,7 +334,7 @@ DECODE_SLIDING_WINDOWS = [(-1, -1), (127, -1), (64, -1), (511, -1), (1024, -1)]
 @pytest.mark.parametrize("fa_version", [2])
 @pytest.mark.parametrize("q_dtype", QDTYPES)
 @pytest.mark.parametrize("is_sink", SINK)
-@pytest.mark.parametrize("window_size", DECODE_SLIDING_WINDOWS)
+@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
 @torch.inference_mode()
 def test_decode_with_paged_kv(
     seq_lens: list[tuple[int, int]],

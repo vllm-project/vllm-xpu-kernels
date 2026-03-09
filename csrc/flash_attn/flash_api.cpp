@@ -160,6 +160,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_sink);
   } else {
     // Normalize -1 (unbounded) to max_seqlen_k for kernel masking logic
+    // In decode phase the window_size_right doesn't have effect
     int eff_window_left =
         window_size_left == -1 ? max_seqlen_k : window_size_left;
     int eff_window_right =

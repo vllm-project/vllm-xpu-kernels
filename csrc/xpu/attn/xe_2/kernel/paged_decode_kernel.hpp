@@ -265,17 +265,8 @@ class XeFMHAFwdSplitKVKernel {
 
       if (CollectiveMainloop::CausalMask && seq_coord < discard_seq_coord)
         continue;
-      const int seq_len =
-          CollectiveMainloop::LocalMask
-              ? cute::min(
-                    seq_len_kv,
-                    full_tile_offset + seq_coord + q_sg_tile +
-                        params.mainloop.window_size_right)
-          : CollectiveMainloop::CausalMask
-              ? full_tile_offset +
-                    cute::min(seq_len_kv, seq_coord - discard_seq_coord) +
-                    q_sg_tile
-              : seq_len_kv;
+      // For decode window_size_right doesn't have effect
+      const int seq_len = seq_len_kv;
       // For decode, all packed GQA heads are at position seq_len_kv - 1.
       // Use seq_len - 1 (= seq_len_kv - 1) as the decode position for
       // k_block0 to match ReduceSplitK's computation.
