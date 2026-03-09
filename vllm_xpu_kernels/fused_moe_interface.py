@@ -220,10 +220,6 @@ def xpu_fused_moe(hidden_states,
         (num_rows, n_experts_per_token),
         dtype=torch.int32,
         device=hidden_states.device)
-    permuted_row_to_unpermuted_row = torch.empty(
-        (num_rows, n_experts_per_token),
-        dtype=torch.int32,
-        device=hidden_states.device)
 
     torch.ops._moe_C.remap_hidden_states(hidden_states, remapped_hidden_states,
                                          expert_map, expert_first_token_offset,
@@ -282,7 +278,6 @@ def xpu_fused_moe(hidden_states,
         is_B_mxfp4=is_mxfp4)
 
     torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
-                                permuted_row_to_unpermuted_row,
                                 unpermuted_row_to_permuted_row,
                                 expert_first_token_offset, num_experts)
 

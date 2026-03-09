@@ -76,7 +76,6 @@ void moe_gather(
     torch::Tensor& output,
     const torch::Tensor& moe_output,
     const torch::Tensor& topk_weights,
-    const torch::Tensor& permuted_row_to_unpermuted_row,
     const torch::Tensor& unpermuted_row_to_permuted_row,
     const torch::Tensor& expert_first_token_offset,
     const int64_t num_experts);

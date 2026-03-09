@@ -77,7 +77,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Apply topk softmax to the gating outputs.
   m.def(
       "moe_gather(Tensor! output, Tensor moe_output, Tensor topk_weights, "
-      "Tensor permuted_row_to_unpermuted_row,"
       "Tensor unpermuted_row_to_permuted_row, Tensor "
       "expert_first_token_offset, int num_experts) -> ()");
   m.impl("moe_gather", torch::kXPU, &moe_gather);
