@@ -91,7 +91,8 @@ void cutlass_paged_decode_impl(
   if (is_fp8_kv) {
     TORCH_CHECK(
         k_scale.has_value() && v_scale.has_value(),
-        "FP8 KV cache requires both k_scale and v_scale tensors to be provided.");
+        "FP8 KV cache requires both k_scale and v_scale tensors to be "
+        "provided.");
     TORCH_CHECK(
         k_scale->scalar_type() == at::ScalarType::Float &&
             k_scale->numel() == 1,
