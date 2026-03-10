@@ -321,16 +321,11 @@ class precompiled_wheel_utils:
             package_data_patch = {}
 
             with zipfile.ZipFile(wheel_path) as wheel:
-                files_to_copy = [
-                    "vllm_xpu_kernels/_C.abi3.so",
-                    "vllm_xpu_kernels/_moe_C.abi3.so",
-                    "vllm_xpu_kernels/_vllm_fa2_C.abi3.so",
-                    "vllm_xpu_kernels/_xpu_C.abi3.so",
+                file_members = [
+                    f for f in wheel.filelist
+                    if f.filename.startswith("vllm_xpu_kernels/")
+                    and f.filename.endswith(".so")
                 ]
-
-                file_members = list(
-                    filter(lambda x: x.filename in files_to_copy,
-                           wheel.filelist))
 
                 for file in file_members:
                     print(f"[extract] {file.filename}")
@@ -413,12 +408,27 @@ package_data = {
     ]
 }
 
+
+def get_vllm_version() -> str:
+    # Allow overriding the version.
+    if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
+        print(f"Overriding VLLM version with {env_version}")
+        os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
+        return get_version(write_to="_version.py")
+
+    version = get_version(write_to="_version.py")
+
+    return version
+
+
 # If using precompiled, extract and patch package_data (in advance of setup)
 if envs.VLLM_USE_PRECOMPILED:
     # for now, we force use local wheel path
+    print(f"version: get_vllm_version()={get_vllm_version()}")
     wheel_location = os.getenv(
         "VLLM_PRECOMPILED_WHEEL_LOCATION",
-        "./vllm_xpu_kernels-0.0.1-cp312-cp312-linux_x86_64.whl")
+        f"./vllm_xpu_kernels-{get_vllm_version()}-cp312-cp312-linux_x86_64.whl"
+    )
     if wheel_location is not None:
         wheel_url = wheel_location
     else:
@@ -484,19 +494,6 @@ if ext_modules:
         "build_ext":
         precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
     }
-
-
-def get_vllm_version() -> str:
-    # Allow overriding the version.
-    if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
-        print(f"Overriding VLLM version with {env_version}")
-        os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
-        return get_version(write_to="_version.py")
-
-    version = get_version(write_to="_version.py")
-
-    return version
-
 
 setup(
     version=get_vllm_version(),
