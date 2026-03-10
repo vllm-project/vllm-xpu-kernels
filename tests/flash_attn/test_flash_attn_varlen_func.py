@@ -359,6 +359,8 @@ def test_decode_with_paged_kv(
     #                 "supported on version 3 with bfloat16 base type")
     if num_heads == (16, 1) and head_size == 256:
         pytest.skip("skip test cases that may run out of SLM.")
+    if block_size == 128 and num_blocks == 32768 and head_size >= 192:
+        pytest.skip("skip test cases that may run out of Memory.")
     if is_sink and window_size != (-1, -1):
         pytest.skip("sink not supported with sliding window")
     torch.manual_seed(42)
