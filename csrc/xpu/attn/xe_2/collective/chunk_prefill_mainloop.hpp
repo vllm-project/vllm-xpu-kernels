@@ -562,7 +562,8 @@ template <
     class TensorV_,
     class TiledCopyQ_ = void,  // Optional TiledCopy for loading Q
     class TiledCopyK_ = void,  // Optional TiledCopy for loading K
-    class TiledCopyV_ = void>  // Optional TiledCopy for loading V
+    class TiledCopyV_ = void,  // Optional TiledCopy for loading V
+    bool LocalMask_ = false>
 struct DecodeFwdMainloop {
   static_assert(
       cutlass::detail::dependent_false<DispatchPolicy_>,
@@ -583,7 +584,8 @@ template <
     class TensorV_,
     class TiledCopyQ_,
     class TiledCopyK_,
-    class TiledCopyV_>
+    class TiledCopyV_,
+    bool LocalMask_>
 struct DecodeFwdMainloop<
     XeDefault<Stages>,
     PagedKV_,
@@ -596,7 +598,8 @@ struct DecodeFwdMainloop<
     TensorV_,
     TiledCopyQ_,
     TiledCopyK_,
-    TiledCopyV_> {
+    TiledCopyV_,
+    LocalMask_> {
   //
   // Type Aliases
   //
@@ -669,6 +672,7 @@ struct DecodeFwdMainloop<
   static constexpr bool CausalMask = CausalMask_;
   static constexpr bool Fp8KV =
       is_any_of_v<ElementK, float_e5m2_t, float_e4m3_t>;
+  static constexpr bool LocalMask = LocalMask_;
 
   // User-facing arguments
   struct Arguments {
@@ -680,6 +684,9 @@ struct DecodeFwdMainloop<
     int page_size;
     int max_pages_per_seq;
     int total_seqlen_kv;
+    // Local Mask
+    int window_size_left;
+    int window_size_right;
   };
 
   // Kernel-facing parameters
@@ -707,7 +714,9 @@ struct DecodeFwdMainloop<
         args.ptr_page_table,
         args.page_size,
         args.max_pages_per_seq,
-        args.total_seqlen_kv};
+        args.total_seqlen_kv,
+        args.window_size_left,
+        args.window_size_right};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -903,6 +912,26 @@ struct DecodeFwdMainloop<
       //     }
       //   }
       // }
+
+      /* Local/sliding window masking */
+      if constexpr (LocalMask) {
+        // For decode, all packed GQA heads share the same KV position
+        // (seq_len_kv - 1). Use a fixed decode row for all elements.
+        int decode_row = seq_len - 1 - full_tile_offset;
+        Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
+        Tensor gP = local_tile(
+            cPgP, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
+        auto cS_thread = thr_mma_qk.partition_C(gP);
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS.size(); ++i) {
+          int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
+          bool left_mask = col_idx < decode_row - params.window_size_left;
+          bool right_mask = col_idx > decode_row + params.window_size_right;
+          if (left_mask || right_mask) {
+            tSrS(i) = ElementS(-INFINITY);
+          }
+        }
+      }
 
       /* k masking for remainder tiles */
       if (check_remainder_k && K == blk_k1 - 1) {
