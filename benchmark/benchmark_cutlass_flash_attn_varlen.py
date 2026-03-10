@@ -284,9 +284,9 @@ def benchmark_varlen_with_paged_kv(
                                     window_size=window_size,
                                     s_aux=sink)
                 end.record()
-            torch.xpu.synchronize()
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
+        torch.xpu.synchronize()
         ms = total_latency / (iterations - 5)
     else:
         for index in range(iterations):
@@ -332,9 +332,9 @@ def benchmark_varlen_with_paged_kv(
                     window_size=window_size,
                     s_aux=sink)
                 end.record()
-            torch.xpu.synchronize()
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
+        torch.xpu.synchronize()
         ms = total_latency / (iterations - 5)
     clear_xpu_cache()
 
