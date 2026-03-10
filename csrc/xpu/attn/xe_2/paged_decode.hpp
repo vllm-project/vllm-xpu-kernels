@@ -492,7 +492,7 @@ void decode_policy_dispatch_impl(
           float_e5m2_t,
           half_t>::kernel_dispatch(queue, args);
     }
-  } else {
+  } else if (cuQKType.q_type == CutlassDType::bfloat16) {
     if (cuQKType.k_type == CutlassDType::bfloat16) {
       return PagedDecodeConfig<
           typename decode_policy::ShapeQK,
@@ -540,4 +540,10 @@ void decode_policy_dispatch_impl(
           bfloat16_t>::kernel_dispatch(queue, args);
     }
   }
+  TORCH_CHECK(
+      false,
+      "Unsupported Q/KV dtype combination for paged_decode kernel: q_type=",
+      static_cast<int>(cuQKType.q_type),
+      " k_type=",
+      static_cast<int>(cuQKType.k_type));
 }
