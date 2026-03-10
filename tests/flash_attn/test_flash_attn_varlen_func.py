@@ -129,7 +129,8 @@ MINI_PYTEST_PARAMS = {
         "num_heads": [(8, 2)],
         "num_blocks": [64],
         "window_size": [(-1, -1), (127, 127)],
-        "is_paged": [True]
+        "is_paged": [True],
+        "stride_pad": [0, 32]
     },
     "test_decode_with_paged_kv": {
         "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
@@ -155,6 +156,10 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("is_casual", CASUAL)
 @pytest.mark.parametrize("is_paged", PAGED)
 @pytest.mark.parametrize("fp8_dtype", FP8KV)
+# stride_pad: padding added to head_size to create non-contiguous Q/K/V.
+# Must be a multiple of 32 (64-byte alignment / 2 bytes per bf16 element)
+# since the Xe2 2D block load requires 64-byte aligned base pointers.
+@pytest.mark.parametrize("stride_pad", [0, 32])
 @torch.inference_mode()
 def test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -171,6 +176,7 @@ def test_varlen_with_paged_kv(
     is_casual: bool,
     is_paged: bool,
     fp8_dtype: Optional[torch.dtype],
+    stride_pad: int,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -185,6 +191,10 @@ def test_varlen_with_paged_kv(
         pytest.skip("skip local attn to avoid runtime hang on CI.")
     if block_size == 128 and num_blocks == 32768 and head_size >= 192:
         pytest.skip("skip test cases that may run out of Memory.")
+    if stride_pad > 0 and fp8_dtype is not None:
+        pytest.skip("non-contiguous Q/K/V with FP8 KV cache not tested")
+    if stride_pad > 0 and q_dtype is not None:
+        pytest.skip("non-contiguous Q/K/V with quantized query not tested")
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
@@ -203,6 +213,18 @@ def test_varlen_with_paged_kv(
                         num_query_heads,
                         head_size,
                         dtype=dtype)
+    # Create non-contiguous Q/K/V by allocating with padded head_size
+    # and slicing back to original head_size.
+    if stride_pad > 0:
+        padded_head = head_size + stride_pad
+        query_padded = torch.randn(sum(query_lens),
+                                   num_query_heads,
+                                   padded_head,
+                                   dtype=dtype)
+        query_padded[:, :, :head_size] = query
+        query = query_padded[:, :, :head_size]
+        assert not query.is_contiguous()
+        assert query.stride(-1) == 1
     if is_paged:
         key_cache = torch.randn(num_blocks,
                                 block_size,
@@ -215,6 +237,20 @@ def test_varlen_with_paged_kv(
                                 head_size,
                                 dtype=dtype)
     value_cache = torch.randn_like(key_cache)
+    if stride_pad > 0 and not is_paged:
+        padded_head = head_size + stride_pad
+        k_padded = torch.randn(*key_cache.shape[:-1], padded_head, dtype=dtype)
+        k_padded[..., :head_size] = key_cache
+        key_cache = k_padded[..., :head_size]
+        v_padded = torch.randn(*value_cache.shape[:-1],
+                               padded_head,
+                               dtype=dtype)
+        v_padded[..., :head_size] = value_cache
+        value_cache = v_padded[..., :head_size]
+        assert not key_cache.is_contiguous()
+        assert not value_cache.is_contiguous()
+        assert key_cache.stride(-1) == 1
+        assert value_cache.stride(-1) == 1
 
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
@@ -290,24 +326,25 @@ def test_varlen_with_paged_kv(
                                         window_size=window_size,
                                         s_aux=sink)
 
-    ref_output = ref_paged_attn(query=query,
-                                key_cache=maybe_quantized_key_cache,
-                                value_cache=maybe_quantized_value_cache,
-                                query_lens=query_lens,
-                                kv_lens=kv_lens,
-                                block_tables=block_tables,
-                                scale=scale,
-                                casual=is_casual,
-                                is_paged=is_paged,
-                                sink=sink,
-                                q_descale=q_descale,
-                                k_descale=k_descale,
-                                v_descale=v_descale,
-                                window_size_left=window_size[0],
-                                window_size_right=window_size[1],
-                                is_fp8kv=is_fp8kv,
-                                is_fp8_query=is_fp8_query,
-                                dtype=dtype)
+    ref_output = ref_paged_attn(
+        query=query.contiguous(),
+        key_cache=maybe_quantized_key_cache.contiguous(),
+        value_cache=maybe_quantized_value_cache.contiguous(),
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        casual=is_casual,
+        is_paged=is_paged,
+        sink=sink,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        window_size_left=window_size[0],
+        window_size_right=window_size[1],
+        is_fp8kv=is_fp8kv,
+        is_fp8_query=is_fp8_query,
+        dtype=dtype)
     atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
