@@ -70,6 +70,18 @@ static inline bool is_pvc(at::DeviceIndex device_index = -1) {
          syclex::architecture::intel_gpu_pvc;
 }
 
+// intel_gpu_cri only exists on CRI-enabled oneAPI toolchains; see
+// is_xe3p_arch() below for how VLLM_XPU_HAS_INTEL_GPU_CRI is detected.
+static inline bool is_cri(at::DeviceIndex device_index = -1) {
+#ifdef VLLM_XPU_HAS_INTEL_GPU_CRI
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_cri;
+#else
+  (void)device_index;
+  return false;
+#endif
+}
+
 static inline bool is_xe2_arch(at::DeviceIndex device_index = -1) {
   auto arch = get_device_architecture(device_index);
   return arch == syclex::architecture::intel_gpu_bmg_g21 ||
