@@ -14,6 +14,7 @@ RUN apt clean && apt-get update -y && \
     curl \
     ffmpeg \
     git \
+    ccache \
     libsndfile1 \
     libsm6 \
     libxext6 \

@@ -60,8 +60,7 @@ def ref_paged_attn(query: torch.Tensor,
     for i in range(num_seqs):
         query_len = query_lens[i]
         kv_len = kv_lens[i]
-        q = query[start_idx:start_idx + query_len]
-        q *= scale
+        q = query[start_idx:start_idx + query_len] * scale
 
         if is_paged:
             num_kv_blocks = (kv_len + block_size - 1) // block_size
@@ -144,6 +143,7 @@ MINI_PYTEST_PARAMS = {
         "head_size": [128],
         "num_blocks": [2048],
         "combined_head_dim_factor": [2],
+        "window_size": [(-1, -1), (127, -1)],
     }
 }
 
@@ -340,6 +340,7 @@ def test_varlen_with_paged_kv(
 @pytest.mark.parametrize("fa_version", [2])
 @pytest.mark.parametrize("q_dtype", QDTYPES)
 @pytest.mark.parametrize("is_sink", SINK)
+@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
 @torch.inference_mode()
 def test_decode_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -352,6 +353,7 @@ def test_decode_with_paged_kv(
     fa_version: int,
     q_dtype: Optional[torch.dtype],
     is_sink: bool,
+    window_size: tuple[int, int],
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -361,6 +363,8 @@ def test_decode_with_paged_kv(
     #                 "supported on version 3 with bfloat16 base type")
     if num_heads == (16, 1) and head_size == 256:
         pytest.skip("skip test cases that may run out of SLM.")
+    if is_sink and window_size != (-1, -1):
+        pytest.skip("sink not supported with sliding window")
     torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -424,7 +428,7 @@ def test_decode_with_paged_kv(
                                     softmax_scale=scale,
                                     causal=False,
                                     block_table=block_tables,
-                                    window_size=(-1, -1),
+                                    window_size=window_size,
                                     s_aux=sink)
 
     ref_output = ref_paged_attn(query=query,
@@ -437,11 +441,13 @@ def test_decode_with_paged_kv(
                                 casual=False,
                                 is_paged=True,
                                 sink=sink,
-                                window_size_left=-1,
-                                window_size_right=-1)
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1])
     atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
+    if window_size != (-1, -1):
+        atol, rtol = 1.5e-2, 1.5e-2
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
     torch.xpu.empty_cache()
