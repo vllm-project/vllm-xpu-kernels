@@ -55,6 +55,7 @@ def flash_attn_varlen_func_CalKernelTime(
     num_splits_kv: Optional[int] = None,
     start_event: Optional[torch.Event] = None,
     end_event: Optional[torch.Event] = None,
+    device: str = "xpu",
 ):
     """
     FlashAttention interface for variable-length sequences, with optional
@@ -127,6 +128,13 @@ def flash_attn_varlen_func_CalKernelTime(
                 "FA2 only supports both KV cache descaled")
 
         start_event.record()
+        q = q.to(device)
+        k = k.to(device)
+        v = v.to(device)
+        out = out.to(device)
+        cu_seqlens_q = cu_seqlens_q.to(device)
+        dummy_cu_seqlens_k = dummy_cu_seqlens_k.to(device)
+        block_table = block_table.to(device) if block_table is not None else None
         out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
             q,
             k,
@@ -156,6 +164,13 @@ def flash_attn_varlen_func_CalKernelTime(
             None,
             num_splits_kv,
         )
+        q = q.to("cpu")
+        k = k.to("cpu")
+        v = v.to("cpu")
+        out = out.to("cpu")
+        cu_seqlens_q = cu_seqlens_q.to("cpu")
+        dummy_cu_seqlens_k = dummy_cu_seqlens_k.to("cpu")
+        block_table = block_table.to("cpu") if block_table is not None else None
         end_event.record()
     else:
         raise NotImplementedError("not support yet")

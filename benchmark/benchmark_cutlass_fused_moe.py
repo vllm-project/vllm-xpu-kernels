@@ -9,6 +9,7 @@ import triton
 import triton.testing
 from tests.utils import seed_everything
 from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
+from benchmark.src.fused_moe_interface_ import xpu_fused_moe_CalKernelTime
 from tests.utils import parse_args
 from tests.ops.fp8_quant_op import scaled_fp8_quant
 from tests.fused_moe.test_fused_moe import ref_fused_moe
@@ -139,56 +140,101 @@ def calculate_diff(config):
         print("❌ Implementations differ, ", config, " error: ", e)
 
 
-def get_benchmark():
+def get_benchmark(iterations):
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["m", "n", "k", "num_experts", "topk", "dtype", "w_dtype", "has_bias"],
             x_vals=[(*tuple(c)[0], *tuple(c)[1:]) for c in configs],
             line_arg="provider",
-            line_vals=["native", "vllm"],
-            line_names=["native", "vllm"],
-            styles=[("red", "-"), ("blue", "-")],
+            line_vals=["native", "vllm", "vllm_kernel_gemm1", "vllm_kernel_gemm2", "vllm_kernel_gather"],
+            line_names=["native", "vllm", "vllm_kernel_time"],
+            styles=[("red", "-"), ("blue", "-"), ("green", "-")],
             ylabel="Latency (us)",
             plot_name="moe-cutlass-vs-native",
             args={},
         )
     )
-    def benchmark(m, n, k, num_experts, topk, dtype, w_dtype, has_bias, provider):
-        quantiles = [0.5, 0.2, 0.8]
-
+    def benchmark(m, n, k, num_experts, topk, dtype, w_dtype, has_bias, provider, iterations=iterations):
         print(f"Running config: {(m, n, k, num_experts, topk, dtype, w_dtype, has_bias)}, Provider: {provider}", flush=True)
+        start = torch.xpu.Event(enable_timing=True)
+        end = torch.xpu.Event(enable_timing=True)
+        total_latency = 0.0
+        ms = 0.0
+        assert iterations > 5, "Iterations should be greater than 5 to have enough warmup iterations."
+
         if provider == "native":
             ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
             flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
                 expert_scores, expert_indices = make_fused_moe_input(config=((m, n, k), num_experts, topk, dtype, w_dtype, has_bias))
-            ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: ref_fused_moe(ref_a, ref_w13, w13_bias, ref_w2, w2_bias,
-                flat_expert_weights, flat_expert_indices, topk,
-                "silu", num_experts),
-                quantiles=quantiles,
-            )
+
+            for index in range(iterations):
+                start.record()
+                ref_fused_moe(ref_a, ref_w13, w13_bias, ref_w2, w2_bias,
+                    flat_expert_weights, flat_expert_indices, topk,
+                    "silu", num_experts)
+                end.record()
+                end.synchronize()
+                if index >= 5:  # skip the first 5 iterations for warmup
+                    total_latency += start.elapsed_time(end)
+        elif provider == "vllm":
+            ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
+            flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
+                expert_scores, expert_indices = make_fused_moe_input(config=((m, n, k), num_experts, topk, dtype, w_dtype, has_bias))
+
+            for index in range(iterations):
+                start.record()
+                xpu_fused_moe(hidden_states=a,
+                    w13=w13,
+                    w13_scales=w13_scales,
+                    w13_bias=w13_bias,
+                    w2=w2,
+                    w2_scales=w2_scales,
+                    w2_bias=w2_bias,
+                    topk_weights=expert_scores,
+                    topk_ids=expert_indices,
+                    n_experts_per_token=topk,
+                    activation="silu",
+                    num_experts=num_experts,
+                    is_fp8=(w_dtype is not None))
+                end.record()
+                end.synchronize()
+                if index >= 5:  # skip the first 5 iterations for warmup
+                    total_latency += start.elapsed_time(end)
         else:
             ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
             flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
                 expert_scores, expert_indices = make_fused_moe_input(config=((m, n, k), num_experts, topk, dtype, w_dtype, has_bias))
-            ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: xpu_fused_moe(hidden_states=a,
-                w13=w13,
-                w13_scales=w13_scales,
-                w13_bias=w13_bias,
-                w2=w2,
-                w2_scales=w2_scales,
-                w2_bias=w2_bias,
-                topk_weights=expert_scores,
-                topk_ids=expert_indices,
-                n_experts_per_token=topk,
-                activation="silu",
-                num_experts=num_experts,
-                is_fp8=(w_dtype is not None)),
-                quantiles=quantiles,
-            )
+            
+            for index in range(iterations):
+                gemm1, gemm2, gather = xpu_fused_moe_CalKernelTime(hidden_states=a,
+                    w13=w13,
+                    w13_scales=w13_scales,
+                    w13_bias=w13_bias,
+                    w2=w2,
+                    w2_scales=w2_scales,
+                    w2_bias=w2_bias,
+                    topk_weights=expert_scores,
+                    topk_ids=expert_indices,
+                    n_experts_per_token=topk,
+                    activation="silu",
+                    num_experts=num_experts,
+                    is_fp8=(w_dtype is not None),
+                    start_event=start,
+                    end_event=end)
+                if index >= 5:  # skip the first 5 iterations for warmup
+                    if provider == "vllm_kernel_gemm1":
+                        total_latency += gemm1
+                    elif provider == "vllm_kernel_gemm2":
+                        total_latency += gemm2
+                    elif provider == "vllm_kernel_gather":
+                        total_latency += gather
+                    else:
+                        raise ValueError(f"Unknown provider: {provider}")
+
+        torch.xpu.synchronize()
+        ms = total_latency / (iterations - 5)
         clear_xpu_cache()
-        return 1000 * ms, 1000 * max_ms, 1000 * min_ms
+        return 1000 * ms
 
     return benchmark
 
@@ -198,6 +244,7 @@ if __name__ == "__main__":
     args = parse_args()
     seed = 1234
     seed_everything(seed)
+    iterations = 20
 
     mnk =[
         (1, 5120, 8192),
@@ -228,6 +275,6 @@ if __name__ == "__main__":
             print("Error in config: ", config, " error: ", e)
         clear_xpu_cache()
 
-    benchmark = get_benchmark()
+    benchmark = get_benchmark(iterations=iterations)
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=args.save_path)

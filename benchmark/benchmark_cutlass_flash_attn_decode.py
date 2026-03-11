@@ -173,10 +173,10 @@ def benchmark_decode_with_paged_kv(
             value_cache = value_cache.to("cpu")
             block_tables = block_tables.to("cpu")
             end.record()
+            end.synchronize()
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
-        torch.xpu.synchronize()
-        ms = total_latency / (iterations - 5)
+
     elif provider == "flash":
         for index in range(iterations):
             block_tables = torch.randint(0,
@@ -205,10 +205,9 @@ def benchmark_decode_with_paged_kv(
             maybe_quantized_value_cache = maybe_quantized_value_cache.to("cpu")
             block_tables = block_tables.to("cpu")
             end.record()
+            end.synchronize()
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
-        torch.xpu.synchronize()
-        ms = total_latency / (iterations - 5)
     else:
         for index in range(iterations):
             block_tables = torch.randint(0,
@@ -231,8 +230,8 @@ def benchmark_decode_with_paged_kv(
                 end_event=end)
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
-        torch.xpu.synchronize()
-        ms = total_latency / (iterations - 5)
+    torch.xpu.synchronize()
+    ms = total_latency / (iterations - 5)
     clear_xpu_cache()
 
     return 1000 * ms

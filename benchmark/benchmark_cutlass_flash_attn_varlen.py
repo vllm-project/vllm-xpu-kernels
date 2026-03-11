@@ -228,10 +228,9 @@ def benchmark_varlen_with_paged_kv(
                 is_fp8_query=is_fp8_query,
                 dtype=dtype)
             end.record()
-            torch.xpu.synchronize()
+            end.synchronize()
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
-        ms = total_latency / (iterations - 5)
     elif is_paged:
         for index in range(iterations):
             query = torch.randn(sum(query_lens),
@@ -284,10 +283,9 @@ def benchmark_varlen_with_paged_kv(
                                     window_size=window_size,
                                     s_aux=sink)
                 end.record()
+                end.synchronize()
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
-        torch.xpu.synchronize()
-        ms = total_latency / (iterations - 5)
     else:
         for index in range(iterations):
             if provider == "flash_kernel_time":
@@ -332,10 +330,11 @@ def benchmark_varlen_with_paged_kv(
                     window_size=window_size,
                     s_aux=sink)
                 end.record()
+                end.synchronize()
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
-        torch.xpu.synchronize()
-        ms = total_latency / (iterations - 5)
+    torch.xpu.synchronize()
+    ms = total_latency / (iterations - 5)
     clear_xpu_cache()
 
     return 1000 * ms
