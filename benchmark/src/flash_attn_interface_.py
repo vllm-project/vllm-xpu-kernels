@@ -172,6 +172,7 @@ def flash_attn_varlen_func_CalKernelTime(
         dummy_cu_seqlens_k = dummy_cu_seqlens_k.to("cpu")
         block_table = block_table.to("cpu") if block_table is not None else None
         end_event.record()
+        end_event.synchronize()
     else:
         raise NotImplementedError("not support yet")
     return (out, softmax_lse) if return_softmax_lse else (out)
