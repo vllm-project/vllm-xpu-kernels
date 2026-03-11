@@ -83,7 +83,7 @@ def ref_paged_attn(query: torch.Tensor,
         if is_fp8kv:
             k = (k.to(torch.float32) * k_descale).to(dtype)
             v = (v.to(torch.float32) * v_descale).to(dtype)
-        attn = torch.einsum("qhd,khd->hqk", q, k).float()
+        attn = torch.einsum("qhd,khd->hqk", q, k)
         empty_mask = torch.ones(query_len, kv_len)
         mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
         if window_size_right > 0 or window_size_left > 0:
@@ -109,7 +109,7 @@ def ref_paged_attn(query: torch.Tensor,
                                       1).expand(attn.size()[0],
                                                 attn.size()[1], 1)
             attn = torch.cat([attn, sink_expanded], dim=-1)
-        attn = torch.softmax(attn, dim=-1).to(v.dtype)
+        attn = torch.softmax(attn, dim=-1)
         if sink is not None:
             attn = attn[..., :-1]
         out = torch.einsum("hqk,khd->qhd", attn, v)
@@ -198,7 +198,7 @@ def test_varlen_with_paged_kv(
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
-    torch.manual_seed(4242)
+    torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
