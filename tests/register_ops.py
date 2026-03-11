@@ -143,6 +143,23 @@ def gather_cache(src_cache: torch.Tensor,
                                         cu_seq_lens, batch_size, seq_starts)
 
 
+def convert_fp8(
+    dst_cache: torch.Tensor,
+    src_cache: torch.Tensor,
+    scale: float,
+    kv_dtype: str,
+) -> None:
+    """Convert between FP8 and FP16/BF16/FP32 formats with scaling.
+
+    Args:
+        dst_cache: Destination tensor for converted data
+        src_cache: Source tensor to convert
+        scale: Scaling factor for conversion
+        kv_dtype: Data type string ("fp8", "fp8_e4m3", "fp8_e5m2", or "auto")
+    """
+    torch.ops._C_cache_ops.convert_fp8(dst_cache, src_cache, scale, kv_dtype)
+
+
 def static_scaled_fp8_quant(
     out: torch.Tensor,
     input: torch.Tensor,
@@ -336,6 +353,36 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  bias: Optional[torch.Tensor]) -> None:
     torch.ops._moe_C.topk_softmax(topk_weights, topk_ids, token_expert_indices,
                                   gating_output, renormalize, bias)
+
+
+def swap_blocks(
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    block_size_in_bytes: int,
+    block_mapping: torch.Tensor,
+) -> None:
+    """
+    Copy specific blocks from one tensor to another.
+
+    This method assumes each of the two input tensors is composed of
+    consecutive contiguous blocks, of size block_size_in_bytes.
+    i.e. the memory layout for each tensor is:
+    [block0] [block1] ... [block N]
+
+    block_mapping determines the subset of blocks to copy of the source tensor,
+    and their matching destination block number on the destination tensor.
+    block_mapping is expected to be a tensor of shape (num_blocks_to_copy, 2)
+    where each block_mapping[i] represents a single copy operation, copying
+    block #block_mapping[i][0] from the source tensor
+    to block #block_mapping[i][1] on the destination tensor.
+    block_mapping should have dtype int64.
+
+    The source and the destination tensors can be either on CPU or GPU,
+    but not both on CPU.
+    The block mapping tensor must be on CPU.
+    """
+    torch.ops._C_cache_ops.swap_blocks(src, dst, block_size_in_bytes,
+                                       block_mapping)
 
 
 def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
