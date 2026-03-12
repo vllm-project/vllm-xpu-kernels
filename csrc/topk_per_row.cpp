@@ -1,3 +1,5 @@
+// Adapated from https://github.com/vllm-project/vllm/blob/main/csrc/sampler.cu#L646-L728
+
 #include <sycl/sycl.hpp>
 
 #include <algorithm>
@@ -9,7 +11,7 @@
 
 namespace vllm {
 
-static constexpr int WARP_SIZE = 32;
+static constexpr int SUBGROUP_SIZE = 32;
 
 // The number of slots for the final pass.
 static constexpr int kNumFinalItems = 2048;
@@ -27,7 +29,7 @@ struct FinalItems {
 
 struct Histogram {
   int data[kNumBins];
-  int tmp[WARP_SIZE + 1]; // used in prefix sum computation
+  int tmp[SUBGROUP_SIZE + 1]; // used in prefix sum computation
 };
 
 // Struct to hold all static sized shared memory objects
@@ -149,8 +151,8 @@ void vectorized_process(size_t thread_rank, size_t num_threads,
       }
     }
 
-    static_assert(WARP_SIZE >= items_per_scalar);
-    // and because items_per_scalar > skip_cnt, WARP_SIZE > skip_cnt
+    static_assert(SUBGROUP_SIZE >= items_per_scalar);
+    // and because items_per_scalar > skip_cnt, SUBGROUP_SIZE > skip_cnt
     // no need to use loop
     if (thread_rank < skip_cnt) {
       f(in[thread_rank], thread_rank);
@@ -159,7 +161,7 @@ void vectorized_process(size_t thread_rank, size_t num_threads,
     // len_cast * items_per_scalar + items_per_scalar > len - skip_cnt;
     // and so
     // len - (skip_cnt + len_cast * items_per_scalar) < items_per_scalar <=
-    // WARP_SIZE no need to use loop
+    // SUBGROUP_SIZE no need to use loop
     const idxT remain_i = skip_cnt + len_cast * items_per_scalar + thread_rank;
     if (remain_i < len) {
       f(in[remain_i], remain_i);
@@ -180,9 +182,9 @@ bool processHistogramStep(
   sycl::group group = item.get_group();
   auto sg = item.get_sub_group();
   auto threadIdx_x = item.get_local_id(0);
-  auto lane_id = threadIdx_x % WARP_SIZE;
-  auto warp_id = threadIdx_x / WARP_SIZE;
-  auto warp_num = (kNumThreadsPerBlock + WARP_SIZE - 1) / WARP_SIZE;
+  auto lane_id = threadIdx_x % SUBGROUP_SIZE;
+  auto sg_id = threadIdx_x / SUBGROUP_SIZE;
+  auto sg_num = (kNumThreadsPerBlock + SUBGROUP_SIZE - 1) / SUBGROUP_SIZE;
 
   // Clear the histogram.
   // The histogram size is [kNumBins], and the threads access it in this layout:
@@ -243,41 +245,41 @@ bool processHistogramStep(
     if constexpr (USE_CUB) {
       // No CUB lib in sycl, so we implement our own prefix sum
     } else {
-      // Warp-level prefix sum
-      int warpLocalInclusivePrefixSum = binCount;
-      for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
-        int val = sycl::shift_group_right(sg, warpLocalInclusivePrefixSum, offset);
+      // subgroup-level prefix sum
+      int subgroupLocalInclusivePrefixSum = binCount;
+      for (int offset = 1; offset < SUBGROUP_SIZE; offset *= 2) {
+        int val = sycl::shift_group_right(sg, subgroupLocalInclusivePrefixSum, offset);
         if (lane_id >= offset) {
-          warpLocalInclusivePrefixSum += val;
+          subgroupLocalInclusivePrefixSum += val;
         }
       }
-      int warpLocalExclusivePrefixSum = warpLocalInclusivePrefixSum - binCount;
+      int subgroupLocalExclusivePrefixSum = subgroupLocalInclusivePrefixSum - binCount;
 
-      // the last lane in each warp writes the warp level total sum to smem
-      int warpLocalTotalSum = 0;
-      if (lane_id == WARP_SIZE - 1) {
-        warpLocalTotalSum = warpLocalInclusivePrefixSum;
-        smemFinal.histo.tmp[warp_id] = warpLocalTotalSum;
+      // the last lane in each subgroup writes the subgroup level total sum to smem
+      int subgroupLocalTotalSum = 0;
+      if (lane_id == SUBGROUP_SIZE - 1) {
+        subgroupLocalTotalSum = subgroupLocalInclusivePrefixSum;
+        smemFinal.histo.tmp[sg_id] = subgroupLocalTotalSum;
       }
 
-      // the first thread in the block computes the prefix sum of warp sums
+      // the first thread in the block computes the prefix sum of subgroup sums
       sycl::group_barrier(group);
-      if (warp_id == 0 && lane_id == 0) {
+      if (sg_id == 0 && lane_id == 0) {
         int sum = 0;
-        for (int i = 0; i < warp_num; i++) {
+        for (int i = 0; i < sg_num; i++) {
           int val = smemFinal.histo.tmp[i];
           smemFinal.histo.tmp[i] = sum;
           sum += val;
         }
-        smemFinal.histo.tmp[warp_num] = sum;
+        smemFinal.histo.tmp[sg_num] = sum;
       }
       
-      // add the warp prefix sum to each thread's local exclusive prefix sum
+      // add the subgroup prefix sum to each thread's local exclusive prefix sum
       sycl::group_barrier(group);
-      int warpPrefixSum = smemFinal.histo.tmp[warp_id];
-      prefixSum = warpPrefixSum + warpLocalExclusivePrefixSum;
+      int subgroupPrefixSum = smemFinal.histo.tmp[sg_id];
+      prefixSum = subgroupPrefixSum + subgroupLocalExclusivePrefixSum;
 
-      totalSum = smemFinal.histo.tmp[warp_num];
+      totalSum = smemFinal.histo.tmp[sg_num];
     }
 
     // Update the histogram with the prefix sums.
@@ -565,7 +567,7 @@ class top_k_per_row_prefill_kernel {
         stride1_(stride1),
         topK_(topK),
         offsetIndex_(offsetIndex) {}
-  void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]](const sycl::nd_item<3>& item) const {
+  void operator()[[sycl::reqd_sub_group_size(SUBGROUP_SIZE)]](const sycl::nd_item<3>& item) const {
     int64_t group_idx = item.get_group(0);
     int64_t local_idx = item.get_local_id(0);
     int local_range = item.get_local_range(0);
@@ -637,7 +639,7 @@ class top_k_per_row_decode_kernel {
     numBlocksToMerge_(numBlocksToMerge),
     indices_(indices) {}
 
-  void operator()[[sycl::reqd_sub_group_size(WARP_SIZE)]](const sycl::nd_item<3>& item) const {
+  void operator()[[sycl::reqd_sub_group_size(SUBGROUP_SIZE)]](const sycl::nd_item<3>& item) const {
     auto blockIdx_x = item.get_group(0);
     auto blockIdx_y = item.get_group(1);
     auto gridDim_y = item.get_group_range(1);
