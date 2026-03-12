@@ -136,6 +136,8 @@ MINI_PYTEST_PARAMS = {
         "num_heads": [(8, 2)],
         "head_size": [64, 128],
         "num_blocks": [64],
+        "fp8_dtype": [torch.float8_e4m3fn, None],
+        "window_size": [(-1, -1), (127, -1)],
     }
 }
 
@@ -332,6 +334,8 @@ def test_varlen_with_paged_kv(
 @pytest.mark.parametrize("fa_version", [2])
 @pytest.mark.parametrize("q_dtype", QDTYPES)
 @pytest.mark.parametrize("is_sink", SINK)
+@pytest.mark.parametrize("fp8_dtype", FP8KV)
+@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
 @torch.inference_mode()
 def test_decode_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -344,6 +348,8 @@ def test_decode_with_paged_kv(
     fa_version: int,
     q_dtype: Optional[torch.dtype],
     is_sink: bool,
+    fp8_dtype: Optional[torch.dtype],
+    window_size: tuple[int, int],
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -353,6 +359,10 @@ def test_decode_with_paged_kv(
     #                 "supported on version 3 with bfloat16 base type")
     if num_heads == (16, 1) and head_size == 256:
         pytest.skip("skip test cases that may run out of SLM.")
+    if block_size == 128 and num_blocks == 32768 and head_size >= 192:
+        pytest.skip("skip test cases that may run out of Memory.")
+    if is_sink and window_size != (-1, -1):
+        pytest.skip("sink not supported with sliding window")
     torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -405,6 +415,13 @@ def test_decode_with_paged_kv(
         q_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
+    is_fp8kv = False
+    if fp8_dtype is not None:
+        is_fp8kv = True
+        k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
+        v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
+        maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
+        maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
 
     output = flash_attn_varlen_func(maybe_quantized_query,
                                     maybe_quantized_key_cache,
@@ -416,12 +433,14 @@ def test_decode_with_paged_kv(
                                     softmax_scale=scale,
                                     causal=False,
                                     block_table=block_tables,
-                                    window_size=(-1, -1),
+                                    k_descale=k_descale,
+                                    v_descale=v_descale,
+                                    window_size=window_size,
                                     s_aux=sink)
 
     ref_output = ref_paged_attn(query=query,
-                                key_cache=key_cache,
-                                value_cache=value_cache,
+                                key_cache=maybe_quantized_key_cache,
+                                value_cache=maybe_quantized_value_cache,
                                 query_lens=query_lens,
                                 kv_lens=kv_lens,
                                 block_tables=block_tables,
@@ -429,11 +448,17 @@ def test_decode_with_paged_kv(
                                 casual=False,
                                 is_paged=True,
                                 sink=sink,
-                                window_size_left=-1,
-                                window_size_right=-1)
+                                k_descale=k_descale,
+                                v_descale=v_descale,
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1],
+                                is_fp8kv=is_fp8kv,
+                                dtype=dtype)
     atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
+    if fp8_dtype is not None:
+        atol, rtol = 1.5e-2, 1.5e-2
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
     torch.xpu.empty_cache()

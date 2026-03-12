@@ -217,9 +217,8 @@ class blockExpertPrefixSumKernel {
 
 #define LAUNCH_BLOCK_PREFIXSUM_KERNEL(kNumTokensPerBlock) \
   stream.submit([&](sycl::handler& cgh) {                 \
-    \                     
     cgh.parallel_for(                                     \
-        sycl::nd_range<3>(grid * block, block), \ 
+        sycl::nd_range<3>(grid * block, block),           \
         blockExpertPrefixSumKernel<kNumTokensPerBlock>(   \
             token_selected_experts,                       \
             blocked_expert_counts,                        \
@@ -363,9 +362,8 @@ class GlobalExpertPrefixSumKernel {
 
 #define LAUNCH_GLOBAL_PREFIXSUM_KERNEL(kNumThreadsPerBlock) \
   stream.submit([&](sycl::handler& cgh) {                   \
-    \                     
     cgh.parallel_for(                                       \
-        sycl::nd_range<3>(grid * block, block), \ 
+        sycl::nd_range<3>(grid * block, block),             \
         GlobalExpertPrefixSumKernel<kNumThreadsPerBlock>(   \
             blocked_expert_counts,                          \
             blocked_expert_counts_cumsum,                   \
