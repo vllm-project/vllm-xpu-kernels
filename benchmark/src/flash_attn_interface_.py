@@ -128,7 +128,6 @@ def flash_attn_varlen_func_CalKernelTime(
                 "FA2 only supports both KV cache descaled")
 
         start_event.record()
-        block_table = block_table.to(device) if block_table is not None else None
         out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
             q,
             k,
