@@ -152,10 +152,6 @@ def benchmark_decode_with_paged_kv(
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
             start.record()
-            query = query.to(DEVICE)
-            key_cache = key_cache.to(DEVICE)
-            value_cache = value_cache.to(DEVICE)
-            block_tables = block_tables.to(DEVICE)
             ref_paged_attn(query=query,
                 key_cache=key_cache,
                 value_cache=value_cache,
@@ -168,10 +164,6 @@ def benchmark_decode_with_paged_kv(
                 sink=sink,
                 window_size_left=-1,
                 window_size_right=-1)
-            query = query.to("cpu")
-            key_cache = key_cache.to("cpu")
-            value_cache = value_cache.to("cpu")
-            block_tables = block_tables.to("cpu")
             end.record()
             end.synchronize()
             if index >= 5:  # skip the first 5 iterations for warmup
@@ -184,10 +176,6 @@ def benchmark_decode_with_paged_kv(
                                         (num_seqs, max_num_blocks_per_seq),
                                         dtype=torch.int32)
             start.record()
-            maybe_quantized_query = maybe_quantized_query.to(DEVICE)
-            maybe_quantized_key_cache = maybe_quantized_key_cache.to(DEVICE)
-            maybe_quantized_value_cache = maybe_quantized_value_cache.to(DEVICE)
-            block_tables = block_tables.to(DEVICE)
             flash_attn_varlen_func(maybe_quantized_query,
                 maybe_quantized_key_cache,
                 maybe_quantized_value_cache,
@@ -200,10 +188,6 @@ def benchmark_decode_with_paged_kv(
                 block_table=block_tables,
                 window_size=(-1, -1),
                 s_aux=sink)
-            maybe_quantized_query = maybe_quantized_query.to("cpu")
-            maybe_quantized_key_cache = maybe_quantized_key_cache.to("cpu")
-            maybe_quantized_value_cache = maybe_quantized_value_cache.to("cpu")
-            block_tables = block_tables.to("cpu")
             end.record()
             end.synchronize()
             if index >= 5:  # skip the first 5 iterations for warmup
@@ -278,6 +262,8 @@ if __name__ == "__main__":
     seed = 1234
     seed_everything(seed)
     iterations = 20
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
 
     # seq_lens = [[(1, 1025)], [(1, 523), (1, 37), (1, 2011)], [(1, 13000)],
     #             [(1, 523), (1, 37), (1, 2011), (1, 5000)]]
@@ -315,12 +301,12 @@ if __name__ == "__main__":
         new_configs.append(config)
     configs = new_configs
 
-    # for config in configs:
-    #    try:
-    #        calculate_diff_decode_paged_kv(config)
-    #    except Exception as e:
-    #        print("Error in config: ", config, " error: ", e)
-    #    clear_xpu_cache()
+    for config in configs:
+       try:
+           calculate_diff_decode_paged_kv(config)
+       except Exception as e:
+           print("Error in config: ", config, " error: ", e)
+       clear_xpu_cache()
 
     benchmark = get_benchmark_decode_with_paged_kv(iterations=iterations)
     # Run performance benchmark
