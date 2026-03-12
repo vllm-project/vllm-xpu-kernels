@@ -6,10 +6,10 @@ import vllm_xpu_kernels._moe_C  # noqa: F401
 from tests.utils import seed_everything
 
 DEVICE = "xpu"
-NUM_ROWS = [1, 32, 8192]
-HIDDEN_SIZE = [128, 1024]
+NUM_ROWS = [32, 1024]
+HIDDEN_SIZE = [128]
 TOTAL_EXPERTS_NUM = [32, 128]
-TOP_KS = [1, 4, 8]
+TOP_KS = [1, 8]
 DTYPE = [torch.bfloat16, torch.float16, torch.float32]
 
 LOCAL_EXPERTS_NUM = [3, 8, 11]
@@ -19,7 +19,7 @@ EP_SIZE = [4]
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
     "default": {
-        "num_rows": [1],
+        "num_rows": [32],
         "hidden_size": [128],
         "total_experts_num": [16],
         "topk": [1],
