@@ -340,11 +340,11 @@ class XeFMHAFwdSplitKVKernel {
       auto layout_k = make_layout(
           shape_K,
           make_stride(
-              int(get<0>(p.dK)), _1{}, int(get<2>(p.dK)), int(get<3>(p.dK))));
+              get<0>(p.dK), _1{}, get<2>(p.dK), get<3>(p.dK)));
       auto layout_v = make_layout(
           shape_V,
           make_stride(
-              _1{}, int(get<1>(p.dV)), int(get<2>(p.dV)), int(get<3>(p.dV))));
+              _1{}, get<1>(p.dV), get<2>(p.dV), get<3>(p.dV)));
 
       auto layout_o = make_ordered_layout(shape_O, Step<_1, _0, _2, _3, _4>{});
       auto layout_exp_sums =
