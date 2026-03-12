@@ -182,6 +182,17 @@ void cutlass_paged_decode_impl(
       value_cache.stride(1),
       value_cache.stride(2)};
 
+  TORCH_CHECK(
+      key_cache.stride(-1) == 1,
+      "paged_decode_xe2: key_cache must be contiguous in the last dimension "
+      "(head_dim), got stride=",
+      key_cache.stride(-1));
+  TORCH_CHECK(
+      value_cache.stride(-1) == 1,
+      "paged_decode_xe2: value_cache must be contiguous in the last dimension "
+      "(head_dim), got stride=",
+      value_cache.stride(-1));
+
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
 
   static constexpr int max_head_size = 256;

@@ -160,6 +160,26 @@ struct DecodeKernelLauncher {
     if (args.k_stride_seq > 0) {
       // Use actual strides from KV cache tensors (supports non-contiguous
       // layouts such as MLA combined KV cache)
+      constexpr int64_t kIntMax =
+          static_cast<int64_t>(std::numeric_limits<int>::max());
+      TORCH_CHECK(
+          args.k_stride_seq <= kIntMax && args.k_stride_heads <= kIntMax &&
+              args.k_stride_page <= kIntMax && args.v_stride_seq <= kIntMax &&
+              args.v_stride_heads <= kIntMax && args.v_stride_page <= kIntMax,
+          "KV cache stride exceeds int32 max (",
+          kIntMax,
+          "): k_stride_seq=",
+          args.k_stride_seq,
+          " k_stride_heads=",
+          args.k_stride_heads,
+          " k_stride_page=",
+          args.k_stride_page,
+          " v_stride_seq=",
+          args.v_stride_seq,
+          " v_stride_heads=",
+          args.v_stride_heads,
+          " v_stride_page=",
+          args.v_stride_page);
       stride_K = StrideK{
           static_cast<int>(args.k_stride_seq),
           _1{},
