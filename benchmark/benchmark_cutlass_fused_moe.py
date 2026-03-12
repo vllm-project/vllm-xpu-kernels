@@ -162,11 +162,11 @@ def get_benchmark(iterations):
         ms = 0.0
         assert iterations > 5, "Iterations should be greater than 5 to have enough warmup iterations."
 
-        if provider == "native":
-            ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
+        ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
             flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
                 expert_scores, expert_indices = make_fused_moe_input(config=((m, n, k), num_experts, topk, dtype, w_dtype, has_bias))
 
+        if provider == "native":
             for index in range(iterations):
                 start.record()
                 ref_fused_moe(ref_a, ref_w13, w13_bias, ref_w2, w2_bias,
@@ -177,10 +177,6 @@ def get_benchmark(iterations):
                 if index >= 5:  # skip the first 5 iterations for warmup
                     total_latency += start.elapsed_time(end)
         elif provider == "vllm":
-            ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
-            flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
-                expert_scores, expert_indices = make_fused_moe_input(config=((m, n, k), num_experts, topk, dtype, w_dtype, has_bias))
-
             for index in range(iterations):
                 start.record()
                 xpu_fused_moe(hidden_states=a,
@@ -201,10 +197,6 @@ def get_benchmark(iterations):
                 if index >= 5:  # skip the first 5 iterations for warmup
                     total_latency += start.elapsed_time(end)
         else:
-            ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
-            flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
-                expert_scores, expert_indices = make_fused_moe_input(config=((m, n, k), num_experts, topk, dtype, w_dtype, has_bias))
-            
             for index in range(iterations):
                 gemm1, gemm2, gather = xpu_fused_moe_CalKernelTime(hidden_states=a,
                     w13=w13,
