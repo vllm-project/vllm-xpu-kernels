@@ -481,6 +481,7 @@ void kernel_launcher(
   using KERNEL_MAIN = causal_conv1d_kernel<T, Width, ReorderInput>;
   auto range_main = KERNEL_MAIN::get_nd_range(num_actual_tokens, qkvz_elems);
   assert(head_k_dim % KERNEL_MAIN::elems_per_item == 0);
+  assert(num_v_heads % KERNEL_MAIN::elems_per_item == 0);
   queue.submit([&](sycl::handler& cgh) {
     KERNEL_MAIN task(
         q_out,

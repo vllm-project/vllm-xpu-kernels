@@ -23,7 +23,7 @@ TP_SIZE = [1]
 HAS_BIAS = [True, False]
 ACTIVATION = ["silu"]
 MODE = ["prefill", "decode", "mix_mode"]
-reorder_input = [True, False]
+REORDER_INPUT = [True, False]
 DTYPES = [torch.float16]
 
 # Override pytest parameters when enabling mini pytest
@@ -250,7 +250,7 @@ def simple_random_distribute(N, batch_size):
 @pytest.mark.parametrize("has_bias", HAS_BIAS)
 @pytest.mark.parametrize("activation", ACTIVATION)
 @pytest.mark.parametrize("mode", MODE)
-@pytest.mark.parametrize("reorder_input", reorder_input)
+@pytest.mark.parametrize("reorder_input", REORDER_INPUT)
 @pytest.mark.parametrize("dtype", DTYPES)
 @torch.inference_mode()
 def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
