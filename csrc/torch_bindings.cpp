@@ -96,6 +96,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl(
       "per_token_group_fp8_quant", torch::kXPU, &per_token_group_quant_fp8);
 
+  // Compute per-token-group MXFP4 quantized tensor and scaling factor.
+  ops.def(
+      "per_token_group_quant_mxfp4(Tensor input, Tensor! output_q, Tensor! "
+      "output_s, int group_size, float eps) -> ()");
+  ops.impl(
+      "per_token_group_quant_mxfp4", torch::kXPU, &per_token_group_quant_mxfp4);
+
   // swigluoai_and_mul
   ops.def(
       "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
