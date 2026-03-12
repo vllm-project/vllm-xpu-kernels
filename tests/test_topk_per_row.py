@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from tests.register_ops import topk_per_row_prefill, topk_per_row_decode
-from vllm.platforms import current_platform
 
 # This file is same as https://github.com/vllm-project/vllm/blob/main/tests/kernels/test_top_k_per_row.py with
 # modification of testing XPU platform. Here just for quick testing, in future this could be removed and
@@ -66,7 +65,7 @@ def create_row_boundaries(
 
 def compare_top_k_results(
     logits: torch.Tensor,
-    cuda_indices: torch.Tensor,
+    xpu_indices: torch.Tensor,
     torch_indices: torch.Tensor,
     row_starts: torch.Tensor,
     row_ends: torch.Tensor,
@@ -74,10 +73,10 @@ def compare_top_k_results(
     tolerance: float = 1e-5,
 ) -> bool:
     """
-    Compare results from CUDA top_k_per_row with torch.topk.
+    Compare results from XPU top_k_per_row with torch.topk.
     Both results should be sorted and contain the same top-k elements.
     """
-    num_rows = cuda_indices.shape[0]
+    num_rows = xpu_indices.shape[0]
 
     for row_idx in range(num_rows):
         # Get valid elements using row boundaries
@@ -85,33 +84,33 @@ def compare_top_k_results(
         row_end = row_ends[row_idx].item()
         row_length = row_end - row_start
         num_valid = min(top_k, row_length)
-        cuda_row_indices = cuda_indices[row_idx][:num_valid].cpu()
+        xpu_row_indices = xpu_indices[row_idx][:num_valid].cpu()
         torch_row_indices = torch_indices[row_idx][:num_valid].cpu()
 
         # Compare the sets of indices first
-        cuda_set = set(cuda_row_indices.tolist())
+        xpu_set = set(xpu_row_indices.tolist())
         torch_set = set(torch_row_indices.tolist())
-        if cuda_set == torch_set:
+        if xpu_set == torch_set:
             continue
 
         # Any difference in elements, compare the values
         logits_row = logits[row_idx]
-        cuda_row_values = [logits_row[i] for i in cuda_row_indices]
+        xpu_row_values = [logits_row[i] for i in xpu_row_indices]
         torch_row_values = [logits_row[i] for i in torch_row_indices]
 
-        cuda_only_values, torch_only_values = [], []
-        for idx in cuda_set - torch_set:
-            cuda_pos = (cuda_row_indices == idx).nonzero(as_tuple=True)[0]
-            cuda_only_values.append(cuda_row_values[cuda_pos[0]])
+        xpu_only_values, torch_only_values = [], []
+        for idx in xpu_set - torch_set:
+            xpu_pos = (xpu_row_indices == idx).nonzero(as_tuple=True)[0]
+            xpu_only_values.append(xpu_row_values[xpu_pos[0]])
 
-        for idx in torch_set - cuda_set:
+        for idx in torch_set - xpu_set:
             torch_pos = (torch_row_indices == idx).nonzero(as_tuple=True)[0]
             torch_only_values.append(torch_row_values[torch_pos[0]])
 
-        if len(cuda_only_values) != len(torch_only_values):
+        if len(xpu_only_values) != len(torch_only_values):
             return False
         if not torch.allclose(
-            torch.tensor(cuda_only_values, device="xpu"),
+            torch.tensor(xpu_only_values, device="xpu"),
             torch.tensor(torch_only_values, device="xpu"),
             rtol=tolerance,
             atol=tolerance,
@@ -123,7 +122,6 @@ def compare_top_k_results(
 
 @pytest.mark.parametrize("num_rows", NUM_ROWS)
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="This test requires XPU")
 @torch.inference_mode()
 def test_top_k_per_row(
     num_rows: int,
@@ -144,7 +142,7 @@ def test_top_k_per_row(
     # Create output tensors
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=device)
 
-    # Run CUDA implementation
+    # Run XPU implementation
     topk_per_row_prefill(
         logits,
         row_starts,
@@ -164,7 +162,7 @@ def test_top_k_per_row(
     # Compare results
     assert compare_top_k_results(
         logits, indices, torch_indices, row_starts, row_ends, top_k
-    ), "CUDA top_k_per_row_prefill results don't match torch.topk"
+    ), "XPU top_k_per_row_prefill results don't match torch.topk"
 
 
 def _run_top_k_per_row_decode_test(
@@ -196,7 +194,7 @@ def _run_top_k_per_row_decode_test(
     # Create output tensors
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=device)
 
-    # Run CUDA implementation
+    # Run XPU implementation
     topk_per_row_decode(
         logits,
         next_n,
@@ -220,14 +218,13 @@ def _run_top_k_per_row_decode_test(
     # Compare results
     assert compare_top_k_results(
         logits, indices, torch_indices, row_starts, row_ends, top_k
-    ), "CUDA top_k_per_row_decode results don't match torch.topk"
+    ), "XPU top_k_per_row_decode results don't match torch.topk"
 
 
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
 @pytest.mark.parametrize("next_n", NEXT_N)
 @pytest.mark.parametrize("data_generation", DATA_GENERATION)
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="This test requires XPU")
 @torch.inference_mode()
 def test_top_k_per_row_decode(
     top_k: int,
@@ -246,7 +243,6 @@ def test_top_k_per_row_decode(
     )
 
 
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="This test requires XPU")
 @torch.inference_mode()
 def test_top_k_per_row_decode_large_vocab_size() -> None:
     """
