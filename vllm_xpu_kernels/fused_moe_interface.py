@@ -224,8 +224,8 @@ def xpu_fused_moe(hidden_states,
     torch.ops._moe_C.remap_hidden_states(hidden_states, remapped_hidden_states,
                                          expert_map, expert_first_token_offset,
                                          unpermuted_row_to_permuted_row,
-                                         topk_ids, topk_weights, num_rows,
-                                         hidden_size, n_experts_per_token,
+                                         topk_ids, num_rows, hidden_size,
+                                         n_experts_per_token,
                                          total_experts_num, local_experts_num)
 
     ########### gemm1 ##################

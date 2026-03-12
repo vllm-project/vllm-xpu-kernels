@@ -106,7 +106,6 @@ void remap_hidden_states(
     torch::Tensor& expert_first_token_offset,
     torch::Tensor& unpermuted_row_to_permuted_row,
     torch::Tensor& topk_ids,
-    torch::Tensor& topk_weights,
     int64_t num_rows,
     int64_t hidden_size,
     int64_t n_experts_per_token,

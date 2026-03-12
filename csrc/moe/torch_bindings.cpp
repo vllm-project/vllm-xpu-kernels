@@ -100,7 +100,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "remap_hidden_states(Tensor hidden_states, Tensor remapped_hidden_states,"
       "Tensor expert_map, Tensor expert_first_token_offset,"
       "Tensor unpermuted_row_to_permuted_row, Tensor topk_ids,"
-      "Tensor topk_weights,"
       "int num_rows, "
       "int hidden_size, int n_experts_per_token, int total_experts_num, int "
       "local_experts_num) -> "

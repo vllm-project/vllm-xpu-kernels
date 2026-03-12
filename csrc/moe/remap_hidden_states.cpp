@@ -139,7 +139,6 @@ class RemapHiddenStates {
       int* unpermuted_row_to_permuted_row,
       int64_t* expert_first_token_offset,
       int64_t* topk_ids,
-      float* topk_weights,
       const int num_rows,
       const int hidden_size,
       const int n_experts_per_token,
@@ -150,7 +149,6 @@ class RemapHiddenStates {
         unpermuted_row_to_permuted_row(unpermuted_row_to_permuted_row),
         expert_first_token_offset(expert_first_token_offset),
         topk_ids(topk_ids),
-        topk_weights(topk_weights),
         num_rows(num_rows),
         hidden_size(hidden_size),
         n_experts_per_token(n_experts_per_token),
@@ -238,7 +236,6 @@ class RemapHiddenStates {
   int* unpermuted_row_to_permuted_row;
   int64_t* expert_first_token_offset;
   int64_t* topk_ids;
-  float* topk_weights;
   const int num_rows;
   const int hidden_size;
   const int n_experts_per_token;
@@ -253,7 +250,6 @@ void RemapHiddenStatesLauncher(
     int64_t* expert_first_token_offset,
     int* unpermuted_row_to_permuted_row,
     int64_t* topk_ids,
-    float* topk_weights,
     const int num_rows,
     const int hidden_size,
     const int n_experts_per_token,
@@ -294,7 +290,6 @@ void RemapHiddenStatesLauncher(
             unpermuted_row_to_permuted_row,
             expert_first_token_offset,
             topk_ids,
-            topk_weights,
             num_rows,
             hidden_size,
             n_experts_per_token,
@@ -314,7 +309,6 @@ void remap_hidden_states(
     torch::Tensor&
         unpermuted_row_to_permuted_row,  // [num_rows, n_experts_per_token]
     torch::Tensor& topk_ids,             // [num_rows, n_experts_per_token]
-    torch::Tensor& topk_weights,         // [num_rows, n_experts_per_token]
     int64_t num_rows,
     int64_t hidden_size,
     int64_t n_experts_per_token,
@@ -335,10 +329,6 @@ void remap_hidden_states(
   TORCH_CHECK(
       topk_ids.scalar_type() == torch::kInt64, "topk_ids must be int64");
 
-  TORCH_CHECK(
-      topk_weights.scalar_type() == torch::kFloat32,
-      "topk_weights must be float32");
-
   // shape check
   TORCH_CHECK(
       hidden_states.size(0) == num_rows && hidden_states.size(1) == hidden_size,
@@ -357,10 +347,6 @@ void remap_hidden_states(
   TORCH_CHECK(
       topk_ids.size(0) == num_rows && topk_ids.size(1) == n_experts_per_token,
       "topk_ids must be [num_rows, n_experts_per_token]");
-  TORCH_CHECK(
-      topk_weights.size(0) == num_rows &&
-          topk_weights.size(1) == n_experts_per_token,
-      "topk_weights must be [num_rows, n_experts_per_token]");
 
   const at::DeviceGuard device_guard(hidden_states.device());
   auto& queue = vllm::xpu::vllmGetQueue();
@@ -373,7 +359,6 @@ void remap_hidden_states(
       reinterpret_cast<int64_t*>(expert_first_token_offset.data_ptr()),  \
       reinterpret_cast<int*>(unpermuted_row_to_permuted_row.data_ptr()), \
       reinterpret_cast<int64_t*>(topk_ids.data_ptr()),                   \
-      reinterpret_cast<float*>(topk_weights.data_ptr()),                 \
       num_rows,                                                          \
       hidden_size,                                                       \
       n_experts_per_token,                                               \
