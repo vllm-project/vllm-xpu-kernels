@@ -110,9 +110,6 @@ def calculate_diff(config):
                             flat_expert_weights, flat_expert_indices, topk,
                             "silu", e)
 
-    ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights, \
-        flat_expert_indices, a, w13, w13_scales, w2, w2_scales, \
-            expert_scores, expert_indices = make_fused_moe_input(config)
     output = xpu_fused_moe(hidden_states=a,
                            w13=w13,
                            w13_scales=w13_scales,
