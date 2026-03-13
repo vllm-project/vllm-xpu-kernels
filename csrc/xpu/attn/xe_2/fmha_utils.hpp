@@ -83,12 +83,86 @@ struct chunk_policy_head256 {
   using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };
 
+// Page-size-aware chunk prefill policies.
+// Used when paged KV has block_size smaller than the default K-tile.
+
+// block_size=16 variants (K-tile = 16)
+struct chunk_policy_head64_p16 {
+  using ShapeQK = Shape<_128, _16, _32>;
+  using ShapePV = Shape<_128, _32, _16>;
+  using ShapeOut = Shape<_128, _64>;
+  using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
+};
+
+struct chunk_policy_head96_p16 {
+  using ShapeQK = Shape<_128, _16, _32>;
+  using ShapePV = Shape<_128, _32, _16>;
+  using ShapeOut = Shape<_128, _96>;
+  using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
+};
+
+struct chunk_policy_head128_p16 {
+  using ShapeQK = Shape<_128, _16, _32>;
+  using ShapePV = Shape<_128, _32, _16>;
+  using ShapeOut = Shape<_128, _128>;
+  using SubgroupLayoutQK = Layout<Shape<_16, _1, _1>>;
+};
+
+struct chunk_policy_head192_p16 {
+  using ShapeQK = Shape<_256, _16, _32>;
+  using ShapePV = Shape<_256, _32, _16>;
+  using ShapeOut = Shape<_256, _192>;
+  using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
+};
+
+struct chunk_policy_head256_p16 {
+  using ShapeQK = Shape<_256, _16, _32>;
+  using ShapePV = Shape<_256, _32, _16>;
+  using ShapeOut = Shape<_256, _256>;
+  using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
+};
+
+// block_size=32 variants (K-tile = 32)
+// Only needed for head96/head128 whose default K-tile is 64
+struct chunk_policy_head96_p32 {
+  using ShapeQK = Shape<_128, _32, _32>;
+  using ShapePV = Shape<_128, _32, _32>;
+  using ShapeOut = Shape<_128, _96>;
+  using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
+};
+
+struct chunk_policy_head128_p32 {
+  using ShapeQK = Shape<_128, _32, _32>;
+  using ShapePV = Shape<_128, _32, _32>;
+  using ShapeOut = Shape<_128, _128>;
+  using SubgroupLayoutQK = Layout<Shape<_16, _1, _1>>;
+};
+
 // define decode policy
 template <typename q_packed, typename head_dim, typename kv_tile>
 struct decode_policy_qpacked_head {
   static_assert(
-      cute::is_same_v<kv_tile, _64> || cute::is_same_v<kv_tile, _128>,
+      cute::is_same_v<kv_tile, _16> || cute::is_same_v<kv_tile, _32> ||
+          cute::is_same_v<kv_tile, _64> || cute::is_same_v<kv_tile, _128>,
       "Unsupported kv_tile(page_size) for decode_policy_qpacked_head");
+};
+
+// kv_tile == _16
+template <typename q_packed, typename head_dim>
+struct decode_policy_qpacked_head<q_packed, head_dim, _16> {
+  using ShapeQK = Shape<q_packed, _16, _64>;
+  using ShapePV = Shape<q_packed, _32, _16>;
+  using ShapeOut = Shape<q_packed, head_dim>;
+  using SubgroupLayoutQK = Layout<Shape<_1, _1, _1>>;
+};
+
+// kv_tile == _32
+template <typename q_packed, typename head_dim>
+struct decode_policy_qpacked_head<q_packed, head_dim, _32> {
+  using ShapeQK = Shape<q_packed, _32, _64>;
+  using ShapePV = Shape<q_packed, _32, _32>;
+  using ShapeOut = Shape<q_packed, head_dim>;
+  using SubgroupLayoutQK = Layout<Shape<_1, _2, _1>>;
 };
 
 // kv_tile == _64

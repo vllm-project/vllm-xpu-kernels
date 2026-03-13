@@ -586,6 +586,9 @@ class DecodeFwdEpilogue {
 
     if constexpr (ReduceK{} == _1{}) {
       ReduceFragARow rA_max;
+      // Initialize rA_max from tA_max so that max_logits is correct
+      // when num_kv_splits > 1 (used by ReduceSplitK).
+      rA_max(0) = tA_max(0);
       return std::make_tuple(tArA, rA_max, tA_sum, true);
     } else {
       /* Identify A tile ID and k block for this subgroup. */

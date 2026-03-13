@@ -72,6 +72,12 @@ inline void dispatch_by_page_size(
     CutlassQKType& cuQKType,
     const paged_decode_args_t& args) {
   switch (page_size) {
+    case 16:
+      dispatch_by_head_size<QGroup, _16>(head_case, queue, cuQKType, args);
+      break;
+    case 32:
+      dispatch_by_head_size<QGroup, _32>(head_case, queue, cuQKType, args);
+      break;
     case 64:
       dispatch_by_head_size<QGroup, _64>(head_case, queue, cuQKType, args);
       break;
