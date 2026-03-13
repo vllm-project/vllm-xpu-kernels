@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
 import torch
-# import vllm
-from vllm import _custom_ops as ops
 
 import vllm_xpu_kernels._C  # noqa: F401
+from tests import register_ops as ops
 
 torch.set_printoptions(threshold=torch.inf, precision=8)
 
