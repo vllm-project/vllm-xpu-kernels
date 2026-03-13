@@ -146,6 +146,59 @@ void cutlass_chunk_prefill_impl(
       is_local,
       is_sink};
 
+  // Extract Q, K, V, O strides from tensors
+  if (is_varlen) {
+    // Q/O: [total_seq, num_heads, head_size]
+    args.q_stride_seq = query.stride(0);
+    args.q_stride_heads = query.stride(1);
+    args.q_stride_batch = 0;
+    args.o_stride_seq = out.stride(0);
+    args.o_stride_heads = out.stride(1);
+    args.o_stride_batch = 0;
+    if (is_paged) {
+      // K/V: [num_blocks, block_size, num_heads_kv, head_size]
+      args.k_stride_seq = key_cache.stride(1);
+      args.k_stride_heads = key_cache.stride(2);
+      args.k_stride_batch = 0;
+      args.v_stride_seq = value_cache.stride(1);
+      args.v_stride_heads = value_cache.stride(2);
+      args.v_stride_batch = 0;
+    } else {
+      // K/V: [total_seq_k, num_heads_kv, head_size]
+      args.k_stride_seq = key_cache.stride(0);
+      args.k_stride_heads = key_cache.stride(1);
+      args.k_stride_batch = 0;
+      args.v_stride_seq = value_cache.stride(0);
+      args.v_stride_heads = value_cache.stride(1);
+      args.v_stride_batch = 0;
+    }
+  } else {
+    // Q/O: [batch, num_heads, seq, head_size]
+    args.q_stride_seq = query.stride(2);
+    args.q_stride_heads = query.stride(1);
+    args.q_stride_batch = query.stride(0);
+    args.o_stride_seq = out.stride(2);
+    args.o_stride_heads = out.stride(1);
+    args.o_stride_batch = out.stride(0);
+    if (is_paged) {
+      // K/V: [num_blocks, block_size, num_heads_kv, head_size]
+      args.k_stride_seq = key_cache.stride(1);
+      args.k_stride_heads = key_cache.stride(2);
+      args.k_stride_batch = 0;
+      args.v_stride_seq = value_cache.stride(1);
+      args.v_stride_heads = value_cache.stride(2);
+      args.v_stride_batch = 0;
+    } else {
+      // K/V: [batch, num_heads_kv, seq, head_size]
+      args.k_stride_seq = key_cache.stride(2);
+      args.k_stride_heads = key_cache.stride(1);
+      args.k_stride_batch = key_cache.stride(0);
+      args.v_stride_seq = value_cache.stride(2);
+      args.v_stride_heads = value_cache.stride(1);
+      args.v_stride_batch = value_cache.stride(0);
+    }
+  }
+
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
 
   static constexpr int max_head_size = 256;
