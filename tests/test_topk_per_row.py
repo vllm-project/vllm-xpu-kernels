@@ -26,7 +26,7 @@ TOP_K_VALUES = [2048, 3000]
 BATCH_SIZE = [1, 2, 512]
 NEXT_N = [1, 8]
 DATA_GENERATION = ["random", "10LSBits"]
-# > 200 * 1000 to test split work, 
+# > 200 * 1000 to test split work,
 # only use for large vocab test
 VOCAB_SIZE = [300000]
 

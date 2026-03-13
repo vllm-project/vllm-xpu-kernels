@@ -1,4 +1,4 @@
-// Adapated from
+// Adapted from
 // https://github.com/vllm-project/vllm/blob/main/csrc/sampler.cu#L646-L728
 
 #include <sycl/sycl.hpp>
