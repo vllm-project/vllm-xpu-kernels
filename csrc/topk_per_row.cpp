@@ -1,4 +1,5 @@
-// Adapated from https://github.com/vllm-project/vllm/blob/main/csrc/sampler.cu#L646-L728
+// Adapated from
+// https://github.com/vllm-project/vllm/blob/main/csrc/sampler.cu#L646-L728
 
 #include <sycl/sycl.hpp>
 
@@ -29,7 +30,7 @@ struct FinalItems {
 
 struct Histogram {
   int data[kNumBins];
-  int tmp[SUBGROUP_SIZE + 1]; // used in prefix sum computation
+  int tmp[SUBGROUP_SIZE + 1];  // used in prefix sum computation
 };
 
 // Struct to hold all static sized shared memory objects
@@ -50,7 +51,6 @@ struct SharedStates {
   int smemFoundTopKValues[1];
 };
 
-
 template <typename scalar_t>
 struct alignas(8) vec4_t {
   scalar_t x;
@@ -62,10 +62,11 @@ struct alignas(8) vec4_t {
 template <typename T>
 T atomicAdd(T* address, T val) {
   sycl::atomic_ref<
-    T, 
-    sycl::memory_order::relaxed,
-    sycl::memory_scope::device,
-    sycl::access::address_space::local_space> atom_val(*address);
+      T,
+      sycl::memory_order::relaxed,
+      sycl::memory_scope::device,
+      sycl::access::address_space::local_space>
+      atom_val(*address);
   return atom_val.fetch_add(val);
 }
 
@@ -112,8 +113,8 @@ static inline bool isPartialMatch(float x, uint32_t pattern) {
 }
 
 template <typename T, typename idxT, typename Func>
-void vectorized_process(size_t thread_rank, size_t num_threads,
-                                   const T* in, idxT len, Func f) {
+void vectorized_process(
+    size_t thread_rank, size_t num_threads, const T* in, idxT len, Func f) {
   using WideT = vec4_t<float>;
   if constexpr (sizeof(T) >= sizeof(WideT)) {
     // in this path, no vectorized load is performed, just process as normal
@@ -124,7 +125,8 @@ void vectorized_process(size_t thread_rank, size_t num_threads,
     static_assert(sizeof(WideT) % sizeof(T) == 0);
     constexpr int items_per_scalar = sizeof(WideT) / sizeof(T);
 
-    // This union is to allow to conveniently access individual elements after vectorized load
+    // This union is to allow to conveniently access individual elements after
+    // vectorized load
     // TODO: it's UB
     union {
       WideT scalar;
@@ -169,16 +171,31 @@ void vectorized_process(size_t thread_rank, size_t num_threads,
   }
 }
 
-
-template <int step, int kNumThreadsPerBlock, int kNumBins, int kNumFinalItems,
-          bool multipleBlocksPerRow, bool mergeBlocks, typename SmemFinalType,
-          typename SmemOutputType>
+template <
+    int step,
+    int kNumThreadsPerBlock,
+    int kNumBins,
+    int kNumFinalItems,
+    bool multipleBlocksPerRow,
+    bool mergeBlocks,
+    typename SmemFinalType,
+    typename SmemOutputType>
 bool processHistogramStep(
     const sycl::nd_item<3>& item,
-    const int* indices, const float* logits, int rowEnd, uint32_t& logitPattern,
-    int& thresholdBinIdx, SmemOutputType* smemOutput, int* smemThresholdBinIdx,
-    int* smemFinalDstIdx, int* smemFinalBinSize, int* smemFoundTopKValues,
-    SmemFinalType& smemFinal, int stride1, int rowStart, int topK) {
+    const int* indices,
+    const float* logits,
+    int rowEnd,
+    uint32_t& logitPattern,
+    int& thresholdBinIdx,
+    SmemOutputType* smemOutput,
+    int* smemThresholdBinIdx,
+    int* smemFinalDstIdx,
+    int* smemFinalBinSize,
+    int* smemFoundTopKValues,
+    SmemFinalType& smemFinal,
+    int stride1,
+    int rowStart,
+    int topK) {
   sycl::group group = item.get_group();
   auto sg = item.get_sub_group();
   auto threadIdx_x = item.get_local_id(0);
@@ -215,8 +232,12 @@ bool processHistogramStep(
 
   // Distribute the elements to the histogram bins.
   if (stride1 == 1) {
-    vectorized_process(threadIdx_x, kNumThreadsPerBlock, logits + rowStart,
-                       rowEnd - rowStart, distributeToBins);
+    vectorized_process(
+        threadIdx_x,
+        kNumThreadsPerBlock,
+        logits + rowStart,
+        rowEnd - rowStart,
+        distributeToBins);
   } else {
     for (int idx = rowStart + threadIdx_x; idx < rowEnd;
          idx += kNumThreadsPerBlock) {
@@ -248,14 +269,17 @@ bool processHistogramStep(
       // subgroup-level prefix sum
       int subgroupLocalInclusivePrefixSum = binCount;
       for (int offset = 1; offset < SUBGROUP_SIZE; offset *= 2) {
-        int val = sycl::shift_group_right(sg, subgroupLocalInclusivePrefixSum, offset);
+        int val = sycl::shift_group_right(
+            sg, subgroupLocalInclusivePrefixSum, offset);
         if (lane_id >= offset) {
           subgroupLocalInclusivePrefixSum += val;
         }
       }
-      int subgroupLocalExclusivePrefixSum = subgroupLocalInclusivePrefixSum - binCount;
+      int subgroupLocalExclusivePrefixSum =
+          subgroupLocalInclusivePrefixSum - binCount;
 
-      // the last lane in each subgroup writes the subgroup level total sum to smem
+      // the last lane in each subgroup writes the subgroup level total sum to
+      // smem
       int subgroupLocalTotalSum = 0;
       if (lane_id == SUBGROUP_SIZE - 1) {
         subgroupLocalTotalSum = subgroupLocalInclusivePrefixSum;
@@ -273,7 +297,7 @@ bool processHistogramStep(
         }
         smemFinal.histo.tmp[sg_num] = sum;
       }
-      
+
       // add the subgroup prefix sum to each thread's local exclusive prefix sum
       sycl::group_barrier(group);
       int subgroupPrefixSum = smemFinal.histo.tmp[sg_id];
@@ -283,7 +307,8 @@ bool processHistogramStep(
     }
 
     // Update the histogram with the prefix sums.
-    prefixSum += lastValue; // lastValue is the prefix sum of last thread in the previous round
+    prefixSum += lastValue;  // lastValue is the prefix sum of last thread in
+                             // the previous round
     totalSum += lastValue;
     smemFinal.histo.data[idx] = prefixSum;
 
@@ -369,8 +394,12 @@ bool processHistogramStep(
   };
 
   if (stride1 == 1) {
-    vectorized_process(threadIdx_x, kNumThreadsPerBlock, logits + rowStart,
-                       rowEnd - rowStart, processBins);
+    vectorized_process(
+        threadIdx_x,
+        kNumThreadsPerBlock,
+        logits + rowStart,
+        rowEnd - rowStart,
+        processBins);
   } else {
     for (int idx = rowStart + threadIdx_x; idx < rowEnd;
          idx += kNumThreadsPerBlock) {
@@ -386,20 +415,29 @@ bool processHistogramStep(
   return smemFinalBinSize[0] > kNumFinalItems;
 }
 
-
-template <int kNumThreadsPerBlock, int kNumBins, bool useRadixSort,
-          bool multipleBlocksPerRow = false, bool mergeBlocks = false>
-static void topKPerRowJob(const sycl::nd_item<3>& item, 
-                                     sycl::local_accessor<char, 1> slm,
-                                     const int* indices, const float* logits,
-                                     int rowStart, int rowEnd, int* outIndices,
-                                     float* outLogits, int stride1, int topK) {
+template <
+    int kNumThreadsPerBlock,
+    int kNumBins,
+    bool useRadixSort,
+    bool multipleBlocksPerRow = false,
+    bool mergeBlocks = false>
+static void topKPerRowJob(
+    const sycl::nd_item<3>& item,
+    sycl::local_accessor<char, 1> slm,
+    const int* indices,
+    const float* logits,
+    int rowStart,
+    int rowEnd,
+    int* outIndices,
+    float* outLogits,
+    int stride1,
+    int topK) {
   sycl::group group = item.get_group();
   auto sg = item.get_sub_group();
   auto threadIdx_x = item.get_local_id(0);
 
   char* smem_buf =
-        slm.template get_multi_ptr<sycl::access::decorated::no>().get();
+      slm.template get_multi_ptr<sycl::access::decorated::no>().get();
 
   int sharedStatesOffset = topK * sizeof(int32_t);
   if constexpr (multipleBlocksPerRow) {
@@ -416,7 +454,6 @@ static void topKPerRowJob(const sycl::nd_item<3>& item,
   int* smemFinalDstIdx = sharedStates->smemFinalDstIdx;
   int* smemFinalBinSize = sharedStates->smemFinalBinSize;
   int* smemFoundTopKValues = sharedStates->smemFoundTopKValues;
-
 
   // The length of the row.
   int rowLen = rowEnd - rowStart;
@@ -453,44 +490,105 @@ static void topKPerRowJob(const sycl::nd_item<3>& item,
   uint32_t logitPattern = 0;
 
   // Step 0: Process first 11 bits of half representation
-  bool continueToNextStep =
-      processHistogramStep<0, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
-                           multipleBlocksPerRow, mergeBlocks>(
-          item,
-          indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
-          smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
-          smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
+  bool continueToNextStep = processHistogramStep<
+      0,
+      kNumThreadsPerBlock,
+      kNumBins,
+      kNumFinalItems,
+      multipleBlocksPerRow,
+      mergeBlocks>(
+      item,
+      indices,
+      logits,
+      rowEnd,
+      logitPattern,
+      thresholdBinIdx,
+      smemOutput,
+      smemThresholdBinIdx,
+      smemFinalDstIdx,
+      smemFinalBinSize,
+      smemFoundTopKValues,
+      smemFinal,
+      stride1,
+      rowStart,
+      topK);
 
   if (continueToNextStep) {
     // Step 1: Process next 11 bits
-    continueToNextStep =
-        processHistogramStep<1, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
-                             multipleBlocksPerRow, mergeBlocks>(
-            item,
-            indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
-            smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
-            smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
+    continueToNextStep = processHistogramStep<
+        1,
+        kNumThreadsPerBlock,
+        kNumBins,
+        kNumFinalItems,
+        multipleBlocksPerRow,
+        mergeBlocks>(
+        item,
+        indices,
+        logits,
+        rowEnd,
+        logitPattern,
+        thresholdBinIdx,
+        smemOutput,
+        smemThresholdBinIdx,
+        smemFinalDstIdx,
+        smemFinalBinSize,
+        smemFoundTopKValues,
+        smemFinal,
+        stride1,
+        rowStart,
+        topK);
   }
 
   if (continueToNextStep) {
     // Step 2: Process next 11 bits
-    continueToNextStep =
-        processHistogramStep<2, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
-                             multipleBlocksPerRow, mergeBlocks>(
-            item,
-            indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
-            smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
-            smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
+    continueToNextStep = processHistogramStep<
+        2,
+        kNumThreadsPerBlock,
+        kNumBins,
+        kNumFinalItems,
+        multipleBlocksPerRow,
+        mergeBlocks>(
+        item,
+        indices,
+        logits,
+        rowEnd,
+        logitPattern,
+        thresholdBinIdx,
+        smemOutput,
+        smemThresholdBinIdx,
+        smemFinalDstIdx,
+        smemFinalBinSize,
+        smemFoundTopKValues,
+        smemFinal,
+        stride1,
+        rowStart,
+        topK);
   }
 
   if (continueToNextStep) {
     // Step 3: Process last 10 bits
-    processHistogramStep<3, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
-                         multipleBlocksPerRow, mergeBlocks>(
+    processHistogramStep<
+        3,
+        kNumThreadsPerBlock,
+        kNumBins,
+        kNumFinalItems,
+        multipleBlocksPerRow,
+        mergeBlocks>(
         item,
-        indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
-        smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
-        smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
+        indices,
+        logits,
+        rowEnd,
+        logitPattern,
+        thresholdBinIdx,
+        smemOutput,
+        smemThresholdBinIdx,
+        smemFinalDstIdx,
+        smemFinalBinSize,
+        smemFoundTopKValues,
+        smemFinal,
+        stride1,
+        rowStart,
+        topK);
   }
 
   if (!continueToNextStep) {
@@ -544,7 +642,6 @@ static void topKPerRowJob(const sycl::nd_item<3>& item,
   }
 }
 
-
 template <int kNumThreadsPerBlock, bool useRadixSort>
 class top_k_per_row_prefill_kernel {
  public:
@@ -567,7 +664,8 @@ class top_k_per_row_prefill_kernel {
         stride1_(stride1),
         topK_(topK),
         offsetIndex_(offsetIndex) {}
-  void operator()[[sycl::reqd_sub_group_size(SUBGROUP_SIZE)]](const sycl::nd_item<3>& item) const {
+  void operator() [[sycl::reqd_sub_group_size(SUBGROUP_SIZE)]] (
+      const sycl::nd_item<3>& item) const {
     int64_t group_idx = item.get_group(0);
     int64_t local_idx = item.get_local_id(0);
     int local_range = item.get_local_range(0);
@@ -601,45 +699,49 @@ class top_k_per_row_prefill_kernel {
 
  private:
   sycl::local_accessor<char, 1> slm_;
-  const int32_t *indices_; // [num_tokens, topK]
-  const float *logits_;   // [num_tokens, num_max_logits]
-  const int32_t *rowStart_; // [num_tokens]
-  const int32_t *rowEnd_; // [num_tokens]
+  const int32_t* indices_;   // [num_tokens, topK]
+  const float* logits_;      // [num_tokens, num_max_logits]
+  const int32_t* rowStart_;  // [num_tokens]
+  const int32_t* rowEnd_;    // [num_tokens]
   const int64_t stride0_;
   const int64_t stride1_;
   const int64_t topK_;
   const int64_t offsetIndex_;
 };
 
-template <int kNumThreadsPerBlock, bool useRadixSort,
-      bool multipleBlocksPerRow = false, bool mergeBlocks = false>
+template <
+    int kNumThreadsPerBlock,
+    bool useRadixSort,
+    bool multipleBlocksPerRow = false,
+    bool mergeBlocks = false>
 class top_k_per_row_decode_kernel {
  public:
   top_k_per_row_decode_kernel(
-    sycl::local_accessor<char, 1>& slm,
-    const float* logits,
-    const int32_t* seqLens,
-    int32_t* outIndices,
-    int64_t stride0,
-    int64_t stride1,
-    int64_t topK,
-    int64_t next_n,
-    float* outLogits = nullptr,
-    const int numBlocksToMerge = 0,
-    const int32_t* indices = nullptr)
-    : slm_(slm),
-    logits_(logits),
-    seqLens_(seqLens),
-    outIndices_(outIndices),
-    stride0_(stride0),
-    stride1_(stride1),
-    topK_(topK),
-    next_n_(next_n),
-    outLogits_(outLogits),
-    numBlocksToMerge_(numBlocksToMerge),
-    indices_(indices) {}
+      sycl::local_accessor<char, 1>& slm,
+      const float* logits,
+      const int32_t* seqLens,
+      int32_t* outIndices,
+      int64_t stride0,
+      int64_t stride1,
+      int64_t topK,
+      int64_t next_n,
+      float* outLogits = nullptr,
+      const int numBlocksToMerge = 0,
+      const int32_t* indices = nullptr)
+      : slm_(slm),
+        logits_(logits),
+        seqLens_(seqLens),
+        outIndices_(outIndices),
+        stride0_(stride0),
+        stride1_(stride1),
+        topK_(topK),
+        next_n_(next_n),
+        outLogits_(outLogits),
+        numBlocksToMerge_(numBlocksToMerge),
+        indices_(indices) {}
 
-  void operator()[[sycl::reqd_sub_group_size(SUBGROUP_SIZE)]](const sycl::nd_item<3>& item) const {
+  void operator() [[sycl::reqd_sub_group_size(SUBGROUP_SIZE)]] (
+      const sycl::nd_item<3>& item) const {
     auto blockIdx_x = item.get_group(0);
     auto blockIdx_y = item.get_group(1);
     auto gridDim_y = item.get_group_range(1);
@@ -652,10 +754,10 @@ class top_k_per_row_decode_kernel {
     int32_t seq_len = seqLens_[rowIdx / next_n_];
     int rowEnd = seq_len - next_n_ + (rowIdx % next_n_) + 1;
 
-    const float *logits = logits_;
-    const int *indices = indices_;
-    int *outIndices = outIndices_;
-    float *outLogits = outLogits_;
+    const float* logits = logits_;
+    const int* indices = indices_;
+    int* outIndices = outIndices_;
+    float* outLogits = outLogits_;
     // Local pointers to this block
     if constexpr (!multipleBlocksPerRow && !mergeBlocks) {
       outIndices += static_cast<int64_t>(rowIdx) * topK_;
@@ -674,35 +776,39 @@ class top_k_per_row_decode_kernel {
     }
     logits += static_cast<int64_t>(rowIdx) * stride0_;
 
-    topKPerRowJob<kNumThreadsPerBlock, kNumBins, useRadixSort,
-                  multipleBlocksPerRow, mergeBlocks>(
-      item, 
-      slm_, 
-      indices, 
-      logits, 
-      rowStart, 
-      rowEnd, 
-      outIndices, 
-      outLogits, 
-      stride1_, 
-      topK_);
+    topKPerRowJob<
+        kNumThreadsPerBlock,
+        kNumBins,
+        useRadixSort,
+        multipleBlocksPerRow,
+        mergeBlocks>(
+        item,
+        slm_,
+        indices,
+        logits,
+        rowStart,
+        rowEnd,
+        outIndices,
+        outLogits,
+        stride1_,
+        topK_);
   }
 
  private:
   sycl::local_accessor<char, 1> slm_;
-  const float *logits_;
-  const int32_t *seqLens_;
-  int32_t *outIndices_;
+  const float* logits_;
+  const int32_t* seqLens_;
+  int32_t* outIndices_;
   int64_t stride0_;
   int64_t stride1_;
   int64_t topK_;
   int64_t next_n_;
-  float *outLogits_;
+  float* outLogits_;
   const int numBlocksToMerge_;
-  const int32_t *indices_;
+  const int32_t* indices_;
 };
 
-} // namespace vllm
+}  // namespace vllm
 
 void top_k_per_row_decode(
     const torch::Tensor& logits,
@@ -718,7 +824,7 @@ void top_k_per_row_decode(
   TORCH_CHECK(logits.stride(1) == stride1);
 
   TORCH_CHECK(seqLens.size(0) == numRows / next_n);
-  
+
   TORCH_CHECK(indices.size(0) == numRows);
   TORCH_CHECK(indices.size(1) == topK);
 
@@ -734,7 +840,8 @@ void top_k_per_row_decode(
     // Use insertion sort
     sycl::range<3> grid(numRows, 1, 1);
     sycl::range<3> block(kNumThreadsPerBlock, 1, 1);
-    size_t dynamic_smem_in_bytes = sizeof(vllm::SharedStates) + topK * sizeof(int32_t);
+    size_t dynamic_smem_in_bytes =
+        sizeof(vllm::SharedStates) + topK * sizeof(int32_t);
     queue.submit([&](sycl::handler& cgh) {
       // SLM allocation
       sycl::local_accessor<char, 1> slm(
@@ -742,69 +849,75 @@ void top_k_per_row_decode(
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
           vllm::top_k_per_row_decode_kernel<kNumThreadsPerBlock, false>(
-            slm,
-            logits.data_ptr<float>(),
-            seqLens.data_ptr<int>(),
-            indices.data_ptr<int>(),
-            stride0,
-            stride1,
-            topK,
-            next_n));
+              slm,
+              logits.data_ptr<float>(),
+              seqLens.data_ptr<int>(),
+              indices.data_ptr<int>(),
+              stride0,
+              stride1,
+              topK,
+              next_n));
     });
   } else if (numColumns < kSplitWorkThreshold) {
     // From this threshold, use radix sort instead
     sycl::range<3> grid(numRows, 1, 1);
     sycl::range<3> block(kNumThreadsPerBlock, 1, 1);
-    size_t dynamic_smem_in_bytes = sizeof(vllm::SharedStates) + topK * sizeof(int32_t);
+    size_t dynamic_smem_in_bytes =
+        sizeof(vllm::SharedStates) + topK * sizeof(int32_t);
     queue.submit([&](sycl::handler& cgh) {
       // SLM allocation
       sycl::local_accessor<char, 1> slm(
           sycl::range<1>(dynamic_smem_in_bytes), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
-          vllm::top_k_per_row_decode_kernel<kNumThreadsPerBlock, false/*TODO true*/>(
-            slm,
-            logits.data_ptr<float>(),
-            seqLens.data_ptr<int>(),
-            indices.data_ptr<int>(),
-            stride0,
-            stride1,
-            topK,
-            next_n));
+          vllm::top_k_per_row_decode_kernel<
+              kNumThreadsPerBlock,
+              false /*TODO true*/>(
+              slm,
+              logits.data_ptr<float>(),
+              seqLens.data_ptr<int>(),
+              indices.data_ptr<int>(),
+              stride0,
+              stride1,
+              topK,
+              next_n));
     });
   } else {
     // Long sequences are run in two steps
     constexpr auto multipleBlocksPerRowConfig = 10;
 
-    const auto outIndicesAux =
-        torch::empty({numRows, multipleBlocksPerRowConfig, topK},
-                     torch::dtype(torch::kInt32).device(logits.device()));
-    const auto outLogitsAux =
-        torch::empty({numRows, multipleBlocksPerRowConfig, topK},
-                     torch::dtype(torch::kFloat).device(logits.device()));
-    
+    const auto outIndicesAux = torch::empty(
+        {numRows, multipleBlocksPerRowConfig, topK},
+        torch::dtype(torch::kInt32).device(logits.device()));
+    const auto outLogitsAux = torch::empty(
+        {numRows, multipleBlocksPerRowConfig, topK},
+        torch::dtype(torch::kFloat).device(logits.device()));
+
     // Step 1: each row is processed by multiple blocks
     sycl::range<3> grid_step1(numRows, multipleBlocksPerRowConfig, 1);
     sycl::range<3> block_step1(kNumThreadsPerBlock, 1, 1);
-    size_t dynamic_smem_in_bytes_step1 =
-        sizeof(vllm::SharedStates) + topK * sizeof(int32_t) +
-        topK * sizeof(float);
+    size_t dynamic_smem_in_bytes_step1 = sizeof(vllm::SharedStates) +
+                                         topK * sizeof(int32_t) +
+                                         topK * sizeof(float);
     queue.submit([&](sycl::handler& cgh) {
       // SLM allocation
       sycl::local_accessor<char, 1> slm(
           sycl::range<1>(dynamic_smem_in_bytes_step1), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid_step1 * block_step1, block_step1),
-          vllm::top_k_per_row_decode_kernel<kNumThreadsPerBlock, false/*TODO true*/, true>(
-            slm,
-            logits.data_ptr<float>(),
-            seqLens.data_ptr<int>(),
-            outIndicesAux.data_ptr<int>(),
-            stride0,
-            stride1,
-            topK,
-            next_n,
-            outLogitsAux.data_ptr<float>()));
+          vllm::top_k_per_row_decode_kernel<
+              kNumThreadsPerBlock,
+              false /*TODO true*/,
+              true>(
+              slm,
+              logits.data_ptr<float>(),
+              seqLens.data_ptr<int>(),
+              outIndicesAux.data_ptr<int>(),
+              stride0,
+              stride1,
+              topK,
+              next_n,
+              outLogitsAux.data_ptr<float>()));
     });
 
     // Step 2: merge the results from multiple blocks
@@ -819,18 +932,22 @@ void top_k_per_row_decode(
           sycl::range<1>(dynamic_smem_in_bytes_step2), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid_step2 * block_step2, block_step2),
-          vllm::top_k_per_row_decode_kernel<kNumThreadsPerBlockMerge, false/*TODO true*/, false, true>(
-            slm,
-            outLogitsAux.data_ptr<float>(),
-            seqLens.data_ptr<int32_t>(),
-            indices.data_ptr<int32_t>(),
-            outLogitsAux.stride(0),
-            1,
-            topK,
-            next_n,
-            /*outLogits=*/nullptr,
-            multipleBlocksPerRowConfig,
-            outIndicesAux.data_ptr<int32_t>()));
+          vllm::top_k_per_row_decode_kernel<
+              kNumThreadsPerBlockMerge,
+              false /*TODO true*/,
+              false,
+              true>(
+              slm,
+              outLogitsAux.data_ptr<float>(),
+              seqLens.data_ptr<int32_t>(),
+              indices.data_ptr<int32_t>(),
+              outLogitsAux.stride(0),
+              1,
+              topK,
+              next_n,
+              /*outLogits=*/nullptr,
+              multipleBlocksPerRowConfig,
+              outIndicesAux.data_ptr<int32_t>()));
     });
   }
   return;
@@ -861,9 +978,10 @@ void top_k_per_row_prefill(
   const at::DeviceGuard device_guard(logits.device());
 
   int numInsertionBlocks =
-    std::min(static_cast<int>(numRows), kSortingAlgorithmThreshold);
+      std::min(static_cast<int>(numRows), kSortingAlgorithmThreshold);
 
-  size_t dynamic_smem_in_bytes = sizeof(vllm::SharedStates) + topK * sizeof(int32_t);
+  size_t dynamic_smem_in_bytes =
+      sizeof(vllm::SharedStates) + topK * sizeof(int32_t);
 
   // For small input sizes, we only launch insertion sort kernels.
   sycl::range<3> grid(numInsertionBlocks, 1, 1);
@@ -875,15 +993,15 @@ void top_k_per_row_prefill(
     cgh.parallel_for(
         sycl::nd_range<3>(grid * block, block),
         vllm::top_k_per_row_prefill_kernel<kNumThreadsPerBlock, false>(
-          slm,
-          indices.data_ptr<int32_t>(),
-          logits.data_ptr<float>(),
-          rowStarts.data_ptr<int32_t>(),
-          rowEnds.data_ptr<int32_t>(),
-          stride0,
-          stride1,
-          topK, 
-          0));
+            slm,
+            indices.data_ptr<int32_t>(),
+            logits.data_ptr<float>(),
+            rowStarts.data_ptr<int32_t>(),
+            rowEnds.data_ptr<int32_t>(),
+            stride0,
+            stride1,
+            topK,
+            0));
   });
 
   // For large input sizes, we launch radix sort kernels for the remaining
@@ -898,15 +1016,15 @@ void top_k_per_row_prefill(
       cgh.parallel_for(
           sycl::nd_range<3>(grid_radix * block_radix, block_radix),
           vllm::top_k_per_row_prefill_kernel<kNumThreadsPerBlock, false>(
-            slm,
-            indices.data_ptr<int32_t>(),
-            logits.data_ptr<float>(),
-            rowStarts.data_ptr<int32_t>(),
-            rowEnds.data_ptr<int32_t>(),
-            stride0,
-            stride1,
-            topK,
-            kSortingAlgorithmThreshold));
+              slm,
+              indices.data_ptr<int32_t>(),
+              logits.data_ptr<float>(),
+              rowStarts.data_ptr<int32_t>(),
+              rowEnds.data_ptr<int32_t>(),
+              stride0,
+              stride1,
+              topK,
+              kSortingAlgorithmThreshold));
     });
   }
 }

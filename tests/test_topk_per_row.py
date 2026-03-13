@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 import torch
 
-from tests.register_ops import topk_per_row_prefill, topk_per_row_decode
+from tests.register_ops import topk_per_row_decode, topk_per_row_prefill
 
 # This file is same as https://github.com/vllm-project/vllm/blob/main/tests/kernels/test_top_k_per_row.py with
 # modification of testing XPU platform. Here just for quick testing, in future this could be removed and
@@ -15,6 +15,7 @@ TOP_K_VALUES = [2048, 3000]
 BATCH_SIZE = [1, 2, 512]
 NEXT_N = [1, 8]
 DATA_GENERATION = ["random", "10LSBits"]
+
 
 def create_random_logits(
     row_starts: torch.Tensor,
@@ -28,9 +29,10 @@ def create_random_logits(
     np.random.seed(seed)
     # Generate logits with some structure to make testing more meaningful
     if data_generation == "random":
-        logits = torch.randn(
-            row_starts.shape[0], max(row_ends), dtype=dtype, device="xpu"
-        )
+        logits = torch.randn(row_starts.shape[0],
+                             max(row_ends),
+                             dtype=dtype,
+                             device="xpu")
     elif data_generation == "10LSBits":
         top_22_bits_mask = 0xFFFFFC00
         last_10_bits_mask = 0x000003FF
@@ -45,8 +47,7 @@ def create_random_logits(
         )
         # Combine: fixed top 22 bits with random last 10 bits
         logits_bits = (fixed_top_22_bits & top_22_bits_mask) | (
-            random_bottom_bits & last_10_bits_mask
-        )
+            random_bottom_bits & last_10_bits_mask)
         logits = logits_bits.view(dtype)
 
     for i, end in enumerate(row_ends):
@@ -55,8 +56,7 @@ def create_random_logits(
 
 
 def create_row_boundaries(
-    seq_len: int, vocab_size: int
-) -> tuple[torch.Tensor, torch.Tensor]:
+        seq_len: int, vocab_size: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Create row start and end indices for testing."""
     row_starts = torch.zeros(seq_len, dtype=torch.int32, device="xpu")
     row_ends = torch.arange(1, seq_len + 1, device="xpu", dtype=torch.int32)
@@ -110,10 +110,10 @@ def compare_top_k_results(
         if len(xpu_only_values) != len(torch_only_values):
             return False
         if not torch.allclose(
-            torch.tensor(xpu_only_values, device="xpu"),
-            torch.tensor(torch_only_values, device="xpu"),
-            rtol=tolerance,
-            atol=tolerance,
+                torch.tensor(xpu_only_values, device="xpu"),
+                torch.tensor(torch_only_values, device="xpu"),
+                rtol=tolerance,
+                atol=tolerance,
         ):
             return False
 
@@ -137,7 +137,8 @@ def test_top_k_per_row(
     # Create test data
     vocab_size = 20000
     row_starts, row_ends = create_row_boundaries(num_rows, vocab_size)
-    logits = create_random_logits(row_starts, row_ends, torch.float32, 42, "random")
+    logits = create_random_logits(row_starts, row_ends, torch.float32, 42,
+                                  "random")
 
     # Create output tensors
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=device)
@@ -161,8 +162,8 @@ def test_top_k_per_row(
 
     # Compare results
     assert compare_top_k_results(
-        logits, indices, torch_indices, row_starts, row_ends, top_k
-    ), "XPU top_k_per_row_prefill results don't match torch.topk"
+        logits, indices, torch_indices, row_starts, row_ends,
+        top_k), "XPU top_k_per_row_prefill results don't match torch.topk"
 
 
 def _run_top_k_per_row_decode_test(
@@ -180,16 +181,15 @@ def _run_top_k_per_row_decode_test(
 
     # Create test data
     num_rows = batch_size * next_n
-    seq_lens = torch.randint(
-        vocab_size, (batch_size,), dtype=torch.int32, device=device
-    )
+    seq_lens = torch.randint(vocab_size, (batch_size, ),
+                             dtype=torch.int32,
+                             device=device)
     row_starts = torch.zeros(num_rows, dtype=torch.int32, device=device)
     row_indices = torch.arange(num_rows, device=device) // next_n
     next_n_offset = torch.arange(num_rows, device=device) % next_n
     row_ends = seq_lens[row_indices] - next_n + next_n_offset + 1
-    logits = create_random_logits(
-        row_starts, row_ends, torch.float32, 42, data_generation
-    )
+    logits = create_random_logits(row_starts, row_ends, torch.float32, 42,
+                                  data_generation)
 
     # Create output tensors
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device=device)
@@ -217,8 +217,8 @@ def _run_top_k_per_row_decode_test(
 
     # Compare results
     assert compare_top_k_results(
-        logits, indices, torch_indices, row_starts, row_ends, top_k
-    ), "XPU top_k_per_row_decode results don't match torch.topk"
+        logits, indices, torch_indices, row_starts, row_ends,
+        top_k), "XPU top_k_per_row_decode results don't match torch.topk"
 
 
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
@@ -238,9 +238,8 @@ def test_top_k_per_row_decode(
     torch.xpu.memory.empty_cache()
 
     vocab_size = 20000
-    _run_top_k_per_row_decode_test(
-        top_k, batch_size, next_n, vocab_size, data_generation
-    )
+    _run_top_k_per_row_decode_test(top_k, batch_size, next_n, vocab_size,
+                                   data_generation)
 
 
 @torch.inference_mode()
@@ -253,8 +252,7 @@ def test_top_k_per_row_decode_large_vocab_size() -> None:
     top_k = 2048
     batch_size = 8
     next_n = 2
-    vocab_size = 300000 # > 200 * 1000 to test split work
+    vocab_size = 300000  # > 200 * 1000 to test split work
     data_generation = "random"
-    _run_top_k_per_row_decode_test(
-        top_k, batch_size, next_n, vocab_size, data_generation
-    )
+    _run_top_k_per_row_decode_test(top_k, batch_size, next_n, vocab_size,
+                                   data_generation)
