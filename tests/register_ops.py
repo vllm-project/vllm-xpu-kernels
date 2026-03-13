@@ -391,3 +391,43 @@ def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  bias: Optional[torch.Tensor]) -> None:
     torch.ops._moe_C.topk_sigmoid(topk_weights, topk_ids, token_expert_indices,
                                   gating_output, renormalize, bias)
+
+
+def topk_per_row_prefill(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    top_k: int,
+) -> None:
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+
+def topk_per_row_decode(
+    logits: torch.Tensor,
+    next_n: int,
+    seq_lens: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    top_k: int,
+) -> None:
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        next_n,
+        seq_lens,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )

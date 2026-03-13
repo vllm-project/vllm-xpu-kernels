@@ -110,6 +110,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "get_xpu_view_from_cpu_tensor",
       torch::kCPU,
       &get_xpu_view_from_cpu_tensor);
+
+  ops.def(
+      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
+      "Tensor! indices, int numRows, int stride0, "
+      "int stride1, int topK) -> ()");
+  ops.impl("top_k_per_row_prefill", torch::kXPU, &top_k_per_row_prefill);
+
+  ops.def(
+      "top_k_per_row_decode(Tensor logits, int next_n, "
+      "Tensor seq_lens, Tensor! indices, "
+      "int numRows, int stride0, int stride1, int topK) -> ()");
+  ops.impl("top_k_per_row_decode", torch::kXPU, &top_k_per_row_decode);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {

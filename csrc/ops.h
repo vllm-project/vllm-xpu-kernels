@@ -119,3 +119,23 @@ void swap_blocks(
     torch::Tensor& dst,
     int64_t block_size_in_bytes,
     const torch::Tensor& block_mapping);
+
+void top_k_per_row_decode(
+    const torch::Tensor& logits,
+    int64_t next_n,
+    const torch::Tensor& seqLens,
+    torch::Tensor& indices,
+    int64_t numRows,
+    int64_t stride0,
+    int64_t stride1,
+    int64_t topK);
+
+void top_k_per_row_prefill(
+    const torch::Tensor& logits,
+    const torch::Tensor& rowStarts,
+    const torch::Tensor& rowEnds,
+    torch::Tensor& indices,
+    int64_t numRows,
+    int64_t stride0,
+    int64_t stride1,
+    int64_t topK);

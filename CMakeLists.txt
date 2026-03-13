@@ -366,7 +366,8 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/quantization/fp8/fp8_quant.cpp"
       "csrc/xpu_view.cpp"
       "csrc/tensor_utils.cpp"
-      "csrc/utils/mem_cpy.cpp")
+      "csrc/utils/mem_cpy.cpp"
+      "csrc/topk_per_row.cpp")
   include_directories("/usr/include")
 
   define_gpu_extension_target(
