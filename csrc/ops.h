@@ -16,6 +16,21 @@ void fused_add_rms_norm(
     torch::Tensor& weight,
     double epsilon);
 
+void rms_norm_static_fp8_quant(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    torch::Tensor& scale,
+    double epsilon);
+
+void fused_add_rms_norm_static_fp8_quant(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    torch::Tensor& scale,
+    double epsilon);
+
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
