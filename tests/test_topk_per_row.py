@@ -9,12 +9,26 @@ from tests.register_ops import topk_per_row_decode, topk_per_row_prefill
 # modification of testing XPU platform. Here just for quick testing, in future this could be removed and
 # tested in upstream repo instead
 
+#override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "num_rows": [8],
+        "top_k": [128],
+        "batch_size": [2],
+        "next_n": [2],
+        "vocab_size": [2000],
+    },
+}
+
 # Test parameters
 NUM_ROWS = [1, 32, 2050, 8239]
 TOP_K_VALUES = [2048, 3000]
 BATCH_SIZE = [1, 2, 512]
 NEXT_N = [1, 8]
 DATA_GENERATION = ["random", "10LSBits"]
+# > 200 * 1000 to test split work, 
+# only use for large vocab test
+VOCAB_SIZE = [300000]
 
 
 def create_random_logits(
@@ -242,17 +256,20 @@ def test_top_k_per_row_decode(
                                    data_generation)
 
 
+@pytest.mark.parametrize("vocab_size", VOCAB_SIZE)
+@pytest.mark.parametrize("top_k", TOP_K_VALUES)
 @torch.inference_mode()
-def test_top_k_per_row_decode_large_vocab_size() -> None:
+def test_top_k_per_row_decode_large_vocab_size(
+    vocab_size: int,
+    top_k: int,
+) -> None:
     """
     Test top_k_per_row_decode with large vocabulary size.
     """
     torch.xpu.memory.empty_cache()
 
-    top_k = 2048
     batch_size = 8
     next_n = 2
-    vocab_size = 300000  # > 200 * 1000 to test split work
     data_generation = "random"
     _run_top_k_per_row_decode_test(top_k, batch_size, next_n, vocab_size,
                                    data_generation)
