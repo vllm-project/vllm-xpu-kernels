@@ -22,7 +22,7 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' && 
       github.event.workflow_run.event == 'push')
     container:                      
-      image: localhost:5000/xpu-kernel-ci-image:latest   
+      image: pytorch/manylinux2_28-builder:xpu-main   
       options: --user root
     steps:
       - name: Checkout
@@ -42,8 +42,11 @@ jobs:
 
       - name: build wheel
         run: |
-          uv pip install -r requirements.txt
+          source /opt/intel/oneapi/2025.3/oneapi-vars.sh
+          pip install -r requirements.txt
           python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/conda/lib/python3.11/site-packages/torch/lib/
+          for f in dist/*-linux_x86_64.whl; do mv "$f" "${f/linux_x86_64/manylinux_2_28_x86_64}"; done
 
       - name: Create build info file
         run: |
