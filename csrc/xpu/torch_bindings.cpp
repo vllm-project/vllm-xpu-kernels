@@ -76,7 +76,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "int num_prefills, int num_decodes, Tensor? has_initial_state, Tensor "
       "non_spec_query_start_loc,"
       "Tensor non_spec_state_indices_tensor, int num_actual_tokens, int "
-      "tp_size) -> ()");
+      "tp_size, bool reorder_input) -> ()");
   xpu_ops.impl("gdn_attention", torch::kXPU, &gdn_attention);
 
   // for empty tensor functions, we don't need dispatch key like torch::kXPU
