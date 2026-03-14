@@ -74,6 +74,13 @@ void gather_cache(
     int64_t batch_size,
     std::optional<torch::Tensor> seq_starts = std::nullopt);
 
+void indexer_k_quant_and_cache(
+    torch::Tensor& k,             // [num_tokens, head_dim]
+    torch::Tensor& kv_cache,      // [num_blocks, block_size, cache_stride]
+    torch::Tensor& slot_mapping,  // [num_tokens]
+    int64_t quant_block_size,     // quantization block size
+    const std::string& scale_fmt);
+
 void static_scaled_fp8_quant(
     torch::Tensor& out,
     torch::Tensor const& input,
