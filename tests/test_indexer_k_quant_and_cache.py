@@ -190,12 +190,11 @@ def test_indexer_k_quant_and_cache(num_tokens, head_dim, quant_block_size,
                          f"ref={ref_scale}, out={out_scale}")
 
 
-if __name__ == "__main__":
-    test_indexer_k_quant_and_cache(
-        num_tokens=17,
-        head_dim=256,
-        quant_block_size=128,
-        block_size=16,
-        scale_fmt="ue8m0",
-        dtype=torch.float32,
-    )
+test_indexer_k_quant_and_cache(
+    num_tokens=17,
+    head_dim=256,
+    quant_block_size=128,
+    block_size=16,
+    scale_fmt="ue8m0",
+    dtype=torch.float32,
+)
