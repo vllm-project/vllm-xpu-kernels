@@ -224,6 +224,8 @@ def _f32_to_floatx_unpacked(x: Tensor, ebits: int, mbits: int) -> Tensor:
     #
     # branch 2: to conversion to denormal as well as rounding up to normal
     #
+    # WA CI failed
+    denorm_mask_float = denorm_mask_float.to(x.device)
     denormal_x = x + denorm_mask_float
     denormal_x = denormal_x.view(torch.int32)
     denormal_x -= denorm_mask_int
