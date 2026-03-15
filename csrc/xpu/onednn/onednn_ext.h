@@ -272,8 +272,8 @@ enum class bias_type_t : uint16_t {};
 // Encode function (constexpr)
 constexpr bias_type_t
 get_bias_type(const std::optional<at::Tensor>& bias, int m, int n) {
-  bias_shape_t shape;
-  bias_data_type_t dtype;
+  auto shape = bias_shape_t::none;
+  auto dtype = bias_data_type_t::none;
   if (bias.has_value() && bias.value().defined()) {
     auto& b = bias.value();
     const auto nuelm = b.numel();
