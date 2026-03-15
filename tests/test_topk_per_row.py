@@ -5,9 +5,10 @@ import torch
 
 from tests.register_ops import topk_per_row_decode, topk_per_row_prefill
 
-# This file is same as https://github.com/vllm-project/vllm/blob/main/tests/kernels/test_top_k_per_row.py with
-# modification of testing XPU platform. Here just for quick testing, in future this could be removed and
-# tested in upstream repo instead
+# This file is same as
+# https://github.com/vllm-project/vllm/blob/main/tests/kernels/test_top_k_per_row.py
+# with modification of testing XPU platform. Here just for quick testing, in
+# future this could be removed and tested in upstream repo instead
 
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
