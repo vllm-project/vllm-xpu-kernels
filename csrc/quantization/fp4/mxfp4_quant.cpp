@@ -39,6 +39,14 @@ void per_token_group_quant_mxfp4(
       output_q.scalar_type() == at::ScalarType::Byte, "output_q must be uint8");
 
   const int num_groups = static_cast<int>(input.numel() / group_size);
+  if (num_groups == 0) {
+    // No work to do for empty input; ensure outputs are empty as well.
+    TORCH_CHECK(
+        output_q.numel() == 0, "output_q must be empty when input is empty");
+    TORCH_CHECK(
+        output_s.numel() == 0, "output_s must be empty when input is empty");
+    return;
+  }
 
   at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
   at::DeviceGuard device_guard(curDevice);

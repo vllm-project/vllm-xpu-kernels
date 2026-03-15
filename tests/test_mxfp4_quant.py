@@ -132,16 +132,3 @@ def test_mxfp4_known_values() -> None:
                                    ops_out.cpu().view(torch.uint8),
                                    atol=0.2,
                                    rtol=0.2)
-
-
-if __name__ == "__main__":
-    test_per_block_mxfp4_quant(
-        num_tokens=4,
-        hidden_size=128,
-        dtype=torch.bfloat16,
-        column_major_scale=False,
-        seed=0,
-    )
-    print("test_per_block_mxfp4_quant passed")
-    test_mxfp4_known_values()
-    print("test_mxfp4_known_values passed")

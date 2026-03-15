@@ -54,5 +54,10 @@ def per_token_group_quant_mxfp4(
                                              group_size, eps)
 
     out_q = out_q.view(torch.float4_e2m1fn_x2)
-    out_s = out_s.to(torch.float8_e8m0fnu)
+    out_s = out_s.to(dtype=torch.float8_e8m0fnu,
+                     memory_format=torch.preserve_format)
+    if column_major_scales:
+        # Verify that the column-major-like strides are preserved after casting.
+        assert out_s.stride(0) == 1 and out_s.stride(1) == M, (
+            "scale tensor must retain column-major-like strides")
     return out_q, out_s

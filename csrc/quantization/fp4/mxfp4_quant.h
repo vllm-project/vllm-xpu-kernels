@@ -100,13 +100,12 @@ class per_token_group_quant_mxfp4_kernel {
         item.get_sub_group(), local_absmax, sycl::maximum<float>());
 
     float y_s = local_absmax / FP4_MAX;
-    y_s =
-        sycl::exp2(sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(y_s), 1e-10f))));
+    y_s = sycl::exp2(sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(y_s), eps))));
 
     if (lane_id == 0) {
       *scale_output = y_s;
     }
-    group_barrier(item.get_group());
+    sycl::group_barrier(item.get_group());
 
     const float inv_scale = 1.0f / y_s;
 
