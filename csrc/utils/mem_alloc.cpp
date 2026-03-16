@@ -144,6 +144,7 @@ void free_virtual_address(const MemoryMetadata& metadata) {
   log_metadata_lifecycle("free_virtual_address end", metadata);
 }
 
+// Reserve virtual address space and map physical memory, then track metadata.
 void* reserve_and_map_new(int device, size_t size) {
   ensure_device(device);
 
@@ -181,6 +182,7 @@ void* reserve_and_map_new(int device, size_t size) {
   return reinterpret_cast<void*>(va);
 }
 
+// Sleep path: unmap physical memory while keeping VA reservation and metadata.
 void unmap_for_sleep(void* ptr) {
   std::lock_guard<std::mutex> lock(g_memory_map_mutex);
   auto it = g_memory_map.find(ptr);
@@ -200,6 +202,7 @@ void unmap_for_sleep(void* ptr) {
   log_metadata_lifecycle("sleep after unmap", it->second);
 }
 
+// Wake path: remap physical memory to a previously reserved VA.
 void remap_for_wakeup(void* ptr) {
   std::lock_guard<std::mutex> lock(g_memory_map_mutex);
   auto it = g_memory_map.find(ptr);
@@ -218,6 +221,7 @@ void remap_for_wakeup(void* ptr) {
   log_metadata_lifecycle("wake after map", it->second);
 }
 
+// Fully release an allocation: unmap physical memory and free virtual address.
 void release_allocation(void* ptr) {
   MemoryMetadata metadata;
   {
@@ -272,7 +276,8 @@ PyObject* create_tuple_from_c_integers(
 
 // Our exported C functions that call Python:
 
-// Use sycl::queue* instead of CUstream
+// Allocate XPU memory and notify Python allocator callback with allocation
+// tuple.
 void* my_malloc(ssize_t size, int device, sycl::queue* queue) {
   (void)queue;
   ensure_device(device);
@@ -316,7 +321,7 @@ void* my_malloc(ssize_t size, int device, sycl::queue* queue) {
   return ptr;
 }
 
-// Use sycl::queue* instead of CUstream
+// Validate and release an allocation after Python callback confirms metadata.
 void my_free(void* ptr, ssize_t size, int device, sycl::queue* queue) {
   (void)size;
   (void)device;
@@ -388,6 +393,7 @@ void my_free(void* ptr, ssize_t size, int device, sycl::queue* queue) {
 }
 
 // Python-exposed function: init_module(python_malloc, python_free)
+// Register Python malloc/free callbacks used by allocator entry points.
 static PyObject* py_init_module(PyObject* self, PyObject* args) {
   PyObject* malloc_callback = nullptr;
   PyObject* free_callback = nullptr;
@@ -407,6 +413,7 @@ static PyObject* py_init_module(PyObject* self, PyObject* args) {
   Py_RETURN_NONE;
 }
 
+// Python sleep hook: unmap physical memory for an existing allocation tuple.
 static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
   if (!args || !PyTuple_Check(args) || PyTuple_Size(args) != 4) {
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
@@ -441,6 +448,7 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
   Py_RETURN_NONE;
 }
 
+// Python wake hook: remap physical memory for a previously reserved allocation.
 static PyObject* python_create_and_allocate(PyObject* self, PyObject* args) {
   if (!args || !PyTuple_Check(args) || PyTuple_Size(args) != 4) {
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");

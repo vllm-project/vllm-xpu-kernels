@@ -391,6 +391,10 @@ if(XPUMEM_ALLOCATOR_ENABLED)
 endif()
 
 #
+# Define other extension targets
+#
+
+#
 # _C extension
 #
 if(BASIC_KERNELS_ENABLED)
