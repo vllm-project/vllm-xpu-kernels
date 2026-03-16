@@ -20,12 +20,6 @@ MINI_MNK_FACTORS = [
     (8, 32, 32),
 ]
 
-MINI_PYTEST_PARAMS = {
-    "test_int8_gemm": {
-        "mnk_factors": MINI_MNK_FACTORS,
-    },
-}
-
 
 class QuantMode(Enum):
     SYM = 1
