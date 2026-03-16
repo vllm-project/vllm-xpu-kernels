@@ -206,7 +206,6 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
                                    ref_unpermuted_scales,
                                    rtol=0,
                                    atol=0)
-        pass
 
 
 def ref_init_expert_map(expert_map, local_experts_num, ep_rank, ep_size):
