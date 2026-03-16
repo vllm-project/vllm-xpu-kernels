@@ -242,10 +242,10 @@ def dequantize(qweight, scales, qzeros, group_size, g_idx=None):
         return (weight - gptq_zeros[g_idx]) * scales[g_idx]
 
 
-def dequantize_s8_to_float(quantized, scale, zero_point):
+def dequantize_i8_to_float(quantized, scale, zero_point):
     repeat_dims = [1] * (quantized.dim() - 1) + [quantized.shape[-1]]
-    return (quantized -
-            zero_point.repeat(repeat_dims)) * scale.repeat(repeat_dims)
+    return (quantized.to(scale.dtype) - zero_point.to(
+        scale.dtype).repeat(repeat_dims)) * scale.repeat(repeat_dims)
 
 
 def dynamic_per_token_quant_ref(input, use_sym_quant, bits):
