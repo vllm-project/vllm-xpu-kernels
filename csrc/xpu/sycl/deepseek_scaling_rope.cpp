@@ -1,6 +1,7 @@
 #include <sycl/sycl.hpp>
 #include "utils.h"
 #include "dispatch_utils.h"
+#include "rotary_embedding.hpp"
 #include <cmath>
 #include <c10/macros/Macros.h>
 
@@ -47,35 +48,14 @@ class deepseek_scaling_rope_kernel {
       const T* pe,
       const T* cos_sin_cache,
       T* res) const {
-    constexpr int64_t half_rotary_dim = rotary_dim / 2;
-    constexpr int64_t vec_2_len = 2;
-    using v2_type = sycl::vec<T, vec_2_len>;
+    constexpr int64_t embed_dim = rotary_dim / 2;
     const int64_t cache_idx = position * rotary_dim;
-    const T* cos_cache_offset = &cos_sin_cache[cache_idx];
-    const T* sin_cache_offset = cos_cache_offset + half_rotary_dim;
-    if constexpr (is_neox) {
-      // repeat & rotate mul add
-      for (int64_t i = 0; i < half_rotary_dim; ++i) {
-        int64_t j = i + half_rotary_dim;
-        T cv = cos_cache_offset[i];
-        T sv = sin_cache_offset[i];
-        res[i] = pe[i] * cv - pe[j] * sv;
-        res[j] = pe[j] * cv + pe[i] * sv;
-      }
-    } else {
-      // interleave & rotate mul add, unfortunately no prefetch in sycl
-      const v2_type* pe_2 = reinterpret_cast<const v2_type*>(pe);
-      v2_type* res_2 = reinterpret_cast<v2_type*>(res);
-      for (int64_t h = 0; h < half_rotary_dim; ++h) {
-        T c = cos_cache_offset[h];
-        T s = sin_cache_offset[h];
-        v2_type c2 = {c, c};
-        v2_type s2 = {s, s};
-        v2_type t = pe_2[h];
-        v2_type* dst = &res_2[h];
-        v2_type tr = {-t[1], t[0]};
-        *dst = t * c2 + tr * s2;
-      }
+    const T* cos_ptr = &cos_sin_cache[cache_idx];
+    const T* sin_ptr = cos_ptr + embed_dim;
+
+    for (int64_t rot_offset = 0; rot_offset < embed_dim; ++rot_offset) {
+      apply_token_rotary_embedding<T, is_neox>(
+          pe, res, cos_ptr, sin_ptr, rot_offset, embed_dim);
     }
   }
 

@@ -38,15 +38,6 @@ void rotary_embedding(
     torch::Tensor& cos_sin_cache,
     bool is_neox);
 
-void multimodal_rotary_embedding(
-    torch::Tensor& positions,           // [num_mrope_sections, num_tokens]
-    torch::Tensor& query,
-    std::optional<torch::Tensor> key,
-    int64_t head_size,
-    torch::Tensor& cos_sin_cache,       // [max_position, rot_dim]
-    bool is_neox,
-    std::vector<int64_t> mrope_section); // host int list [num_mrope_sections]
-
 void reshape_and_cache(
     torch::Tensor& key,
     torch::Tensor& value,
