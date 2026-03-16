@@ -79,16 +79,17 @@ void per_token_group_quant_mxfp4(
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_mxfp4_kernel", [&] {
         queue.submit([&](sycl::handler& cgh) {
-          auto kernel = vllm::fp4::per_token_group_quant_mxfp4_kernel<scalar_t>(
-              output_q.data_ptr<uint8_t>(),
-              output_s.data_ptr<float>(),
-              input.data_ptr<scalar_t>(),
-              static_cast<int>(group_size),
-              groups_per_block,
-              static_cast<float>(eps),
-              scale_num_cols,
-              scale_stride,
-              is_column_major);
+          auto kernel =
+              vllm::mxfp4::per_token_group_quant_mxfp4_kernel<scalar_t>(
+                  output_q.data_ptr<uint8_t>(),
+                  output_s.data_ptr<float>(),
+                  input.data_ptr<scalar_t>(),
+                  static_cast<int>(group_size),
+                  groups_per_block,
+                  static_cast<float>(eps),
+                  scale_num_cols,
+                  scale_stride,
+                  is_column_major);
           cgh.parallel_for(sycl::nd_range<1>(grid * block, block), kernel);
         });
       });
