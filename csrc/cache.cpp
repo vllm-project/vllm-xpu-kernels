@@ -10,7 +10,7 @@
 #include "utils/mem_cpy.h"
 
 // FP8 E4M3 scale divisor for Intel GPU
-constexpr float kFp8ScaleDivisor = 448.f;
+constexpr float kFp8E4M3ScaleDivisor = 448.f;
 
 namespace vllm {
 
@@ -423,15 +423,12 @@ class indexer_k_quant_and_cache_kernel {
 
     if (slot_idx < 0 || head_dim_idx >= head_dim_) return;
 
+    // Compute local amax
+    float amax = 0.f;
     float k_vals[VEC_SIZE];
     for (int i = 0; i < VEC_SIZE; i++) {
       k_vals[i] =
           static_cast<float>(k_[token_idx * head_dim_ + head_dim_idx + i]);
-    }
-
-    // Compute local amax
-    float amax = 0.f;
-    for (int i = 0; i < VEC_SIZE; i++) {
       amax = sycl::fmax(amax, sycl::fabs(k_vals[i]));
     }
 
@@ -439,7 +436,7 @@ class indexer_k_quant_and_cache_kernel {
     auto sg = item_id.get_sub_group();
     amax = sycl::reduce_over_group(sg, amax, sycl::maximum<float>{});
 
-    float scale = sycl::fmax(amax, 1e-4f) / kFp8ScaleDivisor;
+    float scale = sycl::fmax(amax, 1e-4f) / kFp8E4M3ScaleDivisor;
 
     if (use_ue8m0_) {
       scale = sycl::exp2(sycl::ceil(sycl::log2(scale)));

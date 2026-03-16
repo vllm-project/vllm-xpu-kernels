@@ -5,8 +5,6 @@ import torch
 import vllm_xpu_kernels._C  # noqa: F401
 from tests import register_ops as ops
 
-torch.set_printoptions(threshold=torch.inf, precision=8)
-
 eps = 1e-4
 
 DEVICE = "xpu"
@@ -45,6 +43,8 @@ def _pytorch_group_quant(
     if dtype is None:
         dtype = torch.float8_e4m3fn
 
+    assert dtype == torch.float8_e4m3fn, "Only torch.float8_e4m3fn is " \
+                                         "supported in indexer k quantization"
     assert x.shape[-1] % group_size == 0
     assert x.stride(-1) == 1
 
@@ -117,12 +117,10 @@ def ref_indexer_k_quant_and_cache(
         block_idx = slot_idx // block_size
         block_offset = slot_idx % block_size
 
-        # fp8 写入: block内fp8区域用head_dim步进
         fp8_start = block_idx * block_size * cache_stride + \
         block_offset * head_dim
         kv_cache_flat_bytes[fp8_start:fp8_start + head_dim] = k_fp8_bytes[i]
 
-        # scale 写入: fp8区域之后，用float索引
         for g in range(num_groups):
             scale_float_idx = (
                 block_idx * block_size * cache_stride + block_size * head_dim +
@@ -141,8 +139,6 @@ def ref_indexer_k_quant_and_cache(
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_indexer_k_quant_and_cache(num_tokens, head_dim, quant_block_size,
                                    block_size, scale_fmt, dtype):
-    if not torch.xpu.is_available():
-        pytest.skip("XPU not available")
 
     assert head_dim % quant_block_size == 0, \
         f"head_dim {head_dim} must be divisible " \
@@ -152,7 +148,6 @@ def test_indexer_k_quant_and_cache(num_tokens, head_dim, quant_block_size,
     num_blocks = (num_tokens + block_size - 1) // block_size
     cache_stride = head_dim + num_groups * 4
 
-    torch.manual_seed(42)
     k = torch.randn((num_tokens, head_dim), device=DEVICE, dtype=dtype)
 
     kv_cache_ref = torch.zeros((num_blocks, block_size, cache_stride),
@@ -188,13 +183,3 @@ def test_indexer_k_quant_and_cache(num_tokens, head_dim, quant_block_size,
             ref_scale, out_scale,
             atol=1e-5), (f"[block={block_idx}] Scale mismatch: "
                          f"ref={ref_scale}, out={out_scale}")
-
-
-test_indexer_k_quant_and_cache(
-    num_tokens=17,
-    head_dim=256,
-    quant_block_size=128,
-    block_size=16,
-    scale_fmt="ue8m0",
-    dtype=torch.float32,
-)
