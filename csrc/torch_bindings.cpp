@@ -167,6 +167,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "swap_blocks(Tensor src, Tensor! dst,"
       "            int block_size_in_bytes, Tensor block_mapping) -> ()");
   cache_ops.impl("swap_blocks", torch::kXPU, &swap_blocks);
+  cache_ops.def(
+      "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache,"
+      "Tensor slot_mapping, int quant_block_size, str scale_fmt) -> ()");
+  cache_ops.impl(
+      "indexer_k_quant_and_cache", torch::kXPU, &indexer_k_quant_and_cache);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
