@@ -2,8 +2,10 @@
 #include <sycl/sycl.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 
+#include "ops.h"
 #include "utils.h"
 #include "utils/mem_cpy.h"
 
@@ -151,3 +153,55 @@ void xpuAsyncMemcpy(
 
 }  // namespace xpu
 }  // namespace vllm
+
+void xpu_memcpy_sync(
+    int64_t dst_ptr,
+    int64_t src_ptr,
+    int64_t n_bytes,
+    int64_t kind,
+    int64_t device) {
+  TORCH_CHECK(n_bytes >= 0, "n_bytes must be non-negative");
+  if (n_bytes == 0) {
+    return;
+  }
+
+  if (device >= 0) {
+    c10::xpu::check_device_index(static_cast<int>(device));
+    c10::xpu::set_device(static_cast<int>(device));
+  }
+
+  void* dst = reinterpret_cast<void*>(static_cast<uintptr_t>(dst_ptr));
+  const void* src =
+      reinterpret_cast<const void*>(static_cast<uintptr_t>(src_ptr));
+
+  switch (kind) {
+    case 0:
+      vllm::xpu::memcpyHostToDevice(
+          dst,
+          src,
+          static_cast<size_t>(n_bytes),
+          /*async=*/false,
+          /*hctx=*/nullptr,
+          /*is_pinned=*/false);
+      break;
+    case 1:
+      vllm::xpu::memcpyDeviceToHost(
+          dst,
+          src,
+          static_cast<size_t>(n_bytes),
+          /*async=*/false,
+          /*hctx=*/nullptr,
+          /*is_pinned=*/false);
+      break;
+    case 2:
+      vllm::xpu::memcpyDeviceToDevice(
+          dst, src, static_cast<size_t>(n_bytes), /*async=*/false);
+      break;
+    default:
+      TORCH_CHECK(
+          false,
+          "Unsupported memcpy kind: ",
+          kind,
+          " (0=H2D, 1=D2H, 2=D2D)");
+  }
+}
