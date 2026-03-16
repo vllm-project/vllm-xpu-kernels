@@ -207,6 +207,15 @@ def swigluoai_and_mul(
     torch.ops._C.swigluoai_and_mul(out, input, alpha, limit)
 
 
+def swiglustep_and_mul(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    limit: float = 7.0,
+) -> None:
+    """SwiGLU-step and Mul activation function."""
+    torch.ops._C.swiglustep_and_mul(out, input, limit)
+
+
 # onednn gemm
 def int4_gemm_w4a16(input: torch.Tensor, weight: torch.Tensor,
                     bias: Optional[torch.Tensor], scales: torch.Tensor,
