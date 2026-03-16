@@ -129,9 +129,8 @@ torch::Tensor int8_gemm_w8a8(
       "int8_gemm_w8a8: activation must be int8 (signed/unsigned), got ",
       A_.scalar_type());
   TORCH_CHECK(
-      B.scalar_type() == at::ScalarType::Char ||
-          B.scalar_type() == at::ScalarType::Byte,
-      "int8_gemm_w8a8: weight must be int8 (signed/unsigned), got ",
+      B.scalar_type() == at::ScalarType::Char,
+      "int8_gemm_w8a8: weight must be signed int8 (Char), got ",
       B.scalar_type());
 
   // Validate quantization format for input A
@@ -144,15 +143,8 @@ torch::Tensor int8_gemm_w8a8(
       "int8_gemm_w8a8: A_scale and A_zp must be per-token [m,1] or per-tensor "
       "[1]");
 
-  // Validate scale and zero point shapes match
-  TORCH_CHECK(
-      A_scale.numel() == A_zp.numel(),
-      "int8_gemm_w8a8: A_scale and A_zp must have the same number of elements");
-  TORCH_CHECK(
-      B_scale.numel() == B_zp.numel(),
-      "int8_gemm_w8a8: B_scale and B_zp must have the same number of elements");
-
   torch::Tensor result = check_and_create_output_tensor(A_, B, torch::kHalf);
+
   oneDNN::dnnl_matmul_w8a8_int8(
       result, A_, A_scale, A_zp, B, B_scale, B_zp, group_size, bias);
   return result;
