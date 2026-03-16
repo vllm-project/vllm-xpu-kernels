@@ -101,13 +101,12 @@ void init_expert_map(
 
 void remap_hidden_states(
     torch::Tensor& hidden_states,
+    const c10::optional<torch::Tensor>& hidden_states_scales,
     torch::Tensor& remapped_hidden_states,
+    const c10::optional<torch::Tensor>& remapped_hidden_states_scales,
     torch::Tensor& expert_map,
     torch::Tensor& expert_first_token_offset,
     torch::Tensor& unpermuted_row_to_permuted_row,
     torch::Tensor& topk_ids,
-    int64_t num_rows,
-    int64_t hidden_size,
-    int64_t n_experts_per_token,
     int64_t total_experts_num,
     int64_t local_experts_num);
