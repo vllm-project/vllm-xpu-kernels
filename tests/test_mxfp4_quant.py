@@ -20,6 +20,13 @@ MXFP4_GROUP_SIZE = 32
 COLUMN_MAJOR_SCALE = [True, False]
 SEEDS = [0]
 
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "num_tokens": [1],
+        "hidden_size": [64],
+    },
+}
+
 
 def seed_everything(seed: int) -> None:
     random.seed(seed)

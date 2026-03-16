@@ -5,7 +5,7 @@
 #include <cstdint>
 
 namespace vllm {
-namespace fp4 {
+namespace mxfp4 {
 
 // Maximum representable FP4 E2M1 value.
 static constexpr float FP4_MAX = 6.0f;
@@ -130,5 +130,5 @@ class per_token_group_quant_mxfp4_kernel {
   }
 };
 
-}  // namespace fp4
+}  // namespace mxfp4
 }  // namespace vllm
