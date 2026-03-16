@@ -164,6 +164,7 @@ def xpu_memcpy_sync(dst_ptr: int,
 
     kind: 0=H2D, 1=D2H, 2=D2D.
     """
+
     def _to_i64_ptr(ptr: int) -> int:
         return ptr if ptr < (1 << 63) else ptr - (1 << 64)
 

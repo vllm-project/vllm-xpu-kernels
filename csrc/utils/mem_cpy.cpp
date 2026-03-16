@@ -199,9 +199,6 @@ void xpu_memcpy_sync(
       break;
     default:
       TORCH_CHECK(
-          false,
-          "Unsupported memcpy kind: ",
-          kind,
-          " (0=H2D, 1=D2H, 2=D2D)");
+          false, "Unsupported memcpy kind: ", kind, " (0=H2D, 1=D2H, 2=D2D)");
   }
 }
