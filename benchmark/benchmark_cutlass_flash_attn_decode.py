@@ -20,6 +20,13 @@ def clear_xpu_cache():
     torch.xpu.synchronize()
 
 
+def calculate_memory_usage(num_seqs, max_kv_len, block_size, num_kv_heads, head_size, dtype):
+    # Memory for key and value caches
+    kv_blocks = (max_kv_len + block_size - 1) // block_size
+    kv_cache_memory = 2 * num_seqs * kv_blocks * block_size * num_kv_heads * head_size * torch.tensor([], dtype=dtype).element_size()
+    return kv_cache_memory / (1024 ** 3)  # Convert to GB
+
+
 def make_decode_with_paged_kv_input(config):
     seq_lens, num_heads, head_size, block_size, dtype, _, num_blocks, _, q_dtype, is_sink = config
     # if num_heads == (16, 1) and head_size == 256:
@@ -214,6 +221,11 @@ def benchmark_decode_with_paged_kv(
                 end_event=end)
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
+        if provider == "flash_memBandwidth":
+            torch.xpu.synchronize()
+            ms = total_latency / (iterations - 5)
+            memory_load_GB = calculate_memory_usage(num_seqs, max_kv_len, block_size, num_heads[1], head_size, dtype)
+            return memory_load_GB / (ms / 1000)
     torch.xpu.synchronize()
     ms = total_latency / (iterations - 5)
     clear_xpu_cache()
@@ -228,9 +240,9 @@ def get_benchmark_decode_with_paged_kv(iterations=20):
                      "num_blocks", "fa_versions", "q_dtype", "is_sink"],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
-            line_vals=["native", "flash", "flash_kernelTime"],
-            line_names=["Native", "FlashAttention", "FlashAttention_kernelTime"],
-            styles=[("red", "-"), ("blue", "-"), ("green", "-")],
+            line_vals=["native", "flash", "flash_kernelTime", "flash_memBandwidth"],
+            line_names=["Native", "FlashAttention", "FlashAttention_kernelTime", "FlashAttention_memBandwidth"],
+            styles=[("red", "-"), ("blue", "-"), ("green", "-"), ("purple", "-")],
             ylabel="Latency (us)",
             plot_name="flash-attn-decode-vs-native",
             args={},
@@ -278,6 +290,17 @@ if __name__ == "__main__":
     q_dtype = [None]
     is_sink = [False, True]
 
+    seq_lens = ["4,1+1+1+1,523+37+2011+5000"]
+    num_heads = [(16, 1)]
+    head_size = [192]
+    block_size = [128]
+    dtype = [torch.bfloat16]
+    soft_cap = [None]
+    num_blocks = [2048]
+    fa_versions = [2]
+    q_dtype = [None]
+    is_sink = [False, True]
+
     print("Final configuration:")
     print("seq_lens: ", seq_lens)
     print("num_heads: ", num_heads)
@@ -301,12 +324,12 @@ if __name__ == "__main__":
         new_configs.append(config)
     configs = new_configs
 
-    for config in configs:
-       try:
-           calculate_diff_decode_paged_kv(config)
-       except Exception as e:
-           print("Error in config: ", config, " error: ", e)
-       clear_xpu_cache()
+    # for config in configs:
+    #    try:
+    #        calculate_diff_decode_paged_kv(config)
+    #    except Exception as e:
+    #        print("Error in config: ", config, " error: ", e)
+    #    clear_xpu_cache()
 
     benchmark = get_benchmark_decode_with_paged_kv(iterations=iterations)
     # Run performance benchmark
