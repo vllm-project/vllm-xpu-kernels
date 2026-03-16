@@ -24,22 +24,31 @@ char error_msg[10240];  // 10KB buffer to store error messages
 int no_error = 0;
 int error_code = no_error;  // store error code
 
-#define XPU_CHECK(condition)                                                 \
-  do {                                                                      \
-    try {                                                                   \
-      condition;                                                            \
-      error_code = no_error;                                                \
-    } catch (const sycl::exception& e) {                                    \
-      error_code = -1;                                                      \
-      snprintf(error_msg, sizeof(error_msg),                                \
-               "XPU SYCL Error: %s at %s:%d", e.what(), __FILE__, __LINE__); \
-      std::cerr << error_msg << std::endl;                                  \
-    } catch (...) {                                                         \
-      error_code = -1;                                                      \
-      snprintf(error_msg, sizeof(error_msg),                                \
-               "XPU Unknown Error at %s:%d", __FILE__, __LINE__);         \
-      std::cerr << error_msg << std::endl;                                  \
-    }                                                                       \
+#define XPU_CHECK(condition)               \
+  do {                                     \
+    try {                                  \
+      condition;                           \
+      error_code = no_error;               \
+    } catch (const sycl::exception& e) {   \
+      error_code = -1;                     \
+      snprintf(                            \
+          error_msg,                       \
+          sizeof(error_msg),               \
+          "XPU SYCL Error: %s at %s:%d",   \
+          e.what(),                        \
+          __FILE__,                        \
+          __LINE__);                       \
+      std::cerr << error_msg << std::endl; \
+    } catch (...) {                        \
+      error_code = -1;                     \
+      snprintf(                            \
+          error_msg,                       \
+          sizeof(error_msg),               \
+          "XPU Unknown Error at %s:%d",    \
+          __FILE__,                        \
+          __LINE__);                       \
+      std::cerr << error_msg << std::endl; \
+    }                                      \
   } while (0)
 
 // Global references to Python callables.
@@ -52,8 +61,9 @@ static bool parse_debug_env_enabled() {
     return false;
   }
   std::string v(env);
-  std::transform(v.begin(), v.end(), v.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
   return v == "1" || v == "true" || v == "on" || v == "yes";
 }
 
@@ -103,7 +113,8 @@ void map_physical_memory(MemoryMetadata& metadata) {
 
   metadata.physical_mem.emplace(sycl_device, sycl_context, metadata.size);
   metadata.physical_mem->map(
-      reinterpret_cast<uintptr_t>(metadata.ptr), metadata.size,
+      reinterpret_cast<uintptr_t>(metadata.ptr),
+      metadata.size,
       sycl::ext::oneapi::experimental::address_access_mode::read_write);
   metadata.mapped = true;
   log_metadata_lifecycle("map end", metadata);
@@ -118,8 +129,8 @@ void unmap_physical_memory(MemoryMetadata& metadata) {
   log_metadata_lifecycle("unmap begin", metadata);
 
   auto sycl_context = c10::xpu::get_device_context();
-  sycl::ext::oneapi::experimental::unmap(metadata.ptr, metadata.size,
-                                         sycl_context);
+  sycl::ext::oneapi::experimental::unmap(
+      metadata.ptr, metadata.size, sycl_context);
   metadata.physical_mem.reset();
   metadata.mapped = false;
   log_metadata_lifecycle("unmap end", metadata);
@@ -138,8 +149,9 @@ void* reserve_and_map_new(int device, size_t size) {
 
   auto sycl_context = c10::xpu::get_device_context();
   uintptr_t va = 0;
-  XPU_CHECK(va = sycl::ext::oneapi::experimental::reserve_virtual_mem(
-                size, sycl_context));
+  XPU_CHECK(
+      va = sycl::ext::oneapi::experimental::reserve_virtual_mem(
+          size, sycl_context));
   if (error_code != 0 || va == 0) {
     return nullptr;
   }
@@ -162,7 +174,8 @@ void* reserve_and_map_new(int device, size_t size) {
   {
     std::lock_guard<std::mutex> lock(g_memory_map_mutex);
     g_memory_map[metadata.ptr] = std::move(metadata);
-    log_metadata_lifecycle("reserve_and_map inserted", g_memory_map[reinterpret_cast<void*>(va)]);
+    log_metadata_lifecycle(
+        "reserve_and_map inserted", g_memory_map[reinterpret_cast<void*>(va)]);
   }
 
   return reinterpret_cast<void*>(va);
@@ -173,8 +186,10 @@ void unmap_for_sleep(void* ptr) {
   auto it = g_memory_map.find(ptr);
   if (it == g_memory_map.end()) {
     error_code = -1;
-    snprintf(error_msg, sizeof(error_msg),
-             "XPU Error: pointer not found in memory map for sleep unmap");
+    snprintf(
+        error_msg,
+        sizeof(error_msg),
+        "XPU Error: pointer not found in memory map for sleep unmap");
     return;
   }
 
@@ -190,8 +205,10 @@ void remap_for_wakeup(void* ptr) {
   auto it = g_memory_map.find(ptr);
   if (it == g_memory_map.end()) {
     error_code = -1;
-    snprintf(error_msg, sizeof(error_msg),
-             "XPU Error: pointer not found in memory map for wake remap");
+    snprintf(
+        error_msg,
+        sizeof(error_msg),
+        "XPU Error: pointer not found in memory map for wake remap");
     return;
   }
 
@@ -208,8 +225,10 @@ void release_allocation(void* ptr) {
     auto it = g_memory_map.find(ptr);
     if (it == g_memory_map.end()) {
       error_code = -1;
-      snprintf(error_msg, sizeof(error_msg),
-               "XPU Error: pointer not found in memory map");
+      snprintf(
+          error_msg,
+          sizeof(error_msg),
+          "XPU Error: pointer not found in memory map");
       return;
     }
     log_metadata_lifecycle("release erase-from-map", it->second);
@@ -228,10 +247,11 @@ void release_allocation(void* ptr) {
   log_metadata_lifecycle("release done", metadata);
 }
 
-PyObject* create_tuple_from_c_integers(unsigned long long a,
-                                       unsigned long long b,
-                                       unsigned long long c,
-                                       unsigned long long d) {
+PyObject* create_tuple_from_c_integers(
+    unsigned long long a,
+    unsigned long long b,
+    unsigned long long c,
+    unsigned long long d) {
   // Create a new tuple of size 4
   PyObject* tuple = PyTuple_New(4);
   if (!tuple) {
@@ -240,7 +260,8 @@ PyObject* create_tuple_from_c_integers(unsigned long long a,
 
   // Convert integers to Python objects and set them in the tuple
   PyTuple_SetItem(
-      tuple, 0,
+      tuple,
+      0,
       PyLong_FromUnsignedLongLong(a));  // Steals reference to the PyLong
   PyTuple_SetItem(tuple, 1, PyLong_FromUnsignedLongLong(b));
   PyTuple_SetItem(tuple, 2, PyLong_FromUnsignedLongLong(c));
@@ -263,7 +284,7 @@ void* my_malloc(ssize_t size, int device, sycl::queue* queue) {
 
   // Reserve VA and map physical memory first.
   void* ptr = reserve_and_map_new(device, size);
-  
+
   if (ptr == nullptr) {
     return nullptr;
   }
@@ -273,8 +294,10 @@ void* my_malloc(ssize_t size, int device, sycl::queue* queue) {
 
   // Pass a single handle tuple to keep CUDA cumem allocator parity
   PyObject* arg_tuple = create_tuple_from_c_integers(
-      (unsigned long long)device, (unsigned long long)size,
-      reinterpret_cast<unsigned long long>(ptr), (unsigned long long)0);
+      (unsigned long long)device,
+      (unsigned long long)size,
+      reinterpret_cast<unsigned long long>(ptr),
+      (unsigned long long)0);
 
   PyObject* py_result =
       PyObject_CallFunctionObjArgs(g_python_malloc_callback, arg_tuple, NULL);
@@ -330,7 +353,8 @@ void my_free(void* ptr, ssize_t size, int device, sycl::queue* queue) {
   }
 
   if (!PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
-    PyErr_SetString(PyExc_TypeError, "Expected python_free to return a tuple of size 4");
+    PyErr_SetString(
+        PyExc_TypeError, "Expected python_free to return a tuple of size 4");
     Py_XDECREF(py_result);
     PyGILState_Release(gstate);
     return;
@@ -339,8 +363,13 @@ void my_free(void* ptr, ssize_t size, int device, sycl::queue* queue) {
   unsigned long long recv_device, recv_size;
   unsigned long long recv_ptr, recv_handle;
   // Unpack the tuple into four C integers
-  if (!PyArg_ParseTuple(py_result, "KKKK", &recv_device, &recv_size,
-                        &recv_ptr, &recv_handle)) {
+  if (!PyArg_ParseTuple(
+          py_result,
+          "KKKK",
+          &recv_device,
+          &recv_size,
+          &recv_ptr,
+          &recv_handle)) {
     Py_DECREF(py_result);
     PyGILState_Release(gstate);
     return;
@@ -357,7 +386,6 @@ void my_free(void* ptr, ssize_t size, int device, sycl::queue* queue) {
 
   release_allocation(ptr);
 }
-
 
 // Python-exposed function: init_module(python_malloc, python_free)
 static PyObject* py_init_module(PyObject* self, PyObject* args) {
@@ -388,8 +416,8 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
   unsigned long long recv_device, recv_size;
   unsigned long long recv_ptr, recv_handle;
   // Unpack the tuple into four C integers
-  if (!PyArg_ParseTuple(args, "KKKK", &recv_device, &recv_size, &recv_ptr,
-                        &recv_handle)) {
+  if (!PyArg_ParseTuple(
+          args, "KKKK", &recv_device, &recv_size, &recv_ptr, &recv_handle)) {
     return nullptr;
   }
 
@@ -421,8 +449,8 @@ static PyObject* python_create_and_allocate(PyObject* self, PyObject* args) {
 
   unsigned long long recv_device, recv_size;
   unsigned long long recv_ptr, recv_handle;
-  if (!PyArg_ParseTuple(args, "KKKK", &recv_device, &recv_size, &recv_ptr,
-                        &recv_handle)) {
+  if (!PyArg_ParseTuple(
+          args, "KKKK", &recv_device, &recv_size, &recv_ptr, &recv_handle)) {
     return nullptr;
   }
 
@@ -441,18 +469,27 @@ static PyObject* python_create_and_allocate(PyObject* self, PyObject* args) {
 }
 
 static PyMethodDef module_methods[] = {
-    {"init_module", (PyCFunction)py_init_module, METH_VARARGS,
+    {"init_module",
+     (PyCFunction)py_init_module,
+     METH_VARARGS,
      "Initialize module with python_malloc and python_free callables."},
-    {"python_create_and_allocate", (PyCFunction)python_create_and_allocate, METH_VARARGS,
+    {"python_create_and_allocate",
+     (PyCFunction)python_create_and_allocate,
+     METH_VARARGS,
      "Create and allocate memory on the XPU device."},
-    {"python_unmap_and_release", (PyCFunction)python_unmap_and_release,
-     METH_VARARGS, "Unmap and release memory on the XPU device."},
+    {"python_unmap_and_release",
+     (PyCFunction)python_unmap_and_release,
+     METH_VARARGS,
+     "Unmap and release memory on the XPU device."},
     {NULL, NULL, 0, NULL}  // sentinel
 };
 
 static struct PyModuleDef xpumem_allocator_module = {
-    PyModuleDef_HEAD_INIT, "xpumem_allocator",
-    "SYCL USM-based allocator for XPUPluggableAllocator", -1, module_methods};
+    PyModuleDef_HEAD_INIT,
+    "xpumem_allocator",
+    "SYCL USM-based allocator for XPUPluggableAllocator",
+    -1,
+    module_methods};
 
 PyMODINIT_FUNC PyInit_xpumem_allocator(void) {
   // Initialize the module

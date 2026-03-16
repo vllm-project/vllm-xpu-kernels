@@ -350,22 +350,21 @@ list(
 #
 # xpumem_allocator extension - XPU memory allocator with Python callbacks
 #
-set(XPUMEM_ALLOCATOR_ENABLED ON CACHE BOOL "Build xpumem_allocator extension")
+set(XPUMEM_ALLOCATOR_ENABLED
+    ON
+    CACHE BOOL "Build xpumem_allocator extension")
 if(XPUMEM_ALLOCATOR_ENABLED)
   message(STATUS "Enabling xpumem_allocator extension.")
 
-  set(XPUMEM_ALLOCATOR_SRC
-    "csrc/utils/mem_alloc.cpp"
-  )
+  set(XPUMEM_ALLOCATOR_SRC "csrc/utils/mem_alloc.cpp")
   include_directories("/usr/include")
 
   # Create Python module for xpumem_allocator
   find_package(Python REQUIRED COMPONENTS Development)
   find_package(Torch REQUIRED)
-  list(APPEND PYTORCH_INCLUDES
-    ${TORCH_INCLUDE_DIRS}
-    )
-  Python_add_library(xpumem_allocator MODULE USE_SABI 3 WITH_SOABI "${XPUMEM_ALLOCATOR_SRC}")
+  list(APPEND PYTORCH_INCLUDES ${TORCH_INCLUDE_DIRS})
+  python_add_library(xpumem_allocator MODULE USE_SABI 3 WITH_SOABI
+                     "${XPUMEM_ALLOCATOR_SRC}")
 
   set_property(TARGET xpumem_allocator PROPERTY CXX_STANDARD 17)
 
@@ -375,26 +374,20 @@ if(XPUMEM_ALLOCATOR_ENABLED)
   get_target_property(EXISTING_DEFS xpumem_allocator COMPILE_DEFINITIONS)
   if(EXISTING_DEFS)
     list(REMOVE_ITEM EXISTING_DEFS "Py_LIMITED_API=3")
-    set_target_properties(xpumem_allocator PROPERTIES COMPILE_DEFINITIONS "${EXISTING_DEFS}")
+    set_target_properties(xpumem_allocator PROPERTIES COMPILE_DEFINITIONS
+                                                      "${EXISTING_DEFS}")
   endif()
-  target_include_directories(xpumem_allocator PRIVATE
-    ${Python_INCLUDE_DIRS}
-    ${PYTORCH_INCLUDES}
-    csrc
-  )
+  target_include_directories(xpumem_allocator PRIVATE ${Python_INCLUDE_DIRS}
+                                                      ${PYTORCH_INCLUDES} csrc)
 
-  target_link_libraries(xpumem_allocator PRIVATE
-    torch
-    ${TORCH_LIBRARIES}
-  )
+  target_link_libraries(xpumem_allocator PRIVATE torch ${TORCH_LIBRARIES})
 
   if(VLLM_GPU_LANG STREQUAL "SYCL")
     target_link_options(xpumem_allocator PRIVATE ${VLLM_GPU_LINK_FLAGS})
   endif()
 
-  install(TARGETS xpumem_allocator
-    LIBRARY DESTINATION vllm_xpu_kernels
-    COMPONENT xpumem_allocator)
+  install(TARGETS xpumem_allocator LIBRARY DESTINATION vllm_xpu_kernels
+                                           COMPONENT xpumem_allocator)
 endif()
 
 #
