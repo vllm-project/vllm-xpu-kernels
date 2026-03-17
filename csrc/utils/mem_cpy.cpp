@@ -71,7 +71,7 @@ void memcpyHostToDevice(
 
   if (is_pinned) {
     // Pinned host → device: can be transferred via direct asynchronous DMA
-    memcpy_sync(queue, dst, src, n_bytes);
+    memcpy_async(queue, dst, src, n_bytes);
     // Only record the event if src is pinned memory allocated
     // by the caching host allocator
     record_host_alloc_event_if_possible(const_cast<void*>(src), hctx);

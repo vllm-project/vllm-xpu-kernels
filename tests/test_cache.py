@@ -7,7 +7,8 @@ import torch
 
 from tests import register_ops as ops
 from tests.register_ops import reshape_and_cache, reshape_and_cache_flash
-from tests.utils import (_convert_from_fp8, create_kv_caches_with_random,
+from tests.utils import (_convert_from_fp8, create_kv_caches_with_pinned,
+                         create_kv_caches_with_random,
                          create_kv_caches_with_random_flash, opcheck,
                          seed_everything)
 
@@ -626,6 +627,105 @@ def test_swap_blocks(
         ),
         cond=do_opcheck,
     )
+
+    ops.swap_blocks(
+        src_key_caches[0],
+        dst_key_caches[0],
+        block_size_in_bytes,
+        block_mapping_tensor,
+    )
+    ops.swap_blocks(
+        src_value_caches[0],
+        dst_value_caches[0],
+        block_size_in_bytes,
+        block_mapping_tensor,
+    )
+
+    for src, dst in block_mapping:
+        torch.testing.assert_close(src_key_caches_clone[src].cpu(),
+                                   dst_key_caches[0][dst].cpu())
+        torch.testing.assert_close(src_value_caches_clone[src].cpu(),
+                                   dst_value_caches[0][dst].cpu())
+
+
+# Test with pinned memory to verify async DMA path
+@pytest.mark.parametrize("direction", [("cpu", "xpu"), ("xpu", "cpu")])
+@pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@torch.inference_mode()
+def test_swap_blocks_pinned(
+    direction: tuple[str, str],
+    num_mappings: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+) -> None:
+    """Test swap_blocks with pinned host memory to exercise async DMA path."""
+    if kv_cache_dtype == "fp8":
+        pytest.skip()
+
+    seed_everything(seed)
+
+    src_device = device if direction[0] == "xpu" else "cpu"
+    dst_device = device if direction[1] == "xpu" else "cpu"
+
+    src_blocks = random.sample(range(num_blocks), num_mappings)
+    # For cross-device swaps, destination blocks can be any available block
+    if src_device == dst_device:
+        remaining_blocks = list(set(range(num_blocks)) - set(src_blocks))
+        dst_blocks = random.sample(remaining_blocks, num_mappings)
+    else:
+        dst_blocks = random.sample(range(num_blocks), num_mappings)
+
+    block_mapping = list(zip(src_blocks, dst_blocks))
+    block_mapping_tensor = torch.tensor(block_mapping,
+                                        dtype=torch.int64,
+                                        device="cpu").view(-1, 2)
+
+    # Create the KV caches with pinned memory when on CPU
+    src_key_caches, src_value_caches = create_kv_caches_with_pinned(
+        num_blocks,
+        block_size,
+        1,
+        num_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        seed,
+        src_device,
+    )
+
+    # Create the KV caches on the second device.
+    dst_key_caches, dst_value_caches = create_kv_caches_with_pinned(
+        num_blocks,
+        block_size,
+        1,
+        num_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        seed,
+        dst_device,
+    )
+
+    src_key_caches_clone = src_key_caches[0].clone()
+    src_value_caches_clone = src_value_caches[0].clone()
+
+    # Call the swap_blocks kernel.
+    src_cache = src_key_caches[0]
+    block_size_in_bytes = src_cache.element_size() * src_cache.stride(0)
 
     ops.swap_blocks(
         src_key_caches[0],
