@@ -6,6 +6,10 @@ import torch
 import vllm_xpu_kernels._C  # noqa: F401
 from tests import register_ops as ops
 
+MEMCPY_HOST_TO_DEVICE = 0
+MEMCPY_DEVICE_TO_HOST = 1
+MEMCPY_DEVICE_TO_DEVICE = 2
+
 XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
 ]
@@ -21,7 +25,7 @@ def test_xpu_memcpy_sync_host_to_device(device: str) -> None:
         dst.data_ptr(),
         src.data_ptr(),
         src.numel() * src.element_size(),
-        ops.MEMCPY_HOST_TO_DEVICE,
+        MEMCPY_HOST_TO_DEVICE,
         torch.xpu.current_device(),
     )
 
@@ -39,7 +43,7 @@ def test_xpu_memcpy_sync_device_to_host(device: str) -> None:
         dst.data_ptr(),
         src.data_ptr(),
         dst.numel() * dst.element_size(),
-        ops.MEMCPY_DEVICE_TO_HOST,
+        MEMCPY_DEVICE_TO_HOST,
         torch.xpu.current_device(),
     )
 
@@ -56,7 +60,7 @@ def test_xpu_memcpy_sync_device_to_device(device: str) -> None:
         dst.data_ptr(),
         src.data_ptr(),
         src.numel() * src.element_size(),
-        ops.MEMCPY_DEVICE_TO_DEVICE,
+        MEMCPY_DEVICE_TO_DEVICE,
         torch.xpu.current_device(),
     )
 

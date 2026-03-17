@@ -7,10 +7,6 @@ import vllm_xpu_kernels._C  # noqa: F401
 import vllm_xpu_kernels._moe_C  # noqa: F401
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 
-MEMCPY_HOST_TO_DEVICE = 0
-MEMCPY_DEVICE_TO_HOST = 1
-MEMCPY_DEVICE_TO_DEVICE = 2
-
 
 # layer norm ops
 def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,

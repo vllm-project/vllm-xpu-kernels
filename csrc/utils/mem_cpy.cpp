@@ -154,6 +154,12 @@ void xpuAsyncMemcpy(
 }  // namespace xpu
 }  // namespace vllm
 
+enum class MemcpyKind : int64_t {
+  HostToDevice = 0,
+  DeviceToHost = 1,
+  DeviceToDevice = 2,
+};
+
 void xpu_memcpy_sync(
     int64_t dst_ptr,
     int64_t src_ptr,
@@ -174,8 +180,8 @@ void xpu_memcpy_sync(
   const void* src =
       reinterpret_cast<const void*>(static_cast<uintptr_t>(src_ptr));
 
-  switch (kind) {
-    case 0:
+  switch (static_cast<MemcpyKind>(kind)) {
+    case MemcpyKind::HostToDevice:
       vllm::xpu::memcpyHostToDevice(
           dst,
           src,
@@ -184,7 +190,7 @@ void xpu_memcpy_sync(
           /*hctx=*/nullptr,
           /*is_pinned=*/false);
       break;
-    case 1:
+    case MemcpyKind::DeviceToHost:
       vllm::xpu::memcpyDeviceToHost(
           dst,
           src,
@@ -193,7 +199,7 @@ void xpu_memcpy_sync(
           /*hctx=*/nullptr,
           /*is_pinned=*/false);
       break;
-    case 2:
+    case MemcpyKind::DeviceToDevice:
       vllm::xpu::memcpyDeviceToDevice(
           dst, src, static_cast<size_t>(n_bytes), /*async=*/false);
       break;
