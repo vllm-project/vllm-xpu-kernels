@@ -345,7 +345,7 @@ def benchmark_varlen_with_paged_kv(
         torch.xpu.synchronize()
         ms = total_latency / (iterations - 5)
         flops = calculate_flops(num_query_heads, query_lens, kv_lens, head_size, is_causal)
-        tflops = flops / (ms * 1e6)
+        tflops = flops / (ms / 1000) / 1e12
         clear_xpu_cache()
         return tflops
 
@@ -444,6 +444,13 @@ if __name__ == "__main__":
     configs = list(
         itertools.product(num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype)
     )
+    new_configs = []
+    for config in configs:
+        if config[5] == 128 and config[9] == 32768 and config[4] >= 192:
+            print("Skipping config due to potential OOM: ", config)
+            continue
+        new_configs.append(config)
+    configs = new_configs
 
     for config in configs:
        try:

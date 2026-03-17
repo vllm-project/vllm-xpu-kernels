@@ -308,7 +308,8 @@ if __name__ == "__main__":
     )
     new_configs = []
     for config in configs:
-        if config[1] == (16, 1) and config[2] == 256:
+        if (config[1] == (16, 1) and config[2] == 256) or \
+           (config[3] == 128 and config[6] == 32768 and config[2] >= 192):
             print("Skipping config due to potential OOM: ", config)
             continue
         new_configs.append(config)
