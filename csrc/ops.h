@@ -106,6 +106,13 @@ void per_token_group_quant_fp8(
     double fp8_max,
     bool scale_ue8m0);
 
+void per_token_group_quant_mxfp4(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    int64_t group_size,
+    double eps);
+
 void swigluoai_and_mul(
     torch::Tensor& out,
     torch::Tensor& input,
