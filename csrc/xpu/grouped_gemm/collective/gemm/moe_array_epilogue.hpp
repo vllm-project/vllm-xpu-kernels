@@ -306,7 +306,7 @@ class CollectiveEpilogue<
     bool implementable = true;
     bool fusion_implementable = true;
 
-    auto problem_shape_MNKL = cutlass::Shape(1, N_, K_, 1);
+    auto problem_shape_MNKL = cute::make_shape(1, N_, K_, 1);
     auto [M, N, K, L] = problem_shape_MNKL;
     if constexpr (is_destination_supported) {
       constexpr int min_aligned_elements_D =
