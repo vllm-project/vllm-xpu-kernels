@@ -225,6 +225,7 @@ def benchmark_decode_with_paged_kv(
             torch.xpu.synchronize()
             ms = total_latency / (iterations - 5)
             memory_load_GB = calculate_memory_usage(num_seqs, max_kv_len, block_size, num_heads[1], head_size, dtype)
+            clear_xpu_cache()
             return memory_load_GB / (ms / 1000)
     torch.xpu.synchronize()
     ms = total_latency / (iterations - 5)
@@ -290,17 +291,6 @@ if __name__ == "__main__":
     q_dtype = [None]
     is_sink = [False, True]
 
-    seq_lens = ["4,1+1+1+1,523+37+2011+5000"]
-    num_heads = [(16, 1)]
-    head_size = [192]
-    block_size = [128]
-    dtype = [torch.bfloat16]
-    soft_cap = [None]
-    num_blocks = [2048]
-    fa_versions = [2]
-    q_dtype = [None]
-    is_sink = [False, True]
-
     print("Final configuration:")
     print("seq_lens: ", seq_lens)
     print("num_heads: ", num_heads)
@@ -324,12 +314,12 @@ if __name__ == "__main__":
         new_configs.append(config)
     configs = new_configs
 
-    # for config in configs:
-    #    try:
-    #        calculate_diff_decode_paged_kv(config)
-    #    except Exception as e:
-    #        print("Error in config: ", config, " error: ", e)
-    #    clear_xpu_cache()
+    for config in configs:
+       try:
+           calculate_diff_decode_paged_kv(config)
+       except Exception as e:
+           print("Error in config: ", config, " error: ", e)
+       clear_xpu_cache()
 
     benchmark = get_benchmark_decode_with_paged_kv(iterations=iterations)
     # Run performance benchmark

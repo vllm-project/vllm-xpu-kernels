@@ -20,6 +20,14 @@ def clear_xpu_cache():
     torch.xpu.synchronize()
 
 
+def calculate_flops(num_query_heads, query_lens, kv_lens, head_size, is_causal):
+    total = 0
+    for sq, sk in zip(query_lens, kv_lens):
+        effective_sk = sk * 0.5 if is_causal else sk
+        total += 4 * num_query_heads * sq * effective_sk * head_size
+    return total
+
+
 def make_varlen_with_paged_kv_input(config):
     num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, _, num_blocks, _, q_dtype, is_sink, is_causal, is_paged, fp8_dtype = config
     query_lens = query_lens.split(",")
@@ -241,7 +249,7 @@ def benchmark_varlen_with_paged_kv(
                                         num_blocks,
                                         (num_seqs, max_num_blocks_per_seq),
                                         dtype=torch.int32)
-            if provider == "flash_kernel_time":
+            if provider == "flash_kernel_time" or provider == "flash_kernel_TFLOPS":
                 flash_attn_varlen_func_CalKernelTime(maybe_quantized_query,
                                 maybe_quantized_key_cache,
                                 maybe_quantized_value_cache,
@@ -288,7 +296,7 @@ def benchmark_varlen_with_paged_kv(
                 total_latency += start.elapsed_time(end)
     else:
         for index in range(iterations):
-            if provider == "flash_kernel_time":
+            if provider == "flash_kernel_time" or provider == "flash_kernel_TFLOPS":
                 flash_attn_varlen_func_CalKernelTime(maybe_quantized_query,
                     maybe_quantized_key_cache,
                     maybe_quantized_value_cache,
@@ -333,6 +341,14 @@ def benchmark_varlen_with_paged_kv(
                 end.synchronize()
             if index >= 5:  # skip the first 5 iterations for warmup
                 total_latency += start.elapsed_time(end)
+    if provider == "flash_kernel_TFLOPS":
+        torch.xpu.synchronize()
+        ms = total_latency / (iterations - 5)
+        flops = calculate_flops(num_query_heads, query_lens, kv_lens, head_size, is_causal)
+        tflops = flops / (ms * 1e6)
+        clear_xpu_cache()
+        return tflops
+
     torch.xpu.synchronize()
     ms = total_latency / (iterations - 5)
     clear_xpu_cache()
@@ -346,9 +362,9 @@ def get_benchmark_varlen_with_paged_kv(iterations=20):
             x_names=["num_seqs", "query_lens", "kv_lens", "num_heads", "head_size", "block_size", "window_size", "dtype", "soft_cap", "num_blocks", "fa_versions", "q_dtype", "is_sink", "is_causal", "is_paged", "fp8_dtype"],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
-            line_vals=["native", "flash", "flash_kernel_time"],
-            line_names=["Native", "FlashAttention", "FlashAttention Kernel Time"],
-            styles=[("red", "-"), ("blue", "-"), ("green", "-")],
+            line_vals=["native", "flash", "flash_kernel_time", "flash_kernel_TFLOPS"],
+            line_names=["Native", "FlashAttention", "FlashAttention Kernel Time", "FlashAttention TFLOPS"],
+            styles=[("red", "-"), ("blue", "-"), ("green", "-"), ("purple", "-")],
             ylabel="Latency (us)",
             plot_name="flash-attn-varlen-vs-native",
             args={},
