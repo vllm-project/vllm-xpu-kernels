@@ -33,13 +33,25 @@ static inline void dnnl_matmul_w8a8_int8(
   // get joint dtypes
   joint_dtypes_t jd;
   auto in_dtype = mat1.scalar_type();
-  if (in_dtype == at::ScalarType::Char) {
+  auto w_dtype = mat2.scalar_type();
+  if (in_dtype == at::ScalarType::Char && w_dtype == at::ScalarType::Char) {
     jd = joint_dtypes_t::int8;
-  } else if (in_dtype == at::ScalarType::Byte) {
+  } else if (
+      in_dtype == at::ScalarType::Byte && w_dtype == at::ScalarType::Char) {
     jd = joint_dtypes_t::u8_int8;
+  } else if (
+      in_dtype == at::ScalarType::Char && w_dtype == at::ScalarType::Byte) {
+    jd = joint_dtypes_t::s8_u8;
+  } else if (
+      in_dtype == at::ScalarType::Byte && w_dtype == at::ScalarType::Byte) {
+    jd = joint_dtypes_t::u8_u8;
   } else {
     TORCH_INTERNAL_ASSERT(
-        false, "Unsupported data type for int8-int8 matmul: ", in_dtype);
+        false,
+        "Unsupported data type combination for int8-int8 matmul: act=",
+        in_dtype,
+        " wei=",
+        w_dtype);
   }
 
   // get bias type

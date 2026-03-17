@@ -45,6 +45,8 @@ enum class joint_dtypes_t {
   s8_int4,
   u8_int4,
   u8_int8,
+  s8_u8,
+  u8_u8,
   f16_f8_e5m2,
   bf16_f8_e5m2,
   f16_f8_e4m3,
@@ -117,6 +119,26 @@ struct onednn_types_mapper<joint_dtypes_t::u8_int8> {
       get() {
     return std::make_tuple(
         memory::data_type::u8, memory::data_type::s8, memory::data_type::f16);
+  }
+};
+
+template <>
+struct onednn_types_mapper<joint_dtypes_t::s8_u8> {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
+    return std::make_tuple(
+        memory::data_type::s8, memory::data_type::u8, memory::data_type::f16);
+  }
+};
+
+template <>
+struct onednn_types_mapper<joint_dtypes_t::u8_u8> {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
+    return std::make_tuple(
+        memory::data_type::u8, memory::data_type::u8, memory::data_type::f16);
   }
 };
 
@@ -941,6 +963,34 @@ static inline primitive_ext& matmul_primitive_create_and_cache(
           zp_group_size);
     case joint_dtypes_t::u8_int8:
       return matmul_primitive_create_and_cache<joint_dtypes_t::u8_int8, F>(
+          Tt,
+          b_type,
+          m,
+          n,
+          k,
+          lda,
+          ldb,
+          ldc,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::s8_u8:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::s8_u8, F>(
+          Tt,
+          b_type,
+          m,
+          n,
+          k,
+          lda,
+          ldb,
+          ldc,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::u8_u8:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::u8_u8, F>(
           Tt,
           b_type,
           m,

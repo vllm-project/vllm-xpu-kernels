@@ -129,8 +129,9 @@ torch::Tensor int8_gemm_w8a8(
       "int8_gemm_w8a8: activation must be int8 (signed/unsigned), got ",
       A_.scalar_type());
   TORCH_CHECK(
-      B.scalar_type() == at::ScalarType::Char,
-      "int8_gemm_w8a8: weight must be signed int8 (Char), got ",
+      B.scalar_type() == at::ScalarType::Char ||
+          B.scalar_type() == at::ScalarType::Byte,
+      "int8_gemm_w8a8: weight must be int8 (Char) or uint8 (Byte), got ",
       B.scalar_type());
 
   // Validate quantization format for input A
