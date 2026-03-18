@@ -132,15 +132,17 @@ def rmsnorm_ipex(
     x = x.view(-1, x.shape[-1])
 
     if residual is not None:
-        torch.ops.torch_ipex.fused_add_rms_norm_vllm(x, residual, weight, eps)
-        output = (x, residual)
+        residual = residual.view(-1, residual.shape[-1])
+        if hasattr(ipex.llm.functional, 'fused_add_rms_norm'):
+            output, residual_out = ipex.llm.functional.fused_add_rms_norm(
+                x, residual, weight, eps)
+            output = (output.view(orig_shape), residual_out.view(orig_shape))
+        else:
+            x = x + residual
+            output = ipex.llm.functional.rms_norm(x, weight, eps)
+            output = (output.view(orig_shape), x.view(orig_shape))
     else:
-        out = torch.empty_like(x)
-        torch.ops.torch_ipex.rms_norm_vllm(out, x, weight, eps)
-        output = out
-    if isinstance(output, tuple):
-        output = (output[0].view(orig_shape), output[1].view(orig_shape))
-    else:
+        output = ipex.llm.functional.rms_norm(x, weight, eps)
         output = output.view(orig_shape)
 
     return output
