@@ -108,8 +108,10 @@ def implement_zp(qweight):
 
     return result
 
+
 def relu2_no_mul(x: torch.Tensor) -> torch.Tensor:
     return torch.square(F.relu(x))
+
 
 def xpu_fused_moe(hidden_states,
                   w13,
@@ -264,7 +266,6 @@ def xpu_fused_moe(hidden_states,
     elif activation == "swigluoai":
         torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
     elif activation == "relu2_no_mul":
-        #torch.ops._C.gelu_quick(act_output, gemm1_output)
         act_output = relu2_no_mul(gemm1_output)
         inter_size_scale = 2
     else:
