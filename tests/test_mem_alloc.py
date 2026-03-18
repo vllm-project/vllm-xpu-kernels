@@ -48,7 +48,7 @@ def test_create_and_allocate_unknown_pointer_raises() -> None:
 
 @pytest.mark.skipif(not torch.xpu.is_available(),
                     reason="XPU is not available")
-@pytest.mark.skipif(version.parse(torch.__version__) <= version.parse("2.10"),
+@pytest.mark.skipif(version.parse(torch.__version__) < version.parse("2.11"),
                     reason="Torch version should be newer or equal 2.11")
 def test_pluggable_allocator_allocate_release() -> None:
     allocation_records: dict[int, tuple[int, int, int]] = {}
