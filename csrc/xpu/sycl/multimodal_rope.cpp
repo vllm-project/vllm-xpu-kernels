@@ -56,7 +56,8 @@ class multimodal_rotary_embedding_kernel {
     const int embed_dim = rot_dim / 2;
 
     // Build cos/sin cache for this token (private memory per thread).
-    scalar_t merged_cache[MROPE_MAX_ROT_DIM];  // [cos | sin], size = rot_dim
+    // Zero-initialize
+    scalar_t merged_cache[MROPE_MAX_ROT_DIM] = {};  // [cos | sin], size = rot_dim
     int cumsum = 0;
     for (int s = 0; s < num_mrope_sections; ++s) {
       const int lo = cumsum;
@@ -177,10 +178,20 @@ void call_multimodal_rotary_embedding_kernel(
   auto key_ptr = key.has_value() ? key->data_ptr<scalar_t>() : nullptr;
   auto cos_sin_cache_ptr = cos_sin_cache.data_ptr<scalar_t>();
 
-  // Convert int64 list to int array for the kernel.
+  // Convert int64 list to int array for the kernel and verify sections
+  // sum to embed_dim (= rot_dim / 2).
   int mrope_section_arr[vllm::MROPE_MAX_SECTIONS] = {};
-  for (int s = 0; s < num_mrope_sections; ++s)
+  int section_sum = 0;
+  for (int s = 0; s < num_mrope_sections; ++s) {
     mrope_section_arr[s] = static_cast<int>(mrope_section[s]);
+    section_sum += mrope_section_arr[s];
+  }
+  TORCH_CHECK(
+      section_sum == rot_dim / 2,
+      "mrope_section values must sum to rot_dim / 2 (embed_dim=",
+      rot_dim / 2,
+      "), but got ",
+      section_sum);
 
   sycl::range<3> grid(1, 1, num_tokens);
   sycl::range<3> block(1, 1, std::min<int64_t>(num_heads * rot_dim / 2, 512));
