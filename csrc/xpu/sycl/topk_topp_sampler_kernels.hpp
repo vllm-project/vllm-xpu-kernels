@@ -12,8 +12,8 @@ enum class LogprobsMode{
 
 struct top_k_only_kernel {
  public:
-  static constexpr int sub_group_size = 32;
-  static constexpr int group_size = 256;
+  static constexpr int sub_group_size = 16;
+  static constexpr int group_size = 512;
 
   top_k_only_kernel(
       int64_t* random_sampled,
@@ -69,10 +69,11 @@ struct top_k_only_kernel {
         do{
             int pivot_count_local = 0;
 
+#pragma unroll
             for(int e = 0; e < handle_size; ++e){
                 int idx = local_offset + e;
                 float logit = logits_ptr[idx];
-                
+                 
                 if(logit >= pivot){
                     pivot_count_local += 1;
                 }
@@ -99,6 +100,7 @@ struct top_k_only_kernel {
     float max_value_local = INFINITY * -1;
     int max_idx_local = 0;
 
+#pragma unroll
     for(int e = 0; e < handle_size; ++e){
         int idx = local_offset + e;
         float logit = logits_ptr[idx];

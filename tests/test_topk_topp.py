@@ -16,7 +16,7 @@ K = [1, 32, 128, 1024, None]
 P = [0.1, 0.2, 0.4, 0.8, 1.0, None]
 LOGPROBS_MODE = ["raw_logits", "processed_logits", "processed_logprobs"]
 
-BATCH_SIZE = [16]
+BATCH_SIZE = [2048]
 VOCAL_SIZE = [131072]
 K = [50]
 P = [None, None]
