@@ -85,6 +85,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def("is_pvc(int device_index) -> bool");
   xpu_ops.impl("is_pvc", &is_pvc);
+
+  xpu_ops.def(
+      "topk_topp_sampler(Tensor! random_sampled, Tensor? processed_logprobs,"
+      "Tensor! logits, Tensor? k, Tensor? p, str logprobs_mode) -> ()");
+  xpu_ops.impl("topk_topp_sampler", torch::kXPU, &topk_topp_sampler);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
