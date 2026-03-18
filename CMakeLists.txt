@@ -154,7 +154,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(SYCL_FLAGS "")
   set(SYCL_KERNEL_OPTIONS)
 
-  list(APPEND SYCL_FLAGS "-fsycl")
+  list(APPEND SYCL_FLAGS "-fsycl" "-fno-sycl-instrument-device-code")
 
   set(SYCL_COMPILE_FLAGS ${SYCL_FLAGS})
 
@@ -170,7 +170,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
 
   # ============= LINK OPTIONS ==================
   set(SYCL_LINK_FLAGS "")
-  list(APPEND SYCL_LINK_FLAGS "-fsycl")
+  list(APPEND SYCL_LINK_FLAGS "-fsycl" "-fno-sycl-instrument-device-code" "-fsycl-targets=spir64_gen")
   set(SYCL_DEVICE_LINK_FLAGS ${SYCL_LINK_FLAGS})
   set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS} ${SYCL_TARGETS_OPTION})
   set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS}
@@ -209,7 +209,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages
   # when building.
   set(CUTLASS_REVISION
-      "3f2a337e885db0fb97b2a6ba514eb7a2a734ac4a"
+      "5b9e70a37a22c050f7362c05841b05ab85fac4fa"
       CACHE STRING "CUTLASS revision to use")
 
   if(DEFINED ENV{VLLM_CUTLASS_SRC_DIR})

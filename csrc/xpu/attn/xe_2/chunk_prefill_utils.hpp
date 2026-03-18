@@ -2,27 +2,17 @@
 
 using namespace cute;
 
-template <typename chunk_policy, bool... Bs>
-void policy_dispatch_func(
-    sycl::queue& queue,
-    CutlassQKType& cuQKType,
-    const chunk_prefill_args_t& args) {
-  policy_dispatch_impl<chunk_policy, Bs...>(queue, cuQKType, args);
-}
-
-template <typename chunk_policy, bool... Bs, typename... Ts>
+// Only Paged is dispatched at compile time; Causal, Local, Sink are disabled.
+template <typename chunk_policy>
 void policy_dispatch_func(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args,
-    bool b,
-    Ts... ts) {
-  if (b) {
-    policy_dispatch_func<chunk_policy, Bs..., true>(
-        queue, cuQKType, args, ts...);
+    bool is_paged) {
+  if (is_paged) {
+    policy_dispatch_impl<chunk_policy, true>(queue, cuQKType, args);
   } else {
-    policy_dispatch_func<chunk_policy, Bs..., false>(
-        queue, cuQKType, args, ts...);
+    policy_dispatch_impl<chunk_policy, false>(queue, cuQKType, args);
   }
 }
 

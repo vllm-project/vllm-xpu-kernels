@@ -13,13 +13,11 @@ using namespace cute;
 #cmakedefine01 IMPL_KISLOCAL
 // clang-format on
 
+// Only Paged is a compile-time variant; Causal, Local, Sink are disabled.
 #define INSTANTIATE_KERNEL()             \
   template void policy_dispatch_impl<    \
       IMPL_POLICY,                       \
-      static_cast<bool>(IMPL_KISPAGED),  \
-      static_cast<bool>(IMPL_KISCAUSAL), \
-      static_cast<bool>(IMPL_KISLOCAL),  \
-      static_cast<bool>(IMPL_KISSINK)>(  \
+      static_cast<bool>(IMPL_KISPAGED)>( \
       sycl::queue & queue,               \
       CutlassQKType& cuQKType,           \
       const chunk_prefill_args_t& args);
