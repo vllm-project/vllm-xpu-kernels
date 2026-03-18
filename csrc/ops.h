@@ -74,6 +74,13 @@ void gather_cache(
     int64_t batch_size,
     std::optional<torch::Tensor> seq_starts = std::nullopt);
 
+void indexer_k_quant_and_cache(
+    torch::Tensor& k,             // [num_tokens, head_dim]
+    torch::Tensor& kv_cache,      // [num_blocks, block_size, cache_stride]
+    torch::Tensor& slot_mapping,  // [num_tokens]
+    int64_t quant_block_size,     // quantization block size
+    const std::string& scale_fmt);
+
 void static_scaled_fp8_quant(
     torch::Tensor& out,
     torch::Tensor const& input,
@@ -99,6 +106,13 @@ void per_token_group_quant_fp8(
     double fp8_max,
     bool scale_ue8m0);
 
+void per_token_group_quant_mxfp4(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    int64_t group_size,
+    double eps);
+
 void swigluoai_and_mul(
     torch::Tensor& out,
     torch::Tensor& input,
@@ -119,3 +133,23 @@ void swap_blocks(
     torch::Tensor& dst,
     int64_t block_size_in_bytes,
     const torch::Tensor& block_mapping);
+
+void top_k_per_row_decode(
+    const torch::Tensor& logits,
+    int64_t next_n,
+    const torch::Tensor& seqLens,
+    torch::Tensor& indices,
+    int64_t numRows,
+    int64_t stride0,
+    int64_t stride1,
+    int64_t topK);
+
+void top_k_per_row_prefill(
+    const torch::Tensor& logits,
+    const torch::Tensor& rowStarts,
+    const torch::Tensor& rowEnds,
+    torch::Tensor& indices,
+    int64_t numRows,
+    int64_t stride0,
+    int64_t stride1,
+    int64_t topK);

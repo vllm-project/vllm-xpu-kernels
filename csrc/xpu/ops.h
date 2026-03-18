@@ -97,7 +97,8 @@ void gdn_attention(
     const torch::Tensor& non_spec_query_start_loc,
     const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
-    const int64_t tp_size);
+    const int64_t tp_size,
+    const bool reorder_input);
 
 bool is_bmg(int64_t device_index);
 
