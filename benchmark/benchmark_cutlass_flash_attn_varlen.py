@@ -395,15 +395,7 @@ def get_benchmark_varlen_with_paged_kv(iterations=20):
     return benchmark
 
 
-if __name__ == "__main__":
-
-    args = parse_args()
-    seed = 1234
-    seed_everything(seed)
-    iterations = 20
-    torch.set_default_device("xpu")
-    torch.xpu.set_device("xpu:0")
-
+def gen_correctness_config():
     # seq_lens = [[(1, 1328), (5, 18), (129, 463)]]
     num_seqs = [3]
     query_lens = ["1,5,129"]
@@ -444,6 +436,53 @@ if __name__ == "__main__":
     configs = list(
         itertools.product(num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype)
     )
+    return configs
+
+
+def gen_perf_configs():
+    num_seqs = [3]
+    query_lens = ["1024,2048,2048"]
+    kv_lens = ["1024,1024,2048"]
+
+    num_heads = [(32, 8)]
+    head_size = [128]
+    block_size = [64, 128]
+    window_size = [(-1, -1)]
+    dtype = [torch.float16, torch.bfloat16]
+    soft_cap = [None]
+    num_blocks = [16324]
+    fa_versions = [2]
+    q_dtype = [None]
+    is_sink = [False, True]
+    is_causal = [False, True]
+    is_paged = [False, True]
+    fp8_dtype = [torch.float8_e5m2, torch.float8_e4m3fn, None]
+
+    print("Final configuration:")
+    print(f"num_seqs: {num_seqs}")
+    print(f"query_lens: {query_lens}")
+    print(f"kv_lens: {kv_lens}")
+    print(f"num_heads: {num_heads}")
+    print(f"head_size: {head_size}")
+    print(f"block_size: {block_size}")
+    print(f"window_size: {window_size}")
+    print(f"dtype: {dtype}")
+    print(f"soft_cap: {soft_cap}")
+    print(f"num_blocks: {num_blocks}")
+    print(f"fa_versions: {fa_versions}")
+    print(f"q_dtype: {q_dtype}")
+    print(f"is_sink: {is_sink}")
+    print(f"is_causal: {is_causal}")
+    print(f"is_paged: {is_paged}")
+    print(f"fp8_dtype: {fp8_dtype}")
+
+    configs = list(
+        itertools.product(num_seqs, query_lens, kv_lens, num_heads, head_size, block_size, window_size, dtype, soft_cap, num_blocks, fa_versions, q_dtype, is_sink, is_causal, is_paged, fp8_dtype)
+    )
+    return configs
+
+
+def filter_configs(configs):
     new_configs = []
     for config in configs:
         if (config[5] == 128 and config[9] == 32768 and config[4] >= 192) or \
@@ -451,7 +490,20 @@ if __name__ == "__main__":
             print("Skipping config due to potential OOM: ", config)
             continue
         new_configs.append(config)
-    configs = new_configs
+    return new_configs
+
+
+if __name__ == "__main__":
+
+    args = parse_args()
+    seed = 1234
+    seed_everything(seed)
+    iterations = 20
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+
+    configs = gen_correctness_config()
+    configs = filter_configs(configs)
 
     for config in configs:
        try:
@@ -460,6 +512,8 @@ if __name__ == "__main__":
            print("Error in config: ", config, " error: ", e)
        clear_xpu_cache()
 
+    configs = gen_perf_configs()
+    configs = filter_configs(configs)
     benchmark = get_benchmark_varlen_with_paged_kv(iterations=iterations)
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=args.save_path)

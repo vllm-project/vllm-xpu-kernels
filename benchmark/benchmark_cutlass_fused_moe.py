@@ -22,6 +22,16 @@ def clear_xpu_cache():
     torch.xpu.synchronize()
 
 
+def calculate_flops(m, n, k):
+    return 2 * m * n * k
+
+
+def calculate_memory_usage(m, n, k, num_experts, dtype, w_dtype=None):
+    io_memory = (m * k + m * n) * torch.tensor([], dtype=dtype).element_size() / (1024 ** 3)  # in GB
+    weight_memory = num_experts * k * n * torch.tensor([], dtype=dtype if w_dtype is None else w_dtype).element_size() / (1024 ** 3)  # in GB
+    return io_memory + weight_memory
+
+
 def make_fused_moe_input(config):
     mnk, e, topk, dtype, w_dtype, has_bias = config
     m, n, k = mnk
@@ -143,9 +153,9 @@ def get_benchmark(iterations):
             x_names=["m", "n", "k", "num_experts", "topk", "dtype", "w_dtype", "has_bias"],
             x_vals=[(*tuple(c)[0], *tuple(c)[1:]) for c in configs],
             line_arg="provider",
-            line_vals=["native", "vllm", "vllm_kernel_gemm1", "vllm_kernel_gemm2", "vllm_kernel_gather"],
-            line_names=["native", "vllm", "vllm_kernel_gemm1", "vllm_kernel_gemm2", "vllm_kernel_gather"],
-            styles=[("red", "-"), ("blue", "-"), ("green", "-"), ("orange", "-"), ("purple", "-")],
+            line_vals=["native", "vllm", "vllm_kernel_gemm1", "vllm_kernel_gemm2", "vllm_kernel_gather", "vllm_kernel_gemm1_tflops", "vllm_kernel_gemm2_tflops", "vllm_kernel_gemm1_memory", "vllm_kernel_gemm2_memory"],
+            line_names=["native", "vllm", "vllm_kernel_gemm1", "vllm_kernel_gemm2", "vllm_kernel_gather", "vllm_kernel_gemm1_tflops", "vllm_kernel_gemm2_tflops", "vllm_kernel_gemm1_memory", "vllm_kernel_gemm2_memory"],
+            styles=[("red", "-"), ("blue", "-"), ("green", "-"), ("orange", "-"), ("purple", "-"), ("green", "--"), ("orange", "--"), ("green", ":"), ("orange", ":")],
             ylabel="Latency (us)",
             plot_name="moe-cutlass-vs-native",
             args={},
@@ -195,7 +205,7 @@ def get_benchmark(iterations):
                     total_latency += start.elapsed_time(end)
         else:
             for index in range(iterations):
-                gemm1, gemm2, gather = xpu_fused_moe_CalKernelTime(hidden_states=a,
+                gemm1, gemm2, gather, (gemm1_m, gemm1_n, gemm1_k, gemm1_expert), (gemm2_m, gemm2_n, gemm2_k, gemm2_expert) = xpu_fused_moe_CalKernelTime(hidden_states=a,
                     w13=w13,
                     w13_scales=w13_scales,
                     w13_bias=w13_bias,
@@ -211,14 +221,26 @@ def get_benchmark(iterations):
                     start_event=start,
                     end_event=end)
                 if index >= 5:  # skip the first 5 iterations for warmup
-                    if provider == "vllm_kernel_gemm1":
+                    if provider == "vllm_kernel_gemm1" or provider == "vllm_kernel_gemm1_tflops" or provider == "vllm_kernel_gemm1_memory":
                         total_latency += gemm1
-                    elif provider == "vllm_kernel_gemm2":
+                        m, n, k, active_experts = gemm1_m, gemm1_n, gemm1_k, gemm1_expert
+                    elif provider == "vllm_kernel_gemm2" or provider == "vllm_kernel_gemm2_tflops" or provider == "vllm_kernel_gemm2_memory":
                         total_latency += gemm2
+                        m, n, k, active_experts = gemm2_m, gemm2_n, gemm2_k, gemm2_expert
                     elif provider == "vllm_kernel_gather":
                         total_latency += gather
-                    else:
-                        raise ValueError(f"Unknown provider: {provider}")
+            if provider == "vllm_kernel_gemm1_tflops" or provider == "vllm_kernel_gemm2_tflops":
+                torch.xpu.synchronize()
+                ms = total_latency / (iterations - 5)
+                clear_xpu_cache()
+                flops = calculate_flops(m, n, k)
+                return flops / (ms / 1000) / 1e12
+            elif provider == "vllm_kernel_gemm1_memory" or provider == "vllm_kernel_gemm2_memory":
+                torch.xpu.synchronize()
+                ms = total_latency / (iterations - 5)
+                clear_xpu_cache()
+                memory_usage_GB = calculate_memory_usage(m, n, k, active_experts, dtype, w_dtype)
+                return memory_usage_GB / (ms / 1000)  # GB/s
 
         torch.xpu.synchronize()
         ms = total_latency / (iterations - 5)
@@ -246,6 +268,7 @@ if __name__ == "__main__":
     dtype = [torch.float16, torch.bfloat16]
     w_dtype = [torch.float8_e5m2, torch.float8_e4m3fn, None]
     has_bias = [True, False]
+
     print("Final configuration:")
     print(f"  m,n,k: {mnk}")
     print(f"  experts: {experts}")
