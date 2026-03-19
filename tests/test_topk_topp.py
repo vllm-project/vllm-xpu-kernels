@@ -18,8 +18,8 @@ LOGPROBS_MODE = ["raw_logits", "processed_logits", "processed_logprobs"]
 
 BATCH_SIZE = [2048]
 VOCAL_SIZE = [131072]
-K = [50]
-P = [None, None]
+K = [32]
+P = [None]
 LOGPROBS_MODE = ["raw_logits"]
 
 
@@ -42,14 +42,21 @@ def random_sample(
     # not have its own seed. Then, we overwrite the values for the requests
     # that have their own seeds.
     if len(generators) != probs.shape[0]:
-        q.exponential_()
+        generator = torch.xpu.default_generators[q.device.index]
+        state = generator.get_state()
+        seed, _ = state.view(torch.int64)
+        # replace for UT pass
+        # q.exponential_()
+        offset = 0
+        seeds = torch.tensor([seed, offset], dtype=torch.int64, device=torch.device("cpu"))
+        torch.ops._xpu_C.exponential_2d_(q, seeds, 1.0)
     if generators:
         # TODO(woosuk): This can be slow because we handle each request
         # one by one. Optimize this.
         for i, generator in generators.items():
             q[i].exponential_(generator=generator)
-    # return probs.div_(q).argmax(dim=-1).view(-1)
-    return probs.argmax(dim=-1).view(-1)
+    return probs.div_(q).argmax(dim=-1).view(-1)
+    # return probs.argmax(dim=-1).view(-1)
 
 def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     """
@@ -163,6 +170,7 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: torch.Tensor | None,
         p: torch.Tensor | None,
+        seeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         XPU implementation of top-k and top-p sampling.
@@ -177,8 +185,30 @@ class TopKTopPSampler(nn.Module):
         if self.logprobs_mode == "processed_logits" or self.logprobs_mode == "processed_logprobs":
             processed_logprobs = torch.empty_like(logits)
 
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
-        torch.ops._xpu_C.topk_topp_sampler(random_sampled, processed_logprobs, probs, k, p, self.logprobs_mode)
+        processed_logprobs = torch.empty_like(logits)
+
+        # logits[:] = logits.softmax(dim=-1, dtype=torch.float32)
+        # if(k is not None and p is not None):
+        #     torch.ops._xpu_C.top_k_mask_logits(logits, top_k)
+
+        logits = logits.softmax(dim=-1, dtype=torch.float32)
+
+        if seeds is None:
+            generator = torch.xpu.default_generators[logits.device.index]
+            state = generator.get_state()
+            seed, _ = state.view(torch.int64)
+            offset = 0
+            seeds = torch.tensor([seed, offset], dtype=torch.int64, device=torch.device("cpu"))
+
+        torch.ops._xpu_C.topk_topp_sampler(
+            random_sampled,
+            processed_logprobs,
+            logits,
+            k,
+            p,
+            self.logprobs_mode,
+            seeds,
+            1.0)
         return random_sampled, processed_logprobs
 
 
@@ -245,8 +275,17 @@ def test_topk_topp(batch_size, vocal_size, k, p, logprobs_mode):
     print(prof_ref.key_averages().table(sort_by="self_xpu_time_total", row_limit=10), flush=True)
 
     # print("ref_random_sampled", ref_random_sampled.shape, ref_random_sampled.dtype, ref_random_sampled)
-    # print("random_sampled", random_sampled)
+    # print("random_sampled", random_sampled[468])
+    # print("ref_random_sampled", ref_random_sampled[468])
 
+    # print("logits", logits)
+    # print("ref_logits", ref_logits)
+    # print("processed_logprobs", processed_logprobs)
+
+    # mask1 = logits != float('-inf')
+    # mask2 = ref_logits != float('-inf')
+
+    # torch.testing.assert_close(mask1.sum(-1), top_k, rtol=0, atol=0)
     torch.testing.assert_close(random_sampled, ref_random_sampled, rtol=0, atol=0)
     if processed_logprobs is not None:
         # print("ref_processed_logprobs", ref_processed_logprobs.shape, ref_processed_logprobs.dtype)
