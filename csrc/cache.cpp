@@ -425,11 +425,10 @@ class indexer_k_quant_and_cache_kernel {
 
     // Compute local amax
     float amax = 0.f;
-    float k_vals[VEC_SIZE];
+    scalar_t k_vals[VEC_SIZE];
     for (int i = 0; i < VEC_SIZE; i++) {
-      k_vals[i] =
-          static_cast<float>(k_[token_idx * head_dim_ + head_dim_idx + i]);
-      amax = sycl::fmax(amax, sycl::fabs(k_vals[i]));
+      k_vals[i] = k_[token_idx * head_dim_ + head_dim_idx + i];
+      amax = sycl::fmax(amax, sycl::fabs(static_cast<float>(k_vals[i])));
     }
 
     // group-level reduction (sub-group reduce max)
