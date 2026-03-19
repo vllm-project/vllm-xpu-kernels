@@ -399,6 +399,11 @@ struct FMHAFwdMainloop<
         int tile_within = K % tiles_per_block;
         int block_phys = get_paged_block(block_logical, idx_b);
 
+        int pre_K = K + STAGES;
+        int pre_blk = pre_K / tiles_per_block;
+        int pre_tw = pre_K % tiles_per_block;
+        int pre_bp = get_paged_block(pre_blk, idx_b);
+
         // Per-block 2D copies (rebase HW payload to this block)
         TiledCopyK copy_k_blk{K_ND(_, _, block_phys)};
         TiledCopyV copy_v_blk{V_ND(_, _, block_phys)};
@@ -500,10 +505,6 @@ struct FMHAFwdMainloop<
 
         /* K prefetch for next iteration */
         {
-          int pre_K = K + STAGES;
-          int pre_blk = pre_K / tiles_per_block;
-          int pre_tw = pre_K % tiles_per_block;
-          int pre_bp = get_paged_block(pre_blk, idx_b);
           auto prefetch_k_next = make_block_2d_prefetch(
               TiledCopyK{K_ND(_, _, pre_bp)});
           auto pKgK_next =
