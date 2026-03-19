@@ -224,9 +224,11 @@ def get_benchmark(iterations):
                     if provider == "vllm_kernel_gemm1" or provider == "vllm_kernel_gemm1_tflops" or provider == "vllm_kernel_gemm1_memory":
                         total_latency += gemm1
                         m, n, k, active_experts = gemm1_m, gemm1_n, gemm1_k, gemm1_expert
+                        print(f"gemm1 time: {gemm1} ms, m: {gemm1_m}, n: {gemm1_n}, k: {gemm1_k}, active_experts: {gemm1_expert}")
                     elif provider == "vllm_kernel_gemm2" or provider == "vllm_kernel_gemm2_tflops" or provider == "vllm_kernel_gemm2_memory":
                         total_latency += gemm2
                         m, n, k, active_experts = gemm2_m, gemm2_n, gemm2_k, gemm2_expert
+                        print(f"gemm1 time: {gemm1} ms, m: {gemm1_m}, n: {gemm1_n}, k: {gemm1_k}, active_experts: {gemm1_expert}")
                     elif provider == "vllm_kernel_gather":
                         total_latency += gather
             if provider == "vllm_kernel_gemm1_tflops" or provider == "vllm_kernel_gemm2_tflops":
