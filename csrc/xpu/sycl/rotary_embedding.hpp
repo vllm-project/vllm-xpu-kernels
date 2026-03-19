@@ -87,8 +87,12 @@ inline void apply_rotary_embedding(
         token_idx * query_stride + head_idx * head_stride;
     const int rot_offset = i % embed_dim;
     apply_token_rotary_embedding<scalar_t, IS_NEOX>(
-        query + token_head, query + token_head,
-        cos_ptr, sin_ptr, rot_offset, embed_dim);
+        query + token_head,
+        query + token_head,
+        cos_ptr,
+        sin_ptr,
+        rot_offset,
+        embed_dim);
   }
 
   if (key != nullptr) {
@@ -100,8 +104,12 @@ inline void apply_rotary_embedding(
           token_idx * key_stride + head_idx * head_stride;
       const int rot_offset = i % embed_dim;
       apply_token_rotary_embedding<scalar_t, IS_NEOX>(
-          key + token_head, key + token_head,
-          cos_ptr, sin_ptr, rot_offset, embed_dim);
+          key + token_head,
+          key + token_head,
+          cos_ptr,
+          sin_ptr,
+          rot_offset,
+          embed_dim);
     }
   }
 }

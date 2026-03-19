@@ -61,6 +61,7 @@ def rotary_embedding(
     torch.ops._C.rotary_embedding(positions, query, key, head_size,
                                   cos_sin_cache, is_neox)
 
+
 def multimodal_rotary_embedding(
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -71,8 +72,8 @@ def multimodal_rotary_embedding(
     mrope_section: list[int],
 ) -> None:
     torch.ops._xpu_C.multimodal_rotary_embedding(positions, query, key,
-                                             head_size, cos_sin_cache,
-                                             is_neox, mrope_section)
+                                                 head_size, cos_sin_cache,
+                                                 is_neox, mrope_section)
 
 
 def deepseek_scaling_rope(

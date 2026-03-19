@@ -60,8 +60,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "                            Tensor!? key, int head_size,"
       "                            Tensor cos_sin_cache, bool is_neox,"
       "                            int[] mrope_section) -> ()");
-  xpu_ops.impl("multimodal_rotary_embedding", torch::kXPU,
-           &multimodal_rotary_embedding);
+  xpu_ops.impl(
+      "multimodal_rotary_embedding", torch::kXPU, &multimodal_rotary_embedding);
 
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "

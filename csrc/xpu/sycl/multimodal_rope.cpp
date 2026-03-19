@@ -57,7 +57,8 @@ class multimodal_rotary_embedding_kernel {
 
     // Build cos/sin cache for this token (private memory per thread).
     // Zero-initialize
-    scalar_t merged_cache[MROPE_MAX_ROT_DIM] = {};  // [cos | sin], size = rot_dim
+    scalar_t merged_cache[MROPE_MAX_ROT_DIM] =
+        {};  // [cos | sin], size = rot_dim
     int cumsum = 0;
     for (int s = 0; s < num_mrope_sections; ++s) {
       const int lo = cumsum;
@@ -66,7 +67,7 @@ class multimodal_rotary_embedding_kernel {
       const int64_t pos = positions[s * num_tokens + token_idx];
       const scalar_t* src = cos_sin_cache + pos * rot_dim;
       for (int r = lo; r < hi; ++r) {
-        merged_cache[r]             = src[r];              // cos slice
+        merged_cache[r] = src[r];                          // cos slice
         merged_cache[embed_dim + r] = src[embed_dim + r];  // sin slice
       }
     }
@@ -106,7 +107,6 @@ class multimodal_rotary_embedding_kernel {
 
 }  // namespace vllm
 
-
 // ── Multi-Modal Rotary Embedding (M-RoPE) ──────────────────────────────────
 // Used by models such as Qwen2-VL that need per-section position encoding.
 //
@@ -144,8 +144,7 @@ void call_multimodal_rotary_embedding_kernel(
       vllm::MROPE_MAX_SECTIONS);
 
   const int query_hidden_size = query.numel() / num_tokens;
-  const int key_hidden_size =
-      key.has_value() ? key->numel() / num_tokens : 0;
+  const int key_hidden_size = key.has_value() ? key->numel() / num_tokens : 0;
   TORCH_CHECK(query_hidden_size % head_size == 0);
   TORCH_CHECK(key_hidden_size % head_size == 0);
 
@@ -167,8 +166,7 @@ void call_multimodal_rotary_embedding_kernel(
   const int64_t key_stride = key.has_value() ? key->stride(0) : 0;
   const int query_ndim = query.dim();
   // For [num_tokens, num_heads, head_size] use stride(-2), else head_size.
-  const int64_t head_stride =
-      (query_ndim == 3) ? query.stride(-2) : head_size;
+  const int64_t head_stride = (query_ndim == 3) ? query.stride(-2) : head_size;
 
   // Ensure positions is contiguous so that raw pointer arithmetic
   // s * num_tokens + t correctly addresses positions[s, t].
@@ -242,18 +240,23 @@ void call_multimodal_rotary_embedding_kernel(
 }
 
 void multimodal_rotary_embedding(
-    torch::Tensor& positions,           // [num_mrope_sections, num_tokens]
+    torch::Tensor& positions,  // [num_mrope_sections, num_tokens]
     torch::Tensor& query,
     std::optional<torch::Tensor> key,
     int64_t head_size,
-    torch::Tensor& cos_sin_cache,       // [max_position, rot_dim]
+    torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
     bool is_neox,
-    std::vector<int64_t> mrope_section) // host int list [num_mrope_sections]
+    std::vector<int64_t> mrope_section)  // host int list [num_mrope_sections]
 {
   VLLM_DISPATCH_FLOATING_TYPES(
       query.scalar_type(), "multimodal_rotary_embedding", [&] {
         call_multimodal_rotary_embedding_kernel<scalar_t>(
-            positions, query, key, head_size, cos_sin_cache, is_neox,
+            positions,
+            query,
+            key,
+            head_size,
+            cos_sin_cache,
+            is_neox,
             mrope_section);
-  });
+      });
 }
