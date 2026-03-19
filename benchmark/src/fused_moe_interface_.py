@@ -290,6 +290,11 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
     end_event.record()
     end_event.synchronize()
     gemm1_kernel_time = start_event.elapsed_time(end_event)
+    diff = expert_first_token_offset[1:] - expert_first_token_offset[:-1]
+    active_experts1 = (diff > 0).sum().item()
+    gemm1_m = gemm1_input.shape[0]
+    gemm1_k = gemm1_input.shape[1]
+    gemm1_n = input_B.shape[1]
 
     # act
     act_output = torch.empty((num_moe_inputs, inter_size),
@@ -339,11 +344,8 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
     gather_kernel_time = start_event.elapsed_time(end_event)
 
     diff = expert_first_token_offset[1:] - expert_first_token_offset[:-1]
-    active_experts = (diff > 0).sum().item()
-    gemm1_m = gemm1_input.shape[0]
-    gemm1_k = gemm1_input.shape[1]
-    gemm1_n = input_B.shape[1]
+    active_experts2 = (diff > 0).sum().item()
     gemm2_m = input_A.shape[0]
     gemm2_k = input_A.shape[1]
     gemm2_n = input_B.shape[1]
-    return gemm1_kernel_time, gemm2_kernel_time, gather_kernel_time, (gemm1_m, gemm1_n, gemm1_k, active_experts), (gemm2_m, gemm2_n, gemm2_k, active_experts)
+    return gemm1_kernel_time, gemm2_kernel_time, gather_kernel_time, (gemm1_m, gemm1_n, gemm1_k, active_experts1), (gemm2_m, gemm2_n, gemm2_k, active_experts2)
