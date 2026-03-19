@@ -141,15 +141,30 @@ struct FMHAFwdMainloop<
 
   using TensorQ2D =
       decltype(TensorQ_{}(append<rank_v<TensorQ_>>(make_coord(_, _), 0)));
+
+  // 2D per-block types used for TiledCopy derivation (block 2D copy is 2D).
   using TensorK2D =
       decltype(TensorK_{}(append<rank_v<TensorK_>>(make_coord(_, _), 0)));
   using TensorV2D =
       decltype(TensorV_{}(append<rank_v<TensorV_>>(make_coord(_, _), 0)));
 
+  // Operator tensor types: 3D for PagedKV (block_size, head_size, block_nums),
+  // 2D for non-paged (seq_len, head_size).
+  using TensorKND = conditional_t<
+      PagedKV_,
+      decltype(TensorK_{}(make_coord(_, _, 0, _))),
+      TensorK2D>;
+  using TensorVND = conditional_t<
+      PagedKV_,
+      decltype(TensorV_{}(make_coord(_, _, 0, _))),
+      TensorV2D>;
+
   using TiledCopyQ = conditional_t<
       is_void_v<TiledCopyQ_>,
       decltype(make_block_2d_copy_A(TiledMMAQK{}, TensorQ2D{})),
       TiledCopyQ_>;
+  // TiledCopy always uses 2D types. For PagedKV, per-block copies are
+  // constructed at runtime to rebase the base address per physical block.
   using TiledCopyK = conditional_t<
       is_void_v<TiledCopyK_>,
       decltype(make_block_2d_copy_B(TiledMMAQK{}, TensorK2D{})),
@@ -159,17 +174,8 @@ struct FMHAFwdMainloop<
       decltype(make_block_2d_copy_B(TiledMMAPV{}, TensorV2D{})),
       TiledCopyV_>;
 
-  // TODO: static_asserts on TiledMMAPV here...
-
   //
   // Accumulator types
-  //
-  // FragS:    accumulator for Q*K MMA
-  // FragO:    accumulator for P*V MMAs.
-  //           Note: v mode may be split into multiple pieces
-  //             to reduce register pressure.
-  // Frag*Row types are reductions of the corresponding Frag* types
-  //   over rows.
   //
   template <typename TiledMMA>
   using FragC = decltype(TiledMMA{}.get_slice(0).partition_sg_fragment_C(
@@ -186,8 +192,6 @@ struct FMHAFwdMainloop<
   using FragARow = decltype(reduce<1>(FragA{}, sycl::plus<void>{}));
   using ElementA = typename TiledMMAPV::ValTypeD;
 
-  // static constexpr bool Fp8KV =
-  //     is_any_of_v<ElementK, float_e5m2_t, float_e4m3_t>;
   static constexpr bool Fp8KV = false;
   static constexpr bool CausalMask = CausalMask_;
   static constexpr bool LocalMask = LocalMask_;
@@ -199,11 +203,13 @@ struct FMHAFwdMainloop<
     void* const scale_k;
     void* const scale_v;
 
-    // Paged KV Cache
+    // Paged KV Cache (BNHS layout: [block_nums, num_heads, block_size, head_size])
     const int* ptr_page_table;
     int page_size;
     int max_pages_per_seq;
     int total_seqlen_kv;
+    int num_heads_kv;
+    int total_block_nums;
     // Local Mask
     int local_left, local_right;
   };
@@ -234,6 +240,8 @@ struct FMHAFwdMainloop<
         args.page_size,
         args.max_pages_per_seq,
         args.total_seqlen_kv,
+        args.num_heads_kv,
+        args.total_block_nums,
         args.local_left,
         args.local_right};
   }
@@ -242,25 +250,20 @@ struct FMHAFwdMainloop<
     return true;
   }
 
-  CUTLASS_DEVICE int get_paged_idx(int K, int idx_b) {
-    int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
+  CUTLASS_DEVICE int get_paged_block(int block_logical, int idx_b) {
     int b_offset = idx_b * params.max_pages_per_seq;
-    int page_local_idx = K * get<1>(TileShapeQK{}) / params.page_size;
-
-    // Clamp page_local_idx to the valid range [0, max_pages_per_seq - 1]
+    int page_local_idx = block_logical;
     if (page_local_idx >= params.max_pages_per_seq) {
       page_local_idx = params.max_pages_per_seq - 1;
     }
-
-    return params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page +
-           K % tiles_per_page;
+    return params.ptr_page_table[b_offset + page_local_idx];
   }
 
   template <typename QVCoord>
   CUTLASS_DEVICE void operator()(
       TensorQ2D const& Q_2D,  // (q,d)
-      TensorK2D const& K_2D,  // (k,d)
-      TensorV2D const& V_2D,  // (d,k)
+      TensorKND const& K_ND,  // PagedKV: (block_size,d,block_nums); else (k,d)
+      TensorVND const& V_ND,  // PagedKV: (d,block_size,block_nums); else (d,k)
       FragA& tArA,            // Output accumulator (q,v)
       FragARow& tA_max,       // Softmax row-wise max accumulator
       FragARow& tA_sum,       // Softmax row-wise sum accumulator
@@ -271,290 +274,408 @@ struct FMHAFwdMainloop<
       int blk_k1_causal,
       int thr_id,
       int seq_len,
-      int full_tile_offset) {
+      int full_tile_offset,
+      int head = 0) {         // KV head index for BNHS addressing
     using namespace sycl::ext::oneapi::this_work_item;
 
-    // Short dimension names:
-    //    q = sequence len dimension for Q
-    //    k = sequence len dimension for K
-    //    d = head size dimension for K/Q
-    //    v = head size dimension for V
-    //   VV = MMA tile indices for V
-    // Capital letters (Q, K, ...) refer to WG block indices.
-    // Primed letters (q', k', ...) refer to atom block indices.
+    constexpr int tile_k = get<1>(TileShapeQK{});
 
-    auto tile_shape_v =
-        make_shape(get<1>(TileShapePV{}) * C<VTiles>{}, get<2>(TileShapePV{}));
+    /* Create proxy coordinate tensors for Q and P (common) */
+    Tensor cQ = make_identity_tensor(Q_2D.shape());
+    Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));
 
-    /* Create proxy coordinate tensors for Q/K/P/V */
-    Tensor cQ = make_identity_tensor(Q_2D.shape());               // (q,d)
-    Tensor cK = make_identity_tensor(K_2D.shape());               // (k,d)
-    Tensor cV = make_identity_tensor(V_2D.shape());               // (v,k)
-    Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));  // (q,k)
-
-    /* Partition global tensors into workgroup tiles */
     Tensor gQ = local_tile(
-        cQ, TileShapeQK{}, append(blk_qv, _), Step<_1, X, _1>{});  // (q,d,D)
-    Tensor gK = local_tile(
-        cK,
-        TileShapeQK{},
-        make_coord(_, _, _),
-        Step<X, _1, _1>{});  // (k,d,K,D)
-    Tensor gV =
-        local_tile(cV, tile_shape_v, make_coord(get<1>(blk_qv), _));  // (v,k,K)
-    Tensor gV_split = local_tile(
-        gV,
-        TileShapePV{},
-        make_coord(_, _, 0),
-        Step<X, _1, _1>{});  // (v,k,VV,K)
+        cQ, TileShapeQK{}, append(blk_qv, _), Step<_1, X, _1>{});
 
-    /* Create global -> register copies */
-    TiledCopyQ copy_q{Q_2D};
-    TiledCopyK copy_k{K_2D};
-    TiledCopyV copy_v{V_2D};
-
-    /* Create MMAs */
+    /* Common MMA and Q copy setup */
     TiledMMAQK mma_qk{};
     TiledMMAPV mma_pv{};
+    TiledCopyQ copy_q{Q_2D};
 
-    /* Slice TiledCopy/TiledMMA operations down to to work-item level */
     auto thr_copy_q = copy_q.get_slice(thr_id);
-    auto thr_copy_k = copy_k.get_slice(thr_id);
-    auto thr_copy_v = copy_v.get_slice(thr_id);
     auto thr_mma_qk = mma_qk.get_slice(thr_id);
     auto thr_mma_pv = mma_pv.get_slice(thr_id);
 
-    /* Partition coordinate tensors for copy */
-    auto tQgQ = thr_copy_q.partition_S(gQ);        // (atom_val,q',d',D)
-    auto tKgK = thr_copy_k.partition_S(gK);        // (atom_val,k',d',K,D)
-    auto tVgV = thr_copy_v.partition_S(gV_split);  // (atom_val,v',k',VV,K)
-
-    /* Create register fragments for MMA and copies */
+    auto tQgQ = thr_copy_q.partition_S(gQ);
     auto tQrQ = thr_copy_q.partition_sg_fragment_D(gQ(_, _, 0));
     auto tSrQ = thr_mma_qk.partition_sg_fragment_A(gQ(_, _, 0));
-
-    auto tKrK = thr_copy_k.partition_sg_fragment_D(gK(_, _, 0, 0));
-    auto tSrK = thr_mma_qk.partition_sg_fragment_B(gK(_, _, 0, 0));
-
     auto tSrS = thr_mma_qk.partition_sg_fragment_C(cP);
     auto tArP = thr_mma_pv.partition_sg_fragment_A(cP);
 
-    auto tVrV = thr_copy_v.partition_sg_fragment_D(gV_split(_, _, 0, 0));
-    auto tArV = thr_mma_pv.partition_sg_fragment_B(gV_split(_, _, 0, 0));
-
-    /* Create TiledCopy objects for prefetches (K and V used in main loop) */
-    auto prefetch_k = make_block_2d_prefetch(copy_k);
-    // auto prefetch_v =
-    //     make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D);
-    auto prefetch_v = make_block_2d_prefetch(copy_v);
-
-    /* Partition global tensors for prefetch (K and V) */
-    auto pKgK = prefetch_k.get_slice(thr_id).partition_S(gK);
-    // auto pVgV = prefetch_v.get_slice(thr_id).partition_S(gV);
-    auto pVgV = prefetch_v.get_slice(thr_id).partition_S(gV_split);
-
-    // ------
-    // Kernel
-    // ------
-
-    const int barrier_scope =  2;
-
-    // PagedKV
-    int page_idx, next_page_idx = blk_k0, K_prefetch_idx = blk_k0;
-    if constexpr (PagedKV) {
-      next_page_idx = get_paged_idx(blk_k0, idx_b);
-    }
-
-    /* Q prefetch — scoped so prefetch_q/pQgQ registers are freed
-     * before the main loop (Q is only loaded once, not in the loop). */
-    {
-      auto prefetch_q = make_block_2d_prefetch(copy_q);
-      auto pQgQ = prefetch_q.get_slice(thr_id).partition_S(gQ);
-      for (int D = 0; D < size<3>(pQgQ); D++) {
-        prefetch(prefetch_q, pQgQ(_, _, _, D));
-      }
-    }
-
-    /* K prefetch for first STAGES blocks */
-    for (int D = 0; D < size<4>(pKgK); D++) {
-      for (int S = 0; S < STAGES; S++) {
-        if constexpr (PagedKV) {
-          K_prefetch_idx = get_paged_idx(blk_k0 + S, idx_b);
-        } else {
-          K_prefetch_idx = blk_k0 + S;
-        }
-        prefetch(prefetch_k, pKgK(_, _, _, K_prefetch_idx, D));
-      }
-    }
-
-    clear(tArA);
-    fill(tA_max, cutlass::platform::numeric_limits<ElementA>::lowest());
-    clear(tA_sum);
-
-    /* Check if */
-    bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
-
-    /* Pre-compute masking scalars to avoid CuTe coordinate tensors
-     * inside the K loop (reduces register pressure).
-     * XE_DPAS MMA partition: element i in tSrS maps to
-     *   row = row_base + (i % elems_per_n)
-     *   col = K * kTileK + (i / elems_per_n) * sg_size + lane_id */
+    /* Masking scalars (common) */
     int lane_id = thr_id % intel::sg_size;
     constexpr int sg_tile_q = get<0>(TileShapeQK{}) / SGPerWG::value;
     int row_base = get<0>(blk_qv) * get<0>(TileShapeQK{}) +
                    (thr_id / intel::sg_size) * sg_tile_q;
 
-    /* Main loop, blocked in k. */
-    for (int K = blk_k0; K < blk_k1; K++) {
-      // TODO: split barrier tuning
-      /* Split barrier to keep threads together */
-      // barrier_arrive(ScopeSubgroup);
+    if constexpr (PagedKV) {
+      // ── BNHS PagedKV path ──────────────────────────────────────
+      // K_ND: (block_size, head_size, block_nums) — 3D after head selection
+      // V_ND: (head_size, block_size, block_nums) — 3D after head selection
+      // Blocks are non-contiguous; we use per-block 2D copies. For each
+      // physical block, a TiledCopyK/V is constructed (just 1 HW payload
+      // create instruction) from the 2D per-block slice.
+      int tiles_per_block = params.page_size / tile_k;
 
-      bool need_causal = false;
-      if constexpr (CausalMask) {
-        need_causal = K >= blk_k1_causal;
+      // 2D per-block reference (block 0) for identity tensor and partitions
+      auto K_ref = K_ND(_, _, 0);  // 2D: (block_size, head_size)
+      auto V_ref = V_ND(_, _, 0);  // 2D: (head_size, block_size)
+
+      Tensor cK = make_identity_tensor(K_ref.shape());
+      Tensor cV = make_identity_tensor(V_ref.shape());
+
+      /* Tile K within one block: (block_size, head_size) →
+         (tile_k, tile_d, Kw, D) where Kw = block_size/tile_k */
+      Tensor gK = local_tile(
+          cK, TileShapeQK{}, make_coord(_, _, _),
+          Step<X, _1, _1>{});
+      /* Single-level V tiling within one block:
+         (head_size, block_size) → (v_tile, k_tile, V_all, K_within) */
+      auto tile_v_paged = make_shape(
+          get<1>(TileShapePV{}), get<2>(TileShapePV{}));
+      Tensor gV = local_tile(cV, tile_v_paged, make_coord(_, _));
+
+      TiledCopyK copy_k_ref{K_ref};
+      TiledCopyV copy_v_ref{V_ref};
+      auto thr_copy_k = copy_k_ref.get_slice(thr_id);
+      auto thr_copy_v = copy_v_ref.get_slice(thr_id);
+
+      auto tKgK = thr_copy_k.partition_S(gK);
+      auto tVgV = thr_copy_v.partition_S(gV);
+
+      auto tKrK = thr_copy_k.partition_sg_fragment_D(
+          gK(_, _, 0, 0));
+      auto tSrK = thr_mma_qk.partition_sg_fragment_B(
+          gK(_, _, 0, 0));
+      auto tVrV = thr_copy_v.partition_sg_fragment_D(
+          gV(_, _, 0, 0));
+      auto tArV = thr_mma_pv.partition_sg_fragment_B(
+          gV(_, _, 0, 0));
+
+      // V head tile offset for output head dimension
+      int vv_base = get<1>(blk_qv) * VTiles;
+
+      const int barrier_scope = 2;
+
+      /* Q prefetch */
+      {
+        auto prefetch_q = make_block_2d_prefetch(copy_q);
+        auto pQgQ = prefetch_q.get_slice(thr_id).partition_S(gQ);
+        for (int D = 0; D < size<3>(pQgQ); D++) {
+          prefetch(prefetch_q, pQgQ(_, _, _, D));
+        }
       }
 
-      page_idx = next_page_idx;
-      /* Advance page indices.
-       * For STAGES>=2: pipeline the indices — this iteration's
-       * K_prefetch_idx (for K+STAGES) becomes next iteration's
-       * next_page_idx (for K+1+STAGES-1 = K+STAGES). This reduces
-       * two page-table lookups to ONE per iteration.
-       * For STAGES==1: K_prefetch_idx == next_page_idx, one lookup. */
-      if constexpr (PagedKV) {
-#if STAGES >= 2
-        next_page_idx = K_prefetch_idx;
-#else
-        next_page_idx = get_paged_idx(K + 1, idx_b);
-#endif
-        K_prefetch_idx = get_paged_idx(K + STAGES, idx_b);
-      } else {
-        next_page_idx = K + 1;
-        K_prefetch_idx = K + STAGES;
+      /* K prefetch for first STAGES blocks */
+      for (int S = 0; S < STAGES; S++) {
+        int pre_K = blk_k0 + S;
+        int pre_blk = pre_K / tiles_per_block;
+        int pre_tw = pre_K % tiles_per_block;
+        int pre_bp = get_paged_block(pre_blk, idx_b);
+        auto prefetch_k_s = make_block_2d_prefetch(
+            TiledCopyK{K_ND(_, _, pre_bp)});
+        auto pKgK_s =
+            prefetch_k_s.get_slice(thr_id).partition_S(gK);
+        for (int D = 0; D < size<4>(pKgK_s); D++) {
+          prefetch(prefetch_k_s,
+                   pKgK_s(_, _, _, pre_tw, D));
+        }
       }
 
-      // auto tKgK_cache =
-      //     PagedKV ? tKgK(_, _, _, page_idx, _) : tKgK(_, _, _, K, _);
-      // auto tVgV_cache =
-      //     PagedKV ? tVgV(_, _, _, _, page_idx) : tVgV(_, _, _, _, K);
-      auto tKgK_cache = tKgK(_, _, _, page_idx, _);
-      auto tVgV_cache = tVgV(_, _, _, _, page_idx);
+      clear(tArA);
+      fill(tA_max, cutlass::platform::numeric_limits<ElementA>::lowest());
+      clear(tA_sum);
+
+      bool check_remainder_k = (seq_len % tile_k != 0);
+
+      /* Main loop, blocked in k. */
+      for (int K = blk_k0; K < blk_k1; K++) {
+        bool need_causal = false;
+        if constexpr (CausalMask) {
+          need_causal = K >= blk_k1_causal;
+        }
+
+        int block_logical = K / tiles_per_block;
+        int tile_within = K % tiles_per_block;
+        int block_phys = get_paged_block(block_logical, idx_b);
+
+        // Per-block 2D copies (rebase HW payload to this block)
+        TiledCopyK copy_k_blk{K_ND(_, _, block_phys)};
+        TiledCopyV copy_v_blk{V_ND(_, _, block_phys)};
 
 #if SYNC
-      barrier_arrive(barrier_scope);
+        barrier_arrive(barrier_scope);
 #endif
 
-      /* GEMM 1: S = K * Q */
-      clear(tSrS); /* TODO: fuse w/ initial gemm call */
-      CUTLASS_PRAGMA_UNROLL
-      for (int D = 0; D < size<4>(tKgK); D++) {
-        copy(copy_q, tQgQ(_, _, _, D), tQrQ);
-        copy(copy_k, tKgK_cache(_, _, _, D), tKrK);
+        /* GEMM 1: S = Q * K^T */
+        clear(tSrS);
+        CUTLASS_PRAGMA_UNROLL
+        for (int D = 0; D < size<4>(tKgK); D++) {
+          copy(copy_q, tQgQ(_, _, _, D), tQrQ);
+          copy(copy_k_blk,
+               tKgK(_, _, _, tile_within, D), tKrK);
+          reorder(tQrQ, tSrQ);
+          reorder(tKrK, tSrK);
+          cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
+        }
 
-        reorder(tQrQ, tSrQ);
-        reorder(tKrK, tSrK);
-        // if constexpr (Fp8KV) {
-        //   for (int i = 0; i < tSrK.size(); ++i) {
-        //     tSrK(i) =
-        //         static_cast<ElementQ>(scale_k * static_cast<float>(tSrK(i)));
-        //   }
-        // }
-        cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
-      }
-
-      /* V prefetch for GEMM 2 */
-      CUTLASS_PRAGMA_UNROLL
-      for (int VV = 0; VV < VTiles; VV++) {
-        prefetch(prefetch_v, pVgV(_, _, _, VV, page_idx));
-      }
-      // prefetch(prefetch_v, pVgV(_, _, _, page_idx));
-
-      /* Causal masking and k remainder masking — pure scalar arithmetic,
-       * no CuTe coordinate tensors, to minimize register pressure.
-       * Uses the XE_DPAS MMA partition: for N-rep n and row j,
-       *   col = K*TileK + n*sg_size + lane_id
-       *   row = row_base + j */
-      {
-        bool need_k_rem = check_remainder_k && K == blk_k1 - 1;
-        if (need_causal || need_k_rem) {
-          constexpr int kTileK = get<1>(TileShapeQK{});
-          constexpr int n_reps = kTileK / intel::sg_size;
-          constexpr int elems_per_n = tSrS.size() / n_reps;
-          int k_base = K * kTileK;
+        /* V prefetch for GEMM 2 */
+        {
+          auto prefetch_v_blk = make_block_2d_prefetch(copy_v_blk);
+          auto pVgV_blk =
+              prefetch_v_blk.get_slice(thr_id).partition_S(gV);
           CUTLASS_PRAGMA_UNROLL
-          for (int n = 0; n < n_reps; n++) {
-            int col = k_base + n * intel::sg_size + lane_id;
-            if (need_k_rem && col >= seq_len) {
-              // Entire column OOB — mask all rows in this N-rep
-              CUTLASS_PRAGMA_UNROLL
-              for (int j = 0; j < elems_per_n; j++) {
-                tSrS(n * elems_per_n + j) = ElementS(-INFINITY);
-              }
-            } else if constexpr (CausalMask) {
-              if (need_causal) {
-                // causal_bound: mask rows where j < causal_bound
-                int causal_bound = col - full_tile_offset - row_base;
+          for (int VV = 0; VV < VTiles; VV++) {
+            prefetch(prefetch_v_blk,
+                     pVgV_blk(_, _, _, vv_base + VV, tile_within));
+          }
+        }
+
+        /* Causal masking and k remainder masking */
+        {
+          bool need_k_rem = check_remainder_k && K == blk_k1 - 1;
+          if (need_causal || need_k_rem) {
+            constexpr int kTileK = tile_k;
+            constexpr int n_reps = kTileK / intel::sg_size;
+            constexpr int elems_per_n = tSrS.size() / n_reps;
+            int k_base = K * kTileK;
+            CUTLASS_PRAGMA_UNROLL
+            for (int n = 0; n < n_reps; n++) {
+              int col = k_base + n * intel::sg_size + lane_id;
+              if (need_k_rem && col >= seq_len) {
                 CUTLASS_PRAGMA_UNROLL
                 for (int j = 0; j < elems_per_n; j++) {
-                  if (j < causal_bound) {
-                    tSrS(n * elems_per_n + j) = ElementS(-INFINITY);
+                  tSrS(n * elems_per_n + j) = ElementS(-INFINITY);
+                }
+              } else if constexpr (CausalMask) {
+                if (need_causal) {
+                  int causal_bound =
+                      col - full_tile_offset - row_base;
+                  CUTLASS_PRAGMA_UNROLL
+                  for (int j = 0; j < elems_per_n; j++) {
+                    if (j < causal_bound) {
+                      tSrS(n * elems_per_n + j) =
+                          ElementS(-INFINITY);
+                    }
                   }
                 }
               }
             }
           }
         }
-      }
-      /* Local masking */
-      if constexpr (LocalMask) {
-        Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
-        Tensor gP = local_tile(
-            cPgP, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
-        auto cS_thread = thr_mma_qk.partition_C(gP);
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < tSrS.size(); ++i) {
-          int row_idx = get<0>(cS_thread(i));
-          int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
-          bool left_mask = col_idx < row_idx - params.local_left;
-          bool right_mask = col_idx > row_idx + params.local_right;
-          if (left_mask || right_mask) {
-            tSrS(i) = ElementS(-INFINITY);
+        /* Local masking */
+        if constexpr (LocalMask) {
+          Tensor cPgP =
+              make_identity_tensor(make_shape(seq_len, seq_len));
+          Tensor gP = local_tile(
+              cPgP, take<0, 2>(TileShapeQK{}),
+              make_coord(get<0>(blk_qv), K));
+          auto cS_thread = thr_mma_qk.partition_C(gP);
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < tSrS.size(); ++i) {
+            int row_idx = get<0>(cS_thread(i));
+            int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
+            bool left_mask =
+                col_idx < row_idx - params.local_left;
+            bool right_mask =
+                col_idx > row_idx + params.local_right;
+            if (left_mask || right_mask) {
+              tSrS(i) = ElementS(-INFINITY);
+            }
           }
+        }
+
+        /* Apply softmax and scaling */
+        softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA);
+        reorder(tSrS, tArP);
+
+        /* GEMM 2: A += P * V, split in v dimension */
+        CUTLASS_PRAGMA_UNROLL
+        for (int VV = 0; VV < VTiles; VV++) {
+          copy(copy_v_blk,
+               tVgV(_, _, _, vv_base + VV, tile_within), tVrV);
+          reorder(tVrV, tArV);
+          cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
+        }
+
+        /* K prefetch for next iteration */
+        {
+          int pre_K = K + STAGES;
+          int pre_blk = pre_K / tiles_per_block;
+          int pre_tw = pre_K % tiles_per_block;
+          int pre_bp = get_paged_block(pre_blk, idx_b);
+          auto prefetch_k_next = make_block_2d_prefetch(
+              TiledCopyK{K_ND(_, _, pre_bp)});
+          auto pKgK_next =
+              prefetch_k_next.get_slice(thr_id).partition_S(gK);
+          for (int D = 0; D < size<4>(pKgK_next); D++) {
+            prefetch(prefetch_k_next,
+                     pKgK_next(_, _, _, pre_tw, D));
+          }
+        }
+
+#if SYNC
+        barrier_wait(barrier_scope);
+#endif
+      }
+    } else {
+      // ── Non-paged path: K/V are 2D (original) ─────────────────
+      auto tile_shape_v = make_shape(
+          get<1>(TileShapePV{}) * C<VTiles>{}, get<2>(TileShapePV{}));
+
+      Tensor cK = make_identity_tensor(K_ND.shape());
+      Tensor cV = make_identity_tensor(V_ND.shape());
+
+      Tensor gK = local_tile(
+          cK, TileShapeQK{}, make_coord(_, _, _),
+          Step<X, _1, _1>{});
+      Tensor gV = local_tile(
+          cV, tile_shape_v, make_coord(get<1>(blk_qv), _));
+      Tensor gV_split = local_tile(
+          gV, TileShapePV{}, make_coord(_, _, 0),
+          Step<X, _1, _1>{});
+
+      TiledCopyK copy_k{K_ND};
+      TiledCopyV copy_v{V_ND};
+      auto thr_copy_k = copy_k.get_slice(thr_id);
+      auto thr_copy_v = copy_v.get_slice(thr_id);
+
+      auto tKgK = thr_copy_k.partition_S(gK);
+      auto tVgV = thr_copy_v.partition_S(gV_split);
+
+      auto tKrK = thr_copy_k.partition_sg_fragment_D(
+          gK(_, _, 0, 0));
+      auto tSrK = thr_mma_qk.partition_sg_fragment_B(
+          gK(_, _, 0, 0));
+      auto tVrV = thr_copy_v.partition_sg_fragment_D(
+          gV_split(_, _, 0, 0));
+      auto tArV = thr_mma_pv.partition_sg_fragment_B(
+          gV_split(_, _, 0, 0));
+
+      auto prefetch_k = make_block_2d_prefetch(copy_k);
+      auto prefetch_v = make_block_2d_prefetch(copy_v);
+      auto pKgK = prefetch_k.get_slice(thr_id).partition_S(gK);
+      auto pVgV =
+          prefetch_v.get_slice(thr_id).partition_S(gV_split);
+
+      const int barrier_scope = 2;
+
+      {
+        auto prefetch_q = make_block_2d_prefetch(copy_q);
+        auto pQgQ = prefetch_q.get_slice(thr_id).partition_S(gQ);
+        for (int D = 0; D < size<3>(pQgQ); D++) {
+          prefetch(prefetch_q, pQgQ(_, _, _, D));
         }
       }
 
-      // Cong: arrive
-      /* Apply softmax and scaling */
-      softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA);
-      reorder(tSrS, tArP);
-
-      /* GEMM 2: A += P * V, split in v dimension */
-      CUTLASS_PRAGMA_UNROLL
-      for (int VV = 0; VV < VTiles; VV++) {
-        copy(copy_v, tVgV_cache(_, _, _, VV), tVrV);
-        reorder(tVrV, tArV);
-        // if constexpr (Fp8KV) {
-        //   CUTLASS_PRAGMA_UNROLL
-        //   for (int i = 0; i < tArV.size(); ++i) {
-        //     tArV(i) =
-        //         static_cast<ElementQ>(scale_v * static_cast<float>(tArV(i)));
-        //   }
-        // }
-        cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
-      }
-
-      // Cong: wait
-      // barrier();
-
-      /* K prefetch */
       for (int D = 0; D < size<4>(pKgK); D++) {
-        prefetch(prefetch_k, pKgK(_, _, _, K_prefetch_idx, D));
+        for (int S = 0; S < STAGES; S++) {
+          prefetch(prefetch_k, pKgK(_, _, _, blk_k0 + S, D));
+        }
       }
+
+      clear(tArA);
+      fill(tA_max,
+           cutlass::platform::numeric_limits<ElementA>::lowest());
+      clear(tA_sum);
+
+      bool check_remainder_k = (seq_len % tile_k != 0);
+
+      for (int K = blk_k0; K < blk_k1; K++) {
+        bool need_causal = false;
+        if constexpr (CausalMask) {
+          need_causal = K >= blk_k1_causal;
+        }
 
 #if SYNC
-      barrier_wait(barrier_scope);
+        barrier_arrive(barrier_scope);
 #endif
+
+        clear(tSrS);
+        CUTLASS_PRAGMA_UNROLL
+        for (int D = 0; D < size<4>(tKgK); D++) {
+          copy(copy_q, tQgQ(_, _, _, D), tQrQ);
+          copy(copy_k, tKgK(_, _, _, K, D), tKrK);
+          reorder(tQrQ, tSrQ);
+          reorder(tKrK, tSrK);
+          cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
+        }
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int VV = 0; VV < VTiles; VV++) {
+          prefetch(prefetch_v, pVgV(_, _, _, VV, K));
+        }
+
+        {
+          bool need_k_rem = check_remainder_k && K == blk_k1 - 1;
+          if (need_causal || need_k_rem) {
+            constexpr int kTileK = tile_k;
+            constexpr int n_reps = kTileK / intel::sg_size;
+            constexpr int elems_per_n = tSrS.size() / n_reps;
+            int k_base = K * kTileK;
+            CUTLASS_PRAGMA_UNROLL
+            for (int n = 0; n < n_reps; n++) {
+              int col = k_base + n * intel::sg_size + lane_id;
+              if (need_k_rem && col >= seq_len) {
+                CUTLASS_PRAGMA_UNROLL
+                for (int j = 0; j < elems_per_n; j++) {
+                  tSrS(n * elems_per_n + j) = ElementS(-INFINITY);
+                }
+              } else if constexpr (CausalMask) {
+                if (need_causal) {
+                  int causal_bound =
+                      col - full_tile_offset - row_base;
+                  CUTLASS_PRAGMA_UNROLL
+                  for (int j = 0; j < elems_per_n; j++) {
+                    if (j < causal_bound) {
+                      tSrS(n * elems_per_n + j) =
+                          ElementS(-INFINITY);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        if constexpr (LocalMask) {
+          Tensor cPgP =
+              make_identity_tensor(make_shape(seq_len, seq_len));
+          Tensor gP = local_tile(
+              cPgP, take<0, 2>(TileShapeQK{}),
+              make_coord(get<0>(blk_qv), K));
+          auto cS_thread = thr_mma_qk.partition_C(gP);
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < tSrS.size(); ++i) {
+            int row_idx = get<0>(cS_thread(i));
+            int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
+            bool left_mask =
+                col_idx < row_idx - params.local_left;
+            bool right_mask =
+                col_idx > row_idx + params.local_right;
+            if (left_mask || right_mask) {
+              tSrS(i) = ElementS(-INFINITY);
+            }
+          }
+        }
+
+        softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA);
+        reorder(tSrS, tArP);
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int VV = 0; VV < VTiles; VV++) {
+          copy(copy_v, tVgV(_, _, _, VV, K), tVrV);
+          reorder(tVrV, tArV);
+          cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
+        }
+
+        for (int D = 0; D < size<4>(pKgK); D++) {
+          prefetch(prefetch_k, pKgK(_, _, _, K + STAGES, D));
+        }
+
+#if SYNC
+        barrier_wait(barrier_scope);
+#endif
+      }
     }
   }
 

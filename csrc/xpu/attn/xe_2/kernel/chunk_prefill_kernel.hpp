@@ -300,16 +300,29 @@ class XeFMHAFwdKernel {
 
       auto batch_dim_qo = is_var_len ? 1 : s.batch;
       auto batch_dim_kv = (PagedKV || is_var_len) ? 1 : s.batch;
-      auto total_seqlen_kv =
-          PagedKV ? params.mainloop.total_seqlen_kv : seq_len_kv;
       auto shape_Q =
           make_shape(seq_len_qo, s.head_size_qk, s.num_heads_q, batch_dim_qo);
-      auto shape_K = make_shape(
-          total_seqlen_kv, s.head_size_qk, s.num_heads_kv, batch_dim_kv);
-      auto shape_V = make_shape(
-          s.head_size_vo, total_seqlen_kv, s.num_heads_kv, batch_dim_kv);
       auto shape_O =
           make_shape(seq_len_qo, s.head_size_vo, s.num_heads_q, batch_dim_qo);
+
+      // For PagedKV (BNHS layout): K/V are 4D with block structure.
+      // Shape: (block_size, head_size, num_heads, total_block_nums)
+      // After head selection → 3D: (block_size, head_size, block_nums)
+      // The block 2D copy uses tiled_strides for per-block base rebasing.
+      auto total_block_nums =
+          PagedKV ? params.mainloop.total_block_nums : 0;
+      auto total_seqlen_kv =
+          PagedKV ? params.mainloop.total_seqlen_kv : seq_len_kv;
+      auto shape_K = PagedKV
+          ? make_shape(params.mainloop.page_size, s.head_size_qk,
+                       s.num_heads_kv, total_block_nums)
+          : make_shape(total_seqlen_kv, s.head_size_qk,
+                       s.num_heads_kv, batch_dim_kv);
+      auto shape_V = PagedKV
+          ? make_shape(s.head_size_vo, params.mainloop.page_size,
+                       s.num_heads_kv, total_block_nums)
+          : make_shape(s.head_size_vo, total_seqlen_kv,
+                       s.num_heads_kv, batch_dim_kv);
 
       auto dcQ = const_cast<ElementQ*>(p.Q + offset_q);
       auto dcK = const_cast<ElementK*>(p.K + offset_k);
@@ -342,21 +355,42 @@ class XeFMHAFwdKernel {
       int l_coord_qo = is_var_len ? 0 : idx_b;
       int l_coord_kv = (PagedKV || is_var_len) ? 0 : idx_b;
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
-      mainloop(
-          Q(_, _, head_q, l_coord_qo),
-          K(_, _, head, l_coord_kv),
-          V(_, _, head, l_coord_kv),
-          tArA,
-          tA_max,
-          tA_sum,
-          blk_qv,
-          idx_b,
-          k_block0,
-          k_blocks,
-          k_blocks_causal,
-          thr_id,
-          seq_len,
-          full_tile_offset);
+      if constexpr (PagedKV) {
+        // BNHS: pass 3D K/V (keep block dim) + head index
+        mainloop(
+            Q(_, _, head_q, l_coord_qo),
+            K(_, _, head, _),  // 3D: (block_size, head_size, block_nums)
+            V(_, _, head, _),  // 3D: (head_size, block_size, block_nums)
+            tArA,
+            tA_max,
+            tA_sum,
+            blk_qv,
+            idx_b,
+            k_block0,
+            k_blocks,
+            k_blocks_causal,
+            thr_id,
+            seq_len,
+            full_tile_offset,
+            head);
+      } else {
+        // Non-paged: pass 2D K/V (original)
+        mainloop(
+            Q(_, _, head_q, l_coord_qo),
+            K(_, _, head, l_coord_kv),
+            V(_, _, head, l_coord_kv),
+            tArA,
+            tA_max,
+            tA_sum,
+            blk_qv,
+            idx_b,
+            k_block0,
+            k_blocks,
+            k_blocks_causal,
+            thr_id,
+            seq_len,
+            full_tile_offset);
+      }
       if constexpr (
           !is_empty_v<MainloopSharedStorage> &&
           !is_empty_v<EpilogueSharedStorage>) {
