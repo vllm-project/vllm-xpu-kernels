@@ -66,6 +66,42 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     int64_t rotary_dim,
     bool is_neox);
 
+void causal_conv1d(
+    torch::Tensor& q_out,
+    torch::Tensor& k_out,
+    torch::Tensor& v_out,
+    torch::Tensor& z_out,
+    torch::Tensor& b_out,
+    torch::Tensor& a_out,
+    const torch::Tensor& mixed_qkvz,
+    const torch::Tensor& mixed_ba,
+    const torch::Tensor& conv_weights,
+    const std::optional<torch::Tensor>& conv_bias,
+    torch::Tensor& conv_states,
+    const torch::Tensor& query_start_loc,
+    const torch::Tensor& cache_indices,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::string& activation,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const bool reorder_input);
+
+void gated_delta_rule(
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& b,
+    const torch::Tensor& a,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    torch::Tensor& ssm_state,
+    const torch::Tensor& query_start_loc,
+    const torch::Tensor& cache_indices,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const int64_t num_prefills,
+    const int64_t num_decodes);
+
 void gdn_attention(
     torch::Tensor& core_attn_out,
     torch::Tensor& z,
