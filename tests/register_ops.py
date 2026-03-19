@@ -165,6 +165,28 @@ def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor,
                                                      scale_fmt)
 
 
+def xpu_memcpy_sync(dst_ptr: int,
+                    src_ptr: int,
+                    n_bytes: int,
+                    kind: int,
+                    device: int = -1) -> None:
+    """Pointer-based synchronous memcpy op.
+
+    kind: 0=H2D, 1=D2H, 2=D2D.
+    """
+
+    def _to_i64_ptr(ptr: int) -> int:
+        return ptr if ptr < (1 << 63) else ptr - (1 << 64)
+
+    torch.ops._C.xpu_memcpy_sync(
+        _to_i64_ptr(dst_ptr),
+        _to_i64_ptr(src_ptr),
+        n_bytes,
+        kind,
+        device,
+    )
+
+
 def convert_fp8(
     dst_cache: torch.Tensor,
     src_cache: torch.Tensor,
