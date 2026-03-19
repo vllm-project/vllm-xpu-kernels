@@ -106,9 +106,7 @@ void swigluoai_and_mul(
     double limit = 7.0);
 
 void swiglustep_and_mul(
-    torch::Tensor& out,
-    torch::Tensor& input,
-    double limit = 7.0);
+    torch::Tensor& out, torch::Tensor& input, double limit = 7.0);
 
 torch::Tensor get_xpu_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 

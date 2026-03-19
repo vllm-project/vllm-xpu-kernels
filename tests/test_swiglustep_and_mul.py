@@ -59,11 +59,7 @@ def test_swiglustep_and_mul(
     out = layer(x)
     ref_out = layer.forward_native(x)
 
-    rtol = {
-        torch.float16: 2e-3,
-        torch.bfloat16: 2e-2,
-        torch.float: 1.3e-6
-    }
+    rtol = {torch.float16: 2e-3, torch.bfloat16: 2e-2, torch.float: 1.3e-6}
 
     def _get_rtol(output) -> float:
         return rtol[output.dtype]
