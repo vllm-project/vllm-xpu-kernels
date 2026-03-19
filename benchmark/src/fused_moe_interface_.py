@@ -158,8 +158,12 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
     inter_size = list(w13.shape)[-2] // 2
 
     assert w13.is_contiguous() and w2.is_contiguous()
-    gemm1_n = w13.shape[1]
-    gemm2_n = w2.shape[1]
+    if hasattr(w13, 'xpu_fused_moe'):
+        gemm1_n = w13.shape[2]
+        gemm2_n = w2.shape[2]
+    else:
+        gemm1_n = w13.shape[1]
+        gemm2_n = w2.shape[1]
 
     # 4bits support [E, N, K]
     # other types [E, K, N]
