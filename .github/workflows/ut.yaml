@@ -1,12 +1,18 @@
 name: run unit tests on Intel GPU.
 
-on: 
+on:
   pull_request:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_all_tests:
+        description: 'Run all unit tests regardless of changed files'
+        type: boolean
+        default: false
 
-permissions: 
+permissions:
   contents: read
 
 env:
@@ -14,15 +20,130 @@ env:
 
 jobs:
 
-  build-docker-image-latest-pvc:
+  # Determine which test groups are needed based on changed files.
+  # On push to main or manual trigger with run_all_tests=true, all groups run.
+  # On PRs and manual triggers without run_all_tests, only affected groups run.
+  determine-tests:
     runs-on: self-hosted-pvc
+    outputs:
+      run_any: ${{ steps.check.outputs.run_any }}
+      run_all: ${{ steps.check.outputs.run_all }}
+      run_attention: ${{ steps.check.outputs.run_attention }}
+      run_moe: ${{ steps.check.outputs.run_moe }}
+      run_lora: ${{ steps.check.outputs.run_lora }}
+      run_quant: ${{ steps.check.outputs.run_quant }}
+      run_other: ${{ steps.check.outputs.run_other }}
     steps:
       - name: Clean workspace
         run: |
           sudo chown -R "$(id -u):$(id -g)" . || true
           git clean -ffdx || true
           git reset --hard || true
-          
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+
+      - name: Determine test groups to run
+        id: check
+        run: |
+          set_all_outputs() {
+            echo "run_any=true"      >> "$GITHUB_OUTPUT"
+            echo "run_all=true"      >> "$GITHUB_OUTPUT"
+            echo "run_attention=true" >> "$GITHUB_OUTPUT"
+            echo "run_moe=true"      >> "$GITHUB_OUTPUT"
+            echo "run_lora=true"     >> "$GITHUB_OUTPUT"
+            echo "run_quant=true"    >> "$GITHUB_OUTPUT"
+            echo "run_other=true"    >> "$GITHUB_OUTPUT"
+          }
+
+          # Always run all tests on push to main
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "Push to main: running all tests"
+            set_all_outputs
+            exit 0
+          fi
+
+          # Run all tests when manually triggered with run_all_tests=true
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.run_all_tests }}" == "true" ]]; then
+            echo "Manual trigger with run_all_tests=true: running all tests"
+            set_all_outputs
+            exit 0
+          fi
+
+          # Get changed files for pull_request or workflow_dispatch
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            CHANGED_FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}")
+          else
+            # workflow_dispatch without run_all_tests: compare against the main branch tip
+            # so the diff reflects what this branch actually changes relative to main.
+            git fetch origin main 2>/dev/null || true
+            CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null || echo "")
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          # If common/build-system files changed, run everything
+          if echo "$CHANGED_FILES" | grep -qE \
+            '(^CMakeLists\.txt$|^Dockerfile\.xpu$|^requirements\.txt$|^setup\.py$|^pyproject\.toml$|^cmake/|^\.github/workflows/|^csrc/core/|^csrc/dispatch_utils\.h$|^csrc/ops\.h$|^csrc/sycl_first\.h$|^csrc/utils\.h$|^csrc/torch_bindings\.cpp$|^csrc/tensor_utils\.cpp$|^csrc/xpu/torch_bindings\.cpp$|^csrc/xpu/ops\.h$)'; then
+            echo "Common/build files changed: running all tests"
+            set_all_outputs
+            exit 0
+          fi
+
+          RUN_ANY=false
+
+          # Attention tests: flash_attn, gdn_attn, KV-cache
+          if echo "$CHANGED_FILES" | grep -qE \
+            '(^csrc/flash_attn/|^csrc/xpu/attn/|^csrc/xpu/gdn_attn/|^csrc/cache\.cpp$|^vllm_xpu_kernels/flash_attn_interface\.py$|^tests/flash_attn/|^tests/gdn_attn/|^tests/test_cache\.py$)'; then
+            echo "run_attention=true" >> "$GITHUB_OUTPUT"
+            RUN_ANY=true
+          fi
+
+          # MoE tests: fused_moe kernels, grouped_gemm, topk, topk_per_row, grouped_topk
+          if echo "$CHANGED_FILES" | grep -qE \
+            '(^csrc/moe/|^csrc/xpu/grouped_gemm/|^csrc/topk_per_row\.cpp$|^vllm_xpu_kernels/fused_moe_interface\.py$|^tests/fused_moe/|^tests/test_moe_|^tests/test_topk\.py$|^tests/test_topk_per_row\.py$|^tests/test_grouped_topk\.py$)'; then
+            echo "run_moe=true" >> "$GITHUB_OUTPUT"
+            RUN_ANY=true
+          fi
+
+          # LoRA tests
+          if echo "$CHANGED_FILES" | grep -qE \
+            '(^csrc/xpu/lora/|^tests/test_lora_ops\.py$|^tests/lora/)'; then
+            echo "run_lora=true" >> "$GITHUB_OUTPUT"
+            RUN_ANY=true
+          fi
+
+          # Quantization tests: fp8, mxfp4, int4/onednn, quantized cache
+          if echo "$CHANGED_FILES" | grep -qE \
+            '(^csrc/quantization/|^csrc/xpu/onednn/|^csrc/cache\.cpp$|^tests/test_fp8_quant\.py$|^tests/test_mxfp4_quant\.py$|^tests/test_int4_gemm_onednn\.py$|^tests/test_indexer_k_quant_and_cache\.py$)'; then
+            echo "run_quant=true" >> "$GITHUB_OUTPUT"
+            RUN_ANY=true
+          fi
+
+          # Other tests: layernorm, rotary embedding, memory utilities, activation
+          if echo "$CHANGED_FILES" | grep -qE \
+            '(^csrc/layernorm\.cpp$|^csrc/pos_encoding_kernels\.cpp$|^csrc/xpu/sycl/|^csrc/utils/|^csrc/activation\.cpp$|^tests/test_layernorm\.py$|^tests/test_rotary_embedding\.py$|^tests/test_mem_alloc\.py$|^tests/test_uva\.py$)'; then
+            echo "run_other=true" >> "$GITHUB_OUTPUT"
+            RUN_ANY=true
+          fi
+
+          echo "run_any=$RUN_ANY" >> "$GITHUB_OUTPUT"
+
+  build-docker-image-latest-pvc:
+    runs-on: self-hosted-pvc
+    needs: determine-tests
+    if: needs.determine-tests.outputs.run_any == 'true'
+    steps:
+      - name: Clean workspace
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          git clean -ffdx || true
+          git reset --hard || true
+
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -38,13 +159,15 @@ jobs:
 
   build-docker-image-latest-bmg:
     runs-on: self-hosted-bmg
+    needs: determine-tests
+    if: needs.determine-tests.outputs.run_any == 'true'
     steps:
       - name: Clean workspace
         run: |
           sudo chown -R "$(id -u):$(id -g)" . || true
           git clean -ffdx || true
           git reset --hard || true
-          
+
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -60,9 +183,9 @@ jobs:
 
   run-unit-tests-pvc:
     runs-on: self-hosted-pvc
-    needs: build-docker-image-latest-pvc
+    needs: [determine-tests, build-docker-image-latest-pvc]
     timeout-minutes: 40
-    container:                      
+    container:
       image: localhost:5000/xpu-kernel-ci-image:latest
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
     steps:
@@ -84,14 +207,59 @@ jobs:
           MAX_JOBS=128 uv pip install --no-build-isolation -e . -v
           ccache -s || true
 
-      - name: test 
+      - name: test
+        env:
+          RUN_ALL: ${{ needs.determine-tests.outputs.run_all }}
+          RUN_ATTENTION: ${{ needs.determine-tests.outputs.run_attention }}
+          RUN_MOE: ${{ needs.determine-tests.outputs.run_moe }}
+          RUN_LORA: ${{ needs.determine-tests.outputs.run_lora }}
+          RUN_QUANT: ${{ needs.determine-tests.outputs.run_quant }}
+          RUN_OTHER: ${{ needs.determine-tests.outputs.run_other }}
         run: |
-          ZE_AFFINITY_MASK=0,1 SKIP_HANG_KERNEL=1 SKIP_ACC_ERROR_KERNEL=1 pytest -v -s tests/
-          VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 ZE_AFFINITY_MASK=0,1 pytest -v -s tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm
+          TEST_PATHS=""
+          GROUPED_GEMM_TEST=""
+
+          if [[ "$RUN_ALL" == "true" ]]; then
+            TEST_PATHS="tests/"
+            GROUPED_GEMM_TEST="tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm"
+          else
+            if [[ "$RUN_ATTENTION" == "true" ]]; then
+              TEST_PATHS="$TEST_PATHS tests/flash_attn/ tests/gdn_attn/ tests/test_cache.py"
+            fi
+            if [[ "$RUN_MOE" == "true" ]]; then
+              TEST_PATHS="$TEST_PATHS tests/fused_moe/test_fused_moe.py tests/fused_moe/test_moe_prologue.py tests/fused_moe/test_remap_hidden_states.py tests/test_moe_gather.py tests/test_topk.py tests/test_topk_per_row.py tests/test_grouped_topk.py tests/test_moe_align_block_size.py tests/test_moe_lora_align_sum.py"
+              GROUPED_GEMM_TEST="tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm"
+            fi
+            if [[ "$RUN_LORA" == "true" ]]; then
+              TEST_PATHS="$TEST_PATHS tests/test_lora_ops.py"
+            fi
+            if [[ "$RUN_QUANT" == "true" ]]; then
+              TEST_PATHS="$TEST_PATHS tests/test_fp8_quant.py tests/test_mxfp4_quant.py tests/test_int4_gemm_onednn.py tests/test_indexer_k_quant_and_cache.py"
+            fi
+            if [[ "$RUN_OTHER" == "true" ]]; then
+              TEST_PATHS="$TEST_PATHS tests/test_layernorm.py tests/test_rotary_embedding.py tests/test_mem_alloc.py tests/test_uva.py"
+            fi
+          fi
+
+          # Trim leading/trailing whitespace
+          TEST_PATHS=$(echo "$TEST_PATHS" | xargs)
+
+          if [[ -n "$TEST_PATHS" ]]; then
+            # $TEST_PATHS is intentionally unquoted so the shell word-splits it into
+            # separate arguments for pytest (test directories + optional --ignore flags).
+            ZE_AFFINITY_MASK=0,1 SKIP_HANG_KERNEL=1 SKIP_ACC_ERROR_KERNEL=1 pytest -v -s $TEST_PATHS
+          fi
+          if [[ -n "$GROUPED_GEMM_TEST" ]]; then
+            VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 ZE_AFFINITY_MASK=0,1 pytest -v -s $GROUPED_GEMM_TEST
+          fi
+          if [[ -z "$TEST_PATHS" && -z "$GROUPED_GEMM_TEST" ]]; then
+            echo "No tests selected for this run."
+          fi
 
   clean-repo-pvc:
     runs-on: self-hosted-pvc
     needs: run-unit-tests-pvc
+    if: always()
     steps:
       - name: Clean workspace
         run: |
@@ -101,9 +269,9 @@ jobs:
 
   run-unit-tests-bmg:
     runs-on: self-hosted-bmg
-    needs: build-docker-image-latest-bmg
+    needs: [determine-tests, build-docker-image-latest-bmg]
     timeout-minutes: 40
-    container: 
+    container:
       image: localhost:5000/xpu-kernel-ci-image:latest
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
     steps:
@@ -125,17 +293,70 @@ jobs:
           MAX_JOBS=96 uv pip install --no-build-isolation -e . -v
           ccache -s || true
 
-      - name: test 
+      - name: test
+        env:
+          RUN_ALL: ${{ needs.determine-tests.outputs.run_all }}
+          RUN_ATTENTION: ${{ needs.determine-tests.outputs.run_attention }}
+          RUN_MOE: ${{ needs.determine-tests.outputs.run_moe }}
+          RUN_LORA: ${{ needs.determine-tests.outputs.run_lora }}
+          RUN_QUANT: ${{ needs.determine-tests.outputs.run_quant }}
+          RUN_OTHER: ${{ needs.determine-tests.outputs.run_other }}
         run: |
-          # tests/test_moe_align_block_size.py, tests/test_moe_lora_align_sum.py takes much time than expected. ignore it for now.
-          ZE_AFFINITY_MASK=0,1 pytest -v -s tests/ --ignore=tests/test_lora_ops.py --ignore=tests/test_fp8_quant.py --ignore=tests/test_moe_align_block_size.py --ignore=tests/test_moe_lora_align_sum.py
-          # fixme: Running lora UT separately to avoid OOM when running together with other tests.
-          ZE_AFFINITY_MASK=0,1 pytest -v -s tests/test_lora_ops.py
-          VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 ZE_AFFINITY_MASK=0,1 pytest -v -s tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm
+          TEST_PATHS=""
+          LORA_TEST=""
+          GROUPED_GEMM_TEST=""
+
+          if [[ "$RUN_ALL" == "true" ]]; then
+            # tests/test_moe_align_block_size.py and tests/test_moe_lora_align_sum.py take
+            # much longer than expected on BMG; skip them in the full run for now.
+            TEST_PATHS="tests/ --ignore=tests/test_lora_ops.py --ignore=tests/test_fp8_quant.py --ignore=tests/test_moe_align_block_size.py --ignore=tests/test_moe_lora_align_sum.py"
+            # fixme: Run lora UT separately to avoid OOM when running together with other tests.
+            LORA_TEST="tests/test_lora_ops.py"
+            GROUPED_GEMM_TEST="tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm"
+          else
+            if [[ "$RUN_ATTENTION" == "true" ]]; then
+              TEST_PATHS="$TEST_PATHS tests/flash_attn/ tests/gdn_attn/ tests/test_cache.py"
+            fi
+            if [[ "$RUN_MOE" == "true" ]]; then
+              # Skip test_moe_align_block_size.py and test_moe_lora_align_sum.py on BMG (too slow)
+              TEST_PATHS="$TEST_PATHS tests/fused_moe/test_fused_moe.py tests/fused_moe/test_moe_prologue.py tests/fused_moe/test_remap_hidden_states.py tests/test_moe_gather.py tests/test_topk.py tests/test_topk_per_row.py tests/test_grouped_topk.py"
+              GROUPED_GEMM_TEST="tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm"
+            fi
+            if [[ "$RUN_LORA" == "true" ]]; then
+              # fixme: Run lora UT separately to avoid OOM when running together with other tests.
+              LORA_TEST="tests/test_lora_ops.py"
+            fi
+            if [[ "$RUN_QUANT" == "true" ]]; then
+              # test_fp8_quant.py is excluded on BMG in the full run; keep that here too
+              TEST_PATHS="$TEST_PATHS tests/test_mxfp4_quant.py tests/test_int4_gemm_onednn.py tests/test_indexer_k_quant_and_cache.py"
+            fi
+            if [[ "$RUN_OTHER" == "true" ]]; then
+              TEST_PATHS="$TEST_PATHS tests/test_layernorm.py tests/test_rotary_embedding.py tests/test_mem_alloc.py tests/test_uva.py"
+            fi
+          fi
+
+          # Trim leading/trailing whitespace
+          TEST_PATHS=$(echo "$TEST_PATHS" | xargs)
+
+          if [[ -n "$TEST_PATHS" ]]; then
+            # $TEST_PATHS is intentionally unquoted so the shell word-splits it into
+            # separate arguments for pytest (test directories + optional --ignore flags).
+            ZE_AFFINITY_MASK=0,1 pytest -v -s $TEST_PATHS
+          fi
+          if [[ -n "$LORA_TEST" ]]; then
+            ZE_AFFINITY_MASK=0,1 pytest -v -s $LORA_TEST
+          fi
+          if [[ -n "$GROUPED_GEMM_TEST" ]]; then
+            VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 ZE_AFFINITY_MASK=0,1 pytest -v -s $GROUPED_GEMM_TEST
+          fi
+          if [[ -z "$TEST_PATHS" && -z "$LORA_TEST" && -z "$GROUPED_GEMM_TEST" ]]; then
+            echo "No tests selected for this run."
+          fi
 
   clean-repo-bmg:
     runs-on: self-hosted-bmg
     needs: run-unit-tests-bmg
+    if: always()
     steps:
       - name: Clean workspace
         run: |
