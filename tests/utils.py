@@ -224,6 +224,45 @@ def create_kv_caches_with_random_flash(
     return key_caches, value_caches
 
 
+def create_kv_caches_with_pinned(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: str,
+    model_dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Create KV caches with pinned host memory when device is 'cpu'."""
+
+    key_caches, value_caches = create_kv_caches_with_random(
+        num_blocks,
+        block_size,
+        num_layers,
+        num_heads,
+        head_size,
+        cache_dtype,
+        model_dtype,
+        seed,
+        device,
+    )
+
+    # If on CPU, convert to pinned memory by recreating the tensor
+    if device == "cpu":
+        for i in range(len(key_caches)):
+            # Create a new pinned tensor and copy data
+            pinned_key = torch.empty_like(key_caches[i], pin_memory=True)
+            pinned_value = torch.empty_like(value_caches[i], pin_memory=True)
+            pinned_key.copy_(key_caches[i])
+            pinned_value.copy_(value_caches[i])
+            key_caches[i] = pinned_key
+            value_caches[i] = pinned_value
+
+    return key_caches, value_caches
+
+
 def get_model_config(model_name: str, tp_size: int = 1):
     from transformers import AutoConfig
     config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
