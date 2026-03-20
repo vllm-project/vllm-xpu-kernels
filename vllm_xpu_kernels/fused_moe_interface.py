@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
+import torch.nn.functional as F
 
 try:
     from . import _C  # noqa: F401
@@ -106,6 +107,10 @@ def implement_zp(qweight):
     result = pack_compact(high_s8, low_s8)
 
     return result
+
+
+def relu2_no_mul(x: torch.Tensor) -> torch.Tensor:
+    return torch.square(F.relu(x))
 
 
 def xpu_fused_moe(hidden_states,
@@ -253,12 +258,16 @@ def xpu_fused_moe(hidden_states,
     act_output = torch.empty((num_moe_inputs, inter_size),
                              dtype=gemm1_output.dtype,
                              device=gemm1_output.device)
+    inter_size_scale = 1
     if activation == "silu":
         torch.ops._C.silu_and_mul(act_output, gemm1_output)
     elif activation == "gelu":
         torch.ops._C.gelu_and_mul(act_output, gemm1_output)
     elif activation == "swigluoai":
         torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
+    elif activation == "relu2_no_mul":
+        act_output = relu2_no_mul(gemm1_output)
+        inter_size_scale = 2
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
@@ -277,7 +286,7 @@ def xpu_fused_moe(hidden_states,
         ptr_D=gemm2_output,
         expert_first_token_offset=expert_first_token_offset,
         N=hidden_size,
-        K=inter_size,
+        K=inter_size * inter_size_scale,
         num_experts=num_experts,
         is_B_int4=is_int4,
         is_B_mxfp4=is_mxfp4)
