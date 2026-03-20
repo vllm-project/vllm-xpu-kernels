@@ -191,6 +191,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "Tensor slot_mapping, int quant_block_size, str scale_fmt) -> ()");
   cache_ops.impl(
       "indexer_k_quant_and_cache", torch::kXPU, &indexer_k_quant_and_cache);
+  cache_ops.def(
+      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, "
+      "Tensor! dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
+  cache_ops.impl(
+      "cp_gather_indexer_k_quant_cache",
+      torch::kXPU,
+      &cp_gather_indexer_k_quant_cache);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
