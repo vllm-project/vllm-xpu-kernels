@@ -269,15 +269,7 @@ def get_benchmark_decode_with_paged_kv(iterations=20):
     return benchmark
 
 
-if __name__ == "__main__":
-
-    args = parse_args()
-    seed = 1234
-    seed_everything(seed)
-    iterations = 20
-    torch.set_default_device("xpu")
-    torch.xpu.set_device("xpu:0")
-
+def gen_correctness_config():
     # seq_lens = [[(1, 1025)], [(1, 523), (1, 37), (1, 2011)], [(1, 13000)],
     #             [(1, 523), (1, 37), (1, 2011), (1, 5000)]]
     seq_lens = ["1,1,1025", "3,1+1+1,523+37+2011", "1,1,13000", "4,1+1+1+1,523+37+2011+5000"]
@@ -306,6 +298,40 @@ if __name__ == "__main__":
         itertools.product(seq_lens, num_heads, head_size, block_size, dtype, soft_cap,
                           num_blocks, fa_versions, q_dtype, is_sink)
     )
+    return configs
+
+
+def gen_perf_configs():
+    seq_lens = ["1,1,1025", "3,1+1+1,523+37+2011", "1,1,13000"]
+    num_heads = [(4, 4), (16, 1)]
+    head_size = [64, 128, 256]
+    block_size = [64, 128]
+    dtype = [torch.float16, torch.bfloat16]
+    soft_cap = [None]
+    num_blocks = [2048]
+    fa_versions = [2]
+    q_dtype = [None]
+    is_sink = [False, True]
+
+    print("Final configuration:")
+    print("seq_lens: ", seq_lens)
+    print("num_heads: ", num_heads)
+    print("head_size: ", head_size)
+    print("block_size: ", block_size)
+    print("dtype: ", dtype)
+    print("soft_cap: ", soft_cap)
+    print("num_blocks: ", num_blocks)
+    print("fa_versions: ", fa_versions)
+    print("q_dtype: ", q_dtype)
+    print("is_sink: ", is_sink)
+    configs = list(
+        itertools.product(seq_lens, num_heads, head_size, block_size, dtype, soft_cap,
+                          num_blocks, fa_versions, q_dtype, is_sink)
+    )
+    return configs
+
+
+def filter_configs(configs):
     new_configs = []
     for config in configs:
         if (config[1] == (16, 1) and config[2] == 256) or \
@@ -313,8 +339,20 @@ if __name__ == "__main__":
             print("Skipping config due to potential OOM: ", config)
             continue
         new_configs.append(config)
-    configs = new_configs
+    return new_configs
 
+
+if __name__ == "__main__":
+
+    args = parse_args()
+    seed = 1234
+    seed_everything(seed)
+    iterations = 20
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+
+    configs = gen_correctness_config()
+    configs = filter_configs(configs)
     for config in configs:
        try:
            calculate_diff_decode_paged_kv(config)
@@ -322,6 +360,8 @@ if __name__ == "__main__":
            print("Error in config: ", config, " error: ", e)
        clear_xpu_cache()
 
+    configs = gen_perf_configs()
+    configs = filter_configs(configs)
     benchmark = get_benchmark_decode_with_paged_kv(iterations=iterations)
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=args.save_path)
