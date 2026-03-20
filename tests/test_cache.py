@@ -89,6 +89,18 @@ MINI_PYTEST_PARAMS = {
         "device": ["xpu:0"],
         "kv_cache_dtype": KV_CACHE_DTYPE,
     },
+    "test_swap_blocks_pinned": {
+        "direction": [("cpu", "xpu")],
+        "num_mappings": [256],
+        "num_heads": [8],
+        "head_size": [64],
+        "block_size": [8],
+        "num_blocks": [1024],
+        "dtype": [torch.bfloat16],
+        "seed": [0],
+        "device": ["xpu:0"],
+        "kv_cache_dtype": KV_CACHE_DTYPE,
+    },
 }
 
 
@@ -706,6 +718,9 @@ def test_swap_blocks_pinned(
         seed,
         src_device,
     )
+    if src_device == "cpu":
+        assert src_key_caches[0].is_pinned()
+        assert src_value_caches[0].is_pinned()
 
     # Create the KV caches on the second device.
     dst_key_caches, dst_value_caches = create_kv_caches_with_pinned(
@@ -719,6 +734,10 @@ def test_swap_blocks_pinned(
         seed,
         dst_device,
     )
+
+    if dst_device == "cpu":
+        assert dst_key_caches[0].is_pinned()
+        assert dst_value_caches[0].is_pinned()
 
     src_key_caches_clone = src_key_caches[0].clone()
     src_value_caches_clone = src_value_caches[0].clone()
@@ -739,6 +758,12 @@ def test_swap_blocks_pinned(
         block_size_in_bytes,
         block_mapping_tensor,
     )
+
+    # For the ("xpu", "cpu") direction, device→pinned-host copies are
+    # asynchronous. Ensure all transfers have completed before reading the
+    # destination CPU caches to avoid race conditions in the assertions.
+    if src_device == "xpu" and dst_device == "cpu":
+        torch.xpu.synchronize()
 
     for src, dst in block_mapping:
         torch.testing.assert_close(src_key_caches_clone[src].cpu(),

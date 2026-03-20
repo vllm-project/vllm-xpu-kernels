@@ -236,7 +236,6 @@ def create_kv_caches_with_pinned(
     device: str,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     """Create KV caches with pinned host memory when device is 'cpu'."""
-    from tests.utils import create_kv_caches_with_random
 
     key_caches, value_caches = create_kv_caches_with_random(
         num_blocks,
