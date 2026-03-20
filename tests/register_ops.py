@@ -270,6 +270,20 @@ def int4_gemm_w4a8(input: torch.Tensor,
                                            group_size, g_idx, bias)
 
 
+def int8_gemm_w8a8(input: torch.Tensor,
+                   input_scales: torch.Tensor,
+                   input_zero_points: torch.Tensor,
+                   weight: torch.Tensor,
+                   wei_scales: torch.Tensor,
+                   wei_zero_points: torch.Tensor,
+                   group_size: int,
+                   bias: Optional[torch.Tensor] = None):
+    return torch.ops._xpu_C.int8_gemm_w8a8(input, input_scales,
+                                           input_zero_points, weight,
+                                           wei_scales, wei_zero_points,
+                                           group_size, bias)
+
+
 def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
              out_dtype: Optional[torch.dtype],
              scale_act: Optional[torch.Tensor],

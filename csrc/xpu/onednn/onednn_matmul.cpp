@@ -3,6 +3,7 @@
 #include "fp8_gemm_w8a16.h"
 #include "int4_gemm_w4a16.h"
 #include "int4_gemm_w4a8.h"
+#include "int8_gemm_w8a8.h"
 
 inline bool is_supported_fp8(at::ScalarType t) {
   return (t == at::ScalarType::Float8_e5m2) ||
@@ -108,6 +109,45 @@ torch::Tensor int4_gemm_w4a16(
   torch::Tensor result = check_and_create_output_tensor(A, B, A.scalar_type());
 
   oneDNN::dnnl_matmul_w4a16_int4(result, A, B, bias, B_scale, B_zp, group_size);
+  return result;
+}
+
+torch::Tensor int8_gemm_w8a8(
+    const torch::Tensor& A_,       // quantized activations, [m, k] int8
+    const torch::Tensor& A_scale,  // per-token [m, 1] or per-tensor [1]
+    const torch::Tensor& A_zp,     // per-token [m, 1] or per-tensor [1]
+    const torch::Tensor& B,        // quantized weight, [k, n] NT format int8
+    const torch::Tensor& B_scale,  // per-channel [1, n] or per-group [k/gs, n]
+    const torch::Tensor& B_zp,     // per-channel [1, n] or per-group [k/gs, n]
+    int64_t group_size,            // -1 for per-channel
+    const std::optional<torch::Tensor>& bias) {
+  const at::DeviceGuard device_guard(A_.device());
+
+  TORCH_CHECK(
+      A_.scalar_type() == at::ScalarType::Char ||
+          A_.scalar_type() == at::ScalarType::Byte,
+      "int8_gemm_w8a8: activation must be int8 (signed/unsigned), got ",
+      A_.scalar_type());
+  TORCH_CHECK(
+      B.scalar_type() == at::ScalarType::Char ||
+          B.scalar_type() == at::ScalarType::Byte,
+      "int8_gemm_w8a8: weight must be int8 (Char) or uint8 (Byte), got ",
+      B.scalar_type());
+
+  // Validate quantization format for input A
+  const bool per_token_A =
+      (A_scale.dim() == 2 && A_scale.size(1) == 1 && A_zp.dim() == 2 &&
+       A_zp.size(1) == 1);
+  const bool per_tensor_A = (A_scale.numel() == 1 && A_zp.numel() == 1);
+  TORCH_CHECK(
+      per_token_A || per_tensor_A,
+      "int8_gemm_w8a8: A_scale and A_zp must be per-token [m,1] or per-tensor "
+      "[1]");
+
+  torch::Tensor result = check_and_create_output_tensor(A_, B, torch::kHalf);
+
+  oneDNN::dnnl_matmul_w8a8_int8(
+      result, A_, A_scale, A_zp, B, B_scale, B_zp, group_size, bias);
   return result;
 }
 
