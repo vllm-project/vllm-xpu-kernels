@@ -11,6 +11,26 @@ on:
         description: 'Run all unit tests regardless of changed files'
         type: boolean
         default: false
+      run_attention:
+        description: 'Run attention tests (flash_attn, gdn_attn, cache)'
+        type: boolean
+        default: false
+      run_moe:
+        description: 'Run MoE tests (fused_moe, grouped_gemm, topk)'
+        type: boolean
+        default: false
+      run_lora:
+        description: 'Run LoRA tests'
+        type: boolean
+        default: false
+      run_quant:
+        description: 'Run quantization tests (fp8, mxfp4, int4/onednn)'
+        type: boolean
+        default: false
+      run_other:
+        description: 'Run other tests (layernorm, rotary embedding, mem, uva)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -73,11 +93,41 @@ jobs:
             exit 0
           fi
 
-          # Get changed files for pull_request or workflow_dispatch
+          # Honor per-group manual inputs when workflow_dispatch is used without run_all_tests
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            RUN_ANY=false
+            if [[ "${{ inputs.run_attention }}" == "true" ]]; then
+              echo "run_attention=true" >> "$GITHUB_OUTPUT"
+              RUN_ANY=true
+            fi
+            if [[ "${{ inputs.run_moe }}" == "true" ]]; then
+              echo "run_moe=true" >> "$GITHUB_OUTPUT"
+              RUN_ANY=true
+            fi
+            if [[ "${{ inputs.run_lora }}" == "true" ]]; then
+              echo "run_lora=true" >> "$GITHUB_OUTPUT"
+              RUN_ANY=true
+            fi
+            if [[ "${{ inputs.run_quant }}" == "true" ]]; then
+              echo "run_quant=true" >> "$GITHUB_OUTPUT"
+              RUN_ANY=true
+            fi
+            if [[ "${{ inputs.run_other }}" == "true" ]]; then
+              echo "run_other=true" >> "$GITHUB_OUTPUT"
+              RUN_ANY=true
+            fi
+            if [[ "$RUN_ANY" == "true" ]]; then
+              echo "Manual trigger with per-group inputs: running selected test groups"
+              echo "run_any=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          # Get changed files for pull_request or workflow_dispatch (no group selected)
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             CHANGED_FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}")
           else
-            # workflow_dispatch without run_all_tests: compare against the main branch tip
+            # workflow_dispatch without run_all_tests or per-group inputs: compare against the main branch tip
             # so the diff reflects what this branch actually changes relative to main.
             git fetch origin main 2>/dev/null || true
             CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null || echo "")
