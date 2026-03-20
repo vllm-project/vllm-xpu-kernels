@@ -19,6 +19,7 @@ void cutlass_paged_decode_xe2(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -45,6 +46,7 @@ void cutlass_paged_decode_xe2(
       cu_seqlens_k,
       max_seqlen_q,
       max_seqlen_k,
+      q_scale,
       k_scale,
       v_scale,
       sm_scale,
@@ -74,6 +76,7 @@ void cutlass_paged_decode_impl(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -86,6 +89,8 @@ void cutlass_paged_decode_impl(
     bool is_local,
     bool is_sink,
     int num_kv_splits) {
+  bool is_fp8_q = query.scalar_type() == at::ScalarType::Float8_e5m2 ||
+                  query.scalar_type() == at::ScalarType::Float8_e4m3fn;
   bool is_fp8_kv = key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
                    key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn;
   if (is_fp8_kv) {
@@ -101,6 +106,15 @@ void cutlass_paged_decode_impl(
         v_scale->scalar_type() == at::ScalarType::Float &&
             v_scale->numel() == 1,
         "FP8 KV v_scale must be a float32 tensor with a single element.");
+  }
+  if (is_fp8_q) {
+    TORCH_CHECK(
+        q_scale.has_value(),
+        "FP8 Q cache requires q_scale tensor to be provided.");
+    TORCH_CHECK(
+        q_scale->scalar_type() == at::ScalarType::Float &&
+            q_scale->numel() == 1,
+        "FP8 Q q_scale must be a float32 tensor with a single element.");
   }
 
   // general params
@@ -156,6 +170,7 @@ void cutlass_paged_decode_impl(
       max_seqlen_k,
       total_seqlen_q,
       total_seqlen_k,
+      is_fp8_q ? q_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
