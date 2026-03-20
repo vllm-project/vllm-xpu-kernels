@@ -85,9 +85,9 @@ def ref_gated_delta_rule(
                                    eps).unsqueeze(-1)
             q_t *= scale
 
-            q_t = torch.repeat_interleave(
-                q_t, repeats=num_v_heads // num_k_heads,
-                dim=0)  # [num_v_heads, head_k_dim]
+            q_t = torch.repeat_interleave(q_t,
+                                          repeats=num_v_heads // num_k_heads,
+                                          dim=0)  # [num_v_heads, head_k_dim]
             k_t = torch.repeat_interleave(k_t,
                                           repeats=num_v_heads // num_k_heads,
                                           dim=0)
@@ -100,8 +100,9 @@ def ref_gated_delta_rule(
 
             ssm_state_batch += k_t.unsqueeze(1) * delta_t.unsqueeze(2)
 
-            core_attn_out[batch_start_id + token_id] = (
-                ssm_state_batch * q_t.unsqueeze(1)).sum(dim=-1).to(dtype)
+            core_attn_out[batch_start_id +
+                          token_id] = (ssm_state_batch *
+                                       q_t.unsqueeze(1)).sum(dim=-1).to(dtype)
 
         ssm_state[cache_indices[batch]] = ssm_state_batch.to(dtype)
 
@@ -160,9 +161,11 @@ def test_gated_delta_rule(num_actual_tokens, batch_size, num_k_heads,
     v = torch.randn((num_actual_tokens, num_v_heads, head_v_dim),
                     dtype=dtype,
                     device=device)
-    b = torch.randn((num_actual_tokens, num_v_heads), dtype=dtype,
+    b = torch.randn((num_actual_tokens, num_v_heads),
+                    dtype=dtype,
                     device=device)
-    a = torch.randn((num_actual_tokens, num_v_heads), dtype=dtype,
+    a = torch.randn((num_actual_tokens, num_v_heads),
+                    dtype=dtype,
                     device=device)
     A_log = torch.randn((num_v_heads, ), dtype=dtype, device=device)
     dt_bias = torch.randn((num_v_heads, ), dtype=dtype, device=device)

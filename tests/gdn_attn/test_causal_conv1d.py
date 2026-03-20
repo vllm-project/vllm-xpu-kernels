@@ -73,8 +73,7 @@ def ref_causal_conv1d(
         v_tmp = v_tmp.reshape(v_tmp.size(0), -1, kv_ratio * head_v_dim)
         z_tmp = z_tmp.reshape(z_tmp.size(0), -1, kv_ratio * head_v_dim)
         mixed_qkvz = torch.cat([q_tmp, k_tmp, v_tmp, z_tmp],
-                               dim=-1).reshape(q_tmp.size(0),
-                                               -1).contiguous()
+                               dim=-1).reshape(q_tmp.size(0), -1).contiguous()
 
         b_tmp, a_tmp = mixed_ba.chunk(2, dim=-1)
         b_tmp = b_tmp.reshape(b_tmp.size(0), -1, kv_ratio)
@@ -83,14 +82,16 @@ def ref_causal_conv1d(
                              dim=-1).reshape(b_tmp.size(0), -1).contiguous()
 
     # Parse mixed_ba into b, a: [total_seqlen, num_k_heads, 2 * kv_ratio]
-    mixed_ba_3d = mixed_ba.reshape(num_actual_tokens, num_k_heads, 2 * kv_ratio)
+    mixed_ba_3d = mixed_ba.reshape(num_actual_tokens, num_k_heads,
+                                   2 * kv_ratio)
     b, a = torch.split(mixed_ba_3d, [kv_ratio, kv_ratio], dim=-1)
     b = b.reshape(num_actual_tokens, num_v_heads)
     a = a.reshape(num_actual_tokens, num_v_heads)
     b_out.copy_(b)
     a_out.copy_(a)
 
-    # Parse mixed_qkvz: [total_seqlen, num_k_heads, 2*head_k_dim + 2*kv_ratio*head_v_dim]
+    # Parse mixed_qkvz:
+    # [total_seqlen, num_k_heads, 2*head_k_dim + 2*kv_ratio*head_v_dim]
     qkvz_per_head = 2 * head_k_dim + 2 * kv_ratio * head_v_dim
     mixed_qkvz_3d = mixed_qkvz.reshape(num_actual_tokens, num_k_heads,
                                        qkvz_per_head)
@@ -134,9 +135,8 @@ def ref_causal_conv1d(
             padding=0,
             groups=qkv_elems_size,
         )
-        qkv_conv_out = (qkv_conv_out
-                        if activation is None else F.silu(qkv_conv_out)).to(
-                            dtype=dtype)
+        qkv_conv_out = (qkv_conv_out if activation is None else
+                        F.silu(qkv_conv_out)).to(dtype=dtype)
         qkv_conv_out = qkv_conv_out.transpose(-2, -1).reshape(
             batch_num_tokens, qkv_elems_size)
 
@@ -207,13 +207,13 @@ def test_causal_conv1d(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
     num_decodes = batch_size - num_prefills
     cache_batch_size = 200
 
-    mixed_qkvz_size = num_k_heads * (2 * head_k_dim +
-                                     2 * head_v_dim * num_v_heads // num_k_heads)
+    mixed_qkvz_size = num_k_heads * (
+        2 * head_k_dim + 2 * head_v_dim * num_v_heads // num_k_heads)
     mixed_ba_size = num_k_heads * (2 * num_v_heads // num_k_heads)
 
     mixed_qkvz = torch.randn((num_actual_tokens, mixed_qkvz_size),
-                              dtype=dtype,
-                              device=device)
+                             dtype=dtype,
+                             device=device)
     mixed_ba = torch.randn((num_actual_tokens, mixed_ba_size),
                            dtype=dtype,
                            device=device)
@@ -225,8 +225,9 @@ def test_causal_conv1d(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                               device=device)
     ref_conv_states = conv_states.clone()
 
-    conv_weights = torch.randn((mixed_qkv_size, width), dtype=dtype,
-                                device=device)
+    conv_weights = torch.randn((mixed_qkv_size, width),
+                               dtype=dtype,
+                               device=device)
     conv_bias = None
     if has_bias:
         conv_bias = torch.randn((mixed_qkv_size, ), dtype=dtype, device=device)
@@ -248,23 +249,23 @@ def test_causal_conv1d(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                                  dtype=torch.int32)
 
     q_out = torch.empty((num_actual_tokens, num_k_heads, head_k_dim),
-                         dtype=dtype,
-                         device=device)
+                        dtype=dtype,
+                        device=device)
     k_out = torch.empty((num_actual_tokens, num_k_heads, head_k_dim),
-                         dtype=dtype,
-                         device=device)
+                        dtype=dtype,
+                        device=device)
     v_out = torch.empty((num_actual_tokens, num_v_heads, head_v_dim),
-                         dtype=dtype,
-                         device=device)
+                        dtype=dtype,
+                        device=device)
     z_out = torch.empty((num_actual_tokens, num_v_heads, head_v_dim),
-                         dtype=dtype,
-                         device=device)
+                        dtype=dtype,
+                        device=device)
     b_out = torch.empty((num_actual_tokens, num_v_heads),
-                         dtype=dtype,
-                         device=device)
+                        dtype=dtype,
+                        device=device)
     a_out = torch.empty((num_actual_tokens, num_v_heads),
-                         dtype=dtype,
-                         device=device)
+                        dtype=dtype,
+                        device=device)
 
     torch.ops._xpu_C.causal_conv1d(
         q_out,

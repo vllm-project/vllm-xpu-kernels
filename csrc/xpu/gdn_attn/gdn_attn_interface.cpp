@@ -12,12 +12,12 @@
 #endif
 
 void causal_conv1d(
-    torch::Tensor& q_out,   // [total_seqlen, num_k_heads, head_k_dim]
-    torch::Tensor& k_out,   // [total_seqlen, num_k_heads, head_k_dim]
-    torch::Tensor& v_out,   // [total_seqlen, num_v_heads, head_v_dim]
-    torch::Tensor& z_out,   // [total_seqlen, num_v_heads, head_v_dim]
-    torch::Tensor& b_out,   // [total_seqlen, num_v_heads]
-    torch::Tensor& a_out,   // [total_seqlen, num_v_heads]
+    torch::Tensor& q_out,  // [total_seqlen, num_k_heads, head_k_dim]
+    torch::Tensor& k_out,  // [total_seqlen, num_k_heads, head_k_dim]
+    torch::Tensor& v_out,  // [total_seqlen, num_v_heads, head_v_dim]
+    torch::Tensor& z_out,  // [total_seqlen, num_v_heads, head_v_dim]
+    torch::Tensor& b_out,  // [total_seqlen, num_v_heads]
+    torch::Tensor& a_out,  // [total_seqlen, num_v_heads]
     const torch::Tensor&
         mixed_qkvz,  // [total_seqlen, num_k_heads * (2 * head_k_dim + 2 *
                      // head_v_dim * num_v_heads / num_k_heads)]
