@@ -16,11 +16,18 @@ K = [1, 32, 128, 1024, None]
 P = [0.1, 0.2, 0.4, 0.8, 1.0, None]
 LOGPROBS_MODE = ["raw_logits", "processed_logits", "processed_logprobs"]
 
-BATCH_SIZE = [2048]
-VOCAL_SIZE = [131072]
-K = [32]
+BATCH_SIZE = [1024]
+VOCAL_SIZE = [1024]
+K = [None]
 P = [None]
-LOGPROBS_MODE = ["raw_logits"]
+LOGPROBS_MODE = ["processed_logprobs"]
+
+
+BATCH_SIZE = [1, 32, 1024]
+VOCAL_SIZE = [1024, 2048, 4096]
+K = [1, 32, 128, 1024, None]
+P = [0.1, 0.2, 0.4, 0.8, 1.0, None]
+LOGPROBS_MODE = ["raw_logits", "processed_logits", "processed_logprobs"]
 
 
 LogprobsMode = Literal[
@@ -177,19 +184,16 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
-        if (k is None and p is None) or generators:
+        # if (k is None and p is None) or generators:
+        if generators:
             return self.forward_native(logits, generators, k, p)
         batch_size = logits.shape[0]
         random_sampled = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
-        processed_logprobs = None
-        if self.logprobs_mode == "processed_logits" or self.logprobs_mode == "processed_logprobs":
-            processed_logprobs = torch.empty_like(logits)
-
-        processed_logprobs = torch.empty_like(logits)
-
-        # logits[:] = logits.softmax(dim=-1, dtype=torch.float32)
-        # if(k is not None and p is not None):
-        #     torch.ops._xpu_C.top_k_mask_logits(logits, top_k)
+        logits_to_return = None
+        if self.logprobs_mode == "processed_logits":
+            logits_to_return = logits
+        elif self.logprobs_mode == "processed_logprobs":
+            logits_to_return = logits
 
         logits = logits.softmax(dim=-1, dtype=torch.float32)
 
@@ -202,14 +206,14 @@ class TopKTopPSampler(nn.Module):
 
         torch.ops._xpu_C.topk_topp_sampler(
             random_sampled,
-            processed_logprobs,
+            logits_to_return,
             logits,
             k,
             p,
             self.logprobs_mode,
             seeds,
             1.0)
-        return random_sampled, processed_logprobs
+        return random_sampled, logits_to_return
 
 
 
@@ -220,14 +224,9 @@ class TopKTopPSampler(nn.Module):
 @pytest.mark.parametrize("logprobs_mode", LOGPROBS_MODE)
 def test_topk_topp(batch_size, vocal_size, k, p, logprobs_mode):
 
-    seed_everything(0)
+    seed_everything(42)
 
     generators={}
-
-    if generators:
-        print("True")
-    else:
-        print("False")
 
     logits = torch.randn(
         batch_size, vocal_size, dtype=torch.float, device=DEVICE
@@ -237,12 +236,18 @@ def test_topk_topp(batch_size, vocal_size, k, p, logprobs_mode):
     top_k = None
     top_p = None
     if k is not None:
-        top_k = torch.randint(1, k + 1, (batch_size,), device=DEVICE)
-        print("top_k", top_k.shape, top_k.dtype)
+        if k != vocal_size:
+            top_k = torch.randint(1, k + 1, (batch_size,), device=DEVICE)
+        else:
+            top_k = torch.full((batch_size,), vocal_size, dtype=torch.long, device=DEVICE)
+        # print("top_k", top_k.shape, top_k.dtype)
     if p is not None:
-        top_p = 1.0 - torch.rand(
-            batch_size, dtype=torch.float, device=DEVICE
-        )
+        if p != 1.0:
+            top_p = 1.0 - torch.rand(
+                batch_size, dtype=torch.float, device=DEVICE
+            )
+        else:
+            top_p = torch.ones([batch_size], dtype=torch.float, device=DEVICE)
 
     topk_topp_sampler = TopKTopPSampler(logprobs_mode=logprobs_mode)
 
@@ -252,7 +257,7 @@ def test_topk_topp(batch_size, vocal_size, k, p, logprobs_mode):
             ],
             record_shapes=True,
         ) as prof:
-        random_sampled, processed_logprobs = topk_topp_sampler.forward_xpu(
+        random_sampled, logits_to_return = topk_topp_sampler.forward_xpu(
             logits=logits,
             generators=generators,
             k=top_k,
@@ -266,7 +271,7 @@ def test_topk_topp(batch_size, vocal_size, k, p, logprobs_mode):
             ],
             record_shapes=True,
         ) as prof_ref:
-        ref_random_sampled, ref_processed_logprobs = topk_topp_sampler.forward_native(
+        ref_random_sampled, ref_logits_to_return = topk_topp_sampler.forward_native(
             logits=ref_logits,
             generators=generators,
             k=top_k,
@@ -274,20 +279,9 @@ def test_topk_topp(batch_size, vocal_size, k, p, logprobs_mode):
         )
     print(prof_ref.key_averages().table(sort_by="self_xpu_time_total", row_limit=10), flush=True)
 
-    # print("ref_random_sampled", ref_random_sampled.shape, ref_random_sampled.dtype, ref_random_sampled)
-    # print("random_sampled", random_sampled[468])
-    # print("ref_random_sampled", ref_random_sampled[468])
-
-    # print("logits", logits)
-    # print("ref_logits", ref_logits)
-    # print("processed_logprobs", processed_logprobs)
-
-    # mask1 = logits != float('-inf')
-    # mask2 = ref_logits != float('-inf')
-
-    # torch.testing.assert_close(mask1.sum(-1), top_k, rtol=0, atol=0)
     torch.testing.assert_close(random_sampled, ref_random_sampled, rtol=0, atol=0)
-    if processed_logprobs is not None:
-        # print("ref_processed_logprobs", ref_processed_logprobs.shape, ref_processed_logprobs.dtype)
-        # torch.testing.assert_close(processed_logprobs, ref_processed_logprobs, rtol=1e-2, atol=1e-2)
-        pass
+    if logits_to_return is not None:
+        mask = (logits_to_return - ref_logits_to_return) > 1e-2
+        mask_sum = mask.sum()
+        if mask_sum > 5:
+            torch.testing.assert_close(logits_to_return, ref_logits_to_return, rtol=1e-2, atol=1e-2)
