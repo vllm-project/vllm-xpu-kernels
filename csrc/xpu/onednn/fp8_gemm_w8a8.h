@@ -25,6 +25,20 @@ static inline void dnnl_matmul_w8a8_fp8(
   const int n = o_sz.back();  // presume channel last format
   const int k = *(src_sz.end() - 1);
 
+  // block quant param
+  bool is_block_quant = (m1_sc.dim() == 2) && (m2_sc.dim() == 2) &&
+                        (m1_sc.size(1) != 1) && (m2_sc.size(1) != 1);
+  int64_t group_size = -1;
+  if (is_block_quant) {
+    TORCH_CHECK(
+        m1_sc.size(1) == m2_sc.size(1),
+        "Mismatch group size in input and weight.",
+        m1_sc.size(1),
+        " vs ",
+        m2_sc.size(1));
+    group_size = k / m1_sc.size(1);
+  }
+
   // get joint dtypes
   joint_dtypes_t jd;
   auto in_dtype = mat1.scalar_type();
@@ -77,6 +91,13 @@ static inline void dnnl_matmul_w8a8_fp8(
           {},
           get_onednn_dtype(m1_sc));
       /* per tensor quant */
+    } else if (is_block_quant) {
+      pattr.set_scales(
+          DNNL_ARG_SRC,
+          /* mask */ (1 << 0) + (1 << 1),
+          {1, group_size},
+          get_onednn_dtype(m1_sc));
+      /* per block quant */
     } else {
       pattr.set_scales(
           DNNL_ARG_SRC,
@@ -93,6 +114,13 @@ static inline void dnnl_matmul_w8a8_fp8(
           {},
           get_onednn_dtype(m2_sc));
       /* per tensor quant */
+    } else if (is_block_quant) {
+      pattr.set_scales(
+          DNNL_ARG_WEIGHTS,
+          /* mask */ (1 << 0) + (1 << 1),
+          {group_size, group_size},
+          get_onednn_dtype(m2_sc));
+      /* per block quant */
     } else {
       pattr.set_scales(
           DNNL_ARG_WEIGHTS,
