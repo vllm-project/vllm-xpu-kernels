@@ -53,6 +53,22 @@ struct chunk_prefill_args_t {
   bool is_causal = false;
   bool is_local = false;
   bool is_sink = false;
+  // Q/O strides in CUTLASS order: (seq, head_size=1, heads, batch)
+  int q_stride_seq = 0;
+  int q_stride_heads = 0;
+  int q_stride_batch = 0;
+  // K strides in CUTLASS order: (seq, head_size=1, heads, batch)
+  int k_stride_seq = 0;
+  int k_stride_heads = 0;
+  int k_stride_batch = 0;
+  // V strides in CUTLASS order: (head_size=1, seq, heads, batch)
+  int v_stride_seq = 0;
+  int v_stride_heads = 0;
+  int v_stride_batch = 0;
+  // O strides in CUTLASS order: (seq, head_size=1, heads, batch)
+  int o_stride_seq = 0;
+  int o_stride_heads = 0;
+  int o_stride_batch = 0;
 };
 
 template <class FMHAKernel, bool isVarLen>
@@ -110,21 +126,26 @@ struct KernelLauncher {
       shape.seq_len_kv = shape_init.seq_len_kv = args.max_keys;
     }
 
-    auto seq_len_qo = shape_init.seq_len_qo;
-    auto seq_len_kv = shape_init.seq_len_kv;
+    // Use actual tensor strides instead of packed strides
+    stride_Q = StrideQ{};
+    get<0>(stride_Q) = args.q_stride_seq;
+    get<2>(stride_Q) = args.q_stride_heads;
+    get<3>(stride_Q) = args.q_stride_batch;
 
-    stride_Q = cutlass::make_cute_packed_stride(
-        StrideQ{},
-        cute::make_shape(seq_len_qo, head_size_qk, num_heads_q, batch));
-    stride_K = cutlass::make_cute_packed_stride(
-        StrideK{},
-        cute::make_shape(seq_len_kv, head_size_qk, num_heads_kv, batch));
-    stride_V = cutlass::make_cute_packed_stride(
-        StrideV{},
-        cute::make_shape(head_size_vo, seq_len_kv, num_heads_kv, batch));
-    stride_O = cutlass::make_cute_packed_stride(
-        StrideO{},
-        cute::make_shape(seq_len_qo, head_size_vo, num_heads_q, batch));
+    stride_K = StrideK{};
+    get<0>(stride_K) = args.k_stride_seq;
+    get<2>(stride_K) = args.k_stride_heads;
+    get<3>(stride_K) = args.k_stride_batch;
+
+    stride_V = StrideV{};
+    get<1>(stride_V) = args.v_stride_seq;
+    get<2>(stride_V) = args.v_stride_heads;
+    get<3>(stride_V) = args.v_stride_batch;
+
+    stride_O = StrideO{};
+    get<0>(stride_O) = args.o_stride_seq;
+    get<2>(stride_O) = args.o_stride_heads;
+    get<3>(stride_O) = args.o_stride_batch;
 
     return shape;
   }
