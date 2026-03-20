@@ -70,53 +70,55 @@ jobs:
         id: check
         run: |
           set_all_outputs() {
-            echo "run_any=true"      >> "$GITHUB_OUTPUT"
-            echo "run_all=true"      >> "$GITHUB_OUTPUT"
-            echo "run_attention=true" >> "$GITHUB_OUTPUT"
-            echo "run_moe=true"      >> "$GITHUB_OUTPUT"
-            echo "run_lora=true"     >> "$GITHUB_OUTPUT"
-            echo "run_quant=true"    >> "$GITHUB_OUTPUT"
-            echo "run_other=true"    >> "$GITHUB_OUTPUT"
+            {
+              echo "run_any=true"
+              echo "run_all=true"
+              echo "run_attention=true"
+              echo "run_moe=true"
+              echo "run_lora=true"
+              echo "run_quant=true"
+              echo "run_other=true"
+            } >> "$GITHUB_OUTPUT"
           }
 
           # Always run all tests on push to main
-          if [[ "${{ github.event_name }}" == "push" ]]; then
+          if [ "${{ github.event_name }}" = "push" ]; then
             echo "Push to main: running all tests"
             set_all_outputs
             exit 0
           fi
 
           # Run all tests when manually triggered with run_all_tests=true
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.run_all_tests }}" == "true" ]]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.run_all_tests }}" = "true" ]; then
             echo "Manual trigger with run_all_tests=true: running all tests"
             set_all_outputs
             exit 0
           fi
 
           # Honor per-group manual inputs when workflow_dispatch is used without run_all_tests
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             RUN_ANY=false
-            if [[ "${{ inputs.run_attention }}" == "true" ]]; then
+            if [ "${{ inputs.run_attention }}" = "true" ]; then
               echo "run_attention=true" >> "$GITHUB_OUTPUT"
               RUN_ANY=true
             fi
-            if [[ "${{ inputs.run_moe }}" == "true" ]]; then
+            if [ "${{ inputs.run_moe }}" = "true" ]; then
               echo "run_moe=true" >> "$GITHUB_OUTPUT"
               RUN_ANY=true
             fi
-            if [[ "${{ inputs.run_lora }}" == "true" ]]; then
+            if [ "${{ inputs.run_lora }}" = "true" ]; then
               echo "run_lora=true" >> "$GITHUB_OUTPUT"
               RUN_ANY=true
             fi
-            if [[ "${{ inputs.run_quant }}" == "true" ]]; then
+            if [ "${{ inputs.run_quant }}" = "true" ]; then
               echo "run_quant=true" >> "$GITHUB_OUTPUT"
               RUN_ANY=true
             fi
-            if [[ "${{ inputs.run_other }}" == "true" ]]; then
+            if [ "${{ inputs.run_other }}" = "true" ]; then
               echo "run_other=true" >> "$GITHUB_OUTPUT"
               RUN_ANY=true
             fi
-            if [[ "$RUN_ANY" == "true" ]]; then
+            if [ "$RUN_ANY" = "true" ]; then
               echo "Manual trigger with per-group inputs: running selected test groups"
               echo "run_any=true" >> "$GITHUB_OUTPUT"
               exit 0
@@ -124,7 +126,7 @@ jobs:
           fi
 
           # Get changed files for pull_request or workflow_dispatch (no group selected)
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             CHANGED_FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}")
           else
             # workflow_dispatch without run_all_tests or per-group inputs: compare against the main branch tip
@@ -269,24 +271,24 @@ jobs:
           TEST_PATHS=""
           GROUPED_GEMM_TEST=""
 
-          if [[ "$RUN_ALL" == "true" ]]; then
+          if [ "$RUN_ALL" = "true" ]; then
             TEST_PATHS="tests/"
             GROUPED_GEMM_TEST="tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm"
           else
-            if [[ "$RUN_ATTENTION" == "true" ]]; then
+            if [ "$RUN_ATTENTION" = "true" ]; then
               TEST_PATHS="$TEST_PATHS tests/flash_attn/ tests/gdn_attn/ tests/test_cache.py"
             fi
-            if [[ "$RUN_MOE" == "true" ]]; then
+            if [ "$RUN_MOE" = "true" ]; then
               TEST_PATHS="$TEST_PATHS tests/fused_moe/test_fused_moe.py tests/fused_moe/test_moe_prologue.py tests/fused_moe/test_remap_hidden_states.py tests/test_moe_gather.py tests/test_topk.py tests/test_topk_per_row.py tests/test_grouped_topk.py tests/test_moe_align_block_size.py tests/test_moe_lora_align_sum.py"
               GROUPED_GEMM_TEST="tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm"
             fi
-            if [[ "$RUN_LORA" == "true" ]]; then
+            if [ "$RUN_LORA" = "true" ]; then
               TEST_PATHS="$TEST_PATHS tests/test_lora_ops.py"
             fi
-            if [[ "$RUN_QUANT" == "true" ]]; then
+            if [ "$RUN_QUANT" = "true" ]; then
               TEST_PATHS="$TEST_PATHS tests/test_fp8_quant.py tests/test_mxfp4_quant.py tests/test_int4_gemm_onednn.py tests/test_indexer_k_quant_and_cache.py"
             fi
-            if [[ "$RUN_OTHER" == "true" ]]; then
+            if [ "$RUN_OTHER" = "true" ]; then
               TEST_PATHS="$TEST_PATHS tests/test_layernorm.py tests/test_rotary_embedding.py tests/test_mem_alloc.py tests/test_uva.py"
             fi
           fi
@@ -294,15 +296,16 @@ jobs:
           # Trim leading/trailing whitespace
           TEST_PATHS=$(echo "$TEST_PATHS" | xargs)
 
-          if [[ -n "$TEST_PATHS" ]]; then
+          if [ -n "$TEST_PATHS" ]; then
             # $TEST_PATHS is intentionally unquoted so the shell word-splits it into
             # separate arguments for pytest (test directories + optional --ignore flags).
+            # shellcheck disable=SC2086
             ZE_AFFINITY_MASK=0,1 SKIP_HANG_KERNEL=1 SKIP_ACC_ERROR_KERNEL=1 pytest -v -s $TEST_PATHS
           fi
-          if [[ -n "$GROUPED_GEMM_TEST" ]]; then
+          if [ -n "$GROUPED_GEMM_TEST" ]; then
             VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 ZE_AFFINITY_MASK=0,1 pytest -v -s $GROUPED_GEMM_TEST
           fi
-          if [[ -z "$TEST_PATHS" && -z "$GROUPED_GEMM_TEST" ]]; then
+          if [ -z "$TEST_PATHS" ] && [ -z "$GROUPED_GEMM_TEST" ]; then
             echo "No tests selected for this run."
           fi
 
@@ -356,7 +359,7 @@ jobs:
           LORA_TEST=""
           GROUPED_GEMM_TEST=""
 
-          if [[ "$RUN_ALL" == "true" ]]; then
+          if [ "$RUN_ALL" = "true" ]; then
             # tests/test_moe_align_block_size.py and tests/test_moe_lora_align_sum.py take
             # much longer than expected on BMG; skip them in the full run for now.
             TEST_PATHS="tests/ --ignore=tests/test_lora_ops.py --ignore=tests/test_fp8_quant.py --ignore=tests/test_moe_align_block_size.py --ignore=tests/test_moe_lora_align_sum.py"
@@ -364,23 +367,23 @@ jobs:
             LORA_TEST="tests/test_lora_ops.py"
             GROUPED_GEMM_TEST="tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm"
           else
-            if [[ "$RUN_ATTENTION" == "true" ]]; then
+            if [ "$RUN_ATTENTION" = "true" ]; then
               TEST_PATHS="$TEST_PATHS tests/flash_attn/ tests/gdn_attn/ tests/test_cache.py"
             fi
-            if [[ "$RUN_MOE" == "true" ]]; then
+            if [ "$RUN_MOE" = "true" ]; then
               # Skip test_moe_align_block_size.py and test_moe_lora_align_sum.py on BMG (too slow)
               TEST_PATHS="$TEST_PATHS tests/fused_moe/test_fused_moe.py tests/fused_moe/test_moe_prologue.py tests/fused_moe/test_remap_hidden_states.py tests/test_moe_gather.py tests/test_topk.py tests/test_topk_per_row.py tests/test_grouped_topk.py"
               GROUPED_GEMM_TEST="tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm"
             fi
-            if [[ "$RUN_LORA" == "true" ]]; then
+            if [ "$RUN_LORA" = "true" ]; then
               # fixme: Run lora UT separately to avoid OOM when running together with other tests.
               LORA_TEST="tests/test_lora_ops.py"
             fi
-            if [[ "$RUN_QUANT" == "true" ]]; then
+            if [ "$RUN_QUANT" = "true" ]; then
               # test_fp8_quant.py is excluded on BMG in the full run; keep that here too
               TEST_PATHS="$TEST_PATHS tests/test_mxfp4_quant.py tests/test_int4_gemm_onednn.py tests/test_indexer_k_quant_and_cache.py"
             fi
-            if [[ "$RUN_OTHER" == "true" ]]; then
+            if [ "$RUN_OTHER" = "true" ]; then
               TEST_PATHS="$TEST_PATHS tests/test_layernorm.py tests/test_rotary_embedding.py tests/test_mem_alloc.py tests/test_uva.py"
             fi
           fi
@@ -388,18 +391,19 @@ jobs:
           # Trim leading/trailing whitespace
           TEST_PATHS=$(echo "$TEST_PATHS" | xargs)
 
-          if [[ -n "$TEST_PATHS" ]]; then
+          if [ -n "$TEST_PATHS" ]; then
             # $TEST_PATHS is intentionally unquoted so the shell word-splits it into
             # separate arguments for pytest (test directories + optional --ignore flags).
+            # shellcheck disable=SC2086
             ZE_AFFINITY_MASK=0,1 pytest -v -s $TEST_PATHS
           fi
-          if [[ -n "$LORA_TEST" ]]; then
+          if [ -n "$LORA_TEST" ]; then
             ZE_AFFINITY_MASK=0,1 pytest -v -s $LORA_TEST
           fi
-          if [[ -n "$GROUPED_GEMM_TEST" ]]; then
+          if [ -n "$GROUPED_GEMM_TEST" ]; then
             VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 ZE_AFFINITY_MASK=0,1 pytest -v -s $GROUPED_GEMM_TEST
           fi
-          if [[ -z "$TEST_PATHS" && -z "$LORA_TEST" && -z "$GROUPED_GEMM_TEST" ]]; then
+          if [ -z "$TEST_PATHS" ] && [ -z "$LORA_TEST" ] && [ -z "$GROUPED_GEMM_TEST" ]; then
             echo "No tests selected for this run."
           fi
 
