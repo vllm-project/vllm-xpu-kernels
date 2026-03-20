@@ -259,6 +259,8 @@ def xpu_fused_moe(hidden_states,
         torch.ops._C.gelu_and_mul(act_output, gemm1_output)
     elif activation == "swigluoai":
         torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
+    elif activation == "swiglustep":
+        torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
