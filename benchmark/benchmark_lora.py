@@ -15,8 +15,8 @@ from typing import Any, Callable, Optional
 import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
-from utils import ArgPool, Bench, CudaGraphBenchParams
-from weight_shapes import WEIGHT_SHAPES
+from benchmark.utils import ArgPool, Bench, CudaGraphBenchParams
+from benchmark.weight_shapes import WEIGHT_SHAPES
 
 from tests.lora.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 

@@ -111,6 +111,7 @@ def get_benchmark(scoring_func: str):
                                     device="xpu")
 
         quantiles = [0.5, 0.2, 0.8]
+        print(f"Running config: {(n_token, n_expert, topk, renormalize, dtype)}, Provider: {provider}", flush=True)
 
         if provider == "vllm":
             ms, min_ms, max_ms = triton.testing.do_bench(
