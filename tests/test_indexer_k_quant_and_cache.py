@@ -13,9 +13,9 @@ HEAD_DIMS = [128, 256, 512]
 QUANT_BLOCK_SIZES = [128]
 BLOCK_SIZES = [16]
 SCALE_FMTS = ["ue8m0", "fp8e4m3"]
-# TODO: will add back torch.bfloat16, torch.float16
+# TODO: will add back torch.float16
 # after fp8_e4m3 acc is verified
-DTYPES = [torch.float32]
+DTYPES = [torch.float32, torch.bfloat16]
 
 # override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
@@ -57,11 +57,12 @@ def _pytorch_group_quant(
     original_shape = x.shape
     num_groups = original_shape[-1] // group_size
     group_shape = original_shape[:-1] + (num_groups, group_size)
-    x_grouped = x.view(group_shape)
 
+    # Quantization should be done in FP32 for better accuracy.
+    x_grouped = x.view(group_shape).float()
     abs_max = torch.amax(torch.abs(x_grouped), dim=-1, keepdim=False)
-    abs_max = torch.maximum(abs_max,
-                            torch.tensor(eps, device=x.device, dtype=x.dtype))
+    abs_max = torch.maximum(
+        abs_max, torch.tensor(eps, device=x.device, dtype=torch.float32))
 
     FP8_MAX = torch.finfo(dtype).max
     FP8_MIN = torch.finfo(dtype).min

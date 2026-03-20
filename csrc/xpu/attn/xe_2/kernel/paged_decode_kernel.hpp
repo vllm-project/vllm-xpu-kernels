@@ -319,10 +319,29 @@ class XeFMHAFwdSplitKVKernel {
 
       int num_blocks_per_split =
           cute::ceil_div(windowed_k_blocks, num_kv_splits);
-      int kv_split_offset = k_block0 + idx_kv_split * num_blocks_per_split;
-      int num_effective_kv_blocks = cute::min(
-          windowed_k_blocks - idx_kv_split * num_blocks_per_split,
-          num_blocks_per_split);
+
+      // Per-sequence split decision: short sequences are treated as
+      // single-split even when num_kv_splits > 1, avoiding precision
+      // loss from the split-reduce roundtrip.
+      constexpr int kMinBlocksForSplit = 128;
+      bool is_single_split =
+          (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
+
+      int kv_split_offset;
+      int num_effective_kv_blocks;
+      if (is_single_split) {
+        // Split 0 processes all blocks; splits 1+ skip entirely.
+        if (idx_kv_split > 0) {
+          continue;
+        }
+        kv_split_offset = k_block0;
+        num_effective_kv_blocks = windowed_k_blocks;
+      } else {
+        kv_split_offset = k_block0 + idx_kv_split * num_blocks_per_split;
+        num_effective_kv_blocks = cute::min(
+            windowed_k_blocks - idx_kv_split * num_blocks_per_split,
+            num_blocks_per_split);
+      }
 
       if (num_effective_kv_blocks <= 0) {
         // no need computation
@@ -409,7 +428,8 @@ class XeFMHAFwdSplitKVKernel {
             idx_kv_split,
             head_group_q,
             sinks_per_kv,
-            num_kv_splits);
+            num_kv_splits,
+            is_single_split);
       } else {
         epilogue(
             O(_, _, head, idx_kv_split, l_coord),
@@ -423,7 +443,8 @@ class XeFMHAFwdSplitKVKernel {
             idx_kv_split,
             head_group_q,
             sinks,
-            num_kv_splits);
+            num_kv_splits,
+            is_single_split);
       }
     }
   }
@@ -702,16 +723,18 @@ class ReduceSplitK {
           ElementLSE local_max_logit = shared_storage.max_logits_slm_array[i];
           ElementLSE local_exp_sum = shared_storage.exp_sums_slm_array[i];
 
+          // Skip splits with no valid data (short sequences treated as
+          // single-split have exp_sums=0 / max_logits=-inf for unused splits).
+          if (local_exp_sum <= ElementLSE(0)) continue;
+
           ElementLSE rescale =
               sycl::native::exp2(local_max_logit - global_max_logits);
 
-          // in FMHA epilogue, it's divided by local_exp_sum, here we multiply
-          // back
-          ElementLSE adjusted_o_accum =
-              static_cast<ElementLSE>(
-                  Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord)) *
-              local_exp_sum;
-          acc += adjusted_o_accum * rescale;
+          // Partial outputs are unnormalized (not divided by exp_sum in the
+          // epilogue), so combine them directly with the rescale factor.
+          ElementLSE o_accum_val = static_cast<ElementLSE>(
+              Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord));
+          acc += o_accum_val * rescale;
 
           // update global exp sum
           global_exp_sums += local_exp_sum * rescale;

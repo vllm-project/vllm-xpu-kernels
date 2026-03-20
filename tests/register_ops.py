@@ -151,6 +151,28 @@ def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor,
                                                      scale_fmt)
 
 
+def xpu_memcpy_sync(dst_ptr: int,
+                    src_ptr: int,
+                    n_bytes: int,
+                    kind: int,
+                    device: int = -1) -> None:
+    """Pointer-based synchronous memcpy op.
+
+    kind: 0=H2D, 1=D2H, 2=D2D.
+    """
+
+    def _to_i64_ptr(ptr: int) -> int:
+        return ptr if ptr < (1 << 63) else ptr - (1 << 64)
+
+    torch.ops._C.xpu_memcpy_sync(
+        _to_i64_ptr(dst_ptr),
+        _to_i64_ptr(src_ptr),
+        n_bytes,
+        kind,
+        device,
+    )
+
+
 def convert_fp8(
     dst_cache: torch.Tensor,
     src_cache: torch.Tensor,
@@ -408,3 +430,43 @@ def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  bias: Optional[torch.Tensor]) -> None:
     torch.ops._moe_C.topk_sigmoid(topk_weights, topk_ids, token_expert_indices,
                                   gating_output, renormalize, bias)
+
+
+def topk_per_row_prefill(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    top_k: int,
+) -> None:
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+
+def topk_per_row_decode(
+    logits: torch.Tensor,
+    next_n: int,
+    seq_lens: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    top_k: int,
+) -> None:
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        next_n,
+        seq_lens,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
