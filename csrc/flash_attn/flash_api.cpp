@@ -31,6 +31,7 @@ inline int get_num_splits(
     // Under-utilized: fill GPU cores.
     // Scale by block_size since larger blocks mean more compute per WG.
     int eff_parallel = cur_parallel * block_size / 64;
+    eff_parallel = std::max(1, eff_parallel);
     target_splits = (num_xe_cores + eff_parallel - 1) / eff_parallel;
   } else if (cur_parallel <= num_xe_cores * 2) {
     // Well-utilized zone (1x-2x oversubscription):
