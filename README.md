@@ -1,25 +1,25 @@
 ## About
 
-This repo is designed as a vLLM plugin which provides custom kernels for Intel GPU (known as XPU in PyTorch).
+This repository is a vLLM plugin that provides custom kernels for Intel GPUs (called XPU in PyTorch).
 
 ## Getting started
-Currently we use PyTorch 2.10, oneapi 2025.3.
+We currently use PyTorch 2.10 and oneAPI 2025.3.
 
 ### How it works
-vLLM define and implement a lot custom torch ops/kernels in vllm code base for cuda. as a torch supported device, Intel GPU can also do similar work to provide same ops/kernels in vLLM for xpu device. We followed torch op register/dispatch method in this repo. On vllm side, we will do `import vllm_xpu_kernels._C` at start time which should register all custom ops so we can directly use.
+vLLM defines and implements many custom Torch ops/kernels in the vLLM codebase for CUDA. As a PyTorch-supported device, Intel GPUs can provide equivalent ops/kernels for the XPU backend. This repository follows the Torch op registration/dispatch pattern. On the vLLM side, `import vllm_xpu_kernels._C` is executed at startup, which registers all custom ops for direct use.
 
 ### Prepare
 
-Install oneapi 2025.3 deep learning essential [dependency](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html).
+Install the oneAPI 2025.3 deep learning essentials [dependency](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html).
 
-Create a new virtual env, install build dependency and torch dependency
+Create a new virtual environment, then install the build and Torch dependencies:
 
 ```
 pip install -r requirements.txt
 ```
 
 ### Build & Install
-Build development installation to current directory:
+For a development install in the current directory:
 
 ```
 pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
@@ -27,7 +27,7 @@ pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
 pip install --no-build-isolation -e . -v
 ```
 
-or installation to system directory:
+For an installation to the system directory:
 
 ```
 pip install --extra-index-url=https://download.pytorch.org/whl/xpu  .
@@ -35,7 +35,7 @@ pip install --extra-index-url=https://download.pytorch.org/whl/xpu  .
 pip install --no-build-isolation . 
 ```
 
-or build wheel (generated .whl in dist folder)
+To build a wheel (the generated `.whl` file will be placed in the `dist` folder):
 
 ```
 pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu  .
@@ -43,34 +43,34 @@ pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu  .
 pip wheel --no-build-isolation  .
 ```
 
-Incremental build
+For incremental builds:
 
 ```
 python3 -m build --wheel --no-isolation
 ```
 
 ### How to use in vLLM
-As vLLM [RFC#33214](https://github.com/vllm-project/vllm/issues/33214) completed, vLLM-xpu is migrated to vLLM-xpu-kernels based implementation. You can pull latest vllm code and install vllm-xpu manually now.
+After vLLM [RFC#33214](https://github.com/vllm-project/vllm/issues/33214) was completed, vLLM-XPU migrated to a vLLM-XPU-kernels-based implementation. You can now pull the latest vLLM code and install vLLM-XPU manually; vLLM-XPU-kernels will be installed automatically as a wheel dependency.
 
-### Why Static Linking DNNL Instead of Shared Linking?
+### Why statically link DNNL instead of using shared linking?
 
 We chose to **statically link oneDNN (DNNL)** rather than using it as a shared library for the following reasons:
 
 #### 1. **Version Compatibility**
 
-Static linking ensures our application always uses the exact version of DNNL. With shared libraries, there's a risk that system-installed versions might be incompatible or introduce subtle bugs due to API/ABI changes.
+Static linking ensures that the application always uses the exact DNNL version we ship. With shared libraries, system-installed versions may be incompatible or introduce subtle bugs due to API/ABI changes.
 
 #### 2. **Performance Consistency**
 
-By linking statically, we avoid potential performance variability introduced by different builds or configurations of DNNL that might be present on the host system.
+With static linking, we avoid performance variability caused by different DNNL builds or configurations that may exist on the host system.
 
 #### 3. **Avoiding Runtime Errors**
 
-Using shared libraries requires correct paths and environment setup (`LD_LIBRARY_PATH` on Linux). Static linking avoids issues where DNNL cannot be found or loaded at runtime.
+Shared libraries require correct paths and environment setup (`LD_LIBRARY_PATH` on Linux). Static linking avoids runtime issues where DNNL cannot be found or loaded.
 
 #### 4. **Aligning with PyTorch**
 
-One key reason to use static linking is to maintain consistency with the PyTorch ecosystem. PyTorch itself statically links libraries like DNNL to ensure deterministic and reliable behavior across different environments.
+Another key reason for static linking is consistency with the PyTorch ecosystem. PyTorch also statically links libraries such as DNNL to ensure deterministic and reliable behavior across environments.
 
 ## License
 
