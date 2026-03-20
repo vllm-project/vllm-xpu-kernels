@@ -68,6 +68,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
 
   xpu_ops.def(
+      "causal_conv1d(Tensor! q_out, Tensor! k_out, Tensor! v_out, Tensor! "
+      "z_out, Tensor! b_out, Tensor! a_out, Tensor mixed_qkvz, Tensor "
+      "mixed_ba, Tensor conv_weights, Tensor? conv_bias, Tensor! conv_states, "
+      "Tensor query_start_loc, Tensor cache_indices, Tensor? "
+      "has_initial_state, "
+      "str activation, int num_prefills, int num_decodes, "
+      "bool reorder_input) -> ()");
+  xpu_ops.impl("causal_conv1d", torch::kXPU, &causal_conv1d);
+
+  xpu_ops.def(
+      "gated_delta_rule(Tensor! core_attn_out, Tensor q, Tensor k, Tensor v, "
+      "Tensor b, Tensor a, Tensor A_log, Tensor dt_bias, Tensor! ssm_state, "
+      "Tensor query_start_loc, Tensor cache_indices, Tensor? "
+      "has_initial_state, "
+      "int num_prefills, int num_decodes) -> ()");
+  xpu_ops.impl("gated_delta_rule", torch::kXPU, &gated_delta_rule);
+
+  xpu_ops.def(
       "gdn_attention(Tensor! core_attn_out, Tensor! z, Tensor "
       "projected_states_qkvz, Tensor projected_states_ba,"
       "int num_k_heads, int num_v_heads, int head_k_dim, int head_v_dim,"
