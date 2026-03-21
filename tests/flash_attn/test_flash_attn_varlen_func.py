@@ -406,6 +406,7 @@ def test_decode_with_paged_kv(
     q_descale = None  #noqa: F841
     k_descale = None  #noqa: F841
     v_descale = None  #noqa: F841
+    scale_shape = (num_seqs, num_kv_heads)
     if q_dtype is not None:
         # QKV are drawn from N(0, 1): no need for a fp8 scaling factor
         maybe_quantized_query = query.to(q_dtype)
@@ -434,8 +435,10 @@ def test_decode_with_paged_kv(
                                     softmax_scale=scale,
                                     causal=False,
                                     block_table=block_tables,
-                                    k_descale=k_descale,
-                                    v_descale=v_descale,
+                                    k_descale=k_descale.expand(scale_shape)
+                                    if k_descale is not None else None,
+                                    v_descale=v_descale.expand(scale_shape)
+                                    if v_descale is not None else None,
                                     window_size=window_size,
                                     s_aux=sink)
 
