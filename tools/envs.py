@@ -83,10 +83,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MAX_JOBS":
     lambda: os.getenv("MAX_JOBS", None),
 
-    # If set, vllm will use precompiled binaries (*.so)
+    # If set, vllm-xpu-kernels will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
-    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
-        os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+    lambda: os.environ.get("VLLM_USE_PRECOMPILED", "").strip().lower() in
+    ("1", "true") or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
 
     # Whether to force using nightly wheel in python build.
     # This is used for testing the nightly wheel in python build.
