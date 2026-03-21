@@ -7,6 +7,7 @@ from typing import Optional
 import pytest
 import torch
 
+from tests.utils import format_tc
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 NUM_HEADS = [(4, 4), (8, 2), (10, 2), (16, 1)]
@@ -147,15 +148,15 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @pytest.mark.parametrize("soft_cap", SOFT_CAPS)
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("fa_version", [2])
-@pytest.mark.parametrize("q_dtype", QDTYPES)
+@pytest.mark.parametrize("q_dtype", QDTYPES, ids=format_tc)
 @pytest.mark.parametrize("is_sink", SINK)
 @pytest.mark.parametrize("is_casual", CASUAL)
 @pytest.mark.parametrize("is_paged", PAGED)
-@pytest.mark.parametrize("fp8_dtype", FP8KV)
+@pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
 @torch.inference_mode()
 def test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -328,13 +329,13 @@ def test_varlen_with_paged_kv(
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @pytest.mark.parametrize("soft_cap", SOFT_CAPS)
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("fa_version", [2])
-@pytest.mark.parametrize("q_dtype", QDTYPES)
+@pytest.mark.parametrize("q_dtype", QDTYPES, ids=format_tc)
 @pytest.mark.parametrize("is_sink", SINK)
-@pytest.mark.parametrize("fp8_dtype", FP8KV)
+@pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
 @pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
 @torch.inference_mode()
 def test_decode_with_paged_kv(
