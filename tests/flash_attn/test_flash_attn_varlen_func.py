@@ -365,8 +365,9 @@ def test_decode_with_paged_kv(
     if is_sink and window_size != (-1, -1):
         pytest.skip("sink not supported with sliding window")
     is_fp8_query = q_dtype is not None
-    if is_fp8_query:
-        pytest.skip("skip cases with fp8 query")
+    is_fp8kv = fp8_dtype is not None
+    if is_fp8_query and q_dtype != fp8_dtype:
+        pytest.skip("skip cases with fp8 query and non-fp8 kv")
     torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -419,9 +420,11 @@ def test_decode_with_paged_kv(
         q_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
         v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
-    is_fp8kv = False
-    if fp8_dtype is not None:
-        is_fp8kv = True
+    scale_shape = (num_seqs, num_kv_heads)
+    if is_fp8_query:
+        q_descale = (torch.abs(query).max() / 200).to(torch.float32)
+        maybe_quantized_query = (query / q_descale).to(q_dtype)
+    if is_fp8kv:
         k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
         v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
         maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
@@ -437,8 +440,12 @@ def test_decode_with_paged_kv(
                                     softmax_scale=scale,
                                     causal=False,
                                     block_table=block_tables,
-                                    k_descale=k_descale,
-                                    v_descale=v_descale,
+                                    q_descale=q_descale.expand(scale_shape)
+                                    if q_descale is not None else None,
+                                    k_descale=k_descale.expand(scale_shape)
+                                    if k_descale is not None else None,
+                                    v_descale=v_descale.expand(scale_shape)
+                                    if v_descale is not None else None,
                                     window_size=window_size,
                                     s_aux=sink)
 
@@ -452,6 +459,7 @@ def test_decode_with_paged_kv(
                                 casual=False,
                                 is_paged=True,
                                 sink=sink,
+                                q_descale=q_descale,
                                 k_descale=k_descale,
                                 v_descale=v_descale,
                                 window_size_left=window_size[0],
