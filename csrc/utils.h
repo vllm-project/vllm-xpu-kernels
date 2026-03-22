@@ -8,6 +8,21 @@
 #define CHECK_DEVICE(x) TORCH_CHECK(x.is_xpu(), #x " must be on XPU")
 #define CHECK_CONTIGUOUS(x) \
   TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+// Xe2 2D block loads require 64-byte aligned base pointers.
+// All non-unit strides must produce 64-byte aligned offsets.
+#define CHECK_STRIDE_ALIGNMENT(x)                             \
+  for (int _d = 0; _d < (x).dim() - 1; ++_d) {                \
+    TORCH_CHECK(                                              \
+        (x).stride(_d) * (x).element_size() % 64 == 0,        \
+        #x " stride(",                                        \
+        _d,                                                   \
+        ")=",                                                 \
+        (x).stride(_d),                                       \
+        " is not 64-byte aligned (element_size=",             \
+        (x).element_size(),                                   \
+        "). Xe2 2D block loads require 64-byte aligned base " \
+        "pointers.");                                         \
+  }
 
 namespace vllm {
 namespace xpu {
