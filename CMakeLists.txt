@@ -10,7 +10,6 @@ cmake_minimum_required(VERSION 3.26)
 # If you want to only build one target, make sure to install it manually: cmake
 # --build . --target _C cmake --install . --component _C
 project(vllm_extensions LANGUAGES CXX)
-
 # XPU by default, used by setup.py
 set(VLLM_TARGET_DEVICE
     "xpu"
@@ -140,6 +139,8 @@ message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 # when loaded by Python.
 set(CMAKE_INSTALL_RPATH "$ORIGIN")
 
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
+
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   #
   # For SYCL we want to use the same flags as CUDA, so we set them here. Note
@@ -150,6 +151,22 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(SYCL_FIRST_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/csrc/sycl_first.h")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include ${SYCL_FIRST_HEADER}")
 
+  # AOT devices can be overridden via environment variables:
+  # VLLM_XPU_AOT_DEVICES and VLLM_XPU_XE2_AOT_DEVICES Example: export
+  # VLLM_XPU_AOT_DEVICES="pvc,bmg-g21-a0" export
+  # VLLM_XPU_XE2_AOT_DEVICES="pvc,bmg-g31-a0"
+  set(AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
+  set(XE2_AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
+
+  # Allow overriding via env, including explicitly disabling AOT by setting an
+  # empty env var (e.g. export VLLM_XPU_AOT_DEVICES="").
+  if(DEFINED ENV{VLLM_XPU_AOT_DEVICES})
+    set(AOT_DEVICES $ENV{VLLM_XPU_AOT_DEVICES})
+  endif()
+  if(DEFINED ENV{VLLM_XPU_XE2_AOT_DEVICES})
+    set(XE2_AOT_DEVICES $ENV{VLLM_XPU_XE2_AOT_DEVICES})
+  endif()
+
   # ============= COMPILE OPTIONS ==================
   set(SYCL_FLAGS "")
   set(SYCL_KERNEL_OPTIONS)
@@ -157,12 +174,10 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   list(APPEND SYCL_FLAGS "-fsycl" "-fno-sycl-instrument-device-code")
 
   set(SYCL_COMPILE_FLAGS ${SYCL_FLAGS})
-
-  set(SYCL_TARGETS_OPTION -fsycl-targets=spir64_gen)
-  set(SYCL_KERNEL_OPTIONS ${SYCL_KERNEL_OPTIONS} ${SYCL_TARGETS_OPTION})
-  set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} ${SYCL_KERNEL_OPTIONS})
-
   set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} "-O3" "-DNDEBUG")
+  if(AOT_DEVICES)
+    set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} -fsycl-targets=spir64_gen)
+  endif()
   # Final build option be like: icpx -fsycl -fsycl-target=spir64_gen
   # ${SYCL_KERNEL_OPTIONS} -fsycl-host-compiler=gcc
   # -fsycl-host-compiler-options='${CMAKE_HOST_FLAGS}' kernel.cpp -o kernel.o
@@ -172,25 +187,25 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(SYCL_LINK_FLAGS "")
   list(APPEND SYCL_LINK_FLAGS "-fsycl" "-fno-sycl-instrument-device-code" "-fsycl-targets=spir64_gen")
   set(SYCL_DEVICE_LINK_FLAGS ${SYCL_LINK_FLAGS})
-  set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS} ${SYCL_TARGETS_OPTION})
   set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS}
                              -fsycl-max-parallel-link-jobs=16)
   set(SYCL_DEVICE_LINK_FLAGS
       ${SYCL_DEVICE_LINK_FLAGS}
       "-Xspirv-translator;-spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,+SPV_INTEL_subgroup_matrix_multiply_accumulate"
   )
-
-  # TODO: make AOT configurable
-  set(AOT_DEVICES "pvc,bmg-g21-a0,bmg-g31-a0")
-  set(XE2_AOT_DEVICES "pvc,bmg-g21-a0,bmg-g31-a0")
+  if(AOT_DEVICES)
+    list(APPEND SYCL_DEVICE_LINK_FLAGS -fsycl-targets=spir64_gen
+         -Xsycl-target-backend=spir64_gen)
+  endif()
 
   # Final link option be like: icpx -fsycl -fsycl-target=spir64_gen
   # ${SYCL_DEVICE_LINK_FLAGS} -Xsycl-target-backend=spir64_gen
   # '${SYCL_OFFLINE_COMPILER_FLAGS}' kernel.o -o device-code.o
   set(FINAL_LINK_OPTIONS "")
   list(APPEND FINAL_LINK_OPTIONS ${SYCL_DEVICE_LINK_FLAGS})
-  list(APPEND FINAL_LINK_OPTIONS -Xsycl-target-backend=spir64_gen
-       "-device ${AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
+  if(AOT_DEVICES)
+    list(APPEND FINAL_LINK_OPTIONS "-device ${AOT_DEVICES}")
+  endif()
 
   set(VLLM_GPU_LINK_FLAGS ${FINAL_LINK_OPTIONS})
 
@@ -333,6 +348,49 @@ list(
   "torch")
 
 #
+# xpumem_allocator extension - XPU memory allocator with Python callbacks
+#
+set(XPUMEM_ALLOCATOR_ENABLED
+    ON
+    CACHE BOOL "Build xpumem_allocator extension")
+if(XPUMEM_ALLOCATOR_ENABLED)
+  message(STATUS "Enabling xpumem_allocator extension.")
+
+  set(XPUMEM_ALLOCATOR_SRC "csrc/utils/mem_alloc.cpp")
+  include_directories("/usr/include")
+
+  # Create Python module for xpumem_allocator
+  find_package(Python REQUIRED COMPONENTS Development)
+  find_package(Torch REQUIRED)
+  list(APPEND PYTORCH_INCLUDES ${TORCH_INCLUDE_DIRS})
+  python_add_library(xpumem_allocator MODULE USE_SABI 3 WITH_SOABI
+                     "${XPUMEM_ALLOCATOR_SRC}")
+
+  set_property(TARGET xpumem_allocator PROPERTY CXX_STANDARD 17)
+
+  if(VLLM_GPU_LANG STREQUAL "SYCL")
+    target_compile_options(xpumem_allocator PRIVATE ${VLLM_GPU_COMPILE_FLAGS})
+  endif()
+  get_target_property(EXISTING_DEFS xpumem_allocator COMPILE_DEFINITIONS)
+  if(EXISTING_DEFS)
+    list(REMOVE_ITEM EXISTING_DEFS "Py_LIMITED_API=3")
+    set_target_properties(xpumem_allocator PROPERTIES COMPILE_DEFINITIONS
+                                                      "${EXISTING_DEFS}")
+  endif()
+  target_include_directories(xpumem_allocator PRIVATE ${Python_INCLUDE_DIRS}
+                                                      ${PYTORCH_INCLUDES} csrc)
+
+  target_link_libraries(xpumem_allocator PRIVATE torch ${TORCH_LIBRARIES})
+
+  if(VLLM_GPU_LANG STREQUAL "SYCL")
+    target_link_options(xpumem_allocator PRIVATE ${VLLM_GPU_LINK_FLAGS})
+  endif()
+
+  install(TARGETS xpumem_allocator LIBRARY DESTINATION vllm_xpu_kernels
+                                           COMPONENT xpumem_allocator)
+endif()
+
+#
 # Define other extension targets
 #
 
@@ -348,8 +406,11 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/pos_encoding_kernels.cpp"
       "csrc/torch_bindings.cpp"
       "csrc/quantization/fp8/fp8_quant.cpp"
+      "csrc/quantization/fp4/mxfp4_quant.cpp"
       "csrc/xpu_view.cpp"
-      "csrc/tensor_utils.cpp")
+      "csrc/tensor_utils.cpp"
+      "csrc/utils/mem_cpy.cpp"
+      "csrc/topk_per_row.cpp")
   include_directories("/usr/include")
 
   define_gpu_extension_target(

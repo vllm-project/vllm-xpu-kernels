@@ -18,20 +18,41 @@ inline int get_num_splits(
       device.get_info<sycl::ext::intel::info::device::gpu_slices>() *
       device
           .get_info<sycl::ext::intel::info::device::gpu_subslices_per_slice>();
-  int parallel_ = num_xe_cores;
-  int parallel_2 = num_xe_cores * 2;
 
-  int cur_parallel_d = batch_size * num_heads_kv;
+  int cur_parallel = batch_size * num_heads_kv;
+  int kv_blocks = (max_seqlen_k + block_size - 1) / block_size;
 
-  int num_splits = (parallel_ + cur_parallel_d - 1) / cur_parallel_d;
+  // Below 128 KV blocks the per-split FMHA compute is too small relative
+  // to the ReduceSplitK overhead, regardless of block size.
+  if (kv_blocks < 128) return 1;
 
-  if (cur_parallel_d * num_splits > parallel_ && num_splits > 1) {
-    num_splits = std::ceil(parallel_2 / static_cast<float>(cur_parallel_d)) - 1;
+  int target_splits;
+  if (cur_parallel < num_xe_cores) {
+    // Under-utilized: fill GPU cores.
+    // Scale by block_size since larger blocks mean more compute per WG.
+    int eff_parallel = cur_parallel * block_size / 64;
+    eff_parallel = std::max(1, eff_parallel);
+    target_splits = (num_xe_cores + eff_parallel - 1) / eff_parallel;
+  } else if (cur_parallel <= num_xe_cores * 2) {
+    // Well-utilized zone (1x-2x oversubscription):
+    // GPU is busy, splitting adds overhead without benefit.
+    return 1;
+  } else {
+    // Heavily oversubscribed (>2x): shorter WGs help.
+    // But gate out when compute is already saturated.
+    int eff_parallel = cur_parallel * block_size / 64;
+    if (eff_parallel >= num_xe_cores * 8) return 1;
+    target_splits = std::max(1, kv_blocks / 64);
+    int par_cap = std::max(1, num_xe_cores * 8 / cur_parallel);
+    target_splits = std::min(target_splits, par_cap);
   }
 
-  int max_splits = (max_seqlen_k + block_size - 1) / block_size;
-  max_splits = std::min(max_splits, parallel_);
-  return std::min(num_splits, max_splits);
+  // Each split must process at least 32 KV blocks.
+  int max_splits_blocks = std::max(1, kv_blocks / 32);
+  // Hard cap: more splits give diminishing returns and increase
+  // ReduceSplitK overhead and temporary buffer memory.
+  int num_splits = std::min({target_splits, max_splits_blocks, 8});
+  return std::max(1, num_splits);
 }
 
 std::vector<at::Tensor> mha_varlen_fwd(
@@ -69,11 +90,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
   TORCH_CHECK(
       v.scalar_type() == k_type, "key and value must have the same dtype");
-  bool is_fp8kv = false;
-  if (k_type == at::ScalarType::Float8_e5m2 ||
-      k_type == at::ScalarType::Float8_e4m3fn) {
-    is_fp8kv = true;
-  } else {
+  if (k_type != at::ScalarType::Float8_e5m2 &&
+      k_type != at::ScalarType::Float8_e4m3fn) {
     TORCH_CHECK(
         k.scalar_type() == q_type, "query and key must have the same dtype");
     TORCH_CHECK(
@@ -133,7 +151,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
 
-  if (max_seqlen_q > 1 || !is_paged || is_fp8kv) {
+  if (max_seqlen_q > 1 || !is_paged) {
     at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
 
     cutlass_chunk_prefill_interface(
@@ -178,50 +196,53 @@ std::vector<at::Tensor> mha_varlen_fwd(
     // int num_kv_splits = num_splits.value_or(get_num_splits(
     //     queue, batch_size, num_heads_kv, effective_seqlen_k, block_size));
 
-    // at::Tensor tmp_out =
-    //     num_kv_splits == 1
-    //         ? out
-    //         : at::empty(
-    //               {num_tokens, num_heads_q * num_kv_splits, head_dim},
-    //               q.options().device(q.device()));
-    // at::Tensor max_logits = at::empty(
-    //     {num_tokens, num_heads_q, num_kv_splits},
-    //     q.options().dtype(at::kFloat).device(q.device()));
-    // at::Tensor exp_sums = at::empty(
-    //     {num_tokens, num_heads_q, num_kv_splits},
-    //     q.options().dtype(at::kFloat).device(q.device()));
+    at::Tensor tmp_out =
+        num_kv_splits == 1
+            ? out
+            : at::empty(
+                  {num_tokens, num_heads_q * num_kv_splits, head_dim},
+                  q.options().device(q.device()));
+    at::Tensor max_logits = at::full(
+        {num_tokens, num_heads_q, num_kv_splits},
+        -std::numeric_limits<float>::infinity(),
+        q.options().dtype(at::kFloat).device(q.device()));
+    at::Tensor exp_sums = at::zeros(
+        {num_tokens, num_heads_q, num_kv_splits},
+        q.options().dtype(at::kFloat).device(q.device()));
 
     // at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
 
-    // // For paged decode (single query per sequence), causal masking is a
-    // // no-op: seqused_k already constrains KV to only the valid past tokens,
-    // // so there are no "future" tokens to mask. Passing is_causal=true
-    // // triggers a seq_len formula that adds +q_sg_tile extra KV positions,
-    // // causing invalid cache entries to pollute the attention output.
-    // cutlass_paged_decode_interface(
-    //     queue,
-    //     q,
-    //     k,
-    //     v,
-    //     out,
-    //     tmp_out,
-    //     exp_sums,
-    //     max_logits,
-    //     block_table,
-    //     cu_seqlens_q,
-    //     seqlens_k,
-    //     max_seqlen_q,
-    //     max_seqlen_k,
-    //     softmax_scale,
-    //     softmax_sink_,
-    //     eff_window_left,
-    //     eff_window_right,
-    //     is_varlen,
-    //     is_paged,
-    //     false,  // is_causal: always false for decode; see comment above
-    //     is_local,
-    //     is_sink,
-    //     num_kv_splits);
+    // For paged decode (single query per sequence), causal masking is a
+    // no-op: seqused_k already constrains KV to only the valid past tokens,
+    // so there are no "future" tokens to mask. Passing is_causal=true
+    // triggers a seq_len formula that adds +q_sg_tile extra KV positions,
+    // causing invalid cache entries to pollute the attention output.
+    cutlass_paged_decode_interface(
+        queue,
+        q,
+        k,
+        v,
+        out,
+        tmp_out,
+        exp_sums,
+        max_logits,
+        block_table,
+        cu_seqlens_q,
+        seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        k_scale,
+        v_scale,
+        softmax_scale,
+        softmax_sink_,
+        eff_window_left,
+        eff_window_right,
+        is_varlen,
+        is_paged,
+        false,  // is_causal: always false for decode; see comment above
+        is_local,
+        is_sink,
+        num_kv_splits);
   }
 
   if (return_softmax) {

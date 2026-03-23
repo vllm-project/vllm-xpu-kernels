@@ -7,10 +7,12 @@ import torch
 
 from tests import register_ops as ops
 from tests.register_ops import reshape_and_cache, reshape_and_cache_flash
-from tests.utils import (_convert_from_fp8, create_kv_caches_with_random,
+from tests.utils import (_convert_from_fp8, create_kv_caches_with_pinned,
+                         create_kv_caches_with_random,
                          create_kv_caches_with_random_flash, opcheck,
                          seed_everything)
 
+COPYING_DIRECTION = [("xpu", "cpu"), ("xpu", "xpu"), ("cpu", "xpu")]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
@@ -29,6 +31,8 @@ NUM_BLOCKS_MLA = [8]
 # don't make it too large. e.g. [1024, 36000] will OOM
 NUM_BLOCKS = [1024]
 
+NUM_MAPPINGS = [256]  # Arbitrary values for testing
+
 SEEDS = [0]
 DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
@@ -36,6 +40,14 @@ DEVICES = [
 
 KV_CACHE_DTYPE = ["auto"]  # FIXME: will add "fp8" when accuracy is improved
 KV_CACHE_DTYPE_ALL = ["auto", "fp8"]
+
+# For now, disable "test_aot_dispatch_dynamic" since there are some
+# bugs related to this test in PyTorch 2.4.
+DEFAULT_OPCHECK_TEST_UTILS: tuple[str, ...] = (
+    "test_schema",
+    "test_autograd_registration",
+    "test_faketensor",
+)
 
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
@@ -54,6 +66,40 @@ MINI_PYTEST_PARAMS = {
         "num_blocks": [4],
         "block_size": [8],
         "max_seq_len": [4],
+    },
+    "test_swap_blocks": {
+        "direction": [("xpu", "cpu")],
+        "num_mappings": [256],
+        "num_heads": [8],
+        "head_size": [64],
+        "block_size": [8],
+        "num_blocks": [1024],
+        "dtype": [torch.bfloat16],
+        "seed": [0],
+        "device": ["xpu:0"],
+        "kv_cache_dtype": KV_CACHE_DTYPE,
+    },
+    "test_swap_blocks_mla": {
+        "kv_lora_rank": KV_LORA_RANKS,
+        "qk_rope_head_dim": QK_ROPE_HEAD_DIMS,
+        "block_size": BLOCK_SIZES_MLA,
+        "num_blocks": NUM_BLOCKS_MLA,
+        "dtype": [torch.bfloat16],
+        "seed": [0],
+        "device": ["xpu:0"],
+        "kv_cache_dtype": KV_CACHE_DTYPE,
+    },
+    "test_swap_blocks_pinned": {
+        "direction": [("cpu", "xpu")],
+        "num_mappings": [256],
+        "num_heads": [8],
+        "head_size": [64],
+        "block_size": [8],
+        "num_blocks": [1024],
+        "dtype": [torch.bfloat16],
+        "seed": [0],
+        "device": ["xpu:0"],
+        "kv_cache_dtype": KV_CACHE_DTYPE,
     },
 }
 
@@ -491,3 +537,299 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
 
     ops.gather_cache(src_cache, dst, block_table, cu_seq_lens, batch_size)
     torch.testing.assert_close(dst, expected)
+
+
+@pytest.mark.parametrize("direction", COPYING_DIRECTION)
+@pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@torch.inference_mode()
+def test_swap_blocks(
+    kv_cache_factory,
+    direction: tuple[str, str],
+    num_mappings: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+) -> None:
+    if kv_cache_dtype == "fp8" and "cpu" in direction:
+        pytest.skip()
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
+
+    seed_everything(seed)
+
+    src_device = device if direction[0] == "xpu" else "cpu"
+    dst_device = device if direction[1] == "xpu" else "cpu"
+
+    src_blocks = random.sample(range(num_blocks), num_mappings)
+    # For the same device, mapping must not overlap
+    if src_device == dst_device:
+        remaining_blocks = list(set(range(num_blocks)) - set(src_blocks))
+        dst_blocks = random.sample(remaining_blocks, num_mappings)
+    else:
+        dst_blocks = random.sample(range(num_blocks), num_mappings)
+
+    block_mapping = list(zip(src_blocks, dst_blocks))
+    block_mapping_tensor = torch.tensor(block_mapping,
+                                        dtype=torch.int64,
+                                        device="cpu").view(-1, 2)
+
+    # Create the KV caches on the first device.
+    src_key_caches, src_value_caches = kv_cache_factory(
+        num_blocks,
+        block_size,
+        1,
+        num_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        seed,
+        src_device,
+    )
+
+    # Create the KV caches on the second device.
+    dst_key_caches, dst_value_caches = kv_cache_factory(
+        num_blocks,
+        block_size,
+        1,
+        num_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        seed,
+        dst_device,
+    )
+
+    src_key_caches_clone = src_key_caches[0].clone()
+    src_value_caches_clone = src_value_caches[0].clone()
+
+    # Call the swap_blocks kernel.
+    do_opcheck = head_size == HEAD_SIZES[0]
+    src_cache = src_key_caches[0]
+    block_size_in_bytes = src_cache.element_size() * src_cache.stride(0)
+    opcheck(
+        torch.ops._C_cache_ops.swap_blocks,
+        (
+            src_key_caches[0],
+            dst_key_caches[0],
+            block_size_in_bytes,
+            block_mapping_tensor,
+        ),
+        cond=do_opcheck,
+    )
+    opcheck(
+        torch.ops._C_cache_ops.swap_blocks,
+        (
+            src_value_caches[0],
+            dst_value_caches[0],
+            block_size_in_bytes,
+            block_mapping_tensor,
+        ),
+        cond=do_opcheck,
+    )
+
+    ops.swap_blocks(
+        src_key_caches[0],
+        dst_key_caches[0],
+        block_size_in_bytes,
+        block_mapping_tensor,
+    )
+    ops.swap_blocks(
+        src_value_caches[0],
+        dst_value_caches[0],
+        block_size_in_bytes,
+        block_mapping_tensor,
+    )
+
+    for src, dst in block_mapping:
+        torch.testing.assert_close(src_key_caches_clone[src].cpu(),
+                                   dst_key_caches[0][dst].cpu())
+        torch.testing.assert_close(src_value_caches_clone[src].cpu(),
+                                   dst_value_caches[0][dst].cpu())
+
+
+# Test with pinned memory to verify async DMA path
+@pytest.mark.parametrize("direction", [("cpu", "xpu"), ("xpu", "cpu")])
+@pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@torch.inference_mode()
+def test_swap_blocks_pinned(
+    direction: tuple[str, str],
+    num_mappings: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+) -> None:
+    """Test swap_blocks with pinned host memory to exercise async DMA path."""
+    if kv_cache_dtype == "fp8":
+        pytest.skip()
+
+    seed_everything(seed)
+
+    src_device = device if direction[0] == "xpu" else "cpu"
+    dst_device = device if direction[1] == "xpu" else "cpu"
+
+    src_blocks = random.sample(range(num_blocks), num_mappings)
+    # For cross-device swaps, destination blocks can be any available block
+    if src_device == dst_device:
+        remaining_blocks = list(set(range(num_blocks)) - set(src_blocks))
+        dst_blocks = random.sample(remaining_blocks, num_mappings)
+    else:
+        dst_blocks = random.sample(range(num_blocks), num_mappings)
+
+    block_mapping = list(zip(src_blocks, dst_blocks))
+    block_mapping_tensor = torch.tensor(block_mapping,
+                                        dtype=torch.int64,
+                                        device="cpu").view(-1, 2)
+
+    # Create the KV caches with pinned memory when on CPU
+    src_key_caches, src_value_caches = create_kv_caches_with_pinned(
+        num_blocks,
+        block_size,
+        1,
+        num_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        seed,
+        src_device,
+    )
+    if src_device == "cpu":
+        assert src_key_caches[0].is_pinned()
+        assert src_value_caches[0].is_pinned()
+
+    # Create the KV caches on the second device.
+    dst_key_caches, dst_value_caches = create_kv_caches_with_pinned(
+        num_blocks,
+        block_size,
+        1,
+        num_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        seed,
+        dst_device,
+    )
+
+    if dst_device == "cpu":
+        assert dst_key_caches[0].is_pinned()
+        assert dst_value_caches[0].is_pinned()
+
+    src_key_caches_clone = src_key_caches[0].clone()
+    src_value_caches_clone = src_value_caches[0].clone()
+
+    # Call the swap_blocks kernel.
+    src_cache = src_key_caches[0]
+    block_size_in_bytes = src_cache.element_size() * src_cache.stride(0)
+
+    ops.swap_blocks(
+        src_key_caches[0],
+        dst_key_caches[0],
+        block_size_in_bytes,
+        block_mapping_tensor,
+    )
+    ops.swap_blocks(
+        src_value_caches[0],
+        dst_value_caches[0],
+        block_size_in_bytes,
+        block_mapping_tensor,
+    )
+
+    # For the ("xpu", "cpu") direction, device→pinned-host copies are
+    # asynchronous. Ensure all transfers have completed before reading the
+    # destination CPU caches to avoid race conditions in the assertions.
+    if src_device == "xpu" and dst_device == "cpu":
+        torch.xpu.synchronize()
+
+    for src, dst in block_mapping:
+        torch.testing.assert_close(src_key_caches_clone[src].cpu(),
+                                   dst_key_caches[0][dst].cpu())
+        torch.testing.assert_close(src_value_caches_clone[src].cpu(),
+                                   dst_value_caches[0][dst].cpu())
+
+
+@pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)
+@pytest.mark.parametrize("qk_rope_head_dim", QK_ROPE_HEAD_DIMS)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES_MLA)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS_MLA)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@torch.inference_mode()
+def test_swap_blocks_mla(
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+) -> None:
+    seed_everything(seed)
+    torch.set_default_device(device)
+    torch.xpu.set_device(device)
+
+    entry_size = kv_lora_rank + qk_rope_head_dim
+
+    src_cache = _create_mla_cache(num_blocks, block_size, entry_size, dtype,
+                                  kv_cache_dtype, device)
+    dst_cache = _create_mla_cache(num_blocks, block_size, entry_size, dtype,
+                                  kv_cache_dtype, device)
+
+    _fill_mla_cache(src_cache, kv_cache_dtype)
+    _fill_mla_cache(dst_cache, kv_cache_dtype)
+
+    src_cache_clone = src_cache.clone()
+
+    num_mappings = min(2, num_blocks // 2)
+    src_blocks = random.sample(range(num_blocks), num_mappings)
+    remaining_blocks = list(set(range(num_blocks)) - set(src_blocks))
+    dst_blocks = random.sample(remaining_blocks, num_mappings)
+    block_mapping = list(zip(src_blocks, dst_blocks))
+    block_mapping_tensor = torch.tensor(block_mapping,
+                                        dtype=torch.int64,
+                                        device="cpu").view(-1, 2)
+
+    block_size_in_bytes = src_cache.element_size() * src_cache.stride(0)
+    opcheck(
+        torch.ops._C_cache_ops.swap_blocks,
+        (src_cache, dst_cache, block_size_in_bytes, block_mapping_tensor),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+    )
+
+    ops.swap_blocks(src_cache, dst_cache, block_size_in_bytes,
+                    block_mapping_tensor)
+
+    for src, dst in block_mapping:
+        torch.testing.assert_close(
+            src_cache_clone[src].cpu(),
+            dst_cache[dst].cpu(),
+            msg=f"Block {src} from src should have been swapped to block "
+            f"{dst} in dst_cache.",
+        )

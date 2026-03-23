@@ -5,7 +5,7 @@
 macro(find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
   file(REAL_PATH ${EXECUTABLE} EXECUTABLE)
   set(Python_EXECUTABLE ${EXECUTABLE})
-  find_package(Python COMPONENTS Interpreter Development.Module
+  find_package(Python COMPONENTS Interpreter Development Development.Module
                                  Development.SABIModule)
   if(NOT Python_FOUND)
     message(FATAL_ERROR "Unable to find python matching: ${EXECUTABLE}.")
@@ -19,6 +19,9 @@ macro(find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
         "${_SUPPORTED_VERSIONS_LIST}.")
   endif()
   message(STATUS "Found python matching: ${EXECUTABLE}.")
+  message(STATUS "Python include dirs: ${Python_INCLUDE_DIRS}")
+  message(STATUS "Python libraries: ${Python_LIBRARIES}")
+  message(STATUS "Python version: ${Python_VERSION}")
 endmacro()
 
 #
@@ -602,9 +605,13 @@ function(add_xe2_kernel_library LIBRARY_NAME)
 
   # Set link options for XE2 devices
   set(XE2_GPU_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
-  list(
-    APPEND XE2_GPU_LINK_FLAGS -Xsycl-target-backend=spir64_gen
-    "-device ${XE2_AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
+  if(XE2_AOT_DEVICES)
+    list(
+      APPEND
+      XE2_GPU_LINK_FLAGS
+      "-device ${XE2_AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread"
+    )
+  endif()
   target_link_options(${LIBRARY_NAME} PRIVATE ${XE2_GPU_LINK_FLAGS})
 endfunction()
 
@@ -666,7 +673,10 @@ function(add_xe_default_kernel_library LIBRARY_NAME)
   # Set link options for default devices (AOT_DEVICES instead of
   # XE2_AOT_DEVICES)
   set(XE_DEFAULT_GPU_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
-  list(APPEND XE_DEFAULT_GPU_LINK_FLAGS -Xsycl-target-backend=spir64_gen
-       "-device ${AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
+  if(AOT_DEVICES)
+    list(
+      APPEND XE_DEFAULT_GPU_LINK_FLAGS
+      "-device ${AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
+  endif()
   target_link_options(${LIBRARY_NAME} PRIVATE ${XE_DEFAULT_GPU_LINK_FLAGS})
 endfunction()

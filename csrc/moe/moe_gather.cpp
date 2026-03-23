@@ -13,7 +13,6 @@ class MoeGather {
       T* output,
       const T* moe_output,
       const float* topk_weights,
-      const int* permuted_row_to_unpermuted_row,
       const int* unpermuted_row_to_permuted_row,
       const int64_t* expert_first_token_offset,
       const int num_experts,
@@ -22,7 +21,6 @@ class MoeGather {
       : output(output),
         moe_output(moe_output),
         topk_weights(topk_weights),
-        permuted_row_to_unpermuted_row(permuted_row_to_unpermuted_row),
         unpermuted_row_to_permuted_row(unpermuted_row_to_permuted_row),
         expert_first_token_offset(expert_first_token_offset),
         num_experts(num_experts),
@@ -50,19 +48,7 @@ class MoeGather {
     int moe_ids[TOPK];
 #pragma unroll
     for (int i = 0; i < TOPK; ++i) {
-      moe_ids[i] = unpermuted_row_to_permuted_row[token_idx + i * num_tokens];
-    }
-
-    int permuted_row_to_unpermuted_row_0 = permuted_row_to_unpermuted_row[0];
-    int rows_sum = expert_first_token_offset[num_experts];
-#pragma unroll
-    for (int i = 0; i < TOPK; ++i) {
-      // check invalid idx for EP
-      if (rows_sum == 0 ||
-          (moe_ids[i] == 0 &&
-           (permuted_row_to_unpermuted_row_0 != token_idx + i * num_tokens))) {
-        moe_ids[i] = -1;
-      }
+      moe_ids[i] = unpermuted_row_to_permuted_row[token_idx * TOPK + i];
     }
 
     float scores[TOPK];
@@ -107,7 +93,6 @@ class MoeGather {
   T* output;
   const T* moe_output;
   const float* topk_weights;
-  const int* permuted_row_to_unpermuted_row;
   const int* unpermuted_row_to_permuted_row;
   const int64_t* expert_first_token_offset;
   const int num_experts;
@@ -120,7 +105,6 @@ void MoeGatherLauncher(
     T* output,
     const T* moe_output,
     const float* topk_weights,
-    const int* permuted_row_to_unpermuted_row,
     const int* unpermuted_row_to_permuted_row,
     const int64_t* expert_first_token_offset,
     const int num_experts,
@@ -141,7 +125,6 @@ void MoeGatherLauncher(
               output,                                                 \
               moe_output,                                             \
               topk_weights,                                           \
-              permuted_row_to_unpermuted_row,                         \
               unpermuted_row_to_permuted_row,                         \
               expert_first_token_offset,                              \
               num_experts,                                            \
@@ -183,7 +166,6 @@ void moe_gather(
     torch::Tensor& output,              // [num_tokens, hidden_size]
     const torch::Tensor& moe_output,    // [num_tokens * topk, hidden_size]
     const torch::Tensor& topk_weights,  // [num_tokens, topk]
-    const torch::Tensor& permuted_row_to_unpermuted_row,  // [num_tokens * topk]
     const torch::Tensor& unpermuted_row_to_permuted_row,  // [num_tokens * topk]
     const torch::Tensor& expert_first_token_offset,       // [num_experts + 1]
     const int64_t num_experts) {
@@ -204,7 +186,6 @@ void moe_gather(
       reinterpret_cast<T*>(output.data_ptr()),                           \
       reinterpret_cast<T*>(moe_output.data_ptr()),                       \
       reinterpret_cast<float*>(topk_weights.data_ptr()),                 \
-      reinterpret_cast<int*>(permuted_row_to_unpermuted_row.data_ptr()), \
       reinterpret_cast<int*>(unpermuted_row_to_permuted_row.data_ptr()), \
       reinterpret_cast<int64_t*>(expert_first_token_offset.data_ptr()),  \
       num_experts,                                                       \

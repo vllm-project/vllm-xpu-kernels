@@ -143,6 +143,53 @@ def gather_cache(src_cache: torch.Tensor,
                                         cu_seq_lens, batch_size, seq_starts)
 
 
+def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor,
+                              slot_mapping: torch.Tensor,
+                              quant_block_size: int, scale_fmt: str) -> None:
+    torch.ops._C_cache_ops.indexer_k_quant_and_cache(k, kv_cache, slot_mapping,
+                                                     quant_block_size,
+                                                     scale_fmt)
+
+
+def xpu_memcpy_sync(dst_ptr: int,
+                    src_ptr: int,
+                    n_bytes: int,
+                    kind: int,
+                    device: int = -1) -> None:
+    """Pointer-based synchronous memcpy op.
+
+    kind: 0=H2D, 1=D2H, 2=D2D.
+    """
+
+    def _to_i64_ptr(ptr: int) -> int:
+        return ptr if ptr < (1 << 63) else ptr - (1 << 64)
+
+    torch.ops._C.xpu_memcpy_sync(
+        _to_i64_ptr(dst_ptr),
+        _to_i64_ptr(src_ptr),
+        n_bytes,
+        kind,
+        device,
+    )
+
+
+def convert_fp8(
+    dst_cache: torch.Tensor,
+    src_cache: torch.Tensor,
+    scale: float,
+    kv_dtype: str,
+) -> None:
+    """Convert between FP8 and FP16/BF16/FP32 formats with scaling.
+
+    Args:
+        dst_cache: Destination tensor for converted data
+        src_cache: Source tensor to convert
+        scale: Scaling factor for conversion
+        kv_dtype: Data type string ("fp8", "fp8_e4m3", "fp8_e5m2", or "auto")
+    """
+    torch.ops._C_cache_ops.convert_fp8(dst_cache, src_cache, scale, kv_dtype)
+
+
 def static_scaled_fp8_quant(
     out: torch.Tensor,
     input: torch.Tensor,
@@ -178,6 +225,15 @@ def per_token_group_fp8_quant(input: torch.Tensor,
     torch.ops._C.per_token_group_fp8_quant(input, output_q, output_s,
                                            group_size, eps, fp8_min, fp8_max,
                                            scale_ue8m0)
+
+
+def per_token_group_quant_mxfp4(input: torch.Tensor,
+                                output_q: torch.Tensor,
+                                output_s: torch.Tensor,
+                                group_size: int = 32,
+                                eps: float = 1e-10) -> None:
+    torch.ops._C.per_token_group_quant_mxfp4(input, output_q, output_s,
+                                             group_size, eps)
 
 
 def swigluoai_and_mul(
@@ -338,9 +394,79 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                                   gating_output, renormalize, bias)
 
 
+def swap_blocks(
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    block_size_in_bytes: int,
+    block_mapping: torch.Tensor,
+) -> None:
+    """
+    Copy specific blocks from one tensor to another.
+
+    This method assumes each of the two input tensors is composed of
+    consecutive contiguous blocks, of size block_size_in_bytes.
+    i.e. the memory layout for each tensor is:
+    [block0] [block1] ... [block N]
+
+    block_mapping determines the subset of blocks to copy of the source tensor,
+    and their matching destination block number on the destination tensor.
+    block_mapping is expected to be a tensor of shape (num_blocks_to_copy, 2)
+    where each block_mapping[i] represents a single copy operation, copying
+    block #block_mapping[i][0] from the source tensor
+    to block #block_mapping[i][1] on the destination tensor.
+    block_mapping should have dtype int64.
+
+    The source and the destination tensors can be either on CPU or GPU,
+    but not both on CPU.
+    The block mapping tensor must be on CPU.
+    """
+    torch.ops._C_cache_ops.swap_blocks(src, dst, block_size_in_bytes,
+                                       block_mapping)
+
+
 def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor, renormalize: bool,
                  bias: Optional[torch.Tensor]) -> None:
     torch.ops._moe_C.topk_sigmoid(topk_weights, topk_ids, token_expert_indices,
                                   gating_output, renormalize, bias)
+
+
+def topk_per_row_prefill(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    top_k: int,
+) -> None:
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+
+def topk_per_row_decode(
+    logits: torch.Tensor,
+    next_n: int,
+    seq_lens: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    top_k: int,
+) -> None:
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        next_n,
+        seq_lens,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )

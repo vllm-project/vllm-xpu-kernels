@@ -96,6 +96,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl(
       "per_token_group_fp8_quant", torch::kXPU, &per_token_group_quant_fp8);
 
+  // Compute per-token-group MXFP4 quantized tensor and scaling factor.
+  ops.def(
+      "per_token_group_quant_mxfp4(Tensor input, Tensor! output_q, Tensor! "
+      "output_s, int group_size, float eps) -> ()");
+  ops.impl(
+      "per_token_group_quant_mxfp4", torch::kXPU, &per_token_group_quant_mxfp4);
+
   // swigluoai_and_mul
   ops.def(
       "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
@@ -110,6 +117,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "get_xpu_view_from_cpu_tensor",
       torch::kCPU,
       &get_xpu_view_from_cpu_tensor);
+
+  ops.def(
+      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
+      "Tensor! indices, int numRows, int stride0, "
+      "int stride1, int topK) -> ()");
+  ops.impl("top_k_per_row_prefill", torch::kXPU, &top_k_per_row_prefill);
+
+  ops.def(
+      "top_k_per_row_decode(Tensor logits, int next_n, "
+      "Tensor seq_lens, Tensor! indices, "
+      "int numRows, int stride0, int stride1, int topK) -> ()");
+  ops.impl("top_k_per_row_decode", torch::kXPU, &top_k_per_row_decode);
+
+  // Synchronous raw-pointer memcpy helper (0=H2D, 1=D2H, 2=D2D).
+  // This is intentionally pointer-based to support allocator-managed buffers.
+  ops.def(
+      "xpu_memcpy_sync(int dst_ptr, int src_ptr, int n_bytes, int kind, "
+      "int device=-1) -> ()");
+  ops.impl("xpu_memcpy_sync", &xpu_memcpy_sync);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
@@ -147,6 +173,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("gather_cache", torch::kXPU, &gather_cache);
+
+  // Convert between FP8 and FP16/BF16/FP32 formats with scaling
+  cache_ops.def(
+      "convert_fp8(Tensor! dst, Tensor src, "
+      "            float scale, str kv_cache_dtype) -> ()");
+  cache_ops.impl("convert_fp8", torch::kXPU, &convert_fp8);
+
+  // Cache ops
+  // Swap in (out) the cache blocks from src to dst.
+  cache_ops.def(
+      "swap_blocks(Tensor src, Tensor! dst,"
+      "            int block_size_in_bytes, Tensor block_mapping) -> ()");
+  cache_ops.impl("swap_blocks", torch::kXPU, &swap_blocks);
+  cache_ops.def(
+      "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache,"
+      "Tensor slot_mapping, int quant_block_size, str scale_fmt) -> ()");
+  cache_ops.impl(
+      "indexer_k_quant_and_cache", torch::kXPU, &indexer_k_quant_and_cache);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
