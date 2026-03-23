@@ -9,6 +9,7 @@ import torch
 from tests.ops.mx_utils import (FP4_EBITS, FP4_MBITS, _floatx_unpacked_to_f32,
                                 to_mxfp, unpack_uint4)
 from tests.ops.mxfp4_quant_op import per_token_group_quant_mxfp4
+from tests.utils import format_tc
 
 DTYPES = [torch.float, torch.bfloat16, torch.half]
 
@@ -57,7 +58,7 @@ def dequantize_mxfp4(
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @pytest.mark.parametrize("column_major_scale", COLUMN_MAJOR_SCALE)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()

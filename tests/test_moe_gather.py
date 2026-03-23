@@ -3,7 +3,7 @@ import pytest
 import torch
 
 import vllm_xpu_kernels._moe_C  # noqa: F401
-from tests.utils import seed_everything
+from tests.utils import format_tc, seed_everything
 
 DEVICE = "xpu"
 INPUT_LENGTHS = [1, 8, 1024, 8192]
@@ -51,7 +51,8 @@ def ref_moe_gather(output, moe_output, topk_weights,
 @pytest.mark.parametrize("ep_rank", EP_RANK)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype",
-                         [torch.bfloat16, torch.float16, torch.float32])
+                         [torch.bfloat16, torch.float16, torch.float32],
+                         ids=format_tc)
 def test_moe_gather(input_len, hidden_size, num_experts, topk, ep_rank,
                     ep_size, dtype):
     seed_everything(7)

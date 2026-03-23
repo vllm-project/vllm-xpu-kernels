@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm_xpu_kernels._xpu_C  # noqa: F401
+from tests.utils import format_tc
 
 # QWEN NEXT shape
 NUM_TOKENS = [1, 32, 1024, 8192]
@@ -251,7 +252,7 @@ def simple_random_distribute(N, batch_size):
 @pytest.mark.parametrize("activation", ACTIVATION)
 @pytest.mark.parametrize("mode", MODE)
 @pytest.mark.parametrize("reorder_input", REORDER_INPUT)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @torch.inference_mode()
 def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                        num_v_heads, head_v_dim, width, tp_size, has_bias,

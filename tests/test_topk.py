@@ -4,7 +4,7 @@ import torch
 
 from tests.ops.topk_op import (fused_topk_sigmoid, fused_topk_softmax,
                                topk_sigmoid, topk_softmax)
-from tests.utils import seed_everything
+from tests.utils import format_tc, seed_everything
 
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
@@ -22,7 +22,8 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("has_bias", [True, False])
 @pytest.mark.parametrize("dtype",
-                         [torch.float16, torch.bfloat16, torch.float32])
+                         [torch.float16, torch.bfloat16, torch.float32],
+                         ids=format_tc)
 def test_fused_topk_softmax(n_token: int, n_hidden: int, n_expert: int,
                             topk: int, renormalize: bool, has_bias: bool,
                             dtype: torch.dtype):
@@ -65,7 +66,8 @@ def test_fused_topk_softmax(n_token: int, n_hidden: int, n_expert: int,
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("has_bias", [True, False])
 @pytest.mark.parametrize("dtype",
-                         [torch.float16, torch.bfloat16, torch.float32])
+                         [torch.float16, torch.bfloat16, torch.float32],
+                         ids=format_tc)
 def test_fused_topk_sigmoid(n_token: int, n_hidden: int, n_expert: int,
                             topk: int, renormalize: bool, has_bias: bool,
                             dtype: torch.dtype):
