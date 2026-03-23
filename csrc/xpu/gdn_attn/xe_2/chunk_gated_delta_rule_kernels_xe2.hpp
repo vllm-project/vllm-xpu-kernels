@@ -49,24 +49,14 @@ act_softplus(float& x, float beta = 1.0f, float threshold = 20.0f) {
 }
 
 template <typename T>
-CUTE_DEVICE void chunk_prepare_kernel(
+CUTE_DEVICE void l2norm_kernel(
     const T* q,
     const T* k,
-    const float* a,
-    const T* A_log,
-    const T* dt_bias,
-    const int* query_start_loc,
     const int total_virtual_seqlen,
-    const int batch_size,
     const int num_k_heads,
-    const int head_k_dim,
-    const int num_v_heads,
-    const int head_v_dim) {
+    const int head_k_dim) {
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-  int local_id = item.get_local_linear_id();
-  int local_range = item.get_local_range(2);
 
-  // l2norm for q, k
   int group_id = item.get_group(1);
   int group_range = item.get_group_range(1);
   auto sg = item.get_sub_group();
@@ -87,7 +77,7 @@ CUTE_DEVICE void chunk_prepare_kernel(
     CUTE_UNROLL
     for (int k_dim_idx = sg_local_id * elem_per_item; k_dim_idx < head_k_dim;
          k_dim_idx += sub_group_size * elem_per_item) {
-      CUTE_UNROLL
+      CUTE_UNROLL // can compiler vectorize this loop?
       for (int e = 0; e < elem_per_item; ++e) {
         float q_value = q_ptr[k_dim_idx + e];
         float k_value = k_ptr[k_dim_idx + e];
@@ -115,6 +105,28 @@ CUTE_DEVICE void chunk_prepare_kernel(
       }
     }
   }
+}
+
+template <typename T>
+CUTE_DEVICE void chunk_prepare_kernel(
+    const float* a,
+    const T* A_log,
+    const T* dt_bias,
+    const int* query_start_loc,
+    const int total_virtual_seqlen,
+    const int batch_size,
+    const int num_v_heads,
+    const int head_v_dim) {
+  auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+  int group_id = item.get_group(1);
+  int group_range = item.get_group_range(1);
+  auto sg = item.get_sub_group();
+  int sg_id = sg.get_group_linear_id();
+  int sg_range = sg.get_group_linear_range();
+  int sg_local_id = sg.get_local_linear_id();
+
+  int total_sg_range = group_range * sg_range;
+  int total_sg_id = group_id * sg_range + sg_id;
 
   int pre_chunks = 0;
   const int chunk_range = total_sg_range / num_v_heads;
@@ -750,8 +762,8 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   int local_id = item.get_local_linear_id();
   int local_range = item.get_local_range(2);
-  int chunk_id = item.get_group(1);
-  const int global_chunk_range = item.get_group_range(1);
+  int chunk_id = item.get_group(1); // the wg id
+  const int global_chunk_range = item.get_group_range(1); // the wg num
 
   // l2norm for q, k
   int group_id = item.get_group(1);
@@ -814,6 +826,8 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
     while (chunk_id < cumsum_chunks) {
       const int chunk_start_offset = chunk_id * chunk_size;
 
+      // the process of each chunk
+      // why loop along num_v_heads dim?
       for (int v_head_id = 0; v_head_id < num_v_heads; ++v_head_id) {
         CUTE_UNROLL
         for (int e = local_id; e < chunk_size; e += local_range) {
@@ -909,7 +923,7 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
           }
         }
       }
-      chunk_id += global_chunk_range;
+      chunk_id += global_chunk_range; // wgs process chunks in a round robin manner
     }
     pre_chunks = cumsum_chunks;
   }
@@ -1253,6 +1267,9 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
 }
 
 template <typename T>
+class L2NormKernel;
+
+template <typename T>
 class ChunkPrepareKernel;
 
 template <typename T>
@@ -1309,27 +1326,37 @@ void kernel_launcher(
       syclex::sub_group_size<cute::detail::subgroup_size>,
       intelex::grf_size<256>};
 
+  sycl::range<3> local_l2norm(1, 1, MaxThreadsPerSM);
+  sycl::range<3> global_l2norm(1, sm_count, 1);
+  auto event_l2norm = queue.submit([&](sycl::handler& cgh) {
+    cgh.parallel_for<L2NormKernel<T>>(
+        sycl::nd_range<3>{global_l2norm * local_l2norm, local_l2norm},
+        kernel_props,
+        [=](auto) {
+          l2norm_kernel<T>(
+              q, k, total_virtual_seqlen, num_k_heads, head_k_dim);
+        });
+  });
+  EventManager::getInstance().addEvent(event_l2norm);
+
   // prepare data for A, W, U compute
   sycl::range<3> local_prepare(1, 1, MaxThreadsPerSM);
   sycl::range<3> global_prepare(1, sm_count, 1);
   int slm_size_prepare = num_v_heads * 2 + chunk_size;
 
   auto event_prepare = queue.submit([&](sycl::handler& cgh) {
+    cgh.depends_on(event_l2norm);
     cgh.parallel_for<ChunkPrepareKernel<T>>(
         sycl::nd_range<3>{global_prepare * local_prepare, local_prepare},
         kernel_props,
         [=](auto) {
           chunk_prepare_kernel<T>(
-              q,
-              k,
               a,
               A_log,
               dt_bias,
               query_start_loc,
               total_virtual_seqlen,
               batch_size,
-              num_k_heads,
-              head_k_dim,
               num_v_heads,
               head_v_dim);
         });
