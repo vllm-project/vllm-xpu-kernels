@@ -53,6 +53,7 @@ struct chunk_prefill_args_t {
   bool is_causal = false;
   bool is_local = false;
   bool is_sink = false;
+  void* is_prefill = nullptr;
 };
 
 template <class FMHAKernel, bool isVarLen>
@@ -145,7 +146,8 @@ struct KernelLauncher {
          stride_V,
          reinterpret_cast<ElementO*>(args.out),
          stride_O,
-         reinterpret_cast<ElementQ*>(args.sm_sink)},
+         reinterpret_cast<ElementQ*>(args.sm_sink),
+         static_cast<const bool*>(args.is_prefill)},
         {args.sm_scale,
          args.k_scale,
          args.v_scale,
