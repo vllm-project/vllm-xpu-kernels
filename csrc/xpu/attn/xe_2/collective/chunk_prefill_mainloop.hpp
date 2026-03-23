@@ -36,6 +36,7 @@
 #define STAGES              2
 #define SYNC                1
 #define POSTPROCESSING      1
+#define PREFETCH_V_EARLIER  1
 
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/dispatch_policy.hpp"
@@ -390,6 +391,10 @@ struct FMHAFwdMainloop<
 
       /* Main loop, blocked in k. */
       for (int K = blk_k0; K < blk_k1; K++) {
+#if SYNC
+        barrier_arrive(barrier_scope);
+#endif
+
         bool need_causal = false;
         if constexpr (CausalMask) {
           need_causal = K >= blk_k1_causal;
@@ -408,8 +413,17 @@ struct FMHAFwdMainloop<
         TiledCopyK copy_k_blk{K_ND(_, _, block_phys)};
         TiledCopyV copy_v_blk{V_ND(_, _, block_phys)};
 
-#if SYNC
-        barrier_arrive(barrier_scope);
+#if PREFETCH_V_EARLIER
+      {
+        auto prefetch_v_blk = make_block_2d_prefetch(copy_v_blk);
+        auto pVgV_blk =
+            prefetch_v_blk.get_slice(thr_id).partition_S(gV);
+        CUTLASS_PRAGMA_UNROLL
+        for (int VV = 0; VV < VTiles; VV++) {
+          prefetch(prefetch_v_blk,
+                    pVgV_blk(_, _, _, vv_base + VV, tile_within));
+        }
+      }
 #endif
 
         /* GEMM 1: S = Q * K^T */
@@ -424,6 +438,7 @@ struct FMHAFwdMainloop<
           cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
         }
 
+#if !PREFETCH_V_EARLIER
         /* V prefetch for GEMM 2 */
         {
           auto prefetch_v_blk = make_block_2d_prefetch(copy_v_blk);
@@ -435,6 +450,7 @@ struct FMHAFwdMainloop<
                      pVgV_blk(_, _, _, vv_base + VV, tile_within));
           }
         }
+#endif
 
         /* Causal masking and k remainder masking */
         {
