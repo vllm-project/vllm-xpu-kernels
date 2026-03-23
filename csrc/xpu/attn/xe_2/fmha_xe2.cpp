@@ -80,10 +80,10 @@ void cutlass_chunk_prefill_impl(
   if (is_varlen) {
     // query: [total_seq, num_heads, head_size]
     batch_size = cu_seqlens_q.numel() - 1;
-    num_heads_q = query.size(0);
-    num_heads_kv = is_paged ? key_cache.size(1) : key_cache.size(1);
+    num_heads_q = query.size(1);
+    num_heads_kv = key_cache.size(1);
     head_size = query.size(2);
-    total_seqlen_q = query.size(1);
+    total_seqlen_q = query.size(0);
     total_seqlen_k = key_cache.size(0);
   } else {
     // query: [batch, num_heads, seq, head_size]
@@ -156,20 +156,20 @@ void cutlass_chunk_prefill_impl(
           std::to_string(max_head_size));
 
   if (args.head_size <= HEAD_SIZE_LIMIT_0) {
-    // policy_dispatch_func<chunk_policy_head64>(
-    //     queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+    policy_dispatch_func<chunk_policy_head64>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
-    // policy_dispatch_func<chunk_policy_head96>(
-    //     queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+    policy_dispatch_func<chunk_policy_head96>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
     policy_dispatch_func<chunk_policy_head128>(
-        queue, cuQKType, args, is_paged);
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
-    // policy_dispatch_func<chunk_policy_head192>(
-    //     queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+    policy_dispatch_func<chunk_policy_head192>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
-    // policy_dispatch_func<chunk_policy_head256>(
-    //     queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+    policy_dispatch_func<chunk_policy_head256>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
   }

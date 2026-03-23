@@ -3,7 +3,7 @@
 
 #ifdef VLLM_XPU_ENABLE_XE2
   #include "csrc/xpu/attn/xe_2/fmha_xe2.h"
-  // #include "csrc/xpu/attn/xe_2/paged_decode_xe2.h"
+  #include "csrc/xpu/attn/xe_2/paged_decode_xe2.h"
 #endif
 
 void cutlass_chunk_prefill_interface(
@@ -76,6 +76,8 @@ void cutlass_paged_decode_interface(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& k_scale,
+    std::optional<const at::Tensor>& v_scale,
     double sm_scale,
     std::optional<const at::Tensor>& sm_sink_,
     int window_size_left,
@@ -89,30 +91,32 @@ void cutlass_paged_decode_interface(
   if (vllm::xpu::is_xe2_arch()) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel
-    // cutlass_paged_decode_xe2(
-    //     queue,
-    //     query,
-    //     key_cache,
-    //     value_cache,
-    //     out,
-    //     temp_out,
-    //     exp_sums,
-    //     max_logits,
-    //     block_table,
-    //     cu_seqlens_q,
-    //     cu_seqlens_k,
-    //     max_seqlen_q,
-    //     max_seqlen_k,
-    //     sm_scale,
-    //     sm_sink_,
-    //     window_size_left,
-    //     window_size_right,
-    //     is_varlen,
-    //     is_paged,
-    //     is_causal,
-    //     is_local,
-    //     is_sink,
-    //     num_kv_splits);
+    cutlass_paged_decode_xe2(
+        queue,
+        query,
+        key_cache,
+        value_cache,
+        out,
+        temp_out,
+        exp_sums,
+        max_logits,
+        block_table,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        k_scale,
+        v_scale,
+        sm_scale,
+        sm_sink_,
+        window_size_left,
+        window_size_right,
+        is_varlen,
+        is_paged,
+        is_causal,
+        is_local,
+        is_sink,
+        num_kv_splits);
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif

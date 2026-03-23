@@ -286,16 +286,14 @@ class XeFMHAFwdKernel {
         int group_heads_q = s.num_heads_q / s.num_heads_kv;
         auto qo_cumulative = s.seq_len_qo.cumulative_length;
         auto kv_cumulative = s.seq_len_kv.cumulative_length;
-        // Offset = seq_stride * cumulative_pos.  seq_stride = get<0>(dQ/dO)
-        // for Q/O (seq is dim 0), get<1>(dV) for V (seq is dim 1).
-        offset_q = get<0>(p.dQ) * qo_cumulative[idx_b];
+        offset_q = s.num_heads_q * s.head_size_qk * qo_cumulative[idx_b];
         offset_k = PagedKV
                        ? 0
                        : get<0>(p.dK) * kv_cumulative[idx_b];
         offset_v = PagedKV
                        ? 0
                        : get<1>(p.dV) * kv_cumulative[idx_b];
-        offset_o = get<0>(p.dO) * qo_cumulative[idx_b];
+        offset_o = s.num_heads_q * s.head_size_vo * qo_cumulative[idx_b];
       }
 
       auto batch_dim_qo = is_var_len ? 1 : s.batch;
@@ -330,7 +328,7 @@ class XeFMHAFwdKernel {
       auto dcO = const_cast<ElementO*>(p.O + offset_o);
 
       auto layout_q = is_var_len
-                          ? make_layout(shape_Q, p.dQ)
+                          ? make_ordered_layout(shape_Q, Step<_2, _0, _1, _3>{})
                           : make_layout(shape_Q, p.dQ);
       auto layout_k = (PagedKV || is_var_len)
                           ? make_layout(shape_K, p.dK)
@@ -339,7 +337,7 @@ class XeFMHAFwdKernel {
                           ? make_layout(shape_V, p.dV)
                           : make_layout(shape_V, p.dV);
       auto layout_o = is_var_len
-                          ? make_layout(shape_O, p.dO)
+                          ? make_ordered_layout(shape_O, Step<_2, _0, _1, _3>{})
                           : make_layout(shape_O, p.dO);
 
       Tensor Q = make_tensor(make_gmem_ptr(dcQ), layout_q);
