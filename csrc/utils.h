@@ -40,11 +40,17 @@ static inline bool is_pvc(at::DeviceIndex device_index = -1) {
          syclex::architecture::intel_gpu_pvc;
 }
 
+static inline bool is_lnl(at::DeviceIndex device_index = -1) {
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_lnl_m;
+}
+
 static inline bool is_xe2_arch(at::DeviceIndex device_index = -1) {
   auto arch = get_device_architecture(device_index);
   return arch == syclex::architecture::intel_gpu_bmg_g21 ||
          arch == syclex::architecture::intel_gpu_bmg_g31 ||
-         arch == syclex::architecture::intel_gpu_pvc;
+         arch == syclex::architecture::intel_gpu_pvc ||
+         arch == syclex::architecture::intel_gpu_lnl_m;
 }
 
 static inline std::optional<std::string> getEnv(const char* name) {
