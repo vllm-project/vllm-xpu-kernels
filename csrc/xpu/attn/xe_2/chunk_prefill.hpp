@@ -72,6 +72,8 @@ struct chunk_prefill_args_t {
   int o_stride_seq = 0;
   int o_stride_heads = 0;
   int o_stride_batch = 0;
+  // per-batch mask: true = prefill, false = decode; nullptr = process all
+  void* is_prefill = nullptr;
 };
 
 template <class FMHAKernel, bool isVarLen>
@@ -171,7 +173,8 @@ struct KernelLauncher {
          stride_O,
          reinterpret_cast<ElementQ*>(args.sm_sink),
          args.softmax_lse,
-         args.lse_stride},
+         args.lse_stride,
+         static_cast<const bool*>(args.is_prefill)},
         {args.sm_scale,
          args.k_scale,
          args.v_scale,

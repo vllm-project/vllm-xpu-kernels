@@ -119,6 +119,8 @@ struct paged_decode_args_t {
   int64_t v_stride_page = 0;
   int64_t v_stride_seq = 0;
   int64_t v_stride_heads = 0;
+  // per-batch mask: true = prefill, false = decode; nullptr = process all
+  void* is_prefill = nullptr;
 };
 
 template <class FMHAKernel, class ReductionSplitKernel, bool isVarLen>
@@ -272,6 +274,7 @@ struct DecodeKernelLauncher {
             reinterpret_cast<ElementLSE*>(args.max_logits),
             stride_max_logits,
             reinterpret_cast<ElementQ*>(args.sm_sink),
+            static_cast<const bool*>(args.is_prefill),
         },
         {args.sm_scale,
          args.k_scale,
@@ -297,7 +300,8 @@ struct DecodeKernelLauncher {
          stride_exp_sums,
          reinterpret_cast<ElementLSE*>(args.max_logits),
          stride_max_logits,
-         args.window_size_left},
+         args.window_size_left,
+         static_cast<const bool*>(args.is_prefill)},
         hw_info,
         args.num_kv_splits};
 
