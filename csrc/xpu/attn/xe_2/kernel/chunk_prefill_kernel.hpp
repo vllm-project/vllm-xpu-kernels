@@ -304,21 +304,21 @@ class XeFMHAFwdKernel {
           make_shape(seq_len_qo, s.head_size_vo, s.num_heads_q, batch_dim_qo);
 
       // For PagedKV (BNHS layout): K/V are 4D with block structure.
-      // Shape: (block_size, head_size, num_heads, total_block_nums)
+      // Shape: (block_size, head_size, num_heads, block_nums)
       // After head selection → 3D: (block_size, head_size, block_nums)
       // The block 2D copy uses tiled_strides for per-block base rebasing.
-      auto total_block_nums =
-          PagedKV ? params.mainloop.total_block_nums : 0;
+      auto block_nums =
+          PagedKV ? params.mainloop.block_nums : 0;
       auto total_seqlen_kv =
           PagedKV ? params.mainloop.total_seqlen_kv : seq_len_kv;
       auto shape_K = PagedKV
           ? make_shape(params.mainloop.page_size, s.head_size_qk,
-                       s.num_heads_kv, total_block_nums)
+                       s.num_heads_kv, block_nums)
           : make_shape(total_seqlen_kv, s.head_size_qk,
                        s.num_heads_kv, batch_dim_kv);
       auto shape_V = PagedKV
           ? make_shape(s.head_size_vo, params.mainloop.page_size,
-                       s.num_heads_kv, total_block_nums)
+                       s.num_heads_kv, block_nums)
           : make_shape(s.head_size_vo, total_seqlen_kv,
                        s.num_heads_kv, batch_dim_kv);
 
@@ -330,12 +330,8 @@ class XeFMHAFwdKernel {
       auto layout_q = is_var_len
                           ? make_ordered_layout(shape_Q, Step<_2, _0, _1, _3>{})
                           : make_layout(shape_Q, p.dQ);
-      auto layout_k = (PagedKV || is_var_len)
-                          ? make_layout(shape_K, p.dK)
-                          : make_layout(shape_K, p.dK);
-      auto layout_v = (PagedKV || is_var_len)
-                          ? make_layout(shape_V, p.dV)
-                          : make_layout(shape_V, p.dV);
+      auto layout_k = make_layout(shape_K, p.dK);
+      auto layout_v = make_layout(shape_V, p.dV);
       auto layout_o = is_var_len
                           ? make_ordered_layout(shape_O, Step<_2, _0, _1, _3>{})
                           : make_layout(shape_O, p.dO);

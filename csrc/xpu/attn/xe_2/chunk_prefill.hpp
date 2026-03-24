@@ -166,7 +166,6 @@ struct KernelLauncher {
          args.block_size,
          args.max_blocks_per_seq,
          args.total_seqlen_k,
-         args.num_heads_k,
          args.is_paged ? args.total_seqlen_k / args.block_size : 0,
          args.window_size_left,
          args.window_size_right},

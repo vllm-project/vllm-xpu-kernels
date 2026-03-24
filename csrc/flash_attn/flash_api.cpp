@@ -179,22 +179,22 @@ std::vector<at::Tensor> mha_varlen_fwd(
   } else {
     // Normalize -1 (unbounded) to max_seqlen_k for kernel masking logic
     // In decode phase the window_size_right doesn't have effect
-    // int eff_window_left =
-    //     window_size_left == -1 ? max_seqlen_k : window_size_left;
-    // int eff_window_right =
-    //     window_size_right == -1 ? max_seqlen_k : window_size_right;
-    // int effective_seqlen_k =
-    //     is_local ? std::min(max_seqlen_k, eff_window_left + 1) : max_seqlen_k;
+    int eff_window_left =
+        window_size_left == -1 ? max_seqlen_k : window_size_left;
+    int eff_window_right =
+        window_size_right == -1 ? max_seqlen_k : window_size_right;
+    int effective_seqlen_k =
+        is_local ? std::min(max_seqlen_k, eff_window_left + 1) : max_seqlen_k;
 
-    // int num_tokens = q.size(0);
-    // int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
-    // int num_heads_q = q.size(1);
-    // int head_dim = q.size(2);
-    // int num_heads_kv = k.size(2);
-    // int block_size = k.size(1);
+    int num_tokens = q.size(0);
+    int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
+    int num_heads_q = q.size(1);
+    int head_dim = q.size(2);
+    int num_heads_kv = k.size(2);
+    int block_size = k.size(1);
 
-    // int num_kv_splits = num_splits.value_or(get_num_splits(
-    //     queue, batch_size, num_heads_kv, effective_seqlen_k, block_size));
+    int num_kv_splits = num_splits.value_or(get_num_splits(
+        queue, batch_size, num_heads_kv, effective_seqlen_k, block_size));
 
     at::Tensor tmp_out =
         num_kv_splits == 1
@@ -210,7 +210,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
 
-    // at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
+    at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
 
     // For paged decode (single query per sequence), causal masking is a
     // no-op: seqused_k already constrains KV to only the valid past tokens,

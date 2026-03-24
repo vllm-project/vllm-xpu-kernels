@@ -32,12 +32,6 @@
 
 #pragma once
 
-// Perf. knobs
-#define STAGES              2
-#define SYNC                1
-#define POSTPROCESSING      1
-#define PREFETCH_V_EARLIER  1
-
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/dispatch_policy.hpp"
 
@@ -193,7 +187,8 @@ struct FMHAFwdMainloop<
   using FragARow = decltype(reduce<1>(FragA{}, sycl::plus<void>{}));
   using ElementA = typename TiledMMAPV::ValTypeD;
 
-  static constexpr bool Fp8KV = false;
+  static constexpr bool Fp8KV =
+      is_any_of_v<ElementK, float_e5m2_t, float_e4m3_t>;
   static constexpr bool CausalMask = CausalMask_;
   static constexpr bool LocalMask = LocalMask_;
   static constexpr bool PagedKV = PagedKV_;
@@ -209,8 +204,7 @@ struct FMHAFwdMainloop<
     int page_size;
     int max_pages_per_seq;
     int total_seqlen_kv;
-    int num_heads_kv;
-    int total_block_nums;
+    int block_nums;
     // Local Mask
     int local_left, local_right;
   };
@@ -241,8 +235,7 @@ struct FMHAFwdMainloop<
         args.page_size,
         args.max_pages_per_seq,
         args.total_seqlen_kv,
-        args.num_heads_kv,
-        args.total_block_nums,
+        args.block_nums,
         args.local_left,
         args.local_right};
   }
@@ -367,8 +360,8 @@ struct FMHAFwdMainloop<
         }
       }
 
-      /* K prefetch for first STAGES blocks */
-      for (int S = 0; S < STAGES; S++) {
+      /* K prefetch for first Stages blocks */
+      for (int S = 0; S < Stages; S++) {
         int pre_K = blk_k0 + S;
         int pre_blk = pre_K / tiles_per_block;
         int pre_tw = pre_K % tiles_per_block;
@@ -391,9 +384,6 @@ struct FMHAFwdMainloop<
 
       /* Main loop, blocked in k. */
       for (int K = blk_k0; K < blk_k1; K++) {
-#if SYNC
-        barrier_arrive(barrier_scope);
-#endif
 
         bool need_causal = false;
         if constexpr (CausalMask) {
@@ -404,17 +394,19 @@ struct FMHAFwdMainloop<
         int tile_within = K % tiles_per_block;
         int block_phys = get_paged_block(block_logical, idx_b);
 
-        int pre_K = K + STAGES;
+        int pre_K = K + Stages;
         int pre_blk = pre_K / tiles_per_block;
         int pre_tw = pre_K % tiles_per_block;
         int pre_bp = get_paged_block(pre_blk, idx_b);
+
+        barrier_arrive(barrier_scope);
 
         // Per-block 2D copies (rebase HW payload to this block)
         TiledCopyK copy_k_blk{K_ND(_, _, block_phys)};
         TiledCopyV copy_v_blk{V_ND(_, _, block_phys)};
 
-#if PREFETCH_V_EARLIER
       {
+        // prefetch V for Gemm PV
         auto prefetch_v_blk = make_block_2d_prefetch(copy_v_blk);
         auto pVgV_blk =
             prefetch_v_blk.get_slice(thr_id).partition_S(gV);
@@ -424,7 +416,6 @@ struct FMHAFwdMainloop<
                     pVgV_blk(_, _, _, vv_base + VV, tile_within));
         }
       }
-#endif
 
         /* GEMM 1: S = Q * K^T */
         clear(tSrS);
@@ -437,20 +428,6 @@ struct FMHAFwdMainloop<
           reorder(tKrK, tSrK);
           cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
         }
-
-#if !PREFETCH_V_EARLIER
-        /* V prefetch for GEMM 2 */
-        {
-          auto prefetch_v_blk = make_block_2d_prefetch(copy_v_blk);
-          auto pVgV_blk =
-              prefetch_v_blk.get_slice(thr_id).partition_S(gV);
-          CUTLASS_PRAGMA_UNROLL
-          for (int VV = 0; VV < VTiles; VV++) {
-            prefetch(prefetch_v_blk,
-                     pVgV_blk(_, _, _, vv_base + VV, tile_within));
-          }
-        }
-#endif
 
         /* Causal masking and k remainder masking */
         {
@@ -536,9 +513,7 @@ struct FMHAFwdMainloop<
           }
         }
 
-#if SYNC
         barrier_wait(barrier_scope);
-#endif
       }
     } else {
       // ── Non-paged path: K/V are 2D (original) ─────────────────
@@ -591,7 +566,7 @@ struct FMHAFwdMainloop<
       }
 
       for (int D = 0; D < size<4>(pKgK); D++) {
-        for (int S = 0; S < STAGES; S++) {
+        for (int S = 0; S < Stages; S++) {
           prefetch(prefetch_k, pKgK(_, _, _, blk_k0 + S, D));
         }
       }
@@ -697,7 +672,7 @@ struct FMHAFwdMainloop<
         }
 
         for (int D = 0; D < size<4>(pKgK); D++) {
-          prefetch(prefetch_k, pKgK(_, _, _, K + STAGES, D));
+          prefetch(prefetch_k, pKgK(_, _, _, K + Stages, D));
         }
 
 #if SYNC
@@ -733,23 +708,6 @@ struct FMHAFwdMainloop<
     }
 
     /* Rescale existing S sums */
-#if POSTPROCESSING    
-    if (!first_block) {
-      auto tS_bsum = reduce<1>(tS, sycl::plus<void>{});
-      CUTLASS_PRAGMA_UNROLL
-      for (int i = 0; i < tS_sum.size(); i++) {
-        tS_sum(i) *= rescale(i);
-        tS_sum(i) += tS_bsum(i);
-      }
-    } else {
-      /* Update sums */
-      auto tS_bsum = reduce<1>(tS, sycl::plus<void>{});
-      CUTLASS_PRAGMA_UNROLL
-      for (int i = 0; i < tS_sum.size(); i++) {
-        tS_sum(i) += tS_bsum(i);
-      }
-    }
-#else 
     if (!first_block) {
       CUTLASS_PRAGMA_UNROLL
       for (int i = 0; i < tS_sum.size(); i++) {
@@ -763,7 +721,6 @@ struct FMHAFwdMainloop<
     for (int i = 0; i < tS_sum.size(); i++) {
       tS_sum(i) += tS_bsum(i);
     }
-#endif
     return rescale;
   }
 };
