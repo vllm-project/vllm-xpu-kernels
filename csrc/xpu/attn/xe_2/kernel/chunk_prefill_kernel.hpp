@@ -287,12 +287,8 @@ class XeFMHAFwdKernel {
         auto qo_cumulative = s.seq_len_qo.cumulative_length;
         auto kv_cumulative = s.seq_len_kv.cumulative_length;
         offset_q = s.num_heads_q * s.head_size_qk * qo_cumulative[idx_b];
-        offset_k = PagedKV
-                       ? 0
-                       : get<0>(p.dK) * kv_cumulative[idx_b];
-        offset_v = PagedKV
-                       ? 0
-                       : get<1>(p.dV) * kv_cumulative[idx_b];
+        offset_k = PagedKV ? 0 : get<0>(p.dK) * kv_cumulative[idx_b];
+        offset_v = PagedKV ? 0 : get<1>(p.dV) * kv_cumulative[idx_b];
         offset_o = s.num_heads_q * s.head_size_vo * qo_cumulative[idx_b];
       }
 
@@ -307,20 +303,29 @@ class XeFMHAFwdKernel {
       // Shape: (block_size, head_size, num_heads, block_nums)
       // After head selection → 3D: (block_size, head_size, block_nums)
       // The block 2D copy uses tiled_strides for per-block base rebasing.
-      auto block_nums =
-          PagedKV ? params.mainloop.block_nums : 0;
+      auto block_nums = PagedKV ? params.mainloop.block_nums : 0;
       auto total_seqlen_kv =
           PagedKV ? params.mainloop.total_seqlen_kv : seq_len_kv;
-      auto shape_K = PagedKV
-          ? make_shape(params.mainloop.page_size, s.head_size_qk,
-                       s.num_heads_kv, block_nums)
-          : make_shape(total_seqlen_kv, s.head_size_qk,
-                       s.num_heads_kv, batch_dim_kv);
-      auto shape_V = PagedKV
-          ? make_shape(s.head_size_vo, params.mainloop.page_size,
-                       s.num_heads_kv, block_nums)
-          : make_shape(s.head_size_vo, total_seqlen_kv,
-                       s.num_heads_kv, batch_dim_kv);
+      auto shape_K = PagedKV ? make_shape(
+                                   params.mainloop.page_size,
+                                   s.head_size_qk,
+                                   s.num_heads_kv,
+                                   block_nums)
+                             : make_shape(
+                                   total_seqlen_kv,
+                                   s.head_size_qk,
+                                   s.num_heads_kv,
+                                   batch_dim_kv);
+      auto shape_V = PagedKV ? make_shape(
+                                   s.head_size_vo,
+                                   params.mainloop.page_size,
+                                   s.num_heads_kv,
+                                   block_nums)
+                             : make_shape(
+                                   s.head_size_vo,
+                                   total_seqlen_kv,
+                                   s.num_heads_kv,
+                                   batch_dim_kv);
 
       auto dcQ = const_cast<ElementQ*>(p.Q + offset_q);
       auto dcK = const_cast<ElementK*>(p.K + offset_k);

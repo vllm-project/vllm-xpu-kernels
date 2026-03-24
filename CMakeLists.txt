@@ -185,7 +185,8 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
 
   # ============= LINK OPTIONS ==================
   set(SYCL_LINK_FLAGS "")
-  list(APPEND SYCL_LINK_FLAGS "-fsycl" "-fno-sycl-instrument-device-code" "-fsycl-targets=spir64_gen")
+  list(APPEND SYCL_LINK_FLAGS "-fsycl" "-fno-sycl-instrument-device-code"
+       "-fsycl-targets=spir64_gen")
   set(SYCL_DEVICE_LINK_FLAGS ${SYCL_LINK_FLAGS})
   set(SYCL_DEVICE_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS}
                              -fsycl-max-parallel-link-jobs=16)

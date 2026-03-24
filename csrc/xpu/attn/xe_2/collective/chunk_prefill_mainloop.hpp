@@ -199,7 +199,8 @@ struct FMHAFwdMainloop<
     void* const scale_k;
     void* const scale_v;
 
-    // Paged KV Cache (BNHS layout: [block_nums, num_heads, block_size, head_size])
+    // Paged KV Cache (BNHS layout: [block_nums, num_heads, block_size,
+    // head_size])
     const int* ptr_page_table;
     int page_size;
     int max_pages_per_seq;
@@ -269,7 +270,7 @@ struct FMHAFwdMainloop<
       int thr_id,
       int seq_len,
       int full_tile_offset,
-      int head = 0) {         // KV head index for BNHS addressing
+      int head = 0) {  // KV head index for BNHS addressing
     using namespace sycl::ext::oneapi::this_work_item;
 
     constexpr int tile_k = get<1>(TileShapeQK{});
@@ -278,8 +279,8 @@ struct FMHAFwdMainloop<
     Tensor cQ = make_identity_tensor(Q_2D.shape());
     Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));
 
-    Tensor gQ = local_tile(
-        cQ, TileShapeQK{}, append(blk_qv, _), Step<_1, X, _1>{});
+    Tensor gQ =
+        local_tile(cQ, TileShapeQK{}, append(blk_qv, _), Step<_1, X, _1>{});
 
     /* Common MMA and Q copy setup */
     TiledMMAQK mma_qk{};
@@ -320,13 +321,12 @@ struct FMHAFwdMainloop<
 
       /* Tile K within one block: (block_size, head_size) →
          (tile_k, tile_d, Kw, D) where Kw = block_size/tile_k */
-      Tensor gK = local_tile(
-          cK, TileShapeQK{}, make_coord(_, _, _),
-          Step<X, _1, _1>{});
+      Tensor gK =
+          local_tile(cK, TileShapeQK{}, make_coord(_, _, _), Step<X, _1, _1>{});
       /* Single-level V tiling within one block:
          (head_size, block_size) → (v_tile, k_tile, V_all, K_within) */
-      auto tile_v_paged = make_shape(
-          get<1>(TileShapePV{}), get<2>(TileShapePV{}));
+      auto tile_v_paged =
+          make_shape(get<1>(TileShapePV{}), get<2>(TileShapePV{}));
       Tensor gV = local_tile(cV, tile_v_paged, make_coord(_, _));
 
       TiledCopyK copy_k_ref{K_ref};
@@ -337,14 +337,10 @@ struct FMHAFwdMainloop<
       auto tKgK = thr_copy_k.partition_S(gK);
       auto tVgV = thr_copy_v.partition_S(gV);
 
-      auto tKrK = thr_copy_k.partition_sg_fragment_D(
-          gK(_, _, 0, 0));
-      auto tSrK = thr_mma_qk.partition_sg_fragment_B(
-          gK(_, _, 0, 0));
-      auto tVrV = thr_copy_v.partition_sg_fragment_D(
-          gV(_, _, 0, 0));
-      auto tArV = thr_mma_pv.partition_sg_fragment_B(
-          gV(_, _, 0, 0));
+      auto tKrK = thr_copy_k.partition_sg_fragment_D(gK(_, _, 0, 0));
+      auto tSrK = thr_mma_qk.partition_sg_fragment_B(gK(_, _, 0, 0));
+      auto tVrV = thr_copy_v.partition_sg_fragment_D(gV(_, _, 0, 0));
+      auto tArV = thr_mma_pv.partition_sg_fragment_B(gV(_, _, 0, 0));
 
       // V head tile offset for output head dimension
       int vv_base = get<1>(blk_qv) * VTiles;
@@ -366,13 +362,11 @@ struct FMHAFwdMainloop<
         int pre_blk = pre_K / tiles_per_block;
         int pre_tw = pre_K % tiles_per_block;
         int pre_bp = get_paged_block(pre_blk, idx_b);
-        auto prefetch_k_s = make_block_2d_prefetch(
-            TiledCopyK{K_ND(_, _, pre_bp)});
-        auto pKgK_s =
-            prefetch_k_s.get_slice(thr_id).partition_S(gK);
+        auto prefetch_k_s =
+            make_block_2d_prefetch(TiledCopyK{K_ND(_, _, pre_bp)});
+        auto pKgK_s = prefetch_k_s.get_slice(thr_id).partition_S(gK);
         for (int D = 0; D < size<4>(pKgK_s); D++) {
-          prefetch(prefetch_k_s,
-                   pKgK_s(_, _, _, pre_tw, D));
+          prefetch(prefetch_k_s, pKgK_s(_, _, _, pre_tw, D));
         }
       }
 
@@ -384,7 +378,6 @@ struct FMHAFwdMainloop<
 
       /* Main loop, blocked in k. */
       for (int K = blk_k0; K < blk_k1; K++) {
-
         bool need_causal = false;
         if constexpr (CausalMask) {
           need_causal = K >= blk_k1_causal;
@@ -405,25 +398,23 @@ struct FMHAFwdMainloop<
         TiledCopyK copy_k_blk{K_ND(_, _, block_phys)};
         TiledCopyV copy_v_blk{V_ND(_, _, block_phys)};
 
-      {
-        // prefetch V for Gemm PV
-        auto prefetch_v_blk = make_block_2d_prefetch(copy_v_blk);
-        auto pVgV_blk =
-            prefetch_v_blk.get_slice(thr_id).partition_S(gV);
-        CUTLASS_PRAGMA_UNROLL
-        for (int VV = 0; VV < VTiles; VV++) {
-          prefetch(prefetch_v_blk,
-                    pVgV_blk(_, _, _, vv_base + VV, tile_within));
+        {
+          // prefetch V for Gemm PV
+          auto prefetch_v_blk = make_block_2d_prefetch(copy_v_blk);
+          auto pVgV_blk = prefetch_v_blk.get_slice(thr_id).partition_S(gV);
+          CUTLASS_PRAGMA_UNROLL
+          for (int VV = 0; VV < VTiles; VV++) {
+            prefetch(
+                prefetch_v_blk, pVgV_blk(_, _, _, vv_base + VV, tile_within));
+          }
         }
-      }
 
         /* GEMM 1: S = Q * K^T */
         clear(tSrS);
         CUTLASS_PRAGMA_UNROLL
         for (int D = 0; D < size<4>(tKgK); D++) {
           copy(copy_q, tQgQ(_, _, _, D), tQrQ);
-          copy(copy_k_blk,
-               tKgK(_, _, _, tile_within, D), tKrK);
+          copy(copy_k_blk, tKgK(_, _, _, tile_within, D), tKrK);
           reorder(tQrQ, tSrQ);
           reorder(tKrK, tSrK);
           cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
@@ -447,13 +438,11 @@ struct FMHAFwdMainloop<
                 }
               } else if constexpr (CausalMask) {
                 if (need_causal) {
-                  int causal_bound =
-                      col - full_tile_offset - row_base;
+                  int causal_bound = col - full_tile_offset - row_base;
                   CUTLASS_PRAGMA_UNROLL
                   for (int j = 0; j < elems_per_n; j++) {
                     if (j < causal_bound) {
-                      tSrS(n * elems_per_n + j) =
-                          ElementS(-INFINITY);
+                      tSrS(n * elems_per_n + j) = ElementS(-INFINITY);
                     }
                   }
                 }
@@ -463,53 +452,47 @@ struct FMHAFwdMainloop<
         }
         /* Local masking */
         if constexpr (LocalMask) {
-          Tensor cPgP =
-              make_identity_tensor(make_shape(seq_len, seq_len));
+          Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
           Tensor gP = local_tile(
-              cPgP, take<0, 2>(TileShapeQK{}),
-              make_coord(get<0>(blk_qv), K));
+              cPgP, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
           auto cS_thread = thr_mma_qk.partition_C(gP);
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tSrS.size(); ++i) {
             int row_idx = get<0>(cS_thread(i));
             int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
-            bool left_mask =
-                col_idx < row_idx - params.local_left;
-            bool right_mask =
-                col_idx > row_idx + params.local_right;
+            bool left_mask = col_idx < row_idx - params.local_left;
+            bool right_mask = col_idx > row_idx + params.local_right;
             if (left_mask || right_mask) {
               tSrS(i) = ElementS(-INFINITY);
             }
           }
         }
 
-       /* Apply softmax and scaling (tA rescaling fused into GEMM2 VTile loop) */
+        /* Apply softmax and scaling (tA rescaling fused into GEMM2 VTile loop)
+         */
         auto rescale = softmax(K == blk_k0, tSrS, tA_max, tA_sum);
         reorder(tSrS, tArP);
 
         /* GEMM 2: A += P * V, split in v dimension */
         CUTLASS_PRAGMA_UNROLL
         for (int VV = 0; VV < VTiles; VV++) {
-          copy(copy_v_blk,
-               tVgV(_, _, _, vv_base + VV, tile_within), tVrV);
+          copy(copy_v_blk, tVgV(_, _, _, vv_base + VV, tile_within), tVrV);
           reorder(tVrV, tArV);
           if (K != blk_k0) {
             CUTLASS_PRAGMA_UNROLL
             for (int i = 0; i < tArA.size() / VTiles; i++)
-              tArA(_,_,_,VV)(i) *= broadcast<0>(rescale, tArA, i);
+              tArA(_, _, _, VV)(i) *= broadcast<0>(rescale, tArA, i);
           }
           cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
         }
 
         /* K prefetch for next iteration */
         {
-          auto prefetch_k_next = make_block_2d_prefetch(
-              TiledCopyK{K_ND(_, _, pre_bp)});
-          auto pKgK_next =
-              prefetch_k_next.get_slice(thr_id).partition_S(gK);
+          auto prefetch_k_next =
+              make_block_2d_prefetch(TiledCopyK{K_ND(_, _, pre_bp)});
+          auto pKgK_next = prefetch_k_next.get_slice(thr_id).partition_S(gK);
           for (int D = 0; D < size<4>(pKgK_next); D++) {
-            prefetch(prefetch_k_next,
-                     pKgK_next(_, _, _, pre_tw, D));
+            prefetch(prefetch_k_next, pKgK_next(_, _, _, pre_tw, D));
           }
         }
 
@@ -523,14 +506,11 @@ struct FMHAFwdMainloop<
       Tensor cK = make_identity_tensor(K_ND.shape());
       Tensor cV = make_identity_tensor(V_ND.shape());
 
-      Tensor gK = local_tile(
-          cK, TileShapeQK{}, make_coord(_, _, _),
-          Step<X, _1, _1>{});
-      Tensor gV = local_tile(
-          cV, tile_shape_v, make_coord(get<1>(blk_qv), _));
-      Tensor gV_split = local_tile(
-          gV, TileShapePV{}, make_coord(_, _, 0),
-          Step<X, _1, _1>{});
+      Tensor gK =
+          local_tile(cK, TileShapeQK{}, make_coord(_, _, _), Step<X, _1, _1>{});
+      Tensor gV = local_tile(cV, tile_shape_v, make_coord(get<1>(blk_qv), _));
+      Tensor gV_split =
+          local_tile(gV, TileShapePV{}, make_coord(_, _, 0), Step<X, _1, _1>{});
 
       TiledCopyK copy_k{K_ND};
       TiledCopyV copy_v{V_ND};
@@ -540,20 +520,15 @@ struct FMHAFwdMainloop<
       auto tKgK = thr_copy_k.partition_S(gK);
       auto tVgV = thr_copy_v.partition_S(gV_split);
 
-      auto tKrK = thr_copy_k.partition_sg_fragment_D(
-          gK(_, _, 0, 0));
-      auto tSrK = thr_mma_qk.partition_sg_fragment_B(
-          gK(_, _, 0, 0));
-      auto tVrV = thr_copy_v.partition_sg_fragment_D(
-          gV_split(_, _, 0, 0));
-      auto tArV = thr_mma_pv.partition_sg_fragment_B(
-          gV_split(_, _, 0, 0));
+      auto tKrK = thr_copy_k.partition_sg_fragment_D(gK(_, _, 0, 0));
+      auto tSrK = thr_mma_qk.partition_sg_fragment_B(gK(_, _, 0, 0));
+      auto tVrV = thr_copy_v.partition_sg_fragment_D(gV_split(_, _, 0, 0));
+      auto tArV = thr_mma_pv.partition_sg_fragment_B(gV_split(_, _, 0, 0));
 
       auto prefetch_k = make_block_2d_prefetch(copy_k);
       auto prefetch_v = make_block_2d_prefetch(copy_v);
       auto pKgK = prefetch_k.get_slice(thr_id).partition_S(gK);
-      auto pVgV =
-          prefetch_v.get_slice(thr_id).partition_S(gV_split);
+      auto pVgV = prefetch_v.get_slice(thr_id).partition_S(gV_split);
 
       const int barrier_scope = 2;
 
@@ -572,8 +547,7 @@ struct FMHAFwdMainloop<
       }
 
       clear(tArA);
-      fill(tA_max,
-           cutlass::platform::numeric_limits<ElementA>::lowest());
+      fill(tA_max, cutlass::platform::numeric_limits<ElementA>::lowest());
       clear(tA_sum);
 
       bool check_remainder_k = (seq_len % tile_k != 0);
@@ -620,13 +594,11 @@ struct FMHAFwdMainloop<
                 }
               } else if constexpr (CausalMask) {
                 if (need_causal) {
-                  int causal_bound =
-                      col - full_tile_offset - row_base;
+                  int causal_bound = col - full_tile_offset - row_base;
                   CUTLASS_PRAGMA_UNROLL
                   for (int j = 0; j < elems_per_n; j++) {
                     if (j < causal_bound) {
-                      tSrS(n * elems_per_n + j) =
-                          ElementS(-INFINITY);
+                      tSrS(n * elems_per_n + j) = ElementS(-INFINITY);
                     }
                   }
                 }
@@ -635,27 +607,23 @@ struct FMHAFwdMainloop<
           }
         }
         if constexpr (LocalMask) {
-          Tensor cPgP =
-              make_identity_tensor(make_shape(seq_len, seq_len));
+          Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
           Tensor gP = local_tile(
-              cPgP, take<0, 2>(TileShapeQK{}),
-              make_coord(get<0>(blk_qv), K));
+              cPgP, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
           auto cS_thread = thr_mma_qk.partition_C(gP);
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tSrS.size(); ++i) {
             int row_idx = get<0>(cS_thread(i));
             int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
-            bool left_mask =
-                col_idx < row_idx - params.local_left;
-            bool right_mask =
-                col_idx > row_idx + params.local_right;
+            bool left_mask = col_idx < row_idx - params.local_left;
+            bool right_mask = col_idx > row_idx + params.local_right;
             if (left_mask || right_mask) {
               tSrS(i) = ElementS(-INFINITY);
             }
           }
         }
 
-        /* Apply softmax and scaling (tA rescaling fused into GEMM2 VTile loop) */
+        /* Apply softmax and scaling */
         auto rescale = softmax(K == blk_k0, tSrS, tA_max, tA_sum);
         reorder(tSrS, tArP);
 
@@ -663,10 +631,11 @@ struct FMHAFwdMainloop<
         for (int VV = 0; VV < VTiles; VV++) {
           copy(copy_v, tVgV(_, _, _, VV, K), tVrV);
           reorder(tVrV, tArV);
+          // tA rescaling fused into PV
           if (K != blk_k0) {
             CUTLASS_PRAGMA_UNROLL
             for (int i = 0; i < tArA.size() / VTiles; i++)
-              tArA(_,_,_,VV)(i) *= broadcast<0>(rescale, tArA, i);
+              tArA(_, _, _, VV)(i) *= broadcast<0>(rescale, tArA, i);
           }
           cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
         }
@@ -685,10 +654,10 @@ struct FMHAFwdMainloop<
   // Single step of blocked softmax.
   CUTLASS_DEVICE
   FragSRow softmax(
-      bool first_block,  // First softmax block?
-      FragS& tS,         // Softmax src/dst block
-      FragSRow& tS_max,  // Softmax row-wise max accumulator
-      FragSRow& tS_sum) {  // Softmax row-wise sum accumulator 
+      bool first_block,    // First softmax block?
+      FragS& tS,           // Softmax src/dst block
+      FragSRow& tS_max,    // Softmax row-wise max accumulator
+      FragSRow& tS_sum) {  // Softmax row-wise sum accumulator
 
     /* Compute row-wise maxima for this block */
     auto tS_bmax = reduce<1>(tS, sycl::maximum{});
@@ -704,7 +673,8 @@ struct FMHAFwdMainloop<
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++) {
-      tS(i) = sycl::native::exp2(params.scale * tS(i) - broadcast<0>(tS_max, tS, i));
+      tS(i) = sycl::native::exp2(
+          params.scale * tS(i) - broadcast<0>(tS_max, tS, i));
     }
 
     /* Rescale existing S sums */
