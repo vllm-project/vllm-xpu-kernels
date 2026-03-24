@@ -27,7 +27,7 @@ def fp8_block_quant_2d(
         x: [M, N] float tensor (fp16/fp32)
         block_m: block rows
         block_n: block cols
-        fp8_dtype: torch.float8_e4m3fn or e5m2
+        fp8_dtype: torch.float8_e4m3fn
     Returns:
         q: FP8 tensor [M, N]
         scales: FP32 tensor [ceil(M/BM), ceil(N/BN)]
@@ -68,6 +68,58 @@ def fp8_block_quant_2d(
             q[m0:m1, n0:n1] = q_block
 
     return q, scales
+
+
+def fp8_block_dequant_2d(
+    q: torch.Tensor,
+    scales: torch.Tensor,
+    block_m: int,
+    block_n: int,
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """
+    Dequantize a 2D block-quantized FP8 tensor.
+
+    Args:
+        q: FP8 tensor [M, N]
+        scales: FP32 tensor [ceil(M/BM), ceil(N/BN)]
+        block_m: block rows
+        block_n: block cols
+        dtype: output dtype (e.g. torch.float16, torch.bfloat16)
+    Returns:
+        Dequantized tensor [M, N] in the specified dtype
+    """
+    assert q.dim() == 2
+    M, N = q.shape
+    grid_m, grid_n = scales.shape
+
+    return (q.to(torch.float32).reshape(grid_m, block_m, grid_n, block_n) *
+            scales.reshape(grid_m, 1, grid_n, 1)).reshape(M, N).to(dtype)
+
+
+def per_token_group_dequant_fp8(
+    q: torch.Tensor,
+    scales: torch.Tensor,
+    group_size: int,
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """
+    Dequantize a per-token-group quantized FP8 tensor.
+
+    Args:
+        q: FP8 tensor [M, K]
+        scales: FP32 tensor [M, K//group_size]
+        group_size: number of elements per group
+        dtype: output dtype
+    Returns:
+        Dequantized tensor [M, K] in the specified dtype
+    """
+    assert q.dim() == 2
+    M, K = q.shape
+    num_groups = K // group_size
+
+    return (q.to(torch.float32).reshape(M, num_groups, group_size) *
+            scales.unsqueeze(-1)).reshape(M, K).to(dtype)
 
 
 def scaled_fp8_quant(
