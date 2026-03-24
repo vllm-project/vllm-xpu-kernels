@@ -3,7 +3,7 @@
 This repo is designed as a vLLM plugin which provides custom kernels for Intel GPU (known as XPU in PyTorch).
 
 ## Getting started
-Currently we use PyTorch 2.10, oneapi 2025.3.
+Currently we use PyTorch 2.11, oneapi 2025.3.
 
 ### How it works
 python3 setup.py build - will build a `_C.abi3.so` under build directory

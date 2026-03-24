@@ -44,7 +44,7 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
 #
 # TODO: we need to align torch version with used in vLLM.
 #
-set(TORCH_SUPPORTED_VERSION_XPU "2.9.0")
+set(TORCH_SUPPORTED_VERSION_XPU "2.11.0")
 
 set(BUILD_SYCL_TLA_KERNELS
     ON
