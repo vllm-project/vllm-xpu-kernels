@@ -516,10 +516,17 @@ class cp_gather_indexer_k_quant_cache_kernel {
     const int local_range_y = static_cast<int>(item.get_local_range(1));  // 8
 
     const int token_idx =
-        static_cast<int>(item.get_group(1) * local_range_x + local_x);
+        static_cast<int>(item.get_group(0) * local_range_x + local_x);
     const int head_idx =
-        static_cast<int>(item.get_group(0) * local_range_y + local_y) *
+        static_cast<int>(item.get_group(1) * local_range_y + local_y) *
         VEC_SIZE;
+
+    // Initialise SLM to 0 before the search to avoid stale values
+    // from the previous work-group that ran on the same EU.
+    if (local_y == 0 && token_idx < num_tokens_) {
+      batch_idx_acc_[local_x] = 0;
+    }
+    item.barrier(sycl::access::fence_space::local_space);
 
     for (int iter = 0; iter < (batch_size_ + local_range_y - 1) / local_range_y;
          ++iter) {
@@ -536,6 +543,7 @@ class cp_gather_indexer_k_quant_cache_kernel {
     // Synchronise SLM writes before any thread reads batch_idx_acc_
     item.barrier(sycl::access::fence_space::local_space);
 
+    // Exit threads after barrier to make sure nothing to write.
     if (head_idx >= static_cast<int>(head_dim_) || token_idx >= num_tokens_) {
       return;
     }
@@ -555,9 +563,23 @@ class cp_gather_indexer_k_quant_cache_kernel {
         static_cast<int64_t>(token_idx) * token_stride_ + head_idx;
 
     // Vectorised 16-byte copy: read 16 fp8 bytes from cache, write to dst_k
-    reinterpret_cast<sycl::float4*>(dst_k_)[dst_inblock_offset / VEC_SIZE] =
-        reinterpret_cast<const sycl::float4*>(
-            kv_cache_)[src_inblock_offset / VEC_SIZE];
+    // Use float4 only when both src/dst are 16-byte aligned and full chunk
+    // fits.
+    const bool src_aligned = (src_inblock_offset % VEC_SIZE) == 0;
+    const bool dst_aligned = (dst_inblock_offset % VEC_SIZE) == 0;
+    const bool full_chunk =
+        (head_idx + VEC_SIZE <= static_cast<int>(head_dim_));
+    if (full_chunk && src_aligned && dst_aligned) {
+      *reinterpret_cast<sycl::float4*>(dst_k_ + dst_inblock_offset) =
+          *reinterpret_cast<const sycl::float4*>(
+              kv_cache_ + src_inblock_offset);
+    } else {
+      int remains =
+          full_chunk ? VEC_SIZE : static_cast<int>(head_dim_) - head_idx;
+      for (int i = 0; i < remains; i++) {
+        dst_k_[dst_inblock_offset + i] = kv_cache_[src_inblock_offset + i];
+      }
+    }
 
     // Scale copy: only local_y==0 writes (one scale per quant_block)
     if (local_y == 0) {
@@ -1179,8 +1201,8 @@ void indexer_k_quant_and_cache(
 #define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(BLOCK_Y_SIZE)              \
   do {                                                                  \
     sycl::range<2> global(                                              \
-        ((head_dim + 8 * vec_size - 1) / (8 * vec_size)),               \
-        ((num_tokens + (BLOCK_Y_SIZE) - 1) / (BLOCK_Y_SIZE)));          \
+        ((num_tokens + (BLOCK_Y_SIZE) - 1) / (BLOCK_Y_SIZE)),           \
+        ((head_dim + 8 * vec_size - 1) / (8 * vec_size)));              \
     sycl::range<2> local((BLOCK_Y_SIZE), 8);                            \
     queue.submit([&](sycl::handler& cgh) {                              \
       sycl::local_accessor<int, 1> batch_idx(                           \

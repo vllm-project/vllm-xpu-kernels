@@ -9,8 +9,10 @@ eps = 1e-4
 
 DEVICE = "xpu"
 BATCH_SEQ_LENS = [[1], [3], [6], [3, 4], [5, 4], [4, 3], [4, 4], [7, 8, 5]]
-HEAD_DIMS = [128, 256, 512]
-QUANT_BLOCK_SIZES = [128]
+# (head_dim, quant_block_size) valid combinations
+HEAD_DIM_QUANT_BLOCK_PARAMS = ([(hd, 128) for hd in [128, 256, 512]] +
+                               [(24, 24)]  # corner case
+                               )
 BLOCK_SIZES = [4, 16]
 SCALE_FMTS = ["ue8m0", "fp8e4m3"]
 # TODO: will add back torch.float16
@@ -21,8 +23,7 @@ DTYPES = [torch.float32, torch.bfloat16]
 MINI_PYTEST_PARAMS = {
     "default": {
         "batch_seq_lens": [[1]],
-        "head_dim": [128],
-        "quant_block_size": [128],
+        "head_dim,quant_block_size": [(128, 128)],
         "block_size": [16],
         "scale_fmt": ["ue8m0"],
         "dtype": [torch.float32],
@@ -81,8 +82,8 @@ def ref_cp_gather_indexer_k_quant_cache(
 
 
 @pytest.mark.parametrize("batch_seq_lens", BATCH_SEQ_LENS)
-@pytest.mark.parametrize("head_dim", HEAD_DIMS)
-@pytest.mark.parametrize("quant_block_size", QUANT_BLOCK_SIZES)
+@pytest.mark.parametrize("head_dim,quant_block_size",
+                         HEAD_DIM_QUANT_BLOCK_PARAMS)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("scale_fmt", SCALE_FMTS)
 @pytest.mark.parametrize("dtype", DTYPES)
