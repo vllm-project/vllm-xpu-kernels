@@ -287,8 +287,12 @@ class XeFMHAFwdKernel {
         auto qo_cumulative = s.seq_len_qo.cumulative_length;
         auto kv_cumulative = s.seq_len_kv.cumulative_length;
         offset_q = s.num_heads_q * s.head_size_qk * qo_cumulative[idx_b];
-        offset_k = PagedKV ? 0 : get<0>(p.dK) * kv_cumulative[idx_b];
-        offset_v = PagedKV ? 0 : get<1>(p.dV) * kv_cumulative[idx_b];
+        offset_k = PagedKV
+                       ? 0
+                       : s.num_heads_kv * s.head_size_qk * kv_cumulative[idx_b];
+        offset_v = PagedKV
+                       ? 0
+                       : s.num_heads_kv * s.head_size_vo * kv_cumulative[idx_b];
         offset_o = s.num_heads_q * s.head_size_vo * qo_cumulative[idx_b];
       }
 
@@ -335,8 +339,12 @@ class XeFMHAFwdKernel {
       auto layout_q = is_var_len
                           ? make_ordered_layout(shape_Q, Step<_2, _0, _1, _3>{})
                           : make_layout(shape_Q, p.dQ);
-      auto layout_k = make_layout(shape_K, p.dK);
-      auto layout_v = make_layout(shape_V, p.dV);
+      auto layout_k =
+          PagedKV ? make_layout(shape_K, p.dK)
+                  : make_ordered_layout(shape_K, Step<_2, _0, _1, _3>{});
+      auto layout_v =
+          PagedKV ? make_layout(shape_V, p.dV)
+                  : make_ordered_layout(shape_V, Step<_0, _2, _1, _3>{});
       auto layout_o = is_var_len
                           ? make_ordered_layout(shape_O, Step<_2, _0, _1, _3>{})
                           : make_layout(shape_O, p.dO);

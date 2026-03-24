@@ -584,9 +584,7 @@ struct FMHAFwdMainloop<
           need_causal = K >= blk_k1_causal;
         }
 
-#if SYNC
         barrier_arrive(barrier_scope);
-#endif
 
         clear(tSrS);
         CUTLASS_PRAGMA_UNROLL
@@ -683,9 +681,7 @@ struct FMHAFwdMainloop<
           prefetch(prefetch_k, pKgK(_, _, _, K + Stages, D));
         }
 
-#if SYNC
         barrier_wait(barrier_scope);
-#endif
       }
     }
   }
@@ -1039,8 +1035,6 @@ struct DecodeFwdMainloop<
     /* Check if */
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
 
-    /* Pre-compute lane_id for k remainder scalar arithmetic */
-    int lane_id = thr_id % intel::sg_size;
     // FP8 KV Scale: Currently we only support per-tensor scale for KV
     float scale_k = 1.f, scale_v = 1.f;
     if constexpr (Fp8KV) {
@@ -1119,20 +1113,18 @@ struct DecodeFwdMainloop<
         }
       }
 
-      /* k masking for remainder tiles — scalar arithmetic */
+      /* k masking for remainder tiles */
       if (check_remainder_k && K == blk_k1 - 1) {
-        constexpr int kTileK = get<1>(TileShapeQK{});
-        constexpr int n_reps = kTileK / intel::sg_size;
-        int elems_per_n = tSrS.size() / n_reps;
-        int k_base = K * kTileK;
+        FragSCol k_rem_mask;
+        int k = get<0>(tKgK(0, 0, 0, K, 0)) + get_sub_group().get_local_id()[0];
         CUTLASS_PRAGMA_UNROLL
-        for (int n = 0; n < n_reps; n++) {
-          if (k_base + n * intel::sg_size + lane_id >= seq_len) {
-            CUTLASS_PRAGMA_UNROLL
-            for (int j = 0; j < elems_per_n; j++) {
-              tSrS(n * elems_per_n + j) = ElementS(-INFINITY);
-            }
-          }
+        for (int i = 0; i < k_rem_mask.size(); i++, k += intel::sg_size) {
+          k_rem_mask(i) =
+              (k < seq_len) ? ElementS(sycl::nan(0u)) : ElementS(-INFINITY);
+        }
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS.size(); i++) {
+          tSrS(i) = sycl::fmin(tSrS(i), broadcast<1>(k_rem_mask, tSrS, i));
         }
       }
 
