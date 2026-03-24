@@ -254,8 +254,10 @@ def test_varlen_with_paged_kv(
         maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
 
     if is_paged:
-        key_cache_real = maybe_quantized_key_cache.permute(0, 2, 1, 3).contiguous()
-        value_cache_real = maybe_quantized_value_cache.permute(0, 2, 1, 3).contiguous()
+        key_cache_real = maybe_quantized_key_cache.permute(0, 2, 1,
+                                                           3).contiguous()
+        value_cache_real = maybe_quantized_value_cache.permute(0, 2, 1,
+                                                               3).contiguous()
         output = flash_attn_varlen_func(maybe_quantized_query,
                                         key_cache_real,
                                         value_cache_real,

@@ -124,6 +124,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
     TORCH_CHECK(
         block_table.stride(-1) == 1,
         "page_table must have contiguous last dimension");
+    TORCH_CHECK(
+        block_table.size(1) == k.size(2),
+        "key/value size must be [block_nums, num_heads, block_size, "
+        "head_size]");
   }
 
   CHECK_DEVICE(cu_seqlens_q);
