@@ -526,7 +526,6 @@ class cp_gather_indexer_k_quant_cache_kernel {
     if (local_y == 0 && token_idx < num_tokens_) {
       batch_idx_acc_[local_x] = 0;
     }
-    item.barrier(sycl::access::fence_space::local_space);
 
     for (int iter = 0; iter < (batch_size_ + local_range_y - 1) / local_range_y;
          ++iter) {
