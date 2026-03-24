@@ -376,6 +376,13 @@ struct FMHAFwdMainloop<
 
       bool check_remainder_k = (seq_len % tile_k != 0);
 
+      // FP8 KV Scale: Currently we only support per-tensor scale for KV
+      float scale_k = 1.f, scale_v = 1.f;
+      if constexpr (Fp8KV) {
+        scale_k = *static_cast<const float*>(params.scale_k);
+        scale_v = *static_cast<const float*>(params.scale_v);
+      }
+
       /* Main loop, blocked in k. */
       for (int K = blk_k0; K < blk_k1; K++) {
         bool need_causal = false;
@@ -417,6 +424,12 @@ struct FMHAFwdMainloop<
           copy(copy_k_blk, tKgK(_, _, _, tile_within, D), tKrK);
           reorder(tQrQ, tSrQ);
           reorder(tKrK, tSrK);
+          if constexpr (Fp8KV) {
+            for (int i = 0; i < tSrK.size(); ++i) {
+              tSrK(i) =
+                  static_cast<ElementQ>(scale_k * static_cast<float>(tSrK(i)));
+            }
+          }
           cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
         }
 
@@ -468,8 +481,7 @@ struct FMHAFwdMainloop<
           }
         }
 
-        /* Apply softmax and scaling (tA rescaling fused into GEMM2 VTile loop)
-         */
+        /* Apply softmax*/
         auto rescale = softmax(K == blk_k0, tSrS, tA_max, tA_sum);
         reorder(tSrS, tArP);
 
@@ -482,6 +494,13 @@ struct FMHAFwdMainloop<
             CUTLASS_PRAGMA_UNROLL
             for (int i = 0; i < tArA.size() / VTiles; i++)
               tArA(_, _, _, VV)(i) *= broadcast<0>(rescale, tArA, i);
+          }
+          if constexpr (Fp8KV) {
+            CUTLASS_PRAGMA_UNROLL
+            for (int i = 0; i < tArV.size(); ++i) {
+              tArV(i) =
+                  static_cast<ElementQ>(scale_v * static_cast<float>(tArV(i)));
+            }
           }
           cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
         }
@@ -552,6 +571,13 @@ struct FMHAFwdMainloop<
 
       bool check_remainder_k = (seq_len % tile_k != 0);
 
+      // FP8 KV Scale: Currently we only support per-tensor scale for KV
+      float scale_k = 1.f, scale_v = 1.f;
+      if constexpr (Fp8KV) {
+        scale_k = *static_cast<const float*>(params.scale_k);
+        scale_v = *static_cast<const float*>(params.scale_v);
+      }
+
       for (int K = blk_k0; K < blk_k1; K++) {
         bool need_causal = false;
         if constexpr (CausalMask) {
@@ -569,6 +595,12 @@ struct FMHAFwdMainloop<
           copy(copy_k, tKgK(_, _, _, K, D), tKrK);
           reorder(tQrQ, tSrQ);
           reorder(tKrK, tSrK);
+          if constexpr (Fp8KV) {
+            for (int i = 0; i < tSrK.size(); ++i) {
+              tSrK(i) =
+                  static_cast<ElementQ>(scale_k * static_cast<float>(tSrK(i)));
+            }
+          }
           cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
         }
 
@@ -636,6 +668,13 @@ struct FMHAFwdMainloop<
             CUTLASS_PRAGMA_UNROLL
             for (int i = 0; i < tArA.size() / VTiles; i++)
               tArA(_, _, _, VV)(i) *= broadcast<0>(rescale, tArA, i);
+          }
+          if constexpr (Fp8KV) {
+            CUTLASS_PRAGMA_UNROLL
+            for (int i = 0; i < tArV.size(); ++i) {
+              tArV(i) =
+                  static_cast<ElementQ>(scale_v * static_cast<float>(tArV(i)));
+            }
           }
           cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
         }
