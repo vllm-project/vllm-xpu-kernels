@@ -9,6 +9,9 @@
 #include "utils.h"
 #include "utils/mem_cpy.h"
 
+// FP8 E4M3 scale divisor for Intel GPU
+constexpr float kFp8E4M3ScaleDivisor = 448.f;
+
 namespace vllm {
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
@@ -382,6 +385,89 @@ class gather_cache_kernel {
   const int32_t* __restrict__ seq_starts;  // Optional: starting offsets per
 };
 
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+class indexer_k_quant_and_cache_kernel {
+ public:
+  indexer_k_quant_and_cache_kernel(
+      const scalar_t* __restrict__ k,
+      cache_t* __restrict__ kv_cache,
+      const int64_t* __restrict__ slot_mapping,
+      const int head_dim,
+      const int quant_block_size,
+      const int cache_block_size,
+      const int cache_stride,
+      bool use_ue8m0)
+      : k_(k),
+        kv_cache_(kv_cache),
+        slot_mapping_(slot_mapping),
+        head_dim_(head_dim),
+        quant_block_size_(quant_block_size),
+        cache_block_size_(cache_block_size),
+        cache_stride_(cache_stride),
+        use_ue8m0_(use_ue8m0) {}
+
+  void operator()(const sycl::nd_item<2>& item_id) const {
+    constexpr int VEC_SIZE = 4;
+    int64_t local_x = item_id.get_local_id(0);
+    int64_t local_y = item_id.get_local_id(1);
+    int64_t group_x = item_id.get_group(0);
+    int64_t token_idx = item_id.get_group(1);
+    int64_t head_dim_idx =
+        (group_x * item_id.get_local_range(0) * item_id.get_local_range(1) +
+         local_x * item_id.get_local_range(1) + local_y) *
+        VEC_SIZE;
+
+    int64_t slot_idx = slot_mapping_[token_idx];
+    const int64_t block_idx = slot_idx / cache_block_size_;
+    const int64_t block_offset = slot_idx % cache_block_size_;
+
+    if (slot_idx < 0 || head_dim_idx >= head_dim_) return;
+
+    // Compute local amax
+    float amax = 0.f;
+    scalar_t k_vals[VEC_SIZE];
+    for (int i = 0; i < VEC_SIZE; i++) {
+      k_vals[i] = k_[token_idx * head_dim_ + head_dim_idx + i];
+      amax = sycl::fmax(amax, sycl::fabs(static_cast<float>(k_vals[i])));
+    }
+
+    // group-level reduction (sub-group reduce max)
+    auto sg = item_id.get_sub_group();
+    amax = sycl::reduce_over_group(sg, amax, sycl::maximum<float>{});
+
+    float scale = sycl::fmax(amax, 1e-4f) / kFp8E4M3ScaleDivisor;
+
+    if (use_ue8m0_) {
+      scale = sycl::exp2(sycl::ceil(sycl::log2(scale)));
+    }
+    // Put scale in the back of quanted values for the sake of data contiuity
+    const int64_t dst_offset = block_idx * cache_block_size_ * cache_stride_ +
+                               block_offset * head_dim_ + head_dim_idx;
+
+    fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> op{scale};
+    for (int i = 0; i < VEC_SIZE; i++) {
+      op(kv_cache_[dst_offset + i], k_vals[i]);
+    }
+
+    if (local_y == 0) {
+      const int64_t dst_scale_idx =
+          block_idx * cache_block_size_ * cache_stride_ +
+          cache_block_size_ * head_dim_ +
+          (block_offset * head_dim_ + head_dim_idx) * 4 / quant_block_size_;
+      reinterpret_cast<float*>(kv_cache_)[dst_scale_idx / 4] = scale;
+    }
+  }
+
+ private:
+  const scalar_t* __restrict__ k_;  // [num_tokens, head_dim]
+  cache_t* __restrict__ kv_cache_;  // [num_blocks, block_size, cache_stride]
+  const int64_t* __restrict__ slot_mapping_;  // [num_tokens]
+  const int64_t head_dim_;
+  const int64_t quant_block_size_;
+  const int64_t cache_block_size_;
+  const int64_t cache_stride_;
+  const bool use_ue8m0_;
+};
 }  // namespace vllm
 
 // KV_T is the stored data type of kv-cache.
@@ -916,4 +1002,54 @@ void convert_fp8(
     DISPATCH_BY_KV_CACHE_DTYPE(
         src.scalar_type(), kv_cache_dtype, CALL_CONVERT_FP8_KERNEL);
   }
+}
+#define CALL_INDEXER_K_QUANT_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)          \
+  queue.submit([&](sycl::handler& cgh) {                                 \
+    cgh.parallel_for(                                                    \
+        sycl::nd_range<2>(grid * block, block),                          \
+        vllm::indexer_k_quant_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+            reinterpret_cast<KV_T*>(k.data_ptr()),                       \
+            reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),             \
+            slot_mapping.data_ptr<int64_t>(),                            \
+            head_dim,                                                    \
+            quant_block_size,                                            \
+            cache_block_size,                                            \
+            cache_stride,                                                \
+            use_ue8m0));                                                 \
+  });
+
+void indexer_k_quant_and_cache(
+    torch::Tensor& k,             // [num_tokens, head_dim]
+    torch::Tensor& kv_cache,      // [num_blocks, block_size, cache_stride]
+    torch::Tensor& slot_mapping,  // [num_tokens]
+    int64_t quant_block_size,     // quantization block size
+    const std::string& scale_fmt) {
+  int num_tokens = k.size(0);
+  int head_dim = k.size(1);
+  int cache_block_size = kv_cache.size(1);
+  int cache_stride = kv_cache.size(2);
+  bool use_ue8m0 = scale_fmt == "ue8m0";
+
+  TORCH_CHECK(
+      k.device() == kv_cache.device(),
+      "k and kv_cache must be on the same device");
+  TORCH_CHECK(
+      k.device() == slot_mapping.device(),
+      "k and slot_mapping must be on the same device");
+  TORCH_CHECK(
+      head_dim % quant_block_size == 0,
+      "head_dim must be divisible by quant_block_size");
+
+  constexpr int vec_size = 4;
+  sycl::range<2> grid(
+      (head_dim + quant_block_size * vec_size - 1) /
+          (quant_block_size * vec_size),
+      num_tokens);
+  sycl::range<2> block(vec_size, 32);
+  const at::DeviceGuard device_guard(k.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+
+  static const std::string kv_cache_dtype = "fp8_e4m3";
+  DISPATCH_BY_KV_CACHE_DTYPE(
+      k.scalar_type(), kv_cache_dtype, CALL_INDEXER_K_QUANT_AND_CACHE);
 }

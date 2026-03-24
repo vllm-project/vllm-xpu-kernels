@@ -8,7 +8,7 @@
 namespace gdn {
 static constexpr int chunk_size = gdn::chunk_size_xe2;
 
-template <typename T, int Width>
+template <typename T, int Width, bool ReorderInput>
 struct chunk_causal_conv1d_kernel {
  public:
   static constexpr int sub_group_size = 32;
@@ -110,7 +110,7 @@ struct chunk_causal_conv1d_kernel {
     const int qkv_dim = q_dim + k_dim + v_dim;
     const int qkvz_dim = q_dim + k_dim + v_dim + z_dim;
 
-    const int qkvz_elems_offset = k_head_id * qkvz_dim + qkv_dim_offset;
+    int qkvz_elems_offset = k_head_id * qkvz_dim + qkv_dim_offset;
 
     // get current seq start, end
     int batch_id = batch_size - 1;
@@ -145,10 +145,21 @@ struct chunk_causal_conv1d_kernel {
 
     if (qkv_dim_offset < q_dim) {
       is_q = true;
+      if constexpr (ReorderInput) {
+        qkvz_elems_offset = k_head_id * k_dim + qkv_dim_offset;
+      }
     } else if (qkv_dim_offset < q_dim + k_dim) {
       is_k = true;
+      if constexpr (ReorderInput) {
+        qkvz_elems_offset = num_k_heads * head_k_dim + k_head_id * k_dim +
+                            qkv_dim_offset - (q_dim);
+      }
     } else {
       is_v = true;
+      if constexpr (ReorderInput) {
+        qkvz_elems_offset = 2 * num_k_heads * head_k_dim + k_head_id * v_dim +
+                            qkv_dim_offset - (q_dim + k_dim);
+      }
     }
 
     // reorder index to map weights
@@ -331,7 +342,7 @@ struct chunk_causal_conv1d_kernel {
   const int conv_elems;
 };
 
-template <typename T>
+template <typename T, bool ReorderInput>
 struct chunk_reorder_zba_kernel {
  public:
   static constexpr int sub_group_size = 32;
@@ -406,19 +417,37 @@ struct chunk_reorder_zba_kernel {
         pre_chunks += (current_seq_len + chunk_size - 1) / chunk_size;
       }
 
-      int step =
-          (token_id * num_v_heads + k_head_id * num_v_heads / num_k_heads) * 2;
+      if constexpr (ReorderInput) {
+        int step = token_id * num_v_heads * 2;
 #pragma unroll
-      for (int e = 0; e < kv_ratio; ++e) {
-        float b_value = mixed_ba[step + dim_offset + e];
-        float a_value = mixed_ba[step + kv_ratio + dim_offset + e];
-        b_value = act_sigmoid(b_value);
-        b_out
-            [(k_head_id * kv_ratio + dim_offset + e) * num_virtual_tokens +
-             out_token_id] = b_value;
-        a_out
-            [(k_head_id * kv_ratio + dim_offset + e) * num_virtual_tokens +
-             out_token_id] = a_value;
+        for (int e = 0; e < kv_ratio; ++e) {
+          float b_value = mixed_ba[step + k_head_id * kv_ratio + e];
+          float a_value =
+              mixed_ba[step + num_v_heads + k_head_id * kv_ratio + e];
+          b_value = act_sigmoid(b_value);
+          b_out
+              [(k_head_id * kv_ratio + e) * num_virtual_tokens + out_token_id] =
+                  b_value;
+          a_out
+              [(k_head_id * kv_ratio + e) * num_virtual_tokens + out_token_id] =
+                  a_value;
+        }
+      } else {
+        int step =
+            (token_id * num_v_heads + k_head_id * num_v_heads / num_k_heads) *
+            2;
+#pragma unroll
+        for (int e = 0; e < kv_ratio; ++e) {
+          float b_value = mixed_ba[step + e];
+          float a_value = mixed_ba[step + kv_ratio + e];
+          b_value = act_sigmoid(b_value);
+          b_out
+              [(k_head_id * kv_ratio + e) * num_virtual_tokens + out_token_id] =
+                  b_value;
+          a_out
+              [(k_head_id * kv_ratio + e) * num_virtual_tokens + out_token_id] =
+                  a_value;
+        }
       }
     }
 
@@ -426,10 +455,15 @@ struct chunk_reorder_zba_kernel {
 #pragma unroll
     for (int e = 0; e < load_size; ++e) {
       int z_dim_id = dim_offset * load_size + e;
+      int mixed_z_id = token_id * num_k_heads * qkvz_dim +
+                       k_head_id * qkvz_dim + qkv_dim + z_dim_id;
+      if constexpr (ReorderInput) {
+        mixed_z_id = token_id * num_k_heads * qkvz_dim +
+                     2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim +
+                     k_head_id * z_dim + z_dim_id;
+      }
       z_out[token_id * num_k_heads * z_dim + k_head_id * z_dim + z_dim_id] =
-          mixed_qkvz
-              [token_id * num_k_heads * qkvz_dim + k_head_id * qkvz_dim +
-               qkv_dim + z_dim_id];
+          mixed_qkvz[mixed_z_id];
     }
   }
 
@@ -521,7 +555,7 @@ struct chunk_update_states_kernel {
   const int batch_size;
 };
 
-template <typename T, int Width>
+template <typename T, int Width, bool ReorderInput>
 void kernel_launcher(
     sycl::queue& queue,
     T* q_out,
@@ -553,7 +587,7 @@ void kernel_launcher(
     const int& conv_elems,
     const int& num_prefills,
     const int& num_decodes) {
-  using KERNEL_MAIN = chunk_causal_conv1d_kernel<T, Width>;
+  using KERNEL_MAIN = chunk_causal_conv1d_kernel<T, Width, ReorderInput>;
   auto range_main = KERNEL_MAIN::get_nd_range(
       num_actual_tokens, num_k_heads, head_k_dim, num_v_heads, head_v_dim);
   queue.submit([&](sycl::handler& cgh) {
@@ -588,7 +622,7 @@ void kernel_launcher(
     cgh.parallel_for(range_main, task);
   });
 
-  using KERNEL_ZBA = chunk_reorder_zba_kernel<T>;
+  using KERNEL_ZBA = chunk_reorder_zba_kernel<T, ReorderInput>;
   const int z_dim = head_v_dim * num_v_heads / num_k_heads;
   auto range_zba =
       KERNEL_ZBA::get_nd_range(num_actual_tokens, num_k_heads, z_dim);
@@ -661,7 +695,8 @@ void chunk_causal_conv1d_xe2(
     const ActMode& act_mode,  // silu or swish
     const int& pad_slot_id,   // -1
     const int num_prefills,
-    const int num_decodes) {
+    const int num_decodes,
+    const bool reorder_input) {
   if (num_prefills == 0 && num_decodes == 0) {
     return;
   }
@@ -684,8 +719,8 @@ void chunk_causal_conv1d_xe2(
       {batch_size, width - 1, conv_elems},
       torch::dtype(dtype).device(device).requires_grad(false));
 
-#define KERNEL_LAUNCHER(scalar_t, width)                           \
-  kernel_launcher<scalar_t, width>(                                \
+#define KERNEL_LAUNCHER(scalar_t, width, reorder_input)            \
+  kernel_launcher<scalar_t, width, reorder_input>(                 \
       queue,                                                       \
       reinterpret_cast<scalar_t*>(q_out.data_ptr()),               \
       reinterpret_cast<scalar_t*>(k_out.data_ptr()),               \
@@ -721,37 +756,45 @@ void chunk_causal_conv1d_xe2(
       num_prefills,                                                \
       num_decodes);
 
-#define WIDTH_DISPATCH(scalar_t, width) \
-  switch (width) {                      \
-    case 1:                             \
-      KERNEL_LAUNCHER(scalar_t, 1)      \
-      break;                            \
-    case 2:                             \
-      KERNEL_LAUNCHER(scalar_t, 2)      \
-      break;                            \
-    case 3:                             \
-      KERNEL_LAUNCHER(scalar_t, 3)      \
-      break;                            \
-    case 4:                             \
-      KERNEL_LAUNCHER(scalar_t, 4)      \
-      break;                            \
-    case 5:                             \
-      KERNEL_LAUNCHER(scalar_t, 5)      \
-      break;                            \
-    default:                            \
-      break;                            \
+#define WIDTH_DISPATCH(scalar_t, width, reorder_input) \
+  switch (width) {                                     \
+    case 1:                                            \
+      KERNEL_LAUNCHER(scalar_t, 1, reorder_input)      \
+      break;                                           \
+    case 2:                                            \
+      KERNEL_LAUNCHER(scalar_t, 2, reorder_input)      \
+      break;                                           \
+    case 3:                                            \
+      KERNEL_LAUNCHER(scalar_t, 3, reorder_input)      \
+      break;                                           \
+    case 4:                                            \
+      KERNEL_LAUNCHER(scalar_t, 4, reorder_input)      \
+      break;                                           \
+    case 5:                                            \
+      KERNEL_LAUNCHER(scalar_t, 5, reorder_input)      \
+      break;                                           \
+    default:                                           \
+      break;                                           \
+  }
+
+#define SPLIT_DISPATCH(scalar_t, width, reorder_input) \
+  if (reorder_input) {                                 \
+    WIDTH_DISPATCH(scalar_t, width, true)              \
+  } else {                                             \
+    WIDTH_DISPATCH(scalar_t, width, false)             \
   }
 
   if (mixed_qkvz.scalar_type() == at::kBFloat16) {
     using scalar_t = sycl::ext::oneapi::bfloat16;
-    WIDTH_DISPATCH(scalar_t, width)
+    SPLIT_DISPATCH(scalar_t, width, reorder_input)
   } else if (mixed_qkvz.scalar_type() == at::kHalf) {
     using scalar_t = sycl::half;
-    WIDTH_DISPATCH(scalar_t, width)
+    SPLIT_DISPATCH(scalar_t, width, reorder_input)
   } else {
     using scalar_t = float;
-    WIDTH_DISPATCH(scalar_t, width)
+    SPLIT_DISPATCH(scalar_t, width, reorder_input)
   }
+#undef SPLIT_DISPATCH
 #undef WIDTH_DISPATCH
 #undef KERNEL_LAUNCHER
 }

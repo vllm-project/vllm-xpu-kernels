@@ -3,7 +3,7 @@ import pytest
 import torch
 
 from tests.ops.swigluoai_and_mul_op import SwigluOAIAndMul
-from tests.utils import opcheck, seed_everything
+from tests.utils import format_tc, opcheck, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
@@ -45,7 +45,7 @@ def get_default_rtol(output) -> float:
 )
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", XPU_DEVICES)
 @torch.inference_mode()
