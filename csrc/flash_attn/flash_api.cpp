@@ -183,9 +183,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     // Paged path: create is_prefill mask and dispatch to both kernels.
     // Each kernel skips batches that aren't its type.
     int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
-    at::Tensor seq_lens_q =
-        cu_seqlens_q.slice(0, 1, batch_size + 1) -
-        cu_seqlens_q.slice(0, 0, batch_size);
+    at::Tensor seq_lens_q = cu_seqlens_q.slice(0, 1, batch_size + 1) -
+                            cu_seqlens_q.slice(0, 0, batch_size);
     at::Tensor is_prefill_mask = seq_lens_q.gt(1);
     std::optional<const at::Tensor> is_prefill_opt = is_prefill_mask;
 
