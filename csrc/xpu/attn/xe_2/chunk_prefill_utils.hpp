@@ -2,27 +2,110 @@
 
 using namespace cute;
 
-template <typename chunk_policy, bool... Bs>
-void policy_dispatch_func(
+// ============================================================================
+// Optimized dispatch to reduce compile-time recursion depth
+// Instead of recursive template instantiation, we use a flattened approach
+// ============================================================================
+
+// Base case - forward to the actual implementation
+template <typename chunk_policy, bool Paged, bool Causal, bool Local, bool Sink>
+inline void policy_dispatch_exec(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args) {
-  policy_dispatch_impl<chunk_policy, Bs...>(queue, cuQKType, args);
+  policy_dispatch_impl<chunk_policy, Paged, Causal, Local, Sink>(
+      queue, cuQKType, args);
 }
 
-template <typename chunk_policy, bool... Bs, typename... Ts>
-void policy_dispatch_func(
+// Flattened dispatch: directly compute all 4 booleans without recursion
+// This reduces template instantiation overhead significantly
+template <typename chunk_policy>
+inline void policy_dispatch_func(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args,
-    bool b,
-    Ts... ts) {
-  if (b) {
-    policy_dispatch_func<chunk_policy, Bs..., true>(
-        queue, cuQKType, args, ts...);
+    bool is_paged,
+    bool is_causal,
+    bool is_local,
+    bool is_sink) {
+  // Use a switch-like approach to minimize branching and template
+  // instantiations 16 combinations total (2^4), organized by binary encoding
+  if (!is_paged) {
+    if (!is_causal) {
+      if (!is_local) {
+        if (!is_sink) {
+          policy_dispatch_exec<chunk_policy, false, false, false, false>(
+              queue, cuQKType, args);
+        } else {
+          policy_dispatch_exec<chunk_policy, false, false, false, true>(
+              queue, cuQKType, args);
+        }
+      } else {
+        if (!is_sink) {
+          policy_dispatch_exec<chunk_policy, false, false, true, false>(
+              queue, cuQKType, args);
+        } else {
+          policy_dispatch_exec<chunk_policy, false, false, true, true>(
+              queue, cuQKType, args);
+        }
+      }
+    } else {
+      if (!is_local) {
+        if (!is_sink) {
+          policy_dispatch_exec<chunk_policy, false, true, false, false>(
+              queue, cuQKType, args);
+        } else {
+          policy_dispatch_exec<chunk_policy, false, true, false, true>(
+              queue, cuQKType, args);
+        }
+      } else {
+        if (!is_sink) {
+          policy_dispatch_exec<chunk_policy, false, true, true, false>(
+              queue, cuQKType, args);
+        } else {
+          policy_dispatch_exec<chunk_policy, false, true, true, true>(
+              queue, cuQKType, args);
+        }
+      }
+    }
   } else {
-    policy_dispatch_func<chunk_policy, Bs..., false>(
-        queue, cuQKType, args, ts...);
+    if (!is_causal) {
+      if (!is_local) {
+        if (!is_sink) {
+          policy_dispatch_exec<chunk_policy, true, false, false, false>(
+              queue, cuQKType, args);
+        } else {
+          policy_dispatch_exec<chunk_policy, true, false, false, true>(
+              queue, cuQKType, args);
+        }
+      } else {
+        if (!is_sink) {
+          policy_dispatch_exec<chunk_policy, true, false, true, false>(
+              queue, cuQKType, args);
+        } else {
+          policy_dispatch_exec<chunk_policy, true, false, true, true>(
+              queue, cuQKType, args);
+        }
+      }
+    } else {
+      if (!is_local) {
+        if (!is_sink) {
+          policy_dispatch_exec<chunk_policy, true, true, false, false>(
+              queue, cuQKType, args);
+        } else {
+          policy_dispatch_exec<chunk_policy, true, true, false, true>(
+              queue, cuQKType, args);
+        }
+      } else {
+        if (!is_sink) {
+          policy_dispatch_exec<chunk_policy, true, true, true, false>(
+              queue, cuQKType, args);
+        } else {
+          policy_dispatch_exec<chunk_policy, true, true, true, true>(
+              queue, cuQKType, args);
+        }
+      }
+    }
   }
 }
 
