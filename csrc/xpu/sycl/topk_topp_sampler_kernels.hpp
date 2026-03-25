@@ -452,55 +452,57 @@ struct top_k_only_kernel {
     const int remained_vec_size = handle_size - (loop_count - 1) * VEC_SIZE;
     const int loop_times = (remained_vec_size == VEC_SIZE) ? loop_count : (loop_count - 1);
     const bool has_last_loop = (remained_vec_size == VEC_SIZE) ? false : true;
+
+    float max_softmax_value = -INFINITY;
+
+    // low, high, and max value for softmax
+    for(int l = 0; l < loop_times; ++l){
+        #pragma unroll
+        for(int e = 0; e < VEC_SIZE; ++e){
+            local_data[e] = logits_ptr[l * VEC_SIZE + e];
+        }
+
+        #pragma unroll
+        for(int e = 0; e < VEC_SIZE; ++e){
+            float logit = local_data[e] ;
+            
+            if(logit < low){
+                low = logit;
+            }
+
+            if(logit > high){
+                high = logit;
+            }
+        }
+    }
+
+    if(has_last_loop){
+        #pragma unroll
+        for(int e = 0; e < remained_vec_size; ++e){
+            local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
+        }
+
+        #pragma unroll
+        for(int e = 0; e < remained_vec_size; ++e){
+            float logit = local_data[e] ;
+            
+            if(logit < low){
+                low = logit;
+            }
+
+            if(logit > high){
+                high = logit;
+            }
+        }
+    }
+
+    low = sycl::reduce_over_group(group, low, sycl::minimum<>());
+    high = sycl::reduce_over_group(group, high, sycl::maximum<>());
+    pivot = low;
+    max_softmax_value = high;
     
+    // topk
     if(top_k_value != vocal_size){
-
-        // low, high
-        for(int l = 0; l < loop_times; ++l){
-            #pragma unroll
-            for(int e = 0; e < VEC_SIZE; ++e){
-                local_data[e] = logits_ptr[l * VEC_SIZE + e];
-            }
-
-            #pragma unroll
-            for(int e = 0; e < VEC_SIZE; ++e){
-                float logit = local_data[e] ;
-                
-                if(logit < low){
-                    low = logit;
-                }
-
-                if(logit > high){
-                    high = logit;
-                }
-            }
-        }
-
-        if(has_last_loop){
-            #pragma unroll
-            for(int e = 0; e < remained_vec_size; ++e){
-                local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
-            }
-
-            #pragma unroll
-            for(int e = 0; e < remained_vec_size; ++e){
-                float logit = local_data[e] ;
-                
-                if(logit < low){
-                    low = logit;
-                }
-
-                if(logit > high){
-                    high = logit;
-                }
-            }
-        }
-
-        low = sycl::reduce_over_group(group, low, sycl::minimum<>());
-        high = sycl::reduce_over_group(group, high, sycl::maximum<>());
-
-        int iter = 0;
-
         do{
             int pivot_count_local = 0;
 
@@ -554,46 +556,41 @@ struct top_k_only_kernel {
         }
     }
 
-    float pivot_sum = 1.0f;
+    // get sum_softmax after mask with pivot
+    float sum_softmax = 0.0f;
+    for(int l = 0; l < loop_times; ++l){
+        #pragma unroll
+        for(int e = 0; e < VEC_SIZE; ++e){
+            local_data[e] = logits_ptr[l * VEC_SIZE + e];
+        }
 
-    if constexpr (logprobs_mode == LogprobsMode::processed_logprobs){
-        if(top_k_value != vocal_size){
-            float pivot_sum_local = 0.0f;
-            pivot_sum = 0.0f;
-            for(int l = 0; l < loop_times; ++l){
-                #pragma unroll
-                for(int e = 0; e < VEC_SIZE; ++e){
-                    local_data[e] = logits_ptr[l * VEC_SIZE + e];
-                }
-
-                #pragma unroll
-                for(int e = 0; e < VEC_SIZE; ++e){
-                    float logit = local_data[e];
-                    
-                    if(logit >= pivot){
-                        pivot_sum_local += logit;
-                    }
-                }
+        #pragma unroll
+        for(int e = 0; e < VEC_SIZE; ++e){
+            float logit = local_data[e] ;
+            
+            if(logit >= pivot){
+                sum_softmax += sycl::native::exp(logit - max_softmax_value);
             }
-
-            if(has_last_loop){
-                #pragma unroll
-                for(int e = 0; e < remained_vec_size; ++e){
-                    local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
-                }
-
-                #pragma unroll
-                for(int e = 0; e < remained_vec_size; ++e){
-                    float logit = local_data[e];
-                    
-                    if(logit >= pivot){
-                        pivot_sum_local += logit;
-                    }
-                }
-            }
-            pivot_sum = sycl::reduce_over_group(group, pivot_sum_local, sycl::plus<>());
         }
     }
+
+    if(has_last_loop){
+        #pragma unroll
+        for(int e = 0; e < remained_vec_size; ++e){
+            local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
+        }
+
+        #pragma unroll
+        for(int e = 0; e < remained_vec_size; ++e){
+            float logit = local_data[e] ;
+            
+            if(logit >= pivot){
+                sum_softmax += sycl::native::exp(logit - max_softmax_value);
+            }
+        }
+    }
+
+    sum_softmax = sycl::reduce_over_group(group, sum_softmax, sycl::plus<>());
 
     float max_value_local = -INFINITY;
     int max_idx_local = 0;
@@ -612,8 +609,12 @@ struct top_k_only_kernel {
             float rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
             
             if(logit >= pivot){
+                if constexpr (logprobs_mode == LogprobsMode::processed_logits){
+                    logits_to_return_ptr[l * VEC_SIZE + e] = logit;
+                }
+                logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
                 if constexpr (logprobs_mode == LogprobsMode::processed_logprobs){
-                    logits_to_return_ptr[l * VEC_SIZE + e] = sycl::log(logit / pivot_sum);
+                    logits_to_return_ptr[l * VEC_SIZE + e] = sycl::log(logit);
                 }
                 logit /= rand;
                 if(logit > max_value_local){
@@ -642,8 +643,12 @@ struct top_k_only_kernel {
             float rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
             
             if(logit >= pivot){
+                if constexpr (logprobs_mode == LogprobsMode::processed_logits){
+                    logits_to_return_ptr[loop_times * VEC_SIZE + e] = logit;
+                }
+                logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
                 if constexpr (logprobs_mode == LogprobsMode::processed_logprobs){
-                    logits_to_return_ptr[loop_times * VEC_SIZE + e] = sycl::log(logit / pivot_sum);
+                    logits_to_return_ptr[loop_times * VEC_SIZE + e] = sycl::log(logit);
                 }
                 logit /= rand;
                 if(logit > max_value_local){
