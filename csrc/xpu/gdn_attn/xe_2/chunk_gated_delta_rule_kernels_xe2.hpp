@@ -896,8 +896,6 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
     while (chunk_id < cumsum_chunks) {
       const int chunk_start_offset = chunk_id * chunk_size;
 
-      // the process of each chunk
-      // why loop along num_v_heads dim?
       for (int v_head_id = 0; v_head_id < num_v_heads; ++v_head_id) {
         CUTE_UNROLL
         for (int e = local_id; e < chunk_size; e += local_range) {
