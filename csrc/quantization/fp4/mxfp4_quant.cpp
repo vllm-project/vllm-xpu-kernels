@@ -48,8 +48,7 @@ void per_token_group_quant_mxfp4(
     return;
   }
 
-  at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
-  at::DeviceGuard device_guard(curDevice);
+  const at::DeviceGuard device_guard(input.device());
 
   // Choose how many sub-groups to pack into one work-group.
   constexpr int THREADS_PER_GROUP = 32;

@@ -402,8 +402,10 @@ if(BASIC_KERNELS_ENABLED)
   set(VLLM_EXT_SRC
       "csrc/cache.cpp"
       "csrc/layernorm.cpp"
+      "csrc/layernorm_quant.cpp"
       "csrc/activation.cpp"
       "csrc/pos_encoding_kernels.cpp"
+      "csrc/fused_qknorm_rope.cpp"
       "csrc/torch_bindings.cpp"
       "csrc/quantization/fp8/fp8_quant.cpp"
       "csrc/quantization/fp4/mxfp4_quant.cpp"

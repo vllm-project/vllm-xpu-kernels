@@ -26,6 +26,11 @@ def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 
 
+def silu_and_mul_quant(out: torch.Tensor, input: torch.Tensor,
+                       scale: torch.Tensor) -> None:
+    torch.ops._C.silu_and_mul_quant(out, input, scale)
+
+
 def gelu_fast(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.gelu_fast(out, input)
 

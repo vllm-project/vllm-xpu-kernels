@@ -16,7 +16,49 @@ void fused_add_rms_norm(
     torch::Tensor& weight,
     double epsilon);
 
+// Fused RMSNorm + dynamic per-token quantization (FP8 or INT8 output).
+void rms_norm_dynamic_per_token_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    double const epsilon,
+    std::optional<torch::Tensor> scale_ub,
+    std::optional<torch::Tensor> residual);
+
+// Fused RMSNorm + per-column-block quantization (FP8 or INT8 output).
+void rms_norm_per_block_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    double const epsilon,
+    std::optional<torch::Tensor> scale_ub,
+    std::optional<torch::Tensor> residual,
+    int64_t group_size,
+    bool is_scale_transposed);
+
+void rms_norm_static_fp8_quant(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    torch::Tensor& scale,
+    double epsilon);
+
+void fused_add_rms_norm_static_fp8_quant(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    torch::Tensor& scale,
+    double epsilon);
+
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
+
+void silu_and_mul_quant(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& scale);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
@@ -37,6 +79,19 @@ void rotary_embedding(
     int64_t head_size,
     torch::Tensor& cos_sin_cache,
     bool is_neox);
+
+void fused_qk_norm_rope(
+    torch::Tensor& qkv,
+    int64_t num_heads_q,
+    int64_t num_heads_k,
+    int64_t num_heads_v,
+    int64_t head_dim,
+    double eps,
+    torch::Tensor& q_weight,
+    torch::Tensor& k_weight,
+    torch::Tensor& cos_sin_cache,
+    bool is_neox,
+    torch::Tensor& position_ids);
 
 void reshape_and_cache(
     torch::Tensor& key,

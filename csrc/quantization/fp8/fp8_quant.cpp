@@ -504,8 +504,7 @@ void static_scaled_fp8_quant(
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
 
-  at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
-  at::DeviceGuard device_guard(curDevice);
+  const at::DeviceGuard device_guard(input.device());
 
   auto& queue = vllm::xpu::vllmGetQueue();
   VLLM_DISPATCH_FLOATING_TYPES(
@@ -562,8 +561,7 @@ void dynamic_scaled_fp8_quant(
   int64_t in_row_stride = input.stride(-2);
   int64_t out_row_stride = out.stride(-2);
 
-  at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
-  at::DeviceGuard device_guard(curDevice);
+  const at::DeviceGuard device_guard(input.device());
 
   auto& queue = vllm::xpu::vllmGetQueue();
   VLLM_DISPATCH_FLOATING_TYPES(
@@ -616,8 +614,7 @@ void per_token_group_quant_fp8(
   TORCH_CHECK(input.numel() % group_size == 0);
   TORCH_CHECK(output_s.dim() == 2);
 
-  at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
-  at::DeviceGuard device_guard(curDevice);
+  const at::DeviceGuard device_guard(input.device());
 
   constexpr int THREADS_PER_GROUP = 32;
 
@@ -684,8 +681,7 @@ void dynamic_per_token_scaled_fp8_quant(
   sycl::range<1> grid(num_tokens);
   sycl::range<1> block(std::min(hidden_size, 1024));
 
-  at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
-  at::DeviceGuard device_guard(curDevice);
+  const at::DeviceGuard device_guard(input.device());
 
   auto& queue = vllm::xpu::vllmGetQueue();
   VLLM_DISPATCH_FLOATING_TYPES(
