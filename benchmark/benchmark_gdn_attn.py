@@ -15,7 +15,8 @@ STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 
-def simple_random_distribute(total_tokens: int, batch_size: int) -> torch.Tensor:
+def simple_random_distribute(total_tokens: int,
+                             batch_size: int) -> torch.Tensor:
     distribution = torch.ones([batch_size], dtype=torch.int32)
     for _ in range(total_tokens - batch_size):
         selected_idx = random.randint(0, batch_size - 1)
@@ -58,7 +59,8 @@ def main(
                 "decode mode requires batch_size >= num_actual_tokens")
         num_prefills = 0
     else:
-        num_prefills = random.randint(1, batch_size - 1) if batch_size > 1 else 1
+        num_prefills = random.randint(1, batch_size -
+                                      1) if batch_size > 1 else 1
     num_decodes = batch_size - num_prefills
 
     mixed_qkvz_size = num_k_heads // tp_size * (
@@ -80,15 +82,17 @@ def main(
     )
 
     conv_weights = torch.randn((mixed_qkv_size, width), dtype=dtype)
-    conv_bias = torch.randn((mixed_qkv_size), dtype=dtype) if has_bias else None
+    conv_bias = torch.randn(
+        (mixed_qkv_size), dtype=dtype) if has_bias else None
 
     A_log = torch.randn((num_v_heads // tp_size), dtype=dtype)
     dt_bias = torch.randn((num_v_heads // tp_size), dtype=dtype)
 
     prefill_batches = simple_random_distribute(num_actual_tokens - num_decodes,
                                                batch_size - num_decodes)
-    token_batches = torch.cat([torch.ones([num_decodes], dtype=torch.int32),
-                               prefill_batches]).to("xpu")
+    token_batches = torch.cat(
+        [torch.ones([num_decodes], dtype=torch.int32),
+         prefill_batches]).to("xpu")
     perm = torch.randperm(token_batches.size(0), device="xpu")
     shuffled_tensor = token_batches[perm]
     non_spec_query_start_loc = torch.cat([
