@@ -442,8 +442,8 @@ struct top_k_only_kernel {
     float* logits_ptr = logits + batch_id * vocal_size + local_offset;
     float* logits_to_return_ptr = logits_to_return + batch_id * vocal_size + local_offset;
 
-    double low = 0.0f, high = 1.f / static_cast<double>(top_k_value);
-    double pivot = low;
+    double low = INFINITY, high = -INFINITY;
+    double pivot = -INFINITY;
     int pivot_count = top_k_value;
     double eps = 1e-9;
 
@@ -454,8 +454,57 @@ struct top_k_only_kernel {
     const bool has_last_loop = (remained_vec_size == VEC_SIZE) ? false : true;
     
     if(top_k_value != vocal_size){
+
+        // low, high
+        for(int l = 0; l < loop_times; ++l){
+            #pragma unroll
+            for(int e = 0; e < VEC_SIZE; ++e){
+                local_data[e] = logits_ptr[l * VEC_SIZE + e];
+            }
+
+            #pragma unroll
+            for(int e = 0; e < VEC_SIZE; ++e){
+                float logit = local_data[e] ;
+                
+                if(logit < low){
+                    low = logit;
+                }
+
+                if(logit > high){
+                    high = logit;
+                }
+            }
+        }
+
+        if(has_last_loop){
+            #pragma unroll
+            for(int e = 0; e < remained_vec_size; ++e){
+                local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
+            }
+
+            #pragma unroll
+            for(int e = 0; e < remained_vec_size; ++e){
+                float logit = local_data[e] ;
+                
+                if(logit < low){
+                    low = logit;
+                }
+
+                if(logit > high){
+                    high = logit;
+                }
+            }
+        }
+
+        low = sycl::reduce_over_group(group, low, sycl::minimum<>());
+        high = sycl::reduce_over_group(group, high, sycl::maximum<>());
+
+        int iter = 0;
+
         do{
             int pivot_count_local = 0;
+
+            pivot = (low + high) / 2;
 
             for(int l = 0; l < loop_times; ++l){
                 #pragma unroll
@@ -498,15 +547,9 @@ struct top_k_only_kernel {
             } else {
                 low = pivot;
             }
-
-            pivot = (low + high) / 2;
         } while (((high - low) > eps));
-    }
 
-    if(pivot_count != top_k_value){
-        if(pivot_count > top_k_value){
-            pivot = high;
-        } else {
+        if(pivot_count < top_k_value){
             pivot = low;
         }
     }
