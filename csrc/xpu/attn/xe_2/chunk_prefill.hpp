@@ -116,26 +116,12 @@ struct KernelLauncher {
     stride_Q = cutlass::make_cute_packed_stride(
         StrideQ{},
         cute::make_shape(seq_len_qo, head_size_qk, num_heads_q, batch));
-    // BNHS layout for PagedKV: strides encode (block_size, head_size,
-    // num_heads, total_blocks)
-    if (args.is_paged) {
-      int total_block_nums = args.total_seqlen_k / args.block_size;
-      stride_K = cutlass::make_cute_packed_stride(
-          StrideK{},
-          cute::make_shape(
-              args.block_size, head_size_qk, num_heads_kv, total_block_nums));
-      stride_V = cutlass::make_cute_packed_stride(
-          StrideV{},
-          cute::make_shape(
-              head_size_vo, args.block_size, num_heads_kv, total_block_nums));
-    } else {
-      stride_K = cutlass::make_cute_packed_stride(
-          StrideK{},
-          cute::make_shape(seq_len_kv, head_size_qk, num_heads_kv, batch));
-      stride_V = cutlass::make_cute_packed_stride(
-          StrideV{},
-          cute::make_shape(head_size_vo, seq_len_kv, num_heads_kv, batch));
-    }
+    stride_K = cutlass::make_cute_packed_stride(
+        StrideK{},
+        cute::make_shape(seq_len_kv, head_size_qk, num_heads_kv, batch));
+    stride_V = cutlass::make_cute_packed_stride(
+        StrideV{},
+        cute::make_shape(head_size_vo, seq_len_kv, num_heads_kv, batch));
     stride_O = cutlass::make_cute_packed_stride(
         StrideO{},
         cute::make_shape(seq_len_qo, head_size_vo, num_heads_q, batch));
@@ -167,7 +153,6 @@ struct KernelLauncher {
          args.block_size,
          args.max_blocks_per_seq,
          args.total_seqlen_k,
-         args.is_paged ? args.total_seqlen_k / args.block_size : 0,
          args.window_size_left,
          args.window_size_right},
         {},

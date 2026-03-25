@@ -89,16 +89,15 @@ void cutlass_chunk_prefill_impl(
     // query: [batch, num_heads, seq, head_size]
     batch_size = query.size(0);
     num_heads_q = query.size(1);
-    num_heads_kv = key_cache.size(1);
+    num_heads_kv = is_paged ? key_cache.size(2) : key_cache.size(1);
     head_size = query.size(3);
     max_seqlen_q = query.size(2);
     max_seqlen_k = is_paged ? max_seqlen_q : key_cache.size(2);
   }
   if (is_paged) {
-    // key_cache: [block_nums, num_heads, block_size, head_size] (BNHS layout)
     num_blocks = key_cache.size(0);
-    num_heads_kv = key_cache.size(1);
-    block_size = key_cache.size(2);
+    block_size = key_cache.size(1);
+    num_heads_kv = key_cache.size(2);
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
   }
