@@ -25,7 +25,8 @@ HAS_BIAS = [True, False]
 ACTIVATION = ["silu"]
 MODE = ["prefill", "decode", "mix_mode"]
 REORDER_INPUT = [True, False]
-DTYPES = [torch.float16]
+DTYPES = [torch.float16, torch.bfloat16]
+SSM_STATE_IS_FP32 = [False, True]
 
 # Override pytest parameters when enabling mini pytest
 MINI_PYTEST_PARAMS = {
@@ -228,7 +229,7 @@ def ref_gdn_attention(
                                        q_t.unsqueeze(1)).sum(dim=-1).to(dtype)
 
         ssm_state[non_spec_state_indices_tensor[batch]] = ssm_state_batch.to(
-            dtype)
+            ssm_state.dtype)
 
 
 def simple_random_distribute(N, batch_size):
@@ -253,10 +254,12 @@ def simple_random_distribute(N, batch_size):
 @pytest.mark.parametrize("mode", MODE)
 @pytest.mark.parametrize("reorder_input", REORDER_INPUT)
 @pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("ssm_state_is_fp32", SSM_STATE_IS_FP32)
 @torch.inference_mode()
 def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                        num_v_heads, head_v_dim, width, tp_size, has_bias,
-                       activation, reorder_input, mode, dtype):
+                       activation, reorder_input, mode, dtype,
+                       ssm_state_is_fp32):
     # FIXME: remove skip
     if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
             and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
@@ -265,6 +268,7 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
     device = "xpu"
     random.seed(42)
     torch.manual_seed(42)
+    ssm_state_dtype = torch.float32 if ssm_state_is_fp32 else dtype
 
     assert head_k_dim == head_v_dim
 
@@ -303,7 +307,7 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
     ref_conv_state = conv_state.clone()
     ssm_state = torch.randn(
         (cache_batch_size, num_v_heads // tp_size, head_v_dim, head_k_dim),
-        dtype=dtype,
+        dtype=ssm_state_dtype,
         device=device)
     ref_ssm_state = ssm_state.clone()
 

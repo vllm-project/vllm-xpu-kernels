@@ -915,19 +915,20 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
   }
 }
 
-template <typename T, class TiledMMA>
+template <typename T, typename StateT, class TiledMMA>
 CUTE_DEVICE void chunk_fwd_o_kernel(
-    const sycl::local_accessor<float, 1>& slm_mem_const,
-    T* core_attn_out,
-    T* A,
-    T* w,
-    T* u,
-    const T* q,
-    const T* k,
+    const sycl::local_accessor<float, 1>& slm_mem_const,  // [3 * chunk_size]
+    T* core_attn_out,  // [total_seqlen, num_v_heads, head_v_dim]
+    T* A,  // [num_v_heads, total_virtual_seqlen, chunk_size], temp O2 buffer
+    T* w,  // [num_v_heads, total_virtual_seqlen, head_k_dim]
+    T* u,  // [num_v_heads, total_virtual_seqlen, head_v_dim]
+    const T* q,  // [total_virtual_seqlen, num_k_heads, head_k_dim]
+    const T* k,  // [total_virtual_seqlen, num_k_heads, head_k_dim]
     const float* a,
     const T* A_log,
     const T* dt_bias,
-    T* ssm_state,
+    StateT*
+      ssm_state,  // [cache_batch_size, num_v_heads, head_v_dim, head_k_dim]
     const int ssm_state_stride_0,
     const int* query_start_loc,
     const int* cache_indices,
@@ -938,6 +939,9 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
     const int head_k_dim,
     const int num_v_heads,
     const int head_v_dim) {
+  (void)A_log;
+  (void)dt_bias;
+
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   int local_id = item.get_local_linear_id();
   int current_batch_id = item.get_group(0);
@@ -945,8 +949,6 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
   int local_range = item.get_local_range(2);
 
   auto sg = item.get_sub_group();
-  int sg_id = sg.get_group_linear_id();
-  int sg_range = sg.get_group_linear_range();
   int sg_local_id = sg.get_local_linear_id();
 
   float* slm_mem = static_cast<float*>(
@@ -955,9 +957,6 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
   float* g_slm_ptr = slm_mem;
   float* g_multi_slm_ptr = slm_mem + chunk_size;
   float* g_exp_slm_ptr = g_multi_slm_ptr + chunk_size;
-
-  float A_log_exp_h = -sycl::exp(static_cast<float>(A_log[v_head_id]));
-  float dt_bias_h = static_cast<float>(dt_bias[v_head_id]);
 
   TiledMMA mma{};
   auto wg_tile = mma.tile_mnk();
@@ -981,9 +980,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
   int n_sg_start = sg_local_n_coord * SG_N;
 
   const int kv_ratio = num_v_heads / num_k_heads;
-
-  constexpr int prefetch_dist = 3;
-  constexpr int barrier_scope = 2;
+  const int kv_head_id = v_head_id / kv_ratio;
 
   int pre_chunks = 0;
 
@@ -1000,14 +997,15 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       continue;
     }
 
-    T* ssm_state_ptr =
+    StateT* ssm_state_ptr =
         ssm_state +
         static_cast<int64_t>(cache_indices[batch_id]) * ssm_state_stride_0 +
         v_head_id * head_v_dim * head_k_dim;
 
     for (int chunk_id = 0; chunk_id < current_chunks; ++chunk_id) {
-      const int out_chunk_offset = seq_start_offset + chunk_id * chunk_size;
-      const int chunk_offset = (pre_chunks + chunk_id) * chunk_size;
+      const bool has_prev_state = (chunk_id != 0) || initial_state;
+      const int out_seq_offset = seq_start_offset + chunk_id * chunk_size;
+      const int virtual_seq_offset = (pre_chunks + chunk_id) * chunk_size;
 
       int current_chunk_size = chunk_size;
       if ((chunk_id + 1) * chunk_size > seq_len) {
@@ -1015,13 +1013,13 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       }
 
       float g_last_value =
-          a[(chunk_offset + current_chunk_size - 1) +
+          a[(virtual_seq_offset + current_chunk_size - 1) +
             v_head_id * total_virtual_seqlen];
       float g_last_value_exp = sycl::exp(g_last_value);
       CUTE_UNROLL
       for (int e = local_id; e < current_chunk_size; e += local_range) {
         float g_cumsum_value =
-            a[(chunk_offset + e) + v_head_id * total_virtual_seqlen];
+            a[(virtual_seq_offset + e) + v_head_id * total_virtual_seqlen];
         g_slm_ptr[e] = g_cumsum_value;
         g_multi_slm_ptr[e] = sycl::exp(g_last_value - g_cumsum_value);
         g_exp_slm_ptr[e] = sycl::exp(g_cumsum_value);
@@ -1037,20 +1035,20 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       item.barrier(sycl::access::fence_space::local_space);
 
       auto W_ptr = w + v_head_id * total_virtual_seqlen * head_k_dim +
-                   chunk_offset * head_k_dim;
+              virtual_seq_offset * head_k_dim;
       auto W_tensor_shape = make_shape(chunk_size, head_k_dim);
       auto W_tensor = make_tensor(
           make_gmem_ptr(W_ptr),
           make_layout(W_tensor_shape, make_stride(head_k_dim, _1{})));
 
       auto U_ptr = u + v_head_id * total_virtual_seqlen * head_v_dim +
-                   chunk_offset * head_v_dim;
+              virtual_seq_offset * head_v_dim;
       auto U_tensor_shape = make_shape(chunk_size, head_v_dim);
       auto U_tensor = make_tensor(
           make_gmem_ptr(U_ptr),
           make_layout(U_tensor_shape, make_stride(head_v_dim, _1{})));
 
-      T* S_ptr = ssm_state_ptr;
+      StateT* S_ptr = ssm_state_ptr;
       auto S_tensor_shape = make_shape(head_v_dim, head_k_dim);
       auto S_tensor = make_tensor(
           make_gmem_ptr(S_ptr),
@@ -1066,7 +1064,14 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
 
       auto thr_mma = mma.get_slice(local_id);
 
-      if (chunk_id != 0 || initial_state) {
+      // ------------------------------------------------------------------
+      // Part 1: Compute current chunk output O using previous state S_prev.
+      // ------------------------------------------------------------------
+
+      // If S_prev exists, first apply recurrent correction:
+      //   U <- U - W * S_prev
+      // This keeps U in-place and avoids extra global buffers.
+      if (has_prev_state) {
         for (int dv = 0; dv < head_v_dim / chunk_size; ++dv) {
           Tensor gU_C =
               local_tile(cU, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
@@ -1094,16 +1099,18 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
         item.barrier(sycl::access::fence_space::local_space);
       }
 
-      auto q_ptr = q + chunk_offset * num_k_heads * head_k_dim +
-                   (v_head_id / kv_ratio) * head_k_dim;
+      // Build Q/K views for the current chunk and compute O2 = Q * K^T.
+      // O2 is written to A as a temporary buffer in this fused kernel.
+      auto q_ptr = q + virtual_seq_offset * num_k_heads * head_k_dim +
+                kv_head_id * head_k_dim;
       auto Q_tensor_shape = make_shape(current_chunk_size, head_k_dim);
       auto Q_tensor = make_tensor(
           make_gmem_ptr(q_ptr),
           make_layout(
               Q_tensor_shape, make_stride(head_k_dim * num_k_heads, _1{})));
 
-      auto k_ptr = k + chunk_offset * num_k_heads * head_k_dim +
-                   (v_head_id / kv_ratio) * head_k_dim;
+      auto k_ptr = k + virtual_seq_offset * num_k_heads * head_k_dim +
+                kv_head_id * head_k_dim;
       auto K_tensor_shape = make_shape(chunk_size, head_k_dim);
       auto K_tensor = make_tensor(
           make_gmem_ptr(k_ptr),
@@ -1113,7 +1120,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       auto O2_ptr =
           A +
           static_cast<int64_t>(v_head_id) * total_virtual_seqlen * chunk_size +
-          chunk_offset * chunk_size;
+          virtual_seq_offset * chunk_size;
       auto O2_tensor_shape = make_shape(current_chunk_size, chunk_size);
       auto O2_tensor = make_tensor(
           make_gmem_ptr(O2_ptr),
@@ -1131,6 +1138,8 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       clear(tSrO2_c);
       gemm_TTS(Q_tensor, K_tensor, tSrO2_c, 0, 0, mma);
 
+      // Apply gated causal mask on O2:
+      //   O2[m, n] *= exp(g_m - g_n), and O2[m, n] = 0 for m < n.
       CUTE_UNROLL
       for (int sn = 0; sn < SG_N / sub_group_size; ++sn) {
         int n_idx =
@@ -1148,11 +1157,14 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       reorder(tSrO2_c, tCrO2_c);
       copy(copy_O2_c, tCrO2_c, tCgO2_c);
 
+      // barrier to make sure O2 is visible to afterward O compute
+      item.barrier(sycl::access::fence_space::local_space);
+
       auto U_tensor_T_shape = make_shape(head_v_dim, chunk_size);
       auto U_tensor_T = make_tensor(
           make_gmem_ptr(U_ptr),
           make_layout(U_tensor_T_shape, make_stride(_1{}, head_v_dim)));
-      auto O_ptr = core_attn_out + out_chunk_offset * num_v_heads * head_v_dim +
+      auto O_ptr = core_attn_out + out_seq_offset * num_v_heads * head_v_dim +
                    v_head_id * head_v_dim;
       auto O_tensor_shape = make_shape(current_chunk_size, head_v_dim);
       auto O_tensor = make_tensor(
@@ -1164,7 +1176,10 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       auto copy_O_c = get_block_2d_copy_D<void>(mma, O_tensor);
       auto thr_copy_O_c = copy_O_c.get_slice(local_id);
 
-      if (chunk_id != 0 || initial_state) {
+      // Write output O for this chunk:
+      //   with S_prev: O = exp(g) * (Q * S_prev) + O2 * U
+      //   no S_prev : O = O2 * U
+      if (has_prev_state) {
         for (int dv = 0; dv < head_v_dim / chunk_size; ++dv) {
           Tensor gO_C =
               local_tile(cO, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
@@ -1188,8 +1203,25 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
           reorder(tSrO_c, tCrO_c);
           copy(copy_O_c, tCrO_c, tCgO_c);
         }
+      } else {
+        for (int dv = 0; dv < head_v_dim / chunk_size; ++dv) {
+          Tensor gO_C =
+              local_tile(cO, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
+          auto tCrO_c = thr_copy_O_c.partition_sg_fragment_S(gO_C);
+          auto tCgO_c = thr_copy_O_c.partition_D(gO_C);
+          auto tSrO_c = thr_mma.partition_sg_fragment_C(gO_C);
+
+          clear(tSrO_c);
+          gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma);
+          reorder(tSrO_c, tCrO_c);
+          copy(copy_O_c, tCrO_c, tCgO_c);
+        }
       }
 
+      // ------------------------------------------------------------------
+      // Part 2: Advance recurrent state S for the next chunk.
+      // ------------------------------------------------------------------
+      //   S_next = exp(g_last) * S_prev + sum_t exp(g_last - g_t) * U_t^T K_t
       auto K_tensor_T_shape = make_shape(head_k_dim, chunk_size);
       auto K_tensor_T = make_tensor(
           make_gmem_ptr(k_ptr),
@@ -1197,10 +1229,8 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
               K_tensor_T_shape, make_stride(_1{}, head_k_dim * num_k_heads)));
 
       Tensor cS = make_identity_tensor(S_tensor.shape());
-
       auto copy_S_c = get_block_2d_copy_C<void>(mma, S_tensor);
       auto copy_S_d = get_block_2d_copy_D<void>(mma, S_tensor);
-
       auto thr_copy_S_c = copy_S_c.get_slice(local_id);
       auto thr_copy_S_d = copy_S_d.get_slice(local_id);
 
@@ -1212,7 +1242,9 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
           auto tCgS_d = thr_copy_S_d.partition_D(gS_C);
           auto tSrS_d = thr_mma.partition_sg_fragment_C(gS_C);
 
-          if (chunk_id != 0 || initial_state) {
+          // Seed accumulator with exp(g_last) * S_prev when previous state
+          // exists; otherwise start from zeros.
+          if (has_prev_state) {
             auto tCgS_c = thr_copy_S_c.partition_S(gS_C);
             auto tCrS_c = thr_copy_S_c.partition_sg_fragment_D(gS_C);
             copy(copy_S_c, tCgS_c, tCrS_c);
@@ -1232,45 +1264,30 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
           copy(copy_S_d, tCrS_d, tCgS_d);
         }
       }
-
-      if (chunk_id == 0 && !initial_state) {
-        for (int dv = 0; dv < head_v_dim / chunk_size; ++dv) {
-          Tensor gO_C =
-              local_tile(cO, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
-          auto tCrO_c = thr_copy_O_c.partition_sg_fragment_S(gO_C);
-          auto tCgO_c = thr_copy_O_c.partition_D(gO_C);
-          auto tSrO_c = thr_mma.partition_sg_fragment_C(gO_C);
-
-          clear(tSrO_c);
-          gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma);
-          reorder(tSrO_c, tCrO_c);
-          copy(copy_O_c, tCrO_c, tCgO_c);
-        }
-      }
     }
     pre_chunks += current_chunks;
   }
 }
 
-template <typename T>
+template <typename T, typename StateTag>
 class ChunkPrepareKernel;
 
-template <typename T>
+template <typename T, typename StateTag>
 class ChunkComputeAKernel;
 
-template <typename T>
+template <typename T, typename StateTag>
 class ChunkInverseOptKernel;
 
-template <typename T>
+template <typename T, typename StateTag>
 class ChunkInverseKernel;
 
-template <typename T>
+template <typename T, typename StateTag>
 class ChunkComputeWUKernel;
 
-template <typename T>
+template <typename T, typename StateT>
 class ChunkFwdOKernel;
 
-template <typename T>
+template <typename T, typename StateT>
 void kernel_launcher(
     sycl::queue& queue,
     T* core_attn_out,
@@ -1284,7 +1301,7 @@ void kernel_launcher(
     const float* a,
     const T* A_log,
     const T* dt_bias,
-    T* ssm_state,
+    StateT* ssm_state,
     const int ssm_state_stride_0,
     const int* query_start_loc,
     const int* cache_indices,
@@ -1315,7 +1332,7 @@ void kernel_launcher(
   int slm_size_prepare = num_v_heads * 2 + chunk_size;
 
   auto event_prepare = queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for<ChunkPrepareKernel<T>>(
+    cgh.parallel_for<ChunkPrepareKernel<T, StateT>>(
         sycl::nd_range<3>{global_prepare * local_prepare, local_prepare},
         kernel_props,
         [=](auto) {
@@ -1353,7 +1370,7 @@ void kernel_launcher(
   auto event_compute_A = queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_compute_A), cgh);
-    cgh.parallel_for<ChunkComputeAKernel<T>>(
+    cgh.parallel_for<ChunkComputeAKernel<T, StateT>>(
         sycl::nd_range<3>{global_compute_A * local_compute_A, local_compute_A},
         kernel_props,
         [=](auto) {
@@ -1394,7 +1411,7 @@ void kernel_launcher(
         1);
 
     auto event_inverse = queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for<ChunkInverseOptKernel<T>>(
+        cgh.parallel_for<ChunkInverseOptKernel<T, StateT>>(
           sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
           kernel_props,
           [=](auto) {
@@ -1423,7 +1440,7 @@ void kernel_launcher(
     auto event_inverse = queue.submit([&](sycl::handler& cgh) {
       sycl::local_accessor<float, 1> local_mem(
           sycl::range<1>(slm_size_inverse), cgh);
-      cgh.parallel_for<ChunkInverseKernel<T>>(
+        cgh.parallel_for<ChunkInverseKernel<T, StateT>>(
           sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
           kernel_props,
           [=](auto) {
@@ -1459,7 +1476,7 @@ void kernel_launcher(
   auto event_compute_wu = queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_compute_wu), cgh);
-    cgh.parallel_for<ChunkComputeWUKernel<T>>(
+    cgh.parallel_for<ChunkComputeWUKernel<T, StateT>>(
         sycl::nd_range<3>{
             global_compute_wu * local_compute_wu, local_compute_wu},
         kernel_props,
@@ -1504,11 +1521,11 @@ void kernel_launcher(
   auto event_fwd_o = queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_fwd_o), cgh);
-    cgh.parallel_for<ChunkFwdOKernel<T>>(
+    cgh.parallel_for<ChunkFwdOKernel<T, StateT>>(
         sycl::nd_range<3>{global_fwd_o * local_fwd_o, local_fwd_o},
         kernel_props,
         [=](auto) {
-          chunk_fwd_o_kernel<T, MMAFwdO>(
+          chunk_fwd_o_kernel<T, StateT, MMAFwdO>(
               local_mem,
               core_attn_out,
               A,
@@ -1586,42 +1603,67 @@ void chunk_gated_delta_rule_impl_xe2(
       {num_v_heads, total_seqlen + padding_size, head_v_dim},
       torch::dtype(dtype).device(device).requires_grad(false));
 
-#define KERNEL_LAUNCHER(scalar_t)                                  \
-  kernel_launcher<scalar_t>(                                       \
-      queue,                                                       \
-      reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),       \
-      reinterpret_cast<scalar_t*>(q.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(k.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(v.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(A.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(w.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(u.data_ptr()),                   \
-      reinterpret_cast<float*>(b.data_ptr()),                      \
-      reinterpret_cast<float*>(a.data_ptr()),                      \
-      reinterpret_cast<scalar_t*>(A_log.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
-      reinterpret_cast<scalar_t*>(ssm_state.data_ptr()),           \
-      ssm_state_stride_0,                                          \
-      reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
-      reinterpret_cast<int*>(cache_indices.data_ptr()),            \
-      has_initial_state.has_value()                                \
-          ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
-          : nullptr,                                               \
-      batch_size,                                                  \
-      total_virtual_seqlen,                                        \
-      num_k_heads,                                                 \
-      head_k_dim,                                                  \
-      num_v_heads,                                                 \
+#define KERNEL_LAUNCHER(scalar_t, state_scalar_t)                \
+  kernel_launcher<scalar_t, state_scalar_t>(                     \
+      queue,                                                     \
+      reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),     \
+      reinterpret_cast<scalar_t*>(q.data_ptr()),                 \
+      reinterpret_cast<scalar_t*>(k.data_ptr()),                 \
+      reinterpret_cast<scalar_t*>(v.data_ptr()),                 \
+      reinterpret_cast<scalar_t*>(A.data_ptr()),                 \
+      reinterpret_cast<scalar_t*>(w.data_ptr()),                 \
+      reinterpret_cast<scalar_t*>(u.data_ptr()),                 \
+      reinterpret_cast<float*>(b.data_ptr()),                    \
+      reinterpret_cast<float*>(a.data_ptr()),                    \
+      reinterpret_cast<scalar_t*>(A_log.data_ptr()),             \
+      reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),           \
+      reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),        \
+      ssm_state_stride_0,                                             \
+      reinterpret_cast<int*>(query_start_loc.data_ptr()),             \
+      reinterpret_cast<int*>(cache_indices.data_ptr()),               \
+      has_initial_state.has_value()                                   \
+          ? reinterpret_cast<bool*>(has_initial_state->data_ptr())    \
+          : nullptr,                                                  \
+      batch_size,                                                     \
+      total_virtual_seqlen,                                           \
+      num_k_heads,                                                    \
+      head_k_dim,                                                     \
+      num_v_heads,                                                    \
       head_v_dim);
+
+#define DISPATCH_STATE_DTYPE(scalar_t)                                     \
+  do {                                                                     \
+    if (ssm_state.scalar_type() == at::kFloat) {                           \
+      using state_scalar_t = float;                                        \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                            \
+    } else if (ssm_state.scalar_type() == at::kBFloat16) {                 \
+      using state_scalar_t = bfloat16_t;                                   \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                            \
+    } else if (ssm_state.scalar_type() == at::kHalf) {                     \
+      using state_scalar_t = half_t;                                       \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                            \
+    } else {                                                               \
+      TORCH_CHECK(                                                         \
+          false,                                                           \
+          "ssm_state dtype must be float32/float16/bfloat16, but got ",    \
+          ssm_state.scalar_type());                                        \
+    }                                                                      \
+  } while (0)
 
   if (core_attn_out.scalar_type() == at::kBFloat16) {
     using scalar_t = bfloat16_t;
-    KERNEL_LAUNCHER(scalar_t)
+    DISPATCH_STATE_DTYPE(scalar_t);
   } else if (core_attn_out.scalar_type() == at::kHalf) {
     using scalar_t = half_t;
-    KERNEL_LAUNCHER(scalar_t)
+    DISPATCH_STATE_DTYPE(scalar_t);
+  } else {
+    TORCH_CHECK(
+        false,
+        "core_attn_out dtype must be float16/bfloat16, but got ",
+        core_attn_out.scalar_type());
   }
 
+#undef DISPATCH_STATE_DTYPE
 #undef KERNEL_LAUNCHER
 }
 
