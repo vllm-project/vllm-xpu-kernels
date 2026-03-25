@@ -827,7 +827,6 @@ struct top_p_only_kernel {
         #pragma unroll
         for(int e = 0; e < VEC_SIZE; ++e){
             float logit = local_data[e] ;
-            
             sum_softmax += sycl::native::exp(logit - max_softmax_value);
         }
     }
@@ -841,7 +840,6 @@ struct top_p_only_kernel {
         #pragma unroll
         for(int e = 0; e < remained_vec_size; ++e){
             float logit = local_data[e] ;
-            
             sum_softmax += sycl::native::exp(logit - max_softmax_value);
         }
     }
@@ -857,8 +855,11 @@ struct top_p_only_kernel {
             float pivot_count_local = 0.0f;
 
             pivot = (low + high) / 2;
+            
+            // avoid repeated calculation
+            float pivot_ = sycl::log(sum_softmax * pivot) + max_softmax_value;
 
-            for(int l = 0; l < loop_times; ++l){
+            for(int l = 0; l < loop_times; ++l){ 
                 #pragma unroll
                 for(int e = 0; e < VEC_SIZE; ++e){
                     local_data[e] = logits_ptr[l * VEC_SIZE + e];
@@ -867,9 +868,9 @@ struct top_p_only_kernel {
                 #pragma unroll
                 for(int e = 0; e < VEC_SIZE; ++e){
                     float logit = local_data[e];
-                    logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
                     
-                    if(logit >= pivot){
+                    if(logit >= pivot_){
+                        logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
                         pivot_count_local += logit;
                     }
                 }
@@ -884,9 +885,9 @@ struct top_p_only_kernel {
                 #pragma unroll
                 for(int e = 0; e < remained_vec_size; ++e){
                     float logit = local_data[e];
-                    logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
                     
-                    if(logit >= pivot){
+                    if(logit >= pivot_){
+                        logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
                         pivot_count_local += logit;
                     }
                 }
