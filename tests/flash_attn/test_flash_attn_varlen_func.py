@@ -177,6 +177,8 @@ def test_varlen_with_paged_kv(
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
     # # FIXME: remove skip
+    if num_heads == (16, 1) and head_size == 256:
+        pytest.skip("skip test cases that decode may run out of SLM.")
     if (is_casual and seq_lens[1][0]
             == 5) and (os.getenv("SKIP_HANG_KERNEL") is not None
                        and os.getenv("SKIP_HANG_KERNEL") == "1"):
