@@ -1404,14 +1404,13 @@ void kernel_launcher(
   syclex::properties kernel_props_l2norm{
       syclex::sub_group_size<cute::detail::subgroup_size>};
 
-  static constexpr int MaxThreadsPerWorkgroupL2Norm = 1024;
   static constexpr int L2NormVecSize = 8;
   static constexpr int MaxSubgroupsPerWorkgroupL2Norm =
-      MaxThreadsPerWorkgroupL2Norm / cute::detail::subgroup_size;
+      MaxThreadsPerSM / cute::detail::subgroup_size;
   const int total_qk_heads = total_virtual_seqlen * num_k_heads;
   const int wg_count_l2norm =
       cute::ceil_div(total_qk_heads, MaxSubgroupsPerWorkgroupL2Norm);
-  sycl::range<3> local_l2norm(1, 1, MaxThreadsPerWorkgroupL2Norm);
+  sycl::range<3> local_l2norm(1, 1, MaxThreadsPerSM);
   sycl::range<3> global_l2norm(1, wg_count_l2norm, 1);
   constexpr int l2norm_vec_width = sizeof(T) * L2NormVecSize;
   const bool l2norm_vec_enabled =
