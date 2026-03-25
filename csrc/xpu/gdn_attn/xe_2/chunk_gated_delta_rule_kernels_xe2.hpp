@@ -83,8 +83,8 @@ CUTE_DEVICE void l2norm_kernel(
   float k_sum = 0.0f;
   CUTE_UNROLL
   for (int k_dim_idx = sg_local_id * elem_per_item; k_dim_idx < head_k_dim;
-        k_dim_idx += sub_group_size * elem_per_item) {
-    CUTE_UNROLL // can compiler vectorize this loop?
+       k_dim_idx += sub_group_size * elem_per_item) {
+    CUTE_UNROLL
     for (int e = 0; e < elem_per_item; ++e) {
       float q_value = q_ptr[k_dim_idx + e];
       float k_value = k_ptr[k_dim_idx + e];
@@ -100,11 +100,11 @@ CUTE_DEVICE void l2norm_kernel(
   float k_inv = sycl::rsqrt(k_sum + eps);
   CUTE_UNROLL
   for (int k_dim_idx = sg_local_id * elem_per_item; k_dim_idx < head_k_dim;
-        k_dim_idx += sub_group_size * elem_per_item) {
+       k_dim_idx += sub_group_size * elem_per_item) {
     CUTE_UNROLL
     for (int e = 0; e < elem_per_item; ++e) {
-      q_ptr[k_dim_idx + e] = static_cast<T>(
-          static_cast<float>(q_ptr[k_dim_idx + e]) * q_inv);
+      q_ptr[k_dim_idx + e] =
+          static_cast<T>(static_cast<float>(q_ptr[k_dim_idx + e]) * q_inv);
       k_ptr[k_dim_idx + e] =
           static_cast<T>(static_cast<float>(k_ptr[k_dim_idx + e]) * k_inv);
     }
@@ -144,7 +144,8 @@ CUTE_DEVICE void l2norm_vectorized_kernel(
   float q_sum = 0.0f;
   float k_sum = 0.0f;
   CUTE_UNROLL
-  for (int vec_idx = sg_local_id; vec_idx < num_vec; vec_idx += sub_group_size) {
+  for (int vec_idx = sg_local_id; vec_idx < num_vec;
+       vec_idx += sub_group_size) {
     auto q_vec = q_vec_ptr[vec_idx];
     auto k_vec = k_vec_ptr[vec_idx];
     CUTE_UNROLL
@@ -162,15 +163,14 @@ CUTE_DEVICE void l2norm_vectorized_kernel(
   float k_inv = sycl::rsqrt(k_sum + eps);
 
   CUTE_UNROLL
-  for (int vec_idx = sg_local_id; vec_idx < num_vec; vec_idx += sub_group_size) {
+  for (int vec_idx = sg_local_id; vec_idx < num_vec;
+       vec_idx += sub_group_size) {
     auto q_vec = q_vec_ptr[vec_idx];
     auto k_vec = k_vec_ptr[vec_idx];
     CUTE_UNROLL
     for (int e = 0; e < VEC_SIZE; ++e) {
-      q_vec.val[e] =
-          static_cast<T>(static_cast<float>(q_vec.val[e]) * q_inv);
-      k_vec.val[e] =
-          static_cast<T>(static_cast<float>(k_vec.val[e]) * k_inv);
+      q_vec.val[e] = static_cast<T>(static_cast<float>(q_vec.val[e]) * q_inv);
+      k_vec.val[e] = static_cast<T>(static_cast<float>(k_vec.val[e]) * k_inv);
     }
     q_vec_ptr[vec_idx] = q_vec;
     k_vec_ptr[vec_idx] = k_vec;
@@ -832,8 +832,8 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   int local_id = item.get_local_linear_id();
   int local_range = item.get_local_range(2);
-  int chunk_id = item.get_group(1); // the wg id
-  const int global_chunk_range = item.get_group_range(1); // the wg num
+  int chunk_id = item.get_group(1);
+  const int global_chunk_range = item.get_group_range(1);
 
   // l2norm for q, k
   int group_id = item.get_group(1);
@@ -993,7 +993,7 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
           }
         }
       }
-      chunk_id += global_chunk_range; // wgs process chunks in a round robin manner
+      chunk_id += global_chunk_range;
     }
     pre_chunks = cumsum_chunks;
   }
