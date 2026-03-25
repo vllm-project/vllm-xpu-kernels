@@ -112,11 +112,11 @@ struct gated_delta_rule_kernel {
       for (int j = 0; j < v_dim_per_sg; ++j) {
 #pragma unroll
         for (int i = 0; i < k_bucket_size; ++i) {
-            state_local[j * k_bucket_size + i] = static_cast<float>(
-              ssm_state_ptr
-                [num_v_heads_id * head_k_dim * head_v_dim +
-                 (k_bucket_size * sg_local_id + i) +
-                 (head_v_dim_id + j) * head_k_dim]);
+          state_local[j * k_bucket_size + i] =
+              static_cast<float>(ssm_state_ptr
+                                     [num_v_heads_id * head_k_dim * head_v_dim +
+                                      (k_bucket_size * sg_local_id + i) +
+                                      (head_v_dim_id + j) * head_k_dim]);
         }
       }
     } else {
@@ -238,7 +238,7 @@ struct gated_delta_rule_kernel {
             [num_v_heads_id * head_k_dim * head_v_dim +
              (k_bucket_size * sg_local_id + i) +
              (head_v_dim_id + j) * head_k_dim] =
-            static_cast<StateT>(state_local[j * k_bucket_size + i]);
+                static_cast<StateT>(state_local[j * k_bucket_size + i]);
       }
     }
   }
@@ -378,25 +378,25 @@ void gated_delta_rule(
       head_v_dim);
 
 #define BUCKET_DISPATCH(scalar_t, state_scalar_t, k_bucket_size) \
-  switch (k_bucket_size) {                       \
-    case 1:                                      \
+  switch (k_bucket_size) {                                       \
+    case 1:                                                      \
       KERNEL_LAUNCHER(scalar_t, state_scalar_t, 1)               \
-      break;                                     \
-    case 2:                                      \
+      break;                                                     \
+    case 2:                                                      \
       KERNEL_LAUNCHER(scalar_t, state_scalar_t, 2)               \
-      break;                                     \
-    case 4:                                      \
+      break;                                                     \
+    case 4:                                                      \
       KERNEL_LAUNCHER(scalar_t, state_scalar_t, 4)               \
-      break;                                     \
-    case 8:                                      \
+      break;                                                     \
+    case 8:                                                      \
       KERNEL_LAUNCHER(scalar_t, state_scalar_t, 8)               \
-      break;                                     \
-    default:                                     \
-      TORCH_CHECK(false);                        \
+      break;                                                     \
+    default:                                                     \
+      TORCH_CHECK(false);                                        \
   }
 
 #define DISPATCH_STATE_DTYPE(scalar_t)                                  \
-  do {                                                                   \
+  do {                                                                  \
     if (ssm_state.scalar_type() == at::kFloat) {                        \
       using state_scalar_t = float;                                     \
       BUCKET_DISPATCH(scalar_t, state_scalar_t, k_bucket_size)          \
@@ -406,12 +406,12 @@ void gated_delta_rule(
     } else if (ssm_state.scalar_type() == at::kHalf) {                  \
       using state_scalar_t = sycl::half;                                \
       BUCKET_DISPATCH(scalar_t, state_scalar_t, k_bucket_size)          \
-    } else {                                                             \
-      TORCH_CHECK(                                                       \
-          false,                                                         \
+    } else {                                                            \
+      TORCH_CHECK(                                                      \
+          false,                                                        \
           "ssm_state dtype must be float32/float16/bfloat16, but got ", \
-          ssm_state.scalar_type());                                      \
-    }                                                                    \
+          ssm_state.scalar_type());                                     \
+    }                                                                   \
   } while (0)
 
   if (core_attn_out.scalar_type() == at::kBFloat16) {

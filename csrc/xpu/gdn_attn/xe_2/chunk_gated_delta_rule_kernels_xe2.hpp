@@ -928,7 +928,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
     const T* A_log,
     const T* dt_bias,
     StateT*
-      ssm_state,  // [cache_batch_size, num_v_heads, head_v_dim, head_k_dim]
+        ssm_state,  // [cache_batch_size, num_v_heads, head_v_dim, head_k_dim]
     const int ssm_state_stride_0,
     const int* query_start_loc,
     const int* cache_indices,
@@ -1035,14 +1035,14 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       item.barrier(sycl::access::fence_space::local_space);
 
       auto W_ptr = w + v_head_id * total_virtual_seqlen * head_k_dim +
-              virtual_seq_offset * head_k_dim;
+                   virtual_seq_offset * head_k_dim;
       auto W_tensor_shape = make_shape(chunk_size, head_k_dim);
       auto W_tensor = make_tensor(
           make_gmem_ptr(W_ptr),
           make_layout(W_tensor_shape, make_stride(head_k_dim, _1{})));
 
       auto U_ptr = u + v_head_id * total_virtual_seqlen * head_v_dim +
-              virtual_seq_offset * head_v_dim;
+                   virtual_seq_offset * head_v_dim;
       auto U_tensor_shape = make_shape(chunk_size, head_v_dim);
       auto U_tensor = make_tensor(
           make_gmem_ptr(U_ptr),
@@ -1102,7 +1102,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       // Build Q/K views for the current chunk and compute O2 = Q * K^T.
       // O2 is written to A as a temporary buffer in this fused kernel.
       auto q_ptr = q + virtual_seq_offset * num_k_heads * head_k_dim +
-                kv_head_id * head_k_dim;
+                   kv_head_id * head_k_dim;
       auto Q_tensor_shape = make_shape(current_chunk_size, head_k_dim);
       auto Q_tensor = make_tensor(
           make_gmem_ptr(q_ptr),
@@ -1110,7 +1110,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
               Q_tensor_shape, make_stride(head_k_dim * num_k_heads, _1{})));
 
       auto k_ptr = k + virtual_seq_offset * num_k_heads * head_k_dim +
-                kv_head_id * head_k_dim;
+                   kv_head_id * head_k_dim;
       auto K_tensor_shape = make_shape(chunk_size, head_k_dim);
       auto K_tensor = make_tensor(
           make_gmem_ptr(k_ptr),
@@ -1411,7 +1411,7 @@ void kernel_launcher(
         1);
 
     auto event_inverse = queue.submit([&](sycl::handler& cgh) {
-        cgh.parallel_for<ChunkInverseOptKernel<T, StateT>>(
+      cgh.parallel_for<ChunkInverseOptKernel<T, StateT>>(
           sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
           kernel_props,
           [=](auto) {
@@ -1440,7 +1440,7 @@ void kernel_launcher(
     auto event_inverse = queue.submit([&](sycl::handler& cgh) {
       sycl::local_accessor<float, 1> local_mem(
           sycl::range<1>(slm_size_inverse), cgh);
-        cgh.parallel_for<ChunkInverseKernel<T, StateT>>(
+      cgh.parallel_for<ChunkInverseKernel<T, StateT>>(
           sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
           kernel_props,
           [=](auto) {
@@ -1603,51 +1603,51 @@ void chunk_gated_delta_rule_impl_xe2(
       {num_v_heads, total_seqlen + padding_size, head_v_dim},
       torch::dtype(dtype).device(device).requires_grad(false));
 
-#define KERNEL_LAUNCHER(scalar_t, state_scalar_t)                \
-  kernel_launcher<scalar_t, state_scalar_t>(                     \
-      queue,                                                     \
-      reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),     \
-      reinterpret_cast<scalar_t*>(q.data_ptr()),                 \
-      reinterpret_cast<scalar_t*>(k.data_ptr()),                 \
-      reinterpret_cast<scalar_t*>(v.data_ptr()),                 \
-      reinterpret_cast<scalar_t*>(A.data_ptr()),                 \
-      reinterpret_cast<scalar_t*>(w.data_ptr()),                 \
-      reinterpret_cast<scalar_t*>(u.data_ptr()),                 \
-      reinterpret_cast<float*>(b.data_ptr()),                    \
-      reinterpret_cast<float*>(a.data_ptr()),                    \
-      reinterpret_cast<scalar_t*>(A_log.data_ptr()),             \
-      reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),           \
-      reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),        \
-      ssm_state_stride_0,                                             \
-      reinterpret_cast<int*>(query_start_loc.data_ptr()),             \
-      reinterpret_cast<int*>(cache_indices.data_ptr()),               \
-      has_initial_state.has_value()                                   \
-          ? reinterpret_cast<bool*>(has_initial_state->data_ptr())    \
-          : nullptr,                                                  \
-      batch_size,                                                     \
-      total_virtual_seqlen,                                           \
-      num_k_heads,                                                    \
-      head_k_dim,                                                     \
-      num_v_heads,                                                    \
+#define KERNEL_LAUNCHER(scalar_t, state_scalar_t)                  \
+  kernel_launcher<scalar_t, state_scalar_t>(                       \
+      queue,                                                       \
+      reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),       \
+      reinterpret_cast<scalar_t*>(q.data_ptr()),                   \
+      reinterpret_cast<scalar_t*>(k.data_ptr()),                   \
+      reinterpret_cast<scalar_t*>(v.data_ptr()),                   \
+      reinterpret_cast<scalar_t*>(A.data_ptr()),                   \
+      reinterpret_cast<scalar_t*>(w.data_ptr()),                   \
+      reinterpret_cast<scalar_t*>(u.data_ptr()),                   \
+      reinterpret_cast<float*>(b.data_ptr()),                      \
+      reinterpret_cast<float*>(a.data_ptr()),                      \
+      reinterpret_cast<scalar_t*>(A_log.data_ptr()),               \
+      reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
+      reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),     \
+      ssm_state_stride_0,                                          \
+      reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
+      reinterpret_cast<int*>(cache_indices.data_ptr()),            \
+      has_initial_state.has_value()                                \
+          ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
+          : nullptr,                                               \
+      batch_size,                                                  \
+      total_virtual_seqlen,                                        \
+      num_k_heads,                                                 \
+      head_k_dim,                                                  \
+      num_v_heads,                                                 \
       head_v_dim);
 
-#define DISPATCH_STATE_DTYPE(scalar_t)                                     \
-  do {                                                                     \
-    if (ssm_state.scalar_type() == at::kFloat) {                           \
-      using state_scalar_t = float;                                        \
-      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                            \
-    } else if (ssm_state.scalar_type() == at::kBFloat16) {                 \
-      using state_scalar_t = bfloat16_t;                                   \
-      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                            \
-    } else if (ssm_state.scalar_type() == at::kHalf) {                     \
-      using state_scalar_t = half_t;                                       \
-      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                            \
-    } else {                                                               \
-      TORCH_CHECK(                                                         \
-          false,                                                           \
-          "ssm_state dtype must be float32/float16/bfloat16, but got ",    \
-          ssm_state.scalar_type());                                        \
-    }                                                                      \
+#define DISPATCH_STATE_DTYPE(scalar_t)                                  \
+  do {                                                                  \
+    if (ssm_state.scalar_type() == at::kFloat) {                        \
+      using state_scalar_t = float;                                     \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                         \
+    } else if (ssm_state.scalar_type() == at::kBFloat16) {              \
+      using state_scalar_t = bfloat16_t;                                \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                         \
+    } else if (ssm_state.scalar_type() == at::kHalf) {                  \
+      using state_scalar_t = half_t;                                    \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t)                         \
+    } else {                                                            \
+      TORCH_CHECK(                                                      \
+          false,                                                        \
+          "ssm_state dtype must be float32/float16/bfloat16, but got ", \
+          ssm_state.scalar_type());                                     \
+    }                                                                   \
   } while (0)
 
   if (core_attn_out.scalar_type() == at::kBFloat16) {
