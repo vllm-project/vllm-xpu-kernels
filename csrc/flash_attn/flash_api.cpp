@@ -236,7 +236,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     at::Tensor seq_lens_q = cu_seqlens_q.slice(0, 1, batch_size + 1) -
                             cu_seqlens_q.slice(0, 0, batch_size);
     at::Tensor is_prefill_mask = seq_lens_q.gt(1);
-    std::optional<const at::Tensor> is_prefill_opt = is_prefill_mask;
+    bool all_prefill = is_prefill_mask.all().item<bool>();
+    bool all_decode = !is_prefill_mask.any().item<bool>();
 
     if (!out_.has_value()) {
       // Output shape uses V's head_dim (may differ from Q/K for MLA)
@@ -248,102 +249,116 @@ std::vector<at::Tensor> mha_varlen_fwd(
           q.options().device(q.device()));
     }
 
-    // Chunk prefill: processes only prefill batches (skips decode)
-    cutlass_chunk_prefill_interface(
-        queue,
-        q,
-        k,
-        v,
-        out,
-        block_table,
-        cu_seqlens_q,
-        seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        k_scale,
-        v_scale,
-        softmax_scale,
-        softmax_sink_,
-        window_size_left,
-        window_size_right,
-        is_varlen,
-        is_paged,
-        is_causal,
-        is_local,
-        is_sink,
-        softmax_lse_opt,
-        is_prefill_opt);
+    bool run_chunk_prefill = all_prefill || !all_decode;
+    bool run_paged_decode = all_decode || !all_prefill;
 
-    // Paged decode: processes only decode batches (skips prefill)
-    int eff_window_left =
-        window_size_left == -1 ? max_seqlen_k : window_size_left;
-    int eff_window_right =
-        window_size_right == -1 ? max_seqlen_k : window_size_right;
-    int effective_seqlen_k =
-        is_local ? std::min(max_seqlen_k, eff_window_left + 1) : max_seqlen_k;
+    // When all batches are the same type, pass no mask (nullptr) so the
+    // kernel skips the per-batch branch and processes everything.
+    std::optional<const at::Tensor> is_prefill_opt =
+        (all_prefill || all_decode)
+            ? std::nullopt
+            : std::optional<const at::Tensor>(is_prefill_mask);
 
-    int num_tokens = q.size(0);
-    int num_heads_q = q.size(1);
-    int v_head_dim = v.size(-1);
-    int num_heads_kv = k.size(2);
-    int kv_block_size = k.size(1);
+    if (run_chunk_prefill) {
+      // Chunk prefill: processes prefill batches (skips decode via mask)
+      cutlass_chunk_prefill_interface(
+          queue,
+          q,
+          k,
+          v,
+          out,
+          block_table,
+          cu_seqlens_q,
+          seqlens_k,
+          max_seqlen_q,
+          max_seqlen_k,
+          k_scale,
+          v_scale,
+          softmax_scale,
+          softmax_sink_,
+          window_size_left,
+          window_size_right,
+          is_varlen,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          softmax_lse_opt,
+          is_prefill_opt);
+    }
 
-    int num_kv_splits = num_splits.value_or(get_num_splits(
-        queue,
-        batch_size,
-        num_heads_q,
-        num_heads_kv,
-        effective_seqlen_k,
-        kv_block_size));
+    if (run_paged_decode) {
+      // Paged decode: processes decode batches (skips prefill via mask)
+      int eff_window_left =
+          window_size_left == -1 ? max_seqlen_k : window_size_left;
+      int eff_window_right =
+          window_size_right == -1 ? max_seqlen_k : window_size_right;
+      int effective_seqlen_k =
+          is_local ? std::min(max_seqlen_k, eff_window_left + 1) : max_seqlen_k;
 
-    at::Tensor tmp_out =
-        num_kv_splits == 1
-            ? out
-            : at::empty(
-                  {num_tokens, num_heads_q * num_kv_splits, v_head_dim},
-                  q.options().device(q.device()));
-    // Initialized to neutral values so decode-skipped batches don't pollute
-    // the ReduceSplitK output when the prefill mask is active.
-    at::Tensor decode_max_logits = at::full(
-        {num_tokens, num_heads_q, num_kv_splits},
-        -std::numeric_limits<float>::infinity(),
-        q.options().dtype(at::kFloat).device(q.device()));
-    at::Tensor decode_exp_sums = at::zeros(
-        {num_tokens, num_heads_q, num_kv_splits},
-        q.options().dtype(at::kFloat).device(q.device()));
+      int num_tokens = q.size(0);
+      int num_heads_q = q.size(1);
+      int v_head_dim = v.size(-1);
+      int num_heads_kv = k.size(2);
+      int kv_block_size = k.size(1);
 
-    // For paged decode (single query per sequence), causal masking is a
-    // no-op: seqused_k already constrains KV to only the valid past tokens,
-    // so there are no "future" tokens to mask. Passing is_causal=true
-    // triggers a seq_len formula that adds +q_sg_tile extra KV positions,
-    // causing invalid cache entries to pollute the attention output.
-    cutlass_paged_decode_interface(
-        queue,
-        q,
-        k,
-        v,
-        out,
-        tmp_out,
-        decode_exp_sums,
-        decode_max_logits,
-        block_table,
-        cu_seqlens_q,
-        seqlens_k,
-        max_seqlen_q,
-        max_seqlen_k,
-        k_scale,
-        v_scale,
-        softmax_scale,
-        softmax_sink_,
-        eff_window_left,
-        eff_window_right,
-        is_varlen,
-        is_paged,
-        false,  // is_causal: always false for decode; see comment above
-        is_local,
-        is_sink,
-        num_kv_splits,
-        is_prefill_opt);
+      int num_kv_splits = num_splits.value_or(get_num_splits(
+          queue,
+          batch_size,
+          num_heads_q,
+          num_heads_kv,
+          effective_seqlen_k,
+          kv_block_size));
+
+      at::Tensor tmp_out =
+          num_kv_splits == 1
+              ? out
+              : at::empty(
+                    {num_tokens, num_heads_q * num_kv_splits, v_head_dim},
+                    q.options().device(q.device()));
+      // Initialized to neutral values so decode-skipped batches don't pollute
+      // the ReduceSplitK output when the prefill mask is active.
+      at::Tensor decode_max_logits = at::full(
+          {num_tokens, num_heads_q, num_kv_splits},
+          -std::numeric_limits<float>::infinity(),
+          q.options().dtype(at::kFloat).device(q.device()));
+      at::Tensor decode_exp_sums = at::zeros(
+          {num_tokens, num_heads_q, num_kv_splits},
+          q.options().dtype(at::kFloat).device(q.device()));
+
+      // For paged decode (single query per sequence), causal masking is a
+      // no-op: seqused_k already constrains KV to only the valid past tokens,
+      // so there are no "future" tokens to mask. Passing is_causal=true
+      // triggers a seq_len formula that adds +q_sg_tile extra KV positions,
+      // causing invalid cache entries to pollute the attention output.
+      cutlass_paged_decode_interface(
+          queue,
+          q,
+          k,
+          v,
+          out,
+          tmp_out,
+          decode_exp_sums,
+          decode_max_logits,
+          block_table,
+          cu_seqlens_q,
+          seqlens_k,
+          max_seqlen_q,
+          max_seqlen_k,
+          k_scale,
+          v_scale,
+          softmax_scale,
+          softmax_sink_,
+          eff_window_left,
+          eff_window_right,
+          is_varlen,
+          is_paged,
+          false,  // is_causal: always false for decode; see comment above
+          is_local,
+          is_sink,
+          num_kv_splits,
+          is_prefill_opt);
+    }
   }
 
   if (return_softmax) {
