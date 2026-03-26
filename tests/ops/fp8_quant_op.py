@@ -10,6 +10,117 @@ import tests.register_ops as ops
 # Add parent directory to Python path
 # sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) #noqa: E501
 
+FP8_E4M3_MAX = 448.0
+
+
+def fp8_block_quant_2d(
+    x: torch.Tensor,
+    block_m: int,
+    block_n: int,
+    fp8_dtype=torch.float8_e4m3fn,
+    eps: float = 1e-6,
+):
+    """
+    Reference FP8 2D block quantization
+
+    Args:
+        x: [M, N] float tensor (fp16/fp32)
+        block_m: block rows
+        block_n: block cols
+        fp8_dtype: torch.float8_e4m3fn
+    Returns:
+        q: FP8 tensor [M, N]
+        scales: FP32 tensor [ceil(M/BM), ceil(N/BN)]
+    """
+    assert x.dim() == 2
+    M, N = x.shape
+    device = x.device
+
+    assert (block_m <= M and block_n <= N and M % block_m == 0
+            and N % block_n == 0)
+    BM, BN = block_m, block_n
+    grid_m = (M + BM - 1) // BM
+    grid_n = (N + BN - 1) // BN
+
+    scales = torch.empty((grid_m, grid_n), device=device, dtype=torch.float32)
+    q = torch.empty_like(x, dtype=fp8_dtype)
+
+    FP8_MAX = FP8_E4M3_MAX
+
+    for gm in range(grid_m):
+        for gn in range(grid_n):
+            m0 = gm * BM
+            n0 = gn * BN
+            m1 = min(m0 + BM, M)
+            n1 = min(n0 + BN, N)
+
+            block = x[m0:m1, n0:n1]
+
+            # absmax
+            amax = block.abs().max()
+            scale = amax / FP8_MAX
+            scale = torch.clamp(scale, min=eps)
+
+            scales[gm, gn] = scale
+
+            # quantize
+            q_block = (block / scale).to(fp8_dtype)
+            q[m0:m1, n0:n1] = q_block
+
+    return q, scales
+
+
+def fp8_block_dequant_2d(
+    q: torch.Tensor,
+    scales: torch.Tensor,
+    block_m: int,
+    block_n: int,
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """
+    Dequantize a 2D block-quantized FP8 tensor.
+
+    Args:
+        q: FP8 tensor [M, N]
+        scales: FP32 tensor [ceil(M/BM), ceil(N/BN)]
+        block_m: block rows
+        block_n: block cols
+        dtype: output dtype (e.g. torch.float16, torch.bfloat16)
+    Returns:
+        Dequantized tensor [M, N] in the specified dtype
+    """
+    assert q.dim() == 2
+    M, N = q.shape
+    grid_m, grid_n = scales.shape
+
+    return (q.to(torch.float32).reshape(grid_m, block_m, grid_n, block_n) *
+            scales.reshape(grid_m, 1, grid_n, 1)).reshape(M, N).to(dtype)
+
+
+def per_token_group_dequant_fp8(
+    q: torch.Tensor,
+    scales: torch.Tensor,
+    group_size: int,
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """
+    Dequantize a per-token-group quantized FP8 tensor.
+
+    Args:
+        q: FP8 tensor [M, K]
+        scales: FP32 tensor [M, K//group_size]
+        group_size: number of elements per group
+        dtype: output dtype
+    Returns:
+        Dequantized tensor [M, K] in the specified dtype
+    """
+    assert q.dim() == 2
+    M, K = q.shape
+    num_groups = K // group_size
+
+    return (q.to(torch.float32).reshape(M, num_groups, group_size) *
+            scales.unsqueeze(-1)).reshape(M, K).to(dtype)
+
 
 def scaled_fp8_quant(
     input: torch.Tensor,
