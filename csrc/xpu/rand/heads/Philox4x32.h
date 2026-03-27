@@ -3,7 +3,7 @@
 
 // From https://github.com/intel/torch-xpu-ops/src/ATen/native/xpu/sycl/Philox4x32.h
 
-namespace TopkToppSamplerImpl {
+namespace RAND {
 #define EXTRA_FLAG_NORMAL 0x00000001
 
 template <typename T>
@@ -516,5 +516,5 @@ static inline unsigned int rand_poisson(
   return rand_poisson_gammainc(state, (float)lambda);
 }
 
-} // namespace TopkToppSamplerImpl
+} // namespace RAND
 
