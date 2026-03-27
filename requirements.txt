@@ -13,10 +13,10 @@ build
 ninja
 
 # torch dependency
-# --extra-index-url=https://download.pytorch.org/whl/xpu
-# torch==2.10.0+xpu
-# triton-xpu
-# may need oneapi packages
+--extra-index-url=https://download.pytorch.org/whl/xpu
+torch==2.10.0+xpu
+triton-xpu
+may need oneapi packages
 
 # tests
 pytest
