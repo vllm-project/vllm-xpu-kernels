@@ -383,7 +383,7 @@ struct FMHAFwdMainloop<
 
     /* Main loop, blocked in k. */
     for (int K = blk_k0; K < blk_k1; K++) {
-      // barrier_arrive(ScopeWorkgroup);
+      barrier_arrive(ScopeWorkgroup);
 
       bool need_causal = false;
       if constexpr (CausalMask) {
@@ -504,7 +504,7 @@ struct FMHAFwdMainloop<
         prefetch(prefetch_k, pKgK(_, _, _, next_page_idx, D));
       }
 
-      // barrier_wait(ScopeWorkgroup);
+      barrier_wait(ScopeWorkgroup);
     }
   }
 
