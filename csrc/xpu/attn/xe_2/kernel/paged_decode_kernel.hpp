@@ -143,6 +143,9 @@ class XeFMHAFwdSplitKVKernel {
     StrideO dMax_logits;
 
     const ElementSink* sm_sink;
+
+    // per-batch mask: true = prefill, false = decode; nullptr = process all
+    const bool* is_prefill;
   };
   using KernelParams = KernelArguments;
 
@@ -250,6 +253,10 @@ class XeFMHAFwdSplitKVKernel {
     for (; tile_scheduler.is_valid(); ++tile_scheduler) {
       auto [blk_q, blk_v, head, idx_b, idx_kv_split] =
           tile_scheduler.get_block_coord();  // (Q,V,h,b,id_split)
+
+      // Skip prefill batches when is_prefill mask is provided
+      if (p.is_prefill != nullptr && p.is_prefill[idx_b]) continue;
+
       auto blk_qv = make_coord(blk_q, blk_v);
       int head_q_start = head * head_group_q;
 
@@ -497,6 +504,9 @@ class ReduceSplitK {
     const ElementLSE* max_logits;
     StrideO dMax_logits;
     int window_size_left = -1;
+
+    // per-batch mask: true = prefill, false = decode; nullptr = process all
+    const bool* is_prefill;
   };
   using KernelParams = KernelArguments;
 
@@ -600,6 +610,9 @@ class ReduceSplitK {
     CUTLASS_PRAGMA_NO_UNROLL
     for (; tile_scheduler.is_valid(); ++tile_scheduler) {
       auto [seq_idx, head_q, idx_b] = tile_scheduler.get_block_coord();
+
+      // Skip prefill batches when is_prefill mask is provided
+      if (p.is_prefill != nullptr && p.is_prefill[idx_b]) continue;
 
       auto sequence_length_shape = get_sequence_length_shape(s, idx_b);
       auto [seq_len_qo, seq_len_kv] = sequence_length_shape;

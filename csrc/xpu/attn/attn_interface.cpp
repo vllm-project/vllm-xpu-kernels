@@ -27,7 +27,8 @@ void cutlass_chunk_prefill_interface(
     bool is_paged,
     bool is_causal,
     bool is_local,
-    bool is_sink) {
+    bool is_sink,
+    std::optional<const at::Tensor>& is_prefill) {
   if (vllm::xpu::is_xe2_arch()) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel
@@ -52,7 +53,8 @@ void cutlass_chunk_prefill_interface(
         is_paged,
         is_causal,
         is_local,
-        is_sink);
+        is_sink,
+        is_prefill);
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif
@@ -87,7 +89,8 @@ void cutlass_paged_decode_interface(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    int num_kv_splits) {
+    int num_kv_splits,
+    std::optional<const at::Tensor>& is_prefill) {
   if (vllm::xpu::is_xe2_arch()) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel
@@ -116,7 +119,8 @@ void cutlass_paged_decode_interface(
         is_causal,
         is_local,
         is_sink,
-        num_kv_splits);
+        num_kv_splits,
+        is_prefill);
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif

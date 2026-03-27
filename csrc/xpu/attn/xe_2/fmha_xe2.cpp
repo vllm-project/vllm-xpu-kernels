@@ -25,7 +25,8 @@ void cutlass_chunk_prefill_xe2(
     bool is_paged,
     bool is_causal,
     bool is_local,
-    bool is_sink) {
+    bool is_sink,
+    std::optional<const at::Tensor>& is_prefill) {
   cutlass_chunk_prefill_impl(
       queue,
       query,
@@ -47,7 +48,8 @@ void cutlass_chunk_prefill_xe2(
       is_paged,
       is_causal,
       is_local,
-      is_sink);
+      is_sink,
+      is_prefill);
 }
 
 void cutlass_chunk_prefill_impl(
@@ -71,8 +73,8 @@ void cutlass_chunk_prefill_impl(
     bool is_paged,
     bool is_causal,
     bool is_local,
-    bool is_sink) {
-  // general params
+    bool is_sink,
+    std::optional<const at::Tensor>& is_prefill) {
   int batch_size, num_heads_q, num_heads_kv, head_size;
   // additional params
   int total_seqlen_q, total_seqlen_k;
@@ -144,7 +146,8 @@ void cutlass_chunk_prefill_impl(
       is_paged,   // paged
       is_causal,
       is_local,
-      is_sink};
+      is_sink,
+      is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr};
 
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
 

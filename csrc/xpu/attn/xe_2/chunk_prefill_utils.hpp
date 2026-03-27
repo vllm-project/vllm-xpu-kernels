@@ -47,4 +47,5 @@ void cutlass_chunk_prefill_impl(
     bool is_paged,
     bool is_causal,
     bool is_local,
-    bool is_sink);
+    bool is_sink,
+    std::optional<const at::Tensor>& is_prefill);
