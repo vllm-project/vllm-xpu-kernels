@@ -70,11 +70,21 @@ static inline void dnnl_matmul_w8a16_fp8(
 
   auto f_attr = [&](dnnl::primitive_attr& pattr) {
     pattr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
-    pattr.set_scales(
-        DNNL_ARG_WEIGHTS,
-        /* mask */ 0,
-        {},
-        get_onednn_dtype(m2_sc));
+    if (m2_sc.numel() == 1) {
+      pattr.set_scales(
+          DNNL_ARG_WEIGHTS,
+          /* mask */ 0,
+          {},
+          get_onednn_dtype(m2_sc));
+      /* per tensor quant */
+    } else {
+      pattr.set_scales(
+          DNNL_ARG_WEIGHTS,
+          /* mask */ (1 << 1),
+          {},
+          get_onednn_dtype(m2_sc));
+      /* per channel quant */
+    }
   };
 
   int arg_off = 0;
@@ -85,8 +95,10 @@ static inline void dnnl_matmul_w8a16_fp8(
   at::Device curDevice = at::Device(at::kXPU, dev_id);
   auto engine = GpuEngineManager::Instance().get_engine(curDevice);
 
+  int m2_sc_group_size = m2_sc.numel();
+  int sc_group_size = (group_size << 8) | m2_sc_group_size;
   auto& matmul_ext = matmul_primitive_create_and_cache(
-      jd, tt, b_type, m, n, k, lda, ldb, ldc, dev_id, f_attr, group_size);
+      jd, tt, b_type, m, n, k, lda, ldb, ldc, dev_id, f_attr, sc_group_size);
 
   matmul_ext.set_attribute(
       arg_off++,
