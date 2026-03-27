@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+from typing import Literal
+
 import pytest
 import torch
 import torch.nn as nn
-
-from typing import Literal
 
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 from tests.utils import seed_everything
@@ -16,32 +16,9 @@ K = [1, 32, 128, 1024, None]
 P = [0.1, 0.2, 0.4, 0.8, 1.0, None]
 LOGPROBS_MODE = ["raw_logits", "processed_logits", "processed_logprobs"]
 
+LogprobsMode = Literal["raw_logits", "raw_logprobs", "processed_logits",
+                       "processed_logprobs"]
 
-# BATCH_SIZE = [1, 32, 1024]
-# VOCAL_SIZE = [1024, 2048, 4096]
-# K = [1, 32, 128, 1024]
-# P = [None]
-# # K = [None]
-# # P = [0.1, 0.2, 0.4, 0.8, 1.0]
-# K = [None]
-# P = [None]
-# LOGPROBS_MODE = ["raw_logits", "processed_logits", "processed_logprobs"]
-
-# BATCH_SIZE = [2048]
-# VOCAL_SIZE = [131072]
-# K = [None]
-# P = [None]
-# LOGPROBS_MODE = ["processed_logprobs"]
-
-# BATCH_SIZE = [32]
-# VOCAL_SIZE = [1024]
-# K = [32]
-# P = [1.0]
-# LOGPROBS_MODE = ["raw_logits"]
-
-LogprobsMode = Literal[
-    "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
-]
 
 def random_sample(
     probs: torch.Tensor,
@@ -64,7 +41,9 @@ def random_sample(
         # replace for UT pass
         # q.exponential_()
         offset = 0
-        seeds = torch.tensor([seed, offset], dtype=torch.int64, device=torch.device("cpu"))
+        seeds = torch.tensor([seed, offset],
+                             dtype=torch.int64,
+                             device=torch.device("cpu"))
         torch.ops._xpu_C.exponential_2d_(q, seeds, 1.0)
     if generators:
         # TODO(woosuk): This can be slow because we handle each request
@@ -73,6 +52,7 @@ def random_sample(
             q[i].exponential_(generator=generator)
     return probs.div_(q).argmax(dim=-1).view(-1)
     # return probs.argmax(dim=-1).view(-1)
+
 
 def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     """
@@ -95,6 +75,7 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     # Handle non-topk rows.
     top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
     return logits.masked_fill_(logits < top_k_mask, -float("inf"))
+
 
 def apply_top_k_top_p_pytorch(
     logits: torch.Tensor,
@@ -139,13 +120,14 @@ def apply_top_k_top_p_pytorch(
     # Re-sort the probabilities.
     return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
 
-def apply_top_k_top_p(
-    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
-) -> torch.Tensor:
+
+def apply_top_k_top_p(logits: torch.Tensor, k: torch.Tensor | None,
+                      p: torch.Tensor | None) -> torch.Tensor:
     if p is None and k is None:
         return logits
 
     return apply_top_k_top_p_pytorch(logits, k, p)
+
 
 class TopKTopPSampler(nn.Module):
     """
@@ -197,9 +179,12 @@ class TopKTopPSampler(nn.Module):
         if generators:
             return self.forward_native(logits, generators, k, p)
         batch_size = logits.shape[0]
-        random_sampled = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
+        random_sampled = torch.empty(batch_size,
+                                     dtype=torch.int64,
+                                     device=logits.device)
         logits_to_return = None
-        if self.logprobs_mode == "processed_logits" or self.logprobs_mode == "processed_logprobs":
+        if self.logprobs_mode == "processed_logits" or\
+            self.logprobs_mode == "processed_logprobs":
             logits_to_return = torch.empty_like(logits)
             # logits_to_return = logits
 
@@ -208,19 +193,14 @@ class TopKTopPSampler(nn.Module):
             state = generator.get_state()
             seed, _ = state.view(torch.int64)
             offset = 0
-            seeds = torch.tensor([seed, offset], dtype=torch.int64, device=torch.device("cpu"))
+            seeds = torch.tensor([seed, offset],
+                                 dtype=torch.int64,
+                                 device=torch.device("cpu"))
 
-        torch.ops._xpu_C.topk_topp_sampler(
-            random_sampled,
-            logits_to_return,
-            logits,
-            k,
-            p,
-            self.logprobs_mode,
-            seeds,
-            1.0)
+        torch.ops._xpu_C.topk_topp_sampler(random_sampled, logits_to_return,
+                                           logits, k, p, self.logprobs_mode,
+                                           seeds, 1.0)
         return random_sampled, logits_to_return
-
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
@@ -232,81 +212,68 @@ def test_topk_topp(batch_size, vocal_size, k, p, logprobs_mode):
 
     seed_everything(42)
 
-    generators={}
+    generators = {}
 
-    logits = torch.randn(
-        batch_size, vocal_size, dtype=torch.float, device=DEVICE
-    )
+    logits = torch.randn(batch_size,
+                         vocal_size,
+                         dtype=torch.float,
+                         device=DEVICE)
     ref_logits = logits.clone()
 
     top_k = None
     top_p = None
     if k is not None:
         if k != vocal_size:
-            top_k = torch.randint(1, k + 1, (batch_size,), device=DEVICE)
+            top_k = torch.randint(1, k + 1, (batch_size, ), device=DEVICE)
         else:
-            top_k = torch.full((batch_size,), vocal_size, dtype=torch.long, device=DEVICE)
-        # print("top_k", top_k.shape, top_k.dtype)
+            top_k = torch.full((batch_size, ),
+                               vocal_size,
+                               dtype=torch.long,
+                               device=DEVICE)
     if p is not None:
         if p != 1.0:
             top_p = 1.0 - torch.rand(
-                batch_size, dtype=torch.float, device=DEVICE
-            )
+                batch_size, dtype=torch.float, device=DEVICE)
         else:
             top_p = torch.ones([batch_size], dtype=torch.float, device=DEVICE)
 
     topk_topp_sampler = TopKTopPSampler(logprobs_mode=logprobs_mode)
 
-    with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.XPU,
-            ],
-            record_shapes=True,
-        ) as prof:
-        random_sampled, logits_to_return = topk_topp_sampler.forward_xpu(
-            logits=logits,
-            generators=generators,
-            k=top_k,
-            p=top_p,
-        )
-    # print(prof.key_averages().table(sort_by="self_xpu_time_total", row_limit=10), flush=True)
+    random_sampled, logits_to_return = topk_topp_sampler.forward_xpu(
+        logits=logits,
+        generators=generators,
+        k=top_k,
+        p=top_p,
+    )
 
-    with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.XPU,
-            ],
-            record_shapes=True,
-        ) as prof_ref:
-        ref_random_sampled, ref_logits_to_return = topk_topp_sampler.forward_native(
-            logits=ref_logits,
-            generators=generators,
-            k=top_k,
-            p=top_p,
-        )
-    # print(prof_ref.key_averages().table(sort_by="self_xpu_time_total", row_limit=10), flush=True)
+    ref_random_sampled, ref_logits_to_return =\
+        topk_topp_sampler.forward_native(
+        logits=ref_logits,
+        generators=generators,
+        k=top_k,
+        p=top_p,
+    )
 
-    # print("random_sampled[20]", random_sampled[20])
-    # print("ref_random_sampled[20]", ref_random_sampled[20])
-
-    # print("logits[575]", logits[20][575])
-    # print("logits[303]", logits[20][303])
-
-    torch.testing.assert_close(random_sampled, ref_random_sampled, rtol=0, atol=0)
+    torch.testing.assert_close(random_sampled,
+                               ref_random_sampled,
+                               rtol=0,
+                               atol=0)
     if logits_to_return is not None:
         if top_p is None:
-            torch.testing.assert_close(logits_to_return, ref_logits_to_return, rtol=1e-5, atol=1e-5)
+            torch.testing.assert_close(logits_to_return,
+                                       ref_logits_to_return,
+                                       rtol=1e-5,
+                                       atol=1e-5)
         else:
             # Top-p involved: allow small differences
             # Either < 1% of kept values OR < 5 values absolute
             xpu_kept = (logits_to_return != float("-inf")).sum(dim=-1)
             ref_kept = (ref_logits_to_return != float("-inf")).sum(dim=-1)
 
-            max_diff = (ref_kept - ref_kept).abs().max().item()
+            max_diff = (ref_kept - xpu_kept).abs().max().item()
             max_kept = ref_kept.max().item()
             if max_kept > 0 and max_diff > 3:
                 diff_pct = max_diff / max_kept * 100
                 assert diff_pct < 0.5, (
                     f"Top-p mask difference too large: {diff_pct:.2f}% "
-                    f"(max diff {max_diff} values out of {max_kept})"
-                )
-
+                    f"(max diff {max_diff} values out of {max_kept})")

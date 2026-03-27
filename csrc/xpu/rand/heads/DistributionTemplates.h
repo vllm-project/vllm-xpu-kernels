@@ -12,7 +12,7 @@ struct ExponentialFunctor {
     // converted to half
     accscalar_t log;
     if (val >= static_cast<accscalar_t>(1.f) -
-            std::numeric_limits<scalar_t>::epsilon() / 2.f) {
+                   std::numeric_limits<scalar_t>::epsilon() / 2.f) {
       log = -std::numeric_limits<scalar_t>::epsilon() / 2.f;
     } else {
       log = std::log(val);
@@ -38,4 +38,4 @@ struct Uniform4DistributionFunctor {
     return rand_uniform4(state);
   }
 };
-} // namespace RAND
+}  // namespace RAND

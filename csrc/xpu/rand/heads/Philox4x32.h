@@ -1,7 +1,8 @@
 #pragma once
 #include <sycl/sycl.hpp>
 
-// From https://github.com/intel/torch-xpu-ops/src/ATen/native/xpu/sycl/Philox4x32.h
+// From
+// https://github.com/intel/torch-xpu-ops/src/ATen/native/xpu/sycl/Philox4x32.h
 
 namespace RAND {
 #define EXTRA_FLAG_NORMAL 0x00000001
@@ -52,47 +53,36 @@ typedef struct randStatePhilox4_32_10 {
   float boxmuller_extra;
 } randStatePhilox4_32_10_t;
 
-static inline void Philox_State_Incr(
-    randStatePhilox4_32_10_t* s,
-    unsigned long long n) {
+static inline void
+Philox_State_Incr(randStatePhilox4_32_10_t* s, unsigned long long n) {
   unsigned int nlo = (unsigned int)(n);
   unsigned int nhi = (unsigned int)(n >> 32);
   s->ctr.x += nlo;
-  if (s->ctr.x < nlo)
-    nhi++;
+  if (s->ctr.x < nlo) nhi++;
   s->ctr.y += nhi;
-  if (nhi <= s->ctr.y)
-    return;
-  if (++s->ctr.z)
-    return;
+  if (nhi <= s->ctr.y) return;
+  if (++s->ctr.z) return;
   ++s->ctr.w;
 }
 
 static inline void Philox_State_Incr(randStatePhilox4_32_10_t* s) {
-  if (++s->ctr.x)
-    return;
-  if (++s->ctr.y)
-    return;
-  if (++s->ctr.z)
-    return;
+  if (++s->ctr.x) return;
+  if (++s->ctr.y) return;
+  if (++s->ctr.z) return;
   ++s->ctr.w;
 }
 
-static inline void Philox_State_Incr_hi(
-    randStatePhilox4_32_10_t* s,
-    unsigned long long n) {
+static inline void
+Philox_State_Incr_hi(randStatePhilox4_32_10_t* s, unsigned long long n) {
   unsigned int nlo = (unsigned int)(n);
   unsigned int nhi = (unsigned int)(n >> 32);
   s->ctr.z += nlo;
-  if (s->ctr.z < nlo)
-    nhi++;
+  if (s->ctr.z < nlo) nhi++;
   s->ctr.w += nhi;
 }
 
-static inline unsigned int mulhilo32(
-    unsigned int a,
-    unsigned int b,
-    unsigned int* hip) {
+static inline unsigned int
+mulhilo32(unsigned int a, unsigned int b, unsigned int* hip) {
   *hip = sycl::mul_hi(a, b);
   return a * b;
 }
@@ -107,46 +97,44 @@ static inline uint4 _philox4x32round(uint4 ctr, uint2 key) {
 }
 
 static inline uint4 rand_Philox4x32_10(uint4 c, uint2 k) {
-  c = _philox4x32round(c, k); // 1
+  c = _philox4x32round(c, k);  // 1
   k.x += PHILOX_W32_0;
   k.y += PHILOX_W32_1;
-  c = _philox4x32round(c, k); // 2
+  c = _philox4x32round(c, k);  // 2
   k.x += PHILOX_W32_0;
   k.y += PHILOX_W32_1;
-  c = _philox4x32round(c, k); // 3
+  c = _philox4x32round(c, k);  // 3
   k.x += PHILOX_W32_0;
   k.y += PHILOX_W32_1;
-  c = _philox4x32round(c, k); // 4
+  c = _philox4x32round(c, k);  // 4
   k.x += PHILOX_W32_0;
   k.y += PHILOX_W32_1;
-  c = _philox4x32round(c, k); // 5
+  c = _philox4x32round(c, k);  // 5
   k.x += PHILOX_W32_0;
   k.y += PHILOX_W32_1;
-  c = _philox4x32round(c, k); // 6
+  c = _philox4x32round(c, k);  // 6
   k.x += PHILOX_W32_0;
   k.y += PHILOX_W32_1;
-  c = _philox4x32round(c, k); // 7
+  c = _philox4x32round(c, k);  // 7
   k.x += PHILOX_W32_0;
   k.y += PHILOX_W32_1;
-  c = _philox4x32round(c, k); // 8
+  c = _philox4x32round(c, k);  // 8
   k.x += PHILOX_W32_0;
   k.y += PHILOX_W32_1;
-  c = _philox4x32round(c, k); // 9
+  c = _philox4x32round(c, k);  // 9
   k.x += PHILOX_W32_0;
   k.y += PHILOX_W32_1;
-  return _philox4x32round(c, k); // 10
+  return _philox4x32round(c, k);  // 10
 }
 
-static inline void skipahead_sequence(
-    unsigned long long n,
-    randStatePhilox4_32_10_t* state) {
+static inline void
+skipahead_sequence(unsigned long long n, randStatePhilox4_32_10_t* state) {
   Philox_State_Incr_hi(state, n);
   state->output = rand_Philox4x32_10(state->ctr, state->key);
 }
 
-static inline void skipahead(
-    unsigned long long n,
-    randStatePhilox4_32_10_t* state) {
+static inline void
+skipahead(unsigned long long n, randStatePhilox4_32_10_t* state) {
   state->STATE += (n & 3);
   n /= 4;
   if (state->STATE > 3) {
@@ -304,10 +292,7 @@ static inline float4 rand_box_muller4(R* state) {
 }
 
 static inline double2 _rand_box_muller_double(
-    unsigned int x0,
-    unsigned int x1,
-    unsigned int y0,
-    unsigned int y1) {
+    unsigned int x0, unsigned int x1, unsigned int y0, unsigned int y1) {
   double2 result;
   unsigned long long zx =
       (unsigned long long)x0 ^ ((unsigned long long)x1 << (53 - 32));
@@ -370,7 +355,7 @@ static inline double lgamma_integer(int a) {
   double sum;
 
   if (a > 8) {
-    /* Stirling approximation; coefficients from Hart et al, "Computer
+    /* Stirling approximation; coefficients from "Computer
      * Approximations", Wiley 1968. Approximation 5404.
      */
     s = 1.0 / fa;
@@ -471,9 +456,8 @@ static inline float pgammaincinv(float a, float y) {
 }
 
 /* Rejection Method for Poisson distribution based on gammainc approximation */
-static inline unsigned int rand_poisson_gammainc(
-    randStatePhilox4_32_10_t* state,
-    float lambda) {
+static inline unsigned int
+rand_poisson_gammainc(randStatePhilox4_32_10_t* state, float lambda) {
   float y, x, t, z, v;
   float logl = logf(lambda);
   while (true) {
@@ -485,17 +469,15 @@ static inline unsigned int rand_poisson_gammainc(
     z = z * v;
     t = (float)expf(
         -lambda + x * logl - (float)lgamma_integer((int)(1.0f + x)));
-    if ((z < t) && (v >= 1e-20))
-      break;
+    if ((z < t) && (v >= 1e-20)) break;
   }
   return (unsigned int)x;
 }
 
 // Donald E. Knuth Seminumerical Algorithms. The Art of Computer Programming,
 // Volume 2
-static inline unsigned int rand_poisson_knuth(
-    randStatePhilox4_32_10_t* state,
-    float lambda) {
+static inline unsigned int
+rand_poisson_knuth(randStatePhilox4_32_10_t* state, float lambda) {
   unsigned int k = 0;
   float p = expf(lambda);
   do {
@@ -505,16 +487,13 @@ static inline unsigned int rand_poisson_knuth(
   return k - 1;
 }
 
-static inline unsigned int rand_poisson(
-    randStatePhilox4_32_10_t* state,
-    double lambda) {
-  if (lambda < 64)
-    return rand_poisson_knuth(state, (float)lambda);
+static inline unsigned int
+rand_poisson(randStatePhilox4_32_10_t* state, double lambda) {
+  if (lambda < 64) return rand_poisson_knuth(state, (float)lambda);
   if (lambda > 4000)
-    return (
-        unsigned int)((std::sqrt(lambda) * rand_normal_double(state)) + lambda + 0.5); // Round to nearest
+    return (unsigned int)((std::sqrt(lambda) * rand_normal_double(state)) +
+                          lambda + 0.5);  // Round to nearest
   return rand_poisson_gammainc(state, (float)lambda);
 }
 
-} // namespace RAND
-
+}  // namespace RAND

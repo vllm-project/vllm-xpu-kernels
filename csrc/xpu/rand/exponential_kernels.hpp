@@ -8,7 +8,7 @@ struct exponential_2d_kernel {
  public:
   static constexpr int sub_group_size = 16;
   static constexpr int group_size = 512;
-  static constexpr int VEC_SIZE = 4; // align with rand_uniform4
+  static constexpr int VEC_SIZE = 4;  // align with rand_uniform4
 
   using scalar_t = float;
   using accscalar_t = float;
@@ -25,14 +25,14 @@ struct exponential_2d_kernel {
         vocal_size(vocal_size),
         seed(seed),
         offset(offset),
-        lambda(lambda)
-        {}
+        lambda(lambda) {}
 
   static inline sycl::nd_range<1>
   get_nd_range(const int batch_size, const int vocal_size) {
     int local_size = group_size;
-    if(vocal_size < group_size){
-        local_size = (vocal_size + sub_group_size - 1) / sub_group_size * sub_group_size;
+    if (vocal_size < group_size) {
+      local_size =
+          (vocal_size + sub_group_size - 1) / sub_group_size * sub_group_size;
     }
     sycl::range<1> local(local_size);
     sycl::range<1> global(batch_size);
@@ -63,35 +63,36 @@ struct exponential_2d_kernel {
 
     const int loop_count = (handle_size + VEC_SIZE - 1) / VEC_SIZE;
     const int remained_vec_size = handle_size - (loop_count - 1) * VEC_SIZE;
-    const int loop_times = (remained_vec_size == VEC_SIZE) ? loop_count : (loop_count - 1);
+    const int loop_times =
+        (remained_vec_size == VEC_SIZE) ? loop_count : (loop_count - 1);
     const bool has_last_loop = (remained_vec_size == VEC_SIZE) ? false : true;
 
-    for(int l = 0; l < loop_times; ++l){
-        auto rand4 = dist_func(&state);
-        #pragma unroll
-        for(int e = 0; e < VEC_SIZE; ++e){
-            auto rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
-            tensor_local_ptr[l * VEC_SIZE + e] = static_cast<T>(rand);
-        }
+    for (int l = 0; l < loop_times; ++l) {
+      auto rand4 = dist_func(&state);
+#pragma unroll
+      for (int e = 0; e < VEC_SIZE; ++e) {
+        auto rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
+        tensor_local_ptr[l * VEC_SIZE + e] = static_cast<T>(rand);
+      }
     }
 
-    if(has_last_loop){
-        auto rand4 = dist_func(&state);
-        #pragma unroll
-        for(int e = 0; e < remained_vec_size; ++e){
-            auto rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
-            tensor_local_ptr[loop_times * VEC_SIZE + e] = static_cast<T>(rand);
-        }
+    if (has_last_loop) {
+      auto rand4 = dist_func(&state);
+#pragma unroll
+      for (int e = 0; e < remained_vec_size; ++e) {
+        auto rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
+        tensor_local_ptr[loop_times * VEC_SIZE + e] = static_cast<T>(rand);
+      }
     }
   }
 
  private:
-    T* tensor_ptr;
-    const int batch_size;
-    const int vocal_size;
-    const int64_t seed;
-    const int64_t offset;
-    const float lambda;
+  T* tensor_ptr;
+  const int batch_size;
+  const int vocal_size;
+  const int64_t seed;
+  const int64_t offset;
+  const float lambda;
 };
 
 template <typename T>
@@ -103,19 +104,11 @@ void exponential_2d_kernel_launcher(
     const int64_t seed,
     const int64_t offset,
     const float lambda) {
-
-    using KERNEL = exponential_2d_kernel<T>;
-    auto range = KERNEL::get_nd_range(batch_size, vocal_size);
-    queue.submit([&](sycl::handler& cgh) {
-        KERNEL task(
-            tensor_ptr,
-            batch_size,
-            vocal_size,
-            seed,
-            offset,
-            lambda);
-        cgh.parallel_for(range, task);
-    });
-
+  using KERNEL = exponential_2d_kernel<T>;
+  auto range = KERNEL::get_nd_range(batch_size, vocal_size);
+  queue.submit([&](sycl::handler& cgh) {
+    KERNEL task(tensor_ptr, batch_size, vocal_size, seed, offset, lambda);
+    cgh.parallel_for(range, task);
+  });
 }
-}
+}  // namespace RAND

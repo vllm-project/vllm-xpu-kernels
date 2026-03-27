@@ -97,12 +97,11 @@ bool is_pvc(int64_t device_index);
 
 void exponential_2d_(
     torch::Tensor& tensor,
-    torch::Tensor& seeds, // should on CPU
+    torch::Tensor& seeds,  // should on CPU
     const double lambda);
 
 void top_k_mask_logits(
-    torch::Tensor& logits,
-    const std::optional<torch::Tensor>& k);
+    torch::Tensor& logits, const std::optional<torch::Tensor>& k);
 
 void topk_topp_sampler(
     torch::Tensor& random_sampled,
@@ -111,5 +110,5 @@ void topk_topp_sampler(
     const std::optional<torch::Tensor>& k,
     const std::optional<torch::Tensor>& p,
     const std::string& logprobs_mode,
-    torch::Tensor& seeds, // should on CPU
+    torch::Tensor& seeds,  // should on CPU
     const double lambda);
