@@ -6,6 +6,7 @@
   #include "csrc/xpu/attn/xe_2/paged_decode_xe2.h"
 #endif
 
+// just a test log for trigger CI. will remove.
 void cutlass_chunk_prefill_interface(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]
