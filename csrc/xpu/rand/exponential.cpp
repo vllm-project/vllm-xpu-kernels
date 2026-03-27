@@ -9,7 +9,7 @@ void exponential_2d_(
     torch::Tensor& tensor, int64_t seed, int64_t offset, const double lambda) {
   auto dtype = tensor.dtype();
   int batch_size = tensor.size(0);
-  int vocal_size = tensor.size(1);
+  int vocab_size = tensor.size(1);
 
   auto& queue = vllm::xpu::vllmGetQueue();
 
@@ -19,7 +19,7 @@ void exponential_2d_(
       queue,                                   \
       reinterpret_cast<T*>(tensor.data_ptr()), \
       batch_size,                              \
-      vocal_size,                              \
+      vocab_size,                              \
       seed,                                    \
       offset,                                  \
       lambda);

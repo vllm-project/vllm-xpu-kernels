@@ -28,7 +28,7 @@ struct random_sampler_only_kernel {
       float* logits_to_return,
       float* logits,
       const int batch_size,
-      const int vocal_size,
+      const int vocab_size,
       const int64_t seed,
       const int64_t offset,
       const float lambda)
@@ -36,17 +36,17 @@ struct random_sampler_only_kernel {
         logits_to_return(logits_to_return),
         logits(logits),
         batch_size(batch_size),
-        vocal_size(vocal_size),
+        vocab_size(vocab_size),
         seed(seed),
         offset(offset),
         lambda(lambda) {}
 
   static inline sycl::nd_range<1>
-  get_nd_range(const int batch_size, const int vocal_size) {
+  get_nd_range(const int batch_size, const int vocab_size) {
     int local_size = group_size;
-    if (vocal_size < group_size) {
+    if (vocab_size < group_size) {
       local_size =
-          (vocal_size + sub_group_size - 1) / sub_group_size * sub_group_size;
+          (vocab_size + sub_group_size - 1) / sub_group_size * sub_group_size;
     }
     sycl::range<1> local(local_size);
     sycl::range<1> global(batch_size);
@@ -70,15 +70,15 @@ struct random_sampler_only_kernel {
 
     auto group = item.get_group();
 
-    const int local_handle_size = (vocal_size + local_range - 1) / local_range;
+    const int local_handle_size = (vocab_size + local_range - 1) / local_range;
     const int local_offset = local_id * local_handle_size;
-    const int remained_size = vocal_size - local_offset;
+    const int remained_size = vocab_size - local_offset;
     const int handle_size = sycl::min(local_handle_size, remained_size);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
-    float* logits_ptr = logits + batch_id * vocal_size + local_offset;
+    float* logits_ptr = logits + batch_id * vocab_size + local_offset;
     float* logits_to_return_ptr =
-        logits_to_return + batch_id * vocal_size + local_offset;
+        logits_to_return + batch_id * vocab_size + local_offset;
 
     float local_data[VEC_SIZE];
     const int loop_count = (handle_size + VEC_SIZE - 1) / VEC_SIZE;
@@ -218,7 +218,7 @@ struct random_sampler_only_kernel {
         sycl::reduce_over_group(group, max_value_local, sycl::maximum<>());
     bool is_max = (max_val_global == max_value_local);
     int64_t first_max_id = sycl::reduce_over_group(
-        group, is_max ? max_idx_local : (vocal_size - 1), sycl::minimum<>());
+        group, is_max ? max_idx_local : (vocab_size - 1), sycl::minimum<>());
 
     if (0 == local_id) {
       random_sampled_ptr[0] = first_max_id;
@@ -230,7 +230,7 @@ struct random_sampler_only_kernel {
   float* logits_to_return;
   float* logits;
   const int batch_size;
-  const int vocal_size;
+  const int vocab_size;
   const int64_t seed;
   const int64_t offset;
   const float lambda;
@@ -252,7 +252,7 @@ struct top_k_only_kernel {
       float* logits,
       const int64_t* top_k,
       const int batch_size,
-      const int vocal_size,
+      const int vocab_size,
       const int64_t seed,
       const int64_t offset,
       const float lambda)
@@ -261,17 +261,17 @@ struct top_k_only_kernel {
         logits(logits),
         top_k(top_k),
         batch_size(batch_size),
-        vocal_size(vocal_size),
+        vocab_size(vocab_size),
         seed(seed),
         offset(offset),
         lambda(lambda) {}
 
   static inline sycl::nd_range<1>
-  get_nd_range(const int batch_size, const int vocal_size) {
+  get_nd_range(const int batch_size, const int vocab_size) {
     int local_size = group_size;
-    if (vocal_size < group_size) {
+    if (vocab_size < group_size) {
       local_size =
-          (vocal_size + sub_group_size - 1) / sub_group_size * sub_group_size;
+          (vocab_size + sub_group_size - 1) / sub_group_size * sub_group_size;
     }
     sycl::range<1> local(local_size);
     sycl::range<1> global(batch_size);
@@ -297,15 +297,15 @@ struct top_k_only_kernel {
 
     const int top_k_value = top_k[batch_id];
 
-    const int local_handle_size = (vocal_size + local_range - 1) / local_range;
+    const int local_handle_size = (vocab_size + local_range - 1) / local_range;
     const int local_offset = local_id * local_handle_size;
-    const int remained_size = vocal_size - local_offset;
+    const int remained_size = vocab_size - local_offset;
     const int handle_size = sycl::min(local_handle_size, remained_size);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
-    float* logits_ptr = logits + batch_id * vocal_size + local_offset;
+    float* logits_ptr = logits + batch_id * vocab_size + local_offset;
     float* logits_to_return_ptr =
-        logits_to_return + batch_id * vocal_size + local_offset;
+        logits_to_return + batch_id * vocab_size + local_offset;
 
     double low = INFINITY, high = -INFINITY;
     double pivot = -INFINITY;
@@ -368,7 +368,7 @@ struct top_k_only_kernel {
     max_softmax_value = high;
 
     // topk
-    if (top_k_value != vocal_size) {
+    if (top_k_value != vocab_size) {
       do {
         int pivot_count_local = 0;
 
@@ -538,7 +538,7 @@ struct top_k_only_kernel {
         sycl::reduce_over_group(group, max_value_local, sycl::maximum<>());
     bool is_max = (max_val_global == max_value_local);
     int64_t first_max_id = sycl::reduce_over_group(
-        group, is_max ? max_idx_local : (vocal_size - 1), sycl::minimum<>());
+        group, is_max ? max_idx_local : (vocab_size - 1), sycl::minimum<>());
 
     if (0 == local_id) {
       random_sampled_ptr[0] = first_max_id;
@@ -551,7 +551,7 @@ struct top_k_only_kernel {
   float* logits;
   const int64_t* top_k;
   const int batch_size;
-  const int vocal_size;
+  const int vocab_size;
   const int64_t seed;
   const int64_t offset;
   const float lambda;
@@ -573,7 +573,7 @@ struct top_p_only_kernel {
       float* logits,
       const float* top_p,
       const int batch_size,
-      const int vocal_size,
+      const int vocab_size,
       const int64_t seed,
       const int64_t offset,
       const float lambda)
@@ -582,17 +582,17 @@ struct top_p_only_kernel {
         logits(logits),
         top_p(top_p),
         batch_size(batch_size),
-        vocal_size(vocal_size),
+        vocab_size(vocab_size),
         seed(seed),
         offset(offset),
         lambda(lambda) {}
 
   static inline sycl::nd_range<1>
-  get_nd_range(const int batch_size, const int vocal_size) {
+  get_nd_range(const int batch_size, const int vocab_size) {
     int local_size = group_size;
-    if (vocal_size < group_size) {
+    if (vocab_size < group_size) {
       local_size =
-          (vocal_size + sub_group_size - 1) / sub_group_size * sub_group_size;
+          (vocab_size + sub_group_size - 1) / sub_group_size * sub_group_size;
     }
     sycl::range<1> local(local_size);
     sycl::range<1> global(batch_size);
@@ -618,15 +618,15 @@ struct top_p_only_kernel {
 
     const float top_p_value = top_p[batch_id];
 
-    const int local_handle_size = (vocal_size + local_range - 1) / local_range;
+    const int local_handle_size = (vocab_size + local_range - 1) / local_range;
     const int local_offset = local_id * local_handle_size;
-    const int remained_size = vocal_size - local_offset;
+    const int remained_size = vocab_size - local_offset;
     const int handle_size = sycl::min(local_handle_size, remained_size);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
-    float* logits_ptr = logits + batch_id * vocal_size + local_offset;
+    float* logits_ptr = logits + batch_id * vocab_size + local_offset;
     float* logits_to_return_ptr =
-        logits_to_return + batch_id * vocal_size + local_offset;
+        logits_to_return + batch_id * vocab_size + local_offset;
 
     double low = INFINITY, high = -INFINITY;
     double pivot = -INFINITY;
@@ -865,7 +865,7 @@ struct top_p_only_kernel {
         sycl::reduce_over_group(group, max_value_local, sycl::maximum<>());
     bool is_max = (max_val_global == max_value_local);
     int64_t first_max_id = sycl::reduce_over_group(
-        group, is_max ? max_idx_local : (vocal_size - 1), sycl::minimum<>());
+        group, is_max ? max_idx_local : (vocab_size - 1), sycl::minimum<>());
 
     if (0 == local_id) {
       random_sampled_ptr[0] = first_max_id;
@@ -878,7 +878,7 @@ struct top_p_only_kernel {
   float* logits;
   const float* top_p;
   const int batch_size;
-  const int vocal_size;
+  const int vocab_size;
   const int64_t seed;
   const int64_t offset;
   const float lambda;
@@ -902,7 +902,7 @@ struct top_k_top_p_kernel {
       const int64_t* top_k,
       const float* top_p,
       const int batch_size,
-      const int vocal_size,
+      const int vocab_size,
       const int64_t seed,
       const int64_t offset,
       const float lambda)
@@ -913,17 +913,17 @@ struct top_k_top_p_kernel {
         top_k(top_k),
         top_p(top_p),
         batch_size(batch_size),
-        vocal_size(vocal_size),
+        vocab_size(vocab_size),
         seed(seed),
         offset(offset),
         lambda(lambda) {}
 
   static inline sycl::nd_range<1>
-  get_nd_range(const int batch_size, const int vocal_size) {
+  get_nd_range(const int batch_size, const int vocab_size) {
     int local_size = group_size;
-    if (vocal_size < group_size) {
+    if (vocab_size < group_size) {
       local_size =
-          (vocal_size + sub_group_size - 1) / sub_group_size * sub_group_size;
+          (vocab_size + sub_group_size - 1) / sub_group_size * sub_group_size;
     }
     sycl::range<1> local(local_size);
     sycl::range<1> global(batch_size);
@@ -950,16 +950,16 @@ struct top_k_top_p_kernel {
     const int top_k_value = top_k[batch_id];
     const float top_p_value = top_p[batch_id];
 
-    const int local_handle_size = (vocal_size + local_range - 1) / local_range;
+    const int local_handle_size = (vocab_size + local_range - 1) / local_range;
     const int local_offset = local_id * local_handle_size;
-    const int remained_size = vocal_size - local_offset;
+    const int remained_size = vocab_size - local_offset;
     const int handle_size = sycl::min(local_handle_size, remained_size);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
-    float* logits_ptr = logits + batch_id * vocal_size + local_offset;
-    float* buffer_ptr = buffer + batch_id * vocal_size + local_offset;
+    float* logits_ptr = logits + batch_id * vocab_size + local_offset;
+    float* buffer_ptr = buffer + batch_id * vocab_size + local_offset;
     float* logits_to_return_ptr =
-        logits_to_return + batch_id * vocal_size + local_offset;
+        logits_to_return + batch_id * vocab_size + local_offset;
 
     double low_k = INFINITY, high_k = -INFINITY;
     double pivot_k = -INFINITY;
@@ -1021,7 +1021,7 @@ struct top_k_top_p_kernel {
     max_softmax_value = high_k;
 
     // topk
-    if (top_k_value != vocal_size) {
+    if (top_k_value != vocab_size) {
       int pivot_count_k = top_k_value;
       do {
         int pivot_count_local = 0;
@@ -1279,7 +1279,7 @@ struct top_k_top_p_kernel {
         sycl::reduce_over_group(group, max_value_local, sycl::maximum<>());
     bool is_max = (max_val_global == max_value_local);
     int64_t first_max_id = sycl::reduce_over_group(
-        group, is_max ? max_idx_local : (vocal_size - 1), sycl::minimum<>());
+        group, is_max ? max_idx_local : (vocab_size - 1), sycl::minimum<>());
 
     if (0 == local_id) {
       random_sampled_ptr[0] = first_max_id;
@@ -1294,7 +1294,7 @@ struct top_k_top_p_kernel {
   const int64_t* top_k;
   const float* top_p;
   const int batch_size;
-  const int vocal_size;
+  const int vocab_size;
   const int64_t seed;
   const int64_t offset;
   const float lambda;
@@ -1310,14 +1310,14 @@ void topk_topp_sampler_kernel_launcher(
     const int64_t* top_k,
     const float* top_p,
     const int batch_size,
-    const int vocal_size,
+    const int vocab_size,
     const int64_t seed,
     const int64_t offset,
     const float lambda) {
   if (top_k != nullptr && top_p == nullptr) {
     // launch top_k_only_kernel
     using KERNEL_TOPK_ONLY = top_k_only_kernel<logprobs_mode>;
-    auto range = KERNEL_TOPK_ONLY::get_nd_range(batch_size, vocal_size);
+    auto range = KERNEL_TOPK_ONLY::get_nd_range(batch_size, vocab_size);
     queue.submit([&](sycl::handler& cgh) {
       KERNEL_TOPK_ONLY task(
           random_sampled,
@@ -1325,7 +1325,7 @@ void topk_topp_sampler_kernel_launcher(
           logits,
           top_k,
           batch_size,
-          vocal_size,
+          vocab_size,
           seed,
           offset,
           lambda);
@@ -1334,7 +1334,7 @@ void topk_topp_sampler_kernel_launcher(
   } else if (top_k == nullptr && top_p != nullptr) {
     // launch top_p_only_kernel
     using KERNEL_TOPP_ONLY = top_p_only_kernel<logprobs_mode>;
-    auto range = KERNEL_TOPP_ONLY::get_nd_range(batch_size, vocal_size);
+    auto range = KERNEL_TOPP_ONLY::get_nd_range(batch_size, vocab_size);
     queue.submit([&](sycl::handler& cgh) {
       KERNEL_TOPP_ONLY task(
           random_sampled,
@@ -1342,7 +1342,7 @@ void topk_topp_sampler_kernel_launcher(
           logits,
           top_p,
           batch_size,
-          vocal_size,
+          vocab_size,
           seed,
           offset,
           lambda);
@@ -1351,7 +1351,7 @@ void topk_topp_sampler_kernel_launcher(
   } else if (top_k != nullptr && top_p != nullptr) {
     // launch top_k_top_p_kernel
     using KERNEL_TOPK_TOPP = top_k_top_p_kernel<logprobs_mode>;
-    auto range = KERNEL_TOPK_TOPP::get_nd_range(batch_size, vocal_size);
+    auto range = KERNEL_TOPK_TOPP::get_nd_range(batch_size, vocab_size);
     queue.submit([&](sycl::handler& cgh) {
       KERNEL_TOPK_TOPP task(
           random_sampled,
@@ -1361,7 +1361,7 @@ void topk_topp_sampler_kernel_launcher(
           top_k,
           top_p,
           batch_size,
-          vocal_size,
+          vocab_size,
           seed,
           offset,
           lambda);
@@ -1370,14 +1370,14 @@ void topk_topp_sampler_kernel_launcher(
   } else {
     // launch random_sampler_only_kernel
     using KERNEL_SAMPLER_ONLY = random_sampler_only_kernel<logprobs_mode>;
-    auto range = KERNEL_SAMPLER_ONLY::get_nd_range(batch_size, vocal_size);
+    auto range = KERNEL_SAMPLER_ONLY::get_nd_range(batch_size, vocab_size);
     queue.submit([&](sycl::handler& cgh) {
       KERNEL_SAMPLER_ONLY task(
           random_sampled,
           logits_to_return,
           logits,
           batch_size,
-          vocal_size,
+          vocab_size,
           seed,
           offset,
           lambda);

@@ -15,18 +15,18 @@ LOGPROBS_MODE = ["raw_logits", "processed_logits", "processed_logprobs"]
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
-@pytest.mark.parametrize("vocal_size", VOCAL_SIZE)
+@pytest.mark.parametrize("vocab_size", VOCAL_SIZE)
 @pytest.mark.parametrize("k", K)
 @pytest.mark.parametrize("p", P)
 @pytest.mark.parametrize("logprobs_mode", LOGPROBS_MODE)
-def test_topk_topp(batch_size, vocal_size, k, p, logprobs_mode):
+def test_topk_topp(batch_size, vocab_size, k, p, logprobs_mode):
 
     seed_everything(42)
 
     generators = {}
 
     logits = torch.randn(batch_size,
-                         vocal_size,
+                         vocab_size,
                          dtype=torch.float,
                          device=DEVICE)
     ref_logits = logits.clone()
@@ -34,11 +34,11 @@ def test_topk_topp(batch_size, vocal_size, k, p, logprobs_mode):
     top_k = None
     top_p = None
     if k is not None:
-        if k != vocal_size:
+        if k != vocab_size:
             top_k = torch.randint(1, k + 1, (batch_size, ), device=DEVICE)
         else:
             top_k = torch.full((batch_size, ),
-                               vocal_size,
+                               vocab_size,
                                dtype=torch.long,
                                device=DEVICE)
     if p is not None:

@@ -15,7 +15,7 @@ void topk_topp_sampler(
     torch::Tensor& seeds,  // should on CPU
     const double lambda) {
   int batch_size = logits.size(0);
-  int vocal_size = logits.size(1);
+  int vocab_size = logits.size(1);
 
   auto& queue = vllm::xpu::vllmGetQueue();
 
@@ -36,7 +36,7 @@ void topk_topp_sampler(
       k.has_value() ? k->data_ptr<int64_t>() : nullptr,                  \
       p.has_value() ? p->data_ptr<float>() : nullptr,                    \
       batch_size,                                                        \
-      vocal_size,                                                        \
+      vocab_size,                                                        \
       seed,                                                              \
       offset,                                                            \
       lambda);

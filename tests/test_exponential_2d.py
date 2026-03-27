@@ -149,31 +149,31 @@ class ExponentialDistributionTester:
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
-@pytest.mark.parametrize("vocal_size", VOCAL_SIZE)
+@pytest.mark.parametrize("vocab_size", VOCAL_SIZE)
 @pytest.mark.parametrize("seed", [0, 42, 123])
 @pytest.mark.parametrize("offset", [0, 1, 10])
 @pytest.mark.parametrize("lambda_param", [0.5, 1.0, 2.0])
-def test_exponential_2d_comprehensive(batch_size, vocal_size, seed, offset,
+def test_exponential_2d_comprehensive(batch_size, vocab_size, seed, offset,
                                       lambda_param):
     seeds = torch.tensor([seed, offset],
                          dtype=torch.int64,
                          device=torch.device("cpu"))
 
     samples = torch.empty(batch_size,
-                          vocal_size,
+                          vocab_size,
                           dtype=torch.float,
                           device=DEVICE)
     torch.ops._xpu_C.exponential_2d_(samples, seeds, lambda_param)
 
     assert samples.shape == (
-        batch_size, vocal_size
-    ), f"Shape error: expected {(batch_size, vocal_size)}, got {samples.shape}"
+        batch_size, vocab_size
+    ), f"Shape error: expected {(batch_size, vocab_size)}, got {samples.shape}"
     assert torch.all(
         samples >
         0), "All samples should be positive for exponential distribution"
     assert torch.all(torch.isfinite(samples)), "All samples should be finite"
 
-    total_samples = batch_size * vocal_size
+    total_samples = batch_size * vocab_size
     if total_samples >= 1000:
         tester = ExponentialDistributionTester()
 
@@ -219,17 +219,17 @@ def test_exponential_2d_comprehensive(batch_size, vocal_size, seed, offset,
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
-@pytest.mark.parametrize("vocal_size", VOCAL_SIZE)
+@pytest.mark.parametrize("vocab_size", VOCAL_SIZE)
 @pytest.mark.parametrize("seed", [0, 42, 123])
 @pytest.mark.parametrize("offset", [0, 1, 10])
 @pytest.mark.parametrize("lambda_param", [0.5, 1.0, 2.0])
-def test_exponential_2d_reproducibility(batch_size, vocal_size, seed, offset,
+def test_exponential_2d_reproducibility(batch_size, vocab_size, seed, offset,
                                         lambda_param):
     seeds1 = torch.tensor([seed, offset],
                           dtype=torch.int64,
                           device=torch.device("cpu"))
     samples1 = torch.empty(batch_size,
-                           vocal_size,
+                           vocab_size,
                            dtype=torch.float,
                            device=DEVICE)
     torch.ops._xpu_C.exponential_2d_(samples1, seeds1, lambda_param)
@@ -238,7 +238,7 @@ def test_exponential_2d_reproducibility(batch_size, vocal_size, seed, offset,
                           dtype=torch.int64,
                           device=torch.device("cpu"))
     samples2 = torch.empty(batch_size,
-                           vocal_size,
+                           vocab_size,
                            dtype=torch.float,
                            device=DEVICE)
     torch.ops._xpu_C.exponential_2d_(samples2, seeds2, lambda_param)
@@ -250,7 +250,7 @@ def test_exponential_2d_reproducibility(batch_size, vocal_size, seed, offset,
                           dtype=torch.int64,
                           device=torch.device("cpu"))
     samples3 = torch.empty(batch_size,
-                           vocal_size,
+                           vocab_size,
                            dtype=torch.float,
                            device=DEVICE)
     torch.ops._xpu_C.exponential_2d_(samples3, seeds3, lambda_param)
@@ -260,11 +260,11 @@ def test_exponential_2d_reproducibility(batch_size, vocal_size, seed, offset,
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
-@pytest.mark.parametrize("vocal_size", VOCAL_SIZE)
+@pytest.mark.parametrize("vocab_size", VOCAL_SIZE)
 @pytest.mark.parametrize("seed", [0, 42, 123])
 @pytest.mark.parametrize("offset", [0, 1, 10])
 @pytest.mark.parametrize("lambda_param", [0.1, 0.5, 1.0, 2.0, 10.0])
-def test_exponential_2d_edge_cases(batch_size, vocal_size, seed, offset,
+def test_exponential_2d_edge_cases(batch_size, vocab_size, seed, offset,
                                    lambda_param):
     seeds = torch.tensor([seed, offset],
                          dtype=torch.int64,
@@ -272,7 +272,7 @@ def test_exponential_2d_edge_cases(batch_size, vocal_size, seed, offset,
 
     # for lambda_param in lambda_values:
     samples = torch.empty(batch_size,
-                          vocal_size,
+                          vocab_size,
                           dtype=torch.float,
                           device=DEVICE)
     torch.ops._xpu_C.exponential_2d_(samples, seeds, lambda_param)
