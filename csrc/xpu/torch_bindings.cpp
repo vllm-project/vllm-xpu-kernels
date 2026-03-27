@@ -85,6 +85,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def("is_pvc(int device_index) -> bool");
   xpu_ops.impl("is_pvc", &is_pvc);
+
+  xpu_ops.def(
+      "exponential_2d_(Tensor! tensor, Tensor! seeds, float lambda) -> ()");
+  xpu_ops.impl("exponential_2d_", torch::kXPU, &exponential_2d_);
+
+  xpu_ops.def(
+      "topk_topp_sampler(Tensor! random_sampled, Tensor? logits_to_return,"
+      "Tensor! logits, Tensor? k, Tensor? p, str logprobs_mode, Tensor! seeds, "
+      "float lambda) -> ()");
+  xpu_ops.impl("topk_topp_sampler", torch::kXPU, &topk_topp_sampler);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
