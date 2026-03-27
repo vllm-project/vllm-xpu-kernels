@@ -6,24 +6,24 @@ using namespace cute;
 template <typename decode_policy, bool... Bs>
 void decode_policy_dispatch_func(
     sycl::queue& queue,
-    CutlassQKType& cuQKType,
+    CutlassQKOType& cuQKOType,
     const paged_decode_args_t& args) {
-  decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuQKType, args);
+  decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuQKOType, args);
 }
 
 template <typename decode_policy, bool... Bs, typename... Ts>
 void decode_policy_dispatch_func(
     sycl::queue& queue,
-    CutlassQKType& cuQKType,
+    CutlassQKOType& cuQKOType,
     const paged_decode_args_t& args,
     bool b,
     Ts... ts) {
   if (b) {
     decode_policy_dispatch_func<decode_policy, Bs..., true>(
-        queue, cuQKType, args, ts...);
+        queue, cuQKOType, args, ts...);
   } else {
     decode_policy_dispatch_func<decode_policy, Bs..., false>(
-        queue, cuQKType, args, ts...);
+        queue, cuQKOType, args, ts...);
   }
 }
 
@@ -31,33 +31,33 @@ template <typename QGroup, typename PageSize>
 inline void dispatch_by_head_size(
     const int head_case,
     sycl::queue& queue,
-    CutlassQKType& cuQKType,
+    CutlassQKOType& cuQKOType,
     const paged_decode_args_t& args) {
   switch (head_case) {
     case 0:
       decode_policy_dispatch_func<
           decode_policy_qpacked_head<QGroup, _64, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
+          queue, cuQKOType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 1:
       decode_policy_dispatch_func<
           decode_policy_qpacked_head<QGroup, _96, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
+          queue, cuQKOType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 2:
       decode_policy_dispatch_func<
           decode_policy_qpacked_head<QGroup, _128, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
+          queue, cuQKOType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 3:
       decode_policy_dispatch_func<
           decode_policy_qpacked_head<QGroup, _192, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
+          queue, cuQKOType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 4:
       decode_policy_dispatch_func<
           decode_policy_qpacked_head<QGroup, _256, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
+          queue, cuQKOType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     default:
       TORCH_CHECK(false, "Unsupported head size for fmha");
@@ -69,14 +69,14 @@ inline void dispatch_by_page_size(
     const int page_size,
     const int head_case,
     sycl::queue& queue,
-    CutlassQKType& cuQKType,
+    CutlassQKOType& cuQKOType,
     const paged_decode_args_t& args) {
   switch (page_size) {
     case 64:
-      dispatch_by_head_size<QGroup, _64>(head_case, queue, cuQKType, args);
+      dispatch_by_head_size<QGroup, _64>(head_case, queue, cuQKOType, args);
       break;
     case 128:
-      dispatch_by_head_size<QGroup, _128>(head_case, queue, cuQKType, args);
+      dispatch_by_head_size<QGroup, _128>(head_case, queue, cuQKOType, args);
       break;
     default:
       TORCH_CHECK(false, "Unsupported page size for fmha");
