@@ -51,6 +51,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "-> (Tensor, Tensor)");
   xpu_ops.impl("deepseek_scaling_rope", torch::kXPU, &deepseek_scaling_rope);
 
+  // Multi-modal Rotary Embedding (M-RoPE) — used by e.g. Qwen2-VL.
+  // positions has shape [num_mrope_sections, num_tokens]; mrope_section is
+  // an int32 device tensor of length num_mrope_sections that partitions the
+  // rotation dimensions across positional axes (e.g. time / height / width).
+  xpu_ops.def(
+      "multimodal_rotary_embedding(Tensor positions, Tensor! query,"
+      "                            Tensor!? key, int head_size,"
+      "                            Tensor cos_sin_cache, bool is_neox,"
+      "                            int[] mrope_section) -> ()");
+  xpu_ops.impl(
+      "multimodal_rotary_embedding", torch::kXPU, &multimodal_rotary_embedding);
+
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
       "indices, float scale) -> ()");
