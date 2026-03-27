@@ -97,12 +97,35 @@ class cmake_build_ext(build_ext):
             num_jobs = int(num_jobs)
             logger.info("Using MAX_JOBS=%d as the number of jobs.", num_jobs)
         else:
+            # Estimate the number of jobs. Each compile process may take ~8GB
+            # of memory, so we limit jobs to avoid OOM on memory-constrained
+            # machines.
+            import psutil
+            mem_bytes = psutil.virtual_memory().total
+
             try:
                 # os.sched_getaffinity() isn't universally available, so fall
                 #  back to os.cpu_count() if we get an error here.
-                num_jobs = len(os.sched_getaffinity(0))
+                cpu_jobs = len(os.sched_getaffinity(0))
             except AttributeError:
-                num_jobs = os.cpu_count()
+                cpu_jobs = os.cpu_count() or 1
+
+            if mem_bytes is not None:
+                # Assume each compile process may require ~8GB.
+                mem_jobs = max(1, mem_bytes // (8 * 1024**3))
+                num_jobs = max(1, min(cpu_jobs, int(mem_jobs)))
+                logger.info(
+                    "Auto-detected: cpu core: %d, memory_limit: %d, using: %d",
+                    cpu_jobs,
+                    mem_jobs,
+                    num_jobs,
+                )
+            else:
+                num_jobs = max(1, cpu_jobs)
+                logger.info(
+                    "Could not determine system memory. Using cpu core: %d",
+                    num_jobs,
+                )
 
         get_oneapi_version()
 
