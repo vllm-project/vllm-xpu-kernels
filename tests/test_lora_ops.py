@@ -33,6 +33,17 @@ MINI_PYTEST_PARAMS = {
         "seed": [0],
         "op_type": ["shrink", "expand"],
     },
+    "test_kernels_mixed_precision": {
+        "batches": [1],
+        "num_loras": [1],
+        "rank": [1],
+        "hidden_size": [128],
+        "nslices": [1],
+        "weight_dtype": [torch.float16],
+        "device": ["xpu:0"],
+        "seed": [0],
+        "op_type": ["shrink", "expand"],
+    },
 }
 
 
@@ -138,6 +149,7 @@ def check_lora_shrink_kernel(
     device: str,
     seq_length: int,
     scaling: float,
+    input_dtype: torch.dtype = None,
 ):
     """
     Compare outputs of torch_ops.sgmv_shrink and xpu_ops.lora_shrink
@@ -153,6 +165,7 @@ def check_lora_shrink_kernel(
         dtype,
         "shrink",
         device,
+        input_dtype=input_dtype,
     )
     max_seq_length, token_nums = data.meta()
 
@@ -202,6 +215,7 @@ def check_lora_expand_kernel(
     device: str,
     seq_length: int,
     add_inputs: bool,
+    input_dtype: torch.dtype = None,
 ):
     """
     Compare outputs of torch_ops.sgmv_expand and xpu_ops.lora_expand
@@ -217,6 +231,7 @@ def check_lora_expand_kernel(
         dtype,
         "expand",
         device,
+        input_dtype=input_dtype,
     )
 
     max_seq_length, token_nums = data.meta()
@@ -487,4 +502,60 @@ def test_kernels_hidden_size(
             device=device,
             seq_length=128,
             add_inputs=True,
+        )
+
+
+@pytest.mark.parametrize("batches", [1, 4, 16])
+@pytest.mark.parametrize("num_loras", [1, 8])
+@pytest.mark.parametrize("rank", [1, 16, 64])
+@pytest.mark.parametrize("hidden_size", [128, 2049])
+@pytest.mark.parametrize("nslices", [1, 2, 3])
+@pytest.mark.parametrize("weight_dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("seed", SEED)
+@pytest.mark.parametrize("op_type", ["shrink", "expand"])
+def test_kernels_mixed_precision(
+    batches: int,
+    num_loras: int,
+    rank: int,
+    hidden_size: int,
+    nslices: int,
+    weight_dtype: torch.dtype,
+    device: str,
+    seed: int,
+    op_type: str,
+):
+    """
+    Tests LoRA kernels with mixed precision:
+    input=float32, weight=float16/bfloat16.
+    """
+    torch.set_default_device(device)
+    torch.xpu.set_device(device)
+    seed_everything(seed)
+
+    if op_type == "shrink":
+        check_lora_shrink_kernel(
+            batches=batches,
+            num_loras=num_loras,
+            rank=rank,
+            hidden_size=hidden_size,
+            nslices=nslices,
+            dtype=weight_dtype,
+            device=device,
+            seq_length=128,
+            scaling=0.5,
+            input_dtype=torch.float32,
+        )
+    else:
+        check_lora_expand_kernel(
+            batches=batches,
+            num_loras=num_loras,
+            rank=rank,
+            hidden_size=hidden_size,
+            nslices=nslices,
+            dtype=weight_dtype,
+            device=device,
+            seq_length=128,
+            add_inputs=True,
+            input_dtype=torch.float32,
         )
