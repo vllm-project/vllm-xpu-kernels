@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <sycl/sycl.hpp>
 #include <torch/all.h>
 
@@ -14,6 +15,11 @@ static constexpr int elem_per_item = 2;
 static constexpr int sub_group_size = 16;
 static constexpr float eps = 0.000001f;
 static constexpr int chunk_size = gdn::chunk_size_xe2;
+
+template <typename T, int VEC_SIZE>
+struct alignas(sizeof(T) * VEC_SIZE) vec_t {
+  T val[VEC_SIZE];
+};
 
 struct chunk_gemm_policy_64x64x32_2x1 {
   using WGTile = Shape<_64, _64, _32>;
@@ -49,24 +55,139 @@ act_softplus(float& x, float beta = 1.0f, float threshold = 20.0f) {
 }
 
 template <typename T>
-CUTE_DEVICE void chunk_prepare_kernel(
+CUTE_DEVICE void l2norm_kernel(
     const T* q,
     const T* k,
+    const int total_virtual_seqlen,
+    const int num_k_heads,
+    const int head_k_dim) {
+  auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+
+  int group_id = item.get_group(1);
+  int group_range = item.get_group_range(1);
+  auto sg = item.get_sub_group();
+  int sg_id = sg.get_group_linear_id();
+  int sg_range = sg.get_group_linear_range();
+  int sg_local_id = sg.get_local_linear_id();
+
+  int total_sg_id = group_id * sg_range + sg_id;
+  const int total_qk_heads = total_virtual_seqlen * num_k_heads;
+  if (total_sg_id >= total_qk_heads) {
+    return;
+  }
+  float q_scale = sycl::rsqrt(static_cast<float>(head_k_dim));
+
+  auto q_ptr = const_cast<T*>(q) + total_sg_id * head_k_dim;
+  auto k_ptr = const_cast<T*>(k) + total_sg_id * head_k_dim;
+  float q_sum = 0.0f;
+  float k_sum = 0.0f;
+  CUTE_UNROLL
+  for (int k_dim_idx = sg_local_id * elem_per_item; k_dim_idx < head_k_dim;
+       k_dim_idx += sub_group_size * elem_per_item) {
+    CUTE_UNROLL
+    for (int e = 0; e < elem_per_item; ++e) {
+      float q_value = q_ptr[k_dim_idx + e];
+      float k_value = k_ptr[k_dim_idx + e];
+      q_value *= q_value;
+      k_value *= k_value;
+      q_sum += q_value;
+      k_sum += k_value;
+    }
+  }
+  q_sum = sycl::reduce_over_group(sg, q_sum, sycl::plus<>());
+  k_sum = sycl::reduce_over_group(sg, k_sum, sycl::plus<>());
+  float q_inv = sycl::rsqrt(q_sum + eps) * q_scale;
+  float k_inv = sycl::rsqrt(k_sum + eps);
+  CUTE_UNROLL
+  for (int k_dim_idx = sg_local_id * elem_per_item; k_dim_idx < head_k_dim;
+       k_dim_idx += sub_group_size * elem_per_item) {
+    CUTE_UNROLL
+    for (int e = 0; e < elem_per_item; ++e) {
+      q_ptr[k_dim_idx + e] =
+          static_cast<T>(static_cast<float>(q_ptr[k_dim_idx + e]) * q_inv);
+      k_ptr[k_dim_idx + e] =
+          static_cast<T>(static_cast<float>(k_ptr[k_dim_idx + e]) * k_inv);
+    }
+  }
+}
+
+template <typename T, int VEC_SIZE>
+CUTE_DEVICE void l2norm_vectorized_kernel(
+    const T* q,
+    const T* k,
+    const int total_virtual_seqlen,
+    const int num_k_heads,
+    const int head_k_dim) {
+  auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+
+  int group_id = item.get_group(1);
+  int group_range = item.get_group_range(1);
+  auto sg = item.get_sub_group();
+  int sg_id = sg.get_group_linear_id();
+  int sg_range = sg.get_group_linear_range();
+  int sg_local_id = sg.get_local_linear_id();
+
+  int total_sg_id = group_id * sg_range + sg_id;
+  const int total_qk_heads = total_virtual_seqlen * num_k_heads;
+  if (total_sg_id >= total_qk_heads) {
+    return;
+  }
+
+  float q_scale = sycl::rsqrt(static_cast<float>(head_k_dim));
+  auto q_ptr = const_cast<T*>(q) + total_sg_id * head_k_dim;
+  auto k_ptr = const_cast<T*>(k) + total_sg_id * head_k_dim;
+
+  auto q_vec_ptr = reinterpret_cast<vec_t<T, VEC_SIZE>*>(q_ptr);
+  auto k_vec_ptr = reinterpret_cast<vec_t<T, VEC_SIZE>*>(k_ptr);
+  const int num_vec = head_k_dim / VEC_SIZE;
+
+  float q_sum = 0.0f;
+  float k_sum = 0.0f;
+  CUTE_UNROLL
+  for (int vec_idx = sg_local_id; vec_idx < num_vec;
+       vec_idx += sub_group_size) {
+    auto q_vec = q_vec_ptr[vec_idx];
+    auto k_vec = k_vec_ptr[vec_idx];
+    CUTE_UNROLL
+    for (int e = 0; e < VEC_SIZE; ++e) {
+      float q_value = static_cast<float>(q_vec.val[e]);
+      float k_value = static_cast<float>(k_vec.val[e]);
+      q_sum += q_value * q_value;
+      k_sum += k_value * k_value;
+    }
+  }
+
+  q_sum = sycl::reduce_over_group(sg, q_sum, sycl::plus<>());
+  k_sum = sycl::reduce_over_group(sg, k_sum, sycl::plus<>());
+  float q_inv = sycl::rsqrt(q_sum + eps) * q_scale;
+  float k_inv = sycl::rsqrt(k_sum + eps);
+
+  CUTE_UNROLL
+  for (int vec_idx = sg_local_id; vec_idx < num_vec;
+       vec_idx += sub_group_size) {
+    auto q_vec = q_vec_ptr[vec_idx];
+    auto k_vec = k_vec_ptr[vec_idx];
+    CUTE_UNROLL
+    for (int e = 0; e < VEC_SIZE; ++e) {
+      q_vec.val[e] = static_cast<T>(static_cast<float>(q_vec.val[e]) * q_inv);
+      k_vec.val[e] = static_cast<T>(static_cast<float>(k_vec.val[e]) * k_inv);
+    }
+    q_vec_ptr[vec_idx] = q_vec;
+    k_vec_ptr[vec_idx] = k_vec;
+  }
+}
+
+template <typename T>
+CUTE_DEVICE void chunk_prepare_kernel(
     const float* a,
     const T* A_log,
     const T* dt_bias,
     const int* query_start_loc,
     const int total_virtual_seqlen,
     const int batch_size,
-    const int num_k_heads,
-    const int head_k_dim,
     const int num_v_heads,
     const int head_v_dim) {
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
-  int local_id = item.get_local_linear_id();
-  int local_range = item.get_local_range(2);
-
-  // l2norm for q, k
   int group_id = item.get_group(1);
   int group_range = item.get_group_range(1);
   auto sg = item.get_sub_group();
@@ -76,45 +197,6 @@ CUTE_DEVICE void chunk_prepare_kernel(
 
   int total_sg_range = group_range * sg_range;
   int total_sg_id = group_id * sg_range + sg_id;
-  float q_scale = 1.0 / sycl::sqrt(static_cast<float>(head_k_dim));
-  for (int64_t handle_idx = total_sg_id;
-       handle_idx < total_virtual_seqlen * num_k_heads;
-       handle_idx += total_sg_range) {
-    auto q_ptr = const_cast<T*>(q) + handle_idx * head_k_dim;
-    auto k_ptr = const_cast<T*>(k) + handle_idx * head_k_dim;
-    float q_sum = 0.0f;
-    float k_sum = 0.0f;
-    CUTE_UNROLL
-    for (int k_dim_idx = sg_local_id * elem_per_item; k_dim_idx < head_k_dim;
-         k_dim_idx += sub_group_size * elem_per_item) {
-      CUTE_UNROLL
-      for (int e = 0; e < elem_per_item; ++e) {
-        float q_value = q_ptr[k_dim_idx + e];
-        float k_value = k_ptr[k_dim_idx + e];
-        q_value *= q_value;
-        k_value *= k_value;
-        q_sum += q_value;
-        k_sum += k_value;
-      }
-    }
-    q_sum = sycl::reduce_over_group(sg, q_sum, sycl::plus<>());
-    k_sum = sycl::reduce_over_group(sg, k_sum, sycl::plus<>());
-    q_sum += eps;
-    k_sum += eps;
-    q_sum = sycl::sqrt(q_sum);
-    k_sum = sycl::sqrt(k_sum);
-    CUTE_UNROLL
-    for (int k_dim_idx = sg_local_id * elem_per_item; k_dim_idx < head_k_dim;
-         k_dim_idx += sub_group_size * elem_per_item) {
-      CUTE_UNROLL
-      for (int e = 0; e < elem_per_item; ++e) {
-        q_ptr[k_dim_idx + e] = static_cast<T>(
-            static_cast<float>(q_ptr[k_dim_idx + e]) / q_sum * q_scale);
-        k_ptr[k_dim_idx + e] =
-            static_cast<T>(static_cast<float>(k_ptr[k_dim_idx + e]) / k_sum);
-      }
-    }
-  }
 
   int pre_chunks = 0;
   const int chunk_range = total_sg_range / num_v_heads;
@@ -1253,6 +1335,12 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
 }
 
 template <typename T>
+class L2NormKernel;
+
+template <typename T>
+class L2NormVecKernel;
+
+template <typename T>
 class ChunkPrepareKernel;
 
 template <typename T>
@@ -1309,27 +1397,64 @@ void kernel_launcher(
       syclex::sub_group_size<cute::detail::subgroup_size>,
       intelex::grf_size<256>};
 
+  // L2 Norm
+  // Each subgroup process one q/k head
+  syclex::properties kernel_props_l2norm{
+      syclex::sub_group_size<cute::detail::subgroup_size>};
+
+  static constexpr int L2NormVecSize = 8;
+  static constexpr int MaxSubgroupsPerWorkgroupL2Norm =
+      MaxThreadsPerSM / cute::detail::subgroup_size;
+  const int total_qk_heads = total_virtual_seqlen * num_k_heads;
+  const int wg_count_l2norm =
+      cute::ceil_div(total_qk_heads, MaxSubgroupsPerWorkgroupL2Norm);
+  sycl::range<3> local_l2norm(1, 1, MaxThreadsPerSM);
+  sycl::range<3> global_l2norm(1, wg_count_l2norm, 1);
+  constexpr int l2norm_vec_width = sizeof(T) * L2NormVecSize;
+  const bool l2norm_vec_enabled =
+      ((reinterpret_cast<uintptr_t>(q) & (l2norm_vec_width - 1)) == 0) &&
+      ((reinterpret_cast<uintptr_t>(k) & (l2norm_vec_width - 1)) == 0) &&
+      ((head_k_dim & (L2NormVecSize - 1)) == 0);
+
+  auto event_l2norm = queue.submit([&](sycl::handler& cgh) {
+    if (l2norm_vec_enabled) {
+      cgh.parallel_for<L2NormVecKernel<T>>(
+          sycl::nd_range<3>{global_l2norm * local_l2norm, local_l2norm},
+          kernel_props_l2norm,
+          [=](auto) {
+            l2norm_vectorized_kernel<T, L2NormVecSize>(
+                q, k, total_virtual_seqlen, num_k_heads, head_k_dim);
+          });
+    } else {
+      cgh.parallel_for<L2NormKernel<T>>(
+          sycl::nd_range<3>{global_l2norm * local_l2norm, local_l2norm},
+          kernel_props_l2norm,
+          [=](auto) {
+            l2norm_kernel<T>(
+                q, k, total_virtual_seqlen, num_k_heads, head_k_dim);
+          });
+    }
+  });
+  EventManager::getInstance().addEvent(event_l2norm);
+
   // prepare data for A, W, U compute
   sycl::range<3> local_prepare(1, 1, MaxThreadsPerSM);
   sycl::range<3> global_prepare(1, sm_count, 1);
   int slm_size_prepare = num_v_heads * 2 + chunk_size;
 
   auto event_prepare = queue.submit([&](sycl::handler& cgh) {
+    cgh.depends_on(event_l2norm);
     cgh.parallel_for<ChunkPrepareKernel<T>>(
         sycl::nd_range<3>{global_prepare * local_prepare, local_prepare},
         kernel_props,
         [=](auto) {
           chunk_prepare_kernel<T>(
-              q,
-              k,
               a,
               A_log,
               dt_bias,
               query_start_loc,
               total_virtual_seqlen,
               batch_size,
-              num_k_heads,
-              head_k_dim,
               num_v_heads,
               head_v_dim);
         });
