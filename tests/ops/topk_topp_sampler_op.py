@@ -1,10 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 from typing import Literal
 
 import torch
 import torch.nn as nn
 
 import vllm_xpu_kernels._xpu_C  # noqa: F401
+
+HAS_TRITON = False
+USE_TRITON_REPLACE_NATIVE = os.getenv('USE_TRITON_REPLACE_NATIVE',
+                                      'False') == 'True'
+if USE_TRITON_REPLACE_NATIVE:
+    try:
+        from vllm.triton_utils import HAS_TRITON  # noqa: F401
+        from vllm.v1.sample.ops.topk_topp_triton import (  # noqa: F401
+            apply_top_k_top_p_triton)
+    except ImportError:
+        print("Triton is not available. The test will be run by native.")
 
 LogprobsMode = Literal["raw_logits", "raw_logprobs", "processed_logits",
                        "processed_logprobs"]
@@ -114,6 +126,9 @@ def apply_top_k_top_p(logits: torch.Tensor, k: torch.Tensor | None,
                       p: torch.Tensor | None) -> torch.Tensor:
     if p is None and k is None:
         return logits
+
+    if HAS_TRITON:
+        return apply_top_k_top_p_triton(logits, k, p)
 
     return apply_top_k_top_p_pytorch(logits, k, p)
 
