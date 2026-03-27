@@ -62,9 +62,9 @@ def calculate_ops_pct(
     return (active_ops / batch_size) * 100 if batch_size > 0 else 0.0
 
 
-def create_logits(
-    batch_size: int, vocab_size: int, device: str = "xpu"
-) -> torch.Tensor:
+def create_logits(batch_size: int,
+                  vocab_size: int,
+                  device: str = "xpu") -> torch.Tensor:
     """Create random logits mimicking a realistic LLM distribution.
 
     Uses a Zipf-like probability distribution (rank^-1.1) converted to logits
@@ -132,7 +132,9 @@ def benchmark_function(
     start_events = [
         torch.xpu.Event(enable_timing=True) for _ in range(benchmark_iters)
     ]
-    end_events = [torch.xpu.Event(enable_timing=True) for _ in range(benchmark_iters)]
+    end_events = [
+        torch.xpu.Event(enable_timing=True) for _ in range(benchmark_iters)
+    ]
 
     for i in range(benchmark_iters):
         logits_copy = logits.clone()
@@ -147,7 +149,8 @@ def benchmark_function(
 
     # Calculate timing
     times = [
-        start_events[i].elapsed_time(end_events[i]) for i in range(benchmark_iters)
+        start_events[i].elapsed_time(end_events[i])
+        for i in range(benchmark_iters)
     ]
     avg_time = sum(times) / len(times)
 
@@ -168,7 +171,10 @@ def create_benchmark_configs(
     for vocab_size in vocab_sizes:
         for batch_size in batch_sizes:
             # 1. Top-k only - whole batch (all rows have k < vocab_size)
-            k_all = torch.full((batch_size,), 50, dtype=torch.int64, device=device)
+            k_all = torch.full((batch_size, ),
+                               50,
+                               dtype=torch.int64,
+                               device=device)
             configs.append(
                 BenchmarkConfig(
                     name=f"topk_whole_b{batch_size}_v{vocab_size // 1000}k",
@@ -178,13 +184,18 @@ def create_benchmark_configs(
                     p_values=None,
                     description=f"Top-k only (whole batch, k=50), "
                     f"batch={batch_size}, vocab={vocab_size}",
-                    ops_pct=calculate_ops_pct(k_all, None, vocab_size, batch_size),
-                )
-            )
+                    ops_pct=calculate_ops_pct(k_all, None, vocab_size,
+                                              batch_size),
+                ))
 
-            # 2. Top-k only - partial batch (half have k=50, half have k=vocab_size)
-            k_partial = torch.full((batch_size,), 50, dtype=torch.int64, device=device)
-            k_partial[batch_size // 2 :] = vocab_size  # No filtering for second half
+            # 2. Top-k only - partial batch
+            # (half have k=50, half have k=vocab_size)
+            k_partial = torch.full((batch_size, ),
+                                   50,
+                                   dtype=torch.int64,
+                                   device=device)
+            k_partial[batch_size //
+                      2:] = vocab_size  # No filtering for second half
             configs.append(
                 BenchmarkConfig(
                     name=f"topk_partial_b{batch_size}_v{vocab_size // 1000}k",
@@ -192,14 +203,18 @@ def create_benchmark_configs(
                     vocab_size=vocab_size,
                     k_values=k_partial,
                     p_values=None,
-                    description=f"Top-k only (partial batch, 50% k=50, 50% k=vocab), "
+                    description=
+                    f"Top-k only (partial batch, 50% k=50, 50% k=vocab), "
                     f"batch={batch_size}, vocab={vocab_size}",
-                    ops_pct=calculate_ops_pct(k_partial, None, vocab_size, batch_size),
-                )
-            )
+                    ops_pct=calculate_ops_pct(k_partial, None, vocab_size,
+                                              batch_size),
+                ))
 
             # 3. Top-p only - whole batch (all rows have p < 1.0)
-            p_all = torch.full((batch_size,), 0.9, dtype=torch.float32, device=device)
+            p_all = torch.full((batch_size, ),
+                               0.9,
+                               dtype=torch.float32,
+                               device=device)
             configs.append(
                 BenchmarkConfig(
                     name=f"topp_whole_b{batch_size}_v{vocab_size // 1000}k",
@@ -209,15 +224,16 @@ def create_benchmark_configs(
                     p_values=p_all,
                     description=f"Top-p only (whole batch, p=0.9), "
                     f"batch={batch_size}, vocab={vocab_size}",
-                    ops_pct=calculate_ops_pct(None, p_all, vocab_size, batch_size),
-                )
-            )
+                    ops_pct=calculate_ops_pct(None, p_all, vocab_size,
+                                              batch_size),
+                ))
 
             # 4. Top-p only - partial batch (half have p=0.9, half have p=1.0)
-            p_partial = torch.full(
-                (batch_size,), 0.9, dtype=torch.float32, device=device
-            )
-            p_partial[batch_size // 2 :] = 1.0  # No filtering for second half
+            p_partial = torch.full((batch_size, ),
+                                   0.9,
+                                   dtype=torch.float32,
+                                   device=device)
+            p_partial[batch_size // 2:] = 1.0  # No filtering for second half
             configs.append(
                 BenchmarkConfig(
                     name=f"topp_partial_b{batch_size}_v{vocab_size // 1000}k",
@@ -225,41 +241,54 @@ def create_benchmark_configs(
                     vocab_size=vocab_size,
                     k_values=None,
                     p_values=p_partial,
-                    description=f"Top-p only (partial batch, 50% p=0.9, 50% p=1.0), "
+                    description=
+                    f"Top-p only (partial batch, 50% p=0.9, 50% p=1.0), "
                     f"batch={batch_size}, vocab={vocab_size}",
-                    ops_pct=calculate_ops_pct(None, p_partial, vocab_size, batch_size),
-                )
-            )
+                    ops_pct=calculate_ops_pct(None, p_partial, vocab_size,
+                                              batch_size),
+                ))
 
             # 5. Mix of top-k and top-p (both applied to whole batch)
-            k_mix = torch.full((batch_size,), 100, dtype=torch.int64, device=device)
-            p_mix = torch.full((batch_size,), 0.9, dtype=torch.float32, device=device)
+            k_mix = torch.full((batch_size, ),
+                               100,
+                               dtype=torch.int64,
+                               device=device)
+            p_mix = torch.full((batch_size, ),
+                               0.9,
+                               dtype=torch.float32,
+                               device=device)
             configs.append(
                 BenchmarkConfig(
-                    name=f"topk_topp_whole_b{batch_size}_v{vocab_size // 1000}k",
+                    name=
+                    f"topk_topp_whole_b{batch_size}_v{vocab_size // 1000}k",
                     batch_size=batch_size,
                     vocab_size=vocab_size,
                     k_values=k_mix,
                     p_values=p_mix,
                     description=f"Top-k + Top-p (whole batch, k=100, p=0.9), "
                     f"batch={batch_size}, vocab={vocab_size}",
-                    ops_pct=calculate_ops_pct(k_mix, p_mix, vocab_size, batch_size),
-                )
-            )
+                    ops_pct=calculate_ops_pct(k_mix, p_mix, vocab_size,
+                                              batch_size),
+                ))
 
-            # 6. Mix with partial application (some rows k only, some p only, some both)
-            k_mixed = torch.full(
-                (batch_size,), vocab_size, dtype=torch.int64, device=device
-            )
-            p_mixed = torch.full((batch_size,), 1.0, dtype=torch.float32, device=device)
+            # 6. Mix with partial application
+            # (some rows k only, some p only, some both)
+            k_mixed = torch.full((batch_size, ),
+                                 vocab_size,
+                                 dtype=torch.int64,
+                                 device=device)
+            p_mixed = torch.full((batch_size, ),
+                                 1.0,
+                                 dtype=torch.float32,
+                                 device=device)
             # First third: k only
             third = batch_size // 3
             k_mixed[:third] = 50
             # Second third: p only
-            p_mixed[third : 2 * third] = 0.5
+            p_mixed[third:2 * third] = 0.5
             # Last third: both k and p
-            k_mixed[2 * third :] = 100
-            p_mixed[2 * third :] = 0.9
+            k_mixed[2 * third:] = 100
+            p_mixed[2 * third:] = 0.9
             configs.append(
                 BenchmarkConfig(
                     name=f"mixed_partial_b{batch_size}_v{vocab_size // 1000}k",
@@ -267,11 +296,12 @@ def create_benchmark_configs(
                     vocab_size=vocab_size,
                     k_values=k_mixed,
                     p_values=p_mixed,
-                    description=f"Mixed partial (1/3 k=50, 1/3 p=0.9, 1/3 both), "
+                    description=
+                    f"Mixed partial (1/3 k=50, 1/3 p=0.9, 1/3 both), "
                     f"batch={batch_size}, vocab={vocab_size}",
-                    ops_pct=calculate_ops_pct(k_mixed, p_mixed, vocab_size, batch_size),
-                )
-            )
+                    ops_pct=calculate_ops_pct(k_mixed, p_mixed, vocab_size,
+                                              batch_size),
+                ))
 
     return configs
 
@@ -346,7 +376,8 @@ def run_benchmark(
 
         if verbose:
             print(f"  Sycl:  {sycl_time:.3f} ms, {format_memory(sycl_mem)}")
-            print(f"  PyTorch: {pytorch_time:.3f} ms, {format_memory(pytorch_mem)}")
+            print(
+                f"  PyT: {pytorch_time:.3f} ms, {format_memory(pytorch_mem)}")
             print(f"  Speedup: {speedup:.2f}x, Memory ratio: {mem_ratio:.2f}x")
             print()
 
@@ -366,11 +397,9 @@ def print_summary_table(results: list[dict]):
     print()
 
     # Header
-    header = (
-        f"{'Scenario':<40} {'Batch':>6} {'Vocab':>7} {'Ops%':>6} "
-        f"{'Sycl (ms)':>12} {'PyTorch (ms)':>13} {'Speedup':>8} "
-        f"{'Sycl Mem':>10} {'Pyt Mem':>10}"
-    )
+    header = (f"{'Scenario':<40} {'Batch':>6} {'Vocab':>7} {'Ops%':>6} "
+              f"{'Sycl (ms)':>12} {'PyTorch (ms)':>13} {'Speedup':>8} "
+              f"{'Sycl Mem':>10} {'Pyt Mem':>10}")
     print(header)
     print("-" * 130)
 
@@ -386,22 +415,21 @@ def print_summary_table(results: list[dict]):
             current_vocab = config.vocab_size
 
         scenario = config.name.split("_b")[0]  # Extract scenario name
-        print(
-            f"{scenario:<40} {config.batch_size:>6} {config.vocab_size:>7} "
-            f"{config.ops_pct:>5.0f}% "
-            f"{result['sycl_time_ms']:>12.3f} {result['pytorch_time_ms']:>13.3f} "
-            f"{result['speedup']:>7.2f}x "
-            f"{format_memory(result['sycl_mem']):>10} "
-            f"{format_memory(result['pytorch_mem']):>10}"
-        )
+        print(f"{scenario:<40} {config.batch_size:>6} {config.vocab_size:>7} "
+              f"{config.ops_pct:>5.0f}% "
+              f"{result['sycl_time_ms']:>12.3f} \
+                {result['pytorch_time_ms']:>13.3f} "
+              f"{result['speedup']:>7.2f}x "
+              f"{format_memory(result['sycl_mem']):>10} "
+              f"{format_memory(result['pytorch_mem']):>10}")
 
     print("=" * 130)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark Sycl vs PyTorch sort-based top-k/top-p implementations"
-    )
+        description=
+        "Benchmark Sycl vs PyTorch sort-based top-k/top-p implementations")
     parser.add_argument(
         "--batch-sizes",
         type=int,

@@ -13,6 +13,7 @@ K = [1, 32, 128, 1024, None]
 P = [0.1, 0.2, 0.4, 0.8, 1.0, None]
 LOGPROBS_MODE = ["raw_logits", "processed_logits", "processed_logprobs"]
 
+
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
 @pytest.mark.parametrize("vocal_size", VOCAL_SIZE)
 @pytest.mark.parametrize("k", K)

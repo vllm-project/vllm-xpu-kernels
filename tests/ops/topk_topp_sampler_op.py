@@ -181,8 +181,8 @@ class TopKTopPSampler(nn.Module):
         seed, _ = state.view(torch.int64)
         offset = 0
         seeds = torch.tensor([seed, offset],
-                                dtype=torch.int64,
-                                device=torch.device("cpu"))
+                             dtype=torch.int64,
+                             device=torch.device("cpu"))
 
         torch.ops._xpu_C.topk_topp_sampler(random_sampled, logits_to_return,
                                            logits, k, p, self.logprobs_mode,
