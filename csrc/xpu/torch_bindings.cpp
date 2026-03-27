@@ -90,9 +90,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "exponential_2d_(Tensor! tensor, Tensor! seeds, float lambda) -> ()");
   xpu_ops.impl("exponential_2d_", &exponential_2d_);
 
-  xpu_ops.def("top_k_mask_logits(Tensor! logits, Tensor? k) -> ()");
-  xpu_ops.impl("top_k_mask_logits", torch::kXPU, &top_k_mask_logits);
-
   xpu_ops.def(
       "topk_topp_sampler(Tensor! random_sampled, Tensor? logits_to_return,"
       "Tensor! logits, Tensor? k, Tensor? p, str logprobs_mode, Tensor! seeds, "

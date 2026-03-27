@@ -100,9 +100,6 @@ void exponential_2d_(
     torch::Tensor& seeds,  // should on CPU
     const double lambda);
 
-void top_k_mask_logits(
-    torch::Tensor& logits, const std::optional<torch::Tensor>& k);
-
 void topk_topp_sampler(
     torch::Tensor& random_sampled,
     const std::optional<torch::Tensor>& logits_to_return,

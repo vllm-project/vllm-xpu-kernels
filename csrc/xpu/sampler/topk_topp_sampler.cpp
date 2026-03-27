@@ -5,23 +5,6 @@
 
 #include "topk_topp_sampler_kernels.hpp"
 
-void top_k_mask_logits(
-    torch::Tensor& logits, const std::optional<torch::Tensor>& k) {
-  TORCH_CHECK(k.has_value(), "k must be provided for top_k_mask_logits");
-
-  int batch_size = logits.size(0);
-  int vocal_size = logits.size(1);
-
-  auto& queue = vllm::xpu::vllmGetQueue();
-
-  TopkToppSamplerImpl::top_k_mask_logits_kernel_launcher(
-      queue,
-      logits.data_ptr<float>(),
-      k->data_ptr<int64_t>(),
-      batch_size,
-      vocal_size);
-}
-
 void topk_topp_sampler(
     torch::Tensor& random_sampled,
     const std::optional<torch::Tensor>& logits_to_return,

@@ -51,7 +51,6 @@ def random_sample(
         for i, generator in generators.items():
             q[i].exponential_(generator=generator)
     return probs.div_(q).argmax(dim=-1).view(-1)
-    # return probs.argmax(dim=-1).view(-1)
 
 
 def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
