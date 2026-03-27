@@ -8,14 +8,14 @@ from tests.utils import seed_everything
 DEVICE = "xpu"
 
 BATCH_SIZE = [1, 32, 1024]
-VOCAL_SIZE = [1024, 2048, 4096]
+VOCAB_SIZE = [1024, 2048, 4096]
 K = [1, 32, 128, 1024, None]
 P = [0.1, 0.2, 0.4, 0.8, 1.0, None]
 LOGPROBS_MODE = ["raw_logits", "processed_logits", "processed_logprobs"]
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
-@pytest.mark.parametrize("vocab_size", VOCAL_SIZE)
+@pytest.mark.parametrize("vocab_size", VOCAB_SIZE)
 @pytest.mark.parametrize("k", K)
 @pytest.mark.parametrize("p", P)
 @pytest.mark.parametrize("logprobs_mode", LOGPROBS_MODE)

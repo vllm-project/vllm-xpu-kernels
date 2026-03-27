@@ -9,7 +9,7 @@ from scipy import stats
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 BATCH_SIZE = [1, 4, 16]
-VOCAL_SIZE = [100, 1000, 10000]
+VOCAB_SIZE = [100, 1000, 10000]
 DEVICE = "xpu"
 
 
@@ -149,7 +149,7 @@ class ExponentialDistributionTester:
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
-@pytest.mark.parametrize("vocab_size", VOCAL_SIZE)
+@pytest.mark.parametrize("vocab_size", VOCAB_SIZE)
 @pytest.mark.parametrize("seed", [0, 42, 123])
 @pytest.mark.parametrize("offset", [0, 1, 10])
 @pytest.mark.parametrize("lambda_param", [0.5, 1.0, 2.0])
@@ -219,7 +219,7 @@ def test_exponential_2d_comprehensive(batch_size, vocab_size, seed, offset,
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
-@pytest.mark.parametrize("vocab_size", VOCAL_SIZE)
+@pytest.mark.parametrize("vocab_size", VOCAB_SIZE)
 @pytest.mark.parametrize("seed", [0, 42, 123])
 @pytest.mark.parametrize("offset", [0, 1, 10])
 @pytest.mark.parametrize("lambda_param", [0.5, 1.0, 2.0])
@@ -260,7 +260,7 @@ def test_exponential_2d_reproducibility(batch_size, vocab_size, seed, offset,
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
-@pytest.mark.parametrize("vocab_size", VOCAL_SIZE)
+@pytest.mark.parametrize("vocab_size", VOCAB_SIZE)
 @pytest.mark.parametrize("seed", [0, 42, 123])
 @pytest.mark.parametrize("offset", [0, 1, 10])
 @pytest.mark.parametrize("lambda_param", [0.1, 0.5, 1.0, 2.0, 10.0])
