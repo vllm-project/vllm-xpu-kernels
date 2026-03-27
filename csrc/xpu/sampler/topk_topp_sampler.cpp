@@ -23,6 +23,8 @@ void topk_topp_sampler(
   int64_t seed = seeds_ptr[0];
   int64_t offset = seeds_ptr[1];
 
+  torch::Tensor buffer = torch::empty_like(logits);
+
 #define LAUNCHER(logprobs_mode)                                          \
   TopkToppSamplerImpl::topk_topp_sampler_kernel_launcher<logprobs_mode>( \
       queue,                                                             \
@@ -30,6 +32,7 @@ void topk_topp_sampler(
       logits_to_return.has_value() ? logits_to_return->data_ptr<float>() \
                                    : nullptr,                            \
       logits.data_ptr<float>(),                                          \
+      buffer.data_ptr<float>(),                                          \
       k.has_value() ? k->data_ptr<int64_t>() : nullptr,                  \
       p.has_value() ? p->data_ptr<float>() : nullptr,                    \
       batch_size,                                                        \

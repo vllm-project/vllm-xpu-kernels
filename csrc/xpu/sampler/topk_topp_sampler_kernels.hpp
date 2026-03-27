@@ -898,6 +898,7 @@ struct top_k_top_p_kernel {
       int64_t* random_sampled,
       float* logits_to_return,
       float* logits,
+      float* buffer,
       const int64_t* top_k,
       const float* top_p,
       const int batch_size,
@@ -908,6 +909,7 @@ struct top_k_top_p_kernel {
       : random_sampled(random_sampled),
         logits_to_return(logits_to_return),
         logits(logits),
+        buffer(buffer),
         top_k(top_k),
         top_p(top_p),
         batch_size(batch_size),
@@ -955,6 +957,7 @@ struct top_k_top_p_kernel {
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
     float* logits_ptr = logits + batch_id * vocal_size + local_offset;
+    float* buffer_ptr = buffer + batch_id * vocal_size + local_offset;
     float* logits_to_return_ptr =
         logits_to_return + batch_id * vocal_size + local_offset;
 
@@ -1076,6 +1079,7 @@ struct top_k_top_p_kernel {
 
     // get sum_softmax after mask with pivot_k
     float sum_softmax = 0.0f;
+    int buffer_size = 0;
     for (int l = 0; l < loop_times; ++l) {
 #pragma unroll
       for (int e = 0; e < VEC_SIZE; ++e) {
@@ -1087,7 +1091,10 @@ struct top_k_top_p_kernel {
         float logit = local_data[e];
 
         if (logit >= pivot_k) {
-          sum_softmax += sycl::native::exp(logit - max_softmax_value);
+          logit = sycl::native::exp(logit - max_softmax_value);
+          sum_softmax += logit;
+          buffer_ptr[buffer_size] = logit;
+          ++buffer_size;
         }
       }
     }
@@ -1103,10 +1110,22 @@ struct top_k_top_p_kernel {
         float logit = local_data[e];
 
         if (logit >= pivot_k) {
-          sum_softmax += sycl::native::exp(logit - max_softmax_value);
+          logit = sycl::native::exp(logit - max_softmax_value);
+          sum_softmax += logit;
+          buffer_ptr[buffer_size] = logit;
+          ++buffer_size;
         }
       }
     }
+
+    const int loop_count_buffer = (buffer_size + VEC_SIZE - 1) / VEC_SIZE;
+    const int remained_vec_size_buffer =
+        buffer_size - (loop_count_buffer - 1) * VEC_SIZE;
+    const int loop_times_buffer = (remained_vec_size_buffer == VEC_SIZE)
+                                      ? loop_count_buffer
+                                      : (loop_count_buffer - 1);
+    const bool has_last_loop_buffer =
+        (remained_vec_size_buffer == VEC_SIZE) ? false : true;
 
     sum_softmax = sycl::reduce_over_group(group, sum_softmax, sycl::plus<>());
     double low_p = sycl::native::exp(low_k - max_softmax_value) / sum_softmax;
@@ -1123,16 +1142,16 @@ struct top_k_top_p_kernel {
 
         pivot_p = (low_p + high_p) / 2;
 
-        for (int l = 0; l < loop_times; ++l) {
+        for (int l = 0; l < loop_times_buffer; ++l) {
 #pragma unroll
           for (int e = 0; e < VEC_SIZE; ++e) {
-            local_data[e] = logits_ptr[l * VEC_SIZE + e];
+            local_data[e] = buffer_ptr[l * VEC_SIZE + e];
           }
 
 #pragma unroll
           for (int e = 0; e < VEC_SIZE; ++e) {
             float logit = local_data[e];
-            logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
+            logit /= sum_softmax;
 
             if (logit >= pivot_p) {
               pivot_count_local += logit;
@@ -1140,16 +1159,16 @@ struct top_k_top_p_kernel {
           }
         }
 
-        if (has_last_loop) {
+        if (has_last_loop_buffer) {
 #pragma unroll
-          for (int e = 0; e < remained_vec_size; ++e) {
-            local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
+          for (int e = 0; e < remained_vec_size_buffer; ++e) {
+            local_data[e] = buffer_ptr[loop_times_buffer * VEC_SIZE + e];
           }
 
 #pragma unroll
-          for (int e = 0; e < remained_vec_size; ++e) {
+          for (int e = 0; e < remained_vec_size_buffer; ++e) {
             float logit = local_data[e];
-            logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
+            logit /= sum_softmax;
 
             if (logit >= pivot_p) {
               pivot_count_local += logit;
@@ -1271,6 +1290,7 @@ struct top_k_top_p_kernel {
   int64_t* random_sampled;
   float* logits_to_return;
   float* logits;
+  float* buffer;
   const int64_t* top_k;
   const float* top_p;
   const int batch_size;
@@ -1286,6 +1306,7 @@ void topk_topp_sampler_kernel_launcher(
     int64_t* random_sampled,
     float* logits_to_return,
     float* logits,
+    float* buffer,
     const int64_t* top_k,
     const float* top_p,
     const int batch_size,
@@ -1336,6 +1357,7 @@ void topk_topp_sampler_kernel_launcher(
           random_sampled,
           logits_to_return,
           logits,
+          buffer,
           top_k,
           top_p,
           batch_size,
