@@ -125,9 +125,10 @@ def ref_paged_attn(query: torch.Tensor,
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
     "test_varlen_with_paged_kv": {
-        "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
-        "head_size": [64, 128],
-        "num_heads": [(8, 2)],
+        "seq_lens": [[(5, 18)]],
+        "head_size": [64],
+        "block_size": [64],
+        "num_heads": [(2)],
         "num_blocks": [64],
         "window_size": [(-1, -1), (127, 127)],
         "is_paged": [True]

@@ -30,7 +30,8 @@ DTYPES = [torch.float16]
 # Override pytest parameters when enabling mini pytest
 MINI_PYTEST_PARAMS = {
     "default": {
-        "num_actual_tokens": [32],
+        "num_actual_tokens": [1],
+        "batch_size": [4],
     },
 }
 
