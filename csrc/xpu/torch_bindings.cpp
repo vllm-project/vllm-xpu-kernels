@@ -88,7 +88,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def(
       "exponential_2d_(Tensor! tensor, Tensor! seeds, float lambda) -> ()");
-  xpu_ops.impl("exponential_2d_", &exponential_2d_);
+  xpu_ops.impl("exponential_2d_", torch::kXPU, &exponential_2d_);
 
   xpu_ops.def(
       "topk_topp_sampler(Tensor! random_sampled, Tensor? logits_to_return,"

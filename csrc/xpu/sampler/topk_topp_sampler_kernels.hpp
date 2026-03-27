@@ -1,3 +1,4 @@
+#pragma once
 #include <sycl/sycl.hpp>
 #include "xpu/rand/heads/DistributionTemplates.h"
 

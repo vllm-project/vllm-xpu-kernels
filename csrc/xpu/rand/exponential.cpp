@@ -7,6 +7,11 @@
 
 void exponential_2d_(
     torch::Tensor& tensor, int64_t seed, int64_t offset, const double lambda) {
+  TORCH_CHECK(
+      tensor.dim() == 2,
+      "Input tensor must be 2D, but got ",
+      tensor.dim(),
+      "D");
   auto dtype = tensor.dtype();
   int batch_size = tensor.size(0);
   int vocab_size = tensor.size(1);

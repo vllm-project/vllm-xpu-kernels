@@ -17,6 +17,36 @@ void topk_topp_sampler(
   int batch_size = logits.size(0);
   int vocab_size = logits.size(1);
 
+  TORCH_CHECK(
+      seeds.device().is_cpu(),
+      "seeds tensor must be on CPU, but got device: ",
+      seeds.device());
+  TORCH_CHECK(
+      seeds.numel() == 2,
+      "seeds tensor must have 2 elements (seed and offset), but got numel: ",
+      seeds.numel());
+  TORCH_CHECK(
+      logits.dtype() == torch::kFloat32,
+      "Logits tensor must be float32, but got ",
+      logits.dtype())
+  TORCH_CHECK(logits.is_contiguous(), "Logitss tensor must be contiguous")
+  if (logits_to_return.has_value()) {
+    TORCH_CHECK(
+        logits_to_return->dtype() == torch::kFloat32,
+        "Logits_to_return tensor must be float32, but got ",
+        logits_to_return->dtype())
+    TORCH_CHECK(
+        logits_to_return->is_contiguous(),
+        "Logits_to_return tensor must be contiguous")
+  }
+  TORCH_CHECK(
+      random_sampled.dtype() == torch::kInt64,
+      "random_sampled tensor must be int64, but got ",
+      random_sampled.dtype())
+  TORCH_CHECK(
+      random_sampled.is_contiguous(),
+      "random_sampled tensor must be contiguous")
+
   auto& queue = vllm::xpu::vllmGetQueue();
 
   auto seeds_ptr = reinterpret_cast<int64_t*>(seeds.data_ptr());
@@ -41,7 +71,6 @@ void topk_topp_sampler(
       offset,                                                            \
       lambda);
 
-  TopkToppSamplerImpl::LogprobsMode logprobs_mode_enum;
   if (logprobs_mode == "raw_logits" || logprobs_mode == "raw_logprobs") {
     LAUNCHER(TopkToppSamplerImpl::LogprobsMode::default_mode)
   } else if (logprobs_mode == "processed_logits") {
