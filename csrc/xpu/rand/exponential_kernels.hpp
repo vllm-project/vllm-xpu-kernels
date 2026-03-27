@@ -16,23 +16,23 @@ struct exponential_2d_kernel {
   exponential_2d_kernel(
       T* tensor_ptr,
       const int batch_size,
-      const int vocal_size,
+      const int vocab_size,
       const int64_t seed,
       const int64_t offset,
       const float lambda)
       : tensor_ptr(tensor_ptr),
         batch_size(batch_size),
-        vocal_size(vocal_size),
+        vocab_size(vocab_size),
         seed(seed),
         offset(offset),
         lambda(lambda) {}
 
   static inline sycl::nd_range<1>
-  get_nd_range(const int batch_size, const int vocal_size) {
+  get_nd_range(const int batch_size, const int vocab_size) {
     int local_size = group_size;
-    if (vocal_size < group_size) {
+    if (vocab_size < group_size) {
       local_size =
-          (vocal_size + sub_group_size - 1) / sub_group_size * sub_group_size;
+          (vocab_size + sub_group_size - 1) / sub_group_size * sub_group_size;
     }
     sycl::range<1> local(local_size);
     sycl::range<1> global(batch_size);
@@ -54,12 +54,12 @@ struct exponential_2d_kernel {
     Uniform4DistributionFunctor dist_func;
     ExponentialFunctor<scalar_t, accscalar_t> exponential_func(lambda);
 
-    const int local_handle_size = (vocal_size + local_range - 1) / local_range;
+    const int local_handle_size = (vocab_size + local_range - 1) / local_range;
     const int local_offset = local_id * local_handle_size;
-    const int remained_size = vocal_size - local_offset;
+    const int remained_size = vocab_size - local_offset;
     const int handle_size = sycl::min(local_handle_size, remained_size);
 
-    T* tensor_local_ptr = tensor_ptr + batch_id * vocal_size + local_offset;
+    T* tensor_local_ptr = tensor_ptr + batch_id * vocab_size + local_offset;
 
     const int loop_count = (handle_size + VEC_SIZE - 1) / VEC_SIZE;
     const int remained_vec_size = handle_size - (loop_count - 1) * VEC_SIZE;
@@ -89,7 +89,7 @@ struct exponential_2d_kernel {
  private:
   T* tensor_ptr;
   const int batch_size;
-  const int vocal_size;
+  const int vocab_size;
   const int64_t seed;
   const int64_t offset;
   const float lambda;
@@ -100,14 +100,14 @@ void exponential_2d_kernel_launcher(
     sycl::queue& queue,
     T* tensor_ptr,
     const int batch_size,
-    const int vocal_size,
+    const int vocab_size,
     const int64_t seed,
     const int64_t offset,
     const float lambda) {
   using KERNEL = exponential_2d_kernel<T>;
-  auto range = KERNEL::get_nd_range(batch_size, vocal_size);
+  auto range = KERNEL::get_nd_range(batch_size, vocab_size);
   queue.submit([&](sycl::handler& cgh) {
-    KERNEL task(tensor_ptr, batch_size, vocal_size, seed, offset, lambda);
+    KERNEL task(tensor_ptr, batch_size, vocab_size, seed, offset, lambda);
     cgh.parallel_for(range, task);
   });
 }
