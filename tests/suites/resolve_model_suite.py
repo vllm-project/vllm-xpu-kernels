@@ -7,8 +7,12 @@ import shlex
 import sys
 from collections.abc import Iterable
 
-from .kernel_test_map import KERNEL_TO_TESTS
-from .model_kernel_map import MODEL_TO_KERNELS
+try:
+    from .kernel_test_map import KERNEL_TO_TESTS
+    from .model_kernel_map import MODEL_TO_KERNELS
+except ImportError:
+    from kernel_test_map import KERNEL_TO_TESTS
+    from model_kernel_map import MODEL_TO_KERNELS
 
 
 def _split_csv(values: str | None) -> list[str]:
