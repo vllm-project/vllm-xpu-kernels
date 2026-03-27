@@ -14,7 +14,7 @@ NUM_HEADS = [(4, 4), (8, 2), (10, 2), (16, 1)]
 HEAD_SIZES = [64, 128, 192, 256]
 BLOCK_SIZES = [64, 128]
 DTYPES = [torch.bfloat16, torch.half]
-QDTYPES = [None]
+QDTYPES = [torch.float8_e4m3fn, None]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
@@ -130,7 +130,9 @@ MINI_PYTEST_PARAMS = {
         "num_heads": [(8, 2)],
         "num_blocks": [64],
         "window_size": [(-1, -1), (127, 127)],
-        "is_paged": [True]
+        "is_paged": [True],
+        "fp8_dtypes": [torch.float8_e4m3fn, None],
+        "q_dtypes": [torch.float8_e4m3fn, None]
     },
     "test_decode_with_paged_kv": {
         "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
@@ -187,9 +189,11 @@ def test_varlen_with_paged_kv(
         pytest.skip("skip local attn to avoid runtime hang on CI.")
     if block_size == 128 and num_blocks == 32768 and head_size >= 192:
         pytest.skip("skip test cases that may run out of Memory.")
-    # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
-    #     pytest.skip("Flash attention with quantized inputs is only "
-    #                 "supported on version 3 with bfloat16 base type")
+
+    is_fp8_query = q_dtype is not None
+    is_fp8kv = fp8_dtype is not None
+    if is_fp8_query and q_dtype != fp8_dtype:
+        pytest.skip("skip cases with fp8 query and non-fp8 kv")
     torch.manual_seed(4242)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -205,6 +209,7 @@ def test_varlen_with_paged_kv(
                         num_query_heads,
                         head_size,
                         dtype=dtype)
+    output = torch.empty_like(query)
     if is_paged:
         key_cache = torch.randn(num_blocks,
                                 block_size,
@@ -242,11 +247,9 @@ def test_varlen_with_paged_kv(
     k_descale = None  #noqa: F841
     v_descale = None  #noqa: F841
     scale_shape = (num_seqs, num_kv_heads)
-    is_fp8_query = q_dtype is not None
     if is_fp8_query:
         q_descale = (torch.abs(query).max() / 200).to(torch.float32)
         maybe_quantized_query = (query / q_descale).to(q_dtype)
-    is_fp8kv = fp8_dtype is not None
     if is_fp8kv:
         k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
         v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
@@ -271,6 +274,7 @@ def test_varlen_with_paged_kv(
                                         causal=is_casual,
                                         block_table=block_tables,
                                         window_size=window_size,
+                                        out=output,
                                         s_aux=sink)
     else:
         output = flash_attn_varlen_func(maybe_quantized_query,
@@ -290,9 +294,10 @@ def test_varlen_with_paged_kv(
                                         causal=is_casual,
                                         block_table=None,
                                         window_size=window_size,
+                                        out=output,
                                         s_aux=sink)
 
-    ref_output = ref_paged_attn(query=query,
+    ref_output = ref_paged_attn(query=maybe_quantized_query,
                                 key_cache=maybe_quantized_key_cache,
                                 value_cache=maybe_quantized_value_cache,
                                 query_lens=query_lens,
@@ -354,16 +359,16 @@ def test_decode_with_paged_kv(
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
-    # # FIXME: remove skip
-    # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
-    #     pytest.skip("Flash attention with quantized inputs is only "
-    #                 "supported on version 3 with bfloat16 base type")
     if num_heads == (16, 1) and head_size == 256:
         pytest.skip("skip test cases that may run out of SLM.")
     if block_size == 128 and num_blocks == 32768 and head_size >= 192:
         pytest.skip("skip test cases that may run out of Memory.")
     if is_sink and window_size != (-1, -1):
         pytest.skip("sink not supported with sliding window")
+    is_fp8_query = q_dtype is not None
+    is_fp8kv = fp8_dtype is not None
+    if is_fp8_query and q_dtype != fp8_dtype:
+        pytest.skip("skip cases with fp8 query and non-fp8 kv")
     torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -374,11 +379,15 @@ def test_decode_with_paged_kv(
     max_query_len = max(query_lens)
     max_kv_len = max(kv_lens)
     scale = head_size**-0.5
+    if is_fp8_query and sum(query_lens) == 1:
+        pytest.skip("skip test cases with fp8 query and total query len of 1, \
+                which may cause overflow in quantization.")
 
     query = torch.randn(sum(query_lens),
                         num_query_heads,
                         head_size,
                         dtype=dtype)
+    output = torch.empty_like(query)
     key_cache = torch.randn(num_blocks,
                             block_size,
                             num_kv_heads,
@@ -407,19 +416,10 @@ def test_decode_with_paged_kv(
     k_descale = None  #noqa: F841
     v_descale = None  #noqa: F841
     scale_shape = (num_seqs, num_kv_heads)
-    if q_dtype is not None:
-        # QKV are drawn from N(0, 1): no need for a fp8 scaling factor
-        maybe_quantized_query = query.to(q_dtype)
-        maybe_quantized_key_cache = key_cache.to(q_dtype)
-        maybe_quantized_value_cache = value_cache.to(q_dtype)
-
-        scale_shape = (num_seqs, num_kv_heads)
-        q_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
-        k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
-        v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
-    is_fp8kv = False
-    if fp8_dtype is not None:
-        is_fp8kv = True
+    if is_fp8_query:
+        q_descale = (torch.abs(query).max() / 200).to(torch.float32)
+        maybe_quantized_query = (query / q_descale).to(q_dtype)
+    if is_fp8kv:
         k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
         v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
         maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
@@ -435,14 +435,17 @@ def test_decode_with_paged_kv(
                                     softmax_scale=scale,
                                     causal=False,
                                     block_table=block_tables,
+                                    q_descale=q_descale.expand(scale_shape)
+                                    if q_descale is not None else None,
                                     k_descale=k_descale.expand(scale_shape)
                                     if k_descale is not None else None,
                                     v_descale=v_descale.expand(scale_shape)
                                     if v_descale is not None else None,
                                     window_size=window_size,
+                                    out=output,
                                     s_aux=sink)
 
-    ref_output = ref_paged_attn(query=query,
+    ref_output = ref_paged_attn(query=maybe_quantized_query,
                                 key_cache=maybe_quantized_key_cache,
                                 value_cache=maybe_quantized_value_cache,
                                 query_lens=query_lens,
@@ -452,15 +455,19 @@ def test_decode_with_paged_kv(
                                 casual=False,
                                 is_paged=True,
                                 sink=sink,
+                                q_descale=q_descale,
                                 k_descale=k_descale,
                                 v_descale=v_descale,
                                 window_size_left=window_size[0],
                                 window_size_right=window_size[1],
                                 is_fp8kv=is_fp8kv,
+                                is_fp8_query=is_fp8_query,
                                 dtype=dtype)
     atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
+    if window_size[0] != -1 or window_size[1] != -1:
+        atol, rtol = 1.5e-2, 1.5e-2
     if fp8_dtype is not None:
         atol, rtol = 1.5e-2, 1.5e-2
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \

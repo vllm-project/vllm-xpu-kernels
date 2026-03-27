@@ -19,6 +19,7 @@ void cutlass_paged_decode_xe2(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -45,6 +46,7 @@ void cutlass_paged_decode_xe2(
       cu_seqlens_k,
       max_seqlen_q,
       max_seqlen_k,
+      q_scale,
       k_scale,
       v_scale,
       sm_scale,
@@ -86,6 +88,7 @@ void cutlass_paged_decode_impl(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -98,6 +101,8 @@ void cutlass_paged_decode_impl(
     bool is_local,
     bool is_sink,
     int num_kv_splits) {
+  bool is_fp8_q = query.scalar_type() == at::ScalarType::Float8_e5m2 ||
+                  query.scalar_type() == at::ScalarType::Float8_e4m3fn;
   bool is_fp8_kv = key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
                    key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn;
   if (is_fp8_kv) {
@@ -113,6 +118,15 @@ void cutlass_paged_decode_impl(
         v_scale->scalar_type() == at::ScalarType::Float &&
             is_single_value_broadcast_tensor(*v_scale),
         "FP8 KV v_scale must be a float32 tensor with a single element.");
+  }
+  if (is_fp8_q) {
+    TORCH_CHECK(
+        q_scale.has_value(),
+        "FP8 Q cache requires q_scale tensor to be provided.");
+    TORCH_CHECK(
+        q_scale->scalar_type() == at::ScalarType::Float &&
+            is_single_value_broadcast_tensor(*q_scale),
+        "FP8 Q q_scale must be a float32 tensor with a single element.");
   }
 
   // general params
@@ -168,6 +182,7 @@ void cutlass_paged_decode_impl(
       max_seqlen_k,
       total_seqlen_q,
       total_seqlen_k,
+      is_fp8_q ? q_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
@@ -187,7 +202,7 @@ void cutlass_paged_decode_impl(
       is_sink,
       num_kv_splits};
 
-  CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
+  CutlassQKOType cuQKOType = aten_to_Cutlass_qko_dtype(query, key_cache, out);
 
   static constexpr int max_head_size = 256;
   TORCH_CHECK(
@@ -208,9 +223,9 @@ void cutlass_paged_decode_impl(
   int num_q_group_size = num_heads_q / num_heads_kv;
 
   if (num_q_group_size <= 8) {
-    dispatch_by_page_size<_8>(block_size, head_case, queue, cuQKType, args);
+    dispatch_by_page_size<_8>(block_size, head_case, queue, cuQKOType, args);
   } else if (num_q_group_size <= 16) {
-    dispatch_by_page_size<_16>(block_size, head_case, queue, cuQKType, args);
+    dispatch_by_page_size<_16>(block_size, head_case, queue, cuQKOType, args);
   } else {
     TORCH_CHECK(false, "Unsupported num_heads_q / num_heads_kv for fmha");
   }
