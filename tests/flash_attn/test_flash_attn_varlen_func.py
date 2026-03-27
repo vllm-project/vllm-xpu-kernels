@@ -12,7 +12,7 @@ from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 NUM_HEADS = [(4, 4), (8, 2), (10, 2), (16, 1)]
 HEAD_SIZES = [64, 128, 192, 256]
-BLOCK_SIZES = [64, 128]
+BLOCK_SIZES = [16, 32, 64, 128]
 DTYPES = [torch.bfloat16, torch.half]
 QDTYPES = [None]
 # one value large enough to test overflow in index calculation.

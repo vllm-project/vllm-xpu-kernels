@@ -34,6 +34,36 @@ function(fmha_forward_configure FILENAME_SUFFIX)
     endforeach()
   endforeach()
 
+  # Page-size-specific paged-only policies (only Paged=true)
+  set(paged_policy_list
+      "chunk_policy_head64_p16"
+      "chunk_policy_head96_p16"
+      "chunk_policy_head128_p16"
+      "chunk_policy_head192_p16"
+      "chunk_policy_head256_p16"
+      "chunk_policy_head96_p32"
+      "chunk_policy_head128_p32")
+
+  set(IMPL_KISPAGED "true")
+  foreach(IMPL_POLICY ${paged_policy_list})
+    foreach(IMPL_KISCAUSAL ${L_BOOLS})
+      foreach(IMPL_KISLOCAL ${L_BOOLS})
+        foreach(IMPL_KISSINK ${L_BOOLS})
+          set(FILE_SUFFIX "${IMPL_POLICY}_")
+          set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISPAGED}}")
+          set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
+          set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
+          set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
+          configure_file(${FILENAME_SUFFIX}.cpp.in
+                         "${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
+          list(
+            APPEND GEN_KERNEL_SRCS
+            "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
+        endforeach()
+      endforeach()
+    endforeach()
+  endforeach()
+
   list(REMOVE_DUPLICATES GEN_KERNEL_SRCS)
   list(LENGTH GEN_KERNEL_SRCS GEN_KERNEL_SRCS_LENGTH)
   message(
