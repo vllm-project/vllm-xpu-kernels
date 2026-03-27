@@ -5,7 +5,7 @@
 
 namespace gdn {
 static constexpr int sub_group_size = 32;
-template <typename T, int k_bucket_size>
+template <typename T, typename StateT, int k_bucket_size>
 struct gated_delta_rule_kernel {
  public:
   static constexpr int group_size = 256;
@@ -23,7 +23,7 @@ struct gated_delta_rule_kernel {
       const T* a,
       const T* A_log,
       const T* dt_bias,
-      T* ssm_state,
+      StateT* ssm_state,
       const int ssm_state_stride_0,
       const int* query_start_loc,
       const int* cache_indices,
@@ -102,7 +102,7 @@ struct gated_delta_rule_kernel {
     float k_local[k_bucket_size];
     float v_local[v_dim_per_sg];
 
-    T* ssm_state_ptr =
+    StateT* ssm_state_ptr =
         ssm_state +
         static_cast<int64_t>(cache_indices[batch_id]) * ssm_state_stride_0;
 
@@ -112,10 +112,11 @@ struct gated_delta_rule_kernel {
       for (int j = 0; j < v_dim_per_sg; ++j) {
 #pragma unroll
         for (int i = 0; i < k_bucket_size; ++i) {
-          state_local[j * k_bucket_size + i] = ssm_state_ptr
-              [num_v_heads_id * head_k_dim * head_v_dim +
-               (k_bucket_size * sg_local_id + i) +
-               (head_v_dim_id + j) * head_k_dim];
+          state_local[j * k_bucket_size + i] =
+              static_cast<float>(ssm_state_ptr
+                                     [num_v_heads_id * head_k_dim * head_v_dim +
+                                      (k_bucket_size * sg_local_id + i) +
+                                      (head_v_dim_id + j) * head_k_dim]);
         }
       }
     } else {
@@ -237,7 +238,7 @@ struct gated_delta_rule_kernel {
             [num_v_heads_id * head_k_dim * head_v_dim +
              (k_bucket_size * sg_local_id + i) +
              (head_v_dim_id + j) * head_k_dim] =
-                state_local[j * k_bucket_size + i];
+                static_cast<StateT>(state_local[j * k_bucket_size + i]);
       }
     }
   }
@@ -251,7 +252,7 @@ struct gated_delta_rule_kernel {
   const T* a;
   const T* A_log;
   const T* dt_bias;
-  T* ssm_state;
+  StateT* ssm_state;
   const int ssm_state_stride_0;
   const int* query_start_loc;
   const int* cache_indices;
@@ -264,7 +265,7 @@ struct gated_delta_rule_kernel {
   const int head_v_dim;
 };
 
-template <typename T, int k_bucket_size>
+template <typename T, typename StateT, int k_bucket_size>
 void kernel_launcher(
     sycl::queue& queue,
     T* core_attn_out,
@@ -275,7 +276,7 @@ void kernel_launcher(
     const T* a,
     const T* A_log,
     const T* dt_bias,
-    T* ssm_state,
+    StateT* ssm_state,
     const int ssm_state_stride_0,
     const int* query_start_loc,
     const int* cache_indices,
@@ -286,7 +287,7 @@ void kernel_launcher(
     const int head_k_dim,
     const int num_v_heads,
     const int head_v_dim) {
-  using KERNEL = gated_delta_rule_kernel<T, k_bucket_size>;
+  using KERNEL = gated_delta_rule_kernel<T, StateT, k_bucket_size>;
   auto range = KERNEL::get_nd_range(batch_size, num_v_heads, head_v_dim);
   assert(head_v_dim % KERNEL::v_dim_per_group == 0);
   queue.submit([&](sycl::handler& cgh) {
@@ -351,8 +352,8 @@ void gated_delta_rule(
   TORCH_CHECK(head_k_dim % sub_group_size == 0);
   const int k_bucket_size = head_k_dim / sub_group_size;
 
-#define KERNEL_LAUNCHER(scalar_t, k_bucket_size)                   \
-  kernel_launcher<scalar_t, k_bucket_size>(                        \
+#define KERNEL_LAUNCHER(scalar_t, state_scalar_t, k_bucket_size)   \
+  kernel_launcher<scalar_t, state_scalar_t, k_bucket_size>(        \
       queue,                                                       \
       reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),       \
       reinterpret_cast<scalar_t*>(q.data_ptr()),                   \
@@ -362,7 +363,7 @@ void gated_delta_rule(
       reinterpret_cast<scalar_t*>(a.data_ptr()),                   \
       reinterpret_cast<scalar_t*>(A_log.data_ptr()),               \
       reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
-      reinterpret_cast<scalar_t*>(ssm_state.data_ptr()),           \
+      reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),     \
       ssm_state_stride_0,                                          \
       reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
       reinterpret_cast<int*>(cache_indices.data_ptr()),            \
@@ -376,34 +377,54 @@ void gated_delta_rule(
       num_v_heads,                                                 \
       head_v_dim);
 
-#define BUCKET_DISPATCH(scalar_t, k_bucket_size) \
-  switch (k_bucket_size) {                       \
-    case 1:                                      \
-      KERNEL_LAUNCHER(scalar_t, 1)               \
-      break;                                     \
-    case 2:                                      \
-      KERNEL_LAUNCHER(scalar_t, 2)               \
-      break;                                     \
-    case 4:                                      \
-      KERNEL_LAUNCHER(scalar_t, 4)               \
-      break;                                     \
-    case 8:                                      \
-      KERNEL_LAUNCHER(scalar_t, 8)               \
-      break;                                     \
-    default:                                     \
-      TORCH_CHECK(false);                        \
+#define BUCKET_DISPATCH(scalar_t, state_scalar_t, k_bucket_size) \
+  switch (k_bucket_size) {                                       \
+    case 1:                                                      \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t, 1)               \
+      break;                                                     \
+    case 2:                                                      \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t, 2)               \
+      break;                                                     \
+    case 4:                                                      \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t, 4)               \
+      break;                                                     \
+    case 8:                                                      \
+      KERNEL_LAUNCHER(scalar_t, state_scalar_t, 8)               \
+      break;                                                     \
+    default:                                                     \
+      TORCH_CHECK(false);                                        \
   }
+
+#define DISPATCH_STATE_DTYPE(scalar_t)                                  \
+  do {                                                                  \
+    if (ssm_state.scalar_type() == at::kFloat) {                        \
+      using state_scalar_t = float;                                     \
+      BUCKET_DISPATCH(scalar_t, state_scalar_t, k_bucket_size)          \
+    } else if (ssm_state.scalar_type() == at::kBFloat16) {              \
+      using state_scalar_t = sycl::ext::oneapi::bfloat16;               \
+      BUCKET_DISPATCH(scalar_t, state_scalar_t, k_bucket_size)          \
+    } else if (ssm_state.scalar_type() == at::kHalf) {                  \
+      using state_scalar_t = sycl::half;                                \
+      BUCKET_DISPATCH(scalar_t, state_scalar_t, k_bucket_size)          \
+    } else {                                                            \
+      TORCH_CHECK(                                                      \
+          false,                                                        \
+          "ssm_state dtype must be float32/float16/bfloat16, but got ", \
+          ssm_state.scalar_type());                                     \
+    }                                                                   \
+  } while (0)
 
   if (core_attn_out.scalar_type() == at::kBFloat16) {
     using scalar_t = sycl::ext::oneapi::bfloat16;
-    BUCKET_DISPATCH(scalar_t, k_bucket_size)
+    DISPATCH_STATE_DTYPE(scalar_t);
   } else if (core_attn_out.scalar_type() == at::kHalf) {
     using scalar_t = sycl::half;
-    BUCKET_DISPATCH(scalar_t, k_bucket_size)
+    DISPATCH_STATE_DTYPE(scalar_t);
   } else {
     using scalar_t = float;
-    BUCKET_DISPATCH(scalar_t, k_bucket_size)
+    DISPATCH_STATE_DTYPE(scalar_t);
   }
+#undef DISPATCH_STATE_DTYPE
 #undef BUCKET_DISPATCH
 #undef KERNEL_LAUNCHER
 }
