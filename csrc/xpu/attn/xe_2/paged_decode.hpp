@@ -24,16 +24,27 @@
 
 using namespace cute;
 
-using decode_policy_q8_h64 = decode_policy_qpacked_head<_8, _64>;
-using decode_policy_q8_h96 = decode_policy_qpacked_head<_8, _96>;
-using decode_policy_q8_h128 = decode_policy_qpacked_head<_8, _128>;
-using decode_policy_q8_h192 = decode_policy_qpacked_head<_8, _192>;
-using decode_policy_q8_h256 = decode_policy_qpacked_head<_8, _256>;
-using decode_policy_q16_h64 = decode_policy_qpacked_head<_16, _64>;
-using decode_policy_q16_h96 = decode_policy_qpacked_head<_16, _96>;
-using decode_policy_q16_h128 = decode_policy_qpacked_head<_16, _128>;
-using decode_policy_q16_h192 = decode_policy_qpacked_head<_16, _192>;
-using decode_policy_q16_h256 = decode_policy_qpacked_head<_16, _256>;
+using decode_policy_q8_h64_p64 = decode_policy_qpacked_head<_8, _64, _64>;
+using decode_policy_q8_h96_p64 = decode_policy_qpacked_head<_8, _96, _64>;
+using decode_policy_q8_h128_p64 = decode_policy_qpacked_head<_8, _128, _64>;
+using decode_policy_q8_h192_p64 = decode_policy_qpacked_head<_8, _192, _64>;
+using decode_policy_q8_h256_p64 = decode_policy_qpacked_head<_8, _256, _64>;
+using decode_policy_q16_h64_p64 = decode_policy_qpacked_head<_16, _64, _64>;
+using decode_policy_q16_h96_p64 = decode_policy_qpacked_head<_16, _96, _64>;
+using decode_policy_q16_h128_p64 = decode_policy_qpacked_head<_16, _128, _64>;
+using decode_policy_q16_h192_p64 = decode_policy_qpacked_head<_16, _192, _64>;
+using decode_policy_q16_h256_p64 = decode_policy_qpacked_head<_16, _256, _64>;
+
+using decode_policy_q8_h64_p128 = decode_policy_qpacked_head<_8, _64, _128>;
+using decode_policy_q8_h96_p128 = decode_policy_qpacked_head<_8, _96, _128>;
+using decode_policy_q8_h128_p128 = decode_policy_qpacked_head<_8, _128, _128>;
+using decode_policy_q8_h192_p128 = decode_policy_qpacked_head<_8, _192, _128>;
+using decode_policy_q8_h256_p128 = decode_policy_qpacked_head<_8, _256, _128>;
+using decode_policy_q16_h64_p128 = decode_policy_qpacked_head<_16, _64, _128>;
+using decode_policy_q16_h96_p128 = decode_policy_qpacked_head<_16, _96, _128>;
+using decode_policy_q16_h128_p128 = decode_policy_qpacked_head<_16, _128, _128>;
+using decode_policy_q16_h192_p128 = decode_policy_qpacked_head<_16, _192, _128>;
+using decode_policy_q16_h256_p128 = decode_policy_qpacked_head<_16, _256, _128>;
 
 struct paged_decode_args_t {
   void* query;
@@ -50,6 +61,8 @@ struct paged_decode_args_t {
   int max_keys;
   int total_seqlen_q;
   int total_seqlen_k;
+  void* k_scale = nullptr;
+  void* v_scale = nullptr;
   float sm_scale;
   void* sm_sink;
   int batch_size;
@@ -186,10 +199,14 @@ struct DecodeKernelLauncher {
             reinterpret_cast<ElementQ*>(args.sm_sink),
         },
         {args.sm_scale,
+         args.k_scale,
+         args.v_scale,
          static_cast<int*>(args.block_table),
          args.block_size,
          args.max_blocks_per_seq,
-         args.total_seqlen_k},
+         args.total_seqlen_k,
+         args.window_size_left,
+         args.window_size_right},
         {},
         hw_info,
         args.num_kv_splits};
@@ -203,7 +220,8 @@ struct DecodeKernelLauncher {
          reinterpret_cast<ElementLSE*>(args.exp_sums),
          stride_exp_sums,
          reinterpret_cast<ElementLSE*>(args.max_logits),
-         stride_max_logits},
+         stride_max_logits,
+         args.window_size_left},
         hw_info,
         args.num_kv_splits};
 
@@ -234,7 +252,7 @@ struct DecodeKernelLauncher {
 
     ReductionSplitKernel::initialize_workspace(
         reduce_arg, workspace.get() + workspace_size);
-    run(queue, params, reduce_params);
+    run(queue, params, reduce_params, args.num_kv_splits > 1);
 
     return cutlass::Status::kSuccess;
   }
@@ -242,12 +260,17 @@ struct DecodeKernelLauncher {
   static void
   run(sycl::queue& queue,
       typename FMHAKernel::Params params,
-      typename ReductionSplitKernel::Params reduce_params) {
+      typename ReductionSplitKernel::Params reduce_params,
+      bool need_reduce) {
     namespace syclex = sycl::ext::oneapi::experimental;
     namespace intelex = sycl::ext::intel::experimental;
 
     dim3 const block = FMHAKernel::get_block_shape();
     dim3 const grid = FMHAKernel::get_grid_shape(params);
+
+    // cute::print("Launching FMHAKernel with grid: "); cute::print("%d x %d x
+    // %d ", grid.x, grid.y, grid.z); cute::print("and block: ");
+    // cute::print("%d x %d x %d\n", block.x, block.y, block.z);
 
     // configure smem size and carveout
     int smem_size = FMHAKernel::SharedStorageSize;
@@ -267,32 +290,34 @@ struct DecodeKernelLauncher {
     auto event =
         compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
             policy, queue, params);
+    EventManager::getInstance().addEvent(event);
 
     // event.wait();
 
-    dim3 const reduce_grid =
-        ReductionSplitKernel::get_grid_shape(reduce_params);
-    int reduce_smem_size = ReductionSplitKernel::SharedStorageSize;
-    const auto reduce_sycl_block = compat::dim3(block.x, block.y, block.z);
-    const auto reduce_sycl_grid =
-        compat::dim3(reduce_grid.x, reduce_grid.y, reduce_grid.z);
-    compat::experimental::launch_properties launch_props_reduce{
-        syclex::work_group_scratch_size(reduce_smem_size),
-    };
-    compat::experimental::launch_policy reduce_policy{
-        reduce_sycl_grid, reduce_sycl_block, launch_props_reduce, kernel_props};
+    if (need_reduce) {
+      dim3 const reduce_grid =
+          ReductionSplitKernel::get_grid_shape(reduce_params);
+      int reduce_smem_size = ReductionSplitKernel::SharedStorageSize;
+      const auto reduce_sycl_block = compat::dim3(block.x, block.y, block.z);
+      const auto reduce_sycl_grid =
+          compat::dim3(reduce_grid.x, reduce_grid.y, reduce_grid.z);
+      compat::experimental::launch_properties launch_props_reduce{
+          syclex::work_group_scratch_size(reduce_smem_size),
+      };
+      compat::experimental::launch_policy reduce_policy{
+          reduce_sycl_grid,
+          reduce_sycl_block,
+          launch_props_reduce,
+          kernel_props};
 
-    // wait for FA kernel finished
-    // maybe no need wait here if launched with in-order queue
+      auto reduce_event = compat::experimental::launch<
+          cutlass::device_kernel<ReductionSplitKernel>>(
+          reduce_policy, queue, reduce_params);
 
-    auto reduce_event = compat::experimental::launch<
-        cutlass::device_kernel<ReductionSplitKernel>>(
-        reduce_policy, queue, reduce_params);
+      // reduce_event.wait();
 
-    // reduce_event.wait();
-
-    EventManager::getInstance().addEvent(event);
-    EventManager::getInstance().addEvent(reduce_event);
+      EventManager::getInstance().addEvent(reduce_event);
+    }
   }
 };
 
@@ -383,7 +408,8 @@ struct PagedDecodeConfig {
         TensorV,
         GmemTiledCopyQ,
         GmemTiledCopyK,
-        GmemTiledCopyV>;
+        GmemTiledCopyV,
+        Local>;
 
     // Epilogue
     using CollectiveEpilogue = cutlass::fmha::collective::DecodeFwdEpilogue<
@@ -419,37 +445,109 @@ struct PagedDecodeConfig {
 // Template function for explicit instantiation
 template <typename decode_policy, bool Causal, bool Local, bool Sink>
 void decode_policy_dispatch_impl(
-    sycl::queue& queue, CutlassDType cuType, const paged_decode_args_t& args) {
+    sycl::queue& queue,
+    CutlassQKType& cuQKType,
+    const paged_decode_args_t& args) {
   const int PipelineStages = 1;
-  if (cuType == CutlassDType::half) {
-    return PagedDecodeConfig<
-        typename decode_policy::ShapeQK,
-        typename decode_policy::ShapePV,
-        typename decode_policy::ShapeOut,
-        typename decode_policy::SubgroupLayoutQK,
-        void,
-        PipelineStages,
-        Causal,
-        Local,
-        Sink,
-        half_t,
-        half_t,
-        half_t,
-        half_t>::kernel_dispatch(queue, args);
-  } else {
-    return PagedDecodeConfig<
-        typename decode_policy::ShapeQK,
-        typename decode_policy::ShapePV,
-        typename decode_policy::ShapeOut,
-        typename decode_policy::SubgroupLayoutQK,
-        void,
-        PipelineStages,
-        Causal,
-        Local,
-        Sink,
-        bfloat16_t,
-        bfloat16_t,
-        bfloat16_t,
-        bfloat16_t>::kernel_dispatch(queue, args);
+  if (cuQKType.q_type == CutlassDType::half) {
+    if (cuQKType.k_type == CutlassDType::half) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          half_t,
+          half_t,
+          half_t,
+          half_t>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          half_t,
+          float_e4m3_t,
+          float_e4m3_t,
+          half_t>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          half_t,
+          float_e5m2_t,
+          float_e5m2_t,
+          half_t>::kernel_dispatch(queue, args);
+    }
+  } else if (cuQKType.q_type == CutlassDType::bfloat16) {
+    if (cuQKType.k_type == CutlassDType::bfloat16) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          bfloat16_t,
+          bfloat16_t,
+          bfloat16_t,
+          bfloat16_t>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          bfloat16_t,
+          float_e4m3_t,
+          float_e4m3_t,
+          bfloat16_t>::kernel_dispatch(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+      return PagedDecodeConfig<
+          typename decode_policy::ShapeQK,
+          typename decode_policy::ShapePV,
+          typename decode_policy::ShapeOut,
+          typename decode_policy::SubgroupLayoutQK,
+          void,
+          PipelineStages,
+          Causal,
+          Local,
+          Sink,
+          bfloat16_t,
+          float_e5m2_t,
+          float_e5m2_t,
+          bfloat16_t>::kernel_dispatch(queue, args);
+    }
   }
+  TORCH_CHECK(
+      false,
+      "Unsupported Q/KV dtype combination for paged_decode kernel: q_type=",
+      static_cast<int>(cuQKType.q_type),
+      " k_type=",
+      static_cast<int>(cuQKType.k_type));
 }

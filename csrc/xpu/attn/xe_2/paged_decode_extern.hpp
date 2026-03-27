@@ -9,16 +9,26 @@
 
 // X-Macro list using aliases
 #define PAGED_DECODE_POLICY_LIST(X) \
-  X(decode_policy_q8_h64)           \
-  X(decode_policy_q8_h96)           \
-  X(decode_policy_q8_h128)          \
-  X(decode_policy_q8_h192)          \
-  X(decode_policy_q8_h256)          \
-  X(decode_policy_q16_h64)          \
-  X(decode_policy_q16_h96)          \
-  X(decode_policy_q16_h128)         \
-  X(decode_policy_q16_h192)         \
-  X(decode_policy_q16_h256)
+  X(decode_policy_q8_h64_p64)       \
+  X(decode_policy_q8_h96_p64)       \
+  X(decode_policy_q8_h128_p64)      \
+  X(decode_policy_q8_h192_p64)      \
+  X(decode_policy_q8_h256_p64)      \
+  X(decode_policy_q16_h64_p64)      \
+  X(decode_policy_q16_h96_p64)      \
+  X(decode_policy_q16_h128_p64)     \
+  X(decode_policy_q16_h192_p64)     \
+  X(decode_policy_q16_h256_p64)     \
+  X(decode_policy_q8_h64_p128)      \
+  X(decode_policy_q8_h96_p128)      \
+  X(decode_policy_q8_h128_p128)     \
+  X(decode_policy_q8_h192_p128)     \
+  X(decode_policy_q8_h256_p128)     \
+  X(decode_policy_q16_h64_p128)     \
+  X(decode_policy_q16_h96_p128)     \
+  X(decode_policy_q16_h128_p128)    \
+  X(decode_policy_q16_h192_p128)    \
+  X(decode_policy_q16_h256_p128)
 
 // =============================================================================
 // Automatic extern template declarations for all policy combinations
@@ -32,7 +42,7 @@
   extern template void                                              \
   decode_policy_dispatch_impl<POLICY, CAUSAL, LOCAL, SINK>(         \
       sycl::queue & queue,                                          \
-      CutlassDType cuType,                                          \
+      CutlassQKType & cuQKType,                                     \
       const paged_decode_args_t& args);
 
 // Generate all 8 bool combinations for a given policy using nested macros

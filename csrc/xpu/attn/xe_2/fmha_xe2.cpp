@@ -89,10 +89,10 @@ void cutlass_chunk_prefill_impl(
     // query: [batch, num_heads, seq, head_size]
     batch_size = query.size(0);
     num_heads_q = query.size(1);
-    num_heads_kv = key_cache.size(1);
+    num_heads_kv = is_paged ? key_cache.size(2) : key_cache.size(1);
     head_size = query.size(3);
     max_seqlen_q = query.size(2);
-    max_seqlen_k = key_cache.size(2);
+    max_seqlen_k = is_paged ? max_seqlen_q : key_cache.size(2);
   }
   if (is_paged) {
     num_blocks = key_cache.size(0);

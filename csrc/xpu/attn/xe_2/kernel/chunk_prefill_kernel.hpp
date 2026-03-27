@@ -299,17 +299,18 @@ class XeFMHAFwdKernel {
         offset_o = s.num_heads_q * s.head_size_vo * qo_cumulative[idx_b];
       }
 
-      auto batch_dim = is_var_len ? 1 : s.batch;
+      auto batch_dim_qo = is_var_len ? 1 : s.batch;
+      auto batch_dim_kv = (PagedKV || is_var_len) ? 1 : s.batch;
       auto total_seqlen_kv =
           PagedKV ? params.mainloop.total_seqlen_kv : seq_len_kv;
       auto shape_Q =
-          make_shape(seq_len_qo, s.head_size_qk, s.num_heads_q, batch_dim);
+          make_shape(seq_len_qo, s.head_size_qk, s.num_heads_q, batch_dim_qo);
       auto shape_K = make_shape(
-          total_seqlen_kv, s.head_size_qk, s.num_heads_kv, batch_dim);
+          total_seqlen_kv, s.head_size_qk, s.num_heads_kv, batch_dim_kv);
       auto shape_V = make_shape(
-          s.head_size_vo, total_seqlen_kv, s.num_heads_kv, batch_dim);
+          s.head_size_vo, total_seqlen_kv, s.num_heads_kv, batch_dim_kv);
       auto shape_O =
-          make_shape(seq_len_qo, s.head_size_vo, s.num_heads_q, batch_dim);
+          make_shape(seq_len_qo, s.head_size_vo, s.num_heads_q, batch_dim_qo);
 
       auto dcQ = const_cast<ElementQ*>(p.Q + offset_q);
       auto dcK = const_cast<ElementK*>(p.K + offset_k);
@@ -319,10 +320,10 @@ class XeFMHAFwdKernel {
       auto layout_q = is_var_len
                           ? make_ordered_layout(shape_Q, Step<_2, _0, _1, _3>{})
                           : make_layout(shape_Q, p.dQ);
-      auto layout_k = is_var_len
+      auto layout_k = (PagedKV || is_var_len)
                           ? make_ordered_layout(shape_K, Step<_2, _0, _1, _3>{})
                           : make_layout(shape_K, p.dK);
-      auto layout_v = is_var_len
+      auto layout_v = (PagedKV || is_var_len)
                           ? make_ordered_layout(shape_V, Step<_0, _2, _1, _3>{})
                           : make_layout(shape_V, p.dV);
       auto layout_o = is_var_len
@@ -339,12 +340,13 @@ class XeFMHAFwdKernel {
       FragARow tA_max, tA_sum;
 
       // Main loop
-      int l_coord = is_var_len ? 0 : idx_b;
+      int l_coord_qo = is_var_len ? 0 : idx_b;
+      int l_coord_kv = (PagedKV || is_var_len) ? 0 : idx_b;
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
       mainloop(
-          Q(_, _, head_q, l_coord),
-          K(_, _, head, l_coord),
-          V(_, _, head, l_coord),
+          Q(_, _, head_q, l_coord_qo),
+          K(_, _, head, l_coord_kv),
+          V(_, _, head, l_coord_kv),
           tArA,
           tA_max,
           tA_sum,
@@ -368,7 +370,7 @@ class XeFMHAFwdKernel {
       if constexpr (Sink) {
         ElementSink s_head = p.ptr_S[head_q];
         epilogue(
-            O(_, _, head_q, l_coord),
+            O(_, _, head_q, l_coord_qo),
             tArA,
             tA_max,
             tA_sum,
@@ -377,7 +379,7 @@ class XeFMHAFwdKernel {
             thr_id);
       } else {
         epilogue(
-            O(_, _, head_q, l_coord),
+            O(_, _, head_q, l_coord_qo),
             tArA,
             tA_max,
             tA_sum,

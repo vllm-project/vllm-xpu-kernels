@@ -75,7 +75,6 @@
    variable: $ export IGC_VectorAliasBBThreshold=10000
 */
 
-#pragma once
 #include "helper.h"
 #include "csrc/xpu/grouped_gemm/collective/gemm/moe_dtype_policy.hpp"
 

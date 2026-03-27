@@ -83,14 +83,28 @@ struct chunk_policy_head256 {
   using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };
 
-// define macro for decode policy
-#define DECODE_NUM_SG _4
-#define DECODE_KV_TILE _64  // KV tile size is set to 64 for page size is 64
-
-template <class q_packed, class head_dim>
+// define decode policy
+template <typename q_packed, typename head_dim, typename kv_tile>
 struct decode_policy_qpacked_head {
-  using ShapeQK = Shape<q_packed, DECODE_KV_TILE, _64>;
-  using ShapePV = Shape<q_packed, _32, DECODE_KV_TILE>;
+  static_assert(
+      cute::is_same_v<kv_tile, _64> || cute::is_same_v<kv_tile, _128>,
+      "Unsupported kv_tile(page_size) for decode_policy_qpacked_head");
+};
+
+// kv_tile == _64
+template <typename q_packed, typename head_dim>
+struct decode_policy_qpacked_head<q_packed, head_dim, _64> {
+  using ShapeQK = Shape<q_packed, _64, _64>;
+  using ShapePV = Shape<q_packed, _32, _64>;
   using ShapeOut = Shape<q_packed, head_dim>;
-  using SubgroupLayoutQK = Layout<Shape<_1, DECODE_NUM_SG, _1>>;
+  using SubgroupLayoutQK = Layout<Shape<_1, _4, _1>>;
+};
+
+// kv_tile == _128
+template <typename q_packed, typename head_dim>
+struct decode_policy_qpacked_head<q_packed, head_dim, _128> {
+  using ShapeQK = Shape<q_packed, _128, _64>;
+  using ShapePV = Shape<q_packed, _32, _128>;
+  using ShapeOut = Shape<q_packed, head_dim>;
+  using SubgroupLayoutQK = Layout<Shape<_1, _8, _1>>;
 };

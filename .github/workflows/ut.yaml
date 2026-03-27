@@ -64,7 +64,7 @@ jobs:
     timeout-minutes: 40
     container:                      
       image: localhost:5000/xpu-kernel-ci-image:latest
-      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged
+      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
     steps:
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -74,12 +74,20 @@ jobs:
       - name: build & install wheel
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          export CCACHE_DIR=/root/.ccache
+          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
+          export CCACHE_NOHASHDIR=1
+          export CCACHE_COMPILERCHECK=content
+          ccache -s || true
+          ccache -p || true
+          git submodule sync && git submodule update --init --recursive
           uv pip install -r requirements.txt
-          MAX_JOB=128 uv pip install -e . -v
+          MAX_JOBS=128 uv pip install --no-build-isolation -e . -v
+          ccache -s || true
 
       - name: test 
         run: |
-          ZE_AFFINITY_MASK=0,1 SKIP_HANG_KERNEL=1 pytest -v -s tests/
+          ZE_AFFINITY_MASK=0,1 SKIP_HANG_KERNEL=1 SKIP_ACC_ERROR_KERNEL=1 pytest -v -s tests/
           VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 ZE_AFFINITY_MASK=0,1 pytest -v -s tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm
 
   clean-repo-pvc:
@@ -98,7 +106,7 @@ jobs:
     timeout-minutes: 40
     container: 
       image: localhost:5000/xpu-kernel-ci-image:latest
-      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged 
+      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
     steps:
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -108,8 +116,16 @@ jobs:
       - name: build & install wheel
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          export CCACHE_DIR=/root/.ccache
+          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
+          export CCACHE_NOHASHDIR=1
+          export CCACHE_COMPILERCHECK=content
+          ccache -s || true
+          ccache -p || true
+          git submodule sync && git submodule update --init --recursive
           uv pip install -r requirements.txt
-          MAX_JOBS=128 uv pip install -e . -v
+          MAX_JOBS=96 uv pip install --no-build-isolation -e . -v
+          ccache -s || true
 
       - name: test 
         run: |

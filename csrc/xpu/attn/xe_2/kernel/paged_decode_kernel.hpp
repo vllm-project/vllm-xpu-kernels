@@ -265,13 +265,18 @@ class XeFMHAFwdSplitKVKernel {
 
       if (CollectiveMainloop::CausalMask && seq_coord < discard_seq_coord)
         continue;
-      const int seq_len =
-          CollectiveMainloop::CausalMask
-              ? full_tile_offset +
-                    cute::min(seq_len_kv, seq_coord - discard_seq_coord) +
-                    q_sg_tile
-              : seq_len_kv;
+      // For decode window_size_right doesn't have effect
+      const int seq_len = seq_len_kv;
+      // For decode, all packed GQA heads are at position seq_len_kv - 1.
+      // Use seq_len - 1 (= seq_len_kv - 1) as the decode position for
+      // k_block0 to match ReduceSplitK's computation.
+      const int k_block0 =
+          CollectiveMainloop::LocalMask
+              ? cute::max(seq_len - 1 - params.mainloop.window_size_left, 0) /
+                    get<1>(TileShapeQK{})
+              : 0;
       const int k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
+      const int windowed_k_blocks = k_blocks - k_block0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       int offset_exp_sums = 0, offset_max_logits = 0;
@@ -312,10 +317,31 @@ class XeFMHAFwdSplitKVKernel {
           make_shape(head_group_q, num_kv_splits, s.num_heads_kv, batch_dim);
       auto shape_sink = make_shape(s.num_heads_kv, head_group_q);
 
-      int num_blocks_per_split = cute::ceil_div(k_blocks, num_kv_splits);
-      int kv_split_offset = idx_kv_split * num_blocks_per_split;
-      int num_effective_kv_blocks =
-          cute::min(k_blocks - kv_split_offset, num_blocks_per_split);
+      int num_blocks_per_split =
+          cute::ceil_div(windowed_k_blocks, num_kv_splits);
+
+      // Per-sequence split decision: short sequences are treated as
+      // single-split even when num_kv_splits > 1, avoiding precision
+      // loss from the split-reduce roundtrip.
+      constexpr int kMinBlocksForSplit = 128;
+      bool is_single_split =
+          (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
+
+      int kv_split_offset;
+      int num_effective_kv_blocks;
+      if (is_single_split) {
+        // Split 0 processes all blocks; splits 1+ skip entirely.
+        if (idx_kv_split > 0) {
+          continue;
+        }
+        kv_split_offset = k_block0;
+        num_effective_kv_blocks = windowed_k_blocks;
+      } else {
+        kv_split_offset = k_block0 + idx_kv_split * num_blocks_per_split;
+        num_effective_kv_blocks = cute::min(
+            windowed_k_blocks - idx_kv_split * num_blocks_per_split,
+            num_blocks_per_split);
+      }
 
       if (num_effective_kv_blocks <= 0) {
         // no need computation
@@ -401,7 +427,9 @@ class XeFMHAFwdSplitKVKernel {
             max_logits(_, _, head, l_coord),
             idx_kv_split,
             head_group_q,
-            sinks_per_kv);
+            sinks_per_kv,
+            num_kv_splits,
+            is_single_split);
       } else {
         epilogue(
             O(_, _, head, idx_kv_split, l_coord),
@@ -414,7 +442,9 @@ class XeFMHAFwdSplitKVKernel {
             max_logits(_, _, head, l_coord),
             idx_kv_split,
             head_group_q,
-            sinks);
+            sinks,
+            num_kv_splits,
+            is_single_split);
       }
     }
   }
@@ -466,6 +496,7 @@ class ReduceSplitK {
     StrideO dExp_sums;
     const ElementLSE* max_logits;
     StrideO dMax_logits;
+    int window_size_left = -1;
   };
   using KernelParams = KernelArguments;
 
@@ -486,8 +517,6 @@ class ReduceSplitK {
         max_logits_slm_array;
     cutlass::Array<ElementLSE, FMHAKernel_::max_num_kv_splits>
         exp_sums_slm_array;
-    cutlass::Array<ElementLSE, FMHAKernel_::max_num_kv_splits>
-        rescaled_exp_sums_array;
   };
 
   static constexpr int SharedStorageSize =
@@ -579,7 +608,15 @@ class ReduceSplitK {
       if (seq_idx >= seq_len_qo) continue;
 
       const int k_blocks = cute::ceil_div(seq_len_kv, get<1>(TileShapeQK{}));
-      int num_blocks_per_split = cute::ceil_div(k_blocks, num_kv_splits);
+      // Sliding window: skip blocks before the window
+      constexpr bool LocalMask = FMHAKernel_::CollectiveMainloop::LocalMask;
+      const int k_block0 =
+          LocalMask ? cute::max(seq_len_kv - 1 - p.window_size_left, 0) /
+                          get<1>(TileShapeQK{})
+                    : 0;
+      const int windowed_k_blocks = k_blocks - k_block0;
+      int num_blocks_per_split =
+          cute::ceil_div(windowed_k_blocks, num_kv_splits);
 
       int offset_o = 0, offset_o_accum = 0;
       int offset_exp_sums = 0, offset_max_logits = 0;
@@ -650,11 +687,12 @@ class ReduceSplitK {
       // Step 1: reduce max logits across different partitions
       // store into SLM for later use
 
-      ElementLSE global_max_logits =
-          cutlass::platform::numeric_limits<ElementLSE>::lowest();
+      ElementLSE global_max_logits{
+          cutlass::platform::numeric_limits<ElementLSE>::lowest()};
       ElementLSE global_exp_sums{0};
       // only first subgroup participates
-      if (thr_id < num_kv_splits && thr_id * num_blocks_per_split < k_blocks) {
+      if (thr_id < num_kv_splits &&
+          thr_id * num_blocks_per_split < windowed_k_blocks) {
         ElementLSE cur_max_logit = max_logits(seq_idx, thr_id, head_q, l_coord);
         global_max_logits = sycl::max(global_max_logits, cur_max_logit);
         shared_storage.max_logits_slm_array[thr_id] = cur_max_logit;
@@ -674,40 +712,35 @@ class ReduceSplitK {
       global_max_logits =
           sycl::group_broadcast(get_work_group<1>(), global_max_logits, 0);
 
-      // step 2: rescale Oaccum and write back to O
-      if (thr_id < num_kv_splits && thr_id * num_blocks_per_split < k_blocks) {
-        ElementLSE local_max_logit =
-            shared_storage.max_logits_slm_array[thr_id];
-        ElementLSE local_exp_sum = shared_storage.exp_sums_slm_array[thr_id];
-
-        ElementLSE rescale =
-            sycl::native::exp2(local_max_logit - global_max_logits);
-        ElementLSE rescaled_exp_sum = local_exp_sum * rescale;
-        shared_storage.rescaled_exp_sums_array[thr_id] = rescaled_exp_sum;
-
-        global_exp_sums += rescaled_exp_sum;
-      }
-      sycl::group_barrier(get_work_group<3>());
-      global_exp_sums = reduce_over_group(
-          get_work_group<1>(), global_exp_sums, sycl::plus<>());
-      global_exp_sums =
-          sycl::group_broadcast(get_work_group<1>(), global_exp_sums, 0);
-
-      ElementLSE inv_global_exp_sums = 1. / global_exp_sums;
       for (int idx = thr_id; idx < s.head_size_vo;
            idx += SGPerWG::value * intel::sg_size) {
         ElementLSE acc = 0;
+        global_exp_sums = 0;
         for (int i = 0; i < num_kv_splits; ++i) {
-          if (i * num_blocks_per_split >= k_blocks) {
+          if (i * num_blocks_per_split >= windowed_k_blocks) {
             break;
           }
-          // assume seq_len_q == 1
-          ElementLSE adjusted_o_accum =
-              static_cast<ElementLSE>(
-                  Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord)) *
-              shared_storage.rescaled_exp_sums_array[i];
-          acc += adjusted_o_accum;
+          ElementLSE local_max_logit = shared_storage.max_logits_slm_array[i];
+          ElementLSE local_exp_sum = shared_storage.exp_sums_slm_array[i];
+
+          // Skip splits with no valid data (short sequences treated as
+          // single-split have exp_sums=0 / max_logits=-inf for unused splits).
+          if (local_exp_sum <= ElementLSE(0)) continue;
+
+          ElementLSE rescale =
+              sycl::native::exp2(local_max_logit - global_max_logits);
+
+          // Partial outputs are unnormalized (not divided by exp_sum in the
+          // epilogue), so combine them directly with the rescale factor.
+          ElementLSE o_accum_val = static_cast<ElementLSE>(
+              Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord));
+          acc += o_accum_val * rescale;
+
+          // update global exp sum
+          global_exp_sums += local_exp_sum * rescale;
         }
+
+        ElementLSE inv_global_exp_sums = 1. / global_exp_sums;
 
         acc *= inv_global_exp_sums;
         O(seq_idx, idx, head_q, l_coord) = static_cast<ElementO>(acc);

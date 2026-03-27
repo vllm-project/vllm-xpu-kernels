@@ -194,7 +194,7 @@ struct FMHAFwdMainloop<
     void* const scale_v;
 
     // Paged KV Cache
-    int* ptr_page_table;
+    const int* ptr_page_table;
     int page_size;
     int max_pages_per_seq;
     int total_seqlen_kv;
@@ -234,6 +234,20 @@ struct FMHAFwdMainloop<
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
     return true;
+  }
+
+  CUTLASS_DEVICE int get_paged_idx(int K, int idx_b) {
+    int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
+    int b_offset = idx_b * params.max_pages_per_seq;
+    int page_local_idx = K * get<1>(TileShapeQK{}) / params.page_size;
+
+    // Clamp page_local_idx to the valid range [0, max_pages_per_seq - 1]
+    if (page_local_idx >= params.max_pages_per_seq) {
+      page_local_idx = params.max_pages_per_seq - 1;
+    }
+
+    return params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page +
+           K % tiles_per_page;
   }
 
   template <typename QVCoord>
@@ -339,24 +353,21 @@ struct FMHAFwdMainloop<
     // ------
 
     // PagedKV
-    int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
-    int page_idx = blk_k0, next_page_idx;
-    int b_offset = idx_b * params.max_pages_per_seq;
+    int page_idx, next_page_idx;
     if constexpr (PagedKV) {
-      int page_local_idx = page_idx * get<1>(TileShapeQK{}) / params.page_size;
-      page_idx =
-          params.ptr_page_table[b_offset + page_local_idx] * tiles_per_page +
-          page_idx % tiles_per_page;
+      next_page_idx = get_paged_idx(blk_k0, idx_b);
     }
 
     /* Initialization steps for first block: Q/K prefetch, O init */
     /* TODO: limit D prefetch for large head size, and reorder K prefetches */
+    CUTLASS_PRAGMA_UNROLL
     for (int D = 0; D < size<3>(pQgQ); D++) {
       prefetch(prefetch_q, pQgQ(_, _, _, D));
     }
 
+    CUTLASS_PRAGMA_UNROLL
     for (int D = 0; D < size<4>(pKgK); D++) {
-      prefetch(prefetch_k, pKgK(_, _, _, page_idx, D));
+      prefetch(prefetch_k, pKgK(_, _, _, next_page_idx, D));
     }
 
     clear(tArA);
@@ -377,6 +388,12 @@ struct FMHAFwdMainloop<
     for (int K = blk_k0; K < blk_k1; K++) {
       /* Split barrier to keep threads together */
       // barrier_arrive(ScopeSubgroup);
+
+      page_idx = next_page_idx;
+      // next paged_idx
+      if constexpr (PagedKV) {
+        next_page_idx = get_paged_idx(K + 1, idx_b);
+      }
 
       auto tKgK_cache =
           PagedKV ? tKgK(_, _, _, page_idx, _) : tKgK(_, _, _, K, _);
@@ -473,29 +490,12 @@ struct FMHAFwdMainloop<
       }
 
       // sycl::group_barrier(compat::get_nd_item<1>().get_group());
-      barrier();
-
-      // next paged_idx
-      next_page_idx = K + 1;
-      if constexpr (PagedKV) {
-        int next_page_local_idx =
-            next_page_idx * get<1>(TileShapeQK{}) / params.page_size;
-        bool valid_page = next_page_local_idx < params.max_pages_per_seq;
-        if (valid_page) {
-          next_page_idx =
-              params.ptr_page_table[b_offset + next_page_local_idx] *
-                  tiles_per_page +
-              next_page_idx % tiles_per_page;
-        } else {
-          // set to last page
-          next_page_idx = params.max_pages_per_seq * tiles_per_page - 1;
-        }
-      }
-      page_idx = next_page_idx;
+      // barrier();
 
       /* K prefetch */
+      CUTLASS_PRAGMA_UNROLL
       for (int D = 0; D < size<4>(pKgK); D++) {
-        prefetch(prefetch_k, pKgK(_, _, _, page_idx, D));
+        prefetch(prefetch_k, pKgK(_, _, _, next_page_idx, D));
       }
 
       // barrier_wait(ScopeSubgroup);
@@ -562,7 +562,8 @@ template <
     class TensorV_,
     class TiledCopyQ_ = void,  // Optional TiledCopy for loading Q
     class TiledCopyK_ = void,  // Optional TiledCopy for loading K
-    class TiledCopyV_ = void>  // Optional TiledCopy for loading V
+    class TiledCopyV_ = void,  // Optional TiledCopy for loading V
+    bool LocalMask_ = false>
 struct DecodeFwdMainloop {
   static_assert(
       cutlass::detail::dependent_false<DispatchPolicy_>,
@@ -583,7 +584,8 @@ template <
     class TensorV_,
     class TiledCopyQ_,
     class TiledCopyK_,
-    class TiledCopyV_>
+    class TiledCopyV_,
+    bool LocalMask_>
 struct DecodeFwdMainloop<
     XeDefault<Stages>,
     PagedKV_,
@@ -596,7 +598,8 @@ struct DecodeFwdMainloop<
     TensorV_,
     TiledCopyQ_,
     TiledCopyK_,
-    TiledCopyV_> {
+    TiledCopyV_,
+    LocalMask_> {
   //
   // Type Aliases
   //
@@ -612,6 +615,9 @@ struct DecodeFwdMainloop<
   using TensorQ = TensorQ_;
   using TensorK = TensorK_;
   using TensorV = TensorV_;
+
+  using ElementQ = typename TensorQ::engine_type::value_type;
+  using ElementK = typename TensorK::engine_type::value_type;
 
   using TensorQ2D =
       decltype(TensorQ_{}(append<rank_v<TensorQ_>>(make_coord(_, _), 0)));
@@ -664,15 +670,23 @@ struct DecodeFwdMainloop<
 
   static constexpr bool PagedKV = PagedKV_;
   static constexpr bool CausalMask = CausalMask_;
+  static constexpr bool Fp8KV =
+      is_any_of_v<ElementK, float_e5m2_t, float_e4m3_t>;
+  static constexpr bool LocalMask = LocalMask_;
 
   // User-facing arguments
   struct Arguments {
     ElementS const scale;
+    void* const scale_k;
+    void* const scale_v;
     // Paged KV Cache
     int const* ptr_page_table;
     int page_size;
     int max_pages_per_seq;
     int total_seqlen_kv;
+    // Local Mask
+    int window_size_left;
+    int window_size_right;
   };
 
   // Kernel-facing parameters
@@ -695,10 +709,14 @@ struct DecodeFwdMainloop<
     ElementS val = args.scale * static_cast<ElementS>(kLog2e);
     return Params{
         val,
+        args.scale_k,
+        args.scale_v,
         args.ptr_page_table,
         args.page_size,
         args.max_pages_per_seq,
-        args.total_seqlen_kv};
+        args.total_seqlen_kv,
+        args.window_size_left,
+        args.window_size_right};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -837,6 +855,13 @@ struct DecodeFwdMainloop<
     /* Check if */
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
 
+    // FP8 KV Scale: Currently we only support per-tensor scale for KV
+    float scale_k = 1.f, scale_v = 1.f;
+    if constexpr (Fp8KV) {
+      scale_k = *static_cast<const float*>(params.scale_k);
+      scale_v = *static_cast<const float*>(params.scale_v);
+    }
+
     /* Main loop, blocked in k. */
     int next_tile_idx;
     for (int K = blk_k0; K < blk_k1; K++) {
@@ -856,6 +881,12 @@ struct DecodeFwdMainloop<
 
         reorder(tQrQ, tSrQ);
         reorder(tKrK, tSrK);
+        if constexpr (Fp8KV) {
+          for (int i = 0; i < tSrK.size(); ++i) {
+            tSrK(i) =
+                static_cast<ElementQ>(scale_k * static_cast<float>(tSrK(i)));
+          }
+        }
 
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
       }
@@ -882,6 +913,26 @@ struct DecodeFwdMainloop<
       //   }
       // }
 
+      /* Local/sliding window masking */
+      if constexpr (LocalMask) {
+        // For decode, all packed GQA heads share the same KV position
+        // (seq_len_kv - 1). Use a fixed decode row for all elements.
+        int decode_row = seq_len - 1 - full_tile_offset;
+        Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
+        Tensor gP = local_tile(
+            cPgP, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
+        auto cS_thread = thr_mma_qk.partition_C(gP);
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS.size(); ++i) {
+          int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
+          bool left_mask = col_idx < decode_row - params.window_size_left;
+          bool right_mask = col_idx > decode_row + params.window_size_right;
+          if (left_mask || right_mask) {
+            tSrS(i) = ElementS(-INFINITY);
+          }
+        }
+      }
+
       /* k masking for remainder tiles */
       if (check_remainder_k && K == blk_k1 - 1) {
         FragSCol k_rem_mask;
@@ -906,6 +957,13 @@ struct DecodeFwdMainloop<
       for (int VV = 0; VV < VTiles; VV++) {
         copy(copy_v, tVgV_cache(_, _, _, VV), tVrV);
         reorder(tVrV, tArV);
+        if constexpr (Fp8KV) {
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < tArV.size(); ++i) {
+            tArV(i) =
+                static_cast<ElementQ>(scale_v * static_cast<float>(tArV(i)));
+          }
+        }
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
 

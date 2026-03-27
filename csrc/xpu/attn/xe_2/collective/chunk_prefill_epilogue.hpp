@@ -518,8 +518,9 @@ class DecodeFwdEpilogue {
       const TensorLSE2D& max_logits,  // Global max logits tensor
       int idx_kv_split,
       int head_group_q,
-      TensorSink& tSink  // Sink for current head
-  ) {
+      TensorSink& tSink,  // Sink for current head
+      int num_kv_splits,
+      bool is_single_split) {
     using namespace cute;
     using ElementA = typename FragA::element_type;
 
@@ -535,27 +536,36 @@ class DecodeFwdEpilogue {
 
     auto [rA, rA_max, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
 
-    int thr_id_sg = thr_id % intel::sg_size;
-
-    // store exp sum and max logits for current KV split
+    // Always store exp sum and max logits for current KV split.
     // assume seq_len_qo == 1
     if (thr_id < head_group_q) {
-      exp_sums(thr_id, idx_kv_split) = rA_sum(0);
-      max_logits(thr_id, idx_kv_split) = rA_max(0);
+      if (is_single_split) {
+        // Sentinel values: make ReduceSplitK a pass-through copy.
+        exp_sums(thr_id, idx_kv_split) = ElementA(1);
+        max_logits(thr_id, idx_kv_split) = ElementA(0);
+      } else if (num_kv_splits > 1) {
+        exp_sums(thr_id, idx_kv_split) = rA_sum(0);
+        max_logits(thr_id, idx_kv_split) = rA_max(0);
+      }
     }
 
     /* Some subgroups may not have any work to do; if so, quit early. */
     if (!active) return;
 
-    /* Complete softmax, dividing out sums. */
-    CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < rA_sum.size(); i++) {
-      rA_sum(i) = ElementA(1) / rA_sum(i);
-    }
+    /* Complete softmax: normalize output for single-split sequences
+       (so ReduceSplitK pass-through gives correct result).
+       For multi-split, store unnormalized to avoid divide-multiply
+       precision loss in the reduce roundtrip. */
+    if (is_single_split || num_kv_splits <= 1) {
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < rA_sum.size(); i++) {
+        rA_sum(i) = ElementA(1) / rA_sum(i);
+      }
 
-    CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < rA.size(); i++) {
-      rA(i) *= broadcast<0>(rA_sum, rA, i);
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < rA.size(); i++) {
+        rA(i) *= broadcast<0>(rA_sum, rA, i);
+      }
     }
 
     /* Tile output */
@@ -587,8 +597,7 @@ class DecodeFwdEpilogue {
     using namespace sycl::ext::oneapi::this_work_item;
 
     if constexpr (ReduceK{} == _1{}) {
-      ReduceFragARow rA_max;
-      return std::make_tuple(tArA, rA_max, tA_sum, true);
+      return std::make_tuple(tArA, tA_max, tA_sum, true);
     } else {
       /* Identify A tile ID and k block for this subgroup. */
       auto thr_vak = group<1, 3>(TiledMMAPV{}.get_thr_layout_vmnk())
