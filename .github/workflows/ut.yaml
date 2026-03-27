@@ -80,6 +80,7 @@ jobs:
           export CCACHE_COMPILERCHECK=content
           ccache -s || true
           ccache -p || true
+          git submodule sync && git submodule update --init --recursive
           uv pip install -r requirements.txt
           MAX_JOBS=128 uv pip install --no-build-isolation -e . -v
           ccache -s || true
@@ -121,6 +122,7 @@ jobs:
           export CCACHE_COMPILERCHECK=content
           ccache -s || true
           ccache -p || true
+          git submodule sync && git submodule update --init --recursive
           uv pip install -r requirements.txt
           MAX_JOBS=96 uv pip install --no-build-isolation -e . -v
           ccache -s || true
