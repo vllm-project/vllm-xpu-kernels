@@ -468,6 +468,147 @@ class indexer_k_quant_and_cache_kernel {
   const int64_t cache_stride_;
   const bool use_ue8m0_;
 };
+
+// Kernel to gather K data and its FP8 block-scales back from the paged KV-cache
+// into flat contiguous destination tensors, used during attention prefill.
+template <int BLOCK_Y_SIZE>
+class cp_gather_indexer_k_quant_cache_kernel {
+ public:
+  cp_gather_indexer_k_quant_cache_kernel(
+      const char* __restrict__ kv_cache,
+      char* __restrict__ dst_k,
+      char* __restrict__ dst_scale,
+      const int32_t* __restrict__ block_table,
+      const int32_t* __restrict__ cu_seq_lens,
+      sycl::local_accessor<int, 1> batch_idx_acc,
+      const int batch_size,
+      const int64_t token_stride,
+      const int64_t head_dim,
+      const int64_t block_stride,
+      const int64_t cache_block_size,
+      const int num_blocks,
+      const int num_tokens,
+      const int quant_block_size)
+      : kv_cache_(kv_cache),
+        dst_k_(dst_k),
+        dst_scale_(dst_scale),
+        block_table_(block_table),
+        cu_seq_lens_(cu_seq_lens),
+        batch_idx_acc_(batch_idx_acc),
+        batch_size_(batch_size),
+        token_stride_(token_stride),
+        head_dim_(head_dim),
+        block_stride_(block_stride),
+        cache_block_size_(cache_block_size),
+        num_blocks_(num_blocks),
+        num_tokens_(num_tokens),
+        quant_block_size_(quant_block_size) {}
+
+  void operator()(sycl::nd_item<2> item) const {
+    // VEC_SIZE = sizeof(sycl::float4) / sizeof(char) = 16
+    // This matches CUDA's float4 vectorised load/store of fp8 bytes.
+    constexpr int VEC_SIZE = 16;
+
+    const int local_x = static_cast<int>(item.get_local_id(0));
+    const int local_y = static_cast<int>(item.get_local_id(1));
+    const int local_range_x =
+        static_cast<int>(item.get_local_range(0));  // BLOCK_Y_SIZE
+    const int local_range_y = static_cast<int>(item.get_local_range(1));  // 8
+
+    const int token_idx =
+        static_cast<int>(item.get_group(0) * local_range_x + local_x);
+    const int head_idx =
+        static_cast<int>(item.get_group(1) * local_range_y + local_y) *
+        VEC_SIZE;
+
+    // Initialise SLM to 0 before the search to avoid stale values
+    // from the previous work-group that ran on the same EU.
+    if (local_y == 0 && token_idx < num_tokens_) {
+      batch_idx_acc_[local_x] = 0;
+    }
+
+    for (int iter = 0; iter < (batch_size_ + local_range_y - 1) / local_range_y;
+         ++iter) {
+      int tid = iter * local_range_y + local_y;
+      if (tid < batch_size_) {
+        const int seq_start = cu_seq_lens_[tid];
+        const int seq_end = cu_seq_lens_[tid + 1];
+        if (token_idx >= seq_start && token_idx < seq_end) {
+          batch_idx_acc_[local_x] = tid;
+        }
+      }
+    }
+
+    // Synchronise SLM writes before any thread reads batch_idx_acc_
+    item.barrier(sycl::access::fence_space::local_space);
+
+    // Exit threads after barrier to make sure nothing to write.
+    if (head_idx >= static_cast<int>(head_dim_) || token_idx >= num_tokens_) {
+      return;
+    }
+
+    const int my_batch = batch_idx_acc_[local_x];
+    const int inbatch_seq_idx = token_idx - cu_seq_lens_[my_batch];
+    const int block_idx = block_table_
+        [my_batch * num_blocks_ + inbatch_seq_idx / cache_block_size_];
+
+    const int64_t src_block_offset =
+        static_cast<int64_t>(block_idx) * block_stride_;
+    const int64_t cache_inblock_offset =
+        static_cast<int64_t>(inbatch_seq_idx % cache_block_size_) * head_dim_ +
+        head_idx;
+    const int64_t src_inblock_offset = src_block_offset + cache_inblock_offset;
+    const int64_t dst_inblock_offset =
+        static_cast<int64_t>(token_idx) * token_stride_ + head_idx;
+
+    // Vectorised 16-byte copy: read 16 fp8 bytes from cache, write to dst_k
+    // Use float4 only when both src/dst are 16-byte aligned and full chunk
+    // fits.
+    const bool src_aligned = (src_inblock_offset % VEC_SIZE) == 0;
+    const bool dst_aligned = (dst_inblock_offset % VEC_SIZE) == 0;
+    const bool full_chunk =
+        (head_idx + VEC_SIZE <= static_cast<int>(head_dim_));
+    if (full_chunk && src_aligned && dst_aligned) {
+      *reinterpret_cast<sycl::float4*>(dst_k_ + dst_inblock_offset) =
+          *reinterpret_cast<const sycl::float4*>(
+              kv_cache_ + src_inblock_offset);
+    } else {
+      int remains =
+          full_chunk ? VEC_SIZE : static_cast<int>(head_dim_) - head_idx;
+      for (int i = 0; i < remains; i++) {
+        dst_k_[dst_inblock_offset + i] = kv_cache_[src_inblock_offset + i];
+      }
+    }
+
+    // Scale copy: only local_y==0 writes (one scale per quant_block)
+    if (local_y == 0) {
+      const int64_t src_scale_offset =
+          src_block_offset +
+          static_cast<int64_t>(cache_block_size_) * head_dim_ +
+          cache_inblock_offset * 4 / quant_block_size_;
+      reinterpret_cast<float*>(
+          dst_scale_)[dst_inblock_offset / quant_block_size_] =
+          reinterpret_cast<const float*>(kv_cache_)[src_scale_offset / 4];
+    }
+  }
+
+ private:
+  const char* kv_cache_;
+  char* dst_k_;
+  char* dst_scale_;
+  const int32_t* block_table_;
+  const int32_t* cu_seq_lens_;
+  sycl::local_accessor<int, 1> batch_idx_acc_;
+  int batch_size_;
+  int64_t token_stride_;
+  int64_t head_dim_;
+  int64_t block_stride_;
+  int64_t cache_block_size_;
+  int num_blocks_;
+  int num_tokens_;
+  int quant_block_size_;
+};
+
 }  // namespace vllm
 
 // KV_T is the stored data type of kv-cache.
@@ -1052,4 +1193,84 @@ void indexer_k_quant_and_cache(
   static const std::string kv_cache_dtype = "fp8_e4m3";
   DISPATCH_BY_KV_CACHE_DTYPE(
       k.scalar_type(), kv_cache_dtype, CALL_INDEXER_K_QUANT_AND_CACHE);
+}
+
+// Dispatch macro: submit a single SYCL kernel with the given BLOCK_Y_SIZE.
+// The local work-group is (BLOCK_Y_SIZE, 8)
+#define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(BLOCK_Y_SIZE)              \
+  do {                                                                  \
+    sycl::range<2> global(                                              \
+        ((num_tokens + (BLOCK_Y_SIZE) - 1) / (BLOCK_Y_SIZE)),           \
+        ((head_dim + 8 * vec_size - 1) / (8 * vec_size)));              \
+    sycl::range<2> local((BLOCK_Y_SIZE), 8);                            \
+    queue.submit([&](sycl::handler& cgh) {                              \
+      sycl::local_accessor<int, 1> batch_idx(                           \
+          sycl::range<1>((BLOCK_Y_SIZE)), cgh);                         \
+      cgh.parallel_for(                                                 \
+          sycl::nd_range<2>(global * local, local),                     \
+          vllm::cp_gather_indexer_k_quant_cache_kernel<(BLOCK_Y_SIZE)>( \
+              reinterpret_cast<const char*>(kv_cache.data_ptr()),       \
+              reinterpret_cast<char*>(dst_k.data_ptr()),                \
+              reinterpret_cast<char*>(dst_scale.data_ptr()),            \
+              block_table.data_ptr<int32_t>(),                          \
+              cu_seq_lens.data_ptr<int32_t>(),                          \
+              batch_idx,                                                \
+              batch_size,                                               \
+              dst_k.stride(0),                                          \
+              head_dim,                                                 \
+              kv_cache.stride(0),                                       \
+              kv_cache.size(1),                                         \
+              static_cast<int>(block_table.size(1)),                    \
+              num_tokens,                                               \
+              quant_block_size));                                       \
+    });                                                                 \
+  } while (0)
+
+void cp_gather_indexer_k_quant_cache(
+    const torch::Tensor& kv_cache,  // [num_blocks, block_size, cache_stride]
+    torch::Tensor& dst_k,           // [num_tokens, head_dim]
+    torch::Tensor& dst_scale,  // [num_tokens, head_dim / quant_block_size * 4]
+    const torch::Tensor& block_table,  // [batch_size, num_blocks]
+    const torch::Tensor& cu_seq_lens   // [batch_size + 1]
+) {
+  int batch_size = static_cast<int>(block_table.size(0));
+  int num_tokens = static_cast<int>(dst_k.size(0));
+  int64_t head_dim = dst_k.size(1);
+  int quant_block_size = static_cast<int>(head_dim * 4 / dst_scale.size(1));
+
+  TORCH_CHECK(
+      kv_cache.device() == dst_k.device(),
+      "kv_cache and dst_k must be on the same device");
+  TORCH_CHECK(
+      kv_cache.device() == dst_scale.device(),
+      "kv_cache and dst_scale must be on the same device");
+  TORCH_CHECK(
+      kv_cache.device() == block_table.device(),
+      "kv_cache and block_table must be on the same device");
+  TORCH_CHECK(
+      kv_cache.device() == cu_seq_lens.device(),
+      "kv_cache and cu_seq_lens must be on the same device");
+  TORCH_CHECK(
+      head_dim % quant_block_size == 0,
+      "head_dim must be divisible by quant_block_size");
+
+  constexpr int vec_size = 16;
+  const at::DeviceGuard device_guard(kv_cache.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+
+  // Select BLOCK_Y_SIZE (token parallelism per work-group) based on batch
+  // size, mirroring the CUDA heuristic.
+  if (num_tokens < 32) {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(1);
+  } else if (num_tokens < 64) {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(2);
+  } else if (num_tokens < 128) {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(4);
+  } else if (num_tokens < 256) {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(8);
+  } else if (num_tokens < 512) {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(16);
+  } else {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(32);
+  }
 }

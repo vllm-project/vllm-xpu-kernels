@@ -173,6 +173,15 @@ def xpu_memcpy_sync(dst_ptr: int,
     )
 
 
+def cp_gather_indexer_k_quant_cache(kv_cache: torch.Tensor,
+                                    dst_k: torch.Tensor,
+                                    dst_scale: torch.Tensor,
+                                    block_table: torch.Tensor,
+                                    cu_seq_lens: torch.Tensor) -> None:
+    torch.ops._C_cache_ops.cp_gather_indexer_k_quant_cache(
+        kv_cache, dst_k, dst_scale, block_table, cu_seq_lens)
+
+
 def convert_fp8(
     dst_cache: torch.Tensor,
     src_cache: torch.Tensor,
