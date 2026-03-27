@@ -116,7 +116,7 @@ void cutlass_paged_decode_impl(
   }
 
   // general params
-  int batch_size, num_heads_q, num_heads_kv, head_size;
+  int batch_size, num_heads_q, num_heads_kv, head_size, v_head_size;
   // additional params
   int total_seqlen_q, total_seqlen_k;
   int num_blocks, block_size, max_blocks_per_seq;
@@ -126,6 +126,7 @@ void cutlass_paged_decode_impl(
     num_heads_q = query.size(1);
     num_heads_kv = key_cache.size(1);
     head_size = query.size(2);
+    v_head_size = value_cache.size(-1);
     total_seqlen_q = query.size(0);
     total_seqlen_k = key_cache.size(0);
   } else {
@@ -134,6 +135,7 @@ void cutlass_paged_decode_impl(
     num_heads_q = query.size(1);
     num_heads_kv = key_cache.size(1);
     head_size = query.size(3);
+    v_head_size = value_cache.size(-1);
     max_seqlen_q = query.size(2);
     max_seqlen_k = key_cache.size(2);
   }
@@ -176,6 +178,7 @@ void cutlass_paged_decode_impl(
       num_heads_q,
       num_heads_kv,
       head_size,
+      v_head_size,
       max_blocks_per_seq,
       block_size,
       window_size_left,
@@ -185,7 +188,25 @@ void cutlass_paged_decode_impl(
       is_causal,
       is_local,
       is_sink,
-      num_kv_splits};
+      num_kv_splits,
+      // KV cache strides
+      key_cache.stride(0),
+      key_cache.stride(1),
+      key_cache.stride(2),
+      value_cache.stride(0),
+      value_cache.stride(1),
+      value_cache.stride(2)};
+
+  TORCH_CHECK(
+      key_cache.stride(-1) == 1,
+      "paged_decode_xe2: key_cache must be contiguous in the last dimension "
+      "(head_dim), got stride=",
+      key_cache.stride(-1));
+  TORCH_CHECK(
+      value_cache.stride(-1) == 1,
+      "paged_decode_xe2: value_cache must be contiguous in the last dimension "
+      "(head_dim), got stride=",
+      value_cache.stride(-1));
 
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
 
