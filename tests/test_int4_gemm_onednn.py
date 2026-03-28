@@ -6,7 +6,7 @@ import torch
 
 from tests.register_ops import int4_gemm_w4a8, int4_gemm_w4a16
 from vllm_xpu_kernels.quantization._quantize_convert import (
-    GPTQUtils, dequantize, dequantize_s8_to_float, dynamic_per_token_quant_ref)
+    GPTQUtils, dequantize, dequantize_i8_to_float, dynamic_per_token_quant_ref)
 
 BATCHES = [1]
 MNK_FACTORS = [
@@ -108,7 +108,7 @@ def test_int4_gemm_w4a8(dtype, act_order, mnk_factors, qmode: QuantMode):
     input = torch.randn([m, k], device="xpu", dtype=dtype)
     input_int8, input_scales, input_zero_points = dynamic_per_token_quant_ref(
         input, False, bits=8)
-    input_int8_dequant = dequantize_s8_to_float(input_int8, input_scales,
+    input_int8_dequant = dequantize_i8_to_float(input_int8, input_scales,
                                                 input_zero_points).to("cpu")
     weight = rand_int4(k * n, torch.int32, "xpu").reshape(k // 8, n)
 
