@@ -110,6 +110,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> ()");
   ops.impl("swigluoai_and_mul", torch::kXPU, &swigluoai_and_mul);
 
+  // swiglustep_and_mul
+  ops.def(
+      "swiglustep_and_mul(Tensor! out, Tensor input, float limit=7.0) "
+      "-> ()");
+  ops.impl("swiglustep_and_mul", torch::kXPU, &swiglustep_and_mul);
+
   ops.def(
       "get_xpu_view_from_cpu_tensor(Tensor cpu_tensor) -> "
       "Tensor");
