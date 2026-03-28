@@ -35,6 +35,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 
+  // Fused RMS Normalization + static FP8 quantization.
+  ops.def(
+      "rms_norm_static_fp8_quant(Tensor! result, Tensor! input, "
+      "Tensor! weight, Tensor! scale, float epsilon) -> ()");
+  ops.impl(
+      "rms_norm_static_fp8_quant", torch::kXPU, &rms_norm_static_fp8_quant);
+
+  // Fused Add + RMS Normalization + static FP8 quantization.
+  ops.def(
+      "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor! input, "
+      "Tensor! residual, Tensor! weight, Tensor! scale, float epsilon) -> ()");
+  ops.impl(
+      "fused_add_rms_norm_static_fp8_quant",
+      torch::kXPU,
+      &fused_add_rms_norm_static_fp8_quant);
+
   // activation ops
   ops.def("silu_and_mul(Tensor! out, Tensor! input) -> ()");
   ops.impl("silu_and_mul", torch::kXPU, &silu_and_mul);
