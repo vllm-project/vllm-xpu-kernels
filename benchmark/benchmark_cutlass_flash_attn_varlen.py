@@ -425,7 +425,7 @@ def filter_configs(configs):
 if __name__ == "__main__":
 
     args = parse_args()
-    seed = 1234
+    seed = 4242
     seed_everything(seed)
     iterations = 20
     torch.set_default_device("xpu")

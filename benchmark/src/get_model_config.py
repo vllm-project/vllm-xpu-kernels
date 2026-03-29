@@ -95,9 +95,9 @@ def gen_cutlass_flash_attn_varlen_correctness_configs():
 
 
 def gen_cutlass_flash_attn_varlen_perf_configs():
-    num_seqs = [3]
-    query_lens = ["1024,2048,2048"]
-    kv_lens = ["1024,1024,2048"]
+    num_seqs = [4]
+    query_lens = ["1024,2048,2048,8192"]
+    kv_lens = ["1024,1024,2048,8192"]
 
     block_size = [64, 128]
     window_size = [(-1, -1)]
@@ -109,7 +109,8 @@ def gen_cutlass_flash_attn_varlen_perf_configs():
     is_sink = [False, True]
     is_causal = [False, True]
     is_paged = [False, True]
-    kv_dtype = [torch.float8_e5m2, torch.float8_e4m3fn, None]
+    # kv_dtype = [torch.float8_e5m2, torch.float8_e4m3fn, None]     # fp8 OOM
+    kv_dtype = [None]
 
     def get_configs_from_models():
         configs = []
@@ -141,16 +142,8 @@ def gen_cutlass_flash_attn_varlen_perf_configs():
         configs = sorted(configs, key=sort_key)
         return configs
 
-    # TODO: run with model configs caused some OOM issue, need to investigate
-    # configs = get_configs_from_models()
+    configs = get_configs_from_models()
 
-    num_heads = [(32, 8)]
-    head_size = [128]
-    configs = list(
-        itertools.product(num_seqs, query_lens, kv_lens, num_heads, head_size,
-                          block_size, window_size, output_dtype, soft_cap,
-                          num_blocks, fa_versions, q_dtype, is_sink, is_causal,
-                          is_paged, kv_dtype))
     return configs
 
 
