@@ -109,7 +109,7 @@ def implement_zp(qweight):
 
 
 # vllm_xpu_kernel,main,
-#   https://github.com/vllm-project/vllm-xpu-kernels/tree/3cf991b
+#   https://github.com/vllm-project/vllm-xpu-kernels/tree/377e7eb
 def xpu_fused_moe_CalKernelTime(hidden_states,
                                 w13,
                                 w13_scales,
@@ -129,8 +129,14 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
                                 is_fp8=False,
                                 is_int4=False,
                                 is_mxfp4=False,
-                                start_event=None,
-                                end_event=None):
+                                start_event_remap=None,
+                                end_event_remap=None,
+                                start_event_gemm1=None,
+                                end_event_gemm1=None,
+                                start_event_gemm2=None,
+                                end_event_gemm2=None,
+                                start_event_gather=None,
+                                end_event_gather=None):
     '''
     hidden_states: [num_rows, hidden_size]
     w13: [num_experts, 2*inter_size, hidden_size]
@@ -175,6 +181,7 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
 
     assert w13.is_contiguous() and w2.is_contiguous()
 
+    # FIXME: move this to vllm
     if is_int4 and not hasattr(w13, 'xpu_fused_moe'):
         w13_tmp = torch.empty_like(w13)
         w2_tmp = torch.empty_like(w2)
@@ -190,6 +197,11 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
     # TODO: will all integrated in Cpp func. Temporary expose before gemm fusion
     num_rows, hidden_size = list(hidden_states.shape)
     num_moe_inputs = n_experts_per_token * num_rows
+
+    # Use actual GEMM N dimensions for correct FLOPS calculation
+    gemm1_n = 2 * inter_size  # gemm1: N = 2 * inter_size
+    gemm2_n = hidden_size      # gemm2: N = hidden_size
+    
     if topk_ids.dtype == torch.int32:
         topk_ids = topk_ids.to(torch.int64)
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
@@ -228,6 +240,9 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
         dtype=torch.int32,
         device=hidden_states.device)
 
+    ########### remap ##################
+    if start_event_remap is not None:
+        start_event_remap.record()
     torch.ops._moe_C.remap_hidden_states(
         hidden_states=hidden_states,
         hidden_states_scales=None,
@@ -239,11 +254,14 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
         topk_ids=topk_ids,
         total_experts_num=total_experts_num,
         local_experts_num=local_experts_num)
+    if end_event_remap is not None:
+        end_event_remap.record()
 
     ########### gemm1 ##################
     input_B = w13
 
-    start_event.record()
+    if start_event_gemm1 is not None:
+        start_event_gemm1.record()
     torch.ops._xpu_C.cutlass_grouped_gemm_interface(
         ptr_A=remapped_hidden_states,
         ptr_B=input_B,
@@ -256,9 +274,8 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
         num_experts=num_experts,
         is_B_int4=is_int4,
         is_B_mxfp4=is_mxfp4)
-    end_event.record()
-    end_event.synchronize()
-    gemm1_kernel_time = start_event.elapsed_time(end_event)
+    if end_event_gemm1 is not None:
+        end_event_gemm1.record()
     diff = expert_first_token_offset[1:] - expert_first_token_offset[:-1]
     active_experts1 = (diff > 0).sum().item()
     gemm1_m = remapped_hidden_states.shape[0]
@@ -284,7 +301,8 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
 
-    start_event.record()
+    if start_event_gemm2 is not None:
+        start_event_gemm2.record()
     torch.ops._xpu_C.cutlass_grouped_gemm_interface(
         ptr_A=input_A,
         ptr_B=input_B,
@@ -297,22 +315,21 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
         num_experts=num_experts,
         is_B_int4=is_int4,
         is_B_mxfp4=is_mxfp4)
-    end_event.record()
-    end_event.synchronize()
-    gemm2_kernel_time = start_event.elapsed_time(end_event)
 
-    start_event.record()
+    if end_event_gemm2 is not None:
+        end_event_gemm2.record()
+
+    if start_event_gather is not None:
+        start_event_gather.record()
     torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
                                 unpermuted_row_to_permuted_row,
                                 expert_first_token_offset, num_experts)
-    end_event.record()
-    end_event.synchronize()
-    gather_kernel_time = start_event.elapsed_time(end_event)
+    if end_event_gather is not None:
+        end_event_gather.record()
 
     diff = expert_first_token_offset[1:] - expert_first_token_offset[:-1]
     active_experts2 = (diff > 0).sum().item()
     gemm2_m = input_A.shape[0]
     gemm2_k = input_A.shape[1]
-    return gemm1_kernel_time, gemm2_kernel_time, gather_kernel_time, (
-        gemm1_m, gemm1_n, gemm1_k, active_experts1), (gemm2_m, gemm2_n,
-                                                      gemm2_k, active_experts2)
+    return ((gemm1_m, gemm1_n, gemm1_k, active_experts1),
+            (gemm2_m, gemm2_n, gemm2_k, active_experts2))

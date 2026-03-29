@@ -24,8 +24,8 @@ DEVICE = "xpu"
 
 def clear_xpu_cache():
     torch.xpu.empty_cache()
-    gc.collect()
     torch.xpu.synchronize()
+    gc.collect()
 
 
 def calculate_memory_usage(kv_len_sum, num_kv_heads, head_size, output_dtype):
@@ -163,21 +163,26 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
           flush=True)
     assert iterations > 5, \
     "Number of iterations should be greater than 5 to account for warmup"
-    start = torch.xpu.Event(enable_timing=True)
-    end = torch.xpu.Event(enable_timing=True)
     total_latency = 0.0
     ms = 0.0
     queries = [
         torch.rand_like(maybe_quantized_query) for _ in range(iterations)
     ]
 
+    start_events = [
+        torch.xpu.Event(enable_timing=True) for _ in range(iterations - 5)
+    ]
+    end_events = [
+        torch.xpu.Event(enable_timing=True) for _ in range(iterations - 5)
+    ]
     if provider == "flash":
         for index in range(iterations):
             block_tables = torch.randint(0,
                                          num_blocks,
                                          (num_seqs, max_num_blocks_per_seq),
                                          dtype=torch.int32)
-            start.record()
+            if index >= 5:
+                start_events[index - 5].record()
             flash_attn_varlen_func(queries[index],
                                    maybe_quantized_key_cache,
                                    maybe_quantized_value_cache,
@@ -190,16 +195,16 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
                                    block_table=block_tables,
                                    window_size=(-1, -1),
                                    s_aux=sink)
-            end.record()
-            end.synchronize()
-            if index >= 5:  # skip the first 5 iterations for warmup
-                total_latency += start.elapsed_time(end)
+            if index >= 5:
+                end_events[index - 5].record()
     else:
         for index in range(iterations):
             block_tables = torch.randint(0,
                                          num_blocks,
                                          (num_seqs, max_num_blocks_per_seq),
                                          dtype=torch.int32)
+            se = start_events[index - 5] if index >= 5 else None
+            ee = end_events[index - 5] if index >= 5 else None
             flash_attn_varlen_func_CalKernelTime(queries[index],
                                                  maybe_quantized_key_cache,
                                                  maybe_quantized_value_cache,
@@ -212,12 +217,14 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
                                                  block_table=block_tables,
                                                  window_size=(-1, -1),
                                                  s_aux=sink,
-                                                 start_event=start,
-                                                 end_event=end)
-            if index >= 5:  # skip the first 5 iterations for warmup
-                total_latency += start.elapsed_time(end)
+                                                 start_event=se,
+                                                 end_event=ee)
         if provider == "flash_memBandwidth":
             torch.xpu.synchronize()
+            total_latency = sum(
+                start_events[i].elapsed_time(end_events[i])
+                for i in range(iterations - 5)
+            )
             ms = total_latency / (iterations - 5)
             memory_load_GB = calculate_memory_usage(seq_k.sum().item(),
                                                     num_heads[1], head_size,
@@ -225,6 +232,10 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
             clear_xpu_cache()
             return memory_load_GB / (ms / 1000)
     torch.xpu.synchronize()
+    total_latency = sum(
+        start_events[i].elapsed_time(end_events[i])
+        for i in range(iterations - 5)
+    )
     ms = total_latency / (iterations - 5)
     clear_xpu_cache()
 
