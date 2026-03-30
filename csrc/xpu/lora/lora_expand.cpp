@@ -1,4 +1,6 @@
 #include <iostream>
+#include <algorithm>
+#include <type_traits>
 #include <sycl/sycl.hpp>
 #include <ATen/ATen.h>
 #include <c10/util/Exception.h>
@@ -41,7 +43,11 @@ constexpr uint32_t kMediumWorkgroupSize = 128;
  *     outputs[b, slice_offset + s] += Σ_r (inputs[b, r] * weights[indices[b],
  * s, r])
  */
-template <typename output_t, typename input_t, typename weight_t, uint32_t vec_size>
+template <
+    typename output_t,
+    typename input_t,
+    typename weight_t,
+    uint32_t vec_size>
 class bgmv_expand_slice_kernel {
  private:
   output_t* outputs_;
@@ -304,17 +310,21 @@ void launch_bgmv_expand_slice(
   dpcpp_queue.submit([&](sycl::handler& cgh) {
     dispatch_vec_size(vec_size, [&](auto vec_c) {
       constexpr int V = vec_c.value;
-      vllm::lora::bgmv_expand_slice_kernel<sycl_output_t, sycl_input_t, sycl_weight_t, V> kfn(
-          reinterpret_cast<sycl_output_t*>(outputs),
-          reinterpret_cast<const sycl_input_t*>(inputs),
-          reinterpret_cast<const sycl_weight_t*>(weights),
-          indices,
-          hidden,
-          rank,
-          slice_offset,
-          slice_size,
-          add_inputs,
-          batch_size);
+      vllm::lora::bgmv_expand_slice_kernel<
+          sycl_output_t,
+          sycl_input_t,
+          sycl_weight_t,
+          V>
+          kfn(reinterpret_cast<sycl_output_t*>(outputs),
+              reinterpret_cast<const sycl_input_t*>(inputs),
+              reinterpret_cast<const sycl_weight_t*>(weights),
+              indices,
+              hidden,
+              rank,
+              slice_offset,
+              slice_size,
+              add_inputs,
+              batch_size);
       cgh.parallel_for(sycl::nd_range<1>(global_range, local_range), kfn);
     });
   });
@@ -360,7 +370,8 @@ void validate_lora_b_slice_tensors(
   TORCH_CHECK(
       inputs.scalar_type() == at::kFloat ||
           inputs.scalar_type() == lora_b_weights.scalar_type(),
-      "inputs dtype must match lora_b_weights dtype when inputs is not float32");
+      "inputs dtype must match lora_b_weights dtype when inputs is not "
+      "float32");
 
   TORCH_CHECK(
       output_tensor.scalar_type() == at::kHalf ||
@@ -454,8 +465,8 @@ void bgmv_expand_slice(
       inputs.scalar_type(), "bgmv_expand_slice_input", [&]() {
         using input_t = scalar_t;
         auto dispatch_output = [&](auto* weight_ptr) {
-          using weight_t = std::remove_const_t<
-              std::remove_pointer_t<decltype(weight_ptr)>>;
+          using weight_t =
+              std::remove_const_t<std::remove_pointer_t<decltype(weight_ptr)>>;
           switch (outputs.scalar_type()) {
             case at::ScalarType::Half:
               launch_bgmv_expand_slice<at::Half, input_t, weight_t>(
@@ -463,8 +474,12 @@ void bgmv_expand_slice(
                   inputs.data_ptr<input_t>(),
                   weight_ptr,
                   indices.data_ptr<int64_t>(),
-                  batch_size, hidden, rank,
-                  slice_offset, slice_size, add_inputs);
+                  batch_size,
+                  hidden,
+                  rank,
+                  slice_offset,
+                  slice_size,
+                  add_inputs);
               break;
             case at::ScalarType::BFloat16:
               launch_bgmv_expand_slice<at::BFloat16, input_t, weight_t>(
@@ -472,8 +487,12 @@ void bgmv_expand_slice(
                   inputs.data_ptr<input_t>(),
                   weight_ptr,
                   indices.data_ptr<int64_t>(),
-                  batch_size, hidden, rank,
-                  slice_offset, slice_size, add_inputs);
+                  batch_size,
+                  hidden,
+                  rank,
+                  slice_offset,
+                  slice_size,
+                  add_inputs);
               break;
             case at::ScalarType::Float:
               launch_bgmv_expand_slice<float, input_t, weight_t>(
@@ -481,8 +500,12 @@ void bgmv_expand_slice(
                   inputs.data_ptr<input_t>(),
                   weight_ptr,
                   indices.data_ptr<int64_t>(),
-                  batch_size, hidden, rank,
-                  slice_offset, slice_size, add_inputs);
+                  batch_size,
+                  hidden,
+                  rank,
+                  slice_offset,
+                  slice_size,
+                  add_inputs);
               break;
             default:
               TORCH_CHECK(

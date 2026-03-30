@@ -1,5 +1,6 @@
-#include <iostream>
 #include <sycl/sycl.hpp>
+#include <algorithm>
+#include <type_traits>
 #include <ATen/ATen.h>
 #include <c10/util/Exception.h>
 #include "dispatch_utils.h"
@@ -30,7 +31,11 @@ namespace vllm::lora {
  *   For each sample b and rank r:
  *     outputs[b, r] = scale * Σ_h (inputs[b, h] * weights[indices[b], r, h])
  */
-template <typename output_t, typename input_t, typename weight_t, uint32_t vec_size>
+template <
+    typename output_t,
+    typename input_t,
+    typename weight_t,
+    uint32_t vec_size>
 class bgmv_shrink_kernel {
  private:
   output_t* outputs_;
@@ -40,6 +45,7 @@ class bgmv_shrink_kernel {
   const uint32_t hidden_;
   const uint32_t rank_;
   const float scale_;
+  const uint32_t num_loras_;
 
  public:
   using acc_t = float;
@@ -54,6 +60,7 @@ class bgmv_shrink_kernel {
    * @param hidden Hidden dimension
    * @param rank LoRA rank
    * @param scale Scaling factor
+   * @param num_loras Number of LoRA adapters (for bounds checking)
    */
   bgmv_shrink_kernel(
       output_t* outputs,
@@ -62,14 +69,16 @@ class bgmv_shrink_kernel {
       const int64_t* indices,
       const uint32_t hidden,
       const uint32_t rank,
-      const float scale)
+      const float scale,
+      const uint32_t num_loras)
       : outputs_(outputs),
         inputs_(inputs),
         weights_(weights),
         indices_(indices),
         hidden_(hidden),
         rank_(rank),
-        scale_(scale) {}
+        scale_(scale),
+        num_loras_(num_loras) {}
 
   void operator()(sycl::nd_item<1> item) const {
     // Thread indexing
@@ -87,8 +96,9 @@ class bgmv_shrink_kernel {
     const int64_t lora_idx =
         indices_[batch_id];  // indices[batch_id] -> lora_id
 
-    // Skip invalid LoRA indices
-    if (lora_idx < 0) return;
+    // Skip invalid LoRA indices (negative = no LoRA, >= num_loras = out of
+    // bounds)
+    if (lora_idx < 0 || static_cast<uint32_t>(lora_idx) >= num_loras_) return;
 
     // Calculate data pointers
     // inputs: [batch_size, hidden_size] -> inputs[batch_id, :]
@@ -120,18 +130,19 @@ class bgmv_shrink_kernel {
 // Vectorized dot product computation
 #pragma unroll
         for (uint32_t i = 0; i < vec_size; i++) {
-          // input_vec[i] * weight_vec[i] corresponds to:
-          // inputs[batch_id, offset+i] * weights[lora_idx, rank_id, offset+i]
-          local_sum += static_cast<acc_t>(input_vec[i]) *
-                       static_cast<acc_t>(weight_vec[i]);
+          local_sum = sycl::mad(
+              static_cast<acc_t>(input_vec[i]),
+              static_cast<acc_t>(weight_vec[i]),
+              local_sum);
         }
       } else {
         // Partial vector processing: handle remaining elements less than
         // vec_size
         for (uint32_t i = 0; i < remaining; i++) {
-          // inputs[batch_id, offset+i] * weights[lora_idx, rank_id, offset+i]
-          local_sum += static_cast<acc_t>(input_base[offset + i]) *
-                       static_cast<acc_t>(weight_base[offset + i]);
+          local_sum = sycl::mad(
+              static_cast<acc_t>(input_base[offset + i]),
+              static_cast<acc_t>(weight_base[offset + i]),
+              local_sum);
         }
       }
       offset += stride;  // Jump to next position handled by current thread
@@ -186,6 +197,7 @@ void dispatch_vec_size(int vec_size, Fn&& fn) {
  * @param hidden     - Hidden dimension size
  * @param rank       - LoRA rank
  * @param scale      - Scaling factor
+ * @param num_loras  - Number of LoRA adapters
  */
 template <typename output_t, typename input_t, typename weight_t>
 void launch_bgmv_shrink(
@@ -196,7 +208,8 @@ void launch_bgmv_shrink(
     const uint32_t batch_size,
     const uint32_t hidden,
     const uint32_t rank,
-    const float scale) {
+    const float scale,
+    const uint32_t num_loras) {
   // Compute vec_size for inputs
   uint32_t input_vec_bytes = 16;
   const auto input_align = reinterpret_cast<uintptr_t>(inputs);
@@ -259,14 +272,20 @@ void launch_bgmv_shrink(
   using sycl_output_t = typename vllm::xpu::SyclTypeTrait<output_t>::Type;
   using sycl_input_t = typename vllm::xpu::SyclTypeTrait<input_t>::Type;
   using sycl_weight_t = typename vllm::xpu::SyclTypeTrait<weight_t>::Type;
+
   dpcpp_queue.submit([&](sycl::handler& cgh) {
     dispatch_vec_size(vec_size, [&](auto vec_c) {
       constexpr int V = vec_c.value;
-      vllm::lora::bgmv_shrink_kernel<sycl_output_t, sycl_input_t, sycl_weight_t, V> kfn(
-          reinterpret_cast<sycl_output_t*>(outputs),
-          reinterpret_cast<const sycl_input_t*>(inputs),
-          reinterpret_cast<const sycl_weight_t*>(weights),
-          indices, hidden, rank, scale);
+      vllm::lora::
+          bgmv_shrink_kernel<sycl_output_t, sycl_input_t, sycl_weight_t, V>
+              kfn(reinterpret_cast<sycl_output_t*>(outputs),
+                  reinterpret_cast<const sycl_input_t*>(inputs),
+                  reinterpret_cast<const sycl_weight_t*>(weights),
+                  indices,
+                  hidden,
+                  rank,
+                  scale,
+                  num_loras);
       cgh.parallel_for(sycl::nd_range<1>(global_range, local_range), kfn);
     });
   });
@@ -310,7 +329,8 @@ void validate_lora_a_tensors(
   TORCH_CHECK(
       inputs.scalar_type() == at::kFloat ||
           inputs.scalar_type() == lora_a_weights.scalar_type(),
-      "inputs dtype must match lora_a_weights dtype when inputs is not float32");
+      "inputs dtype must match lora_a_weights dtype when inputs is not "
+      "float32");
 
   TORCH_CHECK(
       output_tensor.scalar_type() == at::kHalf ||
@@ -381,6 +401,7 @@ void bgmv_shrink(
   uint32_t batch_size = inputs.size(0);
   uint32_t hidden = inputs.size(1);
   uint32_t rank = outputs.size(1);
+  uint32_t num_loras = lora_weights.size(0);
 
   // 3. Dispatch based on INPUT type and WEIGHT type independently
   auto scale_f = static_cast<float>(scale);
@@ -388,8 +409,8 @@ void bgmv_shrink(
       inputs.scalar_type(), "bgmv_shrink_input", [&]() {
         using input_t = scalar_t;
         auto dispatch_output = [&](auto* weight_ptr) {
-          using weight_t = std::remove_const_t<
-              std::remove_pointer_t<decltype(weight_ptr)>>;
+          using weight_t =
+              std::remove_const_t<std::remove_pointer_t<decltype(weight_ptr)>>;
           VLLM_DISPATCH_FLOATING_TYPES(
               outputs.scalar_type(), "bgmv_shrink", [&]() {
                 using output_t = scalar_t;
@@ -398,7 +419,11 @@ void bgmv_shrink(
                     inputs.data_ptr<input_t>(),
                     weight_ptr,
                     indices.data_ptr<int64_t>(),
-                    batch_size, hidden, rank, scale_f);
+                    batch_size,
+                    hidden,
+                    rank,
+                    scale_f,
+                    num_loras);
               });
         };
         switch (lora_weights.scalar_type()) {
