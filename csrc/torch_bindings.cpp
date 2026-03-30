@@ -35,6 +35,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 
+  // Gemma RMSNorm: x * rsqrt(mean(x^2) + eps) * (1 + weight)
+  ops.def(
+      "gemma_rms_norm(Tensor! result, Tensor! input, Tensor! weight, "
+      "float epsilon) -> ()");
+  ops.impl("gemma_rms_norm", torch::kXPU, &gemma_rms_norm);
+
+  // In-place fused Add and Gemma RMS Normalization.
+  ops.def(
+      "fused_add_gemma_rms_norm(Tensor! input, Tensor! residual, "
+      "Tensor weight, float epsilon) -> ()");
+  ops.impl(
+      "fused_add_gemma_rms_norm", torch::kXPU, &fused_add_gemma_rms_norm);
+
+  ops.def(
+      "rms_norm_gated(Tensor! result, Tensor! input, Tensor! weight, "
+      "Tensor? z, float epsilon, "
+      "bool norm_before_gate, str activation) -> ()");
+  ops.impl("rms_norm_gated", torch::kXPU, &rms_norm_gated);
+
   // activation ops
   ops.def("silu_and_mul(Tensor! out, Tensor! input) -> ()");
   ops.impl("silu_and_mul", torch::kXPU, &silu_and_mul);
