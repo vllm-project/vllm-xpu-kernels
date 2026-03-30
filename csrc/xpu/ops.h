@@ -66,6 +66,26 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     int64_t rotary_dim,
     bool is_neox);
 
+/**
+ * Multi-head Rotary Positional Embedding (MRoPE) for multimodal models.
+ *
+ * @param positions     [3, num_tokens] int64 – T/H/W position indices.
+ * @param query         [num_tokens, q_num_head, head_size]
+ * @param key           [num_tokens, k_num_head, head_size]
+ * @param cos_sin_cache [max_seq_len, rotary_dim]  (first half=cos, second half=sin)
+ * @param rotary_dim    Rotary portion of each head (≤ head_size).
+ * @param mrope_section [t, h, w] with t+h+w == rotary_dim/2.
+ * @param is_neox_style true → neox (split halves), false → gptj (interleaved pairs).
+ */
+std::tuple<at::Tensor, at::Tensor> mrope(
+    const at::Tensor&           positions,
+    const at::Tensor&           query,
+    const at::Tensor&           key,
+    const at::Tensor&           cos_sin_cache,
+    int64_t                     rotary_dim,
+    const std::vector<int64_t>& mrope_section,
+    bool                        is_neox_style);
+
 void gdn_attention(
     torch::Tensor& core_attn_out,
     torch::Tensor& z,

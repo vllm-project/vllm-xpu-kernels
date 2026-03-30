@@ -76,6 +76,19 @@ def deepseek_scaling_rope(
                                                   rotary_dim, is_neox_style)
 
 
+def mrope(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rotary_dim: int,
+    mrope_section: list[int],
+    is_neox_style: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._xpu_C.mrope(positions, query, key, cos_sin_cache,
+                                  rotary_dim, mrope_section, is_neox_style)
+
+
 def reshape_and_cache(
     key: torch.Tensor,
     value: torch.Tensor,

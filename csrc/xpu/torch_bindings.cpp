@@ -51,6 +51,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "-> (Tensor, Tensor)");
   xpu_ops.impl("deepseek_scaling_rope", torch::kXPU, &deepseek_scaling_rope);
 
+  // MRoPE: multi-head rotary positional embedding for multimodal models.
+  // positions: [3, num_tokens] (T/H/W), mrope_section: [t, h, w] with sum == rotary_dim/2
+  xpu_ops.def(
+      "mrope(Tensor! positions, Tensor! query, Tensor! key, "
+      "Tensor! cos_sin_cache, int rotary_dim, int[] mrope_section, bool "
+      "is_neox_style) "
+      "-> (Tensor, Tensor)");
+  xpu_ops.impl("mrope", torch::kXPU, &mrope);
+
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
       "indices, float scale) -> ()");
