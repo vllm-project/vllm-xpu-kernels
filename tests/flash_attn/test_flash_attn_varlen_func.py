@@ -71,8 +71,7 @@ def ref_paged_attn(query: torch.Tensor,
 
             k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
             k = k[:kv_len]
-            v = value_cache[block_indices].view(-1, num_kv_heads,
-                                                    v_head_size)
+            v = value_cache[block_indices].view(-1, num_kv_heads, v_head_size)
             v = v[:kv_len]
         else:
             k = key_cache[start_idx_kv:start_idx_kv + kv_len]
@@ -166,7 +165,7 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("is_paged", PAGED)
 @pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
 @torch.inference_mode()
-def not_test_varlen_with_paged_kv(
+def test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
@@ -346,7 +345,7 @@ def not_test_varlen_with_paged_kv(
 @pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
 @pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
 @torch.inference_mode()
-def not_test_decode_with_paged_kv(
+def test_decode_with_paged_kv(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
