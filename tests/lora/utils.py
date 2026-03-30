@@ -239,7 +239,7 @@ def generate_data_for_nslices(
         # expand op needs to complete y+=a@lora_b, so output is
         # initinized randomly
         our_out_tensor = torch.rand((total_tokens, hidden_size * nslices),
-                                    dtype=dtype).to(device)
+                                    dtype=input_dtype).to(device)
 
     # Ensure the same input.
     ref_out_tensor = our_out_tensor.clone()

@@ -30,12 +30,17 @@ def bgmv_expand(
     lora_indices_tensor: torch.Tensor,
     add_inputs: bool = True,
 ):
-    selected_loras = lora_b_weights[lora_indices_tensor].to(
-        dtype=output_tensor.dtype)
+    selected_loras = lora_b_weights[lora_indices_tensor]
     if len(selected_loras.shape) == 4:
         selected_loras = selected_loras.squeeze(dim=1)
-    inputs = inputs.to(dtype=output_tensor.dtype)
-    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras)
+    # Compute at the highest precision among inputs, weights, and output
+    # so that higher-precision inputs (e.g. float32) are never downcast.
+    compute_dtype = torch.promote_types(
+        torch.promote_types(inputs.dtype, selected_loras.dtype),
+        output_tensor.dtype,
+    )
+    outputs = torch.einsum("bi, boi -> bo", inputs.to(dtype=compute_dtype),
+                           selected_loras.to(dtype=compute_dtype))
 
     limit = output_tensor.shape[0]
     if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
@@ -45,9 +50,11 @@ def bgmv_expand(
     common_len = min(outputs.shape[1], output_tensor.shape[1])
 
     if add_inputs:
-        output_tensor[:, :common_len] += outputs[:limit, :common_len]
+        output_tensor[:, :common_len] += outputs[:limit, :common_len].to(
+            output_tensor.dtype)
     else:
-        output_tensor[:, :common_len] = outputs[:limit, :common_len]
+        output_tensor[:, :common_len] = outputs[:limit, :common_len].to(
+            output_tensor.dtype)
 
 
 def sgmv_shrink(
@@ -76,14 +83,18 @@ def bgmv_shrink(
     lora_indices_tensor: torch.Tensor,
     scaling: float = 1.0,
 ):
-    selected_loras = lora_b_weights[lora_indices_tensor].to(
-        dtype=output_tensor.dtype)
+    selected_loras = lora_b_weights[lora_indices_tensor]
     if len(selected_loras.shape) == 4:
         selected_loras = selected_loras.squeeze(dim=1)
-    inputs = inputs.to(dtype=output_tensor.dtype)
-    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras)
+    compute_dtype = torch.promote_types(
+        torch.promote_types(inputs.dtype, selected_loras.dtype),
+        output_tensor.dtype,
+    )
+    outputs = torch.einsum("bi, boi -> bo", inputs.to(dtype=compute_dtype),
+                           selected_loras.to(dtype=compute_dtype))
 
-    output_tensor[:, :outputs.shape[1]] = scaling * outputs[:]
+    output_tensor[:, :outputs.shape[1]] = (scaling * outputs[:]).to(
+        output_tensor.dtype)
 
 
 def sgmv_expand_slice(
@@ -123,14 +134,19 @@ def bgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = True,
 ):
-    selected_loras = lora_b_weights[lora_indices_tensor].to(
-        dtype=output_tensor.dtype)
-    inputs = inputs.to(dtype=output_tensor.dtype)
+    selected_loras = lora_b_weights[lora_indices_tensor]
     if len(selected_loras.shape) == 4:
         selected_loras = selected_loras.squeeze(dim=1)
-    outputs = torch.einsum("bi, boi -> bo", inputs, selected_loras)
+    compute_dtype = torch.promote_types(
+        torch.promote_types(inputs.dtype, selected_loras.dtype),
+        output_tensor.dtype,
+    )
+    outputs = torch.einsum("bi, boi -> bo", inputs.to(dtype=compute_dtype),
+                           selected_loras.to(dtype=compute_dtype))
 
     if add_inputs:
-        output_tensor[:, slice_offset:slice_offset + slice_size] += outputs[:]
+        output_tensor[:, slice_offset:slice_offset +
+                      slice_size] += outputs[:].to(output_tensor.dtype)
     else:
-        output_tensor[:, slice_offset:slice_offset + slice_size] = outputs[:]
+        output_tensor[:, slice_offset:slice_offset +
+                      slice_size] = outputs[:].to(output_tensor.dtype)
