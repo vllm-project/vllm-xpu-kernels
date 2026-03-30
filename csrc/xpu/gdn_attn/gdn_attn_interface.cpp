@@ -47,7 +47,8 @@ void gdn_attention(
     const torch::Tensor& non_spec_query_start_loc,       // [batch_size + 1]
     const torch::Tensor& non_spec_state_indices_tensor,  // [batch_size]
     const int64_t num_actual_tokens,
-    const int64_t tp_size) {
+    const int64_t tp_size,
+    const bool reorder_input) {
   TORCH_CHECK(
       core_attn_out.is_contiguous(), "core_attn_out must be contiguous");
   TORCH_CHECK(z.is_contiguous(), "z must be contiguous");
@@ -144,7 +145,8 @@ void gdn_attention(
         act_mode,                                                 \
         pad_slot_id,                                              \
         num_prefills,                                             \
-        num_decodes);                                             \
+        num_decodes,                                              \
+        reorder_input);                                           \
     gdn::gated_delta_rule(                                        \
         queue,                                                    \
         core_attn_out,                                            \
@@ -203,7 +205,8 @@ void gdn_attention(
         act_mode,
         pad_slot_id,
         num_prefills,
-        num_decodes);
+        num_decodes,
+        reorder_input);
 
     chunk_gated_delta_rule_xe2(
         queue,

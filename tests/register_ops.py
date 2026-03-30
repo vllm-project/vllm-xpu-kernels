@@ -143,6 +143,36 @@ def gather_cache(src_cache: torch.Tensor,
                                         cu_seq_lens, batch_size, seq_starts)
 
 
+def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor,
+                              slot_mapping: torch.Tensor,
+                              quant_block_size: int, scale_fmt: str) -> None:
+    torch.ops._C_cache_ops.indexer_k_quant_and_cache(k, kv_cache, slot_mapping,
+                                                     quant_block_size,
+                                                     scale_fmt)
+
+
+def xpu_memcpy_sync(dst_ptr: int,
+                    src_ptr: int,
+                    n_bytes: int,
+                    kind: int,
+                    device: int = -1) -> None:
+    """Pointer-based synchronous memcpy op.
+
+    kind: 0=H2D, 1=D2H, 2=D2D.
+    """
+
+    def _to_i64_ptr(ptr: int) -> int:
+        return ptr if ptr < (1 << 63) else ptr - (1 << 64)
+
+    torch.ops._C.xpu_memcpy_sync(
+        _to_i64_ptr(dst_ptr),
+        _to_i64_ptr(src_ptr),
+        n_bytes,
+        kind,
+        device,
+    )
+
+
 def convert_fp8(
     dst_cache: torch.Tensor,
     src_cache: torch.Tensor,
@@ -195,6 +225,15 @@ def per_token_group_fp8_quant(input: torch.Tensor,
     torch.ops._C.per_token_group_fp8_quant(input, output_q, output_s,
                                            group_size, eps, fp8_min, fp8_max,
                                            scale_ue8m0)
+
+
+def per_token_group_quant_mxfp4(input: torch.Tensor,
+                                output_q: torch.Tensor,
+                                output_s: torch.Tensor,
+                                group_size: int = 32,
+                                eps: float = 1e-10) -> None:
+    torch.ops._C.per_token_group_quant_mxfp4(input, output_q, output_s,
+                                             group_size, eps)
 
 
 def swigluoai_and_mul(
@@ -391,3 +430,43 @@ def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  bias: Optional[torch.Tensor]) -> None:
     torch.ops._moe_C.topk_sigmoid(topk_weights, topk_ids, token_expert_indices,
                                   gating_output, renormalize, bias)
+
+
+def topk_per_row_prefill(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    top_k: int,
+) -> None:
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+
+def topk_per_row_decode(
+    logits: torch.Tensor,
+    next_n: int,
+    seq_lens: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    top_k: int,
+) -> None:
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        next_n,
+        seq_lens,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )

@@ -10,7 +10,6 @@ cmake_minimum_required(VERSION 3.26)
 # If you want to only build one target, make sure to install it manually: cmake
 # --build . --target _C cmake --install . --component _C
 project(vllm_extensions LANGUAGES CXX)
-
 # XPU by default, used by setup.py
 set(VLLM_TARGET_DEVICE
     "xpu"
@@ -226,7 +225,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages
   # when building.
   set(CUTLASS_REVISION
-      "3f2a337e885db0fb97b2a6ba514eb7a2a734ac4a"
+      "cd763790ad2f74d7294435ecf77682bac0062c3a"
       CACHE STRING "CUTLASS revision to use")
 
   if(DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -308,6 +307,7 @@ if(BUILD_SYCL_TLA_KERNELS)
 
   set(SYCL_TLA_KERNELS_COMPILE_FLAGS ${VLLM_GPU_COMPILE_FLAGS})
   list(APPEND SYCL_TLA_KERNELS_COMPILE_FLAGS ${VLLM_CUTLASS_FLAGS})
+  list(APPEND SYCL_TLA_KERNELS_COMPILE_FLAGS "-fno-sycl-instrument-device-code")
 
   # compile static library for attn and grouped_gemm, link this library to vLLM
   # extensions shared library
@@ -350,6 +350,49 @@ list(
   "torch")
 
 #
+# xpumem_allocator extension - XPU memory allocator with Python callbacks
+#
+set(XPUMEM_ALLOCATOR_ENABLED
+    ON
+    CACHE BOOL "Build xpumem_allocator extension")
+if(XPUMEM_ALLOCATOR_ENABLED)
+  message(STATUS "Enabling xpumem_allocator extension.")
+
+  set(XPUMEM_ALLOCATOR_SRC "csrc/utils/mem_alloc.cpp")
+  include_directories("/usr/include")
+
+  # Create Python module for xpumem_allocator
+  find_package(Python REQUIRED COMPONENTS Development)
+  find_package(Torch REQUIRED)
+  list(APPEND PYTORCH_INCLUDES ${TORCH_INCLUDE_DIRS})
+  python_add_library(xpumem_allocator MODULE USE_SABI 3 WITH_SOABI
+                     "${XPUMEM_ALLOCATOR_SRC}")
+
+  set_property(TARGET xpumem_allocator PROPERTY CXX_STANDARD 17)
+
+  if(VLLM_GPU_LANG STREQUAL "SYCL")
+    target_compile_options(xpumem_allocator PRIVATE ${VLLM_GPU_COMPILE_FLAGS})
+  endif()
+  get_target_property(EXISTING_DEFS xpumem_allocator COMPILE_DEFINITIONS)
+  if(EXISTING_DEFS)
+    list(REMOVE_ITEM EXISTING_DEFS "Py_LIMITED_API=3")
+    set_target_properties(xpumem_allocator PROPERTIES COMPILE_DEFINITIONS
+                                                      "${EXISTING_DEFS}")
+  endif()
+  target_include_directories(xpumem_allocator PRIVATE ${Python_INCLUDE_DIRS}
+                                                      ${PYTORCH_INCLUDES} csrc)
+
+  target_link_libraries(xpumem_allocator PRIVATE torch ${TORCH_LIBRARIES})
+
+  if(VLLM_GPU_LANG STREQUAL "SYCL")
+    target_link_options(xpumem_allocator PRIVATE ${VLLM_GPU_LINK_FLAGS})
+  endif()
+
+  install(TARGETS xpumem_allocator LIBRARY DESTINATION vllm_xpu_kernels
+                                           COMPONENT xpumem_allocator)
+endif()
+
+#
 # Define other extension targets
 #
 
@@ -365,9 +408,11 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/pos_encoding_kernels.cpp"
       "csrc/torch_bindings.cpp"
       "csrc/quantization/fp8/fp8_quant.cpp"
+      "csrc/quantization/fp4/mxfp4_quant.cpp"
       "csrc/xpu_view.cpp"
       "csrc/tensor_utils.cpp"
-      "csrc/utils/mem_cpy.cpp")
+      "csrc/utils/mem_cpy.cpp"
+      "csrc/topk_per_row.cpp")
   include_directories("/usr/include")
 
   define_gpu_extension_target(

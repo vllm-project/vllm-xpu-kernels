@@ -7,6 +7,7 @@ from typing import Optional
 import pytest
 import torch
 
+from tests.utils import format_tc
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 NUM_HEADS = [(8, 2)]
@@ -155,15 +156,15 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @pytest.mark.parametrize("soft_cap", SOFT_CAPS)
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("fa_version", [2])
-@pytest.mark.parametrize("q_dtype", QDTYPES)
+@pytest.mark.parametrize("q_dtype", QDTYPES, ids=format_tc)
 @pytest.mark.parametrize("is_sink", SINK)
 @pytest.mark.parametrize("is_casual", CASUAL)
 @pytest.mark.parametrize("is_paged", PAGED)
-@pytest.mark.parametrize("fp8_dtype", FP8KV)
+@pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
 @torch.inference_mode()
 def not_test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -336,13 +337,13 @@ def not_test_varlen_with_paged_kv(
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @pytest.mark.parametrize("soft_cap", SOFT_CAPS)
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("fa_version", [2])
-@pytest.mark.parametrize("q_dtype", QDTYPES)
+@pytest.mark.parametrize("q_dtype", QDTYPES, ids=format_tc)
 @pytest.mark.parametrize("is_sink", SINK)
-@pytest.mark.parametrize("fp8_dtype", FP8KV)
+@pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
 @pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
 @torch.inference_mode()
 def not_test_decode_with_paged_kv(
@@ -413,6 +414,7 @@ def not_test_decode_with_paged_kv(
     q_descale = None  #noqa: F841
     k_descale = None  #noqa: F841
     v_descale = None  #noqa: F841
+    scale_shape = (num_seqs, num_kv_heads)
     if q_dtype is not None:
         # QKV are drawn from N(0, 1): no need for a fp8 scaling factor
         maybe_quantized_query = query.to(q_dtype)
@@ -441,8 +443,10 @@ def not_test_decode_with_paged_kv(
                                     softmax_scale=scale,
                                     causal=False,
                                     block_table=block_tables,
-                                    k_descale=k_descale,
-                                    v_descale=v_descale,
+                                    k_descale=k_descale.expand(scale_shape)
+                                    if k_descale is not None else None,
+                                    v_descale=v_descale.expand(scale_shape)
+                                    if v_descale is not None else None,
                                     window_size=window_size,
                                     s_aux=sink)
 

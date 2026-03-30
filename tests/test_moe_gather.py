@@ -3,7 +3,7 @@ import pytest
 import torch
 
 import vllm_xpu_kernels._moe_C  # noqa: F401
-from tests.utils import seed_everything
+from tests.utils import format_tc, seed_everything
 
 DEVICE = "xpu"
 INPUT_LENGTHS = [1, 8, 1024, 8192]
@@ -25,33 +25,17 @@ MINI_PYTEST_PARAMS = {
 
 
 def ref_moe_gather(output, moe_output, topk_weights,
-                   permuted_row_to_unpermuted_row,
                    unpermuted_row_to_permuted_row, expert_first_token_offset,
                    num_experts):
     input_len = output.shape[0]
-    hidden_size = output.shape[1]
     topk = topk_weights.shape[1]
-    moe_indices = unpermuted_row_to_permuted_row.view(topk,
-                                                      input_len).transpose(
-                                                          0, 1)
+    moe_indices = unpermuted_row_to_permuted_row.view(input_len, topk)
 
-    if expert_first_token_offset[-1] == 0:
-        selected_outputs = torch.zeros_like(moe_output)
-        selected_outputs = selected_outputs.view(
-            [input_len, topk, hidden_size])
-    else:
-        selected_outputs = moe_output[
-            moe_indices]  # (input_len, topk, hidden_size)
-        mask = (moe_indices != 0).unsqueeze(-1)
-        selected_outputs = selected_outputs * mask
-        selected_outputs = selected_outputs.contiguous()
-
-        unpermuted_row_to_permuted_row_0 = permuted_row_to_unpermuted_row[0]
-        topk_idx = unpermuted_row_to_permuted_row_0 // input_len
-        input_len_idx = unpermuted_row_to_permuted_row_0 % input_len
-        transposed_idx = input_len_idx * topk + topk_idx
-        selected_outputs.view([input_len * topk,
-                               hidden_size])[transposed_idx] = moe_output[0]
+    selected_outputs = moe_output[
+        moe_indices]  # (input_len, topk, hidden_size)
+    mask = (moe_indices != -1).unsqueeze(-1)
+    selected_outputs = selected_outputs * mask
+    selected_outputs = selected_outputs.contiguous()
 
     selected_outputs_fp32 = selected_outputs.float()
     topk_weights_fp32 = topk_weights.float()
@@ -67,7 +51,8 @@ def ref_moe_gather(output, moe_output, topk_weights,
 @pytest.mark.parametrize("ep_rank", EP_RANK)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype",
-                         [torch.bfloat16, torch.float16, torch.float32])
+                         [torch.bfloat16, torch.float16, torch.float32],
+                         ids=format_tc)
 def test_moe_gather(input_len, hidden_size, num_experts, topk, ep_rank,
                     ep_size, dtype):
     seed_everything(7)
@@ -102,13 +87,11 @@ def test_moe_gather(input_len, hidden_size, num_experts, topk, ep_rank,
                                                     device=DEVICE)
     unpermuted_row_to_permuted_row = torch.argsort(
         permuted_row_to_unpermuted_row).to(torch.int32)
-    permuted_row_to_unpermuted_row[expert_cumsum[-1]:] = 0
     unpermuted_row_to_permuted_row[unpermuted_row_to_permuted_row >=
-                                   expert_cumsum[-1]] = 0
+                                   expert_cumsum[-1]] = -1
 
     output = torch.empty((input_len, hidden_size), device=DEVICE, dtype=dtype)
     torch.ops._moe_C.moe_gather(output, moe_output, expert_scores,
-                                permuted_row_to_unpermuted_row,
                                 unpermuted_row_to_permuted_row,
                                 expert_first_token_offset,
                                 num_experts_per_node)
@@ -117,7 +100,6 @@ def test_moe_gather(input_len, hidden_size, num_experts, topk, ep_rank,
                              device=DEVICE,
                              dtype=dtype)
     ref_moe_gather(ref_output, moe_output, expert_scores,
-                   permuted_row_to_unpermuted_row,
                    unpermuted_row_to_permuted_row, expert_first_token_offset,
                    num_experts_per_node)
     torch.testing.assert_close(output, ref_output, rtol=1e-2, atol=1e-2)

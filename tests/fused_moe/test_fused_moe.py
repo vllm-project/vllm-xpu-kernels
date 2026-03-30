@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from tests.ops.fp8_quant_op import scaled_fp8_quant
-from tests.utils import seed_everything
+from tests.utils import format_tc, seed_everything
 from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
 DEVICE = "xpu"
@@ -148,9 +148,11 @@ def ref_fused_moe(x,
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
 @pytest.mark.parametrize("w_dtype",
-                         [torch.float8_e5m2, torch.float8_e4m3fn, None])
+                         [torch.float8_e5m2, torch.float8_e4m3fn, None],
+                         ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
     seed_everything(7)
@@ -229,6 +231,9 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
                             flat_expert_weights, flat_expert_indices, topk,
                             "silu", e)
 
+    w13.data = w13.transpose(-1, -2).contiguous()
+    w2.data = w2.transpose(-1, -2).contiguous()
+
     output = xpu_fused_moe(hidden_states=a,
                            w13=w13,
                            w13_scales=w13_scales,
@@ -255,7 +260,7 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_fused_moe_int4(m, n, k, e, topk, dtype, has_bias):
     seed_everything(7)
@@ -359,7 +364,8 @@ def test_fused_moe_int4(m, n, k, e, topk, dtype, has_bias):
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
     seed_everything(7)
@@ -473,8 +479,8 @@ FUSED_MOE_MNK_FACTORS = [
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_rank", EP_RANK)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
-@pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("w_dtype", [torch.float8_e5m2, None])
+@pytest.mark.parametrize("dtype", [torch.float16], ids=format_tc)
+@pytest.mark.parametrize("w_dtype", [torch.float8_e5m2, None], ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype,
                       has_bias):
@@ -559,6 +565,9 @@ def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype,
     expert_start_id = e * ep_rank
     expert_end_id = expert_start_id + e
 
+    w13.data = w13.transpose(-1, -2).contiguous()
+    w2.data = w2.transpose(-1, -2).contiguous()
+
     output = xpu_fused_moe(hidden_states=a,
                            w13=w13[expert_start_id:expert_end_id],
                            w13_scales=w13_scales[expert_start_id:expert_end_id]
@@ -593,7 +602,7 @@ def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype,
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_rank", EP_RANK)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
                            has_bias):
@@ -711,7 +720,7 @@ def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_rank", EP_RANK)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("dtype", [torch.float16], ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
                             has_bias):

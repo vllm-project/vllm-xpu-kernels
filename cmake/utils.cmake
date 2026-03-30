@@ -5,7 +5,7 @@
 macro(find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
   file(REAL_PATH ${EXECUTABLE} EXECUTABLE)
   set(Python_EXECUTABLE ${EXECUTABLE})
-  find_package(Python COMPONENTS Interpreter Development.Module
+  find_package(Python COMPONENTS Interpreter Development Development.Module
                                  Development.SABIModule)
   if(NOT Python_FOUND)
     message(FATAL_ERROR "Unable to find python matching: ${EXECUTABLE}.")
@@ -19,6 +19,9 @@ macro(find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
         "${_SUPPORTED_VERSIONS_LIST}.")
   endif()
   message(STATUS "Found python matching: ${EXECUTABLE}.")
+  message(STATUS "Python include dirs: ${Python_INCLUDE_DIRS}")
+  message(STATUS "Python libraries: ${Python_LIBRARIES}")
+  message(STATUS "Python version: ${Python_VERSION}")
 endmacro()
 
 #

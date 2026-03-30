@@ -108,25 +108,29 @@ def implement_zp(qweight):
     return result
 
 
-def xpu_fused_moe(hidden_states,
-                  w13,
-                  w13_scales,
-                  w13_bias,
-                  w2,
-                  w2_scales,
-                  w2_bias,
-                  topk_weights,
-                  topk_ids,
-                  n_experts_per_token,
-                  activation,
-                  num_experts,
-                  ep_rank=0,
-                  ep_size=1,
-                  expert_map=None,
-                  output=None,
-                  is_fp8=False,
-                  is_int4=False,
-                  is_mxfp4=False):
+# vllm_xpu_kernel,main,
+#   https://github.com/vllm-project/vllm-xpu-kernels/tree/3cf991b
+def xpu_fused_moe_CalKernelTime(hidden_states,
+                                w13,
+                                w13_scales,
+                                w13_bias,
+                                w2,
+                                w2_scales,
+                                w2_bias,
+                                topk_weights,
+                                topk_ids,
+                                n_experts_per_token,
+                                activation,
+                                num_experts,
+                                ep_rank=0,
+                                ep_size=1,
+                                expert_map=None,
+                                output=None,
+                                is_fp8=False,
+                                is_int4=False,
+                                is_mxfp4=False,
+                                start_event=None,
+                                end_event=None):
     '''
     hidden_states: [num_rows, hidden_size]
     w13: [num_experts, 2*inter_size, hidden_size]
@@ -154,17 +158,27 @@ def xpu_fused_moe(hidden_states,
     else:
         assert output.shape == hidden_states.shape, \
             "output shape must be the same as hidden_states shape"
+    inter_size = list(w13.shape)[-2] // 2
+
+    assert w13.is_contiguous() and w2.is_contiguous()
+    if hasattr(w13, 'xpu_fused_moe'):
+        gemm1_n = w13.shape[2]
+        gemm2_n = w2.shape[2]
+    else:
+        gemm1_n = w13.shape[1]
+        gemm2_n = w2.shape[1]
 
     # 4bits support [E, N, K]
     # other types [E, K, N]
     if not is_int4 and not is_mxfp4:
-        inter_size = list(w13.shape)[-1] // 2
-    else:
-        inter_size = list(w13.shape)[-2] // 2
+        if not hasattr(w13, 'xpu_fused_moe'):
+            w13.data = w13.transpose(-1, -2).contiguous()
+            w2.data = w2.transpose(-1, -2).contiguous()
+            w13.xpu_fused_moe = True
+            w13.inter_size = inter_size
+        else:
+            inter_size = w13.inter_size
 
-    assert w13.is_contiguous() and w2.is_contiguous()
-
-    # FIXME: move this to vllm
     if is_int4 and not hasattr(w13, 'xpu_fused_moe'):
         w13_tmp = torch.empty_like(w13)
         w2_tmp = torch.empty_like(w2)
@@ -232,6 +246,7 @@ def xpu_fused_moe(hidden_states,
     ########### gemm1 ##################
     input_B = w13
 
+    start_event.record()
     torch.ops._xpu_C.cutlass_grouped_gemm_interface(
         ptr_A=remapped_hidden_states,
         ptr_B=input_B,
@@ -244,6 +259,13 @@ def xpu_fused_moe(hidden_states,
         num_experts=num_experts,
         is_B_int4=is_int4,
         is_B_mxfp4=is_mxfp4)
+    end_event.record()
+    end_event.synchronize()
+    gemm1_kernel_time = start_event.elapsed_time(end_event)
+    diff = expert_first_token_offset[1:] - expert_first_token_offset[:-1]
+    active_experts1 = (diff > 0).sum().item()
+    gemm1_m = remapped_hidden_states.shape[0]
+    gemm1_k = remapped_hidden_states.shape[1]
 
     # act
     act_output = torch.empty((num_moe_inputs, inter_size),
@@ -253,7 +275,7 @@ def xpu_fused_moe(hidden_states,
         torch.ops._C.silu_and_mul(act_output, gemm1_output)
     elif activation == "gelu":
         torch.ops._C.gelu_and_mul(act_output, gemm1_output)
-    elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
+    elif activation == "swigluoai":
         torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
@@ -265,6 +287,7 @@ def xpu_fused_moe(hidden_states,
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
 
+    start_event.record()
     torch.ops._xpu_C.cutlass_grouped_gemm_interface(
         ptr_A=input_A,
         ptr_B=input_B,
@@ -277,9 +300,22 @@ def xpu_fused_moe(hidden_states,
         num_experts=num_experts,
         is_B_int4=is_int4,
         is_B_mxfp4=is_mxfp4)
+    end_event.record()
+    end_event.synchronize()
+    gemm2_kernel_time = start_event.elapsed_time(end_event)
 
+    start_event.record()
     torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
                                 unpermuted_row_to_permuted_row,
                                 expert_first_token_offset, num_experts)
+    end_event.record()
+    end_event.synchronize()
+    gather_kernel_time = start_event.elapsed_time(end_event)
 
-    return output
+    diff = expert_first_token_offset[1:] - expert_first_token_offset[:-1]
+    active_experts2 = (diff > 0).sum().item()
+    gemm2_m = input_A.shape[0]
+    gemm2_k = input_A.shape[1]
+    return gemm1_kernel_time, gemm2_kernel_time, gather_kernel_time, (
+        gemm1_m, gemm1_n, gemm1_k, active_experts1), (gemm2_m, gemm2_n,
+                                                      gemm2_k, active_experts2)
