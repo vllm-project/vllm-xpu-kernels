@@ -86,6 +86,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.def("is_pvc(int device_index) -> bool");
   xpu_ops.impl("is_pvc", &is_pvc);
 
+  // test only, will not use in vllm
   xpu_ops.def(
       "exponential_2d_(Tensor! tensor, Tensor! seeds, float lambda) -> ()");
   xpu_ops.impl("exponential_2d_", torch::kXPU, &exponential_2d_);

@@ -4,8 +4,6 @@
 
 namespace TopkToppSamplerImpl {
 
-using namespace RAND;
-
 enum class LogprobsMode {
   default_mode,
   raw_logits,
@@ -22,7 +20,7 @@ struct random_sampler_only_kernel {
   static constexpr int VEC_SIZE = 4;
 
   using scalar_t = float;
-  using accscalar_t = float;
+  using acc_scalar_t = float;
 
   random_sampler_only_kernel(
       int64_t* random_sampled,
@@ -63,11 +61,11 @@ struct random_sampler_only_kernel {
     const int global_id = item.get_global_linear_id();
     uint64_t philox_seed = seed;
     uint64_t philox_offset = offset;
-    randStatePhilox4_32_10_t state;
-    rand_init(philox_seed, global_id, philox_offset, &state);
+    RAND::randStatePhilox4_32_10_t state;
+    RAND::rand_init(philox_seed, global_id, philox_offset, &state);
 
-    Uniform4DistributionFunctor dist_func;
-    ExponentialFunctor<scalar_t, accscalar_t> exponential_func(lambda);
+    RAND::Uniform4DistributionFunctor dist_func;
+    RAND::ExponentialFunctor<scalar_t, acc_scalar_t> exponential_func(lambda);
 
     auto group = item.get_group();
 
@@ -170,7 +168,7 @@ struct random_sampler_only_kernel {
 #pragma unroll
       for (int e = 0; e < VEC_SIZE; ++e) {
         float logit = local_data[e];
-        float rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
+        float rand = exponential_func(static_cast<acc_scalar_t>((&rand4.x)[e]));
 
         if constexpr (logprobs_mode == LogprobsMode::processed_logits) {
           logits_to_return_ptr[l * VEC_SIZE + e] = logit;
@@ -198,7 +196,7 @@ struct random_sampler_only_kernel {
 #pragma unroll
       for (int e = 0; e < remained_vec_size; ++e) {
         float logit = local_data[e];
-        float rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
+        float rand = exponential_func(static_cast<acc_scalar_t>((&rand4.x)[e]));
 
         if constexpr (logprobs_mode == LogprobsMode::processed_logits) {
           logits_to_return_ptr[loop_times * VEC_SIZE + e] = logit;
@@ -245,7 +243,7 @@ struct top_k_only_kernel {
   static constexpr int VEC_SIZE = 4;
 
   using scalar_t = float;
-  using accscalar_t = float;
+  using acc_scalar_t = float;
 
   top_k_only_kernel(
       int64_t* random_sampled,
@@ -288,11 +286,11 @@ struct top_k_only_kernel {
     const int global_id = item.get_global_linear_id();
     uint64_t philox_seed = seed;
     uint64_t philox_offset = offset;
-    randStatePhilox4_32_10_t state;
-    rand_init(philox_seed, global_id, philox_offset, &state);
+    RAND::randStatePhilox4_32_10_t state;
+    RAND::rand_init(philox_seed, global_id, philox_offset, &state);
 
-    Uniform4DistributionFunctor dist_func;
-    ExponentialFunctor<scalar_t, accscalar_t> exponential_func(lambda);
+    RAND::Uniform4DistributionFunctor dist_func;
+    RAND::ExponentialFunctor<scalar_t, acc_scalar_t> exponential_func(lambda);
 
     auto group = item.get_group();
 
@@ -474,7 +472,7 @@ struct top_k_only_kernel {
 #pragma unroll
       for (int e = 0; e < VEC_SIZE; ++e) {
         float logit = local_data[e];
-        float rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
+        float rand = exponential_func(static_cast<acc_scalar_t>((&rand4.x)[e]));
 
         if (logit >= pivot) {
           if constexpr (logprobs_mode == LogprobsMode::processed_logits) {
@@ -510,7 +508,7 @@ struct top_k_only_kernel {
 #pragma unroll
       for (int e = 0; e < remained_vec_size; ++e) {
         float logit = local_data[e];
-        float rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
+        float rand = exponential_func(static_cast<acc_scalar_t>((&rand4.x)[e]));
 
         if (logit >= pivot) {
           if constexpr (logprobs_mode == LogprobsMode::processed_logits) {
@@ -566,7 +564,7 @@ struct top_p_only_kernel {
   static constexpr int VEC_SIZE = 4;
 
   using scalar_t = float;
-  using accscalar_t = float;
+  using acc_scalar_t = float;
 
   top_p_only_kernel(
       int64_t* random_sampled,
@@ -609,11 +607,11 @@ struct top_p_only_kernel {
     const int global_id = item.get_global_linear_id();
     uint64_t philox_seed = seed;
     uint64_t philox_offset = offset;
-    randStatePhilox4_32_10_t state;
-    rand_init(philox_seed, global_id, philox_offset, &state);
+    RAND::randStatePhilox4_32_10_t state;
+    RAND::rand_init(philox_seed, global_id, philox_offset, &state);
 
-    Uniform4DistributionFunctor dist_func;
-    ExponentialFunctor<scalar_t, accscalar_t> exponential_func(lambda);
+    RAND::Uniform4DistributionFunctor dist_func;
+    RAND::ExponentialFunctor<scalar_t, acc_scalar_t> exponential_func(lambda);
 
     auto group = item.get_group();
 
@@ -799,7 +797,7 @@ struct top_p_only_kernel {
         float logit = local_data[e];
         float logit_softmax =
             sycl::native::exp(logit - max_softmax_value) / sum_softmax;
-        float rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
+        float rand = exponential_func(static_cast<acc_scalar_t>((&rand4.x)[e]));
 
         if (logit_softmax >= pivot) {
           if constexpr (logprobs_mode == LogprobsMode::processed_logits) {
@@ -837,7 +835,7 @@ struct top_p_only_kernel {
         float logit = local_data[e];
         float logit_softmax =
             sycl::native::exp(logit - max_softmax_value) / sum_softmax;
-        float rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
+        float rand = exponential_func(static_cast<acc_scalar_t>((&rand4.x)[e]));
 
         if (logit_softmax >= pivot) {
           if constexpr (logprobs_mode == LogprobsMode::processed_logits) {
@@ -893,7 +891,7 @@ struct top_k_top_p_kernel {
   static constexpr int VEC_SIZE = 4;
 
   using scalar_t = float;
-  using accscalar_t = float;
+  using acc_scalar_t = float;
 
   top_k_top_p_kernel(
       int64_t* random_sampled,
@@ -940,11 +938,11 @@ struct top_k_top_p_kernel {
     const int global_id = item.get_global_linear_id();
     uint64_t philox_seed = seed;
     uint64_t philox_offset = offset;
-    randStatePhilox4_32_10_t state;
-    rand_init(philox_seed, global_id, philox_offset, &state);
+    RAND::randStatePhilox4_32_10_t state;
+    RAND::rand_init(philox_seed, global_id, philox_offset, &state);
 
-    Uniform4DistributionFunctor dist_func;
-    ExponentialFunctor<scalar_t, accscalar_t> exponential_func(lambda);
+    RAND::Uniform4DistributionFunctor dist_func;
+    RAND::ExponentialFunctor<scalar_t, acc_scalar_t> exponential_func(lambda);
 
     auto group = item.get_group();
 
@@ -1213,7 +1211,7 @@ struct top_k_top_p_kernel {
         float logit = local_data[e];
         float logit_softmax =
             sycl::native::exp(logit - max_softmax_value) / sum_softmax;
-        float rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
+        float rand = exponential_func(static_cast<acc_scalar_t>((&rand4.x)[e]));
 
         if (logit >= pivot_k && logit_softmax >= pivot_p) {
           if constexpr (logprobs_mode == LogprobsMode::processed_logits) {
@@ -1251,7 +1249,7 @@ struct top_k_top_p_kernel {
         float logit = local_data[e];
         float logit_softmax =
             sycl::native::exp(logit - max_softmax_value) / sum_softmax;
-        float rand = exponential_func(static_cast<accscalar_t>((&rand4.x)[e]));
+        float rand = exponential_func(static_cast<acc_scalar_t>((&rand4.x)[e]));
 
         if (logit >= pivot_k && logit_softmax >= pivot_p) {
           if constexpr (logprobs_mode == LogprobsMode::processed_logits) {
