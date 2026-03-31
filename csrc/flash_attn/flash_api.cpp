@@ -187,8 +187,6 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
   // Allocated only in chunk_prefill path when return_softmax is true
   std::optional<at::Tensor> softmax_lse_opt;
-
-  // Allocate softmax_lse if requested: [total_seqlen_q, num_heads_q]
   if (return_softmax) {
     int total_seqlen_q = q.size(0);
     int num_heads_q = q.size(1);
@@ -197,14 +195,17 @@ std::vector<at::Tensor> mha_varlen_fwd(
         q.options().dtype(at::kFloat).device(q.device()));
   }
 
-  at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
+  if (max_seqlen_q > 1 || !is_paged) {
+    at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
 
-  if (!is_paged) {
-    // Non-paged: always use chunk_prefill for everything
-    if (!out_.has_value()) {
-      out = torch::empty_like(q);
-    }
-    std::optional<const at::Tensor> no_mask = std::nullopt;
+    int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
+    at::Tensor seq_lens_q = cu_seqlens_q.slice(0, 1, batch_size + 1) -
+                            cu_seqlens_q.slice(0, 0, batch_size);
+    at::Tensor is_prefill_mask = seq_lens_q.gt(1);
+    //bool has_decode = !is_prefill_mask.all().item<bool>();
+    bool has_decode = true;
+    std::optional<const at::Tensor> is_prefill_opt = is_prefill_mask;
+
     cutlass_chunk_prefill_interface(
         queue,
         q,
@@ -228,67 +229,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_local,
         is_sink,
         softmax_lse_opt,
-        no_mask);
-  } else {
-    // Paged path: create is_prefill mask and dispatch to both kernels.
-    // Each kernel skips batches that aren't its type.
-    int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
-    at::Tensor seq_lens_q = cu_seqlens_q.slice(0, 1, batch_size + 1) -
-                            cu_seqlens_q.slice(0, 0, batch_size);
-    at::Tensor is_prefill_mask = seq_lens_q.gt(1);
-    bool all_prefill = is_prefill_mask.all().item<bool>();
-    bool all_decode = !is_prefill_mask.any().item<bool>();
+        is_prefill_opt);
 
-    if (!out_.has_value()) {
-      // Output shape uses V's head_dim (may differ from Q/K for MLA)
-      int num_tokens = q.size(0);
-      int num_heads_q = q.size(1);
-      int v_head_dim = v.size(-1);
-      out = torch::empty(
-          {num_tokens, num_heads_q, v_head_dim},
-          q.options().device(q.device()));
-    }
-
-    bool run_chunk_prefill = all_prefill || !all_decode;
-    bool run_paged_decode = all_decode || !all_prefill;
-
-    // When all batches are the same type, pass no mask (nullptr) so the
-    // kernel skips the per-batch branch and processes everything.
-    std::optional<const at::Tensor> is_prefill_opt =
-        (all_prefill || all_decode)
-            ? std::nullopt
-            : std::optional<const at::Tensor>(is_prefill_mask);
-
-    if (run_chunk_prefill) {
-      // Chunk prefill: processes prefill batches (skips decode via mask)
-      cutlass_chunk_prefill_interface(
-          queue,
-          q,
-          k,
-          v,
-          out,
-          block_table,
-          cu_seqlens_q,
-          seqlens_k,
-          max_seqlen_q,
-          max_seqlen_k,
-          k_scale,
-          v_scale,
-          softmax_scale,
-          softmax_sink_,
-          window_size_left,
-          window_size_right,
-          is_varlen,
-          is_paged,
-          is_causal,
-          is_local,
-          is_sink,
-          softmax_lse_opt,
-          is_prefill_opt);
-    }
-
-    if (run_paged_decode) {
-      // Paged decode: processes decode batches (skips prefill via mask)
+    if (has_decode) {
+      // Paged decode: processes only decode batches (skips prefill)
       int eff_window_left =
           window_size_left == -1 ? max_seqlen_k : window_size_left;
       int eff_window_right =
@@ -296,41 +240,21 @@ std::vector<at::Tensor> mha_varlen_fwd(
       int effective_seqlen_k =
           is_local ? std::min(max_seqlen_k, eff_window_left + 1) : max_seqlen_k;
 
-      int num_tokens = q.size(0);
+      int num_tokens = batch_size;
       int num_heads_q = q.size(1);
       int v_head_dim = v.size(-1);
       int num_heads_kv = k.size(2);
       int kv_block_size = k.size(1);
 
-      int num_kv_splits = num_splits.value_or(get_num_splits(
-          queue,
-          batch_size,
-          num_heads_q,
-          num_heads_kv,
-          effective_seqlen_k,
-          kv_block_size));
-
-      at::Tensor tmp_out =
-          num_kv_splits == 1
-              ? out
-              : at::empty(
-                    {num_tokens, num_heads_q * num_kv_splits, v_head_dim},
-                    q.options().device(q.device()));
-      // Initialized to neutral values so decode-skipped batches don't pollute
-      // the ReduceSplitK output when the prefill mask is active.
-      at::Tensor decode_max_logits = at::full(
+      int num_kv_splits = 1;
+      at::Tensor tmp_out = out;
+      at::Tensor decode_max_logits = at::empty(
           {num_tokens, num_heads_q, num_kv_splits},
-          -std::numeric_limits<float>::infinity(),
           q.options().dtype(at::kFloat).device(q.device()));
-      at::Tensor decode_exp_sums = at::zeros(
+      at::Tensor decode_exp_sums = at::empty(
           {num_tokens, num_heads_q, num_kv_splits},
           q.options().dtype(at::kFloat).device(q.device()));
 
-      // For paged decode (single query per sequence), causal masking is a
-      // no-op: seqused_k already constrains KV to only the valid past tokens,
-      // so there are no "future" tokens to mask. Passing is_causal=true
-      // triggers a seq_len formula that adds +q_sg_tile extra KV positions,
-      // causing invalid cache entries to pollute the attention output.
       cutlass_paged_decode_interface(
           queue,
           q,
@@ -353,12 +277,81 @@ std::vector<at::Tensor> mha_varlen_fwd(
           eff_window_right,
           is_varlen,
           is_paged,
-          false,  // is_causal: always false for decode; see comment above
+          false,  // is_causal: always false for decode;
           is_local,
           is_sink,
           num_kv_splits,
           is_prefill_opt);
     }
+  } else {
+    // Normalize -1 (unbounded) to max_seqlen_k for kernel masking logic
+    // In decode phase the window_size_right doesn't have effect
+    int eff_window_left =
+        window_size_left == -1 ? max_seqlen_k : window_size_left;
+    int eff_window_right =
+        window_size_right == -1 ? max_seqlen_k : window_size_right;
+    int effective_seqlen_k =
+        is_local ? std::min(max_seqlen_k, eff_window_left + 1) : max_seqlen_k;
+
+    int num_tokens = q.size(0);
+    int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
+    int num_heads_q = q.size(1);
+    int head_dim = q.size(2);
+    int num_heads_kv = k.size(2);
+    int block_size = k.size(1);
+
+    int num_kv_splits = num_splits.value_or(get_num_splits(
+        queue, batch_size, num_heads_kv, effective_seqlen_k, block_size));
+
+    at::Tensor tmp_out =
+        num_kv_splits == 1
+            ? out
+            : at::empty(
+                  {num_tokens, num_heads_q * num_kv_splits, head_dim},
+                  q.options().device(q.device()));
+    at::Tensor max_logits = at::full(
+        {num_tokens, num_heads_q, num_kv_splits},
+        -std::numeric_limits<float>::infinity(),
+        q.options().dtype(at::kFloat).device(q.device()));
+    at::Tensor exp_sums = at::zeros(
+        {num_tokens, num_heads_q, num_kv_splits},
+        q.options().dtype(at::kFloat).device(q.device()));
+
+    at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
+    std::optional<const at::Tensor> no_mask = std::nullopt;
+
+    // For paged decode (single query per sequence), causal masking is a
+    // no-op: seqused_k already constrains KV to only the valid past tokens,
+    // so there are no "future" tokens to mask. Passing is_causal=true
+    // triggers a seq_len formula that adds +q_sg_tile extra KV positions,
+    // causing invalid cache entries to pollute the attention output.
+    cutlass_paged_decode_interface(
+        queue,
+        q,
+        k,
+        v,
+        out,
+        tmp_out,
+        exp_sums,
+        max_logits,
+        block_table,
+        cu_seqlens_q,
+        seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        k_scale,
+        v_scale,
+        softmax_scale,
+        softmax_sink_,
+        eff_window_left,
+        eff_window_right,
+        is_varlen,
+        is_paged,
+        false,  // is_causal: always false for decode; see comment above
+        is_local,
+        is_sink,
+        num_kv_splits,
+        no_mask);
   }
 
   if (return_softmax) {
