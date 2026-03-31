@@ -82,6 +82,7 @@ jobs:
           ccache -p || true
           git submodule sync && git submodule update --init --recursive
           uv pip install -r requirements.txt
+          uv pip install gguf
           MAX_JOBS=128 uv pip install --no-build-isolation -e . -v
           ccache -s || true
 
@@ -124,6 +125,7 @@ jobs:
           ccache -p || true
           git submodule sync && git submodule update --init --recursive
           uv pip install -r requirements.txt
+          uv pip install gguf
           MAX_JOBS=80 uv pip install --no-build-isolation -e . -v
           ccache -s || true
 

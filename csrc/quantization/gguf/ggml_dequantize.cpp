@@ -50,9 +50,7 @@ class ggml_dequantize_q4_0_kernel {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
   ggml_dequantize_q4_0_kernel(
-      const block_q4_0* blocks,
-      sycl_t* out,
-      int64_t numel)
+      const block_q4_0* blocks, sycl_t* out, int64_t numel)
       : blocks_(blocks), out_(out), numel_(numel) {}
 
   void operator()(sycl::id<1> index) const {
@@ -65,12 +63,12 @@ class ggml_dequantize_q4_0_kernel {
     const int64_t block_offset = i % QK4_0;
     const block_q4_0& block = blocks_[block_index];
     const bool is_high_half = block_offset >= (QK4_0 / 2);
-    const int64_t quant_index = is_high_half ? (block_offset - QK4_0 / 2)
-                                             : block_offset;
+    const int64_t quant_index =
+        is_high_half ? (block_offset - QK4_0 / 2) : block_offset;
     const uint8_t packed = block.qs[quant_index];
     const int quant = is_high_half ? (packed >> 4) : (packed & 0x0F);
-    const float value = (static_cast<float>(quant) - 8.0f) *
-                        static_cast<float>(block.d);
+    const float value =
+        (static_cast<float>(quant) - 8.0f) * static_cast<float>(block.d);
     out_[i] = static_cast<sycl_t>(value);
   }
 
@@ -86,9 +84,7 @@ class ggml_dequantize_q5_0_kernel {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
   ggml_dequantize_q5_0_kernel(
-      const block_q5_0* blocks,
-      sycl_t* out,
-      int64_t numel)
+      const block_q5_0* blocks, sycl_t* out, int64_t numel)
       : blocks_(blocks), out_(out), numel_(numel) {}
 
   void operator()(sycl::id<1> index) const {
@@ -101,8 +97,8 @@ class ggml_dequantize_q5_0_kernel {
     const int64_t block_offset = i % QK5_0;
     const block_q5_0& block = blocks_[block_index];
     const bool is_high_half = block_offset >= (QK5_0 / 2);
-    const int64_t quant_index = is_high_half ? (block_offset - QK5_0 / 2)
-                                             : block_offset;
+    const int64_t quant_index =
+        is_high_half ? (block_offset - QK5_0 / 2) : block_offset;
     const uint8_t packed = block.qs[quant_index];
     const uint32_t qh = load_u32_le(block.qh);
     const int xh = is_high_half ? ((qh >> (quant_index + 12)) & 0x10)
@@ -125,9 +121,7 @@ class ggml_dequantize_q8_0_kernel {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
   ggml_dequantize_q8_0_kernel(
-      const block_q8_0* blocks,
-      sycl_t* out,
-      int64_t numel)
+      const block_q8_0* blocks, sycl_t* out, int64_t numel)
       : blocks_(blocks), out_(out), numel_(numel) {}
 
   void operator()(sycl::id<1> index) const {
@@ -188,42 +182,47 @@ torch::Tensor ggml_dequantize(
   CHECK_CONTIGUOUS(W);
 
   TORCH_CHECK(
-      type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q5_0 || type == GGML_TYPE_Q8_0,
+      type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q5_0 ||
+          type == GGML_TYPE_Q8_0,
       "XPU ggml_dequantize currently only supports Q4_0 (type=2), "
       "Q5_0 (type=6) and Q8_0 (type=8), got ",
       type);
-  TORCH_CHECK(W.scalar_type() == at::ScalarType::Byte,
-              "XPU ggml_dequantize expects uint8 weights, got ",
-              W.scalar_type());
+  TORCH_CHECK(
+      W.scalar_type() == at::ScalarType::Byte,
+      "XPU ggml_dequantize expects uint8 weights, got ",
+      W.scalar_type());
   TORCH_CHECK(m >= 0 && n >= 0, "m and n must be non-negative");
 
   const int64_t numel = m * n;
-  TORCH_CHECK(numel % QK4_0 == 0,
-              ggml_type_name(type),
-              " dequantize expects m * n to be divisible by ",
-              QK4_0,
-              ", got ",
-              numel);
+  TORCH_CHECK(
+      numel % QK4_0 == 0,
+      ggml_type_name(type),
+      " dequantize expects m * n to be divisible by ",
+      QK4_0,
+      ", got ",
+      numel);
 
   const int64_t expected_nbytes = get_expected_nbytes(type, numel);
   const int64_t weight_nbytes = W.numel() * W.element_size();
-  TORCH_CHECK(weight_nbytes == expected_nbytes,
-              ggml_type_name(type),
-              " packed weight size mismatch: expected ",
-              expected_nbytes,
-              " bytes for shape (",
-              m,
-              ", ",
-              n,
-              "), got ",
-              weight_nbytes,
-              " bytes");
+  TORCH_CHECK(
+      weight_nbytes == expected_nbytes,
+      ggml_type_name(type),
+      " packed weight size mismatch: expected ",
+      expected_nbytes,
+      " bytes for shape (",
+      m,
+      ", ",
+      n,
+      "), got ",
+      weight_nbytes,
+      " bytes");
 
   const auto dtype = out_dtype.value_or(torch::kFloat16);
-  TORCH_CHECK(dtype == torch::kFloat16 || dtype == torch::kBFloat16 ||
-                  dtype == torch::kFloat32,
-              "XPU ggml_dequantize only supports fp16, bf16 or fp32 outputs, got ",
-              dtype);
+  TORCH_CHECK(
+      dtype == torch::kFloat16 || dtype == torch::kBFloat16 ||
+          dtype == torch::kFloat32,
+      "XPU ggml_dequantize only supports fp16, bf16 or fp32 outputs, got ",
+      dtype);
 
   auto options = torch::TensorOptions().dtype(dtype).device(W.device());
   auto output = torch::empty({m, n}, options);
@@ -268,7 +267,8 @@ torch::Tensor ggml_dequantize(
         break;
       }
       default:
-        TORCH_CHECK(false, "Unsupported GGML type for XPU ggml_dequantize: ", type);
+        TORCH_CHECK(
+            false, "Unsupported GGML type for XPU ggml_dequantize: ", type);
     }
   });
 

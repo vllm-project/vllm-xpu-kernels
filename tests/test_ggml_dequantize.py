@@ -1,6 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from pathlib import Path
 
 import pytest
@@ -8,19 +6,15 @@ import torch
 from gguf import GGMLQuantizationType, GGUFReader, ReaderTensor, dequantize
 from huggingface_hub import snapshot_download
 
-# import vllm._custom_ops as ops
-# from vllm.model_executor.layers.fused_moe import fused_experts
-# from vllm.model_executor.layers.quantization.gguf import _fused_moe_gguf
-# from vllm.utils.torch_utils import set_random_seed
-from tests.register_ops import ggml_dequantize
+from tests.ops.ggml_dequantize_op import ggml_dequantize
 
 GGUF_SAMPLE = snapshot_download("Isotr0py/test-gguf-sample")
 GGUF_SAMPLE_MOE = snapshot_download("SzymonOzog/test-gguf-moe-sample")
 
 
 def get_gguf_sample_tensors(
-    hidden_size: int, quant_type: GGMLQuantizationType
-) -> list[ReaderTensor]:
+        hidden_size: int,
+        quant_type: GGMLQuantizationType) -> list[ReaderTensor]:
     sample_dir = GGUF_SAMPLE
     filename = f"Quant_{quant_type.name}_{hidden_size}.gguf"
     sample_file = Path(sample_dir) / filename
@@ -28,8 +22,8 @@ def get_gguf_sample_tensors(
 
 
 def get_gguf_MoE_tensors(
-    hidden_size: int, quant_type: GGMLQuantizationType
-) -> list[ReaderTensor]:
+        hidden_size: int,
+        quant_type: GGMLQuantizationType) -> list[ReaderTensor]:
     sample_dir = GGUF_SAMPLE_MOE
     filename = f"Quant_{quant_type.name}_{hidden_size}.gguf"
     sample_file = Path(sample_dir) / filename
@@ -81,9 +75,8 @@ def test_dequantize(
         shape_str = tensor.name.split("_")[-1]
         shape = map(int, shape_str.split("x"))
 
-        ref_output = torch.tensor(
-            dequantize(tensor.data, quant_type), device=device
-        ).to(dtype)
+        ref_output = torch.tensor(dequantize(tensor.data, quant_type),
+                                  device=device).to(dtype)
         output = ggml_dequantize(
             torch.tensor(tensor.data, device=device),
             quant_type,
@@ -115,7 +108,6 @@ def test_dequantize(
 #         )
 
 #         torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
-
 
 # @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 # @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
@@ -162,7 +154,6 @@ def test_dequantize(
 #         torch.testing.assert_close(
 #             output, ref_output, atol=atols[dtype], rtol=rtols[dtype]
 #         )
-
 
 # @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 # @pytest.mark.parametrize("hidden_size", [512])
