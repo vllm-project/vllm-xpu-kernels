@@ -7,6 +7,7 @@
 #define HEAD_SIZE_LIMIT_2 128
 #define HEAD_SIZE_LIMIT_3 192
 #define HEAD_SIZE_LIMIT_4 256
+#define HEAD_SIZE_LIMIT_5 512
 
 enum class CutlassDType { half, bfloat16, float8_e4m3, float8_e5m2 };
 
@@ -77,6 +78,13 @@ struct chunk_policy_head192 {
 };
 
 struct chunk_policy_head256 {
+  using ShapeQK = Shape<_256, _32, _32>;
+  using ShapePV = Shape<_256, _32, _32>;
+  using ShapeOut = Shape<_256, _256>;
+  using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
+};
+
+struct chunk_policy_head512 {
   using ShapeQK = Shape<_256, _32, _32>;
   using ShapePV = Shape<_256, _32, _32>;
   using ShapeOut = Shape<_256, _256>;

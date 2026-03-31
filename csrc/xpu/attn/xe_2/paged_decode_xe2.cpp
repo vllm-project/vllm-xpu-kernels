@@ -210,7 +210,7 @@ void cutlass_paged_decode_impl(
 
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
 
-  static constexpr int max_head_size = 256;
+  static constexpr int max_head_size = 512;
   TORCH_CHECK(
       head_size <= max_head_size,
       "FMHA forward only supports head dimension at most " +
@@ -222,6 +222,7 @@ void cutlass_paged_decode_impl(
     if (head_size <= HEAD_SIZE_LIMIT_2) return 2;
     if (head_size <= HEAD_SIZE_LIMIT_3) return 3;
     if (head_size <= HEAD_SIZE_LIMIT_4) return 4;
+    if (head_size <= HEAD_SIZE_LIMIT_5) return 5;
     return -1;
   };
 
