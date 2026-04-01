@@ -43,7 +43,10 @@ class RowsPerExpertCount {
     }
 
     int global_expert_id = topk_ids[global_id];
-    int local_expert_id = expert_map[global_expert_id];
+    int local_expert_id = global_expert_id;
+    if (expert_map != nullptr) {
+      local_expert_id = expert_map[global_expert_id];
+    }
 
     if (local_expert_id == -1) {
       // selected expert is not at current rank
@@ -161,9 +164,10 @@ class RemapHiddenStates {
   static constexpr int WARP_SIZE = 16;
   static constexpr int ElemsPerItem = sizeof(float) * 4 / sizeof(TA);
 
-  static inline sycl::nd_range<1> get_nd_range(const int num_rows, const int hidden_size) {
+  static inline sycl::nd_range<1>
+  get_nd_range(const int num_rows, const int hidden_size) {
     int local_num = GroupWorkItem;
-    if(local_num * ElemsPerItem > hidden_size) {
+    if (local_num * ElemsPerItem > hidden_size) {
       local_num = (hidden_size + ElemsPerItem - 1) / ElemsPerItem;
     }
     sycl::range<1> local(local_num);
@@ -185,9 +189,17 @@ class RemapHiddenStates {
     for (int i = 0; i < TopK; ++i) {
       global_expert_id[i] = topk_ids[row * TopK + i];
     }
+
+    if (expert_map != nullptr) {
 #pragma unroll
-    for (int i = 0; i < TopK; ++i) {
-      local_expert_id[i] = expert_map[global_expert_id[i]];
+      for (int i = 0; i < TopK; ++i) {
+        local_expert_id[i] = expert_map[global_expert_id[i]];
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < TopK; ++i) {
+        local_expert_id[i] = global_expert_id[i];
+      }
     }
 
     int rows_offset[TopK];
@@ -203,11 +215,14 @@ class RemapHiddenStates {
 
     item.barrier(sycl::access::fence_space::local_space);
 
-    auto hidden_states_base = hidden_states + row * hidden_size + local_id * ElemsPerItem;
+    auto hidden_states_base =
+        hidden_states + row * hidden_size + local_id * ElemsPerItem;
     TA* remapped_hidden_states_base[TopK];
 #pragma unroll
     for (int i = 0; i < TopK; ++i) {
-      remapped_hidden_states_base[i] = remapped_hidden_states + rows_offset[i] * hidden_size + local_id * ElemsPerItem;
+      remapped_hidden_states_base[i] = remapped_hidden_states +
+                                       rows_offset[i] * hidden_size +
+                                       local_id * ElemsPerItem;
     }
 
     int stride = local_range * ElemsPerItem;
@@ -221,7 +236,8 @@ class RemapHiddenStates {
 #pragma unroll
         for (int i = 0; i < TopK; ++i) {
           if (rows_offset[i] == -1) continue;
-          *(reinterpret_cast<load_type*>(remapped_hidden_states_base[i] + l * stride)) = data;
+          *(reinterpret_cast<load_type*>(
+              remapped_hidden_states_base[i] + l * stride)) = data;
         }
       }
     }
@@ -367,10 +383,10 @@ void remap_hidden_states(
     const c10::optional<torch::Tensor>&
         remapped_hidden_states_scales,  // [num_rows, hidden_size // block_k] or
                                         // empty
-    torch::Tensor& expert_map,          // [total_experts_num]
-    torch::Tensor& expert_first_token_offset,       // [local_experts_num  + 1]
-    torch::Tensor& unpermuted_row_to_permuted_row,  // [num_rows, TopK]
-    torch::Tensor& topk_ids,                        // [num_rows, TopK]
+    const c10::optional<torch::Tensor>& expert_map,  // [total_experts_num]
+    torch::Tensor& expert_first_token_offset,        // [local_experts_num  + 1]
+    torch::Tensor& unpermuted_row_to_permuted_row,   // [num_rows, TopK]
+    torch::Tensor& topk_ids,                         // [num_rows, TopK]
     int64_t total_experts_num,
     int64_t local_experts_num) {
   // dtype check
@@ -389,8 +405,10 @@ void remap_hidden_states(
         "dtype");
   }
 
-  TORCH_CHECK(
-      expert_map.scalar_type() == torch::kInt32, "expert_map must be int32");
+  if (expert_map.has_value()) {
+    TORCH_CHECK(
+        expert_map->scalar_type() == torch::kInt32, "expert_map must be int32");
+  }
 
   TORCH_CHECK(
       expert_first_token_offset.scalar_type() == torch::kInt64,
@@ -418,12 +436,15 @@ void remap_hidden_states(
         "remapped_hidden_states_scales must be [num_rows * "
         "TopK, hidden_size // block_k]");
   }
-  TORCH_CHECK(
-      expert_map.size(0) == total_experts_num,
-      "expert_map must be [total_experts_num]");
+
+  if (expert_map.has_value()) {
+    TORCH_CHECK(
+        expert_map->size(0) == total_experts_num,
+        "expert_map must be [total_experts_num]");
+  }
   TORCH_CHECK(
       expert_first_token_offset.size(0) == local_experts_num + 1,
-      "expert_map must be [local_experts_num + 1]");
+      "expert_first_token_offset must be [local_experts_num + 1]");
   TORCH_CHECK(
       topk_ids.size(0) == num_rows && topk_ids.size(1) == TopK,
       "topk_ids must be [num_rows, TopK]");
@@ -431,25 +452,26 @@ void remap_hidden_states(
   const at::DeviceGuard device_guard(hidden_states.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 
-#define LAUNCH_REMAP_HIDDEN_STATES(TA, TS, TopK)                             \
-  vllm::moe::RemapHiddenStatesLauncher<TA, TS, TopK>(                        \
-      reinterpret_cast<TA*>(hidden_states.data_ptr()),                       \
-      hidden_states_scales.has_value()                                       \
-          ? reinterpret_cast<TS*>(hidden_states_scales->data_ptr())          \
-          : nullptr,                                                         \
-      reinterpret_cast<TA*>(remapped_hidden_states.data_ptr()),              \
-      remapped_hidden_states_scales.has_value()                              \
-          ? reinterpret_cast<TS*>(remapped_hidden_states_scales->data_ptr()) \
-          : nullptr,                                                         \
-      reinterpret_cast<int*>(expert_map.data_ptr()),                         \
-      reinterpret_cast<int64_t*>(expert_first_token_offset.data_ptr()),      \
-      reinterpret_cast<int*>(unpermuted_row_to_permuted_row.data_ptr()),     \
-      reinterpret_cast<int64_t*>(topk_ids.data_ptr()),                       \
-      num_rows,                                                              \
-      hidden_size,                                                           \
-      block_k,                                                               \
-      total_experts_num,                                                     \
-      local_experts_num,                                                     \
+#define LAUNCH_REMAP_HIDDEN_STATES(TA, TS, TopK)                              \
+  vllm::moe::RemapHiddenStatesLauncher<TA, TS, TopK>(                         \
+      reinterpret_cast<TA*>(hidden_states.data_ptr()),                        \
+      hidden_states_scales.has_value()                                        \
+          ? reinterpret_cast<TS*>(hidden_states_scales->data_ptr())           \
+          : nullptr,                                                          \
+      reinterpret_cast<TA*>(remapped_hidden_states.data_ptr()),               \
+      remapped_hidden_states_scales.has_value()                               \
+          ? reinterpret_cast<TS*>(remapped_hidden_states_scales->data_ptr())  \
+          : nullptr,                                                          \
+      expert_map.has_value() ? reinterpret_cast<int*>(expert_map->data_ptr()) \
+                             : nullptr,                                       \
+      reinterpret_cast<int64_t*>(expert_first_token_offset.data_ptr()),       \
+      reinterpret_cast<int*>(unpermuted_row_to_permuted_row.data_ptr()),      \
+      reinterpret_cast<int64_t*>(topk_ids.data_ptr()),                        \
+      num_rows,                                                               \
+      hidden_size,                                                            \
+      block_k,                                                                \
+      total_experts_num,                                                      \
+      local_experts_num,                                                      \
       queue);
 
 #define DISPATCH_TOPK_LAUNCH(TA, TS, TopK)              \
