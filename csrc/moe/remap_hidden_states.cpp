@@ -158,11 +158,15 @@ class RemapHiddenStates {
         total_experts_num(total_experts_num) {}
 
   static constexpr int GroupWorkItem = 256;
-  static constexpr int WARP_SIZE = 32;
-  static constexpr int ElemsPerItem = 4;
+  static constexpr int WARP_SIZE = 16;
+  static constexpr int ElemsPerItem = sizeof(float) * 4 / sizeof(TA);
 
-  static inline sycl::nd_range<1> get_nd_range(const int num_rows) {
-    sycl::range<1> local(GroupWorkItem);
+  static inline sycl::nd_range<1> get_nd_range(const int num_rows, const int hidden_size) {
+    int local_num = GroupWorkItem;
+    if(local_num * ElemsPerItem > hidden_size) {
+      local_num = (hidden_size + ElemsPerItem - 1) / ElemsPerItem;
+    }
+    sycl::range<1> local(local_num);
     sycl::range<1> group(num_rows);
     return sycl::nd_range<1>(local * group, local);
   }
@@ -170,6 +174,7 @@ class RemapHiddenStates {
   void operator()
       [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
     auto local_id = item.get_local_id(0);
+    auto local_range = item.get_local_range(0);
     auto group_id = item.get_group(0);
 
     int row = group_id;
@@ -196,7 +201,9 @@ class RemapHiddenStates {
       }
     }
 
-    int stride = GroupWorkItem * ElemsPerItem;
+    item.barrier(sycl::access::fence_space::local_space);
+
+    int stride = local_range * ElemsPerItem;
     int loop_count = (hidden_size + stride - 1) / stride;
 
     for (int l = 0; l < loop_count; ++l) {
@@ -260,8 +267,6 @@ class RemapHiddenStates {
         }
       }
     }
-
-    item.barrier(sycl::access::fence_space::local_space);
 
     if (local_id == 0) {
 #pragma unroll
@@ -331,7 +336,7 @@ void RemapHiddenStatesLauncher(
 
   queue.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
-        RemapHiddenStates<TA, TS, TopK>::get_nd_range(num_rows),
+        RemapHiddenStates<TA, TS, TopK>::get_nd_range(num_rows, hidden_size),
         RemapHiddenStates<TA, TS, TopK>{
             hidden_states,
             hidden_states_scales,
