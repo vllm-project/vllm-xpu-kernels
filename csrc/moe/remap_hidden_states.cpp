@@ -203,23 +203,25 @@ class RemapHiddenStates {
 
     item.barrier(sycl::access::fence_space::local_space);
 
+    auto hidden_states_base = hidden_states + row * hidden_size + local_id * ElemsPerItem;
+    TA* remapped_hidden_states_base[TopK];
+#pragma unroll
+    for (int i = 0; i < TopK; ++i) {
+      remapped_hidden_states_base[i] = remapped_hidden_states + rows_offset[i] * hidden_size + local_id * ElemsPerItem;
+    }
+
     int stride = local_range * ElemsPerItem;
     int loop_count = (hidden_size + stride - 1) / stride;
 
     for (int l = 0; l < loop_count; ++l) {
-      int start_id = l * stride + local_id * ElemsPerItem;
-
       using load_type = sycl::vec<TA, ElemsPerItem>;
       load_type data;
-      if (start_id < hidden_size) {
-        data = *(reinterpret_cast<load_type*>(
-            hidden_states + row * hidden_size + start_id));
+      if (l * stride + local_id * ElemsPerItem < hidden_size) {
+        data = *(reinterpret_cast<load_type*>(hidden_states_base + l * stride));
 #pragma unroll
         for (int i = 0; i < TopK; ++i) {
-          int offset = rows_offset[i];
-          if (offset == -1) continue;
-          *(reinterpret_cast<load_type*>(
-              remapped_hidden_states + offset * hidden_size + start_id)) = data;
+          if (rows_offset[i] == -1) continue;
+          *(reinterpret_cast<load_type*>(remapped_hidden_states_base[i] + l * stride)) = data;
         }
       }
     }
