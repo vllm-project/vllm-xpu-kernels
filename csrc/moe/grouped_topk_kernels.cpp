@@ -426,8 +426,8 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
             finalScore /= topk_sum;
         }
         if (laneIdx < topk) {
-            topkIndices[laneIdx] = finalScore;
-            topkValues[laneIdx] = expertIdx;
+            topkIndices[laneIdx] = expertIdx;
+            topkValues[laneIdx] = finalScore;
         }
     }
     } // end if constexpr (!UseGroups)
