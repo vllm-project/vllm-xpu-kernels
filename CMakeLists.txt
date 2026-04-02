@@ -172,6 +172,9 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(SYCL_KERNEL_OPTIONS)
 
   list(APPEND SYCL_FLAGS "-fsycl")
+  # For l0 ops like getMemoryInfo
+  list(APPEND SYCL_FLAGS "-lze_loader")
+  list(APPEND SYCL_FLAGS "-Wno-unused-command-line-argument")
 
   set(SYCL_COMPILE_FLAGS ${SYCL_FLAGS})
   set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} "-O3" "-DNDEBUG")
@@ -186,6 +189,9 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # ============= LINK OPTIONS ==================
   set(SYCL_LINK_FLAGS "")
   list(APPEND SYCL_LINK_FLAGS "-fsycl")
+  # For l0 ops like getMemoryInfo
+  list(APPEND SYCL_LINK_FLAGS "-lze_loader")
+  list(APPEND SYCL_LINK_FLAGS "-Wno-unused-command-line-argument")
   set(SYCL_DEVICE_LINK_FLAGS ${SYCL_LINK_FLAGS})
   set(SYCL_DEVICE_LINK_FLAGS
       ${SYCL_DEVICE_LINK_FLAGS} -fsycl-max-parallel-link-jobs=16
@@ -413,6 +419,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/attention/merge_attn_states.cpp"
       "csrc/tensor_utils.cpp"
       "csrc/utils/mem_cpy.cpp"
+      "csrc/utils/mem_info.cpp"
       "csrc/topk_per_row.cpp")
   include_directories("/usr/include")
 
