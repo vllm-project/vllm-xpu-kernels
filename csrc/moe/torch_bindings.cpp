@@ -47,6 +47,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor? maybe_expert_map) -> () ");
   m.impl("moe_lora_align_block_size", torch::kXPU, &moe_lora_align_block_size);
 
+  
   // Apply grouped topk routing to select experts.
   m.def(
       "grouped_topk(Tensor scores, Tensor scores_with_bias, int n_group, int "
@@ -62,6 +63,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "scoring_func, float routed_scaling_factor, Tensor? bias=None) -> "
       "(Tensor, Tensor)");
   m.impl("fused_grouped_topk", torch::kXPU, &fused_grouped_topk);
+
+  // Fused Grouped TopK (multi-group optimized path)
+  m.def(
+      "grouped_topk_multi_group(Tensor hidden_states, Tensor gating_output, int "
+      "n_topk, "
+      "bool renormalize, int n_expert_group, int n_topk_group, str "
+      "scoring_func, float routed_scaling_factor, Tensor? bias=None) -> "
+      "(Tensor, Tensor)");
+  m.impl("grouped_topk_multi_group", torch::kXPU, &grouped_topk_multi_group);
   // Apply topk softmax to the gating outputs.
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
