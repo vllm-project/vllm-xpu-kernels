@@ -349,6 +349,7 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
             ? (scoreSigmoid + sycl_cast<float, BiasT>(routingBias[expert]))
             : scoreSigmoid;
     }
+    item.barrier(sycl::access::fence_space::local_space);
 
     if constexpr (MaxNumExperts > MaxNumExpertsUnit) {
         constexpr int NumExpertWarps = (MaxNumExperts - 1) / MaxNumExpertsUnit + 1;
