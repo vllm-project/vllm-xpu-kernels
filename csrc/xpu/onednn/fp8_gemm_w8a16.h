@@ -26,6 +26,14 @@ static inline void dnnl_matmul_w8a16_fp8(
   const int n = o_sz.back();  // presume channel last format
   const int k = *(src_sz.end() - 1);
 
+  // block quant param: m2_sc is 2D with more than 1 element for block quant
+  bool is_block_quant = (m2_sc.dim() == 2) && (m2_sc.numel() > 1);
+  int64_t blk_group_size = -1;
+  if (is_block_quant) {
+    // Scale layout: [k/gs, n/gs] for NN format, [n/gs, k/gs] for NT format
+    blk_group_size = k / (is_nt ? m2_sc.size(1) : m2_sc.size(0));
+  }
+
   // get joint dtypes
   joint_dtypes_t jd;
   auto in_dtype = mat1.scalar_type();
@@ -70,7 +78,14 @@ static inline void dnnl_matmul_w8a16_fp8(
 
   auto f_attr = [&](dnnl::primitive_attr& pattr) {
     pattr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
-    if (m2_sc.numel() == 1) {
+    if (is_block_quant) {
+      pattr.set_scales(
+          DNNL_ARG_WEIGHTS,
+          /* mask */ (1 << 0) + (1 << 1),
+          {blk_group_size, blk_group_size},
+          get_onednn_dtype(m2_sc));
+      /* per block quant */
+    } else if (m2_sc.numel() == 1) {
       pattr.set_scales(
           DNNL_ARG_WEIGHTS,
           /* mask */ 0,
