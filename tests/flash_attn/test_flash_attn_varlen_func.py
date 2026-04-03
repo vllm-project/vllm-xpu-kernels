@@ -11,7 +11,7 @@ from tests.utils import format_tc
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 NUM_HEADS = [(8, 2)]
-HEAD_SIZES = [64, 128, 192, 256]
+HEAD_SIZES = [64, 128, 192, 256, 512]
 BLOCK_SIZES = [64, 128]
 DTYPES = [torch.bfloat16]
 QDTYPES = [None]
@@ -365,6 +365,8 @@ def test_decode_with_paged_kv(
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
+    if head_size == 512 and block_size == 128:
+        pytest.skip("skip test cases that may run out of SLM.")
     if num_heads == (16, 1) and head_size == 256:
         pytest.skip("skip test cases that may run out of SLM.")
     if block_size == 128 and num_blocks == 32768 and head_size >= 192:
