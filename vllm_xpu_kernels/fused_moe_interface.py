@@ -6,6 +6,7 @@ import torch
 try:
     from . import _C  # noqa: F401
     from . import _xpu_C  # noqa: F401
+    from . import _moe_C  # noqa: F401
     FUSEDMOE_UNAVAILABLE_REASON = None
     FUSEDMOE_AVAILABLE = True
 except ImportError as e:
