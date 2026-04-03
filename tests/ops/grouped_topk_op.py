@@ -113,25 +113,17 @@ def fused_grouped_topk_sycl(
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return ops.fused_grouped_topk(hidden_states, gating_output, topk,
+    assert hidden_states.size(0) == gating_output.size(0), (
+        "Number of tokens mismatch")
+    if scoring_func == "softmax":
+        scores = torch.softmax(gating_output, dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output
+    else:   
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+    return ops.fused_grouped_topk(hidden_states, scores, topk,
                                   renormalize, num_expert_group, topk_group,
                                   scoring_func, routed_scaling_factor,
                                   e_score_correction_bias)
 
 
-def grouped_topk_multi_group(
-    hidden_states: torch.Tensor,
-    gating_output: torch.Tensor,
-    topk: int,
-    renormalize: bool,
-    num_expert_group: int,
-    topk_group: int,
-    scoring_func: str = "softmax",
-    routed_scaling_factor: float = 1.0,
-    e_score_correction_bias: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return ops.grouped_topk_multi_group(hidden_states, gating_output, topk,
-                                        renormalize, num_expert_group,
-                                        topk_group, scoring_func,
-                                        routed_scaling_factor,
-                                        e_score_correction_bias)

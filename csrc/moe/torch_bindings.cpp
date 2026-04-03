@@ -57,21 +57,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   // Fused Grouped TopK
   m.def(
-      "fused_grouped_topk(Tensor hidden_states, Tensor gating_output, int "
-      "n_topk, "
-      "bool renormalize, int n_expert_group, int n_topk_group, str "
-      "scoring_func, float routed_scaling_factor, Tensor? bias=None) -> "
-      "(Tensor, Tensor)");
+      "fused_grouped_topk("
+      "  Tensor hidden_states,"
+      "  Tensor gating_output,"
+      "  int n_topk,"
+      "  bool renormalize,"
+      "  int n_expert_group,"
+      "  int n_topk_group,"
+      "  str scoring_func,"
+      "  float routed_scaling_factor,"
+      "  Tensor? bias=None"
+      ") -> (Tensor, Tensor)");
   m.impl("fused_grouped_topk", torch::kXPU, &fused_grouped_topk);
 
-  // Fused Grouped TopK (multi-group optimized path)
-  m.def(
-      "grouped_topk_multi_group(Tensor hidden_states, Tensor gating_output, int "
-      "n_topk, "
-      "bool renormalize, int n_expert_group, int n_topk_group, str "
-      "scoring_func, float routed_scaling_factor, Tensor? bias=None) -> "
-      "(Tensor, Tensor)");
-  m.impl("grouped_topk_multi_group", torch::kXPU, &grouped_topk_multi_group);
+  // Grouped TopK Multi Group (from grouped_topk_kernels.cpp)
+
   // Apply topk softmax to the gating outputs.
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
