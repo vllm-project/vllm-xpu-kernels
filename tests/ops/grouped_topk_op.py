@@ -21,7 +21,6 @@ def grouped_topk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
-    # Move to CPU to avoid XPU OOM on intermediate tensors
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
     elif scoring_func == "sigmoid":
