@@ -53,7 +53,7 @@ CUTE_DEVICE void chunk_prepare_kernel(
     const T* q,
     const T* k,
     const float* a,
-    const T* A_log,
+    const float* A_log,
     const T* dt_bias,
     const int* query_start_loc,
     const int total_virtual_seqlen,
@@ -121,7 +121,7 @@ CUTE_DEVICE void chunk_prepare_kernel(
   int chunk_id = total_sg_id % chunk_range;
   const int v_head_id = total_sg_id / chunk_range;
 
-  const float A_log_exp_h = -sycl::exp(static_cast<float>(A_log[v_head_id]));
+  const float A_log_exp_h = -sycl::exp(A_log[v_head_id]);
   const float dt_bias_h = static_cast<float>(dt_bias[v_head_id]);
 
   for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
@@ -737,7 +737,7 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
     const T* v,
     const float* b,
     const float* a,
-    const T* A_log,
+    const float* A_log,
     const T* dt_bias,
     const int* query_start_loc,
     const bool* has_initial_state,
@@ -1275,7 +1275,7 @@ void kernel_launcher(
     T* u,
     const float* b,
     const float* a,
-    const T* A_log,
+    const float* A_log,
     const T* dt_bias,
     StateT* ssm_state,
     const int ssm_state_stride_0,
@@ -1562,6 +1562,18 @@ void chunk_gated_delta_rule_impl_xe2(
 
   TORCH_CHECK(num_v_heads % num_k_heads == 0);
 
+  TORCH_CHECK(
+      A_log.scalar_type() == at::kFloat,
+      "A_log dtype must be float32, but got ",
+      A_log.scalar_type());
+  TORCH_CHECK(
+      dt_bias.scalar_type() == core_attn_out.scalar_type(),
+      "dt_bias dtype must match core_attn_out dtype (float16/bfloat16), but "
+      "got dt_bias=",
+      dt_bias.scalar_type(),
+      ", core_attn_out=",
+      core_attn_out.scalar_type());
+
   auto dtype = core_attn_out.dtype();
   auto device = core_attn_out.device();
 
@@ -1589,7 +1601,7 @@ void chunk_gated_delta_rule_impl_xe2(
       reinterpret_cast<scalar_t*>(u.data_ptr()),                   \
       reinterpret_cast<float*>(b.data_ptr()),                      \
       reinterpret_cast<float*>(a.data_ptr()),                      \
-      reinterpret_cast<scalar_t*>(A_log.data_ptr()),               \
+      reinterpret_cast<float*>(A_log.data_ptr()),                  \
       reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
       reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),     \
       ssm_state_stride_0,                                          \

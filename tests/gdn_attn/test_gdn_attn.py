@@ -318,7 +318,9 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
     if has_bias:
         conv_bias = torch.randn((mixed_qkv_size), dtype=dtype, device=device)
 
-    A_log = torch.randn((num_v_heads // tp_size), dtype=dtype, device=device)
+    A_log = torch.randn((num_v_heads // tp_size),
+                        dtype=torch.float32,
+                        device=device)
     dt_bias = torch.randn((num_v_heads // tp_size), dtype=dtype, device=device)
 
     prefill_batches = simple_random_distribute(num_actual_tokens - num_decodes,
