@@ -16,11 +16,6 @@ static constexpr int sub_group_size = 16;
 static constexpr float eps = 0.000001f;
 static constexpr int chunk_size = gdn::chunk_size_xe2;
 
-template <typename T, int VEC_SIZE>
-struct alignas(sizeof(T) * VEC_SIZE) vec_t {
-  T val[VEC_SIZE];
-};
-
 struct chunk_gemm_policy_64x64x32_2x1 {
   using WGTile = Shape<_64, _64, _32>;
   using SGLayout = Layout<Shape<_2, _1, _1>, Stride<_1, _1, _0>>;
@@ -64,7 +59,6 @@ CUTE_DEVICE void l2norm_kernel(
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
 
   int group_id = item.get_group(1);
-  int group_range = item.get_group_range(1);
   auto sg = item.get_sub_group();
   int sg_id = sg.get_group_linear_id();
   int sg_range = sg.get_group_linear_range();
@@ -88,10 +82,8 @@ CUTE_DEVICE void l2norm_kernel(
     for (int e = 0; e < elem_per_item; ++e) {
       float q_value = q_ptr[k_dim_idx + e];
       float k_value = k_ptr[k_dim_idx + e];
-      q_value *= q_value;
-      k_value *= k_value;
-      q_sum += q_value;
-      k_sum += k_value;
+      q_sum += q_value * q_value;
+      k_sum += k_value * k_value;
     }
   }
   q_sum = sycl::reduce_over_group(sg, q_sum, sycl::plus<>());
@@ -120,8 +112,9 @@ CUTE_DEVICE void l2norm_vectorized_kernel(
     const int head_k_dim) {
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
 
+  using vec_t = vllm::xpu::aligned_vec<T, VEC_SIZE>;
+
   int group_id = item.get_group(1);
-  int group_range = item.get_group_range(1);
   auto sg = item.get_sub_group();
   int sg_id = sg.get_group_linear_id();
   int sg_range = sg.get_group_linear_range();
@@ -137,8 +130,8 @@ CUTE_DEVICE void l2norm_vectorized_kernel(
   auto q_ptr = const_cast<T*>(q) + total_sg_id * head_k_dim;
   auto k_ptr = const_cast<T*>(k) + total_sg_id * head_k_dim;
 
-  auto q_vec_ptr = reinterpret_cast<vec_t<T, VEC_SIZE>*>(q_ptr);
-  auto k_vec_ptr = reinterpret_cast<vec_t<T, VEC_SIZE>*>(k_ptr);
+  auto q_vec_ptr = reinterpret_cast<vec_t*>(q_ptr);
+  auto k_vec_ptr = reinterpret_cast<vec_t*>(k_ptr);
   const int num_vec = head_k_dim / VEC_SIZE;
 
   float q_sum = 0.0f;
