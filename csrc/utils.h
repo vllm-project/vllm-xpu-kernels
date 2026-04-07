@@ -44,7 +44,15 @@ static inline bool is_xe2_arch(at::DeviceIndex device_index = -1) {
   auto arch = get_device_architecture(device_index);
   return arch == syclex::architecture::intel_gpu_bmg_g21 ||
          arch == syclex::architecture::intel_gpu_bmg_g31 ||
+         arch == syclex::architecture::intel_gpu_lnl_m ||
          arch == syclex::architecture::intel_gpu_pvc;
+}
+
+static inline bool is_xe3_arch(at::DeviceIndex device_index = -1) {
+  auto arch = get_device_architecture(device_index);
+  return arch == syclex::architecture::intel_gpu_ptl_h ||
+         arch == syclex::architecture::intel_gpu_ptl_u ||
+         arch == syclex::architecture::intel_gpu_wcl;
 }
 
 static inline std::optional<std::string> getEnv(const char* name) {
@@ -117,6 +125,22 @@ struct alignas(sizeof(scalar_t) * vec_size) aligned_vec {
 
   scalar_t const& operator[](int index) const { return val[index]; }
 };
+
+// From float to float.
+inline void from_float(float& dst, float src) { dst = src; }
+// From float32 to float16.
+inline void from_float(sycl::half& dst, float src) { dst = sycl::half(src); }
+// From float32 to bfloat16.
+inline void from_float(sycl::ext::oneapi::bfloat16& dst, float src) {
+  dst = sycl::ext::oneapi::bfloat16(src);
+}
+
+// From float to float.
+inline float to_float(float u) { return u; }
+// From float16 to float32.
+inline float to_float(sycl::half u) { return float(u); }
+// From bfloat16 to float32.
+inline float to_float(sycl::ext::oneapi::bfloat16 u) { return float(u); }
 
 }  // namespace xpu
 

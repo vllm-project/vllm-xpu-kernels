@@ -43,6 +43,8 @@ jobs:
       - name: build wheel
         run: |
           source /opt/intel/oneapi/2025.3/oneapi-vars.sh
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          git submodule sync && git submodule update --init --recursive
           pip install -r requirements.txt
           python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
           for f in dist/*-linux_x86_64.whl; do mv "$f" "${f/linux_x86_64/manylinux_2_28_x86_64}"; done

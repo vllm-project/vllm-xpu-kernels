@@ -69,6 +69,7 @@ struct paged_decode_args_t {
   int num_heads_q;
   int num_heads_k;
   int head_size;
+  int v_head_size;
   int max_blocks_per_seq;
   int block_size;
   int window_size_left = -1;
@@ -79,6 +80,13 @@ struct paged_decode_args_t {
   bool is_local = false;
   bool is_sink = false;
   int num_kv_splits = 1;
+  // KV cache strides [num_blocks, block_size, num_heads_kv, head_size]
+  int64_t k_stride_page = 0;
+  int64_t k_stride_seq = 0;
+  int64_t k_stride_heads = 0;
+  int64_t v_stride_page = 0;
+  int64_t v_stride_seq = 0;
+  int64_t v_stride_heads = 0;
 };
 
 template <class FMHAKernel, class ReductionSplitKernel, bool isVarLen>
@@ -122,7 +130,7 @@ struct DecodeKernelLauncher {
     auto head_size_qk = shape.head_size_qk = shape_init.head_size_qk =
         args.head_size;
     auto head_size_vo = shape.head_size_vo = shape_init.head_size_vo =
-        args.head_size;
+        args.v_head_size;
 
     if constexpr (isVarLen) {
       batch = shape_init.batch = 1;
@@ -150,12 +158,47 @@ struct DecodeKernelLauncher {
     stride_Q = cutlass::make_cute_packed_stride(
         StrideQ{},
         cute::make_shape(seq_len_qo, head_size_qk, num_heads_q, batch));
-    stride_K = cutlass::make_cute_packed_stride(
-        StrideK{},
-        cute::make_shape(seq_len_kv, head_size_qk, num_heads_kv, batch));
-    stride_V = cutlass::make_cute_packed_stride(
-        StrideV{},
-        cute::make_shape(head_size_vo, seq_len_kv, num_heads_kv, batch));
+    if (args.k_stride_seq > 0) {
+      // Use actual strides from KV cache tensors (supports non-contiguous
+      // layouts such as MLA combined KV cache)
+      constexpr int64_t kIntMax =
+          static_cast<int64_t>(std::numeric_limits<int>::max());
+      TORCH_CHECK(
+          args.k_stride_seq <= kIntMax && args.k_stride_heads <= kIntMax &&
+              args.k_stride_page <= kIntMax && args.v_stride_seq <= kIntMax &&
+              args.v_stride_heads <= kIntMax && args.v_stride_page <= kIntMax,
+          "KV cache stride exceeds int32 max (",
+          kIntMax,
+          "): k_stride_seq=",
+          args.k_stride_seq,
+          " k_stride_heads=",
+          args.k_stride_heads,
+          " k_stride_page=",
+          args.k_stride_page,
+          " v_stride_seq=",
+          args.v_stride_seq,
+          " v_stride_heads=",
+          args.v_stride_heads,
+          " v_stride_page=",
+          args.v_stride_page);
+      stride_K = StrideK{
+          static_cast<int>(args.k_stride_seq),
+          _1{},
+          static_cast<int>(args.k_stride_heads),
+          static_cast<int>(args.k_stride_page)};
+      stride_V = StrideV{
+          _1{},
+          static_cast<int>(args.v_stride_seq),
+          static_cast<int>(args.v_stride_heads),
+          static_cast<int>(args.v_stride_page)};
+    } else {
+      stride_K = cutlass::make_cute_packed_stride(
+          StrideK{},
+          cute::make_shape(seq_len_kv, head_size_qk, num_heads_kv, batch));
+      stride_V = cutlass::make_cute_packed_stride(
+          StrideV{},
+          cute::make_shape(head_size_vo, seq_len_kv, num_heads_kv, batch));
+    }
     stride_O = cutlass::make_cute_packed_stride(
         StrideO{},
         cute::make_shape(seq_len_qo, head_size_vo, num_heads_q, batch));

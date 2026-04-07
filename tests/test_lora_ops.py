@@ -8,7 +8,7 @@ import torch
 from tests.lora import torch_ops, xpu_ops
 from tests.lora.utils import (PunicaTensors, assert_close,
                               generate_data_for_nslices)
-from tests.utils import seed_everything
+from tests.utils import format_tc, seed_everything
 
 MINI_PYTEST_PARAMS = {
     "test_kernels": {
@@ -442,7 +442,7 @@ def test_kernels(
 @pytest.mark.parametrize("rank", hs_test_params["max_ranks"])
 @pytest.mark.parametrize("hidden_size", hs_test_params["hidden_sizes"])
 @pytest.mark.parametrize("nslices", [1, 2, 3])
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("op_type", ["shrink", "expand"])

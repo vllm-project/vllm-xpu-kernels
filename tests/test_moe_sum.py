@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from tests.register_ops import moe_sum
-from tests.utils import opcheck
+from tests.utils import format_tc, opcheck
 
 TOP_KS = [2, 6]
 
@@ -25,7 +25,8 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("dtype",
-                         [torch.float32, torch.float16, torch.bfloat16])
+                         [torch.float32, torch.float16, torch.bfloat16],
+                         ids=format_tc)
 def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
     input = torch.randn((m, topk, k), device="xpu", dtype=dtype)
     actual = torch.empty((m, k), device="xpu", dtype=dtype)

@@ -38,7 +38,10 @@ def ref_remap_hidden_states(hidden_states, scales, remapped_hidden_states,
                             expert_first_token_offset,
                             unpermuted_row_to_permuted_row, topk_ids,
                             total_experts_num, local_experts_num):
-    local_topk_ids = expert_map[topk_ids]
+    if expert_map is not None:
+        local_topk_ids = expert_map[topk_ids]
+    else:
+        local_topk_ids = topk_ids
 
     valid_mask = local_topk_ids >= 0
     valid_tensor = local_topk_ids[valid_mask]
@@ -82,15 +85,19 @@ def ref_remap_hidden_states(hidden_states, scales, remapped_hidden_states,
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZE)
 @pytest.mark.parametrize("total_experts_num", TOTAL_EXPERTS_NUM)
 @pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("has_expert_map", [True, False])
 @pytest.mark.parametrize("recipe",
                          ["bf16", "fp16", "mxfp8", "mxfp4", "fp8block"])
 def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
-                             recipe):
+                             has_expert_map, recipe):
     seed_everything(7)
 
     data_dtype, scale_dtype = RECIPE_TO_DTYPE.get(recipe, (None, None))
 
-    local_experts_num = total_experts_num // 2
+    if has_expert_map:
+        local_experts_num = total_experts_num // 2
+    else:
+        local_experts_num = total_experts_num
 
     if data_dtype in [torch.bfloat16, torch.float16]:
         hidden_states = torch.randn((num_rows, hidden_size),
@@ -139,15 +146,17 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
                                                  dtype=torch.int32,
                                                  device=DEVICE)
 
-    expert_map = torch.full((total_experts_num, ),
-                            -1,
-                            dtype=torch.int64,
-                            device=DEVICE)
-    expert_map[torch.randperm(
-        total_experts_num,
-        device=DEVICE)[:local_experts_num]] = torch.randperm(local_experts_num,
-                                                             device=DEVICE)
-    expert_map = expert_map.to(torch.int32)
+    expert_map = None
+    if has_expert_map:
+        expert_map = torch.full((total_experts_num, ),
+                                -1,
+                                dtype=torch.int64,
+                                device=DEVICE)
+        expert_map[torch.randperm(
+            total_experts_num,
+            device=DEVICE)[:local_experts_num]] = torch.randperm(
+                local_experts_num, device=DEVICE)
+        expert_map = expert_map.to(torch.int32)
 
     scores = torch.randn((num_rows, total_experts_num),
                          device=DEVICE,

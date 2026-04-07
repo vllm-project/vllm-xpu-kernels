@@ -154,21 +154,17 @@ def xpu_fused_moe(hidden_states,
     else:
         assert output.shape == hidden_states.shape, \
             "output shape must be the same as hidden_states shape"
-    inter_size = list(w13.shape)[-2] // 2
-
-    assert w13.is_contiguous() and w2.is_contiguous()
 
     # 4bits support [E, N, K]
     # other types [E, K, N]
     if not is_int4 and not is_mxfp4:
-        if not hasattr(w13, 'xpu_fused_moe'):
-            w13.data = w13.transpose(-1, -2).contiguous()
-            w2.data = w2.transpose(-1, -2).contiguous()
-            w13.xpu_fused_moe = True
-            w13.inter_size = inter_size
-        else:
-            inter_size = w13.inter_size
+        inter_size = list(w13.shape)[-1] // 2
+    else:
+        inter_size = list(w13.shape)[-2] // 2
 
+    assert w13.is_contiguous() and w2.is_contiguous()
+
+    # FIXME: move this to vllm
     if is_int4 and not hasattr(w13, 'xpu_fused_moe'):
         w13_tmp = torch.empty_like(w13)
         w2_tmp = torch.empty_like(w2)
@@ -197,16 +193,17 @@ def xpu_fused_moe(hidden_states,
         gemm1_scales = w13_scales
         gemm2_scales = w2_scales
 
-    if expert_map is None:
+    if expert_map is None and ep_size > 1:
         expert_map = torch.empty((num_experts * ep_size),
                                  dtype=torch.int32,
                                  device=hidden_states.device)
         torch.ops._moe_C.init_expert_map(expert_map, num_experts, ep_rank,
                                          ep_size)
-    else:
-        pass
 
-    total_experts_num = expert_map.shape[0]
+    if expert_map is not None:
+        total_experts_num = expert_map.shape[0]
+    else:
+        total_experts_num = num_experts * ep_size
     local_experts_num = num_experts
 
     remapped_hidden_states = torch.empty(
@@ -257,7 +254,7 @@ def xpu_fused_moe(hidden_states,
         torch.ops._C.silu_and_mul(act_output, gemm1_output)
     elif activation == "gelu":
         torch.ops._C.gelu_and_mul(act_output, gemm1_output)
-    elif activation == "swigluoai":
+    elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
         torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 import random
+import types
 import unittest
 from collections.abc import Sequence
 from typing import Any, Optional, Union
@@ -83,6 +84,80 @@ def seed_everything(seed) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+class TcLimitedFormatter:
+
+    def __init__(self, limit_array=None, limit_str=None):
+        self.limit_array = limit_array
+        self.limit_str = limit_str
+        self.counter = 0
+
+    def format_tc_common(self, val, limit_array=None, limit_str=None):
+        if isinstance(val, np.ndarray):
+            val = val.tolist()
+
+        if isinstance(val, torch.dtype):
+            ret = repr(val)
+            return ret.split(sep=".")[1]
+        elif isinstance(val, tuple):
+            if len(val) == 0:
+                ret = 0
+            else:
+                assert val
+                ret = self.format_tc_common(val[0], limit_array)
+            for i in range(1, len(val)):
+                ret = f"{ret}x{self.format_tc_common(val[i], limit_array)}"
+            return f"[{ret}]"
+        elif isinstance(val, list):
+            if len(val) == 0:
+                return "[]"
+            limited = limit_array is not None and len(val) > 2 * limit_array
+            ret = f"[{self.format_tc_common(val[0], limit_array)}"
+            for i in range(1, len(val)):
+                current_value = val[i]
+                if limited:
+                    if i == limit_array:
+                        current_value = f"_INNER{self.counter}_"
+                        self.counter += 1
+                    elif i > limit_array and i < len(val) - limit_array:
+                        continue
+
+                ret = f"{ret}x{self.format_tc_common(\
+                    current_value, limit_array)}"
+
+            ret = f"{ret}]"
+            if limit_str is not None and len(ret) > limit_str:
+                ret = ret[0:limit_str] + f"___{self.counter}"
+                self.counter += 1
+            return ret
+        elif val is None:
+            return "_None_"
+        elif isinstance(
+                val,
+                types.MethodDescriptorType | types.BuiltinMethodType
+                | types.FunctionType,
+        ):
+            return val.__name__
+        else:
+            s = str(val)
+
+            pref_to_find = "<class '"
+            prefix = s.find(pref_to_find)
+            suffix = s.find("'>")
+            if prefix >= 0 and suffix >= 0:
+                s = s[prefix + len(pref_to_find):suffix]
+
+            s = s.replace("numpy", "np")
+
+            return s
+
+    def __call__(self, val):
+        return self.format_tc_common(val, self.limit_array, self.limit_str)
+
+
+def format_tc(val):
+    return TcLimitedFormatter()(val)
 
 
 def _convert_from_fp8(
@@ -221,6 +296,45 @@ def create_kv_caches_with_random_flash(
                 f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
+    return key_caches, value_caches
+
+
+def create_kv_caches_with_pinned(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: str,
+    model_dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Create KV caches with pinned host memory when device is 'cpu'."""
+
+    key_caches, value_caches = create_kv_caches_with_random(
+        num_blocks,
+        block_size,
+        num_layers,
+        num_heads,
+        head_size,
+        cache_dtype,
+        model_dtype,
+        seed,
+        device,
+    )
+
+    # If on CPU, convert to pinned memory by recreating the tensor
+    if device == "cpu":
+        for i in range(len(key_caches)):
+            # Create a new pinned tensor and copy data
+            pinned_key = torch.empty_like(key_caches[i], pin_memory=True)
+            pinned_value = torch.empty_like(value_caches[i], pin_memory=True)
+            pinned_key.copy_(key_caches[i])
+            pinned_value.copy_(value_caches[i])
+            key_caches[i] = pinned_key
+            value_caches[i] = pinned_value
+
     return key_caches, value_caches
 
 

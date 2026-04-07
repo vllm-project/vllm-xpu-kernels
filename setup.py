@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import json
 import logging
 import os
 import shutil
@@ -96,12 +97,35 @@ class cmake_build_ext(build_ext):
             num_jobs = int(num_jobs)
             logger.info("Using MAX_JOBS=%d as the number of jobs.", num_jobs)
         else:
+            # Estimate the number of jobs. Each compile process may take ~8GB
+            # of memory, so we limit jobs to avoid OOM on memory-constrained
+            # machines.
+            import psutil
+            mem_bytes = psutil.virtual_memory().total
+
             try:
                 # os.sched_getaffinity() isn't universally available, so fall
                 #  back to os.cpu_count() if we get an error here.
-                num_jobs = len(os.sched_getaffinity(0))
+                cpu_jobs = len(os.sched_getaffinity(0))
             except AttributeError:
-                num_jobs = os.cpu_count()
+                cpu_jobs = os.cpu_count() or 1
+
+            if mem_bytes is not None:
+                # Assume each compile process may require ~8GB.
+                mem_jobs = max(1, mem_bytes // (8 * 1024**3))
+                num_jobs = max(1, min(cpu_jobs, int(mem_jobs)))
+                logger.info(
+                    "Auto-detected: cpu core: %d, memory_limit: %d, using: %d",
+                    cpu_jobs,
+                    mem_jobs,
+                    num_jobs,
+                )
+            else:
+                num_jobs = max(1, cpu_jobs)
+                logger.info(
+                    "Could not determine system memory. Using cpu core: %d",
+                    num_jobs,
+                )
 
         get_oneapi_version()
 
@@ -294,26 +318,112 @@ class cmake_build_ext(build_ext):
                 self.copy_file(file, inplace_dst_file)
 
 
-ext_modules = []
+class precompiled_wheel_utils:
+    """Extracts libraries and other files from an existing wheel."""
 
-# List of additional shared libraries to install (intermediate build artifacts)
-additional_libraries = {
-    "attn_kernels_xe_2": "/csrc/xpu/attn/xe_2",
-    "gdn_attn_kernels_xe_2": "/csrc/xpu/gdn_attn/xe_2",
-    "grouped_gemm_xe_default": "/csrc/xpu/grouped_gemm/xe_default",
-    "grouped_gemm_xe_2": "/csrc/xpu/grouped_gemm/xe_2",
-}
+    @staticmethod
+    def extract_precompiled_and_patch_package(wheel_url_or_path: str) -> dict:
+        import tempfile
+        import zipfile
 
-if _build_custom_ops():
-    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
-    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fa2_C"))
-    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
-    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._xpu_C"))
-    ext_modules.append(
-        CMakeExtension(name="vllm_xpu_kernels.xpumem_allocator"))
+        temp_dir = None
+        try:
+            if not os.path.isfile(wheel_url_or_path):
+                wheel_filename = wheel_url_or_path.split("/")[-1]
+                temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
+                wheel_path = os.path.join(temp_dir, wheel_filename)
+                print(f"Downloading wheel from {wheel_url_or_path}"
+                      f"to {wheel_path}")
+                from urllib.request import urlretrieve
 
-if ext_modules:
-    cmdclass = {"build_ext": cmake_build_ext}
+                urlretrieve(wheel_url_or_path, filename=wheel_path)
+            else:
+                wheel_path = wheel_url_or_path
+                print(f"Using existing wheel at {wheel_path}")
+
+            package_data_patch = {}
+
+            with zipfile.ZipFile(wheel_path) as wheel:
+                file_members = [
+                    f for f in wheel.filelist
+                    if f.filename.startswith("vllm_xpu_kernels/")
+                    and f.filename.endswith(".so")
+                ]
+
+                for file in file_members:
+                    print(f"[extract] {file.filename}")
+                    target_path = os.path.join(".", file.filename)
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    with (
+                            wheel.open(file.filename) as src,
+                            open(target_path, "wb") as dst,
+                    ):
+                        shutil.copyfileobj(src, dst)
+
+                    pkg = os.path.dirname(file.filename).replace("/", ".")
+                    package_data_patch.setdefault(pkg, []).append(
+                        os.path.basename(file.filename))
+
+            return package_data_patch
+        finally:
+            if temp_dir is not None:
+                print(f"Removing temporary directory {temp_dir}")
+                shutil.rmtree(temp_dir)
+
+    # TODO: not used currently.
+    @staticmethod
+    def get_base_commit_in_main_branch() -> str:
+        # Force to use the nightly wheel. This is mainly used for CI testing.
+        if envs.VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL:
+            return "nightly"
+
+        try:
+            # Get the latest commit hash of the upstream main branch.
+            resp_json = subprocess.check_output([
+                "curl",
+                "-s",
+                "https://api.github.com/repos/vllm-project/vllm/commits/main",
+            ]).decode("utf-8")
+            upstream_main_commit = json.loads(resp_json)["sha"]
+
+            # In Docker build context, .git may be immutable or missing.
+            if envs.VLLM_DOCKER_BUILD_CONTEXT:
+                return upstream_main_commit
+
+            # Check if the upstream_main_commit exists in the local repo
+            try:
+                subprocess.check_output(
+                    ["git", "cat-file", "-e", f"{upstream_main_commit}"])
+            except subprocess.CalledProcessError:
+                # If not present, fetch it from the remote repository.
+                # Note that this does not update any local branches,
+                # but ensures that this commit ref and its history are
+                # available in our local repo.
+                subprocess.check_call([
+                    "git", "fetch",
+                    "https://github.com/vllm-project/vllm-xpu-kernels", "main"
+                ])
+
+            # Then get the commit hash of the current branch that is the same as
+            # the upstream main commit.
+            current_branch = (subprocess.check_output(
+                ["git", "branch", "--show-current"]).decode("utf-8").strip())
+
+            base_commit = (subprocess.check_output([
+                "git", "merge-base", f"{upstream_main_commit}", current_branch
+            ]).decode("utf-8").strip())
+            return base_commit
+        except ValueError as err:
+            raise ValueError(err) from None
+        except Exception as err:
+            logger.warning(
+                "Failed to get the base commit in the main branch. "
+                "Using the nightly wheel. The libraries in this "
+                "wheel may not be compatible with your dev branch: %s",
+                err,
+            )
+            return "nightly"
+
 
 package_data = {
     "vllm-xpu-kernels": [
@@ -333,6 +443,82 @@ def get_vllm_version() -> str:
 
     return version
 
+
+# If using precompiled, extract and patch package_data (in advance of setup)
+if envs.VLLM_USE_PRECOMPILED:
+    # for now, we force use local wheel path
+    print(f"version: get_vllm_version()={get_vllm_version()}")
+    wheel_location = os.getenv(
+        "VLLM_PRECOMPILED_WHEEL_LOCATION",
+        f"./vllm_xpu_kernels-{get_vllm_version()}-cp312-cp312-linux_x86_64.whl"
+    )
+    if wheel_location is not None:
+        wheel_url = wheel_location
+    else:
+        import platform
+
+        arch = platform.machine()
+        if arch == "x86_64":
+            wheel_tag = "manylinux1_x86_64"
+        elif arch == "aarch64":
+            wheel_tag = "manylinux2014_aarch64"
+        else:
+            raise ValueError(f"Unsupported architecture: {arch}")
+        base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+        # TODO: update the URL when hosting the wheels
+        wheel_url = "https://to-be-add.whl"
+        nightly_wheel_url = ("https://to-be-add.whl")
+        from urllib.request import urlopen
+
+        try:
+            with urlopen(wheel_url) as resp:
+                if resp.status != 200:
+                    wheel_url = nightly_wheel_url
+        except Exception as e:
+            print(f"[warn] Falling back to nightly wheel: {e}")
+            wheel_url = nightly_wheel_url
+
+    patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
+        wheel_url)
+    for pkg, files in patch.items():
+        package_data.setdefault(pkg, []).extend(files)
+
+
+class precompiled_build_ext(build_ext):
+    """Disables extension building when using precompiled binaries."""
+
+    def run(self) -> None:
+        print("Skipping build")
+        pass
+
+    def build_extensions(self) -> None:
+        print("Skipping build_ext: using precompiled extensions.")
+        return
+
+
+ext_modules = []
+
+# List of additional shared libraries to install (intermediate build artifacts)
+additional_libraries = {
+    "attn_kernels_xe_2": "/csrc/xpu/attn/xe_2",
+    "gdn_attn_kernels_xe_2": "/csrc/xpu/gdn_attn/xe_2",
+    "grouped_gemm_xe_default": "/csrc/xpu/grouped_gemm/xe_default",
+    "grouped_gemm_xe_2": "/csrc/xpu/grouped_gemm/xe_2",
+}
+
+if _build_custom_ops():
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fa2_C"))
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
+    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._xpu_C"))
+    ext_modules.append(
+        CMakeExtension(name="vllm_xpu_kernels.xpumem_allocator"))
+
+if ext_modules:
+    cmdclass = {
+        "build_ext":
+        precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
+    }
 
 setup(
     version=get_vllm_version(),

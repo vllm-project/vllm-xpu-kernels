@@ -22,11 +22,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      // FIXME: torch op check consider input & weight is mutable in some ut
-      // cases. so we make it mutable here.
-      "rms_norm(Tensor! result, Tensor! input, Tensor! weight, float epsilon) "
-      "-> "
-      "()");
+      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) "
+      "-> ()");
   ops.impl("rms_norm", torch::kXPU, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
@@ -136,6 +133,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "xpu_memcpy_sync(int dst_ptr, int src_ptr, int n_bytes, int kind, "
       "int device=-1) -> ()");
   ops.impl("xpu_memcpy_sync", &xpu_memcpy_sync);
+
+  // Merge attn states
+  // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
+  // can be used to combine partial attention results (in the split-KV case)
+  ops.def(
+      "merge_attn_states("
+      "    Tensor! output,"
+      "    Tensor!? output_lse,"
+      "    Tensor prefix_output,"
+      "    Tensor prefix_lse,"
+      "    Tensor suffix_output,"
+      "    Tensor suffix_lse) -> ()");
+  ops.impl("merge_attn_states", torch::kXPU, &merge_attn_states);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
@@ -191,6 +201,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "Tensor slot_mapping, int quant_block_size, str scale_fmt) -> ()");
   cache_ops.impl(
       "indexer_k_quant_and_cache", torch::kXPU, &indexer_k_quant_and_cache);
+  cache_ops.def(
+      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, "
+      "Tensor! dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
+  cache_ops.impl(
+      "cp_gather_indexer_k_quant_cache",
+      torch::kXPU,
+      &cp_gather_indexer_k_quant_cache);
+
+  // Gather cache blocks with optional FP8 dequantization.
+  cache_ops.def(
+      "gather_and_maybe_dequant_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor cu_seq_lens, Tensor token_to_seq, "
+      "int num_tokens, str kv_cache_dtype, Tensor scale, "
+      "Tensor? seq_starts) -> ()");
+  cache_ops.impl(
+      "gather_and_maybe_dequant_cache",
+      torch::kXPU,
+      &gather_and_maybe_dequant_cache);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
