@@ -52,6 +52,31 @@ namespace MoE {
 
 using namespace cute;
 
+template <typename TB> CUTE_DEVICE TB apply_scale(TB &x, float &y) {
+  static_assert(is_any_of_v<TB, bfloat16_t, half_t>, "Only BF16 & FP16 are supported");
+  uint16_t z = sycl::bit_cast<uint16_t>(x);
+#if defined(__SYCL_DEVICE_ONLY__) && defined(SYCL_INTEL_TARGET)
+  if constexpr (is_same_v<TB, half_t>) {
+    asm("{\n"
+        ".decl Z_FP16 v_type=G type=HF num_elts=16 alias=<%0,0>\n"
+        ".decl Y_FP32 v_type=G type=F num_elts=16 alias=<%1,0>\n"
+        "mul (M1, 16) Z_FP16(0,0)<1> Z_FP16(0,0)<1;1,0> Y_FP32(0,0)<1;1,0>\n"
+        "}\n"
+        : "+rw"(z)
+        : "rw"(y));
+  } else {
+    asm("{\n"
+        ".decl Z_BF16 v_type=G type=BF num_elts=16 alias=<%0,0>\n"
+        ".decl Y_FP32 v_type=G type=F num_elts=16 alias=<%1,0>\n"
+        "mul (M1, 16) Z_BF16(0,0)<1> Z_BF16(0,0)<1;1,0> Y_FP32(0,0)<1;1,0>\n"
+        "}\n"
+        : "+rw"(z)
+        : "rw"(y));
+  }
+#endif
+  return sycl::bit_cast<TB>(z);
+}
+
 template <
     class GmemTiledCopyA,
     class GmemTiledCopyB,
@@ -322,7 +347,7 @@ CUTE_DEVICE void xe_gemm_4bits(
   int group_num = get<1>(A.shape()) / group_size;
   int x_idx = sg_local_id / channel_num;
 
-  TA scales[thr_N * channel_num];
+  float scales[thr_N * channel_num];
 
   clear(tCrC);
 
@@ -352,7 +377,7 @@ CUTE_DEVICE void xe_gemm_4bits(
         for (int c = 0; c < channel_num; ++c) {
           int real_idx = x_idx + c * (sg_local_range / channel_num);
           int sg_local_n = n * sg_local_range + real_idx;
-          TA scale;
+          float scale;
           if constexpr (std::is_same_v<TB, int4_t>) {
             scale = Scales
                 [(n_tile_start + n_sg_start + sg_local_n) * group_num +
@@ -363,7 +388,7 @@ CUTE_DEVICE void xe_gemm_4bits(
                     [(n_tile_start + n_sg_start + sg_local_n) * group_num +
                      group_idx]
                 << 23;
-            scale = static_cast<TA>(reinterpret_cast<float&>(scale_u32));
+            scale = reinterpret_cast<float&>(scale_u32);
           }
 
           scales[n * channel_num + c] = scale;
@@ -383,9 +408,10 @@ CUTE_DEVICE void xe_gemm_4bits(
     for (int n = 0; n < thr_N; ++n) {
       CUTLASS_PRAGMA_UNROLL
       for (int c = 0; c < channel_num; ++c) {
+        float scale = scales[n * channel_num + c];
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < tCrB.size() / thr_N / channel_num; ++i) {
-          tCrB(cute::tuple(c, _), n, _)[i] *= scales[n * channel_num + c];
+          tCrB(cute::tuple(c, _), n, _)[i] = apply_scale(tCrB(cute::tuple(c, _), n, _)[i], scale);
         }
       }
     }
