@@ -70,8 +70,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       ") -> (Tensor, Tensor)");
   m.impl("fused_grouped_topk", torch::kXPU, &fused_grouped_topk);
 
-  // Grouped TopK Multi Group (from grouped_topk_kernels.cpp)
-
   // Apply topk softmax to the gating outputs.
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
