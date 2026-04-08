@@ -1,23 +1,12 @@
 #include <torch/all.h>
-#include <sycl/sycl.hpp>
-#include <c10/xpu/XPUStream.h>
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <sycl/sycl.hpp>
 #include "../dispatch_utils.h"
-
+#include "../utils.h"
 namespace vllm {
 namespace moe {
-
-// Type trait: bfloat16 -> float for computation, everything else stays as-is
-template <typename T>
-struct compute_type { using type = T; };
-
-template <>
-struct compute_type<sycl::ext::oneapi::bfloat16> { using type = float; };
-
-template <typename T>
-using compute_type_t = typename compute_type<T>::type;
 
 constexpr unsigned FULL_WARP_MASK = 0xffffffff;
 static constexpr int WARP_SIZE = 32;
@@ -47,35 +36,28 @@ inline T_OUT sycl_cast(T_IN val) {
     return static_cast<T_OUT>(val);
 }
 
-
-template <>
-inline float sycl_cast<float, sycl::half>(sycl::half val) {
-    return static_cast<float>(val);
-}
-
-template <>
-inline float sycl_cast<float, sycl::ext::oneapi::bfloat16>(sycl::ext::oneapi::bfloat16 val) {
-    return static_cast<float>(val);
-}
-
 template <typename T>
 inline T neg_inf() {
-    return sycl_cast<T, float>(-std::numeric_limits<float>::infinity());
+    T out;
+    xpu::from_float(out, -std::numeric_limits<float>::infinity());
+    return out;
 }
 
 template <typename T>
 inline bool is_finite(const T val) {
-    return std::isfinite(sycl_cast<float, T>(val));
+    return std::isfinite(xpu::to_float(val));
 }
+
 inline float sigmoid_accurate(float x) {
-    return 1.f / (1.f + sycl::native::exp(-x)); // More efficient approximation Optimized point 1
+    return 1.f / (1.f + sycl::native::exp(-x)); 
 }
 
 template <typename T>
 inline T apply_sigmoid(T val) {
-    float f = sycl_cast<float, T>(val);
-    return sycl_cast<T, float>(sigmoid_accurate(f));
-
+    float f = xpu::to_float(val);
+    T out;
+    xpu::from_float(out, sigmoid_accurate(f));
+    return out;
 }
 
 template <ScoringFunc SF, typename T>
@@ -97,7 +79,7 @@ inline void reduceTopK(sycl::sub_group subgroup, T* out_val, IdxT* out_idx,
     bool selected[N_IN] = {false};
 
     for (int k = 0; k < topk; ++k) {
-        using CT = compute_type_t<T>;
+        using CT = xpu::acc_type<T>;
         CT local_best_val = static_cast<CT>(min_val);
         IdxT local_best_idx = invalid_idx;
         int local_best_pos = -1;
@@ -292,7 +274,7 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
         if (laneIdx < topk) {
             laneIdxOut = selectedExpertIdx[laneIdx];
             T in = scoresToken[static_cast<int32_t>(laneIdxOut)];
-            laneUnbiased = sycl_cast<float, T>(apply_scoring<SF>(in));
+            laneUnbiased = xpu::to_float(apply_scoring<SF>(in));
         }
 
         float scale = static_cast<float>(routedScalingFactor);
@@ -329,8 +311,6 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
             : scoreSigmoid;
     }
 
-    // Barrier: ensure all warps have written smemScoreSigmoid/smemScoreBias
-    // before any warp reads them in the topk reduction below.
     item.barrier(sycl::access::fence_space::local_space);
 
     if constexpr (MaxNumExperts > MaxNumExpertsUnit) {
@@ -402,8 +382,10 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
 
     if (warpIdx == 0) {
         int32_t expertIdx = laneIdx < topk ? topExperts[laneIdx] : MaxNumExperts - 1;
-        T scoreNormT = laneIdx < topk ? smemScoreSigmoid[expertIdx] : sycl_cast<T, float>(0.F);
-        float scoreNorm = sycl_cast<float, T>(scoreNormT);
+        T temp;
+        xpu::from_float(temp, 0.F);
+        T scoreNormT = laneIdx < topk ? smemScoreSigmoid[expertIdx] : temp;
+        float scoreNorm = xpu::to_float(scoreNormT);
         float finalScore = static_cast<float>(scoreNorm * routedScalingFactor);
         float topk_sum = 1e-20f;
         if (renormalize) {
@@ -550,7 +532,7 @@ std::tuple<torch::Tensor, torch::Tensor> fused_grouped_topk(
         ? vllm::moe::SCORING_SIGMOID
         : vllm::moe::SCORING_NONE;
 
-  // Always output float32 for topk_values (eliminates Python-side conversion)
+  
     torch::Tensor topk_values = torch::empty(
       {num_tokens, topk}, torch::dtype(torch::kFloat32).device(gating_output.device()));
     torch::Tensor topk_indices = torch::empty(
