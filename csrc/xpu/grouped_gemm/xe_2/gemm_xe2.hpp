@@ -346,8 +346,9 @@ CUTE_DEVICE void xe_gemm_4bits(
   int n_sg_start = sg_local_n_coord * SG_N;
   int group_num = get<1>(A.shape()) / group_size;
   int x_idx = sg_local_id / channel_num;
-
-  float scales[thr_N * channel_num];
+  
+  using scaleStoreType = conditional_t<is_same_v<TA, half_t>, half_t, float>;
+  scaleStoreType scales[thr_N * channel_num];
 
   clear(tCrC);
 
@@ -377,7 +378,7 @@ CUTE_DEVICE void xe_gemm_4bits(
         for (int c = 0; c < channel_num; ++c) {
           int real_idx = x_idx + c * (sg_local_range / channel_num);
           int sg_local_n = n * sg_local_range + real_idx;
-          float scale;
+          scaleStoreType scale;
           if constexpr (std::is_same_v<TB, int4_t>) {
             scale = Scales
                 [(n_tile_start + n_sg_start + sg_local_n) * group_num +
@@ -388,7 +389,7 @@ CUTE_DEVICE void xe_gemm_4bits(
                     [(n_tile_start + n_sg_start + sg_local_n) * group_num +
                      group_idx]
                 << 23;
-            scale = reinterpret_cast<float&>(scale_u32);
+            scale = static_cast<scaleStoreType>(reinterpret_cast<float&>(scale_u32));
           }
 
           scales[n * channel_num + c] = scale;
@@ -408,10 +409,13 @@ CUTE_DEVICE void xe_gemm_4bits(
     for (int n = 0; n < thr_N; ++n) {
       CUTLASS_PRAGMA_UNROLL
       for (int c = 0; c < channel_num; ++c) {
-        float scale = scales[n * channel_num + c];
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < tCrB.size() / thr_N / channel_num; ++i) {
-          tCrB(cute::tuple(c, _), n, _)[i] = apply_scale(tCrB(cute::tuple(c, _), n, _)[i], scale);
+          if constexpr (std::is_same_v<TA, half_t>) {
+            tCrB(cute::tuple(c, _), n, _)[i] *= scales[n * channel_num + c];
+          } else {
+            tCrB(cute::tuple(c, _), n, _)[i] = apply_scale(tCrB(cute::tuple(c, _), n, _)[i], scales[n * channel_num + c]);
+          }
         }
       }
     }
