@@ -50,14 +50,32 @@ set(BUILD_SYCL_TLA_KERNELS
     ON
     CACHE BOOL "Build SYCL-TLA based kernels for XPU")
 # ARCHITECTURE OPTIONS
-set(VLLM_XPU_ENABLE_XE2 ON)
-set(VLLM_XPU_ENABLE_XE_DEFAULT ON)
+option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
+option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
 
-set(BASIC_KERNELS_ENABLED ON)
-set(FA2_KERNELS_ENABLED ON)
-set(GND_KERNELS_ENABLED ON)
-set(MOE_KERNELS_ENABLED ON)
-set(XPU_SPECIFIC_KERNELS_ENABLED ON)
+# KERNEL OPTIONS — each controls whether the corresponding Python extension is
+# built. Override from the command line with -D<NAME>=OFF or via the
+# identically-named environment variable (read by setup.py).
+option(BASIC_KERNELS_ENABLED "Build basic kernels (_C extension)" ON)
+option(FA2_KERNELS_ENABLED
+       "Build Flash Attention 2 kernels (_vllm_fa2_C extension)" ON)
+option(MOE_KERNELS_ENABLED "Build MoE kernels (_moe_C extension)" ON)
+option(XPU_SPECIFIC_KERNELS_ENABLED
+       "Build XPU-specific kernels (_xpu_C extension)" ON)
+option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
+
+message(STATUS "")
+message(STATUS "Kernel build configuration:")
+message(STATUS "  BUILD_SYCL_TLA_KERNELS       = ${BUILD_SYCL_TLA_KERNELS}")
+message(STATUS "  VLLM_XPU_ENABLE_XE2          = ${VLLM_XPU_ENABLE_XE2}")
+message(STATUS "  VLLM_XPU_ENABLE_XE_DEFAULT   = ${VLLM_XPU_ENABLE_XE_DEFAULT}")
+message(STATUS "  BASIC_KERNELS_ENABLED        = ${BASIC_KERNELS_ENABLED}")
+message(STATUS "  FA2_KERNELS_ENABLED          = ${FA2_KERNELS_ENABLED}")
+message(STATUS "  MOE_KERNELS_ENABLED          = ${MOE_KERNELS_ENABLED}")
+message(
+  STATUS "  XPU_SPECIFIC_KERNELS_ENABLED = ${XPU_SPECIFIC_KERNELS_ENABLED}")
+message(STATUS "  XPUMEM_ALLOCATOR_ENABLED     = ${XPUMEM_ALLOCATOR_ENABLED}")
+message(STATUS "")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -352,9 +370,6 @@ list(
 #
 # xpumem_allocator extension - XPU memory allocator with Python callbacks
 #
-set(XPUMEM_ALLOCATOR_ENABLED
-    ON
-    CACHE BOOL "Build xpumem_allocator extension")
 if(XPUMEM_ALLOCATOR_ENABLED)
   message(STATUS "Enabling xpumem_allocator extension.")
 
@@ -441,6 +456,14 @@ endif()
 #
 # flash attention _C extension
 #
+if(FA2_KERNELS_ENABLED AND NOT ATTN_KERNEL_LIB_NAME)
+  message(
+    WARNING
+      "FA2_KERNELS_ENABLED is ON but no attention kernel libraries are available. "
+      "The _vllm_fa2_C extension will be built without kernel libraries and may "
+      "fail at runtime. Enable BUILD_SYCL_TLA_KERNELS and VLLM_XPU_ENABLE_XE2 "
+      "for full FA2 functionality.")
+endif()
 if(FA2_KERNELS_ENABLED)
   message(STATUS "Enabling fa2 extension.")
   file(GLOB FA2_GEN_SRCS "csrc/flash_attn/*.cpp"
