@@ -321,6 +321,14 @@ def int4_gemm_w4a8(input: torch.Tensor,
                                            group_size, g_idx, bias)
 
 
+def ggml_dequantize(weight: torch.Tensor,
+                    quant_type: int,
+                    m: int,
+                    n: int,
+                    dtype: Optional[torch.dtype] = None):
+    return torch.ops._xpu_C.ggml_dequantize(weight, quant_type, m, n, dtype)
+
+
 def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
              out_dtype: Optional[torch.dtype],
              scale_act: Optional[torch.Tensor],

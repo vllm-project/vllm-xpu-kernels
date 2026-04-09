@@ -36,6 +36,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("int4_gemm_w4a8", torch::kXPU, &int4_gemm_w4a8);
 
   xpu_ops.def(
+      "ggml_dequantize(Tensor W, int type, SymInt m, SymInt n, ScalarType? "
+      "dtype) -> Tensor");
+  xpu_ops.impl("ggml_dequantize", torch::kXPU, &ggml_dequantize);
+
+  xpu_ops.def(
       "cutlass_grouped_gemm_interface(Tensor ptr_A, Tensor ptr_B, Tensor? "
       "ptr_scales, "
       "Tensor? ptr_bias, "

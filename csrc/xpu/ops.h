@@ -52,6 +52,13 @@ torch::Tensor int4_gemm_w4a8(
     const std::optional<torch::Tensor>& g_idx,
     const std::optional<torch::Tensor>& bias);
 
+torch::Tensor ggml_dequantize(
+    const torch::Tensor& W,
+    int64_t type,
+    int64_t m,
+    int64_t n,
+    std::optional<c10::ScalarType> out_dtype);
+
 torch::Tensor cutlass_grouped_gemm_interface(
     torch::Tensor ptr_A,
     torch::Tensor ptr_B,
