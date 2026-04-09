@@ -323,7 +323,10 @@ class XeFMHAFwdSplitKVKernel {
       // Per-sequence split decision: short sequences are treated as
       // single-split even when num_kv_splits > 1, avoiding precision
       // loss from the split-reduce roundtrip.
-      constexpr int kMinBlocksForSplit = 128;
+      // Scale threshold with tile width: smaller tiles (p64) have fewer
+      // SGs per WG, so splitting becomes beneficial at fewer blocks.
+      constexpr int tile_n = get<1>(TileShapeQK{});
+      constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 64 : 128;
       bool is_single_split =
           (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
 
@@ -620,6 +623,14 @@ class ReduceSplitK {
       int num_blocks_per_split =
           cute::ceil_div(windowed_k_blocks, num_kv_splits);
 
+      // Mirror the FMHA kernel's is_single_split decision so we only
+      // read split slots that were actually written.
+      constexpr int tile_n = get<1>(typename FMHAKernel_::TileShapeQK{});
+      constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 64 : 128;
+      bool is_single_split =
+          (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
+      int effective_splits = is_single_split ? 1 : num_kv_splits;
+
       int offset_o = 0, offset_o_accum = 0;
       int offset_exp_sums = 0, offset_max_logits = 0;
 
@@ -693,7 +704,7 @@ class ReduceSplitK {
           cutlass::platform::numeric_limits<ElementLSE>::lowest()};
       ElementLSE global_exp_sums{0};
       // only first subgroup participates
-      if (thr_id < num_kv_splits &&
+      if (thr_id < effective_splits &&
           thr_id * num_blocks_per_split < windowed_k_blocks) {
         ElementLSE cur_max_logit = max_logits(seq_idx, thr_id, head_q, l_coord);
         global_max_logits = sycl::max(global_max_logits, cur_max_logit);
@@ -718,7 +729,7 @@ class ReduceSplitK {
            idx += SGPerWG::value * intel::sg_size) {
         ElementLSE acc = 0;
         global_exp_sums = 0;
-        for (int i = 0; i < num_kv_splits; ++i) {
+        for (int i = 0; i < effective_splits; ++i) {
           if (i * num_blocks_per_split >= windowed_k_blocks) {
             break;
           }
