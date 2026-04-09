@@ -326,7 +326,7 @@ class XeFMHAFwdSplitKVKernel {
       // Scale threshold with tile width: smaller tiles (p64) have fewer
       // SGs per WG, so splitting becomes beneficial at fewer blocks.
       constexpr int tile_n = get<1>(TileShapeQK{});
-      constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 64 : 128;
+      constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
       bool is_single_split =
           (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
 
@@ -626,7 +626,7 @@ class ReduceSplitK {
       // Mirror the FMHA kernel's is_single_split decision so we only
       // read split slots that were actually written.
       constexpr int tile_n = get<1>(typename FMHAKernel_::TileShapeQK{});
-      constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 64 : 128;
+      constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
       bool is_single_split =
           (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
       int effective_splits = is_single_split ? 1 : num_kv_splits;

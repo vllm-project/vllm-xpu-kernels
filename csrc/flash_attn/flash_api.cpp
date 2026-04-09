@@ -22,43 +22,33 @@ inline int get_num_splits(
   int cur_parallel = batch_size * num_heads_kv;
   int kv_blocks = (max_seqlen_k + block_size - 1) / block_size;
 
-  // Below a threshold number of KV blocks, the FMHA kernel time is flat
-  // regardless of split count — splitting only adds ReduceSplitK overhead.
-  // Smaller page sizes (≤64) benefit from splitting at fewer blocks because
-  // each WG has fewer subgroups (4 vs 8), so single-WG throughput is lower.
-  int min_kv_blocks = (block_size <= 64) ? 64 : 128;
+  // Minimum KV blocks to benefit from splitting, aligned with the kernel's
+  // kMinBlocksForSplit.  Below this the kernel falls back to single-split
+  // regardless, and splitting only adds ReduceSplitK overhead.
+  // p64: 32 blocks (2048 tokens).  p128: 128 blocks (16384 tokens).
+  int min_kv_blocks = (block_size <= 64) ? 32 : 128;
   if (kv_blocks < min_kv_blocks) return 1;
 
+  // GPU already heavily saturated: splitting adds overhead without benefit.
+  if (cur_parallel >= num_xe_cores * 4) return 1;
+
   int target_splits;
-  if (cur_parallel < num_xe_cores) {
-    // Under-utilized: issue enough splits to fill GPU cores.
-    target_splits = num_xe_cores;
-    if (num_heads_kv >= 4) {
-      // Multi-head: larger blocks provide more compute per work-group,
-      // so fewer splits saturate the GPU.  Scale inversely with
-      // block_size (e.g. split=20 at p64, split=10 at p128 for 32/8).
-      target_splits = std::max(4, num_xe_cores * 64 / block_size);
-    }
-    if (num_heads_kv <= 2) {
-      // Few KV heads: each split finishes fast, so scale splits with
-      // block count.  Smaller page sizes need more aggressive splitting
-      // (~10 blocks/split for p64 vs ~17 for p128) because each WG has
-      // fewer subgroups and thus lower single-WG throughput.
-      int blocks_per_split = (block_size <= 64) ? 10 : 17;
-      target_splits = std::max(target_splits, kv_blocks / blocks_per_split);
-    }
-  } else if (cur_parallel <= num_xe_cores * 2) {
-    // Well-utilized zone (1x-2x oversubscription):
-    // GPU is busy, splitting adds overhead without benefit.
-    return 1;
+
+  if (num_heads_kv <= 2) {
+    // Few KV heads — each WG iterates many blocks sequentially.
+    // Split so each WG handles ~blocks_per_split blocks, balancing
+    // FMHA parallelism against ReduceSplitK overhead.
+    int blocks_per_split = (block_size <= 64) ? 10 : 8;
+    int from_blocks = kv_blocks / blocks_per_split;
+    // Cap total work-groups at ~5× XE cores to limit oversubscription.
+    int from_wg_cap = std::max(1, num_xe_cores * 5 / cur_parallel);
+    target_splits = std::min(from_blocks, from_wg_cap);
   } else {
-    // Heavily oversubscribed (>2x): shorter WGs help.
-    // But gate out when compute is already saturated.
-    int eff_parallel = cur_parallel * block_size / 64;
-    if (eff_parallel >= num_xe_cores * 8) return 1;
-    target_splits = std::max(1, kv_blocks / 64);
-    int par_cap = std::max(1, num_xe_cores * 8 / cur_parallel);
-    target_splits = std::min(target_splits, par_cap);
+    // Many KV heads (≥4) — batch × kv_heads already provides base
+    // occupancy.  Target moderate total WG count (~3-4× XE cores) to
+    // keep scheduling overhead in check.
+    int target_wgs = num_xe_cores * ((block_size <= 64) ? 4 : 3);
+    target_splits = std::max(1, target_wgs / cur_parallel);
   }
 
   // Each split must process at least 3 KV blocks to amortize overhead.
