@@ -114,7 +114,9 @@ struct AccumulateType {
   static constexpr bool is_narrow_float =
       std::is_same_v<T, at::Half> || std::is_same_v<T, at::BFloat16> ||
       std::is_same_v<T, c10::Float8_e4m3fn> ||
-      std::is_same_v<T, c10::Float8_e5m2>;
+      std::is_same_v<T, c10::Float8_e5m2>   || 
+      std::is_same_v<T, sycl::ext::oneapi::bfloat16> ||
+      std::is_same_v<T, sycl::half>;;
 
   static constexpr bool is_integer =
       std::is_same_v<T, int8_t> || std::is_same_v<T, uint8_t> ||
