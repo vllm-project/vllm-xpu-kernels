@@ -191,6 +191,7 @@ class cmake_build_ext(build_ext):
             "BASIC_KERNELS_ENABLED",
             "FA2_KERNELS_ENABLED",
             "MOE_KERNELS_ENABLED",
+            "GDN_KERNELS_ENABLED",
             "XPU_SPECIFIC_KERNELS_ENABLED",
             "XPUMEM_ALLOCATOR_ENABLED",
         ]
@@ -528,11 +529,14 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
     if _is_enabled("VLLM_XPU_ENABLE_XE2"):
         if _is_enabled("FA2_KERNELS_ENABLED"):
             additional_libraries["attn_kernels_xe_2"] = "/csrc/xpu/attn/xe_2"
-        additional_libraries["gdn_attn_kernels_xe_2"] = (
-            "/csrc/xpu/gdn_attn/xe_2")
-        additional_libraries["grouped_gemm_xe_2"] = (
-            "/csrc/xpu/grouped_gemm/xe_2")
-    if _is_enabled("VLLM_XPU_ENABLE_XE_DEFAULT"):
+        if _is_enabled("GDN_KERNELS_ENABLED"):
+            additional_libraries["gdn_attn_kernels_xe_2"] = (
+                "/csrc/xpu/gdn_attn/xe_2")
+        if _is_enabled("MOE_KERNELS_ENABLED"):
+            additional_libraries["grouped_gemm_xe_2"] = (
+                "/csrc/xpu/grouped_gemm/xe_2")
+    if _is_enabled("VLLM_XPU_ENABLE_XE_DEFAULT") and _is_enabled(
+            "MOE_KERNELS_ENABLED"):
         additional_libraries["grouped_gemm_xe_default"] = (
             "/csrc/xpu/grouped_gemm/xe_default")
 

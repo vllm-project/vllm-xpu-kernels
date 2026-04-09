@@ -59,7 +59,9 @@ option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
 option(BASIC_KERNELS_ENABLED "Build basic kernels (_C extension)" ON)
 option(FA2_KERNELS_ENABLED
        "Build Flash Attention 2 kernels (_vllm_fa2_C extension)" ON)
-option(MOE_KERNELS_ENABLED "Build MoE kernels (_moe_C extension)" ON)
+option(MOE_KERNELS_ENABLED
+       "Build MoE kernels (_moe_C extension + grouped_gemm TLA)" ON)
+option(GDN_KERNELS_ENABLED "Build GDN attention kernels (gdn_attn TLA)" ON)
 option(XPU_SPECIFIC_KERNELS_ENABLED
        "Build XPU-specific kernels (_xpu_C extension)" ON)
 option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
@@ -72,6 +74,7 @@ message(STATUS "  VLLM_XPU_ENABLE_XE_DEFAULT   = ${VLLM_XPU_ENABLE_XE_DEFAULT}")
 message(STATUS "  BASIC_KERNELS_ENABLED        = ${BASIC_KERNELS_ENABLED}")
 message(STATUS "  FA2_KERNELS_ENABLED          = ${FA2_KERNELS_ENABLED}")
 message(STATUS "  MOE_KERNELS_ENABLED          = ${MOE_KERNELS_ENABLED}")
+message(STATUS "  GDN_KERNELS_ENABLED          = ${GDN_KERNELS_ENABLED}")
 message(
   STATUS "  XPU_SPECIFIC_KERNELS_ENABLED = ${XPU_SPECIFIC_KERNELS_ENABLED}")
 message(STATUS "  XPUMEM_ALLOCATOR_ENABLED     = ${XPUMEM_ALLOCATOR_ENABLED}")
@@ -331,21 +334,38 @@ if(BUILD_SYCL_TLA_KERNELS)
   # extensions shared library
   set(SYCL_TLA_COMPILE_OPTIONS "")
   if(VLLM_XPU_ENABLE_XE_DEFAULT)
-    add_subdirectory(csrc/xpu/grouped_gemm/xe_default)
-    list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_default")
+    if(MOE_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/grouped_gemm/xe_default)
+      list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_default")
+    endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE_DEFAULT)
   endif()
   if(VLLM_XPU_ENABLE_XE2)
-    add_subdirectory(csrc/xpu/grouped_gemm/xe_2)
-    add_subdirectory(csrc/xpu/attn/xe_2)
-    add_subdirectory(csrc/xpu/gdn_attn/xe_2)
-    list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_2")
-    list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels_xe_2")
-    list(APPEND GDN_ATTN_LIB_NAME "gdn_attn_kernels_xe_2")
+    if(MOE_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/grouped_gemm/xe_2)
+      list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_2")
+    endif()
+    if(FA2_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/attn/xe_2)
+      list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels_xe_2")
+    endif()
+    if(GDN_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/gdn_attn/xe_2)
+      list(APPEND GDN_ATTN_LIB_NAME "gdn_attn_kernels_xe_2")
+    endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
 
+endif()
+
+# Feature compile defines — these guard op registrations and interface code so
+# that disabled features don't pull in unbuilt TLA library symbols.
+if(MOE_KERNELS_ENABLED)
+  list(APPEND VLLM_GPU_COMPILE_FLAGS -DVLLM_MOE_ENABLED)
+endif()
+if(GDN_KERNELS_ENABLED)
+  list(APPEND VLLM_GPU_COMPILE_FLAGS -DVLLM_GDN_ENABLED)
 endif()
 
 # define vLLM XPU cmake variables
@@ -505,9 +525,14 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
       "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
       "csrc/xpu/rand/exponential.cpp"
-      "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp"
-      "csrc/xpu/utils.cpp"
-      "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
+      "csrc/xpu/utils.cpp")
+  if(MOE_KERNELS_ENABLED)
+    list(APPEND VLLM_EXT_XPU_SRC
+         "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp")
+  endif()
+  if(GDN_KERNELS_ENABLED)
+    list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
+  endif()
   include_directories("/usr/include")
   # TODO: check if we need this flags list(APPEND VLLM_GPU_FLAGS
   # "-gline-tables-only")

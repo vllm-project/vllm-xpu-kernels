@@ -121,6 +121,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("FA2_KERNELS_ENABLED", "ON"),
     "MOE_KERNELS_ENABLED":
     lambda: os.getenv("MOE_KERNELS_ENABLED", "ON"),
+    "GDN_KERNELS_ENABLED":
+    lambda: os.getenv("GDN_KERNELS_ENABLED", "ON"),
     "XPU_SPECIFIC_KERNELS_ENABLED":
     lambda: os.getenv("XPU_SPECIFIC_KERNELS_ENABLED", "ON"),
     "XPUMEM_ALLOCATOR_ENABLED":
