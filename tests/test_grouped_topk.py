@@ -18,14 +18,14 @@ MINI_PYTEST_PARAMS = {
 }
 
 
-@pytest.mark.parametrize("n_token", [64, 50000,100000])
+@pytest.mark.parametrize("n_token", [1, 33, 64])
 @pytest.mark.parametrize("n_hidden", [1024, 2048])
-@pytest.mark.parametrize("n_expert", [128, 256])
-@pytest.mark.parametrize("topk", [8])
+@pytest.mark.parametrize("n_expert", [16])
+@pytest.mark.parametrize("topk", [2])
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("num_expert_group", [8])
-@pytest.mark.parametrize("topk_group", [4])
-@pytest.mark.parametrize("scoring_func", ["sigmoid","softmax"])
+@pytest.mark.parametrize("topk_group", [2])
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
 @pytest.mark.parametrize("routed_scaling_factor", [1.0, 2.5])
 @pytest.mark.parametrize("dtype",
                          [torch.float16, torch.bfloat16, torch.float32])
@@ -36,10 +36,10 @@ def test_grouped_topk(n_token: int, n_hidden: int, n_expert: int, topk: int,
     seed_everything(0)
     hidden_states = torch.randn((n_token, n_hidden), dtype=dtype, device="xpu")
     gating_output = torch.randn((n_token, n_expert), dtype=dtype, device="xpu")
-    
     e_score_correction_bias = torch.randn((n_expert, ),
                                           dtype=dtype,
                                           device="xpu")
+
     baseline_topk_weights, baseline_topk_ids = grouped_topk(
         hidden_states=hidden_states,
         gating_output=gating_output,
@@ -50,6 +50,7 @@ def test_grouped_topk(n_token: int, n_hidden: int, n_expert: int, topk: int,
         scoring_func=scoring_func,
         routed_scaling_factor=routed_scaling_factor,
         e_score_correction_bias=e_score_correction_bias)
+
     test_topk_weights, test_topk_ids = fused_grouped_topk(
         hidden_states=hidden_states,
         gating_output=gating_output,

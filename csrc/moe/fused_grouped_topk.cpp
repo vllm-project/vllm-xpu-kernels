@@ -20,6 +20,7 @@ static constexpr int NumTopGroupScores = 2;
 static constexpr int DefaultMaxNumTopExperts = 8;
 static constexpr int MaxSupportedTopExperts = 22;
 static constexpr int MaxNumTopGroups = 4;
+static constexpr int MaxReduceTopK = 32;
 
 enum ScoringFunc : int { SCORING_NONE = 0, SCORING_SIGMOID = 1 };
 
@@ -79,8 +80,7 @@ inline void reduceTopK(sycl::sub_group subgroup, T* out_val, IdxT* out_idx,
     bool selected[N_IN] = {false};
 
     for (int k = 0; k < topk; ++k) {
-        using CT = xpu::acc_type<T>;
-        CT local_best_val = static_cast<CT>(min_val);
+        T local_best_val = min_val;
         IdxT local_best_idx = invalid_idx;
         int local_best_pos = -1;
 
@@ -98,11 +98,13 @@ inline void reduceTopK(sycl::sub_group subgroup, T* out_val, IdxT* out_idx,
                 local_best_pos = i;
             }
         }
-
-        T warp_best_val = sycl::reduce_over_group(
-            subgroup, local_best_val, sycl::maximum<CT>());
-
+        float local_best_val_tmp = xpu::to_float(local_best_val);
+        float warp_best_val_tmp = sycl::reduce_over_group(
+            subgroup, local_best_val_tmp, sycl::maximum<float>());
+        
+        T warp_best_val = static_cast<T>(warp_best_val_tmp);
         IdxT warp_best_idx = invalid_idx;
+        
         if (local_best_pos != -1 && local_best_val == warp_best_val) {
             warp_best_idx = local_best_idx;
         }
@@ -112,11 +114,20 @@ inline void reduceTopK(sycl::sub_group subgroup, T* out_val, IdxT* out_idx,
         bool found = (warp_best_idx != invalid_idx);
         if (found) {
             int insert_pos = k;
-            while (insert_pos > 0 && out_val[insert_pos - 1] == warp_best_val &&
-                   out_idx[insert_pos - 1] > warp_best_idx) {
-                out_val[insert_pos] = out_val[insert_pos - 1];
-                out_idx[insert_pos] = out_idx[insert_pos - 1];
-                --insert_pos;
+            bool still_shifting = true;
+            #pragma unroll
+            for (int shift = 0; shift < MaxReduceTopK - 1; ++shift) {
+                int prev_pos = k - shift - 1;
+                bool active = shift < k;
+                bool should_shift = active && still_shifting &&
+                    out_val[prev_pos] == warp_best_val &&
+                    out_idx[prev_pos] > warp_best_idx;
+                if (should_shift) {
+                    out_val[prev_pos + 1] = out_val[prev_pos];
+                    out_idx[prev_pos + 1] = out_idx[prev_pos];
+                    insert_pos = prev_pos;
+                }
+                still_shifting = still_shifting && should_shift;
             }
             out_val[insert_pos] = warp_best_val;
             out_idx[insert_pos] = warp_best_idx;
@@ -279,10 +290,17 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
 
         float scale = static_cast<float>(routedScalingFactor);
         if (renormalize) {
-            float topkSum = 1e-20f;
-            topkSum += sycl::reduce_over_group(
-                subgroup, laneUnbiased,sycl::plus<float>());
-            scale /= topkSum;
+            // Match baseline precision: sum and divide in T precision
+            T laneScoreT = static_cast<T>(laneUnbiased);
+            T topkSumT = static_cast<T>(0);
+            for (int i = 0; i < static_cast<int>(topk); ++i) {
+                T val = sycl::select_from_group(subgroup, laneScoreT, i);
+                topkSumT = topkSumT + val;
+            }
+            if (laneIdx < topk) {
+                T normalizedT = laneScoreT / topkSumT;
+                laneUnbiased = xpu::to_float(normalizedT);
+            }
         }
 
         if (laneIdx < topk) {

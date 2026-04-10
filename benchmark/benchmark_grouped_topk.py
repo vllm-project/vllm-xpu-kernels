@@ -75,10 +75,10 @@ def grouped_topk_compile(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
-n_token_range = [50000]
-n_expert_range = [256]
-topk_range = [8]
-topk_group_range = [4]
+n_token_range = [1, 64, 256]
+n_expert_range = [16, 64, 128]
+topk_range = [2, 4]
+topk_group_range = [4, 8]
 scoring_func_range = ["sigmoid", "softmax"]
 dtype_range = [torch.float16, torch.bfloat16, torch.float32]
 configs = list(
@@ -121,7 +121,7 @@ def get_benchmark():
     ):
         n_hidden = 1024
         routed_scaling_factor = 1.0
-        num_expert_group = 4
+        num_expert_group = 8
         renormalize = True
         hidden_states = torch.randn((n_token, n_hidden),
                                     dtype=dtype,
