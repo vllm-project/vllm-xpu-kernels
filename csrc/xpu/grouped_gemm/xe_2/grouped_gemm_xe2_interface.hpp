@@ -286,8 +286,6 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     }                                                                       \
   }
 
-    const char* val = std::getenv("MY_ENV_VAR");
-
     if (A_avg_M <= 4) {
       using policy = w4a16_policy_m_8;
       W4A16LauncherCallER(policy);
@@ -354,14 +352,14 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     if (A_avg_M <= 8) {
       using policy = w16a16_policy_m_16;
       W16A16LauncherCallER(policy);
-    } else if(A_avg_M <= 16){
+    } else if (A_avg_M <= 16) {
       using policy = w16a16_policy_m_32;
       W16A16LauncherCallER(policy);
     } else {
-      if(B_N <= 64){
+      if (B_N <= 64) {
         using policy = w16a16_policy_n_64;
         W16A16LauncherCallER(policy);
-      } else if(B_N <= 512){
+      } else if (B_N <= 512) {
         using policy = w16a16_policy_n_128;
         W16A16LauncherCallER(policy);
       } else {

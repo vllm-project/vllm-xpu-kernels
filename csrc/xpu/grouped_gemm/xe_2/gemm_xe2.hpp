@@ -52,8 +52,10 @@ namespace MoE {
 
 using namespace cute;
 
-template <typename TB> CUTE_DEVICE TB apply_scale(TB &x, float &y) {
-  static_assert(is_any_of_v<TB, bfloat16_t, half_t>, "Only BF16 & FP16 are supported");
+template <typename TB>
+CUTE_DEVICE TB apply_scale(TB& x, float& y) {
+  static_assert(
+      is_any_of_v<TB, bfloat16_t, half_t>, "Only BF16 & FP16 are supported");
   uint16_t z = sycl::bit_cast<uint16_t>(x);
 #if defined(__SYCL_DEVICE_ONLY__) && defined(SYCL_INTEL_TARGET)
   if constexpr (is_same_v<TB, half_t>) {
@@ -264,8 +266,6 @@ CUTE_DEVICE void xe_gemm_4bits(
   auto wg_n = get<1>(blk_coord);
   int local_id = item.get_local_linear_id();
 
-  auto gemm_n = get<0>(B.shape());
-
   Tensor cA = make_identity_tensor(A.shape());
   Tensor cB = make_identity_tensor(B.shape());
   Tensor cC = make_identity_tensor(C.shape());
@@ -348,7 +348,7 @@ CUTE_DEVICE void xe_gemm_4bits(
   int n_sg_start = sg_local_n_coord * SG_N;
   int group_num = get<1>(A.shape()) / group_size;
   int x_idx = sg_local_id / channel_num;
-  
+
   using scaleStoreType = conditional_t<is_same_v<TA, half_t>, half_t, float>;
   scaleStoreType scales[thr_N * channel_num];
 
@@ -364,15 +364,20 @@ CUTE_DEVICE void xe_gemm_4bits(
     prefetch(prefetch_a, pAgA(_, _, _, k_tile_prefetch));
     prefetch(prefetch_b, pBgB(_, _, _, k_tile_prefetch));
 
-    if(k_tile_prefetch * group_size < shape<1>(A)){
+    if (k_tile_prefetch * group_size < shape<1>(A)) {
       auto next_scales_tensor = make_tensor(
-          make_gmem_ptr(reinterpret_cast<const ElementS *>(
-            Scales + (n_tile_start + n_sg_start) * group_num + k_tile_prefetch)),
-          make_layout(make_shape(Int<SG_N>{}, Int<1>{}), make_stride(group_num, Int<1>{})));
+          make_gmem_ptr(
+              reinterpret_cast<const ElementS*>(
+                  Scales + (n_tile_start + n_sg_start) * group_num +
+                  k_tile_prefetch)),
+          make_layout(
+              make_shape(Int<SG_N>{}, Int<1>{}),
+              make_stride(group_num, Int<1>{})));
       auto prefetch_scales = make_block_2d_prefetch<1>(
           make_shape(Int<SG_N>{}, Int<1>{}), next_scales_tensor);
       auto thr_prefetch_scales = prefetch_scales.get_slice(sg_local_id);
-      auto pSgS = thr_prefetch_scales.partition_S(make_identity_tensor(make_shape(Int<SG_N>{}, Int<1>{})));
+      auto pSgS = thr_prefetch_scales.partition_S(
+          make_identity_tensor(make_shape(Int<SG_N>{}, Int<1>{})));
       prefetch(prefetch_scales, pSgS(_, 0, 0));
     }
   }
@@ -403,22 +408,28 @@ CUTE_DEVICE void xe_gemm_4bits(
                     [(n_tile_start + n_sg_start + sg_local_n) * group_num +
                      group_idx]
                 << 23;
-            scale = static_cast<scaleStoreType>(reinterpret_cast<float&>(scale_u32));
+            scale = static_cast<scaleStoreType>(
+                reinterpret_cast<float&>(scale_u32));
           }
 
           scales[n * channel_num + c] = scale;
         }
       }
 
-      if((group_idx + prefetch_dist) * group_size < shape<1>(A)){
+      if ((group_idx + prefetch_dist) * group_size < shape<1>(A)) {
         auto next_scales_tensor = make_tensor(
-            make_gmem_ptr(reinterpret_cast<const ElementS *>(
-              Scales + (n_tile_start + n_sg_start) * group_num + group_idx + prefetch_dist)),
-            make_layout(make_shape(Int<SG_N>{}, Int<1>{}), make_stride(group_num, Int<1>{})));
+            make_gmem_ptr(
+                reinterpret_cast<const ElementS*>(
+                    Scales + (n_tile_start + n_sg_start) * group_num +
+                    group_idx + prefetch_dist)),
+            make_layout(
+                make_shape(Int<SG_N>{}, Int<1>{}),
+                make_stride(group_num, Int<1>{})));
         auto prefetch_scales = make_block_2d_prefetch<1>(
             make_shape(Int<SG_N>{}, Int<1>{}), next_scales_tensor);
         auto thr_prefetch_scales = prefetch_scales.get_slice(sg_local_id);
-        auto pSgS = thr_prefetch_scales.partition_S(make_identity_tensor(make_shape(Int<SG_N>{}, Int<1>{})));
+        auto pSgS = thr_prefetch_scales.partition_S(
+            make_identity_tensor(make_shape(Int<SG_N>{}, Int<1>{})));
         prefetch(prefetch_scales, pSgS(_, 0, 0));
       }
     }
@@ -440,7 +451,8 @@ CUTE_DEVICE void xe_gemm_4bits(
           if constexpr (std::is_same_v<TA, half_t>) {
             tCrB(cute::tuple(c, _), n, _)[i] *= scales[n * channel_num + c];
           } else {
-            tCrB(cute::tuple(c, _), n, _)[i] = apply_scale(tCrB(cute::tuple(c, _), n, _)[i], scales[n * channel_num + c]);
+            tCrB(cute::tuple(c, _), n, _)[i] = apply_scale(
+                tCrB(cute::tuple(c, _), n, _)[i], scales[n * channel_num + c]);
           }
         }
       }
