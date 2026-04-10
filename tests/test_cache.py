@@ -2,6 +2,7 @@
 
 import random
 
+import numpy as np
 import pytest
 import torch
 
@@ -100,6 +101,16 @@ MINI_PYTEST_PARAMS = {
         "seed": [0],
         "device": ["xpu:0"],
         "kv_cache_dtype": KV_CACHE_DTYPE,
+    },
+    "test_swap_blocks_batch": {
+        "direction": [("cpu", "xpu")],
+        "device": ["xpu:0"],
+    },
+    "test_swap_blocks_batch_empty": {
+        "device": ["xpu:0"],
+    },
+    "test_swap_blocks_batch_h2d_mutation_race": {
+        "device": ["xpu:0"],
     },
 }
 
@@ -947,4 +958,153 @@ def test_swap_blocks_mla(
             dst_cache[dst].cpu(),
             msg=f"Block {src} from src should have been swapped to block "
             f"{dst} in dst_cache.",
+        )
+
+
+# ---------------------------------------------------------------------------
+#  swap_blocks_batch tests
+# ---------------------------------------------------------------------------
+
+
+def _build_batch_args(
+    src_cache: torch.Tensor,
+    dst_cache: torch.Tensor,
+    block_mapping: list[tuple[int, int]],
+    block_size_in_bytes: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build (src_ptrs, dst_ptrs, sizes) tensors for swap_blocks_batch."""
+    n = len(block_mapping)
+    src_arr = np.empty(n, dtype=np.uint64)
+    dst_arr = np.empty(n, dtype=np.uint64)
+    sz_arr = np.full(n, block_size_in_bytes, dtype=np.uint64)
+
+    src_base = src_cache.data_ptr()
+    dst_base = dst_cache.data_ptr()
+    stride = src_cache.stride(0) * src_cache.element_size()
+
+    for i, (sb, db) in enumerate(block_mapping):
+        src_arr[i] = src_base + sb * stride
+        dst_arr[i] = dst_base + db * stride
+
+    return (torch.from_numpy(src_arr), torch.from_numpy(dst_arr),
+            torch.from_numpy(sz_arr))
+
+
+@pytest.mark.parametrize("direction", COPYING_DIRECTION)
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_swap_blocks_batch(
+    direction: tuple[str, str],
+    device: str,
+) -> None:
+    """Test swap_blocks_batch for H2D, D2H and D2D directions."""
+    num_mappings = 64
+    num_heads = 8
+    head_size = 64
+    block_size = 8
+    num_blocks = 256
+    dtype = torch.bfloat16
+    seed = 0
+
+    seed_everything(seed)
+
+    src_device = device if direction[0] == "xpu" else "cpu"
+    dst_device = device if direction[1] == "xpu" else "cpu"
+    if "xpu" in direction:
+        torch.xpu.set_device(device)
+
+    src_blocks = random.sample(range(num_blocks), num_mappings)
+    if src_device == dst_device:
+        remaining = list(set(range(num_blocks)) - set(src_blocks))
+        dst_blocks = random.sample(remaining, num_mappings)
+    else:
+        dst_blocks = random.sample(range(num_blocks), num_mappings)
+    block_mapping = list(zip(src_blocks, dst_blocks))
+
+    src_key, src_val = create_kv_caches_with_random(num_blocks, block_size, 1,
+                                                    num_heads, head_size,
+                                                    "auto", dtype, seed,
+                                                    src_device)
+    dst_key, dst_val = create_kv_caches_with_random(num_blocks, block_size, 1,
+                                                    num_heads, head_size,
+                                                    "auto", dtype, seed,
+                                                    dst_device)
+
+    src_key_clone = src_key[0].clone()
+    src_val_clone = src_val[0].clone()
+
+    block_size_in_bytes = src_key[0].element_size() * src_key[0].stride(0)
+
+    # Build batch args and call
+    for src_cache, dst_cache in [(src_key[0], dst_key[0]),
+                                 (src_val[0], dst_val[0])]:
+        sp, dp, sz = _build_batch_args(src_cache, dst_cache, block_mapping,
+                                       block_size_in_bytes)
+        ops.swap_blocks_batch(sp, dp, sz)
+
+    torch.xpu.synchronize()
+
+    for sb, db in block_mapping:
+        torch.testing.assert_close(src_key_clone[sb].cpu(),
+                                   dst_key[0][db].cpu())
+        torch.testing.assert_close(src_val_clone[sb].cpu(),
+                                   dst_val[0][db].cpu())
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_swap_blocks_batch_h2d_mutation_race(device: str) -> None:
+    """Verify staging buffer protects against caller mutation for H2D batch."""
+    num_mappings = 256
+    num_heads = 8
+    head_size = 128
+    block_size = 32
+    num_blocks = 512
+    dtype = torch.bfloat16
+    seed = 0
+
+    seed_everything(seed)
+
+    src_blocks = random.sample(range(num_blocks), num_mappings)
+    dst_blocks = random.sample(range(num_blocks), num_mappings)
+    block_mapping = list(zip(src_blocks, dst_blocks))
+
+    # Source: pinned CPU memory
+    src_key, src_val = create_kv_caches_with_pinned(num_blocks, block_size, 1,
+                                                    num_heads, head_size,
+                                                    "auto", dtype, seed, "cpu")
+    assert src_key[0].is_pinned()
+
+    # Destination: XPU
+    dst_key, dst_val = create_kv_caches_with_random(num_blocks, block_size, 1,
+                                                    num_heads, head_size,
+                                                    "auto", dtype, seed)
+
+    src_key_clone = src_key[0].clone()
+    src_val_clone = src_val[0].clone()
+
+    block_size_in_bytes = src_key[0].element_size() * src_key[0].stride(0)
+
+    for src_cache, dst_cache in [(src_key[0], dst_key[0]),
+                                 (src_val[0], dst_val[0])]:
+        sp, dp, sz = _build_batch_args(src_cache, dst_cache, block_mapping,
+                                       block_size_in_bytes)
+        ops.swap_blocks_batch(sp, dp, sz)
+
+    # Immediately mutate source — should not affect destination.
+    src_key[0].fill_(0)
+    src_val[0].fill_(0)
+
+    torch.xpu.synchronize()
+
+    for sb, db in block_mapping:
+        torch.testing.assert_close(
+            src_key_clone[sb].cpu(),
+            dst_key[0][db].cpu(),
+            msg=f"Key block {sb}→{db} corrupted by post-call mutation",
+        )
+        torch.testing.assert_close(
+            src_val_clone[sb].cpu(),
+            dst_val[0][db].cpu(),
+            msg=f"Value block {sb}→{db} corrupted by post-call mutation",
         )

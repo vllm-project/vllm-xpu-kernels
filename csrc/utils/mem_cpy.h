@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 
 namespace vllm {
 namespace xpu {
@@ -31,6 +32,28 @@ void xpuAsyncMemcpy(
     xpuMemcpyKind kind,
     const void* hctx,
     bool is_pinned);
+
+/**
+ * @brief Batch async memcpy: copies N independent (src, dst, size) triples
+ *        in a single call, amortising per-copy overhead.
+ *
+ * The copy direction is auto-detected from the first non-zero entry's USM
+ * pointer types.  All entries must share the same direction.
+ *
+ * For H2D: snapshots all source blocks through a single contiguous pinned
+ *   staging buffer so the caller may safely mutate host memory immediately.
+ * For D2H / D2D: direct async DMA without staging.
+ *
+ * @param src_ptrs   Array of N raw source addresses
+ * @param dst_ptrs   Array of N raw destination addresses
+ * @param sizes      Array of N byte counts
+ * @param n          Number of entries
+ */
+void xpuAsyncMemcpyBatch(
+    const uint64_t* src_ptrs,
+    const uint64_t* dst_ptrs,
+    const uint64_t* sizes,
+    int64_t n);
 
 }  // namespace xpu
 }  // namespace vllm

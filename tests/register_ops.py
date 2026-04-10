@@ -487,6 +487,17 @@ def swap_blocks(
                                        block_mapping)
 
 
+def swap_blocks_batch(
+    src_ptrs: torch.Tensor,
+    dst_ptrs: torch.Tensor,
+    sizes: torch.Tensor,
+) -> None:
+    """Batch version of swap_blocks: copies N independent (src, dst, size)
+    triples in a single call. The target XPU device is auto-inferred from the
+    device-side pointers in src_ptrs/dst_ptrs."""
+    torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
+
+
 def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor, renormalize: bool,

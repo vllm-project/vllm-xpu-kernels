@@ -1175,6 +1175,37 @@ void swap_blocks(
   return;
 }
 
+/**
+ * @brief Batch version of swap_blocks: copies N independent (src, dst, size)
+ *        triples in a single call, amortising per-copy overhead.
+ *
+ * Thin wrapper that validates the CPU tensor inputs and delegates to
+ * vllm::xpu::xpuAsyncMemcpyBatch for the actual copy logic.
+ */
+void swap_blocks_batch(
+    const torch::Tensor& src_ptrs,
+    const torch::Tensor& dst_ptrs,
+    const torch::Tensor& sizes) {
+  TORCH_CHECK(src_ptrs.device().is_cpu(), "src_ptrs must be on CPU");
+  TORCH_CHECK(dst_ptrs.device().is_cpu(), "dst_ptrs must be on CPU");
+  TORCH_CHECK(sizes.device().is_cpu(), "sizes must be on CPU");
+  TORCH_CHECK(src_ptrs.dtype() == torch::kUInt64, "src_ptrs must be uint64");
+  TORCH_CHECK(dst_ptrs.dtype() == torch::kUInt64, "dst_ptrs must be uint64");
+  TORCH_CHECK(sizes.dtype() == torch::kUInt64, "sizes must be uint64");
+
+  const int64_t n = src_ptrs.size(0);
+  TORCH_CHECK(dst_ptrs.size(0) == n, "dst_ptrs length must match src_ptrs");
+  TORCH_CHECK(sizes.size(0) == n, "sizes length must match src_ptrs");
+
+  if (n == 0) return;
+
+  vllm::xpu::xpuAsyncMemcpyBatch(
+      src_ptrs.data_ptr<uint64_t>(),
+      dst_ptrs.data_ptr<uint64_t>(),
+      sizes.data_ptr<uint64_t>(),
+      n);
+}
+
 namespace vllm {
 
 // Kernel for FP8 conversion (matches CUDA convert_fp8_kernel pattern).
