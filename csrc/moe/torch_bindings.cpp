@@ -47,7 +47,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor? maybe_expert_map) -> () ");
   m.impl("moe_lora_align_block_size", torch::kXPU, &moe_lora_align_block_size);
 
-  
   // Apply grouped topk routing to select experts.
   m.def(
       "grouped_topk(Tensor scores, Tensor scores_with_bias, int n_group, int "

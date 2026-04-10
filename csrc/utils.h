@@ -107,7 +107,6 @@ struct SyclTypeTrait<c10::BFloat16> {
   using Type = sycl::ext::oneapi::bfloat16;
 };
 
-
 template <typename T>
 struct AccumulateType {
  private:
