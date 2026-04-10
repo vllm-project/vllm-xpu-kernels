@@ -368,6 +368,18 @@ CUTE_DEVICE void xe_gemm_4bits(
   for (; k_tile_prefetch < prefetch_dist; k_tile_prefetch++) {
     prefetch(prefetch_a, pAgA(_, _, _, k_tile_prefetch));
     prefetch(prefetch_b, pBgB(_, _, _, k_tile_prefetch));
+
+    if(k_tile_prefetch * group_size < shape<1>(A)){
+      auto next_scales_tensor = make_tensor(
+          make_gmem_ptr(reinterpret_cast<const ElementS *>(
+            Scales + (n_tile_start + n_sg_start) * group_num + k_tile_prefetch)),
+          make_layout(make_shape(Int<SG_N>{}, Int<1>{}), make_stride(group_num, Int<1>{})));
+      auto prefetch_scales = make_block_2d_prefetch<1>(
+          make_shape(Int<SG_N>{}, Int<1>{}), next_scales_tensor);
+      auto thr_prefetch_scales = prefetch_scales.get_slice(sg_local_id);
+      auto pSgS = thr_prefetch_scales.partition_S(make_identity_tensor(make_shape(Int<SG_N>{}, Int<1>{})));
+      prefetch(prefetch_scales, pSgS(_, 0, 0));
+    }
   }
 
   for (int k_tile = 0; k_tile < k_tile_count; k_tile++, k_tile_prefetch++) {
@@ -432,10 +444,10 @@ CUTE_DEVICE void xe_gemm_4bits(
       //   scales[i * 2 + 1] = scale;
       // }
 
-      if((k_tile + 1) * tile_k < shape<1>(A)){
+      if((group_idx + prefetch_dist) * group_size < shape<1>(A)){
         auto next_scales_tensor = make_tensor(
             make_gmem_ptr(reinterpret_cast<const ElementS *>(
-              Scales + (n_tile_start + n_sg_start) * group_num + group_idx + 1)),
+              Scales + (n_tile_start + n_sg_start) * group_num + group_idx + prefetch_dist)),
             make_layout(make_shape(Int<SG_N>{}, Int<1>{}), make_stride(group_num, Int<1>{})));
         auto prefetch_scales = make_block_2d_prefetch<1>(
             make_shape(Int<SG_N>{}, Int<1>{}), next_scales_tensor);
