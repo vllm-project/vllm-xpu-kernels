@@ -144,3 +144,27 @@ class QuickGELU(CustomOp):
         out = torch.empty_like(x)
         self.op(out, x)
         return out
+
+
+class Relu2NoMul(CustomOp):
+    """Squared ReLU activation function (without mul).
+
+    The function computes x -> relu(x)^2.
+
+    Shapes:
+        x: (num_tokens, d) or (batch_size, seq_len, d)
+        return: same shape as x
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.op = torch.ops._C.relu2_no_mul
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        return torch.square(F.relu(x))
+
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x)
+        self.op(out, x)
+        return out

@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from tests.ops.fp8_quant_op import scaled_fp8_quant
-from tests.utils import seed_everything
+from tests.utils import format_tc, seed_everything
 from vllm_xpu_kernels.fused_moe_interface import (cutlass_grouped_gemm,
                                                   cutlass_grouped_gemm_xe2)
 
@@ -43,7 +43,8 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     seed_everything(7)
@@ -100,7 +101,8 @@ def init_rows_for_experts(tokens, topk, num_rows_per_expert):
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     seed_everything(7)
@@ -151,8 +153,10 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("fp8_dtype", [torch.float8_e5m2, torch.float8_e4m3fn])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e5m2, torch.float8_e4m3fn],
+                         ids=format_tc)
 @pytest.mark.parametrize("has_bias", [False, True])
 def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     seed_everything(7)
@@ -265,7 +269,8 @@ def implement_zp(qweight, zp=None):
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
 @pytest.mark.parametrize("has_bias", [False, True])
 def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
     seed_everything(7)
@@ -376,7 +381,8 @@ def dequantize_mxfp4(qweight, scales, group_size, dtype):
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
 @pytest.mark.parametrize("has_bias", [False, True])
 def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
     seed_everything(7)

@@ -59,6 +59,11 @@ inline void dispatch_by_head_size(
           decode_policy_qpacked_head<QGroup, _256, PageSize>>(
           queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
+    case 5:
+      decode_policy_dispatch_func<
+          decode_policy_qpacked_head<QGroup, _512, PageSize>>(
+          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
+      break;
     default:
       TORCH_CHECK(false, "Unsupported head size for fmha");
   }

@@ -81,6 +81,19 @@ def deepseek_scaling_rope(
                                                   rotary_dim, is_neox_style)
 
 
+# merge attn states ops
+def merge_attn_states(
+    output: torch.Tensor,
+    prefix_output: torch.Tensor,
+    prefix_lse: torch.Tensor,
+    suffix_output: torch.Tensor,
+    suffix_lse: torch.Tensor,
+    output_lse: torch.Tensor | None = None,
+) -> None:
+    torch.ops._C.merge_attn_states(output, output_lse, prefix_output,
+                                   prefix_lse, suffix_output, suffix_lse)
+
+
 def reshape_and_cache(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -156,6 +169,21 @@ def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor,
                                                      scale_fmt)
 
 
+def gather_and_maybe_dequant_cache(
+        src_cache: torch.Tensor,
+        dst: torch.Tensor,
+        block_table: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        token_to_seq: torch.Tensor,
+        num_tokens: int,
+        kv_cache_dtype: str,
+        scale: torch.Tensor,
+        seq_starts: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C_cache_ops.gather_and_maybe_dequant_cache(
+        src_cache, dst, block_table, cu_seq_lens, token_to_seq, num_tokens,
+        kv_cache_dtype, scale, seq_starts)
+
+
 def xpu_memcpy_sync(dst_ptr: int,
                     src_ptr: int,
                     n_bytes: int,
@@ -178,11 +206,20 @@ def xpu_memcpy_sync(dst_ptr: int,
     )
 
 
+def cp_gather_indexer_k_quant_cache(kv_cache: torch.Tensor,
+                                    dst_k: torch.Tensor,
+                                    dst_scale: torch.Tensor,
+                                    block_table: torch.Tensor,
+                                    cu_seq_lens: torch.Tensor) -> None:
+    torch.ops._C_cache_ops.cp_gather_indexer_k_quant_cache(
+        kv_cache, dst_k, dst_scale, block_table, cu_seq_lens)
+
+
 def convert_fp8(
     dst_cache: torch.Tensor,
     src_cache: torch.Tensor,
     scale: float,
-    kv_dtype: str,
+    kv_dtype: str = "fp8",
 ) -> None:
     """Convert between FP8 and FP16/BF16/FP32 formats with scaling.
 
@@ -251,6 +288,20 @@ def swigluoai_and_mul(
     torch.ops._C.swigluoai_and_mul(out, input, alpha, limit)
 
 
+def relu2_no_mul(out: torch.Tensor, input: torch.Tensor) -> None:
+    """Relu2 (squared ReLU) activation function without mul."""
+    torch.ops._C.relu2_no_mul(out, input)
+
+
+def swiglustep_and_mul(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    limit: float = 7.0,
+) -> None:
+    """SwiGLU-step and Mul activation function."""
+    torch.ops._C.swiglustep_and_mul(out, input, limit)
+
+
 # onednn gemm
 def int4_gemm_w4a16(input: torch.Tensor, weight: torch.Tensor,
                     bias: Optional[torch.Tensor], scales: torch.Tensor,
@@ -281,6 +332,18 @@ def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
              scale_wei: Optional[torch.Tensor], bias: Optional[torch.Tensor]):
     return torch.ops._xpu_C.fp8_gemm(input, weight, out_dtype, scale_act,
                                      scale_wei, bias)
+
+
+def fp4_gemm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    scale_act: torch.Tensor,
+    scale_wei: torch.Tensor,
+    out_dtype: Optional[torch.dtype],
+    bias: Optional[torch.Tensor],
+):
+    return torch.ops._xpu_C.fp4_gemm(input, weight, scale_act, scale_wei,
+                                     out_dtype, bias)
 
 
 def fp8_gemm_w8a16(input: torch.Tensor, weight: torch.Tensor,

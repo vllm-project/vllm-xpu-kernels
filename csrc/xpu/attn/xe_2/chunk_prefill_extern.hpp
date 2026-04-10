@@ -12,7 +12,8 @@
   X(chunk_policy_head96)     \
   X(chunk_policy_head128)    \
   X(chunk_policy_head192)    \
-  X(chunk_policy_head256)
+  X(chunk_policy_head256)    \
+  X(chunk_policy_head512)
 
 // =============================================================================
 // Automatic extern template declarations for all policy combinations

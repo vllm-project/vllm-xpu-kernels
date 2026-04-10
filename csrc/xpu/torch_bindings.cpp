@@ -20,6 +20,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
 
   xpu_ops.def(
+      "fp4_gemm(Tensor A, Tensor B, Tensor A_scale, Tensor B_scale, "
+      "ScalarType? out_dtype, Tensor? bias_) -> Tensor");
+  xpu_ops.impl("fp4_gemm", torch::kXPU, &fp4_gemm);
+
+  xpu_ops.def(
       "int4_gemm_w4a16(Tensor A, Tensor B, Tensor? bias, Tensor B_scale, "
       "Tensor B_zp, int group_size, Tensor? g_idx) -> Tensor");
   xpu_ops.impl("int4_gemm_w4a16", torch::kXPU, &int4_gemm_w4a16);
@@ -85,6 +90,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def("is_pvc(int device_index) -> bool");
   xpu_ops.impl("is_pvc", &is_pvc);
+
+  // test only, will not use in vllm
+  xpu_ops.def(
+      "exponential_2d_(Tensor! tensor, Tensor! seeds, float lambda) -> ()");
+  xpu_ops.impl("exponential_2d_", torch::kXPU, &exponential_2d_);
+
+  xpu_ops.def(
+      "topk_topp_sampler(Tensor! random_sampled, Tensor? logits_to_return,"
+      "Tensor! logits, Tensor? k, Tensor? p, str logprobs_mode, Tensor! seeds, "
+      "float lambda) -> ()");
+  xpu_ops.impl("topk_topp_sampler", torch::kXPU, &topk_topp_sampler);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

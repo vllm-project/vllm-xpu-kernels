@@ -136,6 +136,25 @@ void indexer_k_quant_and_cache(
     int64_t quant_block_size,     // quantization block size
     const std::string& scale_fmt);
 
+void cp_gather_indexer_k_quant_cache(
+    const torch::Tensor& kv_cache,  // [num_blocks, block_size, cache_stride]
+    torch::Tensor& dst_k,           // [num_tokens, head_dim]
+    torch::Tensor& dst_scale,  // [num_tokens, head_dim / quant_block_size * 4]
+    const torch::Tensor& block_table,  // [batch_size, num_blocks]
+    const torch::Tensor& cu_seq_lens   // [batch_size + 1]
+);
+
+void gather_and_maybe_dequant_cache(
+    torch::Tensor const& src_cache,     // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
+    torch::Tensor const& dst,           // [TOT_TOKENS, ENTRIES...]
+    torch::Tensor const& block_table,   // [BATCH, BLOCK_INDICES]
+    torch::Tensor const& cu_seq_lens,   // [BATCH+1]
+    torch::Tensor const& token_to_seq,  // [MAX_TOKEN_ACROSS_CHUNKS]
+    int64_t num_tokens,
+    const std::string& kv_cache_dtype,
+    torch::Tensor const& scale,
+    std::optional<torch::Tensor> seq_starts = std::nullopt);
+
 void static_scaled_fp8_quant(
     torch::Tensor& out,
     torch::Tensor const& input,
@@ -173,6 +192,11 @@ void swigluoai_and_mul(
     torch::Tensor& input,
     double alpha = 1.702,
     double limit = 7.0);
+
+void relu2_no_mul(torch::Tensor& out, torch::Tensor& input);
+
+void swiglustep_and_mul(
+    torch::Tensor& out, torch::Tensor& input, double limit = 7.0);
 
 torch::Tensor get_xpu_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
@@ -215,3 +239,11 @@ void xpu_memcpy_sync(
     int64_t n_bytes,
     int64_t kind,
     int64_t device = -1);
+
+void merge_attn_states(
+    torch::Tensor& output,
+    std::optional<torch::Tensor> output_lse,
+    const torch::Tensor& prefix_output,
+    const torch::Tensor& prefix_lse,
+    const torch::Tensor& suffix_output,
+    const torch::Tensor& suffix_lse);

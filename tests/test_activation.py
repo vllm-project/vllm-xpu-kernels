@@ -4,7 +4,7 @@ import torch
 
 from tests.allclose_default import get_default_atol, get_default_rtol
 from tests.ops.activation_op import (FastGELU, GeluAndMul, MulAndSilu, NewGELU,
-                                     QuickGELU, SiluAndMul)
+                                     QuickGELU, Relu2NoMul, SiluAndMul)
 from tests.utils import opcheck, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -66,9 +66,11 @@ def test_act_and_mul(
     opcheck(fn, (out, x))
 
 
-@pytest.mark.parametrize("activation", [(FastGELU, torch.ops._C.gelu_fast),
-                                        (NewGELU, torch.ops._C.gelu_new),
-                                        (QuickGELU, torch.ops._C.gelu_quick)])
+@pytest.mark.parametrize("activation",
+                         [(FastGELU, torch.ops._C.gelu_fast),
+                          (NewGELU, torch.ops._C.gelu_new),
+                          (QuickGELU, torch.ops._C.gelu_quick),
+                          (Relu2NoMul, torch.ops._C.relu2_no_mul)])
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)

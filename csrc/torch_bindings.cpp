@@ -155,6 +155,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> ()");
   ops.impl("swigluoai_and_mul", torch::kXPU, &swigluoai_and_mul);
 
+  // relu2_no_mul
+  ops.def("relu2_no_mul(Tensor! out, Tensor! input) -> ()");
+  ops.impl("relu2_no_mul", torch::kXPU, &relu2_no_mul);
+
+  // swiglustep_and_mul
+  ops.def(
+      "swiglustep_and_mul(Tensor! out, Tensor input, float limit=7.0) "
+      "-> ()");
+  ops.impl("swiglustep_and_mul", torch::kXPU, &swiglustep_and_mul);
+
   ops.def(
       "get_xpu_view_from_cpu_tensor(Tensor cpu_tensor) -> "
       "Tensor");
@@ -181,6 +191,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "xpu_memcpy_sync(int dst_ptr, int src_ptr, int n_bytes, int kind, "
       "int device=-1) -> ()");
   ops.impl("xpu_memcpy_sync", &xpu_memcpy_sync);
+
+  // Merge attn states
+  // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
+  // can be used to combine partial attention results (in the split-KV case)
+  ops.def(
+      "merge_attn_states("
+      "    Tensor! output,"
+      "    Tensor!? output_lse,"
+      "    Tensor prefix_output,"
+      "    Tensor prefix_lse,"
+      "    Tensor suffix_output,"
+      "    Tensor suffix_lse) -> ()");
+  ops.impl("merge_attn_states", torch::kXPU, &merge_attn_states);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
@@ -236,6 +259,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "Tensor slot_mapping, int quant_block_size, str scale_fmt) -> ()");
   cache_ops.impl(
       "indexer_k_quant_and_cache", torch::kXPU, &indexer_k_quant_and_cache);
+  cache_ops.def(
+      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, "
+      "Tensor! dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
+  cache_ops.impl(
+      "cp_gather_indexer_k_quant_cache",
+      torch::kXPU,
+      &cp_gather_indexer_k_quant_cache);
+
+  // Gather cache blocks with optional FP8 dequantization.
+  cache_ops.def(
+      "gather_and_maybe_dequant_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor cu_seq_lens, Tensor token_to_seq, "
+      "int num_tokens, str kv_cache_dtype, Tensor scale, "
+      "Tensor? seq_starts) -> ()");
+  cache_ops.impl(
+      "gather_and_maybe_dequant_cache",
+      torch::kXPU,
+      &gather_and_maybe_dequant_cache);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

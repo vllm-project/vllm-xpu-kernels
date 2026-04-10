@@ -7,7 +7,8 @@ import torch
 
 from tests import register_ops as ops
 from tests.register_ops import reshape_and_cache, reshape_and_cache_flash
-from tests.utils import (_convert_from_fp8, create_kv_caches_with_random,
+from tests.utils import (_convert_from_fp8, create_kv_caches_with_pinned,
+                         create_kv_caches_with_random,
                          create_kv_caches_with_random_flash, opcheck,
                          seed_everything)
 
@@ -83,6 +84,18 @@ MINI_PYTEST_PARAMS = {
         "qk_rope_head_dim": QK_ROPE_HEAD_DIMS,
         "block_size": BLOCK_SIZES_MLA,
         "num_blocks": NUM_BLOCKS_MLA,
+        "dtype": [torch.bfloat16],
+        "seed": [0],
+        "device": ["xpu:0"],
+        "kv_cache_dtype": KV_CACHE_DTYPE,
+    },
+    "test_swap_blocks_pinned": {
+        "direction": [("cpu", "xpu")],
+        "num_mappings": [256],
+        "num_heads": [8],
+        "head_size": [64],
+        "block_size": [8],
+        "num_blocks": [1024],
         "dtype": [torch.bfloat16],
         "seed": [0],
         "device": ["xpu:0"],
@@ -483,7 +496,6 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
                               device=device)
     cu_seq_lens[0] = 0
     cu_seq_lens[1:] = seq_len_tensor.cumsum(dim=0).to(dtype=torch.int32)
-    print("seq_len_tensor", seq_len_tensor)
 
     tot_blocks_tensor = (seq_len_tensor + block_size - 1) // block_size
     block_table = torch.empty((batch_size, num_blocks),
@@ -523,6 +535,122 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
     )
 
     ops.gather_cache(src_cache, dst, block_table, cu_seq_lens, batch_size)
+    torch.testing.assert_close(dst, expected)
+
+
+@pytest.mark.parametrize("kv_lora_rank", [512])
+@pytest.mark.parametrize("qk_rope_head_dim", [64])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("num_blocks", [1024])
+@pytest.mark.parametrize("max_seq_len", [512])
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_gather_and_maybe_dequant_cache_mla(
+    kv_lora_rank,
+    qk_rope_head_dim,
+    block_size,
+    num_blocks,
+    max_seq_len,
+    batch_size,
+    dtype,
+    kv_cache_dtype,
+    device,
+):
+    entry_size = kv_lora_rank + qk_rope_head_dim
+    scale = torch.tensor(0.1, dtype=torch.float32, device=device)
+    src_cache = _create_mla_cache(num_blocks, block_size, entry_size, dtype,
+                                  kv_cache_dtype, device)
+    _fill_mla_cache(src_cache, kv_cache_dtype=kv_cache_dtype)
+
+    seq_len_tensor = torch.randint(max_seq_len,
+                                   max_seq_len + 1, (batch_size, ),
+                                   device=device)
+
+    total_tokens = seq_len_tensor.sum()
+    cu_seq_lens = torch.empty((batch_size + 1),
+                              dtype=torch.int32,
+                              device=device)
+    cu_seq_lens[0] = 0
+    cu_seq_lens[1:] = seq_len_tensor.cumsum(dim=0).to(dtype=torch.int32)
+    token_to_seq = torch.arange(0,
+                                batch_size,
+                                dtype=torch.int32,
+                                device=device)
+    token_to_seq = torch.repeat_interleave(token_to_seq, seq_len_tensor)
+
+    tot_blocks_tensor = (seq_len_tensor + block_size - 1) // block_size
+    block_table = torch.empty((batch_size, num_blocks),
+                              dtype=torch.int32,
+                              device=device)
+
+    for b in range(batch_size):
+        perm = torch.randperm(num_blocks, device=device)
+        block_table[b, :] = perm
+
+    dst = torch.zeros((total_tokens, entry_size), dtype=dtype, device=device)
+
+    expected_batches = []
+    for b in range(batch_size):
+        s = seq_len_tensor[b]
+        if s == 0:
+            continue
+        tot = tot_blocks_tensor[b]
+        blocks = block_table[b, :tot].tolist()
+
+        gathered_rows = []
+        for i in range(tot - 1):
+            block_data = src_cache[blocks[i]]
+            if kv_cache_dtype == "fp8":
+                dequantized_block = torch.empty_like(block_data, dtype=dtype)
+                ops.convert_fp8(dequantized_block, block_data, scale.item())
+                gathered_rows.append(dequantized_block)
+            else:
+                gathered_rows.append(block_data)
+        remaining = s - (tot - 1) * block_size
+        last_block_data = src_cache[blocks[-1], :remaining, :]
+        if kv_cache_dtype == "fp8":
+            dequantized_last_block = torch.empty_like(last_block_data,
+                                                      dtype=dtype)
+            ops.convert_fp8(dequantized_last_block, last_block_data,
+                            scale.item())
+            gathered_rows.append(dequantized_last_block)
+        else:
+            gathered_rows.append(last_block_data)
+
+        batch_expected = torch.cat(gathered_rows, dim=0)
+        expected_batches.append(batch_expected)
+    expected = torch.cat(expected_batches, dim=0)
+
+    opcheck(
+        torch.ops._C_cache_ops.gather_and_maybe_dequant_cache,
+        (
+            src_cache,
+            dst,
+            block_table,
+            cu_seq_lens,
+            token_to_seq,
+            total_tokens,
+            kv_cache_dtype,
+            scale,
+            None,
+        ),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+    )
+
+    ops.gather_and_maybe_dequant_cache(
+        src_cache,
+        dst,
+        block_table,
+        cu_seq_lens,
+        token_to_seq,
+        total_tokens,
+        kv_cache_dtype,
+        scale,
+        None,
+    )
     torch.testing.assert_close(dst, expected)
 
 
@@ -639,6 +767,118 @@ def test_swap_blocks(
         block_size_in_bytes,
         block_mapping_tensor,
     )
+
+    for src, dst in block_mapping:
+        torch.testing.assert_close(src_key_caches_clone[src].cpu(),
+                                   dst_key_caches[0][dst].cpu())
+        torch.testing.assert_close(src_value_caches_clone[src].cpu(),
+                                   dst_value_caches[0][dst].cpu())
+
+
+# Test with pinned memory to verify async DMA path
+@pytest.mark.parametrize("direction", [("cpu", "xpu"), ("xpu", "cpu")])
+@pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@torch.inference_mode()
+def test_swap_blocks_pinned(
+    direction: tuple[str, str],
+    num_mappings: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+) -> None:
+    """Test swap_blocks with pinned host memory to exercise async DMA path."""
+    if kv_cache_dtype == "fp8":
+        pytest.skip()
+
+    seed_everything(seed)
+
+    src_device = device if direction[0] == "xpu" else "cpu"
+    dst_device = device if direction[1] == "xpu" else "cpu"
+
+    src_blocks = random.sample(range(num_blocks), num_mappings)
+    # For cross-device swaps, destination blocks can be any available block
+    if src_device == dst_device:
+        remaining_blocks = list(set(range(num_blocks)) - set(src_blocks))
+        dst_blocks = random.sample(remaining_blocks, num_mappings)
+    else:
+        dst_blocks = random.sample(range(num_blocks), num_mappings)
+
+    block_mapping = list(zip(src_blocks, dst_blocks))
+    block_mapping_tensor = torch.tensor(block_mapping,
+                                        dtype=torch.int64,
+                                        device="cpu").view(-1, 2)
+
+    # Create the KV caches with pinned memory when on CPU
+    src_key_caches, src_value_caches = create_kv_caches_with_pinned(
+        num_blocks,
+        block_size,
+        1,
+        num_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        seed,
+        src_device,
+    )
+    if src_device == "cpu":
+        assert src_key_caches[0].is_pinned()
+        assert src_value_caches[0].is_pinned()
+
+    # Create the KV caches on the second device.
+    dst_key_caches, dst_value_caches = create_kv_caches_with_pinned(
+        num_blocks,
+        block_size,
+        1,
+        num_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        seed,
+        dst_device,
+    )
+
+    if dst_device == "cpu":
+        assert dst_key_caches[0].is_pinned()
+        assert dst_value_caches[0].is_pinned()
+
+    src_key_caches_clone = src_key_caches[0].clone()
+    src_value_caches_clone = src_value_caches[0].clone()
+
+    # Call the swap_blocks kernel.
+    src_cache = src_key_caches[0]
+    block_size_in_bytes = src_cache.element_size() * src_cache.stride(0)
+
+    ops.swap_blocks(
+        src_key_caches[0],
+        dst_key_caches[0],
+        block_size_in_bytes,
+        block_mapping_tensor,
+    )
+    ops.swap_blocks(
+        src_value_caches[0],
+        dst_value_caches[0],
+        block_size_in_bytes,
+        block_mapping_tensor,
+    )
+
+    # For the ("xpu", "cpu") direction, device→pinned-host copies are
+    # asynchronous. Ensure all transfers have completed before reading the
+    # destination CPU caches to avoid race conditions in the assertions.
+    if src_device == "xpu" and dst_device == "cpu":
+        torch.xpu.synchronize()
 
     for src, dst in block_mapping:
         torch.testing.assert_close(src_key_caches_clone[src].cpu(),

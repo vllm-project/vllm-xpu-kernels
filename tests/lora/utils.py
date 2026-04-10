@@ -195,7 +195,10 @@ def generate_data_for_nslices(
     dtype,
     op_type,
     device,
+    input_dtype=None,
 ) -> PunicaTensors:
+    if input_dtype is None:
+        input_dtype = dtype
     seq_len_tensor = torch.randint(seq_length, seq_length + 1,
                                    (batches, )).to(device)
     b_seq_start_loc = torch.cumsum(
@@ -207,7 +210,7 @@ def generate_data_for_nslices(
     lora_weights_lst = []
     if op_type == "shrink":
         inputs_tensor = torch.rand((total_tokens, hidden_size),
-                                   dtype=dtype).to(device)
+                                   dtype=input_dtype).to(device)
 
         for _ in range(nslices):
             if op_type == "shrink":
@@ -225,7 +228,7 @@ def generate_data_for_nslices(
     else:
         inputs_tensor = torch.rand(
             (nslices, total_tokens, max_rank),
-            dtype=dtype,
+            dtype=input_dtype,
         ).to(device)
         for _ in range(nslices):
             lora_weights_lst.append(
@@ -236,7 +239,7 @@ def generate_data_for_nslices(
         # expand op needs to complete y+=a@lora_b, so output is
         # initinized randomly
         our_out_tensor = torch.rand((total_tokens, hidden_size * nslices),
-                                    dtype=dtype).to(device)
+                                    dtype=input_dtype).to(device)
 
     # Ensure the same input.
     ref_out_tensor = our_out_tensor.clone()

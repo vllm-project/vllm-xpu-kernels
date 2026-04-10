@@ -104,7 +104,7 @@ void remap_hidden_states(
     const c10::optional<torch::Tensor>& hidden_states_scales,
     torch::Tensor& remapped_hidden_states,
     const c10::optional<torch::Tensor>& remapped_hidden_states_scales,
-    torch::Tensor& expert_map,
+    const c10::optional<torch::Tensor>& expert_map,
     torch::Tensor& expert_first_token_offset,
     torch::Tensor& unpermuted_row_to_permuted_row,
     torch::Tensor& topk_ids,

@@ -148,7 +148,7 @@ void cutlass_chunk_prefill_impl(
 
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
 
-  static constexpr int max_head_size = 256;
+  static constexpr int max_head_size = 512;
   TORCH_CHECK(
       head_size <= max_head_size,
       "FMHA forward only supports head dimension at most " +
@@ -168,6 +168,9 @@ void cutlass_chunk_prefill_impl(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
     policy_dispatch_func<chunk_policy_head256>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
+    policy_dispatch_func<chunk_policy_head512>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
