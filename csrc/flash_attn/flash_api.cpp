@@ -25,36 +25,29 @@ inline int get_num_splits(
   // Minimum KV blocks to benefit from splitting, aligned with the kernel's
   // kMinBlocksForSplit.  Below this the kernel falls back to single-split
   // regardless, and splitting only adds ReduceSplitK overhead.
-  // p64: 32 blocks (2048 tokens).  p128: 128 blocks (16384 tokens).
   int min_kv_blocks = (block_size <= 64) ? 32 : 128;
   if (kv_blocks < min_kv_blocks) return 1;
 
-  // GPU already heavily saturated: splitting adds overhead without benefit.
-  if (cur_parallel >= num_xe_cores * 4) return 1;
+  // GPU well-utilized or saturated: splitting only adds ReduceSplitK
+  // overhead without improving FMHA throughput.
+  if (cur_parallel >= num_xe_cores) return 1;
 
+  // Under-utilized (cur_parallel < num_xe_cores): split to fill the GPU.
   int target_splits;
-
-  if (num_heads_kv <= 2) {
-    // Few KV heads — each WG iterates many blocks sequentially.
-    // Split so each WG handles ~blocks_per_split blocks, balancing
-    // FMHA parallelism against ReduceSplitK overhead.
-    int blocks_per_split = (block_size <= 64) ? 10 : 8;
-    int from_blocks = kv_blocks / blocks_per_split;
-    // Cap total work-groups at ~5× XE cores to limit oversubscription.
-    int from_wg_cap = std::max(1, num_xe_cores * 5 / cur_parallel);
-    target_splits = std::min(from_blocks, from_wg_cap);
+  if (num_heads_kv >= 4) {
+    // Many KV heads: each split adds kv_heads WGs.  Scale inversely
+    // with block_size — p64 gets ~20 splits, p128 gets ~10.
+    target_splits = std::max(4, num_xe_cores * 64 / block_size);
   } else {
-    // Many KV heads (≥4) — batch × kv_heads already provides base
-    // occupancy.  Target moderate total WG count (~3-4× XE cores) to
-    // keep scheduling overhead in check.
-    int target_wgs = num_xe_cores * ((block_size <= 64) ? 4 : 3);
-    target_splits = std::max(1, target_wgs / cur_parallel);
+    // Few KV heads: target at least num_xe_cores splits for parallelism;
+    // allow more for very long sequences (~10 blocks/split at p64).
+    int blocks_per_split = (block_size <= 64) ? 10 : 8;
+    target_splits = std::max(num_xe_cores, kv_blocks / blocks_per_split);
   }
 
   // Each split must process at least 3 KV blocks to amortize overhead.
   int max_splits_blocks = std::max(1, kv_blocks / 3);
-  // Hard cap: beyond 40 splits, diminishing returns and increased
-  // ReduceSplitK overhead and temporary buffer memory.
+  // Hard cap: beyond 40 splits, diminishing returns.
   int num_splits = std::min({target_splits, max_splits_blocks, 40});
   return std::max(1, num_splits);
 }
