@@ -38,7 +38,7 @@ def _rms_norm(x: torch.Tensor, weight: torch.Tensor,
 
 
 def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-                       is_neox: bool) -> torch.Tensor:
+                      is_neox: bool) -> torch.Tensor:
     """Apply RoPE to x. x shape: [num_tokens, num_heads, head_dim].
     cos/sin shape: [num_tokens, rotary_dim/2]."""
     rotary_dim = cos.shape[-1] * 2
@@ -145,7 +145,7 @@ def test_fused_qk_norm_rope(
     qkv_base = torch.randn(num_tokens, total_dim, dtype=dtype, device=device)
     qkv_fused = qkv_base.clone()
     positions = torch.randint(0,
-                              max_position, (num_tokens,),
+                              max_position, (num_tokens, ),
                               dtype=torch.long,
                               device=device)
 

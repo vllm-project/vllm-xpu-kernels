@@ -24,6 +24,7 @@ MINI_PYTEST_PARAMS = {
     },
 }
 
+
 def ref_silu_and_mul_quant(
     x: torch.Tensor,
     scale: torch.Tensor,
@@ -91,7 +92,6 @@ def test_silu_and_mul_quant_vs_separate(
     seed: int,
     device: str,
 ) -> None:
-    """Verify fused kernel matches separate silu_and_mul + static_scaled_fp8_quant."""
     seed_everything(seed)
     torch.set_default_device(device)
 

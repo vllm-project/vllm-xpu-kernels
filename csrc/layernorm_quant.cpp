@@ -97,12 +97,11 @@ class rms_norm_dynamic_per_token_quant_kernel {
         computed_scale = (absmax > 0.0f) ? (absmax / 127.0f) : 1.0f;
       } else {
         // FP8
-        const float fp8_max =
-            static_cast<float>(fp8::quant_type_max_v<out_t>);
+        const float fp8_max = static_cast<float>(fp8::quant_type_max_v<out_t>);
         const float clamped_absmax =
             (scale_ub != nullptr) ? sycl::min(absmax, *scale_ub) : absmax;
-        computed_scale = sycl::max(clamped_absmax / fp8_max,
-                                   fp8::min_scaling_factor<out_t>::val());
+        computed_scale = sycl::max(
+            clamped_absmax / fp8_max, fp8::min_scaling_factor<out_t>::val());
       }
       s_local[1] = computed_scale;
       scales[token_idx] = computed_scale;
@@ -122,8 +121,7 @@ class rms_norm_dynamic_per_token_quant_kernel {
             sycl::max(sycl::min(sycl::rint(q), 127.0f), -128.0f));
       } else {
         // FP8
-        const float fp8_max =
-            static_cast<float>(fp8::quant_type_max_v<out_t>);
+        const float fp8_max = static_cast<float>(fp8::quant_type_max_v<out_t>);
         token_output[i] =
             static_cast<out_t>(sycl::max(sycl::min(q, fp8_max), -fp8_max));
       }
@@ -231,13 +229,12 @@ class rms_norm_per_block_quant_kernel {
           // FP8
           const float fp8_max =
               static_cast<float>(fp8::quant_type_max_v<out_t>);
-          group_scale = sycl::max(group_absmax / fp8_max,
-                                  fp8::min_scaling_factor<out_t>::val());
+          group_scale = sycl::max(
+              group_absmax / fp8_max, fp8::min_scaling_factor<out_t>::val());
         }
         s_local[1] = group_scale;
-        const int64_t scale_idx =
-            token_idx * scale_stride_token +
-            static_cast<int64_t>(g) * scale_stride_group;
+        const int64_t scale_idx = token_idx * scale_stride_token +
+                                  static_cast<int64_t>(g) * scale_stride_group;
         scales[scale_idx] = group_scale;
       }
       sycl::group_barrier(item.get_group());
@@ -279,7 +276,6 @@ class rms_norm_per_block_quant_kernel {
   const int64_t scale_stride_token;
   const int64_t scale_stride_group;
 };
-
 
 template <typename scalar_t, typename out_t, int VEC_SIZE>
 class rms_norm_static_fp8_quant_kernel {
@@ -347,8 +343,8 @@ class rms_norm_static_fp8_quant_kernel {
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(src[j]);
         // Weight multiply in scalar_t precision to match unfused path
-        float norm_x = static_cast<float>(
-            static_cast<scalar_t>(x * inv_rms) * wgt[j]);
+        float norm_x =
+            static_cast<float>(static_cast<scalar_t>(x * inv_rms) * wgt[j]);
         float q = norm_x * scale_inv;
         token_output[i * VEC_SIZE + j] =
             static_cast<out_t>(sycl::max(sycl::min(q, fp8_max), -fp8_max));
@@ -365,7 +361,6 @@ class rms_norm_static_fp8_quant_kernel {
   const float epsilon;
   const int hidden_size;
 };
-
 
 template <typename scalar_t, typename out_t, int VEC_SIZE>
 class fused_add_rms_norm_static_fp8_quant_kernel {
@@ -442,8 +437,8 @@ class fused_add_rms_norm_static_fp8_quant_kernel {
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(res[j]);
         // Weight multiply in scalar_t precision to match unfused path
-        float norm_x = static_cast<float>(
-            static_cast<scalar_t>(x * inv_rms) * wgt[j]);
+        float norm_x =
+            static_cast<float>(static_cast<scalar_t>(x * inv_rms) * wgt[j]);
         float q = norm_x * scale_inv;
         token_output[i * VEC_SIZE + j] =
             static_cast<out_t>(sycl::max(sycl::min(q, fp8_max), -fp8_max));
@@ -534,8 +529,7 @@ void call_rms_norm_per_block_quant_kernel(
   // Compute scale strides based on transposition
   const int64_t scale_stride_token =
       is_scale_transposed ? 1 : static_cast<int64_t>(num_groups);
-  const int64_t scale_stride_group =
-      is_scale_transposed ? num_tokens : 1LL;
+  const int64_t scale_stride_group = is_scale_transposed ? num_tokens : 1LL;
 
   auto* out_ptr = out.data_ptr<out_t>();
   auto* input_ptr = input.data_ptr<scalar_t>();
@@ -616,10 +610,18 @@ void call_rms_norm_static_fp8_quant_kernel(
 
   // Dispatch on vec_size (gcd guarantees hidden_size % vec_size == 0)
   switch (vec_size) {
-    case 8:  launch(std::integral_constant<int, 8>{}); break;
-    case 4:  launch(std::integral_constant<int, 4>{}); break;
-    case 2:  launch(std::integral_constant<int, 2>{}); break;
-    default: launch(std::integral_constant<int, 1>{}); break;
+    case 8:
+      launch(std::integral_constant<int, 8>{});
+      break;
+    case 4:
+      launch(std::integral_constant<int, 4>{});
+      break;
+    case 2:
+      launch(std::integral_constant<int, 2>{});
+      break;
+    default:
+      launch(std::integral_constant<int, 1>{});
+      break;
   }
 }
 
@@ -669,10 +671,18 @@ void call_fused_add_rms_norm_static_fp8_quant_kernel(
 
   // Dispatch on vec_size (gcd guarantees hidden_size % vec_size == 0)
   switch (vec_size) {
-    case 8:  launch(std::integral_constant<int, 8>{}); break;
-    case 4:  launch(std::integral_constant<int, 4>{}); break;
-    case 2:  launch(std::integral_constant<int, 2>{}); break;
-    default: launch(std::integral_constant<int, 1>{}); break;
+    case 8:
+      launch(std::integral_constant<int, 8>{});
+      break;
+    case 4:
+      launch(std::integral_constant<int, 4>{});
+      break;
+    case 2:
+      launch(std::integral_constant<int, 2>{});
+      break;
+    default:
+      launch(std::integral_constant<int, 1>{});
+      break;
   }
 }
 
@@ -689,36 +699,49 @@ void rms_norm_dynamic_per_token_quant(
   const at::DeviceGuard device_guard(input.device());
   TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
   TORCH_CHECK(out.is_contiguous(), "out must be contiguous");
-  TORCH_CHECK(weight.dtype() == input.dtype(),
-              "weight and input must have the same dtype");
-  TORCH_CHECK(scales.dtype() == torch::kFloat32,
-              "scales must be float32");
+  TORCH_CHECK(
+      weight.dtype() == input.dtype(),
+      "weight and input must have the same dtype");
+  TORCH_CHECK(scales.dtype() == torch::kFloat32, "scales must be float32");
   TORCH_CHECK(
       out.dtype() == torch::kFloat8_e4m3fn || out.dtype() == torch::kInt8,
       "output must be float8_e4m3fn or int8");
   if (scale_ub.has_value()) {
-    TORCH_CHECK(out.dtype() == torch::kFloat8_e4m3fn,
-                "scale_ub is only supported for FP8 output");
+    TORCH_CHECK(
+        out.dtype() == torch::kFloat8_e4m3fn,
+        "scale_ub is only supported for FP8 output");
   }
   if (residual.has_value()) {
-    TORCH_CHECK(residual->scalar_type() == input.scalar_type(),
-                "residual and input must have the same dtype");
+    TORCH_CHECK(
+        residual->scalar_type() == input.scalar_type(),
+        "residual and input must have the same dtype");
     TORCH_CHECK(residual->is_contiguous(), "residual must be contiguous");
   }
 
   if (out.dtype() == torch::kFloat8_e4m3fn) {
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "rms_norm_dynamic_per_token_quant", [&] {
-          vllm::call_rms_norm_dynamic_per_token_quant_kernel<scalar_t,
-                                                             at::Float8_e4m3fn>(
-              out, residual, input, weight, scale_ub, scales,
+          vllm::call_rms_norm_dynamic_per_token_quant_kernel<
+              scalar_t,
+              at::Float8_e4m3fn>(
+              out,
+              residual,
+              input,
+              weight,
+              scale_ub,
+              scales,
               static_cast<float>(epsilon));
         });
   } else {
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "rms_norm_dynamic_per_token_quant_int8", [&] {
           vllm::call_rms_norm_dynamic_per_token_quant_kernel<scalar_t, int8_t>(
-              out, residual, input, weight, scale_ub, scales,
+              out,
+              residual,
+              input,
+              weight,
+              scale_ub,
+              scales,
               static_cast<float>(epsilon));
         });
   }
@@ -737,35 +760,46 @@ void rms_norm_per_block_quant(
   const at::DeviceGuard device_guard(input.device());
   TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
   TORCH_CHECK(out.is_contiguous(), "out must be contiguous");
-  TORCH_CHECK(weight.dtype() == input.dtype(),
-              "weight and input must have the same dtype");
+  TORCH_CHECK(
+      weight.dtype() == input.dtype(),
+      "weight and input must have the same dtype");
   TORCH_CHECK(scales.dtype() == torch::kFloat32, "scales must be float32");
   TORCH_CHECK(
       out.dtype() == torch::kFloat8_e4m3fn || out.dtype() == torch::kInt8,
       "output must be float8_e4m3fn or int8");
-  TORCH_CHECK(input.size(-1) % group_size == 0,
-              "hidden_size must be divisible by group_size");
+  TORCH_CHECK(
+      input.size(-1) % group_size == 0,
+      "hidden_size must be divisible by group_size");
   if (residual.has_value()) {
-    TORCH_CHECK(residual->scalar_type() == input.scalar_type(),
-                "residual and input must have the same dtype");
+    TORCH_CHECK(
+        residual->scalar_type() == input.scalar_type(),
+        "residual and input must have the same dtype");
     TORCH_CHECK(residual->is_contiguous(), "residual must be contiguous");
   }
 
   if (out.dtype() == torch::kFloat8_e4m3fn) {
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "rms_norm_per_block_quant", [&] {
-          vllm::call_rms_norm_per_block_quant_kernel<scalar_t,
-                                                     at::Float8_e4m3fn>(
-              out, residual, input, weight, scales,
-              static_cast<float>(epsilon),
-              static_cast<int>(group_size),
-              is_scale_transposed);
+          vllm::
+              call_rms_norm_per_block_quant_kernel<scalar_t, at::Float8_e4m3fn>(
+                  out,
+                  residual,
+                  input,
+                  weight,
+                  scales,
+                  static_cast<float>(epsilon),
+                  static_cast<int>(group_size),
+                  is_scale_transposed);
         });
   } else {
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "rms_norm_per_block_quant_int8", [&] {
           vllm::call_rms_norm_per_block_quant_kernel<scalar_t, int8_t>(
-              out, residual, input, weight, scales,
+              out,
+              residual,
+              input,
+              weight,
+              scales,
               static_cast<float>(epsilon),
               static_cast<int>(group_size),
               is_scale_transposed);
@@ -781,16 +815,16 @@ void rms_norm_static_fp8_quant(
     double epsilon) {
   const at::DeviceGuard device_guard(input.device());
   TORCH_CHECK(out.is_contiguous(), "out must be contiguous");
-  TORCH_CHECK(weight.dtype() == input.dtype(),
-              "weight and input must have the same dtype");
+  TORCH_CHECK(
+      weight.dtype() == input.dtype(),
+      "weight and input must have the same dtype");
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_static_fp8_quant", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "rms_norm_static_fp8_quant_fp8", [&] {
               vllm::call_rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t>(
-                  out, input, weight, scale,
-                  static_cast<float>(epsilon));
+                  out, input, weight, scale, static_cast<float>(epsilon));
             });
       });
 }
@@ -805,18 +839,25 @@ void fused_add_rms_norm_static_fp8_quant(
   const at::DeviceGuard device_guard(input.device());
   TORCH_CHECK(out.is_contiguous(), "out must be contiguous");
   TORCH_CHECK(residual.is_contiguous(), "residual must be contiguous");
-  TORCH_CHECK(residual.scalar_type() == input.scalar_type(),
-              "residual and input must have the same dtype");
-  TORCH_CHECK(weight.scalar_type() == input.scalar_type(),
-              "weight and input must have the same dtype");
+  TORCH_CHECK(
+      residual.scalar_type() == input.scalar_type(),
+      "residual and input must have the same dtype");
+  TORCH_CHECK(
+      weight.scalar_type() == input.scalar_type(),
+      "weight and input must have the same dtype");
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "fused_add_rms_norm_static_fp8_quant", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "fused_add_rms_norm_static_fp8_quant_fp8", [&] {
               vllm::call_fused_add_rms_norm_static_fp8_quant_kernel<
-                  scalar_t, fp8_t>(
-                  out, input, residual, weight, scale,
+                  scalar_t,
+                  fp8_t>(
+                  out,
+                  input,
+                  residual,
+                  weight,
+                  scale,
                   static_cast<float>(epsilon));
             });
       });

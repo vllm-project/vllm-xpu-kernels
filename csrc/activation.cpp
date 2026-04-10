@@ -1,7 +1,6 @@
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <algorithm>
-#include <iostream>
 #include <numeric>
 #include "utils.h"
 #include "dispatch_utils.h"

@@ -8,7 +8,6 @@ import pytest
 import torch
 
 import vllm_xpu_kernels._C  # noqa: F401 – registers torch.ops._C.*
-
 from tests.ops.layernorm_op import RMSNorm
 
 DTYPES = [torch.half, torch.bfloat16]
@@ -26,7 +25,6 @@ XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
 ]
 
-
 MINI_PYTEST_PARAMS = {
     "default": {
         "num_tokens": [4],
@@ -34,6 +32,7 @@ MINI_PYTEST_PARAMS = {
         "GROUP_SIZES": [64],
     },
 }
+
 
 def _ref_rms_norm(
     layer: RMSNorm,
@@ -64,7 +63,8 @@ def _ref_per_token_quant(
 
     if quant_dtype == torch.int8:
         absmax = normed_2d.abs().amax(dim=1, keepdim=True)  # [T, 1]
-        scale = torch.where(absmax > 0, absmax / 127.0, torch.ones_like(absmax))
+        scale = torch.where(absmax > 0, absmax / 127.0,
+                            torch.ones_like(absmax))
         q = (normed_2d / scale).round().clamp(-128, 127).to(torch.int8)
         return q, scale.squeeze(1)
     else:
@@ -92,15 +92,18 @@ def _ref_per_group_quant(
     normed_2d = normed.view(num_tokens, hidden).float()
 
     q_out = torch.empty_like(normed_2d, dtype=quant_dtype)
-    scales = torch.empty(num_tokens, num_groups, dtype=torch.float32,
+    scales = torch.empty(num_tokens,
+                         num_groups,
+                         dtype=torch.float32,
                          device=normed.device)
 
-    fp8_max = torch.finfo(quant_dtype).max if quant_dtype != torch.int8 else 127.0
+    fp8_max = torch.finfo(
+        quant_dtype).max if quant_dtype != torch.int8 else 127.0
     min_sf = 1.0 / (fp8_max * 512.0) if quant_dtype != torch.int8 else 0.0
 
     for g in range(num_groups):
         chunk = normed_2d[:, g * group_size:(g + 1) * group_size]  # [T, G]
-        absmax = chunk.abs().amax(dim=1, keepdim=True)              # [T, 1]
+        absmax = chunk.abs().amax(dim=1, keepdim=True)  # [T, 1]
 
         if quant_dtype == torch.int8:
             scale = torch.where(absmax > 0, absmax / 127.0,
@@ -130,8 +133,8 @@ def _ops_per_token_quant(
     scales = torch.empty(num_tokens, dtype=torch.float32, device=x.device)
     if residual is not None:
         residual = residual.clone().contiguous()
-    torch.ops._C.rms_norm_dynamic_per_token_quant(
-        out, x, weight, scales, EPS, scale_ub, residual)
+    torch.ops._C.rms_norm_dynamic_per_token_quant(out, x, weight, scales, EPS,
+                                                  scale_ub, residual)
     return out, scales, residual
 
 
@@ -146,16 +149,22 @@ def _ops_per_group_quant(
     out = torch.empty_like(x, dtype=quant_dtype)
     num_tokens = x.numel() // x.shape[-1]
     num_groups = x.shape[-1] // group_size
-    scales = torch.empty(num_tokens, num_groups, dtype=torch.float32,
+    scales = torch.empty(num_tokens,
+                         num_groups,
+                         dtype=torch.float32,
                          device=x.device)
     if residual is not None:
         residual = residual.clone().contiguous()
     torch.ops._C.rms_norm_per_block_quant(
-        out, x, weight, scales, EPS,
-        None,           # scale_ub (not used for per-block)
+        out,
+        x,
+        weight,
+        scales,
+        EPS,
+        None,  # scale_ub (not used for per-block)
         residual,
         group_size,
-        False,          # is_scale_transposed
+        False,  # is_scale_transposed
     )
     return out, scales, residual
 
@@ -200,11 +209,17 @@ def test_rms_norm_dynamic_per_token_quant(
     assert ops_scales.dtype == torch.float32
 
     if quant_dtype == torch.int8:
-        torch.testing.assert_close(ref_scales, ops_scales, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(ref_scales,
+                                   ops_scales,
+                                   atol=1e-6,
+                                   rtol=1e-6)
         torch.testing.assert_close(ref_q, ops_q, atol=1, rtol=0)
     else:
         # FP8: scales should be close; compare quantized values or dequantized
-        torch.testing.assert_close(ref_scales, ops_scales, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(ref_scales,
+                                   ops_scales,
+                                   atol=1e-5,
+                                   rtol=1e-5)
         ref_qf = ref_q.float()
         ops_qf = ops_q.float()
         if not torch.allclose(ref_qf, ops_qf, atol=1e-6):
@@ -220,8 +235,10 @@ def test_rms_norm_dynamic_per_token_quant(
             torch.testing.assert_close(ref_deq, ops_deq, atol=0.2, rtol=0.15)
 
     if add_residual:
-        torch.testing.assert_close(ref_residual, ops_residual,
-                                   atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(ref_residual,
+                                   ops_residual,
+                                   atol=1e-2,
+                                   rtol=1e-2)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 83, 2048])
@@ -244,7 +261,8 @@ def test_rms_norm_per_block_quant(
     device: str,
 ) -> None:
     if hidden_size % group_size != 0:
-        pytest.skip(f"hidden_size {hidden_size} not divisible by group_size {group_size}")
+        pytest.skip(f"hidden_size {hidden_size} not divisible by \
+            group_size {group_size}")
 
     torch.manual_seed(seed)
     torch.set_default_device("xpu")
@@ -259,7 +277,8 @@ def test_rms_norm_per_block_quant(
 
     # Reference: native RMSNorm + per-group quant
     ref_normed, ref_residual = _ref_rms_norm(layer, x, residual)
-    ref_q, ref_scales = _ref_per_group_quant(ref_normed, group_size, quant_dtype)
+    ref_q, ref_scales = _ref_per_group_quant(ref_normed, group_size,
+                                             quant_dtype)
 
     # Kernel
     ops_q, ops_scales, ops_residual = _ops_per_group_quant(
@@ -285,8 +304,10 @@ def test_rms_norm_per_block_quant(
             torch.testing.assert_close(ref_deq, ops_deq, atol=0.2, rtol=0.15)
 
     if add_residual:
-        torch.testing.assert_close(ref_residual, ops_residual,
-                                   atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(ref_residual,
+                                   ops_residual,
+                                   atol=1e-2,
+                                   rtol=1e-2)
 
 
 def _ops_rms_norm_static_fp8_quant(
@@ -305,12 +326,11 @@ def _ops_fused_add_rms_norm_static_fp8_quant(
     residual: torch.Tensor,
     scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    out = torch.empty(x.shape[-1],
-                      dtype=torch.float8_e4m3fn,
+    out = torch.empty(x.shape[-1], dtype=torch.float8_e4m3fn,
                       device=x.device).expand_as(x).contiguous()
     residual = residual.clone().contiguous()
-    torch.ops._C.fused_add_rms_norm_static_fp8_quant(
-        out, x, residual, weight, scale, EPS)
+    torch.ops._C.fused_add_rms_norm_static_fp8_quant(out, x, residual, weight,
+                                                     scale, EPS)
     return out, residual
 
 
@@ -421,5 +441,7 @@ def test_fused_add_rms_norm_static_fp8_quant(
         ref_deq = ref_qf * quant_scale
         ops_deq = ops_qf * quant_scale
         torch.testing.assert_close(ref_deq, ops_deq, atol=0.2, rtol=0.15)
-    torch.testing.assert_close(
-        ops_residual, ref_residual, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(ops_residual,
+                               ref_residual,
+                               atol=1e-2,
+                               rtol=1e-2)
