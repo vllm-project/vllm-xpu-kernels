@@ -56,9 +56,7 @@ void fused_add_rms_norm_static_fp8_quant(
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void silu_and_mul_quant(
-    torch::Tensor& out,
-    torch::Tensor& input,
-    torch::Tensor& scale);
+    torch::Tensor& out, torch::Tensor& input, torch::Tensor& scale);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 

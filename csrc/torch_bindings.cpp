@@ -40,8 +40,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
       "Tensor weight, Tensor! scale, float epsilon, "
       "Tensor? scale_ub, Tensor!? residual) -> ()");
-  ops.impl("rms_norm_dynamic_per_token_quant", torch::kXPU,
-           &rms_norm_dynamic_per_token_quant);
+  ops.impl(
+      "rms_norm_dynamic_per_token_quant",
+      torch::kXPU,
+      &rms_norm_dynamic_per_token_quant);
 
   // Fused RMSNorm + per-column-block quantization (FP8 or INT8).
   ops.def(
@@ -49,23 +51,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor weight, Tensor! scale, float epsilon, "
       "Tensor? scale_ub, Tensor!? residual, int group_size, "
       "bool is_scale_transposed) -> ()");
-  ops.impl("rms_norm_per_block_quant", torch::kXPU,
-           &rms_norm_per_block_quant);
+  ops.impl("rms_norm_per_block_quant", torch::kXPU, &rms_norm_per_block_quant);
 
   // Fused RMSNorm + static FP8 quantization.
   ops.def(
       "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
       "Tensor scale, float epsilon) -> ()");
-  ops.impl("rms_norm_static_fp8_quant", torch::kXPU,
-           &rms_norm_static_fp8_quant);
+  ops.impl(
+      "rms_norm_static_fp8_quant", torch::kXPU, &rms_norm_static_fp8_quant);
 
   // In-place fused Add + RMSNorm + static FP8 quantization.
   ops.def(
       "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
       "Tensor! residual, Tensor weight, "
       "Tensor scale, float epsilon) -> ()");
-  ops.impl("fused_add_rms_norm_static_fp8_quant", torch::kXPU,
-           &fused_add_rms_norm_static_fp8_quant);
+  ops.impl(
+      "fused_add_rms_norm_static_fp8_quant",
+      torch::kXPU,
+      &fused_add_rms_norm_static_fp8_quant);
 
   // activation ops
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
