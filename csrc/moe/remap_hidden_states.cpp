@@ -215,14 +215,16 @@ class RemapHiddenStates {
 
     item.barrier(sycl::access::fence_space::local_space);
 
-    auto hidden_states_base =
-        hidden_states + row * hidden_size + local_id * ElemsPerItem;
+    auto hidden_states_base = hidden_states +
+                              row * static_cast<int64_t>(hidden_size) +
+                              local_id * ElemsPerItem;
     TA* remapped_hidden_states_base[TopK];
 #pragma unroll
     for (int i = 0; i < TopK; ++i) {
-      remapped_hidden_states_base[i] = remapped_hidden_states +
-                                       rows_offset[i] * hidden_size +
-                                       local_id * ElemsPerItem;
+      remapped_hidden_states_base[i] =
+          remapped_hidden_states +
+          rows_offset[i] * static_cast<int64_t>(hidden_size) +
+          local_id * ElemsPerItem;
     }
 
     int stride = local_range * ElemsPerItem;
@@ -244,7 +246,7 @@ class RemapHiddenStates {
 
     if (hidden_states_scales != nullptr &&
         remapped_hidden_states_scales != nullptr) {
-      int scaled_hidden_size = hidden_size / block_k;
+      int64_t scaled_hidden_size = hidden_size / block_k;
       loop_count = (scaled_hidden_size + stride - 1) / stride;
 
       for (int l = 0; l < loop_count; ++l) {
