@@ -266,6 +266,9 @@ void launch_fused_qk_norm_rope(
     case 256:
       DISPATCH_HEAD_DIM(256);
       break;
+    case 512:
+      DISPATCH_HEAD_DIM(512);
+      break;
     default:
       TORCH_CHECK(
           false,

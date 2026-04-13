@@ -586,8 +586,10 @@ void call_rms_norm_static_fp8_quant_kernel(
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
 
   // Dispatch VEC_SIZE = gcd(16 / sizeof(sycl_t), hidden_size) matching CUDA
-  const int vec_size =
+  const int candidate_vec_size =
       std::gcd(static_cast<int>(16 / sizeof(sycl_t)), hidden_size);
+  const int vec_size =
+      (input_stride % candidate_vec_size == 0) ? candidate_vec_size : 1;
   const int block_size = std::min(hidden_size / vec_size, max_block_size);
 
   auto& queue = vllm::xpu::vllmGetQueue();
