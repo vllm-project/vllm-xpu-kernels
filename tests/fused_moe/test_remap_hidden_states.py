@@ -226,6 +226,98 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
             print("Mismatched ref:", ref_unpermuted_scales[mismatched_indices])
 
 
+@pytest.mark.parametrize("num_rows", [262144])
+@pytest.mark.parametrize("hidden_size", [2048])
+@pytest.mark.parametrize("total_experts_num", [128])
+@pytest.mark.parametrize("topk", [8])
+@pytest.mark.parametrize("has_expert_map", [False])
+@pytest.mark.parametrize("recipe",
+                         ["bf16", "fp16", "mxfp8", "mxfp4", "fp8block"])
+def test_remap_hidden_states_overflow(num_rows, hidden_size, total_experts_num,
+                                      topk, has_expert_map, recipe):
+    seed_everything(7)
+
+    data_dtype, scale_dtype = RECIPE_TO_DTYPE.get(recipe, (None, None))
+
+    if has_expert_map:
+        local_experts_num = total_experts_num // 2
+    else:
+        local_experts_num = total_experts_num
+
+    if data_dtype in [torch.bfloat16, torch.float16]:
+        hidden_states = torch.randn((num_rows, hidden_size),
+                                    dtype=data_dtype,
+                                    device=DEVICE)
+        scales = None
+    elif data_dtype is torch.float8_e4m3fn:
+        hidden_states_fp32 = torch.randn((num_rows, hidden_size),
+                                         dtype=torch.float32,
+                                         device=DEVICE)
+        hidden_states = hidden_states_fp32.to(torch.float8_e4m3fn)
+        if recipe == "fp8block":
+            block_k = 128
+            scales = torch.randn((num_rows, hidden_size // block_k),
+                                 device=DEVICE,
+                                 dtype=torch.float32)
+        elif recipe == "mxfp8":
+            block_k = 16
+            scales = torch.randint(1,
+                                   256, (num_rows, hidden_size // block_k),
+                                   device=DEVICE,
+                                   dtype=torch.uint8).view(
+                                       torch.float8_e8m0fnu)
+    elif data_dtype is torch.float4_e2m1fn_x2:
+        block_k = 16  # two input elem in a 8bit
+        hidden_states_fp32 = torch.randn((num_rows, hidden_size // 2),
+                                         dtype=torch.float32,
+                                         device=DEVICE)
+        hidden_states = hidden_states_fp32.to(torch.uint8).view(
+            torch.float4_e2m1fn_x2)
+        scales = torch.randint(1,
+                               256, (num_rows, hidden_size // 2 // block_k),
+                               device=DEVICE,
+                               dtype=torch.uint8).view(torch.float8_e8m0fnu)
+
+    remapped_hidden_states = torch.empty_like(hidden_states).repeat_interleave(
+        topk, dim=0)
+    remapped_scales = None
+    if scale_dtype is not None:
+        remapped_scales = torch.empty_like(scales).repeat_interleave(topk,
+                                                                     dim=0)
+    expert_first_token_offset = torch.zeros((local_experts_num + 1),
+                                            dtype=torch.int64,
+                                            device=DEVICE)
+    unpermuted_row_to_permuted_row = torch.empty((num_rows, topk),
+                                                 dtype=torch.int32,
+                                                 device=DEVICE)
+
+    expert_map = None
+    if has_expert_map:
+        expert_map = torch.full((total_experts_num, ),
+                                -1,
+                                dtype=torch.int64,
+                                device=DEVICE)
+        expert_map[torch.randperm(
+            total_experts_num,
+            device=DEVICE)[:local_experts_num]] = torch.randperm(
+                local_experts_num, device=DEVICE)
+        expert_map = expert_map.to(torch.int32)
+
+    scores = torch.randn((num_rows, total_experts_num),
+                         device=DEVICE,
+                         dtype=torch.float32)
+    _, topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)
+    topk_ids = topk_ids.to(torch.int64)
+
+    torch.ops._moe_C.remap_hidden_states(
+        hidden_states, scales, remapped_hidden_states, remapped_scales,
+        expert_map, expert_first_token_offset, unpermuted_row_to_permuted_row,
+        topk_ids, total_experts_num, local_experts_num)
+
+    print("remapped_hidden_states", remapped_hidden_states, flush=True)
+    print("remapped_scales", remapped_scales, flush=True)
+
+
 def ref_init_expert_map(expert_map, local_experts_num, ep_rank, ep_size):
     expert_map_tmp = torch.full((local_experts_num * ep_size, ),
                                 -1,

@@ -100,6 +100,34 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "CMAKE_BUILD_TYPE":
     lambda: os.getenv("CMAKE_BUILD_TYPE"),
 
+    # ================== Kernel Build Options ==================
+    # These control which kernel extensions are built. Set to "0" or "OFF"
+    # to disable. They are forwarded to CMake as -D flags by setup.py.
+
+    # Build SYCL-TLA based kernels (attention, grouped_gemm shared libs)
+    "BUILD_SYCL_TLA_KERNELS":
+    lambda: os.getenv("BUILD_SYCL_TLA_KERNELS", "ON"),
+
+    # Architecture options
+    "VLLM_XPU_ENABLE_XE2":
+    lambda: os.getenv("VLLM_XPU_ENABLE_XE2", "ON"),
+    "VLLM_XPU_ENABLE_XE_DEFAULT":
+    lambda: os.getenv("VLLM_XPU_ENABLE_XE_DEFAULT", "ON"),
+
+    # Individual kernel extension toggles
+    "BASIC_KERNELS_ENABLED":
+    lambda: os.getenv("BASIC_KERNELS_ENABLED", "ON"),
+    "FA2_KERNELS_ENABLED":
+    lambda: os.getenv("FA2_KERNELS_ENABLED", "ON"),
+    "MOE_KERNELS_ENABLED":
+    lambda: os.getenv("MOE_KERNELS_ENABLED", "ON"),
+    "GDN_KERNELS_ENABLED":
+    lambda: os.getenv("GDN_KERNELS_ENABLED", "ON"),
+    "XPU_SPECIFIC_KERNELS_ENABLED":
+    lambda: os.getenv("XPU_SPECIFIC_KERNELS_ENABLED", "ON"),
+    "XPUMEM_ALLOCATOR_ENABLED":
+    lambda: os.getenv("XPUMEM_ALLOCATOR_ENABLED", "ON"),
+
     # If set, vllm will print verbose logs during installation
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),
