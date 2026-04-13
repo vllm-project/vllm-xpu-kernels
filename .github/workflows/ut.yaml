@@ -90,6 +90,15 @@ jobs:
         run: |
           ls -lh dist/*.whl
 
+      - name: report wheel size
+        run: |
+          WHEEL_NAME=$(basename dist/*.whl)
+          WHEEL_SIZE=$(ls -lh dist/*.whl | awk '{print $5}')
+          echo "### PVC Wheel Size" >> $GITHUB_STEP_SUMMARY
+          echo "| Wheel | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${WHEEL_NAME}\` | **${WHEEL_SIZE}** |" >> $GITHUB_STEP_SUMMARY
+
       - name: install wheel
         run: |
           VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls dist/*.whl) uv pip install --no-build-isolation -e . -v
@@ -140,6 +149,15 @@ jobs:
       - name: print wheel size
         run: |
           ls -lh dist/*.whl
+
+      - name: report wheel size
+        run: |
+          WHEEL_NAME=$(basename dist/*.whl)
+          WHEEL_SIZE=$(ls -lh dist/*.whl | awk '{print $5}')
+          echo "### BMG Wheel Size" >> $GITHUB_STEP_SUMMARY
+          echo "| Wheel | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${WHEEL_NAME}\` | **${WHEEL_SIZE}** |" >> $GITHUB_STEP_SUMMARY
 
       - name: install wheel
         run: |
