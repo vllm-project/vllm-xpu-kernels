@@ -9,6 +9,9 @@ using namespace cute;
 // to generate specific kernel instantiations for each policy combination.
 
 // clang-format off
+#define IMPL_Q_T ${IMPL_Q_T}
+#define IMPL_KV_T ${IMPL_KV_T}
+#define IMPL_O_T ${IMPL_O_T}
 #define IMPL_POLICY ${IMPL_POLICY}
 #cmakedefine01 IMPL_KISCAUSAL
 #cmakedefine01 IMPL_KISLOCAL
@@ -18,18 +21,20 @@ using namespace cute;
 // =============================================================================
 // Explicit Template Instantiation
 // =============================================================================
-// Instantiate the decode_policy_dispatch_impl function template with the
+// Instantiate the decode_policy_dispatch_typed_impl function template with the
 // specific policy and boolean flag combinations provided by CMake. This
 // produces one compiled kernel per source file.
 
-#define INSTANTIATE_KERNEL()                 \
-  template void decode_policy_dispatch_impl< \
-      IMPL_POLICY,                           \
-      static_cast<bool>(IMPL_KISCAUSAL),     \
-      static_cast<bool>(IMPL_KISLOCAL),      \
-      static_cast<bool>(IMPL_KISSINK)>(      \
-      sycl::queue & queue,                   \
-      CutlassQKType & cuQKType,              \
+#define INSTANTIATE_KERNEL()                       \
+  template void decode_policy_dispatch_typed_impl< \
+      IMPL_POLICY,                                 \
+      IMPL_Q_T,                                    \
+      IMPL_KV_T,                                   \
+      IMPL_O_T,                                    \
+      static_cast<bool>(IMPL_KISCAUSAL),           \
+      static_cast<bool>(IMPL_KISLOCAL),            \
+      static_cast<bool>(IMPL_KISSINK)>(            \
+      sycl::queue & queue,                         \
       const paged_decode_args_t& args);
 
 INSTANTIATE_KERNEL()

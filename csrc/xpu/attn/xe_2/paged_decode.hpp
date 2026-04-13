@@ -490,111 +490,136 @@ struct PagedDecodeConfig {
 };
 
 // Template function for explicit instantiation
+template <
+    typename decode_policy,
+    typename ElementQ,
+    typename ElementKV,
+    typename ElementO,
+    bool Causal,
+    bool Local,
+    bool Sink>
+void decode_policy_dispatch_typed_impl(
+    sycl::queue& queue, const paged_decode_args_t& args) {
+  const int PipelineStages = 1;
+  return PagedDecodeConfig<
+      typename decode_policy::ShapeQK,
+      typename decode_policy::ShapePV,
+      typename decode_policy::ShapeOut,
+      typename decode_policy::SubgroupLayoutQK,
+      void,
+      PipelineStages,
+      Causal,
+      Local,
+      Sink,
+      ElementQ,
+      ElementKV,
+      ElementKV,
+      ElementO>::kernel_dispatch(queue, args);
+}
+
 template <typename decode_policy, bool Causal, bool Local, bool Sink>
 void decode_policy_dispatch_impl(
     sycl::queue& queue,
-    CutlassQKType& cuQKType,
+    CutlassQKOType& cuQKOType,
     const paged_decode_args_t& args) {
-  const int PipelineStages = 1;
-  if (cuQKType.q_type == CutlassDType::half) {
-    if (cuQKType.k_type == CutlassDType::half) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          half_t,
-          half_t,
-          half_t,
-          half_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          half_t,
-          float_e4m3_t,
-          float_e4m3_t,
-          half_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          half_t,
-          float_e5m2_t,
-          float_e5m2_t,
-          half_t>::kernel_dispatch(queue, args);
+  if (cuQKOType.o_type == CutlassDType::half) {
+    if (cuQKOType.q_type == CutlassDType::half) {
+      if (cuQKOType.k_type == CutlassDType::half) {
+        return decode_policy_dispatch_typed_impl<
+            decode_policy,
+            half_t,
+            half_t,
+            half_t,
+            Causal,
+            Local,
+            Sink>(queue, args);
+      } else if (cuQKOType.k_type == CutlassDType::float8_e4m3) {
+        return decode_policy_dispatch_typed_impl<
+            decode_policy,
+            half_t,
+            float_e4m3_t,
+            half_t,
+            Causal,
+            Local,
+            Sink>(queue, args);
+      } else if (cuQKOType.k_type == CutlassDType::float8_e5m2) {
+        return decode_policy_dispatch_typed_impl<
+            decode_policy,
+            half_t,
+            float_e5m2_t,
+            half_t,
+            Causal,
+            Local,
+            Sink>(queue, args);
+      } else {
+        TORCH_CHECK(
+            false,
+            "Unsupported Q/KV dtype combination for paged_decode kernel: "
+            "q_type=",
+            static_cast<int>(cuQKOType.q_type),
+            " k_type=",
+            static_cast<int>(cuQKOType.k_type),
+            " o_type=",
+            static_cast<int>(cuQKOType.o_type));
+      }
+    } else {
+      TORCH_CHECK(
+          false,
+          "Unsupported Q/KV dtype combination for paged_decode kernel: q_type=",
+          static_cast<int>(cuQKOType.q_type),
+          " k_type=",
+          static_cast<int>(cuQKOType.k_type),
+          " o_type=",
+          static_cast<int>(cuQKOType.o_type));
     }
-  } else if (cuQKType.q_type == CutlassDType::bfloat16) {
-    if (cuQKType.k_type == CutlassDType::bfloat16) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          bfloat16_t,
-          bfloat16_t,
-          bfloat16_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          bfloat16_t,
-          float_e4m3_t,
-          float_e4m3_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          bfloat16_t,
-          float_e5m2_t,
-          float_e5m2_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
+  } else if (cuQKOType.o_type == CutlassDType::bfloat16) {
+    if (cuQKOType.q_type == CutlassDType::bfloat16) {
+      if (cuQKOType.k_type == CutlassDType::bfloat16) {
+        return decode_policy_dispatch_typed_impl<
+            decode_policy,
+            bfloat16_t,
+            bfloat16_t,
+            bfloat16_t,
+            Causal,
+            Local,
+            Sink>(queue, args);
+      } else if (cuQKOType.k_type == CutlassDType::float8_e4m3) {
+        return decode_policy_dispatch_typed_impl<
+            decode_policy,
+            bfloat16_t,
+            float_e4m3_t,
+            bfloat16_t,
+            Causal,
+            Local,
+            Sink>(queue, args);
+      } else if (cuQKOType.k_type == CutlassDType::float8_e5m2) {
+        return decode_policy_dispatch_typed_impl<
+            decode_policy,
+            bfloat16_t,
+            float_e5m2_t,
+            bfloat16_t,
+            Causal,
+            Local,
+            Sink>(queue, args);
+      }
+    } else {
+      TORCH_CHECK(
+          false,
+          "Unsupported Q/KV dtype combination for paged_decode kernel: q_type=",
+          static_cast<int>(cuQKOType.q_type),
+          " k_type=",
+          static_cast<int>(cuQKOType.k_type),
+          " o_type=",
+          static_cast<int>(cuQKOType.o_type));
     }
+  } else {
+    TORCH_CHECK(
+        false,
+        "Unsupported Q/KV dtype combination for paged_decode kernel: q_type=",
+        static_cast<int>(cuQKOType.q_type),
+        " k_type=",
+        static_cast<int>(cuQKOType.k_type),
+        " o_type=",
+        static_cast<int>(cuQKOType.o_type));
   }
-  TORCH_CHECK(
-      false,
-      "Unsupported Q/KV dtype combination for paged_decode kernel: q_type=",
-      static_cast<int>(cuQKType.q_type),
-      " k_type=",
-      static_cast<int>(cuQKType.k_type));
 }
