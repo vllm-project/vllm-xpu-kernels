@@ -71,7 +71,7 @@ jobs:
         with:
           set-safe-directory: true
 
-      - name: build & install wheel
+      - name: build wheel
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           export CCACHE_DIR=/root/.ccache
@@ -82,8 +82,17 @@ jobs:
           ccache -p || true
           git submodule sync && git submodule update --init --recursive
           uv pip install -r requirements.txt
-          MAX_JOBS=128 uv pip install --no-build-isolation -e . -v
+          rm -rf dist/*
+          MAX_JOBS=128 uv build --no-build-isolation --wheel -v
           ccache -s || true
+
+      - name: print wheel size
+        run: |
+          ls -lh dist/*.whl
+
+      - name: install wheel
+        run: |
+          VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls dist/*.whl) uv pip install --no-build-isolation -e . -v
 
       - name: test 
         run: |
@@ -113,7 +122,7 @@ jobs:
         with:
           set-safe-directory: true
 
-      - name: build & install wheel
+      - name: build wheel
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           export CCACHE_DIR=/root/.ccache
@@ -124,8 +133,17 @@ jobs:
           ccache -p || true
           git submodule sync && git submodule update --init --recursive
           uv pip install -r requirements.txt
-          MAX_JOBS=80 uv pip install --no-build-isolation -e . -v
+          rm -rf dist/*
+          MAX_JOBS=80 uv build --no-build-isolation --wheel -v
           ccache -s || true
+
+      - name: print wheel size
+        run: |
+          ls -lh dist/*.whl
+
+      - name: install wheel
+        run: |
+          VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls dist/*.whl) uv pip install --no-build-isolation -e . -v
 
       - name: test 
         run: |
