@@ -34,6 +34,8 @@ MINI_PYTEST_PARAMS = {
     },
 }
 
+SKIP_TEST_FOR_MINI_SCOPE = os.getenv("XPU_KERNEL_PYTEST_PROFILER") == "MINI"
+
 
 def ref_gdn_attention(
     core_attn_out,
@@ -253,6 +255,8 @@ def simple_random_distribute(N, batch_size):
 @pytest.mark.parametrize("mode", MODE)
 @pytest.mark.parametrize("reorder_input", REORDER_INPUT)
 @pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.skipif(SKIP_TEST_FOR_MINI_SCOPE,
+                    reason="Skip gdn attention for the mini pytest profiler.")
 @torch.inference_mode()
 def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                        num_v_heads, head_v_dim, width, tp_size, has_bias,
