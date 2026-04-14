@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from tests.ops.layernorm_op import RMSNorm
+from tests.ops.layernorm_op import GemmaRMSNorm, RMSNorm, RMSNormGated
 from tests.utils import opcheck
 
 DTYPES = [torch.half, torch.bfloat16]
@@ -119,3 +119,101 @@ def test_rms_norm_uncontigous(
         torch.ops._C.rms_norm,
         (out, q_by_head, layer.weight.data, layer.variance_epsilon),
     )
+
+
+@pytest.mark.parametrize("num_tokens", [7, 83])
+@pytest.mark.parametrize("hidden_size", [64])
+@pytest.mark.parametrize("use_gate", [False, True])
+@pytest.mark.parametrize("norm_before_gate", [False, True])
+@pytest.mark.parametrize("activation", ["swish", "silu"])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@torch.inference_mode()
+def test_rms_norm_gated(
+    num_tokens: int,
+    hidden_size: int,
+    use_gate: bool,
+    norm_before_gate: bool,
+    activation: str,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    torch.manual_seed(seed)
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
+
+    layer = RMSNormGated(
+        hidden_size,
+        eps=1e-5,
+        norm_before_gate=norm_before_gate,
+        dtype=dtype,
+        activation=activation,
+    ).to(dtype=dtype)
+    layer.weight.data.normal_(mean=1.0, std=0.1)
+
+    scale = 1 / (2 * hidden_size)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
+    z = torch.randn_like(x) * scale if use_gate else None
+
+    ref_out = layer.forward_native(x, z)
+    out = layer(x, z)
+    torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+    opcheck(
+        torch.ops._C.rms_norm_gated,
+        (
+            torch.empty_like(x),
+            x,
+            layer.weight.data,
+            z,
+            layer.eps,
+            norm_before_gate,
+            activation,
+        ),
+    )
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@torch.inference_mode()
+def test_gemma_rms_norm(
+    num_tokens: int,
+    hidden_size: int,
+    add_residual: bool,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    torch.manual_seed(seed)
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
+
+    layer = GemmaRMSNorm(hidden_size).to(dtype=dtype)
+    layer.weight.data.normal_(mean=0.0, std=0.1)
+
+    scale = 1 / (2 * hidden_size)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
+    residual = torch.randn_like(x) * scale if add_residual else None
+
+    ref_out = layer.forward_native(x, residual)
+    out = layer(x, residual)
+
+    if add_residual:
+        torch.testing.assert_close(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
+        opcheck(
+            torch.ops._C.fused_add_gemma_rms_norm,
+            (x, residual, layer.weight.data, layer.variance_epsilon),
+        )
+    else:
+        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+        opcheck(
+            torch.ops._C.gemma_rms_norm,
+            (torch.empty_like(x), x, layer.weight.data, layer.variance_epsilon),
+        )

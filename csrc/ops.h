@@ -16,6 +16,27 @@ void fused_add_rms_norm(
     torch::Tensor& weight,
     double epsilon);
 
+void gemma_rms_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    double epsilon);
+
+void fused_add_gemma_rms_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    double epsilon);
+
+void rms_norm_gated(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    std::optional<torch::Tensor> z,
+    double epsilon,
+    bool norm_before_gate,
+    const std::string& activation);
+
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);

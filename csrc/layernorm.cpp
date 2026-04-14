@@ -13,7 +13,8 @@ struct alignas(8) vec4_t {
 
 // The vector width is fixed at 4 to avoid excessive branching in the kernel,
 // which could degrade performance.
-template <typename scalar_t, int NUM_DIMS, int VEC_SIZE = 4>
+template <typename scalar_t, int NUM_DIMS, int VEC_SIZE = 4, bool IS_GEMMA = false,
+          bool HAS_Z = false, bool NORM_BEFORE_GATE = false>
 class rms_norm_kernel {
  public:
   rms_norm_kernel(
@@ -28,7 +29,8 @@ class rms_norm_kernel {
       const float epsilon_,
       const int num_tokens_,
       const int hidden_size_,
-      sycl::local_accessor<float, 1> s_variance_)
+      sycl::local_accessor<float, 1> s_variance_,
+      const scalar_t* z_ = nullptr)
       : out(out_),
         input(input_),
         input_stride_d2(input_stride_d2_),
@@ -40,7 +42,8 @@ class rms_norm_kernel {
         epsilon(epsilon_),
         num_tokens(num_tokens_),
         hidden_size(hidden_size_),
-        s_variance(s_variance_) {}
+        s_variance(s_variance_),
+        z(z_) {}
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
@@ -48,16 +51,22 @@ class rms_norm_kernel {
         s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
     float variance = 0.0f;
 
-    const scalar_t* input_row;
+    const scalar_t* input_row, * z_row;
     if constexpr (NUM_DIMS == 2) {
       // 2D for layernorm normal case [batch_size, hidden]
       input_row = input + item_ct1.get_group(2) * input_stride_d2;
+      if constexpr (HAS_Z) {
+        z_row = z + item_ct1.get_group(2) * input_stride_d2;
+      }
     } else if constexpr (NUM_DIMS == 3) {
       // 3D for q/k norm [batch_size, num_heads, head_size]
       int batch_idx = item_ct1.get_group(2) / input_shape_d2;
       int head_idx = item_ct1.get_group(2) % input_shape_d2;
       input_row =
           input + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
+      if constexpr (HAS_Z) {
+        z_row = z + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
+      }
     } else if constexpr (NUM_DIMS == 4) {
       // 4D for transformers model_impl qk norm [batch, seq, head, head_dim]
       int batch_idx = item_ct1.get_group(2) / (input_shape_d3 * input_shape_d2);
@@ -66,6 +75,10 @@ class rms_norm_kernel {
       int head_idx = remaining % input_shape_d2;
       input_row = input + batch_idx * input_stride_d4 +
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
+      if constexpr (HAS_Z) {
+        z_row = z + batch_idx * input_stride_d4 +
+                seq_idx * input_stride_d3 + head_idx * input_stride_d2;
+      }
     }
 
     auto vec_op = [&variance](
@@ -80,18 +93,40 @@ class rms_norm_kernel {
       variance += x * x;
     };
 
+    auto silu_op = [](const scalar_t& val) {
+      scalar_t x = val;
+      x = x / ((scalar_t)1.0f + (scalar_t)sycl::exp((float)(-x)));
+      return x;
+    };
+
     constexpr int WIDTH = VEC_SIZE * sizeof(scalar_t);
     uintptr_t addr_in = reinterpret_cast<uintptr_t>(input_row);
 
     // fast path when the whole region is already aligned
     bool can_vec =
         ((addr_in & (WIDTH - 1)) == 0) && ((hidden_size & (VEC_SIZE - 1)) == 0);
+    uintptr_t addr_z_in = 0;
+    if constexpr (HAS_Z && !NORM_BEFORE_GATE) {
+      addr_z_in = reinterpret_cast<uintptr_t>(z_row);
+      can_vec = can_vec && ((addr_z_in & (WIDTH - 1)) == 0);
+    }
     if (can_vec) {
       int64_t const num_vec_elems = hidden_size / VEC_SIZE;
       auto const* vec_in = reinterpret_cast<const vec4_t<scalar_t>*>(input_row);
+      const vec4_t<scalar_t>* vec_z;
+      if constexpr (HAS_Z && !NORM_BEFORE_GATE) {
+        vec_z = reinterpret_cast<const vec4_t<scalar_t>*>(z_row);
+      }
       for (int i = item_ct1.get_local_id(2); i < num_vec_elems;
            i += item_ct1.get_local_range(2)) {
         vec4_t<scalar_t> tmp = vec_in[i];
+        if constexpr (HAS_Z && !NORM_BEFORE_GATE) {
+          vec4_t<scalar_t> z_tmp = vec_z[i];
+          #pragma unroll
+          for (int j = 0; j < VEC_SIZE; ++j) {
+            tmp.val[j] = silu_op(z_tmp.val[j]) * tmp.val[j];
+          }
+        }
         vec_op(tmp);
       }
     } else {
@@ -104,15 +139,42 @@ class rms_norm_kernel {
       // 1. handle the possibly unaligned prefix with scalar access.
       for (int i = item_ct1.get_local_id(2); i < prefix_elems;
            i += item_ct1.get_local_range(2)) {
-        scalar_op(input_row[i]);
+        auto tmp = input_row[i];
+        if constexpr (HAS_Z && !NORM_BEFORE_GATE) {
+          auto z_tmp = z_row[i];
+          tmp = silu_op(z_tmp) * tmp;
+        }
+        scalar_op(tmp);
       }
 
       int64_t const num_vec_elems = (hidden_size - prefix_elems) / VEC_SIZE;
       auto const* vec_in =
           reinterpret_cast<const vec4_t<scalar_t>*>(input_row + prefix_elems);
+      const vec4_t<scalar_t>* vec_z;
+      bool can_vec_z;
+      if constexpr (HAS_Z && !NORM_BEFORE_GATE) {
+        int z_misalignment_offset = addr_z_in & (WIDTH - 1);
+        can_vec_z = z_misalignment_offset == misalignment_offset;
+        vec_z = reinterpret_cast<const vec4_t<scalar_t>*>(z_row + prefix_elems);
+      }
       for (int i = item_ct1.get_local_id(2); i < num_vec_elems;
            i += item_ct1.get_local_range(2)) {
         vec4_t<scalar_t> tmp = vec_in[i];
+        if constexpr (HAS_Z && !NORM_BEFORE_GATE) {
+          vec4_t<scalar_t> z_tmp;
+          if (can_vec_z) {
+            z_tmp = vec_z[i];
+          } else {
+            #pragma unroll
+            for (int j = 0; j < VEC_SIZE; ++j) {
+              z_tmp.val[j] = (z_row + prefix_elems)[i * VEC_SIZE + j];
+            }
+          }
+          #pragma unroll
+          for (int j = 0; j < VEC_SIZE; ++j) {
+            tmp.val[j] = silu_op(z_tmp.val[j]) * tmp.val[j];
+          }
+        }
         vec_op(tmp);
       }
 
@@ -120,7 +182,12 @@ class rms_norm_kernel {
       for (int i = item_ct1.get_local_id(2) + num_vec_elems * VEC_SIZE;
            i < hidden_size - prefix_elems;
            i += item_ct1.get_local_range(2)) {
-        scalar_op((input_row + prefix_elems)[i]);
+        auto tmp = (input_row + prefix_elems)[i];
+        if constexpr (HAS_Z && !NORM_BEFORE_GATE) {
+          auto z_tmp = (z_row + prefix_elems)[i];
+          tmp = silu_op(z_tmp) * tmp;
+        }
+        scalar_op(tmp);
       }
     }
 
@@ -141,8 +208,16 @@ class rms_norm_kernel {
                        ((addr_weight & (WIDTH - 1)) == 0) &&
                        ((addr_out & (WIDTH - 1)) == 0) &&
                        ((hidden_size & (VEC_SIZE - 1)) == 0);
+    if constexpr (HAS_Z) {
+      addr_z_in = reinterpret_cast<uintptr_t>(z_row);
+      can_vec_out = can_vec_out && ((addr_z_in & (WIDTH - 1)) == 0);
+    }
     if (can_vec_out) {
       auto* v_in = reinterpret_cast<const vec4_t<scalar_t>*>(input_row);
+      const vec4_t<scalar_t>* v_z = nullptr;
+      if constexpr (HAS_Z) {
+        v_z = reinterpret_cast<const vec4_t<scalar_t>*>(z_row);
+      }
       auto* v_w = reinterpret_cast<const vec4_t<scalar_t>*>(weight);
       auto* v_out = reinterpret_cast<vec4_t<scalar_t>*>(out_row);
       int64_t const out_num_vec_elems = hidden_size / VEC_SIZE;
@@ -152,17 +227,47 @@ class rms_norm_kernel {
         vec4_t<scalar_t> dst;
         vec4_t<scalar_t> src1 = v_in[idx];
         vec4_t<scalar_t> src2 = v_w[idx];
+        vec4_t<scalar_t> z_src;
+        if constexpr (HAS_Z) {
+          z_src = v_z[idx];
+        }
         for (int j = 0; j < VEC_SIZE; j++) {
-          float x = static_cast<float>(src1.val[j]);
-          dst.val[j] = ((scalar_t)(x * s_variance_val)) * src2.val[j];
+          scalar_t x_val = src1.val[j];
+          if constexpr (HAS_Z && !NORM_BEFORE_GATE) {
+            x_val *= silu_op(z_src.val[j]);
+          }
+          if constexpr (IS_GEMMA) {
+            float w = (float)src2.val[j] + 1.0f;
+            dst.val[j] = (scalar_t)(x_val * s_variance_val * w);
+          } else {
+            dst.val[j] = ((scalar_t)(x_val * s_variance_val)) * src2.val[j];
+          }
+          if constexpr (HAS_Z && NORM_BEFORE_GATE) {
+            auto z_tmp = z_src.val[j];
+            dst.val[j] *= silu_op(z_tmp);
+          }
         }
         v_out[idx] = dst;
       }
     } else {
       for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
            idx += item_ct1.get_local_range(2)) {
-        float x = (float)input_row[idx];
-        out_row[idx] = ((scalar_t)(x * (*s_variance_ptr))) * weight[idx];
+        scalar_t x_val = input_row[idx];
+        if constexpr (HAS_Z && !NORM_BEFORE_GATE) {
+          x_val = silu_op(z_row[idx]) * x_val;
+        }
+        scalar_t out_val;
+        if constexpr (IS_GEMMA) {
+          float w = (float)weight[idx] + 1.0f;
+          out_val = (scalar_t)(x_val * (*s_variance_ptr) * w);
+        } else {
+          out_val = ((scalar_t)(x_val * (*s_variance_ptr))) * weight[idx];
+        }
+        if constexpr (HAS_Z && NORM_BEFORE_GATE) {
+          auto z_tmp = z_row[idx];
+          out_val *= silu_op(z_tmp);
+        }
+        out_row[idx] = out_val;
       }
     }
   }
@@ -176,18 +281,21 @@ class rms_norm_kernel {
   const int64_t input_shape_d2;
   const int64_t input_shape_d3;
   const scalar_t* __restrict__ weight;  // [hidden_size]
+  const scalar_t* __restrict__ z;       // [..., hidden_size] gating tensor (HAS_Z only)
   const float epsilon;
   const int num_tokens;
   const int hidden_size;
   sycl::local_accessor<float, 1> s_variance;
 };
 
-template <typename scalar_t>
+template <typename scalar_t, bool IS_GEMMA = false,
+          bool HAS_Z = false, bool NORM_BEFORE_GATE = false>
 void call_rms_norm_kernel(
     torch::Tensor& out,
     torch::Tensor& input,
     torch::Tensor& weight,
-    float epsilon) {
+    float epsilon,
+    const scalar_t* z_ptr = nullptr) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -210,7 +318,7 @@ void call_rms_norm_kernel(
       sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
-          vllm::rms_norm_kernel<sycl_t, tensor_rank>(
+          vllm::rms_norm_kernel<sycl_t, tensor_rank, 4, IS_GEMMA, HAS_Z, NORM_BEFORE_GATE>(
               (sycl_t*)out_ptr,
               (const sycl_t*)input_ptr,
               input_stride_d2,
@@ -222,12 +330,13 @@ void call_rms_norm_kernel(
               epsilon,
               num_tokens,
               hidden_size,
-              s_variance));
+              s_variance,
+              (const sycl_t*)z_ptr));
     });
   });
 }
 
-template <typename scalar_t>
+template <typename scalar_t, bool IS_GEMMA = false>
 class fused_add_rms_norm_kernel {
  public:
   fused_add_rms_norm_kernel(
@@ -276,8 +385,14 @@ class fused_add_rms_norm_kernel {
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
          idx += item_ct1.get_local_range(2)) {
       float x = (float)residual[item_ct1.get_group(2) * hidden_size + idx];
-      input[item_ct1.get_group(2) * input_stride + idx] =
+      if constexpr (IS_GEMMA) {
+        float w = (float)weight[idx] + 1.0f;
+        input[item_ct1.get_group(2) * input_stride + idx] =
+          (scalar_t)(x * (*s_variance_ptr) * w);
+      } else {
+        input[item_ct1.get_group(2) * input_stride + idx] =
           ((scalar_t)(x * (*s_variance_ptr))) * weight[idx];
+      }
     }
   }
 
@@ -292,7 +407,7 @@ class fused_add_rms_norm_kernel {
   sycl::local_accessor<float, 1> s_variance;  // local memory for variance
 };
 
-template <typename scalar_t>
+template <typename scalar_t, bool IS_GEMMA = false>
 void call_fused_add_rms_norm_kernel(
     torch::Tensor& input,
     torch::Tensor& residual,
@@ -312,7 +427,7 @@ void call_fused_add_rms_norm_kernel(
     sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
     cgh.parallel_for(
         sycl::nd_range<3>(grid * block, block),
-        fused_add_rms_norm_kernel<sycl_t>(
+        fused_add_rms_norm_kernel<sycl_t, IS_GEMMA>(
             (sycl_t*)input_ptr,
             (sycl_t*)residual_ptr,
             input_stride,
@@ -323,6 +438,8 @@ void call_fused_add_rms_norm_kernel(
             s_variance));
   });
 }
+
+
 
 }  // namespace vllm
 
@@ -355,5 +472,95 @@ void fused_add_rms_norm(
       input.scalar_type(), "call_fused_add_rms_norm_kernel", [&] {
         vllm::call_fused_add_rms_norm_kernel<scalar_t>(
             input, residual, weight, epsilon);
+      });
+}
+
+void gemma_rms_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    double epsilon) {
+  TORCH_CHECK(out.is_contiguous());
+  if (input.stride(-1) != 1) {
+    input = input.contiguous();
+  }
+  TORCH_CHECK(input.stride(-1) == 1);
+  TORCH_CHECK(weight.is_contiguous());
+  TORCH_CHECK(input.scalar_type() == weight.scalar_type());
+
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_gemma_rms_norm_kernel", [&] {
+        vllm::call_rms_norm_kernel<scalar_t, true>(out, input, weight, epsilon);
+      });
+}
+
+void fused_add_gemma_rms_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    double epsilon) {
+  TORCH_CHECK(weight.is_contiguous());
+  TORCH_CHECK(input.scalar_type() == weight.scalar_type());
+
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_fused_add_gemma_rms_norm_kernel", [&] {
+        vllm::call_fused_add_rms_norm_kernel<scalar_t, true>(
+            input, residual, weight, epsilon);
+      });
+}
+
+void rms_norm_gated(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    std::optional<torch::Tensor> z,
+    double epsilon,
+    bool norm_before_gate,
+    const std::string& activation) {
+  TORCH_CHECK(out.is_contiguous());
+  TORCH_CHECK(input.dim() >= 1);
+
+  if (input.stride(-1) != 1 || !input.is_contiguous()) {
+    input = input.contiguous();
+  }
+  TORCH_CHECK(input.stride(-1) == 1);
+  TORCH_CHECK(input.is_contiguous());
+  TORCH_CHECK(out.scalar_type() == input.scalar_type());
+  TORCH_CHECK(out.numel() == input.numel());
+  TORCH_CHECK(weight.is_contiguous());
+  TORCH_CHECK(weight.scalar_type() == input.scalar_type());
+  TORCH_CHECK(
+      activation == "swish" || activation == "silu",
+      "Unsupported rms_norm_gated activation '",
+      activation,
+      "'. Expected one of: swish, silu.");
+
+  int64_t hidden_size = input.size(-1);
+  TORCH_CHECK(weight.numel() == hidden_size);
+
+  if (z.has_value() && z->defined()) {
+    if (z->stride(-1) != 1 || !z->is_contiguous()) {
+      z = z->contiguous();
+    }
+    TORCH_CHECK(z->sizes() == input.sizes());
+    TORCH_CHECK(z->scalar_type() == input.scalar_type());
+  }
+
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_rms_norm_gated_kernel", [&] {
+        auto z_ptr =
+            (z.has_value() && z->defined()) ? z->data_ptr<scalar_t>() : nullptr;
+        if (z_ptr == nullptr) {
+            vllm::call_rms_norm_kernel<scalar_t, false, false, false>(
+                out, input, weight, epsilon, z_ptr);
+        } else {
+          if (norm_before_gate) {
+            vllm::call_rms_norm_kernel<scalar_t, false, true, true>(
+                out, input, weight, epsilon, z_ptr);
+          } else {
+            vllm::call_rms_norm_kernel<scalar_t, false, true, false>(
+                out, input, weight, epsilon, z_ptr);
+          }
+        }
       });
 }

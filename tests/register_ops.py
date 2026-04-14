@@ -22,6 +22,27 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def gemma_rms_norm(out: torch.Tensor, input: torch.Tensor,
+                   weight: torch.Tensor, epsilon: float) -> None:
+    torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
+
+
+def fused_add_gemma_rms_norm(input: torch.Tensor, residual: torch.Tensor,
+                             weight: torch.Tensor, epsilon: float) -> None:
+    torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
+
+
+def rms_norm_gated(out: torch.Tensor,
+                   input: torch.Tensor,
+                   weight: torch.Tensor,
+                   z: Optional[torch.Tensor],
+                   epsilon: float,
+                   norm_before_gate: bool = True,
+                   activation: str = "swish") -> None:
+    torch.ops._C.rms_norm_gated(out, input, weight, z, epsilon,
+                                norm_before_gate, activation)
+
+
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 
