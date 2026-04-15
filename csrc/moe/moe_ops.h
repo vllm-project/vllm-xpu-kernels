@@ -110,3 +110,16 @@ void remap_hidden_states(
     torch::Tensor& topk_ids,
     int64_t total_experts_num,
     int64_t local_experts_num);
+
+void moe_scatter_dynamic_quant(
+    torch::Tensor& selected_experts,
+    torch::Tensor& moe_weights,
+    torch::Tensor& token_to_scatter_offset,
+    torch::Tensor& experts_token_count,
+    torch::Tensor& experts_token_start,
+    torch::Tensor& hidden_states,
+    torch::Tensor& experts_smooth_scale,
+    torch::Tensor& scatter_tokens,
+    torch::Tensor& scatter_per_token_scale,
+    torch::Tensor& scatter_tokens_offset,
+    int64_t shared_experts_num);

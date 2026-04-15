@@ -21,7 +21,6 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
-
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 
@@ -465,6 +464,26 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  bias: Optional[torch.Tensor]) -> None:
     torch.ops._moe_C.topk_softmax(topk_weights, topk_ids, token_expert_indices,
                                   gating_output, renormalize, bias)
+
+def moe_scatter_dynamic_quant(
+    selected_experts: torch.Tensor,
+    moe_weights: torch.Tensor,
+    token_to_scatter_offset: torch.Tensor,
+    experts_token_count: torch.Tensor,
+    experts_token_start: torch.Tensor,
+    hidden_states: torch.Tensor,
+    experts_smooth_scale: torch.Tensor,
+    scatter_tokens: torch.Tensor,
+    scatter_per_token_scale: torch.Tensor,
+    scatter_tokens_offset: torch.Tensor,
+    shared_experts_num: int
+) -> None:
+    torch.ops._moe_C.moe_scatter_dynamic_quant(
+        selected_experts, moe_weights, token_to_scatter_offset,
+        experts_token_count, experts_token_start, hidden_states,
+        experts_smooth_scale, scatter_tokens, scatter_per_token_scale,
+        scatter_tokens_offset, shared_experts_num
+    )
 
 
 def swap_blocks(

@@ -106,6 +106,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "local_experts_num) -> "
       "()");
   m.impl("remap_hidden_states", torch::kXPU, &remap_hidden_states);
+
+  m.def(
+      "moe_scatter_dynamic_quant(Tensor! selected_experts, Tensor! moe_weights, "
+      "Tensor! token_to_scatter_offset, Tensor! experts_token_count, "
+      "Tensor! experts_token_start, Tensor! hidden_states, "
+      "Tensor! experts_smooth_scale, Tensor! scatter_tokens, "
+      "Tensor! scatter_per_token_scale, Tensor! scatter_tokens_offset, "
+      "int shared_experts_num) -> ()");
+  m.impl(
+      "moe_scatter_dynamic_quant", torch::kXPU, &moe_scatter_dynamic_quant);
+
+  m.def(
+      "moe_swiglu_dynamic_quant(Tensor! scatter_tokens, Tensor! smooth_scale, "
+      "Tensor! experts_token_count, Tensor! experts_token_start, "
+      "Tensor! quant_tokens, Tensor! per_token_scale, "
+      "int total_experts_num, int max_token_num) -> ()");
+  m.impl(
+      "moe_swiglu_dynamic_quant", torch::kXPU, &moe_swiglu_dynamic_quant);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
