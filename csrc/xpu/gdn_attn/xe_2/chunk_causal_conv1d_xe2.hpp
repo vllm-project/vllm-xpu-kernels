@@ -342,6 +342,371 @@ struct chunk_causal_conv1d_kernel {
   const int conv_elems;
 };
 
+template <typename T, int Width, bool ReorderInput>
+struct chunk_causal_conv1d_opt_kernel {
+ public:
+  // Optimized kernel for ReorderInput=true only.
+  //
+  // High-level mapping:
+  //   - group(0): one chunk-program (one sequence chunk).
+  //   - group(1): one feature tile (block_n contiguous conv channels).
+  //   - local_id: cooperatively loads/computes/stores within the tile.
+  //
+  // High-level dataflow:
+  //   1) Stage [state_len + segment_len, block_n] window into SLM.
+  //   2) Do depthwise causal conv on staged window for this feature tile.
+  //   3) Write q/k/v to virtual-token-major output layout.
+  //   4) Update conv_states once per sequence (current policy: first chunk).
+  static constexpr int sub_group_size = 32;
+  static constexpr int sg_num = 4;
+  static constexpr int wg_size = sub_group_size * sg_num;
+  static constexpr int vec_size = 4;
+  static constexpr int block_m = 8;
+  static constexpr int block_n = 128;
+  static constexpr int state_len = Width - 1;
+  static constexpr int vec_channels = block_n / vec_size;
+  static constexpr int smem_in_elems = (state_len + block_m) * block_n;
+  static constexpr int smem_elems = smem_in_elems;
+  using vec_t = sycl::vec<T, vec_size>;
+  using vecf_t = sycl::vec<float, vec_size>;
+
+  chunk_causal_conv1d_opt_kernel(
+      T* q_out,
+      T* k_out,
+      T* v_out,
+      T* z_out,
+      float* b_out,
+      float* a_out,
+      const T* mixed_qkvz,
+      const T* mixed_ba,
+      const T* conv_weights,
+      const T* conv_bias,
+      T* conv_states,
+      const int conv_states_stride_0,
+      T* conv_states_tmp,
+      const int32_t* batch_ptr,
+      const int32_t* token_chunk_offset_ptr,
+      const int32_t* out_token_base_ptr,
+      int* query_start_loc,
+      int* cache_indices,
+      bool* has_initial_state,
+      const ActMode& act_mode,
+      const int& pad_slot_id,
+      const int& batch_size,
+      const int& num_actual_tokens,
+      const int& num_virtual_tokens,
+      const int& num_k_heads,
+      const int& head_k_dim,
+      const int& num_v_heads,
+      const int& head_v_dim,
+      const int& qkvz_elems,
+      const int& conv_elems,
+      sycl::local_accessor<T, 1> smem_x)
+      : q_out(q_out),
+        k_out(k_out),
+        v_out(v_out),
+        z_out(z_out),
+        b_out(b_out),
+        a_out(a_out),
+        mixed_qkvz(mixed_qkvz),
+        mixed_ba(mixed_ba),
+        conv_weights(conv_weights),
+        conv_bias(conv_bias),
+        conv_states(conv_states),
+        conv_states_stride_0(conv_states_stride_0),
+        conv_states_tmp(conv_states_tmp),
+        batch_ptr(batch_ptr),
+        token_chunk_offset_ptr(token_chunk_offset_ptr),
+        out_token_base_ptr(out_token_base_ptr),
+        query_start_loc(query_start_loc),
+        cache_indices(cache_indices),
+        has_initial_state(has_initial_state),
+        act_mode(act_mode),
+        pad_slot_id(pad_slot_id),
+        batch_size(batch_size),
+        num_actual_tokens(num_actual_tokens),
+        num_virtual_tokens(num_virtual_tokens),
+        num_k_heads(num_k_heads),
+        head_k_dim(head_k_dim),
+        num_v_heads(num_v_heads),
+        head_v_dim(head_v_dim),
+        qkvz_elems(qkvz_elems),
+        conv_elems(conv_elems),
+        smem_x(smem_x) {
+    static_assert(ReorderInput, "chunk_causal_conv1d_opt_kernel only supports ReorderInput=true");
+    static_assert(vec_size == 1 || vec_size == 2 || vec_size == 4 || vec_size == 8,
+                  "vec_size must be one of {1,2,4,8}");
+      // static_assert(block_n == wg_size, "block_n must match wg_size");
+      static_assert(block_n % vec_size == 0, "block_n must be divisible by vec_size");
+  }
+
+  // mixed_qkvz layout used by this kernel (ReorderInput=true only), per token:
+  //   [all Q heads][all K heads][all V heads][all Z heads]
+  // Conv path in this kernel consumes only Q/K/V part (conv_num_feats).
+
+  static inline sycl::nd_range<2> get_nd_range(
+      const int total_seqlen_chunks,
+      const int num_k_heads,
+      const int head_k_dim,
+      const int num_v_heads,
+      const int head_v_dim) {
+    const int v_dim = head_v_dim * num_v_heads / num_k_heads;
+    const int conv_feats_per_head = 2 * head_k_dim + v_dim;
+    const int conv_num_feats = conv_feats_per_head * num_k_heads;
+    const int feat_groups =
+        (conv_num_feats + block_n - 1) / block_n;
+
+    // Each work-group computes one [block_m, block_n] output tile:
+    //   - block_m: chunk axis (token axis inside one sequence chunk)
+    //   - block_n: conv-channel axis (feature tile)
+    sycl::range<2> local(1, wg_size);
+    sycl::range<2> global(total_seqlen_chunks, feat_groups);
+    return sycl::nd_range<2>(global * local, local);
+  }
+
+  static inline void act_swish(float& x, float beta = 1.0f) {
+    constexpr float log2e = 1.44269504089f;
+    x = x / (1.0f + sycl::native::exp2(-x * beta * log2e));
+  }
+
+  static inline void act_silu(float& x) { act_swish(x, 1.0f); }
+
+  [[sycl::reqd_sub_group_size(sub_group_size)]] void
+  operator()(sycl::nd_item<2> item) const {
+    // token_chunk_id maps to one host-generated chunk program:
+    //   token_chunk_id -> (batch_id, chunk_offset_in_sequence)
+    const int token_chunk_id = item.get_group(0);
+    const int local_id = item.get_local_linear_id();
+    T* smem_ptr =
+        smem_x.template get_multi_ptr<sycl::access::decorated::no>().get();
+    T* smem_in = smem_ptr;
+
+    const int q_dim = head_k_dim;
+    const int k_dim = head_k_dim;
+    const int v_dim = head_v_dim * num_v_heads / num_k_heads;
+    const int conv_feats_per_head = q_dim + k_dim + v_dim;
+    const int conv_num_feats = conv_feats_per_head * num_k_heads;
+
+    const int feat_group = item.get_group(1);
+
+    // batch_id for this token chunk
+    const int batch_id = batch_ptr[token_chunk_id];
+    if (batch_id < 0 || batch_id >= batch_size) {
+      return;
+    }
+
+    // chunk_offset is INTRA-SEQUENCE chunk id (0..num_chunks-1),
+    // not a global chunk id across all sequences.
+    const int chunk_offset = token_chunk_offset_ptr[token_chunk_id];
+    const int seq_start_offset = query_start_loc[batch_id];
+    const int seq_end_offset = query_start_loc[batch_id + 1];
+    const int seqlen = seq_end_offset - seq_start_offset;
+    if (seqlen <= 0) {
+      return;
+    }
+
+    const int states_id = cache_indices[batch_id];
+    if (states_id == pad_slot_id) {
+      return;
+    }
+
+    const bool has_init_conv_states =
+        (has_initial_state == nullptr ||
+         (has_initial_state != nullptr && has_initial_state[batch_id]));
+    T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
+
+    const int token_offset = block_m * chunk_offset;
+    // segment_len can be smaller than block_m for the tail chunk.
+    const int segment_len = sycl::max(0, sycl::min(block_m, seqlen - token_offset));
+    if (segment_len <= 0) {
+      return;
+    }
+
+    // Stage one conv window into SLM for this feature tile:
+    //   window = [history(state_len) + current_chunk(segment_len)]
+    //   shape  = [window_len, vec_channels] where vec_channels=block_n/vec_size
+    // Source token mapping:
+    //   src_token < 0  -> read from conv_states (if has initial state)
+    //   src_token >= 0 -> read from mixed_qkvz at sequence-local position
+    const int window_len = state_len + segment_len;
+    const int vec_stride = vec_channels;
+    const int load_tasks = window_len * vec_channels;
+    for (int task_id = local_id; task_id < load_tasks; task_id += wg_size) {
+      const int pos = task_id / vec_channels;
+      const int vec_idx = task_id % vec_channels;
+      const int feat_base = feat_group * block_n + vec_idx * vec_size;
+      const int src_token = token_offset - state_len + pos;
+
+      vec_t src_vec(static_cast<T>(0));
+      if (src_token >= 0 && src_token < seqlen) {
+        const T* src_ptr =
+            mixed_qkvz + (seq_start_offset + src_token) * qkvz_elems + feat_base;
+        src_vec.load(0, src_ptr);
+      } else if (has_init_conv_states) {
+        const int state_pos = state_len + src_token;
+        if (state_pos >= 0 && state_pos < state_len) {
+          const T* state_ptr = conv_states_ptr + state_pos * conv_elems + feat_base;
+          src_vec.load(0, state_ptr);
+        }
+      }
+      src_vec.store(pos * vec_stride + vec_idx, smem_in);
+    }
+    item.barrier(sycl::access::fence_space::local_space);
+
+    // Parallelism over token axis inside a chunk tile:
+    // each lane-group handles t = m_lane, m_lane + m_parallel, ...
+    const int m_parallel = wg_size / vec_channels;
+    const int vec_idx = local_id % vec_channels;
+    const int m_lane = local_id / vec_channels;
+    const int feat_base = feat_group * block_n + vec_idx * vec_size;
+
+    // Load bias
+    vec_t bias_vec(static_cast<T>(0));
+    if (conv_bias != nullptr) {
+      bias_vec.load(0, conv_bias + feat_base);
+    }
+
+    // Load weights for channels of this work-item into registers.
+    vecf_t w_reg[Width];
+#pragma unroll
+    for (int k = 0; k < Width; ++k) {
+#pragma unroll
+      for (int lane = 0; lane < vec_size; ++lane) {
+        const int c = feat_base + lane;
+        w_reg[k][lane] = static_cast<float>(conv_weights[c * Width + k]);
+      }
+    }
+
+    for (int t = m_lane; t < segment_len; t += m_parallel) {
+      // acc computes one output channel vector for token t.
+      vecf_t acc;
+#pragma unroll
+      for (int lane = 0; lane < vec_size; ++lane) {
+        acc[lane] = static_cast<float>(bias_vec[lane]);
+      }
+
+#pragma unroll
+      for (int k = 0; k < Width; ++k) {
+        // Read staged input x[t + k, c] from SLM.
+        vec_t xv_vec;
+        xv_vec.load((t + k) * vec_stride + vec_idx, smem_in);
+        vecf_t xv_vec_f;
+#pragma unroll
+        for (int lane = 0; lane < vec_size; ++lane) {
+          xv_vec_f[lane] = static_cast<float>(xv_vec[lane]);
+        }
+        acc += xv_vec_f * w_reg[k];
+      }
+      vec_t out_vec{};
+#pragma unroll
+      for (int lane = 0; lane < vec_size; ++lane) {
+        if (act_mode == ActMode::silu) {
+          act_silu(acc[lane]);
+        } else if (act_mode == ActMode::swish) {
+          act_swish(acc[lane]);
+        }
+        out_vec[lane] = static_cast<T>(acc[lane]);
+      }
+
+      // Store q/k/v into virtual-token-major layout directly.
+      // Mapping is decoupled from program scheduling granularity:
+      //   - scheduling uses block_m-sized micro chunks,
+      //   - logical output layout remains chunk_size(64)-based.
+      // Host precomputes per-program out_token_base in logical layout.
+      const int out_token_base = out_token_base_ptr[token_chunk_id];
+      const int out_token_id = out_token_base + t;
+      if (out_token_id >= num_virtual_tokens) {
+        continue;
+      }
+
+      // Channel partition inside conv feature vector:
+      //   [0, q_total)                  -> Q
+      //   [q_total, q_total + k_total)  -> K
+      //   [q_total + k_total, end)      -> V
+      const int q_total = num_k_heads * q_dim;
+      const int k_total = num_k_heads * k_dim;
+      const int v_total = num_k_heads * v_dim;
+
+      const int feat_end_store = feat_base + vec_size;
+      if (feat_end_store <= q_total) {
+        out_vec.store(0, q_out + out_token_id * q_total + feat_base);
+      } else if (feat_base >= q_total && feat_end_store <= q_total + k_total) {
+        out_vec.store(
+            0,
+            k_out + out_token_id * k_total +
+                (feat_base - q_total));
+      } else {
+        out_vec.store(
+            0,
+            v_out + out_token_id * v_total +
+                (feat_base - q_total - k_total));
+      }
+    }
+
+    // conv_states update policy (current implementation):
+    //   - only chunk_offset == 0 performs update (single writer per sequence),
+    //   - updated state is built from sequence tail tokens (or previous state
+    //     when sequence shorter than state_len).
+    if (chunk_offset == 0 && state_len > 0) {
+      if (local_id < vec_channels) {
+        const int feat_base_state = feat_group * block_n + local_id * vec_size;
+#pragma unroll
+        for (int s = 0; s < state_len; ++s) {
+          const int src_token = seqlen - state_len + s;
+          vec_t new_state_vec(static_cast<T>(0));
+          if (src_token >= 0) {
+            const T* src_ptr =
+                mixed_qkvz + (seq_start_offset + src_token) * qkvz_elems +
+                feat_base_state;
+            new_state_vec.load(0, src_ptr);
+          } else if (has_init_conv_states) {
+            const int prev_pos = state_len + src_token;
+            if (prev_pos >= 0 && prev_pos < state_len) {
+              const T* prev_ptr = conv_states_ptr + prev_pos * conv_elems +
+                                  feat_base_state;
+              new_state_vec.load(0, prev_ptr);
+            }
+          }
+          new_state_vec.store(0, conv_states_ptr + s * conv_elems + feat_base_state);
+        }
+      }
+    }
+  }
+
+ private:
+  T* q_out;
+  T* k_out;
+  T* v_out;
+  T* z_out;
+  float* b_out;
+  float* a_out;
+  const T* mixed_qkvz;
+  const T* mixed_ba;
+  const T* conv_weights;
+  const T* conv_bias;
+  T* conv_states;
+  const int conv_states_stride_0;
+  T* conv_states_tmp;
+  const int32_t* batch_ptr;
+  const int32_t* token_chunk_offset_ptr;
+  const int32_t* out_token_base_ptr;
+  const int32_t* query_start_loc;
+  const int* cache_indices;
+  const bool* has_initial_state;
+  const ActMode act_mode;
+  const int pad_slot_id;
+  const int batch_size;
+  const int num_actual_tokens;
+  const int num_virtual_tokens;
+  const int num_k_heads;
+  const int head_k_dim;
+  const int num_v_heads;
+  const int head_v_dim;
+  const int qkvz_elems;
+  const int conv_elems;
+  sycl::local_accessor<T, 1> smem_x;
+};
+
 template <typename T, bool ReorderInput>
 struct chunk_reorder_zba_kernel {
  public:
@@ -555,6 +920,106 @@ struct chunk_update_states_kernel {
   const int batch_size;
 };
 
+
+struct build_program_meta_device_kernel {
+ public:
+  build_program_meta_device_kernel(
+      const int32_t* query_start_loc,
+      int32_t* batch_ptr,
+      int32_t* token_chunk_offset_ptr,
+      int32_t* out_token_base_ptr,
+      int32_t pad_slot_id,
+      int block_m,
+      int batch_size,
+      int num_program_slots)
+      : query_start_loc(query_start_loc),
+        batch_ptr(batch_ptr),
+        token_chunk_offset_ptr(token_chunk_offset_ptr),
+        out_token_base_ptr(out_token_base_ptr),
+        pad_slot_id(pad_slot_id),
+        block_m(block_m),
+        batch_size(batch_size),
+        num_program_slots(num_program_slots) {}
+
+  void operator()(sycl::id<1> id) const {
+    const int32_t program_id = static_cast<int32_t>(id[0]);
+    if (program_id >= num_program_slots) {
+      return;
+    }
+
+    int32_t pre_micro_chunks = 0;
+    int32_t pre_chunks_64 = 0;
+    bool found = false;
+
+    for (int32_t seq = 0; seq < batch_size; ++seq) {
+      const int32_t seqlen = query_start_loc[seq + 1] - query_start_loc[seq];
+      const int32_t n_micro_chunks = (seqlen + block_m - 1) / block_m;
+      const int32_t cumsum_micro = pre_micro_chunks + n_micro_chunks;
+
+      if (program_id < cumsum_micro) {
+        const int32_t chunk_offset = program_id - pre_micro_chunks;
+        batch_ptr[program_id] = seq;
+        token_chunk_offset_ptr[program_id] = chunk_offset;
+        out_token_base_ptr[program_id] =
+            pre_chunks_64 * chunk_size + chunk_offset * block_m;
+        found = true;
+        break;
+      }
+
+      pre_micro_chunks = cumsum_micro;
+      pre_chunks_64 += (seqlen + chunk_size - 1) / chunk_size;
+    }
+
+    if (!found) {
+      batch_ptr[program_id] = pad_slot_id;
+      token_chunk_offset_ptr[program_id] = 0;
+      out_token_base_ptr[program_id] = 0;
+    }
+  }
+
+ private:
+  const int32_t* query_start_loc;
+  int32_t* batch_ptr;
+  int32_t* token_chunk_offset_ptr;
+  int32_t* out_token_base_ptr;
+  const int32_t pad_slot_id;
+  const int block_m;
+  const int batch_size;
+  const int num_program_slots;
+};
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+build_program_meta_device(
+    sycl::queue& queue,
+    const torch::Tensor& query_start_loc,
+    int32_t pad_slot_id,
+    int block_m,
+    int num_program_slots) {
+  auto opts = torch::TensorOptions()
+                  .dtype(torch::kInt32)
+                  .device(query_start_loc.device())
+                  .requires_grad(false);
+  auto batch_ptr = torch::empty({num_program_slots}, opts);
+  auto token_chunk_offset_ptr = torch::empty({num_program_slots}, opts);
+  auto out_token_base_ptr = torch::empty({num_program_slots}, opts);
+
+  const int batch_size = query_start_loc.size(0) - 1;
+  queue.submit([&](sycl::handler& cgh) {
+    build_program_meta_device_kernel task(
+        reinterpret_cast<const int32_t*>(query_start_loc.data_ptr()),
+        reinterpret_cast<int32_t*>(batch_ptr.data_ptr()),
+        reinterpret_cast<int32_t*>(token_chunk_offset_ptr.data_ptr()),
+        reinterpret_cast<int32_t*>(out_token_base_ptr.data_ptr()),
+        pad_slot_id,
+        block_m,
+        batch_size,
+        num_program_slots);
+    cgh.parallel_for(sycl::range<1>(num_program_slots), task);
+  });
+
+  return {batch_ptr, token_chunk_offset_ptr, out_token_base_ptr};
+}
+
 template <typename T, int Width, bool ReorderInput>
 void kernel_launcher(
     sycl::queue& queue,
@@ -571,6 +1036,7 @@ void kernel_launcher(
     T* conv_states,
     const int conv_states_stride_0,
     T* conv_states_tmp,
+    const torch::Tensor& query_start_loc_tensor,
     int* query_start_loc,
     int* cache_indices,
     bool* has_initial_state,
@@ -587,40 +1053,120 @@ void kernel_launcher(
     const int& conv_elems,
     const int& num_prefills,
     const int& num_decodes) {
-  using KERNEL_MAIN = chunk_causal_conv1d_kernel<T, Width, ReorderInput>;
-  auto range_main = KERNEL_MAIN::get_nd_range(
-      num_actual_tokens, num_k_heads, head_k_dim, num_v_heads, head_v_dim);
-  queue.submit([&](sycl::handler& cgh) {
-    KERNEL_MAIN task(
-        q_out,
-        k_out,
-        v_out,
-        z_out,
-        b_out,
-        a_out,
-        mixed_qkvz,
-        mixed_ba,
-        conv_weights,
-        conv_bias,
-        conv_states,
-        conv_states_stride_0,
-        conv_states_tmp,
-        query_start_loc,
-        cache_indices,
-        has_initial_state,
-        act_mode,
-        pad_slot_id,
-        batch_size,
-        num_actual_tokens,
-        num_virtual_tokens,
-        num_k_heads,
-        head_k_dim,
-        num_v_heads,
-        head_v_dim,
-        qkvz_elems,
-        conv_elems);
-    cgh.parallel_for(range_main, task);
-  });
+  if constexpr (ReorderInput) {
+    using KERNEL_MAIN = chunk_causal_conv1d_opt_kernel<T, Width, ReorderInput>;
+
+    // Use a approximate number of micro-chunks to avoid D2H synchronization
+    const int approx_total_micro_chunks =
+        (num_actual_tokens + batch_size * (KERNEL_MAIN::block_m - 1) +
+         KERNEL_MAIN::block_m - 1) /
+        KERNEL_MAIN::block_m;
+
+    auto [batch_tensor, token_chunk_offset_tensor, out_token_base_tensor] =
+      build_program_meta_device(
+        queue,
+        query_start_loc_tensor,
+        static_cast<int32_t>(pad_slot_id),
+        KERNEL_MAIN::block_m,
+        approx_total_micro_chunks);
+
+    const int32_t * batch_ptr = reinterpret_cast<const int32_t*>(batch_tensor.data_ptr());
+    const int32_t * token_chunk_offset_ptr = reinterpret_cast<const int32_t*>(token_chunk_offset_tensor.data_ptr());
+    const int32_t * out_token_base_ptr = reinterpret_cast<const int32_t*>(out_token_base_tensor.data_ptr());
+
+    auto range_main = KERNEL_MAIN::get_nd_range(
+      approx_total_micro_chunks, num_k_heads, head_k_dim, num_v_heads, head_v_dim);
+    queue.submit([&](sycl::handler& cgh) {
+      sycl::local_accessor<T, 1> smem_x(
+          sycl::range<1>(KERNEL_MAIN::smem_elems), cgh);
+      KERNEL_MAIN task(
+          q_out,
+          k_out,
+          v_out,
+          z_out,
+          b_out,
+          a_out,
+          mixed_qkvz,
+          mixed_ba,
+          conv_weights,
+          conv_bias,
+          conv_states,
+          conv_states_stride_0,
+          conv_states_tmp,
+          batch_ptr,
+          token_chunk_offset_ptr,
+          out_token_base_ptr,
+          query_start_loc,
+          cache_indices,
+          has_initial_state,
+          act_mode,
+          pad_slot_id,
+          batch_size,
+          num_actual_tokens,
+          num_virtual_tokens,
+          num_k_heads,
+          head_k_dim,
+          num_v_heads,
+          head_v_dim,
+          qkvz_elems,
+          conv_elems,
+          smem_x);
+      cgh.parallel_for(range_main, task);
+    });
+  } else {
+    using KERNEL_MAIN = chunk_causal_conv1d_kernel<T, Width, ReorderInput>;
+    auto range_main = KERNEL_MAIN::get_nd_range(
+        num_actual_tokens, num_k_heads, head_k_dim, num_v_heads, head_v_dim);
+    queue.submit([&](sycl::handler& cgh) {
+      KERNEL_MAIN task(
+          q_out,
+          k_out,
+          v_out,
+          z_out,
+          b_out,
+          a_out,
+          mixed_qkvz,
+          mixed_ba,
+          conv_weights,
+          conv_bias,
+          conv_states,
+          conv_states_stride_0,
+          conv_states_tmp,
+          query_start_loc,
+          cache_indices,
+          has_initial_state,
+          act_mode,
+          pad_slot_id,
+          batch_size,
+          num_actual_tokens,
+          num_virtual_tokens,
+          num_k_heads,
+          head_k_dim,
+          num_v_heads,
+          head_v_dim,
+          qkvz_elems,
+          conv_elems);
+      cgh.parallel_for(range_main, task);
+    });
+
+    if (num_prefills > 0) {
+      using KERNEL_UPDATE = chunk_update_states_kernel<T>;
+      auto range_update =
+          KERNEL_UPDATE::get_nd_range(batch_size, Width, conv_elems);
+      queue.submit([&](sycl::handler& cgh) {
+        KERNEL_UPDATE task(
+            conv_states,
+            conv_states_stride_0,
+            conv_states_tmp,
+            cache_indices,
+            Width,
+            conv_elems,
+            query_start_loc,
+            batch_size);
+        cgh.parallel_for(range_update, task);
+      });
+    }
+  }
 
   using KERNEL_ZBA = chunk_reorder_zba_kernel<T, ReorderInput>;
   const int z_dim = head_v_dim * num_v_heads / num_k_heads;
@@ -647,23 +1193,6 @@ void kernel_launcher(
     cgh.parallel_for(range_zba, task);
   });
 
-  if (num_prefills > 0) {
-    using KERNEL_UPDATE = chunk_update_states_kernel<T>;
-    auto range_update =
-        KERNEL_UPDATE::get_nd_range(batch_size, Width, conv_elems);
-    queue.submit([&](sycl::handler& cgh) {
-      KERNEL_UPDATE task(
-          conv_states,
-          conv_states_stride_0,
-          conv_states_tmp,
-          cache_indices,
-          Width,
-          conv_elems,
-          query_start_loc,
-          batch_size);
-      cgh.parallel_for(range_update, task);
-    });
-  }
 }
 
 void chunk_causal_conv1d_xe2(
@@ -713,6 +1242,47 @@ void chunk_causal_conv1d_xe2(
   const int width = conv_weights.size(1);
   const int conv_states_stride_0 = conv_states.stride(0);
 
+  if (reorder_input) {
+    constexpr int block_n =
+      chunk_causal_conv1d_opt_kernel<float, 1, true>::block_n;
+      constexpr int vec_size_opt =
+        chunk_causal_conv1d_opt_kernel<float, 1, true>::vec_size;
+    const int v_dim = head_v_dim * num_v_heads / num_k_heads;
+    const int expected_conv_elems = num_k_heads * (2 * head_k_dim + v_dim);
+      const int q_total = num_k_heads * head_k_dim;
+      const int k_total = num_k_heads * head_k_dim;
+    TORCH_CHECK(
+      num_v_heads % num_k_heads == 0,
+      "chunk_causal_conv1d_opt_kernel requires num_v_heads % num_k_heads == 0, got num_v_heads=",
+      num_v_heads,
+      ", num_k_heads=",
+      num_k_heads);
+    TORCH_CHECK(
+      conv_elems == expected_conv_elems,
+      "chunk_causal_conv1d_opt_kernel requires conv_elems == num_k_heads * (2*head_k_dim + head_v_dim*num_v_heads/num_k_heads), got conv_elems=",
+      conv_elems,
+      ", expected=",
+      expected_conv_elems);
+    TORCH_CHECK(
+      conv_elems % block_n == 0,
+      "chunk_causal_conv1d_opt_kernel requires conv_elems % block_n == 0 to avoid tail-channel guards, got conv_elems=",
+      conv_elems,
+      ", block_n=",
+      block_n);
+    TORCH_CHECK(
+      q_total % vec_size_opt == 0,
+      "chunk_causal_conv1d_opt_kernel requires q_total % vec_size == 0 to enable pure vectorized q/k/v stores, got q_total=",
+      q_total,
+      ", vec_size=",
+      vec_size_opt);
+    TORCH_CHECK(
+      k_total % vec_size_opt == 0,
+      "chunk_causal_conv1d_opt_kernel requires k_total % vec_size == 0 to enable pure vectorized q/k/v stores, got k_total=",
+      k_total,
+      ", vec_size=",
+      vec_size_opt);
+  }
+
   auto dtype = conv_states.dtype();
   auto device = conv_states.device();
   torch::Tensor conv_states_tmp = torch::empty(
@@ -737,6 +1307,7 @@ void chunk_causal_conv1d_xe2(
       reinterpret_cast<scalar_t*>(conv_states.data_ptr()),         \
       conv_states_stride_0,                                        \
       reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),     \
+      query_start_loc,                                             \
       reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
       reinterpret_cast<int*>(cache_indices.data_ptr()),            \
       has_initial_state.has_value()                                \
