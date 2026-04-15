@@ -354,18 +354,6 @@ struct chunk_causal_conv1d_kernel {
 template <typename T, int Width, bool ReorderInput>
 struct chunk_causal_conv1d_opt_kernel {
  public:
-  // Optimized kernel for ReorderInput=true only.
-  //
-  // High-level mapping:
-  //   - group(0): one chunk-program (one sequence chunk).
-  //   - group(1): one feature tile (block_n contiguous conv channels).
-  //   - local_id: cooperatively loads/computes/stores within the tile.
-  //
-  // High-level dataflow:
-  //   1) Stage [state_len + segment_len, block_n] window into SLM.
-  //   2) Do depthwise causal conv on staged window for this feature tile.
-  //   3) Write q/k/v to virtual-token-major output layout.
-  //   4) Update conv_states once per sequence (current policy: first chunk).
   static constexpr int sub_group_size = 32;
   static constexpr int sg_num = 4;
   static constexpr int wg_size = sub_group_size * sg_num;
@@ -442,21 +430,18 @@ struct chunk_causal_conv1d_opt_kernel {
         qkvz_elems(qkvz_elems),
         conv_elems(conv_elems),
         smem_x(smem_x) {
-    static_assert(ReorderInput, "chunk_causal_conv1d_opt_kernel only supports ReorderInput=true");
-    static_assert(vec_size == 1 || vec_size == 2 || vec_size == 4 || vec_size == 8,
-                  "vec_size must be one of {1,2,4,8}");
-      static_assert(
+    static_assert(
+        ReorderInput,
+        "chunk_causal_conv1d_opt_kernel only supports ReorderInput=true");
+    static_assert(
+        vec_size == 1 || vec_size == 2 || vec_size == 4 || vec_size == 8,
+        "vec_size must be one of {1,2,4,8}");
+    static_assert(
         std::is_trivially_copyable_v<vec_t>,
         "aligned_vec must be trivially copyable");
-      // static_assert(block_n == wg_size, "block_n must match wg_size");
-      static_assert(
-        block_n % vec_size == 0,
-        "block_n must be divisible by vec_size");
+    static_assert(
+        block_n % vec_size == 0, "block_n must be divisible by vec_size");
   }
-
-  // mixed_qkvz layout used by this kernel (ReorderInput=true only), per token:
-  //   [all Q heads][all K heads][all V heads][all Z heads]
-  // Conv path in this kernel consumes only Q/K/V part (conv_num_feats).
 
   static inline sycl::nd_range<2> get_nd_range(
       const int total_seqlen_chunks,
@@ -467,12 +452,7 @@ struct chunk_causal_conv1d_opt_kernel {
     const int v_dim = head_v_dim * num_v_heads / num_k_heads;
     const int conv_feats_per_head = 2 * head_k_dim + v_dim;
     const int conv_num_feats = conv_feats_per_head * num_k_heads;
-    const int feat_groups =
-        (conv_num_feats + block_n - 1) / block_n;
-
-    // Each work-group computes one [block_m, block_n] output tile:
-    //   - block_m: chunk axis (token axis inside one sequence chunk)
-    //   - block_n: conv-channel axis (feature tile)
+    const int feat_groups = (conv_num_feats + block_n - 1) / block_n;
     sycl::range<2> local(1, wg_size);
     sycl::range<2> global(total_seqlen_chunks, feat_groups);
     return sycl::nd_range<2>(global * local, local);
@@ -487,8 +467,6 @@ struct chunk_causal_conv1d_opt_kernel {
 
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<2> item) const {
-    // token_chunk_id maps to one host-generated chunk program:
-    //   token_chunk_id -> (batch_id, chunk_offset_in_sequence)
     const int token_chunk_id = item.get_group(0);
     const int local_id = item.get_local_linear_id();
     vec_t* smem_ptr =
@@ -503,14 +481,11 @@ struct chunk_causal_conv1d_opt_kernel {
 
     const int feat_group = item.get_group(1);
 
-    // batch_id for this token chunk
     const int batch_id = batch_ptr[token_chunk_id];
     if (batch_id < 0 || batch_id >= batch_size) {
       return;
     }
 
-    // chunk_offset is INTRA-SEQUENCE chunk id (0..num_chunks-1),
-    // not a global chunk id across all sequences.
     const int chunk_offset = token_chunk_offset_ptr[token_chunk_id];
     const int seq_start_offset = query_start_loc[batch_id];
     const int seq_end_offset = query_start_loc[batch_id + 1];
@@ -530,18 +505,12 @@ struct chunk_causal_conv1d_opt_kernel {
     T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
 
     const int token_offset = block_m * chunk_offset;
-    // segment_len can be smaller than block_m for the tail chunk.
-    const int segment_len = sycl::max(0, sycl::min(block_m, seqlen - token_offset));
+    const int segment_len =
+        sycl::max(0, sycl::min(block_m, seqlen - token_offset));
     if (segment_len <= 0) {
       return;
     }
 
-    // Stage one conv window into SLM for this feature tile:
-    //   window = [history(state_len) + current_chunk(segment_len)]
-    //   shape  = [window_len, vec_channels] where vec_channels=block_n/vec_size
-    // Source token mapping:
-    //   src_token < 0  -> read from conv_states (if has initial state)
-    //   src_token >= 0 -> read from mixed_qkvz at sequence-local position
     const int window_len = state_len + segment_len;
     const int vec_stride = vec_channels;
     const int load_tasks = window_len * vec_channels;
@@ -553,13 +522,15 @@ struct chunk_causal_conv1d_opt_kernel {
 
       vec_t src_vec{};
       if (src_token >= 0 && src_token < seqlen) {
-        const T* src_ptr =
-            mixed_qkvz + (seq_start_offset + src_token) * qkvz_elems + feat_base;
+        const T* src_ptr = mixed_qkvz +
+                           (seq_start_offset + src_token) * qkvz_elems +
+                           feat_base;
         src_vec = *reinterpret_cast<const vec_t*>(src_ptr);
       } else if (has_init_conv_states) {
         const int state_pos = state_len + src_token;
         if (state_pos >= 0 && state_pos < state_len) {
-          const T* state_ptr = conv_states_ptr + state_pos * conv_elems + feat_base;
+          const T* state_ptr =
+              conv_states_ptr + state_pos * conv_elems + feat_base;
           src_vec = *reinterpret_cast<const vec_t*>(state_ptr);
         }
       }
@@ -567,20 +538,16 @@ struct chunk_causal_conv1d_opt_kernel {
     }
     item.barrier(sycl::access::fence_space::local_space);
 
-    // Parallelism over token axis inside a chunk tile:
-    // each lane-group handles t = m_lane, m_lane + m_parallel, ...
     const int m_parallel = wg_size / vec_channels;
     const int vec_idx = local_id % vec_channels;
     const int m_lane = local_id / vec_channels;
     const int feat_base = feat_group * block_n + vec_idx * vec_size;
 
-    // Load bias
     vec_t bias_vec{};
     if (conv_bias != nullptr) {
       bias_vec = *reinterpret_cast<const vec_t*>(conv_bias + feat_base);
     }
 
-    // Load weights for channels of this work-item into registers.
     vec_t w_reg[Width];
 #pragma unroll
     for (int k = 0; k < Width; ++k) {
@@ -601,11 +568,10 @@ struct chunk_causal_conv1d_opt_kernel {
 
 #pragma unroll
       for (int k = 0; k < Width; ++k) {
-        // Read staged input x[t + k, c] from SLM.
         vec_t xv_vec = *(smem_in + (t + k) * vec_stride + vec_idx);
 #pragma unroll
         for (int lane = 0; lane < vec_size; ++lane) {
-          acc[lane] += vllm::xpu::to_float(xv_vec[lane]) * 
+          acc[lane] += vllm::xpu::to_float(xv_vec[lane]) *
                        vllm::xpu::to_float(w_reg[k][lane]);
         }
       }
@@ -620,21 +586,12 @@ struct chunk_causal_conv1d_opt_kernel {
         vllm::xpu::from_float(out_vec[lane], acc[lane]);
       }
 
-      // Store q/k/v into virtual-token-major layout directly.
-      // Mapping is decoupled from program scheduling granularity:
-      //   - scheduling uses block_m-sized micro chunks,
-      //   - logical output layout remains chunk_size(64)-based.
-      // Host precomputes per-program out_token_base in logical layout.
       const int out_token_base = out_token_base_ptr[token_chunk_id];
       const int out_token_id = out_token_base + t;
       if (out_token_id >= num_virtual_tokens) {
         continue;
       }
 
-      // Channel partition inside conv feature vector:
-      //   [0, q_total)                  -> Q
-      //   [q_total, q_total + k_total)  -> K
-      //   [q_total + k_total, end)      -> V
       const int q_total = num_k_heads * q_dim;
       const int k_total = num_k_heads * k_dim;
       const int v_total = num_k_heads * v_dim;
@@ -653,10 +610,6 @@ struct chunk_causal_conv1d_opt_kernel {
       }
     }
 
-    // conv_states update policy (current implementation):
-    //   - only chunk_offset == 0 performs update (single writer per sequence),
-    //   - updated state is built from sequence tail tokens (or previous state
-    //     when sequence shorter than state_len).
     if (chunk_offset == 0 && state_len > 0) {
       if (local_id < vec_channels) {
         const int feat_base_state = feat_group * block_n + local_id * vec_size;
@@ -665,15 +618,15 @@ struct chunk_causal_conv1d_opt_kernel {
           const int src_token = seqlen - state_len + s;
           vec_t new_state_vec{};
           if (src_token >= 0) {
-            const T* src_ptr =
-                mixed_qkvz + (seq_start_offset + src_token) * qkvz_elems +
-                feat_base_state;
+            const T* src_ptr = mixed_qkvz +
+                               (seq_start_offset + src_token) * qkvz_elems +
+                               feat_base_state;
             new_state_vec = *reinterpret_cast<const vec_t*>(src_ptr);
           } else if (has_init_conv_states) {
             const int prev_pos = state_len + src_token;
             if (prev_pos >= 0 && prev_pos < state_len) {
-              const T* prev_ptr = conv_states_ptr + prev_pos * conv_elems +
-                                  feat_base_state;
+              const T* prev_ptr =
+                  conv_states_ptr + prev_pos * conv_elems + feat_base_state;
               new_state_vec = *reinterpret_cast<const vec_t*>(prev_ptr);
             }
           }
@@ -744,8 +697,7 @@ static inline bool can_use_chunk_causal_conv1d_opt(
   const int k_total = num_k_heads * head_k_dim;
   const int v_total = num_v_heads * head_v_dim;
 
-  return num_v_heads % num_k_heads == 0 &&
-         conv_elems == expected_conv_elems &&
+  return num_v_heads % num_k_heads == 0 && conv_elems == expected_conv_elems &&
          conv_elems % kernel_t::block_n == 0 &&
          q_total % kernel_t::vec_size == 0 &&
          k_total % kernel_t::vec_size == 0 &&
@@ -974,7 +926,6 @@ struct chunk_update_states_kernel {
   const int batch_size;
 };
 
-
 struct build_program_meta_device_kernel {
  public:
   build_program_meta_device_kernel(
@@ -1126,7 +1077,8 @@ void kernel_launcher(
         conv_elems);
 
     if (use_opt_kernel) {
-      using KERNEL_MAIN = chunk_causal_conv1d_opt_kernel<T, Width, ReorderInput>;
+      using KERNEL_MAIN =
+          chunk_causal_conv1d_opt_kernel<T, Width, ReorderInput>;
 
       // Use a approximate number of micro-chunks to avoid D2H synchronization
       const int approx_total_micro_chunks =
@@ -1144,8 +1096,8 @@ void kernel_launcher(
 
       const int32_t* batch_ptr =
           reinterpret_cast<const int32_t*>(batch_tensor.data_ptr());
-      const int32_t* token_chunk_offset_ptr =
-          reinterpret_cast<const int32_t*>(token_chunk_offset_tensor.data_ptr());
+      const int32_t* token_chunk_offset_ptr = reinterpret_cast<const int32_t*>(
+          token_chunk_offset_tensor.data_ptr());
       const int32_t* out_token_base_ptr =
           reinterpret_cast<const int32_t*>(out_token_base_tensor.data_ptr());
 
@@ -1274,7 +1226,6 @@ void kernel_launcher(
         head_v_dim);
     cgh.parallel_for(range_zba, task);
   });
-
 }
 
 void chunk_causal_conv1d_xe2(
