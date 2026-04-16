@@ -352,6 +352,10 @@ def get_model_config(model_name: str, tp_size: int = 1):
     elif model_arch in ["Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"]:
         original_num_groups = config.num_experts
         original_intermediate_size = config.moe_intermediate_size
+    elif model_arch in ["Qwen3_5MoeForConditionalGeneration"]:
+        original_num_groups = config.text_config.num_experts
+        original_intermediate_size = config.text_config.moe_intermediate_size
+        config = config.text_config
     elif model_arch in ["DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM"]:
         original_num_groups = config.n_routed_experts
         original_intermediate_size = config.moe_intermediate_size
