@@ -27,9 +27,9 @@ DEVICE = "xpu"
 
 
 def clear_xpu_cache():
+    torch.xpu.synchronize()
     torch.xpu.empty_cache()
     gc.collect()
-    torch.xpu.synchronize()
 
 
 def calculate_flops(m, n, k):
