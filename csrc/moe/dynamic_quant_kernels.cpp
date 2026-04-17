@@ -11,6 +11,139 @@
 using namespace sycl::ext::intel::esimd;
 using bf16 = sycl::ext::oneapi::bfloat16;
 
+void moe_swiglu_dynamic_quant(
+    torch::Tensor& scatter_tokens,
+    torch::Tensor& smooth_scale,
+    torch::Tensor& experts_token_count,
+    torch::Tensor& experts_token_start,
+    torch::Tensor& quant_tokens,
+    torch::Tensor& per_token_scale,
+    int64_t total_experts_num,
+    int64_t max_token_num) {
+
+    auto& queue = vllm::xpu::vllmGetQueue();
+
+    auto scatter_tokens_ptr = reinterpret_cast<bf16*>(scatter_tokens.data_ptr<at::BFloat16>());
+    auto smooth_scale_ptr = smooth_scale.data_ptr<float>();
+    auto experts_token_count_ptr = experts_token_count.data_ptr<int32_t>();
+    auto experts_token_start_ptr = experts_token_start.data_ptr<int32_t>();
+    auto quant_tokens_ptr = quant_tokens.data_ptr<int8_t>();
+    auto per_token_scale_ptr = per_token_scale.data_ptr<float>();
+
+    int hidden_size = scatter_tokens.size(1) / 2;
+
+    auto launch_swiglu = [&](auto unroll_tag) {
+        constexpr int UNROLL = decltype(unroll_tag)::value;
+        constexpr int CHUNK = 64;
+        constexpr int BS = CHUNK * UNROLL;
+
+        int num_blocks = hidden_size / BS;
+        int wg_size = std::min(num_blocks, 64);
+
+        sycl::range<3> GlobalRange(total_experts_num, max_token_num, wg_size);
+        sycl::range<3> LocalRange(1, 1, wg_size);
+
+        queue.submit([&](sycl::handler& cgh) {
+            cgh.parallel_for(sycl::nd_range<3>(GlobalRange, LocalRange), [=](sycl::nd_item<3> item) SYCL_ESIMD_KERNEL {
+                slm_init(64 * sizeof(float));
+
+                const int loc_id = item.get_local_id(2);
+                if (loc_id == 0) {
+                    slm_block_store<float, 64>(0, simd<float, 64>(0.0f));
+                }
+                barrier();
+
+                const int expert_idx = item.get_global_id(0);
+                const int token_idx = item.get_global_id(1);
+
+                if (token_idx >= experts_token_count_ptr[expert_idx]) {
+                    return;
+                }
+
+                const int token_start = experts_token_start_ptr[expert_idx];
+                bf16* scatter_token_base = scatter_tokens_ptr + (token_start + token_idx) * 2 * hidden_size;
+                int8_t* output_base = quant_tokens_ptr + (token_start + token_idx) * hidden_size;
+
+                float thread_max = 0.0f;
+
+                // Pass 1: Extrema tracking
+                for (int bid = loc_id; bid < num_blocks; bid += wg_size) {
+#pragma unroll
+                    for (int u = 0; u < UNROLL; ++u) {
+                        simd<bf16, CHUNK> x1 = block_load<bf16, CHUNK>(
+                            scatter_token_base + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
+                        simd<bf16, CHUNK> x2 = block_load<bf16, CHUNK>(
+                            scatter_token_base + hidden_size + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
+                        simd<float, CHUNK> scale = block_load<float, CHUNK>(
+                            smooth_scale_ptr + expert_idx * hidden_size + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
+
+                        simd<float, CHUNK> x1_f = x1;
+                        simd<float, CHUNK> x2_f = x2;
+
+                        simd<float, CHUNK> x1_silu = x1_f / (1.0f + sycl::ext::intel::esimd::exp(-x1_f));
+                        simd<float, CHUNK> swiglu_tokens = x1_silu * x2_f;
+
+                        simd<float, CHUNK> scaled_swiglu_tokens = swiglu_tokens * scale;
+                        simd<float, CHUNK> scaled_swiglu_tokens_abs = sycl::ext::intel::esimd::abs(scaled_swiglu_tokens);
+
+                        float max_value = hmax<float, float, CHUNK>(scaled_swiglu_tokens_abs);
+                        thread_max = std::max(thread_max, max_value);
+                    }
+                }
+
+                slm_block_store<float, 1>(loc_id * sizeof(float), thread_max);
+                barrier();
+
+                simd<float, 64> max_value_full = slm_block_load<float, 64>(0);
+                float max_value_final = hmax<float, float, 64>(max_value_full);
+
+                float this_token_scale = max_value_final / 127.0f;
+                float recip_scale = this_token_scale == 0.0f ? 1.0f : (1.0f / this_token_scale);
+
+                // Pass 2: Recompute, quantize, and store
+                for (int bid = loc_id; bid < num_blocks; bid += wg_size) {
+#pragma unroll
+                    for (int u = 0; u < UNROLL; ++u) {
+                        simd<bf16, CHUNK> x1 = block_load<bf16, CHUNK>(
+                            scatter_token_base + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
+                        simd<bf16, CHUNK> x2 = block_load<bf16, CHUNK>(
+                            scatter_token_base + hidden_size + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
+                        simd<float, CHUNK> scale = block_load<float, CHUNK>(
+                            smooth_scale_ptr + expert_idx * hidden_size + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
+
+                        simd<float, CHUNK> x1_f = x1;
+                        simd<float, CHUNK> x2_f = x2;
+
+                        simd<float, CHUNK> x1_silu = x1_f / (1.0f + sycl::ext::intel::esimd::exp(-x1_f));
+                        simd<float, CHUNK> swiglu_tokens = x1_silu * x2_f;
+
+                        simd<float, CHUNK> scaled_swiglu_tokens = swiglu_tokens * scale;
+
+                        simd<int8_t, CHUNK> scaled_swiglu_tokens_quant_out = rnde<float>(scaled_swiglu_tokens * recip_scale);
+
+                        block_store<int8_t, CHUNK>(
+                            output_base + bid * BS + u * CHUNK, scaled_swiglu_tokens_quant_out, properties{cache_hint_L1<cache_hint::write_back>, cache_hint_L2<cache_hint::write_back>});
+                    }
+                }
+
+                if (loc_id == 0) {
+                    block_store<float, 1>(
+                        per_token_scale_ptr + token_start + token_idx, simd<float, 1>(this_token_scale), properties{cache_hint_L1<cache_hint::write_back>, cache_hint_L2<cache_hint::write_back>});
+                }
+            });
+        });
+    };
+
+    if (hidden_size % 512 == 0) {
+        launch_swiglu(std::integral_constant<int, 8>{});
+    } else if (hidden_size % 256 == 0) {
+        launch_swiglu(std::integral_constant<int, 4>{});
+    } else if (hidden_size % 128 == 0) {
+        launch_swiglu(std::integral_constant<int, 2>{});
+    } else {
+        launch_swiglu(std::integral_constant<int, 1>{});
+    }
+}
 
 void moe_scatter_dynamic_quant(
     torch::Tensor& selected_experts,

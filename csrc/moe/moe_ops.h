@@ -123,3 +123,14 @@ void moe_scatter_dynamic_quant(
     torch::Tensor& scatter_per_token_scale,
     torch::Tensor& scatter_tokens_offset,
     int64_t shared_experts_num);
+
+void moe_swiglu_dynamic_quant(
+    torch::Tensor& scatter_tokens,
+    torch::Tensor& smooth_scale,
+    torch::Tensor& experts_token_count,
+    torch::Tensor& experts_token_start,
+    torch::Tensor& quant_tokens,
+    torch::Tensor& per_token_scale,
+    int64_t total_experts_num,
+    int64_t max_token_num);
+

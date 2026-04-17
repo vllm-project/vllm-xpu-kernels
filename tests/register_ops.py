@@ -21,6 +21,7 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
+
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 
@@ -483,6 +484,23 @@ def moe_scatter_dynamic_quant(
         experts_token_count, experts_token_start, hidden_states,
         experts_smooth_scale, scatter_tokens, scatter_per_token_scale,
         scatter_tokens_offset, shared_experts_num
+    )
+
+
+def moe_swiglu_dynamic_quant(
+    scatter_tokens: torch.Tensor,
+    smooth_scale: torch.Tensor,
+    experts_token_count: torch.Tensor,
+    experts_token_start: torch.Tensor,
+    quant_tokens: torch.Tensor,
+    per_token_scale: torch.Tensor,
+    total_experts_num: int,
+    max_token_num: int
+) -> None:
+    torch.ops._moe_C.moe_swiglu_dynamic_quant(
+        scatter_tokens, smooth_scale, experts_token_count,
+        experts_token_start, quant_tokens, per_token_scale,
+        total_experts_num, max_token_num
     )
 
 
