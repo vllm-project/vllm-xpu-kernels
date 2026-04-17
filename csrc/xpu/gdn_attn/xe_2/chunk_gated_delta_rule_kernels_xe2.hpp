@@ -1060,34 +1060,6 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
 
       auto thr_mma = mma.get_slice(local_id);
 
-      if (has_prev_state) {
-        for (int dv = 0; dv < head_v_dim / chunk_size; ++dv) {
-          Tensor gU_C =
-              local_tile(cU, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
-          auto tCrU_d = thr_copy_U_d.partition_sg_fragment_S(gU_C);
-          auto tCgU_d = thr_copy_U_d.partition_D(gU_C);
-          auto tSrU_d = thr_mma.partition_sg_fragment_C(gU_C);
-          clear(tSrU_d);
-          gemm_TTS(W_tensor, S_tensor, tSrU_d, 0, dv, mma);
-
-          auto tCrU_c_save = thr_copy_U_c.partition_sg_fragment_D(gU_C);
-          reorder(tSrU_d, tCrU_c_save);
-
-          auto tCgU_c = thr_copy_U_c.partition_S(gU_C);
-          auto tCrU_c = thr_copy_U_c.partition_sg_fragment_D(gU_C);
-          copy(copy_U_c, tCgU_c, tCrU_c);
-
-          CUTE_UNROLL
-          for (int i = 0; i < tCrU_c_save.size(); ++i) {
-            tCrU_c(i) -= tCrU_c_save(i);
-          }
-
-          reorder(tCrU_c, tCrU_d);
-          copy(copy_U_d, tCrU_d, tCgU_d);
-        }
-        item.barrier(sycl::access::fence_space::local_space);
-      }
-
       auto q_ptr =
           q + chunk_offset * num_k_heads * head_k_dim + kv_head_id * head_k_dim;
       auto Q_tensor_shape = make_shape(current_chunk_size, head_k_dim);
@@ -1122,6 +1094,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       auto tCgO2_c = thr_copy_O2_c.partition_D(gO2_C);
       auto tSrO2_c = thr_mma.partition_sg_fragment_C(gO2_C);
 
+      // QK MMA: compute O2 = mask(Q × K^T) first (no dependency on WS)
       clear(tSrO2_c);
       gemm_TTS(Q_tensor, K_tensor, tSrO2_c, 0, 0, mma);
 
@@ -1162,15 +1135,45 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       auto thr_copy_O_c = copy_O_c.get_slice(local_id);
 
       if (has_prev_state) {
+        // Fused WS+QS dv loop: S[dv] is loaded once per k_tile and reused
+        // in registers for both WS (W×S) and QS (Q×S) DPAS operations.
         for (int dv = 0; dv < head_v_dim / chunk_size; ++dv) {
+          // --- Fused WS+QS MMA: share S[dv] load in registers ---
+          Tensor gU_C =
+              local_tile(cU, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
+          auto tSrU_d = thr_mma.partition_sg_fragment_C(gU_C);
+          clear(tSrU_d);
+
           Tensor gO_C =
               local_tile(cO, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
-          auto tCrO_c = thr_copy_O_c.partition_sg_fragment_S(gO_C);
-          auto tCgO_c = thr_copy_O_c.partition_D(gO_C);
           auto tSrO_c = thr_mma.partition_sg_fragment_C(gO_C);
-
           clear(tSrO_c);
-          gemm_TTS(Q_tensor, S_tensor, tSrO_c, 0, dv, mma);
+
+          // Fused gemm: W×S[dv] -> tSrU_d, Q×S[dv] -> tSrO_c
+          // S is loaded once and reused in registers for both
+          gemm_TTS_fused_2A(
+              W_tensor, Q_tensor, S_tensor,
+              tSrU_d, tSrO_c, 0, 0, dv, mma);
+
+          // --- WS epilogue: U_new[dv] = U_old[dv] - W×S[dv] ---
+          auto tCrU_d = thr_copy_U_d.partition_sg_fragment_S(gU_C);
+          auto tCgU_d = thr_copy_U_d.partition_D(gU_C);
+          auto tCrU_c_save = thr_copy_U_c.partition_sg_fragment_D(gU_C);
+          reorder(tSrU_d, tCrU_c_save);
+
+          auto tCgU_c = thr_copy_U_c.partition_S(gU_C);
+          auto tCrU_c = thr_copy_U_c.partition_sg_fragment_D(gU_C);
+          copy(copy_U_c, tCgU_c, tCrU_c);
+
+          CUTE_UNROLL
+          for (int i = 0; i < tCrU_c_save.size(); ++i) {
+            tCrU_c(i) -= tCrU_c_save(i);
+          }
+
+          reorder(tCrU_c, tCrU_d);
+          copy(copy_U_d, tCrU_d, tCgU_d);
+
+          // --- QS epilogue: apply exp(g) scaling ---
           CUTE_UNROLL
           for (int sn = 0; sn < SG_N / sub_group_size; ++sn) {
             int n_idx =
@@ -1181,7 +1184,15 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
               tSrO_c(sn * SG_M + sm) *= g_exp_slm_ptr[(m_idx)];
             }
           }
+
+          // Barrier: ensure U_new[dv] is visible across all subgroups
+          // before O2U reads it via U_tensor_T.
+          item.barrier(sycl::access::fence_space::local_space);
+
+          // --- O2U MMA: O[dv] += O1[dv] + O2 × U_T[dv] ---
           gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma);
+          auto tCrO_c = thr_copy_O_c.partition_sg_fragment_S(gO_C);
+          auto tCgO_c = thr_copy_O_c.partition_D(gO_C);
           reorder(tSrO_c, tCrO_c);
           copy(copy_O_c, tCrO_c, tCgO_c);
         }
