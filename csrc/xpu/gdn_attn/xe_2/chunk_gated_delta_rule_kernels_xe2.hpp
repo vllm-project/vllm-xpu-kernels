@@ -1017,8 +1017,8 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
         float g_cumsum_value =
             a[(chunk_offset + e) + v_head_id * total_virtual_seqlen];
         g_slm_ptr[e] = g_cumsum_value;
-        g_multi_slm_ptr[e] = sycl::native::exp(g_last_value - g_cumsum_value);
         g_exp_slm_ptr[e] = sycl::native::exp(g_cumsum_value);
+        g_multi_slm_ptr[e] = g_last_value_exp / g_exp_slm_ptr[e];
       }
 
       CUTE_UNROLL
