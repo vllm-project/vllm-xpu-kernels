@@ -1011,14 +1011,14 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       float g_last_value =
           a[(chunk_offset + current_chunk_size - 1) +
             v_head_id * total_virtual_seqlen];
-      float g_last_value_exp = sycl::exp(g_last_value);
+      float g_last_value_exp = sycl::native::exp(g_last_value);
       CUTE_UNROLL
       for (int e = local_id; e < current_chunk_size; e += local_range) {
         float g_cumsum_value =
             a[(chunk_offset + e) + v_head_id * total_virtual_seqlen];
         g_slm_ptr[e] = g_cumsum_value;
-        g_multi_slm_ptr[e] = sycl::exp(g_last_value - g_cumsum_value);
-        g_exp_slm_ptr[e] = sycl::exp(g_cumsum_value);
+        g_multi_slm_ptr[e] = sycl::native::exp(g_last_value - g_cumsum_value);
+        g_exp_slm_ptr[e] = sycl::native::exp(g_cumsum_value);
       }
 
       CUTE_UNROLL
@@ -1106,7 +1106,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
         for (int sm = 0; sm < SG_M; ++sm) {
           int m_idx = m_tile_start + m_sg_start + sm;
           tSrO2_c(sn * SG_M + sm) *=
-              sycl::exp(g_slm_ptr[(m_idx)] - g_slm_ptr[n_idx]);
+              sycl::native::exp(g_slm_ptr[(m_idx)] - g_slm_ptr[n_idx]);
           if (m_idx < n_idx) {
             tSrO2_c(sn * SG_M + sm) = 0.0f;
           }
