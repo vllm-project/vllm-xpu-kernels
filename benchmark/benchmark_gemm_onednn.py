@@ -238,7 +238,7 @@ def gen_weight_shape_configs(dtype_kind="fp8"):
                     "fp8_w8a16" for w8a16, "fp8_per_channel" for per-channel.
     """
     configs = []
-    m_sizes = [1, 32, 128, 1024, 4096]
+    m_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024, 4096]
     for model_name, shapes in KPI_WEIGHT_SHAPES.items():
         for (k, n), m in itertools.product(shapes, m_sizes):
             if dtype_kind == "bf16":
@@ -443,8 +443,6 @@ def get_bf16_gemm_benchmark(configs, iterations):
             args={},
         ))
     def benchmark(m, n, k, dtype, provider, iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
         total_latency = 0.0
         assert iterations > 5
 
@@ -452,15 +450,16 @@ def get_bf16_gemm_benchmark(configs, iterations):
             [m, k], dtype=dtype, device=DEVICE) / 10.0
         weight = torch.randn([n, k], dtype=dtype, device=DEVICE) / 10.0
 
+        start_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
+        end_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
         for index in range(iterations):
-            start.record()
-            torch.nn.functional.linear(input, weight)
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
-
+                start_event[index - 5].record()
+            torch.nn.functional.linear(input, weight)
+            if index >= 5:
+                end_event[index - 5].record()
         torch.xpu.synchronize()
+        total_latency = sum(start_event[i].elapsed_time(end_event[i]) for i in range(iterations - 5))
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
@@ -497,8 +496,6 @@ def get_fp8_gemm_benchmark(configs, iterations):
         ))
     def benchmark(m, n, k, out_dtype, fp8_dtype, provider,
                   iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
         total_latency = 0.0
         assert iterations > 5
 
@@ -515,16 +512,18 @@ def get_fp8_gemm_benchmark(configs, iterations):
             weight, scale_wei, fp8_dtype=fp8_dtype)
         weight_fp8_t = weight_fp8.transpose(0, 1)
 
+        start_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
+        end_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
         for index in range(iterations):
-            start.record()
+            if index >= 5:
+                start_event[index - 5].record()
             fp8_gemm(input_fp8, weight_fp8_t, out_dtype,
                      scale_src, scale_wei, torch.Tensor())
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
+                end_event[index - 5].record()
 
         torch.xpu.synchronize()
+        total_latency = sum(start_event[i].elapsed_time(end_event[i]) for i in range(iterations - 5))
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
@@ -562,8 +561,6 @@ def get_fp8_gemm_w8a16_benchmark(configs, iterations):
         ))
     def benchmark(m, n, k, out_dtype, fp8_dtype, provider,
                   iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
         total_latency = 0.0
         assert iterations > 5
 
@@ -576,15 +573,17 @@ def get_fp8_gemm_w8a16_benchmark(configs, iterations):
             weight, scale_wei, fp8_dtype=fp8_dtype, group_shape=(-1, 1))
         weight_fp8_t = weight_fp8.transpose(0, 1)
 
+        start_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
+        end_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
         for index in range(iterations):
-            start.record()
-            fp8_gemm_w8a16(input, weight_fp8_t, scale_wei, torch.Tensor())
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
+                start_event[index - 5].record()
+            fp8_gemm_w8a16(input, weight_fp8_t, scale_wei, torch.Tensor())
+            if index >= 5:
+                end_event[index - 5].record()
 
         torch.xpu.synchronize()
+        total_latency = sum(start_event[i].elapsed_time(end_event[i]) for i in range(iterations - 5))
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
@@ -622,8 +621,6 @@ def get_fp8_gemm_per_channel_benchmark(configs, iterations):
         ))
     def benchmark(m, n, k, out_dtype, fp8_dtype, provider,
                   iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
         total_latency = 0.0
         assert iterations > 5
 
@@ -638,16 +635,18 @@ def get_fp8_gemm_per_channel_benchmark(configs, iterations):
             weight, use_per_token_if_dynamic=True, fp8_dtype=fp8_dtype)
         weight_fp8_t = weight_fp8.transpose(0, 1)
 
+        start_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
+        end_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
         for index in range(iterations):
-            start.record()
+            if index >= 5:
+                start_event[index - 5].record()
             fp8_gemm(input_fp8, weight_fp8_t, out_dtype,
                      scale_src, scale_wei, torch.Tensor())
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
+                end_event[index - 5].record()
 
         torch.xpu.synchronize()
+        total_latency = sum(start_event[i].elapsed_time(end_event[i]) for i in range(iterations - 5))
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
@@ -684,8 +683,6 @@ def get_mxfp8_gemm_benchmark(configs, iterations):
             args={},
         ))
     def benchmark(m, n, k, out_dtype, provider, iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
         total_latency = 0.0
         assert iterations > 5
 
@@ -699,16 +696,18 @@ def get_mxfp8_gemm_benchmark(configs, iterations):
         _, inputs_lp, inputs_scale = _convert_to_mxfp8(inputs)
         _, weights_lp, weights_scale = _convert_to_mxfp8(weights)
 
+        start_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
+        end_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
         for index in range(iterations):
-            start.record()
+            if index >= 5:
+                start_event[index - 5].record()
             fp8_gemm(inputs_lp, weights_lp.transpose(0, 1), out_dtype,
                      inputs_scale, weights_scale, torch.Tensor())
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
+                end_event[index - 5].record()
 
         torch.xpu.synchronize()
+        total_latency = sum(start_event[i].elapsed_time(end_event[i]) for i in range(iterations - 5))
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
@@ -761,8 +760,6 @@ def get_mxfp4_gemm_benchmark(configs, iterations):
             args={},
         ))
     def benchmark(m, n, k, out_dtype, provider, iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
         total_latency = 0.0
         assert iterations > 5
 
@@ -776,16 +773,18 @@ def get_mxfp4_gemm_benchmark(configs, iterations):
         _, inputs_lp, inputs_scale = _convert_to_mxfp4(inputs)
         _, weights_lp, weights_scale = _convert_to_mxfp4(weights)
 
+        start_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
+        end_event = [torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)]
         for index in range(iterations):
-            start.record()
+            if index >= 5:
+                start_event[index - 5].record()
             fp4_gemm(inputs_lp, weights_lp.transpose(0, 1),
                      inputs_scale, weights_scale, out_dtype, torch.Tensor())
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
+                end_event[index - 5].record()
 
         torch.xpu.synchronize()
+        total_latency = sum(start_event[i].elapsed_time(end_event[i]) for i in range(iterations - 5))
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
