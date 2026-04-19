@@ -20,13 +20,20 @@ inline int get_num_splits(
           .get_info<sycl::ext::intel::info::device::gpu_subslices_per_slice>();
 
   int cur_parallel = batch_size * num_heads_kv;
-  int kv_blocks = (max_seqlen_k + block_size - 1) / block_size;
 
-  // Minimum KV blocks to benefit from splitting, aligned with the kernel's
+  // The decode kernel iterates kv_tile-sized work units within each page,
+  // not page-sized units. The dispatch routes block_size %% 128 == 0 to
+  // kv_tile=_128, else to kv_tile=_64. Compute the heuristic in tiles so
+  // it scales uniformly across all 64*n block_sizes (e.g. 64, 128, 192,
+  // 256, 384...) instead of being mis-tuned for non-{64,128} sizes.
+  int kv_tile = ((block_size % 128) == 0) ? 128 : 64;
+  int kv_tiles = (max_seqlen_k + kv_tile - 1) / kv_tile;
+
+  // Minimum KV tiles to benefit from splitting, aligned with the kernel's
   // kMinBlocksForSplit.  Below this the kernel falls back to single-split
   // regardless, and splitting only adds ReduceSplitK overhead.
-  int min_kv_blocks = (block_size <= 64) ? 32 : 128;
-  if (kv_blocks < min_kv_blocks) return 1;
+  int min_kv_tiles = (kv_tile <= 64) ? 32 : 64;
+  if (kv_tiles < min_kv_tiles) return 1;
 
   // GPU well-utilized or saturated: splitting only adds ReduceSplitK
   // overhead without improving FMHA throughput.
@@ -36,19 +43,19 @@ inline int get_num_splits(
   int target_splits;
   if (num_heads_kv >= 4) {
     // Many KV heads: each split adds kv_heads WGs.  Scale inversely
-    // with block_size — p64 gets ~20 splits, p128 gets ~10.
-    target_splits = std::max(4, num_xe_cores * 64 / block_size);
+    // with kv_tile — kv_tile=64 gets ~20 splits, kv_tile=128 gets ~10.
+    target_splits = std::max(4, num_xe_cores * 64 / kv_tile);
   } else {
     // Few KV heads: target at least num_xe_cores splits for parallelism;
-    // allow more for very long sequences (~10 blocks/split at p64).
-    int blocks_per_split = (block_size <= 64) ? 10 : 8;
-    target_splits = std::max(num_xe_cores, kv_blocks / blocks_per_split);
+    // allow more for very long sequences (~10 tiles/split at kv_tile=64).
+    int tiles_per_split = (kv_tile <= 64) ? 10 : 8;
+    target_splits = std::max(num_xe_cores, kv_tiles / tiles_per_split);
   }
 
-  // Each split must process at least 3 KV blocks to amortize overhead.
-  int max_splits_blocks = std::max(1, kv_blocks / 3);
+  // Each split must process at least 3 KV tiles to amortize overhead.
+  int max_splits_tiles = std::max(1, kv_tiles / 3);
   // Hard cap: beyond 40 splits, diminishing returns.
-  int num_splits = std::min({target_splits, max_splits_blocks, 40});
+  int num_splits = std::min({target_splits, max_splits_tiles, 40});
   return std::max(1, num_splits);
 }
 

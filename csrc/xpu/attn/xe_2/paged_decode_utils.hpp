@@ -84,7 +84,21 @@ inline void dispatch_by_page_size(
       dispatch_by_head_size<QGroup, _128>(head_case, queue, cuQKType, args);
       break;
     default:
-      TORCH_CHECK(false, "Unsupported page size for fmha");
+      // The mainloop iterates page_size / TileShapeQK[1] sub-tiles per page
+      // using the page-table indirection, so any positive multiple of the
+      // policy's kv_tile is supported. Route to the largest kv_tile that
+      // divides page_size for best throughput.
+      if (page_size > 0 && (page_size % 128) == 0) {
+        dispatch_by_head_size<QGroup, _128>(head_case, queue, cuQKType, args);
+      } else if (page_size > 0 && (page_size % 64) == 0) {
+        dispatch_by_head_size<QGroup, _64>(head_case, queue, cuQKType, args);
+      } else {
+        TORCH_CHECK(
+            false,
+            "Unsupported page size for fmha: ",
+            page_size,
+            " (supported: any positive multiple of 64)");
+      }
   }
 }
 

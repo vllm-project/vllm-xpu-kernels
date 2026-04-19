@@ -207,6 +207,16 @@ void cutlass_chunk_prefill_impl(
       "FMHA forward only supports head dimension at most " +
           std::to_string(max_head_size));
 
+  // Validate block_size: must be a positive multiple of 64. Non-paged mode
+  // does not use block_size, so only enforce the check when paged.
+  if (is_paged) {
+    TORCH_CHECK(
+        block_size > 0 && (block_size % 64) == 0,
+        "chunk_prefill: unsupported block_size=",
+        block_size,
+        " (supported: any positive multiple of 64)");
+  }
+
   if (args.head_size <= HEAD_SIZE_LIMIT_0) {
     policy_dispatch_func<chunk_policy_head64>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
