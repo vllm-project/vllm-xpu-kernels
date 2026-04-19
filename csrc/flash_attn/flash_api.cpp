@@ -22,11 +22,21 @@ inline int get_num_splits(
   int cur_parallel = batch_size * num_heads_kv;
 
   // The decode kernel iterates kv_tile-sized work units within each page,
-  // not page-sized units. The dispatch routes block_size %% 128 == 0 to
-  // kv_tile=_128, else to kv_tile=_64. Compute the heuristic in tiles so
-  // it scales uniformly across all 64*n block_sizes (e.g. 64, 128, 192,
-  // 256, 384...) instead of being mis-tuned for non-{64,128} sizes.
-  int kv_tile = ((block_size % 128) == 0) ? 128 : 64;
+  // not page-sized units. The dispatch routes
+  //   block_size == 16          -> kv_tile=_16
+  //   block_size == 32          -> kv_tile=_32
+  //   block_size %% 128 == 0    -> kv_tile=_128
+  //   else (other 64*n)         -> kv_tile=_64
+  // Compute the heuristic in tiles so it scales uniformly across all
+  // supported block_sizes (16, 32, 64, 128, 192, 256, ...).
+  int kv_tile;
+  if (block_size == 16) {
+    kv_tile = 16;
+  } else if (block_size == 32) {
+    kv_tile = 32;
+  } else {
+    kv_tile = ((block_size % 128) == 0) ? 128 : 64;
+  }
   int kv_tiles = (max_seqlen_k + kv_tile - 1) / kv_tile;
 
   // Minimum KV tiles to benefit from splitting, aligned with the kernel's
@@ -54,8 +64,22 @@ inline int get_num_splits(
 
   // Each split must process at least 3 KV tiles to amortize overhead.
   int max_splits_tiles = std::max(1, kv_tiles / 3);
+  // Per-policy cap on splits = SGPerWG * sg_size. The decode kernel's
+  // SubgroupLayoutQK depends on kv_tile, which is selected from block_size:
+  //   block_size == 16 -> kv_tile=_16, SGPerWG=1 -> max_kv_splits=16
+  //   block_size == 32 -> kv_tile=_32, SGPerWG=2 -> max_kv_splits=32
+  //   else (>=64)      -> kv_tile=_64 or _128, SGPerWG>=4 -> >=64
+  // Submitting more than max_kv_splits triggers can_implement to fail
+  // ("Invalid Problem Size") and the kernel is skipped.
+  int policy_split_cap = 64;
+  if (block_size == 16) {
+    policy_split_cap = 16;
+  } else if (block_size == 32) {
+    policy_split_cap = 32;
+  }
   // Hard cap: beyond 40 splits, diminishing returns.
-  int num_splits = std::min({target_splits, max_splits_tiles, 40});
+  int num_splits =
+      std::min({target_splits, max_splits_tiles, 40, policy_split_cap});
   return std::max(1, num_splits);
 }
 

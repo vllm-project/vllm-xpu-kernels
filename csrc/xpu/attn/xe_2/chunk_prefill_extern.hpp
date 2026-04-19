@@ -7,13 +7,19 @@
 // =============================================================================
 // To add a new head size policy, simply add it to this X-Macro list:
 // X(policy_name)
-#define CHUNK_POLICY_LIST(X) \
-  X(chunk_policy_head64)     \
-  X(chunk_policy_head96)     \
-  X(chunk_policy_head128)    \
-  X(chunk_policy_head192)    \
-  X(chunk_policy_head256)    \
-  X(chunk_policy_head512)
+#define CHUNK_POLICY_LIST(X)  \
+  X(chunk_policy_head64)      \
+  X(chunk_policy_head96)      \
+  X(chunk_policy_head128)     \
+  X(chunk_policy_head192)     \
+  X(chunk_policy_head256)     \
+  X(chunk_policy_head512)     \
+  X(chunk_policy_head64_b16)  \
+  X(chunk_policy_head96_b16)  \
+  X(chunk_policy_head128_b16) \
+  X(chunk_policy_head192_b16) \
+  X(chunk_policy_head256_b16) \
+  X(chunk_policy_head512_b16)
 
 // =============================================================================
 // Automatic extern template declarations for all policy combinations
