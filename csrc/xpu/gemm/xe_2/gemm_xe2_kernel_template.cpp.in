@@ -1,0 +1,7 @@
+#include "gemm_xe2_kernel.hpp"
+
+template torch::Tensor run_gemm<Config_${IMPL_TILE}_${IMPL_LAYOUT}>(
+    sycl::queue& queue,
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    int M, int N, int K);
