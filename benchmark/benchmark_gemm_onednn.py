@@ -314,7 +314,6 @@ def check_fp8_gemm_per_tensor(config):
         out_dtype,
         scale_src,
         scale_wei,
-        torch.Tensor(),
     )
 
     try:
@@ -342,7 +341,6 @@ def check_fp8_gemm_w8a16(config):
         input,
         weight_fp8.transpose(0, 1),
         scale_wei,
-        torch.Tensor(),
     )
 
     try:
@@ -376,7 +374,6 @@ def check_fp8_gemm_per_channel(config):
         out_dtype,
         scale_src,
         scale_wei,
-        torch.Tensor(),
     )
 
     try:
@@ -406,7 +403,6 @@ def check_mxfp8_gemm(config):
         out_dtype,
         inputs_scale,
         weights_scale,
-        torch.Tensor(),
     )
     output_ref = torch.matmul(
         inputs_hp.to(out_dtype), weights_hp.to(out_dtype).t()
@@ -439,7 +435,6 @@ def check_mxfp4_gemm(config):
         inputs_scale,
         weights_scale,
         out_dtype,
-        torch.Tensor(),
     )
     output_ref = torch.matmul(
         inputs_hp.to(out_dtype), weights_hp.to(out_dtype).t()
@@ -567,7 +562,6 @@ def get_fp8_gemm_benchmark(configs, iterations):
                 out_dtype,
                 scale_src,
                 scale_wei,
-                torch.Tensor(),
             )
             if index >= 5:
                 end_event[index - 5].record()
@@ -712,7 +706,6 @@ def get_fp8_gemm_per_channel_benchmark(configs, iterations):
                 out_dtype,
                 scale_src,
                 scale_wei,
-                torch.Tensor(),
             )
             if index >= 5:
                 end_event[index - 5].record()
@@ -786,7 +779,6 @@ def get_mxfp8_gemm_benchmark(configs, iterations):
                 out_dtype,
                 inputs_scale,
                 weights_scale,
-                torch.Tensor(),
             )
             if index >= 5:
                 end_event[index - 5].record()
@@ -878,7 +870,6 @@ def get_mxfp4_gemm_benchmark(configs, iterations):
                 inputs_scale,
                 weights_scale,
                 out_dtype,
-                torch.Tensor(),
             )
             if index >= 5:
                 end_event[index - 5].record()
