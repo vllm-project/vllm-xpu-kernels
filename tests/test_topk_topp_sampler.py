@@ -99,3 +99,57 @@ def test_topk_topp(batch_size, vocab_size, k, p, logprobs_mode):
                 assert diff_pct < 0.5, (
                     f"Top-p mask difference too large: {diff_pct:.2f}% "
                     f"(max diff {max_diff} values out of {max_kept})")
+
+
+@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("vocab_size", [1024])
+@pytest.mark.parametrize("k", K)
+@pytest.mark.parametrize("p", P)
+@pytest.mark.parametrize("logprobs_mode", ["raw_logits"])
+@pytest.mark.parametrize("infinite_value", ["-inf", "inf", "nan"])
+@pytest.mark.parametrize("is_full_infinite", [True, False])
+def test_topk_topp_infinite(
+    batch_size, vocab_size, k, p, logprobs_mode,
+    infinite_value, is_full_infinite):
+
+    seed_everything(42)
+
+    generators = {}
+
+    logits = torch.randn(batch_size,
+                         vocab_size,
+                         dtype=torch.float,
+                         device=DEVICE)
+
+    top_k = None
+    top_p = None
+    if k is not None:
+        if k != vocab_size:
+            top_k = torch.randint(1, k + 1, (batch_size, ), device=DEVICE)
+        else:
+            top_k = torch.full((batch_size, ),
+                               vocab_size,
+                               dtype=torch.long,
+                               device=DEVICE)
+    if p is not None:
+        if p != 1.0:
+            top_p = 1.0 - torch.rand(
+                batch_size, dtype=torch.float, device=DEVICE)
+        else:
+            top_p = torch.ones([batch_size], dtype=torch.float, device=DEVICE)
+
+    topk_topp_sampler = TopKTopPSampler(logprobs_mode=logprobs_mode)
+
+    if not is_full_infinite:
+        logits[0][0] = float(infinite_value)
+    else:
+        logits.fill_(float(infinite_value))
+
+    random_sampled, logits_to_return = topk_topp_sampler.forward_xpu(
+        logits=logits,
+        generators=generators,
+        k=top_k,
+        p=top_p,
+    )
+
+    torch.xpu.synchronize()

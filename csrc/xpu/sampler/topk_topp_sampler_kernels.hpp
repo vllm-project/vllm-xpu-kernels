@@ -331,6 +331,8 @@ struct top_k_only_kernel {
       for (int e = 0; e < VEC_SIZE; ++e) {
         float logit = local_data[e];
 
+        if (!sycl::isfinite(logit)) continue;
+
         if (logit < low) {
           low = logit;
         }
@@ -351,6 +353,8 @@ struct top_k_only_kernel {
       for (int e = 0; e < remained_vec_size; ++e) {
         float logit = local_data[e];
 
+        if (!sycl::isfinite(logit)) continue;
+
         if (logit < low) {
           low = logit;
         }
@@ -365,6 +369,15 @@ struct top_k_only_kernel {
     high = sycl::reduce_over_group(group, high, sycl::maximum<>());
     pivot = low;
     max_softmax_value = high;
+
+    // if all value is infinite, return 0
+    if (!sycl::isfinite(low) || !sycl::isfinite(high)) {
+      if (0 == local_id) {
+        random_sampled_ptr[0] = 0;
+      }
+
+      return;
+    }
 
     // topk
     if (top_k_value != vocab_size) {
@@ -652,6 +665,8 @@ struct top_p_only_kernel {
       for (int e = 0; e < VEC_SIZE; ++e) {
         float logit = local_data[e];
 
+        if (!sycl::isfinite(logit)) continue;
+
         if (logit < low) {
           low = logit;
         }
@@ -672,6 +687,8 @@ struct top_p_only_kernel {
       for (int e = 0; e < remained_vec_size; ++e) {
         float logit = local_data[e];
 
+        if (!sycl::isfinite(logit)) continue;
+
         if (logit < low) {
           low = logit;
         }
@@ -685,6 +702,15 @@ struct top_p_only_kernel {
     low = sycl::reduce_over_group(group, low, sycl::minimum<>());
     high = sycl::reduce_over_group(group, high, sycl::maximum<>());
     max_softmax_value = high;
+
+    // if all value is infinite, return 0
+    if (!sycl::isfinite(low) || !sycl::isfinite(high)) {
+      if (0 == local_id) {
+        random_sampled_ptr[0] = 0;
+      }
+
+      return;
+    }
 
     // get sum_softmax after mask without pivot
     float sum_softmax = 0.0f;
@@ -984,6 +1010,8 @@ struct top_k_top_p_kernel {
       for (int e = 0; e < VEC_SIZE; ++e) {
         float logit = local_data[e];
 
+        if (!sycl::isfinite(logit)) continue;
+
         if (logit < low_k) {
           low_k = logit;
         }
@@ -1004,6 +1032,8 @@ struct top_k_top_p_kernel {
       for (int e = 0; e < remained_vec_size; ++e) {
         float logit = local_data[e];
 
+        if (!sycl::isfinite(logit)) continue;
+
         if (logit < low_k) {
           low_k = logit;
         }
@@ -1018,6 +1048,15 @@ struct top_k_top_p_kernel {
     high_k = sycl::reduce_over_group(group, high_k, sycl::maximum<>());
     pivot_k = low_k;
     max_softmax_value = high_k;
+
+    // if all value is infinite, return 0
+    if (!sycl::isfinite(low_k) || !sycl::isfinite(high_k)) {
+      if (0 == local_id) {
+        random_sampled_ptr[0] = 0;
+      }
+
+      return;
+    }
 
     // topk
     if (top_k_value != vocab_size) {
