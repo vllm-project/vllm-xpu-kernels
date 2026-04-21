@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
 import random
 import time
 from argparse import ArgumentParser
 
 import torch
+
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 

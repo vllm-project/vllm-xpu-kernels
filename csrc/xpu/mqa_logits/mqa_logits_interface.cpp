@@ -31,17 +31,13 @@ void check_fp8_mqa_inputs(
   TORCH_CHECK(cu_seqlen_ke.dim() == 1, "cu_seqlen_ke must be [seq_len]");
 
   TORCH_CHECK(
-      q.scalar_type() == at::kFloat8_e4m3fn,
-      "q must be torch.float8_e4m3fn");
+      q.scalar_type() == at::kFloat8_e4m3fn, "q must be torch.float8_e4m3fn");
   TORCH_CHECK(
-      kv.scalar_type() == at::kFloat8_e4m3fn,
-      "kv must be torch.float8_e4m3fn");
+      kv.scalar_type() == at::kFloat8_e4m3fn, "kv must be torch.float8_e4m3fn");
   TORCH_CHECK(
-      kv_scales.scalar_type() == at::kFloat,
-      "kv_scales must be torch.float32");
+      kv_scales.scalar_type() == at::kFloat, "kv_scales must be torch.float32");
   TORCH_CHECK(
-      weights.scalar_type() == at::kFloat,
-      "weights must be torch.float32");
+      weights.scalar_type() == at::kFloat, "weights must be torch.float32");
   TORCH_CHECK(
       cu_seqlen_ks.scalar_type() == at::kInt,
       "cu_seqlen_ks must be torch.int32");
@@ -76,18 +72,15 @@ void check_fp8_paged_mqa_inputs(
   CHECK_DEVICE(block_tables);
 
   TORCH_CHECK(
-      q_fp8.dim() == 4,
-      "q_fp8 must be [batch_size, next_n, heads, index_dim]");
+      q_fp8.dim() == 4, "q_fp8 must be [batch_size, next_n, heads, index_dim]");
   TORCH_CHECK(
       kv_cache_fp8.dim() == 4,
       "kv_cache_fp8 must be [num_blocks, block_size, 1, index_dim+4]");
   TORCH_CHECK(
-      weights.dim() == 2,
-      "weights must be [batch_size * next_n, heads]");
+      weights.dim() == 2, "weights must be [batch_size * next_n, heads]");
   TORCH_CHECK(context_lens.dim() == 1, "context_lens must be [batch_size]");
   TORCH_CHECK(
-      block_tables.dim() == 2,
-      "block_tables must be [batch_size, max_blocks]");
+      block_tables.dim() == 2, "block_tables must be [batch_size, max_blocks]");
 
   TORCH_CHECK(
       q_fp8.scalar_type() == at::kFloat8_e4m3fn,
@@ -96,8 +89,7 @@ void check_fp8_paged_mqa_inputs(
       kv_cache_fp8.scalar_type() == at::kByte,
       "kv_cache_fp8 must be torch.uint8 packed cache");
   TORCH_CHECK(
-      weights.scalar_type() == at::kFloat,
-      "weights must be torch.float32");
+      weights.scalar_type() == at::kFloat, "weights must be torch.float32");
   TORCH_CHECK(
       context_lens.scalar_type() == at::kInt,
       "context_lens must be torch.int32");
@@ -116,17 +108,16 @@ void check_fp8_paged_mqa_inputs(
       kv_cache_fp8.size(3) == index_dim + 4,
       "kv_cache_fp8 packed last dim must be index_dim + 4");
   TORCH_CHECK(
-      weights.size(0) == batch_size * next_n,
-      "weights first dim mismatch");
+      weights.size(0) == batch_size * next_n, "weights first dim mismatch");
   TORCH_CHECK(weights.size(1) == heads, "weights heads mismatch");
   TORCH_CHECK(
-      context_lens.size(0) == batch_size,
-      "context_lens shape mismatch");
-  TORCH_CHECK(block_tables.size(0) == batch_size, "block_tables shape mismatch");
+      context_lens.size(0) == batch_size, "context_lens shape mismatch");
+  TORCH_CHECK(
+      block_tables.size(0) == batch_size, "block_tables shape mismatch");
   TORCH_CHECK(max_model_len > 0, "max_model_len must be > 0");
 }
 
-} // namespace
+}  // namespace
 
 torch::Tensor fp8_mqa_logits(
     const torch::Tensor& q,
@@ -142,7 +133,7 @@ torch::Tensor fp8_mqa_logits(
   const int64_t head_dim = q.size(2);
   const int64_t seq_len_kv = kv.size(0);
 
-    if (vllm::xpu::is_xe2_arch()) {
+  if (vllm::xpu::is_xe2_arch()) {
     return fp8_mqa_logits_xe2(
         q,
         kv,
@@ -168,12 +159,7 @@ torch::Tensor fp8_paged_mqa_logits(
     const c10::optional<at::Tensor>& schedule_metadata,
     int64_t max_model_len) {
   check_fp8_paged_mqa_inputs(
-      q_fp8,
-      kv_cache_fp8,
-      weights,
-      context_lens,
-      block_tables,
-      max_model_len);
+      q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len);
   (void)schedule_metadata;
 
   const int64_t batch_size = q_fp8.size(0);
@@ -187,14 +173,14 @@ torch::Tensor fp8_paged_mqa_logits(
   auto kv_cache_flat =
       kv_cache_fp8.view({num_blocks, block_size * (index_dim + 4)});
   auto kv_value_u8 = kv_cache_flat.slice(1, 0, block_size * index_dim)
-                        .view({num_blocks, block_size, 1, index_dim});
+                         .view({num_blocks, block_size, 1, index_dim});
   auto kv_scale_u8 = kv_cache_flat.slice(1, block_size * index_dim)
-                        .view({num_blocks, block_size, 1, 4});
+                         .view({num_blocks, block_size, 1, 4});
 
   auto kv_fp8 = kv_value_u8.view(torch::kFloat8_e4m3fn);
   auto kv_scales_f32 = kv_scale_u8.view(torch::kFloat);
 
-    if (vllm::xpu::is_xe2_arch()) {
+  if (vllm::xpu::is_xe2_arch()) {
     return fp8_paged_mqa_logits_xe2(
         q_fp8,
         kv_fp8,
@@ -212,5 +198,6 @@ torch::Tensor fp8_paged_mqa_logits(
         max_model_len);
   }
 
-  TORCH_CHECK(false, "Only XE2 paged mqa logits kernel is supported currently.");
+  TORCH_CHECK(
+      false, "Only XE2 paged mqa logits kernel is supported currently.");
 }

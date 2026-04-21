@@ -1,8 +1,8 @@
-# SPDX-License-Identifier: Apache-2.0
 import random
 
 import pytest
 import torch
+
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 DEVICES = ["xpu:0"]

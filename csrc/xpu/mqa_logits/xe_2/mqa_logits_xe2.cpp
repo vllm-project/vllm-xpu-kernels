@@ -88,17 +88,25 @@ class fp8_mqa_logits_kernel_t {
             make_stride(p.num_heads * p.head_dim, p.head_dim, _1{})));
     auto kv_tensor = make_tensor(
         p.kv_ptr,
-        make_layout(make_shape(p.seq_len_kv, p.head_dim), make_stride(p.head_dim, _1{})));
-    auto scales_tensor =
-        make_tensor(p.scales_ptr, make_layout(make_shape(p.seq_len_kv), make_stride(_1{})));
+        make_layout(
+            make_shape(p.seq_len_kv, p.head_dim),
+            make_stride(p.head_dim, _1{})));
+    auto scales_tensor = make_tensor(
+        p.scales_ptr, make_layout(make_shape(p.seq_len_kv), make_stride(_1{})));
     auto weights_tensor = make_tensor(
         p.weights_ptr,
-        make_layout(make_shape(p.seq_len, p.num_heads), make_stride(p.num_heads, _1{})));
-    auto ks_tensor = make_tensor(p.ks_ptr, make_layout(make_shape(p.seq_len), make_stride(_1{})));
-    auto ke_tensor = make_tensor(p.ke_ptr, make_layout(make_shape(p.seq_len), make_stride(_1{})));
+        make_layout(
+            make_shape(p.seq_len, p.num_heads),
+            make_stride(p.num_heads, _1{})));
+    auto ks_tensor = make_tensor(
+        p.ks_ptr, make_layout(make_shape(p.seq_len), make_stride(_1{})));
+    auto ke_tensor = make_tensor(
+        p.ke_ptr, make_layout(make_shape(p.seq_len), make_stride(_1{})));
     auto out_tensor = make_tensor(
         p.out_ptr,
-        make_layout(make_shape(p.seq_len, p.seq_len_kv), make_stride(p.seq_len_kv, _1{})));
+        make_layout(
+            make_shape(p.seq_len, p.seq_len_kv),
+            make_stride(p.seq_len_kv, _1{})));
 
     auto num_heads = p.num_heads;
     auto head_dim = p.head_dim;
@@ -121,7 +129,8 @@ class fp8_mqa_logits_kernel_t {
     if (kv_block_start >= seq_len_kv) {
       return;
     }
-    const int64_t kv_block_end = cute::min(kv_block_start + kBlockKV, seq_len_kv);
+    const int64_t kv_block_end =
+        cute::min(kv_block_start + kBlockKV, seq_len_kv);
 
     if (ke <= kv_block_start || ks >= kv_block_end) {
       const int64_t kv_index = kv_block_start + local_id;
@@ -141,10 +150,13 @@ class fp8_mqa_logits_kernel_t {
     auto wg_tile = mma.tile_mnk();
 
     Tensor gQ = local_tile(cQ, select<0, 2>(wg_tile), make_coord(_, _));
-    Tensor gKV = local_tile(cKV, select<1, 2>(wg_tile), make_coord(kv_block_idx, _));
-    Tensor gScales = local_tile(cScales, select<1>(wg_tile), make_coord(kv_block_idx));
+    Tensor gKV =
+        local_tile(cKV, select<1, 2>(wg_tile), make_coord(kv_block_idx, _));
+    Tensor gScales =
+        local_tile(cScales, select<1>(wg_tile), make_coord(kv_block_idx));
     Tensor gWeights = local_tile(cWeights, select<0>(wg_tile), make_coord(_));
-    Tensor gOut = local_tile(cOut, select<1>(wg_tile), make_coord(kv_block_idx));
+    Tensor gOut =
+        local_tile(cOut, select<1>(wg_tile), make_coord(kv_block_idx));
 
     auto copy_q = make_block_2d_copy_A(mma, curr_q_tensor);
     auto copy_kv = make_block_2d_copy_B(mma, kv_tensor);
@@ -193,7 +205,8 @@ class fp8_mqa_logits_kernel_t {
       barrier_wait(barrier_scope);
 
       if (local_id < kBlockHeads) {
-        weights_smem[local_id] = curr_weights_tensor(head_tile * kBlockHeads + local_id);
+        weights_smem[local_id] =
+            curr_weights_tensor(head_tile * kBlockHeads + local_id);
       }
 
       barrier_arrive(barrier_scope);
@@ -205,7 +218,8 @@ class fp8_mqa_logits_kernel_t {
         prefetch(prefetch_kv, pBgB(_, _, _, k_tile_prefetch));
       }
 
-      for (int64_t k_tile = 0; k_tile < k_tile_count; k_tile++, k_tile_prefetch++) {
+      for (int64_t k_tile = 0; k_tile < k_tile_count;
+           k_tile++, k_tile_prefetch++) {
         barrier_arrive(barrier_scope);
 
         copy(copy_q, tAgA(_, _, _, head_tile, k_tile), tArA);
@@ -251,7 +265,8 @@ class fp8_mqa_logits_kernel_t {
       return;
     }
 
-    curr_out_tensor(kv_index) = (kv_index >= ks && kv_index < ke) ? output : neg_inf;
+    curr_out_tensor(kv_index) =
+        (kv_index >= ks && kv_index < ke) ? output : neg_inf;
   }
 };
 
@@ -320,11 +335,14 @@ class fp8_paged_mqa_logits_kernel_t {
         make_layout(
             make_shape(p.batch_size, p.next_n, p.heads),
             make_stride(p.next_n * p.heads, p.heads, _1{})));
-    auto context_tensor =
-        make_tensor(p.context_ptr, make_layout(make_shape(p.batch_size), make_stride(_1{})));
+    auto context_tensor = make_tensor(
+        p.context_ptr,
+        make_layout(make_shape(p.batch_size), make_stride(_1{})));
     auto block_tables_tensor = make_tensor(
         p.block_tables_ptr,
-        make_layout(make_shape(p.batch_size, p.max_blocks), make_stride(p.max_blocks, _1{})));
+        make_layout(
+            make_shape(p.batch_size, p.max_blocks),
+            make_stride(p.max_blocks, _1{})));
     auto out_tensor = make_tensor(
         p.out_ptr,
         make_layout(
@@ -340,7 +358,8 @@ class fp8_paged_mqa_logits_kernel_t {
     }
 
     int32_t context_len = context_tensor(batch_idx);
-    int64_t block_start = static_cast<int64_t>(logical_block_idx) * p.block_size;
+    int64_t block_start =
+        static_cast<int64_t>(logical_block_idx) * p.block_size;
     if (block_start >= context_len) {
       return;
     }
@@ -350,8 +369,8 @@ class fp8_paged_mqa_logits_kernel_t {
       return;
     }
 
-    int64_t block_end =
-        cute::min(block_start + p.block_size, static_cast<int64_t>(context_len));
+    int64_t block_end = cute::min(
+        block_start + p.block_size, static_cast<int64_t>(context_len));
     int64_t actual_block_size = block_end - block_start;
 
     auto mma = MMA{};
@@ -381,7 +400,8 @@ class fp8_paged_mqa_logits_kernel_t {
     const int barrier_scope = 2;
 
     for (int64_t q_token_id = 0; q_token_id < p.next_n; q_token_id++) {
-      int64_t q_offset = static_cast<int64_t>(context_len) - p.next_n + q_token_id;
+      int64_t q_offset =
+          static_cast<int64_t>(context_len) - p.next_n + q_token_id;
       if (q_offset < block_start) {
         continue;
       }
@@ -413,13 +433,15 @@ class fp8_paged_mqa_logits_kernel_t {
         clear(tCrC);
 
         CUTE_UNROLL
-        for (; k_tile_prefetch < prefetch_dist && k_tile_prefetch < k_tile_count;
+        for (;
+             k_tile_prefetch < prefetch_dist && k_tile_prefetch < k_tile_count;
              k_tile_prefetch++) {
           prefetch(prefetch_q, pAgA(_, _, _, head_tile, k_tile_prefetch));
           prefetch(prefetch_kv, pBgB(_, _, _, k_tile_prefetch));
         }
 
-        for (int64_t k_tile = 0; k_tile < k_tile_count; k_tile++, k_tile_prefetch++) {
+        for (int64_t k_tile = 0; k_tile < k_tile_count;
+             k_tile++, k_tile_prefetch++) {
           barrier_arrive(barrier_scope);
 
           copy(copy_q, tAgA(_, _, _, head_tile, k_tile), tArA);
@@ -438,7 +460,9 @@ class fp8_paged_mqa_logits_kernel_t {
         }
 
         int64_t block_offset = local_id;
-        float scale = block_offset < actual_block_size ? curr_scales_tensor(block_offset) : 0.0f;
+        float scale = block_offset < actual_block_size
+                          ? curr_scales_tensor(block_offset)
+                          : 0.0f;
 
         CUTE_UNROLL
         for (int i = 0; i < size(tCrC); i++) {
@@ -514,13 +538,15 @@ torch::Tensor fp8_mqa_logits_xe2(
   constexpr int64_t kBlockKV = get<1>(typename MqaPolicy::WGTile{});
 
   cutlass::KernelHardwareInfo hw_info;
-  hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
-      hw_info.device_id);
+  hw_info.sm_count =
+      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
+          hw_info.device_id);
 
   using Kernel = fp8_mqa_logits_kernel_t;
 
   dim3 block(1, Kernel::threads_per_wg, 1);
-  dim3 grid(seq_len, cute::ceil_div(seq_len_kv, static_cast<int64_t>(kBlockKV)), 1);
+  dim3 grid(
+      seq_len, cute::ceil_div(seq_len_kv, static_cast<int64_t>(kBlockKV)), 1);
 
   const auto sycl_block = compat::dim3(block.x, block.y, block.z);
   const auto sycl_grid = compat::dim3(grid.x, grid.y, grid.z);
@@ -558,10 +584,9 @@ torch::Tensor fp8_mqa_logits_xe2(
       sycl::ext::oneapi::experimental::sub_group_size<16>};
   compat::experimental::launch_policy policy{
       sycl_grid, sycl_block, launch_props, kernel_props};
-  auto event = compat::experimental::launch<cutlass::device_kernel<Kernel>, Kernel>(
-      policy,
-      queue,
-      params);
+  auto event =
+      compat::experimental::launch<cutlass::device_kernel<Kernel>, Kernel>(
+          policy, queue, params);
 #endif
 
   return logits;
@@ -662,13 +687,12 @@ torch::Tensor fp8_paged_mqa_logits_xe2(
       sycl::ext::oneapi::experimental::work_group_scratch_size(smem_size),
   };
   compat::experimental::kernel_properties kernel_props{
-      sycl::ext::oneapi::experimental::sub_group_size<16>
-  };
-  compat::experimental::launch_policy policy{sycl_grid, sycl_block, launch_props, kernel_props};
-  auto event = compat::experimental::launch<cutlass::device_kernel<Kernel>, Kernel>(
-      policy,
-      queue,
-      params);
+      sycl::ext::oneapi::experimental::sub_group_size<16>};
+  compat::experimental::launch_policy policy{
+      sycl_grid, sycl_block, launch_props, kernel_props};
+  auto event =
+      compat::experimental::launch<cutlass::device_kernel<Kernel>, Kernel>(
+          policy, queue, params);
 #endif
 
   return logits;
