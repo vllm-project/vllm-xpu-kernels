@@ -111,6 +111,17 @@ def benchmark_fp8_mqa_logits(
     flops = 2.0 * seq_len * seq_len_kv * num_heads * head_dim
     tflops = flops / avg_s / 1e12
 
+    bytes = (
+        seq_len * num_heads * head_dim +  # q
+        seq_len_kv * head_dim +  # kv
+        seq_len_kv * 4 +  # kv scales
+        seq_len * num_heads * 4 +  # weights
+        seq_len * 4 +  # ks
+        seq_len * 4 +  # ke
+        seq_len * seq_len_kv * 4  # output logits
+    )
+    bandwidth = bytes / avg_s / 1e9
+
     print("=== fp8_mqa_logits benchmark ===")
     print(
         f"shape: q=({seq_len},{num_heads},{head_dim}), "
@@ -118,6 +129,7 @@ def benchmark_fp8_mqa_logits(
         f"full_kv_range={full_kv_range}")
     print(f"avg latency: {avg_us:.3f} us")
     print(f"approx throughput: {tflops:.3f} TFLOPS")
+    print(f"approx bandwidth: {bandwidth:.3f} GB/s")
 
 
 def benchmark_fp8_paged_mqa_logits(
@@ -194,6 +206,16 @@ def benchmark_fp8_paged_mqa_logits(
     flops = 2.0 * batch_size * next_n * effective_kv * heads * index_dim
     tflops = flops / avg_s / 1e12
 
+    bytes = (
+        batch_size * next_n * heads * index_dim +  # q
+        batch_size * max_blocks * block_size * (index_dim + 4) +  # used kv cache
+        batch_size * next_n * heads * 4 +  # weights
+        batch_size * 4 +  # context_lens
+        batch_size * max_blocks * 4 +  # block_tables
+        batch_size * next_n * context_len * 4  # output logits
+    )
+    bandwidth = bytes / avg_s / 1e9
+
     print("=== fp8_paged_mqa_logits benchmark ===")
     print(
         f"shape: q=({batch_size},{next_n},{heads},{index_dim}), "
@@ -201,6 +223,7 @@ def benchmark_fp8_paged_mqa_logits(
         f"block_size={block_size}, max_model_len={max_model_len}")
     print(f"avg latency: {avg_us:.3f} us")
     print(f"approx throughput: {tflops:.3f} TFLOPS")
+    print(f"approx bandwidth: {bandwidth:.3f} GB/s")
 
 
 if __name__ == "__main__":
@@ -214,19 +237,21 @@ if __name__ == "__main__":
     parser.add_argument("--num-warmup-iters", type=int, default=10)
     parser.add_argument("--num-iters", type=int, default=100)
 
-    parser.add_argument("--seq-len", type=int, default=512)
-    parser.add_argument("--seq-len-kv", type=int, default=1024)
+    # non-paged args
+    parser.add_argument("--seq-len", type=int, default=2048)
+    parser.add_argument("--seq-len-kv", type=int, default=4096)
     parser.add_argument("--num-heads", type=int, default=64)
     parser.add_argument("--head-dim", type=int, default=128)
     parser.add_argument("--full-kv-range", action="store_true")
 
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--next-n", type=int, default=2)
-    parser.add_argument("--context-len", type=int, default=2048)
+    # paged args
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--next-n", type=int, default=8)
+    parser.add_argument("--context-len", type=int, default=8192)
     parser.add_argument("--heads", type=int, default=64)
     parser.add_argument("--index-dim", type=int, default=128)
     parser.add_argument("--block-size", type=int, default=64)
-    parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument("--max-model-len", type=int, default=8192)
 
     args = parser.parse_args()
 
