@@ -208,7 +208,7 @@ def benchmark_fp8_paged_mqa_logits(
 
     bytes = (
         batch_size * next_n * heads * index_dim +  # q
-        batch_size * max_blocks * block_size * (index_dim + 4) +  # used kv cache
+        batch_size * max_blocks * block_size * (index_dim + 4) +  # kv cache
         batch_size * next_n * heads * 4 +  # weights
         batch_size * 4 +  # context_lens
         batch_size * max_blocks * 4 +  # block_tables
