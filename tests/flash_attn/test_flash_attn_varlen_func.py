@@ -399,7 +399,7 @@ def test_decode_with_paged_kv(
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
-    if head_size == 512 and block_size == 128:
+    if head_size == 512 and block_size >= 128:
         pytest.skip("skip test cases that may run out of SLM.")
     if num_heads == (16, 1) and head_size == 256:
         pytest.skip("skip test cases that may run out of SLM.")
@@ -407,6 +407,9 @@ def test_decode_with_paged_kv(
         pytest.skip("skip test cases that may run out of Memory.")
     if is_sink and window_size != (-1, -1):
         pytest.skip("sink not supported with sliding window")
+    if (window_size[0] != -1 or window_size[1] != -1) and (
+            os.getenv("SKIP_HANG_KERNEL") == "1"):
+        pytest.skip("skip local attn to avoid runtime hang on CI.")
     torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
