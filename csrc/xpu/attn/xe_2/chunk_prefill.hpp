@@ -5,7 +5,6 @@
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
 #include "cutlass/util/packed_stride.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
-#include "cutlass/util/sycl_event_manager.hpp"
 #include <cute/tensor.hpp>
 #include <random>
 
@@ -218,11 +217,8 @@ struct KernelLauncher {
         syclex::sub_group_size<cute::intel::sg_size>, intelex::grf_size<256>};
     compat::experimental::launch_policy policy{
         sycl_grid, sycl_block, launch_props, kernel_props};
-    auto event =
-        compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
-            policy, queue, params);
-
-    EventManager::getInstance().addEvent(event);
+    compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
+        policy, queue, params);
   }
 };
 
