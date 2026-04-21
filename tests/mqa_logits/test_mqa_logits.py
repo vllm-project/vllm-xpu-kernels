@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import random
 
 import pytest
@@ -21,8 +22,10 @@ def kv_cache_cast_to_fp8(x: torch.Tensor) -> torch.Tensor:
     )
     x_fp8[:, :block_size * head_dim] = x_scaled.view(
         num_blocks, block_size * head_dim).view(dtype=torch.uint8)
-    x_fp8[:, block_size * head_dim:] = sf.view(num_blocks,
-                                               block_size).view(dtype=torch.uint8)
+    x_fp8[:, block_size * head_dim:] = sf.view(
+        num_blocks,
+        block_size,
+    ).view(dtype=torch.uint8)
     return x_fp8.view(num_blocks, block_size, num_heads, head_dim + 4)
 
 
@@ -80,10 +83,18 @@ def _pytorch_mqa_logits(
     q = q.to(torch.bfloat16)
 
     mask_lo = (
-        torch.arange(0, seq_len_kv, device=q.device)[None, :] >= cu_seqlen_ks[:, None]
+        torch.arange(
+            0,
+            seq_len_kv,
+            device=q.device,
+        )[None, :] >= cu_seqlen_ks[:, None]
     )
     mask_hi = (
-        torch.arange(0, seq_len_kv, device=q.device)[None, :] < cu_seqlen_ke[:, None]
+        torch.arange(
+            0,
+            seq_len_kv,
+            device=q.device,
+        )[None, :] < cu_seqlen_ke[:, None]
     )
     mask = mask_lo & mask_hi
 
@@ -106,9 +117,14 @@ def fp8_paged_mqa_logits_torch(
     num_blocks, block_size, _, _ = kv_cache.size()
 
     kv_cache = kv_cache.view(num_blocks, -1)
-    kv_cache_value = kv_cache[:, :block_size * dim].view(num_blocks, block_size, 1, dim)
-    kv_cache_scale = kv_cache[:, block_size * dim:].view(num_blocks, block_size, 1,
-                                                          4).view(torch.float32)
+    kv_cache_value = kv_cache[:, :block_size * dim].view(
+        num_blocks, block_size, 1, dim)
+    kv_cache_scale = kv_cache[:, block_size * dim:].view(
+        num_blocks,
+        block_size,
+        1,
+        4,
+    ).view(torch.float32)
 
     q = q.float()
     kv_cache_value = kv_cache_value.view(fp8_dtype).float() * kv_cache_scale
@@ -122,9 +138,13 @@ def fp8_paged_mqa_logits_torch(
     context_lens = context_lens.tolist()
     for i in range(batch_size):
         context_len = context_lens[i]
-        q_offsets = torch.arange(context_len - next_n, context_len, device=q.device)
-        weight_slice = weights[i * next_n:(i + 1) * next_n, :].transpose(0,
-                                                                          1).contiguous()
+        q_offsets = torch.arange(
+            context_len - next_n,
+            context_len,
+            device=q.device,
+        )
+        weight_slice = weights[i * next_n:(i + 1) * next_n, :].transpose(
+            0, 1).contiguous()
         for block_rk in range(cdiv(context_len, block_size)):
             block_idx = block_tables[i][block_rk]
             qx, kx = q[i], kv_cache_value[block_idx]
@@ -135,7 +155,8 @@ def fp8_paged_mqa_logits_torch(
                                                          q_offsets[:, None])
             s = torch.where(
                 mask[None, :, :],
-                (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(logits.dtype),
+                (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(
+                    logits.dtype),
                 float("-inf"),
             )
             s = torch.relu(s) * weight_slice[..., None]
@@ -143,8 +164,11 @@ def fp8_paged_mqa_logits_torch(
             logits[
                 i * next_n:(i + 1) * next_n,
                 block_rk * block_size:(block_rk + 1) * block_size,
-            ] = torch.where(k_offsets[None, :] <= q_offsets[:, None], s,
-                            float("-inf"))
+            ] = torch.where(
+                k_offsets[None, :] <= q_offsets[:, None],
+                s,
+                float("-inf"),
+            )
     return logits
 
 
@@ -232,7 +256,8 @@ def test_fp8_paged_mqa_logits_xpu(bs_nextn, device):
                                          device=device,
                                          dtype=torch.int32)
             max_block_len = (
-                (context_lens.max().item() + blocksize - 1) // blocksize * blocksize)
+                (context_lens.max().item() + blocksize - 1) // blocksize *
+                blocksize)
             block_tables = torch.zeros((batch_size, max_block_len),
                                        device=device,
                                        dtype=torch.int32)
@@ -273,13 +298,15 @@ def test_fp8_paged_mqa_logits_xpu(bs_nextn, device):
             neginf_mask = logits == float("-inf")
             assert torch.equal(neginf_mask, ref_neginf_mask)
 
-            positions = torch.arange(max_model_len,
-                                     device=device).unsqueeze(0).expand(
-                                         batch_size * next_n, -1)
-            row_indices = torch.arange(batch_size * next_n, device=device) // next_n
-            next_n_offset = torch.arange(batch_size * next_n, device=device) % next_n
-            mask = positions <= (context_lens[row_indices] - next_n +
-                                 next_n_offset).unsqueeze(1)
+            positions = torch.arange(
+                max_model_len, device=device).unsqueeze(0).expand(
+                    batch_size * next_n, -1)
+            row_indices = torch.arange(
+                batch_size * next_n, device=device) // next_n
+            next_n_offset = torch.arange(
+                batch_size * next_n, device=device) % next_n
+            mask = positions <= (
+                context_lens[row_indices] - next_n + next_n_offset).unsqueeze(1)
 
             logits = logits.masked_fill(~mask, 0)
             ref_logits = ref_logits.masked_fill(~mask, 0)

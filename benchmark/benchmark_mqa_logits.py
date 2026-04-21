@@ -39,8 +39,10 @@ def kv_cache_cast_to_fp8(x: torch.Tensor) -> torch.Tensor:
     )
     x_fp8[:, :block_size * head_dim] = x_scaled.view(
         num_blocks, block_size * head_dim).view(dtype=torch.uint8)
-    x_fp8[:, block_size * head_dim:] = sf.view(num_blocks,
-                                               block_size).view(dtype=torch.uint8)
+    x_fp8[:, block_size * head_dim:] = sf.view(
+        num_blocks,
+        block_size,
+    ).view(dtype=torch.uint8)
     return x_fp8.view(num_blocks, block_size, num_heads, head_dim + 4)
 
 
@@ -69,7 +71,12 @@ def benchmark_fp8_mqa_logits(
 
     if full_kv_range:
         ks = torch.zeros(seq_len, dtype=torch.int32, device="xpu")
-        ke = torch.full((seq_len, ), seq_len_kv, dtype=torch.int32, device="xpu")
+        ke = torch.full(
+            (seq_len, ),
+            seq_len_kv,
+            dtype=torch.int32,
+            device="xpu",
+        )
     else:
         ks = torch.zeros(seq_len, dtype=torch.int32, device="xpu")
         ke = torch.arange(seq_len, dtype=torch.int32, device="xpu") + (
@@ -79,8 +86,14 @@ def benchmark_fp8_mqa_logits(
     kv_fp8, kv_scales = per_custom_dims_cast_to_fp8(kv, (0, ), False)
 
     def run_once():
-        return torch.ops._xpu_C.fp8_mqa_logits(q_fp8, kv_fp8, kv_scales, weights, ks,
-                                               ke)
+        return torch.ops._xpu_C.fp8_mqa_logits(
+            q_fp8,
+            kv_fp8,
+            kv_scales,
+            weights,
+            ks,
+            ke,
+        )
 
     for _ in range(num_warmup_iters):
         run_once()
@@ -100,7 +113,8 @@ def benchmark_fp8_mqa_logits(
 
     print("=== fp8_mqa_logits benchmark ===")
     print(
-        f"shape: q=({seq_len},{num_heads},{head_dim}), kv=({seq_len_kv},{head_dim}), "
+        f"shape: q=({seq_len},{num_heads},{head_dim}), "
+        f"kv=({seq_len_kv},{head_dim}), "
         f"full_kv_range={full_kv_range}")
     print(f"avg latency: {avg_us:.3f} us")
     print(f"approx throughput: {tflops:.3f} TFLOPS")
@@ -182,14 +196,16 @@ def benchmark_fp8_paged_mqa_logits(
 
     print("=== fp8_paged_mqa_logits benchmark ===")
     print(
-        f"shape: q=({batch_size},{next_n},{heads},{index_dim}), context_len={context_len}, "
+        f"shape: q=({batch_size},{next_n},{heads},{index_dim}), "
+        f"context_len={context_len}, "
         f"block_size={block_size}, max_model_len={max_model_len}")
     print(f"avg latency: {avg_us:.3f} us")
     print(f"approx throughput: {tflops:.3f} TFLOPS")
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description="Benchmark MQA logits kernels on XPU.")
+    parser = ArgumentParser(
+        description="Benchmark MQA logits kernels on XPU.")
     parser.add_argument("--mode",
                         type=str,
                         choices=["non-paged", "paged"],
