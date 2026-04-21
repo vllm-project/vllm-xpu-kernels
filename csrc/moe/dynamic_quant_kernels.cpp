@@ -7,11 +7,45 @@
 #include "../utils.h"
 #include "../dispatch_utils.h"
 #include <sycl/ext/oneapi/bfloat16.hpp>
+#include <c10/core/DeviceGuard.h>
 
 using namespace sycl::ext::intel::esimd;
 using bf16 = sycl::ext::oneapi::bfloat16;
+using fp16 = sycl::half;
 
-void moe_swiglu_dynamic_quant(
+template <typename decl_tag> struct QuantMax;
+template <> struct QuantMax<int8_t> { static constexpr float value = 127.0f; };
+template <> struct QuantMax<uint8_t> { static constexpr float value = 448.0f; }; // e4m3fn max value
+
+// Vectorized software emulation for float32 -> float8_e4m3fn conversion
+template <int N>
+inline simd<uint8_t, N> fast_cvt_float_to_e4m3fn(simd<float, N> x) {
+    simd<uint32_t, N> bits = x.template bit_cast_view<uint32_t>();
+    simd<uint32_t, N> sign = (bits >> 24) & 0x80;
+    simd<uint32_t, N> abs_bits = bits & 0x7FFFFFFF;
+
+    // Rounding tie-to-even approximation (add half of the 20-bit shifted fractional part)
+    simd<uint32_t, N> rounded = abs_bits + 0x00080000;
+    
+    simd<int32_t, N> exp = (rounded >> 23) - 127 + 7;
+    simd<uint32_t, N> mantissa = (rounded & 0x7FFFFF) >> 20;
+
+    simd<uint8_t, N> res = 0;
+    
+    auto is_normal = (exp > 0) & (exp < 16);
+    auto is_overflow = exp >= 16;
+    auto is_underflow = exp <= 0;
+
+    res.merge(sign | (exp << 3) | mantissa, is_normal);
+    res.merge(sign | 0x7E, is_overflow); // 0x7E is 448.0 (Maximum e4m3fn value)
+    res.merge(sign, is_underflow);       // Fast fallback: flush subnormals to 0
+
+    return res;
+}
+
+
+template <typename T_in, typename T_out>
+void moe_swiglu_dynamic_quant_impl(
     torch::Tensor& scatter_tokens,
     torch::Tensor& smooth_scale,
     torch::Tensor& experts_token_count,
@@ -23,14 +57,15 @@ void moe_swiglu_dynamic_quant(
 
     auto& queue = vllm::xpu::vllmGetQueue();
 
-    auto scatter_tokens_ptr = reinterpret_cast<bf16*>(scatter_tokens.data_ptr<at::BFloat16>());
+    auto scatter_tokens_ptr = reinterpret_cast<T_in*>(scatter_tokens.data_ptr());
     auto smooth_scale_ptr = smooth_scale.data_ptr<float>();
     auto experts_token_count_ptr = experts_token_count.data_ptr<int32_t>();
     auto experts_token_start_ptr = experts_token_start.data_ptr<int32_t>();
-    auto quant_tokens_ptr = quant_tokens.data_ptr<int8_t>();
+    auto quant_tokens_ptr = reinterpret_cast<T_out*>(quant_tokens.data_ptr());
     auto per_token_scale_ptr = per_token_scale.data_ptr<float>();
 
     int hidden_size = scatter_tokens.size(1) / 2;
+    constexpr float quant_max = QuantMax<T_out>::value;
 
     auto launch_swiglu = [&](auto unroll_tag) {
         constexpr int UNROLL = decltype(unroll_tag)::value;
@@ -61,8 +96,8 @@ void moe_swiglu_dynamic_quant(
                 }
 
                 const int token_start = experts_token_start_ptr[expert_idx];
-                bf16* scatter_token_base = scatter_tokens_ptr + (token_start + token_idx) * 2 * hidden_size;
-                int8_t* output_base = quant_tokens_ptr + (token_start + token_idx) * hidden_size;
+                T_in* scatter_token_base = scatter_tokens_ptr + (token_start + token_idx) * 2 * hidden_size;
+                T_out* output_base = quant_tokens_ptr + (token_start + token_idx) * hidden_size;
 
                 float thread_max = 0.0f;
 
@@ -70,9 +105,9 @@ void moe_swiglu_dynamic_quant(
                 for (int bid = loc_id; bid < num_blocks; bid += wg_size) {
 #pragma unroll
                     for (int u = 0; u < UNROLL; ++u) {
-                        simd<bf16, CHUNK> x1 = block_load<bf16, CHUNK>(
+                        simd<T_in, CHUNK> x1 = block_load<T_in, CHUNK>(
                             scatter_token_base + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
-                        simd<bf16, CHUNK> x2 = block_load<bf16, CHUNK>(
+                        simd<T_in, CHUNK> x2 = block_load<T_in, CHUNK>(
                             scatter_token_base + hidden_size + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
                         simd<float, CHUNK> scale = block_load<float, CHUNK>(
                             smooth_scale_ptr + expert_idx * hidden_size + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
@@ -97,16 +132,17 @@ void moe_swiglu_dynamic_quant(
                 simd<float, 64> max_value_full = slm_block_load<float, 64>(0);
                 float max_value_final = hmax<float, float, 64>(max_value_full);
 
-                float this_token_scale = max_value_final / 127.0f;
-                float recip_scale = this_token_scale == 0.0f ? 1.0f : (1.0f / this_token_scale);
+                float raw_token_scale = max_value_final / quant_max;
+                float this_token_scale = raw_token_scale == 0.0f ? 1.0f : raw_token_scale;
+                float recip_scale = 1.0f / this_token_scale;
 
                 // Pass 2: Recompute, quantize, and store
                 for (int bid = loc_id; bid < num_blocks; bid += wg_size) {
 #pragma unroll
                     for (int u = 0; u < UNROLL; ++u) {
-                        simd<bf16, CHUNK> x1 = block_load<bf16, CHUNK>(
+                        simd<T_in, CHUNK> x1 = block_load<T_in, CHUNK>(
                             scatter_token_base + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
-                        simd<bf16, CHUNK> x2 = block_load<bf16, CHUNK>(
+                        simd<T_in, CHUNK> x2 = block_load<T_in, CHUNK>(
                             scatter_token_base + hidden_size + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
                         simd<float, CHUNK> scale = block_load<float, CHUNK>(
                             smooth_scale_ptr + expert_idx * hidden_size + bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
@@ -119,9 +155,14 @@ void moe_swiglu_dynamic_quant(
 
                         simd<float, CHUNK> scaled_swiglu_tokens = swiglu_tokens * scale;
 
-                        simd<int8_t, CHUNK> scaled_swiglu_tokens_quant_out = rnde<float>(scaled_swiglu_tokens * recip_scale);
+                        simd<T_out, CHUNK> scaled_swiglu_tokens_quant_out;
+                        if constexpr (std::is_same_v<T_out, int8_t>) {
+                            scaled_swiglu_tokens_quant_out = rnde<float>(scaled_swiglu_tokens * recip_scale);
+                        } else {
+                            scaled_swiglu_tokens_quant_out = fast_cvt_float_to_e4m3fn<CHUNK>(scaled_swiglu_tokens * recip_scale);
+                        }
 
-                        block_store<int8_t, CHUNK>(
+                        block_store<T_out, CHUNK>(
                             output_base + bid * BS + u * CHUNK, scaled_swiglu_tokens_quant_out, properties{cache_hint_L1<cache_hint::write_back>, cache_hint_L2<cache_hint::write_back>});
                     }
                 }
@@ -145,7 +186,8 @@ void moe_swiglu_dynamic_quant(
     }
 }
 
-void moe_scatter_dynamic_quant(
+template <typename T_in, typename T_out>
+void moe_scatter_dynamic_quant_impl(
     torch::Tensor& selected_experts,
     torch::Tensor& moe_weights,
     torch::Tensor& token_to_scatter_offset,
@@ -164,7 +206,9 @@ void moe_scatter_dynamic_quant(
     int n_tokens = selected_experts.size(0);
     int n_expert = experts_token_count.size(0);
     int hd_size = hidden_states.size(1);
-    int n_expert_total = n_expert + shared_experts_num;
+    int n_expert_total = n_expert;
+    
+    constexpr float quant_max = QuantMax<T_out>::value;
 
     auto selected_experts_ptr = selected_experts.data_ptr<int32_t>();
     auto ext_tokens_cnt_ptr = experts_token_count.data_ptr<int32_t>();
@@ -196,10 +240,10 @@ void moe_scatter_dynamic_quant(
         });
     });
 
-    auto hidden_states_ptr = reinterpret_cast<bf16*>(hidden_states.data_ptr<at::BFloat16>());
+    auto hidden_states_ptr = reinterpret_cast<T_in*>(hidden_states.data_ptr());
     auto smooth_scale_ptr = experts_smooth_scale.data_ptr<float>();
     auto moe_weights_ptr = moe_weights.data_ptr<float>();
-    auto scatter_tokens_ptr = scatter_tokens.data_ptr<int8_t>();
+    auto scatter_tokens_ptr = reinterpret_cast<T_out*>(scatter_tokens.data_ptr());
     auto scatter_per_token_scale_ptr = scatter_per_token_scale.data_ptr<float>();
     auto scatter_tokens_offset_ptr = scatter_tokens_offset.data_ptr<int32_t>();
 
@@ -241,7 +285,7 @@ void moe_scatter_dynamic_quant(
                 for (int hd_bid = loc_id; hd_bid < num_blocks; hd_bid += wg_size) {
 #pragma unroll
                     for (int u = 0; u < UNROLL; ++u) {
-                        simd<bf16, CHUNK> hidden = block_load<bf16, CHUNK>(
+                        simd<T_in, CHUNK> hidden = block_load<T_in, CHUNK>(
                             hidden_states_ptr + token_idx * hd_size + hd_bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
                         simd<float, CHUNK> scale = block_load<float, CHUNK>(
                             smooth_scale_ptr + expert_id * hd_size + hd_bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
@@ -259,21 +303,28 @@ void moe_scatter_dynamic_quant(
 
                 simd<float, 64> max_value_full = slm_block_load<float, 64>(0);
                 float max_value_final = hmax<float, float, 64>(max_value_full);
-                float this_token_scale = max_value_final / 127.0f;
-                float recip_scale = this_token_scale == 0.0f ? 1.0f : (1.0f / this_token_scale);
+                float raw_token_scale = max_value_final / quant_max;
+                float this_token_scale = raw_token_scale == 0.0f ? 1.0f : raw_token_scale;
+                float recip_scale = 1.0f / this_token_scale;
 
                 for (int hd_bid = loc_id; hd_bid < num_blocks; hd_bid += wg_size) {
 #pragma unroll
                     for (int u = 0; u < UNROLL; ++u) {
-                        simd<bf16, CHUNK> hidden = block_load<bf16, CHUNK>(
+                        simd<T_in, CHUNK> hidden = block_load<T_in, CHUNK>(
                             hidden_states_ptr + token_idx * hd_size + hd_bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
                         simd<float, CHUNK> scale = block_load<float, CHUNK>(
                             smooth_scale_ptr + expert_id * hd_size + hd_bid * BS + u * CHUNK, properties{cache_hint_L1<cache_hint::cached>, cache_hint_L2<cache_hint::cached>});
 
                         simd<float, CHUNK> smoothed = simd<float, CHUNK>(hidden) * scale * weight;
-                        simd<int8_t, CHUNK> quantized = rnde<float>(smoothed * recip_scale);
 
-                        block_store<int8_t, CHUNK>(
+                        simd<T_out, CHUNK> quantized;
+                        if constexpr (std::is_same_v<T_out, int8_t>) {
+                            quantized = rnde<float>(smoothed * recip_scale);
+                        } else {
+                            quantized = fast_cvt_float_to_e4m3fn<CHUNK>(smoothed * recip_scale);
+                        }
+
+                        block_store<T_out, CHUNK>(
                             scatter_tokens_ptr + target_idx * hd_size + hd_bid * BS + u * CHUNK, quantized, properties{cache_hint_L1<cache_hint::write_back>, cache_hint_L2<cache_hint::write_back>});
                     }
                 }
@@ -286,7 +337,6 @@ void moe_scatter_dynamic_quant(
         });
     };
 
-    // Dispatch based on hidden size divisibility mapping to max stable unroll bounds
     if (hd_size % 512 == 0) {
         launch_step3(std::integral_constant<int, 8>{});
     } else if (hd_size % 256 == 0) {
@@ -296,4 +346,74 @@ void moe_scatter_dynamic_quant(
     } else {
         launch_step3(std::integral_constant<int, 1>{});
     }
+}
+
+// Outer dispatch macros to select implementation
+#define DISPATCH_MOE_QUANT_IMPL(FUNC_NAME, ...) \
+    if (in_dtype == at::ScalarType::BFloat16 && out_dtype == at::ScalarType::Char) { \
+        FUNC_NAME<bf16, int8_t>(__VA_ARGS__); \
+    } else if (in_dtype == at::ScalarType::Half && out_dtype == at::ScalarType::Char) { \
+        FUNC_NAME<fp16, int8_t>(__VA_ARGS__); \
+    } else if (in_dtype == at::ScalarType::BFloat16 && out_dtype == at::ScalarType::Float8_e4m3fn) { \
+        FUNC_NAME<bf16, uint8_t>(__VA_ARGS__); \
+    } else if (in_dtype == at::ScalarType::Half && out_dtype == at::ScalarType::Float8_e4m3fn) { \
+        FUNC_NAME<fp16, uint8_t>(__VA_ARGS__); \
+    } else { \
+        TORCH_CHECK(false, "Unsupported in_dtype/out_dtype combination for dynamic quant."); \
+    }
+
+void moe_swiglu_dynamic_quant(
+    torch::Tensor& scatter_tokens,
+    torch::Tensor& smooth_scale,
+    torch::Tensor& experts_token_count,
+    torch::Tensor& experts_token_start,
+    torch::Tensor& quant_tokens,
+    torch::Tensor& per_token_scale,
+    int64_t total_experts_num,
+    int64_t max_token_num) {
+
+    at::DeviceGuard guard(scatter_tokens.device());
+
+    TORCH_CHECK(scatter_tokens.is_contiguous(), "scatter_tokens must be contiguous");
+    TORCH_CHECK(smooth_scale.is_contiguous(), "smooth_scale must be contiguous");
+    TORCH_CHECK(quant_tokens.is_contiguous(), "quant_tokens must be contiguous");
+
+    TORCH_CHECK(smooth_scale.scalar_type() == at::ScalarType::Float, "smooth_scale must be Float32");
+
+    auto in_dtype = scatter_tokens.scalar_type();
+    auto out_dtype = quant_tokens.scalar_type();
+
+    DISPATCH_MOE_QUANT_IMPL(moe_swiglu_dynamic_quant_impl, 
+                            scatter_tokens, smooth_scale, experts_token_count, 
+                            experts_token_start, quant_tokens, per_token_scale, 
+                            total_experts_num, max_token_num);
+}
+
+void moe_scatter_dynamic_quant(
+    torch::Tensor& selected_experts,
+    torch::Tensor& moe_weights,
+    torch::Tensor& token_to_scatter_offset,
+    torch::Tensor& experts_token_count,
+    torch::Tensor& experts_token_start,
+    torch::Tensor& hidden_states,
+    torch::Tensor& experts_smooth_scale,
+    torch::Tensor& scatter_tokens,
+    torch::Tensor& scatter_per_token_scale,
+    torch::Tensor& scatter_tokens_offset,
+    int64_t shared_experts_num) {
+
+    at::DeviceGuard guard(hidden_states.device());
+
+    TORCH_CHECK(hidden_states.is_contiguous() && scatter_tokens.is_contiguous(), "Tensors must be contiguous");
+    TORCH_CHECK(experts_smooth_scale.scalar_type() == at::ScalarType::Float, "experts_smooth_scale must be Float32");
+    TORCH_CHECK(experts_token_count.size(0) == experts_token_start.size(0), "Token count and start tensors must match in size");
+
+    auto in_dtype = hidden_states.scalar_type();
+    auto out_dtype = scatter_tokens.scalar_type();
+
+    DISPATCH_MOE_QUANT_IMPL(moe_scatter_dynamic_quant_impl,
+                            selected_experts, moe_weights, token_to_scatter_offset, 
+                            experts_token_count, experts_token_start, hidden_states, 
+                            experts_smooth_scale, scatter_tokens, scatter_per_token_scale, 
+                            scatter_tokens_offset, shared_experts_num);
 }
