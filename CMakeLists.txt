@@ -534,7 +534,6 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/torch_bindings.cpp"
       "csrc/xpu/lora/lora_shrink.cpp"
       "csrc/xpu/lora/lora_expand.cpp"
-      "csrc/xpu/mqa_logits/mqa_logits_interface.cpp"
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
       "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
       "csrc/xpu/rand/exponential.cpp"
@@ -545,6 +544,9 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
   endif()
   if(GDN_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
+  endif()
+  if(MQA_LOGITS_KERNELS_ENABLED)
+    list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/mqa_logits/mqa_logits_interface.cpp")
   endif()
   include_directories("/usr/include")
   # TODO: check if we need this flags list(APPEND VLLM_GPU_FLAGS

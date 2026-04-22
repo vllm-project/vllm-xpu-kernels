@@ -5,17 +5,13 @@
 
 #include <torch/all.h>
 
-#include "cutlass/kernel_hardware_info.h"
-#include "cutlass/device_kernel.h"
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/dispatch_policy.hpp"
 #include "cutlass/platform/platform.h"
 #include "cutlass/kernel_hardware_info.h"
 #include "cutlass/device_kernel.h"
 #include "cutlass/util/packed_stride.hpp"
-#include "cute/tensor.hpp"
 #include "cute/atom/copy_traits_xe_2d.hpp"
-#include "cute/algorithm/subgroup_algorithms.hpp"
 
 #include "cute/algorithm/functional.hpp"
 #include "cute/algorithm/gemm.hpp"
@@ -536,11 +532,6 @@ torch::Tensor fp8_mqa_logits_xe2(
   using MqaPolicy = w8a8_policy_m_32;
   constexpr int64_t kBlockHeads = get<0>(typename MqaPolicy::WGTile{});
   constexpr int64_t kBlockKV = get<1>(typename MqaPolicy::WGTile{});
-
-  cutlass::KernelHardwareInfo hw_info;
-  hw_info.sm_count =
-      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
-          hw_info.device_id);
 
   using Kernel = fp8_mqa_logits_kernel_t;
 

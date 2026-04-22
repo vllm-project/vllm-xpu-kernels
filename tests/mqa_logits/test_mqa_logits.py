@@ -255,10 +255,10 @@ def test_fp8_paged_mqa_logits_xpu(bs_nextn, device):
                                          (batch_size, ),
                                          device=device,
                                          dtype=torch.int32)
-            max_block_len = (
-                (context_lens.max().item() + blocksize - 1) // blocksize *
-                blocksize)
-            block_tables = torch.zeros((batch_size, max_block_len),
+            max_blocks = (
+                (context_lens.max().item() + blocksize - 1) // blocksize
+            )
+            block_tables = torch.zeros((batch_size, max_blocks),
                                        device=device,
                                        dtype=torch.int32)
 
