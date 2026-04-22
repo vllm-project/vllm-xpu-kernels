@@ -124,7 +124,8 @@ class reshape_and_cache_flash_kernel {
       const int head_size,
       const int block_size,
       const float* k_scale,
-      const float* v_scale)
+      const float* v_scale,
+      const int kv_scale_stride)
       : key_(key),
         value_(value),
         key_cache_(key_cache),
@@ -139,7 +140,8 @@ class reshape_and_cache_flash_kernel {
         head_size_(head_size),
         block_size_(block_size),
         k_scale_(k_scale),
-        v_scale_(v_scale) {}
+        v_scale_(v_scale),
+        kv_scale_stride_(kv_scale_stride) {}
 
   void operator()(const sycl::nd_item<1>& item) const {
     int64_t group_idx = item.get_group(0);
@@ -162,14 +164,45 @@ class reshape_and_cache_flash_kernel {
     cache_t* __restrict__ value_dst =
         value_cache_ + block_idx * block_stride_ + block_offset * page_stride_;
 
-    float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale_;
-    float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale_;
+    const bool is_contiguous_heads = (head_stride_ == head_size_);
+    // constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
 
-    fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
-    fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
-    fp8::scaled_convert_vec(key_src, key_dst, n, local_idx, local_range, k_op);
-    fp8::scaled_convert_vec(
-        value_src, value_dst, n, local_idx, local_range, v_op);
+    if (is_contiguous_heads && kv_scale_stride_ == 0) {
+      float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale_;
+      float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale_;
+
+      fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+      fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+      fp8::scaled_convert_vec(key_src, key_dst, n, local_idx, local_range, k_op);
+      fp8::scaled_convert_vec(
+          value_src, value_dst, n, local_idx, local_range, v_op);
+    } else {
+      const int lane = local_idx & 31;
+      const int warp_id = local_idx >> 5;
+      const int warps_per_block = local_range >> 5;
+
+      for (int head = warp_id; head < num_heads_; head += warps_per_block) {
+        const scalar_t* __restrict__ k_src_h = key_src + head * head_size_;
+        const scalar_t* __restrict__ v_src_h = value_src + head * head_size_;
+
+        cache_t* __restrict__ k_dst_h =
+            key_dst + static_cast<int64_t>(head) * head_stride_;
+        cache_t* __restrict__ v_dst_h =
+            value_dst + static_cast<int64_t>(head) * head_stride_;
+
+        float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto)
+                                ? 0.f
+                                : k_scale_[head * kv_scale_stride_];
+        float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto)
+                                ? 0.f
+                                : v_scale_[head * kv_scale_stride_];
+
+        fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+        fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+        fp8::scaled_convert_vec(k_src_h, k_dst_h, head_size_, lane, 32, k_op);
+        fp8::scaled_convert_vec(v_src_h, v_dst_h, head_size_, lane, 32, v_op);
+      }
+    }
   }
 
  private:
@@ -190,6 +223,7 @@ class reshape_and_cache_flash_kernel {
   const int block_size_;
   const float* k_scale_;
   const float* v_scale_;
+  const int kv_scale_stride_;
 };
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
@@ -782,7 +816,8 @@ void reshape_and_cache(
             head_size,                                                 \
             block_size,                                                \
             reinterpret_cast<const float*>(k_scale.data_ptr()),        \
-            reinterpret_cast<const float*>(v_scale.data_ptr())));      \
+            reinterpret_cast<const float*>(v_scale.data_ptr()),        \
+            kv_scale_stride));                                         \
   });
 
 void reshape_and_cache_flash(
@@ -806,8 +841,19 @@ void reshape_and_cache_flash(
   int64_t head_stride = key_cache.stride(2);
   TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
+  TORCH_CHECK(k_scale.sizes() == v_scale.sizes(),
+              "k_scale and v_scale must have the same shape");
+  TORCH_CHECK(k_scale.numel() == 1 || k_scale.numel() == num_heads,
+              "k_scale and v_scale must be of shape [1] or [num_heads]");
+  int kv_scale_stride = (k_scale.numel() > 1) ? 1 : 0;
+
   sycl::range<1> grid(num_tokens);
-  sycl::range<1> block(std::min(num_heads * head_size, 1024));
+  // The kernel's non-contiguous path uses warp-style logic that assumes the
+  // local size is a multiple of 32.
+  const int n = num_heads * head_size;
+  int block_threads = std::min(((n + 31) / 32) * 32, 1024);
+  block_threads = std::max(block_threads, 32);
+  sycl::range<1> block(block_threads);
   const at::DeviceGuard device_guard(key.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 

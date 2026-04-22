@@ -365,6 +365,97 @@ def test_reshape_and_cache_flash(
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
 
 
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE_ALL)
+@torch.inference_mode()
+def test_reshape_and_cache_flash_hnd_head_stride(
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+) -> None:
+    """HND regression: handle non-contiguous heads (head_stride != head_size)."""
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
+
+    random.seed(seed)
+    torch.manual_seed(seed)
+
+    num_slots = block_size * num_blocks
+    slot_mapping_lst = random.sample(range(num_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst,
+                                dtype=torch.long,
+                                device=device)
+
+    qkv = torch.randn(num_tokens,
+                      3,
+                      num_heads,
+                      head_size,
+                      dtype=dtype,
+                      device=device)
+    _, key, value = qkv.unbind(dim=1)
+
+    # Allocate padded caches so the head dimension is not contiguous.
+    # Shape expected by reshape_and_cache_flash: [num_blocks, block_size, num_heads, head_size]
+    pad = 8
+    key_base = torch.empty((num_blocks, block_size, num_heads, head_size + pad),
+                           dtype=dtype,
+                           device=device)
+    value_base = torch.empty((num_blocks, block_size, num_heads, head_size + pad),
+                             dtype=dtype,
+                             device=device)
+    key_base.uniform_(-1.0, 1.0)
+    value_base.uniform_(-1.0, 1.0)
+    key_cache = key_base[..., :head_size]
+    value_cache = value_base[..., :head_size]
+
+    # Sanity: this is the point of the test.
+    assert key_cache.stride(2) != head_size
+    assert value_cache.stride(2) != head_size
+
+    kv_cache_dtype = "auto"
+    # Keep per-tensor scales to ensure we take the HND path because of strides,
+    # not because kv_scale_stride != 0.
+    k_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    key_cache_ref = key_cache.clone()
+    value_cache_ref = value_cache.clone()
+    block_indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    block_offsets = slot_mapping % block_size
+    for i in range(num_tokens):
+        b = int(block_indices[i].item())
+        o = int(block_offsets[i].item())
+        key_cache_ref[b, o, :, :] = key[i]
+        value_cache_ref[b, o, :, :] = value[i]
+
+    reshape_and_cache_flash(
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+
+    torch.testing.assert_close(key_cache.contiguous(), key_cache_ref.contiguous())
+    torch.testing.assert_close(value_cache.contiguous(),
+                               value_cache_ref.contiguous())
+
 def _create_mla_cache(
     num_blocks: int,
     block_size: int,
