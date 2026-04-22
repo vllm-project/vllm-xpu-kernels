@@ -10,9 +10,9 @@ class InitExpertMap {
  public:
   InitExpertMap(
       int* expert_map,
-      const int num_experts,
-      const int ep_rank,
-      const int ep_size)
+      const size_t num_experts,
+      const size_t ep_rank,
+      const size_t ep_size)
       : expert_map(expert_map),
         num_experts(num_experts),
         ep_rank(ep_rank),
@@ -22,8 +22,8 @@ class InitExpertMap {
   static constexpr int WARP_SIZE = 32;
 
   static inline sycl::nd_range<1>
-  get_nd_range(const int num_experts, const int ep_size) {
-    int group_nums =
+  get_nd_range(const size_t num_experts, const size_t ep_size) {
+    size_t group_nums =
         (ep_size * num_experts + GroupWorkItem - 1) / GroupWorkItem;
     sycl::range<1> local(GroupWorkItem);
     sycl::range<1> group(group_nums);
@@ -54,16 +54,16 @@ class InitExpertMap {
 
  private:
   int* expert_map;
-  const int num_experts;
-  const int ep_rank;
-  const int ep_size;
+  const size_t num_experts;
+  const size_t ep_rank;
+  const size_t ep_size;
 };
 
 void InitExpertMapLauncher(
     int* expert_map,
-    const int num_experts,
-    const int ep_rank,
-    const int ep_size,
+    const size_t num_experts,
+    const size_t ep_rank,
+    const size_t ep_size,
     sycl::queue& queue) {
   queue.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(

@@ -15,7 +15,7 @@ void fused_moe_prologue_impl(
     int64_t ep_rank,
     int64_t ep_size,
     int64_t num_experts_on_rank) {
-  int experts_per_token = token_selected_experts.size(1);
+  size_t experts_per_token = token_selected_experts.size(1);
   int64_t num_rows = input.size(0);
 
   assert(ep_rank >= 0 && ep_rank < ep_size);

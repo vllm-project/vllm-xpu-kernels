@@ -23,12 +23,12 @@ class reshape_and_cache_kernel {
       cache_t* __restrict__ key_cache,
       cache_t* __restrict__ value_cache,
       const int64_t* __restrict__ slot_mapping,
-      int key_stride,
-      int value_stride,
-      int num_heads,
-      int head_size,
-      int block_size,
-      int x,
+      size_t key_stride,
+      size_t value_stride,
+      size_t num_heads,
+      size_t head_size,
+      size_t block_size,
+      size_t x,
       const float* k_scale,
       const float* v_scale)
       : key_(key),
@@ -46,29 +46,29 @@ class reshape_and_cache_kernel {
         v_scale_(v_scale) {}
 
   void operator()(const sycl::nd_item<1>& item) const {
-    int group_idx = item.get_group(0);
-    int local_idx = item.get_local_id(0);
-    int local_range = item.get_local_range(0);
+    size_t group_idx = item.get_group(0);
+    size_t local_idx = item.get_local_id(0);
+    size_t local_range = item.get_local_range(0);
     int slot_idx = slot_mapping_[group_idx];
     if (slot_idx < 0) return;
 
     const int block_idx = slot_idx / block_size_;
     const int block_offset = slot_idx % block_size_;
-    const int n = num_heads_ * head_size_;
-    for (int i = local_idx; i < n; i += local_range) {
-      const int src_key_idx = group_idx * key_stride_ + i;
-      const int src_value_idx = group_idx * value_stride_ + i;
-      const int head_idx = i / head_size_;
-      const int head_offset = i % head_size_;
-      const int x_idx = head_offset / x_;
-      const int x_offset = head_offset % x_;
-      const int dst_key_idx =
+    const size_t n = num_heads_ * head_size_;
+    for (size_t i = local_idx; i < n; i += local_range) {
+      const size_t src_key_idx = group_idx * key_stride_ + i;
+      const size_t src_value_idx = group_idx * value_stride_ + i;
+      const size_t head_idx = i / head_size_;
+      const size_t head_offset = i % head_size_;
+      const size_t x_idx = head_offset / x_;
+      const size_t x_offset = head_offset % x_;
+      const size_t dst_key_idx =
           block_idx * num_heads_ * (head_size_ / x_) * block_size_ * x_ +
           head_idx * (head_size_ / x_) * block_size_ * x_ +
           x_idx * block_size_ * x_ + block_offset * x_ + x_offset;
-      const int dst_value_idx = block_idx * n * block_size_ +
-                                head_idx * head_size_ * block_size_ +
-                                head_offset * block_size_ + block_offset;
+      const size_t dst_value_idx = block_idx * n * block_size_ +
+                                   head_idx * head_size_ * block_size_ +
+                                   head_offset * block_size_ + block_offset;
       scalar_t tgt_key = key_[src_key_idx];
       scalar_t tgt_value = value_[src_value_idx];
       if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
@@ -96,12 +96,12 @@ class reshape_and_cache_kernel {
   cache_t* __restrict__ value_cache_;   // [num_blocks, num_heads, head_size,
                                         // block_size]
   const int64_t* __restrict__ slot_mapping_;  // [num_tokens]
-  const int key_stride_;
-  const int value_stride_;
-  const int num_heads_;
-  const int head_size_;
-  const int block_size_;
-  const int x_;
+  const size_t key_stride_;
+  const size_t value_stride_;
+  const size_t num_heads_;
+  const size_t head_size_;
+  const size_t block_size_;
+  const size_t x_;
   const float* k_scale_;
   const float* v_scale_;
 };
@@ -120,9 +120,9 @@ class reshape_and_cache_flash_kernel {
       const int64_t head_stride,
       const int64_t key_stride,
       const int64_t value_stride,
-      const int num_heads,
-      const int head_size,
-      const int block_size,
+      const size_t num_heads,
+      const size_t head_size,
+      const size_t block_size,
       const float* k_scale,
       const float* v_scale)
       : key_(key),
@@ -144,13 +144,13 @@ class reshape_and_cache_flash_kernel {
   void operator()(const sycl::nd_item<1>& item) const {
     int64_t group_idx = item.get_group(0);
     int64_t local_idx = item.get_local_id(0);
-    int local_range = item.get_local_range(0);
+    size_t local_range = item.get_local_range(0);
     int64_t slot_idx = slot_mapping_[group_idx];
     if (slot_idx < 0) return;
 
     const int64_t block_idx = slot_idx / block_size_;
     const int64_t block_offset = slot_idx % block_size_;
-    const int n = num_heads_ * head_size_;
+    const size_t n = num_heads_ * head_size_;
 
     // pointers to the beginning of the source row for this token.
     const scalar_t* __restrict__ key_src = key_ + group_idx * key_stride_;
@@ -185,9 +185,9 @@ class reshape_and_cache_flash_kernel {
   const int64_t head_stride_;
   const int64_t key_stride_;
   const int64_t value_stride_;
-  const int num_heads_;
-  const int head_size_;
-  const int block_size_;
+  const size_t num_heads_;
+  const size_t head_size_;
+  const size_t block_size_;
   const float* k_scale_;
   const float* v_scale_;
 };
@@ -200,13 +200,13 @@ class concat_and_cache_mla_kernel {
       const scalar_t* __restrict__ k_pe,
       cache_t* __restrict__ kv_cache,
       const int64_t* __restrict__ slot_mapping,
-      const int block_stride,
-      const int entry_stride,
-      const int kv_c_stride,
-      const int k_pe_stride,
-      const int kv_lora_rank,
-      const int pe_dim,
-      const int block_size,
+      const size_t block_stride,
+      const size_t entry_stride,
+      const size_t kv_c_stride,
+      const size_t k_pe_stride,
+      const size_t kv_lora_rank,
+      const size_t pe_dim,
+      const size_t block_size,
       const float* scale)
       : kv_c(kv_c),
         k_pe(k_pe),
@@ -233,14 +233,14 @@ class concat_and_cache_mla_kernel {
 
     auto copy = [&](const scalar_t* __restrict__ src,
                     cache_t* dst,
-                    int src_stride,
-                    int dst_stride,
-                    int size,
-                    int offset) {
-      for (int i = item_id.get_local_id(0); i < size;
+                    size_t src_stride,
+                    size_t dst_stride,
+                    size_t size,
+                    size_t offset) {
+      for (size_t i = item_id.get_local_id(0); i < size;
            i += item_id.get_local_range(0)) {
-        const int src_idx = token_idx * src_stride + i;
-        const int dst_idx =
+        const size_t src_idx = token_idx * src_stride + i;
+        const size_t dst_idx =
             block_idx * block_stride + block_offset * entry_stride + i + offset;
         if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
           dst[dst_idx] = static_cast<at::Float8_e4m3fn>(src[src_idx] * *scale);
@@ -262,13 +262,13 @@ class concat_and_cache_mla_kernel {
   cache_t* __restrict__ kv_cache;  // [num_blocks, block_size, (kv_lora_rank +
                                    // pe_dim)]
   const int64_t* __restrict__ slot_mapping;  // [num_tokens]
-  const int block_stride;                    //
-  const int entry_stride;                    //
-  const int kv_c_stride;                     //
-  const int k_pe_stride;                     //
-  const int kv_lora_rank;                    //
-  const int pe_dim;                          //
-  const int block_size;                      //
+  const size_t block_stride;                 //
+  const size_t entry_stride;                 //
+  const size_t kv_c_stride;                  //
+  const size_t k_pe_stride;                  //
+  const size_t kv_lora_rank;                 //
+  const size_t pe_dim;                       //
+  const size_t block_size;                   //
   const float* scale;                        //
 };
 
@@ -392,10 +392,10 @@ class indexer_k_quant_and_cache_kernel {
       const scalar_t* __restrict__ k,
       cache_t* __restrict__ kv_cache,
       const int64_t* __restrict__ slot_mapping,
-      const int head_dim,
-      const int quant_block_size,
-      const int cache_block_size,
-      const int cache_stride,
+      const size_t head_dim,
+      const size_t quant_block_size,
+      const size_t cache_block_size,
+      const size_t cache_stride,
       bool use_ue8m0)
       : k_(k),
         kv_cache_(kv_cache),
@@ -481,14 +481,14 @@ class cp_gather_indexer_k_quant_cache_kernel {
       const int32_t* __restrict__ block_table,
       const int32_t* __restrict__ cu_seq_lens,
       sycl::local_accessor<int, 1> batch_idx_acc,
-      const int batch_size,
+      const size_t batch_size,
       const int64_t token_stride,
       const int64_t head_dim,
       const int64_t block_stride,
       const int64_t cache_block_size,
-      const int num_blocks,
-      const int num_tokens,
-      const int quant_block_size)
+      const size_t num_blocks,
+      const size_t num_tokens,
+      const size_t quant_block_size)
       : kv_cache_(kv_cache),
         dst_k_(dst_k),
         dst_scale_(dst_scale),
@@ -509,17 +509,14 @@ class cp_gather_indexer_k_quant_cache_kernel {
     // This matches CUDA's float4 vectorised load/store of fp8 bytes.
     constexpr int VEC_SIZE = 16;
 
-    const int local_x = static_cast<int>(item.get_local_id(0));
-    const int local_y = static_cast<int>(item.get_local_id(1));
-    const int local_range_x =
-        static_cast<int>(item.get_local_range(0));  // BLOCK_Y_SIZE
-    const int local_range_y = static_cast<int>(item.get_local_range(1));  // 8
+    const size_t local_x = item.get_local_id(0);
+    const size_t local_y = item.get_local_id(1);
+    const size_t local_range_x = item.get_local_range(0);  // BLOCK_Y_SIZE
+    const size_t local_range_y = item.get_local_range(1);  // 8
 
-    const int token_idx =
-        static_cast<int>(item.get_group(0) * local_range_x + local_x);
-    const int head_idx =
-        static_cast<int>(item.get_group(1) * local_range_y + local_y) *
-        VEC_SIZE;
+    const size_t token_idx = item.get_group(0) * local_range_x + local_x;
+    const size_t head_idx =
+        (item.get_group(1) * local_range_y + local_y) * VEC_SIZE;
 
     // Initialise SLM to 0 before the search to avoid stale values
     // from the previous work-group that ran on the same EU.
@@ -527,9 +524,10 @@ class cp_gather_indexer_k_quant_cache_kernel {
       batch_idx_acc_[local_x] = 0;
     }
 
-    for (int iter = 0; iter < (batch_size_ + local_range_y - 1) / local_range_y;
+    for (size_t iter = 0;
+         iter < (batch_size_ + local_range_y - 1) / local_range_y;
          ++iter) {
-      int tid = iter * local_range_y + local_y;
+      size_t tid = iter * local_range_y + local_y;
       if (tid < batch_size_) {
         const int seq_start = cu_seq_lens_[tid];
         const int seq_end = cu_seq_lens_[tid + 1];
@@ -543,7 +541,8 @@ class cp_gather_indexer_k_quant_cache_kernel {
     item.barrier(sycl::access::fence_space::local_space);
 
     // Exit threads after barrier to make sure nothing to write.
-    if (head_idx >= static_cast<int>(head_dim_) || token_idx >= num_tokens_) {
+    if (head_idx >= static_cast<size_t>(head_dim_) ||
+        token_idx >= num_tokens_) {
       return;
     }
 
@@ -567,15 +566,15 @@ class cp_gather_indexer_k_quant_cache_kernel {
     const bool src_aligned = (src_inblock_offset % VEC_SIZE) == 0;
     const bool dst_aligned = (dst_inblock_offset % VEC_SIZE) == 0;
     const bool full_chunk =
-        (head_idx + VEC_SIZE <= static_cast<int>(head_dim_));
+        (head_idx + VEC_SIZE <= static_cast<size_t>(head_dim_));
     if (full_chunk && src_aligned && dst_aligned) {
       *reinterpret_cast<sycl::float4*>(dst_k_ + dst_inblock_offset) =
           *reinterpret_cast<const sycl::float4*>(
               kv_cache_ + src_inblock_offset);
     } else {
-      int remains =
-          full_chunk ? VEC_SIZE : static_cast<int>(head_dim_) - head_idx;
-      for (int i = 0; i < remains; i++) {
+      size_t remains =
+          full_chunk ? VEC_SIZE : static_cast<size_t>(head_dim_) - head_idx;
+      for (size_t i = 0; i < remains; i++) {
         dst_k_[dst_inblock_offset + i] = kv_cache_[src_inblock_offset + i];
       }
     }
@@ -599,14 +598,14 @@ class cp_gather_indexer_k_quant_cache_kernel {
   const int32_t* block_table_;
   const int32_t* cu_seq_lens_;
   sycl::local_accessor<int, 1> batch_idx_acc_;
-  int batch_size_;
+  size_t batch_size_;
   int64_t token_stride_;
   int64_t head_dim_;
   int64_t block_stride_;
   int64_t cache_block_size_;
-  int num_blocks_;
-  int num_tokens_;
-  int quant_block_size_;
+  size_t num_blocks_;
+  size_t num_tokens_;
+  size_t quant_block_size_;
 };
 
 // grid is launched with dimensions (num_tokens)
@@ -742,17 +741,17 @@ void reshape_and_cache(
     const std::string& kv_cache_dtype,
     torch::Tensor& k_scale,
     torch::Tensor& v_scale) {
-  int num_tokens = slot_mapping.size(0);
-  int num_heads = key.size(1);
-  int head_size = key.size(2);
-  int block_size = key_cache.size(3);
-  int x = key_cache.size(4);
+  size_t num_tokens = slot_mapping.size(0);
+  size_t num_heads = key.size(1);
+  size_t head_size = key.size(2);
+  size_t block_size = key_cache.size(3);
+  size_t x = key_cache.size(4);
 
-  int key_stride = key.stride(0);
-  int value_stride = value.stride(0);
+  size_t key_stride = key.stride(0);
+  size_t value_stride = value.stride(0);
 
   sycl::range<1> grid(num_tokens);
-  sycl::range<1> block(std::min(num_heads * head_size, 1024));
+  sycl::range<1> block(std::min(num_heads * head_size, size_t{1024}));
   const at::DeviceGuard device_guard(key.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 
@@ -794,10 +793,10 @@ void reshape_and_cache_flash(
     const std::string& kv_cache_dtype,
     torch::Tensor& k_scale,
     torch::Tensor& v_scale) {
-  int num_tokens = slot_mapping.size(0);
-  int num_heads = key.size(1);
-  int head_size = key.size(2);
-  int block_size = key_cache.size(1);
+  size_t num_tokens = slot_mapping.size(0);
+  size_t num_heads = key.size(1);
+  size_t head_size = key.size(2);
+  size_t block_size = key_cache.size(1);
 
   int64_t key_stride = key.stride(0);
   int64_t value_stride = value.stride(0);
@@ -807,7 +806,7 @@ void reshape_and_cache_flash(
   TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
 
   sycl::range<1> grid(num_tokens);
-  sycl::range<1> block(std::min(num_heads * head_size, 1024));
+  sycl::range<1> block(std::min(num_heads * head_size, size_t{1024}));
   const at::DeviceGuard device_guard(key.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 
@@ -855,20 +854,20 @@ void concat_and_cache_mla(
   // before padding.
   // For compatibility with both cases, we use slot_mapping.size(0) as the
   // number of tokens.
-  int num_tokens = slot_mapping.size(0);
-  int kv_lora_rank = kv_c.size(1);
-  int pe_dim = k_pe.size(1);
-  int block_size = kv_cache.size(1);
+  size_t num_tokens = slot_mapping.size(0);
+  size_t kv_lora_rank = kv_c.size(1);
+  size_t pe_dim = k_pe.size(1);
+  size_t block_size = kv_cache.size(1);
 
   TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
 
-  int kv_c_stride = kv_c.stride(0);
-  int k_pe_stride = k_pe.stride(0);
-  int block_stride = kv_cache.stride(0);
-  int entry_stride = kv_cache.stride(1);
+  size_t kv_c_stride = kv_c.stride(0);
+  size_t k_pe_stride = k_pe.stride(0);
+  size_t block_stride = kv_cache.stride(0);
+  size_t entry_stride = kv_cache.stride(1);
 
   sycl::range<1> grid(num_tokens);
-  sycl::range<1> block(std::min(kv_lora_rank, 1024));
+  sycl::range<1> block(std::min(kv_lora_rank, size_t{1024}));
   const at::DeviceGuard device_guard(kv_c.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 
@@ -1379,10 +1378,10 @@ void indexer_k_quant_and_cache(
     torch::Tensor& slot_mapping,  // [num_tokens]
     int64_t quant_block_size,     // quantization block size
     const std::string& scale_fmt) {
-  int num_tokens = k.size(0);
-  int head_dim = k.size(1);
-  int cache_block_size = kv_cache.size(1);
-  int cache_stride = kv_cache.size(2);
+  size_t num_tokens = k.size(0);
+  size_t head_dim = k.size(1);
+  size_t cache_block_size = kv_cache.size(1);
+  size_t cache_stride = kv_cache.size(2);
   bool use_ue8m0 = scale_fmt == "ue8m0";
 
   TORCH_CHECK(
@@ -1434,7 +1433,7 @@ void indexer_k_quant_and_cache(
               head_dim,                                                 \
               kv_cache.stride(0),                                       \
               kv_cache.size(1),                                         \
-              static_cast<int>(block_table.size(1)),                    \
+              static_cast<size_t>(block_table.size(1)),                 \
               num_tokens,                                               \
               quant_block_size));                                       \
     });                                                                 \
@@ -1447,10 +1446,10 @@ void cp_gather_indexer_k_quant_cache(
     const torch::Tensor& block_table,  // [batch_size, num_blocks]
     const torch::Tensor& cu_seq_lens   // [batch_size + 1]
 ) {
-  int batch_size = static_cast<int>(block_table.size(0));
-  int num_tokens = static_cast<int>(dst_k.size(0));
+  size_t batch_size = block_table.size(0);
+  size_t num_tokens = dst_k.size(0);
   int64_t head_dim = dst_k.size(1);
-  int quant_block_size = static_cast<int>(head_dim * 4 / dst_scale.size(1));
+  size_t quant_block_size = head_dim * 4 / dst_scale.size(1);
 
   TORCH_CHECK(
       kv_cache.device() == dst_k.device(),

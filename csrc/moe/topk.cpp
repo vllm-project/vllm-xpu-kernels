@@ -33,7 +33,7 @@ class MoeSoftmax {
       const InputdType* input,
       const bool* finished,
       float* output,
-      const int num_cols)
+      const size_t num_cols)
       : slm(slm),
         input(input),
         finished(finished),
@@ -52,7 +52,7 @@ class MoeSoftmax {
     auto local_id_x = item.get_local_id(0);
     auto group_id_x = item.get_group(0);
 
-    const int thread_row_offset = group_id_x * num_cols;
+    const size_t thread_row_offset = group_id_x * num_cols;
 
     float threadData(INFINITY * -1);
 
@@ -61,8 +61,8 @@ class MoeSoftmax {
       return;
     }
 
-    for (int ii = local_id_x; ii < num_cols; ii += TPB) {
-      const int idx = thread_row_offset + ii;
+    for (size_t ii = local_id_x; ii < num_cols; ii += TPB) {
+      const size_t idx = thread_row_offset + ii;
       threadData = MAX(static_cast<float>(input[idx]), threadData);
     }
 
@@ -75,8 +75,8 @@ class MoeSoftmax {
 
     threadData = 0;
 
-    for (int ii = local_id_x; ii < num_cols; ii += TPB) {
-      const int idx = thread_row_offset + ii;
+    for (size_t ii = local_id_x; ii < num_cols; ii += TPB) {
+      const size_t idx = thread_row_offset + ii;
       threadData += sycl::exp((static_cast<float>(input[idx]) - *float_max));
     }
 
@@ -87,8 +87,8 @@ class MoeSoftmax {
     }
     item.barrier(sycl::access::fence_space::local_space);
 
-    for (int ii = local_id_x; ii < num_cols; ii += TPB) {
-      const int idx = thread_row_offset + ii;
+    for (size_t ii = local_id_x; ii < num_cols; ii += TPB) {
+      const size_t idx = thread_row_offset + ii;
       const float val =
           sycl::exp((static_cast<float>(input[idx]) - (*float_max))) *
           (*normalizing_factor);
@@ -101,7 +101,7 @@ class MoeSoftmax {
   const InputdType* input;
   const bool* finished;
   float* output;
-  const int num_cols;
+  const size_t num_cols;
 };
 
 template <int TPB, typename InputdType>
@@ -111,7 +111,7 @@ class MoeSigmoid {
       const InputdType* input,
       const bool* finished,
       float* output,
-      const int num_cols)
+      const size_t num_cols)
       : input(input), finished(finished), output(output), num_cols(num_cols) {}
 
   void operator()
@@ -119,15 +119,15 @@ class MoeSigmoid {
     auto local_id_x = item.get_local_id(0);
     auto group_id_x = item.get_group(0);
 
-    const int thread_row_offset = group_id_x * num_cols;
+    const size_t thread_row_offset = group_id_x * num_cols;
 
     // Don't touch finished rows.
     if ((finished != nullptr) && finished[group_id_x]) {
       return;
     }
 
-    for (int ii = local_id_x; ii < num_cols; ii += TPB) {
-      const int idx = thread_row_offset + ii;
+    for (size_t ii = local_id_x; ii < num_cols; ii += TPB) {
+      const size_t idx = thread_row_offset + ii;
       output[idx] = sigmoid_typed(input[idx]);
     }
   }
@@ -136,7 +136,7 @@ class MoeSigmoid {
   const InputdType* input;
   const bool* finished;
   float* output;
-  const int num_cols;
+  const size_t num_cols;
 };
 
 template <int TPB, typename IndType>
@@ -148,10 +148,10 @@ class MoeTopK {
       float* output,
       IndType* indices,
       int* source_rows,
-      const int num_experts,
+      const size_t num_experts,
       const int k,
-      const int start_expert,
-      const int end_expert,
+      const size_t start_expert,
+      const size_t end_expert,
       const bool renormalize,
       const float* bias)
       : inputs_after_softmax(inputs_after_softmax),
@@ -175,20 +175,20 @@ class MoeTopK {
     auto local_id_x = item.get_local_id(0);
     auto group_id_x = item.get_group(0);
 
-    const int num_rows = item.get_group_range(0);
-    const int block_row = group_id_x;
+    const size_t num_rows = item.get_group_range(0);
+    const size_t block_row = group_id_x;
 
     const bool row_is_active = finished ? !finished[block_row] : true;
-    const int thread_read_offset = group_id_x * num_experts;
+    const size_t thread_read_offset = group_id_x * num_experts;
     float sum_val = 0.0f;
-    for (int k_idx = 0; k_idx < k; ++k_idx) {
+    for (size_t k_idx = 0; k_idx < k; ++k_idx) {
       kIdx = 0;
       kVal = -1.f;  // This is OK because inputs are probabilities
 
       int inpIdx;
       float inpVal;
-      for (int expert = local_id_x; expert < num_experts; expert += TPB) {
-        const int idx = thread_read_offset + expert;
+      for (size_t expert = local_id_x; expert < num_experts; expert += TPB) {
+        const size_t idx = thread_read_offset + expert;
         inpIdx = expert;
         inpVal =
             inputs_after_softmax[idx] + (bias != nullptr ? bias[expert] : 0.0f);
@@ -221,7 +221,7 @@ class MoeTopK {
             expert >= start_expert && expert < end_expert;
         const bool should_process_row = row_is_active && node_uses_expert;
 
-        const int idx = k * block_row + k_idx;
+        const size_t idx = k * block_row + k_idx;
         output[idx] = inputs_after_softmax[thread_read_offset + expert];
         indices[idx] =
             should_process_row ? (expert - start_expert) : num_experts;
@@ -233,8 +233,8 @@ class MoeTopK {
 
     if (renormalize) {
       auto local_range_x = item.get_local_range(0);
-      for (int k_idx = local_id_x; k_idx < k; k_idx += local_range_x) {
-        const int idx = k * block_row + k_idx;
+      for (size_t k_idx = local_id_x; k_idx < k; k_idx += local_range_x) {
+        const size_t idx = k * block_row + k_idx;
         output[idx] /= sum_val;
       }
     }
@@ -246,10 +246,10 @@ class MoeTopK {
   float* output;
   IndType* indices;
   int* source_rows;
-  const int num_experts;
+  const size_t num_experts;
   const int k;
-  const int start_expert;
-  const int end_expert;
+  const size_t start_expert;
+  const size_t end_expert;
   const bool renormalize;
   const float* bias;
 };
@@ -286,12 +286,12 @@ class TopKGating {
       const InputdType* input,
       const bool* finished,
       float* output,
-      const int num_rows,
+      const size_t num_rows,
       IndType* indices,
       int* source_rows,
       const int k,
-      const int start_expert,
-      const int end_expert,
+      const size_t start_expert,
+      const size_t end_expert,
       const bool renormalize,
       const float* bias)
       : input(input),
@@ -355,11 +355,11 @@ class TopKGating {
     // Compute CTA and warp rows. We pack multiple rows into a single warp, and
     // a block contains WARPS_PER_CTA warps. This, each block processes a chunk
     // of rows. We start by computing the start row for each block.
-    const int cta_base_row = group_id_x * ROWS_PER_CTA;
+    const size_t cta_base_row = group_id_x * ROWS_PER_CTA;
 
     // Now, using the base row per thread block, we compute the base row per
     // warp.
-    const int warp_base_row = cta_base_row + local_id_y * ROWS_PER_WARP;
+    const size_t warp_base_row = cta_base_row + local_id_y * ROWS_PER_WARP;
 
     // The threads in a warp are split into sub-groups that will work on a row.
     // We compute row offset for each thread sub-group
@@ -386,7 +386,7 @@ class TopKGating {
     // Finally, we pull in the data from global mem
     InputdType row_chunk_load[VPT];
 #pragma unroll
-    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+    for (size_t ii = 0; ii < LDG_PER_THREAD; ++ii) {
 #pragma unroll
       for (int jj = 0; jj < ELTS_PER_LDG; ++jj) {
         row_chunk_load[ii * ELTS_PER_LDG + jj] =
@@ -396,7 +396,7 @@ class TopKGating {
 
     float row_chunk[VPT];
 #pragma unroll
-    for (int ii = 0; ii < VPT; ++ii) {
+    for (size_t ii = 0; ii < VPT; ++ii) {
       row_chunk[ii] = static_cast<float>(row_chunk_load[ii]);
     }
 
@@ -406,7 +406,7 @@ class TopKGating {
     if constexpr (ScoringFuncParam == ScoringFunc::SOFTMAX) {
       float thread_max = row_chunk[0];
 #pragma unroll
-      for (int ii = 1; ii < VPT; ++ii) {
+      for (size_t ii = 1; ii < VPT; ++ii) {
         thread_max = MAX(thread_max, row_chunk[ii]);
       }
 
@@ -425,7 +425,7 @@ class TopKGating {
       // the exp. We also compute the thread local sum.
       float row_sum = 0;
 #pragma unroll
-      for (int ii = 0; ii < VPT; ++ii) {
+      for (size_t ii = 0; ii < VPT; ++ii) {
         row_chunk[ii] = sycl::exp(row_chunk[ii] - thread_max);
         row_sum += row_chunk[ii];
       }
@@ -447,12 +447,12 @@ class TopKGating {
       const float reciprocal_row_sum = 1.f / row_sum;
 
 #pragma unroll
-      for (int ii = 0; ii < VPT; ++ii) {
+      for (size_t ii = 0; ii < VPT; ++ii) {
         row_chunk[ii] = row_chunk[ii] * reciprocal_row_sum;
       }
     } else {
 #pragma unroll
-      for (int ii = 0; ii < VPT; ++ii) {
+      for (size_t ii = 0; ii < VPT; ++ii) {
         row_chunk[ii] = sigmoid_typed(static_cast<InputdType>(row_chunk[ii]));
       }
     }
@@ -466,7 +466,7 @@ class TopKGating {
 #pragma unroll
       for (int ldg = 0; ldg < LDG_PER_THREAD; ++ldg) {
 #pragma unroll
-        for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
+        for (size_t ii = 0; ii < ELTS_PER_LDG; ++ii) {
           const int expert =
               first_elt_read_by_thread + ldg * COLS_PER_GROUP_LDG + ii;
           float bias_val = expert < NUM_EXPERTS ? bias[expert] : 0.0f;
@@ -476,7 +476,7 @@ class TopKGating {
       }
     } else {
 #pragma unroll
-      for (int ii = 0; ii < VPT; ++ii) {
+      for (size_t ii = 0; ii < VPT; ++ii) {
         row_chunk_with_bias[ii] = row_chunk[ii];
       }
     }
@@ -486,7 +486,7 @@ class TopKGating {
     int start_col = first_elt_read_by_thread;
     float sum_val = 0.0f;
 
-    for (int k_idx = 0; k_idx < k; ++k_idx) {
+    for (size_t k_idx = 0; k_idx < k; ++k_idx) {
       // First, each thread does the local argmax
       float max_val_with_bias = row_chunk_with_bias[0];
       float max_val = row_chunk[0];
@@ -496,7 +496,7 @@ class TopKGating {
       for (int ldg = 0, col = start_col; ldg < LDG_PER_THREAD;
            ++ldg, col += COLS_PER_GROUP_LDG) {
 #pragma unroll
-        for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
+        for (size_t ii = 0; ii < ELTS_PER_LDG; ++ii) {
           float val_with_bias = row_chunk_with_bias[ldg * ELTS_PER_LDG + ii];
           float val = row_chunk[ldg * ELTS_PER_LDG + ii];
 
@@ -547,7 +547,7 @@ class TopKGating {
         // The lead thread from each sub-group will write out the final results
         // to global memory. (This will be a single) thread per row of the
         // input/output matrices.
-        const int idx = k * thread_row + k_idx;
+        const size_t idx = k * thread_row + k_idx;
         output[idx] = max_val;
         indices[idx] =
             should_process_row ? (expert - start_expert) : NUM_EXPERTS;
@@ -562,8 +562,9 @@ class TopKGating {
     }
 
     if (renormalize) {
-      for (int k_idx = thread_group_idx; k_idx < k; k_idx += THREADS_PER_ROW) {
-        const int idx = k * thread_row + k_idx;
+      for (size_t k_idx = thread_group_idx; k_idx < k;
+           k_idx += THREADS_PER_ROW) {
+        const size_t idx = k * thread_row + k_idx;
         output[idx] /= sum_val;
       }
     }
@@ -577,8 +578,8 @@ class TopKGating {
   IndType* indices;
   int* source_rows;
   const int k;
-  const int start_expert;
-  const int end_expert;
+  const size_t start_expert;
+  const size_t end_expert;
   const bool renormalize;
   const float* bias;
 };
@@ -619,10 +620,10 @@ void topk_gating_launcher_helper(
     float* output,
     IndType* indices,
     int* source_row,
-    const int num_rows,
+    const size_t num_rows,
     const int k,
-    const int start_expert,
-    const int end_expert,
+    const size_t start_expert,
+    const size_t end_expert,
     bool renormalize,
     float* bias,
     sycl::queue& queue) {
@@ -695,7 +696,7 @@ void topk_gating_kernel_launcher(
     int* token_expert_indices,
     float* scoring_workspace,
     const int num_tokens,
-    const int num_experts,
+    const size_t num_experts,
     const int topk,
     const bool renormalize,
     float* bias,
@@ -831,9 +832,9 @@ void topk_softmax(
     torch::Tensor& gating_output,         // [num_tokens, num_experts]
     const bool renormalize,
     std::optional<torch::Tensor> bias) {
-  const int num_experts = gating_output.size(-1);
+  const size_t num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
-  const int topk = topk_weights.size(-1);
+  const size_t topk = topk_weights.size(-1);
 
   const bool is_pow_2 =
       (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
@@ -882,9 +883,9 @@ void topk_sigmoid(
     torch::Tensor& gating_output,         // [num_tokens, num_experts]
     const bool renormalize,
     std::optional<torch::Tensor> bias) {
-  const int num_experts = gating_output.size(-1);
+  const size_t num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
-  const int topk = topk_weights.size(-1);
+  const size_t topk = topk_weights.size(-1);
 
   const bool is_pow_2 =
       (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);

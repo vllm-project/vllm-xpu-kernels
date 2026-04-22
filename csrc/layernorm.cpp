@@ -27,8 +27,8 @@ class rms_norm_kernel {
       const int64_t input_shape_d3_,   // input.size(-3)
       const scalar_t* weight_,
       const float epsilon_,
-      const int num_tokens_,
-      const int hidden_size_,
+      const size_t num_tokens_,
+      const size_t hidden_size_,
       sycl::local_accessor<float, 1> s_variance_)
       : out(out_),
         input(input_),
@@ -55,23 +55,25 @@ class rms_norm_kernel {
       input_row = input + item_ct1.get_group(2) * input_stride_d2;
     } else if constexpr (NUM_DIMS == 3) {
       // 3D for q/k norm [batch_size, num_heads, head_size]
-      int batch_idx = item_ct1.get_group(2) / input_shape_d2;
-      int head_idx = item_ct1.get_group(2) % input_shape_d2;
+      size_t batch_idx = item_ct1.get_group(2) / input_shape_d2;
+      size_t head_idx = item_ct1.get_group(2) % input_shape_d2;
       input_row =
           input + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
     } else if constexpr (NUM_DIMS == 4) {
       // 4D for transformers model_impl qk norm [batch, seq, head, head_dim]
-      int batch_idx = item_ct1.get_group(2) / (input_shape_d3 * input_shape_d2);
-      int remaining = item_ct1.get_group(2) % (input_shape_d3 * input_shape_d2);
-      int seq_idx = remaining / input_shape_d2;
-      int head_idx = remaining % input_shape_d2;
+      size_t batch_idx =
+          item_ct1.get_group(2) / (input_shape_d3 * input_shape_d2);
+      size_t remaining =
+          item_ct1.get_group(2) % (input_shape_d3 * input_shape_d2);
+      size_t seq_idx = remaining / input_shape_d2;
+      size_t head_idx = remaining % input_shape_d2;
       input_row = input + batch_idx * input_stride_d4 +
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
     }
 
     auto vec_op = [&variance](
-                      const vec4_t<scalar_t>& vec, int vec_size = VEC_SIZE) {
-      for (int i = 0; i < vec_size; ++i) {
+                      const vec4_t<scalar_t>& vec, size_t vec_size = VEC_SIZE) {
+      for (size_t i = 0; i < vec_size; ++i) {
         float x = static_cast<float>(vec.val[i]);
         variance += x * x;
       }
@@ -90,20 +92,20 @@ class rms_norm_kernel {
     if (can_vec) {
       int64_t const num_vec_elems = hidden_size / VEC_SIZE;
       auto const* vec_in = reinterpret_cast<const vec4_t<scalar_t>*>(input_row);
-      for (int i = item_ct1.get_local_id(2); i < num_vec_elems;
+      for (size_t i = item_ct1.get_local_id(2); i < num_vec_elems;
            i += item_ct1.get_local_range(2)) {
         vec4_t<scalar_t> tmp = vec_in[i];
         vec_op(tmp);
       }
     } else {
-      int misalignment_offset = addr_in & (WIDTH - 1);
-      int alignment_bytes = WIDTH - misalignment_offset;
-      int prefix_elems = alignment_bytes & (WIDTH - 1);
+      size_t misalignment_offset = addr_in & (WIDTH - 1);
+      size_t alignment_bytes = WIDTH - misalignment_offset;
+      size_t prefix_elems = alignment_bytes & (WIDTH - 1);
       prefix_elems /= sizeof(scalar_t);
       prefix_elems = prefix_elems < hidden_size ? prefix_elems : hidden_size;
 
       // 1. handle the possibly unaligned prefix with scalar access.
-      for (int i = item_ct1.get_local_id(2); i < prefix_elems;
+      for (size_t i = item_ct1.get_local_id(2); i < prefix_elems;
            i += item_ct1.get_local_range(2)) {
         scalar_op(input_row[i]);
       }
@@ -111,14 +113,14 @@ class rms_norm_kernel {
       int64_t const num_vec_elems = (hidden_size - prefix_elems) / VEC_SIZE;
       auto const* vec_in =
           reinterpret_cast<const vec4_t<scalar_t>*>(input_row + prefix_elems);
-      for (int i = item_ct1.get_local_id(2); i < num_vec_elems;
+      for (size_t i = item_ct1.get_local_id(2); i < num_vec_elems;
            i += item_ct1.get_local_range(2)) {
         vec4_t<scalar_t> tmp = vec_in[i];
         vec_op(tmp);
       }
 
       // 3. handle remaining tail elements.
-      for (int i = item_ct1.get_local_id(2) + num_vec_elems * VEC_SIZE;
+      for (size_t i = item_ct1.get_local_id(2) + num_vec_elems * VEC_SIZE;
            i < hidden_size - prefix_elems;
            i += item_ct1.get_local_range(2)) {
         scalar_op((input_row + prefix_elems)[i]);
@@ -148,7 +150,7 @@ class rms_norm_kernel {
       auto* v_out = reinterpret_cast<vec4_t<scalar_t>*>(out_row);
       int64_t const out_num_vec_elems = hidden_size / VEC_SIZE;
       float s_variance_val = *s_variance_ptr;
-      for (int idx = item_ct1.get_local_id(2); idx < out_num_vec_elems;
+      for (size_t idx = item_ct1.get_local_id(2); idx < out_num_vec_elems;
            idx += item_ct1.get_local_range(2)) {
         vec4_t<scalar_t> dst;
         vec4_t<scalar_t> src1 = v_in[idx];
@@ -160,7 +162,7 @@ class rms_norm_kernel {
         v_out[idx] = dst;
       }
     } else {
-      for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
+      for (size_t idx = item_ct1.get_local_id(2); idx < hidden_size;
            idx += item_ct1.get_local_range(2)) {
         float x = (float)input_row[idx];
         out_row[idx] = ((scalar_t)(x * (*s_variance_ptr))) * weight[idx];
@@ -178,8 +180,8 @@ class rms_norm_kernel {
   const int64_t input_shape_d3;
   const scalar_t* __restrict__ weight;  // [hidden_size]
   const float epsilon;
-  const int num_tokens;
-  const int hidden_size;
+  const size_t num_tokens;
+  const size_t hidden_size;
   sycl::local_accessor<float, 1> s_variance;
 };
 
@@ -190,9 +192,9 @@ void call_rms_norm_kernel(
     torch::Tensor& weight,
     float epsilon) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
-  int hidden_size = input.size(-1);
-  int num_tokens = input.numel() / hidden_size;
-  int num_dims = input.dim();
+  size_t hidden_size = input.size(-1);
+  size_t num_tokens = input.numel() / hidden_size;
+  size_t num_dims = input.dim();
   int64_t input_stride_d2 = input.stride(-2);
   int64_t input_stride_d3 = (num_dims >= 3) ? input.stride(-3) : 0;
   int64_t input_stride_d4 = (num_dims >= 4) ? input.stride(-4) : 0;
@@ -203,7 +205,7 @@ void call_rms_norm_kernel(
   auto input_ptr = input.data_ptr<scalar_t>();
   auto weight_ptr = weight.data_ptr<scalar_t>();
   sycl::range<3> grid(1, 1, num_tokens);
-  sycl::range<3> block(1, 1, std::min(hidden_size, 1024));
+  sycl::range<3> block(1, 1, std::min(hidden_size, static_cast<size_t>(1024)));
   auto& queue = vllm::xpu::vllmGetQueue();
 
   VLLM_DISPATCH_RANK234(num_dims, [&]() {
@@ -237,8 +239,8 @@ class fused_add_rms_norm_kernel {
       const int64_t input_stride_,
       const scalar_t* __restrict__ weight_,  // [hidden_size]
       const float epsilon_,
-      const int num_tokens_,
-      const int hidden_size_,
+      const size_t num_tokens_,
+      const size_t hidden_size_,
       sycl::local_accessor<float, 1> s_variance_)
       : input(input_),
         residual(residual_),
@@ -255,7 +257,7 @@ class fused_add_rms_norm_kernel {
         s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
     float variance = 0.0f;
 
-    for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
+    for (size_t idx = item_ct1.get_local_id(2); idx < hidden_size;
          idx += item_ct1.get_local_range(2)) {
       scalar_t z = (scalar_t)input[item_ct1.get_group(2) * input_stride + idx];
       z += residual[item_ct1.get_group(2) * hidden_size + idx];
@@ -274,7 +276,7 @@ class fused_add_rms_norm_kernel {
 
     item_ct1.barrier(sycl::access::fence_space::local_space);
 
-    for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
+    for (size_t idx = item_ct1.get_local_id(2); idx < hidden_size;
          idx += item_ct1.get_local_range(2)) {
       float x = (float)residual[item_ct1.get_group(2) * hidden_size + idx];
       input[item_ct1.get_group(2) * input_stride + idx] =
@@ -288,8 +290,8 @@ class fused_add_rms_norm_kernel {
   const int64_t input_stride;
   const scalar_t* __restrict__ weight;  // [hidden_size]
   const float epsilon;
-  const int num_tokens;
-  const int hidden_size;
+  const size_t num_tokens;
+  const size_t hidden_size;
   sycl::local_accessor<float, 1> s_variance;  // local memory for variance
 };
 
@@ -300,14 +302,14 @@ void call_fused_add_rms_norm_kernel(
     torch::Tensor& weight,
     float epsilon) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
-  int hidden_size = input.size(-1);
-  int num_tokens = input.numel() / hidden_size;
+  size_t hidden_size = input.size(-1);
+  size_t num_tokens = input.numel() / hidden_size;
   auto input_ptr = input.data_ptr<scalar_t>();
   auto residual_ptr = residual.data_ptr<scalar_t>();
   auto weight_ptr = weight.data_ptr<scalar_t>();
   int64_t input_stride = input.stride(-2);
   sycl::range<3> grid(1, 1, num_tokens);
-  sycl::range<3> block(1, 1, std::min(hidden_size, 1024));
+  sycl::range<3> block(1, 1, std::min(hidden_size, static_cast<size_t>(1024)));
   auto& queue = vllm::xpu::vllmGetQueue();
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
@@ -351,8 +353,8 @@ void fused_add_rms_norm(
     torch::Tensor& weight,
     double epsilon) {
   const at::DeviceGuard device_guard(input.device());
-  int hidden_size = input.size(-1);
-  int num_tokens = input.numel() / hidden_size;
+  size_t hidden_size = input.size(-1);
+  size_t num_tokens = input.numel() / hidden_size;
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_fused_add_rms_norm_kernel", [&] {

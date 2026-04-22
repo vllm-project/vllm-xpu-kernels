@@ -99,9 +99,9 @@ template <int VEC_SIZE = 4, typename scalar_t, typename dtype_t, typename ScaOp>
 void scaled_convert_vec(
     const scalar_t* src,
     dtype_t* dst,
-    int num_elems,
-    int local_idx,
-    int local_range,
+    size_t num_elems,
+    size_t local_idx,
+    size_t local_range,
     ScaOp&& scalar_op) {
   constexpr int WIDTH = VEC_SIZE * sizeof(scalar_t);
   uintptr_t addr = reinterpret_cast<uintptr_t>(src);
@@ -131,12 +131,12 @@ void scaled_convert_vec(
 
   int misalignment_offset = addr & (WIDTH - 1);
   int alignment_bytes = WIDTH - misalignment_offset;
-  int prefix_elems = alignment_bytes & (WIDTH - 1);
+  size_t prefix_elems = alignment_bytes & (WIDTH - 1);
   prefix_elems /= sizeof(scalar_t);
   prefix_elems = sycl::min(prefix_elems, num_elems);
 
   // 1. prefill elements when it is unsafe to vectorize
-  for (int i = local_idx; i < prefix_elems; i += local_range) {
+  for (size_t i = local_idx; i < prefix_elems; i += local_range) {
     scalar_op(dst[i], src[i]);
   }
 
@@ -144,14 +144,14 @@ void scaled_convert_vec(
   dst += prefix_elems;
   num_elems -= prefix_elems;
 
-  int num_vec = num_elems / VEC_SIZE;
+  size_t num_vec = num_elems / VEC_SIZE;
   using srcx4_t = vec4_t<scalar_t>;
   using distx4_t = dtypex4_t<dtype_t>;
   auto const* vectorized_in = reinterpret_cast<srcx4_t const*>(src);
   auto* vectorized_out = reinterpret_cast<distx4_t*>(dst);
 
   // 2. vectorize the main part
-  for (int i = local_idx; i < num_vec; i += local_range) {
+  for (size_t i = local_idx; i < num_vec; i += local_range) {
     distx4_t tmp;
     // Make a local copy of the entire pack
     srcx4_t in_vec = vectorized_in[i];  // <- encourages a single vector ld
@@ -163,8 +163,8 @@ void scaled_convert_vec(
   }
 
   // 3. handle the tail
-  int tail_start = num_vec * VEC_SIZE;
-  for (int i = local_idx + tail_start; i < num_elems; i += local_range) {
+  size_t tail_start = num_vec * VEC_SIZE;
+  for (size_t i = local_idx + tail_start; i < num_elems; i += local_range) {
     scalar_op(dst[i], src[i]);
   }
 }

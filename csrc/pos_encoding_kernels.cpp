@@ -11,9 +11,9 @@ inline void apply_token_rotary_embedding(
     scalar_t* __restrict__ arr,
     const scalar_t* __restrict__ cos_ptr,
     const scalar_t* __restrict__ sin_ptr,
-    int rot_offset,
-    int embed_dim) {
-  int x_index, y_index;
+    size_t rot_offset,
+    size_t embed_dim) {
+  size_t x_index, y_index;
   scalar_t cos, sin;
   if (IS_NEOX) {
     // GPT-NeoX style rotary embedding.
@@ -45,38 +45,38 @@ inline void apply_rotary_embedding(
                                    // head_size] or [num_tokens, num_kv_heads,
                                    // head_size]
     const scalar_t* cache_ptr,
-    const int head_size,
-    const int num_heads,
-    const int num_kv_heads,
-    const int rot_dim,
+    const size_t head_size,
+    const size_t num_heads,
+    const size_t num_kv_heads,
+    const size_t rot_dim,
     const int token_idx,
     const int64_t query_stride,
     const int64_t key_stride,
     const int64_t head_stride,
     const sycl::nd_item<3>& item_ct1) {
-  const int embed_dim = rot_dim / 2;
+  const size_t embed_dim = rot_dim / 2;
   const scalar_t* cos_ptr = cache_ptr;
   const scalar_t* sin_ptr = cache_ptr + embed_dim;
 
-  const int nq = num_heads * embed_dim;
-  for (int i = item_ct1.get_local_id(2); i < nq;
+  const size_t nq = num_heads * embed_dim;
+  for (size_t i = item_ct1.get_local_id(2); i < nq;
        i += item_ct1.get_local_range(2)) {
-    const int head_idx = i / embed_dim;
+    const size_t head_idx = i / embed_dim;
     const int64_t token_head =
         token_idx * query_stride + head_idx * head_stride;
-    const int rot_offset = i % embed_dim;
+    const size_t rot_offset = i % embed_dim;
     apply_token_rotary_embedding<scalar_t, IS_NEOX>(
         query + token_head, cos_ptr, sin_ptr, rot_offset, embed_dim);
   }
 
   if (key != nullptr) {
-    const int nk = num_kv_heads * embed_dim;
-    for (int i = item_ct1.get_local_id(2); i < nk;
+    const size_t nk = num_kv_heads * embed_dim;
+    for (size_t i = item_ct1.get_local_id(2); i < nk;
          i += item_ct1.get_local_range(2)) {
-      const int head_idx = i / embed_dim;
+      const size_t head_idx = i / embed_dim;
       const int64_t token_head =
           token_idx * key_stride + head_idx * head_stride;
-      const int rot_offset = i % embed_dim;
+      const size_t rot_offset = i % embed_dim;
       apply_token_rotary_embedding<scalar_t, IS_NEOX>(
           key + token_head, cos_ptr, sin_ptr, rot_offset, embed_dim);
     }
@@ -98,13 +98,13 @@ class rotary_embedding_kernel {
       // head_size]
       const scalar_t* __restrict__ cos_sin_cache_,  // [max_position, 2, rot_dim
                                                     // // 2]
-      const int rot_dim_,
+      const size_t rot_dim_,
       const int64_t query_stride_,
       const int64_t key_stride_,
       const int64_t head_stride_,
-      const int num_heads_,
-      const int num_kv_heads_,
-      const int head_size_)
+      const size_t num_heads_,
+      const size_t num_kv_heads_,
+      const size_t head_size_)
       : positions(positions_),
         query(query_),
         key(key_),
@@ -151,13 +151,13 @@ class rotary_embedding_kernel {
                                // head_size]
   const scalar_t* __restrict__ cos_sin_cache;  // [max_position, 2, rot_dim //
                                                // 2]
-  const int rot_dim;
+  const size_t rot_dim;
   const int64_t query_stride;
   const int64_t key_stride;
   const int64_t head_stride;
-  const int num_heads;
-  const int num_kv_heads;
-  const int head_size;
+  const size_t num_heads;
+  const size_t num_kv_heads;
+  const size_t head_size;
 };
 
 }  // namespace vllm
@@ -173,7 +173,7 @@ void call_rotary_embedding_kernel(
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   // num_tokens = batch_size * seq_len
   int64_t num_tokens = positions.numel();
-  int positions_ndim = positions.dim();
+  size_t positions_ndim = positions.dim();
 
   // Make sure num_tokens dim is consistent across positions, query, and key
   TORCH_CHECK(
@@ -196,24 +196,25 @@ void call_rotary_embedding_kernel(
 
   // Make sure head_size is valid for query and key
   // hidden_size = num_heads * head_size
-  int query_hidden_size = query.numel() / num_tokens;
-  int key_hidden_size = key.has_value() ? key->numel() / num_tokens : 0;
+  size_t query_hidden_size = query.numel() / num_tokens;
+  size_t key_hidden_size = key.has_value() ? key->numel() / num_tokens : 0;
   TORCH_CHECK(query_hidden_size % head_size == 0);
   TORCH_CHECK(key_hidden_size % head_size == 0);
 
   // Make sure query and key have consistent number of heads
-  int num_heads = query_hidden_size / head_size;
-  int num_kv_heads = key.has_value() ? key_hidden_size / head_size : num_heads;
+  size_t num_heads = query_hidden_size / head_size;
+  size_t num_kv_heads =
+      key.has_value() ? key_hidden_size / head_size : num_heads;
   TORCH_CHECK(num_heads % num_kv_heads == 0);
 
-  int rot_dim = cos_sin_cache.size(1);
-  int seq_dim_idx = positions_ndim - 1;
+  size_t rot_dim = cos_sin_cache.size(1);
+  size_t seq_dim_idx = positions_ndim - 1;
   int64_t query_stride = query.stride(seq_dim_idx);
   int64_t key_stride = key.has_value() ? key->stride(seq_dim_idx) : 0;
   // Determine head stride: for [*, heads, head_size] use stride of last dim;
   // for flat [*, heads*head_size], heads blocks are contiguous of size
   // head_size
-  int query_ndim = query.dim();
+  size_t query_ndim = query.dim();
   int64_t head_stride =
       (query_ndim == positions_ndim + 2) ? query.stride(-2) : head_size;
 
@@ -223,7 +224,7 @@ void call_rotary_embedding_kernel(
   auto cos_sin_cache_ptr = cos_sin_cache.data_ptr<scalar_t>();
 
   sycl::range<3> grid(1, 1, num_tokens);
-  sycl::range<3> block(1, 1, std::min<int64_t>(num_heads * rot_dim / 2, 512));
+  sycl::range<3> block(1, 1, std::min<size_t>(num_heads * rot_dim / 2, 512));
 
   at::DeviceGuard device_guard(query.device());
   auto& queue = vllm::xpu::vllmGetQueue();

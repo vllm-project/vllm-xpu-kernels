@@ -13,8 +13,8 @@ class RowsPerExpertCount {
       int64_t* expert_first_token_offset,
       int64_t* topk_ids,
       int* unpermuted_row_to_permuted_row,
-      const int num_rows,
-      const int TopK)
+      const size_t num_rows,
+      const size_t TopK)
       : expert_map(expert_map),
         expert_first_token_offset(expert_first_token_offset),
         topk_ids(topk_ids),
@@ -26,8 +26,8 @@ class RowsPerExpertCount {
   static constexpr int WARP_SIZE = 32;
 
   static inline sycl::nd_range<1>
-  get_nd_range(const int num_rows, const int TopK) {
-    int group_nums = (num_rows * TopK + GroupWorkItem - 1) / GroupWorkItem;
+  get_nd_range(const size_t num_rows, const int TopK) {
+    size_t group_nums = (num_rows * TopK + GroupWorkItem - 1) / GroupWorkItem;
     sycl::range<1> local(GroupWorkItem);
     sycl::range<1> group(group_nums);
     return sycl::nd_range<1>(local * group, local);
@@ -69,8 +69,8 @@ class RowsPerExpertCount {
   int64_t* expert_first_token_offset;
   int64_t* topk_ids;
   int* unpermuted_row_to_permuted_row;
-  const int num_rows;
-  const int TopK;
+  const size_t num_rows;
+  const size_t TopK;
 };
 
 class CalculateFristTokenOffset {
@@ -143,7 +143,7 @@ class RemapHiddenStates {
       int* unpermuted_row_to_permuted_row,
       int64_t* expert_first_token_offset,
       int64_t* topk_ids,
-      const int num_rows,
+      const size_t num_rows,
       const int hidden_size,
       const int block_k,
       const int total_experts_num)
@@ -165,7 +165,7 @@ class RemapHiddenStates {
   static constexpr int ElemsPerItem = sizeof(float) * 4 / sizeof(TA);
 
   static inline sycl::nd_range<1>
-  get_nd_range(const int num_rows, const int hidden_size) {
+  get_nd_range(const size_t num_rows, const int hidden_size) {
     int local_num = GroupWorkItem;
     if (local_num * ElemsPerItem > hidden_size) {
       local_num = (hidden_size + ElemsPerItem - 1) / ElemsPerItem;
@@ -305,7 +305,7 @@ class RemapHiddenStates {
   int* unpermuted_row_to_permuted_row;
   int64_t* expert_first_token_offset;
   int64_t* topk_ids;
-  const int num_rows;
+  const size_t num_rows;
   const int hidden_size;
   const int block_k;
   const int total_experts_num;
@@ -321,7 +321,7 @@ void RemapHiddenStatesLauncher(
     int64_t* expert_first_token_offset,
     int* unpermuted_row_to_permuted_row,
     int64_t* topk_ids,
-    const int num_rows,
+    const size_t num_rows,
     const int hidden_size,
     const int block_k,
     const int total_experts_num,
@@ -419,7 +419,7 @@ void remap_hidden_states(
   TORCH_CHECK(
       topk_ids.scalar_type() == torch::kInt64, "topk_ids must be int64");
 
-  int num_rows = hidden_states.size(0);
+  size_t num_rows = hidden_states.size(0);
   int hidden_size = hidden_states.size(1);
   int TopK = topk_ids.size(1);
   int block_k = 1;

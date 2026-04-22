@@ -24,11 +24,11 @@ class scaled_fp8_quant_kernel_strided_group_shape {
   fp8_type* out;
   const scalar_t* input;
   const float* scale;
-  int hidden_size;
+  size_t hidden_size;
   int64_t in_row_stride;
   int64_t out_row_stride;
-  int group_m;
-  int group_n;
+  size_t group_m;
+  size_t group_n;
   int64_t scale_stride_i;
   int64_t scale_stride_j;
 
@@ -37,11 +37,11 @@ class scaled_fp8_quant_kernel_strided_group_shape {
       fp8_type* out_,
       const scalar_t* input_,
       const float* scale_,
-      int hidden_size,
+      size_t hidden_size,
       int64_t in_row_stride_,
       int64_t out_row_stride_,
-      int group_m_,
-      int group_n_,
+      size_t group_m_,
+      size_t group_n_,
       int64_t scale_stride_i_,
       int64_t scale_stride_j_)
       : out(out_),
@@ -90,9 +90,9 @@ class scaled_fp8_quant_kernel_strided_group_shape {
           token_in, token_out, hidden_size, tid, item.get_local_range(0), op);
     } else if (group_n % VEC_SIZE == 0) {
       // Multiple column groups with vectorization
-      const int num_groups_n = hidden_size / group_n;
+      const size_t num_groups_n = hidden_size / group_n;
 
-      for (int gj = 0; gj < num_groups_n; gj++) {
+      for (size_t gj = 0; gj < num_groups_n; gj++) {
         fp8::ConvertWithScaleOp<true, fp8_type> op{get_inv_scale(gj)};
         fp8::scaled_convert_vec(
             token_in + gj * group_n,
@@ -104,8 +104,8 @@ class scaled_fp8_quant_kernel_strided_group_shape {
       }
     } else {
       // Scalar path for small column groups (group_n < VEC_SIZE)
-      for (int n = tid; n < hidden_size; n += item.get_local_range(0)) {
-        const int gj = n / group_n;
+      for (size_t n = tid; n < hidden_size; n += item.get_local_range(0)) {
+        const size_t gj = n / group_n;
         fp8::ConvertWithScaleOp<true, fp8_type> op{get_inv_scale_cached(gj)};
         op(token_out[n], token_in[n]);
       }
@@ -119,7 +119,7 @@ class scaled_fp8_quant_kernel_strided_dynamic {
   fp8_type* out;
   const scalar_t* input;
   const float* scale;
-  int64_t hidden_size;
+  size_t hidden_size;
   int64_t in_row_stride;
   int64_t out_row_stride;
 
@@ -128,7 +128,7 @@ class scaled_fp8_quant_kernel_strided_dynamic {
       fp8_type* out_,
       const scalar_t* input_,
       const float* scale_,
-      int hidden_size_,
+      size_t hidden_size_,
       int64_t in_row_stride_,
       int64_t out_row_stride_)
       : out(out_),
@@ -158,12 +158,12 @@ class per_token_group_quant_8bit_kernel {
   fp8_type* out;
   float* scale;
   scalar_t const* input;
-  const int group_size;
-  const int groups_per_block;
+  const size_t group_size;
+  const size_t groups_per_block;
   float eps;
   bool scale_ue8m0;
-  const int scale_num_rows;
-  const int scale_stride;
+  const size_t scale_num_rows;
+  const size_t scale_stride;
   bool is_column_major;
 
  public:
@@ -171,12 +171,12 @@ class per_token_group_quant_8bit_kernel {
       fp8_type* out_,
       float* scale_,
       scalar_t const* input_,
-      const int group_size_,
-      const int groups_per_block_,
+      const size_t group_size_,
+      const size_t groups_per_block_,
       float eps_,
       bool scale_ue8m0_,
-      const int scale_num_rows_ = 0,
-      const int scale_stride_ = 0,
+      const size_t scale_num_rows_ = 0,
+      const size_t scale_stride_ = 0,
       bool is_column_major_ = false)
       : out(out_),
         scale(scale_),
@@ -192,13 +192,13 @@ class per_token_group_quant_8bit_kernel {
       [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
     constexpr int threads_per_group = 32;
 
-    int local_id = item.get_local_id(0);
-    int local_group_id = local_id / threads_per_group;
-    int lane_id = local_id % threads_per_group;
+    size_t local_id = item.get_local_id(0);
+    size_t local_group_id = local_id / threads_per_group;
+    size_t lane_id = local_id % threads_per_group;
 
     // Global 32-thread group
-    int block_group_id = item.get_group(0) * groups_per_block;
-    int global_group_id = block_group_id + local_group_id;
+    size_t block_group_id = item.get_group(0) * groups_per_block;
+    size_t global_group_id = block_group_id + local_group_id;
 
     // Base offset
     int64_t block_group_offset =
@@ -210,8 +210,8 @@ class per_token_group_quant_8bit_kernel {
     scalar_t const* group_input = &input[block_group_offset];
     fp8_type* group_output = &out[block_group_offset];
     if (is_column_major) {
-      const int row_idx = global_group_id / scale_num_rows;
-      const int col_idx = global_group_id % scale_num_rows;
+      const size_t row_idx = global_group_id / scale_num_rows;
+      const size_t col_idx = global_group_id % scale_num_rows;
       scale_output =
           reinterpret_cast<float*>(scale) + (col_idx * scale_stride + row_idx);
     } else {
@@ -224,7 +224,7 @@ class per_token_group_quant_8bit_kernel {
       local_absmax =
           thread_max_vec(group_input, group_size, lane_id, threads_per_group);
     } else {
-      for (int i = lane_id; i < group_size; i += threads_per_group) {
+      for (size_t i = lane_id; i < group_size; i += threads_per_group) {
         float const x = static_cast<float>(group_input[i]);
         local_absmax = sycl::max(local_absmax, sycl::fabs(x));
       }
@@ -258,7 +258,7 @@ class per_token_group_quant_8bit_kernel {
           item.get_local_range(0),
           op);
     } else {
-      for (int i = lane_id; i < group_size; i += groups_per_block) {
+      for (size_t i = lane_id; i < group_size; i += groups_per_block) {
         fp8::ConvertWithScaleOp<true, fp8_type> op{inverted_scale};
         op(group_output[i], group_input[i]);
       }
@@ -273,7 +273,7 @@ class dynamic_per_token_scaled_fp8_quant_kernel {
   float* scale;
   scalar_t const* input;
   float const* scale_ub;
-  const int hidden_size;
+  const size_t hidden_size;
 
  public:
   dynamic_per_token_scaled_fp8_quant_kernel(
@@ -281,7 +281,7 @@ class dynamic_per_token_scaled_fp8_quant_kernel {
       float* scale_,
       scalar_t const* input_,
       float const* scale_ub_,
-      const int hidden_size_)
+      const size_t hidden_size_)
       : out(out_),
         scale(scale_),
         input(input_),
@@ -306,7 +306,7 @@ class dynamic_per_token_scaled_fp8_quant_kernel {
       absmax_val = thread_max_vec(
           token_input, hidden_size, tid, item.get_local_range(0));
     } else {
-      for (int i = tid; i < hidden_size; i += item.get_local_range(0)) {
+      for (size_t i = tid; i < hidden_size; i += item.get_local_range(0)) {
         float const x = static_cast<float>(token_input[i]);
         absmax_val = sycl::max(absmax_val, sycl::fabs(x));
       }
@@ -344,7 +344,7 @@ class dynamic_per_token_scaled_fp8_quant_kernel {
           item.get_local_range(0),
           op);
     } else {
-      for (int i = tid; i < hidden_size; i += item.get_local_range(0)) {
+      for (size_t i = tid; i < hidden_size; i += item.get_local_range(0)) {
         fp8::ConvertWithScaleOp<true, fp8_type> op{inverted_scale};
         op(token_output[i], token_input[i]);
       }
@@ -366,7 +366,7 @@ void static_scaled_fp8_quant(
   TORCH_CHECK(
       out.stride(-1) == 1, "last dimension of output must be contiguous");
 
-  const int hidden_size = input.size(-1);                  // N (columns)
+  const size_t hidden_size = input.size(-1);               // N (columns)
   const int64_t num_tokens = input.numel() / hidden_size;  // M (rows)
 
   // Determine group_m, group_n, and scale strides from scale shape
@@ -609,7 +609,7 @@ void per_token_group_quant_fp8(
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(output_q.is_contiguous());
 
-  const int num_groups = input.numel() / group_size;
+  const size_t num_groups = input.numel() / group_size;
 
   TORCH_CHECK(input.numel() % group_size == 0);
   TORCH_CHECK(output_s.dim() == 2);
@@ -618,7 +618,7 @@ void per_token_group_quant_fp8(
 
   constexpr int THREADS_PER_GROUP = 32;
 
-  int groups_per_block = 1;
+  size_t groups_per_block = 1;
 
   if (num_groups % 16 == 0) {
     groups_per_block = 16;
@@ -631,12 +631,12 @@ void per_token_group_quant_fp8(
   }
 
   auto dst_type = output_q.scalar_type();
-  const int num_blocks = num_groups / groups_per_block;
-  const int num_threads = groups_per_block * THREADS_PER_GROUP;
+  const size_t num_blocks = num_groups / groups_per_block;
+  const size_t num_threads = groups_per_block * THREADS_PER_GROUP;
 
   const bool is_column_major = output_s.stride(0) < output_s.stride(1);
-  const int scale_num_rows = output_s.size(1);
-  const int scale_stride = output_s.stride(1);
+  const size_t scale_num_rows = output_s.size(1);
+  const size_t scale_stride = output_s.stride(1);
 
   sycl::range<1> grid(num_blocks);
   sycl::range<1> block(num_threads);
@@ -676,10 +676,10 @@ void dynamic_per_token_scaled_fp8_quant(
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
 
-  int const hidden_size = input.size(-1);
-  int const num_tokens = input.numel() / hidden_size;
+  size_t const hidden_size = input.size(-1);
+  size_t const num_tokens = input.numel() / hidden_size;
   sycl::range<1> grid(num_tokens);
-  sycl::range<1> block(std::min(hidden_size, 1024));
+  sycl::range<1> block(std::min(hidden_size, static_cast<size_t>(1024)));
 
   const at::DeviceGuard device_guard(input.device());
 

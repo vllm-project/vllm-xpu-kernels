@@ -38,7 +38,7 @@ void per_token_group_quant_mxfp4(
   TORCH_CHECK(
       output_q.scalar_type() == at::ScalarType::Byte, "output_q must be uint8");
 
-  const int num_groups = static_cast<int>(input.numel() / group_size);
+  const size_t num_groups = input.numel() / group_size;
   if (num_groups == 0) {
     // No work to do for empty input; ensure outputs are empty as well.
     TORCH_CHECK(
@@ -52,7 +52,7 @@ void per_token_group_quant_mxfp4(
 
   // Choose how many sub-groups to pack into one work-group.
   constexpr int THREADS_PER_GROUP = 32;
-  int groups_per_block = 1;
+  size_t groups_per_block = 1;
   if (num_groups % 16 == 0)
     groups_per_block = 16;
   else if (num_groups % 8 == 0)
@@ -62,14 +62,14 @@ void per_token_group_quant_mxfp4(
   else if (num_groups % 2 == 0)
     groups_per_block = 2;
 
-  const int num_blocks = num_groups / groups_per_block;
-  const int num_threads = groups_per_block * THREADS_PER_GROUP;
+  const size_t num_blocks = num_groups / groups_per_block;
+  const size_t num_threads = groups_per_block * THREADS_PER_GROUP;
 
   // Detect column-major scale layout.
   const bool is_column_major = output_s.stride(0) < output_s.stride(1);
   // scale_num_cols = number of groups per token row (= N / group_size).
-  const int scale_num_cols = output_s.size(1);
-  const int scale_stride = static_cast<int>(output_s.stride(1));
+  const size_t scale_num_cols = output_s.size(1);
+  const size_t scale_stride = static_cast<size_t>(output_s.stride(1));
 
   sycl::range<1> grid(num_blocks);
   sycl::range<1> block(num_threads);
@@ -83,7 +83,7 @@ void per_token_group_quant_mxfp4(
                   output_q.data_ptr<uint8_t>(),
                   output_s.data_ptr<float>(),
                   input.data_ptr<scalar_t>(),
-                  static_cast<int>(group_size),
+                  static_cast<size_t>(group_size),
                   groups_per_block,
                   static_cast<float>(eps),
                   scale_num_cols,

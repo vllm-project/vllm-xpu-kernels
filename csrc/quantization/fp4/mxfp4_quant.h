@@ -37,11 +37,11 @@ class per_token_group_quant_mxfp4_kernel {
   uint8_t* out;
   float* scale;
   scalar_t const* input;
-  const int group_size;  // = 32 for MX format
-  const int groups_per_block;
+  const size_t group_size;  // = 32 for MX format
+  const size_t groups_per_block;
   float eps;
-  const int scale_num_cols;  // N / group_size  (columns in scale matrix)
-  const int scale_stride;    // stride(1) of scale tensor
+  const size_t scale_num_cols;  // N / group_size  (columns in scale matrix)
+  const size_t scale_stride;    // stride(1) of scale tensor
   bool is_column_major;
 
  public:
@@ -49,11 +49,11 @@ class per_token_group_quant_mxfp4_kernel {
       uint8_t* out_,
       float* scale_,
       scalar_t const* input_,
-      const int group_size_,
-      const int groups_per_block_,
+      const size_t group_size_,
+      const size_t groups_per_block_,
       float eps_,
-      const int scale_num_cols_ = 0,
-      const int scale_stride_ = 0,
+      const size_t scale_num_cols_ = 0,
+      const size_t scale_stride_ = 0,
       bool is_column_major_ = false)
       : out(out_),
         scale(scale_),
@@ -69,12 +69,12 @@ class per_token_group_quant_mxfp4_kernel {
       [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
     constexpr int THREADS_PER_GROUP = 32;
 
-    int local_id = item.get_local_id(0);
-    int local_group_id = local_id / THREADS_PER_GROUP;
-    int lane_id = local_id % THREADS_PER_GROUP;
+    size_t local_id = item.get_local_id(0);
+    size_t local_group_id = local_id / THREADS_PER_GROUP;
+    size_t lane_id = local_id % THREADS_PER_GROUP;
 
-    int block_group_id = item.get_group(0) * groups_per_block;
-    int global_group_id = block_group_id + local_group_id;
+    size_t block_group_id = item.get_group(0) * groups_per_block;
+    size_t global_group_id = block_group_id + local_group_id;
 
     int64_t group_offset = static_cast<int64_t>(global_group_id) * group_size;
     scalar_t const* group_input = input + group_offset;
@@ -84,8 +84,8 @@ class per_token_group_quant_mxfp4_kernel {
     // Resolve the scale output pointer for this group.
     float* scale_output;
     if (is_column_major) {
-      const int row_idx = global_group_id / scale_num_cols;
-      const int col_idx = global_group_id % scale_num_cols;
+      const size_t row_idx = global_group_id / scale_num_cols;
+      const size_t col_idx = global_group_id % scale_num_cols;
       scale_output = scale + col_idx * scale_stride + row_idx;
     } else {
       scale_output = scale + global_group_id;

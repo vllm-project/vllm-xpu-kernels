@@ -32,7 +32,7 @@ class rms_norm_dynamic_per_token_quant_kernel {
       const float* __restrict__ scale_ub_,
       float* __restrict__ scales_,
       const float epsilon_,
-      const int hidden_size_)
+      const size_t hidden_size_)
       : out(out_),
         residual(residual_),
         input(input_),
@@ -43,8 +43,8 @@ class rms_norm_dynamic_per_token_quant_kernel {
         hidden_size(hidden_size_) {}
 
   void operator()(sycl::nd_item<1> item) const {
-    const int tid = item.get_local_id(0);
-    const int local_range = item.get_local_range(0);
+    const size_t tid = item.get_local_id(0);
+    const size_t local_range = item.get_local_range(0);
     const int64_t token_idx = item.get_group(0);
 
     // s_local[0] = inv_rms,  s_local[1] = scale
@@ -61,7 +61,7 @@ class rms_norm_dynamic_per_token_quant_kernel {
 
     // Pass 1: optional residual add + compute variance
     float variance = 0.0f;
-    for (int i = tid; i < hidden_size; i += local_range) {
+    for (size_t i = tid; i < hidden_size; i += local_range) {
       float x = static_cast<float>(token_input[i]);
       if constexpr (has_residual) {
         x += static_cast<float>(token_residual[i]);
@@ -82,7 +82,7 @@ class rms_norm_dynamic_per_token_quant_kernel {
 
     // Pass 2: compute max |norm(x)| across the row → token scale
     float absmax = 0.0f;
-    for (int i = tid; i < hidden_size; i += local_range) {
+    for (size_t i = tid; i < hidden_size; i += local_range) {
       const float x = has_residual ? static_cast<float>(token_residual[i])
                                    : static_cast<float>(token_input[i]);
       const float norm_x = x * inv_rms * static_cast<float>(weight[i]);
@@ -110,7 +110,7 @@ class rms_norm_dynamic_per_token_quant_kernel {
     const float inv_scale = 1.0f / s_local[1];
 
     // Pass 3: normalize and quantize
-    for (int i = tid; i < hidden_size; i += local_range) {
+    for (size_t i = tid; i < hidden_size; i += local_range) {
       const float x = has_residual ? static_cast<float>(token_residual[i])
                                    : static_cast<float>(token_input[i]);
       const float norm_x = x * inv_rms * static_cast<float>(weight[i]);
@@ -136,7 +136,7 @@ class rms_norm_dynamic_per_token_quant_kernel {
   const float* __restrict__ scale_ub;
   float* __restrict__ scales;
   const float epsilon;
-  const int hidden_size;
+  const size_t hidden_size;
 };
 
 template <typename scalar_t, typename out_t, bool has_residual>
@@ -149,9 +149,9 @@ class rms_norm_per_block_quant_kernel {
       const scalar_t* __restrict__ weight_,
       float* __restrict__ scales_,
       const float epsilon_,
-      const int hidden_size_,
-      const int group_size_,
-      const int num_tokens_,
+      const size_t hidden_size_,
+      const size_t group_size_,
+      const size_t num_tokens_,
       const int64_t scale_stride_token_,
       const int64_t scale_stride_group_)
       : out(out_),
@@ -167,8 +167,8 @@ class rms_norm_per_block_quant_kernel {
         scale_stride_group(scale_stride_group_) {}
 
   void operator()(sycl::nd_item<1> item) const {
-    const int tid = item.get_local_id(0);
-    const int local_range = item.get_local_range(0);
+    const size_t tid = item.get_local_id(0);
+    const size_t local_range = item.get_local_range(0);
     const int64_t token_idx = item.get_group(0);
 
     // s_local[0] = inv_rms,  s_local[1] = current group scale
@@ -185,7 +185,7 @@ class rms_norm_per_block_quant_kernel {
 
     // Pass 1: optional residual add + compute full-row variance
     float variance = 0.0f;
-    for (int i = tid; i < hidden_size; i += local_range) {
+    for (size_t i = tid; i < hidden_size; i += local_range) {
       float x = static_cast<float>(token_input[i]);
       if constexpr (has_residual) {
         x += static_cast<float>(token_residual[i]);
@@ -205,14 +205,14 @@ class rms_norm_per_block_quant_kernel {
     const float inv_rms = s_local[0];
 
     // Pass 2+3: for each column group, compute scale then quantize
-    const int num_groups = hidden_size / group_size;
-    for (int g = 0; g < num_groups; g++) {
-      const int group_start = g * group_size;
+    const size_t num_groups = hidden_size / group_size;
+    for (size_t g = 0; g < num_groups; g++) {
+      const size_t group_start = g * group_size;
 
       // Find max |norm(x)| within this group
       float group_absmax = 0.0f;
-      for (int i = tid; i < group_size; i += local_range) {
-        const int col = group_start + i;
+      for (size_t i = tid; i < group_size; i += local_range) {
+        const size_t col = group_start + i;
         const float x = has_residual ? static_cast<float>(token_residual[col])
                                      : static_cast<float>(token_input[col]);
         const float norm_x = x * inv_rms * static_cast<float>(weight[col]);
@@ -241,8 +241,8 @@ class rms_norm_per_block_quant_kernel {
       const float inv_scale = 1.0f / s_local[1];
 
       // Quantize this group
-      for (int i = tid; i < group_size; i += local_range) {
-        const int col = group_start + i;
+      for (size_t i = tid; i < group_size; i += local_range) {
+        const size_t col = group_start + i;
         const float x = has_residual ? static_cast<float>(token_residual[col])
                                      : static_cast<float>(token_input[col]);
         const float norm_x = x * inv_rms * static_cast<float>(weight[col]);
@@ -270,9 +270,9 @@ class rms_norm_per_block_quant_kernel {
   const scalar_t* __restrict__ weight;
   float* __restrict__ scales;
   const float epsilon;
-  const int hidden_size;
-  const int group_size;
-  const int num_tokens;
+  const size_t hidden_size;
+  const size_t group_size;
+  const size_t num_tokens;
   const int64_t scale_stride_token;
   const int64_t scale_stride_group;
 };
@@ -283,11 +283,11 @@ class rms_norm_static_fp8_quant_kernel {
   rms_norm_static_fp8_quant_kernel(
       out_t* __restrict__ out_,
       const scalar_t* __restrict__ input_,
-      const int input_stride_,
+      const size_t input_stride_,
       const scalar_t* __restrict__ weight_,
       const float* __restrict__ scale_,
       const float epsilon_,
-      const int hidden_size_)
+      const size_t hidden_size_)
       : out(out_),
         input(input_),
         input_stride(input_stride_),
@@ -299,8 +299,8 @@ class rms_norm_static_fp8_quant_kernel {
   void operator()(sycl::nd_item<1> item) const {
     using vec_t = vllm::xpu::aligned_vec<scalar_t, VEC_SIZE>;
 
-    const int tid = item.get_local_id(0);
-    const int local_range = item.get_local_range(0);
+    const size_t tid = item.get_local_id(0);
+    const size_t local_range = item.get_local_range(0);
     const int64_t token_idx = item.get_group(0);
 
     auto& s_variance =
@@ -309,12 +309,12 @@ class rms_norm_static_fp8_quant_kernel {
 
     const scalar_t* token_input = input + token_idx * input_stride;
     out_t* token_output = out + token_idx * hidden_size;
-    const int nvec = hidden_size / VEC_SIZE;
+    const size_t nvec = hidden_size / VEC_SIZE;
 
     // Pass 1: compute variance — VEC_SIZE elements per work-item per iteration
     float variance = 0.0f;
     const auto* v_in = reinterpret_cast<const vec_t*>(token_input);
-    for (int i = tid; i < nvec; i += local_range) {
+    for (size_t i = tid; i < nvec; i += local_range) {
       vec_t v = v_in[i];
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; j++) {
@@ -336,7 +336,7 @@ class rms_norm_static_fp8_quant_kernel {
 
     // Pass 2: normalize, apply weight, quantize — same vectorization as Pass 1
     const auto* v_w = reinterpret_cast<const vec_t*>(weight);
-    for (int i = tid; i < nvec; i += local_range) {
+    for (size_t i = tid; i < nvec; i += local_range) {
       vec_t src = v_in[i];
       vec_t wgt = v_w[i];
 #pragma unroll
@@ -355,11 +355,11 @@ class rms_norm_static_fp8_quant_kernel {
  private:
   out_t* __restrict__ out;
   const scalar_t* __restrict__ input;
-  const int input_stride;
+  const size_t input_stride;
   const scalar_t* __restrict__ weight;
   const float* __restrict__ scale;
   const float epsilon;
-  const int hidden_size;
+  const size_t hidden_size;
 };
 
 template <typename scalar_t, typename out_t, int VEC_SIZE>
@@ -368,12 +368,12 @@ class fused_add_rms_norm_static_fp8_quant_kernel {
   fused_add_rms_norm_static_fp8_quant_kernel(
       out_t* __restrict__ out_,
       const scalar_t* __restrict__ input_,
-      const int input_stride_,
+      const size_t input_stride_,
       scalar_t* __restrict__ residual_,
       const scalar_t* __restrict__ weight_,
       const float* __restrict__ scale_,
       const float epsilon_,
-      const int hidden_size_)
+      const size_t hidden_size_)
       : out(out_),
         input(input_),
         input_stride(input_stride_),
@@ -386,8 +386,8 @@ class fused_add_rms_norm_static_fp8_quant_kernel {
   void operator()(sycl::nd_item<1> item) const {
     using vec_t = vllm::xpu::aligned_vec<scalar_t, VEC_SIZE>;
 
-    const int tid = item.get_local_id(0);
-    const int local_range = item.get_local_range(0);
+    const size_t tid = item.get_local_id(0);
+    const size_t local_range = item.get_local_range(0);
     const int64_t token_idx = item.get_group(0);
 
     auto& s_variance =
@@ -397,13 +397,13 @@ class fused_add_rms_norm_static_fp8_quant_kernel {
     const scalar_t* token_input = input + token_idx * input_stride;
     scalar_t* token_residual = residual + token_idx * hidden_size;
     out_t* token_output = out + token_idx * hidden_size;
-    const int nvec = hidden_size / VEC_SIZE;
+    const size_t nvec = hidden_size / VEC_SIZE;
 
     // Pass 1: add residual + compute variance, VEC_SIZE elements per iteration
     float variance = 0.0f;
     const auto* v_in = reinterpret_cast<const vec_t*>(token_input);
     auto* v_res = reinterpret_cast<vec_t*>(token_residual);
-    for (int i = tid; i < nvec; i += local_range) {
+    for (size_t i = tid; i < nvec; i += local_range) {
       vec_t inp = v_in[i];
       vec_t res = v_res[i];
 #pragma unroll
@@ -430,7 +430,7 @@ class fused_add_rms_norm_static_fp8_quant_kernel {
 
     // Pass 2: normalize from residual, apply weight, quantize
     const auto* v_w = reinterpret_cast<const vec_t*>(weight);
-    for (int i = tid; i < nvec; i += local_range) {
+    for (size_t i = tid; i < nvec; i += local_range) {
       vec_t res = v_res[i];
       vec_t wgt = v_w[i];
 #pragma unroll
@@ -449,12 +449,12 @@ class fused_add_rms_norm_static_fp8_quant_kernel {
  private:
   out_t* __restrict__ out;
   const scalar_t* __restrict__ input;
-  const int input_stride;
+  const size_t input_stride;
   scalar_t* __restrict__ residual;
   const scalar_t* __restrict__ weight;
   const float* __restrict__ scale;
   const float epsilon;
-  const int hidden_size;
+  const size_t hidden_size;
 };
 
 template <typename scalar_t, typename out_t>
@@ -468,9 +468,9 @@ void call_rms_norm_dynamic_per_token_quant_kernel(
     float epsilon) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
-  const int hidden_size = input.size(-1);
+  const size_t hidden_size = input.size(-1);
   const int64_t num_tokens = input.numel() / hidden_size;
-  const int block_size = std::min(hidden_size, 1024);
+  const size_t block_size = std::min(hidden_size, static_cast<size_t>(1024));
 
   auto* out_ptr = out.data_ptr<out_t>();
   auto* input_ptr = input.data_ptr<scalar_t>();
@@ -521,10 +521,10 @@ void call_rms_norm_per_block_quant_kernel(
     bool is_scale_transposed) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
-  const int hidden_size = input.size(-1);
+  const size_t hidden_size = input.size(-1);
   const int64_t num_tokens = input.numel() / hidden_size;
-  const int num_groups = hidden_size / group_size;
-  const int block_size = std::min(hidden_size, 1024);
+  const size_t num_groups = hidden_size / group_size;
+  const size_t block_size = std::min(hidden_size, static_cast<size_t>(1024));
 
   // Compute scale strides based on transposition
   const int64_t scale_stride_token =
@@ -556,7 +556,7 @@ void call_rms_norm_per_block_quant_kernel(
               epsilon,
               hidden_size,
               group_size,
-              static_cast<int>(num_tokens),
+              static_cast<size_t>(num_tokens),
               scale_stride_token,
               scale_stride_group));
     });
@@ -578,19 +578,19 @@ void call_rms_norm_static_fp8_quant_kernel(
     float epsilon) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
-  const int hidden_size = input.size(-1);
-  const int input_stride = input.stride(-2);
+  const size_t hidden_size = input.size(-1);
+  const size_t input_stride = input.stride(-2);
   const int64_t num_tokens = input.numel() / hidden_size;
 
   // Match CUDA: smaller blocks when num_tokens is large for better occupancy
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  const size_t max_block_size = (num_tokens < 256) ? 1024 : 256;
 
   // Dispatch VEC_SIZE = gcd(16 / sizeof(sycl_t), hidden_size) matching CUDA
-  const int candidate_vec_size =
-      std::gcd(static_cast<int>(16 / sizeof(sycl_t)), hidden_size);
-  const int vec_size =
+  const size_t candidate_vec_size =
+      std::gcd(static_cast<size_t>(16 / sizeof(sycl_t)), hidden_size);
+  const size_t vec_size =
       (input_stride % candidate_vec_size == 0) ? candidate_vec_size : 1;
-  const int block_size = std::min(hidden_size / vec_size, max_block_size);
+  const size_t block_size = std::min(hidden_size / vec_size, max_block_size);
 
   auto& queue = vllm::xpu::vllmGetQueue();
 
@@ -637,20 +637,21 @@ void call_fused_add_rms_norm_static_fp8_quant_kernel(
     float epsilon) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
-  const int hidden_size = input.size(-1);
-  const int input_stride = input.stride(-2);
+  const size_t hidden_size = input.size(-1);
+  const size_t input_stride = input.stride(-2);
   const int64_t num_tokens = input.numel() / hidden_size;
 
   // Match CUDA: smaller blocks when num_tokens is large for better occupancy
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  const size_t max_block_size = (num_tokens < 256) ? 1024 : 256;
 
   // Dispatch VEC_SIZE = gcd(16 / sizeof(sycl_t), hidden_size) matching CUDA.
   // Also require input_stride % vec_size == 0 for safe vectorized input reads.
-  int vec_size = std::gcd(static_cast<int>(16 / sizeof(sycl_t)), hidden_size);
+  size_t vec_size =
+      std::gcd(static_cast<size_t>(16 / sizeof(sycl_t)), hidden_size);
   if (input_stride % vec_size != 0) {
     vec_size = 1;
   }
-  const int block_size = std::min(hidden_size / vec_size, max_block_size);
+  const size_t block_size = std::min(hidden_size / vec_size, max_block_size);
 
   auto& queue = vllm::xpu::vllmGetQueue();
 

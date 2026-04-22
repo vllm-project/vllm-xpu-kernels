@@ -27,16 +27,16 @@ class fused_qk_norm_rope_kernel {
 
   fused_qk_norm_rope_kernel(
       scalar_t* __restrict__ qkv_,
-      const int num_heads_q_,
-      const int num_heads_k_,
-      const int num_heads_v_,
+      const size_t num_heads_q_,
+      const size_t num_heads_k_,
+      const size_t num_heads_v_,
       const float eps_,
       const scalar_t* __restrict__ q_weight_,
       const scalar_t* __restrict__ k_weight_,
       const scalar_t_cache* __restrict__ cos_sin_cache_,
       const int64_t* __restrict__ position_ids_,
-      const int num_tokens_,
-      const int rotary_dim_)
+      const size_t num_tokens_,
+      const size_t rotary_dim_)
       : qkv(qkv_),
         num_heads_q(num_heads_q_),
         num_heads_k(num_heads_k_),
@@ -52,37 +52,38 @@ class fused_qk_norm_rope_kernel {
   void operator() [[sycl::reqd_sub_group_size(SUB_GROUP_SIZE)]] (
       const sycl::nd_item<1>& item) const {
     auto sg = item.get_sub_group();
-    const int lane_id = sg.get_local_linear_id();
-    const int sg_id_in_wg = sg.get_group_linear_id();
-    const int sgs_per_wg = sg.get_group_linear_range();
-    const int global_sg_id = item.get_group(0) * sgs_per_wg + sg_id_in_wg;
+    const size_t lane_id = sg.get_local_linear_id();
+    const size_t sg_id_in_wg = sg.get_group_linear_id();
+    const size_t sgs_per_wg = sg.get_group_linear_range();
+    const size_t global_sg_id = item.get_group(0) * sgs_per_wg + sg_id_in_wg;
 
-    const int total_qk_heads = num_heads_q + num_heads_k;
-    const int token_idx = global_sg_id / total_qk_heads;
-    const int local_head_idx = global_sg_id % total_qk_heads;
+    const size_t total_qk_heads = num_heads_q + num_heads_k;
+    const size_t token_idx = global_sg_id / total_qk_heads;
+    const size_t local_head_idx = global_sg_id % total_qk_heads;
 
     if (token_idx >= num_tokens) return;
 
     const bool is_q = local_head_idx < num_heads_q;
-    const int head_idx = is_q ? local_head_idx : local_head_idx - num_heads_q;
-    const int num_heads = num_heads_q + num_heads_k + num_heads_v;
+    const size_t head_idx =
+        is_q ? local_head_idx : local_head_idx - num_heads_q;
+    const size_t num_heads = num_heads_q + num_heads_k + num_heads_v;
 
     // Compute the offset into the QKV tensor for this sub-group's head.
-    int offset_warp;
+    size_t offset_warp;
     if (is_q) {
       offset_warp = token_idx * num_heads * head_dim + head_idx * head_dim;
     } else {
       offset_warp = token_idx * num_heads * head_dim + num_heads_q * head_dim +
                     head_idx * head_dim;
     }
-    int offset_thread = offset_warp + lane_id * NUM_ELEMS_PER_THREAD;
+    size_t offset_thread = offset_warp + lane_id * NUM_ELEMS_PER_THREAD;
 
     // Load elements and compute sum of squares for RMSNorm.
     float elements[NUM_ELEMS_PER_THREAD];
     float sum_of_squares = 0.0f;
 
 #pragma unroll
-    for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
+    for (size_t i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
       float val = static_cast<float>(qkv[offset_thread + i]);
       elements[i] = val;
       sum_of_squares += val * val;
@@ -99,34 +100,34 @@ class fused_qk_norm_rope_kernel {
     // Apply RMSNorm with learned weights.
     const scalar_t* weight = is_q ? q_weight : k_weight;
 #pragma unroll
-    for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
-      int dim = lane_id * NUM_ELEMS_PER_THREAD + i;
+    for (size_t i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
+      size_t dim = lane_id * NUM_ELEMS_PER_THREAD + i;
       float w = static_cast<float>(weight[dim]);
       elements[i] *= rms_rcp * w;
     }
 
     // Apply RoPE.
     const int64_t pos_id = position_ids[token_idx];
-    const int embed_dim = rotary_dim / 2;
+    const size_t embed_dim = rotary_dim / 2;
     const scalar_t_cache* cache_ptr = cos_sin_cache + pos_id * rotary_dim;
     const scalar_t_cache* cos_ptr = cache_ptr;
     const scalar_t_cache* sin_ptr = cache_ptr + embed_dim;
 
-    const int rotary_lanes = rotary_dim / NUM_ELEMS_PER_THREAD;
+    const size_t rotary_lanes = rotary_dim / NUM_ELEMS_PER_THREAD;
 
     if (lane_id < rotary_lanes) {
       if constexpr (!IS_NEOX) {
         // Interleaved-style RoPE (GPT-J style).
 #pragma unroll
-        for (int i = 0; i < NUM_ELEMS_PER_THREAD / 2; ++i) {
-          const int idx0 = 2 * i;
-          const int idx1 = 2 * i + 1;
-          const int dim_idx = lane_id * NUM_ELEMS_PER_THREAD + idx0;
+        for (size_t i = 0; i < NUM_ELEMS_PER_THREAD / 2; ++i) {
+          const size_t idx0 = 2 * i;
+          const size_t idx1 = 2 * i + 1;
+          const size_t dim_idx = lane_id * NUM_ELEMS_PER_THREAD + idx0;
 
           const float val0 = elements[idx0];
           const float val1 = elements[idx1];
 
-          const int half_dim = dim_idx / 2;
+          const size_t half_dim = dim_idx / 2;
           const float cos_val = static_cast<float>(cos_ptr[half_dim]);
           const float sin_val = static_cast<float>(sin_ptr[half_dim]);
 
@@ -136,10 +137,10 @@ class fused_qk_norm_rope_kernel {
       } else {
         // Neox-style RoPE: exchange data with partner lane.
         sycl::group_barrier(sg);
-        const int pair_offset = (rotary_dim / 2) / NUM_ELEMS_PER_THREAD;
+        const size_t pair_offset = (rotary_dim / 2) / NUM_ELEMS_PER_THREAD;
 
 #pragma unroll
-        for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
+        for (size_t i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
           float partner_val =
               sycl::permute_group_by_xor(sg, elements[i], pair_offset);
 
@@ -147,9 +148,9 @@ class fused_qk_norm_rope_kernel {
             partner_val = -partner_val;
           }
 
-          int dim_idx = lane_id * NUM_ELEMS_PER_THREAD + i;
+          size_t dim_idx = lane_id * NUM_ELEMS_PER_THREAD + i;
           dim_idx = (dim_idx * 2) % rotary_dim;
-          int half_dim = dim_idx / 2;
+          size_t half_dim = dim_idx / 2;
 
           const float cos_val = static_cast<float>(cos_ptr[half_dim]);
           const float sin_val = static_cast<float>(sin_ptr[half_dim]);
@@ -162,34 +163,34 @@ class fused_qk_norm_rope_kernel {
 
     // Store results back in-place.
 #pragma unroll
-    for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
+    for (size_t i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
       qkv[offset_thread + i] = static_cast<scalar_t>(elements[i]);
     }
   }
 
  private:
   scalar_t* __restrict__ qkv;
-  const int num_heads_q;
-  const int num_heads_k;
-  const int num_heads_v;
+  const size_t num_heads_q;
+  const size_t num_heads_k;
+  const size_t num_heads_v;
   const float eps;
   const scalar_t* __restrict__ q_weight;
   const scalar_t* __restrict__ k_weight;
   const scalar_t_cache* __restrict__ cos_sin_cache;
   const int64_t* __restrict__ position_ids;
-  const int num_tokens;
-  const int rotary_dim;
+  const size_t num_tokens;
+  const size_t rotary_dim;
 };
 
 template <typename scalar_t, typename scalar_t_cache>
 void launch_fused_qk_norm_rope(
     torch::Tensor& qkv,
-    int num_tokens,
-    int num_heads_q,
-    int num_heads_k,
-    int num_heads_v,
-    int head_dim,
-    int rotary_dim,
+    size_t num_tokens,
+    size_t num_heads_q,
+    size_t num_heads_k,
+    size_t num_heads_v,
+    size_t head_dim,
+    size_t rotary_dim,
     float eps,
     torch::Tensor& q_weight,
     torch::Tensor& k_weight,
@@ -202,9 +203,9 @@ void launch_fused_qk_norm_rope(
   constexpr int block_size = 256;
   constexpr int sgs_per_wg = block_size / 32;
 
-  const int total_qk_heads = num_heads_q + num_heads_k;
-  const int total_sgs = num_tokens * total_qk_heads;
-  const int grid_size = (total_sgs + sgs_per_wg - 1) / sgs_per_wg;
+  const size_t total_qk_heads = num_heads_q + num_heads_k;
+  const size_t total_sgs = num_tokens * total_qk_heads;
+  const size_t grid_size = (total_sgs + sgs_per_wg - 1) / sgs_per_wg;
 
   auto qkv_ptr = reinterpret_cast<sycl_t*>(qkv.data_ptr<scalar_t>());
   auto q_weight_ptr =
@@ -351,12 +352,12 @@ void fused_qk_norm_rope(
           using cache_scalar_t = scalar_t;
           vllm::launch_fused_qk_norm_rope<qkv_scalar_t, cache_scalar_t>(
               qkv,
-              static_cast<int>(num_tokens),
-              static_cast<int>(num_heads_q),
-              static_cast<int>(num_heads_k),
-              static_cast<int>(num_heads_v),
-              static_cast<int>(head_dim),
-              static_cast<int>(cos_sin_cache.size(1)),
+              static_cast<size_t>(num_tokens),
+              static_cast<size_t>(num_heads_q),
+              static_cast<size_t>(num_heads_k),
+              static_cast<size_t>(num_heads_v),
+              static_cast<size_t>(head_dim),
+              static_cast<size_t>(cos_sin_cache.size(1)),
               static_cast<float>(eps),
               q_weight,
               k_weight,

@@ -15,9 +15,9 @@ class MoeGather {
       const float* topk_weights,
       const int* unpermuted_row_to_permuted_row,
       const int64_t* expert_first_token_offset,
-      const int num_experts,
-      const int num_tokens,
-      const int hidden_size)
+      const size_t num_experts,
+      const size_t num_tokens,
+      const size_t hidden_size)
       : output(output),
         moe_output(moe_output),
         topk_weights(topk_weights),
@@ -31,7 +31,7 @@ class MoeGather {
   static constexpr int WARP_SIZE = 32;
   static constexpr int Stride = GroupWorkItem * ElemsPerItem;
 
-  static inline sycl::nd_range<1> get_nd_range(const int num_tokens) {
+  static inline sycl::nd_range<1> get_nd_range(const size_t num_tokens) {
     sycl::range<1> local(GroupWorkItem);
     sycl::range<1> group(num_tokens);
     return sycl::nd_range<1>(local * group, local);
@@ -43,7 +43,7 @@ class MoeGather {
     auto local_id_x = item.get_local_id(0);
     auto group_id_x = item.get_group(0);
 
-    const int token_idx = group_id_x;
+    const size_t token_idx = group_id_x;
 
     int moe_ids[TOPK];
 #pragma unroll
@@ -57,10 +57,10 @@ class MoeGather {
       scores[i] = topk_weights[token_idx * TOPK + i];
     }
 
-    const int loop_count = (hidden_size + Stride - 1) / Stride;
+    const size_t loop_count = (hidden_size + Stride - 1) / Stride;
 
-    for (int i = 0; i < loop_count; ++i) {
-      const int hidden_idx = i * Stride + local_id_x * ElemsPerItem;
+    for (size_t i = 0; i < loop_count; ++i) {
+      const size_t hidden_idx = i * Stride + local_id_x * ElemsPerItem;
       if (hidden_idx < hidden_size) {
         float accum[ElemsPerItem];
 #pragma unroll
@@ -95,9 +95,9 @@ class MoeGather {
   const float* topk_weights;
   const int* unpermuted_row_to_permuted_row;
   const int64_t* expert_first_token_offset;
-  const int num_experts;
-  const int num_tokens;
-  const int hidden_size;
+  const size_t num_experts;
+  const size_t num_tokens;
+  const size_t hidden_size;
 };
 
 template <typename T>
@@ -107,10 +107,10 @@ void MoeGatherLauncher(
     const float* topk_weights,
     const int* unpermuted_row_to_permuted_row,
     const int64_t* expert_first_token_offset,
-    const int num_experts,
-    const int num_tokens,
-    const int topk,
-    const int hidden_size,
+    const size_t num_experts,
+    const size_t num_tokens,
+    const size_t topk,
+    const size_t hidden_size,
     sycl::queue& queue) {
   int elems_per_item = sizeof(float) * 4 / sizeof(T);
   while (hidden_size % elems_per_item != 0) {
@@ -170,9 +170,9 @@ void moe_gather(
     const torch::Tensor& expert_first_token_offset,       // [num_experts + 1]
     const int64_t num_experts) {
   // Implementation of the gather operation
-  const int num_tokens = topk_weights.size(0);
-  const int topk = topk_weights.size(1);
-  const int hidden_size = output.size(1);
+  const size_t num_tokens = topk_weights.size(0);
+  const size_t topk = topk_weights.size(1);
+  const size_t hidden_size = output.size(1);
 
   TORCH_CHECK(
       topk_weights.scalar_type() == torch::kFloat32,
