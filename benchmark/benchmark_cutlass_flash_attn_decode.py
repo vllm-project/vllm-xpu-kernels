@@ -3,9 +3,15 @@
 
 # isort: off
 import gc
+from pathlib import Path
+import sys
 
 import torch
 import triton
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from benchmark.src.flash_attn_interface_ import (
     flash_attn_varlen_func_CalKernelTime)
@@ -20,6 +26,11 @@ from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 # isort: on
 
 DEVICE = "xpu"
+
+
+def ensure_save_path_exists(save_path: str) -> str:
+    Path(save_path).mkdir(parents=True, exist_ok=True)
+    return save_path
 
 
 def clear_xpu_cache():
@@ -303,5 +314,6 @@ if __name__ == "__main__":
     configs = gen_perf_configs()
     configs = filter_configs(configs)
     benchmark = get_benchmark_decode_with_paged_kv(iterations=iterations)
+    save_path = ensure_save_path_exists(args.save_path)
     # Run performance benchmark
-    benchmark.run(print_data=True, save_path=args.save_path)
+    benchmark.run(print_data=True, save_path=save_path)
