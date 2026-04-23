@@ -83,14 +83,15 @@ inline void dispatch_by_page_size(
   // NOTE: We intentionally route page_size that is a multiple of 128 through
   // the kv_tile=_64 policy (instead of _128) because the _128 decode policy
   // uses SubgroupLayoutQK<_1,_8,_1> (8-SG K split, ReduceK=8) which exercises
-  // a buggy cross-SG SLM reduction path in chunk_prefill_epilogue.hpp::reduce_A.
-  // The bug only manifests in real autoregressive serving (gpt-oss-20b gsm8k
-  // strict-match drops ~12pp) and stems from the degenerate SGTileShapeO=(1,32)
-  // produced when ReduceK=8. The _64 policy uses ReduceK=4 with the
-  // well-tested SGTileShapeO=(2,32) layout. The mainloop iterates
-  // page_size/64 sub-tiles per page (2 for page=128, 4 for page=256, ...),
-  // so correctness is preserved at a small parallelism cost. Restore the
-  // _128 routing once the underlying ReduceK=8 bug is fixed upstream.
+  // a buggy cross-SG SLM reduction path in
+  // chunk_prefill_epilogue.hpp::reduce_A. The bug only manifests in real
+  // autoregressive serving (gpt-oss-20b gsm8k strict-match drops ~12pp) and
+  // stems from the degenerate SGTileShapeO=(1,32) produced when ReduceK=8. The
+  // _64 policy uses ReduceK=4 with the well-tested SGTileShapeO=(2,32) layout.
+  // The mainloop iterates page_size/64 sub-tiles per page (2 for page=128, 4
+  // for page=256, ...), so correctness is preserved at a small parallelism
+  // cost. Restore the _128 routing once the underlying ReduceK=8 bug is fixed
+  // upstream.
   if (page_size == 16) {
     dispatch_by_head_size<QGroup, _16>(head_case, queue, cuQKType, args);
   } else if (page_size == 32) {
