@@ -61,12 +61,18 @@ def calculate_memory_bytes(m, n, k, x_dtype, w_dtype=None):
 # Config generation
 # ---------------------------------------------------------------------------
 
-# Generic MNK shapes for benchmarking
-GENERIC_MNK = [
-    (512, 1024, 2048),
-    (1024, 2048, 2048),
-    (4096, 4096, 4096),
-    (6144, 12288, 4096),
+# Generic NK shapes for benchmarking (M is swept like model_shapes)
+GENERIC_NK = [
+    (1024, 2048),
+    (2048, 2048),
+    (4096, 4096),
+    (12288, 4096),
+    (1024, 8192),
+]
+
+M_SIZES = [
+    1, 2, 4, 8, 16, 32, 64, 128,
+    256, 384, 512, 640, 768, 896, 1024, 4096,
 ]
 
 FP8_DTYPES = [torch.float8_e4m3fn, torch.float8_e5m2]
@@ -248,54 +254,60 @@ KPI_WEIGHT_SHAPES = {
 def gen_fp8_gemm_perf_configs():
     """Generate configs for fp8_gemm (w8a8) per-tensor benchmark."""
     configs = []
-    for mnk, out_dtype, fp8_dtype in itertools.product(
-        GENERIC_MNK, OUT_DTYPES, FP8_DTYPES
+    for (n, k), m, out_dtype, fp8_dtype in itertools.product(
+        GENERIC_NK, M_SIZES, OUT_DTYPES, FP8_DTYPES
     ):
-        configs.append((mnk, out_dtype, fp8_dtype))
+        configs.append(((m, n, k), out_dtype, fp8_dtype))
     return configs
 
 
 def gen_fp8_gemm_w8a16_perf_configs():
     """Generate configs for fp8_gemm_w8a16 benchmark."""
     configs = []
-    for mnk, out_dtype, fp8_dtype in itertools.product(
-        GENERIC_MNK, OUT_DTYPES, FP8_DTYPES
+    for (n, k), m, out_dtype, fp8_dtype in itertools.product(
+        GENERIC_NK, M_SIZES, OUT_DTYPES, FP8_DTYPES
     ):
-        configs.append((mnk, out_dtype, fp8_dtype))
+        configs.append(((m, n, k), out_dtype, fp8_dtype))
     return configs
 
 
 def gen_fp8_gemm_per_channel_perf_configs():
     """Generate configs for fp8_gemm per-channel benchmark."""
     configs = []
-    for mnk, out_dtype, fp8_dtype in itertools.product(
-        GENERIC_MNK, OUT_DTYPES, [torch.float8_e4m3fn]
+    for (n, k), m, out_dtype, fp8_dtype in itertools.product(
+        GENERIC_NK, M_SIZES, OUT_DTYPES, [torch.float8_e4m3fn]
     ):
-        configs.append((mnk, out_dtype, fp8_dtype))
+        configs.append(((m, n, k), out_dtype, fp8_dtype))
     return configs
 
 
 def gen_mxfp8_gemm_perf_configs():
     """Generate configs for mxfp8 gemm benchmark."""
     configs = []
-    for mnk, out_dtype in itertools.product(GENERIC_MNK, OUT_DTYPES):
-        configs.append((mnk, out_dtype))
+    for (n, k), m, out_dtype in itertools.product(
+        GENERIC_NK, M_SIZES, OUT_DTYPES
+    ):
+        configs.append(((m, n, k), out_dtype))
     return configs
 
 
 def gen_bf16_gemm_perf_configs():
     """Generate configs for bf16 gemm benchmark."""
     configs = []
-    for mnk, dtype in itertools.product(GENERIC_MNK, OUT_DTYPES):
-        configs.append((mnk, dtype))
+    for (n, k), m, dtype in itertools.product(
+        GENERIC_NK, M_SIZES, OUT_DTYPES
+    ):
+        configs.append(((m, n, k), dtype))
     return configs
 
 
 def gen_mxfp4_gemm_perf_configs():
     """Generate configs for mxfp4 gemm benchmark."""
     configs = []
-    for mnk, out_dtype in itertools.product(GENERIC_MNK, OUT_DTYPES):
-        configs.append((mnk, out_dtype))
+    for (n, k), m, out_dtype in itertools.product(
+        GENERIC_NK, M_SIZES, OUT_DTYPES
+    ):
+        configs.append(((m, n, k), out_dtype))
     return configs
 
 
@@ -307,26 +319,8 @@ def gen_weight_shape_configs(dtype_kind="fp8"):
                     "fp8_w8a16" for w8a16, "fp8_per_channel" for per-channel.
     """
     configs = []
-    m_sizes = [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        384,
-        512,
-        640,
-        768,
-        896,
-        1024,
-        4096,
-    ]
     for model_name, shapes in KPI_WEIGHT_SHAPES.items():
-        for (k, n), m in itertools.product(shapes, m_sizes):
+        for (k, n), m in itertools.product(shapes, M_SIZES):
             if dtype_kind == "bf16":
                 for out_dtype in OUT_DTYPES:
                     configs.append(((m, n, k), out_dtype))
