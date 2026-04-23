@@ -165,9 +165,9 @@ struct decode_policy_qpacked_head<q_packed, head_dim, _32> {
 };
 
 // kv_tile == _64
-// Also services any block_size that is a multiple of 64 but not of 128
-// (e.g. 64, 192, 320, ...). The mainloop iterates page_size / 64 sub-tiles
-// per page via the page-table indirection.
+// Also services any block_size that is a positive multiple of 64
+// (e.g. 64, 128, 192, 256, 320, ...). The mainloop iterates
+// page_size / 64 sub-tiles per page via the page-table indirection.
 template <typename q_packed, typename head_dim>
 struct decode_policy_qpacked_head<q_packed, head_dim, _64> {
   using ShapeQK = Shape<q_packed, _64, _64>;
@@ -177,7 +177,13 @@ struct decode_policy_qpacked_head<q_packed, head_dim, _64> {
 };
 
 // kv_tile == _128
-// Also services any block_size that is a multiple of 128 (e.g. 128, 256, 384).
+// NOTE: Currently UNUSED. The dispatcher in paged_decode_utils.hpp routes
+// page_size that is a multiple of 128 through the kv_tile=_64 policy because
+// this _128 policy uses SubgroupLayoutQK<_1,_8,_1> (ReduceK=8), which
+// triggers a wrong-result bug in the cross-SG SLM reduction
+// (chunk_prefill_epilogue.hpp::reduce_A) when SGTileShapeO collapses to
+// (1, 32). See dispatch_by_page_size for details. Kept here so it can be
+// re-enabled once the upstream ReduceK=8 reduction path is fixed.
 template <typename q_packed, typename head_dim>
 struct decode_policy_qpacked_head<q_packed, head_dim, _128> {
   using ShapeQK = Shape<q_packed, _128, _64>;
