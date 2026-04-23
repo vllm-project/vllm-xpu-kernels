@@ -399,8 +399,12 @@ def test_decode_with_paged_kv(
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
-    if head_size == 512 and block_size >= 128:
-        pytest.skip("skip test cases that may run out of SLM.")
+    # NOTE: head_size=512 + block_size>=128 was previously skipped because the
+    # kv_tile=_128 decode policy + head_size=512 ShapePV exceeded SLM. The
+    # _128 policy is no longer dispatched; all multiples of 64 use the
+    # kv_tile=_64 policy (see paged_decode_utils.hpp::dispatch_by_page_size),
+    # so SLM usage is independent of block_size for block_size>=64. The
+    # head_size=512 case has been verified to pass for all BLOCK_SIZES.
     if num_heads == (16, 1) and head_size == 256:
         pytest.skip("skip test cases that may run out of SLM.")
     if block_size == 128 and num_blocks == 32768 and head_size >= 192:
