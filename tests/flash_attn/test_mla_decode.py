@@ -44,7 +44,8 @@ def _ref_mla_decode(
         kv = cache[idx].reshape(-1, head_qk)[:kl]   # [kl, head_qk]
         k = kv                                      # [kl, head_qk]
         v = kv[:, :lora]                            # [kl, lora]
-        q = torch.cat([q_nope[q0:q1], q_pe[q0:q1]], dim=-1)  # [ql, h_q, head_qk]
+        q = torch.cat([q_nope[q0:q1],
+                       q_pe[q0:q1]], dim=-1)  # [ql, h_q, head_qk]
         # attn: [h_q, ql, kl]
         attn = torch.einsum("qhd,kd->hqk", q, k).float() * softmax_scale
         if causal and ql > 1:
