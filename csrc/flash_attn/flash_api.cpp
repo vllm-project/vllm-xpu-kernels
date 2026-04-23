@@ -318,7 +318,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
 // MLA decode entry point. Forwards `q` (concatenated `[q_nope, q_pe]`),
 // the combined `kv_c_and_k_pe_cache` as K, and a non-contiguous narrow view
 // of the same buffer (kv_c only) as V to `cutlass_paged_decode_interface`.
-// Always paged + varlen; supports `is_causal=true` for query_len > 1.
+// Always paged + varlen
 at::Tensor mla_decode_fwd(
     const at::Tensor& q,            // [num_tokens, num_heads_q, head_size_qk]
     const at::Tensor& k_cache,      // [num_blocks, block_size, 1, head_size_qk]
