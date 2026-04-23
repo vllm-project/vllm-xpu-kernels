@@ -22,11 +22,11 @@ inline int get_num_splits(
   int cur_parallel = batch_size * num_heads_kv;
 
   // The decode kernel iterates kv_tile-sized work units within each page,
-  // not page-sized units. The dispatch routes
-  //   block_size == 16          -> kv_tile=_16
-  //   block_size == 32          -> kv_tile=_32
-  //   block_size %% 128 == 0    -> kv_tile=_128
-  //   else (other 64*n)         -> kv_tile=_64
+  // not page-sized units. The dispatch (see paged_decode_utils.hpp::
+  // dispatch_by_page_size) routes
+  //   block_size == 16              -> kv_tile=_16
+  //   block_size == 32              -> kv_tile=_32
+  //   block_size > 0 && %% 64 == 0  -> kv_tile=_64  (covers 64, 128, 192, ...)
   // Compute the heuristic in tiles so it scales uniformly across all
   // supported block_sizes (16, 32, 64, 128, 192, 256, ...).
   int kv_tile;
@@ -35,14 +35,14 @@ inline int get_num_splits(
   } else if (block_size == 32) {
     kv_tile = 32;
   } else {
-    kv_tile = ((block_size % 128) == 0) ? 128 : 64;
+    kv_tile = 64;
   }
   int kv_tiles = (max_seqlen_k + kv_tile - 1) / kv_tile;
 
   // Minimum KV tiles to benefit from splitting, aligned with the kernel's
   // kMinBlocksForSplit.  Below this the kernel falls back to single-split
   // regardless, and splitting only adds ReduceSplitK overhead.
-  int min_kv_tiles = (kv_tile <= 64) ? 32 : 64;
+  int min_kv_tiles = 32;
   if (kv_tiles < min_kv_tiles) return 1;
 
   // GPU well-utilized or saturated: splitting only adds ReduceSplitK
@@ -53,29 +53,35 @@ inline int get_num_splits(
   int target_splits;
   if (num_heads_kv >= 4) {
     // Many KV heads: each split adds kv_heads WGs.  Scale inversely
-    // with kv_tile — kv_tile=64 gets ~20 splits, kv_tile=128 gets ~10.
+    // with kv_tile so smaller tiles (which already have more native
+    // parallelism per page) request fewer splits — kv_tile=64 gets ~20,
+    // kv_tile=32 gets ~40, kv_tile=16 gets ~80 (clamped by policy cap).
     target_splits = std::max(4, num_xe_cores * 64 / kv_tile);
   } else {
     // Few KV heads: target at least num_xe_cores splits for parallelism;
-    // allow more for very long sequences (~10 tiles/split at kv_tile=64).
-    int tiles_per_split = (kv_tile <= 64) ? 10 : 8;
+    // allow more for very long sequences (~10 tiles/split).
+    int tiles_per_split = 10;
     target_splits = std::max(num_xe_cores, kv_tiles / tiles_per_split);
   }
 
   // Each split must process at least 3 KV tiles to amortize overhead.
   int max_splits_tiles = std::max(1, kv_tiles / 3);
-  // Per-policy cap on splits = SGPerWG * sg_size. The decode kernel's
-  // SubgroupLayoutQK depends on kv_tile, which is selected from block_size:
-  //   block_size == 16 -> kv_tile=_16, SGPerWG=1 -> max_kv_splits=16
-  //   block_size == 32 -> kv_tile=_32, SGPerWG=2 -> max_kv_splits=32
-  //   else (>=64)      -> kv_tile=_64 or _128, SGPerWG>=4 -> >=64
+  // Per-policy cap on splits = SGPerWG * sg_size (sg_size=16). The decode
+  // kernel's SubgroupLayoutQK depends on kv_tile, which is selected from
+  // block_size (see decode_policy_qpacked_head specializations in
+  // fmha_utils.hpp):
+  //   block_size == 16   -> kv_tile=_16, SGPerWG=1 -> max_kv_splits=16
+  //   block_size == 32   -> kv_tile=_32, SGPerWG=2 -> max_kv_splits=32
+  //   block_size 64*n    -> kv_tile=_64, SGPerWG=4 -> max_kv_splits=64
   // Submitting more than max_kv_splits triggers can_implement to fail
   // ("Invalid Problem Size") and the kernel is skipped.
-  int policy_split_cap = 64;
+  int policy_split_cap;
   if (block_size == 16) {
     policy_split_cap = 16;
   } else if (block_size == 32) {
     policy_split_cap = 32;
+  } else {
+    policy_split_cap = 64;
   }
   // Hard cap: beyond 40 splits, diminishing returns.
   int num_splits =
