@@ -320,9 +320,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
 // of the same buffer (kv_c only) as V to `cutlass_paged_decode_interface`.
 // Always paged + varlen
 at::Tensor mla_decode_fwd(
-    const at::Tensor& q,            // [num_tokens, num_heads_q, head_size_qk]
-    const at::Tensor& k_cache,      // [num_blocks, block_size, 1, head_size_qk]
-    const at::Tensor& v_cache,      // [num_blocks, block_size, 1, head_size_vo]
+    const at::Tensor& q,        // [num_tokens, num_heads_q, head_size_qk]
+    const at::Tensor& k_cache,  // [num_blocks, block_size, 1, head_size_qk]
+    const at::Tensor& v_cache,  // [num_blocks, block_size, 1, head_size_vo]
     std::optional<at::Tensor>& out_,
     const at::Tensor& cu_seqlens_q,  // [b+1]
     const at::Tensor& seqused_k,     // [b]
@@ -347,7 +347,8 @@ at::Tensor mla_decode_fwd(
   CHECK_DEVICE(seqused_k);
   CHECK_DEVICE(block_table);
 
-  TORCH_CHECK(q.dim() == 3, "q must be [num_tokens, num_heads_q, head_size_qk]");
+  TORCH_CHECK(
+      q.dim() == 3, "q must be [num_tokens, num_heads_q, head_size_qk]");
   TORCH_CHECK(
       k_cache.dim() == 4 && v_cache.dim() == 4,
       "k_cache/v_cache must be [num_blocks, block_size, num_heads_kv, head]");
@@ -376,8 +377,7 @@ at::Tensor mla_decode_fwd(
     out = *out_;
   } else {
     out = torch::empty(
-        {num_tokens, num_heads_q, v_head_dim},
-        q.options().device(q.device()));
+        {num_tokens, num_heads_q, v_head_dim}, q.options().device(q.device()));
   }
 
   int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;

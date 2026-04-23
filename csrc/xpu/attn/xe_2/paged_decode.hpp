@@ -53,8 +53,7 @@ using decode_policy_q16_h192_p128 = decode_policy_qpacked_head<_16, _192, _128>;
 using decode_policy_q16_h256_p128 = decode_policy_qpacked_head<_16, _256, _128>;
 using decode_policy_q16_h512_p128 = decode_policy_qpacked_head<_16, _512, _128>;
 using decode_policy_q8_h576_p128 = decode_policy_qpacked_head<_8, _576, _128>;
-using decode_policy_q16_h576_p128 =
-    decode_policy_qpacked_head<_16, _576, _128>;
+using decode_policy_q16_h576_p128 = decode_policy_qpacked_head<_16, _576, _128>;
 
 // page_size = 16
 using decode_policy_q8_h64_p16 = decode_policy_qpacked_head<_8, _64, _16>;

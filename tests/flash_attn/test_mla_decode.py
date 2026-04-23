@@ -8,7 +8,6 @@ qk_rope_head_dim) and V (a non-contiguous narrow view, head_dim =
 kv_lora_rank).
 """
 
-from typing import Optional
 
 import pytest
 import torch

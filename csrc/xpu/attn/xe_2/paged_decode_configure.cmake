@@ -95,7 +95,14 @@ function(paged_decode_configure FILENAME_SUFFIX)
 
   # Configuration space dimensions
   set(qgroup_list "8" "16")
-  set(headsize_list "64" "96" "128" "192" "256" "512" "576")
+  set(headsize_list
+      "64"
+      "96"
+      "128"
+      "192"
+      "256"
+      "512"
+      "576")
   set(pagesize_list "16" "32" "64" "128")
 
   # =============================================================================
