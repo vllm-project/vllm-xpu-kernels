@@ -315,6 +315,123 @@ std::vector<at::Tensor> mha_varlen_fwd(
     return {out, softmax_lse};
   }
 }
+// MLA decode entry point. Forwards `q` (concatenated `[q_nope, q_pe]`),
+// the combined `kv_c_and_k_pe_cache` as K, and a non-contiguous narrow view
+// of the same buffer (kv_c only) as V to `cutlass_paged_decode_interface`.
+// Always paged + varlen; supports `is_causal=true` for query_len > 1.
+at::Tensor mla_decode_fwd(
+    const at::Tensor& q,            // [num_tokens, num_heads_q, head_size_qk]
+    const at::Tensor& k_cache,      // [num_blocks, block_size, 1, head_size_qk]
+    const at::Tensor& v_cache,      // [num_blocks, block_size, 1, head_size_vo]
+    std::optional<at::Tensor>& out_,
+    const at::Tensor& cu_seqlens_q,  // [b+1]
+    const at::Tensor& seqused_k,     // [b]
+    const at::Tensor& block_table,   // [b, max_blocks_per_seq]
+    int max_seqlen_q,
+    int max_seqlen_k,
+    float softmax_scale,
+    bool is_causal,
+    std::optional<int> num_splits) {
+  auto q_type = q.scalar_type();
+  TORCH_CHECK(
+      q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16,
+      "MLA decode XPU only supports fp16/bf16");
+  TORCH_CHECK(
+      k_cache.scalar_type() == q_type && v_cache.scalar_type() == q_type,
+      "q/k/v dtype mismatch");
+
+  CHECK_DEVICE(q);
+  CHECK_DEVICE(k_cache);
+  CHECK_DEVICE(v_cache);
+  CHECK_DEVICE(cu_seqlens_q);
+  CHECK_DEVICE(seqused_k);
+  CHECK_DEVICE(block_table);
+
+  TORCH_CHECK(q.dim() == 3, "q must be [num_tokens, num_heads_q, head_size_qk]");
+  TORCH_CHECK(
+      k_cache.dim() == 4 && v_cache.dim() == 4,
+      "k_cache/v_cache must be [num_blocks, block_size, num_heads_kv, head]");
+  TORCH_CHECK(
+      k_cache.size(2) == 1 && v_cache.size(2) == 1,
+      "MLA expects num_heads_kv == 1");
+  TORCH_CHECK(
+      q.stride(-1) == 1 && k_cache.stride(-1) == 1 && v_cache.stride(-1) == 1,
+      "q/k_cache/v_cache must be contiguous in last dim");
+  TORCH_CHECK(
+      block_table.dtype() == torch::kInt32, "block_table must be int32");
+  TORCH_CHECK(
+      cu_seqlens_q.dtype() == torch::kInt32, "cu_seqlens_q must be int32");
+  TORCH_CHECK(seqused_k.dtype() == torch::kInt32, "seqused_k must be int32");
+
+  auto& queue = vllm::xpu::vllmGetQueue(q.device().index());
+
+  int num_tokens = q.size(0);
+  int num_heads_q = q.size(1);
+  int v_head_dim = v_cache.size(-1);
+  int block_size = k_cache.size(1);
+  int num_heads_kv = 1;
+
+  at::Tensor out;
+  if (out_.has_value()) {
+    out = *out_;
+  } else {
+    out = torch::empty(
+        {num_tokens, num_heads_q, v_head_dim},
+        q.options().device(q.device()));
+  }
+
+  int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
+  int eff_seqlen_k = max_seqlen_k;
+  int num_kv_splits = num_splits.value_or(get_num_splits(
+      queue, batch_size, num_heads_kv, eff_seqlen_k, block_size));
+
+  at::Tensor tmp_out =
+      num_kv_splits == 1
+          ? out
+          : at::empty(
+                {num_tokens, num_heads_q * num_kv_splits, v_head_dim},
+                q.options().device(q.device()));
+  at::Tensor max_logits = at::empty(
+      {num_tokens, num_heads_q, num_kv_splits},
+      q.options().dtype(at::kFloat).device(q.device()));
+  at::Tensor exp_sums = at::empty(
+      {num_tokens, num_heads_q, num_kv_splits},
+      q.options().dtype(at::kFloat).device(q.device()));
+
+  std::optional<const at::Tensor> k_scale = std::nullopt;
+  std::optional<const at::Tensor> v_scale = std::nullopt;
+  std::optional<const at::Tensor> softmax_sink = std::nullopt;
+
+  cutlass_paged_decode_interface(
+      queue,
+      q,
+      k_cache,
+      v_cache,
+      out,
+      tmp_out,
+      exp_sums,
+      max_logits,
+      block_table,
+      cu_seqlens_q,
+      seqused_k,
+      max_seqlen_q,
+      max_seqlen_k,
+      k_scale,
+      v_scale,
+      static_cast<double>(softmax_scale),
+      softmax_sink,
+      /*window_size_left=*/-1,
+      /*window_size_right=*/-1,
+      /*is_varlen=*/true,
+      /*is_paged=*/true,
+      is_causal,
+      /*is_local=*/false,
+      /*is_sink=*/false,
+      num_kv_splits);
+
+  return out;
+}
+
 }  // namespace FLASH_NAMESPACE
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
@@ -333,6 +450,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "varlen_fwd",
       torch::kXPU,
       make_pytorch_shim(&FLASH_NAMESPACE::mha_varlen_fwd));
+
+  ops.def(
+      "mla_decode_fwd(Tensor q, Tensor k_cache, Tensor v_cache, Tensor!? out, "
+      "Tensor cu_seqlens_q, Tensor seqused_k, Tensor block_table, "
+      "int max_seqlen_q, int max_seqlen_k, float softmax_scale, "
+      "bool is_causal, int? num_splits) -> Tensor");
+  ops.impl(
+      "mla_decode_fwd",
+      torch::kXPU,
+      make_pytorch_shim(&FLASH_NAMESPACE::mla_decode_fwd));
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

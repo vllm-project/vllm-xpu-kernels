@@ -8,6 +8,7 @@
 #define HEAD_SIZE_LIMIT_3 192
 #define HEAD_SIZE_LIMIT_4 256
 #define HEAD_SIZE_LIMIT_5 512
+#define HEAD_SIZE_LIMIT_6 576
 
 enum class CutlassDType { half, bfloat16, float8_e4m3, float8_e5m2 };
 
