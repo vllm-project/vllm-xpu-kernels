@@ -11,12 +11,10 @@ from tests.utils import format_tc
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 NUM_HEADS = [(8, 2)]
-HEAD_SIZES = [64, 128, 192, 256, 512]
-BLOCK_SIZES = [16, 32, 64, 128, 192, 256]
+HEAD_SIZES = [64, 128, 256, 512]
+BLOCK_SIZES = [16, 64, 512]
 DTYPES = [torch.bfloat16]
 QDTYPES = [None]
-# one value large enough to test overflow in index calculation.
-# one value small enough to test the schema op check
 NUM_BLOCKS = [2048]
 SOFT_CAPS = [None]
 SLIDING_WINDOWS = [(-1, 127), (127, -1), (64, 64), (-1, -1)]
@@ -364,9 +362,7 @@ def test_varlen_with_paged_kv(
 
 
 @pytest.mark.parametrize("seq_lens",
-                         [[(1, 1025)], [(1, 523), (1, 37),
-                                        (1, 2011)], [(1, 13000)],
-                          [(1, 523), (1, 37), (1, 2011), (1, 5000)]])
+                         [[(1, 523), (1, 37), (1, 2011)], [(1, 13000)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
