@@ -1,6 +1,7 @@
 #include "fmha_xe2.h"
 #include "chunk_prefill_utils.hpp"
 #include "chunk_prefill_extern.hpp"
+#include "fmha_utils.hpp"
 
 using namespace cute;
 
@@ -205,7 +206,7 @@ void cutlass_chunk_prefill_impl(
     }
   }
 
-  CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
+  CutlassQKOType cuQKOType = aten_to_Cutlass_qko_dtype(query, key_cache, out);
 
   static constexpr int max_head_size = 512;
   TORCH_CHECK(
@@ -215,22 +216,22 @@ void cutlass_chunk_prefill_impl(
 
   if (args.head_size <= HEAD_SIZE_LIMIT_0) {
     policy_dispatch_func<chunk_policy_head64>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
     policy_dispatch_func<chunk_policy_head96>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
     policy_dispatch_func<chunk_policy_head128>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
     policy_dispatch_func<chunk_policy_head192>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
     policy_dispatch_func<chunk_policy_head256>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
     policy_dispatch_func<chunk_policy_head512>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKOType, args, is_paged, is_causal, is_local, is_sink);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
   }
