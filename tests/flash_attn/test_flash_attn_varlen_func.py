@@ -191,15 +191,6 @@ def test_varlen_with_paged_kv(
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
-    # # FIXME: remove skip
-    if (is_casual and seq_lens[1][0]
-            == 5) and (os.getenv("SKIP_HANG_KERNEL") is not None
-                       and os.getenv("SKIP_HANG_KERNEL") == "1"):
-        pytest.skip("skip casual for seqlen0 to avoid runtime hang on CI.")
-    if (window_size[0] != -1 or window_size[1]
-            != -1) and (os.getenv("SKIP_HANG_KERNEL") is not None
-                        and os.getenv("SKIP_HANG_KERNEL") == "1"):
-        pytest.skip("skip local attn to avoid runtime hang on CI.")
     if block_size == 128 and num_blocks == 32768 and head_size >= 192:
         pytest.skip("skip test cases that may run out of Memory.")
     if stride_pad > 0 and fp8_dtype is not None:
@@ -391,15 +382,6 @@ def test_varlen_with_interleaved_paged_kv(
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
-    # # FIXME: remove skip
-    if (is_casual and seq_lens[1][0]
-            == 5) and (os.getenv("SKIP_HANG_KERNEL") is not None
-                       and os.getenv("SKIP_HANG_KERNEL") == "1"):
-        pytest.skip("skip casual for seqlen0 to avoid runtime hang on CI.")
-    if (window_size[0] != -1 or window_size[1]
-            != -1) and (os.getenv("SKIP_HANG_KERNEL") is not None
-                        and os.getenv("SKIP_HANG_KERNEL") == "1"):
-        pytest.skip("skip local attn to avoid runtime hang on CI.")
     if block_size == 128 and num_blocks == 32768 and head_size >= 192:
         pytest.skip("skip test cases that may run out of Memory.")
 
@@ -836,9 +818,6 @@ def test_varlen_with_softmax_lse(
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
-    if (is_casual and seq_lens[1][0]
-            == 5) and (os.getenv("SKIP_HANG_KERNEL") == "1"):
-        pytest.skip("skip casual for seqlen0 to avoid runtime hang on CI.")
     torch.manual_seed(4242)
 
     query_lens = [x[0] for x in seq_lens]
