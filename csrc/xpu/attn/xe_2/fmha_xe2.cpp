@@ -249,22 +249,64 @@ void cutlass_chunk_prefill_impl(
   if (use_b16_policy) {
     if (args.head_size <= HEAD_SIZE_LIMIT_0) {
       policy_dispatch_func<chunk_policy_head64_b16>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
       policy_dispatch_func<chunk_policy_head96_b16>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
       policy_dispatch_func<chunk_policy_head128_b16>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
       policy_dispatch_func<chunk_policy_head192_b16>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
       policy_dispatch_func<chunk_policy_head256_b16>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
       policy_dispatch_func<chunk_policy_head512_b16>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
     } else {
       TORCH_CHECK(false, "Unsupported head size for fmha");
     }
