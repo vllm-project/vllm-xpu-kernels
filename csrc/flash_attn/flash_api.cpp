@@ -23,9 +23,10 @@ inline int get_num_splits(
   // The decode kernel iterates kv_tile-sized work units within each page,
   // not page-sized units. The dispatch (see paged_decode_utils.hpp::
   // dispatch_by_page_size) routes
-  //   block_size == 16              -> kv_tile=_16  (SubgroupLayoutQK<_1,_1,_1>, SGPerWG=1)
-  //   block_size == 32              -> kv_tile=_32  (SubgroupLayoutQK<_1,_2,_1>, SGPerWG=2)
-  //   block_size > 0 && %% 64 == 0  -> kv_tile=_64  (SubgroupLayoutQK<_1,_4,_1>, SGPerWG=4)
+  //   block_size == 16              -> kv_tile=_16 (SubgroupLayoutQK<_1,_1,_1>,
+  //   SGPerWG=1) block_size == 32              -> kv_tile=_32
+  //   (SubgroupLayoutQK<_1,_2,_1>, SGPerWG=2) block_size > 0 && %% 64 == 0  ->
+  //   kv_tile=_64  (SubgroupLayoutQK<_1,_4,_1>, SGPerWG=4)
   int kv_tile;
   int sg_per_wg;
   int policy_split_cap;
@@ -86,7 +87,8 @@ inline int get_num_splits(
   // (4) Each split must process at least ~4 KV tiles to amortize overhead.
   int max_splits_tiles = std::max(1, kv_tiles / 4);
   // (5) Hard cap of 32 (beyond this the ReduceSplitK kernel dominates).
-  return std::max(1, std::min({splits, max_splits_tiles, 32, policy_split_cap}));
+  return std::max(
+      1, std::min({splits, max_splits_tiles, 32, policy_split_cap}));
 }
 
 std::vector<at::Tensor> mha_varlen_fwd(
@@ -249,7 +251,11 @@ std::vector<at::Tensor> mha_varlen_fwd(
     }
 
     int num_kv_splits = num_splits.value_or(get_num_splits(
-        queue, batch_size, num_heads_q, num_heads_kv, effective_seqlen_k,
+        queue,
+        batch_size,
+        num_heads_q,
+        num_heads_kv,
+        effective_seqlen_k,
         block_size));
 
     at::Tensor tmp_out =
