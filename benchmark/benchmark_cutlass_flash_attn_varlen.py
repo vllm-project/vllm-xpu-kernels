@@ -3,15 +3,16 @@
 
 # isort: off
 import gc
-from pathlib import Path
-import sys
 
 import torch
 import triton
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+try:
+    from benchmark.utils import ensure_repo_root_on_path, ensure_save_path_exists
+except ModuleNotFoundError:
+    from utils import ensure_repo_root_on_path, ensure_save_path_exists
+
+REPO_ROOT = ensure_repo_root_on_path(__file__)
 
 from benchmark.src.flash_attn_interface_ import (
     flash_attn_varlen_func_CalKernelTime)
@@ -26,11 +27,6 @@ from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 # isort: on
 
 DEVICE = "xpu"
-
-
-def ensure_save_path_exists(save_path: str) -> str:
-    Path(save_path).mkdir(parents=True, exist_ok=True)
-    return save_path
 
 
 def clear_xpu_cache():

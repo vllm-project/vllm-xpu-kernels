@@ -3,11 +3,25 @@
 
 import dataclasses
 from collections.abc import Iterable
+from pathlib import Path
+import sys
 from typing import Any, Callable, Optional
 
 import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
+
+
+def ensure_repo_root_on_path(file_path: str) -> Path:
+    repo_root = Path(file_path).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    return repo_root
+
+
+def ensure_save_path_exists(save_path: str) -> str:
+    Path(save_path).mkdir(parents=True, exist_ok=True)
+    return save_path
 
 
 @dataclasses.dataclass

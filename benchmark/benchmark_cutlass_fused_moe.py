@@ -3,17 +3,17 @@
 
 # isort: off
 import gc
-from pathlib import Path
-import sys
 
 import torch
 import triton
 import triton.testing
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+try:
+    from benchmark.utils import ensure_repo_root_on_path, ensure_save_path_exists
+except ModuleNotFoundError:
+    from utils import ensure_repo_root_on_path, ensure_save_path_exists
 
+REPO_ROOT = ensure_repo_root_on_path(__file__)
 from benchmark.src.fused_moe_interface_ import xpu_fused_moe_CalKernelTime
 from benchmark.src.get_model_config import (
     gen_cutlass_fused_moe_correctness_configs as gen_correctness_config)
@@ -26,7 +26,6 @@ from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 # isort: on
 
 DEVICE = "xpu"
-
 
 def clear_xpu_cache():
     torch.xpu.empty_cache()
@@ -198,7 +197,7 @@ def get_benchmark(iterations):
                   n,
                   k,
                   num_experts,
-                  topk,
+                topk,
                   x_dtype,
                   w_dtype,
                   has_bias,
@@ -320,5 +319,6 @@ if __name__ == "__main__":
 
     configs = gen_perf_configs()
     benchmark = get_benchmark(iterations=iterations)
+    save_path = ensure_save_path_exists(args.save_path)
     # Run performance benchmark
-    benchmark.run(print_data=True, save_path=args.save_path)
+    benchmark.run(print_data=True, save_path=save_path)

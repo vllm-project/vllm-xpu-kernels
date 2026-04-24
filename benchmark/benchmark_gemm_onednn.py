@@ -10,6 +10,13 @@ import torch
 import triton
 import triton.testing
 
+try:
+    from benchmark.utils import ensure_repo_root_on_path
+except ModuleNotFoundError:
+    from utils import ensure_repo_root_on_path
+
+REPO_ROOT = ensure_repo_root_on_path(__file__)
+
 from tests.ops.fp8_quant_op import scaled_fp8_quant
 from tests.ops.mx_utils import (
     FP4_EBITS,
