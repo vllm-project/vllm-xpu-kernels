@@ -220,7 +220,7 @@ void cutlass_chunk_prefill_impl(
       head_size <= max_head_size,
       "FMHA forward only supports head dimension at most " +
           std::to_string(max_head_size));
-  
+
   // softmax_lse output is only supported on the
   // !Paged && !Local && !Sink specialization (template-constrained to
   // keep kernel instantiation count bounded).
