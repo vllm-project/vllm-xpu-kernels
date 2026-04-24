@@ -8,12 +8,13 @@ import sys
 
 import torch
 
-from tests.ops.layernorm_op import RMSNorm
-from tests.utils import STR_DTYPE_TO_TORCH_DTYPE
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from tests.ops.layernorm_op import RMSNorm
+from tests.utils import STR_DTYPE_TO_TORCH_DTYPE
+
 
 @torch.inference_mode()
 def main(

@@ -3,10 +3,16 @@
 
 # isort: off
 import gc
+from pathlib import Path
+import sys
 
 import torch
 import triton
 import triton.testing
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from benchmark.src.fused_moe_interface_ import xpu_fused_moe_CalKernelTime
 from benchmark.src.get_model_config import (

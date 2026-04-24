@@ -9,6 +9,10 @@ import sys
 import torch
 import triton
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from benchmark.src.flash_attn_interface_ import (
     flash_attn_varlen_func_CalKernelTime)
 from benchmark.src.get_model_config import (
@@ -20,10 +24,6 @@ from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
 from tests.utils import parse_args, seed_everything
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 # isort: on
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 DEVICE = "xpu"
 
