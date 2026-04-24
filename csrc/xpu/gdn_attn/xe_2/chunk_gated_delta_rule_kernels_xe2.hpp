@@ -1017,8 +1017,8 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
         float g_cumsum_value =
             a[(chunk_offset + e) + v_head_id * total_virtual_seqlen];
         g_slm_ptr[e] = g_cumsum_value;
+        g_multi_slm_ptr[e] = sycl::native::exp(g_last_value - g_cumsum_value);
         g_exp_slm_ptr[e] = sycl::native::exp(g_cumsum_value);
-        g_multi_slm_ptr[e] = g_last_value_exp / g_exp_slm_ptr[e];
       }
 
       CUTE_UNROLL
@@ -1152,8 +1152,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
           // Fused gemm: W×S[dv] -> tSrU_d, Q×S[dv] -> tSrO_c
           // S is loaded once and reused in registers for both
           gemm_TTS_fused_2A(
-              W_tensor, Q_tensor, S_tensor,
-              tSrU_d, tSrO_c, 0, 0, dv, mma);
+              W_tensor, Q_tensor, S_tensor, tSrU_d, tSrO_c, 0, 0, dv, mma);
 
           // --- WS epilogue: U_new[dv] = U_old[dv] - W×S[dv] ---
           auto tCrU_d = thr_copy_U_d.partition_sg_fragment_S(gU_C);

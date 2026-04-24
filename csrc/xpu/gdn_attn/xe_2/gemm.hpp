@@ -407,12 +407,9 @@ CUTE_DEVICE void gemm_TTS_fused_2A(
 
   auto wg_tile = mma.tile_mnk();
 
-  Tensor gA1 = local_tile(
-      cA1, select<0, 2>(wg_tile), make_coord(wg_m1, _));
-  Tensor gA2 = local_tile(
-      cA2, select<0, 2>(wg_tile), make_coord(wg_m2, _));
-  Tensor gB = local_tile(
-      cB, select<1, 2>(wg_tile), make_coord(wg_n, _));
+  Tensor gA1 = local_tile(cA1, select<0, 2>(wg_tile), make_coord(wg_m1, _));
+  Tensor gA2 = local_tile(cA2, select<0, 2>(wg_tile), make_coord(wg_m2, _));
+  Tensor gB = local_tile(cB, select<1, 2>(wg_tile), make_coord(wg_n, _));
 
   auto copy_a1 = get_block_2d_copy_A<void>(mma, A1);
   auto copy_a2 = get_block_2d_copy_A<void>(mma, A2);
