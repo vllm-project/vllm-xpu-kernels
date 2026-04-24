@@ -272,7 +272,7 @@ class XeFMHAFwdKernel {
           cute::min(seq_len_qo, (blk_q * get<0>(TileShapeQK{}) + q_offset_sg));
 
       // calc sg level seq_len_kv
-      const int sg_seq_len =
+      const int seq_len =
           CausalMask
               ? LocalMask
                     ? cute::min(
@@ -289,12 +289,10 @@ class XeFMHAFwdKernel {
                     0) /
                     get<1>(TileShapeQK{})
               : 0;
-      const int sg_k_blocks =
-          cute::ceil_div(sg_seq_len, get<1>(TileShapeQK{}));
+      const int sg_k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
       const int sg_k_blocks_causal =
-          CausalMask
-              ? (seq_coord + full_tile_offset) / get<1>(TileShapeQK{})
-              : 0;
+          CausalMask ? (seq_coord + full_tile_offset) / get<1>(TileShapeQK{})
+                     : 0;
 
       // The mainloop wraps each K iteration in a workgroup-scoped barrier
       // pair, so every subgroup in the workgroup must execute the same
@@ -376,7 +374,7 @@ class XeFMHAFwdKernel {
           k_blocks,
           k_blocks_causal,
           thr_id,
-          sg_seq_len,
+          seq_len,
           full_tile_offset);
 
       // return softmax_lse
