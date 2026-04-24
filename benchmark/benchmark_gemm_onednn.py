@@ -11,16 +11,26 @@ import triton
 import triton.testing
 
 from tests.ops.fp8_quant_op import scaled_fp8_quant
-from tests.ops.mx_utils import (FP4_EBITS, FP4_MBITS,
-                                _floatx_unpacked_to_f32,
-                                from_blocked_format, to_mxfp, unpack_uint4)
+from tests.ops.mx_utils import (
+    FP4_EBITS,
+    FP4_MBITS,
+    _floatx_unpacked_to_f32,
+    from_blocked_format,
+    to_mxfp,
+    unpack_uint4,
+)
 from tests.register_ops import fp4_gemm, fp8_gemm, fp8_gemm_w8a16
 from tests.utils import seed_everything
 # isort: on
 
 ALL_BENCHMARKS = [
-    "bf16", "fp8", "fp8_w8a16", "fp8_per_channel",
-    "mxfp8", "mxfp4", "model_shapes",
+    "bf16",
+    "fp8",
+    "fp8_w8a16",
+    "fp8_per_channel",
+    "mxfp8",
+    "mxfp4",
+    "model_shapes",
 ]
 
 DEVICE = "xpu"
@@ -40,7 +50,8 @@ def calculate_memory_bytes(m, n, k, x_dtype, w_dtype=None):
     """Calculate total memory read/written in bytes."""
     x_elem = torch.tensor([], dtype=x_dtype).element_size()
     w_elem = torch.tensor(
-        [], dtype=x_dtype if w_dtype is None else w_dtype).element_size()
+        [], dtype=x_dtype if w_dtype is None else w_dtype
+    ).element_size()
     out_elem = torch.tensor([], dtype=x_dtype).element_size()
     # input + weight + output
     return m * k * x_elem + k * n * w_elem + m * n * out_elem
@@ -66,115 +77,115 @@ OUT_DTYPES = [torch.float16, torch.bfloat16]
 KPI_WEIGHT_SHAPES = {
     # llama-3-70b TP=1
     "llama-3-70b/TP1": [
-        (8192, 10240),   # qkv
-        (8192, 8192),    # out
-        (8192, 57344),   # gate_up
-        (28672, 8192),   # down
+        (8192, 10240),  # qkv
+        (8192, 8192),  # out
+        (8192, 57344),  # gate_up
+        (28672, 8192),  # down
     ],
     # llama-3-70b TP=2
     "llama-3-70b/TP2": [
-        (8192, 5120),    # qkv
-        (4096, 8192),    # out
-        (8192, 28672),   # gate_up
-        (14336, 8192),   # down
+        (8192, 5120),  # qkv
+        (4096, 8192),  # out
+        (8192, 28672),  # gate_up
+        (14336, 8192),  # down
     ],
     # Llama 4 Maverick/Scout TP=8
     "llama-4-maverick/TP8": [
-        (5120, 896),     # qkv
-        (640, 5120),     # out
-        (5120, 4096),    # gate_up
-        (2048, 5120),    # down
+        (5120, 896),  # qkv
+        (640, 5120),  # out
+        (5120, 4096),  # gate_up
+        (2048, 5120),  # down
     ],
     # LLama3 8B TP=1
     "llama-3-8b/TP1": [
-        (4096, 6144),    # qkv
-        (4096, 4096),    # out
-        (4096, 28672),   # gate_up
-        (14336, 4096),   # down
+        (4096, 6144),  # qkv
+        (4096, 4096),  # out
+        (4096, 28672),  # gate_up
+        (14336, 4096),  # down
     ],
     # gpt-oss-120b TP=2 EP=1
     "gpt-oss-120b/TP2": [
-        (2880, 2560),    # qkv
-        (2048, 2880),    # out
-        (2880, 5760),    # gate_up
-        (2880, 2880),    # down
+        (2880, 2560),  # qkv
+        (2048, 2880),  # out
+        (2880, 5760),  # gate_up
+        (2880, 2880),  # down
     ],
     # gpt-oss-120b TP=4 EP=1
     "gpt-oss-120b/TP4": [
-        (2880, 1280),    # qkv
-        (1024, 2880),    # out
-        (2880, 5760),    # gate_up
-        (2880, 2880),    # down
+        (2880, 1280),  # qkv
+        (1024, 2880),  # out
+        (2880, 5760),  # gate_up
+        (2880, 2880),  # down
     ],
     # gpt-oss-120b TP=8 EP=1
     "gpt-oss-120b/TP8": [
-        (2880, 640),     # qkv
-        (512, 2880),     # out
-        (2880, 5760),    # gate_up
-        (2880, 2880),    # down
+        (2880, 640),  # qkv
+        (512, 2880),  # out
+        (2880, 5760),  # gate_up
+        (2880, 2880),  # down
     ],
     # Qwen 235B TP=2 EP=1
     "qwen-235b/TP2": [
-        (4096, 4608),    # qkv
-        (4096, 4096),    # out
-        (4096, 3072),    # gate_up
-        (1536, 4096),    # down
+        (4096, 4608),  # qkv
+        (4096, 4096),  # out
+        (4096, 3072),  # gate_up
+        (1536, 4096),  # down
     ],
     # Qwen 235B TP=4 EP=1
     "qwen-235b/TP4": [
-        (4096, 2304),    # qkv
-        (2048, 4096),    # out
-        (4096, 3072),    # gate_up
-        (1536, 4096),    # down
+        (4096, 2304),  # qkv
+        (2048, 4096),  # out
+        (4096, 3072),  # gate_up
+        (1536, 4096),  # down
     ],
     # Qwen 235B TP=8 EP=1
     "qwen-235b/TP8": [
-        (4096, 1152),    # qkv
-        (1024, 4096),    # out
-        (4096, 3072),    # gate_up
-        (1536, 4096),    # down
+        (4096, 1152),  # qkv
+        (1024, 4096),  # out
+        (4096, 3072),  # gate_up
+        (1536, 4096),  # down
     ],
     # DeepSeek R1(671B) TP=4 EP=1
     "deepseek-r1/TP4": [
-        (7168, 1536),    # qkv
-        (1536, 6144),    # qkv
-        (7168, 576),     # qkv
-        (512, 8192),     # qkv
-        (4096, 7168),    # out
-        (7168, 9216),    # gate_up
-        (7168, 4096),    # gate_up (EP=1)
-        (7168, 36864),   # gate_up (shared)
-        (4608, 7168),    # down
-        (2048, 7168),    # down (EP=1)
-        (18432, 7168),   # down (shared)
+        (7168, 1536),  # qkv
+        (1536, 6144),  # qkv
+        (7168, 576),  # qkv
+        (512, 8192),  # qkv
+        (4096, 7168),  # out
+        (7168, 9216),  # gate_up
+        (7168, 4096),  # gate_up (EP=1)
+        (7168, 36864),  # gate_up (shared)
+        (4608, 7168),  # down
+        (2048, 7168),  # down (EP=1)
+        (18432, 7168),  # down (shared)
     ],
     # DeepSeek R1(671B) TP=8 EP=1
     "deepseek-r1/TP8": [
-        (7168, 1536),    # qkv
-        (1536, 3072),    # qkv
-        (7168, 576),     # qkv
-        (512, 4096),     # qkv
-        (2048, 7168),    # out
-        (7168, 4608),    # gate_up
-        (7168, 4096),    # gate_up (EP=1)
-        (7168, 36864),   # gate_up (shared)
-        (2304, 7168),    # down
-        (2048, 7168),    # down (EP=1)
-        (18432, 7168),   # down (shared)
+        (7168, 1536),  # qkv
+        (1536, 3072),  # qkv
+        (7168, 576),  # qkv
+        (512, 4096),  # qkv
+        (2048, 7168),  # out
+        (7168, 4608),  # gate_up
+        (7168, 4096),  # gate_up (EP=1)
+        (7168, 36864),  # gate_up (shared)
+        (2304, 7168),  # down
+        (2048, 7168),  # down (EP=1)
+        (18432, 7168),  # down (shared)
     ],
     # DeepSeek R1(671B) TP=16 EP=1
     "deepseek-r1/TP16": [
-        (7168, 1536),    # qkv
-        (1536, 1536),    # qkv
-        (7168, 576),     # qkv
-        (512, 2048),     # qkv
-        (1024, 7168),    # out
-        (7168, 2304),    # gate_up
-        (7168, 4096),    # gate_up (EP=1)
-        (7168, 36864),   # gate_up (shared)
-        (1152, 7168),    # down
-        (2048, 7168),    # down (EP=1)
-        (18432, 7168),   # down (shared)
+        (7168, 1536),  # qkv
+        (1536, 1536),  # qkv
+        (7168, 576),  # qkv
+        (512, 2048),  # qkv
+        (1024, 7168),  # out
+        (7168, 2304),  # gate_up
+        (7168, 4096),  # gate_up (EP=1)
+        (7168, 36864),  # gate_up (shared)
+        (1152, 7168),  # down
+        (2048, 7168),  # down (EP=1)
+        (18432, 7168),  # down (shared)
     ],
 }
 
@@ -183,7 +194,8 @@ def gen_fp8_gemm_perf_configs():
     """Generate configs for fp8_gemm (w8a8) per-tensor benchmark."""
     configs = []
     for mnk, out_dtype, fp8_dtype in itertools.product(
-            GENERIC_MNK, OUT_DTYPES, FP8_DTYPES):
+        GENERIC_MNK, OUT_DTYPES, FP8_DTYPES
+    ):
         configs.append((mnk, out_dtype, fp8_dtype))
     return configs
 
@@ -192,7 +204,8 @@ def gen_fp8_gemm_w8a16_perf_configs():
     """Generate configs for fp8_gemm_w8a16 benchmark."""
     configs = []
     for mnk, out_dtype, fp8_dtype in itertools.product(
-            GENERIC_MNK, OUT_DTYPES, FP8_DTYPES):
+        GENERIC_MNK, OUT_DTYPES, FP8_DTYPES
+    ):
         configs.append((mnk, out_dtype, fp8_dtype))
     return configs
 
@@ -201,7 +214,8 @@ def gen_fp8_gemm_per_channel_perf_configs():
     """Generate configs for fp8_gemm per-channel benchmark."""
     configs = []
     for mnk, out_dtype, fp8_dtype in itertools.product(
-            GENERIC_MNK, OUT_DTYPES, [torch.float8_e4m3fn]):
+        GENERIC_MNK, OUT_DTYPES, [torch.float8_e4m3fn]
+    ):
         configs.append((mnk, out_dtype, fp8_dtype))
     return configs
 
@@ -238,7 +252,24 @@ def gen_weight_shape_configs(dtype_kind="fp8"):
                     "fp8_w8a16" for w8a16, "fp8_per_channel" for per-channel.
     """
     configs = []
-    m_sizes = [1, 32, 128, 1024, 4096]
+    m_sizes = [
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        384,
+        512,
+        640,
+        768,
+        896,
+        1024,
+        4096,
+    ]
     for model_name, shapes in KPI_WEIGHT_SHAPES.items():
         for (k, n), m in itertools.product(shapes, m_sizes):
             if dtype_kind == "bf16":
@@ -246,13 +277,12 @@ def gen_weight_shape_configs(dtype_kind="fp8"):
                     configs.append(((m, n, k), out_dtype))
             elif dtype_kind == "fp8" or dtype_kind == "fp8_w8a16":
                 for out_dtype, fp8_dtype in itertools.product(
-                        OUT_DTYPES, FP8_DTYPES):
+                    OUT_DTYPES, FP8_DTYPES
+                ):
                     configs.append(((m, n, k), out_dtype, fp8_dtype))
             elif dtype_kind == "fp8_per_channel":
                 for out_dtype in OUT_DTYPES:
-                    configs.append((
-                        (m, n, k), out_dtype,
-                        torch.float8_e4m3fn))
+                    configs.append(((m, n, k), out_dtype, torch.float8_e4m3fn))
     return configs
 
 
@@ -265,15 +295,13 @@ def check_fp8_gemm_per_tensor(config):
     mnk, out_dtype, fp8_dtype = config
     m, n, k = mnk
 
-    input = torch.randn(
-        [m, k], dtype=out_dtype, device=DEVICE) / 10.0
+    input = torch.randn([m, k], dtype=out_dtype, device=DEVICE) / 10.0
     weight = torch.randn([n, k], dtype=out_dtype, device=DEVICE) / 10.0
 
     scale_src = torch.tensor(4.0, device=DEVICE)
     scale_wei = torch.tensor(4.0, device=DEVICE)
 
-    input_fp8, _ = scaled_fp8_quant(
-        input, scale_src, fp8_dtype=fp8_dtype)
+    input_fp8, _ = scaled_fp8_quant(input, scale_src, fp8_dtype=fp8_dtype)
     weight_fp8, _ = scaled_fp8_quant(weight, scale_wei, fp8_dtype=fp8_dtype)
 
     input_hp = input_fp8.to(out_dtype) * scale_src.to(out_dtype)
@@ -286,7 +314,6 @@ def check_fp8_gemm_per_tensor(config):
         out_dtype,
         scale_src,
         scale_wei,
-        torch.Tensor(),
     )
 
     try:
@@ -300,13 +327,13 @@ def check_fp8_gemm_w8a16(config):
     mnk, out_dtype, fp8_dtype = config
     m, n, k = mnk
 
-    input = torch.randn(
-        [m, k], dtype=out_dtype, device=DEVICE) / 10.0
+    input = torch.randn([m, k], dtype=out_dtype, device=DEVICE) / 10.0
     weight = torch.ones([n, k], dtype=out_dtype, device=DEVICE)
     scale_wei = torch.tensor(4.0, device=DEVICE)
 
     weight_fp8, _ = scaled_fp8_quant(
-        weight, scale_wei, fp8_dtype=fp8_dtype, group_shape=(-1, 1))
+        weight, scale_wei, fp8_dtype=fp8_dtype, group_shape=(-1, 1)
+    )
     weight_hp = weight_fp8.to(out_dtype) * scale_wei.to(out_dtype)
     output_ref = torch.matmul(input, weight_hp.t())
 
@@ -314,7 +341,6 @@ def check_fp8_gemm_w8a16(config):
         input,
         weight_fp8.transpose(0, 1),
         scale_wei,
-        torch.Tensor(),
     )
 
     try:
@@ -328,14 +354,15 @@ def check_fp8_gemm_per_channel(config):
     mnk, out_dtype, fp8_dtype = config
     m, n, k = mnk
 
-    input = torch.randn(
-        [m, k], dtype=out_dtype, device=DEVICE) / 10.0
+    input = torch.randn([m, k], dtype=out_dtype, device=DEVICE) / 10.0
     weight = torch.randn([n, k], dtype=out_dtype, device=DEVICE) / 10.0
 
     input_fp8, scale_src = scaled_fp8_quant(
-        input, use_per_token_if_dynamic=True, fp8_dtype=fp8_dtype)
+        input, use_per_token_if_dynamic=True, fp8_dtype=fp8_dtype
+    )
     weight_fp8, scale_wei = scaled_fp8_quant(
-        weight, use_per_token_if_dynamic=True, fp8_dtype=fp8_dtype)
+        weight, use_per_token_if_dynamic=True, fp8_dtype=fp8_dtype
+    )
 
     input_hp = input_fp8.to(out_dtype) * scale_src.to(out_dtype)
     weight_hp = weight_fp8.to(out_dtype) * scale_wei.to(out_dtype)
@@ -347,7 +374,6 @@ def check_fp8_gemm_per_channel(config):
         out_dtype,
         scale_src,
         scale_wei,
-        torch.Tensor(),
     )
 
     try:
@@ -377,10 +403,10 @@ def check_mxfp8_gemm(config):
         out_dtype,
         inputs_scale,
         weights_scale,
-        torch.Tensor(),
     )
     output_ref = torch.matmul(
-        inputs_hp.to(out_dtype), weights_hp.to(out_dtype).t())
+        inputs_hp.to(out_dtype), weights_hp.to(out_dtype).t()
+    )
 
     try:
         torch.testing.assert_close(output, output_ref, atol=5e-2, rtol=5e-2)
@@ -409,15 +435,18 @@ def check_mxfp4_gemm(config):
         inputs_scale,
         weights_scale,
         out_dtype,
-        torch.Tensor(),
     )
     output_ref = torch.matmul(
-        inputs_hp.to(out_dtype), weights_hp.to(out_dtype).t())
+        inputs_hp.to(out_dtype), weights_hp.to(out_dtype).t()
+    )
 
     try:
         torch.testing.assert_close(
-            output.to(torch.float), output_ref.to(torch.float),
-            atol=5e-2, rtol=5e-2)
+            output.to(torch.float),
+            output_ref.to(torch.float),
+            atol=5e-2,
+            rtol=5e-2,
+        )
         print("✅ mxfp4_gemm passed:", config)
     except AssertionError as e:
         print("❌ mxfp4_gemm failed:", config, "error:", e)
@@ -441,26 +470,32 @@ def get_bf16_gemm_benchmark(configs, iterations):
             ylabel="value",
             plot_name="bf16_gemm",
             args={},
-        ))
+        )
+    )
     def benchmark(m, n, k, dtype, provider, iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
         total_latency = 0.0
         assert iterations > 5
 
-        input = torch.randn(
-            [m, k], dtype=dtype, device=DEVICE) / 10.0
+        input = torch.randn([m, k], dtype=dtype, device=DEVICE) / 10.0
         weight = torch.randn([n, k], dtype=dtype, device=DEVICE) / 10.0
 
+        start_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
+        end_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
         for index in range(iterations):
-            start.record()
-            torch.nn.functional.linear(input, weight)
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
-
+                start_event[index - 5].record()
+            torch.nn.functional.linear(input, weight)
+            if index >= 5:
+                end_event[index - 5].record()
         torch.xpu.synchronize()
+        total_latency = sum(
+            start_event[i].elapsed_time(end_event[i])
+            for i in range(iterations - 5)
+        )
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
@@ -494,37 +529,48 @@ def get_fp8_gemm_benchmark(configs, iterations):
             ylabel="value",
             plot_name="fp8_gemm_per_tensor",
             args={},
-        ))
-    def benchmark(m, n, k, out_dtype, fp8_dtype, provider,
-                  iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
+        )
+    )
+    def benchmark(
+        m, n, k, out_dtype, fp8_dtype, provider, iterations=iterations
+    ):
         total_latency = 0.0
         assert iterations > 5
 
-        input = torch.randn(
-            [m, k], dtype=out_dtype, device=DEVICE) / 10.0
+        input = torch.randn([m, k], dtype=out_dtype, device=DEVICE) / 10.0
         weight = torch.randn([n, k], dtype=out_dtype, device=DEVICE) / 10.0
 
         scale_src = torch.tensor(4.0, device=DEVICE)
         scale_wei = torch.tensor(4.0, device=DEVICE)
 
-        input_fp8, _ = scaled_fp8_quant(
-            input, scale_src, fp8_dtype=fp8_dtype)
-        weight_fp8, _ = scaled_fp8_quant(
-            weight, scale_wei, fp8_dtype=fp8_dtype)
+        input_fp8, _ = scaled_fp8_quant(input, scale_src, fp8_dtype=fp8_dtype)
+        weight_fp8, _ = scaled_fp8_quant(weight, scale_wei, fp8_dtype=fp8_dtype)
         weight_fp8_t = weight_fp8.transpose(0, 1)
 
+        start_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
+        end_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
         for index in range(iterations):
-            start.record()
-            fp8_gemm(input_fp8, weight_fp8_t, out_dtype,
-                     scale_src, scale_wei, torch.Tensor())
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
+                start_event[index - 5].record()
+            fp8_gemm(
+                input_fp8,
+                weight_fp8_t,
+                out_dtype,
+                scale_src,
+                scale_wei,
+            )
+            if index >= 5:
+                end_event[index - 5].record()
 
         torch.xpu.synchronize()
+        total_latency = sum(
+            start_event[i].elapsed_time(end_event[i])
+            for i in range(iterations - 5)
+        )
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
@@ -532,8 +578,7 @@ def get_fp8_gemm_benchmark(configs, iterations):
             flops = calculate_flops(m, n, k)
             return flops / (ms / 1000) / 1e12
         elif provider == "bandwidth_GBs":
-            mem_bytes = calculate_memory_bytes(m, n, k,
-                                               out_dtype, fp8_dtype)
+            mem_bytes = calculate_memory_bytes(m, n, k, out_dtype, fp8_dtype)
             return mem_bytes / (ms / 1000) / 1e9
         else:  # latency_us
             return 1000 * ms
@@ -559,32 +604,41 @@ def get_fp8_gemm_w8a16_benchmark(configs, iterations):
             ylabel="value",
             plot_name="fp8_gemm_w8a16",
             args={},
-        ))
-    def benchmark(m, n, k, out_dtype, fp8_dtype, provider,
-                  iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
+        )
+    )
+    def benchmark(
+        m, n, k, out_dtype, fp8_dtype, provider, iterations=iterations
+    ):
         total_latency = 0.0
         assert iterations > 5
 
-        input = torch.randn(
-            [m, k], dtype=out_dtype, device=DEVICE) / 10.0
+        input = torch.randn([m, k], dtype=out_dtype, device=DEVICE) / 10.0
         weight = torch.ones([n, k], dtype=out_dtype, device=DEVICE)
         scale_wei = torch.tensor(4.0, device=DEVICE)
 
         weight_fp8, _ = scaled_fp8_quant(
-            weight, scale_wei, fp8_dtype=fp8_dtype, group_shape=(-1, 1))
+            weight, scale_wei, fp8_dtype=fp8_dtype, group_shape=(-1, 1)
+        )
         weight_fp8_t = weight_fp8.transpose(0, 1)
 
+        start_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
+        end_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
         for index in range(iterations):
-            start.record()
-            fp8_gemm_w8a16(input, weight_fp8_t, scale_wei, torch.Tensor())
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
+                start_event[index - 5].record()
+            fp8_gemm_w8a16(input, weight_fp8_t, scale_wei, torch.Tensor())
+            if index >= 5:
+                end_event[index - 5].record()
 
         torch.xpu.synchronize()
+        total_latency = sum(
+            start_event[i].elapsed_time(end_event[i])
+            for i in range(iterations - 5)
+        )
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
@@ -592,8 +646,7 @@ def get_fp8_gemm_w8a16_benchmark(configs, iterations):
             flops = calculate_flops(m, n, k)
             return flops / (ms / 1000) / 1e12
         elif provider == "bandwidth_GBs":
-            mem_bytes = calculate_memory_bytes(m, n, k,
-                                               out_dtype, fp8_dtype)
+            mem_bytes = calculate_memory_bytes(m, n, k, out_dtype, fp8_dtype)
             return mem_bytes / (ms / 1000) / 1e9
         else:
             return 1000 * ms
@@ -619,35 +672,49 @@ def get_fp8_gemm_per_channel_benchmark(configs, iterations):
             ylabel="value",
             plot_name="fp8_gemm_per_channel",
             args={},
-        ))
-    def benchmark(m, n, k, out_dtype, fp8_dtype, provider,
-                  iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
+        )
+    )
+    def benchmark(
+        m, n, k, out_dtype, fp8_dtype, provider, iterations=iterations
+    ):
         total_latency = 0.0
         assert iterations > 5
 
-        input = torch.randn(
-            [m, k], dtype=out_dtype, device=DEVICE) / 10.0
+        input = torch.randn([m, k], dtype=out_dtype, device=DEVICE) / 10.0
         weight = torch.randn([n, k], dtype=out_dtype, device=DEVICE) / 10.0
 
         input_fp8, scale_src = scaled_fp8_quant(
-            input, use_per_token_if_dynamic=True,
-            fp8_dtype=fp8_dtype)
+            input, use_per_token_if_dynamic=True, fp8_dtype=fp8_dtype
+        )
         weight_fp8, scale_wei = scaled_fp8_quant(
-            weight, use_per_token_if_dynamic=True, fp8_dtype=fp8_dtype)
+            weight, use_per_token_if_dynamic=True, fp8_dtype=fp8_dtype
+        )
         weight_fp8_t = weight_fp8.transpose(0, 1)
 
+        start_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
+        end_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
         for index in range(iterations):
-            start.record()
-            fp8_gemm(input_fp8, weight_fp8_t, out_dtype,
-                     scale_src, scale_wei, torch.Tensor())
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
+                start_event[index - 5].record()
+            fp8_gemm(
+                input_fp8,
+                weight_fp8_t,
+                out_dtype,
+                scale_src,
+                scale_wei,
+            )
+            if index >= 5:
+                end_event[index - 5].record()
 
         torch.xpu.synchronize()
+        total_latency = sum(
+            start_event[i].elapsed_time(end_event[i])
+            for i in range(iterations - 5)
+        )
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
@@ -655,8 +722,7 @@ def get_fp8_gemm_per_channel_benchmark(configs, iterations):
             flops = calculate_flops(m, n, k)
             return flops / (ms / 1000) / 1e12
         elif provider == "bandwidth_GBs":
-            mem_bytes = calculate_memory_bytes(m, n, k,
-                                               out_dtype, fp8_dtype)
+            mem_bytes = calculate_memory_bytes(m, n, k, out_dtype, fp8_dtype)
             return mem_bytes / (ms / 1000) / 1e9
         else:
             return 1000 * ms
@@ -682,10 +748,9 @@ def get_mxfp8_gemm_benchmark(configs, iterations):
             ylabel="value",
             plot_name="mxfp8_gemm",
             args={},
-        ))
+        )
+    )
     def benchmark(m, n, k, out_dtype, provider, iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
         total_latency = 0.0
         assert iterations > 5
 
@@ -699,16 +764,30 @@ def get_mxfp8_gemm_benchmark(configs, iterations):
         _, inputs_lp, inputs_scale = _convert_to_mxfp8(inputs)
         _, weights_lp, weights_scale = _convert_to_mxfp8(weights)
 
+        start_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
+        end_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
         for index in range(iterations):
-            start.record()
-            fp8_gemm(inputs_lp, weights_lp.transpose(0, 1), out_dtype,
-                     inputs_scale, weights_scale, torch.Tensor())
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
+                start_event[index - 5].record()
+            fp8_gemm(
+                inputs_lp,
+                weights_lp.transpose(0, 1),
+                out_dtype,
+                inputs_scale,
+                weights_scale,
+            )
+            if index >= 5:
+                end_event[index - 5].record()
 
         torch.xpu.synchronize()
+        total_latency = sum(
+            start_event[i].elapsed_time(end_event[i])
+            for i in range(iterations - 5)
+        )
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
@@ -717,7 +796,8 @@ def get_mxfp8_gemm_benchmark(configs, iterations):
             return flops / (ms / 1000) / 1e12
         elif provider == "bandwidth_GBs":
             mem_bytes = calculate_memory_bytes(
-                m, n, k, out_dtype, torch.float8_e4m3fn)
+                m, n, k, out_dtype, torch.float8_e4m3fn
+            )
             return mem_bytes / (ms / 1000) / 1e9
         else:
             return 1000 * ms
@@ -759,10 +839,9 @@ def get_mxfp4_gemm_benchmark(configs, iterations):
             ylabel="value",
             plot_name="mxfp4_gemm",
             args={},
-        ))
+        )
+    )
     def benchmark(m, n, k, out_dtype, provider, iterations=iterations):
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
         total_latency = 0.0
         assert iterations > 5
 
@@ -776,16 +855,30 @@ def get_mxfp4_gemm_benchmark(configs, iterations):
         _, inputs_lp, inputs_scale = _convert_to_mxfp4(inputs)
         _, weights_lp, weights_scale = _convert_to_mxfp4(weights)
 
+        start_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
+        end_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
         for index in range(iterations):
-            start.record()
-            fp4_gemm(inputs_lp, weights_lp.transpose(0, 1),
-                     inputs_scale, weights_scale, out_dtype, torch.Tensor())
-            end.record()
-            end.synchronize()
             if index >= 5:
-                total_latency += start.elapsed_time(end)
+                start_event[index - 5].record()
+            fp4_gemm(
+                inputs_lp,
+                weights_lp.transpose(0, 1),
+                inputs_scale,
+                weights_scale,
+                out_dtype,
+            )
+            if index >= 5:
+                end_event[index - 5].record()
 
         torch.xpu.synchronize()
+        total_latency = sum(
+            start_event[i].elapsed_time(end_event[i])
+            for i in range(iterations - 5)
+        )
         ms = total_latency / (iterations - 5)
         clear_xpu_cache()
 
@@ -796,8 +889,7 @@ def get_mxfp4_gemm_benchmark(configs, iterations):
             # fp4 weight is packed as uint8 (2 elements per byte)
             w_bytes = k * n // 2
             x_bytes = m * k // 2
-            out_bytes = m * n * torch.tensor(
-                [], dtype=out_dtype).element_size()
+            out_bytes = m * n * torch.tensor([], dtype=out_dtype).element_size()
             mem_bytes = x_bytes + w_bytes + out_bytes
             return mem_bytes / (ms / 1000) / 1e9
         else:
@@ -818,9 +910,11 @@ def gemm_parse_args():
         nargs="+",
         default=["bf16"],
         choices=ALL_BENCHMARKS + ["all"],
-        help=("Benchmarks to run. Default: bf16. "
-              "Use 'all' to run everything. "
-              f"Choices: {ALL_BENCHMARKS}"),
+        help=(
+            "Benchmarks to run. Default: bf16. "
+            "Use 'all' to run everything. "
+            f"Choices: {ALL_BENCHMARKS}"
+        ),
     )
     parser.add_argument(
         "--save-path",
@@ -843,35 +937,59 @@ if __name__ == "__main__":
     use_model_shapes = "model_shapes" in enabled
 
     bench_registry = {
-        "bf16": ("bf16 gemm (F.linear)",
-                 gen_bf16_gemm_perf_configs, get_bf16_gemm_benchmark,
-                 None),
-        "fp8": ("fp8_gemm per-tensor (w8a8)",
-                gen_fp8_gemm_perf_configs, get_fp8_gemm_benchmark,
-                check_fp8_gemm_per_tensor),
-        "fp8_w8a16": ("fp8_gemm_w8a16",
-                      gen_fp8_gemm_w8a16_perf_configs,
-                      get_fp8_gemm_w8a16_benchmark,
-                      check_fp8_gemm_w8a16),
-        "fp8_per_channel": ("fp8_gemm per-channel",
-                            gen_fp8_gemm_per_channel_perf_configs,
-                            get_fp8_gemm_per_channel_benchmark,
-                            check_fp8_gemm_per_channel),
-        "mxfp8": ("mxfp8 gemm",
-                  gen_mxfp8_gemm_perf_configs, get_mxfp8_gemm_benchmark,
-                  check_mxfp8_gemm),
-        "mxfp4": ("mxfp4 gemm",
-                  gen_mxfp4_gemm_perf_configs, get_mxfp4_gemm_benchmark,
-                  check_mxfp4_gemm),
+        "bf16": (
+            "bf16 gemm (F.linear)",
+            gen_bf16_gemm_perf_configs,
+            get_bf16_gemm_benchmark,
+            None,
+        ),
+        "fp8": (
+            "fp8_gemm per-tensor (w8a8)",
+            gen_fp8_gemm_perf_configs,
+            get_fp8_gemm_benchmark,
+            check_fp8_gemm_per_tensor,
+        ),
+        "fp8_w8a16": (
+            "fp8_gemm_w8a16",
+            gen_fp8_gemm_w8a16_perf_configs,
+            get_fp8_gemm_w8a16_benchmark,
+            check_fp8_gemm_w8a16,
+        ),
+        "fp8_per_channel": (
+            "fp8_gemm per-channel",
+            gen_fp8_gemm_per_channel_perf_configs,
+            get_fp8_gemm_per_channel_benchmark,
+            check_fp8_gemm_per_channel,
+        ),
+        "mxfp8": (
+            "mxfp8 gemm",
+            gen_mxfp8_gemm_perf_configs,
+            get_mxfp8_gemm_benchmark,
+            check_mxfp8_gemm,
+        ),
+        "mxfp4": (
+            "mxfp4 gemm",
+            gen_mxfp4_gemm_perf_configs,
+            get_mxfp4_gemm_benchmark,
+            check_mxfp4_gemm,
+        ),
     }
 
-    for name, (label, gen_configs, get_bench, check_fn) in (
-            bench_registry.items()):
+    for name, (
+        label,
+        gen_configs,
+        get_bench,
+        check_fn,
+    ) in bench_registry.items():
         if name not in enabled:
             continue
 
         if use_model_shapes and name in (
-                "bf16", "fp8", "fp8_w8a16", "fp8_per_channel"):
+            "bf16",
+            "fp8",
+            "fp8_w8a16",
+            "fp8_per_channel",
+        ):
             configs = gen_weight_shape_configs(name)
             suffix = " with model weight shapes"
         else:

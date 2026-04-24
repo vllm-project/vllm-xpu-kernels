@@ -344,7 +344,7 @@ void _moe_align_block_size_small_batch_expert(
   if (local_id_x >= fill_threads) {
     if (tid < num_experts) {
       tokens_cnts[tid] = 0;
-      for (int i = 1; i <= stride; ++i) {
+      for (size_t i = 1; i <= stride; ++i) {
         tokens_cnts[i * num_experts + tid] +=
             tokens_cnts[(i - 1) * num_experts + tid];
       }

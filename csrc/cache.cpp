@@ -6,6 +6,7 @@
 
 #include "dispatch_utils.h"
 #include "quantization/fp8/quant_utils.h"
+#include "quantization/utils.h"
 #include "utils.h"
 #include "utils/mem_cpy.h"
 
@@ -162,13 +163,15 @@ class reshape_and_cache_flash_kernel {
     cache_t* __restrict__ value_dst =
         value_cache_ + block_idx * block_stride_ + block_offset * page_stride_;
 
+    constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
     float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale_;
     float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale_;
 
     fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
     fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
-    fp8::scaled_convert_vec(key_src, key_dst, n, local_idx, local_range, k_op);
-    fp8::scaled_convert_vec(
+    vectorize_with_alignment<VEC_SIZE>(
+        key_src, key_dst, n, local_idx, local_range, k_op);
+    vectorize_with_alignment<VEC_SIZE>(
         value_src, value_dst, n, local_idx, local_range, v_op);
   }
 

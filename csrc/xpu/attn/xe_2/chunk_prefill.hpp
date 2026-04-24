@@ -5,7 +5,6 @@
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
 #include "cutlass/util/packed_stride.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
-#include "cutlass/util/sycl_event_manager.hpp"
 #include <cute/tensor.hpp>
 #include <random>
 
@@ -53,6 +52,10 @@ struct chunk_prefill_args_t {
   bool is_causal = false;
   bool is_local = false;
   bool is_sink = false;
+  bool is_interleaved_kv_cache = false;
+  // softmax_lse output (nullptr when not requested)
+  float* softmax_lse = nullptr;
+  int lse_stride = 0;  // stride along seq dim (= num_heads_q)
   // Q/O strides in CUTLASS order: (seq, head_size=1, heads, batch)
   int q_stride_seq = 0;
   int q_stride_heads = 0;
@@ -166,7 +169,9 @@ struct KernelLauncher {
          stride_V,
          reinterpret_cast<ElementO*>(args.out),
          stride_O,
-         reinterpret_cast<ElementQ*>(args.sm_sink)},
+         reinterpret_cast<ElementQ*>(args.sm_sink),
+         args.softmax_lse,
+         args.lse_stride},
         {args.sm_scale,
          args.k_scale,
          args.v_scale,
@@ -175,7 +180,8 @@ struct KernelLauncher {
          args.max_blocks_per_seq,
          args.total_seqlen_k,
          args.window_size_left,
-         args.window_size_right},
+         args.window_size_right,
+         args.is_interleaved_kv_cache},
         {},
         hw_info};
 
@@ -218,11 +224,8 @@ struct KernelLauncher {
         syclex::sub_group_size<cute::intel::sg_size>, intelex::grf_size<256>};
     compat::experimental::launch_policy policy{
         sycl_grid, sycl_block, launch_props, kernel_props};
-    auto event =
-        compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
-            policy, queue, params);
-
-    EventManager::getInstance().addEvent(event);
+    compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
+        policy, queue, params);
   }
 };
 
@@ -237,6 +240,7 @@ template <
     bool Causal = false,
     bool Local = false,
     bool Sink = false,
+    bool SoftmaxLSE = false,
     typename ElementQ = bfloat16_t,
     typename ElementK = bfloat16_t,
     typename ElementV = bfloat16_t,
@@ -324,7 +328,8 @@ struct FMHAConfig {
         ProblemShapeType,
         CollectiveMainloop,
         CollectiveEpilogue,
-        Scheduler>;
+        Scheduler,
+        SoftmaxLSE>;
 
     KernelLauncher<FMHAKernel, VarLen> launcher;
 
@@ -338,7 +343,13 @@ struct FMHAConfig {
   }
 };
 
-template <typename chunk_policy, bool Paged, bool Causal, bool Local, bool Sink>
+template <
+    typename chunk_policy,
+    bool Paged,
+    bool Causal,
+    bool Local,
+    bool Sink,
+    bool SoftmaxLSE>
 void policy_dispatch_impl(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
@@ -357,6 +368,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           half_t,
           half_t,
           half_t,
@@ -373,6 +385,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           half_t,
           float_e4m3_t,
           float_e4m3_t,
@@ -389,6 +402,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           half_t,
           float_e5m2_t,
           float_e5m2_t,
@@ -407,6 +421,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           bfloat16_t,
           bfloat16_t,
           bfloat16_t,
@@ -423,6 +438,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           bfloat16_t,
           float_e4m3_t,
           float_e4m3_t,
@@ -439,6 +455,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           bfloat16_t,
           float_e5m2_t,
           float_e5m2_t,

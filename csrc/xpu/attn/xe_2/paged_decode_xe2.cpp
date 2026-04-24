@@ -139,6 +139,9 @@ void cutlass_paged_decode_impl(
     max_seqlen_q = query.size(2);
     max_seqlen_k = key_cache.size(2);
   }
+
+  bool is_interleaved_kv = false;
+
   if (is_paged) {
     // num_blocks is used to build total_seqlen_k for shape_K in kernels
     // it is not just the meaning of used blocks for kv.
@@ -147,6 +150,8 @@ void cutlass_paged_decode_impl(
     num_heads_kv = key_cache.size(2);
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
+
+    is_interleaved_kv = is_interleaved_kv_cache(key_cache, value_cache);
   }
 
   if (is_local) {
@@ -169,7 +174,7 @@ void cutlass_paged_decode_impl(
       max_seqlen_q,
       max_seqlen_k,
       total_seqlen_q,
-      total_seqlen_k,
+      is_interleaved_kv ? total_seqlen_k * 2 : total_seqlen_k,
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
@@ -188,12 +193,12 @@ void cutlass_paged_decode_impl(
       is_causal,
       is_local,
       is_sink,
+      is_interleaved_kv,
       num_kv_splits,
-      // KV cache strides
-      key_cache.stride(0),
+      is_interleaved_kv ? key_cache.stride(0) / 2 : key_cache.stride(0),
       key_cache.stride(1),
       key_cache.stride(2),
-      value_cache.stride(0),
+      is_interleaved_kv ? value_cache.stride(0) / 2 : value_cache.stride(0),
       value_cache.stride(1),
       value_cache.stride(2)};
 

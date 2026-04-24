@@ -144,7 +144,7 @@ _LLAMA4_PROFILE = {
             "num_tokens": [1, 128],
             "num_heads": [LLAMA4_NUM_KV_HEADS],
             "head_size": [LLAMA4_HEAD_SIZE],
-            "block_size": [16],
+            "block_size": [64],
             "dtype": [torch.bfloat16],
         },
     },
@@ -304,13 +304,13 @@ _DEEPSEEK_PROFILE = {
             "num_tokens": [1, 128],
             "num_heads": [8],
             "head_size": [128],
-            "block_size": [16],
+            "block_size": [64],
             "dtype": [torch.bfloat16],
         },
         "test_concat_and_cache_mla": {
             "num_tokens": [1, 128],
             "num_blocks": [4],
-            "block_size": [16],
+            "block_size": [64],
         },
     },
     "tests/test_topk.py": {
@@ -400,10 +400,391 @@ _DEEPSEEK_PROFILE = {
 }
 
 # ---------------------------------------------------------------------------
+# Qwen3-30B-A3B (Qwen/Qwen3-30B-A3B-Instruct-2507)
+#   - Qwen3MoE architecture, SiluAndMul (SwiGLU), RMSNorm
+#   - hidden_size=2048, intermediate_size=6144, moe_intermediate_size=768
+#   - 32 attention heads, 4 KV heads, head_dim=128
+#   - 128 experts, top-8 routing, norm_topk_prob=True
+#   - neox-style RoPE
+# ---------------------------------------------------------------------------
+QWEN3_30B_HEAD_DIM = 128
+QWEN3_30B_NUM_HEADS = 32
+QWEN3_30B_HIDDEN_SIZE = 2048
+QWEN3_30B_INTERMEDIATE_SIZE = 6144        # dense FFN intermediate
+QWEN3_30B_MOE_INTERMEDIATE_SIZE = 768     # per-expert FFN intermediate
+QWEN3_30B_NUM_KV_HEADS = 4
+QWEN3_30B_NUM_EXPERTS = 128
+QWEN3_30B_TOPK = 8
+_QWEN3_30B_A3B_PROFILE = {
+    # ---- Activation: SiluAndMul (SwiGLU) ----
+    "tests/test_activation.py": {
+        "test_act_and_mul": {
+            "activation": ["silu_and_mul"],
+            "num_tokens": [1, 128, 2048],
+            "d": [QWEN3_30B_MOE_INTERMEDIATE_SIZE],
+        },
+        "test_activation": None,
+    },
+    # ---- RMSNorm ----
+    "tests/test_layernorm.py": {
+        "test_rms_norm": {
+            "num_tokens": [1, 128, 2048],
+            "hidden_size": [QWEN3_30B_HIDDEN_SIZE],
+        },
+    },
+    # ---- Rotary Embedding: neox style ----
+    "tests/test_rotary_embedding.py": {
+        "test_rotary_embedding_opcheck": {
+            "is_neox_style": [True],
+            "max_position": [1024],
+            "head_size": [QWEN3_30B_HEAD_DIM],
+            "seq_len": [1, 128, 1024],
+        },
+    },
+    # ---- KV Cache: GQA 32q/4kv ----
+    "tests/test_cache.py": {
+        "test_reshape_and_cache_flash": {
+            "num_tokens": [1, 128],
+            "num_heads": [QWEN3_30B_NUM_KV_HEADS],
+            "head_size": [QWEN3_30B_HEAD_DIM],
+            "block_size": [64],
+            "dtype": [torch.bfloat16],
+        },
+    },
+    # ---- TopK routing: 128 experts, top-8 ----
+    "tests/test_topk.py": {
+        "test_fused_topk_softmax": {
+            "topk": [QWEN3_30B_TOPK],
+            "n_expert": [QWEN3_30B_NUM_EXPERTS],
+            "n_token": [1, 128, 2048],
+        },
+    },
+    # ---- Fused MoE: 128 experts, top-8 ----
+    "tests/fused_moe/test_fused_moe.py": {
+        "test_fused_moe": {
+            "m,n,k": [
+                (1, QWEN3_30B_MOE_INTERMEDIATE_SIZE, QWEN3_30B_HIDDEN_SIZE),
+                (128, QWEN3_30B_MOE_INTERMEDIATE_SIZE, QWEN3_30B_HIDDEN_SIZE),
+            ],
+            "e": [QWEN3_30B_NUM_EXPERTS],
+            "topk": [QWEN3_30B_TOPK],
+            "dtype": [torch.bfloat16],
+            "has_bias": [True, False],
+        },
+    },
+    # ---- Grouped GEMM: 128 experts, top-8 ----
+    "tests/fused_moe/test_grouped_gemm.py": {
+        "test_grouped_gemm": {
+            "m,n,k": [
+                (1, QWEN3_30B_MOE_INTERMEDIATE_SIZE, QWEN3_30B_HIDDEN_SIZE),
+                (128, QWEN3_30B_MOE_INTERMEDIATE_SIZE, QWEN3_30B_HIDDEN_SIZE),
+            ],
+            "e": [QWEN3_30B_NUM_EXPERTS],
+            "topk": [QWEN3_30B_TOPK],
+            "dtype": [torch.bfloat16],
+            "has_bias": [True, False],
+        },
+    },
+    # ---- MoE prologue ----
+    "tests/fused_moe/test_moe_prologue.py": {
+        "test_prologue": {
+            "m,n,k": [
+                (1, QWEN3_30B_MOE_INTERMEDIATE_SIZE, QWEN3_30B_HIDDEN_SIZE),
+                (128, QWEN3_30B_MOE_INTERMEDIATE_SIZE, QWEN3_30B_HIDDEN_SIZE),
+            ],
+            "e": [QWEN3_30B_NUM_EXPERTS],
+            "topk": [QWEN3_30B_TOPK],
+        },
+    },
+    # ---- MoE remap hidden states ----
+    "tests/fused_moe/test_remap_hidden_states.py": {
+        "test_remap_hidden_states": {
+            "total_experts_num": [QWEN3_30B_NUM_EXPERTS],
+            "topk": [QWEN3_30B_TOPK],
+            "hidden_size": [QWEN3_30B_HIDDEN_SIZE],
+        },
+    },
+    # ---- MoE align block size ----
+    "tests/test_moe_align_block_size.py": {
+        "test_moe_align_block_size": {
+            "m": [1, 128, 2048],
+            "num_experts": [QWEN3_30B_NUM_EXPERTS],
+            "topk": [QWEN3_30B_TOPK],
+            "block_size": [128],
+        },
+    },
+    # ---- MoE gather ----
+    "tests/test_moe_gather.py": {
+        "test_moe_gather": {
+            "input_len": [1, 128],
+            "hidden_size": [QWEN3_30B_HIDDEN_SIZE],
+            "num_experts": [QWEN3_30B_NUM_EXPERTS],
+            "topk": [QWEN3_30B_TOPK],
+        },
+    },
+    # ---- MoE sum ----
+    "tests/test_moe_sum.py": {
+        "test_moe_sum": {
+            "m": [1, 128],
+            "topk": [QWEN3_30B_TOPK],
+            "k": [QWEN3_30B_HIDDEN_SIZE],
+        },
+    },
+    # ---- Flash Attention: GQA 32q/4kv heads ----
+    "tests/flash_attn/test_flash_attn_varlen_func.py": {
+        "test_varlen_with_paged_kv": {
+            "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
+            "num_heads": [(QWEN3_30B_NUM_HEADS, QWEN3_30B_NUM_KV_HEADS)],
+            "head_size": [QWEN3_30B_HEAD_DIM],
+            "num_blocks": [2048],
+            "window_size": [(-1, -1)],
+            "is_paged": [True],
+        },
+        "test_decode_with_paged_kv": {
+            "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
+            "num_heads": [(QWEN3_30B_NUM_HEADS, QWEN3_30B_NUM_KV_HEADS)],
+            "head_size": [QWEN3_30B_HEAD_DIM],
+            "num_blocks": [2048],
+            "window_size": [(-1, -1)],
+        },
+        "test_decode_with_paged_kv_mla": None,  # Not MLA
+    },
+    # ---- Merge attention states ----
+    "tests/test_merge_attn_states.py": {
+        "test_merge_attn_states": {
+            "num_tokens": [1, 128],
+            "num_query_heads": [QWEN3_30B_NUM_HEADS],
+            "head_size": [QWEN3_30B_HEAD_DIM],
+            "output_dtype": [torch.bfloat16],
+        },
+    },
+    # ---- FP8 quantization ----
+    "tests/test_fp8_quant.py": {
+        "test_dynamic_per_tensor_fp8_quant": {
+            "num_tokens": [1, 128],
+            "hidden_size": [QWEN3_30B_HIDDEN_SIZE],
+        },
+        "test_dynamic_per_token_fp8_quant": {
+            "num_tokens": [1, 128],
+            "hidden_size": [QWEN3_30B_HIDDEN_SIZE],
+        },
+    },
+    # ---- FP8 GEMM ----
+    "tests/test_fp8_gemm_onednn.py": {
+        "test_fp8_gemm_per_tensor": {
+            "mnk_factors": [
+                (1, QWEN3_30B_HIDDEN_SIZE, QWEN3_30B_MOE_INTERMEDIATE_SIZE),
+                (128, QWEN3_30B_HIDDEN_SIZE, QWEN3_30B_MOE_INTERMEDIATE_SIZE),
+            ],
+        },
+        "test_fp8_gemm_per_channel": {
+            "mnk_factors": [
+                (1, QWEN3_30B_HIDDEN_SIZE, QWEN3_30B_MOE_INTERMEDIATE_SIZE),
+                (128, QWEN3_30B_HIDDEN_SIZE, QWEN3_30B_MOE_INTERMEDIATE_SIZE),
+            ],
+        },
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Qwen3-235B-A22B (Qwen/Qwen3-235B-A22B-Instruct-2507)
+#   - Qwen3MoE architecture, SiluAndMul (SwiGLU), RMSNorm
+#   - hidden_size=4096, intermediate_size=12288, moe_intermediate_size=1536
+#   - 64 attention heads, 4 KV heads, head_dim=128
+#   - 128 experts, top-8 routing, norm_topk_prob=True
+#   - neox-style RoPE
+# ---------------------------------------------------------------------------
+QWEN3_235B_HEAD_DIM = 128
+QWEN3_235B_NUM_HEADS = 64
+QWEN3_235B_HIDDEN_SIZE = 4096
+QWEN3_235B_INTERMEDIATE_SIZE = 12288      # dense FFN intermediate
+QWEN3_235B_MOE_INTERMEDIATE_SIZE = 1536   # per-expert FFN intermediate
+QWEN3_235B_NUM_KV_HEADS = 4
+QWEN3_235B_NUM_EXPERTS = 128
+QWEN3_235B_TOPK = 8
+_QWEN3_235B_A22B_PROFILE = {
+    # ---- Activation: SiluAndMul (SwiGLU) ----
+    "tests/test_activation.py": {
+        "test_act_and_mul": {
+            "activation": ["silu_and_mul"],
+            "num_tokens": [1, 128, 2048],
+            "d": [QWEN3_235B_MOE_INTERMEDIATE_SIZE],
+        },
+        "test_activation": None,
+    },
+    # ---- RMSNorm ----
+    "tests/test_layernorm.py": {
+        "test_rms_norm": {
+            "num_tokens": [1, 128, 2048],
+            "hidden_size": [QWEN3_235B_HIDDEN_SIZE],
+        },
+    },
+    # ---- Rotary Embedding: neox style ----
+    "tests/test_rotary_embedding.py": {
+        "test_rotary_embedding_opcheck": {
+            "is_neox_style": [True],
+            "max_position": [1024],
+            "head_size": [QWEN3_235B_HEAD_DIM],
+            "seq_len": [1, 128, 1024],
+        },
+    },
+    # ---- KV Cache: GQA 64q/4kv ----
+    "tests/test_cache.py": {
+        "test_reshape_and_cache_flash": {
+            "num_tokens": [1, 128],
+            "num_heads": [QWEN3_235B_NUM_KV_HEADS],
+            "head_size": [QWEN3_235B_HEAD_DIM],
+            "block_size": [64],
+            "dtype": [torch.bfloat16],
+        },
+    },
+    # ---- TopK routing: 128 experts, top-8 ----
+    "tests/test_topk.py": {
+        "test_fused_topk_softmax": {
+            "topk": [QWEN3_235B_TOPK],
+            "n_expert": [QWEN3_235B_NUM_EXPERTS],
+            "n_token": [1, 128, 2048],
+        },
+    },
+    # ---- Fused MoE: 128 experts, top-8 ----
+    "tests/fused_moe/test_fused_moe.py": {
+        "test_fused_moe": {
+            "m,n,k": [
+                (1, QWEN3_235B_MOE_INTERMEDIATE_SIZE, QWEN3_235B_HIDDEN_SIZE),
+                (128, QWEN3_235B_MOE_INTERMEDIATE_SIZE,
+                 QWEN3_235B_HIDDEN_SIZE),
+            ],
+            "e": [QWEN3_235B_NUM_EXPERTS],
+            "topk": [QWEN3_235B_TOPK],
+            "dtype": [torch.bfloat16],
+            "has_bias": [True, False],
+        },
+    },
+    # ---- Grouped GEMM: 128 experts, top-8 ----
+    "tests/fused_moe/test_grouped_gemm.py": {
+        "test_grouped_gemm": {
+            "m,n,k": [
+                (1, QWEN3_235B_MOE_INTERMEDIATE_SIZE, QWEN3_235B_HIDDEN_SIZE),
+                (128, QWEN3_235B_MOE_INTERMEDIATE_SIZE,
+                 QWEN3_235B_HIDDEN_SIZE),
+            ],
+            "e": [QWEN3_235B_NUM_EXPERTS],
+            "topk": [QWEN3_235B_TOPK],
+            "dtype": [torch.bfloat16],
+            "has_bias": [True, False],
+        },
+    },
+    # ---- MoE prologue ----
+    "tests/fused_moe/test_moe_prologue.py": {
+        "test_prologue": {
+            "m,n,k": [
+                (1, QWEN3_235B_MOE_INTERMEDIATE_SIZE, QWEN3_235B_HIDDEN_SIZE),
+                (128, QWEN3_235B_MOE_INTERMEDIATE_SIZE,
+                 QWEN3_235B_HIDDEN_SIZE),
+            ],
+            "e": [QWEN3_235B_NUM_EXPERTS],
+            "topk": [QWEN3_235B_TOPK],
+        },
+    },
+    # ---- MoE remap hidden states ----
+    "tests/fused_moe/test_remap_hidden_states.py": {
+        "test_remap_hidden_states": {
+            "total_experts_num": [QWEN3_235B_NUM_EXPERTS],
+            "topk": [QWEN3_235B_TOPK],
+            "hidden_size": [QWEN3_235B_HIDDEN_SIZE],
+        },
+    },
+    # ---- MoE align block size ----
+    "tests/test_moe_align_block_size.py": {
+        "test_moe_align_block_size": {
+            "m": [1, 128, 2048],
+            "num_experts": [QWEN3_235B_NUM_EXPERTS],
+            "topk": [QWEN3_235B_TOPK],
+            "block_size": [128],
+        },
+    },
+    # ---- MoE gather ----
+    "tests/test_moe_gather.py": {
+        "test_moe_gather": {
+            "input_len": [1, 128],
+            "hidden_size": [QWEN3_235B_HIDDEN_SIZE],
+            "num_experts": [QWEN3_235B_NUM_EXPERTS],
+            "topk": [QWEN3_235B_TOPK],
+        },
+    },
+    # ---- MoE sum ----
+    "tests/test_moe_sum.py": {
+        "test_moe_sum": {
+            "m": [1, 128],
+            "topk": [QWEN3_235B_TOPK],
+            "k": [QWEN3_235B_HIDDEN_SIZE],
+        },
+    },
+    # ---- Flash Attention: GQA 64q/4kv heads ----
+    "tests/flash_attn/test_flash_attn_varlen_func.py": {
+        "test_varlen_with_paged_kv": {
+            "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
+            "num_heads": [(QWEN3_235B_NUM_HEADS, QWEN3_235B_NUM_KV_HEADS)],
+            "head_size": [QWEN3_235B_HEAD_DIM],
+            "num_blocks": [2048],
+            "window_size": [(-1, -1)],
+            "is_paged": [True],
+        },
+        "test_decode_with_paged_kv": {
+            "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
+            "num_heads": [(QWEN3_235B_NUM_HEADS, QWEN3_235B_NUM_KV_HEADS)],
+            "head_size": [QWEN3_235B_HEAD_DIM],
+            "num_blocks": [2048],
+            "window_size": [(-1, -1)],
+        },
+        "test_decode_with_paged_kv_mla": None,  # Not MLA
+    },
+    # ---- Merge attention states ----
+    "tests/test_merge_attn_states.py": {
+        "test_merge_attn_states": {
+            "num_tokens": [1, 128],
+            "num_query_heads": [QWEN3_235B_NUM_HEADS],
+            "head_size": [QWEN3_235B_HEAD_DIM],
+            "output_dtype": [torch.bfloat16],
+        },
+    },
+    # ---- FP8 quantization ----
+    "tests/test_fp8_quant.py": {
+        "test_dynamic_per_tensor_fp8_quant": {
+            "num_tokens": [1, 128],
+            "hidden_size": [QWEN3_235B_HIDDEN_SIZE],
+        },
+        "test_dynamic_per_token_fp8_quant": {
+            "num_tokens": [1, 128],
+            "hidden_size": [QWEN3_235B_HIDDEN_SIZE],
+        },
+    },
+    # ---- FP8 GEMM ----
+    "tests/test_fp8_gemm_onednn.py": {
+        "test_fp8_gemm_per_tensor": {
+            "mnk_factors": [
+                (1, QWEN3_235B_HIDDEN_SIZE, QWEN3_235B_MOE_INTERMEDIATE_SIZE),
+                (128, QWEN3_235B_HIDDEN_SIZE,
+                 QWEN3_235B_MOE_INTERMEDIATE_SIZE),
+            ],
+        },
+        "test_fp8_gemm_per_channel": {
+            "mnk_factors": [
+                (1, QWEN3_235B_HIDDEN_SIZE, QWEN3_235B_MOE_INTERMEDIATE_SIZE),
+                (128, QWEN3_235B_HIDDEN_SIZE,
+                 QWEN3_235B_MOE_INTERMEDIATE_SIZE),
+            ],
+        },
+    },
+}
+
+# ---------------------------------------------------------------------------
 # Registry of all on-demand profiles
 # ---------------------------------------------------------------------------
 ONDEMAND_PROFILES = {
     "llama3": _LLAMA3_PROFILE,
     "llama4": _LLAMA4_PROFILE,
     "deepseek": _DEEPSEEK_PROFILE,
+    "qwen3_30b_a3b": _QWEN3_30B_A3B_PROFILE,
+    "qwen3_235b_a22b": _QWEN3_235B_A22B_PROFILE,
 }

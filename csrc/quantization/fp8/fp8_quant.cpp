@@ -86,7 +86,7 @@ class scaled_fp8_quant_kernel_strided_group_shape {
     if (STRIDE_J_ZERO && hidden_size % VEC_SIZE == 0) {
       // Per-tensor or per-token: single scale per row, vectorize full row
       fp8::ConvertWithScaleOp<true, fp8_type> op{get_inv_scale(0)};
-      fp8::scaled_convert_vec(
+      vectorize_with_alignment<VEC_SIZE>(
           token_in, token_out, hidden_size, tid, item.get_local_range(0), op);
     } else if (group_n % VEC_SIZE == 0) {
       // Multiple column groups with vectorization
@@ -94,7 +94,7 @@ class scaled_fp8_quant_kernel_strided_group_shape {
 
       for (int gj = 0; gj < num_groups_n; gj++) {
         fp8::ConvertWithScaleOp<true, fp8_type> op{get_inv_scale(gj)};
-        fp8::scaled_convert_vec(
+        vectorize_with_alignment<VEC_SIZE>(
             token_in + gj * group_n,
             token_out + gj * group_n,
             group_n,
@@ -147,7 +147,8 @@ class scaled_fp8_quant_kernel_strided_dynamic {
     // division.
     const float inverted_scale = 1.0f / (*scale);
     fp8::ConvertWithScaleOp<true, fp8_type> op{inverted_scale};
-    fp8::scaled_convert_vec(
+    constexpr int VEC_SIZE = 4;
+    vectorize_with_alignment<VEC_SIZE>(
         token_in, token_out, hidden_size, tid, item.get_local_range(0), op);
   }
 };
@@ -248,9 +249,10 @@ class per_token_group_quant_8bit_kernel {
     group_barrier(item.get_group());
 
     const float inverted_scale = 1.0f / (y_s);
+    constexpr int VEC_SIZE = 4;
     if (!can_vectorize) {
       fp8::ConvertWithScaleOp<true, fp8_type> op{inverted_scale};
-      fp8::scaled_convert_vec(
+      vectorize_with_alignment<VEC_SIZE>(
           group_input,
           group_output,
           group_size,
@@ -334,9 +336,10 @@ class dynamic_per_token_scaled_fp8_quant_kernel {
 
     // Note that we don't use inverted scales so we can match FBGemm impl.
     const float inverted_scale = 1.0f / (token_scale[0]);
+    constexpr int VEC_SIZE = 4;
     if (can_vectorize) {
       fp8::ConvertWithScaleOp<true, fp8_type> op{inverted_scale};
-      fp8::scaled_convert_vec(
+      vectorize_with_alignment<VEC_SIZE>(
           token_input,
           token_output,
           hidden_size,

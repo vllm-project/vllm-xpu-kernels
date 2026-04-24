@@ -1307,7 +1307,7 @@ void kernel_launcher(
   sycl::range<3> global_prepare(1, sm_count, 1);
   int slm_size_prepare = num_v_heads * 2 + chunk_size;
 
-  auto event_prepare = queue.submit([&](sycl::handler& cgh) {
+  queue.submit([&](sycl::handler& cgh) {
     cgh.parallel_for<ChunkPrepareKernel<T, StateT>>(
         sycl::nd_range<3>{global_prepare * local_prepare, local_prepare},
         kernel_props,
@@ -1327,7 +1327,6 @@ void kernel_launcher(
               head_v_dim);
         });
   });
-  EventManager::getInstance().addEvent(event_prepare);
 
   // compute A
   using WGTileComputeA = chunk_gemm_policy_compute_A::WGTile;
@@ -1343,7 +1342,7 @@ void kernel_launcher(
       1, sm_count * MaxThreadsPerSM / MaxThreadsPerWorkgroupComputeA, 1);
   int slm_size_compute_A = chunk_size;
 
-  auto event_compute_A = queue.submit([&](sycl::handler& cgh) {
+  queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_compute_A), cgh);
     cgh.parallel_for<ChunkComputeAKernel<T, StateT>>(
@@ -1366,7 +1365,6 @@ void kernel_launcher(
               head_v_dim);
         });
   });
-  EventManager::getInstance().addEvent(event_compute_A);
 
   if (vllm::xpu::is_bmg()) {
     using WGTileInverse = chunk_gemm_policy_inverse::WGTile;
@@ -1386,7 +1384,7 @@ void kernel_launcher(
             num_v_heads * num_v_heads,
         1);
 
-    auto event_inverse = queue.submit([&](sycl::handler& cgh) {
+    queue.submit([&](sycl::handler& cgh) {
       cgh.parallel_for<ChunkInverseOptKernel<T, StateT>>(
           sycl::nd_range<3>{global_inverse * local_inverse, local_inverse},
           kernel_props,
@@ -1402,7 +1400,6 @@ void kernel_launcher(
                 head_v_dim);
           });
     });
-    EventManager::getInstance().addEvent(event_inverse);
   } else {
     // PVC has acc issue of sycl tla, so use native implementation for inverse
     // Once issue is fixed, remove this workaround and use the same MMA-based
@@ -1413,7 +1410,7 @@ void kernel_launcher(
         1, sm_count * MaxThreadsPerSM / inverse_items, 1);
     int slm_size_inverse = chunk_size * chunk_size * 2;
 
-    auto event_inverse = queue.submit([&](sycl::handler& cgh) {
+    queue.submit([&](sycl::handler& cgh) {
       sycl::local_accessor<float, 1> local_mem(
           sycl::range<1>(slm_size_inverse), cgh);
       cgh.parallel_for<ChunkInverseKernel<T, StateT>>(
@@ -1432,7 +1429,6 @@ void kernel_launcher(
                 head_v_dim);
           });
     });
-    EventManager::getInstance().addEvent(event_inverse);
   }
 
   // compute W U
@@ -1449,7 +1445,7 @@ void kernel_launcher(
       1, sm_count * MaxThreadsPerSM / MaxThreadsPerWorkgroupComputeWU, 1);
   int slm_size_compute_wu = num_v_heads * 2 + chunk_size * 2;
 
-  auto event_compute_wu = queue.submit([&](sycl::handler& cgh) {
+  queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_compute_wu), cgh);
     cgh.parallel_for<ChunkComputeWUKernel<T, StateT>>(
@@ -1479,7 +1475,6 @@ void kernel_launcher(
               head_v_dim);
         });
   });
-  EventManager::getInstance().addEvent(event_compute_wu);
 
   // compute O
   using WGTileFwdO = chunk_gemm_policy_fwd_o::WGTile;
@@ -1494,7 +1489,7 @@ void kernel_launcher(
   sycl::range<3> global_fwd_o(batch_size, num_v_heads, 1);
   int slm_size_fwd_o = chunk_size + chunk_size + chunk_size;
 
-  auto event_fwd_o = queue.submit([&](sycl::handler& cgh) {
+  queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
         sycl::range<1>(slm_size_fwd_o), cgh);
     cgh.parallel_for<ChunkFwdOKernel<T, StateT>>(
@@ -1523,7 +1518,6 @@ void kernel_launcher(
               head_v_dim);
         });
   });
-  EventManager::getInstance().addEvent(event_fwd_o);
 }
 
 void chunk_gated_delta_rule_impl_xe2(

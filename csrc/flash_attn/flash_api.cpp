@@ -183,11 +183,23 @@ std::vector<at::Tensor> mha_varlen_fwd(
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
 
+  // Allocated only in chunk_prefill path when return_softmax is true
+  std::optional<at::Tensor> softmax_lse_opt;
+
   if (max_seqlen_q > 1 || !is_paged) {
     if (!out_.has_value()) {
       out = torch::empty_like(q);
     }
     at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
+
+    // Allocate softmax_lse if requested: [total_seqlen_q, num_heads_q]
+    if (return_softmax) {
+      int total_seqlen_q = q.size(0);
+      int num_heads_q = q.size(1);
+      softmax_lse_opt = torch::empty(
+          {total_seqlen_q, num_heads_q},
+          q.options().dtype(at::kFloat).device(q.device()));
+    }
 
     cutlass_chunk_prefill_interface(
         queue,
@@ -210,7 +222,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_paged,
         is_causal,
         is_local,
-        is_sink);
+        is_sink,
+        softmax_lse_opt);
   } else {
     // Normalize -1 (unbounded) to max_seqlen_k for kernel masking logic
     // In decode phase the window_size_right doesn't have effect
@@ -287,8 +300,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
   }
 
   if (return_softmax) {
-    // FIXME: current do not support store softmax_lse out
-    auto softmax_lse = torch::empty_like(out);
+    at::Tensor softmax_lse =
+        softmax_lse_opt.has_value() ? *softmax_lse_opt : torch::empty({});
     return {out, softmax_lse};
   } else {
     at::Tensor softmax_lse;

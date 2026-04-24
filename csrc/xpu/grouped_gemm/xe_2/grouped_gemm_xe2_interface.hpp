@@ -53,7 +53,6 @@
 #include "cutlass/util/reference/device/gemm_complex.h"
 #include "cutlass/util/reference/device/tensor_compare.h"
 #include "cutlass/util/reference/host/tensor_fill.h"
-#include "cutlass/util/sycl_event_manager.hpp"
 
 #include "gemm_xe2_policy.hpp"
 #include "grouped_gemm_xe2.hpp"
@@ -125,7 +124,7 @@ void MoEGEMMLauncher(
   using GmemTiledCopyB = typename policy::GmemTiledCopyB;
   using GmemTiledCopyD = typename policy::GmemTiledCopyD;
 
-  auto event = stream.submit([&](sycl::handler& cgh) {
+  stream.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<int32_t, 1> local_mem(sycl::range<1>(1), cgh);
     cgh.parallel_for<GemmCuteName<
         ElementA,
@@ -158,7 +157,6 @@ void MoEGEMMLauncher(
               local_mem);
         });
   });
-  EventManager::getInstance().addEvent(event);
 }
 
 at::Tensor cutlass_grouped_gemm_xe2_impl(

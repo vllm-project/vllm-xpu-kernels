@@ -48,6 +48,23 @@ aten_to_Cutlass_qk_dtype(const at::Tensor& q, const at::Tensor& k) {
   return CutlassQKType(aten_to_dtype(q), aten_to_dtype(k));
 }
 
+inline bool is_interleaved_kv_cache(
+    const at::Tensor& key_cache, const at::Tensor& value_cache) {
+  auto value_stride = value_cache.strides();
+
+  if (key_cache.dim() == value_cache.dim() &&
+      key_cache.sizes() == value_cache.sizes() &&
+      key_cache.strides() == value_stride &&
+      key_cache.element_size() == value_cache.element_size() &&
+      key_cache.storage().data_ptr() == value_cache.storage().data_ptr() &&
+      key_cache.storage_offset() == 0 &&
+      value_cache.storage_offset() == value_stride[0] / 2) {
+    return true;
+  }
+
+  return false;
+}
+
 using namespace cute;
 struct chunk_policy_head64 {
   using ShapeQK = Shape<_128, _32, _32>;
