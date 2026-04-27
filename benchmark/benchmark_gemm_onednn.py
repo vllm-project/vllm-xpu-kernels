@@ -988,7 +988,6 @@ if __name__ == "__main__":
     ) in bench_registry.items():
         if name not in enabled:
             continue
-        print(f"INFO: running with name = {name}, label = {label}...")
 
         if use_model_shapes and name in (
             "bf16",
