@@ -64,7 +64,7 @@ class RowsPerExpertCount {
         sycl::memory_order_relaxed,
         sycl::memory_scope_device,
         sycl::access::address_space::global_space>(
-        expert_first_token_offset[local_expert_id + 1]);
+        expert_first_token_offset[local_expert_id]);
     int64_t old = atomic_count.fetch_add(1);
     unpermuted_row_to_permuted_row[global_id] = old;
   }
@@ -79,68 +79,11 @@ class RowsPerExpertCount {
   const int TopK;
 };
 
-class CalculateFristTokenOffset {
- public:
-  CalculateFristTokenOffset(
-      int64_t* expert_first_token_offset, const int local_experts_num)
-      : expert_first_token_offset(expert_first_token_offset),
-        local_experts_num(local_experts_num) {}
-
-  static constexpr int WARP_SIZE = 32;
-  static constexpr int MAX_LOCAL_STORAGE = 32;
-
-  static inline sycl::nd_range<1> get_nd_range() {
-    sycl::range<1> local(WARP_SIZE);
-    sycl::range<1> group(1);
-    return sycl::nd_range<1>(local * group, local);
-  }
-
-  void operator()
-      [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
-    auto sg = item.get_sub_group();
-    int sg_local_id = sg.get_local_linear_id();
-
-    int elems_per_item = (local_experts_num + WARP_SIZE - 1) / WARP_SIZE;
-
-    int local_sum = 0;
-    int local_start = elems_per_item * sg_local_id;
-    int remained_elems = local_experts_num - local_start;
-    int local_elems =
-        remained_elems > elems_per_item ? elems_per_item : remained_elems;
-
-    int local_storage[MAX_LOCAL_STORAGE];
-
-    if (remained_elems > 0) {
-#pragma unroll
-      for (int i = 0; i < local_elems; ++i) {
-        int idx = local_start + i;
-        local_storage[i] = expert_first_token_offset[idx + 1];
-        local_sum += local_storage[i];
-      }
-    }
-
-    int global_sum =
-        sycl::exclusive_scan_over_group(sg, local_sum, sycl::plus<int>());
-
-    if (remained_elems > 0) {
-#pragma unroll
-      for (int i = 0; i < local_elems; ++i) {
-        int idx = local_start + i;
-        global_sum += local_storage[i];
-        expert_first_token_offset[idx + 1] = global_sum;
-      }
-    }
-  }
-
- private:
-  int64_t* expert_first_token_offset;
-  const int local_experts_num;
-};
-
 template <typename TA, typename TS, int TopK>
 class RemapHiddenStates {
  public:
   RemapHiddenStates(
+      sycl::local_accessor<int32_t, 1>& slm,
       TA* hidden_states,
       TS* hidden_states_scales,
       TA* remapped_hidden_states,
@@ -153,8 +96,10 @@ class RemapHiddenStates {
       const int num_rows,
       const int hidden_size,
       const int block_k,
-      const int total_experts_num)
-      : hidden_states(hidden_states),
+      const int total_experts_num,
+      const int local_experts_num)
+      : slm(slm),
+        hidden_states(hidden_states),
         hidden_states_scales(hidden_states_scales),
         remapped_hidden_states(remapped_hidden_states),
         remapped_hidden_states_scales(remapped_hidden_states_scales),
@@ -166,11 +111,13 @@ class RemapHiddenStates {
         num_rows(num_rows),
         hidden_size(hidden_size),
         block_k(block_k),
-        total_experts_num(total_experts_num) {}
+        total_experts_num(total_experts_num),
+        local_experts_num(local_experts_num) {}
 
   static constexpr int GroupWorkItem = 256;
   static constexpr int WARP_SIZE = 16;
   static constexpr int ElemsPerItem = sizeof(float) * 4 / sizeof(TA);
+  static constexpr int EXCLUSIVE_SIZE = 1024;
 
   static inline sycl::nd_range<1>
   get_nd_range(const int num_rows, const int hidden_size) {
@@ -188,6 +135,22 @@ class RemapHiddenStates {
     auto local_id = item.get_local_id(0);
     auto local_range = item.get_local_range(0);
     auto group_id = item.get_group(0);
+
+    int32_t* expert_cumsum_ptr = static_cast<int32_t*>(
+        slm.template get_multi_ptr<sycl::access::decorated::no>().get());
+
+    for (int i = local_id; i < local_experts_num; i += local_range) {
+      expert_cumsum_ptr[i] = expert_first_token_offset[i];
+    }
+
+    item.barrier(sycl::access::fence_space::local_space);
+
+    sycl::joint_inclusive_scan(
+        item.get_group(),
+        expert_cumsum_ptr,
+        expert_cumsum_ptr + EXCLUSIVE_SIZE,
+        expert_cumsum_ptr,
+        sycl::plus<int>{});
 
     int row = group_id;
     int global_expert_id[TopK];
@@ -224,7 +187,7 @@ class RemapHiddenStates {
     for (int i = 0; i < TopK; ++i) {
       if (local_expert_id[i] != -1) {
         rows_offset[i] = unpermuted_row_to_permuted_row[row * TopK + i] +
-                         expert_first_token_offset[local_expert_id[i]];
+                         expert_cumsum_ptr[local_expert_id[i] - 1];
       } else {
         rows_offset[i] = -1;
       }
@@ -314,6 +277,7 @@ class RemapHiddenStates {
   }
 
  private:
+  sycl::local_accessor<int32_t, 1> slm;
   TA* hidden_states;
   TS* hidden_states_scales;
   TA* remapped_hidden_states;
@@ -327,6 +291,7 @@ class RemapHiddenStates {
   const int hidden_size;
   const int block_k;
   const int total_experts_num;
+  const int local_experts_num;
 };
 
 template <typename TA, typename TS, int TopK>
@@ -347,8 +312,7 @@ void RemapHiddenStatesLauncher(
     const int local_experts_num,
     sycl::queue& queue) {
   TORCH_CHECK(
-      local_experts_num <= CalculateFristTokenOffset::MAX_LOCAL_STORAGE *
-                               CalculateFristTokenOffset::WARP_SIZE,
+      (local_experts_num <= RemapHiddenStates<TA, TS, TopK>::EXCLUSIVE_SIZE),
       "local_experts_num exceeds the maximum supported number");
   TORCH_CHECK(
       (hidden_size % RemapHiddenStates<TA, TS, TopK>::ElemsPerItem == 0),
@@ -368,16 +332,12 @@ void RemapHiddenStatesLauncher(
   });
 
   queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        CalculateFristTokenOffset::get_nd_range(),
-        CalculateFristTokenOffset{
-            expert_first_token_offset, local_experts_num});
-  });
-
-  queue.submit([&](sycl::handler& cgh) {
+    sycl::local_accessor<int32_t, 1> slm(
+        sycl::range<1>(RemapHiddenStates<TA, TS, TopK>::EXCLUSIVE_SIZE), cgh);
     cgh.parallel_for(
         RemapHiddenStates<TA, TS, TopK>::get_nd_range(num_rows, hidden_size),
         RemapHiddenStates<TA, TS, TopK>{
+            slm,
             hidden_states,
             hidden_states_scales,
             remapped_hidden_states,
@@ -390,7 +350,8 @@ void RemapHiddenStatesLauncher(
             num_rows,
             hidden_size,
             block_k,
-            total_experts_num});
+            total_experts_num,
+            local_experts_num});
   });
 }
 
@@ -466,8 +427,8 @@ void remap_hidden_states(
         "expert_map must be [total_experts_num]");
   }
   TORCH_CHECK(
-      expert_first_token_offset.size(0) == local_experts_num + 1,
-      "expert_first_token_offset must be [local_experts_num + 1]");
+      expert_first_token_offset.size(0) == local_experts_num,
+      "expert_first_token_offset must be [local_experts_num]");
   TORCH_CHECK(
       topk_ids.size(0) == num_rows && topk_ids.size(1) == TopK,
       "topk_ids must be [num_rows, TopK]");
