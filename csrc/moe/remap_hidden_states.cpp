@@ -15,14 +15,18 @@ class RowsPerExpertCount {
       bool is_topk_ids_int32,
       int* unpermuted_row_to_permuted_row,
       const int num_rows,
-      const int TopK)
+      const int TopK,
+      const int local_experts_num,
+      sycl::local_accessor<int32_t, 1> local_counts)
       : expert_map(expert_map),
         rows_per_expert(rows_per_expert),
         topk_ids(topk_ids),
         is_topk_ids_int32(is_topk_ids_int32),
         unpermuted_row_to_permuted_row(unpermuted_row_to_permuted_row),
         num_rows(num_rows),
-        TopK(TopK) {}
+        TopK(TopK),
+        local_experts_num(local_experts_num),
+        local_counts(local_counts) {}
 
   static constexpr int GroupWorkItem = 256;
   static constexpr int WARP_SIZE = 32;
@@ -38,34 +42,74 @@ class RowsPerExpertCount {
   void operator()
       [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
     auto global_id = item.get_global_linear_id();
+    auto local_id = item.get_local_id(0);
+    auto local_range = item.get_local_range(0);
 
-    if (global_id >= num_rows * TopK) {
-      // early return
-      return;
+    // ===== Phase 1: init SLM =====
+    for (int i = local_id; i < local_experts_num; i += local_range) {
+      local_counts[i] = 0;
+    }
+    item.barrier(sycl::access::fence_space::local_space);
+
+    // ===== Phase 2: local atomic =====
+    if (global_id < num_rows * TopK) {
+      int global_expert_id =
+          is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
+                            : reinterpret_cast<int64_t*>(topk_ids)[global_id];
+      int local_expert_id = global_expert_id;
+      if (expert_map != nullptr) {
+        local_expert_id = expert_map[global_expert_id];
+      }
+
+      if (local_expert_id == -1) {
+        unpermuted_row_to_permuted_row[global_id] = -1;
+      } else {
+        auto local_atomic = sycl::atomic_ref<
+            int,
+            sycl::memory_order_relaxed,
+            sycl::memory_scope_work_group,
+            sycl::access::address_space::local_space>(
+            local_counts[local_expert_id]);
+        int local_old = local_atomic.fetch_add(1);
+
+        unpermuted_row_to_permuted_row[global_id] = local_old;
+      }
     }
 
-    int global_expert_id =
-        is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
-                          : reinterpret_cast<int64_t*>(topk_ids)[global_id];
-    int local_expert_id = global_expert_id;
-    if (expert_map != nullptr) {
-      local_expert_id = expert_map[global_expert_id];
+    item.barrier(sycl::access::fence_space::local_space);
+
+    // ===== Phase 3: global atomic =====
+    for (int i = local_id; i < local_experts_num; i += local_range) {
+      int count = local_counts[i];
+      if (count > 0) {
+        auto global_atomic = sycl::atomic_ref<
+            int,
+            sycl::memory_order_relaxed,
+            sycl::memory_scope_device,
+            sycl::access::address_space::global_space>(
+            rows_per_expert[i]);
+        int base = global_atomic.fetch_add(count);
+        local_counts[i] = base;
+      }
     }
 
-    if (local_expert_id == -1) {
-      // selected expert is not at current rank
-      unpermuted_row_to_permuted_row[global_id] = -1;
-      return;
-    }
+    item.barrier(sycl::access::fence_space::local_space);
 
-    auto atomic_count = sycl::atomic_ref<
-        int,
-        sycl::memory_order_relaxed,
-        sycl::memory_scope_device,
-        sycl::access::address_space::global_space>(
-        rows_per_expert[local_expert_id]);
-    int old = atomic_count.fetch_add(1);
-    unpermuted_row_to_permuted_row[global_id] = old;
+    // ===== Phase 4: fix unpermuted_row_to_permuted_row =====
+    if (global_id < num_rows * TopK) {
+      int global_expert_id =
+          is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
+                            : reinterpret_cast<int64_t*>(topk_ids)[global_id];
+      int local_expert_id = global_expert_id;
+      if (expert_map != nullptr) {
+        local_expert_id = expert_map[global_expert_id];
+      }
+
+      if (local_expert_id != -1) {
+        // local_old + base_offset = global_offset
+        unpermuted_row_to_permuted_row[global_id] += local_counts[local_expert_id];
+      }
+    }
   }
 
  private:
@@ -76,6 +120,8 @@ class RowsPerExpertCount {
   int* unpermuted_row_to_permuted_row;
   const int num_rows;
   const int TopK;
+  const int local_experts_num;
+  sycl::local_accessor<int32_t, 1> local_counts;
 };
 
 template <typename TA, typename TS, int TopK>
@@ -323,6 +369,8 @@ void RemapHiddenStatesLauncher(
       "hidden_size must be divisible by ElemsPerItem");
 
   queue.submit([&](sycl::handler& cgh) {
+    sycl::local_accessor<int32_t, 1> local_counts(
+        sycl::range<1>(local_experts_num), cgh);
     cgh.parallel_for(
         RowsPerExpertCount::get_nd_range(num_rows, TopK),
         RowsPerExpertCount{
@@ -332,7 +380,9 @@ void RemapHiddenStatesLauncher(
             is_topk_ids_int32,
             unpermuted_row_to_permuted_row,
             num_rows,
-            TopK});
+            TopK,
+            local_experts_num,
+            local_counts});
   });
 
   queue.submit([&](sycl::handler& cgh) {
