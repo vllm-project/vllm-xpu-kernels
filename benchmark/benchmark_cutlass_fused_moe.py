@@ -197,7 +197,7 @@ def get_benchmark(iterations):
                   n,
                   k,
                   num_experts,
-                topk,
+                  topk,
                   x_dtype,
                   w_dtype,
                   has_bias,
