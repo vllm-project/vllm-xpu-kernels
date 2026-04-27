@@ -138,8 +138,11 @@ class RemapHiddenStates {
     int32_t* expert_cumsum_ptr = static_cast<int32_t*>(
         slm.template get_multi_ptr<sycl::access::decorated::no>().get());
 
+    if (local_id == 0) {
+      expert_cumsum_ptr[0] = 0;
+    }
     for (int i = local_id; i < local_experts_num; i += local_range) {
-      expert_cumsum_ptr[i] = rows_per_expert[i];
+      expert_cumsum_ptr[i + 1] = rows_per_expert[i];
     }
 
     item.barrier(sycl::access::fence_space::local_space);
@@ -185,8 +188,10 @@ class RemapHiddenStates {
 #pragma unroll
     for (int i = 0; i < TopK; ++i) {
       if (local_expert_id[i] != -1) {
-        rows_offset[i] = unpermuted_row_to_permuted_row[row * TopK + i] +
-                         expert_cumsum_ptr[local_expert_id[i] - 1];
+        int cumsum_offset =
+            local_expert_id[i] == 0 ? 0 : expert_cumsum_ptr[local_expert_id[i]];
+        rows_offset[i] =
+            unpermuted_row_to_permuted_row[row * TopK + i] + cumsum_offset;
       } else {
         rows_offset[i] = -1;
       }
@@ -311,7 +316,8 @@ void RemapHiddenStatesLauncher(
     const int local_experts_num,
     sycl::queue& queue) {
   TORCH_CHECK(
-      (local_experts_num <= RemapHiddenStates<TA, TS, TopK>::EXCLUSIVE_SIZE),
+      (local_experts_num <=
+       (RemapHiddenStates<TA, TS, TopK>::EXCLUSIVE_SIZE - 1)),
       "local_experts_num exceeds the maximum supported number");
   TORCH_CHECK(
       (hidden_size % RemapHiddenStates<TA, TS, TopK>::ElemsPerItem == 0),
@@ -367,7 +373,7 @@ void remap_hidden_states(
         remapped_hidden_states_scales,  // [num_rows, hidden_size // block_k] or
                                         // empty
     const c10::optional<torch::Tensor>& expert_map,  // [total_experts_num]
-    torch::Tensor& rows_per_expert,                  // [local_experts_num  + 1]
+    torch::Tensor& rows_per_expert,                  // [local_experts_num]
     torch::Tensor& unpermuted_row_to_permuted_row,   // [num_rows, TopK]
     torch::Tensor& topk_ids,                         // [num_rows, TopK]
     int64_t total_experts_num,
