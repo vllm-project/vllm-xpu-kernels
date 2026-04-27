@@ -86,10 +86,11 @@ def ref_remap_hidden_states(hidden_states, scales, remapped_hidden_states,
 @pytest.mark.parametrize("total_experts_num", TOTAL_EXPERTS_NUM)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("has_expert_map", [True, False])
+@pytest.mark.parametrize("is_topk_ids_32", [True, False])
 @pytest.mark.parametrize("recipe",
                          ["bf16", "fp16", "mxfp8", "mxfp4", "fp8block"])
 def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
-                             has_expert_map, recipe):
+                             has_expert_map, is_topk_ids_32, recipe):
     seed_everything(7)
 
     data_dtype, scale_dtype = RECIPE_TO_DTYPE.get(recipe, (None, None))
@@ -162,7 +163,10 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
                          device=DEVICE,
                          dtype=torch.float32)
     _, topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)
-    topk_ids = topk_ids.to(torch.int64)
+    if is_topk_ids_32:
+        topk_ids = topk_ids.to(torch.int32)
+    else:
+        topk_ids = topk_ids.to(torch.int64)
 
     ref_remapped_hidden_states = remapped_hidden_states.clone()
     ref_expert_first_token_offset = expert_first_token_offset.clone()
@@ -231,10 +235,11 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
 @pytest.mark.parametrize("total_experts_num", [128])
 @pytest.mark.parametrize("topk", [8])
 @pytest.mark.parametrize("has_expert_map", [False])
+@pytest.mark.parametrize("is_topk_ids_32", [True, False])
 @pytest.mark.parametrize("recipe",
                          ["bf16", "fp16", "mxfp8", "mxfp4", "fp8block"])
 def test_remap_hidden_states_overflow(num_rows, hidden_size, total_experts_num,
-                                      topk, has_expert_map, recipe):
+                                      topk, has_expert_map, is_topk_ids_32, recipe):
     seed_everything(7)
 
     data_dtype, scale_dtype = RECIPE_TO_DTYPE.get(recipe, (None, None))
@@ -307,7 +312,10 @@ def test_remap_hidden_states_overflow(num_rows, hidden_size, total_experts_num,
                          device=DEVICE,
                          dtype=torch.float32)
     _, topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)
-    topk_ids = topk_ids.to(torch.int64)
+    if is_topk_ids_32:
+        topk_ids = topk_ids.to(torch.int32)
+    else:
+        topk_ids = topk_ids.to(torch.int64)
 
     torch.ops._moe_C.remap_hidden_states(
         hidden_states, scales, remapped_hidden_states, remapped_scales,

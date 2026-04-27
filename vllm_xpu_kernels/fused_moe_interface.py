@@ -177,11 +177,8 @@ def xpu_fused_moe(hidden_states,
         w2.data = w2_tmp
         w13.xpu_fused_moe = True
 
-    # TODO: will all integrated in Cpp func. Temporary expose before gemm fusion
     num_rows, hidden_size = list(hidden_states.shape)
     num_moe_inputs = n_experts_per_token * num_rows
-    if topk_ids.dtype == torch.int32:
-        topk_ids = topk_ids.to(torch.int64)
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)

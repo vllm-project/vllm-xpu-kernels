@@ -11,13 +11,15 @@ class RowsPerExpertCount {
   RowsPerExpertCount(
       int* expert_map,
       int64_t* expert_first_token_offset,
-      int64_t* topk_ids,
+      void* topk_ids,
+      bool is_topk_ids_int32,
       int* unpermuted_row_to_permuted_row,
       const int num_rows,
       const int TopK)
       : expert_map(expert_map),
         expert_first_token_offset(expert_first_token_offset),
         topk_ids(topk_ids),
+        is_topk_ids_int32(is_topk_ids_int32),
         unpermuted_row_to_permuted_row(unpermuted_row_to_permuted_row),
         num_rows(num_rows),
         TopK(TopK) {}
@@ -42,7 +44,10 @@ class RowsPerExpertCount {
       return;
     }
 
-    int global_expert_id = topk_ids[global_id];
+    int global_expert_id = 
+      is_topk_ids_int32
+      ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
+      : reinterpret_cast<int64_t*>(topk_ids)[global_id];
     int local_expert_id = global_expert_id;
     if (expert_map != nullptr) {
       local_expert_id = expert_map[global_expert_id];
@@ -67,7 +72,8 @@ class RowsPerExpertCount {
  private:
   int* expert_map;
   int64_t* expert_first_token_offset;
-  int64_t* topk_ids;
+  void* topk_ids;
+  bool is_topk_ids_int32;
   int* unpermuted_row_to_permuted_row;
   const int num_rows;
   const int TopK;
@@ -142,7 +148,8 @@ class RemapHiddenStates {
       int* expert_map,
       int* unpermuted_row_to_permuted_row,
       int64_t* expert_first_token_offset,
-      int64_t* topk_ids,
+      void* topk_ids,
+      bool is_topk_ids_int32,
       const int num_rows,
       const int hidden_size,
       const int block_k,
@@ -155,6 +162,7 @@ class RemapHiddenStates {
         unpermuted_row_to_permuted_row(unpermuted_row_to_permuted_row),
         expert_first_token_offset(expert_first_token_offset),
         topk_ids(topk_ids),
+        is_topk_ids_int32(is_topk_ids_int32),
         num_rows(num_rows),
         hidden_size(hidden_size),
         block_k(block_k),
@@ -185,9 +193,18 @@ class RemapHiddenStates {
     int global_expert_id[TopK];
     int local_expert_id[TopK];
 
-#pragma unroll
-    for (int i = 0; i < TopK; ++i) {
-      global_expert_id[i] = topk_ids[row * TopK + i];
+    if (is_topk_ids_int32) {
+      auto topk_ids_32 = reinterpret_cast<int32_t*>(topk_ids);
+  #pragma unroll
+      for (int i = 0; i < TopK; ++i) {
+        global_expert_id[i] = topk_ids_32[row * TopK + i];
+      }
+    } else {
+      auto topk_ids_64 = reinterpret_cast<int64_t*>(topk_ids);
+  #pragma unroll
+      for (int i = 0; i < TopK; ++i) {
+        global_expert_id[i] = topk_ids_64[row * TopK + i];
+      }    
     }
 
     if (expert_map != nullptr) {
@@ -304,7 +321,8 @@ class RemapHiddenStates {
   int* expert_map;
   int* unpermuted_row_to_permuted_row;
   int64_t* expert_first_token_offset;
-  int64_t* topk_ids;
+  void* topk_ids;
+  bool is_topk_ids_int32;
   const int num_rows;
   const int hidden_size;
   const int block_k;
@@ -320,7 +338,8 @@ void RemapHiddenStatesLauncher(
     int* expert_map,
     int64_t* expert_first_token_offset,
     int* unpermuted_row_to_permuted_row,
-    int64_t* topk_ids,
+    void* topk_ids,
+    bool is_topk_ids_int32,
     const int num_rows,
     const int hidden_size,
     const int block_k,
@@ -342,6 +361,7 @@ void RemapHiddenStatesLauncher(
             expert_map,
             expert_first_token_offset,
             topk_ids,
+            is_topk_ids_int32,
             unpermuted_row_to_permuted_row,
             num_rows,
             TopK});
@@ -366,6 +386,7 @@ void RemapHiddenStatesLauncher(
             unpermuted_row_to_permuted_row,
             expert_first_token_offset,
             topk_ids,
+            is_topk_ids_int32,
             num_rows,
             hidden_size,
             block_k,
@@ -417,7 +438,7 @@ void remap_hidden_states(
       "expert_first_token_offset must be int64");
 
   TORCH_CHECK(
-      topk_ids.scalar_type() == torch::kInt64, "topk_ids must be int64");
+      topk_ids.scalar_type() == torch::kInt64 || topk_ids.scalar_type() == torch::kInt32, "topk_ids must be int64 or int32");
 
   int num_rows = hidden_states.size(0);
   int hidden_size = hidden_states.size(1);
@@ -468,7 +489,8 @@ void remap_hidden_states(
                              : nullptr,                                       \
       reinterpret_cast<int64_t*>(expert_first_token_offset.data_ptr()),       \
       reinterpret_cast<int*>(unpermuted_row_to_permuted_row.data_ptr()),      \
-      reinterpret_cast<int64_t*>(topk_ids.data_ptr()),                        \
+      reinterpret_cast<void*>(topk_ids.data_ptr()),                           \
+      topk_ids.scalar_type() == torch::kInt32,                                \
       num_rows,                                                               \
       hidden_size,                                                            \
       block_k,                                                                \
