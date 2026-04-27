@@ -86,8 +86,7 @@ class RowsPerExpertCount {
             int,
             sycl::memory_order_relaxed,
             sycl::memory_scope_device,
-            sycl::access::address_space::global_space>(
-            rows_per_expert[i]);
+            sycl::access::address_space::global_space>(rows_per_expert[i]);
         int base = global_atomic.fetch_add(count);
         local_counts[i] = base;
       }
@@ -107,7 +106,8 @@ class RowsPerExpertCount {
 
       if (local_expert_id != -1) {
         // local_old + base_offset = global_offset
-        unpermuted_row_to_permuted_row[global_id] += local_counts[local_expert_id];
+        unpermuted_row_to_permuted_row[global_id] +=
+            local_counts[local_expert_id];
       }
     }
   }
