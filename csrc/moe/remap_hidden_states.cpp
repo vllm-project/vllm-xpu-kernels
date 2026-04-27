@@ -141,7 +141,7 @@ class RemapHiddenStates {
     if (local_id == 0) {
       expert_cumsum_ptr[0] = 0;
     }
-    for (int i = local_id; i < local_experts_num; i += local_range) {
+    for (int i = local_id; i < local_experts_num - 1; i += local_range) {
       expert_cumsum_ptr[i + 1] = rows_per_expert[i];
     }
 
@@ -150,7 +150,7 @@ class RemapHiddenStates {
     sycl::joint_inclusive_scan(
         item.get_group(),
         expert_cumsum_ptr,
-        expert_cumsum_ptr + EXCLUSIVE_SIZE,
+        expert_cumsum_ptr + local_experts_num,
         expert_cumsum_ptr,
         sycl::plus<int>{});
 
@@ -316,8 +316,7 @@ void RemapHiddenStatesLauncher(
     const int local_experts_num,
     sycl::queue& queue) {
   TORCH_CHECK(
-      (local_experts_num <=
-       (RemapHiddenStates<TA, TS, TopK>::EXCLUSIVE_SIZE - 1)),
+      (local_experts_num <= (RemapHiddenStates<TA, TS, TopK>::EXCLUSIVE_SIZE)),
       "local_experts_num exceeds the maximum supported number");
   TORCH_CHECK(
       (hidden_size % RemapHiddenStates<TA, TS, TopK>::ElemsPerItem == 0),
@@ -338,7 +337,7 @@ void RemapHiddenStatesLauncher(
 
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<int32_t, 1> slm(
-        sycl::range<1>(RemapHiddenStates<TA, TS, TopK>::EXCLUSIVE_SIZE), cgh);
+        sycl::range<1>(local_experts_num), cgh);
     cgh.parallel_for(
         RemapHiddenStates<TA, TS, TopK>::get_nd_range(num_rows, hidden_size),
         RemapHiddenStates<TA, TS, TopK>{
