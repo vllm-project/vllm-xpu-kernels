@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 
 # isort: off
 import gc
@@ -8,7 +9,10 @@ import torch
 import triton
 
 try:
-    from benchmark.utils import ensure_repo_root_on_path, ensure_save_path_exists
+    from benchmark.utils import (
+        ensure_repo_root_on_path,
+        ensure_save_path_exists,
+    )
 except ModuleNotFoundError:
     from utils import ensure_repo_root_on_path, ensure_save_path_exists
 

@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import sys
 from collections.abc import Iterable
 from pathlib import Path
-import sys
 from typing import Any, Callable, Optional
 
 import torch
