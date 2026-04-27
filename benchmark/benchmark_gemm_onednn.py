@@ -11,12 +11,9 @@ import torch
 import triton
 import triton.testing
 
-try:
-    from benchmark.utils import ensure_repo_root_on_path
-except ModuleNotFoundError:
-    from utils import ensure_repo_root_on_path
+from utils import bootstrap_benchmark_env
 
-REPO_ROOT = ensure_repo_root_on_path(__file__)
+bootstrap_benchmark_env(__file__)
 
 from tests.ops.fp8_quant_op import scaled_fp8_quant
 from tests.ops.mx_utils import (
@@ -991,6 +988,7 @@ if __name__ == "__main__":
     ) in bench_registry.items():
         if name not in enabled:
             continue
+        print(f"INFO: running with name = {name}, label = {label}...")
 
         if use_model_shapes and name in (
             "bf16",

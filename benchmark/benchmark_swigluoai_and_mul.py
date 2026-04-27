@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 
 import itertools
 from argparse import ArgumentParser
 
 import torch
 import triton
+from utils import bootstrap_benchmark_env
+
+bootstrap_benchmark_env(__file__)
 
 from tests.ops.swigluoai_and_mul_op import SwigluOAIAndMul
 

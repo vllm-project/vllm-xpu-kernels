@@ -5,14 +5,10 @@
 import time
 from argparse import ArgumentParser
 
-try:
-    from benchmark.utils import ensure_repo_root_on_path
-except ModuleNotFoundError:
-    from utils import ensure_repo_root_on_path
-
 import torch
+from utils import bootstrap_benchmark_env
 
-REPO_ROOT = ensure_repo_root_on_path(__file__)
+bootstrap_benchmark_env(__file__)
 
 from tests.ops.layernorm_op import RMSNorm
 from tests.utils import STR_DTYPE_TO_TORCH_DTYPE

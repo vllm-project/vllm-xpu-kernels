@@ -24,6 +24,15 @@ def ensure_save_path_exists(save_path: str) -> str:
     return save_path
 
 
+def setup_benchmark_env(file_path: str) -> Path:
+    return ensure_repo_root_on_path(file_path)
+
+
+def bootstrap_benchmark_env(file_path: str):
+    repo_root = ensure_repo_root_on_path(file_path)
+    return repo_root, ensure_save_path_exists
+
+
 @dataclasses.dataclass
 class CudaGraphBenchParams:
     num_ops_in_cuda_graph: int

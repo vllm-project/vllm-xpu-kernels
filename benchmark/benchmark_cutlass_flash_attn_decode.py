@@ -8,15 +8,9 @@ import gc
 import torch
 import triton
 
-try:
-    from benchmark.utils import (
-        ensure_repo_root_on_path,
-        ensure_save_path_exists,
-    )
-except ModuleNotFoundError:
-    from utils import ensure_repo_root_on_path, ensure_save_path_exists
+from utils import bootstrap_benchmark_env, ensure_save_path_exists
 
-REPO_ROOT = ensure_repo_root_on_path(__file__)
+bootstrap_benchmark_env(__file__)
 
 from benchmark.src.flash_attn_interface_ import (
     flash_attn_varlen_func_CalKernelTime)

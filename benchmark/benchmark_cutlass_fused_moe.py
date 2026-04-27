@@ -9,15 +9,9 @@ import torch
 import triton
 import triton.testing
 
-try:
-    from benchmark.utils import (
-        ensure_repo_root_on_path,
-        ensure_save_path_exists,
-    )
-except ModuleNotFoundError:
-    from utils import ensure_repo_root_on_path, ensure_save_path_exists
+from utils import bootstrap_benchmark_env, ensure_save_path_exists
 
-REPO_ROOT = ensure_repo_root_on_path(__file__)
+bootstrap_benchmark_env(__file__)
 from benchmark.src.fused_moe_interface_ import xpu_fused_moe_CalKernelTime
 from benchmark.src.get_model_config import (
     gen_cutlass_fused_moe_correctness_configs as gen_correctness_config)
