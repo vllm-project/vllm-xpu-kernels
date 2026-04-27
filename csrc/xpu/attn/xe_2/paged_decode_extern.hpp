@@ -32,7 +32,31 @@
   X(decode_policy_q16_h128_p128)    \
   X(decode_policy_q16_h192_p128)    \
   X(decode_policy_q16_h256_p128)    \
-  X(decode_policy_q16_h512_p128)
+  X(decode_policy_q16_h512_p128)    \
+  X(decode_policy_q8_h64_p16)       \
+  X(decode_policy_q8_h96_p16)       \
+  X(decode_policy_q8_h128_p16)      \
+  X(decode_policy_q8_h192_p16)      \
+  X(decode_policy_q8_h256_p16)      \
+  X(decode_policy_q8_h512_p16)      \
+  X(decode_policy_q16_h64_p16)      \
+  X(decode_policy_q16_h96_p16)      \
+  X(decode_policy_q16_h128_p16)     \
+  X(decode_policy_q16_h192_p16)     \
+  X(decode_policy_q16_h256_p16)     \
+  X(decode_policy_q16_h512_p16)     \
+  X(decode_policy_q8_h64_p32)       \
+  X(decode_policy_q8_h96_p32)       \
+  X(decode_policy_q8_h128_p32)      \
+  X(decode_policy_q8_h192_p32)      \
+  X(decode_policy_q8_h256_p32)      \
+  X(decode_policy_q8_h512_p32)      \
+  X(decode_policy_q16_h64_p32)      \
+  X(decode_policy_q16_h96_p32)      \
+  X(decode_policy_q16_h128_p32)     \
+  X(decode_policy_q16_h192_p32)     \
+  X(decode_policy_q16_h256_p32)     \
+  X(decode_policy_q16_h512_p32)
 
 // =============================================================================
 // Automatic extern template declarations for all policy combinations

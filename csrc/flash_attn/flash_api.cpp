@@ -10,6 +10,7 @@ namespace FLASH_NAMESPACE {
 inline int get_num_splits(
     const sycl::queue& queue,
     const int& batch_size,
+    const int& num_heads_q,
     const int& num_heads_kv,
     const int& max_seqlen_k,
     const int& block_size) {
@@ -19,37 +20,75 @@ inline int get_num_splits(
       device
           .get_info<sycl::ext::intel::info::device::gpu_subslices_per_slice>();
 
-  int cur_parallel = batch_size * num_heads_kv;
-  int kv_blocks = (max_seqlen_k + block_size - 1) / block_size;
-
-  // Minimum KV blocks to benefit from splitting, aligned with the kernel's
-  // kMinBlocksForSplit.  Below this the kernel falls back to single-split
-  // regardless, and splitting only adds ReduceSplitK overhead.
-  int min_kv_blocks = (block_size <= 64) ? 32 : 128;
-  if (kv_blocks < min_kv_blocks) return 1;
-
-  // GPU well-utilized or saturated: splitting only adds ReduceSplitK
-  // overhead without improving FMHA throughput.
-  if (cur_parallel >= num_xe_cores) return 1;
-
-  // Under-utilized (cur_parallel < num_xe_cores): split to fill the GPU.
-  int target_splits;
-  if (num_heads_kv >= 4) {
-    // Many KV heads: each split adds kv_heads WGs.  Scale inversely
-    // with block_size — p64 gets ~20 splits, p128 gets ~10.
-    target_splits = std::max(4, num_xe_cores * 64 / block_size);
+  // The decode kernel iterates kv_tile-sized work units within each page,
+  // not page-sized units. The dispatch (see paged_decode_utils.hpp::
+  // dispatch_by_page_size) routes
+  //   block_size == 16              -> kv_tile=_16 (SubgroupLayoutQK<_1,_1,_1>,
+  //   SGPerWG=1) block_size == 32              -> kv_tile=_32
+  //   (SubgroupLayoutQK<_1,_2,_1>, SGPerWG=2) block_size > 0 && %% 64 == 0  ->
+  //   kv_tile=_64  (SubgroupLayoutQK<_1,_4,_1>, SGPerWG=4)
+  int kv_tile;
+  int sg_per_wg;
+  int policy_split_cap;
+  if (block_size == 16) {
+    kv_tile = 16;
+    sg_per_wg = 1;
+    policy_split_cap = 16;
+  } else if (block_size == 32) {
+    kv_tile = 32;
+    sg_per_wg = 2;
+    policy_split_cap = 32;
   } else {
-    // Few KV heads: target at least num_xe_cores splits for parallelism;
-    // allow more for very long sequences (~10 blocks/split at p64).
-    int blocks_per_split = (block_size <= 64) ? 10 : 8;
-    target_splits = std::max(num_xe_cores, kv_blocks / blocks_per_split);
+    kv_tile = 64;
+    sg_per_wg = 4;
+    policy_split_cap = 64;
   }
 
-  // Each split must process at least 3 KV blocks to amortize overhead.
-  int max_splits_blocks = std::max(1, kv_blocks / 3);
-  // Hard cap: beyond 40 splits, diminishing returns.
-  int num_splits = std::min({target_splits, max_splits_blocks, 40});
-  return std::max(1, num_splits);
+  int kv_tiles = (max_seqlen_k + kv_tile - 1) / kv_tile;
+
+  // Below ~16 tiles total the kernel falls back to single-split anyway; any
+  // splitting only adds ReduceSplitK overhead.
+  if (kv_tiles < 16) return 1;
+
+  // Effective number of WG slots on the GPU.  Each Xe core hosts up to
+  // (4 / sg_per_wg) decode WGs concurrently (4 SGs per Xe core at sg_size=16
+  // on Intel Xe2; smaller kv_tile policies use fewer SGs per WG and therefore
+  // pack more WGs per core).
+  int num_wg_slots = num_xe_cores * 4 / sg_per_wg;
+
+  int wgs_per_split = batch_size * num_heads_kv;
+
+  // Saturation guard: if the FMHA already saturates WG slots and the sequence
+  // is not long enough for splitting to deliver bandwidth gains, splitting
+  // only adds ReduceSplitK overhead.
+  if (wgs_per_split >= num_wg_slots && kv_tiles < 64) return 1;
+
+  // (1) Parallelism term: enough splits so total FMHA WGs reach 4x WG-slot
+  //     oversubscription, hiding memory latency.
+  int splits_par =
+      std::max(1, (4 * num_wg_slots + wgs_per_split - 1) / wgs_per_split);
+
+  // (2) Bandwidth term: long sequences benefit from finer K splits even when
+  //     parallelism is already met (per-WG K reduction shortens, total memory
+  //     traffic is invariant to splits).  ~12 tiles per split is the empirical
+  //     knee.
+  int splits_bw = std::max(1, kv_tiles / 12);
+
+  int splits = std::max(splits_par, splits_bw);
+
+  // (3) Reduction-cost cap: ReduceSplitK output volume scales with
+  //     batch_size * num_heads_q * num_kv_splits.  Cap so that this does not
+  //     dwarf the FMHA epilogue.  Empirically 128 * num_xe_cores partial
+  //     "head-rows" total is a good ceiling.
+  int red_work = std::max(1, batch_size * num_heads_q);
+  int red_cap = std::max(2, 128 * num_xe_cores / red_work);
+  splits = std::min(splits, red_cap);
+
+  // (4) Each split must process at least ~4 KV tiles to amortize overhead.
+  int max_splits_tiles = std::max(1, kv_tiles / 4);
+  // (5) Hard cap of 32 (beyond this the ReduceSplitK kernel dominates).
+  return std::max(
+      1, std::min({splits, max_splits_tiles, 32, policy_split_cap}));
 }
 
 std::vector<at::Tensor> mha_varlen_fwd(
@@ -212,7 +251,12 @@ std::vector<at::Tensor> mha_varlen_fwd(
     }
 
     int num_kv_splits = num_splits.value_or(get_num_splits(
-        queue, batch_size, num_heads_kv, effective_seqlen_k, block_size));
+        queue,
+        batch_size,
+        num_heads_q,
+        num_heads_kv,
+        effective_seqlen_k,
+        block_size));
 
     at::Tensor tmp_out =
         num_kv_splits == 1
