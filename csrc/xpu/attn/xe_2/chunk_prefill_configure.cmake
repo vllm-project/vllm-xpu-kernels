@@ -5,8 +5,18 @@ function(fmha_forward_configure FILENAME_SUFFIX)
   set(BOOL_FLAG_false "f")
   set(BOOL_FLAG_true "t")
   set(policy_list
-      "chunk_policy_head64" "chunk_policy_head96" "chunk_policy_head128"
-      "chunk_policy_head192" "chunk_policy_head256" "chunk_policy_head512")
+      "chunk_policy_head64"
+      "chunk_policy_head96"
+      "chunk_policy_head128"
+      "chunk_policy_head192"
+      "chunk_policy_head256"
+      "chunk_policy_head512"
+      "chunk_policy_head64_b16"
+      "chunk_policy_head96_b16"
+      "chunk_policy_head128_b16"
+      "chunk_policy_head192_b16"
+      "chunk_policy_head256_b16"
+      "chunk_policy_head512_b16")
 
   set(IMPL_KV_T "fp16")
 

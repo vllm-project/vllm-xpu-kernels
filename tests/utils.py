@@ -123,8 +123,9 @@ class TcLimitedFormatter:
                     elif i > limit_array and i < len(val) - limit_array:
                         continue
 
-                ret = f"{ret}x{self.format_tc_common(\
-                    current_value, limit_array)}"
+                _formatted = self.format_tc_common(
+                    current_value, limit_array)
+                ret = f"{ret}x{_formatted}"
 
             ret = f"{ret}]"
             if limit_str is not None and len(ret) > limit_str:
