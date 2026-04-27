@@ -77,8 +77,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Apply topk softmax to the gating outputs.
   m.def(
       "moe_gather(Tensor! output, Tensor moe_output, Tensor topk_weights, "
-      "Tensor unpermuted_row_to_permuted_row, Tensor "
-      "expert_first_token_offset, int num_experts) -> ()");
+      "Tensor unpermuted_row_to_permuted_row, "
+      "int num_experts) -> ()");
   m.impl("moe_gather", torch::kXPU, &moe_gather);
   m.def(
       "fused_moe_prologue(Tensor input, Tensor? input_scales, Tensor "
@@ -100,7 +100,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "remap_hidden_states(Tensor hidden_states, Tensor? hidden_states_scales, "
       "Tensor remapped_hidden_states,"
       "Tensor? remapped_hidden_states_scales,"
-      "Tensor? expert_map, Tensor expert_first_token_offset,"
+      "Tensor? expert_map, Tensor rows_per_expert,"
       "Tensor unpermuted_row_to_permuted_row, Tensor topk_ids,"
       "int total_experts_num, int "
       "local_experts_num) -> "
