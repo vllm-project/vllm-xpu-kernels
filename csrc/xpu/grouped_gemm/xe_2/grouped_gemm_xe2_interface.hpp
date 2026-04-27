@@ -238,7 +238,7 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       reinterpret_cast<ElementA*>(ptr_D.data_ptr()),                           \
       N,                                                                       \
       K,                                                                       \
-      reinterpret_cast<int*>(rows_per_expert.data_ptr()),                     \
+      reinterpret_cast<int*>(rows_per_expert.data_ptr()),                      \
       num_experts,                                                             \
       group_size,                                                              \
       static_cast<int*>(atomic_buffer.data_ptr()));

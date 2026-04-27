@@ -44,10 +44,9 @@ class RowsPerExpertCount {
       return;
     }
 
-    int global_expert_id = 
-      is_topk_ids_int32
-      ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
-      : reinterpret_cast<int64_t*>(topk_ids)[global_id];
+    int global_expert_id =
+        is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
+                          : reinterpret_cast<int64_t*>(topk_ids)[global_id];
     int local_expert_id = global_expert_id;
     if (expert_map != nullptr) {
       local_expert_id = expert_map[global_expert_id];
@@ -158,16 +157,16 @@ class RemapHiddenStates {
 
     if (is_topk_ids_int32) {
       auto topk_ids_32 = reinterpret_cast<int32_t*>(topk_ids);
-  #pragma unroll
+#pragma unroll
       for (int i = 0; i < TopK; ++i) {
         global_expert_id[i] = topk_ids_32[row * TopK + i];
       }
     } else {
       auto topk_ids_64 = reinterpret_cast<int64_t*>(topk_ids);
-  #pragma unroll
+#pragma unroll
       for (int i = 0; i < TopK; ++i) {
         global_expert_id[i] = topk_ids_64[row * TopK + i];
-      }    
+      }
     }
 
     if (expert_map != nullptr) {
@@ -368,7 +367,7 @@ void remap_hidden_states(
         remapped_hidden_states_scales,  // [num_rows, hidden_size // block_k] or
                                         // empty
     const c10::optional<torch::Tensor>& expert_map,  // [total_experts_num]
-    torch::Tensor& rows_per_expert,        // [local_experts_num  + 1]
+    torch::Tensor& rows_per_expert,                  // [local_experts_num  + 1]
     torch::Tensor& unpermuted_row_to_permuted_row,   // [num_rows, TopK]
     torch::Tensor& topk_ids,                         // [num_rows, TopK]
     int64_t total_experts_num,
@@ -399,7 +398,9 @@ void remap_hidden_states(
       "rows_per_expert must be int32");
 
   TORCH_CHECK(
-      topk_ids.scalar_type() == torch::kInt64 || topk_ids.scalar_type() == torch::kInt32, "topk_ids must be int64 or int32");
+      topk_ids.scalar_type() == torch::kInt64 ||
+          topk_ids.scalar_type() == torch::kInt32,
+      "topk_ids must be int64 or int32");
 
   int num_rows = hidden_states.size(0);
   int hidden_size = hidden_states.size(1);
@@ -448,7 +449,7 @@ void remap_hidden_states(
           : nullptr,                                                          \
       expert_map.has_value() ? reinterpret_cast<int*>(expert_map->data_ptr()) \
                              : nullptr,                                       \
-      reinterpret_cast<int*>(rows_per_expert.data_ptr()),       \
+      reinterpret_cast<int*>(rows_per_expert.data_ptr()),                     \
       reinterpret_cast<int*>(unpermuted_row_to_permuted_row.data_ptr()),      \
       reinterpret_cast<void*>(topk_ids.data_ptr()),                           \
       topk_ids.scalar_type() == torch::kInt32,                                \
