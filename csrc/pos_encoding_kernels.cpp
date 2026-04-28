@@ -99,6 +99,7 @@ class rotary_embedding_kernel {
       const scalar_t* __restrict__ cos_sin_cache_,  // [max_position, 2, rot_dim
                                                     // // 2]
       const int rot_dim_,
+      const int64_t max_position_,
       const int64_t query_stride_,
       const int64_t key_stride_,
       const int64_t head_stride_,
@@ -110,6 +111,7 @@ class rotary_embedding_kernel {
         key(key_),
         cos_sin_cache(cos_sin_cache_),
         rot_dim(rot_dim_),
+        max_position(max_position_),
         query_stride(query_stride_),
         key_stride(key_stride_),
         head_stride(head_stride_),
@@ -122,6 +124,13 @@ class rotary_embedding_kernel {
     // Each thread block is responsible for one token.
     const int token_idx = item_ct1.get_group(2);
     int64_t pos = positions[token_idx];
+    // Clamp position into the cos/sin cache range to avoid OOB reads when
+    // callers pass positions >= max_position
+    if (pos < 0) {
+      pos = 0;
+    } else if (pos >= max_position) {
+      pos = max_position - 1;
+    }
     const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
 
     apply_rotary_embedding<scalar_t, IS_NEOX>(
@@ -152,6 +161,7 @@ class rotary_embedding_kernel {
   const scalar_t* __restrict__ cos_sin_cache;  // [max_position, 2, rot_dim //
                                                // 2]
   const int rot_dim;
+  const int64_t max_position;
   const int64_t query_stride;
   const int64_t key_stride;
   const int64_t head_stride;
@@ -207,6 +217,7 @@ void call_rotary_embedding_kernel(
   TORCH_CHECK(num_heads % num_kv_heads == 0);
 
   int rot_dim = cos_sin_cache.size(1);
+  int64_t max_position = cos_sin_cache.size(0);
   int seq_dim_idx = positions_ndim - 1;
   int64_t query_stride = query.stride(seq_dim_idx);
   int64_t key_stride = key.has_value() ? key->stride(seq_dim_idx) : 0;
@@ -237,6 +248,7 @@ void call_rotary_embedding_kernel(
               (sycl_t*)key_ptr,
               (sycl_t*)cos_sin_cache_ptr,
               rot_dim,
+              max_position,
               query_stride,
               key_stride,
               head_stride,
@@ -254,6 +266,7 @@ void call_rotary_embedding_kernel(
               (sycl_t*)key_ptr,
               (sycl_t*)cos_sin_cache_ptr,
               rot_dim,
+              max_position,
               query_stride,
               key_stride,
               head_stride,
