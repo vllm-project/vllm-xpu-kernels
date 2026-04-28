@@ -319,6 +319,7 @@ endif()
 set(ATTN_KERNEL_LIB_NAME "")
 set(GROUPED_GEMM_LIB_NAME "")
 set(GDN_ATTN_LIB_NAME "")
+set(GEMM_LIB_NAME "")
 
 if(BUILD_SYCL_TLA_KERNELS)
 
@@ -352,6 +353,10 @@ if(BUILD_SYCL_TLA_KERNELS)
     if(GDN_KERNELS_ENABLED)
       add_subdirectory(csrc/xpu/gdn_attn/xe_2)
       list(APPEND GDN_ATTN_LIB_NAME "gdn_attn_kernels_xe_2")
+    endif()
+    if(XPU_SPECIFIC_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/gemm/xe_2)
+      list(APPEND GEMM_LIB_NAME "gemm_xe_2")
     endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
@@ -532,6 +537,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC
          "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp")
   endif()
+  list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gemm/gemm_interface.cpp")
   if(GDN_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
   endif()
@@ -567,7 +573,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     INCLUDE_DIRECTORIES
     ${VLLM_XPU_INCLUDE_DIR}
     LIBRARIES
-    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME}
+    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME};${GEMM_LIB_NAME}
     USE_SABI
     3
     WITH_SOABI)

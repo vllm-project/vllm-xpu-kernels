@@ -3,6 +3,7 @@
 #ifdef VLLM_MOE_ENABLED
   #include "xpu/grouped_gemm/grouped_gemm_interface.h"
 #endif
+#include "xpu/gemm/gemm_interface.h"
 #include "xpu/lora/lora_ops.h"
 
 #include <torch/library.h>
@@ -89,6 +90,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "tp_size, bool reorder_input) -> ()");
   xpu_ops.impl("gdn_attention", torch::kXPU, &gdn_attention);
 #endif
+
+  xpu_ops.def("cutlass_gemm(Tensor A, Tensor B) -> Tensor");
+  xpu_ops.impl("cutlass_gemm", torch::kXPU, &cutlass_gemm_interface);
 
   // for empty tensor functions, we don't need dispatch key like torch::kXPU
   xpu_ops.def("is_bmg(int device_index) -> bool");

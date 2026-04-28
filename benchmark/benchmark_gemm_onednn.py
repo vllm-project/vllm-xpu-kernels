@@ -25,6 +25,7 @@ from tests.utils import seed_everything
 
 ALL_BENCHMARKS = [
     "bf16",
+    "bf16_tla",
     "fp8",
     "fp8_w8a16",
     "fp8_per_channel",
@@ -236,6 +237,14 @@ def gen_bf16_gemm_perf_configs():
     return configs
 
 
+def gen_bf16_tla_gemm_perf_configs():
+    """Generate configs for bf16 TLA gemm benchmark (bf16 only)."""
+    configs = []
+    for mnk in GENERIC_MNK:
+        configs.append((mnk, torch.bfloat16))
+    return configs
+
+
 def gen_mxfp4_gemm_perf_configs():
     """Generate configs for mxfp4 gemm benchmark."""
     configs = []
@@ -272,7 +281,7 @@ def gen_weight_shape_configs(dtype_kind="fp8"):
     ]
     for model_name, shapes in KPI_WEIGHT_SHAPES.items():
         for (k, n), m in itertools.product(shapes, m_sizes):
-            if dtype_kind == "bf16":
+            if dtype_kind in ["bf16", "bf16_tla"]:
                 for out_dtype in OUT_DTYPES:
                     configs.append(((m, n, k), out_dtype))
             elif dtype_kind == "fp8" or dtype_kind == "fp8_w8a16":
@@ -489,6 +498,68 @@ def get_bf16_gemm_benchmark(configs, iterations):
             if index >= 5:
                 start_event[index - 5].record()
             torch.nn.functional.linear(input, weight)
+            if index >= 5:
+                end_event[index - 5].record()
+        torch.xpu.synchronize()
+        total_latency = sum(
+            start_event[i].elapsed_time(end_event[i])
+            for i in range(iterations - 5)
+        )
+        ms = total_latency / (iterations - 5)
+        clear_xpu_cache()
+
+        if provider == "tflops":
+            flops = calculate_flops(m, n, k)
+            return flops / (ms / 1000) / 1e12
+        elif provider == "bandwidth_GBs":
+            mem_bytes = calculate_memory_bytes(m, n, k, dtype)
+            return mem_bytes / (ms / 1000) / 1e9
+        else:
+            return 1000 * ms
+
+    return benchmark
+
+
+# ---------------------------------------------------------------------------
+# Benchmark: bf16 gemm via CUTLASS TLA
+# ---------------------------------------------------------------------------
+
+
+def get_bf16_tla_gemm_benchmark(configs, iterations):
+    from vllm_xpu_kernels.gemm_interface import cutlass_gemm
+
+    @triton.testing.perf_report(
+        triton.testing.Benchmark(
+            x_names=["m", "n", "k", "dtype"],
+            x_vals=[(*c[0], c[1]) for c in configs],
+            line_arg="provider",
+            line_vals=["latency_us", "tflops", "bandwidth_GBs"],
+            line_names=["Latency (us)", "TFLOPS", "Bandwidth (GB/s)"],
+            styles=[("blue", "-"), ("green", "--"), ("orange", ":")],
+            ylabel="value",
+            plot_name="bf16_tla_gemm",
+            args={},
+        )
+    )
+    def benchmark(m, n, k, dtype, provider, iterations=iterations):
+        total_latency = 0.0
+        assert iterations > 5
+
+        input = torch.randn([m, k], dtype=dtype, device=DEVICE) / 10.0
+        weight = torch.randn([n, k], dtype=dtype, device=DEVICE) / 10.0
+        # weight is [N, K]; .t().contiguous() gives [K, N] row-major
+        weight_t = weight.t().contiguous()
+
+        start_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
+        end_event = [
+            torch.xpu.Event(enable_timing=True) for i in range(iterations - 5)
+        ]
+        for index in range(iterations):
+            if index >= 5:
+                start_event[index - 5].record()
+            cutlass_gemm(input, weight_t)
             if index >= 5:
                 end_event[index - 5].record()
         torch.xpu.synchronize()
@@ -943,6 +1014,12 @@ if __name__ == "__main__":
             get_bf16_gemm_benchmark,
             None,
         ),
+        "bf16_tla": (
+            "bf16 gemm (CUTLASS TLA)",
+            gen_bf16_gemm_perf_configs,
+            get_bf16_tla_gemm_benchmark,
+            None,
+        ),
         "fp8": (
             "fp8_gemm per-tensor (w8a8)",
             gen_fp8_gemm_perf_configs,
@@ -986,6 +1063,7 @@ if __name__ == "__main__":
 
         if use_model_shapes and name in (
             "bf16",
+            "bf16_tla",
             "fp8",
             "fp8_w8a16",
             "fp8_per_channel",

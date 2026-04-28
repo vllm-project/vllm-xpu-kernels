@@ -103,6 +103,9 @@ void gdn_attention(
     const bool reorder_input);
 #endif
 
+torch::Tensor
+cutlass_gemm_interface(const torch::Tensor& A, const torch::Tensor& B);
+
 bool is_bmg(int64_t device_index);
 
 bool is_pvc(int64_t device_index);
