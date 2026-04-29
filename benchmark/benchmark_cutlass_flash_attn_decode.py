@@ -237,7 +237,8 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
                                                     output_dtype)
             measured_bw = memory_load_GB / (ms / 1000)
             if provider == "flash_MBU":
-                hardware_presets = get_hardware_preset(torch.xpu.get_device_name())
+                hardware_presets = get_hardware_preset(
+                    torch.xpu.get_device_name())
                 if hardware_presets is None:
                     clear_xpu_cache()
                     return float("nan")
@@ -268,12 +269,14 @@ def get_benchmark_decode_with_paged_kv(iterations=20):
             ],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
-            line_vals=["flash", "flash_kernelTime", "flash_memBandwidth", "flash_MBU"],
+            line_vals=["flash", "flash_kernelTime", "flash_memBandwidth",
+                       "flash_MBU"],
             line_names=[
                 "FlashAttention(us)", "FlashAttention_kernelTime(us)",
                 "FlashAttention_memBandwidth(GB/s)", "FlashAttention_MBU (%)"
             ],
-            styles=[("blue", "-"), ("green", "-"), ("purple", "-"), ("red", "-")],
+            styles=[("blue", "-"), ("green", "-"), ("purple", "-"),
+                    ("red", "-")],
             ylabel="Latency (us)",
             plot_name="flash-attn-decode",
             args={},

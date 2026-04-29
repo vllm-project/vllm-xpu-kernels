@@ -403,12 +403,14 @@ def get_benchmark_varlen_with_paged_kv(iterations=20):
             ],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
-            line_vals=["flash", "flash_kernel_time", "flash_kernel_TFLOPS", "flash_kernel_MFU"],
+            line_vals=["flash", "flash_kernel_time", "flash_kernel_TFLOPS",
+                       "flash_kernel_MFU"],
             line_names=[
                 "FlashAttention(us)", "FlashAttention_Kernel_Time(us)",
                 "FlashAttention_TFLOPS", "FlashAttention_MFU (%)"
             ],
-            styles=[("blue", "-"), ("green", "-"), ("purple", "-"), ("red", "-")],
+            styles=[("blue", "-"), ("green", "-"), ("purple", "-"),
+                    ("red", "-")],
             ylabel="Latency (us)",
             plot_name="flash-attn-varlen",
             args={},
