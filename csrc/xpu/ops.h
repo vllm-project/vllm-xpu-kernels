@@ -59,7 +59,7 @@ torch::Tensor cutlass_grouped_gemm_interface(
     const c10::optional<at::Tensor>& ptr_scales,
     const c10::optional<at::Tensor>& ptr_bias,
     torch::Tensor ptr_D,
-    torch::Tensor expert_first_token_offset,
+    torch::Tensor rows_per_expert,
     int64_t N,
     int64_t K,
     int64_t num_experts,

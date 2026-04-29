@@ -15,7 +15,7 @@ torch::Tensor cutlass_grouped_gemm_interface(
     const c10::optional<at::Tensor>& ptr_scales,
     const c10::optional<at::Tensor>& ptr_bias,
     torch::Tensor ptr_D,
-    torch::Tensor expert_first_token_offset,
+    torch::Tensor rows_per_expert,
     int64_t N,
     int64_t K,
     int64_t num_experts,
@@ -25,7 +25,7 @@ torch::Tensor cutlass_grouped_gemm_interface(
 #ifdef VLLM_XPU_ENABLE_XE_DEFAULT
     int64_t groups = num_experts;
     return cutlass_grouped_gemm_xe_default(
-        ptr_A, ptr_B, ptr_bias, ptr_D, expert_first_token_offset, N, K, groups);
+        ptr_A, ptr_B, ptr_bias, ptr_D, rows_per_expert, N, K, groups);
 #else
     TORCH_CHECK(
         false,
@@ -41,7 +41,7 @@ torch::Tensor cutlass_grouped_gemm_interface(
         ptr_scales,
         ptr_bias,
         ptr_D,
-        expert_first_token_offset,
+        rows_per_expert,
         N,
         K,
         num_experts,
@@ -54,7 +54,7 @@ torch::Tensor cutlass_grouped_gemm_interface(
 #ifdef VLLM_XPU_ENABLE_XE_DEFAULT
     int64_t groups = num_experts;
     return cutlass_grouped_gemm_xe_default(
-        ptr_A, ptr_B, ptr_bias, ptr_D, expert_first_token_offset, N, K, groups);
+        ptr_A, ptr_B, ptr_bias, ptr_D, rows_per_expert, N, K, groups);
 #else
     TORCH_CHECK(
         false, "XE default cutlass kernel is not enabled in this build.");

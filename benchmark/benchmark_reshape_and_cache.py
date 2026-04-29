@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 
 import itertools
 import random
@@ -8,6 +9,9 @@ from typing import Optional
 import torch
 import triton
 from torch import Tensor
+from utils import bootstrap_benchmark_env
+
+bootstrap_benchmark_env(__file__)
 
 from tests import register_ops as vllm_ops
 from tests.utils import (check_ipex_availability, create_kv_caches_with_random,

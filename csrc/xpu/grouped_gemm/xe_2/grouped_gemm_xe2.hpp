@@ -78,7 +78,7 @@ CUTE_DEVICE void MoEGEMM(
     const ElementBI* Bias,
     ElementD* Outputs,
     TiledMMA const& mma,
-    const int64_t* expert_first_token_offset,
+    const int* rows_per_expert,
     const int32_t num_experts,
     const int32_t group_size,
     const int32_t gemm_n,
@@ -120,8 +120,8 @@ CUTE_DEVICE void MoEGEMM(
           .get());
 
   for (int i = 0; i < num_experts; ++i) {
-    int cumsum_rows_for_experts = expert_first_token_offset[i + 1];
-    int gemm_m = cumsum_rows_for_experts - pre_rows;
+    int gemm_m = rows_per_expert[i];
+    int cumsum_rows_for_experts = pre_rows + gemm_m;
     int cumsum_tiles_for_experts =
         (gemm_m + wg_tile_m - 1) / wg_tile_m + pre_tiles;
 

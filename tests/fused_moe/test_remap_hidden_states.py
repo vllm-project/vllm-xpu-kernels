@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import random
+
 import pytest
 import torch
 
@@ -35,7 +37,7 @@ MINI_PYTEST_PARAMS = {
 
 def ref_remap_hidden_states(hidden_states, scales, remapped_hidden_states,
                             remapped_scales, expert_map,
-                            expert_first_token_offset,
+                            rows_per_expert,
                             unpermuted_row_to_permuted_row, topk_ids,
                             total_experts_num, local_experts_num):
     if expert_map is not None:
@@ -53,7 +55,7 @@ def ref_remap_hidden_states(hidden_states, scales, remapped_hidden_states,
         torch.cumsum(frequencies, dim=0)
     ])
 
-    expert_first_token_offset.copy_(prefix)
+    rows_per_expert.copy_(frequencies.to(torch.int32))
 
     expert_local_offset = torch.zeros((local_experts_num, ),
                                       dtype=torch.int32,
@@ -69,7 +71,7 @@ def ref_remap_hidden_states(hidden_states, scales, remapped_hidden_states,
             if selected_expert == -1:
                 unpermuted_row_to_permuted_row[i, j] = -1
                 continue
-            first_token_offset_offset = expert_first_token_offset[
+            first_token_offset_offset = prefix[
                 selected_expert].item()
             offset = expert_local_offset[selected_expert]
             remapped_hidden_states[first_token_offset_offset +
@@ -139,8 +141,8 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
     if scale_dtype is not None:
         remapped_scales = torch.empty_like(scales).repeat_interleave(topk,
                                                                      dim=0)
-    expert_first_token_offset = torch.zeros((local_experts_num + 1),
-                                            dtype=torch.int64,
+    rows_per_expert = torch.zeros((local_experts_num),
+                                            dtype=torch.int32,
                                             device=DEVICE)
     unpermuted_row_to_permuted_row = torch.empty((num_rows, topk),
                                                  dtype=torch.int32,
@@ -162,10 +164,14 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
                          device=DEVICE,
                          dtype=torch.float32)
     _, topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)
-    topk_ids = topk_ids.to(torch.int64)
+    is_topk_ids_32 = random.randint(0, 1)
+    if is_topk_ids_32:
+        topk_ids = topk_ids.to(torch.int32)
+    else:
+        topk_ids = topk_ids.to(torch.int64)
 
     ref_remapped_hidden_states = remapped_hidden_states.clone()
-    ref_expert_first_token_offset = expert_first_token_offset.clone()
+    ref_rows_per_expert = rows_per_expert.clone()
     ref_unpermuted_row_to_permuted_row = unpermuted_row_to_permuted_row.clone()
     ref_remapped_scales = None
     if scale_dtype is not None:
@@ -175,13 +181,13 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
 
     ref_remap_hidden_states(hidden_states, scales, ref_remapped_hidden_states,
                             ref_remapped_scales, expert_map,
-                            ref_expert_first_token_offset,
+                            ref_rows_per_expert,
                             ref_unpermuted_row_to_permuted_row, topk_ids,
                             total_experts_num, local_experts_num)
 
     torch.ops._moe_C.remap_hidden_states(
         hidden_states, scales, remapped_hidden_states, remapped_scales,
-        expert_map, expert_first_token_offset, unpermuted_row_to_permuted_row,
+        expert_map, rows_per_expert, unpermuted_row_to_permuted_row,
         topk_ids, total_experts_num, local_experts_num)
 
     if data_dtype is torch.float4_e2m1fn_x2:
@@ -199,8 +205,8 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
                                rtol=0,
                                atol=0,
                                equal_nan=True)
-    torch.testing.assert_close(ref_expert_first_token_offset,
-                               expert_first_token_offset,
+    torch.testing.assert_close(ref_rows_per_expert,
+                               rows_per_expert,
                                rtol=0,
                                atol=0)
     if scale_dtype is not None:
@@ -284,8 +290,8 @@ def test_remap_hidden_states_overflow(num_rows, hidden_size, total_experts_num,
     if scale_dtype is not None:
         remapped_scales = torch.empty_like(scales).repeat_interleave(topk,
                                                                      dim=0)
-    expert_first_token_offset = torch.zeros((local_experts_num + 1),
-                                            dtype=torch.int64,
+    rows_per_expert = torch.zeros((local_experts_num),
+                                            dtype=torch.int32,
                                             device=DEVICE)
     unpermuted_row_to_permuted_row = torch.empty((num_rows, topk),
                                                  dtype=torch.int32,
@@ -307,11 +313,11 @@ def test_remap_hidden_states_overflow(num_rows, hidden_size, total_experts_num,
                          device=DEVICE,
                          dtype=torch.float32)
     _, topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)
-    topk_ids = topk_ids.to(torch.int64)
+    topk_ids = topk_ids.to(torch.int32)
 
     torch.ops._moe_C.remap_hidden_states(
         hidden_states, scales, remapped_hidden_states, remapped_scales,
-        expert_map, expert_first_token_offset, unpermuted_row_to_permuted_row,
+        expert_map, rows_per_expert, unpermuted_row_to_permuted_row,
         topk_ids, total_experts_num, local_experts_num)
 
     print("remapped_hidden_states", remapped_hidden_states, flush=True)

@@ -10,17 +10,23 @@ class RowsPerExpertCount {
  public:
   RowsPerExpertCount(
       int* expert_map,
-      int64_t* expert_first_token_offset,
-      int64_t* topk_ids,
+      int* rows_per_expert,
+      void* topk_ids,
+      bool is_topk_ids_int32,
       int* unpermuted_row_to_permuted_row,
       const int num_rows,
-      const int TopK)
+      const int TopK,
+      const int local_experts_num,
+      sycl::local_accessor<int32_t, 1> local_counts)
       : expert_map(expert_map),
-        expert_first_token_offset(expert_first_token_offset),
+        rows_per_expert(rows_per_expert),
         topk_ids(topk_ids),
+        is_topk_ids_int32(is_topk_ids_int32),
         unpermuted_row_to_permuted_row(unpermuted_row_to_permuted_row),
         num_rows(num_rows),
-        TopK(TopK) {}
+        TopK(TopK),
+        local_experts_num(local_experts_num),
+        local_counts(local_counts) {}
 
   static constexpr int GroupWorkItem = 256;
   static constexpr int WARP_SIZE = 32;
@@ -36,133 +42,127 @@ class RowsPerExpertCount {
   void operator()
       [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
     auto global_id = item.get_global_linear_id();
+    auto local_id = item.get_local_id(0);
+    auto local_range = item.get_local_range(0);
 
-    if (global_id >= num_rows * TopK) {
-      // early return
-      return;
+    // ===== Phase 1: init SLM =====
+    for (int i = local_id; i < local_experts_num; i += local_range) {
+      local_counts[i] = 0;
+    }
+    item.barrier(sycl::access::fence_space::local_space);
+
+    // ===== Phase 2: local atomic =====
+    if (global_id < num_rows * TopK) {
+      int global_expert_id =
+          is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
+                            : reinterpret_cast<int64_t*>(topk_ids)[global_id];
+      int local_expert_id = global_expert_id;
+      if (expert_map != nullptr) {
+        local_expert_id = expert_map[global_expert_id];
+      }
+
+      if (local_expert_id == -1) {
+        unpermuted_row_to_permuted_row[global_id] = -1;
+      } else {
+        auto local_atomic = sycl::atomic_ref<
+            int,
+            sycl::memory_order_relaxed,
+            sycl::memory_scope_work_group,
+            sycl::access::address_space::local_space>(
+            local_counts[local_expert_id]);
+        int local_old = local_atomic.fetch_add(1);
+
+        unpermuted_row_to_permuted_row[global_id] = local_old;
+      }
     }
 
-    int global_expert_id = topk_ids[global_id];
-    int local_expert_id = global_expert_id;
-    if (expert_map != nullptr) {
-      local_expert_id = expert_map[global_expert_id];
+    item.barrier(sycl::access::fence_space::local_space);
+
+    // ===== Phase 3: global atomic =====
+    for (int i = local_id; i < local_experts_num; i += local_range) {
+      int count = local_counts[i];
+      if (count > 0) {
+        auto global_atomic = sycl::atomic_ref<
+            int,
+            sycl::memory_order_relaxed,
+            sycl::memory_scope_device,
+            sycl::access::address_space::global_space>(rows_per_expert[i]);
+        int base = global_atomic.fetch_add(count);
+        local_counts[i] = base;
+      }
     }
 
-    if (local_expert_id == -1) {
-      // selected expert is not at current rank
-      unpermuted_row_to_permuted_row[global_id] = -1;
-      return;
-    }
+    item.barrier(sycl::access::fence_space::local_space);
 
-    auto atomic_count = sycl::atomic_ref<
-        int64_t,
-        sycl::memory_order_relaxed,
-        sycl::memory_scope_device,
-        sycl::access::address_space::global_space>(
-        expert_first_token_offset[local_expert_id + 1]);
-    int64_t old = atomic_count.fetch_add(1);
-    unpermuted_row_to_permuted_row[global_id] = old;
+    // ===== Phase 4: fix unpermuted_row_to_permuted_row =====
+    if (global_id < num_rows * TopK) {
+      int global_expert_id =
+          is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
+                            : reinterpret_cast<int64_t*>(topk_ids)[global_id];
+      int local_expert_id = global_expert_id;
+      if (expert_map != nullptr) {
+        local_expert_id = expert_map[global_expert_id];
+      }
+
+      if (local_expert_id != -1) {
+        // local_old + base_offset = global_offset
+        unpermuted_row_to_permuted_row[global_id] +=
+            local_counts[local_expert_id];
+      }
+    }
   }
 
  private:
   int* expert_map;
-  int64_t* expert_first_token_offset;
-  int64_t* topk_ids;
+  int* rows_per_expert;
+  void* topk_ids;
+  bool is_topk_ids_int32;
   int* unpermuted_row_to_permuted_row;
   const int num_rows;
   const int TopK;
-};
-
-class CalculateFristTokenOffset {
- public:
-  CalculateFristTokenOffset(
-      int64_t* expert_first_token_offset, const int local_experts_num)
-      : expert_first_token_offset(expert_first_token_offset),
-        local_experts_num(local_experts_num) {}
-
-  static constexpr int WARP_SIZE = 32;
-  static constexpr int MAX_LOCAL_STORAGE = 32;
-
-  static inline sycl::nd_range<1> get_nd_range() {
-    sycl::range<1> local(WARP_SIZE);
-    sycl::range<1> group(1);
-    return sycl::nd_range<1>(local * group, local);
-  }
-
-  void operator()
-      [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
-    auto sg = item.get_sub_group();
-    int sg_local_id = sg.get_local_linear_id();
-
-    int elems_per_item = (local_experts_num + WARP_SIZE - 1) / WARP_SIZE;
-
-    int local_sum = 0;
-    int local_start = elems_per_item * sg_local_id;
-    int remained_elems = local_experts_num - local_start;
-    int local_elems =
-        remained_elems > elems_per_item ? elems_per_item : remained_elems;
-
-    int local_storage[MAX_LOCAL_STORAGE];
-
-    if (remained_elems > 0) {
-#pragma unroll
-      for (int i = 0; i < local_elems; ++i) {
-        int idx = local_start + i;
-        local_storage[i] = expert_first_token_offset[idx + 1];
-        local_sum += local_storage[i];
-      }
-    }
-
-    int global_sum =
-        sycl::exclusive_scan_over_group(sg, local_sum, sycl::plus<int>());
-
-    if (remained_elems > 0) {
-#pragma unroll
-      for (int i = 0; i < local_elems; ++i) {
-        int idx = local_start + i;
-        global_sum += local_storage[i];
-        expert_first_token_offset[idx + 1] = global_sum;
-      }
-    }
-  }
-
- private:
-  int64_t* expert_first_token_offset;
   const int local_experts_num;
+  sycl::local_accessor<int32_t, 1> local_counts;
 };
 
 template <typename TA, typename TS, int TopK>
 class RemapHiddenStates {
  public:
   RemapHiddenStates(
+      sycl::local_accessor<int32_t, 1>& slm,
       TA* hidden_states,
       TS* hidden_states_scales,
       TA* remapped_hidden_states,
       TS* remapped_hidden_states_scales,
       int* expert_map,
       int* unpermuted_row_to_permuted_row,
-      int64_t* expert_first_token_offset,
-      int64_t* topk_ids,
+      int* rows_per_expert,
+      void* topk_ids,
+      bool is_topk_ids_int32,
       const int num_rows,
       const int hidden_size,
       const int block_k,
-      const int total_experts_num)
-      : hidden_states(hidden_states),
+      const int total_experts_num,
+      const int local_experts_num)
+      : slm(slm),
+        hidden_states(hidden_states),
         hidden_states_scales(hidden_states_scales),
         remapped_hidden_states(remapped_hidden_states),
         remapped_hidden_states_scales(remapped_hidden_states_scales),
         expert_map(expert_map),
         unpermuted_row_to_permuted_row(unpermuted_row_to_permuted_row),
-        expert_first_token_offset(expert_first_token_offset),
+        rows_per_expert(rows_per_expert),
         topk_ids(topk_ids),
+        is_topk_ids_int32(is_topk_ids_int32),
         num_rows(num_rows),
         hidden_size(hidden_size),
         block_k(block_k),
-        total_experts_num(total_experts_num) {}
+        total_experts_num(total_experts_num),
+        local_experts_num(local_experts_num) {}
 
   static constexpr int GroupWorkItem = 256;
   static constexpr int WARP_SIZE = 16;
   static constexpr int ElemsPerItem = sizeof(float) * 4 / sizeof(TA);
+  static constexpr int EXCLUSIVE_SIZE = 1024;
 
   static inline sycl::nd_range<1>
   get_nd_range(const int num_rows, const int hidden_size) {
@@ -181,13 +181,41 @@ class RemapHiddenStates {
     auto local_range = item.get_local_range(0);
     auto group_id = item.get_group(0);
 
+    int32_t* expert_cumsum_ptr = static_cast<int32_t*>(
+        slm.template get_multi_ptr<sycl::access::decorated::no>().get());
+
+    if (local_id == 0) {
+      expert_cumsum_ptr[0] = 0;
+    }
+    for (int i = local_id; i < local_experts_num - 1; i += local_range) {
+      expert_cumsum_ptr[i + 1] = rows_per_expert[i];
+    }
+
+    item.barrier(sycl::access::fence_space::local_space);
+
+    sycl::joint_inclusive_scan(
+        item.get_group(),
+        expert_cumsum_ptr,
+        expert_cumsum_ptr + local_experts_num,
+        expert_cumsum_ptr,
+        sycl::plus<int>{});
+
     int row = group_id;
     int global_expert_id[TopK];
     int local_expert_id[TopK];
 
+    if (is_topk_ids_int32) {
+      auto topk_ids_32 = reinterpret_cast<int32_t*>(topk_ids);
 #pragma unroll
-    for (int i = 0; i < TopK; ++i) {
-      global_expert_id[i] = topk_ids[row * TopK + i];
+      for (int i = 0; i < TopK; ++i) {
+        global_expert_id[i] = topk_ids_32[row * TopK + i];
+      }
+    } else {
+      auto topk_ids_64 = reinterpret_cast<int64_t*>(topk_ids);
+#pragma unroll
+      for (int i = 0; i < TopK; ++i) {
+        global_expert_id[i] = topk_ids_64[row * TopK + i];
+      }
     }
 
     if (expert_map != nullptr) {
@@ -206,8 +234,10 @@ class RemapHiddenStates {
 #pragma unroll
     for (int i = 0; i < TopK; ++i) {
       if (local_expert_id[i] != -1) {
-        rows_offset[i] = unpermuted_row_to_permuted_row[row * TopK + i] +
-                         expert_first_token_offset[local_expert_id[i]];
+        int cumsum_offset =
+            local_expert_id[i] == 0 ? 0 : expert_cumsum_ptr[local_expert_id[i]];
+        rows_offset[i] =
+            unpermuted_row_to_permuted_row[row * TopK + i] + cumsum_offset;
       } else {
         rows_offset[i] = -1;
       }
@@ -297,18 +327,21 @@ class RemapHiddenStates {
   }
 
  private:
+  sycl::local_accessor<int32_t, 1> slm;
   TA* hidden_states;
   TS* hidden_states_scales;
   TA* remapped_hidden_states;
   TS* remapped_hidden_states_scales;
   int* expert_map;
   int* unpermuted_row_to_permuted_row;
-  int64_t* expert_first_token_offset;
-  int64_t* topk_ids;
+  int* rows_per_expert;
+  void* topk_ids;
+  bool is_topk_ids_int32;
   const int num_rows;
   const int hidden_size;
   const int block_k;
   const int total_experts_num;
+  const int local_experts_num;
 };
 
 template <typename TA, typename TS, int TopK>
@@ -318,9 +351,10 @@ void RemapHiddenStatesLauncher(
     TA* remapped_hidden_states,
     TS* remapped_hidden_states_scales,
     int* expert_map,
-    int64_t* expert_first_token_offset,
+    int* rows_per_expert,
     int* unpermuted_row_to_permuted_row,
-    int64_t* topk_ids,
+    void* topk_ids,
+    bool is_topk_ids_int32,
     const int num_rows,
     const int hidden_size,
     const int block_k,
@@ -328,48 +362,50 @@ void RemapHiddenStatesLauncher(
     const int local_experts_num,
     sycl::queue& queue) {
   TORCH_CHECK(
-      local_experts_num <= CalculateFristTokenOffset::MAX_LOCAL_STORAGE *
-                               CalculateFristTokenOffset::WARP_SIZE,
+      (local_experts_num <= (RemapHiddenStates<TA, TS, TopK>::EXCLUSIVE_SIZE)),
       "local_experts_num exceeds the maximum supported number");
   TORCH_CHECK(
       (hidden_size % RemapHiddenStates<TA, TS, TopK>::ElemsPerItem == 0),
       "hidden_size must be divisible by ElemsPerItem");
 
   queue.submit([&](sycl::handler& cgh) {
+    sycl::local_accessor<int32_t, 1> local_counts(
+        sycl::range<1>(local_experts_num), cgh);
     cgh.parallel_for(
         RowsPerExpertCount::get_nd_range(num_rows, TopK),
         RowsPerExpertCount{
             expert_map,
-            expert_first_token_offset,
+            rows_per_expert,
             topk_ids,
+            is_topk_ids_int32,
             unpermuted_row_to_permuted_row,
             num_rows,
-            TopK});
+            TopK,
+            local_experts_num,
+            local_counts});
   });
 
   queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        CalculateFristTokenOffset::get_nd_range(),
-        CalculateFristTokenOffset{
-            expert_first_token_offset, local_experts_num});
-  });
-
-  queue.submit([&](sycl::handler& cgh) {
+    sycl::local_accessor<int32_t, 1> slm(
+        sycl::range<1>(local_experts_num), cgh);
     cgh.parallel_for(
         RemapHiddenStates<TA, TS, TopK>::get_nd_range(num_rows, hidden_size),
         RemapHiddenStates<TA, TS, TopK>{
+            slm,
             hidden_states,
             hidden_states_scales,
             remapped_hidden_states,
             remapped_hidden_states_scales,
             expert_map,
             unpermuted_row_to_permuted_row,
-            expert_first_token_offset,
+            rows_per_expert,
             topk_ids,
+            is_topk_ids_int32,
             num_rows,
             hidden_size,
             block_k,
-            total_experts_num});
+            total_experts_num,
+            local_experts_num});
   });
 }
 
@@ -386,7 +422,7 @@ void remap_hidden_states(
         remapped_hidden_states_scales,  // [num_rows, hidden_size // block_k] or
                                         // empty
     const c10::optional<torch::Tensor>& expert_map,  // [total_experts_num]
-    torch::Tensor& expert_first_token_offset,        // [local_experts_num  + 1]
+    torch::Tensor& rows_per_expert,                  // [local_experts_num]
     torch::Tensor& unpermuted_row_to_permuted_row,   // [num_rows, TopK]
     torch::Tensor& topk_ids,                         // [num_rows, TopK]
     int64_t total_experts_num,
@@ -413,11 +449,13 @@ void remap_hidden_states(
   }
 
   TORCH_CHECK(
-      expert_first_token_offset.scalar_type() == torch::kInt64,
-      "expert_first_token_offset must be int64");
+      rows_per_expert.scalar_type() == torch::kInt32,
+      "rows_per_expert must be int32");
 
   TORCH_CHECK(
-      topk_ids.scalar_type() == torch::kInt64, "topk_ids must be int64");
+      topk_ids.scalar_type() == torch::kInt64 ||
+          topk_ids.scalar_type() == torch::kInt32,
+      "topk_ids must be int64 or int32");
 
   int num_rows = hidden_states.size(0);
   int hidden_size = hidden_states.size(1);
@@ -445,8 +483,8 @@ void remap_hidden_states(
         "expert_map must be [total_experts_num]");
   }
   TORCH_CHECK(
-      expert_first_token_offset.size(0) == local_experts_num + 1,
-      "expert_first_token_offset must be [local_experts_num + 1]");
+      rows_per_expert.size(0) == local_experts_num,
+      "rows_per_expert must be [local_experts_num]");
   TORCH_CHECK(
       topk_ids.size(0) == num_rows && topk_ids.size(1) == TopK,
       "topk_ids must be [num_rows, TopK]");
@@ -466,9 +504,10 @@ void remap_hidden_states(
           : nullptr,                                                          \
       expert_map.has_value() ? reinterpret_cast<int*>(expert_map->data_ptr()) \
                              : nullptr,                                       \
-      reinterpret_cast<int64_t*>(expert_first_token_offset.data_ptr()),       \
+      reinterpret_cast<int*>(rows_per_expert.data_ptr()),                     \
       reinterpret_cast<int*>(unpermuted_row_to_permuted_row.data_ptr()),      \
-      reinterpret_cast<int64_t*>(topk_ids.data_ptr()),                        \
+      reinterpret_cast<void*>(topk_ids.data_ptr()),                           \
+      topk_ids.scalar_type() == torch::kInt32,                                \
       num_rows,                                                               \
       hidden_size,                                                            \
       block_k,                                                                \

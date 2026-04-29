@@ -85,7 +85,7 @@ void MoEGEMMLauncher(
     ElementD* outputs,
     const int gemm_n,
     const int gemm_k,
-    const int64_t* expert_first_token_offset,
+    const int* rows_per_expert,
     const int num_experts,
     const int group_size,
     int32_t* atomic_buffer) {
@@ -148,7 +148,7 @@ void MoEGEMMLauncher(
               bias,
               outputs,
               mma,
-              expert_first_token_offset,
+              rows_per_expert,
               num_experts,
               group_size,
               gemm_n,
@@ -165,7 +165,7 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     const c10::optional<at::Tensor>& ptr_scales,
     const c10::optional<at::Tensor>& ptr_bias,
     at::Tensor& ptr_D,
-    at::Tensor& expert_first_token_offset,
+    at::Tensor& rows_per_expert,
     int64_t N,
     int64_t K,
     int64_t num_experts,
@@ -238,7 +238,7 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       reinterpret_cast<ElementA*>(ptr_D.data_ptr()),                           \
       N,                                                                       \
       K,                                                                       \
-      reinterpret_cast<int64_t*>(expert_first_token_offset.data_ptr()),        \
+      reinterpret_cast<int*>(rows_per_expert.data_ptr()),                      \
       num_experts,                                                             \
       group_size,                                                              \
       static_cast<int*>(atomic_buffer.data_ptr()));

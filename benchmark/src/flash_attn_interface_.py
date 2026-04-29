@@ -128,7 +128,8 @@ def flash_attn_varlen_func_CalKernelTime(
             raise NotImplementedError(
                 "FA2 only supports both KV cache descaled")
 
-        start_event.record()
+        if start_event is not None:
+            start_event.record()
         out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
             q,
             k,
@@ -158,8 +159,8 @@ def flash_attn_varlen_func_CalKernelTime(
             None,
             num_splits_kv,
         )
-        end_event.record()
-        end_event.synchronize()
+        if end_event is not None:
+            end_event.record()
     else:
         raise NotImplementedError("not support yet")
     return (out, softmax_lse) if return_softmax_lse else (out)

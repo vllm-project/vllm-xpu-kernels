@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 
 # isort: off
 import gc
 
 import torch
 import triton
+
+from utils import bootstrap_benchmark_env, ensure_save_path_exists
+
+bootstrap_benchmark_env(__file__)
 
 from benchmark.src.flash_attn_interface_ import (
     flash_attn_varlen_func_CalKernelTime)
@@ -24,8 +29,8 @@ DEVICE = "xpu"
 
 def clear_xpu_cache():
     torch.xpu.empty_cache()
-    gc.collect()
     torch.xpu.synchronize()
+    gc.collect()
 
 
 def calculate_flops(num_query_heads, query_lens, kv_lens, head_size,
@@ -234,8 +239,6 @@ def benchmark_varlen_with_paged_kv(num_seqs,
     assert iterations > 5, \
     "Number of iterations should be greater than 5 to account for warmup"
 
-    start = torch.xpu.Event(enable_timing=True)
-    end = torch.xpu.Event(enable_timing=True)
     total_latency = 0.0
     ms = 0.0
 
@@ -243,6 +246,12 @@ def benchmark_varlen_with_paged_kv(num_seqs,
         torch.rand_like(maybe_quantized_query) for _ in range(iterations)
     ]
 
+    start_events = [
+        torch.xpu.Event(enable_timing=True) for _ in range(iterations - 5)
+    ]
+    end_events = [
+        torch.xpu.Event(enable_timing=True) for _ in range(iterations - 5)
+    ]
     if is_paged:
         for index in range(iterations):
             block_tables = torch.randint(0,
@@ -251,6 +260,8 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                                          dtype=torch.int32)
             if provider == "flash_kernel_time" or \
             provider == "flash_kernel_TFLOPS":
+                se = start_events[index - 5] if index >= 5 else None
+                ee = end_events[index - 5] if index >= 5 else None
                 flash_attn_varlen_func_CalKernelTime(
                     queries[index],
                     maybe_quantized_key_cache,
@@ -270,10 +281,11 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                     block_table=block_tables,
                     window_size=window_size,
                     s_aux=sink,
-                    start_event=start,
-                    end_event=end)
+                    start_event=se,
+                    end_event=ee)
             else:
-                start.record()
+                if index >= 5:
+                    start_events[index - 5].record()
                 flash_attn_varlen_func(queries[index],
                                        maybe_quantized_key_cache,
                                        maybe_quantized_value_cache,
@@ -292,14 +304,14 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                                        block_table=block_tables,
                                        window_size=window_size,
                                        s_aux=sink)
-                end.record()
-                end.synchronize()
-            if index >= 5:  # skip the first 5 iterations for warmup
-                total_latency += start.elapsed_time(end)
+                if index >= 5:
+                    end_events[index - 5].record()
     else:
         for index in range(iterations):
             if provider == "flash_kernel_time" or \
             provider == "flash_kernel_TFLOPS":
+                se = start_events[index - 5] if index >= 5 else None
+                ee = end_events[index - 5] if index >= 5 else None
                 flash_attn_varlen_func_CalKernelTime(
                     queries[index],
                     maybe_quantized_key_cache,
@@ -319,10 +331,11 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                     block_table=None,
                     window_size=window_size,
                     s_aux=sink,
-                    start_event=start,
-                    end_event=end)
+                    start_event=se,
+                    end_event=ee)
             else:
-                start.record()
+                if index >= 5:
+                    start_events[index - 5].record()
                 flash_attn_varlen_func(queries[index],
                                        maybe_quantized_key_cache,
                                        maybe_quantized_value_cache,
@@ -341,12 +354,14 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                                        block_table=None,
                                        window_size=window_size,
                                        s_aux=sink)
-                end.record()
-                end.synchronize()
-            if index >= 5:  # skip the first 5 iterations for warmup
-                total_latency += start.elapsed_time(end)
+                if index >= 5:
+                    end_events[index - 5].record()
     if provider == "flash_kernel_TFLOPS":
         torch.xpu.synchronize()
+        total_latency = sum(
+            start_events[i].elapsed_time(end_events[i])
+            for i in range(iterations - 5)
+        )
         ms = total_latency / (iterations - 5)
         flops = calculate_flops(num_query_heads, query_lens, kv_lens,
                                 head_size, is_causal)
@@ -355,6 +370,10 @@ def benchmark_varlen_with_paged_kv(num_seqs,
         return tflops
 
     torch.xpu.synchronize()
+    total_latency = sum(
+        start_events[i].elapsed_time(end_events[i])
+        for i in range(iterations - 5)
+    )
     ms = total_latency / (iterations - 5)
     clear_xpu_cache()
 
@@ -425,7 +444,7 @@ def filter_configs(configs):
 if __name__ == "__main__":
 
     args = parse_args()
-    seed = 1234
+    seed = 4242
     seed_everything(seed)
     iterations = 20
     torch.set_default_device("xpu")
@@ -444,5 +463,6 @@ if __name__ == "__main__":
     configs = gen_perf_configs()
     configs = filter_configs(configs)
     benchmark = get_benchmark_varlen_with_paged_kv(iterations=iterations)
+    save_path = ensure_save_path_exists(args.save_path)
     # Run performance benchmark
-    benchmark.run(print_data=True, save_path=args.save_path)
+    benchmark.run(print_data=True, save_path=save_path)

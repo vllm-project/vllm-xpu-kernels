@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 
 import itertools
 from typing import Optional, Union
@@ -7,6 +8,9 @@ from typing import Optional, Union
 import torch
 import triton
 from torch import nn
+from utils import bootstrap_benchmark_env
+
+bootstrap_benchmark_env(__file__)
 
 from tests import register_ops as vllm_ops
 from tests.utils import check_ipex_availability, parse_args
