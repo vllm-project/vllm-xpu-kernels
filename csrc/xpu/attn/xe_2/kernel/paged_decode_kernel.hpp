@@ -283,7 +283,11 @@ class XeFMHAFwdSplitKVKernel {
       if constexpr (is_var_len) {
         auto qo_cumulative = s.seq_len_qo.cumulative_length;
 
-        offset_q = s.num_heads_q * s.head_size_qk * qo_cumulative[idx_b];
+        // Use Q's actual per-token stride (get<0>(dQ)) instead of assuming
+        // the packed value num_heads_q * head_size_qk so non-contiguous Q
+        // tensors (e.g. strided slices, permuted/transposed views, slices
+        // of a wider buffer) are read correctly.
+        offset_q = get<0>(p.dQ) * qo_cumulative[idx_b];
         offset_o = s.num_heads_q * s.head_size_vo * num_kv_splits *
                    qo_cumulative[idx_b];
         offset_exp_sums = s.num_heads_q * num_kv_splits * qo_cumulative[idx_b];
@@ -358,7 +362,18 @@ class XeFMHAFwdSplitKVKernel {
       auto ptrExp_sums = p.exp_sums + offset_exp_sums;
       auto ptrMax_logits = p.max_logits + offset_max_logits;
 
-      auto layout_q = make_ordered_layout(shape_Q, Step<_1, _0, _2, _3>{});
+      // Q layout uses the tensor's actual head stride (get<2>(dQ)) so
+      // non-contiguous Q (e.g. permuted heads or sliced from a wider
+      // head-dim buffer) is read correctly. The GQA grouping splits the
+      // num_heads_q dim into (num_heads_kv outer, head_group_q inner) which
+      // assumes heads are regularly strided by q_stride_heads.
+      auto layout_q = make_layout(
+          shape_Q,
+          make_stride(
+              get<2>(p.dQ),
+              _1{},
+              static_cast<int>(head_group_q) * get<2>(p.dQ),
+              get<3>(p.dQ)));
       auto layout_k = make_layout(
           shape_K, make_stride(get<0>(p.dK), _1{}, get<2>(p.dK), get<3>(p.dK)));
       auto layout_v = make_layout(

@@ -119,6 +119,15 @@ struct paged_decode_args_t {
   int64_t v_stride_page = 0;
   int64_t v_stride_seq = 0;
   int64_t v_stride_heads = 0;
+  // Q strides. Varlen Q is [total_seq, num_heads_q, head_size]; non-varlen Q
+  // is [batch, num_heads_q, seq, head_size]. The kernel always assumes the
+  // head_size dim has stride 1 (checked at the API boundary). The other
+  // strides are passed explicitly so non-contiguous Q (slice/permute/sliced
+  // buffer) is supported. q_stride_batch is unused for varlen (batch=1) and
+  // populated as 0 in that case.
+  int64_t q_stride_seq = 0;
+  int64_t q_stride_heads = 0;
+  int64_t q_stride_batch = 0;
 };
 
 template <class FMHAKernel, class ReductionSplitKernel, bool isVarLen>
@@ -187,9 +196,35 @@ struct DecodeKernelLauncher {
 
     num_kv_splits = args.num_kv_splits;
 
-    stride_Q = cutlass::make_cute_packed_stride(
-        StrideQ{},
-        cute::make_shape(seq_len_qo, head_size_qk, num_heads_q, batch));
+    if (args.q_stride_seq > 0 || args.q_stride_heads > 0 ||
+        args.q_stride_batch > 0) {
+      // Use actual strides from the Q tensor (supports non-contiguous Q
+      // such as strided row slices, permuted/transposed views, or slices
+      // of a wider buffer). The head_dim stride is _1 and is enforced at
+      // the API boundary.
+      constexpr int64_t kIntMax =
+          static_cast<int64_t>(std::numeric_limits<int>::max());
+      TORCH_CHECK(
+          args.q_stride_seq <= kIntMax && args.q_stride_heads <= kIntMax &&
+              args.q_stride_batch <= kIntMax,
+          "Q stride exceeds int32 max (",
+          kIntMax,
+          "): q_stride_seq=",
+          args.q_stride_seq,
+          " q_stride_heads=",
+          args.q_stride_heads,
+          " q_stride_batch=",
+          args.q_stride_batch);
+      stride_Q = StrideQ{
+          static_cast<int>(args.q_stride_seq),
+          _1{},
+          static_cast<int>(args.q_stride_heads),
+          static_cast<int>(args.q_stride_batch)};
+    } else {
+      stride_Q = cutlass::make_cute_packed_stride(
+          StrideQ{},
+          cute::make_shape(seq_len_qo, head_size_qk, num_heads_q, batch));
+    }
     if (args.k_stride_seq > 0) {
       // Use actual strides from KV cache tensors (supports non-contiguous
       // layouts such as MLA combined KV cache)
