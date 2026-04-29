@@ -370,10 +370,11 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                                 head_size, is_causal)
         tflops = flops / (ms / 1000) / 1e12
         if provider == "flash_kernel_MFU":
-            peak_tflops = get_hardware_preset(torch.xpu.get_device_name())["tflops"]
-            if peak_tflops is None:
+            hardware_presets = get_hardware_preset(torch.xpu.get_device_name())
+            if hardware_presets is None:
                 clear_xpu_cache()
                 return float("nan")
+            peak_tflops = hardware_presets["tflops"]
             clear_xpu_cache()
             return (tflops / peak_tflops) * 100
         clear_xpu_cache()

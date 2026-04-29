@@ -237,10 +237,11 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
                                                     output_dtype)
             measured_bw = memory_load_GB / (ms / 1000)
             if provider == "flash_MBU":
-                peak_bw = get_hardware_preset(torch.xpu.get_device_name())["memory_bandwidth_gbps"]
-                if peak_bw is None:
+                hardware_presets = get_hardware_preset(torch.xpu.get_device_name())
+                if hardware_presets is None:
                     clear_xpu_cache()
                     return float("nan")
+                peak_bw = hardware_presets["memory_bandwidth_GBs"]
                 clear_xpu_cache()
                 return (measured_bw / peak_bw) * 100
             clear_xpu_cache()
