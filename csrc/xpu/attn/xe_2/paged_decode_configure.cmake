@@ -117,6 +117,11 @@ function(paged_decode_configure FILENAME_SUFFIX)
         set(IMPL_POLICY
             ${policy_${IMPL_QGROUP}_${IMPL_HEADSIZE}_${IMPL_PAGESIZE}})
 
+        # Skip combinations that have no corresponding policy defined
+        if(NOT IMPL_POLICY)
+          continue()
+        endif()
+
         foreach(IMPL_KISCAUSAL ${L_BOOLS})
           foreach(IMPL_KISLOCAL ${L_BOOLS})
             foreach(IMPL_KISSINK ${L_BOOLS})

@@ -383,7 +383,12 @@ at::Tensor mla_decode_fwd(
   int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
   int eff_seqlen_k = max_seqlen_k;
   int num_kv_splits = num_splits.value_or(get_num_splits(
-      queue, batch_size, num_heads_kv, eff_seqlen_k, block_size));
+      queue,
+      batch_size,
+      num_heads_q,
+      num_heads_kv,
+      eff_seqlen_k,
+      block_size));
 
   at::Tensor tmp_out =
       num_kv_splits == 1

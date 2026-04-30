@@ -58,7 +58,7 @@
   X(decode_policy_q16_h128_p32)     \
   X(decode_policy_q16_h192_p32)     \
   X(decode_policy_q16_h256_p32)     \
-  X(decode_policy_q16_h512_p32)
+  X(decode_policy_q16_h512_p32)     \
   X(decode_policy_q8_h576_p128)     \
   X(decode_policy_q16_h576_p128)
 
