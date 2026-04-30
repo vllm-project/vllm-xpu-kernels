@@ -2,17 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for MLA decode via the XPU paged_decode kernel.
 
-The wrapper concatenates ``q = [q_nope, q_pe]`` and reuses
-``kv_c_and_k_pe_cache`` for both K (full, head_dim = kv_lora_rank +
-qk_rope_head_dim) and V (a non-contiguous narrow view, head_dim =
-kv_lora_rank).
+The unified ``flash_attn_varlen_func`` (FA2) decode branch routes paged decode
+with ``max_seqlen_q == 1`` through ``cutlass_paged_decode_interface``. MLA
+decode is expressed as a varlen call by:
+
+* concatenating ``q = [q_nope, q_pe]`` (head_size_qk = lora + rope),
+* using the full ``kv_c_and_k_pe_cache`` reshaped to 4D
+  ``[num_blocks, block_size, 1, head_qk]`` as ``k_cache``, and
+* using a non-contiguous narrow view of the same buffer (first ``lora``
+  channels of the last dim) as ``v_cache``.
 """
 
 
 import pytest
 import torch
 
-from vllm_xpu_kernels.flash_attn_interface import flash_mla_decode
+from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 DEVICE = "xpu"
 
@@ -46,7 +51,6 @@ def _ref_mla_decode(
         v = kv[:, :lora]                            # [kl, lora]
         q = torch.cat([q_nope[q0:q1],
                        q_pe[q0:q1]], dim=-1)  # [ql, h_q, head_qk]
-        # attn: [h_q, ql, kl]
         attn = torch.einsum("qhd,kd->hqk", q, k).float() * softmax_scale
         if causal and ql > 1:
             mask = torch.triu(
@@ -55,7 +59,6 @@ def _ref_mla_decode(
             )
             attn.masked_fill_(mask, float("-inf"))
         attn = torch.softmax(attn, dim=-1).to(v.dtype)
-        # out: [ql, h_q, lora]
         out = torch.einsum("hqk,kd->qhd", attn, v)
         out_chunks.append(out)
     return torch.cat(out_chunks, dim=0)
@@ -92,11 +95,52 @@ def _make_inputs(
     return q_nope, q_pe, cache, cu_seqlens_q, seqused_k, block_table
 
 
+def _mla_decode_via_varlen(
+    q_nope, q_pe, cache, block_table, cu_seqlens_q, seqused_k,
+    max_seqlen_q, max_seqlen_k, softmax_scale,
+):
+    """Pack MLA inputs and call ``flash_attn_varlen_func``.
+
+    Mirrors what the vLLM XPU MLA backend does at `forward_mqa` time.
+    """
+    kv_lora_rank = q_nope.shape[-1]
+
+    # Cache: normalize to 4D [num_blocks, block_size, 1, head_qk].
+    if cache.dim() == 3:
+        cache = cache.unsqueeze(-2)
+    assert cache.dim() == 4 and cache.size(-2) == 1
+
+    k_cache = cache
+    v_cache = cache.narrow(-1, 0, kv_lora_rank)
+    # Sanity: V must remain non-contiguous in seq stride but contiguous in
+    # the last dim (kernel honors per-tensor strides).
+    assert v_cache.stride(-1) == 1
+    assert v_cache.stride(-2) == cache.size(-1)
+
+    q = torch.cat([q_nope, q_pe], dim=-1)
+    if not q.is_contiguous():
+        q = q.contiguous()
+
+    return flash_attn_varlen_func(
+        q,
+        k_cache,
+        v_cache,
+        max_seqlen_q=max_seqlen_q,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_k=max_seqlen_k,
+        seqused_k=seqused_k,
+        block_table=block_table,
+        softmax_scale=softmax_scale,
+        causal=False,
+        fa_version=2,
+    )
+
+
 # DeepSeek-V3 shapes: kv_lora_rank=512, qk_rope_head_dim=64.
 # At head_size_qk=576 the kernel only fits in Intel Xe SLM with q_packed<=8
-# and block_size=64 (see assertions in `flash_mla_decode`). The matrix below
-# exercises only the supported envelope; larger configs are gated to assert
-# (TORCH_CHECK) and tested separately below.
+# and block_size=64 (enforced by TORCH_CHECK in flash_api.cpp's
+# mha_varlen_fwd decode branch). The matrix below exercises only the
+# supported envelope; rejected configs are tested separately below.
 @pytest.mark.parametrize("block_size", [64])
 @pytest.mark.parametrize(
     "query_lens,kv_lens",
@@ -125,17 +169,11 @@ def test_mla_decode_deepseek_v3(block_size, query_lens, kv_lens, num_heads_q):
 
     softmax_scale = (kv_lora_rank + qk_rope_head_dim) ** -0.5
 
-    out = flash_mla_decode(
-        q_nope=q_nope, q_pe=q_pe,
-        kv_c_and_k_pe_cache=cache,
-        block_table=bt,
-        cu_seqlens_q=cu_q,
-        seqused_k=sk,
+    out = _mla_decode_via_varlen(
+        q_nope, q_pe, cache, bt, cu_q, sk,
         max_seqlen_q=max(query_lens),
         max_seqlen_k=max(kv_lens),
         softmax_scale=softmax_scale,
-        kv_lora_rank=kv_lora_rank,
-        qk_rope_head_dim=qk_rope_head_dim,
     )
 
     ref = _ref_mla_decode(q_nope, q_pe, cache, bt, cu_q, sk,
@@ -145,8 +183,7 @@ def test_mla_decode_deepseek_v3(block_size, query_lens, kv_lens, num_heads_q):
 
 
 def test_mla_decode_rejects_large_q_packed():
-    """`flash_mla_decode` should fail fast (not hang) when the configuration
-    exceeds Intel Xe SLM limits."""
+    """Should fail fast (not hang) when num_heads_q > 8 at head_size=576."""
     if not torch.xpu.is_available():
         pytest.skip("XPU not available")
     kv_lora_rank, rope = 512, 64
@@ -156,16 +193,15 @@ def test_mla_decode_rejects_large_q_packed():
         num_heads_q=16, kv_lora_rank=kv_lora_rank,
         qk_rope_head_dim=rope, block_size=block_size, num_blocks=4,
         dtype=torch.bfloat16)
-    with pytest.raises(AssertionError, match="num_heads_q"):
-        flash_mla_decode(q_nope=q_nope, q_pe=q_pe,
-                         kv_c_and_k_pe_cache=cache, block_table=bt,
-                         cu_seqlens_q=cu_q, seqused_k=sk,
-                         max_seqlen_q=1, max_seqlen_k=64,
-                         kv_lora_rank=kv_lora_rank,
-                         qk_rope_head_dim=rope)
+    with pytest.raises(RuntimeError, match="num_heads_q"):
+        _mla_decode_via_varlen(
+            q_nope, q_pe, cache, bt, cu_q, sk,
+            max_seqlen_q=1, max_seqlen_k=64,
+            softmax_scale=(kv_lora_rank + rope) ** -0.5)
 
 
 def test_mla_decode_rejects_large_block_size():
+    """Should fail fast when block_size > 64 at head_size=576."""
     if not torch.xpu.is_available():
         pytest.skip("XPU not available")
     kv_lora_rank, rope = 512, 64
@@ -175,10 +211,8 @@ def test_mla_decode_rejects_large_block_size():
         num_heads_q=8, kv_lora_rank=kv_lora_rank,
         qk_rope_head_dim=rope, block_size=block_size, num_blocks=4,
         dtype=torch.bfloat16)
-    with pytest.raises(AssertionError, match="block_size"):
-        flash_mla_decode(q_nope=q_nope, q_pe=q_pe,
-                         kv_c_and_k_pe_cache=cache, block_table=bt,
-                         cu_seqlens_q=cu_q, seqused_k=sk,
-                         max_seqlen_q=1, max_seqlen_k=64,
-                         kv_lora_rank=kv_lora_rank,
-                         qk_rope_head_dim=rope)
+    with pytest.raises(RuntimeError, match="block_size"):
+        _mla_decode_via_varlen(
+            q_nope, q_pe, cache, bt, cu_q, sk,
+            max_seqlen_q=1, max_seqlen_k=64,
+            softmax_scale=(kv_lora_rank + rope) ** -0.5)
