@@ -26,6 +26,8 @@ RUN apt clean && apt-get update -y && \
     python3.12 \
     python3.12-dev
 
+RUN apt remove libze1 -y
+
 RUN mkdir neo && cd neo && \
     wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.32.7/intel-igc-core-2_2.32.7+21184_amd64.deb && \
     wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.32.7/intel-igc-opencl-2_2.32.7+21184_amd64.deb && \
