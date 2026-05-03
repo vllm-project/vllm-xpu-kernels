@@ -6,7 +6,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<80.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.11.0+xpu",
+    "torch @ https://download-r2.pytorch.org/whl/nightly/xpu/torch-2.13.0.dev20260502%2Bxpu-cp312-cp312-linux_x86_64.whl",
     "wheel",
     "regex",
     "jinja2",
