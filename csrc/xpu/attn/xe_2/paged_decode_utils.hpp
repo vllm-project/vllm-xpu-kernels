@@ -1,30 +1,35 @@
-#include "paged_decode.hpp"
+#include "paged_decode_extern.hpp"
 
 using namespace cute;
 
-// Runtime dispatcher helper
-template <typename decode_policy, bool... Bs>
-void decode_policy_dispatch_func(
+using decode_dispatch_fn_t = void (*)(
+    sycl::queue& queue,
+    CutlassQKType& cuQKType,
+    const paged_decode_args_t& args);
+
+inline int decode_dispatch_flags_index(const paged_decode_args_t& args) {
+  return (static_cast<int>(args.is_causal) << 2) |
+         (static_cast<int>(args.is_local) << 1) |
+         static_cast<int>(args.is_sink);
+}
+
+template <typename decode_policy>
+inline void dispatch_by_runtime_flags(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const paged_decode_args_t& args) {
-  decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuQKType, args);
-}
+  static constexpr decode_dispatch_fn_t kDispatchers[] = {
+      &decode_policy_dispatch_impl<decode_policy, false, false, false>,
+      &decode_policy_dispatch_impl<decode_policy, false, false, true>,
+      &decode_policy_dispatch_impl<decode_policy, false, true, false>,
+      &decode_policy_dispatch_impl<decode_policy, false, true, true>,
+      &decode_policy_dispatch_impl<decode_policy, true, false, false>,
+      &decode_policy_dispatch_impl<decode_policy, true, false, true>,
+      &decode_policy_dispatch_impl<decode_policy, true, true, false>,
+      &decode_policy_dispatch_impl<decode_policy, true, true, true>,
+  };
 
-template <typename decode_policy, bool... Bs, typename... Ts>
-void decode_policy_dispatch_func(
-    sycl::queue& queue,
-    CutlassQKType& cuQKType,
-    const paged_decode_args_t& args,
-    bool b,
-    Ts... ts) {
-  if (b) {
-    decode_policy_dispatch_func<decode_policy, Bs..., true>(
-        queue, cuQKType, args, ts...);
-  } else {
-    decode_policy_dispatch_func<decode_policy, Bs..., false>(
-        queue, cuQKType, args, ts...);
-  }
+  kDispatchers[decode_dispatch_flags_index(args)](queue, cuQKType, args);
 }
 
 template <typename QGroup, typename PageSize>
@@ -33,40 +38,27 @@ inline void dispatch_by_head_size(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const paged_decode_args_t& args) {
-  switch (head_case) {
-    case 0:
-      decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _64, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
-      break;
-    case 1:
-      decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _96, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
-      break;
-    case 2:
-      decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _128, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
-      break;
-    case 3:
-      decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _192, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
-      break;
-    case 4:
-      decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _256, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
-      break;
-    case 5:
-      decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _512, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
-      break;
-    default:
-      TORCH_CHECK(false, "Unsupported head size for fmha");
-  }
+  static constexpr decode_dispatch_fn_t kHeadDispatchers[] = {
+      &dispatch_by_runtime_flags<
+          decode_policy_qpacked_head<QGroup, _64, PageSize>>,
+      &dispatch_by_runtime_flags<
+          decode_policy_qpacked_head<QGroup, _96, PageSize>>,
+      &dispatch_by_runtime_flags<
+          decode_policy_qpacked_head<QGroup, _128, PageSize>>,
+      &dispatch_by_runtime_flags<
+          decode_policy_qpacked_head<QGroup, _192, PageSize>>,
+      &dispatch_by_runtime_flags<
+          decode_policy_qpacked_head<QGroup, _256, PageSize>>,
+      &dispatch_by_runtime_flags<
+          decode_policy_qpacked_head<QGroup, _512, PageSize>>,
+  };
+  constexpr int kNumHeadCases =
+      sizeof(kHeadDispatchers) / sizeof(kHeadDispatchers[0]);
+
+  TORCH_CHECK(
+      head_case >= 0 && head_case < kNumHeadCases,
+      "Unsupported head size for fmha");
+  kHeadDispatchers[head_case](queue, cuQKType, args);
 }
 
 template <typename QGroup>

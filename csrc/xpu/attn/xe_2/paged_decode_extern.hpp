@@ -21,18 +21,6 @@
   X(decode_policy_q16_h192_p64)     \
   X(decode_policy_q16_h256_p64)     \
   X(decode_policy_q16_h512_p64)     \
-  X(decode_policy_q8_h64_p128)      \
-  X(decode_policy_q8_h96_p128)      \
-  X(decode_policy_q8_h128_p128)     \
-  X(decode_policy_q8_h192_p128)     \
-  X(decode_policy_q8_h256_p128)     \
-  X(decode_policy_q8_h512_p128)     \
-  X(decode_policy_q16_h64_p128)     \
-  X(decode_policy_q16_h96_p128)     \
-  X(decode_policy_q16_h128_p128)    \
-  X(decode_policy_q16_h192_p128)    \
-  X(decode_policy_q16_h256_p128)    \
-  X(decode_policy_q16_h512_p128)    \
   X(decode_policy_q8_h64_p16)       \
   X(decode_policy_q8_h96_p16)       \
   X(decode_policy_q8_h128_p16)      \

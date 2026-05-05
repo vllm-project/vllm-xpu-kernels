@@ -1,6 +1,5 @@
 #include "paged_decode_xe2.h"
 #include "paged_decode_utils.hpp"
-#include "paged_decode_extern.hpp"
 
 using namespace cute;
 

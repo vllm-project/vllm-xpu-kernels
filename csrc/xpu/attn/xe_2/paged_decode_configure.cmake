@@ -53,13 +53,6 @@ function(paged_decode_configure FILENAME_SUFFIX)
   set(policy_8_256_64 "decode_policy_q8_h256_p64")
   set(policy_8_512_64 "decode_policy_q8_h512_p64")
 
-  set(policy_8_64_128 "decode_policy_q8_h64_p128")
-  set(policy_8_96_128 "decode_policy_q8_h96_p128")
-  set(policy_8_128_128 "decode_policy_q8_h128_p128")
-  set(policy_8_192_128 "decode_policy_q8_h192_p128")
-  set(policy_8_256_128 "decode_policy_q8_h256_p128")
-  set(policy_8_512_128 "decode_policy_q8_h512_p128")
-
   # Q-group size 16 policies
   set(policy_16_64_16 "decode_policy_q16_h64_p16")
   set(policy_16_96_16 "decode_policy_q16_h96_p16")
@@ -82,17 +75,13 @@ function(paged_decode_configure FILENAME_SUFFIX)
   set(policy_16_256_64 "decode_policy_q16_h256_p64")
   set(policy_16_512_64 "decode_policy_q16_h512_p64")
 
-  set(policy_16_64_128 "decode_policy_q16_h64_p128")
-  set(policy_16_96_128 "decode_policy_q16_h96_p128")
-  set(policy_16_128_128 "decode_policy_q16_h128_p128")
-  set(policy_16_192_128 "decode_policy_q16_h192_p128")
-  set(policy_16_256_128 "decode_policy_q16_h256_p128")
-  set(policy_16_512_128 "decode_policy_q16_h512_p128")
-
   # Configuration space dimensions
   set(qgroup_list "8" "16")
   set(headsize_list "64" "96" "128" "192" "256" "512")
-  set(pagesize_list "16" "32" "64" "128")
+  # Keep generation aligned with the runtime dispatcher: page_size that is a
+  # positive multiple of 64 is routed through the kv_tile=_64 policy, so the
+  # currently disabled _128 policy should not be instantiated here.
+  set(pagesize_list "16" "32" "64")
 
   # =============================================================================
   # Generate Kernel Sources
