@@ -59,6 +59,21 @@ def compute_num_tokens_per_block(num_tokens, num_experts_per_node):
     return 1024
 
 
+def fused_moe_activation(act_output, gemm1_output, activation):
+    if activation == "silu":
+        torch.ops._C.silu_and_mul(act_output, gemm1_output)
+    elif activation == "gelu":
+        torch.ops._C.gelu_and_mul(act_output, gemm1_output)
+    elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
+        torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
+    elif activation == "relu2_no_mul":
+        torch.ops._C.relu2_no_mul(act_output, gemm1_output)
+    elif activation == "swiglustep":
+        torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
+    else:
+        raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
+
+
 def implement_zp(qweight):
     # change u4 to s4 to avoid zero point in gemm kernel
     # only support default zero point now
@@ -409,18 +424,7 @@ def xpu_fused_moe(hidden_states,
     act_output = torch.empty((num_moe_inputs, inter_size * inter_size_scale),
                              dtype=gemm1_output.dtype,
                              device=gemm1_output.device)
-    if activation == "silu":
-        torch.ops._C.silu_and_mul(act_output, gemm1_output)
-    elif activation == "gelu":
-        torch.ops._C.gelu_and_mul(act_output, gemm1_output)
-    elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
-        torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
-    elif activation == "relu2_no_mul":
-        torch.ops._C.relu2_no_mul(act_output, gemm1_output)
-    elif activation == "swiglustep":
-        torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
-    else:
-        raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
+    fused_moe_activation(act_output, gemm1_output, activation)
 
     ########### gemm2 ##################
     input_A = act_output.contiguous()
