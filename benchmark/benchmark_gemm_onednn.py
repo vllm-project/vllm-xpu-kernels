@@ -6,6 +6,7 @@
 import argparse
 import gc
 import itertools
+from pathlib import Path
 
 import torch
 import triton
@@ -39,6 +40,9 @@ ALL_BENCHMARKS = [
 ]
 
 DEVICE = "xpu"
+DEFAULT_PEAK_FP8_TFLOPS = 197.0
+DEFAULT_PEAK_BF16_TFLOPS = 98.5
+DEFAULT_PEAK_BW_GBS = 456.0
 
 
 def clear_xpu_cache():
@@ -60,6 +64,69 @@ def calculate_memory_bytes(m, n, k, x_dtype, w_dtype=None):
     out_elem = torch.tensor([], dtype=x_dtype).element_size()
     # input + weight + output
     return m * k * x_elem + k * n * w_elem + m * n * out_elem
+
+
+def _add_roofline_metrics(df, peak_tflops, peak_bw_gbs):
+    analysis_df = df.copy()
+    for col in ("m", "n", "k"):
+        if col in analysis_df.columns:
+            analysis_df[col] = analysis_df[col].astype(int)
+
+    tflops_col = "TFLOPS (value)"
+    bw_col = "Bandwidth (GB/s) (value)"
+
+    analysis_df["%peak_tflops"] = analysis_df[tflops_col] / peak_tflops * 100.0
+    analysis_df["%peak_bw"] = analysis_df[bw_col] / peak_bw_gbs * 100.0
+    analysis_df["AI(F/B)"] = (
+        analysis_df[tflops_col] * 1000.0 / analysis_df[bw_col]
+    )
+    analysis_df["roofline_tflops"] = (
+        analysis_df["AI(F/B)"] * peak_bw_gbs / 1000.0
+    ).clip(upper=peak_tflops)
+    analysis_df["eff_vs_roofline(%)"] = (
+        analysis_df[tflops_col] / analysis_df["roofline_tflops"] * 100.0
+    )
+
+    norm_ratio = analysis_df["%peak_tflops"] / analysis_df["%peak_bw"].clip(
+        lower=1e-6
+    )
+    analysis_df["bound_hint"] = "mixed"
+    analysis_df.loc[norm_ratio > 1.25, "bound_hint"] = "compute-leaning"
+    analysis_df.loc[norm_ratio < 0.75, "bound_hint"] = "memory-leaning"
+    return analysis_df
+
+
+def _print_roofline_analysis(plot_name, df, peak_tflops, peak_bw_gbs):
+    analysis_df = _add_roofline_metrics(df, peak_tflops, peak_bw_gbs)
+    latency_col = "Latency (us) (value)"
+    tflops_col = "TFLOPS (value)"
+    bw_col = "Bandwidth (GB/s) (value)"
+
+    prefix_cols = [
+        col
+        for col in ["m", "n", "k", "dtype", "out_dtype", "fp8_dtype"]
+        if col in analysis_df.columns
+    ]
+    show_cols = prefix_cols + [
+        latency_col,
+        tflops_col,
+        bw_col,
+        "%peak_tflops",
+        "%peak_bw",
+        "AI(F/B)",
+        "roofline_tflops",
+        "eff_vs_roofline(%)",
+        "bound_hint",
+    ]
+
+    print(f"{plot_name}_analysis:")
+    print(
+        analysis_df[show_cols].to_string(
+            index=False,
+            float_format=lambda x: f"{x:.4f}",
+        )
+    )
+    return analysis_df
 
 
 # ---------------------------------------------------------------------------
@@ -947,6 +1014,24 @@ def gemm_parse_args():
         default="./configs/gemm/",
         help="Path to save benchmark results",
     )
+    parser.add_argument(
+        "--peak-fp8-tflops",
+        type=float,
+        default=DEFAULT_PEAK_FP8_TFLOPS,
+        help="Peak FP8 TFLOPS for roofline analysis",
+    )
+    parser.add_argument(
+        "--peak-bf16-tflops",
+        type=float,
+        default=DEFAULT_PEAK_BF16_TFLOPS,
+        help="Peak BF16 TFLOPS for roofline analysis",
+    )
+    parser.add_argument(
+        "--peak-bw-gbs",
+        type=float,
+        default=DEFAULT_PEAK_BW_GBS,
+        help="Peak memory bandwidth (GB/s) for roofline analysis",
+    )
     args = parser.parse_args()
     if "all" in args.benchmarks:
         args.benchmarks = ALL_BENCHMARKS
@@ -1043,4 +1128,23 @@ if __name__ == "__main__":
         print(f"Performance: {label}{suffix}")
         print("=" * 60)
         bench = get_bench(configs, iterations)
-        bench.run(print_data=True, save_path=args.save_path)
+        perf_df = bench.run(
+            print_data=False,
+            save_path=args.save_path,
+            return_df=True,
+        )
+        peak_tflops = (
+            args.peak_bf16_tflops if name == "bf16" else args.peak_fp8_tflops
+        )
+        plot_name = label.replace(" ", "_").replace("(", "").replace(")", "")
+        analysis_df = _print_roofline_analysis(
+            plot_name=plot_name,
+            df=perf_df,
+            peak_tflops=peak_tflops,
+            peak_bw_gbs=args.peak_bw_gbs,
+        )
+        bench_cfg = getattr(bench, "benchmarks", None)
+        bench_plot_name = getattr(bench_cfg, "plot_name", None)
+        if bench_plot_name is not None:
+            csv_path = Path(args.save_path) / f"{bench_plot_name}.csv"
+            analysis_df.to_csv(csv_path, index=False, float_format="%.6f")
