@@ -200,6 +200,13 @@ class cmake_build_ext(build_ext):
             cmake_args.append('-D{}={}'.format(
                 opt, "ON" if _is_enabled(opt) else "OFF"))
 
+        # Forward paged decode kernel config if set via environment variable.
+        # Example: VLLM_PAGED_DECODE_CONFIG=llama pip install .
+        _paged_decode_config = os.environ.get("VLLM_PAGED_DECODE_CONFIG", "")
+        if _paged_decode_config:
+            cmake_args.append(
+                '-DVLLM_PAGED_DECODE_CONFIG={}'.format(_paged_decode_config))
+
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
         # and plays more nicely with sccache.
@@ -323,7 +330,7 @@ class cmake_build_ext(build_ext):
                     # Continue with other libraries even if one fails
 
     def run(self):
-        self.build_temp = "build/temp"
+        self.build_temp = "build/temp_template"
         # First, run the standard build_ext command to compile the extensions
         super().run()
 
