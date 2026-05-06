@@ -28,7 +28,8 @@ void decode_policy_dispatch_func(
         false,
         "Paged decode kernel not compiled for this configuration. "
         "Rebuild with a kernel config that includes the required policy, "
-        "or use VLLM_PAGED_DECODE_CONFIG=.../kernel_configs/full.conf");
+        "or use "
+        "VLLM_PAGED_DECODE_CONFIG=.../kernel_configs/paged_decode_full.conf");
   }
 }
 

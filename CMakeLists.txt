@@ -91,7 +91,34 @@ endif()
 # Default to full config if not specified
 if(NOT VLLM_PAGED_DECODE_CONFIG OR "${VLLM_PAGED_DECODE_CONFIG}" STREQUAL "")
   set(VLLM_PAGED_DECODE_CONFIG
-      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/xe_2/kernel_configs/full.conf")
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/xe_2/kernel_configs/paged_decode_full.conf"
+  )
+endif()
+
+# KERNEL CONFIGURATION — controls which chunk prefill kernel variants are
+# compiled. Use model-specific configs to reduce compile time.
+set(VLLM_CHUNK_PREFILL_CONFIG
+    ""
+    CACHE
+      STRING
+      "Path to chunk prefill kernel config (empty=full, or: chunk_prefill_full/common/llama/qwen/deepseek)"
+)
+
+# Resolve shorthand config names to full paths
+if(VLLM_CHUNK_PREFILL_CONFIG AND NOT IS_ABSOLUTE "${VLLM_CHUNK_PREFILL_CONFIG}")
+  if(NOT VLLM_CHUNK_PREFILL_CONFIG MATCHES "\\.conf$")
+    set(VLLM_CHUNK_PREFILL_CONFIG "${VLLM_CHUNK_PREFILL_CONFIG}.conf")
+  endif()
+  set(VLLM_CHUNK_PREFILL_CONFIG
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/xe_2/kernel_configs/${VLLM_CHUNK_PREFILL_CONFIG}"
+  )
+endif()
+
+# Default to full config if not specified
+if(NOT VLLM_CHUNK_PREFILL_CONFIG OR "${VLLM_CHUNK_PREFILL_CONFIG}" STREQUAL "")
+  set(VLLM_CHUNK_PREFILL_CONFIG
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/xe_2/kernel_configs/chunk_prefill_full.conf"
+  )
 endif()
 
 message(STATUS "Kernel build configuration:")
@@ -107,6 +134,7 @@ message(
   STATUS "  XPU_SPECIFIC_KERNELS_ENABLED = ${XPU_SPECIFIC_KERNELS_ENABLED}")
 message(STATUS "  XPUMEM_ALLOCATOR_ENABLED     = ${XPUMEM_ALLOCATOR_ENABLED}")
 message(STATUS "  VLLM_PAGED_DECODE_CONFIG     = ${VLLM_PAGED_DECODE_CONFIG}")
+message(STATUS "  VLLM_CHUNK_PREFILL_CONFIG    = ${VLLM_CHUNK_PREFILL_CONFIG}")
 message(STATUS "")
 
 #

@@ -178,33 +178,6 @@ function(paged_decode_configure FILENAME_SUFFIX)
   # =============================================================================
   set(BUILD_TUPLES)
 
-<<<<<<< HEAD
-        # Skip combinations that have no corresponding policy defined
-        if(NOT IMPL_POLICY)
-          continue()
-        endif()
-
-        foreach(IMPL_KISCAUSAL ${L_BOOLS})
-          foreach(IMPL_KISLOCAL ${L_BOOLS})
-            foreach(IMPL_KISSINK ${L_BOOLS})
-              # Construct unique filename suffix: e.g., _q8_h64_fff
-              set(FILE_SUFFIX
-                  "_q${IMPL_QGROUP}_h${IMPL_HEADSIZE}_p${IMPL_PAGESIZE}_")
-              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
-              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
-              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
-
-              # Generate .cpp file from template
-              configure_file(${FILENAME_SUFFIX}.cpp.in
-                             "${FILENAME_SUFFIX}${FILE_SUFFIX}.cpp")
-
-              # Add to output list
-              list(
-                APPEND
-                GEN_KERNEL_SRCS
-                "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}${FILE_SUFFIX}.cpp"
-              )
-=======
   if(CONFIG_IS_FULL)
     # Full mode: generate all combinations (original behavior)
     foreach(IMPL_QGROUP ${qgroup_list})
@@ -219,7 +192,6 @@ function(paged_decode_configure FILENAME_SUFFIX)
                   "${IMPL_QGROUP}|${IMPL_HEADSIZE}|${IMPL_PAGESIZE}|${IMPL_KISCAUSAL}|${IMPL_KISLOCAL}|${IMPL_KISSINK}"
                 )
               endforeach()
->>>>>>> d9153fd (simplify template)
             endforeach()
           endforeach()
         endforeach()

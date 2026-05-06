@@ -1,6 +1,11 @@
 #include "fmha_xe2.h"
 #include "chunk_prefill_utils.hpp"
-#include "chunk_prefill_extern.hpp"
+// Use the generated extern header (only declares enabled policies)
+#if __has_include("chunk_prefill_extern_gen.hpp")
+  #include "chunk_prefill_extern_gen.hpp"
+#else
+  #include "chunk_prefill_extern.hpp"
+#endif
 
 using namespace cute;
 
