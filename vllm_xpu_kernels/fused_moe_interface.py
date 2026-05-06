@@ -10,6 +10,9 @@ except ImportError as e:
     FUSEDMOE_UNAVAILABLE_REASON = str(e)
     FUSEDMOE_AVAILABLE = False
 
+from ._mx_utils import (fp4_e2m1fn_x2_to_float, hp_from_1x128, hp_from_128x128,
+                        quant_fp8_act, quant_mxfp_act)
+
 
 def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
                          k, num_experts):
@@ -73,6 +76,21 @@ def fused_moe_activation(act_output, gemm1_output, activation):
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
+def _naive_fused_moe_activation(gemm1_output, activation):
+    if activation == "silu":
+        return torch.nn.functional.silu(gemm1_output)
+    elif activation == "gelu":
+        return torch.nn.functional.gelu(gemm1_output)
+    elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
+        gate, up = gemm1_output.chunk(2, dim=-1)
+        return torch.nn.functional.silu(gate) * up * 1.702 * 7.0
+    elif activation == "relu2_no_mul":
+        return torch.nn.functional.relu(gemm1_output).pow(2)
+    elif activation == "swiglustep":
+        gate, up = gemm1_output.chunk(2, dim=-1)
+        return torch.nn.functional.relu(gate - 7.0).sign() * up * 7.0
+    else:
+        raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
 def implement_zp(qweight):
     # change u4 to s4 to avoid zero point in gemm kernel
@@ -104,6 +122,127 @@ def implement_zp(qweight):
 
     return result
 
+def ref_fused_moe(recipe,
+                  x,
+                  w13,
+                  w13_scales,
+                  w13_bias,
+                  w2,
+                  w2_scales,
+                  w2_bias,
+                  expert_weights,
+                  expert_indices,
+                  num_per_tok,
+                  activation,
+                  num_experts,
+                  ep_rank=0,
+                  ep_size=1):
+
+    flat_expert_indices = expert_indices.view(-1)
+    flat_expert_weights = expert_weights.view(-1, 1)
+
+    expert_start_id = num_experts * ep_rank
+    expert_end_id = expert_start_id + num_experts
+    expert_cache = torch.zeros_like(x).to(torch.float32)
+    idxs = flat_expert_indices.argsort()
+    counts = flat_expert_indices.bincount().cpu().numpy()
+    tokens_per_expert = counts.cumsum()
+    token_idxs = idxs // num_per_tok
+
+    if recipe == "fp8block":
+        _q, _scale = quant_fp8_act(x)
+        x = hp_from_1x128(_q, _scale)
+    elif recipe == "mxfp8":
+        act_ori_shape = x.shape
+        w13_ori_shape = w13.shape
+        w2_ori_shape = w2.shape
+        _q, _scale = quant_mxfp_act(x, "mxfp8")
+        x = _q.float().reshape(-1, 32) * (_scale.reshape(-1, 1).float())
+        x = x.reshape(act_ori_shape)
+        w13 = w13.float().reshape(-1, 32) * (w13_scales.reshape(-1, 1).float())
+        w2 = w2.float().reshape(-1, 32) * (w2_scales.reshape(-1, 1).float())
+        w13 = w13.reshape(w13_ori_shape)
+        w2 = w2.reshape(w2_ori_shape)
+    elif recipe == "mxfp4":
+        act_ori_shape = x.shape
+        _q, _scale = quant_mxfp_act(x, "mxfp4")
+        x = fp4_e2m1fn_x2_to_float(_q).reshape(-1, 32) * (_scale.reshape(
+            -1, 1).float())
+        x = x.reshape(act_ori_shape)
+        w13_ori_shape = w13.shape
+        w2_ori_shape = w2.shape
+        w13 = fp4_e2m1fn_x2_to_float(w13).reshape(
+            -1, 32) * (w13_scales.reshape(-1, 1).float())
+        w2 = fp4_e2m1fn_x2_to_float(w2).reshape(-1, 32) * (w2_scales.reshape(
+            -1, 1).float())
+        w13 = w13.reshape(w13_ori_shape[:-1] + (w13_ori_shape[-1] * 2, ))
+        w2 = w2.reshape(w2_ori_shape[:-1] + (w2_ori_shape[-1] * 2, ))
+
+    for expert_id, end_idx in enumerate(tokens_per_expert):
+        start_idx = 0 if expert_id == 0 else tokens_per_expert[expert_id - 1]
+        if (start_idx == end_idx) or (expert_id
+                                      < expert_start_id) or (expert_id
+                                                             >= expert_end_id):
+            continue
+        exp_token_idxs = token_idxs[start_idx:end_idx]
+        expert_tokens = x[exp_token_idxs]
+
+        ### dequant weight13
+        expert_w13 = w13[expert_id, :, :]
+        if recipe == "fp8block":
+            expert_w13 = hp_from_128x128(w13[expert_id, :, :],
+                                         w13_scales[expert_id, :, :])
+        ###
+
+        w1, w3 = torch.split(expert_w13,
+                             int(list(expert_w13.shape)[0] / 2),
+                             dim=0)
+        if w13_bias is not None:
+            w1_bias, w3_bias = w13_bias[expert_id, :].chunk(2)
+        gemm1 = (expert_tokens.to(torch.float32) @ w1.T.to(torch.float32))
+        if w13_bias is not None:
+            gemm1 += w1_bias.to(torch.float32)
+
+        gate = _naive_fused_moe_activation(gemm1, activation)
+        up = (expert_tokens.to(torch.float32) @ w3.T.to(torch.float32))
+        if w13_bias is not None:
+            up += w3_bias.to(torch.float32)
+
+        ### quant act for gemm2 and dequant weight 2
+        gemm2_input = gate * up
+        expert_w2 = w2[expert_id, :, :]
+        if recipe == "fp8block":
+            expert_w2 = hp_from_128x128(w2[expert_id, :, :],
+                                        w2_scales[expert_id, :, :])
+            _q, _scale = quant_fp8_act(gemm2_input)
+            gemm2_input = hp_from_1x128(_q, _scale)
+        elif recipe == "mxfp8":
+            _q, _scale = quant_mxfp_act(gemm2_input, "mxfp8")
+            gemm2_input = _q.float().reshape(-1, 32) * (_scale.reshape(
+                -1, 1).float())
+            gemm2_input = gemm2_input.reshape(_q.shape)
+        elif recipe == "mxfp4":
+            _q, _scale = quant_mxfp_act(gemm2_input, "mxfp4")
+            gemm2_input = fp4_e2m1fn_x2_to_float(_q).reshape(
+                -1, 32) * (_scale.reshape(-1, 1).float())
+            gemm2_input = gemm2_input.reshape(_q.shape[:-1] +
+                                              (_q.shape[-1] * 2, ))
+        ###
+
+        expert_out = ((gemm2_input) @ expert_w2.T.to(torch.float32))
+
+        if w2_bias is not None:
+            expert_out += w2_bias[expert_id, :].to(torch.float32)
+
+        expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
+        expert_cache.scatter_reduce_(0,
+                                     exp_token_idxs.view(-1, 1).repeat(
+                                         1, x.shape[-1]),
+                                     expert_out,
+                                     reduce='sum')
+    if recipe in ["bf16", "fp16"]:
+        expert_cache = expert_cache.to(x.dtype)
+    return expert_cache
 class XpuFusedMoe:
     def __init__(
         self,
@@ -302,7 +441,8 @@ def xpu_fused_moe(hidden_states,
                   output=None,
                   is_fp8=False,
                   is_int4=False,
-                  is_mxfp4=False):
+                  is_mxfp4=False,
+                  is_mxfp8=False):
     '''
     hidden_states: [num_rows, hidden_size]
     w13: [num_experts, 2*inter_size, hidden_size]
@@ -324,12 +464,30 @@ def xpu_fused_moe(hidden_states,
     num_experts: int
     is_int4: bool
     is_mxfp4: bool
+    is_mxfp8: bool
     '''
     if output is None:
         output = torch.empty_like(hidden_states)
     else:
         assert output.shape == hidden_states.shape, \
             "output shape must be the same as hidden_states shape"
+    if is_mxfp8:
+        output = ref_fused_moe(recipe="mxfp8",
+                               x=hidden_states,
+                               w13=w13,
+                               w13_scales=w13_scales,
+                               w13_bias=w13_bias,
+                               w2=w2,
+                               w2_scales=w2_scales,
+                               w2_bias=w2_bias,
+                               expert_weights=topk_weights,
+                               expert_indices=topk_ids,
+                               num_per_tok=n_experts_per_token,
+                               activation=activation,
+                               num_experts=num_experts,
+                               ep_rank=ep_rank,
+                               ep_size=ep_size)
+        return output
 
     # 4bits support [E, N, K]
     # other types [E, K, N]
