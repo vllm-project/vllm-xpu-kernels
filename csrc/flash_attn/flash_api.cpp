@@ -117,7 +117,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     const float softcap,
     const bool return_softmax,
     std::optional<at::Generator> gen_,
-    std::optional<int> num_splits) {
+    std::optional<int> num_splits,
+    bool mix_batch) {
   auto q_type = q.scalar_type();
   auto k_type = k.scalar_type();
   TORCH_CHECK(
@@ -196,8 +197,12 @@ std::vector<at::Tensor> mha_varlen_fwd(
   }
 
   at::Tensor seqlens_k = is_paged ? *seqused_k : cu_seqlens_k;
+  bool is_prefill_only = (!mix_batch && max_seqlen_q > 1) | !is_paged;
 
-  if (!is_paged) {
+  if (is_prefill_only) {
+    if (!out_.has_value()) {
+      out = torch::empty_like(q);
+    }
     // Non-paged: always use chunk_prefill for everything
     std::optional<const at::Tensor> no_mask = std::nullopt;
     cutlass_chunk_prefill_interface(
@@ -225,6 +230,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
         softmax_lse_opt,
         no_mask);
   } else if (max_seqlen_q > 1) {
+    if (!out_.has_value()) {
+      out = torch::empty_like(q);
+    }
     int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
     at::Tensor seq_lens_q = cu_seqlens_q.slice(0, 1, batch_size + 1) -
                             cu_seqlens_q.slice(0, 0, batch_size);
@@ -409,7 +417,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float softmax_scale, Tensor? softmax_sink, bool zero_tensors, "
       "bool is_causal, int window_size_left, int window_size_right, float "
       "softcap, bool return_softmax, "
-      "Generator? gen, int? num_splits) -> Tensor[]");
+      "Generator? gen, int? num_splits, bool mix_batch) -> Tensor[]");
   ops.impl(
       "varlen_fwd",
       torch::kXPU,
