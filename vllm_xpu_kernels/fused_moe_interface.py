@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
+
 import torch
 
 try:
@@ -12,6 +14,19 @@ except ImportError as e:
 
 from ._mx_utils import (fp4_e2m1fn_x2_to_float, hp_from_1x128, hp_from_128x128,
                         quant_fp8_act, quant_mxfp_act)
+
+REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
+
+
+def _is_env_enabled(env_name: str, default: str = "OFF") -> bool:
+    value = os.environ.get(env_name, default).strip().upper()
+    return value not in ("0", "OFF", "FALSE", "NO", "N", "F")
+
+
+def _should_use_ref_fused_moe(is_mxfp8: bool) -> bool:
+    if is_mxfp8:
+        return True
+    return _is_env_enabled(REF_FUSED_MOE_ENV)
 
 
 def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
@@ -247,6 +262,7 @@ def ref_fused_moe(recipe,
     if recipe in ["bf16", "fp16"]:
         expert_cache = expert_cache.to(x.dtype)
     return expert_cache
+
 class XpuFusedMoe:
     def __init__(
         self,
@@ -446,7 +462,8 @@ def xpu_fused_moe(hidden_states,
                   is_fp8=False,
                   is_int4=False,
                   is_mxfp4=False,
-                  is_mxfp8=False):
+                  is_mxfp8=False,
+                  is_block_fp8=False):
     '''
     hidden_states: [num_rows, hidden_size]
     w13: [num_experts, 2*inter_size, hidden_size]
@@ -469,28 +486,43 @@ def xpu_fused_moe(hidden_states,
     is_int4: bool
     is_mxfp4: bool
     is_mxfp8: bool
+    is_block_fp8: bool
     '''
     if output is None:
         output = torch.empty_like(hidden_states)
     else:
         assert output.shape == hidden_states.shape, \
             "output shape must be the same as hidden_states shape"
-    if is_mxfp8:
-        out = ref_fused_moe(recipe="mxfp8",
-                               x=hidden_states,
-                               w13=w13,
-                               w13_scales=w13_scales,
-                               w13_bias=w13_bias,
-                               w2=w2,
-                               w2_scales=w2_scales,
-                               w2_bias=w2_bias,
-                               expert_weights=topk_weights,
-                               expert_indices=topk_ids,
-                               num_per_tok=n_experts_per_token,
-                               activation=activation,
-                               num_experts=num_experts,
-                               ep_rank=ep_rank,
-                               ep_size=ep_size)
+    if _should_use_ref_fused_moe(is_mxfp8):
+        def get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8):
+            if is_mxfp8:
+                return "mxfp8"
+            elif is_block_fp8:
+                return "fp8block"
+            elif is_mxfp4:
+                return "mxfp4"
+            elif is_int4:
+                return "int4"
+            elif is_fp8:
+                return "fp8"
+            else:
+                return "bf16"
+        recipe = get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8)
+        out = ref_fused_moe(recipe=recipe,
+                            x=hidden_states,
+                            w13=w13,
+                            w13_scales=w13_scales,
+                            w13_bias=w13_bias,
+                            w2=w2,
+                            w2_scales=w2_scales,
+                            w2_bias=w2_bias,
+                            expert_weights=topk_weights,
+                            expert_indices=topk_ids,
+                            num_per_tok=n_experts_per_token,
+                            activation=activation,
+                            num_experts=num_experts,
+                            ep_rank=ep_rank,
+                            ep_size=ep_size)
         output.copy_(out)
         return output
 
