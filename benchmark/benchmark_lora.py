@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 
 import argparse
 import copy
@@ -15,8 +16,10 @@ from typing import Any, Callable, Optional
 import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
-from utils import ArgPool, Bench, CudaGraphBenchParams
+from utils import ArgPool, Bench, CudaGraphBenchParams, bootstrap_benchmark_env
 from weight_shapes import WEIGHT_SHAPES
+
+bootstrap_benchmark_env(__file__)
 
 from tests.lora.xpu_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 

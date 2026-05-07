@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+import random
+
 import pytest
 import torch
 
 from tests.allclose_default import get_default_atol, get_default_rtol
-from tests.ops.activation_op import (FastGELU, GeluAndMul, MulAndSilu, NewGELU,
-                                     QuickGELU, SiluAndMul)
+from tests.ops.activation_op import (FastGELU, FatreluAndMul, GeluAndMul,
+                                     MulAndSilu, NewGELU, QuickGELU,
+                                     Relu2NoMul, SiluAndMul)
 from tests.utils import opcheck, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -24,8 +27,9 @@ MINI_PYTEST_PARAMS = {
 }
 
 
-@pytest.mark.parametrize("activation",
-                         ["silu_and_mul", "mul_and_silu", "gelu", "gelu_tanh"])
+@pytest.mark.parametrize(
+    "activation",
+    ["silu_and_mul", "mul_and_silu", "gelu", "gelu_tanh", "fatrelu"])
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -55,20 +59,32 @@ def test_act_and_mul(
     elif activation == "gelu_tanh":
         layer = GeluAndMul(approximate="tanh")
         fn = torch.ops._C.gelu_tanh_and_mul
+    elif activation == "fatrelu":
+        threshold = random.uniform(0, 1)
+        layer = FatreluAndMul(threshold)
+        fn = torch.ops._C.fatrelu_and_mul
     out = layer(x)
     ref_out = layer.forward_native(x)
 
-    torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-3)
+    if activation == "fatrelu":
+        torch.testing.assert_close(out, ref_out, atol=0.0, rtol=0.0)
+    else:
+        torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-3)
 
     d = x.shape[-1] // 2
     output_shape = (x.shape[:-1] + (d, ))
     out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-    opcheck(fn, (out, x))
+    if activation == "fatrelu":
+        opcheck(fn, (out, x, threshold))
+    else:
+        opcheck(fn, (out, x))
 
 
-@pytest.mark.parametrize("activation", [(FastGELU, torch.ops._C.gelu_fast),
-                                        (NewGELU, torch.ops._C.gelu_new),
-                                        (QuickGELU, torch.ops._C.gelu_quick)])
+@pytest.mark.parametrize("activation",
+                         [(FastGELU, torch.ops._C.gelu_fast),
+                          (NewGELU, torch.ops._C.gelu_new),
+                          (QuickGELU, torch.ops._C.gelu_quick),
+                          (Relu2NoMul, torch.ops._C.relu2_no_mul)])
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)

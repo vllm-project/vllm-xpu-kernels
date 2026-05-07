@@ -283,7 +283,11 @@ class XeFMHAFwdSplitKVKernel {
       if constexpr (is_var_len) {
         auto qo_cumulative = s.seq_len_qo.cumulative_length;
 
-        offset_q = s.num_heads_q * s.head_size_qk * qo_cumulative[idx_b];
+        // Use Q's actual per-token stride (get<0>(dQ)) instead of assuming
+        // the packed value num_heads_q * head_size_qk so non-contiguous Q
+        // tensors (e.g. strided slices, permuted/transposed views, slices
+        // of a wider buffer) are read correctly.
+        offset_q = get<0>(p.dQ) * qo_cumulative[idx_b];
         offset_o = s.num_heads_q * s.head_size_vo * num_kv_splits *
                    qo_cumulative[idx_b];
         offset_exp_sums = s.num_heads_q * num_kv_splits * qo_cumulative[idx_b];
@@ -323,7 +327,10 @@ class XeFMHAFwdSplitKVKernel {
       // Per-sequence split decision: short sequences are treated as
       // single-split even when num_kv_splits > 1, avoiding precision
       // loss from the split-reduce roundtrip.
-      constexpr int kMinBlocksForSplit = 128;
+      // Scale threshold with tile width: smaller tiles (p64) have fewer
+      // SGs per WG, so splitting becomes beneficial at fewer blocks.
+      constexpr int tile_n = get<1>(TileShapeQK{});
+      constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
       bool is_single_split =
           (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
 
@@ -355,7 +362,18 @@ class XeFMHAFwdSplitKVKernel {
       auto ptrExp_sums = p.exp_sums + offset_exp_sums;
       auto ptrMax_logits = p.max_logits + offset_max_logits;
 
-      auto layout_q = make_ordered_layout(shape_Q, Step<_1, _0, _2, _3>{});
+      // Q layout uses the tensor's actual head stride (get<2>(dQ)) so
+      // non-contiguous Q (e.g. permuted heads or sliced from a wider
+      // head-dim buffer) is read correctly. The GQA grouping splits the
+      // num_heads_q dim into (num_heads_kv outer, head_group_q inner) which
+      // assumes heads are regularly strided by q_stride_heads.
+      auto layout_q = make_layout(
+          shape_Q,
+          make_stride(
+              get<2>(p.dQ),
+              _1{},
+              static_cast<int>(head_group_q) * get<2>(p.dQ),
+              get<3>(p.dQ)));
       auto layout_k = make_layout(
           shape_K, make_stride(get<0>(p.dK), _1{}, get<2>(p.dK), get<3>(p.dK)));
       auto layout_v = make_layout(
@@ -620,6 +638,14 @@ class ReduceSplitK {
       int num_blocks_per_split =
           cute::ceil_div(windowed_k_blocks, num_kv_splits);
 
+      // Mirror the FMHA kernel's is_single_split decision so we only
+      // read split slots that were actually written.
+      constexpr int tile_n = get<1>(typename FMHAKernel_::TileShapeQK{});
+      constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
+      bool is_single_split =
+          (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
+      int effective_splits = is_single_split ? 1 : num_kv_splits;
+
       int offset_o = 0, offset_o_accum = 0;
       int offset_exp_sums = 0, offset_max_logits = 0;
 
@@ -693,7 +719,7 @@ class ReduceSplitK {
           cutlass::platform::numeric_limits<ElementLSE>::lowest()};
       ElementLSE global_exp_sums{0};
       // only first subgroup participates
-      if (thr_id < num_kv_splits &&
+      if (thr_id < effective_splits &&
           thr_id * num_blocks_per_split < windowed_k_blocks) {
         ElementLSE cur_max_logit = max_logits(seq_idx, thr_id, head_q, l_coord);
         global_max_logits = sycl::max(global_max_logits, cur_max_logit);
@@ -718,7 +744,7 @@ class ReduceSplitK {
            idx += SGPerWG::value * intel::sg_size) {
         ElementLSE acc = 0;
         global_exp_sums = 0;
-        for (int i = 0; i < num_kv_splits; ++i) {
+        for (int i = 0; i < effective_splits; ++i) {
           if (i * num_blocks_per_split >= windowed_k_blocks) {
             break;
           }

@@ -75,6 +75,12 @@ def _build_custom_ops() -> bool:
     return True
 
 
+def _is_enabled(env_name: str) -> bool:
+    """Check if a build option env var is enabled (default ON)."""
+    val = os.environ.get(env_name, "ON").strip().upper()
+    return val not in ("0", "OFF", "FALSE", "NO")
+
+
 class CMakeExtension(Extension):
 
     def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
@@ -175,6 +181,23 @@ class cmake_build_ext(build_ext):
         # Pass the python path to cmake so it can reuse the build dependencies
         # on subsequent calls to python.
         cmake_args += ['-DVLLM_PYTHON_PATH={}'.format(":".join(sys.path))]
+
+        # Forward kernel build options to cmake so option() defaults are
+        # overridden when the user sets environment variables.
+        _kernel_options = [
+            "BUILD_SYCL_TLA_KERNELS",
+            "VLLM_XPU_ENABLE_XE2",
+            "VLLM_XPU_ENABLE_XE_DEFAULT",
+            "BASIC_KERNELS_ENABLED",
+            "FA2_KERNELS_ENABLED",
+            "MOE_KERNELS_ENABLED",
+            "GDN_KERNELS_ENABLED",
+            "XPU_SPECIFIC_KERNELS_ENABLED",
+            "XPUMEM_ALLOCATOR_ENABLED",
+        ]
+        for opt in _kernel_options:
+            cmake_args.append('-D{}={}'.format(
+                opt, "ON" if _is_enabled(opt) else "OFF"))
 
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
@@ -431,6 +454,10 @@ package_data = {
     ]
 }
 
+_SCM_TAG_REGEX = (r'^(?:[\w-]+-)?'
+                   r'(?P<version>[vV]?\d+(?:\.\d+)*'
+                   r'(?:[._-]?(?:dev|a|b|rc|alpha|beta)\d*)?)$')
+_SCM_DESCRIBE_CMD = "git describe --dirty --tags --long --match 'v*'"
 
 def get_vllm_version() -> str:
     # Allow overriding the version.
@@ -439,7 +466,11 @@ def get_vllm_version() -> str:
         os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
         return get_version(write_to="_version.py")
 
-    version = get_version(write_to="_version.py")
+    version = get_version(
+        write_to="_version.py",
+        git_describe_command=_SCM_DESCRIBE_CMD,
+        tag_regex=_SCM_TAG_REGEX,
+    )
 
     return version
 
@@ -498,21 +529,37 @@ class precompiled_build_ext(build_ext):
 
 ext_modules = []
 
-# List of additional shared libraries to install (intermediate build artifacts)
-additional_libraries = {
-    "attn_kernels_xe_2": "/csrc/xpu/attn/xe_2",
-    "gdn_attn_kernels_xe_2": "/csrc/xpu/gdn_attn/xe_2",
-    "grouped_gemm_xe_default": "/csrc/xpu/grouped_gemm/xe_default",
-    "grouped_gemm_xe_2": "/csrc/xpu/grouped_gemm/xe_2",
-}
+# List of additional shared libraries to install (intermediate build artifacts).
+# Only include libraries whose cmake targets will actually be built, based on
+# the architecture and TLA kernel options.
+additional_libraries = {}
+if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
+    if _is_enabled("VLLM_XPU_ENABLE_XE2"):
+        if _is_enabled("FA2_KERNELS_ENABLED"):
+            additional_libraries["attn_kernels_xe_2"] = "/csrc/xpu/attn/xe_2"
+        if _is_enabled("GDN_KERNELS_ENABLED"):
+            additional_libraries["gdn_attn_kernels_xe_2"] = (
+                "/csrc/xpu/gdn_attn/xe_2")
+        if _is_enabled("MOE_KERNELS_ENABLED"):
+            additional_libraries["grouped_gemm_xe_2"] = (
+                "/csrc/xpu/grouped_gemm/xe_2")
+    if _is_enabled("VLLM_XPU_ENABLE_XE_DEFAULT") and _is_enabled(
+            "MOE_KERNELS_ENABLED"):
+        additional_libraries["grouped_gemm_xe_default"] = (
+            "/csrc/xpu/grouped_gemm/xe_default")
 
 if _build_custom_ops():
-    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
-    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fa2_C"))
-    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
-    ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._xpu_C"))
-    ext_modules.append(
-        CMakeExtension(name="vllm_xpu_kernels.xpumem_allocator"))
+    if _is_enabled("BASIC_KERNELS_ENABLED"):
+        ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
+    if _is_enabled("FA2_KERNELS_ENABLED"):
+        ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fa2_C"))
+    if _is_enabled("MOE_KERNELS_ENABLED"):
+        ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
+    if _is_enabled("XPU_SPECIFIC_KERNELS_ENABLED"):
+        ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._xpu_C"))
+    if _is_enabled("XPUMEM_ALLOCATOR_ENABLED"):
+        ext_modules.append(
+            CMakeExtension(name="vllm_xpu_kernels.xpumem_allocator"))
 
 if ext_modules:
     cmdclass = {

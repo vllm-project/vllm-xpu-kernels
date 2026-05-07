@@ -65,7 +65,8 @@ template <
     class ProblemShape_,
     class CollectiveMainloop_,
     class CollectiveEpilogue_,
-    class TileScheduler_>
+    class TileScheduler_,
+    bool SoftmaxLSE_ = false>
 class XeFMHAFwdKernel {
  public:
   //
@@ -117,6 +118,7 @@ class XeFMHAFwdKernel {
   static constexpr bool CausalMask = CollectiveMainloop::CausalMask;
   static constexpr bool LocalMask = CollectiveMainloop::LocalMask;
   static constexpr bool Sink = CollectiveEpilogue::Sink;
+  static constexpr bool SoftmaxLSE = SoftmaxLSE_;
   using ElementSink = typename CollectiveEpilogue::ElementSink;
 
   // Kernel level shared memory storage
@@ -144,6 +146,10 @@ class XeFMHAFwdKernel {
 
     // softmax sink
     const ElementSink* ptr_S;
+
+    // softmax_lse output [total_seqlen_q, num_heads_q] (nullptr if disabled)
+    float* softmax_lse;
+    int lse_stride;  // = num_heads_q
   };
   using KernelParams = KernelArguments;
 
@@ -283,17 +289,13 @@ class XeFMHAFwdKernel {
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       if constexpr (is_var_len) {
-        int group_heads_q = s.num_heads_q / s.num_heads_kv;
         auto qo_cumulative = s.seq_len_qo.cumulative_length;
         auto kv_cumulative = s.seq_len_kv.cumulative_length;
-        offset_q = s.num_heads_q * s.head_size_qk * qo_cumulative[idx_b];
-        offset_k = PagedKV
-                       ? 0
-                       : s.num_heads_kv * s.head_size_qk * kv_cumulative[idx_b];
-        offset_v = PagedKV
-                       ? 0
-                       : s.num_heads_kv * s.head_size_vo * kv_cumulative[idx_b];
-        offset_o = s.num_heads_q * s.head_size_vo * qo_cumulative[idx_b];
+        // Use actual seq strides for offset computation
+        offset_q = get<0>(p.dQ) * qo_cumulative[idx_b];
+        offset_k = PagedKV ? 0 : get<0>(p.dK) * kv_cumulative[idx_b];
+        offset_v = PagedKV ? 0 : get<1>(p.dV) * kv_cumulative[idx_b];
+        offset_o = get<0>(p.dO) * qo_cumulative[idx_b];
       }
 
       auto batch_dim_qo = is_var_len ? 1 : s.batch;
@@ -314,18 +316,10 @@ class XeFMHAFwdKernel {
       auto dcV = const_cast<ElementV*>(p.V + offset_v);
       auto dcO = const_cast<ElementO*>(p.O + offset_o);
 
-      auto layout_q = is_var_len
-                          ? make_ordered_layout(shape_Q, Step<_2, _0, _1, _3>{})
-                          : make_layout(shape_Q, p.dQ);
-      auto layout_k = (PagedKV || is_var_len)
-                          ? make_ordered_layout(shape_K, Step<_2, _0, _1, _3>{})
-                          : make_layout(shape_K, p.dK);
-      auto layout_v = (PagedKV || is_var_len)
-                          ? make_ordered_layout(shape_V, Step<_0, _2, _1, _3>{})
-                          : make_layout(shape_V, p.dV);
-      auto layout_o = is_var_len
-                          ? make_ordered_layout(shape_O, Step<_2, _0, _1, _3>{})
-                          : make_layout(shape_O, p.dO);
+      auto layout_q = make_layout(shape_Q, p.dQ);
+      auto layout_k = make_layout(shape_K, p.dK);
+      auto layout_v = make_layout(shape_V, p.dV);
+      auto layout_o = make_layout(shape_O, p.dO);
 
       Tensor Q = make_tensor(make_gmem_ptr(dcQ), layout_q);
       Tensor K = make_tensor(make_gmem_ptr(dcK), layout_k);
@@ -355,6 +349,42 @@ class XeFMHAFwdKernel {
           thr_id,
           seq_len,
           full_tile_offset);
+
+      // return softmax_lse
+      if constexpr (SoftmaxLSE) {
+        static_assert(
+            size<3>(typename TiledMMAPV::ThrLayoutVMNK{}) == 1,
+            "softmax_lse requires ReduceK == 1 in TiledMMAPV");
+        if (get<1>(blk_qv) == 0 && (thr_id % intel::sg_size == 0)) {
+          using ElementA = typename FragA::value_type;
+          constexpr float kLn2 = 0.6931471805599453f;
+          int q_tile_start = blk_q * get<0>(TileShapeQK{});
+          int qo_cumul = 0;
+          if constexpr (is_var_len) {
+            qo_cumul = s.seq_len_qo.cumulative_length[idx_b];
+          }
+
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < tA_sum.size(); i++) {
+            int q_in_batch = q_tile_start + q_offset_sg + i;
+            if (q_in_batch < seq_len_qo) {
+              ElementA sum_val = tA_sum(i);
+              // Include sink contribution for LSE computation
+              if constexpr (Sink) {
+                constexpr double kLog2e = 1.4426950408889634074;
+                ElementSink s_head = p.ptr_S[head_q];
+                sum_val += sycl::native::exp2(
+                    static_cast<ElementA>(s_head * kLog2e) - tA_max(i));
+              }
+              float lse = static_cast<float>(tA_max(i)) * kLn2 +
+                          sycl::log(static_cast<float>(sum_val));
+              int global_q = qo_cumul + q_in_batch;
+              p.softmax_lse[global_q * p.lse_stride + head_q] = lse;
+            }
+          }
+        }
+      }
+
       if constexpr (
           !is_empty_v<MainloopSharedStorage> &&
           !is_empty_v<EpilogueSharedStorage>) {

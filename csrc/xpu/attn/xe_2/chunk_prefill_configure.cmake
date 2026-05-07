@@ -5,8 +5,18 @@ function(fmha_forward_configure FILENAME_SUFFIX)
   set(BOOL_FLAG_false "f")
   set(BOOL_FLAG_true "t")
   set(policy_list
-      "chunk_policy_head64" "chunk_policy_head96" "chunk_policy_head128"
-      "chunk_policy_head192" "chunk_policy_head256")
+      "chunk_policy_head64"
+      "chunk_policy_head96"
+      "chunk_policy_head128"
+      "chunk_policy_head192"
+      "chunk_policy_head256"
+      "chunk_policy_head512"
+      "chunk_policy_head64_b16"
+      "chunk_policy_head96_b16"
+      "chunk_policy_head128_b16"
+      "chunk_policy_head192_b16"
+      "chunk_policy_head256_b16"
+      "chunk_policy_head512_b16")
 
   set(IMPL_KV_T "fp16")
 
@@ -16,18 +26,30 @@ function(fmha_forward_configure FILENAME_SUFFIX)
       foreach(IMPL_KISCAUSAL ${L_BOOLS})
         foreach(IMPL_KISLOCAL ${L_BOOLS})
           foreach(IMPL_KISSINK ${L_BOOLS})
-            set(FILE_SUFFIX "${IMPL_POLICY}_")
-            set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISPAGED}}")
-            set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
-            set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
-            set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
-            configure_file(${FILENAME_SUFFIX}.cpp.in
-                           "${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
-            list(
-              APPEND
-              GEN_KERNEL_SRCS
-              "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp"
-            )
+            # softmax_lse is only supported on the (Paged=false, Local=false,
+            # Sink=false) specialization. For all other combos force
+            # IMPL_KISLSE=false to keep the number of generated TUs bounded.
+            set(LSE_BOOLS "false")
+            if(IMPL_KISPAGED STREQUAL "false"
+               AND IMPL_KISLOCAL STREQUAL "false"
+               AND IMPL_KISSINK STREQUAL "false")
+              set(LSE_BOOLS ${L_BOOLS})
+            endif()
+            foreach(IMPL_KISLSE ${LSE_BOOLS})
+              set(FILE_SUFFIX "${IMPL_POLICY}_")
+              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISPAGED}}")
+              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
+              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
+              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
+              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLSE}}")
+              configure_file(${FILENAME_SUFFIX}.cpp.in
+                             "${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
+              list(
+                APPEND
+                GEN_KERNEL_SRCS
+                "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp"
+              )
+            endforeach()
           endforeach()
         endforeach()
       endforeach()

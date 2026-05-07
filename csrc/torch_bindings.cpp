@@ -21,9 +21,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
+  // FIXME: torch op check consider input & weight is mutable in some ut
+  // cases. so we make it mutable here.
   ops.def(
       "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) "
-      "-> ()");
+      "-> "
+      "()");
   ops.impl("rms_norm", torch::kXPU, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
@@ -32,26 +35,69 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 
+  // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8).
+  ops.def(
+      "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual) -> ()");
+  ops.impl(
+      "rms_norm_dynamic_per_token_quant",
+      torch::kXPU,
+      &rms_norm_dynamic_per_token_quant);
+
+  // Fused RMSNorm + per-column-block quantization (FP8 or INT8).
+  ops.def(
+      "rms_norm_per_block_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual, int group_size, "
+      "bool is_scale_transposed) -> ()");
+  ops.impl("rms_norm_per_block_quant", torch::kXPU, &rms_norm_per_block_quant);
+
+  // Fused RMSNorm + static FP8 quantization.
+  ops.def(
+      "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
+      "Tensor scale, float epsilon) -> ()");
+  ops.impl(
+      "rms_norm_static_fp8_quant", torch::kXPU, &rms_norm_static_fp8_quant);
+
+  // In-place fused Add + RMSNorm + static FP8 quantization.
+  ops.def(
+      "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! residual, Tensor weight, "
+      "Tensor scale, float epsilon) -> ()");
+  ops.impl(
+      "fused_add_rms_norm_static_fp8_quant",
+      torch::kXPU,
+      &fused_add_rms_norm_static_fp8_quant);
+
   // activation ops
-  ops.def("silu_and_mul(Tensor! out, Tensor! input) -> ()");
+  ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
   ops.impl("silu_and_mul", torch::kXPU, &silu_and_mul);
 
-  ops.def("mul_and_silu(Tensor! out, Tensor! input) -> ()");
+  // Fused SiLU + Mul + FP8 Quantization
+  ops.def(
+      "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
+  ops.impl("silu_and_mul_quant", torch::kXPU, &silu_and_mul_quant);
+
+  ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kXPU, &mul_and_silu);
 
-  ops.def("gelu_and_mul(Tensor! out, Tensor! input) -> ()");
+  ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_and_mul", torch::kXPU, &gelu_and_mul);
 
-  ops.def("gelu_tanh_and_mul(Tensor! out, Tensor! input) -> ()");
+  ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_tanh_and_mul", torch::kXPU, &gelu_tanh_and_mul);
 
-  ops.def("gelu_fast(Tensor! out, Tensor! input) -> ()");
+  ops.def("fatrelu_and_mul(Tensor! out, Tensor! input, float threshold) -> ()");
+  ops.impl("fatrelu_and_mul", torch::kXPU, &fatrelu_and_mul);
+
+  ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_fast", torch::kXPU, &gelu_fast);
 
-  ops.def("gelu_new(Tensor! out, Tensor! input) -> ()");
+  ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_new", torch::kXPU, &gelu_new);
 
-  ops.def("gelu_quick(Tensor! out, Tensor! input) -> ()");
+  ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_quick", torch::kXPU, &gelu_quick);
 
   // pos_embedding
@@ -60,6 +106,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                 Tensor!? key, int head_size,"
       "                 Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kXPU, &rotary_embedding);
+
+  // Fused QK RMSNorm + RoPE
+  ops.def(
+      "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
+      "int num_heads_k, int num_heads_v, int head_dim, float eps, "
+      "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
+      "bool is_neox, Tensor position_ids) -> ()");
+  ops.impl("fused_qk_norm_rope", torch::kXPU, &fused_qk_norm_rope);
 
   // Compute FP8 quantized tensor for given scaling factor.
   ops.def(
@@ -106,6 +160,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "limit=7.0) "
       "-> ()");
   ops.impl("swigluoai_and_mul", torch::kXPU, &swigluoai_and_mul);
+
+  // relu2_no_mul
+  ops.def("relu2_no_mul(Tensor! out, Tensor! input) -> ()");
+  ops.impl("relu2_no_mul", torch::kXPU, &relu2_no_mul);
 
   // swiglustep_and_mul
   ops.def(
@@ -202,6 +260,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "swap_blocks(Tensor src, Tensor! dst,"
       "            int block_size_in_bytes, Tensor block_mapping) -> ()");
   cache_ops.impl("swap_blocks", torch::kXPU, &swap_blocks);
+  // Batch swap: copies N (src_ptr, dst_ptr, size) triples in one call.
+  // The target XPU device is auto-inferred from the device pointer.
+  cache_ops.def(
+      "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
+      "                  Tensor sizes) -> ()");
+  cache_ops.impl("swap_blocks_batch", torch::kCPU, &swap_blocks_batch);
   cache_ops.def(
       "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache,"
       "Tensor slot_mapping, int quant_block_size, str scale_fmt) -> ()");

@@ -21,7 +21,7 @@ struct gated_delta_rule_kernel {
       const T* v,
       const T* b,
       const T* a,
-      const T* A_log,
+      const float* A_log,
       const T* dt_bias,
       StateT* ssm_state,
       const int ssm_state_stride_0,
@@ -250,7 +250,7 @@ struct gated_delta_rule_kernel {
   const T* v;
   const T* b;
   const T* a;
-  const T* A_log;
+  const float* A_log;
   const T* dt_bias;
   StateT* ssm_state;
   const int ssm_state_stride_0;
@@ -274,7 +274,7 @@ void kernel_launcher(
     const T* v,
     const T* b,
     const T* a,
-    const T* A_log,
+    const float* A_log,
     const T* dt_bias,
     StateT* ssm_state,
     const int ssm_state_stride_0,
@@ -349,6 +349,18 @@ void gated_delta_rule(
   const int ssm_state_stride_0 = ssm_state.stride(0);
 
   TORCH_CHECK(num_v_heads % num_k_heads == 0);
+  TORCH_CHECK(
+      A_log.scalar_type() == at::kFloat,
+      "A_log dtype must be float32, but got ",
+      A_log.scalar_type());
+  TORCH_CHECK(
+      dt_bias.scalar_type() == core_attn_out.scalar_type(),
+      "dt_bias dtype must match core_attn_out dtype (float16/bfloat16), but "
+      "got dt_bias=",
+      dt_bias.scalar_type(),
+      ", core_attn_out=",
+      core_attn_out.scalar_type());
+
   TORCH_CHECK(head_k_dim % sub_group_size == 0);
   const int k_bucket_size = head_k_dim / sub_group_size;
 
@@ -361,7 +373,7 @@ void gated_delta_rule(
       reinterpret_cast<scalar_t*>(v.data_ptr()),                   \
       reinterpret_cast<scalar_t*>(b.data_ptr()),                   \
       reinterpret_cast<scalar_t*>(a.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(A_log.data_ptr()),               \
+      reinterpret_cast<float*>(A_log.data_ptr()),                  \
       reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
       reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),     \
       ssm_state_stride_0,                                          \

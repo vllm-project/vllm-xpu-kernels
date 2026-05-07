@@ -331,6 +331,8 @@ struct top_k_only_kernel {
       for (int e = 0; e < VEC_SIZE; ++e) {
         float logit = local_data[e];
 
+        if (!sycl::isfinite(logit)) continue;
+
         if (logit < low) {
           low = logit;
         }
@@ -351,6 +353,8 @@ struct top_k_only_kernel {
       for (int e = 0; e < remained_vec_size; ++e) {
         float logit = local_data[e];
 
+        if (!sycl::isfinite(logit)) continue;
+
         if (logit < low) {
           low = logit;
         }
@@ -366,8 +370,13 @@ struct top_k_only_kernel {
     pivot = low;
     max_softmax_value = high;
 
+    if (!sycl::isfinite(max_softmax_value)) {
+      max_softmax_value = INFINITY;
+    }
+
     // topk
-    if (top_k_value != vocab_size) {
+    if ((top_k_value != vocab_size) &&
+        (sycl::isfinite(low) && sycl::isfinite(high))) {
       do {
         int pivot_count_local = 0;
 
@@ -984,6 +993,8 @@ struct top_k_top_p_kernel {
       for (int e = 0; e < VEC_SIZE; ++e) {
         float logit = local_data[e];
 
+        if (!sycl::isfinite(logit)) continue;
+
         if (logit < low_k) {
           low_k = logit;
         }
@@ -1004,6 +1015,8 @@ struct top_k_top_p_kernel {
       for (int e = 0; e < remained_vec_size; ++e) {
         float logit = local_data[e];
 
+        if (!sycl::isfinite(logit)) continue;
+
         if (logit < low_k) {
           low_k = logit;
         }
@@ -1019,8 +1032,13 @@ struct top_k_top_p_kernel {
     pivot_k = low_k;
     max_softmax_value = high_k;
 
+    if (!sycl::isfinite(max_softmax_value)) {
+      max_softmax_value = INFINITY;
+    }
+
     // topk
-    if (top_k_value != vocab_size) {
+    if ((top_k_value != vocab_size) &&
+        (sycl::isfinite(low_k) && sycl::isfinite(high_k))) {
       int pivot_count_k = top_k_value;
       do {
         int pivot_count_local = 0;

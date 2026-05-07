@@ -7,6 +7,7 @@
 #include <c10/util/Float8_e5m2.h>
 
 #include "quantization/fp8/quant_utils.h"
+#include "quantization/utils.h"
 
 using namespace at;
 
@@ -19,7 +20,7 @@ inline float thread_max_vec(
     int const tid,
     int const step) {
   // Vectorized input/output to better utilize memory bandwidth.
-  using vec4_t = fp8::vec4_t<scalar_t>;
+  using vec4_t = vec4_t<scalar_t>;
   vec4_t const* vectorized_in = reinterpret_cast<vec4_t const*>(input);
 
   int64_t const num_vec_elems = num_elems >> 2;
@@ -29,13 +30,13 @@ inline float thread_max_vec(
   for (int64_t i = tid; i < num_vec_elems; i += step) {
     vec4_t in_vec = vectorized_in[i];
     absmax_val =
-        sycl::max(absmax_val, sycl::fabs(static_cast<float>(in_vec.x)));
+        sycl::max(absmax_val, sycl::fabs(static_cast<float>(in_vec.val[0])));
     absmax_val =
-        sycl::max(absmax_val, sycl::fabs(static_cast<float>(in_vec.y)));
+        sycl::max(absmax_val, sycl::fabs(static_cast<float>(in_vec.val[1])));
     absmax_val =
-        sycl::max(absmax_val, sycl::fabs(static_cast<float>(in_vec.z)));
+        sycl::max(absmax_val, sycl::fabs(static_cast<float>(in_vec.val[2])));
     absmax_val =
-        sycl::max(absmax_val, sycl::fabs(static_cast<float>(in_vec.w)));
+        sycl::max(absmax_val, sycl::fabs(static_cast<float>(in_vec.val[3])));
   }
 
   // Handle the remaining elements if num_elems is not divisible by 4

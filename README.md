@@ -42,7 +42,7 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 ## Requirements
 
 - **Python**: 3.9 – 3.12
-- **PyTorch**: 2.10.0+xpu
+- **PyTorch**: 2.11.0+xpu
 - **oneAPI**: 2025.3 ([Base Toolkit download](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html))
 - **CMake**: ≥ 3.26
 - **Ninja** build system

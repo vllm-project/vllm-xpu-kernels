@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 from __future__ import annotations
 
 import random
@@ -7,6 +8,9 @@ import time
 
 import torch
 from tabulate import tabulate
+from utils import bootstrap_benchmark_env
+
+bootstrap_benchmark_env(__file__)
 
 from tests import register_ops as ops
 from tests.utils import (STR_DTYPE_TO_TORCH_DTYPE,

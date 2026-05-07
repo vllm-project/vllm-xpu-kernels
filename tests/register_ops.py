@@ -26,6 +26,11 @@ def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 
 
+def silu_and_mul_quant(out: torch.Tensor, input: torch.Tensor,
+                       scale: torch.Tensor) -> None:
+    torch.ops._C.silu_and_mul_quant(out, input, scale)
+
+
 def gelu_fast(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.gelu_fast(out, input)
 
@@ -48,6 +53,11 @@ def gelu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
 
 def gelu_tanh_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.gelu_tanh_and_mul(out, input)
+
+
+def fatrelu_and_mul(out: torch.Tensor, input: torch.Tensor,
+                    threshold: float) -> None:
+    torch.ops._C.fatrelu_and_mul(out, input, threshold)
 
 
 def rotary_embedding(
@@ -297,6 +307,11 @@ def swigluoai_and_mul(
     torch.ops._C.swigluoai_and_mul(out, input, alpha, limit)
 
 
+def relu2_no_mul(out: torch.Tensor, input: torch.Tensor) -> None:
+    """Relu2 (squared ReLU) activation function without mul."""
+    torch.ops._C.relu2_no_mul(out, input)
+
+
 def swiglustep_and_mul(
     out: torch.Tensor,
     input: torch.Tensor,
@@ -333,9 +348,22 @@ def int4_gemm_w4a8(input: torch.Tensor,
 def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
              out_dtype: Optional[torch.dtype],
              scale_act: Optional[torch.Tensor],
-             scale_wei: Optional[torch.Tensor], bias: Optional[torch.Tensor]):
+             scale_wei: Optional[torch.Tensor],
+             bias: Optional[torch.Tensor] = None):
     return torch.ops._xpu_C.fp8_gemm(input, weight, out_dtype, scale_act,
                                      scale_wei, bias)
+
+
+def fp4_gemm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    scale_act: torch.Tensor,
+    scale_wei: torch.Tensor,
+    out_dtype: Optional[torch.dtype],
+    bias: Optional[torch.Tensor] = None,
+):
+    return torch.ops._xpu_C.fp4_gemm(input, weight, scale_act, scale_wei,
+                                     out_dtype, bias)
 
 
 def fp8_gemm_w8a16(input: torch.Tensor, weight: torch.Tensor,
@@ -482,6 +510,17 @@ def swap_blocks(
     """
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_size_in_bytes,
                                        block_mapping)
+
+
+def swap_blocks_batch(
+    src_ptrs: torch.Tensor,
+    dst_ptrs: torch.Tensor,
+    sizes: torch.Tensor,
+) -> None:
+    """Batch version of swap_blocks: copies N independent (src, dst, size)
+    triples in a single call. The target XPU device is auto-inferred from the
+    device-side pointers in src_ptrs/dst_ptrs."""
+    torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
 
 
 def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,

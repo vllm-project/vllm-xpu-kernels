@@ -13,28 +13,16 @@ except ImportError as e:
 
 def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
                          k, num_experts):
-    # expert_token_count_ = torch.tensor(expert_token_count,
-    #                                    dtype=torch.int64,
-    #                                    device=input_A.device)
-    # if bias is not None:
-    #     bias = bias.repeat_interleave(expert_token_count_, dim=0).float()
-
-    def exclusive_prefix_sum(arr):
-        prefix = [0]
-        for i, x in enumerate(arr):
-            prefix.append(prefix[-1] + x)
-        return prefix
-
-    expert_offset = torch.tensor(exclusive_prefix_sum(expert_token_count),
-                                 dtype=torch.int64,
-                                 device="xpu")
+    num_rows_per_expert = torch.tensor(expert_token_count,
+                                        dtype=torch.int32,
+                                        device="xpu")
     torch.ops._xpu_C.cutlass_grouped_gemm_interface(
         ptr_A=input_A,
         ptr_B=input_B,
         ptr_scales=None,
         ptr_bias=bias,
         ptr_D=output,
-        expert_first_token_offset=expert_offset,
+        rows_per_expert=num_rows_per_expert,
         N=n,
         K=k,
         num_experts=num_experts,
@@ -45,19 +33,13 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
 def cutlass_grouped_gemm_xe2(input_A, input_B, scales, bias, output,
                              num_rows_per_expert, n, k, num_experts, is_B_int4,
                              is_B_mxfp4):
-    expert_first_token_offset = torch.cat([
-        torch.tensor([0],
-                     dtype=num_rows_per_expert.dtype,
-                     device=num_rows_per_expert.device),
-        torch.cumsum(num_rows_per_expert, dim=0)
-    ]).to(torch.int64)
     torch.ops._xpu_C.cutlass_grouped_gemm_interface(
         ptr_A=input_A,
         ptr_B=input_B,
         ptr_scales=scales,
         ptr_bias=bias,
         ptr_D=output,
-        expert_first_token_offset=expert_first_token_offset,
+        rows_per_expert=num_rows_per_expert,
         N=n,
         K=k,
         num_experts=num_experts,
@@ -107,6 +89,185 @@ def implement_zp(qweight):
 
     return result
 
+class XpuFusedMoe:
+    def __init__(
+        self,
+        w13,
+        w13_scales,
+        w13_bias,
+        w2,
+        w2_scales,
+        w2_bias,
+        n_experts_per_token,
+        activation,
+        num_experts,
+        ep_rank=0,
+        ep_size=1,
+        expert_map=None,
+        is_fp8=False,
+        is_int4=False,
+        is_mxfp4=False
+    ):
+        # 4bits support [E, N, K]
+        # other types [E, K, N]
+        if not is_int4 and not is_mxfp4:
+            self.inter_size = w13.shape[-1] // 2
+        else:
+            self.inter_size = w13.shape[-2] // 2
+
+        assert w13.is_contiguous() and w2.is_contiguous()
+
+        # FIXME: move this to vllm
+        if is_int4 and not hasattr(w13, 'xpu_fused_moe'):
+            w13_tmp = torch.empty_like(w13)
+            w2_tmp = torch.empty_like(w2)
+            for i in range(num_experts):
+                w13_tmp[i] = implement_zp(w13[i])
+                w2_tmp[i] = implement_zp(w2[i])
+            w13_tmp = w13_tmp.contiguous()
+            w2_tmp = w2_tmp.contiguous()
+            w13.data = w13_tmp
+            w2.data = w2_tmp
+            w13.xpu_fused_moe = True
+
+        self.w13 = w13
+        self.w2 = w2
+
+        if not is_fp8 and not is_int4 and not is_mxfp4:
+            self.gemm1_scales = None
+            self.gemm2_scales = None
+        else:
+            self.gemm1_scales = w13_scales
+            self.gemm2_scales = w2_scales
+
+        self.w13_bias = w13_bias
+        self.w2_bias = w2_bias
+
+        self.n_experts_per_token = n_experts_per_token
+        self.activation = activation
+        self.inter_size_scale = 2 if self.activation == "relu2_no_mul" else 1
+        self.num_experts = num_experts
+        self.ep_rank = ep_rank
+        self.ep_size = ep_size
+        self.is_fp8 = is_fp8
+        self.is_int4 = is_int4
+        self.is_mxfp4 = is_mxfp4
+
+        if self.activation == "silu":
+            self.act_func = torch.ops._C.silu_and_mul
+        elif self.activation == "gelu":
+            self.act_func = torch.ops._C.gelu_and_mul
+        elif self.activation == "swigluoai" \
+            or ("SWIGLUOAI" in str(self.activation)):
+            self.act_func = torch.ops._C.swigluoai_and_mul
+        elif self.activation == "relu2_no_mul":
+            self.act_func = torch.ops._C.relu2_no_mul
+        elif self.activation == "swiglustep":
+            self.act_func = torch.ops._C.swiglustep_and_mul
+        else:
+            raise ValueError(
+                f"Unsupported FusedMoe activation: {self.activation}.")
+
+        self.expert_map = expert_map
+        if self.expert_map is None and self.ep_size > 1:
+            self.expert_map = torch.empty((self.num_experts * self.ep_size),
+                                    dtype=torch.int32,
+                                    device=w13.device)
+            torch.ops._moe_C.init_expert_map(
+                self.expert_map,
+                self.num_experts,
+                self.ep_rank,
+                self.ep_size)
+
+        if self.expert_map is not None:
+            self.total_experts_num = self.expert_map.shape[0]
+        else:
+            self.total_experts_num = self.num_experts * self.ep_size
+        self.local_experts_num = self.num_experts
+
+    def apply(
+        self,
+        output,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        expert_map=None,
+    ):      
+        num_rows, hidden_size = hidden_states.shape
+        num_moe_inputs = self.n_experts_per_token * num_rows
+        
+        if expert_map is None and self.ep_size > 1:
+            expert_map = self.expert_map
+
+        remapped_hidden_states = torch.empty(
+            (num_rows * self.n_experts_per_token, hidden_size),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device)
+        rows_per_expert = torch.zeros((self.num_experts),
+                                                dtype=torch.int32,
+                                                device=hidden_states.device)
+        unpermuted_row_to_permuted_row = torch.empty(
+            (num_rows, self.n_experts_per_token),
+            dtype=torch.int32,
+            device=hidden_states.device)
+
+        torch.ops._moe_C.remap_hidden_states(
+            hidden_states=hidden_states,
+            hidden_states_scales=None,
+            remapped_hidden_states=remapped_hidden_states,
+            remapped_hidden_states_scales=None,
+            expert_map=expert_map,
+            rows_per_expert=rows_per_expert,
+            unpermuted_row_to_permuted_row=unpermuted_row_to_permuted_row,
+            topk_ids=topk_ids,
+            total_experts_num=self.total_experts_num,
+            local_experts_num=self.local_experts_num)
+
+        ########### gemm1 ##################
+        gemm1_output = torch.empty((num_moe_inputs, 2 * self.inter_size),
+                                dtype=hidden_states.dtype,
+                                device=hidden_states.device)
+        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
+            ptr_A=remapped_hidden_states,
+            ptr_B=self.w13,
+            ptr_scales=self.gemm1_scales,
+            ptr_bias=self.w13_bias,
+            ptr_D=gemm1_output,
+            rows_per_expert=rows_per_expert,
+            N=2 * self.inter_size,
+            K=hidden_size,
+            num_experts=self.num_experts,
+            is_B_int4=self.is_int4,
+            is_B_mxfp4=self.is_mxfp4)
+
+        # act
+        act_output = torch.empty(
+            (num_moe_inputs, self.inter_size * self.inter_size_scale),
+            dtype=gemm1_output.dtype,
+            device=gemm1_output.device)
+        self.act_func(act_output, gemm1_output)
+
+        ########### gemm2 ##################
+        gemm2_output = torch.empty((num_moe_inputs, hidden_size),
+                                dtype=hidden_states.dtype,
+                                device=hidden_states.device)
+
+        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
+            ptr_A=act_output,
+            ptr_B=self.w2,
+            ptr_scales=self.gemm2_scales,
+            ptr_bias=self.w2_bias,
+            ptr_D=gemm2_output,
+            rows_per_expert=rows_per_expert,
+            N=hidden_size,
+            K=self.inter_size * self.inter_size_scale,
+            num_experts=self.num_experts,
+            is_B_int4=self.is_int4,
+            is_B_mxfp4=self.is_mxfp4)
+
+        torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
+                                    unpermuted_row_to_permuted_row,
+                                    self.num_experts)
 
 def xpu_fused_moe(hidden_states,
                   w13,
@@ -177,11 +338,8 @@ def xpu_fused_moe(hidden_states,
         w2.data = w2_tmp
         w13.xpu_fused_moe = True
 
-    # TODO: will all integrated in Cpp func. Temporary expose before gemm fusion
     num_rows, hidden_size = list(hidden_states.shape)
     num_moe_inputs = n_experts_per_token * num_rows
-    if topk_ids.dtype == torch.int32:
-        topk_ids = topk_ids.to(torch.int64)
     gemm1_output = torch.empty((num_moe_inputs, 2 * inter_size),
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
@@ -210,8 +368,8 @@ def xpu_fused_moe(hidden_states,
         (num_rows * n_experts_per_token, hidden_size),
         dtype=hidden_states.dtype,
         device=hidden_states.device)
-    expert_first_token_offset = torch.zeros((num_experts + 1),
-                                            dtype=torch.int64,
+    rows_per_expert = torch.zeros((num_experts),
+                                            dtype=torch.int32,
                                             device=hidden_states.device)
     unpermuted_row_to_permuted_row = torch.empty(
         (num_rows, n_experts_per_token),
@@ -224,7 +382,7 @@ def xpu_fused_moe(hidden_states,
         remapped_hidden_states=remapped_hidden_states,
         remapped_hidden_states_scales=None,
         expert_map=expert_map,
-        expert_first_token_offset=expert_first_token_offset,
+        rows_per_expert=rows_per_expert,
         unpermuted_row_to_permuted_row=unpermuted_row_to_permuted_row,
         topk_ids=topk_ids,
         total_experts_num=total_experts_num,
@@ -239,15 +397,16 @@ def xpu_fused_moe(hidden_states,
         ptr_scales=gemm1_scales,
         ptr_bias=w13_bias,
         ptr_D=gemm1_output,
-        expert_first_token_offset=expert_first_token_offset,
+        rows_per_expert=rows_per_expert,
         N=2 * inter_size,
         K=hidden_size,
         num_experts=num_experts,
         is_B_int4=is_int4,
         is_B_mxfp4=is_mxfp4)
 
+    inter_size_scale = 2 if activation == "relu2_no_mul" else 1
     # act
-    act_output = torch.empty((num_moe_inputs, inter_size),
+    act_output = torch.empty((num_moe_inputs, inter_size * inter_size_scale),
                              dtype=gemm1_output.dtype,
                              device=gemm1_output.device)
     if activation == "silu":
@@ -256,6 +415,8 @@ def xpu_fused_moe(hidden_states,
         torch.ops._C.gelu_and_mul(act_output, gemm1_output)
     elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
         torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
+    elif activation == "relu2_no_mul":
+        torch.ops._C.relu2_no_mul(act_output, gemm1_output)
     elif activation == "swiglustep":
         torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
     else:
@@ -274,15 +435,15 @@ def xpu_fused_moe(hidden_states,
         ptr_scales=gemm2_scales,
         ptr_bias=w2_bias,
         ptr_D=gemm2_output,
-        expert_first_token_offset=expert_first_token_offset,
+        rows_per_expert=rows_per_expert,
         N=hidden_size,
-        K=inter_size,
+        K=inter_size * inter_size_scale,
         num_experts=num_experts,
         is_B_int4=is_int4,
         is_B_mxfp4=is_mxfp4)
 
     torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
                                 unpermuted_row_to_permuted_row,
-                                expert_first_token_offset, num_experts)
+                                num_experts)
 
     return output

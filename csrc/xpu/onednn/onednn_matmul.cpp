@@ -1,4 +1,5 @@
 #include <vector>
+#include "fp4_gemm_w4a4.h"
 #include "fp8_gemm_w8a8.h"
 #include "fp8_gemm_w8a16.h"
 #include "int4_gemm_w4a16.h"
@@ -7,6 +8,10 @@
 inline bool is_supported_fp8(at::ScalarType t) {
   return (t == at::ScalarType::Float8_e5m2) ||
          (t == at::ScalarType::Float8_e4m3fn);
+}
+
+inline bool is_supported_fp4(at::ScalarType t) {
+  return t == at::ScalarType::Float4_e2m1fn_x2;
 }
 
 torch::Tensor check_and_create_output_tensor(
@@ -90,6 +95,30 @@ torch::Tensor fp8_gemm_w8a16(
                               ? B_scale_.value()
                               : at::ones({1}, B.options().dtype(A.dtype()));
   oneDNN::dnnl_matmul_w8a16_fp8(result, A, B, is_nt, bias_, B_scale);
+  return result;
+}
+
+torch::Tensor fp4_gemm(
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    const torch::Tensor& A_scale,
+    const torch::Tensor& B_scale,
+    std::optional<c10::ScalarType> out_dtype,
+    const std::optional<torch::Tensor>& bias) {
+  const at::DeviceGuard device_guard(A.device());
+  torch::Tensor result = check_and_create_output_tensor(A, B, out_dtype);
+  auto a_st = A.scalar_type();
+  auto b_st = B.scalar_type();
+  TORCH_CHECK(
+      is_supported_fp4(a_st) && is_supported_fp4(b_st) && a_st == b_st,
+      "input and weight must be f4_e2m1x2 or f4_e2m1x2 for fp4 matmul");
+  TORCH_CHECK(
+      result.scalar_type() == torch::kFloat16 ||
+          result.scalar_type() == torch::kBFloat16,
+      "output must be float16 or bfloat16 for fp4 matmul");
+  // check if nt format
+  bool is_nt = B.strides()[B.dim() - 2] == 1;
+  oneDNN::dnnl_matmul_w4a4_fp4(result, A, B, is_nt, bias, A_scale, B_scale);
   return result;
 }
 

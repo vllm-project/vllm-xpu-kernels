@@ -11,17 +11,19 @@ using namespace cute;
 #cmakedefine01 IMPL_KISCAUSAL
 #cmakedefine01 IMPL_KISSINK
 #cmakedefine01 IMPL_KISLOCAL
+#cmakedefine01 IMPL_KISLSE
 // clang-format on
 
-#define INSTANTIATE_KERNEL()             \
-  template void policy_dispatch_impl<    \
-      IMPL_POLICY,                       \
-      static_cast<bool>(IMPL_KISPAGED),  \
-      static_cast<bool>(IMPL_KISCAUSAL), \
-      static_cast<bool>(IMPL_KISLOCAL),  \
-      static_cast<bool>(IMPL_KISSINK)>(  \
-      sycl::queue & queue,               \
-      CutlassQKType& cuQKType,           \
+#define INSTANTIATE_KERNEL()                \
+  template void policy_dispatch_impl<       \
+      IMPL_POLICY,                          \
+      static_cast<bool>(IMPL_KISPAGED),     \
+      static_cast<bool>(IMPL_KISCAUSAL),    \
+      static_cast<bool>(IMPL_KISLOCAL),     \
+      static_cast<bool>(IMPL_KISSINK),      \
+      static_cast<bool>(IMPL_KISLSE)>(      \
+      sycl::queue & queue,                  \
+      CutlassQKType& cuQKType,              \
       const chunk_prefill_args_t& args);
 
 INSTANTIATE_KERNEL()

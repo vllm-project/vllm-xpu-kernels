@@ -32,35 +32,67 @@ function(paged_decode_configure FILENAME_SUFFIX)
   # the policies defined in paged_decode_policy.hpp
 
   # Q-group size 8 policies
+  set(policy_8_64_16 "decode_policy_q8_h64_p16")
+  set(policy_8_96_16 "decode_policy_q8_h96_p16")
+  set(policy_8_128_16 "decode_policy_q8_h128_p16")
+  set(policy_8_192_16 "decode_policy_q8_h192_p16")
+  set(policy_8_256_16 "decode_policy_q8_h256_p16")
+  set(policy_8_512_16 "decode_policy_q8_h512_p16")
+
+  set(policy_8_64_32 "decode_policy_q8_h64_p32")
+  set(policy_8_96_32 "decode_policy_q8_h96_p32")
+  set(policy_8_128_32 "decode_policy_q8_h128_p32")
+  set(policy_8_192_32 "decode_policy_q8_h192_p32")
+  set(policy_8_256_32 "decode_policy_q8_h256_p32")
+  set(policy_8_512_32 "decode_policy_q8_h512_p32")
+
   set(policy_8_64_64 "decode_policy_q8_h64_p64")
   set(policy_8_96_64 "decode_policy_q8_h96_p64")
   set(policy_8_128_64 "decode_policy_q8_h128_p64")
   set(policy_8_192_64 "decode_policy_q8_h192_p64")
   set(policy_8_256_64 "decode_policy_q8_h256_p64")
+  set(policy_8_512_64 "decode_policy_q8_h512_p64")
 
   set(policy_8_64_128 "decode_policy_q8_h64_p128")
   set(policy_8_96_128 "decode_policy_q8_h96_p128")
   set(policy_8_128_128 "decode_policy_q8_h128_p128")
   set(policy_8_192_128 "decode_policy_q8_h192_p128")
   set(policy_8_256_128 "decode_policy_q8_h256_p128")
+  set(policy_8_512_128 "decode_policy_q8_h512_p128")
 
   # Q-group size 16 policies
+  set(policy_16_64_16 "decode_policy_q16_h64_p16")
+  set(policy_16_96_16 "decode_policy_q16_h96_p16")
+  set(policy_16_128_16 "decode_policy_q16_h128_p16")
+  set(policy_16_192_16 "decode_policy_q16_h192_p16")
+  set(policy_16_256_16 "decode_policy_q16_h256_p16")
+  set(policy_16_512_16 "decode_policy_q16_h512_p16")
+
+  set(policy_16_64_32 "decode_policy_q16_h64_p32")
+  set(policy_16_96_32 "decode_policy_q16_h96_p32")
+  set(policy_16_128_32 "decode_policy_q16_h128_p32")
+  set(policy_16_192_32 "decode_policy_q16_h192_p32")
+  set(policy_16_256_32 "decode_policy_q16_h256_p32")
+  set(policy_16_512_32 "decode_policy_q16_h512_p32")
+
   set(policy_16_64_64 "decode_policy_q16_h64_p64")
   set(policy_16_96_64 "decode_policy_q16_h96_p64")
   set(policy_16_128_64 "decode_policy_q16_h128_p64")
   set(policy_16_192_64 "decode_policy_q16_h192_p64")
   set(policy_16_256_64 "decode_policy_q16_h256_p64")
+  set(policy_16_512_64 "decode_policy_q16_h512_p64")
 
   set(policy_16_64_128 "decode_policy_q16_h64_p128")
   set(policy_16_96_128 "decode_policy_q16_h96_p128")
   set(policy_16_128_128 "decode_policy_q16_h128_p128")
   set(policy_16_192_128 "decode_policy_q16_h192_p128")
   set(policy_16_256_128 "decode_policy_q16_h256_p128")
+  set(policy_16_512_128 "decode_policy_q16_h512_p128")
 
   # Configuration space dimensions
   set(qgroup_list "8" "16")
-  set(headsize_list "64" "96" "128" "192" "256")
-  set(pagesize_list "64" "128")
+  set(headsize_list "64" "96" "128" "192" "256" "512")
+  set(pagesize_list "16" "32" "64" "128")
 
   # =============================================================================
   # Generate Kernel Sources

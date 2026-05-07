@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 
 import itertools
 from argparse import ArgumentParser
@@ -7,6 +8,9 @@ from typing import Optional
 
 import torch
 import triton
+from utils import bootstrap_benchmark_env
+
+bootstrap_benchmark_env(__file__)
 
 from tests.ops.topk_op import (fused_topk_sigmoid, fused_topk_softmax,
                                topk_sigmoid, topk_softmax)

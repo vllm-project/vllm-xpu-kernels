@@ -123,8 +123,9 @@ class TcLimitedFormatter:
                     elif i > limit_array and i < len(val) - limit_array:
                         continue
 
-                ret = f"{ret}x{self.format_tc_common(\
-                    current_value, limit_array)}"
+                _formatted = self.format_tc_common(
+                    current_value, limit_array)
+                ret = f"{ret}x{_formatted}"
 
             ret = f"{ret}]"
             if limit_str is not None and len(ret) > limit_str:
@@ -343,13 +344,19 @@ def get_model_config(model_name: str, tp_size: int = 1):
     config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     model_arch = config.architectures[0] if config.architectures else "Unknown"
 
+    # For VL / multimodal models whose top-level config wraps a text_config,
+    # unwrap early so all downstream attribute accesses work uniformly.
+    if not hasattr(config, 'hidden_size') and hasattr(config, 'text_config'):
+        config = config.text_config
+
     if model_arch == "DbrxForCausalLM":
         original_num_groups = config.ffn_config.moe_num_experts
         original_intermediate_size = config.ffn_config.ffn_hidden_size
     elif model_arch == "JambaForCausalLM":
         original_num_groups = config.num_experts
         original_intermediate_size = config.intermediate_size
-    elif model_arch in ["Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"]:
+    elif model_arch in ["Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM", 
+                        "Qwen3_5MoeForConditionalGeneration"]:
         original_num_groups = config.num_experts
         original_intermediate_size = config.moe_intermediate_size
     elif model_arch in ["DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM"]:
