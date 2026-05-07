@@ -29,6 +29,21 @@ def _should_use_ref_fused_moe(is_mxfp8: bool) -> bool:
     return _is_env_enabled(REF_FUSED_MOE_ENV)
 
 
+def _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8):
+    if is_mxfp8:
+        return "mxfp8"
+    elif is_block_fp8:
+        return "fp8block"
+    elif is_mxfp4:
+        return "mxfp4"
+    elif is_int4:
+        return "int4"
+    elif is_fp8:
+        return "fp8"
+    else:
+        return "bf16"
+
+
 def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
                          k, num_experts):
     num_rows_per_expert = torch.tensor(expert_token_count,
@@ -280,7 +295,9 @@ class XpuFusedMoe:
         expert_map=None,
         is_fp8=False,
         is_int4=False,
-        is_mxfp4=False
+        is_mxfp4=False,
+        is_mxfp8=False,
+        is_block_fp8=False
     ):
         # 4bits support [E, N, K]
         # other types [E, K, N]
@@ -326,6 +343,11 @@ class XpuFusedMoe:
         self.is_fp8 = is_fp8
         self.is_int4 = is_int4
         self.is_mxfp4 = is_mxfp4
+        self.is_mxfp8 = is_mxfp8
+        self.is_block_fp8 = is_block_fp8
+        self.use_ref = _should_use_ref_fused_moe(is_mxfp8)
+        self.recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
+                                   is_block_fp8)
 
         if self.activation == "silu":
             self.act_func = torch.ops._C.silu_and_mul
@@ -367,6 +389,25 @@ class XpuFusedMoe:
         topk_ids,
         expert_map=None,
     ):      
+        if self.use_ref:
+            out = ref_fused_moe(recipe=self.recipe,
+                                x=hidden_states,
+                                w13=self.w13,
+                                w13_scales=self.gemm1_scales,
+                                w13_bias=self.w13_bias,
+                                w2=self.w2,
+                                w2_scales=self.gemm2_scales,
+                                w2_bias=self.w2_bias,
+                                expert_weights=topk_weights,
+                                expert_indices=topk_ids,
+                                num_per_tok=self.n_experts_per_token,
+                                activation=self.activation,
+                                num_experts=self.num_experts,
+                                ep_rank=self.ep_rank,
+                                ep_size=self.ep_size)
+            output.copy_(out)
+            return
+
         num_rows, hidden_size = hidden_states.shape
         num_moe_inputs = self.n_experts_per_token * num_rows
         
@@ -494,20 +535,8 @@ def xpu_fused_moe(hidden_states,
         assert output.shape == hidden_states.shape, \
             "output shape must be the same as hidden_states shape"
     if _should_use_ref_fused_moe(is_mxfp8):
-        def get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8):
-            if is_mxfp8:
-                return "mxfp8"
-            elif is_block_fp8:
-                return "fp8block"
-            elif is_mxfp4:
-                return "mxfp4"
-            elif is_int4:
-                return "int4"
-            elif is_fp8:
-                return "fp8"
-            else:
-                return "bf16"
-        recipe = get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8)
+        recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
+                             is_block_fp8)
         out = ref_fused_moe(recipe=recipe,
                             x=hidden_states,
                             w13=w13,
