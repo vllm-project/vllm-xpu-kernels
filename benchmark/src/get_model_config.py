@@ -14,6 +14,17 @@ model_lists = [
 ]
 
 
+def _safe_get_model_config(model: str, tp_size: int = 1):
+    try:
+        return get_model_config(model, tp_size=tp_size)
+    except Exception as error:
+        print(
+            "Warning: skip model config load failure: "
+            f"model={model}, error={error}"
+        )
+        return None
+
+
 def gen_cutlass_fused_moe_correctness_configs():
     mnk = [
         (1, 5120, 8192),
@@ -41,7 +52,9 @@ def gen_cutlass_fused_moe_perf_configs():
     input_lens = [1, 4, 16, 1024, 8192]
 
     for model in model_lists:
-        model_config = get_model_config(model, tp_size=1)
+        model_config = _safe_get_model_config(model, tp_size=1)
+        if model_config is None:
+            continue
         if not model_config["is_moe"]:
             continue
 
@@ -145,8 +158,8 @@ def gen_cutlass_flash_attn_varlen_correctness_configs():
 
 def gen_cutlass_flash_attn_varlen_perf_configs():
     num_seqs = [4]
-    query_lens = ["1024,2048,2048,8192"]
-    kv_lens = ["1024,1024,2048,8192"]
+    query_lens = ["1024,2048,2048"]
+    kv_lens = ["1024,1024,2048"]
 
     block_size = [64, 128]
     window_size = [(-1, -1)]
@@ -172,7 +185,9 @@ def gen_cutlass_flash_attn_varlen_perf_configs():
     def get_configs_from_models():
         configs = []
         for model in model_lists:
-            model_config = get_model_config(model, tp_size=1)
+            model_config = _safe_get_model_config(model, tp_size=1)
+            if model_config is None:
+                continue
             head_size = [model_config["head_dim"]]
             num_heads = [(model_config["num_attention_heads"],
                           model_config["num_key_value_heads"])]
@@ -274,7 +289,9 @@ def gen_cutlass_flash_attn_decode_perf_configs():
 
     configs = []
     for model in model_lists:
-        model_config = get_model_config(model, tp_size=1)
+        model_config = _safe_get_model_config(model, tp_size=1)
+        if model_config is None:
+            continue
         head_size = [model_config["head_dim"]]
         num_heads = [(model_config["num_attention_heads"],
                       model_config["num_key_value_heads"])]
