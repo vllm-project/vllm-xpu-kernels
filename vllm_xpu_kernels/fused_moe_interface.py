@@ -153,6 +153,8 @@ def ref_fused_moe(recipe,
         _q, _scale = quant_fp8_act(x)
         x = hp_from_1x128(_q, _scale)
     elif recipe == "mxfp8":
+        w13 = w13.transpose(1, 2).contiguous()
+        w2 = w2.transpose(1, 2).contiguous()
         act_ori_shape = x.shape
         w13_ori_shape = w13.shape
         w2_ori_shape = w2.shape
@@ -472,7 +474,7 @@ def xpu_fused_moe(hidden_states,
         assert output.shape == hidden_states.shape, \
             "output shape must be the same as hidden_states shape"
     if is_mxfp8:
-        output = ref_fused_moe(recipe="mxfp8",
+        out = ref_fused_moe(recipe="mxfp8",
                                x=hidden_states,
                                w13=w13,
                                w13_scales=w13_scales,
@@ -487,6 +489,7 @@ def xpu_fused_moe(hidden_states,
                                num_experts=num_experts,
                                ep_rank=ep_rank,
                                ep_size=ep_size)
+        output.copy_(out)
         return output
 
     # 4bits support [E, N, K]
