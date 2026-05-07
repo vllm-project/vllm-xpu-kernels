@@ -161,6 +161,8 @@ def ref_fused_moe(recipe,
         _q, _scale = quant_mxfp_act(x, "mxfp8")
         x = _q.float().reshape(-1, 32) * (_scale.reshape(-1, 1).float())
         x = x.reshape(act_ori_shape)
+        w13_scales = w13_scales.view(torch.float8_e8m0fnu)
+        w2_scales = w2_scales.view(torch.float8_e8m0fnu)
         w13 = w13.float().reshape(-1, 32) * (w13_scales.reshape(-1, 1).float())
         w2 = w2.float().reshape(-1, 32) * (w2_scales.reshape(-1, 1).float())
         w13 = w13.reshape(w13_ori_shape)
