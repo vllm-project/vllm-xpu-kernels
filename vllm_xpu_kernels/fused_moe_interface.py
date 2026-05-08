@@ -345,9 +345,11 @@ class XpuFusedMoe:
         self.is_mxfp4 = is_mxfp4
         self.is_mxfp8 = is_mxfp8
         self.is_block_fp8 = is_block_fp8
-        self.use_ref = _should_use_ref_fused_moe(is_mxfp8)
         self.recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
                                    is_block_fp8)
+        self._apply_impl = (self._apply_ref
+                            if _should_use_ref_fused_moe(is_mxfp8)
+                            else self._apply_kernel)
 
         if self.activation == "silu":
             self.act_func = torch.ops._C.silu_and_mul
@@ -388,26 +390,43 @@ class XpuFusedMoe:
         topk_weights,
         topk_ids,
         expert_map=None,
-    ):      
-        if self.use_ref:
-            out = ref_fused_moe(recipe=self.recipe,
-                                x=hidden_states,
-                                w13=self.w13,
-                                w13_scales=self.gemm1_scales,
-                                w13_bias=self.w13_bias,
-                                w2=self.w2,
-                                w2_scales=self.gemm2_scales,
-                                w2_bias=self.w2_bias,
-                                expert_weights=topk_weights,
-                                expert_indices=topk_ids,
-                                num_per_tok=self.n_experts_per_token,
-                                activation=self.activation,
-                                num_experts=self.num_experts,
-                                ep_rank=self.ep_rank,
-                                ep_size=self.ep_size)
-            output.copy_(out)
-            return
+    ):
+        self._apply_impl(output, hidden_states, topk_weights, topk_ids,
+                         expert_map)
 
+    def _apply_ref(
+        self,
+        output,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        expert_map=None,
+    ):
+        out = ref_fused_moe(recipe=self.recipe,
+                            x=hidden_states,
+                            w13=self.w13,
+                            w13_scales=self.gemm1_scales,
+                            w13_bias=self.w13_bias,
+                            w2=self.w2,
+                            w2_scales=self.gemm2_scales,
+                            w2_bias=self.w2_bias,
+                            expert_weights=topk_weights,
+                            expert_indices=topk_ids,
+                            num_per_tok=self.n_experts_per_token,
+                            activation=self.activation,
+                            num_experts=self.num_experts,
+                            ep_rank=self.ep_rank,
+                            ep_size=self.ep_size)
+        output.copy_(out)
+
+    def _apply_kernel(
+        self,
+        output,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        expert_map=None,
+    ):
         num_rows, hidden_size = hidden_states.shape
         num_moe_inputs = self.n_experts_per_token * num_rows
         
