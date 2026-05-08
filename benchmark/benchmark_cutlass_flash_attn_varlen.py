@@ -22,6 +22,7 @@ from benchmark.src.get_model_config import (
 from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
 from tests.utils import parse_args, seed_everything
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+from benchmark.presets import get_hardware_preset
 # isort: on
 
 DEVICE = "xpu"
@@ -259,7 +260,8 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                                          (num_seqs, max_num_blocks_per_seq),
                                          dtype=torch.int32)
             if provider == "flash_kernel_time" or \
-            provider == "flash_kernel_TFLOPS":
+            provider == "flash_kernel_TFLOPS" or \
+            provider == "flash_kernel_MFU":
                 se = start_events[index - 5] if index >= 5 else None
                 ee = end_events[index - 5] if index >= 5 else None
                 flash_attn_varlen_func_CalKernelTime(
@@ -309,7 +311,8 @@ def benchmark_varlen_with_paged_kv(num_seqs,
     else:
         for index in range(iterations):
             if provider == "flash_kernel_time" or \
-            provider == "flash_kernel_TFLOPS":
+            provider == "flash_kernel_TFLOPS" or \
+            provider == "flash_kernel_MFU":
                 se = start_events[index - 5] if index >= 5 else None
                 ee = end_events[index - 5] if index >= 5 else None
                 flash_attn_varlen_func_CalKernelTime(
@@ -356,7 +359,7 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                                        s_aux=sink)
                 if index >= 5:
                     end_events[index - 5].record()
-    if provider == "flash_kernel_TFLOPS":
+    if provider == "flash_kernel_TFLOPS" or provider == "flash_kernel_MFU":
         torch.xpu.synchronize()
         total_latency = sum(
             start_events[i].elapsed_time(end_events[i])
@@ -366,6 +369,14 @@ def benchmark_varlen_with_paged_kv(num_seqs,
         flops = calculate_flops(num_query_heads, query_lens, kv_lens,
                                 head_size, is_causal)
         tflops = flops / (ms / 1000) / 1e12
+        if provider == "flash_kernel_MFU":
+            hardware_presets = get_hardware_preset(torch.xpu.get_device_name())
+            if hardware_presets is None:
+                clear_xpu_cache()
+                return float("nan")
+            peak_tflops = hardware_presets["tflops"]
+            clear_xpu_cache()
+            return (tflops / peak_tflops) * 100
         clear_xpu_cache()
         return tflops
 
@@ -392,12 +403,14 @@ def get_benchmark_varlen_with_paged_kv(iterations=20):
             ],
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
-            line_vals=["flash", "flash_kernel_time", "flash_kernel_TFLOPS"],
+            line_vals=["flash", "flash_kernel_time", "flash_kernel_TFLOPS",
+                       "flash_kernel_MFU"],
             line_names=[
                 "FlashAttention(us)", "FlashAttention_Kernel_Time(us)",
-                "FlashAttention_TFLOPS"
+                "FlashAttention_TFLOPS", "FlashAttention_MFU (%)"
             ],
-            styles=[("blue", "-"), ("green", "-"), ("purple", "-")],
+            styles=[("blue", "-"), ("green", "-"), ("purple", "-"),
+                    ("red", "-")],
             ylabel="Latency (us)",
             plot_name="flash-attn-varlen",
             args={},

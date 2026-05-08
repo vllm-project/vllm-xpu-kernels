@@ -175,11 +175,11 @@ def test_indexer_k_quant_and_cache(num_tokens, head_dim, quant_block_size,
         ref_scale = block_ref[fp8_end:].view(torch.float32)
         out_scale = block_xpu[fp8_end:].view(torch.float32)
 
+        diff = (ref_fp8.view(torch.float8_e4m3fn).float() -
+                out_fp8.view(torch.float8_e4m3fn).float()).abs().max()
         assert torch.equal(
             ref_fp8,
-            out_fp8), (f"[block={block_idx}] FP8 mismatch: max diff="
-                       f"{(ref_fp8.view(torch.float8_e4m3fn).float() - \
-            out_fp8.view(torch.float8_e4m3fn).float()).abs().max()}")
+            out_fp8), (f"[block={block_idx}] FP8 mismatch: max diff={diff}")
         assert torch.allclose(
             ref_scale, out_scale,
             atol=1e-5), (f"[block={block_idx}] Scale mismatch: "
