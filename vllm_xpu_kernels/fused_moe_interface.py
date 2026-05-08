@@ -352,9 +352,7 @@ class XpuFusedMoe:
         self.is_block_fp8 = is_block_fp8
         self.recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
                                    is_block_fp8)
-        self._apply_impl = (self._apply_ref
-                            if _should_use_ref_fused_moe(is_mxfp8)
-                            else self._apply_kernel)
+        self._use_ref = _should_use_ref_fused_moe(is_mxfp8)
 
         if self.activation == "silu":
             self.act_func = torch.ops._C.silu_and_mul
@@ -396,8 +394,14 @@ class XpuFusedMoe:
         topk_ids,
         expert_map=None,
     ):
-        self._apply_impl(output, hidden_states, topk_weights, topk_ids,
-                         expert_map)
+        if self._use_ref:
+            self._apply_ref(output, hidden_states,
+                            topk_weights, topk_ids,
+                            expert_map)
+        else:
+            self._apply_kernel(output, hidden_states,
+                               topk_weights, topk_ids,
+                               expert_map)
 
     def _apply_ref(
         self,

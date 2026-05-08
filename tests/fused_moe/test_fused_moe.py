@@ -263,6 +263,7 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
         rtol = 2e-2
         atol = 2e-2
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
+    del fused_moe_impl
 
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
