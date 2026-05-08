@@ -7,7 +7,7 @@
 
 namespace gdn {
 
-template <typename T, int Width, bool ReorderInput>
+template <typename T, int Width, bool ReorderInput, bool IS_SPEC = false>
 struct causal_conv1d_kernel {
  public:
   static constexpr int sub_group_size = 32;
@@ -41,7 +41,15 @@ struct causal_conv1d_kernel {
       const int& num_v_heads,
       const int& head_v_dim,
       const int& qkvz_elems,
-      const int& conv_elems)
+      const int& conv_elems,
+      // Spec-decoding (only consulted when IS_SPEC=true). Per-token store
+      // slot comes from spec_state_indices[batch_id, t - seq_start]; the
+      // load slot for the partial-window branch comes from
+      // spec_state_indices[batch_id, num_accepted_tokens[batch_id]-1].
+      const int* spec_state_indices = nullptr,
+      const int* num_accepted_tokens = nullptr,
+      const int spec_stride = 0,
+      const int state_len = 0)
       : q_out(q_out),
         k_out(k_out),
         v_out(v_out),
@@ -67,7 +75,11 @@ struct causal_conv1d_kernel {
         num_v_heads(num_v_heads),
         head_v_dim(head_v_dim),
         qkvz_elems(qkvz_elems),
-        conv_elems(conv_elems) {}
+        conv_elems(conv_elems),
+        spec_state_indices(spec_state_indices),
+        num_accepted_tokens(num_accepted_tokens),
+        spec_stride(spec_stride),
+        state_len(state_len) {}
 
   static inline sycl::nd_range<2>
   get_nd_range(const int total_seqlen, const int qkvz_elems) {
@@ -144,11 +156,38 @@ struct causal_conv1d_kernel {
       }
     }
 
-    // get states cache location
-    int states_id = cache_indices[batch_id];
+    // get states cache location. For spec-decoding (FLA-aligned, tick 40):
+    // ALL spec tokens read/write the single slot at cache_indices[batch_id]
+    // (= spec_state_indices[batch_id, 0] per the dispatcher), with a rolling
+    // history of state_len positions inside it. The history starting offset
+    // within the slot is (num_accepted_tokens - 1).
+    int states_id;
+    int spec_store_slot = pad_slot_id;
+    bool spec_skip_init_load = false;
+    if constexpr (IS_SPEC) {
+      const int n_acc = num_accepted_tokens[batch_id];
+      if (n_acc <= 0) {
+        // (Rung 6) num_accepted=0: no valid prior state to load.
+        states_id = 0;
+        spec_skip_init_load = true;
+      } else {
+        states_id = cache_indices[batch_id];
+        if (states_id <= 0) {
+          // FLA NULL_BLOCK_ID convention: treat 0/-1 as no prior state.
+          states_id = 0;
+          spec_skip_init_load = true;
+        }
+      }
+      const int t_in_seq = token_id - seq_start_offset;
+      spec_store_slot = spec_state_indices[batch_id * spec_stride + t_in_seq];
+    } else {
+      states_id = cache_indices[batch_id];
+    }
 
-    if (states_id == pad_slot_id) {
-      return;
+    if constexpr (!IS_SPEC) {
+      if (states_id == pad_slot_id) {
+        return;
+      }
     }
 
     int mixed_qkvz_id = qkvz_elems_id;
@@ -209,9 +248,18 @@ struct causal_conv1d_kernel {
     }
 
     // get states cache ptr
-    const bool has_init_conv_states =
+    bool has_init_conv_states =
         (has_initial_state == nullptr ||
          (has_initial_state != nullptr && has_initial_state[batch_id]));
+    if constexpr (IS_SPEC) {
+      // (Rung 6) Spec overrides: when num_accepted=0 or the load slot is
+      // the NULL sentinel, the partial-window load must NOT touch
+      // conv_states_ptr (no valid prior data); the kernel still proceeds
+      // and writes per-token state.
+      if (spec_skip_init_load) {
+        has_init_conv_states = false;
+      }
+    }
     T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
 
     // load weights
@@ -238,13 +286,24 @@ struct causal_conv1d_kernel {
     int seq_cu_len = token_id - seq_start_offset + 1;
     int input_load_len = seq_cu_len >= Width ? Width : seq_cu_len;
     int states_load_len = seq_cu_len >= Width ? 0 : Width - input_load_len;
+    // For IS_SPEC, the slot holds state_len > Width-1 positions and the
+    // history of interest starts at offset (n_acc - 1). For non-spec, the
+    // slot is exactly Width-1 positions and offset is 0.
+    int load_offset_shift = 0;
+    if constexpr (IS_SPEC) {
+      const int n_acc_local = num_accepted_tokens[batch_id];
+      if (n_acc_local > 0) {
+        load_offset_shift = n_acc_local - 1;
+      }
+    }
     if (states_load_len != 0 && has_init_conv_states) {
 #pragma unroll
       for (int i = 0; i < states_load_len; ++i) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
           local_input[Width * e + i] = conv_states_ptr
-              [(Width - 1 - states_load_len + i) * conv_elems +
+              [(Width - 1 - states_load_len + i + load_offset_shift) *
+                   conv_elems +
                reordered_elems_id + e];
         }
       }
@@ -282,7 +341,56 @@ struct causal_conv1d_kernel {
     }
 
     // save states
-    if (seq_end_offset - seq_start_offset > 1) {
+    if constexpr (IS_SPEC) {
+      // (Tick 40) FLA-aligned spec writeback: stage the rolled state into
+      // conv_states_tmp[batch_id, state_len, conv_elems]. A second kernel
+      // (spec_state_roll_kernel) copies tmp -> slot[cache_indices[batch_id]]
+      // after the main kernel finishes (race-free because slot is read by
+      // pass 1 but only written by pass 2).
+      //
+      // Per-position semantics for slot[cache_indices[batch_id]]:
+      //   new[p] = pre[n_acc + p]                  for p < state_len - K_call
+      //   new[p] = current_input[p - (state_len - K_call)]  for p >= state_len
+      //   - K_call
+      //
+      // Each work-item handles t_in_seq = token_id - seq_start_offset:
+      //   - Always: writes tmp at position (state_len - K_call + t_in_seq) =
+      //     the spec token's contribution to the rolled state.
+      //   - If t_in_seq < state_len - K_call: also writes tmp at position
+      //     t_in_seq with the shift-copy of pre[n_acc + t_in_seq].
+      const int K_call = seq_end_offset - seq_start_offset;
+      const int n_acc_safe = (num_accepted_tokens[batch_id] > 0)
+                                 ? num_accepted_tokens[batch_id]
+                                 : 0;
+      const int t_in_seq = token_id - seq_start_offset;
+      const int new_input_pos = state_len - K_call + t_in_seq;
+      // Latest input value for this token = local_input[Width-1].
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        if (new_input_pos >= 0 && new_input_pos < state_len) {
+          conv_states_tmp
+              [batch_id * state_len * conv_elems + new_input_pos * conv_elems +
+               reordered_elems_id + e] = local_input[Width * e + Width - 1];
+        }
+      }
+      // Shift-copy: only the first (state_len - K_call) work items per
+      // dim chunk read pre[n_acc + t_in_seq] and stage it at position
+      // t_in_seq in tmp.
+      if (t_in_seq < state_len - K_call) {
+        const int shift_src_pos = n_acc_safe + t_in_seq;
+#pragma unroll
+        for (int e = 0; e < elems_per_item; ++e) {
+          T pre_val = T(0);
+          if (!spec_skip_init_load && shift_src_pos < state_len) {
+            pre_val = conv_states_ptr
+                [shift_src_pos * conv_elems + reordered_elems_id + e];
+          }
+          conv_states_tmp
+              [batch_id * state_len * conv_elems + t_in_seq * conv_elems +
+               reordered_elems_id + e] = pre_val;
+        }
+      }
+    } else if (seq_end_offset - seq_start_offset > 1) {
       // because current group is unable to know if old states are needed by
       // other group, hard to update states inplace if prefill
       if (seq_end_offset - 1 == token_id) {
@@ -372,6 +480,15 @@ struct causal_conv1d_kernel {
   const int head_v_dim;
   const int qkvz_elems;
   const int conv_elems;
+  // Spec-decoding inputs (consulted when IS_SPEC=true). See ctor docstring.
+  const int* spec_state_indices;
+  const int* num_accepted_tokens;
+  const int spec_stride;
+  // state_len = conv_states_stride_0 / conv_elems. Number of time positions
+  // per slot in the (slot, time, dim) conv state buffer. For non-spec this
+  // equals Width-1; for spec it can be larger (e.g. state_len = (Width-1) +
+  // (K_max - 1)). Plumbed in to drive the FLA-aligned rolled writeback.
+  const int state_len;
 };
 
 template <typename T>
@@ -447,7 +564,79 @@ struct update_states_kernel {
   const int batch_size;
 };
 
-template <typename T, int Width, bool ReorderInput>
+// Tick-40 spec-state roll kernel. Pass 2 of the FLA-aligned conv1d_update:
+// copies the rolled state staged by pass 1 in conv_states_tmp[batch_id,
+// state_len, conv_elems] to conv_states[cache_indices[batch_id], state_len,
+// conv_elems]. Race-free because pass 1 only writes tmp; pass 2 only writes
+// the slot.
+template <typename T>
+struct spec_state_roll_kernel {
+ public:
+  static constexpr int sub_group_size = 32;
+  static constexpr int group_size = 256;
+  static constexpr int elems_per_item = 4;
+  static constexpr int elems_per_group = group_size * elems_per_item;
+
+  spec_state_roll_kernel(
+      T* conv_states,
+      const int conv_states_stride_0,
+      const T* conv_states_tmp,
+      const int* cache_indices,
+      const int state_len,
+      const int conv_elems,
+      const int batch_size)
+      : conv_states(conv_states),
+        conv_states_stride_0(conv_states_stride_0),
+        conv_states_tmp(conv_states_tmp),
+        cache_indices(cache_indices),
+        state_len(state_len),
+        conv_elems(conv_elems),
+        batch_size(batch_size) {}
+
+  static inline sycl::nd_range<3> get_nd_range(
+      const int batch_size, const int state_len, const int conv_elems) {
+    const int groups_per_token =
+        (conv_elems + elems_per_group - 1) / elems_per_group;
+    sycl::range<3> local(1, 1, group_size);
+    sycl::range<3> global(batch_size, state_len, groups_per_token);
+    return sycl::nd_range<3>(global * local, local);
+  }
+
+  [[sycl::reqd_sub_group_size(sub_group_size)]] void
+  operator()(sycl::nd_item<3> item) const {
+    const int batch_id = item.get_group(0);
+    const int pos_id = item.get_group(1);
+    const int local_group_id = item.get_group(2);
+    const int local_id = item.get_local_linear_id();
+    const int elems_start_offset_group = local_group_id * elems_per_group;
+
+    const int states_id = cache_indices[batch_id];
+    if (states_id <= 0) {
+      return;  // null sentinel: no slot to write
+    }
+    T* conv_states_ptr =
+        conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
+    const T* conv_states_tmp_ptr =
+        conv_states_tmp + batch_id * state_len * conv_elems;
+    for (int i = elems_start_offset_group + local_id;
+         i < elems_start_offset_group + elems_per_group && i < conv_elems;
+         i += group_size) {
+      conv_states_ptr[pos_id * conv_elems + i] =
+          conv_states_tmp_ptr[pos_id * conv_elems + i];
+    }
+  }
+
+ private:
+  T* conv_states;
+  const int conv_states_stride_0;
+  const T* conv_states_tmp;
+  const int* cache_indices;
+  const int state_len;
+  const int conv_elems;
+  const int batch_size;
+};
+
+template <typename T, int Width, bool ReorderInput, bool IS_SPEC = false>
 void kernel_launcher(
     sycl::queue& queue,
     T* q_out,
@@ -477,8 +666,12 @@ void kernel_launcher(
     const int& qkvz_elems,
     const int& conv_elems,
     const int& num_prefills,
-    const int& num_decodes) {
-  using KERNEL_MAIN = causal_conv1d_kernel<T, Width, ReorderInput>;
+    const int& num_decodes,
+    const int* spec_state_indices = nullptr,
+    const int* num_accepted_tokens = nullptr,
+    const int spec_stride = 0,
+    const int state_len = 0) {
+  using KERNEL_MAIN = causal_conv1d_kernel<T, Width, ReorderInput, IS_SPEC>;
   auto range_main = KERNEL_MAIN::get_nd_range(num_actual_tokens, qkvz_elems);
   assert(head_k_dim % KERNEL_MAIN::elems_per_item == 0);
   assert(num_v_heads % KERNEL_MAIN::elems_per_item == 0);
@@ -509,24 +702,49 @@ void kernel_launcher(
         num_v_heads,
         head_v_dim,
         qkvz_elems,
-        conv_elems);
+        conv_elems,
+        spec_state_indices,
+        num_accepted_tokens,
+        spec_stride,
+        state_len);
     cgh.parallel_for(range_main, task);
   });
-  if (num_prefills > 0) {
-    using KERNEL_UPDATE = update_states_kernel<T>;
-    auto range_update =
-        KERNEL_UPDATE::get_nd_range(batch_size, Width, conv_elems);
+  if constexpr (!IS_SPEC) {
+    if (num_prefills > 0) {
+      using KERNEL_UPDATE = update_states_kernel<T>;
+      auto range_update =
+          KERNEL_UPDATE::get_nd_range(batch_size, Width, conv_elems);
+      queue.submit([&](sycl::handler& cgh) {
+        KERNEL_UPDATE task(
+            conv_states,
+            conv_states_stride_0,
+            conv_states_tmp,
+            cache_indices,
+            Width,
+            conv_elems,
+            query_start_loc,
+            batch_size);
+        cgh.parallel_for(range_update, task);
+      });
+    }
+  } else {
+    // Tick-40 pass 2: copy the rolled state staged in conv_states_tmp
+    // (shape [batch, state_len, conv_elems]) into the slot at
+    // cache_indices[batch_id]. Race-free vs pass 1 because pass 1 only
+    // wrote tmp; this pass is the only writer of slot.
+    using KERNEL_ROLL = spec_state_roll_kernel<T>;
+    auto range_roll =
+        KERNEL_ROLL::get_nd_range(batch_size, state_len, conv_elems);
     queue.submit([&](sycl::handler& cgh) {
-      KERNEL_UPDATE task(
+      KERNEL_ROLL task(
           conv_states,
           conv_states_stride_0,
           conv_states_tmp,
           cache_indices,
-          Width,
+          state_len,
           conv_elems,
-          query_start_loc,
           batch_size);
-      cgh.parallel_for(range_update, task);
+      cgh.parallel_for(range_roll, task);
     });
   }
 }
@@ -561,7 +779,14 @@ void causal_conv1d(
     const int& pad_slot_id,   // -1
     const int num_prefills,
     const int num_decodes,
-    const bool reorder_input) {
+    const bool reorder_input,
+    // Spec-decoding extension. When is_spec=true the per-sequence load slot
+    // and per-token store slot come from these tensors; cache_indices is
+    // ignored. Both tensors are int32 [batch_size, K] / [batch_size].
+    const bool is_spec = false,
+    const int* spec_state_indices_ptr = nullptr,
+    const int* num_accepted_tokens_ptr = nullptr,
+    const int spec_stride = 0) {
   if (num_prefills == 0 && num_decodes == 0) {
     return;
   }
@@ -576,48 +801,65 @@ void causal_conv1d(
   const int conv_elems = conv_weights.size(0);
   const int width = conv_weights.size(1);
   const int conv_states_stride_0 = conv_states.stride(0);
+  // (Tick 40) state_len = number of time positions per slot. For non-spec,
+  // the buffer is sized to width-1 by convention; for spec, the runtime
+  // sizes it larger (e.g. (Width-1) + (K_max-1) = 6 for Width=4 K_max=4).
+  // Derive from stride; conv_states is row-major (slot, time, dim).
+  const int state_len = conv_states_stride_0 / conv_elems;
+  const int tmp_rows = is_spec ? state_len : (width - 1);
 
   auto dtype = conv_states.dtype();
   auto device = conv_states.device();
   torch::Tensor conv_states_tmp = torch::empty(
-      {batch_size, width - 1, conv_elems},
+      {batch_size, tmp_rows, conv_elems},
       torch::dtype(dtype).device(device).requires_grad(false));
 
-#define KERNEL_LAUNCHER(scalar_t, width, reorder_input)            \
-  kernel_launcher<scalar_t, width, reorder_input>(                 \
-      queue,                                                       \
-      reinterpret_cast<scalar_t*>(q_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(k_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(v_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(z_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(b_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(a_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(mixed_qkvz.data_ptr()),          \
-      reinterpret_cast<scalar_t*>(mixed_ba.data_ptr()),            \
-      reinterpret_cast<scalar_t*>(conv_weights.data_ptr()),        \
-      conv_bias.has_value()                                        \
-          ? reinterpret_cast<scalar_t*>(conv_bias->data_ptr())     \
-          : nullptr,                                               \
-      reinterpret_cast<scalar_t*>(conv_states.data_ptr()),         \
-      conv_states_stride_0,                                        \
-      reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),     \
-      reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
-      reinterpret_cast<int*>(cache_indices.data_ptr()),            \
-      has_initial_state.has_value()                                \
-          ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
-          : nullptr,                                               \
-      act_mode,                                                    \
-      pad_slot_id,                                                 \
-      batch_size,                                                  \
-      num_actual_tokens,                                           \
-      num_k_heads,                                                 \
-      head_k_dim,                                                  \
-      num_v_heads,                                                 \
-      head_v_dim,                                                  \
-      qkvz_elems,                                                  \
-      conv_elems,                                                  \
-      num_prefills,                                                \
-      num_decodes);
+#define KERNEL_LAUNCHER_IMPL(scalar_t, width, reorder_input, IS_SPEC) \
+  kernel_launcher<scalar_t, width, reorder_input, IS_SPEC>(           \
+      queue,                                                          \
+      reinterpret_cast<scalar_t*>(q_out.data_ptr()),                  \
+      reinterpret_cast<scalar_t*>(k_out.data_ptr()),                  \
+      reinterpret_cast<scalar_t*>(v_out.data_ptr()),                  \
+      reinterpret_cast<scalar_t*>(z_out.data_ptr()),                  \
+      reinterpret_cast<scalar_t*>(b_out.data_ptr()),                  \
+      reinterpret_cast<scalar_t*>(a_out.data_ptr()),                  \
+      reinterpret_cast<scalar_t*>(mixed_qkvz.data_ptr()),             \
+      reinterpret_cast<scalar_t*>(mixed_ba.data_ptr()),               \
+      reinterpret_cast<scalar_t*>(conv_weights.data_ptr()),           \
+      conv_bias.has_value()                                           \
+          ? reinterpret_cast<scalar_t*>(conv_bias->data_ptr())        \
+          : nullptr,                                                  \
+      reinterpret_cast<scalar_t*>(conv_states.data_ptr()),            \
+      conv_states_stride_0,                                           \
+      reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),        \
+      reinterpret_cast<int*>(query_start_loc.data_ptr()),             \
+      reinterpret_cast<int*>(cache_indices.data_ptr()),               \
+      has_initial_state.has_value()                                   \
+          ? reinterpret_cast<bool*>(has_initial_state->data_ptr())    \
+          : nullptr,                                                  \
+      act_mode,                                                       \
+      pad_slot_id,                                                    \
+      batch_size,                                                     \
+      num_actual_tokens,                                              \
+      num_k_heads,                                                    \
+      head_k_dim,                                                     \
+      num_v_heads,                                                    \
+      head_v_dim,                                                     \
+      qkvz_elems,                                                     \
+      conv_elems,                                                     \
+      num_prefills,                                                   \
+      num_decodes,                                                    \
+      spec_state_indices_ptr,                                         \
+      num_accepted_tokens_ptr,                                        \
+      spec_stride,                                                    \
+      state_len);
+
+#define KERNEL_LAUNCHER(scalar_t, width, reorder_input)         \
+  if (is_spec) {                                                \
+    KERNEL_LAUNCHER_IMPL(scalar_t, width, reorder_input, true)  \
+  } else {                                                      \
+    KERNEL_LAUNCHER_IMPL(scalar_t, width, reorder_input, false) \
+  }
 
 #define WIDTH_DISPATCH(scalar_t, width, reorder_input) \
   switch (width) {                                     \
@@ -660,6 +902,7 @@ void causal_conv1d(
 #undef SPLIT_DISPATCH
 #undef WIDTH_DISPATCH
 #undef KERNEL_LAUNCHER
+#undef KERNEL_LAUNCHER_IMPL
 }
 
 }  // namespace gdn

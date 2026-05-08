@@ -5,7 +5,7 @@
 
 namespace gdn {
 static constexpr int sub_group_size = 32;
-template <typename T, typename StateT, int k_bucket_size>
+template <typename T, typename StateT, int k_bucket_size, bool IS_SPEC = false>
 struct gated_delta_rule_kernel {
  public:
   static constexpr int group_size = 256;
@@ -33,7 +33,14 @@ struct gated_delta_rule_kernel {
       const int num_k_heads,
       const int head_k_dim,
       const int num_v_heads,
-      const int head_v_dim)
+      const int head_v_dim,
+      // Spec-decoding (only consulted when IS_SPEC=true). When IS_SPEC,
+      // `cache_indices` above is ignored; per-sequence load slot comes from
+      // `spec_state_indices[i_n, num_accepted_tokens[i_n] - 1]` and per-token
+      // store slot comes from `spec_state_indices[i_n, t - seq_start]`.
+      const int* spec_state_indices = nullptr,
+      const int* num_accepted_tokens = nullptr,
+      const int spec_stride = 0)
       : core_attn_out(core_attn_out),
         q(q),
         k(k),
@@ -52,7 +59,10 @@ struct gated_delta_rule_kernel {
         num_k_heads(num_k_heads),
         head_k_dim(head_k_dim),
         num_v_heads(num_v_heads),
-        head_v_dim(head_v_dim) {}
+        head_v_dim(head_v_dim),
+        spec_state_indices(spec_state_indices),
+        num_accepted_tokens(num_accepted_tokens),
+        spec_stride(spec_stride) {}
 
   static inline sycl::nd_range<3> get_nd_range(
       const int batch_size, const int num_v_heads, const int head_v_dim) {
@@ -102,12 +112,32 @@ struct gated_delta_rule_kernel {
     float k_local[k_bucket_size];
     float v_local[v_dim_per_sg];
 
-    StateT* ssm_state_ptr =
-        ssm_state +
-        static_cast<int64_t>(cache_indices[batch_id]) * ssm_state_stride_0;
+    // Resolve the slot to load the initial recurrent state from. For spec
+    // decoding, the slot comes from spec_state_indices[batch_id,
+    // num_accepted_tokens[batch_id] - 1] and a non-positive slot value
+    // (0 = NULL_BLOCK_ID, mirrors FLA) means "no valid prior state".
+    int64_t load_slot;
+    bool has_init_state;
+    if constexpr (IS_SPEC) {
+      const int n_acc = num_accepted_tokens[batch_id];
+      if (n_acc <= 0) {
+        load_slot = 0;
+        has_init_state = false;
+      } else {
+        const int load_idx = n_acc - 1;
+        const int raw = spec_state_indices[batch_id * spec_stride + load_idx];
+        load_slot = static_cast<int64_t>(raw);
+        has_init_state = raw > 0;
+      }
+    } else {
+      load_slot = static_cast<int64_t>(cache_indices[batch_id]);
+      has_init_state =
+          (has_initial_state == nullptr) || has_initial_state[batch_id];
+    }
+    StateT* ssm_state_ptr = ssm_state + load_slot * ssm_state_stride_0;
 
     // load state
-    if (has_initial_state == nullptr || has_initial_state[batch_id]) {
+    if (has_init_state) {
 #pragma unroll
       for (int j = 0; j < v_dim_per_sg; ++j) {
 #pragma unroll
@@ -227,18 +257,46 @@ struct gated_delta_rule_kernel {
                head_v_dim_id + i] = res[i];
         }
       }
+
+      // (S2) Per-token state writeback for spec-decoding. Each candidate
+      // token in this sequence writes its post-state to a different cache
+      // pool slot indexed by spec_state_indices[batch_id, t - seq_start].
+      // A non-positive slot value is the FLA NULL_BLOCK_ID; skip the write.
+      if constexpr (IS_SPEC) {
+        const int spec_slot =
+            spec_state_indices[batch_id * spec_stride + (t - seq_start_offset)];
+        if (spec_slot > 0) {
+          StateT* per_token_ptr =
+              ssm_state + static_cast<int64_t>(spec_slot) * ssm_state_stride_0;
+#pragma unroll
+          for (int j = 0; j < v_dim_per_sg; ++j) {
+#pragma unroll
+            for (int i = 0; i < k_bucket_size; ++i) {
+              per_token_ptr
+                  [num_v_heads_id * head_k_dim * head_v_dim +
+                   (k_bucket_size * sg_local_id + i) +
+                   (head_v_dim_id + j) * head_k_dim] =
+                      static_cast<StateT>(state_local[j * k_bucket_size + i]);
+            }
+          }
+        }
+      }
     }
 
+    // (S3) Non-spec final-state writeback. Spec covered the per-token write
+    // above so no post-loop store is needed.
+    if constexpr (!IS_SPEC) {
 // update state
 #pragma unroll
-    for (int j = 0; j < v_dim_per_sg; ++j) {
+      for (int j = 0; j < v_dim_per_sg; ++j) {
 #pragma unroll
-      for (int i = 0; i < k_bucket_size; ++i) {
-        ssm_state_ptr
-            [num_v_heads_id * head_k_dim * head_v_dim +
-             (k_bucket_size * sg_local_id + i) +
-             (head_v_dim_id + j) * head_k_dim] =
-                static_cast<StateT>(state_local[j * k_bucket_size + i]);
+        for (int i = 0; i < k_bucket_size; ++i) {
+          ssm_state_ptr
+              [num_v_heads_id * head_k_dim * head_v_dim +
+               (k_bucket_size * sg_local_id + i) +
+               (head_v_dim_id + j) * head_k_dim] =
+                  static_cast<StateT>(state_local[j * k_bucket_size + i]);
+        }
       }
     }
   }
@@ -263,9 +321,13 @@ struct gated_delta_rule_kernel {
   const int head_k_dim;
   const int num_v_heads;
   const int head_v_dim;
+  // Spec-decoding inputs (consulted when IS_SPEC=true). See ctor docstring.
+  const int* spec_state_indices;
+  const int* num_accepted_tokens;
+  const int spec_stride;
 };
 
-template <typename T, typename StateT, int k_bucket_size>
+template <typename T, typename StateT, int k_bucket_size, bool IS_SPEC = false>
 void kernel_launcher(
     sycl::queue& queue,
     T* core_attn_out,
@@ -286,8 +348,11 @@ void kernel_launcher(
     const int num_k_heads,
     const int head_k_dim,
     const int num_v_heads,
-    const int head_v_dim) {
-  using KERNEL = gated_delta_rule_kernel<T, StateT, k_bucket_size>;
+    const int head_v_dim,
+    const int* spec_state_indices = nullptr,
+    const int* num_accepted_tokens = nullptr,
+    const int spec_stride = 0) {
+  using KERNEL = gated_delta_rule_kernel<T, StateT, k_bucket_size, IS_SPEC>;
   auto range = KERNEL::get_nd_range(batch_size, num_v_heads, head_v_dim);
   assert(head_v_dim % KERNEL::v_dim_per_group == 0);
   queue.submit([&](sycl::handler& cgh) {
@@ -310,7 +375,10 @@ void kernel_launcher(
         num_k_heads,
         head_k_dim,
         num_v_heads,
-        head_v_dim);
+        head_v_dim,
+        spec_state_indices,
+        num_accepted_tokens,
+        spec_stride);
     cgh.parallel_for(range, task);
   });
 }
@@ -332,7 +400,13 @@ void gated_delta_rule(
     const std::optional<torch::Tensor>&
         has_initial_state,  // [batch_size] or None
     const int num_prefills,
-    const int num_decodes) {
+    const int num_decodes,
+    // Spec-decoding extension. When IS_SPEC=true, cache_indices is unused
+    // and slot lookup goes through spec_state_indices + num_accepted_tokens.
+    const bool is_spec = false,
+    const int* spec_state_indices_ptr = nullptr,
+    const int* num_accepted_tokens_ptr = nullptr,
+    const int spec_stride = 0) {
   if (num_prefills == 0 && num_decodes == 0) {
     return;
   }
@@ -364,30 +438,40 @@ void gated_delta_rule(
   TORCH_CHECK(head_k_dim % sub_group_size == 0);
   const int k_bucket_size = head_k_dim / sub_group_size;
 
-#define KERNEL_LAUNCHER(scalar_t, state_scalar_t, k_bucket_size)   \
-  kernel_launcher<scalar_t, state_scalar_t, k_bucket_size>(        \
-      queue,                                                       \
-      reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),       \
-      reinterpret_cast<scalar_t*>(q.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(k.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(v.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(b.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(a.data_ptr()),                   \
-      reinterpret_cast<float*>(A_log.data_ptr()),                  \
-      reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
-      reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),     \
-      ssm_state_stride_0,                                          \
-      reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
-      reinterpret_cast<int*>(cache_indices.data_ptr()),            \
-      has_initial_state.has_value()                                \
-          ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
-          : nullptr,                                               \
-      batch_size,                                                  \
-      total_seqlen,                                                \
-      num_k_heads,                                                 \
-      head_k_dim,                                                  \
-      num_v_heads,                                                 \
-      head_v_dim);
+#define KERNEL_LAUNCHER_IMPL(scalar_t, state_scalar_t, k_bucket_size, IS_SPEC) \
+  kernel_launcher<scalar_t, state_scalar_t, k_bucket_size, IS_SPEC>(           \
+      queue,                                                                   \
+      reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),                   \
+      reinterpret_cast<scalar_t*>(q.data_ptr()),                               \
+      reinterpret_cast<scalar_t*>(k.data_ptr()),                               \
+      reinterpret_cast<scalar_t*>(v.data_ptr()),                               \
+      reinterpret_cast<scalar_t*>(b.data_ptr()),                               \
+      reinterpret_cast<scalar_t*>(a.data_ptr()),                               \
+      reinterpret_cast<float*>(A_log.data_ptr()),                              \
+      reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),                         \
+      reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),                 \
+      ssm_state_stride_0,                                                      \
+      reinterpret_cast<int*>(query_start_loc.data_ptr()),                      \
+      reinterpret_cast<int*>(cache_indices.data_ptr()),                        \
+      has_initial_state.has_value()                                            \
+          ? reinterpret_cast<bool*>(has_initial_state->data_ptr())             \
+          : nullptr,                                                           \
+      batch_size,                                                              \
+      total_seqlen,                                                            \
+      num_k_heads,                                                             \
+      head_k_dim,                                                              \
+      num_v_heads,                                                             \
+      head_v_dim,                                                              \
+      spec_state_indices_ptr,                                                  \
+      num_accepted_tokens_ptr,                                                 \
+      spec_stride);
+
+#define KERNEL_LAUNCHER(scalar_t, state_scalar_t, k_bucket_size)         \
+  if (is_spec) {                                                         \
+    KERNEL_LAUNCHER_IMPL(scalar_t, state_scalar_t, k_bucket_size, true)  \
+  } else {                                                               \
+    KERNEL_LAUNCHER_IMPL(scalar_t, state_scalar_t, k_bucket_size, false) \
+  }
 
 #define BUCKET_DISPATCH(scalar_t, state_scalar_t, k_bucket_size) \
   switch (k_bucket_size) {                                       \
@@ -439,6 +523,7 @@ void gated_delta_rule(
 #undef DISPATCH_STATE_DTYPE
 #undef BUCKET_DISPATCH
 #undef KERNEL_LAUNCHER
+#undef KERNEL_LAUNCHER_IMPL
 }
 
 }  // namespace gdn

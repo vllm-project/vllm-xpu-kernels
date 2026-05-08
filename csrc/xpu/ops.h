@@ -109,7 +109,17 @@ void gdn_attention(
     const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
     const int64_t tp_size,
-    const bool reorder_input);
+    const bool reorder_input,
+    // Spec-decoding extension. When `spec_state_indices_tensor` is provided
+    // (shape [num_seqs, K]), the call evaluates K candidate tokens per
+    // sequence, loads the initial state from
+    // `spec_state_indices_tensor[i, num_accepted_tokens[i]-1]`, and writes
+    // each token's post-state to `spec_state_indices_tensor[i, t]`. Mirrors
+    // the FLA Triton IS_SPEC_DECODING semantics. Both must be provided
+    // together; both nullopt = legacy non-spec behavior.
+    const std::optional<torch::Tensor>& spec_state_indices_tensor =
+        std::nullopt,
+    const std::optional<torch::Tensor>& num_accepted_tokens = std::nullopt);
 #endif
 
 bool is_bmg(int64_t device_index);

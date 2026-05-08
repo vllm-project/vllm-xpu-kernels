@@ -48,7 +48,12 @@ void gdn_attention(
     const torch::Tensor& non_spec_state_indices_tensor,  // [batch_size]
     const int64_t num_actual_tokens,
     const int64_t tp_size,
-    const bool reorder_input) {
+    const bool reorder_input,
+    // Spec-decoding extension. When provided together (both non-empty), the
+    // op evaluates K candidate tokens per sequence and uses the per-token
+    // slot ring; mirrors FLA Triton IS_SPEC_DECODING.
+    const std::optional<torch::Tensor>& spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& num_accepted_tokens) {
   TORCH_CHECK(
       core_attn_out.is_contiguous(), "core_attn_out must be contiguous");
   TORCH_CHECK(z.is_contiguous(), "z must be contiguous");
@@ -140,6 +145,62 @@ void gdn_attention(
   }
   const int pad_slot_id = -1;
 
+  // Resolve spec-decoding state. Both tensors must be set or both unset;
+  // mismatched is rejected. When set, route through the native kernels
+  // with IS_SPEC=true (the chunk path handles non-spec prefill only).
+  const bool is_spec =
+      spec_state_indices_tensor.has_value() && num_accepted_tokens.has_value();
+  TORCH_CHECK(
+      spec_state_indices_tensor.has_value() == num_accepted_tokens.has_value(),
+      "spec_state_indices_tensor and num_accepted_tokens must both be "
+      "provided or both omitted");
+  const int* spec_state_indices_ptr = nullptr;
+  const int* num_accepted_tokens_ptr = nullptr;
+  int spec_stride = 0;
+  if (is_spec) {
+    const auto& spec_idx = spec_state_indices_tensor.value();
+    const auto& num_acc = num_accepted_tokens.value();
+    TORCH_CHECK(
+        spec_idx.is_contiguous(),
+        "spec_state_indices_tensor must be contiguous");
+    TORCH_CHECK(
+        num_acc.is_contiguous(), "num_accepted_tokens must be contiguous");
+    TORCH_CHECK(
+        spec_idx.dim() == 2,
+        "spec_state_indices_tensor must be 2D [num_seqs, K]");
+    TORCH_CHECK(
+        num_acc.dim() == 1, "num_accepted_tokens must be 1D [num_seqs]");
+    // Both tensors are reinterpret_cast<int*> on the kernel side; require
+    // int32 explicitly so a runaway int64 caller fails loudly instead of
+    // silently misreading bytes.
+    TORCH_CHECK(
+        spec_idx.scalar_type() == at::kInt,
+        "spec_state_indices_tensor must be int32, got ",
+        spec_idx.scalar_type());
+    TORCH_CHECK(
+        num_acc.scalar_type() == at::kInt,
+        "num_accepted_tokens must be int32, got ",
+        num_acc.scalar_type());
+    TORCH_CHECK(
+        spec_idx.size(0) == num_acc.size(0),
+        "spec_state_indices_tensor.size(0) (",
+        spec_idx.size(0),
+        ") must match num_accepted_tokens.size(0) (",
+        num_acc.size(0),
+        ")");
+    TORCH_CHECK(
+        spec_idx.size(0) == non_spec_query_start_loc.size(0) - 1,
+        "spec_state_indices_tensor.size(0) (",
+        spec_idx.size(0),
+        ") must equal query_start_loc.size(0) - 1 (",
+        non_spec_query_start_loc.size(0) - 1,
+        "); pass spec_query_start_loc as non_spec_query_start_loc when "
+        "spec args are set");
+    spec_state_indices_ptr = reinterpret_cast<int*>(spec_idx.data_ptr());
+    num_accepted_tokens_ptr = reinterpret_cast<int*>(num_acc.data_ptr());
+    spec_stride = spec_idx.size(1);
+  }
+
 #define NATIVE_LAUNCHER                                           \
   do {                                                            \
     torch::Tensor q = torch::empty(                               \
@@ -177,7 +238,11 @@ void gdn_attention(
         pad_slot_id,                                              \
         num_prefills,                                             \
         num_decodes,                                              \
-        reorder_input);                                           \
+        reorder_input,                                            \
+        is_spec,                                                  \
+        spec_state_indices_ptr,                                   \
+        num_accepted_tokens_ptr,                                  \
+        spec_stride);                                             \
     gdn::gated_delta_rule(                                        \
         queue,                                                    \
         core_attn_out_active,                                     \
@@ -193,11 +258,18 @@ void gdn_attention(
         non_spec_state_indices_tensor,                            \
         has_initial_state,                                        \
         num_prefills,                                             \
-        num_decodes);                                             \
+        num_decodes,                                              \
+        is_spec,                                                  \
+        spec_state_indices_ptr,                                   \
+        num_accepted_tokens_ptr,                                  \
+        spec_stride);                                             \
   } while (0)
 
 #ifdef VLLM_XPU_ENABLE_XE2
-  if (num_prefills > 0) {
+  // Spec-decoding always routes through the native kernels: even when
+  // seq_len > 1 (K=2..3 candidates) the spec slot ring needs the per-token
+  // writeback path, which the chunk kernels don't implement.
+  if (!is_spec && num_prefills > 0) {
     int batch_size = non_spec_query_start_loc.size(0) - 1;
     int padding_size = batch_size * (gdn::chunk_size_xe2 - 1);
 
