@@ -200,7 +200,18 @@ void cutlass_paged_decode_impl(
       key_cache.stride(2),
       is_interleaved_kv ? value_cache.stride(0) / 2 : value_cache.stride(0),
       value_cache.stride(1),
-      value_cache.stride(2)};
+      value_cache.stride(2),
+      // Q strides: for varlen Q is [total_seq, num_heads, head_size]; for
+      // non-varlen Q is [batch, num_heads, seq, head_size].
+      is_varlen ? query.stride(0) : query.stride(2),
+      is_varlen ? query.stride(1) : query.stride(1),
+      is_varlen ? int64_t{0} : query.stride(0)};
+
+  TORCH_CHECK(
+      query.stride(-1) == 1,
+      "paged_decode_xe2: query must be contiguous in the last dimension "
+      "(head_dim), got stride=",
+      query.stride(-1));
 
   TORCH_CHECK(
       key_cache.stride(-1) == 1,

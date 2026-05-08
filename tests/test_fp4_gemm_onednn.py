@@ -68,7 +68,6 @@ def test_mxfp4_gemm(mnk_factors, out_dtype):
         inputs_scale,
         weights_scale,
         out_dtype,
-        torch.Tensor(),
     )
 
     output_ref = torch.matmul(inputs_hp.to(out_dtype),
