@@ -18,9 +18,9 @@ from ._mx_utils import (fp4_e2m1fn_x2_to_float, hp_from_1x128, hp_from_128x128,
 REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
 
 
-def _is_env_enabled(env_name: str, default: str = "OFF") -> bool:
+def _is_env_enabled(env_name: str, default: str = "0") -> bool:
     value = os.environ.get(env_name, default).strip().upper()
-    return value not in ("0", "OFF", "FALSE", "NO", "N", "F")
+    return value in ("1", "ON", "TRUE", "YES", "Y")
 
 
 def _should_use_ref_fused_moe(is_mxfp8: bool) -> bool:
