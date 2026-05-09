@@ -55,7 +55,7 @@ class multimodal_rotary_embedding_kernel {
   // GPT-J vec4 processes 2 rotation offsets per call.
   static constexpr int GPTJ_PAIRS_PER_VEC = 2;
 
-  void operator()[[sycl::reqd_sub_group_size(32)]](
+  void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
     const int token_idx = item_ct1.get_group(2);
     const int embed_dim = rot_dim / 2;
@@ -82,8 +82,7 @@ class multimodal_rotary_embedding_kernel {
 
       scalar_t* data = is_query_head ? query : key;
       const int64_t stride = is_query_head ? query_stride : key_stride;
-      const int64_t token_head =
-          token_idx * stride + head_idx * head_stride;
+      const int64_t token_head = token_idx * stride + head_idx * head_stride;
       rotate_single_head(
           data + token_head, embed_dim, local_id, local_range, section_src);
       return;
@@ -91,12 +90,24 @@ class multimodal_rotary_embedding_kernel {
 
     // ── 1D grid mode: each WG handles all heads for one token ──
     rotate_all_heads(
-        query, query_stride, num_heads, embed_dim, local_id, local_range,
-        token_idx, section_src);
+        query,
+        query_stride,
+        num_heads,
+        embed_dim,
+        local_id,
+        local_range,
+        token_idx,
+        section_src);
     if (key != nullptr) {
       rotate_all_heads(
-          key, key_stride, num_kv_heads, embed_dim, local_id, local_range,
-          token_idx, section_src);
+          key,
+          key_stride,
+          num_kv_heads,
+          embed_dim,
+          local_id,
+          local_range,
+          token_idx,
+          section_src);
     }
   }
 
@@ -127,18 +138,24 @@ class multimodal_rotary_embedding_kernel {
         const int rot_offset = v * VEC_SIZE;
         const int s = find_section(rot_offset);
         apply_token_rotary_embedding_vec<scalar_t, VEC_SIZE>(
-            data, data,
-            section_src[s], section_src[s] + embed_dim,
-            rot_offset, embed_dim);
+            data,
+            data,
+            section_src[s],
+            section_src[s] + embed_dim,
+            rot_offset,
+            embed_dim);
       }
       // Scalar tail: embed_dim % VEC_SIZE remaining elements.
       const int tail_start = vph * VEC_SIZE;
       for (int r = tail_start + local_id; r < embed_dim; r += local_range) {
         const int s = find_section(r);
         apply_token_rotary_embedding<scalar_t, true>(
-            data, data,
-            section_src[s], section_src[s] + embed_dim,
-            r, embed_dim);
+            data,
+            data,
+            section_src[s],
+            section_src[s] + embed_dim,
+            r,
+            embed_dim);
       }
     } else {
       const int vph = embed_dim / GPTJ_PAIRS_PER_VEC;
@@ -147,21 +164,28 @@ class multimodal_rotary_embedding_kernel {
         const int s = find_section(rot_offset);
         // Guard: if the two offsets straddle a section boundary,
         // fall back to scalar to use the correct cos/sin for each.
-        if (rot_offset + 1 < embed_dim &&
-            find_section(rot_offset + 1) != s) {
+        if (rot_offset + 1 < embed_dim && find_section(rot_offset + 1) != s) {
           apply_token_rotary_embedding<scalar_t, false>(
-              data, data,
-              section_src[s], section_src[s] + embed_dim,
-              rot_offset, embed_dim);
+              data,
+              data,
+              section_src[s],
+              section_src[s] + embed_dim,
+              rot_offset,
+              embed_dim);
           const int s2 = find_section(rot_offset + 1);
           apply_token_rotary_embedding<scalar_t, false>(
-              data, data,
-              section_src[s2], section_src[s2] + embed_dim,
-              rot_offset + 1, embed_dim);
+              data,
+              data,
+              section_src[s2],
+              section_src[s2] + embed_dim,
+              rot_offset + 1,
+              embed_dim);
         } else {
           apply_token_rotary_embedding_gptj_vec4<scalar_t>(
-              data, data,
-              section_src[s], section_src[s] + embed_dim,
+              data,
+              data,
+              section_src[s],
+              section_src[s] + embed_dim,
               rot_offset);
         }
       }
@@ -169,9 +193,12 @@ class multimodal_rotary_embedding_kernel {
       if (embed_dim % GPTJ_PAIRS_PER_VEC != 0 && local_id == 0) {
         const int s = find_section(embed_dim - 1);
         apply_token_rotary_embedding<scalar_t, false>(
-            data, data,
-            section_src[s], section_src[s] + embed_dim,
-            embed_dim - 1, embed_dim);
+            data,
+            data,
+            section_src[s],
+            section_src[s] + embed_dim,
+            embed_dim - 1,
+            embed_dim);
       }
     }
   }
@@ -197,9 +224,12 @@ class multimodal_rotary_embedding_kernel {
         const int64_t token_head =
             token_idx * data_stride + head_idx * head_stride;
         apply_token_rotary_embedding_vec<scalar_t, VEC_SIZE>(
-            data + token_head, data + token_head,
-            section_src[s], section_src[s] + embed_dim,
-            rot_offset, embed_dim);
+            data + token_head,
+            data + token_head,
+            section_src[s],
+            section_src[s] + embed_dim,
+            rot_offset,
+            embed_dim);
       }
       // Scalar tail for embed_dim % VEC_SIZE != 0.
       const int tail_start = vph * VEC_SIZE;
@@ -213,9 +243,12 @@ class multimodal_rotary_embedding_kernel {
           const int64_t token_head =
               token_idx * data_stride + head_idx * head_stride;
           apply_token_rotary_embedding<scalar_t, true>(
-              data + token_head, data + token_head,
-              section_src[s], section_src[s] + embed_dim,
-              rot_offset, embed_dim);
+              data + token_head,
+              data + token_head,
+              section_src[s],
+              section_src[s] + embed_dim,
+              rot_offset,
+              embed_dim);
         }
       }
     } else {
@@ -228,21 +261,28 @@ class multimodal_rotary_embedding_kernel {
         const int64_t token_head =
             token_idx * data_stride + head_idx * head_stride;
         // Guard: section boundary crossing.
-        if (rot_offset + 1 < embed_dim &&
-            find_section(rot_offset + 1) != s) {
+        if (rot_offset + 1 < embed_dim && find_section(rot_offset + 1) != s) {
           apply_token_rotary_embedding<scalar_t, false>(
-              data + token_head, data + token_head,
-              section_src[s], section_src[s] + embed_dim,
-              rot_offset, embed_dim);
+              data + token_head,
+              data + token_head,
+              section_src[s],
+              section_src[s] + embed_dim,
+              rot_offset,
+              embed_dim);
           const int s2 = find_section(rot_offset + 1);
           apply_token_rotary_embedding<scalar_t, false>(
-              data + token_head, data + token_head,
-              section_src[s2], section_src[s2] + embed_dim,
-              rot_offset + 1, embed_dim);
+              data + token_head,
+              data + token_head,
+              section_src[s2],
+              section_src[s2] + embed_dim,
+              rot_offset + 1,
+              embed_dim);
         } else {
           apply_token_rotary_embedding_gptj_vec4<scalar_t>(
-              data + token_head, data + token_head,
-              section_src[s], section_src[s] + embed_dim,
+              data + token_head,
+              data + token_head,
+              section_src[s],
+              section_src[s] + embed_dim,
               rot_offset);
         }
       }
@@ -250,12 +290,14 @@ class multimodal_rotary_embedding_kernel {
       if (embed_dim % GPTJ_PAIRS_PER_VEC != 0) {
         for (int h = local_id; h < n_heads; h += local_range) {
           const int s = find_section(embed_dim - 1);
-          const int64_t token_head =
-              token_idx * data_stride + h * head_stride;
+          const int64_t token_head = token_idx * data_stride + h * head_stride;
           apply_token_rotary_embedding<scalar_t, false>(
-              data + token_head, data + token_head,
-              section_src[s], section_src[s] + embed_dim,
-              embed_dim - 1, embed_dim);
+              data + token_head,
+              data + token_head,
+              section_src[s],
+              section_src[s] + embed_dim,
+              embed_dim - 1,
+              embed_dim);
         }
       }
     }
@@ -329,8 +371,7 @@ void call_multimodal_rotary_embedding_kernel(
       vllm::MROPE_MAX_SECTIONS);
 
   const int query_hidden_size = query.numel() / num_tokens;
-  const int key_hidden_size =
-      key.has_value() ? key->numel() / num_tokens : 0;
+  const int key_hidden_size = key.has_value() ? key->numel() / num_tokens : 0;
   TORCH_CHECK(query_hidden_size % head_size == 0);
   TORCH_CHECK(key_hidden_size % head_size == 0);
 
@@ -346,8 +387,7 @@ void call_multimodal_rotary_embedding_kernel(
   // Strides.
   const int64_t query_stride = query.stride(0);
   const int64_t key_stride = key.has_value() ? key->stride(0) : 0;
-  const int64_t head_stride =
-      (query.dim() == 3) ? query.stride(-2) : head_size;
+  const int64_t head_stride = (query.dim() == 3) ? query.stride(-2) : head_size;
 
   // Ensure positions is contiguous for raw pointer arithmetic.
   at::Tensor positions_contig = positions.contiguous();
@@ -362,7 +402,9 @@ void call_multimodal_rotary_embedding_kernel(
   TORCH_CHECK(
       section_sum == rot_dim / 2,
       "mrope_section values must sum to rot_dim / 2 (embed_dim=",
-      rot_dim / 2, "), but got ", section_sum);
+      rot_dim / 2,
+      "), but got ",
+      section_sum);
 
   // ── Grid and block configuration ──
   // NeoX vec4 processes 4 rot_offsets/call; GPT-J vec4 processes 2.
@@ -380,15 +422,17 @@ void call_multimodal_rotary_embedding_kernel(
   if (num_tokens <= SMALL_TOKEN_THRESHOLD) {
     grid = sycl::range<3>(1, total_head_groups, num_tokens);
     block = sycl::range<3>(
-        1, 1,
-        std::min<int64_t>(align_up(std::max<int64_t>(vecs_per_head, 32), 32),
-                          512));
+        1,
+        1,
+        std::min<int64_t>(
+            align_up(std::max<int64_t>(vecs_per_head, 32), 32), 512));
   } else {
     grid = sycl::range<3>(1, 1, num_tokens);
     const int nk_vecs =
         (key.has_value() ? num_kv_heads : num_heads) * vecs_per_head;
     block = sycl::range<3>(
-        1, 1,
+        1,
+        1,
         std::min<int64_t>(align_up(std::max<int64_t>(nk_vecs, 32), 32), 512));
   }
 

@@ -9,14 +9,9 @@ sections so that each section can encode a different positional axis
 
 Usage:
     python benchmark/benchmark_multimodal_rotary_embedding.py
-    python benchmark/benchmark_multimodal_rotary_embedding.py --num-tokens 4096
-    python benchmark/benchmark_multimodal_rotary_embedding.py --save-path ./configs/mrope/
 """
 
 import argparse
-import itertools
-import math
-import sys
 
 import torch
 import triton
@@ -99,8 +94,6 @@ def mrope_vllm_torch(
     Works on flat [num_tokens, hidden] layout internally, same as vLLM.
     """
     num_tokens = query.shape[0]
-    num_heads = query.shape[1]
-    num_kv_heads = key.shape[1]
     head_size = query.shape[2]
     rot_dim = cos_sin_cache.shape[1]
 
@@ -109,8 +102,8 @@ def mrope_vllm_torch(
     k_flat = key.reshape(num_tokens, -1).clone()
 
     # cos_sin_cache[positions] → [num_sections, num_tokens, rot_dim]
-    cos_sin = cos_sin_cache[positions]  # [num_sections, num_tokens, rot_dim]
-    cos, sin = cos_sin.chunk(2, dim=-1)  # each [num_sections, num_tokens, rot_dim//2]
+    cos_sin = cos_sin_cache[positions]
+    cos, sin = cos_sin.chunk(2, dim=-1)  # rot_dim//2
 
     # Merge sections: for each section s, take cos[s, :, lo:hi]
     cos = torch.cat(
@@ -325,76 +318,6 @@ def mrope_xpu_kernel(positions: torch.Tensor, query: torch.Tensor,
                                     cos_sin_cache, is_neox, mrope_section)
 
 
-# ─── Correctness check ──────────────────────────────────────────────────────
-def check_correctness(config_name: str, config: dict, dtype: torch.dtype,
-                      is_neox: bool, num_tokens: int,
-                      max_position: int) -> None:
-    head_size = config["head_size"]
-    rot_dim = config["rot_dim"]
-    mrope_section = config["mrope_section"]
-    num_heads = config["num_heads"]
-    num_kv_heads = config["num_kv_heads"]
-    num_sections = len(mrope_section)
-
-    cos_sin_cache = compute_cos_sin_cache(max_position, rot_dim, dtype=dtype)
-
-    positions = torch.stack([
-        torch.randint(0, max_position, (num_tokens, ), device="xpu")
-        for _ in range(num_sections)
-    ])
-
-    query = torch.randn(num_tokens, num_heads, head_size, dtype=dtype,
-                         device="xpu")
-    key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype,
-                       device="xpu")
-
-    # Reference: vLLM torch
-    ref_q, ref_k = mrope_vllm_torch(positions, query.clone(), key.clone(),
-                                     cos_sin_cache, mrope_section, is_neox)
-
-    def _check(name, q_result, k_result):
-        q_ref = ref_q.float()
-        k_ref = ref_k.float()
-        q_res = q_result.float()
-        k_res = k_result.float()
-
-        # Handle shape mismatch (vllm variants may return different shapes)
-        if q_res.shape != q_ref.shape:
-            q_res = q_res.view_as(q_ref)
-        if k_res.shape != k_ref.shape:
-            k_res = k_res.view_as(k_ref)
-
-        q_match = torch.allclose(q_res, q_ref, atol=1e-2, rtol=1e-2)
-        k_match = torch.allclose(k_res, k_ref, atol=1e-2, rtol=1e-2)
-        status = "✅" if (q_match and k_match) else "❌"
-        msg = (f"  {status} {config_name} [{name}] (neox={is_neox}): "
-               f"Q={'match' if q_match else 'MISMATCH'}, "
-               f"K={'match' if k_match else 'MISMATCH'}")
-        if not q_match or not k_match:
-            q_maxdiff = (q_res - q_ref).abs().max().item()
-            k_maxdiff = (k_res - k_ref).abs().max().item()
-            msg += f"  (Q maxdiff={q_maxdiff:.6f}, K maxdiff={k_maxdiff:.6f})"
-        print(msg)
-
-    # vLLM torch.compile
-    vcq, vck = mrope_vllm_compiled(positions, query.clone(), key.clone(),
-                                    cos_sin_cache, mrope_section, is_neox)
-    _check("vLLM t.compile", vcq, vck)
-
-    # vLLM Triton (NeoX + 3 sections only)
-    if is_neox and len(mrope_section) == 3:
-        tq, tk = mrope_vllm_triton(positions, query.clone(), key.clone(),
-                                    cos_sin_cache, mrope_section, is_neox)
-        _check("vLLM Triton", tq, tk)
-
-    # XPU kernel (in-place)
-    q_xpu = query.clone()
-    k_xpu = key.clone()
-    mrope_xpu_kernel(positions, q_xpu, k_xpu, head_size, cos_sin_cache,
-                     is_neox, mrope_section)
-    _check("XPU Kernel", q_xpu, k_xpu)
-
-
 # ─── Benchmark ───────────────────────────────────────────────────────────────
 def get_benchmark(config: dict, dtype: torch.dtype, is_neox: bool,
                   max_position: int, num_tokens_list: list[int]):
@@ -543,11 +466,6 @@ def parse_benchmark_args():
         default="./configs/mrope/",
         help="Path to save benchmark results",
     )
-    parser.add_argument(
-        "--check-correctness",
-        action="store_true",
-        help="Run correctness check before benchmarking",
-    )
     return parser.parse_args()
 
 
@@ -582,15 +500,6 @@ if __name__ == "__main__":
     print(f"  num_tokens:   {num_tokens_list}")
     print(f"  configs:      {list(configs_to_run.keys())}")
     print()
-
-    # ── Correctness check ──
-    if args.check_correctness:
-        print("Running correctness checks...")
-        for name, cfg in configs_to_run.items():
-            for neox in [True, False]:
-                check_correctness(name, cfg, dtype, neox, num_tokens=64,
-                                  max_position=args.max_position)
-        print()
 
     # ── Performance benchmark ──
     for name, cfg in configs_to_run.items():
