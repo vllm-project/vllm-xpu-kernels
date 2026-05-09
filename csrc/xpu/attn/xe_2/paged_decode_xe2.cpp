@@ -163,6 +163,9 @@ void cutlass_paged_decode_impl(
         window_size_right == -1 ? max_seqlen_k : window_size_right;
   }
 
+  int page_stride_elements = static_cast<int>(
+      get_paged_kv_cache_page_stride_elements(key_cache, is_interleaved_kv));
+
   paged_decode_args_t args = {
       query.data_ptr(),
       key_cache.data_ptr(),
@@ -209,7 +212,20 @@ void cutlass_paged_decode_impl(
       // non-varlen Q is [batch, num_heads, seq, head_size].
       is_varlen ? query.stride(0) : query.stride(2),
       is_varlen ? query.stride(1) : query.stride(1),
-      is_varlen ? int64_t{0} : query.stride(0)};
+      is_varlen ? int64_t{0} : query.stride(0),
+      page_stride_elements};
+
+  // For non-contiguous paged KV (e.g., cross-layer KV cache), enlarge
+  // total_seqlen_k to cover the full physical extent for the 2D block
+  // load surface descriptor. Without this, block loads for blocks at
+  // higher physical addresses would return zeros.
+  if (is_paged) {
+    int64_t effective_total =
+        get_paged_kv_cache_effective_total_seqlen(key_cache, is_interleaved_kv);
+    if (effective_total > args.total_seqlen_k) {
+      args.total_seqlen_k = static_cast<int>(effective_total);
+    }
+  }
 
   TORCH_CHECK(
       query.stride(-1) == 1,

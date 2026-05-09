@@ -2,6 +2,7 @@
 
 #include "core/registration.h"
 #include "xpu/attn/attn_interface.h"
+#include "xpu/attn/paged_kv_utils.h"
 #include "utils.h"
 #include <torch/all.h>
 
@@ -161,6 +162,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     TORCH_CHECK(
         block_table.stride(-1) == 1,
         "page_table must have contiguous last dimension");
+    check_paged_kv_cache_strides(k, v);
   }
 
   CHECK_DEVICE(cu_seqlens_q);
