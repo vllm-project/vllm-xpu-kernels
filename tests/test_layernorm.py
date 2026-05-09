@@ -8,7 +8,7 @@ from tests.ops.layernorm_op import RMSNorm
 from tests.utils import opcheck
 
 DTYPES = [torch.half, torch.bfloat16]
-NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
+NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 # TODO: add back  5120, 5124, 5125, 5126, 8192, 8199 after ci env issue fixed
 HIDDEN_SIZES = [8, 768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192,
                 8199]  # Arbitrary values for testing
@@ -56,7 +56,8 @@ def test_rms_norm(
     last_dim = 2 * hidden_size if strided_input else hidden_size
     x = torch.randn(num_tokens, last_dim, dtype=dtype)
     x = x[..., :hidden_size]
-    assert x.is_contiguous() != strided_input
+    if num_tokens > 1:
+        assert x.is_contiguous() != strided_input
     x *= scale
     residual = torch.randn_like(x) * scale if add_residual else None
 
