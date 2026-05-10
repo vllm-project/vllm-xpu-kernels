@@ -18,9 +18,6 @@ import triton
 import triton.language as tl
 
 from tests import register_ops as ops
-from tests.utils import check_ipex_availability
-
-HAS_IPEX = check_ipex_availability()
 
 # ─── Model-inspired M-RoPE configurations ───────────────────────────────────
 # Format: (head_size, rot_dim, mrope_section, description)

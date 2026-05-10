@@ -137,13 +137,28 @@ class multimodal_rotary_embedding_kernel {
       for (int v = local_id; v < vph; v += local_range) {
         const int rot_offset = v * VEC_SIZE;
         const int s = find_section(rot_offset);
-        apply_token_rotary_embedding_vec<scalar_t, VEC_SIZE>(
-            data,
-            data,
-            section_src[s],
-            section_src[s] + embed_dim,
-            rot_offset,
-            embed_dim);
+        // Guard: if the vec4 straddles a section boundary,
+        // fall back to scalar to use the correct cos/sin for each.
+        if (find_section(rot_offset + VEC_SIZE - 1) != s) {
+          for (int j = 0; j < VEC_SIZE; ++j) {
+            const int sj = find_section(rot_offset + j);
+            apply_token_rotary_embedding<scalar_t, true>(
+                data,
+                data,
+                section_src[sj],
+                section_src[sj] + embed_dim,
+                rot_offset + j,
+                embed_dim);
+          }
+        } else {
+          apply_token_rotary_embedding_vec<scalar_t, VEC_SIZE>(
+              data,
+              data,
+              section_src[s],
+              section_src[s] + embed_dim,
+              rot_offset,
+              embed_dim);
+        }
       }
       // Scalar tail: embed_dim % VEC_SIZE remaining elements.
       const int tail_start = vph * VEC_SIZE;
@@ -223,13 +238,28 @@ class multimodal_rotary_embedding_kernel {
         const int s = find_section(rot_offset);
         const int64_t token_head =
             token_idx * data_stride + head_idx * head_stride;
-        apply_token_rotary_embedding_vec<scalar_t, VEC_SIZE>(
-            data + token_head,
-            data + token_head,
-            section_src[s],
-            section_src[s] + embed_dim,
-            rot_offset,
-            embed_dim);
+        // Guard: if the vec4 straddles a section boundary,
+        // fall back to scalar to use the correct cos/sin for each.
+        if (find_section(rot_offset + VEC_SIZE - 1) != s) {
+          for (int j = 0; j < VEC_SIZE; ++j) {
+            const int sj = find_section(rot_offset + j);
+            apply_token_rotary_embedding<scalar_t, true>(
+                data + token_head,
+                data + token_head,
+                section_src[sj],
+                section_src[sj] + embed_dim,
+                rot_offset + j,
+                embed_dim);
+          }
+        } else {
+          apply_token_rotary_embedding_vec<scalar_t, VEC_SIZE>(
+              data + token_head,
+              data + token_head,
+              section_src[s],
+              section_src[s] + embed_dim,
+              rot_offset,
+              embed_dim);
+        }
       }
       // Scalar tail for embed_dim % VEC_SIZE != 0.
       const int tail_start = vph * VEC_SIZE;
