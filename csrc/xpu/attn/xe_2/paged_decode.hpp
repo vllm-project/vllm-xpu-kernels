@@ -112,6 +112,7 @@ struct paged_decode_args_t {
   bool is_sink = false;
   bool is_interleaved_kv_cache = false;
   int num_kv_splits = 1;
+  const int* splits_per_seq = nullptr;  // per-seq split counts; null => use global num_kv_splits
   // KV cache strides [num_blocks, block_size, num_heads_kv, head_size]
   int64_t k_stride_page = 0;
   int64_t k_stride_seq = 0;
@@ -307,6 +308,7 @@ struct DecodeKernelLauncher {
             reinterpret_cast<ElementLSE*>(args.max_logits),
             stride_max_logits,
             reinterpret_cast<ElementQ*>(args.sm_sink),
+            args.splits_per_seq,
         },
         {args.sm_scale,
          args.k_scale,
@@ -332,7 +334,8 @@ struct DecodeKernelLauncher {
          stride_exp_sums,
          reinterpret_cast<ElementLSE*>(args.max_logits),
          stride_max_logits,
-         args.window_size_left},
+         args.window_size_left,
+         args.splits_per_seq},
         hw_info,
         args.num_kv_splits};
 

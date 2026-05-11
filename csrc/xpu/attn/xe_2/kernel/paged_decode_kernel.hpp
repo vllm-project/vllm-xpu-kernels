@@ -143,6 +143,7 @@ class XeFMHAFwdSplitKVKernel {
     StrideO dMax_logits;
 
     const ElementSink* sm_sink;
+    const int* splits_per_seq = nullptr;  // per-seq split counts; null => use global num_kv_splits
   };
   using KernelParams = KernelArguments;
 
@@ -321,23 +322,28 @@ class XeFMHAFwdSplitKVKernel {
           make_shape(head_group_q, num_kv_splits, s.num_heads_kv, batch_dim);
       auto shape_sink = make_shape(s.num_heads_kv, head_group_q);
 
-      int num_blocks_per_split =
-          cute::ceil_div(windowed_k_blocks, num_kv_splits);
+      // Per-sequence adaptive split count
+      int seq_num_kv_splits = (p.splits_per_seq != nullptr)
+          ? p.splits_per_seq[idx_b]
+          : num_kv_splits;
 
-      // Per-sequence split decision: short sequences are treated as
-      // single-split even when num_kv_splits > 1, avoiding precision
-      // loss from the split-reduce roundtrip.
-      // Scale threshold with tile width: smaller tiles (p64) have fewer
-      // SGs per WG, so splitting becomes beneficial at fewer blocks.
+      // Early exit: this WG's split index exceeds the per-seq allocation
+      if (idx_kv_split >= seq_num_kv_splits) {
+        continue;
+      }
+
+      int num_blocks_per_split =
+          cute::ceil_div(windowed_k_blocks, seq_num_kv_splits);
+
+      // Per-sequence single-split fallback for very short sequences
       constexpr int tile_n = get<1>(TileShapeQK{});
       constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
       bool is_single_split =
-          (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
+          (seq_num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
 
       int kv_split_offset;
       int num_effective_kv_blocks;
       if (is_single_split) {
-        // Split 0 processes all blocks; splits 1+ skip entirely.
         if (idx_kv_split > 0) {
           continue;
         }
@@ -351,7 +357,6 @@ class XeFMHAFwdSplitKVKernel {
       }
 
       if (num_effective_kv_blocks <= 0) {
-        // no need computation
         continue;
       }
 
@@ -517,6 +522,7 @@ class ReduceSplitK {
     const ElementLSE* max_logits;
     StrideO dMax_logits;
     int window_size_left = -1;
+    const int* splits_per_seq = nullptr;  // per-seq split counts
   };
   using KernelParams = KernelArguments;
 
@@ -635,16 +641,20 @@ class ReduceSplitK {
                           get<1>(TileShapeQK{})
                     : 0;
       const int windowed_k_blocks = k_blocks - k_block0;
-      int num_blocks_per_split =
-          cute::ceil_div(windowed_k_blocks, num_kv_splits);
+      // Per-sequence adaptive split count
+      int seq_num_kv_splits = (p.splits_per_seq != nullptr)
+          ? p.splits_per_seq[idx_b]
+          : num_kv_splits;
 
-      // Mirror the FMHA kernel's is_single_split decision so we only
-      // read split slots that were actually written.
+      int num_blocks_per_split =
+          cute::ceil_div(windowed_k_blocks, seq_num_kv_splits);
+
+      // Mirror the FMHA kernel's is_single_split decision
       constexpr int tile_n = get<1>(typename FMHAKernel_::TileShapeQK{});
       constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
       bool is_single_split =
-          (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
-      int effective_splits = is_single_split ? 1 : num_kv_splits;
+          (seq_num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
+      int effective_splits = is_single_split ? 1 : seq_num_kv_splits;
 
       int offset_o = 0, offset_o_accum = 0;
       int offset_exp_sums = 0, offset_max_logits = 0;
