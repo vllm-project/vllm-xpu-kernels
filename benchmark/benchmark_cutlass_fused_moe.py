@@ -221,17 +221,9 @@ def get_benchmark(iterations):
                             topk, x_dtype, w_dtype, has_bias))
 
         if provider == "vllm":
-            start_events = [
-                torch.xpu.Event(enable_timing=True)
-                for _ in range(iterations - 5)
-            ]
-            end_events = [
-                torch.xpu.Event(enable_timing=True)
-                for _ in range(iterations - 5)
-            ]
-            for index in range(iterations):
-                if index >= 5:
-                    start_events[index - 5].record()
+            start_event = torch.xpu.Event(enable_timing=True)
+            end_event = torch.xpu.Event(enable_timing=True)
+            for index in range(5):
                 xpu_fused_moe(hidden_states=a,
                               w13=w13,
                               w13_scales=w13_scales,
@@ -245,13 +237,24 @@ def get_benchmark(iterations):
                               activation="silu",
                               num_experts=num_experts,
                               is_fp8=(w_dtype is not None))
-                if index >= 5:
-                    end_events[index - 5].record()
+            start_event.record()
+            for index in range(5, iterations):
+                xpu_fused_moe(hidden_states=a,
+                              w13=w13,
+                              w13_scales=w13_scales,
+                              w13_bias=w13_bias,
+                              w2=w2,
+                              w2_scales=w2_scales,
+                              w2_bias=w2_bias,
+                              topk_weights=expert_scores,
+                              topk_ids=expert_indices,
+                              n_experts_per_token=topk,
+                              activation="silu",
+                              num_experts=num_experts,
+                              is_fp8=(w_dtype is not None))
+            end_event.record()
             torch.xpu.synchronize()
-            total_latency = sum(
-                start_events[i].elapsed_time(end_events[i])
-                for i in range(iterations - 5)
-            )
+            total_latency = start_event.elapsed_time(end_event)
         else:
             n_measured = iterations - 5
             remap_se = [
