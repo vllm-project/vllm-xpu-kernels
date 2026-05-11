@@ -207,6 +207,42 @@ void cutlass_paged_decode_impl(
       is_varlen ? query.stride(1) : query.stride(1),
       is_varlen ? int64_t{0} : query.stride(0)};
 
+  // Per-sequence adaptive split-K: for batch > 1, compute per-seq splits
+  // to avoid over-splitting short sequences in mixed-length batches.
+  // Only activate for supported GQA configs (ratio >= 8).
+  at::Tensor splits_per_seq_tensor;
+  int num_q_group_size = num_heads_q / num_heads_kv;
+  if (batch_size > 1 && num_kv_splits > 1 && num_q_group_size >= 8) {
+    auto seqlens_k_cpu = cu_seqlens_k.cpu();
+    auto seqlens_k_ptr = seqlens_k_cpu.data_ptr<int>();
+
+    int kv_tile = (block_size == 16) ? 16 : (block_size == 32) ? 32 : 64;
+    int sg_per_wg = (block_size == 16) ? 1 : (block_size == 32) ? 2 : 4;
+    int policy_split_cap = (block_size == 16) ? 16 : (block_size == 32) ? 32 : 64;
+
+    std::vector<int> splits_vec(batch_size);
+    for (int i = 0; i < batch_size; ++i) {
+      int seq_k_i = is_local ? std::min(seqlens_k_ptr[i], window_size_left + 1)
+                             : seqlens_k_ptr[i];
+      int kv_tiles_i = (seq_k_i + kv_tile - 1) / kv_tile;
+
+      // Quick path: very short sequence → single split
+      if (kv_tiles_i < 16) {
+        splits_vec[i] = 1;
+        continue;
+      }
+
+      // Use bandwidth-based heuristic: ~12 tiles per split
+      int splits_bw = std::max(1, kv_tiles_i / 12);
+      int max_splits_tiles = std::max(1, kv_tiles_i / 4);
+      splits_vec[i] = std::max(1, std::min({splits_bw, max_splits_tiles, 32, policy_split_cap, num_kv_splits}));
+    }
+
+    splits_per_seq_tensor = torch::from_blob(
+        splits_vec.data(), {batch_size}, torch::kInt32).clone().to(query.device());
+    args.splits_per_seq = splits_per_seq_tensor.data_ptr<int>();
+  }
+
   TORCH_CHECK(
       query.stride(-1) == 1,
       "paged_decode_xe2: query must be contiguous in the last dimension "
