@@ -244,28 +244,25 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int block_size = k.size(1);
     int head_size_qk = q.size(-1);
 
-    // Intel Xe SLM (shared local memory) limits: at the largest head_size
-    // bucket (h576, used by MLA decode = kv_lora_rank+qk_rope_head_dim), the
-    // per-WG output accumulator plus Q/K/V tiles cannot fit in SLM unless
-    // q_packed <= 8 and block_size <= 64. Fail fast here so callers (e.g.
-    // vLLM) can route to a different strategy or bump TP, instead of
-    // hanging at runtime.
-    if (head_size_qk > 512) {  // h576 dispatch bucket (see fmha_utils.hpp)
+    // SLM (shared local memory) limits on Intel Xe restrict the paged decode
+    // kernel's epilogue cross-SG reduction buffer when head_size grows.
+    // The buffer size is q_packed * head_size_vo * SGPerWG * sizeof(float);
+    // with kv_tile=_64 (SGPerWG=4) and head_size_vo=512 (MLA), q_packed=8
+    // takes 64 KiB (fits) and q_packed=16 takes 128 KiB (exceeds the per-WG
+    // SLM cap and hangs at submit). All block_size that are multiples of 64
+    // dispatch through kv_tile=_64 so the SLM cost is independent of
+    // block_size; only q_packed needs to be guarded.
+    if (head_size_qk > 512) {
+      int q_packed =
+          num_heads_kv > 0 ? (num_heads_q / num_heads_kv) : num_heads_q;
       TORCH_CHECK(
-          block_size <= 64,
-          "paged decode at head_size=",
+          q_packed <= 8,
+          "paged decode: num_heads_q/num_heads_kv=",
+          q_packed,
+          " is not supported at head_size_qk=",
           head_size_qk,
-          " is not supported with block_size=",
-          block_size,
-          " due to Intel Xe SLM limits; use block_size<=64.");
-      TORCH_CHECK(
-          num_heads_q <= 8,
-          "paged decode at head_size=",
-          head_size_qk,
-          " is not supported with num_heads_q=",
-          num_heads_q,
-          " per rank due to Intel Xe SLM limits (q_packed must be <= 8). "
-          "Increase tensor parallel size so num_heads_q per rank is <= 8.");
+          " due to Intel Xe SLM limits (q_packed must be <= 8). Increase "
+          "tensor parallel size so num_heads_q per rank is <= 8.");
     }
 
     // Output shape uses V's head_dim (may differ from Q/K for MLA)
