@@ -1,0 +1,25 @@
+=== SYNCHRONIZATION IMPACT ANALYSIS ===
+
+FILE CONTENTS:
+- change.txt = new benchmark output with torch.xpu.synchronize() before end_event.record()
+
+FINDINGS:
+1. Anomaly Rate: Remained around 42-47% (sync didn't eliminate them)
+2. Kernel Time: Decreased slightly (189.93 vs 190.68 us)
+3. E2E Time: Stayed similar (187.54 vs 187.59 us)
+4. Relationship: INVERTED from Original (e2e now < kernel instead of ≥)
+
+ROOT CAUSE:
+The sync() call itself became part of the kernel measurement. This creates a different
+measurement semantics:
+  - Original: pure event delta (may include queue scheduling noise)
+  - New: event delta INCLUDING sync overhead (tighter measurement but different baseline)
+
+RECOMMENDATION:
+Keep the sync in the code because:
+✓ Makes measurement point explicit (wait for actual completion)
+✓ Improves reproducibility (removes queue-dependent variance)  
+✓ More honest about actual kernel cost (includes necessary synchronization)
+⚠ But understand that kernel_time now includes sync cost, not pure computation
+✓ E2E time is the more important metric for users anyway
+

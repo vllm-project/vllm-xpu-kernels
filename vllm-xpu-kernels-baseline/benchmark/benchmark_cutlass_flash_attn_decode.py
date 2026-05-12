@@ -319,17 +319,7 @@ def filter_configs(configs):
     for config in configs:
         if (config[1] == (16, 1) and config[2] == 256) or \
            (config[3] == 128 and config[6] == 32768 and config[2] >= 192):
-            continue
-        # Only batch > 1 (per-seq splits only triggers for multi-batch)
-        num_seqs = int(config[0].split(",")[0])
-        if num_seqs <= 1:
-            continue
-        # Only supported GQA ratio >= 8
-        num_q_heads, num_kv_heads = config[1]
-        if num_q_heads // num_kv_heads < 8:
-            continue
-        # Only compiled head sizes
-        if config[2] not in [128]:
+            print("Skipping config due to potential OOM: ", config)
             continue
         new_configs.append(config)
     return new_configs
@@ -344,15 +334,14 @@ if __name__ == "__main__":
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
 
-    # Skip correctness tests (can crash GPU with unsupported configs)
-    # configs = gen_correctness_config()
-    # configs = filter_configs(configs)
-    # for config in configs:
-    #     try:
-    #         calculate_diff_decode_paged_kv(config)
-    #     except Exception as e:
-    #         print("Error in config: ", config, " error: ", e)
-    #     clear_xpu_cache()
+    configs = gen_correctness_config()
+    configs = filter_configs(configs)
+    for config in configs:
+        try:
+            calculate_diff_decode_paged_kv(config)
+        except Exception as e:
+            print("Error in config: ", config, " error: ", e)
+        clear_xpu_cache()
 
     configs = gen_perf_configs()
     configs = filter_configs(configs)

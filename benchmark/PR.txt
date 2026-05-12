@@ -1,0 +1,1107 @@
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 64, 64, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 64, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 64, 128, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 64, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 192, 64, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 192, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (4, 4), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (4, 4), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 192, 128, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (4, 4), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (4, 4), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 192, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 256, 64, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 256, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (4, 4), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (4, 4), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 256, 128, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (4, 4), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (4, 4), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (4, 4), 256, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 64, 64, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 64, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 64, 128, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 64, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 192, 64, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 192, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (8, 2), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (8, 2), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 192, 128, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (8, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (8, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 192, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 256, 64, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 256, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (8, 2), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (8, 2), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 256, 128, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (8, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (8, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (8, 2), 256, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 64, 64, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 64, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 64, 128, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 64, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 192, 64, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 192, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (10, 2), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (10, 2), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 192, 128, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (10, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (10, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 192, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 256, 64, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 256, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (10, 2), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (10, 2), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 256, 128, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (10, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (10, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (10, 2), 256, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (16, 1), 64, 64, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (16, 1), 64, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (16, 1), 64, 128, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (16, 1), 64, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (16, 1), 192, 64, torch.float16, None, 32768, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,1025', (16, 1), 192, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (16, 1), 192, 128, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping unsupported FMHA config:  ('1,1,1025', (16, 1), 192, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 64, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 64, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 64, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 64, torch.float16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 64, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 64, torch.bfloat16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 64, torch.bfloat16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 128, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 128, torch.float16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,1025', (16, 1), 256, 128, torch.bfloat16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (4, 4), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (4, 4), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (4, 4), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (4, 4), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (4, 4), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (4, 4), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (4, 4), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (4, 4), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (8, 2), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (8, 2), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (8, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (8, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (8, 2), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (8, 2), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (8, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (8, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (10, 2), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (10, 2), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (10, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (10, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (10, 2), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (10, 2), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (10, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (10, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 64, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 64, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 64, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 64, torch.float16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 64, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 64, torch.bfloat16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 64, torch.bfloat16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 128, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 128, torch.float16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('3,1+1+1,523+37+2011', (16, 1), 256, 128, torch.bfloat16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (4, 4), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (4, 4), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (4, 4), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (4, 4), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (4, 4), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (4, 4), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (4, 4), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (4, 4), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (8, 2), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (8, 2), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (8, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (8, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (8, 2), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (8, 2), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (8, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (8, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (10, 2), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (10, 2), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (10, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (10, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (10, 2), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (10, 2), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (10, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (10, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 64, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 64, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 64, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 64, torch.float16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 64, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 64, torch.bfloat16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 64, torch.bfloat16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 128, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 128, torch.float16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('1,1,13000', (16, 1), 256, 128, torch.bfloat16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 192, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 192, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 192, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 192, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 64, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 64, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 64, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 64, torch.float16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 64, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 64, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 64, torch.bfloat16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 64, torch.bfloat16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 128, torch.float16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 128, torch.float16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 128, torch.float16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 128, torch.float16, None, 2048, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 128, torch.bfloat16, None, 32768, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 128, torch.bfloat16, None, 32768, 2, None, True)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping config due to potential OOM:  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 256, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (4, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (8, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (10, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,1025', (16, 1), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (4, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (8, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (10, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('3,1+1+1,523+37+2011', (16, 1), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (4, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (8, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (10, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('1,1,13000', (16, 1), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match, [transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+ ('4,1+1+1+1,523+37+2011+5000', (4, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (8, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (10, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 64, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 64, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 64, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 64, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 64, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 64, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 64, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 64, torch.bfloat16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 128, torch.float16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 128, torch.float16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 128, torch.float16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 128, torch.float16, None, 2048, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 128, torch.bfloat16, None, 32768, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 128, torch.bfloat16, None, 32768, 2, None, True)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 128, torch.bfloat16, None, 2048, 2, None, False)
+✅ All implementations match,  ('4,1+1+1+1,523+37+2011+5000', (16, 1), 128, 128, torch.bfloat16, None, 2048, 2, None, True)
+Full model config with TP=1:
+  num_groups: 1
+  hidden_size: 4096
+  intermediate_size: 14336
+  dtype: torch.bfloat16
+  model_arch: LlamaForCausalLM
+  vocab_size: 128256
+  num_layers: 32
+  num_attention_heads: 32
+  num_key_value_heads: 8
+  head_dim: 128
+  hidden_act: silu
+  max_position_embeddings: 131072
+  rope_theta: 10000.0
+  rope_scaling: {'factor': 8.0, 'low_freq_factor': 1.0, 'high_freq_factor': 4.0, 'original_max_position_embeddings': 8192, 'rope_type': 'llama3', 'rope_theta': 500000.0}
+  rms_norm_eps: 1e-05
+  layer_norm_eps: 1e-05
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  moe_config: {}
+  is_moe: False
+  tp_size: 1
+  model_type: llama
+  torch_dtype: torch.bfloat16
+Full model config with TP=1:
+  num_groups: 1
+  hidden_size: 2560
+  intermediate_size: 10240
+  dtype: torch.bfloat16
+  model_arch: MiniCPMV
+  vocab_size: 73448
+  num_layers: 32
+  num_attention_heads: 32
+  num_key_value_heads: 2
+  head_dim: 128
+  hidden_act: silu
+  max_position_embeddings: 32768
+  rope_theta: 10000.0
+  rope_scaling: {'factor': 1.0, 'long_factor': [0.9977997200264581, 1.014658295992452, 1.0349680404997148, 1.059429246056193, 1.0888815016813513, 1.1243301355211495, 1.166977103606075, 1.2182568066927284, 1.2798772354275727, 1.3538666751582975, 1.4426259039919596, 1.5489853358570191, 1.6762658237220625, 1.8283407612492941, 2.0096956085876183, 2.225478927469756, 2.481536379650452, 2.784415934557119, 3.1413289096347365, 3.560047844772632, 4.048719380066383, 4.615569542115128, 5.2684819496549835, 6.014438591970396, 6.858830049237097, 7.804668263503327, 8.851768731513417, 9.99600492938444, 11.228766118181639, 12.536757560834843, 13.902257701387796, 15.303885189125953, 16.717837610115794, 18.119465097853947, 19.484965238406907, 20.792956681060105, 22.02571786985731, 23.16995406772833, 24.217054535738416, 25.16289275000465, 26.007284207271347, 26.753240849586767, 27.40615325712662, 27.973003419175363, 28.461674954469114, 28.880393889607006, 29.237306864684626, 29.540186419591297, 29.79624387177199, 30.01202719065413, 30.193382037992453, 30.34545697551969, 30.47273746338473, 30.579096895249787, 30.66785612408345, 30.741845563814174, 30.80346599254902, 30.85474569563567, 30.897392663720595, 30.932841297560394, 30.962293553185553, 30.986754758742034, 31.007064503249293, 31.02392307921529], 'original_max_position_embeddings': 32786, 'rope_type': 'longrope', 'short_factor': [0.9977997200264581, 1.014658295992452, 1.0349680404997148, 1.059429246056193, 1.0888815016813513, 1.1243301355211495, 1.166977103606075, 1.2182568066927284, 1.2798772354275727, 1.3538666751582975, 1.4426259039919596, 1.5489853358570191, 1.6762658237220625, 1.8283407612492941, 2.0096956085876183, 2.225478927469756, 2.481536379650452, 2.784415934557119, 3.1413289096347365, 3.560047844772632, 4.048719380066383, 4.615569542115128, 5.2684819496549835, 6.014438591970396, 6.858830049237097, 7.804668263503327, 8.851768731513417, 9.99600492938444, 11.228766118181639, 12.536757560834843, 13.902257701387796, 15.303885189125953, 16.717837610115794, 18.119465097853947, 19.484965238406907, 20.792956681060105, 22.02571786985731, 23.16995406772833, 24.217054535738416, 25.16289275000465, 26.007284207271347, 26.753240849586767, 27.40615325712662, 27.973003419175363, 28.461674954469114, 28.880393889607006, 29.237306864684626, 29.540186419591297, 29.79624387177199, 30.01202719065413, 30.193382037992453, 30.34545697551969, 30.47273746338473, 30.579096895249787, 30.66785612408345, 30.741845563814174, 30.80346599254902, 30.85474569563567, 30.897392663720595, 30.932841297560394, 30.962293553185553, 30.986754758742034, 31.007064503249293, 31.02392307921529], 'rope_theta': 10000.0}
+  rms_norm_eps: 1e-06
+  layer_norm_eps: 1e-05
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  moe_config: {}
+  is_moe: False
+  tp_size: 1
+  model_type: minicpmv
+  torch_dtype: torch.bfloat16
+Full model config with TP=1:
+  num_groups: 128
+  hidden_size: 2048
+  intermediate_size: 768
+  dtype: torch.bfloat16
+  model_arch: Qwen3MoeForCausalLM
+  vocab_size: 151936
+  num_layers: 48
+  num_attention_heads: 32
+  num_key_value_heads: 4
+  head_dim: 128
+  hidden_act: silu
+  max_position_embeddings: 40960
+  rope_theta: 10000.0
+  rope_scaling: {'rope_theta': 1000000.0, 'rope_type': 'default'}
+  rms_norm_eps: 1e-06
+  layer_norm_eps: 1e-05
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  moe_config: {'moe_top_k': 8, 'moe_min_capacity': 4, 'moe_capacity_factor': 1.0, 'moe_aux_loss_coef': 0.01}
+  is_moe: True
+  tp_size: 1
+  model_type: qwen3_moe
+  torch_dtype: torch.bfloat16
+Full model config with TP=1:
+  num_groups: 1
+  hidden_size: 5120
+  intermediate_size: 27648
+  dtype: torch.bfloat16
+  model_arch: Qwen2_5_VLForConditionalGeneration
+  vocab_size: 152064
+  num_layers: 64
+  num_attention_heads: 40
+  num_key_value_heads: 8
+  head_dim: 128
+  hidden_act: silu
+  max_position_embeddings: 128000
+  rope_theta: 10000.0
+  rope_scaling: {'mrope_section': [16, 24, 24], 'rope_type': 'default', 'type': 'default', 'rope_theta': 1000000.0}
+  rms_norm_eps: 1e-06
+  layer_norm_eps: 1e-05
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  moe_config: {}
+  is_moe: False
+  tp_size: 1
+  model_type: qwen2_5_vl_text
+  torch_dtype: torch.bfloat16
+Full model config with TP=1:
+  num_groups: 64
+  hidden_size: 2048
+  intermediate_size: 1408
+  dtype: torch.bfloat16
+  model_arch: DeepseekV2ForCausalLM
+  vocab_size: 102400
+  num_layers: 27
+  num_attention_heads: 16
+  num_key_value_heads: 16
+  head_dim: 128
+  hidden_act: silu
+  max_position_embeddings: 163840
+  rope_theta: 10000
+  rope_scaling: {'beta_fast': 32, 'beta_slow': 1, 'factor': 40, 'mscale': 0.707, 'mscale_all_dim': 0.707, 'original_max_position_embeddings': 4096, 'type': 'yarn', 'rope_theta': 10000, 'rope_type': 'yarn'}
+  rms_norm_eps: 1e-06
+  layer_norm_eps: 1e-05
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  moe_config: {'moe_top_k': 6, 'moe_min_capacity': 4, 'moe_capacity_factor': 1.0, 'moe_aux_loss_coef': 0.01}
+  is_moe: True
+  tp_size: 1
+  model_type: deepseek_v2
+  torch_dtype: torch.bfloat16
+Full model config with TP=1:
+  num_groups: 256
+  hidden_size: 2048
+  intermediate_size: 512
+  dtype: torch.bfloat16
+  model_arch: Qwen3_5MoeForConditionalGeneration
+  vocab_size: 248320
+  num_layers: 40
+  num_attention_heads: 16
+  num_key_value_heads: 2
+  head_dim: 256
+  hidden_act: silu
+  max_position_embeddings: 262144
+  rope_theta: 10000.0
+  rope_scaling: {'mrope_interleaved': True, 'mrope_section': [11, 11, 10], 'rope_type': 'default', 'rope_theta': 10000000, 'partial_rotary_factor': 0.25}
+  rms_norm_eps: 1e-06
+  layer_norm_eps: 1e-05
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  moe_config: {'moe_top_k': 8, 'moe_min_capacity': 4, 'moe_capacity_factor': 1.0, 'moe_aux_loss_coef': 0.01}
+  is_moe: True
+  tp_size: 1
+  model_type: qwen3_5_moe_text
+  torch_dtype: torch.bfloat16
+Skipping unsupported FMHA config:  ('1,1,4096', (16, 2), 256, 64, torch.bfloat16, None, 2048, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,4096', (16, 2), 256, 64, torch.float16, None, 2048, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,4096', (16, 2), 256, 128, torch.bfloat16, None, 2048, 2, None, False)
+Skipping unsupported FMHA config:  ('1,1,4096', (16, 2), 256, 128, torch.float16, None, 2048, 2, None, False)
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('1,1,4096', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (16, 16), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 2), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 4), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (32, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 64, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.bfloat16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, False), Provider: flash_memBandwidth
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_kernelTime
+Running config: ('8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384', (40, 8), 128, 128, torch.float16, None, 2048, 2, None, True), Provider: flash_memBandwidth
+flash-attn-decode:
+                                                                                                                                                                                               seq_lens num_heads  head_size  block_size    output_dtype soft_cap  num_blocks  fa_versions q_dtype  is_sink  FlashAttention(us) (Latency (us))  FlashAttention_kernelTime(us) (Latency (us))  FlashAttention_memBandwidth(GB/s) (Latency (us))
+0                                                                                                                                                                                              1,1,4096  (16, 16)        128          64  torch.bfloat16     None        2048            2    None    False                         102.904533                                    102.225067                                        305.118572
+1                                                                                                                                                                                              1,1,4096  (16, 16)        128          64  torch.bfloat16     None        2048            2    None     True                         103.310133                                    101.306400                                        307.229579
+2                                                                                                                                                                                              1,1,4096  (16, 16)        128          64   torch.float16     None        2048            2    None    False                         103.445333                                    101.743200                                        308.998837
+3                                                                                                                                                                                              1,1,4096  (16, 16)        128          64   torch.float16     None        2048            2    None     True                         103.029333                                    101.937333                                        306.258853
+4                                                                                                                                                                                              1,1,4096  (16, 16)        128         128  torch.bfloat16     None        2048            2    None    False                         104.034667                                    101.989333                                        307.460114
+5                                                                                                                                                                                              1,1,4096  (16, 16)        128         128  torch.bfloat16     None        2048            2    None     True                         103.667200                                    104.703733                                        291.135325
+6                                                                                                                                                                                              1,1,4096  (16, 16)        128         128   torch.float16     None        2048            2    None    False                         103.414133                                    110.045867                                        307.302893
+7                                                                                                                                                                                              1,1,4096  (16, 16)        128         128   torch.float16     None        2048            2    None     True                         103.486933                                    101.739733                                        303.925255
+8                                                                                                                                                                                              1,1,4096   (32, 2)        128          64  torch.bfloat16     None        2048            2    None    False                          42.886133                                     62.094933                                         60.003349
+9                                                                                                                                                                                              1,1,4096   (32, 2)        128          64  torch.bfloat16     None        2048            2    None     True                          43.187733                                     50.682667                                         76.988445
+10                                                                                                                                                                                             1,1,4096   (32, 2)        128          64   torch.float16     None        2048            2    None    False                          42.629600                                     58.926400                                         76.888631
+11                                                                                                                                                                                             1,1,4096   (32, 2)        128          64   torch.float16     None        2048            2    None     True                          42.969333                                     58.971467                                         76.977926
+12                                                                                                                                                                                             1,1,4096   (32, 2)        128         128  torch.bfloat16     None        2048            2    None    False                          45.513867                                     62.053333                                         65.557533
+13                                                                                                                                                                                             1,1,4096   (32, 2)        128         128  torch.bfloat16     None        2048            2    None     True                          45.097867                                     62.143467                                         74.706815
+14                                                                                                                                                                                             1,1,4096   (32, 2)        128         128   torch.float16     None        2048            2    None    False                          45.059733                                     61.075733                                         66.348871
+15                                                                                                                                                                                             1,1,4096   (32, 2)        128         128   torch.float16     None        2048            2    None     True                          45.524267                                     65.402133                                         75.085153
+16                                                                                                                                                                                             1,1,4096   (32, 4)        128          64  torch.bfloat16     None        2048            2    None    False                          63.176533                                     72.169067                                        112.629605
+17                                                                                                                                                                                             1,1,4096   (32, 4)        128          64  torch.bfloat16     None        2048            2    None     True                          63.197333                                     69.686933                                        105.279163
+18                                                                                                                                                                                             1,1,4096   (32, 4)        128          64   torch.float16     None        2048            2    None    False                          61.973600                                     69.305600                                        101.326639
+19                                                                                                                                                                                             1,1,4096   (32, 4)        128          64   torch.float16     None        2048            2    None     True                          62.226667                                     69.153067                                        104.420618
+20                                                                                                                                                                                             1,1,4096   (32, 4)        128         128  torch.bfloat16     None        2048            2    None    False                          62.597600                                     68.095733                                        103.097386
+21                                                                                                                                                                                             1,1,4096   (32, 4)        128         128  torch.bfloat16     None        2048            2    None     True                          62.150400                                     79.913600                                        104.343262
+22                                                                                                                                                                                             1,1,4096   (32, 4)        128         128   torch.float16     None        2048            2    None    False                          60.697867                                     73.659733                                        115.427462
+23                                                                                                                                                                                             1,1,4096   (32, 4)        128         128   torch.float16     None        2048            2    None     True                          62.549067                                     75.531733                                        107.421982
+24                                                                                                                                                                                             1,1,4096   (32, 8)        128          64  torch.bfloat16     None        2048            2    None    False                          65.499200                                     78.266933                                        180.881754
+25                                                                                                                                                                                             1,1,4096   (32, 8)        128          64  torch.bfloat16     None        2048            2    None     True                          65.481867                                     72.189867                                        218.743584
+26                                                                                                                                                                                             1,1,4096   (32, 8)        128          64   torch.float16     None        2048            2    None    False                          64.629067                                     74.824533                                        200.258210
+27                                                                                                                                                                                             1,1,4096   (32, 8)        128          64   torch.float16     None        2048            2    None     True                          65.208000                                     75.188533                                        209.054339
+28                                                                                                                                                                                             1,1,4096   (32, 8)        128         128  torch.bfloat16     None        2048            2    None    False                          66.986400                                     79.716000                                        211.249135
+29                                                                                                                                                                                             1,1,4096   (32, 8)        128         128  torch.bfloat16     None        2048            2    None     True                          66.275733                                     79.712533                                        210.952520
+30                                                                                                                                                                                             1,1,4096   (32, 8)        128         128   torch.float16     None        2048            2    None    False                          66.858133                                     79.272267                                        213.510731
+31                                                                                                                                                                                             1,1,4096   (32, 8)        128         128   torch.float16     None        2048            2    None     True                          66.528800                                     78.364000                                        205.667878
+32                                                                                                                                                                                             1,1,4096   (40, 8)        128          64  torch.bfloat16     None        2048            2    None    False                          65.017333                                     77.504267                                        216.838812
+33                                                                                                                                                                                             1,1,4096   (40, 8)        128          64  torch.bfloat16     None        2048            2    None     True                          65.058933                                     72.169067                                        202.035570
+34                                                                                                                                                                                             1,1,4096   (40, 8)        128          64   torch.float16     None        2048            2    None    False                          64.864800                                     76.530133                                        209.657249
+35                                                                                                                                                                                             1,1,4096   (40, 8)        128          64   torch.float16     None        2048            2    None     True                          65.249600                                     75.285600                                        207.009210
+36                                                                                                                                                                                             1,1,4096   (40, 8)        128         128  torch.bfloat16     None        2048            2    None    False                          66.296533                                     81.047200                                        204.947778
+37                                                                                                                                                                                             1,1,4096   (40, 8)        128         128  torch.bfloat16     None        2048            2    None     True                          66.421333                                     81.574133                                        174.921859
+38                                                                                                                                                                                             1,1,4096   (40, 8)        128         128   torch.float16     None        2048            2    None    False                          66.670933                                     82.842933                                        201.972197
+39                                                                                                                                                                                             1,1,4096   (40, 8)        128         128   torch.float16     None        2048            2    None     True                          66.632800                                     74.027200                                        197.252146
+40   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512  (16, 16)        128          64  torch.bfloat16     None        2048            2    None    False                         312.530400                                    311.039733                                        403.546561
+41   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512  (16, 16)        128          64  torch.bfloat16     None        2048            2    None     True                         313.098933                                    311.310133                                        402.312859
+42   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512  (16, 16)        128          64   torch.float16     None        2048            2    None    False                         313.643200                                    309.663467                                        402.182726
+43   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512  (16, 16)        128          64   torch.float16     None        2048            2    None     True                         313.476800                                    311.518133                                        402.124418
+44   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512  (16, 16)        128         128  torch.bfloat16     None        2048            2    None    False                         316.784000                                    313.449067                                        396.713561
+45   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512  (16, 16)        128         128  torch.bfloat16     None        2048            2    None     True                         316.416533                                    313.733333                                        398.705091
+46   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512  (16, 16)        128         128   torch.float16     None        2048            2    None    False                         315.539467                                    314.554933                                        398.506800
+47   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512  (16, 16)        128         128   torch.float16     None        2048            2    None     True                         316.021333                                    315.147733                                        396.569578
+48   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 2)        128          64  torch.bfloat16     None        2048            2    None    False                          54.898133                                     65.901333                                        254.070549
+49   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 2)        128          64  torch.bfloat16     None        2048            2    None     True                          55.300267                                     70.740800                                        258.618977
+50   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 2)        128          64   torch.float16     None        2048            2    None    False                          56.267467                                     62.476267                                        204.371612
+51   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 2)        128          64   torch.float16     None        2048            2    None     True                          53.840800                                     73.073867                                        248.057872
+52   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 2)        128         128  torch.bfloat16     None        2048            2    None    False                          57.414933                                     69.170400                                        254.357310
+53   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 2)        128         128  torch.bfloat16     None        2048            2    None     True                          57.064800                                     76.027467                                        250.693116
+54   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 2)        128         128   torch.float16     None        2048            2    None    False                          55.504800                                     68.480533                                        255.105928
+55   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 2)        128         128   torch.float16     None        2048            2    None     True                          57.369867                                     78.384800                                        230.748556
+56   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 4)        128          64  torch.bfloat16     None        2048            2    None    False                          89.953067                                     87.859200                                        356.766655
+57   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 4)        128          64  torch.bfloat16     None        2048            2    None     True                          89.821333                                     87.869600                                        355.640631
+58   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 4)        128          64   torch.float16     None        2048            2    None    False                          89.623733                                     87.758667                                        356.160532
+59   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 4)        128          64   torch.float16     None        2048            2    None     True                          89.433067                                     88.278667                                        355.738874
+60   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 4)        128         128  torch.bfloat16     None        2048            2    None    False                          90.798933                                     89.533600                                        341.520101
+61   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 4)        128         128  torch.bfloat16     None        2048            2    None     True                          91.294667                                     89.322133                                        349.098562
+62   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 4)        128         128   torch.float16     None        2048            2    None    False                          91.405600                                     93.749067                                        350.551160
+63   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 4)        128         128   torch.float16     None        2048            2    None     True                          91.977600                                     89.679200                                        349.545274
+64   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 8)        128          64  torch.bfloat16     None        2048            2    None    False                         166.455467                                    164.181333                                        382.291055
+65   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 8)        128          64  torch.bfloat16     None        2048            2    None     True                         166.556000                                    165.366933                                        378.216962
+66   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 8)        128          64   torch.float16     None        2048            2    None    False                         166.223200                                    164.122400                                        380.700766
+67   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 8)        128          64   torch.float16     None        2048            2    None     True                         166.777867                                    164.541867                                        374.399762
+68   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 8)        128         128  torch.bfloat16     None        2048            2    None    False                         167.973867                                    165.932000                                        375.640091
+69   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 8)        128         128  torch.bfloat16     None        2048            2    None     True                         168.819733                                    166.032533                                        372.812634
+70   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 8)        128         128   torch.float16     None        2048            2    None    False                         168.095200                                    166.393067                                        375.867201
+71   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (32, 8)        128         128   torch.float16     None        2048            2    None     True                         167.637600                                    167.755467                                        374.019172
+72   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (40, 8)        128          64  torch.bfloat16     None        2048            2    None    False                         166.597600                                    164.753333                                        380.515959
+73   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (40, 8)        128          64  torch.bfloat16     None        2048            2    None     True                         167.460800                                    165.477867                                        376.447969
+74   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (40, 8)        128          64   torch.float16     None        2048            2    None    False                         166.538667                                    164.552267                                        380.098797
+75   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (40, 8)        128          64   torch.float16     None        2048            2    None     True                         168.122933                                    165.831467                                        377.330393
+76   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (40, 8)        128         128  torch.bfloat16     None        2048            2    None    False                         169.294667                                    166.129600                                        373.802039
+77   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (40, 8)        128         128  torch.bfloat16     None        2048            2    None     True                         169.364000                                    167.020533                                        372.666215
+78   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (40, 8)        128         128   torch.float16     None        2048            2    None    False                         168.400267                                    167.034400                                        373.368529
+79   32,1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512+512   (40, 8)        128         128   torch.float16     None        2048            2    None     True                         168.896000                                    167.197333                                        374.089018
+80                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384  (16, 16)        128          64  torch.bfloat16     None        2048            2    None    False                         642.862133                                    640.872267                                        387.852015
+81                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384  (16, 16)        128          64  torch.bfloat16     None        2048            2    None     True                         640.820267                                    643.402933                                        388.195757
+82                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384  (16, 16)        128          64   torch.float16     None        2048            2    None    False                         642.335200                                    639.925867                                        388.674656
+83                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384  (16, 16)        128          64   torch.float16     None        2048            2    None     True                         644.113600                                    641.004000                                        388.885072
+84                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384  (16, 16)        128         128  torch.bfloat16     None        2048            2    None    False                         651.022667                                    650.457600                                        385.537239
+85                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384  (16, 16)        128         128  torch.bfloat16     None        2048            2    None     True                         652.964000                                    649.611733                                        383.606042
+86                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384  (16, 16)        128         128   torch.float16     None        2048            2    None    False                         646.346133                                    652.447467                                        382.959797
+87                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384  (16, 16)        128         128   torch.float16     None        2048            2    None     True                         654.080267                                    650.065867                                        383.145676
+88                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 2)        128          64  torch.bfloat16     None        2048            2    None    False                         125.302667                                    122.581333                                        252.246270
+89                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 2)        128          64  torch.bfloat16     None        2048            2    None     True                         129.376000                                    127.507467                                        258.841467
+90                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 2)        128          64   torch.float16     None        2048            2    None    False                         122.099467                                    119.173600                                        256.307210
+91                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 2)        128          64   torch.float16     None        2048            2    None     True                         124.394400                                    121.860267                                        249.644420
+92                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 2)        128         128  torch.bfloat16     None        2048            2    None    False                         125.940533                                    120.674667                                        249.014407
+93                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 2)        128         128  torch.bfloat16     None        2048            2    None     True                         124.328533                                    123.038933                                        252.246270
+94                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 2)        128         128   torch.float16     None        2048            2    None    False                         131.865067                                    123.375200                                        244.798541
+95                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 2)        128         128   torch.float16     None        2048            2    None     True                         125.663200                                    127.580267                                        250.214861
+96                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 4)        128          64  torch.bfloat16     None        2048            2    None    False                         198.764800                                    202.508800                                        308.829251
+97                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 4)        128          64  torch.bfloat16     None        2048            2    None     True                         210.114667                                    197.367733                                        305.430906
+98                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 4)        128          64   torch.float16     None        2048            2    None    False                         201.063200                                    197.145867                                        315.198262
+99                                                                                                                                              8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 4)        128          64   torch.float16     None        2048            2    None     True                         202.706400                                    203.209067                                        310.060964
+100                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 4)        128         128  torch.bfloat16     None        2048            2    None    False                         203.458667                                    201.368267                                        303.182702
+101                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 4)        128         128  torch.bfloat16     None        2048            2    None     True                         205.483200                                    198.241333                                        309.980684
+102                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 4)        128         128   torch.float16     None        2048            2    None    False                         201.215733                                    204.002933                                        309.489211
+103                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 4)        128         128   torch.float16     None        2048            2    None     True                         202.429067                                    202.872800                                        306.180775
+104                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 8)        128          64  torch.bfloat16     None        2048            2    None    False                         347.484800                                    342.309067                                        361.027712
+105                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 8)        128          64  torch.bfloat16     None        2048            2    None     True                         339.618933                                    341.189333                                        358.598248
+106                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 8)        128          64   torch.float16     None        2048            2    None    False                         349.363733                                    342.503200                                        358.054869
+107                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 8)        128          64   torch.float16     None        2048            2    None     True                         348.081067                                    349.939200                                        361.318263
+108                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 8)        128         128  torch.bfloat16     None        2048            2    None    False                         353.738667                                    350.164533                                        361.496457
+109                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 8)        128         128  torch.bfloat16     None        2048            2    None     True                         355.690400                                    344.850133                                        357.612804
+110                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 8)        128         128   torch.float16     None        2048            2    None    False                         348.008267                                    353.364267                                        352.835031
+111                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (32, 8)        128         128   torch.float16     None        2048            2    None     True                         352.743733                                    345.394400                                        357.349510
+112                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (40, 8)        128          64  torch.bfloat16     None        2048            2    None    False                         347.256000                                    349.471200                                        354.723731
+113                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (40, 8)        128          64  torch.bfloat16     None        2048            2    None     True                         349.845600                                    343.570933                                        359.466777
+114                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (40, 8)        128          64   torch.float16     None        2048            2    None    False                         346.836533                                    348.285600                                        357.200246
+115                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (40, 8)        128          64   torch.float16     None        2048            2    None     True                         347.204000                                    349.339467                                        361.252848
+116                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (40, 8)        128         128  torch.bfloat16     None        2048            2    None    False                         352.085067                                    351.887467                                        353.898865
+117                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (40, 8)        128         128  torch.bfloat16     None        2048            2    None     True                         352.376267                                    351.911733                                        354.219967
+118                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (40, 8)        128         128   torch.float16     None        2048            2    None    False                         354.480533                                    350.084800                                        356.081196
+119                                                                                                                                             8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384   (40, 8)        128         128   torch.float16     None        2048            2    None     True                         352.566933                                    352.566933                                        356.000019

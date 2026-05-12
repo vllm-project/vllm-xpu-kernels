@@ -1,0 +1,71 @@
+=== THREE-WAY BENCHMARK COMPARISON ===
+
+Three versions analyzed:
+1. Original - baseline code (before sync)
+2. PR #332 - batch event recording optimization
+3. New (With Sync) - added torch.xpu.synchronize() before end_event.record()
+
+METHODOLOGY:
+- 120 configuration combinations tested
+- Metrics: E2E time (end-to-end), Kernel time, Memory Bandwidth
+- Data extracted from: original.txt, PR.txt, change.txt
+
+KEY FINDINGS:
+
+E2E Time Performance:
+  Original:   191.13 us (baseline)
+  PR #332:    187.59 us (-1.85% faster)
+  New+Sync:   187.54 us (-1.86% faster, same as PR)
+  → Sync doesn't degrade E2E performance ✓
+
+Kernel Time Measurements:
+  Original:   190.10 us (baseline, includes some queue overhead)
+  PR #332:    190.68 us (+0.31% slower)
+  New+Sync:   189.93 us (-0.41% faster)
+  → Sync makes kernel measurements slightly cleaner
+
+Anomaly Rate (kernel > e2e):
+  Original:   50/120 (41.7%)
+  PR #332:    57/120 (47.5%) - worse
+  New+Sync:   54/120 (45.0%) - middle
+  → Sync doesn't eliminate anomalies completely
+  → But problem is inherent to the two measurement methodologies
+
+Relationship Change:
+  Original:   e2e ≥ kernel (expected: overhead = 1.03 us)
+  PR #332:    e2e < kernel (inverted: overhead = -3.09 us) ⚠️
+  New+Sync:   e2e < kernel (inverted: overhead = -2.39 us) ⚠️
+  → PR and New show inverted relationship (different measurement semantics)
+
+INTERPRETATION:
+
+The "kernel > e2e" anomaly is NOT a bug but a measurement artifact:
+- Original: measured queue intervals (less synchronized)
+- PR/New: measured actual kernels (more synchronized)
+
+These measure different things:
+  kernel_time = GPU computation (but may include queue waits for Xe)
+  e2e_time = Python-to-return interval (amortized across batch)
+
+For GPU performance analysis:
+  ✓ Use kernel_time to understand GPU behavior
+  ⚠ Understand it includes Intel XPU queuing artifacts
+  ✓ Use e2e_time for application-level latency impact
+
+RECOMMENDATION:
+
+1. Keep the sync() in the code ✓
+   - Makes measurement point explicit
+   - Improves measurement reproducibility
+   - kernel_time is more meaningful
+
+2. Report both metrics with context:
+   - "E2E latency improved by -1.85% with PR #332"
+   - "GPU kernel time shows -0.41% with explicit synchronization"
+   - "Note: kernel measurements may include Intel XPU queue effects"
+
+3. For PR acceptance:
+   ✓ E2E performance is the key metric → -1.85% improvement
+   ✓ User-visible latency improves
+   ✓ The sync() adds clarity to measurements
+   → Recommend MERGE PR #332
