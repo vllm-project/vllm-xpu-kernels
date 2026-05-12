@@ -740,6 +740,138 @@ def test_decode_with_paged_kv_mla(
     torch.xpu.empty_cache()
 
 
+@pytest.mark.parametrize("seq_lens",
+                         [[(1, 523), (1, 37), (1, 2011)], [(1, 13000)]])
+@pytest.mark.parametrize("num_heads", [(8, 2)])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("num_blocks", [2048])
+@pytest.mark.parametrize(
+    "noncontig_mode",
+    ["strided_rows", "permuted_heads", "sliced_buffer"],
+)
+@torch.inference_mode()
+def test_decode_with_paged_kv_noncontiguous_q(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+    block_size: int,
+    num_blocks: int,
+    noncontig_mode: str,
+) -> None:
+    """Paged decode with a non-contiguous query tensor.
+
+    The kernel previously assumed Q was fully contiguous (it builds
+    Q's strides via cute::make_cute_packed_stride). Only stride(-1)==1
+    was checked at the API boundary, so callers passing non-contiguous Q
+    views (slice with stride>1, permuted/transposed, slice of a wider
+    buffer) silently read wrong memory. This test exercises the three
+    common non-contiguous shapes and asserts kernel parity with the
+    reference implementation.
+    """
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(42)
+
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+    total_q = sum(query_lens)
+
+    if noncontig_mode == "strided_rows":
+        # Build a 2x-tall query buffer and take every other row. Resulting
+        # stride(0) = 2 * num_query_heads * head_size, stride(-1) = 1.
+        if total_q == 1:
+            pytest.skip(
+                "strided_rows requires >1 query tokens to be non-contiguous")
+        big_q = torch.randn(total_q * 2,
+                            num_query_heads,
+                            head_size,
+                            dtype=dtype)
+        query_noncontig = big_q[::2]
+    elif noncontig_mode == "permuted_heads":
+        # Allocate as [total_q, head_size, num_query_heads] and permute the
+        # last two dims. Logical shape is [total_q, num_query_heads,
+        # head_size] but stride(1) == 1 and stride(-1) == head_size... so we
+        # additionally make the last dim contiguous via a contiguous head_dim
+        # by allocating [total_q, num_query_heads, head_size] then permuting
+        # heads via an index_select-style stride trick.
+        big_q = torch.randn(total_q,
+                            num_query_heads * 2,
+                            head_size,
+                            dtype=dtype)
+        # take every other head; stride(1) = 2 * head_size, stride(-1) = 1
+        query_noncontig = big_q[:, ::2, :]
+    else:
+        # sliced_buffer: query is a slice of a wider head_size buffer
+        big_q = torch.randn(total_q,
+                            num_query_heads,
+                            head_size * 2,
+                            dtype=dtype)
+        query_noncontig = big_q[..., :head_size]
+        # stride(-1) is still 1, but stride(1) = 2*head_size (non-packed)
+    assert not query_noncontig.is_contiguous(), (
+        "test setup error: query must be non-contiguous")
+    assert query_noncontig.stride(-1) == 1
+    assert query_noncontig.shape == (total_q, num_query_heads, head_size)
+
+    # Reference uses a contiguous copy with identical values.
+    query_ref = query_noncontig.contiguous()
+
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    output = flash_attn_varlen_func(query_noncontig,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=False,
+                                    block_table=block_tables,
+                                    window_size=(-1, -1))
+
+    ref_output = ref_paged_attn(query=query_ref,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False,
+                                is_paged=True,
+                                window_size_left=-1,
+                                window_size_right=-1,
+                                dtype=dtype)
+    atol, rtol = 1e-2, 1e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
 def ref_softmax_lse(
     query: torch.Tensor,
     key_cache: torch.Tensor,
