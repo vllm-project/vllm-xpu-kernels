@@ -195,6 +195,7 @@ void cutlass_paged_decode_impl(
       is_sink,
       is_interleaved_kv,
       num_kv_splits,
+      nullptr,  // splits_per_seq, filled in below if applicable
       is_interleaved_kv ? key_cache.stride(0) / 2 : key_cache.stride(0),
       key_cache.stride(1),
       key_cache.stride(2),
@@ -240,6 +241,8 @@ void cutlass_paged_decode_impl(
 
     splits_per_seq_tensor = torch::from_blob(
         splits_vec.data(), {batch_size}, torch::kInt32).clone().to(query.device());
+    // Ensure H2D copy is visible to the kernel queue before launch.
+    queue.wait();
     args.splits_per_seq = splits_per_seq_tensor.data_ptr<int>();
   }
 
@@ -279,7 +282,7 @@ void cutlass_paged_decode_impl(
   };
 
   int head_case = get_head_size_case(args.head_size);
-  int num_q_group_size = num_heads_q / num_heads_kv;
+  // num_q_group_size already computed above for adaptive-split heuristic
 
   if (num_q_group_size <= 8) {
     dispatch_by_page_size<_8>(block_size, head_case, queue, cuQKType, args);
