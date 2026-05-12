@@ -74,26 +74,57 @@ void gdn_attention(
       non_spec_state_indices_tensor.is_contiguous(),
       "non_spec_state_indices_tensor must be contiguous");
 
-  // check core_attn_out shape
-  TORCH_CHECK(core_attn_out.size(0) == num_actual_tokens);
+  // check core_attn_out / z / projected_states_{qkvz,ba} shapes.
+  // Callers running under torch.compile + cudagraph capture pad the leading
+  // dim to the captured graph size while num_actual_tokens stays at the real
+  // (unpadded) count, so accept size(0) >= num_actual_tokens and narrow to the
+  // active prefix below.
+  TORCH_CHECK(
+      core_attn_out.size(0) >= num_actual_tokens,
+      "core_attn_out.size(0) (",
+      core_attn_out.size(0),
+      ") must be >= num_actual_tokens (",
+      num_actual_tokens,
+      ")");
   TORCH_CHECK(core_attn_out.size(1) == num_v_heads / tp_size);
   TORCH_CHECK(core_attn_out.size(2) == head_v_dim);
 
-  // check z shape
   TORCH_CHECK(z.size(0) == core_attn_out.size(0));
   TORCH_CHECK(z.size(1) == core_attn_out.size(1));
   TORCH_CHECK(z.size(2) == core_attn_out.size(2));
 
-  // check projected_states_qkvz shape
-  TORCH_CHECK(projected_states_qkvz.size(0) == num_actual_tokens);
+  TORCH_CHECK(
+      projected_states_qkvz.size(0) >= num_actual_tokens,
+      "projected_states_qkvz.size(0) (",
+      projected_states_qkvz.size(0),
+      ") must be >= num_actual_tokens (",
+      num_actual_tokens,
+      ")");
   TORCH_CHECK(
       projected_states_qkvz.size(1) ==
       num_k_heads / tp_size *
           (2 * head_k_dim + 2 * head_v_dim * num_v_heads / num_k_heads));
 
-  // check projected_states_ba shape
-  TORCH_CHECK(projected_states_ba.size(0) == num_actual_tokens);
+  TORCH_CHECK(
+      projected_states_ba.size(0) >= num_actual_tokens,
+      "projected_states_ba.size(0) (",
+      projected_states_ba.size(0),
+      ") must be >= num_actual_tokens (",
+      num_actual_tokens,
+      ")");
   TORCH_CHECK(projected_states_ba.size(1) == 2 * num_v_heads / tp_size);
+
+  // Narrowing dim 0 of a contiguous tensor yields a contiguous view that
+  // shares storage with the original, so writes through core_attn_out_active
+  // land in the caller's buffer at offsets [0, num_actual_tokens); padded
+  // trailing slots are left untouched (matches the CUDA path in
+  // gdn_linear_attn.py).
+  auto core_attn_out_active = core_attn_out.narrow(0, 0, num_actual_tokens);
+  auto z_active = z.narrow(0, 0, num_actual_tokens);
+  auto projected_states_qkvz_active =
+      projected_states_qkvz.narrow(0, 0, num_actual_tokens);
+  auto projected_states_ba_active =
+      projected_states_ba.narrow(0, 0, num_actual_tokens);
 
   auto& queue = vllm::xpu::vllmGetQueue();
   auto dtype = projected_states_qkvz.dtype();
@@ -131,11 +162,11 @@ void gdn_attention(
         q,                                                        \
         k,                                                        \
         v,                                                        \
-        z,                                                        \
+        z_active,                                                 \
         b,                                                        \
         a,                                                        \
-        projected_states_qkvz,                                    \
-        projected_states_ba,                                      \
+        projected_states_qkvz_active,                             \
+        projected_states_ba_active,                               \
         conv_weights,                                             \
         conv_bias,                                                \
         conv_state,                                               \
@@ -149,7 +180,7 @@ void gdn_attention(
         reorder_input);                                           \
     gdn::gated_delta_rule(                                        \
         queue,                                                    \
-        core_attn_out,                                            \
+        core_attn_out_active,                                     \
         q,                                                        \
         k,                                                        \
         v,                                                        \
@@ -191,11 +222,11 @@ void gdn_attention(
         q,
         k,
         v,
-        z,
+        z_active,
         b,
         a,
-        projected_states_qkvz,
-        projected_states_ba,
+        projected_states_qkvz_active,
+        projected_states_ba_active,
         conv_weights,
         conv_bias,
         conv_state,
@@ -210,7 +241,7 @@ void gdn_attention(
 
     chunk_gated_delta_rule_xe2(
         queue,
-        core_attn_out,
+        core_attn_out_active,
         q,
         k,
         v,
