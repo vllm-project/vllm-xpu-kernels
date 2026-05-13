@@ -517,7 +517,7 @@ function(define_gpu_extension_target GPU_MOD_NAME)
                              PRIVATE "-DTORCH_EXTENSION_NAME=${GPU_MOD_NAME}")
 
   message(STATUS "GPU_MOD_NAME: ${GPU_MOD_NAME}")
-  target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
+  target_include_directories(${GPU_MOD_NAME} PRIVATE ${CMAKE_SOURCE_DIR} csrc
                                                      ${GPU_INCLUDE_DIRECTORIES})
 
   target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${GPU_LIBRARIES})
