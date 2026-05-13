@@ -37,10 +37,10 @@ def calculate_flops(m, n, k):
 
 def calculate_memory_usage(m, n, k, num_experts, x_dtype, w_dtype=None):
     io_memory = (m * k + m * n) * torch.tensor(
-        [], dtype=x_dtype).element_size() / (1024**3)  # in GB
+        [], dtype=x_dtype).element_size() / (1000**3)  # in GB
     weight_memory = num_experts * k * n * torch.tensor(
         [], dtype=x_dtype if w_dtype is None else w_dtype).element_size() / (
-            1024**3)  # in GB
+            1000**3)  # in GB
     return io_memory + weight_memory
 
 
