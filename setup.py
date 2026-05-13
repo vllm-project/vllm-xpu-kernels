@@ -317,6 +317,12 @@ class cmake_build_ext(build_ext):
             prefix = outdir.parent if '.' in first_ext.name else outdir
 
             for lib_name, file_path in additional_libraries.items():
+                # Libs supplied via VLLM_XPU_PREBUILT_<NAME>_LIB are wired in
+                # as SHARED IMPORTED targets in CMakeLists; the corresponding
+                # csrc/.../{lib} subdir is never add_subdirectory()'d, so its
+                # build/temp dir does not exist for `cmake --install` to chdir to.
+                if "VLLM_XPU_PREBUILT_{}_LIB".format(lib_name.upper()) in os.environ:
+                    continue
                 install_args = [
                     "cmake",
                     "--install",
