@@ -200,6 +200,19 @@ class cmake_build_ext(build_ext):
             cmake_args.append('-D{}={}'.format(
                 opt, "ON" if _is_enabled(opt) else "OFF"))
 
+        # Forward prebuilt-library overrides so packagers can supply
+        # pre-built kernel SHARED libs and skip recompilation.
+        _prebuilt_lib_options = [
+            "VLLM_XPU_PREBUILT_ATTN_KERNELS_XE_2_LIB",
+            "VLLM_XPU_PREBUILT_GDN_ATTN_KERNELS_XE_2_LIB",
+            "VLLM_XPU_PREBUILT_MQA_LOGITS_KERNELS_XE_2_LIB",
+            "VLLM_XPU_PREBUILT_GROUPED_GEMM_XE_2_LIB",
+            "VLLM_XPU_PREBUILT_GROUPED_GEMM_XE_DEFAULT_LIB",
+        ]
+        for opt in _prebuilt_lib_options:
+            if opt in os.environ:
+                cmake_args.append('-D{}={}'.format(opt, os.environ[opt]))
+
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
         # and plays more nicely with sccache.

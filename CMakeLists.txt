@@ -323,6 +323,9 @@ set(GROUPED_GEMM_LIB_NAME "")
 set(GDN_ATTN_LIB_NAME "")
 set(MQA_LOGITS_LIB_NAME "")
 
+option(VLLM_XPU_LIBS_ONLY
+       "Build only kernel SHARED libs, skip extension modules" OFF)
+
 if(BUILD_SYCL_TLA_KERNELS)
 
   set(SYCL_TLA_INCLUDE_DIRS
@@ -338,32 +341,80 @@ if(BUILD_SYCL_TLA_KERNELS)
   set(SYCL_TLA_COMPILE_OPTIONS "")
   if(VLLM_XPU_ENABLE_XE_DEFAULT)
     if(MOE_KERNELS_ENABLED)
-      add_subdirectory(csrc/xpu/grouped_gemm/xe_default)
+      if(VLLM_XPU_PREBUILT_GROUPED_GEMM_XE_DEFAULT_LIB)
+        add_library(grouped_gemm_xe_default SHARED IMPORTED GLOBAL)
+        set_target_properties(grouped_gemm_xe_default PROPERTIES
+          IMPORTED_LOCATION
+            "${VLLM_XPU_PREBUILT_GROUPED_GEMM_XE_DEFAULT_LIB}"
+          INTERFACE_INCLUDE_DIRECTORIES
+            "${CMAKE_SOURCE_DIR}/csrc/xpu/grouped_gemm/xe_default;${CMAKE_SOURCE_DIR}/csrc/xpu/grouped_gemm")
+      else()
+        add_subdirectory(csrc/xpu/grouped_gemm/xe_default)
+      endif()
       list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_default")
     endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE_DEFAULT)
   endif()
   if(VLLM_XPU_ENABLE_XE2)
     if(MOE_KERNELS_ENABLED)
-      add_subdirectory(csrc/xpu/grouped_gemm/xe_2)
+      if(VLLM_XPU_PREBUILT_GROUPED_GEMM_XE_2_LIB)
+        add_library(grouped_gemm_xe_2 SHARED IMPORTED GLOBAL)
+        set_target_properties(grouped_gemm_xe_2 PROPERTIES
+          IMPORTED_LOCATION "${VLLM_XPU_PREBUILT_GROUPED_GEMM_XE_2_LIB}"
+          INTERFACE_INCLUDE_DIRECTORIES
+            "${CMAKE_SOURCE_DIR}/csrc/xpu/grouped_gemm/xe_2;${CMAKE_SOURCE_DIR}/csrc/xpu/grouped_gemm")
+      else()
+        add_subdirectory(csrc/xpu/grouped_gemm/xe_2)
+      endif()
       list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_2")
     endif()
     if(FA2_KERNELS_ENABLED)
-      add_subdirectory(csrc/xpu/attn/xe_2)
+      if(VLLM_XPU_PREBUILT_ATTN_KERNELS_XE_2_LIB)
+        add_library(attn_kernels_xe_2 SHARED IMPORTED GLOBAL)
+        set_target_properties(attn_kernels_xe_2 PROPERTIES
+          IMPORTED_LOCATION "${VLLM_XPU_PREBUILT_ATTN_KERNELS_XE_2_LIB}"
+          INTERFACE_INCLUDE_DIRECTORIES
+            "${CMAKE_SOURCE_DIR}/csrc/xpu/attn/xe_2;${CMAKE_SOURCE_DIR}/csrc/xpu/attn")
+      else()
+        add_subdirectory(csrc/xpu/attn/xe_2)
+      endif()
       list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels_xe_2")
     endif()
     if(GDN_KERNELS_ENABLED)
-      add_subdirectory(csrc/xpu/gdn_attn/xe_2)
+      if(VLLM_XPU_PREBUILT_GDN_ATTN_KERNELS_XE_2_LIB)
+        add_library(gdn_attn_kernels_xe_2 SHARED IMPORTED GLOBAL)
+        set_target_properties(gdn_attn_kernels_xe_2 PROPERTIES
+          IMPORTED_LOCATION
+            "${VLLM_XPU_PREBUILT_GDN_ATTN_KERNELS_XE_2_LIB}"
+          INTERFACE_INCLUDE_DIRECTORIES
+            "${CMAKE_SOURCE_DIR}/csrc/xpu/gdn_attn/xe_2;${CMAKE_SOURCE_DIR}/csrc/xpu/gdn_attn")
+      else()
+        add_subdirectory(csrc/xpu/gdn_attn/xe_2)
+      endif()
       list(APPEND GDN_ATTN_LIB_NAME "gdn_attn_kernels_xe_2")
     endif()
     if(MQA_LOGITS_KERNELS_ENABLED)
-      add_subdirectory(csrc/xpu/mqa_logits/xe_2)
+      if(VLLM_XPU_PREBUILT_MQA_LOGITS_KERNELS_XE_2_LIB)
+        add_library(mqa_logits_kernels_xe_2 SHARED IMPORTED GLOBAL)
+        set_target_properties(mqa_logits_kernels_xe_2 PROPERTIES
+          IMPORTED_LOCATION
+            "${VLLM_XPU_PREBUILT_MQA_LOGITS_KERNELS_XE_2_LIB}"
+          INTERFACE_INCLUDE_DIRECTORIES
+            "${CMAKE_SOURCE_DIR}/csrc/xpu/mqa_logits/xe_2;${CMAKE_SOURCE_DIR}/csrc/xpu/mqa_logits")
+      else()
+        add_subdirectory(csrc/xpu/mqa_logits/xe_2)
+      endif()
       list(APPEND MQA_LOGITS_LIB_NAME "mqa_logits_kernels_xe_2")
     endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
 
+endif()
+
+if(VLLM_XPU_LIBS_ONLY)
+  message(STATUS "VLLM_XPU_LIBS_ONLY is ON, skipping extension modules.")
+  return()
 endif()
 
 # Feature compile defines — these guard op registrations and interface code so
