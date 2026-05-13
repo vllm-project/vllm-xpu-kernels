@@ -26,7 +26,44 @@ void policy_dispatch_func(
         "Unreachable: softmax_lse is only supported when is_paged=false, "
         "is_local=false, is_sink=false");
   } else {
-    policy_dispatch_impl<chunk_policy, Bs...>(queue, cuQKType, args);
+    // Runtime Q/KV dtype dispatch into one of the 6 explicit
+    // instantiations declared in chunk_prefill_extern.hpp. Keep the
+    // matrix below in sync with CHUNK_DTYPE_COMBINATIONS there.
+    if (cuQKType.q_type == CutlassDType::half) {
+      if (cuQKType.k_type == CutlassDType::half) {
+        policy_dispatch_impl<chunk_policy, Bs..., half_t, half_t>(queue, args);
+      } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+        policy_dispatch_impl<chunk_policy, Bs..., half_t, float_e4m3_t>(
+            queue, args);
+      } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+        policy_dispatch_impl<chunk_policy, Bs..., half_t, float_e5m2_t>(
+            queue, args);
+      } else {
+        TORCH_CHECK(
+            false,
+            "Unsupported K dtype for q=half: ",
+            static_cast<int>(cuQKType.k_type));
+      }
+    } else if (cuQKType.q_type == CutlassDType::bfloat16) {
+      if (cuQKType.k_type == CutlassDType::bfloat16) {
+        policy_dispatch_impl<chunk_policy, Bs..., bfloat16_t, bfloat16_t>(
+            queue, args);
+      } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+        policy_dispatch_impl<chunk_policy, Bs..., bfloat16_t, float_e4m3_t>(
+            queue, args);
+      } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+        policy_dispatch_impl<chunk_policy, Bs..., bfloat16_t, float_e5m2_t>(
+            queue, args);
+      } else {
+        TORCH_CHECK(
+            false,
+            "Unsupported K dtype for q=bfloat16: ",
+            static_cast<int>(cuQKType.k_type));
+      }
+    } else {
+      TORCH_CHECK(
+          false, "Unsupported Q dtype: ", static_cast<int>(cuQKType.q_type));
+    }
   }
 }
 

@@ -1,6 +1,5 @@
 function(fmha_forward_configure FILENAME_SUFFIX)
   set(GEN_KERNEL_SRCS) # output
-  set(L_TYPES "fp16" "bf16")
   set(L_BOOLS "false" "true")
   set(BOOL_FLAG_false "f")
   set(BOOL_FLAG_true "t")
@@ -18,10 +17,18 @@ function(fmha_forward_configure FILENAME_SUFFIX)
       "chunk_policy_head256_b16"
       "chunk_policy_head512_b16")
 
-  set(IMPL_KV_T "fp16")
+  # Valid (Q, KV) dtype combinations. Q dictates O; KV dictates K and V.
+  # Encoded as "Q_TYPE|KV_TYPE|FILENAME_TOKEN" — keep in sync with the
+  # CHUNK_DTYPE_COMBINATIONS X-macro in chunk_prefill_extern.hpp.
+  set(dtype_combos
+      "half_t|half_t|hh"
+      "half_t|float_e4m3_t|h4"
+      "half_t|float_e5m2_t|h5"
+      "bfloat16_t|bfloat16_t|bb"
+      "bfloat16_t|float_e4m3_t|b4"
+      "bfloat16_t|float_e5m2_t|b5")
 
   foreach(IMPL_POLICY ${policy_list})
-    # foreach(IMPL_T ${L_TYPES})
     foreach(IMPL_KISPAGED ${L_BOOLS})
       foreach(IMPL_KISCAUSAL ${L_BOOLS})
         foreach(IMPL_KISLOCAL ${L_BOOLS})
@@ -36,19 +43,27 @@ function(fmha_forward_configure FILENAME_SUFFIX)
               set(LSE_BOOLS ${L_BOOLS})
             endif()
             foreach(IMPL_KISLSE ${LSE_BOOLS})
-              set(FILE_SUFFIX "${IMPL_POLICY}_")
-              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISPAGED}}")
-              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
-              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
-              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
-              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLSE}}")
-              configure_file(${FILENAME_SUFFIX}.cpp.in
-                             "${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
-              list(
-                APPEND
-                GEN_KERNEL_SRCS
-                "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp"
-              )
+              foreach(_combo ${dtype_combos})
+                string(REPLACE "|" ";" _combo_list "${_combo}")
+                list(GET _combo_list 0 IMPL_Q_DTYPE)
+                list(GET _combo_list 1 IMPL_KV_DTYPE)
+                list(GET _combo_list 2 DTYPE_TOKEN)
+
+                set(FILE_SUFFIX "${IMPL_POLICY}_")
+                set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISPAGED}}")
+                set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
+                set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
+                set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
+                set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLSE}}")
+                set(FILE_SUFFIX "${FILE_SUFFIX}_${DTYPE_TOKEN}")
+                configure_file(${FILENAME_SUFFIX}.cpp.in
+                               "${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
+                list(
+                  APPEND
+                  GEN_KERNEL_SRCS
+                  "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp"
+                )
+              endforeach()
             endforeach()
           endforeach()
         endforeach()

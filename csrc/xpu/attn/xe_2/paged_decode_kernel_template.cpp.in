@@ -6,10 +6,13 @@ using namespace cute;
 // CMake Template Variables
 // =============================================================================
 // These macros are populated by CMake during the configuration process
-// to generate specific kernel instantiations for each policy combination.
+// to generate specific kernel instantiations for each (policy, bool,
+// Q dtype, KV dtype) combination.
 
 // clang-format off
 #define IMPL_POLICY ${IMPL_POLICY}
+#define IMPL_Q_DTYPE ${IMPL_Q_DTYPE}
+#define IMPL_KV_DTYPE ${IMPL_KV_DTYPE}
 #cmakedefine01 IMPL_KISCAUSAL
 #cmakedefine01 IMPL_KISLOCAL
 #cmakedefine01 IMPL_KISSINK
@@ -19,17 +22,18 @@ using namespace cute;
 // Explicit Template Instantiation
 // =============================================================================
 // Instantiate the decode_policy_dispatch_impl function template with the
-// specific policy and boolean flag combinations provided by CMake. This
-// produces one compiled kernel per source file.
+// specific policy, boolean flag and Q/KV dtype combinations provided by
+// CMake. This produces one compiled kernel per source file.
 
 #define INSTANTIATE_KERNEL()                 \
   template void decode_policy_dispatch_impl< \
       IMPL_POLICY,                           \
       static_cast<bool>(IMPL_KISCAUSAL),     \
       static_cast<bool>(IMPL_KISLOCAL),      \
-      static_cast<bool>(IMPL_KISSINK)>(      \
+      static_cast<bool>(IMPL_KISSINK),       \
+      IMPL_Q_DTYPE,                          \
+      IMPL_KV_DTYPE>(                        \
       sycl::queue & queue,                   \
-      CutlassQKType & cuQKType,              \
       const paged_decode_args_t& args);
 
 INSTANTIATE_KERNEL()

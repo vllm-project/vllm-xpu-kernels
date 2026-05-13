@@ -105,10 +105,21 @@ function(paged_decode_configure FILENAME_SUFFIX)
       "576")
   set(pagesize_list "16" "32" "64" "128")
 
+  # Valid (Q, KV) dtype combinations. Q dictates O; KV dictates K and V.
+  # Encoded as "Q_TYPE|KV_TYPE|FILENAME_TOKEN" — keep in sync with the
+  # DECODE_DTYPE_COMBINATIONS X-macro in paged_decode_extern.hpp.
+  set(dtype_combos
+      "half_t|half_t|hh"
+      "half_t|float_e4m3_t|h4"
+      "half_t|float_e5m2_t|h5"
+      "bfloat16_t|bfloat16_t|bb"
+      "bfloat16_t|float_e4m3_t|b4"
+      "bfloat16_t|float_e5m2_t|b5")
+
   # =============================================================================
   # Generate Kernel Sources
   # =============================================================================
-  # Iterate over all combinations: policy × causal × local × sink
+  # Iterate over all combinations: policy × causal × local × sink × dtype
 
   foreach(IMPL_QGROUP ${qgroup_list})
     foreach(IMPL_HEADSIZE ${headsize_list})
@@ -125,23 +136,32 @@ function(paged_decode_configure FILENAME_SUFFIX)
         foreach(IMPL_KISCAUSAL ${L_BOOLS})
           foreach(IMPL_KISLOCAL ${L_BOOLS})
             foreach(IMPL_KISSINK ${L_BOOLS})
-              # Construct unique filename suffix: e.g., _q8_h64_fff
-              set(FILE_SUFFIX
-                  "_q${IMPL_QGROUP}_h${IMPL_HEADSIZE}_p${IMPL_PAGESIZE}_")
-              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
-              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
-              set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
+              foreach(_combo ${dtype_combos})
+                string(REPLACE "|" ";" _combo_list "${_combo}")
+                list(GET _combo_list 0 IMPL_Q_DTYPE)
+                list(GET _combo_list 1 IMPL_KV_DTYPE)
+                list(GET _combo_list 2 DTYPE_TOKEN)
 
-              # Generate .cpp file from template
-              configure_file(${FILENAME_SUFFIX}.cpp.in
-                             "${FILENAME_SUFFIX}${FILE_SUFFIX}.cpp")
+                # Construct unique filename suffix: e.g., _q8_h64_p16_fff_hh
+                set(FILE_SUFFIX
+                    "_q${IMPL_QGROUP}_h${IMPL_HEADSIZE}_p${IMPL_PAGESIZE}_")
+                set(FILE_SUFFIX
+                    "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
+                set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
+                set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
+                set(FILE_SUFFIX "${FILE_SUFFIX}_${DTYPE_TOKEN}")
 
-              # Add to output list
-              list(
-                APPEND
-                GEN_KERNEL_SRCS
-                "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}${FILE_SUFFIX}.cpp"
-              )
+                # Generate .cpp file from template
+                configure_file(${FILENAME_SUFFIX}.cpp.in
+                               "${FILENAME_SUFFIX}${FILE_SUFFIX}.cpp")
+
+                # Add to output list
+                list(
+                  APPEND
+                  GEN_KERNEL_SRCS
+                  "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}${FILE_SUFFIX}.cpp"
+                )
+              endforeach()
             endforeach()
           endforeach()
         endforeach()

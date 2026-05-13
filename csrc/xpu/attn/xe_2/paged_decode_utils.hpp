@@ -2,13 +2,61 @@
 
 using namespace cute;
 
-// Runtime dispatcher helper
+// Runtime dispatcher helper. Bool pack (Causal, Local, Sink) is peeled
+// recursively below; the base case here lands a runtime Q/KV dtype
+// dispatch and trampolines into one of the 6 explicit instantiations
+// declared in paged_decode_extern.hpp. Keep this matrix in sync with
+// DECODE_DTYPE_COMBINATIONS there.
 template <typename decode_policy, bool... Bs>
 void decode_policy_dispatch_func(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const paged_decode_args_t& args) {
-  decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuQKType, args);
+  if (cuQKType.q_type == CutlassDType::half) {
+    if (cuQKType.k_type == CutlassDType::half) {
+      decode_policy_dispatch_impl<decode_policy, Bs..., half_t, half_t>(
+          queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+      decode_policy_dispatch_impl<decode_policy, Bs..., half_t, float_e4m3_t>(
+          queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+      decode_policy_dispatch_impl<decode_policy, Bs..., half_t, float_e5m2_t>(
+          queue, args);
+    } else {
+      TORCH_CHECK(
+          false,
+          "Unsupported K dtype for q=half: ",
+          static_cast<int>(cuQKType.k_type));
+    }
+  } else if (cuQKType.q_type == CutlassDType::bfloat16) {
+    if (cuQKType.k_type == CutlassDType::bfloat16) {
+      decode_policy_dispatch_impl<
+          decode_policy,
+          Bs...,
+          bfloat16_t,
+          bfloat16_t>(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+      decode_policy_dispatch_impl<
+          decode_policy,
+          Bs...,
+          bfloat16_t,
+          float_e4m3_t>(queue, args);
+    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+      decode_policy_dispatch_impl<
+          decode_policy,
+          Bs...,
+          bfloat16_t,
+          float_e5m2_t>(queue, args);
+    } else {
+      TORCH_CHECK(
+          false,
+          "Unsupported K dtype for q=bfloat16: ",
+          static_cast<int>(cuQKType.k_type));
+    }
+  } else {
+    TORCH_CHECK(
+        false, "Unsupported Q dtype: ", static_cast<int>(cuQKType.q_type));
+  }
 }
 
 template <typename decode_policy, bool... Bs, typename... Ts>

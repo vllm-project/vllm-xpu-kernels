@@ -343,123 +343,40 @@ struct FMHAConfig {
   }
 };
 
+// Q/KV dtype are template parameters (not runtime branches) so each TU
+// instantiates exactly one FMHAConfig pipeline. The previous design's
+// in-body if-tree forced icpx to hold all 6 kernel pipelines in memory
+// per TU; widening the dispatch to compile-time params drops per-TU peak
+// RSS roughly 6x at the cost of 6x TU count. Runtime dtype dispatch moves
+// to policy_dispatch_func in chunk_prefill_utils.hpp, which trampolines
+// into one of the 6 extern-template specialisations.
 template <
     typename chunk_policy,
     bool Paged,
     bool Causal,
     bool Local,
     bool Sink,
-    bool SoftmaxLSE>
+    bool SoftmaxLSE,
+    typename ElementQ,
+    typename ElementKV>
 void policy_dispatch_impl(
     sycl::queue& queue,
-    CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args) {
   const int PipelineStages = 2;
-  if (cuQKType.q_type == CutlassDType::half) {
-    if (cuQKType.k_type == CutlassDType::half) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
-          half_t,
-          half_t,
-          half_t,
-          half_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
-          half_t,
-          float_e4m3_t,
-          float_e4m3_t,
-          half_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
-          half_t,
-          float_e5m2_t,
-          float_e5m2_t,
-          half_t>::kernel_dispatch(queue, args);
-    }
-  } else {
-    if (cuQKType.k_type == CutlassDType::bfloat16) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
-          bfloat16_t,
-          bfloat16_t,
-          bfloat16_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
-          bfloat16_t,
-          float_e4m3_t,
-          float_e4m3_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
-      return FMHAConfig<
-          typename chunk_policy::ShapeQK,
-          typename chunk_policy::ShapePV,
-          typename chunk_policy::ShapeOut,
-          typename chunk_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
-          bfloat16_t,
-          float_e5m2_t,
-          float_e5m2_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
-    }
-  }
+  return FMHAConfig<
+      typename chunk_policy::ShapeQK,
+      typename chunk_policy::ShapePV,
+      typename chunk_policy::ShapeOut,
+      typename chunk_policy::SubgroupLayoutQK,
+      void,
+      PipelineStages,
+      Paged,
+      Causal,
+      Local,
+      Sink,
+      SoftmaxLSE,
+      ElementQ,
+      ElementKV,
+      ElementKV,
+      ElementQ>::kernel_dispatch(queue, args);
 }
