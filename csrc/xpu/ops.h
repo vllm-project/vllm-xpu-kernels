@@ -360,6 +360,8 @@ bool is_pvc(int64_t device_index);
 
 bool is_cri(int64_t device_index);
 
+bool is_nvl_p(int64_t device_index);
+
 bool is_xe2_arch(int64_t device_index);
 
 bool is_xe3_arch(int64_t device_index);

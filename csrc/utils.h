@@ -82,6 +82,11 @@ static inline bool is_cri(at::DeviceIndex device_index = -1) {
 #endif
 }
 
+static inline bool is_nvl_p(at::DeviceIndex device_index = -1) {
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_nvl_p;
+}
+
 static inline bool is_xe2_arch(at::DeviceIndex device_index = -1) {
   auto arch = get_device_architecture(device_index);
   return arch == syclex::architecture::intel_gpu_bmg_g21 ||

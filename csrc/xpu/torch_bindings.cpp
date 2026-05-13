@@ -289,6 +289,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.def("is_cri(int device_index=-1) -> bool");
   xpu_ops.impl("is_cri", &is_cri);
 
+  xpu_ops.def("is_nvl_p(int device_index=-1) -> bool");
+  xpu_ops.impl("is_nvl_p", &is_nvl_p);
+
   xpu_ops.def("is_xe2_arch(int device_index=-1) -> bool");
   xpu_ops.impl("is_xe2_arch", &is_xe2_arch);
 
