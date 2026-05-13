@@ -207,11 +207,14 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(VLLM_GPU_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS})
 
   # ============= LINK OPTIONS ==================
+  set(VLLM_XPU_SYCL_LINK_PARALLELISM "16" CACHE STRING
+      "Inner parallelism for SYCL device link (-fsycl-max-parallel-link-jobs). Lower values reduce peak link-time memory.")
   set(SYCL_LINK_FLAGS "")
   list(APPEND SYCL_LINK_FLAGS "-fsycl")
   set(SYCL_DEVICE_LINK_FLAGS ${SYCL_LINK_FLAGS})
   set(SYCL_DEVICE_LINK_FLAGS
-      ${SYCL_DEVICE_LINK_FLAGS} -fsycl-max-parallel-link-jobs=16
+      ${SYCL_DEVICE_LINK_FLAGS}
+      -fsycl-max-parallel-link-jobs=${VLLM_XPU_SYCL_LINK_PARALLELISM}
       -flink-huge-device-code)
   set(SYCL_DEVICE_LINK_FLAGS
       ${SYCL_DEVICE_LINK_FLAGS}
@@ -314,7 +317,9 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   list(APPEND VLLM_CUTLASS_FLAGS "-DCUTLASS_ENABLE_SYCL")
   list(APPEND VLLM_CUTLASS_FLAGS "-DSYCL_INTEL_TARGET")
   list(APPEND VLLM_CUTLASS_FLAGS "-DCUTLASS_VERSIONS_GENERATED")
-  list(APPEND VLLM_CUTLASS_FLAGS "-ftemplate-backtrace-limit=0")
+  set(VLLM_XPU_CUTLASS_TEMPLATE_BACKTRACE_LIMIT "0" CACHE STRING
+      "Template instantiation backtrace depth for CUTLASS-SYCL TUs. Lower values reduce frontend memory retention; 0 = unlimited.")
+  list(APPEND VLLM_CUTLASS_FLAGS "-ftemplate-backtrace-limit=${VLLM_XPU_CUTLASS_TEMPLATE_BACKTRACE_LIMIT}")
   list(APPEND VLLM_CUTLASS_FLAGS "-fdiagnostics-color=always")
 endif()
 
