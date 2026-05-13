@@ -25,6 +25,20 @@ static inline void dnnl_matmul_w8a8_fp8(
   const int n = o_sz.back();  // presume channel last format
   const int k = *(src_sz.end() - 1);
 
+  // block quant param
+  bool is_block_quant = (m1_sc.dim() == 2) && (m2_sc.dim() == 2) &&
+                        (m1_sc.size(1) != 1) && (m2_sc.size(1) != 1);
+  int64_t group_size = -1;
+  if (is_block_quant) {
+    TORCH_CHECK(
+        m1_sc.size(1) == m2_sc.size(1),
+        "Mismatch group size in input and weight.",
+        m1_sc.size(1),
+        " vs ",
+        m2_sc.size(1));
+    group_size = k / m1_sc.size(1);
+  }
+
   // get joint dtypes
   joint_dtypes_t jd;
   auto in_dtype = mat1.scalar_type();
@@ -39,7 +53,7 @@ static inline void dnnl_matmul_w8a8_fp8(
                                                : joint_dtypes_t::f8_e4m3_f16;
   } else {
     TORCH_INTERNAL_ASSERT(
-        false, "Unsupported data type for fp8 matmul: ", mat1.scalar_type());
+        false, "Unsupported data type for fp8 matmul: ", in_dtype);
   }
 
   // get bias type
@@ -68,38 +82,74 @@ static inline void dnnl_matmul_w8a8_fp8(
                     : mat2.strides()[mat2.dim() - 1];
   int64_t ldc = result.strides()[leading_dim];
 
+  auto m1_sc_dtype = m1_sc.scalar_type();
+  auto m2_sc_dtype = m2_sc.scalar_type();
   auto f_attr = [&](dnnl::primitive_attr& pattr) {
     pattr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
-    if (m1_sc.numel() == 1) {
-      pattr.set_scales(
-          DNNL_ARG_SRC,
-          /* mask */ 0,
-          {},
-          get_onednn_dtype(m1_sc));
-      /* per tensor quant */
-    } else {
+
+    if (m1_sc_dtype == at::ScalarType::Float8_e8m0fnu) {
+      TORCH_CHECK(
+          m2_sc_dtype == at::ScalarType::Float8_e8m0fnu,
+          "Mismatched scale data types in mxfp8 matmul: ",
+          m1_sc_dtype,
+          " vs ",
+          m2_sc_dtype);
       pattr.set_scales(
           DNNL_ARG_SRC,
           /* mask */ (1 << 0) + (1 << 1),
-          {1, k},
+          {1, 32},
           get_onednn_dtype(m1_sc));
-      /* per token quant */
-    }
-
-    if (m2_sc.numel() == 1) {
       pattr.set_scales(
           DNNL_ARG_WEIGHTS,
-          /* mask */ 0,
-          {},
+          /* mask */ (1 << 0) + (1 << 1),
+          {32, 1},
           get_onednn_dtype(m2_sc));
-      /* per tensor quant */
     } else {
-      pattr.set_scales(
-          DNNL_ARG_WEIGHTS,
-          /* mask */ (1 << 1),
-          {},
-          get_onednn_dtype(m2_sc));
-      /* per channel quant */
+      if (m1_sc.numel() == 1) {
+        pattr.set_scales(
+            DNNL_ARG_SRC,
+            /* mask */ 0,
+            {},
+            get_onednn_dtype(m1_sc));
+        /* per tensor quant */
+      } else if (is_block_quant) {
+        pattr.set_scales(
+            DNNL_ARG_SRC,
+            /* mask */ (1 << 0) + (1 << 1),
+            {1, group_size},
+            get_onednn_dtype(m1_sc));
+        /* per block quant */
+      } else {
+        pattr.set_scales(
+            DNNL_ARG_SRC,
+            /* mask */ (1 << 0) + (1 << 1),
+            {1, k},
+            get_onednn_dtype(m1_sc));
+        /* per token quant */
+      }
+
+      if (m2_sc.numel() == 1) {
+        pattr.set_scales(
+            DNNL_ARG_WEIGHTS,
+            /* mask */ 0,
+            {},
+            get_onednn_dtype(m2_sc));
+        /* per tensor quant */
+      } else if (is_block_quant) {
+        pattr.set_scales(
+            DNNL_ARG_WEIGHTS,
+            /* mask */ (1 << 0) + (1 << 1),
+            {group_size, group_size},
+            get_onednn_dtype(m2_sc));
+        /* per block quant */
+      } else {
+        pattr.set_scales(
+            DNNL_ARG_WEIGHTS,
+            /* mask */ (1 << 1),
+            {},
+            get_onednn_dtype(m2_sc));
+        /* per channel quant */
+      }
     }
   };
 

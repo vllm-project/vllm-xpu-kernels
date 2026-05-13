@@ -5,7 +5,6 @@
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
 #include "cutlass/util/packed_stride.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
-#include "cutlass/util/sycl_event_manager.hpp"
 #include <cute/tensor.hpp>
 #include <random>
 
@@ -29,22 +28,54 @@ using decode_policy_q8_h96_p64 = decode_policy_qpacked_head<_8, _96, _64>;
 using decode_policy_q8_h128_p64 = decode_policy_qpacked_head<_8, _128, _64>;
 using decode_policy_q8_h192_p64 = decode_policy_qpacked_head<_8, _192, _64>;
 using decode_policy_q8_h256_p64 = decode_policy_qpacked_head<_8, _256, _64>;
+using decode_policy_q8_h512_p64 = decode_policy_qpacked_head<_8, _512, _64>;
 using decode_policy_q16_h64_p64 = decode_policy_qpacked_head<_16, _64, _64>;
 using decode_policy_q16_h96_p64 = decode_policy_qpacked_head<_16, _96, _64>;
 using decode_policy_q16_h128_p64 = decode_policy_qpacked_head<_16, _128, _64>;
 using decode_policy_q16_h192_p64 = decode_policy_qpacked_head<_16, _192, _64>;
 using decode_policy_q16_h256_p64 = decode_policy_qpacked_head<_16, _256, _64>;
+using decode_policy_q16_h512_p64 = decode_policy_qpacked_head<_16, _512, _64>;
 
 using decode_policy_q8_h64_p128 = decode_policy_qpacked_head<_8, _64, _128>;
 using decode_policy_q8_h96_p128 = decode_policy_qpacked_head<_8, _96, _128>;
 using decode_policy_q8_h128_p128 = decode_policy_qpacked_head<_8, _128, _128>;
 using decode_policy_q8_h192_p128 = decode_policy_qpacked_head<_8, _192, _128>;
 using decode_policy_q8_h256_p128 = decode_policy_qpacked_head<_8, _256, _128>;
+using decode_policy_q8_h512_p128 = decode_policy_qpacked_head<_8, _512, _128>;
 using decode_policy_q16_h64_p128 = decode_policy_qpacked_head<_16, _64, _128>;
 using decode_policy_q16_h96_p128 = decode_policy_qpacked_head<_16, _96, _128>;
 using decode_policy_q16_h128_p128 = decode_policy_qpacked_head<_16, _128, _128>;
 using decode_policy_q16_h192_p128 = decode_policy_qpacked_head<_16, _192, _128>;
 using decode_policy_q16_h256_p128 = decode_policy_qpacked_head<_16, _256, _128>;
+using decode_policy_q16_h512_p128 = decode_policy_qpacked_head<_16, _512, _128>;
+
+// page_size = 16
+using decode_policy_q8_h64_p16 = decode_policy_qpacked_head<_8, _64, _16>;
+using decode_policy_q8_h96_p16 = decode_policy_qpacked_head<_8, _96, _16>;
+using decode_policy_q8_h128_p16 = decode_policy_qpacked_head<_8, _128, _16>;
+using decode_policy_q8_h192_p16 = decode_policy_qpacked_head<_8, _192, _16>;
+using decode_policy_q8_h256_p16 = decode_policy_qpacked_head<_8, _256, _16>;
+using decode_policy_q8_h512_p16 = decode_policy_qpacked_head<_8, _512, _16>;
+using decode_policy_q16_h64_p16 = decode_policy_qpacked_head<_16, _64, _16>;
+using decode_policy_q16_h96_p16 = decode_policy_qpacked_head<_16, _96, _16>;
+using decode_policy_q16_h128_p16 = decode_policy_qpacked_head<_16, _128, _16>;
+using decode_policy_q16_h192_p16 = decode_policy_qpacked_head<_16, _192, _16>;
+using decode_policy_q16_h256_p16 = decode_policy_qpacked_head<_16, _256, _16>;
+using decode_policy_q16_h512_p16 = decode_policy_qpacked_head<_16, _512, _16>;
+
+// page_size = 32
+using decode_policy_q8_h64_p32 = decode_policy_qpacked_head<_8, _64, _32>;
+using decode_policy_q8_h96_p32 = decode_policy_qpacked_head<_8, _96, _32>;
+using decode_policy_q8_h128_p32 = decode_policy_qpacked_head<_8, _128, _32>;
+using decode_policy_q8_h192_p32 = decode_policy_qpacked_head<_8, _192, _32>;
+using decode_policy_q8_h256_p32 = decode_policy_qpacked_head<_8, _256, _32>;
+using decode_policy_q8_h512_p32 = decode_policy_qpacked_head<_8, _512, _32>;
+using decode_policy_q16_h64_p32 = decode_policy_qpacked_head<_16, _64, _32>;
+using decode_policy_q16_h96_p32 = decode_policy_qpacked_head<_16, _96, _32>;
+using decode_policy_q16_h128_p32 = decode_policy_qpacked_head<_16, _128, _32>;
+using decode_policy_q16_h192_p32 = decode_policy_qpacked_head<_16, _192, _32>;
+using decode_policy_q16_h256_p32 = decode_policy_qpacked_head<_16, _256, _32>;
+using decode_policy_q16_h512_p32 = decode_policy_qpacked_head<_16, _512, _32>;
 
 struct paged_decode_args_t {
   void* query;
@@ -79,6 +110,7 @@ struct paged_decode_args_t {
   bool is_causal = false;
   bool is_local = false;
   bool is_sink = false;
+  bool is_interleaved_kv_cache = false;
   int num_kv_splits = 1;
   // KV cache strides [num_blocks, block_size, num_heads_kv, head_size]
   int64_t k_stride_page = 0;
@@ -87,6 +119,15 @@ struct paged_decode_args_t {
   int64_t v_stride_page = 0;
   int64_t v_stride_seq = 0;
   int64_t v_stride_heads = 0;
+  // Q strides. Varlen Q is [total_seq, num_heads_q, head_size]; non-varlen Q
+  // is [batch, num_heads_q, seq, head_size]. The kernel always assumes the
+  // head_size dim has stride 1 (checked at the API boundary). The other
+  // strides are passed explicitly so non-contiguous Q (slice/permute/sliced
+  // buffer) is supported. q_stride_batch is unused for varlen (batch=1) and
+  // populated as 0 in that case.
+  int64_t q_stride_seq = 0;
+  int64_t q_stride_heads = 0;
+  int64_t q_stride_batch = 0;
 };
 
 template <class FMHAKernel, class ReductionSplitKernel, bool isVarLen>
@@ -155,9 +196,35 @@ struct DecodeKernelLauncher {
 
     num_kv_splits = args.num_kv_splits;
 
-    stride_Q = cutlass::make_cute_packed_stride(
-        StrideQ{},
-        cute::make_shape(seq_len_qo, head_size_qk, num_heads_q, batch));
+    if (args.q_stride_seq > 0 || args.q_stride_heads > 0 ||
+        args.q_stride_batch > 0) {
+      // Use actual strides from the Q tensor (supports non-contiguous Q
+      // such as strided row slices, permuted/transposed views, or slices
+      // of a wider buffer). The head_dim stride is _1 and is enforced at
+      // the API boundary.
+      constexpr int64_t kIntMax =
+          static_cast<int64_t>(std::numeric_limits<int>::max());
+      TORCH_CHECK(
+          args.q_stride_seq <= kIntMax && args.q_stride_heads <= kIntMax &&
+              args.q_stride_batch <= kIntMax,
+          "Q stride exceeds int32 max (",
+          kIntMax,
+          "): q_stride_seq=",
+          args.q_stride_seq,
+          " q_stride_heads=",
+          args.q_stride_heads,
+          " q_stride_batch=",
+          args.q_stride_batch);
+      stride_Q = StrideQ{
+          static_cast<int>(args.q_stride_seq),
+          _1{},
+          static_cast<int>(args.q_stride_heads),
+          static_cast<int>(args.q_stride_batch)};
+    } else {
+      stride_Q = cutlass::make_cute_packed_stride(
+          StrideQ{},
+          cute::make_shape(seq_len_qo, head_size_qk, num_heads_q, batch));
+    }
     if (args.k_stride_seq > 0) {
       // Use actual strides from KV cache tensors (supports non-contiguous
       // layouts such as MLA combined KV cache)
@@ -249,7 +316,8 @@ struct DecodeKernelLauncher {
          args.max_blocks_per_seq,
          args.total_seqlen_k,
          args.window_size_left,
-         args.window_size_right},
+         args.window_size_right,
+         args.is_interleaved_kv_cache},
         {},
         hw_info,
         args.num_kv_splits};
@@ -330,10 +398,8 @@ struct DecodeKernelLauncher {
         syclex::sub_group_size<cute::intel::sg_size>, intelex::grf_size<256>};
     compat::experimental::launch_policy policy{
         sycl_grid, sycl_block, launch_props, kernel_props};
-    auto event =
-        compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
-            policy, queue, params);
-    EventManager::getInstance().addEvent(event);
+    compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
+        policy, queue, params);
 
     // event.wait();
 
@@ -353,13 +419,10 @@ struct DecodeKernelLauncher {
           launch_props_reduce,
           kernel_props};
 
-      auto reduce_event = compat::experimental::launch<
+      compat::experimental::launch<
           cutlass::device_kernel<ReductionSplitKernel>>(
           reduce_policy, queue, reduce_params);
-
       // reduce_event.wait();
-
-      EventManager::getInstance().addEvent(reduce_event);
     }
   }
 };

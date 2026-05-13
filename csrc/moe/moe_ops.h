@@ -77,7 +77,6 @@ void moe_gather(
     const torch::Tensor& moe_output,
     const torch::Tensor& topk_weights,
     const torch::Tensor& unpermuted_row_to_permuted_row,
-    const torch::Tensor& expert_first_token_offset,
     const int64_t num_experts);
 
 void fused_moe_prologue(
@@ -105,7 +104,7 @@ void remap_hidden_states(
     torch::Tensor& remapped_hidden_states,
     const c10::optional<torch::Tensor>& remapped_hidden_states_scales,
     const c10::optional<torch::Tensor>& expert_map,
-    torch::Tensor& expert_first_token_offset,
+    torch::Tensor& rows_per_expert,
     torch::Tensor& unpermuted_row_to_permuted_row,
     torch::Tensor& topk_ids,
     int64_t total_experts_num,

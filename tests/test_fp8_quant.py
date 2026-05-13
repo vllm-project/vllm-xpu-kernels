@@ -12,7 +12,12 @@ from tests.ops.fp8_quant_op import (per_token_group_quant_fp8,
                                     scaled_fp8_quant, scaled_quantize)
 from tests.ops.mx_utils import to_mxfp
 
-SKIP_TEST_FOR_MINI_SCOPE = os.getenv("XPU_KERNEL_PYTEST_PROFILER") == "MINI"
+# Legacy compatibility: used by skipif below. Now handled by conftest.py
+# for the general case via SKIP_IN_MINI_SCOPE or TEST_SCOPE_PARAMS.
+_test_scope = os.getenv("XPU_KERNEL_TEST_SCOPE", "").strip().lower()
+_is_mini_scope = (_test_scope == "mini" or os.getenv(
+    "XPU_KERNEL_PYTEST_PROFILER", "").strip().upper() == "MINI")
+SKIP_TEST_FOR_MINI_SCOPE = _is_mini_scope
 
 
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:

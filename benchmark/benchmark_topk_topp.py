@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 """
 Benchmark comparing Sycl vs PyTorch sort-based top-k/top-p implementations.
 
@@ -19,6 +20,9 @@ import gc
 from dataclasses import dataclass
 
 import torch
+from utils import bootstrap_benchmark_env
+
+bootstrap_benchmark_env(__file__)
 
 from tests.ops.topk_topp_sampler_op import TopKTopPSampler
 

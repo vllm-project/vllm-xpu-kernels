@@ -25,7 +25,8 @@ void cutlass_chunk_prefill_xe2(
     bool is_paged,
     bool is_causal,
     bool is_local,
-    bool is_sink) {
+    bool is_sink,
+    std::optional<at::Tensor>& softmax_lse) {
   cutlass_chunk_prefill_impl(
       queue,
       query,
@@ -47,7 +48,8 @@ void cutlass_chunk_prefill_xe2(
       is_paged,
       is_causal,
       is_local,
-      is_sink);
+      is_sink,
+      softmax_lse);
 }
 
 void cutlass_chunk_prefill_impl(
@@ -71,7 +73,8 @@ void cutlass_chunk_prefill_impl(
     bool is_paged,
     bool is_causal,
     bool is_local,
-    bool is_sink) {
+    bool is_sink,
+    std::optional<at::Tensor>& softmax_lse) {
   // general params
   int batch_size, num_heads_q, num_heads_kv, head_size;
   // additional params
@@ -94,12 +97,17 @@ void cutlass_chunk_prefill_impl(
     max_seqlen_q = query.size(2);
     max_seqlen_k = is_paged ? max_seqlen_q : key_cache.size(2);
   }
+
+  bool is_interleaved_kv = false;
+
   if (is_paged) {
     num_blocks = key_cache.size(0);
     block_size = key_cache.size(1);
     num_heads_kv = key_cache.size(2);
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
+
+    is_interleaved_kv = is_interleaved_kv_cache(key_cache, value_cache);
   }
 
   if (is_local) {
@@ -127,7 +135,7 @@ void cutlass_chunk_prefill_impl(
       max_seqlen_q,
       max_seqlen_k,
       total_seqlen_q,
-      total_seqlen_k,
+      is_interleaved_kv ? total_seqlen_k * 2 : total_seqlen_k,
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
@@ -144,31 +152,182 @@ void cutlass_chunk_prefill_impl(
       is_paged,   // paged
       is_causal,
       is_local,
-      is_sink};
+      is_sink,
+      is_interleaved_kv};
+
+  // Populate softmax_lse output pointer if requested
+  if (softmax_lse.has_value()) {
+    args.softmax_lse = softmax_lse.value().data_ptr<float>();
+    args.lse_stride = num_heads_q;
+  }
+  // Extract Q, K, V, O strides from tensors
+  if (is_varlen) {
+    // Q/O: [total_seq, num_heads, head_size]
+    args.q_stride_seq = query.stride(0);
+    args.q_stride_heads = query.stride(1);
+    args.q_stride_batch = 0;
+    args.o_stride_seq = out.stride(0);
+    args.o_stride_heads = out.stride(1);
+    args.o_stride_batch = 0;
+    if (is_paged) {
+      // K/V: [num_blocks, block_size, num_heads_kv, head_size]
+      args.k_stride_seq = key_cache.stride(1);
+      args.k_stride_heads = key_cache.stride(2);
+      args.k_stride_batch = 0;
+      args.v_stride_seq = value_cache.stride(1);
+      args.v_stride_heads = value_cache.stride(2);
+      args.v_stride_batch = 0;
+    } else {
+      // K/V: [total_seq_k, num_heads_kv, head_size]
+      args.k_stride_seq = key_cache.stride(0);
+      args.k_stride_heads = key_cache.stride(1);
+      args.k_stride_batch = 0;
+      args.v_stride_seq = value_cache.stride(0);
+      args.v_stride_heads = value_cache.stride(1);
+      args.v_stride_batch = 0;
+    }
+  } else {
+    // Q/O: [batch, num_heads, seq, head_size]
+    args.q_stride_seq = query.stride(2);
+    args.q_stride_heads = query.stride(1);
+    args.q_stride_batch = query.stride(0);
+    args.o_stride_seq = out.stride(2);
+    args.o_stride_heads = out.stride(1);
+    args.o_stride_batch = out.stride(0);
+    if (is_paged) {
+      // K/V: [num_blocks, block_size, num_heads_kv, head_size]
+      args.k_stride_seq = key_cache.stride(1);
+      args.k_stride_heads = key_cache.stride(2);
+      args.k_stride_batch = 0;
+      args.v_stride_seq = value_cache.stride(1);
+      args.v_stride_heads = value_cache.stride(2);
+      args.v_stride_batch = 0;
+    } else {
+      // K/V: [batch, num_heads_kv, seq, head_size]
+      args.k_stride_seq = key_cache.stride(2);
+      args.k_stride_heads = key_cache.stride(1);
+      args.k_stride_batch = key_cache.stride(0);
+      args.v_stride_seq = value_cache.stride(2);
+      args.v_stride_heads = value_cache.stride(1);
+      args.v_stride_batch = value_cache.stride(0);
+    }
+  }
 
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
 
-  static constexpr int max_head_size = 256;
+  static constexpr int max_head_size = 512;
   TORCH_CHECK(
       head_size <= max_head_size,
       "FMHA forward only supports head dimension at most " +
           std::to_string(max_head_size));
 
-  if (args.head_size <= HEAD_SIZE_LIMIT_0) {
+  // softmax_lse output is only supported on the
+  // !Paged && !Local && !Sink specialization (template-constrained to
+  // keep kernel instantiation count bounded).
+  bool is_lse = softmax_lse.has_value();
+  TORCH_CHECK(
+      !is_lse || (!is_paged && !is_local && !is_sink),
+      "softmax_lse output is only supported when is_paged=false, "
+      "is_local=false, is_sink=false");
+
+  // Validate block_size: 16, 32, or any positive multiple of 64. Non-paged
+  // mode does not use block_size, so only enforce the check when paged.
+  if (is_paged) {
+    TORCH_CHECK(
+        block_size == 16 || block_size == 32 ||
+            (block_size > 0 && (block_size % 64) == 0),
+        "chunk_prefill: unsupported block_size=",
+        block_size,
+        " (supported: 16, 32, or any positive multiple of 64)");
+  }
+
+  // Block_size == 16 needs the *_b16 policies (TileShapeQK[1] = 16).
+  // All other supported sizes (32, 64*n) divide cleanly by the default
+  // TileShapeQK[1] = 32 used in the standard chunk_policy_head* set.
+  const bool use_b16_policy = is_paged && (block_size == 16);
+
+  if (use_b16_policy) {
+    if (args.head_size <= HEAD_SIZE_LIMIT_0) {
+      policy_dispatch_func<chunk_policy_head64_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
+      policy_dispatch_func<chunk_policy_head96_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
+      policy_dispatch_func<chunk_policy_head128_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
+      policy_dispatch_func<chunk_policy_head192_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
+      policy_dispatch_func<chunk_policy_head256_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
+      policy_dispatch_func<chunk_policy_head512_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else {
+      TORCH_CHECK(false, "Unsupported head size for fmha");
+    }
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_0) {
     policy_dispatch_func<chunk_policy_head64>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
     policy_dispatch_func<chunk_policy_head96>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
     policy_dispatch_func<chunk_policy_head128>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
     policy_dispatch_func<chunk_policy_head192>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
     policy_dispatch_func<chunk_policy_head256>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink);
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
+    policy_dispatch_func<chunk_policy_head512>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else {
     TORCH_CHECK(false, "Unsupported head size for fmha");
   }

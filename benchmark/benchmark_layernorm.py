@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 
 import time
 from argparse import ArgumentParser
 
 import torch
+from utils import bootstrap_benchmark_env
+
+bootstrap_benchmark_env(__file__)
 
 from tests.ops.layernorm_op import RMSNorm
 from tests.utils import STR_DTYPE_TO_TORCH_DTYPE

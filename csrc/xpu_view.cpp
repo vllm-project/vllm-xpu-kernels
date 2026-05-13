@@ -2,6 +2,7 @@
 #include "ops.h"
 #include <c10/core/Device.h>
 #include <c10/xpu/XPUFunctions.h>
+#include <memory>
 
 namespace vllm::xpu {
 
@@ -17,13 +18,17 @@ namespace vllm::xpu {
 
 class XPUHostViewAllocator : public c10::Allocator {
  public:
+  struct OwnerContext {
+    torch::Tensor owner;
+  };
+
   /**
    * @brief Constructor
    * @param host_ptr Pre-allocated host memory pointer
    * @param size Size of the host memory (in bytes)
    */
-  XPUHostViewAllocator(void* host_ptr, size_t size)
-      : host_ptr_(host_ptr), size_(size) {}
+  XPUHostViewAllocator(void* host_ptr, size_t size, torch::Tensor owner)
+      : host_ptr_(host_ptr), size_(size), owner_(std::move(owner)) {}
 
   /**
    * @brief Allocate memory (actually just validates and wraps existing host
@@ -36,15 +41,20 @@ class XPUHostViewAllocator : public c10::Allocator {
     // Verify requested memory size doesn't exceed pre-allocated memory size
     TORCH_CHECK(
         n <= size_, "Requested size exceeds allocated host pointer size");
-    // Return wrapped data pointer with no-op deleter since memory is externally
-    // managed
+    // Use unique_ptr for RAII: if current_device() or DataPtr construction
+    // throws, the OwnerContext is automatically cleaned up instead of leaked.
+    auto ctx = std::make_unique<OwnerContext>(OwnerContext{owner_});
     auto device_id = c10::xpu::current_device();
-    return {
-        host_ptr_,     // Actual data pointer
-        host_ptr_,     // Context pointer (same as data pointer here)
-        [](void*) {},  // No-op deleter, doesn't actually free memory
-        c10::Device(c10::DeviceType::XPU, device_id)  // Device type set to XPU
-    };
+
+    c10::DataPtr data_ptr{
+        host_ptr_,
+        ctx.get(),
+        [](void* ptr) { delete static_cast<OwnerContext*>(ptr); },
+        c10::Device(c10::DeviceType::XPU, device_id)};
+
+    // DataPtr now owns the context via its deleter — release from unique_ptr.
+    ctx.release();
+    return data_ptr;
   }
 
   /**
@@ -71,6 +81,7 @@ class XPUHostViewAllocator : public c10::Allocator {
  private:
   void* const host_ptr_;  // Pre-allocated host memory pointer
   const size_t size_;     // Size of pre-allocated memory
+  torch::Tensor owner_;   // Keeps pinned host storage alive
 };
 }  // namespace vllm::xpu
 
@@ -92,7 +103,8 @@ torch::Tensor get_xpu_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
   auto scalar_type = cpu_tensor.scalar_type();
 
   size_t byte_size = cpu_tensor.numel() * cpu_tensor.element_size();
-  vllm::xpu::XPUHostViewAllocator allocator(host_ptr, byte_size);
+  // Keep `cpu_tensor` storage alive through the view tensor's lifetime.
+  vllm::xpu::XPUHostViewAllocator allocator(host_ptr, byte_size, cpu_tensor);
   c10::DataPtr data_ptr = allocator.allocate(byte_size);
   c10::Storage storage(
       c10::Storage::use_byte_size_t(), byte_size, std::move(data_ptr));

@@ -12,6 +12,17 @@ BATCH_SIZE = [1, 4, 16]
 VOCAB_SIZE = [100, 1000, 10000]
 DEVICE = "xpu"
 
+# CI/mini scope parameter overrides
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "batch_size": [1, 4],
+        "vocab_size": [1000],
+        "seed": [42],
+        "offset": [0],
+        "lambda_param": [1.0],
+    },
+}
+
 
 class ExponentialDistributionTester:
 

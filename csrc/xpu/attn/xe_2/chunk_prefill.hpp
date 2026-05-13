@@ -5,7 +5,6 @@
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
 #include "cutlass/util/packed_stride.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
-#include "cutlass/util/sycl_event_manager.hpp"
 #include <cute/tensor.hpp>
 #include <random>
 
@@ -53,6 +52,26 @@ struct chunk_prefill_args_t {
   bool is_causal = false;
   bool is_local = false;
   bool is_sink = false;
+  bool is_interleaved_kv_cache = false;
+  // softmax_lse output (nullptr when not requested)
+  float* softmax_lse = nullptr;
+  int lse_stride = 0;  // stride along seq dim (= num_heads_q)
+  // Q/O strides in CUTLASS order: (seq, head_size=1, heads, batch)
+  int q_stride_seq = 0;
+  int q_stride_heads = 0;
+  int q_stride_batch = 0;
+  // K strides in CUTLASS order: (seq, head_size=1, heads, batch)
+  int k_stride_seq = 0;
+  int k_stride_heads = 0;
+  int k_stride_batch = 0;
+  // V strides in CUTLASS order: (head_size=1, seq, heads, batch)
+  int v_stride_seq = 0;
+  int v_stride_heads = 0;
+  int v_stride_batch = 0;
+  // O strides in CUTLASS order: (seq, head_size=1, heads, batch)
+  int o_stride_seq = 0;
+  int o_stride_heads = 0;
+  int o_stride_batch = 0;
 };
 
 template <class FMHAKernel, bool isVarLen>
@@ -110,21 +129,26 @@ struct KernelLauncher {
       shape.seq_len_kv = shape_init.seq_len_kv = args.max_keys;
     }
 
-    auto seq_len_qo = shape_init.seq_len_qo;
-    auto seq_len_kv = shape_init.seq_len_kv;
+    // Use actual tensor strides instead of packed strides
+    stride_Q = StrideQ{};
+    get<0>(stride_Q) = args.q_stride_seq;
+    get<2>(stride_Q) = args.q_stride_heads;
+    get<3>(stride_Q) = args.q_stride_batch;
 
-    stride_Q = cutlass::make_cute_packed_stride(
-        StrideQ{},
-        cute::make_shape(seq_len_qo, head_size_qk, num_heads_q, batch));
-    stride_K = cutlass::make_cute_packed_stride(
-        StrideK{},
-        cute::make_shape(seq_len_kv, head_size_qk, num_heads_kv, batch));
-    stride_V = cutlass::make_cute_packed_stride(
-        StrideV{},
-        cute::make_shape(head_size_vo, seq_len_kv, num_heads_kv, batch));
-    stride_O = cutlass::make_cute_packed_stride(
-        StrideO{},
-        cute::make_shape(seq_len_qo, head_size_vo, num_heads_q, batch));
+    stride_K = StrideK{};
+    get<0>(stride_K) = args.k_stride_seq;
+    get<2>(stride_K) = args.k_stride_heads;
+    get<3>(stride_K) = args.k_stride_batch;
+
+    stride_V = StrideV{};
+    get<1>(stride_V) = args.v_stride_seq;
+    get<2>(stride_V) = args.v_stride_heads;
+    get<3>(stride_V) = args.v_stride_batch;
+
+    stride_O = StrideO{};
+    get<0>(stride_O) = args.o_stride_seq;
+    get<2>(stride_O) = args.o_stride_heads;
+    get<3>(stride_O) = args.o_stride_batch;
 
     return shape;
   }
@@ -145,7 +169,9 @@ struct KernelLauncher {
          stride_V,
          reinterpret_cast<ElementO*>(args.out),
          stride_O,
-         reinterpret_cast<ElementQ*>(args.sm_sink)},
+         reinterpret_cast<ElementQ*>(args.sm_sink),
+         args.softmax_lse,
+         args.lse_stride},
         {args.sm_scale,
          args.k_scale,
          args.v_scale,
@@ -154,7 +180,8 @@ struct KernelLauncher {
          args.max_blocks_per_seq,
          args.total_seqlen_k,
          args.window_size_left,
-         args.window_size_right},
+         args.window_size_right,
+         args.is_interleaved_kv_cache},
         {},
         hw_info};
 
@@ -197,11 +224,8 @@ struct KernelLauncher {
         syclex::sub_group_size<cute::intel::sg_size>, intelex::grf_size<256>};
     compat::experimental::launch_policy policy{
         sycl_grid, sycl_block, launch_props, kernel_props};
-    auto event =
-        compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
-            policy, queue, params);
-
-    EventManager::getInstance().addEvent(event);
+    compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
+        policy, queue, params);
   }
 };
 
@@ -216,6 +240,7 @@ template <
     bool Causal = false,
     bool Local = false,
     bool Sink = false,
+    bool SoftmaxLSE = false,
     typename ElementQ = bfloat16_t,
     typename ElementK = bfloat16_t,
     typename ElementV = bfloat16_t,
@@ -303,7 +328,8 @@ struct FMHAConfig {
         ProblemShapeType,
         CollectiveMainloop,
         CollectiveEpilogue,
-        Scheduler>;
+        Scheduler,
+        SoftmaxLSE>;
 
     KernelLauncher<FMHAKernel, VarLen> launcher;
 
@@ -317,7 +343,13 @@ struct FMHAConfig {
   }
 };
 
-template <typename chunk_policy, bool Paged, bool Causal, bool Local, bool Sink>
+template <
+    typename chunk_policy,
+    bool Paged,
+    bool Causal,
+    bool Local,
+    bool Sink,
+    bool SoftmaxLSE>
 void policy_dispatch_impl(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
@@ -336,6 +368,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           half_t,
           half_t,
           half_t,
@@ -352,6 +385,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           half_t,
           float_e4m3_t,
           float_e4m3_t,
@@ -368,6 +402,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           half_t,
           float_e5m2_t,
           float_e5m2_t,
@@ -386,6 +421,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           bfloat16_t,
           bfloat16_t,
           bfloat16_t,
@@ -402,6 +438,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           bfloat16_t,
           float_e4m3_t,
           float_e4m3_t,
@@ -418,6 +455,7 @@ void policy_dispatch_impl(
           Causal,
           Local,
           Sink,
+          SoftmaxLSE,
           bfloat16_t,
           float_e5m2_t,
           float_e5m2_t,

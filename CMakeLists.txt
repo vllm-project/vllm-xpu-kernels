@@ -44,20 +44,43 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
 #
 # TODO: we need to align torch version with used in vLLM.
 #
-set(TORCH_SUPPORTED_VERSION_XPU "2.9.0")
+set(TORCH_SUPPORTED_VERSION_XPU "2.11.0")
 
 set(BUILD_SYCL_TLA_KERNELS
     ON
     CACHE BOOL "Build SYCL-TLA based kernels for XPU")
 # ARCHITECTURE OPTIONS
-set(VLLM_XPU_ENABLE_XE2 ON)
-set(VLLM_XPU_ENABLE_XE_DEFAULT ON)
+option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
+option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
 
-set(BASIC_KERNELS_ENABLED ON)
-set(FA2_KERNELS_ENABLED ON)
-set(GND_KERNELS_ENABLED ON)
-set(MOE_KERNELS_ENABLED ON)
-set(XPU_SPECIFIC_KERNELS_ENABLED ON)
+# KERNEL OPTIONS — each controls whether the corresponding Python extension is
+# built. Override from the command line with -D<NAME>=OFF or via the
+# identically-named environment variable (read by setup.py).
+option(BASIC_KERNELS_ENABLED "Build basic kernels (_C extension)" ON)
+option(FA2_KERNELS_ENABLED
+       "Build Flash Attention 2 kernels (_vllm_fa2_C extension)" ON)
+option(MOE_KERNELS_ENABLED
+       "Build MoE kernels (_moe_C extension + grouped_gemm TLA)" ON)
+option(GDN_KERNELS_ENABLED "Build GDN attention kernels (gdn_attn TLA)" ON)
+option(MQA_LOGITS_KERNELS_ENABLED "Build MQA logits kernels" ON)
+option(XPU_SPECIFIC_KERNELS_ENABLED
+       "Build XPU-specific kernels (_xpu_C extension)" ON)
+option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
+
+message(STATUS "")
+message(STATUS "Kernel build configuration:")
+message(STATUS "  BUILD_SYCL_TLA_KERNELS       = ${BUILD_SYCL_TLA_KERNELS}")
+message(STATUS "  VLLM_XPU_ENABLE_XE2          = ${VLLM_XPU_ENABLE_XE2}")
+message(STATUS "  VLLM_XPU_ENABLE_XE_DEFAULT   = ${VLLM_XPU_ENABLE_XE_DEFAULT}")
+message(STATUS "  BASIC_KERNELS_ENABLED        = ${BASIC_KERNELS_ENABLED}")
+message(STATUS "  FA2_KERNELS_ENABLED          = ${FA2_KERNELS_ENABLED}")
+message(STATUS "  MOE_KERNELS_ENABLED          = ${MOE_KERNELS_ENABLED}")
+message(STATUS "  GDN_KERNELS_ENABLED          = ${GDN_KERNELS_ENABLED}")
+message(STATUS "  MQA_LOGITS_KERNELS_ENABLED   = ${MQA_LOGITS_KERNELS_ENABLED}")
+message(
+  STATUS "  XPU_SPECIFIC_KERNELS_ENABLED = ${XPU_SPECIFIC_KERNELS_ENABLED}")
+message(STATUS "  XPUMEM_ALLOCATOR_ENABLED     = ${XPUMEM_ALLOCATOR_ENABLED}")
+message(STATUS "")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -304,6 +327,7 @@ endif()
 set(ATTN_KERNEL_LIB_NAME "")
 set(GROUPED_GEMM_LIB_NAME "")
 set(GDN_ATTN_LIB_NAME "")
+set(MQA_LOGITS_LIB_NAME "")
 
 if(BUILD_SYCL_TLA_KERNELS)
 
@@ -319,21 +343,45 @@ if(BUILD_SYCL_TLA_KERNELS)
   # extensions shared library
   set(SYCL_TLA_COMPILE_OPTIONS "")
   if(VLLM_XPU_ENABLE_XE_DEFAULT)
-    add_subdirectory(csrc/xpu/grouped_gemm/xe_default)
-    list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_default")
+    if(MOE_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/grouped_gemm/xe_default)
+      list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_default")
+    endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE_DEFAULT)
   endif()
   if(VLLM_XPU_ENABLE_XE2)
-    add_subdirectory(csrc/xpu/grouped_gemm/xe_2)
-    add_subdirectory(csrc/xpu/attn/xe_2)
-    add_subdirectory(csrc/xpu/gdn_attn/xe_2)
-    list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_2")
-    list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels_xe_2")
-    list(APPEND GDN_ATTN_LIB_NAME "gdn_attn_kernels_xe_2")
+    if(MOE_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/grouped_gemm/xe_2)
+      list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_2")
+    endif()
+    if(FA2_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/attn/xe_2)
+      list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels_xe_2")
+    endif()
+    if(GDN_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/gdn_attn/xe_2)
+      list(APPEND GDN_ATTN_LIB_NAME "gdn_attn_kernels_xe_2")
+    endif()
+    if(MQA_LOGITS_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/mqa_logits/xe_2)
+      list(APPEND MQA_LOGITS_LIB_NAME "mqa_logits_kernels_xe_2")
+    endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
 
+endif()
+
+# Feature compile defines — these guard op registrations and interface code so
+# that disabled features don't pull in unbuilt TLA library symbols.
+if(MOE_KERNELS_ENABLED)
+  list(APPEND VLLM_GPU_COMPILE_FLAGS -DVLLM_MOE_ENABLED)
+endif()
+if(GDN_KERNELS_ENABLED)
+  list(APPEND VLLM_GPU_COMPILE_FLAGS -DVLLM_GDN_ENABLED)
+endif()
+if(MQA_LOGITS_KERNELS_ENABLED)
+  list(APPEND VLLM_GPU_COMPILE_FLAGS -DVLLM_MQA_LOGITS_ENABLED)
 endif()
 
 # define vLLM XPU cmake variables
@@ -358,9 +406,6 @@ list(
 #
 # xpumem_allocator extension - XPU memory allocator with Python callbacks
 #
-set(XPUMEM_ALLOCATOR_ENABLED
-    ON
-    CACHE BOOL "Build xpumem_allocator extension")
 if(XPUMEM_ALLOCATOR_ENABLED)
   message(STATUS "Enabling xpumem_allocator extension.")
 
@@ -410,8 +455,10 @@ if(BASIC_KERNELS_ENABLED)
   set(VLLM_EXT_SRC
       "csrc/cache.cpp"
       "csrc/layernorm.cpp"
+      "csrc/layernorm_quant.cpp"
       "csrc/activation.cpp"
       "csrc/pos_encoding_kernels.cpp"
+      "csrc/fused_qknorm_rope.cpp"
       "csrc/torch_bindings.cpp"
       "csrc/quantization/fp8/fp8_quant.cpp"
       "csrc/quantization/fp4/mxfp4_quant.cpp"
@@ -448,6 +495,14 @@ endif()
 #
 # flash attention _C extension
 #
+if(FA2_KERNELS_ENABLED AND NOT ATTN_KERNEL_LIB_NAME)
+  message(
+    WARNING
+      "FA2_KERNELS_ENABLED is ON but no attention kernel libraries are available. "
+      "The _vllm_fa2_C extension will be built without kernel libraries and may "
+      "fail at runtime. Enable BUILD_SYCL_TLA_KERNELS and VLLM_XPU_ENABLE_XE2 "
+      "for full FA2 functionality.")
+endif()
 if(FA2_KERNELS_ENABLED)
   message(STATUS "Enabling fa2 extension.")
   file(GLOB FA2_GEN_SRCS "csrc/flash_attn/*.cpp"
@@ -489,9 +544,17 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
       "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
       "csrc/xpu/rand/exponential.cpp"
-      "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp"
-      "csrc/xpu/utils.cpp"
-      "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
+      "csrc/xpu/utils.cpp")
+  if(MOE_KERNELS_ENABLED)
+    list(APPEND VLLM_EXT_XPU_SRC
+         "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp")
+  endif()
+  if(GDN_KERNELS_ENABLED)
+    list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
+  endif()
+  if(MQA_LOGITS_KERNELS_ENABLED)
+    list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/mqa_logits/mqa_logits_interface.cpp")
+  endif()
   include_directories("/usr/include")
   # TODO: check if we need this flags list(APPEND VLLM_GPU_FLAGS
   # "-gline-tables-only")
@@ -524,7 +587,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     INCLUDE_DIRECTORIES
     ${VLLM_XPU_INCLUDE_DIR}
     LIBRARIES
-    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME}
+    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME};${MQA_LOGITS_LIB_NAME}
     USE_SABI
     3
     WITH_SOABI)

@@ -96,6 +96,31 @@ class GeluAndMul(CustomOp):
         return f'approximate={repr(self.approximate)}'
 
 
+class FatreluAndMul(CustomOp):
+
+    def __init__(self, threshold: float):
+        super().__init__()
+        self.threshold = threshold
+        self.op = ops.fatrelu_and_mul
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        x1 = x[..., :d]
+        x2 = x[..., d:]
+        x1 = F.threshold(x1, self.threshold, 0.0)
+        return x1 * x2
+
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        output_shape = (x.shape[:-1] + (d, ))
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        self.op(out, x, self.threshold)
+        return out
+
+    def extra_repr(self) -> str:
+        return f'threshold={self.threshold!r}'
+
+
 class FastGELU(CustomOp):
 
     def __init__(self):
@@ -139,6 +164,30 @@ class QuickGELU(CustomOp):
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         return x * torch.sigmoid(1.702 * x)
+
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        out = torch.empty_like(x)
+        self.op(out, x)
+        return out
+
+
+class Relu2NoMul(CustomOp):
+    """Squared ReLU activation function (without mul).
+
+    The function computes x -> relu(x)^2.
+
+    Shapes:
+        x: (num_tokens, d) or (batch_size, seq_len, d)
+        return: same shape as x
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.op = torch.ops._C.relu2_no_mul
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        return torch.square(F.relu(x))
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
         out = torch.empty_like(x)

@@ -5,7 +5,7 @@
 /**
  * Make sure the shape of A and B is correctly setting before calling below gemm
  * method implemented with OneDNN.
- *  A should be one of [b, m, k] and [m, k]
+ *  A should be one of [b, m, k] and [m, k] or [m, k//2] in fp4 precision
  *  B should be [k, n] or [k//8, n] in int4 precision, where [k//8, n] indicates
  * a packed representation with 8 int4 values packed into one byte along the k
  * dimension.
@@ -23,6 +23,14 @@ torch::Tensor fp8_gemm_w8a16(
     const torch::Tensor& B,
     const std::optional<torch::Tensor>& B_scale_,
     const std::optional<torch::Tensor>& bias_);
+
+torch::Tensor fp4_gemm(
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    const torch::Tensor& A_scale,
+    const torch::Tensor& B_scale,
+    std::optional<c10::ScalarType> out_dtype,
+    const std::optional<torch::Tensor>& bias);
 
 torch::Tensor int4_gemm_w4a16(
     const torch::Tensor& A_,
@@ -44,18 +52,20 @@ torch::Tensor int4_gemm_w4a8(
     const std::optional<torch::Tensor>& g_idx,
     const std::optional<torch::Tensor>& bias);
 
+#ifdef VLLM_MOE_ENABLED
 torch::Tensor cutlass_grouped_gemm_interface(
     torch::Tensor ptr_A,
     torch::Tensor ptr_B,
     const c10::optional<at::Tensor>& ptr_scales,
     const c10::optional<at::Tensor>& ptr_bias,
     torch::Tensor ptr_D,
-    torch::Tensor expert_first_token_offset,
+    torch::Tensor rows_per_expert,
     int64_t N,
     int64_t K,
     int64_t num_experts,
     bool is_B_int4,
     bool is_B_mxfp4);
+#endif
 
 std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     const at::Tensor& positions,
@@ -66,6 +76,7 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     int64_t rotary_dim,
     bool is_neox);
 
+#ifdef VLLM_GDN_ENABLED
 void gdn_attention(
     torch::Tensor& core_attn_out,
     torch::Tensor& z,
@@ -90,6 +101,7 @@ void gdn_attention(
     const int64_t num_actual_tokens,
     const int64_t tp_size,
     const bool reorder_input);
+#endif
 
 bool is_bmg(int64_t device_index);
 
@@ -109,3 +121,22 @@ void topk_topp_sampler(
     const std::string& logprobs_mode,
     torch::Tensor& seeds,  // should on CPU
     const double lambda);
+
+#ifdef VLLM_MQA_LOGITS_ENABLED
+torch::Tensor fp8_mqa_logits(
+    const torch::Tensor& q,
+    const torch::Tensor& kv,
+    const torch::Tensor& kv_scales,
+    const torch::Tensor& weights,
+    const torch::Tensor& cu_seqlen_ks,
+    const torch::Tensor& cu_seqlen_ke);
+
+torch::Tensor fp8_paged_mqa_logits(
+    const torch::Tensor& q_fp8,
+    const torch::Tensor& kv_cache_fp8,
+    const torch::Tensor& weights,
+    const torch::Tensor& context_lens,
+    const torch::Tensor& block_tables,
+    const c10::optional<at::Tensor>& schedule_metadata,
+    int64_t max_model_len);
+#endif

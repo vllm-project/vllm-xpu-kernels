@@ -19,6 +19,18 @@ class xe_gemm_policy_base {
 
 class w16a16_policy : public xe_gemm_policy_base {};
 
+class w16a16_policy_n_128 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_256, _128, _32>;
+  using SGLayout = Layout<Shape<_8, _2, _1>, Stride<_2, _1, _0>>;
+};
+
+class w16a16_policy_n_64 : public xe_gemm_policy_base {
+ public:
+  using WGTile = Shape<_256, _64, _32>;
+  using SGLayout = Layout<Shape<_8, _1, _1>, Stride<_1, _1, _0>>;
+};
+
 class w16a16_policy_m_8 : public xe_gemm_policy_base {
  public:
   using WGTile = Shape<_8, _64, _32>;
@@ -39,8 +51,8 @@ class w16a16_policy_m_32 : public xe_gemm_policy_base {
 
 class w8a16_policy : public xe_gemm_policy_base {
  public:
-  using WGTile = Shape<_128, _256, _32>;
-  using SGLayout = Layout<Shape<_4, _8, _1>, Stride<_8, _1, _0>>;
+  using WGTile = Shape<_128, _128, _16>;
+  using SGLayout = Layout<Shape<_4, _2, _1>, Stride<_2, _1, _0>>;
 };
 
 class w8a16_policy_m_8 : public xe_gemm_policy_base {

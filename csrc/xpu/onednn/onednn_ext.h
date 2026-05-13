@@ -1,10 +1,9 @@
 #pragma once
-#include <ATen/ATen.h>
-#include <ATen/native/mkldnn/xpu/detail/LRUCache.h>
 
 #include <dnnl.h>
 #include <dnnl.hpp>
 
+#include "lru_cache.h"
 #include "onednn_runtime.h"
 
 namespace std {
@@ -52,6 +51,8 @@ enum class joint_dtypes_t {
   f8_e5m2_bf16,
   f8_e4m3_f16,
   f8_e4m3_bf16,
+  mxfp4_bf16,
+  mxfp4_f16,
 };
 
 template <joint_dtypes_t Ts>
@@ -195,6 +196,30 @@ struct onednn_types_mapper<joint_dtypes_t::f8_e4m3_bf16> {
   }
 };
 
+template <>
+struct onednn_types_mapper<joint_dtypes_t::mxfp4_bf16> {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
+    return std::make_tuple(
+        memory::data_type::f4_e2m1,
+        memory::data_type::f4_e2m1,
+        memory::data_type::bf16);
+  }
+};
+
+template <>
+struct onednn_types_mapper<joint_dtypes_t::mxfp4_f16> {
+  static inline std::
+      tuple<memory::data_type, memory::data_type, memory::data_type>
+      get() {
+    return std::make_tuple(
+        memory::data_type::f4_e2m1,
+        memory::data_type::f4_e2m1,
+        memory::data_type::f16);
+  }
+};
+
 static inline memory::data_type
 get_onednn_dtype(const at::Tensor& tensor, bool allow_undef = false) {
   switch (tensor.scalar_type()) {
@@ -218,6 +243,10 @@ get_onednn_dtype(const at::Tensor& tensor, bool allow_undef = false) {
       return memory::data_type::f8_e4m3;
     case at::ScalarType::Float8_e5m2:
       return memory::data_type::f8_e5m2;
+    case at::ScalarType::Float8_e8m0fnu:
+      return memory::data_type::e8m0;
+    case at::ScalarType::Float4_e2m1fn_x2:
+      return memory::data_type::f4_e2m1;
     default:
       if (!allow_undef) {
         TORCH_CHECK(
@@ -707,8 +736,7 @@ T1 concat(const T1& t1, const T2& t2, const Ts&... ts) {
   return concat(concat(t1, t2), ts...);
 }
 
-using primitive_cache =
-    at::native::onednn::lru_cache<memory::dims, primitive_ext>;
+using primitive_cache = lru_cache<memory::dims, primitive_ext>;
 
 template <trans_type_t Tt, joint_dtypes_t Ts, typename F>
 struct matmul_primitive_cache_t {
@@ -1004,6 +1032,34 @@ static inline primitive_ext& matmul_primitive_create_and_cache(
           zp_group_size);
     case joint_dtypes_t::f8_e4m3_bf16:
       return matmul_primitive_create_and_cache<joint_dtypes_t::f8_e4m3_bf16, F>(
+          Tt,
+          b_type,
+          m,
+          n,
+          k,
+          lda,
+          ldb,
+          ldc,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::mxfp4_bf16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::mxfp4_bf16, F>(
+          Tt,
+          b_type,
+          m,
+          n,
+          k,
+          lda,
+          ldb,
+          ldc,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::mxfp4_f16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::mxfp4_f16, F>(
           Tt,
           b_type,
           m,

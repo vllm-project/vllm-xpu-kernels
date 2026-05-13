@@ -1,6 +1,7 @@
 #include <sycl/sycl.hpp>
 
 #include <algorithm>
+#include <ATen/DeviceGuard.h>
 #include "utils.h"
 #include "dispatch_utils.h"
 
@@ -331,6 +332,7 @@ void rms_norm(
     torch::Tensor& input,
     torch::Tensor& weight,
     double epsilon) {
+  const at::DeviceGuard device_guard(input.device());
   TORCH_CHECK(out.is_contiguous());
   if (input.stride(-1) != 1) {
     input = input.contiguous();
@@ -348,6 +350,7 @@ void fused_add_rms_norm(
     torch::Tensor& residual,
     torch::Tensor& weight,
     double epsilon) {
+  const at::DeviceGuard device_guard(input.device());
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
 

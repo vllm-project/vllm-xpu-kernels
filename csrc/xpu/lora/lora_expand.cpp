@@ -1,4 +1,6 @@
 #include <iostream>
+#include <algorithm>
+#include <type_traits>
 #include <sycl/sycl.hpp>
 #include <ATen/ATen.h>
 #include <c10/util/Exception.h>
@@ -41,12 +43,16 @@ constexpr uint32_t kMediumWorkgroupSize = 128;
  *     outputs[b, slice_offset + s] += Σ_r (inputs[b, r] * weights[indices[b],
  * s, r])
  */
-template <typename output_t, typename input_t, uint32_t vec_size>
+template <
+    typename output_t,
+    typename input_t,
+    typename weight_t,
+    uint32_t vec_size>
 class bgmv_expand_slice_kernel {
  private:
   output_t* outputs_;
   const input_t* inputs_;
-  const input_t* weights_;
+  const weight_t* weights_;
   const int64_t* indices_;
   const uint32_t hidden_;
   const uint32_t rank_;
@@ -56,8 +62,9 @@ class bgmv_expand_slice_kernel {
   const uint32_t batch_size_;
 
  public:
-  using acc_t = vllm::xpu::acc_type<input_t>;
-  using vec_t = vllm::xpu::aligned_vec<input_t, vec_size>;
+  using acc_t = float;
+  using input_vec_t = vllm::xpu::aligned_vec<input_t, vec_size>;
+  using weight_vec_t = vllm::xpu::aligned_vec<weight_t, vec_size>;
 
   /**
    * Constructor
@@ -74,7 +81,7 @@ class bgmv_expand_slice_kernel {
   bgmv_expand_slice_kernel(
       output_t* outputs,
       const input_t* inputs,
-      const input_t* weights,
+      const weight_t* weights,
       const int64_t* indices,
       const uint32_t hidden,
       const uint32_t rank,
@@ -114,17 +121,17 @@ class bgmv_expand_slice_kernel {
       if (lora_idx < 0) continue;
 
       const input_t* input_base = inputs_ + batch_id * rank_;
-      const input_t* weight_base =
+      const weight_t* weight_base =
           weights_ + lora_idx * slice_size_ * rank_ + slice_id * rank_;
 
       acc_t sum = 0;
 
       const uint32_t full_vectors = rank_ / vec_size;
       for (uint32_t j = 0; j < full_vectors; j++) {
-        const vec_t input_vec =
-            *reinterpret_cast<const vec_t*>(input_base + j * vec_size);
-        const vec_t weight_vec =
-            *reinterpret_cast<const vec_t*>(weight_base + j * vec_size);
+        const input_vec_t input_vec =
+            *reinterpret_cast<const input_vec_t*>(input_base + j * vec_size);
+        const weight_vec_t weight_vec =
+            *reinterpret_cast<const weight_vec_t*>(weight_base + j * vec_size);
 
 #pragma unroll
         for (uint32_t k = 0; k < vec_size; k++) {
@@ -238,11 +245,11 @@ compute_workgroup(uint32_t total_elements, uint32_t max_workgroup_size) {
  * @param slice_size   - Size of the slice to update
  * @param add_inputs - Whether to accumulate to existing output
  */
-template <typename output_t, typename input_t>
+template <typename output_t, typename input_t, typename weight_t>
 void launch_bgmv_expand_slice(
     output_t* outputs,
     input_t* inputs,
-    input_t* weights,
+    weight_t* weights,
     int64_t* indices,
     const uint32_t batch_size,
     const uint32_t hidden,
@@ -250,21 +257,36 @@ void launch_bgmv_expand_slice(
     const uint32_t slice_offset,
     const uint32_t slice_size,
     const bool add_inputs) {
-  uint32_t vec_bytes = 16;
+  // Compute vec_size for inputs
+  uint32_t input_vec_bytes = 16;
   const auto input_align = reinterpret_cast<uintptr_t>(inputs);
-  const auto weight_align = reinterpret_cast<uintptr_t>(weights);
-  const uint32_t data_bytes = rank * sizeof(input_t);
+  const uint32_t input_data_bytes = rank * sizeof(input_t);
+  while (input_vec_bytes > sizeof(input_t) &&
+         (input_data_bytes % input_vec_bytes != 0 ||
+          input_align % input_vec_bytes != 0)) {
+    input_vec_bytes /= 2;
+  }
+  if (input_vec_bytes < sizeof(input_t)) {
+    input_vec_bytes = sizeof(input_t);
+  }
+  uint32_t input_vec_size = input_vec_bytes / sizeof(input_t);
 
-  while (vec_bytes > sizeof(input_t) &&
-         (data_bytes % vec_bytes != 0 || input_align % vec_bytes != 0 ||
-          weight_align % vec_bytes != 0)) {
-    vec_bytes /= 2;
+  // Compute vec_size for weights
+  uint32_t weight_vec_bytes = 16;
+  const auto weight_align = reinterpret_cast<uintptr_t>(weights);
+  const uint32_t weight_data_bytes = rank * sizeof(weight_t);
+  while (weight_vec_bytes > sizeof(weight_t) &&
+         (weight_data_bytes % weight_vec_bytes != 0 ||
+          weight_align % weight_vec_bytes != 0)) {
+    weight_vec_bytes /= 2;
   }
-  // Fallback to scalar operations
-  if (vec_bytes < sizeof(input_t)) {
-    vec_bytes = sizeof(input_t);
+  if (weight_vec_bytes < sizeof(weight_t)) {
+    weight_vec_bytes = sizeof(weight_t);
   }
-  uint32_t vec_size = vec_bytes / sizeof(input_t);
+  uint32_t weight_vec_size = weight_vec_bytes / sizeof(weight_t);
+
+  // Use the minimum vec_size so both types can be vectorized
+  uint32_t vec_size = std::min(input_vec_size, weight_vec_size);
 
   at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
   at::DeviceGuard device_guard(curDevice);
@@ -281,20 +303,28 @@ void launch_bgmv_expand_slice(
   const sycl::range<1> local_range{workgroup_size};
   const sycl::range<1> global_range{num_workgroups * workgroup_size};
 
+  using sycl_output_t = typename vllm::xpu::SyclTypeTrait<output_t>::Type;
+  using sycl_input_t = typename vllm::xpu::SyclTypeTrait<input_t>::Type;
+  using sycl_weight_t = typename vllm::xpu::SyclTypeTrait<weight_t>::Type;
+
   dpcpp_queue.submit([&](sycl::handler& cgh) {
     dispatch_vec_size(vec_size, [&](auto vec_c) {
       constexpr int V = vec_c.value;
-      vllm::lora::bgmv_expand_slice_kernel<output_t, input_t, V> kfn(
-          outputs,
-          inputs,
-          weights,
-          indices,
-          hidden,
-          rank,
-          slice_offset,
-          slice_size,
-          add_inputs,
-          batch_size);
+      vllm::lora::bgmv_expand_slice_kernel<
+          sycl_output_t,
+          sycl_input_t,
+          sycl_weight_t,
+          V>
+          kfn(reinterpret_cast<sycl_output_t*>(outputs),
+              reinterpret_cast<const sycl_input_t*>(inputs),
+              reinterpret_cast<const sycl_weight_t*>(weights),
+              indices,
+              hidden,
+              rank,
+              slice_offset,
+              slice_size,
+              add_inputs,
+              batch_size);
       cgh.parallel_for(sycl::nd_range<1>(global_range, local_range), kfn);
     });
   });
@@ -326,13 +356,22 @@ void validate_lora_b_slice_tensors(
 
   // Dtype checks
   TORCH_CHECK(
-      inputs.scalar_type() == lora_b_weights.scalar_type(),
-      "inputs dtype must match lora_b_weights dtype");
+      inputs.scalar_type() == at::kHalf ||
+          inputs.scalar_type() == at::kBFloat16 ||
+          inputs.scalar_type() == at::kFloat,
+      "inputs must be float16, bfloat16, or float32");
 
   TORCH_CHECK(
-      inputs.scalar_type() == at::kHalf ||
-          inputs.scalar_type() == at::kBFloat16,
-      "inputs must be float16 or bfloat16");
+      lora_b_weights.scalar_type() == at::kHalf ||
+          lora_b_weights.scalar_type() == at::kBFloat16,
+      "lora_b_weights must be float16 or bfloat16");
+
+  // When input is not float32, input and weight dtype must match
+  TORCH_CHECK(
+      inputs.scalar_type() == at::kFloat ||
+          inputs.scalar_type() == lora_b_weights.scalar_type(),
+      "inputs dtype must match lora_b_weights dtype when inputs is not "
+      "float32");
 
   TORCH_CHECK(
       output_tensor.scalar_type() == at::kHalf ||
@@ -421,53 +460,69 @@ void bgmv_expand_slice(
   uint32_t rank = inputs.size(1);
   uint32_t hidden = outputs.size(1);
 
-  // 3. Dispatch based on INPUT type
+  // 3. Dispatch based on INPUT type and WEIGHT type independently
   VLLM_DISPATCH_FLOATING_TYPES(
-      inputs.scalar_type(), "bgmv_expand_slice", [&]() {
+      inputs.scalar_type(), "bgmv_expand_slice_input", [&]() {
         using input_t = scalar_t;
-        switch (outputs.scalar_type()) {
+        auto dispatch_output = [&](auto* weight_ptr) {
+          using weight_t =
+              std::remove_const_t<std::remove_pointer_t<decltype(weight_ptr)>>;
+          switch (outputs.scalar_type()) {
+            case at::ScalarType::Half:
+              launch_bgmv_expand_slice<at::Half, input_t, weight_t>(
+                  outputs.data_ptr<at::Half>(),
+                  inputs.data_ptr<input_t>(),
+                  weight_ptr,
+                  indices.data_ptr<int64_t>(),
+                  batch_size,
+                  hidden,
+                  rank,
+                  slice_offset,
+                  slice_size,
+                  add_inputs);
+              break;
+            case at::ScalarType::BFloat16:
+              launch_bgmv_expand_slice<at::BFloat16, input_t, weight_t>(
+                  outputs.data_ptr<at::BFloat16>(),
+                  inputs.data_ptr<input_t>(),
+                  weight_ptr,
+                  indices.data_ptr<int64_t>(),
+                  batch_size,
+                  hidden,
+                  rank,
+                  slice_offset,
+                  slice_size,
+                  add_inputs);
+              break;
+            case at::ScalarType::Float:
+              launch_bgmv_expand_slice<float, input_t, weight_t>(
+                  outputs.data_ptr<float>(),
+                  inputs.data_ptr<input_t>(),
+                  weight_ptr,
+                  indices.data_ptr<int64_t>(),
+                  batch_size,
+                  hidden,
+                  rank,
+                  slice_offset,
+                  slice_size,
+                  add_inputs);
+              break;
+            default:
+              TORCH_CHECK(
+                  false, "Unsupported output type: ", outputs.scalar_type());
+              break;
+          }
+        };
+        switch (lora_weights.scalar_type()) {
           case at::ScalarType::Half:
-            launch_bgmv_expand_slice<at::Half, input_t>(
-                outputs.data_ptr<at::Half>(),
-                inputs.data_ptr<input_t>(),
-                lora_weights.data_ptr<input_t>(),
-                indices.data_ptr<int64_t>(),
-                batch_size,
-                hidden,
-                rank,
-                slice_offset,
-                slice_size,
-                add_inputs);
+            dispatch_output(lora_weights.data_ptr<at::Half>());
             break;
           case at::ScalarType::BFloat16:
-            launch_bgmv_expand_slice<at::BFloat16, input_t>(
-                outputs.data_ptr<at::BFloat16>(),
-                inputs.data_ptr<input_t>(),
-                lora_weights.data_ptr<input_t>(),
-                indices.data_ptr<int64_t>(),
-                batch_size,
-                hidden,
-                rank,
-                slice_offset,
-                slice_size,
-                add_inputs);
-            break;
-          case at::ScalarType::Float:
-            launch_bgmv_expand_slice<float, input_t>(
-                outputs.data_ptr<float>(),
-                inputs.data_ptr<input_t>(),
-                lora_weights.data_ptr<input_t>(),
-                indices.data_ptr<int64_t>(),
-                batch_size,
-                hidden,
-                rank,
-                slice_offset,
-                slice_size,
-                add_inputs);
+            dispatch_output(lora_weights.data_ptr<at::BFloat16>());
             break;
           default:
             TORCH_CHECK(
-                false, "Unsupported output type: ", outputs.scalar_type());
+                false, "Unsupported weight type: ", lora_weights.scalar_type());
             break;
         }
       });

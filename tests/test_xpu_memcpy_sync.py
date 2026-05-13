@@ -14,6 +14,13 @@ XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
 ]
 
+# CI/mini scope parameter overrides
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "device": ["xpu:0"],
+    },
+}
+
 
 @pytest.mark.parametrize("device", XPU_DEVICES)
 def test_xpu_memcpy_sync_host_to_device(device: str) -> None:

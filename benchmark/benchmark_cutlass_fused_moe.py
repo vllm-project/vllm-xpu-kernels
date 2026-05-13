@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 
 # isort: off
 import gc
@@ -8,6 +9,9 @@ import torch
 import triton
 import triton.testing
 
+from utils import bootstrap_benchmark_env, ensure_save_path_exists
+
+bootstrap_benchmark_env(__file__)
 from benchmark.src.fused_moe_interface_ import xpu_fused_moe_CalKernelTime
 from benchmark.src.get_model_config import (
     gen_cutlass_fused_moe_correctness_configs as gen_correctness_config)
@@ -21,11 +25,10 @@ from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
 DEVICE = "xpu"
 
-
 def clear_xpu_cache():
     torch.xpu.empty_cache()
-    gc.collect()
     torch.xpu.synchronize()
+    gc.collect()
 
 
 def calculate_flops(m, n, k):
@@ -115,6 +118,8 @@ def make_fused_moe_input(config):
         ref_w13 = w13
         ref_w2 = w2
 
+    w13 = w13.transpose(-1, -2).contiguous()
+    w2 = w2.transpose(-1, -2).contiguous()
     return (ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights,
             flat_expert_indices, a, w13, w13_scales, w2, w2_scales,
             expert_scores, expert_indices)
@@ -168,20 +173,23 @@ def get_benchmark(iterations):
             x_vals=[(*tuple(c)[0], *tuple(c)[1:]) for c in configs],
             line_arg="provider",
             line_vals=[
-                "vllm", "vllm_kernel_gemm1", "vllm_kernel_gemm2",
-                "vllm_kernel_gather", "vllm_kernel_gemm1_tflops",
-                "vllm_kernel_gemm2_tflops", "vllm_kernel_gemm1_memory",
-                "vllm_kernel_gemm2_memory"
+                "vllm", "vllm_kernel_remap", "vllm_kernel_gemm1",
+                "vllm_kernel_gemm2", "vllm_kernel_gather",
+                "vllm_kernel_gemm1_tflops", "vllm_kernel_gemm2_tflops",
+                "vllm_kernel_gemm1_memory", "vllm_kernel_gemm2_memory"
             ],
             line_names=[
-                "vllm(us)", "vllm_kernel_gemm1(us)", "vllm_kernel_gemm2(us)",
+                "vllm(us)", "vllm_kernel_remap(us)",
+                "vllm_kernel_gemm1(us)", "vllm_kernel_gemm2(us)",
                 "vllm_kernel_gather(us)", "vllm_kernel_gemm1_tflops",
-                "vllm_kernel_gemm2_tflops", "vllm_kernel_gemm1_memory(GB/s)",
+                "vllm_kernel_gemm2_tflops",
+                "vllm_kernel_gemm1_memory(GB/s)",
                 "vllm_kernel_gemm2_memory(GB/s)"
             ],
-            styles=[("blue", "-"), ("green", "-"), ("orange", "-"),
-                    ("purple", "-"), ("green", "--"), ("orange", "--"),
-                    ("green", ":"), ("orange", ":")],
+            styles=[
+                ("blue", "-"), ("red", "-"), ("green", "-"),
+                ("orange", "-"), ("purple", "-"), ("green", "--"),
+                ("orange", "--"), ("green", ":"), ("orange", ":")],
             ylabel="Latency (us)",
             plot_name="fused_moe-cutlass",
             args={},
@@ -200,8 +208,6 @@ def get_benchmark(iterations):
                                 x_dtype, w_dtype, \
                                 has_bias}, Provider: {provider}",
               flush=True)
-        start = torch.xpu.Event(enable_timing=True)
-        end = torch.xpu.Event(enable_timing=True)
         total_latency = 0.0
         ms = 0.0
         assert iterations > 5, \
@@ -215,8 +221,9 @@ def get_benchmark(iterations):
                             topk, x_dtype, w_dtype, has_bias))
 
         if provider == "vllm":
-            for index in range(iterations):
-                start.record()
+            start_event = torch.xpu.Event(enable_timing=True)
+            end_event = torch.xpu.Event(enable_timing=True)
+            for index in range(5):
                 xpu_fused_moe(hidden_states=a,
                               w13=w13,
                               w13_scales=w13_scales,
@@ -230,57 +237,121 @@ def get_benchmark(iterations):
                               activation="silu",
                               num_experts=num_experts,
                               is_fp8=(w_dtype is not None))
-                end.record()
-                end.synchronize()
-                if index >= 5:  # skip the first 5 iterations for warmup
-                    total_latency += start.elapsed_time(end)
+            start_event.record()
+            for index in range(5, iterations):
+                xpu_fused_moe(hidden_states=a,
+                              w13=w13,
+                              w13_scales=w13_scales,
+                              w13_bias=w13_bias,
+                              w2=w2,
+                              w2_scales=w2_scales,
+                              w2_bias=w2_bias,
+                              topk_weights=expert_scores,
+                              topk_ids=expert_indices,
+                              n_experts_per_token=topk,
+                              activation="silu",
+                              num_experts=num_experts,
+                              is_fp8=(w_dtype is not None))
+            end_event.record()
+            torch.xpu.synchronize()
+            total_latency = start_event.elapsed_time(end_event)
         else:
+            n_measured = iterations - 5
+            remap_se = [
+                torch.xpu.Event(enable_timing=True) for _ in range(n_measured)
+            ]
+            remap_ee = [
+                torch.xpu.Event(enable_timing=True) for _ in range(n_measured)
+            ]
+            gemm1_se = [
+                torch.xpu.Event(enable_timing=True) for _ in range(n_measured)
+            ]
+            gemm1_ee = [
+                torch.xpu.Event(enable_timing=True) for _ in range(n_measured)
+            ]
+            gemm2_se = [
+                torch.xpu.Event(enable_timing=True) for _ in range(n_measured)
+            ]
+            gemm2_ee = [
+                torch.xpu.Event(enable_timing=True) for _ in range(n_measured)
+            ]
+            gather_se = [
+                torch.xpu.Event(enable_timing=True) for _ in range(n_measured)
+            ]
+            gather_ee = [
+                torch.xpu.Event(enable_timing=True) for _ in range(n_measured)
+            ]
+            gemm1_info = gemm2_info = None
             for index in range(iterations):
-                gemm1, gemm2, gather, (
-                    gemm1_m, gemm1_n, gemm1_k, gemm1_expert), (
-                        gemm2_m, gemm2_n, gemm2_k,
-                        gemm2_expert) = xpu_fused_moe_CalKernelTime(
-                            hidden_states=a,
-                            w13=w13,
-                            w13_scales=w13_scales,
-                            w13_bias=w13_bias,
-                            w2=w2,
-                            w2_scales=w2_scales,
-                            w2_bias=w2_bias,
-                            topk_weights=expert_scores,
-                            topk_ids=expert_indices,
-                            n_experts_per_token=topk,
-                            activation="silu",
-                            num_experts=num_experts,
-                            is_fp8=(w_dtype is not None),
-                            start_event=start,
-                            end_event=end)
-                if index >= 5:  # skip the first 5 iterations for warmup
-                    if provider == "vllm_kernel_gemm1" or \
-                    provider == "vllm_kernel_gemm1_tflops" or \
-                    provider == "vllm_kernel_gemm1_memory":
-                        total_latency += gemm1
-                        m, n, k, active_experts = gemm1_m, \
-                        gemm1_n, gemm1_k, gemm1_expert
-                    elif provider == "vllm_kernel_gemm2" or \
-                    provider == "vllm_kernel_gemm2_tflops" or \
-                    provider == "vllm_kernel_gemm2_memory":
-                        total_latency += gemm2
-                        m, n, k, active_experts = gemm2_m, \
-                        gemm2_n, gemm2_k, gemm2_expert
-                    elif provider == "vllm_kernel_gather":
-                        total_latency += gather
-            if provider == "vllm_kernel_gemm1_tflops" or \
-            provider == "vllm_kernel_gemm2_tflops":
-                torch.xpu.synchronize()
-                ms = total_latency / (iterations - 5)
+                i = index - 5 if index >= 5 else None
+                cur_gemm1_info, cur_gemm2_info = xpu_fused_moe_CalKernelTime(
+                    hidden_states=a,
+                    w13=w13,
+                    w13_scales=w13_scales,
+                    w13_bias=w13_bias,
+                    w2=w2,
+                    w2_scales=w2_scales,
+                    w2_bias=w2_bias,
+                    topk_weights=expert_scores,
+                    topk_ids=expert_indices,
+                    n_experts_per_token=topk,
+                    activation="silu",
+                    num_experts=num_experts,
+                    is_fp8=(w_dtype is not None),
+                    start_event_remap=remap_se[i] if i is not None else None,
+                    end_event_remap=remap_ee[i] if i is not None else None,
+                    start_event_gemm1=gemm1_se[i] if i is not None else None,
+                    end_event_gemm1=gemm1_ee[i] if i is not None else None,
+                    start_event_gemm2=gemm2_se[i] if i is not None else None,
+                    end_event_gemm2=gemm2_ee[i] if i is not None else None,
+                    start_event_gather=gather_se[i] if i is not None else None,
+                    end_event_gather=gather_ee[i] if i is not None else None,
+                )
+                if index == 5:
+                    gemm1_info = cur_gemm1_info
+                    gemm2_info = cur_gemm2_info
+            torch.xpu.synchronize()
+            remap_latency = sum(
+                remap_se[i].elapsed_time(remap_ee[i])
+                for i in range(n_measured)
+            )
+            gemm1_latency = sum(
+                gemm1_se[i].elapsed_time(gemm1_ee[i])
+                for i in range(n_measured)
+            )
+            gemm2_latency = sum(
+                gemm2_se[i].elapsed_time(gemm2_ee[i])
+                for i in range(n_measured)
+            )
+            gather_latency = sum(
+                gather_se[i].elapsed_time(gather_ee[i])
+                for i in range(n_measured)
+            )
+            gemm1_m, gemm1_n, gemm1_k, gemm1_expert = gemm1_info
+            gemm2_m, gemm2_n, gemm2_k, gemm2_expert = gemm2_info
+            if provider == "vllm_kernel_remap":
+                total_latency = remap_latency
+            elif provider in ("vllm_kernel_gemm1", "vllm_kernel_gemm1_tflops",
+                              "vllm_kernel_gemm1_memory"):
+                total_latency = gemm1_latency
+                m, n, k, active_experts = (gemm1_m, gemm1_n, gemm1_k,
+                                           gemm1_expert)
+            elif provider in ("vllm_kernel_gemm2", "vllm_kernel_gemm2_tflops",
+                              "vllm_kernel_gemm2_memory"):
+                total_latency = gemm2_latency
+                m, n, k, active_experts = (gemm2_m, gemm2_n, gemm2_k,
+                                           gemm2_expert)
+            elif provider == "vllm_kernel_gather":
+                total_latency = gather_latency
+            if provider in ("vllm_kernel_gemm1_tflops",
+                            "vllm_kernel_gemm2_tflops"):
+                ms = total_latency / n_measured
                 clear_xpu_cache()
                 flops = calculate_flops(m, n, k)
                 return flops / (ms / 1000) / 1e12
-            elif provider == "vllm_kernel_gemm1_memory" or \
-                provider == "vllm_kernel_gemm2_memory":
-                torch.xpu.synchronize()
-                ms = total_latency / (iterations - 5)
+            if provider in ("vllm_kernel_gemm1_memory",
+                            "vllm_kernel_gemm2_memory"):
+                ms = total_latency / n_measured
                 clear_xpu_cache()
                 memory_usage_GB = calculate_memory_usage(
                     m, n, k, active_experts, x_dtype, w_dtype)
@@ -312,5 +383,6 @@ if __name__ == "__main__":
 
     configs = gen_perf_configs()
     benchmark = get_benchmark(iterations=iterations)
+    save_path = ensure_save_path_exists(args.save_path)
     # Run performance benchmark
-    benchmark.run(print_data=True, save_path=args.save_path)
+    benchmark.run(print_data=True, save_path=save_path)

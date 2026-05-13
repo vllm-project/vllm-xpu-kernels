@@ -53,7 +53,6 @@
 #include "cutlass/util/reference/device/gemm_complex.h"
 #include "cutlass/util/reference/device/tensor_compare.h"
 #include "cutlass/util/reference/host/tensor_fill.h"
-#include "cutlass/util/sycl_event_manager.hpp"
 
 #include "gemm_xe2_policy.hpp"
 #include "grouped_gemm_xe2.hpp"
@@ -86,7 +85,7 @@ void MoEGEMMLauncher(
     ElementD* outputs,
     const int gemm_n,
     const int gemm_k,
-    const int64_t* expert_first_token_offset,
+    const int* rows_per_expert,
     const int num_experts,
     const int group_size,
     int32_t* atomic_buffer) {
@@ -125,7 +124,7 @@ void MoEGEMMLauncher(
   using GmemTiledCopyB = typename policy::GmemTiledCopyB;
   using GmemTiledCopyD = typename policy::GmemTiledCopyD;
 
-  auto event = stream.submit([&](sycl::handler& cgh) {
+  stream.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<int32_t, 1> local_mem(sycl::range<1>(1), cgh);
     cgh.parallel_for<GemmCuteName<
         ElementA,
@@ -149,7 +148,7 @@ void MoEGEMMLauncher(
               bias,
               outputs,
               mma,
-              expert_first_token_offset,
+              rows_per_expert,
               num_experts,
               group_size,
               gemm_n,
@@ -158,7 +157,6 @@ void MoEGEMMLauncher(
               local_mem);
         });
   });
-  EventManager::getInstance().addEvent(event);
 }
 
 at::Tensor cutlass_grouped_gemm_xe2_impl(
@@ -167,7 +165,7 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     const c10::optional<at::Tensor>& ptr_scales,
     const c10::optional<at::Tensor>& ptr_bias,
     at::Tensor& ptr_D,
-    at::Tensor& expert_first_token_offset,
+    at::Tensor& rows_per_expert,
     int64_t N,
     int64_t K,
     int64_t num_experts,
@@ -240,7 +238,7 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       reinterpret_cast<ElementA*>(ptr_D.data_ptr()),                           \
       N,                                                                       \
       K,                                                                       \
-      reinterpret_cast<int64_t*>(expert_first_token_offset.data_ptr()),        \
+      reinterpret_cast<int*>(rows_per_expert.data_ptr()),                      \
       num_experts,                                                             \
       group_size,                                                              \
       static_cast<int*>(atomic_buffer.data_ptr()));
@@ -286,7 +284,10 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     }                                                                       \
   }
 
-    if (A_avg_M <= 32) {
+    if (A_avg_M <= 4) {
+      using policy = w4a16_policy_m_8;
+      W4A16LauncherCallER(policy);
+    } else if (A_avg_M <= 8) {
       using policy = w4a16_policy_m_16;
       W4A16LauncherCallER(policy);
     } else if (A_avg_M <= 128) {
@@ -322,10 +323,10 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, float); \
   }
 
-    if (A_avg_M <= 32) {
+    if (A_avg_M <= 8) {
       using policy = w8a16_policy_m_16;
       W8A16LauncherCallER(policy);
-    } else if (A_avg_M <= 128) {
+    } else if (A_avg_M <= 32) {
       using policy = w8a16_policy_m_32;
       W8A16LauncherCallER(policy);
     } else {
@@ -346,12 +347,23 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, scalar_t, scalar_t); \
   }
 
-    if (A_avg_M <= 4) {
+    if (A_avg_M <= 8) {
       using policy = w16a16_policy_m_16;
       W16A16LauncherCallER(policy);
-    } else {
-      using policy = w16a16_policy;
+    } else if (A_avg_M <= 16) {
+      using policy = w16a16_policy_m_32;
       W16A16LauncherCallER(policy);
+    } else {
+      if (B_N <= 64) {
+        using policy = w16a16_policy_n_64;
+        W16A16LauncherCallER(policy);
+      } else if (B_N <= 512) {
+        using policy = w16a16_policy_n_128;
+        W16A16LauncherCallER(policy);
+      } else {
+        using policy = w16a16_policy;
+        W16A16LauncherCallER(policy);
+      }
     }
 #undef W16A16LauncherCallER
   }

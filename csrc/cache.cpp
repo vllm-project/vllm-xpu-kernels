@@ -6,6 +6,7 @@
 
 #include "dispatch_utils.h"
 #include "quantization/fp8/quant_utils.h"
+#include "quantization/utils.h"
 #include "utils.h"
 #include "utils/mem_cpy.h"
 
@@ -162,13 +163,15 @@ class reshape_and_cache_flash_kernel {
     cache_t* __restrict__ value_dst =
         value_cache_ + block_idx * block_stride_ + block_offset * page_stride_;
 
+    constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
     float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale_;
     float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale_;
 
     fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
     fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
-    fp8::scaled_convert_vec(key_src, key_dst, n, local_idx, local_range, k_op);
-    fp8::scaled_convert_vec(
+    vectorize_with_alignment<VEC_SIZE>(
+        key_src, key_dst, n, local_idx, local_range, k_op);
+    vectorize_with_alignment<VEC_SIZE>(
         value_src, value_dst, n, local_idx, local_range, v_op);
   }
 
@@ -1173,6 +1176,37 @@ void swap_blocks(
   }
 
   return;
+}
+
+/**
+ * @brief Batch version of swap_blocks: copies N independent (src, dst, size)
+ *        triples in a single call, amortising per-copy overhead.
+ *
+ * Thin wrapper that validates the CPU tensor inputs and delegates to
+ * vllm::xpu::xpuAsyncMemcpyBatch for the actual copy logic.
+ */
+void swap_blocks_batch(
+    const torch::Tensor& src_ptrs,
+    const torch::Tensor& dst_ptrs,
+    const torch::Tensor& sizes) {
+  TORCH_CHECK(src_ptrs.device().is_cpu(), "src_ptrs must be on CPU");
+  TORCH_CHECK(dst_ptrs.device().is_cpu(), "dst_ptrs must be on CPU");
+  TORCH_CHECK(sizes.device().is_cpu(), "sizes must be on CPU");
+  TORCH_CHECK(src_ptrs.dtype() == torch::kUInt64, "src_ptrs must be uint64");
+  TORCH_CHECK(dst_ptrs.dtype() == torch::kUInt64, "dst_ptrs must be uint64");
+  TORCH_CHECK(sizes.dtype() == torch::kUInt64, "sizes must be uint64");
+
+  const int64_t n = src_ptrs.size(0);
+  TORCH_CHECK(dst_ptrs.size(0) == n, "dst_ptrs length must match src_ptrs");
+  TORCH_CHECK(sizes.size(0) == n, "sizes length must match src_ptrs");
+
+  if (n == 0) return;
+
+  vllm::xpu::xpuAsyncMemcpyBatch(
+      src_ptrs.data_ptr<uint64_t>(),
+      dst_ptrs.data_ptr<uint64_t>(),
+      sizes.data_ptr<uint64_t>(),
+      n);
 }
 
 namespace vllm {
