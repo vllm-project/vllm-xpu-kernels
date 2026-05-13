@@ -23,6 +23,9 @@ from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
 from tests.utils import parse_args, seed_everything
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 from benchmark.presets import get_hardware_preset
+from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.kv_cache_interface import KVQuantMode
+from benchmark.triton_utils import make_triton_softmax_buffers
 # isort: on
 
 DEVICE = "xpu"
@@ -247,7 +250,89 @@ def benchmark_varlen_with_paged_kv(num_seqs,
     is_kernel_time_provider = provider in (
         "flash_kernel_time", "flash_kernel_TFLOPS", "flash_kernel_MFU")
 
-    if is_kernel_time_provider:
+    if provider == "triton":
+        if q_dtype is not None or kv_dtype is not None or not is_paged \
+                or not is_causal:
+            clear_xpu_cache()
+            return float("nan")
+        num_query_heads = num_heads[0]
+        num_kv_heads = num_heads[1]
+        seq_threshold_3D, num_par_softmax_segs, segm_out, segm_max, \
+            segm_expsum = make_triton_softmax_buffers(
+                num_query_heads, num_kv_heads, head_size)
+        output = torch.empty(maybe_quantized_query.shape[0],
+                             num_query_heads,
+                             head_size,
+                             dtype=output_dtype)
+        start_event = torch.xpu.Event(enable_timing=True)
+        end_event = torch.xpu.Event(enable_timing=True)
+        for index in range(5):
+            block_tables = torch.randint(
+                0, num_blocks,
+                (num_seqs, max_num_blocks_per_seq),
+                dtype=torch.int32)
+            unified_attention(
+                q=queries[index],
+                k=maybe_quantized_key_cache,
+                v=maybe_quantized_value_cache,
+                out=output,
+                cu_seqlens_q=cu_query_lens,
+                max_seqlen_q=max_query_len,
+                seqused_k=seq_k,
+                max_seqlen_k=max_kv_len,
+                softmax_scale=scale,
+                causal=True,
+                window_size=window_size,
+                block_table=block_tables,
+                softcap=0.0,
+                q_descale=None,
+                k_descale=None,
+                v_descale=None,
+                seq_threshold_3D=seq_threshold_3D,
+                num_par_softmax_segments=num_par_softmax_segs,
+                softmax_segm_output=segm_out,
+                softmax_segm_max=segm_max,
+                softmax_segm_expsum=segm_expsum,
+                sinks=sink,
+                kv_quant_mode=KVQuantMode.NONE,
+                use_td=True)
+        start_event.record()
+        for index in range(5, iterations):
+            block_tables = torch.randint(
+                0, num_blocks,
+                (num_seqs, max_num_blocks_per_seq),
+                dtype=torch.int32)
+            unified_attention(
+                q=queries[index],
+                k=maybe_quantized_key_cache,
+                v=maybe_quantized_value_cache,
+                out=output,
+                cu_seqlens_q=cu_query_lens,
+                max_seqlen_q=max_query_len,
+                seqused_k=seq_k,
+                max_seqlen_k=max_kv_len,
+                softmax_scale=scale,
+                causal=True,
+                window_size=window_size,
+                block_table=block_tables,
+                softcap=0.0,
+                q_descale=None,
+                k_descale=None,
+                v_descale=None,
+                seq_threshold_3D=seq_threshold_3D,
+                num_par_softmax_segments=num_par_softmax_segs,
+                softmax_segm_output=segm_out,
+                softmax_segm_max=segm_max,
+                softmax_segm_expsum=segm_expsum,
+                sinks=sink,
+                kv_quant_mode=KVQuantMode.NONE,
+                use_td=True)
+        end_event.record()
+        torch.xpu.synchronize()
+        ms = start_event.elapsed_time(end_event) / (iterations - 5)
+        clear_xpu_cache()
+        return 1000 * ms
+    elif is_kernel_time_provider:
         start_events = [
             torch.xpu.Event(enable_timing=True)
             for _ in range(iterations - 5)
@@ -445,13 +530,14 @@ def get_benchmark_varlen_with_paged_kv(iterations=20):
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
             line_vals=["flash", "flash_kernel_time", "flash_kernel_TFLOPS",
-                       "flash_kernel_MFU"],
+                       "flash_kernel_MFU", "triton"],
             line_names=[
                 "FlashAttention(us)", "FlashAttention_Kernel_Time(us)",
-                "FlashAttention_TFLOPS", "FlashAttention_MFU (%)"
+                "FlashAttention_TFLOPS", "FlashAttention_MFU (%)",
+                "TritonAttention(us)"
             ],
             styles=[("blue", "-"), ("green", "-"), ("purple", "-"),
-                    ("red", "-")],
+                    ("red", "-"), ("orange", "-")],
             ylabel="Latency (us)",
             plot_name="flash-attn-varlen",
             args={},
