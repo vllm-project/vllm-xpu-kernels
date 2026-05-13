@@ -606,6 +606,15 @@ function(add_xe2_kernel_library LIBRARY_NAME)
       XE2_GPU_LINK_FLAGS
       "-device ${XE2_AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread"
     )
+  else()
+    # JIT path: embed the GRF hint in the SPIR-V module's compile
+    # options so IGC picks it up at first-dispatch JIT.
+    list(
+      APPEND
+      XE2_GPU_LINK_FLAGS
+      -Xsycl-target-backend=spir64
+      "-internal_options -cl-intel-256-GRF-per-thread"
+    )
   endif()
   target_link_options(${LIBRARY_NAME} PRIVATE ${XE2_GPU_LINK_FLAGS})
 endfunction()
@@ -672,6 +681,13 @@ function(add_xe_default_kernel_library LIBRARY_NAME)
     list(
       APPEND XE_DEFAULT_GPU_LINK_FLAGS
       "-device ${AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
+  else()
+    # JIT path: see add_xe2_kernel_library above.
+    list(
+      APPEND
+      XE_DEFAULT_GPU_LINK_FLAGS
+      -Xsycl-target-backend=spir64
+      "-internal_options -cl-intel-256-GRF-per-thread")
   endif()
   target_link_options(${LIBRARY_NAME} PRIVATE ${XE_DEFAULT_GPU_LINK_FLAGS})
 endfunction()
