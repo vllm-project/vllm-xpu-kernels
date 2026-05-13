@@ -1,7 +1,7 @@
 {
     "_comment": "GPU compute runtime package configurations. Each profile is a named list of .deb URLs to download and install. Use GPU_RUNTIME_PROFILE build-arg to select one.",
 
-    "default": "igc-2.34.4-cr-26.18",
+    "default": "igc-2.32.7-cr-26.14",
 
     "profiles": {
         "igc-2.11.7-cr-25.18": {
