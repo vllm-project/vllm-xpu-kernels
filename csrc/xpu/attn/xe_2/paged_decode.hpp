@@ -23,6 +23,8 @@
 
 using namespace cute;
 
+using _576 = cute::Int<576>;
+
 using decode_policy_q8_h64_p64 = decode_policy_qpacked_head<_8, _64, _64>;
 using decode_policy_q8_h96_p64 = decode_policy_qpacked_head<_8, _96, _64>;
 using decode_policy_q8_h128_p64 = decode_policy_qpacked_head<_8, _128, _64>;
@@ -35,6 +37,8 @@ using decode_policy_q16_h128_p64 = decode_policy_qpacked_head<_16, _128, _64>;
 using decode_policy_q16_h192_p64 = decode_policy_qpacked_head<_16, _192, _64>;
 using decode_policy_q16_h256_p64 = decode_policy_qpacked_head<_16, _256, _64>;
 using decode_policy_q16_h512_p64 = decode_policy_qpacked_head<_16, _512, _64>;
+using decode_policy_q8_h576_p64 = decode_policy_qpacked_head<_8, _576, _64>;
+using decode_policy_q16_h576_p64 = decode_policy_qpacked_head<_16, _576, _64>;
 
 using decode_policy_q8_h64_p128 = decode_policy_qpacked_head<_8, _64, _128>;
 using decode_policy_q8_h96_p128 = decode_policy_qpacked_head<_8, _96, _128>;
@@ -48,6 +52,8 @@ using decode_policy_q16_h128_p128 = decode_policy_qpacked_head<_16, _128, _128>;
 using decode_policy_q16_h192_p128 = decode_policy_qpacked_head<_16, _192, _128>;
 using decode_policy_q16_h256_p128 = decode_policy_qpacked_head<_16, _256, _128>;
 using decode_policy_q16_h512_p128 = decode_policy_qpacked_head<_16, _512, _128>;
+using decode_policy_q8_h576_p128 = decode_policy_qpacked_head<_8, _576, _128>;
+using decode_policy_q16_h576_p128 = decode_policy_qpacked_head<_16, _576, _128>;
 
 // page_size = 16
 using decode_policy_q8_h64_p16 = decode_policy_qpacked_head<_8, _64, _16>;

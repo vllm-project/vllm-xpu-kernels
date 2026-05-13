@@ -242,6 +242,28 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int v_head_dim = v.size(-1);
     int num_heads_kv = k.size(2);
     int block_size = k.size(1);
+    int head_size_qk = q.size(-1);
+
+    // SLM (shared local memory) limits on Intel Xe restrict the paged decode
+    // kernel's epilogue cross-SG reduction buffer when head_size grows.
+    // The buffer size is q_packed * head_size_vo * SGPerWG * sizeof(float);
+    // with kv_tile=_64 (SGPerWG=4) and head_size_vo=512 (MLA), q_packed=8
+    // takes 64 KiB (fits) and q_packed=16 takes 128 KiB (exceeds the per-WG
+    // SLM cap and hangs at submit). All block_size that are multiples of 64
+    // dispatch through kv_tile=_64 so the SLM cost is independent of
+    // block_size; only q_packed needs to be guarded.
+    if (head_size_qk > 512) {
+      int q_packed =
+          num_heads_kv > 0 ? (num_heads_q / num_heads_kv) : num_heads_q;
+      TORCH_CHECK(
+          q_packed <= 8,
+          "paged decode: num_heads_q/num_heads_kv=",
+          q_packed,
+          " is not supported at head_size_qk=",
+          head_size_qk,
+          " due to Intel Xe SLM limits (q_packed must be <= 8). Increase "
+          "tensor parallel size so num_heads_q per rank is <= 8.");
+    }
 
     // Output shape uses V's head_dim (may differ from Q/K for MLA)
     if (!out_.has_value()) {
