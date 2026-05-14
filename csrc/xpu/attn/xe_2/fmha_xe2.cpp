@@ -26,7 +26,8 @@ void cutlass_chunk_prefill_xe2(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    std::optional<at::Tensor>& softmax_lse) {
+    std::optional<at::Tensor>& softmax_lse,
+    std::optional<const at::Tensor>& is_prefill) {
   cutlass_chunk_prefill_impl(
       queue,
       query,
@@ -49,7 +50,8 @@ void cutlass_chunk_prefill_xe2(
       is_causal,
       is_local,
       is_sink,
-      softmax_lse);
+      softmax_lse,
+      is_prefill);
 }
 
 void cutlass_chunk_prefill_impl(
@@ -74,7 +76,8 @@ void cutlass_chunk_prefill_impl(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    std::optional<at::Tensor>& softmax_lse) {
+    std::optional<at::Tensor>& softmax_lse,
+    std::optional<const at::Tensor>& is_prefill) {
   // general params
   int batch_size, num_heads_q, num_heads_kv, head_size;
   // additional params
@@ -160,6 +163,9 @@ void cutlass_chunk_prefill_impl(
     args.softmax_lse = softmax_lse.value().data_ptr<float>();
     args.lse_stride = num_heads_q;
   }
+  // Per-batch prefill/decode mask (nullptr -> process all batches)
+  args.is_prefill =
+      is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr;
   // Extract Q, K, V, O strides from tensors
   if (is_varlen) {
     // Q/O: [total_seq, num_heads, head_size]

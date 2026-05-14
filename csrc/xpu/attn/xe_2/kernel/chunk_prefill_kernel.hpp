@@ -150,6 +150,9 @@ class XeFMHAFwdKernel {
     // softmax_lse output [total_seqlen_q, num_heads_q] (nullptr if disabled)
     float* softmax_lse;
     int lse_stride;  // = num_heads_q
+
+    // per-batch mask: true = prefill, false = decode; nullptr = process all
+    const bool* is_prefill;
   };
   using KernelParams = KernelArguments;
 
@@ -253,6 +256,10 @@ class XeFMHAFwdKernel {
     for (; tile_scheduler.is_valid(); ++tile_scheduler) {
       auto [blk_q, blk_v, head_q, idx_b] =
           tile_scheduler.get_block_coord();  // (Q,V,h,b)
+
+      // Skip decode batches when is_prefill mask is provided
+      if (p.is_prefill != nullptr && !p.is_prefill[idx_b]) continue;
+
       auto blk_qv = make_coord(blk_q, blk_v);
       int head = head_q / head_group_q;
 

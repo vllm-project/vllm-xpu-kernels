@@ -169,26 +169,18 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
           flush=True)
     assert iterations > 5, \
     "Number of iterations should be greater than 5 to account for warmup"
-    total_latency = 0.0
-    ms = 0.0
     queries = [
         torch.rand_like(maybe_quantized_query) for _ in range(iterations)
     ]
 
-    start_events = [
-        torch.xpu.Event(enable_timing=True) for _ in range(iterations - 5)
-    ]
-    end_events = [
-        torch.xpu.Event(enable_timing=True) for _ in range(iterations - 5)
-    ]
     if provider == "flash":
-        for index in range(iterations):
+        start_event = torch.xpu.Event(enable_timing=True)
+        end_event = torch.xpu.Event(enable_timing=True)
+        for index in range(5):
             block_tables = torch.randint(0,
                                          num_blocks,
                                          (num_seqs, max_num_blocks_per_seq),
                                          dtype=torch.int32)
-            if index >= 5:
-                start_events[index - 5].record()
             flash_attn_varlen_func(queries[index],
                                    maybe_quantized_key_cache,
                                    maybe_quantized_value_cache,
@@ -201,9 +193,38 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
                                    block_table=block_tables,
                                    window_size=(-1, -1),
                                    s_aux=sink)
-            if index >= 5:
-                end_events[index - 5].record()
+        start_event.record()
+        for index in range(5, iterations):
+            block_tables = torch.randint(0,
+                                         num_blocks,
+                                         (num_seqs, max_num_blocks_per_seq),
+                                         dtype=torch.int32)
+            flash_attn_varlen_func(queries[index],
+                                   maybe_quantized_key_cache,
+                                   maybe_quantized_value_cache,
+                                   max_query_len,
+                                   cu_query_lens,
+                                   max_kv_len,
+                                   seqused_k=seq_k,
+                                   softmax_scale=scale,
+                                   causal=False,
+                                   block_table=block_tables,
+                                   window_size=(-1, -1),
+                                   s_aux=sink)
+        end_event.record()
+        torch.xpu.synchronize()
+        ms = start_event.elapsed_time(end_event) / (iterations - 5)
+        clear_xpu_cache()
+        return 1000 * ms
     else:
+        start_events = [
+            torch.xpu.Event(enable_timing=True)
+            for _ in range(iterations - 5)
+        ]
+        end_events = [
+            torch.xpu.Event(enable_timing=True)
+            for _ in range(iterations - 5)
+        ]
         for index in range(iterations):
             block_tables = torch.randint(0,
                                          num_blocks,
@@ -225,13 +246,13 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
                                                  s_aux=sink,
                                                  start_event=se,
                                                  end_event=ee)
+        torch.xpu.synchronize()
+        total_latency = sum(
+            start_events[i].elapsed_time(end_events[i])
+            for i in range(iterations - 5)
+        )
+        ms = total_latency / (iterations - 5)
         if provider == "flash_memBandwidth" or provider == "flash_MBU":
-            torch.xpu.synchronize()
-            total_latency = sum(
-                start_events[i].elapsed_time(end_events[i])
-                for i in range(iterations - 5)
-            )
-            ms = total_latency / (iterations - 5)
             memory_load_GB = calculate_memory_usage(seq_k.sum().item(),
                                                     num_heads[1], head_size,
                                                     output_dtype)
@@ -247,15 +268,8 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
                 return (measured_bw / peak_bw) * 100
             clear_xpu_cache()
             return measured_bw
-    torch.xpu.synchronize()
-    total_latency = sum(
-        start_events[i].elapsed_time(end_events[i])
-        for i in range(iterations - 5)
-    )
-    ms = total_latency / (iterations - 5)
-    clear_xpu_cache()
-
-    return 1000 * ms
+        clear_xpu_cache()
+        return 1000 * ms
 
 
 def get_benchmark_decode_with_paged_kv(iterations=20):
