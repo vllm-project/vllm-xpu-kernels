@@ -142,6 +142,7 @@ jobs:
 
       - name: install wheel
         run: |
+          uv pip install -r requirements.txt
           VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=$(find dist -name '*.whl' -print -quit) uv pip install --no-build-isolation -e . -v
 
       - name: test 
@@ -182,6 +183,7 @@ jobs:
 
       - name: install wheel
         run: |
+          uv pip install -r requirements.txt
           VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=$(find dist -name '*.whl' -print -quit) uv pip install --no-build-isolation -e . -v
 
       - name: test 
