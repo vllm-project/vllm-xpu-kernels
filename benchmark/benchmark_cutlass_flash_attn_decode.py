@@ -227,7 +227,7 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
         ms = start_event.elapsed_time(end_event) / (iterations - 5)
         clear_xpu_cache()
         return 1000 * ms
-    elif provider == "triton":
+    elif provider in ("triton", "triton_memBandwidth", "triton_MBU"):
         if q_dtype is not None:
             return float("nan")
         num_query_heads, num_kv_heads = num_heads
@@ -308,6 +308,22 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
         end_event.record()
         torch.xpu.synchronize()
         ms = start_event.elapsed_time(end_event) / (iterations - 5)
+        if provider == "triton_memBandwidth" or provider == "triton_MBU":
+            memory_load_GB = calculate_memory_usage(seq_k.sum().item(),
+                                                    num_heads[1], head_size,
+                                                    output_dtype)
+            measured_bw = memory_load_GB / (ms / 1000)
+            if provider == "triton_MBU":
+                hardware_presets = get_hardware_preset(
+                    torch.xpu.get_device_name())
+                if hardware_presets is None:
+                    clear_xpu_cache()
+                    return float("nan")
+                peak_bw = hardware_presets["memory_bandwidth_GBs"]
+                clear_xpu_cache()
+                return (measured_bw / peak_bw) * 100
+            clear_xpu_cache()
+            return measured_bw
         clear_xpu_cache()
         return 1000 * ms
     else:
@@ -381,14 +397,17 @@ def get_benchmark_decode_with_paged_kv(iterations=20):
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
             line_vals=["flash", "flash_kernelTime", "flash_memBandwidth",
-                       "flash_MBU", "triton"],
+                       "flash_MBU", "triton", "triton_memBandwidth",
+                       "triton_MBU"],
             line_names=[
                 "FlashAttention(us)", "FlashAttention_kernelTime(us)",
                 "FlashAttention_memBandwidth(GB/s)", "FlashAttention_MBU (%)",
-                "TritonAttention(us)"
+                "TritonAttention(us)", "TritonAttention_memBandwidth(GB/s)",
+                "TritonAttention_MBU (%)"
             ],
             styles=[("blue", "-"), ("green", "-"), ("purple", "-"),
-                    ("red", "-"), ("orange", "-")],
+                    ("red", "-"), ("orange", "-"), ("brown", "-"),
+                    ("pink", "-")],
             ylabel="Latency (us)",
             plot_name="flash-attn-decode",
             args={},

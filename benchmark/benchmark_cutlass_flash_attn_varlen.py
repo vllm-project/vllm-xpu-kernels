@@ -250,7 +250,7 @@ def benchmark_varlen_with_paged_kv(num_seqs,
     is_kernel_time_provider = provider in (
         "flash_kernel_time", "flash_kernel_TFLOPS", "flash_kernel_MFU")
 
-    if provider == "triton":
+    if provider in ("triton", "triton_TFLOPS", "triton_MFU"):
         if q_dtype is not None or kv_dtype is not None or not is_paged \
                 or not is_causal:
             clear_xpu_cache()
@@ -330,6 +330,21 @@ def benchmark_varlen_with_paged_kv(num_seqs,
         end_event.record()
         torch.xpu.synchronize()
         ms = start_event.elapsed_time(end_event) / (iterations - 5)
+        if provider == "triton_TFLOPS" or provider == "triton_MFU":
+            flops = calculate_flops(num_query_heads, query_lens, kv_lens,
+                                    head_size, is_causal)
+            tflops = flops / (ms / 1000) / 1e12
+            if provider == "triton_MFU":
+                hardware_presets = get_hardware_preset(
+                    torch.xpu.get_device_name())
+                if hardware_presets is None:
+                    clear_xpu_cache()
+                    return float("nan")
+                peak_tflops = hardware_presets["tflops"]
+                clear_xpu_cache()
+                return (tflops / peak_tflops) * 100
+            clear_xpu_cache()
+            return tflops
         clear_xpu_cache()
         return 1000 * ms
     elif is_kernel_time_provider:
@@ -530,14 +545,17 @@ def get_benchmark_varlen_with_paged_kv(iterations=20):
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
             line_vals=["flash", "flash_kernel_time", "flash_kernel_TFLOPS",
-                       "flash_kernel_MFU", "triton"],
+                       "flash_kernel_MFU", "triton", "triton_TFLOPS",
+                       "triton_MFU"],
             line_names=[
                 "FlashAttention(us)", "FlashAttention_Kernel_Time(us)",
                 "FlashAttention_TFLOPS", "FlashAttention_MFU (%)",
-                "TritonAttention(us)"
+                "TritonAttention(us)", "TritonAttention_TFLOPS",
+                "TritonAttention_MFU (%)"
             ],
             styles=[("blue", "-"), ("green", "-"), ("purple", "-"),
-                    ("red", "-"), ("orange", "-")],
+                    ("red", "-"), ("orange", "-"), ("brown", "-"),
+                    ("pink", "-")],
             ylabel="Latency (us)",
             plot_name="flash-attn-varlen",
             args={},
