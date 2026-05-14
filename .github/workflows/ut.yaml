@@ -136,7 +136,7 @@ jobs:
   run-unit-tests-bmg:
     runs-on: self-hosted-bmg
     needs: build-docker-image-latest-bmg
-    timeout-minutes: 50
+    timeout-minutes: 90
     container: 
       image: localhost:5000/xpu-kernel-ci-image:latest
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
