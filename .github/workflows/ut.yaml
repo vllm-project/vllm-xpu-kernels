@@ -142,6 +142,7 @@ jobs:
 
       - name: install wheel
         run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           uv pip install -r requirements.txt
           VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=$(find dist -name '*.whl' -print -quit) uv pip install --no-build-isolation -e . -v
 
@@ -183,6 +184,7 @@ jobs:
 
       - name: install wheel
         run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           uv pip install -r requirements.txt
           VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=$(find dist -name '*.whl' -print -quit) uv pip install --no-build-isolation -e . -v
 
