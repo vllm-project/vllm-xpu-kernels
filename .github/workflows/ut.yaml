@@ -69,11 +69,13 @@ jobs:
           docker tag xpu-kernel-ci-image:latest ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
           docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
 
-  run-unit-tests-pvc:
+  # Build wheel only once on PVC, then share via GitHub Actions artifact.
+  # BMG runner cannot reach PVC directly (different network segment), so the
+  # artifact service (GitHub) acts as the neutral transfer point.
+  build-wheel:
     runs-on: self-hosted-pvc
     needs: build-docker-image-latest-pvc
-    timeout-minutes: 50
-    container:                      
+    container:
       image: localhost:5000/xpu-kernel-ci-image:latest
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
     steps:
@@ -106,14 +108,42 @@ jobs:
           WHEEL_NAME=$(find dist -name '*.whl' -printf '%f\n' | head -1)
           WHEEL_SIZE=$(find dist -name '*.whl' -exec stat --format='%s' {} + | awk '{printf "%.2f MB", $1/1024/1024}')
           {
-            echo "### PVC Wheel Size"
+            echo "### Wheel Size"
             echo "| Wheel | Size |"
             echo "|-------|------|"
             echo "| \`${WHEEL_NAME}\` | **${WHEEL_SIZE}** |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xpu-kernel-wheel
+          path: dist/*.whl
+          retention-days: 15
+
+  run-unit-tests-pvc:
+    runs-on: self-hosted-pvc
+    needs: [build-docker-image-latest-pvc, build-wheel]
+    timeout-minutes: 50
+    container:                      
+      image: localhost:5000/xpu-kernel-ci-image:latest
+      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          set-safe-directory: true
+
+      - name: download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: xpu-kernel-wheel
+          path: dist/
+
       - name: install wheel
         run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          uv pip install -r requirements.txt
           VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=$(find dist -name '*.whl' -print -quit) uv pip install --no-build-isolation -e . -v
 
       - name: test 
@@ -135,7 +165,7 @@ jobs:
 
   run-unit-tests-bmg:
     runs-on: self-hosted-bmg
-    needs: build-docker-image-latest-bmg
+    needs: [build-docker-image-latest-bmg, build-wheel]
     timeout-minutes: 50
     container: 
       image: localhost:5000/xpu-kernel-ci-image:latest
@@ -146,38 +176,16 @@ jobs:
         with:
           set-safe-directory: true
 
-      - name: build wheel
-        run: |
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          export CCACHE_DIR=/root/.ccache
-          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
-          export CCACHE_NOHASHDIR=1
-          export CCACHE_COMPILERCHECK=content
-          ccache -s || true
-          ccache -p || true
-          git submodule sync && git submodule update --init --recursive
-          uv pip install -r requirements.txt
-          rm -rf dist/*
-          MAX_JOBS=80 uv build --no-build-isolation --wheel -v
-          ccache -s || true
-
-      - name: print wheel size
-        run: |
-          ls -lh dist/*.whl
-
-      - name: report wheel size
-        run: |
-          WHEEL_NAME=$(find dist -name '*.whl' -printf '%f\n' | head -1)
-          WHEEL_SIZE=$(find dist -name '*.whl' -exec stat --format='%s' {} + | awk '{printf "%.2f MB", $1/1024/1024}')
-          {
-            echo "### BMG Wheel Size"
-            echo "| Wheel | Size |"
-            echo "|-------|------|"
-            echo "| \`${WHEEL_NAME}\` | **${WHEEL_SIZE}** |"
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: xpu-kernel-wheel
+          path: dist/
 
       - name: install wheel
         run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          uv pip install -r requirements.txt
           VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=$(find dist -name '*.whl' -print -quit) uv pip install --no-build-isolation -e . -v
 
       - name: test 

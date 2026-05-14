@@ -30,7 +30,8 @@ void cutlass_paged_decode_xe2(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    int num_kv_splits) {
+    int num_kv_splits,
+    std::optional<const at::Tensor>& is_prefill) {
   cutlass_paged_decode_impl(
       queue,
       query,
@@ -56,7 +57,8 @@ void cutlass_paged_decode_xe2(
       is_causal,
       is_local,
       is_sink,
-      num_kv_splits);
+      num_kv_splits,
+      is_prefill);
 }
 
 inline bool is_single_value_broadcast_tensor(const at::Tensor& t) {
@@ -97,7 +99,8 @@ void cutlass_paged_decode_impl(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    int num_kv_splits) {
+    int num_kv_splits,
+    std::optional<const at::Tensor>& is_prefill) {
   bool is_fp8_kv = key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
                    key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn;
   if (is_fp8_kv) {
@@ -201,6 +204,7 @@ void cutlass_paged_decode_impl(
       is_interleaved_kv ? value_cache.stride(0) / 2 : value_cache.stride(0),
       value_cache.stride(1),
       value_cache.stride(2),
+      is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr,
       // Q strides: for varlen Q is [total_seq, num_heads, head_size]; for
       // non-varlen Q is [batch, num_heads, seq, head_size].
       is_varlen ? query.stride(0) : query.stride(2),
