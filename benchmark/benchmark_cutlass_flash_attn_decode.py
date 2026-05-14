@@ -115,7 +115,8 @@ def make_decode_with_paged_kv_input(config):
 
 
 def calculate_diff_decode_paged_kv(config):
-    _, _, _, _, _, _, _, _, q_dtype, _ = config
+    seq_lens, num_heads, head_size, block_size, output_dtype, \
+        _, num_blocks, _, q_dtype, is_sink = config
     maybe_quantized_query, maybe_quantized_key_cache, \
         maybe_quantized_value_cache, max_query_len, cu_query_lens, \
         max_kv_len, seq_k, scale, block_tables, sink, query, \
@@ -153,9 +154,36 @@ def calculate_diff_decode_paged_kv(config):
     try:
         torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
             f"{torch.max(torch.abs(output - ref_output))}"
-        print("✅ All implementations match, ", config)
+        print("✅ Flash implementations match, ", config)
     except AssertionError as e:
-        print("❌ Implementations differ, ", config, " error: ", e)
+        print("❌ Flash implementations differ, ", config, " error: ", e)
+
+    # Triton correctness check (only for non-FP8)
+    if q_dtype is None:
+        num_query_heads, num_kv_heads = num_heads
+        seq_threshold_3D, num_par_softmax_segs, segm_out, segm_max, \
+            segm_expsum = make_triton_softmax_buffers(
+                num_query_heads, num_kv_heads, head_size)
+        triton_output = torch.empty(query.shape[0], num_query_heads,
+                                    head_size, dtype=output_dtype)
+        unified_attention(
+            q=query, k=key_cache, v=value_cache, out=triton_output,
+            cu_seqlens_q=cu_query_lens, max_seqlen_q=max_query_len,
+            seqused_k=seq_k, max_seqlen_k=max_kv_len,
+            softmax_scale=scale, causal=True,
+            window_size=(-1, -1), block_table=block_tables,
+            softcap=0.0, q_descale=None, k_descale=None, v_descale=None,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=num_par_softmax_segs,
+            softmax_segm_output=segm_out, softmax_segm_max=segm_max,
+            softmax_segm_expsum=segm_expsum,
+            sinks=sink, kv_quant_mode=KVQuantMode.NONE, use_td=True)
+        try:
+            torch.testing.assert_close(triton_output, ref_output,
+                                       atol=atol, rtol=rtol)
+            print("✅ Triton implementations match, ", config)
+        except AssertionError as e:
+            print("❌ Triton implementations differ, ", config, " error: ", e)
 
 
 def benchmark_decode_with_paged_kv(config, iterations=20):
