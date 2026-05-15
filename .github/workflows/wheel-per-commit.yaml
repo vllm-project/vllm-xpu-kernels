@@ -22,7 +22,7 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' && 
       github.event.workflow_run.event == 'push')
     container:                      
-      image: pytorch/manylinux2_28-builder:xpu-v2.12.0-rc2
+      image: pytorch/manylinux2_28-builder:xpu-v2.12.0-rc9
       options: --user root
     steps:
       - name: Checkout
