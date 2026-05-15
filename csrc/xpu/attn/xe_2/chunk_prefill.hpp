@@ -52,7 +52,6 @@ struct chunk_prefill_args_t {
   bool is_causal = false;
   bool is_local = false;
   bool is_sink = false;
-  bool is_interleaved_kv_cache = false;
   // softmax_lse output (nullptr when not requested)
   float* softmax_lse = nullptr;
   int lse_stride = 0;  // stride along seq dim (= num_heads_q)
@@ -74,10 +73,6 @@ struct chunk_prefill_args_t {
   int o_stride_batch = 0;
   // per-batch mask: true = prefill, false = decode; nullptr = process all
   void* is_prefill = nullptr;
-  // Paged K cache page stride (stride(0) of key_cache tensor).
-  // Non-zero only for paged KV; supports non-contiguous block layouts
-  // such as cross-layer KV cache where page_stride != block_size * seq_stride.
-  int64_t k_stride_page = 0;
   int page_stride_elements = 0;
 };
 
@@ -189,7 +184,6 @@ struct KernelLauncher {
          args.total_seqlen_k,
          args.window_size_left,
          args.window_size_right,
-         args.is_interleaved_kv_cache,
          args.page_stride_elements},
         {},
         hw_info};

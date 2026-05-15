@@ -116,7 +116,6 @@ struct paged_decode_args_t {
   bool is_causal = false;
   bool is_local = false;
   bool is_sink = false;
-  bool is_interleaved_kv_cache = false;
   int num_kv_splits = 1;
   // KV cache strides [num_blocks, block_size, num_heads_kv, head_size]
   int64_t k_stride_page = 0;
@@ -327,10 +326,8 @@ struct DecodeKernelLauncher {
          args.total_seqlen_k,
          args.window_size_left,
          args.window_size_right,
-         args.is_interleaved_kv_cache,
          // page_stride_elements: physical stride between paged blocks in
-         // seq-position units. For contiguous KV this equals block_size; for
-         // cross-layer KV cache it is num_layers * 2 * block_size.
+         // seq-position units. It includes interleaved and cross-layer gaps.
          args.page_stride_elements},
         {},
         hw_info,

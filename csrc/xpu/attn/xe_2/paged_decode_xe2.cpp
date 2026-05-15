@@ -143,8 +143,6 @@ void cutlass_paged_decode_impl(
     max_seqlen_k = key_cache.size(2);
   }
 
-  bool is_interleaved_kv = false;
-
   if (is_paged) {
     // num_blocks is used to build total_seqlen_k for shape_K in kernels
     // it is not just the meaning of used blocks for kv.
@@ -153,8 +151,6 @@ void cutlass_paged_decode_impl(
     num_heads_kv = key_cache.size(2);
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
-
-    is_interleaved_kv = is_interleaved_kv_cache(key_cache, value_cache);
   }
 
   if (is_local) {
@@ -163,8 +159,11 @@ void cutlass_paged_decode_impl(
         window_size_right == -1 ? max_seqlen_k : window_size_right;
   }
 
-  int page_stride_elements = static_cast<int>(
-      get_paged_kv_cache_page_stride_elements(key_cache, is_interleaved_kv));
+  int page_stride_elements = 0;
+  if (is_paged) {
+    page_stride_elements =
+        static_cast<int>(get_paged_kv_cache_page_stride_elements(key_cache));
+  }
 
   paged_decode_args_t args = {
       query.data_ptr(),
@@ -180,7 +179,7 @@ void cutlass_paged_decode_impl(
       max_seqlen_q,
       max_seqlen_k,
       total_seqlen_q,
-      is_interleaved_kv ? total_seqlen_k * 2 : total_seqlen_k,
+      total_seqlen_k,
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
@@ -199,12 +198,11 @@ void cutlass_paged_decode_impl(
       is_causal,
       is_local,
       is_sink,
-      is_interleaved_kv,
       num_kv_splits,
-      is_interleaved_kv ? key_cache.stride(0) / 2 : key_cache.stride(0),
+      key_cache.stride(0),
       key_cache.stride(1),
       key_cache.stride(2),
-      is_interleaved_kv ? value_cache.stride(0) / 2 : value_cache.stride(0),
+      value_cache.stride(0),
       value_cache.stride(1),
       value_cache.stride(2),
       is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr,
@@ -221,7 +219,7 @@ void cutlass_paged_decode_impl(
   // higher physical addresses would return zeros.
   if (is_paged) {
     int64_t effective_total =
-        get_paged_kv_cache_effective_total_seqlen(key_cache, is_interleaved_kv);
+        get_paged_kv_cache_effective_total_seqlen(key_cache);
     if (effective_total > args.total_seqlen_k) {
       args.total_seqlen_k = static_cast<int>(effective_total);
     }
