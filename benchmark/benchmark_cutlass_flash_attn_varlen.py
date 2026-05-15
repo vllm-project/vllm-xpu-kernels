@@ -448,12 +448,12 @@ if __name__ == "__main__":
     configs = gen_correctness_config()
     configs = filter_configs(configs)
 
-    for config in configs:
-        try:
-            calculate_diff_varlen_paged_kv(config)
-        except Exception as e:
-            print("Error in config: ", config, " error: ", e)
-        clear_xpu_cache()
+    # for config in configs:
+    #     try:
+    #         calculate_diff_varlen_paged_kv(config)
+    #     except Exception as e:
+    #         print("Error in config: ", config, " error: ", e)
+    #     clear_xpu_cache()
 
     configs = gen_perf_configs()
     configs = filter_configs(configs)

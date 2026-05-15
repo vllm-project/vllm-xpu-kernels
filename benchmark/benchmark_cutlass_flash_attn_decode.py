@@ -134,7 +134,8 @@ def calculate_diff_decode_paged_kv(config):
                                     causal=False,
                                     block_table=block_tables,
                                     window_size=(-1, -1),
-                                    s_aux=sink)
+                                    s_aux=sink,
+                                    is_mix_batch=True)
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
@@ -220,7 +221,8 @@ def benchmark_decode_with_paged_kv(config, iterations=20):
                                max_query_len, cu_query_lens, max_kv_len,
                                seqused_k=seq_k, softmax_scale=scale,
                                causal=False, block_table=block_tables,
-                               window_size=(-1, -1), s_aux=sink)
+                               window_size=(-1, -1), s_aux=sink,
+                               is_mix_batch=True)
     start_event.record()
     for index in range(5, iterations):
         block_tables = torch.randint(0, num_blocks,
@@ -232,7 +234,8 @@ def benchmark_decode_with_paged_kv(config, iterations=20):
                                max_query_len, cu_query_lens, max_kv_len,
                                seqused_k=seq_k, softmax_scale=scale,
                                causal=False, block_table=block_tables,
-                               window_size=(-1, -1), s_aux=sink)
+                               window_size=(-1, -1), s_aux=sink,
+                               is_mix_batch=True)
     end_event.record()
     torch.xpu.synchronize()
     flash_ms = start_event.elapsed_time(end_event) / (iterations - 5)
