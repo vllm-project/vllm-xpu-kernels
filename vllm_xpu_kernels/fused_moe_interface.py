@@ -97,6 +97,8 @@ def fused_moe_activation(act_output, gemm1_output, activation):
         torch.ops._C.silu_and_mul(act_output, gemm1_output)
     elif activation == "gelu":
         torch.ops._C.gelu_and_mul(act_output, gemm1_output)
+    elif activation == "gelu_tanh":
+        torch.ops._C.gelu_tanh_and_mul(act_output, gemm1_output)
     elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
         torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
     elif activation == "relu2_no_mul":
@@ -111,6 +113,8 @@ def _naive_fused_moe_activation(gemm1_output, activation):
         return torch.nn.functional.silu(gemm1_output)
     elif activation == "gelu":
         return torch.nn.functional.gelu(gemm1_output)
+    elif activation == "gelu_tanh":
+        return torch.nn.functional.gelu(gemm1_output, approximate="tanh")
     elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
         gate, up = gemm1_output.chunk(2, dim=-1)
         return torch.nn.functional.silu(gate) * up * 1.702 * 7.0
@@ -358,6 +362,8 @@ class XpuFusedMoe:
             self.act_func = torch.ops._C.silu_and_mul
         elif self.activation == "gelu":
             self.act_func = torch.ops._C.gelu_and_mul
+        elif self.activation == "gelu_tanh":
+            self.act_func = torch.ops._C.gelu_tanh_and_mul
         elif self.activation == "swigluoai" \
             or ("SWIGLUOAI" in str(self.activation)):
             self.act_func = torch.ops._C.swigluoai_and_mul
