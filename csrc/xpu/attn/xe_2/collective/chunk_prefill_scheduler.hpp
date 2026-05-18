@@ -91,10 +91,10 @@ struct XeFHMAIndividualTileScheduler {
 
 // Work item for compact grid dispatch: each WG reads one entry
 struct DecodeWorkItem {
-  int seq_idx;       // which sequence (batch index)
-  int kv_tile_start; // starting KV tile index (absolute, not per-split)
-  int kv_tile_count; // number of KV tiles this WG processes
-  int split_idx;     // which split within this seq (for Oaccum indexing)
+  int seq_idx;        // which sequence (batch index)
+  int kv_tile_start;  // starting KV tile index (absolute, not per-split)
+  int kv_tile_count;  // number of KV tiles this WG processes
+  int split_idx;      // which split within this seq (for Oaccum indexing)
 };
 
 struct DecodeTileScheduler {
@@ -140,8 +140,13 @@ struct DecodeTileScheduler {
         grid.z *= num_kv_splits;
       }
     }
-    return Params{grid, {num_head}, {shape.batch * num_head}, num_kv_splits,
-                  work_list, total_wgs};
+    return Params{
+        grid,
+        {num_head},
+        {shape.batch * num_head},
+        num_kv_splits,
+        work_list,
+        total_wgs};
   }
 
   template <int Num_SGs>
@@ -168,22 +173,34 @@ struct DecodeTileScheduler {
       DecodeWorkItem wi = params.work_list[work_idx];
       idx_b = wi.seq_idx;
       idx_kv_split = wi.split_idx;
-      return make_coord(BlockIdxY(), BlockIdxX(), head, idx_b, idx_kv_split,
-                        wi.kv_tile_start, wi.kv_tile_count);
+      return make_coord(
+          BlockIdxY(),
+          BlockIdxX(),
+          head,
+          idx_b,
+          idx_kv_split,
+          wi.kv_tile_start,
+          wi.kv_tile_count);
     }
 
     if (params.num_kv_splits_ >= 1) {
       idx_kv_split = flat_idx;
       params.divmod_batch(idx_kv_split, idx_b, idx_kv_split);
       params.divmod_num_heads(idx_b, head, idx_b);
-      return make_coord(BlockIdxY(), BlockIdxX(), head, idx_b, idx_kv_split,
-                        (int)-1, (int)-1);
+      return make_coord(
+          BlockIdxY(),
+          BlockIdxX(),
+          head,
+          idx_b,
+          idx_kv_split,
+          (int)-1,
+          (int)-1);
     }
 
     idx_b = flat_idx;
     params.divmod_num_heads(idx_b, head, idx_b);
-    return make_coord(BlockIdxY(), BlockIdxX(), head, idx_b, (int)-1,
-                      (int)-1, (int)-1);
+    return make_coord(
+        BlockIdxY(), BlockIdxX(), head, idx_b, (int)-1, (int)-1, (int)-1);
   }
 
   CUTLASS_DEVICE

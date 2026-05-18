@@ -117,9 +117,11 @@ struct paged_decode_args_t {
   bool is_local = false;
   bool is_sink = false;
   int num_kv_splits = 1;
-  const int* splits_per_seq = nullptr;  // per-seq split counts; null => use global num_kv_splits
-  const void* work_list = nullptr;      // DecodeWorkItem[total_wgs]; null => old grid
-  int total_wgs = 0;                    // sum(splits_per_seq); 0 => old grid
+  const int* splits_per_seq =
+      nullptr;  // per-seq split counts; null => use global num_kv_splits
+  const void* work_list =
+      nullptr;        // DecodeWorkItem[total_wgs]; null => old grid
+  int total_wgs = 0;  // sum(splits_per_seq); 0 => old grid
   // KV cache strides [num_blocks, block_size, num_heads_kv, head_size]
   int64_t k_stride_page = 0;
   int64_t k_stride_seq = 0;
@@ -381,7 +383,8 @@ struct DecodeKernelLauncher {
     // Compact grid: patch scheduler params with work_list if available
     if (args.work_list != nullptr && args.total_wgs > 0) {
       params.scheduler.work_list =
-          reinterpret_cast<const cutlass::fmha::kernel::DecodeWorkItem*>(args.work_list);
+          reinterpret_cast<const cutlass::fmha::kernel::DecodeWorkItem*>(
+              args.work_list);
       params.scheduler.total_wgs = args.total_wgs;
       // Override grid.z to compact size
       params.scheduler.grid.z = args.total_wgs * args.num_heads_k;

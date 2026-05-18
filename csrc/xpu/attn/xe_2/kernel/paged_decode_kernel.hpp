@@ -146,7 +146,8 @@ class XeFMHAFwdSplitKVKernel {
 
     // per-batch mask: true = prefill, false = decode; nullptr = process all
     const bool* is_prefill;
-    const int* splits_per_seq = nullptr;  // per-seq split counts; null => use global num_kv_splits
+    const int* splits_per_seq =
+        nullptr;  // per-seq split counts; null => use global num_kv_splits
   };
   using KernelParams = KernelArguments;
 
@@ -252,9 +253,16 @@ class XeFMHAFwdSplitKVKernel {
 
     CUTLASS_PRAGMA_NO_UNROLL
     for (; tile_scheduler.is_valid(); ++tile_scheduler) {
-      auto [blk_q, blk_v, head, idx_b, idx_kv_split,
-           wl_tile_start, wl_tile_count] =
-          tile_scheduler.get_block_coord();  // (Q,V,h,b,split,tile_start,tile_count)
+      auto
+          [blk_q,
+           blk_v,
+           head,
+           idx_b,
+           idx_kv_split,
+           wl_tile_start,
+           wl_tile_count] =
+              tile_scheduler
+                  .get_block_coord();  // (Q,V,h,b,split,tile_start,tile_count)
 
       // Skip prefill batches when is_prefill mask is provided
       if (p.is_prefill != nullptr && p.is_prefill[idx_b]) continue;
@@ -342,13 +350,14 @@ class XeFMHAFwdSplitKVKernel {
         kv_split_offset = k_block0 + wl_tile_start;
         num_effective_kv_blocks = wl_tile_count;
         seq_num_kv_splits = (p.splits_per_seq != nullptr)
-            ? p.splits_per_seq[idx_b] : num_kv_splits;
+                                ? p.splits_per_seq[idx_b]
+                                : num_kv_splits;
         is_single_split = (seq_num_kv_splits <= 1);
       } else {
         // Legacy path: compute split range on the fly
         seq_num_kv_splits = (p.splits_per_seq != nullptr)
-            ? p.splits_per_seq[idx_b]
-            : num_kv_splits;
+                                ? p.splits_per_seq[idx_b]
+                                : num_kv_splits;
 
         if (idx_kv_split >= seq_num_kv_splits) {
           continue;
@@ -669,8 +678,8 @@ class ReduceSplitK {
       const int windowed_k_blocks = k_blocks - k_block0;
       // Per-sequence adaptive split count
       int seq_num_kv_splits = (p.splits_per_seq != nullptr)
-          ? p.splits_per_seq[idx_b]
-          : num_kv_splits;
+                                  ? p.splits_per_seq[idx_b]
+                                  : num_kv_splits;
 
       int num_blocks_per_split =
           cute::ceil_div(windowed_k_blocks, seq_num_kv_splits);
@@ -685,8 +694,8 @@ class ReduceSplitK {
       } else {
         constexpr int tile_n = get<1>(typename FMHAKernel_::TileShapeQK{});
         constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
-        bool is_single_split = (seq_num_kv_splits > 1) &&
-            (windowed_k_blocks < kMinBlocksForSplit);
+        bool is_single_split =
+            (seq_num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
         effective_splits = is_single_split ? 1 : seq_num_kv_splits;
       }
 
