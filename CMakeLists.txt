@@ -74,7 +74,7 @@ set(VLLM_PAGED_DECODE_CONFIG
     ""
     CACHE
       STRING
-      "Path to paged decode kernel config (empty=full, or: full/common/llama/qwen/deepseek)"
+      "Path to paged decode kernel config (empty=default, or: default/full/common/llama/qwen/deepseek)"
 )
 
 # Resolve shorthand config names to full paths
@@ -88,10 +88,10 @@ if(VLLM_PAGED_DECODE_CONFIG AND NOT IS_ABSOLUTE "${VLLM_PAGED_DECODE_CONFIG}")
   )
 endif()
 
-# Default to full config if not specified
+# Default to common model config if not specified
 if(NOT VLLM_PAGED_DECODE_CONFIG OR "${VLLM_PAGED_DECODE_CONFIG}" STREQUAL "")
   set(VLLM_PAGED_DECODE_CONFIG
-      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/xe_2/kernel_configs/paged_decode_full.conf"
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/xe_2/kernel_configs/paged_decode_default.conf"
   )
 endif()
 
@@ -101,7 +101,7 @@ set(VLLM_CHUNK_PREFILL_CONFIG
     ""
     CACHE
       STRING
-      "Path to chunk prefill kernel config (empty=full, or: chunk_prefill_full/common/llama/qwen/deepseek)"
+      "Path to chunk prefill kernel config (empty=default, or: default/full/common/llama/qwen/deepseek)"
 )
 
 # Resolve shorthand config names to full paths
@@ -114,10 +114,10 @@ if(VLLM_CHUNK_PREFILL_CONFIG AND NOT IS_ABSOLUTE "${VLLM_CHUNK_PREFILL_CONFIG}")
   )
 endif()
 
-# Default to full config if not specified
+# Default to common model config if not specified
 if(NOT VLLM_CHUNK_PREFILL_CONFIG OR "${VLLM_CHUNK_PREFILL_CONFIG}" STREQUAL "")
   set(VLLM_CHUNK_PREFILL_CONFIG
-      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/xe_2/kernel_configs/chunk_prefill_full.conf"
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/xe_2/kernel_configs/chunk_prefill_default.conf"
   )
 endif()
 
@@ -233,8 +233,8 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # VLLM_XPU_AOT_DEVICES and VLLM_XPU_XE2_AOT_DEVICES Example: export
   # VLLM_XPU_AOT_DEVICES="pvc,bmg-g21-a0" export
   # VLLM_XPU_XE2_AOT_DEVICES="pvc,bmg-g31-a0"
-  set(AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
-  set(XE2_AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
+  set(AOT_DEVICES "pvc")
+  set(XE2_AOT_DEVICES "pvc")
 
   # Allow overriding via env, including explicitly disabling AOT by setting an
   # empty env var (e.g. export VLLM_XPU_AOT_DEVICES="").
@@ -650,6 +650,8 @@ endif()
 if(MOE_KERNELS_ENABLED)
   message(STATUS "Enabling _moe_C extension.")
   file(GLOB VLLM_MOE_EXT_SRC "csrc/moe/*.cpp")
+  list(REMOVE_ITEM VLLM_MOE_EXT_SRC
+       ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/fused_grouped_topk.cpp)
 
   define_gpu_extension_target(
     _moe_C

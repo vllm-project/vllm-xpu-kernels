@@ -11,6 +11,8 @@
 // assume all policies are enabled.
 template <typename Policy>
 struct is_decode_policy_enabled : std::true_type {};
+template <typename Policy, bool Causal, bool Local, bool Sink>
+struct is_decode_policy_tuple_enabled : std::true_type {};
 #endif
 
 using namespace cute;
@@ -21,15 +23,34 @@ void decode_policy_dispatch_func(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const paged_decode_args_t& args) {
-  if constexpr (is_decode_policy_enabled<decode_policy>::value) {
-    decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuQKType, args);
-  } else {
+  constexpr bool flags[] = {Bs...};
+  static_assert(
+      sizeof...(Bs) == 3,
+      "decode_policy_dispatch_func expects 3 bool parameters");
+  constexpr bool Causal = flags[0];
+  constexpr bool Local = flags[1];
+  constexpr bool Sink = flags[2];
+
+  if constexpr (!is_decode_policy_enabled<decode_policy>::value) {
     TORCH_CHECK(
         false,
         "Paged decode kernel not compiled for this configuration. "
         "Rebuild with a kernel config that includes the required policy, "
         "or use "
         "VLLM_PAGED_DECODE_CONFIG=.../kernel_configs/paged_decode_full.conf");
+  } else if constexpr (!is_decode_policy_tuple_enabled<
+                           decode_policy,
+                           Causal,
+                           Local,
+                           Sink>::value) {
+    TORCH_CHECK(
+        false,
+        "Paged decode kernel tuple not compiled for this configuration. "
+        "Rebuild with a kernel config that includes the required bool "
+        "combination, or use "
+        "VLLM_PAGED_DECODE_CONFIG=.../kernel_configs/paged_decode_full.conf");
+  } else {
+    decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuQKType, args);
   }
 }
 

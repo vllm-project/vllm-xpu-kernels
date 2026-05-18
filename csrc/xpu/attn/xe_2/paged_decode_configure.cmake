@@ -311,6 +311,26 @@ function(paged_decode_configure FILENAME_SUFFIX)
     )
   endforeach()
 
+  # Build the compile-time policy+bool tuple trait specializations
+  set(ENABLED_POLICY_TUPLE_TRAITS "")
+  set(ENABLED_TUPLES ${BUILD_TUPLES})
+  list(REMOVE_DUPLICATES ENABLED_TUPLES)
+  foreach(_tuple ${ENABLED_TUPLES})
+    string(REPLACE "|" ";" _tuple_parts "${_tuple}")
+    list(GET _tuple_parts 0 _qgroup)
+    list(GET _tuple_parts 1 _headsize)
+    list(GET _tuple_parts 2 _pagesize)
+    list(GET _tuple_parts 3 _causal)
+    list(GET _tuple_parts 4 _local)
+    list(GET _tuple_parts 5 _sink)
+    set(_pol ${policy_${_qgroup}_${_headsize}_${_pagesize}})
+    if(NOT "${_pol}" STREQUAL "")
+      set(ENABLED_POLICY_TUPLE_TRAITS
+          "${ENABLED_POLICY_TUPLE_TRAITS}template <>\nstruct is_decode_policy_tuple_enabled<${_pol}, ${_causal}, ${_local}, ${_sink}> : std::true_type {};\n"
+      )
+    endif()
+  endforeach()
+
   # Generate the policy-enabled traits header
   configure_file(
     "${CMAKE_CURRENT_LIST_DIR}/paged_decode_enabled_policies.hpp.in"

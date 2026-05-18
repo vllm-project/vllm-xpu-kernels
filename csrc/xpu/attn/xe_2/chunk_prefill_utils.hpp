@@ -9,6 +9,14 @@
 // assume all policies are enabled.
 template <typename Policy>
 struct is_chunk_policy_enabled : std::true_type {};
+template <
+    typename Policy,
+    bool Paged,
+    bool Causal,
+    bool Local,
+    bool Sink,
+    bool Lse>
+struct is_chunk_policy_tuple_enabled : std::true_type {};
 #endif
 
 using namespace cute;
@@ -28,6 +36,7 @@ void policy_dispatch_func(
   static_assert(
       sizeof...(Bs) == 5, "policy_dispatch_func expects 5 bool parameters");
   constexpr bool Paged = flags[0];
+  constexpr bool Causal = flags[1];
   constexpr bool Local = flags[2];
   constexpr bool Sink = flags[3];
   constexpr bool SoftmaxLSE = flags[4];
@@ -42,6 +51,19 @@ void policy_dispatch_func(
         "Chunk prefill kernel not compiled for this configuration. "
         "Rebuild with a kernel config that includes the required policy, "
         "or use "
+        "VLLM_CHUNK_PREFILL_CONFIG=.../kernel_configs/chunk_prefill_full.conf");
+  } else if constexpr (!is_chunk_policy_tuple_enabled<
+                           chunk_policy,
+                           Paged,
+                           Causal,
+                           Local,
+                           Sink,
+                           SoftmaxLSE>::value) {
+    TORCH_CHECK(
+        false,
+        "Chunk prefill kernel tuple not compiled for this configuration. "
+        "Rebuild with a kernel config that includes the required bool "
+        "combination, or use "
         "VLLM_CHUNK_PREFILL_CONFIG=.../kernel_configs/chunk_prefill_full.conf");
   } else {
     policy_dispatch_impl<chunk_policy, Bs...>(queue, cuQKType, args);

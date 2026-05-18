@@ -152,6 +152,15 @@ function(fmha_forward_configure FILENAME_SUFFIX)
       endif()
       list(GET _parts 0 _headsize)
 
+      # Guard against malformed entries (for example, BOM-prefixed comment
+      # lines) that would otherwise expand to an empty policy name.
+      if("${_headsize}" MATCHES "[^0-9]"
+         OR "${std_policy_${_headsize}}" STREQUAL ""
+         OR "${b16_policy_${_headsize}}" STREQUAL "")
+        message(WARNING "Skipping invalid config headsize entry: ${_entry}")
+        continue()
+      endif()
+
       if(_nparts GREATER_EQUAL 6)
         # Explicit boolean values provided
         list(GET _parts 1 _paged)
@@ -159,6 +168,19 @@ function(fmha_forward_configure FILENAME_SUFFIX)
         list(GET _parts 3 _local)
         list(GET _parts 4 _sink)
         list(GET _parts 5 _lse)
+
+        # Validate boolean values
+        set(_invalid_bool FALSE)
+        foreach(_v ${_paged} ${_causal} ${_local} ${_sink} ${_lse})
+          if(NOT (_v STREQUAL "true" OR _v STREQUAL "false"))
+            message(WARNING "Skipping invalid config boolean entry: ${_entry}")
+            set(_invalid_bool TRUE)
+            break()
+          endif()
+        endforeach()
+        if(_invalid_bool)
+          continue()
+        endif()
 
         # Validate LSE constraint
         if(_lse STREQUAL "true")
@@ -278,6 +300,28 @@ function(fmha_forward_configure FILENAME_SUFFIX)
   foreach(_pol ${ENABLED_POLICIES})
     set(CHUNK_ENABLED_POLICY_TRAITS
         "${CHUNK_ENABLED_POLICY_TRAITS}template <>\nstruct is_chunk_policy_enabled<${_pol}> : std::true_type {};\n"
+    )
+  endforeach()
+
+  # Build compile-time policy+bool tuple trait specializations
+  set(CHUNK_ENABLED_TUPLE_TRAITS "")
+  set(ENABLED_TUPLES ${BUILD_TUPLES})
+  list(REMOVE_DUPLICATES ENABLED_TUPLES)
+  foreach(_tuple ${ENABLED_TUPLES})
+    string(REPLACE "|" ";" _tuple_parts "${_tuple}")
+    list(GET _tuple_parts 0 _pol)
+    list(GET _tuple_parts 1 _paged)
+    list(GET _tuple_parts 2 _causal)
+    list(GET _tuple_parts 3 _local)
+    list(GET _tuple_parts 4 _sink)
+    list(GET _tuple_parts 5 _lse)
+
+    if("${_pol}" STREQUAL "")
+      continue()
+    endif()
+
+    set(CHUNK_ENABLED_TUPLE_TRAITS
+        "${CHUNK_ENABLED_TUPLE_TRAITS}template <>\nstruct is_chunk_policy_tuple_enabled<${_pol}, ${_paged}, ${_causal}, ${_local}, ${_sink}, ${_lse}> : std::true_type {};\n"
     )
   endforeach()
 

@@ -16,5 +16,12 @@
 template <typename Policy>
 struct is_chunk_policy_enabled : std::false_type {};
 
+// Base trait: all policy+bool tuples disabled by default.
+template <typename Policy, bool Paged, bool Causal, bool Local, bool Sink, bool Lse>
+struct is_chunk_policy_tuple_enabled : std::false_type {};
+
 // Specializations for enabled policies:
 @CHUNK_ENABLED_POLICY_TRAITS@
+
+// Specializations for enabled policy+bool tuples:
+@CHUNK_ENABLED_TUPLE_TRAITS@
