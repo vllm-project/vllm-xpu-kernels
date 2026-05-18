@@ -451,6 +451,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/layernorm.cpp"
       "csrc/layernorm_quant.cpp"
       "csrc/activation.cpp"
+      "csrc/compute_slot_mapping.cpp"
       "csrc/pos_encoding_kernels.cpp"
       "csrc/fused_qknorm_rope.cpp"
       "csrc/torch_bindings.cpp"

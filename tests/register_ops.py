@@ -569,3 +569,26 @@ def topk_per_row_decode(
         logits.stride(1),
         top_k,
     )
+
+def compute_slot_mapping(
+    num_reqs: int,
+    num_tokens: int,
+    max_num_tokens: int,
+    query_start_loc: torch.Tensor,
+    positions: torch.Tensor,
+    block_table: torch.Tensor,
+    block_table_stride: int,
+    block_size: int,
+    slot_mapping: torch.Tensor,
+    total_cp_world_size: int,
+    total_cp_rank: int,
+    cp_kv_cache_interleave_size: int,
+    pad_id: int,
+) -> None:
+    torch.ops._C.compute_slot_mapping(
+        num_reqs, num_tokens, max_num_tokens,
+        query_start_loc, positions, block_table,
+        block_table_stride, block_size, slot_mapping,
+        total_cp_world_size, total_cp_rank,
+        cp_kv_cache_interleave_size, pad_id,
+    )
