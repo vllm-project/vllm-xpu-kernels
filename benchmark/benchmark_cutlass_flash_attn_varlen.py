@@ -23,9 +23,33 @@ from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
 from tests.utils import parse_args, seed_everything
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 from benchmark.presets import get_hardware_preset
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
-from vllm.v1.kv_cache_interface import KVQuantMode
-from benchmark.triton_utils import make_triton_softmax_buffers
+
+
+def _raise_missing_triton_dependency():
+    raise ImportError(
+        "Triton benchmark support requires optional vLLM/Triton "
+        "dependencies that are not installed in this environment."
+    )
+
+
+try:
+    from vllm.v1.attention.ops.triton_unified_attention import \
+        unified_attention
+    from vllm.v1.kv_cache_interface import KVQuantMode
+    from benchmark.triton_utils import make_triton_softmax_buffers
+except ImportError:
+    def unified_attention(*args, **kwargs):
+        _raise_missing_triton_dependency()
+
+    def make_triton_softmax_buffers(*args, **kwargs):
+        _raise_missing_triton_dependency()
+
+    class _MissingKVQuantMode:
+
+        def __getattr__(self, name):
+            _raise_missing_triton_dependency()
+
+    KVQuantMode = _MissingKVQuantMode()
 # isort: on
 
 DEVICE = "xpu"
@@ -121,7 +145,7 @@ def make_varlen_with_paged_kv_input(config):
 
 
 def calculate_diff_varlen_paged_kv(config):
-    _, _, _, num_heads, head_size, block_size, window_size, output_dtype, \
+    _, _, _, num_heads, head_size, _, window_size, output_dtype, \
         _, _, _, q_dtype, _, is_causal, is_paged, kv_dtype = config
     maybe_quantized_query, maybe_quantized_key_cache, \
         maybe_quantized_value_cache, \
@@ -448,12 +472,12 @@ if __name__ == "__main__":
     configs = gen_correctness_config()
     configs = filter_configs(configs)
 
-    # for config in configs:
-    #     try:
-    #         calculate_diff_varlen_paged_kv(config)
-    #     except Exception as e:
-    #         print("Error in config: ", config, " error: ", e)
-    #     clear_xpu_cache()
+    for config in configs:
+        try:
+            calculate_diff_varlen_paged_kv(config)
+        except Exception as e:
+            print("Error in config: ", config, " error: ", e)
+        clear_xpu_cache()
 
     configs = gen_perf_configs()
     configs = filter_configs(configs)

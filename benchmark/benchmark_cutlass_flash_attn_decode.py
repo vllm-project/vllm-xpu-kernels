@@ -23,9 +23,31 @@ from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
 from tests.utils import parse_args, seed_everything
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 from benchmark.presets import get_hardware_preset
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
-from vllm.v1.kv_cache_interface import KVQuantMode
-from benchmark.triton_utils import make_triton_softmax_buffers
+
+
+def _raise_missing_triton_dependency(*args, **kwargs):
+    raise ImportError(
+        "Triton/vLLM benchmark dependencies are not installed. "
+        "Install `vllm` and Triton-related benchmark requirements to use "
+        "the Triton unified attention path."
+    )
+
+
+class _MissingKVQuantMode:
+
+    def __getattr__(self, name):
+        _raise_missing_triton_dependency()
+
+
+try:
+    from vllm.v1.attention.ops.triton_unified_attention import (
+        unified_attention)
+    from vllm.v1.kv_cache_interface import KVQuantMode
+    from benchmark.triton_utils import make_triton_softmax_buffers
+except ImportError:
+    unified_attention = _raise_missing_triton_dependency
+    KVQuantMode = _MissingKVQuantMode()
+    make_triton_softmax_buffers = _raise_missing_triton_dependency
 # isort: on
 
 DEVICE = "xpu"
@@ -115,8 +137,8 @@ def make_decode_with_paged_kv_input(config):
 
 
 def calculate_diff_decode_paged_kv(config):
-    seq_lens, num_heads, head_size, block_size, output_dtype, \
-        _, num_blocks, _, q_dtype, is_sink = config
+    _, num_heads, head_size, _, output_dtype, \
+        _, num_blocks, _, q_dtype, _ = config
     maybe_quantized_query, maybe_quantized_key_cache, \
         maybe_quantized_value_cache, max_query_len, cu_query_lens, \
         max_kv_len, seq_k, scale, block_tables, sink, query, \
@@ -241,8 +263,11 @@ def benchmark_decode_with_paged_kv(config, iterations=20):
     flash_ms = start_event.elapsed_time(end_event) / (iterations - 5)
     flash_us = flash_ms * 1000
 
-    memory_load_GB = calculate_memory_usage(seq_k.sum().item(),
-                                            num_kv_heads, head_size,
+    memory_load_GB = calculate_memory_usage(cu_query_lens[-1].item(),
+                                            seq_k.sum().item(),
+                                            num_heads, head_size,
+                                            queries[5].dtype,
+                                            maybe_quantized_key_cache.dtype,
                                             output_dtype)
     flash_bw = memory_load_GB / (flash_ms / 1000)
     flash_mbu = float("nan")
