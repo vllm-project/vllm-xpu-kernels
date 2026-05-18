@@ -447,7 +447,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float softmax_scale, Tensor? softmax_sink, bool zero_tensors, "
       "bool is_causal, int window_size_left, int window_size_right, float "
       "softcap, bool return_softmax, "
-      "Generator? gen, int? num_splits, bool mix_batch, Tensor? splits_per_seq, Tensor? work_list) -> Tensor[]");
+      "Generator? gen, int? num_splits, bool mix_batch, Tensor? "
+      "splits_per_seq, Tensor? work_list) -> Tensor[]");
   ops.impl(
       "varlen_fwd",
       torch::kXPU,
