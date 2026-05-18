@@ -255,16 +255,17 @@ void merge_attn_states(
     const torch::Tensor& suffix_output,
     const torch::Tensor& suffix_lse);
 
-void compute_slot_mapping(int64_t num_reqs,
-                          int64_t num_tokens,
-                          int64_t max_num_tokens,
-                          const torch::Tensor& query_start_loc,
-                          const torch::Tensor& positions,
-                          const torch::Tensor& block_table,
-                          int64_t block_table_stride,
-                          int64_t block_size,
-                          torch::Tensor& slot_mapping,
-                          int64_t total_cp_world_size,
-                          int64_t total_cp_rank,
-                          int64_t cp_kv_cache_interleave_size,
-                          int64_t pad_id);
+void compute_slot_mapping(
+    int64_t num_reqs,
+    int64_t num_tokens,
+    int64_t max_num_tokens,
+    const torch::Tensor& query_start_loc,
+    const torch::Tensor& positions,
+    const torch::Tensor& block_table,
+    int64_t block_table_stride,
+    int64_t block_size,
+    torch::Tensor& slot_mapping,
+    int64_t total_cp_world_size,
+    int64_t total_cp_rank,
+    int64_t cp_kv_cache_interleave_size,
+    int64_t pad_id);

@@ -50,9 +50,10 @@ def ref_compute_slot_mapping(
             block_number = int(block_table[req_idx, block_index].item())
             vbo = p - block_index * virtual_block_size
 
-            is_local = (vbo // interleave) % total_cp_world_size == total_cp_rank
-            local_off = (vbo // (total_cp_world_size * interleave)) * interleave \
-                        + (vbo % interleave)
+            is_local = (vbo // interleave) % \
+                        total_cp_world_size == total_cp_rank
+            local_off = (vbo // (total_cp_world_size * interleave)) \
+                         * interleave + (vbo % interleave)
             slot = block_number * block_size + local_off
             out[tok] = slot if is_local else pad_id
 
@@ -90,13 +91,14 @@ def _make_inputs(
 
     virtual_block_size = block_size * total_cp_world_size
 
-    # Build per-request positions; bounded by max_blocks_per_req * virtual_block_size.
+    # Build per-request positions;
+    # bounded by max_blocks_per_req * virtual_block_size.
     positions = torch.empty(num_tokens, dtype=dtype_pos)
     max_pos = max_blocks_per_req * virtual_block_size - 1
     for r in range(num_reqs):
         s, e = int(query_start_loc[r]), int(query_start_loc[r + 1])
-        # Random monotone-ish positions within a request (not required by kernel,
-        # but mimics real workloads).
+        # Random monotone-ish positions within a request 
+        # (not required by kernel, but mimics real workloads).
         base = torch.randint(0, max_pos // 2 + 1, (1,), generator=g).item()
         offs = torch.randint(0, max_pos // 2 + 1, (e - s,), generator=g)
         offs, _ = torch.sort(offs)
@@ -182,7 +184,11 @@ def test_compute_slot_mapping(
     bt = bt_cpu.to(DEVICE)
     # Pre-fill slot_mapping with a sentinel != PAD_ID to make sure the kernel
     # actually writes both regular and padding positions.
-    slot_mapping = torch.full((max_num_tokens,), -999, dtype=torch.int64, device=DEVICE)
+    slot_mapping = torch.full(
+                    (max_num_tokens,),
+                    -999,
+                    dtype=torch.int64,
+                    device=DEVICE)
 
     compute_slot_mapping(
         num_reqs=num_reqs,
@@ -233,13 +239,21 @@ def test_compute_slot_mapping_all_remote():
     qsl_cpu[1:] = torch.cumsum(lens, dim=0).to(torch.int32)
 
     virtual_block_size = block_size * total_cp_world_size
-    # Choose positions so that (pos // interleave) % world_size == 1 (= other rank).
+    # Choose positions 
+    # so that (pos // interleave) % world_size == 1 (= other rank).
     # With interleave=1, that means pos % 2 == 1.
     positions = (torch.arange(num_tokens, dtype=torch.int64) * 2 + 1) \
         .clamp_max(max_blocks_per_req * virtual_block_size - 1)
-    block_table = torch.randint(1, 1000, (num_reqs, max_blocks_per_req), dtype=torch.int32)
+    block_table = torch.randint(
+        1, 1000, (num_reqs, max_blocks_per_req), dtype=torch.int32
+    )
 
-    slot_mapping = torch.full((max_num_tokens,), 0, dtype=torch.int64, device=DEVICE)
+    slot_mapping = torch.full(
+        (max_num_tokens,),
+        0,
+        dtype=torch.int64,
+        device=DEVICE
+    )
 
     compute_slot_mapping(
         num_reqs=num_reqs,

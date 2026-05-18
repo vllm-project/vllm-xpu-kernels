@@ -213,11 +213,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("merge_attn_states", torch::kXPU, &merge_attn_states);
 
   ops.def(
-    "compute_slot_mapping(int num_reqs, int num_tokens, int max_num_tokens, "
-    "Tensor query_start_loc, Tensor positions, Tensor block_table, "
-    "int block_table_stride, int block_size, Tensor! slot_mapping, "
-    "int total_cp_world_size, int total_cp_rank, "
-    "int cp_kv_cache_interleave_size, int pad_id) -> ()");
+      "compute_slot_mapping(int num_reqs, int num_tokens, int max_num_tokens, "
+      "Tensor query_start_loc, Tensor positions, Tensor block_table, "
+      "int block_table_stride, int block_size, Tensor! slot_mapping, "
+      "int total_cp_world_size, int total_cp_rank, "
+      "int cp_kv_cache_interleave_size, int pad_id) -> ()");
   ops.impl("compute_slot_mapping", torch::kXPU, &compute_slot_mapping);
 }
 
