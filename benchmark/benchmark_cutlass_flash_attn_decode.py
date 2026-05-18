@@ -336,6 +336,111 @@ def filter_configs(configs):
     return new_configs
 
 
+def _mk_cfg(seq_lens, num_heads, block_size, name, head_size=128,
+            dtype=torch.bfloat16, num_blocks=2048):
+    # 11-tuple matching make_decode_with_paged_kv_input contract.
+    return (seq_lens, num_heads, head_size, block_size, dtype, None,
+            num_blocks, 2, None, False, name)
+
+
+# Format: seq_lens="B,1+1+...,kv0+kv1+...", num_heads=(q, kv), block_size, name
+BATCH_DECODE_CONFIGS = [
+    # Uniform KV
+    _mk_cfg("32," + "+".join(["1"] * 32) + "," + "+".join(["512"] * 32),
+            (32, 2), 64, "32x512_uniform_(32,2)"),
+    _mk_cfg("32," + "+".join(["1"] * 32) + "," + "+".join(["4096"] * 32),
+            (32, 2), 64, "32x4096_uniform_(32,2)"),
+    # Mixed KV (key optimization target)
+    _mk_cfg("8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384",
+            (32, 2), 64, "8xmixed_128-16384_(32,2)"),
+    _mk_cfg("8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384",
+            (32, 4), 64, "8xmixed_128-16384_(32,4)"),
+    _mk_cfg("8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384",
+            (32, 8), 64, "8xmixed_128-16384_(32,8)"),
+    _mk_cfg("8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384",
+            (40, 8), 64, "8xmixed_128-16384_(40,8)"),
+    # Skewed (mostly short + one long)
+    _mk_cfg("8,1+1+1+1+1+1+1+1,256+256+256+256+256+256+256+16384",
+            (32, 2), 64, "8xskewed_256-16384_(32,2)"),
+    # All short
+    _mk_cfg("8,1+1+1+1+1+1+1+1,128+128+256+256+512+512+1024+1024",
+            (32, 2), 64, "8xshort_128-1024_(32,2)"),
+    # Realistic vLLM-like
+    _mk_cfg(
+        "16," + "+".join(["1"] * 16) + ","
+        + "+".join(["256", "512", "1024", "1024",
+                    "2048", "2048", "4096", "4096",
+                    "4096", "8192", "8192", "8192",
+                    "16384", "16384", "16384", "16384"]),
+        (32, 2), 64, "16xrealistic_mixed_(32,2)"),
+    # block_size=128
+    _mk_cfg("8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384",
+            (32, 2), 128, "8xmixed_128-16384_bs128_(32,2)"),
+    # MHA
+    _mk_cfg("32," + "+".join(["1"] * 32) + "," + "+".join(["512"] * 32),
+            (16, 16), 64, "32x512_uniform_(16,16)_MHA"),
+    _mk_cfg("8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384",
+            (16, 16), 64, "8xmixed_128-16384_(16,16)_MHA"),
+]
+
+
+def benchmark_batch_decode(config, iterations=200):
+    """Benchmark a single batch decode config with GPU-event timing."""
+    (seq_lens, num_heads, head_size, block_size, dtype, soft_cap,
+     num_blocks, fa_versions, q_dtype, is_sink, name) = config
+
+    full_config = (seq_lens, num_heads, head_size, block_size, dtype,
+                   soft_cap, num_blocks, fa_versions, q_dtype, is_sink)
+    (maybe_quantized_query, maybe_quantized_key_cache,
+     maybe_quantized_value_cache, max_query_len, cu_query_lens,
+     max_kv_len, seq_k, scale, block_tables, sink, _,
+     _, _, _, _) = make_decode_with_paged_kv_input(full_config)
+
+    num_seqs = int(seq_lens.split(",")[0])
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+
+    queries = [torch.rand_like(maybe_quantized_query)
+               for _ in range(iterations)]
+    bt_list = [torch.randint(0, num_blocks,
+                             (num_seqs, max_num_blocks_per_seq),
+                             dtype=torch.int32)
+               for _ in range(iterations)]
+
+    def _run(i):
+        flash_attn_varlen_func(
+            queries[i], maybe_quantized_key_cache,
+            maybe_quantized_value_cache,
+            max_query_len, cu_query_lens, max_kv_len,
+            seqused_k=seq_k, softmax_scale=scale,
+            causal=False, block_table=bt_list[i],
+            window_size=(-1, -1), s_aux=sink)
+
+    # Warmup
+    for i in range(min(10, iterations)):
+        _run(i)
+    torch.xpu.synchronize()
+
+    # Timed
+    start_event = torch.xpu.Event(enable_timing=True)
+    end_event = torch.xpu.Event(enable_timing=True)
+    measured = iterations - 10
+    start_event.record()
+    for i in range(10, iterations):
+        _run(i)
+    end_event.record()
+    torch.xpu.synchronize()
+
+    avg_us = start_event.elapsed_time(end_event) * 1000.0 / measured
+
+    # KV bandwidth (K + V, bf16 -> 2 bytes)
+    kv_lens = list(map(int, seq_lens.split(",")[2].split("+")))
+    kv_bytes = sum(kv_lens) * num_heads[1] * head_size * 2 * 2
+    bw_gbs = (kv_bytes / 1e9) / (avg_us / 1e6)
+
+    clear_xpu_cache()
+    return avg_us, bw_gbs
+
+
 if __name__ == "__main__":
 
     args = parse_args()
@@ -360,3 +465,31 @@ if __name__ == "__main__":
     save_path = ensure_save_path_exists(args.save_path)
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=save_path)
+
+    # ================================================================
+    # Batch Decode Benchmark (per-seq adaptive split-K evaluation)
+    # ================================================================
+    print("\n" + "=" * 80)
+    print("Batch Decode Benchmark (per-seq adaptive split-K)")
+    print("=" * 80)
+    hdr = (f"{'config':<40} | {'batch':>5} {'kv_sum':>7} | "
+           f"{'time(us)':>9} {'BW(GB/s)':>9}")
+    print(hdr)
+    print("-" * 80)
+
+    for cfg in BATCH_DECODE_CONFIGS:
+        name = cfg[-1]
+        seq_lens = cfg[0]
+        num_seqs = int(seq_lens.split(",")[0])
+        kv_lens = list(map(int, seq_lens.split(",")[2].split("+")))
+        kv_sum = sum(kv_lens)
+        try:
+            avg_us, bw_gbs = benchmark_batch_decode(cfg, iterations=200)
+            print(f"{name:<40} | {num_seqs:>5} {kv_sum:>7} | "
+                  f"{avg_us:>9.1f} {bw_gbs:>9.1f}")
+        except Exception as e:
+            print(f"{name:<40} | {num_seqs:>5} {kv_sum:>7} | "
+                  f"{'ERROR':>9} {str(e)[:20]}")
+        clear_xpu_cache()
+
+    print("=" * 80)

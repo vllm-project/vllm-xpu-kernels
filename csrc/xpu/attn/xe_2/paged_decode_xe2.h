@@ -27,4 +27,6 @@ void cutlass_paged_decode_xe2(
     bool is_local,
     bool is_sink,
     int num_kv_splits,
-    std::optional<const at::Tensor>& is_prefill);
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<at::Tensor>& splits_per_seq,
+    std::optional<at::Tensor>& work_list);

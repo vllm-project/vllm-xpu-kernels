@@ -31,7 +31,9 @@ void cutlass_paged_decode_xe2(
     bool is_local,
     bool is_sink,
     int num_kv_splits,
-    std::optional<const at::Tensor>& is_prefill) {
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<at::Tensor>& splits_per_seq,
+    std::optional<at::Tensor>& work_list) {
   cutlass_paged_decode_impl(
       queue,
       query,
@@ -58,7 +60,9 @@ void cutlass_paged_decode_xe2(
       is_local,
       is_sink,
       num_kv_splits,
-      is_prefill);
+      is_prefill,
+      splits_per_seq,
+      work_list);
 }
 
 inline bool is_single_value_broadcast_tensor(const at::Tensor& t) {
@@ -100,7 +104,9 @@ void cutlass_paged_decode_impl(
     bool is_local,
     bool is_sink,
     int num_kv_splits,
-    std::optional<const at::Tensor>& is_prefill) {
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<at::Tensor>& splits_per_seq,
+    std::optional<at::Tensor>& work_list) {
   bool is_fp8_kv = key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
                    key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn;
   if (is_fp8_kv) {
@@ -199,6 +205,9 @@ void cutlass_paged_decode_impl(
       is_local,
       is_sink,
       num_kv_splits,
+      nullptr,  // splits_per_seq, filled in below if applicable
+      nullptr,  // work_list, filled in below if applicable
+      0,        // total_wgs, filled in below if applicable
       key_cache.stride(0),
       key_cache.stride(1),
       key_cache.stride(2),
@@ -223,6 +232,18 @@ void cutlass_paged_decode_impl(
     if (effective_total > args.total_seqlen_k) {
       args.total_seqlen_k = static_cast<int>(effective_total);
     }
+  }
+
+  // Per-sequence adaptive split-K: use pre-computed splits_per_seq from Python
+  // if available. This avoids GPU→CPU sync and extra computation here.
+  if (splits_per_seq.has_value() && splits_per_seq->numel() > 0) {
+    args.splits_per_seq = splits_per_seq->data_ptr<int>();
+  }
+
+  // Per-sequence work_list for compact grid scheduling
+  if (work_list.has_value() && work_list->numel() > 0) {
+    args.work_list = work_list->data_ptr<int>();
+    args.total_wgs = work_list->size(0);  // [total_wgs, 4]
   }
 
   TORCH_CHECK(
