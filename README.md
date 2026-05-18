@@ -111,6 +111,16 @@ python -m build --wheel --no-isolation
 
 After [vLLM RFC#33214](https://github.com/vllm-project/vllm/issues/33214) was completed, vLLM-XPU migrated to a `vllm-xpu-kernels`-based implementation. Installing the latest vLLM for XPU will pull in `vllm-xpu-kernels` automatically as a wheel dependency — no manual integration is required.
 
+### Kernel Configuration
+
+By default, vLLM-XPU compiles kernels for common models (Llama, Qwen, DeepSeek). For customization:
+
+```bash
+VLLM_CHUNK_PREFILL_CONFIG=full VLLM_PAGED_DECODE_CONFIG=full pip install .
+```
+
+See [KERNEL_CONFIGURATION.md](KERNEL_CONFIGURATION.md) for detailed guidance on kernel configuration, presets, and troubleshooting missing kernels.
+
 ## Testing
 
 Run the full test suite with pytest:

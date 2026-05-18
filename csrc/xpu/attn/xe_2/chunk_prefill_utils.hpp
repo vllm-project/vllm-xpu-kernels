@@ -40,6 +40,9 @@ void policy_dispatch_func(
   constexpr bool Local = flags[2];
   constexpr bool Sink = flags[3];
   constexpr bool SoftmaxLSE = flags[4];
+  // Extract head_size from policy at compile time.
+  constexpr int _head_sz = cute::size<1>(typename chunk_policy::ShapeOut{});
+
   if constexpr (SoftmaxLSE && (Paged || Local || Sink)) {
     TORCH_CHECK(
         false,
@@ -48,10 +51,26 @@ void policy_dispatch_func(
   } else if constexpr (!is_chunk_policy_enabled<chunk_policy>::value) {
     TORCH_CHECK(
         false,
-        "Chunk prefill kernel not compiled for this configuration. "
-        "Rebuild with a kernel config that includes the required policy, "
-        "or use "
-        "VLLM_CHUNK_PREFILL_CONFIG=.../kernel_configs/chunk_prefill_full.conf");
+        "Chunk prefill kernel not compiled for this configuration.\n\n"
+        "Add this line to your chunk_prefill config file "
+        "(e.g. kernel_configs/chunk_prefill_default.conf):\n\n  ",
+        _head_sz,
+        ",",
+        (Paged ? "true" : "false"),
+        ",",
+        (Causal ? "true" : "false"),
+        ",",
+        (Local ? "true" : "false"),
+        ",",
+        (Sink ? "true" : "false"),
+        ",",
+        (SoftmaxLSE ? "true" : "false"),
+        "\n\nThen rebuild:\n"
+        "  VLLM_CHUNK_PREFILL_CONFIG=default pip install .\n\n"
+        "Or use full config (all combinations, slower build):\n"
+        "  VLLM_CHUNK_PREFILL_CONFIG=full pip install .\n\n"
+        "Available presets: full | common | default | llama | qwen | deepseek\n"
+        "See: KERNEL_CONFIGURATION.md");
   } else if constexpr (!is_chunk_policy_tuple_enabled<
                            chunk_policy,
                            Paged,
@@ -61,10 +80,26 @@ void policy_dispatch_func(
                            SoftmaxLSE>::value) {
     TORCH_CHECK(
         false,
-        "Chunk prefill kernel tuple not compiled for this configuration. "
-        "Rebuild with a kernel config that includes the required bool "
-        "combination, or use "
-        "VLLM_CHUNK_PREFILL_CONFIG=.../kernel_configs/chunk_prefill_full.conf");
+        "Chunk prefill kernel tuple not compiled for this configuration.\n\n"
+        "Add this line to your chunk_prefill config file "
+        "(e.g. kernel_configs/chunk_prefill_default.conf):\n\n  ",
+        _head_sz,
+        ",",
+        (Paged ? "true" : "false"),
+        ",",
+        (Causal ? "true" : "false"),
+        ",",
+        (Local ? "true" : "false"),
+        ",",
+        (Sink ? "true" : "false"),
+        ",",
+        (SoftmaxLSE ? "true" : "false"),
+        "\n\nThen rebuild:\n"
+        "  VLLM_CHUNK_PREFILL_CONFIG=default pip install .\n\n"
+        "Or use full config (all combinations, slower build):\n"
+        "  VLLM_CHUNK_PREFILL_CONFIG=full pip install .\n\n"
+        "Available presets: full | common | default | llama | qwen | deepseek\n"
+        "See: KERNEL_CONFIGURATION.md");
   } else {
     policy_dispatch_impl<chunk_policy, Bs...>(queue, cuQKType, args);
   }

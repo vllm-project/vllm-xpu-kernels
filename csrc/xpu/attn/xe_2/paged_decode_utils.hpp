@@ -31,13 +31,36 @@ void decode_policy_dispatch_func(
   constexpr bool Local = flags[1];
   constexpr bool Sink = flags[2];
 
+  // Extract policy parameters at compile time.
+  // ShapeOut = Shape<q_packed, head_dim>, ShapeQK = Shape<q_packed, kv_tile,
+  // ...>
+  constexpr int _qgroup = cute::size<0>(typename decode_policy::ShapeOut{});
+  constexpr int _head_sz = cute::size<1>(typename decode_policy::ShapeOut{});
+  constexpr int _page_sz = cute::size<1>(typename decode_policy::ShapeQK{});
+
   if constexpr (!is_decode_policy_enabled<decode_policy>::value) {
     TORCH_CHECK(
         false,
-        "Paged decode kernel not compiled for this configuration. "
-        "Rebuild with a kernel config that includes the required policy, "
-        "or use "
-        "VLLM_PAGED_DECODE_CONFIG=.../kernel_configs/paged_decode_full.conf");
+        "Paged decode kernel not compiled for this configuration.\n\n"
+        "Add this line to your paged_decode config file "
+        "(e.g. kernel_configs/paged_decode_default.conf):\n\n  ",
+        _qgroup,
+        ",",
+        _head_sz,
+        ",",
+        _page_sz,
+        ",",
+        (Causal ? "true" : "false"),
+        ",",
+        (Local ? "true" : "false"),
+        ",",
+        (Sink ? "true" : "false"),
+        "\n\nThen rebuild:\n"
+        "  VLLM_PAGED_DECODE_CONFIG=default pip install .\n\n"
+        "Or use full config (all combinations, slower build):\n"
+        "  VLLM_PAGED_DECODE_CONFIG=full pip install .\n\n"
+        "Available presets: full | common | default | llama | qwen | deepseek\n"
+        "See: KERNEL_CONFIGURATION.md");
   } else if constexpr (!is_decode_policy_tuple_enabled<
                            decode_policy,
                            Causal,
@@ -45,10 +68,26 @@ void decode_policy_dispatch_func(
                            Sink>::value) {
     TORCH_CHECK(
         false,
-        "Paged decode kernel tuple not compiled for this configuration. "
-        "Rebuild with a kernel config that includes the required bool "
-        "combination, or use "
-        "VLLM_PAGED_DECODE_CONFIG=.../kernel_configs/paged_decode_full.conf");
+        "Paged decode kernel tuple not compiled for this configuration.\n\n"
+        "Add this line to your paged_decode config file "
+        "(e.g. kernel_configs/paged_decode_default.conf):\n\n  ",
+        _qgroup,
+        ",",
+        _head_sz,
+        ",",
+        _page_sz,
+        ",",
+        (Causal ? "true" : "false"),
+        ",",
+        (Local ? "true" : "false"),
+        ",",
+        (Sink ? "true" : "false"),
+        "\n\nThen rebuild:\n"
+        "  VLLM_PAGED_DECODE_CONFIG=default pip install .\n\n"
+        "Or use full config (all combinations, slower build):\n"
+        "  VLLM_PAGED_DECODE_CONFIG=full pip install .\n\n"
+        "Available presets: full | common | default | llama | qwen | deepseek\n"
+        "See: KERNEL_CONFIGURATION.md");
   } else {
     decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuQKType, args);
   }
