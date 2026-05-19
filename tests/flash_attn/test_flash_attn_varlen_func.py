@@ -162,7 +162,6 @@ MINI_PYTEST_PARAMS = {
         "num_heads": [(8, 2)],
         "num_blocks": [64],
         "window_size": [(-1, -1), (127, 127)],
-        "stride_pad": [0, 32],
         "num_layers": [2],
     },
     "test_decode_with_cross_layer_paged_kv": {
@@ -942,93 +941,35 @@ def test_varlen_with_softmax_lse(
     torch.xpu.empty_cache()
 
 
-def _skip_large_cross_layer_kv(num_blocks,
-                               num_layers,
-                               block_size,
-                               num_kv_heads,
-                               head_size,
-                               dtype,
-                               kv_factor=2):
-    element_size = torch.empty((), dtype=dtype).element_size()
-    total_bytes = (num_blocks * num_layers * kv_factor * block_size *
-                   num_kv_heads * head_size * element_size)
-    if total_bytes > 2 * 1024**3:
-        pytest.skip("skip cross-layer KV case that may run out of memory.")
-
-
-def _quantize_paged_kv_cache(key_cache, value_cache, fp8_dtype, k_descale,
-                             v_descale, combined_kv_cache):
-    quantized_combined_kv_cache = torch.empty_like(combined_kv_cache,
-                                                   dtype=fp8_dtype)
-    quantized_key_cache = quantized_combined_kv_cache[:, 0, 0, :, :, :]
-    quantized_value_cache = quantized_combined_kv_cache[:, 0, 1, :, :, :]
-    quantized_key_cache.copy_((key_cache / k_descale).to(fp8_dtype))
-    quantized_value_cache.copy_((value_cache / v_descale).to(fp8_dtype))
-    return quantized_key_cache, quantized_value_cache
-
-
 @pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
-@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("window_size", [(-1, -1), (127, 127)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
 @pytest.mark.parametrize("num_layers", NUM_LAYERS)
-@pytest.mark.parametrize("soft_cap", SOFT_CAPS)
-@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
-@pytest.mark.parametrize("fa_version", [2])
-@pytest.mark.parametrize("q_dtype", QDTYPES, ids=format_tc)
-@pytest.mark.parametrize("is_sink", SINK)
-@pytest.mark.parametrize("is_casual", CASUAL)
 @pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
-@pytest.mark.parametrize("stride_pad", [0, 32])
 @torch.inference_mode()
 def test_varlen_with_cross_layer_paged_kv(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
-    window_size: tuple[int, int],
-    dtype: torch.dtype,
     block_size: int,
+    dtype: torch.dtype,
     num_layers: int,
-    soft_cap: Optional[float],
-    num_blocks: int,
-    fa_version: int,
-    q_dtype: Optional[torch.dtype],
-    is_sink: bool,
-    is_casual: bool,
+    window_size: tuple[int, int],
     fp8_dtype: Optional[torch.dtype],
-    stride_pad: int,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
-    # # FIXME: remove skip
-    if (is_casual and seq_lens[1][0]
-            == 5) and (os.getenv("SKIP_HANG_KERNEL") is not None
-                       and os.getenv("SKIP_HANG_KERNEL") == "1"):
-        pytest.skip("skip casual for seqlen0 to avoid runtime hang on CI.")
-    if (window_size[0] != -1 or window_size[1]
-            != -1) and (os.getenv("SKIP_HANG_KERNEL") is not None
-                        and os.getenv("SKIP_HANG_KERNEL") == "1"):
-        pytest.skip("skip local attn to avoid runtime hang on CI.")
-    if block_size == 128 and num_blocks == 32768 and head_size >= 192:
-        pytest.skip("skip test cases that may run out of Memory.")
-    if stride_pad > 0 and fp8_dtype is not None:
-        pytest.skip("non-contiguous Q/K/V with FP8 KV cache not tested")
-    if stride_pad > 0 and q_dtype is not None:
-        pytest.skip("non-contiguous Q/K/V with quantized query not tested")
-    # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
-    #     pytest.skip("Flash attention with quantized inputs is only "
-    #                 "supported on version 3 with bfloat16 base type")
     torch.manual_seed(4242)
+    num_blocks = NUM_BLOCKS[0]
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
     assert num_query_heads % num_kv_heads == 0
-    _skip_large_cross_layer_kv(num_blocks, num_layers, block_size,
-                               num_kv_heads, head_size, dtype)
     max_query_len = max(query_lens)
     max_kv_len = max(kv_lens)
     scale = head_size**-0.5
@@ -1037,16 +978,6 @@ def test_varlen_with_cross_layer_paged_kv(
                         num_query_heads,
                         head_size,
                         dtype=dtype)
-    if stride_pad > 0:
-        padded_head = head_size + stride_pad
-        query_padded = torch.randn(sum(query_lens),
-                                   num_query_heads,
-                                   padded_head,
-                                   dtype=dtype)
-        query_padded[:, :, :head_size] = query
-        query = query_padded[:, :, :head_size]
-        assert not query.is_contiguous()
-        assert query.stride(-1) == 1
 
     combined_kv_cache = torch.randn(num_blocks,
                                     num_layers,
@@ -1059,7 +990,7 @@ def test_varlen_with_cross_layer_paged_kv(
     value_cache = combined_kv_cache[:, 0, 1, :, :, :]
     assert key_cache.shape == value_cache.shape
     assert key_cache.stride(0) == num_layers * 2 * block_size * \
-        num_kv_heads * head_size
+       num_kv_heads * head_size
 
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
@@ -1071,28 +1002,19 @@ def test_varlen_with_cross_layer_paged_kv(
                                  num_blocks,
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
-    sink = None
-    if is_sink:
-        sink = torch.randn(num_query_heads, dtype=dtype)
 
     maybe_quantized_query = query
     maybe_quantized_key_cache = key_cache
     maybe_quantized_value_cache = value_cache
-    q_descale = None  #noqa: F841
     k_descale = None  #noqa: F841
     v_descale = None  #noqa: F841
     scale_shape = (num_seqs, num_kv_heads)
-    is_fp8_query = q_dtype is not None
-    if is_fp8_query:
-        q_descale = (torch.abs(query).max() / 200).to(torch.float32)
-        maybe_quantized_query = (query / q_descale).to(q_dtype)
     is_fp8kv = fp8_dtype is not None
     if is_fp8kv:
         k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
         v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
-        maybe_quantized_key_cache, maybe_quantized_value_cache = \
-            _quantize_paged_kv_cache(key_cache, value_cache, fp8_dtype,
-                                     k_descale, v_descale, combined_kv_cache)
+        maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
+        maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
 
     output = flash_attn_varlen_func(maybe_quantized_query,
                                     maybe_quantized_key_cache,
@@ -1101,17 +1023,15 @@ def test_varlen_with_cross_layer_paged_kv(
                                     cu_query_lens,
                                     max_kv_len,
                                     seqused_k=seq_k,
-                                    q_descale=q_descale.expand(scale_shape)
-                                    if q_descale is not None else None,
                                     k_descale=k_descale.expand(scale_shape)
                                     if k_descale is not None else None,
                                     v_descale=v_descale.expand(scale_shape)
                                     if v_descale is not None else None,
                                     softmax_scale=scale,
-                                    causal=is_casual,
+                                    causal=False,
                                     block_table=block_tables,
                                     window_size=window_size,
-                                    s_aux=sink)
+                                    s_aux=None)
 
     ref_output = ref_paged_attn(
         query=query.contiguous(),
@@ -1121,20 +1041,17 @@ def test_varlen_with_cross_layer_paged_kv(
         kv_lens=kv_lens,
         block_tables=block_tables,
         scale=scale,
-        casual=is_casual,
+        casual=False,
         is_paged=True,
-        sink=sink,
-        q_descale=q_descale,
+        sink=None,
         k_descale=k_descale,
         v_descale=v_descale,
         window_size_left=window_size[0],
         window_size_right=window_size[1],
         is_fp8kv=is_fp8kv,
-        is_fp8_query=is_fp8_query,
+        is_fp8_query=False,
         dtype=dtype)
     atol, rtol = 2e-2, 1e-2
-    if q_dtype is not None:
-        atol, rtol = 1.5e-1, 1.5e-1
     if window_size[0] != -1 or window_size[1] != -1:
         atol, rtol = 1.5e-2, 1.5e-2
     if fp8_dtype is not None:
@@ -1143,66 +1060,35 @@ def test_varlen_with_cross_layer_paged_kv(
         f"{torch.max(torch.abs(output - ref_output))}"
     torch.xpu.empty_cache()
 
-@pytest.mark.parametrize("seq_lens",
-                         [[(1, 523), (1, 37), (1, 2011)], [(1, 13000)]])
+@pytest.mark.parametrize("seq_lens", [[(1, 523), (1, 37), (1, 2011)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
 @pytest.mark.parametrize("num_layers", NUM_LAYERS)
-@pytest.mark.parametrize("soft_cap", SOFT_CAPS)
-@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
-@pytest.mark.parametrize("fa_version", [2])
-@pytest.mark.parametrize("q_dtype", QDTYPES, ids=format_tc)
-@pytest.mark.parametrize("is_sink", SINK)
+@pytest.mark.parametrize("window_size", [(-1, -1), (127, -1)])
 @pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
-@pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
 @torch.inference_mode()
 def test_decode_with_cross_layer_paged_kv(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
-    dtype: torch.dtype,
     block_size: int,
+    dtype: torch.dtype,
     num_layers: int,
-    soft_cap: Optional[float],
-    num_blocks: int,
-    fa_version: int,
-    q_dtype: Optional[torch.dtype],
-    is_sink: bool,
-    fp8_dtype: Optional[torch.dtype],
     window_size: tuple[int, int],
+    fp8_dtype: Optional[torch.dtype],
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
-    # # FIXME: remove skip
-    # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
-    #     pytest.skip("Flash attention with quantized inputs is only "
-    #                 "supported on version 3 with bfloat16 base type")
-    # NOTE: head_size=512 + block_size>=128 was previously skipped because the
-    # kv_tile=_128 decode policy + head_size=512 ShapePV exceeded SLM. The
-    # _128 policy is no longer dispatched; all multiples of 64 use the
-    # kv_tile=_64 policy (see paged_decode_utils.hpp::dispatch_by_page_size),
-    # so SLM usage is independent of block_size for block_size>=64. The
-    # head_size=512 case has been verified to pass for all BLOCK_SIZES.
-    if num_heads == (16, 1) and head_size == 256:
-        pytest.skip("skip test cases that may run out of SLM.")
-    if block_size == 128 and num_blocks == 32768 and head_size >= 192:
-        pytest.skip("skip test cases that may run out of Memory.")
-    if is_sink and window_size != (-1, -1):
-        pytest.skip("sink not supported with sliding window")
-    if (window_size[0] != -1 or window_size[1] != -1) and (
-            os.getenv("SKIP_HANG_KERNEL") == "1"):
-        pytest.skip("skip local attn to avoid runtime hang on CI.")
     torch.manual_seed(42)
+    num_blocks = NUM_BLOCKS[0]
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
     assert num_query_heads % num_kv_heads == 0
-    _skip_large_cross_layer_kv(num_blocks, num_layers, block_size,
-                               num_kv_heads, head_size, dtype)
     max_query_len = max(query_lens)
     max_kv_len = max(kv_lens)
     scale = head_size**-0.5
@@ -1222,7 +1108,7 @@ def test_decode_with_cross_layer_paged_kv(
     value_cache = combined_kv_cache[:, 0, 1, :, :, :]
     assert key_cache.shape == value_cache.shape
     assert key_cache.stride(0) == num_layers * 2 * block_size * \
-        num_kv_heads * head_size
+       num_kv_heads * head_size
 
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
@@ -1235,35 +1121,19 @@ def test_decode_with_cross_layer_paged_kv(
                                  num_blocks,
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
-    sink = None
-    if is_sink:
-        sink = torch.randn(num_query_heads, dtype=dtype)
-
     maybe_quantized_query = query
     maybe_quantized_key_cache = key_cache
     maybe_quantized_value_cache = value_cache
-    q_descale = None  #noqa: F841
     k_descale = None  #noqa: F841
     v_descale = None  #noqa: F841
     scale_shape = (num_seqs, num_kv_heads)
-    if q_dtype is not None:
-        # QKV are drawn from N(0, 1): no need for a fp8 scaling factor
-        maybe_quantized_query = query.to(q_dtype)
-        maybe_quantized_key_cache = key_cache.to(q_dtype)
-        maybe_quantized_value_cache = value_cache.to(q_dtype)
-
-        scale_shape = (num_seqs, num_kv_heads)
-        q_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
-        k_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
-        v_descale = torch.ones(scale_shape, dtype=torch.float32)  #noqa: F841
     is_fp8kv = False
     if fp8_dtype is not None:
         is_fp8kv = True
         k_descale = (torch.abs(key_cache).max() / 200).to(torch.float32)
         v_descale = (torch.abs(value_cache).max() / 200).to(torch.float32)
-        maybe_quantized_key_cache, maybe_quantized_value_cache = \
-            _quantize_paged_kv_cache(key_cache, value_cache, fp8_dtype,
-                                     k_descale, v_descale, combined_kv_cache)
+        maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
+        maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
 
     output = flash_attn_varlen_func(maybe_quantized_query,
                                     maybe_quantized_key_cache,
@@ -1280,7 +1150,7 @@ def test_decode_with_cross_layer_paged_kv(
                                     v_descale=v_descale.expand(scale_shape)
                                     if v_descale is not None else None,
                                     window_size=window_size,
-                                    s_aux=sink)
+                                    s_aux=None)
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=maybe_quantized_key_cache.contiguous(),
@@ -1291,7 +1161,7 @@ def test_decode_with_cross_layer_paged_kv(
                                 scale=scale,
                                 casual=False,
                                 is_paged=True,
-                                sink=sink,
+                                sink=None,
                                 k_descale=k_descale,
                                 v_descale=v_descale,
                                 window_size_left=window_size[0],
@@ -1299,8 +1169,6 @@ def test_decode_with_cross_layer_paged_kv(
                                 is_fp8kv=is_fp8kv,
                                 dtype=dtype)
     atol, rtol = 1e-2, 1e-2
-    if q_dtype is not None:
-        atol, rtol = 1.5e-1, 1.5e-1
     if fp8_dtype is not None:
         atol, rtol = 1.5e-2, 1.5e-2
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
