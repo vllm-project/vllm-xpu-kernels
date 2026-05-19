@@ -140,7 +140,8 @@ def _build_and_run_align(
     ``lora_ids_override``: optional 1-D int tensor of length ``max_loras+1``
     used verbatim. Default mirrors ``prepare_tensors`` (sorted-unique into
     the head, -1 tail).
-    ``disabled_slots``: iterable of slot indices to clear in ``adapter_enabled``.
+    ``disabled_slots``: iterable of slot indices to clear
+    in ``adapter_enabled``.
     """
     random.seed(seed)
     num_tokens = num_lora_tokens + num_base_tokens
@@ -231,7 +232,8 @@ def test_moe_lora_align_block_size_mixed_base_and_lora(max_loras):
 
     # Sanity check on the layout being tested.
     assert out["lora_ids"][0].item() == -1, (
-        "prepare_tensors layout mismatch: -1 expected at position 0 for mixed batch"
+        "prepare_tensors layout mismatch: -1 expected at position 0 "
+        "for mixed batch"
     )
 
     real_slot = 0
@@ -243,7 +245,8 @@ def test_moe_lora_align_block_size_mixed_base_and_lora(max_loras):
     assert (
         0 < post_pad <= out["max_num_tokens_padded"]
         and post_pad % out["block_size"] == 0
-    ), f"num_tokens_post_pad[{real_slot}]={post_pad} is not a valid block-aligned count"
+    ), (f"num_tokens_post_pad[{real_slot}]={post_pad} "
+        f"is not a valid block-aligned count")
 
     expert_row = out["expert_ids"].view(max_loras, -1)[real_slot]
     assert (expert_row != SENTINEL_EXPERT).all(), (
