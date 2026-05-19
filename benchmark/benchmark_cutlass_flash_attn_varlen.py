@@ -16,6 +16,9 @@ bootstrap_benchmark_env(__file__)
 from benchmark.src.flash_attn_interface_ import (
     flash_attn_varlen_func_CalKernelTime)
 from benchmark.src.get_model_config import (
+    gen_cutlass_flash_attn_varlen_correctness_configs as
+    gen_correctness_config)
+from benchmark.src.get_model_config import (
     gen_cutlass_flash_attn_varlen_perf_configs as gen_perf_configs)
 from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
 from tests.utils import parse_args, seed_everything
@@ -597,15 +600,15 @@ if __name__ == "__main__":
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
 
-    # configs = gen_correctness_config()
-    # configs = filter_configs(configs)
+    configs = gen_correctness_config()
+    configs = filter_configs(configs)
 
-    # for config in configs:
-    #     try:
-    #         calculate_diff_varlen_paged_kv(config)
-    #     except Exception as e:
-    #         print("Error in config: ", config, " error: ", e)
-    #     clear_xpu_cache()
+    for config in configs:
+        try:
+            calculate_diff_varlen_paged_kv(config)
+        except Exception as e:
+            print("Error in config: ", config, " error: ", e)
+        clear_xpu_cache()
 
     configs = gen_perf_configs()
     configs = filter_configs(configs)
