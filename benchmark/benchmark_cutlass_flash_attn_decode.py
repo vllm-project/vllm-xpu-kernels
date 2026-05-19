@@ -296,7 +296,6 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
     query_lens = list(map(lambda x: int(x), seq_lens.split(",")[1].split("+")))
     kv_lens = list(map(lambda x: int(x), seq_lens.split(",")[2].split("+")))
     num_query_heads = num_heads[0]
-    num_kv_heads = num_heads[1]
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
 
     print(f"Running config: {seq_lens, num_heads, head_size, \
