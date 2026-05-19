@@ -304,15 +304,18 @@ class XeFMHAFwdKernel {
       // Per-element causal / local / remainder masking inside the mainloop
       // handles the widened range safely for SGs that didn't need it.
       auto wg = sycl::ext::oneapi::this_work_item::get_work_group<3>();
-      const int k_block0 = LocalMask
-          ? sycl::reduce_over_group(wg, sg_k_block0, sycl::minimum<int>{})
-          : 0;
-      const int k_blocks = (CausalMask || LocalMask)
-          ? sycl::reduce_over_group(wg, sg_k_blocks, sycl::maximum<int>{})
-          : sg_k_blocks;
-      const int k_blocks_causal = CausalMask
-          ? sycl::reduce_over_group(wg, sg_k_blocks_causal, sycl::minimum<int>{})
-          : 0;
+      const int k_block0 =
+          LocalMask
+              ? sycl::reduce_over_group(wg, sg_k_block0, sycl::minimum<int>{})
+              : 0;
+      const int k_blocks =
+          (CausalMask || LocalMask)
+              ? sycl::reduce_over_group(wg, sg_k_blocks, sycl::maximum<int>{})
+              : sg_k_blocks;
+      const int k_blocks_causal =
+          CausalMask ? sycl::reduce_over_group(
+                           wg, sg_k_blocks_causal, sycl::minimum<int>{})
+                     : 0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       if constexpr (is_var_len) {
