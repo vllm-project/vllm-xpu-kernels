@@ -158,8 +158,8 @@ def gen_cutlass_flash_attn_varlen_correctness_configs():
 
 def gen_cutlass_flash_attn_varlen_perf_configs():
     num_seqs = [4]
-    query_lens = ["1024,2048,2048"]
-    kv_lens = ["1024,1024,2048"]
+    query_lens = ["1024,2048,2048,8192"]
+    kv_lens = ["1024,1024,2048,8192"]
 
     block_size = [64, 128]
     window_size = [(-1, -1)]
