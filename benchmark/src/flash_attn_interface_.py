@@ -54,6 +54,7 @@ def flash_attn_varlen_func_CalKernelTime(
     fa_version: int = DEFAULT_FA_VERSION,
     s_aux: Optional[torch.Tensor] = None,
     num_splits_kv: Optional[int] = None,
+    is_mix_batch: bool = True,
     start_event: Optional[torch.Event] = None,
     end_event: Optional[torch.Event] = None,
     device: str = "xpu",
@@ -158,6 +159,7 @@ def flash_attn_varlen_func_CalKernelTime(
             return_softmax_lse and dropout_p > 0,
             None,
             num_splits_kv,
+            is_mix_batch,
         )
         if end_event is not None:
             end_event.record()

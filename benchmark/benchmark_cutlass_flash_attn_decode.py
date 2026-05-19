@@ -34,11 +34,19 @@ def clear_xpu_cache():
     gc.collect()
 
 
-def calculate_memory_usage(kv_len_sum, num_kv_heads, head_size, output_dtype):
-    # Memory for key and value caches
+def calculate_memory_usage(q_len_sum, kv_len_sum, num_heads, head_size,
+                           query_dtype, kv_dtype, output_dtype):
+    # Memory for query, key and value caches, and output
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    query_memory = q_len_sum * num_query_heads * head_size * \
+        torch.tensor([], dtype=query_dtype).element_size()
     kv_cache_memory = 2 * kv_len_sum * num_kv_heads * \
-    head_size * torch.tensor([], dtype=output_dtype).element_size()
-    return kv_cache_memory / (1024**3)  # Convert to GB
+        head_size * torch.tensor([], dtype=kv_dtype).element_size()
+    output_memory = q_len_sum * num_query_heads * head_size * \
+        torch.tensor([], dtype=output_dtype).element_size()
+    # Convert to GB
+    return (query_memory + kv_cache_memory + output_memory) / (1000**3)
 
 
 def make_decode_with_paged_kv_input(config):
@@ -253,8 +261,11 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
         )
         ms = total_latency / (iterations - 5)
         if provider == "flash_memBandwidth" or provider == "flash_MBU":
-            memory_load_GB = calculate_memory_usage(seq_k.sum().item(),
-                                                    num_heads[1], head_size,
+            memory_load_GB = calculate_memory_usage(cu_query_lens[-1].item(),
+                                                    seq_k.sum().item(),
+                                                    num_heads, head_size,
+                                                    queries[5].dtype,
+                                                    maybe_quantized_key_cache.dtype,
                                                     output_dtype)
             measured_bw = memory_load_GB / (ms / 1000)
             if provider == "flash_MBU":

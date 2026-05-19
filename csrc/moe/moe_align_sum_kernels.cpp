@@ -746,7 +746,10 @@ class moe_lora_align_block_size_kernel {
     auto group_x = item.get_group(0);
     int lora_idx = group_x / 2;
     int lora_id = lora_ids[lora_idx];
-    if (lora_id == -1 || adapter_enabled[lora_id] == 0) {
+    // Guard against -1 (base-model tokens), out-of-bounds lora_id, and
+    // disabled adapters. Mirrors the fix in vllm-project/vllm#40131.
+    if (lora_id == -1 || lora_id >= max_loras ||
+        adapter_enabled[lora_id] == 0) {
       return;
     }
 
@@ -799,6 +802,8 @@ class lora_count_and_sort_expert_tokens_kernel {
   int32_t max_num_tokens_padded;
   int32_t topk_num;
   int32_t* token_mask;
+  int32_t max_loras;
+  int32_t* adapter_enabled;
   int32_t* lora_ids;
   bool has_expert_map;
 
@@ -813,6 +818,8 @@ class lora_count_and_sort_expert_tokens_kernel {
       int32_t max_num_tokens_padded,
       int32_t topk_num,
       int32_t* token_mask,
+      int32_t max_loras,
+      int32_t* adapter_enabled,
       int32_t* lora_ids,
       bool has_expert_map)
       : topk_ids(topk_ids),
@@ -824,13 +831,20 @@ class lora_count_and_sort_expert_tokens_kernel {
         max_num_tokens_padded(max_num_tokens_padded),
         topk_num(topk_num),
         token_mask(token_mask),
+        max_loras(max_loras),
+        adapter_enabled(adapter_enabled),
         lora_ids(lora_ids),
         has_expert_map(has_expert_map) {}
 
   void operator()(sycl::nd_item<2> item) const {
     int lora_idx = item.get_group(0);
     int lora_id = lora_ids[lora_idx];
-    if (lora_id == -1) {
+    // Guard against -1 (base-model tokens), out-of-bounds lora_id, and
+    // disabled adapters. token_mask is allocated with torch::empty and left
+    // uninitialized for disabled slots; running the sort here would traverse
+    // garbage bits. Mirrors the fix in vllm-project/vllm#40131.
+    if (lora_id == -1 || lora_id >= max_loras ||
+        adapter_enabled[lora_id] == 0) {
       return;
     }
 
@@ -916,7 +930,10 @@ class moe_lora_align_block_size_small_batch_expert_kernel {
   void operator()(sycl::nd_item<1> item) const {
     int lora_idx = item.get_group(0);
     int lora_id = lora_ids[lora_idx];
-    if (lora_id == -1 || adapter_enabled[lora_id] == 0) {
+    // Guard against -1, out-of-bounds lora_id, and disabled adapters.
+    // Mirrors the fix in vllm-project/vllm#40131.
+    if (lora_id == -1 || lora_id >= max_loras ||
+        adapter_enabled[lora_id] == 0) {
       return;
     }
 
@@ -1274,7 +1291,10 @@ void moe_lora_align_block_size(
           // threadIdx.x < fill_threads: filling sorted_token_ids
           constexpr int32_t fill_threads = 256;
           const int32_t total_threads = num_thread + fill_threads;
-          const int32_t global_size = max_loras * total_threads;
+          // Grid size is (max_loras + 1): active_lora_ids has length max_loras
+          // + 1 to accommodate a possible -1 entry in addition to max_loras
+          // real slots. Mirrors the fix in vllm-project/vllm#40131.
+          const int32_t global_size = (max_loras + 1) * total_threads;
 
           queue.submit([&](sycl::handler& h) {
             auto slm = sycl::local_accessor<int32_t, 1>(
@@ -1316,7 +1336,8 @@ void moe_lora_align_block_size(
           torch::Tensor cumsum =
               torch::zeros({max_loras * (num_experts + 1)}, options_int);
           const int work_groups_per_lora = 2;
-          const int total_work_groups = max_loras * work_groups_per_lora;
+          // Grid: (max_loras + 1) * 2 work-groups — same rationale as above.
+          const int total_work_groups = (max_loras + 1) * work_groups_per_lora;
           const int global_size = total_work_groups * num_thread;
           queue.submit([&](sycl::handler& h) {
             auto slm = sycl::local_accessor<int32_t, 1>(
@@ -1355,7 +1376,8 @@ void moe_lora_align_block_size(
           const int max_blocks = 65535;
           const int actual_blocks = std::min(num_blocks, max_blocks);
 
-          const int num_groups_x = max_loras;
+          // Grid x-dim: max_loras + 1 — same rationale as align_kernel above.
+          const int num_groups_x = max_loras + 1;
           const int num_groups_y = actual_blocks;
           const int global_size_x = block_threads * num_groups_x;
           const int global_size_y = num_groups_y;
@@ -1373,6 +1395,8 @@ void moe_lora_align_block_size(
                 max_num_tokens_padded,
                 topk_num,
                 token_mask.data_ptr<int32_t>(),
+                max_loras,
+                adapter_enabled.data_ptr<int32_t>(),
                 lora_ids.data_ptr<int32_t>(),
                 has_expert_map);
             h.parallel_for(sycl::nd_range<2>(global_range, local_range), kfn);
