@@ -482,7 +482,8 @@ struct FMHAFwdMainloop<
       }
 
       /* Apply softmax */
-      auto rescale = softmax(effective_scale, K == blk_k0, tSrS, tA_max, tA_sum);
+      auto rescale =
+          softmax(effective_scale, K == blk_k0, tSrS, tA_max, tA_sum);
       reorder(tSrS, tArP);
 
       /* GEMM 2: A += P * V, split in v dimension */
@@ -541,8 +542,7 @@ struct FMHAFwdMainloop<
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++) {
-      tS(i) = sycl::native::exp2(
-          scale * tS(i) - broadcast<0>(tS_max, tS, i));
+      tS(i) = sycl::native::exp2(scale * tS(i) - broadcast<0>(tS_max, tS, i));
     }
 
     /* Rescale existing S sums */
@@ -1041,8 +1041,7 @@ struct DecodeFwdMainloop<
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++)
-      tS(i) = sycl::native::exp2(
-          scale * tS(i) - broadcast<0>(tS_max, tS, i));
+      tS(i) = sycl::native::exp2(scale * tS(i) - broadcast<0>(tS_max, tS, i));
 
     /* Rescale existing S sums and O accumulator */
     if (!first_block) {
