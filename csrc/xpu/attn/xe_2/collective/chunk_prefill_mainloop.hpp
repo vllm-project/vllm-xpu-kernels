@@ -904,7 +904,7 @@ struct DecodeFwdMainloop<
 
         reorder(tQrQ, tSrQ);
         // reorder() performs the (vectorized) fp8 -> ElementQ cast; the
-        // per-tensor scale_k has been folded into params.scale above.
+        // per-tensor scale_k has been folded into effective_scale above.
         reorder(tKrK, tSrK);
 
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
