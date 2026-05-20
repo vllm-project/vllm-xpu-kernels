@@ -378,11 +378,18 @@ struct FMHAFwdMainloop<
 
     bool check_remainder_k = (seq_len % tile_k != 0);
 
-    // FP8 KV Scale: Currently we only support per-tensor scale for KV
-    float scale_k = 1.f, scale_v = 1.f;
+    // FP8 KV Scale (per-tensor): fold scale_k into the softmax scale and
+    // defer scale_v to a single post-loop output rescale. Mathematically
+    // identical to per-element K/V rescaling (S = Q·K is linear in K and
+    // O = sum P_i·V_i is linear in V), but removes both rescales from the
+    // inner loop. The remaining fp8 -> ElementQ conversion is performed by
+    // reorder() using the subgroup-vectorized cast primitive.
+    ElementS effective_scale = params.scale;
+    float scale_v = 1.f;
     if constexpr (Fp8KV) {
-      scale_k = *static_cast<const float*>(params.scale_k);
+      const float scale_k = *static_cast<const float*>(params.scale_k);
       scale_v = *static_cast<const float*>(params.scale_v);
+      effective_scale = params.scale * ElementS(scale_k);
     }
 
     /* Main loop, blocked in k. */
@@ -416,13 +423,9 @@ struct FMHAFwdMainloop<
         copy(copy_q, tQgQ(_, _, _, D), tQrQ);
         copy(copy_k, tKgK_cache(_, _, _, D), tKrK);
         reorder(tQrQ, tSrQ);
+        // reorder() performs the (vectorized) fp8 -> ElementQ cast; the
+        // per-tensor scale_k has been folded into effective_scale above.
         reorder(tKrK, tSrK);
-        if constexpr (Fp8KV) {
-          for (int i = 0; i < tSrK.size(); ++i) {
-            tSrK(i) =
-                static_cast<ElementQ>(scale_k * static_cast<float>(tSrK(i)));
-          }
-        }
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
       }
 
@@ -479,25 +482,21 @@ struct FMHAFwdMainloop<
       }
 
       /* Apply softmax */
-      auto rescale = softmax(K == blk_k0, tSrS, tA_max, tA_sum);
+      auto rescale =
+          softmax(effective_scale, K == blk_k0, tSrS, tA_max, tA_sum);
       reorder(tSrS, tArP);
 
       /* GEMM 2: A += P * V, split in v dimension */
       CUTLASS_PRAGMA_UNROLL
       for (int VV = 0; VV < VTiles; VV++) {
         copy(copy_v, tVgV_cache(_, _, _, VV), tVrV);
+        // reorder() performs the (vectorized) fp8 -> ElementQ cast; the
+        // per-tensor scale_v is applied once after the K loop below.
         reorder(tVrV, tArV);
         if (K != blk_k0) {
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tArA.size() / VTiles; i++)
             tArA(_, _, _, VV)(i) *= broadcast<0>(rescale, tArA, i);
-        }
-        if constexpr (Fp8KV) {
-          CUTLASS_PRAGMA_UNROLL
-          for (int i = 0; i < tArV.size(); ++i) {
-            tArV(i) =
-                static_cast<ElementQ>(scale_v * static_cast<float>(tArV(i)));
-          }
         }
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
@@ -510,11 +509,20 @@ struct FMHAFwdMainloop<
 
       barrier_wait(ScopeWorkgroup);
     }
+
+    // Apply the per-tensor V scale once after the K loop.
+    if constexpr (Fp8KV) {
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < tArA.size(); ++i) {
+        tArA(i) *= ElementA(scale_v);
+      }
+    }
   }
 
   // Single step of blocked softmax.
   CUTLASS_DEVICE
   FragSRow softmax(
+      ElementS scale,      // Effective softmax scale (fp8 K scale folded in)
       bool first_block,    // First softmax block?
       FragS& tS,           // Softmax src/dst block
       FragSRow& tS_max,    // Softmax row-wise max accumulator
@@ -526,7 +534,7 @@ struct FMHAFwdMainloop<
     FragSRow rescale;
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS_max.size(); i++) {
-      ElementS new_max = sycl::max(tS_max(i), params.scale * tS_bmax(i));
+      ElementS new_max = sycl::max(tS_max(i), scale * tS_bmax(i));
       rescale(i) = sycl::native::exp2(tS_max(i) - new_max);
       tS_max(i) = new_max;
     }
@@ -534,8 +542,7 @@ struct FMHAFwdMainloop<
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++) {
-      tS(i) = sycl::native::exp2(
-          params.scale * tS(i) - broadcast<0>(tS_max, tS, i));
+      tS(i) = sycl::native::exp2(scale * tS(i) - broadcast<0>(tS_max, tS, i));
     }
 
     /* Rescale existing S sums */
@@ -864,11 +871,18 @@ struct DecodeFwdMainloop<
     /* Check if */
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
 
-    // FP8 KV Scale: Currently we only support per-tensor scale for KV
-    float scale_k = 1.f, scale_v = 1.f;
+    // FP8 KV Scale (per-tensor): fold scale_k into the softmax scale and
+    // defer scale_v to a single post-loop output rescale. Mathematically
+    // identical to per-element K/V rescaling (S = Q·K is linear in K and
+    // O = sum P_i·V_i is linear in V), but removes both rescales from the
+    // inner loop. The remaining fp8 -> ElementQ conversion is performed by
+    // reorder() using the subgroup-vectorized cast primitive.
+    ElementS effective_scale = params.scale;
+    float scale_v = 1.f;
     if constexpr (Fp8KV) {
-      scale_k = *static_cast<const float*>(params.scale_k);
+      const float scale_k = *static_cast<const float*>(params.scale_k);
       scale_v = *static_cast<const float*>(params.scale_v);
+      effective_scale = params.scale * ElementS(scale_k);
     }
 
     /* Main loop, blocked in k. */
@@ -889,13 +903,9 @@ struct DecodeFwdMainloop<
         copy(copy_k, tKgK_cache(_, _, _, D), tKrK);
 
         reorder(tQrQ, tSrQ);
+        // reorder() performs the (vectorized) fp8 -> ElementQ cast; the
+        // per-tensor scale_k has been folded into params.scale above.
         reorder(tKrK, tSrK);
-        if constexpr (Fp8KV) {
-          for (int i = 0; i < tSrK.size(); ++i) {
-            tSrK(i) =
-                static_cast<ElementQ>(scale_k * static_cast<float>(tSrK(i)));
-          }
-        }
 
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
       }
@@ -958,21 +968,16 @@ struct DecodeFwdMainloop<
       }
 
       /* Apply softmax and scaling */
-      softmax(K == blk_k0, tSrS, tA_max, tA_sum, tArA);
+      softmax(effective_scale, K == blk_k0, tSrS, tA_max, tA_sum, tArA);
       reorder(tSrS, tArP);
 
       /* GEMM 2: A += P * V, split in v dimension */
       CUTLASS_PRAGMA_UNROLL
       for (int VV = 0; VV < VTiles; VV++) {
         copy(copy_v, tVgV_cache(_, _, _, VV), tVrV);
+        // reorder() performs the (vectorized) fp8 -> ElementQ cast; the
+        // per-tensor scale_v is applied once after the K loop below.
         reorder(tVrV, tArV);
-        if constexpr (Fp8KV) {
-          CUTLASS_PRAGMA_UNROLL
-          for (int i = 0; i < tArV.size(); ++i) {
-            tArV(i) =
-                static_cast<ElementQ>(scale_v * static_cast<float>(tArV(i)));
-          }
-        }
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
 
@@ -1003,11 +1008,20 @@ struct DecodeFwdMainloop<
 
       // barrier_wait(ScopeWorkgroup);
     }
+
+    // Apply the per-tensor V scale once after the K loop.
+    if constexpr (Fp8KV) {
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < tArA.size(); ++i) {
+        tArA(i) *= ElementA(scale_v);
+      }
+    }
   }
 
   // Single step of blocked softmax.
   CUTLASS_DEVICE
   void softmax(
+      ElementS scale,    // Effective softmax scale (fp8 K scale folded in)
       bool first_block,  // First softmax block?
       FragS& tS,         // Softmax src/dst block
       FragSRow& tS_max,  // Softmax row-wise max accumulator
@@ -1021,14 +1035,13 @@ struct DecodeFwdMainloop<
     auto tS_prev_max = tS_max;
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS_max.size(); i++) {
-      tS_max(i) = sycl::max(tS_max(i), params.scale * tS_bmax(i));
+      tS_max(i) = sycl::max(tS_max(i), scale * tS_bmax(i));
     }
 
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++)
-      tS(i) = sycl::native::exp2(
-          params.scale * tS(i) - broadcast<0>(tS_max, tS, i));
+      tS(i) = sycl::native::exp2(scale * tS(i) - broadcast<0>(tS_max, tS, i));
 
     /* Rescale existing S sums and O accumulator */
     if (!first_block) {
