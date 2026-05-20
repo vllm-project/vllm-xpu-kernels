@@ -424,7 +424,7 @@ struct FMHAFwdMainloop<
         copy(copy_k, tKgK_cache(_, _, _, D), tKrK);
         reorder(tQrQ, tSrQ);
         // reorder() performs the (vectorized) fp8 -> ElementQ cast; the
-        // per-tensor scale_k has been folded into params.scale above.
+        // per-tensor scale_k has been folded into effective_scale above.
         reorder(tKrK, tSrK);
         cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
       }
@@ -871,7 +871,6 @@ struct DecodeFwdMainloop<
     /* Check if */
     bool check_remainder_k = (seq_len % get<1>(TileShapeQK{}) != 0);
 
-    // FP8 KV Scale (per-tensor): fold scale_k into the softmax scale and
     // FP8 KV Scale (per-tensor): fold scale_k into the softmax scale and
     // defer scale_v to a single post-loop output rescale. Mathematically
     // identical to per-element K/V rescaling (S = Q·K is linear in K and
