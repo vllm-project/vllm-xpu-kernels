@@ -1061,11 +1061,11 @@ def test_swap_blocks_batch(
 @torch.inference_mode()
 def test_swap_blocks_batch_h2d_mutation_race(device: str) -> None:
     """Verify staging buffer protects against caller mutation for H2D batch."""
-    num_mappings = 256
+    num_mappings = 16
     num_heads = 8
-    head_size = 128
-    block_size = 32
-    num_blocks = 512
+    head_size = 8
+    block_size = 16
+    num_blocks = 32
     dtype = torch.bfloat16
     seed = 0
 

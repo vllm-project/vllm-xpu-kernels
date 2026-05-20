@@ -344,6 +344,7 @@ if(BUILD_SYCL_TLA_KERNELS)
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE_DEFAULT)
   endif()
   if(VLLM_XPU_ENABLE_XE2)
+    include_directories(${CMAKE_SOURCE_DIR}/csrc)
     if(MOE_KERNELS_ENABLED)
       add_subdirectory(csrc/xpu/grouped_gemm/xe_2)
       list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_2")
@@ -536,6 +537,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/lora/lora_expand.cpp"
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
       "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
+      "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/rand/exponential.cpp"
       "csrc/xpu/utils.cpp")
   if(MOE_KERNELS_ENABLED)

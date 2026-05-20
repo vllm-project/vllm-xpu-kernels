@@ -11,6 +11,7 @@ setuptools>=77.0.3,<80.0.0
 wheel
 build
 ninja
+psutil
 
 # torch dependency
 --extra-index-url=https://download.pytorch.org/whl/xpu

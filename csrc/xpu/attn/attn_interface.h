@@ -21,7 +21,8 @@ void cutlass_chunk_prefill_interface(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    std::optional<at::Tensor>& softmax_lse);
+    std::optional<at::Tensor>& softmax_lse,
+    std::optional<const at::Tensor>& is_prefill);
 
 void cutlass_paged_decode_interface(
     sycl::queue& queue,
@@ -49,4 +50,5 @@ void cutlass_paged_decode_interface(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    int num_kv_splits);
+    int num_kv_splits,
+    std::optional<const at::Tensor>& is_prefill);

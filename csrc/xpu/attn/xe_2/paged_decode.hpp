@@ -23,6 +23,8 @@
 
 using namespace cute;
 
+using _576 = cute::Int<576>;
+
 using decode_policy_q8_h64_p64 = decode_policy_qpacked_head<_8, _64, _64>;
 using decode_policy_q8_h96_p64 = decode_policy_qpacked_head<_8, _96, _64>;
 using decode_policy_q8_h128_p64 = decode_policy_qpacked_head<_8, _128, _64>;
@@ -35,6 +37,8 @@ using decode_policy_q16_h128_p64 = decode_policy_qpacked_head<_16, _128, _64>;
 using decode_policy_q16_h192_p64 = decode_policy_qpacked_head<_16, _192, _64>;
 using decode_policy_q16_h256_p64 = decode_policy_qpacked_head<_16, _256, _64>;
 using decode_policy_q16_h512_p64 = decode_policy_qpacked_head<_16, _512, _64>;
+using decode_policy_q8_h576_p64 = decode_policy_qpacked_head<_8, _576, _64>;
+using decode_policy_q16_h576_p64 = decode_policy_qpacked_head<_16, _576, _64>;
 
 using decode_policy_q8_h64_p128 = decode_policy_qpacked_head<_8, _64, _128>;
 using decode_policy_q8_h96_p128 = decode_policy_qpacked_head<_8, _96, _128>;
@@ -48,6 +52,8 @@ using decode_policy_q16_h128_p128 = decode_policy_qpacked_head<_16, _128, _128>;
 using decode_policy_q16_h192_p128 = decode_policy_qpacked_head<_16, _192, _128>;
 using decode_policy_q16_h256_p128 = decode_policy_qpacked_head<_16, _256, _128>;
 using decode_policy_q16_h512_p128 = decode_policy_qpacked_head<_16, _512, _128>;
+using decode_policy_q8_h576_p128 = decode_policy_qpacked_head<_8, _576, _128>;
+using decode_policy_q16_h576_p128 = decode_policy_qpacked_head<_16, _576, _128>;
 
 // page_size = 16
 using decode_policy_q8_h64_p16 = decode_policy_qpacked_head<_8, _64, _16>;
@@ -110,7 +116,6 @@ struct paged_decode_args_t {
   bool is_causal = false;
   bool is_local = false;
   bool is_sink = false;
-  bool is_interleaved_kv_cache = false;
   int num_kv_splits = 1;
   // KV cache strides [num_blocks, block_size, num_heads_kv, head_size]
   int64_t k_stride_page = 0;
@@ -119,6 +124,8 @@ struct paged_decode_args_t {
   int64_t v_stride_page = 0;
   int64_t v_stride_seq = 0;
   int64_t v_stride_heads = 0;
+  // per-batch mask: true = prefill, false = decode; nullptr = process all
+  void* is_prefill = nullptr;
   // Q strides. Varlen Q is [total_seq, num_heads_q, head_size]; non-varlen Q
   // is [batch, num_heads_q, seq, head_size]. The kernel always assumes the
   // head_size dim has stride 1 (checked at the API boundary). The other
@@ -128,6 +135,7 @@ struct paged_decode_args_t {
   int64_t q_stride_seq = 0;
   int64_t q_stride_heads = 0;
   int64_t q_stride_batch = 0;
+  int page_stride_elements = 0;
 };
 
 template <class FMHAKernel, class ReductionSplitKernel, bool isVarLen>
@@ -307,6 +315,7 @@ struct DecodeKernelLauncher {
             reinterpret_cast<ElementLSE*>(args.max_logits),
             stride_max_logits,
             reinterpret_cast<ElementQ*>(args.sm_sink),
+            static_cast<const bool*>(args.is_prefill),
         },
         {args.sm_scale,
          args.k_scale,
@@ -317,7 +326,9 @@ struct DecodeKernelLauncher {
          args.total_seqlen_k,
          args.window_size_left,
          args.window_size_right,
-         args.is_interleaved_kv_cache},
+         // page_stride_elements: physical stride between paged blocks in
+         // seq-position units. It includes interleaved and cross-layer gaps.
+         args.page_stride_elements},
         {},
         hw_info,
         args.num_kv_splits};
@@ -332,7 +343,8 @@ struct DecodeKernelLauncher {
          stride_exp_sums,
          reinterpret_cast<ElementLSE*>(args.max_logits),
          stride_max_logits,
-         args.window_size_left},
+         args.window_size_left,
+         static_cast<const bool*>(args.is_prefill)},
         hw_info,
         args.num_kv_splits};
 

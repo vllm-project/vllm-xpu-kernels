@@ -97,6 +97,8 @@ def fused_moe_activation(act_output, gemm1_output, activation):
         torch.ops._C.silu_and_mul(act_output, gemm1_output)
     elif activation == "gelu":
         torch.ops._C.gelu_and_mul(act_output, gemm1_output)
+    elif activation == "gelu_tanh":
+        torch.ops._C.gelu_tanh_and_mul(act_output, gemm1_output)
     elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
         torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
     elif activation == "relu2_no_mul":
@@ -111,6 +113,8 @@ def _naive_fused_moe_activation(gemm1_output, activation):
         return torch.nn.functional.silu(gemm1_output)
     elif activation == "gelu":
         return torch.nn.functional.gelu(gemm1_output)
+    elif activation == "gelu_tanh":
+        return torch.nn.functional.gelu(gemm1_output, approximate="tanh")
     elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
         gate, up = gemm1_output.chunk(2, dim=-1)
         return torch.nn.functional.silu(gate) * up * 1.702 * 7.0
@@ -182,8 +186,11 @@ def ref_fused_moe(recipe,
     token_idxs = idxs // num_per_tok
 
     if recipe == "fp8block":
-        _q, _scale = quant_fp8_act(x)
+        x_f = x.to(torch.float32)
+        _q, _scale = quant_fp8_act(x_f)
         x = hp_from_1x128(_q, _scale)
+        w13 = w13.transpose(1, 2).contiguous()
+        w2 = w2.transpose(1, 2).contiguous()
     elif recipe == "mxfp8":
         w13 = w13.transpose(1, 2).contiguous()
         w2 = w2.transpose(1, 2).contiguous()
@@ -252,8 +259,9 @@ def ref_fused_moe(recipe,
         if recipe == "fp8block":
             expert_w2 = hp_from_128x128(w2[expert_id, :, :],
                                         w2_scales[expert_id, :, :])
-            _q, _scale = quant_fp8_act(gemm2_input)
-            gemm2_input = hp_from_1x128(_q, _scale)
+            gemm2_input_f = gemm2_input.to(torch.float32)
+            _q, _scale = quant_fp8_act(gemm2_input_f)
+            gemm2_input = hp_from_1x128(_q, _scale).to(activation_dtype)
         elif recipe == "mxfp8":
             _q, _scale = quant_mxfp_act(gemm2_input, "mxfp8")
             gemm2_input = (
@@ -268,7 +276,7 @@ def ref_fused_moe(recipe,
                                               (_q.shape[-1] * 2, ))
         ###
 
-        expert_out = ((gemm2_input) @ expert_w2.T.to(activation_dtype))
+        expert_out = (gemm2_input) @ expert_w2.T.to(activation_dtype)
 
         if w2_bias is not None:
             expert_out += w2_bias[expert_id, :].to(activation_dtype)
@@ -358,6 +366,8 @@ class XpuFusedMoe:
             self.act_func = torch.ops._C.silu_and_mul
         elif self.activation == "gelu":
             self.act_func = torch.ops._C.gelu_and_mul
+        elif self.activation == "gelu_tanh":
+            self.act_func = torch.ops._C.gelu_tanh_and_mul
         elif self.activation == "swigluoai" \
             or ("SWIGLUOAI" in str(self.activation)):
             self.act_func = torch.ops._C.swigluoai_and_mul
