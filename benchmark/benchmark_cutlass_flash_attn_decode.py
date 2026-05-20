@@ -4,6 +4,7 @@
 
 # isort: off
 import gc
+from pathlib import Path
 
 import torch
 import triton
@@ -26,6 +27,9 @@ from benchmark.presets import get_hardware_preset
 # isort: on
 
 DEVICE = "xpu"
+DEFAULT_PEAK_FP8_TFLOPS = 197.0
+DEFAULT_PEAK_BF16_TFLOPS = 98.5
+DEFAULT_PEAK_BW_GBS = 456.0
 
 
 def clear_xpu_cache():
@@ -47,6 +51,127 @@ def calculate_memory_usage(q_len_sum, kv_len_sum, num_heads, head_size,
         torch.tensor([], dtype=output_dtype).element_size()
     # Convert to GB
     return (query_memory + kv_cache_memory + output_memory) / (1000**3)
+
+
+def calculate_flops(num_query_heads, query_lens, kv_lens, head_size):
+    total = 0
+    for sq, sk in zip(query_lens, kv_lens):
+        total += 4 * num_query_heads * sq * sk * head_size
+    return total
+
+
+def calculate_memory_bytes(query_lens, kv_lens, num_query_heads, num_kv_heads,
+                           head_size, output_dtype, q_dtype):
+    q_tensor_dtype = output_dtype if q_dtype is None else q_dtype
+    q_elem = torch.tensor([], dtype=q_tensor_dtype).element_size()
+    kv_elem = q_elem
+    out_elem = torch.tensor([], dtype=output_dtype).element_size()
+
+    q_tokens = sum(query_lens)
+    kv_tokens = sum(kv_lens)
+    q_bytes = q_tokens * num_query_heads * head_size * q_elem
+    kv_bytes = 2 * kv_tokens * num_kv_heads * head_size * kv_elem
+    out_bytes = q_tokens * num_query_heads * head_size * out_elem
+    return q_bytes + kv_bytes + out_bytes
+
+
+def _row_peak_tflops(row):
+    has_fp8 = row.get("q_dtype") is not None
+    return DEFAULT_PEAK_FP8_TFLOPS if has_fp8 else DEFAULT_PEAK_BF16_TFLOPS
+
+
+def _resolve_metric_col(df, preferred, fallback_prefix):
+    if preferred in df.columns:
+        return preferred
+    if fallback_prefix in df.columns:
+        return fallback_prefix
+    matches = [
+        col for col in df.columns
+        if str(col).startswith(fallback_prefix)
+    ]
+    return matches[0] if matches else None
+
+
+def print_roofline_analysis(df):
+    analysis_df = df.copy()
+    for col in ["head_size", "block_size", "num_blocks"]:
+        if col in analysis_df.columns:
+            analysis_df[col] = analysis_df[col].astype(int)
+
+    tflops_col = _resolve_metric_col(
+        analysis_df,
+        "FlashAttention_TFLOPS (value)",
+        "FlashAttention_TFLOPS",
+    )
+    bw_col = _resolve_metric_col(
+        analysis_df,
+        "FlashAttention_memBandwidth(GB/s) (value)",
+        "FlashAttention_memBandwidth(GB/s)",
+    )
+    latency_col = _resolve_metric_col(
+        analysis_df,
+        "FlashAttention_kernelTime(us) (value)",
+        "FlashAttention_kernelTime(us)",
+    )
+
+    required_cols = [tflops_col, bw_col]
+    if any(col is None for col in required_cols):
+        print(
+            "Warning: skip roofline metrics because required columns are "
+            f"missing. columns={list(analysis_df.columns)}"
+        )
+        return analysis_df
+
+    analysis_df["peak_tflops"] = analysis_df.apply(_row_peak_tflops, axis=1)
+    analysis_df["%peak_tflops"] = (
+        analysis_df[tflops_col] / analysis_df["peak_tflops"] * 100.0
+    )
+    analysis_df["%peak_bw"] = (
+        analysis_df[bw_col] / DEFAULT_PEAK_BW_GBS * 100.0
+    )
+    analysis_df["AI(F/B)"] = (
+        analysis_df[tflops_col] * 1000.0 / analysis_df[bw_col]
+    )
+    analysis_df["roofline_tflops"] = (
+        analysis_df["AI(F/B)"] * DEFAULT_PEAK_BW_GBS / 1000.0
+    ).clip(upper=analysis_df["peak_tflops"])
+    analysis_df["eff_vs_roofline(%)"] = (
+        analysis_df[tflops_col] / analysis_df["roofline_tflops"] * 100.0
+    )
+
+    norm_ratio = (
+        analysis_df["%peak_tflops"]
+        / analysis_df["%peak_bw"].clip(lower=1e-6)
+    )
+    analysis_df["bound_hint"] = "mixed"
+    analysis_df.loc[norm_ratio > 1.25, "bound_hint"] = "compute-leaning"
+    analysis_df.loc[norm_ratio < 0.75, "bound_hint"] = "memory-leaning"
+
+    show_cols = [
+        "seq_lens",
+        "num_heads",
+        "head_size",
+        "q_dtype",
+        latency_col,
+        tflops_col,
+        bw_col,
+        "%peak_tflops",
+        "%peak_bw",
+        "AI(F/B)",
+        "roofline_tflops",
+        "eff_vs_roofline(%)",
+        "bound_hint",
+    ]
+    show_cols = [c for c in show_cols if c in analysis_df.columns]
+
+    print("flash_attn_decode_roofline_analysis:")
+    print(
+        analysis_df[show_cols].to_string(
+            index=False,
+            float_format=lambda x: f"{x:.4f}",
+        )
+    )
+    return analysis_df
 
 
 def make_decode_with_paged_kv_input(config):
@@ -168,6 +293,9 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
                     num_blocks, fa_versions, q_dtype, is_sink))
 
     num_seqs = int(seq_lens.split(",")[0])
+    query_lens = list(map(lambda x: int(x), seq_lens.split(",")[1].split("+")))
+    kv_lens = list(map(lambda x: int(x), seq_lens.split(",")[2].split("+")))
+    num_query_heads = num_heads[0]
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
 
     print(f"Running config: {seq_lens, num_heads, head_size, \
@@ -260,7 +388,12 @@ def benchmark_decode_with_paged_kv(seq_lens, num_heads, head_size, block_size,
             for i in range(iterations - 5)
         )
         ms = total_latency / (iterations - 5)
-        if provider == "flash_memBandwidth" or provider == "flash_MBU":
+        if provider in ("flash_memBandwidth", "flash_MBU", "flash_TFLOPS"):
+            if provider == "flash_TFLOPS":
+                flops = calculate_flops(num_query_heads, query_lens, kv_lens,
+                                        head_size)
+                clear_xpu_cache()
+                return flops / (ms / 1000) / 1e12
             memory_load_GB = calculate_memory_usage(cu_query_lens[-1].item(),
                                                     seq_k.sum().item(),
                                                     num_heads, head_size,
@@ -295,13 +428,14 @@ def get_benchmark_decode_with_paged_kv(iterations=20):
             x_vals=[tuple(c) for c in configs],
             line_arg="provider",
             line_vals=["flash", "flash_kernelTime", "flash_memBandwidth",
-                       "flash_MBU"],
+                       "flash_MBU", "flash_TFLOPS"],
             line_names=[
                 "FlashAttention(us)", "FlashAttention_kernelTime(us)",
-                "FlashAttention_memBandwidth(GB/s)", "FlashAttention_MBU (%)"
+                "FlashAttention_memBandwidth(GB/s)", "FlashAttention_MBU (%)",
+                "FlashAttention_TFLOPS"
             ],
             styles=[("blue", "-"), ("green", "-"), ("purple", "-"),
-                    ("red", "-")],
+                    ("red", "-"), ("orange", "-")],
             ylabel="Latency (us)",
             plot_name="flash-attn-decode",
             args={},
@@ -359,4 +493,14 @@ if __name__ == "__main__":
     benchmark = get_benchmark_decode_with_paged_kv(iterations=iterations)
     save_path = ensure_save_path_exists(args.save_path)
     # Run performance benchmark
-    benchmark.run(print_data=True, save_path=save_path)
+    perf_df = benchmark.run(
+        print_data=False,
+        save_path=save_path,
+        return_df=True,
+    )
+    analysis_df = print_roofline_analysis(perf_df)
+    bench_cfg = getattr(benchmark, "benchmarks", None)
+    bench_plot_name = getattr(bench_cfg, "plot_name", None)
+    if bench_plot_name is not None:
+        csv_path = Path(save_path) / f"{bench_plot_name}.csv"
+        analysis_df.to_csv(csv_path, index=False, float_format="%.6f")

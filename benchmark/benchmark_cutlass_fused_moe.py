@@ -4,6 +4,7 @@
 
 # isort: off
 import gc
+from pathlib import Path
 
 import torch
 import triton
@@ -24,6 +25,9 @@ from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 # isort: on
 
 DEVICE = "xpu"
+DEFAULT_PEAK_FP8_TFLOPS = 197.0
+DEFAULT_PEAK_BF16_TFLOPS = 98.5
+DEFAULT_PEAK_BW_GBS = 456.0
 
 def clear_xpu_cache():
     torch.xpu.empty_cache()
@@ -42,6 +46,129 @@ def calculate_memory_usage(m, n, k, num_experts, x_dtype, w_dtype=None):
         [], dtype=x_dtype if w_dtype is None else w_dtype).element_size() / (
             1000**3)  # in GB
     return io_memory + weight_memory
+
+
+def _row_peak_tflops(row):
+    return (
+        DEFAULT_PEAK_FP8_TFLOPS
+        if row.get("w_dtype") is not None
+        else DEFAULT_PEAK_BF16_TFLOPS
+    )
+
+
+def _resolve_metric_col(df, preferred, fallback_prefix):
+    if preferred in df.columns:
+        return preferred
+    if fallback_prefix in df.columns:
+        return fallback_prefix
+    matches = [
+        col for col in df.columns
+        if str(col).startswith(fallback_prefix)
+    ]
+    return matches[0] if matches else None
+
+
+def _append_roofline_metrics(df, tflops_col, bw_col, suffix):
+    peak_tflops_col = f"peak_tflops_{suffix}"
+    df[peak_tflops_col] = df.apply(_row_peak_tflops, axis=1)
+    df[f"%peak_tflops_{suffix}"] = df[tflops_col] / df[peak_tflops_col] * 100.0
+    df[f"%peak_bw_{suffix}"] = df[bw_col] / DEFAULT_PEAK_BW_GBS * 100.0
+    df[f"AI(F/B)_{suffix}"] = df[tflops_col] * 1000.0 / df[bw_col]
+    df[f"roofline_tflops_{suffix}"] = (
+        df[f"AI(F/B)_{suffix}"] * DEFAULT_PEAK_BW_GBS / 1000.0
+    ).clip(upper=df[peak_tflops_col])
+    df[f"eff_vs_roofline(%)_{suffix}"] = (
+        df[tflops_col] / df[f"roofline_tflops_{suffix}"] * 100.0
+    )
+
+    norm_ratio = (
+        df[f"%peak_tflops_{suffix}"]
+        / df[f"%peak_bw_{suffix}"].clip(lower=1e-6)
+    )
+    df[f"bound_hint_{suffix}"] = "mixed"
+    df.loc[norm_ratio > 1.25, f"bound_hint_{suffix}"] = "compute-leaning"
+    df.loc[norm_ratio < 0.75, f"bound_hint_{suffix}"] = "memory-leaning"
+
+
+def print_roofline_analysis(df):
+    analysis_df = df.copy()
+    for col in ["m", "n", "k", "num_experts", "topk"]:
+        if col in analysis_df.columns:
+            analysis_df[col] = analysis_df[col].astype(int)
+
+    gemm1_tflops_col = _resolve_metric_col(
+        analysis_df,
+        "vllm_kernel_gemm1_tflops (value)",
+        "vllm_kernel_gemm1_tflops",
+    )
+    gemm2_tflops_col = _resolve_metric_col(
+        analysis_df,
+        "vllm_kernel_gemm2_tflops (value)",
+        "vllm_kernel_gemm2_tflops",
+    )
+    gemm1_bw_col = _resolve_metric_col(
+        analysis_df,
+        "vllm_kernel_gemm1_memory(GB/s) (value)",
+        "vllm_kernel_gemm1_memory(GB/s)",
+    )
+    gemm2_bw_col = _resolve_metric_col(
+        analysis_df,
+        "vllm_kernel_gemm2_memory(GB/s) (value)",
+        "vllm_kernel_gemm2_memory(GB/s)",
+    )
+
+    required_cols = [
+        gemm1_tflops_col,
+        gemm2_tflops_col,
+        gemm1_bw_col,
+        gemm2_bw_col,
+    ]
+    if any(col is None for col in required_cols):
+        print(
+            "Warning: skip roofline metrics because required columns are "
+            f"missing. columns={list(analysis_df.columns)}"
+        )
+        return analysis_df
+
+    _append_roofline_metrics(analysis_df, gemm1_tflops_col, gemm1_bw_col,
+                             "gemm1")
+    _append_roofline_metrics(analysis_df, gemm2_tflops_col, gemm2_bw_col,
+                             "gemm2")
+
+    show_cols = [
+        "m",
+        "n",
+        "k",
+        "num_experts",
+        "topk",
+        "x_dtype",
+        "w_dtype",
+        gemm1_tflops_col,
+        gemm1_bw_col,
+        "%peak_tflops_gemm1",
+        "%peak_bw_gemm1",
+        "AI(F/B)_gemm1",
+        "roofline_tflops_gemm1",
+        "eff_vs_roofline(%)_gemm1",
+        "bound_hint_gemm1",
+        gemm2_tflops_col,
+        gemm2_bw_col,
+        "%peak_tflops_gemm2",
+        "%peak_bw_gemm2",
+        "AI(F/B)_gemm2",
+        "roofline_tflops_gemm2",
+        "eff_vs_roofline(%)_gemm2",
+        "bound_hint_gemm2",
+    ]
+    show_cols = [c for c in show_cols if c in analysis_df.columns]
+    print("fused_moe_roofline_analysis:")
+    print(
+        analysis_df[show_cols].to_string(
+            index=False,
+            float_format=lambda x: f"{x:.4f}",
+        )
+    )
+    return analysis_df
 
 
 def make_fused_moe_input(config):
@@ -385,4 +512,14 @@ if __name__ == "__main__":
     benchmark = get_benchmark(iterations=iterations)
     save_path = ensure_save_path_exists(args.save_path)
     # Run performance benchmark
-    benchmark.run(print_data=True, save_path=save_path)
+    perf_df = benchmark.run(
+        print_data=False,
+        save_path=save_path,
+        return_df=True,
+    )
+    analysis_df = print_roofline_analysis(perf_df)
+    bench_cfg = getattr(benchmark, "benchmarks", None)
+    bench_plot_name = getattr(bench_cfg, "plot_name", None)
+    if bench_plot_name is not None:
+        csv_path = Path(save_path) / f"{bench_plot_name}.csv"
+        analysis_df.to_csv(csv_path, index=False, float_format="%.6f")
