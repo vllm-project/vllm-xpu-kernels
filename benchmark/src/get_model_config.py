@@ -185,12 +185,17 @@ def gen_cutlass_flash_attn_varlen_perf_configs():
                                   is_paged, kv_dtype))
 
         # Add hardcoded attention shapes (diffusion models, etc.)
+        # Use reduced params for B60 (~20G memory):
+        #   smaller seq lens and num_blocks to control memory usage.
+        b60_query_lens = ["256,512,512,2048"]
+        b60_kv_lens = ["256,256,512,2048"]
+        b60_num_blocks = [2048]
         for n_heads, n_kv_heads, h_dim in hardcoded_attn_shapes:
             configs += list(
-                itertools.product(num_seqs, query_lens, kv_lens,
+                itertools.product(num_seqs, b60_query_lens, b60_kv_lens,
                                   [(n_heads, n_kv_heads)], [h_dim],
                                   block_size, window_size, output_dtype,
-                                  soft_cap, num_blocks, fa_versions,
+                                  soft_cap, b60_num_blocks, fa_versions,
                                   q_dtype, is_sink, is_causal, is_paged,
                                   kv_dtype))
 
@@ -264,14 +269,6 @@ def gen_cutlass_flash_attn_decode_perf_configs():
     q_dtype = [None]
     is_sink = [False, True]
 
-    # Hardcoded attention shapes for models that cannot be loaded via
-    # AutoConfig (e.g. diffusion models without a standard model_type).
-    # Format: (num_attention_heads, num_key_value_heads, head_dim)
-    hardcoded_attn_shapes = [
-        # Wan-AI/Wan2.2-I2V-A14B-Diffusers (DiT video diffusion)
-        (40, 40, 128),
-    ]
-
     configs = []
     for model in model_lists:
         model_config = get_model_config(model, tp_size=1)
@@ -283,13 +280,6 @@ def gen_cutlass_flash_attn_decode_perf_configs():
             itertools.product(seq_lens, num_heads, head_size, block_size,
                               output_dtype, soft_cap, num_blocks, fa_versions,
                               q_dtype, is_sink))
-
-    # Add hardcoded attention shapes (diffusion models, etc.)
-    for n_heads, n_kv_heads, h_dim in hardcoded_attn_shapes:
-        configs += list(
-            itertools.product(seq_lens, [(n_heads, n_kv_heads)], [h_dim],
-                              block_size, output_dtype, soft_cap, num_blocks,
-                              fa_versions, q_dtype, is_sink))
 
     configs = set(configs)  # remove duplicates
 
