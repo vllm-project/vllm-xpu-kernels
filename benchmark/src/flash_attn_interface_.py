@@ -248,7 +248,7 @@ def flash_attn_varlen_func_CalKernelTime(
             raise NotImplementedError(
                 "FA2 only supports both KV cache descaled")
 
-                # Compute per-seq splits and work_list on host, upload to device.
+        # Compute per-seq splits and work_list on host, upload to device.
         # Only enable for decode (max_seqlen_q == 1) with paged KV cache,
         # multi-seq batches, and global num_splits_kv > 1.
         splits_per_seq_dev = None
