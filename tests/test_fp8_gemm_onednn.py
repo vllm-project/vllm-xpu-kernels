@@ -273,8 +273,8 @@ def _convert_to_mxfp8_with_hp_ref(t):
 @pytest.mark.parametrize("out_dtype", OUT_DTYPES)
 def test_mxfp8_gemm(mnk_factors, out_dtype):
     m, n, k = mnk_factors
-    inputs = torch.randn((m, k), dtype=out_dtype).xpu() * 0.01
-    weights = torch.randn((n, k), dtype=out_dtype).xpu() * 0.01
+    inputs = torch.randn((m, k), dtype=out_dtype).xpu() / 10.0
+    weights = torch.randn((n, k), dtype=out_dtype).xpu() / 10.0
 
     # Reference: to_mxfp operates on float32 or bfloat16.
     if out_dtype == torch.half:
@@ -290,7 +290,7 @@ def test_mxfp8_gemm(mnk_factors, out_dtype):
         weights_lp.transpose(0, 1),
         out_dtype,
         inputs_scale,
-        weights_scale,
+        weights_scale.t().contiguous(),
         torch.Tensor(),
     )
 
@@ -339,7 +339,7 @@ def test_fp8_gemm_per_block(fp8_dtype, dtype, is_nt, batch, group_size,
         weight_fp8,
         dtype,
         scale_src_fp8,
-        scale_wei_fp8,
+        scale_wei_fp8.t().contiguous(),
         torch.Tensor(),
     )
 
@@ -356,7 +356,7 @@ def test_fp8_gemm_w8a16_block(fp8_dtype, dtype, is_nt, batch, group_size,
                               mnk_factors):
     """Test fp8 w8a16 block quantization GEMM.
 
-    The weight is fp8 with per-block scale of shape [n/gs, k/gs].
+    The weight is fp8 with per-block scale of shape [k/gs, n/gs].
     The activation is fp16/bf16 (not quantized).
     """
     seed = 1234
@@ -389,7 +389,7 @@ def test_fp8_gemm_w8a16_block(fp8_dtype, dtype, is_nt, batch, group_size,
     output_fp8 = fp8_gemm_w8a16(
         input,
         weight_fp8,
-        scale_wei_fp8,
+        scale_wei_fp8.t().contiguous(),
         torch.Tensor(),
     )
 

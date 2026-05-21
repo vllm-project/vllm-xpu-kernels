@@ -27,11 +27,11 @@ static inline void dnnl_matmul_w8a16_fp8(
   const int k = *(src_sz.end() - 1);
 
   // block quant param: m2_sc is 2D with more than 1 element for block quant
+  // Weight scale layout: [k/group_size, n/group_size]
   bool is_block_quant = (m2_sc.dim() == 2) && (m2_sc.numel() > 1);
   int64_t blk_group_size = -1;
   if (is_block_quant) {
-    // Scale layout: [k/gs, n/gs] for NN format, [n/gs, k/gs] for NT format
-    blk_group_size = k / (is_nt ? m2_sc.size(1) : m2_sc.size(0));
+    blk_group_size = k / m2_sc.size(0);
   }
 
   // get joint dtypes

@@ -52,6 +52,7 @@ function(paged_decode_configure FILENAME_SUFFIX)
   set(policy_8_192_64 "decode_policy_q8_h192_p64")
   set(policy_8_256_64 "decode_policy_q8_h256_p64")
   set(policy_8_512_64 "decode_policy_q8_h512_p64")
+  set(policy_8_576_64 "decode_policy_q8_h576_p64")
 
   set(policy_8_64_128 "decode_policy_q8_h64_p128")
   set(policy_8_96_128 "decode_policy_q8_h96_p128")
@@ -59,6 +60,7 @@ function(paged_decode_configure FILENAME_SUFFIX)
   set(policy_8_192_128 "decode_policy_q8_h192_p128")
   set(policy_8_256_128 "decode_policy_q8_h256_p128")
   set(policy_8_512_128 "decode_policy_q8_h512_p128")
+  set(policy_8_576_128 "decode_policy_q8_h576_p128")
 
   # Q-group size 16 policies
   set(policy_16_64_16 "decode_policy_q16_h64_p16")
@@ -81,6 +83,7 @@ function(paged_decode_configure FILENAME_SUFFIX)
   set(policy_16_192_64 "decode_policy_q16_h192_p64")
   set(policy_16_256_64 "decode_policy_q16_h256_p64")
   set(policy_16_512_64 "decode_policy_q16_h512_p64")
+  set(policy_16_576_64 "decode_policy_q16_h576_p64")
 
   set(policy_16_64_128 "decode_policy_q16_h64_p128")
   set(policy_16_96_128 "decode_policy_q16_h96_p128")
@@ -88,10 +91,18 @@ function(paged_decode_configure FILENAME_SUFFIX)
   set(policy_16_192_128 "decode_policy_q16_h192_p128")
   set(policy_16_256_128 "decode_policy_q16_h256_p128")
   set(policy_16_512_128 "decode_policy_q16_h512_p128")
+  set(policy_16_576_128 "decode_policy_q16_h576_p128")
 
   # Configuration space dimensions
   set(qgroup_list "8" "16")
-  set(headsize_list "64" "96" "128" "192" "256" "512")
+  set(headsize_list
+      "64"
+      "96"
+      "128"
+      "192"
+      "256"
+      "512"
+      "576")
   set(pagesize_list "16" "32" "64" "128")
 
   # =============================================================================
@@ -105,6 +116,11 @@ function(paged_decode_configure FILENAME_SUFFIX)
         # Lookup policy name from mapping
         set(IMPL_POLICY
             ${policy_${IMPL_QGROUP}_${IMPL_HEADSIZE}_${IMPL_PAGESIZE}})
+
+        # Skip combinations that have no corresponding policy defined
+        if(NOT IMPL_POLICY)
+          continue()
+        endif()
 
         foreach(IMPL_KISCAUSAL ${L_BOOLS})
           foreach(IMPL_KISLOCAL ${L_BOOLS})

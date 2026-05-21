@@ -150,6 +150,9 @@ class XeFMHAFwdKernel {
     // softmax_lse output [total_seqlen_q, num_heads_q] (nullptr if disabled)
     float* softmax_lse;
     int lse_stride;  // = num_heads_q
+
+    // per-batch mask: true = prefill, false = decode; nullptr = process all
+    const bool* is_prefill;
   };
   using KernelParams = KernelArguments;
 
@@ -253,6 +256,10 @@ class XeFMHAFwdKernel {
     for (; tile_scheduler.is_valid(); ++tile_scheduler) {
       auto [blk_q, blk_v, head_q, idx_b] =
           tile_scheduler.get_block_coord();  // (Q,V,h,b)
+
+      // Skip decode batches when is_prefill mask is provided
+      if (p.is_prefill != nullptr && !p.is_prefill[idx_b]) continue;
+
       auto blk_qv = make_coord(blk_q, blk_v);
       int head = head_q / head_group_q;
 
@@ -275,16 +282,39 @@ class XeFMHAFwdKernel {
                     : cute::min(
                           seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
               : seq_len_kv;
-      const int k_block0 =
+      const int sg_k_block0 =
           LocalMask
               ? cute::max(
                     seq_coord + full_tile_offset - params.mainloop.local_left,
                     0) /
                     get<1>(TileShapeQK{})
               : 0;
-      const int k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
-      const int k_blocks_causal =
+      const int sg_k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
+      const int sg_k_blocks_causal =
           CausalMask ? (seq_coord + full_tile_offset) / get<1>(TileShapeQK{})
+                     : 0;
+
+      // The mainloop wraps each K iteration in a workgroup-scoped barrier
+      // pair, so every subgroup in the workgroup must execute the same
+      // K-loop trip count. Reduce the per-SG bounds across the WG:
+      //   k_block0        = min across WG (start no later than any SG)
+      //   k_blocks        = max across WG (end no earlier than any SG)
+      //   k_blocks_causal = min across WG (turn on causal masking no later
+      //                                    than any SG needs it)
+      // Per-element causal / local / remainder masking inside the mainloop
+      // handles the widened range safely for SGs that didn't need it.
+      auto wg = sycl::ext::oneapi::this_work_item::get_work_group<3>();
+      const int k_block0 =
+          LocalMask
+              ? sycl::reduce_over_group(wg, sg_k_block0, sycl::minimum<int>{})
+              : 0;
+      const int k_blocks =
+          (CausalMask || LocalMask)
+              ? sycl::reduce_over_group(wg, sg_k_blocks, sycl::maximum<int>{})
+              : sg_k_blocks;
+      const int k_blocks_causal =
+          CausalMask ? sycl::reduce_over_group(
+                           wg, sg_k_blocks_causal, sycl::minimum<int>{})
                      : 0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;

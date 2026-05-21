@@ -92,7 +92,8 @@ void fused_qk_norm_rope(
     torch::Tensor& k_weight,
     torch::Tensor& cos_sin_cache,
     bool is_neox,
-    torch::Tensor& position_ids);
+    torch::Tensor& position_ids,
+    int64_t forced_token_heads_per_warp);
 
 void reshape_and_cache(
     torch::Tensor& key,

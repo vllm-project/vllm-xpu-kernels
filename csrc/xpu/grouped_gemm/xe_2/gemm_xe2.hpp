@@ -125,6 +125,7 @@ CUTE_DEVICE void xe_gemm(
   auto thr_mma = mma.get_slice(local_id);
   auto thr_copy_a = copy_a.get_slice(local_id);
   auto thr_copy_b = copy_b.get_slice(local_id);
+  auto thr_copy_c = copy_c.get_slice(local_id);
 
   auto tCrA = thr_mma.partition_sg_fragment_A(gA(_, _, 0));
   auto tCrB = thr_mma.partition_sg_fragment_B(gB(_, _, 0));
@@ -136,15 +137,9 @@ CUTE_DEVICE void xe_gemm(
   Tensor tBgB = thr_copy_b.partition_S(gB);
 
   /* Partition C */
-  Tensor tCgC = thr_mma.partition_C(gC);
-  SubgroupTensor tCrC = thr_mma.partition_sg_fragment_C(gC);
-
-  using TD = typename DTensor::element_type;
-  TD tCrC_final_frag[tCrC.size()];
-  Tensor tCrC_final_tensor =
-      make_tensor(make_rmem_ptr(tCrC_final_frag), tCrC.layout());
-  SubgroupTensor tCrC_final_sg_tensor =
-      make_subgroup_tensor(tCrC_final_tensor, tCrC.tv_layout());
+  auto tCrC = thr_mma.partition_sg_fragment_C(gC);
+  auto tCrC_out = thr_copy_c.partition_sg_fragment_S(gC);
+  auto tCgC = thr_copy_c.partition_D(gC);
 
   auto prefetch_a = make_block_2d_prefetch(copy_a);
   auto prefetch_b = make_block_2d_prefetch(copy_b);
@@ -234,8 +229,8 @@ CUTE_DEVICE void xe_gemm(
     }
   }
 
-  reorder(tCrC, tCrC_final_sg_tensor);
-  copy(copy_c, tCrC_final_sg_tensor, tCgC);
+  reorder(tCrC, tCrC_out);
+  copy(copy_c, tCrC_out, tCgC);
 }
 
 template <
@@ -287,6 +282,7 @@ CUTE_DEVICE void xe_gemm_4bits(
   auto thr_mma = mma.get_slice(local_id);
   auto thr_copy_a = copy_a.get_slice(local_id);
   auto thr_copy_b = copy_b.get_slice(local_id);
+  auto thr_copy_c = copy_c.get_slice(local_id);
 
   auto tCrA = thr_mma.partition_sg_fragment_A(gA(_, _, 0));
   auto tCrB = thr_mma.partition_sg_fragment_B(gB(_, _, 0));
@@ -298,15 +294,9 @@ CUTE_DEVICE void xe_gemm_4bits(
   Tensor tBgB = thr_copy_b.partition_S(gB);
 
   /* Partition C */
-  Tensor tCgC = thr_mma.partition_C(gC);
-  SubgroupTensor tCrC = thr_mma.partition_sg_fragment_C(gC);
-
-  using TD = typename DTensor::element_type;
-  TD tCrC_final_frag[tCrC.size()];
-  Tensor tCrC_final_tensor =
-      make_tensor(make_rmem_ptr(tCrC_final_frag), tCrC.layout());
-  SubgroupTensor tCrC_final_sg_tensor =
-      make_subgroup_tensor(tCrC_final_tensor, tCrC.tv_layout());
+  auto tCrC = thr_mma.partition_sg_fragment_C(gC);
+  auto tCrC_out = thr_copy_c.partition_sg_fragment_S(gC);
+  auto tCgC = thr_copy_c.partition_D(gC);
 
   auto prefetch_a = make_block_2d_prefetch(copy_a);
   auto prefetch_b = make_block_2d_prefetch(copy_b);
@@ -475,8 +465,8 @@ CUTE_DEVICE void xe_gemm_4bits(
     }
   }
 
-  reorder(tCrC, tCrC_final_sg_tensor);
-  copy(copy_c, tCrC_final_sg_tensor, tCgC);
+  reorder(tCrC, tCrC_out);
+  copy(copy_c, tCrC_out, tCgC);
 }
 
 }  // namespace MoE

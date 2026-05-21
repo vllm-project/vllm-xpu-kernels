@@ -26,7 +26,8 @@ void cutlass_chunk_prefill_xe2(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    std::optional<at::Tensor>& softmax_lse) {
+    std::optional<at::Tensor>& softmax_lse,
+    std::optional<const at::Tensor>& is_prefill) {
   cutlass_chunk_prefill_impl(
       queue,
       query,
@@ -49,7 +50,8 @@ void cutlass_chunk_prefill_xe2(
       is_causal,
       is_local,
       is_sink,
-      softmax_lse);
+      softmax_lse,
+      is_prefill);
 }
 
 void cutlass_chunk_prefill_impl(
@@ -74,7 +76,8 @@ void cutlass_chunk_prefill_impl(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    std::optional<at::Tensor>& softmax_lse) {
+    std::optional<at::Tensor>& softmax_lse,
+    std::optional<const at::Tensor>& is_prefill) {
   // general params
   int batch_size, num_heads_q, num_heads_kv, head_size;
   // additional params
@@ -98,16 +101,12 @@ void cutlass_chunk_prefill_impl(
     max_seqlen_k = is_paged ? max_seqlen_q : key_cache.size(2);
   }
 
-  bool is_interleaved_kv = false;
-
   if (is_paged) {
     num_blocks = key_cache.size(0);
     block_size = key_cache.size(1);
     num_heads_kv = key_cache.size(2);
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
-
-    is_interleaved_kv = is_interleaved_kv_cache(key_cache, value_cache);
   }
 
   if (is_local) {
@@ -135,7 +134,7 @@ void cutlass_chunk_prefill_impl(
       max_seqlen_q,
       max_seqlen_k,
       total_seqlen_q,
-      is_interleaved_kv ? total_seqlen_k * 2 : total_seqlen_k,
+      total_seqlen_k,
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
@@ -152,14 +151,16 @@ void cutlass_chunk_prefill_impl(
       is_paged,   // paged
       is_causal,
       is_local,
-      is_sink,
-      is_interleaved_kv};
+      is_sink};
 
   // Populate softmax_lse output pointer if requested
   if (softmax_lse.has_value()) {
     args.softmax_lse = softmax_lse.value().data_ptr<float>();
     args.lse_stride = num_heads_q;
   }
+  // Per-batch prefill/decode mask (nullptr -> process all batches)
+  args.is_prefill =
+      is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr;
   // Extract Q, K, V, O strides from tensors
   if (is_varlen) {
     // Q/O: [total_seq, num_heads, head_size]
@@ -210,6 +211,20 @@ void cutlass_chunk_prefill_impl(
       args.v_stride_seq = value_cache.stride(2);
       args.v_stride_heads = value_cache.stride(1);
       args.v_stride_batch = value_cache.stride(0);
+    }
+  }
+
+  // For non-contiguous paged KV (e.g., cross-layer KV cache), enlarge
+  // total_seqlen_k to cover the full physical extent for the 2D block
+  // load surface descriptor. Without this, block loads for blocks at
+  // higher physical addresses would return zeros.
+  if (is_paged) {
+    args.page_stride_elements =
+        static_cast<int>(get_paged_kv_cache_page_stride_elements(key_cache));
+    int64_t effective_total =
+        get_paged_kv_cache_effective_total_seqlen(key_cache);
+    if (effective_total > args.total_seqlen_k) {
+      args.total_seqlen_k = static_cast<int>(effective_total);
     }
   }
 

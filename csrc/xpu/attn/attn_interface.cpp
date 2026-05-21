@@ -28,7 +28,8 @@ void cutlass_chunk_prefill_interface(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    std::optional<at::Tensor>& softmax_lse) {
+    std::optional<at::Tensor>& softmax_lse,
+    std::optional<const at::Tensor>& is_prefill) {
   if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel (also used as WA for XE3/XE3P)
@@ -54,7 +55,8 @@ void cutlass_chunk_prefill_interface(
         is_causal,
         is_local,
         is_sink,
-        softmax_lse);
+        softmax_lse,
+        is_prefill);
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif
@@ -89,7 +91,10 @@ void cutlass_paged_decode_interface(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    int num_kv_splits) {
+    int num_kv_splits,
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<at::Tensor>& splits_per_seq,
+    std::optional<at::Tensor>& work_list) {
   if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel (also used as WA for XE3/XE3P)
@@ -118,7 +123,10 @@ void cutlass_paged_decode_interface(
         is_causal,
         is_local,
         is_sink,
-        num_kv_splits);
+        num_kv_splits,
+        is_prefill,
+        splits_per_seq,
+        work_list);
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif

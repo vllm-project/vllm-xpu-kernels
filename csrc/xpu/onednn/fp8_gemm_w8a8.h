@@ -25,17 +25,19 @@ static inline void dnnl_matmul_w8a8_fp8(
   const int n = o_sz.back();  // presume channel last format
   const int k = *(src_sz.end() - 1);
 
-  // block quant param
-  bool is_block_quant = (m1_sc.dim() == 2) && (m2_sc.dim() == 2) &&
-                        (m1_sc.size(1) != 1) && (m2_sc.size(1) != 1);
+  bool is_block_quant =
+      (m1_sc.scalar_type() != at::ScalarType::Float8_e8m0fnu) &&
+      (m2_sc.scalar_type() != at::ScalarType::Float8_e8m0fnu) &&
+      (m1_sc.dim() == 2) && (m2_sc.dim() == 2) && (m1_sc.size(1) != 1) &&
+      (m2_sc.size(0) != 1);
   int64_t group_size = -1;
   if (is_block_quant) {
     TORCH_CHECK(
-        m1_sc.size(1) == m2_sc.size(1),
+        m1_sc.size(1) == m2_sc.size(0),
         "Mismatch group size in input and weight.",
         m1_sc.size(1),
         " vs ",
-        m2_sc.size(1));
+        m2_sc.size(0));
     group_size = k / m1_sc.size(1);
   }
 
