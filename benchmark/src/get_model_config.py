@@ -235,6 +235,33 @@ def gen_cutlass_flash_attn_varlen_perf_configs():
                 configs.append((1, "1025", "1025", (8, 8), 64, 64, (-1, -1),
                                 out_dtype, None, 2048, 2, None, False, causal,
                                 False, None))
+
+        # MQA(q=2, kv=1) prefill shapes covering chunked-prefill (new tokens +
+        # cached KV) and long-context scenarios. Used to validate the
+        # XeFHMAIndividualReverseOrderTileScheduler variant selected by the
+        # auto-heuristic / VLLM_XPU_FA_REVERSE_ODD_HEADS=on env override.
+        # head_dim=128, fp16, causal. Each tuple is
+        # (bs, q_heads, kv_heads, qlen, cached_kv_len).
+        mqa_prefill_shapes = [
+            (1, 2, 1, 10240, 0),
+            (1, 2, 1, 32768, 0),
+            (1, 2, 1, 8192, 57344),
+            (1, 2, 1, 65536, 65536),
+            (1, 2, 1, 131072, 131072),
+            (2, 2, 1, 10240, 0),
+            (6, 2, 1, 10240, 0),
+            (2, 2, 1, 8192, 57344),
+        ]
+        # num_blocks=16384 fits the largest shape (kvlen=262144 -> 4096 blocks).
+        for bs, qh, kvh, qlen, cached in mqa_prefill_shapes:
+            kvlen = qlen + cached
+            qlens_str = ",".join([str(qlen)] * bs)
+            kvlens_str = ",".join([str(kvlen)] * bs)
+            for paged in [False, True]:
+                configs.append(
+                    (bs, qlens_str, kvlens_str, (qh, kvh), 128, 64, (-1, -1),
+                     torch.float16, None, 16384, 2, None, False, True, paged,
+                     None))
         return configs
 
     configs = get_configs_from_models()

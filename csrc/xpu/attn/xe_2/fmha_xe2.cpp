@@ -7,6 +7,10 @@
   #include "chunk_prefill_extern.hpp"
 #endif
 
+#include <cctype>
+#include <cstdlib>
+#include <string>
+
 using namespace cute;
 
 void cutlass_chunk_prefill_xe2(
@@ -166,6 +170,43 @@ void cutlass_chunk_prefill_impl(
   // Per-batch prefill/decode mask (nullptr -> process all batches)
   args.is_prefill =
       is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr;
+
+  // Optional alternating reverse Q-tile order for odd heads. Selects the
+  // XeFHMAIndividualReverseOrderTileScheduler variant which mitigates the
+  // causal-prefill load imbalance between head 0 and head 1+ by flipping
+  // the Q-tile dispatch order for odd-indexed heads.
+  //
+  // VLLM_XPU_FA_REVERSE_ODD_HEADS values:
+  //   "0" / "off" / "false"   -> force disabled
+  //   "1" / "on"  / "true"    -> force enabled (debug / perf study)
+  //   unset / "auto"          -> shape-based heuristic (default)
+  //
+  // Heuristic: enable whenever the kernel is doing a causal prefill with
+  // num_heads_q >= 2 and no local/sink masking. An FA2 varlen MQA sweep
+  // on Arc B580 across batch in {1,2,4} and per-seq qlen in
+  // [2048, 131072] showed only a single near-noise (-0.7%) result and
+  // speedups up to +50% kernel time, so a workload-size guard is not
+  // necessary.
+  {
+    static const char* env = std::getenv("VLLM_XPU_FA_REVERSE_ODD_HEADS");
+    std::string mode = "auto";
+    if (env != nullptr) {
+      mode.assign(env);
+      for (auto& c : mode) c = static_cast<char>(std::tolower(c));
+    }
+
+    bool reverse;
+    if (mode == "1" || mode == "on" || mode == "true" || mode == "yes") {
+      reverse = true;
+    } else if (
+        mode == "0" || mode == "off" || mode == "false" || mode == "no") {
+      reverse = false;
+    } else {  // "auto" or anything unrecognized
+      reverse = is_causal && !is_local && !is_sink && num_heads_q >= 2;
+    }
+    args.reverse_q_order = reverse;
+  }
+
   // Extract Q, K, V, O strides from tensors
   if (is_varlen) {
     // Q/O: [total_seq, num_heads, head_size]
