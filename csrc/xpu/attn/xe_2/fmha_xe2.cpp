@@ -188,11 +188,13 @@ void cutlass_chunk_prefill_impl(
   // speedups up to +50% kernel time, so a workload-size guard is not
   // necessary.
   {
-    static const char* env = std::getenv("VLLM_XPU_FA_REVERSE_ODD_HEADS");
     std::string mode = "auto";
+    const char* env = std::getenv("VLLM_XPU_FA_REVERSE_ODD_HEADS");
     if (env != nullptr) {
       mode.assign(env);
-      for (auto& c : mode) c = static_cast<char>(std::tolower(c));
+      for (auto& c : mode) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
     }
 
     bool reverse;
