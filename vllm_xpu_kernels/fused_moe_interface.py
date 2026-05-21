@@ -186,11 +186,8 @@ def ref_fused_moe(recipe,
     token_idxs = idxs // num_per_tok
 
     if recipe == "fp8block":
-        x_f = x.to(torch.float32)
-        _q, _scale = quant_fp8_act(x_f)
+        _q, _scale = quant_fp8_act(x)
         x = hp_from_1x128(_q, _scale)
-        w13 = w13.transpose(1, 2).contiguous()
-        w2 = w2.transpose(1, 2).contiguous()
     elif recipe == "mxfp8":
         w13 = w13.transpose(1, 2).contiguous()
         w2 = w2.transpose(1, 2).contiguous()
@@ -259,9 +256,8 @@ def ref_fused_moe(recipe,
         if recipe == "fp8block":
             expert_w2 = hp_from_128x128(w2[expert_id, :, :],
                                         w2_scales[expert_id, :, :])
-            gemm2_input_f = gemm2_input.to(torch.float32)
-            _q, _scale = quant_fp8_act(gemm2_input_f)
-            gemm2_input = hp_from_1x128(_q, _scale).to(activation_dtype)
+            _q, _scale = quant_fp8_act(gemm2_input)
+            gemm2_input = hp_from_1x128(_q, _scale)
         elif recipe == "mxfp8":
             _q, _scale = quant_mxfp_act(gemm2_input, "mxfp8")
             gemm2_input = (
@@ -276,7 +272,7 @@ def ref_fused_moe(recipe,
                                               (_q.shape[-1] * 2, ))
         ###
 
-        expert_out = (gemm2_input) @ expert_w2.T.to(activation_dtype)
+        expert_out = ((gemm2_input) @ expert_w2.T.to(activation_dtype))
 
         if w2_bias is not None:
             expert_out += w2_bias[expert_id, :].to(activation_dtype)
