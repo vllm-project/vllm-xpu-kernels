@@ -33,7 +33,7 @@ template <
     typename IdxT,
     ScoringFunc SF,
     int MaxNumExperts,
-    bool UseGroups,
+    bool MultiGroups,
     int MaxNumTopExperts = DefaultMaxNumTopExperts>
 class VllmGroupedTopKFusedSmallExpertCountKernel;
 
@@ -87,7 +87,7 @@ inline void reduceTopK(
     T min_val,
     int topk) {
   constexpr IdxT invalid_idx = std::numeric_limits<IdxT>::max();
-  bool selected[N_IN] = {false};
+  bool selected[N_IN];
 
   for (int k = 0; k < topk; ++k) {
     T local_best_val = min_val;
@@ -175,7 +175,7 @@ template <
     typename IdxT,
     ScoringFunc SF,
     int MaxNumExperts,
-    bool UseGroups,
+    bool MultiGroups,
     int MaxNumTopExperts = DefaultMaxNumTopExperts>
 SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
     T* scores,
@@ -191,12 +191,11 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
     bool const renormalize,
     double const routedScalingFactor,
     sycl::nd_item<1> item) {
-  constexpr int NumWarps = MaxNumExperts / WARP_SIZE;
   constexpr float invalidScoreFloat = -std::numeric_limits<float>::infinity();
 
   int threadIdx = item.get_local_id(0);
   int blockIdx = item.get_group(0);
-  if constexpr (UseGroups) {
+  if constexpr (MultiGroups) {
     if (blockIdx >= numTokens) return;
   }
   int localSize = item.get_local_range(0);
@@ -208,7 +207,7 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
   topkValues += blockIdx * topk;
   topkIndices += blockIdx * topk;
 
-  if constexpr (UseGroups) {
+  if constexpr (MultiGroups) {
     auto subgroup = item.get_sub_group();
     T* scoresToken = scores + static_cast<int64_t>(blockIdx) * numExperts;
     T selectedGroupScores[WARP_SIZE];
@@ -345,144 +344,184 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
     }
     return;
   } else {
-    T* smemScoreSigmoid =
-        *sycl::ext::oneapi::group_local_memory_for_overwrite<T[MaxNumExperts]>(
-            item.get_group());
-    T* smemScoreBias =
-        *sycl::ext::oneapi::group_local_memory_for_overwrite<T[MaxNumExperts]>(
-            item.get_group());
-    T invalidScoreT = neg_inf<T>();
-    T topScores[MaxNumTopExperts] = {neg_inf<T>()};
-    int32_t topExperts[MaxNumTopExperts] = {0};
-    T expertScoreGroup[MaxNumTopGroups] = {neg_inf<T>()};
-    int32_t expertIdxGroup[MaxNumTopGroups] = {0};
-    auto group = item.get_sub_group();
+    // Single-group path: select top-k from all experts using single warp.
+    constexpr int ExpertsPerLane = MaxNumExperts / WARP_SIZE;
+    auto subgroup = item.get_sub_group();
+    T* scoresToken = scores + static_cast<int64_t>(blockIdx) * numExperts;
 
-    for (int expert = threadIdx; expert < numExperts; expert += localSize) {
-      int64_t scoreIdx = int64_t{blockIdx} * int64_t{numExperts} + expert;
-      T score = scores[scoreIdx];
-      T scoreSigmoid = apply_scoring<SF>(score);
-      smemScoreSigmoid[expert] = scoreSigmoid;
-      smemScoreBias[expert] =
-          has_bias ? (scoreSigmoid + sycl_cast<T, BiasT>(routingBias[expert]))
-                   : scoreSigmoid;
-    }
+    if constexpr (MaxNumExperts <= NumKimiK2Experts) {
+      // Direct path: <=384 experts, fits in registers
+      T localBiasedScores[ExpertsPerLane];
+      IdxT localIdx[ExpertsPerLane];
 
-    item.barrier(sycl::access::fence_space::local_space);
-
-    if constexpr (MaxNumExperts > MaxNumExpertsUnit) {
-      constexpr int NumExpertWarps =
-          (MaxNumExperts - 1) / MaxNumExpertsUnit + 1;
-      constexpr int NumInterTopK = NumExpertWarps * MaxNumTopExperts;
-      T* smemInterTopScores =
-          *sycl::ext::oneapi::group_local_memory_for_overwrite<T[NumInterTopK]>(
-              item.get_group());
-      IdxT* smemInterTopExperts =
-          *sycl::ext::oneapi::group_local_memory_for_overwrite<
-              int32_t[NumInterTopK]>(item.get_group());
-
-      if (warpIdx < NumExpertWarps) {
-        int32_t offset = warpIdx * WARP_SIZE * MaxNumTopGroups;
-
-        for (int ii = 0; ii < MaxNumTopGroups; ++ii) {
-          int expertIdx = ii * WARP_SIZE + laneIdx;
-          expertIdxGroup[ii] = offset + expertIdx;
-          expertScoreGroup[ii] = (offset + expertIdx < numExperts)
-                                     ? smemScoreBias[offset + expertIdx]
-                                     : invalidScoreT;
+      for (int i = 0; i < ExpertsPerLane; ++i) {
+        int expertId = i * WARP_SIZE + laneIdx;
+        if (expertId < numExperts) {
+          T raw = scoresToken[expertId];
+          T scored = apply_scoring<SF>(raw);
+          localBiasedScores[i] =
+              has_bias ? (scored + sycl_cast<T, BiasT>(routingBias[expertId]))
+                       : scored;
+        } else {
+          localBiasedScores[i] = neg_inf<T>();
         }
-        reduce_topk::reduceTopK<MaxNumTopGroups>(
-            group,
-            topScores,
-            topExperts,
-            expertScoreGroup,
-            expertIdxGroup,
-            invalidScoreT,
-            static_cast<int>(topk));
+        localIdx[i] = static_cast<IdxT>(expertId);
+      }
 
-        if (laneIdx < MaxNumTopExperts) {
-          if (laneIdx < topk) {
-            smemInterTopScores[warpIdx * MaxNumTopExperts + laneIdx] =
-                topScores[laneIdx];
-            smemInterTopExperts[warpIdx * MaxNumTopExperts + laneIdx] =
-                topExperts[laneIdx];
-          } else {
-            smemInterTopScores[warpIdx * MaxNumTopExperts + laneIdx] =
-                invalidScoreT;
-            smemInterTopExperts[warpIdx * MaxNumTopExperts + laneIdx] =
-                MaxNumExperts - 1;
-          }
+      T selectedScores[MaxNumTopExperts];
+      IdxT selectedIdx[MaxNumTopExperts];
+      reduce_topk::reduceTopK<ExpertsPerLane>(
+          subgroup,
+          selectedScores,
+          selectedIdx,
+          localBiasedScores,
+          localIdx,
+          neg_inf<T>(),
+          static_cast<int>(topk));
+
+      float unbiasedArr[DefaultMaxNumTopExperts];
+      for (int i = 0; i < static_cast<int>(topk); ++i) {
+        IdxT idx_i = selectedIdx[i];
+        T raw = scoresToken[static_cast<int32_t>(idx_i)];
+        T scored = apply_scoring<SF>(raw);
+        unbiasedArr[i] = xpu::to_float(scored);
+      }
+
+      float laneUnbiased = 0.0f;
+      IdxT laneIdxOut = 0;
+      if (laneIdx < topk) {
+        laneIdxOut = selectedIdx[laneIdx];
+        laneUnbiased = unbiasedArr[laneIdx];
+      }
+
+      float scale = static_cast<float>(routedScalingFactor);
+      if (renormalize) {
+        float topk_sum = 0.0f;
+        for (int i = 0; i < static_cast<int>(topk); ++i) {
+          topk_sum += unbiasedArr[i];
+        }
+        if (laneIdx < topk) {
+          laneUnbiased /= topk_sum;
         }
       }
-      item.barrier(sycl::access::fence_space::local_space);
-      if (warpIdx == 0) {
-        constexpr int NumInterTopKPerThread =
-            (NumInterTopK - 1) / WARP_SIZE + 1;
-        T intermediateScore[NumInterTopKPerThread];
-        int32_t intermediateExpert[NumInterTopKPerThread];
-        T invalidScoreT = neg_inf<T>();
 
-        for (int i = laneIdx; i < NumInterTopKPerThread * WARP_SIZE;
-             i += WARP_SIZE) {
-          int ii = i / WARP_SIZE;
-          if (i < NumInterTopK) {
-            intermediateScore[ii] = smemInterTopScores[i];
-            intermediateExpert[ii] = smemInterTopExperts[i];
-          } else {
-            intermediateScore[ii] = invalidScoreT;
-            intermediateExpert[ii] = MaxNumExperts - 1;
-          }
-        }
-
-        reduce_topk::reduceTopK<NumInterTopKPerThread>(
-            group,
-            topScores,
-            topExperts,
-            intermediateScore,
-            intermediateExpert,
-            invalidScoreT,
-            static_cast<int>(topk));
+      if (laneIdx < topk) {
+        topkValues[laneIdx] = laneUnbiased * scale;
+        topkIndices[laneIdx] = laneIdxOut;
       }
     } else {
-      if (warpIdx == 0) {
-        for (int ii = 0; ii < MaxNumTopGroups; ++ii) {
-          int32_t expertIdx = ii * WARP_SIZE + laneIdx;
-          expertIdxGroup[ii] = expertIdx;
-          expertScoreGroup[ii] = (expertIdx < numExperts)
-                                     ? smemScoreBias[expertIdx]
-                                     : invalidScoreT;
-        }
-        reduce_topk::reduceTopK<MaxNumTopGroups>(
-            group,
-            topScores,
-            topExperts,
-            expertScoreGroup,
-            expertIdxGroup,
-            invalidScoreT,
-            static_cast<int>(topk));
-      }
-    }
+      // Large expert path (>256): Each lane streams through its experts,
+      // maintaining a local top-k via insertion sort, then iteratively
+      // selects global top-k across the warp. Minimal register pressure.
+      constexpr int LocalTopK = DefaultMaxNumTopExperts;  // 8
+      auto subgroup = item.get_sub_group();
+      T* scoresToken2 = scores + static_cast<int64_t>(blockIdx) * numExperts;
 
-    if (warpIdx == 0) {
-      int32_t expertIdx =
-          laneIdx < topk ? topExperts[laneIdx] : MaxNumExperts - 1;
-      T temp;
-      xpu::from_float(temp, 0.F);
-      T scoreNormT = laneIdx < topk ? smemScoreSigmoid[expertIdx] : temp;
-      float scoreNorm = xpu::to_float(scoreNormT);
-      float finalScore = static_cast<float>(scoreNorm * routedScalingFactor);
-      float topk_sum = 1e-20f;
-      if (renormalize) {
-        topk_sum +=
-            sycl::reduce_over_group(group, scoreNorm, sycl::plus<float>());
-        finalScore /= topk_sum;
+      // Each lane maintains its local top-k sorted descending
+      float laneTopVal[LocalTopK];
+      IdxT laneTopIdx[LocalTopK];
+      for (int k = 0; k < LocalTopK; ++k) {
+        laneTopVal[k] = -std::numeric_limits<float>::infinity();
+        laneTopIdx[k] = std::numeric_limits<IdxT>::max();
       }
+
+      // Stream through all experts assigned to this lane
+      for (int i = 0; i < ExpertsPerLane; ++i) {
+        int expertId = i * WARP_SIZE + laneIdx;
+        if (expertId >= numExperts) break;
+
+        T raw = scoresToken2[expertId];
+        T scored = apply_scoring<SF>(raw);
+        float val =
+            has_bias ? xpu::to_float(
+                           scored + sycl_cast<T, BiasT>(routingBias[expertId]))
+                     : xpu::to_float(scored);
+        IdxT idx = static_cast<IdxT>(expertId);
+
+        // Check if this beats the worst in our local top-k
+        if (val > laneTopVal[LocalTopK - 1] ||
+            (val == laneTopVal[LocalTopK - 1] &&
+             idx < laneTopIdx[LocalTopK - 1])) {
+          // Insert into sorted position
+          int pos = LocalTopK - 1;
+          for (int j = LocalTopK - 2; j >= 0; --j) {
+            if (val > laneTopVal[j] ||
+                (val == laneTopVal[j] && idx < laneTopIdx[j])) {
+              laneTopVal[j + 1] = laneTopVal[j];
+              laneTopIdx[j + 1] = laneTopIdx[j];
+              pos = j;
+            } else {
+              break;
+            }
+          }
+          laneTopVal[pos] = val;
+          laneTopIdx[pos] = idx;
+        }
+      }
+
+      // Now iteratively select global top-k from the warp.
+      // Each lane offers its current best (top of local sorted list).
+      // The warp finds the global max, the winning lane pops it.
+      IdxT globalTopIdx[DefaultMaxNumTopExperts];
+      int lanePtr = 0;  // points to next candidate in laneTopVal
+
+      for (int k = 0; k < static_cast<int>(topk); ++k) {
+        float myVal = (lanePtr < LocalTopK)
+                          ? laneTopVal[lanePtr]
+                          : -std::numeric_limits<float>::infinity();
+        IdxT myIdx = (lanePtr < LocalTopK) ? laneTopIdx[lanePtr]
+                                           : std::numeric_limits<IdxT>::max();
+
+        // Find the best value across all lanes
+        float bestVal =
+            sycl::reduce_over_group(subgroup, myVal, sycl::maximum<float>());
+
+        // Among lanes that have bestVal, pick smallest idx
+        IdxT candidateIdx =
+            (myVal == bestVal) ? myIdx : std::numeric_limits<IdxT>::max();
+        IdxT bestIdx = sycl::reduce_over_group(
+            subgroup, candidateIdx, sycl::minimum<IdxT>());
+
+        globalTopIdx[k] = bestIdx;
+
+        // The winning lane advances its pointer
+        if (myIdx == bestIdx && myVal == bestVal) {
+          lanePtr++;
+        }
+      }
+
+      // Re-read unbiased scores for winners
+      float unbiasedArr[DefaultMaxNumTopExperts];
+      for (int i = 0; i < static_cast<int>(topk); ++i) {
+        T raw = scoresToken2[static_cast<int32_t>(globalTopIdx[i])];
+        T scored = apply_scoring<SF>(raw);
+        unbiasedArr[i] = xpu::to_float(scored);
+      }
+
+      float laneUnbiased = 0.0f;
+      IdxT laneIdxOut = 0;
       if (laneIdx < topk) {
-        topkValues[laneIdx] = finalScore;
-        topkIndices[laneIdx] = expertIdx;
+        laneIdxOut = globalTopIdx[laneIdx];
+        laneUnbiased = unbiasedArr[laneIdx];
+      }
+
+      float scale = static_cast<float>(routedScalingFactor);
+      if (renormalize) {
+        float topk_sum = 0.0f;
+        for (int i = 0; i < static_cast<int>(topk); ++i) {
+          topk_sum += unbiasedArr[i];
+        }
+        if (laneIdx < topk) {
+          laneUnbiased /= topk_sum;
+        }
+      }
+
+      if (laneIdx < topk) {
+        topkValues[laneIdx] = laneUnbiased * scale;
+        topkIndices[laneIdx] = laneIdxOut;
       }
     }
-  }  // end if constexpr (!UseGroups)
+  }  // end if constexpr (!MultiGroups)
 }
 
 template <typename T, typename BiasT, typename IdxT, ScoringFunc SF>
@@ -553,29 +592,16 @@ void invokeNoAuxTc(
     if (num_experts == NumNemotronExperts && n_group == 1 &&
         topk == MaxSupportedTopExperts) {
       LAUNCH_SMALL_KERNEL(
-          NumNemotronExperts,
-          false,
-          MaxSupportedTopExperts,
-          ((NumNemotronExperts + MaxNumExpertsUnit - 1) / MaxNumExpertsUnit) *
-              WARP_SIZE);
+          NumNemotronExperts, false, MaxSupportedTopExperts, WARP_SIZE);
     } else if (
         num_experts > NumKimiK2Experts &&
         num_experts <= MaxSupportedExpertCount) {
       LAUNCH_SMALL_KERNEL(
-          MaxSupportedExpertCount,
-          false,
-          DefaultMaxNumTopExperts,
-          ((MaxSupportedExpertCount + MaxNumExpertsUnit - 1) /
-           MaxNumExpertsUnit) *
-              WARP_SIZE);
+          MaxSupportedExpertCount, false, DefaultMaxNumTopExperts, WARP_SIZE);
     } else if (
         num_experts > MaxNumExpertsUnit && num_experts <= NumKimiK2Experts) {
       LAUNCH_SMALL_KERNEL(
-          NumKimiK2Experts,
-          false,
-          DefaultMaxNumTopExperts,
-          ((NumKimiK2Experts + MaxNumExpertsUnit - 1) / MaxNumExpertsUnit) *
-              WARP_SIZE);
+          NumKimiK2Experts, false, DefaultMaxNumTopExperts, WARP_SIZE);
     } else {
       LAUNCH_SMALL_KERNEL(
           MaxNumExpertsUnit, false, DefaultMaxNumTopExperts, WARP_SIZE);
