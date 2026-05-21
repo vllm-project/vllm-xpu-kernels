@@ -236,31 +236,35 @@ def gen_cutlass_flash_attn_varlen_perf_configs():
                                 out_dtype, None, 2048, 2, None, False, causal,
                                 False, None))
 
-        # MQA(q=2, kv=1) prefill shapes covering chunked-prefill (new tokens +
-        # cached KV) and long-context scenarios. Used to validate the
-        # XeFHMAIndividualReverseOrderTileScheduler variant selected by the
-        # auto-heuristic / VLLM_XPU_FA_REVERSE_ODD_HEADS=on env override.
-        # head_dim=128, fp16, causal. Each tuple is
+        # Causal-prefill shapes across common GQA ratios (MHA, GQA-4:1, GQA-8:1)
+        # used to validate the XeFHMAIndividualReverseOrderTileScheduler variant
+        # selected by the auto-heuristic / VLLM_XPU_FA_REVERSE_ODD_HEADS=on env
+        # override. head_dim=128, fp16, causal. Each tuple is
         # (bs, q_heads, kv_heads, qlen, cached_kv_len).
-        mqa_prefill_shapes = [
-            (1, 2, 1, 10240, 0),
-            (1, 2, 1, 32768, 0),
-            (1, 2, 1, 8192, 57344),
-            (1, 2, 1, 65536, 65536),
-            (1, 2, 1, 131072, 131072),
-            (2, 2, 1, 10240, 0),
-            (6, 2, 1, 10240, 0),
-            (2, 2, 1, 8192, 57344),
+        causal_prefill_shapes = [
+            # MHA (32x32 heads), single-batch prefill
+            (1, 32, 32,  4096,     0),
+            (1, 32, 32, 16384,     0),
+            # GQA 4:1 (32x8 heads), single-batch + chunked-prefill
+            (1, 32,  8,  8192,     0),
+            (2, 32,  8,  4096,     0),
+            (1, 32,  8,  4096, 12288),
+            # GQA 8:1 (64x8 heads), long-ish single-batch + chunked-prefill
+            (1, 64,  8,  8192,     0),
+            (1, 64,  8,  2048, 14336),
+            # batched short prefill (decode-adjacent regime)
+            (4, 32,  8,  2048,     0),
+            (8, 16,  4,  1024,     0),
         ]
-        # num_blocks=16384 fits the largest shape (kvlen=262144 -> 4096 blocks).
-        for bs, qh, kvh, qlen, cached in mqa_prefill_shapes:
+        # num_blocks=2048 fits the largest kvlen=16384 (256 blocks at bs=1).
+        for bs, qh, kvh, qlen, cached in causal_prefill_shapes:
             kvlen = qlen + cached
             qlens_str = ",".join([str(qlen)] * bs)
             kvlens_str = ",".join([str(kvlen)] * bs)
             for paged in [False, True]:
                 configs.append(
                     (bs, qlens_str, kvlens_str, (qh, kvh), 128, 64, (-1, -1),
-                     torch.float16, None, 16384, 2, None, False, True, paged,
+                     torch.float16, None, 2048, 2, None, False, True, paged,
                      None))
         return configs
 
