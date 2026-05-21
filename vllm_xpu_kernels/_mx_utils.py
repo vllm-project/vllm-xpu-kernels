@@ -407,7 +407,6 @@ def quant_fp8_act(x: torch.Tensor):
     """
     block_size = 128
     fp8_dtype = torch.float8_e4m3fn
-    # print("x.dtype", x.dtype, flush=True)
     assert x.dtype == torch.float32 or x.dtype == torch.bfloat16 \
         or x.dtype == torch.float16
     x = x.to(torch.float32)
