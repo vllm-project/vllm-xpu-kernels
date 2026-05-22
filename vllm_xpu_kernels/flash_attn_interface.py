@@ -154,6 +154,113 @@ def compute_splits_per_seq(
     return splits
 
 
+def ref_paged_attn(query: torch.Tensor,
+                   key_cache: torch.Tensor,
+                   value_cache: torch.Tensor,
+                   query_lens: list[int],
+                   kv_lens: list[int],
+                   block_tables: torch.Tensor,
+                   scale: float,
+                   window_size_left: Optional[int] = None,
+                   window_size_right: Optional[int] = None,
+                   soft_cap: Optional[float] = None,
+                   is_paged: Optional[bool] = True,
+                   casual: Optional[bool] = False,
+                   sink: Optional[torch.Tensor] = None,
+                   q_descale: Optional[torch.Tensor] = None,
+                   k_descale: Optional[torch.Tensor] = None,
+                   v_descale: Optional[torch.Tensor] = None,
+                   is_fp8kv: bool = False,
+                   is_fp8_query: bool = False,
+                   dtype: torch.dtype = torch.bfloat16,
+                   return_softmax_lse: bool = False):
+    num_seqs = len(query_lens)
+    block_tables = block_tables.cpu().numpy()
+    if is_paged:
+        _, block_size, num_kv_heads, head_size = key_cache.shape
+        v_head_size = value_cache.shape[-1]
+    else:
+        _, num_kv_heads, head_size = key_cache.shape
+        v_head_size = value_cache.shape[-1]
+
+    if is_fp8_query:
+        query = (query.to(torch.float32) * q_descale).to(dtype)
+
+    outputs: list[torch.Tensor] = []
+    lse_list: list[torch.Tensor] = []
+    start_idx = 0
+    start_idx_kv = 0
+    for i in range(num_seqs):
+        query_len = query_lens[i]
+        kv_len = kv_lens[i]
+        q = query[start_idx:start_idx + query_len] * scale
+
+        if is_paged:
+            num_kv_blocks = (kv_len + block_size - 1) // block_size
+            block_indices = block_tables[i, :num_kv_blocks]
+
+            k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
+            k = k[:kv_len]
+            v = value_cache[block_indices].view(-1, num_kv_heads, v_head_size)
+            v = v[:kv_len]
+        else:
+            k = key_cache[start_idx_kv:start_idx_kv + kv_len]
+            v = value_cache[start_idx_kv:start_idx_kv + kv_len]
+
+        if q.shape[1] != k.shape[1]:
+            k = torch.repeat_interleave(k, q.shape[1] // k.shape[1],
+                                        dim=1).contiguous()
+            v = torch.repeat_interleave(v, q.shape[1] // v.shape[1],
+                                        dim=1).contiguous()
+
+        if is_fp8kv:
+            k = (k.to(torch.float32) * k_descale).to(dtype)
+            v = (v.to(torch.float32) * v_descale).to(dtype)
+        attn = torch.einsum("qhd,khd->hqk", q, k).float()
+        empty_mask = torch.ones(query_len, kv_len)
+        mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
+        if window_size_right > 0 or window_size_left > 0:
+            if window_size_right < 0:
+                window_size_right = max(kv_lens)
+            if window_size_left < 0:
+                window_size_left = max(kv_lens)
+
+            mask_right = torch.triu(empty_mask,
+                                    diagonal=kv_len - query_len +
+                                    window_size_right + 1).bool()
+            mask_left = torch.triu(empty_mask,
+                                   diagonal=kv_len - query_len -
+                                   window_size_left).bool().logical_not()
+            mask_local = mask_right | mask_left
+            attn.masked_fill_(mask_local, float("-inf"))
+        if soft_cap is not None:
+            attn = soft_cap * torch.tanh(attn / soft_cap)
+        if casual:
+            attn.masked_fill_(mask, float("-inf"))
+        if sink is not None:
+            sink_expanded = sink.view(sink.size()[0], 1,
+                                      1).expand(attn.size()[0],
+                                                attn.size()[1], 1)
+            attn = torch.cat([attn, sink_expanded], dim=-1)
+        if return_softmax_lse:
+            # lse shape: [heads, query_len] -> transpose to [query_len, heads]
+            lse = torch.logsumexp(attn, dim=-1).transpose(0, 1).contiguous()
+            lse_list.append(lse)
+        attn = torch.softmax(attn, dim=-1).to(v.dtype)
+        if sink is not None:
+            attn = attn[..., :-1]
+        out = torch.einsum("hqk,khd->qhd", attn, v)
+
+        outputs.append(out)
+        start_idx += query_len
+        start_idx_kv += kv_len
+
+    out_tensor = torch.cat(outputs, dim=0)
+    if return_softmax_lse:
+        return out_tensor, torch.cat(lse_list, dim=0).float()
+    return out_tensor
+
+
 def flash_attn_varlen_func(
     q,
     k,
@@ -291,38 +398,149 @@ def flash_attn_varlen_func(
                 work_list_dev = work_list_cpu.to(
                     device=q.device, non_blocking=True)
 
-        out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
-            q,
-            k,
-            v,
-            out,
-            cu_seqlens_q,
-            # cu_seqlens_k not used since we use seqused_k, but flash_api.cpp
-            # still wants it so we pass all zeros
-            dummy_cu_seqlens_k if cu_seqlens_k is None else cu_seqlens_k,
-            seqused_k,
-            None,
-            block_table,
-            alibi_slopes,
-            max_seqlen_q,
-            max_seqlen_k,
-            dropout_p,
-            k_descale,
-            v_descale,
-            softmax_scale,
-            s_aux,
-            False,
-            causal,
-            real_window_size[0],
-            real_window_size[1],
-            softcap,
-            return_softmax_lse,
-            None,
-            num_splits_kv,
-            is_mix_batch,
-            splits_per_seq_dev,
-            work_list_dev,
-        )
+        try:
+            out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
+                q,
+                k,
+                v,
+                out,
+                cu_seqlens_q,
+                # cu_seqlens_k not used since we use seqused_k, but
+                # flash_api.cpp still wants it so we pass all zeros
+                dummy_cu_seqlens_k if cu_seqlens_k is None else cu_seqlens_k,
+                seqused_k,
+                None,
+                block_table,
+                alibi_slopes,
+                max_seqlen_q,
+                max_seqlen_k,
+                dropout_p,
+                k_descale,
+                v_descale,
+                softmax_scale,
+                s_aux,
+                False,
+                causal,
+                real_window_size[0],
+                real_window_size[1],
+                softcap,
+                return_softmax_lse,
+                None,
+                num_splits_kv,
+                is_mix_batch,
+                splits_per_seq_dev,
+                work_list_dev,
+            )
+        except RuntimeError as e:
+            if "not compiled" not in str(e):
+                raise
+            # Fallback to PyTorch reference implementation.
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "XPU kernel not compiled for this config, falling back "
+                "to PyTorch reference attention. Performance will be "
+                "degraded. To fix, rebuild with the config line shown "
+                "above.\nOriginal error: %s", e)
+            out, softmax_lse = _fallback_varlen_attn(
+                q, k, v, cu_seqlens_q, cu_seqlens_k, seqused_k,
+                block_table, softmax_scale, causal,
+                real_window_size, softcap,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                s_aux=s_aux,
+                return_softmax_lse=return_softmax_lse,
+            )
     else:
         raise NotImplementedError("not support yet")
     return (out, softmax_lse) if return_softmax_lse else (out)
+
+
+def _fallback_varlen_attn(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: Optional[torch.Tensor],
+    seqused_k: Optional[torch.Tensor],
+    block_table: Optional[torch.Tensor],
+    scale: float,
+    causal: bool,
+    window_size: tuple[int, int],
+    softcap: float,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
+    s_aux: Optional[torch.Tensor] = None,
+    return_softmax_lse: bool = False,
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """PyTorch reference fallback when XPU kernel is not compiled."""
+    cu_q = cu_seqlens_q.cpu().tolist()
+    num_seqs = len(cu_q) - 1
+    query_lens = [cu_q[i + 1] - cu_q[i] for i in range(num_seqs)]
+
+    # Determine if KV cache is FP8 and needs dequantization
+    is_fp8kv = k_descale is not None and k.dtype in (
+        torch.float8_e4m3fn, torch.float8_e5m2,
+        torch.float8_e4m3fnuz, torch.float8_e5m2fnuz)
+    # Infer the compute dtype from query (if query is also fp8, fall back to
+    # float16 as the compute type)
+    if q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2,
+                   torch.float8_e4m3fnuz, torch.float8_e5m2fnuz):
+        compute_dtype = torch.float16
+    else:
+        compute_dtype = q.dtype
+
+    is_paged = block_table is not None and seqused_k is not None
+
+    if is_paged:
+        kv_lens = seqused_k.cpu().tolist()
+        result = ref_paged_attn(
+            query=q,
+            key_cache=k,
+            value_cache=v,
+            query_lens=query_lens,
+            kv_lens=kv_lens,
+            block_tables=block_table,
+            scale=scale,
+            window_size_left=window_size[0],
+            window_size_right=window_size[1],
+            soft_cap=softcap if softcap > 0.0 else None,
+            is_paged=True,
+            casual=causal,
+            sink=s_aux,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            is_fp8kv=is_fp8kv,
+            dtype=compute_dtype,
+            return_softmax_lse=return_softmax_lse,
+        )
+    else:
+        cu_k = cu_seqlens_k.cpu().tolist()
+        kv_lens = [cu_k[i + 1] - cu_k[i] for i in range(num_seqs)]
+        result = ref_paged_attn(
+            query=q,
+            key_cache=k,
+            value_cache=v,
+            query_lens=query_lens,
+            kv_lens=kv_lens,
+            block_tables=torch.zeros((num_seqs, 1), dtype=torch.int32,
+                                     device=q.device),
+            scale=scale,
+            window_size_left=window_size[0],
+            window_size_right=window_size[1],
+            soft_cap=softcap if softcap > 0.0 else None,
+            is_paged=False,
+            casual=causal,
+            sink=s_aux,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            is_fp8kv=is_fp8kv,
+            dtype=compute_dtype,
+            return_softmax_lse=return_softmax_lse,
+        )
+
+    if return_softmax_lse:
+        return result[0], result[1]
+    return result, None
+
+
