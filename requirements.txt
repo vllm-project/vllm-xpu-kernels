@@ -14,6 +14,7 @@ ninja
 psutil
 
 # torch dependency
+--extra-index-url https://download.pytorch.org/whl/nightly/xpu
 torch @ https://download-r2.pytorch.org/whl/nightly/xpu/torch-2.13.0.dev20260521%2Bxpu-cp312-cp312-manylinux_2_28_x86_64.whl
 triton-xpu @ https://download-r2.pytorch.org/whl/nightly/triton_xpu-3.7.1%2Bgit21033c4e-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 # may need oneapi packages
