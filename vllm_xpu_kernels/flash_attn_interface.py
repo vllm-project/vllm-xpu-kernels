@@ -478,6 +478,14 @@ def _fallback_varlen_attn(
     num_seqs = len(cu_q) - 1
     query_lens = [cu_q[i + 1] - cu_q[i] for i in range(num_seqs)]
 
+    # The kernel API accepts k/v_descale as (num_seqs, num_kv_heads) views of
+    # a single scalar (all strides == 0).  ref_paged_attn expects a scalar
+    # that broadcasts with (kv_len, num_kv_heads, head_size).
+    if k_descale is not None:
+        k_descale = k_descale.flatten()[0]
+    if v_descale is not None:
+        v_descale = v_descale.flatten()[0]
+
     # Determine if KV cache is FP8 and needs dequantization
     is_fp8kv = k_descale is not None and k.dtype in (
         torch.float8_e4m3fn, torch.float8_e5m2,
