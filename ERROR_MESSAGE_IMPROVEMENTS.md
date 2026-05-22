@@ -36,7 +36,7 @@ or use VLLM_PAGED_DECODE_CONFIG=.../kernel_configs/paged_decode_full.conf
 ERROR: Paged decode kernel tuple not compiled for this configuration.
 Bool combination missing: (causal/local/sink) for this head_size.
 
-SOLUTION: VLLM_PAGED_DECODE_CONFIG=full pip install .
+SOLUTION: VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf pip install .
 See KERNEL_ERROR_QUICK_FIX.md or KERNEL_CONFIGURATION.md for details.
 ```
 
@@ -112,13 +112,16 @@ Added new "Kernel Configuration" section that:
 ├── README.md                               (Updated - added Kernel Configuration section)
 ├── KERNEL_CONFIGURATION.md                 (New - comprehensive guide)
 ├── KERNEL_ERROR_QUICK_FIX.md              (New - quick troubleshooting)
-├── csrc/xpu/attn/xe_2/
-│   ├── chunk_prefill_utils.hpp            (Updated - improved error messages)
-│   ├── paged_decode_utils.hpp             (Updated - improved error messages)
-│   └── kernel_configs/
-│       ├── chunk_prefill_full.conf
-│       ├── chunk_prefill_default.conf
-│       └── ...
+├── csrc/xpu/attn/
+│   ├── kernel_configs/
+│   │   ├── chunk_prefill_full.conf
+│   │   ├── chunk_prefill_default.conf
+│   │   ├── paged_decode_full.conf
+│   │   ├── paged_decode_default.conf
+│   │   └── ...
+│   └── xe_2/
+│       ├── chunk_prefill_utils.hpp        (Updated - improved error messages)
+│       └── paged_decode_utils.hpp         (Updated - improved error messages)
 ```
 
 ---

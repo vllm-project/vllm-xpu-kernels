@@ -7,11 +7,9 @@
 # Usage: paged_decode_configure(paged_decode_kernel_template)
 #
 # CMake Options: VLLM_PAGED_DECODE_CONFIG - Path to kernel config file (default:
-# full.conf) Presets available in kernel_configs/: full.conf    - All 384
-# combinations (current behavior) common.conf  - Popular models (~72 kernels,
-# ~81% reduction) llama.conf   - Llama family (~24 kernels, ~94% reduction)
-# qwen.conf    - Qwen family (~24 kernels, ~94% reduction) deepseek.conf -
-# DeepSeek family (~48 kernels, ~88% reduction)
+# paged_decode_full.conf) Config files located in: csrc/xpu/attn/kernel_configs/
+# paged_decode_full.conf    - All combinations paged_decode_default.conf -
+# Default model configs
 #
 # Config file format: - Lines starting with # are comments - Empty lines are
 # ignored - 'all' keyword builds everything - Each line:
@@ -30,7 +28,7 @@
 # -DVLLM_PAGED_DECODE_CONFIG=...)
 if(NOT DEFINED VLLM_PAGED_DECODE_CONFIG)
   set(VLLM_PAGED_DECODE_CONFIG
-      "${CMAKE_CURRENT_LIST_DIR}/kernel_configs/full.conf")
+      "${CMAKE_CURRENT_LIST_DIR}/../kernel_configs/paged_decode_full.conf")
 endif()
 
 # =============================================================================

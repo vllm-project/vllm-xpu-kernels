@@ -6,11 +6,9 @@
 # build.
 #
 # CMake Options: VLLM_CHUNK_PREFILL_CONFIG - Path to kernel config file
-# (default: full) Presets available in kernel_configs/: chunk_prefill_full.conf
-# - All 216 combinations (current behavior) chunk_prefill_common.conf  - Popular
-# models (~12 kernels) chunk_prefill_llama.conf   - Llama family (~3 kernels)
-# chunk_prefill_qwen.conf    - Qwen family (~3 kernels)
-# chunk_prefill_deepseek.conf - DeepSeek family (~6 kernels)
+# (default: chunk_prefill_full.conf) Config files located in:
+# csrc/xpu/attn/kernel_configs/ chunk_prefill_full.conf    - All 216
+# combinations chunk_prefill_default.conf - Default model configs
 #
 # Config file format: - Lines starting with # are comments - Empty lines are
 # ignored - 'all' keyword builds everything - Each line:
@@ -24,7 +22,7 @@
 # Default config path
 if(NOT DEFINED VLLM_CHUNK_PREFILL_CONFIG)
   set(VLLM_CHUNK_PREFILL_CONFIG
-      "${CMAKE_CURRENT_LIST_DIR}/kernel_configs/chunk_prefill_full.conf")
+      "${CMAKE_CURRENT_LIST_DIR}/../kernel_configs/chunk_prefill_full.conf")
 endif()
 
 # =============================================================================
@@ -38,8 +36,7 @@ function(_chunk_prefill_parse_config CONFIG_FILE OUT_TUPLES OUT_IS_FULL)
     message(
       FATAL_ERROR
         "Chunk prefill kernel config not found: ${CONFIG_FILE}\n"
-        "Available presets: chunk_prefill_full.conf, chunk_prefill_common.conf, "
-        "chunk_prefill_llama.conf, chunk_prefill_qwen.conf, chunk_prefill_deepseek.conf\n"
+        "Available presets: chunk_prefill_full.conf, chunk_prefill_common.conf\n"
         "Set via: cmake -DVLLM_CHUNK_PREFILL_CONFIG=<path>")
   endif()
 

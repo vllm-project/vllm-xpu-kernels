@@ -53,7 +53,7 @@ void policy_dispatch_func(
         false,
         "Chunk prefill kernel not compiled for this configuration.\n\n"
         "Add this line to your chunk_prefill config file "
-        "(e.g. kernel_configs/chunk_prefill_default.conf):\n\n  ",
+        "(csrc/xpu/attn/kernel_configs/chunk_prefill_default.conf):\n\n  ",
         _head_sz,
         ",",
         (Paged ? "true" : "false"),
@@ -66,11 +66,16 @@ void policy_dispatch_func(
         ",",
         (SoftmaxLSE ? "true" : "false"),
         "\n\nThen rebuild:\n"
-        "  VLLM_CHUNK_PREFILL_CONFIG=default pip install .\n\n"
+        "  VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf pip install "
+        ".\n\n"
         "Or use full config (all combinations, slower build):\n"
-        "  VLLM_CHUNK_PREFILL_CONFIG=full pip install .\n\n"
-        "Available presets: full | common | default | llama | qwen | deepseek\n"
-        "See: KERNEL_CONFIGURATION.md");
+        "  VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf pip install .\n\n"
+        "Available configs: chunk_prefill_full.conf | "
+        "chunk_prefill_default.conf\n"
+        "Config location: csrc/xpu/attn/kernel_configs/\n"
+        "See: KERNEL_CONFIGURATION.md\n\n"
+        "If this is unexpected, please report at:\n"
+        "  https://github.com/vllm-project/vllm-xpu-kernels/issues/364");
   } else if constexpr (!is_chunk_policy_tuple_enabled<
                            chunk_policy,
                            Paged,
@@ -82,7 +87,7 @@ void policy_dispatch_func(
         false,
         "Chunk prefill kernel tuple not compiled for this configuration.\n\n"
         "Add this line to your chunk_prefill config file "
-        "(e.g. kernel_configs/chunk_prefill_default.conf):\n\n  ",
+        "(csrc/xpu/attn/kernel_configs/chunk_prefill_default.conf):\n\n  ",
         _head_sz,
         ",",
         (Paged ? "true" : "false"),
@@ -95,11 +100,16 @@ void policy_dispatch_func(
         ",",
         (SoftmaxLSE ? "true" : "false"),
         "\n\nThen rebuild:\n"
-        "  VLLM_CHUNK_PREFILL_CONFIG=default pip install .\n\n"
+        "  VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf pip install "
+        ".\n\n"
         "Or use full config (all combinations, slower build):\n"
-        "  VLLM_CHUNK_PREFILL_CONFIG=full pip install .\n\n"
-        "Available presets: full | common | default | llama | qwen | deepseek\n"
-        "See: KERNEL_CONFIGURATION.md");
+        "  VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf pip install .\n\n"
+        "Available configs: chunk_prefill_full.conf | "
+        "chunk_prefill_default.conf\n"
+        "Config location: csrc/xpu/attn/kernel_configs/\n"
+        "See: KERNEL_CONFIGURATION.md\n\n"
+        "If this is unexpected, please report at:\n"
+        "  https://github.com/vllm-project/vllm-xpu-kernels/issues/364");
   } else {
     policy_dispatch_impl<chunk_policy, Bs...>(queue, cuQKType, args);
   }

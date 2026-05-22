@@ -440,8 +440,11 @@ def flash_attn_varlen_func(
             logger.warning(
                 "XPU kernel not compiled for this config, falling back "
                 "to PyTorch reference attention. Performance will be "
-                "degraded. To fix, rebuild with the config line shown "
-                "above.\nOriginal error: %s", e)
+                "significantly degraded.\n"
+                "To fix: rebuild with the config line shown above.\n"
+                "If this is unexpected, report at: "
+                "https://github.com/vllm-project/vllm-xpu-kernels/issues/364\n"
+                "Original error: %s", e)
             out, softmax_lse = _fallback_varlen_attn(
                 q, k, v, cu_seqlens_q, cu_seqlens_k, seqused_k,
                 block_table, softmax_scale, causal,

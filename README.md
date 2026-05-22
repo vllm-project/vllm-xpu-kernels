@@ -116,7 +116,7 @@ After [vLLM RFC#33214](https://github.com/vllm-project/vllm/issues/33214) was co
 By default, vLLM-XPU compiles kernels for common models (Llama, Qwen, DeepSeek). For customization:
 
 ```bash
-VLLM_CHUNK_PREFILL_CONFIG=full VLLM_PAGED_DECODE_CONFIG=full pip install .
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf pip install .
 ```
 
 See [KERNEL_CONFIGURATION.md](KERNEL_CONFIGURATION.md) for detailed guidance on kernel configuration, presets, and troubleshooting missing kernels.

@@ -14,7 +14,7 @@ If you encounter an error like:
 
 ```bash
 # Recompile with all kernels enabled
-VLLM_CHUNK_PREFILL_CONFIG=full VLLM_PAGED_DECODE_CONFIG=full pip install .
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf pip install .
 ```
 
 This solves ~95% of kernel errors. It takes ~30 minutes to build but supports all models.
@@ -28,14 +28,14 @@ For faster compilation, match your model's configuration:
 ### Llama / Qwen / Mistral
 
 ```bash
-VLLM_CHUNK_PREFILL_CONFIG=common VLLM_PAGED_DECODE_CONFIG=common pip install .
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf pip install .
 # ~5 min build time
 ```
 
 ### DeepSeek
 
 ```bash
-VLLM_CHUNK_PREFILL_CONFIG=deepseek VLLM_PAGED_DECODE_CONFIG=deepseek pip install .
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_deepseek.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_deepseek.conf pip install .
 # ~3 min build time
 ```
 
@@ -67,13 +67,13 @@ Read the full guide: [KERNEL_CONFIGURATION.md](KERNEL_CONFIGURATION.md)
 ## Build Configuration Variables
 
 ```bash
-# Available presets
-VLLM_CHUNK_PREFILL_CONFIG=full|common|llama|qwen|deepseek|default|custom
-VLLM_PAGED_DECODE_CONFIG=full|common|llama|qwen|deepseek|default|custom
+# Available config files (in csrc/xpu/attn/kernel_configs/)
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf|chunk_prefill_default.conf|chunk_prefill_custom.conf
+VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf|paged_decode_default.conf|paged_decode_custom.conf
 
 # Example: Build with defaults
 pip install .
 
 # Example: Build with custom configs
-VLLM_CHUNK_PREFILL_CONFIG=my_config VLLM_PAGED_DECODE_CONFIG=my_config pip install .
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_custom.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_custom.conf pip install .
 ```

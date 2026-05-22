@@ -43,7 +43,7 @@ void decode_policy_dispatch_func(
         false,
         "Paged decode kernel not compiled for this configuration.\n\n"
         "Add this line to your paged_decode config file "
-        "(e.g. kernel_configs/paged_decode_default.conf):\n\n  ",
+        "(csrc/xpu/attn/kernel_configs/paged_decode_default.conf):\n\n  ",
         _qgroup,
         ",",
         _head_sz,
@@ -56,11 +56,15 @@ void decode_policy_dispatch_func(
         ",",
         (Sink ? "true" : "false"),
         "\n\nThen rebuild:\n"
-        "  VLLM_PAGED_DECODE_CONFIG=default pip install .\n\n"
+        "  VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf pip install .\n\n"
         "Or use full config (all combinations, slower build):\n"
-        "  VLLM_PAGED_DECODE_CONFIG=full pip install .\n\n"
-        "Available presets: full | common | default | llama | qwen | deepseek\n"
-        "See: KERNEL_CONFIGURATION.md");
+        "  VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf pip install .\n\n"
+        "Available configs: paged_decode_full.conf | "
+        "paged_decode_default.conf\n"
+        "Config location: csrc/xpu/attn/kernel_configs/\n"
+        "See: KERNEL_CONFIGURATION.md\n\n"
+        "If this is unexpected, please report at:\n"
+        "  https://github.com/vllm-project/vllm-xpu-kernels/issues/364");
   } else if constexpr (!is_decode_policy_tuple_enabled<
                            decode_policy,
                            Causal,
@@ -70,7 +74,7 @@ void decode_policy_dispatch_func(
         false,
         "Paged decode kernel tuple not compiled for this configuration.\n\n"
         "Add this line to your paged_decode config file "
-        "(e.g. kernel_configs/paged_decode_default.conf):\n\n  ",
+        "(csrc/xpu/attn/kernel_configs/paged_decode_default.conf):\n\n  ",
         _qgroup,
         ",",
         _head_sz,
@@ -83,11 +87,15 @@ void decode_policy_dispatch_func(
         ",",
         (Sink ? "true" : "false"),
         "\n\nThen rebuild:\n"
-        "  VLLM_PAGED_DECODE_CONFIG=default pip install .\n\n"
+        "  VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf pip install .\n\n"
         "Or use full config (all combinations, slower build):\n"
-        "  VLLM_PAGED_DECODE_CONFIG=full pip install .\n\n"
-        "Available presets: full | common | default | llama | qwen | deepseek\n"
-        "See: KERNEL_CONFIGURATION.md");
+        "  VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf pip install .\n\n"
+        "Available configs: paged_decode_full.conf | "
+        "paged_decode_default.conf\n"
+        "Config location: csrc/xpu/attn/kernel_configs/\n"
+        "See: KERNEL_CONFIGURATION.md\n\n"
+        "If this is unexpected, please report at:\n"
+        "  https://github.com/vllm-project/vllm-xpu-kernels/issues/364");
   } else {
     decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuQKType, args);
   }
