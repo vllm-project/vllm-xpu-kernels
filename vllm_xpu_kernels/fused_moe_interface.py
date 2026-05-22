@@ -172,54 +172,44 @@ def ref_fused_moe(recipe,
                   ep_rank=0,
                   ep_size=1):
 
-    activation_dtype = x.dtype 
+    compute_dtype = torch.float32
 
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_weights.view(-1, 1)
 
     expert_start_id = num_experts * ep_rank
     expert_end_id = expert_start_id + num_experts
-    expert_cache = torch.zeros_like(x).to(activation_dtype)
+    expert_cache = torch.zeros_like(x).to(compute_dtype)
     idxs = flat_expert_indices.argsort()
     counts = flat_expert_indices.bincount().cpu().numpy()
     tokens_per_expert = counts.cumsum()
     token_idxs = idxs // num_per_tok
 
     if recipe == "fp8block":
-        x_f = x.to(torch.float32)
-        _q, _scale = quant_fp8_act(x_f)
+        _q, _scale = quant_fp8_act(x)
         x = hp_from_1x128(_q, _scale)
-        w13 = w13.transpose(1, 2).contiguous()
-        w2 = w2.transpose(1, 2).contiguous()
     elif recipe == "mxfp8":
-        w13 = w13.transpose(1, 2).contiguous()
-        w2 = w2.transpose(1, 2).contiguous()
         act_ori_shape = x.shape
-        w13_ori_shape = w13.shape
-        w2_ori_shape = w2.shape
         _q, _scale = quant_mxfp_act(x, "mxfp8")
         x = _q.float().reshape(-1, 32) * (_scale.reshape(-1, 1).float())
         x = x.reshape(act_ori_shape)
-        w13_scales = w13_scales.view(torch.float8_e8m0fnu)
-        w2_scales = w2_scales.view(torch.float8_e8m0fnu)
-        w13 = (w13.to(activation_dtype).reshape(-1, 32)
-               * w13_scales.reshape(-1, 1).to(activation_dtype))
-        w2 = (w2.to(activation_dtype).reshape(-1, 32)
-              * w2_scales.reshape(-1, 1).to(activation_dtype))
-        w13 = w13.reshape(w13_ori_shape)
-        w2 = w2.reshape(w2_ori_shape)
+
+        w13_scales = w13_scales.view(torch.float8_e8m0fnu).to(compute_dtype)
+        w2_scales = w2_scales.view(torch.float8_e8m0fnu).to(compute_dtype)
+        w13 = w13.to(compute_dtype) * w13_scales.repeat_interleave(32, dim=1)
+        w2 = w2.to(compute_dtype) * w2_scales.repeat_interleave(32, dim=1)
     elif recipe == "mxfp4":
         act_ori_shape = x.shape
         _q, _scale = quant_mxfp_act(x, "mxfp4")
         x = fp4_e2m1fn_x2_to_float(_q).reshape(-1, 32) * (_scale.reshape(
-            -1, 1).to(activation_dtype))
+            -1, 1).to(compute_dtype))
         x = x.reshape(act_ori_shape)
         w13_ori_shape = w13.shape
         w2_ori_shape = w2.shape
         w13 = fp4_e2m1fn_x2_to_float(w13).reshape(
-            -1, 32) * (w13_scales.reshape(-1, 1).to(activation_dtype))
+            -1, 32) * (w13_scales.reshape(-1, 1).to(compute_dtype))
         w2 = fp4_e2m1fn_x2_to_float(w2).reshape(-1, 32) * (w2_scales.reshape(
-            -1, 1).to(activation_dtype))
+            -1, 1).to(compute_dtype))
         w13 = w13.reshape(w13_ori_shape[:-1] + (w13_ori_shape[-1] * 2, ))
         w2 = w2.reshape(w2_ori_shape[:-1] + (w2_ori_shape[-1] * 2, ))
 
@@ -236,22 +226,33 @@ def ref_fused_moe(recipe,
         expert_w13 = w13[expert_id, :, :]
         if recipe == "fp8block":
             expert_w13 = hp_from_128x128(w13[expert_id, :, :],
-                                         w13_scales[expert_id, :, :])
-        ###
+                                        w13_scales[expert_id, :, :])
+        if recipe in ("fp8block", "mxfp8"):
+            inter = expert_w13.shape[-1] // 2
+            w1, w3 = torch.split(expert_w13, inter, dim=-1)
+        else:
+            w1, w3 = torch.split(expert_w13,
+                                int(list(expert_w13.shape)[0] / 2),
+                                dim=0)
 
-        w1, w3 = torch.split(expert_w13,
-                             int(list(expert_w13.shape)[0] / 2),
-                             dim=0)
         if w13_bias is not None:
             w1_bias, w3_bias = w13_bias[expert_id, :].chunk(2)
-        gemm1 = (expert_tokens.to(activation_dtype) @ w1.T.to(activation_dtype))
+
+        if recipe in ("fp8block", "mxfp8"):
+            gemm1 = expert_tokens.to(compute_dtype) @ w1.to(compute_dtype)
+        else:
+            gemm1 = expert_tokens.to(compute_dtype) @ w1.T.to(compute_dtype)
         if w13_bias is not None:
-            gemm1 += w1_bias.to(activation_dtype)
+            gemm1 += w1_bias.to(compute_dtype)
 
         gate = _naive_fused_moe_activation(gemm1, activation)
-        up = (expert_tokens.to(activation_dtype) @ w3.T.to(activation_dtype))
+
+        if recipe in ("fp8block", "mxfp8"):
+            up = expert_tokens.to(compute_dtype) @ w3.to(compute_dtype)
+        else:
+            up = expert_tokens.to(compute_dtype) @ w3.T.to(compute_dtype)
         if w13_bias is not None:
-            up += w3_bias.to(activation_dtype)
+            up += w3_bias.to(compute_dtype)
 
         ### quant act for gemm2 and dequant weight 2
         gemm2_input = gate * up
@@ -259,27 +260,28 @@ def ref_fused_moe(recipe,
         if recipe == "fp8block":
             expert_w2 = hp_from_128x128(w2[expert_id, :, :],
                                         w2_scales[expert_id, :, :])
-            gemm2_input_f = gemm2_input.to(torch.float32)
-            _q, _scale = quant_fp8_act(gemm2_input_f)
-            gemm2_input = hp_from_1x128(_q, _scale).to(activation_dtype)
+            _q, _scale = quant_fp8_act(gemm2_input)
+            gemm2_input = hp_from_1x128(_q, _scale)
         elif recipe == "mxfp8":
             _q, _scale = quant_mxfp_act(gemm2_input, "mxfp8")
-            gemm2_input = (
-                _q.to(activation_dtype).reshape(-1, 32)
-                * _scale.reshape(-1, 1).to(activation_dtype))
+            gemm2_input = (_q.to(compute_dtype).reshape(-1, 32)
+                        * _scale.reshape(-1, 1).to(compute_dtype))
             gemm2_input = gemm2_input.reshape(_q.shape)
         elif recipe == "mxfp4":
             _q, _scale = quant_mxfp_act(gemm2_input, "mxfp4")
             gemm2_input = fp4_e2m1fn_x2_to_float(_q).reshape(
-                -1, 32) * (_scale.reshape(-1, 1).to(activation_dtype))
+                -1, 32) * (_scale.reshape(-1, 1).to(compute_dtype))
             gemm2_input = gemm2_input.reshape(_q.shape[:-1] +
                                               (_q.shape[-1] * 2, ))
         ###
 
-        expert_out = (gemm2_input) @ expert_w2.T.to(activation_dtype)
+        if recipe in ("fp8block", "mxfp8"):
+            expert_out = gemm2_input @ expert_w2.to(compute_dtype)
+        else:
+            expert_out = gemm2_input @ expert_w2.T.to(compute_dtype)
 
         if w2_bias is not None:
-            expert_out += w2_bias[expert_id, :].to(activation_dtype)
+            expert_out += w2_bias[expert_id, :].to(compute_dtype)
 
         expert_out.mul_(flat_expert_weights[idxs[start_idx:end_idx]])
         expert_cache.scatter_reduce_(0,
@@ -337,7 +339,7 @@ class XpuFusedMoe:
         self.w13 = w13
         self.w2 = w2
 
-        if not is_fp8 and not is_int4 and not is_mxfp4:
+        if not is_fp8 and not is_int4 and not is_mxfp4 and not is_block_fp8:
             self.gemm1_scales = None
             self.gemm2_scales = None
         else:
