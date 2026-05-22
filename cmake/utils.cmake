@@ -727,6 +727,7 @@ function(add_xe_default_kernel_library LIBRARY_NAME)
                          PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC)
   target_compile_definitions(${LIBRARY_NAME}
                              PRIVATE -DVLLM_XPU_ENABLE_XE_DEFAULT)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DSYCL_INTEL_TARGET=20)
   target_include_directories(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_INCLUDE_DIRS})
 
   # Link torch libraries
