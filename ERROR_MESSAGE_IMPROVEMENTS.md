@@ -117,7 +117,6 @@ Added new "Kernel Configuration" section that:
 │   ├── paged_decode_utils.hpp             (Updated - improved error messages)
 │   └── kernel_configs/
 │       ├── chunk_prefill_full.conf
-│       ├── chunk_prefill_common.conf
 │       ├── chunk_prefill_default.conf
 │       └── ...
 ```
