@@ -14,7 +14,6 @@ from packaging.version import Version
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 from setuptools_scm import get_version
-from torch.utils.cpp_extension import SYCL_HOME
 
 
 def load_module_from_path(module_name, path):
@@ -58,14 +57,26 @@ def is_url_available(url: str) -> bool:
     return status == 200
 
 
+def _get_sycl_home():
+    sycl_home = os.getenv("SYCL_HOME")
+    if sycl_home is not None:
+        return sycl_home
+    try:
+        from torch.utils.cpp_extension import SYCL_HOME
+        return SYCL_HOME
+    except Exception:
+        return None
+
+
 def get_oneapi_version() -> Version:
     """Get the oneapi version from
     """
-    assert SYCL_HOME is not None, "SYCL_HOME environment variable is not set."
-    icpx_output = subprocess.check_output([SYCL_HOME + "/bin/icpx", "-v"],
+    sycl_home = _get_sycl_home()
+    assert sycl_home is not None, "SYCL_HOME environment variable is not set."
+    icpx_output = subprocess.check_output([sycl_home + "/bin/icpx", "-v"],
                                           universal_newlines=True)
     print("=============== icpx version ===============")
-    print(f"sycl home: {SYCL_HOME}")
+    print(f"sycl home: {sycl_home}")
     print(icpx_output)
     print("=============== icpx version ===============")
     # output = icpx_output.split()
