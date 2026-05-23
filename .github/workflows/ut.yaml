@@ -198,6 +198,9 @@ jobs:
     runs-on: self-hosted-pvc
     needs: [build-docker-image-latest-pvc, build-wheel]
     timeout-minutes: 50
+    defaults:
+      run:
+        shell: bash
     container:                      
       image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-latest-pvc.outputs.image_tag }}
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
@@ -242,6 +245,9 @@ jobs:
     runs-on: self-hosted-bmg
     needs: [build-docker-image-latest-bmg, build-wheel]
     timeout-minutes: 50
+    defaults:
+      run:
+        shell: bash
     container: 
       image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-latest-bmg.outputs.image_tag }}
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
