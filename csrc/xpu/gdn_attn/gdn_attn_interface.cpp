@@ -322,65 +322,151 @@ void gdn_attention(
   }
 
   if (non_spec_token > 0){
-    torch::Tensor q = torch::empty(                               
-        {non_spec_token, num_k_heads / tp_size, head_k_dim},   
-        torch::dtype(dtype).device(device).requires_grad(false)); 
-    torch::Tensor k = torch::empty(                               
-        {non_spec_token, num_k_heads / tp_size, head_k_dim},   
-        torch::dtype(dtype).device(device).requires_grad(false)); 
-    torch::Tensor v = torch::empty(                               
-        {non_spec_token, num_v_heads / tp_size, head_v_dim},   
-        torch::dtype(dtype).device(device).requires_grad(false)); 
-    torch::Tensor b = torch::empty(                               
-        {non_spec_token, num_v_heads / tp_size},               
-        torch::dtype(dtype).device(device).requires_grad(false)); 
-    torch::Tensor a = torch::empty(                               
-        {non_spec_token, num_v_heads / tp_size},               
-        torch::dtype(dtype).device(device).requires_grad(false));
+#define NATIVE_LAUNCHER                                              \
+  do {                                                               \
+    torch::Tensor q = torch::empty(                                  \
+        {non_spec_token, num_k_heads / tp_size, head_k_dim},         \
+        torch::dtype(dtype).device(device).requires_grad(false));    \
+    torch::Tensor k = torch::empty(                                  \
+        {non_spec_token, num_k_heads / tp_size, head_k_dim},         \
+        torch::dtype(dtype).device(device).requires_grad(false));    \
+    torch::Tensor v = torch::empty(                                  \
+        {non_spec_token, num_v_heads / tp_size, head_v_dim},         \
+        torch::dtype(dtype).device(device).requires_grad(false));    \
+    torch::Tensor b = torch::empty(                                  \
+        {non_spec_token, num_v_heads / tp_size},                     \
+        torch::dtype(dtype).device(device).requires_grad(false));    \
+    torch::Tensor a = torch::empty(                                  \
+        {non_spec_token, num_v_heads / tp_size},                     \
+        torch::dtype(dtype).device(device).requires_grad(false));    \
+    gdn::causal_conv1d(                                              \
+        queue, q, k, v, z_active, b, a,                              \
+        projected_states_qkvz_active,                                \
+        projected_states_ba_active,                                  \
+        conv_weights, conv_bias, conv_state,                         \
+        non_spec_query_start_loc,                                    \
+        non_spec_token_indx,                                         \
+        non_spec_state_indices_tensor,                               \
+        has_initial_state,                                           \
+        empty_tensor,                                                \
+        act_mode, pad_slot_id,                                       \
+        num_prefills, num_decodes, num_spec_decodes,                 \
+        reorder_input);                                              \
+    gdn::gated_delta_rule(                                           \
+        queue, core_attn_out_active,                                 \
+        q, k, v, b, a, A_log, dt_bias, ssm_state,                    \
+        non_spec_query_start_loc,                                    \
+        non_spec_token_indx,                                         \
+        non_spec_state_indices_tensor,                               \
+        has_initial_state,                                           \
+        empty_tensor,                                                \
+        num_prefills, num_decodes, num_spec_decodes);                \
+  } while (0)
 
-    gdn::causal_conv1d(                                           
-        queue,                                                    
-        q,                                                        
-        k,                                                        
-        v,                                                        
-        z_active,                                                 
-        b,                                                        
-        a,                                                        
-        projected_states_qkvz_active,                             
-        projected_states_ba_active,                               
-        conv_weights,                                             
-        conv_bias,                                                
-        conv_state,                                               
-        non_spec_query_start_loc,    
-        non_spec_token_indx,                             
-        non_spec_state_indices_tensor,                            
-        has_initial_state,    
-        empty_tensor,                                    
-        act_mode,                                                 
-        pad_slot_id,                                              
-        num_prefills,                                             
-        num_decodes,    
-        num_spec_decodes,                                          
-        reorder_input);                                           
-    gdn::gated_delta_rule(                                        
-        queue,                                                    
-        core_attn_out_active,                                     
-        q,                                                        
-        k,                                                        
-        v,                                                        
-        b,                                                        
-        a,                                                        
-        A_log,                                                    
-        dt_bias,                                                  
-        ssm_state,                                                
-        non_spec_query_start_loc,   
-        non_spec_token_indx,                              
-        non_spec_state_indices_tensor,                            
-        has_initial_state,  
-        empty_tensor,                                      
-        num_prefills,                                             
-        num_decodes,
-        num_spec_decodes);                                             
+#ifdef VLLM_XPU_ENABLE_XE2
+    // XE2 chunk path handles all non-spec tokens whenever there are prefills,
+    // even when spec_decodes are also present. The XE2 kernels do not accept
+    // token_indx, so when non-spec tokens are interleaved with spec tokens in
+    // the global buffers we first gather them into a contiguous compact view
+    // (mixed_qkvz_xe2 / mixed_ba_xe2 / z_xe2 / core_attn_out_xe2), run XE2 on
+    // the compact buffers, then scatter the produced z and core_attn_out back
+    // to their global positions via index_copy_.
+    if (num_prefills > 0) {
+      int batch_size = non_spec_query_start_loc->size(0) - 1;
+      int padding_size = batch_size * (gdn::chunk_size_xe2 - 1);
 
+      const bool need_gather = non_spec_token_indx.has_value();
+      torch::Tensor gather_idx;
+      torch::Tensor mixed_qkvz_xe2;
+      torch::Tensor mixed_ba_xe2;
+      torch::Tensor z_xe2;
+      torch::Tensor core_attn_out_xe2;
+      if (need_gather) {
+        gather_idx = non_spec_token_indx->to(torch::kLong);
+        mixed_qkvz_xe2 = projected_states_qkvz_active.index_select(0, gather_idx);
+        mixed_ba_xe2 = projected_states_ba_active.index_select(0, gather_idx);
+        // z and core_attn_out are written by XE2 at local non-spec positions;
+        // allocate compact scratch buffers and scatter back after the kernels.
+        z_xe2 = torch::empty(
+            {non_spec_token, num_v_heads / tp_size, head_v_dim},
+            torch::dtype(dtype).device(device).requires_grad(false));
+        core_attn_out_xe2 = torch::empty(
+            {non_spec_token, num_v_heads / tp_size, head_v_dim},
+            torch::dtype(dtype).device(device).requires_grad(false));
+      } else {
+        mixed_qkvz_xe2 = projected_states_qkvz_active;
+        mixed_ba_xe2 = projected_states_ba_active;
+        z_xe2 = z_active;
+        core_attn_out_xe2 = core_attn_out_active;
+      }
+
+      torch::Tensor q = torch::zeros(
+          {non_spec_token + padding_size, num_k_heads / tp_size, head_k_dim},
+          torch::dtype(dtype).device(device).requires_grad(false));
+      torch::Tensor k = torch::zeros(
+          {non_spec_token + padding_size, num_k_heads / tp_size, head_k_dim},
+          torch::dtype(dtype).device(device).requires_grad(false));
+      torch::Tensor v = torch::zeros(
+          {non_spec_token + padding_size, num_v_heads / tp_size, head_v_dim},
+          torch::dtype(dtype).device(device).requires_grad(false));
+      torch::Tensor b = torch::zeros(
+          {num_v_heads / tp_size, non_spec_token + padding_size},
+          torch::dtype(torch::kFloat32).device(device).requires_grad(false));
+      torch::Tensor a = torch::zeros(
+          {num_v_heads / tp_size, non_spec_token + padding_size},
+          torch::dtype(torch::kFloat32).device(device).requires_grad(false));
+
+      gdn::chunk_causal_conv1d_xe2(
+          queue,
+          q,
+          k,
+          v,
+          z_xe2,
+          b,
+          a,
+          mixed_qkvz_xe2,
+          mixed_ba_xe2,
+          conv_weights,
+          conv_bias,
+          conv_state,
+          *non_spec_query_start_loc,
+          *non_spec_state_indices_tensor,
+          has_initial_state,
+          act_mode,
+          pad_slot_id,
+          num_prefills,
+          num_decodes,
+          reorder_input);
+
+      chunk_gated_delta_rule_xe2(
+          queue,
+          core_attn_out_xe2,
+          q,
+          k,
+          v,
+          b,
+          a,
+          A_log,
+          dt_bias,
+          ssm_state,
+          *non_spec_query_start_loc,
+          *non_spec_state_indices_tensor,
+          has_initial_state,
+          num_prefills,
+          num_decodes);
+
+      if (need_gather) {
+        // Scatter XE2 outputs (z reorder + core attention) back to the
+        // interleaved global slots indicated by non_spec_token_indx.
+        z_active.index_copy_(0, gather_idx, z_xe2);
+        core_attn_out_active.index_copy_(0, gather_idx, core_attn_out_xe2);
+      }
+    } else {
+      NATIVE_LAUNCHER;
+    }
+#else
+    NATIVE_LAUNCHER;
+#endif
+#undef NATIVE_LAUNCHER
   }
 }
