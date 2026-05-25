@@ -342,9 +342,7 @@ struct gated_delta_rule_spec_kernel {
         head_v_dim(head_v_dim) {}
 
   static inline sycl::nd_range<3> get_nd_range(
-      const int num_spec_decodes,
-      const int num_v_heads,
-      const int head_v_dim) {
+      const int num_spec_decodes, const int num_v_heads, const int head_v_dim) {
     int num_v_bucket = (head_v_dim + v_dim_per_group - 1) / v_dim_per_group;
     sycl::range<3> local(1, 1, group_size);
     sycl::range<3> global(num_spec_decodes, num_v_heads, num_v_bucket);
@@ -412,7 +410,8 @@ struct gated_delta_rule_spec_kernel {
     // -- Iterate over the num_spec_tokens tokens of this sequence -------------
     for (int t_local = 0; t_local < num_spec_tokens; ++t_local) {
       // Local token index inside q/k/v/b/a (which were sized
-      // num_spec_decodes * num_spec_tokens and ordered by spec_query_start_loc).
+      // num_spec_decodes * num_spec_tokens and ordered by
+      // spec_query_start_loc).
       const int t = batch_id * num_spec_tokens + t_local;
 
       float b_local = b[t * num_v_heads + num_v_heads_id];
@@ -669,14 +668,16 @@ void gated_delta_rule(
     torch::Tensor&
         ssm_state,  // [cache_batch_size, num_v_heads, head_v_dim, head_k_dim]
     const std::optional<torch::Tensor>& query_start_loc,  // [batch_size + 1]
-    const std::optional<torch::Tensor>& token_indx,  // [num_virtual_tokens] or None
-    const std::optional<torch::Tensor>& cache_indices,    // [batch_size]
-    const std::optional<torch::Tensor>& has_initial_state,  // [batch_size] or None
-    const std::optional<torch::Tensor>& num_accepted_tokens,    // [batch_size] or None
+    const std::optional<torch::Tensor>&
+        token_indx,  // [num_virtual_tokens] or None
+    const std::optional<torch::Tensor>& cache_indices,  // [batch_size]
+    const std::optional<torch::Tensor>&
+        has_initial_state,  // [batch_size] or None
+    const std::optional<torch::Tensor>&
+        num_accepted_tokens,  // [batch_size] or None
     const int num_prefills,
     const int num_decodes,
     const int num_spec_decodes) {
-
   TORCH_CHECK(query_start_loc.has_value() && cache_indices.has_value());
 
   // Spec path is selected when num_accepted_tokens is provided. In that case
@@ -722,60 +723,60 @@ void gated_delta_rule(
   TORCH_CHECK(head_k_dim % sub_group_size == 0);
   const int k_bucket_size = head_k_dim / sub_group_size;
 
-#define KERNEL_LAUNCHER(scalar_t, state_scalar_t, k_bucket_size)             \
-  if (is_spec) {                                                             \
-    kernel_launcher_spec<scalar_t, state_scalar_t, k_bucket_size>(           \
-        queue,                                                               \
-        reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),               \
-        reinterpret_cast<scalar_t*>(q.data_ptr()),                           \
-        reinterpret_cast<scalar_t*>(k.data_ptr()),                           \
-        reinterpret_cast<scalar_t*>(v.data_ptr()),                           \
-        reinterpret_cast<scalar_t*>(b.data_ptr()),                           \
-        reinterpret_cast<scalar_t*>(a.data_ptr()),                           \
-        reinterpret_cast<float*>(A_log.data_ptr()),                          \
-        reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),                     \
-        reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),             \
-        ssm_state_stride_0,                                                  \
-        token_indx.has_value()                                               \
-            ? reinterpret_cast<int*>(token_indx->data_ptr())                 \
-            : nullptr,                                                       \
-        reinterpret_cast<int*>(cache_indices->data_ptr()),                   \
-        cache_indices_stride_0,                                              \
-        reinterpret_cast<int*>(num_accepted_tokens->data_ptr()),             \
-        num_spec_decodes,                                                    \
-        num_spec_tokens,                                                     \
-        num_k_heads,                                                         \
-        head_k_dim,                                                          \
-        num_v_heads,                                                         \
-        head_v_dim);                                                         \
-  } else {                                                                   \
-    kernel_launcher<scalar_t, state_scalar_t, k_bucket_size>(                \
-        queue,                                                               \
-        reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),               \
-        reinterpret_cast<scalar_t*>(q.data_ptr()),                           \
-        reinterpret_cast<scalar_t*>(k.data_ptr()),                           \
-        reinterpret_cast<scalar_t*>(v.data_ptr()),                           \
-        reinterpret_cast<scalar_t*>(b.data_ptr()),                           \
-        reinterpret_cast<scalar_t*>(a.data_ptr()),                           \
-        reinterpret_cast<float*>(A_log.data_ptr()),                          \
-        reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),                     \
-        reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),             \
-        ssm_state_stride_0,                                                  \
-        reinterpret_cast<int*>(query_start_loc->data_ptr()),                 \
-        token_indx.has_value()                                               \
-            ? reinterpret_cast<int*>(token_indx->data_ptr())                 \
-            : nullptr,                                                       \
-        reinterpret_cast<int*>(cache_indices->data_ptr()),                   \
-        has_initial_state.has_value()                                        \
-            ? reinterpret_cast<bool*>(has_initial_state->data_ptr())         \
-            : nullptr,                                                       \
-        /*num_accepted_tokens=*/nullptr,                                     \
-        batch_size,                                                          \
-        total_seqlen,                                                        \
-        num_k_heads,                                                         \
-        head_k_dim,                                                          \
-        num_v_heads,                                                         \
-        head_v_dim);                                                         \
+#define KERNEL_LAUNCHER(scalar_t, state_scalar_t, k_bucket_size)     \
+  if (is_spec) {                                                     \
+    kernel_launcher_spec<scalar_t, state_scalar_t, k_bucket_size>(   \
+        queue,                                                       \
+        reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),       \
+        reinterpret_cast<scalar_t*>(q.data_ptr()),                   \
+        reinterpret_cast<scalar_t*>(k.data_ptr()),                   \
+        reinterpret_cast<scalar_t*>(v.data_ptr()),                   \
+        reinterpret_cast<scalar_t*>(b.data_ptr()),                   \
+        reinterpret_cast<scalar_t*>(a.data_ptr()),                   \
+        reinterpret_cast<float*>(A_log.data_ptr()),                  \
+        reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
+        reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),     \
+        ssm_state_stride_0,                                          \
+        token_indx.has_value()                                       \
+            ? reinterpret_cast<int*>(token_indx->data_ptr())         \
+            : nullptr,                                               \
+        reinterpret_cast<int*>(cache_indices->data_ptr()),           \
+        cache_indices_stride_0,                                      \
+        reinterpret_cast<int*>(num_accepted_tokens->data_ptr()),     \
+        num_spec_decodes,                                            \
+        num_spec_tokens,                                             \
+        num_k_heads,                                                 \
+        head_k_dim,                                                  \
+        num_v_heads,                                                 \
+        head_v_dim);                                                 \
+  } else {                                                           \
+    kernel_launcher<scalar_t, state_scalar_t, k_bucket_size>(        \
+        queue,                                                       \
+        reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),       \
+        reinterpret_cast<scalar_t*>(q.data_ptr()),                   \
+        reinterpret_cast<scalar_t*>(k.data_ptr()),                   \
+        reinterpret_cast<scalar_t*>(v.data_ptr()),                   \
+        reinterpret_cast<scalar_t*>(b.data_ptr()),                   \
+        reinterpret_cast<scalar_t*>(a.data_ptr()),                   \
+        reinterpret_cast<float*>(A_log.data_ptr()),                  \
+        reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
+        reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),     \
+        ssm_state_stride_0,                                          \
+        reinterpret_cast<int*>(query_start_loc->data_ptr()),         \
+        token_indx.has_value()                                       \
+            ? reinterpret_cast<int*>(token_indx->data_ptr())         \
+            : nullptr,                                               \
+        reinterpret_cast<int*>(cache_indices->data_ptr()),           \
+        has_initial_state.has_value()                                \
+            ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
+            : nullptr,                                               \
+        /*num_accepted_tokens=*/nullptr,                             \
+        batch_size,                                                  \
+        total_seqlen,                                                \
+        num_k_heads,                                                 \
+        head_k_dim,                                                  \
+        num_v_heads,                                                 \
+        head_v_dim);                                                 \
   }
 
 #define BUCKET_DISPATCH(scalar_t, state_scalar_t, k_bucket_size) \

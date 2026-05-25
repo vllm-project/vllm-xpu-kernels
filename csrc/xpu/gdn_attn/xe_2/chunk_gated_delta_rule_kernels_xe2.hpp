@@ -1146,10 +1146,11 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       auto U_tensor_T = make_tensor(
           make_gmem_ptr(U_ptr),
           make_layout(U_tensor_T_shape, make_stride(_1{}, head_v_dim)));
-      auto O_ptr = core_attn_out +
-                   (token_indx ? token_indx[out_chunk_offset] : out_chunk_offset) *
-                       num_v_heads * head_v_dim +
-                   v_head_id * head_v_dim;
+      auto O_ptr =
+          core_attn_out +
+          (token_indx ? token_indx[out_chunk_offset] : out_chunk_offset) *
+              num_v_heads * head_v_dim +
+          v_head_id * head_v_dim;
       auto O_tensor_shape = make_shape(current_chunk_size, head_v_dim);
       auto O_tensor = make_tensor(
           make_gmem_ptr(O_ptr),

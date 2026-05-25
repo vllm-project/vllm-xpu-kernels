@@ -142,9 +142,8 @@ struct causal_conv1d_kernel {
         for (int e = 0; e < ba_elems_per_item; ++e) {
           b_out[step_local + qkvz_dim_id + e] =
               mixed_ba[step_global * 2 + qkvz_dim_id + e];
-          a_out[step_local + qkvz_dim_id + e] =
-              mixed_ba[step_global * 2 + num_v_heads / num_k_heads +
-                       qkvz_dim_id + e];
+          a_out[step_local + qkvz_dim_id + e] = mixed_ba
+              [step_global * 2 + num_v_heads / num_k_heads + qkvz_dim_id + e];
         }
       }
     }
@@ -271,9 +270,8 @@ struct causal_conv1d_kernel {
 #pragma unroll
     for (int i = 0; i < input_load_len; ++i) {
       const int load_local = token_id - input_load_len + 1 + i;
-      const int load_global = (token_indx != nullptr)
-                                  ? token_indx[load_local]
-                                  : load_local;
+      const int load_global =
+          (token_indx != nullptr) ? token_indx[load_local] : load_local;
 #pragma unroll
       for (int e = 0; e < elems_per_item; ++e) {
         local_input[Width * e + states_load_len + i] =
@@ -607,8 +605,8 @@ struct causal_conv1d_spec_kernel {
     } else if (qkvz_dim_id < q_dim + k_dim) {
       is_k = true;
       if constexpr (ReorderInput) {
-        mixed_qkvz_id = num_k_heads * head_k_dim + k_heads_id * k_dim +
-                        qkvz_dim_id - q_dim;
+        mixed_qkvz_id =
+            num_k_heads * head_k_dim + k_heads_id * k_dim + qkvz_dim_id - q_dim;
       }
       reordered_elems_id =
           num_k_heads * q_dim + k_heads_id * k_dim + qkvz_dim_id - q_dim;
@@ -618,8 +616,8 @@ struct causal_conv1d_spec_kernel {
         mixed_qkvz_id = 2 * num_k_heads * head_k_dim + k_heads_id * v_dim +
                         qkvz_dim_id - (q_dim + k_dim);
       }
-      reordered_elems_id = num_k_heads * (q_dim + k_dim) +
-                           k_heads_id * v_dim + qkvz_dim_id - (q_dim + k_dim);
+      reordered_elems_id = num_k_heads * (q_dim + k_dim) + k_heads_id * v_dim +
+                           qkvz_dim_id - (q_dim + k_dim);
     } else {
       is_z = true;
       if constexpr (ReorderInput) {
@@ -657,9 +655,8 @@ struct causal_conv1d_spec_kernel {
           for (int e = 0; e < ba_elems_per_item; ++e) {
             b_out[step_local + qkvz_dim_id + e] =
                 mixed_ba[step_global * 2 + qkvz_dim_id + e];
-            a_out[step_local + qkvz_dim_id + e] =
-                mixed_ba[step_global * 2 + num_v_heads / num_k_heads +
-                         qkvz_dim_id + e];
+            a_out[step_local + qkvz_dim_id + e] = mixed_ba
+                [step_global * 2 + num_v_heads / num_k_heads + qkvz_dim_id + e];
           }
         }
       }
@@ -783,20 +780,23 @@ struct causal_conv1d_spec_kernel {
       if (is_q) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          q_out[token_id_local * num_k_heads * q_dim + k_heads_id * q_dim +
-                qkvz_dim_id + e] = res[e];
+          q_out
+              [token_id_local * num_k_heads * q_dim + k_heads_id * q_dim +
+               qkvz_dim_id + e] = res[e];
         }
       } else if (is_k) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          k_out[token_id_local * num_k_heads * k_dim + k_heads_id * k_dim +
-                qkvz_dim_id - q_dim + e] = res[e];
+          k_out
+              [token_id_local * num_k_heads * k_dim + k_heads_id * k_dim +
+               qkvz_dim_id - q_dim + e] = res[e];
         }
       } else {  // is_v
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          v_out[token_id_local * num_k_heads * v_dim + k_heads_id * v_dim +
-                qkvz_dim_id - (q_dim + k_dim) + e] = res[e];
+          v_out
+              [token_id_local * num_k_heads * v_dim + k_heads_id * v_dim +
+               qkvz_dim_id - (q_dim + k_dim) + e] = res[e];
         }
       }
 
@@ -894,8 +894,7 @@ void kernel_launcher(
   // run the auxiliary update_states_kernel for prefills here.
   if (num_accepted_tokens != nullptr) {
     using KERNEL_SPEC = causal_conv1d_spec_kernel<T, Width, ReorderInput>;
-    auto range_spec =
-        KERNEL_SPEC::get_nd_range(num_spec_decodes, qkvz_elems);
+    auto range_spec = KERNEL_SPEC::get_nd_range(num_spec_decodes, qkvz_elems);
     assert(head_k_dim % KERNEL_SPEC::elems_per_item == 0);
     assert(num_v_heads % KERNEL_SPEC::elems_per_item == 0);
     queue.submit([&](sycl::handler& cgh) {
@@ -1011,17 +1010,19 @@ void causal_conv1d(
         conv_states,  // [cache_batch_size, width - 1, num_k_heads * (2 *
                       // head_k_dim + head_v_dim * num_v_heads / num_k_heads)]
     const std::optional<torch::Tensor>& query_start_loc,  // [batch_size + 1]
-    const std::optional<torch::Tensor>& token_indx,    // [num_virtual_tokens] or None
-    const std::optional<torch::Tensor>& cache_indices,    // [batch_size]
-    const std::optional<torch::Tensor>& has_initial_state,    // [batch_size] or None
-    const std::optional<torch::Tensor>& num_accepted_tokens,    // [batch_size] or None
+    const std::optional<torch::Tensor>&
+        token_indx,  // [num_virtual_tokens] or None
+    const std::optional<torch::Tensor>& cache_indices,  // [batch_size]
+    const std::optional<torch::Tensor>&
+        has_initial_state,  // [batch_size] or None
+    const std::optional<torch::Tensor>&
+        num_accepted_tokens,  // [batch_size] or None
     const ActMode& act_mode,  // silu or swish
     const int& pad_slot_id,   // -1
     const int num_prefills,
     const int num_decodes,
     const int num_spec_decodes,
     const bool reorder_input) {
-
   TORCH_CHECK(query_start_loc.has_value() && cache_indices.has_value());
 
   const bool is_spec = num_accepted_tokens.has_value();
@@ -1053,50 +1054,49 @@ void causal_conv1d(
       {std::max(batch_size, 1), width - 1, conv_elems},
       torch::dtype(dtype).device(device).requires_grad(false));
 
-#define KERNEL_LAUNCHER(scalar_t, width, reorder_input)            \
-  kernel_launcher<scalar_t, width, reorder_input>(                 \
-      queue,                                                       \
-      reinterpret_cast<scalar_t*>(q_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(k_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(v_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(z_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(b_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(a_out.data_ptr()),               \
-      reinterpret_cast<scalar_t*>(mixed_qkvz.data_ptr()),          \
-      reinterpret_cast<scalar_t*>(mixed_ba.data_ptr()),            \
-      reinterpret_cast<scalar_t*>(conv_weights.data_ptr()),        \
-      conv_bias.has_value()                                        \
-          ? reinterpret_cast<scalar_t*>(conv_bias->data_ptr())     \
-          : nullptr,                                               \
-      reinterpret_cast<scalar_t*>(conv_states.data_ptr()),         \
-      conv_states_stride_0,                                        \
-      reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),     \
-      reinterpret_cast<int*>(query_start_loc->data_ptr()),         \
-      token_indx.has_value()                                       \
-          ? reinterpret_cast<int*>(token_indx->data_ptr())         \
-          : nullptr,                                               \
-      reinterpret_cast<int*>(cache_indices->data_ptr()),           \
-      cache_indices_stride_0,                                      \
-      has_initial_state.has_value()                                \
-          ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
-          : nullptr,                                               \
-      num_accepted_tokens.has_value()                              \
-          ? reinterpret_cast<int*>(num_accepted_tokens->data_ptr())\
-          : nullptr,                                               \
-      act_mode,                                                    \
-      pad_slot_id,                                                 \
-      batch_size,                                                  \
-      num_virtual_tokens,                                          \
-      num_actual_tokens,                                           \
-      num_k_heads,                                                 \
-      head_k_dim,                                                  \
-      num_v_heads,                                                 \
-      head_v_dim,                                                  \
-      qkvz_elems,                                                  \
-      conv_elems,                                                  \
-      num_prefills,                                                \
-      num_decodes,                                                 \
-      num_spec_decodes,                                            \
+#define KERNEL_LAUNCHER(scalar_t, width, reorder_input)                       \
+  kernel_launcher<scalar_t, width, reorder_input>(                            \
+      queue,                                                                  \
+      reinterpret_cast<scalar_t*>(q_out.data_ptr()),                          \
+      reinterpret_cast<scalar_t*>(k_out.data_ptr()),                          \
+      reinterpret_cast<scalar_t*>(v_out.data_ptr()),                          \
+      reinterpret_cast<scalar_t*>(z_out.data_ptr()),                          \
+      reinterpret_cast<scalar_t*>(b_out.data_ptr()),                          \
+      reinterpret_cast<scalar_t*>(a_out.data_ptr()),                          \
+      reinterpret_cast<scalar_t*>(mixed_qkvz.data_ptr()),                     \
+      reinterpret_cast<scalar_t*>(mixed_ba.data_ptr()),                       \
+      reinterpret_cast<scalar_t*>(conv_weights.data_ptr()),                   \
+      conv_bias.has_value()                                                   \
+          ? reinterpret_cast<scalar_t*>(conv_bias->data_ptr())                \
+          : nullptr,                                                          \
+      reinterpret_cast<scalar_t*>(conv_states.data_ptr()),                    \
+      conv_states_stride_0,                                                   \
+      reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),                \
+      reinterpret_cast<int*>(query_start_loc->data_ptr()),                    \
+      token_indx.has_value() ? reinterpret_cast<int*>(token_indx->data_ptr()) \
+                             : nullptr,                                       \
+      reinterpret_cast<int*>(cache_indices->data_ptr()),                      \
+      cache_indices_stride_0,                                                 \
+      has_initial_state.has_value()                                           \
+          ? reinterpret_cast<bool*>(has_initial_state->data_ptr())            \
+          : nullptr,                                                          \
+      num_accepted_tokens.has_value()                                         \
+          ? reinterpret_cast<int*>(num_accepted_tokens->data_ptr())           \
+          : nullptr,                                                          \
+      act_mode,                                                               \
+      pad_slot_id,                                                            \
+      batch_size,                                                             \
+      num_virtual_tokens,                                                     \
+      num_actual_tokens,                                                      \
+      num_k_heads,                                                            \
+      head_k_dim,                                                             \
+      num_v_heads,                                                            \
+      head_v_dim,                                                             \
+      qkvz_elems,                                                             \
+      conv_elems,                                                             \
+      num_prefills,                                                           \
+      num_decodes,                                                            \
+      num_spec_decodes,                                                       \
       num_spec_tokens);
 
 #define WIDTH_DISPATCH(scalar_t, width, reorder_input) \

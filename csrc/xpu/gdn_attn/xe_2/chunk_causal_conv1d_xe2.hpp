@@ -76,9 +76,7 @@ struct chunk_causal_conv1d_kernel {
         qkvz_elems(qkvz_elems),
         conv_elems(conv_elems) {}
 
-  inline int lookup(int t) const {
-    return token_indx ? token_indx[t] : t;
-  }
+  inline int lookup(int t) const { return token_indx ? token_indx[t] : t; }
 
   static inline sycl::nd_range<2> get_nd_range(
       const int total_seqlen,
@@ -228,8 +226,8 @@ struct chunk_causal_conv1d_kernel {
       const int src_token = lookup(token_id - input_load_len + 1 + i);
 #pragma unroll
       for (int e = 0; e < elems_per_item; ++e) {
-        local_input[Width * e + states_load_len + i] = mixed_qkvz
-            [src_token * qkvz_elems + qkvz_elems_offset + e];
+        local_input[Width * e + states_load_len + i] =
+            mixed_qkvz[src_token * qkvz_elems + qkvz_elems_offset + e];
       }
     }
 
@@ -388,9 +386,7 @@ struct chunk_reorder_zba_kernel {
         num_v_heads(num_v_heads),
         head_v_dim(head_v_dim) {}
 
-  inline int lookup(int t) const {
-    return token_indx ? token_indx[t] : t;
-  }
+  inline int lookup(int t) const { return token_indx ? token_indx[t] : t; }
 
   static inline sycl::nd_range<2>
   get_nd_range(const int total_seqlen, const int num_k_heads, const int z_dim) {
@@ -446,9 +442,9 @@ struct chunk_reorder_zba_kernel {
                   a_value;
         }
       } else {
-        int step =
-            (lookup(token_id) * num_v_heads + k_head_id * num_v_heads / num_k_heads) *
-            2;
+        int step = (lookup(token_id) * num_v_heads +
+                    k_head_id * num_v_heads / num_k_heads) *
+                   2;
 #pragma unroll
         for (int e = 0; e < kv_ratio; ++e) {
           float b_value = mixed_ba[step + e];
@@ -723,8 +719,8 @@ void chunk_causal_conv1d_xe2(
 
   const int batch_size = query_start_loc.size(0) - 1;
   const int num_actual_tokens = num_actual_tokens_override >= 0
-      ? num_actual_tokens_override
-      : static_cast<int>(mixed_qkvz.size(0));
+                                    ? num_actual_tokens_override
+                                    : static_cast<int>(mixed_qkvz.size(0));
   const int num_virtual_tokens = q_out.size(0);
   const int num_k_heads = q_out.size(1);
   const int head_k_dim = q_out.size(2);
