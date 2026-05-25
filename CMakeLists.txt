@@ -414,7 +414,7 @@ if(XPUMEM_ALLOCATOR_ENABLED)
   python_add_library(xpumem_allocator MODULE USE_SABI 3 WITH_SOABI
                      "${XPUMEM_ALLOCATOR_SRC}")
 
-  set_property(TARGET xpumem_allocator PROPERTY CXX_STANDARD 17)
+  set_property(TARGET xpumem_allocator PROPERTY CXX_STANDARD 20)
 
   if(VLLM_GPU_LANG STREQUAL "SYCL")
     target_compile_options(xpumem_allocator PRIVATE ${VLLM_GPU_COMPILE_FLAGS})
