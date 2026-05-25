@@ -618,9 +618,7 @@ sycl::event launch_hc_head_fused(
     }                                        \
   } while (0)
 
-static inline sycl::queue& current_queue() {
-  return c10::xpu::getCurrentXPUStream().queue();
-}
+static inline sycl::queue& current_queue() { return vllm::xpu::vllmGetQueue(); }
 
 }  // namespace vllm
 using namespace vllm;
