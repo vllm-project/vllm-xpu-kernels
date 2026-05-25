@@ -26,8 +26,10 @@ struct gated_delta_rule_kernel {
       StateT* ssm_state,
       const int ssm_state_stride_0,
       const int* query_start_loc,
+      const int* token_indx,
       const int* cache_indices,
       const bool* has_initial_state,
+      const int* num_accepted_tokens,
       const int batch_size,
       const int total_seqlen,
       const int num_k_heads,
@@ -45,8 +47,10 @@ struct gated_delta_rule_kernel {
         ssm_state(ssm_state),
         ssm_state_stride_0(ssm_state_stride_0),
         query_start_loc(query_start_loc),
+        token_indx(token_indx),
         cache_indices(cache_indices),
         has_initial_state(has_initial_state),
+        num_accepted_tokens(num_accepted_tokens),
         batch_size(batch_size),
         total_seqlen(total_seqlen),
         num_k_heads(num_k_heads),
@@ -76,6 +80,7 @@ struct gated_delta_rule_kernel {
 
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<3> item) const {
+    return;
     int batch_id = item.get_group(0);
     int num_v_heads_id = item.get_group(1);
     int v_bucket_id = item.get_group(2);
@@ -255,8 +260,10 @@ struct gated_delta_rule_kernel {
   StateT* ssm_state;
   const int ssm_state_stride_0;
   const int* query_start_loc;
+  const int* token_indx;
   const int* cache_indices;
   const bool* has_initial_state;
+  const int* num_accepted_tokens;
   const int batch_size;
   const int total_seqlen;
   const int num_k_heads;
@@ -279,8 +286,10 @@ void kernel_launcher(
     StateT* ssm_state,
     const int ssm_state_stride_0,
     const int* query_start_loc,
+    const int* token_indx,
     const int* cache_indices,
     const bool* has_initial_state,
+    const int* num_accepted_tokens,
     const int batch_size,
     const int total_seqlen,
     const int num_k_heads,
@@ -303,8 +312,10 @@ void kernel_launcher(
         ssm_state,
         ssm_state_stride_0,
         query_start_loc,
+        token_indx,
         cache_indices,
         has_initial_state,
+        num_accepted_tokens,
         batch_size,
         total_seqlen,
         num_k_heads,
@@ -327,17 +338,18 @@ void gated_delta_rule(
     const torch::Tensor& dt_bias,  // [num_v_heads]
     torch::Tensor&
         ssm_state,  // [cache_batch_size, num_v_heads, head_v_dim, head_k_dim]
-    const torch::Tensor& query_start_loc,  // [batch_size + 1]
-    const torch::Tensor& cache_indices,    // [batch_size]
-    const std::optional<torch::Tensor>&
-        has_initial_state,  // [batch_size] or None
+    const std::optional<torch::Tensor>& query_start_loc,  // [batch_size + 1]
+    const std::optional<torch::Tensor>& token_indx,  // [num_virtual_tokens] or None
+    const std::optional<torch::Tensor>& cache_indices,    // [batch_size]
+    const std::optional<torch::Tensor>& has_initial_state,  // [batch_size] or None
+    const std::optional<torch::Tensor>& num_accepted_tokens,    // [batch_size] or None
     const int num_prefills,
-    const int num_decodes) {
-  if (num_prefills == 0 && num_decodes == 0) {
-    return;
-  }
+    const int num_decodes,
+    const int num_spec_decodes) {
 
-  int batch_size = query_start_loc.size(0) - 1;
+  TORCH_CHECK(query_start_loc.has_value() && cache_indices.has_value());
+
+  int batch_size = query_start_loc->size(0) - 1;
   if (num_prefills == 0 && num_decodes > 0) {
     batch_size = num_decodes;
   }
@@ -377,10 +389,16 @@ void gated_delta_rule(
       reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
       reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),     \
       ssm_state_stride_0,                                          \
-      reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
-      reinterpret_cast<int*>(cache_indices.data_ptr()),            \
+      reinterpret_cast<int*>(query_start_loc->data_ptr()),          \
+      token_indx.has_value()                                       \
+          ? reinterpret_cast<int*>(token_indx->data_ptr())         \
+          : nullptr,                                               \
+      reinterpret_cast<int*>(cache_indices->data_ptr()),            \
       has_initial_state.has_value()                                \
           ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
+          : nullptr,                                               \
+      num_accepted_tokens.has_value()                              \
+          ? reinterpret_cast<int*>(num_accepted_tokens->data_ptr())\
           : nullptr,                                               \
       batch_size,                                                  \
       total_seqlen,                                                \

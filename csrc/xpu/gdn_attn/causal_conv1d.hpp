@@ -30,11 +30,14 @@ struct causal_conv1d_kernel {
       const int conv_states_stride_0,
       T* conv_states_tmp,
       int* query_start_loc,
+      int* token_indx,
       int* cache_indices,
       bool* has_initial_state,
+      int* num_accepted_tokens,
       const ActMode& act_mode,
       const int& pad_slot_id,
       const int& batch_size,
+      const int& num_virtual_tokens,
       const int& num_actual_tokens,
       const int& num_k_heads,
       const int& head_k_dim,
@@ -56,12 +59,15 @@ struct causal_conv1d_kernel {
         conv_states_stride_0(conv_states_stride_0),
         conv_states_tmp(conv_states_tmp),
         query_start_loc(query_start_loc),
+        token_indx(token_indx),
         cache_indices(cache_indices),
         has_initial_state(has_initial_state),
+        num_accepted_tokens(num_accepted_tokens),
         act_mode(act_mode),
         pad_slot_id(pad_slot_id),
         batch_size(batch_size),
         num_actual_tokens(num_actual_tokens),
+        num_virtual_tokens(num_virtual_tokens),
         num_k_heads(num_k_heads),
         head_k_dim(head_k_dim),
         num_v_heads(num_v_heads),
@@ -70,11 +76,11 @@ struct causal_conv1d_kernel {
         conv_elems(conv_elems) {}
 
   static inline sycl::nd_range<2>
-  get_nd_range(const int total_seqlen, const int qkvz_elems) {
+  get_nd_range(const int num_virtual_tokens, const int qkvz_elems) {
     const int groups_per_token =
         (qkvz_elems + elems_per_group - 1) / elems_per_group;
     sycl::range<2> local(1, group_size);
-    sycl::range<2> global(total_seqlen, groups_per_token);
+    sycl::range<2> global(num_virtual_tokens, groups_per_token);
     return sycl::nd_range<2>(global * local, local);
   }
 
@@ -85,6 +91,7 @@ struct causal_conv1d_kernel {
 
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<2> item) const {
+    return;
     const int token_id = item.get_group(0);
     const int local_group_id = item.get_group(1);
     const int local_id = item.get_local_linear_id();
@@ -360,11 +367,14 @@ struct causal_conv1d_kernel {
   const int conv_states_stride_0;
   T* conv_states_tmp;
   const int32_t* query_start_loc;
+  const int* token_indx;
   const int* cache_indices;
   const bool* has_initial_state;
+  const int* num_accepted_tokens;
   const ActMode act_mode;
   const int pad_slot_id;
   const int batch_size;
+  const int num_virtual_tokens;
   const int num_actual_tokens;
   const int num_k_heads;
   const int head_k_dim;
@@ -390,6 +400,7 @@ struct update_states_kernel {
       const int width,
       const int conv_elems,
       const int32_t* query_start_loc,
+      const int* token_indx,
       const int batch_size)
       : conv_states(conv_states),
         conv_states_stride_0(conv_states_stride_0),
@@ -398,6 +409,7 @@ struct update_states_kernel {
         width(width),
         conv_elems(conv_elems),
         query_start_loc(query_start_loc),
+        token_indx(token_indx),
         batch_size(batch_size) {}
 
   static inline sycl::nd_range<3>
@@ -411,6 +423,7 @@ struct update_states_kernel {
 
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<3> item) const {
+    return;
     const int batch_id = item.get_group(0);
     const int width_id = item.get_group(1);
     const int local_group_id = item.get_group(2);
@@ -444,6 +457,7 @@ struct update_states_kernel {
   const int width;
   const int conv_elems;
   const int32_t* query_start_loc;
+  const int* token_indx;
   const int batch_size;
 };
 
@@ -464,11 +478,14 @@ void kernel_launcher(
     const int conv_states_stride_0,
     T* conv_states_tmp,
     int* query_start_loc,
+    int* token_indx,
     int* cache_indices,
     bool* has_initial_state,
+    int* num_accepted_tokens,
     const ActMode& act_mode,
     const int& pad_slot_id,
     const int& batch_size,
+    const int& num_virtual_tokens,
     const int& num_actual_tokens,
     const int& num_k_heads,
     const int& head_k_dim,
@@ -477,9 +494,10 @@ void kernel_launcher(
     const int& qkvz_elems,
     const int& conv_elems,
     const int& num_prefills,
-    const int& num_decodes) {
+    const int& num_decodes,
+    const int& num_spec_decodes) {
   using KERNEL_MAIN = causal_conv1d_kernel<T, Width, ReorderInput>;
-  auto range_main = KERNEL_MAIN::get_nd_range(num_actual_tokens, qkvz_elems);
+  auto range_main = KERNEL_MAIN::get_nd_range(num_virtual_tokens, qkvz_elems);
   assert(head_k_dim % KERNEL_MAIN::elems_per_item == 0);
   assert(num_v_heads % KERNEL_MAIN::elems_per_item == 0);
   queue.submit([&](sycl::handler& cgh) {
@@ -498,11 +516,14 @@ void kernel_launcher(
         conv_states_stride_0,
         conv_states_tmp,
         query_start_loc,
+        token_indx,
         cache_indices,
         has_initial_state,
+        num_accepted_tokens,
         act_mode,
         pad_slot_id,
         batch_size,
+        num_virtual_tokens,
         num_actual_tokens,
         num_k_heads,
         head_k_dim,
@@ -525,6 +546,7 @@ void kernel_launcher(
           Width,
           conv_elems,
           query_start_loc,
+          token_indx,
           batch_size);
       cgh.parallel_for(range_update, task);
     });
@@ -533,16 +555,16 @@ void kernel_launcher(
 
 void causal_conv1d(
     sycl::queue& queue,
-    torch::Tensor& q_out,  // [total_seqlen, num_k_heads, head_k_dim]
-    torch::Tensor& k_out,  // [total_seqlen, num_k_heads, head_k_dim]
-    torch::Tensor& v_out,  // [total_seqlen, num_v_heads, head_v_dim]
-    torch::Tensor& z_out,  // [total_seqlen, num_v_heads, head_v_dim]
-    torch::Tensor& b_out,  // [total_seqlen, num_v_heads]
-    torch::Tensor& a_out,  // [total_seqlen, num_v_heads]
+    torch::Tensor& q_out,  // [num_virtual_tokens, num_k_heads, head_k_dim]
+    torch::Tensor& k_out,  // [num_virtual_tokens, num_k_heads, head_k_dim]
+    torch::Tensor& v_out,  // [num_virtual_tokens, num_v_heads, head_v_dim]
+    torch::Tensor& z_out,  // [num_actual_tokens, num_v_heads, head_v_dim]
+    torch::Tensor& b_out,  // [num_virtual_tokens, num_v_heads]
+    torch::Tensor& a_out,  // [num_virtual_tokens, num_v_heads]
     const torch::Tensor&
-        mixed_qkvz,  // [total_seqlen, num_k_heads * (2 * head_k_dim + 2 *
+        mixed_qkvz,  // [num_actual_tokens, num_k_heads * (2 * head_k_dim + 2 *
                      // head_v_dim * num_v_heads / num_k_heads)]
-    const torch::Tensor& mixed_ba,  // [total_seqlen, num_k_heads * (2 *
+    const torch::Tensor& mixed_ba,  // [num_actual_tokens, num_k_heads * (2 *
                                     // num_v_heads / num_k_heads)]
     const torch::Tensor&
         conv_weights,  // [num_k_heads * (2 * head_k_dim + head_v_dim *
@@ -553,21 +575,23 @@ void causal_conv1d(
     torch::Tensor&
         conv_states,  // [cache_batch_size, width - 1, num_k_heads * (2 *
                       // head_k_dim + head_v_dim * num_v_heads / num_k_heads)]
-    const torch::Tensor& query_start_loc,  // [batch_size + 1]
-    const torch::Tensor& cache_indices,    // [batch_size]
-    const std::optional<torch::Tensor>&
-        has_initial_state,    // [batch_size] or None
+    const std::optional<torch::Tensor>& query_start_loc,  // [batch_size + 1]
+    const std::optional<torch::Tensor>& token_indx,    // [num_virtual_tokens] or None
+    const std::optional<torch::Tensor>& cache_indices,    // [batch_size]
+    const std::optional<torch::Tensor>& has_initial_state,    // [batch_size] or None
+    const std::optional<torch::Tensor>& num_accepted_tokens,    // [batch_size] or None
     const ActMode& act_mode,  // silu or swish
     const int& pad_slot_id,   // -1
     const int num_prefills,
     const int num_decodes,
+    const int num_spec_decodes,
     const bool reorder_input) {
-  if (num_prefills == 0 && num_decodes == 0) {
-    return;
-  }
 
-  const int batch_size = query_start_loc.size(0) - 1;
-  const int num_actual_tokens = q_out.size(0);
+  TORCH_CHECK(query_start_loc.has_value() && cache_indices.has_value());
+
+  const int batch_size = query_start_loc->size(0) - 1;
+  const int num_virtual_tokens = q_out.size(0);
+  const int num_actual_tokens = mixed_qkvz.size(0);
   const int num_k_heads = q_out.size(1);
   const int head_k_dim = q_out.size(2);
   const int num_v_heads = v_out.size(1);
@@ -601,14 +625,21 @@ void causal_conv1d(
       reinterpret_cast<scalar_t*>(conv_states.data_ptr()),         \
       conv_states_stride_0,                                        \
       reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),     \
-      reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
-      reinterpret_cast<int*>(cache_indices.data_ptr()),            \
+      reinterpret_cast<int*>(query_start_loc->data_ptr()),         \
+      token_indx.has_value()                                       \
+          ? reinterpret_cast<int*>(token_indx->data_ptr())         \
+          : nullptr,                                               \
+      reinterpret_cast<int*>(cache_indices->data_ptr()),           \
       has_initial_state.has_value()                                \
           ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
+          : nullptr,                                               \
+      num_accepted_tokens.has_value()                              \
+          ? reinterpret_cast<int*>(num_accepted_tokens->data_ptr())\
           : nullptr,                                               \
       act_mode,                                                    \
       pad_slot_id,                                                 \
       batch_size,                                                  \
+      num_virtual_tokens,                                          \
       num_actual_tokens,                                           \
       num_k_heads,                                                 \
       head_k_dim,                                                  \
@@ -617,7 +648,8 @@ void causal_conv1d(
       qkvz_elems,                                                  \
       conv_elems,                                                  \
       num_prefills,                                                \
-      num_decodes);
+      num_decodes,                                                 \
+      num_spec_decodes);
 
 #define WIDTH_DISPATCH(scalar_t, width, reorder_input) \
   switch (width) {                                     \
