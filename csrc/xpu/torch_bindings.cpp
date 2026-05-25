@@ -73,6 +73,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "multimodal_rotary_embedding", torch::kXPU, &multimodal_rotary_embedding);
 
   xpu_ops.def(
+      "mhc_pre(Tensor residual, Tensor fn, Tensor hc_scale, Tensor hc_base, "
+      "float rms_eps, float hc_pre_eps, float hc_sinkhorn_eps, "
+      "float hc_post_mult_value, int sinkhorn_repeat) "
+      "-> (Tensor, Tensor, Tensor)");
+  xpu_ops.impl("mhc_pre", torch::kXPU, &mhc_pre);
+
+  xpu_ops.def(
+      "mhc_post(Tensor x, Tensor residual, Tensor post_layer_mix, "
+      "Tensor comb_res_mix) -> Tensor");
+  xpu_ops.impl("mhc_post", torch::kXPU, &mhc_post);
+
+  xpu_ops.def(
+      "hc_head_fused(Tensor hs_flat, Tensor fn, Tensor hc_scale, "
+      "Tensor hc_base, Tensor(a!) out, int hidden_size, "
+      "float rms_eps, float hc_eps, int hc_mult) -> ()");
+  xpu_ops.impl("hc_head_fused", torch::kXPU, &hc_head_fused);
+
+  xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
       "indices, float scale) -> ()");
   xpu_ops.impl("bgmv_shrink", torch::kXPU, &bgmv_shrink);

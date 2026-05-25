@@ -85,6 +85,34 @@ void multimodal_rotary_embedding(
     bool is_neox,
     std::vector<int64_t> mrope_section);  // host int list [num_mrope_sections]
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
+    const at::Tensor& residual,
+    const at::Tensor& fn,
+    const at::Tensor& hc_scale,
+    const at::Tensor& hc_base,
+    double rms_eps,
+    double hc_pre_eps,
+    double hc_sinkhorn_eps,
+    double hc_post_mult_value,
+    int64_t sinkhorn_repeat);
+
+torch::Tensor mhc_post(
+    const at::Tensor& x,
+    const at::Tensor& residual,
+    const at::Tensor& post_layer_mix,
+    const at::Tensor& comb_res_mix);
+
+void hc_head_fused(
+    const at::Tensor& hs_flat,
+    const at::Tensor& fn,
+    const at::Tensor& hc_scale,
+    const at::Tensor& hc_base,
+    at::Tensor& out,
+    int64_t hidden_size,
+    double rms_eps,
+    double hc_eps,
+    int64_t hc_mult);
+
 #ifdef VLLM_GDN_ENABLED
 void gdn_attention(
     torch::Tensor& core_attn_out,
