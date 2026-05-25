@@ -303,9 +303,6 @@ def flash_attn_varlen_func_CalKernelTime(
             return_softmax_lse and dropout_p > 0,
             None,
             num_splits_kv,
-            is_mix_batch,
-            splits_per_seq_dev,
-            work_list_dev,
         )
         if end_event is not None:
             end_event.record()
