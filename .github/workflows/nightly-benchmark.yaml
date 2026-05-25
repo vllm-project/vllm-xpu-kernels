@@ -17,6 +17,10 @@ on:
       test_workflow_run_id:
         description: 'Optional run id for the unit-test workflow that produced xpu-kernel-wheel'
         required: false
+      update_baseline:
+        description: 'Accept this run''s results as the new main baseline (skips regression failure; only effective on the default branch)'
+        required: false
+        default: 'false'
   pull_request:
     branches: [main]
     types: [labeled]
@@ -462,12 +466,19 @@ jobs:
 
       - name: Compare with main baseline
         run: |
+          # update_baseline accepts the current numbers, so don't fail on regression.
+          FAIL_FLAG="--fail-on-regression"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
+             [ "${{ github.event.inputs.update_baseline }}" = "true" ]; then
+            FAIL_FLAG=""
+            echo "update_baseline requested: comparing without failing on regression."
+          fi
           python tools/benchmark_ci.py compare \
             --current "${{ env.BENCHMARK_RESULTS_DIR }}/results.jsonl" \
             --baseline "benchmark-baseline/results.jsonl" \
             --threshold "${{ env.REGRESSION_THRESHOLD }}" \
             --output-dir "${{ env.BENCHMARK_RESULTS_DIR }}" \
-            --fail-on-regression
+            ${FAIL_FLAG}
 
       - name: Upload benchmark results to database
         if: always()
@@ -534,9 +545,14 @@ jobs:
       - name: Prepare next baseline
         if: |
           success() &&
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.event == 'schedule' &&
-          github.event.workflow_run.head_branch == github.event.repository.default_branch
+          (
+            (github.event_name == 'workflow_run' &&
+             github.event.workflow_run.event == 'schedule' &&
+             github.event.workflow_run.head_branch == github.event.repository.default_branch) ||
+            (github.event_name == 'workflow_dispatch' &&
+             github.event.inputs.update_baseline == 'true' &&
+             github.ref_name == github.event.repository.default_branch)
+          )
         run: |
           rm -rf benchmark-baseline
           mkdir -p benchmark-baseline
@@ -547,9 +563,14 @@ jobs:
       - name: Save next main benchmark baseline
         if: |
           success() &&
-          github.event_name == 'workflow_run' &&
-          github.event.workflow_run.event == 'schedule' &&
-          github.event.workflow_run.head_branch == github.event.repository.default_branch
+          (
+            (github.event_name == 'workflow_run' &&
+             github.event.workflow_run.event == 'schedule' &&
+             github.event.workflow_run.head_branch == github.event.repository.default_branch) ||
+            (github.event_name == 'workflow_dispatch' &&
+             github.event.inputs.update_baseline == 'true' &&
+             github.ref_name == github.event.repository.default_branch)
+          )
         uses: actions/cache/save@v4
         with:
           path: benchmark-baseline
