@@ -180,7 +180,9 @@ void per_token_group_quant_fp8(
     double eps,
     double fp8_min,
     double fp8_max,
-    bool scale_ue8m0);
+    bool scale_ue8m0,
+    bool dummy_is_scale_transposed = false,
+    bool dummy_is_tma_aligned = false);
 
 void per_token_group_quant_mxfp4(
     const torch::Tensor& input,

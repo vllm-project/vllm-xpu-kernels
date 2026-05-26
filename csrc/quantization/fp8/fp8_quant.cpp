@@ -608,7 +608,9 @@ void per_token_group_quant_fp8(
     double eps,
     double fp8_min,
     double fp8_max,
-    bool scale_ue8m0) {
+    bool scale_ue8m0,
+    bool dummy_is_scale_transposed,
+    bool dummy_is_tma_aligned) {
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(output_q.is_contiguous());
 
