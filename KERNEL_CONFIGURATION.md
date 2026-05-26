@@ -1,12 +1,8 @@
 # vLLM-XPU Kernel Configuration Guide
 
-When running vLLM with XPU kernels, you may encounter errors like:
-
-```
-❌ Chunk prefill kernel tuple not compiled for this configuration.
-```
-
-This guide explains how to configure which kernels are compiled and how to fix missing kernel configurations.
+vLLM-XPU selectively compiles attention kernel variants at build time. This
+reduces build time and binary size, but means you may need to recompile if your
+model requires a kernel combination that was not included in the build.
 
 ---
 
@@ -15,9 +11,13 @@ This guide explains how to configure which kernels are compiled and how to fix m
 1. [Quick Start](#quick-start)
 2. [Kernel Types](#kernel-types)
 3. [Configuration Presets](#configuration-presets)
-4. [Bool Combinations](#bool-combinations)
-5. [Custom Configuration](#custom-configuration)
-6. [Build & Install](#build--install)
+4. [Config File Format](#config-file-format)
+5. [How to Determine Your Model's Config](#how-to-determine-your-models-config)
+6. [Bool Combinations](#bool-combinations)
+7. [Custom Configuration](#custom-configuration)
+8. [Build & Install](#build--install)
+9. [Troubleshooting](#troubleshooting)
+10. [Performance Notes](#performance-notes)
 
 ---
 
@@ -25,17 +25,36 @@ This guide explains how to configure which kernels are compiled and how to fix m
 
 ### If you see a kernel missing error:
 
-**Option A: Use the full preset (recommended for first-time setup)**
-
-```bash
-# Recompile with all kernels enabled
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf pip install .
+```
+❌ Chunk prefill kernel tuple not compiled for this configuration.
 ```
 
-**Option B: Customize to your models**
-1. Identify your model's head_size and required bool combinations (see section below)
-2. Create a custom config file in `csrc/xpu/attn/kernel_configs/`
-3. Rebuild with that config
+**Option A: Use the full preset — builds all kernel variants (~60 min)**
+
+```bash
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf \
+VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf \
+  pip install .
+```
+
+**Option B: Use the default preset — Llama / Qwen / DeepSeek only (~2 min)**
+
+```bash
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf \
+VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf \
+  pip install .
+```
+
+**Option C: Custom config — add only the missing combination**
+
+The error message tells you exactly which line to add. For example:
+
+```
+Add this line to your chunk_prefill config file:
+  128,true,true,false,false,false
+Then rebuild:
+  VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf pip install .
+```
 
 ---
 
@@ -43,80 +62,145 @@ VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf VLLM_PAGED_DECODE_CONFIG=paged
 
 vLLM-XPU has two main kernel categories:
 
-### 1. **Chunk Prefill** (Prompt Processing)
-- Used when processing prompt tokens
-- Configuration: `VLLM_CHUNK_PREFILL_CONFIG`
-- Bool parameters: `paged`, `causal`, `local`, `sink`, `lse`
+### 1. Chunk Prefill (Prompt Processing)
 
-### 2. **Paged Decode** (Token Generation)
-- Used when generating tokens one-by-one
-- Configuration: `VLLM_PAGED_DECODE_CONFIG`
-- Bool parameters: `causal`, `local`, `sink`
+- Used when processing prompt tokens
+- Configured via: `VLLM_CHUNK_PREFILL_CONFIG`
+- Parameters: `headsize`, `paged`, `causal`, `local`, `sink`, `lse`
+
+### 2. Paged Decode (Token Generation)
+
+- Used when generating tokens one by one
+- Configured via: `VLLM_PAGED_DECODE_CONFIG`
+- Parameters: `qgroup`, `headsize`, `pagesize`, `causal`, `local`, `sink`
 
 ---
 
 ## Configuration Presets
 
-Configuration files are located in: `csrc/xpu/attn/kernel_configs/`
+Config files are located in `csrc/xpu/attn/kernel_configs/`.
 
-### Chunk Prefill Presets
+### Chunk Prefill
 
-| Preset | File | Kernels | Use Case |
-|--------|------|---------|----------|
-| `full` | `chunk_prefill_full.conf` | 216 | All combinations |
-| `default` | `chunk_prefill_default.conf` | 9 | Llama, Qwen, DeepSeek MLA (default) |
+| File | Kernels | Use Case |
+|------|---------|----------|
+| `chunk_prefill_full.conf` | 216 | All combinations — supports every model |
+| `chunk_prefill_default.conf` | 9 | Llama, Qwen, DeepSeek MLA (default build) |
 
-### Paged Decode Presets
+### Paged Decode
 
-| Preset | File | Kernels | Use Case |
-|--------|------|---------|----------|
-| `full` | `paged_decode_full.conf` | 384 | All combinations |
-| `default` | `paged_decode_default.conf` | 11 | Llama, Qwen, DeepSeek MLA (default) |
+| File | Kernels | Use Case |
+|------|---------|----------|
+| `paged_decode_full.conf` | 384 | All combinations — supports every model |
+| `paged_decode_default.conf` | 11 | Llama, Qwen, DeepSeek MLA (default build) |
 
-### Recommended Combinations
+### Recommended Config per Model Family
 
-| Model Family | Head Sizes | Chunk Prefill Config | Paged Decode Config |
-|--------------|-----------|--------|----------|
-| Llama 2/3, Qwen, Mistral | 128 | `default` | `default` |
-| DeepSeek (MLA) | 192 | `default` | `default` |
-| Mixed / other models | Multiple | `full` | `full` |
+| Model Family | head_size | Chunk Prefill | Paged Decode |
+|--------------|-----------|---------------|--------------|
+| Llama-2/3, Qwen, Mistral | 128 | `default` | `default` |
+| DeepSeek-V2/V3/R1 (MLA) | 192 | `default` | `default` |
+| Gemma-2 | 256 | `full` | `full` |
+| Mixed / other models | multiple | `full` | `full` |
+
+---
+
+## Config File Format
+
+### Chunk Prefill
+
+```
+# Lines starting with # are comments. Empty lines are ignored.
+# Use 'all' to build everything (same as chunk_prefill_full.conf).
+
+# Format: headsize,paged,causal,local,sink,lse
+128,true,true,false,false,false
+128,false,true,false,false,false
+128,false,true,false,false,true   # lse=true: only valid when paged=false,local=false,sink=false
+192,true,true,false,false,false
+```
+
+**Parameters:**
+- `headsize` — head dimension: `64`, `96`, `128`, `192`, `256`, or `512`
+- `paged` — whether paged KV cache is used
+- `causal` — whether causal masking is applied
+- `local` — whether sliding window attention is used
+- `sink` — whether StreamingLLM attention sinks are used
+- `lse` — whether log-sum-exp is output (requires `paged=false`, `local=false`, `sink=false`)
+
+If boolean flags are omitted, all 18 valid combinations are generated for that headsize.
+
+### Paged Decode
+
+```
+# Lines starting with # are comments. Empty lines are ignored.
+# Use 'all' to build everything (same as paged_decode_full.conf).
+
+# Format: qgroup,headsize,pagesize[,causal,local,sink]
+# If causal/local/sink are omitted, all 8 bool combinations are generated.
+8,128,16,true,false,false
+8,128,32,true,false,false
+8,128,64,true,false,false
+
+# Omit bool flags to generate all 8 combinations for this shape:
+8,192,16
+```
+
+**Parameters:**
+- `qgroup` — GQA group size bucket: `8` (ratio ≤ 8) or `16` (ratio 9–16)
+- `headsize` — head dimension: `64`, `96`, `128`, `192`, `256`, or `512`
+- `pagesize` — KV cache block size: `16`, `32`, `64`, or `128`
+- `causal` — whether causal masking is used (almost always `true` for decode)
+- `local` — whether sliding window attention is used
+- `sink` — whether StreamingLLM attention sinks are used
+
+---
+
+## How to Determine Your Model's Config
+
+For a given model you need:
+1. **head_size**: `hidden_size / num_attention_heads`
+2. **GQA ratio** (decode only): `num_attention_heads / num_key_value_heads` → qgroup `8` (ratio ≤ 8) or `16` (ratio 9–16)
+3. **page_size** (decode only): your vLLM deployment's `--block-size` (default: 16)
+
+Common model parameters:
+
+| Model | head_size | GQA ratio | qgroup |
+|-------|-----------|-----------|--------|
+| Llama-3-8B | 128 | 1 (MHA) | 8 |
+| Llama-3-70B | 128 | 8 | 8 |
+| Qwen2-72B | 128 | 8 | 8 |
+| Qwen3-30B-A3B | 128 | 4 | 8 |
+| DeepSeek-V3 (MLA) | 128 + 192 | varies | 8 |
+| Gemma-2-27B | 256 | 2 | 8 |
+| Mistral-7B | 128 | 8 | 8 |
 
 ---
 
 ## Bool Combinations
 
-### Chunk Prefill: 5 Bool Parameters
+### Chunk Prefill: 5 Bool Parameters (`paged`, `causal`, `local`, `sink`, `lse`)
 
-```
-(paged, causal, local, sink, lse)
-```
-
-**Constraints:**
-- `lse` (Log-Sum-Exp) requires: `paged=false`, `local=false`, `sink=false`
-  - Used for distributed attention merging (chunked prefill states)
-  - Cannot combine with paging, sliding window (local), or sink tokens
+**LSE constraint:** `lse=true` is only valid when `paged=false`, `local=false`, `sink=false`.
+It is used for distributed attention merging (chunked prefill states).
 
 | paged | causal | local | sink | lse | Valid? | Use Case |
 |-------|--------|-------|------|-----|--------|----------|
-| true | true | false | false | false | ✅ | Paged KV cache (decode-like) |
-| false | true | false | false | false | ✅ | Initial prompt, no paging |
-| false | true | false | false | true | ✅ | Chunked prefill state merge |
-| false | true | true | false | false | ✅ | Sliding window attention |
-| false | true | true | true | false | ✅ | Sliding window + sink tokens |
-| false | true | false | true | false | ✅ | Sink token optimization |
-| true | true | true | \* | \* | ❌ | LSE incompatible |
-| *|* | *|* | true | ❌ | LSE requires constraints |
+| true  | true   | false | false | false | ✅ | Paged KV cache |
+| false | true   | false | false | false | ✅ | Initial prompt, no paging |
+| false | true   | false | false | true  | ✅ | Chunked prefill state merge |
+| false | true   | true  | false | false | ✅ | Sliding window attention |
+| false | true   | true  | true  | false | ✅ | Sliding window + sink tokens |
+| false | true   | false | true  | false | ✅ | Sink token optimization |
+| any   | any    | any   | any   | true  | ❌ | LSE requires paged=false, local=false, sink=false |
 
-### Paged Decode: 3 Bool Parameters
+### Paged Decode: 3 Bool Parameters (`causal`, `local`, `sink`)
 
-```
-(causal, local, sink)
-```
-
-**Typical combinations:**
-- `(true, false, false)` - Standard causal (most common)
-- `(true, true, false)` - Sliding window
-- `(true, true, true)` - Sliding window + sink tokens
+| causal | local | sink | Use Case |
+|--------|-------|------|----------|
+| true   | false | false | Standard causal (most common) |
+| true   | true  | false | Sliding window (Mistral, Qwen long-context) |
+| true   | true  | true  | Sliding window + sink tokens |
 
 ---
 
@@ -124,27 +208,24 @@ Configuration files are located in: `csrc/xpu/attn/kernel_configs/`
 
 ### Step 1: Identify Your Requirements
 
-Determine what `head_size` and bool combinations you need:
-
 ```python
-# Pseudo-code to identify requirements
-for model in models:
-    head_size = model.hidden_size // model.num_heads
-    causal = True  # Most models use causal attention
-    local = model.has_sliding_window  # e.g., Mistral, Qwen
-    sink = model.has_sink_tokens  # e.g., some attention variants
-    paged = True  # Usually enable paged decode
-    lse = model.uses_distributed_attention  # e.g., multi-GPU prefill merge
+# Pseudo-code
+head_size = model.hidden_size // model.num_heads
+causal    = True                          # most language models
+local     = model.has_sliding_window      # e.g. Mistral, Qwen
+sink      = model.has_sink_tokens
+paged     = True                          # standard vLLM KV cache
+lse       = model.uses_distributed_attn  # multi-GPU chunked prefill merge
+
+qgroup    = 8 if (num_q_heads / num_kv_heads) <= 8 else 16
+page_size = 64  # default vLLM-xpu --block-size
 ```
 
-### Step 2: Create a Config File
+### Step 2: Create Config Files
 
-Create `csrc/xpu/attn/kernel_configs/chunk_prefill_custom.conf`:
+`csrc/xpu/attn/kernel_configs/chunk_prefill_custom.conf`:
 
 ```conf
-# Example: Llama + DeepSeek + Mistral
-# Format: head_size,paged,causal,local,sink,lse
-
 # Llama / Qwen (head_size=128)
 128,true,true,false,false,false
 128,false,true,false,false,false
@@ -159,73 +240,77 @@ Create `csrc/xpu/attn/kernel_configs/chunk_prefill_custom.conf`:
 192,false,true,false,false,true
 ```
 
-For paged_decode, create `csrc/xpu/attn/kernel_configs/paged_decode_custom.conf`:
+`csrc/xpu/attn/kernel_configs/paged_decode_custom.conf`:
 
 ```conf
-# Format: head_size,causal,local,sink
+# Format: qgroup,headsize,pagesize,causal,local,sink
 
-# Standard causal (most models)
-128,true,false,false
-192,true,false,false
+# Llama / Qwen — standard causal, page size 16 and 64
+8,128,16,true,false,false
+8,128,64,true,false,false
 
-# With sliding window
-128,true,true,false
-192,true,true,false
+# DeepSeek MLA
+8,192,16,true,false,false
+8,192,64,true,false,false
+
+# With sliding window (uncomment if needed)
+# 8,128,16,true,true,false
 ```
 
-### Step 3: Rebuild with Custom Config
+### Step 3: Rebuild
 
 ```bash
-# Chunk prefill with custom config
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_custom.conf pip install .
-
-# Or both at once
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_custom.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_custom.conf pip install .
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_custom.conf \
+VLLM_PAGED_DECODE_CONFIG=paged_decode_custom.conf \
+  pip install .
 ```
 
 ---
 
 ## Build & Install
 
-### Basic Installation
+### Via environment variable (pip)
 
 ```bash
-# Default (builds all kernel variants — full config)
+# Default build (full config — all kernel variants)
 pip install .
-
-# With explicit full config (same as above)
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf pip install .
 
 # Optimized build (Llama/Qwen/DeepSeek only, ~97% fewer kernels)
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf pip install .
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf \
+VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf \
+  pip install .
 
-# With custom configs
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_custom.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_custom.conf pip install .
+# Full config (explicit)
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf \
+VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf \
+  pip install .
+
+# Custom config
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_custom.conf \
+VLLM_PAGED_DECODE_CONFIG=paged_decode_custom.conf \
+  pip install .
 ```
 
-### What Preset Should I Use?
-
-**Full build (default — all combinations, all models):**
+Shorthand names (without `.conf`) are resolved automatically:
 
 ```bash
-pip install .
-# Or explicitly:
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf pip install .
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default \
+VLLM_PAGED_DECODE_CONFIG=paged_decode_full \
+  pip install .
 ```
 
-- Compiles all kernels (216 for chunk prefill, 384 for paged decode)
-- Build time: ~30 minutes
-- Supports all models without recompilation
-
-**Optimized build (Llama/Qwen/DeepSeek, ~97% fewer kernels):**
+### Via CMake directly
 
 ```bash
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf pip install .
-```
+cmake -DVLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default \
+      -DVLLM_PAGED_DECODE_CONFIG=paged_decode_full \
+      ...
 
-- Compiles only 6 kernels per kernel type
-- Build time: ~2 minutes
-- If a missing-kernel error occurs, rebuild with `full` or a custom config
+# Or with a full path:
+cmake -DVLLM_CHUNK_PREFILL_CONFIG=/path/to/custom_prefill.conf \
+      -DVLLM_PAGED_DECODE_CONFIG=/path/to/custom_decode.conf \
+      ...
+```
 
 ---
 
@@ -233,52 +318,59 @@ VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf VLLM_PAGED_DECODE_CONFIG=pa
 
 ### Error: "Chunk prefill kernel not compiled for this configuration"
 
-**Problem:** The head_size for your model is not in the config.
-
-**Solution:**
+**Cause:** The `head_size` for your model is not in the config.
 
 ```bash
-# Option 1: Use full config
+# Option 1: Full config (all head sizes)
 VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf pip install .
 
-# Option 2: Add your head_size to a config file and rebuild
-# Edit csrc/xpu/attn/kernel_configs/chunk_prefill_custom.conf and add:
-#   your_head_size,true,true,false,false,false
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_custom.conf pip install .
+# Option 2: Add the head_size to your config and rebuild
+# Edit csrc/xpu/attn/kernel_configs/chunk_prefill_default.conf, add:
+#   <your_head_size>,true,true,false,false,false
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf pip install .
 ```
 
 ### Error: "Chunk prefill kernel tuple not compiled for this configuration"
 
-**Problem:** The bool combination (paged/causal/local/sink/lse) for your model is not compiled.
-
-**Solution:**
+**Cause:** The bool combination (`paged`/`causal`/`local`/`sink`/`lse`) is not compiled for this head_size.
+The error message prints the exact config line to add.
 
 ```bash
-# Option 1: Use full config
+# Option 1: Full config
 VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf pip install .
 
-# Option 2: Add the bool combination to your config file
-# Edit csrc/xpu/attn/kernel_configs/chunk_prefill_custom.conf and add:
-#   head_size,your_paged,your_causal,your_local,your_sink,your_lse
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_custom.conf pip install .
+# Option 2: Add the specific line printed in the error message
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf pip install .
 ```
 
-### How do I check which configs are compiled?
+### Error: "Paged decode kernel not compiled for this configuration"
 
-Check the CMake output during build:
+**Cause:** The `(qgroup, headsize, pagesize)` combination is not in the config.
 
 ```bash
-# Look for lines like:
-# -- Generated chunk_prefill kernel sources: 6 files 
-#    (config: .../chunk_prefill_default.conf)
-# -- Generated paged_decode kernel sources: 384 files 
-#    (config: .../paged_decode_full.conf)
+# Option 1: Full config
+VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf pip install .
+
+# Option 2: Add the line printed in the error message
+VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf pip install .
 ```
 
-Or inspect the generated header:
+### How to check which configs were compiled
+
+CMake prints a summary during build:
+
+```
+-- Generated chunk_prefill kernel sources: 9 files
+   (config: .../chunk_prefill_default.conf)
+-- Generated paged_decode kernel sources: 384 files
+   (config: .../paged_decode_full.conf)
+```
+
+Inspect the generated policy-availability headers directly:
 
 ```bash
 cat build/temp_template/csrc/xpu/attn/xe_2/chunk_prefill_enabled_policies_gen.hpp
+cat build/temp_template/csrc/xpu/attn/xe_2/paged_decode_enabled_policies_gen.hpp
 ```
 
 ---
@@ -287,25 +379,29 @@ cat build/temp_template/csrc/xpu/attn/xe_2/chunk_prefill_enabled_policies_gen.hp
 
 ### Build Time vs Runtime Flexibility
 
-| Config | Build Time | Kernels | Flexibility |
-|--------|-----------|---------|-------------|
-| `default` | ~2 min | ~6 | Llama, Qwen, DeepSeek MLA |
-| `full` | ~30 min | ~216+ | All models |
+| Config | Build Time | Chunk Prefill Kernels | Paged Decode Kernels | Flexibility |
+|--------|------------|----------------------|----------------------|-------------|
+| `default` | ~2 min | 9 | 11 | Llama, Qwen, DeepSeek MLA |
+| `full` | ~60 min | 216 | 384 | All models |
 
 ### Binary Size Impact
 
-- Each unique (head_size, bool-combination) → ~500KB-2MB compiled kernel
-- `default`: ~3MB | `full`: ~100MB+
+- Each unique (head_size, bool-combination) → ~500 KB–2 MB compiled kernel
+- `default`: ~5 MB | `full`: ~100 MB+
 
 ### Recommendation
 
-- **Development / CI**: Use `full` for broad compatibility
-- **Production (known models)**: Use `default` or a custom config for faster builds
+| Scenario | Config |
+|----------|--------|
+| Development / first-time setup | `full` |
+| CI/CD (broad compatibility) | `full` |
+| Production (Llama / Qwen / DeepSeek) | `default` |
+| Production (other or unknown models) | `full` or custom |
 
 ---
 
-## Further Reading
+## Implementation References
 
-- For implementation details: See `csrc/xpu/attn/xe_2/chunk_prefill_configure.cmake`
-- Config file format: See `csrc/xpu/attn/kernel_configs/chunk_prefill_full.conf`
-- Runtime error paths: See `csrc/xpu/attn/xe_2/chunk_prefill_utils.hpp`
+- Config file parsing: `csrc/xpu/attn/xe_2/chunk_prefill_configure.cmake`, `paged_decode_configure.cmake`
+- Runtime policy checks: `csrc/xpu/attn/xe_2/chunk_prefill_utils.hpp`, `paged_decode_utils.hpp`
+- Config files: `csrc/xpu/attn/kernel_configs/`
