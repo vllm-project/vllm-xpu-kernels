@@ -45,7 +45,7 @@ function(_paged_decode_parse_config CONFIG_FILE OUT_TUPLES OUT_IS_FULL)
     message(
       FATAL_ERROR
         "Paged decode kernel config not found: ${CONFIG_FILE}\n"
-        "Available presets: full.conf, common.conf, llama.conf, qwen.conf, deepseek.conf\n"
+        "Available presets: paged_decode_full.conf, paged_decode_default.conf\n"
         "Set via: cmake -DVLLM_PAGED_DECODE_CONFIG=<path>")
   endif()
 

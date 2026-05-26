@@ -34,9 +34,11 @@ VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf VLLM_PAGED_DECODE_CONFIG=pa
 
 ### DeepSeek
 
+DeepSeek MLA (head_size=192) is already included in `default`. Use the same command as above:
+
 ```bash
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_deepseek.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_deepseek.conf pip install .
-# ~3 min build time
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf pip install .
+# ~2 min build time
 ```
 
 ### Mixed / Custom Models

@@ -88,7 +88,7 @@ if(VLLM_PAGED_DECODE_CONFIG AND NOT IS_ABSOLUTE "${VLLM_PAGED_DECODE_CONFIG}")
   )
 endif()
 
-# Default to common model config if not specified
+# Default to full config if not specified
 if(NOT VLLM_PAGED_DECODE_CONFIG OR "${VLLM_PAGED_DECODE_CONFIG}" STREQUAL "")
   set(VLLM_PAGED_DECODE_CONFIG
       "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/kernel_configs/paged_decode_full.conf"
@@ -114,7 +114,7 @@ if(VLLM_CHUNK_PREFILL_CONFIG AND NOT IS_ABSOLUTE "${VLLM_CHUNK_PREFILL_CONFIG}")
   )
 endif()
 
-# Default to common model config if not specified
+# Default to full config if not specified
 if(NOT VLLM_CHUNK_PREFILL_CONFIG OR "${VLLM_CHUNK_PREFILL_CONFIG}" STREQUAL "")
   set(VLLM_CHUNK_PREFILL_CONFIG
       "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/kernel_configs/chunk_prefill_full.conf"

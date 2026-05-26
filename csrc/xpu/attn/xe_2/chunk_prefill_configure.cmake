@@ -36,7 +36,7 @@ function(_chunk_prefill_parse_config CONFIG_FILE OUT_TUPLES OUT_IS_FULL)
     message(
       FATAL_ERROR
         "Chunk prefill kernel config not found: ${CONFIG_FILE}\n"
-        "Available presets: chunk_prefill_full.conf, chunk_prefill_common.conf\n"
+        "Available presets: chunk_prefill_full.conf, chunk_prefill_default.conf\n"
         "Set via: cmake -DVLLM_CHUNK_PREFILL_CONFIG=<path>")
   endif()
 

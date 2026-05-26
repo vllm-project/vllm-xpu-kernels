@@ -6,8 +6,8 @@ kernel variants are compiled. Configs are separated into two categories:
 - **Paged Decode** (`paged_decode_*.conf`) — decode-phase attention kernels
 - **Chunk Prefill** (`chunk_prefill_*.conf`) — prefill-phase attention kernels
 
-Using model-specific configs instead of the full configs can **reduce compile time
-by 80-95%** and produce significantly smaller binaries.
+Using the `default` config instead of `full` can **reduce compile time
+by ~97%** and produce significantly smaller binaries.
 
 ## Usage
 
@@ -15,8 +15,12 @@ by 80-95%** and produce significantly smaller binaries.
 
 ```bash
 # Shorthand (resolved to kernel_configs/ automatically)
-cmake -DVLLM_PAGED_DECODE_CONFIG=paged_decode_llama \
-      -DVLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_llama ...
+cmake -DVLLM_PAGED_DECODE_CONFIG=paged_decode_default \
+      -DVLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default ...
+
+# Or use full config (all kernel variants):
+cmake -DVLLM_PAGED_DECODE_CONFIG=paged_decode_full \
+      -DVLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full ...
 
 # Full path:
 cmake -DVLLM_PAGED_DECODE_CONFIG=/path/to/custom_decode.conf \
@@ -26,8 +30,13 @@ cmake -DVLLM_PAGED_DECODE_CONFIG=/path/to/custom_decode.conf \
 ### Via environment variable (with pip/setup.py):
 
 ```bash
-VLLM_PAGED_DECODE_CONFIG=paged_decode_llama \
-VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_llama \
+VLLM_PAGED_DECODE_CONFIG=paged_decode_default \
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default \
+  pip install -e .
+
+# Or full config:
+VLLM_PAGED_DECODE_CONFIG=paged_decode_full \
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full \
   pip install -e .
 ```
 
@@ -48,10 +57,7 @@ VLLM_CHUNK_PREFILL_CONFIG=/path/to/custom_prefill.conf \
 | Config | Kernels | Reduction | Models Covered |
 |--------|---------|-----------|----------------|
 | `paged_decode_full.conf` | 384 | 0% (baseline) | All possible combinations |
-| `paged_decode_common.conf` | ~20 | ~95% | Llama, Qwen, Mistral, DeepSeek, Gemma |
-| `paged_decode_llama.conf` | ~3 | ~99% | Llama-2, Llama-3, CodeLlama |
-| `paged_decode_qwen.conf` | ~3 | ~99% | Qwen2, Qwen2.5, Qwen3 |
-| `paged_decode_deepseek.conf` | ~6 | ~98% | DeepSeek-V2, V3, R1 |
+| `paged_decode_default.conf` | 11 | ~99% | Llama, Qwen, DeepSeek MLA |
 
 ### Config File Format
 
@@ -89,10 +95,7 @@ VLLM_CHUNK_PREFILL_CONFIG=/path/to/custom_prefill.conf \
 | Config | Kernels | Reduction | Models Covered |
 |--------|---------|-----------|----------------|
 | `chunk_prefill_full.conf` | 216 | 0% (baseline) | All possible combinations |
-| `chunk_prefill_common.conf` | ~12 | ~94% | Llama, Qwen, Mistral, DeepSeek, Gemma |
-| `chunk_prefill_llama.conf` | ~3 | ~99% | Llama-2, Llama-3, CodeLlama |
-| `chunk_prefill_qwen.conf` | ~3 | ~99% | Qwen2, Qwen2.5, Qwen3 |
-| `chunk_prefill_deepseek.conf` | ~6 | ~97% | DeepSeek-V2, V3, R1 |
+| `chunk_prefill_default.conf` | 9 | ~97% | Llama, Qwen, DeepSeek MLA |
 
 ### Config File Format
 
