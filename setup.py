@@ -337,7 +337,7 @@ class cmake_build_ext(build_ext):
                     # Continue with other libraries even if one fails
 
     def run(self):
-        self.build_temp = "build/temp_template"
+        self.build_temp = "build/temp"
         # First, run the standard build_ext command to compile the extensions
         super().run()
 
