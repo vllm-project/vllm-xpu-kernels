@@ -58,25 +58,24 @@ inline float sigmoid_accurate(float x) {
   return 1.f / (1.f + sycl::native::exp(-x));
 }
 
-
 template <typename T>
 inline T warp_reduce_max(sycl::sub_group sg, T val) {
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-        T other = sycl::select_from_group(sg, val, 
-            (sg.get_local_linear_id() ^ offset));
-        val = sycl::max(val, other);
-    }
-    return val;
+  for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+    T other =
+        sycl::select_from_group(sg, val, (sg.get_local_linear_id() ^ offset));
+    val = sycl::max(val, other);
+  }
+  return val;
 }
 
 template <typename T>
 inline T warp_reduce_min(sycl::sub_group sg, T val) {
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-        T other = sycl::select_from_group(sg, val,
-            (sg.get_local_linear_id() ^ offset));
-        val = sycl::min(val, other);
-    }
-    return val;
+  for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+    T other =
+        sycl::select_from_group(sg, val, (sg.get_local_linear_id() ^ offset));
+    val = sycl::min(val, other);
+  }
+  return val;
 }
 
 template <typename T>
