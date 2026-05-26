@@ -58,6 +58,27 @@ inline float sigmoid_accurate(float x) {
   return 1.f / (1.f + sycl::native::exp(-x));
 }
 
+
+template <typename T>
+inline T warp_reduce_max(sycl::sub_group sg, T val) {
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        T other = sycl::select_from_group(sg, val, 
+            (sg.get_local_linear_id() ^ offset));
+        val = sycl::max(val, other);
+    }
+    return val;
+}
+
+template <typename T>
+inline T warp_reduce_min(sycl::sub_group sg, T val) {
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        T other = sycl::select_from_group(sg, val,
+            (sg.get_local_linear_id() ^ offset));
+        val = sycl::min(val, other);
+    }
+    return val;
+}
+
 template <typename T>
 inline T apply_sigmoid(T val) {
   float f = xpu::to_float(val);
@@ -109,8 +130,7 @@ inline void reduceTopK(
       }
     }
     float local_best_val_tmp = xpu::to_float(local_best_val);
-    float warp_best_val_tmp = sycl::reduce_over_group(
-        subgroup, local_best_val_tmp, sycl::maximum<float>());
+    float warp_best_val_tmp = warp_reduce_max(subgroup, local_best_val_tmp);
 
     T warp_best_val = static_cast<T>(warp_best_val_tmp);
     IdxT warp_best_idx = invalid_idx;
@@ -118,8 +138,7 @@ inline void reduceTopK(
     if (local_best_pos != -1 && local_best_val == warp_best_val) {
       warp_best_idx = local_best_idx;
     }
-    warp_best_idx =
-        sycl::reduce_over_group(subgroup, warp_best_idx, sycl::minimum<IdxT>());
+    warp_best_idx = warp_reduce_min(subgroup, warp_best_idx);
 
     bool found = (warp_best_idx != invalid_idx);
     if (found) {
@@ -473,14 +492,12 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
                                            : std::numeric_limits<IdxT>::max();
 
         // Find the best value across all lanes
-        float bestVal =
-            sycl::reduce_over_group(subgroup, myVal, sycl::maximum<float>());
+        float bestVal = warp_reduce_max(subgroup, myVal);
 
         // Among lanes that have bestVal, pick smallest idx
         IdxT candidateIdx =
             (myVal == bestVal) ? myIdx : std::numeric_limits<IdxT>::max();
-        IdxT bestIdx = sycl::reduce_over_group(
-            subgroup, candidateIdx, sycl::minimum<IdxT>());
+        IdxT bestIdx = warp_reduce_min(subgroup, candidateIdx);
 
         globalTopIdx[k] = bestIdx;
 
@@ -537,8 +554,8 @@ void invokeNoAuxTc(
     int64_t const topk,
     bool const renormalize,
     double const routed_scaling_factor,
-    bool enable_pdl = false,
-    sycl::queue queue = sycl::queue()) {
+    bool enable_pdl,
+    sycl::queue& queue) {
   int64_t experts_per_group = num_experts / n_group;
   bool is_single_group =
       (n_group == 1) && (topk_group == 1) &&
@@ -628,7 +645,7 @@ void invokeNoAuxTc(
       bool const renormalize,                      \
       double const routed_scaling_factor,          \
       bool enable_pdl,                             \
-      sycl::queue queue);
+      sycl::queue& queue);
 
 INSTANTIATE_NOAUX_TC(float, float, int32_t, SCORING_SIGMOID);
 INSTANTIATE_NOAUX_TC(float, sycl::half, int32_t, SCORING_SIGMOID);
@@ -715,8 +732,9 @@ std::tuple<torch::Tensor, torch::Tensor> fused_grouped_topk(
       {num_tokens, topk},
       torch::dtype(torch::kInt32).device(gating_output.device()));
 
-  auto device_idx = gating_output.device().index();
-  auto stream = c10::xpu::getCurrentXPUStream(device_idx).queue();
+  // auto device_idx = gating_output.device().index();
+  auto device = gating_output.device();
+  auto& stream = vllm::xpu::vllmGetQueue(device.index());
 
 #define LAUNCH_KERNEL_SF(T, BiasT, IdxT)                                      \
   do {                                                                        \
