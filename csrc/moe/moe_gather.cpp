@@ -135,6 +135,7 @@ void MoeGatherLauncher(
       CASE_TOPK(2, ElemsPerItem)                                               \
       CASE_TOPK(4, ElemsPerItem)                                               \
       CASE_TOPK(6, ElemsPerItem)                                               \
+      CASE_TOPK(7, ElemsPerItem)                                               \
       CASE_TOPK(8, ElemsPerItem)                                               \
       CASE_TOPK(10, ElemsPerItem)                                              \
       default:                                                                 \
