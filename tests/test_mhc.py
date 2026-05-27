@@ -9,14 +9,6 @@ import torch
 
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 
-MINI_PYTEST_PARAMS = {
-    "default": {
-        "num_tokens": [1, 33],
-        "hidden_size": [1024],
-        "hc_mult": [2, 4],
-    },
-}
-
 def mhc_pre_reference(
     residual: torch.Tensor,
     fn: torch.Tensor,
