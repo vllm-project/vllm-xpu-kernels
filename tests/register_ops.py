@@ -458,7 +458,7 @@ def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
 def fused_grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
-    topk: int,
+    n_topk: int,
     renormalize: bool,
     num_expert_group: int,
     topk_group: int,
@@ -467,7 +467,7 @@ def fused_grouped_topk(
     e_score_correction_bias: Optional[torch.Tensor] = None,
 ):
     return torch.ops._moe_C.fused_grouped_topk(hidden_states, gating_output,
-                                               topk, renormalize,
+                                               n_topk, renormalize,
                                                num_expert_group, topk_group,
                                                scoring_func,
                                                routed_scaling_factor,

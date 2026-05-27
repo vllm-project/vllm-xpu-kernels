@@ -59,26 +59,6 @@ inline float sigmoid_accurate(float x) {
 }
 
 template <typename T>
-inline T warp_reduce_max(sycl::sub_group sg, T val) {
-  for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-    T other =
-        sycl::select_from_group(sg, val, (sg.get_local_linear_id() ^ offset));
-    val = sycl::max(val, other);
-  }
-  return val;
-}
-
-template <typename T>
-inline T warp_reduce_min(sycl::sub_group sg, T val) {
-  for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-    T other =
-        sycl::select_from_group(sg, val, (sg.get_local_linear_id() ^ offset));
-    val = sycl::min(val, other);
-  }
-  return val;
-}
-
-template <typename T>
 inline T apply_sigmoid(T val) {
   float f = xpu::to_float(val);
   T out;
@@ -107,7 +87,7 @@ inline void reduceTopK(
     T min_val,
     int topk) {
   constexpr IdxT invalid_idx = std::numeric_limits<IdxT>::max();
-  bool selected[N_IN];
+  bool selected[N_IN] = {false};
 
   for (int k = 0; k < topk; ++k) {
     T local_best_val = min_val;
@@ -129,7 +109,8 @@ inline void reduceTopK(
       }
     }
     float local_best_val_tmp = xpu::to_float(local_best_val);
-    float warp_best_val_tmp = warp_reduce_max(subgroup, local_best_val_tmp);
+    float warp_best_val_tmp = sycl::reduce_over_group(
+        subgroup, local_best_val_tmp, sycl::maximum<float>());
 
     T warp_best_val = static_cast<T>(warp_best_val_tmp);
     IdxT warp_best_idx = invalid_idx;
@@ -137,7 +118,8 @@ inline void reduceTopK(
     if (local_best_pos != -1 && local_best_val == warp_best_val) {
       warp_best_idx = local_best_idx;
     }
-    warp_best_idx = warp_reduce_min(subgroup, warp_best_idx);
+    warp_best_idx =
+        sycl::reduce_over_group(subgroup, warp_best_idx, sycl::minimum<IdxT>());
 
     bool found = (warp_best_idx != invalid_idx);
     if (found) {
@@ -262,6 +244,7 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
         static_cast<int>(topkGroup));
 
     bool proceed = false;
+
     if (topkGroup > 0) {
       proceed = (selectedGroupScores[topkGroup - 1] != neg_inf<T>());
     }
@@ -491,12 +474,14 @@ SYCL_EXTERNAL inline void grouped_topk_fused_small_expert_count_kernel(
                                            : std::numeric_limits<IdxT>::max();
 
         // Find the best value across all lanes
-        float bestVal = warp_reduce_max(subgroup, myVal);
+        float bestVal =
+            sycl::reduce_over_group(subgroup, myVal, sycl::maximum<float>());
 
         // Among lanes that have bestVal, pick smallest idx
         IdxT candidateIdx =
             (myVal == bestVal) ? myIdx : std::numeric_limits<IdxT>::max();
-        IdxT bestIdx = warp_reduce_min(subgroup, candidateIdx);
+        IdxT bestIdx = sycl::reduce_over_group(
+            subgroup, candidateIdx, sycl::minimum<IdxT>());
 
         globalTopIdx[k] = bestIdx;
 
@@ -562,7 +547,7 @@ void invokeNoAuxTc(
       (topk <= DefaultMaxNumTopExperts || topk == MaxSupportedTopExperts);
 
 #define LAUNCH_SMALL_KERNEL(                                            \
-    MAX_EXPERTS, USE_GROUPS, MAX_TOP_EXPERTS, NUM_THREADS)              \
+    MAX_EXPERTS, MultiGroups, MAX_TOP_EXPERTS, NUM_THREADS)             \
   do {                                                                  \
     size_t local_size = static_cast<size_t>(NUM_THREADS);               \
     size_t global_size = static_cast<size_t>(num_tokens) * local_size;  \
@@ -573,7 +558,7 @@ void invokeNoAuxTc(
           IdxT,                                                         \
           SF,                                                           \
           MAX_EXPERTS,                                                  \
-          USE_GROUPS,                                                   \
+          MultiGroups,                                                  \
           MAX_TOP_EXPERTS>>(                                            \
           sycl::nd_range<1>(                                            \
               sycl::range<1>(global_size), sycl::range<1>(local_size)), \
@@ -585,7 +570,7 @@ void invokeNoAuxTc(
                     IdxT,                                               \
                     SF,                                                 \
                     MAX_EXPERTS,                                        \
-                    USE_GROUPS,                                         \
+                    MultiGroups,                                        \
                     MAX_TOP_EXPERTS>(                                   \
                     scores,                                             \
                     topk_values,                                        \
