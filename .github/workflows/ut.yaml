@@ -148,7 +148,7 @@ jobs:
           # Build with default kernel config to test the kernel configuration system
           VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf \
           VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf \
-          VLLM_VERSION_OVERRIDE="$(git describe --tags --long --match 'v*' 2>/dev/null || echo 'dev')-default-config" \
+          VLLM_VERSION_OVERRIDE="$(git describe --tags --long --match 'v*' 2>/dev/null || echo 'dev')-1" \
           MAX_JOBS=128 uv build --no-build-isolation --wheel -v
           ccache -s || true
 
