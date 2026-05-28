@@ -6,8 +6,8 @@ on:
   push:
     branches: [main]
   schedule:
-    # Nightly full-scope run at 02:00 UTC
-    - cron: '0 2 * * *'
+    # Nightly full-scope run at 03:00 CST (19:00 UTC)
+    - cron: '0 19 * * *'
   workflow_dispatch:
     inputs:
       test_scope:
@@ -148,7 +148,7 @@ jobs:
           # Build with default kernel config to test the kernel configuration system
           VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf \
           VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf \
-          VLLM_VERSION_OVERRIDE="$(git describe --tags --long --match 'v*' 2>/dev/null || echo 'dev')-1" \
+          VLLM_VERSION_OVERRIDE="$(git describe --tags --long --match 'v*' 2>/dev/null | sed 's/^v//' || echo '0.0.0.dev0')" \
           MAX_JOBS=128 uv build --no-build-isolation --wheel -v
           ccache -s || true
 
