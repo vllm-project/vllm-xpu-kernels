@@ -8,6 +8,7 @@
 #include "gated_delta_rule.hpp"
 #ifdef VLLM_XPU_ENABLE_XE2
   #include "xe_2/chunk_causal_conv1d_xe2.hpp"
+  #include "xe_2/chunk_causal_conv1d_tiled_xe2.hpp"
   #include "xe_2/chunk_gated_delta_rule_xe2.h"
 #endif
 
@@ -430,29 +431,57 @@ void gdn_attention(
           {num_v_heads / tp_size, non_spec_token + padding_size},
           torch::dtype(torch::kFloat32).device(device).requires_grad(false));
 
-      gdn::chunk_causal_conv1d_xe2(
-          queue,
-          q,
-          k,
-          v,
-          z_active,
-          b,
-          a,
-          projected_states_qkvz_active,
-          projected_states_ba_active,
-          conv_weights,
-          conv_bias,
-          conv_state,
-          *non_spec_query_start_loc,
-          *non_spec_state_indices_tensor,
-          has_initial_state,
-          act_mode,
-          pad_slot_id,
-          num_prefills,
-          num_decodes,
-          reorder_input,
-          token_indx_ptr,
-          non_spec_token);
+      // Use SLM-tiled conv1d for prefill when token count is large enough
+      // to benefit from the tiling overhead (tile_size=8).
+      if (non_spec_token >= gdn::conv1d_tile_size) {
+        gdn::chunk_causal_conv1d_tiled_xe2(
+            queue,
+            q,
+            k,
+            v,
+            z_active,
+            b,
+            a,
+            projected_states_qkvz_active,
+            projected_states_ba_active,
+            conv_weights,
+            conv_bias,
+            conv_state,
+            *non_spec_query_start_loc,
+            *non_spec_state_indices_tensor,
+            has_initial_state,
+            act_mode,
+            pad_slot_id,
+            num_prefills,
+            num_decodes,
+            reorder_input,
+            token_indx_ptr,
+            non_spec_token);
+      } else {
+        gdn::chunk_causal_conv1d_xe2(
+            queue,
+            q,
+            k,
+            v,
+            z_active,
+            b,
+            a,
+            projected_states_qkvz_active,
+            projected_states_ba_active,
+            conv_weights,
+            conv_bias,
+            conv_state,
+            *non_spec_query_start_loc,
+            *non_spec_state_indices_tensor,
+            has_initial_state,
+            act_mode,
+            pad_slot_id,
+            num_prefills,
+            num_decodes,
+            reorder_input,
+            token_indx_ptr,
+            non_spec_token);
+      }
 
       chunk_gated_delta_rule_xe2(
           queue,
