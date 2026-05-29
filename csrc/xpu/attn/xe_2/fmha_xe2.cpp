@@ -90,7 +90,7 @@ void cutlass_chunk_prefill_impl(
   // general params
   int batch_size, num_heads_q, num_heads_kv, head_size;
   // additional params
-  int total_seqlen_q, total_seqlen_k;
+  int total_seqlen_q = 0, total_seqlen_k = 0;
   int num_blocks, block_size, max_blocks_per_seq;
   if (is_varlen) {
     // query: [total_seq, num_heads, head_size]
@@ -108,6 +108,8 @@ void cutlass_chunk_prefill_impl(
     head_size = query.size(3);
     max_seqlen_q = query.size(2);
     max_seqlen_k = is_paged ? max_seqlen_q : key_cache.size(2);
+    total_seqlen_q = batch_size * max_seqlen_q;
+    total_seqlen_k = batch_size * max_seqlen_k;
   }
 
   if (is_paged) {
@@ -181,12 +183,12 @@ void cutlass_chunk_prefill_impl(
   //   "1" / "on"  / "true"    -> force enabled (debug / perf study)
   //   unset / "auto"          -> shape-based heuristic (default)
   //
-  // Heuristic: enable whenever the kernel is doing a causal prefill with
-  // num_heads_q >= 2 and no local/sink masking. An FA2 varlen MQA sweep
-  // on Arc B580 across batch in {1,2,4} and per-seq qlen in
-  // [2048, 131072] showed only a single near-noise (-0.7%) result and
-  // speedups up to +50% kernel time, so a workload-size guard is not
-  // necessary.
+  // Heuristic: For GQA/MQA (num_heads_q > num_heads_kv), always enable —
+  // KV is shared across Q-heads so reverse doesn't hurt cache locality.
+  // For MHA (num_heads_q == num_heads_kv), only enable when the GPU is
+  // under-saturated (total_wgs < 4 * sm_count), because MHA has per-head
+  // independent K/V and reversing Q-tile order scatters memory accesses
+  // across the sequence, causing L2 thrashing when the GPU is fully loaded.
   {
     std::string mode = "auto";
     const char* env = std::getenv("VLLM_XPU_FA_REVERSE_ODD_HEADS");
@@ -204,7 +206,15 @@ void cutlass_chunk_prefill_impl(
         mode == "0" || mode == "off" || mode == "false" || mode == "no") {
       reverse = false;
     } else {  // "auto" or anything unrecognized
-      reverse = is_causal && !is_local && !is_sink && num_heads_q >= 2;
+      bool is_gqa = (num_heads_q > num_heads_kv);
+      int q_tile = (head_size > 96) ? 256 : 128;
+      int n_q_tiles = (total_seqlen_q + q_tile - 1) / q_tile;
+      int total_wgs = n_q_tiles * num_heads_q;
+      int sm_count =
+          cutlass::KernelHardwareInfo::query_device_multiprocessor_count(0);
+      bool gpu_saturated = (total_wgs >= 4 * sm_count);
+      reverse = is_causal && !is_local && !is_sink && num_heads_q >= 2 &&
+          (is_gqa || !gpu_saturated);
     }
     args.reverse_q_order = reverse;
   }
