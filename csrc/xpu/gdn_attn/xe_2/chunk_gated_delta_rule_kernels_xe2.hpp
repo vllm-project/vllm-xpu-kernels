@@ -173,7 +173,7 @@ CUTE_DEVICE void l2norm_vectorized_kernel(
 template <typename T>
 CUTE_DEVICE void chunk_prepare_kernel(
     const float* a,
-    const T* A_log,
+    const float* A_log,
     const T* dt_bias,
     const int* query_start_loc,
     const int total_virtual_seqlen,
