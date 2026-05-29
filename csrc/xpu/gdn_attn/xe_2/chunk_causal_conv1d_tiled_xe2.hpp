@@ -92,10 +92,11 @@ struct chunk_causal_conv1d_tiled_kernel {
   inline int lookup(int t) const { return token_indx ? token_indx[t] : t; }
 
   static inline int get_num_feat_chunks(
-      const int head_k_dim, const int num_v_heads, const int num_k_heads,
+      const int head_k_dim,
+      const int num_v_heads,
+      const int num_k_heads,
       const int head_v_dim) {
-    int qkv_dim =
-        2 * head_k_dim + head_v_dim * num_v_heads / num_k_heads;
+    int qkv_dim = 2 * head_k_dim + head_v_dim * num_v_heads / num_k_heads;
     int feats_per_wg = wg_size * elems_per_item;
     return (qkv_dim + feats_per_wg - 1) / feats_per_wg;
   }
@@ -106,8 +107,8 @@ struct chunk_causal_conv1d_tiled_kernel {
       const int head_k_dim,
       const int num_v_heads,
       const int head_v_dim) {
-    int num_feat_chunks = get_num_feat_chunks(
-        head_k_dim, num_v_heads, num_k_heads, head_v_dim);
+    int num_feat_chunks =
+        get_num_feat_chunks(head_k_dim, num_v_heads, num_k_heads, head_v_dim);
     sycl::range<2> local(1, wg_size);
     sycl::range<2> global(num_tiles * num_feat_chunks, num_k_heads);
     return sycl::nd_range<2>(global * local, local);
@@ -137,8 +138,8 @@ struct chunk_causal_conv1d_tiled_kernel {
     const int k_dim = head_k_dim;
     const int v_dim = head_v_dim * num_v_heads / num_k_heads;
     const int qkv_dim = q_dim + k_dim + v_dim;
-    const int qkvz_dim = q_dim + k_dim + v_dim +
-                          head_v_dim * num_v_heads / num_k_heads;
+    const int qkvz_dim =
+        q_dim + k_dim + v_dim + head_v_dim * num_v_heads / num_k_heads;
     const int num_slots = TileT + Width - 1;
     const int feats_per_wg = wg_size * elems_per_item;
     const int num_feat_chunks = (qkv_dim + feats_per_wg - 1) / feats_per_wg;
@@ -175,8 +176,7 @@ struct chunk_causal_conv1d_tiled_kernel {
           seq_end_local = s_end;
           break;
         }
-        pre_chunks_local +=
-            (seq_len_i + chunk_size_xe2 - 1) / chunk_size_xe2;
+        pre_chunks_local += (seq_len_i + chunk_size_xe2 - 1) / chunk_size_xe2;
         tiles_before += tiles_in_seq;
       }
       slm_meta[0] = batch_id_local;
@@ -230,7 +230,8 @@ struct chunk_causal_conv1d_tiled_kernel {
     int global_feat_offset = 0;
     int reordered_feat = 0;
     if (!feat_valid) {
-      // Skip all computation for out-of-range items; still participate in barriers
+      // Skip all computation for out-of-range items; still participate in
+      // barriers
     } else if (feat < q_dim) {
       if constexpr (ReorderInput) {
         global_feat_offset = k_head_id * k_dim + feat;
@@ -261,38 +262,53 @@ struct chunk_causal_conv1d_tiled_kernel {
 
     // Prefetch first 2 slots into L2 before entering the loop
     if (feat_valid)
-    for (int pf = 0; pf < 2; ++pf) {
-      int pf_token = tile_start_in_seq + pf - (Width - 1);
-      if (pf_token >= 0 && pf_token < seq_len) {
-        int pf_tok = lookup(seq_start + pf_token);
-        auto pf_ptr = &mixed_qkvz[pf_tok * qkvz_elems + global_feat_offset];
-        sycl::ext::oneapi::experimental::prefetch(pf_ptr, elems_per_item * sizeof(T));
-      }
-    }
-
-    // Load loop: one iteration per slot, prefetch 2 slots ahead
-    if (feat_valid)
-    for (int slot = 0; slot < num_slots; ++slot) {
-      int token_in_seq = tile_start_in_seq + slot - (Width - 1);
-
-      // Prefetch slot+2 data to L2
-      if (slot + 2 < num_slots) {
-        int pf_token = tile_start_in_seq + (slot + 2) - (Width - 1);
+      for (int pf = 0; pf < 2; ++pf) {
+        int pf_token = tile_start_in_seq + pf - (Width - 1);
         if (pf_token >= 0 && pf_token < seq_len) {
           int pf_tok = lookup(seq_start + pf_token);
           auto pf_ptr = &mixed_qkvz[pf_tok * qkvz_elems + global_feat_offset];
-          sycl::ext::oneapi::experimental::prefetch(pf_ptr, elems_per_item * sizeof(T));
+          sycl::ext::oneapi::experimental::prefetch(
+              pf_ptr, elems_per_item * sizeof(T));
         }
       }
 
-      T vals[elems_per_item];
-      if (token_in_seq < 0) {
-        int state_row = (Width - 1) + token_in_seq;
-        if (has_init_conv_states && state_row >= 0 && state_row < Width - 1) {
+    // Load loop: one iteration per slot, prefetch 2 slots ahead
+    if (feat_valid)
+      for (int slot = 0; slot < num_slots; ++slot) {
+        int token_in_seq = tile_start_in_seq + slot - (Width - 1);
+
+        // Prefetch slot+2 data to L2
+        if (slot + 2 < num_slots) {
+          int pf_token = tile_start_in_seq + (slot + 2) - (Width - 1);
+          if (pf_token >= 0 && pf_token < seq_len) {
+            int pf_tok = lookup(seq_start + pf_token);
+            auto pf_ptr = &mixed_qkvz[pf_tok * qkvz_elems + global_feat_offset];
+            sycl::ext::oneapi::experimental::prefetch(
+                pf_ptr, elems_per_item * sizeof(T));
+          }
+        }
+
+        T vals[elems_per_item];
+        if (token_in_seq < 0) {
+          int state_row = (Width - 1) + token_in_seq;
+          if (has_init_conv_states && state_row >= 0 && state_row < Width - 1) {
+#pragma unroll
+            for (int e = 0; e < elems_per_item; ++e) {
+              vals[e] =
+                  conv_states_ptr[state_row * conv_elems + reordered_feat + e];
+            }
+          } else {
+#pragma unroll
+            for (int e = 0; e < elems_per_item; ++e) {
+              vals[e] = static_cast<T>(0);
+            }
+          }
+        } else if (token_in_seq < seq_len) {
+          int global_tok = lookup(seq_start + token_in_seq);
 #pragma unroll
           for (int e = 0; e < elems_per_item; ++e) {
-            vals[e] = conv_states_ptr[state_row * conv_elems +
-                                      reordered_feat + e];
+            vals[e] =
+                mixed_qkvz[global_tok * qkvz_elems + global_feat_offset + e];
           }
         } else {
 #pragma unroll
@@ -300,25 +316,12 @@ struct chunk_causal_conv1d_tiled_kernel {
             vals[e] = static_cast<T>(0);
           }
         }
-      } else if (token_in_seq < seq_len) {
-        int global_tok = lookup(seq_start + token_in_seq);
-#pragma unroll
-        for (int e = 0; e < elems_per_item; ++e) {
-          vals[e] = mixed_qkvz[global_tok * qkvz_elems +
-                               global_feat_offset + e];
-        }
-      } else {
-#pragma unroll
-        for (int e = 0; e < elems_per_item; ++e) {
-          vals[e] = static_cast<T>(0);
-        }
-      }
 
 #pragma unroll
-      for (int e = 0; e < elems_per_item; ++e) {
-        slm_input[slot * feats_per_wg + local_feat + e] = vals[e];
+        for (int e = 0; e < elems_per_item; ++e) {
+          slm_input[slot * feats_per_wg + local_feat + e] = vals[e];
+        }
       }
-    }
 
     // Barrier: all items must finish writing SLM before any reads
     sycl::group_barrier(item.get_group());
@@ -363,9 +366,9 @@ struct chunk_causal_conv1d_tiled_kernel {
         int slot = t + w;
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          res[e] +=
-              static_cast<float>(slm_input[slot * feats_per_wg + local_feat + e]) *
-              static_cast<float>(local_weights[w * elems_per_item + e]);
+          res[e] += static_cast<float>(
+                        slm_input[slot * feats_per_wg + local_feat + e]) *
+                    static_cast<float>(local_weights[w * elems_per_item + e]);
         }
       }
 
@@ -395,20 +398,23 @@ struct chunk_causal_conv1d_tiled_kernel {
       if (is_q) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          q_out[out_token_id * num_k_heads * q_dim + k_head_id * q_dim +
-                feat + e] = res[e];
+          q_out
+              [out_token_id * num_k_heads * q_dim + k_head_id * q_dim + feat +
+               e] = res[e];
         }
       } else if (is_k) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          k_out[out_token_id * num_k_heads * k_dim + k_head_id * k_dim +
-                feat - q_dim + e] = res[e];
+          k_out
+              [out_token_id * num_k_heads * k_dim + k_head_id * k_dim + feat -
+               q_dim + e] = res[e];
         }
       } else {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          v_out[out_token_id * num_k_heads * v_dim + k_head_id * v_dim +
-                feat - (q_dim + k_dim) + e] = res[e];
+          v_out
+              [out_token_id * num_k_heads * v_dim + k_head_id * v_dim + feat -
+               (q_dim + k_dim) + e] = res[e];
         }
       }
     }
@@ -434,16 +440,18 @@ struct chunk_causal_conv1d_tiled_kernel {
           int mixed_z_id;
           if constexpr (ReorderInput) {
             mixed_z_id = global_tok * num_k_heads * qkvz_dim_full +
-                         2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim +
-                         k_head_id * z_dim + z_dim_id;
+                         2 * num_k_heads * head_k_dim +
+                         num_v_heads * head_v_dim + k_head_id * z_dim +
+                         z_dim_id;
           } else {
             mixed_z_id = global_tok * num_k_heads * qkvz_dim_full +
                          k_head_id * qkvz_dim_full + qkv_dim_full + z_dim_id;
           }
 #pragma unroll
           for (int e = 0; e < elems_per_item; ++e) {
-            z_out[global_tok * num_k_heads * z_dim + k_head_id * z_dim +
-                  z_dim_id + e] = mixed_qkvz[mixed_z_id + e];
+            z_out
+                [global_tok * num_k_heads * z_dim + k_head_id * z_dim +
+                 z_dim_id + e] = mixed_qkvz[mixed_z_id + e];
           }
         }
 
@@ -453,28 +461,33 @@ struct chunk_causal_conv1d_tiled_kernel {
             int step = global_tok * num_v_heads * 2;
 #pragma unroll
             for (int e = 0; e < kv_ratio; ++e) {
-              float b_val = static_cast<float>(
-                  mixed_ba[step + k_head_id * kv_ratio + e]);
+              float b_val =
+                  static_cast<float>(mixed_ba[step + k_head_id * kv_ratio + e]);
               float a_val = static_cast<float>(
                   mixed_ba[step + num_v_heads + k_head_id * kv_ratio + e]);
               b_val = 1.0f / (1.0f + sycl::exp(-b_val));
-              b_out[(k_head_id * kv_ratio + e) * num_virtual_tokens +
-                    out_token_id] = b_val;
-              a_out[(k_head_id * kv_ratio + e) * num_virtual_tokens +
-                    out_token_id] = a_val;
+              b_out
+                  [(k_head_id * kv_ratio + e) * num_virtual_tokens +
+                   out_token_id] = b_val;
+              a_out
+                  [(k_head_id * kv_ratio + e) * num_virtual_tokens +
+                   out_token_id] = a_val;
             }
           } else {
             int step = (global_tok * num_v_heads +
-                        k_head_id * num_v_heads / num_k_heads) * 2;
+                        k_head_id * num_v_heads / num_k_heads) *
+                       2;
 #pragma unroll
             for (int e = 0; e < kv_ratio; ++e) {
               float b_val = static_cast<float>(mixed_ba[step + e]);
               float a_val = static_cast<float>(mixed_ba[step + kv_ratio + e]);
               b_val = 1.0f / (1.0f + sycl::exp(-b_val));
-              b_out[(k_head_id * kv_ratio + e) * num_virtual_tokens +
-                    out_token_id] = b_val;
-              a_out[(k_head_id * kv_ratio + e) * num_virtual_tokens +
-                    out_token_id] = a_val;
+              b_out
+                  [(k_head_id * kv_ratio + e) * num_virtual_tokens +
+                   out_token_id] = b_val;
+              a_out
+                  [(k_head_id * kv_ratio + e) * num_virtual_tokens +
+                   out_token_id] = a_val;
             }
           }
         }
@@ -491,9 +504,10 @@ struct chunk_causal_conv1d_tiled_kernel {
         int slot = last_slot - (Width - 2) + i;
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          conv_states_tmp[batch_id * (Width - 1) * conv_elems +
-                          i * conv_elems + reordered_feat + e] =
-              slm_input[slot * feats_per_wg + local_feat + e];
+          conv_states_tmp
+              [batch_id * (Width - 1) * conv_elems + i * conv_elems +
+               reordered_feat + e] =
+                  slm_input[slot * feats_per_wg + local_feat + e];
         }
       }
     } else if (seq_len == 1) {
@@ -588,17 +602,38 @@ void tiled_kernel_launcher(
   queue.submit([&](sycl::handler& cgh) {
     auto slm = sycl::local_accessor<char, 1>(sycl::range<1>(slm_bytes), cgh);
     cgh.parallel_for(range_main, [=](sycl::nd_item<2> item) {
-      char* slm_ptr = slm.template get_multi_ptr<sycl::access::decorated::no>()
-                          .get_raw();
+      char* slm_ptr =
+          slm.template get_multi_ptr<sycl::access::decorated::no>().get_raw();
 
       KERNEL_MAIN task(
-          q_out, k_out, v_out, z_out, b_out, a_out,
-          mixed_qkvz, mixed_ba, conv_weights, conv_bias,
-          conv_states, conv_states_stride_0, conv_states_tmp,
-          query_start_loc, cache_indices, has_initial_state, token_indx,
-          act_mode, pad_slot_id, batch_size,
-          num_k_heads, head_k_dim, num_v_heads,
-          head_v_dim, qkvz_elems, conv_elems, num_virtual_tokens, slm_ptr);
+          q_out,
+          k_out,
+          v_out,
+          z_out,
+          b_out,
+          a_out,
+          mixed_qkvz,
+          mixed_ba,
+          conv_weights,
+          conv_bias,
+          conv_states,
+          conv_states_stride_0,
+          conv_states_tmp,
+          query_start_loc,
+          cache_indices,
+          has_initial_state,
+          token_indx,
+          act_mode,
+          pad_slot_id,
+          batch_size,
+          num_k_heads,
+          head_k_dim,
+          num_v_heads,
+          head_v_dim,
+          qkvz_elems,
+          conv_elems,
+          num_virtual_tokens,
+          slm_ptr);
       task(item);
     });
   });
@@ -610,8 +645,14 @@ void tiled_kernel_launcher(
         KERNEL_UPDATE::get_nd_range(batch_size, Width, conv_elems);
     queue.submit([&](sycl::handler& cgh) {
       KERNEL_UPDATE task(
-          conv_states, conv_states_stride_0, conv_states_tmp,
-          cache_indices, Width, conv_elems, query_start_loc, batch_size);
+          conv_states,
+          conv_states_stride_0,
+          conv_states_tmp,
+          cache_indices,
+          Width,
+          conv_elems,
+          query_start_loc,
+          batch_size);
       cgh.parallel_for(range_update, task);
     });
   }
@@ -675,43 +716,43 @@ void chunk_causal_conv1d_tiled_xe2(
 
   constexpr int TileT = conv1d_tile_size;
 
-#define TILED_KERNEL_LAUNCHER(scalar_t, width, reorder_input)          \
-  tiled_kernel_launcher<scalar_t, width, TileT, reorder_input>(        \
-      queue,                                                           \
-      reinterpret_cast<scalar_t*>(q_out.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(k_out.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(v_out.data_ptr()),                   \
-      reinterpret_cast<scalar_t*>(z_out.data_ptr()),                   \
-      reinterpret_cast<float*>(b_out.data_ptr()),                      \
-      reinterpret_cast<float*>(a_out.data_ptr()),                      \
-      reinterpret_cast<scalar_t*>(mixed_qkvz.data_ptr()),              \
-      reinterpret_cast<scalar_t*>(mixed_ba.data_ptr()),                \
-      reinterpret_cast<scalar_t*>(conv_weights.data_ptr()),            \
-      conv_bias.has_value()                                            \
-          ? reinterpret_cast<scalar_t*>(conv_bias->data_ptr())         \
-          : nullptr,                                                   \
-      reinterpret_cast<scalar_t*>(conv_states.data_ptr()),             \
-      conv_states_stride_0,                                            \
-      reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),         \
-      reinterpret_cast<int*>(query_start_loc.data_ptr()),              \
-      reinterpret_cast<int*>(cache_indices.data_ptr()),                \
-      has_initial_state.has_value()                                    \
-          ? reinterpret_cast<bool*>(has_initial_state->data_ptr())     \
-          : nullptr,                                                   \
-      token_indx,                                                      \
-      act_mode,                                                        \
-      pad_slot_id,                                                     \
-      batch_size,                                                      \
-      num_actual_tokens,                                               \
-      num_virtual_tokens,                                              \
-      num_tiles,                                                       \
-      num_k_heads,                                                     \
-      head_k_dim,                                                      \
-      num_v_heads,                                                     \
-      head_v_dim,                                                      \
-      qkvz_elems,                                                      \
-      conv_elems,                                                      \
-      num_prefills,                                                    \
+#define TILED_KERNEL_LAUNCHER(scalar_t, width, reorder_input)      \
+  tiled_kernel_launcher<scalar_t, width, TileT, reorder_input>(    \
+      queue,                                                       \
+      reinterpret_cast<scalar_t*>(q_out.data_ptr()),               \
+      reinterpret_cast<scalar_t*>(k_out.data_ptr()),               \
+      reinterpret_cast<scalar_t*>(v_out.data_ptr()),               \
+      reinterpret_cast<scalar_t*>(z_out.data_ptr()),               \
+      reinterpret_cast<float*>(b_out.data_ptr()),                  \
+      reinterpret_cast<float*>(a_out.data_ptr()),                  \
+      reinterpret_cast<scalar_t*>(mixed_qkvz.data_ptr()),          \
+      reinterpret_cast<scalar_t*>(mixed_ba.data_ptr()),            \
+      reinterpret_cast<scalar_t*>(conv_weights.data_ptr()),        \
+      conv_bias.has_value()                                        \
+          ? reinterpret_cast<scalar_t*>(conv_bias->data_ptr())     \
+          : nullptr,                                               \
+      reinterpret_cast<scalar_t*>(conv_states.data_ptr()),         \
+      conv_states_stride_0,                                        \
+      reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),     \
+      reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
+      reinterpret_cast<int*>(cache_indices.data_ptr()),            \
+      has_initial_state.has_value()                                \
+          ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
+          : nullptr,                                               \
+      token_indx,                                                  \
+      act_mode,                                                    \
+      pad_slot_id,                                                 \
+      batch_size,                                                  \
+      num_actual_tokens,                                           \
+      num_virtual_tokens,                                          \
+      num_tiles,                                                   \
+      num_k_heads,                                                 \
+      head_k_dim,                                                  \
+      num_v_heads,                                                 \
+      head_v_dim,                                                  \
+      qkvz_elems,                                                  \
+      conv_elems,                                                  \
+      num_prefills,                                                \
       num_decodes);
 
 #define TILED_WIDTH_DISPATCH(scalar_t, width, reorder_input) \
