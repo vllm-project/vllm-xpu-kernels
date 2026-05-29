@@ -565,9 +565,7 @@ if(BASIC_KERNELS_ENABLED)
     endif()
   endif()
 
-endif()
-
-define_gpu_extension_target(
+  define_gpu_extension_target(
   _C
   DESTINATION
   vllm_xpu_kernels
