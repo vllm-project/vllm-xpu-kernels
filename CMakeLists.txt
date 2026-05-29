@@ -515,12 +515,14 @@ endif()
 #
 
 #
-# _C extension
+# _C extension (spir64_gen target) Generic kernels that work across all
+# spir64_gen architectures. Arch-specific kernel implementations are in separate
+# libraries (e.g., lib_C_xe2.so) that _C links against.
 #
 if(BASIC_KERNELS_ENABLED)
   message(STATUS "Enabling C extension.")
   set(VLLM_EXT_SRC
-      "csrc/cache.cpp"
+      "csrc/kernel_dispatch.cpp"
       "csrc/layernorm.cpp"
       "csrc/layernorm_quant.cpp"
       "csrc/activation.cpp"
@@ -539,25 +541,53 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/topk_per_row.cpp")
   include_directories("/usr/include")
 
-  define_gpu_extension_target(
-    _C
-    DESTINATION
-    vllm_xpu_kernels
-    LANGUAGE
-    ${VLLM_GPU_LANG}
-    SOURCES
-    ${VLLM_EXT_SRC}
-    COMPILE_FLAGS
-    ${VLLM_GPU_COMPILE_FLAGS}
-    LINK_FLAGS
-    ${VLLM_GPU_LINK_FLAGS}
-    ARCHITECTURES
-    ${VLLM_GPU_ARCHES}
-    INCLUDE_DIRECTORIES
-    ${VLLM_XPU_INCLUDE_DIR}
-    USE_SABI
-    3
-    WITH_SOABI)
+  # Per-extension arch-specific kernel libraries for _C. The same source files
+  # are compiled with arch-specific flags, producing lib_C_xe2.so. Source code
+  # uses ARCH_FUNC() macro to suffix exported symbols.
+  #
+  # Add arch-specific source files here:
+  set(_C_ARCH_SRCS "csrc/cache.cpp")
+  set(C_ARCH_KERNEL_LIBS "")
+
+  if(_C_ARCH_SRCS)
+    if(VLLM_XPU_ENABLE_XE2)
+      add_library(_C_xe2 SHARED ${_C_ARCH_SRCS})
+      set_property(TARGET _C_xe2 PROPERTY CXX_STANDARD 20)
+      target_include_directories(_C_xe2 PRIVATE csrc ${VLLM_XPU_INCLUDE_DIR})
+      target_compile_options(_C_xe2 PRIVATE ${VLLM_GPU_COMPILE_FLAGS})
+      target_link_libraries(_C_xe2 PRIVATE torch ${TORCH_LIBRARIES})
+      set_target_properties(_C_xe2 PROPERTIES LIBRARY_OUTPUT_DIRECTORY
+                                              "${CMAKE_BINARY_DIR}/")
+      target_link_options(_C_xe2 PRIVATE ${VLLM_GPU_LINK_FLAGS})
+      install(TARGETS _C_xe2 LIBRARY DESTINATION vllm_xpu_kernels
+                                     COMPONENT _C_xe2)
+      list(APPEND C_ARCH_KERNEL_LIBS "_C_xe2")
+    endif()
+  endif()
+
+endif()
+
+define_gpu_extension_target(
+  _C
+  DESTINATION
+  vllm_xpu_kernels
+  LANGUAGE
+  ${VLLM_GPU_LANG}
+  SOURCES
+  ${VLLM_EXT_SRC}
+  COMPILE_FLAGS
+  ${VLLM_GPU_COMPILE_FLAGS}
+  LINK_FLAGS
+  ${VLLM_GPU_LINK_FLAGS}
+  ARCHITECTURES
+  ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES
+  ${VLLM_XPU_INCLUDE_DIR}
+  LIBRARIES
+  ${C_ARCH_KERNEL_LIBS}
+  USE_SABI
+  3
+  WITH_SOABI)
 
 endif()
 

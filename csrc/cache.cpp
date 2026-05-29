@@ -4,6 +4,7 @@
 #include <iostream>
 #include <string>
 
+#include "arch_dispatch.h"
 #include "dispatch_utils.h"
 #include "quantization/fp8/quant_utils.h"
 #include "quantization/utils.h"
@@ -874,7 +875,7 @@ class gather_and_maybe_dequant_cache_kernel {
             reinterpret_cast<const float*>(v_scale.data_ptr()))); \
   });
 
-void reshape_and_cache(
+void ARCH_FUNC(reshape_and_cache)(
     torch::Tensor& key,
     torch::Tensor& value,
     torch::Tensor& key_cache,
@@ -946,7 +947,7 @@ void reshape_and_cache(
             reinterpret_cast<const float*>(v_scale.data_ptr())));      \
   });
 
-void reshape_and_cache_flash(
+void ARCH_FUNC(reshape_and_cache_flash)(
     torch::Tensor& key,
     torch::Tensor& value,
     torch::Tensor& key_cache,
@@ -1019,7 +1020,7 @@ void reshape_and_cache_flash(
             reinterpret_cast<const float*>(scale.data_ptr())));     \
   });
 
-void concat_and_cache_mla(
+void ARCH_FUNC(concat_and_cache_mla)(
     torch::Tensor& kv_c,          // [num_tokens, kv_lora_rank]
     torch::Tensor& k_pe,          // [num_tokens, pe_dim]
     torch::Tensor& kv_cache,      // [num_blocks, block_size, (kv_lora_rank +
@@ -1082,7 +1083,7 @@ void concat_and_cache_mla(
 //  - block_table contains the cache block indices for each sequence
 //  - Optionally, seq_starts (if provided) offsets the starting block index by
 //  (seq_starts[bid] / page_size)
-void gather_cache(
+void ARCH_FUNC(gather_cache)(
     torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
     torch::Tensor const& dst,          // [TOT_TOKENS, ENTRIES...]
     torch::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
@@ -1181,7 +1182,7 @@ void gather_cache(
 //  - token_to_seq contains the back mapping from token_id to batch_id
 //  - Optionally, seq_starts (if provided) offsets the starting block index by
 //  seq_starts[bid]
-void gather_and_maybe_dequant_cache(
+void ARCH_FUNC(gather_and_maybe_dequant_cache)(
     torch::Tensor const& src_cache,     // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
     torch::Tensor const& dst,           // [TOT_TOKENS, ENTRIES...]
     torch::Tensor const& block_table,   // [BATCH, BLOCK_INDICES]
@@ -1266,7 +1267,7 @@ void gather_and_maybe_dequant_cache(
  * faster DMA transfers. This function initiates async copies; synchronization
  * must be handled externally.
  */
-void swap_blocks(
+void ARCH_FUNC(swap_blocks)(
     at::Tensor& src,
     at::Tensor& dst,
     int64_t block_size_in_bytes,
@@ -1364,7 +1365,7 @@ void swap_blocks(
  * Thin wrapper that validates the CPU tensor inputs and delegates to
  * vllm::xpu::xpuAsyncMemcpyBatch for the actual copy logic.
  */
-void swap_blocks_batch(
+void ARCH_FUNC(swap_blocks_batch)(
     const torch::Tensor& src_ptrs,
     const torch::Tensor& dst_ptrs,
     const torch::Tensor& sizes) {
@@ -1475,7 +1476,7 @@ class convert_fp8_kernel {
  *                         dst is FP16/BF16/FP32). Other values indicate
  *                         quantization (src is FP16/BF16/FP32, dst is FP8).
  */
-void convert_fp8(
+void ARCH_FUNC(convert_fp8)(
     torch::Tensor& dst,
     const torch::Tensor& src,
     const double scale,
@@ -1555,7 +1556,7 @@ void convert_fp8(
             use_ue8m0));                                                 \
   });
 
-void indexer_k_quant_and_cache(
+void ARCH_FUNC(indexer_k_quant_and_cache)(
     torch::Tensor& k,             // [num_tokens, head_dim]
     torch::Tensor& kv_cache,      // [num_blocks, block_size, cache_stride]
     torch::Tensor& slot_mapping,  // [num_tokens]
@@ -1622,7 +1623,7 @@ void indexer_k_quant_and_cache(
     });                                                                 \
   } while (0)
 
-void cp_gather_indexer_k_quant_cache(
+void ARCH_FUNC(cp_gather_indexer_k_quant_cache)(
     const torch::Tensor& kv_cache,  // [num_blocks, block_size, cache_stride]
     torch::Tensor& dst_k,           // [num_tokens, head_dim]
     torch::Tensor& dst_scale,  // [num_tokens, head_dim / quant_block_size * 4]

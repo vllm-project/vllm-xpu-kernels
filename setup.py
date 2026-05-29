@@ -566,6 +566,10 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
         additional_libraries["grouped_gemm_xe_default"] = (
             "/csrc/xpu/grouped_gemm/xe_default")
 
+# Per-extension arch-specific libs (same sources compiled with different flags)
+if _is_enabled("BASIC_KERNELS_ENABLED") and _is_enabled("VLLM_XPU_ENABLE_XE2"):
+    additional_libraries["_C_xe2"] = ""
+
 if _build_custom_ops():
     if _is_enabled("BASIC_KERNELS_ENABLED"):
         ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
