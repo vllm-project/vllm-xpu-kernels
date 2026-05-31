@@ -26,7 +26,7 @@ BENCHMARK_MODE=1 pytest test_wan22_kernels_ops_bf16.py::TestConv1DKernels::test_
 
 Usage:
 ```bash
-# Run all tests with accurate benchmarking (default)
+# Run all tests with accurate benchmarking (default, BENCHMARK_MODE=1)
 python -m pytest test_wan22_kernels_ops_bf16.py -v -s
 
 # Run all tests in fast mode (quick validation)
@@ -66,7 +66,7 @@ RUNS = 5
 
 # Benchmark mode: if False, run only once (no warmup, no averaging)
 # Set via environment variable: BENCHMARK_MODE=0 to disable
-BENCHMARK_MODE = os.environ.get("BENCHMARK_MODE", "0") != "0"
+BENCHMARK_MODE = os.environ.get("BENCHMARK_MODE", "1") != "0"
 
 # Store test results for report generation
 TEST_RESULTS = []
@@ -179,8 +179,8 @@ def benchmark_with_metrics(name, prepare_fn, compute_fn, op_type, shape_info, pr
     if DEVICE == "cpu":
         return None
 
-    # Use global BENCHMARK_MODE if not explicitly specified
-    benchmark = BENCHMARK_MODE
+    if benchmark is None:
+        benchmark = BENCHMARK_MODE
 
     # Step 1: Prepare on CPU
     tensors_dict, operation = prepare_fn()

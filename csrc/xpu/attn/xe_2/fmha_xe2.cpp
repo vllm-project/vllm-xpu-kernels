@@ -256,94 +256,9 @@ void cutlass_chunk_prefill_impl(
         " (supported: 16, 32, or any positive multiple of 64)");
   }
 
-  // Block_size == 16 needs the *_b16 policies (TileShapeQK[1] = 16).
-  // All other supported sizes (32, 64*n) divide cleanly by the default
-  // TileShapeQK[1] = 32 used in the standard chunk_policy_head* set.
-  const bool use_b16_policy = is_paged && (block_size == 16);
-
-  if (use_b16_policy) {
-    if (args.head_size <= HEAD_SIZE_LIMIT_0) {
-      policy_dispatch_func<chunk_policy_head64_b16>(
-          queue,
-          cuQKType,
-          args,
-          is_paged,
-          is_causal,
-          is_local,
-          is_sink,
-          is_lse);
-    } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
-      policy_dispatch_func<chunk_policy_head96_b16>(
-          queue,
-          cuQKType,
-          args,
-          is_paged,
-          is_causal,
-          is_local,
-          is_sink,
-          is_lse);
-    } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
-      policy_dispatch_func<chunk_policy_head128_b16>(
-          queue,
-          cuQKType,
-          args,
-          is_paged,
-          is_causal,
-          is_local,
-          is_sink,
-          is_lse);
-    } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
-      policy_dispatch_func<chunk_policy_head192_b16>(
-          queue,
-          cuQKType,
-          args,
-          is_paged,
-          is_causal,
-          is_local,
-          is_sink,
-          is_lse);
-    } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
-      policy_dispatch_func<chunk_policy_head256_b16>(
-          queue,
-          cuQKType,
-          args,
-          is_paged,
-          is_causal,
-          is_local,
-          is_sink,
-          is_lse);
-    } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
-      policy_dispatch_func<chunk_policy_head512_b16>(
-          queue,
-          cuQKType,
-          args,
-          is_paged,
-          is_causal,
-          is_local,
-          is_sink,
-          is_lse);
-    } else {
-      TORCH_CHECK(false, "Unsupported head size for fmha");
-    }
-  } else if (args.head_size <= HEAD_SIZE_LIMIT_0) {
-    policy_dispatch_func<chunk_policy_head64>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
-  } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
-    policy_dispatch_func<chunk_policy_head96>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
-  } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
-    policy_dispatch_func<chunk_policy_head128>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
-  } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
-    policy_dispatch_func<chunk_policy_head192>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
-  } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
-    policy_dispatch_func<chunk_policy_head256>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
-  } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
-    policy_dispatch_func<chunk_policy_head512>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
-  } else {
-    TORCH_CHECK(false, "Unsupported head size for fmha");
-  }
+  // Minimal build: only head128, non-paged
+  TORCH_CHECK(!is_paged, "Paged attention not compiled in minimal build");
+  TORCH_CHECK(args.head_size <= HEAD_SIZE_LIMIT_2, "Only head_size<=128 in minimal build");
+  policy_dispatch_func<chunk_policy_head128>(
+      queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
 }
