@@ -21,7 +21,8 @@ void chunk_gated_delta_rule_xe2(
     const std::optional<torch::Tensor>&
         has_initial_state,  // [batch_size] or None
     const int num_prefills,
-    const int num_decodes) {
+    const int num_decodes,
+    const int* token_indx) {
   gdn::chunk_gated_delta_rule_impl_xe2(
       queue,
       core_attn_out,
@@ -37,5 +38,6 @@ void chunk_gated_delta_rule_xe2(
       cache_indices,
       has_initial_state,
       num_prefills,
-      num_decodes);
+      num_decodes,
+      token_indx);
 }

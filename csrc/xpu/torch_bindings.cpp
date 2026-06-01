@@ -60,6 +60,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "-> (Tensor, Tensor)");
   xpu_ops.impl("deepseek_scaling_rope", torch::kXPU, &deepseek_scaling_rope);
 
+  // Multi-modal Rotary Embedding (M-RoPE) — used by e.g. Qwen2-VL.
+  // positions has shape [num_mrope_sections, num_tokens]; mrope_section is
+  // an int32 device tensor of length num_mrope_sections that partitions the
+  // rotation dimensions across positional axes (e.g. time / height / width).
+  xpu_ops.def(
+      "multimodal_rotary_embedding(Tensor positions, Tensor! query,"
+      "                            Tensor!? key, int head_size,"
+      "                            Tensor cos_sin_cache, bool is_neox,"
+      "                            int[] mrope_section) -> ()");
+  xpu_ops.impl(
+      "multimodal_rotary_embedding", torch::kXPU, &multimodal_rotary_embedding);
+
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
       "indices, float scale) -> ()");
@@ -83,9 +95,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "int num_k_heads, int num_v_heads, int head_k_dim, int head_v_dim,"
       "Tensor! conv_state, Tensor! ssm_state, Tensor conv_weights, Tensor? "
       "conv_bias, str activation, Tensor A_log, Tensor dt_bias,"
-      "int num_prefills, int num_decodes, Tensor? has_initial_state, Tensor "
-      "non_spec_query_start_loc,"
-      "Tensor non_spec_state_indices_tensor, int num_actual_tokens, int "
+      "int num_prefills, int num_decodes, int num_spec_decodes, Tensor? "
+      "has_initial_state, Tensor? "
+      "non_spec_query_start_loc,  Tensor? non_spec_token_indx,"
+      "Tensor? non_spec_state_indices_tensor, Tensor? spec_query_start_loc, "
+      "Tensor? spec_token_indx, Tensor? spec_state_indices_tensor, Tensor? "
+      "num_accepted_tokens, int num_actual_tokens, int "
       "tp_size, bool reorder_input) -> ()");
   xpu_ops.impl("gdn_attention", torch::kXPU, &gdn_attention);
 #endif

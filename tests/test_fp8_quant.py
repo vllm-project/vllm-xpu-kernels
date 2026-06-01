@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 import torch
 
-from tests.ops.fp8_quant_op import (per_token_group_quant_fp8,
+from tests.ops.fp8_quant_op import (get_tma_aligned_size,
+                                    per_token_group_quant_fp8,
                                     scaled_fp8_quant, scaled_quantize)
 from tests.ops.mx_utils import to_mxfp
 
@@ -200,10 +201,11 @@ FP8_DTYPES = [torch.float8_e5m2, torch.float8_e4m3fn]
 
 # block quant parameters
 MXFP8_HP_DTYPES = [torch.float, torch.bfloat16]
-NUM_TOKENS_BLOCK_QUANT = [1, 2, 4, 8]
+NUM_TOKENS_BLOCK_QUANT = [1, 2, 3, 4, 8, 31]
 HIDDEN_SIZES_BLOCK_QUANT = [256]
 GROUP_SIZE = [32, 64, 128]
 COLUMN_MAJOR_SCALE = [True, False]
+TMA_ALIGNED_SCALE = [True, False]
 
 # Test static FP8 quantization with 2D group scales
 GROUP_SHAPES_2D = [
@@ -308,6 +310,7 @@ def test_dynamic_per_token_fp8_quant(
 @pytest.mark.parametrize("group_size", GROUP_SIZE)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("column_major_scale", COLUMN_MAJOR_SCALE)
+@pytest.mark.parametrize("tma_aligned_scale", TMA_ALIGNED_SCALE)
 @torch.inference_mode()
 def test_per_block_fp8_quant(
     num_tokens_block_quant: int,
@@ -316,6 +319,7 @@ def test_per_block_fp8_quant(
     group_size: int,
     seed: int,
     column_major_scale: bool,
+    tma_aligned_scale: bool,
 ) -> None:
     seed_everything(seed)
 
@@ -331,7 +335,8 @@ def test_per_block_fp8_quant(
         group_size=group_size,
         dtype=torch.float8_e4m3fn,
         use_ue8m0=False,
-        column_major_scales=column_major_scale)
+        column_major_scales=column_major_scale,
+        tma_aligned_scales=tma_aligned_scale)
 
     assert torch.allclose(ref_out.float(),
                           ops_out.float(),
@@ -342,12 +347,19 @@ def test_per_block_fp8_quant(
                           atol=0.01,
                           rtol=0.01)
 
+    if column_major_scale:
+        assert ops_scales.stride()[-2] == 1
+        if tma_aligned_scale:
+            assert ops_scales.stride()[-1] == get_tma_aligned_size(
+                num_tokens_block_quant, 4)
+
 
 @pytest.mark.parametrize("num_tokens_block_quant", NUM_TOKENS_BLOCK_QUANT)
 @pytest.mark.parametrize("hidden_size_block_quant", HIDDEN_SIZES_BLOCK_QUANT)
 @pytest.mark.parametrize("mxfp8_hp_dtypes", MXFP8_HP_DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("column_major_scale", COLUMN_MAJOR_SCALE)
+@pytest.mark.parametrize("tma_aligned_scale", TMA_ALIGNED_SCALE)
 @torch.inference_mode()
 def test_per_block_mxfp8_quant(
     num_tokens_block_quant: int,
@@ -355,6 +367,7 @@ def test_per_block_mxfp8_quant(
     mxfp8_hp_dtypes: torch.dtype,
     seed: int,
     column_major_scale: bool,
+    tma_aligned_scale: bool,
 ) -> None:
     seed_everything(seed)
 
@@ -370,7 +383,8 @@ def test_per_block_mxfp8_quant(
         group_size=32,
         dtype=torch.float8_e4m3fn,
         use_ue8m0=True,
-        column_major_scales=column_major_scale)
+        column_major_scales=column_major_scale,
+        tma_aligned_scales=tma_aligned_scale)
 
     assert torch.allclose(ref_out.float(),
                           ops_out.float(),

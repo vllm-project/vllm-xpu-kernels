@@ -1,4 +1,5 @@
 #pragma once
+#include "xpu/attn/paged_kv_utils.h"
 #include "torch/all.h"
 #include <cute/tensor.hpp>
 
@@ -47,26 +48,6 @@ inline CutlassDType aten_to_dtype(const at::Tensor& t) {
 inline CutlassQKType
 aten_to_Cutlass_qk_dtype(const at::Tensor& q, const at::Tensor& k) {
   return CutlassQKType(aten_to_dtype(q), aten_to_dtype(k));
-}
-
-inline bool is_interleaved_kv_cache(
-    const at::Tensor& key_cache, const at::Tensor& value_cache) {
-  auto value_stride = value_cache.strides();
-
-  if (key_cache.dim() == value_cache.dim() &&
-      key_cache.sizes() == value_cache.sizes() &&
-      key_cache.strides() == value_stride &&
-      key_cache.element_size() == value_cache.element_size() &&
-      key_cache.storage().data_ptr() == value_cache.storage().data_ptr() &&
-      key_cache.storage_offset() == 0 &&
-      // Paged KV layout is [num_blocks, num_heads, block_size, head_size];
-      // interleaving doubles the per-head extent along block_size so V starts
-      // half-way through the head stride.
-      value_cache.storage_offset() == value_stride[1] / 2) {
-    return true;
-  }
-
-  return false;
 }
 
 using namespace cute;

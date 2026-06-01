@@ -44,7 +44,7 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
 #
 # TODO: we need to align torch version with used in vLLM.
 #
-set(TORCH_SUPPORTED_VERSION_XPU "2.11.0")
+set(TORCH_SUPPORTED_VERSION_XPU "2.12.0")
 
 set(BUILD_SYCL_TLA_KERNELS
     ON
@@ -344,6 +344,7 @@ if(BUILD_SYCL_TLA_KERNELS)
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE_DEFAULT)
   endif()
   if(VLLM_XPU_ENABLE_XE2)
+    include_directories(${CMAKE_SOURCE_DIR}/csrc)
     if(MOE_KERNELS_ENABLED)
       add_subdirectory(csrc/xpu/grouped_gemm/xe_2)
       list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_2")
@@ -413,7 +414,7 @@ if(XPUMEM_ALLOCATOR_ENABLED)
   python_add_library(xpumem_allocator MODULE USE_SABI 3 WITH_SOABI
                      "${XPUMEM_ALLOCATOR_SRC}")
 
-  set_property(TARGET xpumem_allocator PROPERTY CXX_STANDARD 17)
+  set_property(TARGET xpumem_allocator PROPERTY CXX_STANDARD 20)
 
   if(VLLM_GPU_LANG STREQUAL "SYCL")
     target_compile_options(xpumem_allocator PRIVATE ${VLLM_GPU_COMPILE_FLAGS})
@@ -456,6 +457,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/torch_bindings.cpp"
       "csrc/quantization/fp8/fp8_quant.cpp"
       "csrc/quantization/fp4/mxfp4_quant.cpp"
+      "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cpp"
       "csrc/xpu_view.cpp"
       "csrc/attention/merge_attn_states.cpp"
       "csrc/tensor_utils.cpp"
@@ -536,6 +538,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/lora/lora_expand.cpp"
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
       "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
+      "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/rand/exponential.cpp"
       "csrc/xpu/utils.cpp")
   if(MOE_KERNELS_ENABLED)

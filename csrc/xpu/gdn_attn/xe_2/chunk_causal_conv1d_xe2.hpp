@@ -35,6 +35,7 @@ struct chunk_causal_conv1d_kernel {
       int* query_start_loc,
       int* cache_indices,
       bool* has_initial_state,
+      const int* token_indx,
       const ActMode& act_mode,
       const int& pad_slot_id,
       const int& batch_size,
@@ -62,6 +63,7 @@ struct chunk_causal_conv1d_kernel {
         query_start_loc(query_start_loc),
         cache_indices(cache_indices),
         has_initial_state(has_initial_state),
+        token_indx(token_indx),
         act_mode(act_mode),
         pad_slot_id(pad_slot_id),
         batch_size(batch_size),
@@ -73,6 +75,8 @@ struct chunk_causal_conv1d_kernel {
         head_v_dim(head_v_dim),
         qkvz_elems(qkvz_elems),
         conv_elems(conv_elems) {}
+
+  inline int lookup(int t) const { return token_indx ? token_indx[t] : t; }
 
   static inline sycl::nd_range<2> get_nd_range(
       const int total_seqlen,
@@ -219,11 +223,11 @@ struct chunk_causal_conv1d_kernel {
 
 #pragma unroll
     for (int i = 0; i < input_load_len; ++i) {
+      const int src_token = lookup(token_id - input_load_len + 1 + i);
 #pragma unroll
       for (int e = 0; e < elems_per_item; ++e) {
-        local_input[Width * e + states_load_len + i] = mixed_qkvz
-            [(token_id - input_load_len + 1 + i) * qkvz_elems +
-             qkvz_elems_offset + e];
+        local_input[Width * e + states_load_len + i] =
+            mixed_qkvz[src_token * qkvz_elems + qkvz_elems_offset + e];
       }
     }
 
@@ -329,6 +333,7 @@ struct chunk_causal_conv1d_kernel {
   const int32_t* query_start_loc;
   const int* cache_indices;
   const bool* has_initial_state;
+  const int* token_indx;
   const ActMode act_mode;
   const int pad_slot_id;
   const int batch_size;
@@ -360,6 +365,7 @@ struct chunk_reorder_zba_kernel {
       const T* mixed_qkvz,
       const T* mixed_ba,
       const int32_t* query_start_loc,
+      const int* token_indx,
       const int batch_size,
       const int& num_virtual_tokens,
       const int& num_k_heads,
@@ -372,12 +378,15 @@ struct chunk_reorder_zba_kernel {
         mixed_qkvz(mixed_qkvz),
         mixed_ba(mixed_ba),
         query_start_loc(query_start_loc),
+        token_indx(token_indx),
         batch_size(batch_size),
         num_virtual_tokens(num_virtual_tokens),
         num_k_heads(num_k_heads),
         head_k_dim(head_k_dim),
         num_v_heads(num_v_heads),
         head_v_dim(head_v_dim) {}
+
+  inline int lookup(int t) const { return token_indx ? token_indx[t] : t; }
 
   static inline sycl::nd_range<2>
   get_nd_range(const int total_seqlen, const int num_k_heads, const int z_dim) {
@@ -418,7 +427,7 @@ struct chunk_reorder_zba_kernel {
       }
 
       if constexpr (ReorderInput) {
-        int step = token_id * num_v_heads * 2;
+        int step = lookup(token_id) * num_v_heads * 2;
 #pragma unroll
         for (int e = 0; e < kv_ratio; ++e) {
           float b_value = mixed_ba[step + k_head_id * kv_ratio + e];
@@ -433,9 +442,9 @@ struct chunk_reorder_zba_kernel {
                   a_value;
         }
       } else {
-        int step =
-            (token_id * num_v_heads + k_head_id * num_v_heads / num_k_heads) *
-            2;
+        int step = (lookup(token_id) * num_v_heads +
+                    k_head_id * num_v_heads / num_k_heads) *
+                   2;
 #pragma unroll
         for (int e = 0; e < kv_ratio; ++e) {
           float b_value = mixed_ba[step + e];
@@ -452,17 +461,18 @@ struct chunk_reorder_zba_kernel {
     }
 
     // reorder z
+    const int z_src_token = lookup(token_id);
 #pragma unroll
     for (int e = 0; e < load_size; ++e) {
       int z_dim_id = dim_offset * load_size + e;
-      int mixed_z_id = token_id * num_k_heads * qkvz_dim +
+      int mixed_z_id = z_src_token * num_k_heads * qkvz_dim +
                        k_head_id * qkvz_dim + qkv_dim + z_dim_id;
       if constexpr (ReorderInput) {
-        mixed_z_id = token_id * num_k_heads * qkvz_dim +
+        mixed_z_id = z_src_token * num_k_heads * qkvz_dim +
                      2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim +
                      k_head_id * z_dim + z_dim_id;
       }
-      z_out[token_id * num_k_heads * z_dim + k_head_id * z_dim + z_dim_id] =
+      z_out[z_src_token * num_k_heads * z_dim + k_head_id * z_dim + z_dim_id] =
           mixed_qkvz[mixed_z_id];
     }
   }
@@ -474,6 +484,7 @@ struct chunk_reorder_zba_kernel {
   const T* mixed_qkvz;
   const T* mixed_ba;
   const int32_t* query_start_loc;
+  const int* token_indx;
   const int batch_size;
   const int num_virtual_tokens;
   const int num_k_heads;
@@ -574,6 +585,7 @@ void kernel_launcher(
     int* query_start_loc,
     int* cache_indices,
     bool* has_initial_state,
+    const int* token_indx,
     const ActMode& act_mode,
     const int& pad_slot_id,
     const int& batch_size,
@@ -608,6 +620,7 @@ void kernel_launcher(
         query_start_loc,
         cache_indices,
         has_initial_state,
+        token_indx,
         act_mode,
         pad_slot_id,
         batch_size,
@@ -638,6 +651,7 @@ void kernel_launcher(
         mixed_qkvz,
         mixed_ba,
         query_start_loc,
+        token_indx,
         batch_size,
         num_virtual_tokens,
         num_k_heads,
@@ -696,13 +710,17 @@ void chunk_causal_conv1d_xe2(
     const int& pad_slot_id,   // -1
     const int num_prefills,
     const int num_decodes,
-    const bool reorder_input) {
+    const bool reorder_input,
+    const int* token_indx = nullptr,
+    int num_actual_tokens_override = -1) {
   if (num_prefills == 0 && num_decodes == 0) {
     return;
   }
 
   const int batch_size = query_start_loc.size(0) - 1;
-  const int num_actual_tokens = mixed_qkvz.size(0);
+  const int num_actual_tokens = num_actual_tokens_override >= 0
+                                    ? num_actual_tokens_override
+                                    : static_cast<int>(mixed_qkvz.size(0));
   const int num_virtual_tokens = q_out.size(0);
   const int num_k_heads = q_out.size(1);
   const int head_k_dim = q_out.size(2);
@@ -742,6 +760,7 @@ void chunk_causal_conv1d_xe2(
       has_initial_state.has_value()                                \
           ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
           : nullptr,                                               \
+      token_indx,                                                  \
       act_mode,                                                    \
       pad_slot_id,                                                 \
       batch_size,                                                  \

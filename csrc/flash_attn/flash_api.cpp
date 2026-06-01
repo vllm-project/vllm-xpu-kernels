@@ -2,6 +2,7 @@
 
 #include "core/registration.h"
 #include "xpu/attn/attn_interface.h"
+#include "xpu/attn/paged_kv_utils.h"
 #include "utils.h"
 #include <torch/all.h>
 
@@ -118,7 +119,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
     const bool return_softmax,
     std::optional<at::Generator> gen_,
     std::optional<int> num_splits,
-    bool mix_batch) {
+    bool mix_batch,
+    std::optional<at::Tensor>& splits_per_seq,
+    std::optional<at::Tensor>& work_list) {
   auto q_type = q.scalar_type();
   auto k_type = k.scalar_type();
   TORCH_CHECK(
@@ -161,6 +164,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     TORCH_CHECK(
         block_table.stride(-1) == 1,
         "page_table must have contiguous last dimension");
+    check_paged_kv_cache_strides(k, v);
   }
 
   CHECK_DEVICE(cu_seqlens_q);
@@ -313,7 +317,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_local,
         is_sink,
         num_kv_splits,
-        is_prefill_opt);
+        is_prefill_opt,
+        splits_per_seq,
+        work_list);
   } else {
     // Normalize -1 (unbounded) to max_seqlen_k for kernel masking logic
     // In decode phase the window_size_right doesn't have effect
@@ -414,7 +420,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_local,
         is_sink,
         num_kv_splits,
-        no_mask);
+        no_mask,
+        splits_per_seq,
+        work_list);
   }
 
   if (return_softmax) {
@@ -439,7 +447,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float softmax_scale, Tensor? softmax_sink, bool zero_tensors, "
       "bool is_causal, int window_size_left, int window_size_right, float "
       "softcap, bool return_softmax, "
-      "Generator? gen, int? num_splits, bool mix_batch) -> Tensor[]");
+      "Generator? gen, int? num_splits, bool mix_batch, Tensor? "
+      "splits_per_seq, Tensor? work_list) -> Tensor[]");
   ops.impl(
       "varlen_fwd",
       torch::kXPU,

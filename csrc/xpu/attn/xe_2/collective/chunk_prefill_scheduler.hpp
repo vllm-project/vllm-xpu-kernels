@@ -89,12 +89,23 @@ struct XeFHMAIndividualTileScheduler {
   }
 };
 
+// Work item for compact grid dispatch: each WG reads one entry
+struct DecodeWorkItem {
+  int seq_idx;        // which sequence (batch index)
+  int kv_tile_start;  // starting KV tile index (absolute, not per-split)
+  int kv_tile_count;  // number of KV tiles this WG processes
+  int split_idx;      // which split within this seq (for Oaccum indexing)
+};
+
 struct DecodeTileScheduler {
   struct Params {
     dim3 grid;
     FastDivmod divmod_num_heads;
     FastDivmod divmod_batch;
     int num_kv_splits_ = -1;
+    // Compact grid mode: work_list[total_wgs] lookup table
+    const DecodeWorkItem* work_list = nullptr;
+    int total_wgs = 0;  // = sum(splits_per_seq) per head
   };
 
   bool valid_ = true;
@@ -108,7 +119,9 @@ struct DecodeTileScheduler {
       ProblemShape const& shape,
       KernelHardwareInfo hw_info,
       TileShape const& tile_shape,
-      const int& num_kv_splits = -1) {
+      const int& num_kv_splits = -1,
+      const DecodeWorkItem* work_list = nullptr,
+      int total_wgs = 0) {
     using namespace cute;
 
     dim3 grid(
@@ -117,12 +130,23 @@ struct DecodeTileScheduler {
         size(shape.batch * shape.num_heads_q));  // (h,b) -- split later
     int num_head = shape.num_heads_q;
     if (num_kv_splits >= 1) {
-      // for splitKV, each wg handles group query heads
-      grid.z = size(shape.batch * shape.num_heads_kv);
-      grid.z *= num_kv_splits;
       num_head = shape.num_heads_kv;
+      if (work_list != nullptr && total_wgs > 0) {
+        // Compact grid: exactly total_wgs × num_heads_kv WGs
+        grid.z = total_wgs * shape.num_heads_kv;
+      } else {
+        // Original: batch × heads_kv × num_kv_splits
+        grid.z = size(shape.batch * shape.num_heads_kv);
+        grid.z *= num_kv_splits;
+      }
     }
-    return Params{grid, {num_head}, {shape.batch * num_head}, num_kv_splits};
+    return Params{
+        grid,
+        {num_head},
+        {shape.batch * num_head},
+        num_kv_splits,
+        work_list,
+        total_wgs};
   }
 
   template <int Num_SGs>
@@ -136,18 +160,47 @@ struct DecodeTileScheduler {
   CUTLASS_DEVICE
   auto get_block_coord() {
     using namespace cute;
-    int idx_kv_split = BlockIdxZ();
+    int flat_idx = BlockIdxZ();
     int head, idx_b;
+    int idx_kv_split;
 
-    if (params.num_kv_splits_ >= 1) {
-      params.divmod_batch(idx_kv_split, idx_b, idx_kv_split);
-      params.divmod_num_heads(idx_b, head, idx_b);
-      return make_coord(BlockIdxY(), BlockIdxX(), head, idx_b, idx_kv_split);
+    if (params.work_list != nullptr && params.total_wgs > 0) {
+      // Compact grid: direct lookup, O(1)
+      // flat_idx = head_kv * total_wgs + work_idx
+      int work_idx = flat_idx % params.total_wgs;
+      head = flat_idx / params.total_wgs;
+      // Read pre-computed work assignment — O(1) direct lookup
+      DecodeWorkItem wi = params.work_list[work_idx];
+      idx_b = wi.seq_idx;
+      idx_kv_split = wi.split_idx;
+      return make_coord(
+          BlockIdxY(),
+          BlockIdxX(),
+          head,
+          idx_b,
+          idx_kv_split,
+          wi.kv_tile_start,
+          wi.kv_tile_count);
     }
 
-    idx_b = idx_kv_split;
+    if (params.num_kv_splits_ >= 1) {
+      idx_kv_split = flat_idx;
+      params.divmod_batch(idx_kv_split, idx_b, idx_kv_split);
+      params.divmod_num_heads(idx_b, head, idx_b);
+      return make_coord(
+          BlockIdxY(),
+          BlockIdxX(),
+          head,
+          idx_b,
+          idx_kv_split,
+          (int)-1,
+          (int)-1);
+    }
+
+    idx_b = flat_idx;
     params.divmod_num_heads(idx_b, head, idx_b);
-    return make_coord(BlockIdxY(), BlockIdxX(), head, idx_b, (int)-1);
+    return make_coord(
+        BlockIdxY(), BlockIdxX(), head, idx_b, (int)-1, (int)-1, (int)-1);
   }
 
   CUTLASS_DEVICE

@@ -103,8 +103,6 @@ void cutlass_chunk_prefill_impl(
     max_seqlen_k = is_paged ? max_seqlen_q : key_cache.size(2);
   }
 
-  bool is_interleaved_kv = false;
-
   if (is_paged) {
     // Paged KV layout: [num_blocks, num_heads, block_size, head_size]
     num_blocks = key_cache.size(0);
@@ -112,8 +110,6 @@ void cutlass_chunk_prefill_impl(
     block_size = key_cache.size(2);
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
-
-    is_interleaved_kv = is_interleaved_kv_cache(key_cache, value_cache);
   }
 
   if (is_local) {
@@ -141,14 +137,7 @@ void cutlass_chunk_prefill_impl(
       max_seqlen_q,
       max_seqlen_k,
       total_seqlen_q,
-      // For paged with [num_blocks, num_heads, block_size, head_size], the
-      // physical extent along the flat K-seq axis (stride = head_size) is
-      // num_blocks * num_heads * block_size; the kernel needs this bound so
-      // page_idx = block_idx * num_heads * tiles_per_page + (K %
-      // tiles_per_page) stays inside the K tensor's K-dim shape.
-      is_paged ? (is_interleaved_kv ? total_seqlen_k * 2 * num_heads_kv
-                                    : total_seqlen_k * num_heads_kv)
-               : (is_interleaved_kv ? total_seqlen_k * 2 : total_seqlen_k),
+      total_seqlen_k,
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
@@ -165,9 +154,7 @@ void cutlass_chunk_prefill_impl(
       is_paged,   // paged
       is_causal,
       is_local,
-      is_sink,
-      is_interleaved_kv};
-  args.num_heads_kv_for_paged_idx = is_paged ? num_heads_kv : 1;
+      is_sink};
 
   // Populate softmax_lse output pointer if requested
   if (softmax_lse.has_value()) {
@@ -227,6 +214,20 @@ void cutlass_chunk_prefill_impl(
       args.v_stride_seq = value_cache.stride(2);
       args.v_stride_heads = value_cache.stride(1);
       args.v_stride_batch = value_cache.stride(0);
+    }
+  }
+
+  // For non-contiguous paged KV (e.g., cross-layer KV cache), enlarge
+  // total_seqlen_k to cover the full physical extent for the 2D block
+  // load surface descriptor. Without this, block loads for blocks at
+  // higher physical addresses would return zeros.
+  if (is_paged) {
+    args.page_stride_elements =
+        static_cast<int>(get_paged_kv_cache_page_stride_elements(key_cache));
+    int64_t effective_total =
+        get_paged_kv_cache_effective_total_seqlen(key_cache);
+    if (effective_total > args.total_seqlen_k) {
+      args.total_seqlen_k = static_cast<int>(effective_total);
     }
   }
 

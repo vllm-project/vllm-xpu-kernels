@@ -52,8 +52,6 @@ struct chunk_prefill_args_t {
   bool is_causal = false;
   bool is_local = false;
   bool is_sink = false;
-  bool is_interleaved_kv_cache = false;
-  int num_heads_kv_for_paged_idx = 1;
   // softmax_lse output (nullptr when not requested)
   float* softmax_lse = nullptr;
   int lse_stride = 0;  // stride along seq dim (= num_heads_q)
@@ -75,6 +73,7 @@ struct chunk_prefill_args_t {
   int o_stride_batch = 0;
   // per-batch mask: true = prefill, false = decode; nullptr = process all
   void* is_prefill = nullptr;
+  int page_stride_elements = 0;
 };
 
 template <class FMHAKernel, bool isVarLen>
@@ -185,8 +184,7 @@ struct KernelLauncher {
          args.total_seqlen_k,
          args.window_size_left,
          args.window_size_right,
-         args.is_interleaved_kv_cache,
-         args.num_heads_kv_for_paged_idx},
+         args.page_stride_elements},
         {},
         hw_info};
 

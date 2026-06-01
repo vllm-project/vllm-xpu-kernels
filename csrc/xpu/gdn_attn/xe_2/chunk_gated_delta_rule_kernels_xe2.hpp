@@ -931,6 +931,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
     const int* query_start_loc,
     const int* cache_indices,
     const bool* has_initial_state,
+    const int* token_indx,
     const int batch_size,
     const int total_virtual_seqlen,
     const int num_k_heads,
@@ -1145,8 +1146,11 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       auto U_tensor_T = make_tensor(
           make_gmem_ptr(U_ptr),
           make_layout(U_tensor_T_shape, make_stride(_1{}, head_v_dim)));
-      auto O_ptr = core_attn_out + out_chunk_offset * num_v_heads * head_v_dim +
-                   v_head_id * head_v_dim;
+      auto O_ptr =
+          core_attn_out +
+          (token_indx ? token_indx[out_chunk_offset] : out_chunk_offset) *
+              num_v_heads * head_v_dim +
+          v_head_id * head_v_dim;
       auto O_tensor_shape = make_shape(current_chunk_size, head_v_dim);
       auto O_tensor = make_tensor(
           make_gmem_ptr(O_ptr),
@@ -1282,6 +1286,7 @@ void kernel_launcher(
     const int* query_start_loc,
     const int* cache_indices,
     const bool* has_initial_state,
+    const int* token_indx,
     const int batch_size,
     const int total_virtual_seqlen,
     const int num_k_heads,
@@ -1510,6 +1515,7 @@ void kernel_launcher(
               query_start_loc,
               cache_indices,
               has_initial_state,
+              token_indx,
               batch_size,
               total_virtual_seqlen,
               num_k_heads,
@@ -1537,7 +1543,8 @@ void chunk_gated_delta_rule_impl_xe2(
     const std::optional<torch::Tensor>&
         has_initial_state,  // [batch_size] or None
     const int num_prefills,
-    const int num_decodes) {
+    const int num_decodes,
+    const int* token_indx) {
   if (num_prefills == 0 && num_decodes == 0) {
     return;
   }
@@ -1604,6 +1611,7 @@ void chunk_gated_delta_rule_impl_xe2(
       has_initial_state.has_value()                                \
           ? reinterpret_cast<bool*>(has_initial_state->data_ptr()) \
           : nullptr,                                               \
+      token_indx,                                                  \
       batch_size,                                                  \
       total_virtual_seqlen,                                        \
       num_k_heads,                                                 \

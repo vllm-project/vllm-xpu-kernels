@@ -501,7 +501,7 @@ function(define_gpu_extension_target GPU_MOD_NAME)
                                  "${GPU_ARCHITECTURES}")
   endif()
 
-  set_property(TARGET ${GPU_MOD_NAME} PROPERTY CXX_STANDARD 17)
+  set_property(TARGET ${GPU_MOD_NAME} PROPERTY CXX_STANDARD 20)
 
   message(
     STATUS "-------${GPU_MOD_NAME} , ${COMPILE_LANGUAGE}, ${GPU_LANGUAGE}")

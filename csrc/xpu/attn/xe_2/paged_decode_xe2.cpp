@@ -32,7 +32,9 @@ void cutlass_paged_decode_xe2(
     bool is_local,
     bool is_sink,
     int num_kv_splits,
-    std::optional<const at::Tensor>& is_prefill) {
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<at::Tensor>& splits_per_seq,
+    std::optional<at::Tensor>& work_list) {
   cutlass_paged_decode_impl(
       queue,
       query,
@@ -59,7 +61,9 @@ void cutlass_paged_decode_xe2(
       is_local,
       is_sink,
       num_kv_splits,
-      is_prefill);
+      is_prefill,
+      splits_per_seq,
+      work_list);
 }
 
 inline bool is_single_value_broadcast_tensor(const at::Tensor& t) {
@@ -102,7 +106,9 @@ void cutlass_paged_decode_impl(
     bool is_local,
     bool is_sink,
     int num_kv_splits,
-    std::optional<const at::Tensor>& is_prefill) {
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<at::Tensor>& splits_per_seq,
+    std::optional<at::Tensor>& work_list) {
   bool is_fp8_kv = key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
                    key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn;
   if (is_fp8_kv) {
@@ -145,8 +151,6 @@ void cutlass_paged_decode_impl(
     max_seqlen_k = key_cache.size(2);
   }
 
-  bool is_interleaved_kv = false;
-
   if (is_paged) {
     // Paged KV layout: [num_blocks, num_heads, block_size, head_size]
     // num_blocks is used to build total_seqlen_k for shape_K in kernels
@@ -156,14 +160,18 @@ void cutlass_paged_decode_impl(
     block_size = key_cache.size(2);
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
-
-    is_interleaved_kv = is_interleaved_kv_cache(key_cache, value_cache);
   }
 
   if (is_local) {
     window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
     window_size_right =
         window_size_right == -1 ? max_seqlen_k : window_size_right;
+  }
+
+  int page_stride_elements = 0;
+  if (is_paged) {
+    page_stride_elements =
+        static_cast<int>(get_paged_kv_cache_page_stride_elements(key_cache));
   }
 
   paged_decode_args_t args = {
@@ -180,12 +188,7 @@ void cutlass_paged_decode_impl(
       max_seqlen_q,
       max_seqlen_k,
       total_seqlen_q,
-      // Paged KV [num_blocks, num_heads, block_size, head_size]: see comment
-      // in fmha_xe2.cpp; total_seqlen_kv bounds the K-tensor K-dim and must
-      // accommodate page_idx scaled by num_heads_kv in the new layout.
-      is_paged ? (is_interleaved_kv ? total_seqlen_k * 2 * num_heads_kv
-                                    : total_seqlen_k * num_heads_kv)
-               : (is_interleaved_kv ? total_seqlen_k * 2 : total_seqlen_k),
+      total_seqlen_k,
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
@@ -204,12 +207,14 @@ void cutlass_paged_decode_impl(
       is_causal,
       is_local,
       is_sink,
-      is_interleaved_kv,
       num_kv_splits,
-      is_interleaved_kv ? key_cache.stride(0) / 2 : key_cache.stride(0),
+      nullptr,  // splits_per_seq, filled in below if applicable
+      nullptr,  // work_list, filled in below if applicable
+      0,        // total_wgs, filled in below if applicable
+      key_cache.stride(0),
       is_paged ? key_cache.stride(2) : key_cache.stride(1),
       is_paged ? key_cache.stride(1) : key_cache.stride(2),
-      is_interleaved_kv ? value_cache.stride(0) / 2 : value_cache.stride(0),
+      value_cache.stride(0),
       is_paged ? value_cache.stride(2) : value_cache.stride(1),
       is_paged ? value_cache.stride(1) : value_cache.stride(2),
       is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr,
@@ -217,7 +222,32 @@ void cutlass_paged_decode_impl(
       // non-varlen Q is [batch, num_heads, seq, head_size].
       is_varlen ? query.stride(0) : query.stride(2),
       is_varlen ? query.stride(1) : query.stride(1),
-      is_varlen ? int64_t{0} : query.stride(0)};
+      is_varlen ? int64_t{0} : query.stride(0),
+      page_stride_elements};
+
+  // For non-contiguous paged KV (e.g., cross-layer KV cache), enlarge
+  // total_seqlen_k to cover the full physical extent for the 2D block
+  // load surface descriptor. Without this, block loads for blocks at
+  // higher physical addresses would return zeros.
+  if (is_paged) {
+    int64_t effective_total =
+        get_paged_kv_cache_effective_total_seqlen(key_cache);
+    if (effective_total > args.total_seqlen_k) {
+      args.total_seqlen_k = static_cast<int>(effective_total);
+    }
+  }
+
+  // Per-sequence adaptive split-K: use pre-computed splits_per_seq from Python
+  // if available. This avoids GPU→CPU sync and extra computation here.
+  if (splits_per_seq.has_value() && splits_per_seq->numel() > 0) {
+    args.splits_per_seq = splits_per_seq->data_ptr<int>();
+  }
+
+  // Per-sequence work_list for compact grid scheduling
+  if (work_list.has_value() && work_list->numel() > 0) {
+    args.work_list = work_list->data_ptr<int>();
+    args.total_wgs = work_list->size(0);  // [total_wgs, 4]
+  }
 
   TORCH_CHECK(
       query.stride(-1) == 1,

@@ -146,6 +146,8 @@ class XeFMHAFwdSplitKVKernel {
 
     // per-batch mask: true = prefill, false = decode; nullptr = process all
     const bool* is_prefill;
+    const int* splits_per_seq =
+        nullptr;  // per-seq split counts; null => use global num_kv_splits
   };
   using KernelParams = KernelArguments;
 
@@ -251,8 +253,16 @@ class XeFMHAFwdSplitKVKernel {
 
     CUTLASS_PRAGMA_NO_UNROLL
     for (; tile_scheduler.is_valid(); ++tile_scheduler) {
-      auto [blk_q, blk_v, head, idx_b, idx_kv_split] =
-          tile_scheduler.get_block_coord();  // (Q,V,h,b,id_split)
+      auto
+          [blk_q,
+           blk_v,
+           head,
+           idx_b,
+           idx_kv_split,
+           wl_tile_start,
+           wl_tile_count] =
+              tile_scheduler
+                  .get_block_coord();  // (Q,V,h,b,split,tile_start,tile_count)
 
       // Skip prefill batches when is_prefill mask is provided
       if (p.is_prefill != nullptr && p.is_prefill[idx_b]) continue;
@@ -328,37 +338,54 @@ class XeFMHAFwdSplitKVKernel {
           make_shape(head_group_q, num_kv_splits, s.num_heads_kv, batch_dim);
       auto shape_sink = make_shape(s.num_heads_kv, head_group_q);
 
-      int num_blocks_per_split =
-          cute::ceil_div(windowed_k_blocks, num_kv_splits);
-
-      // Per-sequence split decision: short sequences are treated as
-      // single-split even when num_kv_splits > 1, avoiding precision
-      // loss from the split-reduce roundtrip.
-      // Scale threshold with tile width: smaller tiles (p64) have fewer
-      // SGs per WG, so splitting becomes beneficial at fewer blocks.
-      constexpr int tile_n = get<1>(TileShapeQK{});
-      constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
-      bool is_single_split =
-          (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
-
       int kv_split_offset;
       int num_effective_kv_blocks;
-      if (is_single_split) {
-        // Split 0 processes all blocks; splits 1+ skip entirely.
-        if (idx_kv_split > 0) {
+      int seq_num_kv_splits;
+      bool is_single_split;
+
+      if (wl_tile_start >= 0) {
+        // Compact grid: use pre-computed tile range from work_list.
+        // Python (build_decode_split_plan) has already folded the
+        // single-split heuristic and balanced assignment into the plan.
+        kv_split_offset = k_block0 + wl_tile_start;
+        num_effective_kv_blocks = wl_tile_count;
+        seq_num_kv_splits = (p.splits_per_seq != nullptr)
+                                ? p.splits_per_seq[idx_b]
+                                : num_kv_splits;
+        is_single_split = (seq_num_kv_splits <= 1);
+      } else {
+        // Legacy path: compute split range on the fly
+        seq_num_kv_splits = (p.splits_per_seq != nullptr)
+                                ? p.splits_per_seq[idx_b]
+                                : num_kv_splits;
+
+        if (idx_kv_split >= seq_num_kv_splits) {
           continue;
         }
-        kv_split_offset = k_block0;
-        num_effective_kv_blocks = windowed_k_blocks;
-      } else {
-        kv_split_offset = k_block0 + idx_kv_split * num_blocks_per_split;
-        num_effective_kv_blocks = cute::min(
-            windowed_k_blocks - idx_kv_split * num_blocks_per_split,
-            num_blocks_per_split);
+
+        int num_blocks_per_split =
+            cute::ceil_div(windowed_k_blocks, seq_num_kv_splits);
+
+        constexpr int tile_n = get<1>(TileShapeQK{});
+        constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
+        is_single_split =
+            (seq_num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
+
+        if (is_single_split) {
+          if (idx_kv_split > 0) {
+            continue;
+          }
+          kv_split_offset = k_block0;
+          num_effective_kv_blocks = windowed_k_blocks;
+        } else {
+          kv_split_offset = k_block0 + idx_kv_split * num_blocks_per_split;
+          num_effective_kv_blocks = cute::min(
+              windowed_k_blocks - idx_kv_split * num_blocks_per_split,
+              num_blocks_per_split);
+        }
       }
 
       if (num_effective_kv_blocks <= 0) {
-        // no need computation
         continue;
       }
 
@@ -527,6 +554,7 @@ class ReduceSplitK {
 
     // per-batch mask: true = prefill, false = decode; nullptr = process all
     const bool* is_prefill;
+    const int* splits_per_seq = nullptr;  // per-seq split counts
   };
   using KernelParams = KernelArguments;
 
@@ -648,16 +676,28 @@ class ReduceSplitK {
                           get<1>(TileShapeQK{})
                     : 0;
       const int windowed_k_blocks = k_blocks - k_block0;
-      int num_blocks_per_split =
-          cute::ceil_div(windowed_k_blocks, num_kv_splits);
+      // Per-sequence adaptive split count
+      int seq_num_kv_splits = (p.splits_per_seq != nullptr)
+                                  ? p.splits_per_seq[idx_b]
+                                  : num_kv_splits;
 
-      // Mirror the FMHA kernel's is_single_split decision so we only
-      // read split slots that were actually written.
-      constexpr int tile_n = get<1>(typename FMHAKernel_::TileShapeQK{});
-      constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
-      bool is_single_split =
-          (num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
-      int effective_splits = is_single_split ? 1 : num_kv_splits;
+      int num_blocks_per_split =
+          cute::ceil_div(windowed_k_blocks, seq_num_kv_splits);
+
+      // is_single_split is a heuristic owned by the FMHA kernel; when the
+      // host provides splits_per_seq, the host has already applied the same
+      // policy (see build_decode_split_plan in flash_attn_interface.py), so
+      // trust it directly. Otherwise (legacy path), mirror the FMHA kernel.
+      int effective_splits;
+      if (p.splits_per_seq != nullptr) {
+        effective_splits = seq_num_kv_splits;
+      } else {
+        constexpr int tile_n = get<1>(typename FMHAKernel_::TileShapeQK{});
+        constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
+        bool is_single_split =
+            (seq_num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
+        effective_splits = is_single_split ? 1 : seq_num_kv_splits;
+      }
 
       int offset_o = 0, offset_o_accum = 0;
       int offset_exp_sums = 0, offset_max_logits = 0;

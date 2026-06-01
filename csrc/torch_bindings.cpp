@@ -79,6 +79,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kXPU, &silu_and_mul_quant);
 
+  // Fused SiLU + Mul + per-block dynamic quantization (FP8 or INT8).
+  ops.def(
+      "silu_and_mul_per_block_quant("
+      "Tensor! out, "
+      "Tensor input, "
+      "Tensor! scales, "
+      "int group_size, "
+      "Tensor? scale_ub=None, "
+      "bool is_scale_transposed=False) -> ()");
+  ops.impl(
+      "silu_and_mul_per_block_quant",
+      torch::kXPU,
+      &silu_and_mul_per_block_quant);
+
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kXPU, &mul_and_silu);
 
@@ -112,7 +126,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
       "int num_heads_k, int num_heads_v, int head_dim, float eps, "
       "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
-      "bool is_neox, Tensor position_ids) -> ()");
+      "bool is_neox, Tensor position_ids, "
+      "int forced_token_heads_per_warp=-1) -> ()");
   ops.impl("fused_qk_norm_rope", torch::kXPU, &fused_qk_norm_rope);
 
   // Compute FP8 quantized tensor for given scaling factor.
@@ -143,7 +158,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "per_token_group_fp8_quant(Tensor input, Tensor! output_q, Tensor! "
       "output_s, "
       "int group_size, float eps, float fp8_min, float fp8_max, bool "
-      "scale_ue8m0) -> ()");
+      "scale_ue8m0, bool dummy_is_scale_transposed, bool dummy_is_tma_aligned "
+      ") -> ()");
   ops.impl(
       "per_token_group_fp8_quant", torch::kXPU, &per_token_group_quant_fp8);
 

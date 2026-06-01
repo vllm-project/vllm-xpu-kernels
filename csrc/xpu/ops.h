@@ -76,6 +76,15 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     int64_t rotary_dim,
     bool is_neox);
 
+void multimodal_rotary_embedding(
+    torch::Tensor& positions,  // [num_mrope_sections, num_tokens]
+    torch::Tensor& query,
+    std::optional<torch::Tensor> key,
+    int64_t head_size,
+    torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
+    bool is_neox,
+    std::vector<int64_t> mrope_section);  // host int list [num_mrope_sections]
+
 #ifdef VLLM_GDN_ENABLED
 void gdn_attention(
     torch::Tensor& core_attn_out,
@@ -95,9 +104,15 @@ void gdn_attention(
     const torch::Tensor& dt_bias,
     const int64_t num_prefills,
     const int64_t num_decodes,
+    const int64_t num_spec_decodes,
     const std::optional<torch::Tensor>& has_initial_state,
-    const torch::Tensor& non_spec_query_start_loc,
-    const torch::Tensor& non_spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
     const int64_t num_actual_tokens,
     const int64_t tp_size,
     const bool reorder_input);

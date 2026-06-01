@@ -58,6 +58,14 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 void silu_and_mul_quant(
     torch::Tensor& out, torch::Tensor& input, torch::Tensor& scale);
 
+void silu_and_mul_per_block_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor& scales,
+    int64_t group_size,
+    std::optional<torch::Tensor> scale_ub,
+    bool is_scale_transposed);
+
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
@@ -92,7 +100,8 @@ void fused_qk_norm_rope(
     torch::Tensor& k_weight,
     torch::Tensor& cos_sin_cache,
     bool is_neox,
-    torch::Tensor& position_ids);
+    torch::Tensor& position_ids,
+    int64_t forced_token_heads_per_warp);
 
 void reshape_and_cache(
     torch::Tensor& key,
@@ -179,7 +188,9 @@ void per_token_group_quant_fp8(
     double eps,
     double fp8_min,
     double fp8_max,
-    bool scale_ue8m0);
+    bool scale_ue8m0,
+    bool dummy_is_scale_transposed = false,
+    bool dummy_is_tma_aligned = false);
 
 void per_token_group_quant_mxfp4(
     const torch::Tensor& input,

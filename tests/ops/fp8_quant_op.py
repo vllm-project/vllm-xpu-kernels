@@ -184,6 +184,15 @@ def scaled_fp8_quant(
     return output, scale
 
 
+def _ceil_div(x: int, y: int) -> int:
+    return (x + y - 1) // y
+
+
+def get_tma_aligned_size(x: int, element_size: int) -> int:
+    alignment = 16 // element_size
+    return _ceil_div(x, alignment) * alignment
+
+
 def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
@@ -191,6 +200,7 @@ def per_token_group_quant_fp8(
     dtype: torch.dtype = torch.float8_e4m3fn,
     out_q: torch.Tensor | None = None,
     column_major_scales: bool = False,
+    tma_aligned_scales: bool = False,
     use_ue8m0: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
@@ -204,6 +214,7 @@ def per_token_group_quant_fp8(
         is supported for now.
         out_q: Optional output tensor. If not provided, function will create.
         column_major_scales: Outputs scales in column major.
+        tma_aligned_scales: Outputs scales in TMA-aligned layout.
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor.
@@ -224,16 +235,30 @@ def per_token_group_quant_fp8(
         x_q = torch.empty_like(x, device=x.device, dtype=dtype)
 
     if column_major_scales:
-        shape = (x.shape[-1] // group_size, ) + x.shape[:-1]
-        x_s = torch.empty(shape, device=x.device,
-                          dtype=torch.float32).permute(-1, -2)
+        if tma_aligned_scales:
+            m = x.shape[-2]
+            sf_k = x.shape[-1] // group_size
+            tma_aligned_m = get_tma_aligned_size(m, 4)
+            shape = x.shape[:-2] + (m, sf_k)
+            stride = ((1, tma_aligned_m) if x.dim() == 2 else
+                      (tma_aligned_m * sf_k, 1, tma_aligned_m))
+            x_s = torch.empty_strided(shape,
+                                      stride,
+                                      device=x.device,
+                                      dtype=torch.float32)
+        else:
+            shape = x.shape[:-2] + (x.shape[-1] // group_size, x.shape[-2])
+            x_s = torch.empty(shape, device=x.device,
+                              dtype=torch.float32).permute(-1, -2)
     else:
         shape = x.shape[:-1] + (x.shape[-1] // group_size, )
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
     # TODO(bnell): this causes some fp8 moe test to fail.
     torch.ops._C.per_token_group_fp8_quant(x, x_q, x_s, group_size, eps,
-                                           fp8_min, fp8_max, use_ue8m0)
+                                           fp8_min, fp8_max, use_ue8m0,
+                                           column_major_scales,
+                                           tma_aligned_scales)
 
     if use_ue8m0:
         x_s = x_s.to(torch.float8_e8m0fnu)
