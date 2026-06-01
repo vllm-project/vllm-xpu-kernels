@@ -202,6 +202,8 @@ struct FMHAFwdMainloop<
     int local_left, local_right;
     // Interleaved KV Cache
     bool is_interleaved_kv_cache;
+    // Number of KV heads for HND
+    int num_heads_kv;
   };
 
   // Kernel-facing parameters
@@ -232,7 +234,8 @@ struct FMHAFwdMainloop<
         args.total_seqlen_kv,
         args.local_left,
         args.local_right,
-        args.is_interleaved_kv_cache};
+        args.is_interleaved_kv_cache,
+        args.num_heads_kv};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -251,7 +254,8 @@ struct FMHAFwdMainloop<
 
     int block_idx = params.ptr_page_table[b_offset + page_local_idx];
     if (params.is_interleaved_kv_cache) block_idx *= 2;
-    return block_idx * tiles_per_page + K % tiles_per_page;
+    return block_idx * params.num_heads_kv * tiles_per_page +
+           K % tiles_per_page;
   }
 
   template <typename QVCoord>
@@ -695,6 +699,8 @@ struct DecodeFwdMainloop<
     int window_size_right;
     // Interleaved KV Cache
     bool is_interleaved_kv_cache;
+    // Number of KV heads for HND
+    int num_heads_kv;
   };
 
   // Kernel-facing parameters
@@ -725,7 +731,8 @@ struct DecodeFwdMainloop<
         args.total_seqlen_kv,
         args.window_size_left,
         args.window_size_right,
-        args.is_interleaved_kv_cache};
+        args.is_interleaved_kv_cache,
+        args.num_heads_kv};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -844,7 +851,8 @@ struct DecodeFwdMainloop<
       int page_local_idx = tile_idx * get<1>(TileShapeQK{}) / params.page_size;
       int block_idx = params.ptr_page_table[b_offset + page_local_idx];
       if (params.is_interleaved_kv_cache) block_idx *= 2;
-      tile_idx = block_idx * tiles_per_page + tile_idx % tiles_per_page;
+      tile_idx = block_idx * params.num_heads_kv * tiles_per_page +
+                 tile_idx % tiles_per_page;
     }
 
     /* Initialization steps for first block: Q/K prefetch, O init */
@@ -988,10 +996,13 @@ struct DecodeFwdMainloop<
               params.ptr_page_table[b_offset + next_page_local_idx];
           if (params.is_interleaved_kv_cache) next_block_idx *= 2;
           next_tile_idx =
-              next_block_idx * tiles_per_page + next_tile_idx % tiles_per_page;
+              next_block_idx * params.num_heads_kv * tiles_per_page +
+              next_tile_idx % tiles_per_page;
         } else {
           // set to last page
-          next_tile_idx = params.max_pages_per_seq * tiles_per_page - 1;
+          next_tile_idx =
+              params.max_pages_per_seq * params.num_heads_kv * tiles_per_page -
+              1;
         }
       }
       tile_idx = next_tile_idx;

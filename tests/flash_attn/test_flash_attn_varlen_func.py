@@ -46,7 +46,7 @@ def ref_paged_attn(query: torch.Tensor,
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     if is_paged:
-        _, block_size, num_kv_heads, head_size = key_cache.shape
+        _, num_kv_heads, block_size, head_size = key_cache.shape
         v_head_size = value_cache.shape[-1]
     else:
         _, num_kv_heads, head_size = key_cache.shape
@@ -67,9 +67,15 @@ def ref_paged_attn(query: torch.Tensor,
             num_kv_blocks = (kv_len + block_size - 1) // block_size
             block_indices = block_tables[i, :num_kv_blocks]
 
-            k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
+            # key_cache layout: [num_blocks, num_kv_heads, block_size, head_size]
+            # gather -> [num_blocks_i, num_kv_heads, block_size, head_size]
+            # transpose to [num_blocks_i, block_size, num_kv_heads, head_size]
+            # then flatten the block axis with the seq axis.
+            k = key_cache[block_indices].transpose(1, 2).reshape(
+                -1, num_kv_heads, head_size)
             k = k[:kv_len]
-            v = value_cache[block_indices].view(-1, num_kv_heads, v_head_size)
+            v = value_cache[block_indices].transpose(1, 2).reshape(
+                -1, num_kv_heads, v_head_size)
             v = v[:kv_len]
         else:
             k = key_cache[start_idx_kv:start_idx_kv + kv_len]
@@ -236,8 +242,8 @@ def test_varlen_with_paged_kv(
         assert query.stride(-1) == 1
     if is_paged:
         key_cache = torch.randn(num_blocks,
-                                block_size,
                                 num_kv_heads,
+                                block_size,
                                 head_size,
                                 dtype=dtype)
     else:
@@ -420,15 +426,15 @@ def test_varlen_with_interleaved_paged_kv(
                         dtype=dtype)
 
     combined_kv = torch.randn(num_blocks,
-                              2 * block_size,
                               num_kv_heads,
+                              2 * block_size,
                               head_size,
                               dtype=dtype)
-    key_cache = combined_kv[:, :block_size, :, :]
-    value_cache = combined_kv[:, block_size:, :, :]
+    key_cache = combined_kv[:, :, :block_size, :]
+    value_cache = combined_kv[:, :, block_size:, :]
 
     assert key_cache.shape == value_cache.shape
-    assert key_cache.stride(0) == 2 * block_size * num_kv_heads * head_size
+    assert key_cache.stride(0) == num_kv_heads * 2 * block_size * head_size
 
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
@@ -545,8 +551,8 @@ def test_decode_with_paged_kv(
                         head_size,
                         dtype=dtype)
     key_cache = torch.randn(num_blocks,
-                            block_size,
                             num_kv_heads,
+                            block_size,
                             head_size,
                             dtype=dtype)
     value_cache = torch.randn_like(key_cache)
@@ -719,8 +725,8 @@ def test_decode_with_paged_kv_noncontiguous_q(
     query_ref = query_noncontig.contiguous()
 
     key_cache = torch.randn(num_blocks,
-                            block_size,
                             num_kv_heads,
+                            block_size,
                             head_size,
                             dtype=dtype)
     value_cache = torch.randn_like(key_cache)

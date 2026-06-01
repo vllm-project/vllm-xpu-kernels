@@ -59,7 +59,10 @@ inline bool is_interleaved_kv_cache(
       key_cache.element_size() == value_cache.element_size() &&
       key_cache.storage().data_ptr() == value_cache.storage().data_ptr() &&
       key_cache.storage_offset() == 0 &&
-      value_cache.storage_offset() == value_stride[0] / 2) {
+      // Paged KV layout is [num_blocks, num_heads, block_size, head_size];
+      // interleaving doubles the per-head extent along block_size so V starts
+      // half-way through the head stride.
+      value_cache.storage_offset() == value_stride[1] / 2) {
     return true;
   }
 

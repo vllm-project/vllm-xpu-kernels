@@ -326,7 +326,8 @@ struct DecodeKernelLauncher {
          args.total_seqlen_k,
          args.window_size_left,
          args.window_size_right,
-         args.is_interleaved_kv_cache},
+         args.is_interleaved_kv_cache,
+         args.num_heads_k},
         {},
         hw_info,
         args.num_kv_splits};

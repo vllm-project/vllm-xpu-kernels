@@ -6,8 +6,9 @@ using namespace cute;
 
 void cutlass_paged_decode_xe2(
     sycl::queue& queue,
-    const at::Tensor& query,      // [seq_q, heads, head_size]
-    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& query,  // [seq_q, heads, head_size]
+    const at::Tensor&
+        key_cache,  // paged: [num_block, num_heads, block_size, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
     at::Tensor&
@@ -75,8 +76,9 @@ inline bool is_single_value_broadcast_tensor(const at::Tensor& t) {
 
 void cutlass_paged_decode_impl(
     sycl::queue& queue,
-    const at::Tensor& query,      // [seq_q, heads, head_size]
-    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& query,  // [seq_q, heads, head_size]
+    const at::Tensor&
+        key_cache,  // paged: [num_block, num_heads, block_size, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
     at::Tensor&
@@ -146,11 +148,12 @@ void cutlass_paged_decode_impl(
   bool is_interleaved_kv = false;
 
   if (is_paged) {
+    // Paged KV layout: [num_blocks, num_heads, block_size, head_size]
     // num_blocks is used to build total_seqlen_k for shape_K in kernels
     // it is not just the meaning of used blocks for kv.
     num_blocks = key_cache.size(0);
-    block_size = key_cache.size(1);
-    num_heads_kv = key_cache.size(2);
+    num_heads_kv = key_cache.size(1);
+    block_size = key_cache.size(2);
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
 
@@ -177,7 +180,12 @@ void cutlass_paged_decode_impl(
       max_seqlen_q,
       max_seqlen_k,
       total_seqlen_q,
-      is_interleaved_kv ? total_seqlen_k * 2 : total_seqlen_k,
+      // Paged KV [num_blocks, num_heads, block_size, head_size]: see comment
+      // in fmha_xe2.cpp; total_seqlen_kv bounds the K-tensor K-dim and must
+      // accommodate page_idx scaled by num_heads_kv in the new layout.
+      is_paged ? (is_interleaved_kv ? total_seqlen_k * 2 * num_heads_kv
+                                    : total_seqlen_k * num_heads_kv)
+               : (is_interleaved_kv ? total_seqlen_k * 2 : total_seqlen_k),
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
@@ -199,11 +207,11 @@ void cutlass_paged_decode_impl(
       is_interleaved_kv,
       num_kv_splits,
       is_interleaved_kv ? key_cache.stride(0) / 2 : key_cache.stride(0),
-      key_cache.stride(1),
-      key_cache.stride(2),
+      is_paged ? key_cache.stride(2) : key_cache.stride(1),
+      is_paged ? key_cache.stride(1) : key_cache.stride(2),
       is_interleaved_kv ? value_cache.stride(0) / 2 : value_cache.stride(0),
-      value_cache.stride(1),
-      value_cache.stride(2),
+      is_paged ? value_cache.stride(2) : value_cache.stride(1),
+      is_paged ? value_cache.stride(1) : value_cache.stride(2),
       is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr,
       // Q strides: for varlen Q is [total_seq, num_heads, head_size]; for
       // non-varlen Q is [batch, num_heads, seq, head_size].

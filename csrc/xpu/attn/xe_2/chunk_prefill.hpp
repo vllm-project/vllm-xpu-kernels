@@ -53,6 +53,7 @@ struct chunk_prefill_args_t {
   bool is_local = false;
   bool is_sink = false;
   bool is_interleaved_kv_cache = false;
+  int num_heads_kv_for_paged_idx = 1;
   // softmax_lse output (nullptr when not requested)
   float* softmax_lse = nullptr;
   int lse_stride = 0;  // stride along seq dim (= num_heads_q)
@@ -184,7 +185,8 @@ struct KernelLauncher {
          args.total_seqlen_k,
          args.window_size_left,
          args.window_size_right,
-         args.is_interleaved_kv_cache},
+         args.is_interleaved_kv_cache,
+         args.num_heads_kv_for_paged_idx},
         {},
         hw_info};
 
