@@ -486,18 +486,17 @@ struct FMHAFwdMainloop<
           softmax(effective_scale, K == blk_k0, tSrS, tA_max, tA_sum);
       reorder(tSrS, tArP);
 
-      /* GEMM 2: A += P * V, split in v dimension */
+      /* GEMM 2: A += P * V, split in v dimension.
+         tArA rescaling fused per-VTile to overlap with V load. */
       CUTLASS_PRAGMA_UNROLL
       for (int VV = 0; VV < VTiles; VV++) {
         copy(copy_v, tVgV_cache(_, _, _, VV), tVrV);
         // reorder() performs the (vectorized) fp8 -> ElementQ cast; the
         // per-tensor scale_v is applied once after the K loop below.
         reorder(tVrV, tArV);
-        if (K != blk_k0) {
-          CUTLASS_PRAGMA_UNROLL
-          for (int i = 0; i < tArA.size() / VTiles; i++)
-            tArA(_, _, _, VV)(i) *= broadcast<0>(rescale, tArA, i);
-        }
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = tArA.size() / VTiles - 1; i >= 0; i--)
+          tArA(_, _, _, VV)(i) *= broadcast<0>(rescale, tArA, i);
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
 
@@ -539,11 +538,13 @@ struct FMHAFwdMainloop<
       tS_max(i) = new_max;
     }
 
-    /* Scale S and subtract maxima, then exponentiate */
+    /* Scale S and subtract maxima, then exponentiate (split for pipelining) */
     CUTLASS_PRAGMA_UNROLL
-    for (int i = 0; i < tS.size(); i++) {
-      tS(i) = sycl::native::exp2(scale * tS(i) - broadcast<0>(tS_max, tS, i));
-    }
+    for (int i = 0; i < tS.size(); i++)
+      tS(i) = scale * tS(i) - broadcast<0>(tS_max, tS, i);
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < tS.size(); i++)
+      tS(i) = sycl::native::exp2(tS(i));
 
     /* Rescale existing S sums */
     if (!first_block) {
@@ -1037,10 +1038,13 @@ struct DecodeFwdMainloop<
       tS_max(i) = sycl::max(tS_max(i), scale * tS_bmax(i));
     }
 
-    /* Scale S and subtract maxima, then exponentiate */
+    /* Scale S and subtract maxima, then exponentiate (split for pipelining) */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++)
-      tS(i) = sycl::native::exp2(scale * tS(i) - broadcast<0>(tS_max, tS, i));
+      tS(i) = scale * tS(i) - broadcast<0>(tS_max, tS, i);
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < tS.size(); i++)
+      tS(i) = sycl::native::exp2(tS(i));
 
     /* Rescale existing S sums and O accumulator */
     if (!first_block) {
