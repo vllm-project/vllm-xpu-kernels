@@ -378,4 +378,114 @@ CUTE_DEVICE void gemm_TTS_k_multi(
   }
 }
 
+// Fused dual-A GEMM: computes C1 += A1 * B^T and C2 += A2 * B^T
+// sharing the same B operand load. B is loaded once per k_tile and
+// reused in registers for both DPAS operations.
+template <
+    class A1Tensor,
+    class A2Tensor,
+    class BTensor,
+    class SGCTensor1,
+    class SGCTensor2,
+    class TiledMMA>
+CUTE_DEVICE void gemm_TTS_fused_2A(
+    A1Tensor const& A1,  // (M,K) first A operand
+    A2Tensor const& A2,  // (M,K) second A operand
+    BTensor const& B,    // (N,K) shared B operand
+    SGCTensor1& tCrC1,   // accumulator for A1 * B^T
+    SGCTensor2& tCrC2,   // accumulator for A2 * B^T
+    int wg_m1,           // m tile index for A1
+    int wg_m2,           // m tile index for A2
+    int wg_n,            // n tile index for B (shared)
+    TiledMMA const& mma) {
+  auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+  int local_id = item.get_local_linear_id();
+
+  Tensor cA1 = make_identity_tensor(A1.shape());
+  Tensor cA2 = make_identity_tensor(A2.shape());
+  Tensor cB = make_identity_tensor(B.shape());
+
+  auto wg_tile = mma.tile_mnk();
+
+  Tensor gA1 = local_tile(cA1, select<0, 2>(wg_tile), make_coord(wg_m1, _));
+  Tensor gA2 = local_tile(cA2, select<0, 2>(wg_tile), make_coord(wg_m2, _));
+  Tensor gB = local_tile(cB, select<1, 2>(wg_tile), make_coord(wg_n, _));
+
+  auto copy_a1 = get_block_2d_copy_A<void>(mma, A1);
+  auto copy_a2 = get_block_2d_copy_A<void>(mma, A2);
+  auto copy_b = get_block_2d_copy_B<void>(mma, B);
+
+  auto thr_mma = mma.get_slice(local_id);
+  auto thr_copy_a1 = copy_a1.get_slice(local_id);
+  auto thr_copy_a2 = copy_a2.get_slice(local_id);
+  auto thr_copy_b = copy_b.get_slice(local_id);
+
+  // MMA fragments: A fragment reused for both A1 and A2, B shared
+  auto tCrA = thr_mma.partition_sg_fragment_A(gA1(_, _, 0));
+  auto tCrB = thr_mma.partition_sg_fragment_B(gB(_, _, 0));
+
+  // Copy destination registers: separate for A1 and A2
+  auto tArA1 = thr_copy_a1.partition_sg_fragment_D(gA1(_, _, 0));
+  auto tArA2 = thr_copy_a2.partition_sg_fragment_D(gA2(_, _, 0));
+  auto tBrB = thr_copy_b.partition_sg_fragment_D(gB(_, _, 0));
+
+  // Source partitions
+  Tensor tAgA1 = thr_copy_a1.partition_S(gA1);
+  Tensor tAgA2 = thr_copy_a2.partition_S(gA2);
+  Tensor tBgB = thr_copy_b.partition_S(gB);
+
+  // Prefetch setup
+  auto prefetch_a1 = make_block_2d_prefetch(copy_a1);
+  auto prefetch_a2 = make_block_2d_prefetch(copy_a2);
+  auto prefetch_b = make_block_2d_prefetch(copy_b);
+
+  auto thr_prefetch_A1 = prefetch_a1.get_slice(local_id);
+  auto thr_prefetch_A2 = prefetch_a2.get_slice(local_id);
+  auto thr_prefetch_B = prefetch_b.get_slice(local_id);
+
+  auto pAgA1 = thr_prefetch_A1.partition_S(gA1);
+  auto pAgA2 = thr_prefetch_A2.partition_S(gA2);
+  auto pBgB = thr_prefetch_B.partition_S(gB);
+
+  const int prefetch_dist = 3;
+
+  constexpr int barrier_scope = 2;
+
+  int k_tile_count = ceil_div(shape<1>(A1), get<2>(wg_tile));
+  int k_tile_prefetch = 0;
+
+  CUTE_UNROLL
+  for (; k_tile_prefetch < prefetch_dist; k_tile_prefetch++) {
+    prefetch(prefetch_a1, pAgA1(_, _, _, k_tile_prefetch));
+    prefetch(prefetch_a2, pAgA2(_, _, _, k_tile_prefetch));
+    prefetch(prefetch_b, pBgB(_, _, _, k_tile_prefetch));
+  }
+
+  for (int k_tile = 0; k_tile < k_tile_count; k_tile++, k_tile_prefetch++) {
+    barrier_arrive(barrier_scope);
+
+    // Load shared B and both A operands
+    copy(copy_b, tBgB(_, _, _, k_tile), tBrB);
+    copy(copy_a1, tAgA1(_, _, _, k_tile), tArA1);
+    copy(copy_a2, tAgA2(_, _, _, k_tile), tArA2);
+
+    if (k_tile_prefetch < k_tile_count) {
+      prefetch(prefetch_a1, pAgA1(_, _, _, k_tile_prefetch));
+      prefetch(prefetch_a2, pAgA2(_, _, _, k_tile_prefetch));
+      prefetch(prefetch_b, pBgB(_, _, _, k_tile_prefetch));
+    }
+
+    // Reorder B (shared) and A1, then first GEMM
+    reorder(tBrB, tCrB);
+    reorder(tArA1, tCrA);
+    cute::gemm(mma, tCrA, tCrB, tCrC1);
+
+    // Reorder A2 reusing MMA A fragment, B stays in register
+    reorder(tArA2, tCrA);
+    cute::gemm(mma, tCrA, tCrB, tCrC2);
+
+    barrier_wait(barrier_scope);
+  }
+}
+
 }  // namespace gdn
