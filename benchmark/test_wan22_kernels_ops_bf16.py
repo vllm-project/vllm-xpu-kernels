@@ -796,18 +796,18 @@ class TestFlashAttentionKernels:
                     max_seqlen_k=SEQ_LEN,
                     dropout_p=0.0,
                     softmax_scale=softmax_scale,
-                    causal=True,
+                    causal=False,
                 )
 
             shape_info = {"batch": BATCH_SIZE, "num_heads": NUM_HEADS, "seq_len": SEQ_LEN, "head_dim": HEAD_DIM}
 
             result = benchmark_with_metrics(
-                "Flash Attention Varlen Self (causal)",
+                "Flash Attention Varlen Self",
                 prepare,
                 compute,
                 "flash_attn",
                 shape_info,
-                profiling_info="WAN needs causal=False; using causal=True (build limitation)",
+                profiling_info="WAN self-attention (non-causal, seq=75600)",
             )
 
             if result:
