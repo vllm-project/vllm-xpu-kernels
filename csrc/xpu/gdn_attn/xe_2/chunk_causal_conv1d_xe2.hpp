@@ -686,48 +686,45 @@ void kernel_launcher(
   const int norm_slm_bytes = KERNEL_MAIN::get_norm_slm_bytes(
       head_k_dim, num_v_heads, num_k_heads, head_v_dim);
   queue.submit([&](sycl::handler& cgh) {
-    auto norm_slm = sycl::local_accessor<char, 1>(
-        sycl::range<1>(norm_slm_bytes), cgh);
-    cgh.parallel_for(
-        range_main,
-        [=](sycl::nd_item<2> item) {
-          char* norm_slm_ptr =
-              norm_slm
-                  .template get_multi_ptr<sycl::access::decorated::no>()
-                  .get_raw();
-          KERNEL_MAIN task(
-              q_out,
-              k_out,
-              v_out,
-              z_out,
-              b_out,
-              a_out,
-              mixed_qkvz,
-              mixed_ba,
-              conv_weights,
-              conv_bias,
-              conv_states,
-              conv_states_stride_0,
-              conv_states_tmp,
-              query_start_loc,
-              cache_indices,
-              has_initial_state,
-              token_indx,
-              act_mode,
-              pad_slot_id,
-              batch_size,
-              num_actual_tokens,
-              num_virtual_tokens,
-              num_k_heads,
-              head_k_dim,
-              num_v_heads,
-              head_v_dim,
-              qkvz_elems,
-              conv_elems,
-              norm_slm_ptr,
-              fuse_l2norm);
-          task(item);
-        });
+    auto norm_slm =
+        sycl::local_accessor<char, 1>(sycl::range<1>(norm_slm_bytes), cgh);
+    cgh.parallel_for(range_main, [=](sycl::nd_item<2> item) {
+      char* norm_slm_ptr =
+          norm_slm.template get_multi_ptr<sycl::access::decorated::no>()
+              .get_raw();
+      KERNEL_MAIN task(
+          q_out,
+          k_out,
+          v_out,
+          z_out,
+          b_out,
+          a_out,
+          mixed_qkvz,
+          mixed_ba,
+          conv_weights,
+          conv_bias,
+          conv_states,
+          conv_states_stride_0,
+          conv_states_tmp,
+          query_start_loc,
+          cache_indices,
+          has_initial_state,
+          token_indx,
+          act_mode,
+          pad_slot_id,
+          batch_size,
+          num_actual_tokens,
+          num_virtual_tokens,
+          num_k_heads,
+          head_k_dim,
+          num_v_heads,
+          head_v_dim,
+          qkvz_elems,
+          conv_elems,
+          norm_slm_ptr,
+          fuse_l2norm);
+      task(item);
+    });
   });
 
   using KERNEL_ZBA = chunk_reorder_zba_kernel<T, ReorderInput>;

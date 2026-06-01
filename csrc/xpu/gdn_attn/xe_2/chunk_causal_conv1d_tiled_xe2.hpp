@@ -117,7 +117,8 @@ struct chunk_causal_conv1d_tiled_kernel {
   }
 
   static constexpr int meta_ints = 5;
-  // SLM sizes in bytes: metadata (ints) + input data (T elements) + norm (floats)
+  // SLM sizes in bytes: metadata (ints) + input data (T elements) + norm
+  // (floats)
   static constexpr int slm_meta_bytes = meta_ints * sizeof(int);
   static constexpr int feats_per_wg = wg_size * elems_per_item;
   static constexpr int slm_data_elems = (TileT + Width - 1) * feats_per_wg;
@@ -439,7 +440,7 @@ struct chunk_causal_conv1d_tiled_kernel {
           q_total += norm_slm[i * 2];
           k_total += norm_slm[i * 2 + 1];
         }
-        sycl::group_barrier(item.get_group()); // protect SLM for next token
+        sycl::group_barrier(item.get_group());  // protect SLM for next token
 
         float q_inv = sycl::rsqrt(q_total + l2norm_eps) *
                       sycl::rsqrt(static_cast<float>(q_dim));
@@ -823,7 +824,7 @@ void chunk_causal_conv1d_tiled_xe2(
       qkvz_elems,                                                  \
       conv_elems,                                                  \
       num_prefills,                                                \
-      num_decodes,                                                  \
+      num_decodes,                                                 \
       fuse_l2norm);
 
 #define TILED_WIDTH_DISPATCH(scalar_t, width, reorder_input) \

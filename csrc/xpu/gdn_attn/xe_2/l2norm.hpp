@@ -146,8 +146,8 @@ void l2norm_launch(
   static constexpr int MaxSubgroupsPerWorkgroup =
       MaxThreadsPerSM / l2norm_sub_group_size;
   const int total_qk_heads = total_virtual_seqlen * num_k_heads;
-  const int wg_count =
-      (total_qk_heads + MaxSubgroupsPerWorkgroup - 1) / MaxSubgroupsPerWorkgroup;
+  const int wg_count = (total_qk_heads + MaxSubgroupsPerWorkgroup - 1) /
+                       MaxSubgroupsPerWorkgroup;
 
   sycl::range<3> local(1, 1, MaxThreadsPerSM);
   sycl::range<3> global(1, wg_count, 1);
@@ -157,8 +157,10 @@ void l2norm_launch(
 
   constexpr int l2norm_vec_width = sizeof(T) * L2NormVecSize;
   const bool vec_enabled =
-      ((reinterpret_cast<uintptr_t>(q.data_ptr()) & (l2norm_vec_width - 1)) == 0) &&
-      ((reinterpret_cast<uintptr_t>(k.data_ptr()) & (l2norm_vec_width - 1)) == 0) &&
+      ((reinterpret_cast<uintptr_t>(q.data_ptr()) & (l2norm_vec_width - 1)) ==
+       0) &&
+      ((reinterpret_cast<uintptr_t>(k.data_ptr()) & (l2norm_vec_width - 1)) ==
+       0) &&
       ((head_k_dim & (L2NormVecSize - 1)) == 0);
   queue.submit([&](sycl::handler& cgh) {
     if (vec_enabled) {
@@ -166,25 +168,21 @@ void l2norm_launch(
           sycl::nd_range<3>{global * local, local},
           [=](auto) [[sycl::reqd_sub_group_size(l2norm_sub_group_size)]] {
             l2norm_vectorized_kernel<T, L2NormVecSize>(
-                q_ptr, k_ptr, total_virtual_seqlen,
-                num_k_heads, head_k_dim);
+                q_ptr, k_ptr, total_virtual_seqlen, num_k_heads, head_k_dim);
           });
     } else {
       cgh.parallel_for<L2NormKernelTag<T>>(
           sycl::nd_range<3>{global * local, local},
           [=](auto) [[sycl::reqd_sub_group_size(l2norm_sub_group_size)]] {
             l2norm_kernel<T>(
-                q_ptr, k_ptr, total_virtual_seqlen,
-                num_k_heads, head_k_dim);
+                q_ptr, k_ptr, total_virtual_seqlen, num_k_heads, head_k_dim);
           });
     }
   });
 }
 
 void l2norm_xe2(
-    sycl::queue& queue,
-    const torch::Tensor& q,
-    const torch::Tensor& k) {
+    sycl::queue& queue, const torch::Tensor& q, const torch::Tensor& k) {
   const int total_virtual_seqlen = q.size(0);
   const int num_k_heads = q.size(1);
   const int head_k_dim = q.size(2);

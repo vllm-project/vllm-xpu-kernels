@@ -436,11 +436,11 @@ void gdn_attention(
       // Tiled kernel: only valid when all Q+K features fit in a single
       // feature chunk, i.e. 2 * head_k_dim <= feats_per_wg (256).
       // Untiled kernel: always valid (entire QKV in one WG).
-      constexpr int tiled_feats_per_wg = 256;  // wg_size(64) * elems_per_item(4)
+      constexpr int tiled_feats_per_wg =
+          256;  // wg_size(64) * elems_per_item(4)
       const bool use_tiled = (non_spec_token >= gdn::conv1d_tile_size);
-      const bool fuse_l2norm = use_tiled
-          ? (2 * head_k_dim <= tiled_feats_per_wg)
-          : true;
+      const bool fuse_l2norm =
+          use_tiled ? (2 * head_k_dim <= tiled_feats_per_wg) : true;
 
       if (use_tiled) {
         gdn::chunk_causal_conv1d_tiled_xe2(
