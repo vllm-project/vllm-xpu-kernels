@@ -20,10 +20,13 @@ import torch
 import triton
 import triton.language as tl
 
+import vllm_xpu_kernels._xpu_C  # noqa: F401  -- registers _xpu_C ops
+
 
 @dataclass
 class BenchmarkConfig:
     """Configuration for a benchmark run."""
+
     name: str
     op_name: str
     num_tokens: int
@@ -40,31 +43,31 @@ class BenchmarkConfig:
 @triton.jit
 def _mhc_pre_fused_kernel(
     # Inputs
-    res_ptr,         # [N, hc, H] fp32
-    gemm_out_ptr,    # [N, hc3] fp32
-    hc_scale_ptr,    # [3] fp32
-    hc_base_ptr,     # [hc3] fp32
+    res_ptr,  # [N, hc, H] fp32
+    gemm_out_ptr,  # [N, hc3] fp32
+    hc_scale_ptr,  # [3] fp32
+    hc_base_ptr,  # [hc3] fp32
     # Outputs
-    post_mix_ptr,    # [N, hc] fp32
-    comb_mix_ptr,    # [N, hc*hc] fp32
+    post_mix_ptr,  # [N, hc] fp32
+    comb_mix_ptr,  # [N, hc*hc] fp32
     # Intermediate buffer for pre_mix scalars (for einsum kernel)
-    pre_mix_buf_ptr, # [N, hc] fp32
+    pre_mix_buf_ptr,  # [N, hc] fp32
     # Strides
-    stride_res_n,    # = hc * H
-    stride_gemm_n,   # = hc3
-    stride_post_n,   # = hc
-    stride_comb_n,   # = hc * hc
+    stride_res_n,  # = hc * H
+    stride_gemm_n,  # = hc3
+    stride_post_n,  # = hc
+    stride_comb_n,  # = hc * hc
     # Scalar params
     rms_eps,
     hc_pre_eps,
     hc_sinkhorn_eps,
     hc_post_mult_value,
     # Constexpr
-    HC: tl.constexpr,           # 4
-    HC3: tl.constexpr,          # 24
-    HCH: tl.constexpr,         # hc * H = 16384
+    HC: tl.constexpr,  # 4
+    HC3: tl.constexpr,  # 24
+    HCH: tl.constexpr,  # hc * H = 16384
     SINKHORN_REPEAT: tl.constexpr,  # 20
-    BLOCK_H: tl.constexpr,     # tile size for sqrsum reduction
+    BLOCK_H: tl.constexpr,  # tile size for sqrsum reduction
 ):
     pid_n = tl.program_id(0)
 
@@ -99,7 +102,9 @@ def _mhc_pre_fused_kernel(
     pre_mix = tl.sigmoid(pre_raw * scale0 + pre_base) + hc_pre_eps  # [4]
 
     post_base = tl.load(hc_base_ptr + post_offs)
-    post_mix = tl.sigmoid(post_raw * scale1 + post_base) * hc_post_mult_value  # [4]
+    post_mix = (
+        tl.sigmoid(post_raw * scale1 + post_base) * hc_post_mult_value
+    )  # [4]
 
     cm_base = tl.load(hc_base_ptr + cm_offs)
     cm = cm_raw * scale2 + cm_base  # [16]
@@ -135,10 +140,10 @@ def _mhc_pre_fused_kernel(
 @triton.jit
 def _mhc_pre_einsum_kernel(
     # Inputs
-    res_ptr,         # [N, hc, H] fp32
-    pre_mix_ptr,     # [N, hc] fp32
+    res_ptr,  # [N, hc, H] fp32
+    pre_mix_ptr,  # [N, hc] fp32
     # Output
-    layer_input_ptr, # [N, H] bf16
+    layer_input_ptr,  # [N, H] bf16
     # Dims
     H: tl.constexpr,
     HC: tl.constexpr,
@@ -166,24 +171,26 @@ def _mhc_pre_einsum_kernel(
 
     acc = pm0 * r0 + pm1 * r1 + pm2 * r2 + pm3 * r3
 
-    tl.store(layer_input_ptr + pid_n * H + h_offs, acc.to(tl.bfloat16), mask=h_mask)
+    tl.store(
+        layer_input_ptr + pid_n * H + h_offs, acc.to(tl.bfloat16), mask=h_mask
+    )
 
 
 @triton.jit
 def _mhc_post_fused_kernel(
     # Inputs
-    x_ptr,           # [N, H] bf16 - layer output
-    res_ptr,         # [N, hc, H] bf16 - residual
-    post_mix_ptr,    # [N, hc] fp32
-    comb_mix_ptr,    # [N, hc*hc] fp32
+    x_ptr,  # [N, H] bf16 - layer output
+    res_ptr,  # [N, hc, H] bf16 - residual
+    post_mix_ptr,  # [N, hc] fp32
+    comb_mix_ptr,  # [N, hc*hc] fp32
     # Output
-    out_ptr,         # [N, hc, H] bf16
+    out_ptr,  # [N, hc, H] bf16
     # Strides
-    stride_x_n,      # = H
-    stride_res_n,    # = hc * H
-    stride_post_n,   # = hc
-    stride_comb_n,   # = hc * hc
-    stride_out_n,    # = hc * H
+    stride_x_n,  # = H
+    stride_res_n,  # = hc * H
+    stride_post_n,  # = hc
+    stride_comb_n,  # = hc * hc
+    stride_out_n,  # = hc * H
     # Constexpr
     H: tl.constexpr,
     HC: tl.constexpr,
@@ -222,15 +229,25 @@ def _mhc_post_fused_kernel(
     c33 = tl.load(comb_mix_ptr + comb_base + 15).to(tl.float32)
 
     # Load x[pid_n, h_offs]
-    x_vals = tl.load(x_ptr + pid_n * stride_x_n + h_offs, mask=h_mask, other=0.0)
+    x_vals = tl.load(
+        x_ptr + pid_n * stride_x_n + h_offs, mask=h_mask, other=0.0
+    )
     x_f32 = x_vals.to(tl.float32)
 
     # Load residual[pid_n, j, h_offs] for j=0..3
     res_base = pid_n * stride_res_n
-    r0 = tl.load(res_ptr + res_base + 0 * H + h_offs, mask=h_mask, other=0.0).to(tl.float32)
-    r1 = tl.load(res_ptr + res_base + 1 * H + h_offs, mask=h_mask, other=0.0).to(tl.float32)
-    r2 = tl.load(res_ptr + res_base + 2 * H + h_offs, mask=h_mask, other=0.0).to(tl.float32)
-    r3 = tl.load(res_ptr + res_base + 3 * H + h_offs, mask=h_mask, other=0.0).to(tl.float32)
+    r0 = tl.load(
+        res_ptr + res_base + 0 * H + h_offs, mask=h_mask, other=0.0
+    ).to(tl.float32)
+    r1 = tl.load(
+        res_ptr + res_base + 1 * H + h_offs, mask=h_mask, other=0.0
+    ).to(tl.float32)
+    r2 = tl.load(
+        res_ptr + res_base + 2 * H + h_offs, mask=h_mask, other=0.0
+    ).to(tl.float32)
+    r3 = tl.load(
+        res_ptr + res_base + 3 * H + h_offs, mask=h_mask, other=0.0
+    ).to(tl.float32)
 
     # out[hco=0..3]
     out0 = p0 * x_f32 + c00 * r0 + c10 * r1 + c20 * r2 + c30 * r3
@@ -240,10 +257,18 @@ def _mhc_post_fused_kernel(
 
     # Store as bf16
     out_base = pid_n * stride_out_n
-    tl.store(out_ptr + out_base + 0 * H + h_offs, out0.to(tl.bfloat16), mask=h_mask)
-    tl.store(out_ptr + out_base + 1 * H + h_offs, out1.to(tl.bfloat16), mask=h_mask)
-    tl.store(out_ptr + out_base + 2 * H + h_offs, out2.to(tl.bfloat16), mask=h_mask)
-    tl.store(out_ptr + out_base + 3 * H + h_offs, out3.to(tl.bfloat16), mask=h_mask)
+    tl.store(
+        out_ptr + out_base + 0 * H + h_offs, out0.to(tl.bfloat16), mask=h_mask
+    )
+    tl.store(
+        out_ptr + out_base + 1 * H + h_offs, out1.to(tl.bfloat16), mask=h_mask
+    )
+    tl.store(
+        out_ptr + out_base + 2 * H + h_offs, out2.to(tl.bfloat16), mask=h_mask
+    )
+    tl.store(
+        out_ptr + out_base + 3 * H + h_offs, out3.to(tl.bfloat16), mask=h_mask
+    )
 
 
 # --- Triton Python wrappers ---
@@ -281,20 +306,39 @@ def mhc_pre_xpu_triton(
 
     # Allocate outputs
     post_mix = torch.empty(N, hc, dtype=torch.float32, device=residual.device)
-    comb_mix = torch.empty(N, hc * hc, dtype=torch.float32, device=residual.device)
-    layer_input = torch.empty(N, H, dtype=torch.bfloat16, device=residual.device)
-    pre_mix_buf = torch.empty(N, hc, dtype=torch.float32, device=residual.device)
+    comb_mix = torch.empty(
+        N, hc * hc, dtype=torch.float32, device=residual.device
+    )
+    layer_input = torch.empty(
+        N, H, dtype=torch.bfloat16, device=residual.device
+    )
+    pre_mix_buf = torch.empty(
+        N, hc, dtype=torch.float32, device=residual.device
+    )
 
     # Launch 2: fused sinkhorn kernel
     BLOCK_H = 1024
     grid_sinkhorn = (N,)
 
     _mhc_pre_fused_kernel[grid_sinkhorn](
-        res_fp32, gemm_out, hc_scale, hc_base,
-        post_mix, comb_mix, pre_mix_buf,
-        hc * H, hc3, hc, hc * hc,
-        rms_eps, hc_pre_eps, hc_sinkhorn_eps, hc_post_mult_value,
-        HC=hc, HC3=hc3, HCH=hcH,
+        res_fp32,
+        gemm_out,
+        hc_scale,
+        hc_base,
+        post_mix,
+        comb_mix,
+        pre_mix_buf,
+        hc * H,
+        hc3,
+        hc,
+        hc * hc,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_mult_value,
+        HC=hc,
+        HC3=hc3,
+        HCH=hcH,
         SINKHORN_REPEAT=sinkhorn_repeat,
         BLOCK_H=BLOCK_H,
     )
@@ -304,8 +348,12 @@ def mhc_pre_xpu_triton(
     grid_einsum = (N, triton.cdiv(H, BLOCK_H_EINSUM))
 
     _mhc_pre_einsum_kernel[grid_einsum](
-        res_fp32, pre_mix_buf, layer_input,
-        H=H, HC=hc, BLOCK_H=BLOCK_H_EINSUM,
+        res_fp32,
+        pre_mix_buf,
+        layer_input,
+        H=H,
+        HC=hc,
+        BLOCK_H=BLOCK_H_EINSUM,
     )
 
     return (
@@ -342,9 +390,19 @@ def mhc_post_xpu_triton(
     grid = (N, triton.cdiv(H, BLOCK_H))
 
     _mhc_post_fused_kernel[grid](
-        x_flat, res_flat, post_flat, comb_flat, out,
-        H, hc * H, hc, hc * hc, hc * H,
-        H=H, HC=hc, BLOCK_H=BLOCK_H,
+        x_flat,
+        res_flat,
+        post_flat,
+        comb_flat,
+        out,
+        H,
+        hc * H,
+        hc,
+        hc * hc,
+        hc * H,
+        H=H,
+        HC=hc,
+        BLOCK_H=BLOCK_H,
     )
 
     return out.reshape(*N_shape, hc, H)
@@ -395,22 +453,18 @@ def benchmark_function(
     reset_memory_stats()
 
     # Benchmark
-    start_events = [torch.xpu.Event(enable_timing=True) for _ in range(benchmark_iters)]
-    end_events = [torch.xpu.Event(enable_timing=True) for _ in range(benchmark_iters)]
+    start_event = torch.xpu.Event(enable_timing=True)
+    end_event = torch.xpu.Event(enable_timing=True)
 
+    start_event.record()
     for i in range(benchmark_iters):
-        start_events[i].record()
         func_callable(*args)
-        end_events[i].record()
+    end_event.record()
 
     torch.xpu.synchronize()
 
     # Calculate timing
-    times = [
-        start_events[i].elapsed_time(end_events[i])
-        for i in range(benchmark_iters)
-    ]
-    avg_time = sum(times) / len(times)
+    avg_time = start_event.elapsed_time(end_event) / benchmark_iters
 
     # Get peak memory
     _, peak_memory = measure_memory()
@@ -419,15 +473,13 @@ def benchmark_function(
 
 
 def create_benchmark_configs(
-    token_sizes: list[int],
-    hidden_sizes: list[int],
-    hc_mults: list[int]
+    token_sizes: list[int], hidden_sizes: list[int], hc_mults: list[int]
 ) -> list[BenchmarkConfig]:
     """Create all benchmark configurations."""
     configs = []
-    
+
     # ops = ["mhc_pre", "mhc_post"]
-    ops = ["mhc_pre","mhc_post"]
+    ops = ["mhc_pre", "mhc_post"]
 
     for op in ops:
         for hidden in hidden_sizes:
@@ -440,53 +492,76 @@ def create_benchmark_configs(
                             num_tokens=tokens,
                             hidden_size=hidden,
                             hc_mult=hc,
-                            description=f"{op} | tokens={tokens}, hidden={hidden}, hc_mult={hc}"
+                            description=(
+                                f"{op} | tokens={tokens}, "
+                                f"hidden={hidden}, hc_mult={hc}"
+                            ),
                         )
                     )
     return configs
 
 
-def run_op_benchmark(config: BenchmarkConfig, device: torch.device, dtype: torch.dtype, warmup_iters: int, benchmark_iters: int):
+def run_op_benchmark(
+    config: BenchmarkConfig,
+    device: torch.device,
+    dtype: torch.dtype,
+    warmup_iters: int,
+    benchmark_iters: int,
+):
     # Setup inputs based on op
     n = config.num_tokens
     h = config.hidden_size
     hc = config.hc_mult
     rms_eps, hc_eps, hc_sinkhorn_eps = 1e-6, 1e-3, 1e-3
-    
+
     sycl_func = None
     triton_func = None
     args = ()
-    
+
     if config.op_name == "mhc_pre":
         hc3 = hc * 2 + hc * hc
         residual = torch.randn((n, hc, h), dtype=dtype, device=device)
         fn = torch.randn((hc3, hc * h), dtype=torch.float32, device=device)
         hc_scale = torch.randn((3,), dtype=torch.float32, device=device)
         hc_base = torch.randn((hc3,), dtype=torch.float32, device=device)
-        
-        args = (residual, fn, hc_scale, hc_base, rms_eps, hc_eps, hc_sinkhorn_eps, 1.0, 3)
+
+        args = (
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_eps,
+            hc_sinkhorn_eps,
+            1.0,
+            3,
+        )
         sycl_func = torch.ops._xpu_C.mhc_pre
         triton_func = mhc_pre_xpu_triton
-        
+
     elif config.op_name == "mhc_post":
         x = torch.randn((n, h), dtype=dtype, device=device)
         residual = torch.randn((n, hc, h), dtype=dtype, device=device)
         post_mix = torch.randn((n, hc, 1), dtype=torch.float32, device=device)
         comb_mix = torch.randn((n, hc, hc), dtype=torch.float32, device=device)
-        
+
         args = (x, residual, post_mix, comb_mix)
         sycl_func = torch.ops._xpu_C.mhc_post
         triton_func = mhc_post_xpu_triton
 
     # Sycl Bench
-    sycl_time, sycl_mem = benchmark_function(sycl_func, args, warmup_iters, benchmark_iters)
-    
+    sycl_time, sycl_mem = benchmark_function(
+        sycl_func, args, warmup_iters, benchmark_iters
+    )
+
     # Triton Bench
-    triton_time, triton_mem = benchmark_function(triton_func, args, warmup_iters, benchmark_iters)
+    triton_time, triton_mem = benchmark_function(
+        triton_func, args, warmup_iters, benchmark_iters
+    )
 
     speedup = triton_time / sycl_time if sycl_time > 0 else float("inf")
     mem_ratio = triton_mem / sycl_mem if sycl_mem > 0 else float("inf")
-    
+
     return sycl_time, triton_time, sycl_mem, triton_mem, speedup, mem_ratio
 
 
@@ -511,8 +586,10 @@ def run_benchmark(
         if verbose:
             print(f"Running: {config.description}")
 
-        sycl_time, triton_time, sycl_mem, triton_mem, speedup, mem_ratio = run_op_benchmark(
-            config, device, dtype, warmup_iters, benchmark_iters
+        sycl_time, triton_time, sycl_mem, triton_mem, speedup, mem_ratio = (
+            run_op_benchmark(
+                config, device, dtype, warmup_iters, benchmark_iters
+            )
         )
 
         result = {
@@ -528,7 +605,9 @@ def run_benchmark(
 
         if verbose:
             print(f"  Sycl:    {sycl_time:.3f} ms, {format_memory(sycl_mem)}")
-            print(f"  Triton:  {triton_time:.3f} ms, {format_memory(triton_mem)}")
+            print(
+                f"  Triton:  {triton_time:.3f} ms, {format_memory(triton_mem)}"
+            )
             print(f"  Speedup: {speedup:.2f}x, Memory ratio: {mem_ratio:.2f}x")
             print()
 
@@ -545,8 +624,10 @@ def print_summary_table(results: list[dict]):
     print("=" * 105)
     print()
 
-    header = (f"{'Operation':<15} | {'Tokens':>6} | {'Hidden':>6} | {'HC':>2} | "
-              f"{'Sycl (ms)':>10} | {'Triton (ms)':>12} | {'Speedup':>8}")
+    header = (
+        f"{'Operation':<15} | {'Tokens':>6} | {'Hidden':>6} | {'HC':>2} | "
+        f"{'Sycl (ms)':>10} | {'Triton (ms)':>12} | {'Speedup':>8}"
+    )
     print(header)
     print("-" * 105)
 
@@ -559,33 +640,70 @@ def print_summary_table(results: list[dict]):
                 print("-" * 105)
             current_op = config.op_name
 
-        print(f"{config.op_name:<15} | {config.num_tokens:>6} | {config.hidden_size:>6} | {config.hc_mult:>2} | "
-              f"{result['sycl_time_ms']:>10.3f} | {result['triton_time_ms']:>12.3f} | {result['speedup']:>7.2f}x")
+        print(
+            f"{config.op_name:<15} | {config.num_tokens:>6} | "
+            f"{config.hidden_size:>6} | {config.hc_mult:>2} | "
+            f"{result['sycl_time_ms']:>10.3f} | "
+            f"{result['triton_time_ms']:>12.3f} | "
+            f"{result['speedup']:>7.2f}x"
+        )
 
     print("=" * 105)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark Sycl kernel vs Triton for MHC ops")
-    parser.add_argument("--token-sizes", type=int, nargs="+", default=[1,33,128,256,1024,4096],
-                        help="Token shapes / batch sizes to test.")
-    parser.add_argument("--hidden-sizes", type=int, nargs="+", default=[4096,7168], ## 4096 for flash 7168 for pro
-                        help="Hidden sizes to test.")
-    parser.add_argument("--hc-mults", type=int, nargs="+", default=[4],
-                        help="hc_mult configurations.")
-    parser.add_argument("--warmup-iters", type=int, default=5,
-                        help="Number of warmup iterations.")
-    parser.add_argument("--benchmark-iters", type=int, default=20,
-                        help="Number of benchmark iterations.")
-    parser.add_argument("--quiet", action="store_true", help="Only print summary table")
+    parser = argparse.ArgumentParser(
+        description="Benchmark Sycl kernel vs Triton for MHC ops"
+    )
+    parser.add_argument(
+        "--token-sizes",
+        type=int,
+        nargs="+",
+        default=[1, 33, 128, 256, 1024, 4096],
+        help="Token shapes / batch sizes to test.",
+    )
+    parser.add_argument(
+        "--hidden-sizes",
+        type=int,
+        nargs="+",
+        default=[4096, 7168],  ## 4096 for flash 7168 for pro
+        help="Hidden sizes to test.",
+    )
+    parser.add_argument(
+        "--hc-mults",
+        type=int,
+        nargs="+",
+        default=[4],
+        help="hc_mult configurations.",
+    )
+    parser.add_argument(
+        "--warmup-iters",
+        type=int,
+        default=5,
+        help="Number of warmup iterations.",
+    )
+    parser.add_argument(
+        "--benchmark-iters",
+        type=int,
+        default=20,
+        help="Number of benchmark iterations.",
+    )
+    parser.add_argument(
+        "--quiet", action="store_true", help="Only print summary table"
+    )
 
     args = parser.parse_args()
 
     if not torch.xpu.is_available():
-        print("ERROR: XPU is not available. This benchmark requires an XPU device.")
+        print(
+            "ERROR: XPU is not available. "
+            "This benchmark requires an XPU device."
+        )
         return
 
-    configs = create_benchmark_configs(args.token_sizes, args.hidden_sizes, args.hc_mults)
+    configs = create_benchmark_configs(
+        args.token_sizes, args.hidden_sizes, args.hc_mults
+    )
 
     results = run_benchmark(
         configs,
@@ -595,6 +713,7 @@ def main():
     )
 
     print_summary_table(results)
+
 
 if __name__ == "__main__":
     main()
