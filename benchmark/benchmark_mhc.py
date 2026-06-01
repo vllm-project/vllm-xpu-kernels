@@ -20,11 +20,6 @@ import torch
 import triton
 import triton.language as tl
 
-try:
-    import vllm_xpu_kernels._xpu_C
-except ImportError:
-    pass
-
 
 @dataclass
 class BenchmarkConfig:

@@ -7,15 +7,13 @@
 #include <torch/library.h>
 
 #include <cstdint>
+#include "utils.h"
 
 namespace vllm {
 
 using bf16 = sycl::ext::oneapi::bfloat16;
 
-static constexpr int SG = 16;
-static constexpr int WG_THREADS = 128;
-static constexpr int VEC = 8;
-static constexpr int N_SG = WG_THREADS / SG;
+static constexpr int HC = 4;
 
 template <int N>
 static inline sycl::vec<bf16, N> vload_bf16(const bf16* p) {
@@ -67,11 +65,9 @@ static inline void wg_reduce_sum_batch(
     results[j] = scratch[j];
 }
 
-template <int HC>
 class MhcPreKernel;
 
-template <int HC>
-sycl::event launch_mhc_pre(
+static sycl::event launch_mhc_pre(
     sycl::queue& q,
     const bf16* residual,
     const float* fn,
@@ -107,7 +103,7 @@ sycl::event launch_mhc_pre(
     sycl::local_accessor<float, 1> red_scratch(
         RED_COUNT * N_SG_PRE * TOKENS_PER_WG, h);
 
-    h.parallel_for<MhcPreKernel<HC>>(
+    h.parallel_for<MhcPreKernel>(
         sycl::nd_range<1>(global, local),
         [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG_PRE)]]
         {
@@ -384,243 +380,8 @@ sycl::event launch_mhc_pre(
   });
 }
 
-template <int HC>
-class MhcPostKernel;
-
-template <int HC>
-sycl::event launch_mhc_post(
-    sycl::queue& q,
-    const float* __restrict a,
-    const bf16* __restrict b,
-    const float* __restrict c,
-    const bf16* __restrict d,
-    bf16* __restrict x,
-    int N,
-    int H) {
-  static_assert(HC <= 16, "HC must be <= 16");
-
-  static constexpr int VEC_POST = 8;
-  static constexpr int WG_SIZE = 256;
-
-  sycl::range<1> global(static_cast<size_t>(N) * WG_SIZE);
-  sycl::range<1> local(WG_SIZE);
-
-  return q.submit([&](sycl::handler& h) {
-    sycl::local_accessor<float, 1> coeff_s(HC * HC + HC, h);
-
-    h.parallel_for<MhcPostKernel<HC>>(
-        sycl::nd_range<1>(global, local),
-        [=](sycl::nd_item<1> it)
-            [[sycl::reqd_sub_group_size(16), intel::kernel_args_restrict]] {
-              const int tok = it.get_group(0);
-              const int lid = it.get_local_id(0);
-
-              if (lid == 0) {
-                const float* a_ptr = a + tok * HC * HC;
-                const float* c_ptr = c + tok * HC;
-#pragma unroll
-                for (int i = 0; i < HC * HC; ++i)
-                  coeff_s[i] = a_ptr[i];
-#pragma unroll
-                for (int i = 0; i < HC; ++i)
-                  coeff_s[HC * HC + i] = c_ptr[i];
-              }
-              sycl::group_barrier(it.get_group());
-
-              float a_reg[HC][HC];
-              float c_reg[HC];
-#pragma unroll
-              for (int i = 0; i < HC; ++i) {
-                c_reg[i] = coeff_s[HC * HC + i];
-#pragma unroll
-                for (int j = 0; j < HC; ++j)
-                  a_reg[i][j] = coeff_s[i * HC + j];
-              }
-
-              for (int k = lid * VEC_POST; k < H; k += WG_SIZE * VEC_POST) {
-                if (k + VEC_POST <= H) {
-                  auto dv = vload_bf16<VEC_POST>(d + tok * H + k);
-
-                  float acc[HC][VEC_POST];
-#pragma unroll
-                  for (int o = 0; o < HC; ++o)
-#pragma unroll
-                    for (int v = 0; v < VEC_POST; ++v)
-                      acc[o][v] = c_reg[o] * float(dv[v]);
-
-#pragma unroll
-                  for (int i = 0; i < HC; ++i) {
-                    auto bv = vload_bf16<VEC_POST>(b + (tok * HC + i) * H + k);
-#pragma unroll
-                    for (int o = 0; o < HC; ++o) {
-                      float a_val = a_reg[i][o];
-#pragma unroll
-                      for (int v = 0; v < VEC_POST; ++v)
-                        acc[o][v] += a_val * float(bv[v]);
-                    }
-                  }
-
-#pragma unroll
-                  for (int o = 0; o < HC; ++o) {
-                    sycl::vec<bf16, VEC_POST> ov;
-#pragma unroll
-                    for (int v = 0; v < VEC_POST; ++v)
-                      ov[v] = bf16(acc[o][v]);
-                    vstore_bf16<VEC_POST>(x + (tok * HC + o) * H + k, ov);
-                  }
-                } else {
-                  for (int kk = k; kk < H; ++kk) {
-                    float d_val = float(d[tok * H + kk]);
-                    float acc[HC];
-#pragma unroll
-                    for (int o = 0; o < HC; ++o)
-                      acc[o] = c_reg[o] * d_val;
-
-#pragma unroll
-                    for (int i = 0; i < HC; ++i) {
-                      float b_val = float(b[(tok * HC + i) * H + kk]);
-#pragma unroll
-                      for (int o = 0; o < HC; ++o)
-                        acc[o] += a_reg[i][o] * b_val;
-                    }
-#pragma unroll
-                    for (int o = 0; o < HC; ++o)
-                      x[(tok * HC + o) * H + kk] = bf16(acc[o]);
-                  }
-                }
-              }
-            });
-  });
-}
-
-template <int HC>
-class HcHeadKernel;
-
-template <int HC>
-sycl::event launch_hc_head_fused(
-    sycl::queue& q,
-    const bf16* residual,
-    const float* fn,
-    const float* hc_scale,
-    const float* hc_base,
-    bf16* out,
-    int N,
-    int H,
-    float rms_eps,
-    float hc_eps) {
-  const int hc_h = HC * H;
-
-  sycl::range<1> global(static_cast<size_t>(N) * WG_THREADS);
-  sycl::range<1> local(WG_THREADS);
-
-  constexpr int HC_RED = HC + 1;
-
-  return q.submit([&](sycl::handler& h) {
-    sycl::local_accessor<float, 1> red_scratch(HC_RED * N_SG, h);
-    sycl::local_accessor<float, 1> pre_s(HC, h);
-
-    h.parallel_for<HcHeadKernel<HC>>(
-        sycl::nd_range<1>(global, local),
-        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(SG)]] {
-          const int tok = it.get_group(0);
-          const int tid = it.get_local_id(0);
-
-          float local_mix[HC];
-#pragma unroll
-          for (int j = 0; j < HC; ++j)
-            local_mix[j] = 0.f;
-          float local_sq = 0.f;
-
-          const bf16* x_row = residual + tok * hc_h;
-          for (int k = tid * VEC; k < hc_h; k += WG_THREADS * VEC) {
-            auto xv = vload_bf16<VEC>(x_row + k);
-            float xf[VEC];
-#pragma unroll
-            for (int v = 0; v < VEC; ++v) {
-              xf[v] = float(xv[v]);
-              local_sq += xf[v] * xf[v];
-            }
-#pragma unroll
-            for (int j = 0; j < HC; ++j) {
-              const float* fr = fn + j * hc_h + k;
-              float acc = 0.f;
-#pragma unroll
-              for (int v = 0; v < VEC; ++v)
-                acc += xf[v] * fr[v];
-              local_mix[j] += acc;
-            }
-          }
-
-          float partials[HC_RED];
-          partials[0] = local_sq;
-#pragma unroll
-          for (int j = 0; j < HC; ++j)
-            partials[j + 1] = local_mix[j];
-
-          float reduced[HC_RED];
-          wg_reduce_sum_batch<HC_RED, N_SG, SG>(
-              it, partials, &red_scratch[0], reduced);
-
-          float rrms = sycl::native::rsqrt(reduced[0] / hc_h + rms_eps);
-          if (tid == 0) {
-#pragma unroll
-            for (int j = 0; j < HC; ++j) {
-              pre_s[j] = fast_sigmoid(
-                             reduced[j + 1] * rrms * hc_scale[0] + hc_base[j]) +
-                         hc_eps;
-            }
-          }
-          sycl::group_barrier(it.get_group());
-
-          float pre_reg[HC];
-#pragma unroll
-          for (int m = 0; m < HC; ++m)
-            pre_reg[m] = pre_s[m];
-
-          for (int k = tid * VEC; k < H; k += WG_THREADS * VEC) {
-            float acc[VEC];
-#pragma unroll
-            for (int v = 0; v < VEC; ++v)
-              acc[v] = 0.f;
-
-#pragma unroll
-            for (int m = 0; m < HC; ++m) {
-              auto rv = vload_bf16<VEC>(residual + (tok * HC + m) * H + k);
-#pragma unroll
-              for (int v = 0; v < VEC; ++v)
-                acc[v] += pre_reg[m] * float(rv[v]);
-            }
-            sycl::vec<bf16, VEC> ov;
-#pragma unroll
-            for (int v = 0; v < VEC; ++v)
-              ov[v] = bf16(acc[v]);
-            vstore_bf16<VEC>(out + tok * H + k, ov);
-          }
-        });
-  });
-}
-
-#define DISPATCH_HC(HC_VAR, NAME, ...)       \
-  do {                                       \
-    switch (HC_VAR) {                        \
-      case 2:                                \
-        NAME<2>(__VA_ARGS__);                \
-        break;                               \
-      case 4:                                \
-        NAME<4>(__VA_ARGS__);                \
-        break;                               \
-      default:                               \
-        TORCH_CHECK(                         \
-            false,                           \
-            "mhc_xpu: unsupported hc_mult=", \
-            HC_VAR,                          \
-            " (supported: 2, 4)");           \
-    }                                        \
-  } while (0)
-
-static inline sycl::queue& current_queue() { return vllm::xpu::vllmGetQueue(); }
-
 }  // namespace vllm
+
 using namespace vllm;
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
@@ -644,7 +405,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
   auto residual_c = residual.contiguous();
   auto fn_c = fn.contiguous();
 
-  const int64_t HC = residual_c.size(-2);
   const int64_t H = residual_c.size(-1);
   const int64_t HC2 = HC * HC;
   const int64_t HC3 = HC * 2 + HC2;
@@ -677,10 +437,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
     return {post_mix.view(ps), comb_mix.view(cs), layer_input.view(ls)};
   }
 
-  auto& q = current_queue();
-  DISPATCH_HC(
-      HC,
-      launch_mhc_pre,
+  auto& q = vllm::xpu::vllmGetQueue();
+  launch_mhc_pre(
       q,
       reinterpret_cast<const bf16*>(residual_flat.data_ptr()),
       fn_c.data_ptr<float>(),
@@ -707,85 +465,3 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
   ls.push_back(H);
   return {post_mix.view(ps), comb_mix.view(cs), layer_input.view(ls)};
 }
-
-at::Tensor mhc_post(
-    const at::Tensor& x,
-    const at::Tensor& residual,
-    const at::Tensor& post_layer_mix,
-    const at::Tensor& comb_res_mix) {
-  TORCH_CHECK(residual.is_xpu(), "mhc_post: tensors must be on XPU");
-  TORCH_CHECK(
-      residual.scalar_type() == at::kBFloat16, "residual must be bfloat16");
-  TORCH_CHECK(x.scalar_type() == at::kBFloat16, "x must be bfloat16");
-  TORCH_CHECK(
-      post_layer_mix.scalar_type() == at::kFloat,
-      "post_layer_mix must be float32");
-  TORCH_CHECK(
-      comb_res_mix.scalar_type() == at::kFloat, "comb_res_mix must be float32");
-
-  auto residual_c = residual.contiguous();
-  auto x_c = x.contiguous();
-  auto a_c = comb_res_mix.contiguous();
-  auto c_c = post_layer_mix.squeeze(-1).contiguous();
-
-  const int64_t HC = residual_c.size(-2);
-  const int64_t H = residual_c.size(-1);
-  const int64_t N = residual_c.size(0);
-
-  auto out = at::empty_like(residual_c);
-  if (N == 0) return out;
-
-  auto& q = current_queue();
-  DISPATCH_HC(
-      HC,
-      launch_mhc_post,
-      q,
-      a_c.data_ptr<float>(),
-      reinterpret_cast<const bf16*>(residual_c.data_ptr()),
-      c_c.data_ptr<float>(),
-      reinterpret_cast<const bf16*>(x_c.data_ptr()),
-      reinterpret_cast<bf16*>(out.data_ptr()),
-      static_cast<int>(N),
-      static_cast<int>(H));
-
-  return out;
-}
-
-void hc_head_fused(
-    const at::Tensor& hs_flat,
-    const at::Tensor& fn,
-    const at::Tensor& hc_scale,
-    const at::Tensor& hc_base,
-    at::Tensor& out,
-    int64_t hidden_size,
-    double rms_eps,
-    double hc_eps,
-    int64_t hc_mult) {
-  TORCH_CHECK(hs_flat.is_xpu(), "hc_head_fused: tensors must be on XPU");
-  TORCH_CHECK(
-      hs_flat.scalar_type() == at::kBFloat16, "hs_flat must be bfloat16");
-  TORCH_CHECK(out.scalar_type() == at::kBFloat16, "out must be bfloat16");
-
-  const int64_t N = hs_flat.size(0);
-  if (N == 0) return;
-
-  auto hs_c = hs_flat.contiguous();
-  auto fn_c = fn.contiguous();
-
-  auto& q = current_queue();
-  DISPATCH_HC(
-      hc_mult,
-      launch_hc_head_fused,
-      q,
-      reinterpret_cast<const bf16*>(hs_c.data_ptr()),
-      fn_c.data_ptr<float>(),
-      hc_scale.data_ptr<float>(),
-      hc_base.data_ptr<float>(),
-      reinterpret_cast<bf16*>(out.data_ptr()),
-      static_cast<int>(N),
-      static_cast<int>(hidden_size),
-      static_cast<float>(rms_eps),
-      static_cast<float>(hc_eps));
-}
-
-#undef DISPATCH_HC

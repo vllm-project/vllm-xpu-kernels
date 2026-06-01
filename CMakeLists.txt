@@ -537,7 +537,9 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/lora/lora_expand.cpp"
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
       "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
-      "csrc/xpu/sycl/deepseek_mhc.cpp"
+      "csrc/xpu/mhc/mhc_pre.cpp"
+      "csrc/xpu/mhc/mhc_post.cpp"
+      "csrc/xpu/mhc/hc_head_fused.cpp"
       "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/rand/exponential.cpp"
       "csrc/xpu/utils.cpp")
