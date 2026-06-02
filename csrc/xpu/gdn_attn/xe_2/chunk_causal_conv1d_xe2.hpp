@@ -311,7 +311,7 @@ struct chunk_causal_conv1d_kernel {
     // ---- Fused L2 norm for Q and K ----
     // Compute per-thread partial sum of squares for Q or K
     if (fuse_l2norm) {
-      constexpr float l2norm_eps = 0.000001f;
+      // l2norm_eps is defined in gdn_attn_utils.h
       float q_local_sq = 0.0f;
       float k_local_sq = 0.0f;
       if (is_q) {

@@ -400,7 +400,7 @@ struct chunk_causal_conv1d_tiled_kernel {
 
       // ---- Fused L2 norm for Q and K (only in feat_chunk 0) ----
       if (fuse_l2norm && feat_chunk_id == 0) {
-        constexpr float l2norm_eps = 0.000001f;
+        // l2norm_eps is defined in gdn_attn_utils.h
         float* norm_slm = reinterpret_cast<float*>(
             reinterpret_cast<char*>(slm_data) + slm_meta_bytes +
             slm_data_elems * sizeof(T));

@@ -9,7 +9,7 @@
 #ifdef VLLM_XPU_ENABLE_XE2
   #include "xe_2/chunk_causal_conv1d_xe2.hpp"
   #include "xe_2/chunk_causal_conv1d_tiled_xe2.hpp"
-  #include "xe_2/l2norm.hpp"
+  #include "xe_2/l2norm.h"
   #include "xe_2/chunk_gated_delta_rule_xe2.h"
 #endif
 
@@ -496,7 +496,7 @@ void gdn_attention(
 
       // Run standalone l2norm kernel when not fused into conv1d
       if (!fuse_l2norm) {
-        gdn::l2norm_xe2(queue, q, k);
+        l2norm(queue, q, k);
       }
 
       chunk_gated_delta_rule_xe2(

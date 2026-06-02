@@ -10,7 +10,6 @@ namespace gdn {
 
 static constexpr int l2norm_elem_per_item = 2;
 static constexpr int l2norm_sub_group_size = 16;
-static constexpr float l2norm_eps = 0.000001f;
 static constexpr int L2NormVecSize = 8;
 
 template <typename T>
@@ -181,7 +180,7 @@ void l2norm_launch(
   });
 }
 
-void l2norm_xe2(
+void l2norm_impl(
     sycl::queue& queue, const torch::Tensor& q, const torch::Tensor& k) {
   const int total_virtual_seqlen = q.size(0);
   const int num_k_heads = q.size(1);
