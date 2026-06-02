@@ -36,7 +36,8 @@ void rms_norm_per_block_quant(
     std::optional<torch::Tensor> scale_ub,
     std::optional<torch::Tensor> residual,
     int64_t group_size,
-    bool is_scale_transposed);
+    bool is_scale_transposed,
+    bool scale_ue8m0);
 
 void rms_norm_static_fp8_quant(
     torch::Tensor& out,

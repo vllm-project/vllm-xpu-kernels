@@ -139,7 +139,11 @@ class rms_norm_dynamic_per_token_quant_kernel {
   const int hidden_size;
 };
 
-template <typename scalar_t, typename out_t, bool has_residual>
+template <
+    typename scalar_t,
+    typename out_t,
+    bool has_residual,
+    bool scale_ue8m0>
 class rms_norm_per_block_quant_kernel {
  public:
   rms_norm_per_block_quant_kernel(
@@ -233,6 +237,11 @@ class rms_norm_per_block_quant_kernel {
               static_cast<float>(fp8::quant_type_max_v<out_t>);
           group_scale = sycl::max(
               group_absmax / fp8_max, fp8::min_scaling_factor<out_t>::val());
+          if constexpr (scale_ue8m0) {
+            group_scale = sycl::exp2(
+                sycl::ceil(
+                    sycl::log2(sycl::fmax(sycl::fabs(group_scale), 1e-10f))));
+          }
         }
         s_local[1] = group_scale;
         const int64_t scale_idx = token_idx * scale_stride_token +
@@ -521,7 +530,8 @@ void call_rms_norm_per_block_quant_kernel(
     torch::Tensor& scales,
     float epsilon,
     int group_size,
-    bool is_scale_transposed) {
+    bool is_scale_transposed,
+    bool scale_ue8m0) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
   const int hidden_size = input.size(-1);
@@ -542,8 +552,9 @@ void call_rms_norm_per_block_quant_kernel(
 
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  auto launch = [&](auto has_residual_tag) {
+  auto launch = [&](auto has_residual_tag, auto ue8m0_tag) {
     constexpr bool has_residual = decltype(has_residual_tag)::value;
+    constexpr bool ue8m0 = decltype(ue8m0_tag)::value;
     sycl_t* residual_ptr = nullptr;
     if constexpr (has_residual) {
       residual_ptr = (sycl_t*)residual->data_ptr<scalar_t>();
@@ -551,7 +562,7 @@ void call_rms_norm_per_block_quant_kernel(
     queue.submit([&](sycl::handler& cgh) {
       cgh.parallel_for(
           sycl::nd_range<1>(num_tokens * block_size, block_size),
-          rms_norm_per_block_quant_kernel<sycl_t, out_t, has_residual>(
+          rms_norm_per_block_quant_kernel<sycl_t, out_t, has_residual, ue8m0>(
               out_ptr,
               residual_ptr,
               (const sycl_t*)input_ptr,
@@ -568,9 +579,17 @@ void call_rms_norm_per_block_quant_kernel(
   };
 
   if (residual.has_value()) {
-    launch(std::true_type{});
+    if (scale_ue8m0) {
+      launch(std::true_type{}, std::true_type{});
+    } else {
+      launch(std::true_type{}, std::false_type{});
+    }
   } else {
-    launch(std::false_type{});
+    if (scale_ue8m0) {
+      launch(std::false_type{}, std::true_type{});
+    } else {
+      launch(std::false_type{}, std::false_type{});
+    }
   }
 }
 
@@ -763,7 +782,8 @@ void rms_norm_per_block_quant(
     std::optional<torch::Tensor> scale_ub,
     std::optional<torch::Tensor> residual,
     int64_t group_size,
-    bool is_scale_transposed) {
+    bool is_scale_transposed,
+    bool scale_ue8m0) {
   const at::DeviceGuard device_guard(input.device());
   TORCH_CHECK(
       input.stride(-1) == 1, "input must be contiguous in the last dimension");
@@ -784,6 +804,11 @@ void rms_norm_per_block_quant(
         "residual and input must have the same dtype");
     TORCH_CHECK(residual->is_contiguous(), "residual must be contiguous");
   }
+  if (scale_ue8m0) {
+    TORCH_CHECK(
+        out.dtype() == torch::kFloat8_e4m3fn,
+        "scale_ue8m0 (MX FP8) is only supported for float8_e4m3fn output");
+  }
 
   if (out.dtype() == torch::kFloat8_e4m3fn) {
     VLLM_DISPATCH_FLOATING_TYPES(
@@ -797,7 +822,8 @@ void rms_norm_per_block_quant(
                   scales,
                   static_cast<float>(epsilon),
                   static_cast<int>(group_size),
-                  is_scale_transposed);
+                  is_scale_transposed,
+                  scale_ue8m0);
         });
   } else {
     VLLM_DISPATCH_FLOATING_TYPES(
@@ -810,7 +836,8 @@ void rms_norm_per_block_quant(
               scales,
               static_cast<float>(epsilon),
               static_cast<int>(group_size),
-              is_scale_transposed);
+              is_scale_transposed,
+              /*scale_ue8m0=*/false);
         });
   }
 }
