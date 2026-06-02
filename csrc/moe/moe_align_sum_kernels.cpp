@@ -764,7 +764,7 @@ class moe_lora_align_block_size_kernel {
       }
     }
 
-    item.barrier(sycl::access::fence_space::local_space);
+    item.barrier(sycl::access::fence_space::global_and_local);
 
     _moe_align_block_size(
         topk_ids,
@@ -947,7 +947,7 @@ class moe_lora_align_block_size_small_batch_expert_kernel {
       }
     }
 
-    item.barrier(sycl::access::fence_space::local_space);
+    item.barrier(sycl::access::fence_space::global_and_local);
 
     _moe_align_block_size_small_batch_expert<scalar_t, fill_threads>(
         topk_ids,
