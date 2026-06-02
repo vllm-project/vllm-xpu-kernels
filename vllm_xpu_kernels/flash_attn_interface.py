@@ -337,10 +337,12 @@ def flash_attn_varlen_func(
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
     if k_descale is not None:
-        assert k_descale.untyped_storage().nbytes() == 4, \
+        assert k_descale.untyped_storage().nbytes() == 4 and \
+            k_descale.dtype == torch.float32, \
             "k_descale must be view of single float32 scalar tensor"
     if v_descale is not None:
-        assert v_descale.untyped_storage().nbytes() == 4, \
+        assert v_descale.untyped_storage().nbytes() == 4 and \
+            v_descale.dtype == torch.float32, \
             "v_descale must be view of single float32 scalar tensor"
     # custom op does not support non-tuple input
     real_window_size: tuple[int, int]
