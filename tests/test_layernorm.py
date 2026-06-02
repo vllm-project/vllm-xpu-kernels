@@ -9,9 +9,20 @@ from tests.utils import opcheck
 
 DTYPES = [torch.half, torch.bfloat16]
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
-# TODO: add back  5120, 5124, 5125, 5126, 8192, 8199 after ci env issue fixed
-HIDDEN_SIZES = [8, 768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192,
-                8199]  # Arbitrary values for testing
+HIDDEN_SIZES = [
+    8,
+    768,
+    769,
+    770,
+    771,
+    5120,
+    5124,
+    5125,
+    5126,
+    7168,
+    8192,
+    8199,
+]  # Arbitrary values for testing
 HEAD_DIMS = [128, 64]
 NUM_Q_HEADS = [32, 40, 64]
 NUM_KV_HEADS = [8, 32]
@@ -76,11 +87,15 @@ def test_rms_norm(
         torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
 
     if residual is not None:
-        opcheck(torch.ops._C.fused_add_rms_norm,
-                (x, residual, layer.weight.data, layer.variance_epsilon))
+        opcheck(
+            torch.ops._C.fused_add_rms_norm,
+            (x, residual, layer.weight.data, layer.variance_epsilon),
+        )
     else:
-        opcheck(torch.ops._C.rms_norm,
-                (out, x, layer.weight.data, layer.variance_epsilon))
+        opcheck(
+            torch.ops._C.rms_norm,
+            (out, x, layer.weight.data, layer.variance_epsilon),
+        )
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)

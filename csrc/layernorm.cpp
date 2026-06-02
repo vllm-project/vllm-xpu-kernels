@@ -1,6 +1,7 @@
 #include <sycl/sycl.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <ATen/DeviceGuard.h>
 #include "utils.h"
 #include "dispatch_utils.h"
@@ -450,8 +451,11 @@ void call_rms_norm_kernel(
       return;
     }
     sycl::range<3> grid(1, 1, num_tokens);
-    sycl::range<3> block(
-        1, 1, std::min(hidden_size / vec_size, max_block_size));
+    // Round down to nearest power of 2: the kernel produces wrong results
+    // when the work-group size is not a power of 2 (root cause unknown).
+    const int block_dim = std::bit_floor(
+        (unsigned)std::min(hidden_size / vec_size, max_block_size));
+    sycl::range<3> block(1, 1, block_dim);
     VLLM_DISPATCH_RANK234(num_dims, [&]() {
       queue.submit([&](sycl::handler& cgh) {
         sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
@@ -474,7 +478,8 @@ void call_rms_norm_kernel(
     });
   } else {
     sycl::range<3> grid(1, 1, num_tokens);
-    sycl::range<3> block(1, 1, std::min(hidden_size, max_block_size));
+    sycl::range<3> block(
+        1, 1, std::bit_floor((unsigned)std::min(hidden_size, max_block_size)));
     VLLM_DISPATCH_RANK234(num_dims, [&]() {
       queue.submit([&](sycl::handler& cgh) {
         sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
@@ -684,8 +689,13 @@ void call_fused_add_rms_norm_kernel(
   auto& queue = vllm::xpu::vllmGetQueue();
 
   if (can_vec) {
+    // Round down to nearest power of 2: the kernel produces wrong results
+    // when the work-group size is not a power of 2 (root cause unknown).
     sycl::range<3> block(
-        1, 1, std::min(hidden_size / vector_width, max_block_size));
+        1,
+        1,
+        std::bit_floor(
+            (unsigned)std::min(hidden_size / vector_width, max_block_size)));
     queue.submit([&](sycl::handler& cgh) {
       sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
       cgh.parallel_for(
@@ -701,7 +711,8 @@ void call_fused_add_rms_norm_kernel(
               s_variance));
     });
   } else {
-    sycl::range<3> block(1, 1, std::min(hidden_size, max_block_size));
+    sycl::range<3> block(
+        1, 1, std::bit_floor((unsigned)std::min(hidden_size, max_block_size)));
     queue.submit([&](sycl::handler& cgh) {
       sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
       cgh.parallel_for(
