@@ -76,6 +76,13 @@ void silu_and_mul_per_block_quant(
     std::optional<torch::Tensor> scale_ub,
     bool is_scale_transposed);
 
+void silu_and_mul_mxfp4_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor& scales,
+    int64_t group_size,
+    double eps);
+
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);

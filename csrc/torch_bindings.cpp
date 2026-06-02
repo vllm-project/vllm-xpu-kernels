@@ -99,6 +99,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       torch::kXPU,
       &silu_and_mul_per_block_quant);
 
+  ops.def(
+      "silu_and_mul_mxfp4_quant("
+      "Tensor! out, Tensor input, Tensor! scales, "
+      "int group_size, float eps=1e-10) -> ()");
+  ops.impl("silu_and_mul_mxfp4_quant", torch::kXPU, &silu_and_mul_mxfp4_quant);
+
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kXPU, &mul_and_silu);
 
