@@ -39,6 +39,15 @@ void rms_norm_per_block_quant(
     bool is_scale_transposed,
     bool scale_ue8m0);
 
+void rms_norm_mxfp4_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    double const epsilon,
+    std::optional<torch::Tensor> residual,
+    int64_t group_size);
+
 void rms_norm_static_fp8_quant(
     torch::Tensor& out,
     torch::Tensor& input,

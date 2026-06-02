@@ -12,6 +12,7 @@
 #include "ops.h"
 #include "utils.h"
 #include "quantization/fp8/quant_utils.h"
+#include "quantization/fp4/mxfp4_quant.h"
 #include <ATen/DeviceGuard.h>
 
 namespace vllm {
@@ -287,6 +288,132 @@ class rms_norm_per_block_quant_kernel {
   const int64_t scale_stride_token;
   const int64_t scale_stride_group;
   const int64_t input_stride;
+};
+
+template <typename scalar_t, bool has_residual>
+class rms_norm_mxfp4_quant_kernel {
+ public:
+  rms_norm_mxfp4_quant_kernel(
+      uint8_t* __restrict__ out_,
+      scalar_t* __restrict__ residual_,
+      const scalar_t* __restrict__ input_,
+      const scalar_t* __restrict__ weight_,
+      float* __restrict__ scales_,
+      const float epsilon_,
+      const int hidden_size_,
+      const int group_size_,
+      const int64_t scale_stride_token_,
+      const int64_t scale_stride_group_)
+      : out(out_),
+        residual(residual_),
+        input(input_),
+        weight(weight_),
+        scales(scales_),
+        epsilon(epsilon_),
+        hidden_size(hidden_size_),
+        group_size(group_size_),
+        scale_stride_token(scale_stride_token_),
+        scale_stride_group(scale_stride_group_) {}
+
+  void operator()(sycl::nd_item<1> item) const {
+    const int tid = item.get_local_id(0);
+    const int local_range = item.get_local_range(0);
+    const int64_t token_idx = item.get_group(0);
+
+    auto& s_local =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<float[2]>(
+            item.get_group());
+
+    const scalar_t* token_input = input + token_idx * hidden_size;
+    uint8_t* token_output = out + token_idx * (hidden_size / 2);
+    scalar_t* token_residual = nullptr;
+    if constexpr (has_residual) {
+      token_residual = residual + token_idx * hidden_size;
+    }
+
+    float variance = 0.0f;
+    for (int i = tid; i < hidden_size; i += local_range) {
+      float x = static_cast<float>(token_input[i]);
+      if constexpr (has_residual) {
+        x += static_cast<float>(token_residual[i]);
+        token_residual[i] = static_cast<scalar_t>(x);
+        x = static_cast<float>(token_residual[i]);
+      }
+      variance += x * x;
+    }
+    variance = sycl::reduce_over_group(
+        item.get_group(), variance, sycl::plus<float>());
+    if (tid == 0) {
+      s_local[0] = sycl::rsqrt(variance / hidden_size + epsilon);
+    }
+    sycl::group_barrier(item.get_group());
+    const float inv_rms = s_local[0];
+
+    constexpr float FP4_MAX = vllm::mxfp4::FP4_MAX;
+    const int num_groups = hidden_size / group_size;
+
+    for (int g = 0; g < num_groups; g++) {
+      const int group_start = g * group_size;
+
+      float group_absmax = 0.0f;
+      for (int i = tid; i < group_size; i += local_range) {
+        const int col = group_start + i;
+        const float x = has_residual ? static_cast<float>(token_residual[col])
+                                     : static_cast<float>(token_input[col]);
+        const float norm_x = x * inv_rms * static_cast<float>(weight[col]);
+        group_absmax = sycl::max(group_absmax, sycl::fabs(norm_x));
+      }
+      group_absmax = sycl::reduce_over_group(
+          item.get_group(), group_absmax, sycl::maximum<float>());
+
+      if (tid == 0) {
+        float y_s = group_absmax / FP4_MAX;
+        y_s = sycl::exp2(
+            sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(y_s), epsilon))));
+        s_local[1] = y_s;
+        const int64_t scale_idx = token_idx * scale_stride_token +
+                                  static_cast<int64_t>(g) * scale_stride_group;
+        scales[scale_idx] = y_s;
+      }
+      sycl::group_barrier(item.get_group());
+      const float inv_scale = 1.0f / s_local[1];
+
+      for (int j = tid * 2; j < group_size; j += local_range * 2) {
+        const int col0 = group_start + j;
+        const int col1 = col0 + 1;
+
+        const float x0 = has_residual ? static_cast<float>(token_residual[col0])
+                                      : static_cast<float>(token_input[col0]);
+        const float x1 = has_residual ? static_cast<float>(token_residual[col1])
+                                      : static_cast<float>(token_input[col1]);
+        const float n0 = x0 * inv_rms * static_cast<float>(weight[col0]);
+        const float n1 = x1 * inv_rms * static_cast<float>(weight[col1]);
+
+        float q0 = n0 * inv_scale;
+        float q1 = n1 * inv_scale;
+        q0 = sycl::fmax(-FP4_MAX, sycl::fmin(q0, FP4_MAX));
+        q1 = sycl::fmax(-FP4_MAX, sycl::fmin(q1, FP4_MAX));
+
+        const uint8_t fp4_lo = vllm::mxfp4::float_to_fp4_e2m1(q0);
+        const uint8_t fp4_hi = vllm::mxfp4::float_to_fp4_e2m1(q1);
+        token_output[col0 / 2] =
+            static_cast<uint8_t>(((fp4_hi & 0x0Fu) << 4) | (fp4_lo & 0x0Fu));
+      }
+      sycl::group_barrier(item.get_group());
+    }
+  }
+
+ private:
+  uint8_t* __restrict__ out;
+  scalar_t* __restrict__ residual;
+  const scalar_t* __restrict__ input;
+  const scalar_t* __restrict__ weight;
+  float* __restrict__ scales;
+  const float epsilon;
+  const int hidden_size;
+  const int group_size;
+  const int64_t scale_stride_token;
+  const int64_t scale_stride_group;
 };
 
 template <typename scalar_t, typename out_t, int VEC_SIZE>
@@ -712,6 +839,64 @@ void call_fused_add_rms_norm_static_fp8_quant_kernel(
   }
 }
 
+template <typename scalar_t>
+void call_rms_norm_mxfp4_quant_kernel(
+    torch::Tensor& out,
+    std::optional<torch::Tensor>& residual,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    float epsilon,
+    int group_size,
+    bool is_scale_transposed) {
+  using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+
+  const int hidden_size = input.size(-1);
+  const int64_t num_tokens = input.numel() / hidden_size;
+  const int num_groups = hidden_size / group_size;
+  const int block_size = std::min(hidden_size, 1024);
+
+  const int64_t scale_stride_token =
+      is_scale_transposed ? 1 : static_cast<int64_t>(num_groups);
+  const int64_t scale_stride_group = is_scale_transposed ? num_tokens : 1LL;
+
+  auto* out_ptr = out.data_ptr<uint8_t>();
+  auto* input_ptr = input.data_ptr<scalar_t>();
+  auto* weight_ptr = weight.data_ptr<scalar_t>();
+  auto* scales_ptr = scales.data_ptr<float>();
+
+  auto& queue = vllm::xpu::vllmGetQueue();
+
+  auto launch = [&](auto has_residual_tag) {
+    constexpr bool has_residual = decltype(has_residual_tag)::value;
+    sycl_t* residual_ptr = nullptr;
+    if constexpr (has_residual) {
+      residual_ptr = (sycl_t*)residual->data_ptr<scalar_t>();
+    }
+    queue.submit([&](sycl::handler& cgh) {
+      cgh.parallel_for(
+          sycl::nd_range<1>(num_tokens * block_size, block_size),
+          rms_norm_mxfp4_quant_kernel<sycl_t, has_residual>(
+              out_ptr,
+              residual_ptr,
+              (const sycl_t*)input_ptr,
+              (const sycl_t*)weight_ptr,
+              scales_ptr,
+              epsilon,
+              hidden_size,
+              group_size,
+              scale_stride_token,
+              scale_stride_group));
+    });
+  };
+
+  if (residual.has_value()) {
+    launch(std::true_type{});
+  } else {
+    launch(std::false_type{});
+  }
+}
+
 }  // namespace vllm
 
 void rms_norm_dynamic_per_token_quant(
@@ -895,5 +1080,54 @@ void fused_add_rms_norm_static_fp8_quant(
                   scale,
                   static_cast<float>(epsilon));
             });
+      });
+}
+
+void rms_norm_mxfp4_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    double const epsilon,
+    std::optional<torch::Tensor> residual,
+    int64_t group_size) {
+  const at::DeviceGuard device_guard(input.device());
+  TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
+  TORCH_CHECK(out.is_contiguous(), "out must be contiguous");
+  TORCH_CHECK(
+      weight.dtype() == input.dtype(),
+      "weight and input must have the same dtype");
+  TORCH_CHECK(scales.dtype() == torch::kFloat32, "scales must be float32");
+  TORCH_CHECK(
+      out.scalar_type() == at::ScalarType::Byte,
+      "output must be uint8 (packed FP4)");
+  TORCH_CHECK(
+      group_size == 32, "MXFP4 requires group_size == 32, got ", group_size);
+  TORCH_CHECK(
+      input.size(-1) % group_size == 0,
+      "hidden_size must be divisible by group_size");
+  TORCH_CHECK(
+      input.size(-1) % 2 == 0, "hidden_size must be even for FP4 packing");
+  TORCH_CHECK(scales.dim() == 2, "scales must be 2-D");
+  if (residual.has_value()) {
+    TORCH_CHECK(
+        residual->scalar_type() == input.scalar_type(),
+        "residual and input must have the same dtype");
+    TORCH_CHECK(residual->is_contiguous(), "residual must be contiguous");
+  }
+
+  const bool is_scale_transposed = scales.stride(0) < scales.stride(1);
+
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "rms_norm_mxfp4_quant", [&] {
+        vllm::call_rms_norm_mxfp4_quant_kernel<scalar_t>(
+            out,
+            residual,
+            input,
+            weight,
+            scales,
+            static_cast<float>(epsilon),
+            static_cast<int>(group_size),
+            is_scale_transposed);
       });
 }

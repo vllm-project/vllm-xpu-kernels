@@ -53,6 +53,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool is_scale_transposed, bool scale_ue8m0=False) -> ()");
   ops.impl("rms_norm_per_block_quant", torch::kXPU, &rms_norm_per_block_quant);
 
+  ops.def(
+      "rms_norm_mxfp4_quant(Tensor! result, Tensor input, Tensor weight, "
+      "Tensor! scale, float epsilon, Tensor!? residual, int group_size) "
+      "-> ()");
+  ops.impl("rms_norm_mxfp4_quant", torch::kXPU, &rms_norm_mxfp4_quant);
+
   // Fused RMSNorm + static FP8 quantization.
   ops.def(
       "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
