@@ -130,12 +130,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int forced_token_heads_per_warp=-1) -> ()");
   ops.impl("fused_qk_norm_rope", torch::kXPU, &fused_qk_norm_rope);
 
-  // Apply rotary embedding taking cos/sin directly (flash_attn style).
-  ops.def(
-      "apply_rotary_emb(Tensor! output, Tensor input,"
-      "                 Tensor cos, Tensor sin, bool is_neox) -> ()");
-  ops.impl("apply_rotary_emb", torch::kXPU, &apply_rotary_emb);
-
   // Compute FP8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "

@@ -89,13 +89,6 @@ void rotary_embedding(
     torch::Tensor& cos_sin_cache,
     bool is_neox);
 
-void apply_rotary_emb(
-    torch::Tensor& output,
-    torch::Tensor& input,
-    torch::Tensor& cos,
-    torch::Tensor& sin,
-    bool is_neox);
-
 void fused_qk_norm_rope(
     torch::Tensor& qkv,
     int64_t num_heads_q,

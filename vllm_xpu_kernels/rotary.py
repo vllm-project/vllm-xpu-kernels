@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Python wrapper for apply_rotary_emb SYCL kernel.
 
 The underlying _C.apply_rotary_emb kernel expects 3D tensors:
@@ -10,7 +12,7 @@ and cos/sin broadcasting from [seq_len, rot_dim/2] to [num_tokens, rot_dim/2].
 
 import torch
 
-import vllm_xpu_kernels._C  # noqa: F401 — registers torch.ops._C ops
+import vllm_xpu_kernels._xpu_C  # noqa: F401 — registers torch.ops._xpu_C ops
 
 
 def apply_rotary_emb(
@@ -45,10 +47,13 @@ def apply_rotary_emb(
 
     # Expand cos/sin if fewer tokens than input (batch broadcasting)
     if cos_tokens < num_tokens:
+        assert num_tokens % cos_tokens == 0, (
+            f"num_tokens ({num_tokens}) must be divisible by cos_tokens ({cos_tokens})"
+        )
         repeats = num_tokens // cos_tokens
         cos_2d = cos_2d.repeat(repeats, 1)
         sin_2d = sin_2d.repeat(repeats, 1)
 
     output = torch.empty_like(input_3d)
-    torch.ops._C.apply_rotary_emb(output, input_3d, cos_2d, sin_2d, is_neox)
+    torch.ops._xpu_C.apply_rotary_emb(output, input_3d, cos_2d, sin_2d, is_neox)
     return output.reshape(x.shape)

@@ -13,9 +13,18 @@ import torch
 try:
     import tests.register_ops as ops  # noqa: F401
 except (ImportError, ModuleNotFoundError):
-    import vllm_xpu_kernels._C  # noqa: F401
+    import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 from vllm_xpu_kernels.rotary import apply_rotary_emb
+
+# Override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "num_tokens": [16],
+        "num_heads": [8],
+        "head_dim": [64],
+    },
+}
 
 
 def _ref_rotary_emb_interleaved(x, cos, sin):
@@ -149,7 +158,7 @@ def test_apply_rotary_emb_kernel_direct(device, is_neox):
     ).contiguous()
     out = torch.empty_like(x)
 
-    torch.ops._C.apply_rotary_emb(out, x, cos, sin, is_neox)
+    torch.ops._xpu_C.apply_rotary_emb(out, x, cos, sin, is_neox)
 
     if is_neox:
         ref = _ref_rotary_emb_neox(x, cos, sin)
