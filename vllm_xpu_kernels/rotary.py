@@ -10,6 +10,8 @@ and cos/sin broadcasting from [seq_len, rot_dim/2] to [num_tokens, rot_dim/2].
 
 import torch
 
+import vllm_xpu_kernels._C  # noqa: F401 — registers torch.ops._C ops
+
 
 def apply_rotary_emb(
     x: torch.Tensor,
