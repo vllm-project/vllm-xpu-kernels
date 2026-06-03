@@ -48,7 +48,8 @@ def apply_rotary_emb(
     # Expand cos/sin if fewer tokens than input (batch broadcasting)
     if cos_tokens < num_tokens:
         assert num_tokens % cos_tokens == 0, (
-            f"num_tokens ({num_tokens}) must be divisible by cos_tokens ({cos_tokens})"
+            f"num_tokens ({num_tokens}) must be divisible"
+            f" by cos_tokens ({cos_tokens})"
         )
         repeats = num_tokens // cos_tokens
         cos_2d = cos_2d.repeat(repeats, 1)
