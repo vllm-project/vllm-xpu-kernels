@@ -67,7 +67,60 @@ option(XPU_SPECIFIC_KERNELS_ENABLED
        "Build XPU-specific kernels (_xpu_C extension)" ON)
 option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
 
-message(STATUS "")
+# KERNEL CONFIGURATION — controls which paged decode kernel variants are
+# compiled. Use model-specific configs to dramatically reduce compile time. See
+# csrc/xpu/attn/kernel_configs/ for available presets.
+set(VLLM_PAGED_DECODE_CONFIG
+    ""
+    CACHE
+      STRING
+      "Path to paged decode kernel config (empty=default, or filename like paged_decode_full.conf)"
+)
+
+# Resolve shorthand config names to full paths
+if(VLLM_PAGED_DECODE_CONFIG AND NOT IS_ABSOLUTE "${VLLM_PAGED_DECODE_CONFIG}")
+  # Allow e.g. "paged_decode_full.conf" or "paged_decode_full"
+  if(NOT VLLM_PAGED_DECODE_CONFIG MATCHES "\\.conf$")
+    set(VLLM_PAGED_DECODE_CONFIG "${VLLM_PAGED_DECODE_CONFIG}.conf")
+  endif()
+  set(VLLM_PAGED_DECODE_CONFIG
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/kernel_configs/${VLLM_PAGED_DECODE_CONFIG}"
+  )
+endif()
+
+# Default to full config if not specified
+if(NOT VLLM_PAGED_DECODE_CONFIG OR "${VLLM_PAGED_DECODE_CONFIG}" STREQUAL "")
+  set(VLLM_PAGED_DECODE_CONFIG
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/kernel_configs/paged_decode_full.conf"
+  )
+endif()
+
+# KERNEL CONFIGURATION — controls which chunk prefill kernel variants are
+# compiled. Use model-specific configs to reduce compile time.
+set(VLLM_CHUNK_PREFILL_CONFIG
+    ""
+    CACHE
+      STRING
+      "Path to chunk prefill kernel config (empty=default, or filename like chunk_prefill_full.conf)"
+)
+
+# Resolve shorthand config names to full paths
+if(VLLM_CHUNK_PREFILL_CONFIG AND NOT IS_ABSOLUTE "${VLLM_CHUNK_PREFILL_CONFIG}")
+  if(NOT VLLM_CHUNK_PREFILL_CONFIG MATCHES "\\.conf$")
+    set(VLLM_CHUNK_PREFILL_CONFIG "${VLLM_CHUNK_PREFILL_CONFIG}.conf")
+  endif()
+  set(VLLM_CHUNK_PREFILL_CONFIG
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/kernel_configs/${VLLM_CHUNK_PREFILL_CONFIG}"
+  )
+endif()
+
+# Default to full config if not specified
+if(NOT VLLM_CHUNK_PREFILL_CONFIG OR "${VLLM_CHUNK_PREFILL_CONFIG}" STREQUAL "")
+  set(VLLM_CHUNK_PREFILL_CONFIG
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/kernel_configs/chunk_prefill_full.conf"
+  )
+endif()
+
 message(STATUS "Kernel build configuration:")
 message(STATUS "  BUILD_SYCL_TLA_KERNELS       = ${BUILD_SYCL_TLA_KERNELS}")
 message(STATUS "  VLLM_XPU_ENABLE_XE2          = ${VLLM_XPU_ENABLE_XE2}")
@@ -80,6 +133,8 @@ message(STATUS "  MQA_LOGITS_KERNELS_ENABLED   = ${MQA_LOGITS_KERNELS_ENABLED}")
 message(
   STATUS "  XPU_SPECIFIC_KERNELS_ENABLED = ${XPU_SPECIFIC_KERNELS_ENABLED}")
 message(STATUS "  XPUMEM_ALLOCATOR_ENABLED     = ${XPUMEM_ALLOCATOR_ENABLED}")
+message(STATUS "  VLLM_PAGED_DECODE_CONFIG     = ${VLLM_PAGED_DECODE_CONFIG}")
+message(STATUS "  VLLM_CHUNK_PREFILL_CONFIG    = ${VLLM_CHUNK_PREFILL_CONFIG}")
 message(STATUS "")
 
 #
@@ -595,6 +650,8 @@ endif()
 if(MOE_KERNELS_ENABLED)
   message(STATUS "Enabling _moe_C extension.")
   file(GLOB VLLM_MOE_EXT_SRC "csrc/moe/*.cpp")
+  # list(REMOVE_ITEM VLLM_MOE_EXT_SRC
+  # ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/fused_grouped_topk.cpp)
 
   define_gpu_extension_target(
     _moe_C

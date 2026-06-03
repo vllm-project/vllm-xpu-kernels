@@ -1,6 +1,11 @@
 #include "paged_decode_xe2.h"
 #include "paged_decode_utils.hpp"
-#include "paged_decode_extern.hpp"
+// Use the generated extern header (only declares enabled policies)
+#if __has_include("paged_decode_extern_gen.hpp")
+  #include "paged_decode_extern_gen.hpp"
+#else
+  #include "paged_decode_extern.hpp"
+#endif
 
 using namespace cute;
 
