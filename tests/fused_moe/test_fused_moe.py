@@ -31,6 +31,34 @@ MINI_PYTEST_PARAMS = {
         "dtype": [torch.bfloat16],
         "has_bias": [True],
     },
+    "test_fused_moe_ep": {
+        "m,n,k": [(1, 1024, 1024)],
+        "e": [16],
+        "topk": [1],
+        "ep_rank": [0],
+        "ep_size": [4],
+        "dtype": [torch.float16],
+        "w_dtype": [None],
+        "has_bias": [True],
+    },
+    "test_fused_moe_int4_ep": {
+        "m,n,k": [(1, 1024, 1024)],
+        "e": [16],
+        "topk": [1],
+        "ep_rank": [0],
+        "ep_size": [4],
+        "dtype": [torch.bfloat16],
+        "has_bias": [True],
+    },
+    "test_fused_moe_mxfp4_ep": {
+        "m,n,k": [(1, 1024, 1024)],
+        "e": [16],
+        "topk": [1],
+        "ep_rank": [0],
+        "ep_size": [4],
+        "dtype": [torch.float16],
+        "has_bias": [True],
+    },
 }
 
 
@@ -264,6 +292,70 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
         atol = 2e-2
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
     del fused_moe_impl
+
+
+@torch.inference_mode()
+def test_fused_moe_workspace_reuse_matches_allocation_path():
+    seed_everything(11)
+
+    input_len = 4
+    hidden_size = 128
+    intermediate_size = 256
+    num_experts = 2
+    topk = 1
+    dtype = torch.bfloat16
+
+    a = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
+    w13 = torch.randn((num_experts, 2 * intermediate_size, hidden_size),
+                      device=DEVICE, dtype=dtype) / 16
+    w2 = torch.randn((num_experts, hidden_size, intermediate_size),
+                     device=DEVICE, dtype=dtype) / 16
+    scores = torch.randn((input_len, num_experts),
+                         device=DEVICE, dtype=torch.float32)
+    expert_scores, expert_indices = torch.topk(scores, k=topk, dim=-1,
+                                               sorted=False)
+
+    w13.data = w13.transpose(-1, -2).contiguous()
+    w2.data = w2.transpose(-1, -2).contiguous()
+    fused_moe_impl = XpuFusedMoe(
+        w13=w13,
+        w13_scales=None,
+        w13_bias=None,
+        w2=w2,
+        w2_scales=None,
+        w2_bias=None,
+        n_experts_per_token=topk,
+        activation="silu",
+        num_experts=num_experts,
+    )
+
+    allocated_output = torch.empty_like(a)
+    fused_moe_impl.apply(
+        output=allocated_output,
+        hidden_states=a,
+        topk_weights=expert_scores,
+        topk_ids=expert_indices,
+    )
+
+    num_moe_inputs = input_len * topk
+    workspace13 = torch.empty((num_moe_inputs,
+                               max(hidden_size, intermediate_size)),
+                              device=DEVICE, dtype=dtype)
+    workspace2 = torch.empty((num_moe_inputs,
+                              max(hidden_size, 2 * intermediate_size)),
+                             device=DEVICE, dtype=dtype)
+    workspace_output = torch.empty_like(a)
+    fused_moe_impl.apply(
+        output=workspace_output,
+        hidden_states=a,
+        topk_weights=expert_scores,
+        topk_ids=expert_indices,
+        workspace13=workspace13,
+        workspace2=workspace2,
+    )
+
+    torch.testing.assert_close(workspace_output, allocated_output,
+                               rtol=2e-2, atol=2e-2)
 
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
