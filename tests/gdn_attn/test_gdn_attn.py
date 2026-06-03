@@ -843,3 +843,125 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                        ref_ssm_state[slot],
                                        atol=atol,
                                        rtol=rtol)
+
+
+@torch.inference_mode()
+def test_gdn_attention_mtp_accepts_padded_spec_metadata():
+    """Graph capture can pad spec metadata rows; only active rows are valid."""
+    device = "xpu"
+    random.seed(321)
+    torch.manual_seed(321)
+
+    dtype = torch.float16
+    num_spec_decodes = 1
+    num_spec_tokens = 2
+    num_actual_tokens = num_spec_decodes * num_spec_tokens
+    num_k_heads = 16
+    head_k_dim = 128
+    num_v_heads = 32
+    head_v_dim = 128
+    width = 4
+    tp_size = 1
+    cache_batch_size = 32
+
+    mixed_qkvz_size = num_k_heads // tp_size * (
+        2 * head_k_dim + 2 * head_v_dim * num_v_heads // num_k_heads)
+    mixed_ba_size = num_k_heads // tp_size * (2 * num_v_heads // num_k_heads)
+    mixed_qkv_size = num_k_heads // tp_size * (
+        2 * head_k_dim + head_v_dim * num_v_heads // num_k_heads)
+
+    projected_states_qkvz = torch.randn(num_actual_tokens,
+                                        mixed_qkvz_size,
+                                        dtype=dtype,
+                                        device=device)
+    projected_states_ba = torch.randn(num_actual_tokens,
+                                      mixed_ba_size,
+                                      dtype=dtype,
+                                      device=device)
+    conv_state = torch.randn(cache_batch_size,
+                             width - 1,
+                             mixed_qkv_size,
+                             dtype=dtype,
+                             device=device)
+    ssm_state = torch.randn(cache_batch_size,
+                            num_v_heads // tp_size,
+                            head_v_dim,
+                            head_k_dim,
+                            dtype=dtype,
+                            device=device)
+    conv_weights = torch.randn(mixed_qkv_size,
+                               width,
+                               dtype=dtype,
+                               device=device)
+    conv_bias = torch.randn(mixed_qkv_size, dtype=dtype, device=device)
+    A_log = torch.randn(num_v_heads // tp_size,
+                        dtype=torch.float32,
+                        device=device)
+    dt_bias = torch.randn(num_v_heads // tp_size, dtype=dtype, device=device)
+
+    state_slots = torch.tensor([[3, 5]], dtype=torch.int32, device=device)
+    num_accepted_tokens = torch.tensor([1], dtype=torch.int32, device=device)
+    spec_query_start_loc = torch.tensor([0, num_spec_tokens],
+                                        dtype=torch.int32,
+                                        device=device)
+    spec_token_indx = torch.tensor([1, 0], dtype=torch.int32, device=device)
+
+    def run_with_metadata(query_start_loc, state_indices, accepted_tokens):
+        core_attn_out = torch.zeros(num_actual_tokens,
+                                    num_v_heads // tp_size,
+                                    head_v_dim,
+                                    dtype=dtype,
+                                    device=device)
+        z = torch.zeros_like(core_attn_out)
+        conv_state_run = conv_state.clone()
+        ssm_state_run = ssm_state.clone()
+        torch.ops._xpu_C.gdn_attention(
+            core_attn_out,
+            z,
+            projected_states_qkvz.clone(),
+            projected_states_ba.clone(),
+            num_k_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_state=conv_state_run,
+            ssm_state=ssm_state_run,
+            conv_weights=conv_weights,
+            conv_bias=conv_bias,
+            activation="silu",
+            A_log=A_log,
+            dt_bias=dt_bias,
+            num_prefills=0,
+            num_decodes=0,
+            num_spec_decodes=num_spec_decodes,
+            has_initial_state=None,
+            non_spec_query_start_loc=None,
+            non_spec_token_indx=None,
+            non_spec_state_indices_tensor=None,
+            spec_query_start_loc=query_start_loc,
+            spec_token_indx=spec_token_indx,
+            spec_state_indices_tensor=state_indices,
+            num_accepted_tokens=accepted_tokens,
+            num_actual_tokens=num_actual_tokens,
+            tp_size=tp_size,
+            reorder_input=False)
+        return core_attn_out, z, conv_state_run, ssm_state_run
+
+    exact = run_with_metadata(spec_query_start_loc, state_slots,
+                              num_accepted_tokens)
+
+    padded_query_start_loc = torch.tensor([0, num_spec_tokens, 99, 99],
+                                          dtype=torch.int32,
+                                          device=device)
+    padded_state_slots = torch.tensor([[3, 5], [7, 11], [13, 17]],
+                                      dtype=torch.int32,
+                                      device=device)
+    padded_num_accepted = torch.tensor([1, 0, 0],
+                                       dtype=torch.int32,
+                                       device=device)
+    padded = run_with_metadata(padded_query_start_loc, padded_state_slots,
+                               padded_num_accepted)
+
+    for exact_tensor, padded_tensor in zip(exact, padded):
+        torch.testing.assert_close(padded_tensor, exact_tensor,
+                                   atol=5e-2, rtol=5e-2)
