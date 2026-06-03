@@ -413,7 +413,13 @@ void gdn_attention(
     // optional token_indx so they can read mixed_qkvz/mixed_ba and write z /
     // core_attn_out directly at the interleaved global slots indicated by
     // non_spec_token_indx, avoiding host-side gather/scatter.
-    if (num_prefills > 0) {
+    const bool supports_xe2_chunk_gdn =
+        head_k_dim >= gdn::chunk_size_xe2 &&
+        head_v_dim >= gdn::chunk_size_xe2 &&
+        head_k_dim % gdn::chunk_size_xe2 == 0 &&
+        head_v_dim % gdn::chunk_size_xe2 == 0;
+
+    if (num_prefills > 0 && supports_xe2_chunk_gdn) {
       int batch_size = non_spec_query_start_loc->size(0) - 1;
       int padding_size = batch_size * (gdn::chunk_size_xe2 - 1);
 

@@ -27,6 +27,8 @@ MODE = ["prefill", "decode", "mix_mode"]
 REORDER_INPUT = [True, False]
 DTYPES = [torch.float16, torch.bfloat16]
 SSM_STATE_IS_FP32 = [False, True]
+GDN_ATOL = 5e-2
+GDN_RTOL = 5e-2
 
 # Override pytest parameters when enabling mini pytest
 MINI_PYTEST_PARAMS = {
@@ -266,38 +268,41 @@ def simple_random_distribute(N, batch_size):
     return distribution
 
 
-@pytest.mark.parametrize("num_actual_tokens", NUM_TOKENS)
-@pytest.mark.parametrize("batch_size", BATCH_SIZE)
-@pytest.mark.parametrize("num_k_heads", NUM_K_HEADS)
-@pytest.mark.parametrize("head_k_dim", NUM_K_DIMS)
-@pytest.mark.parametrize("num_v_heads", NUM_V_HEADS)
-@pytest.mark.parametrize("head_v_dim", NUM_V_DIMS)
-@pytest.mark.parametrize("width", WIDTH)
-@pytest.mark.parametrize("tp_size", TP_SIZE)
-@pytest.mark.parametrize("has_bias", HAS_BIAS)
-@pytest.mark.parametrize("activation", ACTIVATION)
-@pytest.mark.parametrize("mode", MODE)
-@pytest.mark.parametrize("reorder_input", REORDER_INPUT)
-@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
-@pytest.mark.parametrize("ssm_state_is_fp32", SSM_STATE_IS_FP32)
 @torch.inference_mode()
-def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
-                       num_v_heads, head_v_dim, width, tp_size, has_bias,
-                       activation, reorder_input, mode, dtype,
-                       ssm_state_is_fp32):
-    # FIXME: remove skip
-    if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
-            and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
-        pytest.skip("skip gdn attention kernels testing on PVC.")
-
+def _run_gdn_attention_reference_case(
+    *,
+    num_actual_tokens,
+    batch_size,
+    num_k_heads,
+    head_k_dim,
+    num_v_heads,
+    head_v_dim,
+    width,
+    tp_size=1,
+    has_bias=False,
+    activation="silu",
+    reorder_input=False,
+    mode="prefill",
+    dtype=torch.float16,
+    ssm_state_is_fp32=False,
+    seed=42,
+    token_batches=None,
+    active_state_indices=None,
+    cache_batch_size=200,
+    check_inactive_states=False,
+    check_core_and_states=True,
+):
     device = "xpu"
-    random.seed(42)
-    torch.manual_seed(42)
+    random.seed(seed)
+    torch.manual_seed(seed)
     ssm_state_dtype = torch.float32 if ssm_state_is_fp32 else dtype
 
     assert head_k_dim == head_v_dim
 
-    if batch_size > num_actual_tokens:
+    if token_batches is not None:
+        batch_size = len(token_batches)
+        num_actual_tokens = sum(token_batches)
+    elif batch_size > num_actual_tokens:
         batch_size = num_actual_tokens
 
     if mode == "prefill":
@@ -311,7 +316,6 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                                       1) if batch_size > 1 else 1
 
     num_decodes = batch_size - num_prefills
-    cache_batch_size = 200
 
     mixed_qkvz_size = num_k_heads // tp_size * (
         2 * head_k_dim + 2 * head_v_dim * num_v_heads // num_k_heads)
@@ -329,11 +333,13 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
     conv_state = torch.randn((cache_batch_size, width - 1, mixed_qkv_size),
                              dtype=dtype,
                              device=device)
+    initial_conv_state = conv_state.clone()
     ref_conv_state = conv_state.clone()
     ssm_state = torch.randn(
         (cache_batch_size, num_v_heads // tp_size, head_v_dim, head_k_dim),
         dtype=ssm_state_dtype,
         device=device)
+    initial_ssm_state = ssm_state.clone()
     ref_ssm_state = ssm_state.clone()
 
     conv_weights = torch.randn((mixed_qkv_size, width),
@@ -348,19 +354,33 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                         device=device)
     dt_bias = torch.randn((num_v_heads // tp_size), dtype=dtype, device=device)
 
-    prefill_batches = simple_random_distribute(num_actual_tokens - num_decodes,
-                                               batch_size - num_decodes)
-    token_batches = torch.cat([torch.ones([num_decodes]),
-                               prefill_batches]).to(device)
-    perm = torch.randperm(token_batches.size(0)).to(device)
-    shuffled_tensor = token_batches[perm]
+    if token_batches is None:
+        prefill_batches = simple_random_distribute(
+            num_actual_tokens - num_decodes, batch_size - num_decodes)
+        token_batches_tensor = torch.cat(
+            [torch.ones([num_decodes]), prefill_batches]).to(device)
+        perm = torch.randperm(token_batches_tensor.size(0)).to(device)
+        shuffled_tensor = token_batches_tensor[perm]
+        has_initial_state = perm >= num_decodes
+    else:
+        token_batches_tensor = torch.tensor(token_batches,
+                                           dtype=torch.float32,
+                                           device=device)
+        shuffled_tensor = token_batches_tensor
+        has_initial_state = (torch.arange(batch_size, device=device) >=
+                             num_decodes)
+
     non_spec_query_start_loc = torch.cat([
         torch.zeros([1], device=device),
         torch.cumsum(shuffled_tensor, dim=0)
     ]).to(torch.int32)
-    has_initial_state = perm >= num_decodes
-    non_spec_state_indices_tensor = torch.tensor(random.sample(
-        range(cache_batch_size), batch_size),
+
+    if active_state_indices is None:
+        state_indices = random.sample(range(cache_batch_size), batch_size)
+    else:
+        assert len(active_state_indices) == batch_size
+        state_indices = active_state_indices
+    non_spec_state_indices_tensor = torch.tensor(state_indices,
                                                  device=device,
                                                  dtype=torch.int32)
 
@@ -431,33 +451,153 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
         reorder_input=reorder_input,
     )
 
-    atol = 5e-2
-    rtol = 5e-2
+    torch.testing.assert_close(z, ref_z, atol=GDN_ATOL, rtol=GDN_RTOL)
 
-    torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
-
-    if num_actual_tokens == 8192:
-        pytest.skip("FIXME, skip core_attn_out test because of random error")
+    if not check_core_and_states:
+        return
 
     torch.testing.assert_close(core_attn_out,
                                ref_core_attn_out,
-                               atol=atol,
-                               rtol=rtol,
+                               atol=GDN_ATOL,
+                               rtol=GDN_RTOL,
                                equal_nan=True)
+
     for i in range(batch_size):
         state_id = non_spec_state_indices_tensor[i]
         torch.testing.assert_close(conv_state[state_id],
                                    ref_conv_state[state_id],
-                                   atol=atol,
-                                   rtol=rtol)
-        if num_actual_tokens == 8192:
-            # FIXME: remove this skip
-            # skip because of random error, will be fixed in future
-            pytest.skip("FIXME, skip ssm_state test because of random error")
-            torch.testing.assert_close(ssm_state[state_id],
-                                       ref_ssm_state[state_id],
-                                       atol=atol,
-                                       rtol=rtol)
+                                   atol=GDN_ATOL,
+                                   rtol=GDN_RTOL)
+        torch.testing.assert_close(ssm_state[state_id],
+                                   ref_ssm_state[state_id],
+                                   atol=GDN_ATOL,
+                                   rtol=GDN_RTOL)
+
+    if check_inactive_states:
+        inactive_state_mask = torch.ones(cache_batch_size,
+                                         dtype=torch.bool,
+                                         device=device)
+        inactive_state_mask[non_spec_state_indices_tensor.long()] = False
+        torch.testing.assert_close(conv_state[inactive_state_mask],
+                                   initial_conv_state[inactive_state_mask],
+                                   atol=0,
+                                   rtol=0)
+        torch.testing.assert_close(ssm_state[inactive_state_mask],
+                                   initial_ssm_state[inactive_state_mask],
+                                   atol=0,
+                                   rtol=0)
+
+
+@pytest.mark.parametrize("mode", ["prefill", "mix_mode"])
+@torch.inference_mode()
+def test_gdn_attention_fallback_head_dim_boundary(mode):
+    _run_gdn_attention_reference_case(
+        num_actual_tokens=16,
+        batch_size=16,
+        num_k_heads=1,
+        head_k_dim=32,
+        num_v_heads=1,
+        head_v_dim=32,
+        width=2,
+        mode=mode,
+    )
+
+
+@pytest.mark.parametrize("mode", ["prefill", "mix_mode"])
+@pytest.mark.parametrize("head_dim", [64, 128])
+@torch.inference_mode()
+def test_gdn_attention_xe2_chunk_supported_boundary(head_dim, mode):
+    _run_gdn_attention_reference_case(
+        num_actual_tokens=64,
+        batch_size=16,
+        num_k_heads=1,
+        head_k_dim=head_dim,
+        num_v_heads=1,
+        head_v_dim=head_dim,
+        width=2,
+        mode=mode,
+        seed=43,
+    )
+
+
+@pytest.mark.parametrize("head_dim", [32, 64])
+@torch.inference_mode()
+def test_gdn_attention_state_update_preserves_inactive_cache_slots(head_dim):
+    active_slots = [4, 12, 20, 28, 36, 44, 52, 56]
+    _run_gdn_attention_reference_case(
+        num_actual_tokens=64,
+        batch_size=len(active_slots),
+        num_k_heads=1,
+        head_k_dim=head_dim,
+        num_v_heads=1,
+        head_v_dim=head_dim,
+        width=2,
+        mode="prefill",
+        token_batches=[1, 2, 7, 8, 9, 10, 11, 16],
+        active_state_indices=active_slots,
+        cache_batch_size=64,
+        check_inactive_states=True,
+        seed=44,
+    )
+
+
+@pytest.mark.parametrize("num_actual_tokens", [7, 8, 9, 63, 64, 65])
+@torch.inference_mode()
+def test_gdn_attention_prefill_token_boundaries(num_actual_tokens):
+    batch_size = min(num_actual_tokens, 4)
+    _run_gdn_attention_reference_case(
+        num_actual_tokens=num_actual_tokens,
+        batch_size=batch_size,
+        num_k_heads=1,
+        head_k_dim=64,
+        num_v_heads=1,
+        head_v_dim=64,
+        width=2,
+        mode="prefill",
+        seed=45,
+    )
+
+
+@pytest.mark.parametrize("num_actual_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("batch_size", BATCH_SIZE)
+@pytest.mark.parametrize("num_k_heads", NUM_K_HEADS)
+@pytest.mark.parametrize("head_k_dim", NUM_K_DIMS)
+@pytest.mark.parametrize("num_v_heads", NUM_V_HEADS)
+@pytest.mark.parametrize("head_v_dim", NUM_V_DIMS)
+@pytest.mark.parametrize("width", WIDTH)
+@pytest.mark.parametrize("tp_size", TP_SIZE)
+@pytest.mark.parametrize("has_bias", HAS_BIAS)
+@pytest.mark.parametrize("activation", ACTIVATION)
+@pytest.mark.parametrize("mode", MODE)
+@pytest.mark.parametrize("reorder_input", REORDER_INPUT)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("ssm_state_is_fp32", SSM_STATE_IS_FP32)
+@torch.inference_mode()
+def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
+                       num_v_heads, head_v_dim, width, tp_size, has_bias,
+                       activation, reorder_input, mode, dtype,
+                       ssm_state_is_fp32):
+    if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
+            and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
+        pytest.skip("skip gdn attention kernels testing on PVC.")
+
+    _run_gdn_attention_reference_case(
+        num_actual_tokens=num_actual_tokens,
+        batch_size=batch_size,
+        num_k_heads=num_k_heads,
+        head_k_dim=head_k_dim,
+        num_v_heads=num_v_heads,
+        head_v_dim=head_v_dim,
+        width=width,
+        tp_size=tp_size,
+        has_bias=has_bias,
+        activation=activation,
+        reorder_input=reorder_input,
+        mode=mode,
+        dtype=dtype,
+        ssm_state_is_fp32=ssm_state_is_fp32,
+        check_core_and_states=num_actual_tokens != 8192,
+    )
 
 
 NUM_SPEC_DECODES = [1, 4]
