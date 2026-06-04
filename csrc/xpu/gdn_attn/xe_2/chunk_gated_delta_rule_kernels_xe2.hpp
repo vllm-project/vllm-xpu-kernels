@@ -993,8 +993,8 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
           int state_idx_base = dv * head_k_dim + dk;
           auto k_vec = *reinterpret_cast<const FastVecT*>(k_ptr + dk);
           if (has_prev_state) {
-            auto state_vec =
-                *reinterpret_cast<const FastStateVecT*>(ssm_state_ptr + state_idx_base);
+            auto state_vec = *reinterpret_cast<const FastStateVecT*>(
+                ssm_state_ptr + state_idx_base);
             CUTE_UNROLL
             for (int vi = 0; vi < fast_vec_size; ++vi) {
               float state_value =
@@ -1023,8 +1023,8 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
 
           FastStateVecT state_new_vec;
           if (has_prev_state) {
-            auto state_vec =
-                *reinterpret_cast<const FastStateVecT*>(ssm_state_ptr + state_idx_base);
+            auto state_vec = *reinterpret_cast<const FastStateVecT*>(
+                ssm_state_ptr + state_idx_base);
             CUTE_UNROLL
             for (int vi = 0; vi < fast_vec_size; ++vi) {
               float state_value =
