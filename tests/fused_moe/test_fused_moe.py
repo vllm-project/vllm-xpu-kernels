@@ -101,7 +101,8 @@ def ref_fused_moe(x,
                   activation,
                   num_experts,
                   ep_rank=0,
-                  ep_size=1):
+                  ep_size=1,
+                  gemm1_clamp_limit=None):
     expert_start_id = num_experts * ep_rank
     expert_end_id = expert_start_id + num_experts
     expert_cache = torch.zeros_like(x)
@@ -128,10 +129,13 @@ def ref_fused_moe(x,
         gemm1 = (expert_tokens.to(torch.float32) @ w1.T.to(torch.float32))
         if w13_bias is not None:
             gemm1 += w1_bias.to(torch.float32)
-        gate = act_fn(gemm1)
         up = (expert_tokens.to(torch.float32) @ w3.T.to(torch.float32))
         if w13_bias is not None:
             up += w3_bias.to(torch.float32)
+        if gemm1_clamp_limit is not None and gemm1_clamp_limit > 0:
+            gemm1.clamp_(max=gemm1_clamp_limit)
+            up.clamp_(min=-gemm1_clamp_limit, max=gemm1_clamp_limit)
+        gate = act_fn(gemm1)
         expert_out = ((gate * up) @ w2[expert_id, :, :].T.to(torch.float32))
         if w2_bias is not None:
             expert_out += w2_bias[expert_id, :].to(torch.float32)
@@ -875,3 +879,88 @@ def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
         rtol = 2e-2
         atol = 2e-2
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS) 
+@pytest.mark.parametrize("e", [16])
+@pytest.mark.parametrize("topk", [1])
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
+@pytest.mark.parametrize("gemm1_clamp_limit", [5.0, 10.0])
+def test_fused_moe_clamp_limit(m, n, k, e, topk, dtype, gemm1_clamp_limit):
+    """Test that gemm1_clamp_limit correctly clamps gate/up after GEMM1."""
+    seed_everything(7)
+
+    input_len = m
+    hidden_size = k
+    intermediate_size = n
+    num_experts = e
+
+    # Use /2 scaling so GEMM1 std ≈ 0.25 * sqrt(k) ≈ 8 for k=1024,
+    # ensuring values exceed clamp_limit=5.0 (~53%) and 10.0 (~21%).
+    a = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 2
+    w13 = torch.randn((num_experts, 2 * intermediate_size, hidden_size),
+                      device=DEVICE,
+                      dtype=dtype) / 2
+    w2 = torch.randn((num_experts, hidden_size, intermediate_size),
+                     device=DEVICE,
+                     dtype=dtype) / 16
+    ref_a = a.clone()
+
+    # moe gate
+    scores = torch.randn((input_len, num_experts),
+                         device=DEVICE,
+                         dtype=torch.float32)
+    expert_scores, expert_indices = torch.topk(scores,
+                                               k=topk,
+                                               dim=-1,
+                                               sorted=False)
+
+    flat_expert_indices = expert_indices.view(-1)
+    flat_expert_weights = expert_scores.view(-1, 1)
+
+    ref_out = ref_fused_moe(ref_a, w13.clone(), None, w2.clone(), None,
+                            flat_expert_weights, flat_expert_indices, topk,
+                            "silu", e,
+                            gemm1_clamp_limit=gemm1_clamp_limit)
+
+    w13.data = w13.transpose(-1, -2).contiguous()
+    w2.data = w2.transpose(-1, -2).contiguous()
+
+    fused_moe_impl = XpuFusedMoe(
+                w13=w13,
+                w13_scales=None,
+                w13_bias=None,
+                w2=w2,
+                w2_scales=None,
+                w2_bias=None,
+                n_experts_per_token=topk,
+                activation="silu",
+                num_experts=e,
+                gemm1_clamp_limit=gemm1_clamp_limit,
+            )
+
+    output = torch.empty_like(ref_out)
+    fused_moe_impl.apply(
+        output=output,
+        hidden_states=a,
+        topk_weights=expert_scores,
+        topk_ids=expert_indices,
+    )
+
+    # Use relative tolerance proportional to output magnitude since bf16
+    # accumulation error scales with intermediate values after clamp.
+    output_scale = ref_out.abs().max().item()
+    rtol = 2e-2
+    atol = max(output_scale * 0.02, 0.5)
+    torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
+
+    # Verify clamp actually took effect: without clamp the result should differ.
+    ref_out_no_clamp = ref_fused_moe(ref_a, w13.transpose(-1, -2).clone(),
+                                     None,
+                                     w2.transpose(-1, -2).clone(), None,
+                                     flat_expert_weights,
+                                     flat_expert_indices, topk, "silu", e,
+                                     gemm1_clamp_limit=None)
+    assert not torch.allclose(output, ref_out_no_clamp, rtol=rtol,
+                              atol=atol), \
+        f"clamp_limit={gemm1_clamp_limit} should produce different results"
