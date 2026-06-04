@@ -544,7 +544,8 @@ def xpu_fused_moe(hidden_states,
                   is_int4=False,
                   is_mxfp4=False,
                   is_mxfp8=False,
-                  is_block_fp8=False):
+                  is_block_fp8=False,
+                  gemm1_clamp_limit=None):
     '''
     hidden_states: [num_rows, hidden_size]
     w13: [num_experts, 2*inter_size, hidden_size]
@@ -683,8 +684,15 @@ def xpu_fused_moe(hidden_states,
         is_B_int4=is_int4,
         is_B_mxfp4=is_mxfp4)
 
-    inter_size_scale = 2 if activation == "relu2_no_mul" else 1
+    # Apply swiglu_limit clamping before activation
+    if gemm1_clamp_limit is not None and gemm1_clamp_limit > 0:
+        gate = gemm1_output[:, :inter_size]
+        up = gemm1_output[:, inter_size:]
+        gate.clamp_(max=gemm1_clamp_limit)
+        up.clamp_(min=-gemm1_clamp_limit, max=gemm1_clamp_limit)
+
     # act
+    inter_size_scale = 2 if activation == "relu2_no_mul" else 1
     act_output = torch.empty((num_moe_inputs, inter_size * inter_size_scale),
                              dtype=gemm1_output.dtype,
                              device=gemm1_output.device)
