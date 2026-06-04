@@ -33,6 +33,25 @@
   } while (0)
 
 namespace vllm {
+
+template <int N>
+static inline sycl::vec<sycl::ext::oneapi::bfloat16, N>
+vload_bf16(const sycl::ext::oneapi::bfloat16* p) {
+  return *reinterpret_cast<const sycl::vec<sycl::ext::oneapi::bfloat16, N>*>(p);
+}
+
+template <int N>
+static inline void vstore_bf16(
+    sycl::ext::oneapi::bfloat16* p,
+    const sycl::vec<sycl::ext::oneapi::bfloat16, N>& v) {
+  *reinterpret_cast<sycl::vec<sycl::ext::oneapi::bfloat16, N>*>(p) = v;
+}
+
+template <int N>
+static inline sycl::vec<float, N> vload_f32(const float* p) {
+  return *reinterpret_cast<const sycl::vec<float, N>*>(p);
+}
+
 namespace xpu {
 
 static inline sycl::queue& vllmGetQueue(at::DeviceIndex device_index = -1) {

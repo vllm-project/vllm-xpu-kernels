@@ -1,3 +1,16 @@
+// mhc_post.cpp — MHC (Multi-Head Channel) Post-processing kernel (XPU/SYCL)
+//
+// For each token this kernel reconstructs HC new residual heads from:
+//   - layer_out  [N, H]      (bf16)  — output of the transformer sub-layer
+//   - residual   [N, HC, H]  (bf16)  — original residual heads
+//   - post_mix   [N, HC]     (f32)   — per-head post-layer scale (from mhc_pre)
+//   - comb_mix   [N, HC, HC] (f32)   — Sinkhorn combination matrix (from
+//   mhc_pre)
+//
+// The computation per output head `o` and feature index `k` is:
+//   out[tok, o, k] = post_mix[tok, o] * layer_out[tok, k]
+//                  + sum_i( comb_mix[tok, i, o] * residual[tok, i, k] )
+
 #include <sycl/sycl.hpp>
 #include <sycl/ext/oneapi/bfloat16.hpp>
 
@@ -13,145 +26,207 @@ namespace vllm {
 
 using bf16 = sycl::ext::oneapi::bfloat16;
 
+// Number of heads / channels in MHC.
 static constexpr int HC = 4;
 
-template <int N>
-static inline sycl::vec<bf16, N> vload_bf16(const bf16* p) {
-  return *reinterpret_cast<const sycl::vec<bf16, N>*>(p);
-}
-template <int N>
-static inline void vstore_bf16(bf16* p, const sycl::vec<bf16, N>& v) {
-  *reinterpret_cast<sycl::vec<bf16, N>*>(p) = v;
-}
+// ---------------------------------------------------------------------------
+// Kernel launch
+// ---------------------------------------------------------------------------
 
-class MhcPostKernel;
+class MhcPostKernel {
+ public:
+  static constexpr int kVecWidth = 8;
+  static constexpr int kWGSize = 256;
+
+  MhcPostKernel(
+      const float* comb_mix_,
+      const bf16* residual_,
+      const float* post_mix_,
+      const bf16* layer_out_,
+      bf16* out_,
+      int H_,
+      sycl::local_accessor<float, 1> shared_coeffs_)
+      : comb_mix(comb_mix_),
+        residual(residual_),
+        post_mix(post_mix_),
+        layer_out(layer_out_),
+        out(out_),
+        H(H_),
+        shared_coeffs(shared_coeffs_) {}
+
+  [[sycl::reqd_sub_group_size(16)]]
+  void operator()(sycl::nd_item<1> it) const {
+    const int tok = it.get_group(0);
+    const int lid = it.get_local_id(0);
+
+    // ----------------------------------------------------------------
+    // Phase 1: Thread 0 loads per-token comb_mix and post_mix into
+    //          shared memory so all threads can reuse them.
+    //          HC*HC + HC = 20 floats total.
+    // ----------------------------------------------------------------
+    if (lid == 0) {
+// comb_mix row: HC*HC floats loaded as HC × float4
+#pragma unroll
+      for (int i = 0; i < HC; ++i) {
+        auto row = vload_f32<HC>(comb_mix + tok * HC * HC + i * HC);
+#pragma unroll
+        for (int j = 0; j < HC; ++j) {
+          shared_coeffs[i * HC + j] = row[j];
+        }
+      }
+      // post_mix row: HC floats loaded as float4
+      auto pm = vload_f32<HC>(post_mix + tok * HC);
+#pragma unroll
+      for (int i = 0; i < HC; ++i) {
+        shared_coeffs[HC * HC + i] = pm[i];
+      }
+    }
+    sycl::group_barrier(it.get_group());
+
+    float comb_reg[HC][HC];
+    float post_reg[HC];
+#pragma unroll
+    for (int i = 0; i < HC; ++i) {
+      post_reg[i] = shared_coeffs[HC * HC + i];
+#pragma unroll
+      for (int j = 0; j < HC; ++j) {
+        comb_reg[i][j] = shared_coeffs[i * HC + j];
+      }
+    }
+
+    // ----------------------------------------------------------------
+    // Phase 2: Vectorised loop over feature dimension.
+    // ----------------------------------------------------------------
+    for (int k = lid * kVecWidth; k < H; k += kWGSize * kVecWidth) {
+      if (k + kVecWidth <= H) {
+        auto layer_vec = vload_bf16<kVecWidth>(layer_out + tok * H + k);
+
+        float acc[HC][kVecWidth];
+#pragma unroll
+        for (int o = 0; o < HC; ++o) {
+#pragma unroll
+          for (int v = 0; v < kVecWidth; ++v) {
+            acc[o][v] = post_reg[o] * float(layer_vec[v]);
+          }
+        }
+
+#pragma unroll
+        for (int i = 0; i < HC; ++i) {
+          auto res_vec =
+              vload_bf16<kVecWidth>(residual + (tok * HC + i) * H + k);
+#pragma unroll
+          for (int o = 0; o < HC; ++o) {
+            float c_val = comb_reg[i][o];
+#pragma unroll
+            for (int v = 0; v < kVecWidth; ++v) {
+              acc[o][v] += c_val * float(res_vec[v]);
+            }
+          }
+        }
+
+#pragma unroll
+        for (int o = 0; o < HC; ++o) {
+          sycl::vec<bf16, kVecWidth> out_vec;
+#pragma unroll
+          for (int v = 0; v < kVecWidth; ++v) {
+            out_vec[v] = bf16(acc[o][v]);
+          }
+          vstore_bf16<kVecWidth>(out + (tok * HC + o) * H + k, out_vec);
+        }
+      } else {
+        for (int kk = k; kk < H; ++kk) {
+          float lo_val = float(layer_out[tok * H + kk]);
+          float acc[HC];
+#pragma unroll
+          for (int o = 0; o < HC; ++o) {
+            acc[o] = post_reg[o] * lo_val;
+          }
+#pragma unroll
+          for (int i = 0; i < HC; ++i) {
+            float res_val = float(residual[(tok * HC + i) * H + kk]);
+#pragma unroll
+            for (int o = 0; o < HC; ++o) {
+              acc[o] += comb_reg[i][o] * res_val;
+            }
+          }
+#pragma unroll
+          for (int o = 0; o < HC; ++o) {
+            out[(tok * HC + o) * H + kk] = bf16(acc[o]);
+          }
+        }
+      }
+    }
+  }
+
+ private:
+  const float* comb_mix;
+  const bf16* residual;
+  const float* post_mix;
+  const bf16* layer_out;
+  bf16* out;
+  int H;
+  sycl::local_accessor<float, 1> shared_coeffs;
+};
 
 static sycl::event launch_mhc_post(
     sycl::queue& q,
-    const float* __restrict a,
-    const bf16* __restrict b,
-    const float* __restrict c,
-    const bf16* __restrict d,
-    bf16* __restrict x,
-    int N,
-    int H) {
-  static constexpr int VEC_POST = 8;
-  static constexpr int WG_SIZE = 256;
-
-  sycl::range<1> global(static_cast<size_t>(N) * WG_SIZE);
-  sycl::range<1> local(WG_SIZE);
+    const float* __restrict comb_mix,  // [N, HC, HC] combination matrix
+    const bf16* __restrict residual,   // [N, HC, H]  input residual heads
+    const float* __restrict post_mix,  // [N, HC]     post-layer scale per head
+    const bf16* __restrict layer_out,  // [N, H]      transformer sub-layer
+                                       // output
+    bf16* __restrict out,  // [N, HC, H]  new residual heads (output)
+    int N,                 // number of tokens
+    int H) {               // hidden dimension per head
+  sycl::range<1> global(static_cast<size_t>(N) * MhcPostKernel::kWGSize);
+  sycl::range<1> local(MhcPostKernel::kWGSize);
 
   return q.submit([&](sycl::handler& h) {
-    sycl::local_accessor<float, 1> coeff_s(HC * HC + HC, h);
+    // Shared memory layout: [comb_mix: HC*HC floats | post_mix: HC floats]
+    sycl::local_accessor<float, 1> shared_coeffs(HC * HC + HC, h);
 
-    h.parallel_for<MhcPostKernel>(
+    h.parallel_for(
         sycl::nd_range<1>(global, local),
-        [=](sycl::nd_item<1> it)
-            [[sycl::reqd_sub_group_size(16), intel::kernel_args_restrict]] {
-              const int tok = it.get_group(0);
-              const int lid = it.get_local_id(0);
-
-              if (lid == 0) {
-                const float* a_ptr = a + tok * HC * HC;
-                const float* c_ptr = c + tok * HC;
-#pragma unroll
-                for (int i = 0; i < HC * HC; ++i)
-                  coeff_s[i] = a_ptr[i];
-#pragma unroll
-                for (int i = 0; i < HC; ++i)
-                  coeff_s[HC * HC + i] = c_ptr[i];
-              }
-              sycl::group_barrier(it.get_group());
-
-              float a_reg[HC][HC];
-              float c_reg[HC];
-#pragma unroll
-              for (int i = 0; i < HC; ++i) {
-                c_reg[i] = coeff_s[HC * HC + i];
-#pragma unroll
-                for (int j = 0; j < HC; ++j)
-                  a_reg[i][j] = coeff_s[i * HC + j];
-              }
-
-              for (int k = lid * VEC_POST; k < H; k += WG_SIZE * VEC_POST) {
-                if (k + VEC_POST <= H) {
-                  auto dv = vload_bf16<VEC_POST>(d + tok * H + k);
-
-                  float acc[HC][VEC_POST];
-#pragma unroll
-                  for (int o = 0; o < HC; ++o)
-#pragma unroll
-                    for (int v = 0; v < VEC_POST; ++v)
-                      acc[o][v] = c_reg[o] * float(dv[v]);
-
-#pragma unroll
-                  for (int i = 0; i < HC; ++i) {
-                    auto bv = vload_bf16<VEC_POST>(b + (tok * HC + i) * H + k);
-#pragma unroll
-                    for (int o = 0; o < HC; ++o) {
-                      float a_val = a_reg[i][o];
-#pragma unroll
-                      for (int v = 0; v < VEC_POST; ++v)
-                        acc[o][v] += a_val * float(bv[v]);
-                    }
-                  }
-
-#pragma unroll
-                  for (int o = 0; o < HC; ++o) {
-                    sycl::vec<bf16, VEC_POST> ov;
-#pragma unroll
-                    for (int v = 0; v < VEC_POST; ++v)
-                      ov[v] = bf16(acc[o][v]);
-                    vstore_bf16<VEC_POST>(x + (tok * HC + o) * H + k, ov);
-                  }
-                } else {
-                  for (int kk = k; kk < H; ++kk) {
-                    float d_val = float(d[tok * H + kk]);
-                    float acc[HC];
-#pragma unroll
-                    for (int o = 0; o < HC; ++o)
-                      acc[o] = c_reg[o] * d_val;
-
-#pragma unroll
-                    for (int i = 0; i < HC; ++i) {
-                      float b_val = float(b[(tok * HC + i) * H + kk]);
-#pragma unroll
-                      for (int o = 0; o < HC; ++o)
-                        acc[o] += a_reg[i][o] * b_val;
-                    }
-#pragma unroll
-                    for (int o = 0; o < HC; ++o)
-                      x[(tok * HC + o) * H + kk] = bf16(acc[o]);
-                  }
-                }
-              }
-            });
-  });
+        MhcPostKernel(
+            comb_mix, residual, post_mix, layer_out, out, H, shared_coeffs));
+  });  // q.submit
 }
 
 }  // namespace vllm
 
+// ---------------------------------------------------------------------------
+// PyTorch/ATen entry point
+// ---------------------------------------------------------------------------
+
 using namespace vllm;
 
+// mhc_post — MHC post-processing op exposed to PyTorch.
+//
+// Args:
+//   layer_out     : [*, H]     bf16  — transformer sub-layer output
+//   residual      : [*, HC, H] bf16  — original residual heads
+//   post_mix      : [*, HC, 1] f32   — per-head post-layer scale (from mhc_pre)
+//   comb_mix      : [*, HC, HC] f32  — Sinkhorn combination matrix (from
+//   mhc_pre)
+//
+// Returns: new_residual [*, HC, H] bf16
 at::Tensor mhc_post(
-    const at::Tensor& x,
+    const at::Tensor& layer_out,
     const at::Tensor& residual,
-    const at::Tensor& post_layer_mix,
-    const at::Tensor& comb_res_mix) {
+    const at::Tensor& post_mix,
+    const at::Tensor& comb_mix) {
   TORCH_CHECK(residual.is_xpu(), "mhc_post: tensors must be on XPU");
   TORCH_CHECK(
       residual.scalar_type() == at::kBFloat16, "residual must be bfloat16");
-  TORCH_CHECK(x.scalar_type() == at::kBFloat16, "x must be bfloat16");
   TORCH_CHECK(
-      post_layer_mix.scalar_type() == at::kFloat,
-      "post_layer_mix must be float32");
-  TORCH_CHECK(
-      comb_res_mix.scalar_type() == at::kFloat, "comb_res_mix must be float32");
+      layer_out.scalar_type() == at::kBFloat16, "layer_out must be bfloat16");
+  TORCH_CHECK(post_mix.scalar_type() == at::kFloat, "post_mix must be float32");
+  TORCH_CHECK(comb_mix.scalar_type() == at::kFloat, "comb_mix must be float32");
 
   auto residual_c = residual.contiguous();
-  auto x_c = x.contiguous();
-  auto a_c = comb_res_mix.contiguous();
-  auto c_c = post_layer_mix.squeeze(-1).contiguous();
+  auto layer_out_c = layer_out.contiguous();
+  auto comb_mix_c = comb_mix.contiguous();
+  auto post_mix_c = post_mix.squeeze(-1).contiguous();
 
   const int64_t H = residual_c.size(-1);
   const int64_t N = residual_c.size(0);
@@ -162,10 +237,10 @@ at::Tensor mhc_post(
   auto& q = vllm::xpu::vllmGetQueue();
   launch_mhc_post(
       q,
-      a_c.data_ptr<float>(),
+      comb_mix_c.data_ptr<float>(),
       reinterpret_cast<const bf16*>(residual_c.data_ptr()),
-      c_c.data_ptr<float>(),
-      reinterpret_cast<const bf16*>(x_c.data_ptr()),
+      post_mix_c.data_ptr<float>(),
+      reinterpret_cast<const bf16*>(layer_out_c.data_ptr()),
       reinterpret_cast<bf16*>(out.data_ptr()),
       static_cast<int>(N),
       static_cast<int>(H));
