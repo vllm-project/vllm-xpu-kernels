@@ -876,8 +876,10 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
     T* A,  // [num_v_heads, total_virtual_seqlen, chunk_size], temp O2 buffer
     T* w,  // [num_v_heads, total_virtual_seqlen, head_k_dim]
     T* u,  // [num_v_heads, total_virtual_seqlen, head_v_dim]
+    const T* v,  // [total_virtual_seqlen, num_v_heads, head_v_dim]
     const T* q,  // [total_virtual_seqlen, num_k_heads, head_k_dim]
     const T* k,  // [total_virtual_seqlen, num_k_heads, head_k_dim]
+    const float* b,
     const float* a,
     StateT*
         ssm_state,  // [cache_batch_size, num_v_heads, head_v_dim, head_k_dim]
@@ -899,6 +901,8 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
   int local_range = item.get_local_range(2);
 
   auto sg = item.get_sub_group();
+  int sg_id = sg.get_group_linear_id();
+  int sg_range = sg.get_group_linear_range();
   int sg_local_id = sg.get_local_linear_id();
 
   float* slm_mem = static_cast<float*>(
@@ -951,6 +955,71 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
         ssm_state +
         static_cast<int64_t>(cache_indices[batch_id]) * ssm_state_stride_0 +
         v_head_id * head_v_dim * head_k_dim;
+
+    if (seq_len == 1) {
+      const bool has_prev_state = initial_state;
+      const int chunk_offset = pre_chunks * chunk_size;
+      const int out_chunk_offset = seq_start_offset;
+
+      auto q_ptr =
+        q + chunk_offset * num_k_heads * head_k_dim + kv_head_id * head_k_dim;
+      auto k_ptr =
+        k + chunk_offset * num_k_heads * head_k_dim + kv_head_id * head_k_dim;
+      auto v_ptr =
+        v + chunk_offset * num_v_heads * head_v_dim + v_head_id * head_v_dim;
+      auto O_ptr =
+        core_attn_out + out_chunk_offset * num_v_heads * head_v_dim +
+        v_head_id * head_v_dim;
+
+      float g_last_value =
+        a[(chunk_offset) + v_head_id * total_virtual_seqlen];
+      float g_last_value_exp = sycl::exp(g_last_value);
+      float beta_value =
+        b[(chunk_offset) + v_head_id * total_virtual_seqlen];
+
+      for (int dv = sg_id; dv < head_v_dim; dv += sg_range) {
+      float kv_partial = 0.0f;
+      float out_partial = 0.0f;
+
+      CUTE_UNROLL
+      for (int dk = sg_local_id; dk < head_k_dim; dk += sub_group_size) {
+        int state_idx = dv * head_k_dim + dk;
+        float state_value = has_prev_state
+          ? static_cast<float>(ssm_state_ptr[state_idx]) * g_last_value_exp
+          : 0.0f;
+        kv_partial += state_value * static_cast<float>(k_ptr[dk]);
+      }
+
+      float kv_value = sycl::reduce_over_group(sg, kv_partial, sycl::plus<>());
+      float delta_value = 0.0f;
+      if (sg_local_id == 0) {
+        delta_value =
+          (static_cast<float>(v_ptr[dv]) - kv_value) * beta_value;
+      }
+      delta_value = sycl::group_broadcast(sg, delta_value, 0);
+
+      CUTE_UNROLL
+      for (int dk = sg_local_id; dk < head_k_dim; dk += sub_group_size) {
+        int state_idx = dv * head_k_dim + dk;
+        float state_value = has_prev_state
+          ? static_cast<float>(ssm_state_ptr[state_idx]) * g_last_value_exp
+          : 0.0f;
+        float state_new =
+          state_value + static_cast<float>(k_ptr[dk]) * delta_value;
+        ssm_state_ptr[state_idx] = static_cast<StateT>(state_new);
+        out_partial += state_new * static_cast<float>(q_ptr[dk]);
+      }
+
+      float out_value =
+        sycl::reduce_over_group(sg, out_partial, sycl::plus<>());
+      if (sg_local_id == 0) {
+        O_ptr[dv] = static_cast<T>(out_value);
+      }
+      }
+
+      pre_chunks += current_chunks;
+      continue;
+    }
 
     for (int chunk_id = 0; chunk_id < current_chunks; ++chunk_id) {
       const bool has_prev_state = (chunk_id != 0) || initial_state;
@@ -1467,8 +1536,10 @@ void kernel_launcher(
               A,
               w,
               u,
+              v,
               q,
               k,
+              b,
               a,
               ssm_state,
               ssm_state_stride_0,
