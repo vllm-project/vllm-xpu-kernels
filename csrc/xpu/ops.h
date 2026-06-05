@@ -93,8 +93,7 @@ void apply_rotary_emb(
     bool is_neox);
 
 #ifdef VLLM_GDN_ENABLED
-void gdn_attention(
-    torch::Tensor& core_attn_out,
+std::vector<torch::Tensor> causal_conv1d(
     torch::Tensor& z,
     const torch::Tensor& projected_states_qkvz,
     const torch::Tensor& projected_states_ba,
@@ -103,12 +102,9 @@ void gdn_attention(
     const int64_t head_k_dim,
     const int64_t head_v_dim,
     torch::Tensor& conv_state,
-    torch::Tensor& ssm_state,
     const torch::Tensor& conv_weights,
     const std::optional<torch::Tensor>& conv_bias,
     const std::string& activation,
-    const torch::Tensor& A_log,
-    const torch::Tensor& dt_bias,
     const int64_t num_prefills,
     const int64_t num_decodes,
     const int64_t num_spec_decodes,
@@ -123,6 +119,28 @@ void gdn_attention(
     const int64_t num_actual_tokens,
     const int64_t tp_size,
     const bool reorder_input);
+
+void gated_delta_rule(
+    torch::Tensor& core_attn_out,
+    const std::vector<torch::Tensor>& intermediates,
+    const int64_t num_v_heads,
+    const int64_t head_v_dim,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    torch::Tensor& ssm_state,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const int64_t num_spec_decodes,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    const int64_t num_actual_tokens,
+    const int64_t tp_size);
 #endif
 
 bool is_bmg_g21(int64_t device_index);
