@@ -310,6 +310,110 @@ def test_rms_norm_per_block_quant(
                                    rtol=1e-2)
 
 
+@pytest.mark.parametrize("num_tokens", [4, 83])
+@pytest.mark.parametrize("hidden_size", [128, 1536])
+@pytest.mark.parametrize("group_size", GROUP_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.int8])
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@torch.inference_mode()
+def test_rms_norm_per_block_quant_noncontiguous(
+    num_tokens: int,
+    hidden_size: int,
+    group_size: int,
+    dtype: torch.dtype,
+    quant_dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    """Test rms_norm_per_block_quant with non-contiguous input.
+
+    Simulates the DeepSeekV3 MLA pattern: fused_qkv_a_proj outputs a
+    combined tensor (N, hidden_size + extra), then torch.split() produces
+    a slice with row stride > hidden_size but last-dim stride == 1.
+    The kernel must accept this and produce the same result as a contiguous
+    copy of the same data.
+    """
+    if hidden_size % group_size != 0:
+        pytest.skip(f"hidden_size {hidden_size} not divisible by "
+                    f"group_size {group_size}")
+
+    torch.manual_seed(seed)
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
+
+    layer = RMSNorm(hidden_size, eps=EPS).to(dtype=dtype)
+    layer.weight.data.normal_(mean=1.0, std=0.1)
+
+    # Simulate fused projection output: combined tensor with extra columns.
+    # After split(), x_noncontig has shape (N, hidden_size) but stride
+    # (hidden_size + extra, 1) — last-dim contiguous, rows non-contiguous.
+    extra = 576  # arbitrary extra columns (e.g. kv_lora_rank in DeepSeekV3)
+    fused = torch.randn(num_tokens, hidden_size + extra, dtype=dtype)
+    fused *= 1.0 / hidden_size
+    x_noncontig, _ = fused.split([hidden_size, extra], dim=-1)
+
+    assert x_noncontig.stride(0) == hidden_size + extra  # non-contiguous row
+    assert x_noncontig.stride(-1) == 1  # last dim contiguous
+    assert not x_noncontig.is_contiguous()
+
+    x_contig = x_noncontig.contiguous()
+
+    # Kernel on non-contiguous input
+    out_noncontig = torch.empty_like(x_noncontig, dtype=quant_dtype)
+    num_groups = hidden_size // group_size
+    scales_noncontig = torch.empty(num_tokens,
+                                   num_groups,
+                                   dtype=torch.float32,
+                                   device=device)
+    torch.ops._C.rms_norm_per_block_quant(
+        out_noncontig,
+        x_noncontig,
+        layer.weight.data,
+        scales_noncontig,
+        EPS,
+        None,
+        None,  # no residual
+        group_size,
+        False,
+    )
+
+    # Kernel on contiguous input (reference)
+    out_contig = torch.empty_like(x_contig, dtype=quant_dtype)
+    scales_contig = torch.empty(num_tokens,
+                                num_groups,
+                                dtype=torch.float32,
+                                device=device)
+    torch.ops._C.rms_norm_per_block_quant(
+        out_contig,
+        x_contig,
+        layer.weight.data,
+        scales_contig,
+        EPS,
+        None,
+        None,
+        group_size,
+        False,
+    )
+
+    torch.testing.assert_close(scales_noncontig,
+                               scales_contig,
+                               atol=1e-6,
+                               rtol=1e-6)
+    if quant_dtype == torch.int8:
+        torch.testing.assert_close(out_noncontig, out_contig, atol=1, rtol=0)
+    else:
+        nc_f = out_noncontig.float()
+        c_f = out_contig.float()
+        if not torch.allclose(nc_f, c_f, atol=1e-6):
+            nc_deq = nc_f.view(num_tokens, num_groups,
+                               group_size) * scales_noncontig.unsqueeze(-1)
+            c_deq = c_f.view(num_tokens, num_groups,
+                              group_size) * scales_contig.unsqueeze(-1)
+            torch.testing.assert_close(nc_deq, c_deq, atol=0.2, rtol=0.15)
+
+
 def _ops_rms_norm_static_fp8_quant(
     weight: torch.Tensor,
     x: torch.Tensor,
