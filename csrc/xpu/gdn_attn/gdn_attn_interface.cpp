@@ -13,59 +13,40 @@
   #include "xe_2/chunk_gated_delta_rule_xe2.h"
 #endif
 
-void gdn_attention(
-    torch::Tensor& core_attn_out,  // [num_actual_tokens, num_v_heads / tp_size,
-                                   // head_v_dim]
+
+// Conv stage of GatedDeltaNet linear attention. Runs the causal conv1d (plus
+// activation), writes z, updates conv_state, and returns the intermediate
+// {q, k, v, b, a} tensors consumed by gated_delta_rule. The returned list holds
+// the spec-decode buffers first (when spec tokens exist) followed by the
+// non-spec (prefill + decode) buffers (when non-spec tokens exist), so it
+// contains 0, 5, or 10 tensors. The buffers' shapes/dtypes are path-specific
+// (native vs XE2 prefill) and must be forwarded unchanged to gated_delta_rule.
+std::vector<torch::Tensor> causal_conv1d(
     torch::Tensor& z,  // [num_actual_tokens, num_v_heads / tp_size, head_v_dim]
-    const torch::Tensor&
-        projected_states_qkvz,  // [num_actual_tokens, num_k_heads / tp_size *
-                                // (2 * head_k_dim + 2 * head_v_dim *
-                                // num_v_heads / num_k_heads)]
-    const torch::Tensor&
-        projected_states_ba,  // [num_actual_tokens, num_k_heads / tp_size * (2
-                              // * num_v_heads / num_k_heads)]
+    const torch::Tensor& projected_states_qkvz,
+    const torch::Tensor& projected_states_ba,
     const int64_t num_k_heads,
     const int64_t num_v_heads,
     const int64_t head_k_dim,
     const int64_t head_v_dim,
-    torch::Tensor&
-        conv_state,  // [cache_batch_size, width - 1, num_k_heads / tp_size * (2
-                     // * head_k_dim + head_v_dim * num_v_heads / num_k_heads)]
-    torch::Tensor& ssm_state,  // [cache_batch_size, num_v_heads / tp_size,
-                               // head_v_dim, head_k_dim]
-    const torch::Tensor&
-        conv_weights,  // [num_k_heads / tp_size * (2 * head_k_dim + head_v_dim
-                       // * num_v_heads / num_k_heads), width]
-    const std::optional<torch::Tensor>&
-        conv_bias,  // [num_k_heads / tp_size * (2 * head_k_dim + head_v_dim *
-                    // num_v_heads / num_k_heads)] or None
+    torch::Tensor& conv_state,
+    const torch::Tensor& conv_weights,
+    const std::optional<torch::Tensor>& conv_bias,
     const std::string& activation,
-    const torch::Tensor& A_log,    // [num_v_heads / tp_size]
-    const torch::Tensor& dt_bias,  // [num_v_heads / tp_size]
     const int64_t num_prefills,
     const int64_t num_decodes,
     const int64_t num_spec_decodes,
-    const std::optional<torch::Tensor>&
-        has_initial_state,  // [num_prefills] or None
-    const std::optional<torch::Tensor>&
-        non_spec_query_start_loc,  // [num_prefills + num_decodes + 1]
-    const std::optional<torch::Tensor>&
-        non_spec_token_indx,  // [non_spec_token]
-    const std::optional<torch::Tensor>&
-        non_spec_state_indices_tensor,  // [num_prefills + num_decodes]
-    const std::optional<torch::Tensor>&
-        spec_query_start_loc,  // [num_spec_decodes + 1]
-    const std::optional<torch::Tensor>& spec_token_indx,  // [spec_token]
-    const std::optional<torch::Tensor>&
-        spec_state_indices_tensor,  // [num_spec_decodes, num_speculative_tokens
-                                    // + 1]
-    const std::optional<torch::Tensor>&
-        num_accepted_tokens,  // [num_spec_decodes]
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
     const int64_t num_actual_tokens,
     const int64_t tp_size,
     const bool reorder_input) {
-  TORCH_CHECK(
-      core_attn_out.is_contiguous(), "core_attn_out must be contiguous");
   TORCH_CHECK(z.is_contiguous(), "z must be contiguous");
   TORCH_CHECK(
       projected_states_qkvz.is_contiguous(),
@@ -76,12 +57,7 @@ void gdn_attention(
   TORCH_CHECK(
       conv_state[0].is_contiguous(),
       "conv_state of each batch must be contiguous");
-  TORCH_CHECK(
-      ssm_state[0].is_contiguous(),
-      "ssm_state of each batch must be contiguous");
   TORCH_CHECK(conv_weights.is_contiguous(), "conv_weights must be contiguous");
-  TORCH_CHECK(A_log.is_contiguous(), "A_log must be contiguous");
-  TORCH_CHECK(dt_bias.is_contiguous(), "dt_bias must be contiguous");
 
   int non_spec_token = 0;
   if (num_prefills + num_decodes > 0) {
@@ -208,24 +184,15 @@ void gdn_attention(
   TORCH_CHECK(spec_token == num_spec_decodes * (num_speculative_tokens + 1));
   TORCH_CHECK(non_spec_token + spec_token == num_actual_tokens);
 
-  // check core_attn_out / z / projected_states_{qkvz,ba} shapes.
-  // Callers running under torch.compile + cudagraph capture pad the leading
-  // dim to the captured graph size while num_actual_tokens stays at the real
-  // (unpadded) count, so accept size(0) >= num_actual_tokens and narrow to the
-  // active prefix below.
   TORCH_CHECK(
-      core_attn_out.size(0) >= num_actual_tokens,
-      "core_attn_out.size(0) (",
-      core_attn_out.size(0),
+      z.size(0) >= num_actual_tokens,
+      "z.size(0) (",
+      z.size(0),
       ") must be >= num_actual_tokens (",
       num_actual_tokens,
       ")");
-  TORCH_CHECK(core_attn_out.size(1) == num_v_heads / tp_size);
-  TORCH_CHECK(core_attn_out.size(2) == head_v_dim);
-
-  TORCH_CHECK(z.size(0) == core_attn_out.size(0));
-  TORCH_CHECK(z.size(1) == core_attn_out.size(1));
-  TORCH_CHECK(z.size(2) == core_attn_out.size(2));
+  TORCH_CHECK(z.size(1) == num_v_heads / tp_size);
+  TORCH_CHECK(z.size(2) == head_v_dim);
 
   TORCH_CHECK(
       projected_states_qkvz.size(0) >= num_actual_tokens,
@@ -248,12 +215,8 @@ void gdn_attention(
       ")");
   TORCH_CHECK(projected_states_ba.size(1) == 2 * num_v_heads / tp_size);
 
-  // Narrowing dim 0 of a contiguous tensor yields a contiguous view that
-  // shares storage with the original, so writes through core_attn_out_active
-  // land in the caller's buffer at offsets [0, num_actual_tokens); padded
-  // trailing slots are left untouched (matches the CUDA path in
-  // gdn_linear_attn.py).
-  auto core_attn_out_active = core_attn_out.narrow(0, 0, num_actual_tokens);
+  // Narrow the (possibly cudagraph-padded) leading dim to the active prefix so
+  // the conv kernels never read or write padded rows.
   auto z_active = z.narrow(0, 0, num_actual_tokens);
   auto projected_states_qkvz_active =
       projected_states_qkvz.narrow(0, 0, num_actual_tokens);
@@ -275,6 +238,8 @@ void gdn_attention(
   const int pad_slot_id = -1;
 
   std::optional<torch::Tensor> empty_tensor{std::nullopt};
+
+  std::vector<torch::Tensor> intermediates;
 
   if (spec_token > 0) {
     torch::Tensor q = torch::empty(
@@ -317,29 +282,16 @@ void gdn_attention(
         num_decodes,
         num_spec_decodes,
         reorder_input);
-    gdn::gated_delta_rule(
-        queue,
-        core_attn_out_active,
-        q,
-        k,
-        v,
-        b,
-        a,
-        A_log,
-        dt_bias,
-        ssm_state,
-        spec_query_start_loc,
-        spec_token_indx,
-        spec_state_indices_tensor,
-        empty_tensor,
-        num_accepted_tokens,
-        num_prefills,
-        num_decodes,
-        num_spec_decodes);
+
+    intermediates.push_back(q);
+    intermediates.push_back(k);
+    intermediates.push_back(v);
+    intermediates.push_back(b);
+    intermediates.push_back(a);
   }
 
   if (non_spec_token > 0) {
-#define NATIVE_LAUNCHER                                           \
+#define NATIVE_CONV_LAUNCHER                                      \
   do {                                                            \
     torch::Tensor q = torch::empty(                               \
         {non_spec_token, num_k_heads / tp_size, head_k_dim},      \
@@ -380,33 +332,14 @@ void gdn_attention(
         num_decodes,                                              \
         num_spec_decodes,                                         \
         reorder_input);                                           \
-    gdn::gated_delta_rule(                                        \
-        queue,                                                    \
-        core_attn_out_active,                                     \
-        q,                                                        \
-        k,                                                        \
-        v,                                                        \
-        b,                                                        \
-        a,                                                        \
-        A_log,                                                    \
-        dt_bias,                                                  \
-        ssm_state,                                                \
-        non_spec_query_start_loc,                                 \
-        non_spec_token_indx,                                      \
-        non_spec_state_indices_tensor,                            \
-        has_initial_state,                                        \
-        empty_tensor,                                             \
-        num_prefills,                                             \
-        num_decodes,                                              \
-        num_spec_decodes);                                        \
+    intermediates.push_back(q);                                  \
+    intermediates.push_back(k);                                  \
+    intermediates.push_back(v);                                  \
+    intermediates.push_back(b);                                  \
+    intermediates.push_back(a);                                  \
   } while (0)
 
 #ifdef VLLM_XPU_ENABLE_XE2
-    // XE2 chunk path handles all non-spec tokens whenever there are prefills,
-    // even when spec_decodes are also present. The XE2 kernels accept an
-    // optional token_indx so they can read mixed_qkvz/mixed_ba and write z /
-    // core_attn_out directly at the interleaved global slots indicated by
-    // non_spec_token_indx, avoiding host-side gather/scatter.
     if (num_prefills > 0) {
       int batch_size = non_spec_query_start_loc->size(0) - 1;
       int padding_size = batch_size * (gdn::chunk_size_xe2 - 1);
@@ -499,6 +432,144 @@ void gdn_attention(
         l2norm(queue, q, k);
       }
 
+      intermediates.push_back(q);
+      intermediates.push_back(k);
+      intermediates.push_back(v);
+      intermediates.push_back(b);
+      intermediates.push_back(a);
+    } else {
+      NATIVE_CONV_LAUNCHER;
+    }
+#else
+    NATIVE_CONV_LAUNCHER;
+#endif
+#undef NATIVE_CONV_LAUNCHER
+  }
+
+  return intermediates;
+}
+
+// Delta stage of GatedDeltaNet linear attention. Consumes the intermediate
+// {q, k, v, b, a} tensors produced by causal_conv1d (spec buffers first, then
+// non-spec buffers, matching the same ordering), advances ssm_state, and writes
+// core_attn_out. The path decisions are recomputed from the same scalar/index
+// arguments so the buffers are routed to the matching kernel.
+void gated_delta_rule(
+    torch::Tensor& core_attn_out,  // [num_actual_tokens, num_v_heads / tp_size,
+                                   // head_v_dim]
+    const std::vector<torch::Tensor>& intermediates,
+    const int64_t num_v_heads,
+    const int64_t head_v_dim,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    torch::Tensor& ssm_state,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const int64_t num_spec_decodes,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    const int64_t num_actual_tokens,
+    const int64_t tp_size) {
+  TORCH_CHECK(
+      core_attn_out.is_contiguous(), "core_attn_out must be contiguous");
+  TORCH_CHECK(
+      ssm_state[0].is_contiguous(),
+      "ssm_state of each batch must be contiguous");
+  TORCH_CHECK(A_log.is_contiguous(), "A_log must be contiguous");
+  TORCH_CHECK(dt_bias.is_contiguous(), "dt_bias must be contiguous");
+
+  TORCH_CHECK(
+      core_attn_out.size(0) >= num_actual_tokens,
+      "core_attn_out.size(0) (",
+      core_attn_out.size(0),
+      ") must be >= num_actual_tokens (",
+      num_actual_tokens,
+      ")");
+  TORCH_CHECK(core_attn_out.size(1) == num_v_heads / tp_size);
+  TORCH_CHECK(core_attn_out.size(2) == head_v_dim);
+
+  int non_spec_token = 0;
+  if (num_prefills + num_decodes > 0) {
+    non_spec_token = non_spec_token_indx.has_value()
+        ? non_spec_token_indx->size(0)
+        : num_actual_tokens;
+  }
+  int spec_token = 0;
+  if (num_spec_decodes > 0) {
+    spec_token = spec_token_indx->size(0);
+  }
+
+  TORCH_CHECK(
+      non_spec_token + spec_token == num_actual_tokens,
+      "non_spec_token + spec_token must equal num_actual_tokens");
+
+  const size_t expected = (spec_token > 0 ? 5u : 0u) +
+                          (non_spec_token > 0 ? 5u : 0u);
+  TORCH_CHECK(
+      intermediates.size() == expected,
+      "gated_delta_rule expected ",
+      expected,
+      " intermediate tensors from causal_conv1d, but got ",
+      intermediates.size());
+
+  // Narrow the (possibly cudagraph-padded) leading dim to the active prefix.
+  auto core_attn_out_active = core_attn_out.narrow(0, 0, num_actual_tokens);
+
+  auto& queue = vllm::xpu::vllmGetQueue();
+  std::optional<torch::Tensor> empty_tensor{std::nullopt};
+
+  size_t idx = 0;
+
+  if (spec_token > 0) {
+    const torch::Tensor& q = intermediates[idx + 0];
+    const torch::Tensor& k = intermediates[idx + 1];
+    const torch::Tensor& v = intermediates[idx + 2];
+    const torch::Tensor& b = intermediates[idx + 3];
+    const torch::Tensor& a = intermediates[idx + 4];
+    idx += 5;
+
+    gdn::gated_delta_rule(
+        queue,
+        core_attn_out_active,
+        q,
+        k,
+        v,
+        b,
+        a,
+        A_log,
+        dt_bias,
+        ssm_state,
+        spec_query_start_loc,
+        spec_token_indx,
+        spec_state_indices_tensor,
+        empty_tensor,
+        num_accepted_tokens,
+        num_prefills,
+        num_decodes,
+        num_spec_decodes);
+  }
+
+  if (non_spec_token > 0) {
+    const torch::Tensor& q = intermediates[idx + 0];
+    const torch::Tensor& k = intermediates[idx + 1];
+    const torch::Tensor& v = intermediates[idx + 2];
+    const torch::Tensor& b = intermediates[idx + 3];
+    const torch::Tensor& a = intermediates[idx + 4];
+    idx += 5;
+
+#ifdef VLLM_XPU_ENABLE_XE2
+    if (num_prefills > 0) {
+      const int* token_indx_ptr =
+          non_spec_token_indx.has_value()
+              ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
+              : nullptr;
+
       chunk_gated_delta_rule_xe2(
           queue,
           core_attn_out_active,
@@ -517,11 +588,46 @@ void gdn_attention(
           num_decodes,
           token_indx_ptr);
     } else {
-      NATIVE_LAUNCHER;
+      gdn::gated_delta_rule(
+          queue,
+          core_attn_out_active,
+          q,
+          k,
+          v,
+          b,
+          a,
+          A_log,
+          dt_bias,
+          ssm_state,
+          non_spec_query_start_loc,
+          non_spec_token_indx,
+          non_spec_state_indices_tensor,
+          has_initial_state,
+          empty_tensor,
+          num_prefills,
+          num_decodes,
+          num_spec_decodes);
     }
 #else
-    NATIVE_LAUNCHER;
+    gdn::gated_delta_rule(
+        queue,
+        core_attn_out_active,
+        q,
+        k,
+        v,
+        b,
+        a,
+        A_log,
+        dt_bias,
+        ssm_state,
+        non_spec_query_start_loc,
+        non_spec_token_indx,
+        non_spec_state_indices_tensor,
+        has_initial_state,
+        empty_tensor,
+        num_prefills,
+        num_decodes,
+        num_spec_decodes);
 #endif
-#undef NATIVE_LAUNCHER
   }
 }
