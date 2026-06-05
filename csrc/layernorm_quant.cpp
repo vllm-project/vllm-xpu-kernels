@@ -153,7 +153,8 @@ class rms_norm_per_block_quant_kernel {
       const int group_size_,
       const int num_tokens_,
       const int64_t scale_stride_token_,
-      const int64_t scale_stride_group_)
+      const int64_t scale_stride_group_,
+      const int64_t input_stride_)
       : out(out_),
         residual(residual_),
         input(input_),
@@ -164,7 +165,8 @@ class rms_norm_per_block_quant_kernel {
         group_size(group_size_),
         num_tokens(num_tokens_),
         scale_stride_token(scale_stride_token_),
-        scale_stride_group(scale_stride_group_) {}
+        scale_stride_group(scale_stride_group_),
+        input_stride(input_stride_) {}
 
   void operator()(sycl::nd_item<1> item) const {
     const int tid = item.get_local_id(0);
@@ -176,7 +178,7 @@ class rms_norm_per_block_quant_kernel {
         *sycl::ext::oneapi::group_local_memory_for_overwrite<float[2]>(
             item.get_group());
 
-    const scalar_t* token_input = input + token_idx * hidden_size;
+    const scalar_t* token_input = input + token_idx * input_stride;
     out_t* token_output = out + token_idx * hidden_size;
     scalar_t* token_residual = nullptr;
     if constexpr (has_residual) {
@@ -275,6 +277,7 @@ class rms_norm_per_block_quant_kernel {
   const int num_tokens;
   const int64_t scale_stride_token;
   const int64_t scale_stride_group;
+  const int64_t input_stride;
 };
 
 template <typename scalar_t, typename out_t, int VEC_SIZE>
@@ -522,6 +525,7 @@ void call_rms_norm_per_block_quant_kernel(
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
   const int hidden_size = input.size(-1);
+  const int64_t input_stride = input.stride(0);
   const int64_t num_tokens = input.numel() / hidden_size;
   const int num_groups = hidden_size / group_size;
   const int block_size = std::min(hidden_size, 1024);
@@ -558,7 +562,8 @@ void call_rms_norm_per_block_quant_kernel(
               group_size,
               static_cast<int>(num_tokens),
               scale_stride_token,
-              scale_stride_group));
+              scale_stride_group,
+              input_stride));
     });
   };
 
@@ -760,7 +765,8 @@ void rms_norm_per_block_quant(
     int64_t group_size,
     bool is_scale_transposed) {
   const at::DeviceGuard device_guard(input.device());
-  TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
+  TORCH_CHECK(
+      input.stride(-1) == 1, "input must be contiguous in the last dimension");
   TORCH_CHECK(out.is_contiguous(), "out must be contiguous");
   TORCH_CHECK(
       weight.dtype() == input.dtype(),
