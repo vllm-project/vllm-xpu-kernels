@@ -471,6 +471,204 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                                    rtol=rtol)
 
 
+@pytest.mark.parametrize("num_actual_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("batch_size", BATCH_SIZE)
+@pytest.mark.parametrize("num_k_heads", NUM_K_HEADS)
+@pytest.mark.parametrize("head_k_dim", NUM_K_DIMS)
+@pytest.mark.parametrize("num_v_heads", NUM_V_HEADS)
+@pytest.mark.parametrize("head_v_dim", NUM_V_DIMS)
+@pytest.mark.parametrize("width", WIDTH)
+@pytest.mark.parametrize("tp_size", TP_SIZE)
+@pytest.mark.parametrize("has_bias", HAS_BIAS)
+@pytest.mark.parametrize("activation", ACTIVATION)
+@pytest.mark.parametrize("mode", MODE)
+@pytest.mark.parametrize("reorder_input", REORDER_INPUT)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("ssm_state_is_fp32", SSM_STATE_IS_FP32)
+@torch.inference_mode()
+def test_gdn_attention_legacy(num_actual_tokens, batch_size, num_k_heads,
+                              head_k_dim, num_v_heads, head_v_dim, width,
+                              tp_size, has_bias, activation, reorder_input,
+                              mode, dtype, ssm_state_is_fp32):
+    # Backward-compat test for the legacy fused gdn_attention op, which is now
+    # a thin wrapper that chains causal_conv1d and gated_delta_rule. This is
+    # the original test_gdn_attention case kept verbatim against the fused
+    # entry point.
+    # FIXME: remove skip
+    if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
+            and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
+        pytest.skip("skip gdn attention kernels testing on PVC.")
+
+    device = "xpu"
+    random.seed(42)
+    torch.manual_seed(42)
+    ssm_state_dtype = torch.float32 if ssm_state_is_fp32 else dtype
+
+    assert head_k_dim == head_v_dim
+
+    if batch_size > num_actual_tokens:
+        batch_size = num_actual_tokens
+
+    if mode == "prefill":
+        num_prefills = batch_size
+    elif mode == "decode":
+        num_prefills = 0
+        if batch_size < num_actual_tokens:
+            return
+    else:
+        num_prefills = random.randint(1, batch_size -
+                                      1) if batch_size > 1 else 1
+
+    num_decodes = batch_size - num_prefills
+    cache_batch_size = 200
+
+    mixed_qkvz_size = num_k_heads // tp_size * (
+        2 * head_k_dim + 2 * head_v_dim * num_v_heads // num_k_heads)
+    mixed_ba_size = num_k_heads // tp_size * (2 * num_v_heads // num_k_heads)
+
+    projected_states_qkvz = torch.randn((num_actual_tokens, mixed_qkvz_size),
+                                        dtype=dtype,
+                                        device=device)
+    projected_states_ba = torch.randn((num_actual_tokens, mixed_ba_size),
+                                      dtype=dtype,
+                                      device=device)
+
+    mixed_qkv_size = num_k_heads // tp_size * (
+        2 * head_k_dim + head_v_dim * num_v_heads // num_k_heads)
+    conv_state = torch.randn((cache_batch_size, width - 1, mixed_qkv_size),
+                             dtype=dtype,
+                             device=device)
+    ref_conv_state = conv_state.clone()
+    ssm_state = torch.randn(
+        (cache_batch_size, num_v_heads // tp_size, head_v_dim, head_k_dim),
+        dtype=ssm_state_dtype,
+        device=device)
+    ref_ssm_state = ssm_state.clone()
+
+    conv_weights = torch.randn((mixed_qkv_size, width),
+                               dtype=dtype,
+                               device=device)
+    conv_bias = None
+    if has_bias:
+        conv_bias = torch.randn((mixed_qkv_size), dtype=dtype, device=device)
+
+    A_log = torch.randn((num_v_heads // tp_size),
+                        dtype=torch.float32,
+                        device=device)
+    dt_bias = torch.randn((num_v_heads // tp_size), dtype=dtype, device=device)
+
+    prefill_batches = simple_random_distribute(num_actual_tokens - num_decodes,
+                                               batch_size - num_decodes)
+    token_batches = torch.cat([torch.ones([num_decodes]),
+                               prefill_batches]).to(device)
+    perm = torch.randperm(token_batches.size(0)).to(device)
+    shuffled_tensor = token_batches[perm]
+    non_spec_query_start_loc = torch.cat([
+        torch.zeros([1], device=device),
+        torch.cumsum(shuffled_tensor, dim=0)
+    ]).to(torch.int32)
+    has_initial_state = perm >= num_decodes
+    non_spec_state_indices_tensor = torch.tensor(random.sample(
+        range(cache_batch_size), batch_size),
+                                                 device=device,
+                                                 dtype=torch.int32)
+
+    core_attn_out = torch.zeros(
+        (num_actual_tokens, num_v_heads // tp_size, head_v_dim),
+        dtype=dtype,
+        device=device,
+    )
+    z = torch.empty_like(core_attn_out)
+
+    torch.ops._xpu_C.gdn_attention(
+        core_attn_out,
+        z,
+        projected_states_qkvz,
+        projected_states_ba,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_state=conv_state,
+        ssm_state=ssm_state,
+        conv_weights=conv_weights,
+        conv_bias=conv_bias,
+        activation=activation,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        num_spec_decodes=0,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_token_indx=None,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        spec_query_start_loc=None,
+        spec_token_indx=None,
+        spec_state_indices_tensor=None,
+        num_accepted_tokens=None,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size,
+        reorder_input=reorder_input)
+
+    ref_core_attn_out = torch.zeros_like(core_attn_out)
+    ref_z = torch.empty_like(core_attn_out)
+
+    ref_gdn_attention(
+        ref_core_attn_out,
+        ref_z,
+        projected_states_qkvz,
+        projected_states_ba,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_state=ref_conv_state,
+        ssm_state=ref_ssm_state,
+        conv_weights=conv_weights,
+        conv_bias=conv_bias,
+        activation=activation,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size,
+        reorder_input=reorder_input,
+    )
+
+    atol = 5e-2
+    rtol = 5e-2
+
+    torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
+
+    if num_actual_tokens == 8192:
+        pytest.skip("FIXME, skip core_attn_out test because of random error")
+
+    torch.testing.assert_close(core_attn_out,
+                               ref_core_attn_out,
+                               atol=atol,
+                               rtol=rtol,
+                               equal_nan=True)
+    for i in range(batch_size):
+        state_id = non_spec_state_indices_tensor[i]
+        torch.testing.assert_close(conv_state[state_id],
+                                   ref_conv_state[state_id],
+                                   atol=atol,
+                                   rtol=rtol)
+        if num_actual_tokens == 8192:
+            # FIXME: remove this skip
+            # skip because of random error, will be fixed in future
+            pytest.skip("FIXME, skip ssm_state test because of random error")
+            torch.testing.assert_close(ssm_state[state_id],
+                                       ref_ssm_state[state_id],
+                                       atol=atol,
+                                       rtol=rtol)
+
+
 NUM_SPEC_DECODES = [1, 4]
 NUM_SPEC_TOKENS = [2, 3]  # num_speculative_tokens + 1
 

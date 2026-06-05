@@ -631,3 +631,88 @@ void gated_delta_rule(
 #endif
   }
 }
+
+// Legacy fused entry point kept for API backward compatibility. It performs
+// the exact same work as the original gdn_attention by chaining the two split
+// ops: causal_conv1d produces the {q,k,v,b,a} intermediates (and writes z /
+// updates conv_state); gated_delta_rule consumes them (and writes
+// core_attn_out / updates ssm_state).
+void gdn_attention(
+    torch::Tensor& core_attn_out,
+    torch::Tensor& z,
+    const torch::Tensor& projected_states_qkvz,
+    const torch::Tensor& projected_states_ba,
+    const int64_t num_k_heads,
+    const int64_t num_v_heads,
+    const int64_t head_k_dim,
+    const int64_t head_v_dim,
+    torch::Tensor& conv_state,
+    torch::Tensor& ssm_state,
+    const torch::Tensor& conv_weights,
+    const std::optional<torch::Tensor>& conv_bias,
+    const std::string& activation,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const int64_t num_spec_decodes,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    const int64_t num_actual_tokens,
+    const int64_t tp_size,
+    const bool reorder_input) {
+  std::vector<torch::Tensor> intermediates = causal_conv1d(
+      z,
+      projected_states_qkvz,
+      projected_states_ba,
+      num_k_heads,
+      num_v_heads,
+      head_k_dim,
+      head_v_dim,
+      conv_state,
+      conv_weights,
+      conv_bias,
+      activation,
+      num_prefills,
+      num_decodes,
+      num_spec_decodes,
+      has_initial_state,
+      non_spec_query_start_loc,
+      non_spec_token_indx,
+      non_spec_state_indices_tensor,
+      spec_query_start_loc,
+      spec_token_indx,
+      spec_state_indices_tensor,
+      num_accepted_tokens,
+      num_actual_tokens,
+      tp_size,
+      reorder_input);
+
+  gated_delta_rule(
+      core_attn_out,
+      intermediates,
+      num_v_heads,
+      head_v_dim,
+      A_log,
+      dt_bias,
+      ssm_state,
+      num_prefills,
+      num_decodes,
+      num_spec_decodes,
+      has_initial_state,
+      non_spec_query_start_loc,
+      non_spec_token_indx,
+      non_spec_state_indices_tensor,
+      spec_query_start_loc,
+      spec_token_indx,
+      spec_state_indices_tensor,
+      num_accepted_tokens,
+      num_actual_tokens,
+      tp_size);
+}
