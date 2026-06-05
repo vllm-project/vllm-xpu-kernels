@@ -371,8 +371,7 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
     )
     z = torch.empty_like(core_attn_out)
 
-    torch.ops._xpu_C.gdn_attention(
-        core_attn_out,
+    intermediates = torch.ops._xpu_C.causal_conv1d(
         z,
         projected_states_qkvz,
         projected_states_ba,
@@ -381,12 +380,9 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
         head_k_dim,
         head_v_dim,
         conv_state=conv_state,
-        ssm_state=ssm_state,
         conv_weights=conv_weights,
         conv_bias=conv_bias,
         activation=activation,
-        A_log=A_log,
-        dt_bias=dt_bias,
         num_prefills=num_prefills,
         num_decodes=num_decodes,
         num_spec_decodes=0,
@@ -401,6 +397,28 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
         num_actual_tokens=num_actual_tokens,
         tp_size=tp_size,
         reorder_input=reorder_input)
+
+    torch.ops._xpu_C.gated_delta_rule(
+        core_attn_out,
+        intermediates,
+        num_v_heads,
+        head_v_dim,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        ssm_state=ssm_state,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        num_spec_decodes=0,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_token_indx=None,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        spec_query_start_loc=None,
+        spec_token_indx=None,
+        spec_state_indices_tensor=None,
+        num_accepted_tokens=None,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size)
 
     ref_core_attn_out = torch.zeros_like(core_attn_out)
     ref_z = torch.empty_like(core_attn_out)
@@ -753,8 +771,7 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                 device=device)
     z = torch.zeros_like(core_attn_out)
 
-    torch.ops._xpu_C.gdn_attention(
-        core_attn_out,
+    intermediates = torch.ops._xpu_C.causal_conv1d(
         z,
         projected_states_qkvz,
         projected_states_ba,
@@ -763,12 +780,9 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
         head_k_dim,
         head_v_dim,
         conv_state=conv_state,
-        ssm_state=ssm_state,
         conv_weights=conv_weights,
         conv_bias=conv_bias,
         activation=activation,
-        A_log=A_log,
-        dt_bias=dt_bias,
         num_prefills=0,
         num_decodes=0,
         num_spec_decodes=num_spec_decodes,
@@ -783,6 +797,28 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
         num_actual_tokens=num_actual_tokens,
         tp_size=tp_size,
         reorder_input=reorder_input)
+
+    torch.ops._xpu_C.gated_delta_rule(
+        core_attn_out,
+        intermediates,
+        num_v_heads,
+        head_v_dim,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        ssm_state=ssm_state,
+        num_prefills=0,
+        num_decodes=0,
+        num_spec_decodes=num_spec_decodes,
+        has_initial_state=None,
+        non_spec_query_start_loc=None,
+        non_spec_token_indx=None,
+        non_spec_state_indices_tensor=None,
+        spec_query_start_loc=spec_query_start_loc,
+        spec_token_indx=spec_token_indx,
+        spec_state_indices_tensor=spec_state_indices_tensor,
+        num_accepted_tokens=num_accepted_tokens,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size)
 
     ref_core_attn_out = torch.zeros_like(core_attn_out)
     ref_z = torch.zeros_like(core_attn_out)

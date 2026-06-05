@@ -134,8 +134,7 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
         ssm_state=args["ssm_state"].clone(),
     )
 
-    torch.ops._xpu_C.gdn_attention(
-        core_attn_out_padded,
+    intermediates_padded = torch.ops._xpu_C.causal_conv1d(
         z_padded,
         args_padded["projected_states_qkvz"],
         args_padded["projected_states_ba"],
@@ -144,12 +143,9 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
         args_padded["head_k_dim"],
         args_padded["head_v_dim"],
         conv_state=args_padded["conv_state"],
-        ssm_state=args_padded["ssm_state"],
         conv_weights=args_padded["conv_weights"],
         conv_bias=args_padded["conv_bias"],
         activation=args_padded["activation"],
-        A_log=args_padded["A_log"],
-        dt_bias=args_padded["dt_bias"],
         num_prefills=args_padded["num_prefills"],
         num_decodes=args_padded["num_decodes"],
         num_spec_decodes=0,
@@ -167,6 +163,30 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
         reorder_input=args_padded["reorder_input"],
     )
 
+    torch.ops._xpu_C.gated_delta_rule(
+        core_attn_out_padded,
+        intermediates_padded,
+        args_padded["num_v_heads"],
+        args_padded["head_v_dim"],
+        A_log=args_padded["A_log"],
+        dt_bias=args_padded["dt_bias"],
+        ssm_state=args_padded["ssm_state"],
+        num_prefills=args_padded["num_prefills"],
+        num_decodes=args_padded["num_decodes"],
+        num_spec_decodes=0,
+        has_initial_state=args_padded["has_initial_state"],
+        non_spec_query_start_loc=args_padded["non_spec_query_start_loc"],
+        non_spec_token_indx=None,
+        non_spec_state_indices_tensor=args_padded[
+            "non_spec_state_indices_tensor"],
+        spec_query_start_loc=None,
+        spec_token_indx=None,
+        spec_state_indices_tensor=None,
+        num_accepted_tokens=None,
+        num_actual_tokens=args_padded["num_actual_tokens"],
+        tp_size=args_padded["tp_size"],
+    )
+
     # Reference call with exact-size tensors. Note the kernel mutates
     # projected_states_qkvz / projected_states_ba internally (caller passes
     # them as const refs but inner kernels read them) — so we use the same
@@ -176,8 +196,7 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
                                     dtype=dtype, device=device)
     z_ref = torch.empty_like(core_attn_out_ref)
 
-    torch.ops._xpu_C.gdn_attention(
-        core_attn_out_ref,
+    intermediates_ref = torch.ops._xpu_C.causal_conv1d(
         z_ref,
         args["projected_states_qkvz"][:num_actual_tokens].contiguous(),
         args["projected_states_ba"][:num_actual_tokens].contiguous(),
@@ -186,12 +205,9 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
         args["head_k_dim"],
         args["head_v_dim"],
         conv_state=args["conv_state"],
-        ssm_state=args["ssm_state"],
         conv_weights=args["conv_weights"],
         conv_bias=args["conv_bias"],
         activation=args["activation"],
-        A_log=args["A_log"],
-        dt_bias=args["dt_bias"],
         num_prefills=args["num_prefills"],
         num_decodes=args["num_decodes"],
         num_spec_decodes=0,
@@ -206,6 +222,29 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
         num_actual_tokens=args["num_actual_tokens"],
         tp_size=args["tp_size"],
         reorder_input=args["reorder_input"],
+    )
+
+    torch.ops._xpu_C.gated_delta_rule(
+        core_attn_out_ref,
+        intermediates_ref,
+        args["num_v_heads"],
+        args["head_v_dim"],
+        A_log=args["A_log"],
+        dt_bias=args["dt_bias"],
+        ssm_state=args["ssm_state"],
+        num_prefills=args["num_prefills"],
+        num_decodes=args["num_decodes"],
+        num_spec_decodes=0,
+        has_initial_state=args["has_initial_state"],
+        non_spec_query_start_loc=args["non_spec_query_start_loc"],
+        non_spec_token_indx=None,
+        non_spec_state_indices_tensor=args["non_spec_state_indices_tensor"],
+        spec_query_start_loc=None,
+        spec_token_indx=None,
+        spec_state_indices_tensor=None,
+        num_accepted_tokens=None,
+        num_actual_tokens=args["num_actual_tokens"],
+        tp_size=args["tp_size"],
     )
 
     torch.testing.assert_close(
