@@ -843,3 +843,102 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                        ref_ssm_state[slot],
                                        atol=atol,
                                        rtol=rtol)
+
+
+# GQA ratio num_v_heads/num_k_heads == 3 regression. The SLM-tiled prefill
+# conv1d (chunk_causal_conv1d_tiled_xe2) reorders the z gate one feat_chunk at a
+# time: its 64 work-items cover feats_per_wg = wg_size * elems_per_item = 256 z
+# features in a single pass. For ratio <= 2 with head_v_dim 128 the gate width
+# z_dim = head_v_dim * num_v_heads / num_k_heads is <= 256 and fits, but ratio 3
+# gives z_dim = 384, so the tail features 256..383 -- the 3rd v-head of every
+# k-group -- were never written, corrupting z (and thus core_attn_out) for any
+# prefill of >= conv1d_tile_size (8) tokens. Reproduces with a single short
+# prefill; the existing tests only cover ratio 2 (num_v_heads = 32).
+RATIO3_DTYPES = [torch.float16, torch.bfloat16]
+RATIO3_REORDER = [True, False]
+
+
+@pytest.mark.parametrize("dtype", RATIO3_DTYPES, ids=format_tc)
+@pytest.mark.parametrize("reorder_input", RATIO3_REORDER)
+@torch.inference_mode()
+def test_gdn_attention_gqa_ratio3_prefill(dtype, reorder_input):
+    device = "xpu"
+    random.seed(0)
+    torch.manual_seed(0)
+
+    num_k_heads, head_k_dim = 2, 128
+    num_v_heads, head_v_dim = 6, 128  # ratio 3 -> z_dim = head_v_dim * 3 = 384
+    width, tp_size = 4, 1
+    activation = "silu"
+    num_actual_tokens = 16  # single prefill, >= conv1d_tile_size (8)
+    num_prefills, num_decodes = 1, 0
+    cache_batch_size = 4
+
+    mixed_qkvz_size = num_k_heads * (
+        2 * head_k_dim + 2 * head_v_dim * num_v_heads // num_k_heads)
+    mixed_ba_size = num_k_heads * (2 * num_v_heads // num_k_heads)
+    mixed_qkv_size = num_k_heads * (
+        2 * head_k_dim + head_v_dim * num_v_heads // num_k_heads)
+
+    projected_states_qkvz = torch.randn((num_actual_tokens, mixed_qkvz_size),
+                                        dtype=dtype, device=device)
+    projected_states_ba = torch.randn((num_actual_tokens, mixed_ba_size),
+                                      dtype=dtype, device=device)
+    conv_state = torch.randn((cache_batch_size, width - 1, mixed_qkv_size),
+                             dtype=dtype, device=device)
+    ref_conv_state = conv_state.clone()
+    ssm_state = torch.randn(
+        (cache_batch_size, num_v_heads, head_v_dim, head_k_dim),
+        dtype=dtype, device=device)
+    ref_ssm_state = ssm_state.clone()
+    conv_weights = torch.randn((mixed_qkv_size, width), dtype=dtype,
+                               device=device)
+    conv_bias = torch.randn((mixed_qkv_size), dtype=dtype, device=device)
+    A_log = torch.randn((num_v_heads), dtype=torch.float32, device=device)
+    dt_bias = torch.randn((num_v_heads), dtype=dtype, device=device)
+
+    non_spec_query_start_loc = torch.tensor([0, num_actual_tokens],
+                                            dtype=torch.int32, device=device)
+    has_initial_state = torch.tensor([True], dtype=torch.bool, device=device)
+    non_spec_state_indices_tensor = torch.tensor([0], dtype=torch.int32,
+                                                 device=device)
+
+    core_attn_out = torch.zeros((num_actual_tokens, num_v_heads, head_v_dim),
+                                dtype=dtype, device=device)
+    z = torch.empty_like(core_attn_out)
+
+    torch.ops._xpu_C.gdn_attention(
+        core_attn_out, z, projected_states_qkvz, projected_states_ba,
+        num_k_heads, num_v_heads, head_k_dim, head_v_dim,
+        conv_state=conv_state, ssm_state=ssm_state, conv_weights=conv_weights,
+        conv_bias=conv_bias, activation=activation, A_log=A_log,
+        dt_bias=dt_bias, num_prefills=num_prefills, num_decodes=num_decodes,
+        num_spec_decodes=0, has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_token_indx=None,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        spec_query_start_loc=None, spec_token_indx=None,
+        spec_state_indices_tensor=None, num_accepted_tokens=None,
+        num_actual_tokens=num_actual_tokens, tp_size=tp_size,
+        reorder_input=reorder_input)
+
+    ref_core_attn_out = torch.zeros_like(core_attn_out)
+    ref_z = torch.empty_like(core_attn_out)
+    ref_gdn_attention(
+        ref_core_attn_out, ref_z, projected_states_qkvz, projected_states_ba,
+        num_k_heads, num_v_heads, head_k_dim, head_v_dim,
+        conv_state=ref_conv_state, ssm_state=ref_ssm_state,
+        conv_weights=conv_weights, conv_bias=conv_bias, activation=activation,
+        A_log=A_log, dt_bias=dt_bias, num_prefills=num_prefills,
+        num_decodes=num_decodes, has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        num_actual_tokens=num_actual_tokens, tp_size=tp_size,
+        reorder_input=reorder_input)
+
+    atol = rtol = 5e-2
+    # z (the output gate) is reordered straight from projected_states_qkvz; with
+    # ratio 3 the tiled kernel dropped the 3rd v-head of each k-group.
+    torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
+    torch.testing.assert_close(core_attn_out, ref_core_attn_out, atol=atol,
+                               rtol=rtol)

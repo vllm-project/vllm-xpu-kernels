@@ -500,10 +500,14 @@ struct chunk_causal_conv1d_tiled_kernel {
         int out_token_id = pre_chunks * chunk_size_xe2 + token_in_seq;
         int global_tok = lookup(seq_start + token_in_seq);
 
-        // z reorder: each item handles elems_per_item z features
-        // z_dim = 256 for Qwen, items 0-63 cover 64*4=256 features exactly
-        if (local_feat < z_dim) {
-          int z_dim_id = local_feat;
+        // z reorder: each item handles elems_per_item z features per pass.
+        // The 64 items cover feats_per_wg (256) features per pass, so when
+        // z_dim exceeds 256 -- e.g. GQA ratio num_v_heads/num_k_heads == 3
+        // gives z_dim = head_v_dim * 3 = 384 for Qwen3.6 -- a single pass would
+        // drop the tail z features (the 3rd v-head of each k-group). Stride by
+        // feats_per_wg so every z feature is written for any ratio.
+        for (int z_dim_id = local_feat; z_dim_id < z_dim;
+             z_dim_id += feats_per_wg) {
           int mixed_z_id;
           if constexpr (ReorderInput) {
             mixed_z_id = global_tok * num_k_heads * qkvz_dim_full +
