@@ -200,7 +200,11 @@ std::vector<torch::Tensor> causal_conv1d(
 
 void gated_delta_rule(
     torch::Tensor& core_attn_out,
-    const std::vector<torch::Tensor>& intermediates,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& b,
+    const torch::Tensor& a,
     const int64_t num_v_heads,
     const int64_t head_v_dim,
     const torch::Tensor& A_log,

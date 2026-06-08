@@ -165,7 +165,7 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
 
     torch.ops._xpu_C.gated_delta_rule(
         core_attn_out_padded,
-        intermediates_padded,
+        *intermediates_padded,
         args_padded["num_v_heads"],
         args_padded["head_v_dim"],
         A_log=args_padded["A_log"],
@@ -226,7 +226,7 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
 
     torch.ops._xpu_C.gated_delta_rule(
         core_attn_out_ref,
-        intermediates_ref,
+        *intermediates_ref,
         args["num_v_heads"],
         args["head_v_dim"],
         A_log=args["A_log"],

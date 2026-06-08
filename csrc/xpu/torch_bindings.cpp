@@ -186,7 +186,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("causal_conv1d", torch::kXPU, &causal_conv1d);
 
   xpu_ops.def(
-      "gated_delta_rule(Tensor! core_attn_out, Tensor[] intermediates,"
+      "gated_delta_rule(Tensor! core_attn_out,"
+      "Tensor q, Tensor k, Tensor v, Tensor b, Tensor a,"
       "int num_v_heads, int head_v_dim,"
       "Tensor A_log, Tensor dt_bias, Tensor! ssm_state,"
       "int num_prefills, int num_decodes, int num_spec_decodes, Tensor? "

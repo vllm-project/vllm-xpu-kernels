@@ -153,7 +153,7 @@ def benchmark_gated_delta_rule(shape_name, workload_name, dtype_str, provider,
     def _run():
         torch.ops._xpu_C.gated_delta_rule(
             kwargs["core_attn_out"],
-            intermediates,
+            *intermediates,
             kwargs["num_v_heads"],
             kwargs["head_v_dim"],
             A_log=kwargs["A_log"],
