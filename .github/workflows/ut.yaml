@@ -19,7 +19,8 @@ permissions:
   contents: read
 
 concurrency:
-  # PR 按 PR 号分组，push/schedule/dispatch 按 ref 分组；schedule 不取消避免中断夜测
+  # Group by PR number for pull_request, by ref for push/schedule/dispatch.
+  # Do not cancel in-progress runs for schedule to avoid interrupting nightly tests.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
@@ -32,7 +33,7 @@ jobs:
 
   pre-commit:
     runs-on: self-hosted-pvc
-    # schedule / workflow_dispatch 无需 pre-commit 门控，跳过此 job
+    # Skip pre-commit gate for schedule and workflow_dispatch events.
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     steps:
       - name: Clean workspace
@@ -53,7 +54,7 @@ jobs:
   build-docker-image-latest-pvc:
     runs-on: self-hosted-pvc
     needs: pre-commit
-    # 继续执行当 pre-commit 成功或被跳过（schedule/dispatch），失败则阻断
+    # Run when pre-commit succeeded or was skipped (schedule/dispatch); block on failure.
     if: always() && !failure() && !cancelled()
     steps:
       - name: Clean workspace
