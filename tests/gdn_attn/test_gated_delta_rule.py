@@ -195,7 +195,7 @@ def test_gated_delta_rule(num_actual_tokens, batch_size, num_k_heads,
 
     torch.ops._xpu_C.gated_delta_rule(
         core_attn_out,
-        intermediates,
+        *intermediates,
         num_v_heads,
         head_v_dim,
         A_log=A_log,
@@ -395,7 +395,7 @@ def test_gated_delta_rule_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
 
     torch.ops._xpu_C.gated_delta_rule(
         core_attn_out,
-        intermediates,
+        *intermediates,
         num_v_heads,
         head_v_dim,
         A_log=A_log,

@@ -440,7 +440,7 @@ def benchmark_gdn(shape_name, workload_name, dtype_str, provider, iterations):
             reorder_input=kwargs["reorder_input"])
         torch.ops._xpu_C.gated_delta_rule(
             kwargs["core_attn_out"],
-            intermediates,
+            *intermediates,
             kwargs["num_v_heads"],
             kwargs["head_v_dim"],
             A_log=kwargs["A_log"],

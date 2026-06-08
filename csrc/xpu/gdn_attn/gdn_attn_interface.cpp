@@ -450,14 +450,20 @@ std::vector<torch::Tensor> causal_conv1d(
 }
 
 // Delta stage of GatedDeltaNet linear attention. Consumes the intermediate
-// {q, k, v, b, a} tensors produced by causal_conv1d (spec buffers first, then
-// non-spec buffers, matching the same ordering), advances ssm_state, and writes
-// core_attn_out. The path decisions are recomputed from the same scalar/index
-// arguments so the buffers are routed to the matching kernel.
+// {q, k, v, b, a} tensors produced by causal_conv1d, advances ssm_state, and
+// writes core_attn_out. A given call handles either the spec-decode path or the
+// non-spec (prefill + decode) path (they never coexist), and the q/k/v/b/a
+// buffers belong to whichever path is active. The path decision is recomputed
+// from the same scalar/index arguments so the buffers are routed to the
+// matching kernel.
 void gated_delta_rule(
     torch::Tensor& core_attn_out,  // [num_actual_tokens, num_v_heads / tp_size,
                                    // head_v_dim]
-    const std::vector<torch::Tensor>& intermediates,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& b,
+    const torch::Tensor& a,
     const int64_t num_v_heads,
     const int64_t head_v_dim,
     const torch::Tensor& A_log,
@@ -509,31 +515,13 @@ void gated_delta_rule(
       non_spec_token + spec_token == num_actual_tokens,
       "non_spec_token + spec_token must equal num_actual_tokens");
 
-  const size_t expected = (spec_token > 0 ? 5u : 0u) +
-                          (non_spec_token > 0 ? 5u : 0u);
-  TORCH_CHECK(
-      intermediates.size() == expected,
-      "gated_delta_rule expected ",
-      expected,
-      " intermediate tensors from causal_conv1d, but got ",
-      intermediates.size());
-
   // Narrow the (possibly cudagraph-padded) leading dim to the active prefix.
   auto core_attn_out_active = core_attn_out.narrow(0, 0, num_actual_tokens);
 
   auto& queue = vllm::xpu::vllmGetQueue();
   std::optional<torch::Tensor> empty_tensor{std::nullopt};
 
-  size_t idx = 0;
-
   if (spec_token > 0) {
-    const torch::Tensor& q = intermediates[idx + 0];
-    const torch::Tensor& k = intermediates[idx + 1];
-    const torch::Tensor& v = intermediates[idx + 2];
-    const torch::Tensor& b = intermediates[idx + 3];
-    const torch::Tensor& a = intermediates[idx + 4];
-    idx += 5;
-
     gdn::gated_delta_rule(
         queue,
         core_attn_out_active,
@@ -556,13 +544,6 @@ void gated_delta_rule(
   }
 
   if (non_spec_token > 0) {
-    const torch::Tensor& q = intermediates[idx + 0];
-    const torch::Tensor& k = intermediates[idx + 1];
-    const torch::Tensor& v = intermediates[idx + 2];
-    const torch::Tensor& b = intermediates[idx + 3];
-    const torch::Tensor& a = intermediates[idx + 4];
-    idx += 5;
-
 #ifdef VLLM_XPU_ENABLE_XE2
     if (num_prefills > 0) {
       const int* token_indx_ptr =
@@ -694,9 +675,20 @@ void gdn_attention(
       tp_size,
       reorder_input);
 
+  // Exactly one path is active per call, so causal_conv1d returns a single
+  // {q, k, v, b, a} group; forward it straight to gated_delta_rule.
+  TORCH_CHECK(
+      intermediates.size() == 5,
+      "expected 5 intermediate tensors from causal_conv1d, but got ",
+      intermediates.size());
+
   gated_delta_rule(
       core_attn_out,
-      intermediates,
+      intermediates[0],
+      intermediates[1],
+      intermediates[2],
+      intermediates[3],
+      intermediates[4],
       num_v_heads,
       head_v_dim,
       A_log,
