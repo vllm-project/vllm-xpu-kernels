@@ -19,6 +19,7 @@ def fp8_block_quant_2d(
     block_n: int,
     fp8_dtype=torch.float8_e4m3fn,
     eps: float = 1e-6,
+    use_ue8m0: bool = False,
 ):
     """
     Reference FP8 2D block quantization
@@ -28,9 +29,11 @@ def fp8_block_quant_2d(
         block_m: block rows
         block_n: block cols
         fp8_dtype: torch.float8_e4m3fn
+        use_ue8m0:  return scales as torch.float8_e8m0fnu
     Returns:
         q: FP8 tensor [M, N]
-        scales: FP32 tensor [ceil(M/BM), ceil(N/BN)]
+        scales: FP32 tensor [ceil(M/BM), ceil(N/BN)], or float8_e8m0fnu when
+            use_ue8m0 is True
     """
     assert x.dim() == 2
     M, N = x.shape
@@ -60,12 +63,17 @@ def fp8_block_quant_2d(
             amax = block.abs().max()
             scale = amax / FP8_MAX
             scale = torch.clamp(scale, min=eps)
+            if use_ue8m0:
+                scale = torch.exp2(torch.ceil(torch.log2(scale)))
 
             scales[gm, gn] = scale
 
             # quantize
             q_block = (block / scale).to(fp8_dtype)
             q[m0:m1, n0:n1] = q_block
+
+    if use_ue8m0:
+        scales = scales.to(torch.float8_e8m0fnu)
 
     return q, scales
 
@@ -93,6 +101,7 @@ def fp8_block_dequant_2d(
     M, N = q.shape
     grid_m, grid_n = scales.shape
 
+    scales = scales.to(torch.float32)
     return (q.to(torch.float32).reshape(grid_m, block_m, grid_n, block_n) *
             scales.reshape(grid_m, 1, grid_n, 1)).reshape(M, N).to(dtype)
 
@@ -118,6 +127,7 @@ def per_token_group_dequant_fp8(
     M, K = q.shape
     num_groups = K // group_size
 
+    scales = scales.to(torch.float32)
     return (q.to(torch.float32).reshape(M, num_groups, group_size) *
             scales.unsqueeze(-1)).reshape(M, K).to(dtype)
 
