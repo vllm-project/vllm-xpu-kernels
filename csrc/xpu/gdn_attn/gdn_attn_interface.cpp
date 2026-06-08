@@ -161,8 +161,8 @@ void gdn_attention(
         spec_query_start_loc->dim() == 1,
         "spec_query_start_loc must be 1D of shape [num_spec_decodes + 1]");
     TORCH_CHECK(
-        spec_query_start_loc->size(0) == num_spec_decodes + 1,
-        "spec_query_start_loc must have size [num_spec_decodes + 1]");
+        spec_query_start_loc->size(0) >= num_spec_decodes + 1,
+        "spec_query_start_loc must have size at least [num_spec_decodes + 1]");
 
     TORCH_CHECK(
         spec_token_indx->is_contiguous(), "spec_token_indx must be contiguous");
@@ -186,8 +186,8 @@ void gdn_attention(
         "num_speculative_tokens + 1]");
     TORCH_CHECK(
         num_spec_decodes > 0 &&
-            spec_state_indices_tensor->size(0) == num_spec_decodes,
-        "spec_state_indices_tensor must have size [num_spec_decodes, "
+            spec_state_indices_tensor->size(0) >= num_spec_decodes,
+        "spec_state_indices_tensor must have size at least [num_spec_decodes, "
         "num_speculative_tokens + 1]");
     num_speculative_tokens = spec_state_indices_tensor->size(1) - 1;
 
@@ -201,8 +201,8 @@ void gdn_attention(
         num_accepted_tokens->dim() == 1,
         "num_accepted_tokens must be 1D of shape [num_spec_decodes]");
     TORCH_CHECK(
-        num_accepted_tokens->size(0) == num_spec_decodes,
-        "num_accepted_tokens size must be num_spec_decodes");
+        num_accepted_tokens->size(0) >= num_spec_decodes,
+        "num_accepted_tokens size must be at least num_spec_decodes");
   }
 
   TORCH_CHECK(spec_token == num_spec_decodes * (num_speculative_tokens + 1));
@@ -277,6 +277,13 @@ void gdn_attention(
   std::optional<torch::Tensor> empty_tensor{std::nullopt};
 
   if (spec_token > 0) {
+    std::optional<torch::Tensor> spec_query_start_loc_active{
+        spec_query_start_loc->narrow(0, 0, num_spec_decodes + 1)};
+    std::optional<torch::Tensor> spec_state_indices_tensor_active{
+        spec_state_indices_tensor->narrow(0, 0, num_spec_decodes)};
+    std::optional<torch::Tensor> num_accepted_tokens_active{
+        num_accepted_tokens->narrow(0, 0, num_spec_decodes)};
+
     torch::Tensor q = torch::empty(
         {spec_token, num_k_heads / tp_size, head_k_dim},
         torch::dtype(dtype).device(device).requires_grad(false));
@@ -306,11 +313,11 @@ void gdn_attention(
         conv_weights,
         conv_bias,
         conv_state,
-        spec_query_start_loc,
+        spec_query_start_loc_active,
         spec_token_indx,
-        spec_state_indices_tensor,
+        spec_state_indices_tensor_active,
         empty_tensor,
-        num_accepted_tokens,
+        num_accepted_tokens_active,
         act_mode,
         pad_slot_id,
         num_prefills,
@@ -328,11 +335,11 @@ void gdn_attention(
         A_log,
         dt_bias,
         ssm_state,
-        spec_query_start_loc,
+        spec_query_start_loc_active,
         spec_token_indx,
-        spec_state_indices_tensor,
+        spec_state_indices_tensor_active,
         empty_tensor,
-        num_accepted_tokens,
+        num_accepted_tokens_active,
         num_prefills,
         num_decodes,
         num_spec_decodes);
@@ -407,7 +414,13 @@ void gdn_attention(
     // optional token_indx so they can read mixed_qkvz/mixed_ba and write z /
     // core_attn_out directly at the interleaved global slots indicated by
     // non_spec_token_indx, avoiding host-side gather/scatter.
-    if (num_prefills > 0) {
+    const bool supports_xe2_chunk_gdn =
+        head_k_dim >= gdn::chunk_size_xe2 &&
+        head_v_dim >= gdn::chunk_size_xe2 &&
+        head_k_dim % gdn::chunk_size_xe2 == 0 &&
+        head_v_dim % gdn::chunk_size_xe2 == 0;
+
+    if (num_prefills > 0 && supports_xe2_chunk_gdn) {
       int batch_size = non_spec_query_start_loc->size(0) - 1;
       int padding_size = batch_size * (gdn::chunk_size_xe2 - 1);
 

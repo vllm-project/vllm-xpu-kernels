@@ -453,7 +453,7 @@ struct update_states_kernel {
     const T* conv_states_tmp_ptr =
         conv_states_tmp + batch_id * (width - 1) * conv_elems;
     for (int i = elems_start_offset_group + local_id;
-         i < (local_group_id + 1) * elems_per_group;
+         i < sycl::min((local_group_id + 1) * elems_per_group, conv_elems);
          i += group_size) {
       conv_states_ptr[width_id * conv_elems + i] =
           conv_states_tmp_ptr[width_id * conv_elems + i];
