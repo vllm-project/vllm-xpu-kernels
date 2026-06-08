@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+from typing import Optional
 
 import torch
 
@@ -170,7 +171,8 @@ def ref_fused_moe(recipe,
                   activation,
                   num_experts,
                   ep_rank=0,
-                  ep_size=1):
+                  ep_size=1,
+                  gemm1_clamp_limit: Optional[float]=None):
 
     compute_dtype = torch.float32
 
@@ -245,14 +247,18 @@ def ref_fused_moe(recipe,
         if w13_bias is not None:
             gemm1 += w1_bias.to(compute_dtype)
 
-        gate = _naive_fused_moe_activation(gemm1, activation)
-
         if recipe in ("fp8block", "mxfp8"):
             up = expert_tokens.to(compute_dtype) @ w3.to(compute_dtype)
         else:
             up = expert_tokens.to(compute_dtype) @ w3.T.to(compute_dtype)
         if w13_bias is not None:
             up += w3_bias.to(compute_dtype)
+
+        if gemm1_clamp_limit is not None and gemm1_clamp_limit > 0:
+            gemm1.clamp_(max=gemm1_clamp_limit)
+            up.clamp_(min=-gemm1_clamp_limit, max=gemm1_clamp_limit)
+
+        gate = _naive_fused_moe_activation(gemm1, activation)
 
         ### quant act for gemm2 and dequant weight 2
         gemm2_input = gate * up
@@ -312,7 +318,8 @@ class XpuFusedMoe:
         is_int4=False,
         is_mxfp4=False,
         is_mxfp8=False,
-        is_block_fp8=False
+        is_block_fp8=False,
+        gemm1_clamp_limit: Optional[float]=None,
     ):
         # 4bits support [E, N, K]
         # other types [E, K, N]
@@ -360,6 +367,7 @@ class XpuFusedMoe:
         self.is_mxfp4 = is_mxfp4
         self.is_mxfp8 = is_mxfp8
         self.is_block_fp8 = is_block_fp8
+        self.gemm1_clamp_limit = gemm1_clamp_limit
         self.recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
                                    is_block_fp8)
         self._use_ref = _should_use_ref_fused_moe(is_mxfp8)
@@ -437,7 +445,8 @@ class XpuFusedMoe:
                             activation=self.activation,
                             num_experts=self.num_experts,
                             ep_rank=self.ep_rank,
-                            ep_size=self.ep_size)
+                            ep_size=self.ep_size,
+                            gemm1_clamp_limit=self.gemm1_clamp_limit)
         output.copy_(out)
 
     def _apply_kernel(
@@ -495,6 +504,13 @@ class XpuFusedMoe:
             is_B_int4=self.is_int4,
             is_B_mxfp4=self.is_mxfp4)
 
+        # Apply swiglu_limit clamping before activation
+        if self.gemm1_clamp_limit is not None and self.gemm1_clamp_limit > 0:
+            gate = gemm1_output[:, :self.inter_size]
+            up = gemm1_output[:, self.inter_size:]
+            gate.clamp_(max=self.gemm1_clamp_limit)
+            up.clamp_(min=-self.gemm1_clamp_limit, max=self.gemm1_clamp_limit)
+
         # act
         act_output = torch.empty(
             (num_moe_inputs, self.inter_size * self.inter_size_scale),
@@ -544,7 +560,8 @@ def xpu_fused_moe(hidden_states,
                   is_int4=False,
                   is_mxfp4=False,
                   is_mxfp8=False,
-                  is_block_fp8=False):
+                  is_block_fp8=False,
+                  gemm1_clamp_limit: Optional[float]=None):
     '''
     hidden_states: [num_rows, hidden_size]
     w13: [num_experts, 2*inter_size, hidden_size]
@@ -591,7 +608,8 @@ def xpu_fused_moe(hidden_states,
                             activation=activation,
                             num_experts=num_experts,
                             ep_rank=ep_rank,
-                            ep_size=ep_size)
+                            ep_size=ep_size,
+                            gemm1_clamp_limit=gemm1_clamp_limit)
         output.copy_(out)
         return output
 
@@ -683,8 +701,15 @@ def xpu_fused_moe(hidden_states,
         is_B_int4=is_int4,
         is_B_mxfp4=is_mxfp4)
 
-    inter_size_scale = 2 if activation == "relu2_no_mul" else 1
+    # Apply swiglu_limit clamping before activation
+    if gemm1_clamp_limit is not None and gemm1_clamp_limit > 0:
+        gate = gemm1_output[:, :inter_size]
+        up = gemm1_output[:, inter_size:]
+        gate.clamp_(max=gemm1_clamp_limit)
+        up.clamp_(min=-gemm1_clamp_limit, max=gemm1_clamp_limit)
+
     # act
+    inter_size_scale = 2 if activation == "relu2_no_mul" else 1
     act_output = torch.empty((num_moe_inputs, inter_size * inter_size_scale),
                              dtype=gemm1_output.dtype,
                              device=gemm1_output.device)
