@@ -32,7 +32,7 @@ env:
 jobs:
 
   pre-commit:
-    runs-on: self-hosted-pvc
+    runs-on: self-hosted-pvc-cpu
     # Skip pre-commit gate for schedule and workflow_dispatch events.
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     steps:
@@ -52,7 +52,7 @@ jobs:
           extra_args: --all-files --hook-stage manual
 
   build-docker-image-latest-pvc:
-    runs-on: self-hosted-pvc
+    runs-on: self-hosted-pvc-cpu
     needs: pre-commit
     # Run when pre-commit succeeded or was skipped (schedule/dispatch); block on failure.
     if: always() && !failure() && !cancelled()
@@ -104,7 +104,7 @@ jobs:
   # BMG runner cannot reach PVC directly (different network segment), so the
   # artifact service (GitHub) acts as the neutral transfer point.
   build-wheel:
-    runs-on: self-hosted-pvc
+    runs-on: self-hosted-pvc-cpu
     needs: build-docker-image-latest-pvc
     container:
       image: localhost:5000/xpu-kernel-ci-image:latest
@@ -153,7 +153,7 @@ jobs:
           retention-days: 15
 
   build-wheel-with-default-config:
-    runs-on: self-hosted-pvc
+    runs-on: self-hosted-pvc-cpu
     needs: build-docker-image-latest-pvc
     container:
       image: localhost:5000/xpu-kernel-ci-image:latest
