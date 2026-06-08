@@ -273,15 +273,13 @@ class XeFMHAFwdKernel {
 
       // calc sg level seq_len_kv
       const int sg_seq_len =
-          LocalMask
-              ? cute::min(
-                    seq_len_kv,
-                    full_tile_offset + seq_coord + q_sg_tile +
-                        params.mainloop.local_right)
-              : CausalMask
-                    ? cute::min(
-                          seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
-                    : seq_len_kv;
+          LocalMask ? cute::min(
+                          seq_len_kv,
+                          full_tile_offset + seq_coord + q_sg_tile +
+                              params.mainloop.local_right)
+          : CausalMask
+              ? cute::min(seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
+              : seq_len_kv;
       const int sg_k_block0 =
           LocalMask
               ? cute::max(
@@ -289,25 +287,22 @@ class XeFMHAFwdKernel {
                     0) /
                     get<1>(TileShapeQK{})
               : 0;
-      const int sg_k_blocks =
-          cute::ceil_div(sg_seq_len, get<1>(TileShapeQK{}));
+      const int sg_k_blocks = cute::ceil_div(sg_seq_len, get<1>(TileShapeQK{}));
       const int sg_k_blocks_causal =
           CausalMask ? (seq_coord + full_tile_offset) / get<1>(TileShapeQK{})
                      : 0;
       const int sg_k_block_local_l_safe =
-          LocalMask
-              ? cute::ceil_div(
-                    cute::max(
-                        seq_coord + q_sg_tile - 1 + full_tile_offset -
-                            params.mainloop.local_left,
-                        0),
-                    get<1>(TileShapeQK{}))
-              : 0;
+          LocalMask ? cute::ceil_div(
+                          cute::max(
+                              seq_coord + q_sg_tile - 1 + full_tile_offset -
+                                  params.mainloop.local_left,
+                              0),
+                          get<1>(TileShapeQK{}))
+                    : 0;
       const int sg_k_block_local_r_safe =
           LocalMask
-              ? (seq_coord + full_tile_offset +
-                 params.mainloop.local_right + 1) /
-                        get<1>(TileShapeQK{}) -
+              ? (seq_coord + full_tile_offset + params.mainloop.local_right +
+                 1) / get<1>(TileShapeQK{}) -
                     1
               : 0;
 
@@ -334,24 +329,21 @@ class XeFMHAFwdKernel {
           (CausalMask || LocalMask)
               ? sycl::reduce_over_group(wg, sg_k_blocks, sycl::maximum<int>{})
               : sg_k_blocks;
-      const int seq_len =
-          LocalMask ? sycl::reduce_over_group(
-                          wg, sg_seq_len, sycl::maximum<int>{})
-                    : sg_seq_len;
+      const int seq_len = LocalMask ? sycl::reduce_over_group(
+                                          wg, sg_seq_len, sycl::maximum<int>{})
+                                    : sg_seq_len;
       const int k_blocks_causal =
           CausalMask ? sycl::reduce_over_group(
                            wg, sg_k_blocks_causal, sycl::minimum<int>{})
                      : 0;
       const int k_block_local_l_safe =
-          LocalMask
-              ? sycl::reduce_over_group(
-                    wg, sg_k_block_local_l_safe, sycl::maximum<int>{})
-              : 0;
+          LocalMask ? sycl::reduce_over_group(
+                          wg, sg_k_block_local_l_safe, sycl::maximum<int>{})
+                    : 0;
       const int k_block_local_r_safe =
-          LocalMask
-              ? sycl::reduce_over_group(
-                    wg, sg_k_block_local_r_safe, sycl::minimum<int>{})
-              : 0;
+          LocalMask ? sycl::reduce_over_group(
+                          wg, sg_k_block_local_r_safe, sycl::minimum<int>{})
+                    : 0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       if constexpr (is_var_len) {
