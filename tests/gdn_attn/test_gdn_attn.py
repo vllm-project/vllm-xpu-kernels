@@ -79,68 +79,12 @@ def ref_gdn_attention(
     dtype = projected_states_qkvz.dtype
     batch_size = non_spec_query_start_loc.shape[0] - 1
 
-    if reorder_input:
-        key_dim = head_k_dim * num_k_heads
-        value_dim = head_v_dim * num_v_heads
-        q_size = key_dim // tp_size
-        k_size = q_size
-        v_size = value_dim // tp_size
-        z_size = v_size
-        q_tmp, k_tmp, v_tmp, z_tmp = projected_states_qkvz.split(
-            [q_size, k_size, v_size, z_size], dim=-1)
-        q_tmp = q_tmp.reshape(q_tmp.size(0), -1, head_k_dim)
-        k_tmp = k_tmp.reshape(k_tmp.size(0), -1, head_k_dim)
-        v_tmp = v_tmp.reshape(v_tmp.size(0), -1,
-                              num_v_heads // num_k_heads * head_v_dim)
-        z_tmp = z_tmp.reshape(z_tmp.size(0), -1,
-                              num_v_heads // num_k_heads * head_v_dim)
-        projected_states_qkvz = torch.cat([q_tmp, k_tmp, v_tmp, z_tmp],
-                                          dim=-1).reshape(q_tmp.size(0),
-                                                          -1).contiguous()
-
-        b, a = projected_states_ba.chunk(2, dim=-1)
-        b = b.reshape(b.size(0), -1, num_v_heads // num_k_heads)
-        a = a.reshape(a.size(0), -1, num_v_heads // num_k_heads)
-        projected_states_ba = torch.cat([b, a],
-                                        dim=-1).reshape(b.size(0),
-                                                        -1).contiguous()
-
-    split_arg_list_ba = [
-        num_v_heads // num_k_heads,
-        num_v_heads // num_k_heads,
-    ]
-    projected_states_ba = projected_states_ba.reshape(
-        num_actual_tokens, num_k_heads // tp_size,
-        (2 * num_v_heads // num_k_heads))
-    (b, a) = torch.split(projected_states_ba, split_arg_list_ba, dim=-1)
-    b = b.reshape(num_actual_tokens, num_v_heads // tp_size)
-    a = a.reshape(num_actual_tokens, num_v_heads // tp_size)
-
-    split_arg_list_qkvz = [
-        head_k_dim,
-        head_k_dim,
-        num_v_heads // num_k_heads * head_v_dim,
-        num_v_heads // num_k_heads * head_v_dim,
-    ]
-    projected_states_qkvz = projected_states_qkvz.reshape(
-        num_actual_tokens, num_k_heads // tp_size,
-        (2 * head_k_dim + 2 * num_v_heads // num_k_heads * head_v_dim))
-    (q_split, k_split, v_split, z_spilt) = torch.split(projected_states_qkvz,
-                                                       split_arg_list_qkvz,
-                                                       dim=-1)
-    q_split = q_split.reshape(num_actual_tokens,
-                              num_k_heads // tp_size * head_k_dim)
-    k_split = k_split.reshape(num_actual_tokens,
-                              num_k_heads // tp_size * head_k_dim)
-    v_split = v_split.reshape(
-        num_actual_tokens,
-        num_k_heads // tp_size * num_v_heads // num_k_heads * head_v_dim)
-    qkv = torch.cat((q_split, k_split, v_split), dim=-1).reshape(
-        num_actual_tokens, num_k_heads // tp_size *
-        (2 * head_k_dim + num_v_heads // num_k_heads * head_v_dim))
+    qkv, b, a, z_global = _extract_qkv_b_a_z(
+        projected_states_qkvz, projected_states_ba, num_actual_tokens,
+        num_k_heads, num_v_heads, head_k_dim, head_v_dim, tp_size,
+        reorder_input)
     qkv_elems_size = qkv.shape[-1]
-    z.copy_(
-        z_spilt.reshape(num_actual_tokens, num_v_heads // tp_size, head_v_dim))
+    z.copy_(z_global)
 
     A_log_exp = -torch.exp(A_log)
     softplus = torch.nn.Softplus(beta=1.0, threshold=20.0)
@@ -659,10 +603,10 @@ def test_gdn_attention_legacy(num_actual_tokens, batch_size, num_k_heads,
                                    ref_conv_state[state_id],
                                    atol=atol,
                                    rtol=rtol)
-        if num_actual_tokens == 8192:
-            # FIXME: remove this skip
-            # skip because of random error, will be fixed in future
-            pytest.skip("FIXME, skip ssm_state test because of random error")
+        # FIXME: the ssm_state check is skipped for num_actual_tokens == 8192
+        # due to random error; will be fixed in future. (8192 is already
+        # skipped earlier, so the assertion runs for the reached cases.)
+        if num_actual_tokens != 8192:
             torch.testing.assert_close(ssm_state[state_id],
                                        ref_ssm_state[state_id],
                                        atol=atol,

@@ -86,10 +86,12 @@ def estimate_bytes_moved(kwargs):
     bytes_z = n_tok * z_per_tok * bpe_out
     bytes_inter = n_tok * inter_per_tok * bpe_out
     bytes_conv_state = batch * (width - 1) * qkv_per_tok * bpe_in * 2  # RW
-    bytes_weights = qkv_per_tok * width * bpe_in + qkv_per_tok * bpe_in
+    bytes_weights = qkv_per_tok * width * bpe_in
+    # Bias is only read when conv_bias is provided.
+    bytes_bias = qkv_per_tok * bpe_in if kwargs["conv_bias"] is not None else 0
 
     return (bytes_in + bytes_z + bytes_inter
-            + bytes_conv_state + bytes_weights)
+            + bytes_conv_state + bytes_weights + bytes_bias)
 
 
 def estimate_flops(kwargs):

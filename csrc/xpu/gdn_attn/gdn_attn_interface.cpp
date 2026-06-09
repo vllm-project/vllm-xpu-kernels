@@ -16,11 +16,12 @@
 
 // Conv stage of GatedDeltaNet linear attention. Runs the causal conv1d (plus
 // activation), writes z, updates conv_state, and returns the intermediate
-// {q, k, v, b, a} tensors consumed by gated_delta_rule. The returned list holds
-// the spec-decode buffers first (when spec tokens exist) followed by the
-// non-spec (prefill + decode) buffers (when non-spec tokens exist), so it
-// contains 0, 5, or 10 tensors. The buffers' shapes/dtypes are path-specific
-// (native vs XE2 prefill) and must be forwarded unchanged to gated_delta_rule.
+// {q, k, v, b, a} tensors consumed by gated_delta_rule. A single invocation
+// handles either the spec-decode path OR the non-spec (prefill + decode) path,
+// never both at once (enforced below). The returned list therefore holds
+// exactly 0 tensors (no tokens) or 5 tensors {q, k, v, b, a} for the active
+// path. The buffers' shapes/dtypes are path-specific (native vs XE2 prefill)
+// and must be forwarded unchanged to gated_delta_rule.
 std::vector<torch::Tensor> causal_conv1d(
     torch::Tensor& z,  // [num_actual_tokens, num_v_heads / tp_size, head_v_dim]
     const torch::Tensor& projected_states_qkvz,
@@ -58,9 +59,22 @@ std::vector<torch::Tensor> causal_conv1d(
       conv_state[0].is_contiguous(),
       "conv_state of each batch must be contiguous");
   TORCH_CHECK(conv_weights.is_contiguous(), "conv_weights must be contiguous");
+  TORCH_CHECK(
+      !(num_spec_decodes > 0 && num_prefills + num_decodes > 0),
+      "causal_conv1d does not support spec-decode and non-spec (prefill + "
+      "decode) tokens in the same invocation; the spec path and the non-spec "
+      "path are mutually exclusive");
 
   int non_spec_token = 0;
   if (num_prefills + num_decodes > 0) {
+    TORCH_CHECK(
+        non_spec_query_start_loc.has_value(),
+        "non_spec_query_start_loc must be provided when num_prefills + "
+        "num_decodes > 0");
+    TORCH_CHECK(
+        non_spec_state_indices_tensor.has_value(),
+        "non_spec_state_indices_tensor must be provided when num_prefills + "
+        "num_decodes > 0");
     if (has_initial_state.has_value()) {
       TORCH_CHECK(
           has_initial_state->is_contiguous(),
@@ -127,6 +141,18 @@ std::vector<torch::Tensor> causal_conv1d(
   int spec_token = 0;
   int num_speculative_tokens = 0;
   if (num_spec_decodes > 0) {
+    TORCH_CHECK(
+        spec_query_start_loc.has_value(),
+        "spec_query_start_loc must be provided when num_spec_decodes > 0");
+    TORCH_CHECK(
+        spec_token_indx.has_value(),
+        "spec_token_indx must be provided when num_spec_decodes > 0");
+    TORCH_CHECK(
+        spec_state_indices_tensor.has_value(),
+        "spec_state_indices_tensor must be provided when num_spec_decodes > 0");
+    TORCH_CHECK(
+        num_accepted_tokens.has_value(),
+        "num_accepted_tokens must be provided when num_spec_decodes > 0");
     TORCH_CHECK(
         spec_query_start_loc->is_contiguous(),
         "spec_query_start_loc must be contiguous");
@@ -502,12 +528,32 @@ void gated_delta_rule(
 
   int non_spec_token = 0;
   if (num_prefills + num_decodes > 0) {
+    TORCH_CHECK(
+        non_spec_query_start_loc.has_value(),
+        "non_spec_query_start_loc must be provided when num_prefills + "
+        "num_decodes > 0");
+    TORCH_CHECK(
+        non_spec_state_indices_tensor.has_value(),
+        "non_spec_state_indices_tensor must be provided when num_prefills + "
+        "num_decodes > 0");
     non_spec_token = non_spec_token_indx.has_value()
         ? non_spec_token_indx->size(0)
         : num_actual_tokens;
   }
   int spec_token = 0;
   if (num_spec_decodes > 0) {
+    TORCH_CHECK(
+        spec_query_start_loc.has_value(),
+        "spec_query_start_loc must be provided when num_spec_decodes > 0");
+    TORCH_CHECK(
+        spec_token_indx.has_value(),
+        "spec_token_indx must be provided when num_spec_decodes > 0");
+    TORCH_CHECK(
+        spec_state_indices_tensor.has_value(),
+        "spec_state_indices_tensor must be provided when num_spec_decodes > 0");
+    TORCH_CHECK(
+        num_accepted_tokens.has_value(),
+        "num_accepted_tokens must be provided when num_spec_decodes > 0");
     spec_token = spec_token_indx->size(0);
   }
 
@@ -617,7 +663,9 @@ void gated_delta_rule(
 // the exact same work as the original gdn_attention by chaining the two split
 // ops: causal_conv1d produces the {q,k,v,b,a} intermediates (and writes z /
 // updates conv_state); gated_delta_rule consumes them (and writes
-// core_attn_out / updates ssm_state).
+// core_attn_out / updates ssm_state). causal_conv1d enforces that the
+// spec-decode and non-spec paths are mutually exclusive, so it returns a
+// single 5-tensor group here, preserving the original fused-op semantics.
 void gdn_attention(
     torch::Tensor& core_attn_out,
     torch::Tensor& z,
@@ -675,8 +723,9 @@ void gdn_attention(
       tp_size,
       reorder_input);
 
-  // Exactly one path is active per call, so causal_conv1d returns a single
-  // {q, k, v, b, a} group; forward it straight to gated_delta_rule.
+  // causal_conv1d guarantees the spec and non-spec paths never coexist, so it
+  // returns exactly one {q, k, v, b, a} group; forward it straight to
+  // gated_delta_rule.
   TORCH_CHECK(
       intermediates.size() == 5,
       "expected 5 intermediate tensors from causal_conv1d, but got ",
