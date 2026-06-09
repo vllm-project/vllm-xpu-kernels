@@ -4,3 +4,4 @@ self-hosted-runner:
     - self-hosted-bmg
     - self-hosted-pvc
     - self-hosted-pvc-cpu
+    - self-hosted-bmg-b50
