@@ -11,7 +11,7 @@ import torch
 import triton
 import triton.testing
 
-from utils import bootstrap_benchmark_env
+from utils import bootstrap_benchmark_env, ensure_save_path_exists
 
 bootstrap_benchmark_env(__file__)
 
@@ -1043,4 +1043,5 @@ if __name__ == "__main__":
         print(f"Performance: {label}{suffix}")
         print("=" * 60)
         bench = get_bench(configs, iterations)
-        bench.run(print_data=True, save_path=args.save_path)
+        save_path = ensure_save_path_exists(args.save_path)
+        bench.run(print_data=True, save_path=save_path)
