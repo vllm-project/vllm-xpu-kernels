@@ -109,4 +109,5 @@ void remap_hidden_states(
     torch::Tensor& unpermuted_row_to_permuted_row,
     torch::Tensor& topk_ids,
     int64_t total_experts_num,
-    int64_t local_experts_num);
+    int64_t local_experts_num,
+    const c10::optional<torch::Tensor>& valid_tokens);

@@ -100,8 +100,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor? remapped_hidden_states_scales,"
       "Tensor? expert_map, Tensor rows_per_expert,"
       "Tensor unpermuted_row_to_permuted_row, Tensor topk_ids,"
-      "int total_experts_num, int "
-      "local_experts_num) -> "
+      "int total_experts_num, int local_experts_num, "
+      "Tensor? valid_tokens=None) -> "
       "()");
   m.impl("remap_hidden_states", torch::kXPU, &remap_hidden_states);
 }
