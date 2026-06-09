@@ -63,7 +63,10 @@ void fused_add_rms_norm_static_fp8_quant(
     torch::Tensor& scale,
     double epsilon);
 
-void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
+void silu_and_mul(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    std::optional<torch::Tensor> valid_rows = std::nullopt);
 
 void silu_and_mul_quant(
     torch::Tensor& out, torch::Tensor& input, torch::Tensor& scale);
@@ -86,18 +89,50 @@ void silu_and_mul_mxfp4_quant(
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
-void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
+void gelu_and_mul(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    std::optional<torch::Tensor> valid_rows = std::nullopt);
+void relu2_no_mul(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    std::optional<torch::Tensor> valid_rows = std::nullopt);
 
-void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
+void swigluoai_and_mul(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    double alpha = 1.702,
+    double limit = 7.0,
+    std::optional<torch::Tensor> valid_rows = std::nullopt);
+
+void swiglustep_and_mul(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    double limit = 7.0,
+    std::optional<torch::Tensor> valid_rows = std::nullopt);
+
+void gelu_tanh_and_mul(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    std::optional<torch::Tensor> valid_rows = std::nullopt);
 
 void fatrelu_and_mul(
     torch::Tensor& out, torch::Tensor& input, double threshold);
 
-void gelu_fast(torch::Tensor& out, torch::Tensor& input);
+void gelu_fast(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    std::optional<torch::Tensor> valid_rows = std::nullopt);
 
-void gelu_new(torch::Tensor& out, torch::Tensor& input);
+void gelu_new(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    std::optional<torch::Tensor> valid_rows = std::nullopt);
 
-void gelu_quick(torch::Tensor& out, torch::Tensor& input);
+void gelu_quick(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    std::optional<torch::Tensor> valid_rows = std::nullopt);
 
 void rotary_embedding(
     torch::Tensor& positions,
@@ -216,17 +251,6 @@ void per_token_group_quant_mxfp4(
     torch::Tensor& output_s,
     int64_t group_size,
     double eps);
-
-void swigluoai_and_mul(
-    torch::Tensor& out,
-    torch::Tensor& input,
-    double alpha = 1.702,
-    double limit = 7.0);
-
-void relu2_no_mul(torch::Tensor& out, torch::Tensor& input);
-
-void swiglustep_and_mul(
-    torch::Tensor& out, torch::Tensor& input, double limit = 7.0);
 
 torch::Tensor get_xpu_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
