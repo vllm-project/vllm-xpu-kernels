@@ -221,6 +221,7 @@ def ref_fused_moe(recipe,
                                       < expert_start_id) or (expert_id
                                                              >= expert_end_id):
             continue
+        expert_id -= expert_start_id
         exp_token_idxs = token_idxs[start_idx:end_idx]
         expert_tokens = x[exp_token_idxs]
 
