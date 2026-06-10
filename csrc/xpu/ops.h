@@ -99,6 +99,15 @@ torch::Tensor deepseek_inv_rope_bf16(
     int64_t nope_dim,
     int64_t rope_dim);
 
+std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
+    const torch::Tensor& o,
+    const torch::Tensor& positions,
+    const torch::Tensor& cos_sin_cache,
+    int64_t n_groups,
+    int64_t heads_per_group,
+    int64_t nope_dim,
+    int64_t rope_dim);
+
 #ifdef VLLM_GDN_ENABLED
 void gdn_attention(
     torch::Tensor& core_attn_out,
