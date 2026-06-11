@@ -205,3 +205,14 @@ void deepseek_fused_indexer_q_rope_fp8(
     double head_scale,
     torch::Tensor& q_fp8,
     torch::Tensor& weights_out);
+
+void deepseek_fused_indexer_q_rope_mxfp4(
+    const torch::Tensor& q,
+    const torch::Tensor& positions,
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& index_weights,
+    double softmax_scale,
+    double head_scale,
+    torch::Tensor& packed_out,
+    torch::Tensor& scales_out,
+    torch::Tensor& weights_out);
