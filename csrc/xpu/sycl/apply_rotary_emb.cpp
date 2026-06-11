@@ -53,7 +53,7 @@ class apply_rotary_emb_kernel {
 
       int x_index, y_index;
       scalar_t cos_val, sin_val;
-      if (IS_NEOX) {
+      if constexpr (IS_NEOX) {
         x_index = rot_offset;
         y_index = embed_dim + rot_offset;
         cos_val = token_cos[rot_offset];
