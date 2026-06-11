@@ -166,3 +166,13 @@ torch::Tensor fp8_paged_mqa_logits(
 #endif
 
 std::string get_onednn_version();
+
+void deepseek_fused_indexer_q_rope_fp8(
+    const torch::Tensor& q,
+    const torch::Tensor& positions,
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& index_weights,
+    double softmax_scale,
+    double head_scale,
+    torch::Tensor& q_fp8,
+    torch::Tensor& weights_out);
