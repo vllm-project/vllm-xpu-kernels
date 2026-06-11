@@ -378,6 +378,7 @@ CUTE_DEVICE void chunk_inverse_kernel(
                 static_cast<T>(A_ptr_save[m_idx * chunk_size + n_idx]);
           }
         }
+        item.barrier(sycl::access::fence_space::local_space);
       }
       chunk_id += global_chunk_range;
     }
