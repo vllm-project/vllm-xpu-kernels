@@ -199,6 +199,11 @@ CUTE_DEVICE void chunk_compute_A_kernel(
       const int chunk_start_offset = chunk_id * chunk_size;
 
       for (int v_head_id = 0; v_head_id < num_v_heads; ++v_head_id) {
+        // WAR fence: sub-groups from the previous (chunk, v_head)
+        // iteration may still be reading g_slm_ptr in the exp()
+        // epilogue; all must arrive before any sub-group refills the
+        // SLM (g_slm_ptr) for this iteration.
+        item.barrier(sycl::access::fence_space::local_space);
         CUTE_UNROLL
         for (int e = local_id; e < chunk_size; e += local_range) {
           g_slm_ptr[e] =
@@ -769,6 +774,10 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
       const int chunk_start_offset = chunk_id * chunk_size;
 
       for (int v_head_id = 0; v_head_id < num_v_heads; ++v_head_id) {
+        // WAR fence: previous iteration's sub-groups may still be
+        // reading beta_slm_ptr/g_slm_ptr; all must arrive before any
+        // sub-group refills the SLM for this iteration.
+        item.barrier(sycl::access::fence_space::local_space);
         CUTE_UNROLL
         for (int e = local_id; e < chunk_size; e += local_range) {
           float beta_value =
@@ -966,6 +975,11 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
           a[(chunk_offset + current_chunk_size - 1) +
             v_head_id * total_virtual_seqlen];
       float g_last_value_exp = sycl::native::exp(g_last_value);
+      // WAR fence: the previous chunk iteration's sub-groups may
+      // still be reading g_slm_ptr/g_multi_slm_ptr/g_exp_slm_ptr in
+      // their output/state GEMM epilogues; all must arrive before any
+      // sub-group refills these SLM buffers for this chunk.
+      item.barrier(sycl::access::fence_space::local_space);
       CUTE_UNROLL
       for (int e = local_id; e < current_chunk_size; e += local_range) {
         float g_cumsum_value =
