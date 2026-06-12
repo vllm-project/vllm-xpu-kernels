@@ -526,11 +526,17 @@ class DecodeFwdEpilogue {
 
     // Reduce k-blocks of A and A_sum across WG, if needed.
     int sg_id = thr_id / intel::sg_size;
+    // Decode tiles head_group_q across the grid's Q dimension (blk_qv[0]).
+    // The work-item's row within this tile is thr_id; its global head-group
+    // row is offset by the tile start. q_tile_rows is the packed-Q tile size.
+    constexpr int q_tile_rows = cute::size<0>(TileShapeO{});
+    int q_row = get<0>(blk_qv) * q_tile_rows + thr_id;
+    bool row_valid = (thr_id < q_tile_rows) && (q_row < head_group_q);
     if constexpr (Sink) {
       constexpr double kLog2e = 1.4426950408889634074;
-      if (idx_kv_split == 0 && sg_id == 0 && thr_id < head_group_q) {
+      if (idx_kv_split == 0 && sg_id == 0 && row_valid) {
         tA_sum(0) += sycl::native::exp2(
-            static_cast<ElementA>(tSink(thr_id) * kLog2e) - tA_max(0));
+            static_cast<ElementA>(tSink(q_row) * kLog2e) - tA_max(0));
       }
     }
 
@@ -538,14 +544,14 @@ class DecodeFwdEpilogue {
 
     // Always store exp sum and max logits for current KV split.
     // assume seq_len_qo == 1
-    if (thr_id < head_group_q) {
+    if (row_valid) {
       if (is_single_split) {
         // Sentinel values: make ReduceSplitK a pass-through copy.
-        exp_sums(thr_id, idx_kv_split) = ElementA(1);
-        max_logits(thr_id, idx_kv_split) = ElementA(0);
+        exp_sums(q_row, idx_kv_split) = ElementA(1);
+        max_logits(q_row, idx_kv_split) = ElementA(0);
       } else if (num_kv_splits > 1) {
-        exp_sums(thr_id, idx_kv_split) = rA_sum(0);
-        max_logits(thr_id, idx_kv_split) = rA_max(0);
+        exp_sums(q_row, idx_kv_split) = rA_sum(0);
+        max_logits(q_row, idx_kv_split) = rA_max(0);
       }
     }
 
