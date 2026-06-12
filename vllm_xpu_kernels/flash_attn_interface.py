@@ -294,6 +294,10 @@ def flash_attn_varlen_func(
     num_splits_kv: Optional[int] = None,
     is_mix_batch: bool = True,
     host_kv_lens: Optional[torch.Tensor] = None,
+    # FA4 only (not supported on XPU, accepted for interface compatibility)
+    dynamic_causal: Optional[torch.Tensor] = None,
+    mask_mod=None,
+    aux_tensors=None,
 ):
     """
     FlashAttention interface for variable-length sequences, with optional
@@ -323,6 +327,16 @@ def flash_attn_varlen_func(
         if seqused_k is not None:
             raise ValueError("Provide only one of host_kv_lens and seqused_k")
         seqused_k = _as_int32_device_tensor(host_kv_lens, q.device)
+
+    if dynamic_causal is not None:
+        raise NotImplementedError(
+            "dynamic_causal (per-sequence causal) is not supported on XPU")
+    if mask_mod is not None:
+        raise NotImplementedError(
+            "mask_mod is not supported on XPU")
+    if aux_tensors is not None:
+        raise NotImplementedError(
+            "aux_tensors is not supported on XPU")
 
     assert cu_seqlens_k is not None or seqused_k is not None, \
         "cu_seqlens_k or seqused_k must be provided"
