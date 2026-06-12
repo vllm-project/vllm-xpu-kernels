@@ -61,7 +61,7 @@ jobs:
           docker push "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
 
   build-docker-image-latest-bmg:
-    runs-on: self-hosted-bmg-b50
+    runs-on: self-hosted-bmg
     outputs:
       image_tag: ${{ steps.set-tag.outputs.image_tag }}
     steps:
@@ -237,7 +237,7 @@ jobs:
           git reset --hard || true
 
   run-unit-tests-bmg:
-    runs-on: self-hosted-bmg-b50
+    runs-on: self-hosted-bmg
     needs: [build-docker-image-latest-bmg, build-wheel]
     timeout-minutes: 50
     container: 
@@ -272,7 +272,7 @@ jobs:
           VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 XPU_KERNEL_TEST_SCOPE=${{ env.XPU_KERNEL_TEST_SCOPE }} ZE_AFFINITY_MASK=0,1 pytest -v -s tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm
 
   clean-repo-bmg:
-    runs-on: self-hosted-bmg-b50
+    runs-on: self-hosted-bmg
     needs: run-unit-tests-bmg
     steps:
       - name: Clean workspace
