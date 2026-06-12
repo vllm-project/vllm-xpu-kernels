@@ -21,7 +21,21 @@ torch::Tensor check_and_create_output_tensor(
   TORCH_CHECK(
       A.dim() == 2 || A.dim() == 3,
       "OneDNN Matmul only support 2D and 3D inputs!\n");
-  TORCH_CHECK(B.dim() == 2, "OneDNN Matmul only support 2D weights!\n");
+  TORCH_CHECK(
+      B.dim() == 2 || B.dim() == 3,
+      "OneDNN Matmul only support 2D and 3D weights!\n");
+  if (B.dim() == 3) {
+    TORCH_CHECK(
+        A.dim() == 3,
+        "OneDNN Matmul expects 3D input when using batched weights!\n");
+    TORCH_CHECK(
+        A.size(0) == B.size(0),
+        "OneDNN Matmul expects input and weight batches to match, got ",
+        A.size(0),
+        " and ",
+        B.size(0),
+        ".");
+  }
 
   if (B.scalar_type() == at::ScalarType::Int) {
     TORCH_CHECK(
@@ -29,11 +43,12 @@ torch::Tensor check_and_create_output_tensor(
   }
 
   std::vector<int64_t> result_shape;
+  
   if (A.dim() == 2) {
-    result_shape = {A.size(0), B.size(1)};
+    result_shape = {A.size(0), B.size(-1)};
     // src{m, k}, wei{k, n}, bias{n}, dst{m, n}
   } else {
-    result_shape = {A.size(0), A.size(1), B.size(1)};
+    result_shape = {A.size(0), A.size(1), B.size(-1)};
     // src{b, m, k}, wei{k, n}, bias{n}, dst{b, m, n}
   }
 
@@ -53,7 +68,7 @@ torch::Tensor check_and_create_output_tensor(
 
 torch::Tensor fp8_gemm(
     const torch::Tensor& A,  // [b, m ,k]
-    const torch::Tensor& B,  // [k, n]
+    const torch::Tensor& B,  // [k, n] or [b, k, n]
     std::optional<c10::ScalarType> out_dtype,
     const std::optional<torch::Tensor>& A_scale_,
     const std::optional<torch::Tensor>& B_scale_,
@@ -69,7 +84,7 @@ torch::Tensor fp8_gemm(
       result.scalar_type() == torch::kFloat16 ||
           result.scalar_type() == torch::kBFloat16,
       "output must be float16 or bfloat16 for fp8 matmul");
-  // check if nt format
+  // For 3D weights, accept either [B, K, N] or [B, N, K].
   bool is_nt = B.strides()[B.dim() - 2] == 1;
 
   torch::Tensor A_scale = A_scale_.value_or(at::ones({1}, torch::kFloat));

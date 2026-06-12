@@ -371,6 +371,32 @@ get_onednn_bias_dims(bias_type_t b_type, const int m, const int n) {
   }
 }
 
+static inline memory::dims
+get_onednn_bias_dims(bias_type_t b_type, const memory::dims& dst_dims) {
+  TORCH_CHECK(
+      dst_dims.size() == 2 || dst_dims.size() == 3,
+      "unsupported dst rank for bias dims: ",
+      dst_dims.size());
+  if (dst_dims.size() == 2) {
+    return get_onednn_bias_dims(b_type, dst_dims[0], dst_dims[1]);
+  }
+
+  bias_shape_t b_shape = get_shape(b_type);
+  switch (b_shape) {
+    case bias_shape_t::none:
+      return {0};
+    case bias_shape_t::scalar:
+      return {1, 1, 1};
+    case bias_shape_t::n:
+      return {1, 1, dst_dims[2]};
+    default:
+      TORCH_CHECK(
+          false,
+          "unsupported bias shape for batched matmul: ",
+          static_cast<int>(b_shape));
+  }
+}
+
 static inline memory::data_type get_onednn_bias_data_type(bias_type_t b_type) {
   bias_data_type_t b_dtype = get_dtype(b_type);
   switch (b_dtype) {
@@ -395,6 +421,20 @@ get_onednn_bias_format_type(bias_type_t b_type) {
   } else {
     return memory::format_tag::ab;
   }
+}
+
+static inline memory::format_tag
+get_onednn_bias_format_type(bias_type_t b_type, size_t ndims) {
+  bias_shape_t b_shape = get_shape(b_type);
+  if (b_shape == bias_shape_t::none) {
+    return memory::format_tag::undef;
+  }
+
+  TORCH_CHECK(
+      ndims == 2 || ndims == 3,
+      "unsupported bias rank for format tag: ",
+      ndims);
+  return ndims == 2 ? memory::format_tag::ab : memory::format_tag::abc;
 }
 
 template <trans_type_t Tt>
@@ -814,6 +854,78 @@ struct matmul_primitive_cache_t {
   }
 };
 
+template <trans_type_t Tt, joint_dtypes_t Ts, typename F>
+struct batched_matmul_primitive_cache_t {
+  static inline primitive_ext& get(
+      const memory::dims& src_dims,
+      const memory::dims& wei_dims,
+      const memory::dims& dst_dims,
+      const memory::dims& src_strides,
+      const memory::dims& wei_strides,
+      const memory::dims& dst_strides,
+      const bias_type_t b_type,
+      const int device_id,
+      F f_attr,
+      const int scale_group_size,
+      const int zp_group_size) {
+    auto& cached = get_cache(device_id);
+    auto pri_key = concat(
+        src_dims,
+        wei_dims,
+        dst_dims,
+        src_strides,
+        wei_strides,
+        dst_strides,
+        int(Tt),
+        int(b_type),
+        scale_group_size,
+        zp_group_size);
+    auto iter = cached.find(pri_key);
+    if (iter == cached.end()) {
+      auto [src_dt, wei_dt, dst_dt] = onednn_types_mapper<Ts>::get();
+
+      auto src_md = memory::desc(src_dims, src_dt, src_strides);
+      auto wei_md = memory::desc(wei_dims, wei_dt, wei_strides);
+      auto dst_md = memory::desc(dst_dims, dst_dt, dst_strides);
+      auto bias_md = memory::desc(
+          get_onednn_bias_dims(b_type, dst_dims),
+          get_onednn_bias_data_type(b_type),
+          get_onednn_bias_format_type(b_type, dst_dims.size()));
+
+      primitive_attr pattr;
+      f_attr(pattr);
+
+      matmul::primitive_desc matmul_pd;
+      at::Device curDevice = at::Device(at::kXPU, device_id);
+      auto aengine = GpuEngineManager::Instance().get_engine(curDevice);
+      if (get_shape(b_type) == bias_shape_t::none) {
+        matmul_pd =
+            matmul::primitive_desc(aengine, src_md, wei_md, dst_md, pattr);
+      } else {
+        matmul_pd = matmul::primitive_desc(
+            aengine, src_md, wei_md, bias_md, dst_md, pattr);
+      }
+
+      return cached.insert({pri_key, primitive_ext(matmul(matmul_pd))})
+          .first->second;
+    } else {
+      return iter->second;
+    }
+  }
+
+ private:
+  static constexpr int max_cache_capacity = 512;
+  static inline thread_local std::array<primitive_cache, 16> mappings;
+
+  static inline primitive_cache& get_cache(const int device_id) {
+    auto& mapping = mappings[device_id];
+    if (mapping.max_size() == 0) {
+      mapping.resize(max_cache_capacity);
+    }
+    return mapping;
+  }
+};
+
 template <joint_dtypes_t Ts, typename F>
 static inline primitive_ext& matmul_primitive_create_and_cache(
     const trans_type_t Tt,
@@ -850,6 +962,52 @@ static inline primitive_ext& matmul_primitive_create_and_cache(
           lda,
           ldb,
           ldc,
+          b_type,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    default:
+      throw std::runtime_error("unsupported trans type ...");
+  }
+}
+
+template <joint_dtypes_t Ts, typename F>
+static inline primitive_ext& matmul_primitive_create_and_cache(
+    const trans_type_t Tt,
+    const bias_type_t b_type,
+    const memory::dims& src_dims,
+    const memory::dims& wei_dims,
+    const memory::dims& dst_dims,
+    const memory::dims& src_strides,
+    const memory::dims& wei_strides,
+    const memory::dims& dst_strides,
+    const int device_id,
+    F attr,
+    const int scale_group_size,
+    const int zp_group_size = 0) {
+  switch (Tt) {
+    case trans_type_t::nt:
+      return batched_matmul_primitive_cache_t<trans_type_t::nt, Ts, F>::get(
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          b_type,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case trans_type_t::nn:
+      return batched_matmul_primitive_cache_t<trans_type_t::nn, Ts, F>::get(
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
           b_type,
           device_id,
           attr,
@@ -1068,6 +1226,223 @@ static inline primitive_ext& matmul_primitive_create_and_cache(
           lda,
           ldb,
           ldc,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    default:
+      throw std::runtime_error("Only support int4 and fp8 gemm ...");
+  }
+}
+
+template <typename F>
+static inline primitive_ext& matmul_primitive_create_and_cache(
+    const joint_dtypes_t Ts,
+    const trans_type_t Tt,
+    const bias_type_t b_type,
+    const memory::dims& src_dims,
+    const memory::dims& wei_dims,
+    const memory::dims& dst_dims,
+    const memory::dims& src_strides,
+    const memory::dims& wei_strides,
+    const memory::dims& dst_strides,
+    const int device_id,
+    F attr,
+    const int scale_group_size = 1,
+    const int zp_group_size = 1) {
+  switch (Ts) {
+    case joint_dtypes_t::f16_int4:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::f16_int4, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::bf16_int4:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::bf16_int4, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::s8_int4:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::s8_int4, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::u8_int4:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::u8_int4, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::f16_f8_e5m2:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::f16_f8_e5m2, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::bf16_f8_e5m2:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::bf16_f8_e5m2, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::f16_f8_e4m3:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::f16_f8_e4m3, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::bf16_f8_e4m3:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::bf16_f8_e4m3, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::f8_e5m2_f16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::f8_e5m2_f16, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::f8_e5m2_bf16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::f8_e5m2_bf16, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::f8_e4m3_f16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::f8_e4m3_f16, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::f8_e4m3_bf16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::f8_e4m3_bf16, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::mxfp4_bf16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::mxfp4_bf16, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
+          device_id,
+          attr,
+          scale_group_size,
+          zp_group_size);
+    case joint_dtypes_t::mxfp4_f16:
+      return matmul_primitive_create_and_cache<joint_dtypes_t::mxfp4_f16, F>(
+          Tt,
+          b_type,
+          src_dims,
+          wei_dims,
+          dst_dims,
+          src_strides,
+          wei_strides,
+          dst_strides,
           device_id,
           attr,
           scale_group_size,
