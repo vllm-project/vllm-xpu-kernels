@@ -93,7 +93,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! scales, "
       "int group_size, "
       "Tensor? scale_ub=None, "
-      "bool is_scale_transposed=False) -> ()");
+      "bool is_scale_transposed=False, "
+      "bool scale_ue8m0=False) -> ()");
   ops.impl(
       "silu_and_mul_per_block_quant",
       torch::kXPU,

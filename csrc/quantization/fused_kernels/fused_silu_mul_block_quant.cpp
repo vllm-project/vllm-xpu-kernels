@@ -7,6 +7,7 @@
 #include "utils.h"
 #include "quantization/fp8/quant_utils.h"
 #include "quantization/fused_kernels/quant_conversions.h"
+#include "quantization/utils.h"
 
 namespace vllm {
 
@@ -22,7 +23,8 @@ class silu_and_mul_per_block_quant_kernel {
       const int num_groups_,
       const int group_size_,
       const int64_t scale_stride_token_,
-      const int64_t scale_stride_group_)
+      const int64_t scale_stride_group_,
+      const bool scale_ue8m0_)
       : out(out_),
         scales(scales_),
         input(input_),
@@ -31,57 +33,94 @@ class silu_and_mul_per_block_quant_kernel {
         num_groups(num_groups_),
         group_size(group_size_),
         scale_stride_token(scale_stride_token_),
-        scale_stride_group(scale_stride_group_) {}
+        scale_stride_group(scale_stride_group_),
+        scale_ue8m0(scale_ue8m0_) {}
 
-  void operator()(sycl::nd_item<1> item) const {
-    const int wg_id = static_cast<int>(item.get_group(0));
+  void operator()
+      [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
+    const int token_idx = static_cast<int>(item.get_group(0));
     const int tid = static_cast<int>(item.get_local_id(0));
+    const int local_range = static_cast<int>(item.get_local_range(0));
+    auto sg = item.get_sub_group();
+    const int lane = sg.get_local_id()[0];
 
-    const int token_idx = wg_id / num_groups;
-    const int group_idx = wg_id % num_groups;
-    const int group_start = group_idx * group_size;
+    constexpr int VEC = 16 / sizeof(scalar_t);
+    const int lanes_per_group = group_size / VEC;
+    const int num_chunks = hidden_size / VEC;
 
     const scalar_t* token_gate =
-        input + token_idx * hidden_size * 2 + group_start;
+        input + static_cast<int64_t>(token_idx) * hidden_size * 2;
     const scalar_t* token_up = token_gate + hidden_size;
-    out_t* token_output = out + token_idx * hidden_size + group_start;
+    out_t* token_output = out + static_cast<int64_t>(token_idx) * hidden_size;
+    const auto* vgate =
+        reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(token_gate);
+    const auto* vup = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(token_up);
+    auto* vout = reinterpret_cast<vec_n_t<out_t, VEC>*>(token_output);
 
-    // Step 1: Each thread loads one element, computes SiLU(gate) * up
-    const float gate_f = static_cast<float>(token_gate[tid]);
-    const float up_f = static_cast<float>(token_up[tid]);
-    const float silu_gate = gate_f / (1.0f + sycl::exp(-gate_f));
-    const float result = silu_gate * up_f;
+    for (int base = 0; base < num_chunks; base += local_range) {
+      const int c = base + tid;
+      const bool active = c < num_chunks;
 
-    // Step 2: Reduce to find group max
-    const float group_max = sycl::reduce_over_group(
-        item.get_group(), sycl::fabs(result), sycl::maximum<float>());
+      float res[VEC];
+      float lane_absmax = 0.0f;
+      if (active) {
+        vec_n_t<scalar_t, VEC> g = vgate[c];
+        vec_n_t<scalar_t, VEC> u = vup[c];
+#pragma unroll
+        for (int k = 0; k < VEC; ++k) {
+          const float gf = static_cast<float>(g.val[k]);
+          const float uf = static_cast<float>(u.val[k]);
+          const float r = (gf / (1.0f + sycl::exp(-gf))) * uf;
+          res[k] = r;
+          lane_absmax = sycl::max(lane_absmax, sycl::fabs(r));
+        }
+      }
 
-    // Step 3: Compute scale
-    float group_scale;
-    if constexpr (std::is_same_v<out_t, int8_t>) {
-      group_scale =
-          std::max(group_max / 127.0f, std::numeric_limits<float>::epsilon());
-    } else {
-      const float fp8_max = static_cast<float>(fp8::quant_type_max_v<out_t>);
-      group_scale =
-          sycl::max(group_max / fp8_max, fp8::min_scaling_factor<out_t>::val());
-      if (scale_ub != nullptr) {
-        group_scale = sycl::min(group_scale, *scale_ub);
+      // Segmented max over the lanes_per_group consecutive lanes of a group.
+      float gmax = lane_absmax;
+#pragma unroll
+      for (int off = 1; off < lanes_per_group; off <<= 1) {
+        gmax = sycl::max(gmax, sycl::permute_group_by_xor(sg, gmax, off));
+      }
+
+      float group_scale;
+      if constexpr (std::is_same_v<out_t, int8_t>) {
         group_scale =
-            sycl::max(group_scale, fp8::min_scaling_factor<out_t>::val());
+            std::max(gmax / 127.0f, std::numeric_limits<float>::epsilon());
+      } else {
+        const float fp8_max = static_cast<float>(fp8::quant_type_max_v<out_t>);
+        group_scale =
+            sycl::max(gmax / fp8_max, fp8::min_scaling_factor<out_t>::val());
+        if (scale_ub != nullptr) {
+          group_scale = sycl::min(group_scale, *scale_ub);
+          group_scale =
+              sycl::max(group_scale, fp8::min_scaling_factor<out_t>::val());
+        }
+        if (scale_ue8m0) {
+          group_scale = sycl::exp2(
+              sycl::ceil(
+                  sycl::log2(sycl::fmax(sycl::fabs(group_scale), 1e-10f))));
+        }
+      }
+
+      if (active && (lane % lanes_per_group) == 0) {
+        const int g_idx = c / lanes_per_group;
+        const int64_t scale_idx =
+            static_cast<int64_t>(token_idx) * scale_stride_token +
+            static_cast<int64_t>(g_idx) * scale_stride_group;
+        scales[scale_idx] = group_scale;
+      }
+
+      if (active) {
+        vec_n_t<out_t, VEC> o;
+#pragma unroll
+        for (int k = 0; k < VEC; ++k) {
+          o.val[k] =
+              vllm::ScaledQuant<out_t, false>::quant_fn(res[k], group_scale);
+        }
+        vout[c] = o;
       }
     }
-
-    if (tid == 0) {
-      const int64_t scale_idx =
-          static_cast<int64_t>(token_idx) * scale_stride_token +
-          static_cast<int64_t>(group_idx) * scale_stride_group;
-      scales[scale_idx] = group_scale;
-    }
-
-    // Step 4: Quantize and write output
-    token_output[tid] =
-        vllm::ScaledQuant<out_t, false>::quant_fn(result, group_scale);
   }
 
  private:
@@ -94,6 +133,7 @@ class silu_and_mul_per_block_quant_kernel {
   const int group_size;
   const int64_t scale_stride_token;
   const int64_t scale_stride_group;
+  const bool scale_ue8m0;
 };
 
 }  // namespace vllm
@@ -104,7 +144,8 @@ void silu_and_mul_per_block_quant(
     torch::Tensor& scales,
     int64_t group_size,
     std::optional<torch::Tensor> scale_ub,
-    bool is_scale_transposed) {
+    bool is_scale_transposed,
+    bool scale_ue8m0) {
   TORCH_CHECK(
       out.dtype() == torch::kFloat8_e4m3fn ||
           out.dtype() == torch::kFloat8_e5m2 || out.dtype() == torch::kInt8,
@@ -116,8 +157,8 @@ void silu_and_mul_per_block_quant(
   TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
   TORCH_CHECK(scales.dtype() == torch::kFloat32, "scales must be float32");
   TORCH_CHECK(
-      group_size == 64 || group_size == 128,
-      "group_size must be 64 or 128, got ",
+      group_size == 32 || group_size == 64 || group_size == 128,
+      "group_size must be 32, 64, or 128, got ",
       group_size);
   if (scale_ub.has_value()) {
     TORCH_CHECK(
@@ -156,8 +197,10 @@ void silu_and_mul_per_block_quant(
   const float* scale_ub_ptr =
       scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr;
 
-  const int64_t num_wgs = num_tokens * num_groups;
-  const int64_t wg_size = group_size;
+  const int64_t num_wgs = num_tokens;
+  const int64_t num_chunks = hidden_size / 8;
+  int64_t wg_size = std::min<int64_t>(((num_chunks + 31) / 32) * 32, 1024);
+  if (wg_size < 32) wg_size = 32;
 
   VLLM_DISPATCH_HALF_TYPES(
       input.scalar_type(), "silu_and_mul_per_block_quant", [&] {
@@ -180,7 +223,8 @@ void silu_and_mul_per_block_quant(
                     static_cast<int>(num_groups),
                     static_cast<int>(group_size),
                     scale_stride_token,
-                    scale_stride_group));
+                    scale_stride_group,
+                    scale_ue8m0));
           });
         };
 

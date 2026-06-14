@@ -8,6 +8,7 @@
 #include "ops.h"
 #include "utils.h"
 #include "quantization/fp4/mxfp4_quant.h"
+#include "quantization/utils.h"
 
 namespace vllm {
 
@@ -39,50 +40,80 @@ class silu_and_mul_mxfp4_quant_kernel {
 
   void operator()
       [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
-    const int wg_id = static_cast<int>(item.get_group(0));
+    const int token_idx = static_cast<int>(item.get_group(0));
     const int tid = static_cast<int>(item.get_local_id(0));
+    const int local_range = static_cast<int>(item.get_local_range(0));
+    auto sg = item.get_sub_group();
+    const int lane = sg.get_local_id()[0];
 
-    const int token_idx = wg_id / num_groups;
-    const int group_idx = wg_id % num_groups;
-    const int group_start = group_idx * group_size;
+    constexpr int VEC = 16 / sizeof(scalar_t);
+    const int lanes_per_group = group_size / VEC;  // 32/8 = 4
+    const int num_chunks = hidden_size / VEC;
+    constexpr float FP4_MAX = vllm::mxfp4::FP4_MAX;
 
     const scalar_t* token_gate =
-        input + token_idx * hidden_size * 2 + group_start;
+        input + static_cast<int64_t>(token_idx) * hidden_size * 2;
     const scalar_t* token_up = token_gate + hidden_size;
     uint8_t* token_output =
-        out + token_idx * (hidden_size / 2) + group_start / 2;
+        out + static_cast<int64_t>(token_idx) * (hidden_size / 2);
+    const auto* vgate =
+        reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(token_gate);
+    const auto* vup = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(token_up);
+    auto* vout = reinterpret_cast<vec_n_t<uint8_t, VEC / 2>*>(token_output);
 
-    const float gate_f = static_cast<float>(token_gate[tid]);
-    const float up_f = static_cast<float>(token_up[tid]);
-    const float silu_gate = gate_f / (1.0f + sycl::exp(-gate_f));
-    const float result = silu_gate * up_f;
+    for (int base = 0; base < num_chunks; base += local_range) {
+      const int c = base + tid;
+      const bool active = c < num_chunks;
 
-    constexpr float FP4_MAX = vllm::mxfp4::FP4_MAX;
-    const float group_max = sycl::reduce_over_group(
-        item.get_group(), sycl::fabs(result), sycl::maximum<float>());
+      float res[VEC];
+      float lane_absmax = 0.0f;
+      if (active) {
+        vec_n_t<scalar_t, VEC> g = vgate[c];
+        vec_n_t<scalar_t, VEC> u = vup[c];
+#pragma unroll
+        for (int k = 0; k < VEC; ++k) {
+          const float gf = static_cast<float>(g.val[k]);
+          const float uf = static_cast<float>(u.val[k]);
+          const float r = (gf / (1.0f + sycl::exp(-gf))) * uf;
+          res[k] = r;
+          lane_absmax = sycl::max(lane_absmax, sycl::fabs(r));
+        }
+      }
 
-    float y_s = group_max / FP4_MAX;
-    y_s = sycl::exp2(
-        sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(y_s), epsilon))));
+      float gmax = lane_absmax;
+#pragma unroll
+      for (int off = 1; off < lanes_per_group; off <<= 1) {
+        gmax = sycl::max(gmax, sycl::permute_group_by_xor(sg, gmax, off));
+      }
 
-    if (tid == 0) {
-      const int64_t scale_idx =
-          static_cast<int64_t>(token_idx) * scale_stride_token +
-          static_cast<int64_t>(group_idx) * scale_stride_group;
-      scales[scale_idx] = y_s;
-    }
+      float y_s = gmax / FP4_MAX;
+      y_s = sycl::exp2(
+          sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(y_s), epsilon))));
 
-    const float inv_scale = 1.0f / y_s;
-    float scaled =
-        sycl::fmax(-FP4_MAX, sycl::fmin(result * inv_scale, FP4_MAX));
-    uint8_t fp4_val = vllm::mxfp4::float_to_fp4_e2m1(scaled);
+      if (active && (lane % lanes_per_group) == 0) {
+        const int g_idx = c / lanes_per_group;
+        const int64_t scale_idx =
+            static_cast<int64_t>(token_idx) * scale_stride_token +
+            static_cast<int64_t>(g_idx) * scale_stride_group;
+        scales[scale_idx] = y_s;
+      }
 
-    uint8_t next_fp4 = static_cast<uint8_t>(sycl::shift_group_left(
-        item.get_sub_group(), static_cast<uint32_t>(fp4_val), 1u));
-
-    if ((tid % 2) == 0) {
-      token_output[tid / 2] =
-          static_cast<uint8_t>(((next_fp4 & 0x0Fu) << 4) | (fp4_val & 0x0Fu));
+      if (active) {
+        const float inv_scale = 1.0f / y_s;
+        vec_n_t<uint8_t, VEC / 2> o;
+#pragma unroll
+        for (int k = 0; k < VEC; k += 2) {
+          float s0 =
+              sycl::fmax(-FP4_MAX, sycl::fmin(res[k] * inv_scale, FP4_MAX));
+          float s1 =
+              sycl::fmax(-FP4_MAX, sycl::fmin(res[k + 1] * inv_scale, FP4_MAX));
+          uint8_t n0 = vllm::mxfp4::float_to_fp4_e2m1(s0);
+          uint8_t n1 = vllm::mxfp4::float_to_fp4_e2m1(s1);
+          o.val[k / 2] =
+              static_cast<uint8_t>(((n1 & 0x0Fu) << 4) | (n0 & 0x0Fu));
+        }
+        vout[c] = o;
+      }
     }
   }
 
@@ -147,8 +178,10 @@ void silu_and_mul_mxfp4_quant(
   const at::DeviceGuard device_guard(input.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  const int64_t num_wgs = num_tokens * num_groups;
-  const int64_t wg_size = group_size;  // 32 threads per (token, group)
+  const int64_t num_wgs = num_tokens;
+  const int64_t num_chunks = hidden_size / 8;  // 16 bytes / 2-byte half
+  int64_t wg_size = std::min<int64_t>(((num_chunks + 31) / 32) * 32, 1024);
+  if (wg_size < 32) wg_size = 32;
 
   VLLM_DISPATCH_HALF_TYPES(
       input.scalar_type(), "silu_and_mul_mxfp4_quant", [&] {
