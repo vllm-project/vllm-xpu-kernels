@@ -271,10 +271,21 @@ void cutlass_chunk_prefill_impl(
   // that tiles_per_page = page_size / TileShapeQK[1] is exact.
   const bool use_b16_policy =
       is_paged && (block_size != 32) && (block_size % 64 != 0);
+  static constexpr int head_size_limit_72 = 72;
 
   if (use_b16_policy) {
     if (args.head_size <= HEAD_SIZE_LIMIT_0) {
       policy_dispatch_func<chunk_policy_head64_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size == head_size_limit_72) {
+      policy_dispatch_func<chunk_policy_head72_b16>(
           queue,
           cuQKType,
           args,
@@ -338,6 +349,9 @@ void cutlass_chunk_prefill_impl(
     }
   } else if (args.head_size <= HEAD_SIZE_LIMIT_0) {
     policy_dispatch_func<chunk_policy_head64>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+  } else if (args.head_size == head_size_limit_72) {
+    policy_dispatch_func<chunk_policy_head72>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
     policy_dispatch_func<chunk_policy_head96>(
