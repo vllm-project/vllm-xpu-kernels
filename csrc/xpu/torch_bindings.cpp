@@ -72,6 +72,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl(
       "multimodal_rotary_embedding", torch::kXPU, &multimodal_rotary_embedding);
 
+  // Apply rotary embedding taking cos/sin directly (flash_attn style).
+  // For diffusion models where cos/sin are pre-computed externally.
+  xpu_ops.def(
+      "apply_rotary_emb(Tensor! output, Tensor input,"
+      "                 Tensor cos, Tensor sin, bool is_neox) -> ()");
+  xpu_ops.impl("apply_rotary_emb", torch::kXPU, &apply_rotary_emb);
+
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
       "indices, float scale) -> ()");
