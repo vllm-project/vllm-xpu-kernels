@@ -190,16 +190,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "deepseek_fused_indexer_q_rope_fp8(Tensor q, Tensor positions, "
       "Tensor cos_sin_cache, Tensor index_weights, float softmax_scale, "
       "float head_scale, Tensor! q_fp8, Tensor! weights_out) -> ()");
-  xpu_ops.impl("deepseek_fused_indexer_q_rope_fp8", torch::kXPU,
-               &deepseek_fused_indexer_q_rope_fp8);
+  xpu_ops.impl(
+      "deepseek_fused_indexer_q_rope_fp8",
+      torch::kXPU,
+      &deepseek_fused_indexer_q_rope_fp8);
 
   xpu_ops.def(
       "deepseek_fused_indexer_q_rope_mxfp4(Tensor q, Tensor positions, "
       "Tensor cos_sin_cache, Tensor index_weights, float softmax_scale, "
       "float head_scale, Tensor! packed_out, Tensor! scales_out, "
       "Tensor! weights_out) -> ()");
-  xpu_ops.impl("deepseek_fused_indexer_q_rope_mxfp4", torch::kXPU,
-               &deepseek_fused_indexer_q_rope_mxfp4);
+  xpu_ops.impl(
+      "deepseek_fused_indexer_q_rope_mxfp4",
+      torch::kXPU,
+      &deepseek_fused_indexer_q_rope_mxfp4);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
