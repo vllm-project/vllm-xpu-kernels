@@ -16,7 +16,7 @@ psutil
 # torch dependency
 --extra-index-url=https://download.pytorch.org/whl/test/xpu
 torch==2.13.0+xpu
-triton-xp
+triton-xpu
 # may need oneapi packages
 
 # tests
