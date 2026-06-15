@@ -79,6 +79,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "                 Tensor cos, Tensor sin, bool is_neox) -> ()");
   xpu_ops.impl("apply_rotary_emb", torch::kXPU, &apply_rotary_emb);
 
+  xpu_ops.def("fp32_router_gemm(Tensor mat_a, Tensor mat_b) -> Tensor");
+  xpu_ops.impl("fp32_router_gemm", torch::kXPU, &fp32_router_gemm);
+
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
       "indices, float scale) -> ()");

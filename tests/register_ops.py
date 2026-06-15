@@ -593,3 +593,10 @@ def topk_per_row_decode(
         logits.stride(1),
         top_k,
     )
+
+
+def fp32_router_gemm(
+    mat_a: torch.Tensor,
+    mat_b: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._xpu_C.fp32_router_gemm(mat_a, mat_b)

@@ -92,6 +92,13 @@ void apply_rotary_emb(
     torch::Tensor& sin,     // [num_tokens, rot_dim/2]
     bool is_neox);
 
+// MiniMax-M3 / DeepSeek-style MoE router GEMM:
+//   out[m, n] = sum_k mat_a[m, k] * mat_b[n, k]  (fp32 output)
+// mat_a (activation) is bf16 or fp32; mat_b (weight) is fp32. num_tokens <= 32.
+torch::Tensor fp32_router_gemm(
+    const torch::Tensor& mat_a,
+    const torch::Tensor& mat_b);
+
 #ifdef VLLM_GDN_ENABLED
 void gdn_attention(
     torch::Tensor& core_attn_out,
