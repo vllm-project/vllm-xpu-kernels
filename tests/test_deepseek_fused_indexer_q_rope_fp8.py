@@ -27,7 +27,10 @@ HALF_ROPE = 32
 def reference_fused_indexer_q_rope_fp8(
     q, positions, cos_sin_cache, index_weights, softmax_scale, head_scale
 ):
-    """Pure PyTorch reference matching Triton _fused_indexer_q_rope_quant_kernel."""
+    """Pure PyTorch reference matching Triton.
+
+    Matches `_fused_indexer_q_rope_quant_kernel` semantics.
+    """
     num_tokens = q.shape[0]
     num_heads = q.shape[1]
 
@@ -148,9 +151,8 @@ def test_weight_fold_semantics():
         q, positions, cos_sin_cache, index_weights,
         softmax_scale, head_scale, q_fp8, weights_out)
 
-    # All values are 0.5, so amax=0.5, scale=2^ceil(log2(0.5/448))=2^(-10)=1/1024? 
-    # Actually: log2(0.5/448) = log2(0.001116) ≈ -9.807, ceil=-9, scale=2^-9=1/512
-    # No wait: max(0.5, 1e-4)=0.5, 0.5/448≈0.001116, log2≈-9.807, ceil=-9
+    # All values are 0.5, so amax=0.5.
+    # log2(0.5 / 448) ~= -9.807, ceil = -9, so scale = 2^-9 = 1/512.
     # scale = 2^(-9) = 1/512
     expected_scale = 2.0 ** math.ceil(math.log2(0.5 / 448.0))
     expected_w = 1.0 * expected_scale * softmax_scale * head_scale

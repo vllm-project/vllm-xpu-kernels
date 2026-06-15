@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Fused DeepSeek-V4 indexer Q: GPT-J RoPE + per-block MXFP4 quantize + weight fold.
-// One sub-group (16 lanes) handles 4 heads (COARSEN=4) per token.
-// Each head has 4 x 32-element blocks quantized to MXFP4 with ue8m0 scales.
+// Fused DeepSeek-V4 indexer Q: GPT-J RoPE + per-block MXFP4 quantize + weight
+// fold. One sub-group (16 lanes) handles 4 heads (COARSEN=4) per token. Each
+// head has 4 x 32-element blocks quantized to MXFP4 with ue8m0 scales.
 
 #include <sycl/sycl.hpp>
 #include "utils.h"
@@ -12,16 +12,16 @@ namespace vllm {
 
 using bf16_t = sycl::ext::oneapi::bfloat16;
 
-static constexpr int HEAD_DIM        = 128;
-static constexpr int NOPE_DIM        = 64;
-static constexpr int ROPE_DIM        = 64;
-static constexpr int HALF_ROPE       = 32;
-static constexpr int HALF_BLOCK      = 16;
-static constexpr int NUM_BLOCKS      = 4;  // HEAD_DIM / MXFP4_BLOCK_SIZE
-static constexpr int HEADS_COARSEN   = 4;
-static constexpr int SG_SIZE         = 16;
-static constexpr float FP4_MAX       = 6.0f;
-static constexpr float INV_FP4_MAX   = 1.0f / 6.0f;
+static constexpr int HEAD_DIM = 128;
+static constexpr int NOPE_DIM = 64;
+static constexpr int ROPE_DIM = 64;
+static constexpr int HALF_ROPE = 32;
+static constexpr int HALF_BLOCK = 16;
+static constexpr int NUM_BLOCKS = 4;  // HEAD_DIM / MXFP4_BLOCK_SIZE
+static constexpr int HEADS_COARSEN = 4;
+static constexpr int SG_SIZE = 16;
+static constexpr float FP4_MAX = 6.0f;
+static constexpr float INV_FP4_MAX = 1.0f / 6.0f;
 
 // Staircase FP4 E2M1 encoder: maps float -> 4-bit code (sign|mantissa).
 inline uint8_t encode_fp4(float x) {
@@ -101,7 +101,7 @@ class deepseek_fused_indexer_q_rope_mxfp4_kernel {
 
     // Batch-load all 4 heads upfront (16 uint32 loads)
     uint32_t data[HEADS_COARSEN][4];
-    #pragma unroll
+#pragma unroll
     for (int hc = 0; hc < HEADS_COARSEN; ++hc) {
       const uint32_t* q32 = reinterpret_cast<const uint32_t*>(
           q_ + tok * qs0 + (bh + hc) * HEAD_DIM);
@@ -111,7 +111,7 @@ class deepseek_fused_indexer_q_rope_mxfp4_kernel {
       data[hc][3] = q32[NOPE_DIM / 2 + HALF_BLOCK + lane];
     }
 
-    #pragma unroll
+#pragma unroll
     for (int hc = 0; hc < HEADS_COARSEN; ++hc) {
       const int h = bh + hc;
       uint8_t* pd = packed_ + ((int64_t)tok * H_ + h) * (HEAD_DIM / 2);
@@ -221,7 +221,8 @@ void deepseek_fused_indexer_q_rope_mxfp4(
   const bf16_t* q_ptr = reinterpret_cast<const bf16_t*>(q.data_ptr());
   const int64_t* pos_ptr = positions.data_ptr<int64_t>();
   const float* cs_ptr = cos_sin_cache.data_ptr<float>();
-  const bf16_t* w_ptr = reinterpret_cast<const bf16_t*>(index_weights.data_ptr());
+  const bf16_t* w_ptr =
+      reinterpret_cast<const bf16_t*>(index_weights.data_ptr());
   uint8_t* packed_ptr = packed_out.data_ptr<uint8_t>();
   uint8_t* scales_ptr = scales_out.data_ptr<uint8_t>();
   float* wo_ptr = weights_out.data_ptr<float>();
@@ -236,7 +237,15 @@ void deepseek_fused_indexer_q_rope_mxfp4(
              static_cast<size_t>(nhg * SG_SIZE)},
             {1, static_cast<size_t>(SG_SIZE)}),
         deepseek_fused_indexer_q_rope_mxfp4_kernel(
-            q_ptr, pos_ptr, cs_ptr, w_ptr, packed_ptr, scales_ptr, wo_ptr,
-            num_tokens, num_heads, combined_scale));
+            q_ptr,
+            pos_ptr,
+            cs_ptr,
+            w_ptr,
+            packed_ptr,
+            scales_ptr,
+            wo_ptr,
+            num_tokens,
+            num_heads,
+            combined_scale));
   });
 }

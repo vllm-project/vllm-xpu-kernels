@@ -75,13 +75,16 @@ def reference_fused_indexer_q_rope_mxfp4(
                 base = b * MXFP4_BLOCK_SIZE
                 block = fp[base:base + MXFP4_BLOCK_SIZE]
 
-                # amax with minimum floor (matches fast_inv_scale subnormal guard)
+                # amax with minimum floor.
+                # Matches fast_inv_scale subnormal guard.
                 amax = block.abs().max().item()
                 if amax == 0:
                     amax = FP4_MAX * (2.0 ** -126)
 
                 # ue8m0: biased exponent of scale = 2^ceil(log2(amax/6))
-                lr = math.ceil(math.log2(max(amax / FP4_MAX, 2.0**-126)))
+                lr = math.ceil(
+                    math.log2(max(amax / FP4_MAX, 2.0**-126))
+                )
                 lr = min(max(lr, -127), 127)
                 ue8m0 = int(lr + 127)
                 scales_out[t, h, b] = ue8m0
@@ -90,8 +93,10 @@ def reference_fused_indexer_q_rope_mxfp4(
                 for p in range(16):
                     vl = max(-FP4_MAX, min(fp[base + p * 2].item() * inv_scale,
                                            FP4_MAX))
-                    vh = max(-FP4_MAX, min(fp[base + p * 2 + 1].item() * inv_scale,
-                                           FP4_MAX))
+                    vh = max(
+                        -FP4_MAX,
+                        min(fp[base + p * 2 + 1].item() * inv_scale, FP4_MAX),
+                    )
                     packed_out[t, h, base // 2 + p] = (
                         ((encode_fp4(vh) & 0xF) << 4) | (encode_fp4(vl) & 0xF))
 

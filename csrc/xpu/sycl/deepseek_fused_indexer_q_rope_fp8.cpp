@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Fused DeepSeek-V4 indexer Q: GPT-J RoPE + per-head FP8 quantize + weight fold.
-// One sub-group (16 lanes) handles 2 heads (COARSEN=2) per token.
-// Matches the Triton _fused_indexer_q_rope_quant_kernel semantics.
+// Fused DeepSeek-V4 indexer Q: GPT-J RoPE + per-head FP8 quantize + weight
+// fold. One sub-group (16 lanes) handles 2 heads (COARSEN=2) per token. Matches
+// the Triton _fused_indexer_q_rope_quant_kernel semantics.
 
 #include <sycl/sycl.hpp>
 #include "utils.h"
@@ -12,13 +12,13 @@ namespace vllm {
 
 using bf16_t = sycl::ext::oneapi::bfloat16;
 
-static constexpr int HEAD_DIM      = 128;
-static constexpr int NOPE_DIM      = 64;
-static constexpr int ROPE_DIM      = 64;
-static constexpr int HALF_ROPE     = 32;
-static constexpr int HALF_BLOCK    = 16;
+static constexpr int HEAD_DIM = 128;
+static constexpr int NOPE_DIM = 64;
+static constexpr int ROPE_DIM = 64;
+static constexpr int HALF_ROPE = 32;
+static constexpr int HALF_BLOCK = 16;
 static constexpr int HEADS_COARSEN = 2;
-static constexpr int SG_SIZE       = 16;
+static constexpr int SG_SIZE = 16;
 static constexpr float INV_FP8_MAX = 1.0f / 448.0f;
 
 // Division-free power-of-2 scale + inv_scale computation.
@@ -67,10 +67,16 @@ class deepseek_fused_indexer_q_rope_fp8_kernel {
       int64_t num_tokens,
       int64_t num_heads,
       int64_t cos_sin_stride)
-      : q_(q), positions_(positions), cos_sin_cache_(cos_sin_cache),
-        weights_(weights), q_fp8_(q_fp8), weights_out_(weights_out),
-        weight_combined_(weight_combined), num_tokens_(num_tokens),
-        num_heads_(num_heads), cos_sin_stride_(cos_sin_stride) {}
+      : q_(q),
+        positions_(positions),
+        cos_sin_cache_(cos_sin_cache),
+        weights_(weights),
+        q_fp8_(q_fp8),
+        weights_out_(weights_out),
+        weight_combined_(weight_combined),
+        num_tokens_(num_tokens),
+        num_heads_(num_heads),
+        cos_sin_stride_(cos_sin_stride) {}
 
   [[sycl::reqd_sub_group_size(SG_SIZE)]]
   void operator()(sycl::nd_item<2> item) const {
@@ -84,12 +90,13 @@ class deepseek_fused_indexer_q_rope_fp8_kernel {
     // Load cos/sin for this token's position.
     const float* csr = cos_sin_cache_ + positions_[tok] * cos_sin_stride_;
     const float c0 = csr[lane], s0 = csr[HALF_ROPE + lane];
-    const float c1 = csr[HALF_BLOCK + lane], s1 = csr[HALF_ROPE + HALF_BLOCK + lane];
+    const float c1 = csr[HALF_BLOCK + lane],
+                s1 = csr[HALF_ROPE + HALF_BLOCK + lane];
     const int64_t q_token_stride = num_heads_ * HEAD_DIM;
 
     // Prefetch 2 heads of Q data as packed uint32 (2×bf16 per lane).
     uint32_t dd[HEADS_COARSEN][4];
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < HEADS_COARSEN; ++i) {
       const uint32_t* q32 = reinterpret_cast<const uint32_t*>(
           q_ + tok * q_token_stride + (bh + i) * HEAD_DIM);
@@ -99,7 +106,7 @@ class deepseek_fused_indexer_q_rope_fp8_kernel {
       dd[i][3] = q32[NOPE_DIM / 2 + HALF_BLOCK + lane];
     }
 
-    #pragma unroll
+#pragma unroll
     for (int hc = 0; hc < HEADS_COARSEN; ++hc) {
       const int64_t h = bh + hc;
 
@@ -115,16 +122,21 @@ class deepseek_fused_indexer_q_rope_fp8_kernel {
 
       // GPT-J RoPE + bf16 roundtrip (matches Triton reference numerics).
       float re0 = xe0 * c0 - xo0 * s0, ro0 = xo0 * c0 + xe0 * s0;
-      re0 = (float)(bf16_t)re0; ro0 = (float)(bf16_t)ro0;
+      re0 = (float)(bf16_t)re0;
+      ro0 = (float)(bf16_t)ro0;
       float re1 = xe1 * c1 - xo1 * s1, ro1 = xo1 * c1 + xe1 * s1;
-      re1 = (float)(bf16_t)re1; ro1 = (float)(bf16_t)ro1;
+      re1 = (float)(bf16_t)re1;
+      ro1 = (float)(bf16_t)ro1;
 
       // Per-head absmax reduction.
-      float lm = sycl::fmax(sycl::fmax(sycl::fabs(n0l), sycl::fabs(n0h)),
-                            sycl::fmax(sycl::fabs(n1l), sycl::fabs(n1h)));
-      lm = sycl::fmax(lm, sycl::fmax(
-          sycl::fmax(sycl::fabs(re0), sycl::fabs(ro0)),
-          sycl::fmax(sycl::fabs(re1), sycl::fabs(ro1))));
+      float lm = sycl::fmax(
+          sycl::fmax(sycl::fabs(n0l), sycl::fabs(n0h)),
+          sycl::fmax(sycl::fabs(n1l), sycl::fabs(n1h)));
+      lm = sycl::fmax(
+          lm,
+          sycl::fmax(
+              sycl::fmax(sycl::fabs(re0), sycl::fabs(ro0)),
+              sycl::fmax(sycl::fabs(re1), sycl::fabs(ro1))));
       float amax = sycl::reduce_over_group(sg, lm, sycl::maximum<float>());
 
       // Scale (division-free power-of-2).
@@ -181,10 +193,13 @@ void deepseek_fused_indexer_q_rope_fp8(
     double head_scale,
     torch::Tensor& q_fp8,
     torch::Tensor& weights_out) {
-
   TORCH_CHECK(q.dim() == 3, "q must be [T, H, HEAD_DIM]");
-  TORCH_CHECK(q.size(2) == vllm::HEAD_DIM,
-      "q HEAD_DIM must be ", vllm::HEAD_DIM, ", got ", q.size(2));
+  TORCH_CHECK(
+      q.size(2) == vllm::HEAD_DIM,
+      "q HEAD_DIM must be ",
+      vllm::HEAD_DIM,
+      ", got ",
+      q.size(2));
 
   const int64_t num_tokens = q.size(0);
   const int64_t num_heads = q.size(1);
@@ -192,8 +207,10 @@ void deepseek_fused_indexer_q_rope_fp8(
   const float weight_combined =
       static_cast<float>(softmax_scale) * static_cast<float>(head_scale);
 
-  TORCH_CHECK(num_heads % vllm::HEADS_COARSEN == 0,
-      "num_heads must be divisible by ", vllm::HEADS_COARSEN);
+  TORCH_CHECK(
+      num_heads % vllm::HEADS_COARSEN == 0,
+      "num_heads must be divisible by ",
+      vllm::HEADS_COARSEN);
 
   const int64_t nhg =
       (num_heads + vllm::HEADS_COARSEN - 1) / vllm::HEADS_COARSEN;
@@ -212,7 +229,15 @@ void deepseek_fused_indexer_q_rope_fp8(
             {(size_t)num_tokens, (size_t)(nhg * vllm::SG_SIZE)},
             {1, (size_t)vllm::SG_SIZE}),
         vllm::deepseek_fused_indexer_q_rope_fp8_kernel(
-            q_ptr, pos_ptr, cs_ptr, w_ptr, fp8_ptr, wo_ptr,
-            weight_combined, num_tokens, num_heads, cos_sin_stride));
+            q_ptr,
+            pos_ptr,
+            cs_ptr,
+            w_ptr,
+            fp8_ptr,
+            wo_ptr,
+            weight_combined,
+            num_tokens,
+            num_heads,
+            cos_sin_stride));
   });
 }
