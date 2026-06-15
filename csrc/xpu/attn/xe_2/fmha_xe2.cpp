@@ -214,7 +214,7 @@ void cutlass_chunk_prefill_impl(
           cutlass::KernelHardwareInfo::query_device_multiprocessor_count(0);
       bool gpu_saturated = (total_wgs >= 4 * sm_count);
       reverse = is_causal && !is_local && !is_sink && num_heads_q >= 2 &&
-          (is_gqa || !gpu_saturated);
+                (is_gqa || !gpu_saturated);
     }
     args.reverse_q_order = reverse;
   }
