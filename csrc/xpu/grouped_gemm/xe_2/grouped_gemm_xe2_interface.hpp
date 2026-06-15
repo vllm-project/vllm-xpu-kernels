@@ -178,7 +178,7 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
   bool is_weight_fp8 =
       ((B_dtype == at::kFloat8_e4m3fn) || (B_dtype == at::kFloat8_e5m2));
 
-  TORCH_CHECK(N % 32 == 0, "N must be divisible by 32");
+  TORCH_CHECK(N % 8 == 0, "N must be divisible by 8");
 
   TORCH_CHECK(ptr_A.dim() == 2, "ptr_A must be 2D [Total_M, K]");
   TORCH_CHECK(ptr_B.dim() == 3, "ptr_B must be 3D [num_experts, K, N]");

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   pre-commit:
-    runs-on: self-hosted-pvc
+    runs-on: self-hosted-pvc-cpu
     steps:
     - name: Clean workspace
       run: |

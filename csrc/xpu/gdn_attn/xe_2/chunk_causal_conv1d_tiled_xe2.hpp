@@ -59,7 +59,8 @@ struct chunk_causal_conv1d_tiled_kernel {
       const int& qkvz_elems,
       const int& conv_elems,
       const int& num_virtual_tokens,
-      char* slm_data)
+      char* slm_data,
+      const bool fuse_l2norm)
       : q_out(q_out),
         k_out(k_out),
         v_out(v_out),
@@ -87,7 +88,8 @@ struct chunk_causal_conv1d_tiled_kernel {
         qkvz_elems(qkvz_elems),
         conv_elems(conv_elems),
         num_virtual_tokens(num_virtual_tokens),
-        slm_data(slm_data) {}
+        slm_data(slm_data),
+        fuse_l2norm(fuse_l2norm) {}
 
   inline int lookup(int t) const { return token_indx ? token_indx[t] : t; }
 
@@ -115,13 +117,18 @@ struct chunk_causal_conv1d_tiled_kernel {
   }
 
   static constexpr int meta_ints = 5;
-  // SLM sizes in bytes: metadata (ints) + input data (T elements)
+  // SLM sizes in bytes: metadata (ints) + input data (T elements) + norm
+  // (floats)
   static constexpr int slm_meta_bytes = meta_ints * sizeof(int);
   static constexpr int feats_per_wg = wg_size * elems_per_item;
   static constexpr int slm_data_elems = (TileT + Width - 1) * feats_per_wg;
+  static constexpr int num_subgroups_per_wg = wg_size / sub_group_size;
+  // 2 floats per subgroup: one for Q partial sum, one for K partial sum
+  static constexpr int norm_slm_bytes =
+      2 * num_subgroups_per_wg * static_cast<int>(sizeof(float));
 
   static inline int get_slm_bytes() {
-    return slm_meta_bytes + slm_data_elems * sizeof(T);
+    return slm_meta_bytes + slm_data_elems * sizeof(T) + norm_slm_bytes;
   }
 
   static inline void act_swish(float& x, float beta = 1.0f) {
@@ -391,6 +398,66 @@ struct chunk_causal_conv1d_tiled_kernel {
         }
       }
 
+      // ---- Fused L2 norm for Q and K (only in feat_chunk 0) ----
+      if (fuse_l2norm && feat_chunk_id == 0) {
+        // l2norm_eps is defined in gdn_attn_utils.h
+        float* norm_slm = reinterpret_cast<float*>(
+            reinterpret_cast<char*>(slm_data) + slm_meta_bytes +
+            slm_data_elems * sizeof(T));
+
+        float q_local_sq = 0.0f;
+        float k_local_sq = 0.0f;
+        if (is_q) {
+#pragma unroll
+          for (int e = 0; e < elems_per_item; ++e)
+            q_local_sq += res[e] * res[e];
+        }
+        if (is_k) {
+#pragma unroll
+          for (int e = 0; e < elems_per_item; ++e)
+            k_local_sq += res[e] * res[e];
+        }
+
+        // Subgroup reduce
+        auto sg = item.get_sub_group();
+        float q_sg_sum =
+            sycl::reduce_over_group(sg, q_local_sq, sycl::plus<float>());
+        float k_sg_sum =
+            sycl::reduce_over_group(sg, k_local_sq, sycl::plus<float>());
+
+        // Write subgroup partial sums to SLM
+        int sg_id = sg.get_group_linear_id();
+        if (sg.get_local_linear_id() == 0) {
+          norm_slm[sg_id * 2] = q_sg_sum;
+          norm_slm[sg_id * 2 + 1] = k_sg_sum;
+        }
+        sycl::group_barrier(item.get_group());
+
+        // Combine all subgroup partial sums
+        float q_total = 0.0f;
+        float k_total = 0.0f;
+        for (int i = 0; i < num_subgroups_per_wg; ++i) {
+          q_total += norm_slm[i * 2];
+          k_total += norm_slm[i * 2 + 1];
+        }
+        sycl::group_barrier(item.get_group());  // protect SLM for next token
+
+        float q_inv = sycl::rsqrt(q_total + l2norm_eps) *
+                      sycl::rsqrt(static_cast<float>(q_dim));
+        float k_inv = sycl::rsqrt(k_total + l2norm_eps);
+
+        if (is_q) {
+#pragma unroll
+          for (int e = 0; e < elems_per_item; ++e)
+            res[e] *= q_inv;
+        }
+        if (is_k) {
+#pragma unroll
+          for (int e = 0; e < elems_per_item; ++e)
+            res[e] *= k_inv;
+        }
+      }
+
       // Write output
       int token_in_seq = tile_start_in_seq + t;
       int out_token_id = pre_chunks * chunk_size_xe2 + token_in_seq;
@@ -433,10 +500,14 @@ struct chunk_causal_conv1d_tiled_kernel {
         int out_token_id = pre_chunks * chunk_size_xe2 + token_in_seq;
         int global_tok = lookup(seq_start + token_in_seq);
 
-        // z reorder: each item handles elems_per_item z features
-        // z_dim = 256 for Qwen, items 0-63 cover 64*4=256 features exactly
-        if (local_feat < z_dim) {
-          int z_dim_id = local_feat;
+        // z reorder: each item handles elems_per_item z features per pass.
+        // The 64 items cover feats_per_wg (256) features per pass, so when
+        // z_dim exceeds 256 -- e.g. GQA ratio num_v_heads/num_k_heads == 3
+        // gives z_dim = head_v_dim * 3 = 384 for Qwen3.6 -- a single pass would
+        // drop the tail z features (the 3rd v-head of each k-group). Stride by
+        // feats_per_wg so every z feature is written for any ratio.
+        for (int z_dim_id = local_feat; z_dim_id < z_dim;
+             z_dim_id += feats_per_wg) {
           int mixed_z_id;
           if constexpr (ReorderInput) {
             mixed_z_id = global_tok * num_k_heads * qkvz_dim_full +
@@ -553,6 +624,7 @@ struct chunk_causal_conv1d_tiled_kernel {
   const int conv_elems;
   const int num_virtual_tokens;
   char* slm_data;
+  const bool fuse_l2norm;
 };
 
 template <typename T, int Width, int TileT, bool ReorderInput>
@@ -588,7 +660,8 @@ void tiled_kernel_launcher(
     const int& qkvz_elems,
     const int& conv_elems,
     const int& num_prefills,
-    const int& num_decodes) {
+    const int& num_decodes,
+    const bool fuse_l2norm) {
   // Note: z_out, b_out, a_out, mixed_ba are passed through to the
   // ZBA reorder kernel below, not to the tiled conv1d kernel itself.
   using KERNEL_MAIN =
@@ -633,7 +706,8 @@ void tiled_kernel_launcher(
           qkvz_elems,
           conv_elems,
           num_virtual_tokens,
-          slm_ptr);
+          slm_ptr,
+          fuse_l2norm);
       task(item);
     });
   });
@@ -680,7 +754,8 @@ void chunk_causal_conv1d_tiled_xe2(
     const int num_decodes,
     const bool reorder_input,
     const int* token_indx = nullptr,
-    int num_actual_tokens_override = -1) {
+    int num_actual_tokens_override = -1,
+    const bool fuse_l2norm = false) {
   if (num_prefills == 0 && num_decodes == 0) {
     return;
   }
@@ -753,7 +828,8 @@ void chunk_causal_conv1d_tiled_xe2(
       qkvz_elems,                                                  \
       conv_elems,                                                  \
       num_prefills,                                                \
-      num_decodes);
+      num_decodes,                                                 \
+      fuse_l2norm);
 
 #define TILED_WIDTH_DISPATCH(scalar_t, width, reorder_input) \
   switch (width) {                                           \

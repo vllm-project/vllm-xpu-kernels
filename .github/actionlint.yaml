@@ -3,3 +3,4 @@ self-hosted-runner:
   labels:
     - self-hosted-bmg
     - self-hosted-pvc
+    - self-hosted-pvc-cpu
