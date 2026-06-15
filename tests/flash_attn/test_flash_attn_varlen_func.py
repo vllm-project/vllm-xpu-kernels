@@ -385,6 +385,72 @@ def test_varlen_with_paged_kv(
     torch.xpu.empty_cache()
 
 
+@pytest.mark.parametrize("block_size", [16, 64])
+@torch.inference_mode()
+def test_varlen_with_paged_kv_head_size_72(block_size: int) -> None:
+    """Validate head_size=72 through the padded head80 chunk policies."""
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(2026)
+
+    seq_lens = [(1, 257), (3, 129), (5, 65)]
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = (8, 2)
+    head_size = 72
+    dtype = torch.bfloat16
+    num_blocks = 256
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (len(seq_lens), max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    output = flash_attn_varlen_func(query,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=False,
+                                    block_table=block_tables,
+                                    window_size=(-1, -1),
+                                    s_aux=None)
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False,
+                                is_paged=True,
+                                sink=None,
+                                window_size_left=-1,
+                                window_size_right=-1,
+                                dtype=dtype)
+
+    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
 @pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
