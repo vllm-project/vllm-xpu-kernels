@@ -4,6 +4,8 @@
 #include <sycl/sycl.hpp>
 #include <cstdint>
 
+#include "quantization/utils.h"
+
 namespace vllm {
 namespace mxfp4 {
 
@@ -125,6 +127,111 @@ class per_token_group_quant_mxfp4_kernel {
         // byte[k] = fp4[2k+1] << 4 | fp4[2k]  (matches pack_uint4 in Python)
         group_output[lane_id / 2] =
             ((next_fp4 & 0x0Fu) << 4) | (fp4_val & 0x0Fu);
+      }
+    }
+  }
+};
+
+template <typename scalar_t>
+class per_token_group_quant_mxfp4_vec_kernel {
+ private:
+  uint8_t* __restrict__ out;
+  float* __restrict__ scale;
+  scalar_t const* __restrict__ input;
+  const int hidden_size;
+  const int group_size;  // = 32 for MX format
+  float eps;
+  const int64_t scale_stride_token;
+  const int64_t scale_stride_group;
+
+ public:
+  per_token_group_quant_mxfp4_vec_kernel(
+      uint8_t* out_,
+      float* scale_,
+      scalar_t const* input_,
+      const int hidden_size_,
+      const int group_size_,
+      float eps_,
+      const int64_t scale_stride_token_,
+      const int64_t scale_stride_group_)
+      : out(out_),
+        scale(scale_),
+        input(input_),
+        hidden_size(hidden_size_),
+        group_size(group_size_),
+        eps(eps_),
+        scale_stride_token(scale_stride_token_),
+        scale_stride_group(scale_stride_group_) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
+    const int row_idx = static_cast<int>(item.get_group(0));
+    const int tid = static_cast<int>(item.get_local_id(0));
+    const int local_range = static_cast<int>(item.get_local_range(0));
+    auto sg = item.get_sub_group();
+    const int lane = sg.get_local_id()[0];
+
+    constexpr int VEC = 16 / sizeof(scalar_t);
+    const int lanes_per_group = group_size / VEC;  // 32/8 = 4
+    const int num_chunks = hidden_size / VEC;
+
+    const scalar_t* row_input =
+        input + static_cast<int64_t>(row_idx) * hidden_size;
+    uint8_t* row_output =
+        out + static_cast<int64_t>(row_idx) * (hidden_size / 2);
+    const auto* vin =
+        reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(row_input);
+    auto* vout = reinterpret_cast<vec_n_t<uint8_t, VEC / 2>*>(row_output);
+
+    for (int base = 0; base < num_chunks; base += local_range) {
+      const int c = base + tid;
+      const bool active = c < num_chunks;
+
+      float val[VEC];
+      float lane_absmax = 0.0f;
+      if (active) {
+        vec_n_t<scalar_t, VEC> v = vin[c];
+#pragma unroll
+        for (int k = 0; k < VEC; ++k) {
+          const float f = static_cast<float>(v.val[k]);
+          val[k] = f;
+          lane_absmax = sycl::max(lane_absmax, sycl::fabs(f));
+        }
+      }
+
+      float gmax = lane_absmax;
+#pragma unroll
+      for (int off = 1; off < lanes_per_group; off <<= 1) {
+        gmax = sycl::max(gmax, sycl::permute_group_by_xor(sg, gmax, off));
+      }
+
+      float y_s = gmax / FP4_MAX;
+      y_s =
+          sycl::exp2(sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(y_s), eps))));
+
+      if (active && (lane % lanes_per_group) == 0) {
+        const int g_idx = c / lanes_per_group;
+        const int64_t scale_idx =
+            static_cast<int64_t>(row_idx) * scale_stride_token +
+            static_cast<int64_t>(g_idx) * scale_stride_group;
+        scale[scale_idx] = y_s;
+      }
+
+      if (active) {
+        const float inv_scale = 1.0f / y_s;
+        vec_n_t<uint8_t, VEC / 2> o;
+#pragma unroll
+        for (int k = 0; k < VEC; k += 2) {
+          float s0 =
+              sycl::fmax(-FP4_MAX, sycl::fmin(val[k] * inv_scale, FP4_MAX));
+          float s1 =
+              sycl::fmax(-FP4_MAX, sycl::fmin(val[k + 1] * inv_scale, FP4_MAX));
+          uint8_t n0 = float_to_fp4_e2m1(s0);
+          uint8_t n1 = float_to_fp4_e2m1(s1);
+          o.val[k / 2] =
+              static_cast<uint8_t>(((n1 & 0x0Fu) << 4) | (n0 & 0x0Fu));
+        }
+        vout[c] = o;
       }
     }
   }

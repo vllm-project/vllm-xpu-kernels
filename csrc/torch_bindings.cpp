@@ -50,8 +50,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "rms_norm_per_block_quant(Tensor! result, Tensor input, "
       "Tensor weight, Tensor! scale, float epsilon, "
       "Tensor? scale_ub, Tensor!? residual, int group_size, "
-      "bool is_scale_transposed) -> ()");
+      "bool is_scale_transposed, bool scale_ue8m0=False) -> ()");
   ops.impl("rms_norm_per_block_quant", torch::kXPU, &rms_norm_per_block_quant);
+
+  ops.def(
+      "rms_norm_mxfp4_quant(Tensor! result, Tensor input, Tensor weight, "
+      "Tensor! scale, float epsilon, Tensor!? residual, int group_size) "
+      "-> ()");
+  ops.impl("rms_norm_mxfp4_quant", torch::kXPU, &rms_norm_mxfp4_quant);
 
   // Fused RMSNorm + static FP8 quantization.
   ops.def(
@@ -87,11 +93,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! scales, "
       "int group_size, "
       "Tensor? scale_ub=None, "
-      "bool is_scale_transposed=False) -> ()");
+      "bool is_scale_transposed=False, "
+      "bool scale_ue8m0=False) -> ()");
   ops.impl(
       "silu_and_mul_per_block_quant",
       torch::kXPU,
       &silu_and_mul_per_block_quant);
+
+  ops.def(
+      "silu_and_mul_mxfp4_quant("
+      "Tensor! out, Tensor input, Tensor! scales, "
+      "int group_size, float eps=1e-10) -> ()");
+  ops.impl("silu_and_mul_mxfp4_quant", torch::kXPU, &silu_and_mul_mxfp4_quant);
 
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kXPU, &mul_and_silu);

@@ -84,6 +84,7 @@ def _ref_per_group_quant(
     normed: torch.Tensor,
     group_size: int,
     quant_dtype: torch.dtype,
+    scale_ue8m0: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference dynamic per-column-group quantization."""
     num_tokens = normed.numel() // normed.shape[-1]
@@ -111,6 +112,10 @@ def _ref_per_group_quant(
             q = (chunk / scale).round().clamp(-128, 127).to(torch.int8)
         else:
             scale = torch.clamp(absmax / fp8_max, min=min_sf)
+            if scale_ue8m0:
+                scale = torch.exp2(
+                    torch.ceil(
+                        torch.log2(torch.clamp(scale.abs(), min=1e-10))))
             inv_scale = 1.0 / scale
             q = (chunk * inv_scale).clamp(-fp8_max, fp8_max).to(quant_dtype)
 
@@ -144,6 +149,7 @@ def _ops_per_group_quant(
     quant_dtype: torch.dtype,
     group_size: int,
     residual: torch.Tensor | None,
+    scale_ue8m0: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     x = x.contiguous()
     out = torch.empty_like(x, dtype=quant_dtype)
@@ -165,6 +171,7 @@ def _ops_per_group_quant(
         residual,
         group_size,
         False,  # is_scale_transposed
+        scale_ue8m0,
     )
     return out, scales, residual
 
@@ -549,3 +556,182 @@ def test_fused_add_rms_norm_static_fp8_quant(
                                ref_residual,
                                atol=1e-2,
                                rtol=1e-2)
+
+
+MXFP8_GROUP_SIZES = [32]
+MXFP8_HIDDEN_SIZES = [128, 1024, 5120]
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", MXFP8_HIDDEN_SIZES)
+@pytest.mark.parametrize("group_size", MXFP8_GROUP_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@torch.inference_mode()
+def test_rms_norm_per_block_mxfp8_quant(
+    num_tokens: int,
+    hidden_size: int,
+    group_size: int,
+    add_residual: bool,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    if hidden_size % group_size != 0:
+        pytest.skip(f"hidden_size {hidden_size} not divisible by \
+            group_size {group_size}")
+
+    torch.manual_seed(seed)
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
+
+    quant_dtype = torch.float8_e4m3fn
+
+    layer = RMSNorm(hidden_size, eps=EPS).to(dtype=dtype)
+    layer.weight.data.normal_(mean=1.0, std=0.1)
+
+    scale = 1.0 / hidden_size
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
+    residual = torch.randn_like(x) * scale if add_residual else None
+
+    ref_normed, ref_residual = _ref_rms_norm(layer, x, residual)
+    ref_q, ref_scales = _ref_per_group_quant(ref_normed,
+                                             group_size,
+                                             quant_dtype,
+                                             scale_ue8m0=True)
+
+    # Kernel
+    ops_q, ops_scales, ops_residual = _ops_per_group_quant(layer.weight.data,
+                                                           x,
+                                                           quant_dtype,
+                                                           group_size,
+                                                           residual,
+                                                           scale_ue8m0=True)
+
+    assert ops_q.dtype == quant_dtype
+    assert ops_scales.dtype == torch.float32
+    assert ops_scales.shape == (num_tokens, hidden_size // group_size)
+
+    log2_s = torch.log2(ops_scales.float())
+    torch.testing.assert_close(log2_s, log2_s.round(), atol=1e-5, rtol=0)
+
+    torch.testing.assert_close(ref_scales, ops_scales, atol=1e-4, rtol=1e-4)
+
+    num_groups = hidden_size // group_size
+    ref_qf = ref_q.float().view(num_tokens, num_groups, group_size)
+    ops_qf = ops_q.float().view(num_tokens, num_groups, group_size)
+    if not torch.allclose(ref_qf, ops_qf, atol=1e-6):
+        ref_scales_e = ref_scales.unsqueeze(-1)
+        ops_scales_e = ops_scales.unsqueeze(-1)
+        ref_deq = ref_qf * ref_scales_e
+        ops_deq = ops_qf * ops_scales_e
+        torch.testing.assert_close(ref_deq, ops_deq, atol=0.2, rtol=0.15)
+
+    if add_residual:
+        torch.testing.assert_close(ref_residual,
+                                   ops_residual,
+                                   atol=1e-2,
+                                   rtol=1e-2)
+
+
+from tests.ops.mx_utils import to_mxfp  # noqa: E402
+
+MXFP4_GROUP_SIZE = 32
+MXFP4_HIDDEN_SIZES = [128, 1024, 5120]
+
+
+def _ops_rms_norm_mxfp4_quant(
+    weight: torch.Tensor,
+    x: torch.Tensor,
+    group_size: int,
+    residual: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    x = x.contiguous()
+    num_tokens = x.numel() // x.shape[-1]
+    hidden = x.shape[-1]
+    num_groups = hidden // group_size
+    out = torch.empty(num_tokens, hidden // 2, device=x.device,
+                      dtype=torch.uint8)
+    scales = torch.empty(num_tokens, num_groups, device=x.device,
+                         dtype=torch.float32)
+    if residual is not None:
+        residual = residual.clone().contiguous()
+    torch.ops._C.rms_norm_mxfp4_quant(out, x, weight, scales, EPS, residual,
+                                      group_size)
+    return out, scales, residual
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", MXFP4_HIDDEN_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@torch.inference_mode()
+def test_rms_norm_mxfp4_quant(
+    num_tokens: int,
+    hidden_size: int,
+    add_residual: bool,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    if hidden_size % MXFP4_GROUP_SIZE != 0:
+        pytest.skip(f"hidden_size {hidden_size} not divisible by 32")
+
+    torch.manual_seed(seed)
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
+
+    layer = RMSNorm(hidden_size, eps=EPS).to(dtype=dtype)
+    layer.weight.data.normal_(mean=1.0, std=0.1)
+
+    scale = 1.0 / hidden_size
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
+    residual = torch.randn_like(x) * scale if add_residual else None
+
+    ref_normed, ref_residual = _ref_rms_norm(layer, x, residual)
+    ref_scale_e8m0, ref_q_packed = to_mxfp(
+        ref_normed.float().contiguous(),
+        block_size=MXFP4_GROUP_SIZE,
+        format="mxfp4")
+    ref_exp = ref_scale_e8m0.view(torch.uint8).to(torch.int32)
+    ref_scales_f32 = torch.where(
+        ref_exp == 0,
+        torch.ones_like(ref_exp, dtype=torch.float32),
+        torch.exp2((ref_exp - 127).to(torch.float32)),
+    )
+
+    # Kernel
+    ops_q, ops_scales, ops_residual = _ops_rms_norm_mxfp4_quant(
+        layer.weight.data, x, MXFP4_GROUP_SIZE, residual)
+
+    assert ops_q.dtype == torch.uint8
+    assert ops_q.shape == (num_tokens, hidden_size // 2)
+    assert ops_scales.dtype == torch.float32
+    assert ops_scales.shape == (num_tokens, hidden_size // MXFP4_GROUP_SIZE)
+
+    log2_s = torch.log2(ops_scales.float())
+    torch.testing.assert_close(log2_s, log2_s.round(), atol=1e-5, rtol=0)
+
+    torch.testing.assert_close(ref_scales_f32, ops_scales,
+                               atol=1e-5, rtol=1e-5)
+
+    ref_q_u8 = ref_q_packed.view(torch.uint8)
+    if not torch.equal(ref_q_u8, ops_q):
+        from tests.ops.mx_utils import _floatx_unpacked_to_f32, unpack_uint4
+        ref_unpacked = unpack_uint4(ref_q_u8.cpu())
+        ops_unpacked = unpack_uint4(ops_q.cpu())
+        ref_f = _floatx_unpacked_to_f32(ref_unpacked, 2, 1).to(x.device)
+        ops_f = _floatx_unpacked_to_f32(ops_unpacked, 2, 1).to(x.device)
+        ref_deq = ref_f * ref_scales_f32.unsqueeze(-1).repeat(
+            1, 1, MXFP4_GROUP_SIZE).reshape_as(ref_f)
+        ops_deq = ops_f * ops_scales.unsqueeze(-1).repeat(
+            1, 1, MXFP4_GROUP_SIZE).reshape_as(ops_f)
+        torch.testing.assert_close(ref_deq, ops_deq, atol=0.5, rtol=0.5)
+
+    if add_residual:
+        torch.testing.assert_close(ref_residual, ops_residual,
+                                   atol=1e-2, rtol=1e-2)

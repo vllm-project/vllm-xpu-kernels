@@ -513,6 +513,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/quantization/fp8/fp8_quant.cpp"
       "csrc/quantization/fp4/mxfp4_quant.cpp"
       "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cpp"
+      "csrc/quantization/fused_kernels/fused_silu_mul_mxfp4_quant.cpp"
       "csrc/xpu_view.cpp"
       "csrc/attention/merge_attn_states.cpp"
       "csrc/tensor_utils.cpp"

@@ -36,7 +36,17 @@ void rms_norm_per_block_quant(
     std::optional<torch::Tensor> scale_ub,
     std::optional<torch::Tensor> residual,
     int64_t group_size,
-    bool is_scale_transposed);
+    bool is_scale_transposed,
+    bool scale_ue8m0);
+
+void rms_norm_mxfp4_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor const& weight,
+    torch::Tensor& scales,
+    double const epsilon,
+    std::optional<torch::Tensor> residual,
+    int64_t group_size);
 
 void rms_norm_static_fp8_quant(
     torch::Tensor& out,
@@ -64,7 +74,15 @@ void silu_and_mul_per_block_quant(
     torch::Tensor& scales,
     int64_t group_size,
     std::optional<torch::Tensor> scale_ub,
-    bool is_scale_transposed);
+    bool is_scale_transposed,
+    bool scale_ue8m0);
+
+void silu_and_mul_mxfp4_quant(
+    torch::Tensor& out,
+    torch::Tensor const& input,
+    torch::Tensor& scales,
+    int64_t group_size,
+    double eps);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 

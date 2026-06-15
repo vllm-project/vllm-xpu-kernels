@@ -20,9 +20,9 @@ permissions:
 
 concurrency:
   # Group by PR number for pull_request, by ref for push/schedule/dispatch.
-  # Do not cancel in-progress runs for schedule to avoid interrupting nightly tests.
+  # Only cancel in-progress runs for pull_request events; push to main and schedule are never cancelled.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: localhost:5000
