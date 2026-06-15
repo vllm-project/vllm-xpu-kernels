@@ -85,14 +85,14 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 | File | Kernels | Use Case |
 |------|---------|----------|
 | `chunk_prefill_full.conf` | 216 | All combinations — supports every model |
-| `chunk_prefill_default.conf` | 9 | Llama, Qwen, DeepSeek MLA (default build) |
+| `chunk_prefill_default.conf` | ~13 | Llama, Qwen, DeepSeek MLA, Falcon (default build) |
 
 ### Paged Decode
 
 | File | Kernels | Use Case |
 |------|---------|----------|
 | `paged_decode_full.conf` | 384 | All combinations — supports every model |
-| `paged_decode_default.conf` | 11 | Llama, Qwen, DeepSeek MLA (default build) |
+| `paged_decode_default.conf` | ~17 | Llama, Qwen, DeepSeek MLA, Falcon (default build) |
 
 ### Recommended Config per Model Family
 
@@ -147,7 +147,11 @@ If boolean flags are omitted, all 18 valid combinations are generated for that h
 ```
 
 **Parameters:**
-- `qgroup` — GQA group size bucket: `8` (ratio ≤ 8) or `16` (ratio 9–16)
+- `qgroup` — GQA group bucket (packed-Q tile size): `8` (ratio ≤ 8) or `16`
+  (ratio > 8). The decode kernel tiles the GQA head-group across the grid, so
+  `qgroup` is a tile size, **not** a hard cap on `num_heads_q / num_heads_kv`.
+  Large MQA ratios (e.g. Falcon-7B's 71 query heads / 1 KV head) use the `16`
+  bucket and are split into `ceil(ratio / 16)` work-groups.
 - `headsize` — head dimension: `64`, `96`, `128`, `192`, `256`, or `512`
 - `pagesize` — KV cache block size: `16`, `32`, `64`, or `128`
 - `causal` — whether causal masking is used (almost always `true` for decode)
@@ -160,7 +164,7 @@ If boolean flags are omitted, all 18 valid combinations are generated for that h
 
 For a given model you need:
 1. **head_size**: `hidden_size / num_attention_heads`
-2. **GQA ratio** (decode only): `num_attention_heads / num_key_value_heads` → qgroup `8` (ratio ≤ 8) or `16` (ratio 9–16)
+2. **GQA ratio** (decode only): `num_attention_heads / num_key_value_heads` → qgroup `8` (ratio ≤ 8) or `16` (ratio > 8, including large MQA ratios)
 3. **page_size** (decode only): your vLLM deployment's `--block-size` (default: 16)
 
 Common model parameters:
@@ -174,6 +178,7 @@ Common model parameters:
 | DeepSeek-V3 (MLA) | 128 + 192 | varies | 8 |
 | Gemma-2-27B | 256 | 2 | 8 |
 | Mistral-7B | 128 | 8 | 8 |
+| Falcon-7B (MQA) | 64 | 71 | 16 |
 
 ---
 
@@ -381,7 +386,7 @@ cat build/temp_template/csrc/xpu/attn/xe_2/paged_decode_enabled_policies_gen.hpp
 
 | Config | Build Time | Chunk Prefill Kernels | Paged Decode Kernels | Flexibility |
 |--------|------------|----------------------|----------------------|-------------|
-| `default` | ~2 min | 9 | 11 | Llama, Qwen, DeepSeek MLA |
+| `default` | ~2 min | ~13 | ~17 | Llama, Qwen, DeepSeek MLA, Falcon |
 | `full` | ~60 min | 216 | 384 | All models |
 
 ### Binary Size Impact

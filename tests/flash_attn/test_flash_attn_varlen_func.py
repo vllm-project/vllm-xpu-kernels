@@ -634,6 +634,90 @@ def test_decode_with_paged_kv(
     torch.xpu.empty_cache()
 
 
+# Large GQA / MQA ratios (num_heads_q / num_heads_kv > 16). The decode kernel
+# tiles the packed GQA head-group across the grid's Q dimension, so ratios that
+# exceed the qgroup tile size (8/16) are supported. Falcon-7B uses MQA with
+# 71 query heads and a single KV head.
+@pytest.mark.parametrize("seq_lens", [[(1, 523), (1, 37), (1, 211)],
+                                      [(1, 13000)]])
+@pytest.mark.parametrize("num_heads", [(71, 1), (16, 1), (17, 1)])
+@pytest.mark.parametrize("head_size", [64])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@torch.inference_mode()
+def test_decode_large_gqa_ratio(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+    block_size: int,
+    causal: bool,
+    num_blocks: int,
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(42)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    num_seqs = len(seq_lens)
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    output = flash_attn_varlen_func(query,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=causal,
+                                    block_table=block_tables,
+                                    window_size=(-1, -1))
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=causal,
+                                is_paged=True,
+                                window_size_left=-1,
+                                window_size_right=-1,
+                                dtype=dtype)
+    atol, rtol = 1.5e-2, 1.5e-2
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
+        f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
 @pytest.mark.parametrize("seq_lens",
                          [[(1, 523), (1, 37), (1, 2011)], [(1, 13000)]])
 @pytest.mark.parametrize("num_heads", [(8, 2)])

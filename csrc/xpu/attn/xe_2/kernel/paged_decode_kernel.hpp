@@ -272,7 +272,10 @@ class XeFMHAFwdSplitKVKernel {
 
       auto sequence_length_shape = get_sequence_length_shape(s, idx_b);
       auto [seq_len_qo, seq_len_kv] = sequence_length_shape;
-      if (blk_q * get<0>(TileShapeQK{}) >= seq_len_qo) continue;
+      // Decode packs the GQA head-group into the Q/row dimension (seq_len_qo
+      // is always 1). blk_q tiles head_group_q in steps of the packed-Q tile
+      // size, so skip work-groups whose first head-group row is out of range.
+      if (blk_q * get<0>(TileShapeQK{}) >= head_group_q) continue;
 
       auto offset = cute::min(seq_len_qo, seq_len_kv);
       auto discard_seq_coord = seq_len_qo - offset;

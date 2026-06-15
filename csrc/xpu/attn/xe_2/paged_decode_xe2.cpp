@@ -290,11 +290,14 @@ void cutlass_paged_decode_impl(
   int head_case = get_head_size_case(args.head_size);
   int num_q_group_size = num_heads_q / num_heads_kv;
 
+  // The decode kernel tiles the GQA head-group across the grid's Q dimension
+  // (see DecodeTileScheduler::to_underlying_arguments), so the qgroup bucket is
+  // a packed-Q tile size rather than a hard cap on the GQA ratio. Ratios <= 8
+  // fit a single _8 tile; larger ratios (e.g. falcon-7b's 71 query heads / 1 KV
+  // head) are processed by ceil(ratio / qgroup) work-groups using the _16 tile.
   if (num_q_group_size <= 8) {
     dispatch_by_page_size<_8>(block_size, head_case, queue, cuQKType, args);
-  } else if (num_q_group_size <= 16) {
-    dispatch_by_page_size<_16>(block_size, head_case, queue, cuQKType, args);
   } else {
-    TORCH_CHECK(false, "Unsupported num_heads_q / num_heads_kv for fmha");
+    dispatch_by_page_size<_16>(block_size, head_case, queue, cuQKType, args);
   }
 }
