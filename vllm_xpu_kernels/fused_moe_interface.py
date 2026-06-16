@@ -30,6 +30,11 @@ def _should_use_ref_fused_moe(is_mxfp8: bool) -> bool:
     return _is_env_enabled(REF_FUSED_MOE_ENV)
 
 
+def _should_use_ep_valid_tokens(total_experts_num: int,
+                                local_experts_num: int) -> bool:
+    return total_experts_num > local_experts_num
+
+
 def _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8):
     if is_mxfp8:
         return "mxfp8"
@@ -493,8 +498,12 @@ class XpuFusedMoe:
             total_experts_num=self.total_experts_num,
             local_experts_num=self.local_experts_num)
 
-        # Keep int64 to avoid overflow for large sequences and avoid host sync.
-        valid_tokens = rows_per_expert.sum(dtype=torch.int64).view(1)
+        valid_tokens = None
+        if _should_use_ep_valid_tokens(self.total_experts_num,
+                                       self.local_experts_num):
+            # Keep int64 to avoid overflow for large sequences and avoid host
+            # sync.
+            valid_tokens = rows_per_expert.sum(dtype=torch.int64).view(1)
 
         ########### gemm1 ##################
         gemm1_output = torch.empty((num_moe_inputs, 2 * self.inter_size),
@@ -697,8 +706,10 @@ def xpu_fused_moe(hidden_states,
         total_experts_num=total_experts_num,
         local_experts_num=local_experts_num)
 
-    # Keep int64 to avoid overflow for large sequences and avoid host sync.
-    valid_tokens = rows_per_expert.sum(dtype=torch.int64).view(1)
+    valid_tokens = None
+    if _should_use_ep_valid_tokens(total_experts_num, local_experts_num):
+        # Keep int64 to avoid overflow for large sequences and avoid host sync.
+        valid_tokens = rows_per_expert.sum(dtype=torch.int64).view(1)
 
     ########### gemm1 ##################
     input_B = w13
