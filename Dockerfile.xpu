@@ -23,20 +23,6 @@ RUN apt clean && apt-get update -y && \
     python3.12 \
     python3.12-dev
 
-RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
-    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
-    printf '%s\n' \
-    'Package: intel-oneapi-* intel-deep-learning-essentials* intel-pti*' \
-    'Pin: version 2025.3*' \
-    'Pin-Priority: 1001' \
-    > /etc/apt/preferences.d/oneapi-2025.3.pref && \
-    apt-get update -y && \
-    apt-get install -y --no-install-recommends \
-    intel-oneapi-compiler-dpcpp-cpp-2025.3 \
-    intel-oneapi-mkl-devel-2025.3 \
-    intel-oneapi-dnnl-devel-2025.3 && \
-    rm -rf /var/lib/apt/lists/*
-
 # ─── GPU compute runtime (configurable via gpu_runtime_packages.json) ──────
 ARG GPU_RUNTIME_PROFILE=default
 COPY build_script/gpu_runtime_packages.json build_script/install_gpu_runtime.sh /tmp/
