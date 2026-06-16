@@ -1,8 +1,33 @@
 #pragma once
 
 #include <torch/all.h>
+#include <optional>
 
 torch::Tensor weak_ref_tensor(torch::Tensor& tensor);
+
+// Horizontally-fused MiniMax-M3 attention pre-processing: Gemma RMSNorm +
+// partial-NeoX RoPE on q/k (+ index_q/index_k in sparse mode), plus scatter of
+// k/v/index_k into the paged caches. head_dim == 128.
+void fused_minimax_m3_qknorm_rope_kv_insert(
+    torch::Tensor& qkv,
+    const torch::Tensor& q_norm_weight,
+    const torch::Tensor& k_norm_weight,
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& positions,
+    int64_t num_heads,
+    int64_t num_kv_heads,
+    int64_t rotary_dim,
+    double eps,
+    std::optional<torch::Tensor> index_q_norm_weight,
+    std::optional<torch::Tensor> index_k_norm_weight,
+    int64_t num_index_heads,
+    std::optional<torch::Tensor> slot_mapping,
+    std::optional<torch::Tensor> index_slot_mapping,
+    std::optional<torch::Tensor> kv_cache,
+    std::optional<torch::Tensor> index_cache,
+    int64_t block_size,
+    std::optional<torch::Tensor> q_out,
+    std::optional<torch::Tensor> index_q_out);
 
 void rms_norm(
     torch::Tensor& out,

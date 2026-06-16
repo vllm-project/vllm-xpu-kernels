@@ -515,6 +515,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/activation.cpp"
       "csrc/pos_encoding_kernels.cpp"
       "csrc/fused_qknorm_rope.cpp"
+      "csrc/fused_minimax_m3_qknorm_rope_kv_insert.cpp"
       "csrc/torch_bindings.cpp"
       "csrc/quantization/fp8/fp8_quant.cpp"
       "csrc/quantization/fp4/mxfp4_quant.cpp"
