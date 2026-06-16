@@ -44,7 +44,7 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
 #
 # TODO: we need to align torch version with used in vLLM.
 #
-set(TORCH_SUPPORTED_VERSION_XPU "2.11.0")
+set(TORCH_SUPPORTED_VERSION_XPU "2.12.0")
 
 set(BUILD_SYCL_TLA_KERNELS
     ON
@@ -67,7 +67,60 @@ option(XPU_SPECIFIC_KERNELS_ENABLED
        "Build XPU-specific kernels (_xpu_C extension)" ON)
 option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
 
-message(STATUS "")
+# KERNEL CONFIGURATION — controls which paged decode kernel variants are
+# compiled. Use model-specific configs to dramatically reduce compile time. See
+# csrc/xpu/attn/kernel_configs/ for available presets.
+set(VLLM_PAGED_DECODE_CONFIG
+    ""
+    CACHE
+      STRING
+      "Path to paged decode kernel config (empty=default, or filename like paged_decode_full.conf)"
+)
+
+# Resolve shorthand config names to full paths
+if(VLLM_PAGED_DECODE_CONFIG AND NOT IS_ABSOLUTE "${VLLM_PAGED_DECODE_CONFIG}")
+  # Allow e.g. "paged_decode_full.conf" or "paged_decode_full"
+  if(NOT VLLM_PAGED_DECODE_CONFIG MATCHES "\\.conf$")
+    set(VLLM_PAGED_DECODE_CONFIG "${VLLM_PAGED_DECODE_CONFIG}.conf")
+  endif()
+  set(VLLM_PAGED_DECODE_CONFIG
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/kernel_configs/${VLLM_PAGED_DECODE_CONFIG}"
+  )
+endif()
+
+# Default to full config if not specified
+if(NOT VLLM_PAGED_DECODE_CONFIG OR "${VLLM_PAGED_DECODE_CONFIG}" STREQUAL "")
+  set(VLLM_PAGED_DECODE_CONFIG
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/kernel_configs/paged_decode_full.conf"
+  )
+endif()
+
+# KERNEL CONFIGURATION — controls which chunk prefill kernel variants are
+# compiled. Use model-specific configs to reduce compile time.
+set(VLLM_CHUNK_PREFILL_CONFIG
+    ""
+    CACHE
+      STRING
+      "Path to chunk prefill kernel config (empty=default, or filename like chunk_prefill_full.conf)"
+)
+
+# Resolve shorthand config names to full paths
+if(VLLM_CHUNK_PREFILL_CONFIG AND NOT IS_ABSOLUTE "${VLLM_CHUNK_PREFILL_CONFIG}")
+  if(NOT VLLM_CHUNK_PREFILL_CONFIG MATCHES "\\.conf$")
+    set(VLLM_CHUNK_PREFILL_CONFIG "${VLLM_CHUNK_PREFILL_CONFIG}.conf")
+  endif()
+  set(VLLM_CHUNK_PREFILL_CONFIG
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/kernel_configs/${VLLM_CHUNK_PREFILL_CONFIG}"
+  )
+endif()
+
+# Default to full config if not specified
+if(NOT VLLM_CHUNK_PREFILL_CONFIG OR "${VLLM_CHUNK_PREFILL_CONFIG}" STREQUAL "")
+  set(VLLM_CHUNK_PREFILL_CONFIG
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/attn/kernel_configs/chunk_prefill_full.conf"
+  )
+endif()
+
 message(STATUS "Kernel build configuration:")
 message(STATUS "  BUILD_SYCL_TLA_KERNELS       = ${BUILD_SYCL_TLA_KERNELS}")
 message(STATUS "  VLLM_XPU_ENABLE_XE2          = ${VLLM_XPU_ENABLE_XE2}")
@@ -80,6 +133,8 @@ message(STATUS "  MQA_LOGITS_KERNELS_ENABLED   = ${MQA_LOGITS_KERNELS_ENABLED}")
 message(
   STATUS "  XPU_SPECIFIC_KERNELS_ENABLED = ${XPU_SPECIFIC_KERNELS_ENABLED}")
 message(STATUS "  XPUMEM_ALLOCATOR_ENABLED     = ${XPUMEM_ALLOCATOR_ENABLED}")
+message(STATUS "  VLLM_PAGED_DECODE_CONFIG     = ${VLLM_PAGED_DECODE_CONFIG}")
+message(STATUS "  VLLM_CHUNK_PREFILL_CONFIG    = ${VLLM_CHUNK_PREFILL_CONFIG}")
 message(STATUS "")
 
 #
@@ -420,7 +475,7 @@ if(XPUMEM_ALLOCATOR_ENABLED)
   python_add_library(xpumem_allocator MODULE USE_SABI 3 WITH_SOABI
                      "${XPUMEM_ALLOCATOR_SRC}")
 
-  set_property(TARGET xpumem_allocator PROPERTY CXX_STANDARD 17)
+  set_property(TARGET xpumem_allocator PROPERTY CXX_STANDARD 20)
 
   if(VLLM_GPU_LANG STREQUAL "SYCL")
     target_compile_options(xpumem_allocator PRIVATE ${VLLM_GPU_COMPILE_FLAGS})
@@ -463,6 +518,8 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/torch_bindings.cpp"
       "csrc/quantization/fp8/fp8_quant.cpp"
       "csrc/quantization/fp4/mxfp4_quant.cpp"
+      "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cpp"
+      "csrc/quantization/fused_kernels/fused_silu_mul_mxfp4_quant.cpp"
       "csrc/xpu_view.cpp"
       "csrc/attention/merge_attn_states.cpp"
       "csrc/tensor_utils.cpp"
@@ -545,6 +602,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
       "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
       "csrc/xpu/sycl/multimodal_rope.cpp"
+      "csrc/xpu/sycl/apply_rotary_emb.cpp"
       "csrc/xpu/rand/exponential.cpp"
       "csrc/xpu/utils.cpp")
   if(MOE_KERNELS_ENABLED)

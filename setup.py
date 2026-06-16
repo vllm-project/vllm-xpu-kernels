@@ -200,6 +200,20 @@ class cmake_build_ext(build_ext):
             cmake_args.append('-D{}={}'.format(
                 opt, "ON" if _is_enabled(opt) else "OFF"))
 
+        # Forward paged decode kernel config if set via environment variable.
+        # Example: VLLM_PAGED_DECODE_CONFIG=llama pip install .
+        _paged_decode_config = os.environ.get("VLLM_PAGED_DECODE_CONFIG", "")
+        if _paged_decode_config:
+            cmake_args.append(
+                '-DVLLM_PAGED_DECODE_CONFIG={}'.format(_paged_decode_config))
+
+        # Forward chunk prefill kernel config if set via environment variable.
+        # Example: VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_llama pip install .
+        _chunk_prefill_config = os.environ.get("VLLM_CHUNK_PREFILL_CONFIG", "")
+        if _chunk_prefill_config:
+            cmake_args.append(
+                '-DVLLM_CHUNK_PREFILL_CONFIG={}'.format(_chunk_prefill_config))
+
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
         # and plays more nicely with sccache.

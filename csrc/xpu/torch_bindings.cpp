@@ -72,6 +72,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl(
       "multimodal_rotary_embedding", torch::kXPU, &multimodal_rotary_embedding);
 
+  // Apply rotary embedding taking cos/sin directly (flash_attn style).
+  // For diffusion models where cos/sin are pre-computed externally.
+  xpu_ops.def(
+      "apply_rotary_emb(Tensor! output, Tensor input,"
+      "                 Tensor cos, Tensor sin, bool is_neox) -> ()");
+  xpu_ops.impl("apply_rotary_emb", torch::kXPU, &apply_rotary_emb);
+
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
       "indices, float scale) -> ()");
@@ -95,9 +102,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "int num_k_heads, int num_v_heads, int head_k_dim, int head_v_dim,"
       "Tensor! conv_state, Tensor! ssm_state, Tensor conv_weights, Tensor? "
       "conv_bias, str activation, Tensor A_log, Tensor dt_bias,"
-      "int num_prefills, int num_decodes, Tensor? has_initial_state, Tensor "
-      "non_spec_query_start_loc,"
-      "Tensor non_spec_state_indices_tensor, int num_actual_tokens, int "
+      "int num_prefills, int num_decodes, int num_spec_decodes, Tensor? "
+      "has_initial_state, Tensor? "
+      "non_spec_query_start_loc,  Tensor? non_spec_token_indx,"
+      "Tensor? non_spec_state_indices_tensor, Tensor? spec_query_start_loc, "
+      "Tensor? spec_token_indx, Tensor? spec_state_indices_tensor, Tensor? "
+      "num_accepted_tokens, int num_actual_tokens, int "
       "tp_size, bool reorder_input) -> ()");
   xpu_ops.impl("gdn_attention", torch::kXPU, &gdn_attention);
 #endif
