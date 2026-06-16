@@ -76,6 +76,25 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     int64_t rotary_dim,
     bool is_neox);
 
+void xpu_compress_insert_fp8mix(
+    torch::Tensor const& state_cache,
+    torch::Tensor const& token_to_req_indices,
+    torch::Tensor const& positions,
+    torch::Tensor const& slot_mapping,
+    torch::Tensor const& block_table,
+    torch::Tensor const& rms_norm_weight,
+    double rms_norm_eps,
+    torch::Tensor const& cos_sin_cache,
+    torch::Tensor& k_cache,
+    torch::Tensor const& kv_slot_mapping,
+    int64_t kv_cache_block_size,
+    int64_t compress_ratio,
+    int64_t overlap,
+    int64_t rope_head_dim,
+    int64_t token_stride,
+    int64_t scale_dim,
+    int64_t kv_block_stride);
+
 void multimodal_rotary_embedding(
     torch::Tensor& positions,  // [num_mrope_sections, num_tokens]
     torch::Tensor& query,
