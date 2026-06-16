@@ -652,8 +652,6 @@ endif()
 if(MOE_KERNELS_ENABLED)
   message(STATUS "Enabling _moe_C extension.")
   file(GLOB VLLM_MOE_EXT_SRC "csrc/moe/*.cpp")
-  # list(REMOVE_ITEM VLLM_MOE_EXT_SRC
-  # ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/fused_grouped_topk.cpp)
 
   define_gpu_extension_target(
     _moe_C
