@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace vllm {
 
@@ -810,29 +811,39 @@ void launch_one_fp8mix_generic(
   });
 }
 
-// Per-device persistent scratch buffer for the split-gather 2-pass kernel.
-// Avoids the per-call at::empty allocation (small but measurable for the
-// short Layer B small-nt path: a 32 * 8 * 3 * 512 fp32 alloc is ~1.5 MB).
-// Grows on demand (doubling) and is reused across calls until the process
-// exits. PyTorch's caching allocator already pools allocations, but skipping
-// the at::empty + descriptor refcount work shaves a few microseconds when
-// the kernel itself is ~22 us.
-inline float* get_split_gather_scratch(int64_t needed_numel) {
+// Keep per-invocation scratch tensors alive until the finalize kernel
+// completes. This avoids reusing the same scratch region across overlapping
+// calls, which can race under concurrent submissions.
+struct split_gather_inflight_scratch_t {
+  sycl::event done;
+  at::Tensor scratch;
+};
+
+inline void reap_split_gather_inflight_locked(
+    std::vector<split_gather_inflight_scratch_t>& inflight) {
+  inflight.erase(
+      std::remove_if(
+          inflight.begin(),
+          inflight.end(),
+          [](const split_gather_inflight_scratch_t& e) {
+            return e.done.get_info<sycl::info::event::command_execution_status>() ==
+                sycl::info::event_command_status::complete;
+          }),
+      inflight.end());
+}
+
+inline void hold_split_gather_scratch_until_done(
+    int dev,
+    sycl::event done,
+    at::Tensor scratch) {
   static std::mutex mtx;
-  static std::unordered_map<int, at::Tensor> cache;
-  static std::unordered_map<int, int64_t> cap;
-  const int dev = at::xpu::current_device();
+  static std::unordered_map<int, std::vector<split_gather_inflight_scratch_t>>
+      inflight_by_dev;
+
   std::lock_guard<std::mutex> lk(mtx);
-  auto& t = cache[dev];
-  auto& c = cap[dev];
-  if (!t.defined() || c < needed_numel) {
-    const int64_t new_cap = std::max<int64_t>(needed_numel, c * 2);
-    t = at::empty(
-        {new_cap},
-        at::TensorOptions().dtype(at::kFloat).device(at::kXPU, dev));
-    c = new_cap;
-  }
-  return t.data_ptr<float>();
+  auto& inflight = inflight_by_dev[dev];
+  reap_split_gather_inflight_locked(inflight);
+  inflight.push_back({std::move(done), std::move(scratch)});
 }
 
 template <int CR, int OL, int ROPE_DIM, int G_SHARDS>
@@ -865,17 +876,21 @@ void launch_split_gather_fp8mix(
   constexpr int WG = KA::WG_SIZE;
 
   at::DeviceGuard dg(at::Device(at::kXPU, at::xpu::current_device()));
+    const int dev = at::xpu::current_device();
 
-  // Scratch [num_tokens, G_SHARDS, 3, HEAD] fp32 — persistent, grows on demand.
+    // Scratch [num_tokens, G_SHARDS, 3, HEAD] fp32 — per invocation.
   const int64_t scratch_numel =
       num_tokens * static_cast<int64_t>(G_SHARDS) * 3 *
       static_cast<int64_t>(HEAD);
-  float* scr = get_split_gather_scratch(scratch_numel);
+    at::Tensor scratch = at::empty(
+      {scratch_numel},
+      at::TensorOptions().dtype(at::kFloat).device(at::kXPU, dev));
+    float* scr = scratch.data_ptr<float>();
   const int64_t scr0 = G_SHARDS * 3 * HEAD;
   const int64_t scr1 = 3 * HEAD;
 
   // Pass A: grid = (num_tokens, G_SHARDS * WG), local = (1, WG).
-  q.submit([&](sycl::handler& cgh) {
+    sycl::event pass_a = q.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<2>(
             sycl::range<2>(num_tokens, G_SHARDS * WG),
@@ -895,7 +910,8 @@ void launch_split_gather_fp8mix(
   });
 
   // Pass B: grid = (num_tokens * WG,), local = (WG,).
-  q.submit([&](sycl::handler& cgh) {
+  sycl::event pass_b = q.submit([&](sycl::handler& cgh) {
+    cgh.depends_on(pass_a);
     cgh.parallel_for(
         sycl::nd_range<1>(num_tokens * WG, WG),
         KB{scr,
@@ -914,6 +930,8 @@ void launch_split_gather_fp8mix(
            token_stride,
            scale_dim});
   });
+
+  hold_split_gather_scratch_until_done(dev, std::move(pass_b), std::move(scratch));
 }
 
 }  // namespace
@@ -947,7 +965,36 @@ void xpu_compress_insert_fp8mix(
   TORCH_CHECK(token_to_req_indices.dtype() == torch::kInt32);
   TORCH_CHECK(block_table.dtype() == torch::kInt32);
   TORCH_CHECK(state_cache.dim() == 3);
-    TORCH_CHECK(k_cache.dim() == 3 && k_cache.size(-1) >= token_stride + scale_dim);
+  TORCH_CHECK(
+      k_cache.dim() == 3,
+      "xpu_compress_insert_fp8mix: k_cache must be rank-3 [num_blocks, block_size, payload], got dim=",
+      k_cache.dim());
+  TORCH_CHECK(
+      k_cache.size(-1) >= token_stride + scale_dim,
+      "xpu_compress_insert_fp8mix: k_cache last dim too small, got ",
+      k_cache.size(-1),
+      ", required >= token_stride + scale_dim = ",
+      token_stride,
+      " + ",
+      scale_dim,
+      " = ",
+      (token_stride + scale_dim));
+      TORCH_CHECK(
+        k_cache.stride(2) == 1,
+        "xpu_compress_insert_fp8mix: k_cache must be byte-contiguous on last dim, got stride(2)=",
+        k_cache.stride(2));
+      TORCH_CHECK(
+          k_cache.stride(1) >= token_stride,
+          "xpu_compress_insert_fp8mix: unsupported k_cache layout. Need stride(1) >= token_stride so each token payload has enough contiguous bytes, got stride(1)=",
+        k_cache.stride(1),
+        ", token_stride=",
+          token_stride);
+      TORCH_CHECK(
+        kv_block_stride == k_cache.stride(0),
+        "xpu_compress_insert_fp8mix: kv_block_stride must match k_cache.stride(0), got kv_block_stride=",
+        kv_block_stride,
+        ", k_cache.stride(0)=",
+        k_cache.stride(0));
     TORCH_CHECK(compress_ratio > 0, "xpu_compress_insert_fp8mix: compress_ratio must be > 0");
     TORCH_CHECK(overlap >= 0 && overlap <= 1, "xpu_compress_insert_fp8mix: overlap must be 0 or 1");
     TORCH_CHECK(
