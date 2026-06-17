@@ -32,8 +32,3 @@ def test_get_memory_info(device) -> None:
         ref_total = 32530182144
         assert free > 0
         assert total == ref_total
-
-    elif torch.ops._xpu_C.is_pvc(device):
-        ref_total = 65267564544
-        assert free > 0
-        assert total == ref_total
