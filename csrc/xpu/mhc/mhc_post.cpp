@@ -15,12 +15,10 @@
 
 #include "utils.h"
 
-#if defined(__clang__)
-  #pragma clang diagnostic ignored "-Wpass-failed"
-  #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#elif defined(__GNUC__)
-  #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-#endif
+#include "cutlass/device_kernel.h"
+#include "cute/util/compat/device.hpp"
+#include "cute/util/compat/dims.hpp"
+#include "cute/util/compat/launch_policy.hpp"
 
 namespace {
 
@@ -29,7 +27,80 @@ static constexpr int HC = 4;
 
 using vllm::xpu::aligned_vec;
 
-class MhcPostOptKernel;
+class MhcPostOptKernel {
+public:
+    static constexpr int BLOCK_M = 1;
+    static constexpr int VEC = 8;
+    static constexpr int SG_SIZE = 16;
+    static constexpr int WG_SIZE = 256;
+    static constexpr int THREADS_PER_TOK = WG_SIZE / BLOCK_M;
+
+    struct Params {
+        const float* __restrict comb_res_mix;
+        const bf16* __restrict residual;
+        const float* __restrict post_layer_mix;
+        const bf16* __restrict x;
+        bf16* __restrict out;
+        int N;
+        int H;
+    };
+
+    CUTLASS_DEVICE
+    void operator()(const Params& p, char*) const {
+        using vec_bf16_t = aligned_vec<bf16, VEC>;
+
+        const int wg_id = int(BlockIdxX());
+        const int tid = int(ThreadIdxY());
+        const int tok_base = wg_id * BLOCK_M;
+        const int t = tid / THREADS_PER_TOK;
+        const int local_k = tid % THREADS_PER_TOK;
+        const int tok = tok_base + t;
+        if (tok >= p.N)
+            return;
+
+        float a_reg[HC][HC];
+        float c_reg[HC];
+        #pragma unroll
+        for (int i = 0; i < HC; ++i) {
+            #pragma unroll
+            for (int j = 0; j < HC; ++j)
+                a_reg[i][j] = p.comb_res_mix[tok * HC * HC + i * HC + j];
+            c_reg[i] = p.post_layer_mix[tok * HC + i];
+        }
+
+        for (int k = local_k * VEC; k < p.H; k += THREADS_PER_TOK * VEC) {
+            auto xv = *reinterpret_cast<const vec_bf16_t*>(p.x + tok * p.H + k);
+            float acc[HC][VEC];
+            #pragma unroll
+            for (int o = 0; o < HC; ++o)
+                #pragma unroll
+                for (int v = 0; v < VEC; ++v)
+                    acc[o][v] = c_reg[o] * float(xv.val[v]);
+
+            #pragma unroll
+            for (int i = 0; i < HC; ++i) {
+                auto rv = *reinterpret_cast<const vec_bf16_t*>(
+                    p.residual + (tok * HC + i) * p.H + k);
+                #pragma unroll
+                for (int o = 0; o < HC; ++o) {
+                    float a_val = a_reg[i][o];
+                    #pragma unroll
+                    for (int v = 0; v < VEC; ++v)
+                        acc[o][v] += a_val * float(rv.val[v]);
+                }
+            }
+
+            #pragma unroll
+            for (int o = 0; o < HC; ++o) {
+                vec_bf16_t ov;
+                #pragma unroll
+                for (int v = 0; v < VEC; ++v)
+                    ov.val[v] = static_cast<bf16>(acc[o][v]);
+                *reinterpret_cast<vec_bf16_t*>(p.out + (tok * HC + o) * p.H + k) = ov;
+            }
+        }
+    }
+};
 
 }  // namespace
 
@@ -42,81 +113,45 @@ sycl::event launch_mhc_post_opt(
     bf16* __restrict out,
     int N,
     int H) {
-    static constexpr int BLOCK_M = 1;
-    static constexpr int VEC = 8;
-    static constexpr int SG_SIZE = 16;
-    static constexpr int WG_SIZE = 256;
-    static constexpr int THREADS_PER_TOK = WG_SIZE / BLOCK_M;
-
-    namespace syclex = sycl::ext::oneapi::experimental;
-    namespace intelex = sycl::ext::intel::experimental;
-
-    syclex::properties kernel_props{
-        syclex::sub_group_size<SG_SIZE>,
-        intelex::grf_size<128>};
-
+    static constexpr int BLOCK_M = MhcPostOptKernel::BLOCK_M;
+    static constexpr int WG_SIZE = MhcPostOptKernel::WG_SIZE;
     const size_t num_wgs = static_cast<size_t>((N + BLOCK_M - 1) / BLOCK_M);
-    sycl::range<1> global(num_wgs * WG_SIZE);
-    sycl::range<1> local(WG_SIZE);
 
-    return q.submit([&](sycl::handler& h) {
-        using vec_bf16_t = aligned_vec<bf16, VEC>;
+    MhcPostOptKernel::Params params{
+        comb_res_mix,
+        residual,
+        post_layer_mix,
+        x,
+        out,
+        N,
+        H};
 
-        h.parallel_for<MhcPostOptKernel>(
-            sycl::nd_range<1>(global, local), kernel_props,
-            [=](sycl::nd_item<1> it) [[intel::kernel_args_restrict]] {
-                const int wg_id = it.get_group(0);
-                const int tid = it.get_local_id(0);
-                const int tok_base = wg_id * BLOCK_M;
-                const int t = tid / THREADS_PER_TOK;
-                const int local_k = tid % THREADS_PER_TOK;
-                const int tok = tok_base + t;
-                if (tok >= N)
-                    return;
+    const auto sycl_block = compat::dim3(1, WG_SIZE, 1);
+    const auto sycl_grid = compat::dim3(static_cast<unsigned int>(num_wgs), 1, 1);
 
-                float a_reg[HC][HC];
-                float c_reg[HC];
-                #pragma unroll
-                for (int i = 0; i < HC; ++i) {
-                    #pragma unroll
-                    for (int j = 0; j < HC; ++j)
-                        a_reg[i][j] = comb_res_mix[tok * HC * HC + i * HC + j];
-                    c_reg[i] = post_layer_mix[tok * HC + i];
-                }
+#if !defined(SYCL_EXT_ONEAPI_WORK_GROUP_SCRATCH_MEMORY)
+    using namespace compat::experimental;
+    auto event = launch<cutlass::device_kernel<MhcPostOptKernel>>(
+        launch_policy{
+            sycl_grid,
+            sycl_block,
+            local_mem_size{static_cast<std::size_t>(0)},
+            kernel_properties{sycl_exp::sub_group_size<16>}},
+        q,
+        params);
+#else
+    compat::experimental::launch_properties launch_props{
+        sycl::ext::oneapi::experimental::work_group_scratch_size(0),
+    };
+    compat::experimental::kernel_properties kernel_props{
+        sycl::ext::oneapi::experimental::sub_group_size<16>};
+    compat::experimental::launch_policy policy{
+        sycl_grid, sycl_block, launch_props, kernel_props};
+    auto event = compat::experimental::launch<cutlass::device_kernel<MhcPostOptKernel>, MhcPostOptKernel>(
+        policy, q, params);
+#endif
 
-                for (int k = local_k * VEC; k < H; k += THREADS_PER_TOK * VEC) {
-                    auto xv = *reinterpret_cast<const vec_bf16_t*>(x + tok * H + k);
-                    float acc[HC][VEC];
-                    #pragma unroll
-                    for (int o = 0; o < HC; ++o)
-                        #pragma unroll
-                        for (int v = 0; v < VEC; ++v)
-                            acc[o][v] = c_reg[o] * float(xv.val[v]);
-
-                    #pragma unroll
-                    for (int i = 0; i < HC; ++i) {
-                        auto rv = *reinterpret_cast<const vec_bf16_t*>(
-                            residual + (tok * HC + i) * H + k);
-                        #pragma unroll
-                        for (int o = 0; o < HC; ++o) {
-                            float a_val = a_reg[i][o];
-                            #pragma unroll
-                            for (int v = 0; v < VEC; ++v)
-                                acc[o][v] += a_val * float(rv.val[v]);
-                        }
-                    }
-
-                    #pragma unroll
-                    for (int o = 0; o < HC; ++o) {
-                        vec_bf16_t ov;
-                        #pragma unroll
-                        for (int v = 0; v < VEC; ++v)
-                            ov.val[v] = static_cast<bf16>(acc[o][v]);
-                        *reinterpret_cast<vec_bf16_t*>(out + (tok * HC + o) * H + k) = ov;
-                    }
-                }
-            });
-    });
+    return event;
 }
 
 at::Tensor mhc_post(

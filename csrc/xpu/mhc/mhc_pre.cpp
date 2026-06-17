@@ -36,17 +36,15 @@
 
 #include "utils.h"
 
+#include "cutlass/device_kernel.h"
+#include "cute/util/compat/device.hpp"
+#include "cute/util/compat/dims.hpp"
+#include "cute/util/compat/launch_policy.hpp"
+
 #include <cute/tensor.hpp>
 #include <cute/algorithm/subgroup_algorithms.hpp>
 #include <cute/numeric/arithmetic_tuple.hpp>
 #include <cutlass/kernel_hardware_info.h>
-
-#if defined(__clang__)
-  #pragma clang diagnostic ignored "-Wpass-failed"
-  #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#elif defined(__GNUC__)
-  #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-#endif
 
 using namespace cute;
 
@@ -110,10 +108,10 @@ mhc_pre_splitk_device(ATensor   const& A,          // (M, K) bf16
 {
     auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
     auto sg   = sycl::ext::oneapi::this_work_item::get_sub_group();
-    auto wg_n     = int(item.get_group(0));   // N direction (always 0)
-    auto wg_m     = int(item.get_group(1));   // M direction
-    auto split_id = int(item.get_group(2));   // split-K direction
-    auto local_id = int(item.get_local_id(0));
+    auto wg_n     = int(BlockIdxX());   // N direction (always 0)
+    auto wg_m     = int(BlockIdxY());   // M direction
+    auto split_id = int(BlockIdxZ());   // split-K direction
+    auto local_id = int(ThreadIdxY());
 
     /* Compute K-tile range for this split */
     auto wg_tile = mma.tile_mnk();
@@ -277,6 +275,156 @@ static inline float sigmoid(float x) {
 }
 
 class MhcPreStage2;
+
+class MhcPreStage1VectorFunctor {
+public:
+    static constexpr int HC = 4;
+    static constexpr int BLOCK_M = 2;
+    static constexpr int BLOCK_N = 12;
+    static constexpr int VEC_SIZE = 4;
+    static constexpr int SG_SIZE = 16;
+    static constexpr int WG_SIZE = 256;
+    static constexpr int NUM_SG = WG_SIZE / SG_SIZE;
+    static constexpr int HC_MULT3 = HC * (2 + HC);
+    static_assert(HC_MULT3 % BLOCK_N == 0);
+    static constexpr int NUM_N_BLOCKS = HC_MULT3 / BLOCK_N;
+    static constexpr int NUM_REDUCE_VALUES = BLOCK_N + 1;
+
+    struct Params {
+        const bf16* residual;
+        const float* fn;
+        float* rms_mixes;
+        int N;
+        int H;
+        int k_size;
+        float rms_eps;
+    };
+
+    CUTLASS_DEVICE
+    void operator()(const Params& p, char* smem_buf) const {
+        using vec_bf16_t = aligned_vec<bf16, VEC_SIZE>;
+        using vec_f32_t = aligned_vec<float, VEC_SIZE>;
+
+        float* red_scratch = reinterpret_cast<float*>(smem_buf);
+
+        auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
+
+        const int wg_id = int(BlockIdxX());
+        const int tid = int(ThreadIdxY());
+        auto sg = item.get_sub_group();
+        const int sg_id = sg.get_group_id()[0];
+        const int sg_lane_id = sg.get_local_id()[0];
+        const int token_base = wg_id * BLOCK_M;
+
+        #pragma unroll
+        for (int block_idx = 0; block_idx < NUM_N_BLOCKS; ++block_idx) {
+            float local_mixes[BLOCK_M][BLOCK_N];
+            float local_sqrsum[BLOCK_M];
+            #pragma unroll
+            for (int t = 0; t < BLOCK_M; ++t) {
+                local_sqrsum[t] = 0.f;
+                #pragma unroll
+                for (int j = 0; j < BLOCK_N; ++j)
+                    local_mixes[t][j] = 0.f;
+            }
+
+            for (int k_idx = tid * VEC_SIZE; k_idx < p.k_size; k_idx += WG_SIZE * VEC_SIZE) {
+                vec_f32_t fn_tile[BLOCK_N];
+                #pragma unroll
+                for (int j = 0; j < BLOCK_N; ++j) {
+                    fn_tile[j] = *reinterpret_cast<const vec_f32_t*>(
+                        p.fn + (block_idx * BLOCK_N + j) * p.k_size + k_idx);
+                }
+
+                #pragma unroll
+                for (int t = 0; t < BLOCK_M; ++t) {
+                    int token_idx = token_base + t;
+                    if (token_idx >= p.N)
+                        break;
+
+                    auto residual_vec = *reinterpret_cast<const vec_bf16_t*>(
+                        p.residual + token_idx * p.k_size + k_idx);
+                    float x_vec[VEC_SIZE];
+                    #pragma unroll
+                    for (int v = 0; v < VEC_SIZE; ++v)
+                        x_vec[v] = float(residual_vec.val[v]);
+
+                    #pragma unroll
+                    for (int v = 0; v < VEC_SIZE; ++v)
+                        local_sqrsum[t] += x_vec[v] * x_vec[v];
+
+                    #pragma unroll
+                    for (int j = 0; j < BLOCK_N; ++j) {
+                        float acc = 0.f;
+                        #pragma unroll
+                        for (int v = 0; v < VEC_SIZE; ++v)
+                            acc += x_vec[v] * fn_tile[j].val[v];
+                        local_mixes[t][j] += acc;
+                    }
+                }
+            }
+
+            #pragma unroll
+            for (int t = 0; t < BLOCK_M; ++t) {
+                int token_idx = token_base + t;
+                if (token_idx >= p.N)
+                    break;
+
+                float* token_scratch = &red_scratch[t * NUM_REDUCE_VALUES * NUM_SG];
+                float sg_sum = sycl::reduce_over_group(sg, local_sqrsum[t], sycl::plus<float>());
+                if (sg_lane_id == 0)
+                    token_scratch[sg_id * NUM_REDUCE_VALUES] = sg_sum;
+
+                #pragma unroll
+                for (int j = 0; j < BLOCK_N; ++j) {
+                    float sg_mix = sycl::reduce_over_group(sg, local_mixes[t][j], sycl::plus<float>());
+                    if (sg_lane_id == 0)
+                        token_scratch[sg_id * NUM_REDUCE_VALUES + (j + 1)] = sg_mix;
+                }
+                sycl::group_barrier(item.get_group());
+
+                if (sg_id == 0 && sg_lane_id == 0) {
+                    #pragma unroll
+                    for (int j = 0; j < NUM_REDUCE_VALUES; ++j) {
+                        float s = 0.f;
+                        #pragma unroll
+                        for (int sg_idx = 0; sg_idx < NUM_SG; ++sg_idx)
+                            s += token_scratch[sg_idx * NUM_REDUCE_VALUES + j];
+                        token_scratch[j] = s;
+                    }
+                }
+                sycl::group_barrier(item.get_group());
+
+                float inv_rms = sycl::native::rsqrt(token_scratch[0] / p.k_size + p.rms_eps);
+                if (tid < BLOCK_N)
+                    p.rms_mixes[token_idx * HC_MULT3 + block_idx * BLOCK_N + tid] =
+                        token_scratch[tid + 1] * inv_rms;
+            }
+        }
+    }
+};
+
+template <class ATensor, class BTensor, class WSTensor, class TiledMMA>
+class MhcPreSplitKGemmFunctor {
+public:
+    struct Params {
+        ATensor A_cute;
+        BTensor B_cute;
+        WSTensor WS_cute;
+        float* ws_sqr;
+        TiledMMA mma;
+        int n_splits;
+        int num_wg_m;
+        int M;
+    };
+
+    CUTLASS_DEVICE
+    void operator()(const Params& p, char*) const {
+        mhc_pre_splitk_device<SplitKPolicy::prefetch_dist>(
+            p.A_cute, p.B_cute, p.WS_cute, p.ws_sqr, p.mma,
+            p.n_splits, p.num_wg_m, p.M);
+    }
+};
 
 }  // namespace
 
@@ -494,119 +642,41 @@ sycl::event launch_mhc_pre_stage1_vector(
     static constexpr int NUM_REDUCE_VALUES = BLOCK_N + 1;
     const int k_size = HC * H;
 
-    namespace syclex = sycl::ext::oneapi::experimental;
-    namespace intelex = sycl::ext::intel::experimental;
+    const size_t num_wgs = static_cast<size_t>((N + BLOCK_M - 1) / BLOCK_M);
 
-    syclex::properties kernel_props{
-        syclex::sub_group_size<SG_SIZE>,
-        intelex::grf_size<128>};
+    MhcPreStage1VectorFunctor::Params params{residual, fn, rms_mixes, N, H, k_size, rms_eps};
 
-    sycl::range<1> global(static_cast<size_t>((N + BLOCK_M - 1) / BLOCK_M) * WG_SIZE);
-    sycl::range<1> local(WG_SIZE);
+    const int smem_size = static_cast<int>(
+        MhcPreStage1VectorFunctor::NUM_REDUCE_VALUES *
+        MhcPreStage1VectorFunctor::NUM_SG *
+        MhcPreStage1VectorFunctor::BLOCK_M * sizeof(float));
 
-    return q.submit([&](sycl::handler& h) {
-        using vec_bf16_t = aligned_vec<bf16, VEC_SIZE>;
-        using vec_f32_t = aligned_vec<float, VEC_SIZE>;
-        sycl::local_accessor<float, 1> red_scratch(
-            NUM_REDUCE_VALUES * NUM_SG * BLOCK_M, h);
+    const auto sycl_block = compat::dim3(1, WG_SIZE, 1);
+    const auto sycl_grid = compat::dim3(static_cast<unsigned int>(num_wgs), 1, 1);
 
-        h.parallel_for<MhcPreStage1Vector>(
-            sycl::nd_range<1>(global, local), kernel_props,
-            [=](sycl::nd_item<1> item) {
-                const int wg_id = item.get_group(0);
-                const int tid = item.get_local_id(0);
-                auto sg = item.get_sub_group();
-                const int sg_id = sg.get_group_id()[0];
-                const int sg_lane_id = sg.get_local_id()[0];
-                const int token_base = wg_id * BLOCK_M;
+#if !defined(SYCL_EXT_ONEAPI_WORK_GROUP_SCRATCH_MEMORY)
+    using namespace compat::experimental;
+    auto event = launch<cutlass::device_kernel<MhcPreStage1VectorFunctor>>(
+        launch_policy{
+            sycl_grid,
+            sycl_block,
+            local_mem_size{static_cast<std::size_t>(smem_size)},
+            kernel_properties{sycl_exp::sub_group_size<16>}},
+        q,
+        params);
+#else
+    compat::experimental::launch_properties launch_props{
+        sycl::ext::oneapi::experimental::work_group_scratch_size(smem_size),
+    };
+    compat::experimental::kernel_properties kernel_props{
+        sycl::ext::oneapi::experimental::sub_group_size<16>};
+    compat::experimental::launch_policy policy{
+        sycl_grid, sycl_block, launch_props, kernel_props};
+    auto event = compat::experimental::launch<cutlass::device_kernel<MhcPreStage1VectorFunctor>, MhcPreStage1VectorFunctor>(
+        policy, q, params);
+#endif
 
-                #pragma unroll
-                for (int block_idx = 0; block_idx < NUM_N_BLOCKS; ++block_idx) {
-                    float local_mixes[BLOCK_M][BLOCK_N];
-                    float local_sqrsum[BLOCK_M];
-                    #pragma unroll
-                    for (int t = 0; t < BLOCK_M; ++t) {
-                        local_sqrsum[t] = 0.f;
-                        #pragma unroll
-                        for (int j = 0; j < BLOCK_N; ++j)
-                            local_mixes[t][j] = 0.f;
-                    }
-
-                    for (int k_idx = tid * VEC_SIZE; k_idx < k_size; k_idx += WG_SIZE * VEC_SIZE) {
-                        vec_f32_t fn_tile[BLOCK_N];
-                        #pragma unroll
-                        for (int j = 0; j < BLOCK_N; ++j) {
-                            fn_tile[j] = *reinterpret_cast<const vec_f32_t*>(
-                                fn + (block_idx * BLOCK_N + j) * k_size + k_idx);
-                        }
-
-                        #pragma unroll
-                        for (int t = 0; t < BLOCK_M; ++t) {
-                            int token_idx = token_base + t;
-                            if (token_idx >= N)
-                                break;
-
-                            auto residual_vec = *reinterpret_cast<const vec_bf16_t*>(
-                                residual + token_idx * k_size + k_idx);
-                            float x_vec[VEC_SIZE];
-                            #pragma unroll
-                            for (int v = 0; v < VEC_SIZE; ++v)
-                                x_vec[v] = float(residual_vec.val[v]);
-
-                            #pragma unroll
-                            for (int v = 0; v < VEC_SIZE; ++v)
-                                local_sqrsum[t] += x_vec[v] * x_vec[v];
-
-                            #pragma unroll
-                            for (int j = 0; j < BLOCK_N; ++j) {
-                                float acc = 0.f;
-                                #pragma unroll
-                                for (int v = 0; v < VEC_SIZE; ++v)
-                                    acc += x_vec[v] * fn_tile[j].val[v];
-                                local_mixes[t][j] += acc;
-                            }
-                        }
-                    }
-
-                    #pragma unroll
-                    for (int t = 0; t < BLOCK_M; ++t) {
-                        int token_idx = token_base + t;
-                        if (token_idx >= N)
-                            break;
-
-                        float* token_scratch = &red_scratch[t * NUM_REDUCE_VALUES * NUM_SG];
-                        float sg_sum = sycl::reduce_over_group(sg, local_sqrsum[t], sycl::plus<float>());
-                        if (sg_lane_id == 0)
-                            token_scratch[sg_id * NUM_REDUCE_VALUES] = sg_sum;
-
-                        #pragma unroll
-                        for (int j = 0; j < BLOCK_N; ++j) {
-                            float sg_mix = sycl::reduce_over_group(sg, local_mixes[t][j], sycl::plus<float>());
-                            if (sg_lane_id == 0)
-                                token_scratch[sg_id * NUM_REDUCE_VALUES + (j + 1)] = sg_mix;
-                        }
-                        sycl::group_barrier(item.get_group());
-
-                        if (sg_id == 0 && sg_lane_id == 0) {
-                            #pragma unroll
-                            for (int j = 0; j < NUM_REDUCE_VALUES; ++j) {
-                                float s = 0.f;
-                                #pragma unroll
-                                for (int sg_idx = 0; sg_idx < NUM_SG; ++sg_idx)
-                                    s += token_scratch[sg_idx * NUM_REDUCE_VALUES + j];
-                                token_scratch[j] = s;
-                            }
-                        }
-                        sycl::group_barrier(item.get_group());
-
-                        float inv_rms = sycl::native::rsqrt(token_scratch[0] / k_size + rms_eps);
-                        if (tid < BLOCK_N)
-                            rms_mixes[token_idx * HC_MULT3 + block_idx * BLOCK_N + tid] =
-                                token_scratch[tid + 1] * inv_rms;
-                    }
-                }
-            });
-    });
+    return event;
 }
 
 sycl::event launch_mhc_pre_stage2(
@@ -783,29 +853,45 @@ void launch_mhc_pre_splitk_gemm(
         make_layout(make_shape(n_splits * M_padded, N_gemm),
                     make_stride(N_gemm, Int<1>{})));
 
-    namespace syclex  = sycl::ext::oneapi::experimental;
-    namespace intelex = sycl::ext::intel::experimental;
+    const auto block_x = static_cast<unsigned int>(size(mma));
+    const auto grid_x = static_cast<unsigned int>(ceil_div(shape<0>(B_cute), get<1>(wg_tile)));
+    const auto grid_y = static_cast<unsigned int>(num_wg_m);
+    const auto grid_z = static_cast<unsigned int>(n_splits);
 
-    syclex::properties kernel_props{
-        syclex::sub_group_size<16>,
-        intelex::grf_size<256>
+    typename MhcPreSplitKGemmFunctor<decltype(A_cute), decltype(B_cute), decltype(WS_cute), TiledMMA_t>::Params
+        params{A_cute, B_cute, WS_cute, ws_sqr, mma, n_splits, num_wg_m, M};
+
+    const auto sycl_block = compat::dim3(1, block_x, 1);
+    const auto sycl_grid = compat::dim3(grid_x, grid_y, grid_z);
+
+#if !defined(SYCL_EXT_ONEAPI_WORK_GROUP_SCRATCH_MEMORY)
+    using namespace compat::experimental;
+    launch<cutlass::device_kernel<MhcPreSplitKGemmFunctor<decltype(A_cute), decltype(B_cute), decltype(WS_cute), TiledMMA_t>>>(
+        launch_policy{
+            sycl_grid,
+            sycl_block,
+            local_mem_size{static_cast<std::size_t>(0)},
+            kernel_properties{
+                sycl_exp::sub_group_size<16>,
+                sycl::ext::intel::experimental::grf_size<256>}},
+        queue,
+        params);
+#else
+    compat::experimental::launch_properties launch_props{
+        sycl::ext::oneapi::experimental::work_group_scratch_size(0),
     };
-
-    sycl::range<3> local  = {static_cast<size_t>(size(mma)), 1, 1};
-    sycl::range<3> global = {
-        local[0] * ceil_div(shape<0>(B_cute), get<1>(wg_tile)),
-        local[1] * static_cast<size_t>(num_wg_m),
-        static_cast<size_t>(n_splits)
-    };
-
-    queue.parallel_for<MhcPreSplitKGemm>(
-        sycl::nd_range<3>(global, local), kernel_props,
-        [=](auto) {
-            mhc_pre_splitk_device<Policy::prefetch_dist>(
-                A_cute, B_cute, WS_cute, ws_sqr, mma,
-                n_splits, num_wg_m, M);
-        }
-    );
+    compat::experimental::kernel_properties kernel_props{
+        sycl::ext::oneapi::experimental::sub_group_size<16>,
+        sycl::ext::intel::experimental::grf_size<256>};
+    compat::experimental::launch_policy policy{
+        sycl_grid, sycl_block, launch_props, kernel_props};
+    compat::experimental::launch<
+        cutlass::device_kernel<MhcPreSplitKGemmFunctor<decltype(A_cute), decltype(B_cute), decltype(WS_cute), TiledMMA_t>>,
+        MhcPreSplitKGemmFunctor<decltype(A_cute), decltype(B_cute), decltype(WS_cute), TiledMMA_t>>(
+        policy,
+        queue,
+        params);
+#endif
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
