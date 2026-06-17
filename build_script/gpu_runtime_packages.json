@@ -130,8 +130,8 @@
                 "https://github.com/intel/compute-runtime/releases/download/26.22.38646.4/intel-opencl-icd_26.22.38646.4-0_amd64.deb",
                 "https://github.com/intel/compute-runtime/releases/download/26.22.38646.4/libigdgmm12_22.10.0_amd64.deb",
                 "https://github.com/intel/compute-runtime/releases/download/26.22.38646.4/libze-intel-gpu1_26.22.38646.4-0_amd64.deb",
-                "https://github.com/oneapi-src/level-zero/releases/download/v1.28.6/level-zero_1.28.6+u24.04_amd64.deb",
-                "https://github.com/oneapi-src/level-zero/releases/download/v1.28.6/level-zero-devel_1.28.6+u24.04_amd64.deb"
+                "https://github.com/oneapi-src/level-zero/releases/download/v1.28.6/libze1_1.28.6+u24.04_amd64.deb",
+                "https://github.com/oneapi-src/level-zero/releases/download/v1.28.6/libze-dev_1.28.6+u24.04_amd64.deb"
             ]
         }
     }
