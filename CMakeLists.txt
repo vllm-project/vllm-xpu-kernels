@@ -436,6 +436,7 @@ if(BUILD_SYCL_TLA_KERNELS)
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
+  list(APPEND VLLM_GPU_COMPILE_FLAGS ${VLLM_CUTLASS_FLAGS})
 
 endif()
 
@@ -457,6 +458,15 @@ set(VLLM_XPU_INCLUDE_DIR "")
 list(APPEND VLLM_XPU_INCLUDE_DIR ${CMPLR_ROOT}/include/)
 list(APPEND VLLM_XPU_INCLUDE_DIR ${CMPLR_ROOT}/include/sycl/)
 list(APPEND VLLM_XPU_INCLUDE_DIR ${CMPLR_ROOT}/include/syclcompat/)
+if(CUTLASS_INCLUDE_DIR)
+  list(APPEND VLLM_XPU_INCLUDE_DIR ${CUTLASS_INCLUDE_DIR})
+endif()
+if(CUTLASS_TOOLS_UTIL_INCLUDE_DIR)
+  list(APPEND VLLM_XPU_INCLUDE_DIR ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR})
+endif()
+if(CUTLASS_APP_INCLUDE_DIR)
+  list(APPEND VLLM_XPU_INCLUDE_DIR ${CUTLASS_APP_INCLUDE_DIR})
+endif()
 message(STATUS "VLLM_XPU_INCLUDE_DIR: ${VLLM_XPU_INCLUDE_DIR}")
 
 set(VLLM_XPU_LINK_LIBRARIES "")
@@ -608,6 +618,10 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
 
   set(VLLM_EXT_XPU_SRC
       "csrc/xpu/torch_bindings.cpp"
+      "csrc/xpu/mhc/mhc_pre.cpp"
+      "csrc/xpu/mhc/mhc_post.cpp"
+      "csrc/xpu/mhc/hc_head_fused.cpp"
+      "csrc/xpu/mhc/mhc_fused_post_pre.cpp"
       "csrc/xpu/lora/lora_shrink.cpp"
       "csrc/xpu/lora/lora_expand.cpp"
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
