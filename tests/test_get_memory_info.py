@@ -17,13 +17,23 @@ def test_get_memory_info(device) -> None:
     # ref_free 24385683456
     # ref_total 24385683456
     # ->
-    # ref_free 24972611584
+    # ref_free 25429528576
     # ref_total 25669140480
     # So we use hard code to check the results
     # We should check the results after fixing the torch issue
     # ref_free, ref_total = torch.xpu.mem_get_info(device)
-    ref_total = 24385683456
 
-    if torch.ops._xpu_C.is_bmg(device):
+    if torch.ops._xpu_C.is_bmg_g21(device):
+        ref_total = 24385683456
+        assert free > 0
+        assert total == ref_total
+
+    elif torch.ops._xpu_C.is_bmg_g31(device):
+        ref_total = 32530182144
+        assert free > 0
+        assert total == ref_total
+
+    elif torch.ops._xpu_C.is_pvc(device):
+        ref_total = 65267564544
         assert free > 0
         assert total == ref_total
