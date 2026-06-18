@@ -272,16 +272,26 @@ class XeFMHAFwdKernel {
           cute::min(seq_len_qo, (blk_q * get<0>(TileShapeQK{}) + q_offset_sg));
 
       // calc sg level seq_len_kv
+      // The right K-boundary must shrink whenever a local (sliding-window)
+      // mask is active, regardless of whether causal masking is also on.
+      // The host converts local+causal into local-only (CausalMask=false,
+      // LocalMask=true); in that case the right edge is still bounded by
+      // row + local_right, so we must clamp seq_len here too. Otherwise
+      // seq_len degenerates to seq_len_kv and every Q block iterates all K
+      // blocks, computing GEMM1 for tiles that the local mask then sets to
+      // -inf (pure wasted work). This clamp matches the per-element local
+      // right-mask test (col > row + local_right) used in the mainloop, so
+      // results are unchanged.
       const int seq_len =
-          CausalMask
-              ? LocalMask
+          LocalMask
+              ? cute::min(
+                    seq_len_kv,
+                    full_tile_offset + seq_coord + q_sg_tile +
+                        params.mainloop.local_right)
+              : CausalMask
                     ? cute::min(
-                          seq_len_kv,
-                          full_tile_offset + seq_coord + q_sg_tile +
-                              params.mainloop.local_right)
-                    : cute::min(
                           seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
-              : seq_len_kv;
+                    : seq_len_kv;
       const int sg_k_block0 =
           LocalMask
               ? cute::max(
