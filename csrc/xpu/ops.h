@@ -145,8 +145,7 @@ void hc_head_fused(
     double rms_eps,
     double hc_eps);
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
-mhc_fused_post_pre(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mhc_fused_post_pre(
     const at::Tensor& x,
     const at::Tensor& residual,
     const at::Tensor& post_layer_mix,

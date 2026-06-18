@@ -38,8 +38,7 @@ void hc_head_fused(
     double hc_eps);
 
 // mhc_fused_post_pre: composed post→pre in one call
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
-mhc_fused_post_pre(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mhc_fused_post_pre(
     const at::Tensor& x,
     const at::Tensor& residual,
     const at::Tensor& post_layer_mix,
