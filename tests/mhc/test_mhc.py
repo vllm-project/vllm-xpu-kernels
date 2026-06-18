@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 import pytest
+import torch
 
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 
@@ -92,8 +92,12 @@ def mhc_pre_reference(
     comb_mix = torch.softmax(comb_logits, dim=-1) + hc_sinkhorn_eps
     comb_mix = comb_mix / (comb_mix.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps)
     for _ in range(sinkhorn_repeat - 1):
-        comb_mix = comb_mix / (comb_mix.sum(dim=-1, keepdim=True) + hc_sinkhorn_eps)
-        comb_mix = comb_mix / (comb_mix.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps)
+        comb_mix = comb_mix / (
+            comb_mix.sum(dim=-1, keepdim=True) + hc_sinkhorn_eps
+        )
+        comb_mix = comb_mix / (
+            comb_mix.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps
+        )
 
     layer_input = torch.sum(
         pre_mix.unsqueeze(-1) * x.to(torch.float32), dim=1).to(torch.bfloat16)
@@ -112,7 +116,9 @@ def mhc_post_reference(
         comb_res_mix.to(torch.float32),
         residual.to(torch.float32),
     )
-    post_term = post_layer_mix.to(torch.float32) * x.unsqueeze(-2).to(torch.float32)
+    post_term = post_layer_mix.to(torch.float32) * x.unsqueeze(-2).to(
+        torch.float32
+    )
     return (mixed_residual + post_term).to(torch.bfloat16)
 
 
@@ -132,7 +138,9 @@ def hc_head_fused_reference(
     rsqrt = torch.rsqrt(sqrsum / (HC * hidden_size) + rms_eps)
     pre_mix = torch.sigmoid(mixes * rsqrt * hc_scale[0] + hc_base) + hc_eps
     return torch.sum(
-        pre_mix.unsqueeze(-1) * hs_flat.to(torch.float32), dim=1).to(torch.bfloat16)
+        pre_mix.unsqueeze(-1) * hs_flat.to(torch.float32),
+        dim=1,
+    ).to(torch.bfloat16)
 
 
 def mhc_fused_post_pre_reference(
@@ -171,8 +179,16 @@ def test_mhc_pre(num_tokens: int, hidden_size: int):
     device = "xpu"
     hc3 = HC * 2 + HC * HC
 
-    residual = torch.randn((num_tokens, HC, hidden_size), dtype=torch.bfloat16, device=device)
-    fn = torch.randn((hc3, HC * hidden_size), dtype=torch.float32, device=device)
+    residual = torch.randn(
+        (num_tokens, HC, hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    fn = torch.randn(
+        (hc3, HC * hidden_size),
+        dtype=torch.float32,
+        device=device,
+    )
     hc_scale = torch.randn((3,), dtype=torch.float32, device=device)
     hc_base = torch.randn((hc3,), dtype=torch.float32, device=device)
 
@@ -209,23 +225,50 @@ def test_mhc_pre(num_tokens: int, hidden_size: int):
     if num_tokens < 128:
         torch.testing.assert_close(post_mix, ref_post_mix, atol=1e-4, rtol=1e-4)
         torch.testing.assert_close(comb_mix, ref_comb_mix, atol=1e-4, rtol=1e-4)
-        torch.testing.assert_close(layer_input, ref_layer_input, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(
+            layer_input,
+            ref_layer_input,
+            atol=1e-2,
+            rtol=1e-2,
+        )
     else:
-        # For token numbers >= 2048, we use a looser tolerance due to kernel use tf32 internally
+        # For token numbers >= 2048, we use a looser tolerance because
+        # the kernel uses tf32 internally.
         torch.testing.assert_close(post_mix, ref_post_mix, atol=6e-2, rtol=6e-2)
         torch.testing.assert_close(comb_mix, ref_comb_mix, atol=6e-2, rtol=6e-2)
-        cos_sim = torch.cosine_similarity(layer_input.flatten(), ref_layer_input.flatten(), dim=0)
+        cos_sim = torch.cosine_similarity(
+            layer_input.flatten(),
+            ref_layer_input.flatten(),
+            dim=0,
+        )
         assert cos_sim > 0.99, f"Cosine similarity too low: {cos_sim.item()}"
+
 
 @pytest.mark.parametrize("num_tokens,hidden_size", MHC_POST_CASES)
 def test_mhc_post(num_tokens: int, hidden_size: int):
     torch.manual_seed(0)
     device = "xpu"
 
-    x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16, device=device)
-    residual = torch.randn((num_tokens, HC, hidden_size), dtype=torch.bfloat16, device=device)
-    post_mix = torch.randn((num_tokens, HC, 1), dtype=torch.float32, device=device)
-    comb_mix = torch.randn((num_tokens, HC, HC), dtype=torch.float32, device=device)
+    x = torch.randn(
+        (num_tokens, hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    residual = torch.randn(
+        (num_tokens, HC, hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    post_mix = torch.randn(
+        (num_tokens, HC, 1),
+        dtype=torch.float32,
+        device=device,
+    )
+    comb_mix = torch.randn(
+        (num_tokens, HC, HC),
+        dtype=torch.float32,
+        device=device,
+    )
 
     out = torch.ops._xpu_C.mhc_post(x, residual, post_mix, comb_mix)
     ref = mhc_post_reference(x, residual, post_mix, comb_mix)
@@ -238,18 +281,40 @@ def test_hc_head_fused(num_tokens: int, hidden_size: int):
     torch.manual_seed(0)
     device = "xpu"
 
-    hs_flat = torch.randn((num_tokens, HC, hidden_size), dtype=torch.bfloat16, device=device)
+    hs_flat = torch.randn(
+        (num_tokens, HC, hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
     fn = torch.randn((HC, HC * hidden_size), dtype=torch.float32, device=device)
     hc_scale = torch.randn((1,), dtype=torch.float32, device=device)
     hc_base = torch.randn((HC,), dtype=torch.float32, device=device)
-    out = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16, device=device)
+    out = torch.empty(
+        (num_tokens, hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
 
     rms_eps = 1e-6
     hc_eps = 1e-6
 
     torch.ops._xpu_C.hc_head_fused(
-        hs_flat, fn, hc_scale, hc_base, out, rms_eps, hc_eps)
-    ref = hc_head_fused_reference(hs_flat, fn, hc_scale, hc_base, rms_eps, hc_eps)
+        hs_flat,
+        fn,
+        hc_scale,
+        hc_base,
+        out,
+        rms_eps,
+        hc_eps,
+    )
+    ref = hc_head_fused_reference(
+        hs_flat,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_eps,
+    )
 
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
@@ -261,13 +326,33 @@ def test_mhc_fused_post_pre(num_tokens: int, hidden_size: int):
     hc3 = HC * 2 + HC * HC
 
     # Inputs for the post stage (from previous layer's mhc_pre)
-    x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16, device=device)
-    residual = torch.randn((num_tokens, HC, hidden_size), dtype=torch.bfloat16, device=device)
-    post_layer_mix = torch.randn((num_tokens, HC, 1), dtype=torch.float32, device=device)
-    comb_res_mix = torch.randn((num_tokens, HC, HC), dtype=torch.float32, device=device)
+    x = torch.randn(
+        (num_tokens, hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    residual = torch.randn(
+        (num_tokens, HC, hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    post_layer_mix = torch.randn(
+        (num_tokens, HC, 1),
+        dtype=torch.float32,
+        device=device,
+    )
+    comb_res_mix = torch.randn(
+        (num_tokens, HC, HC),
+        dtype=torch.float32,
+        device=device,
+    )
 
     # Weights for the pre stage (current layer)
-    fn = torch.randn((hc3, HC * hidden_size), dtype=torch.float32, device=device)
+    fn = torch.randn(
+        (hc3, HC * hidden_size),
+        dtype=torch.float32,
+        device=device,
+    )
     hc_scale = torch.randn((3,), dtype=torch.float32, device=device)
     hc_base = torch.randn((hc3,), dtype=torch.float32, device=device)
 
@@ -279,30 +364,76 @@ def test_mhc_fused_post_pre(num_tokens: int, hidden_size: int):
 
     residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur = (
         torch.ops._xpu_C.mhc_fused_post_pre(
-            x, residual, post_layer_mix, comb_res_mix,
-            fn, hc_scale, hc_base,
-            rms_eps, hc_pre_eps, hc_sinkhorn_eps,
-            hc_post_mult_value, sinkhorn_repeat,
+            x,
+            residual,
+            post_layer_mix,
+            comb_res_mix,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
         )
     )
 
     ref_residual, ref_post_mix, ref_comb_mix, ref_layer_input = (
         mhc_fused_post_pre_reference(
-            x, residual, post_layer_mix, comb_res_mix,
-            fn, hc_scale, hc_base,
-            rms_eps, hc_pre_eps, hc_sinkhorn_eps,
-            hc_post_mult_value, sinkhorn_repeat,
+            x,
+            residual,
+            post_layer_mix,
+            comb_res_mix,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
         )
     )
 
     torch.testing.assert_close(residual_cur, ref_residual, atol=1e-2, rtol=1e-2)
     if num_tokens < 128:
-        torch.testing.assert_close(post_mix_cur, ref_post_mix, atol=5e-3, rtol=5e-3)
-        torch.testing.assert_close(comb_mix_cur, ref_comb_mix, atol=5e-3, rtol=5e-3)
-        torch.testing.assert_close(layer_input_cur, ref_layer_input, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(
+            post_mix_cur,
+            ref_post_mix,
+            atol=5e-3,
+            rtol=5e-3,
+        )
+        torch.testing.assert_close(
+            comb_mix_cur,
+            ref_comb_mix,
+            atol=5e-3,
+            rtol=5e-3,
+        )
+        torch.testing.assert_close(
+            layer_input_cur,
+            ref_layer_input,
+            atol=2e-2,
+            rtol=2e-2,
+        )
     else:
-        # For token numbers >= 2048, mhc_pre uses tf32 DPAS path -> looser tolerance
-        torch.testing.assert_close(post_mix_cur, ref_post_mix, atol=6e-2, rtol=6e-2)
-        torch.testing.assert_close(comb_mix_cur, ref_comb_mix, atol=6e-2, rtol=6e-2)
-        cos_sim = torch.cosine_similarity(layer_input_cur.flatten(), ref_layer_input.flatten(), dim=0)
+        # For token numbers >= 2048, mhc_pre uses tf32 DPAS path,
+        # so we use a looser tolerance.
+        torch.testing.assert_close(
+            post_mix_cur,
+            ref_post_mix,
+            atol=6e-2,
+            rtol=6e-2,
+        )
+        torch.testing.assert_close(
+            comb_mix_cur,
+            ref_comb_mix,
+            atol=6e-2,
+            rtol=6e-2,
+        )
+        cos_sim = torch.cosine_similarity(
+            layer_input_cur.flatten(),
+            ref_layer_input.flatten(),
+            dim=0,
+        )
         assert cos_sim > 0.99, f"Cosine similarity too low: {cos_sim.item()}"
