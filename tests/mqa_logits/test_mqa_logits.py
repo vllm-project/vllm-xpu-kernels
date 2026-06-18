@@ -1,10 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 import random
 
 import pytest
 import torch
 
 import vllm_xpu_kernels._xpu_C  # noqa: F401
+
+_test_scope = os.getenv("XPU_KERNEL_TEST_SCOPE", "").strip().lower()
+_allowed_scopes = {
+    "",
+    "ci",
+    "full",
+}
+if _test_scope not in _allowed_scopes:
+    pytest.skip(
+        f"mqa logits tests are disabled for scope: {_test_scope}",
+        allow_module_level=True,
+    )
 
 DEVICES = ["xpu:0"]
 
