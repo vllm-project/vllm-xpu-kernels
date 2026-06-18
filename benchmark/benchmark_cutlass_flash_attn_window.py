@@ -39,13 +39,13 @@ BASE = dict(
     kv_dtype=None,
 )
 
-WINDOWS = [(64, 0), (128, 0), (256, 0), (512, 0), (1024, 0), (2048, 0),(-1, -1)]
+WINDOWS = [(64, 0), (128, 0), (256, 0), (512, 0), (1024, 0), (2048, 0), (-1, -1)]
 ITERS = 20
 
 
 def main():
     torch.set_default_device("xpu")
-    torch.xpu.set_device("xpu:0")
+    torch.xpu.set_device(0)
     print(f"device={torch.xpu.get_device_name()}")
     print(f"shape: q=k={BASE['query_lens']} heads={BASE['num_heads']} "
           f"head_size={BASE['head_size']} causal={BASE['is_causal']} "
