@@ -318,6 +318,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "gather_and_maybe_dequant_cache",
       torch::kXPU,
       &gather_and_maybe_dequant_cache);
+
+  cache_ops.def("getMemoryInfo(int device_index) -> (int, int)");
+  cache_ops.impl("getMemoryInfo", &getMemoryInfo);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

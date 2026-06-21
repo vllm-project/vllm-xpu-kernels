@@ -51,11 +51,18 @@ get_device_architecture(at::DeviceIndex device_index = -1) {
   return raw_device.get_info<syclex::info::device::architecture>();
 }
 
-static inline bool is_bmg(at::DeviceIndex device_index = -1) {
+static inline bool is_bmg_g21(at::DeviceIndex device_index = -1) {
   return get_device_architecture(device_index) ==
-             syclex::architecture::intel_gpu_bmg_g21 ||
-         get_device_architecture(device_index) ==
-             syclex::architecture::intel_gpu_bmg_g31;
+         syclex::architecture::intel_gpu_bmg_g21;
+}
+
+static inline bool is_bmg_g31(at::DeviceIndex device_index = -1) {
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_bmg_g31;
+}
+
+static inline bool is_bmg(at::DeviceIndex device_index = -1) {
+  return is_bmg_g21(device_index) || is_bmg_g31(device_index);
 }
 
 static inline bool is_pvc(at::DeviceIndex device_index = -1) {

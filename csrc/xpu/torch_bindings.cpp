@@ -113,6 +113,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 #endif
 
   // for empty tensor functions, we don't need dispatch key like torch::kXPU
+  xpu_ops.def("is_bmg_g21(int device_index) -> bool");
+  xpu_ops.impl("is_bmg_g21", &is_bmg_g21);
+
+  xpu_ops.def("is_bmg_g31(int device_index) -> bool");
+  xpu_ops.impl("is_bmg_g31", &is_bmg_g31);
+
   xpu_ops.def("is_bmg(int device_index) -> bool");
   xpu_ops.impl("is_bmg", &is_bmg);
 
