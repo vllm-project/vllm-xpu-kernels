@@ -148,17 +148,28 @@ struct causal_conv1d_kernel {
       }
     }
 
-    // get current seq start, end
+    // get current seq start, end. query_start_loc is monotonically increasing
+    // (cumulative sequence lengths), so binary-search the owning sequence
+    // instead of a linear scan. This turns an O(batch_size) chain of dependent
+    // global loads into O(log batch_size), cutting memory-latency stalls that
+    // dominate at large batch sizes.
     int batch_id = batch_size - 1;
     int seq_start_offset = 0;
     int seq_end_offset = 0;
-    for (int i = 0; i < batch_size; ++i) {
-      if (token_id < query_start_loc[i + 1]) {
-        batch_id = i;
-        seq_start_offset = query_start_loc[i];
-        seq_end_offset = query_start_loc[i + 1];
-        break;
+    {
+      int lo = 0;
+      int hi = batch_size - 1;
+      while (lo <= hi) {
+        const int mid = (lo + hi) >> 1;
+        if (token_id < query_start_loc[mid + 1]) {
+          batch_id = mid;
+          hi = mid - 1;
+        } else {
+          lo = mid + 1;
+        }
       }
+      seq_start_offset = query_start_loc[batch_id];
+      seq_end_offset = query_start_loc[batch_id + 1];
     }
 
     // get states cache location
