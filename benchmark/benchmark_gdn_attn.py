@@ -187,8 +187,13 @@ def _make_non_spec_inputs(shape: GdnShape, workload: Workload, dtype):
         torch.zeros(1, dtype=torch.int64),
         torch.cumsum(per_seq, dim=0)
     ]).to(torch.int32).to(DEVICE)
-    has_initial_state = (
-        torch.rand(workload.batch_size, device=DEVICE) > 0.5)
+    if workload.mode == "decode":
+        has_initial_state = torch.ones(workload.batch_size,
+                                       dtype=torch.bool,
+                                       device=DEVICE)
+    else:
+        has_initial_state = (
+            torch.rand(workload.batch_size, device=DEVICE) > 0.5)
     non_spec_state_indices_tensor = torch.tensor(
         random.sample(range(cache_batch_size), workload.batch_size),
         device=DEVICE, dtype=torch.int32)
@@ -508,14 +513,14 @@ def get_benchmark(configs, iterations=20):
             line_arg="provider",
             line_vals=["gdn", "gdn_memBandwidth", "gdn_MBU", "gdn_TFLOPS"],
             line_names=[
-                "GDN(us)",
-                "GDN_memBandwidth(GB/s)",
-                "GDN_MBU (%)",
-                "GDN_TFLOPS",
+                "Latency(us)",
+                "Mem_Bandwidth(GB/s)",
+                "MBU (%)",
+                "TFLOPS",
             ],
             styles=[("blue", "-"), ("purple", "-"), ("red", "-"),
                     ("green", "-")],
-            ylabel="Latency (us)",
+            ylabel="Value",
             plot_name="gdn-attn",
             args={},
         ))
