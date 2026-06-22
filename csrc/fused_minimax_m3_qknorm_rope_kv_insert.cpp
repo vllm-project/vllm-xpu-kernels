@@ -31,6 +31,7 @@
 #include <sycl/sycl.hpp>
 #include "utils.h"
 #include <torch/all.h>
+#include <ATen/DeviceGuard.h>
 #include <optional>
 
 namespace vllm {
@@ -321,13 +322,143 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     int64_t block_size,
     std::optional<torch::Tensor> q_out,
     std::optional<torch::Tensor> index_q_out) {
+  CHECK_DEVICE(qkv);
+  CHECK_CONTIGUOUS(qkv);
+  CHECK_DEVICE(q_norm_weight);
+  CHECK_CONTIGUOUS(q_norm_weight);
+  CHECK_DEVICE(k_norm_weight);
+  CHECK_CONTIGUOUS(k_norm_weight);
+  CHECK_DEVICE(cos_sin_cache);
+  CHECK_CONTIGUOUS(cos_sin_cache);
+  CHECK_DEVICE(positions);
+  CHECK_CONTIGUOUS(positions);
+
   TORCH_CHECK(qkv.dtype() == torch::kBFloat16, "qkv must be bf16");
   TORCH_CHECK(qkv.dim() == 2, "qkv must be 2-D [num_tokens, packed]");
-  TORCH_CHECK(positions.dtype() == torch::kInt64);
+  TORCH_CHECK(
+      q_norm_weight.dtype() == torch::kBFloat16, "q_norm_weight must be bf16");
+  TORCH_CHECK(
+      k_norm_weight.dtype() == torch::kBFloat16, "k_norm_weight must be bf16");
+  TORCH_CHECK(
+      cos_sin_cache.dtype() == torch::kBFloat16, "cos_sin_cache must be bf16");
+  TORCH_CHECK(
+      q_norm_weight.numel() == vllm::M3_HEAD_DIM,
+      "q_norm_weight must have head_dim (",
+      vllm::M3_HEAD_DIM,
+      ") elements");
+  TORCH_CHECK(
+      k_norm_weight.numel() == vllm::M3_HEAD_DIM,
+      "k_norm_weight must have head_dim (",
+      vllm::M3_HEAD_DIM,
+      ") elements");
+  TORCH_CHECK(positions.dtype() == torch::kInt64, "positions must be int64");
+  TORCH_CHECK(positions.dim() == 1, "positions must be 1-D [num_tokens]");
+  TORCH_CHECK(
+      positions.size(0) == qkv.size(0),
+      "positions length must match num_tokens");
   TORCH_CHECK(rotary_dim % 2 == 0, "rotary_dim must be even");
+  TORCH_CHECK(
+      rotary_dim <= vllm::M3_HEAD_DIM,
+      "rotary_dim must be <= head_dim (",
+      vllm::M3_HEAD_DIM,
+      ")");
+  TORCH_CHECK(
+      cos_sin_cache.dim() == 2,
+      "cos_sin_cache must be 2-D [max_position, rotary_dim]");
   TORCH_CHECK(
       cos_sin_cache.size(-1) == rotary_dim,
       "cos_sin_cache last dim must equal rotary_dim");
+  TORCH_CHECK(
+      num_heads > 0 && num_kv_heads > 0,
+      "num_heads and num_kv_heads must be positive");
+  TORCH_CHECK(num_index_heads >= 0, "num_index_heads must be non-negative");
+
+  const int64_t expected_cols =
+      ((int64_t)num_heads + 2 * num_kv_heads +
+       (num_index_heads > 0 ? num_index_heads + 1 : 0)) *
+      vllm::M3_HEAD_DIM;
+  TORCH_CHECK(
+      qkv.size(1) == expected_cols,
+      "qkv packed dim (",
+      qkv.size(1),
+      ") must equal (num_heads + ",
+      "2*num_kv_heads + (num_index_heads>0 ? num_index_heads+1 : 0)) * ",
+      "head_dim (= ",
+      expected_cols,
+      ")");
+
+  // Index branches require their Gemma-norm weights; index_q_out stays optional
+  // (q/index_q fall back to in-place when no gather buffer is supplied).
+  if (num_index_heads > 0) {
+    TORCH_CHECK(
+        index_q_norm_weight.has_value() && index_k_norm_weight.has_value(),
+        "index_q_norm_weight and index_k_norm_weight are required when "
+        "num_index_heads > 0");
+    CHECK_DEVICE(index_q_norm_weight.value());
+    CHECK_CONTIGUOUS(index_q_norm_weight.value());
+    CHECK_DEVICE(index_k_norm_weight.value());
+    CHECK_CONTIGUOUS(index_k_norm_weight.value());
+    TORCH_CHECK(
+        index_q_norm_weight->dtype() == torch::kBFloat16 &&
+            index_k_norm_weight->dtype() == torch::kBFloat16,
+        "index norm weights must be bf16");
+    TORCH_CHECK(
+        index_q_norm_weight->numel() == vllm::M3_HEAD_DIM &&
+            index_k_norm_weight->numel() == vllm::M3_HEAD_DIM,
+        "index norm weights must have head_dim (",
+        vllm::M3_HEAD_DIM,
+        ") elements");
+  }
+
+  if (q_out.has_value()) {
+    CHECK_DEVICE(q_out.value());
+    CHECK_CONTIGUOUS(q_out.value());
+    TORCH_CHECK(q_out->dtype() == torch::kBFloat16, "q_out must be bf16");
+  }
+  if (index_q_out.has_value()) {
+    CHECK_DEVICE(index_q_out.value());
+    CHECK_CONTIGUOUS(index_q_out.value());
+    TORCH_CHECK(
+        index_q_out->dtype() == torch::kBFloat16, "index_q_out must be bf16");
+  }
+
+  // Cache inserts need their matching slot maps (and a valid block_size for the
+  // paged kv_cache); without them the kernel would dereference a null map.
+  if (kv_cache.has_value()) {
+    TORCH_CHECK(
+        slot_mapping.has_value(),
+        "slot_mapping is required when kv_cache is provided");
+    CHECK_DEVICE(kv_cache.value());
+    CHECK_CONTIGUOUS(kv_cache.value());
+    CHECK_DEVICE(slot_mapping.value());
+    CHECK_CONTIGUOUS(slot_mapping.value());
+    TORCH_CHECK(kv_cache->dtype() == torch::kBFloat16, "kv_cache must be bf16");
+    TORCH_CHECK(
+        slot_mapping->dtype() == torch::kInt64, "slot_mapping must be int64");
+    TORCH_CHECK(
+        slot_mapping->numel() == qkv.size(0),
+        "slot_mapping length must match num_tokens");
+    TORCH_CHECK(
+        block_size > 0,
+        "block_size must be positive when kv_cache is provided");
+  }
+  if (index_cache.has_value()) {
+    TORCH_CHECK(
+        index_slot_mapping.has_value(),
+        "index_slot_mapping is required when index_cache is provided");
+    CHECK_DEVICE(index_cache.value());
+    CHECK_CONTIGUOUS(index_cache.value());
+    CHECK_DEVICE(index_slot_mapping.value());
+    CHECK_CONTIGUOUS(index_slot_mapping.value());
+    TORCH_CHECK(
+        index_cache->dtype() == torch::kBFloat16, "index_cache must be bf16");
+    TORCH_CHECK(
+        index_slot_mapping->dtype() == torch::kInt64,
+        "index_slot_mapping must be int64");
+    TORCH_CHECK(
+        index_slot_mapping->numel() == qkv.size(0),
+        "index_slot_mapping length must match num_tokens");
+  }
 
   const int64_t num_tokens = qkv.size(0);
   const bool do_insert = kv_cache.has_value() || index_cache.has_value();
