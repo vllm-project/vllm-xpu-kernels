@@ -27,9 +27,16 @@ def gen_cutlass_fused_moe_correctness_configs():
     x_dtype = [torch.float16, torch.bfloat16]
     w_dtype = [torch.float8_e5m2, torch.float8_e4m3fn, None]
     has_bias = [True, False]
+    # block_fp8 = True uses 128x128 block-wise fp8 weight scales instead of a
+    # single per-expert (per-tensor) scale. It is only valid for fp8 weights
+    # whose N and K are both divisible by 128.
+    is_block = [False, True]
 
-    configs = list(
-        itertools.product(mnk, experts, topk, x_dtype, w_dtype, has_bias))
+    configs = [
+        (m, e, t, x, w, b, blk) for m, e, t, x, w, b, blk in itertools.product(
+            mnk, experts, topk, x_dtype, w_dtype, has_bias, is_block)
+        if not (blk and (w is None or m[1] % 128 != 0 or m[2] % 128 != 0))
+    ]
     return configs
 
 
@@ -38,6 +45,9 @@ def gen_cutlass_fused_moe_perf_configs():
     x_dtype = [torch.float16, torch.bfloat16]
     w_dtype = [torch.float8_e5m2, torch.float8_e4m3fn, None]
     has_bias = [True, False]
+    # block_fp8 = True uses 128x128 block-wise fp8 weight scales; only valid for
+    # fp8 weights with N and K both divisible by 128.
+    is_block = [False, True]
     input_lens = [1, 4, 16, 1024, 8192]
 
     for model in model_lists:
@@ -53,9 +63,13 @@ def gen_cutlass_fused_moe_perf_configs():
 
         moe_top_k = model_config["moe_config"]["moe_top_k"]
         num_experts = model_config["num_groups"]
-        configs += list(
-            itertools.product(mnk, [num_experts],
-                              [moe_top_k], x_dtype, w_dtype, has_bias))
+        configs += [
+            (mk, ne, tk, x, w, b, blk)
+            for mk, ne, tk, x, w, b, blk in itertools.product(
+                mnk, [num_experts], [moe_top_k], x_dtype, w_dtype, has_bias,
+                is_block)
+            if not (blk and (w is None or mk[1] % 128 != 0 or mk[2] % 128 != 0))
+        ]
 
     # Hardcoded model shapes (n, k, num_experts, topk) for various TP sizes.
     # Config tuple (m, n, k) produces:
@@ -99,16 +113,21 @@ def gen_cutlass_fused_moe_perf_configs():
     for n, k, num_experts, topk in hardcoded_model_shapes:
         mnk = list(zip(input_lens, [n] * len(input_lens),
                        [k] * len(input_lens)))
-        configs += list(
-            itertools.product(mnk, [num_experts],
-                              [topk], x_dtype, w_dtype, has_bias))
+        configs += [
+            (mk, ne, tk, x, w, b, blk)
+            for mk, ne, tk, x, w, b, blk in itertools.product(
+                mnk, [num_experts], [topk], x_dtype, w_dtype, has_bias,
+                is_block)
+            if not (blk and (w is None or mk[1] % 128 != 0 or mk[2] % 128 != 0))
+        ]
 
     configs = set(configs)  # remove duplicates
 
     def sort_key(x):
-        (m, n, k), moe_topk, topk_, x_dtype_, w_dtype_, bias_ = x
+        (m, n, k), moe_topk, topk_, x_dtype_, w_dtype_, bias_, blk_ = x
 
-        return (m, n, k, moe_topk, topk_, str(x_dtype_), str(w_dtype_), bias_)
+        return (m, n, k, moe_topk, topk_, str(x_dtype_), str(w_dtype_), bias_,
+                blk_)
 
     configs = sorted(configs, key=sort_key)
     return configs
