@@ -18,6 +18,7 @@ model requires a kernel combination that was not included in the build.
 8. [Build & Install](#build--install)
 9. [Troubleshooting](#troubleshooting)
 10. [Performance Notes](#performance-notes)
+11. [Sparse MLA Config Quick Reference](#sparse-mla-config-quick-reference)
 
 ---
 
@@ -34,6 +35,7 @@ model requires a kernel combination that was not included in the build.
 ```bash
 VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf \
 VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf \
+VLLM_SPARSE_MLA_CONFIG=sparse_mla_full.conf \
   pip install .
 ```
 
@@ -42,6 +44,7 @@ VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf \
 ```bash
 VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf \
 VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf \
+VLLM_SPARSE_MLA_CONFIG=sparse_mla_default.conf \
   pip install .
 ```
 
@@ -53,14 +56,15 @@ The error message tells you exactly which line to add. For example:
 Add this line to your chunk_prefill config file:
   128,true,true,false,false,false
 Then rebuild:
-  VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf pip install .
+  VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf \
+  VLLM_SPARSE_MLA_CONFIG=sparse_mla_default.conf pip install .
 ```
 
 ---
 
 ## Kernel Types
 
-vLLM-XPU has two main kernel categories:
+vLLM-XPU has three attention kernel categories:
 
 ### 1. Chunk Prefill (Prompt Processing)
 
@@ -73,6 +77,14 @@ vLLM-XPU has two main kernel categories:
 - Used when generating tokens one by one
 - Configured via: `VLLM_PAGED_DECODE_CONFIG`
 - Parameters: `qgroup`, `headsize`, `pagesize`, `causal`, `local`, `sink`
+
+### 3. Sparse MLA (DeepSeek-style sparse attention)
+
+- Used by sparse MLA prefill/decode FP8 kernels in FA2 extension
+- Configured via: `VLLM_SPARSE_MLA_CONFIG`
+- Parameters:
+  - prefill: `headsize`, `topklen`, `attn_sink`
+  - decode_fp8: `headsize`, `topklen`, `attn_sink`
 
 ---
 
@@ -94,13 +106,20 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 | `paged_decode_full.conf` | 384 | All combinations — supports every model |
 | `paged_decode_default.conf` | ~17 | Llama, Qwen, DeepSeek MLA, Falcon (default build) |
 
+### Sparse MLA
+
+| File | Kernels | Use Case |
+|------|---------|----------|
+| `sparse_mla_full.conf` | 12 | All sparse MLA instantiations |
+| `sparse_mla_default.conf` | 2 | DeepSeek V4 (default build) |
+
 ### Recommended Config per Model Family
 
 | Model Family | head_size | Chunk Prefill | Paged Decode |
 |--------------|-----------|---------------|--------------|
 | Llama-2/3, Qwen, Mistral | 128 | `default` | `default` |
 | DeepSeek-V2/V3/R1 (MLA) | 192 | `default` | `default` |
-| Gemma-2 | 256 | `full` | `full` |
+| Gemma-2 | 256 | `full` | `full` | n/a |
 | Mixed / other models | multiple | `full` | `full` |
 
 ---
@@ -158,6 +177,45 @@ If boolean flags are omitted, all 18 valid combinations are generated for that h
 - `local` — whether sliding window attention is used
 - `sink` — whether StreamingLLM attention sinks are used
 
+### Sparse MLA
+
+```
+# Lines starting with # are comments. Empty lines are ignored.
+# Use 'all' to build everything (same as sparse_mla_full.conf).
+
+# Format:
+# prefill,headsize[,topklen[,attn_sink]]
+# decode_fp8,headsize[,topklen[,attn_sink]]
+
+prefill,512
+prefill,576,true,true
+decode_fp8,512,false,false
+decode_fp8,512,true,true
+```
+
+**Parameters:**
+- `prefill` entry:
+  - `headsize` — `512` or `576`
+  - `topklen` — optional `true|false` (omitted means both)
+  - `attn_sink` — optional `true|false` (omitted means both)
+- `decode_fp8` entry:
+  - `headsize` — currently `512`
+  - `topklen` — optional `true|false` (omitted means both)
+  - `attn_sink` — optional `true|false` (omitted means both)
+
+Expansion rules:
+- `prefill,512` expands to 4 variants: `(topklen,attn_sink)` in
+  `(false,false)`, `(false,true)`, `(true,false)`, `(true,true)`.
+- `prefill,512,true` expands to 2 variants: `(true,false)`, `(true,true)`.
+- `prefill,512,true,false` expands to exactly 1 variant.
+- Same expansion applies to `decode_fp8,512[...]`.
+
+Current `sparse_mla_default.conf` preset:
+- `prefill,512,true,true`
+- `decode_fp8,512,true,true`
+
+So the default sparse MLA preset currently generates exactly 2 source files.
+
 ---
 
 ## How to Determine Your Model's Config
@@ -206,6 +264,21 @@ It is used for distributed attention merging (chunked prefill states).
 | true   | false | false | Standard causal (most common) |
 | true   | true  | false | Sliding window (Mistral, Qwen long-context) |
 | true   | true  | true  | Sliding window + sink tokens |
+
+### Sparse MLA
+
+- Prefill bools: `topklen`, `attn_sink`
+- Decode bools: `topklen`, `attn_sink`
+
+Common sparse MLA combinations:
+
+| Type | headsize | topklen | attn_sink |
+|------|----------|---------|-----------|
+| prefill | 512 | false | false |
+| prefill | 512 | false | true |
+| prefill | 576 | true | true |
+| decode_fp8 | 512 | false | false |
+| decode_fp8 | 512 | true | true |
 
 ---
 
@@ -262,11 +335,24 @@ page_size = 64  # default vLLM-xpu --block-size
 # 8,128,16,true,true,false
 ```
 
+`csrc/xpu/attn/kernel_configs/sparse_mla_custom.conf`:
+
+```conf
+# Prefill variants
+prefill,512,false
+prefill,576,true
+
+# Decode FP8 variants
+decode_fp8,512,false,false
+decode_fp8,512,true,true
+```
+
 ### Step 3: Rebuild
 
 ```bash
 VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_custom.conf \
 VLLM_PAGED_DECODE_CONFIG=paged_decode_custom.conf \
+VLLM_SPARSE_MLA_CONFIG=sparse_mla_custom.conf \
   pip install .
 ```
 
@@ -277,22 +363,34 @@ VLLM_PAGED_DECODE_CONFIG=paged_decode_custom.conf \
 ### Via environment variable (pip)
 
 ```bash
+# Build only standard FA2 attention kernels
+FA2_KERNELS_ENABLED=ON SPARSE_MLA_KERNELS_ENABLED=OFF pip install .
+
+# Build only sparse MLA kernels
+FA2_KERNELS_ENABLED=OFF SPARSE_MLA_KERNELS_ENABLED=ON pip install .
+
+# Build both standard FA2 attention and sparse MLA kernels
+FA2_KERNELS_ENABLED=ON SPARSE_MLA_KERNELS_ENABLED=ON pip install .
+
 # Default build (full config — all kernel variants)
 pip install .
 
 # Optimized build (Llama/Qwen/DeepSeek only, ~97% fewer kernels)
 VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf \
 VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf \
+VLLM_SPARSE_MLA_CONFIG=sparse_mla_default.conf \
   pip install .
 
 # Full config (explicit)
 VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf \
 VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf \
+VLLM_SPARSE_MLA_CONFIG=sparse_mla_full.conf \
   pip install .
 
 # Custom config
 VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_custom.conf \
 VLLM_PAGED_DECODE_CONFIG=paged_decode_custom.conf \
+VLLM_SPARSE_MLA_CONFIG=sparse_mla_custom.conf \
   pip install .
 ```
 
@@ -301,19 +399,34 @@ Shorthand names (without `.conf`) are resolved automatically:
 ```bash
 VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default \
 VLLM_PAGED_DECODE_CONFIG=paged_decode_full \
+VLLM_SPARSE_MLA_CONFIG=sparse_mla_default \
   pip install .
 ```
 
 ### Via CMake directly
 
 ```bash
+cmake -DFA2_KERNELS_ENABLED=ON \
+  -DSPARSE_MLA_KERNELS_ENABLED=OFF \
+  ...
+
+cmake -DFA2_KERNELS_ENABLED=OFF \
+  -DSPARSE_MLA_KERNELS_ENABLED=ON \
+  ...
+
+cmake -DFA2_KERNELS_ENABLED=ON \
+  -DSPARSE_MLA_KERNELS_ENABLED=ON \
+  ...
+
 cmake -DVLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default \
       -DVLLM_PAGED_DECODE_CONFIG=paged_decode_full \
+  -DVLLM_SPARSE_MLA_CONFIG=sparse_mla_default \
       ...
 
 # Or with a full path:
 cmake -DVLLM_CHUNK_PREFILL_CONFIG=/path/to/custom_prefill.conf \
       -DVLLM_PAGED_DECODE_CONFIG=/path/to/custom_decode.conf \
+  -DVLLM_SPARSE_MLA_CONFIG=/path/to/custom_sparse_mla.conf \
       ...
 ```
 
@@ -360,6 +473,32 @@ VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf pip install .
 VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf pip install .
 ```
 
+### Error: "Sparse MLA prefill kernel not compiled for configuration"
+
+**Cause:** Missing sparse MLA prefill tuple (`prefill,headsize,topklen,attn_sink`) in sparse MLA config.
+
+```bash
+# Option 1: Full sparse MLA config
+VLLM_SPARSE_MLA_CONFIG=sparse_mla_full.conf pip install .
+
+# Option 2: Add the tuple printed in the runtime error, e.g.
+#   prefill,576,true,true
+VLLM_SPARSE_MLA_CONFIG=sparse_mla_default.conf pip install .
+```
+
+### Error: "Sparse MLA decode fp8 kernel not compiled for configuration"
+
+**Cause:** Missing sparse MLA decode tuple (`decode_fp8,headsize,topklen,attn_sink`) in sparse MLA config.
+
+```bash
+# Option 1: Full sparse MLA config
+VLLM_SPARSE_MLA_CONFIG=sparse_mla_full.conf pip install .
+
+# Option 2: Add the tuple printed in the runtime error, e.g.
+#   decode_fp8,512,true,true
+VLLM_SPARSE_MLA_CONFIG=sparse_mla_default.conf pip install .
+```
+
 ### How to check which configs were compiled
 
 CMake prints a summary during build:
@@ -369,6 +508,8 @@ CMake prints a summary during build:
    (config: .../chunk_prefill_default.conf)
 -- Generated paged_decode kernel sources: 384 files
    (config: .../paged_decode_full.conf)
+-- Generated sparse MLA kernel sources: 12 files
+   (config: .../sparse_mla_full.conf)
 ```
 
 Inspect the generated policy-availability headers directly:
@@ -405,8 +546,45 @@ cat build/temp_template/csrc/xpu/attn/xe_2/paged_decode_enabled_policies_gen.hpp
 
 ---
 
+## Sparse MLA Build Impact
+
+Sparse MLA currently has a small fixed kernel surface (12 generated source variants
+in `full` mode), so build-time impact is much lower than chunk prefill/paged
+decode.
+
+With the current `sparse_mla_default.conf`, sparse MLA generates 2 source
+variants.
+
+---
+
+## Sparse MLA Config Quick Reference
+
+Supported tuple forms:
+
+- `prefill,512[,topklen[,attn_sink]]`
+- `prefill,576[,topklen[,attn_sink]]`
+- `decode_fp8,512[,topklen[,attn_sink]]`
+
+Examples:
+
+```conf
+prefill,512
+prefill,576,true,true
+decode_fp8,512,false,false
+decode_fp8,512,true,true
+```
+
+Current default preset (`sparse_mla_default.conf`):
+
+```conf
+prefill,512,true,true
+decode_fp8,512,true,true
+```
+
+---
+
 ## Implementation References
 
-- Config file parsing: `csrc/xpu/attn/xe_2/chunk_prefill_configure.cmake`, `paged_decode_configure.cmake`
+- Config file parsing: `csrc/xpu/attn/xe_2/chunk_prefill_configure.cmake`, `paged_decode_configure.cmake`, `csrc/xpu/attn/mla/sparse_mla_configure.cmake`
 - Runtime policy checks: `csrc/xpu/attn/xe_2/chunk_prefill_utils.hpp`, `paged_decode_utils.hpp`
 - Config files: `csrc/xpu/attn/kernel_configs/`

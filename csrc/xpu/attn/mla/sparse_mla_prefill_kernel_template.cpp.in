@@ -1,0 +1,16 @@
+#include "xpu/attn/mla/sparse_mla_prefill_fwd.hpp"
+
+// clang-format off
+#define IMPL_HEADSIZE ${IMPL_HEADSIZE}
+#cmakedefine01 IMPL_HAVE_TOPK_LENGTH
+#cmakedefine01 IMPL_HAS_ATTN_SINK
+// clang-format on
+
+namespace FLASH_NAMESPACE {
+
+template void launch_sparse_mla_prefill_fwd_kernel<
+    IMPL_HEADSIZE,
+    static_cast<bool>(IMPL_HAVE_TOPK_LENGTH),
+    static_cast<bool>(IMPL_HAS_ATTN_SINK)>(const XPUSparseAttnFwdParams& params);
+
+}  // namespace FLASH_NAMESPACE
