@@ -64,13 +64,11 @@ static inline void dnnl_matmul_w8a8_fp8(
     auto in_dtype = mat1.scalar_type();
     auto out_dtype = result.scalar_type();
     if (in_dtype == at::ScalarType::Float8_e5m2) {
-      jd = out_dtype == at::ScalarType::BFloat16
-               ? joint_dtypes_t::f8_e5m2_bf16
-               : joint_dtypes_t::f8_e5m2_f16;
+      jd = out_dtype == at::ScalarType::BFloat16 ? joint_dtypes_t::f8_e5m2_bf16
+                                                 : joint_dtypes_t::f8_e5m2_f16;
     } else if (in_dtype == at::ScalarType::Float8_e4m3fn) {
-      jd = out_dtype == at::ScalarType::BFloat16
-               ? joint_dtypes_t::f8_e4m3_bf16
-               : joint_dtypes_t::f8_e4m3_f16;
+      jd = out_dtype == at::ScalarType::BFloat16 ? joint_dtypes_t::f8_e4m3_bf16
+                                                 : joint_dtypes_t::f8_e4m3_f16;
     } else {
       TORCH_INTERNAL_ASSERT(
           false, "Unsupported data type for fp8 matmul: ", in_dtype);
@@ -128,7 +126,8 @@ static inline void dnnl_matmul_w8a8_fp8(
       if (wei_sc.dim() == 1) {
         TORCH_CHECK(
             batch == 1,
-            "Batched weight per-channel scale must include batch dimension, got ",
+            "Batched weight per-channel scale must include batch dimension, "
+            "got ",
             wei_sc.sizes(),
             ".");
         TORCH_CHECK(
@@ -178,7 +177,8 @@ static inline void dnnl_matmul_w8a8_fp8(
       pattr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
 
       if (src_scalar) {
-        pattr.set_scales(DNNL_ARG_SRC, /* mask */ 0, {}, get_onednn_dtype(src_sc));
+        pattr.set_scales(
+            DNNL_ARG_SRC, /* mask */ 0, {}, get_onednn_dtype(src_sc));
       } else if (src_block_quant) {
         pattr.set_scales(
             DNNL_ARG_SRC,

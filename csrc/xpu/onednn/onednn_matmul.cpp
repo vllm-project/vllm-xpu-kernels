@@ -43,7 +43,7 @@ torch::Tensor check_and_create_output_tensor(
   }
 
   std::vector<int64_t> result_shape;
-  
+
   if (A.dim() == 2) {
     result_shape = {A.size(0), B.size(-1)};
     // src{m, k}, wei{k, n}, bias{n}, dst{m, n}
