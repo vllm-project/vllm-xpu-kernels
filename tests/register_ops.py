@@ -595,13 +595,6 @@ def topk_per_row_decode(
     )
 
 
-def fp32_router_gemm(
-    mat_a: torch.Tensor,
-    mat_b: torch.Tensor,
-) -> torch.Tensor:
-    return torch.ops._xpu_C.fp32_router_gemm(mat_a, mat_b)
-
-
 def fused_minimax_m3_qknorm_rope_kv_insert(
     qkv: torch.Tensor,
     q_norm_weight: torch.Tensor,
