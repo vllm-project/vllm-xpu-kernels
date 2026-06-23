@@ -148,6 +148,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "schedule_metadata, int max_model_len) -> Tensor");
   xpu_ops.impl("fp8_paged_mqa_logits", torch::kXPU, &fp8_paged_mqa_logits);
 #endif
+
+  xpu_ops.def("get_onednn_version() -> str");
+  xpu_ops.impl("get_onednn_version", &get_onednn_version);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
