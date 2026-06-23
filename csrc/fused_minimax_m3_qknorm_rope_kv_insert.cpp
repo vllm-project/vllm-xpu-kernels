@@ -414,12 +414,26 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     CHECK_DEVICE(q_out.value());
     CHECK_CONTIGUOUS(q_out.value());
     TORCH_CHECK(q_out->dtype() == torch::kBFloat16, "q_out must be bf16");
+    TORCH_CHECK(
+        q_out->numel() == qkv.size(0) * (int64_t)num_heads * vllm::M3_HEAD_DIM,
+        "q_out must have num_tokens * num_heads * head_dim (= ",
+        qkv.size(0) * (int64_t)num_heads * vllm::M3_HEAD_DIM,
+        ") elements");
   }
   if (index_q_out.has_value()) {
+    TORCH_CHECK(
+        num_index_heads > 0,
+        "index_q_out must not be provided when num_index_heads == 0");
     CHECK_DEVICE(index_q_out.value());
     CHECK_CONTIGUOUS(index_q_out.value());
     TORCH_CHECK(
         index_q_out->dtype() == torch::kBFloat16, "index_q_out must be bf16");
+    TORCH_CHECK(
+        index_q_out->numel() ==
+            qkv.size(0) * (int64_t)num_index_heads * vllm::M3_HEAD_DIM,
+        "index_q_out must have num_tokens * num_index_heads * head_dim (= ",
+        qkv.size(0) * (int64_t)num_index_heads * vllm::M3_HEAD_DIM,
+        ") elements");
   }
 
   // Cache inserts need their matching slot maps (and a valid block_size for the
@@ -441,6 +455,18 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     TORCH_CHECK(
         block_size > 0,
         "block_size must be positive when kv_cache is provided");
+    // Kernel indexes kv_cache as [num_blocks, 2, block_size, num_kv_heads,
+    // head_dim]; a mismatched layout would scatter out of bounds.
+    TORCH_CHECK(
+        kv_cache->dim() == 5,
+        "kv_cache must be 5-D [num_blocks, 2, block_size, num_kv_heads, "
+        "head_dim]");
+    TORCH_CHECK(
+        kv_cache->size(1) == 2 && kv_cache->size(2) == block_size &&
+            kv_cache->size(3) == num_kv_heads &&
+            kv_cache->size(4) == vllm::M3_HEAD_DIM,
+        "kv_cache shape must be [num_blocks, 2, block_size, num_kv_heads, "
+        "head_dim]");
   }
   if (index_cache.has_value()) {
     TORCH_CHECK(
@@ -458,6 +484,13 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     TORCH_CHECK(
         index_slot_mapping->numel() == qkv.size(0),
         "index_slot_mapping length must match num_tokens");
+    // Kernel writes index_cache as a flattened [num_slots, head_dim] buffer
+    // (row = absolute slot); the trailing dim must be head_dim.
+    TORCH_CHECK(
+        index_cache->size(-1) == vllm::M3_HEAD_DIM,
+        "index_cache last dim must equal head_dim (",
+        vllm::M3_HEAD_DIM,
+        ")");
   }
 
   const int64_t num_tokens = qkv.size(0);
