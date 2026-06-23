@@ -856,8 +856,8 @@ struct matmul_primitive_cache_t {
 
 template <trans_type_t Tt, joint_dtypes_t Ts, typename F>
 struct batched_matmul_primitive_cache_t {
-  static inline primitive_ext& get(
-      const memory::dims& src_dims,
+  static inline primitive_ext&
+  get(const memory::dims& src_dims,
       const memory::dims& wei_dims,
       const memory::dims& dst_dims,
       const memory::dims& src_strides,
