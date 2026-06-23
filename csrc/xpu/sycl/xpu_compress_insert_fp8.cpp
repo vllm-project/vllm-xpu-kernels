@@ -36,6 +36,9 @@ constexpr float kQuantAbsmaxFloor = 1.0e-4f;
 // Runtime-parameterized generic fp8mix path.
 // This path keeps the same cache layout contract but does not rely on
 // compile-time (CR, OL, rope) specializations.
+// WT is the RMSNorm weight scalar type (float or bfloat16); it is upcast to
+// fp32 per-element inside the kernel, mirroring the Triton load semantics.
+template <typename WT>
 class c4_kv_insert_fp8mix_generic_kernel {
  public:
   static constexpr int HEAD_SIZE = 512;
@@ -66,7 +69,7 @@ class c4_kv_insert_fp8mix_generic_kernel {
       const int32_t* block_table,
       int64_t block_table_stride0,
       int state_cache_block_size,
-      const float* rms_w,
+      const WT* rms_w,
       float rms_eps,
       const float* cos_sin_cache,
       int64_t cos_sin_stride0,
@@ -195,7 +198,7 @@ class c4_kv_insert_fp8mix_generic_kernel {
 #pragma unroll
     for (int j = 0; j < PER_WI; ++j) {
       const int h = dim_base + j;
-      normed[j] = ckv[j] * inv * rms_w_[h];
+      normed[j] = ckv[j] * inv * static_cast<float>(rms_w_[h]);
     }
 
     {
@@ -323,7 +326,7 @@ class c4_kv_insert_fp8mix_generic_kernel {
   const int32_t* block_table_;
   int64_t block_table_stride0_;
   int state_cache_block_size_;
-  const float* rms_w_;
+  const WT* rms_w_;
   float rms_eps_;
   const float* cos_sin_cache_;
   int64_t cos_sin_stride0_;
@@ -481,7 +484,7 @@ class c4_kv_split_gather_kernel {
   int64_t scratch_stride1_;
 };
 
-template <int COMPRESS_RATIO, int ROPE_HEAD_DIM_C, int G_SHARDS>
+template <int COMPRESS_RATIO, int ROPE_HEAD_DIM_C, int G_SHARDS, typename WT>
 class c4_kv_finalize_fp8mix_kernel {
  public:
   static constexpr int HEAD_SIZE = 512;
@@ -513,7 +516,7 @@ class c4_kv_finalize_fp8mix_kernel {
       const int64_t* positions,
       const int64_t* slot_mapping,
       const int64_t* kv_slot_mapping,
-      const float* rms_w,
+      const WT* rms_w,
       float rms_eps,
       const float* cos_sin_cache,
       int64_t cos_sin_stride0,
@@ -607,7 +610,7 @@ class c4_kv_finalize_fp8mix_kernel {
 #pragma unroll
     for (int j = 0; j < PER_WI; ++j) {
       const int h = dim_base + j;
-      normed[j] = ckv[j] * inv * rms_w_[h];
+      normed[j] = ckv[j] * inv * static_cast<float>(rms_w_[h]);
       // Triton parity: FP8 quant path uses bf16 roundtrip before quant.
       if (h < NOPE_HEAD_DIM) {
         smem.pre_nope[h] = static_cast<bf16_t>(normed[j]);
@@ -738,7 +741,7 @@ class c4_kv_finalize_fp8mix_kernel {
   const int64_t* positions_;
   const int64_t* slot_mapping_;
   const int64_t* kv_slot_mapping_;
-  const float* rms_w_;
+  const WT* rms_w_;
   float rms_eps_;
   const float* cos_sin_cache_;
   int64_t cos_sin_stride0_;
@@ -752,6 +755,7 @@ class c4_kv_finalize_fp8mix_kernel {
 
 namespace {
 
+template <typename WT>
 void launch_one_fp8mix_generic(
     sycl::queue& q,
     int64_t num_tokens,
@@ -765,7 +769,7 @@ void launch_one_fp8mix_generic(
     const int32_t* block_table,
     int64_t bt0,
     int state_blk,
-    const float* rms_w,
+    const WT* rms_w,
     float rms_eps,
     const float* cos_sin,
     int64_t cs0,
@@ -779,7 +783,7 @@ void launch_one_fp8mix_generic(
     int overlap,
     int rope_head_dim) {
 
-  using K = vllm::c4_kv_insert_fp8mix_generic_kernel;
+  using K = vllm::c4_kv_insert_fp8mix_generic_kernel<WT>;
   constexpr int WG = K::WG_SIZE;
   at::DeviceGuard dg(at::Device(at::kXPU, at::xpu::current_device()));
   q.submit([&](sycl::handler& cgh) {
@@ -846,7 +850,7 @@ inline void hold_split_gather_scratch_until_done(
   inflight.push_back({std::move(done), std::move(scratch)});
 }
 
-template <int CR, int OL, int ROPE_DIM, int G_SHARDS>
+template <int CR, int OL, int ROPE_DIM, int G_SHARDS, typename WT>
 void launch_split_gather_fp8mix(
     sycl::queue& q,
     int64_t num_tokens,
@@ -860,7 +864,7 @@ void launch_split_gather_fp8mix(
     const int32_t* block_table,
     int64_t bt0,
     int state_blk,
-    const float* rms_w,
+    const WT* rms_w,
     float rms_eps,
     const float* cos_sin,
     int64_t cs0,
@@ -871,7 +875,7 @@ void launch_split_gather_fp8mix(
     int token_stride,
     int scale_dim) {
   using KA = vllm::c4_kv_split_gather_kernel<CR, OL, G_SHARDS>;
-  using KB = vllm::c4_kv_finalize_fp8mix_kernel<CR, ROPE_DIM, G_SHARDS>;
+  using KB = vllm::c4_kv_finalize_fp8mix_kernel<CR, ROPE_DIM, G_SHARDS, WT>;
   constexpr int HEAD = KA::HEAD_SIZE;
   constexpr int WG = KA::WG_SIZE;
 
@@ -934,6 +938,70 @@ void launch_split_gather_fp8mix(
   hold_split_gather_scratch_until_done(dev, std::move(pass_b), std::move(scratch));
 }
 
+// Path selection shared by both weight dtypes. WT is the RMSNorm weight scalar
+// type (float or bfloat16); the conversion to fp32 happens inside the kernel.
+template <typename WT>
+void dispatch_fp8mix(
+    sycl::queue& q,
+    int64_t num_tokens,
+    const float* sc,
+    int64_t scs0,
+    int64_t scs1,
+    int state_width,
+    const int32_t* tr,
+    const int64_t* pos,
+    const int64_t* sm,
+    const int32_t* bt,
+    int64_t bt0,
+    int state_block_size,
+    const WT* rw,
+    float rms_eps,
+    const float* cs,
+    int64_t cs0,
+    uint8_t* kc,
+    const int64_t* kvs,
+    int kv_cache_block_size,
+    int64_t kv_block_stride,
+    int token_stride,
+    int scale_dim,
+    int compress_ratio,
+    int overlap,
+    int rope_head_dim) {
+  static const bool kForceGeneric = []() {
+    const char* e = std::getenv("VLLM_C4_KV_FORCE_GENERIC");
+    return e && e[0] == '1';
+  }();
+
+  const bool can_use_split_gather_layout =
+      (rope_head_dim == 64) && (token_stride == 576) && (scale_dim == 8);
+
+  // Only two runtime paths:
+  // 1) split-gather for B small-token under fixed layout
+  // 2) generic one-pass for all other cases
+  if (!kForceGeneric && can_use_split_gather_layout && compress_ratio == 128 &&
+      overlap == 0) {
+    constexpr int64_t kSplitGatherThreshold = 96;
+    static const bool kDisableSplit = []() {
+      const char* e = std::getenv("VLLM_C4_KV_DISABLE_SPLIT_GATHER");
+      return e && e[0] == '1';
+    }();
+
+    if (!kDisableSplit && num_tokens < kSplitGatherThreshold) {
+      launch_split_gather_fp8mix<128, 0, 64, 8, WT>(
+          q, num_tokens, sc, scs0, scs1, state_width, tr, pos, sm, bt, bt0,
+          state_block_size, rw, rms_eps, cs, cs0, kc, kvs,
+          kv_cache_block_size, kv_block_stride, token_stride, scale_dim);
+      return;
+    }
+  }
+
+  launch_one_fp8mix_generic<WT>(
+      q, num_tokens, sc, scs0, scs1, state_width, tr, pos, sm, bt, bt0,
+      state_block_size, rw, rms_eps, cs, cs0, kc, kvs, kv_cache_block_size,
+      kv_block_stride, token_stride, scale_dim, compress_ratio, overlap,
+      rope_head_dim);
+}
+
 }  // namespace
 void xpu_compress_insert_fp8mix(
     torch::Tensor const& state_cache,
@@ -957,7 +1025,10 @@ void xpu_compress_insert_fp8mix(
       state_cache.dtype() == torch::kFloat32,
       "xpu_compress_insert_fp8mix SYCL: state_cache must be fp32");
   TORCH_CHECK(k_cache.dtype() == torch::kUInt8, "k_cache must be uint8");
-  TORCH_CHECK(rms_norm_weight.dtype() == torch::kFloat32);
+  TORCH_CHECK(
+      rms_norm_weight.scalar_type() == torch::kFloat32 ||
+          rms_norm_weight.scalar_type() == torch::kBFloat16,
+      "xpu_compress_insert_fp8mix: rms_norm_weight must be float32 or bfloat16");
   TORCH_CHECK(cos_sin_cache.dtype() == torch::kFloat32);
   TORCH_CHECK(positions.dtype() == torch::kInt64);
   TORCH_CHECK(slot_mapping.dtype() == torch::kInt64);
@@ -1025,69 +1096,37 @@ void xpu_compress_insert_fp8mix(
   auto* pos = positions.data_ptr<int64_t>();
   auto* sm = slot_mapping.data_ptr<int64_t>();
   auto* bt = block_table.data_ptr<int32_t>();
-  auto* rw = rms_norm_weight.data_ptr<float>();
   auto* cs = cos_sin_cache.data_ptr<float>();
   auto* kc = k_cache.data_ptr<uint8_t>();
   auto* kvs = kv_slot_mapping.data_ptr<int64_t>();
 
   auto& q = vllm::xpu::vllmGetQueue();
+  const float eps = static_cast<float>(rms_norm_eps);
 
-  static const bool kForceGeneric = []() {
-    const char* e = std::getenv("VLLM_C4_KV_FORCE_GENERIC");
-    return e && e[0] == '1';
-  }();
-
-    const bool can_use_split_gather_layout =
-      (rope_head_dim == 64) && (token_stride == 576) && (scale_dim == 8);
-
-  // Only two runtime paths:
-    // 1) split-gather for B small-token under fixed layout
-  // 2) generic one-pass for all other cases
-
-    if (!kForceGeneric && can_use_split_gather_layout &&
-      compress_ratio == 128 && overlap == 0) {
-    constexpr int64_t kSplitGatherThreshold = 96;
-    static const bool kDisableSplit = []() {
-      const char* e = std::getenv("VLLM_C4_KV_DISABLE_SPLIT_GATHER");
-      return e && e[0] == '1';
-    }();
-
-    if (!kDisableSplit && num_tokens < kSplitGatherThreshold) {
-      launch_split_gather_fp8mix<128, 0, 64, 8>(
-          q, num_tokens, sc, state_cache.stride(0), state_cache.stride(1),
-          state_width, tr, pos, sm, bt, block_table.stride(0),
-          state_block_size, rw, static_cast<float>(rms_norm_eps), cs,
-          cos_sin_cache.stride(0), kc, kvs,
-          static_cast<int>(kv_cache_block_size), kv_block_stride,
-          static_cast<int>(token_stride), static_cast<int>(scale_dim));
-      return;
-    }
+  // The RMSNorm weight is consumed (and upcast to fp32) inside the kernel,
+  // so we dispatch on its native dtype instead of forcing a host-side
+  // .float() conversion on the hot path (Triton parity).
+  if (rms_norm_weight.scalar_type() == torch::kBFloat16) {
+    using bf16_t = sycl::ext::oneapi::bfloat16;
+    const auto* rw = reinterpret_cast<const bf16_t*>(
+        rms_norm_weight.data_ptr<at::BFloat16>());
+    dispatch_fp8mix<bf16_t>(
+        q, num_tokens, sc, state_cache.stride(0), state_cache.stride(1),
+        state_width, tr, pos, sm, bt, block_table.stride(0), state_block_size,
+        rw, eps, cs, cos_sin_cache.stride(0), kc, kvs,
+        static_cast<int>(kv_cache_block_size), kv_block_stride,
+        static_cast<int>(token_stride), static_cast<int>(scale_dim),
+        static_cast<int>(compress_ratio), static_cast<int>(overlap),
+        static_cast<int>(rope_head_dim));
+  } else {
+    const float* rw = rms_norm_weight.data_ptr<float>();
+    dispatch_fp8mix<float>(
+        q, num_tokens, sc, state_cache.stride(0), state_cache.stride(1),
+        state_width, tr, pos, sm, bt, block_table.stride(0), state_block_size,
+        rw, eps, cs, cos_sin_cache.stride(0), kc, kvs,
+        static_cast<int>(kv_cache_block_size), kv_block_stride,
+        static_cast<int>(token_stride), static_cast<int>(scale_dim),
+        static_cast<int>(compress_ratio), static_cast<int>(overlap),
+        static_cast<int>(rope_head_dim));
   }
-
-  launch_one_fp8mix_generic(
-      q,
-      num_tokens,
-      sc,
-      state_cache.stride(0),
-      state_cache.stride(1),
-      state_width,
-      tr,
-      pos,
-      sm,
-      bt,
-      block_table.stride(0),
-      state_block_size,
-      rw,
-      static_cast<float>(rms_norm_eps),
-      cs,
-      cos_sin_cache.stride(0),
-      kc,
-      kvs,
-      static_cast<int>(kv_cache_block_size),
-      kv_block_stride,
-      static_cast<int>(token_stride),
-      static_cast<int>(scale_dim),
-      static_cast<int>(compress_ratio),
-      static_cast<int>(overlap),
-      static_cast<int>(rope_head_dim));
 }

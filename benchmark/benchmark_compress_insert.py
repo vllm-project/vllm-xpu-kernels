@@ -60,7 +60,9 @@ def make_inputs(cfg, num_tokens, device, seed=0, num_blocks=152522):
     token_to_req = torch.zeros(num_tokens, dtype=torch.int32, device=device)
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
     kv_slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
-    rms_norm_weight = torch.ones(HEAD_SIZE, dtype=torch.float32, device=device)
+    # Match production: DeepSeek-V4 compressor RMSNorm weight follows the model
+    # dtype (bf16), so use bf16 here to exercise the in-kernel upcast path.
+    rms_norm_weight = torch.ones(HEAD_SIZE, dtype=torch.bfloat16, device=device)
 
     max_pos = int(positions.max().item()) + cr + 1024
     half = ROPE_HEAD_DIM // 2
