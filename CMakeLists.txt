@@ -49,6 +49,15 @@ set(TORCH_SUPPORTED_VERSION_XPU "2.12.0")
 set(BUILD_SYCL_TLA_KERNELS
     ON
     CACHE BOOL "Build SYCL-TLA based kernels for XPU")
+
+set(ONEDNN_GIT_REPO
+    "https://github.com/uxlfoundation/oneDNN.git"
+    CACHE STRING "oneDNN git repository URL")
+
+# rls-v3.12
+set(ONEDNN_GIT_TAG
+    "80afa71049cd69a3df32adcccb623b12cd7baa22"
+    CACHE STRING "oneDNN git commit hash or tag")
 # ARCHITECTURE OPTIONS
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
 option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
@@ -122,6 +131,8 @@ if(NOT VLLM_CHUNK_PREFILL_CONFIG OR "${VLLM_CHUNK_PREFILL_CONFIG}" STREQUAL "")
 endif()
 
 message(STATUS "Kernel build configuration:")
+message(STATUS "  ONEDNN_GIT_REPO              = ${ONEDNN_GIT_REPO}")
+message(STATUS "  ONEDNN_GIT_TAG               = ${ONEDNN_GIT_TAG}")
 message(STATUS "  BUILD_SYCL_TLA_KERNELS       = ${BUILD_SYCL_TLA_KERNELS}")
 message(STATUS "  VLLM_XPU_ENABLE_XE2          = ${VLLM_XPU_ENABLE_XE2}")
 message(STATUS "  VLLM_XPU_ENABLE_XE_DEFAULT   = ${VLLM_XPU_ENABLE_XE_DEFAULT}")
@@ -626,8 +637,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     include_directories(${ONEDNN_INCLUDE_DIR})
     link_libraries(${ONEDNN_LIBRARY})
   else()
-    message(
-      FATAL_ERROR "onednn not found but xpu specific kernels are enabled.")
+    message(FATAL_ERROR "oneDNN not found!")
   endif()
 
   define_gpu_extension_target(
