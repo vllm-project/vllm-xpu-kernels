@@ -205,7 +205,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
   if (is_prefill_only) {
     if (!out_.has_value()) {
-      out = torch::empty_like(q);
+      // Output head dim follows V (may differ from QK for asym attention).
+      out = torch::empty({q.size(0), q.size(1), v.size(-1)}, q.options());
     }
     // Non-paged: always use chunk_prefill for everything
     std::optional<const at::Tensor> no_mask = std::nullopt;
@@ -235,7 +236,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
         no_mask);
   } else if (max_seqlen_q > 1) {
     if (!out_.has_value()) {
-      out = torch::empty_like(q);
+      // Output head dim follows V (may differ from QK for asym attention).
+      out = torch::empty({q.size(0), q.size(1), v.size(-1)}, q.options());
     }
     int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
     at::Tensor seq_lens_q = cu_seqlens_q.slice(0, 1, batch_size + 1) -

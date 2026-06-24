@@ -82,7 +82,9 @@ function(fmha_forward_configure FILENAME_SUFFIX)
       "chunk_policy_head128_b16"
       "chunk_policy_head192_b16"
       "chunk_policy_head256_b16"
-      "chunk_policy_head512_b16")
+      "chunk_policy_head512_b16"
+      "chunk_policy_head192_vo128"
+      "chunk_policy_head192_vo128_b16")
 
   # Map headsize to policy names
   set(std_policy_64 "chunk_policy_head64")
@@ -97,6 +99,12 @@ function(fmha_forward_configure FILENAME_SUFFIX)
   set(b16_policy_192 "chunk_policy_head192_b16")
   set(b16_policy_256 "chunk_policy_head256_b16")
   set(b16_policy_512 "chunk_policy_head512_b16")
+
+  # Asymmetric V/O policies: keyed by QK headsize, emitted in addition to the
+  # symmetric policy so an asym model (e.g. MiMo QK=192,V=128) has a tile whose
+  # output width follows V. Only headsize 192 has an asym variant for now.
+  set(asym_std_policy_192 "chunk_policy_head192_vo128")
+  set(asym_b16_policy_192 "chunk_policy_head192_vo128_b16")
 
   set(IMPL_KV_T "fp16")
 
@@ -204,6 +212,19 @@ function(fmha_forward_configure FILENAME_SUFFIX)
           BUILD_TUPLES
           "${b16_policy_${_headsize}}|${_paged}|${_causal}|${_local}|${_sink}|${_lse}"
         )
+        # Also emit the asymmetric V/O variant for this headsize, if any.
+        if(NOT "${asym_std_policy_${_headsize}}" STREQUAL "")
+          list(
+            APPEND
+            BUILD_TUPLES
+            "${asym_std_policy_${_headsize}}|${_paged}|${_causal}|${_local}|${_sink}|${_lse}"
+          )
+          list(
+            APPEND
+            BUILD_TUPLES
+            "${asym_b16_policy_${_headsize}}|${_paged}|${_causal}|${_local}|${_sink}|${_lse}"
+          )
+        endif()
       else()
         # No booleans specified: generate all 18 valid combinations
         foreach(IMPL_KISPAGED ${L_BOOLS})
@@ -227,6 +248,18 @@ function(fmha_forward_configure FILENAME_SUFFIX)
                     BUILD_TUPLES
                     "${b16_policy_${_headsize}}|${IMPL_KISPAGED}|${IMPL_KISCAUSAL}|${IMPL_KISLOCAL}|${IMPL_KISSINK}|${IMPL_KISLSE}"
                   )
+                  if(NOT "${asym_std_policy_${_headsize}}" STREQUAL "")
+                    list(
+                      APPEND
+                      BUILD_TUPLES
+                      "${asym_std_policy_${_headsize}}|${IMPL_KISPAGED}|${IMPL_KISCAUSAL}|${IMPL_KISLOCAL}|${IMPL_KISSINK}|${IMPL_KISLSE}"
+                    )
+                    list(
+                      APPEND
+                      BUILD_TUPLES
+                      "${asym_b16_policy_${_headsize}}|${IMPL_KISPAGED}|${IMPL_KISCAUSAL}|${IMPL_KISLOCAL}|${IMPL_KISSINK}|${IMPL_KISLSE}"
+                    )
+                  endif()
                 endforeach()
               endforeach()
             endforeach()
