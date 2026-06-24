@@ -108,6 +108,147 @@ class reshape_and_cache_kernel {
 };
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+class reshape_and_cache_flash_strided_kernel {
+ public:
+  reshape_and_cache_flash_strided_kernel(
+      const scalar_t* __restrict__ key,
+      const scalar_t* __restrict__ value,
+      cache_t* __restrict__ cache,
+      const int64_t* __restrict__ slot_mapping,
+      const int64_t block_stride,
+      const int64_t page_stride,
+      const int64_t head_stride,
+      const int64_t key_stride,
+      const int64_t value_stride,
+      const int num_heads,
+      const int head_size,
+      const int block_size,
+      const float* k_scale,
+      const float* v_scale)
+      : key_(key),
+        value_(value),
+        cache_(cache),
+        slot_mapping_(slot_mapping),
+        block_stride_(block_stride),
+        page_stride_(page_stride),
+        head_stride_(head_stride),
+        key_stride_(key_stride),
+        value_stride_(value_stride),
+        num_heads_(num_heads),
+        head_size_(head_size),
+        block_size_(block_size),
+        k_scale_(k_scale),
+        v_scale_(v_scale) {}
+
+  void operator()(const sycl::nd_item<1>& item) const {
+    int local_idx = item.get_local_id(0);
+    int local_range = item.get_local_range(0);
+
+    int token_idx = item.get_group(0);
+    int64_t slot_idx = slot_mapping_[token_idx];
+    if (slot_idx < 0) return;
+
+    const int64_t block_idx = slot_idx / block_size_;
+    const int64_t block_offset = slot_idx % block_size_;
+
+    // Scale ops are identical for every head of this token — construct once.
+    constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
+    const float k_scale_val =
+        (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale_;
+    const float v_scale_val =
+        (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale_;
+    using KVOp = fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt>;
+    KVOp k_op{k_scale_val};
+    KVOp v_op{v_scale_val};
+
+    // Base pointers for this token (head offset applied per-slot below).
+    const scalar_t* k_base = key_ + token_idx * key_stride_;
+    const scalar_t* v_base = value_ + token_idx * value_stride_;
+    // kv_cache base for this (block_idx, block_offset); head offset added
+    // per-slot.
+    cache_t* kv_base =
+        cache_ + block_idx * block_stride_ + block_offset * page_stride_;
+
+    // Partition all (head, vec) pairs across work-items.
+    // vecs_per_head is always a power-of-two (head_size is a power-of-two
+    // multiple of VEC_SIZE), so division/modulo below can be optimised by the
+    // compiler into shifts/masks.
+    const int vecs_per_head = head_size_ / VEC_SIZE;
+    const int total_vecs = num_heads_ * vecs_per_head;
+
+    using vin_t = vec_n_t<scalar_t, VEC_SIZE>;
+    using vout_t = vec_n_t<cache_t, VEC_SIZE>;
+    DefaultVecOp<VEC_SIZE, scalar_t, cache_t, KVOp> k_vec_op{k_op};
+    DefaultVecOp<VEC_SIZE, scalar_t, cache_t, KVOp> v_vec_op{v_op};
+
+    // Check alignment once for head_idx=0; all other heads are offset by
+    // multiples of head_size_ which is VEC_SIZE-aligned by construction.
+    constexpr int WIDTH = VEC_SIZE * sizeof(scalar_t);
+    constexpr int WIDTH_CACHE = VEC_SIZE * sizeof(cache_t);
+    const bool can_vec =
+        ((reinterpret_cast<uintptr_t>(k_base) & (WIDTH - 1)) == 0) &&
+        ((reinterpret_cast<uintptr_t>(v_base) & (WIDTH - 1)) == 0) &&
+        ((reinterpret_cast<uintptr_t>(kv_base) & (WIDTH_CACHE - 1)) == 0) &&
+        ((head_size_ & (VEC_SIZE - 1)) == 0);
+
+    if (can_vec) {
+      for (int slot = local_idx; slot < total_vecs; slot += local_range) {
+        const int head_idx = slot / vecs_per_head;
+        const int vec_idx = slot % vecs_per_head;
+
+        const vin_t* k_vec_in =
+            reinterpret_cast<const vin_t*>(k_base + head_idx * head_size_);
+        const vin_t* v_vec_in =
+            reinterpret_cast<const vin_t*>(v_base + head_idx * head_size_);
+        // K occupies [0, vecs_per_head), V occupies [vecs_per_head,
+        // 2*vecs_per_head) in the fused kv_cache row (guaranteed adjacent by
+        // TORCH_CHECK in dispatch).
+        vout_t* kv_vec_out =
+            reinterpret_cast<vout_t*>(kv_base + head_idx * head_stride_);
+
+        vout_t k_tmp, v_tmp;
+        k_vec_op(k_tmp, k_vec_in[vec_idx]);
+        v_vec_op(v_tmp, v_vec_in[vec_idx]);
+        kv_vec_out[vec_idx] = k_tmp;                  // K
+        kv_vec_out[vec_idx + vecs_per_head] = v_tmp;  // V
+      }
+      return;
+    }
+
+    // Scalar fallback: distribute individual elements across work-items.
+    const int total_elems = num_heads_ * head_size_;
+    for (int slot = local_idx; slot < total_elems; slot += local_range) {
+      const int head_idx = slot / head_size_;
+      const int elem_idx = slot % head_size_;
+
+      const scalar_t* k_src = k_base + head_idx * head_size_;
+      const scalar_t* v_src = v_base + head_idx * head_size_;
+      cache_t* kv_dst = kv_base + head_idx * head_stride_;
+
+      k_op(kv_dst[elem_idx], k_src[elem_idx]);
+      v_op(kv_dst[elem_idx + head_size_], v_src[elem_idx]);
+    }
+  }
+
+ private:
+  const scalar_t* __restrict__ key_;    // [num_tokens, num_heads, head_size]
+  const scalar_t* __restrict__ value_;  // [num_tokens, num_heads, head_size]
+  cache_t* __restrict__ cache_;         // [num_blocks, block_size, num_heads,
+                                        // 2 * head_size]
+  const int64_t* __restrict__ slot_mapping_;  // [num_tokens]
+  const int64_t block_stride_;
+  const int64_t page_stride_;
+  const int64_t head_stride_;
+  const int64_t key_stride_;
+  const int64_t value_stride_;
+  const int num_heads_;
+  const int head_size_;
+  const int block_size_;
+  const float* k_scale_;
+  const float* v_scale_;
+};
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 class reshape_and_cache_flash_kernel {
  public:
   reshape_and_cache_flash_kernel(
@@ -118,7 +259,6 @@ class reshape_and_cache_flash_kernel {
       const int64_t* __restrict__ slot_mapping,
       const int64_t block_stride,
       const int64_t page_stride,
-      const int64_t head_stride,
       const int64_t key_stride,
       const int64_t value_stride,
       const int num_heads,
@@ -133,7 +273,6 @@ class reshape_and_cache_flash_kernel {
         slot_mapping_(slot_mapping),
         block_stride_(block_stride),
         page_stride_(page_stride),
-        head_stride_(head_stride),
         key_stride_(key_stride),
         value_stride_(value_stride),
         num_heads_(num_heads),
@@ -185,7 +324,6 @@ class reshape_and_cache_flash_kernel {
   const int64_t* __restrict__ slot_mapping_;  // [num_tokens]
   const int64_t block_stride_;
   const int64_t page_stride_;
-  const int64_t head_stride_;
   const int64_t key_stride_;
   const int64_t value_stride_;
   const int num_heads_;
@@ -763,6 +901,27 @@ void reshape_and_cache(
       key.scalar_type(), kv_cache_dtype, CALL_RESHAPE_AND_CACHE);
 }
 
+#define CALL_RESHAPE_AND_CACHE_FLASH_STRIDED(KV_T, CACHE_T, KV_DTYPE)          \
+  queue.submit([&](sycl::handler& cgh) {                                       \
+    cgh.parallel_for(                                                          \
+        sycl::nd_range<1>(grid * block, block),                                \
+        vllm::reshape_and_cache_flash_strided_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+            reinterpret_cast<KV_T*>(key.data_ptr()),                           \
+            reinterpret_cast<KV_T*>(value.data_ptr()),                         \
+            reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                  \
+            slot_mapping.data_ptr<int64_t>(),                                  \
+            block_stride,                                                      \
+            page_stride,                                                       \
+            head_stride,                                                       \
+            key_stride,                                                        \
+            value_stride,                                                      \
+            num_heads,                                                         \
+            head_size,                                                         \
+            block_size,                                                        \
+            reinterpret_cast<const float*>(k_scale.data_ptr()),                \
+            reinterpret_cast<const float*>(v_scale.data_ptr())));              \
+  });
+
 // KV_T is the stored data type of kv-cache.
 // CACHE_T is the data type of key and value tensors.
 // KV_DTYPE is the real data type of kv-cache.
@@ -778,7 +937,6 @@ void reshape_and_cache(
             slot_mapping.data_ptr<int64_t>(),                          \
             block_stride,                                              \
             page_stride,                                               \
-            head_stride,                                               \
             key_stride,                                                \
             value_stride,                                              \
             num_heads,                                                 \
@@ -800,6 +958,13 @@ void reshape_and_cache_flash(
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
+
+  const at::DeviceGuard device_guard(key.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+
+  // cache: [num_blocks, block_size, num_heads, head_size]
+  // old layout strides: [B * N * D, N * D, D, 1]
+  // new layout strides: [2 * B * N * D, 2 * D, 2 * B * D, 1]
   int block_size = key_cache.size(1);
 
   int64_t key_stride = key.stride(0);
@@ -807,15 +972,29 @@ void reshape_and_cache_flash(
   int64_t block_stride = key_cache.stride(0);
   int64_t page_stride = key_cache.stride(1);
   int64_t head_stride = key_cache.stride(2);
-  TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
+  bool is_strided_head = (head_stride != head_size);
+  if (is_strided_head) {
+    TORCH_CHECK(
+        reinterpret_cast<uint8_t*>(value_cache.data_ptr()) ==
+            reinterpret_cast<uint8_t*>(key_cache.data_ptr()) +
+                head_size * key_cache.element_size(),
+        "new layout requires value_cache to be adjacent to key_cache");
+    const int vec_size = (key.element_size() == 2) ? 8 : 4;
+    sycl::range<1> grid(num_tokens);
+    sycl::range<1> block(std::min(head_size * num_heads / vec_size, 512));
 
-  sycl::range<1> grid(num_tokens);
-  sycl::range<1> block(std::min(num_heads * head_size, 1024));
-  const at::DeviceGuard device_guard(key.device());
-  auto& queue = vllm::xpu::vllmGetQueue();
+    DISPATCH_BY_KV_CACHE_DTYPE(
+        key.scalar_type(),
+        kv_cache_dtype,
+        CALL_RESHAPE_AND_CACHE_FLASH_STRIDED);
+  } else {
+    sycl::range<1> grid(num_tokens);
+    sycl::range<1> block(std::min(num_heads * head_size, 1024));
 
-  DISPATCH_BY_KV_CACHE_DTYPE(
-      key.scalar_type(), kv_cache_dtype, CALL_RESHAPE_AND_CACHE_FLASH);
+    TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
+    DISPATCH_BY_KV_CACHE_DTYPE(
+        key.scalar_type(), kv_cache_dtype, CALL_RESHAPE_AND_CACHE_FLASH);
+  }
 }
 
 // KV_T is the data type of key and value tensors.

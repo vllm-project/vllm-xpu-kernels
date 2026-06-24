@@ -12,33 +12,21 @@ if(NOT ONEDNN_FOUND)
   set(ONEDNN_INCLUDE_DIR)
   set(DNNL_INCLUDES)
 
-  set(THIRD_PARTY_DIR "${PROJECT_SOURCE_DIR}/third_party")
-  set(ONEDNN_DIR "oneDNN")
-  set(ONEDNN_ROOT "${THIRD_PARTY_DIR}/${ONEDNN_DIR}")
+  include(FetchContent)
 
-  find_path(
-    ONEDNN_INCLUDE_DIR dnnl.hpp dnnl.h
-    PATHS ${ONEDNN_ROOT}
-    PATH_SUFFIXES include
-    NO_DEFAULT_PATH)
-  if(NOT ONEDNN_INCLUDE_DIR)
-    find_package(Git)
-    if(NOT Git_FOUND)
-      message(FATAL_ERROR "Can not find Git executable!")
-    endif()
-    execute_process(
-      COMMAND ${GIT_EXECUTABLE} submodule update --init ${ONEDNN_DIR}
-      WORKING_DIRECTORY ${THIRD_PARTY_DIR} COMMAND_ERROR_IS_FATAL ANY)
-    find_path(
-      ONEDNN_INCLUDE_DIR dnnl.hpp dnnl.h
-      PATHS ${ONEDNN_ROOT}
-      PATH_SUFFIXES include
-      NO_DEFAULT_PATH)
-  endif(NOT ONEDNN_INCLUDE_DIR)
+  if(POLICY CMP0169)
+    cmake_policy(SET CMP0169 OLD)
+  endif()
 
-  if(NOT ONEDNN_INCLUDE_DIR)
-    message(FATAL_ERROR "oneDNN source files not found!")
-  endif(NOT ONEDNN_INCLUDE_DIR)
+  message(
+    STATUS
+      "oneDNN: fetching from ${ONEDNN_GIT_REPO} (commit: ${ONEDNN_GIT_TAG})")
+  FetchContent_Declare(
+    oneDNN
+    GIT_REPOSITORY ${ONEDNN_GIT_REPO}
+    GIT_TAG ${ONEDNN_GIT_TAG}
+    GIT_PROGRESS TRUE
+    GIT_SHALLOW FALSE)
 
   set(DNNL_ENABLE_PRIMITIVE_CACHE
       TRUE
@@ -67,7 +55,9 @@ if(NOT ONEDNN_FOUND)
       TRUE
       CACHE BOOL "use one pass for oneDNN BatchNorm" FORCE)
 
-  add_subdirectory(${ONEDNN_ROOT} oneDNN EXCLUDE_FROM_ALL)
+  FetchContent_Populate(oneDNN)
+  add_subdirectory(${onednn_SOURCE_DIR} ${onednn_BINARY_DIR} EXCLUDE_FROM_ALL)
+
   set(ONEDNN_LIBRARY ${DNNL_LIBRARY_NAME})
   if(NOT TARGET ${ONEDNN_LIBRARY})
     message(FATAL_ERROR "Failed to include oneDNN target")
@@ -84,8 +74,7 @@ if(NOT ONEDNN_FOUND)
   list(APPEND ONEDNN_INCLUDE_DIR ${DNNL_INCLUDES})
 
   # Upper level targets should not load header files from oneDNN's third party.
-  list(FILTER ONEDNN_INCLUDE_DIR EXCLUDE REGEX
-       ".*third_party/oneDNN/third_party.*")
+  list(FILTER ONEDNN_INCLUDE_DIR EXCLUDE REGEX ".*/third_party.*")
 
   set(ONEDNN_FOUND ON)
   message(STATUS "Found oneDNN: TRUE")
