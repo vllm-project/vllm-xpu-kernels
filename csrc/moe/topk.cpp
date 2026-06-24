@@ -738,6 +738,10 @@ void topk_gating_kernel_launcher(
       LAUNCH_TOPK(
           512, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
+    case 1024:
+      LAUNCH_TOPK(
+          1024, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
+      break;
     case 192:
       LAUNCH_TOPK(
           192, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64, ScoringFuncParam);
