@@ -21,10 +21,9 @@ struct gated_delta_rule_decode_kernel_xe2 {
   static constexpr bool supports_packed_state_io =
       std::is_same_v<StateT, float> || std::is_same_v<StateT, sycl::half> ||
       std::is_same_v<StateT, sycl::ext::oneapi::bfloat16>;
-  static constexpr bool use_packed_state_io_128 =
-      supports_packed_state_io && packed_state_bytes == sizeof(sycl::uint4);
-  static constexpr bool use_packed_state_io_64 =
-      supports_packed_state_io && packed_state_bytes == sizeof(sycl::uint2);
+    static constexpr bool use_vector_state_io =
+      supports_packed_state_io &&
+      (packed_state_bytes == 8 || packed_state_bytes == 16);
 
   gated_delta_rule_decode_kernel_xe2(
       T* core_attn_out,
@@ -84,6 +83,47 @@ struct gated_delta_rule_decode_kernel_xe2 {
     }
   }
 
+  template <typename VecT, int vec_size>
+  static inline void load_vec(const VecT* ptr, VecT (&dst)[vec_size]) {
+    sycl::vec<VecT, vec_size> in =
+        *reinterpret_cast<const sycl::vec<VecT, vec_size>*>(ptr);
+#pragma unroll
+    for (int i = 0; i < vec_size; ++i) {
+      dst[i] = in[i];
+    }
+  }
+
+  template <typename VecT, int vec_size>
+  static inline void load_vec_to_float(const VecT* ptr, float (&dst)[vec_size]) {
+    VecT tmp[vec_size];
+    load_vec<VecT, vec_size>(ptr, tmp);
+#pragma unroll
+    for (int i = 0; i < vec_size; ++i) {
+      dst[i] = static_cast<float>(tmp[i]);
+    }
+  }
+
+  template <typename VecT, int vec_size>
+  static inline void store_vec(VecT* ptr, const VecT (&src)[vec_size]) {
+    sycl::vec<VecT, vec_size> out;
+#pragma unroll
+    for (int i = 0; i < vec_size; ++i) {
+      out[i] = src[i];
+    }
+    *reinterpret_cast<sycl::vec<VecT, vec_size>*>(ptr) = out;
+  }
+
+  template <typename VecT, int vec_size>
+  static inline void store_vec_from_float(
+      VecT* ptr, const float (&src)[vec_size]) {
+    VecT tmp[vec_size];
+#pragma unroll
+    for (int i = 0; i < vec_size; ++i) {
+      tmp[i] = static_cast<VecT>(src[i]);
+    }
+    store_vec<VecT, vec_size>(ptr, tmp);
+  }
+
   [[sycl::reqd_sub_group_size(decode_sub_group_size)]] void
   operator()(sycl::nd_item<3> item) const {
     const int decode_id = item.get_group(0);
@@ -119,26 +159,11 @@ struct gated_delta_rule_decode_kernel_xe2 {
           const int state_offset =
               state_head_offset + (head_v_dim_id + j) * head_k_dim +
               k_bucket_size * sg_local_id;
-          if constexpr (use_packed_state_io_128) {
-            alignas(16) StateT state_pack_local[k_bucket_size];
-            reinterpret_cast<sycl::uint4*>(state_pack_local)[0] =
-                reinterpret_cast<const sycl::uint4*>(
-                    ssm_state_ptr + state_offset)[0];
-#pragma unroll
-            for (int i = 0; i < k_bucket_size; ++i) {
-              state_local[j * k_bucket_size + i] =
-                  static_cast<float>(state_pack_local[i]);
-            }
-          } else if constexpr (use_packed_state_io_64) {
-            alignas(8) StateT state_pack_local[k_bucket_size];
-            reinterpret_cast<sycl::uint2*>(state_pack_local)[0] =
-                reinterpret_cast<const sycl::uint2*>(
-                    ssm_state_ptr + state_offset)[0];
-#pragma unroll
-            for (int i = 0; i < k_bucket_size; ++i) {
-              state_local[j * k_bucket_size + i] =
-                  static_cast<float>(state_pack_local[i]);
-            }
+          if constexpr (use_vector_state_io) {
+            load_vec_to_float<StateT, k_bucket_size>(
+                ssm_state_ptr + state_offset,
+                reinterpret_cast<float (&)[k_bucket_size]>(
+                    state_local[j * k_bucket_size]));
           } else {
 #pragma unroll
             for (int i = 0; i < k_bucket_size; ++i) {
@@ -189,12 +214,10 @@ struct gated_delta_rule_decode_kernel_xe2 {
         k_local[i] /= sycl::sqrt(k_sum);
       }
 
-#pragma unroll
-      for (int i = 0; i < v_dim_per_sg; ++i) {
-        v_local[i] =
-            v[decode_id * num_v_heads * head_v_dim +
-              num_v_heads_id * head_v_dim + head_v_dim_id + i];
-      }
+      load_vec_to_float<T, v_dim_per_sg>(
+          v + decode_id * num_v_heads * head_v_dim +
+              num_v_heads_id * head_v_dim + head_v_dim_id,
+          v_local);
 
       float kv_mem[v_dim_per_sg];
 #pragma unroll
@@ -240,13 +263,10 @@ struct gated_delta_rule_decode_kernel_xe2 {
       }
 
       if (sg_local_id == 0) {
-#pragma unroll
-        for (int i = 0; i < v_dim_per_sg; ++i) {
-          core_attn_out
-              [global_t * num_v_heads * head_v_dim +
-               num_v_heads_id * head_v_dim + head_v_dim_id + i] =
-                  static_cast<T>(res[i]);
-        }
+        store_vec_from_float<T, v_dim_per_sg>(
+            core_attn_out + global_t * num_v_heads * head_v_dim +
+                num_v_heads_id * head_v_dim + head_v_dim_id,
+            res);
       }
 
 #pragma unroll
@@ -254,24 +274,11 @@ struct gated_delta_rule_decode_kernel_xe2 {
         const int state_offset =
             state_head_offset + (head_v_dim_id + j) * head_k_dim +
             k_bucket_size * sg_local_id;
-        if constexpr (use_packed_state_io_128) {
-          alignas(16) StateT state_pack_local[k_bucket_size];
-#pragma unroll
-          for (int i = 0; i < k_bucket_size; ++i) {
-            state_pack_local[i] =
-                static_cast<StateT>(state_local[j * k_bucket_size + i]);
-          }
-          reinterpret_cast<sycl::uint4*>(ssm_state_ptr + state_offset)[0] =
-              reinterpret_cast<sycl::uint4*>(state_pack_local)[0];
-        } else if constexpr (use_packed_state_io_64) {
-          alignas(8) StateT state_pack_local[k_bucket_size];
-#pragma unroll
-          for (int i = 0; i < k_bucket_size; ++i) {
-            state_pack_local[i] =
-                static_cast<StateT>(state_local[j * k_bucket_size + i]);
-          }
-          reinterpret_cast<sycl::uint2*>(ssm_state_ptr + state_offset)[0] =
-              reinterpret_cast<sycl::uint2*>(state_pack_local)[0];
+        if constexpr (use_vector_state_io) {
+          store_vec_from_float<StateT, k_bucket_size>(
+              ssm_state_ptr + state_offset,
+              reinterpret_cast<float (&)[k_bucket_size]>(
+                  state_local[j * k_bucket_size]));
         } else {
 #pragma unroll
           for (int i = 0; i < k_bucket_size; ++i) {
