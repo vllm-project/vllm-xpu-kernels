@@ -5,12 +5,12 @@ import torch
 
 #isort: off
 try:
-    from . import _vllm_fa2_C  # noqa: F401
-    FA2_UNAVAILABLE_REASON = None
-    FA2_AVAILABLE = True
+    from . import _vllm_sparse_mla_C  # noqa: F401
+    SPARSE_MLA_UNAVAILABLE_REASON = None
+    SPARSE_MLA_AVAILABLE = True
 except ImportError as e:
-    FA2_UNAVAILABLE_REASON = str(e)
-    FA2_AVAILABLE = False
+    SPARSE_MLA_UNAVAILABLE_REASON = str(e)
+    SPARSE_MLA_AVAILABLE = False
 
 
 def maybe_contiguous(x):
@@ -29,7 +29,7 @@ def flash_mla_sparse_fwd(
     return_softmax_lse: bool = False,
 ):
     """Sparse MLA prefill forward interface."""
-    results = torch.ops._vllm_fa2_C.mla_sparse_prefill_fwd(
+    results = torch.ops._vllm_sparse_mla_C.mla_sparse_prefill_fwd(
         maybe_contiguous(q),
         maybe_contiguous(kv),
         maybe_contiguous(indices),
@@ -67,10 +67,17 @@ def flash_mla_with_kvcache(
 ):
     """Sparse MLA decode interface with FP8 KV cache."""
     if indices is None:
-        raise NotImplementedError("flash_mla_with_kvcache is only supported for sparse attention for now")
+        raise NotImplementedError(
+            "flash_mla_with_kvcache is only supported for sparse attention "
+            "for now"
+        )
     assert not causal, "causal must be False when sparse attention is enabled"
-    assert is_fp8_kvcache, "is_fp8_kvcache must be True when sparse attention is enabled"
-    assert q.dtype == torch.bfloat16, "q must be bfloat16 when sparse attention is enabled"
+    assert is_fp8_kvcache, (
+        "is_fp8_kvcache must be True when sparse attention is enabled"
+    )
+    assert q.dtype == torch.bfloat16, (
+        "q must be bfloat16 when sparse attention is enabled"
+    )
     assert q.shape[1] == 1, "seq_len_q must be 1 for sparse fp8 decode"
     assert q.shape[-1] == head_dim_v and k_cache.shape[-1] == 584, \
         "Only DeepSeek V4 style packed head_dim is supported for now"
@@ -78,7 +85,7 @@ def flash_mla_with_kvcache(
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
-    out_tensor, lse = torch.ops._vllm_fa2_C.mla_sparse_decode_fp8_fwd(
+    out_tensor, lse = torch.ops._vllm_sparse_mla_C.mla_sparse_decode_fp8_fwd(
         maybe_contiguous(q),
         maybe_contiguous(k_cache),
         maybe_contiguous(indices),

@@ -1,4 +1,4 @@
-#include "xpu/attn/mla/sparse_mla_prefill_fwd.hpp"
+#include "xpu/flash_mla/kernels/sparse_mla_prefill_fwd.hpp"
 
 // clang-format off
 #define IMPL_HEADSIZE ${IMPL_HEADSIZE}

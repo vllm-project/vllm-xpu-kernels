@@ -2,6 +2,7 @@
 
 #include "core/registration.h"
 #include "xpu/attn/attn_interface.h"
+#include "xpu/flash_mla/mla_interface.h"
 #include "xpu/attn/paged_kv_utils.h"
 #include "utils.h"
 #include <torch/all.h>

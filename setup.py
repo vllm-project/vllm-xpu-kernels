@@ -577,9 +577,11 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
 if _build_custom_ops():
     if _is_enabled("BASIC_KERNELS_ENABLED"):
         ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
-    if (_is_enabled("FA2_KERNELS_ENABLED")
-            or _is_enabled("SPARSE_MLA_KERNELS_ENABLED")):
+    if _is_enabled("FA2_KERNELS_ENABLED"):
         ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fa2_C"))
+    if _is_enabled("SPARSE_MLA_KERNELS_ENABLED"):
+        ext_modules.append(
+            CMakeExtension(name="vllm_xpu_kernels._vllm_sparse_mla_C"))
     if _is_enabled("MOE_KERNELS_ENABLED"):
         ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
     if _is_enabled("XPU_SPECIFIC_KERNELS_ENABLED"):

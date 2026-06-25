@@ -1,41 +1,72 @@
 # =============================================================================
 # Sparse MLA Kernel Configuration
 # =============================================================================
-# This function selects sparse MLA instantiation units based on a configuration
-# file.
+# This function selects sparse MLA instantiation units based on a preset
+# selector or a configuration file.
 #
-# CMake option:
-#   VLLM_SPARSE_MLA_CONFIG
+# CMake option: VLLM_SPARSE_MLA_CONFIG
 #
-# Config file format:
-#   - Lines starting with # are comments
-#   - Empty lines are ignored
-#   - 'all' enables all sparse MLA generated variants
-#   - Entries:
-#       prefill,headsize[,topklen[,attn_sink]]
-#       decode_fp8,headsize[,topklen[,attn_sink]]
+# Selector/file format: - 'all' enables all sparse MLA generated variants - For
+# file mode: lines starting with # are comments, empty lines are ignored -
+# Entries: prefill,headsize[,topklen[,attn_sink]]
+# decode_fp8,headsize[,topklen[,attn_sink]]
 #
-# Notes:
-#   - prefill headsize: 512 or 576
-#   - decode_fp8 headsize: 512
-#   - bool values must be 'true' or 'false'
+# Notes: - prefill headsize: 512 or 576 - decode_fp8 headsize: 512 - bool values
+# must be 'true' or 'false'
 # =============================================================================
 
-if(NOT DEFINED VLLM_SPARSE_MLA_CONFIG)
-  set(VLLM_SPARSE_MLA_CONFIG
-      "${CMAKE_CURRENT_LIST_DIR}/../kernel_configs/sparse_mla_full.conf")
+if(NOT DEFINED VLLM_SPARSE_MLA_CONFIG OR "${VLLM_SPARSE_MLA_CONFIG}" STREQUAL
+                                         "")
+  set(VLLM_SPARSE_MLA_CONFIG "all")
 endif()
 
 function(_sparse_mla_parse_config CONFIG_FILE OUT_ENTRIES OUT_IS_FULL)
   set(_entries)
   set(_is_full FALSE)
 
+  if("${CONFIG_FILE}" STREQUAL "all")
+    set(${OUT_ENTRIES}
+        "${_entries}"
+        PARENT_SCOPE)
+    set(${OUT_IS_FULL}
+        TRUE
+        PARENT_SCOPE)
+    return()
+  endif()
+
   if(NOT EXISTS "${CONFIG_FILE}")
-    message(
-      FATAL_ERROR
-        "Sparse MLA kernel config not found: ${CONFIG_FILE}\n"
-        "Available presets: sparse_mla_full.conf, sparse_mla_default.conf\n"
-        "Set via: cmake -DVLLM_SPARSE_MLA_CONFIG=<path>")
+    get_filename_component(_cfg_name "${CONFIG_FILE}" NAME)
+    if(_cfg_name STREQUAL "sparse_mla_full.conf")
+      message(WARNING "Sparse MLA kernel config not found: ${CONFIG_FILE}. "
+                      "Falling back to built-in preset 'all'.")
+      set(${OUT_ENTRIES}
+          "${_entries}"
+          PARENT_SCOPE)
+      set(${OUT_IS_FULL}
+          TRUE
+          PARENT_SCOPE)
+      return()
+    else()
+      file(GLOB _available_cfgs
+           "${CMAKE_CURRENT_LIST_DIR}/kernel_configs/*.conf")
+      set(_available_names "")
+      foreach(_cfg ${_available_cfgs})
+        get_filename_component(_cfg_base "${_cfg}" NAME)
+        list(APPEND _available_names "${_cfg_base}")
+      endforeach()
+      list(APPEND _available_names "all")
+      list(REMOVE_DUPLICATES _available_names)
+      if(_available_names)
+        string(REPLACE ";" ", " _available_text "${_available_names}")
+      else()
+        set(_available_text "<none>")
+      endif()
+      message(
+        FATAL_ERROR
+          "Sparse MLA kernel config not found: ${CONFIG_FILE}\n"
+          "Available presets: ${_available_text}\n"
+          "Set via: cmake -DVLLM_SPARSE_MLA_CONFIG=<path>")
+    endif()
   endif()
 
   file(STRINGS "${CONFIG_FILE}" _lines)
@@ -69,10 +100,7 @@ function(sparse_mla_configure OUT_SRCS OUT_DEFINES)
                            _config_is_full)
 
   if(_config_is_full)
-    set(_entries
-        "prefill|512"
-        "prefill|576"
-        "decode_fp8|512")
+    set(_entries "prefill|512" "prefill|576" "decode_fp8|512")
   else()
     set(_entries ${_config_entries})
   endif()
@@ -113,13 +141,18 @@ function(sparse_mla_configure OUT_SRCS OUT_DEFINES)
 
       foreach(_topk ${_topk_values})
         if(NOT (_topk STREQUAL "true" OR _topk STREQUAL "false"))
-          message(WARNING "Skipping invalid sparse MLA prefill topk bool entry: ${_entry}")
+          message(
+            WARNING
+              "Skipping invalid sparse MLA prefill topk bool entry: ${_entry}")
           continue()
         endif()
 
         foreach(_sink ${_sink_values})
           if(NOT (_sink STREQUAL "true" OR _sink STREQUAL "false"))
-            message(WARNING "Skipping invalid sparse MLA prefill attn_sink bool entry: ${_entry}")
+            message(
+              WARNING
+                "Skipping invalid sparse MLA prefill attn_sink bool entry: ${_entry}"
+            )
             continue()
           endif()
 
@@ -140,8 +173,10 @@ function(sparse_mla_configure OUT_SRCS OUT_DEFINES)
           endif()
 
           set(_output_name
-              "sparse_mla_prefill_fwd${_topk_suffix}_k${_headsize}${_sink_suffix}.cpp")
-          set(_def "VLLM_SPARSE_MLA_PREFILL${_topk_def}_K${_headsize}${_sink_def}")
+              "sparse_mla_prefill_fwd${_topk_suffix}_k${_headsize}${_sink_suffix}.cpp"
+          )
+          set(_def
+              "VLLM_SPARSE_MLA_PREFILL${_topk_def}_K${_headsize}${_sink_def}")
 
           set(IMPL_HEADSIZE ${_headsize})
           set(IMPL_HAVE_TOPK_LENGTH ${_topk})
@@ -180,13 +215,18 @@ function(sparse_mla_configure OUT_SRCS OUT_DEFINES)
 
       foreach(_topk ${_topk_values})
         if(NOT (_topk STREQUAL "true" OR _topk STREQUAL "false"))
-          message(WARNING "Skipping invalid sparse MLA decode topk bool entry: ${_entry}")
+          message(
+            WARNING
+              "Skipping invalid sparse MLA decode topk bool entry: ${_entry}")
           continue()
         endif()
 
         foreach(_sink ${_sink_values})
           if(NOT (_sink STREQUAL "true" OR _sink STREQUAL "false"))
-            message(WARNING "Skipping invalid sparse MLA decode attn_sink bool entry: ${_entry}")
+            message(
+              WARNING
+                "Skipping invalid sparse MLA decode attn_sink bool entry: ${_entry}"
+            )
             continue()
           endif()
 
@@ -209,7 +249,9 @@ function(sparse_mla_configure OUT_SRCS OUT_DEFINES)
           set(_output_name
               "sparse_mla_decode_fp8_fwd${_topk_suffix}_k${_headsize}${_sink_suffix}.cpp"
           )
-          set(_def "VLLM_SPARSE_MLA_DECODE_FP8${_topk_def}_K${_headsize}${_sink_def}")
+          set(_def
+              "VLLM_SPARSE_MLA_DECODE_FP8${_topk_def}_K${_headsize}${_sink_def}"
+          )
 
           set(IMPL_HEADSIZE ${_headsize})
           set(IMPL_HAVE_TOPK_LENGTH ${_topk})

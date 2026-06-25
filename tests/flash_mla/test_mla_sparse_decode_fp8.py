@@ -28,13 +28,17 @@ SCALE_BYTES_PER_TOKEN = 8
 HEAD_BYTES = DATA_BYTES_PER_TOKEN + SCALE_BYTES_PER_TOKEN
 
 
-def _pack_sparse_fp8_kv_deepseek_v4(kv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _pack_sparse_fp8_kv_deepseek_v4(
+    kv: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
     num_blocks, block_size, num_heads, d_qk = kv.shape
     assert num_heads == 1
     assert d_qk == D_QK
 
     packed_storage = torch.empty(
-        (num_blocks, block_size * HEAD_BYTES), device=kv.device, dtype=torch.uint8
+        (num_blocks, block_size * HEAD_BYTES),
+        device=kv.device,
+        dtype=torch.uint8,
     )
     dequant = torch.empty_like(kv, dtype=torch.float32)
 
@@ -101,14 +105,23 @@ def _ref_sparse_decode(
 
         # Keep the official invalid semantics and also guard out-of-range
         # positive indices used by this test.
-        invalid_mask = (active_indices < 0) | (active_indices >= active_flat.size(0))
+        invalid_mask = (
+            (active_indices < 0) | (active_indices >= active_flat.size(0))
+        )
         if active_tl is not None:
             normalized_tl = _normalize_topk_length(active_tl)
-            invalid_mask |= torch.arange(0, topk, device=active_indices.device).view(
-                1, 1, topk
-            ).expand(b, s_q, topk) >= normalized_tl
+            invalid_mask |= (
+                torch.arange(0, topk, device=active_indices.device)
+                .view(1, 1, topk)
+                .expand(b, s_q, topk)
+                >= normalized_tl
+            )
 
-        gather_idx = torch.clamp(active_indices, min=0, max=active_flat.size(0) - 1)
+        gather_idx = torch.clamp(
+            active_indices,
+            min=0,
+            max=active_flat.size(0) - 1,
+        )
         gathered = active_flat.index_select(0, gather_idx.reshape(-1)).view(
             b, s_q, topk, D_QK
         )
@@ -128,7 +141,11 @@ def _ref_sparse_decode(
     attn_weight = q @ gathered_kv.transpose(-1, -2)
     attn_weight *= sm_scale
     attn_weight[
-        invalid_mask.view(b * s_q, 1, -1).expand(b * s_q, h_q, invalid_mask.size(-1))
+        invalid_mask.view(b * s_q, 1, -1).expand(
+            b * s_q,
+            h_q,
+            invalid_mask.size(-1),
+        )
     ] = float("-inf")
 
     lse = attn_weight.logsumexp(dim=-1).view(b, s_q, h_q)
@@ -137,7 +154,9 @@ def _ref_sparse_decode(
     output = output.view(b, s_q, h_q, D_V)
 
     if attn_sink is not None:
-        output *= (1.0 / (1.0 + torch.exp(attn_sink.view(1, 1, h_q) - lse))).unsqueeze(-1)
+        output *= (
+            1.0 / (1.0 + torch.exp(attn_sink.view(1, 1, h_q) - lse))
+        ).unsqueeze(-1)
 
     lonely_q_mask = lse == float("-inf")
     output[lonely_q_mask.unsqueeze(-1).expand(b, s_q, h_q, D_V)] = 0.0
@@ -151,7 +170,14 @@ def _ref_sparse_decode(
 @pytest.mark.parametrize("s_q", [15, 33, 88])
 @pytest.mark.parametrize("topk", [1, 66, 288])
 @pytest.mark.parametrize("extra_topk", [1000, 2048])
-def test_mla_sparse_decode_fp8_fwd(has_attn_sink: bool, has_extra: bool, h_q: int, s_q: int, topk: int, extra_topk: int):
+def test_mla_sparse_decode_fp8_fwd(
+    has_attn_sink: bool,
+    has_extra: bool,
+    h_q: int,
+    s_q: int,
+    topk: int,
+    extra_topk: int,
+):
     if not torch.xpu.is_available():
         pytest.skip("XPU not available")
 
@@ -166,20 +192,44 @@ def test_mla_sparse_decode_fp8_fwd(has_attn_sink: bool, has_extra: bool, h_q: in
     extra_block_size = 128
     sm_scale = D_QK ** -0.5
 
-    q_ref = torch.randn((b, s_q, h_q, D_QK), device=device, dtype=torch.float32) * 0.5
+    q_ref = torch.randn(
+        (b, s_q, h_q, D_QK),
+        device=device,
+        dtype=torch.float32,
+    ) * 0.5
     q = q_ref.to(torch.bfloat16)
     q_for_ref = q.float()
 
-    logical_kv = torch.randn((num_blocks, block_size, 1, D_QK), device=device, dtype=torch.bfloat16) * 0.5
+    logical_kv = torch.randn(
+        (num_blocks, block_size, 1, D_QK),
+        device=device,
+        dtype=torch.bfloat16,
+    ) * 0.5
     packed_kv, dequant_kv = _pack_sparse_fp8_kv_deepseek_v4(logical_kv)
 
-    indices = torch.randint(0, num_blocks * block_size, (b, s_q, topk), device=device, dtype=torch.int32)
+    indices = torch.randint(
+        0,
+        num_blocks * block_size,
+        (b, s_q, topk),
+        device=device,
+        dtype=torch.int32,
+    )
     indices[0, 0, -1] = num_blocks * block_size + 9
-    topk_length = torch.randint(1, topk + 1, (b,), device=device, dtype=torch.int32)
+    topk_length = torch.randint(
+        1,
+        topk + 1,
+        (b,),
+        device=device,
+        dtype=torch.int32,
+    )
 
     attn_sink = None
     if has_attn_sink:
-        attn_sink = torch.randn((h_q,), device=device, dtype=torch.float32) * 0.25
+        attn_sink = torch.randn(
+            (h_q,),
+            device=device,
+            dtype=torch.float32,
+        ) * 0.25
 
     packed_extra_kv = None
     dequant_extra_kv = None
@@ -191,7 +241,9 @@ def test_mla_sparse_decode_fp8_fwd(has_attn_sink: bool, has_extra: bool, h_q: in
             device=device,
             dtype=torch.bfloat16,
         ) * 0.5
-        packed_extra_kv, dequant_extra_kv = _pack_sparse_fp8_kv_deepseek_v4(logical_extra_kv)
+        packed_extra_kv, dequant_extra_kv = _pack_sparse_fp8_kv_deepseek_v4(
+            logical_extra_kv
+        )
         extra_indices = torch.randint(
             0,
             extra_num_blocks * extra_block_size,
@@ -199,7 +251,13 @@ def test_mla_sparse_decode_fp8_fwd(has_attn_sink: bool, has_extra: bool, h_q: in
             device=device,
             dtype=torch.int32,
         )
-        extra_topk_length = torch.randint(1, extra_topk + 1, (b,), device=device, dtype=torch.int32)
+        extra_topk_length = torch.randint(
+            1,
+            extra_topk + 1,
+            (b,),
+            device=device,
+            dtype=torch.int32,
+        )
 
     out, lse = flash_mla_with_kvcache(
         q=q,

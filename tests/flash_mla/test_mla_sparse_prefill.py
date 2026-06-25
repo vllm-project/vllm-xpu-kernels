@@ -6,7 +6,6 @@ import torch
 
 from vllm_xpu_kernels.flash_mla_interface import flash_mla_sparse_fwd
 
-
 # override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
     "default": {
@@ -45,13 +44,18 @@ def _reference_sparse_prefill(
 
     idx = indices.clone().squeeze(1)
     if topk_length is not None:
-        mask = torch.arange(topk, device=topk_length.device).unsqueeze(0) >= topk_length.unsqueeze(1)
+        mask = (
+            torch.arange(topk, device=topk_length.device).unsqueeze(0)
+            >= topk_length.unsqueeze(1)
+        )
         idx[mask] = -1
     invalid_mask = (idx < 0) | (idx >= s_kv)
     idx[invalid_mask] = 0
 
     q_f = q.float()
-    gathered = kv.index_select(0, idx.flatten()).reshape(s_q, topk, d_qk).float()
+    gathered = (
+        kv.index_select(0, idx.flatten()).reshape(s_q, topk, d_qk).float()
+    )
     logits = q_f @ gathered.transpose(1, 2)
     logits *= sm_scale
     logits[invalid_mask.unsqueeze(1).expand_as(logits)] = float("-inf")
@@ -75,7 +79,14 @@ def _reference_sparse_prefill(
 @pytest.mark.parametrize("s_q", [512, 576])
 @pytest.mark.parametrize("h_q", [8, 22, 64, 128])
 @pytest.mark.parametrize("topk", [1, 128])
-def test_mla_sparse_prefill_fwd(d_qk: int, has_topk_length: bool, has_attn_sink: bool, h_q: int, s_q: int, topk: int):
+def test_mla_sparse_prefill_fwd(
+    d_qk: int,
+    has_topk_length: bool,
+    has_attn_sink: bool,
+    h_q: int,
+    s_q: int,
+    topk: int,
+):
     if not torch.xpu.is_available():
         pytest.skip("XPU not available")
 
@@ -89,12 +100,24 @@ def test_mla_sparse_prefill_fwd(d_qk: int, has_topk_length: bool, has_attn_sink:
 
     q = torch.randn((s_q, h_q, d_qk), device=device, dtype=dtype)
     kv = torch.randn((s_kv, h_kv, d_qk), device=device, dtype=dtype)
-    indices = torch.randint(0, s_kv, (s_q, h_kv, topk), device=device, dtype=torch.int32)
+    indices = torch.randint(
+        0,
+        s_kv,
+        (s_q, h_kv, topk),
+        device=device,
+        dtype=torch.int32,
+    )
     indices[0, 0, -1] = s_kv + 7
 
     topk_length = None
     if has_topk_length:
-        topk_length = torch.randint(1, topk + 1, (s_q,), device=device, dtype=torch.int32)
+        topk_length = torch.randint(
+            1,
+            topk + 1,
+            (s_q,),
+            device=device,
+            dtype=torch.int32,
+        )
 
     attn_sink = None
     if has_attn_sink:
@@ -102,7 +125,13 @@ def test_mla_sparse_prefill_fwd(d_qk: int, has_topk_length: bool, has_attn_sink:
 
     sm_scale = d_qk ** -0.5
     ref_out, ref_max, ref_lse = _reference_sparse_prefill(
-        q, kv, indices, sm_scale, d_v, topk_length=topk_length, attn_sink=attn_sink
+        q,
+        kv,
+        indices,
+        sm_scale,
+        d_v,
+        topk_length=topk_length,
+        attn_sink=attn_sink,
     )
 
     out, max_logits, lse = flash_mla_sparse_fwd(

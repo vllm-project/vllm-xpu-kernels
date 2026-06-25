@@ -9,8 +9,8 @@ variants are compiled.
 | `chunk_prefill_default.conf` | ~13 | Chunk prefill — Llama, Qwen, DeepSeek MLA, Falcon |
 | `paged_decode_full.conf` | 384 | Paged decode — all combinations |
 | `paged_decode_default.conf` | ~17 | Paged decode — Llama, Qwen, DeepSeek MLA, Falcon |
-| `sparse_mla_full.conf` | 8 | Sparse MLA — all combinations |
-| `sparse_mla_default.conf` | 8 | Sparse MLA — DeepSeek defaults |
+
+Sparse MLA configs are located at `csrc/xpu/flash_mla/kernel_configs/`.
 
 For config file format, usage examples, model-specific guidance, and
 troubleshooting, see **[KERNEL_CONFIGURATION.md](../../../../KERNEL_CONFIGURATION.md)**
