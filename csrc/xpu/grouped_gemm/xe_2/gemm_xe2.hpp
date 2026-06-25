@@ -234,12 +234,8 @@ CUTE_DEVICE void xe_gemm(
 }
 
 // Weight-only block-wise FP8 (W8A16) grouped GEMM.
-// Weights are FP8 with one FP32 scale per 128x128 (K x N) block.
-// Activations remain BF16/FP16. The scale is applied to the dequantized
-// weight fragment per 128-element K block before MMA accumulation. Because
-// every supported policy has tile_n <= 128 (and divides 128), the N-block
-// index is constant for a given output tile, so the scale is a scalar per
-// 128-K block.
+// FP8 weights with one FP32 scale per 128x128 (K x N) block.
+// Activations remain BF16/FP16.
 template <
     class GmemTiledCopyA,
     class GmemTiledCopyB,
@@ -326,24 +322,14 @@ CUTE_DEVICE void xe_gemm_blockfp8(
   int k_tile_count = ceil_div(shape<1>(A), get<2>(wg_tile));
   int k_tile_prefetch = 0;
 
-  // The block scale is a single scalar for this output tile's N-block (tile_n <=
-  // 128), so it only depends on the K-block. The scale loads are software-
-  // pipelined either way: the next K-block's scale is loaded one block
-  // (block_size / tile_k k-tiles) before it is consumed, so its global-memory
-  // latency overlaps the intervening MMAs instead of stalling the inner loop.
-  //
-  // Two schemes are selected at compile time by the workgroup M tile:
-  //  * Small M (tile_m <= 32: decode / MoE small-batch, the latency-critical and
-  //    memory-bound regime where weight-only fp8 wins most): a second C
-  //    accumulator holds the unscaled partial sum of the current 128-K block,
-  //    and the scale is folded into the final accumulator only at each 128-K
-  //    boundary. The inner MMA loop is then identical to the unscaled/per-tensor
-  //    path (no per-k-tile scaling). The small per-sub-group C fragment lets both
-  //    accumulators stay in registers without spilling.
-  //  * Large M (tile_m == 128: prefill, compute-bound): a second 128x128 C
-  //    accumulator would spill, so the scale is instead folded into the
-  //    activation fragment A in place each k-tile (scale_b * (A.B) ==
-  //    (scale_b * A).B) using a single accumulator.
+  // One scalar block scale per output tile (tile_n <= 128), depending only on
+  // the K-block; the next block's scale is prefetched a block ahead so its load
+  // overlaps the MMAs. Two compile-time schemes by M tile:
+  //  * Small M (tile_m <= 32): a second C accumulator sums each 128-K block
+  //    unscaled and is folded in (scaled) at the block boundary, keeping the
+  //    inner loop scale-free. Both accumulators fit in registers at small M.
+  //  * Large M (tile_m == 128): a second 128x128 accumulator would spill, so
+  //    the scale is folded into A each k-tile (scale_b*(A.B) == (scale_b*A).B).
   static constexpr bool use_block_accum = (tile_m <= 32);
   using TAScale = typename ATensor::element_type;
   int num_k_blocks = ceil_div(static_cast<int>(shape<1>(A)), block_size);
@@ -359,8 +345,8 @@ CUTE_DEVICE void xe_gemm_blockfp8(
   }
 
   if constexpr (use_block_accum) {
-    // Small-M path: clean inner loop, fold the block scale at each 128-K
-    // boundary using a second (register-resident) accumulator.
+    // Small-M path: scale-free inner loop, folding each 128-K block into the
+    // final accumulator via a second register-resident accumulator.
     auto tCrC_blk = thr_mma.partition_sg_fragment_C(gC);
     clear(tCrC_blk);
     float cur_scale = 1.0f;
@@ -389,9 +375,8 @@ CUTE_DEVICE void xe_gemm_blockfp8(
 
       cute::gemm(mma, tCrA, tCrB, tCrC_blk);
 
-      // At the end of each 128-K block, fold the unscaled partial sum into the
-      // final accumulator with this block's scale, then reset. K is divisible by
-      // 128, so the final block always folds.
+      // Fold this block's unscaled sum (scaled) into tCrC at each 128-K
+      // boundary, then reset. K % 128 == 0, so the last block always folds.
       if (((k_tile + 1) * tile_k) % block_size == 0) {
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < tCrC.size(); ++i) {

@@ -209,6 +209,7 @@ class XpuFusedMoe:
         else:
             self.gemm1_scales = w13_scales
             self.gemm2_scales = w2_scales
+
         self.w13_bias = w13_bias
         self.w2_bias = w2_bias
 
