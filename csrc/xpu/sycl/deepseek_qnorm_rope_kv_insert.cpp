@@ -528,9 +528,7 @@ void deepseek_qnorm_rope_kv_insert(
               cache_stride_pos));
     });
   } else {
-    const int64_t cache_block_stride =
-        static_cast<int64_t>(block_size) * vllm::TOKEN_DATA_BYTES +
-        static_cast<int64_t>(block_size) * vllm::SCALE_BYTES_PER_TOKEN;
+    const int64_t cache_block_stride = cache.stride(0);
     q_xpu.submit([&](sycl::handler& cgh) {
       auto* q_ptr = reinterpret_cast<bf16_t*>(q.data_ptr());
       auto* kv_ptr = reinterpret_cast<const bf16_t*>(kv.data_ptr());
