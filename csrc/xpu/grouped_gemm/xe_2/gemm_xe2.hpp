@@ -388,7 +388,7 @@ CUTE_DEVICE void xe_gemm_blockfp8(
       barrier_wait(barrier_scope);
     }
   } else {
-    // Large-M path: single accumulator, fold the block scale into A each k-tile.
+    // Large-M path: single accumulator, fold block scale into A each k-tile.
     TAScale cur_scale = static_cast<TAScale>(1);
 
     for (int k_tile = 0; k_tile < k_tile_count; k_tile++, k_tile_prefetch++) {

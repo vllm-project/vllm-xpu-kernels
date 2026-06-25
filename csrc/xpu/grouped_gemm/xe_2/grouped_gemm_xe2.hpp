@@ -150,7 +150,8 @@ CUTE_DEVICE void MoEGEMM(
     } else if constexpr (IsBlockScale) {
       int64_t num_k_blocks = static_cast<int64_t>(gemm_k) / 128;
       int64_t num_n_blocks = static_cast<int64_t>(gemm_n) / 128;
-      ptr_Scales_curr_batch = const_cast<ElementS*>(Scales) +
+      ptr_Scales_curr_batch =
+          const_cast<ElementS*>(Scales) +
           static_cast<int64_t>(expert_id) * num_k_blocks * num_n_blocks;
     }
     ElementBI* ptr_Bias_curr_batch = nullptr;

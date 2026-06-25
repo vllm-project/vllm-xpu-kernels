@@ -324,8 +324,7 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     }
 #undef W4A16LauncherCallER
   } else if (is_B_fp8block) {
-    TORCH_CHECK(
-        is_weight_fp8, "block fp8 grouped gemm must have fp8 weights");
+    TORCH_CHECK(is_weight_fp8, "block fp8 grouped gemm must have fp8 weights");
     TORCH_CHECK(
         ptr_scales.has_value(), "block fp8 grouped gemm must have scales");
     TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");
@@ -348,22 +347,22 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
         "ptr_scales.size(2) of block fp8 must be N / 128");
     group_size = 128;
 
-#define W8A16BlockLauncherCallER(policy)                                   \
-  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {             \
-    using scalar_t = half_t;                                               \
-    MoEGEMMBlockLauncherCallER(                                            \
+#define W8A16BlockLauncherCallER(policy)                                  \
+  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {            \
+    using scalar_t = half_t;                                              \
+    MoEGEMMBlockLauncherCallER(                                           \
         'R', 'R', policy, scalar_t, float_e4m3_t, float);                 \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {        \
-    using scalar_t = half_t;                                               \
-    MoEGEMMBlockLauncherCallER(                                            \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {       \
+    using scalar_t = half_t;                                              \
+    MoEGEMMBlockLauncherCallER(                                           \
         'R', 'R', policy, scalar_t, float_e5m2_t, float);                 \
-  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {  \
-    using scalar_t = bfloat16_t;                                           \
-    MoEGEMMBlockLauncherCallER(                                            \
+  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) { \
+    using scalar_t = bfloat16_t;                                          \
+    MoEGEMMBlockLauncherCallER(                                           \
         'R', 'R', policy, scalar_t, float_e4m3_t, float);                 \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {    \
-    using scalar_t = bfloat16_t;                                           \
-    MoEGEMMBlockLauncherCallER(                                            \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {   \
+    using scalar_t = bfloat16_t;                                          \
+    MoEGEMMBlockLauncherCallER(                                           \
         'R', 'R', policy, scalar_t, float_e5m2_t, float);                 \
   }
 
