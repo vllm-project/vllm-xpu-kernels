@@ -95,9 +95,6 @@ def make_fused_moe_input(config):
             "block fp8 requires hidden_size and intermediate_size " \
             "divisible by 128"
 
-        w13_fp8 = w13.to(w_dtype)
-        w2_fp8 = w2.to(w_dtype)
-
         w13_blk_scales = torch.pow(
             2.0,
             torch.randint(-3,
@@ -111,14 +108,23 @@ def make_fused_moe_input(config):
                               intermediate_size // block_size),
                           device=DEVICE).float())
 
-        ref_w13 = torch.empty_like(w13_fp8, dtype=x_dtype)
-        ref_w2 = torch.empty_like(w2_fp8, dtype=x_dtype)
+        w13_fp8 = torch.empty_like(w13, dtype=w_dtype)
+        w2_fp8 = torch.empty_like(w2, dtype=w_dtype)
+        ref_w13 = torch.empty_like(w13, dtype=x_dtype)
+        ref_w2 = torch.empty_like(w2, dtype=x_dtype)
         for i in range(num_experts):
+            # Quantize by dividing each 128x128 block by its scale before the
+            # fp8 cast (mirroring the per-tensor scaled_fp8_quant path), so the
+            # dequantized weight (fp8 * scale) reconstructs the original weight
+            # and output magnitudes stay in the same range as the bf16 / per-
+            # tensor reference.
             s13 = w13_blk_scales[i].repeat_interleave(
                 block_size, dim=0).repeat_interleave(block_size, dim=1)
+            w13_fp8[i] = (w13[i] / s13).to(w_dtype)
             ref_w13[i] = w13_fp8[i].to(x_dtype) * s13
             s2 = w2_blk_scales[i].repeat_interleave(
                 block_size, dim=0).repeat_interleave(block_size, dim=1)
+            w2_fp8[i] = (w2[i] / s2).to(w_dtype)
             ref_w2[i] = w2_fp8[i].to(x_dtype) * s2
         w13 = w13_fp8
         w2 = w2_fp8
