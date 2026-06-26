@@ -151,6 +151,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def("get_onednn_version() -> str");
   xpu_ops.impl("get_onednn_version", &get_onednn_version);
+
+  xpu_ops.def(
+      "fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn("
+      "Tensor state_cache, Tensor token_to_req_indices, Tensor positions,"
+      "Tensor slot_mapping, Tensor block_table, int block_size,"
+      "int state_width, Tensor rms_norm_weight, float rms_norm_eps,"
+      "Tensor cos_sin_cache, Tensor kv_cache, Tensor kv_slot_mapping,"
+      "int kv_cache_block_size, int head_dim, int rope_head_dim,"
+      "int compress_ratio, int overlap, int quant_block) -> ()");
+  xpu_ops.impl("fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn",
+      torch::kXPU, &fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
