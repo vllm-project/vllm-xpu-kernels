@@ -885,8 +885,10 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
     T* A,  // [num_v_heads, total_virtual_seqlen, chunk_size], temp O2 buffer
     T* w,  // [num_v_heads, total_virtual_seqlen, head_k_dim]
     T* u,  // [num_v_heads, total_virtual_seqlen, head_v_dim]
+    const T* v,  // [total_virtual_seqlen, num_v_heads, head_v_dim]
     const T* q,  // [total_virtual_seqlen, num_k_heads, head_k_dim]
     const T* k,  // [total_virtual_seqlen, num_k_heads, head_k_dim]
+    const float* b,
     const float* a,
     StateT*
         ssm_state,  // [cache_batch_size, num_v_heads, head_v_dim, head_k_dim]
@@ -908,6 +910,8 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
   int local_range = item.get_local_range(2);
 
   auto sg = item.get_sub_group();
+  int sg_id = sg.get_group_linear_id();
+  int sg_range = sg.get_group_linear_range();
   int sg_local_id = sg.get_local_linear_id();
 
   float* slm_mem = static_cast<float*>(
@@ -960,6 +964,110 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
         ssm_state +
         static_cast<int64_t>(cache_indices[batch_id]) * ssm_state_stride_0 +
         v_head_id * head_v_dim * head_k_dim;
+
+    if (seq_len == 1) {
+      // Fast path for decode-like single-token sequence.
+      // Execute one recurrent step directly and skip the chunk loop.
+      static constexpr int fast_vec_size = 2;
+      using FastVecT = vllm::xpu::aligned_vec<T, fast_vec_size>;
+      using FastStateVecT = vllm::xpu::aligned_vec<StateT, fast_vec_size>;
+      const bool has_prev_state = initial_state;
+      const int chunk_offset = pre_chunks * chunk_size;
+      const int out_chunk_offset = seq_start_offset;
+
+      // Map the virtual chunk offset to actual q/k/v/output pointers.
+      auto q_ptr =
+          q + chunk_offset * num_k_heads * head_k_dim + kv_head_id * head_k_dim;
+      auto k_ptr =
+          k + chunk_offset * num_k_heads * head_k_dim + kv_head_id * head_k_dim;
+      auto v_ptr =
+          v + chunk_offset * num_v_heads * head_v_dim + v_head_id * head_v_dim;
+      auto O_ptr = core_attn_out + out_chunk_offset * num_v_heads * head_v_dim +
+                   v_head_id * head_v_dim;
+
+      // a stores per-token cumulative log-decay; use exp(a_t) for decay factor.
+      float g_last_value = a[(chunk_offset) + v_head_id * total_virtual_seqlen];
+      float g_last_value_exp = sycl::exp(g_last_value);
+      float beta_value = b[(chunk_offset) + v_head_id * total_virtual_seqlen];
+
+      // Each subgroup iterates over V dimension stripes.
+      for (int dv = sg_id; dv < head_v_dim; dv += sg_range) {
+        float kv_partial = 0.0f;
+        float out_partial = 0.0f;
+
+        // 1) Read decayed previous state and compute k^T * (decayed_state).
+        CUTE_UNROLL
+        for (int dk = sg_local_id * fast_vec_size; dk < head_k_dim;
+             dk += sub_group_size * fast_vec_size) {
+          int state_idx_base = dv * head_k_dim + dk;
+          auto k_vec = *reinterpret_cast<const FastVecT*>(k_ptr + dk);
+          if (has_prev_state) {
+            auto state_vec = *reinterpret_cast<const FastStateVecT*>(
+                ssm_state_ptr + state_idx_base);
+            CUTE_UNROLL
+            for (int vi = 0; vi < fast_vec_size; ++vi) {
+              float state_value =
+                  static_cast<float>(state_vec[vi]) * g_last_value_exp;
+              kv_partial += state_value * static_cast<float>(k_vec[vi]);
+            }
+          }
+        }
+
+        float kv_value =
+            sycl::reduce_over_group(sg, kv_partial, sycl::plus<>());
+        float delta_value = 0.0f;
+        // 2) Compute delta on lane0 and broadcast within subgroup.
+        if (sg_local_id == 0) {
+          delta_value = (static_cast<float>(v_ptr[dv]) - kv_value) * beta_value;
+        }
+        delta_value = sycl::group_broadcast(sg, delta_value, 0);
+
+        // 3) Update state with k * delta and accumulate q^T * new_state.
+        CUTE_UNROLL
+        for (int dk = sg_local_id * fast_vec_size; dk < head_k_dim;
+             dk += sub_group_size * fast_vec_size) {
+          int state_idx_base = dv * head_k_dim + dk;
+          auto k_vec = *reinterpret_cast<const FastVecT*>(k_ptr + dk);
+          auto q_vec = *reinterpret_cast<const FastVecT*>(q_ptr + dk);
+
+          FastStateVecT state_new_vec;
+          if (has_prev_state) {
+            auto state_vec = *reinterpret_cast<const FastStateVecT*>(
+                ssm_state_ptr + state_idx_base);
+            CUTE_UNROLL
+            for (int vi = 0; vi < fast_vec_size; ++vi) {
+              float state_value =
+                  static_cast<float>(state_vec[vi]) * g_last_value_exp;
+              float state_new =
+                  state_value + static_cast<float>(k_vec[vi]) * delta_value;
+              state_new_vec[vi] = static_cast<StateT>(state_new);
+              out_partial += state_new * static_cast<float>(q_vec[vi]);
+            }
+          } else {
+            CUTE_UNROLL
+            for (int vi = 0; vi < fast_vec_size; ++vi) {
+              float state_new = static_cast<float>(k_vec[vi]) * delta_value;
+              state_new_vec[vi] = static_cast<StateT>(state_new);
+              out_partial += state_new * static_cast<float>(q_vec[vi]);
+            }
+          }
+
+          *reinterpret_cast<FastStateVecT*>(ssm_state_ptr + state_idx_base) =
+              state_new_vec;
+        }
+
+        // 4) Reduce output and store one value per dv from lane0.
+        float out_value =
+            sycl::reduce_over_group(sg, out_partial, sycl::plus<>());
+        if (sg_local_id == 0) {
+          O_ptr[dv] = static_cast<T>(out_value);
+        }
+      }
+
+      // This batch contributes exactly one virtual chunk.
+      pre_chunks += current_chunks;
+      continue;
+    }
 
     for (int chunk_id = 0; chunk_id < current_chunks; ++chunk_id) {
       const bool has_prev_state = (chunk_id != 0) || initial_state;
@@ -1481,8 +1589,10 @@ void kernel_launcher(
               A,
               w,
               u,
+              v,
               q,
               k,
+              b,
               a,
               ssm_state,
               ssm_state_stride_0,
@@ -1536,6 +1646,16 @@ void chunk_gated_delta_rule_impl_xe2(
   const int ssm_state_stride_0 = ssm_state.stride(0);
 
   TORCH_CHECK(num_v_heads % num_k_heads == 0);
+
+  static constexpr int fast_vec_size = 2;
+  TORCH_CHECK(
+      head_k_dim % (sub_group_size * fast_vec_size) == 0,
+      "head_k_dim must be divisible by sub_group_size * ",
+      fast_vec_size,
+      " (",
+      sub_group_size * fast_vec_size,
+      ") for seq_len==1 fast-path vectorization, but got head_k_dim=",
+      head_k_dim);
 
   TORCH_CHECK(
       A_log.scalar_type() == at::kFloat,
