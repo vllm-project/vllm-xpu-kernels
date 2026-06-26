@@ -156,6 +156,10 @@ MINI_PYTEST_PARAMS = {
         "head_size_kv": [(192, 128)],
         "num_blocks": [2048],
     },
+    "test_varlen_with_asym_qk_vo": {
+        "is_paged": [True],
+        "block_size": [16],
+    },
     "test_varlen_with_cross_layer_paged_kv": {
         "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
         "head_size": [64, 128],
@@ -375,6 +379,83 @@ def test_varlen_with_paged_kv(
         atol, rtol = 1.5e-2, 1.5e-2
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize("is_paged", [False, True])
+@pytest.mark.parametrize("block_size", [16, 32])
+@torch.inference_mode()
+def test_varlen_with_asym_qk_vo(is_paged: bool, block_size: int) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(4242)
+
+    seq_lens = [(3, 7), (5, 9)]
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = 4
+    num_kv_heads = 2
+    qk_head_size = 192
+    v_head_size = 128
+    dtype = torch.float16
+    num_blocks = 8
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = qk_head_size**-0.5
+
+    query = torch.randn(sum(query_lens), num_query_heads, qk_head_size,
+                        dtype=dtype)
+    if is_paged:
+        key_cache = torch.randn(num_blocks, block_size, num_kv_heads,
+                                qk_head_size, dtype=dtype)
+        value_cache = torch.randn(num_blocks, block_size, num_kv_heads,
+                                  v_head_size, dtype=dtype)
+    else:
+        key_cache = torch.randn(sum(kv_lens), num_kv_heads, qk_head_size,
+                                dtype=dtype)
+        value_cache = torch.randn(sum(kv_lens), num_kv_heads, v_head_size,
+                                  dtype=dtype)
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    cu_kv_lens = torch.tensor([0] + kv_lens,
+                              dtype=torch.int32).cumsum(dim=0,
+                                                        dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (len(seq_lens), max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    kwargs = {"seqused_k": seq_k, "block_table": block_tables} if is_paged \
+        else {"cu_seqlens_k": cu_kv_lens, "block_table": None}
+    output = flash_attn_varlen_func(query,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    softmax_scale=scale,
+                                    causal=True,
+                                    window_size=(-1, -1),
+                                    **kwargs)
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache.contiguous(),
+                                value_cache=value_cache.contiguous(),
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=True,
+                                is_paged=is_paged,
+                                window_size_left=-1,
+                                window_size_right=-1,
+                                dtype=dtype)
+    assert output.shape == (sum(query_lens), num_query_heads, v_head_size)
+    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2)
     torch.xpu.empty_cache()
 
 
