@@ -279,13 +279,15 @@ void hc_head_fused(
 
   auto hs_c = hs_flat.contiguous();
   auto fn_c = fn.contiguous();
+  auto hc_scale_c = hc_scale.contiguous();
+  auto hc_base_c = hc_base.contiguous();
   auto& q = vllm::xpu::vllmGetQueue();
   launch_hc_head_fused_opt(
       q,
       reinterpret_cast<const bf16*>(hs_c.data_ptr()),
       fn_c.data_ptr<float>(),
-      hc_scale.data_ptr<float>(),
-      hc_base.data_ptr<float>(),
+      hc_scale_c.data_ptr<float>(),
+      hc_base_c.data_ptr<float>(),
       reinterpret_cast<bf16*>(out.data_ptr()),
       static_cast<int>(N),
       static_cast<int>(H),
