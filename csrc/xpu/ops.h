@@ -125,6 +125,10 @@ void gdn_attention(
     const bool reorder_input);
 #endif
 
+bool is_bmg_g21(int64_t device_index);
+
+bool is_bmg_g31(int64_t device_index);
+
 bool is_bmg(int64_t device_index);
 
 bool is_pvc(int64_t device_index);
@@ -162,3 +166,5 @@ torch::Tensor fp8_paged_mqa_logits(
     const c10::optional<at::Tensor>& schedule_metadata,
     int64_t max_model_len);
 #endif
+
+std::string get_onednn_version();
