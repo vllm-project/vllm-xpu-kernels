@@ -74,6 +74,14 @@ CUTE_DEVICE void chunk_prepare_kernel(
   const int chunk_range = total_sg_range / num_v_heads;
   int chunk_id = total_sg_id % chunk_range;
   const int v_head_id = total_sg_id / chunk_range;
+  // total_sg_range need not be a multiple of num_v_heads, so v_head_id can reach num_v_heads
+  // (or, when chunk_range < num_v_heads, num_v_heads + 1). Without this guard those sub-groups
+  // write a[v_head_id * total_virtual_seqlen + ...] one or more head-rows past the end of a
+  // (which is [num_v_heads, total_virtual_seqlen]) -> out-of-bounds device write that corrupts the
+  // adjacent allocation. v_head_id is constant across a sub-group, so this early return is taken
+  // uniformly (no divergence across the inclusive_scan_over_group below). All other chunk
+  // sub-kernels already bound v_head_id to [0, num_v_heads).
+  if (v_head_id >= num_v_heads) return;
 
   const float A_log_exp_h = -sycl::exp(A_log[v_head_id]);
   const float dt_bias_h = static_cast<float>(dt_bias[v_head_id]);
