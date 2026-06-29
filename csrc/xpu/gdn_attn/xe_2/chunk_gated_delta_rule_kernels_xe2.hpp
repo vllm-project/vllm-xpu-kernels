@@ -74,6 +74,10 @@ CUTE_DEVICE void chunk_prepare_kernel(
   const int chunk_range = total_sg_range / num_v_heads;
   int chunk_id = total_sg_id % chunk_range;
   const int v_head_id = total_sg_id / chunk_range;
+  // When total_sg_range is not a multiple of num_v_heads, the top sub-group(s)
+  // get v_head_id >= num_v_heads and would write past the end of a[num_v_heads,
+  // ...] (OOB).
+  if (v_head_id >= num_v_heads) return;
 
   const float A_log_exp_h = -sycl::exp(A_log[v_head_id]);
   const float dt_bias_h = static_cast<float>(dt_bias[v_head_id]);
