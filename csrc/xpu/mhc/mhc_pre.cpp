@@ -1000,8 +1000,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
   // =====================================================================
 
   static constexpr int DISPATCH_THRESHOLD = 128;
+  const bool use_tf32 = vllm::xpu::mhc_use_tf32();
 
-  if (M < DISPATCH_THRESHOLD) {
+  if (M < DISPATCH_THRESHOLD || !use_tf32) {
     // --- Small M: vector dot-product path → standalone Stage 2 ---
     auto rms_mixes = at::empty({M, N_gemm}, opts_f32);
 
