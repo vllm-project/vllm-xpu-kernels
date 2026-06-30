@@ -223,7 +223,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mhc_fused_post_pre(
 
   // ---- mhc_pre: GEMM + RMS-norm + sigmoid / Sinkhorn / weighted reduction
   // ----
-  if (N < DISPATCH_THRESHOLD) {
+  const bool use_tf32 = vllm::xpu::mhc_use_tf32();
+  if (N < DISPATCH_THRESHOLD || !use_tf32) {
     // --- Small M: vector dot-product path → standalone Stage 2 ---
     auto rms_mixes = at::empty({M, N_gemm}, opts_f32);
 
