@@ -257,6 +257,14 @@ def test_fp8_gemm_w8a16_per_channel(fp8_dtype, out_dtype, is_nt, is_mbk, batch,
 
     torch.testing.assert_close(output_fp8, output_ref, atol=5e-2, rtol=5e-2)
 
+    # [1, N] scale must use per-channel path, not block quant
+    scale_wei_2d = scale_wei_fp8.t().contiguous()  # [1, N]
+    output_fp8_2d = fp8_gemm_w8a16(input, weight_fp8_t, scale_wei_2d,
+                                   torch.Tensor())
+    output_fp8_2d = output_fp8_2d.transpose(0, 1) if is_mbk else output_fp8_2d
+    torch.testing.assert_close(output_fp8_2d, output_ref, atol=5e-2, rtol=5e-2,
+                               msg="2D scale [1, N]")
+
 
 def _convert_to_mxfp8_with_hp_ref(t):
     # Convert a tensor to mxfp8, returning:
