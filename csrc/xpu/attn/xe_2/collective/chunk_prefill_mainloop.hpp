@@ -67,9 +67,6 @@ using namespace cute;
 
 template <
     class DispatchPolicy_,
-    bool CausalMask_,
-    bool LocalMask_,
-    bool PagedKV_,
     class TiledMMAQK_,  // Tiling for Q*K GEMM
     class TiledMMAPV_,  // Tiling for P*V GEMM
     int VTiles_,        // # of tiles in V dimension
@@ -89,9 +86,6 @@ struct FMHAFwdMainloop {
 
 template <
     int Stages,
-    bool CausalMask_,
-    bool LocalMask_,
-    bool PagedKV_,
     class TiledMMAQK_,
     class TiledMMAPV_,
     int VTiles_,
@@ -103,9 +97,6 @@ template <
     class TiledCopyV_>
 struct FMHAFwdMainloop<
     XeDefault<Stages>,
-    CausalMask_,
-    LocalMask_,
-    PagedKV_,
     TiledMMAQK_,
     TiledMMAPV_,
     VTiles_,
@@ -183,9 +174,6 @@ struct FMHAFwdMainloop<
 
   static constexpr bool Fp8KV =
       is_any_of_v<ElementK, float_e5m2_t, float_e4m3_t>;
-  static constexpr bool CausalMask = CausalMask_;
-  static constexpr bool LocalMask = LocalMask_;
-  static constexpr bool PagedKV = PagedKV_;
 
   // User-facing arguments
   struct Arguments {
@@ -202,6 +190,9 @@ struct FMHAFwdMainloop<
     int local_left, local_right;
     // Physical stride between paged blocks in seq-position units.
     int page_stride_elements;
+    bool is_causal;
+    bool is_local;
+    bool is_paged;
   };
 
   // Kernel-facing parameters
@@ -232,7 +223,10 @@ struct FMHAFwdMainloop<
         args.total_seqlen_kv,
         args.local_left,
         args.local_right,
-        args.page_stride_elements};
+        args.page_stride_elements,
+        args.is_causal,
+        args.is_local,
+        args.is_paged};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -358,8 +352,11 @@ struct FMHAFwdMainloop<
                    (thr_id / intel::sg_size) * sg_tile_q;
 
     // PagedKV
+    bool const is_causal = params.is_causal;
+    bool const is_local = params.is_local;
+    bool const is_paged = params.is_paged;
     int page_idx, next_page_idx = blk_k0;
-    if constexpr (PagedKV) {
+    if (is_paged) {
       next_page_idx = get_paged_idx(blk_k0, idx_b);
     }
 
@@ -399,21 +396,21 @@ struct FMHAFwdMainloop<
       barrier_arrive(ScopeWorkgroup);
 
       bool need_causal = false;
-      if constexpr (CausalMask) {
+      if (is_causal) {
         need_causal = K >= blk_k1_causal;
       }
 
       page_idx = next_page_idx;
       next_page_idx = K + 1;
       // next paged_idx
-      if constexpr (PagedKV) {
+      if (is_paged) {
         next_page_idx = get_paged_idx(next_page_idx, idx_b);
       }
 
       auto tKgK_cache =
-          PagedKV ? tKgK(_, _, _, page_idx, _) : tKgK(_, _, _, K, _);
+          is_paged ? tKgK(_, _, _, page_idx, _) : tKgK(_, _, _, K, _);
       auto tVgV_cache =
-          PagedKV ? tVgV(_, _, _, _, page_idx) : tVgV(_, _, _, _, K);
+          is_paged ? tVgV(_, _, _, _, page_idx) : tVgV(_, _, _, _, K);
 
       /* V prefetch for GEMM 2 */
       prefetch(prefetch_v, pVgV(_, _, _, page_idx));
@@ -432,7 +429,7 @@ struct FMHAFwdMainloop<
       }
 
       /* Causal masking and k remainder masking */
-      if constexpr (CausalMask) {
+      if (is_causal) {
         if (need_causal) {
           constexpr int kTileK = tile_k;
           constexpr int n_reps = kTileK / intel::sg_size;
@@ -466,7 +463,7 @@ struct FMHAFwdMainloop<
         }
       }
       /* Local masking */
-      if constexpr (LocalMask) {
+      if (is_local) {
         const bool need_left = (K < blk_local_l_safe);
         const bool need_right = (K > blk_local_r_safe);
         if (need_left || need_right) {
@@ -571,8 +568,6 @@ struct FMHAFwdMainloop<
 
 template <
     class DispatchPolicy_,
-    bool PagedKV_,
-    bool CausalMask_,
     class TiledMMAQK_,  // Tiling for Q*K GEMM
     class TiledMMAPV_,  // Tiling for P*V GEMM
     int VTiles_,        // # of tiles in V dimension
@@ -581,8 +576,7 @@ template <
     class TensorV_,
     class TiledCopyQ_ = void,  // Optional TiledCopy for loading Q
     class TiledCopyK_ = void,  // Optional TiledCopy for loading K
-    class TiledCopyV_ = void,  // Optional TiledCopy for loading V
-    bool LocalMask_ = false>
+    class TiledCopyV_ = void>  // Optional TiledCopy for loading V
 struct DecodeFwdMainloop {
   static_assert(
       cutlass::detail::dependent_false<DispatchPolicy_>,
@@ -593,8 +587,6 @@ struct DecodeFwdMainloop {
 
 template <
     int Stages,
-    bool PagedKV_,
-    bool CausalMask_,
     class TiledMMAQK_,
     class TiledMMAPV_,
     int VTiles_,
@@ -603,12 +595,9 @@ template <
     class TensorV_,
     class TiledCopyQ_,
     class TiledCopyK_,
-    class TiledCopyV_,
-    bool LocalMask_>
+    class TiledCopyV_>
 struct DecodeFwdMainloop<
     XeDefault<Stages>,
-    PagedKV_,
-    CausalMask_,
     TiledMMAQK_,
     TiledMMAPV_,
     VTiles_,
@@ -617,8 +606,7 @@ struct DecodeFwdMainloop<
     TensorV_,
     TiledCopyQ_,
     TiledCopyK_,
-    TiledCopyV_,
-    LocalMask_> {
+    TiledCopyV_> {
   //
   // Type Aliases
   //
@@ -687,11 +675,8 @@ struct DecodeFwdMainloop<
   // mismatched");
   using ElementA = typename TiledMMAPV::ValTypeD;
 
-  static constexpr bool PagedKV = PagedKV_;
-  static constexpr bool CausalMask = CausalMask_;
   static constexpr bool Fp8KV =
       is_any_of_v<ElementK, float_e5m2_t, float_e4m3_t>;
-  static constexpr bool LocalMask = LocalMask_;
 
   // User-facing arguments
   struct Arguments {
@@ -708,6 +693,9 @@ struct DecodeFwdMainloop<
     int window_size_right;
     // Physical stride between paged blocks in seq-position units
     int page_stride_elements;
+    bool is_causal;
+    bool is_local;
+    bool is_paged;
   };
 
   // Kernel-facing parameters
@@ -738,7 +726,10 @@ struct DecodeFwdMainloop<
         args.total_seqlen_kv,
         args.window_size_left,
         args.window_size_right,
-        args.page_stride_elements};
+        args.page_stride_elements,
+        args.is_causal,
+        args.is_local,
+        args.is_paged};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -850,11 +841,13 @@ struct DecodeFwdMainloop<
     // ------
 
     // PagedKV
+    bool const is_local = params.is_local;
+    bool const is_paged = params.is_paged;
     int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
     int page_stride_tiles = params.page_stride_elements / get<1>(TileShapeQK{});
     int tile_idx = blk_k0;
     int b_offset = idx_b * params.max_pages_per_seq;
-    if constexpr (PagedKV) {
+    if (is_paged) {
       int page_local_idx = tile_idx * get<1>(TileShapeQK{}) / params.page_size;
       int block_idx = params.ptr_page_table[b_offset + page_local_idx];
       tile_idx = block_idx * page_stride_tiles + tile_idx % tiles_per_page;
@@ -898,9 +891,9 @@ struct DecodeFwdMainloop<
       // barrier_arrive(ScopeWorkgroup);
 
       auto tKgK_cache =
-          PagedKV ? tKgK(_, _, _, tile_idx, _) : tKgK(_, _, _, K, _);
+          is_paged ? tKgK(_, _, _, tile_idx, _) : tKgK(_, _, _, K, _);
       auto tVgV_cache =
-          PagedKV ? tVgV(_, _, _, _, tile_idx) : tVgV(_, _, _, _, K);
+          is_paged ? tVgV(_, _, _, _, tile_idx) : tVgV(_, _, _, _, K);
 
       /* GEMM 1: S = K * Q */
       clear(tSrS); /* TODO: fuse w/ initial gemm call */
@@ -939,7 +932,7 @@ struct DecodeFwdMainloop<
       // }
 
       /* Local/sliding window masking */
-      if constexpr (LocalMask) {
+      if (is_local) {
         // For decode, all packed GQA heads share the same KV position
         // (seq_len_kv - 1). Use a fixed decode row for all elements.
         int decode_row = seq_len - 1 - full_tile_offset;
@@ -991,7 +984,7 @@ struct DecodeFwdMainloop<
 
       // next tile_idx
       next_tile_idx = K + 1;
-      if constexpr (PagedKV) {
+      if (is_paged) {
         int next_page_local_idx =
             next_tile_idx * get<1>(TileShapeQK{}) / params.page_size;
         if (next_page_local_idx < params.max_pages_per_seq) {

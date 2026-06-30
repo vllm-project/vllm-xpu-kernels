@@ -2,19 +2,19 @@
 # Chunk Prefill Kernel Configuration
 # =============================================================================
 # This function generates kernel source files based on a configuration file that
-# specifies which (headsize, paged, causal, local, sink, lse) combinations to
-# build.
+# specifies which head sizes to build.
 #
 # CMake Options: VLLM_CHUNK_PREFILL_CONFIG - Path to kernel config file
 # (default: chunk_prefill_full.conf) Config files located in:
-# csrc/xpu/attn/kernel_configs/ chunk_prefill_full.conf    - All 216
-# combinations chunk_prefill_default.conf - Default model configs
+# csrc/xpu/attn/kernel_configs/ chunk_prefill_full.conf    - All policies
+# chunk_prefill_default.conf - Default model configs
 #
 # Config file format: - Lines starting with # are comments - Empty lines are
 # ignored - 'all' keyword builds everything - Each line:
-# headsize[,paged,causal,local,sink,lse] - If boolean flags omitted, all 18
-# valid combinations are generated - LSE constraint: lse=true only valid when
-# paged=false,local=false,sink=false
+# headsize[,paged,causal,local,sink,lse]
+#
+# Only headsize matters now; trailing boolean fields are ignored for backward
+# compatibility.
 #
 # Both standard and b16 policies are generated for each headsize.
 # =============================================================================
@@ -28,8 +28,8 @@ endif()
 # =============================================================================
 # Helper: Parse chunk prefill config file
 # =============================================================================
-function(_chunk_prefill_parse_config CONFIG_FILE OUT_TUPLES OUT_IS_FULL)
-  set(_tuples)
+function(_chunk_prefill_parse_config CONFIG_FILE OUT_HEADS OUT_IS_FULL)
+  set(_heads)
   set(_is_full FALSE)
 
   if(NOT EXISTS "${CONFIG_FILE}")
@@ -50,12 +50,15 @@ function(_chunk_prefill_parse_config CONFIG_FILE OUT_TUPLES OUT_IS_FULL)
       set(_is_full TRUE)
       break()
     endif()
-    string(REPLACE "," "|" _entry "${_line}")
-    list(APPEND _tuples "${_entry}")
+
+    string(REPLACE "," ";" _parts "${_line}")
+    list(GET _parts 0 _headsize)
+    string(STRIP "${_headsize}" _headsize)
+    list(APPEND _heads "${_headsize}")
   endforeach()
 
-  set(${OUT_TUPLES}
-      "${_tuples}"
+  set(${OUT_HEADS}
+      "${_heads}"
       PARENT_SCOPE)
   set(${OUT_IS_FULL}
       ${_is_full}
@@ -65,11 +68,7 @@ endfunction()
 function(fmha_forward_configure FILENAME_SUFFIX)
   set(GEN_KERNEL_SRCS) # output
   set(ENABLED_POLICIES) # track enabled policies
-  set(L_BOOLS "false" "true")
-  set(BOOL_FLAG_false "f")
-  set(BOOL_FLAG_true "t")
 
-  set(headsize_list "64" "96" "128" "192" "256" "512")
   set(policy_list
       "chunk_policy_head64"
       "chunk_policy_head96"
@@ -98,173 +97,52 @@ function(fmha_forward_configure FILENAME_SUFFIX)
   set(b16_policy_256 "chunk_policy_head256_b16")
   set(b16_policy_512 "chunk_policy_head512_b16")
 
-  set(IMPL_KV_T "fp16")
-
   # =============================================================================
   # Parse Configuration File
   # =============================================================================
   message(STATUS "Chunk prefill kernel config: ${VLLM_CHUNK_PREFILL_CONFIG}")
-  _chunk_prefill_parse_config("${VLLM_CHUNK_PREFILL_CONFIG}" CONFIG_TUPLES
+  _chunk_prefill_parse_config("${VLLM_CHUNK_PREFILL_CONFIG}" CONFIG_HEADS
                               CONFIG_IS_FULL)
 
   # =============================================================================
-  # Build the list of (policy, paged, causal, local, sink, lse) tuples
+  # Build the list of policies to generate
   # =============================================================================
-  set(BUILD_TUPLES)
+  set(BUILD_POLICIES)
 
   if(CONFIG_IS_FULL)
-    # Full mode: generate all valid combinations (original behavior)
-    foreach(IMPL_POLICY ${policy_list})
-      foreach(IMPL_KISPAGED ${L_BOOLS})
-        foreach(IMPL_KISCAUSAL ${L_BOOLS})
-          foreach(IMPL_KISLOCAL ${L_BOOLS})
-            foreach(IMPL_KISSINK ${L_BOOLS})
-              # LSE constraint
-              set(LSE_BOOLS "false")
-              if(IMPL_KISPAGED STREQUAL "false"
-                 AND IMPL_KISLOCAL STREQUAL "false"
-                 AND IMPL_KISSINK STREQUAL "false")
-                set(LSE_BOOLS ${L_BOOLS})
-              endif()
-              foreach(IMPL_KISLSE ${LSE_BOOLS})
-                list(
-                  APPEND
-                  BUILD_TUPLES
-                  "${IMPL_POLICY}|${IMPL_KISPAGED}|${IMPL_KISCAUSAL}|${IMPL_KISLOCAL}|${IMPL_KISSINK}|${IMPL_KISLSE}"
-                )
-              endforeach()
-            endforeach()
-          endforeach()
-        endforeach()
-      endforeach()
-    endforeach()
+    set(BUILD_POLICIES ${policy_list})
   else()
-    # Selective mode: only generate entries from config
-    foreach(_entry ${CONFIG_TUPLES})
-      string(REPLACE "|" ";" _parts "${_entry}")
-      list(LENGTH _parts _nparts)
-      if(_nparts LESS 1)
-        message(WARNING "Skipping invalid config entry: ${_entry}")
-        continue()
-      endif()
-      list(GET _parts 0 _headsize)
-
+    foreach(_headsize ${CONFIG_HEADS})
       # Guard against malformed entries (for example, BOM-prefixed comment
       # lines) that would otherwise expand to an empty policy name.
       if("${_headsize}" MATCHES "[^0-9]"
          OR "${std_policy_${_headsize}}" STREQUAL ""
          OR "${b16_policy_${_headsize}}" STREQUAL "")
-        message(WARNING "Skipping invalid config headsize entry: ${_entry}")
+        message(WARNING "Skipping invalid config headsize entry: ${_headsize}")
         continue()
       endif()
 
-      if(_nparts GREATER_EQUAL 6)
-        # Explicit boolean values provided
-        list(GET _parts 1 _paged)
-        list(GET _parts 2 _causal)
-        list(GET _parts 3 _local)
-        list(GET _parts 4 _sink)
-        list(GET _parts 5 _lse)
-
-        # Validate boolean values
-        set(_invalid_bool FALSE)
-        foreach(_v ${_paged} ${_causal} ${_local} ${_sink} ${_lse})
-          if(NOT (_v STREQUAL "true" OR _v STREQUAL "false"))
-            message(WARNING "Skipping invalid config boolean entry: ${_entry}")
-            set(_invalid_bool TRUE)
-            break()
-          endif()
-        endforeach()
-        if(_invalid_bool)
-          continue()
-        endif()
-
-        # Validate LSE constraint
-        if(_lse STREQUAL "true")
-          if(NOT
-             (_paged STREQUAL "false"
-              AND _local STREQUAL "false"
-              AND _sink STREQUAL "false"))
-            message(
-              WARNING
-                "Skipping invalid config: lse=true requires paged=false,local=false,sink=false: ${_entry}"
-            )
-            continue()
-          endif()
-        endif()
-
-        # Generate for both standard and b16 policies
-        list(
-          APPEND
-          BUILD_TUPLES
-          "${std_policy_${_headsize}}|${_paged}|${_causal}|${_local}|${_sink}|${_lse}"
-        )
-        list(
-          APPEND
-          BUILD_TUPLES
-          "${b16_policy_${_headsize}}|${_paged}|${_causal}|${_local}|${_sink}|${_lse}"
-        )
-      else()
-        # No booleans specified: generate all 18 valid combinations
-        foreach(IMPL_KISPAGED ${L_BOOLS})
-          foreach(IMPL_KISCAUSAL ${L_BOOLS})
-            foreach(IMPL_KISLOCAL ${L_BOOLS})
-              foreach(IMPL_KISSINK ${L_BOOLS})
-                set(LSE_BOOLS "false")
-                if(IMPL_KISPAGED STREQUAL "false"
-                   AND IMPL_KISLOCAL STREQUAL "false"
-                   AND IMPL_KISSINK STREQUAL "false")
-                  set(LSE_BOOLS ${L_BOOLS})
-                endif()
-                foreach(IMPL_KISLSE ${LSE_BOOLS})
-                  list(
-                    APPEND
-                    BUILD_TUPLES
-                    "${std_policy_${_headsize}}|${IMPL_KISPAGED}|${IMPL_KISCAUSAL}|${IMPL_KISLOCAL}|${IMPL_KISSINK}|${IMPL_KISLSE}"
-                  )
-                  list(
-                    APPEND
-                    BUILD_TUPLES
-                    "${b16_policy_${_headsize}}|${IMPL_KISPAGED}|${IMPL_KISCAUSAL}|${IMPL_KISLOCAL}|${IMPL_KISSINK}|${IMPL_KISLSE}"
-                  )
-                endforeach()
-              endforeach()
-            endforeach()
-          endforeach()
-        endforeach()
-      endif()
+      list(APPEND BUILD_POLICIES "${std_policy_${_headsize}}")
+      list(APPEND BUILD_POLICIES "${b16_policy_${_headsize}}")
     endforeach()
   endif()
+
+  list(REMOVE_DUPLICATES BUILD_POLICIES)
 
   # =============================================================================
   # Generate Kernel Sources
   # =============================================================================
-  foreach(_tuple ${BUILD_TUPLES})
-    string(REPLACE "|" ";" _tuple_parts "${_tuple}")
-    list(GET _tuple_parts 0 IMPL_POLICY)
-    list(GET _tuple_parts 1 IMPL_KISPAGED)
-    list(GET _tuple_parts 2 IMPL_KISCAUSAL)
-    list(GET _tuple_parts 3 IMPL_KISLOCAL)
-    list(GET _tuple_parts 4 IMPL_KISSINK)
-    list(GET _tuple_parts 5 IMPL_KISLSE)
-
+  foreach(IMPL_POLICY ${BUILD_POLICIES})
     if("${IMPL_POLICY}" STREQUAL "")
       continue()
     endif()
 
-    # Track enabled policies
     list(APPEND ENABLED_POLICIES "${IMPL_POLICY}")
 
-    set(FILE_SUFFIX "${IMPL_POLICY}_")
-    set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISPAGED}}")
-    set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
-    set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
-    set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
-    set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLSE}}")
     configure_file(${FILENAME_SUFFIX}.cpp.in
-                   "${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
+                   "${FILENAME_SUFFIX}_${IMPL_POLICY}.cpp")
     list(APPEND GEN_KERNEL_SRCS
-         "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
+         "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}_${IMPL_POLICY}.cpp")
   endforeach()
 
   # =============================================================================
@@ -297,28 +175,6 @@ function(fmha_forward_configure FILENAME_SUFFIX)
   foreach(_pol ${ENABLED_POLICIES})
     set(CHUNK_ENABLED_POLICY_TRAITS
         "${CHUNK_ENABLED_POLICY_TRAITS}template <>\nstruct is_chunk_policy_enabled<${_pol}> : std::true_type {};\n"
-    )
-  endforeach()
-
-  # Build compile-time policy+bool tuple trait specializations
-  set(CHUNK_ENABLED_TUPLE_TRAITS "")
-  set(ENABLED_TUPLES ${BUILD_TUPLES})
-  list(REMOVE_DUPLICATES ENABLED_TUPLES)
-  foreach(_tuple ${ENABLED_TUPLES})
-    string(REPLACE "|" ";" _tuple_parts "${_tuple}")
-    list(GET _tuple_parts 0 _pol)
-    list(GET _tuple_parts 1 _paged)
-    list(GET _tuple_parts 2 _causal)
-    list(GET _tuple_parts 3 _local)
-    list(GET _tuple_parts 4 _sink)
-    list(GET _tuple_parts 5 _lse)
-
-    if("${_pol}" STREQUAL "")
-      continue()
-    endif()
-
-    set(CHUNK_ENABLED_TUPLE_TRAITS
-        "${CHUNK_ENABLED_TUPLE_TRAITS}template <>\nstruct is_chunk_policy_tuple_enabled<${_pol}, ${_paged}, ${_causal}, ${_local}, ${_sink}, ${_lse}> : std::true_type {};\n"
     )
   endforeach()
 

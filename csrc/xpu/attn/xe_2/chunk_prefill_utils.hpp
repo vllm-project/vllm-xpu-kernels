@@ -9,100 +9,28 @@
 // assume all policies are enabled.
 template <typename Policy>
 struct is_chunk_policy_enabled : std::true_type {};
-template <
-    typename Policy,
-    bool Paged,
-    bool Causal,
-    bool Local,
-    bool Sink,
-    bool Lse>
-struct is_chunk_policy_tuple_enabled : std::true_type {};
 #endif
 
 using namespace cute;
 
-template <typename chunk_policy, bool... Bs>
+template <typename chunk_policy>
 void policy_dispatch_func(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args) {
-  // Pack is expected in order: (Paged, Causal, Local, Sink, SoftmaxLSE).
-  // SoftmaxLSE=true is only supported when Paged=false, Local=false,
-  // and Sink=false; other combos are not instantiated (no TUs generated),
-  // so statically skip the call for those to avoid implicit instantiation
-  // and guarantee the runtime TORCH_CHECK in fmha_xe2.cpp is the only
-  // path that can surface a bad request.
-  constexpr bool flags[] = {Bs...};
-  static_assert(
-      sizeof...(Bs) == 5, "policy_dispatch_func expects 5 bool parameters");
-  constexpr bool Paged = flags[0];
-  constexpr bool Causal = flags[1];
-  constexpr bool Local = flags[2];
-  constexpr bool Sink = flags[3];
-  constexpr bool SoftmaxLSE = flags[4];
-  // Extract head_size from policy at compile time.
   constexpr int _head_sz = cute::size<1>(typename chunk_policy::ShapeOut{});
 
-  if constexpr (SoftmaxLSE && (Paged || Local || Sink)) {
+  if constexpr (!is_chunk_policy_enabled<chunk_policy>::value) {
     TORCH_CHECK(
         false,
-        "Unreachable: softmax_lse is only supported when is_paged=false, "
-        "is_local=false, is_sink=false");
-  } else if constexpr (!is_chunk_policy_enabled<chunk_policy>::value) {
-    TORCH_CHECK(
-        false,
-        "Chunk prefill kernel not compiled for this configuration.\n\n"
+        "Chunk prefill kernel not compiled for this head size.\n\n"
         "Add this line to your chunk_prefill config file "
         "(csrc/xpu/attn/kernel_configs/chunk_prefill_default.conf):\n\n  ",
         _head_sz,
-        ",",
-        (Paged ? "true" : "false"),
-        ",",
-        (Causal ? "true" : "false"),
-        ",",
-        (Local ? "true" : "false"),
-        ",",
-        (Sink ? "true" : "false"),
-        ",",
-        (SoftmaxLSE ? "true" : "false"),
         "\n\nThen rebuild:\n"
         "  VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf pip install "
         ".\n\n"
-        "Or use full config (all combinations, slower build):\n"
-        "  VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf pip install .\n\n"
-        "Available configs: chunk_prefill_full.conf | "
-        "chunk_prefill_default.conf\n"
-        "Config location: csrc/xpu/attn/kernel_configs/\n"
-        "See: KERNEL_CONFIGURATION.md\n\n"
-        "If this is unexpected, please report at:\n"
-        "  https://github.com/vllm-project/vllm-xpu-kernels/issues/364");
-  } else if constexpr (!is_chunk_policy_tuple_enabled<
-                           chunk_policy,
-                           Paged,
-                           Causal,
-                           Local,
-                           Sink,
-                           SoftmaxLSE>::value) {
-    TORCH_CHECK(
-        false,
-        "Chunk prefill kernel tuple not compiled for this configuration.\n\n"
-        "Add this line to your chunk_prefill config file "
-        "(csrc/xpu/attn/kernel_configs/chunk_prefill_default.conf):\n\n  ",
-        _head_sz,
-        ",",
-        (Paged ? "true" : "false"),
-        ",",
-        (Causal ? "true" : "false"),
-        ",",
-        (Local ? "true" : "false"),
-        ",",
-        (Sink ? "true" : "false"),
-        ",",
-        (SoftmaxLSE ? "true" : "false"),
-        "\n\nThen rebuild:\n"
-        "  VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf pip install "
-        ".\n\n"
-        "Or use full config (all combinations, slower build):\n"
+        "Or use full config (all policies, slower build):\n"
         "  VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf pip install .\n\n"
         "Available configs: chunk_prefill_full.conf | "
         "chunk_prefill_default.conf\n"
@@ -111,23 +39,7 @@ void policy_dispatch_func(
         "If this is unexpected, please report at:\n"
         "  https://github.com/vllm-project/vllm-xpu-kernels/issues/364");
   } else {
-    policy_dispatch_impl<chunk_policy, Bs...>(queue, cuQKType, args);
-  }
-}
-
-template <typename chunk_policy, bool... Bs, typename... Ts>
-void policy_dispatch_func(
-    sycl::queue& queue,
-    CutlassQKType& cuQKType,
-    const chunk_prefill_args_t& args,
-    bool b,
-    Ts... ts) {
-  if (b) {
-    policy_dispatch_func<chunk_policy, Bs..., true>(
-        queue, cuQKType, args, ts...);
-  } else {
-    policy_dispatch_func<chunk_policy, Bs..., false>(
-        queue, cuQKType, args, ts...);
+    policy_dispatch_impl<chunk_policy>(queue, cuQKType, args);
   }
 }
 

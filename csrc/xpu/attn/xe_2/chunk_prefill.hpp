@@ -174,6 +174,11 @@ struct KernelLauncher {
          reinterpret_cast<ElementQ*>(args.sm_sink),
          args.softmax_lse,
          args.lse_stride,
+         args.is_paged,
+         args.is_causal,
+         args.is_local,
+         args.is_sink,
+         args.softmax_lse != nullptr,
          static_cast<const bool*>(args.is_prefill)},
         {args.sm_scale,
          args.k_scale,
@@ -184,8 +189,11 @@ struct KernelLauncher {
          args.total_seqlen_k,
          args.window_size_left,
          args.window_size_right,
-         args.page_stride_elements},
-        {},
+         args.page_stride_elements,
+         args.is_causal,
+         args.is_local,
+         args.is_paged},
+        {args.is_sink},
         hw_info};
 
     // Define device-global scratch memory
@@ -239,11 +247,6 @@ template <
     typename SubgroupLayoutQK,
     typename SubgroupLayoutPV_, /* void -> default */
     int PipelineStages,
-    bool Paged = false,
-    bool Causal = false,
-    bool Local = false,
-    bool Sink = false,
-    bool SoftmaxLSE = false,
     typename ElementQ = bfloat16_t,
     typename ElementK = bfloat16_t,
     typename ElementV = bfloat16_t,
@@ -272,7 +275,6 @@ struct FMHAConfig {
   template <class Scheduler>
   static void run(sycl::queue& queue, const chunk_prefill_args_t& args) {
     constexpr bool VarLen = true;
-    // constexpr bool Paged = true;
     cutlass::KernelHardwareInfo hw_info;
 
     using ProblemShapeType = cutlass::fmha::kernel::FMHAProblemShape<VarLen>;
@@ -306,9 +308,6 @@ struct FMHAConfig {
     using MainloopDispatchPolicy = cutlass::fmha::XeDefault<PipelineStages>;
     using CollectiveMainloop = cutlass::fmha::collective::FMHAFwdMainloop<
         MainloopDispatchPolicy,
-        Causal,
-        Local,
-        Paged,
         TiledMMAQK,
         TiledMMAPV,
         VTiles,
@@ -321,7 +320,6 @@ struct FMHAConfig {
 
     // Epilogue
     using CollectiveEpilogue = cutlass::fmha::collective::FMHAFwdEpilogue<
-        Sink,
         CollectiveMainloop,
         TileShapeOutput,
         TensorO,
@@ -331,8 +329,7 @@ struct FMHAConfig {
         ProblemShapeType,
         CollectiveMainloop,
         CollectiveEpilogue,
-        Scheduler,
-        SoftmaxLSE>;
+        Scheduler>;
 
     KernelLauncher<FMHAKernel, VarLen> launcher;
 
@@ -346,13 +343,7 @@ struct FMHAConfig {
   }
 };
 
-template <
-    typename chunk_policy,
-    bool Paged,
-    bool Causal,
-    bool Local,
-    bool Sink,
-    bool SoftmaxLSE>
+template <typename chunk_policy>
 void policy_dispatch_impl(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
@@ -367,11 +358,6 @@ void policy_dispatch_impl(
           typename chunk_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
           half_t,
           half_t,
           half_t,
@@ -384,11 +370,6 @@ void policy_dispatch_impl(
           typename chunk_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
           half_t,
           float_e4m3_t,
           float_e4m3_t,
@@ -401,11 +382,6 @@ void policy_dispatch_impl(
           typename chunk_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
           half_t,
           float_e5m2_t,
           float_e5m2_t,
@@ -420,11 +396,6 @@ void policy_dispatch_impl(
           typename chunk_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
           bfloat16_t,
           bfloat16_t,
           bfloat16_t,
@@ -437,11 +408,6 @@ void policy_dispatch_impl(
           typename chunk_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
           bfloat16_t,
           float_e4m3_t,
           float_e4m3_t,
@@ -454,11 +420,6 @@ void policy_dispatch_impl(
           typename chunk_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Paged,
-          Causal,
-          Local,
-          Sink,
-          SoftmaxLSE,
           bfloat16_t,
           float_e5m2_t,
           float_e5m2_t,
