@@ -30,7 +30,7 @@ static inline float sigmoid(float x) {
 class HcHeadFusedOptKernel {
  public:
   static constexpr int BLOCK_M = 2;
-  static constexpr int VEC_DOT = 4;
+  static constexpr int VEC_DOT = 8;
   static constexpr int VEC_OUT = 8;
   static constexpr int SG_SIZE = 16;
   static constexpr int WG_SIZE = 256;
