@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 import os
 import random
 
@@ -309,8 +310,25 @@ def _assert_conv_intermediates(intermediates, ref_q, ref_k, ref_v, ref_b,
 
     # XE2 prefill layout: gather the valid (non-padded) token rows.
     valid = _nonspec_valid_rows(non_spec_query_start_loc).to(q.device)
-    torch.testing.assert_close(q[valid], ref_q, atol=atol, rtol=rtol)
-    torch.testing.assert_close(k[valid], ref_k, atol=atol, rtol=rtol)
+
+    # The XE2 prefill conv path fuses the downstream l2norm into q/k (and
+    # scales q by 1/sqrt(head_k_dim)); the native (decode) path defers this to
+    # gated_delta_rule and emits the raw conv output. Apply the same
+    # normalization to the reference before comparing against the prefill
+    # kernel output.
+    eps = 1e-6
+    head_k_dim = ref_q.shape[-1]
+    scale = 1.0 / math.sqrt(head_k_dim)
+    ref_q_n = ref_q.to(torch.float32)
+    ref_q_n = ref_q_n * torch.rsqrt(ref_q_n.pow(2).sum(-1, keepdim=True) + eps)
+    ref_q_n = (ref_q_n * scale).to(ref_q.dtype)
+    ref_k_n = ref_k.to(torch.float32)
+    ref_k_n = (ref_k_n *
+               torch.rsqrt(ref_k_n.pow(2).sum(-1, keepdim=True) + eps)).to(
+                   ref_k.dtype)
+
+    torch.testing.assert_close(q[valid], ref_q_n, atol=atol, rtol=rtol)
+    torch.testing.assert_close(k[valid], ref_k_n, atol=atol, rtol=rtol)
     torch.testing.assert_close(v[valid], ref_v, atol=atol, rtol=rtol)
     # b/a are emitted transposed ([heads, padded]) in float32, and this path
     # pre-applies sigmoid to b (a is passthrough).
