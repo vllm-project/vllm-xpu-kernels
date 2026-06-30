@@ -5,6 +5,18 @@ import torch
 
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 
+# Override pytest parameters when enable mini pytest
+MINI_PYTEST_PARAMS = {
+    "default": {
+        "num_tokens,hidden_size": [
+            (1, 4096),
+            (256, 4096),
+            (1, 7168),
+            (256, 7168),
+        ],
+    },
+}
+
 MHC_PRE_CASES = [
     (1, 4096),
     (33, 4096),
@@ -232,7 +244,7 @@ def test_mhc_pre(num_tokens: int, hidden_size: int):
             rtol=1e-2,
         )
     else:
-        # For token numbers >= 2048, we use a looser tolerance because
+        # For token numbers >= 128, we use a looser tolerance because
         # the kernel uses tf32 internally.
         torch.testing.assert_close(post_mix, ref_post_mix, atol=6e-2, rtol=6e-2)
         torch.testing.assert_close(comb_mix, ref_comb_mix, atol=6e-2, rtol=6e-2)
@@ -417,7 +429,7 @@ def test_mhc_fused_post_pre(num_tokens: int, hidden_size: int):
             rtol=2e-2,
         )
     else:
-        # For token numbers >= 2048, mhc_pre uses tf32 DPAS path,
+        # For token numbers >= 128, mhc_pre uses tf32 DPAS path,
         # so we use a looser tolerance.
         torch.testing.assert_close(
             post_mix_cur,
