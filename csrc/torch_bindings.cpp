@@ -77,7 +77,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &fused_add_rms_norm_static_fp8_quant);
 
   // activation ops
-  ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
+  ops.def(
+      "silu_and_mul(Tensor! result, Tensor input, Tensor? valid_rows=None)"
+      " -> ()");
   ops.impl("silu_and_mul", torch::kXPU, &silu_and_mul);
 
   // Fused SiLU + Mul + FP8 Quantization
@@ -109,22 +111,27 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kXPU, &mul_and_silu);
 
-  ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
+  ops.def(
+      "gelu_and_mul(Tensor! out, Tensor input, Tensor? valid_rows=None) -> ()");
   ops.impl("gelu_and_mul", torch::kXPU, &gelu_and_mul);
 
-  ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
+  ops.def(
+      "gelu_tanh_and_mul(Tensor! out, Tensor input, Tensor? valid_rows=None) "
+      "-> ()");
   ops.impl("gelu_tanh_and_mul", torch::kXPU, &gelu_tanh_and_mul);
 
   ops.def("fatrelu_and_mul(Tensor! out, Tensor! input, float threshold) -> ()");
   ops.impl("fatrelu_and_mul", torch::kXPU, &fatrelu_and_mul);
 
-  ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
+  ops.def(
+      "gelu_fast(Tensor! out, Tensor input, Tensor? valid_rows=None) -> ()");
   ops.impl("gelu_fast", torch::kXPU, &gelu_fast);
 
-  ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
+  ops.def("gelu_new(Tensor! out, Tensor input, Tensor? valid_rows=None) -> ()");
   ops.impl("gelu_new", torch::kXPU, &gelu_new);
 
-  ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
+  ops.def(
+      "gelu_quick(Tensor! out, Tensor input, Tensor? valid_rows=None) -> ()");
   ops.impl("gelu_quick", torch::kXPU, &gelu_quick);
 
   // pos_embedding
@@ -185,18 +192,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // swigluoai_and_mul
   ops.def(
-      "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
-      "limit=7.0) "
+      "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, "
+      "float limit=7.0, Tensor? valid_rows=None) "
       "-> ()");
   ops.impl("swigluoai_and_mul", torch::kXPU, &swigluoai_and_mul);
 
   // relu2_no_mul
-  ops.def("relu2_no_mul(Tensor! out, Tensor! input) -> ()");
+  ops.def(
+      "relu2_no_mul(Tensor! out, Tensor! input, Tensor? valid_rows=None) -> "
+      "()");
   ops.impl("relu2_no_mul", torch::kXPU, &relu2_no_mul);
 
   // swiglustep_and_mul
   ops.def(
-      "swiglustep_and_mul(Tensor! out, Tensor input, float limit=7.0) "
+      "swiglustep_and_mul(Tensor! out, Tensor input, float limit=7.0, Tensor? "
+      "valid_rows=None) "
       "-> ()");
   ops.impl("swiglustep_and_mul", torch::kXPU, &swiglustep_and_mul);
 
