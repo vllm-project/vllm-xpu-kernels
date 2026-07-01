@@ -70,60 +70,74 @@ CUTE_DEVICE void chunk_prepare_kernel(
   int total_sg_range = group_range * sg_range;
   int total_sg_id = group_id * sg_range + sg_id;
 
-  int pre_chunks = 0;
-  const int chunk_range = total_sg_range / num_v_heads;
-  int chunk_id = total_sg_id % chunk_range;
-  const int v_head_id = total_sg_id / chunk_range;
+  const int total_chunks = total_virtual_seqlen / chunk_size;
+  const int total_tasks = num_v_heads * total_chunks;
 
-  const float A_log_exp_h = -sycl::exp(A_log[v_head_id]);
-  const float dt_bias_h = static_cast<float>(dt_bias[v_head_id]);
+  for (int task_id = total_sg_id; task_id < total_tasks; task_id += total_sg_range) {
+    const int v_head_id = task_id / total_chunks;
+    const int chunk_id = task_id % total_chunks;
 
-  for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-    const int seq_start_offset = query_start_loc[batch_id];
-    const int seq_end_offset = query_start_loc[batch_id + 1];
-    const int seq_len = seq_end_offset - seq_start_offset;
+    const float A_log_exp_h = -sycl::exp(A_log[v_head_id]);
+    const float dt_bias_h = static_cast<float>(dt_bias[v_head_id]);
 
-    const int current_chunks = (seq_len + chunk_size - 1) / chunk_size;
-    const int cumsum_chunks = pre_chunks + current_chunks;
+    const int chunk_start_offset = chunk_id * chunk_size;
 
-    if (chunk_id >= cumsum_chunks) {
+    int pre_chunks = 0;
+    int current_chunk_size = chunk_size;
+    for (int b_id = 0; b_id < batch_size; ++b_id) {
+      const int seq_start_offset = query_start_loc[b_id];
+      const int seq_end_offset = query_start_loc[b_id + 1];
+      const int seq_len = seq_end_offset - seq_start_offset;
+      const int current_chunks = (seq_len + chunk_size - 1) / chunk_size;
+      const int cumsum_chunks = pre_chunks + current_chunks;
+
+      if (chunk_id < cumsum_chunks) {
+        const int chunk_offset_in_seq = (chunk_id - pre_chunks) * chunk_size;
+        current_chunk_size = seq_len - chunk_offset_in_seq;
+        if (current_chunk_size > chunk_size) {
+          current_chunk_size = chunk_size;
+        }
+        break;
+      }
       pre_chunks = cumsum_chunks;
-      continue;
     }
 
-    while (chunk_id < cumsum_chunks) {
-      const int chunk_start_offset = chunk_id * chunk_size;
-
-      // assume that (chunk_size % sub_group_size == 0)
-      constexpr int local_num = chunk_size / sub_group_size;
-      float g_local[local_num] = {};
-      float g_local_sum = 0.0f;
-      CUTE_UNROLL
-      for (int c = 0; c < local_num; ++c) {
+    // assume that (chunk_size % sub_group_size == 0)
+    constexpr int local_num = chunk_size / sub_group_size;
+    float g_local[local_num] = {};
+    float g_local_sum = 0.0f;
+    CUTE_UNROLL
+    for (int c = 0; c < local_num; ++c) {
+      const int token_offset = sg_local_id * local_num + c;
+      if (token_offset < current_chunk_size) {
         g_local[c] =
-            a[(chunk_start_offset + sg_local_id * local_num + c) +
+            a[(chunk_start_offset + token_offset) +
               v_head_id * total_virtual_seqlen];
+      } else {
+        g_local[c] = 0.0f;
       }
-      CUTE_UNROLL
-      for (int c = 0; c < local_num; ++c) {
+    }
+    CUTE_UNROLL
+    for (int c = 0; c < local_num; ++c) {
+      const int token_offset = sg_local_id * local_num + c;
+      if (token_offset < current_chunk_size) {
         float a_h = g_local[c] + dt_bias_h;
         a_h = act_softplus(a_h) * A_log_exp_h;
         g_local[c] = a_h;
         g_local_sum += a_h;
+      } else {
+        g_local[c] = 0.0f;
       }
-      g_local_sum =
-          sycl::inclusive_scan_over_group(sg, g_local_sum, sycl::plus<float>());
-      CUTE_UNROLL
-      for (int c = local_num - 1; c >= 0; --c) {
-        const_cast<float*>(a)
-            [(chunk_start_offset + sg_local_id * local_num + c) +
-             v_head_id * total_virtual_seqlen] = g_local_sum;
-        g_local_sum -= g_local[c];
-      }
-
-      chunk_id += chunk_range;
     }
-    pre_chunks = cumsum_chunks;
+    g_local_sum =
+        sycl::inclusive_scan_over_group(sg, g_local_sum, sycl::plus<float>());
+    CUTE_UNROLL
+    for (int c = local_num - 1; c >= 0; --c) {
+      const_cast<float*>(a)
+          [(chunk_start_offset + sg_local_id * local_num + c) +
+           v_head_id * total_virtual_seqlen] = g_local_sum;
+      g_local_sum -= g_local[c];
+    }
   }
 }
 
