@@ -74,6 +74,11 @@ struct chunk_prefill_args_t {
   // per-batch mask: true = prefill, false = decode; nullptr = process all
   void* is_prefill = nullptr;
   int page_stride_elements = 0;
+  // When true, dispatch Q-tiles for odd-indexed heads in reverse order.
+  // Targets low-parallelism causal prefill load imbalance. Selects the
+  // XeFHMAIndividualReverseOrderTileScheduler variant; default false keeps
+  // the original XeFHMAIndividualTileScheduler behavior.
+  bool reverse_q_order = false;
 };
 
 template <class FMHAKernel, bool isVarLen>
@@ -341,6 +346,11 @@ struct FMHAConfig {
 
   static void
   kernel_dispatch(sycl::queue& queue, const chunk_prefill_args_t& args) {
+    if (args.reverse_q_order) {
+      return run<
+          cutlass::fmha::kernel::XeFHMAIndividualReverseOrderTileScheduler>(
+          queue, args);
+    }
     return run<cutlass::fmha::kernel::XeFHMAIndividualTileScheduler>(
         queue, args);
   }

@@ -1123,6 +1123,73 @@ def test_varlen_with_cross_layer_paged_kv(
         f"{torch.max(torch.abs(output - ref_output))}"
     torch.xpu.empty_cache()
 
+
+@torch.inference_mode()
+def test_varlen_reverse_odd_heads_env_on_off_equivalence() -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(17)
+
+    query_lens = [96, 64]
+    kv_lens = [512, 384]
+    num_query_heads, num_kv_heads = 2, 1
+    head_size = 128
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=torch.float16)
+    key_cache = torch.randn(sum(kv_lens),
+                            num_kv_heads,
+                            head_size,
+                            dtype=torch.float16)
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32)
+    cu_kv_lens = torch.tensor([0] + kv_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32)
+    scale = head_size**-0.5
+
+    previous_mode = os.getenv("VLLM_XPU_FA_REVERSE_ODD_HEADS")
+    try:
+        os.environ["VLLM_XPU_FA_REVERSE_ODD_HEADS"] = "off"
+        output_off = flash_attn_varlen_func(query,
+                                            key_cache,
+                                            value_cache,
+                                            max_query_len,
+                                            cu_query_lens,
+                                            max_kv_len,
+                                            cu_seqlens_k=cu_kv_lens,
+                                            softmax_scale=scale,
+                                            causal=True,
+                                            block_table=None,
+                                            window_size=(-1, -1),
+                                            s_aux=None)
+
+        os.environ["VLLM_XPU_FA_REVERSE_ODD_HEADS"] = "on"
+        output_on = flash_attn_varlen_func(query,
+                                           key_cache,
+                                           value_cache,
+                                           max_query_len,
+                                           cu_query_lens,
+                                           max_kv_len,
+                                           cu_seqlens_k=cu_kv_lens,
+                                           softmax_scale=scale,
+                                           causal=True,
+                                           block_table=None,
+                                           window_size=(-1, -1),
+                                           s_aux=None)
+    finally:
+        if previous_mode is None:
+            os.environ.pop("VLLM_XPU_FA_REVERSE_ODD_HEADS", None)
+        else:
+            os.environ["VLLM_XPU_FA_REVERSE_ODD_HEADS"] = previous_mode
+
+    torch.testing.assert_close(output_on, output_off, atol=1e-2, rtol=1e-2)
+    torch.xpu.empty_cache()
+
 @pytest.mark.parametrize("seq_lens", [[(1, 523), (1, 37), (1, 2011)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", [64, 128])

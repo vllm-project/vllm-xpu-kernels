@@ -7,6 +7,10 @@
   #include "chunk_prefill_extern.hpp"
 #endif
 
+#include <cctype>
+#include <cstdlib>
+#include <string>
+
 using namespace cute;
 
 void cutlass_chunk_prefill_xe2(
@@ -86,7 +90,7 @@ void cutlass_chunk_prefill_impl(
   // general params
   int batch_size, num_heads_q, num_heads_kv, head_size;
   // additional params
-  int total_seqlen_q, total_seqlen_k;
+  int total_seqlen_q = 0, total_seqlen_k = 0;
   int num_blocks, block_size, max_blocks_per_seq;
   if (is_varlen) {
     // query: [total_seq, num_heads, head_size]
@@ -104,6 +108,8 @@ void cutlass_chunk_prefill_impl(
     head_size = query.size(3);
     max_seqlen_q = query.size(2);
     max_seqlen_k = is_paged ? max_seqlen_q : key_cache.size(2);
+    total_seqlen_q = batch_size * max_seqlen_q;
+    total_seqlen_k = batch_size * max_seqlen_k;
   }
 
   if (is_paged) {
@@ -166,6 +172,53 @@ void cutlass_chunk_prefill_impl(
   // Per-batch prefill/decode mask (nullptr -> process all batches)
   args.is_prefill =
       is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr;
+
+  // Optional alternating reverse Q-tile order for odd heads. Selects the
+  // XeFHMAIndividualReverseOrderTileScheduler variant which mitigates the
+  // causal-prefill load imbalance between head 0 and head 1+ by flipping
+  // the Q-tile dispatch order for odd-indexed heads.
+  //
+  // VLLM_XPU_FA_REVERSE_ODD_HEADS values:
+  //   "0" / "off" / "false"   -> force disabled
+  //   "1" / "on"  / "true"    -> force enabled (debug / perf study)
+  //   unset / "auto"          -> shape-based heuristic (default)
+  //
+  // Heuristic: For GQA/MQA (num_heads_q > num_heads_kv), always enable —
+  // KV is shared across Q-heads so reverse doesn't hurt cache locality.
+  // For MHA (num_heads_q == num_heads_kv), only enable when the GPU is
+  // under-saturated (total_wgs < 4 * sm_count), because MHA has per-head
+  // independent K/V and reversing Q-tile order scatters memory accesses
+  // across the sequence, causing L2 thrashing when the GPU is fully loaded.
+  {
+    std::string mode = "auto";
+    const char* env = std::getenv("VLLM_XPU_FA_REVERSE_ODD_HEADS");
+    if (env != nullptr) {
+      mode.assign(env);
+      for (auto& c : mode) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+    }
+
+    bool reverse;
+    if (mode == "1" || mode == "on" || mode == "true" || mode == "yes") {
+      reverse = true;
+    } else if (
+        mode == "0" || mode == "off" || mode == "false" || mode == "no") {
+      reverse = false;
+    } else {  // "auto" or anything unrecognized
+      bool is_gqa = (num_heads_q > num_heads_kv);
+      int q_tile = (head_size > 96) ? 256 : 128;
+      int n_q_tiles = (total_seqlen_q + q_tile - 1) / q_tile;
+      int total_wgs = n_q_tiles * num_heads_q;
+      int sm_count =
+          cutlass::KernelHardwareInfo::query_device_multiprocessor_count(0);
+      bool gpu_saturated = (total_wgs >= 4 * sm_count);
+      reverse = is_causal && !is_local && !is_sink && num_heads_q >= 2 &&
+                (is_gqa || !gpu_saturated);
+    }
+    args.reverse_q_order = reverse;
+  }
+
   // Extract Q, K, V, O strides from tensors
   if (is_varlen) {
     // Q/O: [total_seq, num_heads, head_size]
