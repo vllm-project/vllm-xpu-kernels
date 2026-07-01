@@ -12,12 +12,6 @@ namespace vllm {
 
 using bf16_t = sycl::ext::oneapi::bfloat16;
 
-static constexpr int HEAD_DIM = 128;
-static constexpr int NOPE_DIM = 64;
-static constexpr int ROPE_DIM = 64;
-static constexpr int HALF_ROPE = 32;
-static constexpr int HALF_BLOCK = 16;
-static constexpr int HEADS_COARSEN = 2;
 static constexpr int SG_SIZE = 16;
 static constexpr float INV_FP8_MAX = 1.0f / 448.0f;
 
@@ -54,8 +48,19 @@ inline uint8_t fp8_cvt(float x) {
   return (uint8_t)(sign | res);
 }
 
+template <int HEAD_DIM_, int ROPE_DIM_, int HEADS_COARSEN_ = 2>
 class deepseek_fused_indexer_q_rope_fp8_kernel {
  public:
+  static constexpr int HEAD_DIM = HEAD_DIM_;
+  static constexpr int ROPE_DIM = ROPE_DIM_;
+  static constexpr int NOPE_DIM = HEAD_DIM - ROPE_DIM;
+  static constexpr int HALF_ROPE = ROPE_DIM / 2;
+  static constexpr int HALF_BLOCK = SG_SIZE;
+  static constexpr int HEADS_COARSEN = HEADS_COARSEN_;
+  static_assert(ROPE_DIM % 2 == 0 && HALF_ROPE >= SG_SIZE,
+                "ROPE_DIM/2 must be >= SG_SIZE");
+  static_assert(NOPE_DIM > 0, "HEAD_DIM must be > ROPE_DIM");
+
   deepseek_fused_indexer_q_rope_fp8_kernel(
       const bf16_t* __restrict__ q,
       const int64_t* __restrict__ positions,
@@ -194,26 +199,29 @@ void deepseek_fused_indexer_q_rope_fp8(
     torch::Tensor& q_fp8,
     torch::Tensor& weights_out) {
   TORCH_CHECK(q.dim() == 3, "q must be [T, H, HEAD_DIM]");
-  TORCH_CHECK(
-      q.size(2) == vllm::HEAD_DIM,
-      "q HEAD_DIM must be ",
-      vllm::HEAD_DIM,
-      ", got ",
-      q.size(2));
 
   const int64_t num_tokens = q.size(0);
   const int64_t num_heads = q.size(1);
+  const int64_t head_dim = q.size(2);
+  const int64_t rope_dim = cos_sin_cache.size(1);
   const int64_t cos_sin_stride = cos_sin_cache.stride(0);
   const float weight_combined =
       static_cast<float>(softmax_scale) * static_cast<float>(head_scale);
 
+  // Dispatch based on (head_dim, rope_dim). Add new cases for future models.
   TORCH_CHECK(
-      num_heads % vllm::HEADS_COARSEN == 0,
-      "num_heads must be divisible by ",
-      vllm::HEADS_COARSEN);
+      head_dim == 128 && rope_dim == 64,
+      "deepseek_fused_indexer_q_rope_fp8: unsupported head_dim=",
+      head_dim,
+      " rope_dim=",
+      rope_dim,
+      ". Supported: head_dim=128, rope_dim=64");
 
-  const int64_t nhg =
-      (num_heads + vllm::HEADS_COARSEN - 1) / vllm::HEADS_COARSEN;
+  TORCH_CHECK(
+      num_heads % 2 == 0,
+      "num_heads must be divisible by 2");
+
+  const int64_t nhg = num_heads / 2;
 
   auto& queue = vllm::xpu::vllmGetQueue();
   queue.submit([&](sycl::handler& cgh) {
@@ -228,7 +236,7 @@ void deepseek_fused_indexer_q_rope_fp8(
         sycl::nd_range<2>(
             {(size_t)num_tokens, (size_t)(nhg * vllm::SG_SIZE)},
             {1, (size_t)vllm::SG_SIZE}),
-        vllm::deepseek_fused_indexer_q_rope_fp8_kernel(
+        vllm::deepseek_fused_indexer_q_rope_fp8_kernel<128, 64, 2>(
             q_ptr,
             pos_ptr,
             cs_ptr,

@@ -151,7 +151,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def("get_onednn_version() -> str");
   xpu_ops.impl("get_onednn_version", &get_onednn_version);
-  
+
   xpu_ops.def(
       "deepseek_fused_indexer_q_rope_fp8(Tensor q, Tensor positions, "
       "Tensor cos_sin_cache, Tensor index_weights, float softmax_scale, "
