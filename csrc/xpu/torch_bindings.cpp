@@ -78,7 +78,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "apply_rotary_emb(Tensor! output, Tensor input,"
       "                 Tensor cos, Tensor sin, bool is_neox) -> ()");
   xpu_ops.impl("apply_rotary_emb", torch::kXPU, &apply_rotary_emb);
-  
+
   // DeepSeek-V4 fused Q-RMSNorm + GPT-J RoPE + KV cache insert.
   // kv_cache_dtype: "bf16" or "fp8_ds_mla"
   xpu_ops.def(

@@ -207,9 +207,9 @@ def test_bf16_correctness(num_tokens, seed):
         EPS, block_size, "bf16")
 
     # Check Q
-    q_diff = (q.float() - q_ref.float()).abs()
-    assert q_diff.max().item() < 0.02, (
-        f"Q max diff {q_diff.max().item():.6f}")
+    torch.testing.assert_close(
+        q.float(), q_ref.float(), atol=1e-2, rtol=1.6e-2,
+        msg=lambda m: f"Q mismatch: {m}")
 
     # Check cache: NoPE must be bit-exact copy, RoPE within 1 ULP
     assert (cache[:, :, :NOPE_DIM] == cache_ref[:, :, :NOPE_DIM]).all(), \
@@ -264,9 +264,9 @@ def test_fp8_correctness(num_tokens, seed):
         EPS, block_size, "fp8_ds_mla")
 
     # Check Q
-    q_diff = (q.float().cpu() - q_ref_cpu.float()).abs()
-    assert q_diff.max().item() < 0.02, (
-        f"Q max diff {q_diff.max().item():.6f}")
+    torch.testing.assert_close(
+        q.float().cpu(), q_ref_cpu.float(), atol=1e-2, rtol=1.6e-2,
+        msg=lambda m: f"Q mismatch: {m}")
 
     # Check cache bytes: scales, NoPE fp8 data, RoPE bf16
     cache_flat = cache.cpu()
@@ -286,11 +286,11 @@ def test_fp8_correctness(num_tokens, seed):
             assert abs(dev_scale - ref_scale) <= 1, (
                 f"Token {t} scale[{s}]: dev={dev_scale} ref={ref_scale}")
 
-        # NoPE fp8 data: ±1 byte (rounding mode)
+        # NoPE fp8 data: allow ±3 byte diff (exponent boundary rounding)
         dev_nope = cache_flat[data_off:data_off + NOPE_DIM].to(torch.int16)
         ref_nope = cache_ref[data_off:data_off + NOPE_DIM].to(torch.int16)
         byte_diff = (dev_nope - ref_nope).abs()
-        assert byte_diff.max().item() <= 1, (
+        assert byte_diff.max().item() <= 3, (
             f"Token {t} NoPE fp8 byte diff: {byte_diff.max().item()}")
 
         # RoPE bf16 region

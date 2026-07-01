@@ -12,14 +12,6 @@ namespace vllm {
 
 using bf16_t = sycl::ext::oneapi::bfloat16;
 
-static constexpr int HEAD_DIM = 512;
-static constexpr int NOPE_DIM = 448;
-static constexpr int ROPE_DIM = 64;
-static constexpr int HALF_ROPE = 32;
-static constexpr int QUANT_BLOCK = 64;
-static constexpr int NUM_QUANT_BLOCKS = NOPE_DIM / QUANT_BLOCK;     // 7
-static constexpr int SCALE_BYTES_PER_TOKEN = NUM_QUANT_BLOCKS + 1;  // 8
-static constexpr int TOKEN_DATA_BYTES = NOPE_DIM + ROPE_DIM * 2;    // 576
 static constexpr float FP8_MAX = 448.0f;
 
 // Ceil to power-of-2 via IEEE754 bit hack; also returns biased exponent.
@@ -57,11 +49,20 @@ inline uint8_t fused_scale_to_fp8(float val, uint32_t scale_exp) {
   return static_cast<uint8_t>((sign << 7) | (result & 0x7Fu));
 }
 
+template <int HEAD_DIM_, int ROPE_DIM_>
 class qnorm_rope_kv_insert_bf16_kernel {
  public:
+  static constexpr int HEAD_DIM = HEAD_DIM_;
+  static constexpr int ROPE_DIM = ROPE_DIM_;
+  static constexpr int NOPE_DIM = HEAD_DIM - ROPE_DIM;
+  static constexpr int HALF_ROPE = ROPE_DIM / 2;
   static constexpr int SG_SIZE = 16;
-  static constexpr int NOPE_ITERS = NOPE_DIM / (4 * SG_SIZE);  // 7
-  static constexpr int ROPE_ITERS = HALF_ROPE / SG_SIZE;       // 2
+  static constexpr int NOPE_ITERS = NOPE_DIM / (4 * SG_SIZE);
+  static constexpr int ROPE_ITERS = HALF_ROPE / SG_SIZE;
+  static_assert(
+      NOPE_DIM % (4 * SG_SIZE) == 0, "NOPE_DIM must be divisible by 4*SG_SIZE");
+  static_assert(
+      HALF_ROPE % SG_SIZE == 0, "ROPE_DIM/2 must be divisible by SG_SIZE");
 
   qnorm_rope_kv_insert_bf16_kernel(
       bf16_t* __restrict__ q,
@@ -228,11 +229,26 @@ class qnorm_rope_kv_insert_bf16_kernel {
   int64_t cache_stride_pos_;
 };
 
+template <int HEAD_DIM_, int ROPE_DIM_>
 class qnorm_rope_kv_insert_fp8_kernel {
  public:
+  static constexpr int HEAD_DIM = HEAD_DIM_;
+  static constexpr int ROPE_DIM = ROPE_DIM_;
+  static constexpr int NOPE_DIM = HEAD_DIM - ROPE_DIM;
+  static constexpr int HALF_ROPE = ROPE_DIM / 2;
   static constexpr int SG_SIZE = 16;
+  static constexpr int QUANT_BLOCK = SG_SIZE * 4;
+  static constexpr int NUM_QUANT_BLOCKS = NOPE_DIM / QUANT_BLOCK;
+  static constexpr int SCALE_BYTES_PER_TOKEN = NUM_QUANT_BLOCKS + 1;
+  static constexpr int TOKEN_DATA_BYTES = NOPE_DIM + ROPE_DIM * 2;
   static constexpr int NOPE_ITERS = NOPE_DIM / (4 * SG_SIZE);
   static constexpr int ROPE_ITERS = HALF_ROPE / SG_SIZE;
+  static_assert(
+      NOPE_DIM % (4 * SG_SIZE) == 0, "NOPE_DIM must be divisible by 4*SG_SIZE");
+  static_assert(
+      HALF_ROPE % SG_SIZE == 0, "ROPE_DIM/2 must be divisible by SG_SIZE");
+  static_assert(
+      NOPE_DIM % QUANT_BLOCK == 0, "NOPE_DIM must be divisible by QUANT_BLOCK");
 
   qnorm_rope_kv_insert_fp8_kernel(
       bf16_t* __restrict__ q,
@@ -318,13 +334,7 @@ class qnorm_rope_kv_insert_fp8_kernel {
       }
     }
 
-    // Q: sub-group reduction for RMSNorm.
-    float rrms = 1.0f;
     auto sg = item.get_sub_group();
-    if (!is_kv) {
-      sum_sq = sycl::reduce_over_group(sg, sum_sq, sycl::plus<float>());
-      rrms = sycl::rsqrt(sum_sq / static_cast<float>(HEAD_DIM) + eps_);
-    }
 
     if (is_kv) {
       // KV path: fp8 block-quantize NoPE + RoPE into paged cache.
@@ -400,7 +410,10 @@ class qnorm_rope_kv_insert_fp8_kernel {
         rope_dst[2 * p + 1] = static_cast<bf16_t>(new_odd);
       }
     } else {
-      // Q path: apply RMSNorm + RoPE in-place.
+      // Q path: sub-group reduction for RMSNorm, then apply in-place.
+      sum_sq = sycl::reduce_over_group(sg, sum_sq, sycl::plus<float>());
+      float rrms = sycl::rsqrt(sum_sq / static_cast<float>(HEAD_DIM) + eps_);
+
       bf16_t* dst =
           q_ + token_idx * q_stride_token_ + slot_idx * q_stride_head_;
       {
@@ -467,19 +480,22 @@ void deepseek_qnorm_rope_kv_insert(
     const std::string& kv_cache_dtype) {
   const int64_t num_tokens = q.size(0);
   const int64_t num_heads_q = q.size(1);
+  const int64_t head_dim = q.size(2);
+  const int64_t rope_dim = cos_sin_cache.size(1);
 
   TORCH_CHECK(
-      q.size(2) == vllm::HEAD_DIM,
-      "q HEAD_DIM must be ",
-      vllm::HEAD_DIM,
-      ", got ",
-      q.size(2));
-  TORCH_CHECK(
-      kv.size(1) == vllm::HEAD_DIM,
-      "kv HEAD_DIM must be ",
-      vllm::HEAD_DIM,
-      ", got ",
+      kv.size(1) == head_dim,
+      "kv head_dim must match q head_dim (",
+      head_dim,
+      "), got ",
       kv.size(1));
+  TORCH_CHECK(
+      head_dim == 512 && rope_dim == 64,
+      "deepseek_qnorm_rope_kv_insert: unsupported head_dim=",
+      head_dim,
+      " rope_dim=",
+      rope_dim,
+      ". Supported: head_dim=512, rope_dim=64");
 
   const int64_t q_stride_token = q.stride(0);
   const int64_t q_stride_head = q.stride(1);
@@ -490,6 +506,7 @@ void deepseek_qnorm_rope_kv_insert(
   sycl::range<3> global(num_tokens, num_heads_q + 1, SG_SIZE);
   sycl::range<3> local(1, 1, SG_SIZE);
 
+  at::DeviceGuard device_guard(q.device());
   auto& q_xpu = vllm::xpu::vllmGetQueue();
 
   TORCH_CHECK(
@@ -498,19 +515,19 @@ void deepseek_qnorm_rope_kv_insert(
       kv_cache_dtype,
       "', expected 'bf16' or 'fp8_ds_mla'");
 
-  if (kv_cache_dtype == "bf16") {
-    const int64_t cache_stride_block = cache.stride(0);
-    q_xpu.submit([&](sycl::handler& cgh) {
-      auto* q_ptr = reinterpret_cast<bf16_t*>(q.data_ptr());
-      auto* kv_ptr = reinterpret_cast<const bf16_t*>(kv.data_ptr());
-      auto* cache_ptr = reinterpret_cast<bf16_t*>(cache.data_ptr());
-      auto* slot_ptr = slot_mapping.data_ptr<int64_t>();
-      auto* pos_ptr = position_ids.data_ptr<int64_t>();
-      auto* cs_ptr = cos_sin_cache.data_ptr<float>();
+  auto* q_ptr = reinterpret_cast<bf16_t*>(q.data_ptr());
+  auto* kv_ptr = reinterpret_cast<const bf16_t*>(kv.data_ptr());
+  auto* slot_ptr = slot_mapping.data_ptr<int64_t>();
+  auto* pos_ptr = position_ids.data_ptr<int64_t>();
+  auto* cs_ptr = cos_sin_cache.data_ptr<float>();
+  const int64_t cache_block_stride = cache.stride(0);
 
+  if (kv_cache_dtype == "bf16") {
+    auto* cache_ptr = reinterpret_cast<bf16_t*>(cache.data_ptr());
+    q_xpu.submit([&](sycl::handler& cgh) {
       cgh.parallel_for(
           sycl::nd_range<3>(global, local),
-          vllm::qnorm_rope_kv_insert_bf16_kernel(
+          vllm::qnorm_rope_kv_insert_bf16_kernel<512, 64>(
               q_ptr,
               kv_ptr,
               cache_ptr,
@@ -524,22 +541,15 @@ void deepseek_qnorm_rope_kv_insert(
               q_stride_token,
               q_stride_head,
               kv_stride_token,
-              cache_stride_block,
+              cache_block_stride,
               cache_stride_pos));
     });
   } else {
-    const int64_t cache_block_stride = cache.stride(0);
+    auto* cache_ptr = reinterpret_cast<uint8_t*>(cache.data_ptr());
     q_xpu.submit([&](sycl::handler& cgh) {
-      auto* q_ptr = reinterpret_cast<bf16_t*>(q.data_ptr());
-      auto* kv_ptr = reinterpret_cast<const bf16_t*>(kv.data_ptr());
-      auto* cache_ptr = reinterpret_cast<uint8_t*>(cache.data_ptr());
-      auto* slot_ptr = slot_mapping.data_ptr<int64_t>();
-      auto* pos_ptr = position_ids.data_ptr<int64_t>();
-      auto* cs_ptr = cos_sin_cache.data_ptr<float>();
-
       cgh.parallel_for(
           sycl::nd_range<3>(global, local),
-          vllm::qnorm_rope_kv_insert_fp8_kernel(
+          vllm::qnorm_rope_kv_insert_fp8_kernel<512, 64>(
               q_ptr,
               kv_ptr,
               cache_ptr,
