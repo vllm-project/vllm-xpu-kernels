@@ -49,7 +49,6 @@ namespace cutlass::fmha::collective {
 using namespace cute;
 
 template <
-    bool Sink_,
     class CollectiveMainloop,  // Attention mainloop
     class TileShapeO_,         // Shape of output tile, may be larger than P*V
                                // GEMM
@@ -76,7 +75,6 @@ class FMHAFwdEpilogue {
   using ElementA = typename FragA::value_type;
 
   // softmax sink, same dtype
-  static constexpr bool Sink = Sink_;
   using ElementSink = typename CollectiveMainloop::TensorQ::element_type;
 
   // Split k-reduced tiles between participating subgroups.
@@ -119,9 +117,10 @@ class FMHAFwdEpilogue {
   using TiledCopyO =
       conditional_t<is_void_v<TiledCopyO_>, DefaultTiledCopyO, TiledCopyO_>;
 
-  // Stateless design -- no arguments or parameters.
-  struct Arguments {};
-  struct Params {};
+  struct Arguments {
+    bool is_sink;
+  };
+  using Params = Arguments;
 
   // Shared memory storage
   // Note sum/max tiles are padded to 16 elements, due to limitations in CuTe
@@ -143,12 +142,13 @@ class FMHAFwdEpilogue {
       SharedStorageNone>;
 
  private:
+  Params params;
   SharedStorage& shared;
 
  public:
   static constexpr Params
   to_underlying_arguments(Arguments const& args, void* /* workspace */) {
-    return {};
+    return {args.is_sink};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -156,7 +156,8 @@ class FMHAFwdEpilogue {
   }
 
   CUTLASS_HOST_DEVICE
-  FMHAFwdEpilogue(Params const&, SharedStorage& shared_) : shared(shared_) {}
+  FMHAFwdEpilogue(Params const& params_, SharedStorage& shared_)
+      : params(params_), shared(shared_) {}
 
   template <typename QVCoord>
   CUTLASS_DEVICE void operator()(
@@ -178,9 +179,10 @@ class FMHAFwdEpilogue {
     if (!active) return;
 
     /* Complete softmax, dividing out sums. */
+    bool const is_sink = params.is_sink;
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < rA_sum.size(); i++) {
-      if constexpr (Sink) {
+      if (is_sink) {
         constexpr double kLog2e = 1.4426950408889634074;
         rA_sum(i) += sycl::native::exp2(
             static_cast<ElementA>(tSink * kLog2e) - tA_max(i));
@@ -346,8 +348,7 @@ template <
     class TensorO_,     // 2D slice of global output tensor
     class TensorLSE_ = void,   // Optional tensor for storing intermediate exp
                                // sums and max logits
-    class TiledCopyO_ = void,  // Optional TiledCopy for loading O
-    bool Sink_ = false>        // Whether to sink softmax into epilogue
+    class TiledCopyO_ = void>  // Optional TiledCopy for loading O
 class DecodeFwdEpilogue {
  public:
   //
@@ -379,7 +380,6 @@ class DecodeFwdEpilogue {
   using ElementA = typename FragA::value_type;
 
   // softmax sink, same dtype
-  static constexpr bool Sink = Sink_;
   using ElementSink = typename CollectiveMainloop::TensorQ::element_type;
 
   // Split k-reduced tiles between participating subgroups.
@@ -422,9 +422,10 @@ class DecodeFwdEpilogue {
   using TiledCopyO =
       conditional_t<is_void_v<TiledCopyO_>, DefaultTiledCopyO, TiledCopyO_>;
 
-  // Stateless design -- no arguments or parameters.
-  struct Arguments {};
-  struct Params {};
+  struct Arguments {
+    bool is_sink;
+  };
+  using Params = Arguments;
 
   // Shared memory storage
   // Note sum/max tiles are padded to 16 elements, due to limitations in CuTe
@@ -446,12 +447,13 @@ class DecodeFwdEpilogue {
       SharedStorageNone>;
 
  private:
+  Params params;
   SharedStorage& shared;
 
  public:
   static constexpr Params
   to_underlying_arguments(Arguments const& args, void* /* workspace */) {
-    return {};
+    return {args.is_sink};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -459,7 +461,8 @@ class DecodeFwdEpilogue {
   }
 
   CUTLASS_HOST_DEVICE
-  DecodeFwdEpilogue(Params const&, SharedStorage& shared_) : shared(shared_) {}
+  DecodeFwdEpilogue(Params const& params_, SharedStorage& shared_)
+      : params(params_), shared(shared_) {}
 
   template <typename QVCoord>
   CUTLASS_DEVICE void operator()(
@@ -532,7 +535,8 @@ class DecodeFwdEpilogue {
     constexpr int q_tile_rows = cute::size<0>(TileShapeO{});
     int q_row = get<0>(blk_qv) * q_tile_rows + thr_id;
     bool row_valid = (thr_id < q_tile_rows) && (q_row < head_group_q);
-    if constexpr (Sink) {
+    bool const is_sink = params.is_sink;
+    if (is_sink) {
       constexpr double kLog2e = 1.4426950408889634074;
       if (idx_kv_split == 0 && sg_id == 0 && row_valid) {
         tA_sum(0) += sycl::native::exp2(

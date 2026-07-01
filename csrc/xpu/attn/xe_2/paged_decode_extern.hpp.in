@@ -19,31 +19,16 @@
 @POLICY_LIST_ENTRIES@
 
 // =============================================================================
-// Automatic extern template declarations for enabled policy combinations
+// Automatic extern template declarations for enabled policies
 // =============================================================================
 
-#define DECLARE_DECODE_DISPATCH_EXTERN(POLICY, CAUSAL, LOCAL, SINK) \
-  extern template void                                              \
-  decode_policy_dispatch_impl<POLICY, CAUSAL, LOCAL, SINK>(         \
-      sycl::queue & queue,                                          \
-      CutlassQKType & cuQKType,                                     \
+#define DECLARE_DECODE_DISPATCH_EXTERN(POLICY) \
+  extern template void                         \
+  decode_policy_dispatch_impl<POLICY>(         \
+      sycl::queue & queue,                     \
+      CutlassQKType & cuQKType,                \
       const paged_decode_args_t& args);
 
-#define DECLARE_FOR_SINK(POLICY, CAUSAL, LOCAL)                \
-  DECLARE_DECODE_DISPATCH_EXTERN(POLICY, CAUSAL, LOCAL, false) \
-  DECLARE_DECODE_DISPATCH_EXTERN(POLICY, CAUSAL, LOCAL, true)
+PAGED_DECODE_POLICY_LIST(DECLARE_DECODE_DISPATCH_EXTERN)
 
-#define DECLARE_FOR_LOCAL(POLICY, CAUSAL) \
-  DECLARE_FOR_SINK(POLICY, CAUSAL, false) \
-  DECLARE_FOR_SINK(POLICY, CAUSAL, true)
-
-#define DECLARE_ALL_BOOL_COMBINATIONS(POLICY) \
-  DECLARE_FOR_LOCAL(POLICY, false)            \
-  DECLARE_FOR_LOCAL(POLICY, true)
-
-PAGED_DECODE_POLICY_LIST(DECLARE_ALL_BOOL_COMBINATIONS)
-
-#undef DECLARE_ALL_BOOL_COMBINATIONS
-#undef DECLARE_FOR_LOCAL
-#undef DECLARE_FOR_SINK
 #undef DECLARE_DECODE_DISPATCH_EXTERN
