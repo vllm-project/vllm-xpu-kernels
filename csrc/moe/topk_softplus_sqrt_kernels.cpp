@@ -1,22 +1,9 @@
-/*
- * Adapted from
- * https://github.com/NVIDIA/TensorRT-LLM/blob/v0.7.1/cpp/tensorrt_llm/kernels/mixtureOfExperts/moe_kernels.cu
- * Copyright (c) 2024, The vLLM team.
- * SPDX-FileCopyrightText: Copyright (c) 1993-2023 NVIDIA CORPORATION &
- * AFFILIATES. All rights reserved. SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * SYCL port: replaces CUDA-specific primitives with SYCL / oneAPI equivalents.
- */
 #include <type_traits>
 #include <cstdint>
 #include <torch/all.h>
 #include <sycl/sycl.hpp>
 #include <sycl/ext/oneapi/bfloat16.hpp>
 #include <ATen/xpu/XPUContext.h>
-// If you're building inside the IPEX / torch-xpu tree, this header gives you
-// at::xpu::getCurrentXPUStream(). Replace with your project's queue accessor
-// if you don't have it.
 
 #include "../utils.h"
 #include "../dispatch_utils.h"
@@ -31,7 +18,6 @@ namespace sycl_ext = sycl::ext::oneapi;
 using bfloat16_t = sycl_ext::bfloat16;
 using half_t = sycl::half;
 
-/// Aligned array type
 template <typename T, int N, int Alignment = sizeof(T) * N>
 struct alignas(Alignment) AlignedArray {
   T data[N];
@@ -48,7 +34,6 @@ static inline float toFloat(T value) {
   }
 }
 
-// Sub-group warp-style sum reduction (full sub-group width).
 template <typename T>
 static inline T warpReduceSum(T val, sycl::sub_group sg) {
   const int sg_size = sg.get_local_range()[0];
@@ -59,19 +44,12 @@ static inline T warpReduceSum(T val, sycl::sub_group sg) {
   return val;
 }
 
-// XOR shuffle restricted to a logical "row width" (power of two, <= sub-group
-// size).
 template <typename T>
 static inline T
 shflXorWidth(sycl::sub_group sg, T val, int mask, int /*width*/) {
-  // For power-of-two widths <= sg size, XOR shuffle yields the same lane layout
-  // as CUDA's __shfl_xor_sync(..., width).
   return sycl::permute_group_by_xor(sg, val, static_cast<unsigned>(mask));
 }
 
-// Sub-group sum reduction restricted to one logical row group.  This is needed
-// when THREADS_PER_ROW < WARP_SIZE_PARAM, e.g. 16 experts where one hardware
-// sub-group contains multiple independent token rows.
 template <typename T>
 static inline T warpReduceSumWidth(T val, sycl::sub_group sg, int width) {
 #pragma unroll
@@ -80,9 +58,6 @@ static inline T warpReduceSumWidth(T val, sycl::sub_group sg, int width) {
   }
   return val;
 }
-
-// =========================== TopK softplus_sqrt kernel
-// ===========================
 
 template <
     int VPT,
@@ -155,10 +130,6 @@ struct TopkGatingSoftplusSqrtKernel {
         ELTS_PER_WARP % ELTS_PER_ROW == 0,
         "ELTS_PER_WARP must be a multiple of ELTS_PER_ROW");
 
-    // CUDA -> SYCL coordinate mapping:
-    //   blockIdx.x  -> item.get_group(0)
-    //   threadIdx.y -> item.get_local_id(1)   (warp id within CTA)
-    //   threadIdx.x -> item.get_local_id(2)   (lane within warp)
     const int block_x = static_cast<int>(item.get_group(0));
     const int tidy = static_cast<int>(item.get_local_id(1));
     const int tidx = static_cast<int>(item.get_local_id(2));
@@ -183,7 +154,6 @@ struct TopkGatingSoftplusSqrtKernel {
 
     float row_chunk[VPT];
 
-    // ----- Load + convert to float -----
     if constexpr (std::is_same_v<InputType, float>) {
       using VecType = AlignedArray<float, ELTS_PER_LDG>;
       VecType* row_chunk_vec_ptr = reinterpret_cast<VecType*>(&row_chunk);
@@ -242,13 +212,7 @@ struct TopkGatingSoftplusSqrtKernel {
 
     sycl::sub_group sg = item.get_sub_group();
 
-    // ---------- Hash MoE path ----------
     if constexpr (USE_HASH) {
-      // Hash MoE does not select top-k by scanning all experts.  The selected
-      // experts are already provided by tid2eid[input_ids[row], :].  Therefore
-      // we only need to compute sqrt(softplus(x)) for those selected experts.
-      // This both fixes source_rows/token_expert_indices and avoids expensive
-      // exp/log/sqrt on every expert in the row.
       const IndType token_id = input_ids[thread_row];
       const IndType* expert_indices_for_token = tid2eid + token_id * k;
 
@@ -280,8 +244,6 @@ struct TopkGatingSoftplusSqrtKernel {
           }
         }
 
-        // Reduce only within the logical row group.  Reducing over the full
-        // hardware sub-group would mix rows when THREADS_PER_ROW < 32.
         const float selected_weight =
             warpReduceSumWidth(selected_weight_lane, sg, THREADS_PER_ROW);
 
@@ -315,7 +277,6 @@ struct TopkGatingSoftplusSqrtKernel {
       return;
     }
 
-    // ---------- Standard top-k path ----------
 #pragma unroll
     for (int ii = 0; ii < VPT; ++ii) {
       float val = row_chunk[ii];
@@ -354,7 +315,6 @@ struct TopkGatingSoftplusSqrtKernel {
         }
       }
 
-      // Argmax butterfly reduction across THREADS_PER_ROW lanes.
 #pragma unroll
       for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
         float other_max = shflXorWidth(sg, max_val, mask, THREADS_PER_ROW);
@@ -474,7 +434,6 @@ void topkGatingSoftplusSqrtLauncherHelper(
   const int num_warps = (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
   const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
-  // nd_range layout: (gridX, warpsPerCTA, warpSize)
   sycl::range<3> local_range(1, WARPS_PER_TB, WARP_SIZE_PARAM);
   sycl::range<3> global_range(
       static_cast<size_t>(num_blocks), WARPS_PER_TB, WARP_SIZE_PARAM);
@@ -509,7 +468,6 @@ void topkGatingSoftplusSqrtLauncherHelper(
   })
 }
 
-// XPU only (Intel GPU). 32-wide sub-group.
 #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES) \
   topkGatingSoftplusSqrtLauncherHelper<                            \
       NUM_EXPERTS,                                                 \
@@ -706,10 +664,10 @@ void dispatch_topk_softplus_sqrt_launch(
 }
 
 void topk_softplus_sqrt(
-    torch::Tensor& topk_weights,          // [num_tokens, topk]
-    torch::Tensor& topk_indices,          // [num_tokens, topk]
-    torch::Tensor& token_expert_indices,  // [num_tokens, topk]
-    torch::Tensor& gating_output,         // [num_tokens, num_experts]
+  torch::Tensor& topk_weights,
+  torch::Tensor& topk_indices,
+  torch::Tensor& token_expert_indices,
+  torch::Tensor& gating_output,
     bool renormalize,
     double routed_scaling_factor,
     const c10::optional<torch::Tensor>& correction_bias,
