@@ -79,6 +79,35 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "                 Tensor cos, Tensor sin, bool is_neox) -> ()");
   xpu_ops.impl("apply_rotary_emb", torch::kXPU, &apply_rotary_emb);
 
+#ifdef VLLM_MHC_ENABLED
+  xpu_ops.def(
+      "mhc_pre(Tensor residual, Tensor fn, Tensor hc_scale, Tensor hc_base,"
+      "        float rms_eps, float hc_pre_eps, float hc_sinkhorn_eps,"
+      "        float hc_post_mult_value, int sinkhorn_repeat)"
+      "        -> (Tensor, Tensor, Tensor)");
+  xpu_ops.impl("mhc_pre", torch::kXPU, &mhc_pre);
+
+  xpu_ops.def(
+      "mhc_post(Tensor x, Tensor residual, Tensor post_layer_mix,"
+      "         Tensor comb_res_mix) -> Tensor");
+  xpu_ops.impl("mhc_post", torch::kXPU, &mhc_post);
+
+  xpu_ops.def(
+      "hc_head_fused(Tensor hs_flat, Tensor fn, Tensor hc_scale,"
+      "              Tensor hc_base, Tensor! out, float rms_eps,"
+      "              float hc_eps) -> ()");
+  xpu_ops.impl("hc_head_fused", torch::kXPU, &hc_head_fused);
+
+  xpu_ops.def(
+      "mhc_fused_post_pre(Tensor x, Tensor residual, Tensor post_layer_mix,"
+      "                   Tensor comb_res_mix, Tensor fn, Tensor hc_scale,"
+      "                   Tensor hc_base, float rms_eps, float hc_pre_eps,"
+      "                   float hc_sinkhorn_eps, float hc_post_mult_value,"
+      "                   int sinkhorn_repeat)"
+      "                   -> (Tensor, Tensor, Tensor, Tensor)");
+  xpu_ops.impl("mhc_fused_post_pre", torch::kXPU, &mhc_fused_post_pre);
+#endif
+
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
       "indices, float scale) -> ()");

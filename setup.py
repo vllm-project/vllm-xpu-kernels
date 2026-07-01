@@ -558,6 +558,9 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
         if _is_enabled("MQA_LOGITS_KERNELS_ENABLED"):
             additional_libraries["mqa_logits_kernels_xe_2"] = (
                 "/csrc/xpu/mqa_logits/xe_2")
+        if _is_enabled("MHC_KERNELS_ENABLED"):
+            additional_libraries["mhc_kernels_xe_2"] = (
+                "/csrc/xpu/mhc/xe_2")
         if _is_enabled("MOE_KERNELS_ENABLED"):
             additional_libraries["grouped_gemm_xe_2"] = (
                 "/csrc/xpu/grouped_gemm/xe_2")

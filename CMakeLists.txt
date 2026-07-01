@@ -72,6 +72,8 @@ option(MOE_KERNELS_ENABLED
        "Build MoE kernels (_moe_C extension + grouped_gemm TLA)" ON)
 option(GDN_KERNELS_ENABLED "Build GDN attention kernels (gdn_attn TLA)" ON)
 option(MQA_LOGITS_KERNELS_ENABLED "Build MQA logits kernels" ON)
+option(MHC_KERNELS_ENABLED
+       "Build MHC (Manifold-Constrained Hyper-Connections) kernels" ON)
 option(XPU_SPECIFIC_KERNELS_ENABLED
        "Build XPU-specific kernels (_xpu_C extension)" ON)
 option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
@@ -141,6 +143,7 @@ message(STATUS "  FA2_KERNELS_ENABLED          = ${FA2_KERNELS_ENABLED}")
 message(STATUS "  MOE_KERNELS_ENABLED          = ${MOE_KERNELS_ENABLED}")
 message(STATUS "  GDN_KERNELS_ENABLED          = ${GDN_KERNELS_ENABLED}")
 message(STATUS "  MQA_LOGITS_KERNELS_ENABLED   = ${MQA_LOGITS_KERNELS_ENABLED}")
+message(STATUS "  MHC_KERNELS_ENABLED          = ${MHC_KERNELS_ENABLED}")
 message(
   STATUS "  XPU_SPECIFIC_KERNELS_ENABLED = ${XPU_SPECIFIC_KERNELS_ENABLED}")
 message(STATUS "  XPUMEM_ALLOCATOR_ENABLED     = ${XPUMEM_ALLOCATOR_ENABLED}")
@@ -394,6 +397,7 @@ set(ATTN_KERNEL_LIB_NAME "")
 set(GROUPED_GEMM_LIB_NAME "")
 set(GDN_ATTN_LIB_NAME "")
 set(MQA_LOGITS_LIB_NAME "")
+set(MHC_LIB_NAME "")
 
 if(BUILD_SYCL_TLA_KERNELS)
 
@@ -433,6 +437,10 @@ if(BUILD_SYCL_TLA_KERNELS)
       add_subdirectory(csrc/xpu/mqa_logits/xe_2)
       list(APPEND MQA_LOGITS_LIB_NAME "mqa_logits_kernels_xe_2")
     endif()
+    if(MHC_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/mhc/xe_2)
+      list(APPEND MHC_LIB_NAME "mhc_kernels_xe_2")
+    endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
@@ -449,6 +457,9 @@ if(GDN_KERNELS_ENABLED)
 endif()
 if(MQA_LOGITS_KERNELS_ENABLED)
   list(APPEND VLLM_GPU_COMPILE_FLAGS -DVLLM_MQA_LOGITS_ENABLED)
+endif()
+if(MHC_KERNELS_ENABLED)
+  list(APPEND VLLM_GPU_COMPILE_FLAGS -DVLLM_MHC_ENABLED)
 endif()
 
 # define vLLM XPU cmake variables
@@ -657,7 +668,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     INCLUDE_DIRECTORIES
     ${VLLM_XPU_INCLUDE_DIR}
     LIBRARIES
-    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME};${MQA_LOGITS_LIB_NAME}
+    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME};${MQA_LOGITS_LIB_NAME};${MHC_LIB_NAME}
     USE_SABI
     3
     WITH_SOABI)
