@@ -220,6 +220,74 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
 
 
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e5m2, torch.float8_e4m3fn],
+                         ids=format_tc)
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_xe_grouped_gemm_block_fp8(m, n, k, e, topk, dtype, fp8_dtype,
+                                   has_bias):
+    seed_everything(7)
+    block_size = 128
+    if n % block_size != 0 or k % block_size != 0:
+        pytest.skip("block fp8 requires N and K divisible by 128")
+    num_experts = e
+    total_m = m * topk
+    num_k_blocks = k // block_size
+    num_n_blocks = n // block_size
+    # input
+    input_A = torch.randn((total_m, k), dtype=dtype,
+                          device=DEVICE).contiguous()
+    ref_A = input_A
+    # weight: fp8 [num_experts, K, N]
+    input_B_fp8 = torch.randn(
+        (num_experts, k, n), dtype=dtype, device=DEVICE).to(fp8_dtype)
+    # 128x128 block scales [num_experts, K // 128, N // 128]
+    random_exponents = torch.randint(
+        -3, 4, (num_experts, num_k_blocks, num_n_blocks), device=DEVICE)
+    scale_B = torch.pow(2.0, random_exponents.float()).contiguous()
+
+    if has_bias:
+        bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE) * 100
+    else:
+        bias = None
+
+    # output offset
+    num_rows_per_expert = torch.zeros(num_experts,
+                                      device=DEVICE,
+                                      dtype=torch.int32)
+    init_rows_for_experts(m, topk, num_rows_per_expert)
+    output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
+
+    cutlass_grouped_gemm_xe2(input_A, input_B_fp8, scale_B, bias, output,
+                             num_rows_per_expert, n, k, num_experts)
+    # ref gg
+    ref = []
+    pre_token_sum = 0
+    for i in range(num_experts):
+        cur_token_num = num_rows_per_expert[i]
+        if cur_token_num == 0:
+            continue
+        # mma uses fp32 as calculate dtype
+        # so here use fp32 to avoid accuracy error
+        input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(
+            torch.float32)
+        scale_full = scale_B[i].repeat_interleave(
+            block_size, dim=0).repeat_interleave(block_size, dim=1)
+        weight = input_B_fp8[i].to(torch.float32) * scale_full
+        expert_output_fp32 = input @ weight
+        if has_bias:
+            expert_output_fp32 += bias[i]
+        ref.append(expert_output_fp32.to(dtype))
+        pre_token_sum += cur_token_num
+    ref = torch.cat(ref, dim=0)
+
+    torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-1)
+
+
 def dequantize_uint4(qweight, scales, group_size):
     import numpy as np
     k = qweight.shape[1] * 2

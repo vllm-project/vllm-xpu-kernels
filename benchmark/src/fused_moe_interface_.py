@@ -28,6 +28,7 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
                                 is_fp8=False,
                                 is_int4=False,
                                 is_mxfp4=False,
+                                is_block_fp8=False,
                                 start_event_remap=None,
                                 end_event_remap=None,
                                 start_event_gemm1=None,
@@ -107,7 +108,7 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
                                dtype=hidden_states.dtype,
                                device=hidden_states.device)
 
-    if not is_fp8 and not is_int4 and not is_mxfp4:
+    if not is_fp8 and not is_int4 and not is_mxfp4 and not is_block_fp8:
         gemm1_scales = None
         gemm2_scales = None
     else:
@@ -172,7 +173,8 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
         K=hidden_size,
         num_experts=num_experts,
         is_B_int4=is_int4,
-        is_B_mxfp4=is_mxfp4)
+        is_B_mxfp4=is_mxfp4,
+        is_B_fp8block=is_block_fp8)
     if end_event_gemm1 is not None:
         end_event_gemm1.record()
     active_experts1 = (rows_per_expert > 0).sum().item()
@@ -212,7 +214,8 @@ def xpu_fused_moe_CalKernelTime(hidden_states,
         K=inter_size,
         num_experts=num_experts,
         is_B_int4=is_int4,
-        is_B_mxfp4=is_mxfp4)
+        is_B_mxfp4=is_mxfp4,
+        is_B_fp8block=is_block_fp8)
 
     if end_event_gemm2 is not None:
         end_event_gemm2.record()
