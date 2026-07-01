@@ -23,8 +23,8 @@ def _is_env_enabled(env_name: str, default: str = "0") -> bool:
     return value in ("1", "ON", "TRUE", "YES", "Y")
 
 
-def _should_use_ref_fused_moe(is_mxfp8: bool) -> bool:
-    if is_mxfp8:
+def _should_use_ref_fused_moe(is_mxfp8: bool, is_block_fp8: bool) -> bool:  
+    if is_mxfp8 or is_block_fp8:
         return True
     return _is_env_enabled(REF_FUSED_MOE_ENV)
 
@@ -42,6 +42,22 @@ def _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8):
         return "fp8"
     else:
         return "bf16"
+
+def _get_weights_dtype(weight, scales):
+    weight_dtype = weight.dtype
+    is_fp8 = weight_dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    is_int4 = weight_dtype == torch.uint8
+    is_mxfp4 = weight_dtype == torch.float4_e2m1fn_x2
+    is_mxfp8 = (is_fp8
+                and scales is not None
+                and scales.dtype == torch.uint8) 
+    is_block_fp8 = (is_fp8 
+                    and scales is not None
+                    and scales.dtype == torch.float32
+                    and scales.ndim == 3)
+    is_fp8 = is_fp8 and not is_mxfp8 and not is_block_fp8
+
+    return is_fp8, is_int4, is_mxfp4, is_mxfp8, is_block_fp8
 
 
 def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
@@ -64,8 +80,7 @@ def cutlass_grouped_gemm(input_A, input_B, bias, output, expert_token_count, n,
 
 
 def cutlass_grouped_gemm_xe2(input_A, input_B, scales, bias, output,
-                             num_rows_per_expert, n, k, num_experts, is_B_int4,
-                             is_B_mxfp4):
+                             num_rows_per_expert, n, k, num_experts):
     torch.ops._xpu_C.cutlass_grouped_gemm_interface(
         ptr_A=input_A,
         ptr_B=input_B,
@@ -75,9 +90,7 @@ def cutlass_grouped_gemm_xe2(input_A, input_B, scales, bias, output,
         rows_per_expert=num_rows_per_expert,
         N=n,
         K=k,
-        num_experts=num_experts,
-        is_B_int4=is_B_int4,
-        is_B_mxfp4=is_B_mxfp4)
+        num_experts=num_experts)
 
 
 def ceilDiv(a, b):
@@ -153,13 +166,16 @@ class XpuFusedMoe:
         ep_rank=0,
         ep_size=1,
         expert_map=None,
-        is_fp8=False,
-        is_int4=False,
-        is_mxfp4=False,
-        is_mxfp8=False,
-        is_block_fp8=False,
         gemm1_clamp_limit: Optional[float]=None,
     ):
+        assert w13.is_contiguous() and w2.is_contiguous()
+
+        (is_fp8, 
+         is_int4, 
+         is_mxfp4, 
+         is_mxfp8, 
+         is_block_fp8) = _get_weights_dtype(w13, w13_scales)
+
         # 4bits support [E, N, K]
         # other types [E, K, N]
         if not is_int4 and not is_mxfp4:
@@ -167,12 +183,10 @@ class XpuFusedMoe:
         else:
             self.inter_size = w13.shape[-2] // 2
 
-        assert w13.is_contiguous() and w2.is_contiguous()
-
         # FIXME: move this to vllm
         if is_int4 and not hasattr(w13, 'xpu_fused_moe'):
-            w13_tmp = torch.empty_like(w13)
-            w2_tmp = torch.empty_like(w2)
+            w13_tmp = torch.empty_like(w13).to(torch.int8)
+            w2_tmp = torch.empty_like(w2).to(torch.int8)
             for i in range(num_experts):
                 w13_tmp[i] = implement_zp(w13[i])
                 w2_tmp[i] = implement_zp(w2[i])
@@ -185,7 +199,11 @@ class XpuFusedMoe:
         self.w13 = w13
         self.w2 = w2
 
-        if not is_fp8 and not is_int4 and not is_mxfp4 and not is_block_fp8:
+        if (not is_fp8 
+            and not is_int4
+            and not is_mxfp4
+            and not is_block_fp8
+            and not is_mxfp8):
             self.gemm1_scales = None
             self.gemm2_scales = None
         else:
@@ -209,7 +227,7 @@ class XpuFusedMoe:
         self.gemm1_clamp_limit = gemm1_clamp_limit
         self.recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
                                    is_block_fp8)
-        self._use_ref = _should_use_ref_fused_moe(is_mxfp8)
+        self._use_ref = _should_use_ref_fused_moe(is_mxfp8, is_block_fp8)
         if self.activation == "silu":
             self.act_func = torch.ops._C.silu_and_mul
         elif self.activation == "gelu":
@@ -338,9 +356,7 @@ class XpuFusedMoe:
             rows_per_expert=rows_per_expert,
             N=2 * self.inter_size,
             K=hidden_size,
-            num_experts=self.num_experts,
-            is_B_int4=self.is_int4,
-            is_B_mxfp4=self.is_mxfp4)
+            num_experts=self.num_experts)
 
         # Apply swiglu_limit clamping before activation
         if self.gemm1_clamp_limit is not None and self.gemm1_clamp_limit > 0:
@@ -370,9 +386,7 @@ class XpuFusedMoe:
             rows_per_expert=rows_per_expert,
             N=hidden_size,
             K=self.inter_size * self.inter_size_scale,
-            num_experts=self.num_experts,
-            is_B_int4=self.is_int4,
-            is_B_mxfp4=self.is_mxfp4)
+            num_experts=self.num_experts)
 
         torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
                                     unpermuted_row_to_permuted_row,

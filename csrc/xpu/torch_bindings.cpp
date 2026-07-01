@@ -45,7 +45,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor "
       "ptr_D, Tensor "
       "rows_per_expert, int N, int K, int "
-      "num_experts, bool is_B_int4, bool is_B_mxfp4) -> "
+      "num_experts) -> "
       "Tensor");
   xpu_ops.impl(
       "cutlass_grouped_gemm_interface",

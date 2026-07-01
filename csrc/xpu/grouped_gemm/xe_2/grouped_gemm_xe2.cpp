@@ -11,9 +11,7 @@ torch::Tensor cutlass_grouped_gemm_xe2(
     torch::Tensor rows_per_expert,
     int64_t N,
     int64_t K,
-    int64_t num_experts,
-    bool is_B_int4,
-    bool is_B_mxfp4) {
+    int64_t num_experts) {
   return MoE::cutlass_grouped_gemm_xe2_impl(
       ptr_A,
       ptr_B,
@@ -23,7 +21,5 @@ torch::Tensor cutlass_grouped_gemm_xe2(
       rows_per_expert,
       N,
       K,
-      num_experts,
-      is_B_int4,
-      is_B_mxfp4);
+      num_experts);
 }
