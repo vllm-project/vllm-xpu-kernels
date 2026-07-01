@@ -91,7 +91,7 @@ void apply_rotary_emb(
     bool is_neox);
 
 torch::Tensor deepseek_inv_rope_bf16(
-    const torch::Tensor& o,
+    const torch::Tensor& attn_output,
     const torch::Tensor& positions,
     const torch::Tensor& cos_sin_cache,
     int64_t n_groups,
@@ -100,7 +100,7 @@ torch::Tensor deepseek_inv_rope_bf16(
     int64_t rope_dim);
 
 std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
-    const torch::Tensor& o,
+    const torch::Tensor& attn_output,
     const torch::Tensor& positions,
     const torch::Tensor& cos_sin_cache,
     int64_t n_groups,

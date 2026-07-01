@@ -124,7 +124,7 @@ class deepseek_inv_rope_bf16_kernel {
  *
  * Applies inverse RoPE rotation and regroups heads into group-major layout.
  *
- * @param o             Attention output [num_tokens, num_heads, head_dim] bf16
+ * @param attn_output   Attention output [num_tokens, num_heads, head_dim] bf16
  * @param positions     Token positions [num_tokens] int64
  * @param cos_sin_cache Precomputed [max_pos, rope_dim] float32 (cos||sin)
  * @param n_groups      Number of head groups
@@ -134,7 +134,7 @@ class deepseek_inv_rope_bf16_kernel {
  * @return Output tensor [num_tokens, n_groups, heads_per_group * head_dim] bf16
  */
 torch::Tensor deepseek_inv_rope_bf16(
-    const torch::Tensor& o,
+    const torch::Tensor& attn_output,
     const torch::Tensor& positions,
     const torch::Tensor& cos_sin_cache,
     int64_t n_groups,
@@ -144,6 +144,7 @@ torch::Tensor deepseek_inv_rope_bf16(
   using bf16_t = sycl::ext::oneapi::bfloat16;
   constexpr int SG_SIZE = vllm::deepseek_inv_rope_bf16_kernel::SG_SIZE;
 
+  const auto& o = attn_output;
   TORCH_CHECK(o.dim() == 3, "o must be 3D [num_tokens, num_heads, head_dim]");
   TORCH_CHECK(o.scalar_type() == torch::kBFloat16, "o must be bfloat16");
   TORCH_CHECK(
