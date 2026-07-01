@@ -10,6 +10,8 @@ variants are compiled.
 | `paged_decode_full.conf` | 384 | Paged decode — all combinations |
 | `paged_decode_default.conf` | ~17 | Paged decode — Llama, Qwen, DeepSeek MLA, Falcon |
 
+Sparse MLA configs are located at `csrc/xpu/flash_mla/kernel_configs/`.
+
 For config file format, usage examples, model-specific guidance, and
 troubleshooting, see **[KERNEL_CONFIGURATION.md](../../../../KERNEL_CONFIGURATION.md)**
 at the repository root.

@@ -1,3 +1,11 @@
+#pragma once
+
+#include <optional>
+#include <tuple>
+#include <vector>
+
+#include <ATen/ATen.h>
+#include <sycl/sycl.hpp>
 
 void cutlass_chunk_prefill_interface(
     sycl::queue& queue,

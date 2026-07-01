@@ -190,6 +190,7 @@ class cmake_build_ext(build_ext):
             "VLLM_XPU_ENABLE_XE_DEFAULT",
             "BASIC_KERNELS_ENABLED",
             "FA2_KERNELS_ENABLED",
+            "SPARSE_MLA_KERNELS_ENABLED",
             "MOE_KERNELS_ENABLED",
             "GDN_KERNELS_ENABLED",
             "MQA_LOGITS_KERNELS_ENABLED",
@@ -213,6 +214,13 @@ class cmake_build_ext(build_ext):
         if _chunk_prefill_config:
             cmake_args.append(
                 '-DVLLM_CHUNK_PREFILL_CONFIG={}'.format(_chunk_prefill_config))
+
+        # Forward sparse MLA kernel config if set via environment variable.
+        # Example: VLLM_SPARSE_MLA_CONFIG=sparse_mla_default pip install .
+        _sparse_mla_config = os.environ.get("VLLM_SPARSE_MLA_CONFIG", "")
+        if _sparse_mla_config:
+            cmake_args.append(
+                '-DVLLM_SPARSE_MLA_CONFIG={}'.format(_sparse_mla_config))
 
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
@@ -571,6 +579,9 @@ if _build_custom_ops():
         ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
     if _is_enabled("FA2_KERNELS_ENABLED"):
         ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fa2_C"))
+    if _is_enabled("SPARSE_MLA_KERNELS_ENABLED"):
+        ext_modules.append(
+            CMakeExtension(name="vllm_xpu_kernels._vllm_sparse_mla_C"))
     if _is_enabled("MOE_KERNELS_ENABLED"):
         ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
     if _is_enabled("XPU_SPECIFIC_KERNELS_ENABLED"):

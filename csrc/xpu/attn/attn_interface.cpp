@@ -1,10 +1,14 @@
-#include "csrc/utils.h"
+#include "utils.h"
 #include "attn_interface.h"
 
-#ifdef VLLM_XPU_ENABLE_XE2
-  #include "csrc/xpu/attn/xe_2/fmha_xe2.h"
-  #include "csrc/xpu/attn/xe_2/paged_decode_xe2.h"
+#ifdef VLLM_FA2_ATTN_ENABLED
+  #ifdef VLLM_XPU_ENABLE_XE2
+    #include "csrc/xpu/attn/xe_2/fmha_xe2.h"
+    #include "csrc/xpu/attn/xe_2/paged_decode_xe2.h"
+  #endif
 #endif
+
+#ifdef VLLM_FA2_ATTN_ENABLED
 
 void cutlass_chunk_prefill_interface(
     sycl::queue& queue,
@@ -31,7 +35,7 @@ void cutlass_chunk_prefill_interface(
     std::optional<at::Tensor>& softmax_lse,
     std::optional<const at::Tensor>& is_prefill) {
   if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
-#ifdef VLLM_XPU_ENABLE_XE2
+  #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel (also used as WA for XE3/XE3P)
     cutlass_chunk_prefill_xe2(
         queue,
@@ -57,9 +61,9 @@ void cutlass_chunk_prefill_interface(
         is_sink,
         softmax_lse,
         is_prefill);
-#else
+  #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
-#endif
+  #endif
   } else {
     TORCH_CHECK(false, "Only XE2/XE3 cutlass kernel is supported currently.");
   }
@@ -96,7 +100,7 @@ void cutlass_paged_decode_interface(
     std::optional<at::Tensor>& splits_per_seq,
     std::optional<at::Tensor>& work_list) {
   if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
-#ifdef VLLM_XPU_ENABLE_XE2
+  #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel (also used as WA for XE3/XE3P)
     cutlass_paged_decode_xe2(
         queue,
@@ -127,10 +131,12 @@ void cutlass_paged_decode_interface(
         is_prefill,
         splits_per_seq,
         work_list);
-#else
+  #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
-#endif
+  #endif
   } else {
     TORCH_CHECK(false, "Only XE2/XE3 cutlass kernel is supported currently.");
   }
 }
+
+#endif

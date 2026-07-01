@@ -2,11 +2,16 @@
 
 #include "core/registration.h"
 #include "xpu/attn/attn_interface.h"
+#include "xpu/flash_mla/mla_interface.h"
 #include "xpu/attn/paged_kv_utils.h"
 #include "utils.h"
 #include <torch/all.h>
 
+#define FLASH_NAMESPACE vllm::xpu::flash_attn
+
 namespace FLASH_NAMESPACE {
+
+#ifdef VLLM_FA2_ATTN_ENABLED
 
 inline int get_num_splits(
     const sycl::queue& queue,
@@ -434,9 +439,13 @@ std::vector<at::Tensor> mha_varlen_fwd(
     return {out, softmax_lse};
   }
 }
+
+#endif
+
 }  // namespace FLASH_NAMESPACE
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
+#ifdef VLLM_FA2_ATTN_ENABLED
   ops.def(
       "varlen_fwd(Tensor q, Tensor k, Tensor v, Tensor!? out, Tensor "
       "cu_seqlens_q, "
@@ -453,6 +462,30 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "varlen_fwd",
       torch::kXPU,
       make_pytorch_shim(&FLASH_NAMESPACE::mha_varlen_fwd));
+#endif
+
+#ifdef VLLM_SPARSE_MLA_ENABLED
+  ops.def(
+      "mla_sparse_prefill_fwd(Tensor q, Tensor kv, Tensor indices, float "
+      "sm_scale, int d_v, Tensor? attn_sink, Tensor? topk_length, Tensor? "
+      "output, bool return_softmax_lse) -> Tensor[]");
+  ops.impl(
+      "mla_sparse_prefill_fwd",
+      torch::kXPU,
+      make_pytorch_shim(&flash_mla_sparse_attn_prefill_interface));
+
+  ops.def(
+      "mla_sparse_decode_fp8_fwd(Tensor q, Tensor kv, Tensor indices, Tensor? "
+      "topk_length, Tensor? attn_sink, Tensor? out, Tensor? "
+      "tile_scheduler_metadata, Tensor? num_splits, Tensor? extra_kv, Tensor? "
+      "extra_indices, Tensor? extra_topk_length, int d_v, "
+      "float sm_scale, bool return_softmax_lse) -> (Tensor, "
+      "Tensor?)");
+  ops.impl(
+      "mla_sparse_decode_fp8_fwd",
+      torch::kXPU,
+      make_pytorch_shim(&flash_mla_sparse_attn_decode_interface));
+#endif
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

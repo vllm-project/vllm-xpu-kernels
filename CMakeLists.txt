@@ -68,6 +68,8 @@ option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
 option(BASIC_KERNELS_ENABLED "Build basic kernels (_C extension)" ON)
 option(FA2_KERNELS_ENABLED
        "Build Flash Attention 2 kernels (_vllm_fa2_C extension)" ON)
+option(SPARSE_MLA_KERNELS_ENABLED
+       "Build sparse MLA kernels into _vllm_sparse_mla_C extension" ON)
 option(MOE_KERNELS_ENABLED
        "Build MoE kernels (_moe_C extension + grouped_gemm TLA)" ON)
 option(GDN_KERNELS_ENABLED "Build GDN attention kernels (gdn_attn TLA)" ON)
@@ -130,6 +132,47 @@ if(NOT VLLM_CHUNK_PREFILL_CONFIG OR "${VLLM_CHUNK_PREFILL_CONFIG}" STREQUAL "")
   )
 endif()
 
+# KERNEL CONFIGURATION — controls which sparse MLA kernel variants are compiled
+# for the standalone sparse MLA extension.
+set(VLLM_SPARSE_MLA_CONFIG
+    ""
+    CACHE
+      STRING
+      "Sparse MLA kernel config selector (empty=all, or filename/path to .conf)"
+)
+
+# Resolve shorthand config names to full paths
+if(VLLM_SPARSE_MLA_CONFIG
+   AND NOT "${VLLM_SPARSE_MLA_CONFIG}" STREQUAL "all"
+   AND NOT IS_ABSOLUTE "${VLLM_SPARSE_MLA_CONFIG}")
+  if(NOT VLLM_SPARSE_MLA_CONFIG MATCHES "\\.conf$")
+    set(VLLM_SPARSE_MLA_CONFIG "${VLLM_SPARSE_MLA_CONFIG}.conf")
+  endif()
+  set(VLLM_SPARSE_MLA_CONFIG
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/flash_mla/kernel_configs/${VLLM_SPARSE_MLA_CONFIG}"
+  )
+endif()
+
+# Default sparse MLA preset if not specified: compile all sparse templates.
+if(NOT VLLM_SPARSE_MLA_CONFIG OR "${VLLM_SPARSE_MLA_CONFIG}" STREQUAL "")
+  set(VLLM_SPARSE_MLA_CONFIG "all")
+endif()
+
+# Compatibility fallback: setup/build scripts may still pass
+# -DVLLM_SPARSE_MLA_CONFIG=sparse_mla_full.conf.
+if(VLLM_SPARSE_MLA_CONFIG
+   AND NOT "${VLLM_SPARSE_MLA_CONFIG}" STREQUAL "all"
+   AND NOT EXISTS "${VLLM_SPARSE_MLA_CONFIG}")
+  get_filename_component(_sparse_cfg_name "${VLLM_SPARSE_MLA_CONFIG}" NAME)
+  if(_sparse_cfg_name STREQUAL "sparse_mla_full.conf")
+    message(
+      WARNING
+        "Sparse MLA config '${VLLM_SPARSE_MLA_CONFIG}' not found; falling back to built-in preset 'all'."
+    )
+    set(VLLM_SPARSE_MLA_CONFIG "all")
+  endif()
+endif()
+
 message(STATUS "Kernel build configuration:")
 message(STATUS "  ONEDNN_GIT_REPO              = ${ONEDNN_GIT_REPO}")
 message(STATUS "  ONEDNN_GIT_TAG               = ${ONEDNN_GIT_TAG}")
@@ -138,6 +181,7 @@ message(STATUS "  VLLM_XPU_ENABLE_XE2          = ${VLLM_XPU_ENABLE_XE2}")
 message(STATUS "  VLLM_XPU_ENABLE_XE_DEFAULT   = ${VLLM_XPU_ENABLE_XE_DEFAULT}")
 message(STATUS "  BASIC_KERNELS_ENABLED        = ${BASIC_KERNELS_ENABLED}")
 message(STATUS "  FA2_KERNELS_ENABLED          = ${FA2_KERNELS_ENABLED}")
+message(STATUS "  SPARSE_MLA_KERNELS_ENABLED   = ${SPARSE_MLA_KERNELS_ENABLED}")
 message(STATUS "  MOE_KERNELS_ENABLED          = ${MOE_KERNELS_ENABLED}")
 message(STATUS "  GDN_KERNELS_ENABLED          = ${GDN_KERNELS_ENABLED}")
 message(STATUS "  MQA_LOGITS_KERNELS_ENABLED   = ${MQA_LOGITS_KERNELS_ENABLED}")
@@ -146,6 +190,7 @@ message(
 message(STATUS "  XPUMEM_ALLOCATOR_ENABLED     = ${XPUMEM_ALLOCATOR_ENABLED}")
 message(STATUS "  VLLM_PAGED_DECODE_CONFIG     = ${VLLM_PAGED_DECODE_CONFIG}")
 message(STATUS "  VLLM_CHUNK_PREFILL_CONFIG    = ${VLLM_CHUNK_PREFILL_CONFIG}")
+message(STATUS "  VLLM_SPARSE_MLA_CONFIG       = ${VLLM_SPARSE_MLA_CONFIG}")
 message(STATUS "")
 
 #
@@ -574,8 +619,12 @@ if(FA2_KERNELS_ENABLED AND NOT ATTN_KERNEL_LIB_NAME)
 endif()
 if(FA2_KERNELS_ENABLED)
   message(STATUS "Enabling fa2 extension.")
-  file(GLOB FA2_GEN_SRCS "csrc/flash_attn/*.cpp"
-       "csrc/xpu/attn/attn_interface.cpp")
+  file(GLOB FA2_GEN_SRCS "csrc/flash_attn/*.cpp")
+  list(APPEND FA2_GEN_SRCS "csrc/xpu/attn/attn_interface.cpp")
+  set(FA2_INCLUDE_DIRS ${VLLM_XPU_INCLUDE_DIR})
+
+  set(FA2_COMPILE_FLAGS ${VLLM_GPU_COMPILE_FLAGS})
+  list(APPEND FA2_COMPILE_FLAGS "-DVLLM_FA2_ATTN_ENABLED")
 
   define_gpu_extension_target(
     _vllm_fa2_C
@@ -586,17 +635,63 @@ if(FA2_KERNELS_ENABLED)
     SOURCES
     ${FA2_GEN_SRCS}
     COMPILE_FLAGS
-    ${VLLM_GPU_COMPILE_FLAGS}
+    ${FA2_COMPILE_FLAGS}
     LINK_FLAGS
     ${VLLM_GPU_LINK_FLAGS}
     ARCHITECTURES
     ${VLLM_GPU_ARCHES}
     INCLUDE_DIRECTORIES
-    ${VLLM_XPU_INCLUDE_DIR}
+    ${FA2_INCLUDE_DIRS}
     USE_SABI
     3
     LIBRARIES
     ${ATTN_KERNEL_LIB_NAME}
+    WITH_SOABI)
+endif()
+
+if(SPARSE_MLA_KERNELS_ENABLED)
+  if(NOT BUILD_SYCL_TLA_KERNELS)
+    message(
+      FATAL_ERROR
+        "SPARSE_MLA_KERNELS_ENABLED requires BUILD_SYCL_TLA_KERNELS=ON "
+        "to provide CUTLASS/SYCL-TLA headers.")
+  endif()
+
+  message(STATUS "Enabling sparse MLA extension.")
+  set(SPARSE_MLA_GEN_SRCS
+      "csrc/flash_attn/flash_api.cpp" "csrc/xpu/flash_mla/mla_interface.cpp"
+      "csrc/xpu/flash_mla/sparse_mla_fwd.cpp")
+  set(SPARSE_MLA_INCLUDE_DIRS ${VLLM_XPU_INCLUDE_DIR} ${SYCL_TLA_INCLUDE_DIRS})
+  set(SPARSE_MLA_COMPILE_FLAGS ${VLLM_GPU_COMPILE_FLAGS})
+  list(APPEND SPARSE_MLA_COMPILE_FLAGS ${VLLM_CUTLASS_FLAGS})
+
+  include(
+    "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/flash_mla/sparse_mla_configure.cmake")
+  sparse_mla_configure(SPARSE_MLA_TEMPLATE_SRCS SPARSE_MLA_COMPILE_DEFINES)
+  list(APPEND SPARSE_MLA_GEN_SRCS ${SPARSE_MLA_TEMPLATE_SRCS})
+  list(APPEND SPARSE_MLA_COMPILE_FLAGS "-DVLLM_SPARSE_MLA_ENABLED")
+  foreach(_def ${SPARSE_MLA_COMPILE_DEFINES})
+    list(APPEND SPARSE_MLA_COMPILE_FLAGS "-D${_def}")
+  endforeach()
+
+  define_gpu_extension_target(
+    _vllm_sparse_mla_C
+    DESTINATION
+    vllm_xpu_kernels
+    LANGUAGE
+    ${VLLM_GPU_LANG}
+    SOURCES
+    ${SPARSE_MLA_GEN_SRCS}
+    COMPILE_FLAGS
+    ${SPARSE_MLA_COMPILE_FLAGS}
+    LINK_FLAGS
+    ${VLLM_GPU_LINK_FLAGS}
+    ARCHITECTURES
+    ${VLLM_GPU_ARCHES}
+    INCLUDE_DIRECTORIES
+    ${SPARSE_MLA_INCLUDE_DIRS}
+    USE_SABI
+    3
     WITH_SOABI)
 endif()
 
