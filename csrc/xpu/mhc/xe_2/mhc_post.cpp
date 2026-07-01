@@ -103,7 +103,7 @@ class MhcPostOptKernel {
 
 }  // namespace
 
-sycl::event launch_mhc_post_opt(
+void launch_mhc_post_opt(
     sycl::queue& q,
     const float* __restrict comb_res_mix,
     const bf16* __restrict residual,
@@ -122,17 +122,6 @@ sycl::event launch_mhc_post_opt(
   const auto sycl_block = compat::dim3(1, WG_SIZE, 1);
   const auto sycl_grid = compat::dim3(static_cast<unsigned int>(num_wgs), 1, 1);
 
-#if !defined(SYCL_EXT_ONEAPI_WORK_GROUP_SCRATCH_MEMORY)
-  using namespace compat::experimental;
-  auto event = launch<cutlass::device_kernel<MhcPostOptKernel>>(
-      launch_policy{
-          sycl_grid,
-          sycl_block,
-          local_mem_size{static_cast<std::size_t>(0)},
-          kernel_properties{sycl_exp::sub_group_size<16>}},
-      q,
-      params);
-#else
   compat::experimental::launch_properties launch_props{
       sycl::ext::oneapi::experimental::work_group_scratch_size(0),
   };
@@ -140,12 +129,9 @@ sycl::event launch_mhc_post_opt(
       sycl::ext::oneapi::experimental::sub_group_size<16>};
   compat::experimental::launch_policy policy{
       sycl_grid, sycl_block, launch_props, kernel_props};
-  auto event = compat::experimental::
+  compat::experimental::
       launch<cutlass::device_kernel<MhcPostOptKernel>, MhcPostOptKernel>(
           policy, q, params);
-#endif
-
-  return event;
 }
 
 at::Tensor mhc_post(

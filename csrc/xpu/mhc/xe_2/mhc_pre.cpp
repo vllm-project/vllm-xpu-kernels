@@ -449,7 +449,7 @@ class MhcPreSplitKGemmFunctor {
 // Grid: 1 WG per token, 256 threads per WG.
 // ===========================================================================
 
-sycl::event launch_mhc_pre_fused_reduce_stage2(
+void launch_mhc_pre_fused_reduce_stage2(
     sycl::queue& q,
     const float* ws_c,      // [n_splits * M_padded, HC3] fp32
     const float* ws_sqr,    // [n_splits * M_padded] fp32
@@ -484,7 +484,7 @@ sycl::event launch_mhc_pre_fused_reduce_stage2(
   sycl::range<1> global(static_cast<size_t>(num_tokens) * WG_THREADS);
   sycl::range<1> local(WG_THREADS);
 
-  return q.submit([&](sycl::handler& h) {
+  q.submit([&](sycl::handler& h) {
     // SLM layout:
     //   [0 .. HC3]           → mixes_slm: 25 floats (24 mixes + 1 rms_coeff)
     //   [HC3+1 .. HC3+1 + MAX_SPLITS*HC3_PLUS1 - 1] → reduce_buf
@@ -638,7 +638,7 @@ sycl::event launch_mhc_pre_fused_reduce_stage2(
   });
 }
 
-sycl::event launch_mhc_pre_stage1_vector(
+void launch_mhc_pre_stage1_vector(
     sycl::queue& q,
     const bf16* residual,
     const float* fn,
@@ -672,17 +672,6 @@ sycl::event launch_mhc_pre_stage1_vector(
   const auto sycl_block = compat::dim3(1, WG_SIZE, 1);
   const auto sycl_grid = compat::dim3(static_cast<unsigned int>(num_wgs), 1, 1);
 
-#if !defined(SYCL_EXT_ONEAPI_WORK_GROUP_SCRATCH_MEMORY)
-  using namespace compat::experimental;
-  auto event = launch<cutlass::device_kernel<MhcPreStage1VectorFunctor>>(
-      launch_policy{
-          sycl_grid,
-          sycl_block,
-          local_mem_size{static_cast<std::size_t>(smem_size)},
-          kernel_properties{sycl_exp::sub_group_size<16>}},
-      q,
-      params);
-#else
   compat::experimental::launch_properties launch_props{
       sycl::ext::oneapi::experimental::work_group_scratch_size(smem_size),
   };
@@ -690,15 +679,12 @@ sycl::event launch_mhc_pre_stage1_vector(
       sycl::ext::oneapi::experimental::sub_group_size<16>};
   compat::experimental::launch_policy policy{
       sycl_grid, sycl_block, launch_props, kernel_props};
-  auto event = compat::experimental::launch<
+  compat::experimental::launch<
       cutlass::device_kernel<MhcPreStage1VectorFunctor>,
       MhcPreStage1VectorFunctor>(policy, q, params);
-#endif
-
-  return event;
 }
 
-sycl::event launch_mhc_pre_stage2(
+void launch_mhc_pre_stage2(
     sycl::queue& q,
     const float* rms_mixes,
     const bf16* residual,
@@ -724,7 +710,7 @@ sycl::event launch_mhc_pre_stage2(
   sycl::range<1> global(static_cast<size_t>(num_tokens) * WG_THREADS);
   sycl::range<1> local(WG_THREADS);
 
-  return q.submit([&](sycl::handler& h) {
+  q.submit([&](sycl::handler& h) {
     sycl::local_accessor<float, 1> mixes_slm(HC3, h);
 
     h.parallel_for<MhcPreStage2>(
@@ -891,23 +877,6 @@ void launch_mhc_pre_splitk_gemm(
   const auto sycl_block = compat::dim3(1, block_x, 1);
   const auto sycl_grid = compat::dim3(grid_x, grid_y, grid_z);
 
-#if !defined(SYCL_EXT_ONEAPI_WORK_GROUP_SCRATCH_MEMORY)
-  using namespace compat::experimental;
-  launch<cutlass::device_kernel<MhcPreSplitKGemmFunctor<
-      decltype(A_cute),
-      decltype(B_cute),
-      decltype(WS_cute),
-      TiledMMA_t>>>(
-      launch_policy{
-          sycl_grid,
-          sycl_block,
-          local_mem_size{static_cast<std::size_t>(0)},
-          kernel_properties{
-              sycl_exp::sub_group_size<16>,
-              sycl::ext::intel::experimental::grf_size<256>}},
-      queue,
-      params);
-#else
   compat::experimental::launch_properties launch_props{
       sycl::ext::oneapi::experimental::work_group_scratch_size(0),
   };
@@ -927,7 +896,6 @@ void launch_mhc_pre_splitk_gemm(
           decltype(B_cute),
           decltype(WS_cute),
           TiledMMA_t>>(policy, queue, params);
-#endif
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
@@ -969,16 +937,16 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
 
   auto outer_shape = residual_c.sizes().slice(0, residual_c.dim() - 2).vec();
   auto residual_flat = residual_c.view({-1, HC, H});
-  const int64_t N = residual_flat.size(0);
+  const int64_t num_tokens = residual_flat.size(0);
 
   auto opts_f32 = residual_c.options().dtype(at::kFloat);
   auto opts_bf16 = residual_c.options().dtype(at::kBFloat16);
 
-  auto post_mix = at::empty({N, HC}, opts_f32);
-  auto comb_mix = at::empty({N, HC2}, opts_f32);
-  auto layer_input = at::empty({N, H}, opts_bf16);
+  auto post_mix = at::empty({num_tokens, HC}, opts_f32);
+  auto comb_mix = at::empty({num_tokens, HC2}, opts_f32);
+  auto layer_input = at::empty({num_tokens, H}, opts_bf16);
 
-  if (N == 0) {
+  if (num_tokens == 0) {
     std::vector<int64_t> ps = outer_shape;
     ps.push_back(HC);
     ps.push_back(1);
@@ -991,9 +959,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
   }
 
   auto& queue = vllm::xpu::vllmGetQueue();
-  const int M = static_cast<int>(N);
-  const int K = static_cast<int>(HC * H);
-  const int N_gemm = static_cast<int>(HC3);
+  const int M_GEMM = static_cast<int>(num_tokens);
+  const int K_GEMM = static_cast<int>(HC * H);
+  const int N_GEMM = static_cast<int>(HC3);
+  (void)K_GEMM;
 
   // =====================================================================
   // Dispatch: vector path for small M, split-K DPAS for large M
@@ -1002,16 +971,16 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
   static constexpr int DISPATCH_THRESHOLD = 128;
   const bool use_tf32 = vllm::xpu::mhc_use_tf32();
 
-  if (M < DISPATCH_THRESHOLD || !use_tf32) {
+  if (M_GEMM < DISPATCH_THRESHOLD || !use_tf32) {
     // --- Small M: vector dot-product path → standalone Stage 2 ---
-    auto rms_mixes = at::empty({M, N_gemm}, opts_f32);
+    auto rms_mixes = at::empty({M_GEMM, N_GEMM}, opts_f32);
 
     launch_mhc_pre_stage1_vector(
         queue,
         reinterpret_cast<const bf16*>(residual_flat.data_ptr()),
         fn_c.data_ptr<float>(),
         rms_mixes.data_ptr<float>(),
-        M,
+        M_GEMM,
         static_cast<int>(H),
         static_cast<float>(rms_eps));
 
@@ -1024,7 +993,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
         post_mix.data_ptr<float>(),
         comb_mix.data_ptr<float>(),
         reinterpret_cast<bf16*>(layer_input.data_ptr()),
-        static_cast<int>(N),
+        static_cast<int>(num_tokens),
         static_cast<int>(H),
         static_cast<float>(hc_pre_eps),
         static_cast<float>(hc_sinkhorn_eps),
@@ -1032,9 +1001,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
         static_cast<int>(sinkhorn_repeat));
   } else {
     // --- Large M: Split-K DPAS GEMM → Fused Reduce+Stage2 ---
-    auto [n_splits, M_padded, K_val, N_g] =
-        mhc_pre_splitk_params(M, static_cast<int>(H));
-    auto workspace_c = at::empty({n_splits * M_padded, N_g}, opts_f32);
+    auto [n_splits, M_padded, K_GEMM_val, N_GEMM_val] =
+        mhc_pre_splitk_params(M_GEMM, static_cast<int>(H));
+    auto workspace_c = at::empty({n_splits * M_padded, N_GEMM_val}, opts_f32);
     auto workspace_sqr = at::empty({n_splits * M_padded}, opts_f32);
 
     launch_mhc_pre_splitk_gemm(
@@ -1043,7 +1012,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
         fn_c.data_ptr<float>(),
         workspace_c.data_ptr<float>(),
         workspace_sqr.data_ptr<float>(),
-        M,
+        M_GEMM,
         static_cast<int>(H),
         n_splits,
         M_padded);
@@ -1058,11 +1027,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
         post_mix.data_ptr<float>(),
         comb_mix.data_ptr<float>(),
         reinterpret_cast<bf16*>(layer_input.data_ptr()),
-        M,
+        M_GEMM,
         static_cast<int>(H),
         n_splits,
         M_padded,
-        K_val,
+        K_GEMM_val,
         static_cast<float>(rms_eps),
         static_cast<float>(hc_pre_eps),
         static_cast<float>(hc_sinkhorn_eps),

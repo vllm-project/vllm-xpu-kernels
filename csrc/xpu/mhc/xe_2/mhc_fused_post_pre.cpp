@@ -35,7 +35,7 @@ static constexpr int DISPATCH_THRESHOLD = 128;
 // ---- extern declarations for launch functions (defined in sibling TUs) ----
 
 // from mhc_post.cpp
-extern sycl::event launch_mhc_post_opt(
+extern void launch_mhc_post_opt(
     sycl::queue& q,
     const float* comb_res_mix,
     const bf16* residual,
@@ -46,7 +46,7 @@ extern sycl::event launch_mhc_post_opt(
     int H);
 
 // from mhc_pre.cpp
-extern sycl::event launch_mhc_pre_stage1_vector(
+extern void launch_mhc_pre_stage1_vector(
     sycl::queue& q,
     const bf16* residual,
     const float* fn,
@@ -68,7 +68,7 @@ extern void launch_mhc_pre_splitk_gemm(
     int n_splits,
     int M_padded);
 
-extern sycl::event launch_mhc_pre_fused_reduce_stage2(
+extern void launch_mhc_pre_fused_reduce_stage2(
     sycl::queue& q,
     const float* ws_c,
     const float* ws_sqr,
@@ -89,7 +89,7 @@ extern sycl::event launch_mhc_pre_fused_reduce_stage2(
     float hc_post_mult_value,
     int sinkhorn_repeat);
 
-extern sycl::event launch_mhc_pre_stage2(
+extern void launch_mhc_pre_stage2(
     sycl::queue& q,
     const float* rms_mixes,
     const bf16* residual,
