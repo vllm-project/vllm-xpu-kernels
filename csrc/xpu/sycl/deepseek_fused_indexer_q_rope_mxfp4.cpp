@@ -12,13 +12,6 @@ namespace vllm {
 
 using bf16_t = sycl::ext::oneapi::bfloat16;
 
-static constexpr int HEAD_DIM = 128;
-static constexpr int NOPE_DIM = 64;
-static constexpr int ROPE_DIM = 64;
-static constexpr int HALF_ROPE = 32;
-static constexpr int HALF_BLOCK = 16;
-static constexpr int NUM_BLOCKS = 4;  // HEAD_DIM / MXFP4_BLOCK_SIZE
-static constexpr int HEADS_COARSEN = 4;
 static constexpr int SG_SIZE = 16;
 static constexpr float FP4_MAX = 6.0f;
 static constexpr float INV_FP4_MAX = 1.0f / 6.0f;
@@ -55,8 +48,21 @@ inline uint8_t quant_pair(float x0, float x1, float inv_s) {
   return ((encode_fp4(q1) & 0xFu) << 4) | (encode_fp4(q0) & 0xFu);
 }
 
+template <int HEAD_DIM_, int ROPE_DIM_, int HEADS_COARSEN_ = 4>
 class deepseek_fused_indexer_q_rope_mxfp4_kernel {
  public:
+  static constexpr int HEAD_DIM = HEAD_DIM_;
+  static constexpr int ROPE_DIM = ROPE_DIM_;
+  static constexpr int NOPE_DIM = HEAD_DIM - ROPE_DIM;
+  static constexpr int HALF_ROPE = ROPE_DIM / 2;
+  static constexpr int HALF_BLOCK = SG_SIZE;
+  static constexpr int HEADS_COARSEN = HEADS_COARSEN_;
+  static constexpr int MXFP4_BLOCK_SIZE = 32;
+  static constexpr int NUM_BLOCKS = HEAD_DIM / MXFP4_BLOCK_SIZE;
+  static_assert(ROPE_DIM % 2 == 0 && HALF_ROPE >= SG_SIZE,
+                "ROPE_DIM/2 must be >= SG_SIZE");
+  static_assert(NOPE_DIM > 0, "HEAD_DIM must be > ROPE_DIM");
+
   deepseek_fused_indexer_q_rope_mxfp4_kernel(
       const bf16_t* __restrict__ q,
       const int64_t* __restrict__ pos,
@@ -201,6 +207,8 @@ class deepseek_fused_indexer_q_rope_mxfp4_kernel {
 
 }  // namespace vllm
 
+using vllm::bf16_t;
+
 void deepseek_fused_indexer_q_rope_mxfp4(
     const at::Tensor& q,
     const at::Tensor& positions,
@@ -215,8 +223,25 @@ void deepseek_fused_indexer_q_rope_mxfp4(
 
   const int64_t num_tokens = q.size(0);
   const int64_t num_heads = q.size(1);
+  const int64_t head_dim = q.size(2);
+  const int64_t rope_dim = cos_sin_cache.size(1);
   const float combined_scale =
       static_cast<float>(softmax_scale) * static_cast<float>(head_scale);
+
+  // Dispatch based on (head_dim, rope_dim). Add new cases for future models.
+  TORCH_CHECK(
+      head_dim == 128 && rope_dim == 64,
+      "deepseek_fused_indexer_q_rope_mxfp4: unsupported head_dim=",
+      head_dim,
+      " rope_dim=",
+      rope_dim,
+      ". Supported: head_dim=128, rope_dim=64");
+
+  TORCH_CHECK(
+      num_heads % 4 == 0,
+      "num_heads must be divisible by 4");
+
+  const int nhg = num_heads / 4;
 
   const bf16_t* q_ptr = reinterpret_cast<const bf16_t*>(q.data_ptr());
   const int64_t* pos_ptr = positions.data_ptr<int64_t>();
@@ -227,7 +252,6 @@ void deepseek_fused_indexer_q_rope_mxfp4(
   uint8_t* scales_ptr = scales_out.data_ptr<uint8_t>();
   float* wo_ptr = weights_out.data_ptr<float>();
 
-  const int nhg = (num_heads + HEADS_COARSEN - 1) / HEADS_COARSEN;
   auto& queue = xpu::vllmGetQueue();
 
   queue.submit([&](sycl::handler& cgh) {
@@ -236,7 +260,7 @@ void deepseek_fused_indexer_q_rope_mxfp4(
             {static_cast<size_t>(num_tokens),
              static_cast<size_t>(nhg * SG_SIZE)},
             {1, static_cast<size_t>(SG_SIZE)}),
-        deepseek_fused_indexer_q_rope_mxfp4_kernel(
+        deepseek_fused_indexer_q_rope_mxfp4_kernel<128, 64, 4>(
             q_ptr,
             pos_ptr,
             cs_ptr,
