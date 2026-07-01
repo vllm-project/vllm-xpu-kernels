@@ -113,6 +113,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl(
       "deepseek_inv_rope_fp8_quant", torch::kXPU, &deepseek_inv_rope_fp8_quant);
 
+#ifdef VLLM_MHC_ENABLED
   xpu_ops.def(
       "mhc_pre(Tensor residual, Tensor fn, Tensor hc_scale, Tensor hc_base,"
       "        float rms_eps, float hc_pre_eps, float hc_sinkhorn_eps,"
@@ -139,6 +140,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "                   int sinkhorn_repeat)"
       "                   -> (Tensor, Tensor, Tensor, Tensor)");
   xpu_ops.impl("mhc_fused_post_pre", torch::kXPU, &mhc_fused_post_pre);
+#endif
 
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "

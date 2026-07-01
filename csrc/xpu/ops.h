@@ -119,6 +119,7 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
     int64_t nope_dim,
     int64_t rope_dim);
 
+#ifdef VLLM_MHC_ENABLED
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
     const at::Tensor& residual,
     const at::Tensor& fn,
@@ -158,6 +159,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mhc_fused_post_pre(
     double hc_sinkhorn_eps,
     double hc_post_mult_value,
     int64_t sinkhorn_repeat);
+#endif
 
 #ifdef VLLM_GDN_ENABLED
 void gdn_attention(
