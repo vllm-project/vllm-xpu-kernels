@@ -93,6 +93,62 @@ void apply_rotary_emb(
     bool is_neox);
 
 #ifdef VLLM_GDN_ENABLED
+std::vector<torch::Tensor> causal_conv1d(
+    torch::Tensor& z,
+    const torch::Tensor& projected_states_qkvz,
+    const torch::Tensor& projected_states_ba,
+    const int64_t num_k_heads,
+    const int64_t num_v_heads,
+    const int64_t head_k_dim,
+    const int64_t head_v_dim,
+    torch::Tensor& conv_state,
+    const torch::Tensor& conv_weights,
+    const std::optional<torch::Tensor>& conv_bias,
+    const std::string& activation,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const int64_t num_spec_decodes,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    const int64_t num_actual_tokens,
+    const int64_t tp_size,
+    const bool reorder_input);
+
+void gated_delta_rule(
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& b,
+    const torch::Tensor& a,
+    const int64_t num_v_heads,
+    const int64_t head_v_dim,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    torch::Tensor& ssm_state,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const int64_t num_spec_decodes,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices_tensor,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    const int64_t num_actual_tokens,
+    const int64_t tp_size);
+
+// Legacy fused entry point kept for API backward compatibility. Internally
+// chains causal_conv1d and gated_delta_rule to reproduce the original
+// gdn_attention behavior.
 void gdn_attention(
     torch::Tensor& core_attn_out,
     torch::Tensor& z,
