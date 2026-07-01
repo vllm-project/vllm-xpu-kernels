@@ -136,7 +136,8 @@ def test_output_layout(num_tokens):
 
     o = torch.randn(num_tokens, num_heads, HEAD_DIM,
                     dtype=torch.bfloat16, device=DEVICE)
-    positions = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
+    positions = torch.randint(0, max_pos, (num_tokens,),
+                              dtype=torch.int64, device=DEVICE)
     cos_sin_cache = torch.randn(max_pos, ROPE_DIM,
                                 dtype=torch.float32, device=DEVICE)
 
