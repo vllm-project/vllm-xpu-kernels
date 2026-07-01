@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <torch/all.h>
 
 torch::Tensor weak_ref_tensor(torch::Tensor& tensor);
@@ -7,13 +8,13 @@ torch::Tensor weak_ref_tensor(torch::Tensor& tensor);
 void rms_norm(
     torch::Tensor& out,
     torch::Tensor& input,
-    torch::Tensor& weight,
+    std::optional<torch::Tensor> weight,
     double epsilon);
 
 void fused_add_rms_norm(
     torch::Tensor& input,
     torch::Tensor& residual,
-    torch::Tensor& weight,
+    std::optional<torch::Tensor> weight,
     double epsilon);
 
 // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8 output).
