@@ -17,13 +17,11 @@
 #include <ATen/DeviceGuard.h>
 #include <c10/util/Float8_e4m3fn.h>
 #include <c10/xpu/XPUFunctions.h>
-#include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
 #include <unordered_map>
-#include <vector>
 
 namespace vllm {
 
@@ -815,39 +813,31 @@ void launch_one_fp8mix_generic(
   });
 }
 
-// Keep per-invocation scratch tensors alive until the finalize kernel
-// completes. This avoids reusing the same scratch region across overlapping
-// calls, which can race under concurrent submissions.
-struct split_gather_inflight_scratch_t {
-  sycl::event done;
-  at::Tensor scratch;
-};
-
-inline void reap_split_gather_inflight_locked(
-    std::vector<split_gather_inflight_scratch_t>& inflight) {
-  inflight.erase(
-      std::remove_if(
-          inflight.begin(),
-          inflight.end(),
-          [](const split_gather_inflight_scratch_t& e) {
-            return e.done.get_info<sycl::info::event::command_execution_status>() ==
-                sycl::info::event_command_status::complete;
-          }),
-      inflight.end());
-}
-
-inline void hold_split_gather_scratch_until_done(
-    int dev,
-    sycl::event done,
-    at::Tensor scratch) {
+// Persistent per-device scratch for the split-gather path.
+//
+// The XPU stream queue returned by vllmGetQueue() is in-order, so pass B of
+// one invocation finishes before pass A of the next invocation starts. A
+// single reused buffer per device is therefore race-free under the normal
+// single-stream execution model, and avoids a hot-path device allocation plus
+// per-call event/mutex bookkeeping on every decode step (which showed up as
+// large, load-dependent host-side spikes in profiles).
+//
+// The buffer is grow-only: split-gather only runs for num_tokens below a small
+// fixed threshold, so the capacity stabilizes after the first few calls and no
+// further allocation happens on the hot path. The tensor is owned by a static
+// cache, keeping it alive across calls without any explicit lifetime tracking.
+inline float* get_split_gather_scratch(int dev, int64_t numel) {
   static std::mutex mtx;
-  static std::unordered_map<int, std::vector<split_gather_inflight_scratch_t>>
-      inflight_by_dev;
+  static std::unordered_map<int, at::Tensor> cache_by_dev;
 
   std::lock_guard<std::mutex> lk(mtx);
-  auto& inflight = inflight_by_dev[dev];
-  reap_split_gather_inflight_locked(inflight);
-  inflight.push_back({std::move(done), std::move(scratch)});
+  at::Tensor& buf = cache_by_dev[dev];
+  if (!buf.defined() || buf.numel() < numel) {
+    buf = at::empty(
+        {numel},
+        at::TensorOptions().dtype(at::kFloat).device(at::kXPU, dev));
+  }
+  return buf.data_ptr<float>();
 }
 
 template <int CR, int OL, int ROPE_DIM, int G_SHARDS, typename WT>
@@ -882,14 +872,13 @@ void launch_split_gather_fp8mix(
   at::DeviceGuard dg(at::Device(at::kXPU, at::xpu::current_device()));
     const int dev = at::xpu::current_device();
 
-    // Scratch [num_tokens, G_SHARDS, 3, HEAD] fp32 — per invocation.
+    // Scratch [num_tokens, G_SHARDS, 3, HEAD] fp32 — persistent, reused across
+    // calls. Safe to reuse because the stream queue is in-order (pass B of the
+    // previous call completes before pass A of this call writes the buffer).
   const int64_t scratch_numel =
       num_tokens * static_cast<int64_t>(G_SHARDS) * 3 *
       static_cast<int64_t>(HEAD);
-    at::Tensor scratch = at::empty(
-      {scratch_numel},
-      at::TensorOptions().dtype(at::kFloat).device(at::kXPU, dev));
-    float* scr = scratch.data_ptr<float>();
+    float* scr = get_split_gather_scratch(dev, scratch_numel);
   const int64_t scr0 = G_SHARDS * 3 * HEAD;
   const int64_t scr1 = 3 * HEAD;
 
@@ -914,7 +903,7 @@ void launch_split_gather_fp8mix(
   });
 
   // Pass B: grid = (num_tokens * WG,), local = (WG,).
-  sycl::event pass_b = q.submit([&](sycl::handler& cgh) {
+  q.submit([&](sycl::handler& cgh) {
     cgh.depends_on(pass_a);
     cgh.parallel_for(
         sycl::nd_range<1>(num_tokens * WG, WG),
@@ -934,8 +923,6 @@ void launch_split_gather_fp8mix(
            token_stride,
            scale_dim});
   });
-
-  hold_split_gather_scratch_until_done(dev, std::move(pass_b), std::move(scratch));
 }
 
 // Path selection shared by both weight dtypes. WT is the RMSNorm weight scalar
