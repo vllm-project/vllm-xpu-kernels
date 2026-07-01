@@ -92,6 +92,17 @@ void apply_rotary_emb(
     torch::Tensor& sin,     // [num_tokens, rot_dim/2]
     bool is_neox);
 
+void deepseek_qnorm_rope_kv_insert(
+    torch::Tensor& q,
+    const torch::Tensor& kv,
+    torch::Tensor& cache,
+    const torch::Tensor& slot_mapping,
+    const torch::Tensor& position_ids,
+    const torch::Tensor& cos_sin_cache,
+    double eps,
+    int64_t block_size,
+    const std::string& kv_cache_dtype);
+
 #ifdef VLLM_GDN_ENABLED
 void gdn_attention(
     torch::Tensor& core_attn_out,

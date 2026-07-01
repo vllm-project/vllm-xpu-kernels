@@ -79,6 +79,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "                 Tensor cos, Tensor sin, bool is_neox) -> ()");
   xpu_ops.impl("apply_rotary_emb", torch::kXPU, &apply_rotary_emb);
 
+  // DeepSeek-V4 fused Q-RMSNorm + GPT-J RoPE + KV cache insert.
+  // kv_cache_dtype: "bf16" or "fp8_ds_mla"
+  xpu_ops.def(
+      "deepseek_qnorm_rope_kv_insert(Tensor! q, Tensor kv,"
+      "                              Tensor! cache,"
+      "                              Tensor slot_mapping,"
+      "                              Tensor position_ids,"
+      "                              Tensor cos_sin_cache,"
+      "                              float eps, int block_size,"
+      "                              str kv_cache_dtype) -> ()");
+  xpu_ops.impl(
+      "deepseek_qnorm_rope_kv_insert",
+      torch::kXPU,
+      &deepseek_qnorm_rope_kv_insert);
+
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
       "indices, float scale) -> ()");
