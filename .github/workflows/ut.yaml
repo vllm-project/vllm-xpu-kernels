@@ -198,6 +198,9 @@ jobs:
     runs-on: self-hosted-pvc
     needs: [build-docker-image-latest-pvc, build-wheel]
     timeout-minutes: 50
+    defaults:
+      run:
+        shell: bash
     container:                      
       image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-latest-pvc.outputs.image_tag }}
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
@@ -216,11 +219,15 @@ jobs:
       - name: install wheel
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          source /opt/intel/oneapi/setvars.sh --force || true
+          source /opt/venv/bin/activate
           uv pip install -r requirements.txt
           VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=$(find dist -name '*.whl' -print -quit) uv pip install --no-build-isolation -e . -v
 
       - name: test 
         run: |
+          source /opt/intel/oneapi/setvars.sh --force || true
+          source /opt/venv/bin/activate
           echo "Running tests with XPU_KERNEL_TEST_SCOPE=${{ env.XPU_KERNEL_TEST_SCOPE }}"
           XPU_KERNEL_TEST_SCOPE=${{ env.XPU_KERNEL_TEST_SCOPE }} ZE_AFFINITY_MASK=0,1 SKIP_ACC_ERROR_KERNEL=1 pytest -v -s tests/ --ignore=tests/test_fp8_gemm_onednn.py
           VLLM_XPU_FORCE_XE_DEFAULT_KERNEL=1 XPU_KERNEL_TEST_SCOPE=${{ env.XPU_KERNEL_TEST_SCOPE }} ZE_AFFINITY_MASK=0,1 pytest -v -s tests/fused_moe/test_grouped_gemm.py::test_grouped_gemm
@@ -240,6 +247,9 @@ jobs:
     runs-on: self-hosted-bmg
     needs: [build-docker-image-latest-bmg, build-wheel]
     timeout-minutes: 50
+    defaults:
+      run:
+        shell: bash
     container: 
       image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-latest-bmg.outputs.image_tag }}
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
@@ -258,11 +268,15 @@ jobs:
       - name: install wheel
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          source /opt/intel/oneapi/setvars.sh --force || true
+          source /opt/venv/bin/activate
           uv pip install -r requirements.txt
           VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_LOCATION=$(find dist -name '*.whl' -print -quit) uv pip install --no-build-isolation -e . -v
 
       - name: test 
         run: |
+          source /opt/intel/oneapi/setvars.sh --force || true
+          source /opt/venv/bin/activate
           echo "Running tests with XPU_KERNEL_TEST_SCOPE=${{ env.XPU_KERNEL_TEST_SCOPE }}"
           # tests/test_moe_align_block_size.py, tests/test_moe_lora_align_sum.py takes much time than expected. ignore it for now.
           XPU_KERNEL_TEST_SCOPE=${{ env.XPU_KERNEL_TEST_SCOPE }} ZE_AFFINITY_MASK=0,1 pytest -v -s tests/ --ignore=tests/test_lora_ops.py --ignore=tests/test_fp8_quant.py --ignore=tests/test_moe_align_block_size.py --ignore=tests/test_moe_lora_align_sum.py --ignore=tests/test_cache.py::test_swap_blocks --ignore=tests/test_topk_per_row.py --ignore=tests/test_lora_ops.py --ignore=tests/test_fp8_gemm_onednn.py

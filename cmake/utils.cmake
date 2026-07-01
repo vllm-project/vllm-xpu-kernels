@@ -584,6 +584,7 @@ function(add_xe2_kernel_library LIBRARY_NAME)
   target_compile_options(${LIBRARY_NAME}
                          PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE -DVLLM_XPU_ENABLE_XE2)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DSYCL_INTEL_TARGET=20)
   target_include_directories(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_INCLUDE_DIRS})
 
   # Link torch libraries
@@ -609,6 +610,76 @@ function(add_xe2_kernel_library LIBRARY_NAME)
     )
   endif()
   target_link_options(${LIBRARY_NAME} PRIVATE ${XE2_GPU_LINK_FLAGS})
+endfunction()
+
+#
+# Create a shared library for XE3 kernels with common configuration.
+#
+# Arguments: LIBRARY_NAME: Name of the library to create (e.g.,
+# attn_kernels_xe_3) DESTINATION: Installation destination directory (optional,
+# defaults to vllm_xpu_kernels) INCLUDE_CMAKE_SOURCE_DIR: Optional flag to
+# include ${CMAKE_SOURCE_DIR} in include directories
+#
+function(add_xe3_kernel_library LIBRARY_NAME)
+  cmake_parse_arguments(
+    PARSE_ARGV 1 ARG "INCLUDE_CMAKE_SOURCE_DIR" # Boolean options
+    "DESTINATION" # Single value keywords
+    "" # Multi-value keywords
+  )
+
+  # Set default destination if not provided
+  if(NOT ARG_DESTINATION)
+    set(ARG_DESTINATION "vllm_xpu_kernels")
+  endif()
+
+  # Set C++ standard
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+  # Find all source files
+  file(GLOB_RECURSE KERNEL_SOURCES "*.cpp" ${ATTN_KERNEL_SRCS_GEN})
+
+  # Create shared library
+  add_library(${LIBRARY_NAME} SHARED ${KERNEL_SOURCES})
+
+  # Set include directories
+  target_include_directories(
+    ${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+                           ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+  # Optionally add CMAKE_SOURCE_DIR
+  if(ARG_INCLUDE_CMAKE_SOURCE_DIR)
+    target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_SOURCE_DIR})
+  endif()
+
+  # Set compile options and definitions
+  target_compile_options(
+    ${LIBRARY_NAME}
+    PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC -Wno-c++20-extensions
+            -Wno-intel-compat -Wno-pragma-once-outside-header)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DSYCL_INTEL_TARGET=35)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DVLLM_GRF_SIZE=512)
+  target_include_directories(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_INCLUDE_DIRS})
+
+  # Link torch libraries
+  target_link_libraries(${LIBRARY_NAME} PRIVATE torch)
+  target_link_libraries(${LIBRARY_NAME} PRIVATE ${TORCH_LIBRARIES})
+
+  message(
+    STATUS
+      "Setting library output directory for target '${LIBRARY_NAME}' to '${CMAKE_BINARY_DIR}/'.'"
+  )
+  set_target_properties(${LIBRARY_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY
+                                                   "${CMAKE_BINARY_DIR}/")
+  install(TARGETS ${LIBRARY_NAME} LIBRARY DESTINATION ${ARG_DESTINATION}
+                                          COMPONENT ${LIBRARY_NAME})
+
+  # Set link options for XE3 devices
+  set(XE3_GPU_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
+  list(
+    APPEND XE3_GPU_LINK_FLAGS -Xsycl-target-backend=spir64_gen
+    "-device ${XE3_AOT_DEVICES} -internal_options -cl-intel-512-GRF-per-thread")
+  target_link_options(${LIBRARY_NAME} PRIVATE ${XE3_GPU_LINK_FLAGS})
 endfunction()
 
 #
@@ -656,6 +727,7 @@ function(add_xe_default_kernel_library LIBRARY_NAME)
                          PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC)
   target_compile_definitions(${LIBRARY_NAME}
                              PRIVATE -DVLLM_XPU_ENABLE_XE_DEFAULT)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DSYCL_INTEL_TARGET=20)
   target_include_directories(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_INCLUDE_DIRS})
 
   # Link torch libraries
