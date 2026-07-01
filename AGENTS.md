@@ -78,9 +78,20 @@ Important build environment variables:
   `GDN_KERNELS_ENABLED`, `MQA_LOGITS_KERNELS_ENABLED`,
   `XPU_SPECIFIC_KERNELS_ENABLED`, `XPUMEM_ALLOCATOR_ENABLED`: extension or
   kernel-family toggles forwarded from `setup.py` to CMake.
-- `VLLM_PAGED_DECODE_CONFIG` and `VLLM_CHUNK_PREFILL_CONFIG`: attention kernel
-  config presets or absolute config paths. Presets live in
-  `csrc/xpu/attn/kernel_configs/`.
+- `VLLM_CHUNK_PREFILL_CONFIG`: selects the chunk prefill attention kernel
+  config used for prompt processing. Accepts a preset name with or without the
+  `.conf` suffix from `csrc/xpu/attn/kernel_configs/`, or an absolute path to a
+  custom config file. Current presets are `chunk_prefill_default.conf` for common
+  Llama, Qwen, DeepSeek, and Falcon coverage, and `chunk_prefill_full.conf` for
+  all supported variants.
+- `VLLM_PAGED_DECODE_CONFIG`: selects the paged decode attention kernel config
+  used for token generation. It follows the same preset-name or absolute-path
+  rules. Current presets are `paged_decode_default.conf` for common Llama, Qwen,
+  DeepSeek, and Falcon coverage, and `paged_decode_full.conf` for all supported
+  variants.
+- If either config variable is unset, CMake currently defaults to the matching
+  `*_full.conf` preset. Use the `*_default.conf` presets to reduce compile time
+  when broad model coverage is not needed.
 - `VLLM_XPU_AOT_DEVICES` and `VLLM_XPU_XE2_AOT_DEVICES`: override AOT target
   devices. Empty values intentionally disable AOT for the corresponding set.
 - `VLLM_CUTLASS_SRC_DIR`: use a local SYCL-TLA checkout instead of FetchContent.
@@ -147,6 +158,8 @@ Op registration generally follows this pattern:
   Do not revert changes you did not make.
 - Do not commit, create branches, or run destructive git commands unless the
   user explicitly asks.
+- Always sign off commits with `git commit -s` or an equivalent `Signed-off-by:`
+  trailer.
 - If the user asks for commit text, include appropriate trailers such as
   `Co-authored-by: GitHub Copilot` only when requested or consistent with their
   workflow.
