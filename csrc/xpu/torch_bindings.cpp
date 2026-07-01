@@ -97,7 +97,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 // DeepSeek-V4 inverse RoPE (bf16): fused inv GPT-J rotation + group-major
   // layout transform.
   xpu_ops.def(
-      "deepseek_inv_rope_bf16(Tensor o, Tensor positions,"
+      "deepseek_inv_rope_bf16(Tensor attn_output, Tensor positions,"
       "                       Tensor cos_sin_cache, int n_groups,"
       "                       int heads_per_group, int nope_dim,"
       "                       int rope_dim) -> Tensor");
@@ -106,7 +106,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   // DeepSeek-V4 fused inverse RoPE + FP8 quantization: inv GPT-J rotation +
   // per-128-block UE8M0 FP8 E4M3 quantization + group-major layout transform.
   xpu_ops.def(
-      "deepseek_inv_rope_fp8_quant(Tensor o, Tensor positions,"
+      "deepseek_inv_rope_fp8_quant(Tensor attn_output, Tensor positions,"
       "                            Tensor cos_sin_cache, int n_groups,"
       "                            int heads_per_group, int nope_dim,"
       "                            int rope_dim) -> (Tensor, Tensor)");

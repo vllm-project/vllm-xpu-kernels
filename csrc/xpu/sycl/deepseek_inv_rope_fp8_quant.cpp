@@ -200,7 +200,7 @@ class deepseek_inv_rope_fp8_quant_kernel {
 // PyTorch wrapper: inv RoPE + FP8 quant.
 // Returns (fp8_out [G,T,hpg*D], scale_out [G,T,hpg*chunks]) .
 std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
-    const torch::Tensor& o,
+    const torch::Tensor& attn_output,
     const torch::Tensor& positions,
     const torch::Tensor& cos_sin_cache,
     int64_t n_groups,
@@ -212,6 +212,7 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
   constexpr int SG_SIZE = vllm::deepseek_inv_rope_fp8_quant_kernel::SG_SIZE;
   constexpr int QUANT_GROUP_SIZE = vllm::QUANT_GROUP_SIZE;
 
+  const auto& o = attn_output;
   TORCH_CHECK(o.dim() == 3, "o must be 3D [num_tokens, num_heads, head_dim]");
   TORCH_CHECK(o.scalar_type() == torch::kBFloat16, "o must be bfloat16");
   TORCH_CHECK(
