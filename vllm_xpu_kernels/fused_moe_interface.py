@@ -361,7 +361,7 @@ class XpuFusedMoe:
                                 device=hidden_states.device)
         torch.ops._xpu_C.cutlass_grouped_gemm_interface(
             ptr_A=remapped_hidden_states,
-            ptr_A_scale=a1q_scale,
+            ptr_A_scale=remapped_scales,
             ptr_B=self.w13,
             ptr_B_scale=self.gemm1_wei_scales,
             ptr_bias=self.w13_bias,
