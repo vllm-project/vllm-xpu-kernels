@@ -526,6 +526,157 @@ class gather_cache_kernel {
   const int32_t* __restrict__ seq_starts;  // Optional: starting offsets per
 };
 
+constexpr int kDeepseekV4GatherHeadDim = 512;
+constexpr int kDeepseekV4GatherSubgroupSize = 32;
+constexpr int kDeepseekV4GatherVecElems = 8;
+constexpr int kDeepseekV4Fp8Dim = 448;
+constexpr int kDeepseekV4Bf16Dim = 64;
+constexpr int kDeepseekV4ScaleDim = 8;
+constexpr int kDeepseekV4QuantBlock = 64;
+constexpr int kDeepseekV4NumQuantBlocks = 7;
+constexpr int kDeepseekV4TokenDataBytes = kDeepseekV4Fp8Dim + kDeepseekV4Bf16Dim * 2;
+
+static inline int select_gather_k_cache_bf16_rows_per_group(
+    int64_t max_token_hint, int64_t num_reqs, bool is_bmg_arch) {
+  int rows_per_group = 2;
+  if (max_token_hint > 256) {
+    rows_per_group = 4;
+  }
+  if (max_token_hint > 2048) {
+    rows_per_group = 8;
+  }
+  if (max_token_hint > 8192) {
+    rows_per_group = 8;
+  }
+  if (!is_bmg_arch) {
+    rows_per_group = std::min(rows_per_group, 4);
+  }
+
+  if (num_reqs >= 8) {
+    rows_per_group = std::min(rows_per_group, 4);
+  }
+  if (num_reqs >= 32) {
+    rows_per_group = std::min(rows_per_group, 2);
+  }
+  return std::max(rows_per_group, 1);
+}
+
+template <int SUBGROUP_SIZE, int CACHE_BLOCK_SIZE = 0>
+class dequantize_and_gather_k_cache_kernel {
+ public:
+  dequantize_and_gather_k_cache_kernel(
+      at::BFloat16* __restrict__ out,
+      const uint8_t* __restrict__ k_cache,
+      const int32_t* __restrict__ seq_lens,
+      const int32_t* __restrict__ gather_lens,
+      const int32_t* __restrict__ block_table,
+      int64_t out_stride0,
+      int64_t out_stride1,
+      int64_t cache_block_stride,
+      int64_t block_table_stride,
+      int32_t cache_block_size,
+      int32_t offset,
+      int32_t rows_per_group)
+      : out_(out),
+        k_cache_(k_cache),
+        seq_lens_(seq_lens),
+        gather_lens_(gather_lens),
+        block_table_(block_table),
+        out_stride0_(out_stride0),
+        out_stride1_(out_stride1),
+        cache_block_stride_(cache_block_stride),
+        block_table_stride_(block_table_stride),
+        cache_block_size_(cache_block_size),
+        offset_(offset),
+        rows_per_group_(rows_per_group) {}
+
+  void operator() [[sycl::reqd_sub_group_size(SUBGROUP_SIZE)]] (
+      const sycl::nd_item<2>& item) const {
+    const int row_tile = static_cast<int>(item.get_group(0));
+    const int batch_idx = static_cast<int>(item.get_group(1));
+    const int subgroup_idx = static_cast<int>(item.get_local_id(0));
+    const int lane = static_cast<int>(item.get_local_id(1));
+
+    const int seq_len = seq_lens_[batch_idx];
+    const int gather_len =
+        gather_lens_ == nullptr ? seq_len : gather_lens_[batch_idx];
+    const int out_row = row_tile * rows_per_group_ + subgroup_idx;
+    if (out_row >= gather_len) {
+      return;
+    }
+
+    const int start_pos = seq_len - gather_len;
+    const int pos = start_pos + out_row;
+    int block_in_seq;
+    int pos_in_block;
+    if constexpr (CACHE_BLOCK_SIZE > 0 &&
+                  (CACHE_BLOCK_SIZE & (CACHE_BLOCK_SIZE - 1)) == 0) {
+      constexpr int kShift = __builtin_ctz(CACHE_BLOCK_SIZE);
+      block_in_seq = pos >> kShift;
+      pos_in_block = pos & (CACHE_BLOCK_SIZE - 1);
+    } else {
+      block_in_seq = pos / cache_block_size_;
+      pos_in_block = pos % cache_block_size_;
+    }
+
+    const int64_t block_table_batch_offset =
+        static_cast<int64_t>(batch_idx) * block_table_stride_;
+    const int64_t physical_block_idx = block_table_[
+        block_table_batch_offset + block_in_seq];
+
+    const uint8_t* cache_block_ptr =
+        k_cache_ + physical_block_idx * cache_block_stride_;
+    const uint8_t* token_data_ptr =
+        cache_block_ptr + static_cast<int64_t>(pos_in_block) *
+                             kDeepseekV4TokenDataBytes;
+    const uint8_t* token_scale_ptr =
+        cache_block_ptr +
+        static_cast<int64_t>(cache_block_size_) * kDeepseekV4TokenDataBytes +
+        static_cast<int64_t>(pos_in_block) * kDeepseekV4ScaleDim;
+
+    at::BFloat16* out_row_ptr =
+        out_ + static_cast<int64_t>(batch_idx) * out_stride0_ +
+        static_cast<int64_t>(offset_ + out_row) * out_stride1_;
+
+    // Dequantize 7 * 64 FP8 values with one scale byte per quant block.
+    for (int qblock_idx = 0; qblock_idx < kDeepseekV4NumQuantBlocks;
+         ++qblock_idx) {
+      const float exponent = static_cast<float>(token_scale_ptr[qblock_idx]) -
+                             127.0f;
+      const float scale = sycl::exp2(exponent);
+
+      for (int idx = lane; idx < kDeepseekV4QuantBlock; idx += SUBGROUP_SIZE) {
+        const int col = qblock_idx * kDeepseekV4QuantBlock + idx;
+        const at::Float8_e4m3fn fp8_val =
+            sycl::bit_cast<at::Float8_e4m3fn>(token_data_ptr[col]);
+        const float dequant = static_cast<float>(fp8_val) * scale;
+        out_row_ptr[col] = static_cast<at::BFloat16>(dequant);
+      }
+    }
+
+    // Copy the tail BF16 payload [448:512].
+    const uint16_t* tail_src =
+        reinterpret_cast<const uint16_t*>(token_data_ptr + kDeepseekV4Fp8Dim);
+    at::BFloat16* tail_dst = out_row_ptr + kDeepseekV4Fp8Dim;
+    for (int idx = lane; idx < kDeepseekV4Bf16Dim; idx += SUBGROUP_SIZE) {
+      tail_dst[idx] = sycl::bit_cast<at::BFloat16>(tail_src[idx]);
+    }
+  }
+
+ private:
+  at::BFloat16* __restrict__ out_;
+  const uint8_t* __restrict__ k_cache_;
+  const int32_t* __restrict__ seq_lens_;
+  const int32_t* __restrict__ gather_lens_;
+  const int32_t* __restrict__ block_table_;
+  int64_t out_stride0_;
+  int64_t out_stride1_;
+  int64_t cache_block_stride_;
+  int64_t block_table_stride_;
+  int32_t cache_block_size_;
+  int32_t offset_;
+  int32_t rows_per_group_;
+};
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 class indexer_k_quant_and_cache_kernel {
  public:
@@ -1056,6 +1207,143 @@ void concat_and_cache_mla(
 
   DISPATCH_BY_KV_CACHE_DTYPE(
       kv_c.scalar_type(), kv_cache_dtype, CALL_CONCAT_AND_CACHE_MLA);
+}
+
+#define CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(BLOCK_SIZE_TPARAM)           \
+  queue.submit([&](sycl::handler& cgh) {                                     \
+    cgh.parallel_for(                                                         \
+        sycl::nd_range<2>(grid * block, block),                               \
+        vllm::dequantize_and_gather_k_cache_kernel<                           \
+            vllm::kDeepseekV4GatherSubgroupSize,                              \
+            BLOCK_SIZE_TPARAM>(                                                \
+            out.data_ptr<at::BFloat16>(),                                     \
+            k_cache.data_ptr<uint8_t>(),                                      \
+            seq_lens.data_ptr<int32_t>(),                                     \
+            gather_lens_ptr,                                                  \
+            block_table.data_ptr<int32_t>(),                                  \
+            out_stride0,                                                      \
+            out_stride1,                                                      \
+            cache_block_stride,                                               \
+            block_table_stride,                                               \
+            block_size_i32,                                                   \
+            offset_i32,                                                       \
+            rows_per_group));                                                 \
+  });
+
+#define CALL_DEQUANTIZE_AND_GATHER_K_CACHE()                                \
+  do {                                                                       \
+    switch (block_size_i32) {                                                \
+      case 2:  CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(2);  break;          \
+      case 4:  CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(4);  break;          \
+      case 8:  CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(8);  break;          \
+      case 16: CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(16); break;          \
+      case 32: CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(32); break;          \
+      case 64: CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(64); break;          \
+      default: CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(0);  break;          \
+    }                                                                        \
+  } while (0)
+
+void dequantize_and_gather_k_cache(
+    torch::Tensor& out,
+    torch::Tensor const& k_cache,
+    torch::Tensor const& seq_lens,
+    std::optional<torch::Tensor> gather_lens,
+    torch::Tensor const& block_table,
+    int64_t block_size,
+    int64_t offset) {
+  CHECK_DEVICE(out);
+  CHECK_DEVICE(k_cache);
+  CHECK_DEVICE(seq_lens);
+  CHECK_DEVICE(block_table);
+  CHECK_CONTIGUOUS(seq_lens);
+  CHECK_CONTIGUOUS(block_table);
+  CHECK_STRIDE_ALIGNMENT(out);
+  CHECK_STRIDE_ALIGNMENT(k_cache);
+
+  if (gather_lens.has_value()) {
+    CHECK_DEVICE(gather_lens.value());
+    CHECK_CONTIGUOUS(gather_lens.value());
+  }
+
+  TORCH_CHECK(
+      out.scalar_type() == at::ScalarType::BFloat16,
+      "out must be bfloat16");
+  TORCH_CHECK(
+      k_cache.scalar_type() == at::ScalarType::Byte,
+      "k_cache must be uint8");
+  TORCH_CHECK(seq_lens.scalar_type() == at::ScalarType::Int,
+              "seq_lens must be int32");
+  TORCH_CHECK(block_table.scalar_type() == at::ScalarType::Int,
+              "block_table must be int32");
+  if (gather_lens.has_value()) {
+    TORCH_CHECK(gather_lens.value().scalar_type() == at::ScalarType::Int,
+                "gather_lens must be int32");
+  }
+
+  TORCH_CHECK(out.dim() == 3, "out must be [batch, tokens, 512]");
+  TORCH_CHECK(
+      k_cache.dim() == 2, "k_cache must be [num_blocks, block_bytes]");
+  TORCH_CHECK(seq_lens.dim() == 1, "seq_lens must be 1D");
+  TORCH_CHECK(block_table.dim() == 2, "block_table must be 2D");
+  if (gather_lens.has_value()) {
+    TORCH_CHECK(gather_lens.value().dim() == 1, "gather_lens must be 1D");
+  }
+
+  TORCH_CHECK(out.device() == k_cache.device(),
+              "out and k_cache must be on the same device");
+  TORCH_CHECK(out.device() == seq_lens.device(),
+              "out and seq_lens must be on the same device");
+  TORCH_CHECK(out.device() == block_table.device(),
+              "out and block_table must be on the same device");
+  if (gather_lens.has_value()) {
+    TORCH_CHECK(out.device() == gather_lens.value().device(),
+                "out and gather_lens must be on the same device");
+  }
+
+  TORCH_CHECK(out.size(0) == seq_lens.size(0),
+              "out batch must match seq_lens");
+  TORCH_CHECK(block_table.size(0) == seq_lens.size(0),
+              "block_table batch must match seq_lens");
+  TORCH_CHECK(out.size(2) == vllm::kDeepseekV4GatherHeadDim,
+              "out head dim must be 512");
+  TORCH_CHECK(offset >= 0, "offset must be >= 0");
+  TORCH_CHECK(offset <= out.size(1), "offset exceeds out token dimension");
+
+  const int64_t min_block_bytes =
+      block_size * vllm::kDeepseekV4TokenDataBytes +
+      block_size * vllm::kDeepseekV4ScaleDim;
+  TORCH_CHECK(
+      k_cache.stride(1) == 1,
+      "k_cache must be byte-addressable contiguous on the last dimension");
+  TORCH_CHECK(
+      k_cache.size(1) >= min_block_bytes,
+      "k_cache block_bytes is too small for DeepseekV4 layout. required >= ",
+      min_block_bytes,
+      ", got ",
+      k_cache.size(1));
+
+  const int64_t num_reqs = seq_lens.size(0);
+  const int64_t max_token_hint =
+      std::min<int64_t>(block_table.size(1) * block_size, out.size(1) - offset);
+  const int rows_per_group = vllm::select_gather_k_cache_bf16_rows_per_group(
+      max_token_hint, num_reqs, vllm::xpu::is_bmg(out.device().index()));
+  const int64_t row_tiles =
+      (max_token_hint + rows_per_group - 1) / rows_per_group;
+
+  const int32_t block_size_i32 = static_cast<int32_t>(block_size);
+  const int32_t offset_i32 = static_cast<int32_t>(offset);
+  const int32_t* gather_lens_ptr =
+      gather_lens.has_value() ? gather_lens.value().data_ptr<int32_t>() : nullptr;
+  const int64_t out_stride0 = out.stride(0);
+  const int64_t out_stride1 = out.stride(1);
+  const int64_t cache_block_stride = k_cache.stride(0);
+  const int64_t block_table_stride = block_table.stride(0);
+
+  sycl::range<2> grid(row_tiles, num_reqs);
+  sycl::range<2> block(rows_per_group, vllm::kDeepseekV4GatherSubgroupSize);
+  const at::DeviceGuard device_guard(out.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+  CALL_DEQUANTIZE_AND_GATHER_K_CACHE();
 }
 
 // Macro to dispatch the kernel based on the data type.

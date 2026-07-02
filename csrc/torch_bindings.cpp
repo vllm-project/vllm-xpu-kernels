@@ -277,6 +277,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("gather_cache", torch::kXPU, &gather_cache);
 
+  cache_ops.def(
+      "dequantize_and_gather_k_cache(Tensor! out, Tensor k_cache, Tensor seq_lens, "
+      "Tensor? gather_lens, Tensor block_table, int block_size, int offset) "
+      "-> ()");
+  cache_ops.impl(
+      "dequantize_and_gather_k_cache",
+      torch::kXPU,
+      &dequantize_and_gather_k_cache);
+
   // Convert between FP8 and FP16/BF16/FP32 formats with scaling
   cache_ops.def(
       "convert_fp8(Tensor! dst, Tensor src, "

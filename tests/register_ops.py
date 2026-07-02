@@ -222,6 +222,24 @@ def gather_cache(src_cache: torch.Tensor,
     torch.ops._C_cache_ops.gather_cache(src_cache, dst, block_table,
                                         cu_seq_lens, batch_size, seq_starts)
 
+def dequantize_and_gather_k_cache(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: Optional[torch.Tensor],
+    block_table: torch.Tensor,
+    block_size: int,
+    offset: int,
+) -> None:
+    torch.ops._C_cache_ops.dequantize_and_gather_k_cache(
+        out,
+        k_cache,
+        seq_lens,
+        gather_lens,
+        block_table,
+        block_size,
+        offset,
+    )
 
 def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor,
                               slot_mapping: torch.Tensor,

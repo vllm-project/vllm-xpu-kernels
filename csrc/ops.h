@@ -157,6 +157,15 @@ void gather_cache(
     int64_t batch_size,
     std::optional<torch::Tensor> seq_starts = std::nullopt);
 
+void dequantize_and_gather_k_cache(
+    torch::Tensor& out,                 // [batch, max_tokens, 512]
+    torch::Tensor const& k_cache,       // [num_blocks, block_bytes] uint8
+    torch::Tensor const& seq_lens,      // [batch]
+    std::optional<torch::Tensor> gather_lens,  // [batch] or None
+    torch::Tensor const& block_table,   // [batch, max_blocks_per_seq]
+    int64_t block_size,
+    int64_t offset);
+
 void indexer_k_quant_and_cache(
     torch::Tensor& k,             // [num_tokens, head_dim]
     torch::Tensor& kv_cache,      // [num_blocks, block_size, cache_stride]

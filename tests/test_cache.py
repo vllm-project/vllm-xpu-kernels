@@ -41,6 +41,7 @@ DEVICES = [
 
 KV_CACHE_DTYPE = ["auto"]  # FIXME: will add "fp8" when accuracy is improved
 KV_CACHE_DTYPE_ALL = ["auto", "fp8"]
+DEEPSEEK_V4_HEAD_DIM = 512
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
@@ -483,6 +484,167 @@ def test_concat_and_cache_mla(
     else:
         torch.testing.assert_close(kv_cache, ref_kv_cache)
 
+def _reference_dequantize_and_gather_k_cache(
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor | None,
+    block_table: torch.Tensor,
+    out_tokens: int,
+    offset: int,
+) -> torch.Tensor:
+    fp8_dim = 448
+    bf16_dim = 64
+    quant_block = 64
+    num_quant_blocks = 7
+    token_data_bytes = fp8_dim + bf16_dim * 2
+    scale_dim = 8
+
+    batch_size = seq_lens.numel()
+    expected = torch.zeros((batch_size, out_tokens, DEEPSEEK_V4_HEAD_DIM),
+                           dtype=torch.bfloat16)
+    k_cache_cpu = k_cache.cpu()
+    seq_lens_list = seq_lens.cpu().tolist()
+    gather_lens_list = None if gather_lens is None else gather_lens.cpu().tolist()
+    block_table_cpu = block_table.cpu()
+
+    block_size = k_cache.size(1) // (token_data_bytes + scale_dim)
+    token_region_bytes = block_size * token_data_bytes
+
+    for batch_idx, seq_len in enumerate(seq_lens_list):
+        gather_len = seq_len if gather_lens_list is None else gather_lens_list[
+            batch_idx]
+        start_pos = seq_len - gather_len
+        for out_idx in range(gather_len):
+            pos = start_pos + out_idx
+            block_in_seq = pos // block_size
+            pos_in_block = pos % block_size
+            physical_block_idx = int(block_table_cpu[batch_idx, block_in_seq])
+
+            row_base = physical_block_idx * k_cache.size(1)
+            token_base = row_base + pos_in_block * token_data_bytes
+            scale_base = row_base + token_region_bytes + pos_in_block * scale_dim
+
+            token_bytes = k_cache_cpu.view(-1)[token_base:token_base +
+                                               token_data_bytes]
+            fp8_vals = token_bytes[:fp8_dim].view(torch.float8_e4m3fn).to(
+                torch.float32)
+            tail_vals = token_bytes[fp8_dim:].view(torch.uint16).view(
+                torch.bfloat16)
+
+            scale_bytes = k_cache_cpu.view(-1)[scale_base:scale_base + scale_dim]
+            scale_exponents = scale_bytes[:num_quant_blocks].to(torch.int32) - 127
+            scales = torch.pow(2.0, scale_exponents.to(torch.float32))
+
+            out_row = expected[batch_idx, offset + out_idx]
+            for qblock_idx in range(num_quant_blocks):
+                start = qblock_idx * quant_block
+                end = start + quant_block
+                out_row[start:end] = (fp8_vals[start:end] * scales[qblock_idx]).to(
+                    torch.bfloat16)
+            out_row[fp8_dim:] = tail_vals
+
+    return expected
+
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("max_seq_len", [192])
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("offset", [0, 11])
+@pytest.mark.parametrize("use_explicit_gather_lens", [False, True])
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_dequantize_and_gather_k_cache(block_size, max_seq_len, batch_size,
+                                       offset, use_explicit_gather_lens,
+                                       device):
+    fp8_dim = 448
+    bf16_dim = 64
+    quant_block = 64
+    num_quant_blocks = 7
+    token_data_bytes = fp8_dim + bf16_dim * 2
+    scale_dim = 8
+    block_bytes = block_size * (token_data_bytes + scale_dim)
+
+    max_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
+    num_blocks = max(64, batch_size * max_blocks_per_seq * 2)
+
+    fp8_vals = torch.randn((num_blocks, block_size, fp8_dim),
+                           dtype=torch.float32,
+                           device=device).to(torch.float8_e4m3fn)
+    tail_vals = torch.randn((num_blocks, block_size, bf16_dim),
+                            dtype=torch.bfloat16,
+                            device=device)
+    scale_exponents = torch.randint(-8,
+                                    9,
+                                    (num_blocks, block_size, num_quant_blocks),
+                                    dtype=torch.int32,
+                                    device=device)
+    scale_bytes = (scale_exponents + 127).to(torch.uint8)
+    pad_scale = torch.zeros((num_blocks, block_size, scale_dim -
+                             num_quant_blocks),
+                            dtype=torch.uint8,
+                            device=device)
+    scale_storage = torch.cat([scale_bytes, pad_scale], dim=-1)
+
+    token_storage = torch.cat([
+        fp8_vals.view(torch.uint8),
+        tail_vals.view(torch.uint16).view(torch.uint8),
+    ],
+                              dim=-1)
+
+    k_cache = torch.empty((num_blocks, block_bytes),
+                          dtype=torch.uint8,
+                          device=device)
+    k_cache[:, :block_size * token_data_bytes] = token_storage.reshape(
+        num_blocks, block_size * token_data_bytes)
+    k_cache[:, block_size * token_data_bytes:] = scale_storage.reshape(
+        num_blocks, block_size * scale_dim)
+
+    seq_lens = torch.randint(1,
+                             max_seq_len + 1, (batch_size, ),
+                             dtype=torch.int32,
+                             device=device)
+
+    gather_lens = None
+    if use_explicit_gather_lens:
+        gather_lens_cpu = [random.randint(1, int(seq_len))
+                           for seq_len in seq_lens.cpu().tolist()]
+        gather_lens = torch.tensor(gather_lens_cpu,
+                                   dtype=torch.int32,
+                                   device=device)
+
+    block_table = torch.empty((batch_size, max_blocks_per_seq),
+                              dtype=torch.int32,
+                              device=device)
+    for batch_idx in range(batch_size):
+        block_table[batch_idx] = torch.randperm(num_blocks,
+                                                device=device,
+                                                dtype=torch.int32)[
+                                                    :max_blocks_per_seq]
+
+    max_gather_len = int((gather_lens if gather_lens is not None else seq_lens)
+                         .max()
+                         .item())
+    out = torch.zeros((batch_size, offset + max_gather_len,
+                       DEEPSEEK_V4_HEAD_DIM),
+                      dtype=torch.bfloat16,
+                      device=device)
+
+    expected = _reference_dequantize_and_gather_k_cache(
+        k_cache,
+        seq_lens,
+        gather_lens,
+        block_table,
+        out.size(1),
+        offset,
+    ).to(device)
+
+    opcheck(
+        torch.ops._C_cache_ops.dequantize_and_gather_k_cache,
+        (out, k_cache, seq_lens, gather_lens, block_table, block_size, offset),
+    )
+
+    ops.dequantize_and_gather_k_cache(out, k_cache, seq_lens, gather_lens,
+                                      block_table, block_size, offset)
+    torch.testing.assert_close(out, expected)
 
 @pytest.mark.parametrize("kv_lora_rank", [512])
 @pytest.mark.parametrize("qk_rope_head_dim", [64])
