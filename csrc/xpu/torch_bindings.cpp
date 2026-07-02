@@ -61,7 +61,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("deepseek_scaling_rope", torch::kXPU, &deepseek_scaling_rope);
 
   xpu_ops.def(
-      "xpu_compress_insert_fp8mix(Tensor state_cache, Tensor token_to_req_indices, "
+      "xpu_compress_insert_fp8mix(Tensor state_cache, Tensor "
+      "token_to_req_indices, "
       "Tensor positions, Tensor slot_mapping, Tensor block_table, "
       "Tensor rms_norm_weight, float rms_norm_eps, Tensor cos_sin_cache, "
       "Tensor! k_cache, Tensor kv_slot_mapping, int kv_cache_block_size, "

@@ -183,7 +183,9 @@ def _ref_c4_kv_insert_fp8mix(
 
         block_base = kv_block * kv_block_stride
         token_off = block_base + kv_pos * token_stride
-        scale_off = block_base + kv_cache_block_size * token_stride + kv_pos * scale_dim
+        scale_off = (
+            block_base + kv_cache_block_size * token_stride + kv_pos * scale_dim
+        )
 
         raw[token_off: token_off + nope_head_dim] = fp8_nope
         raw[token_off + nope_head_dim: token_off + token_stride] = rope_bytes
@@ -259,7 +261,7 @@ def _make_inputs_small_fp8mix(
     """
     state_width = (1 + overlap) * HEAD_SIZE
     num_blocks = 512
-    max_position = int(((num_tokens + 1) * compress_ratio - 1))
+    max_position = int((num_tokens + 1) * compress_ratio - 1)
     bt_cols = max(1024, max_position // state_blk_sz + 8)
     gen = torch.Generator(device="cpu").manual_seed(seed)
 
@@ -318,15 +320,21 @@ def _apply_fp8mix_case(
         return
 
     if make_non_boundary and num_tokens > 1:
-        odd_idx = torch.arange(1, num_tokens, 2, device=xpu_in["positions"].device)
+        odd_idx = torch.arange(
+            1, num_tokens, 2, device=xpu_in["positions"].device
+        )
         xpu_in["positions"][odd_idx] += 1
 
     if invalidate_slot_mapping and num_tokens > 1:
-        odd_idx = torch.arange(1, num_tokens, 2, device=xpu_in["slot_mapping"].device)
+        odd_idx = torch.arange(
+            1, num_tokens, 2, device=xpu_in["slot_mapping"].device
+        )
         xpu_in["slot_mapping"][odd_idx] = -1
 
     if invalidate_kv_slot and num_tokens > 1:
-        odd_idx = torch.arange(1, num_tokens, 2, device=xpu_in["kv_slot_mapping"].device)
+        odd_idx = torch.arange(
+            1, num_tokens, 2, device=xpu_in["kv_slot_mapping"].device
+        )
         xpu_in["kv_slot_mapping"][odd_idx] = -1
 
 
@@ -511,7 +519,9 @@ def test_c4_kv_insert_fp8mix_layout_and_bytes(config, num_tokens, case, device):
             .view(torch.bfloat16)
             .float()
         )
-        torch.testing.assert_close(xpu_rope_bf16, cpu_rope_bf16, rtol=0, atol=1e-2)
+        torch.testing.assert_close(
+            xpu_rope_bf16, cpu_rope_bf16, rtol=0, atol=1e-2
+        )
         # 8B scales (7 real + 1 pad)
         assert torch.equal(
             xpu_raw[scale_off: scale_off + SCALE_DIM],
@@ -586,7 +596,11 @@ def test_c4_kv_insert_fp8mix_invalid_stride_raises(device):
     "arg_name,bad_value,err_match",
     [
         ("rope_head_dim", 31, r"rope_head_dim must be even and in \[0, 512\]"),
-        ("token_stride", TOKEN_STRIDE - 1, r"token_stride too small for fp8\+rope payload"),
+        (
+            "token_stride",
+            TOKEN_STRIDE - 1,
+            r"token_stride too small for fp8\+rope payload",
+        ),
         ("scale_dim", 6, "scale_dim too small for NOPE quant blocks"),
     ],
 )

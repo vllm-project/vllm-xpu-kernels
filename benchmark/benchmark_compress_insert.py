@@ -7,7 +7,8 @@ Mirrors real input shapes from DeepSeek-V4:
 
 Usage:
     ZE_AFFINITY_MASK=0 python benchmark_compress_insert.py
-    ZE_AFFINITY_MASK=0 python benchmark_compress_insert.py --layer B --num-tokens 8192
+    ZE_AFFINITY_MASK=0 python benchmark_compress_insert.py \
+        --layer B --num-tokens 8192
     ZE_AFFINITY_MASK=0 python benchmark_compress_insert.py --iters 100
 """
 import argparse
@@ -117,7 +118,8 @@ def sync_device(device):
 
 
 def release_device_cache(device):
-    # Avoid long sweeps accumulating allocator pressure and triggering DEVICE_LOST.
+    # Avoid long sweeps accumulating allocator pressure and triggering
+    # DEVICE_LOST.
     gc.collect()
     if device.type == "xpu" and hasattr(torch, "xpu"):
         torch.xpu.empty_cache()
@@ -147,7 +149,8 @@ def benchmark_path(cfg, num_tokens, path, fp8mix_inputs, warmup=5, iters=50):
         _kv_block_stride,
     ) = fp8mix_inputs
 
-    # Allocate benchmark cache tensor here to align with compare script behavior.
+    # Allocate benchmark cache tensor here to align with compare script
+    # behavior.
     k_cache_fp8mix = torch.zeros(
         state_cache.size(0),
         kv_blk,
@@ -200,8 +203,7 @@ def benchmark_triton_path(cfg, num_tokens, fp8mix_inputs,
         raise ValueError("Triton path currently supports cuda/xpu devices only")
 
     from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
-        _fused_kv_compress_norm_rope_insert_sparse_attn as fused_kernel,
-    )
+        _fused_kv_compress_norm_rope_insert_sparse_attn as fused_kernel)
 
     (
         state_cache,
@@ -283,13 +285,16 @@ def compare_sycl_triton_correctness(cfg, num_tokens,
     sycl_dev = torch.device(sycl_device)
     triton_dev = torch.device(triton_device)
     if triton_dev.type not in ("cuda", "xpu"):
-        raise ValueError("--triton-device must be cuda/xpu for correctness comparison")
+        raise ValueError(
+            "--triton-device must be cuda/xpu for correctness comparison"
+        )
 
     from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
-        _fused_kv_compress_norm_rope_insert_sparse_attn as fused_kernel,
-    )
+        _fused_kv_compress_norm_rope_insert_sparse_attn as fused_kernel)
 
-    _, fp8mix_inputs = make_inputs(cfg, num_tokens, sycl_dev, seed=123, num_blocks=num_blocks)
+    _, fp8mix_inputs = make_inputs(
+        cfg, num_tokens, sycl_dev, seed=123, num_blocks=num_blocks
+    )
     (state_cache_x,
      token_to_req_x,
      positions_x,
@@ -404,21 +409,27 @@ def compare_sycl_triton_correctness(cfg, num_tokens,
         active_tokens = unique_slots % kv_blk
 
         # Cache is block-packed in memory:
-        #   [token payload area: kv_blk * token_stride][scale area: kv_blk * scale_dim]
-        # so per-token payload/scale must be gathered by flat offsets, not [:, token, :].
+        #   [token payload area: kv_blk * token_stride]
+        #   [scale area: kv_blk * scale_dim]
+        # so per-token payload/scale must be gathered by flat offsets,
+        # not [:, token, :].
         x_block_view = xcpu.view(xcpu.size(0), -1)
         c_block_view = ccpu.view(ccpu.size(0), -1)
         x_blocks = x_block_view[active_blocks]
         c_blocks = c_block_view[active_blocks]
 
         token_offsets = active_tokens * token_stride
-        token_cols = token_offsets[:, None] + torch.arange(token_stride, dtype=torch.int64)
+        token_cols = token_offsets[:, None] + torch.arange(
+            token_stride, dtype=torch.int64
+        )
         x_token = x_blocks.gather(1, token_cols)
         c_token = c_blocks.gather(1, token_cols)
 
         scale_base = kv_blk * token_stride
         scale_offsets = scale_base + active_tokens * scale_dim
-        scale_cols = scale_offsets[:, None] + torch.arange(scale_dim, dtype=torch.int64)
+        scale_cols = scale_offsets[:, None] + torch.arange(
+            scale_dim, dtype=torch.int64
+        )
         x_scale = x_blocks.gather(1, scale_cols)
         c_scale = c_blocks.gather(1, scale_cols)
 
@@ -441,7 +452,9 @@ def compare_sycl_triton_correctness(cfg, num_tokens,
         c_rope_b = c_token[:, nope_head_dim:token_stride].contiguous()
         x_rope = x_rope_b.reshape(-1, rope_bytes).view(torch.bfloat16).float()
         c_rope = c_rope_b.reshape(-1, rope_bytes).view(torch.bfloat16).float()
-        rope_close = torch.isclose(x_rope, c_rope, rtol=0, atol=float(rope_atol))
+        rope_close = torch.isclose(
+            x_rope, c_rope, rtol=0, atol=float(rope_atol)
+        )
         rope_diff_elems = int((~rope_close).sum().item())
         rope_total_elems = int(rope_close.numel())
 
@@ -525,26 +538,60 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--layer", choices=["A", "B", "both"], default="both")
     ap.add_argument("--path", choices=["fp8mix"], default="fp8mix")
-    ap.add_argument("--impl", choices=["sycl", "triton", "both"], default="both",
-                    help="kernel implementation to benchmark")
+    ap.add_argument(
+        "--impl",
+        choices=["sycl", "triton", "both"],
+        default="both",
+        help="kernel implementation to benchmark",
+    )
     ap.add_argument("--sycl-device", default="xpu")
     ap.add_argument("--triton-device", default="xpu")
     ap.add_argument("--num-blocks", type=int, default=8192,
                     help="number of state/kv blocks for synthetic input")
-    ap.add_argument("--check-correctness", action="store_true",
-                    help="run standalone SYCL vs Triton cache-byte correctness check")
-    ap.add_argument("--correctness-num-blocks", type=int, default=2048,
-                    help="num_blocks used only for correctness comparison to reduce memory pressure")
-    ap.add_argument("--correctness-max-tokens", type=int, default=4096,
-                    help="skip correctness when num_tokens exceeds this threshold")
-    ap.add_argument("--fp8-ulp-tol", type=int, default=1,
-                    help="treat fp8 byte abs diff <= this value as acceptable (default: 1)")
-    ap.add_argument("--fp8-max-hard-diff-bytes", type=int, default=0,
-                    help="max allowed fp8 bytes beyond --fp8-ulp-tol (default: 0)")
-    ap.add_argument("--rope-atol", type=float, default=1e-2,
-                    help="absolute tolerance for rope bf16 value compare (default: 1e-2)")
-    ap.add_argument("--rope-max-diff-elems", type=int, default=1,
-                    help="max allowed rope elements beyond --rope-atol (default: 1)")
+    ap.add_argument(
+        "--check-correctness",
+        action="store_true",
+        help="run standalone SYCL vs Triton cache-byte correctness check",
+    )
+    ap.add_argument(
+        "--correctness-num-blocks",
+        type=int,
+        default=2048,
+        help="num_blocks used only for correctness comparison to "
+             "reduce memory pressure",
+    )
+    ap.add_argument(
+        "--correctness-max-tokens",
+        type=int,
+        default=4096,
+        help="skip correctness when num_tokens exceeds this threshold",
+    )
+    ap.add_argument(
+        "--fp8-ulp-tol",
+        type=int,
+        default=1,
+        help="treat fp8 byte abs diff <= this value as acceptable "
+             "(default: 1)",
+    )
+    ap.add_argument(
+        "--fp8-max-hard-diff-bytes",
+        type=int,
+        default=0,
+        help="max allowed fp8 bytes beyond --fp8-ulp-tol (default: 0)",
+    )
+    ap.add_argument(
+        "--rope-atol",
+        type=float,
+        default=1e-2,
+        help="absolute tolerance for rope bf16 value compare "
+             "(default: 1e-2)",
+    )
+    ap.add_argument(
+        "--rope-max-diff-elems",
+        type=int,
+        default=1,
+        help="max allowed rope elements beyond --rope-atol (default: 1)",
+    )
     ap.add_argument("--num-tokens", type=int, default=None,
                     help="single num_tokens value; default: sweep")
     ap.add_argument("--warmup", type=int, default=5)
@@ -561,10 +608,15 @@ def main():
             cfg = LAYER_CONFIGS[lname]
             for nt in nt_list:
                 if nt <= args.correctness_max_tokens:
-                    # Correctness path uses slot_mapping/kv_slot_mapping = arange(num_tokens),
-                    # so num_blocks must be large enough to cover max(kv_slot // kv_blk).
-                    min_blocks_for_slots = (nt + cfg["kv_cache_block_size"] - 1) // cfg["kv_cache_block_size"]
-                    corr_num_blocks = max(args.correctness_num_blocks, min_blocks_for_slots)
+                    # Correctness path uses
+                    # slot_mapping/kv_slot_mapping = arange(num_tokens),
+                    # so num_blocks must be large enough to cover
+                    # max(kv_slot // kv_blk).
+                    kv_blk = cfg["kv_cache_block_size"]
+                    min_blocks_for_slots = (nt + kv_blk - 1) // kv_blk
+                    corr_num_blocks = max(
+                        args.correctness_num_blocks, min_blocks_for_slots
+                    )
                     ok, stats, detail = compare_sycl_triton_correctness(
                         cfg,
                         nt,
@@ -579,11 +631,14 @@ def main():
                     status = "PASS" if ok else "FAIL"
                     print(
                         f"correctness[{cfg['label']} nt={nt}]: {status} "
-                        f"fp8_diff={stats['fp8_diff_bytes']}/{stats['fp8_total_bytes']} "
+                        f"fp8_diff={stats['fp8_diff_bytes']}"
+                        f"/{stats['fp8_total_bytes']} "
                         f"fp8_hard_diff={stats['fp8_hard_diff_bytes']} "
                         f"(ulp_tol={stats['fp8_ulp_tol']}) "
-                        f"rope_diff={stats['rope_diff_elems']}/{stats['rope_total_elems']} "
-                        f"(atol={stats['rope_atol']:.6g}, max={stats['rope_max_diff_elems']}) "
+                        f"rope_diff={stats['rope_diff_elems']}"
+                        f"/{stats['rope_total_elems']} "
+                        f"(atol={stats['rope_atol']:.6g}, "
+                        f"max={stats['rope_max_diff_elems']}) "
                         f"scale_diff={stats['scale_diff_bytes']}/{stats['scale_total_bytes']}"
                     )
                     if detail is not None:
@@ -591,7 +646,8 @@ def main():
                             "  first_mismatch: "
                             f"block={detail['block']} "
                             f"token_in_block={detail['token_in_block']} "
-                            f"region={detail['region']} idx={detail['region_idx']} "
+                            f"region={detail['region']} "
+                            f"idx={detail['region_idx']} "
                             f"sycl={detail['sycl']} triton={detail['triton']}"
                         )
                 else:
@@ -605,10 +661,17 @@ def main():
         return
 
     if args.impl == "both":
-        print(f"{'layer':<10} {'num_tok':>8} {'sycl_us':>10} {'triton_us':>10} {'sycl_GB/s':>10} {'triton_GB/s':>12} {'triton/sycl':>12}")
+        print(
+            f"{'layer':<10} {'num_tok':>8} {'sycl_us':>10} "
+            f"{'triton_us':>10} {'sycl_GB/s':>10} {'triton_GB/s':>12} "
+            f"{'triton/sycl':>12}"
+        )
         print("-" * 96)
     else:
-        print(f"{'layer':<10} {'impl':<8} {'path':<8} {'num_tok':>8} {'lat_us':>10} {'GB/s':>10} {'us/tok':>10}")
+        print(
+            f"{'layer':<10} {'impl':<8} {'path':<8} {'num_tok':>8} "
+            f"{'lat_us':>10} {'GB/s':>10} {'us/tok':>10}"
+        )
         print("-" * 66)
 
     for lname in layers:
@@ -637,7 +700,8 @@ def main():
                 )
                 ratio = triton_us / sycl_us if sycl_us > 0 else float("inf")
                 print(
-                    f"{cfg['label']:<10} {nt:>8} {sycl_us:>10.2f} {triton_us:>10.2f} "
+                    f"{cfg['label']:<10} {nt:>8} {sycl_us:>10.2f} "
+                    f"{triton_us:>10.2f} "
                     f"{sycl_gbps:>10.1f} {triton_gbps:>12.1f} {ratio:>12.2f}"
                 )
                 release_device_cache(torch.device(args.sycl_device))
@@ -666,7 +730,8 @@ def main():
                         warmup=args.warmup, iters=args.iters,
                     )
                 print(
-                    f"{cfg['label']:<10} {args.impl:<8} {args.path:<8} {nt:>8} {lat_us:>10.2f} "
+                    f"{cfg['label']:<10} {args.impl:<8} {args.path:<8} "
+                    f"{nt:>8} {lat_us:>10.2f} "
                     f"{gbps:>10.1f} {lat_us/nt:>10.2f}"
                 )
                 if args.impl == "triton":

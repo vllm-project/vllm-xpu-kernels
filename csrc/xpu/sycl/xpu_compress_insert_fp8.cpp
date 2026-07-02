@@ -102,10 +102,10 @@ class c4_kv_insert_fp8mix_generic_kernel {
         scale_dim_(scale_dim),
         compress_ratio_(compress_ratio),
         overlap_(overlap),
-          rope_head_dim_(rope_head_dim) {}
+        rope_head_dim_(rope_head_dim) {}
 
-  [[sycl::reqd_sub_group_size(SG_SIZE)]] void operator()(
-      sycl::nd_item<1> it) const {
+  [[sycl::reqd_sub_group_size(SG_SIZE)]] void
+  operator()(sycl::nd_item<1> it) const {
     const int token = it.get_group(0);
     const int lid = it.get_local_id(0);
     const int dim_base = lid * PER_WI;
@@ -132,8 +132,8 @@ class c4_kv_insert_fp8mix_generic_kernel {
         (((position + 1) % static_cast<int64_t>(compress_ratio_)) == 0) &&
         (kv_slot_idx >= 0);
 
-    const int64_t n_gather =
-        static_cast<int64_t>(1 + overlap_) * static_cast<int64_t>(compress_ratio_);
+    const int64_t n_gather = static_cast<int64_t>(1 + overlap_) *
+                             static_cast<int64_t>(compress_ratio_);
     const int64_t start = position - n_gather + 1;
 
     float m_run[PER_WI], s_run[PER_WI], acc[PER_WI];
@@ -154,7 +154,8 @@ class c4_kv_insert_fp8mix_generic_kernel {
       const int32_t state_block = block_table_
           [static_cast<int64_t>(req_idx) * block_table_stride0_ + logical];
       const int64_t pos_in_block = safe_pos % state_cache_block_size_;
-      const float* row = state_cache_ +
+      const float* row =
+          state_cache_ +
           static_cast<int64_t>(state_block) * state_cache_stride0_ +
           pos_in_block * state_cache_stride1_;
 
@@ -186,7 +187,8 @@ class c4_kv_insert_fp8mix_generic_kernel {
     }
     const float ss =
         sycl::reduce_over_group(it.get_group(), ps, sycl::plus<float>());
-    const float inv = sycl::rsqrt(ss / static_cast<float>(HEAD_SIZE) + rms_eps_);
+    const float inv =
+        sycl::rsqrt(ss / static_cast<float>(HEAD_SIZE) + rms_eps_);
 
     const int nope_head_dim = HEAD_SIZE - rope_head_dim_;
     const int nope_pairs = nope_head_dim / 2;
@@ -246,49 +248,58 @@ class c4_kv_insert_fp8mix_generic_kernel {
     const int scale_blocks = (nope_head_dim + QUANT_BLOCK - 1) / QUANT_BLOCK;
     const int total_quant_wis = scale_blocks * WIS_PER_BLOCK;
 
-    if (lid < total_quant_wis) {
-      const int b = lid / WIS_PER_BLOCK;
-      const int wi_in_block = lid % WIS_PER_BLOCK;
-      const int base = b * QUANT_BLOCK + wi_in_block * PER_WI;
+    // Sub-group collectives (permute_group_by_xor / select_from_group) must be
+    // executed by every work-item of the sub-group in converged control flow.
+    // total_quant_wis is always a multiple of WIS_PER_BLOCK (16), so each
+    // 16-lane half-subgroup is either fully active or fully inactive; we run
+    // the collectives for all lanes and only guard the memory reads/writes with
+    // the per-lane `active` predicate. Inactive lanes contribute the identity
+    // value (0) to their half's max reduction and discard the broadcast result.
+    const bool active = lid < total_quant_wis;
+    const int b = active ? (lid / WIS_PER_BLOCK) : 0;
+    const int wi_in_block = active ? (lid % WIS_PER_BLOCK) : 0;
+    const int base = b * QUANT_BLOCK + wi_in_block * PER_WI;
 
-      auto sg = it.get_sub_group();
-      const int sg_lid = static_cast<int>(sg.get_local_linear_id());
-      const int half_leader =
-          (sg_lid / WIS_PER_BLOCK) * WIS_PER_BLOCK;  // 0 or 16 inside subgroup
+    auto sg = it.get_sub_group();
+    const int sg_lid = static_cast<int>(sg.get_local_linear_id());
+    const int half_leader =
+        (sg_lid / WIS_PER_BLOCK) * WIS_PER_BLOCK;  // 0 or 16 inside subgroup
 
-      float block_absmax = 0.f;
+    float block_absmax = 0.f;
+    if (active) {
 #pragma unroll
       for (int j = 0; j < PER_WI; ++j) {
         const int i = base + j;
         if (i < nope_head_dim) {
           block_absmax = sycl::max(
-              block_absmax,
-              sycl::fabs(static_cast<float>(smem.normed[i])));
+              block_absmax, sycl::fabs(static_cast<float>(smem.normed[i])));
         }
       }
+    }
 
-      // 16-lane reduction inside the half-subgroup.
+    // 16-lane reduction inside the half-subgroup (all lanes participate).
 #pragma unroll
-      for (int mask = WIS_PER_BLOCK / 2; mask > 0; mask >>= 1) {
-        const float other = sycl::permute_group_by_xor(sg, block_absmax, mask);
-        block_absmax = sycl::max(block_absmax, other);
-      }
+    for (int mask = WIS_PER_BLOCK / 2; mask > 0; mask >>= 1) {
+      const float other = sycl::permute_group_by_xor(sg, block_absmax, mask);
+      block_absmax = sycl::max(block_absmax, other);
+    }
 
-      float inv_scale_local = 0.f;
-      if (sg_lid == half_leader) {
-        block_absmax = sycl::max(block_absmax, kQuantAbsmaxFloor);
-        const float raw_scale = block_absmax * INV_FP8_MAX;
-        const float exponent = sycl::ceil(sycl::log2(raw_scale));
-        inv_scale_local = sycl::exp2(-exponent);
+    float inv_scale_local = 0.f;
+    if (active && sg_lid == half_leader) {
+      block_absmax = sycl::max(block_absmax, kQuantAbsmaxFloor);
+      const float raw_scale = block_absmax * INV_FP8_MAX;
+      const float exponent = sycl::ceil(sycl::log2(raw_scale));
+      inv_scale_local = sycl::exp2(-exponent);
 
-        float encoded = exponent + kUe8m0ExpBias;
-        encoded = sycl::clamp(encoded, 0.f, 255.f);
-        scale_ptr[b] = static_cast<uint8_t>(encoded);
-      }
+      float encoded = exponent + kUe8m0ExpBias;
+      encoded = sycl::clamp(encoded, 0.f, 255.f);
+      scale_ptr[b] = static_cast<uint8_t>(encoded);
+    }
 
-      const float inv_scale =
-          sycl::select_from_group(sg, inv_scale_local, half_leader);
+    const float inv_scale =
+        sycl::select_from_group(sg, inv_scale_local, half_leader);
 
+    if (active) {
 #pragma unroll
       for (int j = 0; j < PER_WI; ++j) {
         const int i = base + j;
@@ -377,7 +388,7 @@ class c4_kv_split_gather_kernel {
       const int32_t* block_table,
       int64_t block_table_stride0,
       int state_cache_block_size,
-      float* scratch,          // [nt, G, 3, HEAD]
+      float* scratch,           // [nt, G, 3, HEAD]
       int64_t scratch_stride0,  // = G * 3 * HEAD
       int64_t scratch_stride1)  // = 3 * HEAD
       : state_cache_(state_cache),
@@ -393,8 +404,8 @@ class c4_kv_split_gather_kernel {
         scratch_stride0_(scratch_stride0),
         scratch_stride1_(scratch_stride1) {}
 
-  [[sycl::reqd_sub_group_size(SG_SIZE)]] void operator()(
-      sycl::nd_item<2> it) const {
+  [[sycl::reqd_sub_group_size(SG_SIZE)]] void
+  operator()(sycl::nd_item<2> it) const {
     const int token = it.get_group(0);
     const int shard = it.get_group(1);
     const int lid = it.get_local_id(1);
@@ -428,14 +439,14 @@ class c4_kv_split_gather_kernel {
       const int64_t gather_pos = start + gather_idx;
       const bool valid = gather_pos >= 0;
       const int64_t safe_pos = valid ? gather_pos : 0;
-      const int head_offset =
-          (gather_idx >= COMPRESS_RATIO) ? HEAD_SIZE : 0;
+      const int head_offset = (gather_idx >= COMPRESS_RATIO) ? HEAD_SIZE : 0;
 
       const int64_t logical = safe_pos / state_cache_block_size_;
       const int32_t state_block = block_table_
           [static_cast<int64_t>(req_idx) * block_table_stride0_ + logical];
       const int64_t pos_in_block = safe_pos % state_cache_block_size_;
-      const float* row = state_cache_ +
+      const float* row =
+          state_cache_ +
           static_cast<int64_t>(state_block) * state_cache_stride0_ +
           pos_in_block * state_cache_stride1_;
 
@@ -455,9 +466,8 @@ class c4_kv_split_gather_kernel {
     }
 
     // Write partial (m, s, acc) for this shard to scratch.
-    float* base = scratch_ +
-        static_cast<int64_t>(token) * scratch_stride0_ +
-        static_cast<int64_t>(shard) * scratch_stride1_;
+    float* base = scratch_ + static_cast<int64_t>(token) * scratch_stride0_ +
+                  static_cast<int64_t>(shard) * scratch_stride1_;
 #pragma unroll
     for (int j = 0; j < PER_WI; ++j) {
       const int h = dim_base + j;
@@ -539,8 +549,8 @@ class c4_kv_finalize_fp8mix_kernel {
         token_stride_(token_stride),
         scale_dim_(scale_dim) {}
 
-  [[sycl::reqd_sub_group_size(SG_SIZE)]] void operator()(
-      sycl::nd_item<1> it) const {
+  [[sycl::reqd_sub_group_size(SG_SIZE)]] void
+  operator()(sycl::nd_item<1> it) const {
     const int token = it.get_group(0);
     const int lid = it.get_local_id(0);
     const int dim_base = lid * PER_WI;
@@ -558,7 +568,8 @@ class c4_kv_finalize_fp8mix_kernel {
     const int64_t position = smem.meta[1];
     const int64_t kv_slot_idx = smem.meta[2];
     const bool should_store = (slot_id >= 0) &&
-        (((position + 1) % COMPRESS_RATIO) == 0) && (kv_slot_idx >= 0);
+                              (((position + 1) % COMPRESS_RATIO) == 0) &&
+                              (kv_slot_idx >= 0);
 
     // Online-merge G_SHARDS partials in registers.
     float m_run[PER_WI], s_run[PER_WI], acc[PER_WI];
@@ -659,48 +670,55 @@ class c4_kv_finalize_fp8mix_kernel {
 
     // Parallelize NOPE quantization over 7 blocks x 16 WIs (112 WIs total).
     // Each WI handles 4 contiguous elements for both absmax partial and write.
-    constexpr int WIS_PER_BLOCK = QUANT_BLOCK / PER_WI;  // 16
+    constexpr int WIS_PER_BLOCK = QUANT_BLOCK / PER_WI;           // 16
     constexpr int TOTAL_QUANT_WIS = NOPE_BLOCKS * WIS_PER_BLOCK;  // 112
 
-    if (lid < TOTAL_QUANT_WIS) {
-      const int b = lid / WIS_PER_BLOCK;
-      const int wi_in_block = lid % WIS_PER_BLOCK;
-      const int base = b * QUANT_BLOCK + wi_in_block * PER_WI;
-      auto sg = it.get_sub_group();
-      const int sg_lid = static_cast<int>(sg.get_local_linear_id());
-      const int half_leader =
-          (sg_lid / WIS_PER_BLOCK) * WIS_PER_BLOCK;  // 0 or 16
+    // Sub-group collectives must run in converged control flow for the whole
+    // sub-group. TOTAL_QUANT_WIS (112) is a multiple of WIS_PER_BLOCK (16), so
+    // each 16-lane half-subgroup is fully active or fully inactive. Run the
+    // collectives for all lanes; guard reads/writes with `active`.
+    const bool active = lid < TOTAL_QUANT_WIS;
+    const int b = active ? (lid / WIS_PER_BLOCK) : 0;
+    const int wi_in_block = active ? (lid % WIS_PER_BLOCK) : 0;
+    const int base = b * QUANT_BLOCK + wi_in_block * PER_WI;
+    auto sg = it.get_sub_group();
+    const int sg_lid = static_cast<int>(sg.get_local_linear_id());
+    const int half_leader =
+        (sg_lid / WIS_PER_BLOCK) * WIS_PER_BLOCK;  // 0 or 16
 
-      float block_absmax = 0.f;
+    float block_absmax = 0.f;
+    if (active) {
 #pragma unroll
       for (int j = 0; j < PER_WI; ++j) {
-        block_absmax =
-            sycl::max(block_absmax,
-                      sycl::fabs(static_cast<float>(smem.pre_nope[base + j])));
+        block_absmax = sycl::max(
+            block_absmax,
+            sycl::fabs(static_cast<float>(smem.pre_nope[base + j])));
       }
+    }
 
-      // 16-lane reduction inside half-subgroup (lane bits [0..3]).
+    // 16-lane reduction inside half-subgroup (all lanes participate).
 #pragma unroll
-      for (int mask = WIS_PER_BLOCK / 2; mask > 0; mask >>= 1) {
-        const float other = sycl::permute_group_by_xor(sg, block_absmax, mask);
-        block_absmax = sycl::max(block_absmax, other);
-      }
+    for (int mask = WIS_PER_BLOCK / 2; mask > 0; mask >>= 1) {
+      const float other = sycl::permute_group_by_xor(sg, block_absmax, mask);
+      block_absmax = sycl::max(block_absmax, other);
+    }
 
-      float inv_scale_local = 0.f;
-      if (sg_lid == half_leader) {
-        block_absmax = sycl::max(block_absmax, kQuantAbsmaxFloor);
-        const float raw_scale = block_absmax * INV_FP8_MAX;
-        const float exponent = sycl::ceil(sycl::log2(raw_scale));
-        inv_scale_local = sycl::exp2(-exponent);
+    float inv_scale_local = 0.f;
+    if (active && sg_lid == half_leader) {
+      block_absmax = sycl::max(block_absmax, kQuantAbsmaxFloor);
+      const float raw_scale = block_absmax * INV_FP8_MAX;
+      const float exponent = sycl::ceil(sycl::log2(raw_scale));
+      inv_scale_local = sycl::exp2(-exponent);
 
-        float encoded = exponent + kUe8m0ExpBias;
-        encoded = sycl::clamp(encoded, 0.f, 255.f);
-        scale_ptr[b] = static_cast<uint8_t>(encoded);
-      }
+      float encoded = exponent + kUe8m0ExpBias;
+      encoded = sycl::clamp(encoded, 0.f, 255.f);
+      scale_ptr[b] = static_cast<uint8_t>(encoded);
+    }
 
-      const float inv_scale =
-          sycl::select_from_group(sg, inv_scale_local, half_leader);
+    const float inv_scale =
+        sycl::select_from_group(sg, inv_scale_local, half_leader);
 
+    if (active) {
       float x0 = static_cast<float>(smem.pre_nope[base + 0]) * inv_scale;
       float x1 = static_cast<float>(smem.pre_nope[base + 1]) * inv_scale;
       float x2 = static_cast<float>(smem.pre_nope[base + 2]) * inv_scale;
@@ -780,62 +798,39 @@ void launch_one_fp8mix_generic(
     int compress_ratio,
     int overlap,
     int rope_head_dim) {
-
   using K = vllm::c4_kv_insert_fp8mix_generic_kernel<WT>;
   constexpr int WG = K::WG_SIZE;
   at::DeviceGuard dg(at::Device(at::kXPU, at::xpu::current_device()));
   q.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<1>(num_tokens * WG, WG),
-        K{state_cache,
-          s0,
-          s1,
-          state_width,
-          tokenreq,
-          positions,
-          slot_mapping,
-          block_table,
-          bt0,
-          state_blk,
-          rms_w,
-          rms_eps,
-          cos_sin,
-          cs0,
-          k_cache,
-          kv_slot,
-          kv_blk,
-          kv_block_stride,
-          token_stride,
-          scale_dim,
-          compress_ratio,
-          overlap,
-            rope_head_dim});
+        K{state_cache,  s0,           s1,
+          state_width,  tokenreq,     positions,
+          slot_mapping, block_table,  bt0,
+          state_blk,    rms_w,        rms_eps,
+          cos_sin,      cs0,          k_cache,
+          kv_slot,      kv_blk,       kv_block_stride,
+          token_stride, scale_dim,    compress_ratio,
+          overlap,      rope_head_dim});
   });
 }
 
-// Persistent per-device scratch for the split-gather path.
-//
-// The XPU stream queue returned by vllmGetQueue() is in-order, so pass B of
-// one invocation finishes before pass A of the next invocation starts. A
-// single reused buffer per device is therefore race-free under the normal
-// single-stream execution model, and avoids a hot-path device allocation plus
-// per-call event/mutex bookkeeping on every decode step (which showed up as
-// large, load-dependent host-side spikes in profiles).
-//
-// The buffer is grow-only: split-gather only runs for num_tokens below a small
-// fixed threshold, so the capacity stabilizes after the first few calls and no
-// further allocation happens on the hot path. The tensor is owned by a static
-// cache, keeping it alive across calls without any explicit lifetime tracking.
-inline float* get_split_gather_scratch(int dev, int64_t numel) {
+// Persistent per-queue scratch for the split-gather path. The XPU queue is
+// in-order, so successive calls on the same queue are serialized (and the two
+// passes of one call by depends_on), making a reused, queue-keyed buffer
+// race-free. Grow-only and owned by a static cache: no per-call device alloc or
+// event/mutex bookkeeping on the decode hot path. Distinct streams get distinct
+// buffers, so cross-stream submissions never alias the same scratch.
+inline float*
+get_split_gather_scratch(const sycl::queue& q, int dev, int64_t numel) {
   static std::mutex mtx;
-  static std::unordered_map<int, at::Tensor> cache_by_dev;
+  static std::unordered_map<sycl::queue, at::Tensor> cache_by_queue;
 
   std::lock_guard<std::mutex> lk(mtx);
-  at::Tensor& buf = cache_by_dev[dev];
+  at::Tensor& buf = cache_by_queue[q];
   if (!buf.defined() || buf.numel() < numel) {
     buf = at::empty(
-        {numel},
-        at::TensorOptions().dtype(at::kFloat).device(at::kXPU, dev));
+        {numel}, at::TensorOptions().dtype(at::kFloat).device(at::kXPU, dev));
   }
   return buf.data_ptr<float>();
 }
@@ -870,24 +865,22 @@ void launch_split_gather_fp8mix(
   constexpr int WG = KA::WG_SIZE;
 
   at::DeviceGuard dg(at::Device(at::kXPU, at::xpu::current_device()));
-    const int dev = at::xpu::current_device();
+  const int dev = at::xpu::current_device();
 
-    // Scratch [num_tokens, G_SHARDS, 3, HEAD] fp32 — persistent, reused across
-    // calls. Safe to reuse because the stream queue is in-order (pass B of the
-    // previous call completes before pass A of this call writes the buffer).
-  const int64_t scratch_numel =
-      num_tokens * static_cast<int64_t>(G_SHARDS) * 3 *
-      static_cast<int64_t>(HEAD);
-    float* scr = get_split_gather_scratch(dev, scratch_numel);
+  // Scratch [num_tokens, G_SHARDS, 3, HEAD] fp32 — persistent, reused per queue
+  // (safe: the queue is in-order, so the previous call's pass B finishes before
+  // this call's pass A writes).
+  const int64_t scratch_numel = num_tokens * static_cast<int64_t>(G_SHARDS) *
+                                3 * static_cast<int64_t>(HEAD);
+  float* scr = get_split_gather_scratch(q, dev, scratch_numel);
   const int64_t scr0 = G_SHARDS * 3 * HEAD;
   const int64_t scr1 = 3 * HEAD;
 
   // Pass A: grid = (num_tokens, G_SHARDS * WG), local = (1, WG).
-    sycl::event pass_a = q.submit([&](sycl::handler& cgh) {
+  sycl::event pass_a = q.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<2>(
-            sycl::range<2>(num_tokens, G_SHARDS * WG),
-            sycl::range<2>(1, WG)),
+            sycl::range<2>(num_tokens, G_SHARDS * WG), sycl::range<2>(1, WG)),
         KA{state_cache,
            s0,
            s1,
@@ -975,17 +968,57 @@ void dispatch_fp8mix(
 
     if (!kDisableSplit && num_tokens < kSplitGatherThreshold) {
       launch_split_gather_fp8mix<128, 0, 64, 8, WT>(
-          q, num_tokens, sc, scs0, scs1, state_width, tr, pos, sm, bt, bt0,
-          state_block_size, rw, rms_eps, cs, cs0, kc, kvs,
-          kv_cache_block_size, kv_block_stride, token_stride, scale_dim);
+          q,
+          num_tokens,
+          sc,
+          scs0,
+          scs1,
+          state_width,
+          tr,
+          pos,
+          sm,
+          bt,
+          bt0,
+          state_block_size,
+          rw,
+          rms_eps,
+          cs,
+          cs0,
+          kc,
+          kvs,
+          kv_cache_block_size,
+          kv_block_stride,
+          token_stride,
+          scale_dim);
       return;
     }
   }
 
   launch_one_fp8mix_generic<WT>(
-      q, num_tokens, sc, scs0, scs1, state_width, tr, pos, sm, bt, bt0,
-      state_block_size, rw, rms_eps, cs, cs0, kc, kvs, kv_cache_block_size,
-      kv_block_stride, token_stride, scale_dim, compress_ratio, overlap,
+      q,
+      num_tokens,
+      sc,
+      scs0,
+      scs1,
+      state_width,
+      tr,
+      pos,
+      sm,
+      bt,
+      bt0,
+      state_block_size,
+      rw,
+      rms_eps,
+      cs,
+      cs0,
+      kc,
+      kvs,
+      kv_cache_block_size,
+      kv_block_stride,
+      token_stride,
+      scale_dim,
+      compress_ratio,
+      overlap,
       rope_head_dim);
 }
 
@@ -1015,7 +1048,8 @@ void xpu_compress_insert_fp8mix(
   TORCH_CHECK(
       rms_norm_weight.scalar_type() == torch::kFloat32 ||
           rms_norm_weight.scalar_type() == torch::kBFloat16,
-      "xpu_compress_insert_fp8mix: rms_norm_weight must be float32 or bfloat16");
+      "xpu_compress_insert_fp8mix: rms_norm_weight must be float32 or "
+      "bfloat16");
   TORCH_CHECK(cos_sin_cache.dtype() == torch::kFloat32);
   TORCH_CHECK(positions.dtype() == torch::kInt64);
   TORCH_CHECK(slot_mapping.dtype() == torch::kInt64);
@@ -1025,7 +1059,8 @@ void xpu_compress_insert_fp8mix(
   TORCH_CHECK(state_cache.dim() == 3);
   TORCH_CHECK(
       k_cache.dim() == 3,
-      "xpu_compress_insert_fp8mix: k_cache must be rank-3 [num_blocks, block_size, payload], got dim=",
+      "xpu_compress_insert_fp8mix: k_cache must be rank-3 [num_blocks, "
+      "block_size, payload], got dim=",
       k_cache.dim());
   TORCH_CHECK(
       k_cache.size(-1) >= token_stride + scale_dim,
@@ -1037,46 +1072,79 @@ void xpu_compress_insert_fp8mix(
       scale_dim,
       " = ",
       (token_stride + scale_dim));
-      TORCH_CHECK(
-        k_cache.stride(2) == 1,
-        "xpu_compress_insert_fp8mix: k_cache must be byte-contiguous on last dim, got stride(2)=",
-        k_cache.stride(2));
-      TORCH_CHECK(
-          k_cache.stride(1) >= token_stride,
-          "xpu_compress_insert_fp8mix: unsupported k_cache layout. Need stride(1) >= token_stride so each token payload has enough contiguous bytes, got stride(1)=",
-        k_cache.stride(1),
-        ", token_stride=",
-          token_stride);
-      TORCH_CHECK(
-        kv_block_stride == k_cache.stride(0),
-        "xpu_compress_insert_fp8mix: kv_block_stride must match k_cache.stride(0), got kv_block_stride=",
-        kv_block_stride,
-        ", k_cache.stride(0)=",
-        k_cache.stride(0));
-    TORCH_CHECK(compress_ratio > 0, "xpu_compress_insert_fp8mix: compress_ratio must be > 0");
-    TORCH_CHECK(overlap >= 0 && overlap <= 1, "xpu_compress_insert_fp8mix: overlap must be 0 or 1");
-    TORCH_CHECK(
+  TORCH_CHECK(
+      k_cache.stride(2) == 1,
+      "xpu_compress_insert_fp8mix: k_cache must be byte-contiguous on last "
+      "dim, got stride(2)=",
+      k_cache.stride(2));
+  TORCH_CHECK(
+      k_cache.stride(1) >= token_stride,
+      "xpu_compress_insert_fp8mix: unsupported k_cache layout. Need stride(1) "
+      ">= token_stride so each token payload has enough contiguous bytes, got "
+      "stride(1)=",
+      k_cache.stride(1),
+      ", token_stride=",
+      token_stride);
+  TORCH_CHECK(
+      compress_ratio > 0,
+      "xpu_compress_insert_fp8mix: compress_ratio must be > 0");
+  TORCH_CHECK(
+      overlap >= 0 && overlap <= 1,
+      "xpu_compress_insert_fp8mix: overlap must be 0 or 1");
+  TORCH_CHECK(
       rope_head_dim >= 0 && rope_head_dim <= 512 && (rope_head_dim % 2 == 0),
       "xpu_compress_insert_fp8mix: rope_head_dim must be even and in [0, 512]");
-    TORCH_CHECK(token_stride > 0, "xpu_compress_insert_fp8mix: token_stride must be > 0");
-    TORCH_CHECK(scale_dim > 0, "xpu_compress_insert_fp8mix: scale_dim must be > 0");
-    const int64_t nope_head_dim = 512 - rope_head_dim;
-    const int64_t required_scale_blocks = (nope_head_dim + 63) / 64;
-    TORCH_CHECK(
+  TORCH_CHECK(
+      token_stride > 0, "xpu_compress_insert_fp8mix: token_stride must be > 0");
+  TORCH_CHECK(
+      scale_dim > 0, "xpu_compress_insert_fp8mix: scale_dim must be > 0");
+  const int64_t nope_head_dim = 512 - rope_head_dim;
+  const int64_t required_scale_blocks = (nope_head_dim + 63) / 64;
+  TORCH_CHECK(
       scale_dim >= required_scale_blocks,
       "xpu_compress_insert_fp8mix: scale_dim too small for NOPE quant blocks");
-    TORCH_CHECK(
+  TORCH_CHECK(
       token_stride >= nope_head_dim + rope_head_dim * 2,
-      "xpu_compress_insert_fp8mix: token_stride too small for fp8+rope payload");
+      "xpu_compress_insert_fp8mix: token_stride too small for fp8+rope "
+      "payload");
   TORCH_CHECK(
       kv_block_stride >= kv_cache_block_size * (token_stride + scale_dim),
       "xpu_compress_insert_fp8mix: kv_block_stride too small for mixed layout");
+  TORCH_CHECK(
+      kv_block_stride == k_cache.stride(0),
+      "xpu_compress_insert_fp8mix: kv_block_stride must match "
+      "k_cache.stride(0), got kv_block_stride=",
+      kv_block_stride,
+      ", k_cache.stride(0)=",
+      k_cache.stride(0));
 
   const int64_t num_tokens = positions.numel();
   if (num_tokens == 0) return;
 
   const int state_width = static_cast<int>(state_cache.size(-1) / 2);
   const int state_block_size = static_cast<int>(state_cache.size(1));
+
+  // The gather reads row[state_width + head_offset + h] and row[head_offset +
+  // h] with h in [0, HEAD_SIZE) and head_offset in {0, HEAD_SIZE}, where the
+  // second (head_offset == HEAD_SIZE) segment is only accessed when overlap
+  // == 1. Each half of the row (kv / score) must therefore hold (1 + overlap)
+  // HEAD_SIZE segments, i.e. state_width >= HEAD_SIZE * (1 + overlap). Validate
+  // here so a mismatched caller layout fails cleanly instead of reading out of
+  // bounds on the device.
+  constexpr int kHeadSize = 512;
+  const int64_t required_state_width =
+      static_cast<int64_t>(kHeadSize) * (1 + overlap);
+  TORCH_CHECK(
+      static_cast<int64_t>(state_width) >= required_state_width,
+      "xpu_compress_insert_fp8mix: state_cache last dim too small. Need "
+      "size(-1) >= 2 * HEAD_SIZE * (1 + overlap) = ",
+      2 * required_state_width,
+      " (HEAD_SIZE=",
+      kHeadSize,
+      ", overlap=",
+      overlap,
+      "), got size(-1)=",
+      state_cache.size(-1));
 
   auto* sc = state_cache.data_ptr<float>();
   auto* tr = token_to_req_indices.data_ptr<int32_t>();
@@ -1098,22 +1166,58 @@ void xpu_compress_insert_fp8mix(
     const auto* rw = reinterpret_cast<const bf16_t*>(
         rms_norm_weight.data_ptr<at::BFloat16>());
     dispatch_fp8mix<bf16_t>(
-        q, num_tokens, sc, state_cache.stride(0), state_cache.stride(1),
-        state_width, tr, pos, sm, bt, block_table.stride(0), state_block_size,
-        rw, eps, cs, cos_sin_cache.stride(0), kc, kvs,
-        static_cast<int>(kv_cache_block_size), kv_block_stride,
-        static_cast<int>(token_stride), static_cast<int>(scale_dim),
-        static_cast<int>(compress_ratio), static_cast<int>(overlap),
+        q,
+        num_tokens,
+        sc,
+        state_cache.stride(0),
+        state_cache.stride(1),
+        state_width,
+        tr,
+        pos,
+        sm,
+        bt,
+        block_table.stride(0),
+        state_block_size,
+        rw,
+        eps,
+        cs,
+        cos_sin_cache.stride(0),
+        kc,
+        kvs,
+        static_cast<int>(kv_cache_block_size),
+        kv_block_stride,
+        static_cast<int>(token_stride),
+        static_cast<int>(scale_dim),
+        static_cast<int>(compress_ratio),
+        static_cast<int>(overlap),
         static_cast<int>(rope_head_dim));
   } else {
     const float* rw = rms_norm_weight.data_ptr<float>();
     dispatch_fp8mix<float>(
-        q, num_tokens, sc, state_cache.stride(0), state_cache.stride(1),
-        state_width, tr, pos, sm, bt, block_table.stride(0), state_block_size,
-        rw, eps, cs, cos_sin_cache.stride(0), kc, kvs,
-        static_cast<int>(kv_cache_block_size), kv_block_stride,
-        static_cast<int>(token_stride), static_cast<int>(scale_dim),
-        static_cast<int>(compress_ratio), static_cast<int>(overlap),
+        q,
+        num_tokens,
+        sc,
+        state_cache.stride(0),
+        state_cache.stride(1),
+        state_width,
+        tr,
+        pos,
+        sm,
+        bt,
+        block_table.stride(0),
+        state_block_size,
+        rw,
+        eps,
+        cs,
+        cos_sin_cache.stride(0),
+        kc,
+        kvs,
+        static_cast<int>(kv_cache_block_size),
+        kv_block_stride,
+        static_cast<int>(token_stride),
+        static_cast<int>(scale_dim),
+        static_cast<int>(compress_ratio),
+        static_cast<int>(overlap),
         static_cast<int>(rope_head_dim));
   }
 }
