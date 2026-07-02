@@ -152,11 +152,11 @@ struct TopkGatingSoftplusSqrtKernel {
     const InputType* thread_read_ptr =
         thread_row_ptr + first_elt_read_by_thread;
 
-    float row_chunk[VPT];
+    alignas(sizeof(float) * ELTS_PER_LDG) float row_chunk[VPT];
 
     if constexpr (std::is_same_v<InputType, float>) {
       using VecType = AlignedArray<float, ELTS_PER_LDG>;
-      VecType* row_chunk_vec_ptr = reinterpret_cast<VecType*>(&row_chunk);
+      VecType* row_chunk_vec_ptr = reinterpret_cast<VecType*>(row_chunk);
       const VecType* vec_thread_read_ptr =
           reinterpret_cast<const VecType*>(thread_read_ptr);
 #pragma unroll
@@ -586,11 +586,23 @@ void dispatch_topk_softplus_sqrt_launch(
     sycl::queue& q) {
   const float* bias_ptr = nullptr;
   if (correction_bias.has_value()) {
+    TORCH_CHECK(
+        correction_bias.value().scalar_type() == at::ScalarType::Float,
+        "correction_bias must be float32");
+    TORCH_CHECK(
+        correction_bias.value().is_contiguous(),
+        "correction_bias must be contiguous");
     bias_ptr = correction_bias.value().data_ptr<float>();
   }
   bool use_hash = false;
   if (tid2eid.has_value()) {
     TORCH_CHECK(input_ids.has_value(), "input_ids is required for hash MoE");
+    TORCH_CHECK(
+        input_ids.value().scalar_type() == topk_indices.scalar_type(),
+        "input_ids dtype must match topk_indices dtype");
+    TORCH_CHECK(
+        tid2eid.value().scalar_type() == topk_indices.scalar_type(),
+        "tid2eid dtype must match topk_indices dtype");
     use_hash = true;
   }
   if (topk_indices.scalar_type() == at::ScalarType::Int) {
