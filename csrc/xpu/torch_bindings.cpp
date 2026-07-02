@@ -93,8 +93,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "deepseek_qnorm_rope_kv_insert",
       torch::kXPU,
       &deepseek_qnorm_rope_kv_insert);
-  
-// DeepSeek-V4 inverse RoPE (bf16): fused inv GPT-J rotation + group-major
+
+  // DeepSeek-V4 inverse RoPE (bf16): fused inv GPT-J rotation + group-major
   // layout transform.
   xpu_ops.def(
       "deepseek_inv_rope_bf16(Tensor attn_output, Tensor positions,"
