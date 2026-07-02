@@ -28,6 +28,7 @@ class reshape_and_cache_kernel {
       int value_stride,
       int num_heads,
       int head_size,
+      int v_head_size,
       int block_size,
       int x,
       const float* k_scale,
@@ -41,6 +42,7 @@ class reshape_and_cache_kernel {
         value_stride_(value_stride),
         num_heads_(num_heads),
         head_size_(head_size),
+        v_head_size_(v_head_size),
         block_size_(block_size),
         x_(x),
         k_scale_(k_scale),
@@ -55,10 +57,11 @@ class reshape_and_cache_kernel {
 
     const int block_idx = slot_idx / block_size_;
     const int block_offset = slot_idx % block_size_;
-    const int n = num_heads_ * head_size_;
-    for (int i = local_idx; i < n; i += local_range) {
+    // Key and value may have different head_size (asymmetric attention,
+    // e.g. MiMo QK=192 V=128), so iterate them in separate loops.
+    const int n_k = num_heads_ * head_size_;
+    for (int i = local_idx; i < n_k; i += local_range) {
       const int src_key_idx = group_idx * key_stride_ + i;
-      const int src_value_idx = group_idx * value_stride_ + i;
       const int head_idx = i / head_size_;
       const int head_offset = i % head_size_;
       const int x_idx = head_offset / x_;
@@ -67,23 +70,33 @@ class reshape_and_cache_kernel {
           block_idx * num_heads_ * (head_size_ / x_) * block_size_ * x_ +
           head_idx * (head_size_ / x_) * block_size_ * x_ +
           x_idx * block_size_ * x_ + block_offset * x_ + x_offset;
-      const int dst_value_idx = block_idx * n * block_size_ +
-                                head_idx * head_size_ * block_size_ +
-                                head_offset * block_size_ + block_offset;
       scalar_t tgt_key = key_[src_key_idx];
-      scalar_t tgt_value = value_[src_value_idx];
       if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
         key_cache_[dst_key_idx] =
             static_cast<at::Float8_e5m2>(tgt_key * (*k_scale_));
-        value_cache_[dst_value_idx] =
-            static_cast<at::Float8_e5m2>(tgt_value * (*v_scale_));
       } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
         key_cache_[dst_key_idx] =
             static_cast<at::Float8_e4m3fn>(tgt_key * (*k_scale_));
+      } else {  // kv_dt == Fp8KVCacheDataType::kAuto
+        key_cache_[dst_key_idx] = tgt_key;
+      }
+    }
+    const int n_v = num_heads_ * v_head_size_;
+    for (int i = local_idx; i < n_v; i += local_range) {
+      const int src_value_idx = group_idx * value_stride_ + i;
+      const int head_idx = i / v_head_size_;
+      const int head_offset = i % v_head_size_;
+      const int dst_value_idx = block_idx * n_v * block_size_ +
+                                head_idx * v_head_size_ * block_size_ +
+                                head_offset * block_size_ + block_offset;
+      scalar_t tgt_value = value_[src_value_idx];
+      if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
+        value_cache_[dst_value_idx] =
+            static_cast<at::Float8_e5m2>(tgt_value * (*v_scale_));
+      } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
         value_cache_[dst_value_idx] =
             static_cast<at::Float8_e4m3fn>(tgt_value * (*v_scale_));
       } else {  // kv_dt == Fp8KVCacheDataType::kAuto
-        key_cache_[dst_key_idx] = tgt_key;
         value_cache_[dst_value_idx] = tgt_value;
       }
     }
@@ -101,6 +114,7 @@ class reshape_and_cache_kernel {
   const int value_stride_;
   const int num_heads_;
   const int head_size_;
+  const int v_head_size_;
   const int block_size_;
   const int x_;
   const float* k_scale_;
@@ -259,10 +273,13 @@ class reshape_and_cache_flash_kernel {
       const int64_t* __restrict__ slot_mapping,
       const int64_t block_stride,
       const int64_t page_stride,
+      const int64_t value_block_stride,
+      const int64_t value_page_stride,
       const int64_t key_stride,
       const int64_t value_stride,
       const int num_heads,
       const int head_size,
+      const int v_head_size,
       const int block_size,
       const float* k_scale,
       const float* v_scale)
@@ -273,10 +290,13 @@ class reshape_and_cache_flash_kernel {
         slot_mapping_(slot_mapping),
         block_stride_(block_stride),
         page_stride_(page_stride),
+        value_block_stride_(value_block_stride),
+        value_page_stride_(value_page_stride),
         key_stride_(key_stride),
         value_stride_(value_stride),
         num_heads_(num_heads),
         head_size_(head_size),
+        v_head_size_(v_head_size),
         block_size_(block_size),
         k_scale_(k_scale),
         v_scale_(v_scale) {}
@@ -290,7 +310,10 @@ class reshape_and_cache_flash_kernel {
 
     const int64_t block_idx = slot_idx / block_size_;
     const int64_t block_offset = slot_idx % block_size_;
-    const int n = num_heads_ * head_size_;
+    // Key and value may have different head_size (asymmetric attention),
+    // so they have their own element counts and cache strides.
+    const int n_k = num_heads_ * head_size_;
+    const int n_v = num_heads_ * v_head_size_;
 
     // pointers to the beginning of the source row for this token.
     const scalar_t* __restrict__ key_src = key_ + group_idx * key_stride_;
@@ -299,8 +322,9 @@ class reshape_and_cache_flash_kernel {
     // find the start position inside the kv-cache for this token.
     cache_t* __restrict__ key_dst =
         key_cache_ + block_idx * block_stride_ + block_offset * page_stride_;
-    cache_t* __restrict__ value_dst =
-        value_cache_ + block_idx * block_stride_ + block_offset * page_stride_;
+    cache_t* __restrict__ value_dst = value_cache_ +
+                                      block_idx * value_block_stride_ +
+                                      block_offset * value_page_stride_;
 
     constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
     float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale_;
@@ -309,9 +333,9 @@ class reshape_and_cache_flash_kernel {
     fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
     fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
     vectorize_with_alignment<VEC_SIZE>(
-        key_src, key_dst, n, local_idx, local_range, k_op);
+        key_src, key_dst, n_k, local_idx, local_range, k_op);
     vectorize_with_alignment<VEC_SIZE>(
-        value_src, value_dst, n, local_idx, local_range, v_op);
+        value_src, value_dst, n_v, local_idx, local_range, v_op);
   }
 
  private:
@@ -324,10 +348,13 @@ class reshape_and_cache_flash_kernel {
   const int64_t* __restrict__ slot_mapping_;  // [num_tokens]
   const int64_t block_stride_;
   const int64_t page_stride_;
+  const int64_t value_block_stride_;
+  const int64_t value_page_stride_;
   const int64_t key_stride_;
   const int64_t value_stride_;
   const int num_heads_;
   const int head_size_;
+  const int v_head_size_;
   const int block_size_;
   const float* k_scale_;
   const float* v_scale_;
@@ -868,6 +895,7 @@ class gather_and_maybe_dequant_cache_kernel {
             value_stride,                                         \
             num_heads,                                            \
             head_size,                                            \
+            v_head_size,                                          \
             block_size,                                           \
             x,                                                    \
             reinterpret_cast<const float*>(k_scale.data_ptr()),   \
@@ -886,6 +914,7 @@ void reshape_and_cache(
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
+  int v_head_size = value.size(2);
   int block_size = key_cache.size(3);
   int x = key_cache.size(4);
 
@@ -893,7 +922,7 @@ void reshape_and_cache(
   int value_stride = value.stride(0);
 
   sycl::range<1> grid(num_tokens);
-  sycl::range<1> block(std::min(num_heads * head_size, 1024));
+  sycl::range<1> block(std::min(num_heads * std::max(head_size, v_head_size), 1024));
   const at::DeviceGuard device_guard(key.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 
@@ -937,10 +966,13 @@ void reshape_and_cache(
             slot_mapping.data_ptr<int64_t>(),                          \
             block_stride,                                              \
             page_stride,                                               \
+            value_block_stride,                                        \
+            value_page_stride,                                         \
             key_stride,                                                \
             value_stride,                                              \
             num_heads,                                                 \
             head_size,                                                 \
+            v_head_size,                                               \
             block_size,                                                \
             reinterpret_cast<const float*>(k_scale.data_ptr()),        \
             reinterpret_cast<const float*>(v_scale.data_ptr())));      \
@@ -958,6 +990,7 @@ void reshape_and_cache_flash(
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
+  int v_head_size = value.size(2);
 
   const at::DeviceGuard device_guard(key.device());
   auto& queue = vllm::xpu::vllmGetQueue();
@@ -972,6 +1005,8 @@ void reshape_and_cache_flash(
   int64_t block_stride = key_cache.stride(0);
   int64_t page_stride = key_cache.stride(1);
   int64_t head_stride = key_cache.stride(2);
+  int64_t value_block_stride = value_cache.stride(0);
+  int64_t value_page_stride = value_cache.stride(1);
   bool is_strided_head = (head_stride != head_size);
   if (is_strided_head) {
     TORCH_CHECK(
@@ -988,10 +1023,21 @@ void reshape_and_cache_flash(
         kv_cache_dtype,
         CALL_RESHAPE_AND_CACHE_FLASH_STRIDED);
   } else {
+    // Asymmetric attention (e.g. MiMo QK=192, V=128) gives key_cache and
+    // value_cache different block strides, so the old equal-stride invariant
+    // no longer holds; the kernel uses independent value strides instead.
     sycl::range<1> grid(num_tokens);
-    sycl::range<1> block(std::min(num_heads * head_size, 1024));
+    // Right-size the work-group to the *vectorized* element count. The kernel
+    // copies via vectorize_with_alignment<VEC_SIZE>, so only num_elems/VEC_SIZE
+    // threads are ever active. Sizing the WG to num_heads*max_head (the raw
+    // element count) was VEC_SIZE-times oversubscribed (bf16 VEC_SIZE=8 -> 8x
+    // idle threads), starving BMG occupancy and capping memory parallelism.
+    int flash_vec_size = (key.element_size() == 2) ? 8 : 4;
+    int flash_elems = num_heads * std::max(head_size, v_head_size);
+    int flash_wg =
+        std::min((flash_elems + flash_vec_size - 1) / flash_vec_size, 1024);
+    sycl::range<1> block(flash_wg);
 
-    TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
     DISPATCH_BY_KV_CACHE_DTYPE(
         key.scalar_type(), kv_cache_dtype, CALL_RESHAPE_AND_CACHE_FLASH);
   }
