@@ -9,6 +9,8 @@
 #include "quantization/swiglu_limit.h"
 #include "quantization/utils.h"
 
+#include "quantization/fp4/mxfp4_quant_asm.h"
+
 namespace vllm {
 namespace mxfp4 {
 
@@ -135,10 +137,8 @@ class per_token_group_quant_mxfp4_kernel {
     const float inv_scale = 1.0f / y_s;
 
     if (lane_id < group_size) {
-      float val = static_cast<float>(group_input[lane_id]);
-      float scaled_val = val * inv_scale;
-      // Clamp to the representable FP4 E2M1 range [-6, 6].
-      scaled_val = sycl::fmax(-FP4_MAX, sycl::fmin(scaled_val, FP4_MAX));
+      float scaled_val =
+          mxfp4_scale_clamp_asm(group_input[lane_id], inv_scale);
       uint8_t fp4_val = float_to_fp4_e2m1(scaled_val);
 
       // Pack: even lane → low nibble, odd lane (lane+1) → high nibble.
@@ -147,7 +147,7 @@ class per_token_group_quant_mxfp4_kernel {
           item.get_sub_group(), static_cast<uint32_t>(fp4_val), 1u));
 
       if (lane_id % 2 == 0) {
-        // byte[k] = fp4[2k+1] << 4 | fp4[2k]  (matches pack_uint4 in Python)
+        // byte[k] = fp4[2k+1] << 4 | fp4[2k]
         group_output[lane_id / 2] =
             ((next_fp4 & 0x0Fu) << 4) | (fp4_val & 0x0Fu);
       }
