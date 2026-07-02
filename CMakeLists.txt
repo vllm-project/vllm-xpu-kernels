@@ -62,6 +62,13 @@ set(ONEDNN_GIT_TAG
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
 option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
 
+# Build the xe3 asm-path kernels (functions that have a dedicated inline-asm
+# implementation) into a separate _C_xe3asm shared library. Opt-in: it requires
+# xe3 AOT device names supplied via VLLM_XPU_XE3_AOT_DEVICES. When OFF, the
+# fallback (_default) path compiled into _C serves every architecture.
+option(VLLM_XPU_ENABLE_XE3ASM
+       "Build xe3 asm-path kernels into a separate _C_xe3asm library" OFF)
+
 # KERNEL OPTIONS — each controls whether the corresponding Python extension is
 # built. Override from the command line with -D<NAME>=OFF or via the
 # identically-named environment variable (read by setup.py).
@@ -136,6 +143,7 @@ message(STATUS "  ONEDNN_GIT_TAG               = ${ONEDNN_GIT_TAG}")
 message(STATUS "  BUILD_SYCL_TLA_KERNELS       = ${BUILD_SYCL_TLA_KERNELS}")
 message(STATUS "  VLLM_XPU_ENABLE_XE2          = ${VLLM_XPU_ENABLE_XE2}")
 message(STATUS "  VLLM_XPU_ENABLE_XE_DEFAULT   = ${VLLM_XPU_ENABLE_XE_DEFAULT}")
+message(STATUS "  VLLM_XPU_ENABLE_XE3ASM       = ${VLLM_XPU_ENABLE_XE3ASM}")
 message(STATUS "  BASIC_KERNELS_ENABLED        = ${BASIC_KERNELS_ENABLED}")
 message(STATUS "  FA2_KERNELS_ENABLED          = ${FA2_KERNELS_ENABLED}")
 message(STATUS "  MOE_KERNELS_ENABLED          = ${MOE_KERNELS_ENABLED}")
@@ -254,6 +262,14 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   endif()
   if(DEFINED ENV{VLLM_XPU_XE2_AOT_DEVICES})
     set(XE2_AOT_DEVICES $ENV{VLLM_XPU_XE2_AOT_DEVICES})
+  endif()
+
+  # xe3 asm-path AOT devices. No default: the _C_xe3asm library is opt-in and
+  # requires an explicit device list, e.g.
+  #   export VLLM_XPU_XE3_AOT_DEVICES="ptl-h,wcl"
+  set(XE3_AOT_DEVICES "")
+  if(DEFINED ENV{VLLM_XPU_XE3_AOT_DEVICES})
+    set(XE3_AOT_DEVICES $ENV{VLLM_XPU_XE3_AOT_DEVICES})
   endif()
 
   # ============= COMPILE OPTIONS ==================
@@ -515,12 +531,16 @@ endif()
 #
 
 #
-# _C extension
+# _C extension (spir64_gen AOT fallback path). Compiles the generic kernels plus
+# the arch-specialized sources with the _default suffix, so it runs on every AOT
+# device configured via VLLM_XPU_AOT_DEVICES. When VLLM_XPU_ENABLE_XE3ASM is ON,
+# the same arch sources are also compiled into lib_C_xe3asm.so (xe3 asm path) and
+# _C dispatches to it at runtime.
 #
 if(BASIC_KERNELS_ENABLED)
   message(STATUS "Enabling C extension.")
   set(VLLM_EXT_SRC
-      "csrc/cache.cpp"
+      "csrc/kernel_dispatch.cpp"
       "csrc/layernorm.cpp"
       "csrc/layernorm_quant.cpp"
       "csrc/activation.cpp"
@@ -539,6 +559,44 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/topk_per_row.cpp")
   include_directories("/usr/include")
 
+  # Fallback path: compile the arch-specialized sources into _C with the default
+  # (_default) suffix. These use ARCH_FUNC() so the same translation unit can be
+  # rebuilt for the xe3 asm path below without symbol clashes.
+  set(_C_ARCH_SRCS "csrc/cache.cpp")
+  list(APPEND VLLM_EXT_SRC ${_C_ARCH_SRCS})
+
+  # xe3 asm path: compile the same arch sources into a dedicated shared library
+  # with an _xe3asm suffix and -DVLLM_XE3_ASM, AOT-targeted at xe3 devices.
+  set(_C_ARCH_KERNEL_LIBS "")
+  if(VLLM_XPU_ENABLE_XE3ASM)
+    if(NOT XE3_AOT_DEVICES)
+      message(
+        FATAL_ERROR
+          "VLLM_XPU_ENABLE_XE3ASM=ON requires xe3 AOT devices. Set them via, "
+          "e.g., export VLLM_XPU_XE3_AOT_DEVICES=\"ptl-h,wcl\".")
+    endif()
+    message(STATUS "Enabling _C_xe3asm library (devices: ${XE3_AOT_DEVICES}).")
+    add_library(_C_xe3asm SHARED ${_C_ARCH_SRCS})
+    set_property(TARGET _C_xe3asm PROPERTY CXX_STANDARD 20)
+    target_include_directories(_C_xe3asm PRIVATE csrc ${VLLM_XPU_INCLUDE_DIR})
+    target_compile_options(_C_xe3asm PRIVATE ${VLLM_GPU_COMPILE_FLAGS})
+    target_compile_definitions(_C_xe3asm PRIVATE ARCH_SUFFIX=_xe3asm
+                                                 VLLM_XE3_ASM)
+    target_link_libraries(_C_xe3asm PRIVATE torch ${TORCH_LIBRARIES})
+    set_target_properties(_C_xe3asm PROPERTIES LIBRARY_OUTPUT_DIRECTORY
+                                               "${CMAKE_BINARY_DIR}/")
+    # AOT link flags for xe3 devices (mirrors add_xe2_kernel_library).
+    set(_XE3ASM_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
+    list(
+      APPEND _XE3ASM_LINK_FLAGS
+      "-device ${XE3_AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread"
+    )
+    target_link_options(_C_xe3asm PRIVATE ${_XE3ASM_LINK_FLAGS})
+    install(TARGETS _C_xe3asm LIBRARY DESTINATION vllm_xpu_kernels
+                                      COMPONENT _C_xe3asm)
+    list(APPEND _C_ARCH_KERNEL_LIBS "_C_xe3asm")
+  endif()
+
   define_gpu_extension_target(
     _C
     DESTINATION
@@ -555,9 +613,17 @@ if(BASIC_KERNELS_ENABLED)
     ${VLLM_GPU_ARCHES}
     INCLUDE_DIRECTORIES
     ${VLLM_XPU_INCLUDE_DIR}
+    LIBRARIES
+    ${_C_ARCH_KERNEL_LIBS}
     USE_SABI
     3
     WITH_SOABI)
+
+  # Tell kernel_dispatch.cpp (compiled inside _C) that the xe3 asm variants exist
+  # so it emits the runtime dispatch to them.
+  if(VLLM_XPU_ENABLE_XE3ASM)
+    target_compile_definitions(_C PRIVATE VLLM_BUILD_XE3ASM)
+  endif()
 
 endif()
 

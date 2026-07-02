@@ -4,6 +4,7 @@
 #include <iostream>
 #include <string>
 
+#include "arch_dispatch.h"
 #include "dispatch_utils.h"
 #include "quantization/fp8/quant_utils.h"
 #include "quantization/utils.h"
@@ -946,7 +947,7 @@ void reshape_and_cache(
             reinterpret_cast<const float*>(v_scale.data_ptr())));      \
   });
 
-void reshape_and_cache_flash(
+void ARCH_FUNC(reshape_and_cache_flash)(
     torch::Tensor& key,
     torch::Tensor& value,
     torch::Tensor& key_cache,

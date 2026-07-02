@@ -81,6 +81,12 @@ def _is_enabled(env_name: str) -> bool:
     return val not in ("0", "OFF", "FALSE", "NO")
 
 
+def _is_enabled_off(env_name: str) -> bool:
+    """Check if a build option env var is enabled (default OFF)."""
+    val = os.environ.get(env_name, "OFF").strip().upper()
+    return val not in ("0", "OFF", "FALSE", "NO")
+
+
 class CMakeExtension(Extension):
 
     def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
@@ -199,6 +205,11 @@ class cmake_build_ext(build_ext):
         for opt in _kernel_options:
             cmake_args.append('-D{}={}'.format(
                 opt, "ON" if _is_enabled(opt) else "OFF"))
+
+        # The xe3 asm-path library is opt-in (default OFF), so it is forwarded
+        # separately from the default-ON kernel options above.
+        cmake_args.append('-DVLLM_XPU_ENABLE_XE3ASM={}'.format(
+            "ON" if _is_enabled_off("VLLM_XPU_ENABLE_XE3ASM") else "OFF"))
 
         # Forward paged decode kernel config if set via environment variable.
         # Example: VLLM_PAGED_DECODE_CONFIG=llama pip install .
@@ -565,6 +576,12 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
             "MOE_KERNELS_ENABLED"):
         additional_libraries["grouped_gemm_xe_default"] = (
             "/csrc/xpu/grouped_gemm/xe_default")
+
+# Per-extension arch-specific libs (same sources compiled with different flags).
+# The xe3 asm-path fallback library is opt-in via VLLM_XPU_ENABLE_XE3ASM.
+if _is_enabled("BASIC_KERNELS_ENABLED") and _is_enabled_off(
+        "VLLM_XPU_ENABLE_XE3ASM"):
+    additional_libraries["_C_xe3asm"] = ""
 
 if _build_custom_ops():
     if _is_enabled("BASIC_KERNELS_ENABLED"):

@@ -113,6 +113,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_XPU_ENABLE_XE2", "ON"),
     "VLLM_XPU_ENABLE_XE_DEFAULT":
     lambda: os.getenv("VLLM_XPU_ENABLE_XE_DEFAULT", "ON"),
+    # Build the xe3 asm-path kernels into a separate _C_xe3asm library.
+    # Opt-in (default OFF); requires VLLM_XPU_XE3_AOT_DEVICES.
+    "VLLM_XPU_ENABLE_XE3ASM":
+    lambda: os.getenv("VLLM_XPU_ENABLE_XE3ASM", "OFF"),
 
     # Individual kernel extension toggles
     "BASIC_KERNELS_ENABLED":
