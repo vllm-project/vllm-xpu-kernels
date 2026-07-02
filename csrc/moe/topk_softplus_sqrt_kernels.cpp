@@ -664,10 +664,10 @@ void dispatch_topk_softplus_sqrt_launch(
 }
 
 void topk_softplus_sqrt(
-  torch::Tensor& topk_weights,
-  torch::Tensor& topk_indices,
-  torch::Tensor& token_expert_indices,
-  torch::Tensor& gating_output,
+    torch::Tensor& topk_weights,
+    torch::Tensor& topk_indices,
+    torch::Tensor& token_expert_indices,
+    torch::Tensor& gating_output,
     bool renormalize,
     double routed_scaling_factor,
     const c10::optional<torch::Tensor>& correction_bias,
