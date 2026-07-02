@@ -59,8 +59,9 @@ class deepseek_fused_indexer_q_rope_mxfp4_kernel {
   static constexpr int HEADS_COARSEN = HEADS_COARSEN_;
   static constexpr int MXFP4_BLOCK_SIZE = 32;
   static constexpr int NUM_BLOCKS = HEAD_DIM / MXFP4_BLOCK_SIZE;
-  static_assert(ROPE_DIM % 2 == 0 && HALF_ROPE >= SG_SIZE,
-                "ROPE_DIM/2 must be >= SG_SIZE");
+  static_assert(
+      ROPE_DIM % 2 == 0 && HALF_ROPE >= SG_SIZE,
+      "ROPE_DIM/2 must be >= SG_SIZE");
   static_assert(NOPE_DIM > 0, "HEAD_DIM must be > ROPE_DIM");
 
   deepseek_fused_indexer_q_rope_mxfp4_kernel(
@@ -237,9 +238,7 @@ void deepseek_fused_indexer_q_rope_mxfp4(
       rope_dim,
       ". Supported: head_dim=128, rope_dim=64");
 
-  TORCH_CHECK(
-      num_heads % 4 == 0,
-      "num_heads must be divisible by 4");
+  TORCH_CHECK(num_heads % 4 == 0, "num_heads must be divisible by 4");
 
   const int nhg = num_heads / 4;
 
