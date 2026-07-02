@@ -57,8 +57,9 @@ class deepseek_fused_indexer_q_rope_fp8_kernel {
   static constexpr int HALF_ROPE = ROPE_DIM / 2;
   static constexpr int HALF_BLOCK = SG_SIZE;
   static constexpr int HEADS_COARSEN = HEADS_COARSEN_;
-  static_assert(ROPE_DIM % 2 == 0 && HALF_ROPE >= SG_SIZE,
-                "ROPE_DIM/2 must be >= SG_SIZE");
+  static_assert(
+      ROPE_DIM % 2 == 0 && HALF_ROPE >= SG_SIZE,
+      "ROPE_DIM/2 must be >= SG_SIZE");
   static_assert(NOPE_DIM > 0, "HEAD_DIM must be > ROPE_DIM");
 
   deepseek_fused_indexer_q_rope_fp8_kernel(
@@ -217,9 +218,7 @@ void deepseek_fused_indexer_q_rope_fp8(
       rope_dim,
       ". Supported: head_dim=128, rope_dim=64");
 
-  TORCH_CHECK(
-      num_heads % 2 == 0,
-      "num_heads must be divisible by 2");
+  TORCH_CHECK(num_heads % 2 == 0, "num_heads must be divisible by 2");
 
   const int64_t nhg = num_heads / 2;
 
