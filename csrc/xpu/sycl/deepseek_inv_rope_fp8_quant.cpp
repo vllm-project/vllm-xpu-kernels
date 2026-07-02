@@ -215,15 +215,23 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
   const auto& o = attn_output;
   TORCH_CHECK(o.dim() == 3, "o must be 3D [num_tokens, num_heads, head_dim]");
   TORCH_CHECK(o.scalar_type() == torch::kBFloat16, "o must be bfloat16");
+  TORCH_CHECK(o.is_contiguous(), "o must be contiguous");
   TORCH_CHECK(
       positions.scalar_type() == torch::kLong, "positions must be int64");
   TORCH_CHECK(
       cos_sin_cache.scalar_type() == torch::kFloat32,
       "cos_sin_cache must be float32");
+  TORCH_CHECK(
+      cos_sin_cache.stride(-1) == 1,
+      "cos_sin_cache must have contiguous last dim");
 
   const int64_t num_tokens = o.size(0);
   const int64_t num_heads = o.size(1);
   const int64_t head_dim = o.size(2);
+
+  TORCH_CHECK(
+      positions.size(0) == num_tokens,
+      "positions length must equal num_tokens");
 
   TORCH_CHECK(
       num_heads == n_groups * heads_per_group,

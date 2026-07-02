@@ -283,7 +283,7 @@ def test_scales_are_power_of_two():
 
 
 def test_fp8_values_in_range():
-    """Verify all FP8 values are within [-FP8_MAX, FP8_MAX] after dequant."""
+    """Verify all FP8 values are representable (within [-FP8_MAX, FP8_MAX])."""
     num_tokens, num_heads, n_groups = 64, 64, 8
     heads_per_group = num_heads // n_groups
     max_pos = 4096
