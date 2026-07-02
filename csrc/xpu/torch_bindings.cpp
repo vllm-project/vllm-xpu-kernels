@@ -39,8 +39,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
 #ifdef VLLM_MOE_ENABLED
   xpu_ops.def(
-      "cutlass_grouped_gemm_interface(Tensor ptr_A, Tensor ptr_B, Tensor? "
-      "ptr_scales, "
+      "cutlass_grouped_gemm_interface(Tensor ptr_A, Tensor? ptr_A_scale, "
+      "Tensor ptr_B, Tensor? "
+      "ptr_B_scale, "
       "Tensor? ptr_bias, "
       "Tensor "
       "ptr_D, Tensor "
