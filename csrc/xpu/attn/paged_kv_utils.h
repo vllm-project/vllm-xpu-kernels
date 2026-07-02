@@ -3,13 +3,14 @@
 #include <limits>
 #include <torch/all.h>
 
-// Normalize the physical page stride to sequence-position units. For a regular
-// contiguous layout [num_blocks, block_size, num_heads, head_size], this equals
-// block_size. For interleaved or cross-layer layouts, it includes the physical
-// gaps between logical KV blocks.
+// Normalize the physical page stride to sequence-position units. For the HND
+// paged layout [num_blocks, num_heads, block_size, head_size], the sequence
+// stride is stride(2) = head_size, so the physical page stride in seq-position
+// units is stride(0) / stride(2) = num_heads * block_size. Cross-layer layouts
+// may add physical gaps between logical KV blocks.
 inline int64_t
 get_paged_kv_cache_page_stride_elements(const at::Tensor& key_cache) {
-  return key_cache.stride(0) / key_cache.stride(1);
+  return key_cache.stride(0) / key_cache.stride(2);
 }
 
 // Return the sequence length needed by the 2D load surface to cover the full
@@ -25,9 +26,9 @@ get_paged_kv_cache_effective_total_seqlen(const at::Tensor& key_cache) {
 // units and safely passed through int32 kernel parameters.
 inline void check_paged_kv_cache_strides(
     const at::Tensor& key_cache, const at::Tensor& value_cache) {
-  int64_t k_stride_seq = key_cache.stride(1);
+  int64_t k_stride_seq = key_cache.stride(2);
   int64_t k_physical_page_stride = key_cache.stride(0);
-  int64_t v_stride_seq = value_cache.stride(1);
+  int64_t v_stride_seq = value_cache.stride(2);
   int64_t v_physical_page_stride = value_cache.stride(0);
   TORCH_CHECK(
       k_stride_seq > 0,

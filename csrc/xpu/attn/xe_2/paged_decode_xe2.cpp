@@ -11,8 +11,9 @@ using namespace cute;
 
 void cutlass_paged_decode_xe2(
     sycl::queue& queue,
-    const at::Tensor& query,      // [seq_q, heads, head_size]
-    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& query,  // [seq_q, heads, head_size]
+    const at::Tensor&
+        key_cache,  // paged: [num_block, num_heads, block_size, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
     at::Tensor&
@@ -84,8 +85,9 @@ inline bool is_single_value_broadcast_tensor(const at::Tensor& t) {
 
 void cutlass_paged_decode_impl(
     sycl::queue& queue,
-    const at::Tensor& query,      // [seq_q, heads, head_size]
-    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& query,  // [seq_q, heads, head_size]
+    const at::Tensor&
+        key_cache,  // paged: [num_block, num_heads, block_size, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
     at::Tensor&
@@ -155,11 +157,12 @@ void cutlass_paged_decode_impl(
   }
 
   if (is_paged) {
+    // Paged KV layout: [num_blocks, num_heads, block_size, head_size]
     // num_blocks is used to build total_seqlen_k for shape_K in kernels
     // it is not just the meaning of used blocks for kv.
     num_blocks = key_cache.size(0);
-    block_size = key_cache.size(1);
-    num_heads_kv = key_cache.size(2);
+    num_heads_kv = key_cache.size(1);
+    block_size = key_cache.size(2);
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
   }
@@ -214,11 +217,11 @@ void cutlass_paged_decode_impl(
       nullptr,  // work_list, filled in below if applicable
       0,        // total_wgs, filled in below if applicable
       key_cache.stride(0),
-      key_cache.stride(1),
-      key_cache.stride(2),
+      is_paged ? key_cache.stride(2) : key_cache.stride(1),
+      is_paged ? key_cache.stride(1) : key_cache.stride(2),
       value_cache.stride(0),
-      value_cache.stride(1),
-      value_cache.stride(2),
+      is_paged ? value_cache.stride(2) : value_cache.stride(1),
+      is_paged ? value_cache.stride(1) : value_cache.stride(2),
       is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr,
       // Q strides: for varlen Q is [total_seq, num_heads, head_size]; for
       // non-varlen Q is [batch, num_heads, seq, head_size].

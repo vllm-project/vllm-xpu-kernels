@@ -11,8 +11,9 @@ using namespace cute;
 
 void cutlass_chunk_prefill_xe2(
     sycl::queue& queue,
-    const at::Tensor& query,      // [seq_q, heads, head_size]
-    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& query,  // [seq_q, heads, head_size]
+    const at::Tensor&
+        key_cache,  // paged: [num_block, num_heads, block_size, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
     const at::Tensor& block_table,
@@ -61,8 +62,9 @@ void cutlass_chunk_prefill_xe2(
 
 void cutlass_chunk_prefill_impl(
     sycl::queue& queue,
-    const at::Tensor& query,      // [seq_q, heads, head_size]
-    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& query,  // [seq_q, heads, head_size]
+    const at::Tensor&
+        key_cache,  // paged: [num_block, num_heads, block_size, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
     const at::Tensor& block_table,
@@ -100,16 +102,17 @@ void cutlass_chunk_prefill_impl(
     // query: [batch, num_heads, seq, head_size]
     batch_size = query.size(0);
     num_heads_q = query.size(1);
-    num_heads_kv = is_paged ? key_cache.size(2) : key_cache.size(1);
+    num_heads_kv = key_cache.size(1);
     head_size = query.size(3);
     max_seqlen_q = query.size(2);
     max_seqlen_k = is_paged ? max_seqlen_q : key_cache.size(2);
   }
 
   if (is_paged) {
+    // Paged KV layout: [num_blocks, num_heads, block_size, head_size]
     num_blocks = key_cache.size(0);
-    block_size = key_cache.size(1);
-    num_heads_kv = key_cache.size(2);
+    num_heads_kv = key_cache.size(1);
+    block_size = key_cache.size(2);
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
   }
@@ -176,12 +179,12 @@ void cutlass_chunk_prefill_impl(
     args.o_stride_heads = out.stride(1);
     args.o_stride_batch = 0;
     if (is_paged) {
-      // K/V: [num_blocks, block_size, num_heads_kv, head_size]
-      args.k_stride_seq = key_cache.stride(1);
-      args.k_stride_heads = key_cache.stride(2);
+      // K/V: [num_blocks, num_heads_kv, block_size, head_size]
+      args.k_stride_seq = key_cache.stride(2);
+      args.k_stride_heads = key_cache.stride(1);
       args.k_stride_batch = 0;
-      args.v_stride_seq = value_cache.stride(1);
-      args.v_stride_heads = value_cache.stride(2);
+      args.v_stride_seq = value_cache.stride(2);
+      args.v_stride_heads = value_cache.stride(1);
       args.v_stride_batch = 0;
     } else {
       // K/V: [total_seq_k, num_heads_kv, head_size]
@@ -201,12 +204,12 @@ void cutlass_chunk_prefill_impl(
     args.o_stride_heads = out.stride(1);
     args.o_stride_batch = out.stride(0);
     if (is_paged) {
-      // K/V: [num_blocks, block_size, num_heads_kv, head_size]
-      args.k_stride_seq = key_cache.stride(1);
-      args.k_stride_heads = key_cache.stride(2);
+      // K/V: [num_blocks, num_heads_kv, block_size, head_size]
+      args.k_stride_seq = key_cache.stride(2);
+      args.k_stride_heads = key_cache.stride(1);
       args.k_stride_batch = 0;
-      args.v_stride_seq = value_cache.stride(1);
-      args.v_stride_heads = value_cache.stride(2);
+      args.v_stride_seq = value_cache.stride(2);
+      args.v_stride_heads = value_cache.stride(1);
       args.v_stride_batch = 0;
     } else {
       // K/V: [batch, num_heads_kv, seq, head_size]

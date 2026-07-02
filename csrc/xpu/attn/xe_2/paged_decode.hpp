@@ -122,7 +122,7 @@ struct paged_decode_args_t {
   const void* work_list =
       nullptr;        // DecodeWorkItem[total_wgs]; null => old grid
   int total_wgs = 0;  // sum(splits_per_seq); 0 => old grid
-  // KV cache strides [num_blocks, block_size, num_heads_kv, head_size]
+  // KV cache strides [num_blocks, num_heads_kv, block_size, head_size]
   int64_t k_stride_page = 0;
   int64_t k_stride_seq = 0;
   int64_t k_stride_heads = 0;
