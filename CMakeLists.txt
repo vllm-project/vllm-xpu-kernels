@@ -613,6 +613,8 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
       "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
       "csrc/xpu/sycl/deepseek_qnorm_rope_kv_insert.cpp"
+      "csrc/xpu/sycl/deepseek_inv_rope_bf16.cpp"
+      "csrc/xpu/sycl/deepseek_inv_rope_fp8_quant.cpp"
       "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/sycl/apply_rotary_emb.cpp"
       "csrc/xpu/rand/exponential.cpp"
