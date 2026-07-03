@@ -415,32 +415,53 @@ class XeFMHAFwdKernel {
         static_assert(
             size<3>(typename TiledMMAPV::ThrLayoutVMNK{}) == 1,
             "softmax_lse requires ReduceK == 1 in TiledMMAPV");
-        if (get<1>(blk_qv) == 0 && (thr_id % intel::sg_size == 0)) {
+        // Only the first V-block of a (q-tile, head, batch) writes LSE: the
+        // softmax stats (tA_max/tA_sum) are reduced over keys and are therefore
+        // identical for every V-block covering the same query rows.
+        if (get<1>(blk_qv) == 0) {
           using ElementA = typename FragA::value_type;
           constexpr float kLn2 = 0.6931471805599453f;
+          constexpr double kLog2e = 1.4426950408889634074;
           int q_tile_start = blk_q * get<0>(TileShapeQK{});
           int qo_cumul = 0;
           if constexpr (is_var_len) {
             qo_cumul = s.seq_len_qo.cumulative_length[idx_b];
           }
 
+          // The query tile is split across SGPerWG subgroups, q_sg_tile rows
+          // each (q_sg_tile = TileShapeQK[0] / SubgroupLayoutQK[0]); subgroup g
+          // owns global tile rows [g*q_sg_tile, (g+1)*q_sg_tile). After the
+          // key reduction the per-row softmax stats (tA_max/tA_sum) are laid
+          // out so that a subgroup's logical row r lives in lane (r % sg_size),
+          // register (r / sg_size). To write every query row exactly once we
+          // recover (lane, register) -> row and let each work-item write the
+          // rows it actually owns.
+          //
+          // When q_sg_tile < sg_size (e.g. head_size=192 packs 8 rows over 16
+          // lanes) the upper lanes hold no real row: their stat slots are
+          // uninitialised, so they MUST be masked out. Writing them would
+          // clobber valid rows (their default-recovered row index collapses to
+          // the subgroup's first row), which previously produced -inf at the
+          // first query row of every sequence.
+          int lane_id = thr_id % intel::sg_size;
+          int sg_row_base = q_tile_start + sub_group_id * q_sg_tile;
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tA_sum.size(); i++) {
-            int q_in_batch = q_tile_start + q_offset_sg + i;
-            if (q_in_batch < seq_len_qo) {
-              ElementA sum_val = tA_sum(i);
-              // Include sink contribution for LSE computation
-              if constexpr (Sink) {
-                constexpr double kLog2e = 1.4426950408889634074;
-                ElementSink s_head = p.ptr_S[head_q];
-                sum_val += sycl::native::exp2(
-                    static_cast<ElementA>(s_head * kLog2e) - tA_max(i));
-              }
-              float lse = static_cast<float>(tA_max(i)) * kLn2 +
-                          sycl::log(static_cast<float>(sum_val));
-              int global_q = qo_cumul + q_in_batch;
-              p.softmax_lse[global_q * p.lse_stride + head_q] = lse;
+            int row_in_sg = lane_id + intel::sg_size * i;
+            if (row_in_sg >= q_sg_tile) continue;
+            int q_in_batch = sg_row_base + row_in_sg;
+            if (q_in_batch >= seq_len_qo) continue;
+            ElementA sum_val = tA_sum(i);
+            // Include sink contribution for LSE computation
+            if constexpr (Sink) {
+              ElementSink s_head = p.ptr_S[head_q];
+              sum_val += sycl::native::exp2(
+                  static_cast<ElementA>(s_head * kLog2e) - tA_max(i));
             }
+            float lse = static_cast<float>(tA_max(i)) * kLn2 +
+                        sycl::log(static_cast<float>(sum_val));
+            int global_q = qo_cumul + q_in_batch;
+            p.softmax_lse[global_q * p.lse_stride + head_q] = lse;
           }
         }
       }

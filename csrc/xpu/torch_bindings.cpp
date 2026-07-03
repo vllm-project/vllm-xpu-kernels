@@ -45,7 +45,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor "
       "ptr_D, Tensor "
       "rows_per_expert, int N, int K, int "
-      "num_experts, bool is_B_int4, bool is_B_mxfp4) -> "
+      "num_experts) -> "
       "Tensor");
   xpu_ops.impl(
       "cutlass_grouped_gemm_interface",
@@ -78,6 +78,40 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "apply_rotary_emb(Tensor! output, Tensor input,"
       "                 Tensor cos, Tensor sin, bool is_neox) -> ()");
   xpu_ops.impl("apply_rotary_emb", torch::kXPU, &apply_rotary_emb);
+
+  // DeepSeek-V4 fused Q-RMSNorm + GPT-J RoPE + KV cache insert.
+  // kv_cache_dtype: "bf16" or "fp8_ds_mla"
+  xpu_ops.def(
+      "deepseek_qnorm_rope_kv_insert(Tensor! q, Tensor kv,"
+      "                              Tensor! cache,"
+      "                              Tensor slot_mapping,"
+      "                              Tensor position_ids,"
+      "                              Tensor cos_sin_cache,"
+      "                              float eps, int block_size,"
+      "                              str kv_cache_dtype) -> ()");
+  xpu_ops.impl(
+      "deepseek_qnorm_rope_kv_insert",
+      torch::kXPU,
+      &deepseek_qnorm_rope_kv_insert);
+
+  // DeepSeek-V4 inverse RoPE (bf16): fused inv GPT-J rotation + group-major
+  // layout transform.
+  xpu_ops.def(
+      "deepseek_inv_rope_bf16(Tensor attn_output, Tensor positions,"
+      "                       Tensor cos_sin_cache, int n_groups,"
+      "                       int heads_per_group, int nope_dim,"
+      "                       int rope_dim) -> Tensor");
+  xpu_ops.impl("deepseek_inv_rope_bf16", torch::kXPU, &deepseek_inv_rope_bf16);
+
+  // DeepSeek-V4 fused inverse RoPE + FP8 quantization: inv GPT-J rotation +
+  // per-128-block UE8M0 FP8 E4M3 quantization + group-major layout transform.
+  xpu_ops.def(
+      "deepseek_inv_rope_fp8_quant(Tensor attn_output, Tensor positions,"
+      "                            Tensor cos_sin_cache, int n_groups,"
+      "                            int heads_per_group, int nope_dim,"
+      "                            int rope_dim) -> (Tensor, Tensor)");
+  xpu_ops.impl(
+      "deepseek_inv_rope_fp8_quant", torch::kXPU, &deepseek_inv_rope_fp8_quant);
 
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "

@@ -18,9 +18,7 @@ torch::Tensor cutlass_grouped_gemm_interface(
     torch::Tensor rows_per_expert,
     int64_t N,
     int64_t K,
-    int64_t num_experts,
-    bool is_B_int4,
-    bool is_B_mxfp4) {
+    int64_t num_experts) {
   if (vllm::xpu::force_xe_default_kernel()) {
 #ifdef VLLM_XPU_ENABLE_XE_DEFAULT
     int64_t groups = num_experts;
@@ -44,9 +42,7 @@ torch::Tensor cutlass_grouped_gemm_interface(
         rows_per_expert,
         N,
         K,
-        num_experts,
-        is_B_int4,
-        is_B_mxfp4);
+        num_experts);
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif

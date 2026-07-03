@@ -62,9 +62,7 @@ torch::Tensor cutlass_grouped_gemm_interface(
     torch::Tensor rows_per_expert,
     int64_t N,
     int64_t K,
-    int64_t num_experts,
-    bool is_B_int4,
-    bool is_B_mxfp4);
+    int64_t num_experts);
 #endif
 
 std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
@@ -91,6 +89,35 @@ void apply_rotary_emb(
     torch::Tensor& cos,     // [num_tokens, rot_dim/2]
     torch::Tensor& sin,     // [num_tokens, rot_dim/2]
     bool is_neox);
+
+void deepseek_qnorm_rope_kv_insert(
+    torch::Tensor& q,
+    const torch::Tensor& kv,
+    torch::Tensor& cache,
+    const torch::Tensor& slot_mapping,
+    const torch::Tensor& position_ids,
+    const torch::Tensor& cos_sin_cache,
+    double eps,
+    int64_t block_size,
+    const std::string& kv_cache_dtype);
+
+torch::Tensor deepseek_inv_rope_bf16(
+    const torch::Tensor& attn_output,
+    const torch::Tensor& positions,
+    const torch::Tensor& cos_sin_cache,
+    int64_t n_groups,
+    int64_t heads_per_group,
+    int64_t nope_dim,
+    int64_t rope_dim);
+
+std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
+    const torch::Tensor& attn_output,
+    const torch::Tensor& positions,
+    const torch::Tensor& cos_sin_cache,
+    int64_t n_groups,
+    int64_t heads_per_group,
+    int64_t nope_dim,
+    int64_t rope_dim);
 
 #ifdef VLLM_GDN_ENABLED
 void gdn_attention(
