@@ -408,4 +408,4 @@ def quant_act_xpu(x, recipe):
     elif recipe == "fp8block":
         return quant_fp8_block_act(x)
     else:
-        raise NotImplementedError(f"Unsupported recipe for quant_act_xpu: {recipe}")
+        raise NotImplementedError(f"Unsupported recipe for quant_act_xpu: {recipe}") # noqa: E501

@@ -13,7 +13,7 @@ except ImportError as e:
     FUSEDMOE_UNAVAILABLE_REASON = str(e)
     FUSEDMOE_AVAILABLE = False
 
-from .moe_utils import ref_fused_moe, quant_act_xpu
+from .moe_utils import quant_act_xpu, ref_fused_moe
 
 REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
 USE_MXFP4_FP8_ENV = "VLLM_XPU_FUSED_MOE_USE_MXFP4_FP8"
@@ -393,7 +393,7 @@ class XpuFusedMoe:
                                 device=output.device)
 
         if act_quant:
-            act_output, gemm2_act_scale = quant_act_xpu(act_output, recipe=self.recipe)
+            act_output, gemm2_act_scale = quant_act_xpu(act_output, self.recipe)
         torch.ops._xpu_C.cutlass_grouped_gemm_interface(
             ptr_A=act_output,
             ptr_A_scale=gemm2_act_scale if act_quant else None,
