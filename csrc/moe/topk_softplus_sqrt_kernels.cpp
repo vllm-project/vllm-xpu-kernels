@@ -59,6 +59,81 @@ static inline T warpReduceSumWidth(T val, sycl::sub_group sg, int width) {
   return val;
 }
 
+// Load a row chunk from global memory into float registers.
+// Primary template — partial specializations below handle each InputType.
+template <
+    typename InputType,
+    int ELTS_PER_LDG,
+    int LDG_PER_THREAD,
+    int THREADS_PER_ROW>
+struct RowChunkLoader;
+
+// float specialization: direct vector load, no conversion needed.
+template <int ELTS_PER_LDG, int LDG_PER_THREAD, int THREADS_PER_ROW>
+struct RowChunkLoader<float, ELTS_PER_LDG, LDG_PER_THREAD, THREADS_PER_ROW> {
+  static inline void load(float* row_chunk, const float* read_ptr) {
+    using VecType = AlignedArray<float, ELTS_PER_LDG>;
+    VecType* row_chunk_vec_ptr = reinterpret_cast<VecType*>(row_chunk);
+    const VecType* vec_read_ptr = reinterpret_cast<const VecType*>(read_ptr);
+#pragma unroll
+    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+      row_chunk_vec_ptr[ii] = vec_read_ptr[ii * THREADS_PER_ROW];
+    }
+  }
+};
+
+// bfloat16 specialization: vector or scalar load + convert to float.
+template <int ELTS_PER_LDG, int LDG_PER_THREAD, int THREADS_PER_ROW>
+struct RowChunkLoader<
+    bfloat16_t,
+    ELTS_PER_LDG,
+    LDG_PER_THREAD,
+    THREADS_PER_ROW> {
+  static inline void load(float* row_chunk, const bfloat16_t* read_ptr) {
+    if constexpr (ELTS_PER_LDG >= 2) {
+      using VecType = AlignedArray<bfloat16_t, ELTS_PER_LDG>;
+      const VecType* vec_read_ptr = reinterpret_cast<const VecType*>(read_ptr);
+#pragma unroll
+      for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+        VecType vec = vec_read_ptr[ii * THREADS_PER_ROW];
+#pragma unroll
+        for (int jj = 0; jj < ELTS_PER_LDG; ++jj) {
+          row_chunk[ii * ELTS_PER_LDG + jj] = static_cast<float>(vec.data[jj]);
+        }
+      }
+    } else {
+#pragma unroll
+      for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+        row_chunk[ii] = static_cast<float>(*(read_ptr + ii * THREADS_PER_ROW));
+      }
+    }
+  }
+};
+
+// half specialization: vector or scalar load + convert to float.
+template <int ELTS_PER_LDG, int LDG_PER_THREAD, int THREADS_PER_ROW>
+struct RowChunkLoader<half_t, ELTS_PER_LDG, LDG_PER_THREAD, THREADS_PER_ROW> {
+  static inline void load(float* row_chunk, const half_t* read_ptr) {
+    if constexpr (ELTS_PER_LDG >= 2) {
+      using VecType = AlignedArray<half_t, ELTS_PER_LDG>;
+      const VecType* vec_read_ptr = reinterpret_cast<const VecType*>(read_ptr);
+#pragma unroll
+      for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+        VecType vec = vec_read_ptr[ii * THREADS_PER_ROW];
+#pragma unroll
+        for (int jj = 0; jj < ELTS_PER_LDG; ++jj) {
+          row_chunk[ii * ELTS_PER_LDG + jj] = static_cast<float>(vec.data[jj]);
+        }
+      }
+    } else {
+#pragma unroll
+      for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+        row_chunk[ii] = static_cast<float>(*(read_ptr + ii * THREADS_PER_ROW));
+      }
+    }
+  }
+};
+
 template <
     int VPT,
     int NUM_EXPERTS,
@@ -109,7 +184,6 @@ struct TopkGatingSoftplusSqrtKernel {
           ELTS_PER_LDG == 1 || ELTS_PER_LDG % 2 == 0,
           "ELTS_PER_LDG must be 1 or even for 16-bit conversion");
     }
-
     static_assert(
         VPT % ELTS_PER_LDG == 0, "VPT must be a multiple of ELTS_PER_LDG");
     static_assert(
@@ -153,59 +227,8 @@ struct TopkGatingSoftplusSqrtKernel {
         thread_row_ptr + first_elt_read_by_thread;
 
     alignas(sizeof(float) * ELTS_PER_LDG) float row_chunk[VPT];
-
-    if constexpr (std::is_same_v<InputType, float>) {
-      using VecType = AlignedArray<float, ELTS_PER_LDG>;
-      VecType* row_chunk_vec_ptr = reinterpret_cast<VecType*>(row_chunk);
-      const VecType* vec_thread_read_ptr =
-          reinterpret_cast<const VecType*>(thread_read_ptr);
-#pragma unroll
-      for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-        row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
-      }
-    } else if constexpr (std::is_same_v<InputType, bfloat16_t>) {
-      if constexpr (ELTS_PER_LDG >= 2) {
-        using VecType = AlignedArray<bfloat16_t, ELTS_PER_LDG>;
-        const VecType* vec_thread_read_ptr =
-            reinterpret_cast<const VecType*>(thread_read_ptr);
-#pragma unroll
-        for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-          VecType vec = vec_thread_read_ptr[ii * THREADS_PER_ROW];
-#pragma unroll
-          for (int jj = 0; jj < ELTS_PER_LDG; ++jj) {
-            row_chunk[ii * ELTS_PER_LDG + jj] =
-                static_cast<float>(vec.data[jj]);
-          }
-        }
-      } else {
-#pragma unroll
-        for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-          const bfloat16_t* scalar_ptr = thread_read_ptr + ii * THREADS_PER_ROW;
-          row_chunk[ii] = static_cast<float>(*scalar_ptr);
-        }
-      }
-    } else if constexpr (std::is_same_v<InputType, half_t>) {
-      if constexpr (ELTS_PER_LDG >= 2) {
-        using VecType = AlignedArray<half_t, ELTS_PER_LDG>;
-        const VecType* vec_thread_read_ptr =
-            reinterpret_cast<const VecType*>(thread_read_ptr);
-#pragma unroll
-        for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-          VecType vec = vec_thread_read_ptr[ii * THREADS_PER_ROW];
-#pragma unroll
-          for (int jj = 0; jj < ELTS_PER_LDG; ++jj) {
-            row_chunk[ii * ELTS_PER_LDG + jj] =
-                static_cast<float>(vec.data[jj]);
-          }
-        }
-      } else {
-#pragma unroll
-        for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-          const half_t* scalar_ptr = thread_read_ptr + ii * THREADS_PER_ROW;
-          row_chunk[ii] = static_cast<float>(*scalar_ptr);
-        }
-      }
-    }
+    RowChunkLoader<InputType, ELTS_PER_LDG, LDG_PER_THREAD, THREADS_PER_ROW>::
+        load(row_chunk, thread_read_ptr);
 
     constexpr float threshold = 20.0f;
     constexpr float beta = 1.0f;
