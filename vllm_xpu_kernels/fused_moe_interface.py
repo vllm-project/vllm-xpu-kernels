@@ -357,8 +357,8 @@ class XpuFusedMoe:
 
         ########### gemm1 ##################
         gemm1_output = torch.empty((num_moe_inputs, 2 * self.inter_size),
-                                dtype=hidden_states.dtype,
-                                device=hidden_states.device)
+                                dtype=output.dtype,
+                                device=output.device)
         torch.ops._xpu_C.cutlass_grouped_gemm_interface(
             ptr_A=remapped_hidden_states,
             ptr_A_scale=remapped_scales,
@@ -387,8 +387,8 @@ class XpuFusedMoe:
 
         ########### gemm2 ##################
         gemm2_output = torch.empty((num_moe_inputs, hidden_size),
-                                dtype=hidden_states.dtype,
-                                device=hidden_states.device)
+                                dtype=output.dtype,
+                                device=output.device)
 
         if act_quant:
             act_output, gemm2_act_scale = quant_act_xpu(act_output, recipe=self.recipe)
