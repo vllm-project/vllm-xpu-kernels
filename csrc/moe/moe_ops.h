@@ -110,3 +110,17 @@ void remap_hidden_states(
     torch::Tensor& topk_ids,
     int64_t total_experts_num,
     int64_t local_experts_num);
+
+torch::Tensor fused_moe(
+    torch::Tensor input_tokens,
+    torch::Tensor w13,
+    const c10::optional<torch::Tensor>& w13_bias_opt,
+    torch::Tensor w2,
+    const c10::optional<torch::Tensor>& w2_bias_opt,
+    torch::Tensor topk_ids,
+    torch::Tensor topk_weights,
+    const c10::optional<torch::Tensor>& output_opt,
+    int64_t num_experts,
+    int64_t inter_size,
+    int64_t hidden_size,
+    double gemm1_clamp_limit);
