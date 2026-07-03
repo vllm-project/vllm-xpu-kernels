@@ -246,10 +246,6 @@ def test_varlen_with_paged_kv(
         pytest.skip("non-contiguous Q/K/V with FP8 KV cache not tested")
     if stride_pad > 0 and q_dtype is not None:
         pytest.skip("non-contiguous Q/K/V with quantized query not tested")
-    if kv_layout == "HND" and fp8_dtype is not None:
-        pytest.skip("FP8 KV cache + HND layout not tested in combination")
-    if kv_layout == "HND" and q_dtype is not None:
-        pytest.skip("quantized query + HND layout not tested in combination")
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
@@ -602,10 +598,6 @@ def test_decode_with_paged_kv(
     if (window_size[0] != -1 or window_size[1] != -1) and (
             os.getenv("SKIP_HANG_KERNEL") == "1"):
         pytest.skip("skip local attn to avoid runtime hang on CI.")
-    if kv_layout == "HND" and fp8_dtype is not None:
-        pytest.skip("FP8 KV cache + HND layout not tested in combination")
-    if kv_layout == "HND" and q_dtype is not None:
-        pytest.skip("quantized query + HND layout not tested in combination")
     torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -1125,8 +1117,6 @@ def test_varlen_with_cross_layer_paged_kv(
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
     torch.manual_seed(4242)
-    if kv_layout == "HND" and fp8_dtype is not None:
-        pytest.skip("FP8 KV cache + HND layout not tested in combination")
     num_blocks = NUM_BLOCKS[0]
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -1262,8 +1252,6 @@ def test_decode_with_cross_layer_paged_kv(
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
     torch.manual_seed(42)
-    if kv_layout == "HND" and fp8_dtype is not None:
-        pytest.skip("FP8 KV cache + HND layout not tested in combination")
     num_blocks = NUM_BLOCKS[0]
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]

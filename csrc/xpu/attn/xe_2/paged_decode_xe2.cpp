@@ -193,18 +193,21 @@ void cutlass_paged_decode_impl(
   // Compute layout-aware KV strides before initializing args.
   // paged KV: NHD [N, block_size, num_heads, head_size] (seq=dim1, head=dim2)
   //        or HND [N, num_heads, block_size, head_size] (seq=dim2, head=dim1)
+  // non-paged varlen (3D): [total_seq, num_heads, head_size] (seq=dim0,
+  // head=dim1) non-paged batch (4D):  [batch, num_heads, seq, head_size]
+  // (seq=dim2, head=dim1)
   int64_t k_stride_seq =
       is_paged ? (is_hnd ? key_cache.stride(2) : key_cache.stride(1))
-               : key_cache.stride(1);
+               : (is_varlen ? key_cache.stride(0) : key_cache.stride(2));
   int64_t k_stride_heads =
       is_paged ? (is_hnd ? key_cache.stride(1) : key_cache.stride(2))
-               : key_cache.stride(2);
+               : key_cache.stride(1);
   int64_t v_stride_seq =
       is_paged ? (is_hnd ? value_cache.stride(2) : value_cache.stride(1))
-               : value_cache.stride(1);
+               : (is_varlen ? value_cache.stride(0) : value_cache.stride(2));
   int64_t v_stride_heads =
       is_paged ? (is_hnd ? value_cache.stride(1) : value_cache.stride(2))
-               : value_cache.stride(2);
+               : value_cache.stride(1);
 
   paged_decode_args_t args = {
       query.data_ptr(),
