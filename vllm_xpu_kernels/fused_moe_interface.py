@@ -327,8 +327,10 @@ class XpuFusedMoe:
             expert_map = self.expert_map
 
         if act_quant:
-            remapped_scales = torch.empty_like(a1q_scale).repeat_interleave(
-                self.n_experts_per_token, dim=0)
+            remapped_scales = torch.empty(
+                (num_rows * self.n_experts_per_token, a1q_scale.shape[1]),
+                dtype=a1q_scale.dtype,
+                device=a1q_scale.device)
         else:
             remapped_scales = None
         remapped_hidden_states = torch.empty(
