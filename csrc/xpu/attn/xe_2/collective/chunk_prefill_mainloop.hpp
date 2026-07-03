@@ -1001,7 +1001,7 @@ struct DecodeFwdMainloop<
                           next_tile_idx % tiles_per_page;
         } else {
           // set to last page
-          next_tile_idx = params.max_pages_per_seq * tiles_per_page - 1;
+          next_tile_idx = params.max_pages_per_seq * page_stride_tiles - 1;
         }
       }
       tile_idx = next_tile_idx;

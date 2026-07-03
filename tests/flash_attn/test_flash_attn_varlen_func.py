@@ -22,6 +22,7 @@ SINK = [False, True]
 CASUAL = [False, True]
 PAGED = [False, True]
 FP8KV = [torch.float8_e4m3fn, None]
+KV_LAYOUTS = ["NHD", "HND"]
 # Cross-layer tests model the offloading KV connector's uniform cache layout,
 # where each layer view has a larger physical page stride.
 NUM_LAYERS = [2, 16]
@@ -45,11 +46,17 @@ def ref_paged_attn(query: torch.Tensor,
                    v_descale: Optional[torch.Tensor] = None,
                    is_fp8kv: bool = False,
                    is_fp8_query: bool = False,
-                   dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+                   dtype: torch.dtype = torch.bfloat16,
+                   kv_layout: str = "NHD") -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     if is_paged:
-        _, block_size, num_kv_heads, head_size = key_cache.shape
+        if kv_layout == "HND":
+            # HND: [num_blocks, num_kv_heads, block_size, head_size]
+            _, num_kv_heads, block_size, head_size = key_cache.shape
+        else:
+            # NHD: [num_blocks, block_size, num_kv_heads, head_size]
+            _, block_size, num_kv_heads, head_size = key_cache.shape
         v_head_size = value_cache.shape[-1]
     else:
         _, num_kv_heads, head_size = key_cache.shape
@@ -70,10 +77,24 @@ def ref_paged_attn(query: torch.Tensor,
             num_kv_blocks = (kv_len + block_size - 1) // block_size
             block_indices = block_tables[i, :num_kv_blocks]
 
-            k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
-            k = k[:kv_len]
-            v = value_cache[block_indices].view(-1, num_kv_heads, v_head_size)
-            v = v[:kv_len]
+            if kv_layout == "HND":
+                # HND: [num_blocks, num_kv_heads, block_size, head_size]
+                # Gather then transpose to
+                # [num_blocks*block_size, num_kv_heads, head_size]
+                k = key_cache[block_indices].transpose(1, 2).reshape(
+                    -1, num_kv_heads, head_size)
+                k = k[:kv_len]
+                v = value_cache[block_indices].transpose(1, 2).reshape(
+                    -1, num_kv_heads, v_head_size)
+                v = v[:kv_len]
+            else:
+                # NHD: [num_blocks, block_size, num_kv_heads, head_size]
+                k = key_cache[block_indices].reshape(-1, num_kv_heads,
+                                                     head_size)
+                k = k[:kv_len]
+                v = value_cache[block_indices].reshape(-1, num_kv_heads,
+                                                       v_head_size)
+                v = v[:kv_len]
         else:
             k = key_cache[start_idx_kv:start_idx_kv + kv_len]
             v = value_cache[start_idx_kv:start_idx_kv + kv_len]
@@ -134,7 +155,8 @@ MINI_PYTEST_PARAMS = {
         "num_blocks": [64],
         "window_size": [(-1, -1), (127, 127)],
         "is_paged": [True],
-        "stride_pad": [0, 32]
+        "stride_pad": [0, 32],
+        "kv_layout": ["NHD", "HND"]
     },
     "test_varlen_with_interleaved_paged_kv": {
         "seq_lens": [[(1, 1328), (5, 18), (129, 463)]],
@@ -142,6 +164,7 @@ MINI_PYTEST_PARAMS = {
         "num_heads": [(8, 2)],
         "num_blocks": [64],
         "window_size": [(-1, -1), (127, 127)],
+        "kv_layout": ["NHD", "HND"]
     },
     "test_decode_with_paged_kv": {
         "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
@@ -149,6 +172,7 @@ MINI_PYTEST_PARAMS = {
         "head_size": [64, 128],
         "num_blocks": [64],
         "window_size": [(-1, -1), (127, -1)],
+        "kv_layout": ["NHD", "HND"]
     },
     "test_decode_with_paged_kv_mla": {
         "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
@@ -163,6 +187,7 @@ MINI_PYTEST_PARAMS = {
         "num_blocks": [64],
         "window_size": [(-1, -1), (127, 127)],
         "num_layers": [2],
+        "kv_layout": ["NHD", "HND"]
     },
     "test_decode_with_cross_layer_paged_kv": {
         "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
@@ -171,6 +196,7 @@ MINI_PYTEST_PARAMS = {
         "num_blocks": [64],
         "window_size": [(-1, -1), (127, -1)],
         "num_layers": [2],
+        "kv_layout": ["NHD", "HND"]
     }
 }
 
@@ -190,6 +216,7 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("is_paged", PAGED)
 @pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
 @pytest.mark.parametrize("stride_pad", [0, 32])
+@pytest.mark.parametrize("kv_layout", KV_LAYOUTS)
 @torch.inference_mode()
 def test_varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -207,15 +234,22 @@ def test_varlen_with_paged_kv(
     is_paged: bool,
     fp8_dtype: Optional[torch.dtype],
     stride_pad: int,
+    kv_layout: str,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
+    if not is_paged and kv_layout == "HND":
+        pytest.skip("HND layout only applies to paged KV cache")
     if block_size == 128 and num_blocks == 32768 and head_size >= 192:
         pytest.skip("skip test cases that may run out of Memory.")
     if stride_pad > 0 and fp8_dtype is not None:
         pytest.skip("non-contiguous Q/K/V with FP8 KV cache not tested")
     if stride_pad > 0 and q_dtype is not None:
         pytest.skip("non-contiguous Q/K/V with quantized query not tested")
+    if kv_layout == "HND" and fp8_dtype is not None:
+        pytest.skip("FP8 KV cache + HND layout not tested in combination")
+    if kv_layout == "HND" and q_dtype is not None:
+        pytest.skip("quantized query + HND layout not tested in combination")
     # if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
     #     pytest.skip("Flash attention with quantized inputs is only "
     #                 "supported on version 3 with bfloat16 base type")
@@ -245,17 +279,36 @@ def test_varlen_with_paged_kv(
         assert not query.is_contiguous()
         assert query.stride(-1) == 1
     if is_paged:
-        key_cache = torch.randn(num_blocks,
-                                block_size,
-                                num_kv_heads,
-                                head_size,
-                                dtype=dtype)
+        if kv_layout == "HND":
+            # HND: create as NHD then permute(0,2,1,3) to get
+            # [num_blocks, num_kv_heads, block_size, head_size].
+            # The permuted tensor's strides encode the HND layout.
+            key_cache_nhd = torch.randn(num_blocks,
+                                        block_size,
+                                        num_kv_heads,
+                                        head_size,
+                                        dtype=dtype)
+            key_cache = key_cache_nhd.permute(0, 2, 1, 3)
+        else:
+            key_cache = torch.randn(num_blocks,
+                                    block_size,
+                                    num_kv_heads,
+                                    head_size,
+                                    dtype=dtype)
     else:
         key_cache = torch.randn(sum(kv_lens),
                                 num_query_heads,
                                 head_size,
                                 dtype=dtype)
-    value_cache = torch.randn_like(key_cache)
+    if is_paged and kv_layout == "HND":
+        value_cache_nhd = torch.randn(num_blocks,
+                                      block_size,
+                                      num_kv_heads,
+                                      head_size,
+                                      dtype=dtype)
+        value_cache = value_cache_nhd.permute(0, 2, 1, 3)
+    else:
+        value_cache = torch.randn_like(key_cache)
     if stride_pad > 0 and not is_paged:
         padded_head = head_size + stride_pad
         k_padded = torch.randn(*key_cache.shape[:-1],
@@ -365,7 +418,8 @@ def test_varlen_with_paged_kv(
         window_size_right=window_size[1],
         is_fp8kv=is_fp8kv,
         is_fp8_query=is_fp8_query,
-        dtype=dtype)
+        dtype=dtype,
+        kv_layout=kv_layout if is_paged else "NHD")
     atol, rtol = 2e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
@@ -387,6 +441,7 @@ def test_varlen_with_paged_kv(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("is_sink", SINK)
 @pytest.mark.parametrize("is_casual", CASUAL)
+@pytest.mark.parametrize("kv_layout", KV_LAYOUTS)
 @torch.inference_mode()
 def test_varlen_with_interleaved_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -398,6 +453,7 @@ def test_varlen_with_interleaved_paged_kv(
     num_blocks: int,
     is_sink: bool,
     is_casual: bool,
+    kv_layout: str,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -420,16 +476,29 @@ def test_varlen_with_interleaved_paged_kv(
                         head_size,
                         dtype=dtype)
 
-    combined_kv = torch.randn(num_blocks,
-                              2 * block_size,
-                              num_kv_heads,
-                              head_size,
-                              dtype=dtype)
-    key_cache = combined_kv[:, :block_size, :, :]
-    value_cache = combined_kv[:, block_size:, :, :]
+    # Interleaved layout: K and V share a combined allocation where K occupies
+    # the first block_size token slots and V the second block_size slots.
+    # For HND, the combined allocation is permuted from NHD to get the
+    # [num_blocks, num_kv_heads, 2*block_size, head_size] structure.
+    combined_kv_nhd = torch.randn(num_blocks,
+                                  2 * block_size,
+                                  num_kv_heads,
+                                  head_size,
+                                  dtype=dtype)
+    if kv_layout == "HND":
+        # Permute to HND: [num_blocks, num_kv_heads, 2*block_size, head_size]
+        combined_kv_hnd = combined_kv_nhd.permute(0, 2, 1, 3)
+        key_cache = combined_kv_hnd[:, :, :block_size, :]
+        value_cache = combined_kv_hnd[:, :, block_size:, :]
+        # stride(0) is unchanged by permuting dims 1 and 2: both layouts share
+        # the same total elements per row from the combined allocation.
+        assert key_cache.stride(0) == 2 * block_size * num_kv_heads * head_size
+    else:
+        key_cache = combined_kv_nhd[:, :block_size, :, :]
+        value_cache = combined_kv_nhd[:, block_size:, :, :]
+        assert key_cache.stride(0) == 2 * block_size * num_kv_heads * head_size
 
     assert key_cache.shape == value_cache.shape
-    assert key_cache.stride(0) == 2 * block_size * num_kv_heads * head_size
 
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
@@ -471,7 +540,8 @@ def test_varlen_with_interleaved_paged_kv(
                                 is_paged=True,
                                 sink=sink,
                                 window_size_left=window_size[0],
-                                window_size_right=window_size[1])
+                                window_size_right=window_size[1],
+                                kv_layout=kv_layout)
 
     atol, rtol = 1e-2, 1e-2
     if window_size[0] != -1 or window_size[1] != -1 or dtype == torch.bfloat16:
@@ -494,6 +564,7 @@ def test_varlen_with_interleaved_paged_kv(
 @pytest.mark.parametrize("is_sink", SINK)
 @pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
 @pytest.mark.parametrize("window_size", SLIDING_WINDOWS)
+@pytest.mark.parametrize("kv_layout", KV_LAYOUTS)
 @torch.inference_mode()
 def test_decode_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -508,6 +579,7 @@ def test_decode_with_paged_kv(
     is_sink: bool,
     fp8_dtype: Optional[torch.dtype],
     window_size: tuple[int, int],
+    kv_layout: str,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -530,6 +602,10 @@ def test_decode_with_paged_kv(
     if (window_size[0] != -1 or window_size[1] != -1) and (
             os.getenv("SKIP_HANG_KERNEL") == "1"):
         pytest.skip("skip local attn to avoid runtime hang on CI.")
+    if kv_layout == "HND" and fp8_dtype is not None:
+        pytest.skip("FP8 KV cache + HND layout not tested in combination")
+    if kv_layout == "HND" and q_dtype is not None:
+        pytest.skip("quantized query + HND layout not tested in combination")
     torch.manual_seed(42)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -545,12 +621,28 @@ def test_decode_with_paged_kv(
                         num_query_heads,
                         head_size,
                         dtype=dtype)
-    key_cache = torch.randn(num_blocks,
-                            block_size,
-                            num_kv_heads,
-                            head_size,
-                            dtype=dtype)
-    value_cache = torch.randn_like(key_cache)
+    if kv_layout == "HND":
+        # HND: create as NHD then permute(0,2,1,3) to get
+        # [num_blocks, num_kv_heads, block_size, head_size].
+        key_cache_nhd = torch.randn(num_blocks,
+                                    block_size,
+                                    num_kv_heads,
+                                    head_size,
+                                    dtype=dtype)
+        key_cache = key_cache_nhd.permute(0, 2, 1, 3)
+        value_cache_nhd = torch.randn(num_blocks,
+                                      block_size,
+                                      num_kv_heads,
+                                      head_size,
+                                      dtype=dtype)
+        value_cache = value_cache_nhd.permute(0, 2, 1, 3)
+    else:
+        key_cache = torch.randn(num_blocks,
+                                block_size,
+                                num_kv_heads,
+                                head_size,
+                                dtype=dtype)
+        value_cache = torch.randn_like(key_cache)
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
                                                            dtype=torch.int32)
@@ -623,7 +715,8 @@ def test_decode_with_paged_kv(
                                 window_size_left=window_size[0],
                                 window_size_right=window_size[1],
                                 is_fp8kv=is_fp8kv,
-                                dtype=dtype)
+                                dtype=dtype,
+                                kv_layout=kv_layout)
     atol, rtol = 1e-2, 1e-2
     if q_dtype is not None:
         atol, rtol = 1.5e-1, 1.5e-1
@@ -1016,6 +1109,7 @@ def test_varlen_with_softmax_lse(
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
 @pytest.mark.parametrize("num_layers", NUM_LAYERS)
 @pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
+@pytest.mark.parametrize("kv_layout", KV_LAYOUTS)
 @torch.inference_mode()
 def test_varlen_with_cross_layer_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -1026,10 +1120,13 @@ def test_varlen_with_cross_layer_paged_kv(
     num_layers: int,
     window_size: tuple[int, int],
     fp8_dtype: Optional[torch.dtype],
+    kv_layout: str,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
     torch.manual_seed(4242)
+    if kv_layout == "HND" and fp8_dtype is not None:
+        pytest.skip("FP8 KV cache + HND layout not tested in combination")
     num_blocks = NUM_BLOCKS[0]
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -1046,6 +1143,8 @@ def test_varlen_with_cross_layer_paged_kv(
                         head_size,
                         dtype=dtype)
 
+    # Cross-layer allocation: NHD base layout, optionally permuted to HND.
+    # combined: [num_blocks, num_layers, 2, block_size, num_kv_heads, head_size]
     combined_kv_cache = torch.randn(num_blocks,
                                     num_layers,
                                     2,
@@ -1053,11 +1152,22 @@ def test_varlen_with_cross_layer_paged_kv(
                                     num_kv_heads,
                                     head_size,
                                     dtype=dtype)
-    key_cache = combined_kv_cache[:, 0, 0, :, :, :]
-    value_cache = combined_kv_cache[:, 0, 1, :, :, :]
-    assert key_cache.shape == value_cache.shape
-    assert key_cache.stride(0) == num_layers * 2 * block_size * \
+    key_cache_nhd = combined_kv_cache[:, 0, 0, :, :, :]
+    value_cache_nhd = combined_kv_cache[:, 0, 1, :, :, :]
+    assert key_cache_nhd.shape == value_cache_nhd.shape
+    assert key_cache_nhd.stride(0) == num_layers * 2 * block_size * \
        num_kv_heads * head_size
+
+    if kv_layout == "HND":
+        # Permute each NHD slice to HND:
+        # [num_blocks, num_kv_heads, block_size, head_size]
+        key_cache = key_cache_nhd.permute(0, 2, 1, 3)
+        value_cache = value_cache_nhd.permute(0, 2, 1, 3)
+        assert key_cache.stride(0) == key_cache_nhd.stride(0)
+        assert value_cache.stride(0) == value_cache_nhd.stride(0)
+    else:
+        key_cache = key_cache_nhd
+        value_cache = value_cache_nhd
 
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
@@ -1117,7 +1227,8 @@ def test_varlen_with_cross_layer_paged_kv(
         window_size_right=window_size[1],
         is_fp8kv=is_fp8kv,
         is_fp8_query=False,
-        dtype=dtype)
+        dtype=dtype,
+        kv_layout=kv_layout)
     atol, rtol = 2e-2, 1e-2
     if window_size[0] != -1 or window_size[1] != -1:
         atol, rtol = 1.5e-2, 1.5e-2
@@ -1135,6 +1246,7 @@ def test_varlen_with_cross_layer_paged_kv(
 @pytest.mark.parametrize("num_layers", NUM_LAYERS)
 @pytest.mark.parametrize("window_size", [(-1, -1), (127, -1)])
 @pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
+@pytest.mark.parametrize("kv_layout", KV_LAYOUTS)
 @torch.inference_mode()
 def test_decode_with_cross_layer_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -1145,10 +1257,13 @@ def test_decode_with_cross_layer_paged_kv(
     num_layers: int,
     window_size: tuple[int, int],
     fp8_dtype: Optional[torch.dtype],
+    kv_layout: str,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
     torch.manual_seed(42)
+    if kv_layout == "HND" and fp8_dtype is not None:
+        pytest.skip("FP8 KV cache + HND layout not tested in combination")
     num_blocks = NUM_BLOCKS[0]
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -1164,6 +1279,7 @@ def test_decode_with_cross_layer_paged_kv(
                         num_query_heads,
                         head_size,
                         dtype=dtype)
+    # Cross-layer allocation: NHD base layout, optionally permuted to HND.
     combined_kv_cache = torch.randn(num_blocks,
                                     num_layers,
                                     2,
@@ -1171,11 +1287,22 @@ def test_decode_with_cross_layer_paged_kv(
                                     num_kv_heads,
                                     head_size,
                                     dtype=dtype)
-    key_cache = combined_kv_cache[:, 0, 0, :, :, :]
-    value_cache = combined_kv_cache[:, 0, 1, :, :, :]
-    assert key_cache.shape == value_cache.shape
-    assert key_cache.stride(0) == num_layers * 2 * block_size * \
+    key_cache_nhd = combined_kv_cache[:, 0, 0, :, :, :]
+    value_cache_nhd = combined_kv_cache[:, 0, 1, :, :, :]
+    assert key_cache_nhd.shape == value_cache_nhd.shape
+    assert key_cache_nhd.stride(0) == num_layers * 2 * block_size * \
        num_kv_heads * head_size
+
+    if kv_layout == "HND":
+        # Permute each NHD slice to HND:
+        # [num_blocks, num_kv_heads, block_size, head_size]
+        key_cache = key_cache_nhd.permute(0, 2, 1, 3)
+        value_cache = value_cache_nhd.permute(0, 2, 1, 3)
+        assert key_cache.stride(0) == key_cache_nhd.stride(0)
+        assert value_cache.stride(0) == value_cache_nhd.stride(0)
+    else:
+        key_cache = key_cache_nhd
+        value_cache = value_cache_nhd
 
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
@@ -1234,7 +1361,8 @@ def test_decode_with_cross_layer_paged_kv(
                                 window_size_left=window_size[0],
                                 window_size_right=window_size[1],
                                 is_fp8kv=is_fp8kv,
-                                dtype=dtype)
+                                dtype=dtype,
+                                kv_layout=kv_layout)
     atol, rtol = 1e-2, 1e-2
     if fp8_dtype is not None:
         atol, rtol = 1.5e-2, 1.5e-2

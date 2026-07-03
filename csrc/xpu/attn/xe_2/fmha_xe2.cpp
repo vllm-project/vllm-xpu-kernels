@@ -11,8 +11,10 @@ using namespace cute;
 
 void cutlass_chunk_prefill_xe2(
     sycl::queue& queue,
-    const at::Tensor& query,      // [seq_q, heads, head_size]
-    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& query,  // [seq_q, heads, head_size]
+    const at::Tensor&
+        key_cache,  // paged: NHD [num_block, block_size, heads, head_size]
+                    //     or HND [num_block, heads, block_size, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
     const at::Tensor& block_table,
@@ -61,8 +63,10 @@ void cutlass_chunk_prefill_xe2(
 
 void cutlass_chunk_prefill_impl(
     sycl::queue& queue,
-    const at::Tensor& query,      // [seq_q, heads, head_size]
-    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& query,  // [seq_q, heads, head_size]
+    const at::Tensor&
+        key_cache,  // paged: NHD [num_block, block_size, heads, head_size]
+                    //     or HND [num_block, heads, block_size, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
     const at::Tensor& block_table,
@@ -88,6 +92,7 @@ void cutlass_chunk_prefill_impl(
   // additional params
   int total_seqlen_q, total_seqlen_k;
   int num_blocks, block_size, max_blocks_per_seq;
+  bool is_hnd = false;
   if (is_varlen) {
     // query: [total_seq, num_heads, head_size]
     batch_size = cu_seqlens_q.numel() - 1;
@@ -100,6 +105,7 @@ void cutlass_chunk_prefill_impl(
     // query: [batch, num_heads, seq, head_size]
     batch_size = query.size(0);
     num_heads_q = query.size(1);
+    // non-paged: key_cache is [batch, num_heads_kv, seq, head_size]
     num_heads_kv = is_paged ? key_cache.size(2) : key_cache.size(1);
     head_size = query.size(3);
     max_seqlen_q = query.size(2);
@@ -108,8 +114,17 @@ void cutlass_chunk_prefill_impl(
 
   if (is_paged) {
     num_blocks = key_cache.size(0);
-    block_size = key_cache.size(1);
-    num_heads_kv = key_cache.size(2);
+    // Layout detection: HND is created by permuting NHD via permute(0,2,1,3).
+    // NHD [N,B,H,D]: stride(1)=H*D = size(2)*stride(2)
+    // HND [N,H,B,D]: stride(1)=D   != size(2)*stride(2)=B*(H*D)
+    is_hnd = is_paged_kv_hnd_layout(key_cache);
+    if (is_hnd) {
+      num_heads_kv = key_cache.size(1);  // HND: dim1=num_heads
+      block_size = key_cache.size(2);    // HND: dim2=block_size
+    } else {
+      block_size = key_cache.size(1);    // NHD: dim1=block_size
+      num_heads_kv = key_cache.size(2);  // NHD: dim2=num_heads
+    }
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
   }
@@ -176,13 +191,24 @@ void cutlass_chunk_prefill_impl(
     args.o_stride_heads = out.stride(1);
     args.o_stride_batch = 0;
     if (is_paged) {
-      // K/V: [num_blocks, block_size, num_heads_kv, head_size]
-      args.k_stride_seq = key_cache.stride(1);
-      args.k_stride_heads = key_cache.stride(2);
-      args.k_stride_batch = 0;
-      args.v_stride_seq = value_cache.stride(1);
-      args.v_stride_heads = value_cache.stride(2);
-      args.v_stride_batch = 0;
+      // paged KV: NHD [num_blocks, block_size, num_heads_kv, head_size]
+      //        or HND [num_blocks, num_heads_kv, block_size, head_size]
+      //        (permuted)
+      if (is_hnd) {
+        args.k_stride_seq = key_cache.stride(2);    // seq dim = dim2
+        args.k_stride_heads = key_cache.stride(1);  // head dim = dim1
+        args.k_stride_batch = 0;
+        args.v_stride_seq = value_cache.stride(2);
+        args.v_stride_heads = value_cache.stride(1);
+        args.v_stride_batch = 0;
+      } else {
+        args.k_stride_seq = key_cache.stride(1);    // seq dim = dim1
+        args.k_stride_heads = key_cache.stride(2);  // head dim = dim2
+        args.k_stride_batch = 0;
+        args.v_stride_seq = value_cache.stride(1);
+        args.v_stride_heads = value_cache.stride(2);
+        args.v_stride_batch = 0;
+      }
     } else {
       // K/V: [total_seq_k, num_heads_kv, head_size]
       args.k_stride_seq = key_cache.stride(0);
@@ -201,13 +227,24 @@ void cutlass_chunk_prefill_impl(
     args.o_stride_heads = out.stride(1);
     args.o_stride_batch = out.stride(0);
     if (is_paged) {
-      // K/V: [num_blocks, block_size, num_heads_kv, head_size]
-      args.k_stride_seq = key_cache.stride(1);
-      args.k_stride_heads = key_cache.stride(2);
-      args.k_stride_batch = 0;
-      args.v_stride_seq = value_cache.stride(1);
-      args.v_stride_heads = value_cache.stride(2);
-      args.v_stride_batch = 0;
+      // paged KV: NHD [num_blocks, block_size, num_heads_kv, head_size]
+      //        or HND [num_blocks, num_heads_kv, block_size, head_size]
+      //        (permuted)
+      if (is_hnd) {
+        args.k_stride_seq = key_cache.stride(2);    // seq dim = dim2
+        args.k_stride_heads = key_cache.stride(1);  // head dim = dim1
+        args.k_stride_batch = 0;
+        args.v_stride_seq = value_cache.stride(2);
+        args.v_stride_heads = value_cache.stride(1);
+        args.v_stride_batch = 0;
+      } else {
+        args.k_stride_seq = key_cache.stride(1);    // seq dim = dim1
+        args.k_stride_heads = key_cache.stride(2);  // head dim = dim2
+        args.k_stride_batch = 0;
+        args.v_stride_seq = value_cache.stride(1);
+        args.v_stride_heads = value_cache.stride(2);
+        args.v_stride_batch = 0;
+      }
     } else {
       // K/V: [batch, num_heads_kv, seq, head_size]
       args.k_stride_seq = key_cache.stride(2);

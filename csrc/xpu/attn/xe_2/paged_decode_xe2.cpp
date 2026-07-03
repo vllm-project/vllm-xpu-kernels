@@ -11,8 +11,10 @@ using namespace cute;
 
 void cutlass_paged_decode_xe2(
     sycl::queue& queue,
-    const at::Tensor& query,      // [seq_q, heads, head_size]
-    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& query,  // [seq_q, heads, head_size]
+    const at::Tensor&
+        key_cache,  // paged: NHD [num_block, block_size, heads, head_size]
+                    //     or HND [num_block, heads, block_size, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
     at::Tensor&
@@ -84,8 +86,10 @@ inline bool is_single_value_broadcast_tensor(const at::Tensor& t) {
 
 void cutlass_paged_decode_impl(
     sycl::queue& queue,
-    const at::Tensor& query,      // [seq_q, heads, head_size]
-    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& query,  // [seq_q, heads, head_size]
+    const at::Tensor&
+        key_cache,  // paged: NHD [num_block, block_size, heads, head_size]
+                    //     or HND [num_block, heads, block_size, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
     at::Tensor&
@@ -134,6 +138,7 @@ void cutlass_paged_decode_impl(
   // additional params
   int total_seqlen_q, total_seqlen_k;
   int num_blocks, block_size, max_blocks_per_seq;
+  bool is_hnd = false;
   if (is_varlen) {
     // query: [total_seq, num_heads, head_size]
     batch_size = cu_seqlens_q.numel() - 1;
@@ -158,8 +163,17 @@ void cutlass_paged_decode_impl(
     // num_blocks is used to build total_seqlen_k for shape_K in kernels
     // it is not just the meaning of used blocks for kv.
     num_blocks = key_cache.size(0);
-    block_size = key_cache.size(1);
-    num_heads_kv = key_cache.size(2);
+    // Layout detection: HND is created by permuting NHD via permute(0,2,1,3).
+    // NHD [N,B,H,D]: stride(1)=H*D = size(2)*stride(2)
+    // HND [N,H,B,D]: stride(1)=D   != size(2)*stride(2)=B*(H*D)
+    is_hnd = is_paged_kv_hnd_layout(key_cache);
+    if (is_hnd) {
+      num_heads_kv = key_cache.size(1);  // HND: dim1=num_heads
+      block_size = key_cache.size(2);    // HND: dim2=block_size
+    } else {
+      block_size = key_cache.size(1);    // NHD: dim1=block_size
+      num_heads_kv = key_cache.size(2);  // NHD: dim2=num_heads
+    }
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
   }
@@ -175,6 +189,22 @@ void cutlass_paged_decode_impl(
     page_stride_elements =
         static_cast<int>(get_paged_kv_cache_page_stride_elements(key_cache));
   }
+
+  // Compute layout-aware KV strides before initializing args.
+  // paged KV: NHD [N, block_size, num_heads, head_size] (seq=dim1, head=dim2)
+  //        or HND [N, num_heads, block_size, head_size] (seq=dim2, head=dim1)
+  int64_t k_stride_seq =
+      is_paged ? (is_hnd ? key_cache.stride(2) : key_cache.stride(1))
+               : key_cache.stride(1);
+  int64_t k_stride_heads =
+      is_paged ? (is_hnd ? key_cache.stride(1) : key_cache.stride(2))
+               : key_cache.stride(2);
+  int64_t v_stride_seq =
+      is_paged ? (is_hnd ? value_cache.stride(2) : value_cache.stride(1))
+               : value_cache.stride(1);
+  int64_t v_stride_heads =
+      is_paged ? (is_hnd ? value_cache.stride(1) : value_cache.stride(2))
+               : value_cache.stride(2);
 
   paged_decode_args_t args = {
       query.data_ptr(),
@@ -214,11 +244,11 @@ void cutlass_paged_decode_impl(
       nullptr,  // work_list, filled in below if applicable
       0,        // total_wgs, filled in below if applicable
       key_cache.stride(0),
-      key_cache.stride(1),
-      key_cache.stride(2),
+      k_stride_seq,
+      k_stride_heads,
       value_cache.stride(0),
-      value_cache.stride(1),
-      value_cache.stride(2),
+      v_stride_seq,
+      v_stride_heads,
       is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr,
       // Q strides: for varlen Q is [total_seq, num_heads, head_size]; for
       // non-varlen Q is [batch, num_heads, seq, head_size].
