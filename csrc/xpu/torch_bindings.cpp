@@ -142,21 +142,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("mhc_fused_post_pre", torch::kXPU, &mhc_fused_post_pre);
 #endif
 
-  // DeepSeek-V4 fused Q-RMSNorm + GPT-J RoPE + KV cache insert.
-  // kv_cache_dtype: "bf16" or "fp8_ds_mla"
-  xpu_ops.def(
-      "deepseek_qnorm_rope_kv_insert(Tensor! q, Tensor kv,"
-      "                              Tensor! cache,"
-      "                              Tensor slot_mapping,"
-      "                              Tensor position_ids,"
-      "                              Tensor cos_sin_cache,"
-      "                              float eps, int block_size,"
-      "                              str kv_cache_dtype) -> ()");
-  xpu_ops.impl(
-      "deepseek_qnorm_rope_kv_insert",
-      torch::kXPU,
-      &deepseek_qnorm_rope_kv_insert);
-
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
       "indices, float scale) -> ()");
