@@ -301,8 +301,8 @@ class fp8_paged_mqa_logits_kernel_t {
     int64_t block_size;
     int64_t max_blocks;
     int64_t max_model_len;
-    int32_t kv_stride0;
-    int32_t scale_stride0;
+    int64_t kv_stride0;
+    int64_t scale_stride0;
   };
 
   CUTLASS_DEVICE
@@ -613,11 +613,11 @@ torch::Tensor fp8_paged_mqa_logits_xe2(
   const int32_t* block_tables_ptr = block_tables.data_ptr<int32_t>();
   float* out_ptr = logits.data_ptr<float>();
 
-  const int32_t kv_stride0 = kv.stride(0);
-  const int32_t kv_stride1 = kv.stride(1);
-  const int32_t kv_stride3 = kv.stride(3);
-  const int32_t scale_stride0 = kv_scales.stride(0);
-  const int32_t scale_stride1 = kv_scales.stride(1);
+  const int64_t kv_stride0 = kv.stride(0);
+  const int64_t kv_stride1 = kv.stride(1);
+  const int64_t kv_stride3 = kv.stride(3);
+  const int64_t scale_stride0 = kv_scales.stride(0);
+  const int64_t scale_stride1 = kv_scales.stride(1);
 
   TORCH_CHECK(kv_stride1 == index_dim, "kv index_dim stride mismatch");
   TORCH_CHECK(kv_stride3 == 1, "kv last dim stride mismatch");

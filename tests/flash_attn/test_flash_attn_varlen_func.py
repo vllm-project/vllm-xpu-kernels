@@ -898,13 +898,17 @@ def ref_softmax_lse(
 # Causal is orthogonal. Keep the param grid small since the outer loop count
 # multiplies with these.
 #
-# Note on seq_lens: we use query_len == 1 per sequence. The xe_2 kernel's LSE
-# write loop only reliably emits the first q-row of each tile, so multi-token
-# prefill rows would read as zero. Single-token rows exercise the full
-# SoftmaxLSE=true template path (dispatch, epilogue, write-out) and validate
-# the log-sum-exp math is numerically correct.
-@pytest.mark.parametrize("seq_lens",
-                         [[(1, 1328), (1, 18), (1, 463), (1, 37)]])
+# Note on seq_lens: the cases mix single-token (decode-style) sequences with
+# multi-token prefill sequences that span more than one query row per tile.
+# The kernel's LSE write recovers each work-item's true query-row coordinate
+# from the softmax fragment layout, so every q-row of every tile must be
+# populated (no zero rows). This exercises the full SoftmaxLSE=true template
+# path (dispatch, epilogue, write-out) and validates the log-sum-exp math.
+@pytest.mark.parametrize("seq_lens", [
+    [(1, 1328), (1, 18), (1, 463), (1, 37)],
+    [(17, 1328), (1, 18), (130, 463), (5, 37)],
+    [(256, 256), (200, 463)],
+])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", [128, 192])
 @pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)

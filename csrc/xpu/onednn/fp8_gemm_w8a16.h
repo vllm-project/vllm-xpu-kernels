@@ -26,9 +26,10 @@ static inline void dnnl_matmul_w8a16_fp8(
   const int n = o_sz.back();  // presume channel last format
   const int k = *(src_sz.end() - 1);
 
-  // block quant param: m2_sc is 2D with more than 1 element for block quant
-  // Weight scale layout: [k/group_size, n/group_size]
-  bool is_block_quant = (m2_sc.dim() == 2) && (m2_sc.numel() > 1);
+  // block quant: m2_sc is 2D with size(0) > 1, i.e. [k/group_size,
+  // n/group_size] Per-channel scale [1, N] has size(0)==1 and must NOT enter
+  // this branch.
+  bool is_block_quant = (m2_sc.dim() == 2) && (m2_sc.size(0) > 1);
   int64_t blk_group_size = -1;
   if (is_block_quant) {
     blk_group_size = k / m2_sc.size(0);
