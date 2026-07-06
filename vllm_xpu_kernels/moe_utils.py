@@ -173,6 +173,19 @@ def _as_e8m0(s):
             return s.view(torch.float8_e8m0fnu)
         return s
 
+def dequant_act(x, x_scale, recipe):
+    if recipe == "fp8block":
+        return dequant_fp8_block_act(x, x_scale)
+    elif recipe in ("fp8", "mxfp4_fp8"):
+        return x.to(torch.float32) * _as_e8m0(x_scale).to(torch.float32)
+    elif recipe == "mxfp4":
+        return dequant_mxfp4(x, x_scale)
+    elif recipe == "mxfp8":
+        return dequant_mxfp8(x, x_scale)
+    else:
+        # bf16: no quantization noise, return unchanged
+        return x
+
 def qdq_act(x, recipe):
     if recipe == "fp8block":
         _q, _s = quant_fp8_block_act(x)
@@ -237,6 +250,7 @@ def ref_fused_moe(recipe,
                   ep_rank=0,
                   ep_size=1,
                   expert_map=None,
+                  a1q_scale=None,
 ):
     """
     Reference fused MoE implementation with quantization simulation.
@@ -268,7 +282,7 @@ def ref_fused_moe(recipe,
     else:
         inter_size = w13.shape[-1] // 2
     num_moe_inputs = n_experts_per_token * num_rows
-    compute_dtype = hidden_states.dtype
+    compute_dtype = hidden_states.dtype if a1q_scale is None else torch.bfloat16
 
     if expert_map is None and ep_size > 1:
         expert_map = torch.empty((num_experts * ep_size),
@@ -286,6 +300,11 @@ def ref_fused_moe(recipe,
     
 
     # ---- remap hidden states (unchanged from _apply_kernel) ----
+    if a1q_scale is not None:
+        remapped_scales = torch.empty_like(a1q_scale).repeat_interleave(
+            n_experts_per_token, dim=0)
+    else:
+        remapped_scales = None
     remapped_hidden_states = torch.empty(
         (num_moe_inputs, hidden_size),
         dtype=hidden_states.dtype,
@@ -300,15 +319,18 @@ def ref_fused_moe(recipe,
 
     torch.ops._moe_C.remap_hidden_states(
         hidden_states=hidden_states,
-        hidden_states_scales=None,
+        hidden_states_scales=a1q_scale,
         remapped_hidden_states=remapped_hidden_states,
-        remapped_hidden_states_scales=None,
+        remapped_hidden_states_scales=remapped_scales,
         expert_map=expert_map,
         rows_per_expert=rows_per_expert,
         unpermuted_row_to_permuted_row=unpermuted_row_to_permuted_row,
         topk_ids=topk_ids,
         total_experts_num=total_experts_num,
         local_experts_num=local_experts_num)
+
+    if a1q_scale is not None and recipe == "mxfp4":
+        hidden_size = 2 * hidden_size
 
     # ---- GEMM1: cutlass grouped GEMM replaced by torch matmul ----
     gemm1_output = torch.zeros((num_moe_inputs, 2 * inter_size),
@@ -322,7 +344,13 @@ def ref_fused_moe(recipe,
         tokens_i = remapped_hidden_states[offset:offset + n_tokens]
 
         # activation: quant → dequant round-trip
-        tokens_i_qdq = qdq_act(tokens_i, recipe).to(compute_dtype)
+        if a1q_scale is not None:
+            tokens_i_qdq = dequant_act(
+                tokens_i,
+                remapped_scales[offset:offset + n_tokens],
+                recipe).to(compute_dtype)
+        else:
+            tokens_i_qdq = qdq_act(tokens_i, recipe).to(compute_dtype)
         # weight dequant
         w13_i = dequant_wei(w13[i], w13_scales[i], recipe).to(compute_dtype)
         if recipe in ("fp8block", "mxfp8"):
@@ -373,3 +401,11 @@ def ref_fused_moe(recipe,
                                 unpermuted_row_to_permuted_row,
                                 num_experts)
     return output
+
+def quant_act_xpu(x, recipe):
+    if recipe in ("mxfp4", "mxfp8"):
+        return quant_mxfp_act_xpu(x, recipe)
+    elif recipe == "fp8block":
+        return quant_fp8_block_act(x)
+    else:
+        raise NotImplementedError(f"Unsupported recipe for quant_act_xpu: {recipe}") # noqa: E501
