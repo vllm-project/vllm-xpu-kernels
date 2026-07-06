@@ -49,6 +49,15 @@ set(TORCH_SUPPORTED_VERSION_XPU "2.12.0")
 set(BUILD_SYCL_TLA_KERNELS
     ON
     CACHE BOOL "Build SYCL-TLA based kernels for XPU")
+
+set(ONEDNN_GIT_REPO
+    "https://github.com/uxlfoundation/oneDNN.git"
+    CACHE STRING "oneDNN git repository URL")
+
+# rls-v3.12
+set(ONEDNN_GIT_TAG
+    "80afa71049cd69a3df32adcccb623b12cd7baa22"
+    CACHE STRING "oneDNN git commit hash or tag")
 # ARCHITECTURE OPTIONS
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
 option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
@@ -63,6 +72,8 @@ option(MOE_KERNELS_ENABLED
        "Build MoE kernels (_moe_C extension + grouped_gemm TLA)" ON)
 option(GDN_KERNELS_ENABLED "Build GDN attention kernels (gdn_attn TLA)" ON)
 option(MQA_LOGITS_KERNELS_ENABLED "Build MQA logits kernels" ON)
+option(MHC_KERNELS_ENABLED
+       "Build MHC (Manifold-Constrained Hyper-Connections) kernels" ON)
 option(XPU_SPECIFIC_KERNELS_ENABLED
        "Build XPU-specific kernels (_xpu_C extension)" ON)
 option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
@@ -122,6 +133,8 @@ if(NOT VLLM_CHUNK_PREFILL_CONFIG OR "${VLLM_CHUNK_PREFILL_CONFIG}" STREQUAL "")
 endif()
 
 message(STATUS "Kernel build configuration:")
+message(STATUS "  ONEDNN_GIT_REPO              = ${ONEDNN_GIT_REPO}")
+message(STATUS "  ONEDNN_GIT_TAG               = ${ONEDNN_GIT_TAG}")
 message(STATUS "  BUILD_SYCL_TLA_KERNELS       = ${BUILD_SYCL_TLA_KERNELS}")
 message(STATUS "  VLLM_XPU_ENABLE_XE2          = ${VLLM_XPU_ENABLE_XE2}")
 message(STATUS "  VLLM_XPU_ENABLE_XE_DEFAULT   = ${VLLM_XPU_ENABLE_XE_DEFAULT}")
@@ -130,6 +143,7 @@ message(STATUS "  FA2_KERNELS_ENABLED          = ${FA2_KERNELS_ENABLED}")
 message(STATUS "  MOE_KERNELS_ENABLED          = ${MOE_KERNELS_ENABLED}")
 message(STATUS "  GDN_KERNELS_ENABLED          = ${GDN_KERNELS_ENABLED}")
 message(STATUS "  MQA_LOGITS_KERNELS_ENABLED   = ${MQA_LOGITS_KERNELS_ENABLED}")
+message(STATUS "  MHC_KERNELS_ENABLED          = ${MHC_KERNELS_ENABLED}")
 message(
   STATUS "  XPU_SPECIFIC_KERNELS_ENABLED = ${XPU_SPECIFIC_KERNELS_ENABLED}")
 message(STATUS "  XPUMEM_ALLOCATOR_ENABLED     = ${XPUMEM_ALLOCATOR_ENABLED}")
@@ -250,6 +264,9 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   set(SYCL_KERNEL_OPTIONS)
 
   list(APPEND SYCL_FLAGS "-fsycl")
+  # For l0 ops like getMemoryInfo
+  list(APPEND SYCL_FLAGS "-lze_loader")
+  list(APPEND SYCL_FLAGS "-Wno-unused-command-line-argument")
 
   set(SYCL_COMPILE_FLAGS ${SYCL_FLAGS})
   set(SYCL_COMPILE_FLAGS ${SYCL_COMPILE_FLAGS} "-O3" "-DNDEBUG")
@@ -264,6 +281,9 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # ============= LINK OPTIONS ==================
   set(SYCL_LINK_FLAGS "")
   list(APPEND SYCL_LINK_FLAGS "-fsycl")
+  # For l0 ops like getMemoryInfo
+  list(APPEND SYCL_LINK_FLAGS "-lze_loader")
+  list(APPEND SYCL_LINK_FLAGS "-Wno-unused-command-line-argument")
   set(SYCL_DEVICE_LINK_FLAGS ${SYCL_LINK_FLAGS})
   set(SYCL_DEVICE_LINK_FLAGS
       ${SYCL_DEVICE_LINK_FLAGS} -fsycl-max-parallel-link-jobs=16
@@ -377,6 +397,7 @@ set(ATTN_KERNEL_LIB_NAME "")
 set(GROUPED_GEMM_LIB_NAME "")
 set(GDN_ATTN_LIB_NAME "")
 set(MQA_LOGITS_LIB_NAME "")
+set(MHC_LIB_NAME "")
 
 if(BUILD_SYCL_TLA_KERNELS)
 
@@ -416,6 +437,10 @@ if(BUILD_SYCL_TLA_KERNELS)
       add_subdirectory(csrc/xpu/mqa_logits/xe_2)
       list(APPEND MQA_LOGITS_LIB_NAME "mqa_logits_kernels_xe_2")
     endif()
+    if(MHC_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/mhc/xe_2)
+      list(APPEND MHC_LIB_NAME "mhc_kernels_xe_2")
+    endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
@@ -432,6 +457,9 @@ if(GDN_KERNELS_ENABLED)
 endif()
 if(MQA_LOGITS_KERNELS_ENABLED)
   list(APPEND VLLM_GPU_COMPILE_FLAGS -DVLLM_MQA_LOGITS_ENABLED)
+endif()
+if(MHC_KERNELS_ENABLED)
+  list(APPEND VLLM_GPU_COMPILE_FLAGS -DVLLM_MHC_ENABLED)
 endif()
 
 # define vLLM XPU cmake variables
@@ -513,10 +541,12 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/quantization/fp8/fp8_quant.cpp"
       "csrc/quantization/fp4/mxfp4_quant.cpp"
       "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cpp"
+      "csrc/quantization/fused_kernels/fused_silu_mul_mxfp4_quant.cpp"
       "csrc/xpu_view.cpp"
       "csrc/attention/merge_attn_states.cpp"
       "csrc/tensor_utils.cpp"
       "csrc/utils/mem_cpy.cpp"
+      "csrc/utils/mem_info.cpp"
       "csrc/topk_per_row.cpp")
   include_directories("/usr/include")
 
@@ -593,7 +623,13 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/lora/lora_expand.cpp"
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
       "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
+      "csrc/xpu/sycl/deepseek_qnorm_rope_kv_insert.cpp"
+      "csrc/xpu/sycl/deepseek_inv_rope_bf16.cpp"
+      "csrc/xpu/sycl/deepseek_inv_rope_fp8_quant.cpp"
+      "csrc/xpu/sycl/deepseek_fused_indexer_q_rope_fp8.cpp"
+      "csrc/xpu/sycl/deepseek_fused_indexer_q_rope_mxfp4.cpp"
       "csrc/xpu/sycl/multimodal_rope.cpp"
+      "csrc/xpu/sycl/apply_rotary_emb.cpp"
       "csrc/xpu/rand/exponential.cpp"
       "csrc/xpu/utils.cpp")
   if(MOE_KERNELS_ENABLED)
@@ -617,8 +653,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     include_directories(${ONEDNN_INCLUDE_DIR})
     link_libraries(${ONEDNN_LIBRARY})
   else()
-    message(
-      FATAL_ERROR "onednn not found but xpu specific kernels are enabled.")
+    message(FATAL_ERROR "oneDNN not found!")
   endif()
 
   define_gpu_extension_target(
@@ -638,7 +673,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     INCLUDE_DIRECTORIES
     ${VLLM_XPU_INCLUDE_DIR}
     LIBRARIES
-    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME};${MQA_LOGITS_LIB_NAME}
+    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME};${MQA_LOGITS_LIB_NAME};${MHC_LIB_NAME}
     USE_SABI
     3
     WITH_SOABI)
@@ -650,8 +685,6 @@ endif()
 if(MOE_KERNELS_ENABLED)
   message(STATUS "Enabling _moe_C extension.")
   file(GLOB VLLM_MOE_EXT_SRC "csrc/moe/*.cpp")
-  # list(REMOVE_ITEM VLLM_MOE_EXT_SRC
-  # ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/fused_grouped_topk.cpp)
 
   define_gpu_extension_target(
     _moe_C

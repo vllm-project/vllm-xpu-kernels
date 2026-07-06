@@ -27,6 +27,26 @@ def _as_int32_device_tensor(x, device: torch.device) -> torch.Tensor:
     return torch.tensor(x, device=device, dtype=torch.int32)
 
 
+def _normalize_descale_tensor(
+    descale: Optional[torch.Tensor],
+    name: str,
+) -> Optional[torch.Tensor]:
+    if descale is None:
+        return None
+
+    assert descale.dtype in (torch.float32, torch.bfloat16, torch.float16), \
+        f"{name} must be a float32 or bfloat16 or float16 scalar tensor view"
+    assert descale.untyped_storage().nbytes() == descale.element_size(), \
+        f"{name} must be view of single scalar tensor"
+
+    if descale.dtype == torch.float32:
+        return descale
+
+    descale_scalar = descale.flatten()[0].to(dtype=torch.float32)
+    return descale_scalar if descale.ndim == 0 else descale_scalar.expand(
+        descale.shape)
+
+
 def _kv_tile_from_block_size(block_size: int) -> int:
     # Mirror of flash_api.cpp get_num_splits() / TileShapeQK<1>.
     if block_size == 16:
@@ -336,14 +356,8 @@ def flash_attn_varlen_func(
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
-    if k_descale is not None:
-        assert k_descale.untyped_storage().nbytes() == 4 and \
-            k_descale.dtype == torch.float32, \
-            "k_descale must be view of single float32 scalar tensor"
-    if v_descale is not None:
-        assert v_descale.untyped_storage().nbytes() == 4 and \
-            v_descale.dtype == torch.float32, \
-            "v_descale must be view of single float32 scalar tensor"
+    k_descale = _normalize_descale_tensor(k_descale, "k_descale")
+    v_descale = _normalize_descale_tensor(v_descale, "v_descale")
     # custom op does not support non-tuple input
     real_window_size: tuple[int, int]
     if window_size is None:

@@ -269,7 +269,9 @@ struct FMHAFwdMainloop<
       int blk_k1_causal,
       int thr_id,
       int seq_len,
-      int full_tile_offset) {
+      int full_tile_offset,
+      int blk_local_l_safe,
+      int blk_local_r_safe) {
     using namespace sycl::ext::oneapi::this_work_item;
 
     // Short dimension names:
@@ -465,18 +467,22 @@ struct FMHAFwdMainloop<
       }
       /* Local masking */
       if constexpr (LocalMask) {
-        Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
-        Tensor gP = local_tile(
-            cPgP, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
-        auto cS_thread = thr_mma_qk.partition_C(gP);
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < tSrS.size(); ++i) {
-          int row_idx = get<0>(cS_thread(i));
-          int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
-          bool left_mask = col_idx < row_idx - params.local_left;
-          bool right_mask = col_idx > row_idx + params.local_right;
-          if (left_mask || right_mask) {
-            tSrS(i) = ElementS(-INFINITY);
+        const bool need_left = (K < blk_local_l_safe);
+        const bool need_right = (K > blk_local_r_safe);
+        if (need_left || need_right) {
+          Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
+          Tensor gP = local_tile(
+              cPgP, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
+          auto cS_thread = thr_mma_qk.partition_C(gP);
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < tSrS.size(); ++i) {
+            int row_idx = get<0>(cS_thread(i));
+            int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
+            bool left_mask = col_idx < row_idx - params.local_left;
+            bool right_mask = col_idx > row_idx + params.local_right;
+            if (left_mask || right_mask) {
+              tSrS(i) = ElementS(-INFINITY);
+            }
           }
         }
       }

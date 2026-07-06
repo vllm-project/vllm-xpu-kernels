@@ -272,15 +272,13 @@ class XeFMHAFwdKernel {
           cute::min(seq_len_qo, (blk_q * get<0>(TileShapeQK{}) + q_offset_sg));
 
       // calc sg level seq_len_kv
-      const int seq_len =
-          CausalMask
-              ? LocalMask
-                    ? cute::min(
+      const int sg_seq_len =
+          LocalMask ? cute::min(
                           seq_len_kv,
                           full_tile_offset + seq_coord + q_sg_tile +
                               params.mainloop.local_right)
-                    : cute::min(
-                          seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
+          : CausalMask
+              ? cute::min(seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
               : seq_len_kv;
       const int sg_k_block0 =
           LocalMask
@@ -289,18 +287,37 @@ class XeFMHAFwdKernel {
                     0) /
                     get<1>(TileShapeQK{})
               : 0;
-      const int sg_k_blocks = cute::ceil_div(seq_len, get<1>(TileShapeQK{}));
+      const int sg_k_blocks = cute::ceil_div(sg_seq_len, get<1>(TileShapeQK{}));
       const int sg_k_blocks_causal =
           CausalMask ? (seq_coord + full_tile_offset) / get<1>(TileShapeQK{})
                      : 0;
+      const int sg_k_block_local_l_safe =
+          LocalMask ? cute::ceil_div(
+                          cute::max(
+                              seq_coord + q_sg_tile - 1 + full_tile_offset -
+                                  params.mainloop.local_left,
+                              0),
+                          get<1>(TileShapeQK{}))
+                    : 0;
+      const int sg_k_block_local_r_safe =
+          LocalMask
+              ? (seq_coord + full_tile_offset + params.mainloop.local_right +
+                 1) / get<1>(TileShapeQK{}) -
+                    1
+              : 0;
 
       // The mainloop wraps each K iteration in a workgroup-scoped barrier
       // pair, so every subgroup in the workgroup must execute the same
       // K-loop trip count. Reduce the per-SG bounds across the WG:
       //   k_block0        = min across WG (start no later than any SG)
       //   k_blocks        = max across WG (end no earlier than any SG)
+      //   seq_len         = max across WG (common LocalMask upper bound)
       //   k_blocks_causal = min across WG (turn on causal masking no later
       //                                    than any SG needs it)
+      //   k_block_local_l_safe = max across WG (left mask off no earlier
+      //                                         than any SG needs it on)
+      //   k_block_local_r_safe = min across WG (right mask on no earlier
+      //                                         than any SG needs it on)
       // Per-element causal / local / remainder masking inside the mainloop
       // handles the widened range safely for SGs that didn't need it.
       auto wg = sycl::ext::oneapi::this_work_item::get_work_group<3>();
@@ -312,10 +329,21 @@ class XeFMHAFwdKernel {
           (CausalMask || LocalMask)
               ? sycl::reduce_over_group(wg, sg_k_blocks, sycl::maximum<int>{})
               : sg_k_blocks;
+      const int seq_len = LocalMask ? sycl::reduce_over_group(
+                                          wg, sg_seq_len, sycl::maximum<int>{})
+                                    : sg_seq_len;
       const int k_blocks_causal =
           CausalMask ? sycl::reduce_over_group(
                            wg, sg_k_blocks_causal, sycl::minimum<int>{})
                      : 0;
+      const int k_block_local_l_safe =
+          LocalMask ? sycl::reduce_over_group(
+                          wg, sg_k_block_local_l_safe, sycl::maximum<int>{})
+                    : 0;
+      const int k_block_local_r_safe =
+          LocalMask ? sycl::reduce_over_group(
+                          wg, sg_k_block_local_r_safe, sycl::minimum<int>{})
+                    : 0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       if constexpr (is_var_len) {
@@ -378,39 +406,62 @@ class XeFMHAFwdKernel {
           k_blocks_causal,
           thr_id,
           seq_len,
-          full_tile_offset);
+          full_tile_offset,
+          k_block_local_l_safe,
+          k_block_local_r_safe);
 
       // return softmax_lse
       if constexpr (SoftmaxLSE) {
         static_assert(
             size<3>(typename TiledMMAPV::ThrLayoutVMNK{}) == 1,
             "softmax_lse requires ReduceK == 1 in TiledMMAPV");
-        if (get<1>(blk_qv) == 0 && (thr_id % intel::sg_size == 0)) {
+        // Only the first V-block of a (q-tile, head, batch) writes LSE: the
+        // softmax stats (tA_max/tA_sum) are reduced over keys and are therefore
+        // identical for every V-block covering the same query rows.
+        if (get<1>(blk_qv) == 0) {
           using ElementA = typename FragA::value_type;
           constexpr float kLn2 = 0.6931471805599453f;
+          constexpr double kLog2e = 1.4426950408889634074;
           int q_tile_start = blk_q * get<0>(TileShapeQK{});
           int qo_cumul = 0;
           if constexpr (is_var_len) {
             qo_cumul = s.seq_len_qo.cumulative_length[idx_b];
           }
 
+          // The query tile is split across SGPerWG subgroups, q_sg_tile rows
+          // each (q_sg_tile = TileShapeQK[0] / SubgroupLayoutQK[0]); subgroup g
+          // owns global tile rows [g*q_sg_tile, (g+1)*q_sg_tile). After the
+          // key reduction the per-row softmax stats (tA_max/tA_sum) are laid
+          // out so that a subgroup's logical row r lives in lane (r % sg_size),
+          // register (r / sg_size). To write every query row exactly once we
+          // recover (lane, register) -> row and let each work-item write the
+          // rows it actually owns.
+          //
+          // When q_sg_tile < sg_size (e.g. head_size=192 packs 8 rows over 16
+          // lanes) the upper lanes hold no real row: their stat slots are
+          // uninitialised, so they MUST be masked out. Writing them would
+          // clobber valid rows (their default-recovered row index collapses to
+          // the subgroup's first row), which previously produced -inf at the
+          // first query row of every sequence.
+          int lane_id = thr_id % intel::sg_size;
+          int sg_row_base = q_tile_start + sub_group_id * q_sg_tile;
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tA_sum.size(); i++) {
-            int q_in_batch = q_tile_start + q_offset_sg + i;
-            if (q_in_batch < seq_len_qo) {
-              ElementA sum_val = tA_sum(i);
-              // Include sink contribution for LSE computation
-              if constexpr (Sink) {
-                constexpr double kLog2e = 1.4426950408889634074;
-                ElementSink s_head = p.ptr_S[head_q];
-                sum_val += sycl::native::exp2(
-                    static_cast<ElementA>(s_head * kLog2e) - tA_max(i));
-              }
-              float lse = static_cast<float>(tA_max(i)) * kLn2 +
-                          sycl::log(static_cast<float>(sum_val));
-              int global_q = qo_cumul + q_in_batch;
-              p.softmax_lse[global_q * p.lse_stride + head_q] = lse;
+            int row_in_sg = lane_id + intel::sg_size * i;
+            if (row_in_sg >= q_sg_tile) continue;
+            int q_in_batch = sg_row_base + row_in_sg;
+            if (q_in_batch >= seq_len_qo) continue;
+            ElementA sum_val = tA_sum(i);
+            // Include sink contribution for LSE computation
+            if constexpr (Sink) {
+              ElementSink s_head = p.ptr_S[head_q];
+              sum_val += sycl::native::exp2(
+                  static_cast<ElementA>(s_head * kLog2e) - tA_max(i));
             }
+            float lse = static_cast<float>(tA_max(i)) * kLn2 +
+                        sycl::log(static_cast<float>(sum_val));
+            int global_q = qo_cumul + q_in_batch;
+            p.softmax_lse[global_q * p.lse_stride + head_q] = lse;
           }
         }
       }

@@ -9,6 +9,7 @@
 
 #include "quantization/fp8/fp8_quant.h"
 #include "quantization/fp8/quant_utils.h"
+#include "quantization/utils.h"
 
 namespace vllm {
 
@@ -263,6 +264,126 @@ class per_token_group_quant_8bit_kernel {
       for (int i = lane_id; i < group_size; i += threads_per_group) {
         fp8::ConvertWithScaleOp<true, fp8_type> op{inverted_scale};
         op(group_output[i], group_input[i]);
+      }
+    }
+  }
+};
+
+// Vectorized per-token group quant: one work-group per row, each lane reads VEC
+// contiguous elements via 16-byte loads (coalesced), and the per-group absmax
+// is a segmented reduction over the lanes_per_group consecutive lanes that
+// cover a group. This maximizes global-memory bandwidth versus the
+// 1-element-per-thread path. Used for the common case where group_size is a
+// multiple of VEC.
+template <typename scalar_t, typename fp8_type>
+class per_token_group_quant_8bit_vec_kernel {
+ private:
+  fp8_type* out;
+  float* scale;
+  scalar_t const* input;
+  const int group_size;
+  const int hidden;
+  const int num_groups_per_row;
+  float eps;
+  bool scale_ue8m0;
+  const int scale_num_rows;
+  const int scale_stride;
+  bool is_column_major;
+
+ public:
+  per_token_group_quant_8bit_vec_kernel(
+      fp8_type* out_,
+      float* scale_,
+      scalar_t const* input_,
+      const int group_size_,
+      const int hidden_,
+      const int num_groups_per_row_,
+      float eps_,
+      bool scale_ue8m0_,
+      const int scale_num_rows_,
+      const int scale_stride_,
+      bool is_column_major_)
+      : out(out_),
+        scale(scale_),
+        input(input_),
+        group_size(group_size_),
+        hidden(hidden_),
+        num_groups_per_row(num_groups_per_row_),
+        eps(eps_),
+        scale_ue8m0(scale_ue8m0_),
+        scale_num_rows(scale_num_rows_),
+        scale_stride(scale_stride_),
+        is_column_major(is_column_major_) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
+    const int row = static_cast<int>(item.get_group(0));
+    const int tid = static_cast<int>(item.get_local_id(0));
+    const int local_range = static_cast<int>(item.get_local_range(0));
+    auto sg = item.get_sub_group();
+    const int lane = sg.get_local_id()[0];
+
+    constexpr int VEC = 16 / sizeof(scalar_t);
+    const int lanes_per_group = group_size / VEC;
+    const int num_chunks = hidden / VEC;
+
+    scalar_t const* row_in = input + static_cast<int64_t>(row) * hidden;
+    fp8_type* row_out = out + static_cast<int64_t>(row) * hidden;
+    const auto* vin = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(row_in);
+    auto* vout = reinterpret_cast<vec_n_t<fp8_type, VEC>*>(row_out);
+
+    for (int base = 0; base < num_chunks; base += local_range) {
+      const int c = base + tid;
+      const bool active = c < num_chunks;
+
+      vec_n_t<scalar_t, VEC> xv;
+      float lane_absmax = active ? eps : 0.0f;
+      if (active) {
+        xv = vin[c];
+#pragma unroll
+        for (int k = 0; k < VEC; ++k) {
+          lane_absmax =
+              sycl::max(lane_absmax, sycl::fabs(static_cast<float>(xv.val[k])));
+        }
+      }
+
+      float gmax = lane_absmax;
+#pragma unroll
+      for (int off = 1; off < lanes_per_group; off <<= 1) {
+        gmax = sycl::max(gmax, sycl::permute_group_by_xor(sg, gmax, off));
+      }
+
+      float y_s = sycl::max(
+          gmax / fp8::quant_type_max_v<fp8_type>,
+          fp8::min_scaling_factor<fp8_type>::val());
+      if (scale_ue8m0) {
+        y_s = sycl::exp2(
+            sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(y_s), 1e-10f))));
+      }
+
+      if (active && (lane % lanes_per_group) == 0) {
+        const int g_idx = c / lanes_per_group;
+        const int global_group = row * num_groups_per_row + g_idx;
+        float* scale_output;
+        if (is_column_major) {
+          const int row_idx = global_group / scale_num_rows;
+          const int col_idx = global_group % scale_num_rows;
+          scale_output = scale + (col_idx * scale_stride + row_idx);
+        } else {
+          scale_output = scale + global_group;
+        }
+        *scale_output = y_s;
+      }
+
+      if (active) {
+        const float inv = 1.0f / y_s;
+        fp8::ConvertWithScaleOp<true, fp8_type> op{inv};
+        vec_n_t<fp8_type, VEC> o;
+#pragma unroll
+        for (int k = 0; k < VEC; ++k) {
+          op(o.val[k], static_cast<float>(xv.val[k]));
+        }
+        vout[c] = o;
       }
     }
   }
@@ -642,6 +763,51 @@ void per_token_group_quant_fp8(
   const bool is_column_major = output_s.stride(0) < output_s.stride(1);
   const int scale_num_rows = output_s.size(1);
   const int scale_stride = output_s.stride(1);
+
+  // Fast vectorized path: one work-group per row with 16-byte loads. Requires
+  // group_size to be a multiple of the (dtype-dependent) vector width.
+  const int num_tokens = output_s.size(0);
+  const int hidden = static_cast<int>(input.numel() / num_tokens);
+  const int elem_size = input.element_size();
+  const int vec_width = 16 / elem_size;
+  const bool use_vec =
+      (group_size % vec_width == 0) && (hidden % vec_width == 0);
+
+  if (use_vec) {
+    const int num_groups_per_row = hidden / group_size;
+    const int num_chunks = hidden / vec_width;
+    int wg = std::min<int>(((num_chunks + 31) / 32) * 32, 1024);
+    if (wg < 32) wg = 32;
+    sycl::range<1> vgrid(num_tokens);
+    sycl::range<1> vblock(wg);
+    auto& vqueue = vllm::xpu::vllmGetQueue();
+    VLLM_DISPATCH_FLOATING_TYPES(
+        input.scalar_type(), "per_token_group_quant_8bit_vec_scale_type", [&] {
+          VLLM_DISPATCH_FP8_TYPES(
+              output_q.scalar_type(),
+              "per_token_group_quant_8bit_vec_fp8_type",
+              [&] {
+                vqueue.submit([&](sycl::handler& cgh) {
+                  auto kernel = vllm::
+                      per_token_group_quant_8bit_vec_kernel<scalar_t, fp8_t>(
+                          output_q.data_ptr<fp8_t>(),
+                          output_s.data_ptr<float>(),
+                          input.data_ptr<scalar_t>(),
+                          group_size,
+                          hidden,
+                          num_groups_per_row,
+                          eps,
+                          scale_ue8m0,
+                          scale_num_rows,
+                          scale_stride,
+                          is_column_major);
+                  cgh.parallel_for(
+                      sycl::nd_range<1>(vgrid * vblock, vblock), kernel);
+                });
+              });
+        });
+    return;
+  }
 
   sycl::range<1> grid(num_blocks);
   sycl::range<1> block(num_threads);

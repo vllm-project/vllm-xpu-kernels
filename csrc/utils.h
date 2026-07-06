@@ -51,11 +51,18 @@ get_device_architecture(at::DeviceIndex device_index = -1) {
   return raw_device.get_info<syclex::info::device::architecture>();
 }
 
-static inline bool is_bmg(at::DeviceIndex device_index = -1) {
+static inline bool is_bmg_g21(at::DeviceIndex device_index = -1) {
   return get_device_architecture(device_index) ==
-             syclex::architecture::intel_gpu_bmg_g21 ||
-         get_device_architecture(device_index) ==
-             syclex::architecture::intel_gpu_bmg_g31;
+         syclex::architecture::intel_gpu_bmg_g21;
+}
+
+static inline bool is_bmg_g31(at::DeviceIndex device_index = -1) {
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_bmg_g31;
+}
+
+static inline bool is_bmg(at::DeviceIndex device_index = -1) {
+  return is_bmg_g21(device_index) || is_bmg_g31(device_index);
 }
 
 static inline bool is_pvc(at::DeviceIndex device_index = -1) {
@@ -90,6 +97,17 @@ static inline bool force_xe_default_kernel() {
            env_val.value() == "TRUE";
   }
   return false;
+}
+
+// Control whether MHC kernels use the TF32 DPAS GEMM path (split-K).
+// Default: enabled (1). Set VLLM_MHC_USE_TF32=0 to force the vector path.
+static inline bool mhc_use_tf32() {
+  auto env_val = getEnv("VLLM_MHC_USE_TF32");
+  if (env_val.has_value()) {
+    return env_val.value() != "0" && env_val.value() != "false" &&
+           env_val.value() != "FALSE";
+  }
+  return true;
 }
 
 template <typename T>

@@ -124,9 +124,17 @@ struct DecodeTileScheduler {
       int total_wgs = 0) {
     using namespace cute;
 
+    // Decode packs the GQA head-group (head_group_q = num_heads_q /
+    // num_heads_kv) into the Q/row dimension of the MMA tile (seq_len_qo is
+    // always 1 for decode). When head_group_q exceeds the policy's packed-Q
+    // tile size (get<0>(tile_shape), e.g. 8 or 16), we tile the head-group
+    // across the grid's Q dimension so an arbitrarily large GQA ratio (e.g.
+    // falcon-7b: 71 query heads / 1 KV head) is processed by ceil(ratio /
+    // q_packed) work-groups instead of being capped at q_packed.
+    int head_group_q = shape.num_heads_q / shape.num_heads_kv;
     dim3 grid(
         size(ceil_div(shape.head_size_vo, get<1>(tile_shape))),  // V
-        size(ceil_div(shape.seq_len_qo, get<0>(tile_shape))),    // Q
+        size(ceil_div(head_group_q, get<0>(tile_shape))),        // Q
         size(shape.batch * shape.num_heads_q));  // (h,b) -- split later
     int num_head = shape.num_heads_q;
     if (num_kv_splits >= 1) {

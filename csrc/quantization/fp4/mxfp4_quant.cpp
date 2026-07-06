@@ -75,21 +75,52 @@ void per_token_group_quant_mxfp4(
   sycl::range<1> block(num_threads);
   auto& queue = vllm::xpu::vllmGetQueue();
 
+  const int hidden = static_cast<int>(input.size(-1));
+  const int64_t num_rows = input.numel() / hidden;
+  const int64_t scale_stride_token =
+      is_column_major ? 1LL : static_cast<int64_t>(scale_num_cols);
+  const int64_t scale_stride_group =
+      is_column_major ? static_cast<int64_t>(scale_stride) : 1LL;
+
+  bool use_vec = (hidden % group_size == 0);
+
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_mxfp4_kernel", [&] {
-        queue.submit([&](sycl::handler& cgh) {
-          auto kernel =
-              vllm::mxfp4::per_token_group_quant_mxfp4_kernel<scalar_t>(
-                  output_q.data_ptr<uint8_t>(),
-                  output_s.data_ptr<float>(),
-                  input.data_ptr<scalar_t>(),
-                  static_cast<int>(group_size),
-                  groups_per_block,
-                  static_cast<float>(eps),
-                  scale_num_cols,
-                  scale_stride,
-                  is_column_major);
-          cgh.parallel_for(sycl::nd_range<1>(grid * block, block), kernel);
-        });
+        constexpr int VEC = 16 / sizeof(scalar_t);
+        if (use_vec && (hidden % VEC == 0) && (group_size % VEC == 0)) {
+          const int num_chunks = hidden / VEC;
+          int64_t wg_size =
+              std::min<int64_t>(((num_chunks + 31) / 32) * 32, 1024);
+          if (wg_size < 32) wg_size = 32;
+          queue.submit([&](sycl::handler& cgh) {
+            auto kernel =
+                vllm::mxfp4::per_token_group_quant_mxfp4_vec_kernel<scalar_t>(
+                    output_q.data_ptr<uint8_t>(),
+                    output_s.data_ptr<float>(),
+                    input.data_ptr<scalar_t>(),
+                    hidden,
+                    static_cast<int>(group_size),
+                    static_cast<float>(eps),
+                    scale_stride_token,
+                    scale_stride_group);
+            cgh.parallel_for(
+                sycl::nd_range<1>(num_rows * wg_size, wg_size), kernel);
+          });
+        } else {
+          queue.submit([&](sycl::handler& cgh) {
+            auto kernel =
+                vllm::mxfp4::per_token_group_quant_mxfp4_kernel<scalar_t>(
+                    output_q.data_ptr<uint8_t>(),
+                    output_s.data_ptr<float>(),
+                    input.data_ptr<scalar_t>(),
+                    static_cast<int>(group_size),
+                    groups_per_block,
+                    static_cast<float>(eps),
+                    scale_num_cols,
+                    scale_stride,
+                    is_column_major);
+            cgh.parallel_for(sycl::nd_range<1>(grid * block, block), kernel);
+          });
+        }
       });
 }

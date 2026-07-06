@@ -16,13 +16,13 @@ env:
 
 jobs:
   build-wheel-on-pvc:
-    runs-on: self-hosted-pvc
+    runs-on: self-hosted-pvc-cpu
     if: |
       github.event_name == 'workflow_dispatch' || 
       (github.event.workflow_run.conclusion == 'success' && 
       github.event.workflow_run.event == 'push')
     container:                      
-      image: pytorch/manylinux2_28-builder:xpu-v2.12.0-rc9
+      image: intelgpu/manylinux2_28-builder:xpu_2619
       options: --user root
     steps:
       - name: Checkout
@@ -108,7 +108,7 @@ jobs:
           echo "Download: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
   clean-repo-pvc:
-    runs-on: self-hosted-pvc
+    runs-on: self-hosted-pvc-cpu
     needs: build-wheel-on-pvc
     steps:
       - name: Clean workspace

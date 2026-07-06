@@ -46,7 +46,9 @@ struct chunk_causal_conv1d_kernel {
       const int& num_v_heads,
       const int& head_v_dim,
       const int& qkvz_elems,
-      const int& conv_elems)
+      const int& conv_elems,
+      char* norm_slm_data,
+      const bool fuse_l2norm)
       : q_out(q_out),
         k_out(k_out),
         v_out(v_out),
@@ -74,7 +76,9 @@ struct chunk_causal_conv1d_kernel {
         num_v_heads(num_v_heads),
         head_v_dim(head_v_dim),
         qkvz_elems(qkvz_elems),
-        conv_elems(conv_elems) {}
+        conv_elems(conv_elems),
+        norm_slm_data(norm_slm_data),
+        fuse_l2norm(fuse_l2norm) {}
 
   inline int lookup(int t) const { return token_indx ? token_indx[t] : t; }
 
@@ -93,6 +97,19 @@ struct chunk_causal_conv1d_kernel {
     sycl::range<2> local(1, group_size);
     sycl::range<2> global(total_seqlen, num_k_heads);
     return sycl::nd_range<2>(global * local, local);
+  }
+
+  static inline int get_norm_slm_bytes(
+      const int head_k_dim,
+      const int num_v_heads,
+      const int num_k_heads,
+      const int head_v_dim) {
+    const int group_size =
+        (2 * head_k_dim + head_v_dim * num_v_heads / num_k_heads) /
+        elems_per_item;
+    const int num_subgroups = group_size / sub_group_size;
+    // 2 floats per subgroup: one for Q partial sum, one for K partial sum
+    return 2 * num_subgroups * static_cast<int>(sizeof(float));
   }
 
   static inline void act_swish(float& x, float beta = 1.0f) {
@@ -291,6 +308,67 @@ struct chunk_causal_conv1d_kernel {
       }
     }
 
+    // ---- Fused L2 norm for Q and K ----
+    // Compute per-thread partial sum of squares for Q or K
+    if (fuse_l2norm) {
+      // l2norm_eps is defined in gdn_attn_utils.h
+      float q_local_sq = 0.0f;
+      float k_local_sq = 0.0f;
+      if (is_q) {
+#pragma unroll
+        for (int e = 0; e < elems_per_item; ++e)
+          q_local_sq += res[e] * res[e];
+      }
+      if (is_k) {
+#pragma unroll
+        for (int e = 0; e < elems_per_item; ++e)
+          k_local_sq += res[e] * res[e];
+      }
+
+      // Subgroup reduce
+      auto sg = item.get_sub_group();
+      float q_sg_sum =
+          sycl::reduce_over_group(sg, q_local_sq, sycl::plus<float>());
+      float k_sg_sum =
+          sycl::reduce_over_group(sg, k_local_sq, sycl::plus<float>());
+
+      // Write subgroup partial sums to SLM
+      float* norm_slm = reinterpret_cast<float*>(norm_slm_data);
+      int sg_id = sg.get_group_linear_id();
+      int sg_local_id = sg.get_local_linear_id();
+      int num_sgs = item.get_local_range().size() / sub_group_size;
+      if (sg_local_id == 0) {
+        norm_slm[sg_id * 2] = q_sg_sum;
+        norm_slm[sg_id * 2 + 1] = k_sg_sum;
+      }
+      sycl::group_barrier(item.get_group());
+
+      // Combine all subgroup partial sums
+      float q_total = 0.0f;
+      float k_total = 0.0f;
+      for (int i = 0; i < num_sgs; ++i) {
+        q_total += norm_slm[i * 2];
+        k_total += norm_slm[i * 2 + 1];
+      }
+      // No second barrier needed: SLM is read-only after this point
+      // (one token per WG, no reuse of norm_slm within this kernel)
+
+      float q_inv = sycl::rsqrt(q_total + l2norm_eps) *
+                    sycl::rsqrt(static_cast<float>(q_dim));
+      float k_inv = sycl::rsqrt(k_total + l2norm_eps);
+
+      if (is_q) {
+#pragma unroll
+        for (int e = 0; e < elems_per_item; ++e)
+          res[e] *= q_inv;
+      }
+      if (is_k) {
+#pragma unroll
+        for (int e = 0; e < elems_per_item; ++e)
+          res[e] *= k_inv;
+      }
+    }
+
     // reorder q, k, v
     if (is_q) {
 #pragma unroll
@@ -345,6 +423,8 @@ struct chunk_causal_conv1d_kernel {
   const int head_v_dim;
   const int qkvz_elems;
   const int conv_elems;
+  char* norm_slm_data;
+  const bool fuse_l2norm;
 };
 
 template <typename T, bool ReorderInput>
@@ -598,41 +678,53 @@ void kernel_launcher(
     const int& qkvz_elems,
     const int& conv_elems,
     const int& num_prefills,
-    const int& num_decodes) {
+    const int& num_decodes,
+    const bool fuse_l2norm) {
   using KERNEL_MAIN = chunk_causal_conv1d_kernel<T, Width, ReorderInput>;
   auto range_main = KERNEL_MAIN::get_nd_range(
       num_actual_tokens, num_k_heads, head_k_dim, num_v_heads, head_v_dim);
+  const int norm_slm_bytes = KERNEL_MAIN::get_norm_slm_bytes(
+      head_k_dim, num_v_heads, num_k_heads, head_v_dim);
   queue.submit([&](sycl::handler& cgh) {
-    KERNEL_MAIN task(
-        q_out,
-        k_out,
-        v_out,
-        z_out,
-        b_out,
-        a_out,
-        mixed_qkvz,
-        mixed_ba,
-        conv_weights,
-        conv_bias,
-        conv_states,
-        conv_states_stride_0,
-        conv_states_tmp,
-        query_start_loc,
-        cache_indices,
-        has_initial_state,
-        token_indx,
-        act_mode,
-        pad_slot_id,
-        batch_size,
-        num_actual_tokens,
-        num_virtual_tokens,
-        num_k_heads,
-        head_k_dim,
-        num_v_heads,
-        head_v_dim,
-        qkvz_elems,
-        conv_elems);
-    cgh.parallel_for(range_main, task);
+    auto norm_slm =
+        sycl::local_accessor<char, 1>(sycl::range<1>(norm_slm_bytes), cgh);
+    cgh.parallel_for(range_main, [=](sycl::nd_item<2> item) {
+      char* norm_slm_ptr =
+          norm_slm.template get_multi_ptr<sycl::access::decorated::no>()
+              .get_raw();
+      KERNEL_MAIN task(
+          q_out,
+          k_out,
+          v_out,
+          z_out,
+          b_out,
+          a_out,
+          mixed_qkvz,
+          mixed_ba,
+          conv_weights,
+          conv_bias,
+          conv_states,
+          conv_states_stride_0,
+          conv_states_tmp,
+          query_start_loc,
+          cache_indices,
+          has_initial_state,
+          token_indx,
+          act_mode,
+          pad_slot_id,
+          batch_size,
+          num_actual_tokens,
+          num_virtual_tokens,
+          num_k_heads,
+          head_k_dim,
+          num_v_heads,
+          head_v_dim,
+          qkvz_elems,
+          conv_elems,
+          norm_slm_ptr,
+          fuse_l2norm);
+      task(item);
+    });
   });
 
   using KERNEL_ZBA = chunk_reorder_zba_kernel<T, ReorderInput>;
@@ -712,7 +804,8 @@ void chunk_causal_conv1d_xe2(
     const int num_decodes,
     const bool reorder_input,
     const int* token_indx = nullptr,
-    int num_actual_tokens_override = -1) {
+    int num_actual_tokens_override = -1,
+    const bool fuse_l2norm = false) {
   if (num_prefills == 0 && num_decodes == 0) {
     return;
   }
@@ -773,7 +866,8 @@ void chunk_causal_conv1d_xe2(
       qkvz_elems,                                                  \
       conv_elems,                                                  \
       num_prefills,                                                \
-      num_decodes);
+      num_decodes,                                                 \
+      fuse_l2norm);
 
 #define WIDTH_DISPATCH(scalar_t, width, reorder_input) \
   switch (width) {                                     \

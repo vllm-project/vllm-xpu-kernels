@@ -168,17 +168,18 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     at::Tensor& rows_per_expert,
     int64_t N,
     int64_t K,
-    int64_t num_experts,
-    bool is_B_int4,
-    bool is_B_mxfp4) {
+    int64_t num_experts) {
   auto& dpcpp_queue =
       at::xpu::getCurrentXPUStream(ptr_A.device().index()).queue();
   auto A_dtype = ptr_A.dtype();
   auto B_dtype = ptr_B.dtype();
   bool is_weight_fp8 =
       ((B_dtype == at::kFloat8_e4m3fn) || (B_dtype == at::kFloat8_e5m2));
+  bool is_B_int4 = (B_dtype == at::kChar) && ptr_scales.has_value();
+  bool is_B_mxfp4 =
+      (B_dtype == at::kFloat4_e2m1fn_x2) && ptr_scales.has_value();
 
-  TORCH_CHECK(N % 32 == 0, "N must be divisible by 32");
+  TORCH_CHECK(N % 8 == 0, "N must be divisible by 8");
 
   TORCH_CHECK(ptr_A.dim() == 2, "ptr_A must be 2D [Total_M, K]");
   TORCH_CHECK(ptr_B.dim() == 3, "ptr_B must be 3D [num_experts, K, N]");

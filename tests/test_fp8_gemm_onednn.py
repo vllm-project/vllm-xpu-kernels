@@ -218,10 +218,11 @@ def test_fp8_gemm_per_channel(fp8_dtype, out_dtype, is_nt, batch, mnk_factors):
 @pytest.mark.parametrize("out_dtype", OUT_DTYPES)
 @pytest.mark.parametrize("is_nt", [True, False])
 @pytest.mark.parametrize("is_mbk", [True, False])
+@pytest.mark.parametrize("scale_layout", ["flat_1d", "row_2d"])
 @pytest.mark.parametrize("batch", BATCHES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-def test_fp8_gemm_w8a16_per_channel(fp8_dtype, out_dtype, is_nt, is_mbk, batch,
-                                    mnk_factors):
+def test_fp8_gemm_w8a16_per_channel(fp8_dtype, out_dtype, is_nt, is_mbk,
+                                    scale_layout, batch, mnk_factors):
     seed = 1234
     torch.manual_seed(seed)
 
@@ -234,8 +235,10 @@ def test_fp8_gemm_w8a16_per_channel(fp8_dtype, out_dtype, is_nt, is_mbk, batch,
     weight_fp8, scale_wei_fp8 = scaled_fp8_quant(weight,
                                                  use_per_token_if_dynamic=True,
                                                  fp8_dtype=fp8_dtype)
-    # scale_wei_fp8 is [n, 1], flatten to [n] for per-channel scale
-    scale_wei_flat = scale_wei_fp8.flatten()
+    if scale_layout == "flat_1d":
+        scale_wei = scale_wei_fp8.flatten()
+    else:
+        scale_wei = scale_wei_fp8.t().contiguous()
 
     # reference: dequantize weight then fp16/bf16 matmul
     weight_dequant = weight_fp8.to(out_dtype) * scale_wei_fp8.to(out_dtype)
@@ -250,12 +253,18 @@ def test_fp8_gemm_w8a16_per_channel(fp8_dtype, out_dtype, is_nt, is_mbk, batch,
     output_fp8 = fp8_gemm_w8a16(
         input,
         weight_fp8_t,
-        scale_wei_flat,
+        scale_wei,
         torch.Tensor(),
     )
     output_fp8 = output_fp8.transpose(0, 1) if is_mbk else output_fp8
 
-    torch.testing.assert_close(output_fp8, output_ref, atol=5e-2, rtol=5e-2)
+    torch.testing.assert_close(
+        output_fp8,
+        output_ref,
+        atol=5e-2,
+        rtol=5e-2,
+        msg=f"scale_layout={scale_layout}",
+    )
 
 
 def _convert_to_mxfp8_with_hp_ref(t):
@@ -304,9 +313,10 @@ def test_mxfp8_gemm(mnk_factors, out_dtype):
 @pytest.mark.parametrize("is_nt", [True, False])
 @pytest.mark.parametrize("batch", BATCHES)
 @pytest.mark.parametrize("group_size", GROUP_SIZE)
+@pytest.mark.parametrize("use_ue8m0", [False, True])
 @pytest.mark.parametrize("mnk_factors", MNK_BLOCK_FACTORS)
 def test_fp8_gemm_per_block(fp8_dtype, dtype, is_nt, batch, group_size,
-                            mnk_factors):
+                            use_ue8m0, mnk_factors):
     seed = 1234
     torch.manual_seed(seed)
 
@@ -319,9 +329,11 @@ def test_fp8_gemm_per_block(fp8_dtype, dtype, is_nt, batch, group_size,
     input_fp8, scale_src_fp8 = per_token_group_quant_fp8(input.reshape(-1, k),
                                                          group_size,
                                                          dtype=fp8_dtype,
-                                                         use_ue8m0=False)
-    weight_fp8, scale_wei_fp8 = fp8_block_quant_2d(weight, group_size,
-                                                   group_size)
+                                                         use_ue8m0=use_ue8m0)
+    weight_fp8, scale_wei_fp8 = fp8_block_quant_2d(weight,
+                                                   group_size,
+                                                   group_size,
+                                                   use_ue8m0=use_ue8m0)
 
     # reference: dequantize FP8 data, then multiply
     input_deq = per_token_group_dequant_fp8(input_fp8, scale_src_fp8,

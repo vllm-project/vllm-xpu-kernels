@@ -18,6 +18,12 @@ on:
 permissions: 
   contents: read
 
+concurrency:
+  # Group by PR number for pull_request, by ref for push/schedule/dispatch.
+  # Only cancel in-progress runs for pull_request events; push to main and schedule are never cancelled.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   REGISTRY: localhost:5000
   # Nightly (schedule) → full scope; manual dispatch → user choice; PR/push → ci scope
@@ -26,7 +32,9 @@ env:
 jobs:
 
   build-docker-image-latest-pvc:
-    runs-on: self-hosted-pvc
+    runs-on: self-hosted-pvc-cpu
+    outputs:
+      image_tag: ${{ steps.set-tag.outputs.image_tag }}
     steps:
       - name: Clean workspace
         run: |
@@ -40,15 +48,22 @@ jobs:
           set-safe-directory: true
           clean: true
 
+      - name: Set image tag
+        id: set-tag
+        run: echo "image_tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
       - name: build docker image & push to local
         id: build-image
         run: |
-          docker build -t xpu-kernel-ci-image:latest -f Dockerfile.xpu .
-          docker tag xpu-kernel-ci-image:latest ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
-          docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
+          IMAGE_TAG=${GITHUB_SHA::7}
+          docker build -t "xpu-kernel-ci-image:${IMAGE_TAG}" -f Dockerfile.xpu .
+          docker tag "xpu-kernel-ci-image:${IMAGE_TAG}" "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
+          docker push "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
 
   build-docker-image-latest-bmg:
     runs-on: self-hosted-bmg
+    outputs:
+      image_tag: ${{ steps.set-tag.outputs.image_tag }}
     steps:
       - name: Clean workspace
         run: |
@@ -62,21 +77,26 @@ jobs:
           set-safe-directory: true
           clean: true
 
+      - name: Set image tag
+        id: set-tag
+        run: echo "image_tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
       - name: build docker image & push to local
         id: build-image
         run: |
-          docker build -t xpu-kernel-ci-image:latest -f Dockerfile.xpu .
-          docker tag xpu-kernel-ci-image:latest ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
-          docker push ${{ env.REGISTRY }}/xpu-kernel-ci-image:latest
+          IMAGE_TAG=${GITHUB_SHA::7}
+          docker build -t "xpu-kernel-ci-image:${IMAGE_TAG}" -f Dockerfile.xpu .
+          docker tag "xpu-kernel-ci-image:${IMAGE_TAG}" "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
+          docker push "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
 
   # Build wheel only once on PVC, then share via GitHub Actions artifact.
   # BMG runner cannot reach PVC directly (different network segment), so the
   # artifact service (GitHub) acts as the neutral transfer point.
   build-wheel:
-    runs-on: self-hosted-pvc
+    runs-on: self-hosted-pvc-cpu
     needs: build-docker-image-latest-pvc
     container:
-      image: localhost:5000/xpu-kernel-ci-image:latest
+      image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-latest-pvc.outputs.image_tag }}
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
     steps:
       - name: Checkout
@@ -122,10 +142,10 @@ jobs:
           retention-days: 15
 
   build-wheel-with-default-config:
-    runs-on: self-hosted-pvc
+    runs-on: self-hosted-pvc-cpu
     needs: build-docker-image-latest-pvc
     container:
-      image: localhost:5000/xpu-kernel-ci-image:latest
+      image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-latest-pvc.outputs.image_tag }}
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
     steps:
       - name: Checkout
@@ -179,7 +199,7 @@ jobs:
     needs: [build-docker-image-latest-pvc, build-wheel]
     timeout-minutes: 50
     container:                      
-      image: localhost:5000/xpu-kernel-ci-image:latest
+      image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-latest-pvc.outputs.image_tag }}
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
     steps:
       - name: Checkout
@@ -221,7 +241,7 @@ jobs:
     needs: [build-docker-image-latest-bmg, build-wheel]
     timeout-minutes: 50
     container: 
-      image: localhost:5000/xpu-kernel-ci-image:latest
+      image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-latest-bmg.outputs.image_tag }}
       options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
     steps:
       - name: Checkout

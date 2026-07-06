@@ -39,14 +39,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
 #ifdef VLLM_MOE_ENABLED
   xpu_ops.def(
-      "cutlass_grouped_gemm_interface(Tensor ptr_A, Tensor ptr_B, Tensor? "
-      "ptr_scales, "
-      "Tensor? ptr_bias, "
-      "Tensor "
-      "ptr_D, Tensor "
-      "rows_per_expert, int N, int K, int "
-      "num_experts, bool is_B_int4, bool is_B_mxfp4) -> "
-      "Tensor");
+      "cutlass_grouped_gemm_interface(Tensor ptr_A, Tensor? ptr_A_scale, "
+      "Tensor ptr_B, Tensor? ptr_B_scale, Tensor? ptr_bias, Tensor ptr_D, "
+      "Tensor rows_per_expert, int N, int K, int num_experts) -> Tensor");
   xpu_ops.impl(
       "cutlass_grouped_gemm_interface",
       torch::kXPU,
@@ -71,6 +66,76 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "                            int[] mrope_section) -> ()");
   xpu_ops.impl(
       "multimodal_rotary_embedding", torch::kXPU, &multimodal_rotary_embedding);
+
+  // Apply rotary embedding taking cos/sin directly (flash_attn style).
+  // For diffusion models where cos/sin are pre-computed externally.
+  xpu_ops.def(
+      "apply_rotary_emb(Tensor! output, Tensor input,"
+      "                 Tensor cos, Tensor sin, bool is_neox) -> ()");
+  xpu_ops.impl("apply_rotary_emb", torch::kXPU, &apply_rotary_emb);
+
+  // DeepSeek-V4 fused Q-RMSNorm + GPT-J RoPE + KV cache insert.
+  // kv_cache_dtype: "bf16" or "fp8_ds_mla"
+  xpu_ops.def(
+      "deepseek_qnorm_rope_kv_insert(Tensor! q, Tensor kv,"
+      "                              Tensor! cache,"
+      "                              Tensor slot_mapping,"
+      "                              Tensor position_ids,"
+      "                              Tensor cos_sin_cache,"
+      "                              float eps, int block_size,"
+      "                              str kv_cache_dtype) -> ()");
+  xpu_ops.impl(
+      "deepseek_qnorm_rope_kv_insert",
+      torch::kXPU,
+      &deepseek_qnorm_rope_kv_insert);
+
+  // DeepSeek-V4 inverse RoPE (bf16): fused inv GPT-J rotation + group-major
+  // layout transform.
+  xpu_ops.def(
+      "deepseek_inv_rope_bf16(Tensor attn_output, Tensor positions,"
+      "                       Tensor cos_sin_cache, int n_groups,"
+      "                       int heads_per_group, int nope_dim,"
+      "                       int rope_dim) -> Tensor");
+  xpu_ops.impl("deepseek_inv_rope_bf16", torch::kXPU, &deepseek_inv_rope_bf16);
+
+  // DeepSeek-V4 fused inverse RoPE + FP8 quantization: inv GPT-J rotation +
+  // per-128-block UE8M0 FP8 E4M3 quantization + group-major layout transform.
+  xpu_ops.def(
+      "deepseek_inv_rope_fp8_quant(Tensor attn_output, Tensor positions,"
+      "                            Tensor cos_sin_cache, int n_groups,"
+      "                            int heads_per_group, int nope_dim,"
+      "                            int rope_dim) -> (Tensor, Tensor)");
+  xpu_ops.impl(
+      "deepseek_inv_rope_fp8_quant", torch::kXPU, &deepseek_inv_rope_fp8_quant);
+
+#ifdef VLLM_MHC_ENABLED
+  xpu_ops.def(
+      "mhc_pre(Tensor residual, Tensor fn, Tensor hc_scale, Tensor hc_base,"
+      "        float rms_eps, float hc_pre_eps, float hc_sinkhorn_eps,"
+      "        float hc_post_mult_value, int sinkhorn_repeat)"
+      "        -> (Tensor, Tensor, Tensor)");
+  xpu_ops.impl("mhc_pre", torch::kXPU, &mhc_pre);
+
+  xpu_ops.def(
+      "mhc_post(Tensor x, Tensor residual, Tensor post_layer_mix,"
+      "         Tensor comb_res_mix) -> Tensor");
+  xpu_ops.impl("mhc_post", torch::kXPU, &mhc_post);
+
+  xpu_ops.def(
+      "hc_head_fused(Tensor hs_flat, Tensor fn, Tensor hc_scale,"
+      "              Tensor hc_base, Tensor! out, float rms_eps,"
+      "              float hc_eps) -> ()");
+  xpu_ops.impl("hc_head_fused", torch::kXPU, &hc_head_fused);
+
+  xpu_ops.def(
+      "mhc_fused_post_pre(Tensor x, Tensor residual, Tensor post_layer_mix,"
+      "                   Tensor comb_res_mix, Tensor fn, Tensor hc_scale,"
+      "                   Tensor hc_base, float rms_eps, float hc_pre_eps,"
+      "                   float hc_sinkhorn_eps, float hc_post_mult_value,"
+      "                   int sinkhorn_repeat)"
+      "                   -> (Tensor, Tensor, Tensor, Tensor)");
+  xpu_ops.impl("mhc_fused_post_pre", torch::kXPU, &mhc_fused_post_pre);
+#endif
 
   xpu_ops.def(
       "bgmv_shrink(Tensor! outputs, Tensor inputs, Tensor weights, Tensor "
@@ -106,6 +171,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 #endif
 
   // for empty tensor functions, we don't need dispatch key like torch::kXPU
+  xpu_ops.def("is_bmg_g21(int device_index) -> bool");
+  xpu_ops.impl("is_bmg_g21", &is_bmg_g21);
+
+  xpu_ops.def("is_bmg_g31(int device_index) -> bool");
+  xpu_ops.impl("is_bmg_g31", &is_bmg_g31);
+
   xpu_ops.def("is_bmg(int device_index) -> bool");
   xpu_ops.impl("is_bmg", &is_bmg);
 
@@ -135,6 +206,28 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "schedule_metadata, int max_model_len) -> Tensor");
   xpu_ops.impl("fp8_paged_mqa_logits", torch::kXPU, &fp8_paged_mqa_logits);
 #endif
+
+  xpu_ops.def("get_onednn_version() -> str");
+  xpu_ops.impl("get_onednn_version", &get_onednn_version);
+
+  xpu_ops.def(
+      "deepseek_fused_indexer_q_rope_fp8(Tensor q, Tensor positions, "
+      "Tensor cos_sin_cache, Tensor index_weights, float softmax_scale, "
+      "float head_scale, Tensor! q_fp8, Tensor! weights_out) -> ()");
+  xpu_ops.impl(
+      "deepseek_fused_indexer_q_rope_fp8",
+      torch::kXPU,
+      &deepseek_fused_indexer_q_rope_fp8);
+
+  xpu_ops.def(
+      "deepseek_fused_indexer_q_rope_mxfp4(Tensor q, Tensor positions, "
+      "Tensor cos_sin_cache, Tensor index_weights, float softmax_scale, "
+      "float head_scale, Tensor! packed_out, Tensor! scales_out, "
+      "Tensor! weights_out) -> ()");
+  xpu_ops.impl(
+      "deepseek_fused_indexer_q_rope_mxfp4",
+      torch::kXPU,
+      &deepseek_fused_indexer_q_rope_mxfp4);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
