@@ -132,6 +132,12 @@ class c4_kv_insert_fp8mix_generic_kernel {
         (((position + 1) % static_cast<int64_t>(compress_ratio_)) == 0) &&
         (kv_slot_idx >= 0);
 
+    // Early-exit non-boundary/padding tokens before the gather. should_store is
+    // uniform across the work-group (from broadcast metadata), so the whole
+    // group returns together; skips the wasted compress+norm+RoPE at 1/cr
+    // density.
+    if (!should_store) return;
+
     const int64_t n_gather = static_cast<int64_t>(1 + overlap_) *
                              static_cast<int64_t>(compress_ratio_);
     const int64_t start = position - n_gather + 1;
@@ -230,8 +236,6 @@ class c4_kv_insert_fp8mix_generic_kernel {
     }
 
     sycl::group_barrier(it.get_group());
-
-    if (!should_store) return;
 
     const int64_t kv_block = kv_slot_idx / kv_cache_block_size_;
     const int64_t kv_pos = kv_slot_idx % kv_cache_block_size_;
@@ -423,6 +427,11 @@ class c4_kv_split_gather_kernel {
     const int64_t position = meta[0];
     const int32_t req_idx = static_cast<int32_t>(meta[1]);
 
+    // Skip non-boundary tokens (uniform across the work-group): they produce no
+    // compressed entry, so nothing to gather; the finalize kernel skips them
+    // too.
+    if (((position + 1) % COMPRESS_RATIO) != 0) return;
+
     const int64_t start = position - N_GATHER + 1;
     const int row_lo = shard * ROWS_PER_SHARD;
 
@@ -571,6 +580,10 @@ class c4_kv_finalize_fp8mix_kernel {
                               (((position + 1) % COMPRESS_RATIO) == 0) &&
                               (kv_slot_idx >= 0);
 
+    // Early-exit non-boundary tokens (uniform; see gather kernel). They never
+    // wrote scratch, so we must not read it here.
+    if (!should_store) return;
+
     // Online-merge G_SHARDS partials in registers.
     float m_run[PER_WI], s_run[PER_WI], acc[PER_WI];
 #pragma unroll
@@ -656,10 +669,6 @@ class c4_kv_finalize_fp8mix_kernel {
     }
 
     sycl::group_barrier(it.get_group());
-
-    if (!should_store) {
-      return;
-    }
 
     const int64_t kv_block = kv_slot_idx / kv_cache_block_size_;
     const int64_t kv_pos = kv_slot_idx % kv_cache_block_size_;

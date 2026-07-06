@@ -5,11 +5,23 @@ Mirrors real input shapes from DeepSeek-V4:
   Layer A: compress_ratio=4,   overlap=1, kv_blk=64
   Layer B: compress_ratio=128, overlap=0, kv_blk=2
 
+``num_tokens`` always counts the number of compression boundaries (real work
+items). ``--boundary-mode`` controls how they are laid out:
+  realistic (default): the num_tokens boundaries are embedded in a contiguous
+      prefill of length num_tokens * cr, so the boundary density is 1/cr and
+      the non-boundary tokens early-exit exactly like real inference. This is
+      the representative number for end-to-end cost.
+  all: every launched token sits on a boundary (100% density). This is a
+      peak-bandwidth stress test only; it massively over-states real cost,
+      especially for Triton at cr=128 which never sees this density in
+      inference.
+
 Usage:
     ZE_AFFINITY_MASK=0 python benchmark_compress_insert.py
     ZE_AFFINITY_MASK=0 python benchmark_compress_insert.py \
         --layer B --num-tokens 8192
     ZE_AFFINITY_MASK=0 python benchmark_compress_insert.py --iters 100
+    ZE_AFFINITY_MASK=0 python benchmark_compress_insert.py --boundary-mode all
 """
 import argparse
 import gc
@@ -35,13 +47,34 @@ LAYER_CONFIGS = {
 NUM_TOKENS_DEFAULT = [1, 4, 16, 64, 128, 256, 1024, 2048, 4096]
 
 
-def make_inputs(cfg, num_tokens, device, seed=0, num_blocks=152522):
+def make_inputs(cfg, num_tokens, device, seed=0, num_blocks=152522,
+                boundary_mode="realistic"):
     cr = cfg["compress_ratio"]
     overlap = cfg["overlap"]
     kv_blk = cfg["kv_cache_block_size"]
     state_blk_sz = cfg["state_blk_sz"]
     state_width = (1 + overlap) * HEAD_SIZE
     gen = torch.Generator(device="cpu").manual_seed(seed)
+
+    # ``num_tokens`` always counts the compression boundaries (the real work
+    # items). The kernel launches one program per token and early-exits every
+    # token whose ``(position + 1) % compress_ratio != 0``, so the boundary
+    # density is what actually determines how much of each launch is real work.
+    if boundary_mode == "all":
+        # Legacy peak-bandwidth stress test: every launched token sits on a
+        # boundary, so 100% of programs do a full gather+compress. This
+        # over-states real cost (especially Triton at cr=128, which never sees
+        # this density in inference) and is kept only for bandwidth ceilings.
+        positions = ((torch.arange(num_tokens) + 1) * cr - 1)
+    else:
+        # Realistic prefill: embed ``num_tokens`` boundaries into a contiguous
+        # prefill of length ``num_tokens * cr`` so the density is exactly 1/cr
+        # and the non-boundary tokens early-exit just like real inference. The
+        # launched grid, position range and cos_sin_cache match a genuine
+        # prefill chunk of ``num_tokens * cr`` tokens.
+        positions = torch.arange(num_tokens * cr)
+    positions = positions.to(device)
+    n_launch = int(positions.numel())
 
     state_cache = (torch.randn(num_blocks, state_blk_sz, 2 * state_width,
                                generator=gen) * 0.1).to(device)
@@ -52,15 +85,18 @@ def make_inputs(cfg, num_tokens, device, seed=0, num_blocks=152522):
         dtype=torch.uint8,
         device=device,
     )
-    bt_cols = 200000 if cr == 128 else 16384
+    # block_table must cover the largest state block index touched by the
+    # gather window, i.e. positions.max() // state_blk_sz.
+    default_cols = 200000 if cr == 128 else 16384
+    bt_cols = max(default_cols, (n_launch // state_blk_sz) + 8)
     block_table = torch.randint(0, num_blocks, (1, bt_cols),
                                 dtype=torch.int32, generator=gen).to(device)
 
-    # All tokens on boundary so kernel does real work every call.
-    positions = ((torch.arange(num_tokens) + 1) * cr - 1).to(device)
-    token_to_req = torch.zeros(num_tokens, dtype=torch.int32, device=device)
-    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
-    kv_slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    token_to_req = torch.zeros(n_launch, dtype=torch.int32, device=device)
+    slot_mapping = torch.arange(n_launch, dtype=torch.int64, device=device)
+    # Only boundary tokens ever reach the write; their compressed cache slot is
+    # position // cr. Non-boundary tokens early-exit before this is used.
+    kv_slot_mapping = (positions // cr).to(torch.int64)
     # Match production: DeepSeek-V4 compressor RMSNorm weight follows the model
     # dtype (bf16), so use bf16 here to exercise the in-kernel upcast path.
     rms_norm_weight = torch.ones(HEAD_SIZE, dtype=torch.bfloat16, device=device)
@@ -293,7 +329,8 @@ def compare_sycl_triton_correctness(cfg, num_tokens,
         _fused_kv_compress_norm_rope_insert_sparse_attn as fused_kernel)
 
     _, fp8mix_inputs = make_inputs(
-        cfg, num_tokens, sycl_dev, seed=123, num_blocks=num_blocks
+        cfg, num_tokens, sycl_dev, seed=123, num_blocks=num_blocks,
+        boundary_mode="realistic",
     )
     (state_cache_x,
      token_to_req_x,
@@ -594,6 +631,16 @@ def main():
     )
     ap.add_argument("--num-tokens", type=int, default=None,
                     help="single num_tokens value; default: sweep")
+    ap.add_argument(
+        "--boundary-mode",
+        choices=["realistic", "all"],
+        default="realistic",
+        help="realistic (default): num_tokens compressions at 1/cr boundary "
+             "density inside a prefill of length num_tokens*cr, so "
+             "non-boundary tokens early-exit like real inference. "
+             "all: every launched token is on a boundary (legacy peak-"
+             "bandwidth stress; over-states cost, esp. Triton at cr=128).",
+    )
     ap.add_argument("--warmup", type=int, default=5)
     ap.add_argument("--iters", type=int, default=50)
     args = ap.parse_args()
@@ -662,12 +709,24 @@ def main():
 
     if args.impl == "both":
         print(
+            f"# boundary_mode={args.boundary_mode}  "
+            f"(num_tok = # compressions; "
+            f"{'prefill_len = num_tok x cr' if args.boundary_mode == 'realistic'
+               else 'every token on a boundary'})"
+        )
+        print(
             f"{'layer':<10} {'num_tok':>8} {'sycl_us':>10} "
             f"{'triton_us':>10} {'sycl_GB/s':>10} {'triton_GB/s':>12} "
             f"{'triton/sycl':>12}"
         )
         print("-" * 96)
     else:
+        print(
+            f"# boundary_mode={args.boundary_mode}  "
+            f"(num_tok = # compressions; "
+            f"{'prefill_len = num_tok x cr' if args.boundary_mode == 'realistic'
+               else 'every token on a boundary'})"
+        )
         print(
             f"{'layer':<10} {'impl':<8} {'path':<8} {'num_tok':>8} "
             f"{'lat_us':>10} {'GB/s':>10} {'us/tok':>10}"
@@ -683,6 +742,7 @@ def main():
                     nt,
                     torch.device(args.sycl_device),
                     num_blocks=args.num_blocks,
+                    boundary_mode=args.boundary_mode,
                 )
                 sycl_us, sycl_gbps = benchmark_path(
                     cfg, nt, "fp8mix", sycl_inputs,
@@ -693,6 +753,7 @@ def main():
                     nt,
                     torch.device(args.triton_device),
                     num_blocks=args.num_blocks,
+                    boundary_mode=args.boundary_mode,
                 )
                 triton_us, triton_gbps = benchmark_triton_path(
                     cfg, nt, triton_inputs,
@@ -713,6 +774,7 @@ def main():
                         nt,
                         torch.device(args.triton_device),
                         num_blocks=args.num_blocks,
+                        boundary_mode=args.boundary_mode,
                     )
                     lat_us, gbps = benchmark_triton_path(
                         cfg, nt, triton_inputs,
@@ -724,6 +786,7 @@ def main():
                         nt,
                         torch.device(args.sycl_device),
                         num_blocks=args.num_blocks,
+                        boundary_mode=args.boundary_mode,
                     )
                     lat_us, gbps = benchmark_path(
                         cfg, nt, args.path, sycl_inputs,
