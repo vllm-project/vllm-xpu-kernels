@@ -11,14 +11,18 @@
 //
 // HND is created by permuting an NHD tensor via .permute(0, 2, 1, 3).
 // After permutation the strides encode the layout:
-//   NHD contiguous:  stride(1) = num_heads*head_size  = size(2)*stride(2)
-//   HND (permuted):  stride(1) = head_size            < size(2)*stride(2)
+//   NHD contiguous:  stride(1) = num_heads*head_size  > stride(2) = head_size
+//   HND (permuted):  stride(1) = head_size            < stride(2) =
+//   num_heads*head_size
+//
+// So the check simplifies to: stride(1) < stride(2) means dim1 and dim2
+// were swapped, i.e. HND layout.
 //
 // This check is robust for cross-layer (non-contiguous page stride) tensors
 // because stride(1) and stride(2) within each block are unchanged by the
 // outer non-contiguous stride(0).
 inline bool is_paged_kv_hnd_layout(const at::Tensor& key_cache) {
-  return key_cache.stride(1) != key_cache.size(2) * key_cache.stride(2);
+  return key_cache.stride(2) > key_cache.stride(1);
 }
 
 // Normalize the physical page stride to sequence-position units.
