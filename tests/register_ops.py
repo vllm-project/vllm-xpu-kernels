@@ -397,6 +397,15 @@ def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
                                      scale_wei, bias)
 
 
+def fp8_bmm(input: torch.Tensor, weight: torch.Tensor,
+            out_dtype: Optional[torch.dtype],
+            scale_act: Optional[torch.Tensor],
+            scale_wei: Optional[torch.Tensor],
+            bias: Optional[torch.Tensor] = None):
+    return torch.ops._xpu_C.fp8_bmm(input, weight, out_dtype, scale_act,
+                                    scale_wei, bias)
+
+
 def fp4_gemm(
     input: torch.Tensor,
     weight: torch.Tensor,
