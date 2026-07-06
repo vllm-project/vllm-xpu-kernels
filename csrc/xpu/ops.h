@@ -205,6 +205,8 @@ bool is_pvc(int64_t device_index);
 
 bool is_xe2_arch(int64_t device_index);
 
+bool is_xe3_arch(int64_t device_index);
+
 void exponential_2d_(
     torch::Tensor& tensor,
     torch::Tensor& seeds,  // should on CPU

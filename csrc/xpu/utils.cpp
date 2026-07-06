@@ -26,3 +26,9 @@ bool is_xe2_arch(int64_t device_index = -1) {
   at::DeviceIndex dev_idx = device_index;
   return vllm::xpu::is_xe2_arch(dev_idx);
 }
+
+bool is_xe3_arch(int64_t device_index = -1) {
+  at::DeviceIndex dev_idx = device_index;
+  return vllm::xpu::is_xe3_arch(dev_idx);
+}
+
