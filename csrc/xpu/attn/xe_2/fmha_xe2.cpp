@@ -361,10 +361,24 @@ void cutlass_chunk_prefill_impl(
     // follows V; symmetric V=192 keeps the standard policy.
     if (args.head_size == 192 && args.v_head_size == 128) {
       policy_dispatch_func<chunk_policy_head192_vo128>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
     } else {
       policy_dispatch_func<chunk_policy_head192>(
-          queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
     }
   } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
     policy_dispatch_func<chunk_policy_head256>(

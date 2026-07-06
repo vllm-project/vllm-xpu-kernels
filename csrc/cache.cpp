@@ -922,7 +922,8 @@ void reshape_and_cache(
   int value_stride = value.stride(0);
 
   sycl::range<1> grid(num_tokens);
-  sycl::range<1> block(std::min(num_heads * std::max(head_size, v_head_size), 1024));
+  sycl::range<1> block(
+      std::min(num_heads * std::max(head_size, v_head_size), 1024));
   const at::DeviceGuard device_guard(key.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 
