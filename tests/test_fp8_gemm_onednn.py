@@ -7,7 +7,7 @@ from tests.ops.fp8_quant_op import (fp8_block_dequant_2d, fp8_block_quant_2d,
                                     per_token_group_quant_fp8,
                                     scaled_fp8_quant)
 from tests.ops.mx_utils import from_blocked_format, to_mxfp
-from tests.register_ops import fp8_gemm, fp8_gemm_w8a16
+from tests.register_ops import fp8_bmm, fp8_gemm, fp8_gemm_w8a16
 
 BATCHES = [1, 2, 8]
 OUT_DTYPES = [torch.float16, torch.bfloat16]
@@ -57,6 +57,10 @@ MINI_PYTEST_PARAMS = {
     "test_fp8_gemm_w8a16": {
         "batch": [1],
         "mnk_factors": MINI_MNK_FACTORS[:1],
+    },
+    "test_fp8_bmm_batched_weight_per_block": {
+        "batch": [1],
+        "mnk_factors": MINI_MNK_FACTORS,
     },
     "test_fp8_gemm_per_tensor": {
         "mnk_factors": MINI_MNK_FACTORS,
@@ -220,13 +224,12 @@ def test_fp8_gemm_per_channel(fp8_dtype, out_dtype, is_nt, batch, mnk_factors):
 @pytest.mark.parametrize("batch", [1, 2])
 @pytest.mark.parametrize("group_size", [32, 128])
 @pytest.mark.parametrize("mnk_factors", [(32, 128, 256), (16, 128, 256)])
-def test_fp8_gemm_batched_weight_per_block(fp8_dtype, out_dtype, is_nt, batch,
-                                           group_size, mnk_factors):
+def test_fp8_bmm_batched_weight_per_block(fp8_dtype, out_dtype, is_nt, batch,
+                                          group_size, mnk_factors):
     seed = 1234
     torch.manual_seed(seed)
 
     m, n, k = mnk_factors
-    # oneDNN matmul requires non-trivial scales groups to be multiples of 16.
     assert n % group_size == 0 and k % group_size == 0
 
     input = torch.randn([batch, m, k], dtype=out_dtype,
@@ -265,7 +268,6 @@ def test_fp8_gemm_batched_weight_per_block(fp8_dtype, out_dtype, is_nt, batch,
                 out_dtype))
 
     weight_fp8 = torch.stack(weight_fp8_list, dim=0)
-    # Per-batch weight block scales, shape [B, gK, gN].
     scale_wei_fp8 = torch.stack(weight_scales_kn_list, dim=0)
     weight_fp8_hp = torch.stack(weight_deq_list, dim=0)
 
@@ -275,7 +277,7 @@ def test_fp8_gemm_batched_weight_per_block(fp8_dtype, out_dtype, is_nt, batch,
     if is_nt:
         weight_fp8 = weight_fp8.contiguous()
 
-    output_fp8 = fp8_gemm(
+    output_fp8 = fp8_bmm(
         input_fp8,
         weight_fp8,
         out_dtype,

@@ -68,7 +68,7 @@ torch::Tensor check_and_create_output_tensor(
 
 torch::Tensor fp8_gemm(
     const torch::Tensor& A,  // [b, m ,k]
-    const torch::Tensor& B,  // [k, n] or [b, k, n]
+    const torch::Tensor& B,  // [k, n]
     std::optional<c10::ScalarType> out_dtype,
     const std::optional<torch::Tensor>& A_scale_,
     const std::optional<torch::Tensor>& B_scale_,
@@ -84,12 +84,42 @@ torch::Tensor fp8_gemm(
       result.scalar_type() == torch::kFloat16 ||
           result.scalar_type() == torch::kBFloat16,
       "output must be float16 or bfloat16 for fp8 matmul");
-  // For 3D weights, accept either [B, K, N] or [B, N, K].
+  // check if nt format
   bool is_nt = B.strides()[B.dim() - 2] == 1;
 
   torch::Tensor A_scale = A_scale_.value_or(at::ones({1}, torch::kFloat));
   torch::Tensor B_scale = B_scale_.value_or(at::ones({1}, torch::kFloat));
   oneDNN::dnnl_matmul_w8a8_fp8(result, A, B, is_nt, bias_, A_scale, B_scale);
+  return result;
+}
+
+torch::Tensor fp8_bmm(
+    const torch::Tensor& A,  // [b, m ,k]
+    const torch::Tensor& B,  // [b, k, n]
+    std::optional<c10::ScalarType> out_dtype,
+    const std::optional<torch::Tensor>& A_scale_,
+    const std::optional<torch::Tensor>& B_scale_,
+    const std::optional<torch::Tensor>& bias_) {
+  const at::DeviceGuard device_guard(A.device());
+  TORCH_CHECK(A.dim() == 3, "fp8_bmm expects A to be a 3D tensor");
+  TORCH_CHECK(B.dim() == 3, "fp8_bmm expects B to be a 3D tensor");
+  torch::Tensor result = check_and_create_output_tensor(A, B, out_dtype);
+  auto a_st = A.scalar_type();
+  auto b_st = B.scalar_type();
+  TORCH_CHECK(
+      is_supported_fp8(a_st) && is_supported_fp8(b_st) && a_st == b_st,
+      "input and weight must be f8_e5m2 or f8_e4m3fn for fp8 matmul");
+  TORCH_CHECK(
+      result.scalar_type() == torch::kFloat16 ||
+          result.scalar_type() == torch::kBFloat16,
+      "output must be float16 or bfloat16 for fp8 matmul");
+  // check if nt format
+  bool is_nt = B.strides()[B.dim() - 2] == 1;
+
+  torch::Tensor A_scale = A_scale_.value_or(at::ones({1}, torch::kFloat));
+  torch::Tensor B_scale = B_scale_.value_or(at::ones({1}, torch::kFloat));
+  oneDNN::dnnl_batch_matmul_w8a8_fp8(
+      result, A, B, is_nt, bias_, A_scale, B_scale);
   return result;
 }
 
