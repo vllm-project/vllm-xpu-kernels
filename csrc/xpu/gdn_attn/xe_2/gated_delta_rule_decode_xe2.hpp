@@ -17,13 +17,6 @@ struct gated_delta_rule_decode_kernel_xe2 {
   static constexpr int v_dim_per_sg = 4;
   static constexpr int v_dim_per_group = v_dim_per_sg * sg_per_group;
   static constexpr float eps = 0.000001f;
-  static constexpr int packed_state_bytes = k_bucket_size * sizeof(StateT);
-  static constexpr bool supports_packed_state_io =
-      std::is_same_v<StateT, float> || std::is_same_v<StateT, sycl::half> ||
-      std::is_same_v<StateT, sycl::ext::oneapi::bfloat16>;
-    static constexpr bool use_vector_state_io =
-      supports_packed_state_io &&
-      (packed_state_bytes == 8 || packed_state_bytes == 16);
 
   gated_delta_rule_decode_kernel_xe2(
       T* core_attn_out,
@@ -38,7 +31,6 @@ struct gated_delta_rule_decode_kernel_xe2 {
       const int ssm_state_stride_0,
       const int* token_indx,
       const int* cache_indices,
-      const bool* has_initial_state,
       const int batch_size,
       const int num_k_heads,
       const int head_k_dim,
@@ -56,7 +48,6 @@ struct gated_delta_rule_decode_kernel_xe2 {
         ssm_state_stride_0(ssm_state_stride_0),
         token_indx(token_indx),
         cache_indices(cache_indices),
-        has_initial_state(has_initial_state),
         batch_size(batch_size),
         num_k_heads(num_k_heads),
         head_k_dim(head_k_dim),
@@ -153,33 +144,15 @@ struct gated_delta_rule_decode_kernel_xe2 {
       float k_local[k_bucket_size];
       float v_local[v_dim_per_sg];
 
-      if (has_initial_state == nullptr || has_initial_state[decode_id]) {
 #pragma unroll
-        for (int j = 0; j < v_dim_per_sg; ++j) {
-          const int state_offset =
-              state_head_offset + (head_v_dim_id + j) * head_k_dim +
-              k_bucket_size * sg_local_id;
-          if constexpr (use_vector_state_io) {
-            load_vec_to_float<StateT, k_bucket_size>(
-                ssm_state_ptr + state_offset,
-                reinterpret_cast<float (&)[k_bucket_size]>(
-                    state_local[j * k_bucket_size]));
-          } else {
-#pragma unroll
-            for (int i = 0; i < k_bucket_size; ++i) {
-              state_local[j * k_bucket_size + i] =
-                  static_cast<float>(ssm_state_ptr[state_offset + i]);
-            }
-          }
-        }
-      } else {
-#pragma unroll
-        for (int j = 0; j < v_dim_per_sg; ++j) {
-#pragma unroll
-          for (int i = 0; i < k_bucket_size; ++i) {
-            state_local[j * k_bucket_size + i] = 0.0f;
-          }
-        }
+      for (int j = 0; j < v_dim_per_sg; ++j) {
+        const int state_offset =
+            state_head_offset + (head_v_dim_id + j) * head_k_dim +
+            k_bucket_size * sg_local_id;
+        load_vec_to_float<StateT, k_bucket_size>(
+            ssm_state_ptr + state_offset,
+            reinterpret_cast<float (&)[k_bucket_size]>(
+                state_local[j * k_bucket_size]));
       }
 
       float b_local = b[decode_id * num_v_heads + num_v_heads_id];
@@ -274,18 +247,10 @@ struct gated_delta_rule_decode_kernel_xe2 {
         const int state_offset =
             state_head_offset + (head_v_dim_id + j) * head_k_dim +
             k_bucket_size * sg_local_id;
-        if constexpr (use_vector_state_io) {
-          store_vec_from_float<StateT, k_bucket_size>(
-              ssm_state_ptr + state_offset,
-              reinterpret_cast<float (&)[k_bucket_size]>(
-                  state_local[j * k_bucket_size]));
-        } else {
-#pragma unroll
-          for (int i = 0; i < k_bucket_size; ++i) {
-            ssm_state_ptr[state_offset + i] =
-                static_cast<StateT>(state_local[j * k_bucket_size + i]);
-          }
-        }
+        store_vec_from_float<StateT, k_bucket_size>(
+            ssm_state_ptr + state_offset,
+            reinterpret_cast<float (&)[k_bucket_size]>(
+                state_local[j * k_bucket_size]));
       }
     }
   }
@@ -303,7 +268,6 @@ struct gated_delta_rule_decode_kernel_xe2 {
   const int ssm_state_stride_0;
   const int* token_indx;
   const int* cache_indices;
-  const bool* has_initial_state;
   const int batch_size;
   const int num_k_heads;
   const int head_k_dim;
@@ -326,7 +290,6 @@ void kernel_launcher_decode_xe2(
     const int ssm_state_stride_0,
     const int* token_indx,
     const int* cache_indices,
-    const bool* has_initial_state,
     const int batch_size,
     const int num_k_heads,
     const int head_k_dim,
@@ -334,7 +297,12 @@ void kernel_launcher_decode_xe2(
     const int head_v_dim) {
   using KERNEL = gated_delta_rule_decode_kernel_xe2<T, StateT, k_bucket_size>;
   auto range = KERNEL::get_nd_range(batch_size, num_v_heads, head_v_dim);
-  assert(head_v_dim % KERNEL::v_dim_per_group == 0);
+  TORCH_CHECK(
+      head_v_dim % KERNEL::v_dim_per_group == 0,
+      "head_v_dim must be divisible by ",
+      KERNEL::v_dim_per_group,
+      " for XE2 decode, but got ",
+      head_v_dim);
   queue.submit([&](sycl::handler& cgh) {
     KERNEL task(
         core_attn_out,
@@ -349,7 +317,6 @@ void kernel_launcher_decode_xe2(
         ssm_state_stride_0,
         token_indx,
         cache_indices,
-        has_initial_state,
         batch_size,
         num_k_heads,
         head_k_dim,
@@ -374,7 +341,6 @@ void dispatch_state_dtype_decode_xe2(
     const int ssm_state_stride_0,
     const int* token_indx,
     const int* cache_indices,
-    const bool* has_initial_state,
     const int batch_size,
     const int num_k_heads,
     const int head_k_dim,
@@ -398,7 +364,6 @@ void dispatch_state_dtype_decode_xe2(
           ssm_state_stride_0,                                                 \
           token_indx,                                                         \
           cache_indices,                                                      \
-          has_initial_state,                                                  \
           batch_size,                                                         \
           num_k_heads,                                                        \
           head_k_dim,                                                         \
@@ -420,7 +385,6 @@ void dispatch_state_dtype_decode_xe2(
           ssm_state_stride_0,                                                 \
           token_indx,                                                         \
           cache_indices,                                                      \
-          has_initial_state,                                                  \
           batch_size,                                                         \
           num_k_heads,                                                        \
           head_k_dim,                                                         \
@@ -442,7 +406,6 @@ void dispatch_state_dtype_decode_xe2(
           ssm_state_stride_0,                                                 \
           token_indx,                                                         \
           cache_indices,                                                      \
-          has_initial_state,                                                  \
           batch_size,                                                         \
           num_k_heads,                                                        \
           head_k_dim,                                                         \
@@ -464,7 +427,6 @@ void dispatch_state_dtype_decode_xe2(
           ssm_state_stride_0,                                                 \
           token_indx,                                                         \
           cache_indices,                                                      \
-          has_initial_state,                                                  \
           batch_size,                                                         \
           num_k_heads,                                                        \
           head_k_dim,                                                         \
