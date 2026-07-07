@@ -153,7 +153,8 @@ class MoeTopK {
       const int start_expert,
       const int end_expert,
       const bool renormalize,
-      const float* bias)
+      const float* bias,
+      const double routed_scaling_factor)
       : inputs_after_softmax(inputs_after_softmax),
         finished(finished),
         output(output),
@@ -164,7 +165,8 @@ class MoeTopK {
         start_expert(start_expert),
         end_expert(end_expert),
         renormalize(renormalize),
-        bias(bias) {}
+        bias(bias),
+        routed_scaling_factor(routed_scaling_factor) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
@@ -231,11 +233,15 @@ class MoeTopK {
       item.barrier(sycl::access::fence_space::local_space);
     }
 
-    if (renormalize) {
-      auto local_range_x = item.get_local_range(0);
-      for (int k_idx = local_id_x; k_idx < k; k_idx += local_range_x) {
+    if (local_id_x == 0) {
+      float scale = static_cast<float>(routed_scaling_factor);
+      if (renormalize) {
+        const float denom = sum_val > 0.0f ? sum_val : 1.0f;
+        scale /= denom;
+      }
+      for (int k_idx = 0; k_idx < k; ++k_idx) {
         const int idx = k * block_row + k_idx;
-        output[idx] /= sum_val;
+        output[idx] *= scale;
       }
     }
   }
@@ -252,6 +258,7 @@ class MoeTopK {
   const int end_expert;
   const bool renormalize;
   const float* bias;
+  const double routed_scaling_factor;
 };
 
 // ====================== TopK softmax things ===============================
@@ -293,7 +300,8 @@ class TopKGating {
       const int start_expert,
       const int end_expert,
       const bool renormalize,
-      const float* bias)
+      const float* bias,
+      const double routed_scaling_factor)
       : input(input),
         finished(finished),
         output(output),
@@ -304,7 +312,8 @@ class TopKGating {
         start_expert(start_expert),
         end_expert(end_expert),
         renormalize(renormalize),
-        bias(bias) {}
+        bias(bias),
+        routed_scaling_factor(routed_scaling_factor) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<2> item) const {
@@ -561,10 +570,15 @@ class TopKGating {
       }
     }
 
-    if (renormalize) {
-      for (int k_idx = thread_group_idx; k_idx < k; k_idx += THREADS_PER_ROW) {
+    if (thread_group_idx == 0) {
+      float scale = static_cast<float>(routed_scaling_factor);
+      if (renormalize) {
+        const float denom = sum_val > 0.0f ? sum_val : 1.0f;
+        scale /= denom;
+      }
+      for (int k_idx = 0; k_idx < k; ++k_idx) {
         const int idx = k * thread_row + k_idx;
-        output[idx] /= sum_val;
+        output[idx] *= scale;
       }
     }
   }
@@ -581,6 +595,7 @@ class TopKGating {
   const int end_expert;
   const bool renormalize;
   const float* bias;
+  const double routed_scaling_factor;
 };
 
 namespace detail {
@@ -625,6 +640,7 @@ void topk_gating_launcher_helper(
     const int end_expert,
     bool renormalize,
     float* bias,
+    double routed_scaling_factor,
     sycl::queue& queue) {
   static constexpr int BYTES_PER_LDG =
       MIN(MAX_BYTES_PER_LDG, sizeof(InputdType) * EXPERTS);
@@ -659,7 +675,8 @@ void topk_gating_launcher_helper(
             start_expert,
             end_expert,
             renormalize,
-            bias));
+            bias,
+            routed_scaling_factor));
   });
 }
 
@@ -685,6 +702,7 @@ void topk_gating_launcher_helper(
       num_experts,                                                             \
       renormalize,                                                             \
       bias,                                                                    \
+      routed_scaling_factor,                                                   \
       queue);
 
 template <typename InputdType, typename IndType, ScoringFunc ScoringFuncParam>
@@ -699,6 +717,7 @@ void topk_gating_kernel_launcher(
     const int topk,
     const bool renormalize,
     float* bias,
+    const double routed_scaling_factor,
     sycl::queue& queue) {
   static constexpr int WARPS_PER_TB = 4;
   static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
@@ -799,7 +818,8 @@ void topk_gating_kernel_launcher(
                 0,
                 num_experts,
                 renormalize,
-                bias));
+                bias,
+                routed_scaling_factor));
       });
     }
   }
@@ -822,6 +842,7 @@ void topk_gating_kernel_launcher(
       topk,                                                                  \
       renormalize,                                                           \
       bias.has_value() ? bias->data_ptr<float>() : nullptr,                  \
+      routed_scaling_factor,                                                 \
       queue);
 
 void topk_softmax(
@@ -831,6 +852,7 @@ void topk_softmax(
     torch::Tensor& gating_output,         // [num_tokens, num_experts]
     const bool renormalize,
     std::optional<torch::Tensor> bias) {
+  constexpr double routed_scaling_factor = 1.0;
   const int num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
   const int topk = topk_weights.size(-1);
@@ -881,7 +903,8 @@ void topk_sigmoid(
     torch::Tensor& token_expert_indices,  // [num_tokens, topk]
     torch::Tensor& gating_output,         // [num_tokens, num_experts]
     const bool renormalize,
-    std::optional<torch::Tensor> bias) {
+    std::optional<torch::Tensor> bias,
+    const double routed_scaling_factor) {
   const int num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
   const int topk = topk_weights.size(-1);
