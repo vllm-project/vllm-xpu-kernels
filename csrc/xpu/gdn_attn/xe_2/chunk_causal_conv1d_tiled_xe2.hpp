@@ -136,6 +136,42 @@ struct chunk_causal_conv1d_tiled_kernel {
   }
   static inline void act_silu(float& x) { act_swish(x, 1.0f); }
 
+  // Vectorized contiguous helpers (imitates the decode kernel commit af64d0c:
+  // replace per-element 16-bit global loads/stores of the elems_per_item
+  // contiguous lanes with a single wide vector message). The benchmarked GDN
+  // shapes keep all bases aligned to elems_per_item, so the wide message is
+  // well-formed.
+
+  // Store elems_per_item contiguous T values from a float source.
+  static inline void store_vec(T* ptr, const float (&v)[elems_per_item]) {
+    sycl::vec<T, elems_per_item> out;
+#pragma unroll
+    for (int e = 0; e < elems_per_item; ++e) {
+      out[e] = static_cast<T>(v[e]);
+    }
+    *reinterpret_cast<sycl::vec<T, elems_per_item>*>(ptr) = out;
+  }
+
+  // Store elems_per_item contiguous T values from a contiguous T source.
+  static inline void store_vec_t(T* ptr, const T (&src)[elems_per_item]) {
+    sycl::vec<T, elems_per_item> out;
+#pragma unroll
+    for (int e = 0; e < elems_per_item; ++e) {
+      out[e] = src[e];
+    }
+    *reinterpret_cast<sycl::vec<T, elems_per_item>*>(ptr) = out;
+  }
+
+  // Load elems_per_item contiguous T values as a single vector message.
+  static inline void load_vec(const T* ptr, T (&dst)[elems_per_item]) {
+    sycl::vec<T, elems_per_item> in =
+        *reinterpret_cast<const sycl::vec<T, elems_per_item>*>(ptr);
+#pragma unroll
+    for (int e = 0; e < elems_per_item; ++e) {
+      dst[e] = in[e];
+    }
+  }
+
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<2> item) const {
     const int k_head_id = item.get_group(1);
@@ -463,26 +499,20 @@ struct chunk_causal_conv1d_tiled_kernel {
       int out_token_id = pre_chunks * chunk_size_xe2 + token_in_seq;
 
       if (is_q) {
-#pragma unroll
-        for (int e = 0; e < elems_per_item; ++e) {
-          q_out
-              [out_token_id * num_k_heads * q_dim + k_head_id * q_dim + feat +
-               e] = res[e];
-        }
+        store_vec(
+            &q_out[out_token_id * num_k_heads * q_dim + k_head_id * q_dim +
+                   feat],
+            res);
       } else if (is_k) {
-#pragma unroll
-        for (int e = 0; e < elems_per_item; ++e) {
-          k_out
-              [out_token_id * num_k_heads * k_dim + k_head_id * k_dim + feat -
-               q_dim + e] = res[e];
-        }
+        store_vec(
+            &k_out[out_token_id * num_k_heads * k_dim + k_head_id * k_dim +
+                   feat - q_dim],
+            res);
       } else {
-#pragma unroll
-        for (int e = 0; e < elems_per_item; ++e) {
-          v_out
-              [out_token_id * num_k_heads * v_dim + k_head_id * v_dim + feat -
-               (q_dim + k_dim) + e] = res[e];
-        }
+        store_vec(
+            &v_out[out_token_id * num_k_heads * v_dim + k_head_id * v_dim +
+                   feat - (q_dim + k_dim)],
+            res);
       }
     }
 
@@ -518,14 +548,13 @@ struct chunk_causal_conv1d_tiled_kernel {
             mixed_z_id = global_tok * num_k_heads * qkvz_dim_full +
                          k_head_id * qkvz_dim_full + qkv_dim_full + z_dim_id;
           }
-#pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            z_out
-                [global_tok * num_k_heads * z_dim + k_head_id * z_dim +
-                 z_dim_id + e] = mixed_qkvz[mixed_z_id + e];
-          }
+          T z_tmp[elems_per_item];
+          load_vec(&mixed_qkvz[mixed_z_id], z_tmp);
+          store_vec_t(
+              &z_out[global_tok * num_k_heads * z_dim + k_head_id * z_dim +
+                     z_dim_id],
+              z_tmp);
         }
-
         // b/a reorder: only item 0 does this (kv_ratio=2 elements per head)
         if (local_id == 0) {
           if constexpr (ReorderInput) {
