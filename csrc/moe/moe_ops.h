@@ -59,7 +59,19 @@ void topk_sigmoid(
     torch::Tensor& token_expert_indices,
     torch::Tensor& gating_output,
     const bool renormalize,
-    std::optional<torch::Tensor> bias);
+    std::optional<torch::Tensor> bias,
+    double routed_scaling_factor);
+
+void topk_softplus_sqrt(
+    torch::Tensor& topk_weights,
+    torch::Tensor& topk_indices,
+    torch::Tensor& token_expert_indices,
+    torch::Tensor& gating_output,
+    bool renormalize,
+    double routed_scaling_factor,
+    const c10::optional<torch::Tensor>& correction_bias,
+    const c10::optional<torch::Tensor>& input_ids,
+    const c10::optional<torch::Tensor>& tid2eid);
 
 void moe_gather(
     torch::Tensor& output,
