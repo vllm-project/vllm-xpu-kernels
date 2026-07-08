@@ -22,7 +22,7 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' && 
       github.event.workflow_run.event == 'push')
     container:                      
-      image: intelgpu/manylinux2_28-builder:xpu_2619
+      image: intelgpu/manylinux2_28-builder:xpu_2619-26.0
       options: --user root
     steps:
       - name: Checkout
