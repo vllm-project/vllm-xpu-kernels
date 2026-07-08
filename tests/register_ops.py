@@ -550,9 +550,11 @@ def swap_blocks_batch(
 def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor, renormalize: bool,
-                 bias: Optional[torch.Tensor]) -> None:
+                 bias: Optional[torch.Tensor],
+                 routed_scaling_factor: float = 1.0) -> None:
     torch.ops._moe_C.topk_sigmoid(topk_weights, topk_ids, token_expert_indices,
-                                  gating_output, renormalize, bias)
+                                  gating_output, renormalize, bias,
+                                  routed_scaling_factor)
 
 
 def topk_softplus_sqrt(
