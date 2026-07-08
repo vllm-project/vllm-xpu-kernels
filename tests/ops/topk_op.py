@@ -42,6 +42,7 @@ def topk_sigmoid(
     renormalize: bool,
     bias: Optional[torch.Tensor] = None,
     indices_type: Optional[torch.dtype] = None,
+    routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
     routing_weights = torch.sigmoid(gating_output).to(torch.float32)
@@ -54,6 +55,7 @@ def topk_sigmoid(
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    topk_weights = topk_weights * routed_scaling_factor
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
@@ -103,6 +105,7 @@ def fused_topk_sigmoid(
     renormalize: bool,
     bias: Optional[torch.Tensor] = None,
     indices_type: Optional[torch.dtype] = None,
+    routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), (
         "Number of tokens mismatch")
@@ -130,6 +133,7 @@ def fused_topk_sigmoid(
         gating_output,
         renormalize,
         bias,
+        routed_scaling_factor,
     )
 
     return topk_weights, topk_ids

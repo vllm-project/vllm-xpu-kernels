@@ -99,6 +99,17 @@ static inline bool force_xe_default_kernel() {
   return false;
 }
 
+// Control whether MHC kernels use the TF32 DPAS GEMM path (split-K).
+// Default: enabled (1). Set VLLM_MHC_USE_TF32=0 to force the vector path.
+static inline bool mhc_use_tf32() {
+  auto env_val = getEnv("VLLM_MHC_USE_TF32");
+  if (env_val.has_value()) {
+    return env_val.value() != "0" && env_val.value() != "false" &&
+           env_val.value() != "FALSE";
+  }
+  return true;
+}
+
 template <typename T>
 struct SyclTypeTrait {
   using Type = T;

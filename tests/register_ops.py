@@ -397,6 +397,15 @@ def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
                                      scale_wei, bias)
 
 
+def fp8_bmm(input: torch.Tensor, weight: torch.Tensor,
+            out_dtype: Optional[torch.dtype],
+            scale_act: Optional[torch.Tensor],
+            scale_wei: Optional[torch.Tensor],
+            bias: Optional[torch.Tensor] = None):
+    return torch.ops._xpu_C.fp8_bmm(input, weight, out_dtype, scale_act,
+                                    scale_wei, bias)
+
+
 def fp4_gemm(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -550,9 +559,35 @@ def swap_blocks_batch(
 def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor, renormalize: bool,
-                 bias: Optional[torch.Tensor]) -> None:
+                 bias: Optional[torch.Tensor],
+                 routed_scaling_factor: float = 1.0) -> None:
     torch.ops._moe_C.topk_sigmoid(topk_weights, topk_ids, token_expert_indices,
-                                  gating_output, renormalize, bias)
+                                  gating_output, renormalize, bias,
+                                  routed_scaling_factor)
+
+
+def topk_softplus_sqrt(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    routed_scaling_factor: float,
+    correction_bias: Optional[torch.Tensor] = None,
+    input_ids: Optional[torch.Tensor] = None,
+    tid2eid: Optional[torch.Tensor] = None,
+) -> None:
+    torch.ops._moe_C.topk_softplus_sqrt(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        routed_scaling_factor,
+        correction_bias,
+        input_ids,
+        tid2eid,
+    )
 
 
 def topk_per_row_prefill(
