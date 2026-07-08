@@ -555,6 +555,30 @@ def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                                   gating_output, renormalize, bias)
 
 
+def topk_softplus_sqrt(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    routed_scaling_factor: float,
+    correction_bias: Optional[torch.Tensor] = None,
+    input_ids: Optional[torch.Tensor] = None,
+    tid2eid: Optional[torch.Tensor] = None,
+) -> None:
+    torch.ops._moe_C.topk_softplus_sqrt(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        routed_scaling_factor,
+        correction_bias,
+        input_ids,
+        tid2eid,
+    )
+
+
 def topk_per_row_prefill(
     logits: torch.Tensor,
     row_starts: torch.Tensor,
