@@ -17,6 +17,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("fp8_gemm", torch::kXPU, &fp8_gemm);
 
   xpu_ops.def(
+      "fp8_bmm(Tensor A, Tensor B, ScalarType? out_dtype, Tensor? A_scale_, "
+      "Tensor? B_scale_, Tensor? bias_) -> Tensor");
+  xpu_ops.impl("fp8_bmm", torch::kXPU, &fp8_bmm);
+
+  xpu_ops.def(
       "fp8_gemm_w8a16(Tensor A, Tensor B, Tensor? B_scale_, "
       "Tensor? bias_) -> Tensor");
   xpu_ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
@@ -182,6 +187,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def("is_pvc(int device_index) -> bool");
   xpu_ops.impl("is_pvc", &is_pvc);
+
+  xpu_ops.def("is_xe2_arch(int device_index=-1) -> bool");
+  xpu_ops.impl("is_xe2_arch", &is_xe2_arch);
+
+  xpu_ops.def("is_xe3_arch(int device_index=-1) -> bool");
+  xpu_ops.impl("is_xe3_arch", &is_xe3_arch);
 
   // test only, will not use in vllm
   xpu_ops.def(
