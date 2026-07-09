@@ -42,7 +42,7 @@ jobs:
 
       - name: build wheel
         run: |
-          source /opt/intel/oneapi/2025.3/oneapi-vars.sh
+          source /opt/intel/oneapi/2026.0/oneapi-vars.sh
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           git submodule sync && git submodule update --init --recursive
           pip install -r requirements.txt
