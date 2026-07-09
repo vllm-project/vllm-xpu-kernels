@@ -112,3 +112,139 @@ void gated_delta_rule_decode_xe2(
         k_bucket_size);
   }
 }
+
+    void gated_delta_rule_decode_xe2_spec(
+      sycl::queue& queue,
+      torch::Tensor& core_attn_out,
+      const torch::Tensor& q,
+      const torch::Tensor& k,
+      const torch::Tensor& v,
+      const torch::Tensor& b,
+      const torch::Tensor& a,
+      const torch::Tensor& A_log,
+      const torch::Tensor& dt_bias,
+      torch::Tensor& ssm_state,
+      const torch::Tensor& cache_indices,
+      const torch::Tensor& num_accepted_tokens,
+      const int num_spec_decodes,
+      const int num_spec_tokens,
+      const int num_k_heads,
+      const int head_k_dim,
+      const int num_v_heads,
+      const int head_v_dim,
+      const int* token_indx) {
+      TORCH_CHECK(cache_indices.is_contiguous(), "cache_indices must be contiguous");
+      TORCH_CHECK(cache_indices.dtype() == torch::kInt32, "cache_indices must be int32");
+      TORCH_CHECK(cache_indices.dim() == 2, "cache_indices must be 2D");
+      TORCH_CHECK(cache_indices.size(0) == num_spec_decodes, "cache_indices size(0) must match num_spec_decodes");
+      TORCH_CHECK(
+        cache_indices.size(1) == num_spec_tokens,
+        "cache_indices size(1) must match num_spec_tokens");
+      TORCH_CHECK(
+        num_accepted_tokens.is_contiguous(),
+        "num_accepted_tokens must be contiguous");
+      TORCH_CHECK(
+        num_accepted_tokens.dtype() == torch::kInt32,
+        "num_accepted_tokens must be int32");
+      TORCH_CHECK(num_accepted_tokens.dim() == 1, "num_accepted_tokens must be 1D");
+      TORCH_CHECK(
+        num_accepted_tokens.size(0) == num_spec_decodes,
+        "num_accepted_tokens size must match num_spec_decodes");
+      TORCH_CHECK(num_v_heads % num_k_heads == 0, "num_v_heads must be divisible by num_k_heads");
+      TORCH_CHECK(
+        A_log.scalar_type() == at::kFloat,
+        "A_log dtype must be float32, but got ",
+        A_log.scalar_type());
+      TORCH_CHECK(
+        dt_bias.scalar_type() == core_attn_out.scalar_type(),
+        "dt_bias dtype must match core_attn_out dtype, but got dt_bias=",
+        dt_bias.scalar_type(),
+        ", core_attn_out=",
+        core_attn_out.scalar_type());
+      TORCH_CHECK(head_k_dim % gdn::xe2::decode_sub_group_size == 0);
+
+      const int ssm_state_stride_0 = ssm_state.stride(0);
+      const int cache_indices_stride_0 = cache_indices.stride(0);
+      const int* cache_indices_ptr =
+        reinterpret_cast<const int*>(cache_indices.data_ptr());
+      const int* num_accepted_tokens_ptr =
+        reinterpret_cast<const int*>(num_accepted_tokens.data_ptr());
+      const int k_bucket_size = head_k_dim / gdn::xe2::decode_sub_group_size;
+
+      if (core_attn_out.scalar_type() == at::kBFloat16) {
+      using scalar_t = sycl::ext::oneapi::bfloat16;
+      gdn::xe2::dispatch_state_dtype_decode_xe2_spec<scalar_t>(
+        queue,
+        core_attn_out,
+        q,
+        k,
+        v,
+        b,
+        a,
+        A_log,
+        dt_bias,
+        ssm_state,
+        ssm_state_stride_0,
+        token_indx,
+        cache_indices_ptr,
+        cache_indices_stride_0,
+        num_accepted_tokens_ptr,
+        num_spec_decodes,
+        num_spec_tokens,
+        num_k_heads,
+        head_k_dim,
+        num_v_heads,
+        head_v_dim,
+        k_bucket_size);
+      } else if (core_attn_out.scalar_type() == at::kHalf) {
+      using scalar_t = sycl::half;
+      gdn::xe2::dispatch_state_dtype_decode_xe2_spec<scalar_t>(
+        queue,
+        core_attn_out,
+        q,
+        k,
+        v,
+        b,
+        a,
+        A_log,
+        dt_bias,
+        ssm_state,
+        ssm_state_stride_0,
+        token_indx,
+        cache_indices_ptr,
+        cache_indices_stride_0,
+        num_accepted_tokens_ptr,
+        num_spec_decodes,
+        num_spec_tokens,
+        num_k_heads,
+        head_k_dim,
+        num_v_heads,
+        head_v_dim,
+        k_bucket_size);
+      } else {
+      using scalar_t = float;
+      gdn::xe2::dispatch_state_dtype_decode_xe2_spec<scalar_t>(
+        queue,
+        core_attn_out,
+        q,
+        k,
+        v,
+        b,
+        a,
+        A_log,
+        dt_bias,
+        ssm_state,
+        ssm_state_stride_0,
+        token_indx,
+        cache_indices_ptr,
+        cache_indices_stride_0,
+        num_accepted_tokens_ptr,
+        num_spec_decodes,
+        num_spec_tokens,
+        num_k_heads,
+        head_k_dim,
+        num_v_heads,
+        head_v_dim,
+        k_bucket_size);
+      }
+    }

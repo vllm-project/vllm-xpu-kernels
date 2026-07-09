@@ -568,6 +568,34 @@ void gated_delta_rule(
   std::optional<torch::Tensor> empty_tensor{std::nullopt};
 
   if (spec_token > 0) {
+#ifdef VLLM_XPU_ENABLE_XE2
+    const int num_spec_tokens = spec_state_indices_tensor->size(1);
+    const int* spec_token_indx_ptr =
+        spec_token_indx.has_value()
+            ? reinterpret_cast<const int*>(spec_token_indx->data_ptr())
+            : nullptr;
+
+    gated_delta_rule_decode_xe2_spec(
+        queue,
+        core_attn_out_active,
+        q,
+        k,
+        v,
+        b,
+        a,
+        A_log,
+        dt_bias,
+        ssm_state,
+        *spec_state_indices_tensor,
+        *num_accepted_tokens,
+        num_spec_decodes,
+        num_spec_tokens,
+        q.size(1),
+        q.size(2),
+        v.size(1),
+        v.size(2),
+        spec_token_indx_ptr);
+#else
     gdn::gated_delta_rule(
         queue,
         core_attn_out_active,
@@ -587,6 +615,7 @@ void gated_delta_rule(
         num_prefills,
         num_decodes,
         num_spec_decodes);
+    #endif
   }
 
   if (non_spec_token > 0) {
