@@ -555,42 +555,39 @@ struct chunk_causal_conv1d_tiled_kernel {
                      z_dim_id],
               z_tmp);
         }
-        // b/a reorder: only item 0 does this (kv_ratio=2 elements per head)
-        if (local_id == 0) {
-          if constexpr (ReorderInput) {
-            int step = global_tok * num_v_heads * 2;
-#pragma unroll
-            for (int e = 0; e < kv_ratio; ++e) {
-              float b_val =
-                  static_cast<float>(mixed_ba[step + k_head_id * kv_ratio + e]);
-              float a_val = static_cast<float>(
-                  mixed_ba[step + num_v_heads + k_head_id * kv_ratio + e]);
-              b_val = 1.0f / (1.0f + sycl::exp(-b_val));
-              b_out
-                  [(k_head_id * kv_ratio + e) * num_virtual_tokens +
-                   out_token_id] = b_val;
-              a_out
-                  [(k_head_id * kv_ratio + e) * num_virtual_tokens +
-                   out_token_id] = a_val;
-            }
-          } else {
-            int step = (global_tok * num_v_heads +
-                        k_head_id * num_v_heads / num_k_heads) *
-                       2;
-#pragma unroll
-            for (int e = 0; e < kv_ratio; ++e) {
-              float b_val = static_cast<float>(mixed_ba[step + e]);
-              float a_val = static_cast<float>(mixed_ba[step + kv_ratio + e]);
-              b_val = 1.0f / (1.0f + sycl::exp(-b_val));
-              b_out
-                  [(k_head_id * kv_ratio + e) * num_virtual_tokens +
-                   out_token_id] = b_val;
-              a_out
-                  [(k_head_id * kv_ratio + e) * num_virtual_tokens +
-                   out_token_id] = a_val;
-            }
-          }
+        // b/a reorder handled in a separate lane-parallel pass below.
+      }
+
+      // b/a reorder parallelized across lanes: each lane writes one or more
+      // (token, elem) pairs instead of serializing all of them on
+      // local_id == 0. Strided so it stays correct if the pair count exceeds
+      // the workgroup size.
+      int total_ba = tile_tokens * kv_ratio;
+      for (int idx = local_id; idx < total_ba; idx += wg_size) {
+        int t = idx / kv_ratio;
+        int e = idx % kv_ratio;
+        int token_in_seq = tile_start_in_seq + t;
+        int out_token_id = pre_chunks * chunk_size_xe2 + token_in_seq;
+        int global_tok = lookup(seq_start + token_in_seq);
+        float b_val, a_val;
+        if constexpr (ReorderInput) {
+          int step = global_tok * num_v_heads * 2;
+          b_val =
+              static_cast<float>(mixed_ba[step + k_head_id * kv_ratio + e]);
+          a_val = static_cast<float>(
+              mixed_ba[step + num_v_heads + k_head_id * kv_ratio + e]);
+        } else {
+          int step = (global_tok * num_v_heads +
+                      k_head_id * num_v_heads / num_k_heads) *
+                     2;
+          b_val = static_cast<float>(mixed_ba[step + e]);
+          a_val = static_cast<float>(mixed_ba[step + kv_ratio + e]);
         }
+        b_val = 1.0f / (1.0f + sycl::exp(-b_val));
+        b_out[(k_head_id * kv_ratio + e) * num_virtual_tokens + out_token_id] =
+            b_val;
+        a_out[(k_head_id * kv_ratio + e) * num_virtual_tokens + out_token_id] =
+            a_val;
       }
     }
 
