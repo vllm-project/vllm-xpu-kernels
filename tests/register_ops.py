@@ -9,8 +9,8 @@ import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 
 # layer norm ops
-def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
-             epsilon: float) -> None:
+def rms_norm(out: torch.Tensor, input: torch.Tensor,
+             weight: Optional[torch.Tensor], epsilon: float) -> None:
     # TODO: Remove this contiguous call when the kernel is updated to support
     # non-contiguous input
     input_contiguous = input.contiguous()
@@ -18,7 +18,8 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
 
 
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
-                       weight: torch.Tensor, epsilon: float) -> None:
+                       weight: Optional[torch.Tensor],
+                       epsilon: float) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
@@ -397,6 +398,15 @@ def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
                                      scale_wei, bias)
 
 
+def fp8_bmm(input: torch.Tensor, weight: torch.Tensor,
+            out_dtype: Optional[torch.dtype],
+            scale_act: Optional[torch.Tensor],
+            scale_wei: Optional[torch.Tensor],
+            bias: Optional[torch.Tensor] = None):
+    return torch.ops._xpu_C.fp8_bmm(input, weight, out_dtype, scale_act,
+                                    scale_wei, bias)
+
+
 def fp4_gemm(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -550,9 +560,35 @@ def swap_blocks_batch(
 def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor, renormalize: bool,
-                 bias: Optional[torch.Tensor]) -> None:
+                 bias: Optional[torch.Tensor],
+                 routed_scaling_factor: float = 1.0) -> None:
     torch.ops._moe_C.topk_sigmoid(topk_weights, topk_ids, token_expert_indices,
-                                  gating_output, renormalize, bias)
+                                  gating_output, renormalize, bias,
+                                  routed_scaling_factor)
+
+
+def topk_softplus_sqrt(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+    routed_scaling_factor: float,
+    correction_bias: Optional[torch.Tensor] = None,
+    input_ids: Optional[torch.Tensor] = None,
+    tid2eid: Optional[torch.Tensor] = None,
+) -> None:
+    torch.ops._moe_C.topk_softplus_sqrt(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        routed_scaling_factor,
+        correction_bias,
+        input_ids,
+        tid2eid,
+    )
 
 
 def topk_per_row_prefill(

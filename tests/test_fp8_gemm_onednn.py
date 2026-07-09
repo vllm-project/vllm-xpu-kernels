@@ -7,7 +7,7 @@ from tests.ops.fp8_quant_op import (fp8_block_dequant_2d, fp8_block_quant_2d,
                                     per_token_group_quant_fp8,
                                     scaled_fp8_quant)
 from tests.ops.mx_utils import from_blocked_format, to_mxfp
-from tests.register_ops import fp8_gemm, fp8_gemm_w8a16
+from tests.register_ops import fp8_bmm, fp8_gemm, fp8_gemm_w8a16
 
 BATCHES = [1, 2, 8]
 OUT_DTYPES = [torch.float16, torch.bfloat16]
@@ -57,6 +57,10 @@ MINI_PYTEST_PARAMS = {
     "test_fp8_gemm_w8a16": {
         "batch": [1],
         "mnk_factors": MINI_MNK_FACTORS[:1],
+    },
+    "test_fp8_bmm_batched_weight_per_block": {
+        "batch": [1],
+        "mnk_factors": MINI_MNK_FACTORS,
     },
     "test_fp8_gemm_per_tensor": {
         "mnk_factors": MINI_MNK_FACTORS,
@@ -214,14 +218,86 @@ def test_fp8_gemm_per_channel(fp8_dtype, out_dtype, is_nt, batch, mnk_factors):
     torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)
 
 
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
+@pytest.mark.parametrize("out_dtype", OUT_DTYPES)
+@pytest.mark.parametrize("is_nt", [True, False])
+@pytest.mark.parametrize("batch", [1, 2])
+@pytest.mark.parametrize("group_size", [32, 128])
+@pytest.mark.parametrize("mnk_factors", [(32, 128, 256), (16, 128, 256)])
+def test_fp8_bmm_batched_weight_per_block(fp8_dtype, out_dtype, is_nt, batch,
+                                          group_size, mnk_factors):
+    seed = 1234
+    torch.manual_seed(seed)
+
+    m, n, k = mnk_factors
+    assert n % group_size == 0 and k % group_size == 0
+
+    input = torch.randn([batch, m, k], dtype=out_dtype,
+                        device=torch.device("xpu")) / 10.0
+    weight = torch.randn([batch, n, k], dtype=out_dtype).xpu() / 10.0
+
+    input_fp8, scale_src_fp8 = per_token_group_quant_fp8(input.reshape(-1, k),
+                                                         group_size,
+                                                         dtype=fp8_dtype)
+    input_fp8 = input_fp8.reshape(batch, m, k)
+    scale_src_fp8 = scale_src_fp8.reshape(batch, m, -1)
+    input_fp8_hp = per_token_group_dequant_fp8(
+        input_fp8.reshape(-1, k),
+        scale_src_fp8.reshape(batch * m, -1),
+        group_size,
+        out_dtype).reshape(batch, m, k)
+
+    weight_fp8_list = []
+    weight_scales_kn_list = []
+    weight_deq_list = []
+    for b in range(batch):
+        weight_fp8_b, weight_scales_nk_b = fp8_block_quant_2d(
+            weight[b],
+            group_size,
+            group_size,
+            fp8_dtype=fp8_dtype)
+        weight_fp8_list.append(weight_fp8_b)
+        weight_scales_kn_list.append(
+            weight_scales_nk_b.transpose(0, 1).contiguous())
+        weight_deq_list.append(
+            fp8_block_dequant_2d(
+                weight_fp8_b,
+                weight_scales_nk_b,
+                group_size,
+                group_size,
+                out_dtype))
+
+    weight_fp8 = torch.stack(weight_fp8_list, dim=0)
+    scale_wei_fp8 = torch.stack(weight_scales_kn_list, dim=0)
+    weight_fp8_hp = torch.stack(weight_deq_list, dim=0)
+
+    output_ref = torch.matmul(input_fp8_hp, weight_fp8_hp.transpose(-1, -2))
+
+    weight_fp8 = weight_fp8.transpose(1, 2)
+    if is_nt:
+        weight_fp8 = weight_fp8.contiguous()
+
+    output_fp8 = fp8_bmm(
+        input_fp8,
+        weight_fp8,
+        out_dtype,
+        scale_src_fp8,
+        scale_wei_fp8,
+        torch.Tensor(),
+    )
+
+    torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)
+
+
 @pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
 @pytest.mark.parametrize("out_dtype", OUT_DTYPES)
 @pytest.mark.parametrize("is_nt", [True, False])
 @pytest.mark.parametrize("is_mbk", [True, False])
+@pytest.mark.parametrize("scale_layout", ["flat_1d", "row_2d"])
 @pytest.mark.parametrize("batch", BATCHES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-def test_fp8_gemm_w8a16_per_channel(fp8_dtype, out_dtype, is_nt, is_mbk, batch,
-                                    mnk_factors):
+def test_fp8_gemm_w8a16_per_channel(fp8_dtype, out_dtype, is_nt, is_mbk,
+                                    scale_layout, batch, mnk_factors):
     seed = 1234
     torch.manual_seed(seed)
 
@@ -234,8 +310,10 @@ def test_fp8_gemm_w8a16_per_channel(fp8_dtype, out_dtype, is_nt, is_mbk, batch,
     weight_fp8, scale_wei_fp8 = scaled_fp8_quant(weight,
                                                  use_per_token_if_dynamic=True,
                                                  fp8_dtype=fp8_dtype)
-    # scale_wei_fp8 is [n, 1], flatten to [n] for per-channel scale
-    scale_wei_flat = scale_wei_fp8.flatten()
+    if scale_layout == "flat_1d":
+        scale_wei = scale_wei_fp8.flatten()
+    else:
+        scale_wei = scale_wei_fp8.t().contiguous()
 
     # reference: dequantize weight then fp16/bf16 matmul
     weight_dequant = weight_fp8.to(out_dtype) * scale_wei_fp8.to(out_dtype)
@@ -250,12 +328,18 @@ def test_fp8_gemm_w8a16_per_channel(fp8_dtype, out_dtype, is_nt, is_mbk, batch,
     output_fp8 = fp8_gemm_w8a16(
         input,
         weight_fp8_t,
-        scale_wei_flat,
+        scale_wei,
         torch.Tensor(),
     )
     output_fp8 = output_fp8.transpose(0, 1) if is_mbk else output_fp8
 
-    torch.testing.assert_close(output_fp8, output_ref, atol=5e-2, rtol=5e-2)
+    torch.testing.assert_close(
+        output_fp8,
+        output_ref,
+        atol=5e-2,
+        rtol=5e-2,
+        msg=f"scale_layout={scale_layout}",
+    )
 
 
 def _convert_to_mxfp8_with_hp_ref(t):

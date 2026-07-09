@@ -249,7 +249,6 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
                 n_experts_per_token=topk,
                 activation="silu",
                 num_experts=e,
-                is_fp8=(w_dtype is not None),
             )
 
     output = torch.empty_like(ref_out)
@@ -365,7 +364,6 @@ def test_fused_moe_int4(m, n, k, e, topk, dtype, has_bias):
                 n_experts_per_token=topk,
                 activation="silu",
                 num_experts=e,
-                is_int4=True,
             )
 
     output = torch.empty_like(ref_out)
@@ -468,16 +466,15 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
                             "silu", e)
 
     fused_moe_impl = XpuFusedMoe(
-                w13=w13,
+                w13=w13.view(torch.float4_e2m1fn_x2),
                 w13_scales=w13_scales,
                 w13_bias=w13_bias,
-                w2=w2,
+                w2=w2.view(torch.float4_e2m1fn_x2),
                 w2_scales=w2_scales,
                 w2_bias=w2_bias,
                 n_experts_per_token=topk,
                 activation="silu",
                 num_experts=e,
-                is_mxfp4=True,
             )
 
     output = torch.empty_like(ref_out)
@@ -615,7 +612,6 @@ def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype,
                 num_experts=e,
                 ep_rank=ep_rank,
                 ep_size=ep_size,
-                is_fp8=(w_dtype is not None)
             )
 
     output = torch.empty_like(ref_out)
@@ -744,7 +740,6 @@ def test_fused_moe_int4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
                 num_experts=e,
                 ep_rank=ep_rank,
                 ep_size=ep_size,
-                is_int4=True
             )
 
     output = torch.empty_like(ref_out)
@@ -854,12 +849,12 @@ def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
     expert_end_id = expert_start_id + e
 
     fused_moe_impl = XpuFusedMoe(
-                w13=w13[expert_start_id:expert_end_id],
+                w13=w13[expert_start_id:expert_end_id].view(torch.float4_e2m1fn_x2),
                 w13_scales=w13_scales[expert_start_id:expert_end_id]
                 if w13_scales is not None else None,
                 w13_bias=w13_bias[expert_start_id:expert_end_id]
                 if w13_bias is not None else None,
-                w2=w2[expert_start_id:expert_end_id],
+                w2=w2[expert_start_id:expert_end_id].view(torch.float4_e2m1fn_x2),
                 w2_scales=w2_scales[expert_start_id:expert_end_id]
                 if w2_scales is not None else None,
                 w2_bias=w2_bias[expert_start_id:expert_end_id]
@@ -869,7 +864,6 @@ def test_fused_moe_mxfp4_ep(m, n, k, e, topk, ep_rank, ep_size, dtype,
                 num_experts=e,
                 ep_rank=ep_rank,
                 ep_size=ep_size,
-                is_mxfp4=True
             )
 
     output = torch.empty_like(ref_out)

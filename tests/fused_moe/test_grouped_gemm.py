@@ -128,8 +128,7 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
 
     cutlass_grouped_gemm_xe2(input_A, input_B, None, bias, output,
-                             num_rows_per_expert, n, k, num_experts, False,
-                             False)
+                             num_rows_per_expert, n, k, num_experts)
 
     # ref gg
     ref = []
@@ -198,8 +197,7 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
 
     cutlass_grouped_gemm_xe2(input_A, input_B_fp8, scale_B, bias, output,
-                             num_rows_per_expert, n, k, num_experts, False,
-                             False)
+                             num_rows_per_expert, n, k, num_experts)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -299,7 +297,7 @@ def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
         bias = None
 
     input_B_16 = torch.empty(num_experts, n, k, dtype=dtype, device=DEVICE)
-    input_B_int4 = torch.empty_like(input_B_uint4)
+    input_B_int4 = torch.empty_like(input_B_uint4).to(torch.int8)
     for i in range(num_experts):
         # default zp=8
         input_B_16[i] = dequantize_uint4(input_B_uint4[i], scale_B[i],
@@ -314,8 +312,7 @@ def test_xe_grouped_gemm_int4(m, n, k, e, topk, dtype, has_bias):
 
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
     cutlass_grouped_gemm_xe2(input_A, input_B_int4, scale_B, bias, output,
-                             num_rows_per_expert, n, k, num_experts, True,
-                             False)
+                             num_rows_per_expert, n, k, num_experts)
     # ref gg
     ref = []
     pre_token_sum = 0
@@ -396,7 +393,7 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
                           device=DEVICE).contiguous()
     ref_A = input_A
     # weight
-    input_B_int4 = (torch.randint(0,
+    input_B_mxfp4 = (torch.randint(0,
                                   0xff, [num_experts, n, k // 2],
                                   device=DEVICE)).to(torch.uint8)
     # scale
@@ -412,7 +409,7 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
 
     input_B_16 = torch.empty(num_experts, n, k, dtype=dtype, device=DEVICE)
     for i in range(num_experts):
-        input_B_16[i] = dequantize_mxfp4(input_B_int4[i], scale_B[i],
+        input_B_16[i] = dequantize_mxfp4(input_B_mxfp4[i], scale_B[i],
                                          group_size, dtype)
 
     # output offset
@@ -422,9 +419,9 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
     init_rows_for_experts(m, topk, num_rows_per_expert)
 
     output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
-    cutlass_grouped_gemm_xe2(input_A, input_B_int4, scale_B, bias, output,
-                             num_rows_per_expert, n, k, num_experts, False,
-                             True)
+    input_B_mxfp4 = input_B_mxfp4.view(torch.float4_e2m1fn_x2)
+    cutlass_grouped_gemm_xe2(input_A, input_B_mxfp4, scale_B, bias, output,
+                             num_rows_per_expert, n, k, num_experts)
     # ref gg
     ref = []
     pre_token_sum = 0
