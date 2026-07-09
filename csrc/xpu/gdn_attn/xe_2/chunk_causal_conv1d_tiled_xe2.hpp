@@ -7,7 +7,7 @@
 
 namespace gdn {
 
-static constexpr int conv1d_tile_size = 8;
+static constexpr int conv1d_tile_size = 4;
 
 // SLM-tiled conv1d kernel for XE2 prefill path.
 //
