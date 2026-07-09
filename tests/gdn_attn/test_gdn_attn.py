@@ -935,3 +935,95 @@ def test_gdn_attention_gqa_ratio3_prefill(dtype, reorder_input):
     torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
     torch.testing.assert_close(core_attn_out, ref_core_attn_out, atol=atol,
                                rtol=rtol)
+
+
+# chunk_prepare_kernel v_head_id guard coverage (this PR). chunk_prepare
+# derives v_head_id = total_sg_id / (total_sg_range // num_v_heads); when
+# total_sg_range is not a multiple of num_v_heads the top sub-group(s) reach
+# v_head_id == num_v_heads, which the guard must bound. num_v_heads = 48
+# (Qwen3.6-27B, GQA ratio 3 over num_k_heads = 16) exercises that path: on
+# Battlemage sm_count = 32 sub-slices and sg_range = 32, so total_sg_range =
+# 1024 is not a multiple of 48. The existing tests only cover ratio 2
+# (num_v_heads = 32), which always divides total_sg_range.
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16],
+                         ids=format_tc)
+@torch.inference_mode()
+def test_chunk_prepare_vhead_oob_guard(dtype):
+    device = "xpu"
+    random.seed(0)
+    torch.manual_seed(0)
+
+    num_k_heads, head_k_dim = 16, 128
+    num_v_heads, head_v_dim = 48, 128  # GQA ratio 3, Qwen3.6-27B
+    width, tp_size = 4, 1
+    activation = "silu"
+    num_actual_tokens = 64  # single prefill, spans multiple chunks
+    num_prefills, num_decodes = 1, 0
+    cache_batch_size = 4
+
+    mixed_qkvz_size = num_k_heads * (
+        2 * head_k_dim + 2 * head_v_dim * num_v_heads // num_k_heads)
+    mixed_ba_size = num_k_heads * (2 * num_v_heads // num_k_heads)
+    mixed_qkv_size = num_k_heads * (
+        2 * head_k_dim + head_v_dim * num_v_heads // num_k_heads)
+
+    projected_states_qkvz = torch.randn((num_actual_tokens, mixed_qkvz_size),
+                                        dtype=dtype, device=device)
+    projected_states_ba = torch.randn((num_actual_tokens, mixed_ba_size),
+                                      dtype=dtype, device=device)
+    conv_state = torch.randn((cache_batch_size, width - 1, mixed_qkv_size),
+                             dtype=dtype, device=device)
+    ref_conv_state = conv_state.clone()
+    ssm_state = torch.randn(
+        (cache_batch_size, num_v_heads, head_v_dim, head_k_dim),
+        dtype=dtype, device=device)
+    ref_ssm_state = ssm_state.clone()
+    conv_weights = torch.randn((mixed_qkv_size, width), dtype=dtype,
+                               device=device)
+    conv_bias = torch.randn((mixed_qkv_size), dtype=dtype, device=device)
+    A_log = torch.randn((num_v_heads), dtype=torch.float32, device=device)
+    dt_bias = torch.randn((num_v_heads), dtype=dtype, device=device)
+
+    non_spec_query_start_loc = torch.tensor([0, num_actual_tokens],
+                                            dtype=torch.int32, device=device)
+    has_initial_state = torch.tensor([True], dtype=torch.bool, device=device)
+    non_spec_state_indices_tensor = torch.tensor([0], dtype=torch.int32,
+                                                 device=device)
+
+    core_attn_out = torch.zeros((num_actual_tokens, num_v_heads, head_v_dim),
+                                dtype=dtype, device=device)
+    z = torch.empty_like(core_attn_out)
+
+    torch.ops._xpu_C.gdn_attention(
+        core_attn_out, z, projected_states_qkvz, projected_states_ba,
+        num_k_heads, num_v_heads, head_k_dim, head_v_dim,
+        conv_state=conv_state, ssm_state=ssm_state, conv_weights=conv_weights,
+        conv_bias=conv_bias, activation=activation, A_log=A_log,
+        dt_bias=dt_bias, num_prefills=num_prefills, num_decodes=num_decodes,
+        num_spec_decodes=0, has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_token_indx=None,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        spec_query_start_loc=None, spec_token_indx=None,
+        spec_state_indices_tensor=None, num_accepted_tokens=None,
+        num_actual_tokens=num_actual_tokens, tp_size=tp_size,
+        reorder_input=False)
+
+    ref_core_attn_out = torch.zeros_like(core_attn_out)
+    ref_z = torch.empty_like(core_attn_out)
+    ref_gdn_attention(
+        ref_core_attn_out, ref_z, projected_states_qkvz, projected_states_ba,
+        num_k_heads, num_v_heads, head_k_dim, head_v_dim,
+        conv_state=ref_conv_state, ssm_state=ref_ssm_state,
+        conv_weights=conv_weights, conv_bias=conv_bias, activation=activation,
+        A_log=A_log, dt_bias=dt_bias, num_prefills=num_prefills,
+        num_decodes=num_decodes, has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        num_actual_tokens=num_actual_tokens, tp_size=tp_size,
+        reorder_input=False)
+
+    atol = rtol = 5e-2
+    torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
+    torch.testing.assert_close(core_attn_out, ref_core_attn_out, atol=atol,
+                               rtol=rtol)
