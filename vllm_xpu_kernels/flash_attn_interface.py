@@ -42,8 +42,10 @@ DEFAULT_FA_VERSION = 2
 # The default threshold (16) stays within the measured win region across KV
 # lengths on Xe2 (crossover is ~q_len 32); override it with
 # VLLM_XPU_SPEC_DECODE_MAX_QLEN (set to 0/1 to disable the fast path).
-_SPEC_DECODE_MAX_QLEN = int(
-    os.environ.get("VLLM_XPU_SPEC_DECODE_MAX_QLEN", "16"))
+try:
+    _SPEC_DECODE_MAX_QLEN = int(os.environ.get("VLLM_XPU_SPEC_DECODE_MAX_QLEN", "16"))
+except ValueError:
+    _SPEC_DECODE_MAX_QLEN = 16
 
 
 def _spec_decode_varlen_fwd(
@@ -80,8 +82,7 @@ def _spec_decode_varlen_fwd(
     cu_seqlens_q_spec = torch.arange(total + 1,
                                      dtype=torch.int32,
                                      device=q.device)
-    dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q_spec)
-
+    dummy_cu_seqlens_k = torch.zeros_like(cu_seqlens_q_spec)
     # Causal per-position KV length: query row i*q_len + j (position j within
     # the q_len window of sequence i) attends to seqused_k[i] - (q_len-1-j)
     # tokens.
