@@ -43,7 +43,8 @@ DEFAULT_FA_VERSION = 2
 # lengths on Xe2 (crossover is ~q_len 32); override it with
 # VLLM_XPU_SPEC_DECODE_MAX_QLEN (set to 0/1 to disable the fast path).
 try:
-    _SPEC_DECODE_MAX_QLEN = int(os.environ.get("VLLM_XPU_SPEC_DECODE_MAX_QLEN", "16"))
+    _SPEC_DECODE_MAX_QLEN = int(
+        os.environ.get("VLLM_XPU_SPEC_DECODE_MAX_QLEN", "16"))
 except ValueError:
     _SPEC_DECODE_MAX_QLEN = 16
 
