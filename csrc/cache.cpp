@@ -6,6 +6,7 @@
 #include <string>
 
 #include "dispatch_utils.h"
+#include "quantization/fp8/fp8_quant_asm.h"
 #include "quantization/fp8/quant_utils.h"
 #include "quantization/utils.h"
 #include "utils.h"
@@ -315,11 +316,22 @@ class reshape_and_cache_flash_kernel {
         value_cache_ + block_idx * block_stride_ + block_offset * page_stride_;
 
     constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
+#ifdef VLLM_FP8_QUANT_ASM_ENABLED
+    // The Xe3p fcvt path multiplies, so it needs the inverted scale.
+    float k_scale_val =
+        (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : 1.0f / *k_scale_;
+    float v_scale_val =
+        (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : 1.0f / *v_scale_;
+
+    fp8::CopyWithInvScaleOpAsm<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+    fp8::CopyWithInvScaleOpAsm<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+#else
     float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale_;
     float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale_;
 
     fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
     fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+#endif
     vectorize_with_alignment<VEC_SIZE>(
         key_src, key_dst, n, local_idx, local_range, k_op);
     vectorize_with_alignment<VEC_SIZE>(
