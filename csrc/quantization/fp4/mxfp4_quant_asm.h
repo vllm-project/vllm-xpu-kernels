@@ -12,7 +12,8 @@ namespace mxfp4 {
 
 static constexpr float kMxFp4Max = 6.0f;
 
-#if defined(__SYCL_DEVICE_ONLY__) && defined(VLLM_XPU_ENABLE_XE3)
+#if defined(__SYCL_DEVICE_ONLY__) && defined(VLLM_XPU_ENABLE_XE3) && \
+    !defined(VLLM_MXFP4_QUANT_DISABLE_ASM)
 #define VLLM_MXFP4_QUANT_ASM_ENABLED 1
 #endif
 

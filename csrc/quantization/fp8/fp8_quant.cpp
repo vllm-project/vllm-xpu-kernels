@@ -17,6 +17,7 @@
 #include "quantization/moe_scale_layout.h"
 #include "quantization/mx_quant_utils.h"
 #include "quantization/utils.h"
+#include "quant_ns.h"
 
 namespace vllm {
 
@@ -787,6 +788,8 @@ class dynamic_per_token_scaled_fp8_quant_kernel {
 
 }  // namespace vllm
 
+namespace VLLM_QUANT_NS {
+
 void static_scaled_fp8_quant(
     torch::Tensor& out,          // [..., d]
     torch::Tensor const& input,  // [..., d]
@@ -1458,3 +1461,5 @@ void dynamic_per_token_scaled_fp8_quant(
             });
       });
 }
+
+}  // namespace VLLM_QUANT_NS

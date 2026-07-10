@@ -14,6 +14,7 @@
 #include "quantization/swiglu_limit.h"
 
 #include "quantization/fp4/mxfp4_quant.h"
+#include "quant_ns.h"
 
 // per_token_group_quant_mxfp4
 //
@@ -138,6 +139,8 @@ void launch_mxfp4_half_quant(
 }
 
 }  // namespace
+
+namespace VLLM_QUANT_NS {
 
 void per_token_group_quant_mxfp4(
     const torch::Tensor& input,
@@ -441,6 +444,11 @@ void per_token_group_quant_mxfp4(
       });
 }
 
+}  // namespace VLLM_QUANT_NS
+
+// No asm path yet: compiled only into _C.
+#ifndef VLLM_QUANT_ASM_BUILD
+
 // silu_and_mul_per_token_group_quant_mxfp4
 //
 // Same as per_token_group_quant_mxfp4, but the input holds the gate and up
@@ -610,3 +618,5 @@ void silu_and_mul_per_token_group_quant_mxfp4(
         }
       });
 }
+
+#endif  // VLLM_QUANT_ASM_BUILD
