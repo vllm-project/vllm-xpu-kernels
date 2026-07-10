@@ -606,6 +606,39 @@ struct causal_conv1d_spec_kernel {
   }
   static inline void act_silu(float& x) { act_swish(x, 1.0f); }
 
+  // Store `elems_per_item` contiguous T values as a single vector message
+  // instead of per-element 16-bit stores.
+  static inline void store_vec(T* ptr, const float (&v)[elems_per_item]) {
+    using vec_t = vllm::xpu::aligned_vec<T, elems_per_item>;
+    vec_t out;
+#pragma unroll
+    for (int e = 0; e < elems_per_item; ++e) {
+      out[e] = static_cast<T>(v[e]);
+    }
+    *reinterpret_cast<vec_t*>(ptr) = out;
+  }
+
+  // Same as above but source is a contiguous T buffer.
+  static inline void store_vec_t(T* ptr, const T (&src)[elems_per_item]) {
+    using vec_t = vllm::xpu::aligned_vec<T, elems_per_item>;
+    vec_t out;
+#pragma unroll
+    for (int e = 0; e < elems_per_item; ++e) {
+      out[e] = src[e];
+    }
+    *reinterpret_cast<vec_t*>(ptr) = out;
+  }
+
+  // Load `elems_per_item` contiguous T values as a single vector message.
+  static inline void load_vec(const T* ptr, T (&dst)[elems_per_item]) {
+    using vec_t = vllm::xpu::aligned_vec<T, elems_per_item>;
+    vec_t in = *reinterpret_cast<const vec_t*>(ptr);
+#pragma unroll
+    for (int e = 0; e < elems_per_item; ++e) {
+      dst[e] = in[e];
+    }
+  }
+
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<2> item) const {
     const int batch_id = item.get_group(0);
@@ -704,11 +737,9 @@ struct causal_conv1d_spec_kernel {
       for (int t_local = 0; t_local < num_spec_tokens; ++t_local) {
         const int token_id_local = batch_id * num_spec_tokens + t_local;
         const int global_t = token_indx[token_id_local];
-#pragma unroll
-        for (int e = 0; e < elems_per_item; ++e) {
-          z_out[global_t * num_k_heads * z_dim + z_elems_id + e] =
-              mixed_qkvz[global_t * qkvz_elems + mixed_qkvz_id + e];
-        }
+        T z_tmp[elems_per_item];
+        load_vec(&mixed_qkvz[global_t * qkvz_elems + mixed_qkvz_id], z_tmp);
+        store_vec_t(&z_out[global_t * num_k_heads * z_dim + z_elems_id], z_tmp);
       }
       return;
     }
@@ -752,10 +783,13 @@ struct causal_conv1d_spec_kernel {
     if (Width > 1 && has_conv_state) {
 #pragma unroll
       for (int i = 0; i < Width - 1; ++i) {
+        T tmp[elems_per_item];
+        load_vec(
+            &state_line_ptr[(init_row + i) * conv_elems + reordered_elems_id],
+            tmp);
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          local_input[Width * e + i] = state_line_ptr
-              [(init_row + i) * conv_elems + reordered_elems_id + e];
+          local_input[Width * e + i] = tmp[e];
         }
       }
     }
@@ -775,10 +809,11 @@ struct causal_conv1d_spec_kernel {
         }
       }
       // Load new input at the trailing slot.
+      T in_tmp[elems_per_item];
+      load_vec(&mixed_qkvz[global_t * qkvz_elems + mixed_qkvz_id], in_tmp);
 #pragma unroll
       for (int e = 0; e < elems_per_item; ++e) {
-        local_input[Width * e + Width - 1] =
-            mixed_qkvz[global_t * qkvz_elems + mixed_qkvz_id + e];
+        local_input[Width * e + Width - 1] = in_tmp[e];
       }
 
       float res[elems_per_item];
@@ -814,26 +849,23 @@ struct causal_conv1d_spec_kernel {
 
       // Write to LOCAL q/k/v at token_id_local.
       if (is_q) {
-#pragma unroll
-        for (int e = 0; e < elems_per_item; ++e) {
-          q_out
-              [token_id_local * num_k_heads * q_dim + k_heads_id * q_dim +
-               qkvz_dim_id + e] = res[e];
-        }
+        store_vec(
+            &q_out
+                [token_id_local * num_k_heads * q_dim + k_heads_id * q_dim +
+                 qkvz_dim_id],
+            res);
       } else if (is_k) {
-#pragma unroll
-        for (int e = 0; e < elems_per_item; ++e) {
-          k_out
-              [token_id_local * num_k_heads * k_dim + k_heads_id * k_dim +
-               qkvz_dim_id - q_dim + e] = res[e];
-        }
+        store_vec(
+            &k_out
+                [token_id_local * num_k_heads * k_dim + k_heads_id * k_dim +
+                 qkvz_dim_id - q_dim],
+            res);
       } else {  // is_v
-#pragma unroll
-        for (int e = 0; e < elems_per_item; ++e) {
-          v_out
-              [token_id_local * num_k_heads * v_dim + k_heads_id * v_dim +
-               qkvz_dim_id - (q_dim + k_dim) + e] = res[e];
-        }
+        store_vec(
+            &v_out
+                [token_id_local * num_k_heads * v_dim + k_heads_id * v_dim +
+                 qkvz_dim_id - (q_dim + k_dim)],
+            res);
       }
     }
 
@@ -845,20 +877,19 @@ struct causal_conv1d_spec_kernel {
       for (int j = 0; j < state_len; ++j) {
         if (j < hist_rows) {
           const int src_row = init_row + 1 + j;
-#pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            state_line_ptr[j * conv_elems + reordered_elems_id + e] =
-                state_line_ptr[src_row * conv_elems + reordered_elems_id + e];
-          }
+          T tmp[elems_per_item];
+          load_vec(
+              &state_line_ptr[src_row * conv_elems + reordered_elems_id], tmp);
+          store_vec_t(
+              &state_line_ptr[j * conv_elems + reordered_elems_id], tmp);
         } else {
           const int draft_t = j - hist_rows;
           const int token_id_local = batch_id * num_spec_tokens + draft_t;
           const int global_t = token_indx[token_id_local];
-#pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            state_line_ptr[j * conv_elems + reordered_elems_id + e] =
-                mixed_qkvz[global_t * qkvz_elems + mixed_qkvz_id + e];
-          }
+          T tmp[elems_per_item];
+          load_vec(&mixed_qkvz[global_t * qkvz_elems + mixed_qkvz_id], tmp);
+          store_vec_t(
+              &state_line_ptr[j * conv_elems + reordered_elems_id], tmp);
         }
       }
     }
