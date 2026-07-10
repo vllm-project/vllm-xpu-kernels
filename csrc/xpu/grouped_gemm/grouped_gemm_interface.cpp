@@ -23,7 +23,7 @@ torch::Tensor cutlass_grouped_gemm_interface(
   const auto B_dtype = ptr_B.dtype();
   const bool is_B_fp8block =
       (B_dtype == at::kFloat8_e4m3fn || B_dtype == at::kFloat8_e5m2) &&
-      ptr_scales.has_value() && ptr_scales->dim() == 3;
+      ptr_B_scale.has_value() && ptr_B_scale->dim() == 3;
   if (vllm::xpu::force_xe_default_kernel()) {
 #ifdef VLLM_XPU_ENABLE_XE_DEFAULT
     TORCH_CHECK(
