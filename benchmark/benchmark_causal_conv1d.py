@@ -21,6 +21,7 @@ Output format matches benchmark_gdn_attn.py
 """
 # isort: off
 import gc
+import time
 
 import torch
 import triton
@@ -155,19 +156,37 @@ def benchmark_causal_conv1d(shape_name, workload_name, dtype_str, provider,
             tp_size=kwargs["tp_size"],
             reorder_input=kwargs["reorder_input"])
 
-    # warmup
-    for _ in range(5):
+    # cooldown: return the GPU to a consistent idle baseline so DVFS/thermal
+    # state left by the previous config does not bleed into this measurement.
+    torch.xpu.synchronize()
+    time.sleep(0.02)
+
+    # warmup: run for at least ~50ms (and >=5 iters) so tiny ops reach their
+    # own steady-state clock, independent of the preceding workload.
+    _t0 = time.perf_counter()
+    _n = 0
+    while _n < 5 or (time.perf_counter() - _t0) < 0.05:
         _run()
+        _n += 1
     torch.xpu.synchronize()
 
-    start_event = torch.xpu.Event(enable_timing=True)
-    end_event = torch.xpu.Event(enable_timing=True)
-    start_event.record()
-    for _ in range(5, iterations):
-        _run()
-    end_event.record()
-    torch.xpu.synchronize()
-    ms = start_event.elapsed_time(end_event) / (iterations - 5)
+    # Robust timing: take the MIN over several batched sub-measurements.
+    # For launch-bound (~us) ops the mean is skewed by occasional OS/DVFS
+    # jitter, producing phantom run-to-run regressions; the min tracks the
+    # true steady-state floor and is stable to <1%.
+    n_timed = max(iterations - 5, 1)
+    n_rep = 8
+    per_rep = max(n_timed // n_rep, 1)
+    ms = float("inf")
+    for _ in range(n_rep):
+        start_event = torch.xpu.Event(enable_timing=True)
+        end_event = torch.xpu.Event(enable_timing=True)
+        start_event.record()
+        for _ in range(per_rep):
+            _run()
+        end_event.record()
+        torch.xpu.synchronize()
+        ms = min(ms, start_event.elapsed_time(end_event) / per_rep)
 
     if provider == "conv1d":
         clear_xpu_cache()
