@@ -290,11 +290,12 @@ class FMHAFwdEpilogue {
         }
 
         rA_max = rA_kmax[0];
-        for (int kr = 1; kr < ReduceK{}; kr++)
+        for (int kr = 1; kr < ReduceK{}; kr++) {
           CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < rA_max.size(); ++i)
-          rA_max(i) = (rA_max(i) < rA_kmax[kr](i)) ? rA_kmax[kr](i) : rA_max(i);
-
+          for (int i = 0; i < rA_max.size(); ++i)
+            rA_max(i) =
+                (rA_max(i) < rA_kmax[kr](i)) ? rA_kmax[kr](i) : rA_max(i);
+        }
         /* Calculate scale factors for aligning per-block maxima. */
         for (int kr = 0; kr < ReduceK{}; kr++) {
           CUTLASS_PRAGMA_UNROLL
@@ -673,10 +674,12 @@ class DecodeFwdEpilogue {
         }
 
         rA_max = rA_kmax[0];
-        for (int kr = 1; kr < ReduceK{}; kr++)
+        for (int kr = 1; kr < ReduceK{}; kr++) {
           CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < rA_max.size(); ++i)
-          rA_max(i) = (rA_max(i) < rA_kmax[kr](i)) ? rA_kmax[kr](i) : rA_max(i);
+          for (int i = 0; i < rA_max.size(); ++i)
+            rA_max(i) =
+                (rA_max(i) < rA_kmax[kr](i)) ? rA_kmax[kr](i) : rA_max(i);
+        }
 
         /* Calculate scale factors for aligning per-block maxima. */
         for (int kr = 0; kr < ReduceK{}; kr++) {
