@@ -658,7 +658,8 @@ function(add_xe3_kernel_library LIBRARY_NAME)
     PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC -Wno-c++20-extensions
             -Wno-intel-compat -Wno-pragma-once-outside-header)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE -DSYCL_INTEL_TARGET=35)
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DVLLM_GRF_SIZE=512)
+  # FIXME: switch to GRF 512 after oneapi 2026.1
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DVLLM_GRF_SIZE=256)
   target_include_directories(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_INCLUDE_DIRS})
 
   # Link torch libraries
