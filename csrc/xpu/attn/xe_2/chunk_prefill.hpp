@@ -19,7 +19,7 @@
 #include "collective/chunk_prefill_epilogue.hpp"
 #include "kernel/chunk_prefill_kernel.hpp"
 
-#include "fmha_utils.hpp"
+#include "csrc/xpu/attn/fmha_utils.hpp"
 
 using namespace cute;
 
