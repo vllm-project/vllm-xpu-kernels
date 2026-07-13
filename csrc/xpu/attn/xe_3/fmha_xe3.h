@@ -1,15 +1,11 @@
 #include <torch/all.h>
 
-void cutlass_paged_decode_xe3(
+void cutlass_chunk_prefill_xe3(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]
     const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
-    at::Tensor&
-        temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
-    at::Tensor& exp_sums,    // [batch, num_head_q, seq_q, num_kv_splits]
-    at::Tensor& max_logits,  // [batch, num_head_q, seq_q, num_kv_splits]
     const at::Tensor& block_table,
     const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k,
@@ -26,5 +22,5 @@ void cutlass_paged_decode_xe3(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    int num_kv_splits,
+    std::optional<at::Tensor>& softmax_lse,
     std::optional<const at::Tensor>& is_prefill);

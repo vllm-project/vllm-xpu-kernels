@@ -1,6 +1,7 @@
 #include "paged_decode_xe3.h"
 #include "csrc/xpu/attn/xe_2/paged_decode_utils.hpp"
 #include "csrc/xpu/attn/xe_2/paged_decode_extern.hpp"
+#include "csrc/xpu/attn/paged_kv_utils.h"
 
 using namespace cute;
 
@@ -30,7 +31,10 @@ void cutlass_paged_decode_xe3(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    int num_kv_splits) {
+    int num_kv_splits,
+    std::optional<const at::Tensor>& is_prefill) {
+  std::optional<at::Tensor> splits_per_seq_empty;
+  std::optional<at::Tensor> work_list_empty;
   cutlass_paged_decode_impl(
       queue,
       query,
@@ -56,7 +60,10 @@ void cutlass_paged_decode_xe3(
       is_causal,
       is_local,
       is_sink,
-      num_kv_splits);
+      num_kv_splits,
+      is_prefill,
+      splits_per_seq_empty,
+      work_list_empty);
 }
 
 void cutlass_paged_decode_impl(
@@ -85,7 +92,10 @@ void cutlass_paged_decode_impl(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    int num_kv_splits) {
+    int num_kv_splits,
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<at::Tensor>& splits_per_seq,
+    std::optional<at::Tensor>& work_list) {
   bool is_fp8_kv = key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
                    key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn;
   if (is_fp8_kv) {
@@ -134,6 +144,12 @@ void cutlass_paged_decode_impl(
         window_size_right == -1 ? max_seqlen_k : window_size_right;
   }
 
+  int page_stride_elements = 0;
+  if (is_paged) {
+    page_stride_elements =
+        static_cast<int>(get_paged_kv_cache_page_stride_elements(key_cache));
+  }
+
   paged_decode_args_t args = {
       query.data_ptr(),
       key_cache.data_ptr(),
@@ -167,19 +183,39 @@ void cutlass_paged_decode_impl(
       is_causal,
       is_local,
       is_sink,
-      false,  // is_interleaved_kv_cache
       num_kv_splits,
+      nullptr,  // splits_per_seq
+      nullptr,  // work_list
+      0,        // total_wgs
       // KV cache strides
       key_cache.stride(0),
       key_cache.stride(1),
       key_cache.stride(2),
       value_cache.stride(0),
       value_cache.stride(1),
-      value_cache.stride(2)};
+      value_cache.stride(2),
+      is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr,
+      // Q strides
+      is_varlen ? query.stride(0) : query.stride(2),
+      is_varlen ? query.stride(1) : query.stride(1),
+      is_varlen ? int64_t{0} : query.stride(0),
+      page_stride_elements};
+
+  // For non-contiguous paged KV (e.g., cross-layer KV cache), enlarge
+  // total_seqlen_k to cover the full physical extent for the 2D block
+  // load surface descriptor. Without this, block loads for blocks at
+  // higher physical addresses would return zeros.
+  if (is_paged) {
+    int64_t effective_total =
+        get_paged_kv_cache_effective_total_seqlen(key_cache);
+    if (effective_total > args.total_seqlen_k) {
+      args.total_seqlen_k = static_cast<int>(effective_total);
+    }
+  }
 
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
 
-  static constexpr int max_head_size = 256;
+  static constexpr int max_head_size = 576;
   TORCH_CHECK(
       head_size <= max_head_size,
       "FMHA forward only supports head dimension at most " +
@@ -191,6 +227,8 @@ void cutlass_paged_decode_impl(
     if (head_size <= HEAD_SIZE_LIMIT_2) return 2;
     if (head_size <= HEAD_SIZE_LIMIT_3) return 3;
     if (head_size <= HEAD_SIZE_LIMIT_4) return 4;
+    if (head_size <= HEAD_SIZE_LIMIT_5) return 5;
+    if (head_size <= HEAD_SIZE_LIMIT_6) return 6;
     return -1;
   };
 
