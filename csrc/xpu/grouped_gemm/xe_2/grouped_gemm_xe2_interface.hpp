@@ -302,12 +302,39 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
   } else if (is_weight_fp8) {
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
     TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");
-    TORCH_CHECK(
-        ptr_scales->dim() == 1, "ptr_scales of fp8 must be 1D [num_experts]");
-    TORCH_CHECK(
-        ptr_scales->size(0) == num_experts,
-        "ptr_scales.size(0) of fp8 must match num_experts");
     TORCH_CHECK(ptr_scales->dtype() == at::kFloat, "ptr_scales must be float");
+    if (ptr_scales->dim() == 3) {
+      // Block FP8 scales: [num_experts, K//group_size, N//group_size]
+      TORCH_CHECK(
+          ptr_scales->size(0) == num_experts,
+          "ptr_scales.size(0) of block fp8 must match num_experts");
+      int group_num_k = ptr_scales->size(1);
+      int group_num_n = ptr_scales->size(2);
+      TORCH_CHECK(
+          K % group_num_k == 0,
+          "K must be divisible by group_num_k");
+      TORCH_CHECK(
+          N % group_num_n == 0,
+          "N must be divisible by group_num_n");
+      int group_size_k = K / group_num_k;
+      int group_size_n = N / group_num_n;
+      TORCH_CHECK(
+          group_size_k == group_size_n,
+          "block quantization must be square (group_size_k == group_size_n)");
+      group_size = group_size_k;
+      TORCH_CHECK(
+          group_size == 32 || group_size == 64 || group_size == 128 ||
+              group_size == 256,
+          "group_size must be 32, 64, 128 or 256");
+    } else {
+      // Per-tensor FP8 scales: [num_experts]
+      TORCH_CHECK(
+          ptr_scales->dim() == 1,
+          "ptr_scales of fp8 must be 1D [num_experts] or 3D [num_experts, K//gs, N//gs]");
+      TORCH_CHECK(
+          ptr_scales->size(0) == num_experts,
+          "ptr_scales.size(0) of fp8 must match num_experts");
+    }
 
 #define W8A16LauncherCallER(policy)                                         \
   if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {              \
