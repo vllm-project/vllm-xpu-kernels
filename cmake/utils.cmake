@@ -584,7 +584,10 @@ function(add_xe2_kernel_library LIBRARY_NAME)
   target_compile_options(${LIBRARY_NAME}
                          PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC)
   target_compile_definitions(${LIBRARY_NAME} PRIVATE -DVLLM_XPU_ENABLE_XE2)
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DSYCL_INTEL_TARGET=20)
+  # SYCL_INTEL_TARGET is defined without a value (= 1) as a presence trigger.
+  # cutlass/cutlass.h undef's it and re-derives the numeric version (20 for
+  # non-CRI targets, 35 for CRI) via __SYCL_TARGET_INTEL_GPU_CRI__.
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE SYCL_INTEL_TARGET)
   target_include_directories(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_INCLUDE_DIRS})
 
   # Link torch libraries
@@ -657,7 +660,11 @@ function(add_xe3_kernel_library LIBRARY_NAME)
     ${LIBRARY_NAME}
     PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC -Wno-c++20-extensions
             -Wno-intel-compat -Wno-pragma-once-outside-header)
-  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DSYCL_INTEL_TARGET=35)
+  # SYCL_INTEL_TARGET is defined without a value (= 1) as a presence trigger.
+  # __SYCL_TARGET_INTEL_GPU_CRI__ (= 1) tells cutlass/cutlass.h to derive
+  # SYCL_INTEL_TARGET = 35, matching the sycl-tla FindDPCPP.cmake convention.
+  target_compile_definitions(
+    ${LIBRARY_NAME} PRIVATE SYCL_INTEL_TARGET __SYCL_TARGET_INTEL_GPU_CRI__)
   # FIXME: switch to GRF 512 after oneapi 2026.1
   target_compile_definitions(${LIBRARY_NAME} PRIVATE -DVLLM_GRF_SIZE=256)
   target_include_directories(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_INCLUDE_DIRS})

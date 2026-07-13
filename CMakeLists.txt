@@ -60,7 +60,7 @@ set(ONEDNN_GIT_TAG
     CACHE STRING "oneDNN git commit hash or tag")
 # ARCHITECTURE OPTIONS
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
-option(VLLM_XPU_ENABLE_XE3P "Enable XE3P architecture kernels" OFF)
+option(VLLM_XPU_ENABLE_XE3P "Enable XE3P architecture kernels" ON)
 option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
 
 # KERNEL OPTIONS — each controls whether the corresponding Python extension is
