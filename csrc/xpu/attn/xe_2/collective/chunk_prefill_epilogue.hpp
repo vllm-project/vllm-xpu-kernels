@@ -291,14 +291,15 @@ class FMHAFwdEpilogue {
 
         rA_max = rA_kmax[0];
         for (int kr = 1; kr < ReduceK{}; kr++)
-          cute::transform(rA_max, rA_kmax[kr], rA_max, cute::max_fn{});
+          CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < rA_max.size(); ++i)
+          rA_max(i) = (rA_max(i) < rA_kmax[kr](i)) ? rA_kmax[kr](i) : rA_max(i);
 
         /* Calculate scale factors for aligning per-block maxima. */
         for (int kr = 0; kr < ReduceK{}; kr++) {
-          cute::transform(
-              rA_max, rA_kmax[kr], rA_kmax[kr], [](auto gmax, auto kmax) {
-                return sycl::native::exp2(kmax - gmax);
-              });
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < rA_max.size(); ++i)
+            rA_kmax[kr](i) = sycl::native::exp2(rA_kmax[kr](i) - rA_max(i));
         }
       }
 
@@ -673,14 +674,15 @@ class DecodeFwdEpilogue {
 
         rA_max = rA_kmax[0];
         for (int kr = 1; kr < ReduceK{}; kr++)
-          cute::transform(rA_max, rA_kmax[kr], rA_max, cute::max_fn{});
+          CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < rA_max.size(); ++i)
+          rA_max(i) = (rA_max(i) < rA_kmax[kr](i)) ? rA_kmax[kr](i) : rA_max(i);
 
         /* Calculate scale factors for aligning per-block maxima. */
         for (int kr = 0; kr < ReduceK{}; kr++) {
-          cute::transform(
-              rA_max, rA_kmax[kr], rA_kmax[kr], [](auto gmax, auto kmax) {
-                return sycl::native::exp2(kmax - gmax);
-              });
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < rA_max.size(); ++i)
+            rA_kmax[kr](i) = sycl::native::exp2(rA_kmax[kr](i) - rA_max(i));
         }
       }
 
