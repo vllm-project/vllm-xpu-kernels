@@ -85,10 +85,10 @@ static inline bool is_xe3_arch(at::DeviceIndex device_index = -1) {
          arch == syclex::architecture::intel_gpu_wcl;
 }
 
-#ifdef VLLM_XPU_ENABLE_XE3
+#ifdef VLLM_XPU_ENABLE_XE3P
 static inline bool is_xe3p_arch(at::DeviceIndex device_index = -1) {
   auto arch = get_device_architecture(device_index);
-  return arch == syclex::architecture::intel_gpu_nvl_s;
+  return arch == syclex::architecture::intel_gpu_nvl_p;
 }
 #endif
 

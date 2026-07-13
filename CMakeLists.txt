@@ -60,7 +60,7 @@ set(ONEDNN_GIT_TAG
     CACHE STRING "oneDNN git commit hash or tag")
 # ARCHITECTURE OPTIONS
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
-option(VLLM_XPU_ENABLE_XE3 "Enable XE3 architecture kernels" OFF)
+option(VLLM_XPU_ENABLE_XE3P "Enable XE3 architecture kernels" ON)
 option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
 
 # KERNEL OPTIONS — each controls whether the corresponding Python extension is
@@ -138,7 +138,7 @@ message(STATUS "  ONEDNN_GIT_REPO              = ${ONEDNN_GIT_REPO}")
 message(STATUS "  ONEDNN_GIT_TAG               = ${ONEDNN_GIT_TAG}")
 message(STATUS "  BUILD_SYCL_TLA_KERNELS       = ${BUILD_SYCL_TLA_KERNELS}")
 message(STATUS "  VLLM_XPU_ENABLE_XE2          = ${VLLM_XPU_ENABLE_XE2}")
-message(STATUS "  VLLM_XPU_ENABLE_XE3          = ${VLLM_XPU_ENABLE_XE3}")
+message(STATUS "  VLLM_XPU_ENABLE_XE3P          = ${VLLM_XPU_ENABLE_XE3P}")
 message(STATUS "  VLLM_XPU_ENABLE_XE_DEFAULT   = ${VLLM_XPU_ENABLE_XE_DEFAULT}")
 message(STATUS "  BASIC_KERNELS_ENABLED        = ${BASIC_KERNELS_ENABLED}")
 message(STATUS "  FA2_KERNELS_ENABLED          = ${FA2_KERNELS_ENABLED}")
@@ -249,9 +249,9 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # VLLM_XPU_AOT_DEVICES and VLLM_XPU_XE2_AOT_DEVICES Example: export
   # VLLM_XPU_AOT_DEVICES="pvc,bmg-g21-a0" export
   # VLLM_XPU_XE2_AOT_DEVICES="pvc,bmg-g31-a0"
-  set(AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0,xe3p,nvl-s")
+  set(AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0,xe3p")
   set(XE2_AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
-  set(XE3_AOT_DEVICES "xe3p,nvl-s")
+  set(XE3_AOT_DEVICES "xe3p")
 
   # Allow overriding via env, including explicitly disabling AOT by setting an
   # empty env var (e.g. export VLLM_XPU_AOT_DEVICES="").
@@ -446,13 +446,13 @@ if(BUILD_SYCL_TLA_KERNELS)
     endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
-  if(VLLM_XPU_ENABLE_XE3)
+  if(VLLM_XPU_ENABLE_XE3P)
     message("BUILDING XE3 ATTN!!!!!!")
     # add_subdirectory(csrc/xpu/grouped_gemm/xe_3)
     add_subdirectory(csrc/xpu/attn/xe_3)
     # list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_3")
     list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels_xe_3")
-    list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE3)
+    list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE3P)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
 
