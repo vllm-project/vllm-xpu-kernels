@@ -60,7 +60,7 @@ set(ONEDNN_GIT_TAG
     CACHE STRING "oneDNN git commit hash or tag")
 # ARCHITECTURE OPTIONS
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
-option(VLLM_XPU_ENABLE_XE3P "Enable XE3 architecture kernels" ON)
+option(VLLM_XPU_ENABLE_XE3P "Enable XE3P architecture kernels" ON)
 option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
 
 # KERNEL OPTIONS — each controls whether the corresponding Python extension is
@@ -249,9 +249,9 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # VLLM_XPU_AOT_DEVICES and VLLM_XPU_XE2_AOT_DEVICES Example: export
   # VLLM_XPU_AOT_DEVICES="pvc,bmg-g21-a0" export
   # VLLM_XPU_XE2_AOT_DEVICES="pvc,bmg-g31-a0"
-  set(AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0,xe3p")
+  set(AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0,cri")
   set(XE2_AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
-  set(XE3_AOT_DEVICES "xe3p")
+  set(XE3_AOT_DEVICES "cri")
 
   # Allow overriding via env, including explicitly disabling AOT by setting an
   # empty env var (e.g. export VLLM_XPU_AOT_DEVICES="").
@@ -447,7 +447,6 @@ if(BUILD_SYCL_TLA_KERNELS)
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
   if(VLLM_XPU_ENABLE_XE3P)
-    message("BUILDING XE3 ATTN!!!!!!")
     # add_subdirectory(csrc/xpu/grouped_gemm/xe_3)
     add_subdirectory(csrc/xpu/attn/xe_3)
     # list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_3")
