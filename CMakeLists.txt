@@ -326,7 +326,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages
   # when building.
   set(CUTLASS_REVISION
-      "cd763790ad2f74d7294435ecf77682bac0062c3a"
+      "d54352dffe8daab532abd88fc6ab0e9c9fbc6d62"
       CACHE STRING "CUTLASS revision to use")
 
   if(DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
