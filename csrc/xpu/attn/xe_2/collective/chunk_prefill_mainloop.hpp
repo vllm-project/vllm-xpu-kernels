@@ -254,7 +254,7 @@ struct FMHAFwdMainloop<
     return block_idx * page_stride_tiles + K % tiles_per_page;
   }
 
-  template <typename QVCoord>
+  template <bool has_large_surface, typename QVCoord>
   CUTLASS_DEVICE void operator()(
       TensorQ2D const& Q_2D,  // (q,d)
       TensorK2D const& K_2D,  // (k,d)
@@ -294,6 +294,104 @@ struct FMHAFwdMainloop<
     Tensor cV = make_identity_tensor(V_2D.shape());               // (v,k)
     Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));  // (q,k)
 
+    auto K_2D_0 = K_2D;
+    auto V_2D_0 = V_2D;
+
+    // --- Xe 2D-block surface-height split
+    // ------------------------------------- The Xe LSC 2D block-load descriptor
+    // stores the surface height in a 24-bit field, so a (rank-2) K/V surface
+    // can address at most 2^24 rows. A paged KV cache may span many more rows
+    // (total_seqlen_kv = num_blocks * page_stride_elements), which overflows
+    // that field and makes the hardware wrap addresses. To keep the original
+    // rank-2 load/prefetch logic we split the K and V surfaces into
+    // page-aligned sub-surfaces, each at most 2^24 rows tall, and route every
+    // physical tile to the surface that physically contains it.
+
+    // The split state and the two `make_*_surface` lambdas are declared here at
+    // function scope (rather than inside the `if constexpr` below) so that the
+    // per-tile routing inside the K loop can reuse them. They are only ever
+    // exercised when `has_large_surface` is true; otherwise they stay unused.
+    [[maybe_unused]] int tiles_per_surface = 0x3fffffff;
+    [[maybe_unused]] int rows_per_surface = 0;
+    [[maybe_unused]] int k_rows_total = get<0>(K_2D.shape());
+    [[maybe_unused]] int v_cols_total = get<1>(V_2D.shape());
+    [[maybe_unused]] int64_t k_surf_shift = 0;
+    [[maybe_unused]] int64_t v_surf_shift = 0;
+    [[maybe_unused]] int k_pre_surf = -1;
+
+    // Lazily materialize an arbitrary overflow sub-surface `surf` (>= 1). The
+    // base is shifted by `surf` full surfaces and the height/width is the real
+    // remaining extent of that surface, so the 2D block load never reads past
+    // the cache. These are only ever built inside the K loop's cold branch, so
+    // supporting any number of sub-surfaces adds at most one live descriptor
+    // and the common path keeps its original register/descriptor footprint.
+    [[maybe_unused]] auto make_k_surface = [&](int surf) {
+      int64_t rem = int64_t(k_rows_total) - int64_t(surf) * rows_per_surface;
+      int rows = rem > rows_per_surface ? rows_per_surface : int(rem);
+      if (rows < 1) {
+        rows = 1;
+      }
+      return make_tensor(
+          K_2D.data() + int64_t(surf) * k_surf_shift,
+          make_layout(make_shape(rows, get<1>(K_2D.shape())), K_2D.stride()));
+    };
+    [[maybe_unused]] auto make_v_surface = [&](int surf) {
+      int64_t rem = int64_t(v_cols_total) - int64_t(surf) * rows_per_surface;
+      int cols = rem > rows_per_surface ? rows_per_surface : int(rem);
+      if (cols < 1) {
+        cols = 1;
+      }
+      return make_tensor(
+          V_2D.data() + int64_t(surf) * v_surf_shift,
+          make_layout(make_shape(get<0>(V_2D.shape()), cols), V_2D.stride()));
+    };
+
+    if constexpr (has_large_surface) {
+      constexpr int kXeMaxSurfaceRows = 1 << 24;
+      if constexpr (PagedKV) {
+        int page_stride_tiles = params.page_stride_elements / tile_k;
+        int blocks_per_surface =
+            kXeMaxSurfaceRows / params.page_stride_elements;
+        if (blocks_per_surface < 1) {
+          blocks_per_surface = 1;
+        }
+        tiles_per_surface = blocks_per_surface * page_stride_tiles;
+        rows_per_surface = tiles_per_surface * tile_k;
+      }
+
+      // Build the (rank-2) K/V surface 0. Surface 0 keeps the original base
+      // pointer and is the only surface addressed on the hot path; overflow
+      // surfaces are materialized lazily (see make_k_surface/make_v_surface).
+      int k_rows0, v_cols0;
+      if constexpr (PagedKV) {
+        k_rows0 =
+            k_rows_total < rows_per_surface ? k_rows_total : rows_per_surface;
+        k_surf_shift = int64_t(rows_per_surface) * get<0>(K_2D.stride());
+        v_cols0 =
+            v_cols_total < rows_per_surface ? v_cols_total : rows_per_surface;
+        v_surf_shift = int64_t(rows_per_surface) * get<1>(V_2D.stride());
+      } else {
+        k_rows0 = k_rows_total;
+        v_cols0 = v_cols_total;
+      }
+
+      K_2D_0 = make_tensor(
+          K_2D.data(),
+          make_layout(
+              make_shape(k_rows0, get<1>(K_2D.shape())), K_2D.stride()));
+      V_2D_0 = make_tensor(
+          V_2D.data(),
+          make_layout(
+              make_shape(get<0>(V_2D.shape()), v_cols0), V_2D.stride()));
+
+      cK = make_identity_tensor(make_shape(
+          PagedKV ? rows_per_surface : k_rows_total,
+          get<1>(K_2D.shape())));  // (k,d)
+      cV = make_identity_tensor(make_shape(
+          get<0>(V_2D.shape()),
+          PagedKV ? rows_per_surface : v_cols_total));  // (v,k)
+    }
+
     /* Partition global tensors into workgroup tiles */
     Tensor gQ = local_tile(
         cQ, TileShapeQK{}, append(blk_qv, _), Step<_1, X, _1>{});  // (q,d,D)
@@ -312,8 +410,8 @@ struct FMHAFwdMainloop<
 
     /* Create global -> register copies */
     TiledCopyQ copy_q{Q_2D};
-    TiledCopyK copy_k{K_2D};
-    TiledCopyV copy_v{V_2D};
+    TiledCopyK copy_k{K_2D_0};
+    TiledCopyV copy_v{V_2D_0};
 
     /* Create MMAs */
     TiledMMAQK mma_qk{};
@@ -367,6 +465,55 @@ struct FMHAFwdMainloop<
     CUTLASS_PRAGMA_UNROLL
     for (int D = 0; D < size<3>(pQgQ); D++) {
       prefetch(prefetch_q, pQgQ(_, _, _, D));
+    }
+
+    [[maybe_unused]] auto update_surface_info = [&](int next_page_idx) {
+      // Route the current physical tile to its sub-surface (see split above).
+      int k_surf = PagedKV ? next_page_idx / tiles_per_surface : 0;
+      next_page_idx = next_page_idx - k_surf * tiles_per_surface;
+
+      if (k_pre_surf != k_surf) {
+        k_pre_surf = k_surf;
+
+        auto K_2D_n = make_k_surface(k_surf);
+        auto V_2D_n = make_v_surface(k_surf);
+
+        copy_k = TiledCopyK{K_2D_n};
+        copy_v = TiledCopyV{V_2D_n};
+
+        auto thr_copy_k_n = copy_k.get_slice(thr_id);
+        auto thr_copy_v_n = copy_v.get_slice(thr_id);
+
+        prefetch_k = make_block_2d_prefetch(copy_k);
+        prefetch_v =
+            make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D_n);
+
+        Tensor cK_n = make_identity_tensor(K_2D_n.shape());  // (k,d)
+        Tensor cV_n = make_identity_tensor(V_2D_n.shape());  // (v,k)
+
+        Tensor gK_n = local_tile(
+            cK_n,
+            TileShapeQK{},
+            make_coord(_, _, _),
+            Step<X, _1, _1>{});  // (k,d,K,D)
+        Tensor gV_n = local_tile(
+            cV_n, tile_shape_v, make_coord(get<1>(blk_qv), _));  // (v,k,K)
+        Tensor gV_split_n = local_tile(
+            gV_n,
+            TileShapePV{},
+            make_coord(_, _, 0),
+            Step<X, _1, _1>{});  // (v,k,VV,K)
+
+        tKgK = thr_copy_k_n.partition_S(gK_n);        // (atom_val,k',d',K,D)
+        tVgV = thr_copy_v_n.partition_S(gV_split_n);  // (atom_val,v',k',VV,K)
+
+        pKgK = prefetch_k.get_slice(thr_id).partition_S(gK_n);
+        pVgV = prefetch_v.get_slice(thr_id).partition_S(gV_n);
+      }
+    };
+
+    if constexpr (has_large_surface) {
+      update_surface_info(next_page_idx);
     }
 
     CUTLASS_PRAGMA_UNROLL
@@ -454,7 +601,7 @@ struct FMHAFwdMainloop<
       /* k masking for remainder tiles */
       if (check_remainder_k && K == blk_k1 - 1) {
         FragSCol k_rem_mask;
-        int k = get<0>(tKgK(0, 0, 0, K, 0)) + get_sub_group().get_local_id()[0];
+        int k = K * tile_k + get_sub_group().get_local_id()[0];
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < k_rem_mask.size(); i++, k += intel::sg_size) {
           k_rem_mask(i) =
@@ -505,6 +652,10 @@ struct FMHAFwdMainloop<
             tArA(_, _, _, VV)(i) *= broadcast<0>(rescale, tArA, i);
         }
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
+      }
+
+      if constexpr (has_large_surface) {
+        update_surface_info(next_page_idx);
       }
 
       /* K prefetch for next iteration */
@@ -745,7 +896,7 @@ struct DecodeFwdMainloop<
     return true;
   }
 
-  template <typename QVCoord>
+  template <bool has_large_surface, typename QVCoord>
   CUTLASS_DEVICE void operator()(
       TensorQ2D const& Q_2D,  // (q,d)
       TensorK2D const& K_2D,  // (k,d)
@@ -782,6 +933,105 @@ struct DecodeFwdMainloop<
     Tensor cV = make_identity_tensor(V_2D.shape());               // (v,k)
     Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));  // (q,k)
 
+    auto K_2D_0 = K_2D;
+    auto V_2D_0 = V_2D;
+
+    // --- Xe 2D-block surface-height split
+    // ------------------------------------- The Xe LSC 2D block-load descriptor
+    // stores the surface height in a 24-bit field, so a (rank-2) K/V surface
+    // can address at most 2^24 rows. A paged KV cache may span many more rows
+    // (total_seqlen_kv = num_blocks * page_stride_elements), which overflows
+    // that field and makes the hardware wrap addresses. To keep the original
+    // rank-2 load/prefetch logic we split the K and V surfaces into
+    // page-aligned sub-surfaces, each at most 2^24 rows tall, and route every
+    // physical tile to the surface that physically contains it.
+
+    // The split state and the two `make_*_surface` lambdas are declared here at
+    // function scope (rather than inside the `if constexpr` below) so that the
+    // per-tile routing inside the K loop can reuse them. They are only ever
+    // exercised when `has_large_surface` is true; otherwise they stay unused.
+    constexpr int tile_k = get<1>(TileShapeQK{});
+    [[maybe_unused]] int tiles_per_surface = 0x3fffffff;
+    [[maybe_unused]] int rows_per_surface = 0;
+    [[maybe_unused]] int k_rows_total = get<0>(K_2D.shape());
+    [[maybe_unused]] int v_cols_total = get<1>(V_2D.shape());
+    [[maybe_unused]] int64_t k_surf_shift = 0;
+    [[maybe_unused]] int64_t v_surf_shift = 0;
+    [[maybe_unused]] int k_pre_surf = -1;
+
+    // Lazily materialize an arbitrary overflow sub-surface `surf` (>= 1). The
+    // base is shifted by `surf` full surfaces and the height/width is the real
+    // remaining extent of that surface, so the 2D block load never reads past
+    // the cache. These are only ever built inside the K loop's cold branch, so
+    // supporting any number of sub-surfaces adds at most one live descriptor
+    // and the common path keeps its original register/descriptor footprint.
+    [[maybe_unused]] auto make_k_surface = [&](int surf) {
+      int64_t rem = int64_t(k_rows_total) - int64_t(surf) * rows_per_surface;
+      int rows = rem > rows_per_surface ? rows_per_surface : int(rem);
+      if (rows < 1) {
+        rows = 1;
+      }
+      return make_tensor(
+          K_2D.data() + int64_t(surf) * k_surf_shift,
+          make_layout(make_shape(rows, get<1>(K_2D.shape())), K_2D.stride()));
+    };
+    [[maybe_unused]] auto make_v_surface = [&](int surf) {
+      int64_t rem = int64_t(v_cols_total) - int64_t(surf) * rows_per_surface;
+      int cols = rem > rows_per_surface ? rows_per_surface : int(rem);
+      if (cols < 1) {
+        cols = 1;
+      }
+      return make_tensor(
+          V_2D.data() + int64_t(surf) * v_surf_shift,
+          make_layout(make_shape(get<0>(V_2D.shape()), cols), V_2D.stride()));
+    };
+
+    if constexpr (has_large_surface) {
+      constexpr int kXeMaxSurfaceRows = 1 << 24;
+      if constexpr (PagedKV) {
+        int page_stride_tiles = params.page_stride_elements / tile_k;
+        int blocks_per_surface =
+            kXeMaxSurfaceRows / params.page_stride_elements;
+        if (blocks_per_surface < 1) {
+          blocks_per_surface = 1;
+        }
+        tiles_per_surface = blocks_per_surface * page_stride_tiles;
+        rows_per_surface = tiles_per_surface * tile_k;
+      }
+
+      // Build the (rank-2) K/V surface 0. Surface 0 keeps the original base
+      // pointer and is the only surface addressed on the hot path; overflow
+      // surfaces are materialized lazily (see make_k_surface/make_v_surface).
+      int k_rows0, v_cols0;
+      if constexpr (PagedKV) {
+        k_rows0 =
+            k_rows_total < rows_per_surface ? k_rows_total : rows_per_surface;
+        k_surf_shift = int64_t(rows_per_surface) * get<0>(K_2D.stride());
+        v_cols0 =
+            v_cols_total < rows_per_surface ? v_cols_total : rows_per_surface;
+        v_surf_shift = int64_t(rows_per_surface) * get<1>(V_2D.stride());
+      } else {
+        k_rows0 = k_rows_total;
+        v_cols0 = v_cols_total;
+      }
+
+      K_2D_0 = make_tensor(
+          K_2D.data(),
+          make_layout(
+              make_shape(k_rows0, get<1>(K_2D.shape())), K_2D.stride()));
+      V_2D_0 = make_tensor(
+          V_2D.data(),
+          make_layout(
+              make_shape(get<0>(V_2D.shape()), v_cols0), V_2D.stride()));
+
+      cK = make_identity_tensor(make_shape(
+          PagedKV ? rows_per_surface : k_rows_total,
+          get<1>(K_2D.shape())));  // (k,d)
+      cV = make_identity_tensor(make_shape(
+          get<0>(V_2D.shape()),
+          PagedKV ? rows_per_surface : v_cols_total));  // (v,k)
+    }
+
     /* Partition global tensors into workgroup tiles */
     Tensor gQ = local_tile(
         cQ, TileShapeQK{}, append(blk_qv, _), Step<_1, X, _1>{});  // (q,d,D)
@@ -800,14 +1050,12 @@ struct DecodeFwdMainloop<
 
     /* Create global -> register copies */
     TiledCopyQ copy_q{Q_2D};
-    TiledCopyK copy_k{K_2D};
-    TiledCopyV copy_v{V_2D};
+    TiledCopyK copy_k{K_2D_0};
+    TiledCopyV copy_v{V_2D_0};
 
     /* Create MMAs */
     TiledMMAQK mma_qk{};
     TiledMMAPV mma_pv{};
-
-    auto copyQ = make_block_2d_copy_A(TiledMMAQK{}, TensorQ2D{});
 
     /* Slice TiledCopy/TiledMMA operations down to to work-item level */
     auto thr_copy_q = copy_q.get_slice(thr_id);
@@ -864,6 +1112,55 @@ struct DecodeFwdMainloop<
     /* TODO: limit D prefetch for large head size, and reorder K prefetches */
     for (int D = 0; D < size<3>(pQgQ); D++) {
       prefetch(prefetch_q, pQgQ(_, _, _, D));
+    }
+
+    [[maybe_unused]] auto update_surface_info = [&](int next_page_idx) {
+      // Route the current physical tile to its sub-surface (see split above).
+      int k_surf = PagedKV ? next_page_idx / tiles_per_surface : 0;
+      next_page_idx = next_page_idx - k_surf * tiles_per_surface;
+
+      if (k_pre_surf != k_surf) {
+        k_pre_surf = k_surf;
+
+        auto K_2D_n = make_k_surface(k_surf);
+        auto V_2D_n = make_v_surface(k_surf);
+
+        copy_k = TiledCopyK{K_2D_n};
+        copy_v = TiledCopyV{V_2D_n};
+
+        auto thr_copy_k_n = copy_k.get_slice(thr_id);
+        auto thr_copy_v_n = copy_v.get_slice(thr_id);
+
+        prefetch_k = make_block_2d_prefetch(copy_k);
+        prefetch_v =
+            make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D_n);
+
+        Tensor cK_n = make_identity_tensor(K_2D_n.shape());  // (k,d)
+        Tensor cV_n = make_identity_tensor(V_2D_n.shape());  // (v,k)
+
+        Tensor gK_n = local_tile(
+            cK_n,
+            TileShapeQK{},
+            make_coord(_, _, _),
+            Step<X, _1, _1>{});  // (k,d,K,D)
+        Tensor gV_n = local_tile(
+            cV_n, tile_shape_v, make_coord(get<1>(blk_qv), _));  // (v,k,K)
+        Tensor gV_split_n = local_tile(
+            gV_n,
+            TileShapePV{},
+            make_coord(_, _, 0),
+            Step<X, _1, _1>{});  // (v,k,VV,K)
+
+        tKgK = thr_copy_k_n.partition_S(gK_n);        // (atom_val,k',d',K,D)
+        tVgV = thr_copy_v_n.partition_S(gV_split_n);  // (atom_val,v',k',VV,K)
+
+        pKgK = prefetch_k.get_slice(thr_id).partition_S(gK_n);
+        pVgV = prefetch_v.get_slice(thr_id).partition_S(gV_n);
+      }
+    };
+
+    if constexpr (has_large_surface) {
+      update_surface_info(tile_idx);
     }
 
     for (int D = 0; D < size<4>(pKgK); D++) {
@@ -1005,6 +1302,10 @@ struct DecodeFwdMainloop<
         }
       }
       tile_idx = next_tile_idx;
+
+      if constexpr (has_large_surface) {
+        update_surface_info(tile_idx);
+      }
 
       /* K prefetch */
       for (int D = 0; D < size<4>(pKgK); D++) {
