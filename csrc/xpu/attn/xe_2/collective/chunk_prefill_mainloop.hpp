@@ -456,7 +456,8 @@ struct FMHAFwdMainloop<
                    (thr_id / intel::sg_size) * sg_tile_q;
 
     // PagedKV
-    int page_idx, next_page_idx = blk_k0;
+    [[maybe_unused]] int page_idx = blk_k0;
+    [[maybe_unused]] int next_page_idx = blk_k0;
     if constexpr (PagedKV) {
       next_page_idx = get_paged_idx(blk_k0, idx_b);
     }
@@ -467,11 +468,29 @@ struct FMHAFwdMainloop<
       prefetch(prefetch_q, pQgQ(_, _, _, D));
     }
 
-    [[maybe_unused]] auto update_surface_info = [&](int& next_page_idx) {
-      // Route the current physical tile to its sub-surface (see split above).
-      int k_surf = PagedKV ? next_page_idx / tiles_per_surface : 0;
-      next_page_idx = next_page_idx - k_surf * tiles_per_surface;
+    clear(tArA);
+    fill(tA_max, cutlass::platform::numeric_limits<ElementA>::lowest());
+    clear(tA_sum);
 
+    bool check_remainder_k = (seq_len % tile_k != 0);
+
+    // FP8 KV Scale (per-tensor): fold scale_k into the softmax scale and
+    // defer scale_v to a single post-loop output rescale. Mathematically
+    // identical to per-element K/V rescaling (S = Q·K is linear in K and
+    // O = sum P_i·V_i is linear in V), but removes both rescales from the
+    // inner loop. The remaining fp8 -> ElementQ conversion is performed by
+    // reorder() using the subgroup-vectorized cast primitive.
+    ElementS effective_scale = params.scale;
+    float scale_v = 1.f;
+    if constexpr (Fp8KV) {
+      const float scale_k = *static_cast<const float*>(params.scale_k);
+      scale_v = *static_cast<const float*>(params.scale_v);
+      effective_scale = params.scale * ElementS(scale_k);
+    }
+
+    [[maybe_unused]] auto route_current = [&](int cur) -> int {
+      int k_surf = PagedKV ? cur / tiles_per_surface : 0;
+      int local = cur - k_surf * tiles_per_surface;
       if (k_pre_surf != k_surf) {
         k_pre_surf = k_surf;
 
@@ -510,35 +529,14 @@ struct FMHAFwdMainloop<
         pKgK = prefetch_k.get_slice(thr_id).partition_S(gK_n);
         pVgV = prefetch_v.get_slice(thr_id).partition_S(gV_n);
       }
+      return local;
     };
 
-    if constexpr (has_large_surface) {
-      update_surface_info(next_page_idx);
-    }
-
-    CUTLASS_PRAGMA_UNROLL
-    for (int D = 0; D < size<4>(pKgK); D++) {
-      prefetch(prefetch_k, pKgK(_, _, _, next_page_idx, D));
-    }
-
-    clear(tArA);
-    fill(tA_max, cutlass::platform::numeric_limits<ElementA>::lowest());
-    clear(tA_sum);
-
-    bool check_remainder_k = (seq_len % tile_k != 0);
-
-    // FP8 KV Scale (per-tensor): fold scale_k into the softmax scale and
-    // defer scale_v to a single post-loop output rescale. Mathematically
-    // identical to per-element K/V rescaling (S = Q·K is linear in K and
-    // O = sum P_i·V_i is linear in V), but removes both rescales from the
-    // inner loop. The remaining fp8 -> ElementQ conversion is performed by
-    // reorder() using the subgroup-vectorized cast primitive.
-    ElementS effective_scale = params.scale;
-    float scale_v = 1.f;
-    if constexpr (Fp8KV) {
-      const float scale_k = *static_cast<const float*>(params.scale_k);
-      scale_v = *static_cast<const float*>(params.scale_v);
-      effective_scale = params.scale * ElementS(scale_k);
+    if constexpr (!has_large_surface) {
+      CUTLASS_PRAGMA_UNROLL
+      for (int D = 0; D < size<4>(pKgK); D++) {
+        prefetch(prefetch_k, pKgK(_, _, _, next_page_idx, D));
+      }
     }
 
     /* Main loop, blocked in k. */
@@ -550,20 +548,29 @@ struct FMHAFwdMainloop<
         need_causal = K >= blk_k1_causal;
       }
 
-      page_idx = next_page_idx;
-      next_page_idx = K + 1;
-      // next paged_idx
-      if constexpr (PagedKV) {
-        next_page_idx = get_paged_idx(next_page_idx, idx_b);
+      int load_idx;
+      if constexpr (has_large_surface) {
+        int cur = PagedKV ? get_paged_idx(K, idx_b) : K;
+        load_idx = route_current(cur);
+        CUTLASS_PRAGMA_UNROLL
+        for (int D = 0; D < size<4>(pKgK); D++) {
+          prefetch(prefetch_k, pKgK(_, _, _, load_idx, D));
+        }
+      } else {
+        page_idx = next_page_idx;
+        next_page_idx = K + 1;
+        // next paged_idx
+        if constexpr (PagedKV) {
+          next_page_idx = get_paged_idx(next_page_idx, idx_b);
+        }
+        load_idx = PagedKV ? page_idx : K;
       }
 
-      auto tKgK_cache =
-          PagedKV ? tKgK(_, _, _, page_idx, _) : tKgK(_, _, _, K, _);
-      auto tVgV_cache =
-          PagedKV ? tVgV(_, _, _, _, page_idx) : tVgV(_, _, _, _, K);
+      auto tKgK_cache = tKgK(_, _, _, load_idx, _);
+      auto tVgV_cache = tVgV(_, _, _, _, load_idx);
 
       /* V prefetch for GEMM 2 */
-      prefetch(prefetch_v, pVgV(_, _, _, page_idx));
+      prefetch(prefetch_v, pVgV(_, _, _, load_idx));
 
       /* GEMM 1: S = Q * K^T */
       clear(tSrS); /* TODO: fuse w/ initial gemm call */
@@ -654,14 +661,11 @@ struct FMHAFwdMainloop<
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
 
-      if constexpr (has_large_surface) {
-        update_surface_info(next_page_idx);
-      }
-
-      /* K prefetch for next iteration */
-      CUTLASS_PRAGMA_UNROLL
-      for (int D = 0; D < size<4>(pKgK); D++) {
-        prefetch(prefetch_k, pKgK(_, _, _, next_page_idx, D));
+      if constexpr (!has_large_surface) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int D = 0; D < size<4>(pKgK); D++) {
+          prefetch(prefetch_k, pKgK(_, _, _, next_page_idx, D));
+        }
       }
 
       barrier_wait(ScopeWorkgroup);
