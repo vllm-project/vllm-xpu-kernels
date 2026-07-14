@@ -303,6 +303,10 @@ struct DecodeKernelLauncher {
       const paged_decode_args_t& args,
       const cutlass::KernelHardwareInfo& hw_info) {
     ProblemShapeType shape = initialize(args);
+    bool const is_paged = args.is_paged;
+    bool const is_causal = args.is_causal;
+    bool const is_local = args.is_local;
+    bool const is_sink = args.is_sink;
 
     typename FMHAKernel::Arguments arguments{
         {
@@ -320,6 +324,10 @@ struct DecodeKernelLauncher {
             reinterpret_cast<ElementLSE*>(args.max_logits),
             stride_max_logits,
             reinterpret_cast<ElementQ*>(args.sm_sink),
+            is_paged,
+            is_causal,
+            is_local,
+            is_sink,
             static_cast<const bool*>(args.is_prefill),
             args.splits_per_seq,
         },
@@ -334,8 +342,11 @@ struct DecodeKernelLauncher {
          args.window_size_right,
          // page_stride_elements: physical stride between paged blocks in
          // seq-position units. It includes interleaved and cross-layer gaps.
-         args.page_stride_elements},
-        {},
+         args.page_stride_elements,
+         is_causal,
+         is_local,
+         is_paged},
+        {is_sink},
         hw_info,
         args.num_kv_splits};
 
@@ -350,6 +361,7 @@ struct DecodeKernelLauncher {
          reinterpret_cast<ElementLSE*>(args.max_logits),
          stride_max_logits,
          args.window_size_left,
+         is_local,
          static_cast<const bool*>(args.is_prefill),
          args.splits_per_seq},
         hw_info,
@@ -463,9 +475,6 @@ template <
     typename SubgroupLayoutQK,
     typename SubgroupLayoutPV_, /* void -> default */
     int PipelineStages,
-    bool Causal = false,
-    bool Local = false,
-    bool Sink = false,
     typename ElementQ = bfloat16_t,
     typename ElementK = bfloat16_t,
     typename ElementV = bfloat16_t,
@@ -495,7 +504,6 @@ struct PagedDecodeConfig {
   template <class Scheduler>
   static void run(sycl::queue& queue, const paged_decode_args_t& args) {
     constexpr bool VarLen = true;
-    constexpr bool Paged = true;
     cutlass::KernelHardwareInfo hw_info;
     hw_info.sm_count =
         cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
@@ -533,8 +541,6 @@ struct PagedDecodeConfig {
     using MainloopDispatchPolicy = cutlass::fmha::XeDefault<PipelineStages>;
     using CollectiveMainloop = cutlass::fmha::collective::DecodeFwdMainloop<
         MainloopDispatchPolicy,
-        Paged,
-        Causal,
         TiledMMAQK,
         TiledMMAPV,
         VTiles,
@@ -543,17 +549,14 @@ struct PagedDecodeConfig {
         TensorV,
         GmemTiledCopyQ,
         GmemTiledCopyK,
-        GmemTiledCopyV,
-        Local>;
+        GmemTiledCopyV>;
 
     // Epilogue
     using CollectiveEpilogue = cutlass::fmha::collective::DecodeFwdEpilogue<
         CollectiveMainloop,
         TileShapeOutput,
         TensorO,
-        TensorLSE,
-        void,
-        Sink>;
+        TensorLSE>;
 
     using FMHAKernel = cutlass::fmha::kernel::XeFMHAFwdSplitKVKernel<
         ProblemShapeType,
@@ -578,7 +581,7 @@ struct PagedDecodeConfig {
 };
 
 // Template function for explicit instantiation
-template <typename decode_policy, bool Causal, bool Local, bool Sink>
+template <typename decode_policy>
 void decode_policy_dispatch_impl(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
@@ -593,9 +596,6 @@ void decode_policy_dispatch_impl(
           typename decode_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Causal,
-          Local,
-          Sink,
           half_t,
           half_t,
           half_t,
@@ -608,9 +608,6 @@ void decode_policy_dispatch_impl(
           typename decode_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Causal,
-          Local,
-          Sink,
           half_t,
           float_e4m3_t,
           float_e4m3_t,
@@ -623,9 +620,6 @@ void decode_policy_dispatch_impl(
           typename decode_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Causal,
-          Local,
-          Sink,
           half_t,
           float_e5m2_t,
           float_e5m2_t,
@@ -640,9 +634,6 @@ void decode_policy_dispatch_impl(
           typename decode_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Causal,
-          Local,
-          Sink,
           bfloat16_t,
           bfloat16_t,
           bfloat16_t,
@@ -655,9 +646,6 @@ void decode_policy_dispatch_impl(
           typename decode_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Causal,
-          Local,
-          Sink,
           bfloat16_t,
           float_e4m3_t,
           float_e4m3_t,
@@ -670,9 +658,6 @@ void decode_policy_dispatch_impl(
           typename decode_policy::SubgroupLayoutQK,
           void,
           PipelineStages,
-          Causal,
-          Local,
-          Sink,
           bfloat16_t,
           float_e5m2_t,
           float_e5m2_t,

@@ -123,7 +123,6 @@ class XeFMHAFwdSplitKVKernel {
 
   static constexpr int max_num_kv_splits = SGPerWG::value * intel::sg_size;
   static constexpr int dpas_max_repeat_count = 8;
-  static constexpr bool Sink = CollectiveEpilogue::Sink;
   using ElementSink = typename CollectiveEpilogue::ElementSink;
 
   // Device side arguments
@@ -143,6 +142,10 @@ class XeFMHAFwdSplitKVKernel {
     StrideO dMax_logits;
 
     const ElementSink* sm_sink;
+    bool is_paged;
+    bool is_causal;
+    bool is_local;
+    bool is_sink;
 
     // per-batch mask: true = prefill, false = decode; nullptr = process all
     const bool* is_prefill;
@@ -236,6 +239,8 @@ class XeFMHAFwdSplitKVKernel {
 
     auto& p = params.kernel;
     ProblemShape const& s = p.shape;
+    bool const is_causal = p.is_causal;
+    bool const is_local = p.is_local;
     int head_group_q = s.num_heads_q / s.num_heads_kv;
 
     int thr_id = int(ThreadIdxX());
@@ -283,15 +288,14 @@ class XeFMHAFwdSplitKVKernel {
       int seq_coord =
           cute::min(seq_len_qo, (blk_q * get<0>(TileShapeQK{}) + q_offset_sg));
 
-      if (CollectiveMainloop::CausalMask && seq_coord < discard_seq_coord)
-        continue;
+      if (is_causal && seq_coord < discard_seq_coord) continue;
       // For decode window_size_right doesn't have effect
       const int seq_len = seq_len_kv;
       // For decode, all packed GQA heads are at position seq_len_kv - 1.
       // Use seq_len - 1 (= seq_len_kv - 1) as the decode position for
       // k_block0 to match ReduceSplitK's computation.
       const int k_block0 =
-          CollectiveMainloop::LocalMask
+          is_local
               ? cute::max(seq_len - 1 - params.mainloop.window_size_left, 0) /
                     get<1>(TileShapeQK{})
               : 0;
@@ -471,38 +475,21 @@ class XeFMHAFwdSplitKVKernel {
 
       // Epilogue
       CollectiveEpilogue epilogue{params.epilogue, shared_storage.epilogue};
-      if constexpr (Sink) {
-        auto sinks_per_kv = sinks(head, _);
-        epilogue(
-            O(_, _, head, idx_kv_split, l_coord),
-            tArA,
-            tA_max,
-            tA_sum,
-            blk_qv,
-            thr_id,
-            exp_sums(_, _, head, l_coord),
-            max_logits(_, _, head, l_coord),
-            idx_kv_split,
-            head_group_q,
-            sinks_per_kv,
-            num_kv_splits,
-            is_single_split);
-      } else {
-        epilogue(
-            O(_, _, head, idx_kv_split, l_coord),
-            tArA,
-            tA_max,
-            tA_sum,
-            blk_qv,
-            thr_id,
-            exp_sums(_, _, head, l_coord),
-            max_logits(_, _, head, l_coord),
-            idx_kv_split,
-            head_group_q,
-            sinks,
-            num_kv_splits,
-            is_single_split);
-      }
+      auto sinks_per_kv = sinks(head, _);
+      epilogue(
+          O(_, _, head, idx_kv_split, l_coord),
+          tArA,
+          tA_max,
+          tA_sum,
+          blk_qv,
+          thr_id,
+          exp_sums(_, _, head, l_coord),
+          max_logits(_, _, head, l_coord),
+          idx_kv_split,
+          head_group_q,
+          sinks_per_kv,
+          num_kv_splits,
+          is_single_split);
     }
   }
 };
@@ -554,6 +541,7 @@ class ReduceSplitK {
     const ElementLSE* max_logits;
     StrideO dMax_logits;
     int window_size_left = -1;
+    bool is_local = false;
 
     // per-batch mask: true = prefill, false = decode; nullptr = process all
     const bool* is_prefill;
@@ -673,11 +661,10 @@ class ReduceSplitK {
 
       const int k_blocks = cute::ceil_div(seq_len_kv, get<1>(TileShapeQK{}));
       // Sliding window: skip blocks before the window
-      constexpr bool LocalMask = FMHAKernel_::CollectiveMainloop::LocalMask;
       const int k_block0 =
-          LocalMask ? cute::max(seq_len_kv - 1 - p.window_size_left, 0) /
-                          get<1>(TileShapeQK{})
-                    : 0;
+          p.is_local ? cute::max(seq_len_kv - 1 - p.window_size_left, 0) /
+                           get<1>(TileShapeQK{})
+                     : 0;
       const int windowed_k_blocks = k_blocks - k_block0;
       // Per-sequence adaptive split count
       int seq_num_kv_splits = (p.splits_per_seq != nullptr)

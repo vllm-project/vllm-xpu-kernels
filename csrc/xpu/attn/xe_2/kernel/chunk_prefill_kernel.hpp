@@ -65,8 +65,7 @@ template <
     class ProblemShape_,
     class CollectiveMainloop_,
     class CollectiveEpilogue_,
-    class TileScheduler_,
-    bool SoftmaxLSE_ = false>
+    class TileScheduler_>
 class XeFMHAFwdKernel {
  public:
   //
@@ -113,12 +112,6 @@ class XeFMHAFwdKernel {
   using ElementO = typename CollectiveEpilogue::TensorO::element_type;
   using StrideO = decltype(stride(typename CollectiveEpilogue::TensorO{}));
 
-  // Template Features
-  static constexpr bool PagedKV = CollectiveMainloop::PagedKV;
-  static constexpr bool CausalMask = CollectiveMainloop::CausalMask;
-  static constexpr bool LocalMask = CollectiveMainloop::LocalMask;
-  static constexpr bool Sink = CollectiveEpilogue::Sink;
-  static constexpr bool SoftmaxLSE = SoftmaxLSE_;
   using ElementSink = typename CollectiveEpilogue::ElementSink;
 
   // Kernel level shared memory storage
@@ -150,6 +143,11 @@ class XeFMHAFwdKernel {
     // softmax_lse output [total_seqlen_q, num_heads_q] (nullptr if disabled)
     float* softmax_lse;
     int lse_stride;  // = num_heads_q
+    bool is_paged;
+    bool is_causal;
+    bool is_local;
+    bool is_sink;
+    bool has_softmax_lse;
 
     // per-batch mask: true = prefill, false = decode; nullptr = process all
     const bool* is_prefill;
@@ -211,9 +209,9 @@ class XeFMHAFwdKernel {
 
   CUTLASS_DEVICE
   Shape<int, int> get_sequence_length_shape(
-      ProblemShape const& problem_shape, int const& batch) {
+      ProblemShape const& problem_shape, int const& batch, bool is_paged) {
     if constexpr (is_var_len) {
-      if constexpr (PagedKV) {
+      if (is_paged) {
         auto q_len = cutlass::fmha::collective::apply_variable_length(
             Shape<VariableLength>{problem_shape.seq_len_qo}, batch);
         return Shape<int, int>{
@@ -238,6 +236,9 @@ class XeFMHAFwdKernel {
 
     auto& p = params.kernel;
     ProblemShape const& s = p.shape;
+    bool const is_paged = p.is_paged;
+    bool const is_causal = p.is_causal;
+    bool const is_local = p.is_local;
     int head_group_q = s.num_heads_q / s.num_heads_kv;
 
     int thr_id = int(ThreadIdxX());
@@ -263,7 +264,8 @@ class XeFMHAFwdKernel {
       auto blk_qv = make_coord(blk_q, blk_v);
       int head = head_q / head_group_q;
 
-      auto sequence_length_shape = get_sequence_length_shape(s, idx_b);
+      auto sequence_length_shape =
+          get_sequence_length_shape(s, idx_b, is_paged);
       auto [seq_len_qo, seq_len_kv] = sequence_length_shape;
       if (blk_q * get<0>(TileShapeQK{}) >= seq_len_qo) continue;
 
@@ -273,15 +275,15 @@ class XeFMHAFwdKernel {
 
       // calc sg level seq_len_kv
       const int sg_seq_len =
-          LocalMask ? cute::min(
-                          seq_len_kv,
-                          full_tile_offset + seq_coord + q_sg_tile +
-                              params.mainloop.local_right)
-          : CausalMask
+          is_local ? cute::min(
+                         seq_len_kv,
+                         full_tile_offset + seq_coord + q_sg_tile +
+                             params.mainloop.local_right)
+          : is_causal
               ? cute::min(seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
               : seq_len_kv;
       const int sg_k_block0 =
-          LocalMask
+          is_local
               ? cute::max(
                     seq_coord + full_tile_offset - params.mainloop.local_left,
                     0) /
@@ -289,18 +291,18 @@ class XeFMHAFwdKernel {
               : 0;
       const int sg_k_blocks = cute::ceil_div(sg_seq_len, get<1>(TileShapeQK{}));
       const int sg_k_blocks_causal =
-          CausalMask ? (seq_coord + full_tile_offset) / get<1>(TileShapeQK{})
-                     : 0;
-      const int sg_k_block_local_l_safe =
-          LocalMask ? cute::ceil_div(
-                          cute::max(
-                              seq_coord + q_sg_tile - 1 + full_tile_offset -
-                                  params.mainloop.local_left,
-                              0),
-                          get<1>(TileShapeQK{}))
+          is_causal ? (seq_coord + full_tile_offset) / get<1>(TileShapeQK{})
                     : 0;
+      const int sg_k_block_local_l_safe =
+          is_local ? cute::ceil_div(
+                         cute::max(
+                             seq_coord + q_sg_tile - 1 + full_tile_offset -
+                                 params.mainloop.local_left,
+                             0),
+                         get<1>(TileShapeQK{}))
+                   : 0;
       const int sg_k_block_local_r_safe =
-          LocalMask
+          is_local
               ? (seq_coord + full_tile_offset + params.mainloop.local_right +
                  1) / get<1>(TileShapeQK{}) -
                     1
@@ -321,29 +323,28 @@ class XeFMHAFwdKernel {
       // Per-element causal / local / remainder masking inside the mainloop
       // handles the widened range safely for SGs that didn't need it.
       auto wg = sycl::ext::oneapi::this_work_item::get_work_group<3>();
-      const int k_block0 =
-          LocalMask
-              ? sycl::reduce_over_group(wg, sg_k_block0, sycl::minimum<int>{})
-              : 0;
+      const int k_block0 = is_local ? sycl::reduce_over_group(
+                                          wg, sg_k_block0, sycl::minimum<int>{})
+                                    : 0;
       const int k_blocks =
-          (CausalMask || LocalMask)
+          (is_causal || is_local)
               ? sycl::reduce_over_group(wg, sg_k_blocks, sycl::maximum<int>{})
               : sg_k_blocks;
-      const int seq_len = LocalMask ? sycl::reduce_over_group(
-                                          wg, sg_seq_len, sycl::maximum<int>{})
-                                    : sg_seq_len;
+      const int seq_len = is_local ? sycl::reduce_over_group(
+                                         wg, sg_seq_len, sycl::maximum<int>{})
+                                   : sg_seq_len;
       const int k_blocks_causal =
-          CausalMask ? sycl::reduce_over_group(
-                           wg, sg_k_blocks_causal, sycl::minimum<int>{})
-                     : 0;
+          is_causal ? sycl::reduce_over_group(
+                          wg, sg_k_blocks_causal, sycl::minimum<int>{})
+                    : 0;
       const int k_block_local_l_safe =
-          LocalMask ? sycl::reduce_over_group(
-                          wg, sg_k_block_local_l_safe, sycl::maximum<int>{})
-                    : 0;
+          is_local ? sycl::reduce_over_group(
+                         wg, sg_k_block_local_l_safe, sycl::maximum<int>{})
+                   : 0;
       const int k_block_local_r_safe =
-          LocalMask ? sycl::reduce_over_group(
-                          wg, sg_k_block_local_r_safe, sycl::minimum<int>{})
-                    : 0;
+          is_local ? sycl::reduce_over_group(
+                         wg, sg_k_block_local_r_safe, sycl::minimum<int>{})
+                   : 0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       if constexpr (is_var_len) {
@@ -351,15 +352,15 @@ class XeFMHAFwdKernel {
         auto kv_cumulative = s.seq_len_kv.cumulative_length;
         // Use actual seq strides for offset computation
         offset_q = get<0>(p.dQ) * qo_cumulative[idx_b];
-        offset_k = PagedKV ? 0 : get<0>(p.dK) * kv_cumulative[idx_b];
-        offset_v = PagedKV ? 0 : get<1>(p.dV) * kv_cumulative[idx_b];
+        offset_k = is_paged ? 0 : get<0>(p.dK) * kv_cumulative[idx_b];
+        offset_v = is_paged ? 0 : get<1>(p.dV) * kv_cumulative[idx_b];
         offset_o = get<0>(p.dO) * qo_cumulative[idx_b];
       }
 
       auto batch_dim_qo = is_var_len ? 1 : s.batch;
-      auto batch_dim_kv = (PagedKV || is_var_len) ? 1 : s.batch;
+      auto batch_dim_kv = (is_paged || is_var_len) ? 1 : s.batch;
       auto total_seqlen_kv =
-          PagedKV ? params.mainloop.total_seqlen_kv : seq_len_kv;
+          is_paged ? params.mainloop.total_seqlen_kv : seq_len_kv;
       auto shape_Q =
           make_shape(seq_len_qo, s.head_size_qk, s.num_heads_q, batch_dim_qo);
       auto shape_K = make_shape(
@@ -390,7 +391,7 @@ class XeFMHAFwdKernel {
 
       // Main loop
       int l_coord_qo = is_var_len ? 0 : idx_b;
-      int l_coord_kv = (PagedKV || is_var_len) ? 0 : idx_b;
+      int l_coord_kv = (is_paged || is_var_len) ? 0 : idx_b;
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
       mainloop(
           Q(_, _, head_q, l_coord_qo),
@@ -411,7 +412,7 @@ class XeFMHAFwdKernel {
           k_block_local_r_safe);
 
       // return softmax_lse
-      if constexpr (SoftmaxLSE) {
+      if (p.has_softmax_lse) {
         static_assert(
             size<3>(typename TiledMMAPV::ThrLayoutVMNK{}) == 1,
             "softmax_lse requires ReduceK == 1 in TiledMMAPV");
@@ -453,7 +454,7 @@ class XeFMHAFwdKernel {
             if (q_in_batch >= seq_len_qo) continue;
             ElementA sum_val = tA_sum(i);
             // Include sink contribution for LSE computation
-            if constexpr (Sink) {
+            if (p.is_sink) {
               ElementSink s_head = p.ptr_S[head_q];
               sum_val += sycl::native::exp2(
                   static_cast<ElementA>(s_head * kLog2e) - tA_max(i));
@@ -474,7 +475,7 @@ class XeFMHAFwdKernel {
 
       // Epilogue
       CollectiveEpilogue epilogue{params.epilogue, shared_storage.epilogue};
-      if constexpr (Sink) {
+      if (p.is_sink) {
         ElementSink s_head = p.ptr_S[head_q];
         epilogue(
             O(_, _, head_q, l_coord_qo),
