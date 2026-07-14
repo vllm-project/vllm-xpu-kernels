@@ -111,6 +111,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Architecture options
     "VLLM_XPU_ENABLE_XE2":
     lambda: os.getenv("VLLM_XPU_ENABLE_XE2", "ON"),
+    "VLLM_XPU_ENABLE_XE3P":
+    lambda: os.getenv("VLLM_XPU_ENABLE_XE3P", "ON"),
     "VLLM_XPU_ENABLE_XE_DEFAULT":
     lambda: os.getenv("VLLM_XPU_ENABLE_XE_DEFAULT", "ON"),
 
