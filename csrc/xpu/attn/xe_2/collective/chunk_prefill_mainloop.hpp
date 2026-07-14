@@ -443,7 +443,7 @@ struct FMHAFwdMainloop<
     auto prefetch_q = make_block_2d_prefetch(copy_q);
     auto prefetch_k = make_block_2d_prefetch(copy_k);
     auto prefetch_v =
-        make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D);
+        make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D_0);
     /* Partition global tensors for prefetch */
     auto pQgQ = prefetch_q.get_slice(thr_id).partition_S(gQ);
     auto pKgK = prefetch_k.get_slice(thr_id).partition_S(gK);
@@ -467,7 +467,7 @@ struct FMHAFwdMainloop<
       prefetch(prefetch_q, pQgQ(_, _, _, D));
     }
 
-    [[maybe_unused]] auto update_surface_info = [&](int next_page_idx) {
+    [[maybe_unused]] auto update_surface_info = [&](int& next_page_idx) {
       // Route the current physical tile to its sub-surface (see split above).
       int k_surf = PagedKV ? next_page_idx / tiles_per_surface : 0;
       next_page_idx = next_page_idx - k_surf * tiles_per_surface;
@@ -1086,7 +1086,7 @@ struct DecodeFwdMainloop<
     auto prefetch_q = make_block_2d_prefetch(copy_q);
     auto prefetch_k = make_block_2d_prefetch(copy_k);
     auto prefetch_v =
-        make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D);
+        make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D_0);
 
     /* Partition global tensors for prefetch */
     auto pQgQ = prefetch_q.get_slice(thr_id).partition_S(gQ);
@@ -1114,7 +1114,7 @@ struct DecodeFwdMainloop<
       prefetch(prefetch_q, pQgQ(_, _, _, D));
     }
 
-    [[maybe_unused]] auto update_surface_info = [&](int next_page_idx) {
+    [[maybe_unused]] auto update_surface_info = [&](int& next_page_idx) {
       // Route the current physical tile to its sub-surface (see split above).
       int k_surf = PagedKV ? next_page_idx / tiles_per_surface : 0;
       next_page_idx = next_page_idx - k_surf * tiles_per_surface;
