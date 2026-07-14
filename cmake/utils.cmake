@@ -647,8 +647,9 @@ function(add_xe3_kernel_library LIBRARY_NAME)
 
   # Set include directories
   target_include_directories(
-    ${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-                           ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    ${LIBRARY_NAME}
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/..
+           ${CMAKE_CURRENT_BINARY_DIR})
 
   # Optionally add CMAKE_SOURCE_DIR
   if(ARG_INCLUDE_CMAKE_SOURCE_DIR)
