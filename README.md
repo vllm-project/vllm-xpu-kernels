@@ -55,7 +55,7 @@ vLLM calls `import vllm_xpu_kernels._C` at startup, which registers all custom o
 
 ### Installation
 
-**1. Install oneAPI 2025.3**
+**1. Install oneAPI 2026.0**
 
 Download and install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html), then source the environment:
 

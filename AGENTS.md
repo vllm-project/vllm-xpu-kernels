@@ -18,9 +18,9 @@ can dispatch on Intel GPU hardware.
 - Python package metadata currently requires Python `>=3.9,<3.14`; CMake still
   searches `3.9` through `3.12`, so verify interpreter support before changing
   build behavior.
-- PyTorch XPU support is currently `2.12.0+xpu` in `pyproject.toml`, with CMake
-  expecting torch `2.12.0` for XPU.
-- oneAPI 2025.3 is the expected toolchain. Source
+- PyTorch XPU support is currently `2.13.0+xpu` in `pyproject.toml`, with CMake
+  expecting torch `2.13.0` for XPU.
+- oneAPI 2026.0 is the expected toolchain. Source
   `/opt/intel/oneapi/setvars.sh` before building native extensions.
 
 ## Environment And Commands
