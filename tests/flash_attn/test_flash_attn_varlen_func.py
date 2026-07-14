@@ -70,7 +70,7 @@ def ref_paged_attn(query: torch.Tensor,
             num_kv_blocks = (kv_len + block_size - 1) // block_size
             block_indices = block_tables[i, :num_kv_blocks]
 
-            # key_cache layout: [num_blocks, num_kv_heads, block_size, head_size]
+            # key_cache: [num_blocks, num_kv_heads, block_size, head_size]
             # gather -> [num_blocks_i, num_kv_heads, block_size, head_size]
             # transpose to [num_blocks_i, block_size, num_kv_heads, head_size]
             # then flatten the block axis with the seq axis.
