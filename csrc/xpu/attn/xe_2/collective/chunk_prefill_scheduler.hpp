@@ -89,6 +89,72 @@ struct XeFHMAIndividualTileScheduler {
   }
 };
 
+// Variant of XeFHMAIndividualTileScheduler that reverses the Q-tile
+// dispatch order for odd-indexed heads. Intended for low-parallelism
+// causal prefill, where head 0's first wave is dominated by the
+// upper-triangle (light-load) tiles; reversing odd heads lets the next
+// wave consume the heavy lower-triangle tiles in parallel with the
+// remaining light tiles of even heads, smoothing the imbalance.
+//
+// Identical to XeFHMAIndividualTileScheduler except for get_block_coord(),
+// which flips BlockIdxY for odd heads. Selected at runtime via
+// args.reverse_q_order in chunk_prefill_args_t.
+struct XeFHMAIndividualReverseOrderTileScheduler {
+  struct Params {
+    dim3 grid;
+    FastDivmod divmod_num_heads;
+  };
+
+  bool valid_ = true;
+  Params params;
+
+  CUTLASS_DEVICE
+  XeFHMAIndividualReverseOrderTileScheduler(Params const& params)
+      : params(params) {}
+
+  template <class ProblemShape, class TileShape>
+  static Params to_underlying_arguments(
+      ProblemShape const& shape,
+      KernelHardwareInfo hw_info,
+      TileShape const& tile_shape) {
+    using namespace cute;
+
+    dim3 grid(
+        size(ceil_div(shape.head_size_vo, get<1>(tile_shape))),  // V
+        size(ceil_div(shape.seq_len_qo, get<0>(tile_shape))),    // Q
+        size(shape.batch * shape.num_heads_q));  // (h,b) -- split later
+    return Params{grid, {shape.num_heads_q}};
+  }
+
+  template <int Num_SGs>
+  static dim3 get_grid_shape(Params const& params) {
+    return params.grid;
+  }
+
+  CUTLASS_DEVICE
+  bool is_valid() { return valid_; }
+
+  CUTLASS_DEVICE
+  auto get_block_coord() {
+    using namespace cute;
+    int idx_b = BlockIdxZ();
+    int head;
+    params.divmod_num_heads(idx_b, head, idx_b);
+
+    int blk_q = BlockIdxY();
+    if ((head & 1) != 0) {
+      blk_q = GridDimY() - 1 - blk_q;
+    }
+    return make_coord(blk_q, BlockIdxX(), head, idx_b);
+  }
+
+  CUTLASS_DEVICE
+  XeFHMAIndividualReverseOrderTileScheduler& operator++() {
+    valid_ = false;
+    return *this;
+  }
+};
+
 // Work item for compact grid dispatch: each WG reads one entry
 struct DecodeWorkItem {
   int seq_idx;        // which sequence (batch index)
