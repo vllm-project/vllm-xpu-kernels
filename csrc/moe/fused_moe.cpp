@@ -6,6 +6,7 @@ template <
     bool HAS_CLAMP_LIMIT = false,
     bool IS_DECODE = false,
     typename DTYPE = bf16_t,
+    typename INTER_DTYPE = float,
     int TM = (IS_DECODE ? 1 : ::TM),
     int N_TM = (IS_DECODE ? 1 : ::N_TM),
     int N_TK = ::N_TK,
@@ -21,7 +22,7 @@ static void launch_fused_moe_kernel(
     int H,
     int I,
     int num_experts,
-    float* intermediate,
+    INTER_DTYPE* intermediate,
     int32_t* row_counter,
     int K,
     const int64_t* expert_offset,
@@ -37,6 +38,7 @@ static void launch_fused_moe_kernel(
       HAS_CLAMP_LIMIT,
       IS_DECODE,
       DTYPE,
+      INTER_DTYPE,
       TM,
       N_TM,
       N_TK,
@@ -44,39 +46,74 @@ static void launch_fused_moe_kernel(
 
   sycl::nd_range<2> nd;
   if constexpr (IS_DECODE)
-    nd = Kernel::get_nd_range(0, 0, K);
+    nd = Kernel::get_nd_range(total_tokens, 0, K);
   else
     nd = Kernel::get_nd_range(total_tokens, num_experts);
 
-  q.submit([&](sycl::handler& cgh) {
-    int slm_count;
-    slm_count = SG_COUNT * N_TM * TM * TK;
-    sycl::local_accessor<DTYPE, 1> slm_acc(slm_count, cgh);
+  if constexpr (IS_DECODE) {
+    q.submit([&](sycl::handler& cgh) {
+      int slm_count = SG_COUNT * N_TM * TM * TK;
+      sycl::local_accessor<DTYPE, 1> slm_acc(slm_count, cgh);
+      cgh.parallel_for(
+          nd,
+          Kernel{
+              tokens,
+              w13,
+              w2,
+              w13_bias,
+              w2_bias,
+              output,
+              H,
+              I,
+              intermediate,
+              row_counter,
+              K,
+              slm_acc,
+              expert_offset,
+              num_experts,
+              total_tokens,
+              source_row,
+              topk_weights,
+              num_tokens,
+              topk_ids,
+              gemm1_clamp_limit});
+    });
+  } else {
+    const int64_t num_wgs = Kernel::get_num_wgs(total_tokens, num_experts);
+    auto act_buf_alloc = torch::empty(
+        {num_wgs * (int64_t)N_TM * TM * I * (int64_t)sizeof(DTYPE)},
+        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kXPU));
+    DTYPE* act_buf = reinterpret_cast<DTYPE*>(act_buf_alloc.data_ptr());
 
-    cgh.parallel_for(
-        nd,
-        Kernel{
-            tokens,
-            w13,
-            w2,
-            w13_bias,
-            w2_bias,
-            output,
-            H,
-            I,
-            intermediate,
-            row_counter,
-            K,
-            slm_acc,
-            expert_offset,
-            num_experts,
-            total_tokens,
-            source_row,
-            topk_weights,
-            num_tokens,
-            topk_ids,
-            gemm1_clamp_limit});
-  });
+    q.submit([&](sycl::handler& cgh) {
+      int slm_count = SG_COUNT * N_TM * TM * TK;
+      sycl::local_accessor<DTYPE, 1> slm_acc(slm_count, cgh);
+      cgh.parallel_for(
+          nd,
+          Kernel{
+              tokens,
+              w13,
+              w2,
+              w13_bias,
+              w2_bias,
+              output,
+              H,
+              I,
+              intermediate,
+              row_counter,
+              K,
+              slm_acc,
+              expert_offset,
+              num_experts,
+              total_tokens,
+              source_row,
+              topk_weights,
+              num_tokens,
+              topk_ids,
+              gemm1_clamp_limit,
+              act_buf});
+    });
+  }
 }
 
 static void sort_topk_ids(
@@ -93,6 +130,14 @@ static void sort_topk_ids(
   static constexpr int COUNT_WG = 256;
   static constexpr int WARP_SIZE = 16;
   static constexpr int MAX_LOCAL = 32;
+
+  TORCH_CHECK(
+      num_experts <= WARP_SIZE * MAX_LOCAL,
+      "fused_moe: num_experts=",
+      num_experts,
+      " exceeds supported maximum ",
+      (WARP_SIZE * MAX_LOCAL),
+      " for sort_topk_ids");
 
   auto slot_rel = torch::empty(
       num_slots,
@@ -169,14 +214,20 @@ static void sort_topk_ids(
             if (gid >= num_slots) return;
             int32_t expert_id = topk_ids_ptr[gid];
             int64_t dest = (int64_t)slot_rel_ptr[gid] + exp_off_ptr[expert_id];
+            // Store token index (slot / num_per_tok) directly
             sorted_tok_ptr[dest] = (int32_t)(gid / num_per_tok);
+            // Scatter the routing weight to the same sorted position
             sorted_weights_ptr[dest] = topk_weights_ptr[gid];
+            // Store original flat slot index for intermediate buffer addressing
             if (sorted_slot_ptr) sorted_slot_ptr[dest] = gid;
           });
     });
   }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════=
+// PyTorch Entry Point
+// ═════════════════════════════════════════════════════════════════════════════=
 torch::Tensor fused_moe(
     torch::Tensor input_tokens,
     torch::Tensor w13,
@@ -220,13 +271,28 @@ torch::Tensor fused_moe(
   auto topk_wt_flat = topk_weights.to(torch::kFloat32).contiguous().reshape(-1);
 
   torch::Tensor out;
-  if (output_opt.has_value())
+  if (output_opt.has_value()) {
     out = output_opt.value();
-  else
+    TORCH_CHECK(
+        out.dtype() == input_tokens.dtype(),
+        "fused_moe: output dtype must match input_tokens dtype");
+    TORCH_CHECK(
+        out.device() == input_tokens.device(),
+        "fused_moe: output device must match input_tokens device");
+    TORCH_CHECK(
+        out.sizes() == input_tokens.sizes(),
+        "fused_moe: output shape must match input_tokens shape");
+    TORCH_CHECK(out.is_contiguous(), "fused_moe: output must be contiguous");
+  } else {
     out = torch::zeros_like(input_tokens);
+  }
 
-  auto intermediate = torch::zeros(
-      {(int64_t)NT * K, (int64_t)H},
+  const bool use_decode = (NT <= SG_COUNT);
+  const int strips = I / (SG_COUNT * TK);
+  const int64_t inter_rows =
+      use_decode ? (int64_t)NT * K * strips : (int64_t)NT * K;
+  auto intermediate = torch::empty(
+      {inter_rows, (int64_t)H},
       torch::TensorOptions()
           .dtype(torch::kFloat32)
           .device(input_tokens.device()));
@@ -256,7 +322,7 @@ torch::Tensor fused_moe(
         return reinterpret_cast<const DTYPE*>(t.template data_ptr<at::Half>());
     };
 
-    if (NT == 1) {
+    if (NT < ::TM) {
       auto dispatch =
           [&](auto w13_bias_flag, auto w2_bias_flag, auto clamp_flag) {
             launch_fused_moe_kernel<
@@ -279,7 +345,7 @@ torch::Tensor fused_moe(
                 row_counter.data_ptr<int32_t>(),
                 K,
                 /*expert_offset=*/nullptr,
-                /*total_tokens=*/0,
+                /*total_tokens=*/NT,
                 /*source_row=*/nullptr,
                 /*topk_weights=*/topk_wt_flat.data_ptr<float>(),
                 /*num_tokens=*/NT,
@@ -346,6 +412,7 @@ torch::Tensor fused_moe(
                   decltype(clamp_flag)::value,
                   /*IS_DECODE=*/false,
                   DTYPE,
+                  /*INTER_DTYPE=*/float,
                   TM_val>(
                   q,
                   raw_cptr(input_tokens),
@@ -368,14 +435,7 @@ torch::Tensor fused_moe(
                   sorted_slot_ids.data_ptr<int32_t>(),
                   /*gemm1_clamp_limit=*/(float)gemm1_clamp_limit);
             };
-            if (K == 1)
-              prefill_launch(std::integral_constant<int, 1>{});
-            else if (K == 2)
-              prefill_launch(std::integral_constant<int, 2>{});
-            else if (K <= 4)
-              prefill_launch(std::integral_constant<int, 4>{});
-            else
-              prefill_launch(std::integral_constant<int, ::TM>{});
+            prefill_launch(std::integral_constant<int, ::TM>{});
           };
 
       auto dispatch_bias = [&](auto clamp_flag) {
