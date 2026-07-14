@@ -31,7 +31,7 @@ torch::Tensor cutlass_grouped_gemm_interface(
         "XE default cutlass kernel is not enabled in this build, force use XE "
         "default kernel failed.");
 #endif
-  } else if (vllm::xpu::is_xe2_arch()) {
+  } else if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel
     return cutlass_grouped_gemm_xe2(

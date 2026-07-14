@@ -18,6 +18,14 @@ torch::Tensor fp8_gemm(
     const std::optional<torch::Tensor>& B_scale_,
     const std::optional<torch::Tensor>& bias_);
 
+torch::Tensor fp8_bmm(
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    std::optional<c10::ScalarType> out_dtype,
+    const std::optional<torch::Tensor>& A_scale_,
+    const std::optional<torch::Tensor>& B_scale_,
+    const std::optional<torch::Tensor>& bias_);
+
 torch::Tensor fp8_gemm_w8a16(
     const torch::Tensor& A,
     const torch::Tensor& B,
@@ -202,6 +210,10 @@ bool is_bmg_g31(int64_t device_index);
 bool is_bmg(int64_t device_index);
 
 bool is_pvc(int64_t device_index);
+
+bool is_xe2_arch(int64_t device_index);
+
+bool is_xe3_arch(int64_t device_index);
 
 void exponential_2d_(
     torch::Tensor& tensor,
