@@ -440,6 +440,69 @@ class silu_and_mul_with_clamp_kernel {
   const float beta;
 };
 
+// Vectorized flat grid-stride variant of silu_and_mul_with_clamp.
+// Each work-item processes VEC contiguous elements per chunk using aligned
+// (wide) loads/stores, and the grid spans all (token, chunk) pairs via a
+// grid-stride loop so occupancy is independent of the token count. This is the
+// bandwidth-optimized path used whenever d is divisible by VEC.
+template <
+    typename scalar_t,
+    scalar_t (*ACT_FN)(
+        const scalar_t&,
+        const scalar_t&,
+        const float,
+        const float,
+        const float),
+    int VEC>
+class silu_and_mul_with_clamp_vec_kernel {
+ public:
+  silu_and_mul_with_clamp_vec_kernel(
+      scalar_t* __restrict__ out,          // [..., d]
+      const scalar_t* __restrict__ input,  // [..., 2 * d]
+      const int d,
+      const float limit,
+      const float alpha,
+      const float beta,
+      const int64_t total_chunks)
+      : out(out),
+        input(input),
+        d(d),
+        limit(limit),
+        alpha(alpha),
+        beta(beta),
+        total_chunks(total_chunks) {}
+
+  void operator()(sycl::nd_item<1> item) const {
+    using vec_t = vllm::xpu::aligned_vec<scalar_t, VEC>;
+    const int64_t bound = d / VEC;  // # of vec chunks per token half
+    const int64_t stride = item.get_global_range(0);
+    const vec_t* in_v = reinterpret_cast<const vec_t*>(input);
+    vec_t* out_v = reinterpret_cast<vec_t*>(out);
+    for (int64_t gc = item.get_global_id(0); gc < total_chunks; gc += stride) {
+      const int64_t token_idx = gc / bound;
+      const int64_t i = gc - token_idx * bound;
+      // gate = first half, up = second half (contiguous chunks)
+      vec_t gate = in_v[token_idx * bound * 2 + i];
+      vec_t up = in_v[token_idx * bound * 2 + bound + i];
+      vec_t o;
+#pragma unroll
+      for (int j = 0; j < VEC; ++j) {
+        o[j] = ACT_FN(gate[j], up[j], limit, alpha, beta);
+      }
+      out_v[token_idx * bound + i] = o;
+    }
+  }
+
+ private:
+  scalar_t* out;
+  const scalar_t* input;
+  const int d;
+  const float limit;
+  const float alpha;
+  const float beta;
+  const int64_t total_chunks;
+};
+
 }  // namespace vllm
 
 // Launch activation and gating kernel.
@@ -779,27 +842,61 @@ void swiglustep_and_mul(
   LAUNCH_SWIGLUSTEP_AND_MUL(vllm::swiglustep_and_mul, limit);
 }
 
-#define LAUNCH_SILU_AND_MUL_WITH_CLAMP(KERNEL, LIMIT, ALPHA, BETA)            \
-  int d = input.size(-1) / 2;                                                 \
-  int64_t num_tokens = input.numel() / input.size(-1);                        \
-  sycl::range<1> grid(num_tokens);                                            \
-  sycl::range<1> block(std::min(d, 1024));                                    \
-  at::DeviceGuard device_guard(input.device());                               \
-  auto& queue = vllm::xpu::vllmGetQueue();                                    \
-  VLLM_DISPATCH_FLOATING_TYPES(                                               \
-      input.scalar_type(), "silu_and_mul_with_clamp_kernel", [&] {            \
-        queue.submit([&](sycl::handler& cgh) {                                \
-          cgh.parallel_for(                                                   \
-              sycl::nd_range<1>(grid * block, block),                         \
-              vllm::                                                          \
-                  silu_and_mul_with_clamp_kernel<scalar_t, KERNEL<scalar_t>>( \
-                      out.data_ptr<scalar_t>(),                               \
-                      input.data_ptr<scalar_t>(),                             \
-                      d,                                                      \
-                      LIMIT,                                                  \
-                      ALPHA,                                                  \
-                      BETA));                                                 \
-        });                                                                   \
+#define LAUNCH_SILU_AND_MUL_WITH_CLAMP(KERNEL, LIMIT, ALPHA, BETA)          \
+  int d = input.size(-1) / 2;                                               \
+  int64_t num_tokens = input.numel() / input.size(-1);                      \
+  at::DeviceGuard device_guard(input.device());                             \
+  auto& queue = vllm::xpu::vllmGetQueue();                                  \
+  if (num_tokens == 0) {                                                    \
+    return;                                                                 \
+  }                                                                         \
+  VLLM_DISPATCH_FLOATING_TYPES(                                             \
+      input.scalar_type(), "silu_and_mul_with_clamp_kernel", [&] {          \
+        /* 16-byte aligned vector loads: 8xbf16/half, 4xfloat. */           \
+        constexpr int VEC = 16 / sizeof(scalar_t);                          \
+        if (d % VEC == 0) {                                                 \
+          const int64_t bound = d / VEC;                                    \
+          const int64_t total_chunks = num_tokens * bound;                  \
+          constexpr int64_t wg = 256;                                       \
+          /* Cap grid to fill the GPU; grid-stride covers the remainder. */ \
+          constexpr int64_t max_wgs = 2560;                                 \
+          int64_t n_wgs = (total_chunks + wg - 1) / wg;                     \
+          if (n_wgs > max_wgs) n_wgs = max_wgs;                             \
+          if (n_wgs < 1) n_wgs = 1;                                         \
+          sycl::range<1> global(n_wgs * wg);                                \
+          sycl::range<1> block(wg);                                         \
+          queue.submit([&](sycl::handler& cgh) {                            \
+            cgh.parallel_for(                                               \
+                sycl::nd_range<1>(global, block),                           \
+                vllm::silu_and_mul_with_clamp_vec_kernel<                   \
+                    scalar_t,                                               \
+                    KERNEL<scalar_t>,                                       \
+                    VEC>(                                                   \
+                    out.data_ptr<scalar_t>(),                               \
+                    input.data_ptr<scalar_t>(),                             \
+                    d,                                                      \
+                    LIMIT,                                                  \
+                    ALPHA,                                                  \
+                    BETA,                                                   \
+                    total_chunks));                                         \
+          });                                                               \
+        } else {                                                            \
+          sycl::range<1> grid(num_tokens);                                  \
+          sycl::range<1> block(std::min(d, 1024));                          \
+          queue.submit([&](sycl::handler& cgh) {                            \
+            cgh.parallel_for(                                               \
+                sycl::nd_range<1>(grid * block, block),                     \
+                vllm::silu_and_mul_with_clamp_kernel<                       \
+                    scalar_t,                                               \
+                    KERNEL<scalar_t>>(                                      \
+                    out.data_ptr<scalar_t>(),                               \
+                    input.data_ptr<scalar_t>(),                             \
+                    d,                                                      \
+                    LIMIT,                                                  \
+                    ALPHA,                                                  \
+                    BETA));                                                 \
+          });                                                               \
+        }                                                                   \
       });
 
 void silu_and_mul_with_clamp(
