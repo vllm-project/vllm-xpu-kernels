@@ -365,6 +365,17 @@ def swiglustep_and_mul(
     torch.ops._C.swiglustep_and_mul(out, input, limit)
 
 
+def silu_and_mul_with_clamp(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    limit: float,
+    alpha: float = 1.0,
+    beta: float = 0.0,
+) -> None:
+    """SwiGLU (SiLU gate) with input clamping."""
+    torch.ops._C.silu_and_mul_with_clamp(out, input, limit, alpha, beta)
+
+
 # onednn gemm
 def int4_gemm_w4a16(input: torch.Tensor, weight: torch.Tensor,
                     bias: Optional[torch.Tensor], scales: torch.Tensor,

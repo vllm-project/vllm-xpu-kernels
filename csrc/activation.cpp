@@ -376,6 +376,70 @@ class swiglustep_and_mul_kernel {
   const float limit;
 };
 
+// SwiGLU with clamping (SwiGLU-OAI style), contiguous gate/up halves.
+//   gate = gate.clamp(max=limit)
+//   up   = up.clamp(min=-limit, max=limit)
+//   out  = (gate * sigmoid(alpha * gate)) * (up + beta)
+// alpha=1.0, beta=0.0 reduce this to silu(gate) * up.
+template <typename T>
+[[intel::device_indirectly_callable]] inline __attribute__((always_inline)) T
+silu_and_mul_with_clamp_fn(
+    const T& gate, const T& up, float limit, float alpha, float beta) {
+  // clamp gate: min=None, max=limit
+  const float gate_f = (float)gate;
+  const float clamped_gate = gate_f > limit ? limit : gate_f;
+
+  // clamp up: min=-limit, max=limit
+  const float up_f = (float)up;
+  const float clamped_up =
+      up_f > limit ? limit : (up_f < -limit ? -limit : up_f);
+
+  // silu(gate) = gate * sigmoid(alpha * gate)
+  const float silu = clamped_gate / (1.0f + sycl::exp(-clamped_gate * alpha));
+
+  return (T)(silu * (clamped_up + beta));
+}
+
+template <
+    typename scalar_t,
+    scalar_t (*ACT_FN)(
+        const scalar_t&,
+        const scalar_t&,
+        const float,
+        const float,
+        const float)>
+class silu_and_mul_with_clamp_kernel {
+ public:
+  silu_and_mul_with_clamp_kernel(
+      scalar_t* __restrict__ out,          // [..., d]
+      const scalar_t* __restrict__ input,  // [..., 2 * d]
+      const int d,
+      const float limit,
+      const float alpha,
+      const float beta)
+      : out(out), input(input), d(d), limit(limit), alpha(alpha), beta(beta) {}
+
+  void operator()(sycl::nd_item<1> item) const {
+    const int64_t token_idx = item.get_group(0);
+    for (int64_t idx = item.get_local_id(0); idx < d;
+         idx += item.get_local_range(0)) {
+      // gate = first half, up = second half (contiguous chunks)
+      const scalar_t gate = VLLM_LDG(&input[token_idx * 2 * d + idx]);
+      const scalar_t up = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
+
+      out[token_idx * d + idx] = ACT_FN(gate, up, limit, alpha, beta);
+    }
+  }
+
+ private:
+  scalar_t* out;
+  const scalar_t* input;
+  const int d;
+  const float limit;
+  const float alpha;
+  const float beta;
+};
+
 }  // namespace vllm
 
 // Launch activation and gating kernel.
@@ -713,4 +777,37 @@ void swiglustep_and_mul(
     torch::Tensor& input,  // [..., 2 * d]
     double limit) {
   LAUNCH_SWIGLUSTEP_AND_MUL(vllm::swiglustep_and_mul, limit);
+}
+
+#define LAUNCH_SILU_AND_MUL_WITH_CLAMP(KERNEL, LIMIT, ALPHA, BETA)            \
+  int d = input.size(-1) / 2;                                                 \
+  int64_t num_tokens = input.numel() / input.size(-1);                        \
+  sycl::range<1> grid(num_tokens);                                            \
+  sycl::range<1> block(std::min(d, 1024));                                    \
+  at::DeviceGuard device_guard(input.device());                               \
+  auto& queue = vllm::xpu::vllmGetQueue();                                    \
+  VLLM_DISPATCH_FLOATING_TYPES(                                               \
+      input.scalar_type(), "silu_and_mul_with_clamp_kernel", [&] {            \
+        queue.submit([&](sycl::handler& cgh) {                                \
+          cgh.parallel_for(                                                   \
+              sycl::nd_range<1>(grid * block, block),                         \
+              vllm::                                                          \
+                  silu_and_mul_with_clamp_kernel<scalar_t, KERNEL<scalar_t>>( \
+                      out.data_ptr<scalar_t>(),                               \
+                      input.data_ptr<scalar_t>(),                             \
+                      d,                                                      \
+                      LIMIT,                                                  \
+                      ALPHA,                                                  \
+                      BETA));                                                 \
+        });                                                                   \
+      });
+
+void silu_and_mul_with_clamp(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input,  // [..., 2 * d]
+    double limit,
+    double alpha,
+    double beta) {
+  LAUNCH_SILU_AND_MUL_WITH_CLAMP(
+      vllm::silu_and_mul_with_clamp_fn, limit, alpha, beta);
 }
