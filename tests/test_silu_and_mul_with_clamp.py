@@ -7,7 +7,7 @@ from tests.utils import opcheck, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
-D = [512, 13824]  # Arbitrary values for testing
+D = [512, 13824, 17]  # 17 exercises the scalar fallback (d % vec_size != 0)
 LIMITS = [7.0]
 PARAMS = [(1.0, 0.0), (1.702, 1.0)]  # (alpha, beta)
 SEEDS = [0]
