@@ -195,6 +195,7 @@ class cmake_build_ext(build_ext):
             "XPU_SPECIFIC_KERNELS_ENABLED",
             "XPUMEM_ALLOCATOR_ENABLED",
             "VLLM_XPU_ENABLE_ONEDNN",
+            "BUILD_QUANT_ASM_XE3",
         ]
         for opt in _kernel_options:
             cmake_args.append('-D{}={}'.format(
@@ -557,7 +558,8 @@ additional_libraries = {}
 # The Xe3 asm quant library is built independently of the SYCL-TLA kernels;
 # keep this condition in sync with the quant_asm_xe_3 target in CMakeLists.txt.
 if (_is_enabled("VLLM_XPU_ENABLE_XE3P", default="ON")
-        and _is_enabled("BASIC_KERNELS_ENABLED")):
+        and _is_enabled("BASIC_KERNELS_ENABLED")
+        and _is_enabled("BUILD_QUANT_ASM_XE3")):
     additional_libraries["quant_asm_xe_3"] = ""
 if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
     if _is_enabled("VLLM_XPU_ENABLE_XE2"):

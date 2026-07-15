@@ -79,6 +79,10 @@ option(XPU_SPECIFIC_KERNELS_ENABLED
 option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
 option(VLLM_XPU_ENABLE_ONEDNN
        "Build oneDNN-backed kernels (GEMM ops in _xpu_C extension)" ON)
+# Xe3(p)-only hand-written asm quant lib. Can be turned OFF independently of
+# VLLM_XPU_ENABLE_XE3P to work around IGC versions that miscompile the asm.
+# Build-time env: BUILD_QUANT_ASM_XE3=OFF (forwarded to cmake by setup.py).
+option(BUILD_QUANT_ASM_XE3 "Build the Xe3 hand-written asm quant library" ON)
 
 # KERNEL CONFIGURATION — controls which paged decode kernel variants are
 # compiled. Use model-specific configs to dramatically reduce compile time. See
@@ -580,7 +584,9 @@ endif()
 #
 # quant_asm_xe_3 shared library — Xe3(p)-only hand-written asm quant impl.
 #
-if(VLLM_XPU_ENABLE_XE3P AND BASIC_KERNELS_ENABLED)
+if(VLLM_XPU_ENABLE_XE3P
+   AND BASIC_KERNELS_ENABLED
+   AND BUILD_QUANT_ASM_XE3)
   message(STATUS "Enabling quant_asm_xe_3 library (Xe3 asm quant impl).")
 
   set(QUANT_ASM_SRC "csrc/quant_asm_entry.cpp")
@@ -665,6 +671,10 @@ if(BASIC_KERNELS_ENABLED)
   if(VLLM_XPU_ENABLE_XE3P AND TARGET quant_asm_xe_3)
     target_link_libraries(_C PRIVATE quant_asm_xe_3)
     target_compile_definitions(_C PRIVATE VLLM_QUANT_ASM_AVAILABLE=1)
+  elseif(VLLM_XPU_ENABLE_XE3P)
+    message(
+      STATUS
+        "quant_asm_xe_3 disabled; _C built without VLLM_QUANT_ASM_AVAILABLE.")
   endif()
 
 endif()
