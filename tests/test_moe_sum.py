@@ -99,3 +99,35 @@ def test_moe_sum_padded_topk_ids(m: int, topk: int, k: int,
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
 
     opcheck(torch.ops._moe_C.moe_sum, (input, actual, topk_ids, None))
+
+
+def test_moe_sum_input_validation():
+    m, topk, k = 32, 4, 128
+    input = torch.randn((m, topk, k), device="xpu", dtype=torch.float32)
+    output = torch.empty((m, k), device="xpu", dtype=torch.float32)
+    topk_ids = torch.zeros((m, topk), device="xpu", dtype=torch.int32)
+    expert_map = torch.arange(8, device="xpu", dtype=torch.int32)
+
+    # expert_map without topk_ids must be rejected rather than silently ignored.
+    with pytest.raises(RuntimeError, match="expert_map requires topk_ids"):
+        moe_sum(input, output, None, expert_map)
+
+    # dtype mismatch between input and output.
+    bad_out = torch.empty((m, k), device="xpu", dtype=torch.float16)
+    with pytest.raises(RuntimeError, match="same dtype"):
+        moe_sum(input, bad_out)
+
+    # non-contiguous input (a strided slice along hidden).
+    wide = torch.randn((m, topk, k * 2), device="xpu", dtype=torch.float32)
+    noncontig = wide[:, :, ::2]  # shape [m, topk, k], non-contiguous
+    assert not noncontig.is_contiguous()
+    with pytest.raises(RuntimeError, match="contiguous"):
+        moe_sum(noncontig, output)
+
+    # topk_ids with a wrong shape.
+    with pytest.raises(RuntimeError, match="num_tokens, topk"):
+        moe_sum(input, output, topk_ids[:, :topk - 1].contiguous(), None)
+
+    # expert_map with a non-int32 dtype.
+    with pytest.raises(RuntimeError, match="expert_map must be int32"):
+        moe_sum(input, output, topk_ids, expert_map.to(torch.int64))

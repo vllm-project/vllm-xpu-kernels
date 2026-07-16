@@ -1213,10 +1213,53 @@ void moe_sum(
   const auto num_tokens = output.numel() / hidden_size;
   const int topk = input.size(1);
 
+  // This kernel indexes input/output with a contiguous linear layout (it does
+  // not use per-dim strides like the CUDA reference), so both must be
+  // contiguous, share dtype/device, and have matching element counts.
+  TORCH_CHECK(
+      input.scalar_type() == output.scalar_type(),
+      "moe_sum: input and output must have the same dtype");
+  TORCH_CHECK(
+      input.device() == output.device(),
+      "moe_sum: input and output must be on the same device");
+  TORCH_CHECK(
+      input.is_contiguous() && output.is_contiguous(),
+      "moe_sum expects contiguous input and output");
+  TORCH_CHECK(
+      input.numel() == output.numel() * topk,
+      "moe_sum: input shape must be [num_tokens, topk, hidden] matching output "
+      "[num_tokens, hidden]");
+
   // Pad-aware reduction is required whenever topk_ids is supplied: slots whose
   // (global) expert id is negative are padding/invalid, and -- when an
   // expert_map is given -- experts that map off this device (value < 0) must
   // also be skipped. Without topk_ids we take the plain fast path.
+  // An expert_map without topk_ids has no effect and almost certainly signals a
+  // caller bug, so reject it explicitly rather than silently ignoring it.
+  TORCH_CHECK(
+      !(expert_map.has_value() && !topk_ids.has_value()),
+      "moe_sum: expert_map requires topk_ids to be provided");
+
+  if (topk_ids.has_value()) {
+    const auto& tk = topk_ids.value();
+    TORCH_CHECK(tk.is_contiguous(), "moe_sum: topk_ids must be contiguous");
+    TORCH_CHECK(
+        tk.device() == input.device(),
+        "moe_sum: topk_ids must be on the same device as input");
+    TORCH_CHECK(
+        tk.dim() == 2 && tk.size(0) == num_tokens && tk.size(1) == topk,
+        "moe_sum: topk_ids must have shape [num_tokens, topk]");
+    if (expert_map.has_value()) {
+      const auto& em = expert_map.value();
+      TORCH_CHECK(
+          em.scalar_type() == at::kInt, "moe_sum: expert_map must be int32");
+      TORCH_CHECK(em.is_contiguous(), "moe_sum: expert_map must be contiguous");
+      TORCH_CHECK(
+          em.device() == input.device(),
+          "moe_sum: expert_map must be on the same device as input");
+    }
+  }
+
   const bool pad_aware = topk_ids.has_value();
   const int32_t* expert_map_ptr = (pad_aware && expert_map.has_value())
                                       ? expert_map->data_ptr<int32_t>()
