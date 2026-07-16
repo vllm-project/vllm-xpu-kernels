@@ -158,6 +158,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "-> ()");
   xpu_ops.impl("bgmv_expand_slice", torch::kXPU, &bgmv_expand_slice);
 
+  xpu_ops.def(
+      "lora_shrink(Tensor inputs, Tensor[] lora_a_weights, "
+      "Tensor! output_tensor, Tensor lora_indices, float scaling) -> ()");
+  xpu_ops.impl("lora_shrink", torch::kXPU, &lora_shrink);
+
+  xpu_ops.def(
+      "lora_expand(Tensor inputs, Tensor[] lora_b_weights, "
+      "Tensor! output_tensor, Tensor lora_indices, int offset_start, "
+      "bool add_inputs) -> ()");
+  xpu_ops.impl("lora_expand", torch::kXPU, &lora_expand);
+
 #ifdef VLLM_GDN_ENABLED
   xpu_ops.def(
       "gdn_attention(Tensor! core_attn_out, Tensor! z, Tensor "

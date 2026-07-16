@@ -91,3 +91,78 @@ def bgmv_expand_slice(
         slice_size,
         add_inputs,
     )
+
+
+def lora_shrink(
+    inputs: torch.Tensor,
+    lora_a_weights: list[torch.Tensor],
+    output_tensor: torch.Tensor,
+    token_lora_mapping: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,
+    num_tokens_per_lora: torch.Tensor,
+    lora_token_start_loc: torch.Tensor,
+    lora_ids: torch.Tensor,
+    no_lora_flag_cpu: torch.Tensor,
+    num_active_loras: torch.Tensor,
+    scaling: float = 1.0,
+) -> None:
+    """Multi-slice LoRA shrink: processes ALL slices in one kernel launch.
+
+    Args:
+        inputs: [batch_size, hidden_size]
+        lora_a_weights: list of [num_loras, 1, rank, hidden_size]
+        output_tensor: [num_slices, batch_size, rank]
+        token_lora_mapping: [batch_size]
+        scaling: scaling factor
+    """
+    if no_lora_flag_cpu is not None:
+        assert no_lora_flag_cpu.numel() == 1
+        if no_lora_flag_cpu.item():
+            return
+
+    torch.ops._xpu_C.lora_shrink(
+        inputs,
+        lora_a_weights,
+        output_tensor,
+        token_lora_mapping,
+        scaling,
+    )
+
+
+def lora_expand(
+    inputs: torch.Tensor,
+    lora_b_weights: list[torch.Tensor],
+    output_tensor: torch.Tensor,
+    token_lora_mapping: torch.Tensor,
+    token_indices_sorted_by_lora_ids: torch.Tensor,
+    num_tokens_per_lora: torch.Tensor,
+    lora_token_start_loc: torch.Tensor,
+    lora_ids: torch.Tensor,
+    no_lora_flag_cpu: torch.Tensor,
+    num_active_loras: torch.Tensor,
+    offset_start: int = 0,
+    add_inputs: bool = True,
+) -> None:
+    """Multi-slice LoRA expand: processes ALL slices in one kernel launch.
+
+    Args:
+        inputs: [num_slices, batch_size, rank]
+        lora_b_weights: list of [num_loras, 1, slice_size, rank]
+        output_tensor: [batch_size, total_output_dim]
+        token_lora_mapping: [batch_size]
+        offset_start: starting column offset
+        add_inputs: if True, add to existing output
+    """
+    if no_lora_flag_cpu is not None:
+        assert no_lora_flag_cpu.numel() == 1
+        if no_lora_flag_cpu.item():
+            return
+
+    torch.ops._xpu_C.lora_expand(
+        inputs,
+        lora_b_weights,
+        output_tensor,
+        token_lora_mapping,
+        offset_start,
+        add_inputs,
+    )
