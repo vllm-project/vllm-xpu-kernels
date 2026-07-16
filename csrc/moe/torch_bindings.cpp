@@ -3,8 +3,13 @@
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Calculate the result of moe by summing up the partial results
-  // from all selected experts.
-  m.def("moe_sum(Tensor input, Tensor! output) -> ()");
+  // from all selected experts. topk_ids/expert_map are optional and, when
+  // both given, enable pad-aware reduce that skips (token, expert)
+  // slots that were never actually computed (unrouted, or routed to an
+  // expert not owned by this rank under expert parallelism).
+  m.def(
+      "moe_sum(Tensor input, Tensor! output, Tensor? topk_ids=None, "
+      "Tensor? expert_map=None) -> ()");
   m.impl("moe_sum", torch::kXPU, &moe_sum);
 
   // Aligning the number of tokens to be processed by each expert such

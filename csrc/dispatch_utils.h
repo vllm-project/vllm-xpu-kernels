@@ -75,6 +75,18 @@
 #define VLLM_DISPATCH_INTEGRAL_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_INTEGRAL_TYPES(__VA_ARGS__))
 
+// Dispatch on an int32/int64 index tensor (e.g. topk_ids) nested inside a
+// value-type dispatch. Named 'idx_t' instead of 'scalar_t'.
+#define VLLM_DISPATCH_IDX_CASE(enum_type, ...) \
+  AT_PRIVATE_CASE_TYPE_USING_HINT(enum_type, idx_t, __VA_ARGS__)
+
+#define VLLM_DISPATCH_CASE_IDX_TYPES(...)                  \
+  VLLM_DISPATCH_IDX_CASE(at::ScalarType::Int, __VA_ARGS__) \
+  VLLM_DISPATCH_IDX_CASE(at::ScalarType::Long, __VA_ARGS__)
+
+#define VLLM_DISPATCH_IDX_TYPES(TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_IDX_TYPES(__VA_ARGS__))
+
 #define VLLM_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(                                              \
       TYPE, NAME, VLLM_DISPATCH_CASE_INTEGRAL_AND_UNSIGNED_TYPES(__VA_ARGS__))

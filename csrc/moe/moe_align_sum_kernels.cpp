@@ -582,27 +582,274 @@ class count_and_sort_expert_tokens_kernel {
   }
 };
 
-template <typename scalar_t, int TOPK>
-class moe_sum_kernel {
+// Reduce the topk expert outputs per token (summed in fp32). The output is
+// dense [num_tokens, d]; the input is addressed by its strides so non-
+// contiguous inputs work without a copy. A 16B-vectorized path is used when
+// the hidden dim is contiguous (innermost stride 1) and aligned; otherwise a
+// scalar kernel reads via arbitrary strides. topk is a compile-time constant
+// for common values and runtime otherwise. Mirrors CUDA's moe_sum kernels in
+// csrc/libtorch_stable/moe/moe_align_sum_kernels.cu.
+
+// Plain aligned array, used as a 16-byte vector pack (8 elems for bf16/fp16,
+// 4 for fp32). Mirrors CUDA's vllm::vec_n_t.
+template <typename scalar_t, int vec_size>
+struct alignas(vec_size * sizeof(scalar_t)) vec_n_t {
+  scalar_t val[vec_size];
+};
+
+// Elements per 16-byte vector (8 for bf16/fp16, 4 for fp32).
+template <typename scalar_t>
+constexpr int MOE_SUM_VEC = 16 / sizeof(scalar_t);
+
+// Pad-aware skip check for a (token, k) slot: skip if the token wasn't
+// actually routed to a k-th expert (expert_id < 0, used for padding), or if
+// the routed expert isn't owned by this rank under expert parallelism
+// (expert_map[expert_id] < 0). Mirrors CUDA's moe_sum_pad_aware_skip.
+template <typename idx_t>
+inline bool moe_sum_pad_aware_skip(
+    const idx_t* __restrict__ topk_ids,
+    const int32_t* __restrict__ expert_map,
+    int64_t idx) {
+  int64_t expert_id = static_cast<int64_t>(topk_ids[idx]);
+  if (expert_id < 0) return true;
+  if (expert_map != nullptr && expert_map[expert_id] < 0) return true;
+  return false;
+}
+
+template <typename scalar_t, typename idx_t, int TOPK, bool PAD_AWARE>
+class moe_sum_vec_kernel {
  private:
-  scalar_t* output;       // [..., d]
-  const scalar_t* input;  // [..., topk, d]
+  scalar_t* __restrict__ out;          // [num_tokens, d], contiguous
+  const scalar_t* __restrict__ input;  // [num_tokens, topk, d], d contiguous
+  int64_t num_tokens;
   int d;
+  int64_t stride_token;
+  int64_t stride_topk;
+  const idx_t* __restrict__ topk_ids;
+  const int32_t* __restrict__ expert_map;
+  int64_t stride_tk_token;
+  int64_t stride_tk_k;
+  int64_t global_stride;
 
  public:
-  moe_sum_kernel(scalar_t* output, const scalar_t* input, int d)
-      : output(output), input(input), d(d) {}
+  moe_sum_vec_kernel(
+      scalar_t* __restrict__ out,
+      const scalar_t* __restrict__ input,
+      int64_t num_tokens,
+      int d,
+      int64_t stride_token,
+      int64_t stride_topk,
+      const idx_t* __restrict__ topk_ids,
+      const int32_t* __restrict__ expert_map,
+      int64_t stride_tk_token,
+      int64_t stride_tk_k,
+      int64_t global_stride)
+      : out(out),
+        input(input),
+        num_tokens(num_tokens),
+        d(d),
+        stride_token(stride_token),
+        stride_topk(stride_topk),
+        topk_ids(topk_ids),
+        expert_map(expert_map),
+        stride_tk_token(stride_tk_token),
+        stride_tk_k(stride_tk_k),
+        global_stride(global_stride) {}
 
-  void operator()(sycl::nd_item<1> item) const {
-    const int64_t token_idx = item.get_group(0);
-    for (int64_t idx = item.get_local_id(0); idx < d;
-         idx += item.get_local_range(0)) {
-      scalar_t x = 0.0;
+  [[sycl::reqd_sub_group_size(32)]] void
+  operator()(sycl::nd_item<1> item) const {
+    using vec_t = vec_n_t<scalar_t, MOE_SUM_VEC<scalar_t>>;
+    constexpr int VEC = MOE_SUM_VEC<scalar_t>;
+    const int64_t n_vec = d / VEC;
+    const int64_t total = num_tokens * n_vec;
+    for (int64_t i = item.get_global_id(0); i < total; i += global_stride) {
+      const int64_t token = i / n_vec;
+      const int64_t v = i % n_vec;
+      const scalar_t* in_tok = input + token * stride_token + v * VEC;
+      const idx_t* tk_tok = nullptr;
+      if constexpr (PAD_AWARE) {
+        tk_tok = topk_ids + token * stride_tk_token;
+      }
+
+      float acc[VEC];
+#pragma unroll
+      for (int j = 0; j < VEC; ++j)
+        acc[j] = 0.f;
+
 #pragma unroll
       for (int k = 0; k < TOPK; ++k) {
-        x += input[token_idx * TOPK * d + k * d + idx];
+        if constexpr (PAD_AWARE) {
+          if (moe_sum_pad_aware_skip(tk_tok, expert_map, k * stride_tk_k)) {
+            continue;
+          }
+        }
+        vec_t packed =
+            *reinterpret_cast<const vec_t*>(in_tok + k * stride_topk);
+#pragma unroll
+        for (int j = 0; j < VEC; ++j)
+          acc[j] += static_cast<float>(packed.val[j]);
       }
-      output[token_idx * d + idx] = x;
+
+      vec_t outp;
+#pragma unroll
+      for (int j = 0; j < VEC; ++j)
+        outp.val[j] = static_cast<scalar_t>(acc[j]);
+      *reinterpret_cast<vec_t*>(out + token * d + v * VEC) = outp;
+    }
+  }
+};
+
+// Runtime-topk variant of the above, for topk values outside the templated
+// set.
+template <typename scalar_t, typename idx_t, bool PAD_AWARE>
+class moe_sum_vec_dynamic_kernel {
+ private:
+  scalar_t* __restrict__ out;
+  const scalar_t* __restrict__ input;
+  int64_t num_tokens;
+  int d;
+  int topk;
+  int64_t stride_token;
+  int64_t stride_topk;
+  const idx_t* __restrict__ topk_ids;
+  const int32_t* __restrict__ expert_map;
+  int64_t stride_tk_token;
+  int64_t stride_tk_k;
+  int64_t global_stride;
+
+ public:
+  moe_sum_vec_dynamic_kernel(
+      scalar_t* __restrict__ out,
+      const scalar_t* __restrict__ input,
+      int64_t num_tokens,
+      int d,
+      int topk,
+      int64_t stride_token,
+      int64_t stride_topk,
+      const idx_t* __restrict__ topk_ids,
+      const int32_t* __restrict__ expert_map,
+      int64_t stride_tk_token,
+      int64_t stride_tk_k,
+      int64_t global_stride)
+      : out(out),
+        input(input),
+        num_tokens(num_tokens),
+        d(d),
+        topk(topk),
+        stride_token(stride_token),
+        stride_topk(stride_topk),
+        topk_ids(topk_ids),
+        expert_map(expert_map),
+        stride_tk_token(stride_tk_token),
+        stride_tk_k(stride_tk_k),
+        global_stride(global_stride) {}
+
+  [[sycl::reqd_sub_group_size(32)]] void
+  operator()(sycl::nd_item<1> item) const {
+    using vec_t = vec_n_t<scalar_t, MOE_SUM_VEC<scalar_t>>;
+    constexpr int VEC = MOE_SUM_VEC<scalar_t>;
+    const int64_t n_vec = d / VEC;
+    const int64_t total = num_tokens * n_vec;
+    for (int64_t i = item.get_global_id(0); i < total; i += global_stride) {
+      const int64_t token = i / n_vec;
+      const int64_t v = i % n_vec;
+      const scalar_t* in_tok = input + token * stride_token + v * VEC;
+      const idx_t* tk_tok = nullptr;
+      if constexpr (PAD_AWARE) {
+        tk_tok = topk_ids + token * stride_tk_token;
+      }
+
+      float acc[VEC];
+#pragma unroll
+      for (int j = 0; j < VEC; ++j)
+        acc[j] = 0.f;
+
+      for (int k = 0; k < topk; ++k) {
+        if constexpr (PAD_AWARE) {
+          if (moe_sum_pad_aware_skip(tk_tok, expert_map, k * stride_tk_k)) {
+            continue;
+          }
+        }
+        vec_t packed =
+            *reinterpret_cast<const vec_t*>(in_tok + k * stride_topk);
+#pragma unroll
+        for (int j = 0; j < VEC; ++j)
+          acc[j] += static_cast<float>(packed.val[j]);
+      }
+
+      vec_t outp;
+#pragma unroll
+      for (int j = 0; j < VEC; ++j)
+        outp.val[j] = static_cast<scalar_t>(acc[j]);
+      *reinterpret_cast<vec_t*>(out + token * d + v * VEC) = outp;
+    }
+  }
+};
+
+// Stride-aware scalar fallback: handles unaligned/non-vectorizable hidden
+// dims (including a non-contiguous hidden stride) via per-element strided
+// reads. One work-group per token, mirroring CUDA's one-block-per-token
+// launch.
+template <typename scalar_t, typename idx_t, bool PAD_AWARE>
+class moe_sum_scalar_kernel {
+ private:
+  scalar_t* __restrict__ out;          // [num_tokens, d], contiguous
+  const scalar_t* __restrict__ input;  // [num_tokens, topk, d]
+  int d;
+  int topk;
+  int64_t stride_token;
+  int64_t stride_topk;
+  int64_t stride_hidden;
+  const idx_t* __restrict__ topk_ids;
+  const int32_t* __restrict__ expert_map;
+  int64_t stride_tk_token;
+  int64_t stride_tk_k;
+
+ public:
+  moe_sum_scalar_kernel(
+      scalar_t* __restrict__ out,
+      const scalar_t* __restrict__ input,
+      int d,
+      int topk,
+      int64_t stride_token,
+      int64_t stride_topk,
+      int64_t stride_hidden,
+      const idx_t* __restrict__ topk_ids,
+      const int32_t* __restrict__ expert_map,
+      int64_t stride_tk_token,
+      int64_t stride_tk_k)
+      : out(out),
+        input(input),
+        d(d),
+        topk(topk),
+        stride_token(stride_token),
+        stride_topk(stride_topk),
+        stride_hidden(stride_hidden),
+        topk_ids(topk_ids),
+        expert_map(expert_map),
+        stride_tk_token(stride_tk_token),
+        stride_tk_k(stride_tk_k) {}
+
+  [[sycl::reqd_sub_group_size(32)]] void
+  operator()(sycl::nd_item<1> item) const {
+    const int64_t token_idx = item.get_group(0);
+    const scalar_t* in_tok = input + token_idx * stride_token;
+    const idx_t* tk_tok = nullptr;
+    if constexpr (PAD_AWARE) {
+      tk_tok = topk_ids + token_idx * stride_tk_token;
+    }
+    for (int64_t idx = item.get_local_id(0); idx < d;
+         idx += item.get_local_range(0)) {
+      float x = 0.f;
+      for (int k = 0; k < topk; ++k) {
+        if constexpr (PAD_AWARE) {
+          if (moe_sum_pad_aware_skip(tk_tok, expert_map, k * stride_tk_k)) {
+            continue;
+          }
+        }
+        x += static_cast<float>(in_tok[k * stride_topk + idx * stride_hidden]);
+      }
+      out[token_idx * d + idx] = static_cast<scalar_t>(x);
     }
   }
 };
@@ -1167,65 +1414,250 @@ void batched_moe_align_block_size(
 
 void moe_sum(
     torch::Tensor& input,   // [num_tokens, topk, hidden_size]
-    torch::Tensor& output)  // [num_tokens, hidden_size]
-{
+    torch::Tensor& output,  // [num_tokens, hidden_size]
+    std::optional<torch::Tensor> topk_ids,
+    std::optional<torch::Tensor> expert_map) {
+  // Output is dense and written in place, so it must be contiguous. The
+  // input is read by its strides (no copy); only the hidden dim needs to be
+  // contiguous to take the vectorized path.
+  TORCH_CHECK(output.is_contiguous(), "moe_sum expects a contiguous output");
+
   const int hidden_size = input.size(-1);
-  const auto num_tokens = output.numel() / hidden_size;
+  const int64_t num_tokens = output.numel() / hidden_size;
   const int topk = input.size(1);
+  const int64_t stride_token = input.stride(0);
+  const int64_t stride_topk = input.stride(1);
+  const int64_t stride_hidden = input.stride(2);
 
   at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
   at::DeviceGuard device_guard(curDevice);
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  const int local_size = std::min(hidden_size, 1024);
-  const int global_size = num_tokens * local_size;
-  sycl::range<1> global_range(global_size);
-  sycl::range<1> local_range(local_size);
+  if (topk_ids.has_value()) {
+    // Pad-aware reduce path
+    const torch::Tensor& tk = topk_ids.value();
+    TORCH_CHECK(
+        tk.size(0) == num_tokens && tk.size(1) == topk,
+        "moe_sum: topk_ids must have shape [num_tokens, topk]");
+    const int64_t stride_tk_token = tk.stride(0);
+    const int64_t stride_tk_k = tk.stride(1);
 
-  switch (topk) {
-    case 2:
-      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
-        queue.submit([&](sycl::handler& cgh) {
-          cgh.parallel_for(
-              sycl::nd_range<1>(global_range, local_range),
-              vllm::moe::moe_sum_kernel<scalar_t, 2>(
-                  output.data_ptr<scalar_t>(),
-                  input.data_ptr<scalar_t>(),
-                  hidden_size));
-        });
+    const int32_t* expert_map_ptr = nullptr;
+    if (expert_map.has_value()) {
+      TORCH_CHECK(
+          expert_map->scalar_type() == at::ScalarType::Int,
+          "moe_sum: expert_map must be int32");
+      expert_map_ptr = expert_map->data_ptr<int32_t>();
+    }
+
+#define LAUNCH_MOE_SUM_PAD_AWARE_VEC(TOPK)                          \
+  queue.submit([&](sycl::handler& cgh) {                            \
+    cgh.parallel_for(                                               \
+        sycl::nd_range<1>(global_range, local_range),               \
+        vllm::moe::moe_sum_vec_kernel<scalar_t, idx_t, TOPK, true>( \
+            out_ptr,                                                \
+            in_ptr,                                                 \
+            num_tokens,                                             \
+            hidden_size,                                            \
+            stride_token,                                           \
+            stride_topk,                                            \
+            topk_ids_ptr,                                           \
+            expert_map_ptr,                                         \
+            stride_tk_token,                                        \
+            stride_tk_k,                                            \
+            global_stride));                                        \
+  })
+
+    VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_pad_aware", [&] {
+      constexpr int VEC = vllm::moe::MOE_SUM_VEC<scalar_t>;
+      constexpr int WIDTH = VEC * sizeof(scalar_t);
+      auto* out_ptr = output.data_ptr<scalar_t>();
+      auto* in_ptr = input.data_ptr<scalar_t>();
+
+      const bool can_vec = (stride_hidden == 1) && (hidden_size % VEC == 0) &&
+                           (stride_token % VEC == 0) &&
+                           (stride_topk % VEC == 0) &&
+                           (reinterpret_cast<uintptr_t>(in_ptr) % WIDTH == 0) &&
+                           (reinterpret_cast<uintptr_t>(out_ptr) % WIDTH == 0);
+
+      VLLM_DISPATCH_IDX_TYPES(tk.scalar_type(), "moe_sum_pad_aware_idx", [&] {
+        auto* topk_ids_ptr = tk.data_ptr<idx_t>();
+        if (can_vec) {
+          const int64_t n_vec = hidden_size / VEC;
+          const int64_t total = num_tokens * n_vec;
+          const int block = 256;
+          const int64_t num_blocks =
+              std::min<int64_t>((total + block - 1) / block, 65535);
+          const int64_t global_stride = num_blocks * block;
+          sycl::range<1> global_range(global_stride);
+          sycl::range<1> local_range(block);
+          switch (topk) {
+            case 1:
+              LAUNCH_MOE_SUM_PAD_AWARE_VEC(1);
+              break;
+            case 2:
+              LAUNCH_MOE_SUM_PAD_AWARE_VEC(2);
+              break;
+            case 4:
+              LAUNCH_MOE_SUM_PAD_AWARE_VEC(4);
+              break;
+            case 6:
+              LAUNCH_MOE_SUM_PAD_AWARE_VEC(6);
+              break;
+            case 8:
+              LAUNCH_MOE_SUM_PAD_AWARE_VEC(8);
+              break;
+            case 9:
+              LAUNCH_MOE_SUM_PAD_AWARE_VEC(9);
+              break;
+            default:
+              queue.submit([&](sycl::handler& cgh) {
+                cgh.parallel_for(
+                    sycl::nd_range<1>(global_range, local_range),
+                    vllm::moe::
+                        moe_sum_vec_dynamic_kernel<scalar_t, idx_t, true>(
+                            out_ptr,
+                            in_ptr,
+                            num_tokens,
+                            hidden_size,
+                            topk,
+                            stride_token,
+                            stride_topk,
+                            topk_ids_ptr,
+                            expert_map_ptr,
+                            stride_tk_token,
+                            stride_tk_k,
+                            global_stride));
+              });
+              break;
+          }
+        } else {
+          sycl::range<1> global_range(num_tokens * std::min(hidden_size, 1024));
+          sycl::range<1> local_range(std::min(hidden_size, 1024));
+          queue.submit([&](sycl::handler& cgh) {
+            cgh.parallel_for(
+                sycl::nd_range<1>(global_range, local_range),
+                vllm::moe::moe_sum_scalar_kernel<scalar_t, idx_t, true>(
+                    out_ptr,
+                    in_ptr,
+                    hidden_size,
+                    topk,
+                    stride_token,
+                    stride_topk,
+                    stride_hidden,
+                    topk_ids_ptr,
+                    expert_map_ptr,
+                    stride_tk_token,
+                    stride_tk_k));
+          });
+        }
       });
-      break;
-
-    case 3:
-      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
-        queue.submit([&](sycl::handler& cgh) {
-          cgh.parallel_for(
-              sycl::nd_range<1>(global_range, local_range),
-              vllm::moe::moe_sum_kernel<scalar_t, 3>(
-                  output.data_ptr<scalar_t>(),
-                  input.data_ptr<scalar_t>(),
-                  hidden_size));
-        });
-      });
-      break;
-
-    case 4:
-      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
-        queue.submit([&](sycl::handler& cgh) {
-          cgh.parallel_for(
-              sycl::nd_range<1>(global_range, local_range),
-              vllm::moe::moe_sum_kernel<scalar_t, 4>(
-                  output.data_ptr<scalar_t>(),
-                  input.data_ptr<scalar_t>(),
-                  hidden_size));
-        });
-      });
-      break;
-
-    default:
-      at::sum_out(output, input, 1);
-      break;
+    });
+#undef LAUNCH_MOE_SUM_PAD_AWARE_VEC
+    return;
   }
+
+#define LAUNCH_MOE_SUM_VEC(TOPK)                                       \
+  queue.submit([&](sycl::handler& cgh) {                               \
+    cgh.parallel_for(                                                  \
+        sycl::nd_range<1>(global_range, local_range),                  \
+        vllm::moe::moe_sum_vec_kernel<scalar_t, int32_t, TOPK, false>( \
+            out_ptr,                                                   \
+            in_ptr,                                                    \
+            num_tokens,                                                \
+            hidden_size,                                               \
+            stride_token,                                              \
+            stride_topk,                                               \
+            nullptr,                                                   \
+            nullptr,                                                   \
+            0,                                                         \
+            0,                                                         \
+            global_stride));                                           \
+  })
+
+  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum", [&] {
+    constexpr int VEC = vllm::moe::MOE_SUM_VEC<scalar_t>;
+    constexpr int WIDTH = VEC * sizeof(scalar_t);  // 16 bytes
+    auto* out_ptr = output.data_ptr<scalar_t>();
+    auto* in_ptr = input.data_ptr<scalar_t>();
+
+    // Vectorize along hidden only when it is contiguous (innermost stride
+    // 1), a whole number of vectors, and every row offset stays 16B-aligned.
+    const bool can_vec = (stride_hidden == 1) && (hidden_size % VEC == 0) &&
+                         (stride_token % VEC == 0) &&
+                         (stride_topk % VEC == 0) &&
+                         (reinterpret_cast<uintptr_t>(in_ptr) % WIDTH == 0) &&
+                         (reinterpret_cast<uintptr_t>(out_ptr) % WIDTH == 0);
+    if (can_vec) {
+      const int64_t n_vec = hidden_size / VEC;
+      const int64_t total = num_tokens * n_vec;
+      const int block = 256;
+      const int64_t num_blocks =
+          std::min<int64_t>((total + block - 1) / block, 65535);
+      const int64_t global_stride = num_blocks * block;
+      sycl::range<1> global_range(global_stride);
+      sycl::range<1> local_range(block);
+      switch (topk) {
+        case 1:
+          LAUNCH_MOE_SUM_VEC(1);
+          break;
+        case 2:
+          LAUNCH_MOE_SUM_VEC(2);
+          break;
+        case 4:
+          LAUNCH_MOE_SUM_VEC(4);
+          break;
+        case 6:
+          LAUNCH_MOE_SUM_VEC(6);
+          break;
+        case 8:
+          LAUNCH_MOE_SUM_VEC(8);
+          break;
+        case 9:
+          LAUNCH_MOE_SUM_VEC(9);
+          break;
+        default:
+          queue.submit([&](sycl::handler& cgh) {
+            cgh.parallel_for(
+                sycl::nd_range<1>(global_range, local_range),
+                vllm::moe::moe_sum_vec_dynamic_kernel<scalar_t, int32_t, false>(
+                    out_ptr,
+                    in_ptr,
+                    num_tokens,
+                    hidden_size,
+                    topk,
+                    stride_token,
+                    stride_topk,
+                    nullptr,
+                    nullptr,
+                    0,
+                    0,
+                    global_stride));
+          });
+          break;
+      }
+    } else {
+      sycl::range<1> global_range(num_tokens * std::min(hidden_size, 1024));
+      sycl::range<1> local_range(std::min(hidden_size, 1024));
+      queue.submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(
+            sycl::nd_range<1>(global_range, local_range),
+            vllm::moe::moe_sum_scalar_kernel<scalar_t, int32_t, false>(
+                out_ptr,
+                in_ptr,
+                hidden_size,
+                topk,
+                stride_token,
+                stride_topk,
+                stride_hidden,
+                nullptr,
+                nullptr,
+                0,
+                0));
+      });
+    }
+  });
+#undef LAUNCH_MOE_SUM_VEC
 }
 
 void moe_lora_align_block_size(
