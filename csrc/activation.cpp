@@ -444,8 +444,13 @@ class swiglustep_and_mul_kernel {
     }                                                                    \
   }                                                                      \
   if (d % vec_size != 0) vec_size = 1;                                   \
-  int64_t wg_size = std::min(                                            \
+  int64_t wg_cap = std::min(                                             \
       static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));   \
+  /* Round work-group size down to a power of two, as XPU produces       \
+     wrong results / NaNs for non power-of-two local sizes. The strided  \
+     loop below still covers all elements for any wg_size. */            \
+  int64_t wg_size = 1;                                                   \
+  while ((wg_size << 1) <= wg_cap) wg_size <<= 1;                        \
   switch (vec_size) {                                                    \
     VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 1);                        \
     VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 2);                        \
@@ -477,8 +482,13 @@ class swiglustep_and_mul_kernel {
     }                                                                    \
   }                                                                      \
   if (d % vec_size != 0) vec_size = 1;                                   \
-  int64_t wg_size = std::min(                                            \
+  int64_t wg_cap = std::min(                                             \
       static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));   \
+  /* Round work-group size down to a power of two, as XPU produces       \
+     wrong results / NaNs for non power-of-two local sizes. The strided  \
+     loop below still covers all elements for any wg_size. */            \
+  int64_t wg_size = 1;                                                   \
+  while ((wg_size << 1) <= wg_cap) wg_size <<= 1;                        \
   switch (vec_size) {                                                    \
     VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 1);                        \
     VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 2);                        \

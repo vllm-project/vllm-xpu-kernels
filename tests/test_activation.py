@@ -12,7 +12,10 @@ from tests.utils import opcheck, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
-D = [512, 13824]  # Arbitrary values for testing
+# 640/1408/2816 are regression sizes: the *_and_mul vec launch previously
+# picked a non-power-of-two work-group size for these widths and returned
+# wrong values / NaN
+D = [512, 640, 1408, 2816, 13824]
 SEEDS = [0]
 XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
