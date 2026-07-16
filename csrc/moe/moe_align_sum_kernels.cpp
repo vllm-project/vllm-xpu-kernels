@@ -582,27 +582,65 @@ class count_and_sort_expert_tokens_kernel {
   }
 };
 
-template <typename scalar_t, int TOPK>
+// Decide whether the k-th expert slot of a token contributes to the reduction.
+template <typename idx_t>
+inline bool moe_sum_slot_active(
+    const idx_t* topk_ids, const int32_t* expert_map, int64_t slot) {
+  if (topk_ids == nullptr) {
+    return true;
+  }
+  const int64_t expert_id = static_cast<int64_t>(topk_ids[slot]);
+  if (expert_id < 0) {
+    return false;
+  }
+  if (expert_map != nullptr && expert_map[expert_id] < 0) {
+    return false;
+  }
+  return true;
+}
+
+template <typename scalar_t, typename idx_t, int TOPK>
 class moe_sum_kernel {
  private:
   scalar_t* output;       // [..., d]
   const scalar_t* input;  // [..., topk, d]
   int d;
+  const idx_t* topk_ids;      // [num_tokens, topk] or nullptr
+  const int32_t* expert_map;  // [num_experts] or nullptr
 
  public:
-  moe_sum_kernel(scalar_t* output, const scalar_t* input, int d)
-      : output(output), input(input), d(d) {}
+  moe_sum_kernel(
+      scalar_t* output,
+      const scalar_t* input,
+      int d,
+      const idx_t* topk_ids,
+      const int32_t* expert_map)
+      : output(output),
+        input(input),
+        d(d),
+        topk_ids(topk_ids),
+        expert_map(expert_map) {}
 
   void operator()(sycl::nd_item<1> item) const {
     const int64_t token_idx = item.get_group(0);
+
+    bool active[TOPK];
+#pragma unroll
+    for (int k = 0; k < TOPK; ++k) {
+      active[k] = moe_sum_slot_active<idx_t>(
+          topk_ids, expert_map, token_idx * TOPK + k);
+    }
+
     for (int64_t idx = item.get_local_id(0); idx < d;
          idx += item.get_local_range(0)) {
-      scalar_t x = 0.0;
+      float x = 0.f;
 #pragma unroll
       for (int k = 0; k < TOPK; ++k) {
-        x += input[token_idx * TOPK * d + k * d + idx];
+        if (active[k]) {
+          x += static_cast<float>(input[token_idx * TOPK * d + k * d + idx]);
+        }
       }
-      output[token_idx * d + idx] = x;
+      output[token_idx * d + idx] = static_cast<scalar_t>(x);
     }
   }
 };
@@ -1166,12 +1204,23 @@ void batched_moe_align_block_size(
 }
 
 void moe_sum(
-    torch::Tensor& input,   // [num_tokens, topk, hidden_size]
-    torch::Tensor& output)  // [num_tokens, hidden_size]
+    torch::Tensor& input,                          // [num_tokens, topk, hidden]
+    torch::Tensor& output,                         // [num_tokens, hidden]
+    const std::optional<torch::Tensor>& topk_ids,  // [num_tokens, topk]
+    const std::optional<torch::Tensor>& expert_map)  // [num_experts]
 {
   const int hidden_size = input.size(-1);
   const auto num_tokens = output.numel() / hidden_size;
   const int topk = input.size(1);
+
+  // Pad-aware reduction is required whenever topk_ids is supplied: slots whose
+  // (global) expert id is negative are padding/invalid, and -- when an
+  // expert_map is given -- experts that map off this device (value < 0) must
+  // also be skipped. Without topk_ids we take the plain fast path.
+  const bool pad_aware = topk_ids.has_value();
+  const int32_t* expert_map_ptr = (pad_aware && expert_map.has_value())
+                                      ? expert_map->data_ptr<int32_t>()
+                                      : nullptr;
 
   at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
   at::DeviceGuard device_guard(curDevice);
@@ -1182,50 +1231,83 @@ void moe_sum(
   sycl::range<1> global_range(global_size);
   sycl::range<1> local_range(local_size);
 
+  // Dispatch over the topk_ids index dtype (int32 or int64); when there is no
+  // pad-aware masking we use int32 with a null pointer so the mask is a no-op.
+#define VLLM_MOE_SUM_LAUNCH(TOPK_VAL)                                       \
+  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] { \
+    auto* out_ptr = output.data_ptr<scalar_t>();                            \
+    auto* in_ptr = input.data_ptr<scalar_t>();                              \
+    if (pad_aware) {                                                        \
+      AT_DISPATCH_INDEX_TYPES(topk_ids->scalar_type(), "moe_sum_idx", [&] { \
+        const auto* tk_ptr = topk_ids->data_ptr<index_t>();                 \
+        queue.submit([&](sycl::handler& cgh) {                              \
+          cgh.parallel_for(                                                 \
+              sycl::nd_range<1>(global_range, local_range),                 \
+              vllm::moe::moe_sum_kernel<scalar_t, index_t, TOPK_VAL>(       \
+                  out_ptr, in_ptr, hidden_size, tk_ptr, expert_map_ptr));   \
+        });                                                                 \
+      });                                                                   \
+    } else {                                                                \
+      queue.submit([&](sycl::handler& cgh) {                                \
+        cgh.parallel_for(                                                   \
+            sycl::nd_range<1>(global_range, local_range),                   \
+            vllm::moe::moe_sum_kernel<scalar_t, int32_t, TOPK_VAL>(         \
+                out_ptr,                                                    \
+                in_ptr,                                                     \
+                hidden_size,                                                \
+                static_cast<const int32_t*>(nullptr),                       \
+                nullptr));                                                  \
+      });                                                                   \
+    }                                                                       \
+  })
+
   switch (topk) {
+    case 1:
+      VLLM_MOE_SUM_LAUNCH(1);
+      break;
+
     case 2:
-      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
-        queue.submit([&](sycl::handler& cgh) {
-          cgh.parallel_for(
-              sycl::nd_range<1>(global_range, local_range),
-              vllm::moe::moe_sum_kernel<scalar_t, 2>(
-                  output.data_ptr<scalar_t>(),
-                  input.data_ptr<scalar_t>(),
-                  hidden_size));
-        });
-      });
+      VLLM_MOE_SUM_LAUNCH(2);
       break;
 
     case 3:
-      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
-        queue.submit([&](sycl::handler& cgh) {
-          cgh.parallel_for(
-              sycl::nd_range<1>(global_range, local_range),
-              vllm::moe::moe_sum_kernel<scalar_t, 3>(
-                  output.data_ptr<scalar_t>(),
-                  input.data_ptr<scalar_t>(),
-                  hidden_size));
-        });
-      });
+      VLLM_MOE_SUM_LAUNCH(3);
       break;
 
     case 4:
-      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
-        queue.submit([&](sycl::handler& cgh) {
-          cgh.parallel_for(
-              sycl::nd_range<1>(global_range, local_range),
-              vllm::moe::moe_sum_kernel<scalar_t, 4>(
-                  output.data_ptr<scalar_t>(),
-                  input.data_ptr<scalar_t>(),
-                  hidden_size));
-        });
-      });
+      VLLM_MOE_SUM_LAUNCH(4);
+      break;
+
+    case 6:
+      VLLM_MOE_SUM_LAUNCH(6);
+      break;
+
+    case 8:
+      VLLM_MOE_SUM_LAUNCH(8);
+      break;
+
+    case 9:
+      VLLM_MOE_SUM_LAUNCH(9);
       break;
 
     default:
-      at::sum_out(output, input, 1);
+      if (pad_aware) {
+        auto ids = topk_ids.value();
+        auto valid = ids.ge(0);  // drop padding/invalid slots
+        if (expert_map.has_value()) {
+          auto clamped = ids.clamp_min(0).to(torch::kLong);
+          auto local = expert_map->index_select(0, clamped.reshape({-1}))
+                           .reshape(ids.sizes());
+          valid = valid.logical_and(local.ge(0));
+        }
+        auto masked = input.mul(valid.unsqueeze(-1).to(input.scalar_type()));
+        at::sum_out(output, masked, 1);
+      } else {
+        at::sum_out(output, input, 1);
+      }
       break;
   }
+#undef VLLM_MOE_SUM_LAUNCH
 }
 
 void moe_lora_align_block_size(
