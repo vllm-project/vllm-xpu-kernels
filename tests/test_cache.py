@@ -371,6 +371,124 @@ def test_reshape_and_cache_flash(
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
 
 
+# Fused KV-cache layouts, matching vLLM's FlashAttentionBackend after the
+# "Pack K/V into the content dim" refactor (#44455):
+#   get_kv_cache_shape -> (num_blocks, num_kv_heads, block_size, 2 * head_size)
+# The attention layer then does:
+#   key_cache, value_cache = kv_cache.transpose(1, 2).split(head_size, dim=-1)
+# so key_cache / value_cache are two interleaved views of a single allocation:
+#   * value_cache.data_ptr() == key_cache.data_ptr() + head_size (K/V adjacent)
+#   * head dimension is NOT contiguous (head_stride != head_size)
+# These exercise reshape_and_cache_flash_strided_kernel. The two supported
+# physical orderings (selected by get_kv_cache_stride_order) are:
+#   NHD: physical [num_blocks, block_size, num_kv_heads, 2 * head_size]
+#   HND: physical [num_blocks, num_kv_heads, block_size, 2 * head_size]
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("cache_layout", ["NHD", "HND"])
+@torch.inference_mode()
+def test_reshape_and_cache_flash_fused_layout(
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+    cache_layout: str,
+) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
+
+    num_slots = block_size * num_blocks
+    slot_mapping_lst = random.sample(range(num_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst,
+                                dtype=torch.long,
+                                device=device)
+
+    qkv = torch.randn(num_tokens,
+                      3,
+                      num_heads,
+                      head_size,
+                      dtype=dtype,
+                      device=device)
+    _, key, value = qkv.unbind(dim=1)
+
+    # Allocate the packed KV cache in its physical memory order, then present
+    # the logical (num_blocks, num_kv_heads, block_size, 2*head_size) view via a
+    # permutation - exactly what vLLM's get_kv_cache_stride_order encodes.
+    if cache_layout == "NHD":
+        # physical order: [num_blocks, block_size, num_heads, 2*head_size]
+        phys = torch.empty(num_blocks,
+                           block_size,
+                           num_heads,
+                           2 * head_size,
+                           dtype=dtype,
+                           device=device)
+        # logical (B, H, N, 2D): swap block_size and num_heads back.
+        kv_cache = phys.permute(0, 2, 1, 3)
+    else:  # HND
+        # physical order: [num_blocks, num_heads, block_size, 2*head_size]
+        kv_cache = torch.empty(num_blocks,
+                               num_heads,
+                               block_size,
+                               2 * head_size,
+                               dtype=dtype,
+                               device=device)
+    kv_cache.uniform_(-1.0, 1.0)
+
+    # (B, H, N, 2D) -> ((B, N, H, D), (B, N, H, D)), interleaved K/V views.
+    key_cache, value_cache = kv_cache.transpose(1, 2).split(head_size, dim=-1)
+
+    # Sanity: this is precisely the strided-kernel path.
+    assert key_cache.stride(2) != head_size, "head dim must be non-contiguous"
+    assert (value_cache.data_ptr() == key_cache.data_ptr() +
+            head_size * key_cache.element_size()), "K/V must be adjacent"
+
+    k_scale = (key.amax() / 64.0).to(torch.float32)
+    v_scale = (value.amax() / 64.0).to(torch.float32)
+
+    key_cache_ref = key_cache.clone()
+    value_cache_ref = value_cache.clone()
+
+    reshape_and_cache_flash(
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+
+    block_indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    block_indices_lst = block_indices.cpu().tolist()
+    block_offsets = slot_mapping % block_size
+    block_offsets_lst = block_offsets.cpu().tolist()
+    for i in range(num_tokens):
+        b = block_indices_lst[i]
+        o = block_offsets_lst[i]
+        key_cache_ref[b, o, :, :] = key[i]
+        value_cache_ref[b, o, :, :] = value[i]
+
+    torch.testing.assert_close(key_cache.contiguous(),
+                               key_cache_ref.contiguous())
+    torch.testing.assert_close(value_cache.contiguous(),
+                               value_cache_ref.contiguous())
+
+
 def _create_mla_cache(
     num_blocks: int,
     block_size: int,
