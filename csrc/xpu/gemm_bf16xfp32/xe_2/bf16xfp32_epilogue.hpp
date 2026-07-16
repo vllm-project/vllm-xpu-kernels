@@ -118,7 +118,7 @@ class BF16xFP32Epilogue<
     XE_Copy_D xe_store_d = {};
     if constexpr (is_destination_supported) {
       auto mD = cute::make_tensor(
-          cute::make_gmem_ptr(static_cast<ElementD const*>(args.ptr_D)),
+          cute::make_gmem_ptr(static_cast<ElementD*>(args.ptr_D)),
           cute::make_layout(cute::make_shape(M, N, L), args.dD));
       xe_store_d = cute::make_tiled_copy(
           cute::Copy_Atom<Trait_D, ElementD>{}.with(mD),

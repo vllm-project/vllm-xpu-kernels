@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """BF16xFP32 GEMM: emulated FP32-precision GEMM using two BF16 DPAS operations.
 
-  result = A @ B_high.T + (A @ B_low.T) * scale
+  result = A @ B_high + (A @ B_low) * scale
 
-where B_high, B_low are BF16 decompositions of an FP32 weight matrix B:
+where B_high, B_low are BF16 decompositions of an FP32 weight matrix B.
+The kernel expects B_high/B_low in transposed [K, N] layout (see
+:func:`split_fp32_weight`):
   B_high = bf16(B)
   B_low  = bf16((B - fp32(B_high)) / scale)
 """
@@ -29,9 +31,12 @@ def split_fp32_weight(
 
     Returns:
         (W_high, W_low): both [K, N] BF16 tensors (transposed & contiguous)
-        Reconstruction: weight ≈ fp32(W_high) + fp32(W_low) * scale
+        Reconstruction: weight ≈ fp32(W_high.T) + fp32(W_low.T) * scale
     """
-    assert weight.dtype == torch.float32, "weight must be FP32"
+    if weight.dtype != torch.float32:
+        raise ValueError(f"weight must be FP32 (got {weight.dtype})")
+    if scale == 0.0:
+        raise ValueError("scale must be non-zero")
     W_high = weight.to(torch.bfloat16)
     residual = weight - W_high.float()
     W_low = (residual / scale).to(torch.bfloat16)

@@ -426,7 +426,7 @@ def fp8_gemm_w8a16(input: torch.Tensor, weight: torch.Tensor,
 
 
 def gemm_bf16xfp32(A: torch.Tensor, B_high: torch.Tensor,
-                   B_low: torch.Tensor, scale: float = 256.0):
+                   B_low: torch.Tensor, scale: float = 1.0 / 256.0):
     return torch.ops._xpu_C.gemm_bf16xfp32(A, B_high, B_low, scale)
 
 

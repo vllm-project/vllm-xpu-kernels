@@ -332,6 +332,12 @@ inline at::Tensor gemm_bf16xfp32_xe2_impl(
   TORCH_CHECK(A.dtype() == at::kBFloat16, "A must be BF16");
   TORCH_CHECK(B_high.dtype() == at::kBFloat16, "B_high must be BF16");
   TORCH_CHECK(B_low.dtype() == at::kBFloat16, "B_low must be BF16");
+  TORCH_CHECK(A.is_xpu(), "A must be on XPU");
+  TORCH_CHECK(B_high.is_xpu(), "B_high must be on XPU");
+  TORCH_CHECK(B_low.is_xpu(), "B_low must be on XPU");
+  TORCH_CHECK(
+      A.device() == B_high.device() && A.device() == B_low.device(),
+      "A, B_high, and B_low must be on the same XPU device");
   TORCH_CHECK(A.is_contiguous(), "A must be contiguous");
   TORCH_CHECK(B_high.is_contiguous(), "B_high must be contiguous");
   TORCH_CHECK(B_low.is_contiguous(), "B_low must be contiguous");

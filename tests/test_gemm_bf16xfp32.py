@@ -4,7 +4,9 @@
 The kernel emulates an FP32-precision GEMM (BF16 activation x FP32 weight)
 by decomposing the FP32 weight into two BF16 matrices and running a DualGemm:
 
-    out = A @ B_high.T + (A @ B_low.T) * scale
+    out = A @ B_high + (A @ B_low) * scale
+
+(B_high/B_low are already transposed to [K, N], see _split_fp32_weight.)
 
 This mirrors the way the Hunyuan-V3 MoE router (GateLinear) is computed on
 XPU today.  The result is compared against the reference ``F.linear`` path
