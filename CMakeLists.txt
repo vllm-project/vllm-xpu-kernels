@@ -398,6 +398,7 @@ set(GROUPED_GEMM_LIB_NAME "")
 set(GDN_ATTN_LIB_NAME "")
 set(MQA_LOGITS_LIB_NAME "")
 set(MHC_LIB_NAME "")
+set(GEMM_BF16XFP32_LIB_NAME "")
 
 if(BUILD_SYCL_TLA_KERNELS)
 
@@ -441,6 +442,8 @@ if(BUILD_SYCL_TLA_KERNELS)
       add_subdirectory(csrc/xpu/mhc/xe_2)
       list(APPEND MHC_LIB_NAME "mhc_kernels_xe_2")
     endif()
+    add_subdirectory(csrc/xpu/gemm_bf16xfp32/xe_2)
+    list(APPEND GEMM_BF16XFP32_LIB_NAME "gemm_bf16xfp32_xe_2")
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
@@ -637,6 +640,8 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC
          "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp")
   endif()
+  list(APPEND VLLM_EXT_XPU_SRC
+       "csrc/xpu/gemm_bf16xfp32/gemm_bf16xfp32_interface.cpp")
   if(GDN_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
   endif()
@@ -674,7 +679,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     INCLUDE_DIRECTORIES
     ${VLLM_XPU_INCLUDE_DIR}
     LIBRARIES
-    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME};${MQA_LOGITS_LIB_NAME};${MHC_LIB_NAME}
+    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME};${MQA_LOGITS_LIB_NAME};${MHC_LIB_NAME};${GEMM_BF16XFP32_LIB_NAME}
     USE_SABI
     3
     WITH_SOABI)

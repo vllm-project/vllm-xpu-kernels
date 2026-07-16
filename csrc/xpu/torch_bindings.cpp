@@ -3,6 +3,7 @@
 #ifdef VLLM_MOE_ENABLED
   #include "xpu/grouped_gemm/grouped_gemm_interface.h"
 #endif
+#include "xpu/gemm_bf16xfp32/gemm_bf16xfp32_interface.h"
 #include "xpu/lora/lora_ops.h"
 
 #include <torch/library.h>
@@ -52,6 +53,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       torch::kXPU,
       &cutlass_grouped_gemm_interface);
 #endif
+
+  xpu_ops.def(
+      "gemm_bf16xfp32(Tensor A, Tensor B_high, Tensor B_low, float scale) -> "
+      "Tensor");
+  xpu_ops.impl("gemm_bf16xfp32", torch::kXPU, &gemm_bf16xfp32);
 
   xpu_ops.def(
       "deepseek_scaling_rope(Tensor! positions, Tensor! query, Tensor! key, "
