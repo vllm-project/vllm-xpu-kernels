@@ -259,6 +259,7 @@ class reshape_and_cache_flash_kernel {
       const int64_t* __restrict__ slot_mapping,
       const int64_t block_stride,
       const int64_t page_stride,
+      const int64_t head_stride,
       const int64_t key_stride,
       const int64_t value_stride,
       const int num_heads,
@@ -273,6 +274,7 @@ class reshape_and_cache_flash_kernel {
         slot_mapping_(slot_mapping),
         block_stride_(block_stride),
         page_stride_(page_stride),
+        head_stride_(head_stride),
         key_stride_(key_stride),
         value_stride_(value_stride),
         num_heads_(num_heads),
@@ -290,7 +292,6 @@ class reshape_and_cache_flash_kernel {
 
     const int64_t block_idx = slot_idx / block_size_;
     const int64_t block_offset = slot_idx % block_size_;
-    const int n = num_heads_ * head_size_;
 
     // pointers to the beginning of the source row for this token.
     const scalar_t* __restrict__ key_src = key_ + group_idx * key_stride_;
@@ -308,22 +309,89 @@ class reshape_and_cache_flash_kernel {
 
     fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
     fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
-    vectorize_with_alignment<VEC_SIZE>(
-        key_src, key_dst, n, local_idx, local_range, k_op);
-    vectorize_with_alignment<VEC_SIZE>(
-        value_src, value_dst, n, local_idx, local_range, v_op);
+
+    const bool is_contiguous_heads = (head_stride_ == head_size_);
+    if (is_contiguous_heads) {
+      // NHD layout: heads are contiguous, flat copy num_heads * head_size
+      const int n = num_heads_ * head_size_;
+      vectorize_with_alignment<VEC_SIZE>(
+          key_src, key_dst, n, local_idx, local_range, k_op);
+      vectorize_with_alignment<VEC_SIZE>(
+          value_src, value_dst, n, local_idx, local_range, v_op);
+    } else {
+      // HND layout: heads are strided, copy per-head with head_stride offset.
+      // Partition (head, vec) pairs across work-items.
+      const int vecs_per_head = head_size_ / VEC_SIZE;
+      const int total_vecs = num_heads_ * vecs_per_head;
+
+      using vin_t = vec_n_t<scalar_t, VEC_SIZE>;
+      using vout_t = vec_n_t<cache_t, VEC_SIZE>;
+      using KVOp = fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt>;
+      DefaultVecOp<VEC_SIZE, scalar_t, cache_t, KVOp> k_vec_op{k_op};
+      DefaultVecOp<VEC_SIZE, scalar_t, cache_t, KVOp> v_vec_op{v_op};
+
+      constexpr int WIDTH = VEC_SIZE * sizeof(scalar_t);
+      constexpr int WIDTH_CACHE = VEC_SIZE * sizeof(cache_t);
+      const bool can_vec =
+          ((reinterpret_cast<uintptr_t>(key_src) & (WIDTH - 1)) == 0) &&
+          ((reinterpret_cast<uintptr_t>(value_src) & (WIDTH - 1)) == 0) &&
+          ((reinterpret_cast<uintptr_t>(key_dst) & (WIDTH_CACHE - 1)) == 0) &&
+          ((reinterpret_cast<uintptr_t>(value_dst) & (WIDTH_CACHE - 1)) == 0) &&
+          ((head_size_ & (VEC_SIZE - 1)) == 0);
+
+      if (can_vec) {
+        for (int slot = local_idx; slot < total_vecs; slot += local_range) {
+          const int head_idx = slot / vecs_per_head;
+          const int vec_idx = slot % vecs_per_head;
+
+          const vin_t* k_vec_in =
+              reinterpret_cast<const vin_t*>(key_src + head_idx * head_size_);
+          const vin_t* v_vec_in =
+              reinterpret_cast<const vin_t*>(value_src + head_idx * head_size_);
+          vout_t* k_vec_out = reinterpret_cast<vout_t*>(
+              key_dst + static_cast<int64_t>(head_idx) * head_stride_);
+          vout_t* v_vec_out = reinterpret_cast<vout_t*>(
+              value_dst + static_cast<int64_t>(head_idx) * head_stride_);
+
+          vout_t k_tmp, v_tmp;
+          k_vec_op(k_tmp, k_vec_in[vec_idx]);
+          v_vec_op(v_tmp, v_vec_in[vec_idx]);
+          k_vec_out[vec_idx] = k_tmp;
+          v_vec_out[vec_idx] = v_tmp;
+        }
+      } else {
+        // Scalar fallback for unaligned data.
+        const int total_elems = num_heads_ * head_size_;
+        for (int slot = local_idx; slot < total_elems; slot += local_range) {
+          const int head_idx = slot / head_size_;
+          const int elem_idx = slot % head_size_;
+
+          const scalar_t* k_src_h = key_src + head_idx * head_size_;
+          const scalar_t* v_src_h = value_src + head_idx * head_size_;
+          cache_t* k_dst_h =
+              key_dst + static_cast<int64_t>(head_idx) * head_stride_;
+          cache_t* v_dst_h =
+              value_dst + static_cast<int64_t>(head_idx) * head_stride_;
+
+          k_op(k_dst_h[elem_idx], k_src_h[elem_idx]);
+          v_op(v_dst_h[elem_idx], v_src_h[elem_idx]);
+        }
+      }
+    }
   }
 
  private:
   const scalar_t* __restrict__ key_;    // [num_tokens, num_heads, head_size]
   const scalar_t* __restrict__ value_;  // [num_tokens, num_heads, head_size]
-  cache_t* __restrict__ key_cache_;     // [num_blocks, block_size, num_heads,
-                                        // head_size]
-  cache_t* __restrict__ value_cache_;   // [num_blocks, block_size, num_heads,
-                                        // head_size]
+  cache_t* __restrict__ key_cache_;     // NHD: [num_blocks, block_size,
+                                        // num_heads, head_size]
+                                        // HND: [num_blocks, num_heads,
+                                        // block_size, head_size] (permuted)
+  cache_t* __restrict__ value_cache_;   // same layout as key_cache_
   const int64_t* __restrict__ slot_mapping_;  // [num_tokens]
   const int64_t block_stride_;
   const int64_t page_stride_;
+  const int64_t head_stride_;
   const int64_t key_stride_;
   const int64_t value_stride_;
   const int num_heads_;
@@ -937,6 +1005,7 @@ void reshape_and_cache(
             slot_mapping.data_ptr<int64_t>(),                          \
             block_stride,                                              \
             page_stride,                                               \
+            head_stride,                                               \
             key_stride,                                                \
             value_stride,                                              \
             num_heads,                                                 \
@@ -974,20 +1043,34 @@ void reshape_and_cache_flash(
   int64_t head_stride = key_cache.stride(2);
   bool is_strided_head = (head_stride != head_size);
   if (is_strided_head) {
-    TORCH_CHECK(
-        reinterpret_cast<uint8_t*>(value_cache.data_ptr()) ==
-            reinterpret_cast<uint8_t*>(key_cache.data_ptr()) +
-                head_size * key_cache.element_size(),
-        "new layout requires value_cache to be adjacent to key_cache");
-    const int vec_size = (key.element_size() == 2) ? 8 : 4;
-    sycl::range<1> grid(num_tokens);
-    sycl::range<1> block(std::min(head_size * num_heads / vec_size, 512));
+    // Check if this is the interleaved KV layout (cross-layer) where
+    // value_cache is adjacent to key_cache at offset head_size.
+    bool is_interleaved =
+        (reinterpret_cast<uint8_t*>(value_cache.data_ptr()) ==
+         reinterpret_cast<uint8_t*>(key_cache.data_ptr()) +
+             head_size * key_cache.element_size());
+    if (is_interleaved) {
+      // Interleaved KV layout: K and V packed as [.., num_heads, 2*head_size]
+      const int vec_size = (key.element_size() == 2) ? 8 : 4;
+      sycl::range<1> grid(num_tokens);
+      sycl::range<1> block(std::min(head_size * num_heads / vec_size, 512));
 
-    DISPATCH_BY_KV_CACHE_DTYPE(
-        key.scalar_type(),
-        kv_cache_dtype,
-        CALL_RESHAPE_AND_CACHE_FLASH_STRIDED);
+      DISPATCH_BY_KV_CACHE_DTYPE(
+          key.scalar_type(),
+          kv_cache_dtype,
+          CALL_RESHAPE_AND_CACHE_FLASH_STRIDED);
+    } else {
+      // HND layout: separate K/V caches with non-contiguous heads
+      // (head_stride > head_size, typically block_size * head_size).
+      sycl::range<1> grid(num_tokens);
+      sycl::range<1> block(std::min(num_heads * head_size, 1024));
+
+      TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
+      DISPATCH_BY_KV_CACHE_DTYPE(
+          key.scalar_type(), kv_cache_dtype, CALL_RESHAPE_AND_CACHE_FLASH);
+    }
   } else {
+    // NHD layout: contiguous heads, flat copy.
     sycl::range<1> grid(num_tokens);
     sycl::range<1> block(std::min(num_heads * head_size, 1024));
 

@@ -109,10 +109,14 @@ void cutlass_chunk_prefill_impl(
   }
 
   if (is_paged) {
-    // Paged KV layout: [num_blocks, num_heads, block_size, head_size]
+    // vLLM presents paged KV with a fixed logical shape
+    //   [num_blocks, block_size, num_heads_kv, head_size]
+    // for both NHD and HND; only the strides differ (HND has non-contiguous
+    // heads). Sizes are read from their logical positions; the layout is
+    // handled entirely through the KV strides below.
     num_blocks = key_cache.size(0);
-    num_heads_kv = key_cache.size(1);
-    block_size = key_cache.size(2);
+    block_size = key_cache.size(1);
+    num_heads_kv = key_cache.size(2);
     max_blocks_per_seq = block_table.size(1);
     total_seqlen_k = num_blocks * block_size;
   }
@@ -179,12 +183,13 @@ void cutlass_chunk_prefill_impl(
     args.o_stride_heads = out.stride(1);
     args.o_stride_batch = 0;
     if (is_paged) {
-      // K/V: [num_blocks, num_heads_kv, block_size, head_size]
-      args.k_stride_seq = key_cache.stride(2);
-      args.k_stride_heads = key_cache.stride(1);
+      // paged KV logical shape [num_blocks, block_size, num_heads_kv,
+      // head_size]; the strides encode NHD vs HND automatically.
+      args.k_stride_seq = key_cache.stride(1);
+      args.k_stride_heads = key_cache.stride(2);
       args.k_stride_batch = 0;
-      args.v_stride_seq = value_cache.stride(2);
-      args.v_stride_heads = value_cache.stride(1);
+      args.v_stride_seq = value_cache.stride(1);
+      args.v_stride_heads = value_cache.stride(2);
       args.v_stride_batch = 0;
     } else {
       // K/V: [total_seq_k, num_heads_kv, head_size]
@@ -204,12 +209,13 @@ void cutlass_chunk_prefill_impl(
     args.o_stride_heads = out.stride(1);
     args.o_stride_batch = out.stride(0);
     if (is_paged) {
-      // K/V: [num_blocks, num_heads_kv, block_size, head_size]
-      args.k_stride_seq = key_cache.stride(2);
-      args.k_stride_heads = key_cache.stride(1);
+      // paged KV logical shape [num_blocks, block_size, num_heads_kv,
+      // head_size]; the strides encode NHD vs HND automatically.
+      args.k_stride_seq = key_cache.stride(1);
+      args.k_stride_heads = key_cache.stride(2);
       args.k_stride_batch = 0;
-      args.v_stride_seq = value_cache.stride(2);
-      args.v_stride_heads = value_cache.stride(1);
+      args.v_stride_seq = value_cache.stride(1);
+      args.v_stride_heads = value_cache.stride(2);
       args.v_stride_batch = 0;
     } else {
       // K/V: [batch, num_heads_kv, seq, head_size]

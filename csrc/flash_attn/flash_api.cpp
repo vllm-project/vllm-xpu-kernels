@@ -279,8 +279,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int num_tokens = batch_size;
     int num_heads_q = q.size(1);
     int head_dim = q.size(2);
-    int num_heads_kv = k.size(1);
-    int kv_block_size = k.size(2);
+    // Paged KV logical shape [num_blocks, block_size, num_heads, head_size]
+    // for both NHD and HND; only the strides differ.
+    int num_heads_kv = k.size(2);
+    int kv_block_size = k.size(1);
 
     int num_kv_splits = 1;
     at::Tensor tmp_out = out;
@@ -334,8 +336,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
     int num_heads_q = q.size(1);
     int v_head_dim = v.size(-1);
-    int num_heads_kv = k.size(1);
-    int block_size = k.size(2);
+    // Paged KV logical shape [num_blocks, block_size, num_heads, head_size]
+    // for both NHD and HND; only the strides differ.
+    int num_heads_kv = k.size(2);
+    int block_size = k.size(1);
     int head_size_qk = q.size(-1);
 
     // SLM (shared local memory) limits on Intel Xe restrict the paged decode
