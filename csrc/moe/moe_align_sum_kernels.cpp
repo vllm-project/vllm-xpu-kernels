@@ -599,7 +599,12 @@ inline bool moe_sum_slot_active(
   return true;
 }
 
-template <typename scalar_t, typename idx_t, int TOPK>
+// PAD_AWARE selects, at compile time, between the plain reduction fast path
+// (no topk_ids/expert_map, no per-slot branch) and the pad-aware masked path.
+// The fast path is instantiated for ordinary tensor-parallel MoE where every
+// slot contributes; it keeps the tight, fully-unrolled fp32 accumulation
+// (matching the pre-masking kernel codegen) while preserving fp32 precision.
+template <typename scalar_t, typename idx_t, int TOPK, bool PAD_AWARE>
 class moe_sum_kernel {
  private:
   scalar_t* output;       // [..., d]
@@ -624,23 +629,36 @@ class moe_sum_kernel {
   void operator()(sycl::nd_item<1> item) const {
     const int64_t token_idx = item.get_group(0);
 
-    bool active[TOPK];
+    if constexpr (!PAD_AWARE) {
+      // Fast path: every slot is active. No mask, no branch in the hot loop.
+      for (int64_t idx = item.get_local_id(0); idx < d;
+           idx += item.get_local_range(0)) {
+        float x = 0.f;
 #pragma unroll
-    for (int k = 0; k < TOPK; ++k) {
-      active[k] = moe_sum_slot_active<idx_t>(
-          topk_ids, expert_map, token_idx * TOPK + k);
-    }
-
-    for (int64_t idx = item.get_local_id(0); idx < d;
-         idx += item.get_local_range(0)) {
-      float x = 0.f;
-#pragma unroll
-      for (int k = 0; k < TOPK; ++k) {
-        if (active[k]) {
+        for (int k = 0; k < TOPK; ++k) {
           x += static_cast<float>(input[token_idx * TOPK * d + k * d + idx]);
         }
+        output[token_idx * d + idx] = static_cast<scalar_t>(x);
       }
-      output[token_idx * d + idx] = static_cast<scalar_t>(x);
+    } else {
+      bool active[TOPK];
+#pragma unroll
+      for (int k = 0; k < TOPK; ++k) {
+        active[k] = moe_sum_slot_active<idx_t>(
+            topk_ids, expert_map, token_idx * TOPK + k);
+      }
+
+      for (int64_t idx = item.get_local_id(0); idx < d;
+           idx += item.get_local_range(0)) {
+        float x = 0.f;
+#pragma unroll
+        for (int k = 0; k < TOPK; ++k) {
+          if (active[k]) {
+            x += static_cast<float>(input[token_idx * TOPK * d + k * d + idx]);
+          }
+        }
+        output[token_idx * d + idx] = static_cast<scalar_t>(x);
+      }
     }
   }
 };
@@ -1286,7 +1304,7 @@ void moe_sum(
         queue.submit([&](sycl::handler& cgh) {                              \
           cgh.parallel_for(                                                 \
               sycl::nd_range<1>(global_range, local_range),                 \
-              vllm::moe::moe_sum_kernel<scalar_t, index_t, TOPK_VAL>(       \
+              vllm::moe::moe_sum_kernel<scalar_t, index_t, TOPK_VAL, true>( \
                   out_ptr, in_ptr, hidden_size, tk_ptr, expert_map_ptr));   \
         });                                                                 \
       });                                                                   \
@@ -1294,7 +1312,7 @@ void moe_sum(
       queue.submit([&](sycl::handler& cgh) {                                \
         cgh.parallel_for(                                                   \
             sycl::nd_range<1>(global_range, local_range),                   \
-            vllm::moe::moe_sum_kernel<scalar_t, int32_t, TOPK_VAL>(         \
+            vllm::moe::moe_sum_kernel<scalar_t, int32_t, TOPK_VAL, false>(  \
                 out_ptr,                                                    \
                 in_ptr,                                                     \
                 hidden_size,                                                \
