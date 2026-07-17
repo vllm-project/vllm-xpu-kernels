@@ -21,10 +21,8 @@ CHUNK_SIZE_XE2 = 64
 # split helper and token-distribution helper from the gdn attention test, but
 # assert against a standalone conv-stage reference defined below (no call into
 # the fused ref_gdn_attention).
-from test_gdn_attn import (  # noqa: E402
-    _extract_qkv_b_a_z,
-    simple_random_distribute,
-)
+from test_gdn_attn import _extract_qkv_b_a_z  # noqa: E402
+from test_gdn_attn import simple_random_distribute  # noqa: E402
 
 # QWEN NEXT shape
 NUM_TOKENS = [1, 32, 1024, 8192]

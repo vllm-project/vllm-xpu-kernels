@@ -7,10 +7,6 @@ import random
 
 import pytest
 import torch
-
-import vllm_xpu_kernels._xpu_C  # noqa: F401
-from tests.utils import format_tc
-
 # gated_delta_rule is the recurrent (SSM) stage of gdn_attention. It consumes
 # the post-conv {q, k, v, b, a} intermediates produced by causal_conv1d. We run
 # causal_conv1d once to obtain correctly-shaped/laid-out intermediates (their
@@ -18,9 +14,10 @@ from tests.utils import format_tc
 # kernel and the standalone references below. The references contain no conv1d
 # logic at all -- they only run the delta-rule recurrence on the intermediates.
 # Reuse only the token-distribution helper.
-from test_gdn_attn import (  # noqa: E402
-    simple_random_distribute,
-)
+from test_gdn_attn import simple_random_distribute  # noqa: E402
+
+import vllm_xpu_kernels._xpu_C  # noqa: F401
+from tests.utils import format_tc
 
 # QWEN NEXT shape
 NUM_TOKENS = [1, 32, 1024, 8192]

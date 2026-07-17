@@ -13,7 +13,6 @@
   #include "xe_2/chunk_gated_delta_rule_xe2.h"
 #endif
 
-
 // Conv stage of GatedDeltaNet linear attention. Runs the causal conv1d (plus
 // activation), writes z, updates conv_state, and returns the intermediate
 // {q, k, v, b, a} tensors consumed by gated_delta_rule. A single invocation
@@ -358,11 +357,11 @@ std::vector<torch::Tensor> causal_conv1d(
         num_decodes,                                              \
         num_spec_decodes,                                         \
         reorder_input);                                           \
-    intermediates.push_back(q);                                  \
-    intermediates.push_back(k);                                  \
-    intermediates.push_back(v);                                  \
-    intermediates.push_back(b);                                  \
-    intermediates.push_back(a);                                  \
+    intermediates.push_back(q);                                   \
+    intermediates.push_back(k);                                   \
+    intermediates.push_back(v);                                   \
+    intermediates.push_back(b);                                   \
+    intermediates.push_back(a);                                   \
   } while (0)
 
 #ifdef VLLM_XPU_ENABLE_XE2
@@ -537,8 +536,8 @@ void gated_delta_rule(
         "non_spec_state_indices_tensor must be provided when num_prefills + "
         "num_decodes > 0");
     non_spec_token = non_spec_token_indx.has_value()
-        ? non_spec_token_indx->size(0)
-        : num_actual_tokens;
+                         ? non_spec_token_indx->size(0)
+                         : num_actual_tokens;
   }
   int spec_token = 0;
   if (num_spec_decodes > 0) {
