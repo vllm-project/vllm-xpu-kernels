@@ -72,10 +72,7 @@ struct policy_medium_m {
   static constexpr int PipelineStages = 2;
 };
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
 // Kernel type assembly
-///////////////////////////////////////////////////////////////////////////////////////////////////
-
 template <class Policy>
 struct DualGemmKernelType {
   using ElementA = bfloat16_t;
@@ -166,16 +163,8 @@ struct DualGemmKernelType {
       CollectiveBF16xFP32Epilogue>;
 };
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-// SYCL kernel name tags
-///////////////////////////////////////////////////////////////////////////////////////////////////
-
 template <class Policy>
 class GemmBF16xFP32KernelName;
-
-///////////////////////////////////////////////////////////////////////////////////////////////////
-// Launch function
-///////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <class Policy>
 void launch_gemm_bf16xfp32(
@@ -280,10 +269,7 @@ void launch_gemm_bf16xfp32(
   });
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
 // Split-K partial reduction
-///////////////////////////////////////////////////////////////////////////////////////////////////
-
 class ReduceSplitsKernelName;
 
 inline void launch_reduce_splits(
@@ -317,10 +303,82 @@ inline void launch_reduce_splits(
   });
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-// Top-level dispatch (selects tile policy based on M)
-///////////////////////////////////////////////////////////////////////////////////////////////////
+// Split-K factor selection
+inline int choose_splits_fill(int base_wgs, int K, int n_cores) {
+  int splits = 1;
+  int fill_wgs = base_wgs;
+  for (int s = 2; base_wgs * s <= 2 * n_cores; ++s) {
+    if (K % s != 0 || (K / s) % 64 != 0) {
+      continue;
+    }
+    const int wgs = base_wgs * s;
+    if (wgs >= n_cores) {  // first split that fully occupies -> take it
+      splits = s;
+      break;
+    }
+    if (wgs > fill_wgs) {  // otherwise keep the most-filling split
+      splits = s;
+      fill_wgs = wgs;
+    }
+  }
+  return splits;
+}
 
+inline int choose_splits_net(int base_wgs, int K, int n_cores) {
+  int splits = 1;
+  int best_net = 0;  // net for splits == 1
+  for (int s = 2; base_wgs * s <= 2 * n_cores; ++s) {
+    if (K % s != 0 || (K / s) % 64 != 0) {
+      continue;
+    }
+    const int wgs = base_wgs * s;
+    const int gain = (wgs < n_cores ? wgs : n_cores) - base_wgs;
+    const int waste = (wgs > n_cores) ? (wgs - n_cores) : 0;
+    const int net = gain - waste;
+    if (net > best_net) {
+      best_net = net;
+      splits = s;
+    }
+  }
+  return splits;
+}
+
+// Launch a policy with a given Split-K factor (splits == 1 -> single kernel)
+template <class Policy>
+inline void launch_with_splitk(
+    sycl::queue& queue,
+    const at::Tensor& D,
+    const bfloat16_t* ptr_A,
+    const bfloat16_t* ptr_B_high,
+    const bfloat16_t* ptr_B_low,
+    float* ptr_D,
+    int M,
+    int N,
+    int K,
+    float scale_f,
+    int splits) {
+  if (splits > 1) {
+    auto D_ws = at::empty({splits, M, N}, D.options());
+    float* ptr_D_ws = reinterpret_cast<float*>(D_ws.data_ptr());
+    launch_gemm_bf16xfp32<Policy>(
+        queue,
+        ptr_A,
+        ptr_B_high,
+        ptr_B_low,
+        ptr_D_ws,
+        M,
+        N,
+        K,
+        scale_f,
+        splits);
+    launch_reduce_splits(queue, ptr_D_ws, ptr_D, splits, M, N);
+  } else {
+    launch_gemm_bf16xfp32<Policy>(
+        queue, ptr_A, ptr_B_high, ptr_B_low, ptr_D, M, N, K, scale_f);
+  }
+}
+
+// Top-level dispatch (selects tile policy based on M)
 inline at::Tensor gemm_bf16xfp32_xe2_impl(
     at::Tensor& A,       // [M, K] bf16
     at::Tensor& B_high,  // [K, N] bf16 (transposed weight)
@@ -379,51 +437,40 @@ inline at::Tensor gemm_bf16xfp32_xe2_impl(
   auto num_wgs = [&](int blk_m) { return ((M + blk_m - 1) / blk_m) * grid_n; };
 
   if (num_wgs(128) >= fill_threshold) {
+    // Prefill: the BLK_M=128 grid already fills the machine (splits == 1).
     launch_gemm_bf16xfp32<policy_default>(
         queue, ptr_A, ptr_B_high, ptr_B_low, ptr_D, M, N, K, scale_f);
-  } else if (num_wgs(64) >= fill_threshold) {
-    launch_gemm_bf16xfp32<policy_medium_m>(
-        queue, ptr_A, ptr_B_high, ptr_B_low, ptr_D, M, N, K, scale_f);
+  } else if (num_wgs(64) >= fill_threshold || (M >= 128 && M % 64 == 0)) {
+    // Mid M (compute-bound): split only when the occupancy gained beats the
+    // work-groups that spill into an extra wave.
+    launch_with_splitk<policy_medium_m>(
+        queue,
+        D,
+        ptr_A,
+        ptr_B_high,
+        ptr_B_low,
+        ptr_D,
+        M,
+        N,
+        K,
+        scale_f,
+        choose_splits_net(num_wgs(64), K, n_cores));
   } else {
-    const int base_wgs = num_wgs(32);
-    const int max_wgs = 2 * n_cores;
-    int splits = 1;
-    int fill_wgs = base_wgs;  // best occupancy so far (splits == 1)
-    for (int s = 2; base_wgs * s <= max_wgs; ++s) {
-      if (K % s != 0 || (K / s) % 64 != 0) {
-        continue;
-      }
-      const int wgs = base_wgs * s;
-      if (wgs >= n_cores) {  // first split that fully occupies -> take it
-        splits = s;
-        fill_wgs = wgs;
-        break;
-      }
-      if (wgs > fill_wgs) {  // otherwise keep the most-filling split
-        splits = s;
-        fill_wgs = wgs;
-      }
-    }
-
-    if (splits > 1) {
-      auto D_ws = at::empty({splits, M, N}, A.options().dtype(at::kFloat));
-      float* ptr_D_ws = reinterpret_cast<float*>(D_ws.data_ptr());
-      launch_gemm_bf16xfp32<policy_small_m>(
-          queue,
-          ptr_A,
-          ptr_B_high,
-          ptr_B_low,
-          ptr_D_ws,
-          M,
-          N,
-          K,
-          scale_f,
-          splits);
-      launch_reduce_splits(queue, ptr_D_ws, ptr_D, splits, M, N);
-    } else {
-      launch_gemm_bf16xfp32<policy_small_m>(
-          queue, ptr_A, ptr_B_high, ptr_B_low, ptr_D, M, N, K, scale_f);
-    }
+    // Decode (memory-bound small M): split aggressively to put more cores to
+    // work streaming weights; spilled waves are nearly free at these tiny
+    // tiles.
+    launch_with_splitk<policy_small_m>(
+        queue,
+        D,
+        ptr_A,
+        ptr_B_high,
+        ptr_B_low,
+        ptr_D,
+        M,
+        N,
+        K,
+        scale_f,
+        choose_splits_fill(num_wgs(32), K, n_cores));
   }
 
   return D;
