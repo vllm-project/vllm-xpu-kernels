@@ -152,9 +152,12 @@ def merge_attn_states(
     suffix_output: torch.Tensor,
     suffix_lse: torch.Tensor,
     output_lse: torch.Tensor | None = None,
+    prefill_tokens_with_context: int | None = None,
+    output_scale: torch.Tensor | None = None,
 ) -> None:
     torch.ops._C.merge_attn_states(output, output_lse, prefix_output,
-                                   prefix_lse, suffix_output, suffix_lse)
+                                   prefix_lse, suffix_output, suffix_lse,
+                                   prefill_tokens_with_context, output_scale)
 
 
 def reshape_and_cache(
