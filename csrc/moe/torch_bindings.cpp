@@ -1,13 +1,12 @@
 #include "core/registration.h"
 #include "moe_ops.h"
 
-TORCH_LIBRARY_EXPAND(VLLM_TORCH_OP_NAMESPACE, m) {
+VLLM_TORCH_LIBRARY_FRAGMENT_EXPAND(VLLM_TORCH_OP_NAMESPACE, m) {
   // Calculate the result of moe by summing up the partial results
   // from all selected experts.
   m.def(
       "moe_sum(Tensor input, Tensor! output, Tensor? topk_ids, "
       "Tensor? expert_map) -> ()");
-  m.impl("moe_sum", torch::kXPU, &moe_sum);
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.
@@ -17,7 +16,6 @@ TORCH_LIBRARY_EXPAND(VLLM_TORCH_OP_NAMESPACE, m) {
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad,"
       "                     Tensor? maybe_expert_map) -> ()");
-  m.impl("moe_align_block_size", torch::kXPU, &moe_align_block_size);
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size, but for the batched case.
@@ -27,10 +25,6 @@ TORCH_LIBRARY_EXPAND(VLLM_TORCH_OP_NAMESPACE, m) {
       "                     Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad) -> ()");
-  m.impl(
-      "batched_moe_align_block_size",
-      torch::kXPU,
-      &batched_moe_align_block_size);
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.
@@ -47,7 +41,6 @@ TORCH_LIBRARY_EXPAND(VLLM_TORCH_OP_NAMESPACE, m) {
       "                     Tensor! adapter_enabled,"
       "                     Tensor! lora_ids,"
       "                     Tensor? maybe_expert_map) -> () ");
-  m.impl("moe_lora_align_block_size", torch::kXPU, &moe_lora_align_block_size);
 
   // Apply fused grouped topk routing to select experts.
   // bias and scores may have different dtypes.
@@ -57,38 +50,38 @@ TORCH_LIBRARY_EXPAND(VLLM_TORCH_OP_NAMESPACE, m) {
       "grouped_topk(Tensor scores, int n_group, int topk_group, "
       "int topk, bool renormalize, float routed_scaling_factor, "
       "Tensor bias, int scoring_func) -> (Tensor, Tensor)");
-  m.impl("grouped_topk", torch::kXPU, &grouped_topk);
+
   // Apply topk softmax to the gating outputs.
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
       "bias, Tensor? is_padding) -> ()");
-  m.impl("topk_softmax", torch::kXPU, &topk_softmax);
+
   // Apply topk sigmoid to the gating outputs.
   m.def(
       "topk_sigmoid(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, "
       "Tensor? bias, float routed_scaling_factor, Tensor? is_padding) -> ()");
-  m.impl("topk_sigmoid", torch::kXPU, &topk_sigmoid);
+
   // Apply topk softplus sqrt to the gating outputs.
   m.def(
       "topk_softplus_sqrt(Tensor! topk_weights, Tensor! topk_indices, "
       "Tensor! token_expert_indices, Tensor gating_output, bool renormalize, "
       "float routed_scaling_factor, Tensor? correction_bias=None, Tensor? "
       "input_ids=None, Tensor? tid2eid=None, Tensor? is_padding=None) -> ()");
-  m.impl("topk_softplus_sqrt", torch::kXPU, &topk_softplus_sqrt);
+
   // Apply topk softmax to the gating outputs.
   m.def(
       "moe_gather(Tensor! output, Tensor moe_output, Tensor topk_weights, "
       "Tensor unpermuted_row_to_permuted_row, "
       "int num_experts) -> ()");
-  m.impl("moe_gather", torch::kXPU, &moe_gather);
+
   m.def(
       "init_expert_map(Tensor expert_map,"
       "int num_experts, "
       "int ep_rank, int ep_size) -> "
       "()");
-  m.impl("init_expert_map", torch::kXPU, &init_expert_map);
+
   m.def(
       "remap_hidden_states(Tensor hidden_states, Tensor? hidden_states_scales, "
       "Tensor remapped_hidden_states,"
@@ -98,12 +91,26 @@ TORCH_LIBRARY_EXPAND(VLLM_TORCH_OP_NAMESPACE, m) {
       "int total_experts_num, int "
       "local_experts_num) -> "
       "()");
-  m.impl("remap_hidden_states", torch::kXPU, &remap_hidden_states);
 
   m.def(
       "reorder_mxfp_scales(Tensor A_scales, Tensor rows_per_expert, "
       "int total_padded_rows) -> Tensor");
-  m.impl("reorder_mxfp_scales", torch::kXPU, &reorder_mxfp_scales);
+}
+
+VLLM_TORCH_LIBRARY_IMPL_EXPAND(VLLM_TORCH_OP_NAMESPACE, XPU, m) {
+  VLLM_TORCH_IMPL(m, "moe_sum", &moe_sum);
+  VLLM_TORCH_IMPL(m, "moe_align_block_size", &moe_align_block_size);
+  VLLM_TORCH_IMPL(
+      m, "batched_moe_align_block_size", &batched_moe_align_block_size);
+  VLLM_TORCH_IMPL(m, "moe_lora_align_block_size", &moe_lora_align_block_size);
+  VLLM_TORCH_IMPL(m, "grouped_topk", &grouped_topk);
+  VLLM_TORCH_IMPL(m, "topk_softmax", &topk_softmax);
+  VLLM_TORCH_IMPL(m, "topk_sigmoid", &topk_sigmoid);
+  VLLM_TORCH_IMPL(m, "topk_softplus_sqrt", &topk_softplus_sqrt);
+  VLLM_TORCH_IMPL(m, "moe_gather", &moe_gather);
+  VLLM_TORCH_IMPL(m, "init_expert_map", &init_expert_map);
+  VLLM_TORCH_IMPL(m, "remap_hidden_states", &remap_hidden_states);
+  VLLM_TORCH_IMPL(m, "reorder_mxfp_scales", &reorder_mxfp_scales);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
