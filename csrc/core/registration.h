@@ -16,6 +16,14 @@
 #define TORCH_LIBRARY_IMPL_EXPAND(NAME, DEVICE, MODULE) \
   TORCH_LIBRARY_IMPL(NAME, DEVICE, MODULE)
 
+#ifndef VLLM_TORCH_OP_NAMESPACE
+  #define VLLM_TORCH_OP_NAMESPACE TORCH_EXTENSION_NAME
+#endif
+
+#ifndef VLLM_TORCH_CACHE_OP_NAMESPACE
+  #define VLLM_TORCH_CACHE_OP_NAMESPACE CONCAT(TORCH_EXTENSION_NAME, _cache_ops)
+#endif
+
 // REGISTER_EXTENSION allows the shared library to be loaded and initialized
 // via python's import statement.
 #define REGISTER_EXTENSION(NAME)           \

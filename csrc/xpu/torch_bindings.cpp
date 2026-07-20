@@ -8,7 +8,7 @@
 #include <torch/library.h>
 #include <torch/version.h>
 
-TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
+TORCH_LIBRARY_EXPAND(VLLM_TORCH_OP_NAMESPACE, xpu_ops) {
   at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
 
   xpu_ops.def(

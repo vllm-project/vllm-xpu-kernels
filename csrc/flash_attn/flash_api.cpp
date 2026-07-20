@@ -436,7 +436,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
 }
 }  // namespace FLASH_NAMESPACE
 
-TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
+TORCH_LIBRARY_EXPAND(VLLM_TORCH_OP_NAMESPACE, ops) {
   ops.def(
       "varlen_fwd(Tensor q, Tensor k, Tensor v, Tensor!? out, Tensor "
       "cu_seqlens_q, "

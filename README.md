@@ -107,6 +107,18 @@ pip wheel --no-build-isolation .
 python -m build --wheel --no-isolation
 ```
 
+**vLLM libtorch stable extension-name compatibility**:
+
+```bash
+VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES=ON pip install --no-build-isolation .
+```
+
+This builds the native extensions with vLLM-style `*_stable_libtorch` module
+names while preserving the existing `torch.ops` namespaces such as `_C`,
+`_moe_C`, `_xpu_C`, and `_vllm_fa2_C`. The compatibility aliases allow both
+the legacy and stable-suffixed Python import names to resolve to the built
+native extension.
+
 ### Using with vLLM
 
 After [vLLM RFC#33214](https://github.com/vllm-project/vllm/issues/33214) was completed, vLLM-XPU migrated to a `vllm-xpu-kernels`-based implementation. Installing the latest vLLM for XPU will pull in `vllm-xpu-kernels` automatically as a wheel dependency — no manual integration is required.

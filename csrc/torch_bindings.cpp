@@ -13,7 +13,7 @@
 // https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit#heading=h.ptttacy8y1u9
 // https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
 
-TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
+TORCH_LIBRARY_EXPAND(VLLM_TORCH_OP_NAMESPACE, ops) {
   at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
 
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
@@ -241,7 +241,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("merge_attn_states", torch::kXPU, &merge_attn_states);
 }
 
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
+TORCH_LIBRARY_EXPAND(VLLM_TORCH_CACHE_OP_NAMESPACE, cache_ops) {
   // Reshape the key and value tensors and cache them.
   cache_ops.def(
       "reshape_and_cache(Tensor key, Tensor value,"

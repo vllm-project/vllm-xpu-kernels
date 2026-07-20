@@ -195,6 +195,7 @@ class cmake_build_ext(build_ext):
             "MQA_LOGITS_KERNELS_ENABLED",
             "XPU_SPECIFIC_KERNELS_ENABLED",
             "XPUMEM_ALLOCATOR_ENABLED",
+            "VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES",
         ]
         for opt in _kernel_options:
             cmake_args.append('-D{}={}'.format(
@@ -544,6 +545,13 @@ class precompiled_build_ext(build_ext):
 
 ext_modules = []
 
+
+def _extension_module_name(base_name: str) -> str:
+    if _is_enabled("VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES"):
+        return f"vllm_xpu_kernels.{base_name}_stable_libtorch"
+    return f"vllm_xpu_kernels.{base_name}"
+
+
 # List of additional shared libraries to install (intermediate build artifacts).
 # Only include libraries whose cmake targets will actually be built, based on
 # the architecture and TLA kernel options.
@@ -571,13 +579,16 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
 
 if _build_custom_ops():
     if _is_enabled("BASIC_KERNELS_ENABLED"):
-        ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._C"))
+        ext_modules.append(CMakeExtension(name=_extension_module_name("_C")))
     if _is_enabled("FA2_KERNELS_ENABLED"):
-        ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._vllm_fa2_C"))
+        ext_modules.append(
+            CMakeExtension(name=_extension_module_name("_vllm_fa2_C")))
     if _is_enabled("MOE_KERNELS_ENABLED"):
-        ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._moe_C"))
+        ext_modules.append(
+            CMakeExtension(name=_extension_module_name("_moe_C")))
     if _is_enabled("XPU_SPECIFIC_KERNELS_ENABLED"):
-        ext_modules.append(CMakeExtension(name="vllm_xpu_kernels._xpu_C"))
+        ext_modules.append(
+            CMakeExtension(name=_extension_module_name("_xpu_C")))
     if _is_enabled("XPUMEM_ALLOCATOR_ENABLED"):
         ext_modules.append(
             CMakeExtension(name="vllm_xpu_kernels.xpumem_allocator"))
