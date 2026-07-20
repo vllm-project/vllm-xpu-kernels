@@ -13,6 +13,7 @@ permissions:
 
 env:
   REGISTRY: localhost:5000
+  VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES: "ON"
 
 jobs:
   build-wheel-on-pvc:
