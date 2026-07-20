@@ -1,7 +1,7 @@
 #include "core/registration.h"
 #include "moe_ops.h"
 
-TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
+TORCH_LIBRARY_EXPAND(VLLM_TORCH_OP_NAMESPACE, m) {
   // Calculate the result of moe by summing up the partial results
   // from all selected experts.
   m.def(
