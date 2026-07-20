@@ -544,6 +544,10 @@ if(VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES)
   set(VLLM_MOE_EXTENSION_TARGET "_moe_C_stable_libtorch")
 endif()
 
+function(vllm_apply_torch_registration_defs target_name)
+  target_compile_definitions(${target_name} PRIVATE ${ARGN})
+endfunction()
+
 #
 # _C extension
 #
@@ -589,10 +593,9 @@ if(BASIC_KERNELS_ENABLED)
     3
     WITH_SOABI)
 
-  target_compile_definitions(
-    ${VLLM_C_EXTENSION_TARGET}
-    PRIVATE VLLM_TORCH_OP_NAMESPACE=_C
-            VLLM_TORCH_CACHE_OP_NAMESPACE=_C_cache_ops)
+  vllm_apply_torch_registration_defs(
+    ${VLLM_C_EXTENSION_TARGET} VLLM_TORCH_OP_NAMESPACE=_C
+    VLLM_TORCH_CACHE_OP_NAMESPACE=_C_cache_ops)
 
 endif()
 
@@ -634,8 +637,8 @@ if(FA2_KERNELS_ENABLED)
     ${ATTN_KERNEL_LIB_NAME}
     WITH_SOABI)
 
-  target_compile_definitions(${VLLM_FA2_EXTENSION_TARGET}
-                             PRIVATE VLLM_TORCH_OP_NAMESPACE=_vllm_fa2_C)
+  vllm_apply_torch_registration_defs(${VLLM_FA2_EXTENSION_TARGET}
+                                     VLLM_TORCH_OP_NAMESPACE=_vllm_fa2_C)
 endif()
 
 #
@@ -706,8 +709,8 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     3
     WITH_SOABI)
 
-  target_compile_definitions(${VLLM_XPU_EXTENSION_TARGET}
-                             PRIVATE VLLM_TORCH_OP_NAMESPACE=_xpu_C)
+  vllm_apply_torch_registration_defs(${VLLM_XPU_EXTENSION_TARGET}
+                                     VLLM_TORCH_OP_NAMESPACE=_xpu_C)
 endif()
 
 #
@@ -737,6 +740,6 @@ if(MOE_KERNELS_ENABLED)
     3
     WITH_SOABI)
 
-  target_compile_definitions(${VLLM_MOE_EXTENSION_TARGET}
-                             PRIVATE VLLM_TORCH_OP_NAMESPACE=_moe_C)
+  vllm_apply_torch_registration_defs(${VLLM_MOE_EXTENSION_TARGET}
+                                     VLLM_TORCH_OP_NAMESPACE=_moe_C)
 endif()
