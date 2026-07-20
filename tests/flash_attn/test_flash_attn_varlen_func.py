@@ -168,6 +168,13 @@ MINI_PYTEST_PARAMS = {
         "window_size": [(-1, -1), (127, 127)],
         "num_layers": [2],
     },
+    "test_varlen_paged_kv_large_surface_height": {
+        "dtype": [torch.bfloat16],
+        "is_casual": [False],
+    },
+    "test_decode_paged_kv_large_surface_height": {
+        "dtype": [torch.bfloat16],
+    },
     "test_decode_with_cross_layer_paged_kv": {
         "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
         "num_heads": [(8, 2)],
@@ -1207,6 +1214,181 @@ def test_varlen_with_cross_layer_paged_kv(
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
     torch.xpu.empty_cache()
+
+
+# Regression for the Intel Xe 2D block-load surface-height overflow.
+# The paged-KV mainloop folds the physical block index into the 2D surface
+# height (Y). That field is only 24-bit (max 2**24 = 16,777,216 rows), so when
+# `block_idx * page_stride_rows` exceeds it the address wraps and high blocks
+# silently read zeros -> wrong attention. This is only reachable with a large
+# `block_size` (2048) combined with a large physical page stride (e.g. the
+# offloading KV connector's cross-layer cache), which the other paged-KV tests
+# do not cover (they use block_size in {16, 64, 512}). We deliberately map each
+# sequence's blocks to the TOP of the block pool so that the highest referenced
+# block produces a Y offset above 2**24.
+def _run_large_surface_height_case(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    num_layers: int,
+    dtype: torch.dtype,
+    is_casual: bool,
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(4242)
+
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    blocks_needed = sum((kv_len + block_size - 1) // block_size
+                        for kv_len in kv_lens)
+
+    # Physical page stride (in KV rows) between two consecutive blocks in the
+    # tall 2D K/V surface. The cross-layer interleaved cache inflates it by
+    # `num_layers * 2` (2 = interleaved key/value).
+    page_stride_rows = num_layers * 2 * block_size
+    # Choose the pool so the top block's Y offset exceeds the 24-bit limit while
+    # keeping the allocation reasonable.
+    surface_limit = 1 << 24
+    num_blocks = surface_limit // page_stride_rows + 128
+    assert (num_blocks - 1) * page_stride_rows > surface_limit
+    assert num_blocks >= blocks_needed
+
+    # Skip if the device cannot comfortably hold the cache. Besides the pool
+    # itself, ref_paged_attn calls .contiguous() on the two strided K/V slices,
+    # each materializing a dense copy of every block.
+    bytes_per_elem = torch.tensor([], dtype=dtype).element_size()
+    pool_bytes = (num_blocks * page_stride_rows * num_kv_heads * head_size *
+                  bytes_per_elem)
+    dense_kv_bytes = 2 * (num_blocks * block_size * num_kv_heads * head_size *
+                          bytes_per_elem)
+    needed_bytes = pool_bytes + dense_kv_bytes
+    total_mem = torch.xpu.get_device_properties(0).total_memory
+    if needed_bytes > 0.6 * total_mem:
+        pytest.skip(f"needs ~{needed_bytes / 2**30:.1f} GiB, "
+                    f"device has {total_mem / 2**30:.1f} GiB")
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+
+    combined_kv_cache = torch.randn(num_blocks,
+                                    num_layers,
+                                    2,
+                                    block_size,
+                                    num_kv_heads,
+                                    head_size,
+                                    dtype=dtype)
+    key_cache = combined_kv_cache[:, 0, 0, :, :, :]
+    value_cache = combined_kv_cache[:, 0, 1, :, :, :]
+    assert key_cache.shape == value_cache.shape
+    assert key_cache.stride(0) == page_stride_rows * num_kv_heads * head_size
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+
+    # Map every sequence's logical blocks to distinct physical blocks taken from
+    # the TOP of the pool, guaranteeing the highest physical index (and thus a
+    # Y offset above 2**24) is actually read.
+    block_tables = torch.zeros((num_seqs, max_num_blocks_per_seq),
+                               dtype=torch.int32)
+    next_block = num_blocks - 1
+    for i in range(num_seqs):
+        n = (kv_lens[i] + block_size - 1) // block_size
+        for j in range(n):
+            block_tables[i, j] = next_block
+            next_block -= 1
+
+    output = flash_attn_varlen_func(query,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=is_casual,
+                                    block_table=block_tables,
+                                    window_size=(-1, -1),
+                                    s_aux=None)
+
+    ref_output = ref_paged_attn(
+        query=query.contiguous(),
+        key_cache=key_cache.contiguous(),
+        value_cache=value_cache.contiguous(),
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        casual=is_casual,
+        is_paged=True,
+        window_size_left=-1,
+        window_size_right=-1,
+        dtype=dtype)
+    atol, rtol = 2e-2, 1e-2
+    max_diff = torch.max(torch.abs(output.float() - ref_output.float()))
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol,
+                               msg=f"max abs diff: {max_diff}")
+    torch.xpu.empty_cache()
+
+
+# Prefill path: mixed query lengths exercise the FMHA mainloop.
+@pytest.mark.parametrize("seq_lens", [[(1, 2048), (3, 4096), (5, 2000)]])
+@pytest.mark.parametrize("num_heads", [(8, 2)])
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("block_size", [2048])
+@pytest.mark.parametrize("num_layers", [2])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half], ids=format_tc)
+@pytest.mark.parametrize("is_casual", [False, True])
+@torch.inference_mode()
+def test_varlen_paged_kv_large_surface_height(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    num_layers: int,
+    dtype: torch.dtype,
+    is_casual: bool,
+) -> None:
+    _run_large_surface_height_case(seq_lens, num_heads, head_size, block_size,
+                                   num_layers, dtype, is_casual)
+
+
+# Decode counterpart: query_len == 1 per sequence exercises the decode mainloop.
+@pytest.mark.parametrize("seq_lens", [[(1, 2048), (1, 4096), (1, 2000)]])
+@pytest.mark.parametrize("num_heads", [(8, 2)])
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("block_size", [2048])
+@pytest.mark.parametrize("num_layers", [2])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half], ids=format_tc)
+@torch.inference_mode()
+def test_decode_paged_kv_large_surface_height(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    num_layers: int,
+    dtype: torch.dtype,
+) -> None:
+    query_lens = [x[0] for x in seq_lens]
+    assert all(q == 1 for q in query_lens), \
+        "decode path requires query_len == 1"
+    _run_large_surface_height_case(seq_lens, num_heads, head_size, block_size,
+                                   num_layers, dtype, is_casual=False)
+
 
 @pytest.mark.parametrize("seq_lens", [[(1, 523), (1, 37), (1, 2011)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)

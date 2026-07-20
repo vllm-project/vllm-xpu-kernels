@@ -97,3 +97,44 @@ void bgmv_expand(
     const torch::Tensor& weights,
     const torch::Tensor& indices,
     bool add_to_output);
+
+//------------------------------------------------------------------------------
+// lora_shrink
+//------------------------------------------------------------------------------
+// Multi-slice LoRA shrink: processes ALL slices in a single kernel launch.
+//
+//   output[s, b, r] = scale * Σ_h (inputs[b, h] * weights_s[indices[b], r, h])
+//
+// Tensor shapes:
+//   inputs        : [batch_size, hidden_size]
+//   lora_a_weights: list of [num_loras, 1, rank, hidden_size]
+//   output_tensor : [num_slices, batch_size, rank]
+//   lora_indices  : [batch_size]
+//------------------------------------------------------------------------------
+void lora_shrink(
+    const torch::Tensor& inputs,
+    const std::vector<torch::Tensor>& lora_a_weights,
+    torch::Tensor& output_tensor,
+    const torch::Tensor& lora_indices,
+    double scaling);
+
+//------------------------------------------------------------------------------
+// lora_expand
+//------------------------------------------------------------------------------
+// Multi-slice LoRA expand: processes ALL slices in a single kernel launch.
+//
+//   output[b, offset_s + c] += inputs[s, b, :] @ weights_s[indices[b], c, :]
+//
+// Tensor shapes:
+//   inputs        : [num_slices, batch_size, rank]
+//   lora_b_weights: list of [num_loras, 1, slice_size, rank]
+//   output_tensor : [batch_size, total_output_dim]
+//   lora_indices  : [batch_size]
+//------------------------------------------------------------------------------
+void lora_expand(
+    const torch::Tensor& inputs,
+    const std::vector<torch::Tensor>& lora_b_weights,
+    torch::Tensor& output_tensor,
+    const torch::Tensor& lora_indices,
+    int64_t offset_start,
+    bool add_inputs);
