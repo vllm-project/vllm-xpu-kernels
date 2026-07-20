@@ -247,17 +247,23 @@ class XpuFusedMoe:
         self._use_ref = _should_use_ref_fused_moe(is_mxfp8, is_block_fp8)
         if self.activation == "silu":
             self.act_func = torch.ops._C.silu_and_mul
+            self.act_func_args = ()
         elif self.activation == "gelu":
             self.act_func = torch.ops._C.gelu_and_mul
+            self.act_func_args = ()
         elif self.activation == "gelu_tanh":
             self.act_func = torch.ops._C.gelu_tanh_and_mul
+            self.act_func_args = ()
         elif self.activation == "swigluoai" \
             or ("SWIGLUOAI" in str(self.activation)):
             self.act_func = torch.ops._C.swigluoai_and_mul
+            self.act_func_args = (1.702, 7.0)
         elif self.activation == "relu2_no_mul":
             self.act_func = torch.ops._C.relu2_no_mul
+            self.act_func_args = ()
         elif self.activation == "swiglustep":
             self.act_func = torch.ops._C.swiglustep_and_mul
+            self.act_func_args = (7.0,)
         else:
             raise ValueError(
                 f"Unsupported FusedMoe activation: {self.activation}.")
@@ -416,10 +422,8 @@ class XpuFusedMoe:
             (num_moe_inputs, self.inter_size * self.inter_size_scale),
             dtype=gemm1_output.dtype,
             device=gemm1_output.device)
-        fused_moe_activation(act_output,
-                             gemm1_output,
-                             self.activation,
-                             valid_tokens)
+        self.act_func(act_output, gemm1_output, *self.act_func_args,
+                      valid_tokens)
 
         ########### gemm2 ##################
         gemm2_output = torch.empty((num_moe_inputs, hidden_size),
