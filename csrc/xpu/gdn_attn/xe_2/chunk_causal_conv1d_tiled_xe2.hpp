@@ -336,24 +336,24 @@ struct chunk_causal_conv1d_tiled_kernel {
     // ========================================================================
     // Phase 2: Each item computes conv1d for its own feature lanes
     // ========================================================================
+    if (!feat_valid) return;
+
     bool is_q = (feat < q_dim);
     bool is_k = (!is_q && feat < q_dim + k_dim);
 
     // Load weights from global (only Width * elems_per_item = 16 values)
     T local_weights[Width * elems_per_item];
-    if (feat_valid) {
 #pragma unroll
-      for (int w = 0; w < Width; ++w) {
+    for (int w = 0; w < Width; ++w) {
 #pragma unroll
-        for (int e = 0; e < elems_per_item; ++e) {
-          local_weights[w * elems_per_item + e] =
-              conv_weights[(reordered_feat + e) * Width + w];
-        }
+      for (int e = 0; e < elems_per_item; ++e) {
+        local_weights[w * elems_per_item + e] =
+            conv_weights[(reordered_feat + e) * Width + w];
       }
     }
 
     float local_bias[elems_per_item];
-    if (conv_bias != nullptr && feat_valid) {
+    if (conv_bias != nullptr) {
 #pragma unroll
       for (int e = 0; e < elems_per_item; ++e) {
         local_bias[e] = conv_bias[reordered_feat + e];
@@ -363,40 +363,38 @@ struct chunk_causal_conv1d_tiled_kernel {
     // Conv1d: for each output token t, read SLM slots [t, t+Width)
     for (int t = 0; t < tile_tokens; ++t) {
       float res[elems_per_item];
-      if (feat_valid) {
+#pragma unroll
+      for (int e = 0; e < elems_per_item; ++e) {
+        res[e] = 0.0f;
+      }
+
+#pragma unroll
+      for (int w = 0; w < Width; ++w) {
+        int slot = t + w;
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          res[e] = 0.0f;
+          res[e] += static_cast<float>(
+                        slm_input[slot * feats_per_wg + local_feat + e]) *
+                    static_cast<float>(local_weights[w * elems_per_item + e]);
         }
+      }
 
+      if (conv_bias != nullptr) {
 #pragma unroll
-        for (int w = 0; w < Width; ++w) {
-          int slot = t + w;
-#pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            res[e] += static_cast<float>(
-                          slm_input[slot * feats_per_wg + local_feat + e]) *
-                      static_cast<float>(local_weights[w * elems_per_item + e]);
-          }
+        for (int e = 0; e < elems_per_item; ++e) {
+          res[e] += local_bias[e];
         }
+      }
 
-        if (conv_bias != nullptr) {
+      if (act_mode == ActMode::silu) {
 #pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            res[e] += local_bias[e];
-          }
+        for (int e = 0; e < elems_per_item; ++e) {
+          act_silu(res[e]);
         }
-
-        if (act_mode == ActMode::silu) {
+      } else if (act_mode == ActMode::swish) {
 #pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            act_silu(res[e]);
-          }
-        } else if (act_mode == ActMode::swish) {
-#pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            act_swish(res[e]);
-          }
+        for (int e = 0; e < elems_per_item; ++e) {
+          act_swish(res[e]);
         }
       }
 
@@ -409,17 +407,15 @@ struct chunk_causal_conv1d_tiled_kernel {
 
         float q_local_sq = 0.0f;
         float k_local_sq = 0.0f;
-        if (feat_valid) {
-          if (is_q) {
+        if (is_q) {
 #pragma unroll
-            for (int e = 0; e < elems_per_item; ++e)
-              q_local_sq += res[e] * res[e];
-          }
-          if (is_k) {
+          for (int e = 0; e < elems_per_item; ++e)
+            q_local_sq += res[e] * res[e];
+        }
+        if (is_k) {
 #pragma unroll
-            for (int e = 0; e < elems_per_item; ++e)
-              k_local_sq += res[e] * res[e];
-          }
+          for (int e = 0; e < elems_per_item; ++e)
+            k_local_sq += res[e] * res[e];
         }
 
         // Subgroup reduce
@@ -446,50 +442,46 @@ struct chunk_causal_conv1d_tiled_kernel {
         }
         sycl::group_barrier(item.get_group());  // protect SLM for next token
 
-        if (feat_valid) {
-          float q_inv = sycl::rsqrt(q_total + l2norm_eps) *
-                        sycl::rsqrt(static_cast<float>(q_dim));
-          float k_inv = sycl::rsqrt(k_total + l2norm_eps);
+        float q_inv = sycl::rsqrt(q_total + l2norm_eps) *
+                      sycl::rsqrt(static_cast<float>(q_dim));
+        float k_inv = sycl::rsqrt(k_total + l2norm_eps);
 
-          if (is_q) {
+        if (is_q) {
 #pragma unroll
-            for (int e = 0; e < elems_per_item; ++e)
-              res[e] *= q_inv;
-          }
-          if (is_k) {
+          for (int e = 0; e < elems_per_item; ++e)
+            res[e] *= q_inv;
+        }
+        if (is_k) {
 #pragma unroll
-            for (int e = 0; e < elems_per_item; ++e)
-              res[e] *= k_inv;
-          }
+          for (int e = 0; e < elems_per_item; ++e)
+            res[e] *= k_inv;
         }
       }
 
       // Write output
-      if (feat_valid) {
-        int token_in_seq = tile_start_in_seq + t;
-        int out_token_id = pre_chunks * chunk_size_xe2 + token_in_seq;
+      int token_in_seq = tile_start_in_seq + t;
+      int out_token_id = pre_chunks * chunk_size_xe2 + token_in_seq;
 
-        if (is_q) {
+      if (is_q) {
 #pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            q_out
-                [out_token_id * num_k_heads * q_dim + k_head_id * q_dim + feat +
-                 e] = res[e];
-          }
-        } else if (is_k) {
+        for (int e = 0; e < elems_per_item; ++e) {
+          q_out
+              [out_token_id * num_k_heads * q_dim + k_head_id * q_dim + feat +
+               e] = res[e];
+        }
+      } else if (is_k) {
 #pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            k_out
-                [out_token_id * num_k_heads * k_dim + k_head_id * k_dim + feat -
-                 q_dim + e] = res[e];
-          }
-        } else {
+        for (int e = 0; e < elems_per_item; ++e) {
+          k_out
+              [out_token_id * num_k_heads * k_dim + k_head_id * k_dim + feat -
+               q_dim + e] = res[e];
+        }
+      } else {
 #pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            v_out
-                [out_token_id * num_k_heads * v_dim + k_head_id * v_dim + feat -
-                 (q_dim + k_dim) + e] = res[e];
-          }
+        for (int e = 0; e < elems_per_item; ++e) {
+          v_out
+              [out_token_id * num_k_heads * v_dim + k_head_id * v_dim + feat -
+               (q_dim + k_dim) + e] = res[e];
         }
       }
     }
@@ -576,30 +568,28 @@ struct chunk_causal_conv1d_tiled_kernel {
     // ========================================================================
     // Phase 3: Save conv_state for the last tile of each sequence
     // ========================================================================
-    if (feat_valid) {
-      if (tile_start_in_seq + TileT >= seq_len && seq_len > 1) {
-        int last_slot = (tile_tokens - 1) + (Width - 1);
+    if (tile_start_in_seq + TileT >= seq_len && seq_len > 1) {
+      int last_slot = (tile_tokens - 1) + (Width - 1);
 #pragma unroll
-        for (int i = 0; i < Width - 1; ++i) {
-          int slot = last_slot - (Width - 2) + i;
+      for (int i = 0; i < Width - 1; ++i) {
+        int slot = last_slot - (Width - 2) + i;
 #pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            conv_states_tmp
-                [batch_id * (Width - 1) * conv_elems + i * conv_elems +
-                 reordered_feat + e] =
-                    slm_input[slot * feats_per_wg + local_feat + e];
-          }
+        for (int e = 0; e < elems_per_item; ++e) {
+          conv_states_tmp
+              [batch_id * (Width - 1) * conv_elems + i * conv_elems +
+               reordered_feat + e] =
+                  slm_input[slot * feats_per_wg + local_feat + e];
         }
-      } else if (seq_len == 1) {
-        T* st = conv_states + states_id * conv_states_stride_0;
+      }
+    } else if (seq_len == 1) {
+      T* st = conv_states + states_id * conv_states_stride_0;
 #pragma unroll
-        for (int i = 0; i < Width - 1; ++i) {
-          int slot = i + 1;
+      for (int i = 0; i < Width - 1; ++i) {
+        int slot = i + 1;
 #pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            st[i * conv_elems + reordered_feat + e] =
-                slm_input[slot * feats_per_wg + local_feat + e];
-          }
+        for (int e = 0; e < elems_per_item; ++e) {
+          st[i * conv_elems + reordered_feat + e] =
+              slm_input[slot * feats_per_wg + local_feat + e];
         }
       }
     }
