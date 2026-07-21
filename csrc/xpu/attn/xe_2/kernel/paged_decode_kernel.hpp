@@ -126,6 +126,8 @@ class XeFMHAFwdSplitKVKernel {
   static constexpr bool Sink = CollectiveEpilogue::Sink;
   using ElementSink = typename CollectiveEpilogue::ElementSink;
 
+  static constexpr int kXeMaxSurfaceRows = 1 << 24;
+
   // Device side arguments
   struct KernelArguments {
     ProblemShape shape;
@@ -445,23 +447,42 @@ class XeFMHAFwdSplitKVKernel {
       int end_blk = kv_split_offset + num_effective_kv_blocks;
 
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
-
-      mainloop(
-          Q(_, _, head, l_coord),
-          K(_, _, head, l_coord),
-          V(_, _, head, l_coord),
-          tArA,
-          tA_max,
-          tA_sum,
-          blk_qv,
-          idx_b,
-          start_blk,
-          end_blk,
-          k_blocks,
-          thr_id,
-          seq_len,
-          full_tile_offset,
-          discard_seq_coord);
+      bool has_large_surface = kXeMaxSurfaceRows < total_seqlen_kv;
+      if (has_large_surface) {
+        mainloop.template operator()<true>(
+            Q(_, _, head, l_coord),
+            K(_, _, head, l_coord),
+            V(_, _, head, l_coord),
+            tArA,
+            tA_max,
+            tA_sum,
+            blk_qv,
+            idx_b,
+            start_blk,
+            end_blk,
+            k_blocks,
+            thr_id,
+            seq_len,
+            full_tile_offset,
+            discard_seq_coord);
+      } else {
+        mainloop.template operator()<false>(
+            Q(_, _, head, l_coord),
+            K(_, _, head, l_coord),
+            V(_, _, head, l_coord),
+            tArA,
+            tA_max,
+            tA_sum,
+            blk_qv,
+            idx_b,
+            start_blk,
+            end_blk,
+            k_blocks,
+            thr_id,
+            seq_len,
+            full_tile_offset,
+            discard_seq_coord);
+      }
 
       if constexpr (
           !is_empty_v<MainloopSharedStorage> &&

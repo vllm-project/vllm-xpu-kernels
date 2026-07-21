@@ -296,6 +296,7 @@ class FMHAFwdEpilogue {
             rA_max(i) =
                 (rA_max(i) < rA_kmax[kr](i)) ? rA_kmax[kr](i) : rA_max(i);
         }
+
         /* Calculate scale factors for aligning per-block maxima. */
         for (int kr = 0; kr < ReduceK{}; kr++) {
           CUTLASS_PRAGMA_UNROLL

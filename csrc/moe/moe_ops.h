@@ -2,7 +2,11 @@
 
 #include <torch/all.h>
 
-void moe_sum(torch::Tensor& input, torch::Tensor& output);
+void moe_sum(
+    torch::Tensor& input,
+    torch::Tensor& output,
+    const std::optional<torch::Tensor>& topk_ids,
+    const std::optional<torch::Tensor>& expert_map);
 
 void moe_align_block_size(
     torch::Tensor topk_ids,
