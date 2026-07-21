@@ -1045,8 +1045,9 @@ def test_causal_conv1d_conv_elems_oob_guard(dtype):
     # Qwen-27B global heads: K=16, V=48. 
     # At TP=4, local heads are K=4 and V=12. 
     tp_size = 4
-    num_k_heads = 16 // tp_size  # -> 4
-    num_v_heads = 48 // tp_size  # -> 12
+    num_k_heads = 16
+    num_v_heads = 48
+    # local heads will be K=4, V=12 internally
     head_k_dim = 128
     head_v_dim = 128 
     
@@ -1056,13 +1057,18 @@ def test_causal_conv1d_conv_elems_oob_guard(dtype):
     num_prefills, num_decodes = 1, 0
     cache_batch_size = 4
 
-    mixed_qkvz_size = num_k_heads * (
-        2 * head_k_dim + 2 * head_v_dim * num_v_heads // num_k_heads)
-    mixed_ba_size = num_k_heads * (2 * num_v_heads // num_k_heads)
+    local_num_k_heads = num_k_heads // tp_size
+    local_num_v_heads = num_v_heads // tp_size
+    
+    mixed_qkvz_size = local_num_k_heads * (
+        2 * head_k_dim + 2 * head_v_dim * \
+        local_num_v_heads // local_num_k_heads)
+    mixed_ba_size = local_num_k_heads * (
+        2 * local_num_v_heads // local_num_k_heads)
     
     # conv_elems will equal mixed_qkv_size (2560 here)
-    mixed_qkv_size = num_k_heads * (
-        2 * head_k_dim + head_v_dim * num_v_heads // num_k_heads)
+    mixed_qkv_size = local_num_k_heads * (
+        2 * head_k_dim + head_v_dim * local_num_v_heads // local_num_k_heads)
 
     projected_states_qkvz = torch.randn((num_actual_tokens, mixed_qkvz_size),
                                         dtype=dtype, device=device)
@@ -1073,21 +1079,24 @@ def test_causal_conv1d_conv_elems_oob_guard(dtype):
                              dtype=dtype, device=device)
     ref_conv_state = conv_state.clone()
     ssm_state = torch.randn(
-        (cache_batch_size, num_v_heads, head_v_dim, head_k_dim),
+        (cache_batch_size, local_num_v_heads, head_v_dim, head_k_dim),
         dtype=dtype, device=device)
     ref_ssm_state = ssm_state.clone()
         
-    conv_weights = torch.randn((mixed_qkv_size, width), dtype=dtype, device=device)
+    conv_weights = torch.randn(
+        (mixed_qkv_size, width), dtype=dtype, device=device)
     conv_bias = torch.randn((mixed_qkv_size), dtype=dtype, device=device)
-    A_log = torch.randn((num_v_heads), dtype=torch.float32, device=device)
-    dt_bias = torch.randn((num_v_heads), dtype=dtype, device=device)
+    A_log = torch.randn((local_num_v_heads), dtype=torch.float32, device=device)
+    dt_bias = torch.randn((local_num_v_heads), dtype=dtype, device=device)
 
     non_spec_query_start_loc = torch.tensor([0, num_actual_tokens],
                                             dtype=torch.int32, device=device)
     has_initial_state = torch.tensor([True], dtype=torch.bool, device=device)
-    non_spec_state_indices_tensor = torch.tensor([0], dtype=torch.int32, device=device)
+    non_spec_state_indices_tensor = torch.tensor(
+        [0], dtype=torch.int32, device=device)
 
-    core_attn_out = torch.zeros((num_actual_tokens, num_v_heads, head_v_dim),
+    core_attn_out = torch.zeros(
+        (num_actual_tokens, local_num_v_heads, head_v_dim),
                                 dtype=dtype, device=device)
     z = torch.empty_like(core_attn_out)
 
