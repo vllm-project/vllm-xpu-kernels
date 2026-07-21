@@ -68,16 +68,31 @@ template <
     int THREADS_PER_ROW>
 struct RowChunkLoader;
 
-// float specialization: direct vector load, no conversion needed.
+// float specialization: vector or scalar load.
+// Writes element-by-element into row_chunk (via float*) to avoid a
+// strict-aliasing violation that was exposed by the oneAPI 2026.0 compiler.
+// Writing through an AlignedArray<float,N>* alias of a float[] object is UB;
+// the compiler may not propagate such stores to later float* reads, causing
+// the softplus/sqrt loop to see stale values and produce wrong weights.
 template <int ELTS_PER_LDG, int LDG_PER_THREAD, int THREADS_PER_ROW>
 struct RowChunkLoader<float, ELTS_PER_LDG, LDG_PER_THREAD, THREADS_PER_ROW> {
   static inline void load(float* row_chunk, const float* read_ptr) {
-    using VecType = AlignedArray<float, ELTS_PER_LDG>;
-    VecType* row_chunk_vec_ptr = reinterpret_cast<VecType*>(row_chunk);
-    const VecType* vec_read_ptr = reinterpret_cast<const VecType*>(read_ptr);
+    if constexpr (ELTS_PER_LDG >= 2) {
+      using VecType = AlignedArray<float, ELTS_PER_LDG>;
+      const VecType* vec_read_ptr = reinterpret_cast<const VecType*>(read_ptr);
 #pragma unroll
-    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-      row_chunk_vec_ptr[ii] = vec_read_ptr[ii * THREADS_PER_ROW];
+      for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+        VecType vec = vec_read_ptr[ii * THREADS_PER_ROW];
+#pragma unroll
+        for (int jj = 0; jj < ELTS_PER_LDG; ++jj) {
+          row_chunk[ii * ELTS_PER_LDG + jj] = vec.data[jj];
+        }
+      }
+    } else {
+#pragma unroll
+      for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+        row_chunk[ii] = *(read_ptr + ii * THREADS_PER_ROW);
+      }
     }
   }
 };
