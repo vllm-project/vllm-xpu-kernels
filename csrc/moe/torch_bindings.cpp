@@ -81,16 +81,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "int num_experts) -> ()");
   m.impl("moe_gather", torch::kXPU, &moe_gather);
   m.def(
-      "fused_moe_prologue(Tensor input, Tensor? input_scales, Tensor "
-      "token_selected_experts, "
-      "Tensor "
-      "token_final_scales, Tensor workspace, int hidden_size, int inter_size, "
-      "int block_k, "
-      "int ep_rank, int ep_size,"
-      "int num_experts_on_rank) -> "
-      "()");
-  m.impl("fused_moe_prologue", torch::kXPU, &fused_moe_prologue);
-  m.def(
       "init_expert_map(Tensor expert_map,"
       "int num_experts, "
       "int ep_rank, int ep_size) -> "
