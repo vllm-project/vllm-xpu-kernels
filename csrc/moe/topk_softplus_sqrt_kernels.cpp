@@ -68,16 +68,23 @@ template <
     int THREADS_PER_ROW>
 struct RowChunkLoader;
 
-// float specialization: direct vector load, no conversion needed.
+// float specialization: vector load via local copy to avoid strict-aliasing UB.
+// Writing through AlignedArray<float>* to a float[] via reinterpret_cast is
+// undefined behaviour under strict aliasing; oneAPI 2026.0 exploits this.
+// Mirror the bf16/half approach: load into a local VecType first, then copy
+// element-by-element through float* so the compiler sees the writes.
 template <int ELTS_PER_LDG, int LDG_PER_THREAD, int THREADS_PER_ROW>
 struct RowChunkLoader<float, ELTS_PER_LDG, LDG_PER_THREAD, THREADS_PER_ROW> {
   static inline void load(float* row_chunk, const float* read_ptr) {
     using VecType = AlignedArray<float, ELTS_PER_LDG>;
-    VecType* row_chunk_vec_ptr = reinterpret_cast<VecType*>(row_chunk);
     const VecType* vec_read_ptr = reinterpret_cast<const VecType*>(read_ptr);
 #pragma unroll
     for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-      row_chunk_vec_ptr[ii] = vec_read_ptr[ii * THREADS_PER_ROW];
+      VecType vec = vec_read_ptr[ii * THREADS_PER_ROW];
+#pragma unroll
+      for (int jj = 0; jj < ELTS_PER_LDG; ++jj) {
+        row_chunk[ii * ELTS_PER_LDG + jj] = vec.data[jj];
+      }
     }
   }
 };
