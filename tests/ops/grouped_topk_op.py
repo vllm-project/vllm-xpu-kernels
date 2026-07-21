@@ -22,6 +22,16 @@ def grouped_topk(
 
     assert hidden_states.size(0) == gating_output.size(0), (
         "Number of tokens mismatch")
+    # NOTE: torch.topk on XPU (torch 2.13.0+xpu) can return incorrect indices.
+    # Compute this reference implementation on CPU and move results back to the
+    # original device to avoid the broken XPU topk. Also upcast to float32 to
+    # match the fused kernel's internal precision; otherwise low-precision
+    # (e.g. bfloat16) rounding can create spurious ties in the group/expert
+    # selection that differ from the kernel.
+    ref_device = gating_output.device
+    gating_output = gating_output.cpu().float()
+    if e_score_correction_bias is not None:
+        e_score_correction_bias = e_score_correction_bias.cpu().float()
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
     elif scoring_func == "sigmoid":
@@ -61,7 +71,8 @@ def grouped_topk(
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     topk_weights = topk_weights * routed_scaling_factor
-    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+    return (topk_weights.to(device=ref_device, dtype=torch.float32),
+            topk_ids.to(device=ref_device, dtype=torch.int32))
 
 
 def fused_grouped_topk(

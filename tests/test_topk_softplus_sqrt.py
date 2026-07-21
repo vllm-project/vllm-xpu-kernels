@@ -36,7 +36,11 @@ def _torch_topk_softplus_sqrt(
             scores_for_choice = scores + e_score_correction_bias.unsqueeze(0)
         else:
             scores_for_choice = scores
-        topk_ids = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=True)[1]
+        # NOTE: torch.topk on XPU (torch 2.13.0+xpu) can return incorrect
+        # indices, so compute reference top-k selection on CPU.
+        topk_ids = torch.topk(
+            scores_for_choice.cpu(), k=topk, dim=-1, sorted=True
+        )[1].to(scores_for_choice.device)
 
     topk_weights = original_scores.gather(1, topk_ids.long())
     if renormalize:
