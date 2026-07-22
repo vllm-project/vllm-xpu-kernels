@@ -11,7 +11,7 @@ from tests.utils import format_tc
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 NUM_HEADS = [(8, 2)]
-HEAD_SIZES = [64, 128, 256, 512]
+HEAD_SIZES = [64, 80, 128, 256, 512]
 BLOCK_SIZES = [16, 64, 512]
 DTYPES = [torch.half, torch.bfloat16]
 QDTYPES = [None]
