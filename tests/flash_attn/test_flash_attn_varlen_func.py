@@ -388,7 +388,8 @@ def test_varlen_with_paged_kv(
 @pytest.mark.parametrize("block_size", [16, 64])
 @pytest.mark.parametrize("causal", [False, True])
 @torch.inference_mode()
-def test_varlen_with_paged_kv_head_size_72(block_size: int) -> None:
+def test_varlen_with_paged_kv_head_size_72(block_size: int,
+                                           causal: bool) -> None:
     """Validate head_size=72 through the padded head80 chunk policies."""
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -447,8 +448,9 @@ def test_varlen_with_paged_kv_head_size_72(block_size: int) -> None:
                                 window_size_right=-1,
                                 dtype=dtype)
 
-    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2), \
-        f"{torch.max(torch.abs(output - ref_output))}"
+    max_diff = torch.max(torch.abs(output.float() - ref_output.float()))
+    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2,
+                               msg=f"max abs diff: {max_diff}")
     torch.xpu.empty_cache()
 
 
