@@ -51,7 +51,7 @@ act_softplus(float& x, float beta = 1.0f, float threshold = 20.0f) {
 
 template <typename T>
 CUTE_DEVICE void chunk_prepare_kernel(
-    const float* a,
+    float* a,
     const float* A_log,
     const T* dt_bias,
     const int* query_start_loc,
@@ -119,9 +119,8 @@ CUTE_DEVICE void chunk_prepare_kernel(
           sycl::inclusive_scan_over_group(sg, g_local_sum, sycl::plus<float>());
       CUTE_UNROLL
       for (int c = local_num - 1; c >= 0; --c) {
-        const_cast<float*>(a)
-            [(chunk_start_offset + sg_local_id * local_num + c) +
-             v_head_id * total_virtual_seqlen] = g_local_sum;
+        a[(chunk_start_offset + sg_local_id * local_num + c) +
+          v_head_id * total_virtual_seqlen] = g_local_sum;
         g_local_sum -= g_local[c];
       }
 
@@ -1260,7 +1259,7 @@ void kernel_launcher(
     T* w,
     T* u,
     const float* b,
-    const float* a,
+    float* a,
     const float* A_log,
     const T* dt_bias,
     StateT* ssm_state,
