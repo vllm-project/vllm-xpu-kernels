@@ -6,6 +6,7 @@ from typing import Optional
 import torch
 
 import tests.register_ops as ops
+from tests.ops.topk_op import stable_topk
 
 
 def grouped_topk(
@@ -22,16 +23,6 @@ def grouped_topk(
 
     assert hidden_states.size(0) == gating_output.size(0), (
         "Number of tokens mismatch")
-    # NOTE: torch.topk on XPU (torch 2.13.0+xpu) can return incorrect indices.
-    # Compute this reference implementation on CPU and move results back to the
-    # original device to avoid the broken XPU topk. Also upcast to float32 to
-    # match the fused kernel's internal precision; otherwise low-precision
-    # (e.g. bfloat16) rounding can create spurious ties in the group/expert
-    # selection that differ from the kernel.
-    ref_device = gating_output.device
-    gating_output = gating_output.cpu().float()
-    if e_score_correction_bias is not None:
-        e_score_correction_bias = e_score_correction_bias.cpu().float()
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
     elif scoring_func == "sigmoid":
@@ -44,13 +35,14 @@ def grouped_topk(
         # scores for expert selection but original scores for routing weights
         original_scores = scores
         scores = scores + e_score_correction_bias.unsqueeze(0)
-        group_scores = (scores.view(num_token, num_expert_group,
-                                    -1).topk(2, dim=-1)[0].sum(dim=-1))
+        group_scores = (stable_topk(
+            scores.view(num_token, num_expert_group, -1), 2,
+            dim=-1)[0].sum(dim=-1))
     else:
         group_scores = scores.view(num_token, num_expert_group,
                                    -1).max(dim=-1).values  # [n, n_group]
-    group_idx = torch.topk(group_scores, k=topk_group, dim=-1,
-                           sorted=False)[1]  # [n, top_k_group]
+    _, group_idx = stable_topk(group_scores, topk_group,
+                               dim=-1)  # [n, top_k_group]
     group_mask = torch.zeros_like(group_scores)  # [n, n_group]
     group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
     score_mask = group_mask.unsqueeze(-1).expand(
@@ -59,20 +51,16 @@ def grouped_topk(
     tmp_scores = scores.masked_fill(~score_mask.bool(),
                                     float("-inf"))  # [n, e]
     if e_score_correction_bias is not None:
-        topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=False)[1]
+        _, topk_ids = stable_topk(tmp_scores, topk, dim=-1)
         # Use original unbiased scores for the routing weights
         topk_weights = original_scores.gather(1, topk_ids)
     else:
-        topk_weights, topk_ids = torch.topk(tmp_scores,
-                                            k=topk,
-                                            dim=-1,
-                                            sorted=False)
+        topk_weights, topk_ids = stable_topk(tmp_scores, topk, dim=-1)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     topk_weights = topk_weights * routed_scaling_factor
-    return (topk_weights.to(device=ref_device, dtype=torch.float32),
-            topk_ids.to(device=ref_device, dtype=torch.int32))
+    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
 def fused_grouped_topk(
