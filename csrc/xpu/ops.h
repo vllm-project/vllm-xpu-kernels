@@ -224,6 +224,33 @@ void gated_delta_rule(
     const int64_t num_actual_tokens,
     const int64_t tp_size);
 
+void kda_attention(
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q_proj,
+    const torch::Tensor& k_proj,
+    const torch::Tensor& v_proj,
+    const torch::Tensor& raw_gate,
+    const torch::Tensor& beta,
+    torch::Tensor& conv_state,
+    torch::Tensor& recurrent_state,
+    const torch::Tensor& q_conv_weight,
+    const torch::Tensor& k_conv_weight,
+    const torch::Tensor& v_conv_weight,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const int64_t num_spec_decodes,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    const int64_t num_actual_tokens);
+
 // Legacy fused entry point kept for API backward compatibility. Internally
 // chains causal_conv1d and gated_delta_rule to reproduce the original
 // gdn_attention behavior.
