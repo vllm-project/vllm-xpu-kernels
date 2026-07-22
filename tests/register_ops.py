@@ -356,6 +356,11 @@ def relu2_no_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.relu2_no_mul(out, input)
 
 
+def relu2(out: torch.Tensor, input: torch.Tensor) -> None:
+    """Squared ReLU activation: out = relu(x)^2."""
+    torch.ops._C.relu2(out, input)
+
+
 def swiglustep_and_mul(
     out: torch.Tensor,
     input: torch.Tensor,
