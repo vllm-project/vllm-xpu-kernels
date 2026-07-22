@@ -278,13 +278,12 @@ void cutlass_paged_decode_impl(
 
   auto get_head_size_case = [](int head_size) -> int {
     if (head_size <= HEAD_SIZE_LIMIT_0) return 0;
-    if (head_size <= HEAD_SIZE_LIMIT_1) return 1;
-    if (head_size <= HEAD_SIZE_LIMIT_2) return 2;
-    if (head_size <= HEAD_SIZE_LIMIT_3) return 3;
-    if (head_size <= HEAD_SIZE_LIMIT_4) return 4;
-    if (head_size <= HEAD_SIZE_LIMIT_5) return 5;
-    if (head_size <= HEAD_SIZE_LIMIT_6) return 6;
-    if (head_size <= HEAD_SIZE_LIMIT_7) return 7;
+    if (head_size <= HEAD_SIZE_LIMIT_2) return 1;
+    if (head_size <= HEAD_SIZE_LIMIT_3) return 2;
+    if (head_size <= HEAD_SIZE_LIMIT_4) return 3;
+    if (head_size <= HEAD_SIZE_LIMIT_5) return 4;
+    if (head_size <= HEAD_SIZE_LIMIT_6) return 5;
+    if (head_size <= HEAD_SIZE_LIMIT_7) return 6;
     return -1;
   };
 
