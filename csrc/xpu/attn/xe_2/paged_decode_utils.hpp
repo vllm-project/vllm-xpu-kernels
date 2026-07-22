@@ -131,30 +131,35 @@ inline void dispatch_by_head_size(
       break;
     case 1:
       decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _96, PageSize>>(
+          decode_policy_qpacked_head<QGroup, _80, PageSize>>(
           queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 2:
       decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _128, PageSize>>(
+          decode_policy_qpacked_head<QGroup, _96, PageSize>>(
           queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 3:
       decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _192, PageSize>>(
+          decode_policy_qpacked_head<QGroup, _128, PageSize>>(
           queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 4:
       decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _256, PageSize>>(
+          decode_policy_qpacked_head<QGroup, _192, PageSize>>(
           queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 5:
       decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _512, PageSize>>(
+          decode_policy_qpacked_head<QGroup, _256, PageSize>>(
           queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 6:
+      decode_policy_dispatch_func<
+          decode_policy_qpacked_head<QGroup, _512, PageSize>>(
+          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
+      break;
+    case 7:
       decode_policy_dispatch_func<
           decode_policy_qpacked_head<QGroup, _576, PageSize>>(
           queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);

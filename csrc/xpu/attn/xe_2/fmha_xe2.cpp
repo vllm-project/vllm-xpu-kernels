@@ -265,7 +265,6 @@ void cutlass_chunk_prefill_impl(
   // All other supported sizes (32, 64*n) divide cleanly by the default
   // TileShapeQK[1] = 32 used in the standard chunk_policy_head* set.
   const bool use_b16_policy = is_paged && (block_size == 16);
-  static constexpr int head_size_limit_72 = 72;
 
   if (use_b16_policy) {
     if (args.head_size <= HEAD_SIZE_LIMIT_0) {
@@ -278,18 +277,8 @@ void cutlass_chunk_prefill_impl(
           is_local,
           is_sink,
           is_lse);
-    } else if (args.head_size == head_size_limit_72) {
-      policy_dispatch_func<chunk_policy_head72_b16>(
-          queue,
-          cuQKType,
-          args,
-          is_paged,
-          is_causal,
-          is_local,
-          is_sink,
-          is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
-      policy_dispatch_func<chunk_policy_head96_b16>(
+      policy_dispatch_func<chunk_policy_head80_b16>(
           queue,
           cuQKType,
           args,
@@ -299,7 +288,7 @@ void cutlass_chunk_prefill_impl(
           is_sink,
           is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
-      policy_dispatch_func<chunk_policy_head128_b16>(
+      policy_dispatch_func<chunk_policy_head96_b16>(
           queue,
           cuQKType,
           args,
@@ -309,7 +298,7 @@ void cutlass_chunk_prefill_impl(
           is_sink,
           is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
-      policy_dispatch_func<chunk_policy_head192_b16>(
+      policy_dispatch_func<chunk_policy_head128_b16>(
           queue,
           cuQKType,
           args,
@@ -319,7 +308,7 @@ void cutlass_chunk_prefill_impl(
           is_sink,
           is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
-      policy_dispatch_func<chunk_policy_head256_b16>(
+      policy_dispatch_func<chunk_policy_head192_b16>(
           queue,
           cuQKType,
           args,
@@ -329,6 +318,16 @@ void cutlass_chunk_prefill_impl(
           is_sink,
           is_lse);
     } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
+      policy_dispatch_func<chunk_policy_head256_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_6) {
       policy_dispatch_func<chunk_policy_head512_b16>(
           queue,
           cuQKType,
@@ -344,22 +343,22 @@ void cutlass_chunk_prefill_impl(
   } else if (args.head_size <= HEAD_SIZE_LIMIT_0) {
     policy_dispatch_func<chunk_policy_head64>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
-  } else if (args.head_size == head_size_limit_72) {
-    policy_dispatch_func<chunk_policy_head72>(
-        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
-    policy_dispatch_func<chunk_policy_head96>(
+    policy_dispatch_func<chunk_policy_head80>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
-    policy_dispatch_func<chunk_policy_head128>(
+    policy_dispatch_func<chunk_policy_head96>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
-    policy_dispatch_func<chunk_policy_head192>(
+    policy_dispatch_func<chunk_policy_head128>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
-    policy_dispatch_func<chunk_policy_head256>(
+    policy_dispatch_func<chunk_policy_head192>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
+    policy_dispatch_func<chunk_policy_head256>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_6) {
     policy_dispatch_func<chunk_policy_head512>(
         queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
   } else {

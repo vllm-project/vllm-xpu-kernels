@@ -4,12 +4,13 @@
 #include <cute/tensor.hpp>
 
 #define HEAD_SIZE_LIMIT_0 64
-#define HEAD_SIZE_LIMIT_1 96
-#define HEAD_SIZE_LIMIT_2 128
-#define HEAD_SIZE_LIMIT_3 192
-#define HEAD_SIZE_LIMIT_4 256
-#define HEAD_SIZE_LIMIT_5 512
-#define HEAD_SIZE_LIMIT_6 576
+#define HEAD_SIZE_LIMIT_1 80
+#define HEAD_SIZE_LIMIT_2 96
+#define HEAD_SIZE_LIMIT_3 128
+#define HEAD_SIZE_LIMIT_4 192
+#define HEAD_SIZE_LIMIT_5 256
+#define HEAD_SIZE_LIMIT_6 512
+#define HEAD_SIZE_LIMIT_7 576
 
 enum class CutlassDType { half, bfloat16, float8_e4m3, float8_e5m2 };
 
@@ -58,10 +59,10 @@ struct chunk_policy_head64 {
   using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
 };
 
-struct chunk_policy_head72 {
+struct chunk_policy_head80 {
   using ShapeQK = Shape<_128, _64, _16>;
   using ShapePV = Shape<_128, _16, _64>;
-  using ShapeOut = Shape<_128, _72>;
+  using ShapeOut = Shape<_128, _80>;
   using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
 };
 
@@ -110,10 +111,10 @@ struct chunk_policy_head64_b16 {
   using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
 };
 
-struct chunk_policy_head72_b16 {
+struct chunk_policy_head80_b16 {
   using ShapeQK = Shape<_128, _16, _32>;
   using ShapePV = Shape<_128, _16, _16>;
-  using ShapeOut = Shape<_128, _72>;
+  using ShapeOut = Shape<_128, _80>;
   using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
 };
 
