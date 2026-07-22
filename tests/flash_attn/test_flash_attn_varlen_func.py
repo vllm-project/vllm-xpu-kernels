@@ -386,6 +386,7 @@ def test_varlen_with_paged_kv(
 
 
 @pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("causal", [False, True])
 @torch.inference_mode()
 def test_varlen_with_paged_kv_head_size_72(block_size: int) -> None:
     """Validate head_size=72 through the padded head80 chunk policies."""
@@ -427,7 +428,7 @@ def test_varlen_with_paged_kv_head_size_72(block_size: int) -> None:
                                     max_kv_len,
                                     seqused_k=seq_k,
                                     softmax_scale=scale,
-                                    causal=False,
+                                    causal=causal,
                                     block_table=block_tables,
                                     window_size=(-1, -1),
                                     s_aux=None)
@@ -439,7 +440,7 @@ def test_varlen_with_paged_kv_head_size_72(block_size: int) -> None:
                                 kv_lens=kv_lens,
                                 block_tables=block_tables,
                                 scale=scale,
-                                casual=False,
+                                casual=causal,
                                 is_paged=True,
                                 sink=None,
                                 window_size_left=-1,
