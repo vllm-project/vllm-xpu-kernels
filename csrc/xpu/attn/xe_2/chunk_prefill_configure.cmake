@@ -69,7 +69,14 @@ function(fmha_forward_configure FILENAME_SUFFIX)
   set(BOOL_FLAG_false "f")
   set(BOOL_FLAG_true "t")
 
-  set(headsize_list "64" "80" "96" "128" "192" "256" "512")
+  set(headsize_list
+      "64"
+      "80"
+      "96"
+      "128"
+      "192"
+      "256"
+      "512")
   set(policy_list
       "chunk_policy_head64"
       "chunk_policy_head80"

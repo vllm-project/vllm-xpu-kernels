@@ -406,7 +406,10 @@ def test_varlen_with_paged_kv_head_size_72(block_size: int,
     max_kv_len = max(kv_lens)
     scale = head_size**-0.5
 
-    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
     key_cache = torch.randn(
         num_blocks, block_size, num_kv_heads, head_size, dtype=dtype)
     value_cache = torch.randn_like(key_cache)

@@ -515,7 +515,8 @@ struct PagedDecodeConfig {
     static_assert(
         get<0>(TileShapeOutput{}) == get<0>(TileShapePV{}),
         "Output tile and P*V tile have different sizes in Q dimension");
-    constexpr int VTiles = ceil_div(get<1>(TileShapeOutput{}), get<1>(TileShapePV{}));
+    constexpr int VTiles =
+        ceil_div(get<1>(TileShapeOutput{}), get<1>(TileShapePV{}));
 
     auto make_dummy_tensor = [&](auto val, auto stride) {
       return make_tensor(
