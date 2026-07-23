@@ -249,7 +249,8 @@ struct causal_conv1d_kernel {
       int z_elems_id =
           k_heads_id * z_dim + qkvz_dim_id - (q_dim + k_dim + v_dim);
       T z_tmp[elems_per_item];
-      load_vec(&mixed_qkvz[global_token_id * qkvz_elems + mixed_qkvz_id], z_tmp);
+      load_vec(
+          &mixed_qkvz[global_token_id * qkvz_elems + mixed_qkvz_id], z_tmp);
       store_vec_t(
           &z_out[global_token_id * num_k_heads * z_dim + z_elems_id], z_tmp);
       return;
@@ -302,8 +303,9 @@ struct causal_conv1d_kernel {
       for (int i = 0; i < states_load_len; ++i) {
         T tmp[elems_per_item];
         load_vec(
-            &conv_states_ptr[(Width - 1 - states_load_len + i) * conv_elems +
-                             reordered_elems_id],
+            &conv_states_ptr
+                [(Width - 1 - states_load_len + i) * conv_elems +
+                 reordered_elems_id],
             tmp);
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
@@ -388,18 +390,21 @@ struct causal_conv1d_kernel {
     // reorder q, k, v
     if (is_q) {
       store_vec(
-          &q_out[token_id * num_k_heads * q_dim + k_heads_id * q_dim +
-                 qkvz_dim_id],
+          &q_out
+              [token_id * num_k_heads * q_dim + k_heads_id * q_dim +
+               qkvz_dim_id],
           res);
     } else if (is_k) {
       store_vec(
-          &k_out[token_id * num_k_heads * k_dim + k_heads_id * k_dim +
-                 qkvz_dim_id - q_dim],
+          &k_out
+              [token_id * num_k_heads * k_dim + k_heads_id * k_dim +
+               qkvz_dim_id - q_dim],
           res);
     } else if (is_v) {
       store_vec(
-          &v_out[token_id * num_k_heads * v_dim + k_heads_id * v_dim +
-                 qkvz_dim_id - (q_dim + k_dim)],
+          &v_out
+              [token_id * num_k_heads * v_dim + k_heads_id * v_dim +
+               qkvz_dim_id - (q_dim + k_dim)],
           res);
     }
   }
@@ -789,8 +794,7 @@ struct causal_conv1d_spec_kernel {
 #pragma unroll
       for (int i = 0; i < Width - 1; ++i) {
         T tmp[elems_per_item];
-        load_vec(
-            &init_state_ptr[i * conv_elems + reordered_elems_id], tmp);
+        load_vec(&init_state_ptr[i * conv_elems + reordered_elems_id], tmp);
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
           local_input[Width * e + i] = tmp[e];
@@ -854,18 +858,21 @@ struct causal_conv1d_spec_kernel {
       // Write to LOCAL q/k/v at token_id_local.
       if (is_q) {
         store_vec(
-            &q_out[token_id_local * num_k_heads * q_dim + k_heads_id * q_dim +
-                   qkvz_dim_id],
+            &q_out
+                [token_id_local * num_k_heads * q_dim + k_heads_id * q_dim +
+                 qkvz_dim_id],
             res);
       } else if (is_k) {
         store_vec(
-            &k_out[token_id_local * num_k_heads * k_dim + k_heads_id * k_dim +
-                   qkvz_dim_id - q_dim],
+            &k_out
+                [token_id_local * num_k_heads * k_dim + k_heads_id * k_dim +
+                 qkvz_dim_id - q_dim],
             res);
       } else {  // is_v
         store_vec(
-            &v_out[token_id_local * num_k_heads * v_dim + k_heads_id * v_dim +
-                   qkvz_dim_id - (q_dim + k_dim)],
+            &v_out
+                [token_id_local * num_k_heads * v_dim + k_heads_id * v_dim +
+                 qkvz_dim_id - (q_dim + k_dim)],
             res);
       }
 

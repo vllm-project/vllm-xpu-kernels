@@ -500,18 +500,20 @@ struct chunk_causal_conv1d_tiled_kernel {
 
       if (is_q) {
         store_vec(
-            &q_out[out_token_id * num_k_heads * q_dim + k_head_id * q_dim +
-                   feat],
+            &q_out
+                [out_token_id * num_k_heads * q_dim + k_head_id * q_dim + feat],
             res);
       } else if (is_k) {
         store_vec(
-            &k_out[out_token_id * num_k_heads * k_dim + k_head_id * k_dim +
-                   feat - q_dim],
+            &k_out
+                [out_token_id * num_k_heads * k_dim + k_head_id * k_dim + feat -
+                 q_dim],
             res);
       } else {
         store_vec(
-            &v_out[out_token_id * num_k_heads * v_dim + k_head_id * v_dim +
-                   feat - (q_dim + k_dim)],
+            &v_out
+                [out_token_id * num_k_heads * v_dim + k_head_id * v_dim + feat -
+                 (q_dim + k_dim)],
             res);
       }
     }
@@ -551,8 +553,9 @@ struct chunk_causal_conv1d_tiled_kernel {
           T z_tmp[elems_per_item];
           load_vec(&mixed_qkvz[mixed_z_id], z_tmp);
           store_vec_t(
-              &z_out[global_tok * num_k_heads * z_dim + k_head_id * z_dim +
-                     z_dim_id],
+              &z_out
+                  [global_tok * num_k_heads * z_dim + k_head_id * z_dim +
+                   z_dim_id],
               z_tmp);
         }
         // b/a reorder handled in a separate lane-parallel pass below.
@@ -572,8 +575,7 @@ struct chunk_causal_conv1d_tiled_kernel {
         float b_val, a_val;
         if constexpr (ReorderInput) {
           int step = global_tok * num_v_heads * 2;
-          b_val =
-              static_cast<float>(mixed_ba[step + k_head_id * kv_ratio + e]);
+          b_val = static_cast<float>(mixed_ba[step + k_head_id * kv_ratio + e]);
           a_val = static_cast<float>(
               mixed_ba[step + num_v_heads + k_head_id * kv_ratio + e]);
         } else {
