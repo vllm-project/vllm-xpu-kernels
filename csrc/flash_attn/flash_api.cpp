@@ -276,14 +276,28 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int effective_seqlen_k =
         is_local ? std::min(max_seqlen_k, eff_window_left + 1) : max_seqlen_k;
 
-    int num_tokens = batch_size;
+    int num_tokens = q.size(0);
     int num_heads_q = q.size(1);
-    int head_dim = q.size(2);
     int num_heads_kv = k.size(2);
     int kv_block_size = k.size(1);
+    int v_head_dim = v.size(-1);
 
-    int num_kv_splits = 1;
-    at::Tensor tmp_out = out;
+    // Enable Split-K on the decode half of mix-batch. Long KV rows in
+    // chunked-prefill serving previously forced num_kv_splits=1 and left
+    // Xe cores idle along K.
+    int num_kv_splits = num_splits.value_or(get_num_splits(
+        queue,
+        batch_size,
+        num_heads_q,
+        num_heads_kv,
+        effective_seqlen_k,
+        kv_block_size));
+    at::Tensor tmp_out =
+        num_kv_splits == 1
+            ? out
+            : at::empty(
+                  {num_tokens, num_heads_q * num_kv_splits, v_head_dim},
+                  q.options().device(q.device()));
     at::Tensor decode_max_logits = at::empty(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
