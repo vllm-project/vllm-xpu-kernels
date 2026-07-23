@@ -152,7 +152,7 @@ CUTE_DEVICE void xe_gemm(
 
   const int prefetch_dist = 3;
 
-  constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
+  constexpr int barrier_scope = 2;
 
   int k_tile_count = ceil_div(shape<1>(A), get<2>(wg_tile));
   int k_tile_prefetch = 0;
@@ -309,7 +309,7 @@ CUTE_DEVICE void xe_gemm_4bits(
 
   const int prefetch_dist = 6;
 
-  constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
+  constexpr int barrier_scope = 2;
 
   int k_tile_count = ceil_div(shape<1>(A), get<2>(wg_tile));
   int k_tile_prefetch = 0;
