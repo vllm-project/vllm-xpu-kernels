@@ -160,11 +160,13 @@ def _normalize_descale_tensor(
 
 
 def _kv_tile_from_block_size(block_size: int) -> int:
-    # Mirror of flash_api.cpp get_num_splits() / TileShapeQK<1>.
+    # Mirror of paged_decode_utils.hpp::dispatch_by_page_size.
     if block_size == 16:
         return 16
     if block_size == 32:
         return 32
+    if block_size > 0 and block_size % 128 == 0:
+        return 128
     return 64
 
 

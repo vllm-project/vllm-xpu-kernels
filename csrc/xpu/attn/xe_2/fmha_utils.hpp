@@ -179,17 +179,16 @@ struct decode_policy_qpacked_head<q_packed, head_dim, _64> {
 };
 
 // kv_tile == _128
-// NOTE: Currently UNUSED. The dispatcher in paged_decode_utils.hpp routes
-// page_size that is a multiple of 128 through the kv_tile=_64 policy because
-// this _128 policy uses SubgroupLayoutQK<_1,_8,_1> (ReduceK=8), which
-// triggers a wrong-result bug in the cross-SG SLM reduction
-// (chunk_prefill_epilogue.hpp::reduce_A) when SGTileShapeO collapses to
-// (1, 32). See dispatch_by_page_size for details. Kept here so it can be
-// re-enabled once the upstream ReduceK=8 reduction path is fixed.
+// Prefer SubgroupLayoutQK<_1,_4,_1> (ReduceK=4) over <_1,_8,_1>.
+// ReduceK=8 collapses SGTileShapeO to (1,32) and hits a wrong-result bug in
+// chunk_prefill_epilogue.hpp::reduce_A (gpt-oss-20b accuracy cliff).
+// ReduceK=4 keeps the well-tested (2,32) epilogue path while still covering
+// a 128-wide K tile (4 SGs × 32), cutting page_size/128 mainloop trips vs
+// iterating two _64 sub-tiles.
 template <typename q_packed, typename head_dim>
 struct decode_policy_qpacked_head<q_packed, head_dim, _128> {
   using ShapeQK = Shape<q_packed, _128, _64>;
   using ShapePV = Shape<q_packed, _32, _128>;
   using ShapeOut = Shape<q_packed, head_dim>;
-  using SubgroupLayoutQK = Layout<Shape<_1, _8, _1>>;
+  using SubgroupLayoutQK = Layout<Shape<_1, _4, _1>>;
 };
