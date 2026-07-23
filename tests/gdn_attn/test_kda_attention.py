@@ -259,6 +259,28 @@ def _make_inputs(
     )
 
 
+def _to_page_strided_xpu_cache(tensor: torch.Tensor) -> torch.Tensor:
+    slot_numel = tensor[0].numel()
+    slot_stride = slot_numel + 17
+    storage = torch.empty(
+        tensor.shape[0] * slot_stride, dtype=tensor.dtype, device="xpu"
+    )
+    cache = torch.as_strided(
+        storage,
+        tensor.shape,
+        (slot_stride, *tensor.stride()[1:]),
+    )
+    cache.copy_(tensor)
+    assert not cache.is_contiguous()
+    assert cache[0].is_contiguous()
+    return cache
+
+
+@pytest.mark.parametrize(
+    "page_strided_cache",
+    [False, True],
+    ids=["contiguous-cache", "page-strided-cache"],
+)
 @pytest.mark.parametrize(
     ("dtype", "cache_dtype", "head_dim", "dim_first", "mode"),
     [
@@ -271,7 +293,7 @@ def _make_inputs(
 )
 @torch.inference_mode()
 def test_kda_attention_non_spec(
-    dtype, cache_dtype, head_dim, dim_first, mode
+    dtype, cache_dtype, head_dim, dim_first, mode, page_strided_cache
 ):
     num_actual_tokens = 5 if mode == "prefill" else 3
     num_heads = 2
@@ -331,8 +353,12 @@ def test_kda_attention_non_spec(
 
     device = "xpu"
     actual_output = core_attn_out.to(device)
-    actual_conv_state = conv_state.to(device)
-    actual_recurrent_state = recurrent_state.to(device)
+    if page_strided_cache:
+        actual_conv_state = _to_page_strided_xpu_cache(conv_state)
+        actual_recurrent_state = _to_page_strided_xpu_cache(recurrent_state)
+    else:
+        actual_conv_state = conv_state.to(device)
+        actual_recurrent_state = recurrent_state.to(device)
     torch.ops._xpu_C.kda_attention(
         actual_output,
         *(projection.to(device) for projection in projections),

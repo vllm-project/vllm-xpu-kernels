@@ -6,6 +6,16 @@
 
 namespace {
 
+void check_cache_layout(const torch::Tensor& tensor, const char* name) {
+  TORCH_CHECK(tensor.size(0) > 0, name, " must contain at least one slot");
+  TORCH_CHECK(
+      tensor[0].is_contiguous(), name, " of each slot must be contiguous");
+  TORCH_CHECK(
+      tensor.size(0) == 1 || tensor.stride(0) >= tensor[0].numel(),
+      name,
+      " slots must not overlap");
+}
+
 void check_int32_tensor(
     const std::optional<torch::Tensor>& tensor, const char* name, int64_t dim) {
   TORCH_CHECK(tensor.has_value(), name, " must be provided");
@@ -430,21 +440,21 @@ void kda_attention(
       "dt_bias must be contiguous float32 with shape [heads * dim]");
 
   TORCH_CHECK(conv_state.dim() == 3, "conv_state must be 3D");
-  TORCH_CHECK(conv_state.is_contiguous(), "conv_state must be contiguous");
   TORCH_CHECK(
       conv_state.scalar_type() == at::kHalf ||
           conv_state.scalar_type() == at::kBFloat16 ||
           conv_state.scalar_type() == at::kFloat,
       "conv_state must be float16, bfloat16, or float32");
+  check_cache_layout(conv_state, "conv_state");
   TORCH_CHECK(
       recurrent_state.dim() == 4 && recurrent_state.size(1) == num_heads &&
           recurrent_state.size(2) == head_dim &&
           recurrent_state.size(3) == head_dim,
       "recurrent_state must have shape [slots, heads, dim, dim]");
   TORCH_CHECK(
-      recurrent_state.scalar_type() == at::kFloat &&
-          recurrent_state.is_contiguous(),
-      "recurrent_state must be contiguous float32");
+      recurrent_state.scalar_type() == at::kFloat,
+      "recurrent_state must be float32");
+  check_cache_layout(recurrent_state, "recurrent_state");
   TORCH_CHECK(
       recurrent_state.size(0) == conv_state.size(0),
       "KDA cache slot counts must match");
