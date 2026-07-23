@@ -16,6 +16,7 @@ void gated_delta_rule_decode_xe2(
     const torch::Tensor& dt_bias,
     torch::Tensor& ssm_state,
     const torch::Tensor& cache_indices,
+    const std::optional<torch::Tensor>& has_initial_state,
     const int batch_size,
     const int num_k_heads,
     const int head_k_dim,
@@ -26,6 +27,20 @@ void gated_delta_rule_decode_xe2(
   TORCH_CHECK(cache_indices.dtype() == torch::kInt32, "cache_indices must be int32");
   TORCH_CHECK(cache_indices.dim() == 1, "cache_indices must be 1D");
   TORCH_CHECK(cache_indices.size(0) == batch_size, "cache_indices size must match batch_size");
+  if (has_initial_state.has_value()) {
+    TORCH_CHECK(
+        has_initial_state->is_contiguous(),
+        "has_initial_state must be contiguous");
+    TORCH_CHECK(
+        has_initial_state->dtype() == torch::kBool,
+        "has_initial_state must be bool");
+    TORCH_CHECK(
+        has_initial_state->dim() == 1,
+        "has_initial_state must be 1D");
+    TORCH_CHECK(
+        has_initial_state->size(0) == batch_size,
+        "has_initial_state size must match batch_size");
+  }
   TORCH_CHECK(num_v_heads % num_k_heads == 0, "num_v_heads must be divisible by num_k_heads");
   TORCH_CHECK(
       A_log.scalar_type() == at::kFloat,
@@ -42,6 +57,10 @@ void gated_delta_rule_decode_xe2(
   const int ssm_state_stride_0 = ssm_state.stride(0);
   const int* cache_indices_ptr =
       reinterpret_cast<const int*>(cache_indices.data_ptr());
+  const bool* has_initial_state_ptr =
+      has_initial_state.has_value()
+          ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())
+          : nullptr;
   const int k_bucket_size = head_k_dim / gdn::xe2::decode_sub_group_size;
 
   if (core_attn_out.scalar_type() == at::kBFloat16) {
@@ -60,6 +79,7 @@ void gated_delta_rule_decode_xe2(
         ssm_state_stride_0,
         token_indx,
         cache_indices_ptr,
+        has_initial_state_ptr,
         batch_size,
         num_k_heads,
         head_k_dim,
@@ -82,6 +102,7 @@ void gated_delta_rule_decode_xe2(
         ssm_state_stride_0,
         token_indx,
         cache_indices_ptr,
+        has_initial_state_ptr,
         batch_size,
         num_k_heads,
         head_k_dim,
@@ -104,6 +125,7 @@ void gated_delta_rule_decode_xe2(
         ssm_state_stride_0,
         token_indx,
         cache_indices_ptr,
+        has_initial_state_ptr,
         batch_size,
         num_k_heads,
         head_k_dim,
@@ -126,6 +148,7 @@ void gated_delta_rule_decode_xe2(
       torch::Tensor& ssm_state,
       const torch::Tensor& cache_indices,
       const torch::Tensor& num_accepted_tokens,
+      const std::optional<torch::Tensor>& has_initial_state,
       const int num_spec_decodes,
       const int num_spec_tokens,
       const int num_k_heads,
@@ -150,6 +173,20 @@ void gated_delta_rule_decode_xe2(
       TORCH_CHECK(
         num_accepted_tokens.size(0) == num_spec_decodes,
         "num_accepted_tokens size must match num_spec_decodes");
+      if (has_initial_state.has_value()) {
+        TORCH_CHECK(
+          has_initial_state->is_contiguous(),
+          "has_initial_state must be contiguous");
+        TORCH_CHECK(
+          has_initial_state->dtype() == torch::kBool,
+          "has_initial_state must be bool");
+        TORCH_CHECK(
+          has_initial_state->dim() == 1,
+          "has_initial_state must be 1D");
+        TORCH_CHECK(
+          has_initial_state->size(0) == num_spec_decodes,
+          "has_initial_state size must match num_spec_decodes");
+      }
       TORCH_CHECK(num_v_heads % num_k_heads == 0, "num_v_heads must be divisible by num_k_heads");
       TORCH_CHECK(
         A_log.scalar_type() == at::kFloat,
@@ -169,6 +206,10 @@ void gated_delta_rule_decode_xe2(
         reinterpret_cast<const int*>(cache_indices.data_ptr());
       const int* num_accepted_tokens_ptr =
         reinterpret_cast<const int*>(num_accepted_tokens.data_ptr());
+      const bool* has_initial_state_ptr =
+        has_initial_state.has_value()
+          ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())
+          : nullptr;
       const int k_bucket_size = head_k_dim / gdn::xe2::decode_sub_group_size;
 
       if (core_attn_out.scalar_type() == at::kBFloat16) {
@@ -189,6 +230,7 @@ void gated_delta_rule_decode_xe2(
         cache_indices_ptr,
         cache_indices_stride_0,
         num_accepted_tokens_ptr,
+        has_initial_state_ptr,
         num_spec_decodes,
         num_spec_tokens,
         num_k_heads,
@@ -214,6 +256,7 @@ void gated_delta_rule_decode_xe2(
         cache_indices_ptr,
         cache_indices_stride_0,
         num_accepted_tokens_ptr,
+        has_initial_state_ptr,
         num_spec_decodes,
         num_spec_tokens,
         num_k_heads,
@@ -239,6 +282,7 @@ void gated_delta_rule_decode_xe2(
         cache_indices_ptr,
         cache_indices_stride_0,
         num_accepted_tokens_ptr,
+        has_initial_state_ptr,
         num_spec_decodes,
         num_spec_tokens,
         num_k_heads,

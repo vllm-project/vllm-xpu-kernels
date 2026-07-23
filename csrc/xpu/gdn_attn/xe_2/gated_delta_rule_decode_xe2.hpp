@@ -31,6 +31,7 @@ struct gated_delta_rule_decode_kernel_xe2 {
       const int ssm_state_stride_0,
       const int* token_indx,
       const int* cache_indices,
+      const bool* has_initial_state,
       const int batch_size,
       const int num_k_heads,
       const int head_k_dim,
@@ -48,6 +49,7 @@ struct gated_delta_rule_decode_kernel_xe2 {
         ssm_state_stride_0(ssm_state_stride_0),
         token_indx(token_indx),
         cache_indices(cache_indices),
+        has_initial_state(has_initial_state),
         batch_size(batch_size),
         num_k_heads(num_k_heads),
         head_k_dim(head_k_dim),
@@ -136,6 +138,8 @@ struct gated_delta_rule_decode_kernel_xe2 {
     StateT* ssm_state_ptr =
         ssm_state +
         static_cast<int64_t>(cache_indices[decode_id]) * ssm_state_stride_0;
+    const bool has_init_state =
+      has_initial_state == nullptr || has_initial_state[decode_id];
 
     for (int head_v_dim_id = sg_id * v_dim_per_sg; head_v_dim_id < head_v_dim;
          head_v_dim_id += v_dim_per_group) {
@@ -144,15 +148,22 @@ struct gated_delta_rule_decode_kernel_xe2 {
       float k_local[k_bucket_size];
       float v_local[v_dim_per_sg];
 
+      if (has_init_state) {
 #pragma unroll
-      for (int j = 0; j < v_dim_per_sg; ++j) {
-        const int state_offset =
-            state_head_offset + (head_v_dim_id + j) * head_k_dim +
-            k_bucket_size * sg_local_id;
-        load_vec_to_float<StateT, k_bucket_size>(
-            ssm_state_ptr + state_offset,
-            reinterpret_cast<float (&)[k_bucket_size]>(
-                state_local[j * k_bucket_size]));
+        for (int j = 0; j < v_dim_per_sg; ++j) {
+          const int state_offset =
+              state_head_offset + (head_v_dim_id + j) * head_k_dim +
+              k_bucket_size * sg_local_id;
+          load_vec_to_float<StateT, k_bucket_size>(
+              ssm_state_ptr + state_offset,
+              reinterpret_cast<float (&)[k_bucket_size]>(
+                  state_local[j * k_bucket_size]));
+        }
+      } else {
+#pragma unroll
+        for (int i = 0; i < v_dim_per_sg * k_bucket_size; ++i) {
+          state_local[i] = 0.0f;
+        }
       }
 
       float b_local = b[decode_id * num_v_heads + num_v_heads_id];
@@ -268,6 +279,7 @@ struct gated_delta_rule_decode_kernel_xe2 {
   const int ssm_state_stride_0;
   const int* token_indx;
   const int* cache_indices;
+  const bool* has_initial_state;
   const int batch_size;
   const int num_k_heads;
   const int head_k_dim;
@@ -299,6 +311,7 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
       const int* cache_indices,
       const int cache_indices_stride_0,
       const int* num_accepted_tokens,
+      const bool* has_initial_state,
       const int num_spec_decodes,
       const int num_spec_tokens,
       const int num_k_heads,
@@ -319,6 +332,7 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
         cache_indices(cache_indices),
         cache_indices_stride_0(cache_indices_stride_0),
         num_accepted_tokens(num_accepted_tokens),
+        has_initial_state(has_initial_state),
         num_spec_decodes(num_spec_decodes),
         num_spec_tokens(num_spec_tokens),
         num_k_heads(num_k_heads),
@@ -412,6 +426,8 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
         cache_indices[decode_id * cache_indices_stride_0 + init_col];
     const StateT* init_state_ptr =
         ssm_state + static_cast<int64_t>(init_state_idx) * ssm_state_stride_0;
+    const bool has_init_state =
+      has_initial_state == nullptr || has_initial_state[decode_id];
 
     for (int head_v_dim_id = sg_id * v_dim_per_sg; head_v_dim_id < head_v_dim;
          head_v_dim_id += v_dim_per_group) {
@@ -420,15 +436,22 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
       float k_local[k_bucket_size];
       float v_local[v_dim_per_sg];
 
+      if (has_init_state) {
 #pragma unroll
-      for (int j = 0; j < v_dim_per_sg; ++j) {
-        const int state_offset =
-            state_head_offset + (head_v_dim_id + j) * head_k_dim +
-            k_bucket_size * sg_local_id;
-        load_vec_to_float<StateT, k_bucket_size>(
-            init_state_ptr + state_offset,
-            reinterpret_cast<float (&)[k_bucket_size]>(
-                state_local[j * k_bucket_size]));
+        for (int j = 0; j < v_dim_per_sg; ++j) {
+          const int state_offset =
+              state_head_offset + (head_v_dim_id + j) * head_k_dim +
+              k_bucket_size * sg_local_id;
+          load_vec_to_float<StateT, k_bucket_size>(
+              init_state_ptr + state_offset,
+              reinterpret_cast<float (&)[k_bucket_size]>(
+                  state_local[j * k_bucket_size]));
+        }
+      } else {
+#pragma unroll
+        for (int i = 0; i < v_dim_per_sg * k_bucket_size; ++i) {
+          state_local[i] = 0.0f;
+        }
       }
 
       for (int t_local = 0; t_local < num_spec_tokens; ++t_local) {
@@ -553,6 +576,7 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
   const int* cache_indices;
   const int cache_indices_stride_0;
   const int* num_accepted_tokens;
+  const bool* has_initial_state;
   const int num_spec_decodes;
   const int num_spec_tokens;
   const int num_k_heads;
@@ -576,6 +600,7 @@ void kernel_launcher_decode_xe2(
     const int ssm_state_stride_0,
     const int* token_indx,
     const int* cache_indices,
+    const bool* has_initial_state,
     const int batch_size,
     const int num_k_heads,
     const int head_k_dim,
@@ -603,6 +628,7 @@ void kernel_launcher_decode_xe2(
         ssm_state_stride_0,
         token_indx,
         cache_indices,
+        has_initial_state,
         batch_size,
         num_k_heads,
         head_k_dim,
@@ -627,6 +653,7 @@ void dispatch_state_dtype_decode_xe2(
     const int ssm_state_stride_0,
     const int* token_indx,
     const int* cache_indices,
+    const bool* has_initial_state,
     const int batch_size,
     const int num_k_heads,
     const int head_k_dim,
@@ -650,6 +677,7 @@ void dispatch_state_dtype_decode_xe2(
           ssm_state_stride_0,                                                 \
           token_indx,                                                         \
           cache_indices,                                                      \
+          has_initial_state,                                                  \
           batch_size,                                                         \
           num_k_heads,                                                        \
           head_k_dim,                                                         \
@@ -671,6 +699,7 @@ void dispatch_state_dtype_decode_xe2(
           ssm_state_stride_0,                                                 \
           token_indx,                                                         \
           cache_indices,                                                      \
+          has_initial_state,                                                  \
           batch_size,                                                         \
           num_k_heads,                                                        \
           head_k_dim,                                                         \
@@ -692,6 +721,7 @@ void dispatch_state_dtype_decode_xe2(
           ssm_state_stride_0,                                                 \
           token_indx,                                                         \
           cache_indices,                                                      \
+          has_initial_state,                                                  \
           batch_size,                                                         \
           num_k_heads,                                                        \
           head_k_dim,                                                         \
@@ -713,6 +743,7 @@ void dispatch_state_dtype_decode_xe2(
           ssm_state_stride_0,                                                 \
           token_indx,                                                         \
           cache_indices,                                                      \
+          has_initial_state,                                                  \
           batch_size,                                                         \
           num_k_heads,                                                        \
           head_k_dim,                                                         \
@@ -759,6 +790,7 @@ void kernel_launcher_decode_xe2_spec(
     const int* cache_indices,
     const int cache_indices_stride_0,
     const int* num_accepted_tokens,
+    const bool* has_initial_state,
     const int num_spec_decodes,
     const int num_spec_tokens,
     const int num_k_heads,
@@ -790,6 +822,7 @@ void kernel_launcher_decode_xe2_spec(
         cache_indices,
         cache_indices_stride_0,
         num_accepted_tokens,
+        has_initial_state,
         num_spec_decodes,
         num_spec_tokens,
         num_k_heads,
@@ -817,6 +850,7 @@ void dispatch_state_dtype_decode_xe2_spec(
     const int* cache_indices,
     const int cache_indices_stride_0,
     const int* num_accepted_tokens,
+    const bool* has_initial_state,
     const int num_spec_decodes,
     const int num_spec_tokens,
     const int num_k_heads,
@@ -843,6 +877,7 @@ void dispatch_state_dtype_decode_xe2_spec(
           cache_indices,                                                    \
           cache_indices_stride_0,                                           \
           num_accepted_tokens,                                              \
+          has_initial_state,                                                \
           num_spec_decodes,                                                 \
           num_spec_tokens,                                                  \
           num_k_heads,                                                      \
@@ -867,6 +902,7 @@ void dispatch_state_dtype_decode_xe2_spec(
           cache_indices,                                                    \
           cache_indices_stride_0,                                           \
           num_accepted_tokens,                                              \
+          has_initial_state,                                                \
           num_spec_decodes,                                                 \
           num_spec_tokens,                                                  \
           num_k_heads,                                                      \
@@ -891,6 +927,7 @@ void dispatch_state_dtype_decode_xe2_spec(
           cache_indices,                                                    \
           cache_indices_stride_0,                                           \
           num_accepted_tokens,                                              \
+          has_initial_state,                                                \
           num_spec_decodes,                                                 \
           num_spec_tokens,                                                  \
           num_k_heads,                                                      \
@@ -915,6 +952,7 @@ void dispatch_state_dtype_decode_xe2_spec(
           cache_indices,                                                    \
           cache_indices_stride_0,                                           \
           num_accepted_tokens,                                              \
+          has_initial_state,                                                \
           num_spec_decodes,                                                 \
           num_spec_tokens,                                                  \
           num_k_heads,                                                      \

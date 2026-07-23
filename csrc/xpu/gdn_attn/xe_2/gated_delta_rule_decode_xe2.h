@@ -1,4 +1,5 @@
 #include <sycl/sycl.hpp>
+#include <optional>
 #include <torch/all.h>
 
 void gated_delta_rule_decode_xe2(
@@ -13,6 +14,7 @@ void gated_delta_rule_decode_xe2(
     const torch::Tensor& dt_bias,
     torch::Tensor& ssm_state,
     const torch::Tensor& cache_indices,
+    const std::optional<torch::Tensor>& has_initial_state,
     const int batch_size,
     const int num_k_heads,
     const int head_k_dim,
@@ -33,6 +35,7 @@ void gated_delta_rule_decode_xe2_spec(
     torch::Tensor& ssm_state,
     const torch::Tensor& cache_indices,
     const torch::Tensor& num_accepted_tokens,
+    const std::optional<torch::Tensor>& has_initial_state,
     const int num_spec_decodes,
     const int num_spec_tokens,
     const int num_k_heads,

@@ -588,6 +588,7 @@ void gated_delta_rule(
         ssm_state,
         *spec_state_indices_tensor,
         *num_accepted_tokens,
+        has_initial_state,
         num_spec_decodes,
         num_spec_tokens,
         q.size(1),
@@ -648,13 +649,6 @@ void gated_delta_rule(
           non_spec_token_indx.has_value()
               ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
               : nullptr;
-      TORCH_CHECK(
-          has_initial_state.has_value(),
-          "XE2 decode path requires has_initial_state");
-      TORCH_CHECK(
-          has_initial_state->numel() == num_decodes,
-          "XE2 decode path requires has_initial_state size to match num_decodes");
-
       gated_delta_rule_decode_xe2(
           queue,
           core_attn_out_active,
@@ -667,6 +661,7 @@ void gated_delta_rule(
           dt_bias,
           ssm_state,
           *non_spec_state_indices_tensor,
+          has_initial_state,
           num_decodes,
           q.size(1),
           q.size(2),
