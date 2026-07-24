@@ -419,7 +419,15 @@ def test_causal_conv1d(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
         torch.zeros([1], device=device),
         torch.cumsum(shuffled_tensor, dim=0)
     ]).to(torch.int32)
-    has_initial_state = perm >= num_decodes
+
+    # Decode mode should always have initial_state
+    if mode == "decode":
+        has_initial_state = torch.ones(batch_size,
+                                       dtype=torch.bool,
+                                       device=device)
+    else:
+        has_initial_state = perm < num_decodes
+
     non_spec_state_indices_tensor = torch.tensor(random.sample(
         range(cache_batch_size), batch_size),
                                                  device=device,
