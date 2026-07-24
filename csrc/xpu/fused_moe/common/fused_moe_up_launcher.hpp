@@ -2,10 +2,13 @@
 
 #include <torch/all.h>
 
-#include "xe2/fused_moe_xe2_policy.h"
-#include "xe2/xe2_utils.h"
+#ifdef VLLM_XPU_ENABLE_XE2
+#include "csrc/xpu/fused_moe/xe2/fused_moe_xe2_policy.h"
+#include "csrc/xpu/fused_moe/xe2/xe2_utils.h"
+#endif
+
 #include "fused_moe_kernel.hpp"
-#include "fused_moe_up_dispatch.h"
+#include "fused_moe_up_impl_dispatch.h"
 
 namespace FusedMOE {
 using namespace cute;

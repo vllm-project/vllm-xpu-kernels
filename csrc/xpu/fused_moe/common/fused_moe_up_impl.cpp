@@ -1,6 +1,6 @@
 #include "csrc/utils.h"
-#include "fused_moe_up.h"
-#include "fused_moe_up_dispatch.h"
+#include "fused_moe_up_impl.h"
+#include "fused_moe_up_impl_dispatch.h"
 
 namespace {
 
@@ -41,7 +41,7 @@ FusedMOE::FusedMOEUpDispatchFn get_fused_moe_up_dispatch(
 
 }  // namespace
 
-torch::Tensor fused_moe_up(
+torch::Tensor fused_moe_up_impl(
     torch::Tensor& ptr_A,
     const c10::optional<at::Tensor>& ptr_A_scale,
     torch::Tensor& ptr_B,
