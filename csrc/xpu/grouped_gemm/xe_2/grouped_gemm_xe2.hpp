@@ -65,6 +65,7 @@ template <
     char LayoutKindA,
     char LayoutKindB,
     char LayoutKindD,
+    bool IsBlockScale,
     class TiledMMA,
     typename ElementA,
     typename ElementB,
@@ -146,6 +147,12 @@ CUTE_DEVICE void MoEGEMM(
     if constexpr (is_B_4bits) {
       ptr_Scales_curr_batch =
           const_cast<ElementS*>(Scales) + B_offset * 2 / group_size;
+    } else if constexpr (IsBlockScale) {
+      int64_t num_k_blocks = static_cast<int64_t>(gemm_k) / 128;
+      int64_t num_n_blocks = static_cast<int64_t>(gemm_n) / 128;
+      ptr_Scales_curr_batch =
+          const_cast<ElementS*>(Scales) +
+          static_cast<int64_t>(expert_id) * num_k_blocks * num_n_blocks;
     }
     ElementBI* ptr_Bias_curr_batch = nullptr;
     if (Bias != static_cast<ElementBI*>(nullptr)) {
@@ -194,6 +201,16 @@ CUTE_DEVICE void MoEGEMM(
           XE_GEMM_4BITS_CALLER(256)
         }
 #undef XE_GEMM_4BITS_CALLER
+      } else if constexpr (IsBlockScale) {
+        xe_gemm_blockfp8<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
+            A_tensor,
+            B_tensor,
+            ptr_Scales_curr_batch,
+            ptr_Bias_curr_batch,
+            D_tensor,
+            tile_coord,
+            mma,
+            gemm_n);
       } else {
         xe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
             A_tensor,

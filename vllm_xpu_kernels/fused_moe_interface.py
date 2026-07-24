@@ -24,7 +24,7 @@ def _is_env_enabled(env_name: str, default: str = "0") -> bool:
 
 
 def _should_use_ref_fused_moe(is_mxfp8: bool, is_block_fp8: bool) -> bool:  
-    if is_mxfp8 or is_block_fp8:
+    if is_mxfp8 or (is_block_fp8 and not torch.ops._xpu_C.is_xe2_arch()):
         return True
     return _is_env_enabled(REF_FUSED_MOE_ENV)
 
