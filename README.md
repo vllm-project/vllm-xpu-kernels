@@ -42,8 +42,8 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 ## Requirements
 
 - **Python**: 3.9 – 3.12
-- **PyTorch**: 2.12.0+xpu
-- **oneAPI**: 2025.3 ([Base Toolkit download](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html))
+- **PyTorch**: 2.13.0+xpu
+- **oneAPI**: 2026.0 ([Base Toolkit download](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html))
 - **CMake**: ≥ 3.26
 - **Ninja** build system
 
@@ -55,7 +55,7 @@ vLLM calls `import vllm_xpu_kernels._C` at startup, which registers all custom o
 
 ### Installation
 
-**1. Install oneAPI 2025.3**
+**1. Install oneAPI 2026.0**
 
 Download and install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html), then source the environment:
 

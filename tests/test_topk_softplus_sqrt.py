@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 
 import tests.register_ops as ops
+from tests.ops.topk_op import stable_topk
 from tests.utils import format_tc, seed_everything
 
 
@@ -36,7 +37,7 @@ def _torch_topk_softplus_sqrt(
             scores_for_choice = scores + e_score_correction_bias.unsqueeze(0)
         else:
             scores_for_choice = scores
-        topk_ids = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=True)[1]
+        _, topk_ids = stable_topk(scores_for_choice, topk, dim=-1)
 
     topk_weights = original_scores.gather(1, topk_ids.long())
     if renormalize:

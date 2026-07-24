@@ -9,8 +9,8 @@ import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 
 # layer norm ops
-def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
-             epsilon: float) -> None:
+def rms_norm(out: torch.Tensor, input: torch.Tensor,
+             weight: Optional[torch.Tensor], epsilon: float) -> None:
     # TODO: Remove this contiguous call when the kernel is updated to support
     # non-contiguous input
     input_contiguous = input.contiguous()
@@ -18,7 +18,8 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
 
 
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
-                       weight: torch.Tensor, epsilon: float) -> None:
+                       weight: Optional[torch.Tensor],
+                       epsilon: float) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
@@ -425,8 +426,13 @@ def fp8_gemm_w8a16(input: torch.Tensor, weight: torch.Tensor,
 
 
 # moe
-def moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
-    torch.ops._moe_C.moe_sum(input, output)
+def moe_sum(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    topk_ids: Optional[torch.Tensor] = None,
+    expert_map: Optional[torch.Tensor] = None,
+) -> None:
+    torch.ops._moe_C.moe_sum(input, output, topk_ids, expert_map)
 
 
 def moe_lora_align_block_size(

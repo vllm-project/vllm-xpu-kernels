@@ -2,7 +2,11 @@
 
 #include <torch/all.h>
 
-void moe_sum(torch::Tensor& input, torch::Tensor& output);
+void moe_sum(
+    torch::Tensor& input,
+    torch::Tensor& output,
+    const std::optional<torch::Tensor>& topk_ids,
+    const std::optional<torch::Tensor>& expert_map);
 
 void moe_align_block_size(
     torch::Tensor topk_ids,
@@ -79,19 +83,6 @@ void moe_gather(
     const torch::Tensor& topk_weights,
     const torch::Tensor& unpermuted_row_to_permuted_row,
     const int64_t num_experts);
-
-void fused_moe_prologue(
-    torch::Tensor input,
-    const c10::optional<torch::Tensor>& input_scales,
-    torch::Tensor token_selected_experts,
-    torch::Tensor token_final_scales,
-    torch::Tensor workspace,
-    int64_t hidden_size,
-    int64_t inter_size,
-    int64_t block_k,
-    int64_t ep_rank,
-    int64_t ep_size,
-    int64_t num_experts_on_rank);
 
 void init_expert_map(
     torch::Tensor& expert_map,
