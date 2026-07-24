@@ -1,132 +1,45 @@
-#include <torch/all.h>
 #include "csrc/utils.h"
-
-#ifdef VLLM_XPU_ENABLE_XE2
-  #include "xe2/fused_moe_xe2_policy.h"
-  #include "xe2/xe2_utils.h"
-#endif
-#include "fused_moe_kernel.hpp"
 #include "fused_moe_up.h"
+#include "fused_moe_up_dispatch.h"
 
-// #pragma clang diagnostic ignored "-Wpass-failed"
-// #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+namespace {
 
-namespace FusedMOE {
-using namespace cute;
+FusedMOE::FusedMOEUpDispatchFn get_fused_moe_up_dispatch(
+    FusedMOE::FusedMOEWeightType weight_type, const std::string& activation) {
+  using namespace FusedMOE;
 
-// type tag to define a unique sycl kernel name
-template <
-    bool,
-    ActivationType,
-    typename,
-    typename,
-    typename,
-    typename,
-    char,
-    char,
-    class>
-class FusedMOEUpName;
+#define SELECT_ACTIVATION(WeightType, suffix)    \
+  if (activation == "silu") {                    \
+    return fused_moe_up_##suffix##_silu;         \
+  } else if (activation == "gelu") {             \
+    return fused_moe_up_##suffix##_gelu;         \
+  } else if (activation == "gelu_tanh") {        \
+    return fused_moe_up_##suffix##_gelu_tanh;    \
+  } else if (activation == "swigluoai") {        \
+    return fused_moe_up_##suffix##_swigluoai;    \
+  } else if (activation == "relu2_no_mul") {     \
+    return fused_moe_up_##suffix##_relu2_no_mul; \
+  } else if (activation == "swiglustep") {       \
+    return fused_moe_up_##suffix##_swiglustep;   \
+  }
 
-template <
-    bool has_clamping,
-    ActivationType activation_type,
-    char layoutA,
-    char layoutB,
-    class policy,
-    typename ElementA,
-    typename ElementB,
-    typename ElementS,
-    typename ElementBI,
-    typename ElementD>
-void FusedMOEUpLauncher(
-    sycl::queue& queue,
-    const ElementA* activations,
-    const ElementB* weights,
-    const ElementS* scales,
-    const ElementBI* bias,
-    ElementD* outputs,
-    const int gemm_n,
-    const int gemm_k,
-    const int* rows_per_expert,
-    const int num_experts,
-    const int group_size,
-    int32_t* atomic_buffer,
-    const double gemm1_clamp_limit) {
-  using ElementA_non_CV = cutlass::platform::remove_cv_t<ElementA>;
-  auto op = XE_DPAS_TT<systolic_m, float, ElementA_non_CV>{};
+  switch (weight_type) {
+    case FusedMOEWeightType::W4A16:
+      SELECT_ACTIVATION(W4A16, w4a16)
+      break;
+    case FusedMOEWeightType::W8A16:
+      SELECT_ACTIVATION(W8A16, w8a16)
+      break;
+    case FusedMOEWeightType::W16A16:
+      SELECT_ACTIVATION(W16A16, w16a16)
+      break;
+  }
 
-  using WGTile = typename policy::WGTile;
-  using SGLayout = typename policy::SGLayout;
-  using MMA = typename TiledMMAHelper<
-      MMA_Atom<decltype(op)>,
-      Layout<WGTile>,
-      SGLayout>::TiledMMA;
-  auto mma = MMA{};
-
-  int sm_count =
-      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(0);
-  auto MaxThreadsPerWorkgroup = size(mma);
-
-  TORCH_CHECK(
-      MaxThreadsPerSM % MaxThreadsPerWorkgroup == 0,
-      "MaxThreadsPerSM must be divisible by MaxThreadsPerWorkgroup");
-
-  sycl::range<3> local(1, 1, MaxThreadsPerWorkgroup);
-  sycl::range<3> global(
-      1, sm_count * MaxThreadsPerSM / MaxThreadsPerWorkgroup, 1);
-
-  namespace syclex = sycl::ext::oneapi::experimental;
-  namespace intelex = sycl::ext::intel::experimental;
-
-  syclex::properties kernel_props{
-      syclex::sub_group_size<sub_group_size>, intelex::grf_size<grf_size>};
-
-  using GmemTiledCopyA = typename policy::GmemTiledCopyA;
-  using GmemTiledCopyB = typename policy::GmemTiledCopyB;
-  using GmemTiledCopyD = typename policy::GmemTiledCopyD;
-
-  queue.submit([&](sycl::handler& cgh) {
-    sycl::local_accessor<int32_t, 1> local_mem(sycl::range<1>(1), cgh);
-    cgh.parallel_for<FusedMOEUpName<
-        has_clamping,
-        activation_type,
-        ElementA,
-        ElementB,
-        ElementS,
-        ElementD,
-        layoutA,
-        layoutB,
-        policy>>(
-        sycl::nd_range<3>{global * local, local}, kernel_props, [=](auto) {
-          FusedMOEUp<
-              has_clamping,
-              activation_type,
-              GmemTiledCopyA,
-              GmemTiledCopyB,
-              GmemTiledCopyD,
-              layoutA,
-              layoutB,
-              'R'>(
-              activations,
-              weights,
-              scales,
-              bias,
-              outputs,
-              mma,
-              rows_per_expert,
-              num_experts,
-              group_size,
-              gemm_n,
-              gemm_k,
-              atomic_buffer,
-              local_mem,
-              gemm1_clamp_limit);
-        });
-  });
+#undef SELECT_ACTIVATION
+  return nullptr;
 }
-}  // namespace FusedMOE
 
-using namespace FusedMOE;
+}  // namespace
 
 torch::Tensor fused_moe_up(
     torch::Tensor& ptr_A,
@@ -169,7 +82,6 @@ torch::Tensor fused_moe_up(
 
   int A_total_M = ptr_A.size(0);
   int A_K = ptr_A.size(1);
-
   int B_E = ptr_B.size(0);
   int B_K = ptr_B.size(1);
   int B_N = ptr_B.size(2);
@@ -200,11 +112,8 @@ torch::Tensor fused_moe_up(
 
   at::Tensor atomic_buffer =
       at::empty({static_cast<long>(1)}, ptr_A.options().dtype(at::kInt));
-
-  // Clamping is only applied when a positive limit is provided.
   const bool has_clamping = gemm1_clamp_limit > 0;
 
-  // Validate scales up-front (once) based on the weight dtype.
   if (is_B_int4 || is_B_mxfp4) {
     TORCH_CHECK(ptr_B_scale.has_value(), "w4a16 grouped gemm must have scales");
     TORCH_CHECK(ptr_B_scale->is_contiguous(), "ptr_B_scale must be contiguous");
@@ -242,204 +151,36 @@ torch::Tensor fused_moe_up(
         !ptr_B_scale.has_value(), "w16a16 grouped gemm must not have scales");
   }
 
-#define FusedMOEUpLauncherCallER(                                              \
-    HasClamping,                                                               \
-    ActType,                                                                   \
-    LayoutA,                                                                   \
-    LayoutB,                                                                   \
-    Policy,                                                                    \
-    ElementA,                                                                  \
-    ElementB,                                                                  \
-    ElementS)                                                                  \
-  FusedMOEUpLauncher<HasClamping, ActType, LayoutA, LayoutB, Policy>(          \
-      dpcpp_queue,                                                             \
-      reinterpret_cast<ElementA*>(ptr_A.data_ptr()),                           \
-      reinterpret_cast<ElementB*>(ptr_B.data_ptr()),                           \
-      ptr_B_scale.has_value()                                                  \
-          ? reinterpret_cast<ElementS*>(ptr_B_scale->data_ptr())               \
-          : static_cast<ElementS*>(nullptr),                                   \
-      ptr_bias.has_value() ? reinterpret_cast<ElementA*>(ptr_bias->data_ptr()) \
-                           : static_cast<ElementA*>(nullptr),                  \
-      reinterpret_cast<ElementA*>(ptr_D.data_ptr()),                           \
-      N,                                                                       \
-      K,                                                                       \
-      reinterpret_cast<int*>(rows_per_expert.data_ptr()),                      \
-      num_experts,                                                             \
-      group_size,                                                              \
-      static_cast<int*>(atomic_buffer.data_ptr()),                             \
-      gemm1_clamp_limit);
-
-#define W4A16LauncherCallER(HasClamping, ActType, policy)                      \
-  if (is_B_int4) {                                                             \
-    if (A_dtype == at::kBFloat16) {                                            \
-      using scalar_t = bfloat16_t;                                             \
-      FusedMOEUpLauncherCallER(                                                \
-          HasClamping,                                                         \
-          ActType,                                                             \
-          'R',                                                                 \
-          'C',                                                                 \
-          policy,                                                              \
-          scalar_t,                                                            \
-          uint8_t,                                                             \
-          scalar_t);                                                           \
-    } else if (A_dtype == at::kHalf) {                                         \
-      using scalar_t = half_t;                                                 \
-      FusedMOEUpLauncherCallER(                                                \
-          HasClamping,                                                         \
-          ActType,                                                             \
-          'R',                                                                 \
-          'C',                                                                 \
-          policy,                                                              \
-          scalar_t,                                                            \
-          uint8_t,                                                             \
-          scalar_t);                                                           \
-    }                                                                          \
-  } else if (is_B_mxfp4) {                                                     \
-    if (A_dtype == at::kBFloat16) {                                            \
-      using scalar_t = bfloat16_t;                                             \
-      FusedMOEUpLauncherCallER(                                                \
-          HasClamping, ActType, 'R', 'C', policy, scalar_t, uint8_t, uint8_t); \
-    } else if (A_dtype == at::kHalf) {                                         \
-      using scalar_t = half_t;                                                 \
-      FusedMOEUpLauncherCallER(                                                \
-          HasClamping, ActType, 'R', 'C', policy, scalar_t, uint8_t, uint8_t); \
-    }                                                                          \
+  if (A_dtype != at::kBFloat16 && A_dtype != at::kHalf) {
+    return ptr_D;
   }
 
-#define W8A16LauncherCallER(HasClamping, ActType, policy)                 \
-  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {            \
-    using scalar_t = half_t;                                              \
-    FusedMOEUpLauncherCallER(                                             \
-        HasClamping,                                                      \
-        ActType,                                                          \
-        'R',                                                              \
-        'R',                                                              \
-        policy,                                                           \
-        scalar_t,                                                         \
-        float_e4m3_t,                                                     \
-        float);                                                           \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {       \
-    using scalar_t = half_t;                                              \
-    FusedMOEUpLauncherCallER(                                             \
-        HasClamping,                                                      \
-        ActType,                                                          \
-        'R',                                                              \
-        'R',                                                              \
-        policy,                                                           \
-        scalar_t,                                                         \
-        float_e5m2_t,                                                     \
-        float);                                                           \
-  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) { \
-    using scalar_t = bfloat16_t;                                          \
-    FusedMOEUpLauncherCallER(                                             \
-        HasClamping,                                                      \
-        ActType,                                                          \
-        'R',                                                              \
-        'R',                                                              \
-        policy,                                                           \
-        scalar_t,                                                         \
-        float_e4m3_t,                                                     \
-        float);                                                           \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {   \
-    using scalar_t = bfloat16_t;                                          \
-    FusedMOEUpLauncherCallER(                                             \
-        HasClamping,                                                      \
-        ActType,                                                          \
-        'R',                                                              \
-        'R',                                                              \
-        policy,                                                           \
-        scalar_t,                                                         \
-        float_e5m2_t,                                                     \
-        float);                                                           \
-  }
-
-#define W16A16LauncherCallER(HasClamping, ActType, policy)                     \
-  if (A_dtype == at::kBFloat16) {                                              \
-    using scalar_t = bfloat16_t;                                               \
-    FusedMOEUpLauncherCallER(                                                  \
-        HasClamping, ActType, 'R', 'R', policy, scalar_t, scalar_t, scalar_t); \
-  } else if (A_dtype == at::kHalf) {                                           \
-    using scalar_t = half_t;                                                   \
-    FusedMOEUpLauncherCallER(                                                  \
-        HasClamping, ActType, 'R', 'R', policy, scalar_t, scalar_t, scalar_t); \
-  }
-
-#define DISPATCH_MOE_UP(HasClamping, ActType)               \
-  if (is_B_int4 || is_B_mxfp4) {                            \
-    if (A_avg_M <= 4) {                                     \
-      using policy = w4a16_policy_m_8;                      \
-      W4A16LauncherCallER(HasClamping, ActType, policy);    \
-    } else if (A_avg_M <= 8) {                              \
-      using policy = w4a16_policy_m_16;                     \
-      W4A16LauncherCallER(HasClamping, ActType, policy);    \
-    } else if (A_avg_M <= 128) {                            \
-      using policy = w4a16_policy_m_32;                     \
-      W4A16LauncherCallER(HasClamping, ActType, policy);    \
-    } else {                                                \
-      using policy = w4a16_policy;                          \
-      W4A16LauncherCallER(HasClamping, ActType, policy);    \
-    }                                                       \
-  } else if (is_weight_fp8) {                               \
-    if (A_avg_M <= 8) {                                     \
-      using policy = w8a16_policy_m_16;                     \
-      W8A16LauncherCallER(HasClamping, ActType, policy);    \
-    } else if (A_avg_M <= 32) {                             \
-      using policy = w8a16_policy_m_32;                     \
-      W8A16LauncherCallER(HasClamping, ActType, policy);    \
-    } else {                                                \
-      using policy = w8a16_policy;                          \
-      W8A16LauncherCallER(HasClamping, ActType, policy);    \
-    }                                                       \
-  } else {                                                  \
-    if (A_avg_M <= 8) {                                     \
-      using policy = w16a16_policy_m_16;                    \
-      W16A16LauncherCallER(HasClamping, ActType, policy);   \
-    } else if (A_avg_M <= 16) {                             \
-      using policy = w16a16_policy_m_32;                    \
-      W16A16LauncherCallER(HasClamping, ActType, policy);   \
-    } else {                                                \
-      if (B_N <= 64) {                                      \
-        using policy = w16a16_policy_n_64;                  \
-        W16A16LauncherCallER(HasClamping, ActType, policy); \
-      } else if (B_N <= 512) {                              \
-        using policy = w16a16_policy_n_128;                 \
-        W16A16LauncherCallER(HasClamping, ActType, policy); \
-      } else {                                              \
-        using policy = w16a16_policy;                       \
-        W16A16LauncherCallER(HasClamping, ActType, policy); \
-      }                                                     \
-    }                                                       \
-  }
-
-#define DISPATCH_MOE_UP_ACT(ActType) \
-  if (has_clamping) {                \
-    DISPATCH_MOE_UP(true, ActType);  \
-  } else {                           \
-    DISPATCH_MOE_UP(false, ActType); \
-  }
-
-  if (activation == "silu") {
-    DISPATCH_MOE_UP_ACT(ActivationType::SILU);
-  } else if (activation == "gelu") {
-    DISPATCH_MOE_UP_ACT(ActivationType::GELU);
-  } else if (activation == "gelu_tanh") {
-    DISPATCH_MOE_UP_ACT(ActivationType::GELU_TANH);
-  } else if (activation == "swigluoai") {
-    DISPATCH_MOE_UP_ACT(ActivationType::SWIGLUOAI);
-  } else if (activation == "relu2_no_mul") {
-    DISPATCH_MOE_UP_ACT(ActivationType::RELU2_NO_MUL);
-  } else if (activation == "swiglustep") {
-    DISPATCH_MOE_UP_ACT(ActivationType::SWIGLUSTEP);
-  } else {
-    TORCH_CHECK(false, "Unsupported activation: ", activation);
-  }
-
-#undef DISPATCH_MOE_UP_ACT
-#undef DISPATCH_MOE_UP
-#undef W16A16LauncherCallER
-#undef W8A16LauncherCallER
-#undef W4A16LauncherCallER
-#undef FusedMOEUpLauncherCallER
+  FusedMOE::FusedMOEWeightType weight_type =
+      is_B_int4 || is_B_mxfp4 ? FusedMOE::FusedMOEWeightType::W4A16
+      : is_weight_fp8         ? FusedMOE::FusedMOEWeightType::W8A16
+                              : FusedMOE::FusedMOEWeightType::W16A16;
+  FusedMOE::FusedMOEUpLaunchParams params{
+      dpcpp_queue,
+      ptr_A.data_ptr(),
+      ptr_B.data_ptr(),
+      ptr_B_scale.has_value() ? ptr_B_scale->data_ptr() : nullptr,
+      ptr_bias.has_value() ? ptr_bias->data_ptr() : nullptr,
+      ptr_D.data_ptr(),
+      reinterpret_cast<int*>(rows_per_expert.data_ptr()),
+      static_cast<int>(N),
+      static_cast<int>(K),
+      static_cast<int>(num_experts),
+      group_size,
+      static_cast<int*>(atomic_buffer.data_ptr()),
+      gemm1_clamp_limit,
+      A_avg_M,
+      B_N,
+      has_clamping,
+      A_dtype == at::kBFloat16,
+      is_B_int4 || B_dtype == at::kFloat8_e4m3fn};
+  auto dispatch = get_fused_moe_up_dispatch(weight_type, activation);
+  TORCH_CHECK(dispatch != nullptr, "Unsupported activation: ", activation);
+  dispatch(params);
 
   return ptr_D;
 }
