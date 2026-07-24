@@ -5,15 +5,22 @@
 #include <optional>
 #include <torch/all.h>
 #include <algorithm>
+#include <limits>
 #include "utils.h"
+#include "quantization/fp8/quant_utils.h"
+#include "dispatch_utils.h"
 
 namespace vllm {
 
 // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 // can be used to combine partial attention results (in the split-KV case)
-template <typename scalar_t, const uint NUM_THREADS>
+template <
+    typename scalar_t,
+    typename output_t,
+    const uint NUM_THREADS,
+    bool USE_FP8_OUTPUT>
 void merge_attn_states_kernel(
-    scalar_t* output,
+    output_t* output,
     float* output_lse,
     const scalar_t* prefix_output,
     const float* prefix_lse,
@@ -24,8 +31,16 @@ void merge_attn_states_kernel(
     const uint head_size,
     const uint prefix_head_stride,
     const uint output_head_stride,
+    const uint prefix_num_tokens,
+    const float* output_scale,
     const sycl::nd_item<3>& item_ct1) {
-  using pack_128b_t = sycl::uint4;
+  // Inputs always load 128-bit packs (pack_size elements of scalar_t).
+  // Outputs store pack_size elements of output_t, which is smaller for FP8.
+  using input_pack_t = sycl::uint4;
+  using output_pack_t = std::conditional_t<
+      USE_FP8_OUTPUT,
+      std::conditional_t<sizeof(scalar_t) == 4, unsigned int, uint64_t>,
+      sycl::uint4>;
   const uint pack_size = 16 / sizeof(scalar_t);
   const uint threads_per_head = head_size / pack_size;
 
@@ -49,7 +64,43 @@ void merge_attn_states_kernel(
                                head_idx * output_head_stride;
   const scalar_t* prefix_head_ptr = prefix_output + src_head_offset;
   const scalar_t* suffix_head_ptr = suffix_output + src_head_offset;
-  scalar_t* output_head_ptr = output + dst_head_offset;
+  output_t* output_head_ptr = output + dst_head_offset;
+
+  // Pre-invert scale: multiplication is faster than division
+  float fp8_scale_inv = 1.0f;
+  if constexpr (USE_FP8_OUTPUT) {
+    fp8_scale_inv = 1.0f / *output_scale;
+  }
+
+  // If token_idx >= prefix_num_tokens, just copy from suffix
+  if (token_idx >= prefix_num_tokens) {
+    if (pack_offset < head_size) {
+      input_pack_t s_out_pack = reinterpret_cast<const input_pack_t*>(
+          suffix_head_ptr)[pack_offset / pack_size];
+
+      if constexpr (USE_FP8_OUTPUT) {
+        output_t o_out_arr[pack_size];
+        vllm::fp8::ConvertWithScaleOp<true, output_t> convert_op{fp8_scale_inv};
+#pragma unroll
+        for (uint i = 0; i < pack_size; ++i) {
+          const float val = vllm::xpu::to_float(
+              reinterpret_cast<const scalar_t*>(&s_out_pack)[i]);
+          convert_op(o_out_arr[i], val);
+        }
+        reinterpret_cast<output_pack_t*>(
+            output_head_ptr)[pack_offset / pack_size] =
+            *reinterpret_cast<output_pack_t*>(o_out_arr);
+      } else {
+        reinterpret_cast<output_pack_t*>(
+            output_head_ptr)[pack_offset / pack_size] = s_out_pack;
+      }
+    }
+    if (output_lse != nullptr && pack_idx == 0) {
+      float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
+      output_lse[head_idx * num_tokens + token_idx] = s_lse;
+    }
+    return;
+  }
 
   float p_lse = prefix_lse[head_idx * num_tokens + token_idx];
   float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
@@ -68,13 +119,27 @@ void merge_attn_states_kernel(
   */
   if (sycl::isinf(max_lse)) {
     if (pack_offset < head_size) {
-      // Pack 128b load
-      pack_128b_t p_out_pack = reinterpret_cast<const pack_128b_t*>(
+      // Pack 128b load from prefix
+      input_pack_t p_out_pack = reinterpret_cast<const input_pack_t*>(
           prefix_head_ptr)[pack_offset / pack_size];
 
-      // Pack 128b storage
-      reinterpret_cast<pack_128b_t*>(output_head_ptr)[pack_offset / pack_size] =
-          p_out_pack;
+      if constexpr (USE_FP8_OUTPUT) {
+        output_t o_out_arr[pack_size];
+        vllm::fp8::ConvertWithScaleOp<true, output_t> convert_op{fp8_scale_inv};
+#pragma unroll
+        for (uint i = 0; i < pack_size; ++i) {
+          const float val = vllm::xpu::to_float(
+              reinterpret_cast<const scalar_t*>(&p_out_pack)[i]);
+          convert_op(o_out_arr[i], val);
+        }
+        reinterpret_cast<output_pack_t*>(
+            output_head_ptr)[pack_offset / pack_size] =
+            *reinterpret_cast<output_pack_t*>(o_out_arr);
+      } else {
+        // Pack 128b storage
+        reinterpret_cast<output_pack_t*>(
+            output_head_ptr)[pack_offset / pack_size] = p_out_pack;
+      }
     }
     // We only need to write to output_lse once per head.
     if (output_lse != nullptr && pack_idx == 0) {
@@ -93,12 +158,13 @@ void merge_attn_states_kernel(
 
   if (pack_offset < head_size) {
     // Pack 128b load
-    pack_128b_t p_out_pack = reinterpret_cast<const pack_128b_t*>(
+    input_pack_t p_out_pack = reinterpret_cast<const input_pack_t*>(
         prefix_head_ptr)[pack_offset / pack_size];
-    pack_128b_t s_out_pack = reinterpret_cast<const pack_128b_t*>(
+    input_pack_t s_out_pack = reinterpret_cast<const input_pack_t*>(
         suffix_head_ptr)[pack_offset / pack_size];
-    pack_128b_t o_out_pack;
 
+    // Compute merged values in float32
+    float o_out_f[pack_size];
 #pragma unroll
     for (uint i = 0; i < pack_size; ++i) {
       // Always use float for FMA to keep high precision.
@@ -108,15 +174,32 @@ void merge_attn_states_kernel(
       const float s_out_f = vllm::xpu::to_float(
           reinterpret_cast<const scalar_t*>(&s_out_pack)[i]);
       // fma: a * b + c = p_out_f * p_scale + (s_out_f * s_scale)
-      const float o_out_f = p_out_f * p_scale + (s_out_f * s_scale);
-      // float -> half(uint16_t), bfloat16, float.
-      vllm::xpu::from_float(
-          reinterpret_cast<scalar_t*>(&o_out_pack)[i], o_out_f);
+      o_out_f[i] = p_out_f * p_scale + s_out_f * s_scale;
     }
 
-    // Pack 128b storage
-    reinterpret_cast<pack_128b_t*>(output_head_ptr)[pack_offset / pack_size] =
-        o_out_pack;
+    // Convert and store
+    if constexpr (USE_FP8_OUTPUT) {
+      output_t o_out_arr[pack_size];
+      vllm::fp8::ConvertWithScaleOp<true, output_t> convert_op{fp8_scale_inv};
+#pragma unroll
+      for (uint i = 0; i < pack_size; ++i) {
+        convert_op(o_out_arr[i], o_out_f[i]);
+      }
+      reinterpret_cast<output_pack_t*>(
+          output_head_ptr)[pack_offset / pack_size] =
+          *reinterpret_cast<output_pack_t*>(o_out_arr);
+    } else {
+      output_pack_t o_out_pack;
+#pragma unroll
+      for (uint i = 0; i < pack_size; ++i) {
+        // float -> half(uint16_t), bfloat16, float.
+        vllm::xpu::from_float(
+            reinterpret_cast<scalar_t*>(&o_out_pack)[i], o_out_f[i]);
+      }
+      // Pack 128b storage
+      reinterpret_cast<output_pack_t*>(
+          output_head_ptr)[pack_offset / pack_size] = o_out_pack;
+    }
   }
   // We only need to write to output_lse once per head.
   if (output_lse != nullptr && pack_idx == 0) {
@@ -128,7 +211,7 @@ void merge_attn_states_kernel(
 }  // namespace vllm
 
 // The following macro is used to dispatch the conversion function based on
-// the output data type. The FN is a macro that calls a function with
+// the input data type. The FN is a macro that calls a function with
 // template<typename scalar_t>.
 #define DISPATCH_BY_SCALAR_DTYPE(scalar_dtype, fn)                      \
   {                                                                     \
@@ -143,57 +226,72 @@ void merge_attn_states_kernel(
     }                                                                   \
   }
 
-#define LAUNCH_MERGE_ATTN_STATES(scalar_t, NUM_THREADS)            \
-  {                                                                \
-    ((sycl::queue)(queue)).submit([&](sycl::handler& cgh) {        \
-      auto output_data_ptr_ct0 =                                   \
-          reinterpret_cast<scalar_t*>(output.data_ptr());          \
-      auto output_lse_ptr_ct1 = output_lse_ptr;                    \
-      auto prefix_output_data_ptr_ct2 =                            \
-          reinterpret_cast<scalar_t*>(prefix_output.data_ptr());   \
-      auto prefix_lse_data_ptr_ct3 =                               \
-          reinterpret_cast<float*>(prefix_lse.data_ptr());         \
-      auto suffix_output_data_ptr_ct4 =                            \
-          reinterpret_cast<scalar_t*>(suffix_output.data_ptr());   \
-      auto suffix_lse_data_ptr_ct5 =                               \
-          reinterpret_cast<float*>(suffix_lse.data_ptr());         \
-      auto num_tokens_ct6 = num_tokens;                            \
-      auto num_heads_ct7 = num_heads;                              \
-      auto head_size_ct8 = head_size;                              \
-      auto prefix_head_stride_ct9 = prefix_head_stride;            \
-      auto output_head_stride_ct10 = output_head_stride;           \
-                                                                   \
-      cgh.parallel_for(                                            \
-          sycl::nd_range<3>(grid * block, block),                  \
-          [=](sycl::nd_item<3> item_ct1) {                         \
-            vllm::merge_attn_states_kernel<scalar_t, NUM_THREADS>( \
-                output_data_ptr_ct0,                               \
-                output_lse_ptr_ct1,                                \
-                prefix_output_data_ptr_ct2,                        \
-                prefix_lse_data_ptr_ct3,                           \
-                suffix_output_data_ptr_ct4,                        \
-                suffix_lse_data_ptr_ct5,                           \
-                num_tokens_ct6,                                    \
-                num_heads_ct7,                                     \
-                head_size_ct8,                                     \
-                prefix_head_stride_ct9,                            \
-                output_head_stride_ct10,                           \
-                item_ct1);                                         \
-          });                                                      \
-    });                                                            \
+#define LAUNCH_MERGE_ATTN_STATES(scalar_t, output_t, NUM_THREADS, USE_FP8) \
+  {                                                                        \
+    ((sycl::queue)(queue)).submit([&](sycl::handler& cgh) {                \
+      auto output_data_ptr_ct0 =                                           \
+          reinterpret_cast<output_t*>(output.data_ptr());                  \
+      auto output_lse_ptr_ct1 = output_lse_ptr;                            \
+      auto prefix_output_data_ptr_ct2 =                                    \
+          reinterpret_cast<scalar_t*>(prefix_output.data_ptr());           \
+      auto prefix_lse_data_ptr_ct3 =                                       \
+          reinterpret_cast<float*>(prefix_lse.data_ptr());                 \
+      auto suffix_output_data_ptr_ct4 =                                    \
+          reinterpret_cast<scalar_t*>(suffix_output.data_ptr());           \
+      auto suffix_lse_data_ptr_ct5 =                                       \
+          reinterpret_cast<float*>(suffix_lse.data_ptr());                 \
+      auto num_tokens_ct6 = num_tokens;                                    \
+      auto num_heads_ct7 = num_heads;                                      \
+      auto head_size_ct8 = head_size;                                      \
+      auto prefix_head_stride_ct9 = prefix_head_stride;                    \
+      auto output_head_stride_ct10 = output_head_stride;                   \
+      auto prefix_num_tokens_ct11 = prefix_num_tokens;                     \
+      auto output_scale_ptr_ct12 = output_scale_ptr;                       \
+                                                                           \
+      cgh.parallel_for(                                                    \
+          sycl::nd_range<3>(grid * block, block),                          \
+          [=](sycl::nd_item<3> item_ct1) {                                 \
+            vllm::merge_attn_states_kernel<                                \
+                scalar_t,                                                  \
+                output_t,                                                  \
+                NUM_THREADS,                                               \
+                USE_FP8>(                                                  \
+                output_data_ptr_ct0,                                       \
+                output_lse_ptr_ct1,                                        \
+                prefix_output_data_ptr_ct2,                                \
+                prefix_lse_data_ptr_ct3,                                   \
+                suffix_output_data_ptr_ct4,                                \
+                suffix_lse_data_ptr_ct5,                                   \
+                num_tokens_ct6,                                            \
+                num_heads_ct7,                                             \
+                head_size_ct8,                                             \
+                prefix_head_stride_ct9,                                    \
+                output_head_stride_ct10,                                   \
+                prefix_num_tokens_ct11,                                    \
+                output_scale_ptr_ct12,                                     \
+                item_ct1);                                                 \
+          });                                                              \
+    });                                                                    \
   }
 
 /*@brief Merges the attention states from prefix and suffix
  * into the output tensor. NUM_TOKENS: n, NUM_HEADS: h, HEAD_SIZE: d
  *
  * @param output [n,h,d] The output tensor to store the merged attention states.
- * @param output_lse [h,d] Optional tensor to store the log-sum-exp values.
+ * @param output_lse [h,n] Optional tensor to store the log-sum-exp values.
  * @param prefix_output [n,h,d] The prefix attention states.
  * @param prefix_lse [h,n] The log-sum-exp values for the prefix attention
  * states.
  * @param suffix_output [n,h,d] The suffix attention states.
  * @param suffix_lse [h,n] The log-sum-exp values for the suffix attention
  * states.
+ * @param prefill_tokens_with_context Number of prefill tokens with context.
+ *   For the first p tokens (0 <= token_idx < prefill_tokens_with_context),
+ *   output is computed by merging prefix_output and suffix_output. For
+ *   remaining tokens (prefill_tokens_with_context <= token_idx < n), output
+ *   is copied directly from suffix_output.
+ * @param output_scale Optional scalar tensor for FP8 static quantization.
+ *   When provided, output must be FP8 dtype.
  */
 template <typename scalar_t>
 void merge_attn_states_launcher(
@@ -202,7 +300,9 @@ void merge_attn_states_launcher(
     const torch::Tensor& prefix_output,
     const torch::Tensor& prefix_lse,
     const torch::Tensor& suffix_output,
-    const torch::Tensor& suffix_lse) {
+    const torch::Tensor& suffix_lse,
+    const std::optional<int64_t> prefill_tokens_with_context,
+    const std::optional<torch::Tensor>& output_scale) {
   constexpr uint NUM_THREADS = 128;
   const uint num_tokens = output.size(0);
   const uint num_heads = output.size(1);
@@ -214,10 +314,24 @@ void merge_attn_states_launcher(
       head_size % pack_size == 0,
       "headsize must be multiple of pack_size:",
       pack_size);
+
+  const uint prefix_num_tokens =
+      prefill_tokens_with_context.has_value()
+          ? static_cast<uint>(prefill_tokens_with_context.value())
+          : num_tokens;
+  TORCH_CHECK(
+      prefix_num_tokens <= num_tokens,
+      "prefill_tokens_with_context must be <= num_tokens");
+
   float* output_lse_ptr = nullptr;
   if (output_lse.has_value()) {
     output_lse_ptr = output_lse.value().data_ptr<float>();
   }
+  float* output_scale_ptr = nullptr;
+  if (output_scale.has_value()) {
+    output_scale_ptr = output_scale.value().data_ptr<float>();
+  }
+
   // Process one pack elements per thread. for float, the
   // pack_size is 4 for half/bf16, the pack_size is 8.
   const uint threads_per_head = head_size / pack_size;
@@ -230,7 +344,15 @@ void merge_attn_states_launcher(
   at::DeviceGuard device_guard(curDevice);
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  LAUNCH_MERGE_ATTN_STATES(scalar_t, NUM_THREADS);
+  if (output_scale.has_value()) {
+    // FP8 output path - dispatch on output FP8 type
+    VLLM_DISPATCH_FP8_TYPES(output.scalar_type(), "merge_attn_states_fp8", [&] {
+      LAUNCH_MERGE_ATTN_STATES(scalar_t, fp8_t, NUM_THREADS, true);
+    });
+  } else {
+    // Original BF16/FP16/FP32 output path
+    LAUNCH_MERGE_ATTN_STATES(scalar_t, scalar_t, NUM_THREADS, false);
+  }
 }
 
 #define CALL_MERGE_ATTN_STATES_LAUNCHER(scalar_t) \
@@ -241,7 +363,9 @@ void merge_attn_states_launcher(
         prefix_output,                            \
         prefix_lse,                               \
         suffix_output,                            \
-        suffix_lse);                              \
+        suffix_lse,                               \
+        prefill_tokens_with_context,              \
+        output_scale);                            \
   }
 
 void merge_attn_states(
@@ -250,6 +374,25 @@ void merge_attn_states(
     const torch::Tensor& prefix_output,
     const torch::Tensor& prefix_lse,
     const torch::Tensor& suffix_output,
-    const torch::Tensor& suffix_lse) {
-  DISPATCH_BY_SCALAR_DTYPE(output.dtype(), CALL_MERGE_ATTN_STATES_LAUNCHER);
+    const torch::Tensor& suffix_lse,
+    const std::optional<int64_t> prefill_tokens_with_context,
+    const std::optional<torch::Tensor>& output_scale) {
+  if (output_scale.has_value()) {
+    TORCH_CHECK(
+        output.scalar_type() == at::ScalarType::Float8_e4m3fn ||
+            output.scalar_type() == at::ScalarType::Float8_e5m2,
+        "output must be FP8 when output_scale is provided, got: ",
+        output.scalar_type());
+  } else {
+    TORCH_CHECK(
+        output.scalar_type() == prefix_output.scalar_type(),
+        "output dtype (",
+        output.scalar_type(),
+        ") must match prefix_output dtype (",
+        prefix_output.scalar_type(),
+        ") when output_scale is not set");
+  }
+  // Always dispatch on prefix_output (input) dtype
+  DISPATCH_BY_SCALAR_DTYPE(
+      prefix_output.dtype(), CALL_MERGE_ATTN_STATES_LAUNCHER);
 }
