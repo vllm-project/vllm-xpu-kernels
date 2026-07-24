@@ -368,17 +368,20 @@ struct TopkGatingSoftplusSqrtKernel {
         const bool should_process_row = row_is_active && node_uses_expert;
 
         const int idx = k * thread_row + k_idx;
-        if (correction_bias != nullptr) {
-          max_val -= correction_bias[expert];
+        float output_val = max_val;
+        if (is_pad_row) {
+          output_val = 0.f;
+        } else if (correction_bias != nullptr) {
+          output_val -= correction_bias[expert];
         }
-        output[idx] = max_val;
+        output[idx] = output_val;
         indices[idx] =
             is_pad_row
                 ? static_cast<IndType>(-1)
                 : (should_process_row ? (expert - start_expert) : NUM_EXPERTS);
         source_rows[idx] = k_idx * num_rows + thread_row;
         if (renormalize && !is_pad_row) {
-          selected_sum += max_val;
+          selected_sum += output_val;
         }
       }
 
