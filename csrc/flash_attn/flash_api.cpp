@@ -195,8 +195,12 @@ std::vector<at::Tensor> mha_varlen_fwd(
   if (return_softmax) {
     int total_seqlen_q = q.size(0);
     int num_heads_q = q.size(1);
+    // (nheads, total_seqlen_q) matches the CUDA/upstream FlashAttention
+    // softmax_lse convention, and the writer kernel writes directly in
+    // this layout (see chunk_prefill_kernel.hpp), so no transpose/copy is
+    // needed on the caller side (e.g. vLLM's xpu_ops wrapper).
     softmax_lse_opt = torch::empty(
-        {total_seqlen_q, num_heads_q},
+        {num_heads_q, total_seqlen_q},
         q.options().dtype(at::kFloat).device(q.device()));
   }
 

@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 
 import tests.register_ops as ops
+from tests.ops.topk_op import stable_topk
 from tests.utils import format_tc, seed_everything
 
 
@@ -24,6 +25,7 @@ def _torch_topk_softplus_sqrt(
     e_score_correction_bias: Optional[torch.Tensor] = None,
     input_ids: Optional[torch.Tensor] = None,
     hash_indices_table: Optional[torch.Tensor] = None,
+    is_padding: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     scores = F.softplus(gating_output.float()).sqrt()
     original_scores = scores
@@ -36,13 +38,18 @@ def _torch_topk_softplus_sqrt(
             scores_for_choice = scores + e_score_correction_bias.unsqueeze(0)
         else:
             scores_for_choice = scores
-        topk_ids = torch.topk(scores_for_choice, k=topk, dim=-1, sorted=True)[1]
+        _, topk_ids = stable_topk(scores_for_choice, topk, dim=-1)
 
     topk_weights = original_scores.gather(1, topk_ids.long())
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     if routed_scaling_factor != 1.0:
         topk_weights = topk_weights * routed_scaling_factor
+    if is_padding is not None:
+        topk_weights = topk_weights.clone()
+        topk_ids = topk_ids.clone()
+        topk_weights[is_padding] = 0
+        topk_ids[is_padding] = -1
 
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
@@ -55,6 +62,7 @@ def fused_topk_softplus_sqrt(
     correction_bias: Optional[torch.Tensor] = None,
     input_ids: Optional[torch.Tensor] = None,
     hash_indices_table: Optional[torch.Tensor] = None,
+    is_padding: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = gating_output.size(0)
 
@@ -87,6 +95,7 @@ def fused_topk_softplus_sqrt(
         correction_bias,
         input_ids,
         hash_indices_table,
+        is_padding,
     )
 
     return topk_weights, topk_ids
@@ -347,6 +356,78 @@ def test_fused_topk_softplus_sqrt_hash(
     sorted_w_ref = topk_weights_ref.gather(1, idx_ref)
     sorted_w = topk_weights.gather(1, idx_ops)
     torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.parametrize("use_hash", [True, False])
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.bfloat16, torch.float16, torch.float32],
+    ids=format_tc,
+)
+def test_fused_topk_softplus_sqrt_padding(use_bias: bool, use_hash: bool,
+                                          dtype: torch.dtype):
+    seed_everything(0)
+    n_token = 8
+    n_expert = 128
+    topk = 6
+    gating_output = torch.randn((n_token, n_expert), dtype=dtype, device="xpu")
+    is_padding = torch.zeros(n_token, dtype=torch.bool, device="xpu")
+    is_padding[1::2] = True
+    gating_output[is_padding] = float("nan")
+
+    correction_bias = None
+    if use_bias:
+        correction_bias = torch.randn((n_expert, ), dtype=torch.float32,
+                                      device="xpu")
+
+    input_ids = None
+    hash_indices_table = None
+    if use_hash:
+        vocab_size = 64
+        hash_indices_table = torch.stack(
+            [torch.randperm(n_expert)[:topk] for _ in range(vocab_size)]
+        ).to(device="xpu", dtype=torch.int32)
+        input_ids = torch.randint(0,
+                                  vocab_size, (n_token, ),
+                                  dtype=torch.int32,
+                                  device="xpu")
+
+    baseline_topk_weights, baseline_topk_ids = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+        e_score_correction_bias=correction_bias,
+        input_ids=input_ids,
+        hash_indices_table=hash_indices_table,
+        is_padding=is_padding)
+    test_topk_weights, test_topk_ids = fused_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+        correction_bias=correction_bias,
+        input_ids=input_ids,
+        hash_indices_table=hash_indices_table,
+        is_padding=is_padding)
+
+    torch.testing.assert_close(test_topk_ids[is_padding],
+                               torch.full_like(test_topk_ids[is_padding], -1),
+                               atol=0,
+                               rtol=0)
+    torch.testing.assert_close(test_topk_weights[is_padding],
+                               torch.zeros_like(test_topk_weights[is_padding]),
+                               atol=0,
+                               rtol=0)
+    torch.testing.assert_close(baseline_topk_ids[~is_padding],
+                               test_topk_ids[~is_padding],
+                               atol=0,
+                               rtol=0)
+    torch.testing.assert_close(baseline_topk_weights[~is_padding],
+                               test_topk_weights[~is_padding],
+                               atol=2e-2,
+                               rtol=1e-2)
 
 
 if __name__ == "__main__":
