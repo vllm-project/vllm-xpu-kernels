@@ -3,8 +3,13 @@
 #include <torch/all.h>
 
 #ifdef VLLM_XPU_ENABLE_XE2
-#include "csrc/xpu/fused_moe/xe2/fused_moe_xe2_policy.h"
-#include "csrc/xpu/fused_moe/xe2/xe2_utils.h"
+  #include "csrc/xpu/fused_moe/xe2/fused_moe_xe2_policy.h"
+  #include "csrc/xpu/fused_moe/xe2/xe2_utils.h"
+#endif
+
+#ifdef VLLM_XPU_ENABLE_XE3
+  #include "csrc/xpu/fused_moe/xe3/fused_moe_xe3_policy.h"
+  #include "csrc/xpu/fused_moe/xe3/xe3_utils.h"
 #endif
 
 #include "fused_moe_kernel.hpp"

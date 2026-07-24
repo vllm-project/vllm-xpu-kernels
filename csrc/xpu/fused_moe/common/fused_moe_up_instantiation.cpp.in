@@ -1,0 +1,15 @@
+// AUTO-GENERATED from fused_moe_up_instantiation.cpp.in by CMake. DO NOT EDIT.
+//
+// One translation unit is generated per (weight_type, activation) pair so the
+// heavy template instantiations still compile in parallel, but the files no
+// longer need to be checked into the source tree. Regenerated at CMake
+// configure time; see ../CMakeLists.txt.
+#include "csrc/xpu/fused_moe/common/fused_moe_up_launcher.hpp"
+
+FUSED_MOE_NS_BEGIN
+void fused_moe_up_@FMOE_WEIGHT_LOWER@_@FMOE_ACT_LOWER@(
+    const FusedMOEUpLaunchParams& params) {
+  FusedMOEUpLaunch<ActivationType::@FMOE_ACT_UPPER@,
+                   FusedMOEWeightType::@FMOE_WEIGHT_UPPER@>(params);
+}
+FUSED_MOE_NS_END

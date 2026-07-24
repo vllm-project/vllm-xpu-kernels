@@ -5,6 +5,7 @@
 #include <sycl/sycl.hpp>
 
 #include "activation_utils.h"
+#include "fused_moe_arch.h"
 
 namespace FusedMOE {
 
@@ -33,6 +34,10 @@ struct FusedMOEUpLaunchParams {
 
 using FusedMOEUpDispatchFn = void (*)(const FusedMOEUpLaunchParams&);
 
+// Concrete kernel entry points live in a per-backend inline namespace so that
+// fused_moe_xe2 / fused_moe_xe3 do not export clashing symbols.
+inline namespace FUSED_MOE_ARCH_NS {
+
 void fused_moe_up_w4a16_silu(const FusedMOEUpLaunchParams& params);
 void fused_moe_up_w4a16_gelu(const FusedMOEUpLaunchParams& params);
 void fused_moe_up_w4a16_gelu_tanh(const FusedMOEUpLaunchParams& params);
@@ -53,5 +58,7 @@ void fused_moe_up_w16a16_gelu_tanh(const FusedMOEUpLaunchParams& params);
 void fused_moe_up_w16a16_swigluoai(const FusedMOEUpLaunchParams& params);
 void fused_moe_up_w16a16_relu2_no_mul(const FusedMOEUpLaunchParams& params);
 void fused_moe_up_w16a16_swiglustep(const FusedMOEUpLaunchParams& params);
+
+}  // namespace FUSED_MOE_ARCH_NS
 
 }  // namespace FusedMOE

@@ -14,19 +14,17 @@ torch::Tensor fused_moe_up_xe2(
     int64_t num_experts,
     std::string activation,
     double gemm1_clamp_limit) {
-
-  return fused_moe_up_impl(
-    ptr_A,
-    ptr_A_scale,
-    ptr_B,
-    ptr_B_scale,
-    ptr_bias,
-    ptr_D,
-    rows_per_expert,
-    N,
-    K,
-    num_experts,
-    activation,
-    gemm1_clamp_limit);
-
+  return FusedMOE::fused_moe_up_impl(
+      ptr_A,
+      ptr_A_scale,
+      ptr_B,
+      ptr_B_scale,
+      ptr_bias,
+      ptr_D,
+      rows_per_expert,
+      N,
+      K,
+      num_experts,
+      activation,
+      gemm1_clamp_limit);
 }

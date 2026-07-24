@@ -41,6 +41,8 @@ FusedMOE::FusedMOEUpDispatchFn get_fused_moe_up_dispatch(
 
 }  // namespace
 
+FUSED_MOE_NS_BEGIN
+
 torch::Tensor fused_moe_up_impl(
     torch::Tensor& ptr_A,
     const c10::optional<at::Tensor>& ptr_A_scale,
@@ -184,3 +186,5 @@ torch::Tensor fused_moe_up_impl(
 
   return ptr_D;
 }
+
+FUSED_MOE_NS_END
