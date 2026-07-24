@@ -24,7 +24,8 @@ def _is_env_enabled(env_name: str, default: str = "0") -> bool:
 
 
 def _should_use_ref_fused_moe(is_mxfp8: bool, is_block_fp8: bool) -> bool:  
-    if is_mxfp8 or is_block_fp8:
+    # TODO: "or is_block_fp8" was removed so grouped gemm can work; check if this affects other parts of the code
+    if is_mxfp8:  # or is_block_fp8:
         return True
     return _is_env_enabled(REF_FUSED_MOE_ENV)
 
