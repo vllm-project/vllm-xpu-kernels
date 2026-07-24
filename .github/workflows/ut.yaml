@@ -26,6 +26,7 @@ concurrency:
 
 env:
   REGISTRY: localhost:5000
+  VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES: "ON"
   # Nightly (schedule) → full scope; manual dispatch → user choice; PR/push → ci scope
   XPU_KERNEL_TEST_SCOPE: ${{ github.event_name == 'schedule' && 'full' || github.event.inputs.test_scope || 'ci' }}
 

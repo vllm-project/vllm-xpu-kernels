@@ -440,7 +440,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
 }
 }  // namespace FLASH_NAMESPACE
 
-TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
+VLLM_TORCH_LIBRARY_FRAGMENT_EXPAND(VLLM_TORCH_OP_NAMESPACE, ops) {
   ops.def(
       "varlen_fwd(Tensor q, Tensor k, Tensor v, Tensor!? out, Tensor "
       "cu_seqlens_q, "
@@ -453,10 +453,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "softcap, bool return_softmax, "
       "Generator? gen, int? num_splits, bool mix_batch, Tensor? "
       "splits_per_seq, Tensor? work_list) -> Tensor[]");
-  ops.impl(
-      "varlen_fwd",
-      torch::kXPU,
-      make_pytorch_shim(&FLASH_NAMESPACE::mha_varlen_fwd));
+}
+
+VLLM_TORCH_LIBRARY_IMPL_EXPAND(VLLM_TORCH_OP_NAMESPACE, XPU, ops) {
+  VLLM_TORCH_IMPL(
+      ops, "varlen_fwd", make_pytorch_shim(&FLASH_NAMESPACE::mha_varlen_fwd));
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

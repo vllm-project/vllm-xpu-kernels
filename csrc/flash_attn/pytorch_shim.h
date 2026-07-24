@@ -1,6 +1,6 @@
 #pragma once
 
-#include <torch/library.h>
+#include <torch/all.h>
 
 /**
  * Unfortunately, the type signatures of the flash_attn ops are not compatible

@@ -130,6 +130,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "XPUMEM_ALLOCATOR_ENABLED":
     lambda: os.getenv("XPUMEM_ALLOCATOR_ENABLED", "ON"),
 
+    # Build extension modules with vLLM libtorch_stable-compatible names while
+    # preserving the existing torch.ops namespaces.
+    "VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES":
+    lambda: os.getenv("VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES", "OFF"),
+
     # If set, vllm will print verbose logs during installation
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),

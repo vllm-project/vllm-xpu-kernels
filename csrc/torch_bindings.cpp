@@ -1,8 +1,5 @@
 #include "core/registration.h"
 #include "ops.h"
-
-#include <torch/library.h>
-#include <torch/version.h>
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.
 // They must be kept in sync with the signature for X. Generally, only
@@ -13,11 +10,8 @@
 // https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit#heading=h.ptttacy8y1u9
 // https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
 
-TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
-  at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
-
+VLLM_TORCH_LIBRARY_FRAGMENT_EXPAND(VLLM_TORCH_OP_NAMESPACE, ops) {
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
-  ops.impl("weak_ref_tensor", torch::kXPU, &weak_ref_tensor);
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -27,23 +21,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "rms_norm(Tensor! result, Tensor input, Tensor? weight, float epsilon) "
       "-> "
       "()");
-  ops.impl("rms_norm", torch::kXPU, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
   ops.def(
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor? weight, "
       "float epsilon) -> ()");
-  ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 
   // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8).
   ops.def(
       "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
       "Tensor weight, Tensor! scale, float epsilon, "
       "Tensor? scale_ub, Tensor!? residual) -> ()");
-  ops.impl(
-      "rms_norm_dynamic_per_token_quant",
-      torch::kXPU,
-      &rms_norm_dynamic_per_token_quant);
 
   // Fused RMSNorm + per-column-block quantization (FP8 or INT8).
   ops.def(
@@ -51,39 +39,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor weight, Tensor! scale, float epsilon, "
       "Tensor? scale_ub, Tensor!? residual, int group_size, "
       "bool is_scale_transposed, bool scale_ue8m0=False) -> ()");
-  ops.impl("rms_norm_per_block_quant", torch::kXPU, &rms_norm_per_block_quant);
 
   ops.def(
       "rms_norm_mxfp4_quant(Tensor! result, Tensor input, Tensor weight, "
       "Tensor! scale, float epsilon, Tensor!? residual, int group_size) "
       "-> ()");
-  ops.impl("rms_norm_mxfp4_quant", torch::kXPU, &rms_norm_mxfp4_quant);
 
   // Fused RMSNorm + static FP8 quantization.
   ops.def(
       "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
       "Tensor scale, float epsilon) -> ()");
-  ops.impl(
-      "rms_norm_static_fp8_quant", torch::kXPU, &rms_norm_static_fp8_quant);
 
   // In-place fused Add + RMSNorm + static FP8 quantization.
   ops.def(
       "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
       "Tensor! residual, Tensor weight, "
       "Tensor scale, float epsilon) -> ()");
-  ops.impl(
-      "fused_add_rms_norm_static_fp8_quant",
-      torch::kXPU,
-      &fused_add_rms_norm_static_fp8_quant);
 
   // activation ops
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
-  ops.impl("silu_and_mul", torch::kXPU, &silu_and_mul);
 
   // Fused SiLU + Mul + FP8 Quantization
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
-  ops.impl("silu_and_mul_quant", torch::kXPU, &silu_and_mul_quant);
 
   // Fused SiLU + Mul + per-block dynamic quantization (FP8 or INT8).
   ops.def(
@@ -95,44 +73,31 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? scale_ub=None, "
       "bool is_scale_transposed=False, "
       "bool scale_ue8m0=False) -> ()");
-  ops.impl(
-      "silu_and_mul_per_block_quant",
-      torch::kXPU,
-      &silu_and_mul_per_block_quant);
 
   ops.def(
       "silu_and_mul_mxfp4_quant("
       "Tensor! out, Tensor input, Tensor! scales, "
       "int group_size, float eps=1e-10) -> ()");
-  ops.impl("silu_and_mul_mxfp4_quant", torch::kXPU, &silu_and_mul_mxfp4_quant);
 
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
-  ops.impl("mul_and_silu", torch::kXPU, &mul_and_silu);
 
   ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_and_mul", torch::kXPU, &gelu_and_mul);
 
   ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_tanh_and_mul", torch::kXPU, &gelu_tanh_and_mul);
 
   ops.def("fatrelu_and_mul(Tensor! out, Tensor! input, float threshold) -> ()");
-  ops.impl("fatrelu_and_mul", torch::kXPU, &fatrelu_and_mul);
 
   ops.def("gelu_fast(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_fast", torch::kXPU, &gelu_fast);
 
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_new", torch::kXPU, &gelu_new);
 
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
-  ops.impl("gelu_quick", torch::kXPU, &gelu_quick);
 
   // pos_embedding
   ops.def(
       "rotary_embedding(Tensor positions, Tensor! query,"
       "                 Tensor!? key, int head_size,"
       "                 Tensor cos_sin_cache, bool is_neox) -> ()");
-  ops.impl("rotary_embedding", torch::kXPU, &rotary_embedding);
 
   // Fused QK RMSNorm + RoPE
   ops.def(
@@ -141,30 +106,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
       "bool is_neox, Tensor position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
-  ops.impl("fused_qk_norm_rope", torch::kXPU, &fused_qk_norm_rope);
 
   // Compute FP8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
       "(int, int)? group_shape=None) -> ()");
-  ops.impl("static_scaled_fp8_quant", torch::kXPU, &static_scaled_fp8_quant);
 
   // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
   ops.def(
       "dynamic_scaled_fp8_quant(Tensor! result, Tensor input, Tensor! scale) "
       "-> "
       "()");
-  ops.impl("dynamic_scaled_fp8_quant", torch::kXPU, &dynamic_scaled_fp8_quant);
 
   // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
   ops.def(
       "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
       "Tensor! scale, Tensor? scale_ub) -> "
       "()");
-  ops.impl(
-      "dynamic_per_token_scaled_fp8_quant",
-      torch::kXPU,
-      &dynamic_per_token_scaled_fp8_quant);
 
   // Compute per-token-group FP8 quantized tensor and scaling factor.
   ops.def(
@@ -173,59 +131,45 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int group_size, float eps, float fp8_min, float fp8_max, bool "
       "scale_ue8m0, bool dummy_is_scale_transposed, bool dummy_is_tma_aligned "
       ") -> ()");
-  ops.impl(
-      "per_token_group_fp8_quant", torch::kXPU, &per_token_group_quant_fp8);
 
   // Compute per-token-group MXFP4 quantized tensor and scaling factor.
   ops.def(
       "per_token_group_quant_mxfp4(Tensor input, Tensor! output_q, Tensor! "
       "output_s, int group_size, float eps) -> ()");
-  ops.impl(
-      "per_token_group_quant_mxfp4", torch::kXPU, &per_token_group_quant_mxfp4);
 
   // swigluoai_and_mul
   ops.def(
       "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
       "limit=7.0) "
       "-> ()");
-  ops.impl("swigluoai_and_mul", torch::kXPU, &swigluoai_and_mul);
 
   // relu2_no_mul
   ops.def("relu2_no_mul(Tensor! out, Tensor! input) -> ()");
-  ops.impl("relu2_no_mul", torch::kXPU, &relu2_no_mul);
 
   // swiglustep_and_mul
   ops.def(
       "swiglustep_and_mul(Tensor! out, Tensor input, float limit=7.0) "
       "-> ()");
-  ops.impl("swiglustep_and_mul", torch::kXPU, &swiglustep_and_mul);
 
   ops.def(
       "get_xpu_view_from_cpu_tensor(Tensor cpu_tensor) -> "
       "Tensor");
-  ops.impl(
-      "get_xpu_view_from_cpu_tensor",
-      torch::kCPU,
-      &get_xpu_view_from_cpu_tensor);
 
   ops.def(
       "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
       "Tensor! indices, int numRows, int stride0, "
       "int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_prefill", torch::kXPU, &top_k_per_row_prefill);
 
   ops.def(
       "top_k_per_row_decode(Tensor logits, int next_n, "
       "Tensor seq_lens, Tensor! indices, "
       "int numRows, int stride0, int stride1, int topK) -> ()");
-  ops.impl("top_k_per_row_decode", torch::kXPU, &top_k_per_row_decode);
 
   // Synchronous raw-pointer memcpy helper (0=H2D, 1=D2H, 2=D2D).
   // This is intentionally pointer-based to support allocator-managed buffers.
   ops.def(
       "xpu_memcpy_sync(int dst_ptr, int src_ptr, int n_bytes, int kind, "
       "int device=-1) -> ()");
-  ops.impl("xpu_memcpy_sync", &xpu_memcpy_sync);
 
   // Merge attn states
   // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
@@ -238,10 +182,65 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor prefix_lse,"
       "    Tensor suffix_output,"
       "    Tensor suffix_lse) -> ()");
-  ops.impl("merge_attn_states", torch::kXPU, &merge_attn_states);
 }
 
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
+VLLM_TORCH_LIBRARY_IMPL_EXPAND(VLLM_TORCH_OP_NAMESPACE, XPU, ops) {
+  VLLM_TORCH_IMPL(ops, "weak_ref_tensor", &weak_ref_tensor);
+  VLLM_TORCH_IMPL(ops, "rms_norm", &rms_norm);
+  VLLM_TORCH_IMPL(ops, "fused_add_rms_norm", &fused_add_rms_norm);
+  VLLM_TORCH_IMPL(
+      ops,
+      "rms_norm_dynamic_per_token_quant",
+      &rms_norm_dynamic_per_token_quant);
+  VLLM_TORCH_IMPL(ops, "rms_norm_per_block_quant", &rms_norm_per_block_quant);
+  VLLM_TORCH_IMPL(ops, "rms_norm_mxfp4_quant", &rms_norm_mxfp4_quant);
+  VLLM_TORCH_IMPL(ops, "rms_norm_static_fp8_quant", &rms_norm_static_fp8_quant);
+  VLLM_TORCH_IMPL(
+      ops,
+      "fused_add_rms_norm_static_fp8_quant",
+      &fused_add_rms_norm_static_fp8_quant);
+  VLLM_TORCH_IMPL(ops, "silu_and_mul", &silu_and_mul);
+  VLLM_TORCH_IMPL(ops, "silu_and_mul_quant", &silu_and_mul_quant);
+  VLLM_TORCH_IMPL(
+      ops, "silu_and_mul_per_block_quant", &silu_and_mul_per_block_quant);
+  VLLM_TORCH_IMPL(ops, "silu_and_mul_mxfp4_quant", &silu_and_mul_mxfp4_quant);
+  VLLM_TORCH_IMPL(ops, "mul_and_silu", &mul_and_silu);
+  VLLM_TORCH_IMPL(ops, "gelu_and_mul", &gelu_and_mul);
+  VLLM_TORCH_IMPL(ops, "gelu_tanh_and_mul", &gelu_tanh_and_mul);
+  VLLM_TORCH_IMPL(ops, "fatrelu_and_mul", &fatrelu_and_mul);
+  VLLM_TORCH_IMPL(ops, "gelu_fast", &gelu_fast);
+  VLLM_TORCH_IMPL(ops, "gelu_new", &gelu_new);
+  VLLM_TORCH_IMPL(ops, "gelu_quick", &gelu_quick);
+  VLLM_TORCH_IMPL(ops, "rotary_embedding", &rotary_embedding);
+  VLLM_TORCH_IMPL(ops, "fused_qk_norm_rope", &fused_qk_norm_rope);
+  VLLM_TORCH_IMPL(ops, "static_scaled_fp8_quant", &static_scaled_fp8_quant);
+  VLLM_TORCH_IMPL(ops, "dynamic_scaled_fp8_quant", &dynamic_scaled_fp8_quant);
+  VLLM_TORCH_IMPL(
+      ops,
+      "dynamic_per_token_scaled_fp8_quant",
+      &dynamic_per_token_scaled_fp8_quant);
+  VLLM_TORCH_IMPL(ops, "per_token_group_fp8_quant", &per_token_group_quant_fp8);
+  VLLM_TORCH_IMPL(
+      ops, "per_token_group_quant_mxfp4", &per_token_group_quant_mxfp4);
+  VLLM_TORCH_IMPL(ops, "swigluoai_and_mul", &swigluoai_and_mul);
+  VLLM_TORCH_IMPL(ops, "relu2_no_mul", &relu2_no_mul);
+  VLLM_TORCH_IMPL(ops, "swiglustep_and_mul", &swiglustep_and_mul);
+  VLLM_TORCH_IMPL(ops, "top_k_per_row_prefill", &top_k_per_row_prefill);
+  VLLM_TORCH_IMPL(ops, "top_k_per_row_decode", &top_k_per_row_decode);
+  VLLM_TORCH_IMPL(ops, "merge_attn_states", &merge_attn_states);
+}
+
+VLLM_TORCH_LIBRARY_IMPL_EXPAND(VLLM_TORCH_OP_NAMESPACE, CPU, ops) {
+  VLLM_TORCH_IMPL(
+      ops, "get_xpu_view_from_cpu_tensor", &get_xpu_view_from_cpu_tensor);
+}
+
+VLLM_TORCH_LIBRARY_IMPL_EXPAND(
+    VLLM_TORCH_OP_NAMESPACE, CompositeExplicitAutograd, ops) {
+  VLLM_TORCH_IMPL(ops, "xpu_memcpy_sync", &xpu_memcpy_sync);
+}
+
+VLLM_TORCH_LIBRARY_FRAGMENT_EXPAND(VLLM_TORCH_CACHE_OP_NAMESPACE, cache_ops) {
   // Reshape the key and value tensors and cache them.
   cache_ops.def(
       "reshape_and_cache(Tensor key, Tensor value,"
@@ -249,7 +248,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                  Tensor slot_mapping,"
       "                  str kv_cache_dtype,"
       "                  Tensor k_scale, Tensor v_scale) -> ()");
-  cache_ops.impl("reshape_and_cache", torch::kXPU, &reshape_and_cache);
 
   // Reshape the key and value tensors and cache them.
   cache_ops.def(
@@ -259,8 +257,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        Tensor slot_mapping,"
       "                        str kv_cache_dtype,"
       "                        Tensor k_scale, Tensor v_scale) -> ()");
-  cache_ops.impl(
-      "reshape_and_cache_flash", torch::kXPU, &reshape_and_cache_flash);
 
   // Concat kv_c and k_pe and cache them.
   cache_ops.def(
@@ -269,44 +265,33 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                     Tensor slot_mapping,"
       "                     str kv_cache_dtype,"
       "                     Tensor scale) -> ()");
-  cache_ops.impl("concat_and_cache_mla", torch::kXPU, &concat_and_cache_mla);
 
   // Gather cache blocks from src_cache to dst.
   cache_ops.def(
       "gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
-  cache_ops.impl("gather_cache", torch::kXPU, &gather_cache);
 
   // Convert between FP8 and FP16/BF16/FP32 formats with scaling
   cache_ops.def(
       "convert_fp8(Tensor! dst, Tensor src, "
       "            float scale, str kv_cache_dtype) -> ()");
-  cache_ops.impl("convert_fp8", torch::kXPU, &convert_fp8);
 
   // Cache ops
   // Swap in (out) the cache blocks from src to dst.
   cache_ops.def(
       "swap_blocks(Tensor src, Tensor! dst,"
       "            int block_size_in_bytes, Tensor block_mapping) -> ()");
-  cache_ops.impl("swap_blocks", torch::kXPU, &swap_blocks);
   // Batch swap: copies N (src_ptr, dst_ptr, size) triples in one call.
   // The target XPU device is auto-inferred from the device pointer.
   cache_ops.def(
       "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
       "                  Tensor sizes) -> ()");
-  cache_ops.impl("swap_blocks_batch", torch::kCPU, &swap_blocks_batch);
   cache_ops.def(
       "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache,"
       "Tensor slot_mapping, int quant_block_size, str scale_fmt) -> ()");
-  cache_ops.impl(
-      "indexer_k_quant_and_cache", torch::kXPU, &indexer_k_quant_and_cache);
   cache_ops.def(
       "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, "
       "Tensor! dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
-  cache_ops.impl(
-      "cp_gather_indexer_k_quant_cache",
-      torch::kXPU,
-      &cp_gather_indexer_k_quant_cache);
 
   // Gather cache blocks with optional FP8 dequantization.
   cache_ops.def(
@@ -314,13 +299,37 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "Tensor block_table, Tensor cu_seq_lens, Tensor token_to_seq, "
       "int num_tokens, str kv_cache_dtype, Tensor scale, "
       "Tensor? seq_starts) -> ()");
-  cache_ops.impl(
-      "gather_and_maybe_dequant_cache",
-      torch::kXPU,
-      &gather_and_maybe_dequant_cache);
 
   cache_ops.def("getMemoryInfo(int device_index) -> (int, int)");
-  cache_ops.impl("getMemoryInfo", &getMemoryInfo);
+}
+
+VLLM_TORCH_LIBRARY_IMPL_EXPAND(VLLM_TORCH_CACHE_OP_NAMESPACE, XPU, cache_ops) {
+  VLLM_TORCH_IMPL(cache_ops, "reshape_and_cache", &reshape_and_cache);
+  VLLM_TORCH_IMPL(
+      cache_ops, "reshape_and_cache_flash", &reshape_and_cache_flash);
+  VLLM_TORCH_IMPL(cache_ops, "concat_and_cache_mla", &concat_and_cache_mla);
+  VLLM_TORCH_IMPL(cache_ops, "gather_cache", &gather_cache);
+  VLLM_TORCH_IMPL(cache_ops, "convert_fp8", &convert_fp8);
+  VLLM_TORCH_IMPL(cache_ops, "swap_blocks", &swap_blocks);
+  VLLM_TORCH_IMPL(
+      cache_ops, "indexer_k_quant_and_cache", &indexer_k_quant_and_cache);
+  VLLM_TORCH_IMPL(
+      cache_ops,
+      "cp_gather_indexer_k_quant_cache",
+      &cp_gather_indexer_k_quant_cache);
+  VLLM_TORCH_IMPL(
+      cache_ops,
+      "gather_and_maybe_dequant_cache",
+      &gather_and_maybe_dequant_cache);
+}
+
+VLLM_TORCH_LIBRARY_IMPL_EXPAND(VLLM_TORCH_CACHE_OP_NAMESPACE, CPU, cache_ops) {
+  VLLM_TORCH_IMPL(cache_ops, "swap_blocks_batch", &swap_blocks_batch);
+}
+
+VLLM_TORCH_LIBRARY_IMPL_EXPAND(
+    VLLM_TORCH_CACHE_OP_NAMESPACE, CompositeExplicitAutograd, cache_ops) {
+  VLLM_TORCH_IMPL(cache_ops, "getMemoryInfo", &getMemoryInfo);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

@@ -77,6 +77,10 @@ option(MHC_KERNELS_ENABLED
 option(XPU_SPECIFIC_KERNELS_ENABLED
        "Build XPU-specific kernels (_xpu_C extension)" ON)
 option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
+option(
+  VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES
+  "Build kernel extensions with vLLM libtorch_stable-compatible module names"
+  OFF)
 
 # KERNEL CONFIGURATION — controls which paged decode kernel variants are
 # compiled. Use model-specific configs to dramatically reduce compile time. See
@@ -147,6 +151,10 @@ message(STATUS "  MHC_KERNELS_ENABLED          = ${MHC_KERNELS_ENABLED}")
 message(
   STATUS "  XPU_SPECIFIC_KERNELS_ENABLED = ${XPU_SPECIFIC_KERNELS_ENABLED}")
 message(STATUS "  XPUMEM_ALLOCATOR_ENABLED     = ${XPUMEM_ALLOCATOR_ENABLED}")
+message(
+  STATUS
+    "  VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES = ${VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES}"
+)
 message(STATUS "  VLLM_PAGED_DECODE_CONFIG     = ${VLLM_PAGED_DECODE_CONFIG}")
 message(STATUS "  VLLM_CHUNK_PREFILL_CONFIG    = ${VLLM_CHUNK_PREFILL_CONFIG}")
 message(STATUS "")
@@ -525,11 +533,26 @@ endif()
 # Define other extension targets
 #
 
+set(VLLM_C_EXTENSION_TARGET "_C")
+set(VLLM_FA2_EXTENSION_TARGET "_vllm_fa2_C")
+set(VLLM_XPU_EXTENSION_TARGET "_xpu_C")
+set(VLLM_MOE_EXTENSION_TARGET "_moe_C")
+if(VLLM_XPU_USE_LIBTORCH_STABLE_EXTENSION_NAMES)
+  set(VLLM_C_EXTENSION_TARGET "_C_stable_libtorch")
+  set(VLLM_FA2_EXTENSION_TARGET "_vllm_fa2_C_stable_libtorch")
+  set(VLLM_XPU_EXTENSION_TARGET "_xpu_C_stable_libtorch")
+  set(VLLM_MOE_EXTENSION_TARGET "_moe_C_stable_libtorch")
+endif()
+
+function(vllm_apply_torch_registration_defs target_name)
+  target_compile_definitions(${target_name} PRIVATE ${ARGN})
+endfunction()
+
 #
 # _C extension
 #
 if(BASIC_KERNELS_ENABLED)
-  message(STATUS "Enabling C extension.")
+  message(STATUS "Enabling ${VLLM_C_EXTENSION_TARGET} extension.")
   set(VLLM_EXT_SRC
       "csrc/cache.cpp"
       "csrc/layernorm.cpp"
@@ -551,7 +574,7 @@ if(BASIC_KERNELS_ENABLED)
   include_directories("/usr/include")
 
   define_gpu_extension_target(
-    _C
+    ${VLLM_C_EXTENSION_TARGET}
     DESTINATION
     vllm_xpu_kernels
     LANGUAGE
@@ -570,6 +593,10 @@ if(BASIC_KERNELS_ENABLED)
     3
     WITH_SOABI)
 
+  vllm_apply_torch_registration_defs(
+    ${VLLM_C_EXTENSION_TARGET} VLLM_TORCH_OP_NAMESPACE=_C
+    VLLM_TORCH_CACHE_OP_NAMESPACE=_C_cache_ops)
+
 endif()
 
 #
@@ -584,12 +611,12 @@ if(FA2_KERNELS_ENABLED AND NOT ATTN_KERNEL_LIB_NAME)
       "for full FA2 functionality.")
 endif()
 if(FA2_KERNELS_ENABLED)
-  message(STATUS "Enabling fa2 extension.")
+  message(STATUS "Enabling ${VLLM_FA2_EXTENSION_TARGET} extension.")
   file(GLOB FA2_GEN_SRCS "csrc/flash_attn/*.cpp"
        "csrc/xpu/attn/attn_interface.cpp")
 
   define_gpu_extension_target(
-    _vllm_fa2_C
+    ${VLLM_FA2_EXTENSION_TARGET}
     DESTINATION
     vllm_xpu_kernels
     LANGUAGE
@@ -609,13 +636,16 @@ if(FA2_KERNELS_ENABLED)
     LIBRARIES
     ${ATTN_KERNEL_LIB_NAME}
     WITH_SOABI)
+
+  vllm_apply_torch_registration_defs(${VLLM_FA2_EXTENSION_TARGET}
+                                     VLLM_TORCH_OP_NAMESPACE=_vllm_fa2_C)
 endif()
 
 #
 # xpu only ops/kernels, implemented with cutlass/onednn/sycl.
 #
 if(XPU_SPECIFIC_KERNELS_ENABLED)
-  message(STATUS "Enabling _xpu_C extension.")
+  message(STATUS "Enabling ${VLLM_XPU_EXTENSION_TARGET} extension.")
 
   set(VLLM_EXT_XPU_SRC
       "csrc/xpu/torch_bindings.cpp"
@@ -658,7 +688,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
   endif()
 
   define_gpu_extension_target(
-    _xpu_C
+    ${VLLM_XPU_EXTENSION_TARGET}
     DESTINATION
     vllm_xpu_kernels
     LANGUAGE
@@ -678,17 +708,20 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     USE_SABI
     3
     WITH_SOABI)
+
+  vllm_apply_torch_registration_defs(${VLLM_XPU_EXTENSION_TARGET}
+                                     VLLM_TORCH_OP_NAMESPACE=_xpu_C)
 endif()
 
 #
 # _moe_C extension
 #
 if(MOE_KERNELS_ENABLED)
-  message(STATUS "Enabling _moe_C extension.")
+  message(STATUS "Enabling ${VLLM_MOE_EXTENSION_TARGET} extension.")
   file(GLOB VLLM_MOE_EXT_SRC "csrc/moe/*.cpp")
 
   define_gpu_extension_target(
-    _moe_C
+    ${VLLM_MOE_EXTENSION_TARGET}
     DESTINATION
     vllm_xpu_kernels
     LANGUAGE
@@ -706,4 +739,7 @@ if(MOE_KERNELS_ENABLED)
     USE_SABI
     3
     WITH_SOABI)
+
+  vllm_apply_torch_registration_defs(${VLLM_MOE_EXTENSION_TARGET}
+                                     VLLM_TORCH_OP_NAMESPACE=_moe_C)
 endif()
