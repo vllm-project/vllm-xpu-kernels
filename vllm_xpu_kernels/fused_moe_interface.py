@@ -17,6 +17,7 @@ from .moe_utils import quant_act_xpu, ref_fused_moe
 
 REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
 USE_MXFP4_FP8_ENV = "VLLM_XPU_FUSED_MOE_USE_MXFP4_FP8"
+FUSED_MOE_KERNEL_V2_ENV = "VLLM_XPU_FUSED_MOE_KERNEL_V2"
 
 def _is_env_enabled(env_name: str, default: str = "0") -> bool:
     value = os.environ.get(env_name, default).strip().upper()
@@ -264,6 +265,15 @@ class XpuFusedMoe:
             self.total_experts_num = self.num_experts * self.ep_size
         self.local_experts_num = self.num_experts
 
+    def _use_sycl_kernel_v2(self) -> bool:
+        """Return True when the new single-pass SYCL kernel should be used."""
+        if not _is_env_enabled(FUSED_MOE_KERNEL_V2_ENV, "1"):
+            return False
+        if self.is_fp8 or self.is_int4 or self.is_mxfp4 or self.is_mxfp8 \
+            or self.is_block_fp8 or self.activation != "silu":
+            return False
+        return not self.ep_size > 1
+
     def apply(
         self,
         output,
@@ -277,10 +287,37 @@ class XpuFusedMoe:
             self._apply_ref(output, hidden_states,
                             topk_weights, topk_ids,
                             expert_map, a1q_scale)
+        elif self._use_sycl_kernel_v2():
+            self._apply_sycl_kernel(output, hidden_states,
+                                    topk_weights, topk_ids)
         else:
             self._apply_kernel(output, hidden_states,
                                topk_weights, topk_ids,
                                expert_map, a1q_scale)
+
+    def _apply_sycl_kernel(
+        self,
+        output,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+    ):
+        """Dispatch to the new single-pass SYCL fused-MoE kernel."""
+        hidden_size = hidden_states.shape[-1]
+        torch.ops._moe_C.fused_moe(
+            hidden_states,
+            self.w13,
+            self.w13_bias,
+            self.w2,
+            self.w2_bias,
+            topk_ids,
+            topk_weights,
+            output,
+            self.num_experts,
+            self.inter_size,
+            hidden_size,
+            float(self.gemm1_clamp_limit) if self.gemm1_clamp_limit else 0.0,
+        )
 
     def _apply_ref(
         self,

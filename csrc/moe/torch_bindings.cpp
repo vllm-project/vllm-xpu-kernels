@@ -106,6 +106,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "local_experts_num) -> "
       "()");
   m.impl("remap_hidden_states", torch::kXPU, &remap_hidden_states);
+
+  m.def(
+      "fused_moe(Tensor input_tokens, Tensor w13, Tensor? w13_bias,"
+      "          Tensor w2, Tensor? w2_bias,"
+      "          Tensor topk_ids, Tensor topk_weights,"
+      "          Tensor? output,"
+      "          int num_experts, int inter_size, int hidden_size,"
+      "          float gemm1_clamp_limit=0.0) -> Tensor");
+  m.impl("fused_moe", torch::kXPU, &fused_moe);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
