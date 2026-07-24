@@ -130,7 +130,7 @@ def _reference_kda(
     num_accepted_tokens: torch.Tensor | None,
     num_heads: int,
     head_dim: int,
-) -> None:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     actual_tokens = q_proj.shape[0]
     hidden_dim = num_heads * head_dim
     conv_outputs = tuple(
@@ -174,7 +174,6 @@ def _reference_kda(
                 num_heads,
                 head_dim,
             )
-
     if spec_query_start_loc is not None:
         assert spec_token_indx is not None
         assert spec_state_indices is not None
@@ -205,6 +204,7 @@ def _reference_kda(
                 num_heads,
                 head_dim,
             )
+    return conv_outputs
 
 
 def _make_inputs(
@@ -212,7 +212,6 @@ def _make_inputs(
     num_heads: int,
     head_dim: int,
     dtype: torch.dtype,
-    cache_dtype: torch.dtype,
     dim_first: bool,
 ):
     torch.manual_seed(42)
@@ -237,7 +236,7 @@ def _make_inputs(
         conv_shape = (num_slots, 3 * hidden_dim, width - 1)
     else:
         conv_shape = (num_slots, width - 1, 3 * hidden_dim)
-    conv_state = (torch.randn(conv_shape) * 0.1).to(cache_dtype)
+    conv_state = (torch.randn(conv_shape) * 0.1).to(dtype)
     recurrent_state = (
         torch.randn(num_slots, num_heads, head_dim, head_dim) * 0.05
     )
@@ -282,10 +281,11 @@ def _to_page_strided_xpu_cache(tensor: torch.Tensor) -> torch.Tensor:
     ids=["contiguous-cache", "page-strided-cache"],
 )
 @pytest.mark.parametrize(
-    ("dtype", "cache_dtype", "head_dim", "dim_first", "mode"),
+    ("dtype", "head_dim", "dim_first", "mode"),
     [
-        (torch.float16, torch.float16, 32, False, "prefill"),
-        (torch.bfloat16, torch.float32, 128, True, "decode"),
+        (torch.float16, 32, False, "prefill"),
+        (torch.bfloat16, 128, True, "decode"),
+        (torch.float16, 64, True, "prefill+decode"),
     ],
     ids=lambda value: (
         format_tc(value) if isinstance(value, torch.dtype) else str(value)
@@ -293,9 +293,13 @@ def _to_page_strided_xpu_cache(tensor: torch.Tensor) -> torch.Tensor:
 )
 @torch.inference_mode()
 def test_kda_attention_non_spec(
-    dtype, cache_dtype, head_dim, dim_first, mode, page_strided_cache
+    dtype, head_dim, dim_first, mode, page_strided_cache
 ):
-    num_actual_tokens = 5 if mode == "prefill" else 3
+    num_actual_tokens = {
+        "prefill": 5,
+        "decode": 3,
+        "prefill+decode": 5,
+    }[mode]
     num_heads = 2
     (
         projections,
@@ -312,7 +316,6 @@ def test_kda_attention_non_spec(
         num_heads,
         head_dim,
         dtype,
-        cache_dtype,
         dim_first,
     )
     if mode == "prefill":
@@ -320,11 +323,16 @@ def test_kda_attention_non_spec(
         state_indices = torch.tensor([1, 3], dtype=torch.int32)
         has_initial_state = torch.tensor([False, True])
         num_prefills, num_decodes = 2, 0
-    else:
+    elif mode == "decode":
         query_start_loc = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
         state_indices = torch.tensor([1, 3, 5], dtype=torch.int32)
         has_initial_state = None
         num_prefills, num_decodes = 0, 3
+    else:
+        query_start_loc = torch.tensor([0, 3, 4, 5], dtype=torch.int32)
+        state_indices = torch.tensor([1, 3, 5], dtype=torch.int32)
+        has_initial_state = torch.tensor([False, True, True])
+        num_prefills, num_decodes = 1, 2
 
     reference_output = core_attn_out.clone()
     reference_conv_state = conv_state.clone()
@@ -404,14 +412,12 @@ def test_kda_attention_non_spec(
     )
 
 
-@pytest.mark.parametrize("mixed_batch", [False, True])
 @torch.inference_mode()
-def test_kda_attention_spec_decode(mixed_batch):
-    num_actual_tokens = 8 if mixed_batch else 6
+def test_kda_split_ops_compose_to_reference():
+    num_actual_tokens = 5
     num_heads = 2
     head_dim = 32
-    dtype = torch.float16
-    cache_dtype = torch.bfloat16 if mixed_batch else torch.float16
+    dtype = torch.bfloat16
     (
         projections,
         raw_gate,
@@ -427,25 +433,161 @@ def test_kda_attention_spec_decode(mixed_batch):
         num_heads,
         head_dim,
         dtype,
-        cache_dtype,
+        dim_first=False,
+    )
+    query_start_loc = torch.tensor([0, 3, 4, 5], dtype=torch.int32)
+    state_indices = torch.tensor([1, 3, 5], dtype=torch.int32)
+    has_initial_state = torch.tensor([False, True, True])
+
+    reference_output = core_attn_out.clone()
+    reference_conv_state = conv_state.clone()
+    reference_recurrent_state = recurrent_state.clone()
+    reference_qkv = _reference_kda(
+        reference_output,
+        *(projection[:num_actual_tokens] for projection in projections),
+        raw_gate[:, :num_actual_tokens],
+        beta[:, :num_actual_tokens],
+        reference_conv_state,
+        reference_recurrent_state,
+        *weights,
+        a_log,
+        dt_bias,
+        query_start_loc,
+        None,
+        state_indices,
+        has_initial_state,
+        None,
+        None,
+        None,
+        None,
+        num_heads,
+        head_dim,
+    )
+
+    device = "xpu"
+    actual_output = core_attn_out.to(device)
+    actual_conv_state = _to_page_strided_xpu_cache(conv_state)
+    actual_recurrent_state = _to_page_strided_xpu_cache(recurrent_state)
+    device_query_start_loc = query_start_loc.to(device)
+    device_state_indices = state_indices.to(device)
+    device_has_initial_state = has_initial_state.to(device)
+    actual_qkv = torch.ops._xpu_C.kda_causal_conv1d(
+        *(projection.to(device) for projection in projections),
+        actual_conv_state,
+        *(weight.to(device) for weight in weights),
+        1,
+        2,
+        0,
+        device_has_initial_state,
+        device_query_start_loc,
+        None,
+        device_state_indices,
+        None,
+        None,
+        None,
+        None,
+        num_actual_tokens,
+    )
+    torch.ops._xpu_C.kda_gated_delta_rule(
+        actual_output,
+        *actual_qkv,
+        raw_gate.to(device),
+        beta.to(device),
+        actual_recurrent_state,
+        a_log.to(device),
+        dt_bias.to(device),
+        1,
+        2,
+        0,
+        device_has_initial_state,
+        device_query_start_loc,
+        None,
+        device_state_indices,
+        None,
+        None,
+        None,
+        None,
+        num_actual_tokens,
+    )
+
+    tolerance = 6e-2
+    for actual, reference in zip(actual_qkv, reference_qkv):
+        torch.testing.assert_close(
+            actual.cpu(),
+            reference,
+            atol=tolerance,
+            rtol=tolerance,
+        )
+    torch.testing.assert_close(
+        actual_output.cpu(),
+        reference_output,
+        atol=tolerance,
+        rtol=tolerance,
+    )
+    torch.testing.assert_close(
+        actual_conv_state.cpu(),
+        reference_conv_state,
+        atol=tolerance,
+        rtol=tolerance,
+    )
+    torch.testing.assert_close(
+        actual_recurrent_state.cpu(),
+        reference_recurrent_state,
+        atol=tolerance,
+        rtol=tolerance,
+    )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["spec-decode", "spec-decode+prefill+decode"],
+)
+@torch.inference_mode()
+def test_kda_attention_spec_decode(mode):
+    combined_batch = mode == "spec-decode+prefill+decode"
+    num_actual_tokens = 10 if combined_batch else 6
+    num_heads = 2
+    head_dim = 32
+    dtype = torch.float16
+    (
+        projections,
+        raw_gate,
+        beta,
+        weights,
+        conv_state,
+        recurrent_state,
+        a_log,
+        dt_bias,
+        core_attn_out,
+    ) = _make_inputs(
+        num_actual_tokens,
+        num_heads,
+        head_dim,
+        dtype,
         dim_first=False,
     )
     query_start_loc = torch.tensor([0, 3, 6], dtype=torch.int32)
     token_indx = torch.tensor([1, 3, 5, 0, 2, 4], dtype=torch.int32)
     state_indices = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32)
     accepted = torch.tensor([2, 1], dtype=torch.int32)
-    if mixed_batch:
-        non_spec_query_start_loc = torch.tensor([0, 2], dtype=torch.int32)
-        non_spec_token_indx = torch.tensor([6, 7], dtype=torch.int32)
-        non_spec_state_indices = torch.tensor([8], dtype=torch.int32)
-        has_initial_state = torch.tensor([True])
+    if combined_batch:
+        non_spec_query_start_loc = torch.tensor(
+            [0, 3, 4], dtype=torch.int32
+        )
+        non_spec_token_indx = torch.tensor(
+            [6, 7, 8, 9], dtype=torch.int32
+        )
+        non_spec_state_indices = torch.tensor([8, 9], dtype=torch.int32)
+        has_initial_state = torch.tensor([False, True])
         num_prefills = 1
+        num_decodes = 1
     else:
         non_spec_query_start_loc = None
         non_spec_token_indx = None
         non_spec_state_indices = None
         has_initial_state = None
         num_prefills = 0
+        num_decodes = 0
 
     reference_output = core_attn_out.clone()
     reference_conv_state = conv_state.clone()
@@ -476,18 +618,6 @@ def test_kda_attention_spec_decode(mixed_batch):
     actual_output = core_attn_out.to(device)
     actual_conv_state = conv_state.to(device)
     actual_recurrent_state = recurrent_state.to(device)
-    padded_query_start_loc = torch.tensor(
-        [0, 3, 6, 6], dtype=torch.int32, device=device
-    )
-    padded_state_indices = torch.cat(
-        (
-            state_indices,
-            torch.zeros(1, state_indices.shape[1], dtype=torch.int32),
-        )
-    ).to(device)
-    padded_accepted = torch.cat(
-        (accepted, torch.ones(1, dtype=torch.int32))
-    ).to(device)
     torch.ops._xpu_C.kda_attention(
         actual_output,
         *(projection.to(device) for projection in projections),
@@ -499,7 +629,7 @@ def test_kda_attention_spec_decode(mixed_batch):
         a_log.to(device),
         dt_bias.to(device),
         num_prefills,
-        0,
+        num_decodes,
         2,
         (
             None
@@ -512,7 +642,7 @@ def test_kda_attention_spec_decode(mixed_batch):
             else non_spec_query_start_loc.to(device)
         ),
         (
-            torch.empty(0, dtype=torch.int32, device=device)
+            None
             if non_spec_token_indx is None
             else non_spec_token_indx.to(device)
         ),
@@ -521,10 +651,10 @@ def test_kda_attention_spec_decode(mixed_batch):
             if non_spec_state_indices is None
             else non_spec_state_indices.to(device)
         ),
-        padded_query_start_loc,
+        query_start_loc.to(device),
         token_indx.to(device),
-        padded_state_indices,
-        padded_accepted,
+        state_indices.to(device),
+        accepted.to(device),
         num_actual_tokens,
     )
 
