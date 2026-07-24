@@ -136,6 +136,7 @@ class RemapHiddenStates {
       int* expert_map,
       int* unpermuted_row_to_permuted_row,
       int* rows_per_expert,
+      int64_t* valid_tokens,
       void* topk_ids,
       bool is_topk_ids_int32,
       const int num_rows,
@@ -151,6 +152,7 @@ class RemapHiddenStates {
         expert_map(expert_map),
         unpermuted_row_to_permuted_row(unpermuted_row_to_permuted_row),
         rows_per_expert(rows_per_expert),
+        valid_tokens(valid_tokens),
         topk_ids(topk_ids),
         is_topk_ids_int32(is_topk_ids_int32),
         num_rows(num_rows),
@@ -199,6 +201,11 @@ class RemapHiddenStates {
         expert_cumsum_ptr + local_experts_num,
         expert_cumsum_ptr,
         sycl::plus<int>{});
+
+    if (valid_tokens != nullptr && group_id == 0 && local_id == 0) {
+      valid_tokens[0] = expert_cumsum_ptr[local_experts_num - 1] +
+                        rows_per_expert[local_experts_num - 1];
+    }
 
     int row = group_id;
     int global_expert_id[TopK];
@@ -335,6 +342,7 @@ class RemapHiddenStates {
   int* expert_map;
   int* unpermuted_row_to_permuted_row;
   int* rows_per_expert;
+  int64_t* valid_tokens;
   void* topk_ids;
   bool is_topk_ids_int32;
   const int num_rows;
@@ -353,6 +361,7 @@ void RemapHiddenStatesLauncher(
     int* expert_map,
     int* rows_per_expert,
     int* unpermuted_row_to_permuted_row,
+    int64_t* valid_tokens,
     void* topk_ids,
     bool is_topk_ids_int32,
     const int num_rows,
@@ -399,6 +408,7 @@ void RemapHiddenStatesLauncher(
             expert_map,
             unpermuted_row_to_permuted_row,
             rows_per_expert,
+            valid_tokens,
             topk_ids,
             is_topk_ids_int32,
             num_rows,
@@ -426,7 +436,8 @@ void remap_hidden_states(
     torch::Tensor& unpermuted_row_to_permuted_row,   // [num_rows, TopK]
     torch::Tensor& topk_ids,                         // [num_rows, TopK]
     int64_t total_experts_num,
-    int64_t local_experts_num) {
+    int64_t local_experts_num,
+    const c10::optional<torch::Tensor>& valid_tokens) {
   // dtype check
   TORCH_CHECK(
       hidden_states.scalar_type() == remapped_hidden_states.scalar_type(),
@@ -485,6 +496,14 @@ void remap_hidden_states(
   TORCH_CHECK(
       rows_per_expert.size(0) == local_experts_num,
       "rows_per_expert must be [local_experts_num]");
+  TORCH_CHECK(local_experts_num > 0, "local_experts_num must be > 0");
+  if (valid_tokens.has_value()) {
+    TORCH_CHECK(
+        valid_tokens->scalar_type() == torch::kInt64,
+        "valid_tokens must be int64");
+    TORCH_CHECK(
+        valid_tokens->numel() == 1, "valid_tokens must contain 1 element");
+  }
   TORCH_CHECK(
       topk_ids.size(0) == num_rows && topk_ids.size(1) == TopK,
       "topk_ids must be [num_rows, TopK]");
@@ -506,6 +525,9 @@ void remap_hidden_states(
                              : nullptr,                                       \
       reinterpret_cast<int*>(rows_per_expert.data_ptr()),                     \
       reinterpret_cast<int*>(unpermuted_row_to_permuted_row.data_ptr()),      \
+      (valid_tokens.has_value()                                               \
+           ? reinterpret_cast<int64_t*>(valid_tokens->data_ptr())             \
+           : nullptr),                                                        \
       reinterpret_cast<void*>(topk_ids.data_ptr()),                           \
       topk_ids.scalar_type() == torch::kInt32,                                \
       num_rows,                                                               \

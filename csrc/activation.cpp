@@ -92,12 +92,17 @@ class act_kernel {
   act_kernel(
       scalar_t* __restrict__ out,          // [..., d]
       const scalar_t* __restrict__ input,  // [..., d]
-      const int d)
-      : out_(out), input_(input), d_(d) {}
+      const int d,
+      const int64_t* __restrict__ valid_rows = nullptr)
+      : out_(out), input_(input), d_(d), valid_rows_(valid_rows) {}
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
     const int64_t token_idx = item_ct1.get_group(2);
+    if (valid_rows_ != nullptr &&
+        token_idx >= static_cast<int64_t>(*valid_rows_)) {
+      return;
+    }
     for (int64_t idx = item_ct1.get_local_id(2); idx < d_;
          idx += item_ct1.get_local_range(2)) {
       const scalar_t x = input_[token_idx * d_ + idx];
@@ -109,6 +114,7 @@ class act_kernel {
   scalar_t* __restrict__ out_;          // [..., d]
   const scalar_t* __restrict__ input_;  // [..., d]
   const int d_;
+  const int64_t* __restrict__ valid_rows_;
 };
 
 template <
@@ -120,12 +126,17 @@ class act_and_mul_kernel {
   act_and_mul_kernel(
       scalar_t* __restrict__ out,          // [..., d]
       const scalar_t* __restrict__ input,  // [..., 2, d]
-      const int d)
-      : out_(out), input_(input), d_(d) {}
+      const int d,
+      const int64_t* __restrict__ valid_rows = nullptr)
+      : out_(out), input_(input), d_(d), valid_rows_(valid_rows) {}
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
       const sycl::nd_item<3>& item_ct1) const {
     const int64_t token_idx = item_ct1.get_group(2);
+    if (valid_rows_ != nullptr &&
+        token_idx >= static_cast<int64_t>(*valid_rows_)) {
+      return;
+    }
     for (int64_t idx = item_ct1.get_local_id(2); idx < d_;
          idx += item_ct1.get_local_range(2)) {
       const scalar_t x = input_[token_idx * 2 * d_ + idx];
@@ -138,6 +149,7 @@ class act_and_mul_kernel {
   scalar_t* __restrict__ out_;          // [..., d]
   const scalar_t* __restrict__ input_;  // [..., 2, d]
   const int d_;
+  const int64_t* __restrict__ valid_rows_;
 };
 
 // Vectorized version of act_and_mul_kernel using aligned vector loads/stores.
@@ -153,12 +165,17 @@ class act_and_mul_vec_kernel {
   act_and_mul_vec_kernel(
       scalar_t* __restrict__ out,
       const scalar_t* __restrict__ input,
-      const int d)
-      : out_(out), input_(input), d_(d) {}
+      const int d,
+      const int64_t* __restrict__ valid_rows = nullptr)
+      : out_(out), input_(input), d_(d), valid_rows_(valid_rows) {}
 
   void operator()(sycl::nd_item<1> item) const {
     using vec_t = vllm::xpu::aligned_vec<scalar_t, VEC_SIZE>;
     const int64_t token_idx = item.get_group(0);
+    if (valid_rows_ != nullptr &&
+        token_idx >= static_cast<int64_t>(*valid_rows_)) {
+      return;
+    }
     const int64_t offset = item.get_local_linear_id();
     const int64_t step = item.get_local_range(0);
     const int64_t bound = d_ / VEC_SIZE;
@@ -181,6 +198,7 @@ class act_and_mul_vec_kernel {
   scalar_t* __restrict__ out_;
   const scalar_t* __restrict__ input_;
   const int d_;
+  const int64_t* __restrict__ valid_rows_;
 };
 
 template <
@@ -321,11 +339,21 @@ class swigluoai_and_mul_kernel {
       const scalar_t* __restrict__ input,  // [..., 2, d]
       const int d,
       const float alpha,
-      const float limit)
-      : out(out), input(input), d(d), alpha(alpha), limit(limit) {}
+      const float limit,
+      const int64_t* __restrict__ valid_rows = nullptr)
+      : out(out),
+        input(input),
+        d(d),
+        alpha(alpha),
+        limit(limit),
+        valid_rows(valid_rows) {}
 
   void operator()(sycl::nd_item<1> item) const {
     const int64_t token_idx = item.get_group(0);
+    if (valid_rows != nullptr &&
+        token_idx >= static_cast<int64_t>(*valid_rows)) {
+      return;
+    }
     for (int64_t idx = item.get_local_id(0); idx < d;
          idx += item.get_local_range(0)) {
       // gate = x[..., ::2]  (even indices)
@@ -343,6 +371,7 @@ class swigluoai_and_mul_kernel {
   const int d;
   const float alpha;
   const float limit;
+  const int64_t* valid_rows;
 };
 
 template <
@@ -354,11 +383,16 @@ class swiglustep_and_mul_kernel {
       scalar_t* __restrict__ out,          // [..., d]
       const scalar_t* __restrict__ input,  // [..., 2 * d]
       const int d,
-      const float limit)
-      : out(out), input(input), d(d), limit(limit) {}
+      const float limit,
+      const int64_t* __restrict__ valid_rows = nullptr)
+      : out(out), input(input), d(d), limit(limit), valid_rows(valid_rows) {}
 
   void operator()(sycl::nd_item<1> item) const {
     const int64_t token_idx = item.get_group(0);
+    if (valid_rows != nullptr &&
+        token_idx >= static_cast<int64_t>(*valid_rows)) {
+      return;
+    }
     for (int64_t idx = item.get_local_id(0); idx < d;
          idx += item.get_local_range(0)) {
       // gate = first half, up = second half (contiguous chunks)
@@ -374,6 +408,7 @@ class swiglustep_and_mul_kernel {
   const scalar_t* input;
   const int d;
   const float limit;
+  const int64_t* valid_rows;
 };
 
 }  // namespace vllm
@@ -402,15 +437,15 @@ class swiglustep_and_mul_kernel {
   });
 
 // Vectorized launch: dispatch to vec_size=1,2,4,8,16 based on d and dtype.
-#define VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, N)                  \
-  case N: {                                                           \
-    queue.submit([&](sycl::handler& cgh) {                            \
-      cgh.parallel_for(                                               \
-          sycl::nd_range<1>(num_tokens * wg_size, wg_size),           \
-          vllm::act_and_mul_vec_kernel<sycl_t, KERNEL, ACT_FIRST, N>( \
-              (sycl_t*)out_ptr, (sycl_t*)input_ptr, d));              \
-    });                                                               \
-    break;                                                            \
+#define VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, N)                     \
+  case N: {                                                              \
+    queue.submit([&](sycl::handler& cgh) {                               \
+      cgh.parallel_for(                                                  \
+          sycl::nd_range<1>(num_tokens * wg_size, wg_size),              \
+          vllm::act_and_mul_vec_kernel<sycl_t, KERNEL, ACT_FIRST, N>(    \
+              (sycl_t*)out_ptr, (sycl_t*)input_ptr, d, valid_rows_ptr)); \
+    });                                                                  \
+    break;                                                               \
   }
 
 #define VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, N)                  \
@@ -424,36 +459,47 @@ class swiglustep_and_mul_kernel {
     break;                                                            \
   }
 
-#define LAUNCH_ACTIVATION_GATE_KERNEL_VEC(KERNEL, ACT_FIRST)             \
-  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;               \
-  int d = input.size(-1) / 2;                                            \
-  int64_t num_tokens = input.numel() / input.size(-1);                   \
-  if (num_tokens == 0) {                                                 \
-    return;                                                              \
-  }                                                                      \
-  auto out_ptr = out.data_ptr<scalar_t>();                               \
-  auto input_ptr = input.data_ptr<scalar_t>();                           \
-  at::DeviceGuard device_guard(input.device());                          \
-  auto& queue = vllm::xpu::vllmGetQueue();                               \
-  int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(scalar_t)); \
-  {                                                                      \
-    int64_t tmp_wg =                                                     \
-        std::min(static_cast<int64_t>(d), static_cast<int64_t>(1024));   \
-    while (vec_size > 1 && (vec_size >> 1) * tmp_wg >= d) {              \
-      vec_size = vec_size >> 1;                                          \
-    }                                                                    \
-  }                                                                      \
-  if (d % vec_size != 0) vec_size = 1;                                   \
-  int64_t wg_size = std::min(                                            \
-      static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));   \
-  switch (vec_size) {                                                    \
-    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 1);                        \
-    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 2);                        \
-    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 4);                        \
-    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 8);                        \
-    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 16);                       \
-    default:                                                             \
-      TORCH_CHECK(false, "Unsupported vector size: ", vec_size);         \
+#define LAUNCH_ACTIVATION_GATE_KERNEL_VEC(KERNEL, ACT_FIRST)                   \
+  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;                     \
+  int d = input.size(-1) / 2;                                                  \
+  int64_t num_tokens = input.numel() / input.size(-1);                         \
+  if (num_tokens == 0) {                                                       \
+    return;                                                                    \
+  }                                                                            \
+  auto out_ptr = out.data_ptr<scalar_t>();                                     \
+  auto input_ptr = input.data_ptr<scalar_t>();                                 \
+  const int64_t* valid_rows_ptr = nullptr;                                     \
+  if (valid_rows.has_value()) {                                                \
+    TORCH_CHECK(                                                               \
+        valid_rows->scalar_type() == torch::kInt64,                            \
+        "valid_rows must be int64");                                           \
+    TORCH_CHECK(valid_rows->numel() == 1, "valid_rows must have one element"); \
+    TORCH_CHECK(                                                               \
+        valid_rows->device() == input.device(),                                \
+        "valid_rows must be on the same device as input");                     \
+    valid_rows_ptr = valid_rows->data_ptr<int64_t>();                          \
+  }                                                                            \
+  at::DeviceGuard device_guard(input.device());                                \
+  auto& queue = vllm::xpu::vllmGetQueue();                                     \
+  int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(scalar_t));       \
+  {                                                                            \
+    int64_t tmp_wg =                                                           \
+        std::min(static_cast<int64_t>(d), static_cast<int64_t>(1024));         \
+    while (vec_size > 1 && (vec_size >> 1) * tmp_wg >= d) {                    \
+      vec_size = vec_size >> 1;                                                \
+    }                                                                          \
+  }                                                                            \
+  if (d % vec_size != 0) vec_size = 1;                                         \
+  int64_t wg_size = std::min(                                                  \
+      static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));         \
+  switch (vec_size) {                                                          \
+    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 1);                              \
+    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 2);                              \
+    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 4);                              \
+    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 8);                              \
+    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 16);                             \
+    default:                                                                   \
+      TORCH_CHECK(false, "Unsupported vector size: ", vec_size);               \
   }
 
 #define LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM_VEC(KERNEL, PARAM)      \
@@ -490,8 +536,9 @@ class swiglustep_and_mul_kernel {
   }
 
 void silu_and_mul(
-    torch::Tensor& out,    // [..., d]
-    torch::Tensor& input)  // [..., 2 * d]
+    torch::Tensor& out,                       // [..., d]
+    torch::Tensor& input,                     // [..., 2 * d]
+    std::optional<torch::Tensor> valid_rows)  // optional int64 scalar
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "silu_and_mul", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL_VEC(vllm::silu_kernel, true);
@@ -569,14 +616,16 @@ void mul_and_silu(
     torch::Tensor& out,    // [..., d]
     torch::Tensor& input)  // [..., 2 * d]
 {
+  std::optional<torch::Tensor> valid_rows = std::nullopt;
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "mul_and_silu", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL_VEC(vllm::silu_kernel, false);
   });
 }
 
 void gelu_and_mul(
-    torch::Tensor& out,    // [..., d]
-    torch::Tensor& input)  // [..., 2 * d]
+    torch::Tensor& out,                       // [..., d]
+    torch::Tensor& input,                     // [..., 2 * d]
+    std::optional<torch::Tensor> valid_rows)  // optional int64 scalar
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_and_mul", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL_VEC(vllm::gelu_kernel, true);
@@ -584,8 +633,9 @@ void gelu_and_mul(
 }
 
 void gelu_tanh_and_mul(
-    torch::Tensor& out,    // [..., d]
-    torch::Tensor& input)  // [..., 2 * d]
+    torch::Tensor& out,                       // [..., d]
+    torch::Tensor& input,                     // [..., 2 * d]
+    std::optional<torch::Tensor> valid_rows)  // optional int64 scalar
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_tanh_and_mul", [&] {
     LAUNCH_ACTIVATION_GATE_KERNEL_VEC(vllm::gelu_tanh_kernel, true);
@@ -603,50 +653,74 @@ void fatrelu_and_mul(
 }
 
 // Launch element-wise activation kernel.
-#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                   \
-  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type; \
-  int d = input.size(-1);                                  \
-  int64_t num_tokens = input.numel() / input.size(-1);     \
-  sycl::range<3> grid(1, 1, num_tokens);                   \
-  sycl::range<3> block(1, 1, std::min(d, 1024));           \
-  if (num_tokens == 0) {                                   \
-    return;                                                \
-  }                                                        \
-  auto out_ptr = out.data_ptr<scalar_t>();                 \
-  auto input_ptr = input.data_ptr<scalar_t>();             \
-  at::DeviceGuard device_guard(input.device());            \
-  auto& queue = vllm::xpu::vllmGetQueue();                 \
-  queue.submit([&](sycl::handler& cgh) {                   \
-    cgh.parallel_for(                                      \
-        sycl::nd_range<3>(grid * block, block),            \
-        vllm::act_kernel<sycl_t, KERNEL>(                  \
-            (sycl_t*)out_ptr, (sycl_t*)input_ptr, d));     \
+#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                       \
+  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;                     \
+  int d = input.size(-1);                                                      \
+  int64_t num_tokens = input.numel() / input.size(-1);                         \
+  sycl::range<3> grid(1, 1, num_tokens);                                       \
+  sycl::range<3> block(1, 1, std::min(d, 1024));                               \
+  if (num_tokens == 0) {                                                       \
+    return;                                                                    \
+  }                                                                            \
+  auto out_ptr = out.data_ptr<scalar_t>();                                     \
+  auto input_ptr = input.data_ptr<scalar_t>();                                 \
+  const int64_t* valid_rows_ptr = nullptr;                                     \
+  if (valid_rows.has_value()) {                                                \
+    TORCH_CHECK(                                                               \
+        valid_rows->scalar_type() == torch::kInt64,                            \
+        "valid_rows must be int64");                                           \
+    TORCH_CHECK(valid_rows->numel() == 1, "valid_rows must have one element"); \
+    TORCH_CHECK(                                                               \
+        valid_rows->device() == input.device(),                                \
+        "valid_rows must be on the same device as input");                     \
+    valid_rows_ptr = valid_rows->data_ptr<int64_t>();                          \
+  }                                                                            \
+  at::DeviceGuard device_guard(input.device());                                \
+  auto& queue = vllm::xpu::vllmGetQueue();                                     \
+  queue.submit([&](sycl::handler& cgh) {                                       \
+    cgh.parallel_for(                                                          \
+        sycl::nd_range<3>(grid * block, block),                                \
+        vllm::act_kernel<sycl_t, KERNEL>(                                      \
+            (sycl_t*)out_ptr, (sycl_t*)input_ptr, d, valid_rows_ptr));         \
   });
 
-#define LAUNCH_SWIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                    \
-  int d = input.size(-1) / 2;                                             \
-  int64_t num_tokens = input.numel() / input.size(-1);                    \
-  sycl::range<1> grid(num_tokens);                                        \
-  sycl::range<1> block(std::min(d, 1024));                                \
-  at::DeviceGuard device_guard(input.device());                           \
-  auto& queue = vllm::xpu::vllmGetQueue();                                \
-  VLLM_DISPATCH_FLOATING_TYPES(                                           \
-      input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {       \
-        queue.submit([&](sycl::handler& cgh) {                            \
-          cgh.parallel_for(                                               \
-              sycl::nd_range<1>(grid * block, block),                     \
-              vllm::swigluoai_and_mul_kernel<scalar_t, KERNEL<scalar_t>>( \
-                  out.data_ptr<scalar_t>(),                               \
-                  input.data_ptr<scalar_t>(),                             \
-                  d,                                                      \
-                  ALPHA,                                                  \
-                  LIMIT));                                                \
-        });                                                               \
+#define LAUNCH_SWIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                         \
+  int d = input.size(-1) / 2;                                                  \
+  int64_t num_tokens = input.numel() / input.size(-1);                         \
+  sycl::range<1> grid(num_tokens);                                             \
+  sycl::range<1> block(std::min(d, 1024));                                     \
+  at::DeviceGuard device_guard(input.device());                                \
+  auto& queue = vllm::xpu::vllmGetQueue();                                     \
+  const int64_t* valid_rows_ptr = nullptr;                                     \
+  if (valid_rows.has_value()) {                                                \
+    TORCH_CHECK(                                                               \
+        valid_rows->scalar_type() == torch::kInt64,                            \
+        "valid_rows must be int64");                                           \
+    TORCH_CHECK(valid_rows->numel() == 1, "valid_rows must have one element"); \
+    TORCH_CHECK(                                                               \
+        valid_rows->device() == input.device(),                                \
+        "valid_rows must be on the same device as input");                     \
+    valid_rows_ptr = valid_rows->data_ptr<int64_t>();                          \
+  }                                                                            \
+  VLLM_DISPATCH_FLOATING_TYPES(                                                \
+      input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {            \
+        queue.submit([&](sycl::handler& cgh) {                                 \
+          cgh.parallel_for(                                                    \
+              sycl::nd_range<1>(grid * block, block),                          \
+              vllm::swigluoai_and_mul_kernel<scalar_t, KERNEL<scalar_t>>(      \
+                  out.data_ptr<scalar_t>(),                                    \
+                  input.data_ptr<scalar_t>(),                                  \
+                  d,                                                           \
+                  ALPHA,                                                       \
+                  LIMIT,                                                       \
+                  valid_rows_ptr));                                            \
+        });                                                                    \
       });
 
 void gelu_new(
-    torch::Tensor& out,    // [..., d]
-    torch::Tensor& input)  // [..., d]
+    torch::Tensor& out,                       // [..., d]
+    torch::Tensor& input,                     // [..., d]
+    std::optional<torch::Tensor> valid_rows)  // optional int64 scalar
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_new", [&] {
     LAUNCH_ACTIVATION_KERNEL(vllm::gelu_new_kernel);
@@ -654,8 +728,9 @@ void gelu_new(
 }
 
 void gelu_fast(
-    torch::Tensor& out,    // [..., d]
-    torch::Tensor& input)  // [..., d]
+    torch::Tensor& out,                       // [..., d]
+    torch::Tensor& input,                     // [..., d]
+    std::optional<torch::Tensor> valid_rows)  // optional int64 scalar
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_fast", [&] {
     LAUNCH_ACTIVATION_KERNEL(vllm::gelu_fast_kernel);
@@ -663,8 +738,9 @@ void gelu_fast(
 }
 
 void gelu_quick(
-    torch::Tensor& out,    // [..., d]
-    torch::Tensor& input)  // [..., d]
+    torch::Tensor& out,                       // [..., d]
+    torch::Tensor& input,                     // [..., d]
+    std::optional<torch::Tensor> valid_rows)  // optional int64 scalar
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_quick", [&] {
     LAUNCH_ACTIVATION_KERNEL(vllm::gelu_quick_kernel);
@@ -672,8 +748,9 @@ void gelu_quick(
 }
 
 void relu2_no_mul(
-    torch::Tensor& out,    // [..., d]
-    torch::Tensor& input)  // [..., d]
+    torch::Tensor& out,                       // [..., d]
+    torch::Tensor& input,                     // [..., d]
+    std::optional<torch::Tensor> valid_rows)  // optional int64 scalar
 {
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "relu2_no_mul", [&] {
     LAUNCH_ACTIVATION_KERNEL(vllm::relu2_no_mul_kernel);
@@ -684,33 +761,47 @@ void swigluoai_and_mul(
     torch::Tensor& out,    // [..., d]
     torch::Tensor& input,  // [..., 2 * d]
     double alpha,
-    double limit) {
+    double limit,
+    std::optional<torch::Tensor> valid_rows) {
   LAUNCH_SWIGLUOAI_AND_MUL(vllm::swigluoai_and_mul, alpha, limit);
 }
 
-#define LAUNCH_SWIGLUSTEP_AND_MUL(KERNEL, LIMIT)                           \
-  int d = input.size(-1) / 2;                                              \
-  int64_t num_tokens = input.numel() / input.size(-1);                     \
-  sycl::range<1> grid(num_tokens);                                         \
-  sycl::range<1> block(std::min(d, 1024));                                 \
-  at::DeviceGuard device_guard(input.device());                            \
-  auto& queue = vllm::xpu::vllmGetQueue();                                 \
-  VLLM_DISPATCH_FLOATING_TYPES(                                            \
-      input.scalar_type(), "swiglustep_and_mul_kernel", [&] {              \
-        queue.submit([&](sycl::handler& cgh) {                             \
-          cgh.parallel_for(                                                \
-              sycl::nd_range<1>(grid * block, block),                      \
-              vllm::swiglustep_and_mul_kernel<scalar_t, KERNEL<scalar_t>>( \
-                  out.data_ptr<scalar_t>(),                                \
-                  input.data_ptr<scalar_t>(),                              \
-                  d,                                                       \
-                  LIMIT));                                                 \
-        });                                                                \
+#define LAUNCH_SWIGLUSTEP_AND_MUL(KERNEL, LIMIT)                               \
+  int d = input.size(-1) / 2;                                                  \
+  int64_t num_tokens = input.numel() / input.size(-1);                         \
+  sycl::range<1> grid(num_tokens);                                             \
+  sycl::range<1> block(std::min(d, 1024));                                     \
+  at::DeviceGuard device_guard(input.device());                                \
+  auto& queue = vllm::xpu::vllmGetQueue();                                     \
+  const int64_t* valid_rows_ptr = nullptr;                                     \
+  if (valid_rows.has_value()) {                                                \
+    TORCH_CHECK(                                                               \
+        valid_rows->scalar_type() == torch::kInt64,                            \
+        "valid_rows must be int64");                                           \
+    TORCH_CHECK(valid_rows->numel() == 1, "valid_rows must have one element"); \
+    TORCH_CHECK(                                                               \
+        valid_rows->device() == input.device(),                                \
+        "valid_rows must be on the same device as input");                     \
+    valid_rows_ptr = valid_rows->data_ptr<int64_t>();                          \
+  }                                                                            \
+  VLLM_DISPATCH_FLOATING_TYPES(                                                \
+      input.scalar_type(), "swiglustep_and_mul_kernel", [&] {                  \
+        queue.submit([&](sycl::handler& cgh) {                                 \
+          cgh.parallel_for(                                                    \
+              sycl::nd_range<1>(grid * block, block),                          \
+              vllm::swiglustep_and_mul_kernel<scalar_t, KERNEL<scalar_t>>(     \
+                  out.data_ptr<scalar_t>(),                                    \
+                  input.data_ptr<scalar_t>(),                                  \
+                  d,                                                           \
+                  LIMIT,                                                       \
+                  valid_rows_ptr));                                            \
+        });                                                                    \
       });
 
 void swiglustep_and_mul(
     torch::Tensor& out,    // [..., d]
     torch::Tensor& input,  // [..., 2 * d]
-    double limit) {
+    double limit,
+    std::optional<torch::Tensor> valid_rows) {
   LAUNCH_SWIGLUSTEP_AND_MUL(vllm::swiglustep_and_mul, limit);
 }
