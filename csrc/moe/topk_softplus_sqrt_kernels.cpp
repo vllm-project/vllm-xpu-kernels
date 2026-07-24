@@ -158,6 +158,7 @@ struct TopkGatingSoftplusSqrtKernel {
   const float* correction_bias;
   const IndType* input_ids;
   const IndType* tid2eid;
+  const bool* is_padding;
 
   [[sycl::reqd_sub_group_size(WARP_SIZE_PARAM)]]
   void operator()(sycl::nd_item<3> item) const {
@@ -218,6 +219,7 @@ struct TopkGatingSoftplusSqrtKernel {
       return;
     }
     const bool row_is_active = finished ? !finished[thread_row] : true;
+    const bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
 
     const InputType* thread_row_ptr = input + thread_row * ELTS_PER_ROW;
 
@@ -245,25 +247,27 @@ struct TopkGatingSoftplusSqrtKernel {
         const int idx = k * thread_row + k_idx;
 
         float selected_weight_lane = 0.f;
+        if (!is_pad_row) {
 #pragma unroll
-        for (int ii = 0; ii < VPT; ++ii) {
-          const int group_id = ii / ELTS_PER_LDG;
-          const int local_id = ii % ELTS_PER_LDG;
-          const int expert_idx = first_elt_read_by_thread +
-                                 group_id * THREADS_PER_ROW * ELTS_PER_LDG +
-                                 local_id;
-          if (expert == expert_idx) {
-            float val = row_chunk[ii];
-            float val_b = val * beta;
-            val = (val_b > threshold)
-                      ? val
-                      : (sycl::log(1.0f + sycl::exp(val_b))) / beta;
-            val = sycl::sqrt(val);
-            if (sycl::isnan(val) || sycl::isinf(val)) {
-              val = 0.f;
+          for (int ii = 0; ii < VPT; ++ii) {
+            const int group_id = ii / ELTS_PER_LDG;
+            const int local_id = ii % ELTS_PER_LDG;
+            const int expert_idx = first_elt_read_by_thread +
+                                   group_id * THREADS_PER_ROW * ELTS_PER_LDG +
+                                   local_id;
+            if (expert == expert_idx) {
+              float val = row_chunk[ii];
+              float val_b = val * beta;
+              val = (val_b > threshold)
+                        ? val
+                        : (sycl::log(1.0f + sycl::exp(val_b))) / beta;
+              val = sycl::sqrt(val);
+              if (sycl::isnan(val) || sycl::isinf(val)) {
+                val = 0.f;
+              }
+              selected_weight_lane = val;
+              break;
             }
-            selected_weight_lane = val;
-            break;
           }
         }
 
@@ -276,10 +280,12 @@ struct TopkGatingSoftplusSqrtKernel {
           const bool should_process_row = row_is_active && node_uses_expert;
 
           output[idx] = selected_weight;
-          indices[idx] =
-              should_process_row ? (expert - start_expert) : NUM_EXPERTS;
+          indices[idx] = is_pad_row
+                             ? static_cast<IndType>(-1)
+                             : (should_process_row ? (expert - start_expert)
+                                                   : NUM_EXPERTS);
           source_rows[idx] = k_idx * num_rows + thread_row;
-          if (renormalize) {
+          if (renormalize && !is_pad_row) {
             selected_sum += selected_weight;
           }
         }
@@ -302,18 +308,24 @@ struct TopkGatingSoftplusSqrtKernel {
 
 #pragma unroll
     for (int ii = 0; ii < VPT; ++ii) {
-      float val = row_chunk[ii];
-      float val_b = val * beta;
-      val = (val_b > threshold) ? val
-                                : (sycl::log(1.0f + sycl::exp(val_b))) / beta;
-      val = sycl::sqrt(val);
-      if (correction_bias) {
-        const int group_id = ii / ELTS_PER_LDG;
-        const int local_id = ii % ELTS_PER_LDG;
-        const int expert_idx = first_elt_read_by_thread +
-                               group_id * THREADS_PER_ROW * ELTS_PER_LDG +
-                               local_id;
-        val = val + correction_bias[expert_idx];
+      float val = 0.f;
+      if (!is_pad_row) {
+        val = row_chunk[ii];
+        float val_b = val * beta;
+        val = (val_b > threshold) ? val
+                                  : (sycl::log(1.0f + sycl::exp(val_b))) / beta;
+        val = sycl::sqrt(val);
+        if (sycl::isnan(val) || sycl::isinf(val)) {
+          val = 0.f;
+        }
+        if (correction_bias) {
+          const int group_id = ii / ELTS_PER_LDG;
+          const int local_id = ii % ELTS_PER_LDG;
+          const int expert_idx = first_elt_read_by_thread +
+                                 group_id * THREADS_PER_ROW * ELTS_PER_LDG +
+                                 local_id;
+          val = val + correction_bias[expert_idx];
+        }
       }
       row_chunk[ii] = val;
     }
@@ -361,9 +373,11 @@ struct TopkGatingSoftplusSqrtKernel {
         }
         output[idx] = max_val;
         indices[idx] =
-            should_process_row ? (expert - start_expert) : NUM_EXPERTS;
+            is_pad_row
+                ? static_cast<IndType>(-1)
+                : (should_process_row ? (expert - start_expert) : NUM_EXPERTS);
         source_rows[idx] = k_idx * num_rows + thread_row;
-        if (renormalize) {
+        if (renormalize && !is_pad_row) {
           selected_sum += max_val;
         }
       }
@@ -447,6 +461,7 @@ void topkGatingSoftplusSqrtLauncherHelper(
     const bool use_hash,
     const IndType* input_ids,
     const IndType* tid2eid,
+    const bool* is_padding,
     sycl::queue& q) {
   static constexpr int BYTES_PER_LDG =
       MIN(MAX_BYTES_PER_LDG, sizeof(InputType) * EXPERTS);
@@ -486,7 +501,8 @@ void topkGatingSoftplusSqrtLauncherHelper(
         routed_scaling_factor,
         correction_bias,
         input_ids,
-        tid2eid};
+        tid2eid,
+        is_padding};
     q.parallel_for(ndr, k_obj);
   })
 }
@@ -512,6 +528,7 @@ void topkGatingSoftplusSqrtLauncherHelper(
       use_hash,                                                    \
       input_ids,                                                   \
       tid2eid,                                                     \
+      is_padding,                                                  \
       q);
 
 template <typename IndType, typename InputType>
@@ -529,6 +546,7 @@ void topkGatingSoftplusSqrtKernelLauncher(
     const bool use_hash,
     const IndType* input_ids,
     const IndType* tid2eid,
+    const bool* is_padding,
     sycl::queue& q) {
   static constexpr int WARPS_PER_TB = 4;
   static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
@@ -606,6 +624,7 @@ void dispatch_topk_softplus_sqrt_launch(
     const c10::optional<torch::Tensor>& correction_bias,
     const c10::optional<torch::Tensor>& input_ids,
     const c10::optional<torch::Tensor>& tid2eid,
+    const c10::optional<torch::Tensor>& is_padding,
     sycl::queue& q) {
   const float* bias_ptr = nullptr;
   if (correction_bias.has_value()) {
@@ -628,6 +647,22 @@ void dispatch_topk_softplus_sqrt_launch(
         "tid2eid dtype must match topk_indices dtype");
     use_hash = true;
   }
+  const bool* is_padding_ptr = nullptr;
+  if (is_padding.has_value()) {
+    const torch::Tensor& is_padding_tensor = is_padding.value();
+    TORCH_CHECK(
+        is_padding_tensor.scalar_type() == at::ScalarType::Bool,
+        "is_padding tensor must be bool");
+    TORCH_CHECK(is_padding_tensor.dim() == 1, "is_padding tensor must be 1D");
+    TORCH_CHECK(
+        is_padding_tensor.size(0) == num_tokens,
+        "is_padding size mismatch, expected: ",
+        num_tokens);
+    TORCH_CHECK(
+        is_padding_tensor.is_contiguous(),
+        "is_padding tensor must be contiguous");
+    is_padding_ptr = is_padding_tensor.data_ptr<bool>();
+  }
   if (topk_indices.scalar_type() == at::ScalarType::Int) {
     const int* input_ids_ptr = nullptr;
     const int* tid2eid_ptr = nullptr;
@@ -649,6 +684,7 @@ void dispatch_topk_softplus_sqrt_launch(
         use_hash,
         input_ids_ptr,
         tid2eid_ptr,
+        is_padding_ptr,
         q);
   } else if (topk_indices.scalar_type() == at::ScalarType::UInt32) {
     const uint32_t* input_ids_ptr = nullptr;
@@ -671,6 +707,7 @@ void dispatch_topk_softplus_sqrt_launch(
         use_hash,
         input_ids_ptr,
         tid2eid_ptr,
+        is_padding_ptr,
         q);
   } else {
     TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
@@ -694,6 +731,7 @@ void dispatch_topk_softplus_sqrt_launch(
         use_hash,
         input_ids_ptr,
         tid2eid_ptr,
+        is_padding_ptr,
         q);
   }
 }
@@ -707,7 +745,8 @@ void topk_softplus_sqrt(
     double routed_scaling_factor,
     const c10::optional<torch::Tensor>& correction_bias,
     const c10::optional<torch::Tensor>& input_ids,
-    const c10::optional<torch::Tensor>& tid2eid) {
+    const c10::optional<torch::Tensor>& tid2eid,
+    const c10::optional<torch::Tensor>& is_padding) {
   const int num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
   const int topk = topk_weights.size(-1);
@@ -732,6 +771,7 @@ void topk_softplus_sqrt(
         correction_bias,
         input_ids,
         tid2eid,
+        is_padding,
         q);
   } else if (gating_output.scalar_type() == at::ScalarType::Half) {
     dispatch_topk_softplus_sqrt_launch<half_t>(
@@ -747,6 +787,7 @@ void topk_softplus_sqrt(
         correction_bias,
         input_ids,
         tid2eid,
+        is_padding,
         q);
   } else if (gating_output.scalar_type() == at::ScalarType::BFloat16) {
     dispatch_topk_softplus_sqrt_launch<bfloat16_t>(
@@ -763,6 +804,7 @@ void topk_softplus_sqrt(
         correction_bias,
         input_ids,
         tid2eid,
+        is_padding,
         q);
   } else {
     TORCH_CHECK(

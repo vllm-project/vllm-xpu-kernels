@@ -59,20 +59,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
-      "bias) -> ()");
+      "bias, Tensor? is_padding) -> ()");
   m.impl("topk_softmax", torch::kXPU, &topk_softmax);
   // Apply topk sigmoid to the gating outputs.
   m.def(
       "topk_sigmoid(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, "
-      "Tensor? bias, float routed_scaling_factor) -> ()");
+      "Tensor? bias, float routed_scaling_factor, Tensor? is_padding) -> ()");
   m.impl("topk_sigmoid", torch::kXPU, &topk_sigmoid);
   // Apply topk softplus sqrt to the gating outputs.
   m.def(
       "topk_softplus_sqrt(Tensor! topk_weights, Tensor! topk_indices, "
       "Tensor! token_expert_indices, Tensor gating_output, bool renormalize, "
       "float routed_scaling_factor, Tensor? correction_bias=None, Tensor? "
-      "input_ids=None, Tensor? tid2eid=None) -> ()");
+      "input_ids=None, Tensor? tid2eid=None, Tensor? is_padding=None) -> ()");
   m.impl("topk_softplus_sqrt", torch::kXPU, &topk_softplus_sqrt);
   // Apply topk softmax to the gating outputs.
   m.def(

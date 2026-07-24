@@ -55,7 +55,8 @@ void topk_softmax(
     torch::Tensor& token_expert_indices,
     torch::Tensor& gating_output,
     const bool renormalize,
-    std::optional<torch::Tensor> bias);
+    std::optional<torch::Tensor> bias,
+    std::optional<torch::Tensor> is_padding);
 
 void topk_sigmoid(
     torch::Tensor& topk_weights,
@@ -64,7 +65,8 @@ void topk_sigmoid(
     torch::Tensor& gating_output,
     const bool renormalize,
     std::optional<torch::Tensor> bias,
-    double routed_scaling_factor);
+    double routed_scaling_factor,
+    std::optional<torch::Tensor> is_padding);
 
 void topk_softplus_sqrt(
     torch::Tensor& topk_weights,
@@ -75,7 +77,8 @@ void topk_softplus_sqrt(
     double routed_scaling_factor,
     const c10::optional<torch::Tensor>& correction_bias,
     const c10::optional<torch::Tensor>& input_ids,
-    const c10::optional<torch::Tensor>& tid2eid);
+    const c10::optional<torch::Tensor>& tid2eid,
+    const c10::optional<torch::Tensor>& is_padding);
 
 void moe_gather(
     torch::Tensor& output,

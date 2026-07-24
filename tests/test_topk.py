@@ -59,6 +59,75 @@ def test_fused_topk_softmax(n_token: int, n_hidden: int, n_expert: int,
                                rtol=0)
 
 
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+@pytest.mark.parametrize("has_bias", [True, False])
+@pytest.mark.parametrize("dtype",
+                         [torch.float16, torch.bfloat16, torch.float32],
+                         ids=format_tc)
+def test_fused_topk_padding(scoring_func: str, has_bias: bool,
+                            dtype: torch.dtype):
+    seed_everything(0)
+    n_token = 8
+    n_hidden = 1024
+    n_expert = 128
+    topk = 4
+    hidden_states = torch.randn((n_token, n_hidden), dtype=dtype, device="xpu")
+    gating_output = torch.randn((n_token, n_expert), dtype=dtype, device="xpu")
+    bias = None
+    if has_bias:
+        bias = torch.randn((n_expert, ), dtype=torch.float32, device="xpu")
+    is_padding = torch.zeros(n_token, dtype=torch.bool, device="xpu")
+    is_padding[1::2] = True
+
+    if scoring_func == "softmax":
+        baseline_topk_weights, baseline_topk_ids = topk_softmax(
+            hidden_states=hidden_states,
+            gating_output=gating_output,
+            topk=topk,
+            renormalize=True,
+            bias=bias,
+            is_padding=is_padding)
+        test_topk_weights, test_topk_ids = fused_topk_softmax(
+            hidden_states=hidden_states,
+            gating_output=gating_output,
+            topk=topk,
+            renormalize=True,
+            bias=bias,
+            is_padding=is_padding)
+    else:
+        baseline_topk_weights, baseline_topk_ids = topk_sigmoid(
+            hidden_states=hidden_states,
+            gating_output=gating_output,
+            topk=topk,
+            renormalize=True,
+            bias=bias,
+            is_padding=is_padding)
+        test_topk_weights, test_topk_ids = fused_topk_sigmoid(
+            hidden_states=hidden_states,
+            gating_output=gating_output,
+            topk=topk,
+            renormalize=True,
+            bias=bias,
+            is_padding=is_padding)
+
+    torch.testing.assert_close(test_topk_ids[is_padding],
+                               torch.full_like(test_topk_ids[is_padding], -1),
+                               atol=0,
+                               rtol=0)
+    torch.testing.assert_close(test_topk_weights[is_padding],
+                               torch.zeros_like(test_topk_weights[is_padding]),
+                               atol=0,
+                               rtol=0)
+    torch.testing.assert_close(baseline_topk_weights[~is_padding],
+                               test_topk_weights[~is_padding],
+                               atol=2e-2,
+                               rtol=0)
+    torch.testing.assert_close(baseline_topk_ids,
+                               test_topk_ids,
+                               atol=0,
+                               rtol=0)
+
+
 @pytest.mark.parametrize("n_token", [1, 33, 64])
 @pytest.mark.parametrize("n_hidden", [1024])
 @pytest.mark.parametrize("n_expert", [16, 192, 512, 1024])
