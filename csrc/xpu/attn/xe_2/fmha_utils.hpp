@@ -79,6 +79,23 @@ struct chunk_policy_head192 {
   using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };
 
+// Asymmetric variant: QK head_size=192 but V/O head_size=128 (e.g. MiMo).
+// Output/PV tile width follows V (128) instead of QK (192), so the PV GEMM
+// loops VTiles=128/64=2 and the V 2D block load matches the real 128-wide V
+// surface (no out-of-bounds clamp). QK tiling is unchanged.
+// Tuned (sweep on BMG B60, verify Passed): SG=16 (vs symmetric-192's 32) +
+// V-step=64 (vs 32). SG=16 is the big lever: it lifts small/mid MFU sharply
+// (B8S1024 32->44%, B1S256 16->22%) by giving each subgroup more Q rows and
+// improving occupancy/reuse. V-step=64 recovers the long-seq case that SG=16
+// alone would regress. SG=16 alone regresses B1S8192 (register pressure over
+// the long KV loop); V-step=64 mitigates it. Net: wins 6/7 shapes.
+struct chunk_policy_head192_vo128 {
+  using ShapeQK = Shape<_256, _32, _32>;
+  using ShapePV = Shape<_256, _64, _32>;
+  using ShapeOut = Shape<_256, _128>;
+  using SubgroupLayoutQK = Layout<Shape<_16, _1, _1>>;
+};
+
 struct chunk_policy_head256 {
   using ShapeQK = Shape<_256, _32, _32>;
   using ShapePV = Shape<_256, _32, _32>;
@@ -121,6 +138,14 @@ struct chunk_policy_head192_b16 {
   using ShapeQK = Shape<_256, _16, _32>;
   using ShapePV = Shape<_256, _32, _16>;
   using ShapeOut = Shape<_256, _192>;
+  using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
+};
+
+// Asymmetric variant (QK=192, V/O=128) for paged block_size=16 path.
+struct chunk_policy_head192_vo128_b16 {
+  using ShapeQK = Shape<_256, _16, _32>;
+  using ShapePV = Shape<_256, _32, _16>;
+  using ShapeOut = Shape<_256, _128>;
   using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };
 

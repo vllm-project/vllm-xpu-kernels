@@ -371,6 +371,96 @@ def test_reshape_and_cache_flash(
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
 
 
+@torch.inference_mode()
+def test_asym_reshape_and_cache() -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    seed_everything(0)
+
+    num_tokens = 17
+    num_heads = 2
+    qk_head_size = 192
+    v_head_size = 128
+    block_size = 8
+    num_blocks = 4
+    dtype = torch.float16
+    kv_cache_dtype = "auto"
+    x = 16 // torch.tensor([], dtype=dtype).element_size()
+
+    key = torch.randn(num_tokens, num_heads, qk_head_size, dtype=dtype)
+    value = torch.randn(num_tokens, num_heads, v_head_size, dtype=dtype)
+    key_cache = torch.randn(num_blocks, num_heads, qk_head_size // x,
+                            block_size, x, dtype=dtype)
+    value_cache = torch.randn(num_blocks, num_heads, v_head_size, block_size,
+                              dtype=dtype)
+    cloned_key_cache = key_cache.clone()
+    cloned_value_cache = value_cache.clone()
+
+    slot_mapping = torch.randperm(num_blocks * block_size,
+                                  dtype=torch.long)[:num_tokens]
+    k_scale = torch.tensor(1.0, dtype=torch.float32)
+    v_scale = torch.tensor(1.0, dtype=torch.float32)
+
+    reshape_and_cache(key, value, key_cache, value_cache, slot_mapping,
+                      kv_cache_dtype, k_scale, v_scale)
+
+    reshaped_key = key.reshape(num_tokens, num_heads, qk_head_size // x, x)
+    block_indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    block_offsets = slot_mapping % block_size
+    for i in range(num_tokens):
+        block_idx = block_indices[i].item()
+        block_offset = block_offsets[i].item()
+        cloned_key_cache[block_idx, :, :, block_offset, :] = reshaped_key[i]
+        cloned_value_cache[block_idx, :, :, block_offset] = value[i]
+
+    torch.testing.assert_close(key_cache, cloned_key_cache)
+    torch.testing.assert_close(value_cache, cloned_value_cache)
+
+
+@torch.inference_mode()
+def test_asym_reshape_and_cache_flash() -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    seed_everything(1)
+
+    num_tokens = 17
+    num_heads = 2
+    qk_head_size = 192
+    v_head_size = 128
+    block_size = 8
+    num_blocks = 4
+    dtype = torch.float16
+    kv_cache_dtype = "auto"
+
+    key = torch.randn(num_tokens, num_heads, qk_head_size, dtype=dtype)
+    value = torch.randn(num_tokens, num_heads, v_head_size, dtype=dtype)
+    key_cache = torch.randn(num_blocks, block_size, num_heads, qk_head_size,
+                            dtype=dtype)
+    value_cache = torch.randn(num_blocks, block_size, num_heads, v_head_size,
+                              dtype=dtype)
+    cloned_key_cache = key_cache.clone()
+    cloned_value_cache = value_cache.clone()
+
+    slot_mapping = torch.randperm(num_blocks * block_size,
+                                  dtype=torch.long)[:num_tokens]
+    k_scale = torch.tensor(1.0, dtype=torch.float32)
+    v_scale = torch.tensor(1.0, dtype=torch.float32)
+
+    reshape_and_cache_flash(key, value, key_cache, value_cache, slot_mapping,
+                            kv_cache_dtype, k_scale, v_scale)
+
+    block_indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    block_offsets = slot_mapping % block_size
+    for i in range(num_tokens):
+        block_idx = block_indices[i].item()
+        block_offset = block_offsets[i].item()
+        cloned_key_cache[block_idx, block_offset, :, :] = key[i]
+        cloned_value_cache[block_idx, block_offset, :, :] = value[i]
+
+    torch.testing.assert_close(key_cache, cloned_key_cache)
+    torch.testing.assert_close(value_cache, cloned_value_cache)
+
+
 def _create_mla_cache(
     num_blocks: int,
     block_size: int,
