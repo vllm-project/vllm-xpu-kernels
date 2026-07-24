@@ -11,7 +11,7 @@ from tests.utils import format_tc
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 NUM_HEADS = [(8, 2)]
-HEAD_SIZES = [64, 128, 256, 512]
+HEAD_SIZES = [64, 80, 128, 256, 512]
 BLOCK_SIZES = [16, 64, 512]
 DTYPES = [torch.half, torch.bfloat16]
 QDTYPES = [None]
@@ -382,6 +382,78 @@ def test_varlen_with_paged_kv(
         atol, rtol = 1.5e-2, 1.5e-2
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
+    torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("causal", [False, True])
+@torch.inference_mode()
+def test_varlen_with_paged_kv_head_size_72(block_size: int,
+                                           causal: bool) -> None:
+    """Validate head_size=72 through the padded head80 chunk policies."""
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(2026)
+
+    seq_lens = [(1, 257), (3, 129), (5, 65)]
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = (8, 2)
+    head_size = 72
+    dtype = torch.bfloat16
+    num_blocks = 256
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (len(seq_lens), max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    output = flash_attn_varlen_func(query,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=causal,
+                                    block_table=block_tables,
+                                    window_size=(-1, -1),
+                                    s_aux=None)
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=causal,
+                                is_paged=True,
+                                sink=None,
+                                window_size_left=-1,
+                                window_size_right=-1,
+                                dtype=dtype)
+
+    max_diff = torch.max(torch.abs(output.float() - ref_output.float()))
+    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2,
+                               msg=f"max abs diff: {max_diff}")
     torch.xpu.empty_cache()
 
 
