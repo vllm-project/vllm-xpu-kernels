@@ -383,12 +383,18 @@ class concat_and_cache_mla_kernel {
         const int src_idx = token_idx * src_stride + i;
         const int dst_idx =
             block_idx * block_stride + block_offset * entry_stride + i + offset;
-        if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
-          dst[dst_idx] = static_cast<at::Float8_e4m3fn>(src[src_idx] * *scale);
-        } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
-          dst[dst_idx] = static_cast<at::Float8_e5m2>(src[src_idx] * *scale);
-        } else {
+        if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
           dst[dst_idx] = src[src_idx];
+        } else {
+          using fp8_dtype = std::conditional_t<
+              kv_dt == Fp8KVCacheDataType::kFp8E5M2,
+              at::Float8_e5m2,
+              at::Float8_e4m3fn>;
+          const float fp8_max = vllm::fp8::quant_type_max_v<fp8_dtype>;
+          float x = static_cast<float>(src[src_idx]) / *scale;
+          x = sycl::fmax(-fp8_max, sycl::fmin(x, fp8_max));
+          auto fp8_val = static_cast<fp8_dtype>(x);
+          dst[dst_idx] = sycl::bit_cast<cache_t>(fp8_val);
         }
       }
     };
