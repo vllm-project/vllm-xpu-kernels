@@ -161,7 +161,9 @@ void cutlass_chunk_prefill_impl(
   // Populate softmax_lse output pointer if requested
   if (softmax_lse.has_value()) {
     args.softmax_lse = softmax_lse.value().data_ptr<float>();
-    args.lse_stride = num_heads_q;
+    // softmax_lse is allocated as (num_heads_q, total_seqlen_q); stride
+    // along the query-row dimension is total_seqlen_q.
+    args.lse_stride = total_seqlen_q;
   }
   // Per-batch prefill/decode mask (nullptr -> process all batches)
   args.is_prefill =

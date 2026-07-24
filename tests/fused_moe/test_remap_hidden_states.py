@@ -15,6 +15,7 @@ TOP_KS = [1, 8]
 RECIPE_TO_DTYPE = {
     "bf16": (torch.bfloat16, None),
     "fp16": (torch.float16, None),
+    "fp8": (torch.float8_e4m3fn, None),
     "mxfp8": (torch.float8_e4m3fn, torch.float8_e8m0fnu),
     "fp8block": (torch.float8_e4m3fn, torch.float32),
     "mxfp4": (torch.float4_e2m1fn_x2, torch.float8_e8m0fnu),
@@ -89,7 +90,7 @@ def ref_remap_hidden_states(hidden_states, scales, remapped_hidden_states,
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("has_expert_map", [True, False])
 @pytest.mark.parametrize("recipe",
-                         ["bf16", "fp16", "mxfp8", "mxfp4", "fp8block"])
+                         ["bf16", "fp16", "fp8", "mxfp8", "mxfp4", "fp8block"])
 def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
                              has_expert_map, recipe):
     seed_everything(7)
@@ -123,6 +124,8 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
                                    device=DEVICE,
                                    dtype=torch.uint8).view(
                                        torch.float8_e8m0fnu)
+        elif recipe == "fp8":
+            scales = None
     elif data_dtype is torch.float4_e2m1fn_x2:
         block_k = 16  # two input elem in a 8bit
         hidden_states_fp32 = torch.randn((num_rows, hidden_size // 2),

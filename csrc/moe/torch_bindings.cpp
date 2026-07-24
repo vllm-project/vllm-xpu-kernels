@@ -4,7 +4,9 @@
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Calculate the result of moe by summing up the partial results
   // from all selected experts.
-  m.def("moe_sum(Tensor input, Tensor! output) -> ()");
+  m.def(
+      "moe_sum(Tensor input, Tensor! output, Tensor? topk_ids, "
+      "Tensor? expert_map) -> ()");
   m.impl("moe_sum", torch::kXPU, &moe_sum);
 
   // Aligning the number of tokens to be processed by each expert such
@@ -78,16 +80,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor unpermuted_row_to_permuted_row, "
       "int num_experts) -> ()");
   m.impl("moe_gather", torch::kXPU, &moe_gather);
-  m.def(
-      "fused_moe_prologue(Tensor input, Tensor? input_scales, Tensor "
-      "token_selected_experts, "
-      "Tensor "
-      "token_final_scales, Tensor workspace, int hidden_size, int inter_size, "
-      "int block_k, "
-      "int ep_rank, int ep_size,"
-      "int num_experts_on_rank) -> "
-      "()");
-  m.impl("fused_moe_prologue", torch::kXPU, &fused_moe_prologue);
   m.def(
       "init_expert_map(Tensor expert_map,"
       "int num_experts, "

@@ -437,8 +437,13 @@ def fp8_gemm_w8a16(input: torch.Tensor, weight: torch.Tensor,
 
 
 # moe
-def moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
-    torch.ops._moe_C.moe_sum(input, output)
+def moe_sum(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    topk_ids: Optional[torch.Tensor] = None,
+    expert_map: Optional[torch.Tensor] = None,
+) -> None:
+    torch.ops._moe_C.moe_sum(input, output, topk_ids, expert_map)
 
 
 def moe_lora_align_block_size(

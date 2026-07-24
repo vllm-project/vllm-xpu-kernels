@@ -18,7 +18,7 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("n_token", [1, 33, 64])
 @pytest.mark.parametrize("n_hidden", [1024])
 @pytest.mark.parametrize("n_expert", [16, 192, 512, 1024])
-@pytest.mark.parametrize("topk", [2, 4, 8])
+@pytest.mark.parametrize("topk", [2, 4, 5, 8])
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("has_bias", [True, False])
 @pytest.mark.parametrize("dtype",
@@ -62,7 +62,7 @@ def test_fused_topk_softmax(n_token: int, n_hidden: int, n_expert: int,
 @pytest.mark.parametrize("n_token", [1, 33, 64])
 @pytest.mark.parametrize("n_hidden", [1024])
 @pytest.mark.parametrize("n_expert", [16, 192, 512, 1024])
-@pytest.mark.parametrize("topk", [2, 4, 8])
+@pytest.mark.parametrize("topk", [2, 4, 5, 8])
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("has_bias", [True, False])
 @pytest.mark.parametrize("routed_scaling_factor", [1.0, 2.5])

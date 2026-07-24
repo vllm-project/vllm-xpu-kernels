@@ -871,7 +871,7 @@ def ref_softmax_lse(
         lse[q, h] = log( sum_k exp(scale * (Q[q, h] . K[k, h])) )
     with optional causal masking. Kernel restricts LSE to
     Paged=False, Local=False, Sink=False, so this ref mirrors the same.
-    Returns a tensor of shape [sum(query_lens), num_query_heads] in float32.
+    Returns a tensor of shape [num_query_heads, sum(query_lens)] in float32.
     """
     num_query_heads = query.shape[1]
     lse_list: list[torch.Tensor] = []
@@ -891,13 +891,13 @@ def ref_softmax_lse(
                 diagonal=kv_len - query_len + 1,
             ).bool()
             attn.masked_fill_(mask, float("-inf"))
-        # logsumexp over kv dim, then transpose to [query_len, heads]
-        lse = torch.logsumexp(attn, dim=-1).transpose(0, 1).contiguous()
-        assert lse.shape == (query_len, num_query_heads)
+        # logsumexp over kv dim -> [heads, query_len]
+        lse = torch.logsumexp(attn, dim=-1)
+        assert lse.shape == (num_query_heads, query_len)
         lse_list.append(lse)
         start_q += query_len
         start_kv += kv_len
-    return torch.cat(lse_list, dim=0)
+    return torch.cat(lse_list, dim=1)
 
 
 # softmax_lse return is only supported when:
@@ -974,9 +974,9 @@ def test_varlen_with_softmax_lse(
                                               window_size=(-1, -1),
                                               return_softmax_lse=True)
 
-    # Output shape matches ref, and LSE shape is [total_seqlen_q, num_heads_q]
+    # Output shape matches ref, and LSE shape is [num_heads_q, total_seqlen_q]
     total_q = sum(query_lens)
-    assert softmax_lse.shape == (total_q, num_query_heads), softmax_lse.shape
+    assert softmax_lse.shape == (num_query_heads, total_q), softmax_lse.shape
     assert softmax_lse.dtype == torch.float32
 
     # Reference output (reuses the existing helper).
