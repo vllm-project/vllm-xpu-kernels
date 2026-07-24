@@ -20,7 +20,7 @@ from benchmark.src.get_model_config import (gen_cutlass_fused_moe_perf_configs
 from tests.fused_moe.test_fused_moe import ref_fused_moe
 from tests.ops.fp8_quant_op import scaled_fp8_quant
 from tests.utils import parse_args, seed_everything
-from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
+from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 # isort: on
 
 DEVICE = "xpu"
@@ -135,19 +135,20 @@ def calculate_diff(config):
                             flat_expert_weights, flat_expert_indices, topk,
                             "silu", e)
 
-    output = xpu_fused_moe(hidden_states=a,
-                           w13=w13,
-                           w13_scales=w13_scales,
-                           w13_bias=w13_bias,
-                           w2=w2,
-                           w2_scales=w2_scales,
-                           w2_bias=w2_bias,
-                           topk_weights=expert_scores,
-                           topk_ids=expert_indices,
-                           n_experts_per_token=topk,
-                           activation="silu",
-                           num_experts=e,
-                           is_fp8=(w_dtype is not None))
+    moe = XpuFusedMoe(w13=w13,
+                      w13_scales=w13_scales,
+                      w13_bias=w13_bias,
+                      w2=w2,
+                      w2_scales=w2_scales,
+                      w2_bias=w2_bias,
+                      n_experts_per_token=topk,
+                      activation="silu",
+                      num_experts=e)
+    output = torch.empty_like(a)
+    moe.apply(output=output,
+              hidden_states=a,
+              topk_weights=expert_scores,
+              topk_ids=expert_indices)
     if x_dtype == torch.float16:
         rtol = 1e-2
         atol = 1e-2
@@ -221,37 +222,29 @@ def get_benchmark(iterations):
                             topk, x_dtype, w_dtype, has_bias))
 
         if provider == "vllm":
+            moe = XpuFusedMoe(w13=w13,
+                              w13_scales=w13_scales,
+                              w13_bias=w13_bias,
+                              w2=w2,
+                              w2_scales=w2_scales,
+                              w2_bias=w2_bias,
+                              n_experts_per_token=topk,
+                              activation="silu",
+                              num_experts=num_experts)
+            output = torch.empty_like(a)
             start_event = torch.xpu.Event(enable_timing=True)
             end_event = torch.xpu.Event(enable_timing=True)
             for index in range(5):
-                xpu_fused_moe(hidden_states=a,
-                              w13=w13,
-                              w13_scales=w13_scales,
-                              w13_bias=w13_bias,
-                              w2=w2,
-                              w2_scales=w2_scales,
-                              w2_bias=w2_bias,
-                              topk_weights=expert_scores,
-                              topk_ids=expert_indices,
-                              n_experts_per_token=topk,
-                              activation="silu",
-                              num_experts=num_experts,
-                              is_fp8=(w_dtype is not None))
+                moe.apply(output=output,
+                          hidden_states=a,
+                          topk_weights=expert_scores,
+                          topk_ids=expert_indices)
             start_event.record()
             for index in range(5, iterations):
-                xpu_fused_moe(hidden_states=a,
-                              w13=w13,
-                              w13_scales=w13_scales,
-                              w13_bias=w13_bias,
-                              w2=w2,
-                              w2_scales=w2_scales,
-                              w2_bias=w2_bias,
-                              topk_weights=expert_scores,
-                              topk_ids=expert_indices,
-                              n_experts_per_token=topk,
-                              activation="silu",
-                              num_experts=num_experts,
-                              is_fp8=(w_dtype is not None))
+                moe.apply(output=output,
+                          hidden_states=a,
+                          topk_weights=expert_scores,
+                          topk_ids=expert_indices)
             end_event.record()
             torch.xpu.synchronize()
             total_latency = start_event.elapsed_time(end_event)
