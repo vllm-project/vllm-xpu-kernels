@@ -307,6 +307,25 @@ torch::Tensor fp8_paged_mqa_logits(
 
 std::string get_onednn_version();
 
+void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
+    torch::Tensor state_cache,
+    torch::Tensor token_to_req_indices,
+    torch::Tensor positions,
+    torch::Tensor slot_mapping,
+    torch::Tensor block_table,
+    int64_t block_size,
+    int64_t state_width,
+    torch::Tensor rms_norm_weight,
+    double rms_norm_eps,
+    torch::Tensor cos_sin_cache,
+    torch::Tensor kv_cache,
+    torch::Tensor kv_slot_mapping,
+    int64_t kv_cache_block_size,
+    int64_t head_dim,
+    int64_t rope_head_dim,
+    int64_t compress_ratio,
+    int64_t overlap,
+    int64_t quant_block);
 void deepseek_fused_indexer_q_rope_fp8(
     const torch::Tensor& q,
     const torch::Tensor& positions,
