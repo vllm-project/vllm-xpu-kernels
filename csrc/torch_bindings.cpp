@@ -200,6 +200,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> ()");
   ops.impl("swiglustep_and_mul", torch::kXPU, &swiglustep_and_mul);
 
+  // SwiGLU (SiLU gate) with input clamping.
+  // out = silu(gate.clamp(max=limit)) * (up.clamp(+-limit) + beta), where
+  // silu(g) = g * sigmoid(alpha * g). alpha=1.0, beta=0.0 give silu(gate)*up.
+  ops.def(
+      "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit, "
+      "float alpha=1.0, float beta=0.0) -> ()");
+  ops.impl("silu_and_mul_with_clamp", torch::kXPU, &silu_and_mul_with_clamp);
+
   ops.def(
       "get_xpu_view_from_cpu_tensor(Tensor cpu_tensor) -> "
       "Tensor");
