@@ -364,6 +364,13 @@ std::vector<at::Tensor> mha_varlen_fwd(
     }
 
     // Output shape uses V's head_dim (may differ from Q/K for MLA)
+    //
+    // XPUGraph / piecewise capture invariant: q/k/v/out shapes and the
+    // effective num_kv_splits must be fixed for the captured graph. Prefer
+    // a caller-provided `out_` and an explicit `num_splits` so workspace
+    // tensors (tmp_out / max_logits / exp_sums) have stable sizes. The
+    // Python wrapper refuses capture when `out` is None
+    // (VLLM_XPU_ATTN_CAPTURE_STRICT semantics).
     if (!out_.has_value()) {
       out = torch::empty(
           {num_tokens, num_heads_q, v_head_dim},
