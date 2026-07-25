@@ -24,28 +24,46 @@ def merge_attn_states_torch(
         suffix_output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
         suffix_lse: torch.Tensor,  # [NUM_HEADS, NUM_TOKENS]
         output_lse: torch.Tensor | None = None,  # [NUM_HEADS, NUM_TOKENS]
+        prefill_tokens_with_context: int | None = None,
 ):
-    p_lse = prefix_lse
-    s_lse = suffix_lse
-    # inf -> -inf
-    p_lse[p_lse == torch.inf] = -torch.inf
-    s_lse[s_lse == torch.inf] = -torch.inf
-    # max_lse [NUM_HEADS, NUM_TOKENS]
-    max_lse = torch.maximum(p_lse, s_lse)
-    p_lse = p_lse - max_lse
-    s_lse = s_lse - max_lse
-    p_lse_exp = torch.exp(p_lse)
-    s_lse_exp = torch.exp(s_lse)
-    out_se = p_lse_exp + s_lse_exp
-    if output_lse is not None:
-        output_lse = torch.log(out_se) + max_lse
-    p_scale = p_lse_exp / out_se  # [NUM_HEADS, NUM_TOKENS]
-    s_scale = s_lse_exp / out_se  # [NUM_HEADS, NUM_TOKENS]
-    p_scale = torch.transpose(p_scale, 0,
-                              1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
-    s_scale = torch.transpose(s_scale, 0,
-                              1).unsqueeze(2)  # [NUM_TOKENS, NUM_HEADS, 1]
-    output = prefix_output * p_scale + suffix_output * s_scale
+    num_tokens = output.shape[0]
+    prefix_num_tokens = (prefill_tokens_with_context
+                         if prefill_tokens_with_context is not None else
+                         num_tokens)
+
+    # For tokens beyond prefix_num_tokens, copy directly from suffix
+    if prefix_num_tokens < num_tokens:
+        output[prefix_num_tokens:] = suffix_output[prefix_num_tokens:]
+        if output_lse is not None:
+            output_lse[:, prefix_num_tokens:] = suffix_lse[:,
+                                                            prefix_num_tokens:]
+
+    # For prefix tokens, merge prefix and suffix
+    if prefix_num_tokens > 0:
+        p_lse = prefix_lse[:, :prefix_num_tokens].clone()
+        s_lse = suffix_lse[:, :prefix_num_tokens].clone()
+        # inf -> -inf
+        p_lse[p_lse == torch.inf] = -torch.inf
+        s_lse[s_lse == torch.inf] = -torch.inf
+        # max_lse [NUM_HEADS, prefix_num_tokens]
+        max_lse = torch.maximum(p_lse, s_lse)
+        p_lse = p_lse - max_lse
+        s_lse = s_lse - max_lse
+        p_lse_exp = torch.exp(p_lse)
+        s_lse_exp = torch.exp(s_lse)
+        out_se = p_lse_exp + s_lse_exp
+        if output_lse is not None:
+            output_lse[:, :prefix_num_tokens] = (torch.log(out_se) + max_lse)
+        p_scale = p_lse_exp / out_se  # [NUM_HEADS, prefix_num_tokens]
+        s_scale = s_lse_exp / out_se  # [NUM_HEADS, prefix_num_tokens]
+        p_scale = torch.transpose(p_scale, 0, 1).unsqueeze(
+            2)  # [prefix_num_tokens, NUM_HEADS, 1]
+        s_scale = torch.transpose(s_scale, 0, 1).unsqueeze(
+            2)  # [prefix_num_tokens, NUM_HEADS, 1]
+        output[:prefix_num_tokens] = (
+            prefix_output[:prefix_num_tokens] * p_scale +
+            suffix_output[:prefix_num_tokens] * s_scale)
+
     return output, output_lse
 
 
@@ -254,3 +272,89 @@ def test_merge_attn_states(num_tokens: int, num_query_heads: int,
     if len(all_case_info) == (len(NUM_BATCH_TOKENS) * len(HEAD_SIZES) *
                               len(NUM_QUERY_HEADS) * len(DTYPES)):
         generate_markdown_table()
+
+
+@pytest.mark.parametrize("num_tokens", [256, 512])
+@pytest.mark.parametrize("num_query_heads", [8, 16])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("output_dtype", [torch.half, torch.bfloat16])
+@torch.inference_mode()
+def test_merge_attn_states_with_prefix_num_tokens(num_tokens: int,
+                                                  num_query_heads: int,
+                                                  head_size: int,
+                                                  output_dtype: torch.dtype):
+    """Test merge_attn_states with prefill_tokens_with_context < num_tokens.
+
+    For tokens 0..prefill_tokens_with_context-1, output is merged from prefix
+    and suffix. For tokens prefill_tokens_with_context..num_tokens-1, output is
+    copied directly from suffix.
+    """
+    NUM_TOKENS = num_tokens
+    NUM_HEADS = num_query_heads
+    HEAD_SIZE = head_size
+
+    # Use prefix_num_tokens = num_tokens // 2 so half are merged, half copied
+    prefix_num_tokens = NUM_TOKENS // 2
+
+    prefix_lse = torch.randn(NUM_HEADS,
+                             NUM_TOKENS,
+                             dtype=torch.float32,
+                             device="xpu")
+    suffix_lse = torch.randn(NUM_HEADS,
+                             NUM_TOKENS,
+                             dtype=torch.float32,
+                             device="xpu")
+
+    output = torch.zeros((NUM_TOKENS, NUM_HEADS, HEAD_SIZE),
+                         dtype=output_dtype,
+                         device="xpu")
+    output_lse = torch.zeros((NUM_HEADS, NUM_TOKENS),
+                             dtype=torch.float32,
+                             device="xpu")
+    prefix_output = torch.randn((NUM_TOKENS, NUM_HEADS, HEAD_SIZE),
+                                dtype=output_dtype,
+                                device="xpu")
+    suffix_output = torch.randn((NUM_TOKENS, NUM_HEADS, HEAD_SIZE),
+                                dtype=output_dtype,
+                                device="xpu")
+
+    # Run torch reference
+    output_torch = output.clone()
+    output_lse_torch = output_lse.clone()
+    prefix_lse_torch = prefix_lse.clone()
+    suffix_lse_torch = suffix_lse.clone()
+    output_torch, output_lse_torch = merge_attn_states_torch(
+        output_torch,
+        prefix_output,
+        prefix_lse_torch,
+        suffix_output,
+        suffix_lse_torch,
+        output_lse_torch,
+        prefill_tokens_with_context=prefix_num_tokens,
+    )
+
+    # Run XPU kernel
+    output_xpu = output.clone()
+    output_lse_xpu = output_lse.clone()
+    merge_attn_states_xpu(
+        output_xpu,
+        prefix_output,
+        prefix_lse,
+        suffix_output,
+        suffix_lse,
+        output_lse_xpu,
+        prefill_tokens_with_context=prefix_num_tokens,
+    )
+    torch.xpu.synchronize()
+
+    rtol = 1e-2 if output_dtype == torch.bfloat16 else 1e-3
+
+    torch.testing.assert_close(output_xpu.float(),
+                               output_torch.float(),
+                               atol=1e-3,
+                               rtol=rtol)
+    torch.testing.assert_close(output_lse_xpu.float(),
+                               output_lse_torch.float(),
+                               atol=1e-3,
+                               rtol=rtol)
+
