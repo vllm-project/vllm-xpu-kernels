@@ -91,6 +91,11 @@ CUTE_DEVICE void MoEGEMM(
   static constexpr bool is_B_mxfp4 = (std::is_same_v<ElementB, uint8_t>) &&
                                      (std::is_same_v<ElementS, uint8_t>);
   static constexpr bool is_B_4bits = std::is_same_v<ElementB, uint8_t>;
+  // MXFP8: FP8 weights + uint8 E8M0 block scales (group_size=32).
+  static constexpr bool is_B_mxfp8 =
+      (std::is_same_v<ElementB, float_e4m3_t> ||
+       std::is_same_v<ElementB, float_e5m2_t>) &&
+      std::is_same_v<ElementS, uint8_t>;
 
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   auto wg_tile = mma.tile_mnk();
@@ -144,8 +149,13 @@ CUTE_DEVICE void MoEGEMM(
     ElementD* ptr_D_curr_batch = Outputs + pre_rows * gemm_n;
     ElementS* ptr_Scales_curr_batch = const_cast<ElementS*>(Scales) + expert_id;
     if constexpr (is_B_4bits) {
+      // Scales layout [E, N, K/group_size] packed with 4-bit B.
       ptr_Scales_curr_batch =
           const_cast<ElementS*>(Scales) + B_offset * 2 / group_size;
+    } else if constexpr (is_B_mxfp8) {
+      // Scales layout [E, N, K/group_size] (host transposes from [E,K/32,N]).
+      ptr_Scales_curr_batch =
+          const_cast<ElementS*>(Scales) + B_offset / group_size;
     }
     ElementBI* ptr_Bias_curr_batch = nullptr;
     if (Bias != static_cast<ElementBI*>(nullptr)) {
@@ -174,7 +184,10 @@ CUTE_DEVICE void MoEGEMM(
       int m_coord = (group_m_id - pre_tiles);
       auto tile_coord = make_coord(m_coord, n_coord, _, 0);
 
-      if constexpr (is_B_4bits) {
+      if constexpr (is_B_4bits || is_B_mxfp8) {
+        // MXFP8 reuses the 4-bit block-scale mainloop (E8M0 decode + per-K
+        // group B scaling) with float_e4m3/e5m2 weights instead of packed
+        // 4-bit. Scale layout must be [N, K/group_size] per expert.
 #define XE_GEMM_4BITS_CALLER(GroupSize)                                     \
   xe_gemm_4bits<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD, GroupSize>( \
       A_tensor,                                                             \

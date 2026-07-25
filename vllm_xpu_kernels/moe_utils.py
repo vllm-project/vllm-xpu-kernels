@@ -2,6 +2,7 @@
 import torch
 
 from . import _C  # noqa: F401
+from . import _moe_C  # noqa: F401
 from . import _xpu_C  # noqa: F401
 
 finfo = torch.finfo(torch.float8_e4m3fn)
