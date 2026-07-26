@@ -54,7 +54,7 @@ struct chunk_prefill_args_t {
   bool is_sink = false;
   // softmax_lse output (nullptr when not requested)
   float* softmax_lse = nullptr;
-  int lse_stride = 0;  // stride along seq dim (= num_heads_q)
+  int lse_stride = 0;  // stride along head dim (= total_seqlen_q)
   // Q/O strides in CUTLASS order: (seq, head_size=1, heads, batch)
   int q_stride_seq = 0;
   int q_stride_heads = 0;

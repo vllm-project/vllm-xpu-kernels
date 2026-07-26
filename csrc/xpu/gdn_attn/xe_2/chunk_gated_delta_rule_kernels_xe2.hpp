@@ -51,7 +51,7 @@ act_softplus(float& x, float beta = 1.0f, float threshold = 20.0f) {
 
 template <typename T>
 CUTE_DEVICE void chunk_prepare_kernel(
-    const float* a,
+    float* a,
     const float* A_log,
     const T* dt_bias,
     const int* query_start_loc,
@@ -74,6 +74,10 @@ CUTE_DEVICE void chunk_prepare_kernel(
   const int chunk_range = total_sg_range / num_v_heads;
   int chunk_id = total_sg_id % chunk_range;
   const int v_head_id = total_sg_id / chunk_range;
+  // When total_sg_range is not a multiple of num_v_heads, the top sub-group(s)
+  // get v_head_id >= num_v_heads and would write past the end of a[num_v_heads,
+  // ...] (OOB).
+  if (v_head_id >= num_v_heads) return;
 
   const float A_log_exp_h = -sycl::exp(A_log[v_head_id]);
   const float dt_bias_h = static_cast<float>(dt_bias[v_head_id]);
@@ -115,9 +119,8 @@ CUTE_DEVICE void chunk_prepare_kernel(
           sycl::inclusive_scan_over_group(sg, g_local_sum, sycl::plus<float>());
       CUTE_UNROLL
       for (int c = local_num - 1; c >= 0; --c) {
-        const_cast<float*>(a)
-            [(chunk_start_offset + sg_local_id * local_num + c) +
-             v_head_id * total_virtual_seqlen] = g_local_sum;
+        a[(chunk_start_offset + sg_local_id * local_num + c) +
+          v_head_id * total_virtual_seqlen] = g_local_sum;
         g_local_sum -= g_local[c];
       }
 
@@ -1256,7 +1259,7 @@ void kernel_launcher(
     T* w,
     T* u,
     const float* b,
-    const float* a,
+    float* a,
     const float* A_log,
     const T* dt_bias,
     StateT* ssm_state,

@@ -545,7 +545,8 @@ void remap_hidden_states(
     DISPATCH_TOPK_LAUNCH(scalar_t, float, TopK);
   } else if (hidden_states.scalar_type() == torch::kFloat8_e4m3fn) {
     using scalar_t = uint8_t;
-    if (hidden_states_scales->scalar_type() == torch::kFloat32) {
+    if (!hidden_states_scales.has_value() ||
+        hidden_states_scales->scalar_type() == torch::kFloat32) {
       DISPATCH_TOPK_LAUNCH(scalar_t, float, TopK);
     } else if (hidden_states_scales->scalar_type() == torch::kFloat8_e8m0fnu) {
       DISPATCH_TOPK_LAUNCH(scalar_t, uint8_t, TopK);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <torch/all.h>
 
 torch::Tensor weak_ref_tensor(torch::Tensor& tensor);
@@ -7,13 +8,13 @@ torch::Tensor weak_ref_tensor(torch::Tensor& tensor);
 void rms_norm(
     torch::Tensor& out,
     torch::Tensor& input,
-    torch::Tensor& weight,
+    std::optional<torch::Tensor> weight,
     double epsilon);
 
 void fused_add_rms_norm(
     torch::Tensor& input,
     torch::Tensor& residual,
-    torch::Tensor& weight,
+    std::optional<torch::Tensor> weight,
     double epsilon);
 
 // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8 output).
@@ -281,6 +282,8 @@ void merge_attn_states(
     const torch::Tensor& prefix_output,
     const torch::Tensor& prefix_lse,
     const torch::Tensor& suffix_output,
-    const torch::Tensor& suffix_lse);
+    const torch::Tensor& suffix_lse,
+    std::optional<int64_t> prefill_tokens_with_context = std::nullopt,
+    const std::optional<torch::Tensor>& output_scale = std::nullopt);
 
 std::tuple<int64_t, int64_t> getMemoryInfo(int64_t device_index);

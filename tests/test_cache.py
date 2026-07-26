@@ -406,7 +406,7 @@ def _fill_mla_cache(cache: torch.Tensor, kv_cache_dtype: str):
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE_ALL)
 @torch.inference_mode()
 def test_concat_and_cache_mla(
     kv_lora_rank: int,

@@ -144,7 +144,7 @@ uv pip install \
     "packaging>=24.2" \
     "setuptools>=77.0.3,<80.0.0" \
     "setuptools-scm>=8" \
-    "torch==2.10.0+xpu" \
+    "torch==2.13.0+xpu" \
     wheel \
     regex \
     jinja2 \

@@ -24,14 +24,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // FIXME: torch op check consider input & weight is mutable in some ut
   // cases. so we make it mutable here.
   ops.def(
-      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) "
+      "rms_norm(Tensor! result, Tensor input, Tensor? weight, float epsilon) "
       "-> "
       "()");
   ops.impl("rms_norm", torch::kXPU, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
   ops.def(
-      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
+      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor? weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 
@@ -237,7 +237,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor prefix_output,"
       "    Tensor prefix_lse,"
       "    Tensor suffix_output,"
-      "    Tensor suffix_lse) -> ()");
+      "    Tensor suffix_lse,"
+      "    int? prefill_tokens_with_context=None,"
+      "    Tensor? output_scale=None) -> ()");
   ops.impl("merge_attn_states", torch::kXPU, &merge_attn_states);
 }
 

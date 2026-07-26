@@ -2,7 +2,11 @@
 
 #include <torch/all.h>
 
-void moe_sum(torch::Tensor& input, torch::Tensor& output);
+void moe_sum(
+    torch::Tensor& input,
+    torch::Tensor& output,
+    const std::optional<torch::Tensor>& topk_ids,
+    const std::optional<torch::Tensor>& expert_map);
 
 void moe_align_block_size(
     torch::Tensor topk_ids,
@@ -51,7 +55,8 @@ void topk_softmax(
     torch::Tensor& token_expert_indices,
     torch::Tensor& gating_output,
     const bool renormalize,
-    std::optional<torch::Tensor> bias);
+    std::optional<torch::Tensor> bias,
+    std::optional<torch::Tensor> is_padding);
 
 void topk_sigmoid(
     torch::Tensor& topk_weights,
@@ -60,7 +65,8 @@ void topk_sigmoid(
     torch::Tensor& gating_output,
     const bool renormalize,
     std::optional<torch::Tensor> bias,
-    double routed_scaling_factor);
+    double routed_scaling_factor,
+    std::optional<torch::Tensor> is_padding);
 
 void topk_softplus_sqrt(
     torch::Tensor& topk_weights,
@@ -71,7 +77,8 @@ void topk_softplus_sqrt(
     double routed_scaling_factor,
     const c10::optional<torch::Tensor>& correction_bias,
     const c10::optional<torch::Tensor>& input_ids,
-    const c10::optional<torch::Tensor>& tid2eid);
+    const c10::optional<torch::Tensor>& tid2eid,
+    const c10::optional<torch::Tensor>& is_padding);
 
 void moe_gather(
     torch::Tensor& output,
@@ -79,19 +86,6 @@ void moe_gather(
     const torch::Tensor& topk_weights,
     const torch::Tensor& unpermuted_row_to_permuted_row,
     const int64_t num_experts);
-
-void fused_moe_prologue(
-    torch::Tensor input,
-    const c10::optional<torch::Tensor>& input_scales,
-    torch::Tensor token_selected_experts,
-    torch::Tensor token_final_scales,
-    torch::Tensor workspace,
-    int64_t hidden_size,
-    int64_t inter_size,
-    int64_t block_k,
-    int64_t ep_rank,
-    int64_t ep_size,
-    int64_t num_experts_on_rank);
 
 void init_expert_map(
     torch::Tensor& expert_map,

@@ -455,8 +455,10 @@ struct update_states_kernel {
     for (int i = elems_start_offset_group + local_id;
          i < (local_group_id + 1) * elems_per_group;
          i += group_size) {
-      conv_states_ptr[width_id * conv_elems + i] =
-          conv_states_tmp_ptr[width_id * conv_elems + i];
+      if (i < conv_elems) {
+        conv_states_ptr[width_id * conv_elems + i] =
+            conv_states_tmp_ptr[width_id * conv_elems + i];
+      }
     }
   }
 

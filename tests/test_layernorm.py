@@ -16,6 +16,7 @@ HEAD_DIMS = [128, 64]
 NUM_Q_HEADS = [32, 40, 64]
 NUM_KV_HEADS = [8, 32]
 ADD_RESIDUAL = [False, True]
+HAS_WEIGHT = [False, True]
 SEEDS = [0]
 XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
@@ -33,6 +34,7 @@ MINI_PYTEST_PARAMS = {
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("has_weight", HAS_WEIGHT)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", XPU_DEVICES)
@@ -42,6 +44,7 @@ def test_rms_norm(
     num_tokens: int,
     hidden_size: int,
     add_residual: bool,
+    has_weight: bool,
     dtype: torch.dtype,
     seed: int,
     device: str,
@@ -50,8 +53,9 @@ def test_rms_norm(
     # Note: torch.set_default_device("xpu:1") not works.
     torch.set_default_device("xpu")
     torch.xpu.set_device(device)
-    layer = RMSNorm(hidden_size).to(dtype=dtype)
-    layer.weight.data.normal_(mean=1.0, std=0.1)
+    layer = RMSNorm(hidden_size, has_weight=has_weight).to(dtype=dtype)
+    if has_weight:
+        layer.weight.data.normal_(mean=1.0, std=0.1)
     scale = 1 / (2 * hidden_size)
     last_dim = 2 * hidden_size if strided_input else hidden_size
     x = torch.randn(num_tokens, last_dim, dtype=dtype)
@@ -75,12 +79,13 @@ def test_rms_norm(
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
 
+    weight = layer.weight.data if has_weight else None
     if residual is not None:
         opcheck(torch.ops._C.fused_add_rms_norm,
-                (x, residual, layer.weight.data, layer.variance_epsilon))
+                (x, residual, weight, layer.variance_epsilon))
     else:
         opcheck(torch.ops._C.rms_norm,
-                (out, x, layer.weight.data, layer.variance_epsilon))
+                (out, x, weight, layer.variance_epsilon))
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 from typing import Optional
 
 import torch
@@ -15,6 +16,117 @@ except ImportError as e:
 #isort: on
 
 DEFAULT_FA_VERSION = 2
+
+# Speculative-decoding fast path.
+#
+# In speculative decoding every sequence in the batch issues the same small
+# number of query tokens (q_len = num_speculative_tokens + 1, e.g. 2/3/4). By
+# default such a batch (max_seqlen_q > 1) is routed to the chunk-prefill
+# kernel, which has no split-K parallelism over the KV dimension. With a long
+# KV cache and only a handful of query rows the GPU is heavily under-utilized,
+# so prefill is slow.
+#
+# Instead we reuse the split-K *decode* kernel: for a uniform, causal, paged
+# batch we treat each (sequence, query-position) pair as an independent
+# single-token decode "sequence" and run the whole batch in one decode
+# launch. Query token ``j`` (0-indexed within the q_len window) attends
+# causally to KV positions ``[0, kv_len - q_len + j]``, i.e.
+# ``seqused_k - (q_len - 1 - j)`` tokens, so each pseudo-sequence is an
+# ordinary q_len==1 decode with a per-position-adjusted ``seqused_k``. This is
+# exact (it matches the causal reference) and gets the decode path's split-K
+# parallelism.
+#
+# The path only triggers for small, uniform query lengths; larger uniform
+# query lengths keep using chunk-prefill (which reuses the shared KV tile
+# across the Q block, whereas the decode path rescans KV per query token).
+# The default threshold (16) stays within the measured win region across KV
+# lengths on Xe2 (crossover is ~q_len 32); override it with
+# VLLM_XPU_SPEC_DECODE_MAX_QLEN (set to 0/1 to disable the fast path).
+try:
+    _SPEC_DECODE_MAX_QLEN = int(
+        os.environ.get("VLLM_XPU_SPEC_DECODE_MAX_QLEN", "16"))
+except ValueError:
+    _SPEC_DECODE_MAX_QLEN = 16
+
+
+def _spec_decode_varlen_fwd(
+    q,
+    k,
+    v,
+    out,
+    cu_seqlens_q,
+    seqused_k,
+    block_table,
+    max_seqlen_k,
+    k_descale,
+    v_descale,
+    softmax_scale,
+    s_aux,
+    window_size,
+    softcap,
+):
+    """Run the split-K decode kernel once for a speculative-decode batch.
+
+    Assumes a uniform query length: every sequence contributes the same
+    ``q_len`` consecutive query tokens, laid out as ``q[i * q_len + j]`` for
+    sequence ``i`` and position ``j``. Each (sequence, position) pair is
+    treated as an independent single-token decode "sequence", so the whole
+    batch runs in a single ``varlen_fwd`` launch. Returns the output tensor
+    (same row order as ``q``).
+    """
+    batch = cu_seqlens_q.numel() - 1
+    q_len = q.shape[0] // batch
+    total = q.shape[0]  # batch * q_len
+
+    # One decode query per (sequence, position) pair; the row order already
+    # matches q, so the output needs no reordering.
+    cu_seqlens_q_spec = torch.arange(total + 1,
+                                     dtype=torch.int32,
+                                     device=q.device)
+    dummy_cu_seqlens_k = torch.zeros_like(cu_seqlens_q_spec)
+    # Causal per-position KV length: query row i*q_len + j (position j within
+    # the q_len window of sequence i) attends to seqused_k[i] - (q_len-1-j)
+    # tokens.
+    pos = torch.arange(q_len, device=q.device, dtype=seqused_k.dtype)
+    seqused_k_spec = (seqused_k.view(batch, 1) -
+                      (q_len - 1 - pos).view(1, q_len)).clamp_(min=1).reshape(
+                          total).to(torch.int32)
+
+    # Expand the block table so each pseudo-sequence points at its parent
+    # sequence's blocks.
+    block_table_spec = block_table.repeat_interleave(q_len, dim=0)
+
+    out, _ = torch.ops._vllm_fa2_C.varlen_fwd(
+        q,
+        k,
+        v,
+        out,
+        cu_seqlens_q_spec,
+        dummy_cu_seqlens_k,
+        seqused_k_spec,
+        None,
+        block_table_spec,
+        None,  # alibi_slopes
+        1,  # max_seqlen_q
+        max_seqlen_k,
+        0.0,  # dropout_p
+        k_descale,
+        v_descale,
+        softmax_scale,
+        s_aux,
+        False,  # zero_tensors
+        False,  # causal: handled by per-position seqused_k
+        window_size[0],
+        window_size[1],
+        softcap,
+        False,  # return_softmax
+        None,  # gen
+        None,  # num_splits (let the kernel pick via get_num_splits)
+        False,  # is_mix_batch
+        None,  # splits_per_seq
+        None,  # work_list
+    )
+    return out
 
 
 def maybe_contiguous(x):
@@ -263,8 +375,9 @@ def ref_paged_attn(query: torch.Tensor,
                                                 attn.size()[1], 1)
             attn = torch.cat([attn, sink_expanded], dim=-1)
         if return_softmax_lse:
-            # lse shape: [heads, query_len] -> transpose to [query_len, heads]
-            lse = torch.logsumexp(attn, dim=-1).transpose(0, 1).contiguous()
+            # lse shape: [heads, query_len], matching the CUDA/upstream
+            # FlashAttention (nheads, total_q) convention natively.
+            lse = torch.logsumexp(attn, dim=-1)
             lse_list.append(lse)
         attn = torch.softmax(attn, dim=-1).to(v.dtype)
         if sink is not None:
@@ -277,7 +390,7 @@ def ref_paged_attn(query: torch.Tensor,
 
     out_tensor = torch.cat(outputs, dim=0)
     if return_softmax_lse:
-        return out_tensor, torch.cat(lse_list, dim=0).float()
+        return out_tensor, torch.cat(lse_list, dim=1).float()
     return out_tensor
 
 
@@ -387,6 +500,36 @@ def flash_attn_varlen_func(
                                            and v_descale is not None):
             raise NotImplementedError(
                 "FA2 only supports both KV cache descaled")
+
+        # Speculative-decoding fast path: redirect small, uniform, causal,
+        # paged query batches (q_len = num_speculative_tokens + 1) from the
+        # slow chunk-prefill kernel to the split-K decode kernel. See the
+        # comment on _SPEC_DECODE_MAX_QLEN above for the rationale.
+        batch = cu_seqlens_q.numel() - 1
+        is_uniform_qlen = (batch > 0 and q.shape[0] == batch * max_seqlen_q)
+        if (block_table is not None and causal and not return_softmax_lse
+                and softcap == 0.0 and alibi_slopes is None and q_v is None
+                and q_descale is None and scheduler_metadata is None
+                and seqused_k is not None
+                and 1 < max_seqlen_q <= _SPEC_DECODE_MAX_QLEN
+                and is_uniform_qlen):
+            return _spec_decode_varlen_fwd(
+                q,
+                k,
+                v,
+                out,
+                cu_seqlens_q,
+                seqused_k,
+                block_table,
+                max_seqlen_k,
+                k_descale,
+                v_descale,
+                softmax_scale,
+                s_aux,
+                real_window_size,
+                softcap,
+            )
+
         # Compute per-seq splits and work_list on host, upload to device.
         # Only enable for decode (max_seqlen_q == 1) with paged KV cache,
         # multi-seq batches, and global num_splits_kv > 1.

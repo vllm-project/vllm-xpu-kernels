@@ -1,6 +1,7 @@
 #include <sycl/sycl.hpp>
 
 #include <algorithm>
+#include <optional>
 #include <ATen/DeviceGuard.h>
 #include "utils.h"
 #include "dispatch_utils.h"
@@ -8,7 +9,7 @@
 
 namespace vllm {
 
-template <typename scalar_t, int NUM_DIMS, int VEC_SIZE>
+template <typename scalar_t, int NUM_DIMS, int VEC_SIZE, bool HasWeight>
 class rms_norm_kernel {
  public:
   rms_norm_kernel(
@@ -101,11 +102,19 @@ class rms_norm_kernel {
          idx += item_ct1.get_local_range(2)) {
       vec_n_t<scalar_t, VEC_SIZE> dst;
       vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
-      vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
+      vec_n_t<scalar_t, VEC_SIZE> src2;
+      if constexpr (HasWeight) {
+        src2 = v_w[idx];
+      }
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(src1.val[j]);
-        dst.val[j] = ((scalar_t)(x * s_variance_val)) * src2.val[j];
+        scalar_t normalized = static_cast<scalar_t>(x * s_variance_val);
+        if constexpr (HasWeight) {
+          dst.val[j] = normalized * src2.val[j];
+        } else {
+          dst.val[j] = normalized;
+        }
       }
       v_out[idx] = dst;
     }
@@ -126,8 +135,8 @@ class rms_norm_kernel {
   sycl::local_accessor<float, 1> s_variance;
 };
 
-template <typename scalar_t, int NUM_DIMS>
-class rms_norm_kernel<scalar_t, NUM_DIMS, 0> {
+template <typename scalar_t, int NUM_DIMS, bool HasWeight>
+class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
  public:
   rms_norm_kernel(
       scalar_t* out_,
@@ -207,7 +216,12 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0> {
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
          idx += item_ct1.get_local_range(2)) {
       float x = (float)input_row[idx];
-      out_row[idx] = ((scalar_t)(x * (*s_variance_ptr))) * weight[idx];
+      scalar_t normalized = static_cast<scalar_t>(x * (*s_variance_ptr));
+      if constexpr (HasWeight) {
+        out_row[idx] = normalized * weight[idx];
+      } else {
+        out_row[idx] = normalized;
+      }
     }
   }
 
@@ -230,7 +244,12 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0> {
 // The work-group is organized as (ROWS_PER_WG, 1, items_per_row).
 // Each "sub-row" uses dimension 0 to index which row it handles,
 // and dimension 2 for the column within that row.
-template <typename scalar_t, int NUM_DIMS, int VEC_SIZE, int ROWS_PER_WG>
+template <
+    typename scalar_t,
+    int NUM_DIMS,
+    int VEC_SIZE,
+    int ROWS_PER_WG,
+    bool HasWeight>
 class rms_norm_multi_row_kernel {
  public:
   rms_norm_multi_row_kernel(
@@ -337,11 +356,19 @@ class rms_norm_multi_row_kernel {
     for (int idx = col_id; idx < num_vec_elems; idx += col_range) {
       vec_n_t<scalar_t, VEC_SIZE> dst;
       vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
-      vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
+      vec_n_t<scalar_t, VEC_SIZE> src2;
+      if constexpr (HasWeight) {
+        src2 = v_w[idx];
+      }
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(src1.val[j]);
-        dst.val[j] = ((scalar_t)(x * s_var)) * src2.val[j];
+        scalar_t normalized = static_cast<scalar_t>(x * s_var);
+        if constexpr (HasWeight) {
+          dst.val[j] = normalized * src2.val[j];
+        } else {
+          dst.val[j] = normalized;
+        }
       }
       v_out[idx] = dst;
     }
@@ -362,11 +389,11 @@ class rms_norm_multi_row_kernel {
   sycl::local_accessor<float, 1> s_variance;
 };
 
-template <typename scalar_t>
+template <typename scalar_t, bool HasWeight>
 void call_rms_norm_kernel(
     torch::Tensor& out,
     torch::Tensor& input,
-    torch::Tensor& weight,
+    const scalar_t* weight_ptr,
     float epsilon) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
@@ -380,7 +407,6 @@ void call_rms_norm_kernel(
 
   auto out_ptr = out.data_ptr<scalar_t>();
   auto input_ptr = input.data_ptr<scalar_t>();
-  auto weight_ptr = weight.data_ptr<scalar_t>();
 
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   auto& queue = vllm::xpu::vllmGetQueue();
@@ -393,9 +419,10 @@ void call_rms_norm_kernel(
   auto wt_addr = reinterpret_cast<std::uintptr_t>(weight_ptr);
 
   // Base pointers must be aligned
-  bool ptrs_aligned = (inp_addr % req_alignment_bytes == 0) &&
-                      (out_addr % req_alignment_bytes == 0) &&
-                      (wt_addr % req_alignment_bytes == 0);
+  bool ptrs_aligned =
+      (inp_addr % req_alignment_bytes == 0) &&
+      (out_addr % req_alignment_bytes == 0) &&
+      (weight_ptr == nullptr || wt_addr % req_alignment_bytes == 0);
 
   // hidden_size must be divisible by vec_size (so vectorized loop covers all
   // elements)
@@ -432,7 +459,8 @@ void call_rms_norm_kernel(
                   sycl_t,
                   tensor_rank,
                   vec_size,
-                  ROWS_PER_WG>(
+                  ROWS_PER_WG,
+                  HasWeight>(
                   (sycl_t*)out_ptr,
                   (const sycl_t*)input_ptr,
                   input_stride_d2,
@@ -457,7 +485,7 @@ void call_rms_norm_kernel(
         sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
         cgh.parallel_for(
             sycl::nd_range<3>(grid * block, block),
-            rms_norm_kernel<sycl_t, tensor_rank, vec_size>(
+            rms_norm_kernel<sycl_t, tensor_rank, vec_size, HasWeight>(
                 (sycl_t*)out_ptr,
                 (const sycl_t*)input_ptr,
                 input_stride_d2,
@@ -480,7 +508,7 @@ void call_rms_norm_kernel(
         sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
         cgh.parallel_for(
             sycl::nd_range<3>(grid * block, block),
-            rms_norm_kernel<sycl_t, tensor_rank, 0>(
+            rms_norm_kernel<sycl_t, tensor_rank, 0, HasWeight>(
                 (sycl_t*)out_ptr,
                 (const sycl_t*)input_ptr,
                 input_stride_d2,
@@ -498,7 +526,7 @@ void call_rms_norm_kernel(
   }
 }
 
-template <typename scalar_t, int width>
+template <typename scalar_t, int width, bool HasWeight>
 class fused_add_rms_norm_kernel {
  public:
   fused_add_rms_norm_kernel(
@@ -566,12 +594,20 @@ class fused_add_rms_norm_kernel {
       int id = item_ct1.get_group(2) * vec_hidden_size + idx;
       int64_t strided_id = item_ct1.get_group(2) * vec_input_stride + idx;
       vec_t res = residual_v[id];
-      vec_t w = weight_v[idx];
+      vec_t w;
+      if constexpr (HasWeight) {
+        w = weight_v[idx];
+      }
       vec_t out;
 #pragma unroll
       for (int i = 0; i < width; i++) {
         float x = static_cast<float>(res.val[i]);
-        out.val[i] = static_cast<scalar_t>(x * s_var) * w.val[i];
+        scalar_t normalized = static_cast<scalar_t>(x * s_var);
+        if constexpr (HasWeight) {
+          out.val[i] = normalized * w.val[i];
+        } else {
+          out.val[i] = normalized;
+        }
       }
       input_v[strided_id] = out;
     }
@@ -588,8 +624,8 @@ class fused_add_rms_norm_kernel {
   sycl::local_accessor<float, 1> s_variance;  // local memory for variance
 };
 
-template <typename scalar_t>
-class fused_add_rms_norm_kernel<scalar_t, 0> {
+template <typename scalar_t, bool HasWeight>
+class fused_add_rms_norm_kernel<scalar_t, 0, HasWeight> {
  public:
   fused_add_rms_norm_kernel(
       scalar_t* __restrict__ input_,     // [..., hidden_size]
@@ -637,8 +673,13 @@ class fused_add_rms_norm_kernel<scalar_t, 0> {
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
          idx += item_ct1.get_local_range(2)) {
       float x = (float)residual[item_ct1.get_group(2) * hidden_size + idx];
-      input[item_ct1.get_group(2) * input_stride + idx] =
-          ((scalar_t)(x * (*s_variance_ptr))) * weight[idx];
+      scalar_t normalized = static_cast<scalar_t>(x * (*s_variance_ptr));
+      if constexpr (HasWeight) {
+        input[item_ct1.get_group(2) * input_stride + idx] =
+            normalized * weight[idx];
+      } else {
+        input[item_ct1.get_group(2) * input_stride + idx] = normalized;
+      }
     }
   }
 
@@ -653,11 +694,11 @@ class fused_add_rms_norm_kernel<scalar_t, 0> {
   sycl::local_accessor<float, 1> s_variance;  // local memory for variance
 };
 
-template <typename scalar_t>
+template <typename scalar_t, bool HasWeight>
 void call_fused_add_rms_norm_kernel(
     torch::Tensor& input,
     torch::Tensor& residual,
-    torch::Tensor& weight,
+    const scalar_t* weight_ptr,
     float epsilon) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
@@ -665,7 +706,6 @@ void call_fused_add_rms_norm_kernel(
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   auto input_ptr = input.data_ptr<scalar_t>();
   auto residual_ptr = residual.data_ptr<scalar_t>();
-  auto weight_ptr = weight.data_ptr<scalar_t>();
   int64_t input_stride = input.stride(-2);
 
   constexpr int vector_width = (sizeof(scalar_t) == 2) ? 8 : 4;
@@ -673,9 +713,10 @@ void call_fused_add_rms_norm_kernel(
   auto inp_ptr = reinterpret_cast<std::uintptr_t>(input_ptr);
   auto res_ptr = reinterpret_cast<std::uintptr_t>(residual_ptr);
   auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight_ptr);
-  bool ptrs_are_aligned = inp_ptr % req_alignment_bytes == 0 &&
-                          res_ptr % req_alignment_bytes == 0 &&
-                          wt_ptr % req_alignment_bytes == 0;
+  bool ptrs_are_aligned =
+      inp_ptr % req_alignment_bytes == 0 &&
+      res_ptr % req_alignment_bytes == 0 &&
+      (weight_ptr == nullptr || wt_ptr % req_alignment_bytes == 0);
   bool offsets_are_multiple_of_vector_width =
       hidden_size % vector_width == 0 && input_stride % vector_width == 0;
   bool can_vec = ptrs_are_aligned && offsets_are_multiple_of_vector_width;
@@ -690,7 +731,7 @@ void call_fused_add_rms_norm_kernel(
       sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
-          fused_add_rms_norm_kernel<sycl_t, vector_width>(
+          fused_add_rms_norm_kernel<sycl_t, vector_width, HasWeight>(
               (sycl_t*)input_ptr,
               (sycl_t*)residual_ptr,
               input_stride,
@@ -706,7 +747,7 @@ void call_fused_add_rms_norm_kernel(
       sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
-          fused_add_rms_norm_kernel<sycl_t, 0>(
+          fused_add_rms_norm_kernel<sycl_t, 0, HasWeight>(
               (sycl_t*)input_ptr,
               (sycl_t*)residual_ptr,
               input_stride,
@@ -724,7 +765,7 @@ void call_fused_add_rms_norm_kernel(
 void rms_norm(
     torch::Tensor& out,
     torch::Tensor& input,
-    torch::Tensor& weight,
+    std::optional<torch::Tensor> weight,
     double epsilon) {
   const at::DeviceGuard device_guard(input.device());
   TORCH_CHECK(out.is_contiguous());
@@ -732,25 +773,45 @@ void rms_norm(
     input = input.contiguous();
   }
   TORCH_CHECK(input.stride(-1) == 1);
-  TORCH_CHECK(weight.is_contiguous());
+  const bool has_weight = weight.has_value();
+  if (has_weight) {
+    TORCH_CHECK(weight->is_contiguous());
+  }
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_rms_norm_kernel", [&] {
-        vllm::call_rms_norm_kernel<scalar_t>(out, input, weight, epsilon);
+        const scalar_t* weight_ptr =
+            has_weight ? weight->data_ptr<scalar_t>() : nullptr;
+        if (has_weight) {
+          vllm::call_rms_norm_kernel<scalar_t, true>(
+              out, input, weight_ptr, epsilon);
+        } else {
+          vllm::call_rms_norm_kernel<scalar_t, false>(
+              out, input, weight_ptr, epsilon);
+        }
       });
 }
 
 void fused_add_rms_norm(
     torch::Tensor& input,
     torch::Tensor& residual,
-    torch::Tensor& weight,
+    std::optional<torch::Tensor> weight,
     double epsilon) {
   const at::DeviceGuard device_guard(input.device());
-  int hidden_size = input.size(-1);
-  int num_tokens = input.numel() / hidden_size;
+  const bool has_weight = weight.has_value();
+  if (has_weight) {
+    TORCH_CHECK(weight->is_contiguous());
+  }
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_fused_add_rms_norm_kernel", [&] {
-        vllm::call_fused_add_rms_norm_kernel<scalar_t>(
-            input, residual, weight, epsilon);
+        const scalar_t* weight_ptr =
+            has_weight ? weight->data_ptr<scalar_t>() : nullptr;
+        if (has_weight) {
+          vllm::call_fused_add_rms_norm_kernel<scalar_t, true>(
+              input, residual, weight_ptr, epsilon);
+        } else {
+          vllm::call_fused_add_rms_norm_kernel<scalar_t, false>(
+              input, residual, weight_ptr, epsilon);
+        }
       });
 }

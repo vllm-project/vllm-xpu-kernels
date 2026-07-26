@@ -10,7 +10,8 @@ from tests.ops.custom_ops import CustomOp
 
 
 def fused_add_rms_norm(
-        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+        x: torch.Tensor, residual: torch.Tensor,
+        weight: Optional[torch.Tensor],
         variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
     import tests.register_ops as ops
     ops.fused_add_rms_norm(
@@ -22,7 +23,7 @@ def fused_add_rms_norm(
     return x, residual
 
 
-def rms_norm(x: torch.Tensor, weight: torch.Tensor,
+def rms_norm(x: torch.Tensor, weight: Optional[torch.Tensor],
              variance_epsilon: float) -> torch.Tensor:
     import tests.register_ops as ops
     out = torch.empty_like(x)
@@ -118,12 +119,12 @@ class RMSNorm(CustomOp):
 
         add_residual = residual is not None
         norm_func = dispatch_cuda_rmsnorm_func(add_residual)
+        weight = self.weight.data if self.has_weight else None
 
         if add_residual:
-            return norm_func(x, residual, self.weight.data,
-                             self.variance_epsilon)
+            return norm_func(x, residual, weight, self.variance_epsilon)
         else:
-            return norm_func(x, self.weight.data, self.variance_epsilon)
+            return norm_func(x, weight, self.variance_epsilon)
 
     def forward_xpu(
         self,
@@ -133,6 +134,6 @@ class RMSNorm(CustomOp):
         return self.forward_cuda(x, residual)
 
     def extra_repr(self) -> str:
-        s = f"hidden_size={self.weight.data.size(0)}"
+        s = f"hidden_size={self.hidden_size}"
         s += f", eps={self.variance_epsilon}"
         return s
