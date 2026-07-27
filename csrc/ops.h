@@ -282,6 +282,8 @@ void merge_attn_states(
     const torch::Tensor& prefix_output,
     const torch::Tensor& prefix_lse,
     const torch::Tensor& suffix_output,
-    const torch::Tensor& suffix_lse);
+    const torch::Tensor& suffix_lse,
+    std::optional<int64_t> prefill_tokens_with_context = std::nullopt,
+    const std::optional<torch::Tensor>& output_scale = std::nullopt);
 
 std::tuple<int64_t, int64_t> getMemoryInfo(int64_t device_index);

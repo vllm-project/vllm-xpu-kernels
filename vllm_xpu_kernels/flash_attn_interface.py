@@ -375,8 +375,9 @@ def ref_paged_attn(query: torch.Tensor,
                                                 attn.size()[1], 1)
             attn = torch.cat([attn, sink_expanded], dim=-1)
         if return_softmax_lse:
-            # lse shape: [heads, query_len] -> transpose to [query_len, heads]
-            lse = torch.logsumexp(attn, dim=-1).transpose(0, 1).contiguous()
+            # lse shape: [heads, query_len], matching the CUDA/upstream
+            # FlashAttention (nheads, total_q) convention natively.
+            lse = torch.logsumexp(attn, dim=-1)
             lse_list.append(lse)
         attn = torch.softmax(attn, dim=-1).to(v.dtype)
         if sink is not None:
@@ -389,7 +390,7 @@ def ref_paged_attn(query: torch.Tensor,
 
     out_tensor = torch.cat(outputs, dim=0)
     if return_softmax_lse:
-        return out_tensor, torch.cat(lse_list, dim=0).float()
+        return out_tensor, torch.cat(lse_list, dim=1).float()
     return out_tensor
 
 
