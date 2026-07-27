@@ -87,7 +87,8 @@ struct gated_delta_rule_decode_kernel_xe2 {
   }
 
   template <typename VecT, int vec_size>
-  static inline void load_vec_to_float(const VecT* ptr, float (&dst)[vec_size]) {
+  static inline void
+  load_vec_to_float(const VecT* ptr, float (&dst)[vec_size]) {
     VecT tmp[vec_size];
     load_vec<VecT, vec_size>(ptr, tmp);
 #pragma unroll
@@ -107,8 +108,8 @@ struct gated_delta_rule_decode_kernel_xe2 {
   }
 
   template <typename VecT, int vec_size>
-  static inline void store_vec_from_float(
-      VecT* ptr, const float (&src)[vec_size]) {
+  static inline void
+  store_vec_from_float(VecT* ptr, const float (&src)[vec_size]) {
     VecT tmp[vec_size];
 #pragma unroll
     for (int i = 0; i < vec_size; ++i) {
@@ -139,7 +140,7 @@ struct gated_delta_rule_decode_kernel_xe2 {
         ssm_state +
         static_cast<int64_t>(cache_indices[decode_id]) * ssm_state_stride_0;
     const bool has_init_state =
-      has_initial_state == nullptr || has_initial_state[decode_id];
+        has_initial_state == nullptr || has_initial_state[decode_id];
 
     for (int head_v_dim_id = sg_id * v_dim_per_sg; head_v_dim_id < head_v_dim;
          head_v_dim_id += v_dim_per_group) {
@@ -151,9 +152,9 @@ struct gated_delta_rule_decode_kernel_xe2 {
       if (has_init_state) {
 #pragma unroll
         for (int j = 0; j < v_dim_per_sg; ++j) {
-          const int state_offset =
-              state_head_offset + (head_v_dim_id + j) * head_k_dim +
-              k_bucket_size * sg_local_id;
+          const int state_offset = state_head_offset +
+                                   (head_v_dim_id + j) * head_k_dim +
+                                   k_bucket_size * sg_local_id;
           load_vec_to_float<StateT, k_bucket_size>(
               ssm_state_ptr + state_offset,
               reinterpret_cast<float (&)[k_bucket_size]>(
@@ -168,8 +169,8 @@ struct gated_delta_rule_decode_kernel_xe2 {
 
       float b_local = b[decode_id * num_v_heads + num_v_heads_id];
       float beta = act_sigmoid(b_local);
-      float a_local = a[decode_id * num_v_heads + num_v_heads_id] +
-                      dt_bias_local;
+      float a_local =
+          a[decode_id * num_v_heads + num_v_heads_id] + dt_bias_local;
       float g = sycl::exp(A_log_local * act_softplus(a_local));
 
       float q_sum = 0.0f;
@@ -255,9 +256,9 @@ struct gated_delta_rule_decode_kernel_xe2 {
 
 #pragma unroll
       for (int j = 0; j < v_dim_per_sg; ++j) {
-        const int state_offset =
-            state_head_offset + (head_v_dim_id + j) * head_k_dim +
-            k_bucket_size * sg_local_id;
+        const int state_offset = state_head_offset +
+                                 (head_v_dim_id + j) * head_k_dim +
+                                 k_bucket_size * sg_local_id;
         store_vec_from_float<StateT, k_bucket_size>(
             ssm_state_ptr + state_offset,
             reinterpret_cast<float (&)[k_bucket_size]>(
@@ -341,8 +342,7 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
         head_v_dim(head_v_dim) {}
 
   static inline sycl::nd_range<3> get_nd_range(
-      const int num_spec_decodes, const int num_v_heads,
-      const int head_v_dim) {
+      const int num_spec_decodes, const int num_v_heads, const int head_v_dim) {
     sycl::range<3> local(1, 1, group_size);
     sycl::range<3> global(num_spec_decodes, num_v_heads, 1);
     return sycl::nd_range<3>(global * local, local);
@@ -372,7 +372,8 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
   }
 
   template <typename VecT, int vec_size>
-  static inline void load_vec_to_float(const VecT* ptr, float (&dst)[vec_size]) {
+  static inline void
+  load_vec_to_float(const VecT* ptr, float (&dst)[vec_size]) {
     VecT tmp[vec_size];
     load_vec<VecT, vec_size>(ptr, tmp);
 #pragma unroll
@@ -392,8 +393,8 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
   }
 
   template <typename VecT, int vec_size>
-  static inline void store_vec_from_float(
-      VecT* ptr, const float (&src)[vec_size]) {
+  static inline void
+  store_vec_from_float(VecT* ptr, const float (&src)[vec_size]) {
     VecT tmp[vec_size];
 #pragma unroll
     for (int i = 0; i < vec_size; ++i) {
@@ -427,7 +428,7 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
     const StateT* init_state_ptr =
         ssm_state + static_cast<int64_t>(init_state_idx) * ssm_state_stride_0;
     const bool has_init_state =
-      has_initial_state == nullptr || has_initial_state[decode_id];
+        has_initial_state == nullptr || has_initial_state[decode_id];
 
     for (int head_v_dim_id = sg_id * v_dim_per_sg; head_v_dim_id < head_v_dim;
          head_v_dim_id += v_dim_per_group) {
@@ -439,9 +440,9 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
       if (has_init_state) {
 #pragma unroll
         for (int j = 0; j < v_dim_per_sg; ++j) {
-          const int state_offset =
-              state_head_offset + (head_v_dim_id + j) * head_k_dim +
-              k_bucket_size * sg_local_id;
+          const int state_offset = state_head_offset +
+                                   (head_v_dim_id + j) * head_k_dim +
+                                   k_bucket_size * sg_local_id;
           load_vec_to_float<StateT, k_bucket_size>(
               init_state_ptr + state_offset,
               reinterpret_cast<float (&)[k_bucket_size]>(
@@ -489,8 +490,8 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
         }
 
         load_vec_to_float<T, v_dim_per_sg>(
-            v + t * num_v_heads * head_v_dim +
-                num_v_heads_id * head_v_dim + head_v_dim_id,
+            v + t * num_v_heads * head_v_dim + num_v_heads_id * head_v_dim +
+                head_v_dim_id,
             v_local);
 
         float kv_mem[v_dim_per_sg];
@@ -546,12 +547,13 @@ struct gated_delta_rule_decode_spec_kernel_xe2 {
         const int writeback_idx =
             cache_indices[decode_id * cache_indices_stride_0 + t_local];
         StateT* writeback_ptr =
-            ssm_state + static_cast<int64_t>(writeback_idx) * ssm_state_stride_0;
+            ssm_state +
+            static_cast<int64_t>(writeback_idx) * ssm_state_stride_0;
 #pragma unroll
         for (int j = 0; j < v_dim_per_sg; ++j) {
-          const int state_offset =
-              state_head_offset + (head_v_dim_id + j) * head_k_dim +
-              k_bucket_size * sg_local_id;
+          const int state_offset = state_head_offset +
+                                   (head_v_dim_id + j) * head_k_dim +
+                                   k_bucket_size * sg_local_id;
           store_vec_from_float<StateT, k_bucket_size>(
               writeback_ptr + state_offset,
               reinterpret_cast<float (&)[k_bucket_size]>(
@@ -660,98 +662,98 @@ void dispatch_state_dtype_decode_xe2(
     const int num_v_heads,
     const int head_v_dim,
     const int k_bucket_size) {
-#define XE2_DECODE_BUCKET_DISPATCH(state_scalar_t)                           \
-  switch (k_bucket_size) {                                                   \
-    case 1:                                                                  \
-      kernel_launcher_decode_xe2<T, state_scalar_t, 1>(                      \
-          queue,                                                              \
-          reinterpret_cast<T*>(core_attn_out.data_ptr()),                    \
-          reinterpret_cast<T*>(q.data_ptr()),                                \
-          reinterpret_cast<T*>(k.data_ptr()),                                \
-          reinterpret_cast<T*>(v.data_ptr()),                                \
-          reinterpret_cast<T*>(b.data_ptr()),                                \
-          reinterpret_cast<T*>(a.data_ptr()),                                \
-          reinterpret_cast<float*>(A_log.data_ptr()),                        \
-          reinterpret_cast<T*>(dt_bias.data_ptr()),                          \
-          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),           \
-          ssm_state_stride_0,                                                 \
-          token_indx,                                                         \
-          cache_indices,                                                      \
-          has_initial_state,                                                  \
-          batch_size,                                                         \
-          num_k_heads,                                                        \
-          head_k_dim,                                                         \
-          num_v_heads,                                                        \
-          head_v_dim);                                                        \
-      break;                                                                  \
-    case 2:                                                                  \
-      kernel_launcher_decode_xe2<T, state_scalar_t, 2>(                      \
-          queue,                                                              \
-          reinterpret_cast<T*>(core_attn_out.data_ptr()),                    \
-          reinterpret_cast<T*>(q.data_ptr()),                                \
-          reinterpret_cast<T*>(k.data_ptr()),                                \
-          reinterpret_cast<T*>(v.data_ptr()),                                \
-          reinterpret_cast<T*>(b.data_ptr()),                                \
-          reinterpret_cast<T*>(a.data_ptr()),                                \
-          reinterpret_cast<float*>(A_log.data_ptr()),                        \
-          reinterpret_cast<T*>(dt_bias.data_ptr()),                          \
-          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),           \
-          ssm_state_stride_0,                                                 \
-          token_indx,                                                         \
-          cache_indices,                                                      \
-          has_initial_state,                                                  \
-          batch_size,                                                         \
-          num_k_heads,                                                        \
-          head_k_dim,                                                         \
-          num_v_heads,                                                        \
-          head_v_dim);                                                        \
-      break;                                                                  \
-    case 4:                                                                  \
-      kernel_launcher_decode_xe2<T, state_scalar_t, 4>(                      \
-          queue,                                                              \
-          reinterpret_cast<T*>(core_attn_out.data_ptr()),                    \
-          reinterpret_cast<T*>(q.data_ptr()),                                \
-          reinterpret_cast<T*>(k.data_ptr()),                                \
-          reinterpret_cast<T*>(v.data_ptr()),                                \
-          reinterpret_cast<T*>(b.data_ptr()),                                \
-          reinterpret_cast<T*>(a.data_ptr()),                                \
-          reinterpret_cast<float*>(A_log.data_ptr()),                        \
-          reinterpret_cast<T*>(dt_bias.data_ptr()),                          \
-          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),           \
-          ssm_state_stride_0,                                                 \
-          token_indx,                                                         \
-          cache_indices,                                                      \
-          has_initial_state,                                                  \
-          batch_size,                                                         \
-          num_k_heads,                                                        \
-          head_k_dim,                                                         \
-          num_v_heads,                                                        \
-          head_v_dim);                                                        \
-      break;                                                                  \
-    case 8:                                                                  \
-      kernel_launcher_decode_xe2<T, state_scalar_t, 8>(                      \
-          queue,                                                              \
-          reinterpret_cast<T*>(core_attn_out.data_ptr()),                    \
-          reinterpret_cast<T*>(q.data_ptr()),                                \
-          reinterpret_cast<T*>(k.data_ptr()),                                \
-          reinterpret_cast<T*>(v.data_ptr()),                                \
-          reinterpret_cast<T*>(b.data_ptr()),                                \
-          reinterpret_cast<T*>(a.data_ptr()),                                \
-          reinterpret_cast<float*>(A_log.data_ptr()),                        \
-          reinterpret_cast<T*>(dt_bias.data_ptr()),                          \
-          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),           \
-          ssm_state_stride_0,                                                 \
-          token_indx,                                                         \
-          cache_indices,                                                      \
-          has_initial_state,                                                  \
-          batch_size,                                                         \
-          num_k_heads,                                                        \
-          head_k_dim,                                                         \
-          num_v_heads,                                                        \
-          head_v_dim);                                                        \
-      break;                                                                  \
-    default:                                                                  \
-      TORCH_CHECK(false, "unsupported k_bucket_size: ", k_bucket_size);      \
+#define XE2_DECODE_BUCKET_DISPATCH(state_scalar_t)                      \
+  switch (k_bucket_size) {                                              \
+    case 1:                                                             \
+      kernel_launcher_decode_xe2<T, state_scalar_t, 1>(                 \
+          queue,                                                        \
+          reinterpret_cast<T*>(core_attn_out.data_ptr()),               \
+          reinterpret_cast<T*>(q.data_ptr()),                           \
+          reinterpret_cast<T*>(k.data_ptr()),                           \
+          reinterpret_cast<T*>(v.data_ptr()),                           \
+          reinterpret_cast<T*>(b.data_ptr()),                           \
+          reinterpret_cast<T*>(a.data_ptr()),                           \
+          reinterpret_cast<float*>(A_log.data_ptr()),                   \
+          reinterpret_cast<T*>(dt_bias.data_ptr()),                     \
+          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),      \
+          ssm_state_stride_0,                                           \
+          token_indx,                                                   \
+          cache_indices,                                                \
+          has_initial_state,                                            \
+          batch_size,                                                   \
+          num_k_heads,                                                  \
+          head_k_dim,                                                   \
+          num_v_heads,                                                  \
+          head_v_dim);                                                  \
+      break;                                                            \
+    case 2:                                                             \
+      kernel_launcher_decode_xe2<T, state_scalar_t, 2>(                 \
+          queue,                                                        \
+          reinterpret_cast<T*>(core_attn_out.data_ptr()),               \
+          reinterpret_cast<T*>(q.data_ptr()),                           \
+          reinterpret_cast<T*>(k.data_ptr()),                           \
+          reinterpret_cast<T*>(v.data_ptr()),                           \
+          reinterpret_cast<T*>(b.data_ptr()),                           \
+          reinterpret_cast<T*>(a.data_ptr()),                           \
+          reinterpret_cast<float*>(A_log.data_ptr()),                   \
+          reinterpret_cast<T*>(dt_bias.data_ptr()),                     \
+          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),      \
+          ssm_state_stride_0,                                           \
+          token_indx,                                                   \
+          cache_indices,                                                \
+          has_initial_state,                                            \
+          batch_size,                                                   \
+          num_k_heads,                                                  \
+          head_k_dim,                                                   \
+          num_v_heads,                                                  \
+          head_v_dim);                                                  \
+      break;                                                            \
+    case 4:                                                             \
+      kernel_launcher_decode_xe2<T, state_scalar_t, 4>(                 \
+          queue,                                                        \
+          reinterpret_cast<T*>(core_attn_out.data_ptr()),               \
+          reinterpret_cast<T*>(q.data_ptr()),                           \
+          reinterpret_cast<T*>(k.data_ptr()),                           \
+          reinterpret_cast<T*>(v.data_ptr()),                           \
+          reinterpret_cast<T*>(b.data_ptr()),                           \
+          reinterpret_cast<T*>(a.data_ptr()),                           \
+          reinterpret_cast<float*>(A_log.data_ptr()),                   \
+          reinterpret_cast<T*>(dt_bias.data_ptr()),                     \
+          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),      \
+          ssm_state_stride_0,                                           \
+          token_indx,                                                   \
+          cache_indices,                                                \
+          has_initial_state,                                            \
+          batch_size,                                                   \
+          num_k_heads,                                                  \
+          head_k_dim,                                                   \
+          num_v_heads,                                                  \
+          head_v_dim);                                                  \
+      break;                                                            \
+    case 8:                                                             \
+      kernel_launcher_decode_xe2<T, state_scalar_t, 8>(                 \
+          queue,                                                        \
+          reinterpret_cast<T*>(core_attn_out.data_ptr()),               \
+          reinterpret_cast<T*>(q.data_ptr()),                           \
+          reinterpret_cast<T*>(k.data_ptr()),                           \
+          reinterpret_cast<T*>(v.data_ptr()),                           \
+          reinterpret_cast<T*>(b.data_ptr()),                           \
+          reinterpret_cast<T*>(a.data_ptr()),                           \
+          reinterpret_cast<float*>(A_log.data_ptr()),                   \
+          reinterpret_cast<T*>(dt_bias.data_ptr()),                     \
+          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),      \
+          ssm_state_stride_0,                                           \
+          token_indx,                                                   \
+          cache_indices,                                                \
+          has_initial_state,                                            \
+          batch_size,                                                   \
+          num_k_heads,                                                  \
+          head_k_dim,                                                   \
+          num_v_heads,                                                  \
+          head_v_dim);                                                  \
+      break;                                                            \
+    default:                                                            \
+      TORCH_CHECK(false, "unsupported k_bucket_size: ", k_bucket_size); \
   }
 
   if (ssm_state.scalar_type() == at::kFloat) {
@@ -858,110 +860,110 @@ void dispatch_state_dtype_decode_xe2_spec(
     const int num_v_heads,
     const int head_v_dim,
     const int k_bucket_size) {
-#define XE2_DECODE_SPEC_BUCKET_DISPATCH(state_scalar_t)                    \
-  switch (k_bucket_size) {                                                 \
-    case 1:                                                                \
-      kernel_launcher_decode_xe2_spec<T, state_scalar_t, 1>(               \
-          queue,                                                            \
-          reinterpret_cast<T*>(core_attn_out.data_ptr()),                  \
-          reinterpret_cast<T*>(q.data_ptr()),                              \
-          reinterpret_cast<T*>(k.data_ptr()),                              \
-          reinterpret_cast<T*>(v.data_ptr()),                              \
-          reinterpret_cast<T*>(b.data_ptr()),                              \
-          reinterpret_cast<T*>(a.data_ptr()),                              \
-          reinterpret_cast<float*>(A_log.data_ptr()),                      \
-          reinterpret_cast<T*>(dt_bias.data_ptr()),                        \
-          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),         \
-          ssm_state_stride_0,                                               \
-          token_indx,                                                       \
-          cache_indices,                                                    \
-          cache_indices_stride_0,                                           \
-          num_accepted_tokens,                                              \
-          has_initial_state,                                                \
-          num_spec_decodes,                                                 \
-          num_spec_tokens,                                                  \
-          num_k_heads,                                                      \
-          head_k_dim,                                                       \
-          num_v_heads,                                                      \
-          head_v_dim);                                                      \
-      break;                                                                \
-    case 2:                                                                \
-      kernel_launcher_decode_xe2_spec<T, state_scalar_t, 2>(               \
-          queue,                                                            \
-          reinterpret_cast<T*>(core_attn_out.data_ptr()),                  \
-          reinterpret_cast<T*>(q.data_ptr()),                              \
-          reinterpret_cast<T*>(k.data_ptr()),                              \
-          reinterpret_cast<T*>(v.data_ptr()),                              \
-          reinterpret_cast<T*>(b.data_ptr()),                              \
-          reinterpret_cast<T*>(a.data_ptr()),                              \
-          reinterpret_cast<float*>(A_log.data_ptr()),                      \
-          reinterpret_cast<T*>(dt_bias.data_ptr()),                        \
-          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),         \
-          ssm_state_stride_0,                                               \
-          token_indx,                                                       \
-          cache_indices,                                                    \
-          cache_indices_stride_0,                                           \
-          num_accepted_tokens,                                              \
-          has_initial_state,                                                \
-          num_spec_decodes,                                                 \
-          num_spec_tokens,                                                  \
-          num_k_heads,                                                      \
-          head_k_dim,                                                       \
-          num_v_heads,                                                      \
-          head_v_dim);                                                      \
-      break;                                                                \
-    case 4:                                                                \
-      kernel_launcher_decode_xe2_spec<T, state_scalar_t, 4>(               \
-          queue,                                                            \
-          reinterpret_cast<T*>(core_attn_out.data_ptr()),                  \
-          reinterpret_cast<T*>(q.data_ptr()),                              \
-          reinterpret_cast<T*>(k.data_ptr()),                              \
-          reinterpret_cast<T*>(v.data_ptr()),                              \
-          reinterpret_cast<T*>(b.data_ptr()),                              \
-          reinterpret_cast<T*>(a.data_ptr()),                              \
-          reinterpret_cast<float*>(A_log.data_ptr()),                      \
-          reinterpret_cast<T*>(dt_bias.data_ptr()),                        \
-          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),         \
-          ssm_state_stride_0,                                               \
-          token_indx,                                                       \
-          cache_indices,                                                    \
-          cache_indices_stride_0,                                           \
-          num_accepted_tokens,                                              \
-          has_initial_state,                                                \
-          num_spec_decodes,                                                 \
-          num_spec_tokens,                                                  \
-          num_k_heads,                                                      \
-          head_k_dim,                                                       \
-          num_v_heads,                                                      \
-          head_v_dim);                                                      \
-      break;                                                                \
-    case 8:                                                                \
-      kernel_launcher_decode_xe2_spec<T, state_scalar_t, 8>(               \
-          queue,                                                            \
-          reinterpret_cast<T*>(core_attn_out.data_ptr()),                  \
-          reinterpret_cast<T*>(q.data_ptr()),                              \
-          reinterpret_cast<T*>(k.data_ptr()),                              \
-          reinterpret_cast<T*>(v.data_ptr()),                              \
-          reinterpret_cast<T*>(b.data_ptr()),                              \
-          reinterpret_cast<T*>(a.data_ptr()),                              \
-          reinterpret_cast<float*>(A_log.data_ptr()),                      \
-          reinterpret_cast<T*>(dt_bias.data_ptr()),                        \
-          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),         \
-          ssm_state_stride_0,                                               \
-          token_indx,                                                       \
-          cache_indices,                                                    \
-          cache_indices_stride_0,                                           \
-          num_accepted_tokens,                                              \
-          has_initial_state,                                                \
-          num_spec_decodes,                                                 \
-          num_spec_tokens,                                                  \
-          num_k_heads,                                                      \
-          head_k_dim,                                                       \
-          num_v_heads,                                                      \
-          head_v_dim);                                                      \
-      break;                                                                \
-    default:                                                                \
-      TORCH_CHECK(false, "unsupported k_bucket_size: ", k_bucket_size);    \
+#define XE2_DECODE_SPEC_BUCKET_DISPATCH(state_scalar_t)                 \
+  switch (k_bucket_size) {                                              \
+    case 1:                                                             \
+      kernel_launcher_decode_xe2_spec<T, state_scalar_t, 1>(            \
+          queue,                                                        \
+          reinterpret_cast<T*>(core_attn_out.data_ptr()),               \
+          reinterpret_cast<T*>(q.data_ptr()),                           \
+          reinterpret_cast<T*>(k.data_ptr()),                           \
+          reinterpret_cast<T*>(v.data_ptr()),                           \
+          reinterpret_cast<T*>(b.data_ptr()),                           \
+          reinterpret_cast<T*>(a.data_ptr()),                           \
+          reinterpret_cast<float*>(A_log.data_ptr()),                   \
+          reinterpret_cast<T*>(dt_bias.data_ptr()),                     \
+          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),      \
+          ssm_state_stride_0,                                           \
+          token_indx,                                                   \
+          cache_indices,                                                \
+          cache_indices_stride_0,                                       \
+          num_accepted_tokens,                                          \
+          has_initial_state,                                            \
+          num_spec_decodes,                                             \
+          num_spec_tokens,                                              \
+          num_k_heads,                                                  \
+          head_k_dim,                                                   \
+          num_v_heads,                                                  \
+          head_v_dim);                                                  \
+      break;                                                            \
+    case 2:                                                             \
+      kernel_launcher_decode_xe2_spec<T, state_scalar_t, 2>(            \
+          queue,                                                        \
+          reinterpret_cast<T*>(core_attn_out.data_ptr()),               \
+          reinterpret_cast<T*>(q.data_ptr()),                           \
+          reinterpret_cast<T*>(k.data_ptr()),                           \
+          reinterpret_cast<T*>(v.data_ptr()),                           \
+          reinterpret_cast<T*>(b.data_ptr()),                           \
+          reinterpret_cast<T*>(a.data_ptr()),                           \
+          reinterpret_cast<float*>(A_log.data_ptr()),                   \
+          reinterpret_cast<T*>(dt_bias.data_ptr()),                     \
+          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),      \
+          ssm_state_stride_0,                                           \
+          token_indx,                                                   \
+          cache_indices,                                                \
+          cache_indices_stride_0,                                       \
+          num_accepted_tokens,                                          \
+          has_initial_state,                                            \
+          num_spec_decodes,                                             \
+          num_spec_tokens,                                              \
+          num_k_heads,                                                  \
+          head_k_dim,                                                   \
+          num_v_heads,                                                  \
+          head_v_dim);                                                  \
+      break;                                                            \
+    case 4:                                                             \
+      kernel_launcher_decode_xe2_spec<T, state_scalar_t, 4>(            \
+          queue,                                                        \
+          reinterpret_cast<T*>(core_attn_out.data_ptr()),               \
+          reinterpret_cast<T*>(q.data_ptr()),                           \
+          reinterpret_cast<T*>(k.data_ptr()),                           \
+          reinterpret_cast<T*>(v.data_ptr()),                           \
+          reinterpret_cast<T*>(b.data_ptr()),                           \
+          reinterpret_cast<T*>(a.data_ptr()),                           \
+          reinterpret_cast<float*>(A_log.data_ptr()),                   \
+          reinterpret_cast<T*>(dt_bias.data_ptr()),                     \
+          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),      \
+          ssm_state_stride_0,                                           \
+          token_indx,                                                   \
+          cache_indices,                                                \
+          cache_indices_stride_0,                                       \
+          num_accepted_tokens,                                          \
+          has_initial_state,                                            \
+          num_spec_decodes,                                             \
+          num_spec_tokens,                                              \
+          num_k_heads,                                                  \
+          head_k_dim,                                                   \
+          num_v_heads,                                                  \
+          head_v_dim);                                                  \
+      break;                                                            \
+    case 8:                                                             \
+      kernel_launcher_decode_xe2_spec<T, state_scalar_t, 8>(            \
+          queue,                                                        \
+          reinterpret_cast<T*>(core_attn_out.data_ptr()),               \
+          reinterpret_cast<T*>(q.data_ptr()),                           \
+          reinterpret_cast<T*>(k.data_ptr()),                           \
+          reinterpret_cast<T*>(v.data_ptr()),                           \
+          reinterpret_cast<T*>(b.data_ptr()),                           \
+          reinterpret_cast<T*>(a.data_ptr()),                           \
+          reinterpret_cast<float*>(A_log.data_ptr()),                   \
+          reinterpret_cast<T*>(dt_bias.data_ptr()),                     \
+          reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),      \
+          ssm_state_stride_0,                                           \
+          token_indx,                                                   \
+          cache_indices,                                                \
+          cache_indices_stride_0,                                       \
+          num_accepted_tokens,                                          \
+          has_initial_state,                                            \
+          num_spec_decodes,                                             \
+          num_spec_tokens,                                              \
+          num_k_heads,                                                  \
+          head_k_dim,                                                   \
+          num_v_heads,                                                  \
+          head_v_dim);                                                  \
+      break;                                                            \
+    default:                                                            \
+      TORCH_CHECK(false, "unsupported k_bucket_size: ", k_bucket_size); \
   }
 
   if (ssm_state.scalar_type() == at::kFloat) {

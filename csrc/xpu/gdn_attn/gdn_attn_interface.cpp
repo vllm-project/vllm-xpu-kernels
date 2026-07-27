@@ -616,7 +616,7 @@ void gated_delta_rule(
         num_prefills,
         num_decodes,
         num_spec_decodes);
-    #endif
+#endif
   }
 
   if (non_spec_token > 0) {
