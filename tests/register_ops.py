@@ -152,9 +152,12 @@ def merge_attn_states(
     suffix_output: torch.Tensor,
     suffix_lse: torch.Tensor,
     output_lse: torch.Tensor | None = None,
+    prefill_tokens_with_context: int | None = None,
+    output_scale: torch.Tensor | None = None,
 ) -> None:
     torch.ops._C.merge_attn_states(output, output_lse, prefix_output,
-                                   prefix_lse, suffix_output, suffix_lse)
+                                   prefix_lse, suffix_output, suffix_lse,
+                                   prefill_tokens_with_context, output_scale)
 
 
 def reshape_and_cache(
@@ -516,9 +519,11 @@ def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor, renormalize: bool,
-                 bias: Optional[torch.Tensor]) -> None:
+                 bias: Optional[torch.Tensor],
+                 is_padding: Optional[torch.Tensor] = None) -> None:
     torch.ops._moe_C.topk_softmax(topk_weights, topk_ids, token_expert_indices,
-                                  gating_output, renormalize, bias)
+                                  gating_output, renormalize, bias,
+                                  is_padding)
 
 
 def swap_blocks(
@@ -566,10 +571,11 @@ def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor, renormalize: bool,
                  bias: Optional[torch.Tensor],
-                 routed_scaling_factor: float = 1.0) -> None:
+                 routed_scaling_factor: float = 1.0,
+                 is_padding: Optional[torch.Tensor] = None) -> None:
     torch.ops._moe_C.topk_sigmoid(topk_weights, topk_ids, token_expert_indices,
                                   gating_output, renormalize, bias,
-                                  routed_scaling_factor)
+                                  routed_scaling_factor, is_padding)
 
 
 def topk_softplus_sqrt(
@@ -582,6 +588,7 @@ def topk_softplus_sqrt(
     correction_bias: Optional[torch.Tensor] = None,
     input_ids: Optional[torch.Tensor] = None,
     tid2eid: Optional[torch.Tensor] = None,
+    is_padding: Optional[torch.Tensor] = None,
 ) -> None:
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
@@ -593,6 +600,7 @@ def topk_softplus_sqrt(
         correction_bias,
         input_ids,
         tid2eid,
+        is_padding,
     )
 
 

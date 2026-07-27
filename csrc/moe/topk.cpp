@@ -154,7 +154,8 @@ class MoeTopK {
       const int end_expert,
       const bool renormalize,
       const float* bias,
-      const double routed_scaling_factor)
+      const double routed_scaling_factor,
+      const bool* is_padding)
       : inputs_after_softmax(inputs_after_softmax),
         finished(finished),
         output(output),
@@ -166,7 +167,8 @@ class MoeTopK {
         end_expert(end_expert),
         renormalize(renormalize),
         bias(bias),
-        routed_scaling_factor(routed_scaling_factor) {}
+        routed_scaling_factor(routed_scaling_factor),
+        is_padding(is_padding) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
@@ -181,6 +183,7 @@ class MoeTopK {
     const int block_row = group_id_x;
 
     const bool row_is_active = finished ? !finished[block_row] : true;
+    const bool is_pad_row = is_padding != nullptr && is_padding[block_row];
     const int thread_read_offset = group_id_x * num_experts;
     float sum_val = 0.0f;
     for (int k_idx = 0; k_idx < k; ++k_idx) {
@@ -214,7 +217,9 @@ class MoeTopK {
           sycl::reduce_over_group(group, kVal, sycl::maximum<float>());
       const int resultIdx = sycl::reduce_over_group(
           group, resultVal == kVal ? kIdx : 0x7FFFFFFF, sycl::minimum<int>());
-      sum_val += inputs_after_softmax[thread_read_offset + resultIdx];
+      sum_val += is_pad_row
+                     ? 0.0f
+                     : inputs_after_softmax[thread_read_offset + resultIdx];
 
       if (local_id_x == 0) {
         // Ignore experts the node isn't responsible for with expert parallelism
@@ -224,10 +229,14 @@ class MoeTopK {
         const bool should_process_row = row_is_active && node_uses_expert;
 
         const int idx = k * block_row + k_idx;
-        output[idx] = inputs_after_softmax[thread_read_offset + expert];
+        output[idx] = is_pad_row
+                          ? 0.0f
+                          : inputs_after_softmax[thread_read_offset + expert];
         indices[idx] =
-            should_process_row ? (expert - start_expert) : num_experts;
-        assert(indices[idx] >= 0);
+            is_pad_row
+                ? static_cast<IndType>(-1)
+                : (should_process_row ? (expert - start_expert) : num_experts);
+        assert(is_pad_row || indices[idx] >= 0);
         source_rows[idx] = k_idx * num_rows + block_row;
       }
       item.barrier(sycl::access::fence_space::local_space);
@@ -259,6 +268,7 @@ class MoeTopK {
   const bool renormalize;
   const float* bias;
   const double routed_scaling_factor;
+  const bool* is_padding;
 };
 
 // ====================== TopK softmax things ===============================
@@ -301,7 +311,8 @@ class TopKGating {
       const int end_expert,
       const bool renormalize,
       const float* bias,
-      const double routed_scaling_factor)
+      const double routed_scaling_factor,
+      const bool* is_padding)
       : input(input),
         finished(finished),
         output(output),
@@ -313,7 +324,8 @@ class TopKGating {
         end_expert(end_expert),
         renormalize(renormalize),
         bias(bias),
-        routed_scaling_factor(routed_scaling_factor) {}
+        routed_scaling_factor(routed_scaling_factor),
+        is_padding(is_padding) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<2> item) const {
@@ -380,6 +392,7 @@ class TopKGating {
       return;
     }
     const bool row_is_active = finished ? !finished[thread_row] : true;
+    const bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
 
     // We finally start setting up the read pointers for each thread. First,
     // each thread jumps to the start of the row it will read.
@@ -544,7 +557,7 @@ class TopKGating {
         }
       }
 
-      sum_val += max_val;
+      sum_val += is_pad_row ? 0.0f : max_val;
 
       // Write the max for this k iteration to global memory.
       if (thread_group_idx == 0) {
@@ -557,9 +570,11 @@ class TopKGating {
         // to global memory. (This will be a single) thread per row of the
         // input/output matrices.
         const int idx = k * thread_row + k_idx;
-        output[idx] = max_val;
+        output[idx] = is_pad_row ? 0.0f : max_val;
         indices[idx] =
-            should_process_row ? (expert - start_expert) : NUM_EXPERTS;
+            is_pad_row
+                ? static_cast<IndType>(-1)
+                : (should_process_row ? (expert - start_expert) : NUM_EXPERTS);
         source_rows[idx] = k_idx * num_rows + thread_row;
       }
 
@@ -596,6 +611,7 @@ class TopKGating {
   const bool renormalize;
   const float* bias;
   const double routed_scaling_factor;
+  const bool* is_padding;
 };
 
 namespace detail {
@@ -641,6 +657,7 @@ void topk_gating_launcher_helper(
     bool renormalize,
     float* bias,
     double routed_scaling_factor,
+    const bool* is_padding,
     sycl::queue& queue) {
   static constexpr int BYTES_PER_LDG =
       MIN(MAX_BYTES_PER_LDG, sizeof(InputdType) * EXPERTS);
@@ -676,7 +693,8 @@ void topk_gating_launcher_helper(
             end_expert,
             renormalize,
             bias,
-            routed_scaling_factor));
+            routed_scaling_factor,
+            is_padding));
   });
 }
 
@@ -703,6 +721,7 @@ void topk_gating_launcher_helper(
       renormalize,                                                             \
       bias,                                                                    \
       routed_scaling_factor,                                                   \
+      is_padding,                                                              \
       queue);
 
 template <typename InputdType, typename IndType, ScoringFunc ScoringFuncParam>
@@ -718,6 +737,7 @@ void topk_gating_kernel_launcher(
     const bool renormalize,
     float* bias,
     const double routed_scaling_factor,
+    const bool* is_padding,
     sycl::queue& queue) {
   static constexpr int WARPS_PER_TB = 4;
   static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
@@ -819,7 +839,8 @@ void topk_gating_kernel_launcher(
                 num_experts,
                 renormalize,
                 bias,
-                routed_scaling_factor));
+                routed_scaling_factor,
+                is_padding));
       });
     }
   }
@@ -843,7 +864,27 @@ void topk_gating_kernel_launcher(
       renormalize,                                                           \
       bias.has_value() ? bias->data_ptr<float>() : nullptr,                  \
       routed_scaling_factor,                                                 \
+      is_padding.has_value() ? is_padding->data_ptr<bool>() : nullptr,       \
       queue);
+
+static void check_is_padding(
+    const std::optional<torch::Tensor>& is_padding, int64_t num_tokens) {
+  if (!is_padding.has_value()) {
+    return;
+  }
+  const torch::Tensor& is_padding_tensor = is_padding.value();
+  TORCH_CHECK(
+      is_padding_tensor.scalar_type() == at::ScalarType::Bool,
+      "is_padding tensor must be bool");
+  TORCH_CHECK(is_padding_tensor.dim() == 1, "is_padding tensor must be 1D");
+  TORCH_CHECK(
+      is_padding_tensor.size(0) == num_tokens,
+      "is_padding size mismatch, expected: ",
+      num_tokens);
+  TORCH_CHECK(
+      is_padding_tensor.is_contiguous(),
+      "is_padding tensor must be contiguous");
+}
 
 void topk_softmax(
     torch::Tensor& topk_weights,          // [num_tokens, topk]
@@ -851,11 +892,13 @@ void topk_softmax(
     torch::Tensor& token_expert_indices,  // [num_tokens, topk]
     torch::Tensor& gating_output,         // [num_tokens, num_experts]
     const bool renormalize,
-    std::optional<torch::Tensor> bias) {
+    std::optional<torch::Tensor> bias,
+    std::optional<torch::Tensor> is_padding) {
   constexpr double routed_scaling_factor = 1.0;
   const int num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
   const int topk = topk_weights.size(-1);
+  check_is_padding(is_padding, num_tokens);
 
   const bool is_pow_2 =
       (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
@@ -904,10 +947,12 @@ void topk_sigmoid(
     torch::Tensor& gating_output,         // [num_tokens, num_experts]
     const bool renormalize,
     std::optional<torch::Tensor> bias,
-    const double routed_scaling_factor) {
+    const double routed_scaling_factor,
+    std::optional<torch::Tensor> is_padding) {
   const int num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
   const int topk = topk_weights.size(-1);
+  check_is_padding(is_padding, num_tokens);
 
   const bool is_pow_2 =
       (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
