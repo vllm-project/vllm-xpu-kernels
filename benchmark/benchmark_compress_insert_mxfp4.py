@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import time
+
 import torch
 
 try:
@@ -78,8 +79,6 @@ def run_kernel(args):
 def benchmark_config(num_tokens, kv_block_size, compress_ratio, device):
     """Benchmark a single configuration, return (time_us, gbps)."""
     overlap = 1 if compress_ratio == 4 else 0
-    coff = 1 + overlap
-    state_width = coff * HEAD_DIM
     n_gather = (1 + overlap) * compress_ratio
 
     args = setup_inputs(num_tokens, kv_block_size, compress_ratio, overlap,
@@ -98,9 +97,9 @@ def benchmark_config(num_tokens, kv_block_size, compress_ratio, device):
     elapsed = (time.perf_counter() - start) / REPEAT
 
     # Compute effective bandwidth
-    # Read: num_tokens * n_gather * 2 * state_width * 2 bytes (kv+score, bf16)
+    # Read: num_tokens * n_gather * 2 * HEAD_DIM * 2 bytes (kv+score, bf16)
     # Write: num_tokens * (TOKEN_STRIDE + SCALE_DIM) bytes
-    read_bytes = num_tokens * n_gather * 2 * state_width * 2
+    read_bytes = num_tokens * n_gather * 2 * HEAD_DIM * 2
     write_bytes = num_tokens * (TOKEN_STRIDE + SCALE_DIM)
     total_bytes = read_bytes + write_bytes
     gbps = total_bytes / elapsed / 1e9
