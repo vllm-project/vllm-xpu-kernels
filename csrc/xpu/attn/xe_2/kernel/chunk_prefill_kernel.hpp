@@ -149,9 +149,9 @@ class XeFMHAFwdKernel {
     // softmax sink
     const ElementSink* ptr_S;
 
-    // softmax_lse output [total_seqlen_q, num_heads_q] (nullptr if disabled)
+    // softmax_lse output [num_heads_q, total_seqlen_q] (nullptr if disabled)
     float* softmax_lse;
-    int lse_stride;  // = num_heads_q
+    int lse_stride;  // = total_seqlen_q
 
     // per-batch mask: true = prefill, false = decode; nullptr = process all
     const bool* is_prefill;
@@ -484,7 +484,9 @@ class XeFMHAFwdKernel {
             float lse = static_cast<float>(tA_max(i)) * kLn2 +
                         sycl::log(static_cast<float>(sum_val));
             int global_q = qo_cumul + q_in_batch;
-            p.softmax_lse[global_q * p.lse_stride + head_q] = lse;
+            // softmax_lse is (num_heads_q, total_seqlen_q); write directly
+            // in that layout so no transpose/copy is needed by callers.
+            p.softmax_lse[head_q * p.lse_stride + global_q] = lse;
           }
         }
       }
