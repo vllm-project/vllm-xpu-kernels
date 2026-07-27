@@ -53,7 +53,9 @@ def _reference_sequence(
                 conv_state, initial_slot, stream, hidden_dim
             ).float().clone()
         else:
-            history = torch.zeros(width - 1, hidden_dim)
+            history = torch.zeros(width - 1,
+                                  hidden_dim,
+                                  device=conv_state.device)
 
         for step, global_token in enumerate(global_tokens):
             current = projection[global_token].to(conv_state.dtype).float()
@@ -134,7 +136,10 @@ def _reference_kda(
     actual_tokens = q_proj.shape[0]
     hidden_dim = num_heads * head_dim
     conv_outputs = tuple(
-        torch.empty(actual_tokens, hidden_dim, dtype=q_proj.dtype)
+        torch.empty(actual_tokens,
+                    hidden_dim,
+                    dtype=q_proj.dtype,
+                    device=q_proj.devicel)
         for _ in range(3)
     )
     projections = (q_proj, k_proj, v_proj)
