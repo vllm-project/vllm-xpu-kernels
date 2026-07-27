@@ -202,28 +202,27 @@ CUTE_DEVICE void MoEGEMM(
         }
 #undef XE_GEMM_4BITS_CALLER
       } else if (group_size > 0) {
-        // Block FP8 path
-#define XE_GEMM_FP8_BLOCK_SCALE_CALLER(GroupSize)                              \
-  xe_gemm_fp8_block_scale<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD,     \
-                          GroupSize>(                                           \
-      A_tensor,                                                                \
-      B_tensor,                                                                \
-      ptr_Scales_curr_batch,                                                   \
-      ptr_Bias_curr_batch,                                                     \
-      D_tensor,                                                                \
-      tile_coord,                                                              \
-      mma,                                                                     \
+        // Block FP8: reuse xe_gemm_4bits with group_num_n for block indexing
+#define XE_GEMM_FP8_BLOCK_CALLER(GroupSize)                                 \
+  xe_gemm_4bits<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD, GroupSize>( \
+      A_tensor,                                                             \
+      B_tensor,                                                             \
+      ptr_Scales_curr_batch,                                                \
+      ptr_Bias_curr_batch,                                                  \
+      D_tensor,                                                             \
+      tile_coord,                                                           \
+      mma,                                                                  \
       gemm_n / group_size);
         if (group_size == 32) {
-          XE_GEMM_FP8_BLOCK_SCALE_CALLER(32)
+          XE_GEMM_FP8_BLOCK_CALLER(32)
         } else if (group_size == 64) {
-          XE_GEMM_FP8_BLOCK_SCALE_CALLER(64)
+          XE_GEMM_FP8_BLOCK_CALLER(64)
         } else if (group_size == 128) {
-          XE_GEMM_FP8_BLOCK_SCALE_CALLER(128)
+          XE_GEMM_FP8_BLOCK_CALLER(128)
         } else if (group_size == 256) {
-          XE_GEMM_FP8_BLOCK_SCALE_CALLER(256)
+          XE_GEMM_FP8_BLOCK_CALLER(256)
         }
-#undef XE_GEMM_FP8_BLOCK_SCALE_CALLER
+#undef XE_GEMM_FP8_BLOCK_CALLER
       } else {
         xe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
             A_tensor,
