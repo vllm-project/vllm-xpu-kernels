@@ -44,7 +44,7 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
 #
 # TODO: we need to align torch version with used in vLLM.
 #
-set(TORCH_SUPPORTED_VERSION_XPU "2.12.0")
+set(TORCH_SUPPORTED_VERSION_XPU "2.13.0")
 
 set(BUILD_SYCL_TLA_KERNELS
     ON
@@ -323,7 +323,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages
   # when building.
   set(CUTLASS_REVISION
-      "d54352dffe8daab532abd88fc6ab0e9c9fbc6d62"
+      "cd763790ad2f74d7294435ecf77682bac0062c3a"
       CACHE STRING "CUTLASS revision to use")
 
   if(DEFINED ENV{VLLM_CUTLASS_SRC_DIR})

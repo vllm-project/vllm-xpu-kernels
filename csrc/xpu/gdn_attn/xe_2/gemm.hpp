@@ -105,7 +105,7 @@ CUTE_DEVICE void gemm_TTS(
 
   const int prefetch_dist = 3;
 
-  constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
+  constexpr int barrier_scope = 2;
 
   int k_tile_count = ceil_div(shape<1>(A), get<2>(wg_tile));
   int k_tile_prefetch = 0;
@@ -178,7 +178,7 @@ CUTE_DEVICE void gemm_STS(
 
   const int prefetch_dist = 3;
 
-  constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
+  constexpr int barrier_scope = 2;
 
   int k_tile_count = ceil_div(shape<1>(B), get<2>(wg_tile));
   int k_tile_prefetch = 0;
@@ -247,7 +247,7 @@ CUTE_DEVICE void gemm_TSS(
 
   const int prefetch_dist = 3;
 
-  constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
+  constexpr int barrier_scope = 2;
 
   int k_tile_count = ceil_div(shape<1>(A), get<2>(wg_tile));
   int k_tile_prefetch = 0;
@@ -330,7 +330,7 @@ CUTE_DEVICE void gemm_TTS_k_multi(
 
   const int prefetch_dist = 3;
 
-  constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
+  constexpr int barrier_scope = 2;
 
   int k_tile_count = ceil_div(shape<1>(A), get<2>(wg_tile));
   int k_tile_prefetch = 0;
@@ -449,7 +449,7 @@ CUTE_DEVICE void gemm_TTS_fused_2A(
 
   const int prefetch_dist = 3;
 
-  constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
+  constexpr int barrier_scope = 2;
 
   int k_tile_count = ceil_div(shape<1>(A1), get<2>(wg_tile));
   int k_tile_prefetch = 0;
