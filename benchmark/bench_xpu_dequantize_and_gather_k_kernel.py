@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 """Benchmark DeepseekV4 dequantize_and_gather_k_cache on XPU.
 
 Compares Triton and SYCL implementations side-by-side with speedup calculation.
@@ -20,39 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-
-
-def _peek_cli_value(argv: list[str], flag: str) -> str | None:
-    for index, arg in enumerate(argv):
-        if arg == flag and index + 1 < len(argv):
-            return argv[index + 1]
-        if arg.startswith(f"{flag}="):
-            return arg.split("=", 1)[1]
-    return None
-
-
-def _argv_requests_sycl_backend(argv: list[str]) -> bool:
-    backend = _peek_cli_value(argv, "--backend")
-    return backend in {"sycl", "both"} or "--validate-sycl" in argv
-
-
-def _bootstrap_sycl_kernels_path_from_argv(argv: list[str]) -> None:
-    if not _argv_requests_sycl_backend(argv):
-        return
-    sycl_root_arg = _peek_cli_value(argv, "--sycl-kernels-root")
-    candidate_root = (
-        REPO_ROOT.parent / "applications.ai.gpu.vllm-xpu-kernels"
-        if sycl_root_arg is None
-        else Path(sycl_root_arg).resolve()
-    )
-    if candidate_root.exists() and str(candidate_root) not in sys.path:
-        sys.path.insert(0, str(candidate_root))
-
-
-_bootstrap_sycl_kernels_path_from_argv(sys.argv[1:])
 
 import torch
 
@@ -63,9 +34,8 @@ except ModuleNotFoundError:
 
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.v1.attention.ops.deepseek_v4_ops.cache_utils import (
+from vllm.models.deepseek_v4.common.ops.cache_utils import (
     _dequantize_and_gather_k_kernel,
-    dequantize_and_gather_k_cache,
 )
 
 HEAD_DIM = 512
@@ -82,7 +52,6 @@ UINT8_BYTES = torch.tensor([], dtype=torch.uint8).element_size()
 
 KERNEL_NAME_SUBSTRING = "dequantize_and_gather"
 B60_PEAK_BANDWIDTH_GBPS = 456.0
-B60_CACHE_SIZE_MB = 512
 
 GatherOp = Callable[..., None]
 
@@ -148,8 +117,7 @@ BUILTIN_CASES: list[BenchmarkCase] = [
 # Runtime setup helpers
 # ============================================================================
 def _default_sycl_kernels_root() -> Path | None:
-    p = REPO_ROOT.parent / "applications.ai.gpu.vllm-xpu-kernels"
-    return p if p.exists() else None
+    return REPO_ROOT
 
 
 def _require_xpu() -> None:

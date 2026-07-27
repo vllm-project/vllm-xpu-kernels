@@ -1312,8 +1312,11 @@ void dequantize_and_gather_k_cache(
               "block_table batch must match seq_lens");
   TORCH_CHECK(out.size(2) == vllm::kDeepseekV4GatherHeadDim,
               "out head dim must be 512");
+  TORCH_CHECK(block_size > 0, "block_size must be > 0");
   TORCH_CHECK(offset >= 0, "offset must be >= 0");
-  TORCH_CHECK(offset <= out.size(1), "offset exceeds out token dimension");
+  TORCH_CHECK(offset < out.size(1), "offset must be < out token dimension");
+  TORCH_CHECK(block_table.size(1) > 0,
+              "block_table must have at least one block per sequence");
 
   const int64_t min_block_bytes =
       block_size * vllm::kDeepseekV4TokenDataBytes +
