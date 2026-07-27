@@ -15,7 +15,7 @@
 #include <c10/xpu/XPUStream.h>
 #include <sycl/ext/oneapi/bfloat16.hpp>
 #include <sycl/sycl.hpp>
-#include <torch/extension.h>
+#include <torch/all.h>
 
 #include <cmath>
 #include <cstdint>

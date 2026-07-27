@@ -268,8 +268,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor cos_sin_cache, Tensor kv_cache, Tensor kv_slot_mapping,"
       "int kv_cache_block_size, int head_dim, int rope_head_dim,"
       "int compress_ratio, int overlap, int quant_block) -> ()");
-  xpu_ops.impl("fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn",
-      torch::kXPU, &fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn);
+  xpu_ops.impl(
+      "fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn",
+      torch::kXPU,
+      &fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn);
+
+  xpu_ops.def(
       "deepseek_fused_indexer_q_rope_fp8(Tensor q, Tensor positions, "
       "Tensor cos_sin_cache, Tensor index_weights, float softmax_scale, "
       "float head_scale, Tensor! q_fp8, Tensor! weights_out) -> ()");
