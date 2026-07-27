@@ -1,3 +1,4 @@
+#pragma once
 #include <torch/all.h>
 
 torch::Tensor fused_moe_up_xe2(

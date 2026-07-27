@@ -113,7 +113,6 @@ CUTE_DEVICE void FusedMOEUp(
     ElementA* ptr_A_curr_batch =
         const_cast<ElementA*>(Activations) + pre_rows * gemm_k;
     ElementB* ptr_B_curr_batch = const_cast<ElementB*>(Weights) + B_offset;
-    ElementD* ptr_D_curr_batch = Outputs + pre_rows * gemm_n;
     ElementS* ptr_Scales_curr_batch = const_cast<ElementS*>(Scales) + expert_id;
     if constexpr (is_B_4bits) {
       ptr_Scales_curr_batch =
@@ -163,8 +162,30 @@ CUTE_DEVICE void FusedMOEUp(
     };
     auto B1_tensor = make_B_tensor(ptr_B1_curr_batch);
     auto B2_tensor = make_B_tensor(ptr_B2_curr_batch);
-    auto D_tensor = make_moe_tensor<ElementD, LayoutKindD>(
-        ptr_D_curr_batch, gemm_m, gemm_n);
+
+    auto D_tensor = [&]() {
+      if constexpr (activation_type == ActivationType::RELU2_NO_MUL) {
+        return make_tensor(
+            make_gmem_ptr(Outputs + pre_rows * gemm_n * 2),
+            make_layout(
+                make_shape(gemm_m, gemm_n), make_stride(gemm_n * 2, _1{})));
+      } else {
+        return make_moe_tensor<ElementD, LayoutKindD>(
+            Outputs + pre_rows * gemm_n, gemm_m, gemm_n);
+      }
+    }();
+
+    auto D2_tensor = [&]() {
+      if constexpr (activation_type == ActivationType::RELU2_NO_MUL) {
+        return make_tensor(
+            make_gmem_ptr(Outputs + pre_rows * gemm_n * 2 + gemm_n),
+            make_layout(
+                make_shape(gemm_m, gemm_n), make_stride(gemm_n * 2, _1{})));
+      } else {
+        return make_moe_tensor<ElementD, LayoutKindD>(
+            Outputs + pre_rows * gemm_n, gemm_m, gemm_n);
+      }
+    }();
 
     while (group_m_id < cumsum_tiles_for_experts) {
       int n_coord = (group_id * wg_tile_n) % gemm_n_pad / wg_tile_n;
@@ -186,6 +207,7 @@ CUTE_DEVICE void FusedMOEUp(
       ptr_Scales_curr_batch,            \
       ptr_Bias_curr_batch,              \
       D_tensor,                         \
+      D2_tensor,                        \
       tile_coord,                       \
       mma,                              \
       gemm1_clamp_limit);
@@ -212,6 +234,7 @@ CUTE_DEVICE void FusedMOEUp(
             ptr_Scales_curr_batch,
             ptr_Bias_curr_batch,
             D_tensor,
+            D2_tensor,
             tile_coord,
             mma,
             gemm1_clamp_limit);

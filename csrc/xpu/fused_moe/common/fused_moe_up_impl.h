@@ -1,3 +1,4 @@
+#pragma once
 #include <torch/all.h>
 
 #include "fused_moe_arch.h"

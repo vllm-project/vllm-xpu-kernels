@@ -69,7 +69,8 @@ CUTE_DEVICE void gemm_up(
     BTensor const& B2,  // (N,K)
     const ElementS* Scales,
     const ElementBI* Bias,
-    DTensor& C,  // (M,N)
+    DTensor& C,   // (M,N)
+    DTensor& C2,  // (M,N)
     Coord<int, int, cute::Underscore, int> blk_coord,
     TiledMMA const& mma,
     float gemm1_clamp_limit) {
@@ -244,15 +245,32 @@ CUTE_DEVICE void gemm_up(
       tCrC1(i) = gelu_tanh_kernel(tCrC1(i)) * tCrC2(i);
     } else if constexpr (activation_type == ActivationType::SWIGLUOAI) {
       tCrC1(i) = swigluoai_and_mul(tCrC1(i), tCrC2(i), 1.702, 7.0);
-    } else if constexpr (activation_type == ActivationType::RELU2_NO_MUL) {
-      tCrC1(i) = relu2_no_mul_kernel(tCrC1(i)) * tCrC2(i);
     } else if constexpr (activation_type == ActivationType::SWIGLUSTEP) {
       tCrC1(i) = swiglustep_and_mul(tCrC1(i), tCrC2(i), 7.0);
     }
   }
 
+  if constexpr (activation_type == ActivationType::RELU2_NO_MUL) {
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < tCrC1.size(); ++i) {
+      tCrC1(i) = relu2_no_mul_kernel(tCrC1(i));
+    }
+  }
+
   reorder(tCrC1, tCrC_out);
   copy(copy_c, tCrC_out, tCgC);
+
+  if constexpr (activation_type == ActivationType::RELU2_NO_MUL) {
+    auto copy_c2 = get_block_2d_copy_D<GmemTiledCopyC>(mma, C2);
+    auto thr_copy_c2 = copy_c2.get_slice(local_id);
+    auto tCgC2 = thr_copy_c2.partition_D(gC);
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < tCrC2.size(); ++i) {
+      tCrC2(i) = relu2_no_mul_kernel(tCrC2(i));
+    }
+    reorder(tCrC2, tCrC_out);
+    copy(copy_c2, tCrC_out, tCgC2);
+  }
 }
 
 template <
@@ -274,7 +292,8 @@ CUTE_DEVICE void gemm_up_4bits(
     BTensor const& B2,  // (N,K)
     const ElementS* Scales,
     const ElementBI* Bias,
-    DTensor& C,  // (M,N)
+    DTensor& C,   // (M,N)
+    DTensor& C2,  // (M,N)
     Coord<int, int, cute::Underscore, int> blk_coord,
     TiledMMA const& mma,
     float gemm1_clamp_limit) {
@@ -543,15 +562,32 @@ CUTE_DEVICE void gemm_up_4bits(
       tCrC1(i) = gelu_tanh_kernel(tCrC1(i)) * tCrC2(i);
     } else if constexpr (activation_type == ActivationType::SWIGLUOAI) {
       tCrC1(i) = swigluoai_and_mul(tCrC1(i), tCrC2(i), 1.702, 7.0);
-    } else if constexpr (activation_type == ActivationType::RELU2_NO_MUL) {
-      tCrC1(i) = relu2_no_mul_kernel(tCrC1(i)) * tCrC2(i);
     } else if constexpr (activation_type == ActivationType::SWIGLUSTEP) {
       tCrC1(i) = swiglustep_and_mul(tCrC1(i), tCrC2(i), 7.0);
     }
   }
 
+  if constexpr (activation_type == ActivationType::RELU2_NO_MUL) {
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < tCrC1.size(); ++i) {
+      tCrC1(i) = relu2_no_mul_kernel(tCrC1(i));
+    }
+  }
+
   reorder(tCrC1, tCrC_out);
   copy(copy_c, tCrC_out, tCgC);
+
+  if constexpr (activation_type == ActivationType::RELU2_NO_MUL) {
+    auto copy_c2 = get_block_2d_copy_D<GmemTiledCopyC>(mma, C2);
+    auto thr_copy_c2 = copy_c2.get_slice(local_id);
+    auto tCgC2 = thr_copy_c2.partition_D(gC);
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < tCrC2.size(); ++i) {
+      tCrC2(i) = relu2_no_mul_kernel(tCrC2(i));
+    }
+    reorder(tCrC2, tCrC_out);
+    copy(copy_c2, tCrC_out, tCgC2);
+  }
 }
 
 }  // namespace FusedMOE

@@ -100,9 +100,15 @@ torch::Tensor fused_moe_up_impl(
   TORCH_CHECK(B_E == num_experts, "ptr_B.size(0) must match num_experts");
   TORCH_CHECK(A_total_M == D_total_M, "ptr_A.size(0) must match ptr_D.size(0)");
   TORCH_CHECK(A_K == B_K && B_K == K, "ptr_A.size(1) must match ptr_B.size(1)");
-  TORCH_CHECK(
-      B_N == 2 * D_N && D_N == N,
-      "ptr_B.size(2) must match double ptr_D.size(1)");
+  if (activation == "relu2_no_mul") {
+    TORCH_CHECK(
+        B_N == D_N && D_N == 2 * N,
+        "relu2_no_mul ptr_B.size(2) must match ptr_D.size(1)");
+  } else {
+    TORCH_CHECK(
+        B_N == 2 * D_N && D_N == N,
+        "not relu2_no_mul: ptr_B.size(2) must match double ptr_D.size(1)");
+  }
 
   if (ptr_bias.has_value()) {
     TORCH_CHECK(
