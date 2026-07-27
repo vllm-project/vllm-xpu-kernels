@@ -519,3 +519,71 @@ def test_xe_grouped_gemm_mxfp8(m, n, k, e, topk, dtype, has_bias):
     ref = torch.cat(ref, dim=0)
 
     torch.testing.assert_close(output, ref, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("m,n,k", [(1, 256, 256), (4, 256, 256)])
+@pytest.mark.parametrize("e", [2])
+@pytest.mark.parametrize("topk", [1])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_xe_grouped_gemm_block_fp8(m, n, k, e, topk, dtype, has_bias):
+    """Native block-FP8 W8A16 grouped GEMM vs dequant+matmul gold.
+
+    Keeps FP8 weights + float32 2D scales [E, K/128, N/128] in memory.
+    """
+    if not torch.xpu.is_available():
+        pytest.skip("XPU required")
+    seed_everything(7)
+    from vllm_xpu_kernels.moe_utils import dequant_fp8_block_wei
+
+    num_experts = e
+    group_size = 128
+    assert k % group_size == 0 and n % group_size == 0
+    total_m = m * topk
+
+    input_A = torch.randn((total_m, k), dtype=dtype,
+                          device=DEVICE).contiguous() / 10
+    input_B = torch.empty(num_experts, k, n, dtype=torch.float8_e4m3fn,
+                          device=DEVICE)
+    scale_B = (torch.randn(num_experts,
+                           k // group_size,
+                           n // group_size,
+                           dtype=torch.float32,
+                           device=DEVICE).abs() + 0.01)
+
+    for i in range(num_experts):
+        hp = torch.randn(k, n, dtype=torch.float32, device=DEVICE) / 10
+        input_B[i] = hp.to(torch.float8_e4m3fn)
+
+    if has_bias:
+        bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE) / 10
+    else:
+        bias = None
+
+    num_rows_per_expert = torch.zeros(num_experts,
+                                      device=DEVICE,
+                                      dtype=torch.int32)
+    init_rows_for_experts(m, topk, num_rows_per_expert)
+
+    output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
+    cutlass_grouped_gemm_xe2(input_A, input_B, scale_B, bias, output,
+                             num_rows_per_expert, n, k, num_experts)
+
+    ref = []
+    pre_token_sum = 0
+    for i in range(num_experts):
+        cur_token_num = int(num_rows_per_expert[i].item())
+        if cur_token_num == 0:
+            continue
+        inp = input_A[pre_token_sum:pre_token_sum + cur_token_num].to(
+            torch.float32)
+        wei = dequant_fp8_block_wei(input_B[i], scale_B[i])
+        expert_out = inp @ wei
+        if has_bias:
+            expert_out = expert_out + bias[i].to(torch.float32)
+        ref.append(expert_out.to(dtype))
+        pre_token_sum += cur_token_num
+    ref = torch.cat(ref, dim=0)
+
+    torch.testing.assert_close(output, ref, rtol=2e-2, atol=2e-2)

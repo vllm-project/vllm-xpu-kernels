@@ -184,6 +184,12 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     auto sd = ptr_scales->dtype();
     is_B_mxfp8 = (sd == at::kByte) || (sd == at::kFloat8_e8m0fnu);
   }
+  // Block-FP8: FP8 weights + float32 2D scales [E, K/128, N/128].
+  bool is_B_block_fp8 = false;
+  if (is_weight_fp8 && ptr_scales.has_value() && ptr_scales->dim() == 3 &&
+      !is_B_mxfp8) {
+    is_B_block_fp8 = (ptr_scales->dtype() == at::kFloat);
+  }
 
   TORCH_CHECK(N % 8 == 0, "N must be divisible by 8");
 
@@ -415,6 +421,65 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       num_experts,                                                             \
       group_size,                                                              \
       static_cast<int*>(atomic_buffer.data_ptr()));
+  } else if (is_B_block_fp8) {
+    TORCH_CHECK(
+        ptr_scales.has_value(), "block-fp8 grouped gemm must have scales");
+    TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");
+    TORCH_CHECK(
+        ptr_scales->dim() == 3,
+        "ptr_scales of block-fp8 must be 3D [num_experts, K/128, N/128]");
+    TORCH_CHECK(
+        ptr_scales->size(0) == num_experts,
+        "ptr_scales.size(0) of block-fp8 must match num_experts");
+    TORCH_CHECK(K % 128 == 0, "block-fp8 requires K divisible by 128");
+    TORCH_CHECK(N % 128 == 0, "block-fp8 requires N divisible by 128");
+    TORCH_CHECK(
+        ptr_scales->size(1) == (K / 128) && ptr_scales->size(2) == (N / 128),
+        "block-fp8 scales must be [E, K/128, N/128]; got [",
+        ptr_scales->size(0),
+        ", ",
+        ptr_scales->size(1),
+        ", ",
+        ptr_scales->size(2),
+        "] with N=",
+        N,
+        " K=",
+        K);
+    TORCH_CHECK(
+        ptr_scales->dtype() == at::kFloat, "block-fp8 scales must be float32");
+    group_size = 128;
+
+#define W8BLOCKFP8LauncherCallER(policy)                                    \
+  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {              \
+    using scalar_t = half_t;                                                \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, float); \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {         \
+    using scalar_t = half_t;                                                \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, float); \
+  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {   \
+    using scalar_t = bfloat16_t;                                            \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, float); \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {     \
+    using scalar_t = bfloat16_t;                                            \
+    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, float); \
+  } else {                                                                  \
+    TORCH_CHECK(                                                            \
+        false,                                                              \
+        "block-fp8 grouped gemm requires A in {fp16,bf16} and B in "        \
+        "{float8_e4m3fn, float8_e5m2}");                                    \
+  }
+
+    if (A_avg_M <= 8) {
+      using policy = w8a16_policy_m_16;
+      W8BLOCKFP8LauncherCallER(policy);
+    } else if (A_avg_M <= 32) {
+      using policy = w8a16_policy_m_32;
+      W8BLOCKFP8LauncherCallER(policy);
+    } else {
+      using policy = w8a16_policy;
+      W8BLOCKFP8LauncherCallER(policy);
+    }
+#undef W8BLOCKFP8LauncherCallER
   } else if (is_weight_fp8) {
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
     TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");

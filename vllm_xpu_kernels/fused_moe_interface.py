@@ -16,7 +16,6 @@ except ImportError as e:
 
 from .moe_utils import (
     dequant_fp8_block_act,
-    dequant_fp8_block_wei,
     dequant_mxfp8,
     quant_act_xpu,
     ref_fused_moe,
@@ -46,9 +45,9 @@ def _should_use_ref_fused_moe(is_mxfp8: bool, is_block_fp8: bool) -> bool:
     bf16/fp16 after optional act dequant). Disable with
     VLLM_XPU_FUSED_MOE_NATIVE_MXFP8=0 or VLLM_XPU_FUSED_MOE_USE_REF=1.
 
-    Block-FP8: weights are dequantized once at module init into bf16/fp16 and
-    run on the native W16A16 grouped-GEMM path (eliminates per-token Python
-    ref loops). Disable with VLLM_XPU_FUSED_MOE_NATIVE_BLOCK_FP8=0.
+    Block-FP8: native Xe2 grouped-GEMM keeps FP8 weights + float32 2D
+    scales [E,K/128,N/128] in memory (in-kernel scale apply). Disable with
+    VLLM_XPU_FUSED_MOE_NATIVE_BLOCK_FP8=0.
     """
     if _is_env_enabled(REF_FUSED_MOE_ENV):
         return True
@@ -227,40 +226,15 @@ class XpuFusedMoe:
             w2.data = w2_tmp
             w13.xpu_fused_moe = True
 
-        # Block-FP8: one-time weight dequant into float32, then cast to the
-        # activation dtype on first apply (avoids bf16/fp16 mismatch when
-        # bias is absent). Native path is then W16A16 grouped GEMM.
+        # Block-FP8 keeps FP8 weights + float32 2D scales in memory; Xe2
+        # grouped GEMM applies scales in-kernel (no init-time dequant).
         self._block_fp8_promoted = False
-        if (is_block_fp8 and not _should_use_ref_fused_moe(False, True)
-                and w13_scales is not None and w2_scales is not None):
-            w13_hp = torch.empty(w13.shape,
-                                 dtype=torch.float32,
-                                 device=w13.device)
-            w2_hp = torch.empty(w2.shape,
-                                dtype=torch.float32,
-                                device=w2.device)
-            for i in range(num_experts):
-                w13_hp[i] = dequant_fp8_block_wei(w13[i], w13_scales[i])
-                w2_hp[i] = dequant_fp8_block_wei(w2[i], w2_scales[i])
-            if w13_bias is not None:
-                w13 = w13_hp.to(w13_bias.dtype).contiguous()
-                w2 = w2_hp.to(w13_bias.dtype).contiguous()
-            else:
-                # Cast on first apply to match hidden_states.dtype.
-                w13 = w13_hp.contiguous()
-                w2 = w2_hp.contiguous()
-            w13_scales = None
-            w2_scales = None
-            self._block_fp8_promoted = True
 
         self.w13 = w13
         self.w2 = w2
 
-        if (not is_fp8 
-            and not is_int4
-            and not is_mxfp4
-            and not is_block_fp8
-            and not is_mxfp8) or self._block_fp8_promoted:
+        if (not is_fp8 and not is_int4 and not is_mxfp4 and not is_block_fp8
+                and not is_mxfp8):
             self.gemm1_wei_scales = None
             self.gemm2_wei_scales = None
         else:
@@ -333,10 +307,6 @@ class XpuFusedMoe:
                             topk_weights, topk_ids,
                             expert_map, a1q_scale)
         else:
-            if (self._block_fp8_promoted
-                    and self.w13.dtype != hidden_states.dtype):
-                self.w13 = self.w13.to(hidden_states.dtype).contiguous()
-                self.w2 = self.w2.to(hidden_states.dtype).contiguous()
             self._apply_kernel(output, hidden_states,
                                topk_weights, topk_ids,
                                expert_map, a1q_scale)
