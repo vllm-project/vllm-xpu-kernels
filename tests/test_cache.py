@@ -504,7 +504,8 @@ def _reference_dequantize_and_gather_k_cache(
                            dtype=torch.bfloat16)
     k_cache_cpu = k_cache.cpu()
     seq_lens_list = seq_lens.cpu().tolist()
-    gather_lens_list = None if gather_lens is None else gather_lens.cpu().tolist()
+    gather_lens_list = (None if gather_lens is None else
+                        gather_lens.cpu().tolist())
     block_table_cpu = block_table.cpu()
 
     block_size = k_cache.size(1) // (token_data_bytes + scale_dim)
@@ -522,7 +523,8 @@ def _reference_dequantize_and_gather_k_cache(
 
             row_base = physical_block_idx * k_cache.size(1)
             token_base = row_base + pos_in_block * token_data_bytes
-            scale_base = row_base + token_region_bytes + pos_in_block * scale_dim
+            scale_base = (row_base + token_region_bytes +
+                          pos_in_block * scale_dim)
 
             token_bytes = k_cache_cpu.view(-1)[token_base:token_base +
                                                token_data_bytes]
@@ -531,16 +533,18 @@ def _reference_dequantize_and_gather_k_cache(
             tail_vals = token_bytes[fp8_dim:].view(torch.uint16).view(
                 torch.bfloat16)
 
-            scale_bytes = k_cache_cpu.view(-1)[scale_base:scale_base + scale_dim]
-            scale_exponents = scale_bytes[:num_quant_blocks].to(torch.int32) - 127
+            scale_bytes = k_cache_cpu.view(-1)[scale_base:scale_base +
+                                               scale_dim]
+            scale_exponents = (
+                scale_bytes[:num_quant_blocks].to(torch.int32) - 127)
             scales = torch.pow(2.0, scale_exponents.to(torch.float32))
 
             out_row = expected[batch_idx, offset + out_idx]
             for qblock_idx in range(num_quant_blocks):
                 start = qblock_idx * quant_block
                 end = start + quant_block
-                out_row[start:end] = (fp8_vals[start:end] * scales[qblock_idx]).to(
-                    torch.bfloat16)
+                out_row[start:end] = (
+                    fp8_vals[start:end] * scales[qblock_idx]).to(torch.bfloat16)
             out_row[fp8_dim:] = tail_vals
 
     return expected
@@ -557,7 +561,6 @@ def test_dequantize_and_gather_k_cache(block_size, max_seq_len, batch_size,
                                        device):
     fp8_dim = 448
     bf16_dim = 64
-    quant_block = 64
     num_quant_blocks = 7
     token_data_bytes = fp8_dim + bf16_dim * 2
     scale_dim = 8

@@ -15,9 +15,9 @@ import math
 import sys
 import tempfile
 import time
-from glob import glob
 from collections.abc import Callable
 from dataclasses import dataclass
+from glob import glob
 from pathlib import Path
 from typing import Any
 
@@ -32,11 +32,10 @@ try:
 except ModuleNotFoundError:
     tabulate = None
 
+from vllm.models.deepseek_v4.common.ops.cache_utils import (
+    _dequantize_and_gather_k_kernel)
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.models.deepseek_v4.common.ops.cache_utils import (
-    _dequantize_and_gather_k_kernel,
-)
 
 HEAD_DIM = 512
 FP8_DIM = 448
@@ -70,7 +69,11 @@ class BenchmarkCase:
 
     @property
     def api_seq_len(self) -> int:
-        return self.logical_seq_len if self.compress_ratio <= 1 else self.logical_seq_len // self.compress_ratio
+        return (
+            self.logical_seq_len
+            if self.compress_ratio <= 1
+            else self.logical_seq_len // self.compress_ratio
+        )
 
     @property
     def api_gather_len(self) -> int | None:
@@ -78,7 +81,11 @@ class BenchmarkCase:
 
     @property
     def copied_tokens(self) -> int:
-        return self.api_seq_len if self.api_gather_len is None else self.api_gather_len
+        return (
+            self.api_seq_len
+            if self.api_gather_len is None
+            else self.api_gather_len
+        )
 
     @property
     def output_tokens(self) -> int:
@@ -126,16 +133,24 @@ def _require_xpu() -> None:
 
 
 def _require_triton_runtime() -> None:
-    if not HAS_TRITON or not hasattr(_dequantize_and_gather_k_kernel, "__getitem__"):
-        raise RuntimeError("Triton runtime is unavailable for dequantize_and_gather_k_cache.")
+    if not HAS_TRITON or not hasattr(
+        _dequantize_and_gather_k_kernel, "__getitem__"
+    ):
+        raise RuntimeError(
+            "Triton runtime is unavailable for dequantize_and_gather_k_cache."
+        )
 
 
 def _has_sycl_op() -> bool:
     cache_ops = getattr(torch.ops, "_C_cache_ops", None)
-    return cache_ops is not None and hasattr(cache_ops, "dequantize_and_gather_k_cache")
+    return cache_ops is not None and hasattr(
+        cache_ops, "dequantize_and_gather_k_cache"
+    )
 
 
-def _require_sycl_runtime(sycl_kernels_root: Path | None, sycl_library: Path | None) -> None:
+def _require_sycl_runtime(
+    sycl_kernels_root: Path | None, sycl_library: Path | None
+) -> None:
     if _has_sycl_op():
         return
     errors: list[str] = []
@@ -153,7 +168,9 @@ def _require_sycl_runtime(sycl_kernels_root: Path | None, sycl_library: Path | N
         candidates.append(sycl_library)
     if sycl_kernels_root is not None:
         for pattern in ("vllm_xpu_kernels/_C*.so", "build/temp/_C*.so"):
-            candidates.extend(Path(p) for p in glob(str(sycl_kernels_root / pattern)))
+            candidates.extend(
+                Path(p) for p in glob(str(sycl_kernels_root / pattern))
+            )
 
     for candidate in candidates:
         if not candidate.exists():
@@ -169,7 +186,8 @@ def _require_sycl_runtime(sycl_kernels_root: Path | None, sycl_library: Path | N
     if not _has_sycl_op():
         details = " | ".join(errors) if errors else "no loader details"
         raise RuntimeError(
-            f"SYCL op dequantize_and_gather_k_cache unavailable. Details: {details}"
+            "SYCL op dequantize_and_gather_k_cache unavailable. "
+            f"Details: {details}"
         )
 
 
@@ -210,8 +228,12 @@ def dequantize_and_gather_k_cache_triton(
     )
 
 
-def dequantize_and_gather_k_cache_sycl(out, k_cache, seq_lens, gather_lens, block_table, block_size, offset):
-    torch.ops._C_cache_ops.dequantize_and_gather_k_cache(out, k_cache, seq_lens, gather_lens, block_table, block_size, offset)
+def dequantize_and_gather_k_cache_sycl(
+    out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+):
+    torch.ops._C_cache_ops.dequantize_and_gather_k_cache(
+        out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+    )
 
 
 # ============================================================================
@@ -230,7 +252,9 @@ def _release_device_memory() -> None:
 
 def _profiler_activities(device: str) -> list[Any]:
     acts = [torch.profiler.ProfilerActivity.CPU]
-    if device.startswith("xpu") and hasattr(torch.profiler.ProfilerActivity, "XPU"):
+    if device.startswith("xpu") and hasattr(
+        torch.profiler.ProfilerActivity, "XPU"
+    ):
         acts.append(torch.profiler.ProfilerActivity.XPU)
     return acts
 
@@ -239,50 +263,114 @@ def _kernel_latency_samples_us(trace_path: Path) -> list[float]:
     profile = json.loads(trace_path.read_text(encoding="utf-8"))
     samples: list[float] = []
     for event in profile.get("traceEvents", []):
-        if event.get("cat") == "kernel" and KERNEL_NAME_SUBSTRING in str(event.get("name", "")):
+        if event.get("cat") == "kernel" and KERNEL_NAME_SUBSTRING in str(
+            event.get("name", "")
+        ):
             dur = event.get("dur")
             if isinstance(dur, (int, float)):
                 samples.append(float(dur))
     if not samples:
-        raise RuntimeError("Profiler trace missing dequantize_and_gather kernel event.")
+        raise RuntimeError(
+            "Profiler trace missing dequantize_and_gather kernel event."
+        )
     return samples
 
 
 def _make_valid_fp8_bytes(shape: tuple[int, ...], device: str) -> torch.Tensor:
-    vals = torch.randn(*shape, dtype=torch.float32, device=device).clamp(-FP8_MAX, FP8_MAX)
+    vals = torch.randn(*shape, dtype=torch.float32, device=device).clamp(
+        -FP8_MAX, FP8_MAX
+    )
     return vals.to(torch.float8_e4m3fn).view(torch.uint8)
 
 
-def build_inputs(case: BenchmarkCase, batch_size: int, device: str) -> dict[str, torch.Tensor | int | None]:
+def build_inputs(
+    case: BenchmarkCase, batch_size: int, device: str
+) -> dict[str, torch.Tensor | int | None]:
     seq_len = case.api_seq_len
     block_size = case.kernel_block_size
     blocks_per_req = math.ceil(seq_len / block_size)
     total_blocks = batch_size * blocks_per_req
 
     block_bytes = block_size * TOKEN_DATA_BYTES + block_size * SCALE_DIM
-    k_cache = torch.empty(total_blocks, block_bytes, dtype=torch.uint8, device=device)
-    token_data = k_cache[:, :block_size * TOKEN_DATA_BYTES].view(total_blocks, block_size, TOKEN_DATA_BYTES)
-    token_data[:, :, :FP8_DIM] = _make_valid_fp8_bytes((total_blocks, block_size, FP8_DIM), device)
-    bf16_tail = torch.randn(total_blocks, block_size, BF16_DIM, dtype=torch.bfloat16, device=device)
-    token_data[:, :, FP8_DIM:TOKEN_DATA_BYTES] = bf16_tail.view(torch.uint8).view(total_blocks, block_size, BF16_DIM * 2)
-    scales = k_cache[:, block_size * TOKEN_DATA_BYTES:].view(total_blocks, block_size, SCALE_DIM)
-    scales[:, :, :NUM_QUANT_BLOCKS] = torch.randint(120, 136, (total_blocks, block_size, NUM_QUANT_BLOCKS), dtype=torch.uint8, device=device)
+    k_cache = torch.empty(
+        total_blocks, block_bytes, dtype=torch.uint8, device=device
+    )
+    token_data = k_cache[:, : block_size * TOKEN_DATA_BYTES].view(
+        total_blocks, block_size, TOKEN_DATA_BYTES
+    )
+    token_data[:, :, :FP8_DIM] = _make_valid_fp8_bytes(
+        (total_blocks, block_size, FP8_DIM), device
+    )
+    bf16_tail = torch.randn(
+        total_blocks, block_size, BF16_DIM, dtype=torch.bfloat16, device=device
+    )
+    token_data[:, :, FP8_DIM:TOKEN_DATA_BYTES] = bf16_tail.view(
+        torch.uint8
+    ).view(total_blocks, block_size, BF16_DIM * 2)
+    scales = k_cache[:, block_size * TOKEN_DATA_BYTES :].view(
+        total_blocks, block_size, SCALE_DIM
+    )
+    scales[:, :, :NUM_QUANT_BLOCKS] = torch.randint(
+        120,
+        136,
+        (total_blocks, block_size, NUM_QUANT_BLOCKS),
+        dtype=torch.uint8,
+        device=device,
+    )
     scales[:, :, NUM_QUANT_BLOCKS] = 0
 
-    out = torch.empty(batch_size, case.output_tokens, HEAD_DIM, dtype=torch.bfloat16, device=device)
-    seq_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
-    gather_lens = None if case.api_gather_len is None else torch.full((batch_size,), case.api_gather_len, dtype=torch.int32, device=device)
-    block_table = torch.empty(batch_size, blocks_per_req, dtype=torch.int32, device=device)
+    out = torch.empty(
+        batch_size,
+        case.output_tokens,
+        HEAD_DIM,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    seq_lens = torch.full(
+        (batch_size,), seq_len, dtype=torch.int32, device=device
+    )
+    gather_lens = (
+        None
+        if case.api_gather_len is None
+        else torch.full(
+            (batch_size,), case.api_gather_len, dtype=torch.int32, device=device
+        )
+    )
+    block_table = torch.empty(
+        batch_size, blocks_per_req, dtype=torch.int32, device=device
+    )
     for req_idx in range(batch_size):
         start = req_idx * blocks_per_req
-        block_table[req_idx] = torch.arange(start, start + blocks_per_req, dtype=torch.int32, device=device)
+        block_table[req_idx] = torch.arange(
+            start, start + blocks_per_req, dtype=torch.int32, device=device
+        )
 
-    return {"out": out, "k_cache": k_cache, "seq_lens": seq_lens, "gather_lens": gather_lens, "block_table": block_table, "block_size": block_size, "offset": case.offset}
+    return {
+        "out": out,
+        "k_cache": k_cache,
+        "seq_lens": seq_lens,
+        "gather_lens": gather_lens,
+        "block_table": block_table,
+        "block_size": block_size,
+        "offset": case.offset,
+    }
 
 
-def _run_backend_op(backend_op: GatherOp, tensors: dict[str, torch.Tensor | int | None], out: torch.Tensor | None = None) -> None:
+def _run_backend_op(
+    backend_op: GatherOp,
+    tensors: dict[str, torch.Tensor | int | None],
+    out: torch.Tensor | None = None,
+) -> None:
     target_out = tensors["out"] if out is None else out
-    backend_op(target_out, tensors["k_cache"], tensors["seq_lens"], tensors["gather_lens"], tensors["block_table"], tensors["block_size"], tensors["offset"])
+    backend_op(
+        target_out,
+        tensors["k_cache"],
+        tensors["seq_lens"],
+        tensors["gather_lens"],
+        tensors["block_table"],
+        tensors["block_size"],
+        tensors["offset"],
+    )
 
 
 def benchmark_e2e_us(fn, warmup_iters: int, measure_iters: int) -> float:
@@ -296,11 +384,23 @@ def benchmark_e2e_us(fn, warmup_iters: int, measure_iters: int) -> float:
     return (time.perf_counter() - t0) * 1e6 / measure_iters
 
 
-def benchmark_kernel_us(fn, device: str, warmup_iters: int, measure_iters: int) -> float:
-    with tempfile.TemporaryDirectory(prefix="bench_xpu_dequantize_and_gather_") as td:
+def benchmark_kernel_us(
+    fn, device: str, warmup_iters: int, measure_iters: int
+) -> float:
+    with tempfile.TemporaryDirectory(
+        prefix="bench_xpu_dequantize_and_gather_"
+    ) as td:
         trace_path = Path(td) / "trace.pt.trace.json"
-        schedule = torch.profiler.schedule(wait=0, warmup=warmup_iters, active=measure_iters, repeat=1)
-        with torch.profiler.profile(activities=_profiler_activities(device), schedule=schedule, on_trace_ready=lambda p: p.export_chrome_trace(str(trace_path)), record_shapes=False, with_stack=False) as prof:
+        schedule = torch.profiler.schedule(
+            wait=0, warmup=warmup_iters, active=measure_iters, repeat=1
+        )
+        with torch.profiler.profile(
+            activities=_profiler_activities(device),
+            schedule=schedule,
+            on_trace_ready=lambda p: p.export_chrome_trace(str(trace_path)),
+            record_shapes=False,
+            with_stack=False,
+        ) as prof:
             for _ in range(warmup_iters + measure_iters):
                 fn()
                 _synchronize()
@@ -308,10 +408,16 @@ def benchmark_kernel_us(fn, device: str, warmup_iters: int, measure_iters: int) 
         return sum(_kernel_latency_samples_us(trace_path)) / measure_iters
 
 
-def compute_bandwidth_gbps(case: BenchmarkCase, batch_size: int, kernel_us: float) -> float:
+def compute_bandwidth_gbps(
+    case: BenchmarkCase, batch_size: int, kernel_us: float
+) -> float:
     """Compute effective bandwidth in GB/s."""
     copied_tokens = case.copied_tokens * batch_size
-    read_bytes = copied_tokens * (FP8_DIM + BF16_DIM * 2 + NUM_QUANT_BLOCKS * UINT8_BYTES) + copied_tokens * INT32_BYTES
+    read_bytes = (
+        copied_tokens
+        * (FP8_DIM + BF16_DIM * 2 + NUM_QUANT_BLOCKS * UINT8_BYTES)
+        + copied_tokens * INT32_BYTES
+    )
     write_bytes = copied_tokens * HEAD_DIM * BF16_BYTES
     total_bytes = read_bytes + write_bytes
     if kernel_us <= 0:
@@ -326,12 +432,18 @@ def format_table(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "<empty>"
     if tabulate is not None:
-        return tabulate(rows, headers="keys", tablefmt="github", stralign="right")
+        return tabulate(
+            rows, headers="keys", tablefmt="github", stralign="right"
+        )
     headers = list(rows[0].keys())
-    widths = {h: max(len(str(h)), *(len(str(r[h])) for r in rows)) for h in headers}
+    widths = {
+        h: max(len(str(h)), *(len(str(r[h])) for r in rows)) for h in headers
+    }
     hdr = " | ".join(h.rjust(widths[h]) for h in headers)
     div = "-+-".join("-" * widths[h] for h in headers)
-    body = "\n".join(" | ".join(str(r[h]).rjust(widths[h]) for h in headers) for r in rows)
+    body = "\n".join(
+        " | ".join(str(r[h]).rjust(widths[h]) for h in headers) for r in rows
+    )
     return f"{hdr}\n{div}\n{body}"
 
 
@@ -357,36 +469,50 @@ def run_comparison(
 
     for case in cases:
         tensors = build_inputs(case, batch_size, device)
-        triton_fn = lambda t=tensors: _run_backend_op(dequantize_and_gather_k_cache_triton, t)
-        sycl_fn = lambda t=tensors: _run_backend_op(dequantize_and_gather_k_cache_sycl, t)
+        triton_fn = lambda t=tensors: _run_backend_op(
+            dequantize_and_gather_k_cache_triton, t
+        )
+        sycl_fn = lambda t=tensors: _run_backend_op(
+            dequantize_and_gather_k_cache_sycl, t
+        )
 
         # Triton timing
         triton_e2e = benchmark_e2e_us(triton_fn, warmup_iters, measure_iters)
-        triton_kernel = benchmark_kernel_us(triton_fn, device, max(1, warmup_iters // 2), measure_iters)
+        triton_kernel = benchmark_kernel_us(
+            triton_fn, device, max(1, warmup_iters // 2), measure_iters
+        )
         triton_bw = compute_bandwidth_gbps(case, batch_size, triton_kernel)
 
         # SYCL timing
         sycl_e2e = benchmark_e2e_us(sycl_fn, warmup_iters, measure_iters)
-        sycl_kernel = benchmark_kernel_us(sycl_fn, device, max(1, warmup_iters // 2), measure_iters)
+        sycl_kernel = benchmark_kernel_us(
+            sycl_fn, device, max(1, warmup_iters // 2), measure_iters
+        )
         sycl_bw = compute_bandwidth_gbps(case, batch_size, sycl_kernel)
 
-        results.append({
-            "scenario": case.scenario,
-            "ratio": case.compress_ratio,
-            "api_seq": case.api_seq_len,
-            "gather": case.api_gather_len if case.api_gather_len is not None else "full",
-            "blk": case.kernel_block_size,
-            "batch": batch_size,
-            "triton_e2e_us": f"{triton_e2e:.1f}",
-            "sycl_e2e_us": f"{sycl_e2e:.1f}",
-            "e2e_speedup": format_speedup(triton_e2e, sycl_e2e),
-            "triton_kern_us": f"{triton_kernel:.1f}",
-            "sycl_kern_us": f"{sycl_kernel:.1f}",
-            "kern_speedup": format_speedup(triton_kernel, sycl_kernel),
-            "triton_bw": f"{triton_bw:.1f}",
-            "sycl_bw": f"{sycl_bw:.1f}",
-            "sycl_mbu%": f"{sycl_bw / peak_bw_gbps * 100:.1f}",
-        })
+        results.append(
+            {
+                "scenario": case.scenario,
+                "ratio": case.compress_ratio,
+                "api_seq": case.api_seq_len,
+                "gather": (
+                    case.api_gather_len
+                    if case.api_gather_len is not None
+                    else "full"
+                ),
+                "blk": case.kernel_block_size,
+                "batch": batch_size,
+                "triton_e2e_us": f"{triton_e2e:.1f}",
+                "sycl_e2e_us": f"{sycl_e2e:.1f}",
+                "e2e_speedup": format_speedup(triton_e2e, sycl_e2e),
+                "triton_kern_us": f"{triton_kernel:.1f}",
+                "sycl_kern_us": f"{sycl_kernel:.1f}",
+                "kern_speedup": format_speedup(triton_kernel, sycl_kernel),
+                "triton_bw": f"{triton_bw:.1f}",
+                "sycl_bw": f"{sycl_bw:.1f}",
+                "sycl_mbu%": f"{sycl_bw / peak_bw_gbps * 100:.1f}",
+            }
+        )
 
         _release_device_memory()
 
@@ -410,27 +536,37 @@ def run_single_backend(
         fn = lambda t=tensors: _run_backend_op(backend_op, t)
 
         e2e = benchmark_e2e_us(fn, warmup_iters, measure_iters)
-        kernel = benchmark_kernel_us(fn, device, max(1, warmup_iters // 2), measure_iters)
+        kernel = benchmark_kernel_us(
+            fn, device, max(1, warmup_iters // 2), measure_iters
+        )
         bw = compute_bandwidth_gbps(case, batch_size, kernel)
 
-        results.append({
-            "scenario": case.scenario,
-            "ratio": case.compress_ratio,
-            "api_seq": case.api_seq_len,
-            "gather": case.api_gather_len if case.api_gather_len is not None else "full",
-            "blk": case.kernel_block_size,
-            "batch": batch_size,
-            "backend": backend_name,
-            "e2e_us": f"{e2e:.1f}",
-            "kernel_us": f"{kernel:.1f}",
-            "bw_gbps": f"{bw:.1f}",
-            "mbu%": f"{bw / peak_bw_gbps * 100:.1f}",
-        })
+        results.append(
+            {
+                "scenario": case.scenario,
+                "ratio": case.compress_ratio,
+                "api_seq": case.api_seq_len,
+                "gather": (
+                    case.api_gather_len
+                    if case.api_gather_len is not None
+                    else "full"
+                ),
+                "blk": case.kernel_block_size,
+                "batch": batch_size,
+                "backend": backend_name,
+                "e2e_us": f"{e2e:.1f}",
+                "kernel_us": f"{kernel:.1f}",
+                "bw_gbps": f"{bw:.1f}",
+                "mbu%": f"{bw / peak_bw_gbps * 100:.1f}",
+            }
+        )
         _release_device_memory()
     return results
 
 
-def maybe_write_csv(results: list[dict[str, Any]], csv_path: Path | None) -> None:
+def maybe_write_csv(
+    results: list[dict[str, Any]], csv_path: Path | None
+) -> None:
     if csv_path is None or not results:
         return
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -442,19 +578,39 @@ def maybe_write_csv(results: list[dict[str, Any]], csv_path: Path | None) -> Non
 
 
 def build_parser() -> FlexibleArgumentParser:
-    p = FlexibleArgumentParser(description="Benchmark dequantize_and_gather_k_cache (Triton vs SYCL)")
+    p = FlexibleArgumentParser(
+        description="Benchmark dequantize_and_gather_k_cache (Triton vs SYCL)"
+    )
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--warmup-iters", type=int, default=10)
     p.add_argument("--iters", type=int, default=200)
     p.add_argument("--device", type=str, default="xpu")
-    p.add_argument("--backend", type=str, choices=("triton", "sycl", "both"), default="both")
-    p.add_argument("--validate-sycl", action="store_true", help="Validate SYCL correctness vs Triton before benchmarking")
-    p.add_argument("--sycl-kernels-root", type=Path, default=_default_sycl_kernels_root())
+    p.add_argument(
+        "--backend",
+        type=str,
+        choices=("triton", "sycl", "both"),
+        default="both",
+    )
+    p.add_argument(
+        "--validate-sycl",
+        action="store_true",
+        help="Validate SYCL correctness vs Triton before benchmarking",
+    )
+    p.add_argument(
+        "--sycl-kernels-root", type=Path, default=_default_sycl_kernels_root()
+    )
     p.add_argument("--sycl-library", type=Path, default=None)
     p.add_argument("--max-cases", type=int, default=None)
-    p.add_argument("--csv", type=Path, default=None, help="Output CSV file path")
-    p.add_argument("--peak-bw-gbps", type=float, default=B60_PEAK_BANDWIDTH_GBPS,
-                   help=f"Peak memory bandwidth in GB/s (default: {B60_PEAK_BANDWIDTH_GBPS})")
+    p.add_argument(
+        "--csv", type=Path, default=None, help="Output CSV file path"
+    )
+    p.add_argument(
+        "--peak-bw-gbps",
+        type=float,
+        default=B60_PEAK_BANDWIDTH_GBPS,
+        help=f"Peak memory bandwidth in GB/s "
+        f"(default: {B60_PEAK_BANDWIDTH_GBPS})",
+    )
     return p
 
 
@@ -463,10 +619,13 @@ def main(args) -> None:
     _require_xpu()
     cases = BUILTIN_CASES[:]
     if args.max_cases is not None:
-        cases = cases[:args.max_cases]
+        cases = cases[: args.max_cases]
 
-    print(f"Benchmarking {len(cases)} cases, batch_size={args.batch_size}, "
-          f"warmup={args.warmup_iters}, iters={args.iters}, backend={args.backend}")
+    print(
+        f"Benchmarking {len(cases)} cases, batch_size={args.batch_size}, "
+        f"warmup={args.warmup_iters}, iters={args.iters}, "
+        f"backend={args.backend}"
+    )
 
     # Setup backends
     if args.backend in {"triton", "both"}:
@@ -483,12 +642,23 @@ def main(args) -> None:
             tensors = build_inputs(case, args.batch_size, args.device)
             triton_out = torch.zeros_like(tensors["out"])
             sycl_out = torch.zeros_like(tensors["out"])
-            _run_backend_op(dequantize_and_gather_k_cache_triton, tensors, triton_out)
-            _run_backend_op(dequantize_and_gather_k_cache_sycl, tensors, sycl_out)
+            _run_backend_op(
+                dequantize_and_gather_k_cache_triton, tensors, triton_out
+            )
+            _run_backend_op(
+                dequantize_and_gather_k_cache_sycl, tensors, sycl_out
+            )
             _synchronize()
-            max_diff = (sycl_out.float() - triton_out.float()).abs().max().item()
-            torch.testing.assert_close(sycl_out, triton_out, atol=2e-2, rtol=1e-2)
-            print(f"  PASS: {case.scenario} seq={case.api_seq_len} max_diff={max_diff:.6f}")
+            max_diff = (
+                (sycl_out.float() - triton_out.float()).abs().max().item()
+            )
+            torch.testing.assert_close(
+                sycl_out, triton_out, atol=2e-2, rtol=1e-2
+            )
+            print(
+                f"  PASS: {case.scenario} seq={case.api_seq_len} "
+                f"max_diff={max_diff:.6f}"
+            )
             _release_device_memory()
         print("  All cases passed!\n")
 
@@ -496,22 +666,36 @@ def main(args) -> None:
     if args.backend == "both":
         print("\n=== Performance Comparison (Triton vs SYCL) ===")
         results = run_comparison(
-            cases, args.batch_size, args.device,
-            args.warmup_iters, args.iters, args.peak_bw_gbps,
+            cases,
+            args.batch_size,
+            args.device,
+            args.warmup_iters,
+            args.iters,
+            args.peak_bw_gbps,
         )
     elif args.backend == "triton":
         print("\n=== Triton Performance ===")
         results = run_single_backend(
-            cases, args.batch_size, args.device, "triton",
+            cases,
+            args.batch_size,
+            args.device,
+            "triton",
             dequantize_and_gather_k_cache_triton,
-            args.warmup_iters, args.iters, args.peak_bw_gbps,
+            args.warmup_iters,
+            args.iters,
+            args.peak_bw_gbps,
         )
     else:
         print("\n=== SYCL Performance ===")
         results = run_single_backend(
-            cases, args.batch_size, args.device, "sycl",
+            cases,
+            args.batch_size,
+            args.device,
+            "sycl",
             dequantize_and_gather_k_cache_sycl,
-            args.warmup_iters, args.iters, args.peak_bw_gbps,
+            args.warmup_iters,
+            args.iters,
+            args.peak_bw_gbps,
         )
 
     print(format_table(results))

@@ -605,8 +605,9 @@ class dequantize_and_gather_k_cache_kernel {
     const int pos = start_pos + out_row;
     int block_in_seq;
     int pos_in_block;
-    if constexpr (CACHE_BLOCK_SIZE > 0 &&
-                  (CACHE_BLOCK_SIZE & (CACHE_BLOCK_SIZE - 1)) == 0) {
+    if constexpr (
+        CACHE_BLOCK_SIZE > 0 &&
+        (CACHE_BLOCK_SIZE & (CACHE_BLOCK_SIZE - 1)) == 0) {
       constexpr int kShift = __builtin_ctz(CACHE_BLOCK_SIZE);
       block_in_seq = pos >> kShift;
       pos_in_block = pos & (CACHE_BLOCK_SIZE - 1);
@@ -617,16 +618,15 @@ class dequantize_and_gather_k_cache_kernel {
 
     const int64_t block_table_batch_offset =
         static_cast<int64_t>(batch_idx) * block_table_stride_;
-    const int64_t physical_block_idx = block_table_[
-        block_table_batch_offset + block_in_seq];
+    const int64_t physical_block_idx =
+        block_table_[block_table_batch_offset + block_in_seq];
 
     const uint8_t* cache_block_ptr =
         k_cache_ + physical_block_idx * cache_block_stride_;
     const uint8_t* token_data_ptr =
         cache_block_ptr + static_cast<int64_t>(pos_in_block) * 576;
     const uint8_t* token_scale_ptr =
-        cache_block_ptr +
-        static_cast<int64_t>(cache_block_size_) * 576 +
+        cache_block_ptr + static_cast<int64_t>(cache_block_size_) * 576 +
         static_cast<int64_t>(pos_in_block) * 8;
 
     at::BFloat16* out_row_ptr =
@@ -635,8 +635,8 @@ class dequantize_and_gather_k_cache_kernel {
 
     // Dequantize 7 * 64 FP8 values with one scale byte per quant block.
     for (int qblock_idx = 0; qblock_idx < 7; ++qblock_idx) {
-      const float exponent = static_cast<float>(token_scale_ptr[qblock_idx]) -
-                             127.0f;
+      const float exponent =
+          static_cast<float>(token_scale_ptr[qblock_idx]) - 127.0f;
       const float scale = sycl::exp2(exponent);
 
       for (int idx = lane; idx < 64; idx += SUBGROUP_SIZE) {
@@ -1203,38 +1203,50 @@ void concat_and_cache_mla(
       kv_c.scalar_type(), kv_cache_dtype, CALL_CONCAT_AND_CACHE_MLA);
 }
 
-#define CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(BLOCK_SIZE_TPARAM)           \
-  queue.submit([&](sycl::handler& cgh) {                                     \
-    cgh.parallel_for(                                                         \
-        sycl::nd_range<2>(grid * block, block),                               \
-        vllm::dequantize_and_gather_k_cache_kernel<                           \
-            32,                              \
-            BLOCK_SIZE_TPARAM>(                                                \
-            out.data_ptr<at::BFloat16>(),                                     \
-            k_cache.data_ptr<uint8_t>(),                                      \
-            seq_lens.data_ptr<int32_t>(),                                     \
-            gather_lens_ptr,                                                  \
-            block_table.data_ptr<int32_t>(),                                  \
-            out_stride0,                                                      \
-            out_stride1,                                                      \
-            cache_block_stride,                                               \
-            block_table_stride,                                               \
-            block_size_i32,                                                   \
-            offset_i32,                                                       \
-            rows_per_group));                                                 \
+#define CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(BLOCK_SIZE_TPARAM)         \
+  queue.submit([&](sycl::handler& cgh) {                                   \
+    cgh.parallel_for(                                                      \
+        sycl::nd_range<2>(grid * block, block),                            \
+        vllm::dequantize_and_gather_k_cache_kernel<32, BLOCK_SIZE_TPARAM>( \
+            out.data_ptr<at::BFloat16>(),                                  \
+            k_cache.data_ptr<uint8_t>(),                                   \
+            seq_lens.data_ptr<int32_t>(),                                  \
+            gather_lens_ptr,                                               \
+            block_table.data_ptr<int32_t>(),                               \
+            out_stride0,                                                   \
+            out_stride1,                                                   \
+            cache_block_stride,                                            \
+            block_table_stride,                                            \
+            block_size_i32,                                                \
+            offset_i32,                                                    \
+            rows_per_group));                                              \
   });
 
-#define CALL_DEQUANTIZE_AND_GATHER_K_CACHE()                                \
-  do {                                                                       \
-    switch (block_size_i32) {                                                \
-      case 2:  CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(2);  break;          \
-      case 4:  CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(4);  break;          \
-      case 8:  CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(8);  break;          \
-      case 16: CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(16); break;          \
-      case 32: CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(32); break;          \
-      case 64: CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(64); break;          \
-      default: CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(0);  break;          \
-    }                                                                        \
+#define CALL_DEQUANTIZE_AND_GATHER_K_CACHE()         \
+  do {                                               \
+    switch (block_size_i32) {                        \
+      case 2:                                        \
+        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(2);  \
+        break;                                       \
+      case 4:                                        \
+        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(4);  \
+        break;                                       \
+      case 8:                                        \
+        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(8);  \
+        break;                                       \
+      case 16:                                       \
+        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(16); \
+        break;                                       \
+      case 32:                                       \
+        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(32); \
+        break;                                       \
+      case 64:                                       \
+        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(64); \
+        break;                                       \
+      default:                                       \
+        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(0);  \
+        break;                                       \
+    }                                                \
   } while (0)
 
 void dequantize_and_gather_k_cache(
@@ -1260,55 +1272,56 @@ void dequantize_and_gather_k_cache(
   }
 
   TORCH_CHECK(
-      out.scalar_type() == at::ScalarType::BFloat16,
-      "out must be bfloat16");
+      out.scalar_type() == at::ScalarType::BFloat16, "out must be bfloat16");
   TORCH_CHECK(
-      k_cache.scalar_type() == at::ScalarType::Byte,
-      "k_cache must be uint8");
-  TORCH_CHECK(seq_lens.scalar_type() == at::ScalarType::Int,
-              "seq_lens must be int32");
-  TORCH_CHECK(block_table.scalar_type() == at::ScalarType::Int,
-              "block_table must be int32");
+      k_cache.scalar_type() == at::ScalarType::Byte, "k_cache must be uint8");
+  TORCH_CHECK(
+      seq_lens.scalar_type() == at::ScalarType::Int, "seq_lens must be int32");
+  TORCH_CHECK(
+      block_table.scalar_type() == at::ScalarType::Int,
+      "block_table must be int32");
   if (gather_lens.has_value()) {
-    TORCH_CHECK(gather_lens.value().scalar_type() == at::ScalarType::Int,
-                "gather_lens must be int32");
+    TORCH_CHECK(
+        gather_lens.value().scalar_type() == at::ScalarType::Int,
+        "gather_lens must be int32");
   }
 
   TORCH_CHECK(out.dim() == 3, "out must be [batch, tokens, 512]");
-  TORCH_CHECK(
-      k_cache.dim() == 2, "k_cache must be [num_blocks, block_bytes]");
+  TORCH_CHECK(k_cache.dim() == 2, "k_cache must be [num_blocks, block_bytes]");
   TORCH_CHECK(seq_lens.dim() == 1, "seq_lens must be 1D");
   TORCH_CHECK(block_table.dim() == 2, "block_table must be 2D");
   if (gather_lens.has_value()) {
     TORCH_CHECK(gather_lens.value().dim() == 1, "gather_lens must be 1D");
   }
 
-  TORCH_CHECK(out.device() == k_cache.device(),
-              "out and k_cache must be on the same device");
-  TORCH_CHECK(out.device() == seq_lens.device(),
-              "out and seq_lens must be on the same device");
-  TORCH_CHECK(out.device() == block_table.device(),
-              "out and block_table must be on the same device");
+  TORCH_CHECK(
+      out.device() == k_cache.device(),
+      "out and k_cache must be on the same device");
+  TORCH_CHECK(
+      out.device() == seq_lens.device(),
+      "out and seq_lens must be on the same device");
+  TORCH_CHECK(
+      out.device() == block_table.device(),
+      "out and block_table must be on the same device");
   if (gather_lens.has_value()) {
-    TORCH_CHECK(out.device() == gather_lens.value().device(),
-                "out and gather_lens must be on the same device");
+    TORCH_CHECK(
+        out.device() == gather_lens.value().device(),
+        "out and gather_lens must be on the same device");
   }
 
-  TORCH_CHECK(out.size(0) == seq_lens.size(0),
-              "out batch must match seq_lens");
-  TORCH_CHECK(block_table.size(0) == seq_lens.size(0),
-              "block_table batch must match seq_lens");
-  TORCH_CHECK(out.size(2) == 512,
-              "out head dim must be 512");
+  TORCH_CHECK(out.size(0) == seq_lens.size(0), "out batch must match seq_lens");
+  TORCH_CHECK(
+      block_table.size(0) == seq_lens.size(0),
+      "block_table batch must match seq_lens");
+  TORCH_CHECK(out.size(2) == 512, "out head dim must be 512");
   TORCH_CHECK(block_size > 0, "block_size must be > 0");
   TORCH_CHECK(offset >= 0, "offset must be >= 0");
   TORCH_CHECK(offset < out.size(1), "offset must be < out token dimension");
-  TORCH_CHECK(block_table.size(1) > 0,
-              "block_table must have at least one block per sequence");
+  TORCH_CHECK(
+      block_table.size(1) > 0,
+      "block_table must have at least one block per sequence");
 
-  const int64_t min_block_bytes =
-      block_size * 576 +
-      block_size * 8;
+  const int64_t min_block_bytes = block_size * 576 + block_size * 8;
   TORCH_CHECK(
       k_cache.stride(1) == 1,
       "k_cache must be byte-addressable contiguous on the last dimension");
@@ -1329,8 +1342,9 @@ void dequantize_and_gather_k_cache(
 
   const int32_t block_size_i32 = static_cast<int32_t>(block_size);
   const int32_t offset_i32 = static_cast<int32_t>(offset);
-  const int32_t* gather_lens_ptr =
-      gather_lens.has_value() ? gather_lens.value().data_ptr<int32_t>() : nullptr;
+  const int32_t* gather_lens_ptr = gather_lens.has_value()
+                                       ? gather_lens.value().data_ptr<int32_t>()
+                                       : nullptr;
   const int64_t out_stride0 = out.stride(0);
   const int64_t out_stride1 = out.stride(1);
   const int64_t cache_block_stride = k_cache.stride(0);
