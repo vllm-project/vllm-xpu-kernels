@@ -1,9 +1,10 @@
 name: nightly benchmark on Intel BMG
 
 on:
-  schedule:
-    # Beijing time 03:00, which is 19:00 UTC on the previous day.
-    - cron: '0 19 * * *'
+  workflow_run:
+    workflows: ["run unit tests on Intel GPU."]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       benchmark_suite:
@@ -14,6 +15,9 @@ on:
         description: 'Allowed relative regression before failing the job'
         required: false
         default: '0.10'
+      test_workflow_run_id:
+        description: 'Optional run id for the unit-test workflow that produced xpu-kernel-wheel'
+        required: false
   pull_request:
     branches: [main]
     types: [opened, reopened, synchronize, labeled]
@@ -31,13 +35,84 @@ env:
   BENCHMARK_RESULTS_DIR: benchmark-results
   BENCHMARK_SUITE: ${{ github.event.inputs.benchmark_suite || 'nightly' }}
   REGRESSION_THRESHOLD: ${{ github.event.inputs.regression_threshold || '0.10' }}
+  UNIT_TEST_WORKFLOW: run unit tests on Intel GPU.
 
 jobs:
-  build-docker-image-bmg:
+  resolve-wheel-artifact:
     runs-on: self-hosted-bmg
     if: |
-      github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'need_benchmark')
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'schedule') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'need_benchmark'))
+    outputs:
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+      run_id: ${{ steps.resolve.outputs.run_id }}
+      short_sha: ${{ steps.resolve.outputs.short_sha }}
+    steps:
+      - name: Resolve unit-test wheel artifact run
+        id: resolve
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            let runId = '';
+            let headSha = context.sha;
+
+            if (context.eventName === 'workflow_run') {
+              runId = String(context.payload.workflow_run.id);
+              headSha = context.payload.workflow_run.head_sha;
+            } else if (context.eventName === 'pull_request') {
+              headSha = context.payload.pull_request.head.sha;
+            } else if (context.eventName === 'workflow_dispatch') {
+              runId = context.payload.inputs?.test_workflow_run_id || '';
+            }
+
+            if (!runId) {
+              const workflows = await github.paginate(
+                github.rest.actions.listRepoWorkflows,
+                {owner, repo, per_page: 100},
+              );
+              const workflow = workflows.find(
+                (item) => item.name === process.env.UNIT_TEST_WORKFLOW,
+              );
+              if (!workflow) {
+                core.setFailed(`Workflow not found: ${process.env.UNIT_TEST_WORKFLOW}`);
+                return;
+              }
+
+              const runs = await github.paginate(
+                github.rest.actions.listWorkflowRuns,
+                {
+                  owner,
+                  repo,
+                  workflow_id: workflow.id,
+                  head_sha: headSha,
+                  status: 'completed',
+                  per_page: 20,
+                },
+              );
+              const run = runs.find((item) => item.conclusion === 'success');
+              if (!run) {
+                core.setFailed(
+                  `No successful ${process.env.UNIT_TEST_WORKFLOW} run found for ${headSha}`,
+                );
+                return;
+              }
+              runId = String(run.id);
+            }
+
+            core.setOutput('head_sha', headSha);
+            core.setOutput('short_sha', headSha.slice(0, 7));
+            core.setOutput('run_id', runId);
+
+  build-docker-image-bmg:
+    runs-on: self-hosted-bmg
+    needs: resolve-wheel-artifact
     outputs:
       image_tag: ${{ steps.set-tag.outputs.image_tag }}
     steps:
@@ -47,61 +122,27 @@ jobs:
           git clean -ffdx || true
           git reset --hard || true
 
-
       - name: Checkout tested commit
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           set-safe-directory: true
           clean: true
+          ref: ${{ needs.resolve-wheel-artifact.outputs.head_sha }}
 
       - name: Set image tag
         id: set-tag
-        run: echo "image_tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        run: echo "image_tag=${{ needs.resolve-wheel-artifact.outputs.short_sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Build benchmark docker image
         run: |
-          IMAGE_TAG=${GITHUB_SHA::7}
+          IMAGE_TAG=${{ needs.resolve-wheel-artifact.outputs.short_sha }}
           docker build -t "xpu-kernel-ci-image:${IMAGE_TAG}" -f Dockerfile.xpu .
           docker tag "xpu-kernel-ci-image:${IMAGE_TAG}" "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
           docker push "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
 
-  build-wheel-bmg:
-    runs-on: self-hosted-bmg
-    needs: build-docker-image-bmg
-    timeout-minutes: 90
-    container:
-      image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-bmg.outputs.image_tag }}
-      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
-    steps:
-      - name: Checkout tested commit
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          set-safe-directory: true
-
-      - name: Build wheel
-        run: |
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          export CCACHE_DIR=/root/.ccache
-          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
-          export CCACHE_NOHASHDIR=1
-          export CCACHE_COMPILERCHECK=content
-          ccache -s || true
-          git submodule sync && git submodule update --init --recursive
-          uv pip install -r requirements.txt
-          rm -rf dist/*
-          MAX_JOBS=128 uv build --no-build-isolation --wheel -v
-          ccache -s || true
-
-      - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-wheel
-          path: dist/*.whl
-          retention-days: 30
-
   run-benchmarks-bmg:
     runs-on: self-hosted-bmg
-    needs: [build-docker-image-bmg, build-wheel-bmg]
+    needs: [resolve-wheel-artifact, build-docker-image-bmg]
     timeout-minutes: 240
     container:
       image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-bmg.outputs.image_tag }}
@@ -111,12 +152,15 @@ jobs:
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           set-safe-directory: true
+          ref: ${{ needs.resolve-wheel-artifact.outputs.head_sha }}
 
       - name: Download wheel artifact
         uses: actions/download-artifact@v4
         with:
-          name: benchmark-wheel
+          name: xpu-kernel-wheel
           path: dist/
+          run-id: ${{ needs.resolve-wheel-artifact.outputs.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Install wheel
         run: |
@@ -132,7 +176,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: benchmark-baseline
-          key: benchmark-baseline-${{ github.event.repository.default_branch }}-${{ github.sha }}
+          key: benchmark-baseline-${{ github.event.repository.default_branch }}-${{ needs.resolve-wheel-artifact.outputs.head_sha }}
           restore-keys: |
             benchmark-baseline-${{ github.event.repository.default_branch }}-
 
@@ -168,7 +212,8 @@ jobs:
             echo "## Nightly BMG Benchmark"
             echo
             echo "- Suite: \`${{ env.BENCHMARK_SUITE }}\`"
-            echo "- Commit: \`${GITHUB_SHA::7}\`"
+            echo "- Commit: \`${{ needs.resolve-wheel-artifact.outputs.short_sha }}\`"
+            echo "- Wheel artifact run: \`${{ needs.resolve-wheel-artifact.outputs.run_id }}\`"
             echo "- Baseline restored: \`${{ steps.restore-baseline.outputs['cache-hit'] || 'prefix-or-miss' }}\`"
             echo
             if [ -f "${{ env.BENCHMARK_RESULTS_DIR }}/regression_report.md" ]; then
@@ -180,13 +225,17 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results-${{ github.sha }}
+          name: benchmark-results-${{ needs.resolve-wheel-artifact.outputs.head_sha }}
           path: |
             benchmark-results/
           retention-days: 90
 
       - name: Prepare next baseline
-        if: success() && github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+        if: |
+          success() &&
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.event == 'schedule' &&
+          github.event.workflow_run.head_branch == github.event.repository.default_branch
         run: |
           rm -rf benchmark-baseline
           mkdir -p benchmark-baseline
@@ -195,7 +244,11 @@ jobs:
           cp "${{ env.BENCHMARK_RESULTS_DIR }}/run_info.json" benchmark-baseline/run_info.json
 
       - name: Save next main benchmark baseline
-        if: success() && github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+        if: |
+          success() &&
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.event == 'schedule' &&
+          github.event.workflow_run.head_branch == github.event.repository.default_branch
         uses: actions/cache/save@v4
         with:
           path: benchmark-baseline
