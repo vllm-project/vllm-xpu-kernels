@@ -4,7 +4,6 @@ on:
   workflow_run:
     workflows: ["run unit tests on Intel GPU."]
     types: [completed]
-    branches: [main]
   workflow_dispatch:
     inputs:
       benchmark_suite:
@@ -20,11 +19,13 @@ on:
         required: false
   pull_request:
     branches: [main]
-    types: [opened, reopened, synchronize, labeled]
+    types: [labeled]
 
 permissions:
   contents: read
   actions: write
+  issues: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -35,6 +36,7 @@ env:
   BENCHMARK_RESULTS_DIR: benchmark-results
   BENCHMARK_SUITE: ${{ github.event.inputs.benchmark_suite || 'nightly' }}
   REGRESSION_THRESHOLD: ${{ github.event.inputs.regression_threshold || '0.10' }}
+  NEED_BENCHMARK_LABEL: need_benchmark
   UNIT_TEST_WORKFLOW: run unit tests on Intel GPU.
 
 jobs:
@@ -42,14 +44,13 @@ jobs:
     runs-on: self-hosted-bmg
     if: |
       (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'schedule') ||
+       github.event.workflow_run.conclusion == 'success') ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'need_benchmark'))
+      github.event_name == 'pull_request'
     outputs:
       head_sha: ${{ steps.resolve.outputs.head_sha }}
       run_id: ${{ steps.resolve.outputs.run_id }}
+      should_run: ${{ steps.resolve.outputs.should_run }}
       short_sha: ${{ steps.resolve.outputs.short_sha }}
     steps:
       - name: Resolve unit-test wheel artifact run
@@ -59,17 +60,75 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+            const needBenchmarkLabel = process.env.NEED_BENCHMARK_LABEL;
+
+            async function hasNeedBenchmarkLabel(prNumber) {
+              const {data: issue} = await github.rest.issues.get({
+                owner,
+                repo,
+                issue_number: prNumber,
+              });
+              return issue.labels.some((label) => label.name === needBenchmarkLabel);
+            }
+
+            async function associatedPullRequestNumber(workflowRun) {
+              const pullRequests = workflowRun.pull_requests || [];
+              if (pullRequests.length) {
+                return pullRequests[0].number;
+              }
+              const {data: pullRequestsForCommit} = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner,
+                repo,
+                commit_sha: workflowRun.head_sha,
+              });
+              return pullRequestsForCommit.find((pr) => pr.state === 'open')?.number ||
+                pullRequestsForCommit[0]?.number;
+            }
+
+            function skip(message) {
+              core.notice(message);
+              core.setOutput('should_run', 'false');
+            }
 
             let runId = '';
             let headSha = context.sha;
 
             if (context.eventName === 'workflow_run') {
+              if (context.payload.workflow_run.event === 'pull_request') {
+                const prNumber = await associatedPullRequestNumber(context.payload.workflow_run);
+                if (!prNumber) {
+                  skip('Unit-test workflow run is not associated with a pull request.');
+                  return;
+                }
+                if (!(await hasNeedBenchmarkLabel(prNumber))) {
+                  skip(`Pull request #${prNumber} does not have ${needBenchmarkLabel}.`);
+                  return;
+                }
+              } else if (context.payload.workflow_run.event !== 'schedule') {
+                skip(
+                  `Ignoring unit-test workflow_run event ${context.payload.workflow_run.event}.`,
+                );
+                return;
+              }
               runId = String(context.payload.workflow_run.id);
               headSha = context.payload.workflow_run.head_sha;
             } else if (context.eventName === 'pull_request') {
+              if (context.payload.label?.name !== needBenchmarkLabel) {
+                skip(`Ignoring label ${context.payload.label?.name || '<unknown>'}.`);
+                return;
+              }
               headSha = context.payload.pull_request.head.sha;
             } else if (context.eventName === 'workflow_dispatch') {
               runId = context.payload.inputs?.test_workflow_run_id || '';
+            }
+
+            if (runId) {
+              const {data: run} = await github.rest.actions.getWorkflowRun({
+                owner,
+                repo,
+                run_id: Number(runId),
+              });
+              headSha = run.head_sha;
             }
 
             if (!runId) {
@@ -98,6 +157,12 @@ jobs:
               );
               const run = runs.find((item) => item.conclusion === 'success');
               if (!run) {
+                if (context.eventName === 'pull_request') {
+                  skip(
+                    `No successful ${process.env.UNIT_TEST_WORKFLOW} run is ready for ${headSha}; waiting for workflow_run completion.`,
+                  );
+                  return;
+                }
                 core.setFailed(
                   `No successful ${process.env.UNIT_TEST_WORKFLOW} run found for ${headSha}`,
                 );
@@ -107,12 +172,14 @@ jobs:
             }
 
             core.setOutput('head_sha', headSha);
+            core.setOutput('should_run', 'true');
             core.setOutput('short_sha', headSha.slice(0, 7));
             core.setOutput('run_id', runId);
 
   build-docker-image-bmg:
     runs-on: self-hosted-bmg
     needs: resolve-wheel-artifact
+    if: needs.resolve-wheel-artifact.outputs.should_run == 'true'
     outputs:
       image_tag: ${{ steps.set-tag.outputs.image_tag }}
     steps:
@@ -143,6 +210,7 @@ jobs:
   run-benchmarks-bmg:
     runs-on: self-hosted-bmg
     needs: [resolve-wheel-artifact, build-docker-image-bmg]
+    if: needs.resolve-wheel-artifact.outputs.should_run == 'true'
     timeout-minutes: 240
     container:
       image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-bmg.outputs.image_tag }}
@@ -264,8 +332,8 @@ jobs:
 
   clean-repo-bmg:
     runs-on: self-hosted-bmg
-    needs: run-benchmarks-bmg
-    if: always()
+    needs: [resolve-wheel-artifact, run-benchmarks-bmg]
+    if: always() && needs.resolve-wheel-artifact.outputs.should_run == 'true'
     steps:
       - name: Clean workspace
         run: |
