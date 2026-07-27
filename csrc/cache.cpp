@@ -532,16 +532,6 @@ class gather_cache_kernel {
   const int32_t* __restrict__ seq_starts;  // Optional: starting offsets per
 };
 
-constexpr int kDeepseekV4GatherHeadDim = 512;
-constexpr int kDeepseekV4GatherSubgroupSize = 32;
-constexpr int kDeepseekV4GatherVecElems = 8;
-constexpr int kDeepseekV4Fp8Dim = 448;
-constexpr int kDeepseekV4Bf16Dim = 64;
-constexpr int kDeepseekV4ScaleDim = 8;
-constexpr int kDeepseekV4QuantBlock = 64;
-constexpr int kDeepseekV4NumQuantBlocks = 7;
-constexpr int kDeepseekV4TokenDataBytes = kDeepseekV4Fp8Dim + kDeepseekV4Bf16Dim * 2;
-
 static inline int select_gather_k_cache_bf16_rows_per_group(
     int64_t max_token_hint, int64_t num_reqs, bool is_bmg_arch) {
   int rows_per_group = 2;
@@ -633,26 +623,24 @@ class dequantize_and_gather_k_cache_kernel {
     const uint8_t* cache_block_ptr =
         k_cache_ + physical_block_idx * cache_block_stride_;
     const uint8_t* token_data_ptr =
-        cache_block_ptr + static_cast<int64_t>(pos_in_block) *
-                             kDeepseekV4TokenDataBytes;
+        cache_block_ptr + static_cast<int64_t>(pos_in_block) * 576;
     const uint8_t* token_scale_ptr =
         cache_block_ptr +
-        static_cast<int64_t>(cache_block_size_) * kDeepseekV4TokenDataBytes +
-        static_cast<int64_t>(pos_in_block) * kDeepseekV4ScaleDim;
+        static_cast<int64_t>(cache_block_size_) * 576 +
+        static_cast<int64_t>(pos_in_block) * 8;
 
     at::BFloat16* out_row_ptr =
         out_ + static_cast<int64_t>(batch_idx) * out_stride0_ +
         static_cast<int64_t>(offset_ + out_row) * out_stride1_;
 
     // Dequantize 7 * 64 FP8 values with one scale byte per quant block.
-    for (int qblock_idx = 0; qblock_idx < kDeepseekV4NumQuantBlocks;
-         ++qblock_idx) {
+    for (int qblock_idx = 0; qblock_idx < 7; ++qblock_idx) {
       const float exponent = static_cast<float>(token_scale_ptr[qblock_idx]) -
                              127.0f;
       const float scale = sycl::exp2(exponent);
 
-      for (int idx = lane; idx < kDeepseekV4QuantBlock; idx += SUBGROUP_SIZE) {
-        const int col = qblock_idx * kDeepseekV4QuantBlock + idx;
+      for (int idx = lane; idx < 64; idx += SUBGROUP_SIZE) {
+        const int col = qblock_idx * 64 + idx;
         const at::Float8_e4m3fn fp8_val =
             sycl::bit_cast<at::Float8_e4m3fn>(token_data_ptr[col]);
         const float dequant = static_cast<float>(fp8_val) * scale;
@@ -662,9 +650,9 @@ class dequantize_and_gather_k_cache_kernel {
 
     // Copy the tail BF16 payload [448:512].
     const uint16_t* tail_src =
-        reinterpret_cast<const uint16_t*>(token_data_ptr + kDeepseekV4Fp8Dim);
-    at::BFloat16* tail_dst = out_row_ptr + kDeepseekV4Fp8Dim;
-    for (int idx = lane; idx < kDeepseekV4Bf16Dim; idx += SUBGROUP_SIZE) {
+        reinterpret_cast<const uint16_t*>(token_data_ptr + 448);
+    at::BFloat16* tail_dst = out_row_ptr + 448;
+    for (int idx = lane; idx < 64; idx += SUBGROUP_SIZE) {
       tail_dst[idx] = sycl::bit_cast<at::BFloat16>(tail_src[idx]);
     }
   }
@@ -1220,7 +1208,7 @@ void concat_and_cache_mla(
     cgh.parallel_for(                                                         \
         sycl::nd_range<2>(grid * block, block),                               \
         vllm::dequantize_and_gather_k_cache_kernel<                           \
-            vllm::kDeepseekV4GatherSubgroupSize,                              \
+            32,                              \
             BLOCK_SIZE_TPARAM>(                                                \
             out.data_ptr<at::BFloat16>(),                                     \
             k_cache.data_ptr<uint8_t>(),                                      \
@@ -1310,7 +1298,7 @@ void dequantize_and_gather_k_cache(
               "out batch must match seq_lens");
   TORCH_CHECK(block_table.size(0) == seq_lens.size(0),
               "block_table batch must match seq_lens");
-  TORCH_CHECK(out.size(2) == vllm::kDeepseekV4GatherHeadDim,
+  TORCH_CHECK(out.size(2) == 512,
               "out head dim must be 512");
   TORCH_CHECK(block_size > 0, "block_size must be > 0");
   TORCH_CHECK(offset >= 0, "offset must be >= 0");
@@ -1319,8 +1307,8 @@ void dequantize_and_gather_k_cache(
               "block_table must have at least one block per sequence");
 
   const int64_t min_block_bytes =
-      block_size * vllm::kDeepseekV4TokenDataBytes +
-      block_size * vllm::kDeepseekV4ScaleDim;
+      block_size * 576 +
+      block_size * 8;
   TORCH_CHECK(
       k_cache.stride(1) == 1,
       "k_cache must be byte-addressable contiguous on the last dimension");
@@ -1349,7 +1337,7 @@ void dequantize_and_gather_k_cache(
   const int64_t block_table_stride = block_table.stride(0);
 
   sycl::range<2> grid(row_tiles, num_reqs);
-  sycl::range<2> block(rows_per_group, vllm::kDeepseekV4GatherSubgroupSize);
+  sycl::range<2> block(rows_per_group, 32);
   const at::DeviceGuard device_guard(out.device());
   auto& queue = vllm::xpu::vllmGetQueue();
   CALL_DEQUANTIZE_AND_GATHER_K_CACHE();
