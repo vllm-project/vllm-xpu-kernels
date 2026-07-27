@@ -96,6 +96,12 @@ CUTE_DEVICE void MoEGEMM(
       (std::is_same_v<ElementB, float_e4m3_t> ||
        std::is_same_v<ElementB, float_e5m2_t>) &&
       std::is_same_v<ElementS, uint8_t>;
+  // FP8 weights + float scales: per-tensor (group_size<=0) or block-FP8
+  // 2D gs=128 (group_size>0). Distinguished at runtime via group_size.
+  static constexpr bool is_B_fp8_float_scale =
+      (std::is_same_v<ElementB, float_e4m3_t> ||
+       std::is_same_v<ElementB, float_e5m2_t>) &&
+      std::is_same_v<ElementS, float>;
 
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   auto wg_tile = mma.tile_mnk();
@@ -156,6 +162,19 @@ CUTE_DEVICE void MoEGEMM(
       // Scales layout [E, N, K/group_size] (host transposes from [E,K/32,N]).
       ptr_Scales_curr_batch =
           const_cast<ElementS*>(Scales) + B_offset / group_size;
+    } else if constexpr (is_B_fp8_float_scale) {
+      if (group_size > 0) {
+        // Block-FP8: scales [E, K/128, N/128] kept in that order.
+        ptr_Scales_curr_batch =
+            const_cast<ElementS*>(Scales) +
+            static_cast<int64_t>(expert_id) *
+                static_cast<int64_t>(gemm_k / group_size) *
+                static_cast<int64_t>(gemm_n / group_size);
+      } else {
+        // Per-tensor FP8: one float scale per expert.
+        ptr_Scales_curr_batch =
+            const_cast<ElementS*>(Scales) + expert_id;
+      }
     }
     ElementBI* ptr_Bias_curr_batch = nullptr;
     if (Bias != static_cast<ElementBI*>(nullptr)) {
@@ -207,6 +226,31 @@ CUTE_DEVICE void MoEGEMM(
           XE_GEMM_4BITS_CALLER(256)
         }
 #undef XE_GEMM_4BITS_CALLER
+      } else if constexpr (is_B_fp8_float_scale) {
+        if (group_size == 128) {
+          // Block-FP8: float32 2D scales [K/128, N/128] per expert.
+#define XE_GEMM_BLOCK_FP8_CALLER(GroupSize)                                 \
+  xe_gemm_4bits<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD, GroupSize>( \
+      A_tensor,                                                             \
+      B_tensor,                                                             \
+      ptr_Scales_curr_batch,                                                \
+      ptr_Bias_curr_batch,                                                  \
+      D_tensor,                                                             \
+      tile_coord,                                                           \
+      mma);
+          XE_GEMM_BLOCK_FP8_CALLER(128)
+#undef XE_GEMM_BLOCK_FP8_CALLER
+        } else {
+          // Per-tensor FP8 (one float scale per expert).
+          xe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
+              A_tensor,
+              B_tensor,
+              ptr_Scales_curr_batch,
+              ptr_Bias_curr_batch,
+              D_tensor,
+              tile_coord,
+              mma);
+        }
       } else {
         xe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
             A_tensor,

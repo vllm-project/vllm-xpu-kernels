@@ -683,7 +683,7 @@ def test_fused_moe_mxfp8(m, n, k, e, topk, dtype, has_bias):
                          ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
 def test_fused_moe_fp8block(m, n, k, e, topk, dtype, has_bias):
-    """Native block-FP8 fused MoE (init weight dequant) vs dequant-weight ref."""
+    """Native block-FP8 fused MoE (in-kernel scales) vs dequant-weight ref."""
     if not torch.xpu.is_available():
         pytest.skip("XPU required")
     seed_everything(7)
@@ -783,7 +783,9 @@ def test_fused_moe_fp8block(m, n, k, e, topk, dtype, has_bias):
         num_experts=e,
     )
     assert fused_moe_impl.is_block_fp8
-    assert fused_moe_impl._block_fp8_promoted
+    assert not fused_moe_impl._block_fp8_promoted
+    assert fused_moe_impl.gemm1_wei_scales is not None
+    assert fused_moe_impl.w13.dtype == torch.float8_e4m3fn
     assert fused_moe_impl._use_ref is False
 
     output = torch.empty_like(ref_out)
