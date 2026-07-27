@@ -22,6 +22,7 @@ from typing import Any
 class BenchmarkCommand:
     name: str
     argv: list[str]
+    required: bool = True
 
 
 def _python() -> str:
@@ -31,67 +32,6 @@ def _python() -> str:
 def _commands_for_suite(suite: str, raw_dir: Path) -> list[BenchmarkCommand]:
     python = _python()
     commands = [
-        BenchmarkCommand(
-            "grouped_topk",
-            [
-                python,
-                "benchmark/benchmark_grouped_topk.py",
-                "--save-path",
-                str(raw_dir / "grouped_topk"),
-            ],
-        ),
-        BenchmarkCommand(
-            "topk_softmax",
-            [
-                python,
-                "benchmark/benchmark_topk.py",
-                "--scoring-func",
-                "softmax",
-                "--save-path",
-                str(raw_dir / "topk"),
-            ],
-        ),
-    ]
-
-    if suite == "smoke":
-        return commands
-
-    if suite != "nightly":
-        raise ValueError(f"Unsupported benchmark suite: {suite}")
-
-    commands.extend([
-        BenchmarkCommand(
-            "topk_sigmoid",
-            [
-                python,
-                "benchmark/benchmark_topk.py",
-                "--scoring-func",
-                "sigmoid",
-                "--save-path",
-                str(raw_dir / "topk"),
-            ],
-        ),
-        BenchmarkCommand(
-            "topk_softplus_sqrt",
-            [
-                python,
-                "benchmark/benchmark_topk_softplus_sqrt.py",
-                "--save-path",
-                str(raw_dir / "topk_softplus_sqrt"),
-            ],
-        ),
-        BenchmarkCommand(
-            "gemm_onednn",
-            [
-                python,
-                "benchmark/benchmark_gemm_onednn.py",
-                "--benchmarks",
-                "bf16",
-                "fp8_w8a16",
-                "--save-path",
-                str(raw_dir / "gemm_onednn"),
-            ],
-        ),
         BenchmarkCommand(
             "cutlass_fused_moe",
             [
@@ -119,6 +59,72 @@ def _commands_for_suite(suite: str, raw_dir: Path) -> list[BenchmarkCommand]:
                 str(raw_dir / "flash_attn_varlen"),
             ],
         ),
+    ]
+
+    if suite == "smoke":
+        return commands
+
+    if suite != "nightly":
+        raise ValueError(f"Unsupported benchmark suite: {suite}")
+
+    commands.extend([
+        BenchmarkCommand(
+            "grouped_topk",
+            [
+                python,
+                "benchmark/benchmark_grouped_topk.py",
+                "--save-path",
+                str(raw_dir / "grouped_topk"),
+            ],
+            required=False,
+        ),
+        BenchmarkCommand(
+            "topk_softmax",
+            [
+                python,
+                "benchmark/benchmark_topk.py",
+                "--scoring-func",
+                "softmax",
+                "--save-path",
+                str(raw_dir / "topk"),
+            ],
+            required=False,
+        ),
+        BenchmarkCommand(
+            "topk_sigmoid",
+            [
+                python,
+                "benchmark/benchmark_topk.py",
+                "--scoring-func",
+                "sigmoid",
+                "--save-path",
+                str(raw_dir / "topk"),
+            ],
+            required=False,
+        ),
+        BenchmarkCommand(
+            "topk_softplus_sqrt",
+            [
+                python,
+                "benchmark/benchmark_topk_softplus_sqrt.py",
+                "--save-path",
+                str(raw_dir / "topk_softplus_sqrt"),
+            ],
+            required=False,
+        ),
+        BenchmarkCommand(
+            "gemm_onednn",
+            [
+                python,
+                "benchmark/benchmark_gemm_onednn.py",
+                "--benchmarks",
+                "bf16",
+                "fp8_w8a16",
+                "--save-path",
+                str(raw_dir / "gemm_onednn"),
+            ],
+            required=False,
+        ),
         BenchmarkCommand(
             "gdn_attn",
             [
@@ -127,6 +133,7 @@ def _commands_for_suite(suite: str, raw_dir: Path) -> list[BenchmarkCommand]:
                 "--save-path",
                 str(raw_dir / "gdn_attn"),
             ],
+            required=False,
         ),
         BenchmarkCommand(
             "causal_conv1d",
@@ -136,6 +143,7 @@ def _commands_for_suite(suite: str, raw_dir: Path) -> list[BenchmarkCommand]:
                 "--save-path",
                 str(raw_dir / "causal_conv1d"),
             ],
+            required=False,
         ),
         BenchmarkCommand(
             "gated_delta_rule",
@@ -145,6 +153,7 @@ def _commands_for_suite(suite: str, raw_dir: Path) -> list[BenchmarkCommand]:
                 "--save-path",
                 str(raw_dir / "gated_delta_rule"),
             ],
+            required=False,
         ),
         BenchmarkCommand(
             "lora",
@@ -179,9 +188,17 @@ def _commands_for_suite(suite: str, raw_dir: Path) -> list[BenchmarkCommand]:
                 "-o",
                 str(raw_dir / "lora"),
             ],
+            required=False,
         ),
     ])
     return commands
+
+
+def _prepare_command_outputs(command: BenchmarkCommand) -> None:
+    output_flags = {"--save-path", "--output-directory", "-o"}
+    for index, value in enumerate(command.argv[:-1]):
+        if value in output_flags:
+            Path(command.argv[index + 1]).mkdir(parents=True, exist_ok=True)
 
 
 def run_suite(args: argparse.Namespace) -> int:
@@ -196,7 +213,11 @@ def run_suite(args: argparse.Namespace) -> int:
         "suite": args.suite,
         "started_at": int(time.time()),
         "commands": [
-            {"name": command.name, "argv": command.argv}
+            {
+                "name": command.name,
+                "argv": command.argv,
+                "required": command.required,
+            }
             for command in commands
         ],
     }
@@ -206,10 +227,12 @@ def run_suite(args: argparse.Namespace) -> int:
     env = os.environ.copy()
     env.setdefault("ZE_AFFINITY_MASK", "0")
 
+    failures: list[dict[str, Any]] = []
     for command in commands:
         log_file = log_dir / f"{command.name}.log"
         print(f"::group::benchmark {command.name}", flush=True)
         print(" ".join(command.argv), flush=True)
+        _prepare_command_outputs(command)
         with log_file.open("w", encoding="utf-8") as log:
             process = subprocess.Popen(
                 command.argv,
@@ -225,11 +248,27 @@ def run_suite(args: argparse.Namespace) -> int:
             return_code = process.wait()
         print("::endgroup::", flush=True)
         if return_code != 0:
+            failures.append({
+                "name": command.name,
+                "required": command.required,
+                "return_code": return_code,
+                "log": str(log_file),
+            })
             print(
                 f"Benchmark {command.name} failed with {return_code}",
                 file=sys.stderr,
             )
-            return return_code
+            if command.required:
+                (output_dir / "run_failures.json").write_text(
+                    json.dumps(failures, indent=2) + "\n")
+                return return_code
+            print(
+                f"Continuing because {command.name} is low priority",
+                file=sys.stderr,
+            )
+
+    (output_dir / "run_failures.json").write_text(
+        json.dumps(failures, indent=2) + "\n")
 
     return 0
 

@@ -216,6 +216,14 @@ jobs:
             echo "- Wheel artifact run: \`${{ needs.resolve-wheel-artifact.outputs.run_id }}\`"
             echo "- Baseline restored: \`${{ steps.restore-baseline.outputs['cache-hit'] || 'prefix-or-miss' }}\`"
             echo
+            if [ -s "${{ env.BENCHMARK_RESULTS_DIR }}/run_failures.json" ]; then
+              echo "### Benchmark Command Failures"
+              echo
+              echo '```json'
+              cat "${{ env.BENCHMARK_RESULTS_DIR }}/run_failures.json"
+              echo '```'
+              echo
+            fi
             if [ -f "${{ env.BENCHMARK_RESULTS_DIR }}/regression_report.md" ]; then
               cat "${{ env.BENCHMARK_RESULTS_DIR }}/regression_report.md"
             fi
