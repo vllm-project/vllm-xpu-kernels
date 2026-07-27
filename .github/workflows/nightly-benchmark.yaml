@@ -1,0 +1,213 @@
+name: nightly benchmark on Intel BMG
+
+on:
+  schedule:
+    # Beijing time 03:00, which is 19:00 UTC on the previous day.
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+    inputs:
+      benchmark_suite:
+        description: 'Benchmark suite to run: smoke or nightly'
+        required: false
+        default: 'nightly'
+      regression_threshold:
+        description: 'Allowed relative regression before failing the job'
+        required: false
+        default: '0.10'
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, labeled]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: localhost:5000
+  BENCHMARK_RESULTS_DIR: benchmark-results
+  BENCHMARK_SUITE: ${{ github.event.inputs.benchmark_suite || 'nightly' }}
+  REGRESSION_THRESHOLD: ${{ github.event.inputs.regression_threshold || '0.10' }}
+
+jobs:
+  build-docker-image-bmg:
+    runs-on: self-hosted-bmg
+    if: |
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'need_benchmark')
+    outputs:
+      image_tag: ${{ steps.set-tag.outputs.image_tag }}
+    steps:
+      - name: Clean workspace
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          git clean -ffdx || true
+          git reset --hard || true
+
+
+      - name: Checkout tested commit
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          set-safe-directory: true
+          clean: true
+
+      - name: Set image tag
+        id: set-tag
+        run: echo "image_tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build benchmark docker image
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::7}
+          docker build -t "xpu-kernel-ci-image:${IMAGE_TAG}" -f Dockerfile.xpu .
+          docker tag "xpu-kernel-ci-image:${IMAGE_TAG}" "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
+          docker push "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
+
+  build-wheel-bmg:
+    runs-on: self-hosted-bmg
+    needs: build-docker-image-bmg
+    timeout-minutes: 90
+    container:
+      image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-bmg.outputs.image_tag }}
+      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          set-safe-directory: true
+
+      - name: Build wheel
+        run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          export CCACHE_DIR=/root/.ccache
+          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
+          export CCACHE_NOHASHDIR=1
+          export CCACHE_COMPILERCHECK=content
+          ccache -s || true
+          git submodule sync && git submodule update --init --recursive
+          uv pip install -r requirements.txt
+          rm -rf dist/*
+          MAX_JOBS=128 uv build --no-build-isolation --wheel -v
+          ccache -s || true
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-wheel
+          path: dist/*.whl
+          retention-days: 30
+
+  run-benchmarks-bmg:
+    runs-on: self-hosted-bmg
+    needs: [build-docker-image-bmg, build-wheel-bmg]
+    timeout-minutes: 240
+    container:
+      image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-bmg.outputs.image_tag }}
+      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          set-safe-directory: true
+
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-wheel
+          path: dist/
+
+      - name: Install wheel
+        run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          uv pip install -r requirements.txt
+          WHEEL=$(find dist -name '*.whl' -print -quit)
+          VLLM_USE_PRECOMPILED=1 \
+          VLLM_PRECOMPILED_WHEEL_LOCATION="${WHEEL}" \
+          uv pip install --no-build-isolation -e . -v
+
+      - name: Restore main benchmark baseline
+        id: restore-baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: benchmark-baseline
+          key: benchmark-baseline-${{ github.event.repository.default_branch }}-${{ github.sha }}
+          restore-keys: |
+            benchmark-baseline-${{ github.event.repository.default_branch }}-
+
+      - name: Run benchmark suite
+        env:
+          ZE_AFFINITY_MASK: '0'
+        run: |
+          python tools/benchmark_ci.py run \
+            --suite "${{ env.BENCHMARK_SUITE }}" \
+            --output-dir "${{ env.BENCHMARK_RESULTS_DIR }}"
+
+      - name: Normalize benchmark results
+        env:
+          ZE_AFFINITY_MASK: '0'
+        run: |
+          python tools/benchmark_ci.py normalize \
+            --input-dir "${{ env.BENCHMARK_RESULTS_DIR }}/raw" \
+            --output-dir "${{ env.BENCHMARK_RESULTS_DIR }}"
+
+      - name: Compare with main baseline
+        run: |
+          python tools/benchmark_ci.py compare \
+            --current "${{ env.BENCHMARK_RESULTS_DIR }}/results.jsonl" \
+            --baseline "benchmark-baseline/results.jsonl" \
+            --threshold "${{ env.REGRESSION_THRESHOLD }}" \
+            --output-dir "${{ env.BENCHMARK_RESULTS_DIR }}" \
+            --fail-on-regression
+
+      - name: Add benchmark summary
+        if: always()
+        run: |
+          {
+            echo "## Nightly BMG Benchmark"
+            echo
+            echo "- Suite: \`${{ env.BENCHMARK_SUITE }}\`"
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+            echo "- Baseline restored: \`${{ steps.restore-baseline.outputs['cache-hit'] || 'prefix-or-miss' }}\`"
+            echo
+            if [ -f "${{ env.BENCHMARK_RESULTS_DIR }}/regression_report.md" ]; then
+              cat "${{ env.BENCHMARK_RESULTS_DIR }}/regression_report.md"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: |
+            benchmark-results/
+          retention-days: 90
+
+      - name: Prepare next baseline
+        if: success() && github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+        run: |
+          rm -rf benchmark-baseline
+          mkdir -p benchmark-baseline
+          cp "${{ env.BENCHMARK_RESULTS_DIR }}/results.jsonl" benchmark-baseline/results.jsonl
+          cp "${{ env.BENCHMARK_RESULTS_DIR }}/results.csv" benchmark-baseline/results.csv
+          cp "${{ env.BENCHMARK_RESULTS_DIR }}/run_info.json" benchmark-baseline/run_info.json
+
+      - name: Save next main benchmark baseline
+        if: success() && github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: benchmark-baseline
+          key: benchmark-baseline-${{ github.event.repository.default_branch }}-${{ github.run_id }}
+
+  clean-repo-bmg:
+    runs-on: self-hosted-bmg
+    needs: run-benchmarks-bmg
+    if: always()
+    steps:
+      - name: Clean workspace
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          git clean -ffdx || true
+          git reset --hard || true
