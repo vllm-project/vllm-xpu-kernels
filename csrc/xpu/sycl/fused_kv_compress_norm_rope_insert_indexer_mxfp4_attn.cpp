@@ -1013,16 +1013,16 @@ void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn_impl(
       c10::xpu::getCurrentXPUStream(state_cache.device().index()).queue();
 
   const bf16* state_ptr =
-      reinterpret_cast<const bf16*>(state_cache.const_data_ptr<at::BFloat16>());
-  const int32_t* token_to_req = token_to_req_indices.const_data_ptr<int32_t>();
-  const int64_t* pos_ptr = positions.const_data_ptr<int64_t>();
-  const int64_t* slot_ptr = slot_mapping.const_data_ptr<int64_t>();
-  const int32_t* btable = block_table.const_data_ptr<int32_t>();
-  const bf16* rms_ptr = reinterpret_cast<const bf16*>(
-      rms_norm_weight.const_data_ptr<at::BFloat16>());
-  const float* cs_ptr = cos_sin_cache.const_data_ptr<float>();
+      reinterpret_cast<const bf16*>(state_cache.data_ptr<at::BFloat16>());
+  const int32_t* token_to_req = token_to_req_indices.data_ptr<int32_t>();
+  const int64_t* pos_ptr = positions.data_ptr<int64_t>();
+  const int64_t* slot_ptr = slot_mapping.data_ptr<int64_t>();
+  const int32_t* btable = block_table.data_ptr<int32_t>();
+  const bf16* rms_ptr =
+      reinterpret_cast<const bf16*>(rms_norm_weight.data_ptr<at::BFloat16>());
+  const float* cs_ptr = cos_sin_cache.data_ptr<float>();
   uint8_t* kv_ptr = kv_cache.data_ptr<uint8_t>();
-  const int64_t* kv_slot_ptr = kv_slot_mapping.const_data_ptr<int64_t>();
+  const int64_t* kv_slot_ptr = kv_slot_mapping.data_ptr<int64_t>();
 
 // Macro for small CR kernel (CR <= 8)
 #define LAUNCH_SMALL_CASE(CR, OV)                    \
