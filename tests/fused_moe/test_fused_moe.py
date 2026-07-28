@@ -600,7 +600,7 @@ def test_fused_moe_mxfp8(m, n, k, e, topk, dtype, has_bias):
         w2_hp = torch.randn(intermediate_size,
                             hidden_size,
                             dtype=torch.float32) / 16
-        # to_mxfp blocks last dim; weight E8M0 is along K (dim 0) → quantize [N,K].
+        # to_mxfp blocks last dim; E8M0 along K (dim 0) → quantize [N, K].
         sc13, lp13 = to_mxfp(w13_hp.transpose(0, 1).contiguous(),
                              format="mxfp8")
         sc2, lp2 = to_mxfp(w2_hp.transpose(0, 1).contiguous(), format="mxfp8")
