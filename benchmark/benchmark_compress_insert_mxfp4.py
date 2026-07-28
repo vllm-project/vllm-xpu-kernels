@@ -13,7 +13,6 @@ Usage:
 """
 
 import argparse
-import time
 
 import torch
 
@@ -76,25 +75,55 @@ def run_kernel(args):
         *args)
 
 
+def _bytes_per_input_set(num_tokens, kv_block_size, compress_ratio, overlap):
+    """Approximate device bytes for one input set (dominated by state_cache)."""
+    coff = 1 + overlap
+    state_width = coff * HEAD_DIM
+    num_pages = (compress_ratio * num_tokens - 1) // BLOCK_SIZE + 2
+    state_bytes = num_pages * BLOCK_SIZE * (2 * state_width) * 2  # bf16
+    kv_n_blocks = (num_tokens + kv_block_size - 1) // kv_block_size + 1
+    kv_bytes = kv_n_blocks * kv_block_size * (TOKEN_STRIDE + SCALE_DIM)
+    return state_bytes + kv_bytes
+
+
+# Rotate enough distinct input sets to exceed on-chip (L2) cache; otherwise
+# state_cache stays L2-resident across REPEAT and BW reflects L2, not HBM.
+L2_BYPASS_BYTES = 512 * 1024 * 1024
+MAX_INPUT_SETS = 64
+
+
+def _num_input_sets(num_tokens, kv_block_size, compress_ratio, overlap):
+    per = _bytes_per_input_set(
+        num_tokens, kv_block_size, compress_ratio, overlap)
+    n = (L2_BYPASS_BYTES + per - 1) // per
+    return max(1, min(MAX_INPUT_SETS, n))
+
+
 def benchmark_config(num_tokens, kv_block_size, compress_ratio, device):
     """Benchmark a single configuration, return (time_us, gbps)."""
     overlap = 1 if compress_ratio == 4 else 0
     n_gather = (1 + overlap) * compress_ratio
 
-    args = setup_inputs(num_tokens, kv_block_size, compress_ratio, overlap,
-                        device)
+    n_sets = _num_input_sets(num_tokens, kv_block_size, compress_ratio, overlap)
+    arg_sets = [
+        setup_inputs(num_tokens, kv_block_size, compress_ratio, overlap, device)
+        for _ in range(n_sets)
+    ]
 
     # Warmup
     for _ in range(WARMUP):
-        run_kernel(args)
+        run_kernel(arg_sets[0])
     torch.xpu.synchronize()
 
-    # Timed
-    start = time.perf_counter()
-    for _ in range(REPEAT):
-        run_kernel(args)
+    # Rotate input sets to defeat L2 caching; time with device events.
+    start_evt = torch.xpu.Event(enable_timing=True)
+    end_evt = torch.xpu.Event(enable_timing=True)
+    start_evt.record()
+    for i in range(REPEAT):
+        run_kernel(arg_sets[i % n_sets])
+    end_evt.record()
     torch.xpu.synchronize()
-    elapsed = (time.perf_counter() - start) / REPEAT
+    elapsed = start_evt.elapsed_time(end_evt) / 1e3 / REPEAT  # ms -> s
 
     # Compute effective bandwidth
     # Read: num_tokens * n_gather * 2 * HEAD_DIM * 2 bytes (kv+score, bf16)
@@ -132,6 +161,9 @@ def main():
     token_counts = [1, 4, 16, 64, 128, 256, 1024, 2048, 4096]
     kv_block_size = 32
 
+    print(
+        "Rotating input sets to bypass L2; GB/s reflects HBM traffic."
+    )
     print(f"{'CR':>4} | {'Tokens':>6} | {'Time (us)':>10} | {'GB/s':>8}")
     print("-" * 40)
 
