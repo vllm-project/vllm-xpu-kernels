@@ -440,90 +440,86 @@ void launch_kda_conv(
       TORCH_CHECK(false, "unsupported KDA convolution width"); \
   }
 
-#define LAUNCH_TILED_CONV(WIDTH, BATCH_SIZE, NUM_TOKENS)       \
-    kda::launch_causal_conv1d_tiled<T, CacheT, WIDTH>(           \
-            queue,                                                   \
-            reinterpret_cast<T*>(q.data_ptr()),                      \
-            reinterpret_cast<T*>(k.data_ptr()),                      \
-            reinterpret_cast<T*>(v.data_ptr()),                      \
-            reinterpret_cast<const T*>(q_proj.data_ptr()),           \
-            reinterpret_cast<const T*>(k_proj.data_ptr()),           \
-            reinterpret_cast<const T*>(v_proj.data_ptr()),           \
-            reinterpret_cast<const float*>(q_conv_weight.data_ptr()),\
-            reinterpret_cast<const float*>(k_conv_weight.data_ptr()),\
-            reinterpret_cast<const float*>(v_conv_weight.data_ptr()),\
-            reinterpret_cast<CacheT*>(conv_state.data_ptr()),        \
-            conv_state.stride(0),                                    \
-            conv_state_dim_stride,                                   \
-            conv_state_time_stride,                                  \
-            reinterpret_cast<const int*>(                            \
-                    non_spec_query_start_loc->data_ptr()),                \
-            non_spec_token_indx.has_value()                           \
-                    ? reinterpret_cast<const int*>(                       \
-                                non_spec_token_indx->data_ptr())                 \
-                    : nullptr,                                            \
-            reinterpret_cast<const int*>(                            \
-                    non_spec_state_indices->data_ptr()),                  \
-            has_initial_state.has_value()                             \
-                    ? reinterpret_cast<const bool*>(                      \
-                                has_initial_state->data_ptr())                   \
-                    : nullptr,                                            \
-            BATCH_SIZE,                                               \
-            NUM_TOKENS,                                               \
-            hidden_dim)
+#define LAUNCH_TILED_CONV(WIDTH, BATCH_SIZE, NUM_TOKENS)                  \
+  kda::launch_causal_conv1d_tiled<T, CacheT, WIDTH>(                      \
+      queue,                                                              \
+      reinterpret_cast<T*>(q.data_ptr()),                                 \
+      reinterpret_cast<T*>(k.data_ptr()),                                 \
+      reinterpret_cast<T*>(v.data_ptr()),                                 \
+      reinterpret_cast<const T*>(q_proj.data_ptr()),                      \
+      reinterpret_cast<const T*>(k_proj.data_ptr()),                      \
+      reinterpret_cast<const T*>(v_proj.data_ptr()),                      \
+      reinterpret_cast<const float*>(q_conv_weight.data_ptr()),           \
+      reinterpret_cast<const float*>(k_conv_weight.data_ptr()),           \
+      reinterpret_cast<const float*>(v_conv_weight.data_ptr()),           \
+      reinterpret_cast<CacheT*>(conv_state.data_ptr()),                   \
+      conv_state.stride(0),                                               \
+      conv_state_dim_stride,                                              \
+      conv_state_time_stride,                                             \
+      reinterpret_cast<const int*>(non_spec_query_start_loc->data_ptr()), \
+      non_spec_token_indx.has_value()                                     \
+          ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr()) \
+          : nullptr,                                                      \
+      reinterpret_cast<const int*>(non_spec_state_indices->data_ptr()),   \
+      has_initial_state.has_value()                                       \
+          ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())  \
+          : nullptr,                                                      \
+      BATCH_SIZE,                                                         \
+      NUM_TOKENS,                                                         \
+      hidden_dim)
 
 #define TILED_WIDTH_DISPATCH(BATCH_SIZE, NUM_TOKENS)           \
-    switch (width) {                                             \
-        case 2:                                                    \
-            LAUNCH_TILED_CONV(2, BATCH_SIZE, NUM_TOKENS);            \
-            break;                                                   \
-        case 3:                                                    \
-            LAUNCH_TILED_CONV(3, BATCH_SIZE, NUM_TOKENS);            \
-            break;                                                   \
-        case 4:                                                    \
-            LAUNCH_TILED_CONV(4, BATCH_SIZE, NUM_TOKENS);            \
-            break;                                                   \
-        case 5:                                                    \
-            LAUNCH_TILED_CONV(5, BATCH_SIZE, NUM_TOKENS);            \
-            break;                                                   \
-        default:                                                   \
-            TORCH_CHECK(false, "unsupported KDA convolution width"); \
-    }
+  switch (width) {                                             \
+    case 2:                                                    \
+      LAUNCH_TILED_CONV(2, BATCH_SIZE, NUM_TOKENS);            \
+      break;                                                   \
+    case 3:                                                    \
+      LAUNCH_TILED_CONV(3, BATCH_SIZE, NUM_TOKENS);            \
+      break;                                                   \
+    case 4:                                                    \
+      LAUNCH_TILED_CONV(4, BATCH_SIZE, NUM_TOKENS);            \
+      break;                                                   \
+    case 5:                                                    \
+      LAUNCH_TILED_CONV(5, BATCH_SIZE, NUM_TOKENS);            \
+      break;                                                   \
+    default:                                                   \
+      TORCH_CHECK(false, "unsupported KDA convolution width"); \
+  }
 
   const int non_spec_batch_size = num_prefills + num_decodes;
   if (non_spec_batch_size > 0) {
-        const int non_spec_tokens = non_spec_token_indx.has_value()
-                                                                        ? non_spec_token_indx->numel()
-                                                                        : q.size(0);
-        const bool tiled_batch_supported =
-            non_spec_batch_size <= kda::conv1d_tiled_max_batch_size;
-        const int64_t tiled_token_threshold = tiled_batch_supported
-                                                  ? static_cast<int64_t>(
-                                                        kda::conv1d_tiled_min_tokens_per_batch_squared) *
-                                                        non_spec_batch_size *
-                                                        non_spec_batch_size
-                                                  : std::numeric_limits<int64_t>::max();
-        const bool use_tiled =
-                num_prefills > 0 && num_decodes == 0 && num_spec_decodes == 0 &&
-            tiled_batch_supported && non_spec_tokens >= tiled_token_threshold &&
-            q.scalar_type() == conv_state.scalar_type();
-        if (use_tiled) {
-            TILED_WIDTH_DISPATCH(non_spec_batch_size, non_spec_tokens);
-        } else {
-            WIDTH_DISPATCH(
-                    false,
-                    reinterpret_cast<const int*>(non_spec_query_start_loc->data_ptr()),
-                    non_spec_token_indx.has_value()
-                            ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
-                            : nullptr,
-                    reinterpret_cast<const int*>(non_spec_state_indices->data_ptr()),
-                    0,
-                    has_initial_state.has_value()
-                            ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())
-                            : nullptr,
-                    nullptr,
-                    non_spec_batch_size);
-        }
+    const int non_spec_tokens = non_spec_token_indx.has_value()
+                                    ? non_spec_token_indx->numel()
+                                    : q.size(0);
+    const bool tiled_batch_supported =
+        non_spec_batch_size <= kda::conv1d_tiled_max_batch_size;
+    const int64_t tiled_token_threshold =
+        tiled_batch_supported
+            ? static_cast<int64_t>(
+                  kda::conv1d_tiled_min_tokens_per_batch_squared) *
+                  non_spec_batch_size * non_spec_batch_size
+            : std::numeric_limits<int64_t>::max();
+    const bool use_tiled = num_prefills > 0 && num_decodes == 0 &&
+                           num_spec_decodes == 0 && tiled_batch_supported &&
+                           non_spec_tokens >= tiled_token_threshold &&
+                           q.scalar_type() == conv_state.scalar_type();
+    if (use_tiled) {
+      TILED_WIDTH_DISPATCH(non_spec_batch_size, non_spec_tokens);
+    } else {
+      WIDTH_DISPATCH(
+          false,
+          reinterpret_cast<const int*>(non_spec_query_start_loc->data_ptr()),
+          non_spec_token_indx.has_value()
+              ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
+              : nullptr,
+          reinterpret_cast<const int*>(non_spec_state_indices->data_ptr()),
+          0,
+          has_initial_state.has_value()
+              ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())
+              : nullptr,
+          nullptr,
+          non_spec_batch_size);
+    }
   }
   if (num_spec_decodes > 0) {
     WIDTH_DISPATCH(

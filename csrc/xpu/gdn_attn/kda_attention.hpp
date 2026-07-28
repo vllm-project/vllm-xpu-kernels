@@ -373,8 +373,7 @@ struct causal_conv1d_tiled_kernel {
     const bool load_initial_state =
         has_initial_state == nullptr || has_initial_state[batch_id];
 
-    const int local_channel_base =
-        local_id * conv1d_tiled_channels_per_item;
+    const int local_channel_base = local_id * conv1d_tiled_channels_per_item;
     const int combined_channel_base =
         feature_chunk * conv1d_tiled_channels_per_wg + local_channel_base;
     constexpr int window_slots = TileT + Width - 1;
@@ -390,7 +389,7 @@ struct causal_conv1d_tiled_kernel {
           if (token_in_sequence < 0) {
             const int state_time = token_in_sequence + Width - 1;
             if (load_initial_state) {
-                value = static_cast<T>(
+              value = static_cast<T>(
                   conv_state
                       [static_cast<int64_t>(state_id) * conv_state_stride_0 +
                        static_cast<int64_t>(combined_channel) *
@@ -405,8 +404,9 @@ struct causal_conv1d_tiled_kernel {
             const T* input =
                 stream == 0 ? q_proj : (stream == 1 ? k_proj : v_proj);
             value = static_cast<T>(
-                input[static_cast<int64_t>(global_token) * hidden_dim +
-                      channel]);
+                input
+                    [static_cast<int64_t>(global_token) * hidden_dim +
+                     channel]);
           }
         }
         input_window
@@ -450,9 +450,10 @@ struct causal_conv1d_tiled_kernel {
         float acc = 0.0f;
 #pragma unroll
         for (int offset = 0; offset < Width; ++offset) {
-          acc += static_cast<float>(input_window
-               [(token + offset) * conv1d_tiled_channels_per_wg +
-                local_channel_base + lane]) *
+          acc += static_cast<float>(
+                     input_window
+                         [(token + offset) * conv1d_tiled_channels_per_wg +
+                          local_channel_base + lane]) *
                  local_weights[lane][offset];
         }
         const int stream = combined_channel / hidden_dim;
@@ -612,16 +613,15 @@ void launch_causal_conv1d_tiled(
   using TiledKernel = causal_conv1d_tiled_kernel<T, CacheT, Width, TileT>;
   const int num_tiles = ceil_div(num_tokens, TileT) + batch_size;
   const auto tiled_range = TiledKernel::get_nd_range(num_tiles, hidden_dim);
-  constexpr int slm_bytes =
-      4 * sizeof(int) +
-      (TileT + Width - 1) * conv1d_tiled_channels_per_wg * sizeof(T);
+  constexpr int slm_bytes = 4 * sizeof(int) + (TileT + Width - 1) *
+                                                  conv1d_tiled_channels_per_wg *
+                                                  sizeof(T);
   constexpr int slm_words =
       (slm_bytes + sizeof(uint32_t) - 1) / sizeof(uint32_t);
   queue.submit([&](sycl::handler& cgh) {
-    sycl::local_accessor<uint32_t, 1> slm(
-        sycl::range<1>(slm_words), cgh);
+    sycl::local_accessor<uint32_t, 1> slm(sycl::range<1>(slm_words), cgh);
     cgh.parallel_for(tiled_range, [=](sycl::nd_item<2> item) {
-        T* slm_ptr = reinterpret_cast<T*>(
+      T* slm_ptr = reinterpret_cast<T*>(
           slm.template get_multi_ptr<sycl::access::decorated::no>().get_raw());
       TiledKernel task(
           q,
