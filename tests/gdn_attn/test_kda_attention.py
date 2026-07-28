@@ -300,6 +300,7 @@ def _to_page_strided_xpu_cache(tensor: torch.Tensor) -> torch.Tensor:
         (torch.float16, 32, False, "prefill"),
         (torch.bfloat16, 128, True, "decode"),
         (torch.float16, 64, True, "prefill+decode"),
+        (torch.bfloat16, 128, True, "long-prefill"),
     ],
     ids=lambda value: (
         format_tc(value) if isinstance(value, torch.dtype) else str(value)
@@ -314,6 +315,7 @@ def test_kda_attention_non_spec(
         "prefill": 5,
         "decode": 3,
         "prefill+decode": 5,
+        "long-prefill": 131,
     }[mode]
     num_heads = 2
     (
@@ -334,7 +336,14 @@ def test_kda_attention_non_spec(
         dim_first,
         device=device,
     )
-    if mode == "prefill":
+    if mode == "long-prefill":
+        query_start_loc = torch.tensor(
+            [0, num_actual_tokens], dtype=torch.int32, device=device
+        )
+        state_indices = torch.tensor([1], dtype=torch.int32, device=device)
+        has_initial_state = torch.tensor([True], device=device)
+        num_prefills, num_decodes = 1, 0
+    elif mode == "prefill":
         query_start_loc = torch.tensor(
             [0, 2, 5], dtype=torch.int32, device=device
         )
@@ -436,6 +445,95 @@ def test_kda_attention_non_spec(
         reference_recurrent_state,
         atol=tolerance,
         rtol=tolerance,
+    )
+
+
+@torch.inference_mode()
+def test_kda_long_prefill_mixed_conv_cache_dtype():
+    device = torch.device("xpu")
+    num_actual_tokens = 131
+    num_heads = 2
+    head_dim = 128
+    (
+        projections,
+        raw_gate,
+        beta,
+        weights,
+        conv_state,
+        recurrent_state,
+        a_log,
+        dt_bias,
+        core_attn_out,
+    ) = _make_inputs(
+        num_actual_tokens,
+        num_heads,
+        head_dim,
+        torch.bfloat16,
+        True,
+        device=device,
+    )
+    conv_state = conv_state.float()
+    query_start_loc = torch.tensor(
+        [0, num_actual_tokens], dtype=torch.int32, device=device
+    )
+    state_indices = torch.tensor([1], dtype=torch.int32, device=device)
+    has_initial_state = torch.tensor([True], device=device)
+
+    reference_output = core_attn_out.clone()
+    reference_conv_state = conv_state.clone()
+    reference_recurrent_state = recurrent_state.clone()
+    reference_conv_outputs = _reference_kda(
+        reference_output,
+        *projections,
+        raw_gate,
+        beta,
+        reference_conv_state,
+        reference_recurrent_state,
+        *weights,
+        a_log,
+        dt_bias,
+        query_start_loc,
+        None,
+        state_indices,
+        has_initial_state,
+        None,
+        None,
+        None,
+        None,
+        num_heads,
+        head_dim,
+    )
+
+    actual_conv_state = conv_state.clone()
+    actual_conv_outputs = torch.ops._xpu_C.kda_causal_conv1d(
+        *projections,
+        actual_conv_state,
+        *weights,
+        1,
+        0,
+        0,
+        has_initial_state,
+        query_start_loc,
+        None,
+        state_indices,
+        None,
+        None,
+        None,
+        None,
+        num_actual_tokens,
+    )
+
+    for actual, reference in zip(
+        actual_conv_outputs, reference_conv_outputs
+    ):
+        torch.testing.assert_close(
+            actual,
+            reference[:num_actual_tokens],
+            atol=1e-2,
+            rtol=1e-2,
+        )
+    torch.testing.assert_close(
+        actual_conv_state, reference_conv_state, atol=1e-6, rtol=1e-6
     )
 
 
