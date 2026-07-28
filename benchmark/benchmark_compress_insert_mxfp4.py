@@ -8,7 +8,7 @@ Measures throughput (GB/s) of the fused DeepSeek-V4 indexer MXFP4 path:
 
 Usage:
   python benchmark/benchmark_compress_insert_mxfp4.py
-  python benchmark/benchmark_compress_insert_mxfp4.py --compress-ratio 128
+  python benchmark/benchmark_compress_insert_mxfp4.py --compress-ratio 4
   python benchmark/benchmark_compress_insert_mxfp4.py --check-correctness
 """
 
@@ -128,8 +128,7 @@ def main():
         )
         raise SystemExit(result.returncode)
 
-    compress_ratios = ([args.compress_ratio] if args.compress_ratio
-                       else [4, 8, 16, 32, 64, 128])
+    compress_ratios = [args.compress_ratio] if args.compress_ratio else [4]
     token_counts = [1, 4, 16, 64, 128, 256, 1024, 2048, 4096]
     kv_block_size = 32
 

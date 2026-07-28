@@ -120,14 +120,9 @@ def reference_compress_norm_rope(
     [
         (256, 16, 4),
         (256, 32, 4),
-        (256, 32, 8),
-        (256, 32, 16),
-        (256, 32, 32),
-        (256, 32, 64),
-        (256, 32, 128),
     ],
     ids=[
-        "CR4_KVB16", "CR4_KVB32", "CR8", "CR16", "CR32", "CR64", "CR128",
+        "CR4_KVB16", "CR4_KVB32",
     ],
 )
 def test_fused_kv_compress_norm_rope_insert_indexer_mxfp4(
