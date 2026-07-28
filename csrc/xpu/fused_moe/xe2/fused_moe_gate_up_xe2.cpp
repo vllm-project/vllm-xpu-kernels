@@ -1,7 +1,7 @@
-#include "fused_moe_up_xe2.h"
-#include "csrc/xpu/fused_moe/common/fused_moe_up_impl.h"
+#include "fused_moe_gate_up_xe2.h"
+#include "csrc/xpu/fused_moe/common/fused_moe_gate_up_impl.h"
 
-torch::Tensor fused_moe_up_xe2(
+torch::Tensor fused_moe_gate_up_xe2(
     torch::Tensor& ptr_A,
     const c10::optional<at::Tensor>& ptr_A_scale,
     torch::Tensor& ptr_B,
@@ -14,7 +14,7 @@ torch::Tensor fused_moe_up_xe2(
     int64_t num_experts,
     std::string activation,
     double gemm1_clamp_limit) {
-  return FusedMOE::fused_moe_up_impl(
+  return FusedMOE::fused_moe_gate_up_impl(
       ptr_A,
       ptr_A_scale,
       ptr_B,

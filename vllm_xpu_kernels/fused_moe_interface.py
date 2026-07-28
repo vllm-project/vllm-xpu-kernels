@@ -364,7 +364,7 @@ class XpuFusedMoe:
             dtype=output.dtype,
             device=output.device)
 
-        torch.ops._xpu_C.fused_moe_up(
+        torch.ops._xpu_C.fused_moe_gate_up(
             ptr_A=remapped_hidden_states,
             ptr_A_scale=remapped_scales,
             ptr_B=self.w13,

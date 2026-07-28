@@ -5,7 +5,7 @@
 
 FUSED_MOE_NS_BEGIN
 
-torch::Tensor fused_moe_up_impl(
+torch::Tensor fused_moe_gate_up_impl(
     torch::Tensor& ptr_A,
     const c10::optional<at::Tensor>& ptr_A_scale,
     torch::Tensor& ptr_B,

@@ -1,26 +1,26 @@
 #include "csrc/utils.h"
-#include "fused_moe_up_impl.h"
-#include "fused_moe_up_impl_dispatch.h"
+#include "fused_moe_gate_up_impl.h"
+#include "fused_moe_gate_up_impl_dispatch.h"
 
 namespace {
 
-FusedMOE::FusedMOEUpDispatchFn get_fused_moe_up_dispatch(
+FusedMOE::FusedMOEGateUpDispatchFn get_fused_moe_gate_up_dispatch(
     FusedMOE::FusedMOEWeightType weight_type, const std::string& activation) {
   using namespace FusedMOE;
 
-#define SELECT_ACTIVATION(WeightType, suffix)    \
-  if (activation == "silu") {                    \
-    return fused_moe_up_##suffix##_silu;         \
-  } else if (activation == "gelu") {             \
-    return fused_moe_up_##suffix##_gelu;         \
-  } else if (activation == "gelu_tanh") {        \
-    return fused_moe_up_##suffix##_gelu_tanh;    \
-  } else if (activation == "swigluoai") {        \
-    return fused_moe_up_##suffix##_swigluoai;    \
-  } else if (activation == "relu2_no_mul") {     \
-    return fused_moe_up_##suffix##_relu2_no_mul; \
-  } else if (activation == "swiglustep") {       \
-    return fused_moe_up_##suffix##_swiglustep;   \
+#define SELECT_ACTIVATION(WeightType, suffix)         \
+  if (activation == "silu") {                         \
+    return fused_moe_gate_up_##suffix##_silu;         \
+  } else if (activation == "gelu") {                  \
+    return fused_moe_gate_up_##suffix##_gelu;         \
+  } else if (activation == "gelu_tanh") {             \
+    return fused_moe_gate_up_##suffix##_gelu_tanh;    \
+  } else if (activation == "swigluoai") {             \
+    return fused_moe_gate_up_##suffix##_swigluoai;    \
+  } else if (activation == "relu2_no_mul") {          \
+    return fused_moe_gate_up_##suffix##_relu2_no_mul; \
+  } else if (activation == "swiglustep") {            \
+    return fused_moe_gate_up_##suffix##_swiglustep;   \
   }
 
   switch (weight_type) {
@@ -43,7 +43,7 @@ FusedMOE::FusedMOEUpDispatchFn get_fused_moe_up_dispatch(
 
 FUSED_MOE_NS_BEGIN
 
-torch::Tensor fused_moe_up_impl(
+torch::Tensor fused_moe_gate_up_impl(
     torch::Tensor& ptr_A,
     const c10::optional<at::Tensor>& ptr_A_scale,
     torch::Tensor& ptr_B,
@@ -167,7 +167,7 @@ torch::Tensor fused_moe_up_impl(
       is_B_int4 || is_B_mxfp4 ? FusedMOE::FusedMOEWeightType::W4A16
       : is_weight_fp8         ? FusedMOE::FusedMOEWeightType::W8A16
                               : FusedMOE::FusedMOEWeightType::W16A16;
-  FusedMOE::FusedMOEUpLaunchParams params{
+  FusedMOE::FusedMOEGateUpLaunchParams params{
       dpcpp_queue,
       ptr_A.data_ptr(),
       ptr_B.data_ptr(),
@@ -186,7 +186,7 @@ torch::Tensor fused_moe_up_impl(
       has_clamping,
       A_dtype == at::kBFloat16,
       is_B_int4 || B_dtype == at::kFloat8_e4m3fn};
-  auto dispatch = get_fused_moe_up_dispatch(weight_type, activation);
+  auto dispatch = get_fused_moe_gate_up_dispatch(weight_type, activation);
   TORCH_CHECK(dispatch != nullptr, "Unsupported activation: ", activation);
   dispatch(params);
 

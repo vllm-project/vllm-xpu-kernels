@@ -63,7 +63,7 @@ template <
     class TiledMMA,
     typename ElementS,
     typename ElementBI>
-CUTE_DEVICE void gemm_up(
+CUTE_DEVICE void gemm_gate_up(
     ATensor const& A,   // (M,K)
     BTensor const& B1,  // (N,K)
     BTensor const& B2,  // (N,K)
@@ -286,7 +286,7 @@ template <
     class TiledMMA,
     typename ElementS,
     typename ElementBI>
-CUTE_DEVICE void gemm_up_4bits(
+CUTE_DEVICE void gemm_gate_up_4bits(
     ATensor const& A,   // (M,K)
     BTensor const& B1,  // (N,K)
     BTensor const& B2,  // (N,K)

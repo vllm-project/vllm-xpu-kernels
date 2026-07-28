@@ -1,7 +1,7 @@
 #pragma once
 #include <torch/all.h>
 
-torch::Tensor fused_moe_up_xe2(
+torch::Tensor fused_moe_gate_up_xe2(
     torch::Tensor& ptr_A,
     const c10::optional<at::Tensor>& ptr_A_scale,
     torch::Tensor& ptr_B,

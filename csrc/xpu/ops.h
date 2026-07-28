@@ -328,7 +328,7 @@ void deepseek_fused_indexer_q_rope_mxfp4(
     torch::Tensor& scales_out,
     torch::Tensor& weights_out);
 
-torch::Tensor fused_moe_up(
+torch::Tensor fused_moe_gate_up(
     torch::Tensor& ptr_A,
     const c10::optional<at::Tensor>& ptr_A_scale,
     torch::Tensor& ptr_B,

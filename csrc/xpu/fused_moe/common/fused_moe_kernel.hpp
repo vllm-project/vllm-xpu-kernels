@@ -7,7 +7,7 @@
 #include "cutlass/gemm/kernel/tile_scheduler.hpp"
 #include "cutlass/kernel_hardware_info.hpp"
 #include "cutlass/platform/platform.h"
-#include "gemm_up.hpp"
+#include "gemm_gate_up.hpp"
 #include <cute/util/compat.hpp>
 
 #pragma clang diagnostic ignored "-Wpass-failed"
@@ -42,7 +42,7 @@ template <
     typename ElementS,
     typename ElementBI,
     typename ElementD>
-CUTE_DEVICE void FusedMOEUp(
+CUTE_DEVICE void FusedMOEGateUp(
     const ElementA* Activations,
     const ElementB* Weights,
     const ElementS* Scales,
@@ -194,7 +194,7 @@ CUTE_DEVICE void FusedMOEUp(
 
       if constexpr (is_B_4bits) {
 #define XE_GEMM_4BITS_CALLER(GroupSize) \
-  gemm_up_4bits<                        \
+  gemm_gate_up_4bits<                   \
       has_clamping,                     \
       activation_type,                  \
       GmemTiledCopyA,                   \
@@ -222,7 +222,7 @@ CUTE_DEVICE void FusedMOEUp(
         }
 #undef XE_GEMM_4BITS_CALLER
       } else {
-        gemm_up<
+        gemm_gate_up<
             has_clamping,
             activation_type,
             GmemTiledCopyA,

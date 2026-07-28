@@ -25,10 +25,12 @@ foreach(weight IN LISTS FUSED_MOE_UP_WEIGHTS)
   foreach(act IN LISTS FUSED_MOE_UP_ACTS)
     string(TOUPPER "${act}" FMOE_ACT_UPPER)
     set(FMOE_ACT_LOWER "${act}")
-    set(_gen_src "${FUSED_MOE_GENERATED_DIR}/fused_moe_up_${weight}_${act}.cpp")
+    set(_gen_src
+        "${FUSED_MOE_GENERATED_DIR}/fused_moe_gate_up_${weight}_${act}.cpp")
     configure_file(
-      "${CMAKE_CURRENT_SOURCE_DIR}/common/fused_moe_up_instantiation.cpp.in"
-      "${_gen_src}" @ONLY)
+      "${CMAKE_CURRENT_SOURCE_DIR}/common/fused_moe_gate_up_instantiation.cpp.in"
+      "${_gen_src}"
+      @ONLY)
     list(APPEND FUSED_MOE_GENERATED_UP_SRCS "${_gen_src}")
   endforeach()
 endforeach()
