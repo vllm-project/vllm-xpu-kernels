@@ -20,7 +20,15 @@ torch::Tensor cutlass_grouped_gemm_interface(
     int64_t K,
     int64_t num_experts,
     bool is_B_int4,
-    bool is_B_mxfp4) {
+    bool is_B_mxfp4,
+    bool is_B_fp8_block) {
+  TORCH_CHECK(
+      !is_B_fp8_block || vllm::xpu::is_xe2_arch(),
+      "FP8 block-scaled grouped GEMM requires an Xe2 device");
+  TORCH_CHECK(
+      !is_B_fp8_block || !vllm::xpu::force_xe_default_kernel(),
+      "FP8 block-scaled grouped GEMM does not support the forced XE default "
+      "kernel");
   if (vllm::xpu::force_xe_default_kernel()) {
 #ifdef VLLM_XPU_ENABLE_XE_DEFAULT
     int64_t groups = num_experts;
@@ -46,7 +54,8 @@ torch::Tensor cutlass_grouped_gemm_interface(
         K,
         num_experts,
         is_B_int4,
-        is_B_mxfp4);
+        is_B_mxfp4,
+        is_B_fp8_block);
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif

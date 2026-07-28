@@ -64,7 +64,8 @@ torch::Tensor cutlass_grouped_gemm_interface(
     int64_t K,
     int64_t num_experts,
     bool is_B_int4,
-    bool is_B_mxfp4);
+    bool is_B_mxfp4,
+    bool is_B_fp8_block);
 #endif
 
 std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(

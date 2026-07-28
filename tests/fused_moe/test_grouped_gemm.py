@@ -222,6 +222,92 @@ def test_xe_grouped_gemm_fp8(m, n, k, e, topk, dtype, fp8_dtype, has_bias):
     torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
 
 
+@pytest.mark.parametrize("n,k", [(1024, 2048), (2048, 512)])
+def test_xe_grouped_gemm_fp8_block_qwen_shape(n, k):
+    seed_everything(7)
+    rows = [130, 0, 67, 9]
+    num_experts = len(rows)
+    total_m = sum(rows)
+    input_a = (torch.randn(total_m, k, device=DEVICE) * 0.3).half()
+    scales = (
+        torch.rand(num_experts, n // 128, k // 128, device=DEVICE) * 0.015
+        + 0.005
+    ).float()
+    expanded_scales = scales.repeat_interleave(128, 1).repeat_interleave(128, 2)
+    source = torch.randn(num_experts, n, k, device=DEVICE) * 0.08
+    input_b = (source / expanded_scales).clamp(-448, 448).to(
+        torch.float8_e4m3fn
+    )
+    rows_per_expert = torch.tensor(rows, dtype=torch.int32, device=DEVICE)
+    output = torch.empty(total_m, n, dtype=torch.float16, device=DEVICE)
+
+    cutlass_grouped_gemm_xe2(
+        input_a,
+        input_b,
+        scales,
+        None,
+        output,
+        rows_per_expert,
+        n,
+        k,
+        num_experts,
+        False,
+        False,
+        True,
+    )
+
+    reference = torch.empty_like(output)
+    row_start = 0
+    for expert, expert_rows in enumerate(rows):
+        if expert_rows == 0:
+            continue
+        dequantized = input_b[expert].float() * expanded_scales[expert]
+        reference[row_start : row_start + expert_rows] = (
+            input_a[row_start : row_start + expert_rows].float()
+            @ dequantized.transpose(0, 1)
+        ).half()
+        row_start += expert_rows
+
+    torch.testing.assert_close(output, reference, rtol=8e-2, atol=2e-1)
+
+
+def test_xe_grouped_gemm_fp8_block_all_finite_e4m3():
+    n, k = 128, 256
+    input_a = torch.eye(k, dtype=torch.float16, device=DEVICE)
+    input_b = torch.empty(1, n, k, dtype=torch.float8_e4m3fn, device=DEVICE)
+    finite_codes = torch.tensor(
+        [code for code in range(256) if code not in (0x7F, 0xFF)],
+        dtype=torch.uint8,
+        device=DEVICE,
+    )
+    input_b.view(torch.uint8).flatten().copy_(
+        finite_codes.repeat((input_b.numel() + finite_codes.numel() - 1)
+                            // finite_codes.numel())[:input_b.numel()]
+    )
+    scales = torch.tensor([[[0.5, 2.0]]], dtype=torch.float32, device=DEVICE)
+    rows_per_expert = torch.tensor([k], dtype=torch.int32, device=DEVICE)
+    output = torch.empty(k, n, dtype=torch.float16, device=DEVICE)
+
+    cutlass_grouped_gemm_xe2(
+        input_a,
+        input_b,
+        scales,
+        None,
+        output,
+        rows_per_expert,
+        n,
+        k,
+        1,
+        False,
+        False,
+        True,
+    )
+
+    expanded_scales = scales.repeat_interleave(128, 1).repeat_interleave(128, 2)
+    reference = (input_b.float() * expanded_scales).squeeze(0).transpose(0, 1)
+    torch.testing.assert_close(output, reference.half(), rtol=0, atol=0)
+
+
 def dequantize_uint4(qweight, scales, group_size):
     import numpy as np
     k = qweight.shape[1] * 2

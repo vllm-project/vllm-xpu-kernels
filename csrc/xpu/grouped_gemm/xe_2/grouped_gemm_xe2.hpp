@@ -91,6 +91,9 @@ CUTE_DEVICE void MoEGEMM(
   static constexpr bool is_B_mxfp4 = (std::is_same_v<ElementB, uint8_t>) &&
                                      (std::is_same_v<ElementS, uint8_t>);
   static constexpr bool is_B_4bits = std::is_same_v<ElementB, uint8_t>;
+  static constexpr bool is_B_fp8 =
+      std::is_same_v<ElementB, cutlass::float_e5m2_t> ||
+      std::is_same_v<ElementB, cutlass::float_e4m3_t>;
 
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   auto wg_tile = mma.tile_mnk();
@@ -146,6 +149,13 @@ CUTE_DEVICE void MoEGEMM(
     if constexpr (is_B_4bits) {
       ptr_Scales_curr_batch =
           const_cast<ElementS*>(Scales) + B_offset * 2 / group_size;
+    } else if constexpr (is_B_fp8) {
+      if (group_size > 0) {
+        ptr_Scales_curr_batch =
+            const_cast<ElementS*>(Scales) +
+            static_cast<int64_t>(expert_id) * (gemm_n / group_size) *
+                (gemm_k / group_size);
+      }
     }
     ElementBI* ptr_Bias_curr_batch = nullptr;
     if (Bias != static_cast<ElementBI*>(nullptr)) {
@@ -194,6 +204,30 @@ CUTE_DEVICE void MoEGEMM(
           XE_GEMM_4BITS_CALLER(256)
         }
 #undef XE_GEMM_4BITS_CALLER
+      } else if constexpr (is_B_fp8) {
+        if (group_size == 128) {
+          xe_gemm_4bits<
+              GmemTiledCopyA,
+              GmemTiledCopyB,
+              GmemTiledCopyD,
+              128>(
+              A_tensor,
+              B_tensor,
+              ptr_Scales_curr_batch,
+              ptr_Bias_curr_batch,
+              D_tensor,
+              tile_coord,
+              mma);
+        } else {
+          xe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
+              A_tensor,
+              B_tensor,
+              ptr_Scales_curr_batch,
+              ptr_Bias_curr_batch,
+              D_tensor,
+              tile_coord,
+              mma);
+        }
       } else {
         xe_gemm<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD>(
             A_tensor,
