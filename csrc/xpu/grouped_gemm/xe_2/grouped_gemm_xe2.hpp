@@ -92,10 +92,9 @@ CUTE_DEVICE void MoEGEMM(
                                      (std::is_same_v<ElementS, uint8_t>);
   static constexpr bool is_B_4bits = std::is_same_v<ElementB, uint8_t>;
   // MXFP8: FP8 weights + uint8 E8M0 block scales (group_size=32).
-  static constexpr bool is_B_mxfp8 =
-      (std::is_same_v<ElementB, float_e4m3_t> ||
-       std::is_same_v<ElementB, float_e5m2_t>) &&
-      std::is_same_v<ElementS, uint8_t>;
+  static constexpr bool is_B_mxfp8 = (std::is_same_v<ElementB, float_e4m3_t> ||
+                                      std::is_same_v<ElementB, float_e5m2_t>) &&
+                                     std::is_same_v<ElementS, uint8_t>;
   // FP8 weights + float scales: per-tensor (group_size<=0) or block-FP8
   // 2D gs=128 (group_size>0). Distinguished at runtime via group_size.
   static constexpr bool is_B_fp8_float_scale =
@@ -165,15 +164,13 @@ CUTE_DEVICE void MoEGEMM(
     } else if constexpr (is_B_fp8_float_scale) {
       if (group_size > 0) {
         // Block-FP8: scales [E, K/128, N/128] kept in that order.
-        ptr_Scales_curr_batch =
-            const_cast<ElementS*>(Scales) +
-            static_cast<int64_t>(expert_id) *
-                static_cast<int64_t>(gemm_k / group_size) *
-                static_cast<int64_t>(gemm_n / group_size);
+        ptr_Scales_curr_batch = const_cast<ElementS*>(Scales) +
+                                static_cast<int64_t>(expert_id) *
+                                    static_cast<int64_t>(gemm_k / group_size) *
+                                    static_cast<int64_t>(gemm_n / group_size);
       } else {
         // Per-tensor FP8: one float scale per expert.
-        ptr_Scales_curr_batch =
-            const_cast<ElementS*>(Scales) + expert_id;
+        ptr_Scales_curr_batch = const_cast<ElementS*>(Scales) + expert_id;
       }
     }
     ElementBI* ptr_Bias_curr_batch = nullptr;

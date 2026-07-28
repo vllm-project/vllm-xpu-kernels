@@ -14,12 +14,8 @@ except ImportError as e:
     FUSEDMOE_UNAVAILABLE_REASON = str(e)
     FUSEDMOE_AVAILABLE = False
 
-from .moe_utils import (
-    dequant_fp8_block_act,
-    dequant_mxfp8,
-    quant_act_xpu,
-    ref_fused_moe,
-)
+from .moe_utils import (dequant_fp8_block_act, dequant_mxfp8, quant_act_xpu,
+                        ref_fused_moe)
 
 REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
 USE_MXFP4_FP8_ENV = "VLLM_XPU_FUSED_MOE_USE_MXFP4_FP8"
@@ -53,9 +49,8 @@ def _should_use_ref_fused_moe(is_mxfp8: bool, is_block_fp8: bool) -> bool:
         return True
     if is_mxfp8 and not _env_native_default_on(NATIVE_MXFP8_ENV):
         return True
-    if is_block_fp8 and not _env_native_default_on(NATIVE_BLOCK_FP8_ENV):
-        return True
-    return False
+    return (is_block_fp8
+            and not _env_native_default_on(NATIVE_BLOCK_FP8_ENV))
 
 
 def _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8):
@@ -389,7 +384,7 @@ class XpuFusedMoe:
         # MXFP8 / block-FP8 activation scales: dequant to compute dtype so the
         # Xe2 grouped GEMM runs W8A16 / W16A16 (ptr_A_scale is accepted by the
         # op schema but Xe2 currently consumes high-precision A). This matches
-        # ref act QDQ when a1q_scale is supplied without per-expert Python GEMMs.
+        # ref act QDQ when a1q_scale is set without per-expert Python GEMMs.
         if remapped_scales is not None and self.is_mxfp8:
             remapped_hidden_states = dequant_mxfp8(
                 remapped_hidden_states, remapped_scales).to(output.dtype)
