@@ -550,6 +550,28 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/topk_per_row.cpp")
   include_directories("/usr/include")
 
+  # Probe for the Level Zero device-usablemem-size extension instead of gating
+  # on a loader version: the #ifdef in csrc/utils/mem_info.cpp depends on what
+  # the *headers* declare, which need not match the installed loader. Builds
+  # without it fall back to torch's allocator memory info.
+  #
+  # CMAKE_CXX_FLAGS already carries -Werror and -include sycl_first.h by this
+  # point, which makes every try-compile fail; clear it around the probe.
+  include(CheckCXXSourceCompiles)
+  set(_saved_cmake_cxx_flags "${CMAKE_CXX_FLAGS}")
+  set(CMAKE_CXX_FLAGS "")
+  set(CMAKE_REQUIRED_INCLUDES "/usr/include")
+  check_cxx_source_compiles(
+    "#include <level_zero/ze_api.h>
+     int main() {
+       ze_device_usablemem_size_ext_properties_t p{};
+       p.stype = ZE_STRUCTURE_TYPE_DEVICE_USABLEMEM_SIZE_EXT_PROPERTIES;
+       return static_cast<int>(p.currUsableMemSize);
+     }"
+    VLLM_XPU_HAS_ZE_USABLEMEM)
+  unset(CMAKE_REQUIRED_INCLUDES)
+  set(CMAKE_CXX_FLAGS "${_saved_cmake_cxx_flags}")
+
   define_gpu_extension_target(
     _C
     DESTINATION
@@ -569,6 +591,15 @@ if(BASIC_KERNELS_ENABLED)
     USE_SABI
     3
     WITH_SOABI)
+
+  if(VLLM_XPU_HAS_ZE_USABLEMEM)
+    message(STATUS "Level Zero device-usablemem-size extension found; "
+                   "mem_info reports device usable memory.")
+    target_compile_definitions(_C PRIVATE VLLM_XPU_HAS_ZE_USABLEMEM=1)
+  else()
+    message(STATUS "Level Zero device-usablemem-size extension not found; "
+                   "mem_info falls back to torch's allocator.")
+  endif()
 
 endif()
 
