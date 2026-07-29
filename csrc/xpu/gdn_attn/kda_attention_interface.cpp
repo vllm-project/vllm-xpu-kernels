@@ -2,11 +2,80 @@
 #include <torch/all.h>
 
 #include <limits>
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
 
 #include "kda_attention.hpp"
+#include "kda_recurrent_opt.hpp"
 #include "utils.h"
 
+#ifdef VLLM_XPU_ENABLE_XE2
+  #include "xe_2/chunk_kda_xe2.h"
+#endif
+
 namespace {
+
+// Backend selection for the KDA recurrent (gated delta rule) stage.
+//   auto      - heuristic selection (default)
+//   recurrent - always use the reference `recurrent_kda_kernel`
+//   opt       - always use the vectorised `recurrent_kda_opt_kernel`
+//   chunk     - force the chunked XMX pipeline for prefill / mixed batches
+enum class KdaRecurrentBackend { Auto, Reference, Optimized, Chunk };
+
+KdaRecurrentBackend parse_kda_recurrent_backend() {
+  const char* raw = std::getenv("VLLM_XPU_KDA_RECURRENT_MODE");
+  if (raw == nullptr) {
+    return KdaRecurrentBackend::Auto;
+  }
+  const std::string value(raw);
+  if (value == "recurrent" || value == "reference") {
+    return KdaRecurrentBackend::Reference;
+  }
+  if (value == "opt" || value == "decode") {
+    return KdaRecurrentBackend::Optimized;
+  }
+  if (value == "chunk") {
+    return KdaRecurrentBackend::Chunk;
+  }
+  TORCH_CHECK(
+      value == "auto",
+      "VLLM_XPU_KDA_RECURRENT_MODE must be one of auto/recurrent/opt/chunk, "
+      "got ",
+      value);
+  return KdaRecurrentBackend::Auto;
+}
+
+KdaRecurrentBackend kda_recurrent_backend() {
+  static const KdaRecurrentBackend backend = parse_kda_recurrent_backend();
+  return backend;
+}
+
+int64_t parse_env_int(const char* name, int64_t fallback) {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr) {
+    return fallback;
+  }
+  try {
+    return std::stoll(std::string(raw));
+  } catch (const std::exception&) {
+    TORCH_CHECK(false, name, " must be an integer, got ", raw);
+  }
+}
+
+// Below this average sequence length the chunked pipeline's fixed cost (five
+// kernel launches plus the packed workspace) outweighs its throughput.
+int64_t kda_chunk_min_seqlen() {
+  static const int64_t value =
+      parse_env_int("VLLM_XPU_KDA_CHUNK_MIN_SEQLEN", 2 * 64);
+  return value;
+}
+
+int64_t kda_chunk_max_workspace_bytes() {
+  static const int64_t value =
+      parse_env_int("VLLM_XPU_KDA_CHUNK_MAX_WORKSPACE_MB", 2048) * 1024 * 1024;
+  return value;
+}
 
 void check_cache_layout(const torch::Tensor& tensor, const char* name) {
   TORCH_CHECK(tensor.size(0) > 0, name, " must contain at least one slot");
@@ -297,8 +366,9 @@ RecurrentShape validate_recurrent_inputs(
           recurrent_state.size(3) == head_dim,
       "recurrent_state must have shape [slots, heads, dim, dim]");
   TORCH_CHECK(
-      recurrent_state.scalar_type() == at::kFloat,
-      "recurrent_state must be float32");
+      recurrent_state.scalar_type() == at::kFloat ||
+          recurrent_state.scalar_type() == q.scalar_type(),
+      "recurrent_state must be float32 or match the activation dtype");
   check_device(recurrent_state, device, "recurrent_state");
   check_cache_layout(recurrent_state, "recurrent_state");
   TORCH_CHECK(
@@ -538,6 +608,140 @@ void launch_kda_conv(
 #undef LAUNCH_TILED_CONV
 }
 
+// Batch-dependent pointers for one recurrent launch (non-spec vs spec).
+struct KdaRecurrentBatchArgs {
+  const int* query_start_loc;
+  const int* token_indx;
+  const int* state_indices;
+  int64_t state_indices_stride_0;
+  const bool* has_initial_state;
+  const int* num_accepted_tokens;
+  int batch_size;
+};
+
+template <typename T, typename StateT, int Mode>
+void launch_kda_recurrent_opt_bucket(
+    sycl::queue& queue,
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& raw_gate,
+    const torch::Tensor& beta,
+    torch::Tensor& recurrent_state,
+    const torch::Tensor& a_log,
+    const torch::Tensor& dt_bias,
+    const KdaRecurrentBatchArgs& args,
+    int num_heads,
+    int head_dim) {
+#define KDA_LAUNCH_OPT(BUCKET)                               \
+  kda::launch_recurrent_kda_opt<T, StateT, BUCKET, Mode>(    \
+      queue,                                                 \
+      reinterpret_cast<T*>(core_attn_out.data_ptr()),        \
+      reinterpret_cast<const T*>(q.data_ptr()),              \
+      reinterpret_cast<const T*>(k.data_ptr()),              \
+      reinterpret_cast<const T*>(v.data_ptr()),              \
+      reinterpret_cast<const T*>(raw_gate.data_ptr()),       \
+      reinterpret_cast<const float*>(beta.data_ptr()),       \
+      reinterpret_cast<const float*>(a_log.data_ptr()),      \
+      reinterpret_cast<const float*>(dt_bias.data_ptr()),    \
+      reinterpret_cast<StateT*>(recurrent_state.data_ptr()), \
+      recurrent_state.stride(0),                             \
+      args.query_start_loc,                                  \
+      args.token_indx,                                       \
+      args.state_indices,                                    \
+      args.state_indices_stride_0,                           \
+      args.has_initial_state,                                \
+      args.num_accepted_tokens,                              \
+      args.batch_size,                                       \
+      num_heads,                                             \
+      state_vectorized)
+
+  // Wide state messages need the per-slot base address aligned to the vector
+  // width; a page-strided cache may use an arbitrary slot stride.
+  const bool state_vectorized =
+      recurrent_state.stride(0) % (head_dim / kda::sub_group_size) == 0;
+  switch (head_dim / kda::sub_group_size) {
+    case 1:
+      KDA_LAUNCH_OPT(1);
+      break;
+    case 2:
+      KDA_LAUNCH_OPT(2);
+      break;
+    case 4:
+      KDA_LAUNCH_OPT(4);
+      break;
+    case 8:
+      KDA_LAUNCH_OPT(8);
+      break;
+    default:
+      TORCH_CHECK(false, "unsupported KDA head dimension");
+  }
+#undef KDA_LAUNCH_OPT
+}
+
+// Only fp32 state (the historical layout) and state matching the activation
+// dtype are instantiated; other mixes have no practical use and would
+// needlessly multiply the number of compiled kernels.
+template <typename T, int Mode>
+void launch_kda_recurrent_opt(
+    sycl::queue& queue,
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& raw_gate,
+    const torch::Tensor& beta,
+    torch::Tensor& recurrent_state,
+    const torch::Tensor& a_log,
+    const torch::Tensor& dt_bias,
+    const KdaRecurrentBatchArgs& args,
+    int num_heads,
+    int head_dim) {
+  const auto state_dtype = recurrent_state.scalar_type();
+  if (state_dtype == at::kFloat) {
+    launch_kda_recurrent_opt_bucket<T, float, Mode>(
+        queue,
+        core_attn_out,
+        q,
+        k,
+        v,
+        raw_gate,
+        beta,
+        recurrent_state,
+        a_log,
+        dt_bias,
+        args,
+        num_heads,
+        head_dim);
+    return;
+  }
+  if constexpr (!std::is_same_v<T, float>) {
+    if (state_dtype == q.scalar_type()) {
+      launch_kda_recurrent_opt_bucket<T, T, Mode>(
+          queue,
+          core_attn_out,
+          q,
+          k,
+          v,
+          raw_gate,
+          beta,
+          recurrent_state,
+          a_log,
+          dt_bias,
+          args,
+          num_heads,
+          head_dim);
+      return;
+    }
+  }
+  TORCH_CHECK(
+      false,
+      "KDA recurrent_state dtype must be float32 or match the activation "
+      "dtype, got ",
+      state_dtype);
+}
+
 template <typename T>
 void launch_kda_recurrent(
     sycl::queue& queue,
@@ -562,7 +766,8 @@ void launch_kda_recurrent(
     int num_decodes,
     int num_spec_decodes,
     int num_heads,
-    int head_dim) {
+    int head_dim,
+    int64_t num_actual_tokens) {
 #define LAUNCH_RECURRENT(                                   \
     BUCKET,                                                 \
     IS_SPEC,                                                \
@@ -658,31 +863,152 @@ void launch_kda_recurrent(
   }
 
   const int non_spec_batch_size = num_prefills + num_decodes;
-  if (non_spec_batch_size > 0) {
-    BUCKET_DISPATCH(
-        false,
-        reinterpret_cast<const int*>(non_spec_query_start_loc->data_ptr()),
+  // The reference kernel only understands an fp32 state cache, so a narrower
+  // cache dtype implies the optimised kernel regardless of the env override.
+  const bool use_opt =
+      kda_recurrent_backend() != KdaRecurrentBackend::Reference ||
+      recurrent_state.scalar_type() != at::kFloat;
+  bool non_spec_done = false;
+
+#ifdef VLLM_XPU_ENABLE_XE2
+  if (non_spec_batch_size > 0 &&
+      kda_recurrent_backend() != KdaRecurrentBackend::Reference &&
+      kda_recurrent_backend() != KdaRecurrentBackend::Optimized &&
+      chunk_kda_xe2_supported(head_dim) && q.scalar_type() == at::kBFloat16) {
+    const int64_t num_non_spec_tokens =
         non_spec_token_indx.has_value()
-            ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
-            : nullptr,
-        reinterpret_cast<const int*>(non_spec_state_indices->data_ptr()),
-        0,
-        has_initial_state.has_value()
-            ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())
-            : nullptr,
-        nullptr,
-        non_spec_batch_size);
+            ? non_spec_token_indx->numel()
+            : static_cast<int64_t>(num_actual_tokens);
+    const int64_t avg_seqlen = num_non_spec_tokens / non_spec_batch_size;
+    const int64_t workspace = chunk_kda_xe2_workspace_bytes(
+        non_spec_batch_size,
+        num_non_spec_tokens,
+        num_heads,
+        head_dim,
+        q.element_size());
+    const bool forced = kda_recurrent_backend() == KdaRecurrentBackend::Chunk;
+    if ((forced || avg_seqlen >= kda_chunk_min_seqlen()) &&
+        workspace <= kda_chunk_max_workspace_bytes()) {
+      chunk_kda_xe2(
+          queue,
+          core_attn_out,
+          q,
+          k,
+          v,
+          raw_gate,
+          beta,
+          recurrent_state,
+          a_log,
+          dt_bias,
+          *non_spec_query_start_loc,
+          *non_spec_state_indices,
+          has_initial_state,
+          non_spec_token_indx,
+          non_spec_batch_size,
+          num_non_spec_tokens,
+          num_heads,
+          head_dim);
+      non_spec_done = true;
+    }
+  }
+#endif
+
+  if (non_spec_batch_size > 0 && !non_spec_done) {
+    if (use_opt) {
+      const KdaRecurrentBatchArgs args{
+          reinterpret_cast<const int*>(non_spec_query_start_loc->data_ptr()),
+          non_spec_token_indx.has_value()
+              ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
+              : nullptr,
+          reinterpret_cast<const int*>(non_spec_state_indices->data_ptr()),
+          0,
+          has_initial_state.has_value()
+              ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())
+              : nullptr,
+          nullptr,
+          non_spec_batch_size};
+      if (num_prefills == 0) {
+        launch_kda_recurrent_opt<T, kda::recurrent_mode_decode>(
+            queue,
+            core_attn_out,
+            q,
+            k,
+            v,
+            raw_gate,
+            beta,
+            recurrent_state,
+            a_log,
+            dt_bias,
+            args,
+            num_heads,
+            head_dim);
+      } else {
+        launch_kda_recurrent_opt<T, kda::recurrent_mode_general>(
+            queue,
+            core_attn_out,
+            q,
+            k,
+            v,
+            raw_gate,
+            beta,
+            recurrent_state,
+            a_log,
+            dt_bias,
+            args,
+            num_heads,
+            head_dim);
+      }
+    } else {
+      BUCKET_DISPATCH(
+          false,
+          reinterpret_cast<const int*>(non_spec_query_start_loc->data_ptr()),
+          non_spec_token_indx.has_value()
+              ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
+              : nullptr,
+          reinterpret_cast<const int*>(non_spec_state_indices->data_ptr()),
+          0,
+          has_initial_state.has_value()
+              ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())
+              : nullptr,
+          nullptr,
+          non_spec_batch_size);
+    }
   }
   if (num_spec_decodes > 0) {
-    BUCKET_DISPATCH(
-        true,
-        reinterpret_cast<const int*>(spec_query_start_loc->data_ptr()),
-        reinterpret_cast<const int*>(spec_token_indx->data_ptr()),
-        reinterpret_cast<const int*>(spec_state_indices->data_ptr()),
-        spec_state_indices->stride(0),
-        nullptr,
-        reinterpret_cast<const int*>(num_accepted_tokens->data_ptr()),
-        num_spec_decodes);
+    if (use_opt) {
+      const KdaRecurrentBatchArgs args{
+          reinterpret_cast<const int*>(spec_query_start_loc->data_ptr()),
+          reinterpret_cast<const int*>(spec_token_indx->data_ptr()),
+          reinterpret_cast<const int*>(spec_state_indices->data_ptr()),
+          spec_state_indices->stride(0),
+          nullptr,
+          reinterpret_cast<const int*>(num_accepted_tokens->data_ptr()),
+          num_spec_decodes};
+      launch_kda_recurrent_opt<T, kda::recurrent_mode_spec>(
+          queue,
+          core_attn_out,
+          q,
+          k,
+          v,
+          raw_gate,
+          beta,
+          recurrent_state,
+          a_log,
+          dt_bias,
+          args,
+          num_heads,
+          head_dim);
+    } else {
+      BUCKET_DISPATCH(
+          true,
+          reinterpret_cast<const int*>(spec_query_start_loc->data_ptr()),
+          reinterpret_cast<const int*>(spec_token_indx->data_ptr()),
+          reinterpret_cast<const int*>(spec_state_indices->data_ptr()),
+          spec_state_indices->stride(0),
+          nullptr,
+          reinterpret_cast<const int*>(num_accepted_tokens->data_ptr()),
+          num_spec_decodes);
+    }
   }
 #undef BUCKET_DISPATCH
 #undef LAUNCH_RECURRENT
@@ -870,7 +1196,8 @@ void kda_gated_delta_rule(
         num_decodes,
         num_spec_decodes,
         shape.num_heads,
-        shape.head_dim);
+        shape.head_dim,
+        num_actual_tokens);
   });
 }
 
