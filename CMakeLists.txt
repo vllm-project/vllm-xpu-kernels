@@ -559,8 +559,10 @@ if(BASIC_KERNELS_ENABLED)
   # point, which makes every try-compile fail; clear it around the probe.
   include(CheckCXXSourceCompiles)
   set(_saved_cmake_cxx_flags "${CMAKE_CXX_FLAGS}")
+  set(_saved_cmake_required_includes "${CMAKE_REQUIRED_INCLUDES}")
   set(CMAKE_CXX_FLAGS "")
-  set(CMAKE_REQUIRED_INCLUDES "/usr/include")
+  set(CMAKE_REQUIRED_INCLUDES "${_saved_cmake_required_includes}")
+  list(APPEND CMAKE_REQUIRED_INCLUDES "/usr/include")
   check_cxx_source_compiles(
     "#include <level_zero/ze_api.h>
      int main() {
@@ -569,8 +571,10 @@ if(BASIC_KERNELS_ENABLED)
        return static_cast<int>(p.currUsableMemSize);
      }"
     VLLM_XPU_HAS_ZE_USABLEMEM)
-  unset(CMAKE_REQUIRED_INCLUDES)
+  set(CMAKE_REQUIRED_INCLUDES "${_saved_cmake_required_includes}")
+  unset(_saved_cmake_required_includes)
   set(CMAKE_CXX_FLAGS "${_saved_cmake_cxx_flags}")
+  unset(_saved_cmake_cxx_flags)
 
   define_gpu_extension_target(
     _C
