@@ -55,31 +55,28 @@ static constexpr int NOPE_HEAD_DIM = HEAD_SIZE - ROPE_HEAD_DIM;
 static constexpr int NOPE_PAIRS = NOPE_HEAD_DIM / 2;
 
 // ============================================================================
-// FusedMxfp4SmallKernel: Specialized kernel for small compress ratios (CR <= 8)
+// FusedMxfp4Cr4Kernel: Specialized kernel for DeepSeek-V4 CR=4, overlap=1.
 // Key optimizations:
-//   - Tuned tokens per work-group for small CR to improve EU occupancy
-//   - Compile-time N_GATHER <= 16 enables aggressive unrolling
-//   - Register blocking optimized for smaller gather loop
-//   - Uses SG_SIZE=32 for better register utilization on small workloads
+//   - Tuned tokens per work-group for this fixed CR=4 path.
+//   - Compile-time N_GATHER enables aggressive unrolling.
+//   - Register blocking for this indexer gather pattern.
+//   - Uses SG_SIZE=32 for the target occupancy/register tradeoff.
 // ============================================================================
 template <int COMPRESS_RATIO, int OVERLAP>
-class FusedMxfp4SmallKernel {
+class FusedMxfp4Cr4Kernel {
  public:
-  static_assert(COMPRESS_RATIO == 4, "FusedMxfp4SmallKernel is for CR == 4");
-  static_assert(OVERLAP == 1, "FusedMxfp4SmallKernel requires OVERLAP == 1");
+  static_assert(COMPRESS_RATIO == 4, "FusedMxfp4Cr4Kernel is for CR == 4");
+  static_assert(OVERLAP == 1, "FusedMxfp4Cr4Kernel requires OVERLAP == 1");
   static constexpr int N_GATHER = (1 + OVERLAP) * COMPRESS_RATIO;
-  static constexpr int SMALL_TOKENS_PER_WG =
-      8;                                    // Higher occupancy for small CR
-  static constexpr int SMALL_SG_SIZE = 32;  // Subgroup size (fixed at 32)
-  static constexpr int SMALL_ELEMENTS_PER_LANE = HEAD_SIZE / SMALL_SG_SIZE;
-  // Derived quant constants (adapt automatically to SMALL_SG_SIZE)
-  static constexpr int SMALL_PAIR_STRIDE =
-      2 * SMALL_SG_SIZE;  // elements per pair
-  static constexpr int SMALL_LANES_PER_QBLOCK = QUANT_BLOCK / 2;  // 16
-  static constexpr int SMALL_QBLOCKS_PER_PAIR = SMALL_PAIR_STRIDE / QUANT_BLOCK;
+  static constexpr int CR4_TOKENS_PER_WG = 8;
+  static constexpr int CR4_SG_SIZE = 32;
+  static constexpr int CR4_ELEMENTS_PER_LANE = HEAD_SIZE / CR4_SG_SIZE;
+  static constexpr int CR4_PAIR_STRIDE = 2 * CR4_SG_SIZE;  // elements per pair
+  static constexpr int CR4_LANES_PER_QBLOCK = QUANT_BLOCK / 2;  // 16
+  static constexpr int CR4_QBLOCKS_PER_PAIR = CR4_PAIR_STRIDE / QUANT_BLOCK;
   int32_t num_tokens;
 
-  FusedMxfp4SmallKernel(
+  FusedMxfp4Cr4Kernel(
       const bf16* state_cache,
       int64_t state_cache_s0,
       int64_t state_cache_s1,
@@ -119,7 +116,7 @@ class FusedMxfp4SmallKernel {
         state_width(state_width),
         num_tokens(num_tokens) {}
 
-  [[sycl::reqd_sub_group_size(SMALL_SG_SIZE)]]
+  [[sycl::reqd_sub_group_size(CR4_SG_SIZE)]]
   void operator()(sycl::nd_item<2> item) const {
     // ============================================================================
     // Optimized for small CR (4 or 8): N_GATHER is at most 16
@@ -128,8 +125,8 @@ class FusedMxfp4SmallKernel {
 
     const int wg_id = item.get_group(0);
     const int sg_id = item.get_sub_group().get_group_id()[0];
-    const int lane = item.get_local_id(1) % SMALL_SG_SIZE;
-    const int wg_token_start = wg_id * SMALL_TOKENS_PER_WG;
+    const int lane = item.get_local_id(1) % CR4_SG_SIZE;
+    const int wg_token_start = wg_id * CR4_TOKENS_PER_WG;
 
     auto sg = item.get_sub_group();
 
@@ -162,12 +159,12 @@ class FusedMxfp4SmallKernel {
     // ============================================================================
 
     constexpr float NEG_LARGE = -std::numeric_limits<float>::infinity();
-    float m_run[SMALL_ELEMENTS_PER_LANE];
-    float s_run[SMALL_ELEMENTS_PER_LANE];
-    float acc[SMALL_ELEMENTS_PER_LANE];
+    float m_run[CR4_ELEMENTS_PER_LANE];
+    float s_run[CR4_ELEMENTS_PER_LANE];
+    float acc[CR4_ELEMENTS_PER_LANE];
 
 #pragma unroll
-    for (int i = 0; i < SMALL_ELEMENTS_PER_LANE; ++i) {
+    for (int i = 0; i < CR4_ELEMENTS_PER_LANE; ++i) {
       m_run[i] = NEG_LARGE;
       s_run[i] = 0.0f;
       acc[i] = 0.0f;
@@ -197,13 +194,13 @@ class FusedMxfp4SmallKernel {
       // local index a (0..7), pair p=a/2: global element = 32*p + 2*lane +
       // (a&1)
       if (valid) {
-        bf16 kv_buf[SMALL_ELEMENTS_PER_LANE];
-        bf16 score_buf[SMALL_ELEMENTS_PER_LANE];
+        bf16 kv_buf[CR4_ELEMENTS_PER_LANE];
+        bf16 score_buf[CR4_ELEMENTS_PER_LANE];
         simd_load_sg32(row_ptr, kv_buf, lane);
         simd_load_sg32(row_ptr + state_width, score_buf, lane);
 
 #pragma unroll
-        for (int i = 0; i < SMALL_ELEMENTS_PER_LANE; ++i) {
+        for (int i = 0; i < CR4_ELEMENTS_PER_LANE; ++i) {
           float kv = static_cast<float>(kv_buf[i]);
           float score = static_cast<float>(score_buf[i]);
 
@@ -219,9 +216,9 @@ class FusedMxfp4SmallKernel {
     }
 
     // Final compressed values
-    float compressed[SMALL_ELEMENTS_PER_LANE];
+    float compressed[CR4_ELEMENTS_PER_LANE];
 #pragma unroll
-    for (int i = 0; i < SMALL_ELEMENTS_PER_LANE; ++i) {
+    for (int i = 0; i < CR4_ELEMENTS_PER_LANE; ++i) {
       compressed[i] = acc[i] / s_run[i];
     }
 
@@ -231,7 +228,7 @@ class FusedMxfp4SmallKernel {
 
     float my_var = 0.0f;
 #pragma unroll
-    for (int i = 0; i < SMALL_ELEMENTS_PER_LANE; ++i) {
+    for (int i = 0; i < CR4_ELEMENTS_PER_LANE; ++i) {
       my_var += compressed[i] * compressed[i];
     }
 
@@ -239,10 +236,10 @@ class FusedMxfp4SmallKernel {
     total_var /= HEAD_SIZE;
     float rrms = sycl::rsqrt(total_var + rms_eps);
 
-    float normed[SMALL_ELEMENTS_PER_LANE];
+    float normed[CR4_ELEMENTS_PER_LANE];
 #pragma unroll
-    for (int i = 0; i < SMALL_ELEMENTS_PER_LANE; ++i) {
-      int elem_idx = SMALL_PAIR_STRIDE * (i / 2) + 2 * lane + (i & 1);
+    for (int i = 0; i < CR4_ELEMENTS_PER_LANE; ++i) {
+      int elem_idx = CR4_PAIR_STRIDE * (i / 2) + 2 * lane + (i & 1);
       float w = static_cast<float>(rms_weight_ptr[elem_idx]);
       normed[i] = compressed[i] * rrms * w;
     }
@@ -255,9 +252,9 @@ class FusedMxfp4SmallKernel {
     const float* cs_base = cos_sin_ptr + compressed_pos * cos_sin_stride;
 
 #pragma unroll
-    for (int pp = 0; pp < SMALL_ELEMENTS_PER_LANE / 2; ++pp) {
-      int even_elem = SMALL_PAIR_STRIDE * pp + 2 * lane;
-      int pair_idx = even_elem / 2;  // = SMALL_SG_SIZE*pp + lane
+    for (int pp = 0; pp < CR4_ELEMENTS_PER_LANE / 2; ++pp) {
+      int even_elem = CR4_PAIR_STRIDE * pp + 2 * lane;
+      int pair_idx = even_elem / 2;
       float even_val = normed[2 * pp];
       float odd_val = normed[2 * pp + 1];
 
@@ -300,27 +297,26 @@ class FusedMxfp4SmallKernel {
                          kv_pos_in_block * SCALE_DIM;
 
 #pragma unroll
-    for (int pp = 0; pp < SMALL_ELEMENTS_PER_LANE / 2; ++pp) {
+    for (int pp = 0; pp < CR4_ELEMENTS_PER_LANE / 2; ++pp) {
       float a = sycl::fmax(
           sycl::fabs(normed[2 * pp]), sycl::fabs(normed[2 * pp + 1]));
 #pragma unroll
-      for (int mask = 1; mask < SMALL_LANES_PER_QBLOCK; mask <<= 1) {
+      for (int mask = 1; mask < CR4_LANES_PER_QBLOCK; mask <<= 1) {
         a = sycl::fmax(a, sycl::permute_group_by_xor(sg, a, mask));
       }
 
       auto scale_info = vllm::mxfp4::compute_ue8m0_scale(a);
       float inv_scale = 1.0f / scale_info.scale;
 
-      int block_id =
-          SMALL_QBLOCKS_PER_PAIR * pp + lane / SMALL_LANES_PER_QBLOCK;
-      if ((lane & (SMALL_LANES_PER_QBLOCK - 1)) == 0) {
+      int block_id = CR4_QBLOCKS_PER_PAIR * pp + lane / CR4_LANES_PER_QBLOCK;
+      if ((lane & (CR4_LANES_PER_QBLOCK - 1)) == 0) {
         scale_ptr[block_id] = scale_info.ue8m0;
       }
 
       uint8_t packed =
           vllm::mxfp4::quantize_pair_to_mxfp4<vllm::mxfp4::Fp4TieBreak::ToEven>(
               normed[2 * pp], normed[2 * pp + 1], inv_scale);
-      val_ptr[SMALL_SG_SIZE * pp + lane] = packed;
+      val_ptr[CR4_SG_SIZE * pp + lane] = packed;
     }
   }
 
@@ -345,25 +341,25 @@ class FusedMxfp4SmallKernel {
   int64_t state_width;
 };
 
-// Launch function for small kernel
+// Launch function for the fixed CR=4, overlap=1 kernel
 template <int CR, int OV>
-void launch_small_kernel(sycl::queue& q, FusedMxfp4SmallKernel<CR, OV> kernel) {
+void launch_cr4_kernel(sycl::queue& q, FusedMxfp4Cr4Kernel<CR, OV> kernel) {
   const int num_tokens = kernel.num_tokens;
   if (num_tokens == 0) return;
 
-  constexpr int SMALL_TOKENS_PER_WG =
-      FusedMxfp4SmallKernel<CR, OV>::SMALL_TOKENS_PER_WG;
-  constexpr int SMALL_SG_SIZE = FusedMxfp4SmallKernel<CR, OV>::SMALL_SG_SIZE;
+  constexpr int CR4_TOKENS_PER_WG =
+      FusedMxfp4Cr4Kernel<CR, OV>::CR4_TOKENS_PER_WG;
+  constexpr int CR4_SG_SIZE = FusedMxfp4Cr4Kernel<CR, OV>::CR4_SG_SIZE;
   const size_t groups0 =
-      (static_cast<size_t>(num_tokens) + SMALL_TOKENS_PER_WG - 1) /
-      SMALL_TOKENS_PER_WG;
-  const size_t global0 = groups0 * SMALL_TOKENS_PER_WG;
+      (static_cast<size_t>(num_tokens) + CR4_TOKENS_PER_WG - 1) /
+      CR4_TOKENS_PER_WG;
+  const size_t global0 = groups0 * CR4_TOKENS_PER_WG;
 
   q.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<2>(
-            {global0, (size_t)SMALL_SG_SIZE},
-            {(size_t)SMALL_TOKENS_PER_WG, (size_t)SMALL_SG_SIZE}),
+            {global0, (size_t)CR4_SG_SIZE},
+            {(size_t)CR4_TOKENS_PER_WG, (size_t)CR4_SG_SIZE}),
         kernel);
   });
 }
@@ -421,10 +417,10 @@ void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn_impl(
 
 // Macro for the CR==4 / overlap==1 indexer kernel (the only configuration used
 // by the DeepSeek-V4 MXFP4 indexer path).
-#define LAUNCH_SMALL_CASE(CR, OV)                    \
-  launch_small_kernel<CR, OV>(                       \
+#define LAUNCH_CR4_CASE(CR, OV)                      \
+  launch_cr4_kernel<CR, OV>(                         \
       queue,                                         \
-      FusedMxfp4SmallKernel<CR, OV>(                 \
+      FusedMxfp4Cr4Kernel<CR, OV>(                   \
           state_ptr,                                 \
           state_cache.stride(0),                     \
           state_cache.stride(1),                     \
@@ -453,9 +449,9 @@ void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn_impl(
       compress_ratio == 4 && overlap == 1,
       "fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn only supports "
       "compress_ratio == 4 and overlap == 1");
-  LAUNCH_SMALL_CASE(4, 1);
+  LAUNCH_CR4_CASE(4, 1);
 
-#undef LAUNCH_SMALL_CASE
+#undef LAUNCH_CR4_CASE
 }
 
 }  // anonymous namespace
