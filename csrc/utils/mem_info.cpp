@@ -4,7 +4,8 @@
 #include <sycl/sycl.hpp>
 
 #include <iostream>
-
+#include <limits>
+#include <tuple>
 #ifdef VLLM_XPU_HAS_ZE_USABLEMEM
 size_t getTotalMemory(ze_device_handle_t& device) {
   uint32_t memoryCount = 0;
