@@ -265,7 +265,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor state_cache, Tensor token_to_req_indices, Tensor positions,"
       "Tensor slot_mapping, Tensor block_table, int block_size,"
       "int state_width, Tensor rms_norm_weight, float rms_norm_eps,"
-      "Tensor cos_sin_cache, Tensor kv_cache, Tensor kv_slot_mapping,"
+      "Tensor cos_sin_cache, Tensor! kv_cache, Tensor kv_slot_mapping,"
       "int kv_cache_block_size, int head_dim, int rope_head_dim,"
       "int compress_ratio, int overlap, int quant_block) -> ()");
   xpu_ops.impl(
