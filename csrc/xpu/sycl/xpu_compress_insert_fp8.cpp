@@ -809,7 +809,6 @@ void launch_one_fp8mix_generic(
     int rope_head_dim) {
   using K = vllm::c4_kv_insert_fp8mix_generic_kernel<WT>;
   constexpr int WG = K::WG_SIZE;
-  at::DeviceGuard dg(at::Device(at::kXPU, at::xpu::current_device()));
   q.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<1>(num_tokens * WG, WG),
@@ -873,7 +872,8 @@ void launch_split_gather_fp8mix(
   constexpr int HEAD = KA::HEAD_SIZE;
   constexpr int WG = KA::WG_SIZE;
 
-  at::DeviceGuard dg(at::Device(at::kXPU, at::xpu::current_device()));
+  // The op entry installs a DeviceGuard on the input tensor's device, so the
+  // current device here matches both the queue and that tensor.
   const int dev = at::xpu::current_device();
 
   // Scratch [num_tokens, G_SHARDS, 3, HEAD] fp32 — persistent, reused per queue
@@ -1050,6 +1050,9 @@ void xpu_compress_insert_fp8mix(
     int64_t token_stride,
     int64_t scale_dim,
     int64_t kv_block_stride) {
+  // Bind all queue lookups and device allocations to the input tensor's device,
+  // regardless of the ambient current device, before vllmGetQueue() is called.
+  const at::DeviceGuard device_guard(state_cache.device());
   TORCH_CHECK(
       state_cache.dtype() == torch::kFloat32,
       "xpu_compress_insert_fp8mix SYCL: state_cache must be fp32");
