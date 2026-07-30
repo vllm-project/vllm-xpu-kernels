@@ -23,8 +23,6 @@ namespace {
 
 using bf16 = sycl::ext::oneapi::bfloat16;
 
-static constexpr int HEAD_SIZE = 128;
-
 inline void simd_load_sg32(const bf16* base, bf16* out, unsigned int lane) {
 #ifdef __SYCL_DEVICE_ONLY__
   long addr0 = (long)(uintptr_t)base + (long)lane * 4;        // first 64 bf16
@@ -45,7 +43,8 @@ inline void simd_load_sg32(const bf16* base, bf16* out, unsigned int lane) {
 #endif
 }
 
-// Constants
+// File-scope model/layout constants for this fixed DeepSeek-V4 path.
+static constexpr int HEAD_SIZE = 128;
 static constexpr int ROPE_HEAD_DIM = 64;
 static constexpr int QUANT_BLOCK = 32;
 static constexpr int TOKEN_STRIDE = 64;
@@ -119,8 +118,10 @@ class FusedMxfp4Cr4Kernel {
   [[sycl::reqd_sub_group_size(CR4_SG_SIZE)]]
   void operator()(sycl::nd_item<2> item) const {
     // ============================================================================
-    // Optimized for small CR (4 or 8): N_GATHER is at most 16
-    // Uses SG_SIZE=32; one subgroup per token
+    // Fixed CR=4, overlap=1 execution path:
+    // - one subgroup per token
+    // - CR4_SG_SIZE fixed to 32
+    // - N_GATHER resolved at compile time
     // ============================================================================
 
     const int wg_id = item.get_group(0);
@@ -155,7 +156,7 @@ class FusedMxfp4Cr4Kernel {
     const int64_t bt_row = static_cast<int64_t>(req_idx) * block_table_stride;
 
     // ============================================================================
-    // PHASE 1: Online Softmax Compression (optimized for small N_GATHER)
+    // PHASE 1: Online Softmax Compression (fixed compile-time N_GATHER)
     // ============================================================================
 
     constexpr float NEG_LARGE = -std::numeric_limits<float>::infinity();
@@ -170,7 +171,7 @@ class FusedMxfp4Cr4Kernel {
       acc[i] = 0.0f;
     }
 
-    // Small CR: N_GATHER <= 16, fully unrolled
+    // N_GATHER is compile-time constant for this specialization.
 #pragma unroll
     for (int r = 0; r < N_GATHER; ++r) {
       int p = start + r;
@@ -190,9 +191,9 @@ class FusedMxfp4Cr4Kernel {
         row_ptr = state_cache_ptr + row_base;
       }
 
-      // Block 2D load: 128 contiguous bf16 -> 8 bf16/lane (paired layout).
-      // local index a (0..7), pair p=a/2: global element = 32*p + 2*lane +
-      // (a&1)
+      // Block load over one 32-lane subgroup: 128 contiguous bf16 total,
+      // 4 bf16 per lane in paired layout.
+      // local index a (0..3): global element = 32*(a/2) + 2*lane + (a&1)
       if (valid) {
         bf16 kv_buf[CR4_ELEMENTS_PER_LANE];
         bf16 score_buf[CR4_ELEMENTS_PER_LANE];
