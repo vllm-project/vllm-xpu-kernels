@@ -11,10 +11,8 @@
 //   TOKEN_STRIDE  = 64  (packed bytes / token)
 //   SCALE_DIM     = 4   (ue8m0 bytes / token)
 
-#include <ATen/ATen.h>
-#include <c10/xpu/XPUStream.h>
-#include <sycl/ext/oneapi/bfloat16.hpp>
-#include <sycl/sycl.hpp>
+#include "utils.h"
+#include "quantization/fp4/mxfp4_quant.h"
 #include <torch/all.h>
 
 #include <cmath>
@@ -55,37 +53,6 @@ static constexpr int SCALE_DIM = 4;
 static constexpr int HALF_ROPE = ROPE_HEAD_DIM / 2;
 static constexpr int NOPE_HEAD_DIM = HEAD_SIZE - ROPE_HEAD_DIM;
 static constexpr int NOPE_PAIRS = NOPE_HEAD_DIM / 2;
-static constexpr float FP4_MAX = 6.0f;
-static constexpr float INV_FP4_MAX = 1.0f / 6.0f;
-
-// E2M1 encode: Convert float to 4-bit E2M1 format
-inline uint8_t encode_fp4(float x) {
-  uint8_t sign = (x < 0.0f) ? 0x8u : 0x0u;
-  float a = sycl::fabs(x);
-  uint8_t code = (a > 0.25f) + (a >= 0.75f) + (a > 1.25f) + (a >= 1.75f) +
-                 (a > 2.5f) + (a >= 3.5f) + (a > 5.0f);
-  return code | sign;
-}
-
-// Fast scale calculation using bit manipulation
-inline float fast_scale(float amax, uint8_t& ue8m0) {
-  float ratio = amax * INV_FP4_MAX;
-  uint32_t bits;
-  __builtin_memcpy(&bits, &ratio, 4);
-  if ((bits & 0x7F800000u) == 0) bits = 0x00800000u;
-  if (bits & 0x7FFFFFu) bits = (bits + 0x800000u) & 0xFF800000u;
-  float scale;
-  __builtin_memcpy(&scale, &bits, 4);
-  ue8m0 = static_cast<uint8_t>((bits >> 23) & 0xFFu);
-  return scale;
-}
-
-// Quantize a pair of floats to packed 4-bit
-inline uint8_t quant_pair(float x0, float x1, float inv_s) {
-  float q0 = sycl::fmax(-FP4_MAX, sycl::fmin(x0 * inv_s, FP4_MAX));
-  float q1 = sycl::fmax(-FP4_MAX, sycl::fmin(x1 * inv_s, FP4_MAX));
-  return ((encode_fp4(q1) & 0xFu) << 4) | (encode_fp4(q0) & 0xFu);
-}
 
 // ============================================================================
 // FusedMxfp4SmallKernel: Specialized kernel for small compress ratios (CR <= 8)
@@ -341,17 +308,18 @@ class FusedMxfp4SmallKernel {
         a = sycl::fmax(a, sycl::permute_group_by_xor(sg, a, mask));
       }
 
-      uint8_t ue8m0;
-      float inv_scale = 1.0f / fast_scale(a, ue8m0);
+      auto scale_info = vllm::mxfp4::compute_ue8m0_scale(a);
+      float inv_scale = 1.0f / scale_info.scale;
 
       int block_id =
           SMALL_QBLOCKS_PER_PAIR * pp + lane / SMALL_LANES_PER_QBLOCK;
       if ((lane & (SMALL_LANES_PER_QBLOCK - 1)) == 0) {
-        scale_ptr[block_id] = ue8m0;
+        scale_ptr[block_id] = scale_info.ue8m0;
       }
 
       uint8_t packed =
-          quant_pair(normed[2 * pp], normed[2 * pp + 1], inv_scale);
+          vllm::mxfp4::quantize_pair_to_mxfp4<vllm::mxfp4::Fp4TieBreak::ToEven>(
+              normed[2 * pp], normed[2 * pp + 1], inv_scale);
       val_ptr[SMALL_SG_SIZE * pp + lane] = packed;
     }
   }
@@ -401,18 +369,18 @@ void launch_small_kernel(sycl::queue& q, FusedMxfp4SmallKernel<CR, OV> kernel) {
 }
 
 void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn_impl(
-    torch::Tensor state_cache,
-    torch::Tensor token_to_req_indices,
-    torch::Tensor positions,
-    torch::Tensor slot_mapping,
-    torch::Tensor block_table,
+    const torch::Tensor& state_cache,
+    const torch::Tensor& token_to_req_indices,
+    const torch::Tensor& positions,
+    const torch::Tensor& slot_mapping,
+    const torch::Tensor& block_table,
     int64_t block_size,
     int64_t state_width,
-    torch::Tensor rms_norm_weight,
+    const torch::Tensor& rms_norm_weight,
     double rms_norm_eps,
-    torch::Tensor cos_sin_cache,
-    torch::Tensor kv_cache,
-    torch::Tensor kv_slot_mapping,
+    const torch::Tensor& cos_sin_cache,
+    torch::Tensor& kv_cache,
+    const torch::Tensor& kv_slot_mapping,
     int64_t kv_cache_block_size,
     int64_t head_dim,
     int64_t rope_head_dim,
@@ -437,9 +405,7 @@ void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn_impl(
   const int num_tokens = static_cast<int>(positions.numel());
   if (num_tokens == 0) return;
 
-  at::DeviceGuard device_guard(state_cache.device());
-  auto& queue =
-      c10::xpu::getCurrentXPUStream(state_cache.device().index()).queue();
+  auto& queue = vllm::xpu::vllmGetQueue();
 
   const bf16* state_ptr =
       reinterpret_cast<const bf16*>(state_cache.data_ptr<at::BFloat16>());
@@ -495,18 +461,18 @@ void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn_impl(
 }  // anonymous namespace
 
 void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
-    torch::Tensor state_cache,
-    torch::Tensor token_to_req_indices,
-    torch::Tensor positions,
-    torch::Tensor slot_mapping,
-    torch::Tensor block_table,
+    const torch::Tensor& state_cache,
+    const torch::Tensor& token_to_req_indices,
+    const torch::Tensor& positions,
+    const torch::Tensor& slot_mapping,
+    const torch::Tensor& block_table,
     int64_t block_size,
     int64_t state_width,
-    torch::Tensor rms_norm_weight,
+    const torch::Tensor& rms_norm_weight,
     double rms_norm_eps,
-    torch::Tensor cos_sin_cache,
-    torch::Tensor kv_cache,
-    torch::Tensor kv_slot_mapping,
+    const torch::Tensor& cos_sin_cache,
+    torch::Tensor& kv_cache,
+    const torch::Tensor& kv_slot_mapping,
     int64_t kv_cache_block_size,
     int64_t head_dim,
     int64_t rope_head_dim,
