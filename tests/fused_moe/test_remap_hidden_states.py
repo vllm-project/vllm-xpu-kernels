@@ -11,7 +11,7 @@ DEVICE = "xpu"
 NUM_ROWS = [32, 1024]
 HIDDEN_SIZE = [128]
 TOTAL_EXPERTS_NUM = [32, 128]
-TOP_KS = [1, 8]
+TOP_KS = [1, 8, 16]
 RECIPE_TO_DTYPE = {
     "bf16": (torch.bfloat16, None),
     "fp16": (torch.float16, None),
@@ -233,6 +233,33 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
             print("Mismatched scales at indices:", mismatched_indices)
             print("Mismatched scales:", unpermuted_scales[mismatched_indices])
             print("Mismatched ref:", ref_unpermuted_scales[mismatched_indices])
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_moe_gather_topk16(dtype):
+    seed_everything(7)
+    num_tokens, topk, hidden_size = 8, 16, 128
+    moe_output = torch.randn((num_tokens * topk, hidden_size),
+                             dtype=dtype,
+                             device=DEVICE)
+    topk_weights = torch.randn((num_tokens, topk),
+                               dtype=torch.float32,
+                               device=DEVICE)
+    inverse = torch.randperm(num_tokens * topk,
+                             dtype=torch.int32,
+                             device=DEVICE).view(num_tokens, topk)
+    inverse[0, -1] = -1
+    output = torch.empty((num_tokens, hidden_size),
+                         dtype=dtype,
+                         device=DEVICE)
+
+    torch.ops._moe_C.moe_gather(output, moe_output, topk_weights, inverse, 32)
+
+    valid_inverse = inverse.clamp_min(0).to(torch.int64)
+    valid_weights = topk_weights * (inverse >= 0)
+    expected = (moe_output[valid_inverse].float()
+                * valid_weights[..., None]).sum(dim=1).to(dtype)
+    torch.testing.assert_close(output, expected, rtol=1e-2, atol=1e-2)
 
 
 @pytest.mark.parametrize("num_rows", [262144])
