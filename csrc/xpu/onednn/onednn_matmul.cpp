@@ -74,6 +74,17 @@ torch::Tensor fp8_gemm(
     const std::optional<torch::Tensor>& B_scale_,
     const std::optional<torch::Tensor>& bias_) {
   const at::DeviceGuard device_guard(A.device());
+  // The weight B may be provided in a transposed (NT) layout, and A supports
+  // strided layouts, so both are excluded from the contiguity check.
+  TORCH_CHECK(
+      !A_scale_.has_value() || A_scale_.value().is_contiguous(),
+      "A_scale must be contiguous for fp8 matmul");
+  TORCH_CHECK(
+      !B_scale_.has_value() || B_scale_.value().is_contiguous(),
+      "B_scale must be contiguous for fp8 matmul");
+  TORCH_CHECK(
+      !bias_.has_value() || bias_.value().is_contiguous(),
+      "bias must be contiguous for fp8 matmul");
   torch::Tensor result = check_and_create_output_tensor(A, B, out_dtype);
   auto a_st = A.scalar_type();
   auto b_st = B.scalar_type();
@@ -103,6 +114,12 @@ torch::Tensor fp8_bmm(
   const at::DeviceGuard device_guard(A.device());
   TORCH_CHECK(A.dim() == 3, "fp8_bmm expects A to be a 3D tensor");
   TORCH_CHECK(B.dim() == 3, "fp8_bmm expects B to be a 3D tensor");
+  TORCH_CHECK(
+      !A_scale_.has_value() || A_scale_.value().is_contiguous(),
+      "A_scale must be contiguous for fp8 matmul");
+  TORCH_CHECK(
+      !B_scale_.has_value() || B_scale_.value().is_contiguous(),
+      "B_scale must be contiguous for fp8 matmul");
   torch::Tensor result = check_and_create_output_tensor(A, B, out_dtype);
   auto a_st = A.scalar_type();
   auto b_st = B.scalar_type();
@@ -129,6 +146,14 @@ torch::Tensor fp8_gemm_w8a16(
     const std::optional<torch::Tensor>& B_scale_,
     const std::optional<torch::Tensor>& bias_) {
   const at::DeviceGuard device_guard(A.device());
+  // The weight B may be provided in a transposed (NT) layout, and A supports
+  // strided layouts, so both are excluded from the contiguity check.
+  TORCH_CHECK(
+      !B_scale_.has_value() || B_scale_.value().is_contiguous(),
+      "B_scale must be contiguous for fp8 matmul");
+  TORCH_CHECK(
+      !bias_.has_value() || bias_.value().is_contiguous(),
+      "bias must be contiguous for fp8 matmul");
   torch::Tensor result = check_and_create_output_tensor(A, B, A.scalar_type());
   TORCH_CHECK(
       is_supported_fp8(B.scalar_type()),
@@ -151,6 +176,10 @@ torch::Tensor fp4_gemm(
     std::optional<c10::ScalarType> out_dtype,
     const std::optional<torch::Tensor>& bias) {
   const at::DeviceGuard device_guard(A.device());
+  TORCH_CHECK(
+      A_scale.is_contiguous(), "A_scale must be contiguous for fp4 matmul");
+  TORCH_CHECK(
+      B_scale.is_contiguous(), "B_scale must be contiguous for fp4 matmul");
   torch::Tensor result = check_and_create_output_tensor(A, B, out_dtype);
   auto a_st = A.scalar_type();
   auto b_st = B.scalar_type();
@@ -177,6 +206,9 @@ torch::Tensor int4_gemm_w4a16(
     const std::optional<torch::Tensor>& g_idx) {
   const at::DeviceGuard device_guard(A_.device());
 
+  TORCH_CHECK(
+      B_scale.is_contiguous(), "B_scale must be contiguous for int4 matmul");
+
   // For GPTQ with desc_act=True scenario
   auto A = g_idx.has_value() ? A_.index_select(-1, g_idx.value()) : A_;
   torch::Tensor result = check_and_create_output_tensor(A, B, A.scalar_type());
@@ -196,6 +228,11 @@ torch::Tensor int4_gemm_w4a8(
     const std::optional<torch::Tensor>& g_idx,
     const std::optional<torch::Tensor>& bias) {
   const at::DeviceGuard device_guard(A_.device());
+
+  TORCH_CHECK(
+      A_scale.is_contiguous(), "A_scale must be contiguous for int4 matmul");
+  TORCH_CHECK(
+      B_scale.is_contiguous(), "B_scale must be contiguous for int4 matmul");
 
   // Select indices if provided (for GPTQ with desc_act=True)
   const torch::Tensor& A =
