@@ -902,7 +902,13 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   int local_id = item.get_local_linear_id();
   int current_batch_id = item.get_group(0);
-  int v_head_id = item.get_group(1);
+
+  // head_v_dim is split across the grid: group(1) enumerates
+  // (v_head_id, dv_idx) pairs so each work-group owns a single
+  // head_v_dim/chunk_size output tile.
+  const int dv_split = head_v_dim / chunk_size;
+  int v_head_id = item.get_group(1) / dv_split;
+  int dv = item.get_group(1) % dv_split;
   int local_range = item.get_local_range(2);
 
   auto sg = item.get_sub_group();
@@ -1103,64 +1109,62 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       if (has_prev_state) {
         // Fused WS+QS dv loop: S[dv] is loaded once per k_tile and reused
         // in registers for both WS (W×S) and QS (Q×S) DPAS operations.
-        for (int dv = 0; dv < head_v_dim / chunk_size; ++dv) {
-          // --- Fused WS+QS MMA: share S[dv] load in registers ---
-          Tensor gU_C =
-              local_tile(cU, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
-          auto tSrU_d = thr_mma.partition_sg_fragment_C(gU_C);
-          clear(tSrU_d);
+        // --- Fused WS+QS MMA: share S[dv] load in registers ---
+        Tensor gU_C =
+            local_tile(cU, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
+        auto tSrU_d = thr_mma.partition_sg_fragment_C(gU_C);
+        clear(tSrU_d);
 
-          Tensor gO_C =
-              local_tile(cO, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
-          auto tSrO_c = thr_mma.partition_sg_fragment_C(gO_C);
-          clear(tSrO_c);
+        Tensor gO_C =
+            local_tile(cO, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
+        auto tSrO_c = thr_mma.partition_sg_fragment_C(gO_C);
+        clear(tSrO_c);
 
-          // Fused gemm: W×S[dv] -> tSrU_d, Q×S[dv] -> tSrO_c
-          // S is loaded once and reused in registers for both
-          gemm_TTS_fused_2A(
-              W_tensor, Q_tensor, S_tensor, tSrU_d, tSrO_c, 0, 0, dv, mma);
+        // Fused gemm: W×S[dv] -> tSrU_d, Q×S[dv] -> tSrO_c
+        // S is loaded once and reused in registers for both
+        gemm_TTS_fused_2A(
+            W_tensor, Q_tensor, S_tensor, tSrU_d, tSrO_c, 0, 0, dv, mma);
 
-          // --- WS epilogue: U_new[dv] = U_old[dv] - W×S[dv] ---
-          auto tCrU_d = thr_copy_U_d.partition_sg_fragment_S(gU_C);
-          auto tCgU_d = thr_copy_U_d.partition_D(gU_C);
-          auto tCrU_c_save = thr_copy_U_c.partition_sg_fragment_D(gU_C);
-          reorder(tSrU_d, tCrU_c_save);
+        // --- WS epilogue: U_new[dv] = U_old[dv] - W×S[dv] ---
+        auto tCrU_d = thr_copy_U_d.partition_sg_fragment_S(gU_C);
+        auto tCgU_d = thr_copy_U_d.partition_D(gU_C);
+        auto tCrU_c_save = thr_copy_U_c.partition_sg_fragment_D(gU_C);
+        reorder(tSrU_d, tCrU_c_save);
 
-          auto tCgU_c = thr_copy_U_c.partition_S(gU_C);
-          auto tCrU_c = thr_copy_U_c.partition_sg_fragment_D(gU_C);
-          copy(copy_U_c, tCgU_c, tCrU_c);
+        auto tCgU_c = thr_copy_U_c.partition_S(gU_C);
+        auto tCrU_c = thr_copy_U_c.partition_sg_fragment_D(gU_C);
+        copy(copy_U_c, tCgU_c, tCrU_c);
 
-          CUTE_UNROLL
-          for (int i = 0; i < tCrU_c_save.size(); ++i) {
-            tCrU_c(i) -= tCrU_c_save(i);
-          }
-
-          reorder(tCrU_c, tCrU_d);
-          copy(copy_U_d, tCrU_d, tCgU_d);
-
-          // --- QS epilogue: apply exp(g) scaling ---
-          CUTE_UNROLL
-          for (int sn = 0; sn < SG_N / sub_group_size; ++sn) {
-            int n_idx =
-                n_tile_start + n_sg_start + sn * sub_group_size + sg_local_id;
-            CUTE_UNROLL
-            for (int sm = 0; sm < SG_M; ++sm) {
-              int m_idx = m_tile_start + m_sg_start + sm;
-              tSrO_c(sn * SG_M + sm) *= g_exp_slm_ptr[(m_idx)];
-            }
-          }
-
-          // Barrier: ensure U_new[dv] is visible across all subgroups
-          // before O2U reads it via U_tensor_T.
-          item.barrier(sycl::access::fence_space::local_space);
-
-          // --- O2U MMA: O[dv] += O1[dv] + O2 × U_T[dv] ---
-          gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma);
-          auto tCrO_c = thr_copy_O_c.partition_sg_fragment_S(gO_C);
-          auto tCgO_c = thr_copy_O_c.partition_D(gO_C);
-          reorder(tSrO_c, tCrO_c);
-          copy(copy_O_c, tCrO_c, tCgO_c);
+        CUTE_UNROLL
+        for (int i = 0; i < tCrU_c_save.size(); ++i) {
+          tCrU_c(i) -= tCrU_c_save(i);
         }
+
+        reorder(tCrU_c, tCrU_d);
+        copy(copy_U_d, tCrU_d, tCgU_d);
+
+        // --- QS epilogue: apply exp(g) scaling ---
+        CUTE_UNROLL
+        for (int sn = 0; sn < SG_N / sub_group_size; ++sn) {
+          int n_idx =
+              n_tile_start + n_sg_start + sn * sub_group_size + sg_local_id;
+          CUTE_UNROLL
+          for (int sm = 0; sm < SG_M; ++sm) {
+            int m_idx = m_tile_start + m_sg_start + sm;
+            tSrO_c(sn * SG_M + sm) *= g_exp_slm_ptr[(m_idx)];
+          }
+        }
+
+        // Barrier: ensure U_new[dv] is visible across all subgroups
+        // before O2U reads it via U_tensor_T.
+        item.barrier(sycl::access::fence_space::local_space);
+
+        // --- O2U MMA: O[dv] += O1[dv] + O2 × U_T[dv] ---
+        gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma);
+        auto tCrO_c = thr_copy_O_c.partition_sg_fragment_S(gO_C);
+        auto tCgO_c = thr_copy_O_c.partition_D(gO_C);
+        reorder(tSrO_c, tCrO_c);
+        copy(copy_O_c, tCrO_c, tCgO_c);
       }
 
       auto K_tensor_T_shape = make_shape(head_k_dim, chunk_size);
@@ -1175,50 +1179,46 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       auto thr_copy_S_c = copy_S_c.get_slice(local_id);
       auto thr_copy_S_d = copy_S_d.get_slice(local_id);
 
-      for (int dv = 0; dv < head_v_dim / chunk_size; ++dv) {
-        for (int dk = 0; dk < head_k_dim / chunk_size; ++dk) {
-          Tensor gS_C =
-              local_tile(cS, wg_tile, make_coord(dv, dk, 0), Step<_1, _1, X>{});
-          auto tCrS_d = thr_copy_S_d.partition_sg_fragment_S(gS_C);
-          auto tCgS_d = thr_copy_S_d.partition_D(gS_C);
-          auto tSrS_d = thr_mma.partition_sg_fragment_C(gS_C);
+      for (int dk = 0; dk < head_k_dim / chunk_size; ++dk) {
+        Tensor gS_C =
+            local_tile(cS, wg_tile, make_coord(dv, dk, 0), Step<_1, _1, X>{});
+        auto tCrS_d = thr_copy_S_d.partition_sg_fragment_S(gS_C);
+        auto tCgS_d = thr_copy_S_d.partition_D(gS_C);
+        auto tSrS_d = thr_mma.partition_sg_fragment_C(gS_C);
 
-          // Seed accumulator with exp(g_last) * S_prev when previous state
-          // exists; otherwise start from zeros.
-          if (has_prev_state) {
-            auto tCgS_c = thr_copy_S_c.partition_S(gS_C);
-            auto tCrS_c = thr_copy_S_c.partition_sg_fragment_D(gS_C);
-            copy(copy_S_c, tCgS_c, tCrS_c);
+        // Seed accumulator with exp(g_last) * S_prev when previous state
+        // exists; otherwise start from zeros.
+        if (has_prev_state) {
+          auto tCgS_c = thr_copy_S_c.partition_S(gS_C);
+          auto tCrS_c = thr_copy_S_c.partition_sg_fragment_D(gS_C);
+          copy(copy_S_c, tCgS_c, tCrS_c);
 
-            reorder(tCrS_c, tSrS_d);
-            CUTE_UNROLL
-            for (int i = 0; i < tCrS_c.size(); ++i) {
-              tSrS_d(i) *= g_last_value_exp;
-            }
-          } else {
-            clear(tSrS_d);
+          reorder(tCrS_c, tSrS_d);
+          CUTE_UNROLL
+          for (int i = 0; i < tCrS_c.size(); ++i) {
+            tSrS_d(i) *= g_last_value_exp;
           }
-
-          gemm_TTS_k_multi(
-              U_tensor_T, K_tensor_T, tSrS_d, dv, dk, mma, g_multi_slm_ptr);
-          reorder(tSrS_d, tCrS_d);
-          copy(copy_S_d, tCrS_d, tCgS_d);
+        } else {
+          clear(tSrS_d);
         }
+
+        gemm_TTS_k_multi(
+            U_tensor_T, K_tensor_T, tSrS_d, dv, dk, mma, g_multi_slm_ptr);
+        reorder(tSrS_d, tCrS_d);
+        copy(copy_S_d, tCrS_d, tCgS_d);
       }
 
       if (!has_prev_state) {
-        for (int dv = 0; dv < head_v_dim / chunk_size; ++dv) {
-          Tensor gO_C =
-              local_tile(cO, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
-          auto tCrO_c = thr_copy_O_c.partition_sg_fragment_S(gO_C);
-          auto tCgO_c = thr_copy_O_c.partition_D(gO_C);
-          auto tSrO_c = thr_mma.partition_sg_fragment_C(gO_C);
+        Tensor gO_C =
+            local_tile(cO, wg_tile, make_coord(0, dv, 0), Step<_1, _1, X>{});
+        auto tCrO_c = thr_copy_O_c.partition_sg_fragment_S(gO_C);
+        auto tCgO_c = thr_copy_O_c.partition_D(gO_C);
+        auto tSrO_c = thr_mma.partition_sg_fragment_C(gO_C);
 
-          clear(tSrO_c);
-          gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma);
-          reorder(tSrO_c, tCrO_c);
-          copy(copy_O_c, tCrO_c, tCgO_c);
-        }
+        clear(tSrO_c);
+        gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma);
+        reorder(tSrO_c, tCrO_c);
+        copy(copy_O_c, tCrO_c, tCgO_c);
       }
     }
     pre_chunks += current_chunks;
@@ -1471,7 +1471,10 @@ void kernel_launcher(
   auto mmaFwdO = MMAFwdO{};
   int MaxThreadsPerWorkgroupFwdO = size(mmaFwdO);
   sycl::range<3> local_fwd_o(1, 1, MaxThreadsPerWorkgroupFwdO);
-  sycl::range<3> global_fwd_o(batch_size, num_v_heads, 1);
+  // Split head_v_dim (dv_split tiles) across the grid so each work-group
+  // owns one output tile.
+  const int fwd_o_dv_split = head_v_dim / chunk_size;
+  sycl::range<3> global_fwd_o(batch_size, num_v_heads * fwd_o_dv_split, 1);
   int slm_size_fwd_o = chunk_size + chunk_size + chunk_size;
 
   queue.submit([&](sycl::handler& cgh) {
