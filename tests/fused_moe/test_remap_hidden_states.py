@@ -235,7 +235,9 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
             print("Mismatched ref:", ref_unpermuted_scales[mismatched_indices])
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize(
+    "dtype", [torch.bfloat16, torch.float16, torch.float32]
+)
 def test_moe_gather_topk16(dtype):
     seed_everything(7)
     num_tokens, topk, hidden_size = 8, 16, 128
@@ -253,7 +255,9 @@ def test_moe_gather_topk16(dtype):
                          dtype=dtype,
                          device=DEVICE)
 
-    torch.ops._moe_C.moe_gather(output, moe_output, topk_weights, inverse, 32)
+    torch.ops._moe_C.moe_gather(
+        output, moe_output, topk_weights, inverse.view(-1), 32
+    )
 
     valid_inverse = inverse.clamp_min(0).to(torch.int64)
     valid_weights = topk_weights * (inverse >= 0)
