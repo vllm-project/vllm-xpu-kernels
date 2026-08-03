@@ -239,8 +239,13 @@ class XpuFusedMoe:
         self.activation_situ_beta = activation_situ_beta
         self.activation_situ_linear_beta = activation_situ_linear_beta
         if self.activation == "situ":
+            import math
+
             if self.activation_situ_beta is None:
                 raise ValueError("SITU requires activation_situ_beta")
+            if not math.isfinite(self.activation_situ_beta):
+                raise ValueError(
+                    "SITU activation_situ_beta must be finite")
             if self.activation_situ_beta <= 0:
                 raise ValueError("SITU activation_situ_beta must be positive")
         self.inter_size_scale = 2 if self.activation == "relu2_no_mul" else 1

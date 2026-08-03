@@ -115,10 +115,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_tanh_and_mul", torch::kXPU, &gelu_tanh_and_mul);
 
-    ops.def(
-            "situ_and_mul(Tensor! out, Tensor input, float beta=1.0, float "
-            "linear_beta=-1.0) -> ()");
-    ops.impl("situ_and_mul", torch::kXPU, &situ_and_mul);
+  ops.def(
+      "situ_and_mul(Tensor! out, Tensor input, float beta=1.0, float "
+      "linear_beta=-1.0) -> ()");
+  ops.impl("situ_and_mul", torch::kXPU, &situ_and_mul);
 
   ops.def("fatrelu_and_mul(Tensor! out, Tensor! input, float threshold) -> ()");
   ops.impl("fatrelu_and_mul", torch::kXPU, &fatrelu_and_mul);

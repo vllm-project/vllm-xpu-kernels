@@ -802,9 +802,9 @@ void situ_and_mul(
     out.dim() == input.dim(),
     "SITU input and output must have the same number of dimensions");
   for (int64_t dim = 0; dim < input.dim() - 1; ++dim) {
-  TORCH_CHECK(
-    out.size(dim) == input.size(dim),
-    "SITU input and output leading dimensions must match");
+    TORCH_CHECK(
+        out.size(dim) == input.size(dim),
+        "SITU input and output leading dimensions must match");
   }
   TORCH_CHECK(
     out.size(-1) * 2 == input.size(-1),
