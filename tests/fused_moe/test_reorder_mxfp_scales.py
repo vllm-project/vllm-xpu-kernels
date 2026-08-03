@@ -52,7 +52,7 @@ def test_reorder_mxfp_scales(rows_list, scale_k):
 
     # Build random e8m0 scales via uint8 bit patterns (e8m0 is a raw 8-bit
     # exponent code; any byte is a valid value for a copy test).
-    raw = torch.randint(0, 255, (max(total_rows, 1), scale_k),
+    raw = torch.randint(0, 256, (max(total_rows, 1), scale_k),
                         dtype=torch.uint8)[:total_rows]
     A_scales = raw.view(torch.float8_e8m0fnu).to(KERNEL_DEVICE)
     rows_per_expert = torch.tensor(rows_list,

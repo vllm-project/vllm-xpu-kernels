@@ -183,7 +183,8 @@ torch::Tensor reorder_mxfp_scales(
   TORCH_CHECK(
       rows_per_expert.scalar_type() == at::kInt,
       "rows_per_expert must be int32");
-  TORCH_CHECK(rows_per_expert.is_contiguous(), "rows_per_expert must be int32");
+  TORCH_CHECK(
+      rows_per_expert.is_contiguous(), "rows_per_expert must be contiguous");
 
   const int num_experts = rows_per_expert.size(0);
   const int scale_k = A_scales.size(1);
