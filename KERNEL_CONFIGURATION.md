@@ -25,6 +25,17 @@ model requires a kernel combination that was not included in the build.
 
 ### If you see a kernel missing error:
 
+Missing shapes **fail closed by default**: `flash_attn_varlen_func` raises
+instead of silently falling back to a slow PyTorch reference path (which can
+destroy tok/s and break XPUGraph capture). For eager debugging only:
+
+```bash
+export VLLM_XPU_ATTN_ALLOW_FALLBACK=1
+```
+
+Under XPUGraph capture, fallback is always refused (even with
+`ALLOW_FALLBACK=1`). Rebuild with the config line from the error message.
+
 ```
 ❌ Chunk prefill kernel tuple not compiled for this configuration.
 ```
@@ -92,7 +103,7 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 | File | Kernels | Use Case |
 |------|---------|----------|
 | `paged_decode_full.conf` | 384 | All combinations — supports every model |
-| `paged_decode_default.conf` | ~17 | Llama, Qwen, DeepSeek MLA, Falcon (default build) |
+| `paged_decode_default.conf` | ~28 | Llama, Qwen, DeepSeek MLA, Falcon + pagesize=128 |
 
 ### Recommended Config per Model Family
 
@@ -321,6 +332,25 @@ cmake -DVLLM_CHUNK_PREFILL_CONFIG=/path/to/custom_prefill.conf \
 
 ## Troubleshooting
 
+### Error: "Fail-closed attention (default): refusing PyTorch attention fallback"
+
+**Cause:** The requested FA2 shape is not in your AOT config. Silent Python
+fallback is disabled by default.
+
+```bash
+# Fix: rebuild with the config line printed in the Original error, or use full:
+VLLM_PAGED_DECODE_CONFIG=paged_decode_full.conf \
+VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_full.conf \
+  pip install --no-build-isolation -e .
+
+# Debug-only (eager): allow the slow PyTorch path
+export VLLM_XPU_ATTN_ALLOW_FALLBACK=1
+```
+
+`paged_decode_default.conf` includes pagesize=16/32/64/**128** for common
+Llama/Qwen/DeepSeek/Falcon heads. Prefer extending that preset over enabling
+fallback for serve.
+
 ### Error: "Chunk prefill kernel not compiled for this configuration"
 
 **Cause:** The `head_size` for your model is not in the config.
@@ -386,7 +416,7 @@ cat build/temp_template/csrc/xpu/attn/xe_2/paged_decode_enabled_policies_gen.hpp
 
 | Config | Build Time | Chunk Prefill Kernels | Paged Decode Kernels | Flexibility |
 |--------|------------|----------------------|----------------------|-------------|
-| `default` | ~2 min | ~13 | ~17 | Llama, Qwen, DeepSeek MLA, Falcon |
+| `default` | ~2–5 min | ~13 | ~28 | Llama, Qwen, DeepSeek MLA, Falcon (+ page128) |
 | `full` | ~60 min | 216 | 384 | All models |
 
 ### Binary Size Impact
