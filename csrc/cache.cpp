@@ -532,34 +532,25 @@ class gather_cache_kernel {
   const int32_t* __restrict__ seq_starts;  // Optional: starting offsets per
 };
 
-static inline int select_gather_k_cache_bf16_rows_per_group(
-    int64_t max_token_hint, int64_t num_reqs, bool is_bmg_arch) {
-  int rows_per_group = 2;
-  if (max_token_hint > 256) {
-    rows_per_group = 4;
-  }
-  if (max_token_hint > 2048) {
-    rows_per_group = 8;
-  }
-  if (max_token_hint > 8192) {
-    rows_per_group = 8;
-  }
-  if (!is_bmg_arch) {
-    rows_per_group = std::min(rows_per_group, 4);
-  }
-
-  if (num_reqs >= 8) {
-    rows_per_group = std::min(rows_per_group, 4);
-  }
-  if (num_reqs >= 32) {
-    rows_per_group = std::min(rows_per_group, 2);
-  }
-  return std::max(rows_per_group, 1);
-}
-
-template <int SUBGROUP_SIZE, int CACHE_BLOCK_SIZE = 0>
 class dequantize_and_gather_k_cache_kernel {
  public:
+  static constexpr int kSubgroupSize = 32;
+  static constexpr int kRowsPerGroup = 2;
+  // DeepseekV4 K-cache token layout: 448 FP8 values quantized in blocks of 64
+  // (7 UE8M0 scale bytes stored in an 8-byte group), followed by 64 raw BF16
+  // values, for 448 + 64 * 2 = 576 bytes per token.
+  static constexpr int kFp8Dim = 448;
+  static constexpr int kQuantBlockSize = 64;
+  static constexpr int kTokenDataBytes = 576;
+  static constexpr int kTokenScaleBytes = 8;
+  // Trailing raw BF16 values and the resulting dequantized head dim.
+  static constexpr int kTailDim =
+      (kTokenDataBytes - kFp8Dim) / sizeof(at::BFloat16);
+  static constexpr int kHeadDim = kFp8Dim + kTailDim;
+  // Each step dequantizes 8 values: an 8-byte load and a 16-byte store.
+  static constexpr int kVecSize = 8;
+  static constexpr int kNumFp8Vecs = kFp8Dim / kVecSize;
+
   dequantize_and_gather_k_cache_kernel(
       at::BFloat16* __restrict__ out,
       const uint8_t* __restrict__ k_cache,
@@ -571,8 +562,7 @@ class dequantize_and_gather_k_cache_kernel {
       int64_t cache_block_stride,
       int64_t block_table_stride,
       int32_t cache_block_size,
-      int32_t offset,
-      int32_t rows_per_group)
+      int32_t offset)
       : out_(out),
         k_cache_(k_cache),
         seq_lens_(seq_lens),
@@ -583,10 +573,9 @@ class dequantize_and_gather_k_cache_kernel {
         cache_block_stride_(cache_block_stride),
         block_table_stride_(block_table_stride),
         cache_block_size_(cache_block_size),
-        offset_(offset),
-        rows_per_group_(rows_per_group) {}
+        offset_(offset) {}
 
-  void operator() [[sycl::reqd_sub_group_size(SUBGROUP_SIZE)]] (
+  void operator() [[sycl::reqd_sub_group_size(kSubgroupSize)]] (
       const sycl::nd_item<2>& item) const {
     const int row_tile = static_cast<int>(item.get_group(0));
     const int batch_idx = static_cast<int>(item.get_group(1));
@@ -596,25 +585,15 @@ class dequantize_and_gather_k_cache_kernel {
     const int seq_len = seq_lens_[batch_idx];
     const int gather_len =
         gather_lens_ == nullptr ? seq_len : gather_lens_[batch_idx];
-    const int out_row = row_tile * rows_per_group_ + subgroup_idx;
+    const int out_row = row_tile * kRowsPerGroup + subgroup_idx;
     if (out_row >= gather_len) {
       return;
     }
 
     const int start_pos = seq_len - gather_len;
     const int pos = start_pos + out_row;
-    int block_in_seq;
-    int pos_in_block;
-    if constexpr (
-        CACHE_BLOCK_SIZE > 0 &&
-        (CACHE_BLOCK_SIZE & (CACHE_BLOCK_SIZE - 1)) == 0) {
-      constexpr int kShift = __builtin_ctz(CACHE_BLOCK_SIZE);
-      block_in_seq = pos >> kShift;
-      pos_in_block = pos & (CACHE_BLOCK_SIZE - 1);
-    } else {
-      block_in_seq = pos / cache_block_size_;
-      pos_in_block = pos % cache_block_size_;
-    }
+    const int block_in_seq = pos / cache_block_size_;
+    const int pos_in_block = pos % cache_block_size_;
 
     const int64_t block_table_batch_offset =
         static_cast<int64_t>(batch_idx) * block_table_stride_;
@@ -624,37 +603,50 @@ class dequantize_and_gather_k_cache_kernel {
     const uint8_t* cache_block_ptr =
         k_cache_ + physical_block_idx * cache_block_stride_;
     const uint8_t* token_data_ptr =
-        cache_block_ptr + static_cast<int64_t>(pos_in_block) * 576;
+        cache_block_ptr + static_cast<int64_t>(pos_in_block) * kTokenDataBytes;
     const uint8_t* token_scale_ptr =
-        cache_block_ptr + static_cast<int64_t>(cache_block_size_) * 576 +
-        static_cast<int64_t>(pos_in_block) * 8;
+        cache_block_ptr +
+        static_cast<int64_t>(cache_block_size_) * kTokenDataBytes +
+        static_cast<int64_t>(pos_in_block) * kTokenScaleBytes;
 
     at::BFloat16* out_row_ptr =
         out_ + static_cast<int64_t>(batch_idx) * out_stride0_ +
         static_cast<int64_t>(offset_ + out_row) * out_stride1_;
 
-    // Dequantize 7 * 64 FP8 values with one scale byte per quant block.
-    for (int qblock_idx = 0; qblock_idx < 7; ++qblock_idx) {
-      const float exponent =
-          static_cast<float>(token_scale_ptr[qblock_idx]) - 127.0f;
-      const float scale = sycl::exp2(exponent);
+    // Load all scale bytes at once; they share one 8-byte group.
+    const uint64_t scale_bits =
+        *reinterpret_cast<const uint64_t*>(token_scale_ptr);
 
-      for (int idx = lane; idx < 64; idx += SUBGROUP_SIZE) {
-        const int col = qblock_idx * 64 + idx;
+    // kQuantBlockSize is a multiple of kVecSize, so each vector stays inside
+    // one quant block and shares a single scale.
+    constexpr int kVecsPerQuantBlock = kQuantBlockSize / kVecSize;
+    for (int vec_idx = lane; vec_idx < kNumFp8Vecs; vec_idx += kSubgroupSize) {
+      // A UE8M0 byte is the IEEE-754 biased exponent of 2^(byte-127).
+      const uint32_t exponent_bits = static_cast<uint32_t>(
+          (scale_bits >> ((vec_idx / kVecsPerQuantBlock) * 8)) & 0xFFu);
+      const float scale = sycl::bit_cast<float>(exponent_bits << 23);
+
+      const vec_n_t<uint8_t, kVecSize> src =
+          *reinterpret_cast<const vec_n_t<uint8_t, kVecSize>*>(
+              token_data_ptr + vec_idx * kVecSize);
+
+      vec_n_t<at::BFloat16, kVecSize> dst;
+#pragma unroll
+      for (int i = 0; i < kVecSize; ++i) {
         const at::Float8_e4m3fn fp8_val =
-            sycl::bit_cast<at::Float8_e4m3fn>(token_data_ptr[col]);
-        const float dequant = static_cast<float>(fp8_val) * scale;
-        out_row_ptr[col] = static_cast<at::BFloat16>(dequant);
+            sycl::bit_cast<at::Float8_e4m3fn>(src.val[i]);
+        dst.val[i] =
+            static_cast<at::BFloat16>(static_cast<float>(fp8_val) * scale);
       }
+      *reinterpret_cast<vec_n_t<at::BFloat16, kVecSize>*>(
+          out_row_ptr + vec_idx * kVecSize) = dst;
     }
 
-    // Copy the tail BF16 payload [448:512].
-    const uint16_t* tail_src =
-        reinterpret_cast<const uint16_t*>(token_data_ptr + 448);
-    at::BFloat16* tail_dst = out_row_ptr + 448;
-    for (int idx = lane; idx < 64; idx += SUBGROUP_SIZE) {
-      tail_dst[idx] = sycl::bit_cast<at::BFloat16>(tail_src[idx]);
-    }
+    // Tail BF16 payload [448:512]: 64 values == 32 words, one per work-item.
+    const uint32_t* tail_src =
+        reinterpret_cast<const uint32_t*>(token_data_ptr + kFp8Dim);
+    uint32_t* tail_dst = reinterpret_cast<uint32_t*>(out_row_ptr + kFp8Dim);
+    tail_dst[lane] = tail_src[lane];
   }
 
  private:
@@ -669,8 +661,8 @@ class dequantize_and_gather_k_cache_kernel {
   int64_t block_table_stride_;
   int32_t cache_block_size_;
   int32_t offset_;
-  int32_t rows_per_group_;
 };
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 class indexer_k_quant_and_cache_kernel {
  public:
@@ -1203,71 +1195,17 @@ void concat_and_cache_mla(
       kv_c.scalar_type(), kv_cache_dtype, CALL_CONCAT_AND_CACHE_MLA);
 }
 
-#define CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(BLOCK_SIZE_TPARAM)         \
-  queue.submit([&](sycl::handler& cgh) {                                   \
-    cgh.parallel_for(                                                      \
-        sycl::nd_range<2>(grid * block, block),                            \
-        vllm::dequantize_and_gather_k_cache_kernel<32, BLOCK_SIZE_TPARAM>( \
-            out.data_ptr<at::BFloat16>(),                                  \
-            k_cache.data_ptr<uint8_t>(),                                   \
-            seq_lens.data_ptr<int32_t>(),                                  \
-            gather_lens_ptr,                                               \
-            block_table.data_ptr<int32_t>(),                               \
-            out_stride0,                                                   \
-            out_stride1,                                                   \
-            cache_block_stride,                                            \
-            block_table_stride,                                            \
-            block_size_i32,                                                \
-            offset_i32,                                                    \
-            rows_per_group));                                              \
-  });
-
-#define CALL_DEQUANTIZE_AND_GATHER_K_CACHE()         \
-  do {                                               \
-    switch (block_size_i32) {                        \
-      case 2:                                        \
-        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(2);  \
-        break;                                       \
-      case 4:                                        \
-        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(4);  \
-        break;                                       \
-      case 8:                                        \
-        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(8);  \
-        break;                                       \
-      case 16:                                       \
-        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(16); \
-        break;                                       \
-      case 32:                                       \
-        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(32); \
-        break;                                       \
-      case 64:                                       \
-        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(64); \
-        break;                                       \
-      default:                                       \
-        CALL_DEQUANTIZE_AND_GATHER_K_CACHE_IMPL(0);  \
-        break;                                       \
-    }                                                \
-  } while (0)
-
 void dequantize_and_gather_k_cache(
     torch::Tensor& out,
     torch::Tensor const& k_cache,
     torch::Tensor const& seq_lens,
-    std::optional<torch::Tensor> gather_lens,
+    const std::optional<torch::Tensor>& gather_lens,
     torch::Tensor const& block_table,
     int64_t block_size,
     int64_t offset) {
   CHECK_DEVICE(out);
-  CHECK_DEVICE(k_cache);
-  CHECK_DEVICE(seq_lens);
-  CHECK_DEVICE(block_table);
   CHECK_CONTIGUOUS(seq_lens);
-  CHECK_CONTIGUOUS(block_table);
-  CHECK_STRIDE_ALIGNMENT(out);
-  CHECK_STRIDE_ALIGNMENT(k_cache);
-
   if (gather_lens.has_value()) {
-    CHECK_DEVICE(gather_lens.value());
     CHECK_CONTIGUOUS(gather_lens.value());
   }
 
@@ -1286,7 +1224,7 @@ void dequantize_and_gather_k_cache(
         "gather_lens must be int32");
   }
 
-  TORCH_CHECK(out.dim() == 3, "out must be [batch, tokens, 512]");
+  TORCH_CHECK(out.dim() == 3, "out must be [batch, tokens, head_dim]");
   TORCH_CHECK(k_cache.dim() == 2, "k_cache must be [num_blocks, block_bytes]");
   TORCH_CHECK(seq_lens.dim() == 1, "seq_lens must be 1D");
   TORCH_CHECK(block_table.dim() == 2, "block_table must be 2D");
@@ -1313,7 +1251,9 @@ void dequantize_and_gather_k_cache(
   TORCH_CHECK(
       block_table.size(0) == seq_lens.size(0),
       "block_table batch must match seq_lens");
-  TORCH_CHECK(out.size(2) == 512, "out head dim must be 512");
+  constexpr int64_t head_dim =
+      vllm::dequantize_and_gather_k_cache_kernel::kHeadDim;
+  TORCH_CHECK(out.size(2) == head_dim, "out head dim must be ", head_dim);
   TORCH_CHECK(block_size > 0, "block_size must be > 0");
   TORCH_CHECK(offset >= 0, "offset must be >= 0");
   TORCH_CHECK(offset < out.size(1), "offset must be < out token dimension");
@@ -1321,10 +1261,16 @@ void dequantize_and_gather_k_cache(
       block_table.size(1) > 0,
       "block_table must have at least one block per sequence");
 
-  const int64_t min_block_bytes = block_size * 576 + block_size * 8;
+  const int64_t min_block_bytes =
+      block_size *
+      (vllm::dequantize_and_gather_k_cache_kernel::kTokenDataBytes +
+       vllm::dequantize_and_gather_k_cache_kernel::kTokenScaleBytes);
   TORCH_CHECK(
       k_cache.stride(1) == 1,
       "k_cache must be byte-addressable contiguous on the last dimension");
+  TORCH_CHECK(
+      block_table.stride(1) == 1,
+      "block_table last dim must be contiguous (stride==1)");
   TORCH_CHECK(
       k_cache.size(1) >= min_block_bytes,
       "k_cache block_bytes is too small for DeepseekV4 layout. required >= ",
@@ -1332,11 +1278,39 @@ void dequantize_and_gather_k_cache(
       ", got ",
       k_cache.size(1));
 
+  // The kernel dequantizes with kVecSize-wide loads from k_cache and
+  // kVecSize-wide stores into out, so both must stay naturally aligned for
+  // every token row.
+  constexpr int64_t vec_size =
+      vllm::dequantize_and_gather_k_cache_kernel::kVecSize;
+  constexpr int64_t cache_vec_bytes = vec_size * sizeof(uint8_t);
+  constexpr int64_t out_vec_bytes = vec_size * sizeof(at::BFloat16);
+  TORCH_CHECK(
+      reinterpret_cast<uintptr_t>(k_cache.data_ptr()) % cache_vec_bytes == 0 &&
+          k_cache.stride(0) % cache_vec_bytes == 0,
+      "k_cache must be ",
+      cache_vec_bytes,
+      "-byte aligned with a row stride that is a multiple of ",
+      cache_vec_bytes,
+      " bytes");
+  TORCH_CHECK(
+      reinterpret_cast<uintptr_t>(out.data_ptr()) % out_vec_bytes == 0 &&
+          out.stride(0) % vec_size == 0 && out.stride(1) % vec_size == 0,
+      "out must be ",
+      out_vec_bytes,
+      "-byte aligned with strides that are multiples of ",
+      vec_size,
+      " elements");
+  TORCH_CHECK(
+      out.stride(2) == 1, "out must be contiguous in the head dimension");
+
   const int64_t num_reqs = seq_lens.size(0);
   const int64_t max_token_hint =
       std::min<int64_t>(block_table.size(1) * block_size, out.size(1) - offset);
-  const int rows_per_group = vllm::select_gather_k_cache_bf16_rows_per_group(
-      max_token_hint, num_reqs, vllm::xpu::is_bmg(out.device().index()));
+  constexpr int rows_per_group =
+      vllm::dequantize_and_gather_k_cache_kernel::kRowsPerGroup;
+  constexpr int subgroup_size =
+      vllm::dequantize_and_gather_k_cache_kernel::kSubgroupSize;
   const int64_t row_tiles =
       (max_token_hint + rows_per_group - 1) / rows_per_group;
 
@@ -1351,10 +1325,26 @@ void dequantize_and_gather_k_cache(
   const int64_t block_table_stride = block_table.stride(0);
 
   sycl::range<2> grid(row_tiles, num_reqs);
-  sycl::range<2> block(rows_per_group, 32);
+  sycl::range<2> block(rows_per_group, subgroup_size);
   const at::DeviceGuard device_guard(out.device());
   auto& queue = vllm::xpu::vllmGetQueue();
-  CALL_DEQUANTIZE_AND_GATHER_K_CACHE();
+
+  queue.submit([&](sycl::handler& cgh) {
+    cgh.parallel_for(
+        sycl::nd_range<2>(grid * block, block),
+        vllm::dequantize_and_gather_k_cache_kernel(
+            out.data_ptr<at::BFloat16>(),
+            k_cache.data_ptr<uint8_t>(),
+            seq_lens.data_ptr<int32_t>(),
+            gather_lens_ptr,
+            block_table.data_ptr<int32_t>(),
+            out_stride0,
+            out_stride1,
+            cache_block_stride,
+            block_table_stride,
+            block_size_i32,
+            offset_i32));
+  });
 }
 
 // Macro to dispatch the kernel based on the data type.

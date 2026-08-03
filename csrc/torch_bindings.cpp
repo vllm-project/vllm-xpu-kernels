@@ -280,10 +280,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   cache_ops.impl("gather_cache", torch::kXPU, &gather_cache);
 
   cache_ops.def(
-      "dequantize_and_gather_k_cache(Tensor! out, Tensor k_cache, Tensor "
-      "seq_lens, "
-      "Tensor? gather_lens, Tensor block_table, int block_size, int offset) "
-      "-> ()");
+      "dequantize_and_gather_k_cache(Tensor! out,"
+      "                              Tensor k_cache,"
+      "                              Tensor seq_lens,"
+      "                              Tensor? gather_lens,"
+      "                              Tensor block_table,"
+      "                              int block_size,"
+      "                              int offset) -> ()");
   cache_ops.impl(
       "dequantize_and_gather_k_cache",
       torch::kXPU,

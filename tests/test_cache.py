@@ -41,7 +41,6 @@ DEVICES = [
 
 KV_CACHE_DTYPE = ["auto"]  # FIXME: will add "fp8" when accuracy is improved
 KV_CACHE_DTYPE_ALL = ["auto", "fp8"]
-DEEPSEEK_V4_HEAD_DIM = 512
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
@@ -491,16 +490,17 @@ def _reference_dequantize_and_gather_k_cache(
     block_table: torch.Tensor,
     out_tokens: int,
     offset: int,
+    head_dim: int,
+    fp8_dim: int,
+    quant_block: int,
+    scale_dim: int,
 ) -> torch.Tensor:
-    fp8_dim = 448
-    bf16_dim = 64
-    quant_block = 64
-    num_quant_blocks = 7
+    bf16_dim = head_dim - fp8_dim
+    num_quant_blocks = fp8_dim // quant_block
     token_data_bytes = fp8_dim + bf16_dim * 2
-    scale_dim = 8
 
     batch_size = seq_lens.numel()
-    expected = torch.zeros((batch_size, out_tokens, DEEPSEEK_V4_HEAD_DIM),
+    expected = torch.zeros((batch_size, out_tokens, head_dim),
                            dtype=torch.bfloat16)
     k_cache_cpu = k_cache.cpu()
     seq_lens_list = seq_lens.cpu().tolist()
@@ -554,16 +554,19 @@ def _reference_dequantize_and_gather_k_cache(
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("offset", [0, 11])
 @pytest.mark.parametrize("use_explicit_gather_lens", [False, True])
+@pytest.mark.parametrize("head_dim", [512])
+@pytest.mark.parametrize("fp8_dim", [448])
+@pytest.mark.parametrize("quant_block", [64])
+@pytest.mark.parametrize("scale_dim", [8])
 @pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_dequantize_and_gather_k_cache(block_size, max_seq_len, batch_size,
                                        offset, use_explicit_gather_lens,
-                                       device):
-    fp8_dim = 448
-    bf16_dim = 64
-    num_quant_blocks = 7
+                                       head_dim, fp8_dim, quant_block,
+                                       scale_dim, device):
+    bf16_dim = head_dim - fp8_dim
+    num_quant_blocks = fp8_dim // quant_block
     token_data_bytes = fp8_dim + bf16_dim * 2
-    scale_dim = 8
     block_bytes = block_size * (token_data_bytes + scale_dim)
 
     max_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
@@ -575,7 +578,12 @@ def test_dequantize_and_gather_k_cache(block_size, max_seq_len, batch_size,
     tail_vals = torch.randn((num_blocks, block_size, bf16_dim),
                             dtype=torch.bfloat16,
                             device=device)
-    scale_exponents = torch.randint(-8,
+    # A UE8M0 scale byte is a biased exponent: scale = 2^(byte - 127).
+    # The producer computes exponent = ceil(log2(max(amax, 1e-4) / 448)), so
+    # the amax floor pins the smallest realistic exponent at -22. Sample
+    # 2^-22 .. 2^8, which spans the production range without overflowing the
+    # bfloat16 output (448 * 2^8 is far below the bfloat16 maximum).
+    scale_exponents = torch.randint(-22,
                                     9,
                                     (num_blocks, block_size, num_quant_blocks),
                                     dtype=torch.int32,
@@ -626,8 +634,7 @@ def test_dequantize_and_gather_k_cache(block_size, max_seq_len, batch_size,
     max_gather_len = int((gather_lens if gather_lens is not None else seq_lens)
                          .max()
                          .item())
-    out = torch.zeros((batch_size, offset + max_gather_len,
-                       DEEPSEEK_V4_HEAD_DIM),
+    out = torch.zeros((batch_size, offset + max_gather_len, head_dim),
                       dtype=torch.bfloat16,
                       device=device)
 
@@ -638,6 +645,10 @@ def test_dequantize_and_gather_k_cache(block_size, max_seq_len, batch_size,
         block_table,
         out.size(1),
         offset,
+        head_dim,
+        fp8_dim,
+        quant_block,
+        scale_dim,
     ).to(device)
 
     opcheck(

@@ -162,8 +162,8 @@ void dequantize_and_gather_k_cache(
     torch::Tensor& out,             // [batch, max_tokens, 512]
     torch::Tensor const& k_cache,   // [num_blocks, block_bytes] uint8
     torch::Tensor const& seq_lens,  // [batch]
-    std::optional<torch::Tensor> gather_lens,  // [batch] or None
-    torch::Tensor const& block_table,          // [batch, max_blocks_per_seq]
+    const std::optional<torch::Tensor>& gather_lens,  // [batch] or None
+    torch::Tensor const& block_table,  // [batch, max_blocks_per_seq]
     int64_t block_size,
     int64_t offset);
 
