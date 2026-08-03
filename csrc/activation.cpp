@@ -310,6 +310,21 @@ swiglustep_and_mul(const T& gate, const T& up, float limit) {
   return (T)(clamped_gate * clamped_up);
 }
 
+template <typename T>
+[[intel::device_indirectly_callable]] inline __attribute__((always_inline)) T
+situ_and_mul(
+    const T& gate, const T& up, float beta, float linear_beta) {
+  const float gate_f = static_cast<float>(gate);
+  const float up_f = static_cast<float>(up);
+  const float activated_gate =
+      beta * sycl::tanh(gate_f / beta) /
+      (1.0f + sycl::exp(-gate_f));
+  const float activated_up = linear_beta > 0.0f
+      ? linear_beta * sycl::tanh(up_f / linear_beta)
+      : up_f;
+  return static_cast<T>(activated_gate * activated_up);
+}
+
 template <
     typename scalar_t,
     scalar_t (*ACT_FN)(
@@ -374,6 +389,52 @@ class swiglustep_and_mul_kernel {
   const scalar_t* input;
   const int d;
   const float limit;
+};
+
+template <typename scalar_t, int VEC_SIZE>
+class situ_and_mul_kernel {
+ public:
+  situ_and_mul_kernel(
+      scalar_t* __restrict__ out,
+      const scalar_t* __restrict__ input,
+      const int d,
+      const float beta,
+      const float linear_beta)
+      : out(out),
+        input(input),
+        d(d),
+        beta(beta),
+        linear_beta(linear_beta) {}
+
+  void operator()(sycl::nd_item<1> item) const {
+    using vec_t = vllm::xpu::aligned_vec<scalar_t, VEC_SIZE>;
+    const int64_t token_idx = item.get_group(0);
+    const int64_t offset = item.get_local_linear_id();
+    const int64_t step = item.get_local_range(0);
+    const int64_t bound = d / VEC_SIZE;
+    const auto* gate =
+        reinterpret_cast<const vec_t*>(input) + token_idx * bound * 2;
+    const auto* up = gate + bound;
+
+    for (int64_t i = offset; i < bound; i += step) {
+      const vec_t gate_vec = gate[i];
+      const vec_t up_vec = up[i];
+      vec_t out_vec;
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        out_vec[j] = vllm::situ_and_mul(
+            gate_vec[j], up_vec[j], beta, linear_beta);
+      }
+      reinterpret_cast<vec_t*>(out)[token_idx * bound + i] = out_vec;
+    }
+  }
+
+ private:
+  scalar_t* out;
+  const scalar_t* input;
+  const int d;
+  const float beta;
+  const float linear_beta;
 };
 
 }  // namespace vllm
@@ -713,4 +774,94 @@ void swiglustep_and_mul(
     torch::Tensor& input,  // [..., 2 * d]
     double limit) {
   LAUNCH_SWIGLUSTEP_AND_MUL(vllm::swiglustep_and_mul, limit);
+}
+
+void situ_and_mul(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input,  // [..., 2 * d]
+    double beta,
+    double linear_beta) {
+  TORCH_CHECK(
+    std::isfinite(beta) && beta > 0.0,
+    "SITU beta must be finite and greater than zero");
+  TORCH_CHECK(
+    std::isfinite(linear_beta), "SITU linear_beta must be finite");
+  TORCH_CHECK(input.dim() >= 1, "SITU input must have at least one dimension");
+  TORCH_CHECK(
+    input.size(-1) > 0 && input.size(-1) % 2 == 0,
+    "SITU input last dimension must be positive and even");
+  TORCH_CHECK(input.is_contiguous(), "SITU input must be contiguous");
+  TORCH_CHECK(out.is_contiguous(), "SITU output must be contiguous");
+  TORCH_CHECK(
+    out.device() == input.device(),
+    "SITU input and output must be on the same device");
+  TORCH_CHECK(
+    out.scalar_type() == input.scalar_type(),
+    "SITU input and output must have the same dtype");
+  TORCH_CHECK(
+    out.dim() == input.dim(),
+    "SITU input and output must have the same number of dimensions");
+  for (int64_t dim = 0; dim < input.dim() - 1; ++dim) {
+  TORCH_CHECK(
+    out.size(dim) == input.size(dim),
+    "SITU input and output leading dimensions must match");
+  }
+  TORCH_CHECK(
+    out.size(-1) * 2 == input.size(-1),
+    "SITU output last dimension must be half the input last dimension");
+
+  const int d = input.size(-1) / 2;
+  const int64_t num_tokens = input.numel() / input.size(-1);
+  if (num_tokens == 0) {
+    return;
+  }
+  at::DeviceGuard device_guard(input.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "situ_and_mul", [&] {
+    using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+    int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(sycl_t));
+    int64_t tmp_wg =
+        std::min(static_cast<int64_t>(d), static_cast<int64_t>(1024));
+    while (vec_size > 1 && (vec_size >> 1) * tmp_wg >= d) {
+      vec_size >>= 1;
+    }
+    if (d % vec_size != 0) {
+      vec_size = 1;
+    }
+    const int64_t wg_size = std::min(
+        static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));
+
+    auto launch = [&]<int N>() {
+      queue.submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(
+            sycl::nd_range<1>(num_tokens * wg_size, wg_size),
+            vllm::situ_and_mul_kernel<sycl_t, N>(
+                reinterpret_cast<sycl_t*>(out.data_ptr<scalar_t>()),
+                reinterpret_cast<const sycl_t*>(input.data_ptr<scalar_t>()),
+                d,
+                static_cast<float>(beta),
+                static_cast<float>(linear_beta)));
+      });
+    };
+
+    switch (vec_size) {
+      case 1:
+        launch.template operator()<1>();
+        break;
+      case 2:
+        launch.template operator()<2>();
+        break;
+      case 4:
+        launch.template operator()<4>();
+        break;
+      case 8:
+        launch.template operator()<8>();
+        break;
+      case 16:
+        launch.template operator()<16>();
+        break;
+      default:
+        TORCH_CHECK(false, "Unsupported vector size: ", vec_size);
+    }
+  });
 }
