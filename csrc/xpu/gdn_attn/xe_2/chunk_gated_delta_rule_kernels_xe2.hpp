@@ -258,7 +258,8 @@ CUTE_DEVICE void chunk_compute_A_kernel(
                 v_head_id * total_virtual_seqlen];
 
           tSrA_c(sn * SG_M + sm) *=
-              sycl::exp(g_slm_ptr[(m_idx)] - g_slm_ptr[n_idx]) * beta_value;
+              sycl::native::exp(g_slm_ptr[(m_idx)] - g_slm_ptr[n_idx]) *
+              beta_value;
           if (m_idx == n_idx) {
             tSrA_c(sn * SG_M + sm) = 1.0f;
           }
@@ -784,7 +785,7 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
         float a_value =
             a[(chunk_start_offset + e) + v_head_id * total_virtual_seqlen];
         beta_slm_ptr[e] = beta_value;
-        g_slm_ptr[e] = sycl::exp(a_value) * beta_value;
+        g_slm_ptr[e] = sycl::native::exp(a_value) * beta_value;
       }
 
       item.barrier(sycl::access::fence_space::local_space);
