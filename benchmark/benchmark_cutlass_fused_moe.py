@@ -4,6 +4,7 @@
 
 # isort: off
 import gc
+import statistics
 
 import torch
 import triton
@@ -12,7 +13,7 @@ import triton.testing
 from utils import bootstrap_benchmark_env, ensure_save_path_exists
 
 bootstrap_benchmark_env(__file__)
-from benchmark.src.fused_moe_interface_ import xpu_fused_moe_CalKernelTime
+from benchmark.src.fused_moe_interface_ import XpuFusedMoe_CalKernelTime
 from benchmark.src.get_model_config import (
     gen_cutlass_fused_moe_correctness_configs as gen_correctness_config)
 from benchmark.src.get_model_config import (gen_cutlass_fused_moe_perf_configs
@@ -163,7 +164,7 @@ def calculate_diff(config):
         print("❌ Implementations differ, ", config, " error: ", e)
 
 
-def get_benchmark(iterations):
+def get_benchmark():
 
     @triton.testing.perf_report(
         triton.testing.Benchmark(
@@ -203,17 +204,13 @@ def get_benchmark(iterations):
                   x_dtype,
                   w_dtype,
                   has_bias,
-                  provider,
-                  iterations=iterations):
+                  provider):
         print(f"Running config: {m, n, k, num_experts, topk, \
                                 x_dtype, w_dtype, \
                                 has_bias}, Provider: {provider}",
               flush=True)
         total_latency = 0.0
         ms = 0.0
-        assert iterations > 5, \
-            "Iterations should be greater than " \
-            "5 to have enough warmup iterations."
 
         _, _, w13_bias, _, w2_bias, _, \
             _, a, w13, w13_scales, w2, w2_scales, \
@@ -232,24 +229,66 @@ def get_benchmark(iterations):
                               activation="silu",
                               num_experts=num_experts)
             output = torch.empty_like(a)
-            start_event = torch.xpu.Event(enable_timing=True)
-            end_event = torch.xpu.Event(enable_timing=True)
-            for index in range(5):
+
+            def run_vllm_moe():
                 moe.apply(output=output,
                           hidden_states=a,
                           topk_weights=expert_scores,
                           topk_ids=expert_indices)
-            start_event.record()
-            for index in range(5, iterations):
-                moe.apply(output=output,
-                          hidden_states=a,
-                          topk_weights=expert_scores,
-                          topk_ids=expert_indices)
-            end_event.record()
-            torch.xpu.synchronize()
-            total_latency = start_event.elapsed_time(end_event)
+
+            # Use triton do_bench instead of a single start/end event span:
+            # it auto-warms up, flushes the L2 cache between reps and reports
+            # the median. A single event span also captures host-side launch
+            # overhead / queue bubbles between kernels, which is a large and
+            # noisy fraction of the time for small MoE configs.
+            ms, _, _ = triton.testing.do_bench(
+                run_vllm_moe,
+                quantiles=[0.5, 0.2, 0.8],
+            )
+            clear_xpu_cache()
+            return 1000 * ms
         else:
-            n_measured = iterations - 5
+            moe = XpuFusedMoe_CalKernelTime(w13=w13,
+                            w13_scales=w13_scales,
+                            w13_bias=w13_bias,
+                            w2=w2,
+                            w2_scales=w2_scales,
+                            w2_bias=w2_bias,
+                            n_experts_per_token=topk,
+                            activation="silu",
+                            num_experts=num_experts)
+            output = torch.empty_like(a)
+            # L2 cache flush buffer, mirroring triton.testing.do_bench, so
+            # the per-sub-kernel timings are not biased by warm caches.
+            cache = torch.empty(int(256e6 // 4), dtype=torch.int, device=DEVICE)
+
+            # Size the measurement loop by a time budget like
+            # triton.testing.do_bench: first estimate the per-call time, then
+            # pick warmup / repeat counts so we warm up ~25ms and measure
+            # ~100ms worth of iterations (auto-scales with kernel size).
+            warmup_ms = 25
+            rep_ms = 100
+            for _ in range(5):
+                moe.apply(output=output,
+                    hidden_states=a,
+                    topk_weights=expert_scores,
+                    topk_ids=expert_indices)
+            torch.xpu.synchronize()
+            est_start = torch.xpu.Event(enable_timing=True)
+            est_end = torch.xpu.Event(enable_timing=True)
+            est_start.record()
+            for _ in range(5):
+                moe.apply(output=output,
+                    hidden_states=a,
+                    topk_weights=expert_scores,
+                    topk_ids=expert_indices)
+            est_end.record()
+            torch.xpu.synchronize()
+            estimate_ms = est_start.elapsed_time(est_end) / 5
+            n_warmup = max(1, int(warmup_ms / estimate_ms))
+            n_measured = max(1, int(rep_ms / estimate_ms))
+
+            # per-sub-kernel events, sized to the measured loop
             remap_se = [
                 torch.xpu.Event(enable_timing=True) for _ in range(n_measured)
             ]
@@ -274,52 +313,51 @@ def get_benchmark(iterations):
             gather_ee = [
                 torch.xpu.Event(enable_timing=True) for _ in range(n_measured)
             ]
-            gemm1_info = gemm2_info = None
-            for index in range(iterations):
-                i = index - 5 if index >= 5 else None
-                cur_gemm1_info, cur_gemm2_info = xpu_fused_moe_CalKernelTime(
+            # extra warm up before the measured loop
+            for _ in range(n_warmup):
+                moe.apply(output=output,
                     hidden_states=a,
-                    w13=w13,
-                    w13_scales=w13_scales,
-                    w13_bias=w13_bias,
-                    w2=w2,
-                    w2_scales=w2_scales,
-                    w2_bias=w2_bias,
                     topk_weights=expert_scores,
-                    topk_ids=expert_indices,
-                    n_experts_per_token=topk,
-                    activation="silu",
-                    num_experts=num_experts,
-                    is_fp8=(w_dtype is not None),
-                    start_event_remap=remap_se[i] if i is not None else None,
-                    end_event_remap=remap_ee[i] if i is not None else None,
-                    start_event_gemm1=gemm1_se[i] if i is not None else None,
-                    end_event_gemm1=gemm1_ee[i] if i is not None else None,
-                    start_event_gemm2=gemm2_se[i] if i is not None else None,
-                    end_event_gemm2=gemm2_ee[i] if i is not None else None,
-                    start_event_gather=gather_se[i] if i is not None else None,
-                    end_event_gather=gather_ee[i] if i is not None else None,
-                )
-                if index == 5:
+                    topk_ids=expert_indices)
+            gemm1_info = gemm2_info = None
+            for i in range(n_measured):
+                cache.zero_()  # flush L2 before each measured iteration
+                cur_gemm1_info, cur_gemm2_info = \
+                    moe.apply(output=output,
+                        hidden_states=a,
+                        topk_weights=expert_scores,
+                        topk_ids=expert_indices,
+                        start_event_remap=remap_se[i],
+                        end_event_remap=remap_ee[i],
+                        start_event_gemm1=gemm1_se[i],
+                        end_event_gemm1=gemm1_ee[i],
+                        start_event_gemm2=gemm2_se[i],
+                        end_event_gemm2=gemm2_ee[i],
+                        start_event_gather=gather_se[i],
+                        end_event_gather=gather_ee[i],)
+                if i == 0:
                     gemm1_info = cur_gemm1_info
                     gemm2_info = cur_gemm2_info
             torch.xpu.synchronize()
-            remap_latency = sum(
+            # Take the per-iteration median (like do_bench) instead of the
+            # mean, then scale by n_measured so the downstream
+            # `total_latency / n_measured` still yields the median.
+            remap_latency = statistics.median([
                 remap_se[i].elapsed_time(remap_ee[i])
                 for i in range(n_measured)
-            )
-            gemm1_latency = sum(
+            ]) * n_measured
+            gemm1_latency = statistics.median([
                 gemm1_se[i].elapsed_time(gemm1_ee[i])
                 for i in range(n_measured)
-            )
-            gemm2_latency = sum(
+            ]) * n_measured
+            gemm2_latency = statistics.median([
                 gemm2_se[i].elapsed_time(gemm2_ee[i])
                 for i in range(n_measured)
-            )
-            gather_latency = sum(
+            ]) * n_measured
+            gather_latency = statistics.median([
                 gather_se[i].elapsed_time(gather_ee[i])
                 for i in range(n_measured)
-            )
+            ]) * n_measured
             gemm1_m, gemm1_n, gemm1_k, gemm1_expert = gemm1_info
             gemm2_m, gemm2_n, gemm2_k, gemm2_expert = gemm2_info
             if provider == "vllm_kernel_remap":
@@ -351,7 +389,7 @@ def get_benchmark(iterations):
                 return memory_usage_GB / (ms / 1000)  # GB/s
 
         torch.xpu.synchronize()
-        ms = total_latency / (iterations - 5)
+        ms = total_latency / n_measured
         clear_xpu_cache()
         return 1000 * ms
 
@@ -363,7 +401,6 @@ if __name__ == "__main__":
     args = parse_args()
     seed = 1234
     seed_everything(seed)
-    iterations = 20
 
     configs = gen_correctness_config()
 
@@ -375,7 +412,7 @@ if __name__ == "__main__":
         clear_xpu_cache()
 
     configs = gen_perf_configs()
-    benchmark = get_benchmark(iterations=iterations)
+    benchmark = get_benchmark()
     save_path = ensure_save_path_exists(args.save_path)
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=save_path)
