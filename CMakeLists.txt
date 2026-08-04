@@ -54,9 +54,9 @@ set(ONEDNN_GIT_REPO
     "https://github.com/uxlfoundation/oneDNN.git"
     CACHE STRING "oneDNN git repository URL")
 
-# rls-v3.12
+# rls-v3.12.3
 set(ONEDNN_GIT_TAG
-    "80afa71049cd69a3df32adcccb623b12cd7baa22"
+    "6db5f1ba860ca8f65c3f65c4498ad867e9642447"
     CACHE STRING "oneDNN git commit hash or tag")
 # ARCHITECTURE OPTIONS
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
