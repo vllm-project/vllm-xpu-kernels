@@ -83,7 +83,7 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     int64_t rotary_dim,
     bool is_neox);
 
-void xpu_compress_insert_fp8mix(
+void fused_kv_compress_norm_rope_insert_sparse_attn(
     const torch::Tensor& state_cache,
     const torch::Tensor& token_to_req_indices,
     const torch::Tensor& positions,
