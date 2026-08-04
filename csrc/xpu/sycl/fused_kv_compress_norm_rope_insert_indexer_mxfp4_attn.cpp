@@ -60,7 +60,6 @@ class FusedMxfp4Cr4Kernel {
   static constexpr int CR4_PAIR_STRIDE = 2 * CR4_SG_SIZE;  // elements per pair
   static constexpr int CR4_LANES_PER_QBLOCK = QUANT_BLOCK / 2;  // 16
   static constexpr int CR4_QBLOCKS_PER_PAIR = CR4_PAIR_STRIDE / QUANT_BLOCK;
-  int32_t num_tokens;
 
   FusedMxfp4Cr4Kernel(
       const bf16* state_cache,
@@ -327,32 +326,12 @@ class FusedMxfp4Cr4Kernel {
   int32_t kv_block_size;
   int64_t kv_block_stride;
   int64_t state_width;
+  int32_t num_tokens;
 };
 
-// Launch function for the fixed CR=4, overlap=1 kernel
-template <int CR, int OV>
-void launch_cr4_kernel(sycl::queue& q, FusedMxfp4Cr4Kernel<CR, OV> kernel) {
-  const int num_tokens = kernel.num_tokens;
-  if (num_tokens == 0) return;
+}  // anonymous namespace
 
-  constexpr int CR4_TOKENS_PER_WG =
-      FusedMxfp4Cr4Kernel<CR, OV>::CR4_TOKENS_PER_WG;
-  constexpr int CR4_SG_SIZE = FusedMxfp4Cr4Kernel<CR, OV>::CR4_SG_SIZE;
-  const size_t groups0 =
-      (static_cast<size_t>(num_tokens) + CR4_TOKENS_PER_WG - 1) /
-      CR4_TOKENS_PER_WG;
-  const size_t global0 = groups0 * CR4_TOKENS_PER_WG;
-
-  q.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<2>(
-            {global0, (size_t)CR4_SG_SIZE},
-            {(size_t)CR4_TOKENS_PER_WG, (size_t)CR4_SG_SIZE}),
-        kernel);
-  });
-}
-
-void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn_impl(
+void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     const torch::Tensor& state_cache,
     const torch::Tensor& token_to_req_indices,
     const torch::Tensor& positions,
@@ -402,32 +381,6 @@ void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn_impl(
   uint8_t* kv_ptr = kv_cache.data_ptr<uint8_t>();
   const int64_t* kv_slot_ptr = kv_slot_mapping.data_ptr<int64_t>();
 
-// Macro for the CR==4 / overlap==1 indexer kernel (the only configuration used
-// by the DeepSeek-V4 MXFP4 indexer path).
-#define LAUNCH_CR4_CASE(CR, OV)                      \
-  launch_cr4_kernel<CR, OV>(                         \
-      queue,                                         \
-      FusedMxfp4Cr4Kernel<CR, OV>(                   \
-          state_ptr,                                 \
-          state_cache.stride(0),                     \
-          state_cache.stride(1),                     \
-          token_to_req,                              \
-          pos_ptr,                                   \
-          slot_ptr,                                  \
-          btable,                                    \
-          block_table.stride(0),                     \
-          static_cast<int32_t>(block_size),          \
-          rms_ptr,                                   \
-          static_cast<float>(rms_norm_eps),          \
-          cs_ptr,                                    \
-          cos_sin_cache.stride(0),                   \
-          kv_ptr,                                    \
-          kv_slot_ptr,                               \
-          static_cast<int32_t>(kv_cache_block_size), \
-          kv_cache.stride(0),                        \
-          state_width,                               \
-          num_tokens))
-
   // DeepSeek-V4 only exercises the MXFP4 indexer with compress_ratio == 4 and
   // overlap == 1 (the indexer layer is created solely for the CR==4 case, and
   // DeepseekCompressor sets overlap = (compress_ratio == 4)). Only that
@@ -436,49 +389,38 @@ void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn_impl(
       compress_ratio == 4 && overlap == 1,
       "fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn only supports "
       "compress_ratio == 4 and overlap == 1");
-  LAUNCH_CR4_CASE(4, 1);
 
-#undef LAUNCH_CR4_CASE
-}
+  using Kernel = FusedMxfp4Cr4Kernel<4, 1>;
+  const size_t groups =
+      (static_cast<size_t>(num_tokens) + Kernel::CR4_TOKENS_PER_WG - 1) /
+      Kernel::CR4_TOKENS_PER_WG;
 
-}  // anonymous namespace
-
-void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
-    const torch::Tensor& state_cache,
-    const torch::Tensor& token_to_req_indices,
-    const torch::Tensor& positions,
-    const torch::Tensor& slot_mapping,
-    const torch::Tensor& block_table,
-    int64_t block_size,
-    int64_t state_width,
-    const torch::Tensor& rms_norm_weight,
-    double rms_norm_eps,
-    const torch::Tensor& cos_sin_cache,
-    torch::Tensor& kv_cache,
-    const torch::Tensor& kv_slot_mapping,
-    int64_t kv_cache_block_size,
-    int64_t head_dim,
-    int64_t rope_head_dim,
-    int64_t compress_ratio,
-    int64_t overlap,
-    int64_t quant_block) {
-  fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn_impl(
-      state_cache,
-      token_to_req_indices,
-      positions,
-      slot_mapping,
-      block_table,
-      block_size,
-      state_width,
-      rms_norm_weight,
-      rms_norm_eps,
-      cos_sin_cache,
-      kv_cache,
-      kv_slot_mapping,
-      kv_cache_block_size,
-      head_dim,
-      rope_head_dim,
-      compress_ratio,
-      overlap,
-      quant_block);
+  queue.submit([&](sycl::handler& cgh) {
+    cgh.parallel_for(
+        sycl::nd_range<2>(
+            {groups * Kernel::CR4_TOKENS_PER_WG,
+             static_cast<size_t>(Kernel::CR4_SG_SIZE)},
+            {static_cast<size_t>(Kernel::CR4_TOKENS_PER_WG),
+             static_cast<size_t>(Kernel::CR4_SG_SIZE)}),
+        Kernel(
+            state_ptr,
+            state_cache.stride(0),
+            state_cache.stride(1),
+            token_to_req,
+            pos_ptr,
+            slot_ptr,
+            btable,
+            block_table.stride(0),
+            static_cast<int32_t>(block_size),
+            rms_ptr,
+            static_cast<float>(rms_norm_eps),
+            cs_ptr,
+            cos_sin_cache.stride(0),
+            kv_ptr,
+            kv_slot_ptr,
+            static_cast<int32_t>(kv_cache_block_size),
+            kv_cache.stride(0),
+            state_width,
+            num_tokens));
+  });
 }
