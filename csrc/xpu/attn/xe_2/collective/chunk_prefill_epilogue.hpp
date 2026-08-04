@@ -182,7 +182,7 @@ class FMHAFwdEpilogue {
     for (int i = 0; i < rA_sum.size(); i++) {
       if constexpr (Sink) {
         constexpr double kLog2e = 1.4426950408889634074;
-        rA_sum(i) += sycl::native::exp2(
+        rA_sum(i) += sycl::exp2(
             static_cast<ElementA>(tSink * kLog2e) - tA_max(i));
       }
       rA_sum(i) = ElementA(1) / rA_sum(i);
@@ -297,7 +297,7 @@ class FMHAFwdEpilogue {
         for (int kr = 0; kr < ReduceK{}; kr++) {
           cute::transform(
               rA_max, rA_kmax[kr], rA_kmax[kr], [](auto gmax, auto kmax) {
-                return sycl::native::exp2(kmax - gmax);
+                return sycl::exp2(kmax - gmax);
               });
         }
       }
@@ -535,7 +535,7 @@ class DecodeFwdEpilogue {
     if constexpr (Sink) {
       constexpr double kLog2e = 1.4426950408889634074;
       if (idx_kv_split == 0 && sg_id == 0 && row_valid) {
-        tA_sum(0) += sycl::native::exp2(
+        tA_sum(0) += sycl::exp2(
             static_cast<ElementA>(tSink(q_row) * kLog2e) - tA_max(0));
       }
     }
@@ -679,7 +679,7 @@ class DecodeFwdEpilogue {
         for (int kr = 0; kr < ReduceK{}; kr++) {
           cute::transform(
               rA_max, rA_kmax[kr], rA_kmax[kr], [](auto gmax, auto kmax) {
-                return sycl::native::exp2(kmax - gmax);
+                return sycl::exp2(kmax - gmax);
               });
         }
       }

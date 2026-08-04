@@ -833,7 +833,7 @@ class ReduceSplitK {
           if (local_exp_sum <= ElementLSE(0)) continue;
 
           ElementLSE rescale =
-              sycl::native::exp2(local_max_logit - global_max_logits);
+              sycl::exp2(local_max_logit - global_max_logits);
 
           // Partial outputs are unnormalized (not divided by exp_sum in the
           // epilogue), so combine them directly with the rescale factor.

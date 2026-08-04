@@ -478,7 +478,7 @@ class XeFMHAFwdKernel {
             // Include sink contribution for LSE computation
             if constexpr (Sink) {
               ElementSink s_head = p.ptr_S[head_q];
-              sum_val += sycl::native::exp2(
+              sum_val += sycl::exp2(
                   static_cast<ElementA>(s_head * kLog2e) - tA_max(i));
             }
             float lse = static_cast<float>(tA_max(i)) * kLn2 +
