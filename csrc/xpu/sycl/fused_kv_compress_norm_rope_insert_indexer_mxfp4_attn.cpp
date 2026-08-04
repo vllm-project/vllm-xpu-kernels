@@ -23,26 +23,6 @@ namespace {
 
 using bf16 = sycl::ext::oneapi::bfloat16;
 
-inline void simd_load_sg32(const bf16* base, bf16* out, unsigned int lane) {
-#ifdef __SYCL_DEVICE_ONLY__
-  long addr0 = (long)(uintptr_t)base + (long)lane * 4;        // first 64 bf16
-  long addr1 = (long)(uintptr_t)base + 128 + (long)lane * 4;  // next 64 bf16
-  unsigned int r0, r1;
-  asm volatile("lsc_load.ugm (M1, 32) %0:d32x1 flat[%1]:a64"
-               : "=rw"(r0)
-               : "rw"(addr0));
-  asm volatile("lsc_load.ugm (M1, 32) %0:d32x1 flat[%1]:a64"
-               : "=rw"(r1)
-               : "rw"(addr1));
-  const bf16* s0 = reinterpret_cast<const bf16*>(&r0);
-  const bf16* s1 = reinterpret_cast<const bf16*>(&r1);
-  out[0] = s0[0];
-  out[1] = s0[1];
-  out[2] = s1[0];
-  out[3] = s1[1];
-#endif
-}
-
 // File-scope model/layout constants for this fixed DeepSeek-V4 path.
 static constexpr int HEAD_SIZE = 128;
 static constexpr int ROPE_HEAD_DIM = 64;
@@ -52,6 +32,13 @@ static constexpr int SCALE_DIM = 4;
 static constexpr int HALF_ROPE = ROPE_HEAD_DIM / 2;
 static constexpr int NOPE_HEAD_DIM = HEAD_SIZE - ROPE_HEAD_DIM;
 static constexpr int NOPE_PAIRS = NOPE_HEAD_DIM / 2;
+
+inline void load_head_paired(const bf16* base, bf16* out, unsigned int lane) {
+  out[0] = base[2 * lane];
+  out[1] = base[2 * lane + 1];
+  out[2] = base[HEAD_SIZE / 2 + 2 * lane];
+  out[3] = base[HEAD_SIZE / 2 + 2 * lane + 1];
+}
 
 // ============================================================================
 // FusedMxfp4Cr4Kernel: Specialized kernel for DeepSeek-V4 CR=4, overlap=1.
@@ -197,8 +184,8 @@ class FusedMxfp4Cr4Kernel {
       if (valid) {
         bf16 kv_buf[CR4_ELEMENTS_PER_LANE];
         bf16 score_buf[CR4_ELEMENTS_PER_LANE];
-        simd_load_sg32(row_ptr, kv_buf, lane);
-        simd_load_sg32(row_ptr + state_width, score_buf, lane);
+        load_head_paired(row_ptr, kv_buf, lane);
+        load_head_paired(row_ptr + state_width, score_buf, lane);
 
 #pragma unroll
         for (int i = 0; i < CR4_ELEMENTS_PER_LANE; ++i) {
@@ -397,7 +384,6 @@ void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn_impl(
   TORCH_CHECK(kv_cache.is_xpu() && kv_cache.dtype() == at::kByte);
   TORCH_CHECK(kv_slot_mapping.is_xpu() && kv_slot_mapping.dtype() == at::kLong);
   TORCH_CHECK(head_dim == 128 && rope_head_dim == 64 && quant_block == 32);
-  // simd_load_sg32 handles arbitrary state_width
 
   const int num_tokens = static_cast<int>(positions.numel());
   if (num_tokens == 0) return;
