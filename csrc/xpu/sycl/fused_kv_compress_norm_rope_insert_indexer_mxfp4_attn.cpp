@@ -161,44 +161,38 @@ class FusedMxfp4Cr4Kernel {
 #pragma unroll
     for (int r = 0; r < N_GATHER; ++r) {
       int p = start + r;
-      bool valid = (p >= 0);
+      // start is derived from the token position, which is uniform across the
+      // subgroup, so this branch never diverges: it only trims the gather
+      // window at the beginning of a sequence.
+      if (p < 0) continue;
 
-      int blk_idx = 0, blk_num = 0, blk_off = 0;
       int hoff = (r >= COMPRESS_RATIO) ? HEAD_SIZE : 0;
-      const bf16* row_ptr = nullptr;
-
-      if (valid) {
-        blk_idx = p / block_size;
-        blk_num = block_table_ptr[bt_row + blk_idx];
-        blk_off = p % block_size;
-        int64_t row_base = static_cast<int64_t>(blk_num) * state_cache_stride0 +
-                           static_cast<int64_t>(blk_off) * state_cache_stride1 +
-                           hoff;
-        row_ptr = state_cache_ptr + row_base;
-      }
+      int blk_num = block_table_ptr[bt_row + p / block_size];
+      const bf16* row_ptr =
+          state_cache_ptr +
+          static_cast<int64_t>(blk_num) * state_cache_stride0 +
+          static_cast<int64_t>(p % block_size) * state_cache_stride1 + hoff;
 
       // Block load over one 32-lane subgroup: 128 contiguous bf16 total,
       // 4 bf16 per lane in paired layout.
       // local index a (0..3): global element = 32*(a/2) + 2*lane + (a&1)
-      if (valid) {
-        bf16 kv_buf[CR4_ELEMENTS_PER_LANE];
-        bf16 score_buf[CR4_ELEMENTS_PER_LANE];
-        load_head_paired(row_ptr, kv_buf, lane);
-        load_head_paired(row_ptr + state_width, score_buf, lane);
+      bf16 kv_buf[CR4_ELEMENTS_PER_LANE];
+      bf16 score_buf[CR4_ELEMENTS_PER_LANE];
+      load_head_paired(row_ptr, kv_buf, lane);
+      load_head_paired(row_ptr + state_width, score_buf, lane);
 
 #pragma unroll
-        for (int i = 0; i < CR4_ELEMENTS_PER_LANE; ++i) {
-          float kv = static_cast<float>(kv_buf[i]);
-          float score = static_cast<float>(score_buf[i]);
+      for (int i = 0; i < CR4_ELEMENTS_PER_LANE; ++i) {
+        float kv = static_cast<float>(kv_buf[i]);
+        float score = static_cast<float>(score_buf[i]);
 
-          // Online softmax update
-          const float new_m = sycl::fmax(m_run[i], score);
-          const float alpha = sycl::exp(m_run[i] - new_m);
-          const float p_exp = sycl::exp(score - new_m);
-          s_run[i] = s_run[i] * alpha + p_exp;
-          acc[i] = acc[i] * alpha + p_exp * kv;
-          m_run[i] = new_m;
-        }
+        // Online softmax update
+        const float new_m = sycl::fmax(m_run[i], score);
+        const float alpha = sycl::exp(m_run[i] - new_m);
+        const float p_exp = sycl::exp(score - new_m);
+        s_run[i] = s_run[i] * alpha + p_exp;
+        acc[i] = acc[i] * alpha + p_exp * kv;
+        m_run[i] = new_m;
       }
     }
 
