@@ -1,8 +1,9 @@
-// SYCL implementation (non-ESIMD) of
+// SYCL implementation of
 // fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
 //
-// Mirrors the Triton kernel with FP4 quantization logic from fp4_quant.cpp
-// One work-item group per token, using subgroups for quantization parallelism
+// Mirrors the Triton kernel, reusing the FP4 quantization helpers from
+// quantization/fp4/mxfp4_quant.h.
+// One subgroup per token; a work-group holds CR4_TOKENS_PER_WG of them.
 //
 // Hard-coded for DeepSeek-V4 indexer MXFP4 path:
 //   HEAD_SIZE     = 128
@@ -173,9 +174,9 @@ class FusedMxfp4Cr4Kernel {
           static_cast<int64_t>(blk_num) * state_cache_stride0 +
           static_cast<int64_t>(p % block_size) * state_cache_stride1 + hoff;
 
-      // Block load over one 32-lane subgroup: 128 contiguous bf16 total,
-      // 4 bf16 per lane in paired layout.
-      // local index a (0..3): global element = 32*(a/2) + 2*lane + (a&1)
+      // One subgroup covers HEAD_SIZE contiguous bf16, CR4_ELEMENTS_PER_LANE
+      // per lane in the paired layout: local index a maps to element
+      // CR4_PAIR_STRIDE * (a / 2) + 2 * lane + (a & 1).
       bf16 kv_buf[CR4_ELEMENTS_PER_LANE];
       bf16 score_buf[CR4_ELEMENTS_PER_LANE];
       load_head_paired(row_ptr, kv_buf, lane);
