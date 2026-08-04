@@ -713,6 +713,79 @@ def test_decode_with_paged_kv(
     torch.xpu.empty_cache()
 
 
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("head_size", [72, 80])
+@torch.inference_mode()
+def test_decode_with_paged_kv_unaligned_head_size(block_size: int,
+                                                  head_size: int) -> None:
+    """Decode path for head sizes that are not a multiple of the QK d tile."""
+    dtype = torch.bfloat16
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(2026)
+
+    kv_lens = [523, 37, 211]
+    query_lens = [1] * len(kv_lens)
+    num_query_heads, num_kv_heads = (8, 2)
+    num_blocks = 256
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (len(kv_lens), max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    output = flash_attn_varlen_func(query,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=False,
+                                    block_table=block_tables,
+                                    window_size=(-1, -1),
+                                    s_aux=None)
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False,
+                                is_paged=True,
+                                sink=None,
+                                window_size_left=-1,
+                                window_size_right=-1,
+                                dtype=dtype)
+
+    max_diff = torch.max(torch.abs(output.float() - ref_output.float()))
+    torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2,
+                               msg=f"max abs diff: {max_diff}")
+    torch.xpu.empty_cache()
+
+
 # Large GQA / MQA ratios (num_heads_q / num_heads_kv > 16). The decode kernel
 # tiles the packed GQA head-group across the grid's Q dimension, so ratios that
 # exceed the qgroup tile size (8/16) are supported. Falcon-7B uses MQA with
