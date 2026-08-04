@@ -116,23 +116,28 @@ def reference_compress_norm_rope(
 
 
 @pytest.mark.parametrize(
-    "num_tokens,kv_block_size,compress_ratio",
+    "num_tokens,kv_block_size",
     [
-        (256, 16, 4),
-        (256, 32, 4),
+        (256, 16),
+        (256, 32),
+        (255, 16),
+        (13, 32),
+        (1, 16),
     ],
-    ids=[
-        "CR4_KVB16", "CR4_KVB32",
-    ],
+    ids=["KVB16", "KVB32", "tail255", "tail13", "single"],
 )
 def test_fused_kv_compress_norm_rope_insert_indexer_mxfp4(
-    num_tokens, kv_block_size, compress_ratio
+    num_tokens, kv_block_size
 ):
     """Test fused compress+norm+rope+mxfp4_quant+insert kernel accuracy."""
     torch.manual_seed(42)
     device = DEVICE
 
-    overlap = 1 if compress_ratio == 4 else 0
+    # The kernel only supports the DeepSeek-V4 C4 indexer configuration:
+    # vLLM creates the indexer layer solely for compress_ratio == 4 and
+    # derives overlap as (compress_ratio == 4).
+    compress_ratio = 4
+    overlap = 1
     coff = 1 + overlap
     state_width = coff * HEAD_DIM
 
