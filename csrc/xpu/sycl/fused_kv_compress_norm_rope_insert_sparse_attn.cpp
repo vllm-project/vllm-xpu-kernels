@@ -10,14 +10,11 @@
 //
 // Data layout contract: fp8 NOPE + bf16 rope tail + UE8M0 scales.
 
-#include <sycl/sycl.hpp>
-
 #include "ops.h"
 #include "utils.h"
 
 #include <ATen/DeviceGuard.h>
 #include <c10/util/Float8_e4m3fn.h>
-#include <c10/xpu/XPUFunctions.h>
 #include <cstdint>
 #include <type_traits>
 
@@ -51,7 +48,7 @@ class sparse_kv_insert_fp8mix_generic_kernel {
   static constexpr int SG_SIZE = 32;
   static constexpr int PER_WI = HEAD_SIZE / WG_SIZE;  // 4
   static constexpr int QUANT_BLOCK = kSparseQuantBlock;
-  using vec4 = sycl::vec<float, PER_WI>;
+  using wi_vec_t = sycl::vec<float, PER_WI>;
   static constexpr float FP8_MAX = kE4m3FnMax;
   static constexpr float INV_FP8_MAX = 1.0f / FP8_MAX;
   static constexpr float NEG_LARGE = -1.0e30f;
@@ -206,9 +203,9 @@ class sparse_kv_insert_fp8mix_generic_kernel {
       // One 16-byte vector load per work-item makes the sub-group read one
       // contiguous block. The host validates the alignment this needs.
       const int h = dim_base + head_offset;
-      const vec4 score_v =
-          *reinterpret_cast<const vec4*>(row + state_width_ + h);
-      const vec4 kv_v = *reinterpret_cast<const vec4*>(row + h);
+      const wi_vec_t score_v =
+          *reinterpret_cast<const wi_vec_t*>(row + state_width_ + h);
+      const wi_vec_t kv_v = *reinterpret_cast<const wi_vec_t*>(row + h);
 
 #pragma unroll
       for (int j = 0; j < PER_WI; ++j) {
@@ -256,10 +253,6 @@ class sparse_kv_insert_fp8mix_generic_kernel {
     const float inv =
         sycl::rsqrt(ss / static_cast<float>(HEAD_SIZE) + rms_eps_);
 
-    const int nope_head_dim = HEAD_SIZE - rope_head_dim_;
-    const int nope_pairs = nope_head_dim / 2;
-    const int half_rope = rope_head_dim_ / 2;
-
     float normed[PER_WI];
 #pragma unroll
     for (int j = 0; j < PER_WI; ++j) {
@@ -269,28 +262,28 @@ class sparse_kv_insert_fp8mix_generic_kernel {
     // ========================================================================
     // PHASE 3: GPT-J RoPE on the tail pairs (each pair is work-item local)
     // ========================================================================
+    const int nope_head_dim = HEAD_SIZE - rope_head_dim_;
+    const int nope_pairs = nope_head_dim / 2;
+    const int half_rope = rope_head_dim_ / 2;
 
-    {
-      // should_store gives position == m * cr - 1, so (position / cr) * cr
-      // reduces to position + 1 - cr; no 64-bit div/mul needed.
-      const int64_t compressed_pos =
-          position + 1 - static_cast<int64_t>(compress_ratio_);
-      const float* rope_base =
-          cos_sin_cache_ + compressed_pos * cos_sin_stride0_;
+    // should_store gives position == m * cr - 1, so (position / cr) * cr
+    // reduces to position + 1 - cr; no 64-bit div/mul needed.
+    const int64_t compressed_pos =
+        position + 1 - static_cast<int64_t>(compress_ratio_);
+    const float* rope_base = cos_sin_cache_ + compressed_pos * cos_sin_stride0_;
 #pragma unroll
-      for (int p = 0; p < PER_WI / 2; ++p) {
-        const int pair_idx = (dim_base / 2) + p;
-        // pair_idx < HEAD_SIZE / 2 == nope_pairs + half_rope, so a non-negative
-        // rope_pair_local is already below half_rope.
-        const int rope_pair_local = pair_idx - nope_pairs;
-        if (rope_pair_local >= 0) {
-          const float cv = rope_base[rope_pair_local];
-          const float sv = rope_base[half_rope + rope_pair_local];
-          const float even = normed[p * 2];
-          const float odd = normed[p * 2 + 1];
-          normed[p * 2] = even * cv - odd * sv;
-          normed[p * 2 + 1] = odd * cv + even * sv;
-        }
+    for (int p = 0; p < PER_WI / 2; ++p) {
+      const int pair_idx = (dim_base / 2) + p;
+      // pair_idx < HEAD_SIZE / 2 == nope_pairs + half_rope, so a non-negative
+      // rope_pair_local is already below half_rope.
+      const int rope_pair_local = pair_idx - nope_pairs;
+      if (rope_pair_local >= 0) {
+        const float cv = rope_base[rope_pair_local];
+        const float sv = rope_base[half_rope + rope_pair_local];
+        const float even = normed[p * 2];
+        const float odd = normed[p * 2 + 1];
+        normed[p * 2] = even * cv - odd * sv;
+        normed[p * 2 + 1] = odd * cv + even * sv;
       }
     }
 
