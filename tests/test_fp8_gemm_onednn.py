@@ -483,3 +483,49 @@ def test_fp8_gemm_w8a16_block(fp8_dtype, dtype, is_nt, batch, group_size,
     # bf16 has lower mantissa precision (7-bit vs 10-bit for f16), which causes
     # larger accumulated error in the bf16+fp8 block matmul kernel.
     torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)
+
+
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("mode", ["w8a8", "w8a16", "bmm"])
+@pytest.mark.parametrize("m, n, k, scale_gk, scale_gn", (
+    pytest.param(4, 2112, 256, 2, 17, id="n_indivisible"),
+    pytest.param(4, 256, 192, 5, 2, id="k_indivisible"),
+    pytest.param(4, 2112, 192, 5, 17, id="kn_indivisible"),
+))
+def test_fp8_block_indivisible_scale_raises(fp8_dtype, dtype, mode, m,
+                                            n, k, scale_gk, scale_gn):
+    """Block-quant GEMMs reject a scale grid that does not divide [K, N].
+
+    ``scale_gk > 1`` is what selects the block-quant branch in each wrapper.
+    """
+    torch.manual_seed(1234)
+    dev = torch.device("xpu")
+    batch = 2
+
+    if mode == "bmm":
+        input = torch.randn([batch, m, k], dtype=dtype, device=dev)
+        weight = torch.randn([batch, k, n], dtype=dtype, device=dev)
+        scale_wei = torch.ones([batch, scale_gk, scale_gn], device=dev)
+        # A rank-2 per-token activation scale keeps the batched src
+        # grouped-scale check ("must divide K") from preempting this one.
+        scale_src = torch.ones([batch, m], device=dev)
+    else:
+        input = torch.randn([batch * m, k], dtype=dtype, device=dev)
+        weight = torch.randn([k, n], dtype=dtype, device=dev)
+        scale_wei = torch.ones([scale_gk, scale_gn], device=dev)
+        # The activation group count must agree with the weight's K group
+        # count, otherwise the "Mismatch group size" check fires first.
+        scale_src = torch.ones([batch * m, scale_gk], device=dev)
+
+    weight = weight.to(fp8_dtype)
+
+    with pytest.raises(RuntimeError, match="block scale dims must divide"):
+        if mode == "w8a16":
+            fp8_gemm_w8a16(input, weight, scale_wei, torch.Tensor())
+        elif mode == "w8a8":
+            fp8_gemm(input.to(fp8_dtype), weight, dtype, scale_src, scale_wei,
+                     torch.Tensor())
+        else:
+            fp8_bmm(input.to(fp8_dtype), weight, dtype, scale_src, scale_wei,
+                    torch.Tensor())
