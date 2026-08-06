@@ -229,6 +229,13 @@ void relu2_no_mul(torch::Tensor& out, torch::Tensor& input);
 void swiglustep_and_mul(
     torch::Tensor& out, torch::Tensor& input, double limit = 7.0);
 
+void silu_and_mul_with_clamp(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    double limit,
+    double alpha = 1.0,
+    double beta = 0.0);
+
 torch::Tensor get_xpu_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
 // Just for unittest
