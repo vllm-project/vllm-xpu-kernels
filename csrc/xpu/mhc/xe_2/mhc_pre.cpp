@@ -74,18 +74,21 @@ struct SplitKPolicy {
 // TODO: this heuristic is tuned on B60, may need adjustment for other GPUs.
 // ===========================================================================
 static int choose_n_splits(int M, int BLK_M) {
-  cutlass::KernelHardwareInfo hw_info;
-  hw_info.sm_count =
-      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
-          hw_info.device_id);
-  TORCH_CHECK(
-      hw_info.sm_count > 0, "Failed to query device multiprocessor count");
+  // Cache the multiprocessor count: the runtime query enumerates the device
+  // and is comparatively expensive, so it must not run on every invocation.
+  static const int sm_count = [] {
+    cutlass::KernelHardwareInfo hw_info;
+    int count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
+        hw_info.device_id);
+    TORCH_CHECK(count > 0, "Failed to query device multiprocessor count");
+    return count;
+  }();
 
   int num_wg_m = (M + BLK_M - 1) / BLK_M;
 
-  if (num_wg_m <= hw_info.sm_count)
+  if (num_wg_m <= sm_count)
     return 32;
-  else if (num_wg_m <= 4 * hw_info.sm_count)
+  else if (num_wg_m <= 4 * sm_count)
     return 4;
   else
     return 8;
@@ -439,6 +442,115 @@ class MhcPreSplitKGemmFunctor {
 }  // namespace
 
 // ===========================================================================
+// Fused trailing RMSNorm write path (attn_norm / ffn_norm)
+//
+// Computes layer_input = sum_hc(pre_mix * residual) and, instead of storing
+// the raw weighted sum, fuses the RMSNorm that would otherwise run in a
+// separate kernel:
+//   ol      = bf16(sum_hc(pre_mix * residual))    (matches the bf16 tensor a
+//                                                  standalone RMSNorm sees)
+//   rms     = rsqrt(mean(ol^2) + norm_eps)
+//   out     = ol * rms * norm_weight
+//
+// The unnormalized bf16 output is stashed in SLM so residual is read once,
+// then a work-group reduction over the per-position squared sums yields the
+// RMS coefficient. Tuned for Intel Xe (B70): 256-thread work-group, one
+// work-group per token, sub-group + SLM two-level reduction, and 128-bit
+// vectorized HBM traffic on the residual / weight / output tensors.
+// ===========================================================================
+template <int HC_, int VEC_, int WG_THREADS_, int SG_SIZE_>
+static inline void mhc_pre_write_layer_input_rmsnorm(
+    const sycl::nd_item<1>& item,
+    const sycl::sub_group& sg,
+    const bf16* residual,
+    const bf16* norm_weight,
+    bf16* layer_input,
+    float* norm_red,
+    const float (&pre_mix)[HC_],
+    int tok,
+    int hidden_size,
+    float norm_eps) {
+  using vec_bf16_t = aligned_vec<bf16, VEC_>;
+  constexpr int NUM_SG = WG_THREADS_ / SG_SIZE_;
+  constexpr int STRIDE = WG_THREADS_ * VEC_;
+  // Keep the (bf16-rounded) weighted sum in registers so residual is read
+  // exactly once from HBM and no full-width SLM round-trip is required.
+  // MAX_TILES bounds the per-thread element count: it covers hidden_size up to
+  // WG_THREADS_ * VEC_ * MAX_TILES (= 8192 for 256x8x4), which covers the range
+  // used by current models (4096 needs 2 tiles, 7168 needs 4). Keeping this as
+  // tight as possible is critical for MBU: every extra tile is VEC_ live bf16
+  // registers per thread held across the reduction barrier, which inflates GRF
+  // pressure and drops occupancy in the fused-norm path. If a larger hidden
+  // size is ever needed, template this kernel on the tile count and select it
+  // on the host from hidden_size (in-lambda branching does not reduce the GRF
+  // footprint). The host guards hidden_size <= WG_THREADS * VEC * MAX_TILES.
+  constexpr int MAX_TILES = 4;
+  const int tid = static_cast<int>(item.get_local_id(0));
+  const int sg_id = static_cast<int>(sg.get_group_id()[0]);
+  const int lane = static_cast<int>(sg.get_local_id()[0]);
+
+  bf16 stash[MAX_TILES * VEC_];
+  float partial_sumsq = 0.f;
+
+  // Pass 1: weighted sum -> bf16 register stash + per-thread squared sum.
+#pragma unroll
+  for (int t = 0; t < MAX_TILES; ++t) {
+    const int k = tid * VEC_ + t * STRIDE;
+    if (k >= hidden_size) break;
+    float acc[VEC_];
+#pragma unroll
+    for (int v = 0; v < VEC_; ++v)
+      acc[v] = 0.f;
+
+#pragma unroll
+    for (int m = 0; m < HC_; ++m) {
+      auto rv = *reinterpret_cast<const vec_bf16_t*>(
+          residual + (tok * HC_ + m) * hidden_size + k);
+#pragma unroll
+      for (int v = 0; v < VEC_; ++v)
+        acc[v] += pre_mix[m] * float(rv.val[v]);
+    }
+
+#pragma unroll
+    for (int v = 0; v < VEC_; ++v) {
+      bf16 b = static_cast<bf16>(acc[v]);
+      stash[t * VEC_ + v] = b;
+      float bf = static_cast<float>(b);
+      partial_sumsq += bf * bf;
+    }
+  }
+
+  // Work-group reduction of the squared sum: sub-group reduce, then a single
+  // barrier; every thread re-reads the NUM_SG partials and computes rnorm
+  // locally (cheap) so no second barrier is needed.
+  float sg_sum =
+      sycl::reduce_over_group(sg, partial_sumsq, sycl::plus<float>());
+  if (lane == 0) norm_red[sg_id] = sg_sum;
+  sycl::group_barrier(item.get_group());
+  float tot = 0.f;
+#pragma unroll
+  for (int s = 0; s < NUM_SG; ++s)
+    tot += norm_red[s];
+  const float rnorm =
+      sycl::native::rsqrt(tot / static_cast<float>(hidden_size) + norm_eps);
+
+  // Pass 2: scale the register stash by rms * norm_weight and store to HBM.
+#pragma unroll
+  for (int t = 0; t < MAX_TILES; ++t) {
+    const int k = tid * VEC_ + t * STRIDE;
+    if (k >= hidden_size) break;
+    auto wv = *reinterpret_cast<const vec_bf16_t*>(norm_weight + k);
+    vec_bf16_t outv;
+#pragma unroll
+    for (int v = 0; v < VEC_; ++v) {
+      float o = static_cast<float>(stash[t * VEC_ + v]);
+      outv.val[v] = static_cast<bf16>(o * rnorm * float(wv.val[v]));
+    }
+    *reinterpret_cast<vec_bf16_t*>(layer_input + tok * hidden_size + k) = outv;
+  }
+}
+
+// ===========================================================================
 // Fused Reduce + Stage 2
 //
 // Combines split-K reduction with post-processing in a single kernel.
@@ -468,7 +580,9 @@ void launch_mhc_pre_fused_reduce_stage2(
     float hc_pre_eps,
     float hc_sinkhorn_eps,
     float hc_post_mult_value,
-    int sinkhorn_repeat) {
+    int sinkhorn_repeat,
+    const bf16* norm_weight,
+    float norm_eps) {
   static constexpr int SG_SIZE = 16;
   static constexpr int WG_THREADS = 256;
   static constexpr int VEC = 8;
@@ -489,6 +603,8 @@ void launch_mhc_pre_fused_reduce_stage2(
     //   [0 .. HC3]           → mixes_slm: 25 floats (24 mixes + 1 rms_coeff)
     //   [HC3+1 .. HC3+1 + MAX_SPLITS*HC3_PLUS1 - 1] → reduce_buf
     sycl::local_accessor<float, 1> slm(HC3_PLUS1 + MAX_SPLITS * HC3_PLUS1, h);
+    // Fused-RMSNorm scratch: per-sub-group squared-sum reduction buffer.
+    sycl::local_accessor<float, 1> norm_red(WG_THREADS / SG_SIZE, h);
 
     h.parallel_for<MhcPreFusedReduceStage2>(
         sycl::nd_range<1>(global, local),
@@ -605,6 +721,7 @@ void launch_mhc_pre_fused_reduce_stage2(
 
           // ============================================================
           // Phase 2: layer_input = sum(pre_mix * residual, dim=HC)
+          //   with optional fused trailing RMSNorm.
           // ============================================================
 
           float pre_mix[HC];
@@ -612,27 +729,41 @@ void launch_mhc_pre_fused_reduce_stage2(
           for (int m = 0; m < HC; ++m)
             pre_mix[m] = slm[m];
 
-          for (int k = tid * VEC; k < hidden_size; k += WG_THREADS * VEC) {
-            float acc[VEC];
-#pragma unroll
-            for (int v = 0; v < VEC; ++v)
-              acc[v] = 0.f;
-
-#pragma unroll
-            for (int m = 0; m < HC; ++m) {
-              auto rv = *reinterpret_cast<const vec_bf16_t*>(
-                  residual + (tok * HC + m) * hidden_size + k);
+          if (norm_weight == nullptr) {
+            for (int k = tid * VEC; k < hidden_size; k += WG_THREADS * VEC) {
+              float acc[VEC];
 #pragma unroll
               for (int v = 0; v < VEC; ++v)
-                acc[v] += pre_mix[m] * float(rv.val[v]);
-            }
+                acc[v] = 0.f;
 
-            vec_bf16_t ov;
 #pragma unroll
-            for (int v = 0; v < VEC; ++v)
-              ov.val[v] = static_cast<bf16>(acc[v]);
-            *reinterpret_cast<vec_bf16_t*>(
-                layer_input + tok * hidden_size + k) = ov;
+              for (int m = 0; m < HC; ++m) {
+                auto rv = *reinterpret_cast<const vec_bf16_t*>(
+                    residual + (tok * HC + m) * hidden_size + k);
+#pragma unroll
+                for (int v = 0; v < VEC; ++v)
+                  acc[v] += pre_mix[m] * float(rv.val[v]);
+              }
+
+              vec_bf16_t ov;
+#pragma unroll
+              for (int v = 0; v < VEC; ++v)
+                ov.val[v] = static_cast<bf16>(acc[v]);
+              *reinterpret_cast<vec_bf16_t*>(
+                  layer_input + tok * hidden_size + k) = ov;
+            }
+          } else {
+            mhc_pre_write_layer_input_rmsnorm<HC, VEC, WG_THREADS, SG_SIZE>(
+                item,
+                sg,
+                residual,
+                norm_weight,
+                layer_input,
+                &norm_red[0],
+                pre_mix,
+                tok,
+                hidden_size,
+                norm_eps);
           }
         });
   });
@@ -698,7 +829,9 @@ void launch_mhc_pre_stage2(
     float hc_pre_eps,
     float hc_sinkhorn_eps,
     float hc_post_mult_value,
-    int sinkhorn_repeat) {
+    int sinkhorn_repeat,
+    const bf16* norm_weight,
+    float norm_eps) {
   static constexpr int SG_SIZE = 16;
   static constexpr int WG_THREADS = 256;
   static constexpr int VEC = 8;
@@ -712,6 +845,8 @@ void launch_mhc_pre_stage2(
 
   q.submit([&](sycl::handler& h) {
     sycl::local_accessor<float, 1> mixes_slm(HC3, h);
+    // Fused-RMSNorm scratch: per-sub-group squared-sum reduction buffer.
+    sycl::local_accessor<float, 1> norm_red(WG_THREADS / SG_SIZE, h);
 
     h.parallel_for<MhcPreStage2>(
         sycl::nd_range<1>(global, local),
@@ -783,27 +918,41 @@ void launch_mhc_pre_stage2(
           for (int m = 0; m < HC; ++m)
             pre_mix[m] = mixes_slm[m];
 
-          for (int k = tid * VEC; k < hidden_size; k += WG_THREADS * VEC) {
-            float acc[VEC];
-#pragma unroll
-            for (int v = 0; v < VEC; ++v)
-              acc[v] = 0.f;
-
-#pragma unroll
-            for (int m = 0; m < HC; ++m) {
-              auto rv = *reinterpret_cast<const vec_bf16_t*>(
-                  residual + (tok * HC + m) * hidden_size + k);
+          if (norm_weight == nullptr) {
+            for (int k = tid * VEC; k < hidden_size; k += WG_THREADS * VEC) {
+              float acc[VEC];
 #pragma unroll
               for (int v = 0; v < VEC; ++v)
-                acc[v] += pre_mix[m] * float(rv.val[v]);
-            }
+                acc[v] = 0.f;
 
-            vec_bf16_t ov;
 #pragma unroll
-            for (int v = 0; v < VEC; ++v)
-              ov.val[v] = static_cast<bf16>(acc[v]);
-            *reinterpret_cast<vec_bf16_t*>(
-                layer_input + tok * hidden_size + k) = ov;
+              for (int m = 0; m < HC; ++m) {
+                auto rv = *reinterpret_cast<const vec_bf16_t*>(
+                    residual + (tok * HC + m) * hidden_size + k);
+#pragma unroll
+                for (int v = 0; v < VEC; ++v)
+                  acc[v] += pre_mix[m] * float(rv.val[v]);
+              }
+
+              vec_bf16_t ov;
+#pragma unroll
+              for (int v = 0; v < VEC; ++v)
+                ov.val[v] = static_cast<bf16>(acc[v]);
+              *reinterpret_cast<vec_bf16_t*>(
+                  layer_input + tok * hidden_size + k) = ov;
+            }
+          } else {
+            mhc_pre_write_layer_input_rmsnorm<HC, VEC, WG_THREADS, SG_SIZE>(
+                item,
+                sg,
+                residual,
+                norm_weight,
+                layer_input,
+                &norm_red[0],
+                pre_mix,
+                tok,
+                hidden_size,
+                norm_eps);
           }
         });
   });
@@ -907,7 +1056,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
     double hc_pre_eps,
     double hc_sinkhorn_eps,
     double hc_post_mult_value,
-    int64_t sinkhorn_repeat) {
+    int64_t sinkhorn_repeat,
+    const std::optional<at::Tensor>& norm_weight,
+    double norm_eps) {
   TORCH_CHECK(
       residual.is_xpu() && fn.is_xpu() && hc_scale.is_xpu() && hc_base.is_xpu(),
       "mhc_pre: tensors must be on XPU");
@@ -934,6 +1085,26 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
       fn_c.size(0) == HC3 && fn_c.size(1) == HC * H, "fn shape mismatch");
   TORCH_CHECK(hc_scale.numel() == 3, "hc_scale must have 3 elements");
   TORCH_CHECK(hc_base.numel() == HC3, "hc_base must have HC3 elements");
+
+  // Optional trailing RMSNorm weight (attn_norm / ffn_norm) to fuse into the
+  // layer_input write path. nullptr keeps the standalone (non-fused) behavior.
+  const bf16* norm_weight_ptr = nullptr;
+  at::Tensor norm_weight_c;
+  if (norm_weight.has_value() && norm_weight->defined()) {
+    norm_weight_c = norm_weight->contiguous();
+    TORCH_CHECK(
+        norm_weight_c.scalar_type() == at::kBFloat16,
+        "mhc_pre: norm_weight must be bfloat16");
+    TORCH_CHECK(
+        norm_weight_c.numel() == H,
+        "mhc_pre: norm_weight must have hidden_size elements");
+    TORCH_CHECK(
+        H <= 8192,
+        "mhc_pre: fused norm supports hidden_size <= 8192 "
+        "(WG_THREADS * VEC * MAX_TILES); template the stash tile count for "
+        "larger sizes");
+    norm_weight_ptr = reinterpret_cast<const bf16*>(norm_weight_c.data_ptr());
+  }
 
   auto outer_shape = residual_c.sizes().slice(0, residual_c.dim() - 2).vec();
   auto residual_flat = residual_c.view({-1, HC, H});
@@ -998,7 +1169,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
         static_cast<float>(hc_pre_eps),
         static_cast<float>(hc_sinkhorn_eps),
         static_cast<float>(hc_post_mult_value),
-        static_cast<int>(sinkhorn_repeat));
+        static_cast<int>(sinkhorn_repeat),
+        norm_weight_ptr,
+        static_cast<float>(norm_eps));
   } else {
     // --- Large M: Split-K DPAS GEMM → Fused Reduce+Stage2 ---
     auto [n_splits, M_padded, K_GEMM_val, N_GEMM_val] =
@@ -1036,7 +1209,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
         static_cast<float>(hc_pre_eps),
         static_cast<float>(hc_sinkhorn_eps),
         static_cast<float>(hc_post_mult_value),
-        static_cast<int>(sinkhorn_repeat));
+        static_cast<int>(sinkhorn_repeat),
+        norm_weight_ptr,
+        static_cast<float>(norm_eps));
   }
 
   std::vector<int64_t> ps = outer_shape;

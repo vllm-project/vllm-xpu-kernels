@@ -87,7 +87,9 @@ extern void launch_mhc_pre_fused_reduce_stage2(
     float hc_pre_eps,
     float hc_sinkhorn_eps,
     float hc_post_mult_value,
-    int sinkhorn_repeat);
+    int sinkhorn_repeat,
+    const bf16* norm_weight,
+    float norm_eps);
 
 extern void launch_mhc_pre_stage2(
     sycl::queue& q,
@@ -103,7 +105,9 @@ extern void launch_mhc_pre_stage2(
     float hc_pre_eps,
     float hc_sinkhorn_eps,
     float hc_post_mult_value,
-    int sinkhorn_repeat);
+    int sinkhorn_repeat,
+    const bf16* norm_weight,
+    float norm_eps);
 
 // ---- fused op implementation ----
 
@@ -119,7 +123,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mhc_fused_post_pre(
     double hc_pre_eps,
     double hc_sinkhorn_eps,
     double hc_post_mult_value,
-    int64_t sinkhorn_repeat) {
+    int64_t sinkhorn_repeat,
+    const std::optional<at::Tensor>& norm_weight,
+    double norm_eps) {
   TORCH_CHECK(
       x.is_xpu() && residual.is_xpu() && post_layer_mix.is_xpu() &&
           comb_res_mix.is_xpu() && fn.is_xpu() && hc_scale.is_xpu() &&
@@ -188,6 +194,27 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mhc_fused_post_pre(
   TORCH_CHECK(
       hc_base.numel() == HC3,
       "mhc_fused_post_pre: hc_base must have HC3 elements");
+
+  // Optional trailing RMSNorm weight (attn_norm / ffn_norm) to fuse into the
+  // layer_input write path. nullptr keeps the standalone (non-fused) behavior.
+  const bf16* norm_weight_ptr = nullptr;
+  at::Tensor norm_weight_c;
+  if (norm_weight.has_value() && norm_weight->defined()) {
+    norm_weight_c = norm_weight->contiguous();
+    TORCH_CHECK(
+        norm_weight_c.scalar_type() == at::kBFloat16,
+        "mhc_fused_post_pre: norm_weight must be bfloat16");
+    TORCH_CHECK(
+        norm_weight_c.numel() == H,
+        "mhc_fused_post_pre: norm_weight must have hidden_size elements");
+    TORCH_CHECK(
+        H <= 8192,
+        "mhc_fused_post_pre: fused norm supports hidden_size <= 8192 "
+        "(WG_THREADS * VEC * MAX_TILES); template the stash tile count for "
+        "larger sizes");
+    norm_weight_ptr = reinterpret_cast<const bf16*>(norm_weight_c.data_ptr());
+  }
+
   const int M = static_cast<int>(N);
   const int K = static_cast<int>(HC * H);
   const int N_gemm = static_cast<int>(HC3);
@@ -251,9 +278,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mhc_fused_post_pre(
         static_cast<float>(hc_pre_eps),
         static_cast<float>(hc_sinkhorn_eps),
         static_cast<float>(hc_post_mult_value),
-        static_cast<int>(sinkhorn_repeat));
+        static_cast<int>(sinkhorn_repeat),
+        norm_weight_ptr,
+        static_cast<float>(norm_eps));
   } else {
-    // --- Large M: Split-K DPAS GEMM → Fused Reduce+Stage2 ---
     auto [n_splits, M_padded, K_val, N_g] =
         mhc_pre_splitk_params(M, static_cast<int>(H));
     auto workspace_c = at::empty({n_splits * M_padded, N_g}, opts_f32);
@@ -289,7 +317,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mhc_fused_post_pre(
         static_cast<float>(hc_pre_eps),
         static_cast<float>(hc_sinkhorn_eps),
         static_cast<float>(hc_post_mult_value),
-        static_cast<int>(sinkhorn_repeat));
+        static_cast<int>(sinkhorn_repeat),
+        norm_weight_ptr,
+        static_cast<float>(norm_eps));
   }
 
   return {
