@@ -212,7 +212,7 @@ CUTE_DEVICE void chunk_kda_prepare_vec_kernel(
     const T* k,
     const T* v,
     const T* raw_gate,
-    const float* beta,
+    const float* raw_beta,
     const float* a_log,
     const float* dt_bias,
     const float lower_bound,
@@ -298,8 +298,8 @@ CUTE_DEVICE void chunk_kda_prepare_vec_kernel(
         pack_to_float<T, V>(load_pack<T, V>(q + in_off), qv);
         pack_to_float<T, V>(load_pack<T, V>(k + in_off), kv);
         pack_to_float<T, V>(load_pack<T, V>(raw_gate + in_off), gv);
-        const float beta_value =
-            beta[static_cast<int64_t>(global_token) * num_heads + head_id];
+        const float beta_value = kda_gate::native_beta_from_logit(
+            raw_beta[static_cast<int64_t>(global_token) * num_heads + head_id]);
 
         float q_sum = 0.0f;
         float k_sum = 0.0f;
@@ -395,7 +395,7 @@ CUTE_DEVICE void chunk_kda_prepare_kernel(
     const T* k,
     const T* v,
     const T* raw_gate,
-    const float* beta,
+    const float* raw_beta,
     const float* a_log,
     const float* dt_bias,
     const float lower_bound,
@@ -503,8 +503,9 @@ CUTE_DEVICE void chunk_kda_prepare_kernel(
               k_sum += kv * kv;
             }
           }
-          beta_value =
-              beta[static_cast<int64_t>(global_token) * num_heads + head_id];
+          beta_value = kda_gate::native_beta_from_logit(
+              raw_beta
+                  [static_cast<int64_t>(global_token) * num_heads + head_id]);
         }
         q_sum = sycl::reduce_over_group(sg, q_sum, sycl::plus<>());
         k_sum = sycl::reduce_over_group(sg, k_sum, sycl::plus<>());

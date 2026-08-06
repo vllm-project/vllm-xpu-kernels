@@ -319,7 +319,7 @@ RecurrentShape validate_recurrent_inputs(
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& raw_gate,
-    const torch::Tensor& beta,
+    const torch::Tensor& raw_beta,
     torch::Tensor& recurrent_state,
     const torch::Tensor& a_log,
     const torch::Tensor& dt_bias,
@@ -343,7 +343,7 @@ RecurrentShape validate_recurrent_inputs(
   TORCH_CHECK(v.sizes() == q.sizes(), "v shape must match q");
   TORCH_CHECK(
       q.is_contiguous() && k.is_contiguous() && v.is_contiguous() &&
-          raw_gate.is_contiguous() && beta.is_contiguous() &&
+          raw_gate.is_contiguous() && raw_beta.is_contiguous() &&
           core_attn_out.is_contiguous(),
       "KDA recurrent activation tensors must be contiguous");
   TORCH_CHECK(
@@ -360,10 +360,11 @@ RecurrentShape validate_recurrent_inputs(
       raw_gate.size(1) >= num_actual_tokens,
       "raw_gate token dimension must be >= num_actual_tokens");
   TORCH_CHECK(
-      beta.dim() == 3 && beta.size(0) == 1 &&
-          beta.size(1) >= num_actual_tokens && beta.size(2) == num_heads,
-      "beta must have shape [1, >=num_actual_tokens, heads]");
-  TORCH_CHECK(beta.scalar_type() == at::kFloat, "beta must be float32");
+      raw_beta.dim() == 3 && raw_beta.size(0) == 1 &&
+          raw_beta.size(1) >= num_actual_tokens &&
+          raw_beta.size(2) == num_heads,
+      "raw_beta must have shape [1, >=num_actual_tokens, heads]");
+  TORCH_CHECK(raw_beta.scalar_type() == at::kFloat, "raw_beta must be float32");
   TORCH_CHECK(
       core_attn_out.dim() == 4 && core_attn_out.size(0) == 1 &&
           core_attn_out.size(1) >= num_actual_tokens &&
@@ -373,7 +374,7 @@ RecurrentShape validate_recurrent_inputs(
   check_device(k, device, "k");
   check_device(v, device, "v");
   check_device(raw_gate, device, "raw_gate");
-  check_device(beta, device, "beta");
+  check_device(raw_beta, device, "raw_beta");
   check_device(core_attn_out, device, "core_attn_out");
 
   TORCH_CHECK(
@@ -643,7 +644,7 @@ void launch_kda_recurrent_opt_bucket(
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& raw_gate,
-    const torch::Tensor& beta,
+    const torch::Tensor& raw_beta,
     torch::Tensor& recurrent_state,
     const torch::Tensor& a_log,
     const torch::Tensor& dt_bias,
@@ -659,7 +660,7 @@ void launch_kda_recurrent_opt_bucket(
       reinterpret_cast<const T*>(k.data_ptr()),              \
       reinterpret_cast<const T*>(v.data_ptr()),              \
       reinterpret_cast<const T*>(raw_gate.data_ptr()),       \
-      reinterpret_cast<const float*>(beta.data_ptr()),       \
+      reinterpret_cast<const float*>(raw_beta.data_ptr()),   \
       reinterpret_cast<const float*>(a_log.data_ptr()),      \
       reinterpret_cast<const float*>(dt_bias.data_ptr()),    \
       lower_bound,                                           \
@@ -709,7 +710,7 @@ void launch_kda_recurrent_opt(
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& raw_gate,
-    const torch::Tensor& beta,
+    const torch::Tensor& raw_beta,
     torch::Tensor& recurrent_state,
     const torch::Tensor& a_log,
     const torch::Tensor& dt_bias,
@@ -726,7 +727,7 @@ void launch_kda_recurrent_opt(
         k,
         v,
         raw_gate,
-        beta,
+        raw_beta,
         recurrent_state,
         a_log,
         dt_bias,
@@ -745,7 +746,7 @@ void launch_kda_recurrent_opt(
           k,
           v,
           raw_gate,
-          beta,
+          raw_beta,
           recurrent_state,
           a_log,
           dt_bias,
@@ -771,7 +772,7 @@ void launch_kda_recurrent(
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& raw_gate,
-    const torch::Tensor& beta,
+    const torch::Tensor& raw_beta,
     torch::Tensor& recurrent_state,
     const torch::Tensor& a_log,
     const torch::Tensor& dt_bias,
@@ -807,7 +808,7 @@ void launch_kda_recurrent(
       reinterpret_cast<const T*>(k.data_ptr()),             \
       reinterpret_cast<const T*>(v.data_ptr()),             \
       reinterpret_cast<const T*>(raw_gate.data_ptr()),      \
-      reinterpret_cast<const float*>(beta.data_ptr()),      \
+      reinterpret_cast<const float*>(raw_beta.data_ptr()),  \
       reinterpret_cast<const float*>(a_log.data_ptr()),     \
       reinterpret_cast<const float*>(dt_bias.data_ptr()),   \
       lower_bound,                                          \
@@ -919,7 +920,7 @@ void launch_kda_recurrent(
           k,
           v,
           raw_gate,
-          beta,
+          raw_beta,
           recurrent_state,
           a_log,
           dt_bias,
@@ -959,7 +960,7 @@ void launch_kda_recurrent(
             k,
             v,
             raw_gate,
-            beta,
+            raw_beta,
             recurrent_state,
             a_log,
             dt_bias,
@@ -975,7 +976,7 @@ void launch_kda_recurrent(
             k,
             v,
             raw_gate,
-            beta,
+            raw_beta,
             recurrent_state,
             a_log,
             dt_bias,
@@ -1017,7 +1018,7 @@ void launch_kda_recurrent(
           k,
           v,
           raw_gate,
-          beta,
+          raw_beta,
           recurrent_state,
           a_log,
           dt_bias,
@@ -1152,7 +1153,7 @@ void kda_gated_delta_rule(
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& raw_gate,
-    const torch::Tensor& beta,
+    const torch::Tensor& raw_beta,
     torch::Tensor& recurrent_state,
     const torch::Tensor& a_log,
     const torch::Tensor& dt_bias,
@@ -1189,7 +1190,7 @@ void kda_gated_delta_rule(
       k,
       v,
       raw_gate,
-      beta,
+      raw_beta,
       recurrent_state,
       a_log,
       dt_bias,
@@ -1210,7 +1211,7 @@ void kda_gated_delta_rule(
         k,
         v,
         raw_gate,
-        beta,
+        raw_beta,
         recurrent_state,
         a_log,
         dt_bias,
@@ -1238,7 +1239,7 @@ void kda_attention(
     const torch::Tensor& k_proj,
     const torch::Tensor& v_proj,
     const torch::Tensor& raw_gate,
-    const torch::Tensor& beta,
+    const torch::Tensor& raw_beta,
     torch::Tensor& conv_state,
     torch::Tensor& recurrent_state,
     const torch::Tensor& q_conv_weight,
@@ -1285,7 +1286,7 @@ void kda_attention(
       qkv[1],
       qkv[2],
       raw_gate,
-      beta,
+      raw_beta,
       recurrent_state,
       a_log,
       dt_bias,

@@ -48,6 +48,18 @@ inline float native_sigmoid(float x) {
   return sycl::native::recip(1.0f + sycl::native::exp(-x));
 }
 
+// KDA's delta-rule step size. Like `raw_gate`, the kernels take the raw
+// projection output and apply the activation themselves, which keeps the op
+// self-consistent and saves the caller an elementwise pass over
+// [num_tokens, num_heads]. This matches FLA, vLLM, FlashInfer and SGLang, and
+// the Gated DeltaNet kernels in this repository, which all sigmoid `b`
+// in-kernel.
+inline float beta_from_logit(float raw_beta) { return sigmoid(raw_beta); }
+
+inline float native_beta_from_logit(float raw_beta) {
+  return native_sigmoid(raw_beta);
+}
+
 // `x` is `raw_gate + dt_bias`, `head_a` is `-exp(A_log[head])` (so `-head_a` is
 // the positive decay coefficient the sigmoid form scales its input by).
 inline float log_gate(float x, float head_a, float lower_bound) {

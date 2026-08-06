@@ -57,7 +57,7 @@ void chunk_kda_xe2(
     const torch::Tensor& k,
     const torch::Tensor& v,
     const torch::Tensor& raw_gate,
-    const torch::Tensor& beta,
+    const torch::Tensor& raw_beta,
     torch::Tensor& recurrent_state,
     const torch::Tensor& a_log,
     const torch::Tensor& dt_bias,
@@ -115,7 +115,7 @@ void chunk_kda_xe2(
         reinterpret_cast<const scalar_t*>(k.data_ptr()),          \
         reinterpret_cast<const scalar_t*>(v.data_ptr()),          \
         reinterpret_cast<const scalar_t*>(raw_gate.data_ptr()),   \
-        reinterpret_cast<const float*>(beta.data_ptr()),          \
+        reinterpret_cast<const float*>(raw_beta.data_ptr()),      \
         reinterpret_cast<const float*>(a_log.data_ptr()),         \
         reinterpret_cast<const float*>(dt_bias.data_ptr()),       \
         lower_bound,                                              \

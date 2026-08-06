@@ -76,8 +76,8 @@ def _build(case, seed=0, permute=False, lower_bound=None):
         "v": rand(num_tokens, hidden, scale=0.2).to(dtype),
         "raw_gate": rand(1, num_tokens, NUM_HEADS, head_dim,
                          scale=0.2).to(dtype),
-        "beta": torch.rand(1, num_tokens, NUM_HEADS,
-                           generator=gen).to(DEVICE),
+        # Raw logits; the kernel applies the sigmoid.
+        "raw_beta": rand(1, num_tokens, NUM_HEADS),
         "state": rand(batch, NUM_HEADS, head_dim, head_dim,
                       scale=0.05).to(state_dtype),
         "a_log": rand(1, 1, NUM_HEADS, 1, scale=0.1),
@@ -99,7 +99,7 @@ def _build(case, seed=0, permute=False, lower_bound=None):
 
 def _run(t):
     torch.ops._xpu_C.kda_gated_delta_rule(
-        t["out"], t["q"], t["k"], t["v"], t["raw_gate"], t["beta"],
+        t["out"], t["q"], t["k"], t["v"], t["raw_gate"], t["raw_beta"],
         t["state"], t["a_log"], t["dt_bias"], t["num_prefills"],
         t["num_decodes"], 0, t["hi"], t["qsl"], t["tok"], t["idx"],
         None, None, None, None, t["num_tokens"], t["lower_bound"])
@@ -122,7 +122,7 @@ def _permutation_pair(seed=7):
     for key in ("q", "k", "v"):
         identity[key] = permuted[key][perm].contiguous()
     identity["raw_gate"] = permuted["raw_gate"][:, perm].contiguous()
-    identity["beta"] = permuted["beta"][:, perm].contiguous()
+    identity["raw_beta"] = permuted["raw_beta"][:, perm].contiguous()
     # `_run` updates the recurrent state in place, so both runs need their own
     # copy of the same starting point.
     identity["state"] = permuted["state"].clone()
