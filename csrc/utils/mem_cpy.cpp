@@ -151,16 +151,27 @@ void xpuAsyncMemcpy(
   }
 }
 
-// Infer which XPU device a USM device pointer was allocated on by probing
-// each device's SYCL context.  Returns the device index on success.
-// This is O(num_xpu_devices) but avoids threading an explicit device argument
-// through the entire call chain when all callers already have the pointer.
+// Infer which XPU device a USM device pointer was allocated on.
+// Returns the device index on success.
+//
+// NOTE: on Intel GPUs all XPU (sub-)devices share a single SYCL/Level-Zero
+// context, so sycl::get_pointer_type() reports usm::alloc::device for a given
+// device pointer against EVERY device's context.  A first-match loop over
+// get_pointer_type() therefore always returns device 0, no matter which device
+// actually owns the allocation.  The DeviceGuard installed by the caller would
+// then flip the current device to 0 and vllmGetQueue() would return device 0's
+// in-order queue -- a queue with no ordering relationship to the compute stream
+// that produced/consumes the data on the true device.  For a D2H KV-cache store
+// this silently defeats the stream.wait_stream(compute) fence in gpu_worker.py
+// and races the copy against the still-live cache write (nondeterministic
+// corruption).  Use get_pointer_device(), which returns the actual owning
+// device, and map it back to the c10 device index.
 static at::DeviceIndex infer_xpu_device_from_ptr(const void* device_ptr) {
   const int n_devs = c10::xpu::device_count();
+  auto ctx = vllm::xpu::vllmGetQueue(0).get_context();
+  sycl::device owner = sycl::get_pointer_device(device_ptr, ctx);
   for (int i = 0; i < n_devs; i++) {
-    auto ctx = vllm::xpu::vllmGetQueue(i).get_context();
-    auto type = sycl::get_pointer_type(device_ptr, ctx);
-    if (type == sycl::usm::alloc::device || type == sycl::usm::alloc::shared) {
+    if (vllm::xpu::vllmGetQueue(i).get_device() == owner) {
       return static_cast<at::DeviceIndex>(i);
     }
   }
