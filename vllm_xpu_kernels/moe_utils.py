@@ -220,8 +220,6 @@ def ref_fused_moe_activation(
     act_output,
     gemm1_output,
     activation,
-    activation_situ_beta=None,
-    activation_situ_linear_beta=None,
 ):
     if activation == "silu":
         torch.ops._C.silu_and_mul(act_output, gemm1_output)
@@ -236,15 +234,11 @@ def ref_fused_moe_activation(
     elif activation == "swiglustep":
         torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
     elif activation == "situ":
-        if activation_situ_beta is None:
-            raise ValueError("SITU requires activation_situ_beta")
         torch.ops._C.situ_and_mul(
             act_output,
             gemm1_output,
-            activation_situ_beta,
-            -1.0
-            if activation_situ_linear_beta is None
-            else activation_situ_linear_beta,
+            4.0,
+            25.0,
         )
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
@@ -268,8 +262,6 @@ def ref_fused_moe(recipe,
                   ep_size=1,
                   expert_map=None,
                   a1q_scale=None,
-                  activation_situ_beta=None,
-                  activation_situ_linear_beta=None,
 ):
     """
     Reference fused MoE implementation with quantization simulation.
@@ -391,8 +383,6 @@ def ref_fused_moe(recipe,
         act_output,
         gemm1_output,
         activation,
-        activation_situ_beta,
-        activation_situ_linear_beta,
     )
 
     # ---- GEMM2: cutlass grouped GEMM replaced by torch matmul ----

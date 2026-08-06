@@ -107,13 +107,7 @@ def compute_num_tokens_per_block(num_tokens, num_experts_per_node):
     return 1024
 
 
-def fused_moe_activation(
-    act_output,
-    gemm1_output,
-    activation,
-    activation_situ_beta=None,
-    activation_situ_linear_beta=None,
-):
+def fused_moe_activation(act_output, gemm1_output, activation):
     if activation == "silu":
         torch.ops._C.silu_and_mul(act_output, gemm1_output)
     elif activation == "gelu":
@@ -127,15 +121,11 @@ def fused_moe_activation(
     elif activation == "swiglustep":
         torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
     elif activation == "situ":
-        if activation_situ_beta is None:
-            raise ValueError("SITU requires activation_situ_beta")
         torch.ops._C.situ_and_mul(
             act_output,
             gemm1_output,
-            activation_situ_beta,
-            -1.0
-            if activation_situ_linear_beta is None
-            else activation_situ_linear_beta,
+            4.0,
+            25.0,
         )
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
@@ -341,10 +331,7 @@ class XpuFusedMoe:
                             ep_rank=self.ep_rank,
                             ep_size=self.ep_size,
                             expert_map=expert_map,
-                            a1q_scale=a1q_scale,
-                            activation_situ_beta=self.activation_situ_beta,
-                            activation_situ_linear_beta=(
-                                self.activation_situ_linear_beta))
+                            a1q_scale=a1q_scale)
 
     def _apply_kernel(
         self,
