@@ -36,6 +36,8 @@ QUANT_BLOCK = 32
 COMPRESS_RATIO = 4
 OVERLAP = 1
 STATE_WIDTH = (1 + OVERLAP) * HEAD_DIM
+# Production DeepseekCompressor allocates the state cache as float32.
+STATE_DTYPE = torch.float32
 
 WARMUP = 10
 REPEAT = 50
@@ -46,7 +48,7 @@ def setup_inputs(num_tokens, kv_block_size, device):
     num_pages = (COMPRESS_RATIO * num_tokens - 1) // BLOCK_SIZE + 2
     state_cache = torch.randn(
         num_pages, BLOCK_SIZE, 2 * STATE_WIDTH,
-        dtype=torch.bfloat16, device=device,
+        dtype=STATE_DTYPE, device=device,
     )
     block_table = torch.arange(
         num_pages, dtype=torch.int32, device=device
@@ -83,7 +85,8 @@ def run_kernel(args):
 def _bytes_per_input_set(num_tokens, kv_block_size):
     """Approximate device bytes for one input set (dominated by state_cache)."""
     num_pages = (COMPRESS_RATIO * num_tokens - 1) // BLOCK_SIZE + 2
-    state_bytes = num_pages * BLOCK_SIZE * (2 * STATE_WIDTH) * 2  # bf16
+    state_bytes = (num_pages * BLOCK_SIZE * (2 * STATE_WIDTH)
+                   * STATE_DTYPE.itemsize)
     kv_n_blocks = (num_tokens + kv_block_size - 1) // kv_block_size + 1
     kv_bytes = kv_n_blocks * kv_block_size * (TOKEN_STRIDE + SCALE_DIM)
     return state_bytes + kv_bytes
@@ -130,7 +133,7 @@ def benchmark_config(num_tokens, kv_block_size, device):
 
     # Effective bandwidth. Each row is gathered twice, but the two visits use
     # different head-block offsets, so together they read the row exactly once.
-    row_bytes = 2 * STATE_WIDTH * 2  # kv + scores, bf16
+    row_bytes = 2 * STATE_WIDTH * STATE_DTYPE.itemsize  # kv + scores
     read_bytes = num_tokens * COMPRESS_RATIO * row_bytes
     write_bytes = num_tokens * (TOKEN_STRIDE + SCALE_DIM)
     gbps = (read_bytes + write_bytes) / elapsed / 1e9

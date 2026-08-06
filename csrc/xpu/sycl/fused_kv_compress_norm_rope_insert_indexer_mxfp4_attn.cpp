@@ -34,7 +34,9 @@ static constexpr int HALF_ROPE = ROPE_HEAD_DIM / 2;
 static constexpr int NOPE_HEAD_DIM = HEAD_SIZE - ROPE_HEAD_DIM;
 static constexpr int NOPE_PAIRS = NOPE_HEAD_DIM / 2;
 
-inline void load_head_paired(const bf16* base, bf16* out, unsigned int lane) {
+template <typename state_t>
+inline void
+load_head_paired(const state_t* base, state_t* out, unsigned int lane) {
   out[0] = base[2 * lane];
   out[1] = base[2 * lane + 1];
   out[2] = base[HEAD_SIZE / 2 + 2 * lane];
@@ -49,7 +51,7 @@ inline void load_head_paired(const bf16* base, bf16* out, unsigned int lane) {
 //   - Register blocking for this indexer gather pattern.
 //   - Uses SG_SIZE=32 for the target occupancy/register tradeoff.
 // ============================================================================
-template <int COMPRESS_RATIO, int OVERLAP>
+template <typename state_t, int COMPRESS_RATIO, int OVERLAP>
 class FusedMxfp4Cr4Kernel {
  public:
   static_assert(COMPRESS_RATIO == 4, "FusedMxfp4Cr4Kernel is for CR == 4");
@@ -63,7 +65,7 @@ class FusedMxfp4Cr4Kernel {
   static constexpr int CR4_QBLOCKS_PER_PAIR = CR4_PAIR_STRIDE / QUANT_BLOCK;
 
   FusedMxfp4Cr4Kernel(
-      const bf16* state_cache,
+      const state_t* state_cache,
       int64_t state_cache_s0,
       int64_t state_cache_s1,
       const int32_t* token_to_req,
@@ -169,16 +171,16 @@ class FusedMxfp4Cr4Kernel {
 
       int hoff = (r >= COMPRESS_RATIO) ? HEAD_SIZE : 0;
       int blk_num = block_table_ptr[bt_row + p / block_size];
-      const bf16* row_ptr =
+      const state_t* row_ptr =
           state_cache_ptr +
           static_cast<int64_t>(blk_num) * state_cache_stride0 +
           static_cast<int64_t>(p % block_size) * state_cache_stride1 + hoff;
 
-      // One subgroup covers HEAD_SIZE contiguous bf16, CR4_ELEMENTS_PER_LANE
+      // One subgroup covers HEAD_SIZE contiguous values, CR4_ELEMENTS_PER_LANE
       // per lane in the paired layout: local index a maps to element
       // CR4_PAIR_STRIDE * (a / 2) + 2 * lane + (a & 1).
-      bf16 kv_buf[CR4_ELEMENTS_PER_LANE];
-      bf16 score_buf[CR4_ELEMENTS_PER_LANE];
+      state_t kv_buf[CR4_ELEMENTS_PER_LANE];
+      state_t score_buf[CR4_ELEMENTS_PER_LANE];
       load_head_paired(row_ptr, kv_buf, lane);
       load_head_paired(row_ptr + state_width, score_buf, lane);
 
@@ -303,7 +305,7 @@ class FusedMxfp4Cr4Kernel {
   }
 
  private:
-  const bf16* state_cache_ptr;
+  const state_t* state_cache_ptr;
   int64_t state_cache_stride0;
   int64_t state_cache_stride1;
   const int32_t* token_to_req_ptr;
@@ -345,7 +347,9 @@ void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     int64_t compress_ratio,
     int64_t overlap,
     int64_t quant_block) {
-  TORCH_CHECK(state_cache.is_xpu() && state_cache.dtype() == at::kBFloat16);
+  TORCH_CHECK(
+      state_cache.is_xpu() && (state_cache.dtype() == at::kFloat ||
+                               state_cache.dtype() == at::kBFloat16));
   TORCH_CHECK(
       token_to_req_indices.is_xpu() &&
       token_to_req_indices.dtype() == at::kInt);
@@ -364,8 +368,6 @@ void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
 
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  const bf16* state_ptr =
-      reinterpret_cast<const bf16*>(state_cache.data_ptr<at::BFloat16>());
   const int32_t* token_to_req = token_to_req_indices.data_ptr<int32_t>();
   const int64_t* pos_ptr = positions.data_ptr<int64_t>();
   const int64_t* slot_ptr = slot_mapping.data_ptr<int64_t>();
@@ -385,37 +387,48 @@ void fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
       "fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn only supports "
       "compress_ratio == 4 and overlap == 1");
 
-  using Kernel = FusedMxfp4Cr4Kernel<4, 1>;
-  const size_t groups =
-      (static_cast<size_t>(num_tokens) + Kernel::CR4_TOKENS_PER_WG - 1) /
-      Kernel::CR4_TOKENS_PER_WG;
+  auto launch = [&](auto state_t_tag) {
+    using state_t = decltype(state_t_tag);
+    const state_t* state_ptr =
+        reinterpret_cast<const state_t*>(state_cache.data_ptr());
+    using Kernel = FusedMxfp4Cr4Kernel<state_t, 4, 1>;
+    const size_t groups =
+        (static_cast<size_t>(num_tokens) + Kernel::CR4_TOKENS_PER_WG - 1) /
+        Kernel::CR4_TOKENS_PER_WG;
 
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<2>(
-            {groups * Kernel::CR4_TOKENS_PER_WG,
-             static_cast<size_t>(Kernel::CR4_SG_SIZE)},
-            {static_cast<size_t>(Kernel::CR4_TOKENS_PER_WG),
-             static_cast<size_t>(Kernel::CR4_SG_SIZE)}),
-        Kernel(
-            state_ptr,
-            state_cache.stride(0),
-            state_cache.stride(1),
-            token_to_req,
-            pos_ptr,
-            slot_ptr,
-            btable,
-            block_table.stride(0),
-            static_cast<int32_t>(block_size),
-            rms_ptr,
-            static_cast<float>(rms_norm_eps),
-            cs_ptr,
-            cos_sin_cache.stride(0),
-            kv_ptr,
-            kv_slot_ptr,
-            static_cast<int32_t>(kv_cache_block_size),
-            kv_cache.stride(0),
-            state_width,
-            num_tokens));
-  });
+    queue.submit([&](sycl::handler& cgh) {
+      cgh.parallel_for(
+          sycl::nd_range<2>(
+              {groups * Kernel::CR4_TOKENS_PER_WG,
+               static_cast<size_t>(Kernel::CR4_SG_SIZE)},
+              {static_cast<size_t>(Kernel::CR4_TOKENS_PER_WG),
+               static_cast<size_t>(Kernel::CR4_SG_SIZE)}),
+          Kernel(
+              state_ptr,
+              state_cache.stride(0),
+              state_cache.stride(1),
+              token_to_req,
+              pos_ptr,
+              slot_ptr,
+              btable,
+              block_table.stride(0),
+              static_cast<int32_t>(block_size),
+              rms_ptr,
+              static_cast<float>(rms_norm_eps),
+              cs_ptr,
+              cos_sin_cache.stride(0),
+              kv_ptr,
+              kv_slot_ptr,
+              static_cast<int32_t>(kv_cache_block_size),
+              kv_cache.stride(0),
+              state_width,
+              num_tokens));
+    });
+  };
+
+  if (state_cache.dtype() == at::kFloat) {
+    launch(float{});
+  } else {
+    launch(bf16{});
+  }
 }

@@ -109,7 +109,8 @@ def reference_compress_norm_rope(
              rope[1::2] * cos + rope[0::2] * sin],
             dim=-1,
         ).reshape(rope_dim)
-        results.append(torch.cat([nope, rope]).to(state_cache.dtype))
+        # Both kernels round through bfloat16 here regardless of state dtype.
+        results.append(torch.cat([nope, rope]).to(torch.bfloat16))
 
     result = torch.stack(results)
     return quantize_to_mxfp4(result)
@@ -126,8 +127,12 @@ def reference_compress_norm_rope(
     ],
     ids=["KVB16", "KVB32", "tail255", "tail13", "single"],
 )
+# The kernel accepts both; production uses float32.
+@pytest.mark.parametrize(
+    "state_dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"]
+)
 def test_fused_kv_compress_norm_rope_insert_indexer_mxfp4(
-    num_tokens, kv_block_size
+    num_tokens, kv_block_size, state_dtype
 ):
     """Test fused compress+norm+rope+mxfp4_quant+insert kernel accuracy."""
     torch.manual_seed(42)
@@ -144,7 +149,7 @@ def test_fused_kv_compress_norm_rope_insert_indexer_mxfp4(
     num_pages = (compress_ratio * num_tokens - 1) // BLOCK_SIZE + 2
     state_cache = torch.randn(
         num_pages, BLOCK_SIZE, 2 * state_width,
-        dtype=torch.bfloat16, device=device,
+        dtype=state_dtype, device=device,
     )
     block_table = torch.arange(
         num_pages, dtype=torch.int32, device=device
