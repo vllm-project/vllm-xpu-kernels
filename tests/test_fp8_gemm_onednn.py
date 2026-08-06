@@ -508,7 +508,7 @@ def test_fp8_block_indivisible_scale_raises(fp8_dtype, dtype, mode, m,
         weight = torch.randn([batch, k, n], dtype=dtype, device=dev)
         scale_wei = torch.ones([batch, scale_gk, scale_gn], device=dev)
         # A rank-2 per-token activation scale keeps the batched src
-        # grouped-scale check ("must divide K") from pre-empting this one.
+        # grouped-scale check ("must divide K") from preempting this one.
         scale_src = torch.ones([batch, m], device=dev)
     else:
         input = torch.randn([batch * m, k], dtype=dtype, device=dev)
