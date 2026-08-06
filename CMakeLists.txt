@@ -536,6 +536,7 @@ if(BASIC_KERNELS_ENABLED)
   set(VLLM_EXT_SRC
       "csrc/cache.cpp"
       "csrc/layernorm.cpp"
+      "csrc/layernorm_gated.cpp"
       "csrc/layernorm_quant.cpp"
       "csrc/activation.cpp"
       "csrc/pos_encoding_kernels.cpp"
