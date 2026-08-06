@@ -69,7 +69,8 @@ void chunk_kda_xe2(
     int64_t batch_size,
     int64_t num_actual_tokens,
     int64_t num_heads,
-    int64_t head_dim) {
+    int64_t head_dim,
+    bool check_decay_range) {
   TORCH_CHECK(
       chunk_kda_xe2_supported(head_dim),
       "chunk_kda_xe2 requires head_dim to be a positive multiple of ",
@@ -95,6 +96,19 @@ void chunk_kda_xe2(
       {num_heads, vt / kda_xe2::chunk_size, head_dim},
       torch::dtype(torch::kFloat32).device(device).requires_grad(false));
 
+  // Diagnostic only: when asked, give `prepare` somewhere to record that the
+  // per-chunk cumulative log-decay hit `kda_xe2::g_floor`, i.e. that this
+  // launch can no longer reproduce the sequential recurrence. Allocated only
+  // in that case, so the default path keeps its single-allocation profile and
+  // stays free of a host synchronization.
+  torch::Tensor saturated;
+  int* saturated_ptr = nullptr;
+  if (check_decay_range) {
+    saturated = torch::zeros(
+        {1}, torch::dtype(torch::kInt32).device(device).requires_grad(false));
+    saturated_ptr = reinterpret_cast<int*>(saturated.data_ptr());
+  }
+
   const int* token_indx_ptr =
       token_indx.has_value()
           ? reinterpret_cast<const int*>(token_indx->data_ptr())
@@ -119,6 +133,7 @@ void chunk_kda_xe2(
         reinterpret_cast<const float*>(a_log.data_ptr()),         \
         reinterpret_cast<const float*>(dt_bias.data_ptr()),       \
         lower_bound,                                              \
+        saturated_ptr,                                            \
         base,                                                     \
         base + plane,                                             \
         base + 2 * plane,                                         \
@@ -165,4 +180,18 @@ void chunk_kda_xe2(
 
 #undef KDA_CHUNK_DISPATCH_STATE
 #undef KDA_CHUNK_LAUNCH
+
+  if (check_decay_range) {
+    TORCH_CHECK(
+        saturated.item<int32_t>() == 0,
+        "KDA chunked prefill: the per-chunk cumulative log-decay saturated the "
+        "clamp at ",
+        kda_xe2::g_floor,
+        ", so this result does not match the sequential recurrence. The "
+        "chunked pipeline folds exp(G) and exp(-G) into its GEMM operands, "
+        "which bounds how much a key channel may decay within one chunk of ",
+        kda_xe2::chunk_size,
+        " tokens. Select the recurrent backend "
+        "(VLLM_XPU_KDA_RECURRENT_MODE=opt) for this workload.");
+  }
 }

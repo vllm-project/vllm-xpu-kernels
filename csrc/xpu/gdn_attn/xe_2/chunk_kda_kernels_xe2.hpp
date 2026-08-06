@@ -70,8 +70,26 @@ static constexpr int pad_slot_id = -1;
 // help). A channel that decays by more than e^-80 within 64 tokens forgets its
 // state ~35 times over inside a single chunk, which no trained model does; the
 // clamp is inert in practice and the dispatcher keeps the recurrent kernel
-// available as an exact fallback.
+// available as an exact fallback. Set `VLLM_XPU_KDA_CHUNK_STRICT=1` to have
+// the op raise instead of silently diverging when a workload does cross it.
 static constexpr float g_floor = -80.0f;
+
+// Optional diagnostic: `prepare` raises this flag when the clamp above
+// actually engages, i.e. when the chunked result stops matching the sequential
+// recurrence. It is only allocated when the caller asks for the check, so the
+// nullptr test below is uniform across the launch and costs nothing otherwise.
+CUTE_DEVICE void report_decay_saturation(int* saturated) {
+  if (saturated == nullptr) {
+    return;
+  }
+  sycl::atomic_ref<
+      int,
+      sycl::memory_order::relaxed,
+      sycl::memory_scope::device,
+      sycl::access::address_space::global_space>
+      flag(*saturated);
+  flag.store(1);
+}
 
 static constexpr int prepare_sub_group_size = 32;
 static constexpr int prepare_work_group_size = 256;
@@ -216,6 +234,7 @@ CUTE_DEVICE void chunk_kda_prepare_vec_kernel(
     const float* a_log,
     const float* dt_bias,
     const float lower_bound,
+    int* saturated,
     const int* query_start_loc,
     const int* token_indx,
     const int total_virtual_seqlen,
@@ -320,10 +339,13 @@ CUTE_DEVICE void chunk_kda_prepare_vec_kernel(
         float qt[V];
         CUTE_UNROLL
         for (int e = 0; e < V; ++e) {
-          log_cum[e] = sycl::fmax(
-              log_cum[e] + kda_gate::native_log_gate(
-                               gv[e] + bias[e], head_a, lower_bound),
-              g_floor);
+          const float log_raw =
+              log_cum[e] +
+              kda_gate::native_log_gate(gv[e] + bias[e], head_a, lower_bound);
+          if (log_raw < g_floor) {
+            report_decay_saturation(saturated);
+          }
+          log_cum[e] = sycl::fmax(log_raw, g_floor);
           const float decay = sycl::native::exp(log_cum[e]);
           const float inv_decay = sycl::native::recip(decay);
           last_decay[e] = decay;
@@ -399,6 +421,7 @@ CUTE_DEVICE void chunk_kda_prepare_kernel(
     const float* a_log,
     const float* dt_bias,
     const float lower_bound,
+    int* saturated,
     const int* query_start_loc,
     const int* token_indx,
     const int total_virtual_seqlen,
@@ -540,6 +563,9 @@ CUTE_DEVICE void chunk_kda_prepare_kernel(
         auto emit = [&](int c, float gate, float kv, float qv, T vv) {
           log_cum +=
               kda_gate::native_log_gate(gate + bias, head_a, lower_bound);
+          if (log_cum < g_floor) {
+            report_decay_saturation(saturated);
+          }
           log_cum = sycl::fmax(log_cum, g_floor);
           const float decay = sycl::native::exp(log_cum);
           // exp(-log_cum) costs a second transcendental and, worse, does not
