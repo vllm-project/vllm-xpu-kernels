@@ -849,3 +849,104 @@ def test_kda_attention_spec_decode(mode, gate_lower_bound):
         atol=3e-2,
         rtol=3e-2,
     )
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode"])
+@pytest.mark.parametrize("gate_lower_bound", [None, -5.0])
+@torch.inference_mode()
+def test_kda_attention_accepts_fused_mixed_qkv(mode, gate_lower_bound):
+    """Row-strided views of a fused QKV projection must match contiguous ones.
+
+    vLLM produces one fused ``mixed_qkv`` projection and slices q/k/v out of
+    it. Consuming those slices directly avoids materializing a QKV-major copy,
+    so the kernel has to give bit-identical results for either layout.
+    """
+    device = "xpu"
+    num_heads, head_dim, width = 8, 64, 4
+    hidden_dim = num_heads * head_dim
+    batch_size = 2
+    seq_len = 96 if mode == "prefill" else 1
+    num_actual_tokens = batch_size * seq_len
+
+    torch.manual_seed(7)
+    # Mimic vLLM: mixed_qkv is itself a slice of a wider fused projection, so
+    # its row stride is larger than 3 * hidden_dim.
+    fused = (
+        torch.randn(num_actual_tokens, 3 * hidden_dim + 17, device=device) * 0.2
+    ).to(torch.bfloat16)
+    mixed_qkv = fused[:, : 3 * hidden_dim]
+    strided = mixed_qkv.split(hidden_dim, dim=-1)
+    contiguous = tuple(projection.contiguous() for projection in strided)
+
+    raw_gate = (
+        torch.randn(
+            1, num_actual_tokens, num_heads, head_dim, device=device
+        )
+        * 0.2
+    ).to(torch.bfloat16)
+    raw_beta = torch.randn(1, num_actual_tokens, num_heads, device=device)
+    weights = tuple(
+        torch.randn(hidden_dim, width, dtype=torch.float32, device=device)
+        * 0.1
+        for _ in range(3)
+    )
+    a_log = torch.randn(1, 1, num_heads, 1, device=device) * 0.1
+    dt_bias = torch.randn(hidden_dim, device=device) * 0.1
+    query_start_loc = torch.arange(
+        0, num_actual_tokens + 1, seq_len, device=device, dtype=torch.int32
+    )
+    state_indices = torch.arange(
+        batch_size, device=device, dtype=torch.int32
+    )
+    has_initial_state = torch.zeros(
+        batch_size, device=device, dtype=torch.bool
+    )
+    num_prefills = batch_size if mode == "prefill" else 0
+    num_decodes = 0 if mode == "prefill" else batch_size
+
+    results = []
+    for projections in (strided, contiguous):
+        conv_state = torch.zeros(
+            batch_size, 3 * hidden_dim, width - 1, device=device
+        )
+        recurrent_state = torch.zeros(
+            batch_size, num_heads, head_dim, head_dim, device=device
+        )
+        output = torch.zeros(
+            1,
+            num_actual_tokens,
+            num_heads,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        torch.ops._xpu_C.kda_attention(
+            output,
+            *projections,
+            raw_gate,
+            raw_beta,
+            conv_state,
+            recurrent_state,
+            *weights,
+            a_log,
+            dt_bias,
+            num_prefills,
+            num_decodes,
+            0,
+            has_initial_state,
+            query_start_loc,
+            None,
+            state_indices,
+            None,
+            None,
+            None,
+            None,
+            num_actual_tokens,
+            gate_lower_bound,
+        )
+        results.append((output, conv_state, recurrent_state))
+
+    for from_strided, from_contiguous in zip(*results):
+        torch.testing.assert_close(
+            from_strided, from_contiguous, atol=0.0, rtol=0.0
+        )
