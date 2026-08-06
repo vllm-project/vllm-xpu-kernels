@@ -262,7 +262,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "non_spec_query_start_loc, Tensor? non_spec_token_indx, Tensor? "
       "non_spec_state_indices, Tensor? spec_query_start_loc, Tensor? "
       "spec_token_indx, Tensor? spec_state_indices, Tensor? "
-      "num_accepted_tokens, int num_actual_tokens) -> ()");
+      "num_accepted_tokens, int num_actual_tokens, float? gate_lower_bound="
+      "None) -> ()");
   xpu_ops.impl("kda_gated_delta_rule", torch::kXPU, &kda_gated_delta_rule);
 
   xpu_ops.def(
@@ -274,7 +275,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor? non_spec_query_start_loc, Tensor? non_spec_token_indx, Tensor? "
       "non_spec_state_indices, Tensor? spec_query_start_loc, Tensor? "
       "spec_token_indx, Tensor? spec_state_indices, Tensor? "
-      "num_accepted_tokens, int num_actual_tokens) -> ()");
+      "num_accepted_tokens, int num_actual_tokens, float? gate_lower_bound="
+      "None) -> ()");
   xpu_ops.impl("kda_attention", torch::kXPU, &kda_attention);
 
   xpu_ops.def(

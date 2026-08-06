@@ -4,6 +4,8 @@
 
 #include <cstdint>
 
+#include "kda_gate.hpp"
+
 namespace kda {
 
 static constexpr int sub_group_size = 32;
@@ -16,9 +18,7 @@ static constexpr int pad_slot_id = -1;
 
 inline float silu(float x) { return x / (1.0f + sycl::exp(-x)); }
 
-inline float softplus(float x) {
-  return x < 20.0f ? sycl::log(1.0f + sycl::exp(x)) : x;
-}
+using kda_gate::no_lower_bound;
 
 template <typename T, typename CacheT, int Width, bool IsSpec>
 struct causal_conv1d_kernel {
@@ -680,6 +680,7 @@ struct recurrent_kda_kernel {
       const float* beta,
       const float* a_log,
       const float* dt_bias,
+      float lower_bound,
       float* recurrent_state,
       int64_t recurrent_state_stride_0,
       const int* query_start_loc,
@@ -699,6 +700,7 @@ struct recurrent_kda_kernel {
         beta(beta),
         a_log(a_log),
         dt_bias(dt_bias),
+        lower_bound(lower_bound),
         recurrent_state(recurrent_state),
         recurrent_state_stride_0(recurrent_state_stride_0),
         query_start_loc(query_start_loc),
@@ -801,7 +803,7 @@ struct recurrent_kda_kernel {
         const float gate =
             static_cast<float>(raw_gate[qk_offset]) +
             dt_bias[static_cast<int64_t>(head_id) * head_dim + key_id];
-        decay[key] = sycl::exp(head_a * softplus(gate));
+        decay[key] = sycl::exp(kda_gate::log_gate(gate, head_a, lower_bound));
       }
       q_sum = sycl::reduce_over_group(sub_group, q_sum, sycl::plus<>());
       k_sum = sycl::reduce_over_group(sub_group, k_sum, sycl::plus<>());
@@ -901,6 +903,7 @@ struct recurrent_kda_kernel {
   const float* beta;
   const float* a_log;
   const float* dt_bias;
+  float lower_bound;
   float* recurrent_state;
   int64_t recurrent_state_stride_0;
   const int* query_start_loc;
@@ -925,6 +928,7 @@ void launch_recurrent_kda(
     const float* beta,
     const float* a_log,
     const float* dt_bias,
+    float lower_bound,
     float* recurrent_state,
     int64_t recurrent_state_stride_0,
     const int* query_start_loc,
@@ -948,6 +952,7 @@ void launch_recurrent_kda(
         beta,
         a_log,
         dt_bias,
+        lower_bound,
         recurrent_state,
         recurrent_state_stride_0,
         query_start_loc,

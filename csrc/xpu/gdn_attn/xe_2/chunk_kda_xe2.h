@@ -12,6 +12,8 @@ void chunk_kda_xe2(
     torch::Tensor& recurrent_state,  // [slots, heads, dim, dim]
     const torch::Tensor& a_log,      // [1, 1, heads, 1]
     const torch::Tensor& dt_bias,    // [heads * dim]
+    // < 0 selects the bounded sigmoid gate, 0 the unbounded softplus gate.
+    const float lower_bound,
     const torch::Tensor& query_start_loc,
     const torch::Tensor& state_indices,
     const std::optional<torch::Tensor>& has_initial_state,

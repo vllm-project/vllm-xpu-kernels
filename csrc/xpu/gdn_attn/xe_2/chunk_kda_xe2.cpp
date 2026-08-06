@@ -61,6 +61,7 @@ void chunk_kda_xe2(
     torch::Tensor& recurrent_state,
     const torch::Tensor& a_log,
     const torch::Tensor& dt_bias,
+    const float lower_bound,
     const torch::Tensor& query_start_loc,
     const torch::Tensor& state_indices,
     const std::optional<torch::Tensor>& has_initial_state,
@@ -117,6 +118,7 @@ void chunk_kda_xe2(
         reinterpret_cast<const float*>(beta.data_ptr()),          \
         reinterpret_cast<const float*>(a_log.data_ptr()),         \
         reinterpret_cast<const float*>(dt_bias.data_ptr()),       \
+        lower_bound,                                              \
         base,                                                     \
         base + plane,                                             \
         base + 2 * plane,                                         \

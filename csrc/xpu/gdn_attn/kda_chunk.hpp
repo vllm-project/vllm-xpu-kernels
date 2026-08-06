@@ -5,6 +5,8 @@
 
 #include <cstdint>
 
+#include "kda_gate.hpp"
+
 // Chunked (parallel-scan) implementation of the Kimi Delta Attention recurrence
 // used for the prefill / mixed path. The sequential `recurrent_kda_kernel`
 // (kda_attention.hpp) walks tokens one at a time, which is occupancy/latency
@@ -43,7 +45,7 @@
 //   is still not wired into the build.
 //
 // Math (validated to ~1e-17 vs the recurrence in FP64):
-//   per key channel j:  g[c,j] = -exp(a_log[h]) * softplus(gate[c,j]+dt_bias)
+//   per key channel j:  g[c,j] = gate(gate[c,j] + dt_bias)  (see kda_gate.hpp)
 //   T[c,j] = exp(cumsum_c g[c,j])   (inclusive per-channel cumulative decay)
 //   a = kn*T ; b = kn/T ; qt = qn*T   (kn,qn are L2-normalized k,q; qn*=1/sqrt
 //   D) A[s,r]   = beta[r]*(a_s . b_r)            (strictly lower, r<s) U = (I +
@@ -63,10 +65,6 @@ static constexpr int sub_group_size = 32;
 static constexpr float l2norm_eps = 0.000001f;
 static constexpr int pad_slot_id = -1;
 
-inline float softplus_f(float x) {
-  return x < 20.0f ? sycl::log(1.0f + sycl::exp(x)) : x;
-}
-
 // HeadDim == head_k_dim == head_v_dim for KDA. CT = chunk size.
 template <typename T, int HeadDim, int CT, bool IsSpec>
 struct chunk_kda_kernel {
@@ -79,6 +77,7 @@ struct chunk_kda_kernel {
       const float* beta,
       const float* a_log,
       const float* dt_bias,
+      float lower_bound,
       float* recurrent_state,
       int64_t recurrent_state_stride_0,
       const int* query_start_loc,
@@ -98,6 +97,7 @@ struct chunk_kda_kernel {
         beta(beta),
         a_log(a_log),
         dt_bias(dt_bias),
+        lower_bound(lower_bound),
         recurrent_state(recurrent_state),
         recurrent_state_stride_0(recurrent_state_stride_0),
         query_start_loc(query_start_loc),
@@ -214,7 +214,7 @@ struct chunk_kda_kernel {
         kn *= k_inv;
         qn *= q_inv;
         if (c < n) {
-          float g = head_a * softplus_f(gate_r + dt_r);
+          float g = kda_gate::log_gate(gate_r + dt_r, head_a, lower_bound);
           log_cum += g;
           float Tcr = sycl::exp(log_cum);
           float invT = sycl::exp(-log_cum);
@@ -347,6 +347,7 @@ struct chunk_kda_kernel {
   const float* beta;
   const float* a_log;
   const float* dt_bias;
+  float lower_bound;
   float* recurrent_state;
   int64_t recurrent_state_stride_0;
   const int* query_start_loc;
@@ -371,6 +372,7 @@ void launch_chunk_kda_impl(
     const float* beta,
     const float* a_log,
     const float* dt_bias,
+    float lower_bound,
     float* recurrent_state,
     int64_t recurrent_state_stride_0,
     const int* query_start_loc,
@@ -392,6 +394,7 @@ void launch_chunk_kda_impl(
         beta,
         a_log,
         dt_bias,
+        lower_bound,
         recurrent_state,
         recurrent_state_stride_0,
         query_start_loc,
@@ -420,6 +423,7 @@ bool launch_chunk_kda(
     const float* beta,
     const float* a_log,
     const float* dt_bias,
+    float lower_bound,
     float* recurrent_state,
     int64_t recurrent_state_stride_0,
     const int* query_start_loc,
@@ -440,6 +444,7 @@ bool launch_chunk_kda(
       beta,                         \
       a_log,                        \
       dt_bias,                      \
+      lower_bound,                  \
       recurrent_state,              \
       recurrent_state_stride_0,     \
       query_start_loc,              \

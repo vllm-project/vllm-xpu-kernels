@@ -335,7 +335,8 @@ void kda_gated_delta_rule(
     const std::optional<torch::Tensor>& spec_token_indx,
     const std::optional<torch::Tensor>& spec_state_indices,
     const std::optional<torch::Tensor>& num_accepted_tokens,
-    const int64_t num_actual_tokens);
+    const int64_t num_actual_tokens,
+    const std::optional<double>& gate_lower_bound);
 
 void kda_attention(
     torch::Tensor& core_attn_out,
@@ -362,7 +363,8 @@ void kda_attention(
     const std::optional<torch::Tensor>& spec_token_indx,
     const std::optional<torch::Tensor>& spec_state_indices,
     const std::optional<torch::Tensor>& num_accepted_tokens,
-    const int64_t num_actual_tokens);
+    const int64_t num_actual_tokens,
+    const std::optional<double>& gate_lower_bound);
 
 // Legacy fused entry point kept for API backward compatibility. Internally
 // chains causal_conv1d and gated_delta_rule to reproduce the original
