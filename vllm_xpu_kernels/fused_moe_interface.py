@@ -6,6 +6,7 @@ import torch
 
 try:
     from . import _C  # noqa: F401
+    from . import _moe_C  # noqa: F401
     from . import _xpu_C  # noqa: F401
     FUSEDMOE_UNAVAILABLE_REASON = None
     FUSEDMOE_AVAILABLE = True
@@ -13,20 +14,43 @@ except ImportError as e:
     FUSEDMOE_UNAVAILABLE_REASON = str(e)
     FUSEDMOE_AVAILABLE = False
 
-from .moe_utils import quant_act_xpu, ref_fused_moe
+from .moe_utils import (dequant_fp8_block_act, dequant_mxfp8, quant_act_xpu,
+                        ref_fused_moe)
 
 REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
 USE_MXFP4_FP8_ENV = "VLLM_XPU_FUSED_MOE_USE_MXFP4_FP8"
+# MXFP8 / block-FP8 use the native Xe2 path by default.
+NATIVE_MXFP8_ENV = "VLLM_XPU_FUSED_MOE_NATIVE_MXFP8"
+NATIVE_BLOCK_FP8_ENV = "VLLM_XPU_FUSED_MOE_NATIVE_BLOCK_FP8"
 
 def _is_env_enabled(env_name: str, default: str = "0") -> bool:
     value = os.environ.get(env_name, default).strip().upper()
     return value in ("1", "ON", "TRUE", "YES", "Y")
 
 
-def _should_use_ref_fused_moe(is_mxfp8: bool, is_block_fp8: bool) -> bool:  
-    if is_mxfp8 or is_block_fp8:
+def _env_native_default_on(env_name: str) -> bool:
+    """True unless env is explicitly set to a falsy value (default native)."""
+    return os.environ.get(env_name, "1").strip().upper() not in (
+        "0", "OFF", "FALSE", "NO", "N")
+
+
+def _should_use_ref_fused_moe(is_mxfp8: bool, is_block_fp8: bool) -> bool:
+    """Return True when the slow Python ref path must be used.
+
+    MXFP8: native Xe2 grouped-GEMM (FP8 weights + E8M0 block scales; A in
+    bf16/fp16 after optional act dequant). Disable with
+    VLLM_XPU_FUSED_MOE_NATIVE_MXFP8=0 or VLLM_XPU_FUSED_MOE_USE_REF=1.
+
+    Block-FP8: native Xe2 grouped-GEMM keeps FP8 weights + float32 2D
+    scales [E,K/128,N/128] in memory (in-kernel scale apply). Disable with
+    VLLM_XPU_FUSED_MOE_NATIVE_BLOCK_FP8=0.
+    """
+    if _is_env_enabled(REF_FUSED_MOE_ENV):
         return True
-    return _is_env_enabled(REF_FUSED_MOE_ENV)
+    if is_mxfp8 and not _env_native_default_on(NATIVE_MXFP8_ENV):
+        return True
+    return (is_block_fp8
+            and not _env_native_default_on(NATIVE_BLOCK_FP8_ENV))
 
 
 def _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4, is_block_fp8):
@@ -48,9 +72,8 @@ def _get_weights_dtype(weight, scales):
     is_fp8 = weight_dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
     is_int4 = weight_dtype == torch.uint8
     is_mxfp4 = weight_dtype == torch.float4_e2m1fn_x2
-    is_mxfp8 = (is_fp8
-                and scales is not None
-                and scales.dtype == torch.uint8) 
+    is_mxfp8 = (is_fp8 and scales is not None and scales.dtype in (
+        torch.uint8, torch.float8_e8m0fnu))
     is_block_fp8 = (is_fp8 
                     and scales is not None
                     and scales.dtype == torch.float32
@@ -198,14 +221,15 @@ class XpuFusedMoe:
             w2.data = w2_tmp
             w13.xpu_fused_moe = True
 
+        # Block-FP8 keeps FP8 weights + float32 2D scales in memory; Xe2
+        # grouped GEMM applies scales in-kernel (no init-time dequant).
+        self._block_fp8_promoted = False
+
         self.w13 = w13
         self.w2 = w2
 
-        if (not is_fp8 
-            and not is_int4
-            and not is_mxfp4
-            and not is_block_fp8
-            and not is_mxfp8):
+        if (not is_fp8 and not is_int4 and not is_mxfp4 and not is_block_fp8
+                and not is_mxfp8):
             self.gemm1_wei_scales = None
             self.gemm2_wei_scales = None
         else:
@@ -357,6 +381,19 @@ class XpuFusedMoe:
             total_experts_num=self.total_experts_num,
             local_experts_num=self.local_experts_num)
 
+        # MXFP8 / block-FP8 activation scales: dequant to compute dtype so the
+        # Xe2 grouped GEMM runs W8A16 / W16A16 (ptr_A_scale is accepted by the
+        # op schema but Xe2 currently consumes high-precision A). This matches
+        # ref act QDQ when a1q_scale is set without per-expert Python GEMMs.
+        if remapped_scales is not None and self.is_mxfp8:
+            remapped_hidden_states = dequant_mxfp8(
+                remapped_hidden_states, remapped_scales).to(output.dtype)
+            remapped_scales = None
+        elif remapped_scales is not None and self.is_block_fp8:
+            remapped_hidden_states = dequant_fp8_block_act(
+                remapped_hidden_states, remapped_scales).to(output.dtype)
+            remapped_scales = None
+
         ########### gemm1 ##################
         gemm1_output = torch.empty((num_moe_inputs, 2 * self.inter_size),
                                 dtype=output.dtype,
@@ -394,9 +431,20 @@ class XpuFusedMoe:
 
         if act_quant:
             act_output, gemm2_act_scale = quant_act_xpu(act_output, self.recipe)
+            # Dequant before GEMM2 so Xe2 sees high-precision A (W8A16).
+            if self.is_mxfp8 and gemm2_act_scale is not None:
+                act_output = dequant_mxfp8(act_output,
+                                           gemm2_act_scale).to(output.dtype)
+                gemm2_act_scale = None
+            elif self.is_block_fp8 and gemm2_act_scale is not None:
+                act_output = dequant_fp8_block_act(
+                    act_output, gemm2_act_scale).to(output.dtype)
+                gemm2_act_scale = None
+        else:
+            gemm2_act_scale = None
         torch.ops._xpu_C.cutlass_grouped_gemm_interface(
             ptr_A=act_output,
-            ptr_A_scale=gemm2_act_scale if act_quant else None,
+            ptr_A_scale=gemm2_act_scale,
             ptr_B=self.w2,
             ptr_B_scale=self.gemm2_wei_scales,
             ptr_bias=self.w2_bias,
