@@ -103,14 +103,13 @@ CUTE_DEVICE void MoEGEMM(
   int group_range = item.get_group_range(1);
   int local_id = item.get_local_linear_id();
 
-  if (group_id == 0 && local_id == 0) {
-    auto atm = sycl::atomic_ref<
-        int,
-        sycl::memory_order::relaxed,
-        sycl::memory_scope::device,
-        sycl::access::address_space::global_space>(atomic_buffer[0]);
-    atm.store(0);
-  }
+  // Grid-stride scheduling (below) replaces the persistent atomic work-steal,
+  // so there is no shared global tile counter to reset here. The previous
+  // in-kernel reset was un-barriered and ordered only by eager launch timing;
+  // under SYCL-graph capture/replay it raced the tile steals, producing
+  // out-of-bounds tile coordinates and a GPU fault at batch>1. Tile coverage is
+  // unchanged.
+  (void)atomic_buffer;  // unused after grid-stride; retained in the signature
 
   int pre_rows = 0;
   int pre_tiles = 0;
@@ -205,11 +204,13 @@ CUTE_DEVICE void MoEGEMM(
             mma);
       }
 
-      if (local_id == 0) {
-        slm_mem[0] = cutlass::atomicAdd(atomic_buffer, 1);
-      }
-      item.barrier(sycl::access::fence_space::local_space);
-      group_id = group_range + slm_mem[0];
+      // Grid-stride tile assignment: each workgroup deterministically processes
+      // tiles g, g + group_range, g + 2*group_range, ...  No global atomic and
+      // no cross-workgroup state, so it is safe under SYCL-graph capture/replay
+      // at any batch size; coverage is identical to the previous atomic
+      // work-steal (every tile computed exactly once).
+      (void)slm_mem;  // unused after grid-stride; retained in the signature
+      group_id += group_range;
       group_m_id = (group_id * wg_tile_n) / gemm_n_pad;
     }
     pre_rows = cumsum_rows_for_experts;
