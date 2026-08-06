@@ -69,7 +69,7 @@ option(BASIC_KERNELS_ENABLED "Build basic kernels (_C extension)" ON)
 option(FA2_KERNELS_ENABLED
        "Build Flash Attention 2 kernels (_vllm_fa2_C extension)" ON)
 option(MOE_KERNELS_ENABLED
-       "Build MoE kernels (_moe_C extension + grouped_gemm TLA)" ON)
+       "Build MoE kernels (_moe_C extension + grouped_gemm + fused_moe TLA)" ON)
 option(GDN_KERNELS_ENABLED "Build GDN attention kernels (gdn_attn TLA)" ON)
 option(MQA_LOGITS_KERNELS_ENABLED "Build MQA logits kernels" ON)
 option(MHC_KERNELS_ENABLED
@@ -393,6 +393,7 @@ endif()
 
 set(ATTN_KERNEL_LIB_NAME "")
 set(GROUPED_GEMM_LIB_NAME "")
+set(FUSED_MOE_LIB_NAME "")
 set(GDN_ATTN_LIB_NAME "")
 set(MQA_LOGITS_LIB_NAME "")
 set(MHC_LIB_NAME "")
@@ -422,6 +423,8 @@ if(BUILD_SYCL_TLA_KERNELS)
     if(MOE_KERNELS_ENABLED)
       add_subdirectory(csrc/xpu/grouped_gemm/xe_2)
       list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_2")
+      add_subdirectory(csrc/xpu/fused_moe/)
+      list(APPEND FUSED_MOE_LIB_NAME "fused_moe_xe2")
     endif()
     if(FA2_KERNELS_ENABLED)
       add_subdirectory(csrc/xpu/attn/xe_2)
@@ -634,6 +637,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
   if(MOE_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC
          "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp")
+    list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/fused_moe/fused_moe_interface.cpp")
   endif()
   if(GDN_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
@@ -672,7 +676,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     INCLUDE_DIRECTORIES
     ${VLLM_XPU_INCLUDE_DIR}
     LIBRARIES
-    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME};${MQA_LOGITS_LIB_NAME};${MHC_LIB_NAME}
+    ${GROUPED_GEMM_LIB_NAME};${FUSED_MOE_LIB_NAME};${GDN_ATTN_LIB_NAME};${MQA_LOGITS_LIB_NAME};${MHC_LIB_NAME}
     USE_SABI
     3
     WITH_SOABI)

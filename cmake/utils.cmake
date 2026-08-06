@@ -551,7 +551,7 @@ function(add_xe2_kernel_library LIBRARY_NAME)
   cmake_parse_arguments(
     PARSE_ARGV 1 ARG "INCLUDE_CMAKE_SOURCE_DIR" # Boolean options
     "DESTINATION" # Single value keywords
-    "" # Multi-value keywords
+    "EXTRA_SOURCES" # Multi-value keywords
   )
 
   # Set default destination if not provided
@@ -562,8 +562,9 @@ function(add_xe2_kernel_library LIBRARY_NAME)
   # Find all source files
   file(GLOB_RECURSE KERNEL_SOURCES "*.cpp" ${ATTN_KERNEL_SRCS_GEN})
 
-  # Create static library
-  add_library(${LIBRARY_NAME} SHARED ${KERNEL_SOURCES})
+  # Create static library (plus any explicitly provided extra sources, e.g.
+  # shared sources living outside this directory)
+  add_library(${LIBRARY_NAME} SHARED ${KERNEL_SOURCES} ${ARG_EXTRA_SOURCES})
 
   # Set include directories
   target_include_directories(

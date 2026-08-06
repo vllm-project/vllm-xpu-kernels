@@ -226,7 +226,8 @@ class XpuFusedMoe:
         self.is_mxfp4 = is_mxfp4
         self.is_mxfp8 = is_mxfp8
         self.is_block_fp8 = is_block_fp8
-        self.gemm1_clamp_limit = gemm1_clamp_limit
+        self.gemm1_clamp_limit = \
+            gemm1_clamp_limit if gemm1_clamp_limit is not None else -1
         self.recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
                                    is_block_fp8)
         self._use_ref = _should_use_ref_fused_moe(is_mxfp8, is_block_fp8)
@@ -357,35 +358,25 @@ class XpuFusedMoe:
             total_experts_num=self.total_experts_num,
             local_experts_num=self.local_experts_num)
 
-        ########### gemm1 ##################
-        gemm1_output = torch.empty((num_moe_inputs, 2 * self.inter_size),
-                                dtype=output.dtype,
-                                device=output.device)
-        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
+        ########### gemm1 + act ##################
+        act_output = torch.empty(
+            (num_moe_inputs, self.inter_size * self.inter_size_scale),
+            dtype=output.dtype,
+            device=output.device)
+
+        torch.ops._xpu_C.fused_moe_gate_up(
             ptr_A=remapped_hidden_states,
             ptr_A_scale=remapped_scales,
             ptr_B=self.w13,
             ptr_B_scale=self.gemm1_wei_scales,
             ptr_bias=self.w13_bias,
-            ptr_D=gemm1_output,
+            ptr_D=act_output,
             rows_per_expert=rows_per_expert,
-            N=2 * self.inter_size,
+            N=self.inter_size,
             K=hidden_size,
-            num_experts=self.num_experts)
-
-        # Apply swiglu_limit clamping before activation
-        if self.gemm1_clamp_limit is not None and self.gemm1_clamp_limit > 0:
-            gate = gemm1_output[:, :self.inter_size]
-            up = gemm1_output[:, self.inter_size:]
-            gate.clamp_(max=self.gemm1_clamp_limit)
-            up.clamp_(min=-self.gemm1_clamp_limit, max=self.gemm1_clamp_limit)
-
-        # act
-        act_output = torch.empty(
-            (num_moe_inputs, self.inter_size * self.inter_size_scale),
-            dtype=gemm1_output.dtype,
-            device=gemm1_output.device)
-        self.act_func(act_output, gemm1_output)
+            num_experts=self.num_experts,
+            activation=self.activation,
+            gemm1_clamp_limit=self.gemm1_clamp_limit)
 
         ########### gemm2 ##################
         gemm2_output = torch.empty((num_moe_inputs, hidden_size),
