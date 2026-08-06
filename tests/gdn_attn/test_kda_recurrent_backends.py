@@ -155,6 +155,21 @@ def _scatter_worker(out_path):
         }, out_path)
 
 
+def _strict_worker(out_path, a_log_scale):
+    """Run one chunked prefill with a scaled A_log under the strict decay
+    check, and record whether the op accepted it."""
+    import vllm_xpu_kernels._xpu_C  # noqa: F401
+    case = (1, 256, 128, "bfloat16", "float32")
+    t = _build(case, seed=0)
+    t["a_log"] = t["a_log"] + float(a_log_scale)
+    try:
+        _run(t)
+        torch.xpu.synchronize()
+        torch.save({"raised": None}, out_path)
+    except RuntimeError as exc:
+        torch.save({"raised": str(exc)}, out_path)
+
+
 def _collect(mode, tmp_path):
     out_path = str(tmp_path / f"{mode}.pt")
     env = dict(os.environ)
@@ -220,8 +235,43 @@ def test_chunk_honours_permuted_token_indx(tmp_path):
         msg=lambda m: f"chunk state depends on token_indx row order\n{m}")
 
 
+def _run_strict(tmp_path, a_log_shift):
+    out_path = str(tmp_path / f"strict_{a_log_shift}.pt")
+    env = dict(os.environ)
+    env["VLLM_XPU_KDA_RECURRENT_MODE"] = "chunk"
+    env["VLLM_XPU_KDA_CHUNK_MIN_SEQLEN"] = "1"
+    env["VLLM_XPU_KDA_CHUNK_STRICT"] = "1"
+    env.setdefault("PYTHONPATH", os.getcwd())
+    subprocess.run(
+        [sys.executable, os.path.abspath(__file__), "--strict", out_path,
+         str(a_log_shift)],
+        check=True, env=env)
+    return torch.load(out_path)["raised"]
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="requires XPU")
+def test_chunk_strict_accepts_the_trained_gate_regime(tmp_path):
+    """The clamp the chunked pipeline folds into its GEMM operands has to stay
+    inert for the decay rates trained models actually produce, otherwise it
+    would be silently changing results in the default configuration."""
+    assert _run_strict(tmp_path, 0.0) is None
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="requires XPU")
+def test_chunk_strict_rejects_saturating_decay(tmp_path):
+    """Past the clamp the chunked result stops matching the recurrence. That
+    used to be silent; with the strict check it has to be an error naming the
+    fallback."""
+    raised = _run_strict(tmp_path, 1.5)
+    assert raised is not None, "saturating decay was accepted"
+    assert "cumulative log-decay saturated" in raised
+    assert "VLLM_XPU_KDA_RECURRENT_MODE" in raised
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "--scatter":
         _scatter_worker(sys.argv[2])
+    elif sys.argv[1] == "--strict":
+        _strict_worker(sys.argv[2], sys.argv[3])
     else:
         _worker(sys.argv[1])

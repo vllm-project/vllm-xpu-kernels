@@ -21,7 +21,11 @@ void chunk_kda_xe2(
     int64_t batch_size,
     int64_t num_actual_tokens,
     int64_t num_heads,
-    int64_t head_dim);
+    int64_t head_dim,
+    // Opt-in diagnostic: synchronizes and raises if the chunk decay clamp
+    // engaged, instead of silently returning a result the recurrent kernel
+    // would not reproduce.
+    bool check_decay_range);
 
 // True when the chunked pipeline supports this shape at all.
 bool chunk_kda_xe2_supported(int64_t head_dim);

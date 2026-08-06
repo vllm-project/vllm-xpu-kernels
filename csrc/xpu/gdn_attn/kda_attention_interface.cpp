@@ -78,6 +78,17 @@ int64_t kda_chunk_max_workspace_bytes() {
   return value;
 }
 
+// The chunked pipeline folds exp(G) and exp(-G) into its GEMM operands, so it
+// clamps the per-chunk cumulative log-decay to keep both representable. The
+// clamp is inert for trained models but silently diverges from the sequential
+// recurrence beyond it, so offer an opt-in check that turns that divergence
+// into an error. It costs a host synchronization per chunked call, hence off
+// by default.
+bool kda_chunk_check_decay_range() {
+  static const bool value = parse_env_int("VLLM_XPU_KDA_CHUNK_STRICT", 0) != 0;
+  return value;
+}
+
 // Gate mode selector, mirroring `linear_attn_config.gate_lower_bound` in the
 // HuggingFace config: unset -> unbounded softplus gate, set (a negative value,
 // e.g. -5.0 for Kimi-K3) -> bounded sigmoid gate.
@@ -932,7 +943,8 @@ void launch_kda_recurrent(
           non_spec_batch_size,
           num_non_spec_tokens,
           num_heads,
-          head_dim);
+          head_dim,
+          kda_chunk_check_decay_range());
       non_spec_done = true;
     }
   }
