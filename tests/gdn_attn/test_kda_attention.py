@@ -293,6 +293,25 @@ def _make_inputs(
     )
 
 
+def _as_fused_qkv_views(projections):
+    """Repack q/k/v as row-strided slices of one fused mixed-QKV buffer.
+
+    This is the layout vLLM hands us: `mixed_qkv` is a slice of the wider
+    `in_proj_qkvgfab` output, so the padding here keeps the row stride from
+    accidentally equalling 3 * hidden_dim.
+    """
+    tokens, hidden = projections[0].shape
+    fused = torch.zeros(
+        tokens,
+        3 * hidden + 17,
+        dtype=projections[0].dtype,
+        device=projections[0].device,
+    )
+    for index, projection in enumerate(projections):
+        fused[:, index * hidden : (index + 1) * hidden] = projection
+    return fused[:, : 3 * hidden].split(hidden, dim=-1)
+
+
 def _to_page_strided_xpu_cache(tensor: torch.Tensor) -> torch.Tensor:
     slot_numel = tensor[0].numel()
     slot_stride = slot_numel + 17
@@ -707,8 +726,9 @@ def test_kda_split_ops_compose_to_reference():
     "mode",
     ["spec-decode", "spec-decode+prefill+decode"],
 )
+@pytest.mark.parametrize("qkv_layout", ["split", "fused"])
 @torch.inference_mode()
-def test_kda_attention_spec_decode(mode, gate_lower_bound):
+def test_kda_attention_spec_decode(mode, gate_lower_bound, qkv_layout):
     device = torch.device("xpu")
     combined_batch = mode == "spec-decode+prefill+decode"
     num_actual_tokens = 10 if combined_batch else 6
@@ -733,6 +753,8 @@ def test_kda_attention_spec_decode(mode, gate_lower_bound):
         dim_first=False,
         device=device,
     )
+    if qkv_layout == "fused":
+        projections = _as_fused_qkv_views(projections)
     query_start_loc = torch.tensor(
         [0, 3, 6], dtype=torch.int32, device=device
     )
