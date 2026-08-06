@@ -28,13 +28,6 @@
 
 namespace kda {
 
-// `softplus` built from the hardware-accelerated transcendentals. The result
-// feeds exp(a * softplus(gate)) and is consumed at activation precision, so
-// the extra ulps of the native ops are irrelevant here.
-inline float native_softplus(float x) {
-  return x < 20.0f ? sycl::native::log(1.0f + sycl::native::exp(x)) : x;
-}
-
 static constexpr int recurrent_mode_general = 0;
 static constexpr int recurrent_mode_spec = 1;
 static constexpr int recurrent_mode_decode = 2;
@@ -117,6 +110,7 @@ struct recurrent_kda_opt_kernel {
       const float* beta,
       const float* a_log,
       const float* dt_bias,
+      float lower_bound,
       StateT* recurrent_state,
       int64_t recurrent_state_stride_0,
       const int* query_start_loc,
@@ -136,6 +130,7 @@ struct recurrent_kda_opt_kernel {
         beta(beta),
         a_log(a_log),
         dt_bias(dt_bias),
+        lower_bound(lower_bound),
         recurrent_state(recurrent_state),
         recurrent_state_stride_0(recurrent_state_stride_0),
         query_start_loc(query_start_loc),
@@ -247,7 +242,8 @@ struct recurrent_kda_opt_kernel {
         q_sum += q_local[key] * q_local[key];
         k_sum += k_local[key] * k_local[key];
         decay[key] = sycl::native::exp(
-            head_a * native_softplus(decay[key] + bias_local[key]));
+            kda_gate::native_log_gate(
+                decay[key] + bias_local[key], head_a, lower_bound));
       }
       q_sum = sycl::reduce_over_group(sub_group, q_sum, sycl::plus<>());
       k_sum = sycl::reduce_over_group(sub_group, k_sum, sycl::plus<>());
@@ -346,6 +342,7 @@ struct recurrent_kda_opt_kernel {
   const float* beta;
   const float* a_log;
   const float* dt_bias;
+  float lower_bound;
   StateT* recurrent_state;
   int64_t recurrent_state_stride_0;
   const int* query_start_loc;
@@ -370,6 +367,7 @@ void launch_recurrent_kda_opt(
     const float* beta,
     const float* a_log,
     const float* dt_bias,
+    float lower_bound,
     StateT* recurrent_state,
     int64_t recurrent_state_stride_0,
     const int* query_start_loc,
@@ -393,6 +391,7 @@ void launch_recurrent_kda_opt(
         beta,
         a_log,
         dt_bias,
+        lower_bound,
         recurrent_state,
         recurrent_state_stride_0,
         query_start_loc,

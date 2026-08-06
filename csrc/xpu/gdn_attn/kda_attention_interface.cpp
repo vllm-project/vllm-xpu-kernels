@@ -7,6 +7,7 @@
 #include <string>
 
 #include "kda_attention.hpp"
+#include "kda_gate.hpp"
 #include "kda_recurrent_opt.hpp"
 #include "utils.h"
 
@@ -75,6 +76,21 @@ int64_t kda_chunk_max_workspace_bytes() {
   static const int64_t value =
       parse_env_int("VLLM_XPU_KDA_CHUNK_MAX_WORKSPACE_MB", 2048) * 1024 * 1024;
   return value;
+}
+
+// Gate mode selector, mirroring `linear_attn_config.gate_lower_bound` in the
+// HuggingFace config: unset -> unbounded softplus gate, set (a negative value,
+// e.g. -5.0 for Kimi-K3) -> bounded sigmoid gate.
+float resolve_gate_lower_bound(const std::optional<double>& gate_lower_bound) {
+  if (!gate_lower_bound.has_value()) {
+    return kda_gate::no_lower_bound;
+  }
+  const double value = *gate_lower_bound;
+  TORCH_CHECK(
+      value < 0.0,
+      "gate_lower_bound must be negative (or None for the softplus gate), got ",
+      value);
+  return static_cast<float>(value);
 }
 
 void check_cache_layout(const torch::Tensor& tensor, const char* name) {
@@ -631,6 +647,7 @@ void launch_kda_recurrent_opt_bucket(
     torch::Tensor& recurrent_state,
     const torch::Tensor& a_log,
     const torch::Tensor& dt_bias,
+    float lower_bound,
     const KdaRecurrentBatchArgs& args,
     int num_heads,
     int head_dim) {
@@ -645,6 +662,7 @@ void launch_kda_recurrent_opt_bucket(
       reinterpret_cast<const float*>(beta.data_ptr()),       \
       reinterpret_cast<const float*>(a_log.data_ptr()),      \
       reinterpret_cast<const float*>(dt_bias.data_ptr()),    \
+      lower_bound,                                           \
       reinterpret_cast<StateT*>(recurrent_state.data_ptr()), \
       recurrent_state.stride(0),                             \
       args.query_start_loc,                                  \
@@ -695,6 +713,7 @@ void launch_kda_recurrent_opt(
     torch::Tensor& recurrent_state,
     const torch::Tensor& a_log,
     const torch::Tensor& dt_bias,
+    float lower_bound,
     const KdaRecurrentBatchArgs& args,
     int num_heads,
     int head_dim) {
@@ -711,6 +730,7 @@ void launch_kda_recurrent_opt(
         recurrent_state,
         a_log,
         dt_bias,
+        lower_bound,
         args,
         num_heads,
         head_dim);
@@ -729,6 +749,7 @@ void launch_kda_recurrent_opt(
           recurrent_state,
           a_log,
           dt_bias,
+          lower_bound,
           args,
           num_heads,
           head_dim);
@@ -754,6 +775,7 @@ void launch_kda_recurrent(
     torch::Tensor& recurrent_state,
     const torch::Tensor& a_log,
     const torch::Tensor& dt_bias,
+    float lower_bound,
     const std::optional<torch::Tensor>& has_initial_state,
     const std::optional<torch::Tensor>& non_spec_query_start_loc,
     const std::optional<torch::Tensor>& non_spec_token_indx,
@@ -788,6 +810,7 @@ void launch_kda_recurrent(
       reinterpret_cast<const float*>(beta.data_ptr()),      \
       reinterpret_cast<const float*>(a_log.data_ptr()),     \
       reinterpret_cast<const float*>(dt_bias.data_ptr()),   \
+      lower_bound,                                          \
       reinterpret_cast<float*>(recurrent_state.data_ptr()), \
       recurrent_state.stride(0),                            \
       QUERY_START,                                          \
@@ -900,6 +923,7 @@ void launch_kda_recurrent(
           recurrent_state,
           a_log,
           dt_bias,
+          lower_bound,
           *non_spec_query_start_loc,
           *non_spec_state_indices,
           has_initial_state,
@@ -939,6 +963,7 @@ void launch_kda_recurrent(
             recurrent_state,
             a_log,
             dt_bias,
+            lower_bound,
             args,
             num_heads,
             head_dim);
@@ -954,6 +979,7 @@ void launch_kda_recurrent(
             recurrent_state,
             a_log,
             dt_bias,
+            lower_bound,
             args,
             num_heads,
             head_dim);
@@ -995,6 +1021,7 @@ void launch_kda_recurrent(
           recurrent_state,
           a_log,
           dt_bias,
+          lower_bound,
           args,
           num_heads,
           head_dim);
@@ -1140,7 +1167,8 @@ void kda_gated_delta_rule(
     const std::optional<torch::Tensor>& spec_token_indx,
     const std::optional<torch::Tensor>& spec_state_indices,
     const std::optional<torch::Tensor>& num_accepted_tokens,
-    const int64_t num_actual_tokens) {
+    const int64_t num_actual_tokens,
+    const std::optional<double>& gate_lower_bound) {
   validate_metadata(
       num_prefills,
       num_decodes,
@@ -1170,6 +1198,8 @@ void kda_gated_delta_rule(
     return;
   }
 
+  const float lower_bound = resolve_gate_lower_bound(gate_lower_bound);
+
   auto& queue = vllm::xpu::vllmGetQueue();
   dispatch_activation(q.scalar_type(), [&](auto tag) {
     using T = decltype(tag);
@@ -1184,6 +1214,7 @@ void kda_gated_delta_rule(
         recurrent_state,
         a_log,
         dt_bias,
+        lower_bound,
         has_initial_state,
         non_spec_query_start_loc,
         non_spec_token_indx,
@@ -1226,7 +1257,8 @@ void kda_attention(
     const std::optional<torch::Tensor>& spec_token_indx,
     const std::optional<torch::Tensor>& spec_state_indices,
     const std::optional<torch::Tensor>& num_accepted_tokens,
-    const int64_t num_actual_tokens) {
+    const int64_t num_actual_tokens,
+    const std::optional<double>& gate_lower_bound) {
   auto qkv = kda_causal_conv1d(
       q_proj,
       k_proj,
@@ -1268,5 +1300,6 @@ void kda_attention(
       spec_token_indx,
       spec_state_indices,
       num_accepted_tokens,
-      num_actual_tokens);
+      num_actual_tokens,
+      gate_lower_bound);
 }

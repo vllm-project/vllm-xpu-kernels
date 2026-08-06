@@ -24,6 +24,19 @@ def _conv_history(
     return conv_state[slot, :, start:end]
 
 
+def _reference_gate(
+    raw_gate: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    gate_lower_bound: float | None,
+) -> torch.Tensor:
+    """Log-domain KDA decay, mirroring csrc/xpu/gdn_attn/kda_gate.hpp."""
+    x = raw_gate + dt_bias
+    if gate_lower_bound is None:
+        return -torch.exp(a_log) * F.softplus(x)
+    return gate_lower_bound * torch.sigmoid(torch.exp(a_log) * x)
+
+
 def _reference_sequence(
     output: torch.Tensor,
     conv_outputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -41,6 +54,7 @@ def _reference_sequence(
     save_slots: list[int] | None,
     num_heads: int,
     head_dim: int,
+    gate_lower_bound: float | None = None,
 ) -> None:
     hidden_dim = num_heads * head_dim
     width = conv_weights[0].shape[1]
@@ -89,8 +103,11 @@ def _reference_sequence(
         k = k * torch.rsqrt(k.square().sum(-1, keepdim=True) + 1e-6)
         q = q * scale
 
-        gate = -torch.exp(a_log.reshape(num_heads, 1)) * F.softplus(
-            raw_gate[0, global_token].float() + dt
+        gate = _reference_gate(
+            raw_gate[0, global_token].float(),
+            a_log.reshape(num_heads, 1),
+            dt,
+            gate_lower_bound,
         )
         state *= gate.exp().unsqueeze(1)
         kv_memory = (state * k.unsqueeze(1)).sum(-1)
@@ -132,6 +149,7 @@ def _reference_kda(
     num_accepted_tokens: torch.Tensor | None,
     num_heads: int,
     head_dim: int,
+    gate_lower_bound: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     actual_tokens = q_proj.shape[0]
     hidden_dim = num_heads * head_dim
@@ -178,6 +196,7 @@ def _reference_kda(
                 None,
                 num_heads,
                 head_dim,
+                gate_lower_bound,
             )
     if spec_query_start_loc is not None:
         assert spec_token_indx is not None
@@ -208,6 +227,7 @@ def _reference_kda(
                 save_slots,
                 num_heads,
                 head_dim,
+                gate_lower_bound,
             )
     return conv_outputs
 
@@ -290,6 +310,11 @@ def _to_page_strided_xpu_cache(tensor: torch.Tensor) -> torch.Tensor:
 
 
 @pytest.mark.parametrize(
+    "gate_lower_bound",
+    [None, -5.0],
+    ids=["softplus-gate", "sigmoid-gate"],
+)
+@pytest.mark.parametrize(
     "page_strided_cache",
     [False, True],
     ids=["contiguous-cache", "page-strided-cache"],
@@ -308,7 +333,7 @@ def _to_page_strided_xpu_cache(tensor: torch.Tensor) -> torch.Tensor:
 )
 @torch.inference_mode()
 def test_kda_attention_non_spec(
-    dtype, head_dim, dim_first, mode, page_strided_cache
+    dtype, head_dim, dim_first, mode, page_strided_cache, gate_lower_bound
 ):
     device = torch.device("xpu")
     num_actual_tokens = {
@@ -394,6 +419,7 @@ def test_kda_attention_non_spec(
         None,
         num_heads,
         head_dim,
+        gate_lower_bound,
     )
 
     actual_output = core_attn_out.to(device)
@@ -425,6 +451,7 @@ def test_kda_attention_non_spec(
         None,
         None,
         num_actual_tokens,
+        gate_lower_bound,
     )
 
     tolerance = 6e-2 if dtype == torch.bfloat16 else 3e-2
@@ -671,11 +698,16 @@ def test_kda_split_ops_compose_to_reference():
 
 
 @pytest.mark.parametrize(
+    "gate_lower_bound",
+    [None, -5.0],
+    ids=["softplus-gate", "sigmoid-gate"],
+)
+@pytest.mark.parametrize(
     "mode",
     ["spec-decode", "spec-decode+prefill+decode"],
 )
 @torch.inference_mode()
-def test_kda_attention_spec_decode(mode):
+def test_kda_attention_spec_decode(mode, gate_lower_bound):
     device = torch.device("xpu")
     combined_batch = mode == "spec-decode+prefill+decode"
     num_actual_tokens = 10 if combined_batch else 6
@@ -754,6 +786,7 @@ def test_kda_attention_spec_decode(mode):
         accepted,
         num_heads,
         head_dim,
+        gate_lower_bound,
     )
 
     actual_output = core_attn_out.to(device)
@@ -797,6 +830,7 @@ def test_kda_attention_spec_decode(mode):
         state_indices.to(device),
         accepted.to(device),
         num_actual_tokens,
+        gate_lower_bound,
     )
 
     torch.testing.assert_close(

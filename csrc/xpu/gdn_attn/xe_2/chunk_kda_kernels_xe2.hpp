@@ -6,6 +6,7 @@
 
 #include "gemm.hpp"
 #include "gdn_attn_utils.h"
+#include "../kda_gate.hpp"
 #include "csrc/utils.h"
 
 // Chunked (WY-representation) Kimi Delta Attention recurrence for the prefill /
@@ -24,7 +25,8 @@
 // decay into the GEMM operands. `beta` is folded in as well, which removes
 // every post-GEMM scaling from the inner stages:
 //
-//   g[c,j]  = -exp(A_log[h]) * softplus(raw_gate[c,j] + dt_bias[h,j])
+//   g[c,j]  = gate(raw_gate[c,j] + dt_bias[h,j])   (softplus / sigmoid, see
+//             kda_gate.hpp)
 //   G[c,j]  = inclusive cumsum of g over the chunk (reset at each chunk)
 //   Ka[c,j] = k_hat[c,j] * exp( G[c,j])
 //   Kb[c,j] = k_hat[c,j] * exp(-G[c,j]) * beta[c]      <- beta folded in
@@ -146,14 +148,6 @@ chunk_kda_fwd_o_dv_groups(int batch_size, int num_heads, int head_dim) {
   return groups;
 }
 
-// Branch-free so the `prepare` cumsum unrolls cleanly: for x >= 20 the
-// exponential saturates to +inf and log(1 + inf) = inf, which the select then
-// discards, so no NaN can escape.
-CUTE_DEVICE float native_softplus(float x) {
-  const float saturated = sycl::native::log(1.0f + sycl::native::exp(x));
-  return x < 20.0f ? saturated : x;
-}
-
 // How many tokens the per-channel cumsum processes per unrolled step. The loads
 // of one step are independent of the recurrence, so unrolling is what gives the
 // serial scan enough memory-level parallelism to cover DRAM latency.
@@ -221,6 +215,7 @@ CUTE_DEVICE void chunk_kda_prepare_vec_kernel(
     const float* beta,
     const float* a_log,
     const float* dt_bias,
+    const float lower_bound,
     const int* query_start_loc,
     const int* token_indx,
     const int total_virtual_seqlen,
@@ -326,7 +321,9 @@ CUTE_DEVICE void chunk_kda_prepare_vec_kernel(
         CUTE_UNROLL
         for (int e = 0; e < V; ++e) {
           log_cum[e] = sycl::fmax(
-              log_cum[e] + head_a * native_softplus(gv[e] + bias[e]), g_floor);
+              log_cum[e] + kda_gate::native_log_gate(
+                               gv[e] + bias[e], head_a, lower_bound),
+              g_floor);
           const float decay = sycl::native::exp(log_cum[e]);
           const float inv_decay = sycl::native::recip(decay);
           last_decay[e] = decay;
@@ -401,6 +398,7 @@ CUTE_DEVICE void chunk_kda_prepare_kernel(
     const float* beta,
     const float* a_log,
     const float* dt_bias,
+    const float lower_bound,
     const int* query_start_loc,
     const int* token_indx,
     const int total_virtual_seqlen,
@@ -532,13 +530,15 @@ CUTE_DEVICE void chunk_kda_prepare_kernel(
         float log_cum = 0.0f;
         float last_decay = 1.0f;
 
-        // `log_cum` only ever decreases (head_a < 0, softplus > 0) and is
-        // clamped at `g_floor`, so max(x + d, floor) composes to
+        // `log_cum` only ever decreases (the gate is non-positive in both the
+        // softplus and the sigmoid mode) and is clamped at `g_floor`, so
+        // max(x + d, floor) composes to
         // max(x + sum(d), floor): the unrolled steps stay bit-equivalent to the
         // scalar recurrence. Every address in a step is known up front, so the
         // four token loads issue back to back instead of one per iteration.
         auto emit = [&](int c, float gate, float kv, float qv, T vv) {
-          log_cum += head_a * native_softplus(gate + bias);
+          log_cum +=
+              kda_gate::native_log_gate(gate + bias, head_a, lower_bound);
           log_cum = sycl::fmax(log_cum, g_floor);
           const float decay = sycl::native::exp(log_cum);
           // exp(-log_cum) costs a second transcendental and, worse, does not
