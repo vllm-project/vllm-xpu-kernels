@@ -107,7 +107,7 @@ struct recurrent_kda_opt_kernel {
       const T* k,
       const T* v,
       const T* raw_gate,
-      const float* beta,
+      const float* raw_beta,
       const float* a_log,
       const float* dt_bias,
       float lower_bound,
@@ -127,7 +127,7 @@ struct recurrent_kda_opt_kernel {
         k(k),
         v(v),
         raw_gate(raw_gate),
-        beta(beta),
+        raw_beta(raw_beta),
         a_log(a_log),
         dt_bias(dt_bias),
         lower_bound(lower_bound),
@@ -273,8 +273,8 @@ struct recurrent_kda_opt_kernel {
             sub_group, kv_memory[value], sycl::plus<>());
       }
 
-      const float beta_value =
-          beta[static_cast<int64_t>(global_token) * num_heads + head_id];
+      const float beta_value = kda_gate::native_beta_from_logit(
+          raw_beta[static_cast<int64_t>(global_token) * num_heads + head_id]);
       const int64_t value_offset = token_head_offset + value_start;
       float v_local[values_per_sub_group];
       load_to_float<T, values_per_sub_group>(v + value_offset, v_local);
@@ -339,7 +339,7 @@ struct recurrent_kda_opt_kernel {
   const T* k;
   const T* v;
   const T* raw_gate;
-  const float* beta;
+  const float* raw_beta;
   const float* a_log;
   const float* dt_bias;
   float lower_bound;
@@ -364,7 +364,7 @@ void launch_recurrent_kda_opt(
     const T* k,
     const T* v,
     const T* raw_gate,
-    const float* beta,
+    const float* raw_beta,
     const float* a_log,
     const float* dt_bias,
     float lower_bound,
@@ -388,7 +388,7 @@ void launch_recurrent_kda_opt(
         k,
         v,
         raw_gate,
-        beta,
+        raw_beta,
         a_log,
         dt_bias,
         lower_bound,

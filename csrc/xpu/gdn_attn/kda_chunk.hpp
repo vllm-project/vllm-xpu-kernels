@@ -74,7 +74,7 @@ struct chunk_kda_kernel {
       const T* k,
       const T* v,
       const T* raw_gate,
-      const float* beta,
+      const float* raw_beta,
       const float* a_log,
       const float* dt_bias,
       float lower_bound,
@@ -94,7 +94,7 @@ struct chunk_kda_kernel {
         k(k),
         v(v),
         raw_gate(raw_gate),
-        beta(beta),
+        raw_beta(raw_beta),
         a_log(a_log),
         dt_bias(dt_bias),
         lower_bound(lower_bound),
@@ -236,7 +236,9 @@ struct chunk_kda_kernel {
           const int local_token = chunk_start + c;
           const int global_token =
               token_indx == nullptr ? local_token : token_indx[local_token];
-          bv = beta[static_cast<int64_t>(global_token) * num_heads + head_id];
+          bv = kda_gate::beta_from_logit(
+              raw_beta
+                  [static_cast<int64_t>(global_token) * num_heads + head_id]);
         }
         A_beta[c] = bv;
       }
@@ -344,7 +346,7 @@ struct chunk_kda_kernel {
   const T* k;
   const T* v;
   const T* raw_gate;
-  const float* beta;
+  const float* raw_beta;
   const float* a_log;
   const float* dt_bias;
   float lower_bound;
@@ -369,7 +371,7 @@ void launch_chunk_kda_impl(
     const T* k,
     const T* v,
     const T* raw_gate,
-    const float* beta,
+    const float* raw_beta,
     const float* a_log,
     const float* dt_bias,
     float lower_bound,
@@ -391,7 +393,7 @@ void launch_chunk_kda_impl(
         k,
         v,
         raw_gate,
-        beta,
+        raw_beta,
         a_log,
         dt_bias,
         lower_bound,
@@ -420,7 +422,7 @@ bool launch_chunk_kda(
     const T* k,
     const T* v,
     const T* raw_gate,
-    const float* beta,
+    const float* raw_beta,
     const float* a_log,
     const float* dt_bias,
     float lower_bound,
@@ -441,7 +443,7 @@ bool launch_chunk_kda(
       k,                            \
       v,                            \
       raw_gate,                     \
-      beta,                         \
+      raw_beta,                     \
       a_log,                        \
       dt_bias,                      \
       lower_bound,                  \

@@ -8,7 +8,7 @@ void chunk_kda_xe2(
     const torch::Tensor& k,          // [num_tokens, heads * dim]
     const torch::Tensor& v,          // [num_tokens, heads * dim]
     const torch::Tensor& raw_gate,   // [1, >=num_tokens, heads, dim]
-    const torch::Tensor& beta,       // [1, >=num_tokens, heads]
+    const torch::Tensor& raw_beta,   // [1, >=num_tokens, heads]
     torch::Tensor& recurrent_state,  // [slots, heads, dim, dim]
     const torch::Tensor& a_log,      // [1, 1, heads, 1]
     const torch::Tensor& dt_bias,    // [heads * dim]

@@ -43,7 +43,7 @@ def _reference_sequence(
     projections: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     conv_weights: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     raw_gate: torch.Tensor,
-    beta: torch.Tensor,
+    raw_beta: torch.Tensor,
     conv_state: torch.Tensor,
     recurrent_state: torch.Tensor,
     a_log: torch.Tensor,
@@ -113,7 +113,7 @@ def _reference_sequence(
         kv_memory = (state * k.unsqueeze(1)).sum(-1)
         delta = (
             v - kv_memory
-        ) * beta[0, global_token].float().unsqueeze(-1)
+        ) * raw_beta[0, global_token].float().sigmoid().unsqueeze(-1)
         state += delta.unsqueeze(-1) * k.unsqueeze(1)
         result = (state * q.unsqueeze(1)).sum(-1)
         output[0, global_token].copy_(result.to(output.dtype))
@@ -131,7 +131,7 @@ def _reference_kda(
     k_proj: torch.Tensor,
     v_proj: torch.Tensor,
     raw_gate: torch.Tensor,
-    beta: torch.Tensor,
+    raw_beta: torch.Tensor,
     conv_state: torch.Tensor,
     recurrent_state: torch.Tensor,
     q_conv_weight: torch.Tensor,
@@ -185,7 +185,7 @@ def _reference_kda(
                 projections,
                 weights,
                 raw_gate,
-                beta,
+                raw_beta,
                 conv_state,
                 recurrent_state,
                 a_log,
@@ -216,7 +216,7 @@ def _reference_kda(
                 projections,
                 weights,
                 raw_gate,
-                beta,
+                raw_beta,
                 conv_state,
                 recurrent_state,
                 a_log,
@@ -256,7 +256,8 @@ def _make_inputs(
         torch.randn(1, capture_tokens, num_heads, head_dim, device=device)
         * 0.2
     ).to(dtype)
-    beta = torch.randn(1, capture_tokens, num_heads, device=device).sigmoid()
+    # Raw logits: the kernel applies the sigmoid itself.
+    raw_beta = torch.randn(1, capture_tokens, num_heads, device=device)
     weights = tuple(
         torch.randn(hidden_dim, width, dtype=torch.float32, device=device)
         * 0.1
@@ -282,7 +283,7 @@ def _make_inputs(
     return (
         projections,
         raw_gate,
-        beta,
+        raw_beta,
         weights,
         conv_state,
         recurrent_state,
@@ -346,7 +347,7 @@ def test_kda_attention_non_spec(
     (
         projections,
         raw_gate,
-        beta,
+        raw_beta,
         weights,
         conv_state,
         recurrent_state,
@@ -403,7 +404,7 @@ def test_kda_attention_non_spec(
         reference_output,
         *(projection[:num_actual_tokens] for projection in projections),
         raw_gate[:, :num_actual_tokens],
-        beta[:, :num_actual_tokens],
+        raw_beta[:, :num_actual_tokens],
         reference_conv_state,
         reference_recurrent_state,
         *weights,
@@ -433,7 +434,7 @@ def test_kda_attention_non_spec(
         actual_output,
         *(projection.to(device) for projection in projections),
         raw_gate.to(device),
-        beta.to(device),
+        raw_beta.to(device),
         actual_conv_state,
         actual_recurrent_state,
         *(weight.to(device) for weight in weights),
@@ -484,7 +485,7 @@ def test_kda_long_prefill_mixed_conv_cache_dtype():
     (
         projections,
         raw_gate,
-        beta,
+        raw_beta,
         weights,
         conv_state,
         recurrent_state,
@@ -513,7 +514,7 @@ def test_kda_long_prefill_mixed_conv_cache_dtype():
         reference_output,
         *projections,
         raw_gate,
-        beta,
+        raw_beta,
         reference_conv_state,
         reference_recurrent_state,
         *weights,
@@ -574,7 +575,7 @@ def test_kda_split_ops_compose_to_reference():
     (
         projections,
         raw_gate,
-        beta,
+        raw_beta,
         weights,
         conv_state,
         recurrent_state,
@@ -606,7 +607,7 @@ def test_kda_split_ops_compose_to_reference():
         reference_output,
         *(projection[:num_actual_tokens] for projection in projections),
         raw_gate[:, :num_actual_tokens],
-        beta[:, :num_actual_tokens],
+        raw_beta[:, :num_actual_tokens],
         reference_conv_state,
         reference_recurrent_state,
         *weights,
@@ -651,7 +652,7 @@ def test_kda_split_ops_compose_to_reference():
         actual_output,
         *actual_qkv,
         raw_gate.to(device),
-        beta.to(device),
+        raw_beta.to(device),
         actual_recurrent_state,
         a_log.to(device),
         dt_bias.to(device),
@@ -717,7 +718,7 @@ def test_kda_attention_spec_decode(mode, gate_lower_bound):
     (
         projections,
         raw_gate,
-        beta,
+        raw_beta,
         weights,
         conv_state,
         recurrent_state,
@@ -770,7 +771,7 @@ def test_kda_attention_spec_decode(mode, gate_lower_bound):
         reference_output,
         *(projection[:num_actual_tokens] for projection in projections),
         raw_gate[:, :num_actual_tokens],
-        beta[:, :num_actual_tokens],
+        raw_beta[:, :num_actual_tokens],
         reference_conv_state,
         reference_recurrent_state,
         *weights,
@@ -796,7 +797,7 @@ def test_kda_attention_spec_decode(mode, gate_lower_bound):
         actual_output,
         *(projection.to(device) for projection in projections),
         raw_gate.to(device),
-        beta.to(device),
+        raw_beta.to(device),
         actual_conv_state,
         actual_recurrent_state,
         *(weight.to(device) for weight in weights),

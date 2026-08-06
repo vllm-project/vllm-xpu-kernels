@@ -254,9 +254,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "num_accepted_tokens, int num_actual_tokens) -> Tensor[]");
   xpu_ops.impl("kda_causal_conv1d", torch::kXPU, &kda_causal_conv1d);
 
+  // `raw_gate` and `raw_beta` are both raw projection outputs; the kernels
+  // apply the gate activation and sigmoid(raw_beta) themselves.
   xpu_ops.def(
       "kda_gated_delta_rule(Tensor! core_attn_out, Tensor q, Tensor k, "
-      "Tensor v, Tensor raw_gate, Tensor beta, Tensor! recurrent_state, "
+      "Tensor v, Tensor raw_gate, Tensor raw_beta, Tensor! recurrent_state, "
       "Tensor A_log, Tensor dt_bias, int num_prefills, int num_decodes, int "
       "num_spec_decodes, Tensor? has_initial_state, Tensor? "
       "non_spec_query_start_loc, Tensor? non_spec_token_indx, Tensor? "
@@ -268,7 +270,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def(
       "kda_attention(Tensor! core_attn_out, Tensor q_proj, Tensor k_proj, "
-      "Tensor v_proj, Tensor raw_gate, Tensor beta, Tensor! conv_state, "
+      "Tensor v_proj, Tensor raw_gate, Tensor raw_beta, Tensor! conv_state, "
       "Tensor! recurrent_state, Tensor q_conv_weight, Tensor k_conv_weight, "
       "Tensor v_conv_weight, Tensor A_log, Tensor dt_bias, int num_prefills, "
       "int num_decodes, int num_spec_decodes, Tensor? has_initial_state, "
