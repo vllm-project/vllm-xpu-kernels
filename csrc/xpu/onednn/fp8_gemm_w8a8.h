@@ -38,7 +38,7 @@ static inline void dnnl_matmul_w8a8_fp8(
         m2_sc.size(0));
     TORCH_CHECK(
         k % m2_sc.size(0) == 0 && n % m2_sc.size(1) == 0,
-        "Batched weight block scale dims must divide [K, N], got K=",
+        "Weight block scale dims must divide [K, N], got K=",
         k,
         ", N=",
         n,
