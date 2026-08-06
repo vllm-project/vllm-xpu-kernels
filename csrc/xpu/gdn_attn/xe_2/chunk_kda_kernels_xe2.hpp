@@ -67,17 +67,18 @@ static constexpr int pad_slot_id = -1;
 // so the per-channel cumulative log-decay across one chunk must fit in the
 // float exponent range. exp(80) ~ 5.5e34 leaves headroom below the bf16/fp32
 // maximum of 3.4e38 (both have an 8-bit exponent, so fp32 operands would not
-// help). A channel that decays by more than e^-80 within 64 tokens forgets its
-// state ~35 times over inside a single chunk, which no trained model does; the
-// clamp is inert in practice and the dispatcher keeps the recurrent kernel
-// available as an exact fallback. Set `VLLM_XPU_KDA_CHUNK_STRICT=1` to have
-// the op raise instead of silently diverging when a workload does cross it.
+// help). The unbounded softplus gate of a trained model stays far below this,
+// but the bounded sigmoid gate decays by up to `lower_bound` per token, so at
+// `lower_bound = -5` an average gate activation above 0.25 already crosses it.
+// The dispatcher therefore guards the sigmoid gate: it synchronizes after
+// `prepare` and, if the clamp engaged, runs the recurrent kernel instead. Set
+// `VLLM_XPU_KDA_CHUNK_STRICT=1` to raise on that condition instead.
 static constexpr float g_floor = -80.0f;
 
-// Optional diagnostic: `prepare` raises this flag when the clamp above
-// actually engages, i.e. when the chunked result stops matching the sequential
-// recurrence. It is only allocated when the caller asks for the check, so the
-// nullptr test below is uniform across the launch and costs nothing otherwise.
+// `prepare` raises this flag when the clamp above actually engages, i.e. when
+// the remaining stages would stop matching the sequential recurrence. It is
+// only allocated when the caller asks for the check, so the nullptr test below
+// is uniform across the launch and costs nothing otherwise.
 CUTE_DEVICE void report_decay_saturation(int* saturated) {
   if (saturated == nullptr) {
     return;

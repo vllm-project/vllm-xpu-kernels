@@ -1,3 +1,5 @@
+#include <functional>
+
 #include <sycl/sycl.hpp>
 #include <torch/all.h>
 
@@ -50,7 +52,7 @@ int64_t chunk_kda_xe2_workspace_bytes(
   return wide + a_bytes + tl_bytes;
 }
 
-void chunk_kda_xe2(
+bool chunk_kda_xe2(
     sycl::queue& queue,
     torch::Tensor& core_attn_out,
     const torch::Tensor& q,
@@ -70,7 +72,8 @@ void chunk_kda_xe2(
     int64_t num_actual_tokens,
     int64_t num_heads,
     int64_t head_dim,
-    bool check_decay_range) {
+    bool guard_decay_range,
+    bool strict_decay_range) {
   TORCH_CHECK(
       chunk_kda_xe2_supported(head_dim),
       "chunk_kda_xe2 requires head_dim to be a positive multiple of ",
@@ -96,18 +99,29 @@ void chunk_kda_xe2(
       {num_heads, vt / kda_xe2::chunk_size, head_dim},
       torch::dtype(torch::kFloat32).device(device).requires_grad(false));
 
-  // Diagnostic only: when asked, give `prepare` somewhere to record that the
-  // per-chunk cumulative log-decay hit `kda_xe2::g_floor`, i.e. that this
-  // launch can no longer reproduce the sequential recurrence. Allocated only
-  // in that case, so the default path keeps its single-allocation profile and
-  // stays free of a host synchronization.
+  // When guarding, give `prepare` somewhere to record that the per-chunk
+  // cumulative log-decay hit `kda_xe2::g_floor`, i.e. that the remaining
+  // stages can no longer reproduce the sequential recurrence. The flag is
+  // allocated only in that case, so the unguarded path keeps its
+  // single-allocation profile and stays free of a host synchronization.
   torch::Tensor saturated;
   int* saturated_ptr = nullptr;
-  if (check_decay_range) {
+  std::function<bool()> abort_after_prepare;
+  const std::function<bool()>* abort_hook = nullptr;
+  if (guard_decay_range) {
     saturated = torch::zeros(
         {1}, torch::dtype(torch::kInt32).device(device).requires_grad(false));
     saturated_ptr = reinterpret_cast<int*>(saturated.data_ptr());
+    // `item()` synchronizes, which is exactly the point: stage 1 has run and
+    // only scratch has been written, so this is the last moment at which the
+    // launch can be abandoned without having to undo anything.
+    abort_after_prepare = [&saturated]() {
+      return saturated.item<int32_t>() != 0;
+    };
+    abort_hook = &abort_after_prepare;
   }
+
+  bool completed = true;
 
   const int* token_indx_ptr =
       token_indx.has_value()
@@ -122,7 +136,7 @@ void chunk_kda_xe2(
   do {                                                            \
     auto* base = reinterpret_cast<scalar_t*>(wide.data_ptr());    \
     const int64_t plane = num_heads * vt * head_dim;              \
-    kda_xe2::chunk_kda_launcher<scalar_t, state_t>(               \
+    completed = kda_xe2::chunk_kda_launcher<scalar_t, state_t>(   \
         queue,                                                    \
         reinterpret_cast<scalar_t*>(core_attn_out.data_ptr()),    \
         reinterpret_cast<const scalar_t*>(q.data_ptr()),          \
@@ -151,7 +165,8 @@ void chunk_kda_xe2(
         static_cast<int>(batch_size),                             \
         static_cast<int>(vt),                                     \
         static_cast<int>(num_heads),                              \
-        static_cast<int>(head_dim));                              \
+        static_cast<int>(head_dim),                               \
+        abort_hook);                                              \
   } while (0)
 
 #define KDA_CHUNK_DISPATCH_STATE(scalar_t)                                \
@@ -181,17 +196,17 @@ void chunk_kda_xe2(
 #undef KDA_CHUNK_DISPATCH_STATE
 #undef KDA_CHUNK_LAUNCH
 
-  if (check_decay_range) {
-    TORCH_CHECK(
-        saturated.item<int32_t>() == 0,
-        "KDA chunked prefill: the per-chunk cumulative log-decay saturated the "
-        "clamp at ",
-        kda_xe2::g_floor,
-        ", so this result does not match the sequential recurrence. The "
-        "chunked pipeline folds exp(G) and exp(-G) into its GEMM operands, "
-        "which bounds how much a key channel may decay within one chunk of ",
-        kda_xe2::chunk_size,
-        " tokens. Select the recurrent backend "
-        "(VLLM_XPU_KDA_RECURRENT_MODE=opt) for this workload.");
-  }
+  TORCH_CHECK(
+      completed || !strict_decay_range,
+      "KDA chunked prefill: the per-chunk cumulative log-decay saturated the "
+      "clamp at ",
+      kda_xe2::g_floor,
+      ", so this result does not match the sequential recurrence. The "
+      "chunked pipeline folds exp(G) and exp(-G) into its GEMM operands, "
+      "which bounds how much a key channel may decay within one chunk of ",
+      kda_xe2::chunk_size,
+      " tokens. Select the recurrent backend "
+      "(VLLM_XPU_KDA_RECURRENT_MODE=opt) for this workload.");
+
+  return completed;
 }

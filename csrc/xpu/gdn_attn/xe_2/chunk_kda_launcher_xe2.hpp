@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <functional>
 #include <type_traits>
 
 #include <sycl/sycl.hpp>
@@ -25,8 +26,12 @@ class ChunkKdaComputeWUKernel;
 template <typename T, typename StateT>
 class ChunkKdaFwdOKernel;
 
+// Returns false when `abort_after_prepare` reports that stage 1 produced a
+// cumulative log-decay the later stages cannot represent. In that case only the
+// scratch buffers have been written, so the caller is free to fall back to the
+// recurrent backend with the inputs and the state cache untouched.
 template <typename T, typename StateT>
-void chunk_kda_launcher(
+bool chunk_kda_launcher(
     sycl::queue& queue,
     T* core_attn_out,
     const T* q,
@@ -55,7 +60,8 @@ void chunk_kda_launcher(
     const int batch_size,
     const int total_virtual_seqlen,
     const int num_heads,
-    const int head_dim) {
+    const int head_dim,
+    const std::function<bool()>* abort_after_prepare = nullptr) {
   using Element_non_CV = cutlass::platform::remove_cv_t<T>;
   auto op = XE_DPAS_TT<8, float, Element_non_CV>{};
 
@@ -170,6 +176,10 @@ void chunk_kda_launcher(
                 head_dim);
           });
     });
+  }
+
+  if (abort_after_prepare != nullptr && (*abort_after_prepare)()) {
+    return false;
   }
 
   // --- stage 2: A = I + tril_strict(Ka @ Kb^T) ------------------------------
@@ -318,6 +328,8 @@ void chunk_kda_launcher(
           });
     });
   }
+
+  return true;
 }
 
 }  // namespace kda_xe2

@@ -79,12 +79,24 @@ int64_t kda_chunk_max_workspace_bytes() {
 }
 
 // The chunked pipeline folds exp(G) and exp(-G) into its GEMM operands, so it
-// clamps the per-chunk cumulative log-decay to keep both representable. The
-// clamp is inert for trained models but silently diverges from the sequential
-// recurrence beyond it, so offer an opt-in check that turns that divergence
-// into an error. It costs a host synchronization per chunked call, hence off
-// by default.
-bool kda_chunk_check_decay_range() {
+// clamps the per-chunk cumulative log-decay to keep both representable. Beyond
+// the clamp its result silently stops matching the sequential recurrence.
+//
+// How close a gate gets to that clamp depends on its parameterisation. The
+// softplus gate decays by -exp(A_log) * softplus(x) per token, which for a
+// trained model stays far away from `g_floor / chunk_size`. The bounded
+// sigmoid gate instead decays by up to `lower_bound` per token, so at
+// `lower_bound = -5` and 64-token chunks it only takes an average gate
+// activation above 0.25 to saturate. That case is therefore guarded by
+// default: the pipeline synchronizes after its first stage and, when the clamp
+// engaged, hands the batch to the recurrent backend instead.
+bool kda_chunk_guard_decay_range(float lower_bound) {
+  return kda_gate::use_lower_bound(lower_bound);
+}
+
+// Turn the same condition into an error rather than a silent fallback, so a
+// test or a bring-up run can see that the chunked path was declined.
+bool kda_chunk_strict_decay_range() {
   static const bool value = parse_env_int("VLLM_XPU_KDA_CHUNK_STRICT", 0) != 0;
   return value;
 }
@@ -924,7 +936,7 @@ void launch_kda_recurrent(
     const bool forced = kda_recurrent_backend() == KdaRecurrentBackend::Chunk;
     if ((forced || avg_seqlen >= kda_chunk_min_seqlen()) &&
         workspace <= kda_chunk_max_workspace_bytes()) {
-      chunk_kda_xe2(
+      non_spec_done = chunk_kda_xe2(
           queue,
           core_attn_out,
           q,
@@ -944,8 +956,9 @@ void launch_kda_recurrent(
           num_non_spec_tokens,
           num_heads,
           head_dim,
-          kda_chunk_check_decay_range());
-      non_spec_done = true;
+          kda_chunk_guard_decay_range(lower_bound) ||
+              kda_chunk_strict_decay_range(),
+          kda_chunk_strict_decay_range());
     }
   }
 #endif

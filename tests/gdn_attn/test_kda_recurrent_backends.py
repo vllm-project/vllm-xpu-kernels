@@ -37,6 +37,12 @@ CASES = {
     "prefill_b1_s256_d128_lb": (1, 256, 128, "bfloat16", "float32"),
     "prefill_b3_s333_d128_lb": (3, 333, 128, "bfloat16", "float32"),
     "decode_b8_d128_lb": (8, 1, 128, "bfloat16", "float32"),
+    # `_lbsat` drops the retention shift, so the sigmoid gate decays fast
+    # enough to saturate the chunked pipeline's clamp. The chunk backend has to
+    # notice and hand the batch to the recurrent one rather than return the
+    # diverged result.
+    "prefill_b1_s256_d128_lbsat": (1, 256, 128, "bfloat16", "float32"),
+    "prefill_b2_s192_d64_lbsat": (2, 192, 64, "bfloat16", "float32"),
 }
 
 GATE_LOWER_BOUND = -5.0
@@ -48,7 +54,7 @@ GATE_LOWER_BOUND = -5.0
 GATE_LOWER_BOUND_LOGIT_SHIFT = -1.9
 
 
-def _build(case, seed=0, permute=False, lower_bound=None):
+def _build(case, seed=0, permute=False, lower_bound=None, shift_gate=True):
     batch, seqlen, head_dim, dtype_str, state_dtype_str = case
     dtype = getattr(torch, dtype_str)
     state_dtype = getattr(torch, state_dtype_str)
@@ -82,7 +88,8 @@ def _build(case, seed=0, permute=False, lower_bound=None):
                       scale=0.05).to(state_dtype),
         "a_log": rand(1, 1, NUM_HEADS, 1, scale=0.1),
         "dt_bias": (rand(hidden, scale=0.1) + (
-            0.0 if lower_bound is None else GATE_LOWER_BOUND_LOGIT_SHIFT)),
+            GATE_LOWER_BOUND_LOGIT_SHIFT
+            if lower_bound is not None and shift_gate else 0.0)),
         "out": torch.zeros(1, num_tokens, NUM_HEADS, head_dim,
                            device=DEVICE, dtype=dtype),
         "qsl": torch.arange(0, num_tokens + 1, seqlen,
@@ -138,8 +145,9 @@ def _worker(out_path):
                 case,
                 seed=i,
                 permute=name.endswith("_perm"),
-                lower_bound=(GATE_LOWER_BOUND
-                             if name.endswith("_lb") else None),
+                lower_bound=(GATE_LOWER_BOUND if name.endswith(
+                    ("_lb", "_lbsat")) else None),
+                shift_gate=not name.endswith("_lbsat"),
             ))
     torch.save(results, out_path)
 
@@ -259,9 +267,10 @@ def test_chunk_strict_accepts_the_trained_gate_regime(tmp_path):
 
 @pytest.mark.skipif(not torch.xpu.is_available(), reason="requires XPU")
 def test_chunk_strict_rejects_saturating_decay(tmp_path):
-    """Past the clamp the chunked result stops matching the recurrence. That
-    used to be silent; with the strict check it has to be an error naming the
-    fallback."""
+    """Past the clamp the chunked result stops matching the recurrence. The
+    default configuration falls back to the recurrent backend, which the
+    `_lbsat` cases above cover; the strict switch turns the same condition into
+    an error naming that fallback instead."""
     raised = _run_strict(tmp_path, 1.5)
     assert raised is not None, "saturating decay was accepted"
     assert "cumulative log-decay saturated" in raised
