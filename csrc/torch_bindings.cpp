@@ -191,8 +191,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("swigluoai_and_mul", torch::kXPU, &swigluoai_and_mul);
 
   // relu2_no_mul
-  ops.def("relu2_no_mul(Tensor! out, Tensor! input) -> ()");
+  ops.def("relu2_no_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("relu2_no_mul", torch::kXPU, &relu2_no_mul);
+
+  // Squared ReLU implementation.
+  ops.def("relu2(Tensor! out, Tensor input) -> ()");
+  ops.impl("relu2", torch::kXPU, &relu2_no_mul);
 
   // swiglustep_and_mul
   ops.def(
