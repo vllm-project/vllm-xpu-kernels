@@ -242,6 +242,10 @@ struct ConvShape {
   int64_t width;
   int64_t dim_stride;
   int64_t time_stride;
+  // Row stride shared by q/k/v. It is `hidden_dim` for standalone projections
+  // and `3 * hidden_dim` when the three tensors are slices of one fused
+  // mixed-QKV buffer.
+  int64_t qkv_row_stride;
 };
 
 ConvShape validate_conv_inputs(
@@ -264,9 +268,12 @@ ConvShape validate_conv_inputs(
       q_proj.size(0) >= num_actual_tokens,
       "projection leading dimensions must be >= num_actual_tokens");
   TORCH_CHECK(
-      q_proj.is_contiguous() && k_proj.is_contiguous() &&
-          v_proj.is_contiguous(),
-      "KDA projections must be contiguous");
+      q_proj.stride(1) == 1 && k_proj.stride(1) == 1 && v_proj.stride(1) == 1,
+      "KDA projections must be contiguous along the channel dimension");
+  TORCH_CHECK(
+      k_proj.stride(0) == q_proj.stride(0) &&
+          v_proj.stride(0) == q_proj.stride(0),
+      "KDA projections must share the same row stride");
   TORCH_CHECK(
       q_proj.scalar_type() == k_proj.scalar_type() &&
           q_proj.scalar_type() == v_proj.scalar_type(),
@@ -281,6 +288,10 @@ ConvShape validate_conv_inputs(
 
   const int64_t hidden_dim = q_proj.size(1);
   TORCH_CHECK(hidden_dim > 0, "projection hidden dimension must be positive");
+  const int64_t qkv_row_stride = q_proj.stride(0);
+  TORCH_CHECK(
+      qkv_row_stride >= hidden_dim,
+      "KDA projection row stride must be >= the hidden dimension");
   TORCH_CHECK(
       hidden_dim <= std::numeric_limits<int>::max() / 3,
       "projection hidden dimension exceeds the KDA kernel limit");
@@ -328,7 +339,7 @@ ConvShape validate_conv_inputs(
     dim_stride = conv_state.stride(2);
     time_stride = conv_state.stride(1);
   }
-  return {hidden_dim, width, dim_stride, time_stride};
+  return {hidden_dim, width, dim_stride, time_stride, qkv_row_stride};
 }
 
 struct RecurrentShape {
@@ -453,7 +464,8 @@ void launch_kda_conv(
     int hidden_dim,
     int width,
     int64_t conv_state_dim_stride,
-    int64_t conv_state_time_stride) {
+    int64_t conv_state_time_stride,
+    int64_t qkv_row_stride) {
 #define LAUNCH_CONV(                                            \
     WIDTH,                                                      \
     IS_SPEC,                                                    \
@@ -486,7 +498,8 @@ void launch_kda_conv(
       HAS_INITIAL,                                              \
       ACCEPTED,                                                 \
       BATCH_SIZE,                                               \
-      hidden_dim)
+      hidden_dim,                                               \
+      qkv_row_stride)
 
 #define WIDTH_DISPATCH(                                        \
     IS_SPEC,                                                   \
@@ -576,7 +589,8 @@ void launch_kda_conv(
           : nullptr,                                                      \
       BATCH_SIZE,                                                         \
       NUM_TOKENS,                                                         \
-      hidden_dim)
+      hidden_dim,                                                         \
+      qkv_row_stride)
 
 #define TILED_WIDTH_DISPATCH(BATCH_SIZE, NUM_TOKENS)           \
   switch (width) {                                             \
@@ -1166,7 +1180,8 @@ std::vector<torch::Tensor> kda_causal_conv1d(
           shape.hidden_dim,
           shape.width,
           shape.dim_stride,
-          shape.time_stride);
+          shape.time_stride,
+          shape.qkv_row_stride);
     });
   });
   return {q, k, v};

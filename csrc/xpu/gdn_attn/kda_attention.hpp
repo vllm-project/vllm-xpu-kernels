@@ -43,7 +43,8 @@ struct causal_conv1d_kernel {
       const bool* has_initial_state,
       const int* num_accepted_tokens,
       int batch_size,
-      int hidden_dim)
+      int hidden_dim,
+      int64_t qkv_row_stride)
       : q(q),
         k(k),
         v(v),
@@ -64,7 +65,8 @@ struct causal_conv1d_kernel {
         has_initial_state(has_initial_state),
         num_accepted_tokens(num_accepted_tokens),
         batch_size(batch_size),
-        hidden_dim(hidden_dim) {}
+        hidden_dim(hidden_dim),
+        qkv_row_stride(qkv_row_stride) {}
 
   static sycl::nd_range<2> get_nd_range(int batch_size, int hidden_dim) {
     const int combined_dim = 3 * hidden_dim;
@@ -128,7 +130,7 @@ struct causal_conv1d_kernel {
       const int global_token =
           token_indx == nullptr ? local_token : token_indx[local_token];
       const CacheT current = static_cast<CacheT>(
-          input[static_cast<int64_t>(global_token) * hidden_dim + channel]);
+          input[static_cast<int64_t>(global_token) * qkv_row_stride + channel]);
 
       float acc = static_cast<float>(current) *
                   weight[static_cast<int64_t>(channel) * Width + Width - 1];
@@ -196,6 +198,10 @@ struct causal_conv1d_kernel {
   const int* num_accepted_tokens;
   int batch_size;
   int hidden_dim;
+  // Distance between consecutive tokens in q/k/v. Equals `hidden_dim` for
+  // standalone projections and `3 * hidden_dim` when they are views into a
+  // single fused mixed-QKV buffer.
+  int64_t qkv_row_stride;
 };
 
 template <typename T, typename CacheT, int Width, bool IsSpec>
@@ -221,7 +227,8 @@ void launch_causal_conv1d(
     const bool* has_initial_state,
     const int* num_accepted_tokens,
     int batch_size,
-    int hidden_dim) {
+    int hidden_dim,
+    int64_t qkv_row_stride) {
   using Kernel = causal_conv1d_kernel<T, CacheT, Width, IsSpec>;
   const auto range = Kernel::get_nd_range(batch_size, hidden_dim);
   queue.submit([&](sycl::handler& cgh) {
@@ -246,7 +253,8 @@ void launch_causal_conv1d(
         has_initial_state,
         num_accepted_tokens,
         batch_size,
-        hidden_dim);
+        hidden_dim,
+        qkv_row_stride);
     cgh.parallel_for(range, task);
   });
 }
@@ -285,6 +293,7 @@ struct causal_conv1d_tiled_kernel {
       const bool* has_initial_state,
       int batch_size,
       int hidden_dim,
+      int64_t qkv_row_stride,
       T* slm_input)
       : q(q),
         k(k),
@@ -305,6 +314,7 @@ struct causal_conv1d_tiled_kernel {
         has_initial_state(has_initial_state),
         batch_size(batch_size),
         hidden_dim(hidden_dim),
+        qkv_row_stride(qkv_row_stride),
         slm_input(slm_input) {}
 
   static sycl::nd_range<2> get_nd_range(int num_tiles, int hidden_dim) {
@@ -405,7 +415,7 @@ struct causal_conv1d_tiled_kernel {
                 stream == 0 ? q_proj : (stream == 1 ? k_proj : v_proj);
             value = static_cast<T>(
                 input
-                    [static_cast<int64_t>(global_token) * hidden_dim +
+                    [static_cast<int64_t>(global_token) * qkv_row_stride +
                      channel]);
           }
         }
@@ -485,6 +495,10 @@ struct causal_conv1d_tiled_kernel {
   const bool* has_initial_state;
   int batch_size;
   int hidden_dim;
+  // Distance between consecutive tokens in q/k/v. Equals `hidden_dim` for
+  // standalone projections and `3 * hidden_dim` when they are views into a
+  // single fused mixed-QKV buffer.
+  int64_t qkv_row_stride;
   T* slm_input;
 };
 
@@ -503,7 +517,8 @@ struct causal_conv1d_update_state_kernel {
       const int* state_indices,
       const bool* has_initial_state,
       int batch_size,
-      int hidden_dim)
+      int hidden_dim,
+      int64_t qkv_row_stride)
       : q_proj(q_proj),
         k_proj(k_proj),
         v_proj(v_proj),
@@ -516,7 +531,8 @@ struct causal_conv1d_update_state_kernel {
         state_indices(state_indices),
         has_initial_state(has_initial_state),
         batch_size(batch_size),
-        hidden_dim(hidden_dim) {}
+        hidden_dim(hidden_dim),
+        qkv_row_stride(qkv_row_stride) {}
 
   static sycl::nd_range<2> get_nd_range(int batch_size, int hidden_dim) {
     const int combined_dim = 3 * hidden_dim;
@@ -555,7 +571,9 @@ struct causal_conv1d_update_state_kernel {
         const int global_token =
             token_indx == nullptr ? local_token : token_indx[local_token];
         value = static_cast<CacheT>(
-            input[static_cast<int64_t>(global_token) * hidden_dim + channel]);
+            input
+                [static_cast<int64_t>(global_token) * qkv_row_stride +
+                 channel]);
       } else if (load_initial_state) {
         value = conv_state
             [static_cast<int64_t>(state_id) * conv_state_stride_0 +
@@ -584,6 +602,10 @@ struct causal_conv1d_update_state_kernel {
   const bool* has_initial_state;
   int batch_size;
   int hidden_dim;
+  // Distance between consecutive tokens in q/k/v. Equals `hidden_dim` for
+  // standalone projections and `3 * hidden_dim` when they are views into a
+  // single fused mixed-QKV buffer.
+  int64_t qkv_row_stride;
 };
 
 template <typename T, typename CacheT, int Width>
@@ -608,7 +630,8 @@ void launch_causal_conv1d_tiled(
     const bool* has_initial_state,
     int batch_size,
     int num_tokens,
-    int hidden_dim) {
+    int hidden_dim,
+    int64_t qkv_row_stride) {
   constexpr int TileT = conv1d_tile_size;
   using TiledKernel = causal_conv1d_tiled_kernel<T, CacheT, Width, TileT>;
   const int num_tiles = ceil_div(num_tokens, TileT) + batch_size;
@@ -643,6 +666,7 @@ void launch_causal_conv1d_tiled(
           has_initial_state,
           batch_size,
           hidden_dim,
+          qkv_row_stride,
           slm_ptr);
       task(item);
     });
@@ -664,7 +688,8 @@ void launch_causal_conv1d_tiled(
         state_indices,
         has_initial_state,
         batch_size,
-        hidden_dim);
+        hidden_dim,
+        qkv_row_stride);
     cgh.parallel_for(update_range, task);
   });
 }
