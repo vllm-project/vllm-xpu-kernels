@@ -1,7 +1,10 @@
 #include <sycl/sycl.hpp>
 #include <torch/all.h>
 
-void chunk_kda_xe2(
+// Returns false when the launch was abandoned because the chunk decay range
+// was exceeded; the caller must then run the recurrent backend. Always true
+// when `guard_decay_range` is false.
+bool chunk_kda_xe2(
     sycl::queue& queue,
     torch::Tensor& core_attn_out,    // [1, num_tokens, heads, dim]
     const torch::Tensor& q,          // [num_tokens, heads * dim]
@@ -22,10 +25,16 @@ void chunk_kda_xe2(
     int64_t num_actual_tokens,
     int64_t num_heads,
     int64_t head_dim,
-    // Opt-in diagnostic: synchronizes and raises if the chunk decay clamp
-    // engaged, instead of silently returning a result the recurrent kernel
-    // would not reproduce.
-    bool check_decay_range);
+    // When set, the pipeline synchronizes after its first stage and, if the
+    // per-chunk cumulative log-decay hit the clamp, abandons the launch
+    // without touching `core_attn_out` or `recurrent_state`. Callers should
+    // then run the recurrent backend, which has no such range limit. Costs one
+    // device synchronization per call, so it is enabled only for the bounded
+    // sigmoid gate, whose per-token decay can plausibly reach the clamp.
+    bool guard_decay_range,
+    // Raise instead of reporting the saturation back to the caller. Used by
+    // VLLM_XPU_KDA_CHUNK_STRICT=1 to make the condition visible in tests.
+    bool strict_decay_range);
 
 // True when the chunked pipeline supports this shape at all.
 bool chunk_kda_xe2_supported(int64_t head_dim);
