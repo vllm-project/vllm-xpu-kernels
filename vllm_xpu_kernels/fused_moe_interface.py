@@ -120,6 +120,13 @@ def fused_moe_activation(act_output, gemm1_output, activation):
         torch.ops._C.relu2_no_mul(act_output, gemm1_output)
     elif activation == "swiglustep":
         torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
+    elif activation == "situ":
+        torch.ops._C.situ_and_mul(
+            act_output,
+            gemm1_output,
+            4.0,
+            25.0,
+        )
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
@@ -169,6 +176,8 @@ class XpuFusedMoe:
         ep_size=1,
         expert_map=None,
         gemm1_clamp_limit: Optional[float]=None,
+        activation_situ_beta: Optional[float]=None,
+        activation_situ_linear_beta: Optional[float]=None,
     ):
         assert w13.is_contiguous() and w2.is_contiguous()
 
@@ -217,6 +226,18 @@ class XpuFusedMoe:
 
         self.n_experts_per_token = n_experts_per_token
         self.activation = activation
+        self.activation_situ_beta = activation_situ_beta
+        self.activation_situ_linear_beta = activation_situ_linear_beta
+        if self.activation == "situ":
+            import math
+
+            if self.activation_situ_beta is None:
+                raise ValueError("SITU requires activation_situ_beta")
+            if not math.isfinite(self.activation_situ_beta):
+                raise ValueError(
+                    "SITU activation_situ_beta must be finite")
+            if self.activation_situ_beta <= 0:
+                raise ValueError("SITU activation_situ_beta must be positive")
         self.inter_size_scale = 2 if self.activation == "relu2_no_mul" else 1
         self.num_experts = num_experts
         self.ep_rank = ep_rank
@@ -243,6 +264,8 @@ class XpuFusedMoe:
             self.act_func = torch.ops._C.relu2_no_mul
         elif self.activation == "swiglustep":
             self.act_func = torch.ops._C.swiglustep_and_mul
+        elif self.activation == "situ":
+            self.act_func = torch.ops._C.situ_and_mul
         else:
             raise ValueError(
                 f"Unsupported FusedMoe activation: {self.activation}.")
@@ -385,7 +408,17 @@ class XpuFusedMoe:
             (num_moe_inputs, self.inter_size * self.inter_size_scale),
             dtype=gemm1_output.dtype,
             device=gemm1_output.device)
-        self.act_func(act_output, gemm1_output)
+        if self.activation == "situ":
+            self.act_func(
+                act_output,
+                gemm1_output,
+                self.activation_situ_beta,
+                -1.0
+                if self.activation_situ_linear_beta is None
+                else self.activation_situ_linear_beta,
+            )
+        else:
+            self.act_func(act_output, gemm1_output)
 
         ########### gemm2 ##################
         gemm2_output = torch.empty((num_moe_inputs, hidden_size),

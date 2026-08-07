@@ -229,6 +229,13 @@ def ref_fused_moe_activation(act_output, gemm1_output, activation):
         torch.ops._C.relu2_no_mul(act_output, gemm1_output)
     elif activation == "swiglustep":
         torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
+    elif activation == "situ":
+        torch.ops._C.situ_and_mul(
+            act_output,
+            gemm1_output,
+            4.0,
+            25.0,
+        )
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 

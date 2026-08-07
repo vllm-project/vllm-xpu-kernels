@@ -103,6 +103,22 @@ def ref_fused_moe(x,
                   ep_rank=0,
                   ep_size=1,
                   gemm1_clamp_limit=None):
+    if activation == "silu":
+        act_fn = torch.nn.SiLU()
+        linear_fn = lambda up: up
+    elif activation == "situ":
+
+        def situ(gate):
+            return 4.0 * torch.tanh(gate / 4.0) * torch.sigmoid(gate)
+
+        def situ_linear(up):
+            return 25.0 * torch.tanh(up / 25.0)
+
+        act_fn = situ
+        linear_fn = situ_linear
+    else:
+        raise ValueError(f"Unsupported reference activation: {activation}")
+
     expert_start_id = num_experts * ep_rank
     expert_end_id = expert_start_id + num_experts
     expert_cache = torch.zeros_like(x)
@@ -125,7 +141,6 @@ def ref_fused_moe(x,
                              dim=0)
         if w13_bias is not None:
             w1_bias, w3_bias = w13_bias[expert_id, :].chunk(2)
-        act_fn = torch.nn.SiLU()
         gemm1 = (expert_tokens.to(torch.float32) @ w1.T.to(torch.float32))
         if w13_bias is not None:
             gemm1 += w1_bias.to(torch.float32)
@@ -136,6 +151,7 @@ def ref_fused_moe(x,
             gemm1.clamp_(max=gemm1_clamp_limit)
             up.clamp_(min=-gemm1_clamp_limit, max=gemm1_clamp_limit)
         gate = act_fn(gemm1)
+        up = linear_fn(up)
         expert_out = ((gate * up) @ w2[expert_id, :, :].T.to(torch.float32))
         if w2_bias is not None:
             expert_out += w2_bias[expert_id, :].to(torch.float32)
@@ -159,7 +175,8 @@ def ref_fused_moe(x,
                          [torch.float8_e5m2, torch.float8_e4m3fn, None],
                          ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
-def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
+@pytest.mark.parametrize("activation", ["silu", "situ"])
+def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation):
     seed_everything(7)
 
     input_len = m
@@ -232,9 +249,18 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
         ref_w13 = w13
         ref_w2 = w2
 
-    ref_out = ref_fused_moe(ref_a, ref_w13, w13_bias, ref_w2, w2_bias,
-                            flat_expert_weights, flat_expert_indices, topk,
-                            "silu", e)
+    ref_out = ref_fused_moe(
+        ref_a,
+        ref_w13,
+        w13_bias,
+        ref_w2,
+        w2_bias,
+        flat_expert_weights,
+        flat_expert_indices,
+        topk,
+        activation,
+        e,
+    )
 
     w13.data = w13.transpose(-1, -2).contiguous()
     w2.data = w2.transpose(-1, -2).contiguous()
@@ -247,8 +273,11 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias):
                 w2_scales=w2_scales,
                 w2_bias=w2_bias,
                 n_experts_per_token=topk,
-                activation="silu",
+                activation=activation,
                 num_experts=e,
+                activation_situ_beta=4.0 if activation == "situ" else None,
+                activation_situ_linear_beta=(
+                    25.0 if activation == "situ" else None),
             )
 
     output = torch.empty_like(ref_out)
@@ -389,7 +418,8 @@ def test_fused_moe_int4(m, n, k, e, topk, dtype, has_bias):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
                          ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
-def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
+@pytest.mark.parametrize("activation", ["silu", "situ"])
+def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias, activation):
     seed_everything(7)
 
     torch.xpu.empty_cache()
@@ -461,9 +491,18 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
         ref_13[i] = dequantize_mxfp4(w13[i], w13_scales[i], group_size, dtype)
         ref_2[i] = dequantize_mxfp4(w2[i], w2_scales[i], group_size, dtype)
 
-    ref_out = ref_fused_moe(ref_a, ref_13, w13_bias, ref_2, w2_bias,
-                            flat_expert_weights, flat_expert_indices, topk,
-                            "silu", e)
+    ref_out = ref_fused_moe(
+        ref_a,
+        ref_13,
+        w13_bias,
+        ref_2,
+        w2_bias,
+        flat_expert_weights,
+        flat_expert_indices,
+        topk,
+        activation,
+        e,
+    )
 
     fused_moe_impl = XpuFusedMoe(
                 w13=w13.view(torch.float4_e2m1fn_x2),
@@ -473,8 +512,11 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
                 w2_scales=w2_scales,
                 w2_bias=w2_bias,
                 n_experts_per_token=topk,
-                activation="silu",
+                activation=activation,
                 num_experts=e,
+                activation_situ_beta=4.0 if activation == "situ" else None,
+                activation_situ_linear_beta=(
+                    25.0 if activation == "situ" else None),
             )
 
     output = torch.empty_like(ref_out)
