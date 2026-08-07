@@ -494,6 +494,19 @@ def test_fused_moe_mxfp4(m, n, k, e, topk, dtype, has_bias):
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
 
 
+@pytest.mark.parametrize("num_tokens", [1, 4, 16])
+def test_fused_moe_mxfp4_topk16(num_tokens):
+    test_fused_moe_mxfp4(
+        num_tokens,
+        256,
+        256,
+        32,
+        16,
+        torch.bfloat16,
+        False,
+    )
+
+
 FUSED_MOE_MNK_FACTORS = [
     (1, 1024, 1024),
     (4, 1024, 1024),
