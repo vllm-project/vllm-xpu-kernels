@@ -216,11 +216,7 @@ def dequant_wei(wei, wei_scale, recipe):
         return wei
 
 
-def ref_fused_moe_activation(
-    act_output,
-    gemm1_output,
-    activation,
-):
+def ref_fused_moe_activation(act_output, gemm1_output, activation):
     if activation == "silu":
         torch.ops._C.silu_and_mul(act_output, gemm1_output)
     elif activation == "gelu":
@@ -379,11 +375,7 @@ def ref_fused_moe(recipe,
         (num_moe_inputs, inter_size * inter_size_scale),
         dtype=compute_dtype,
         device=hidden_states.device)
-    ref_fused_moe_activation(
-        act_output,
-        gemm1_output,
-        activation,
-    )
+    ref_fused_moe_activation(act_output, gemm1_output, activation)
 
     # ---- GEMM2: cutlass grouped GEMM replaced by torch matmul ----
     gemm2_output = torch.zeros((num_moe_inputs, hidden_size),
