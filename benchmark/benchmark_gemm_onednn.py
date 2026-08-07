@@ -39,6 +39,7 @@ ALL_BENCHMARKS = [
 ]
 
 DEVICE = "xpu"
+WARMUP = 50
 
 
 def clear_xpu_cache():
@@ -528,21 +529,21 @@ def get_bf16_gemm_benchmark(configs, iterations):
     )
     def benchmark(m, n, k, dtype, provider, iterations=iterations):
 
-        assert iterations > 5
+        assert iterations > WARMUP
 
         input = torch.randn([m, k], dtype=dtype, device=DEVICE) / 10.0
         weight = torch.randn([n, k], dtype=dtype, device=DEVICE) / 10.0
 
         start_event = torch.xpu.Event(enable_timing=True)
         end_event = torch.xpu.Event(enable_timing=True)
-        for index in range(5):
+        for index in range(WARMUP):
             torch.nn.functional.linear(input, weight)
         start_event.record()
-        for index in range(iterations - 5):
+        for index in range(iterations - WARMUP):
             torch.nn.functional.linear(input, weight)
         end_event.record()
         torch.xpu.synchronize()
-        ms = start_event.elapsed_time(end_event) / (iterations - 5)
+        ms = start_event.elapsed_time(end_event) / (iterations - WARMUP)
         clear_xpu_cache()
 
         if provider == "tflops":
@@ -581,7 +582,7 @@ def get_fp8_gemm_benchmark(configs, iterations):
         m, n, k, out_dtype, fp8_dtype, provider, iterations=iterations
     ):
 
-        assert iterations > 5
+        assert iterations > WARMUP
 
         input = torch.randn([m, k], dtype=out_dtype, device=DEVICE) / 10.0
         weight = torch.randn([n, k], dtype=out_dtype, device=DEVICE) / 10.0
@@ -595,7 +596,7 @@ def get_fp8_gemm_benchmark(configs, iterations):
 
         start_event = torch.xpu.Event(enable_timing=True)
         end_event = torch.xpu.Event(enable_timing=True)
-        for index in range(5):
+        for index in range(WARMUP):
             fp8_gemm(
                 input_fp8,
                 weight_fp8_t,
@@ -604,7 +605,7 @@ def get_fp8_gemm_benchmark(configs, iterations):
                 scale_wei,
             )
         start_event.record()
-        for index in range(iterations - 5):
+        for index in range(iterations - WARMUP):
             fp8_gemm(
                 input_fp8,
                 weight_fp8_t,
@@ -614,7 +615,7 @@ def get_fp8_gemm_benchmark(configs, iterations):
             )
         end_event.record()
         torch.xpu.synchronize()
-        ms = start_event.elapsed_time(end_event) / (iterations - 5)
+        ms = start_event.elapsed_time(end_event) / (iterations - WARMUP)
         clear_xpu_cache()
 
         if provider == "tflops":
@@ -653,7 +654,7 @@ def get_fp8_gemm_w8a16_benchmark(configs, iterations):
         m, n, k, out_dtype, fp8_dtype, provider, iterations=iterations
     ):
 
-        assert iterations > 5
+        assert iterations > WARMUP
 
         input = torch.randn([m, k], dtype=out_dtype, device=DEVICE) / 10.0
         weight = torch.ones([n, k], dtype=out_dtype, device=DEVICE)
@@ -666,14 +667,14 @@ def get_fp8_gemm_w8a16_benchmark(configs, iterations):
 
         start_event = torch.xpu.Event(enable_timing=True)
         end_event = torch.xpu.Event(enable_timing=True)
-        for index in range(5):
+        for index in range(WARMUP):
             fp8_gemm_w8a16(input, weight_fp8_t, scale_wei, torch.Tensor())
         start_event.record()
-        for index in range(iterations - 5):
+        for index in range(iterations - WARMUP):
             fp8_gemm_w8a16(input, weight_fp8_t, scale_wei, torch.Tensor())
         end_event.record()
         torch.xpu.synchronize()
-        ms = start_event.elapsed_time(end_event) / (iterations - 5)
+        ms = start_event.elapsed_time(end_event) / (iterations - WARMUP)
         clear_xpu_cache()
 
         if provider == "tflops":
@@ -712,7 +713,7 @@ def get_fp8_gemm_per_channel_benchmark(configs, iterations):
         m, n, k, out_dtype, fp8_dtype, provider, iterations=iterations
     ):
 
-        assert iterations > 5
+        assert iterations > WARMUP
 
         input = torch.randn([m, k], dtype=out_dtype, device=DEVICE) / 10.0
         weight = torch.randn([n, k], dtype=out_dtype, device=DEVICE) / 10.0
@@ -727,7 +728,7 @@ def get_fp8_gemm_per_channel_benchmark(configs, iterations):
 
         start_event = torch.xpu.Event(enable_timing=True)
         end_event = torch.xpu.Event(enable_timing=True)
-        for index in range(5):
+        for index in range(WARMUP):
             fp8_gemm(
                 input_fp8,
                 weight_fp8_t,
@@ -736,7 +737,7 @@ def get_fp8_gemm_per_channel_benchmark(configs, iterations):
                 scale_wei,
             )
         start_event.record()
-        for index in range(iterations - 5):
+        for index in range(iterations - WARMUP):
             fp8_gemm(
                 input_fp8,
                 weight_fp8_t,
@@ -746,7 +747,7 @@ def get_fp8_gemm_per_channel_benchmark(configs, iterations):
             )
         end_event.record()
         torch.xpu.synchronize()
-        ms = start_event.elapsed_time(end_event) / (iterations - 5)
+        ms = start_event.elapsed_time(end_event) / (iterations - WARMUP)
         clear_xpu_cache()
 
         if provider == "tflops":
@@ -783,7 +784,7 @@ def get_mxfp8_gemm_benchmark(configs, iterations):
     )
     def benchmark(m, n, k, out_dtype, provider, iterations=iterations):
 
-        assert iterations > 5
+        assert iterations > WARMUP
 
         inputs = torch.randn((m, k), dtype=out_dtype, device=DEVICE) * 0.01
         weights = torch.randn((n, k), dtype=out_dtype, device=DEVICE) * 0.01
@@ -797,7 +798,7 @@ def get_mxfp8_gemm_benchmark(configs, iterations):
 
         start_event = torch.xpu.Event(enable_timing=True)
         end_event = torch.xpu.Event(enable_timing=True)
-        for index in range(5):
+        for index in range(WARMUP):
             fp8_gemm(
                 inputs_lp,
                 weights_lp.transpose(0, 1),
@@ -806,7 +807,7 @@ def get_mxfp8_gemm_benchmark(configs, iterations):
                 weights_scale,
             )
         start_event.record()
-        for index in range(iterations - 5):
+        for index in range(iterations - WARMUP):
             fp8_gemm(
                 inputs_lp,
                 weights_lp.transpose(0, 1),
@@ -816,7 +817,7 @@ def get_mxfp8_gemm_benchmark(configs, iterations):
             )
         end_event.record()
         torch.xpu.synchronize()
-        ms = start_event.elapsed_time(end_event) / (iterations - 5)
+        ms = start_event.elapsed_time(end_event) / (iterations - WARMUP)
         clear_xpu_cache()
 
         if provider == "tflops":
@@ -871,7 +872,7 @@ def get_mxfp4_gemm_benchmark(configs, iterations):
     )
     def benchmark(m, n, k, out_dtype, provider, iterations=iterations):
 
-        assert iterations > 5
+        assert iterations > WARMUP
 
         inputs = torch.randn((m, k), dtype=out_dtype, device=DEVICE) * 0.01
         weights = torch.randn((n, k), dtype=out_dtype, device=DEVICE) * 0.01
@@ -885,7 +886,7 @@ def get_mxfp4_gemm_benchmark(configs, iterations):
 
         start_event = torch.xpu.Event(enable_timing=True)
         end_event = torch.xpu.Event(enable_timing=True)
-        for index in range(5):
+        for index in range(WARMUP):
             fp4_gemm(
                 inputs_lp,
                 weights_lp.transpose(0, 1),
@@ -894,7 +895,7 @@ def get_mxfp4_gemm_benchmark(configs, iterations):
                 out_dtype,
             )
         start_event.record()
-        for index in range(iterations - 5):
+        for index in range(iterations - WARMUP):
             fp4_gemm(
                 inputs_lp,
                 weights_lp.transpose(0, 1),
@@ -904,7 +905,7 @@ def get_mxfp4_gemm_benchmark(configs, iterations):
             )
         end_event.record()
         torch.xpu.synchronize()
-        ms = start_event.elapsed_time(end_event) / (iterations - 5)
+        ms = start_event.elapsed_time(end_event) / (iterations - WARMUP)
         clear_xpu_cache()
 
         if provider == "tflops":
