@@ -26,6 +26,7 @@ from benchmark.presets import get_hardware_preset
 # isort: on
 
 DEVICE = "xpu"
+WARMUP = 10
 
 
 def clear_xpu_cache():
@@ -217,7 +218,7 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                                    is_paged,
                                    kv_dtype,
                                    provider,
-                                   iterations=20):
+                                   iterations=200):
     maybe_quantized_query, maybe_quantized_key_cache, \
         maybe_quantized_value_cache, \
         max_query_len, cu_query_lens, max_kv_len, cu_kv_lens, \
@@ -237,8 +238,8 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                               fa_versions, q_dtype, is_sink, is_causal, \
                               is_paged, kv_dtype}, Provider: {provider}",
           flush=True)
-    assert iterations > 5, \
-    "Number of iterations should be greater than 5 to account for warmup"
+    assert iterations > WARMUP, \
+    "Number of iterations should be greater than WARMUP to account for warmup"
 
     queries = [
         torch.rand_like(maybe_quantized_query) for _ in range(iterations)
@@ -250,11 +251,11 @@ def benchmark_varlen_with_paged_kv(num_seqs,
     if is_kernel_time_provider:
         start_events = [
             torch.xpu.Event(enable_timing=True)
-            for _ in range(iterations - 5)
+            for _ in range(iterations - WARMUP)
         ]
         end_events = [
             torch.xpu.Event(enable_timing=True)
-            for _ in range(iterations - 5)
+            for _ in range(iterations - WARMUP)
         ]
         if is_paged:
             for index in range(iterations):
@@ -262,8 +263,8 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                     0, num_blocks,
                     (num_seqs, max_num_blocks_per_seq),
                     dtype=torch.int32)
-                se = start_events[index - 5] if index >= 5 else None
-                ee = end_events[index - 5] if index >= 5 else None
+                se = start_events[index - WARMUP] if index >= WARMUP else None
+                ee = end_events[index - WARMUP] if index >= WARMUP else None
                 flash_attn_varlen_func_CalKernelTime(
                     queries[index],
                     maybe_quantized_key_cache,
@@ -287,8 +288,8 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                     end_event=ee)
         else:
             for index in range(iterations):
-                se = start_events[index - 5] if index >= 5 else None
-                ee = end_events[index - 5] if index >= 5 else None
+                se = start_events[index - WARMUP] if index >= WARMUP else None
+                ee = end_events[index - WARMUP] if index >= WARMUP else None
                 flash_attn_varlen_func_CalKernelTime(
                     queries[index],
                     maybe_quantized_key_cache,
@@ -313,9 +314,9 @@ def benchmark_varlen_with_paged_kv(num_seqs,
         torch.xpu.synchronize()
         total_latency = sum(
             start_events[i].elapsed_time(end_events[i])
-            for i in range(iterations - 5)
+            for i in range(iterations - WARMUP)
         )
-        ms = total_latency / (iterations - 5)
+        ms = total_latency / (iterations - WARMUP)
         if provider == "flash_kernel_TFLOPS" or provider == "flash_kernel_MFU":
             flops = calculate_flops(num_query_heads, query_lens, kv_lens,
                                     head_size, is_causal)
@@ -337,7 +338,7 @@ def benchmark_varlen_with_paged_kv(num_seqs,
         start_event = torch.xpu.Event(enable_timing=True)
         end_event = torch.xpu.Event(enable_timing=True)
         if is_paged:
-            for index in range(5):
+            for index in range(WARMUP):
                 block_tables = torch.randint(
                     0, num_blocks,
                     (num_seqs, max_num_blocks_per_seq),
@@ -361,7 +362,7 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                                        window_size=window_size,
                                        s_aux=sink)
             start_event.record()
-            for index in range(5, iterations):
+            for index in range(WARMUP, iterations):
                 block_tables = torch.randint(
                     0, num_blocks,
                     (num_seqs, max_num_blocks_per_seq),
@@ -386,7 +387,7 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                                        s_aux=sink)
             end_event.record()
         else:
-            for index in range(5):
+            for index in range(WARMUP):
                 flash_attn_varlen_func(queries[index],
                                        maybe_quantized_key_cache,
                                        maybe_quantized_value_cache,
@@ -406,7 +407,7 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                                        window_size=window_size,
                                        s_aux=sink)
             start_event.record()
-            for index in range(5, iterations):
+            for index in range(WARMUP, iterations):
                 flash_attn_varlen_func(queries[index],
                                        maybe_quantized_key_cache,
                                        maybe_quantized_value_cache,
@@ -427,12 +428,12 @@ def benchmark_varlen_with_paged_kv(num_seqs,
                                        s_aux=sink)
             end_event.record()
         torch.xpu.synchronize()
-        ms = start_event.elapsed_time(end_event) / (iterations - 5)
+        ms = start_event.elapsed_time(end_event) / (iterations - WARMUP)
         clear_xpu_cache()
         return 1000 * ms
 
 
-def get_benchmark_varlen_with_paged_kv(iterations=20):
+def get_benchmark_varlen_with_paged_kv(iterations=200):
 
     @triton.testing.perf_report(
         triton.testing.Benchmark(
@@ -500,7 +501,7 @@ if __name__ == "__main__":
     args = parse_args()
     seed = 4242
     seed_everything(seed)
-    iterations = 20
+    iterations = 40
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
 

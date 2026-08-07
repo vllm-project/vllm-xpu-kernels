@@ -65,15 +65,12 @@ def gen_cutlass_fused_moe_perf_configs():
         # Qwen/Qwen3-30B-A3B, Qwen3-30B-A3B-Instruct-2507,
         # Qwen3-Coder-30B-A3B-Instruct, OpenGVLab/InternVL3_5-30B-A3B
         # [128 experts, topk=8]
-        (768, 2048, 128, 8),     # tp=1: [m,1536,2048], [m,2048,768]
         (384, 2048, 128, 8),     # tp=2: [m,768,2048],  [m,2048,384]
         (192, 2048, 128, 8),     # tp=4: [m,384,2048],  [m,2048,192]
         # Qwen/Qwen3-Coder-Next, Qwen3-Next-80B-A3B-Instruct,
         # Qwen3-Next-80B-A3B-Thinking
         # [512 experts, topk=10]
-        (512, 2048, 512, 10),    # tp=1: [m,1024,2048], [m,2048,512]
-        (256, 2048, 512, 10),    # tp=2: [m,512,2048],  [m,2048,256]
-        (128, 2048, 512, 10),    # tp=4: [m,256,2048],  [m,2048,128]
+        (64, 2048, 512, 10),    # tp=8: [m,128,2048],  [m,2048,64]
         # deepseek-ai/DeepSeek-V2-Lite, moonshotai/Kimi-VL-A3B-Thinking
         # [64 experts, topk=6]
         (1408, 2048, 64, 6),     # tp=1: [m,2816,2048], [m,2048,1408]
@@ -86,13 +83,10 @@ def gen_cutlass_fused_moe_perf_configs():
         (224, 1280, 64, 6),      # tp=4: [m,448,1280],  [m,1280,224]
         # Qwen/Qwen3.5-35B-A3B
         # [256 experts, topk=8]
-        (512, 2048, 256, 8),     # tp=1: [m,1024,2048], [m,2048,512]
         (256, 2048, 256, 8),     # tp=2: [m,512,2048],  [m,2048,256]
         (128, 2048, 256, 8),     # tp=4: [m,256,2048],  [m,2048,128]
         # mistralai/Mixtral-8x7B-Instruct-v0.1
         # [8 experts, topk=2]
-        (14336, 4096, 8, 2),     # tp=1: [m,28672,4096],[m,4096,14336]
-        (7168, 4096, 8, 2),      # tp=2: [m,14336,4096],[m,4096,7168]
         (3584, 4096, 8, 2),      # tp=4: [m,7168,4096], [m,4096,3584]
     ]
 

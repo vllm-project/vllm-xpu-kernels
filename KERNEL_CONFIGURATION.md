@@ -92,7 +92,7 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 | File | Kernels | Use Case |
 |------|---------|----------|
 | `paged_decode_full.conf` | 384 | All combinations — supports every model |
-| `paged_decode_default.conf` | ~17 | Llama, Qwen, DeepSeek MLA, Falcon (default build) |
+| `paged_decode_default.conf` | ~24 | Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec (default build) |
 
 ### Recommended Config per Model Family
 
@@ -100,6 +100,8 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 |--------------|-----------|---------------|--------------|
 | Llama-2/3, Qwen, Mistral | 128 | `default` | `default` |
 | DeepSeek-V2/V3/R1 (MLA) | 192 | `default` | `default` |
+| Phi-4-MM, Phi3V / VLM2Vec | 96/128 | `default` | `default` |
+| Starcoder2-3B | 128 | `default` | `default` |
 | Gemma-2 | 256 | `full` | `full` |
 | Mixed / other models | multiple | `full` | `full` |
 
@@ -176,6 +178,9 @@ Common model parameters:
 | Qwen2-72B | 128 | 8 | 8 |
 | Qwen3-30B-A3B | 128 | 4 | 8 |
 | DeepSeek-V3 (MLA) | 128 + 192 | varies | 8 |
+| Phi-4-multimodal | 128 | <= 8 | 8 |
+| VLM2Vec-Full | 96 | <= 8 | 8 |
+| Starcoder2-3B | 128 | 12 | 16 |
 | Gemma-2-27B | 256 | 2 | 8 |
 | Mistral-7B | 128 | 8 | 8 |
 | Falcon-7B (MQA) | 64 | 71 | 16 |
