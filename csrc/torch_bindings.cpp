@@ -143,6 +143,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int forced_token_heads_per_warp=-1) -> ()");
   ops.impl("fused_qk_norm_rope", torch::kXPU, &fused_qk_norm_rope);
 
+  // Fused MiniMax-M3 attention pre-processing (Gemma RMSNorm + partial-NeoX
+  // RoPE + paged K/V/index inserts). Registered under _C so the upstream
+  // vllm._custom_ops wrapper (torch.ops._C.*) works unchanged on XPU.
+  ops.def(
+      "fused_minimax_m3_qknorm_rope_kv_insert("
+      "Tensor! qkv, Tensor q_norm_weight, Tensor k_norm_weight, "
+      "Tensor cos_sin_cache, Tensor positions, int num_heads, "
+      "int num_kv_heads, int rotary_dim, float eps, "
+      "Tensor? index_q_norm_weight, Tensor? index_k_norm_weight, "
+      "int num_index_heads, "
+      "Tensor? slot_mapping, Tensor? index_slot_mapping, "
+      "Tensor!? kv_cache, Tensor!? index_cache, "
+      "int block_size, Tensor!? q_out, Tensor!? index_q_out) -> ()");
+  ops.impl(
+      "fused_minimax_m3_qknorm_rope_kv_insert",
+      torch::kXPU,
+      &fused_minimax_m3_qknorm_rope_kv_insert);
+
   // Compute FP8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
