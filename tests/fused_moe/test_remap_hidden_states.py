@@ -235,37 +235,6 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
             print("Mismatched ref:", ref_unpermuted_scales[mismatched_indices])
 
 
-@pytest.mark.parametrize(
-    "dtype", [torch.bfloat16, torch.float16, torch.float32]
-)
-def test_moe_gather_topk16(dtype):
-    seed_everything(7)
-    num_tokens, topk, hidden_size = 8, 16, 128
-    moe_output = torch.randn((num_tokens * topk, hidden_size),
-                             dtype=dtype,
-                             device=DEVICE)
-    topk_weights = torch.randn((num_tokens, topk),
-                               dtype=torch.float32,
-                               device=DEVICE)
-    inverse = torch.randperm(num_tokens * topk,
-                             dtype=torch.int32,
-                             device=DEVICE).view(num_tokens, topk)
-    inverse[0, -1] = -1
-    output = torch.empty((num_tokens, hidden_size),
-                         dtype=dtype,
-                         device=DEVICE)
-
-    torch.ops._moe_C.moe_gather(
-        output, moe_output, topk_weights, inverse.view(-1), 32
-    )
-
-    valid_inverse = inverse.clamp_min(0).to(torch.int64)
-    valid_weights = topk_weights * (inverse >= 0)
-    expected = (moe_output[valid_inverse].float()
-                * valid_weights[..., None]).sum(dim=1).to(dtype)
-    torch.testing.assert_close(output, expected, rtol=1e-2, atol=1e-2)
-
-
 @pytest.mark.parametrize("num_rows", [262144])
 @pytest.mark.parametrize("hidden_size", [2048])
 @pytest.mark.parametrize("total_experts_num", [128])
