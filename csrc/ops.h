@@ -92,10 +92,7 @@ void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void situ_and_mul(
-    torch::Tensor& out,
-    torch::Tensor& input,
-    double beta,
-    double linear_beta);
+    torch::Tensor& out, torch::Tensor& input, double beta, double linear_beta);
 
 void fatrelu_and_mul(
     torch::Tensor& out, torch::Tensor& input, double threshold);

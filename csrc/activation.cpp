@@ -312,16 +312,13 @@ swiglustep_and_mul(const T& gate, const T& up, float limit) {
 
 template <typename T>
 [[intel::device_indirectly_callable]] inline __attribute__((always_inline)) T
-situ_and_mul(
-    const T& gate, const T& up, float beta, float linear_beta) {
+situ_and_mul(const T& gate, const T& up, float beta, float linear_beta) {
   const float gate_f = static_cast<float>(gate);
   const float up_f = static_cast<float>(up);
   const float activated_gate =
-      beta * sycl::tanh(gate_f / beta) /
-      (1.0f + sycl::exp(-gate_f));
-  const float activated_up = linear_beta > 0.0f
-      ? linear_beta * sycl::tanh(up_f / linear_beta)
-      : up_f;
+      beta * sycl::tanh(gate_f / beta) / (1.0f + sycl::exp(-gate_f));
+  const float activated_up =
+      linear_beta > 0.0f ? linear_beta * sycl::tanh(up_f / linear_beta) : up_f;
   return static_cast<T>(activated_gate * activated_up);
 }
 
@@ -400,11 +397,7 @@ class situ_and_mul_kernel {
       const int d,
       const float beta,
       const float linear_beta)
-      : out(out),
-        input(input),
-        d(d),
-        beta(beta),
-        linear_beta(linear_beta) {}
+      : out(out), input(input), d(d), beta(beta), linear_beta(linear_beta) {}
 
   void operator()(sycl::nd_item<1> item) const {
     using vec_t = vllm::xpu::aligned_vec<scalar_t, VEC_SIZE>;
@@ -422,8 +415,8 @@ class situ_and_mul_kernel {
       vec_t out_vec;
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; ++j) {
-        out_vec[j] = vllm::situ_and_mul(
-            gate_vec[j], up_vec[j], beta, linear_beta);
+        out_vec[j] =
+            vllm::situ_and_mul(gate_vec[j], up_vec[j], beta, linear_beta);
       }
       reinterpret_cast<vec_t*>(out)[token_idx * bound + i] = out_vec;
     }
@@ -782,33 +775,32 @@ void situ_and_mul(
     double beta,
     double linear_beta) {
   TORCH_CHECK(
-    std::isfinite(beta) && beta > 0.0,
-    "SITU beta must be finite and greater than zero");
-  TORCH_CHECK(
-    std::isfinite(linear_beta), "SITU linear_beta must be finite");
+      std::isfinite(beta) && beta > 0.0,
+      "SITU beta must be finite and greater than zero");
+  TORCH_CHECK(std::isfinite(linear_beta), "SITU linear_beta must be finite");
   TORCH_CHECK(input.dim() >= 1, "SITU input must have at least one dimension");
   TORCH_CHECK(
-    input.size(-1) > 0 && input.size(-1) % 2 == 0,
-    "SITU input last dimension must be positive and even");
+      input.size(-1) > 0 && input.size(-1) % 2 == 0,
+      "SITU input last dimension must be positive and even");
   TORCH_CHECK(input.is_contiguous(), "SITU input must be contiguous");
   TORCH_CHECK(out.is_contiguous(), "SITU output must be contiguous");
   TORCH_CHECK(
-    out.device() == input.device(),
-    "SITU input and output must be on the same device");
+      out.device() == input.device(),
+      "SITU input and output must be on the same device");
   TORCH_CHECK(
-    out.scalar_type() == input.scalar_type(),
-    "SITU input and output must have the same dtype");
+      out.scalar_type() == input.scalar_type(),
+      "SITU input and output must have the same dtype");
   TORCH_CHECK(
-    out.dim() == input.dim(),
-    "SITU input and output must have the same number of dimensions");
+      out.dim() == input.dim(),
+      "SITU input and output must have the same number of dimensions");
   for (int64_t dim = 0; dim < input.dim() - 1; ++dim) {
     TORCH_CHECK(
         out.size(dim) == input.size(dim),
         "SITU input and output leading dimensions must match");
   }
   TORCH_CHECK(
-    out.size(-1) * 2 == input.size(-1),
-    "SITU output last dimension must be half the input last dimension");
+      out.size(-1) * 2 == input.size(-1),
+      "SITU output last dimension must be half the input last dimension");
 
   const int d = input.size(-1) / 2;
   const int64_t num_tokens = input.numel() / input.size(-1);
