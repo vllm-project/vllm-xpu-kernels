@@ -23,6 +23,13 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def fused_rms_norm_gated(out: torch.Tensor, input: torch.Tensor,
+                         gate: torch.Tensor, weight: Optional[torch.Tensor],
+                         epsilon: float, activation: str) -> None:
+    torch.ops._C.fused_rms_norm_gated(out, input, gate, weight, epsilon,
+                                      activation)
+
+
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 

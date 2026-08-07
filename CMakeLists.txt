@@ -531,6 +531,7 @@ if(BASIC_KERNELS_ENABLED)
   set(VLLM_EXT_SRC
       "csrc/cache.cpp"
       "csrc/layernorm.cpp"
+      "csrc/layernorm_gated.cpp"
       "csrc/layernorm_quant.cpp"
       "csrc/activation.cpp"
       "csrc/pos_encoding_kernels.cpp"
@@ -636,7 +637,8 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
          "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp")
   endif()
   if(GDN_KERNELS_ENABLED)
-    list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
+    list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp"
+         "csrc/xpu/gdn_attn/kda_attention_interface.cpp")
   endif()
   if(MQA_LOGITS_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/mqa_logits/mqa_logits_interface.cpp")

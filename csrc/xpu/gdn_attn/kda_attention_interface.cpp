@@ -1,0 +1,1346 @@
+#include <sycl/sycl.hpp>
+#include <torch/all.h>
+
+#include <limits>
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
+
+#include "kda_attention.hpp"
+#include "kda_gate.hpp"
+#include "kda_recurrent_opt.hpp"
+#include "utils.h"
+
+#ifdef VLLM_XPU_ENABLE_XE2
+  #include "xe_2/chunk_kda_xe2.h"
+#endif
+
+namespace {
+
+// Backend selection for the KDA recurrent (gated delta rule) stage.
+//   auto      - heuristic selection (default)
+//   recurrent - always use the reference `recurrent_kda_kernel`
+//   opt       - always use the vectorised `recurrent_kda_opt_kernel`
+//   chunk     - force the chunked XMX pipeline for prefill / mixed batches
+enum class KdaRecurrentBackend { Auto, Reference, Optimized, Chunk };
+
+KdaRecurrentBackend parse_kda_recurrent_backend() {
+  const char* raw = std::getenv("VLLM_XPU_KDA_RECURRENT_MODE");
+  if (raw == nullptr) {
+    return KdaRecurrentBackend::Auto;
+  }
+  const std::string value(raw);
+  if (value == "recurrent" || value == "reference") {
+    return KdaRecurrentBackend::Reference;
+  }
+  if (value == "opt" || value == "decode") {
+    return KdaRecurrentBackend::Optimized;
+  }
+  if (value == "chunk") {
+    return KdaRecurrentBackend::Chunk;
+  }
+  TORCH_CHECK(
+      value == "auto",
+      "VLLM_XPU_KDA_RECURRENT_MODE must be one of auto/recurrent/opt/chunk, "
+      "got ",
+      value);
+  return KdaRecurrentBackend::Auto;
+}
+
+KdaRecurrentBackend kda_recurrent_backend() {
+  static const KdaRecurrentBackend backend = parse_kda_recurrent_backend();
+  return backend;
+}
+
+int64_t parse_env_int(const char* name, int64_t fallback) {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr) {
+    return fallback;
+  }
+  try {
+    return std::stoll(std::string(raw));
+  } catch (const std::exception&) {
+    TORCH_CHECK(false, name, " must be an integer, got ", raw);
+  }
+}
+
+// Below this average sequence length the chunked pipeline's fixed cost (five
+// kernel launches plus the packed workspace) outweighs its throughput.
+int64_t kda_chunk_min_seqlen() {
+  static const int64_t value =
+      parse_env_int("VLLM_XPU_KDA_CHUNK_MIN_SEQLEN", 2 * 64);
+  return value;
+}
+
+int64_t kda_chunk_max_workspace_bytes() {
+  static const int64_t value =
+      parse_env_int("VLLM_XPU_KDA_CHUNK_MAX_WORKSPACE_MB", 2048) * 1024 * 1024;
+  return value;
+}
+
+// The chunked pipeline folds exp(G) and exp(-G) into its GEMM operands, so it
+// clamps the per-chunk cumulative log-decay to keep both representable. Beyond
+// the clamp its result silently stops matching the sequential recurrence.
+//
+// How close a gate gets to that clamp depends on its parameterisation. The
+// softplus gate decays by -exp(A_log) * softplus(x) per token, which for a
+// trained model stays far away from `g_floor / chunk_size`. The bounded
+// sigmoid gate instead decays by up to `lower_bound` per token, so at
+// `lower_bound = -5` and 64-token chunks it only takes an average gate
+// activation above 0.25 to saturate. That case is therefore guarded by
+// default: the pipeline synchronizes after its first stage and, when the clamp
+// engaged, hands the batch to the recurrent backend instead.
+bool kda_chunk_guard_decay_range(float lower_bound) {
+  return kda_gate::use_lower_bound(lower_bound);
+}
+
+// Turn the same condition into an error rather than a silent fallback, so a
+// test or a bring-up run can see that the chunked path was declined.
+bool kda_chunk_strict_decay_range() {
+  static const bool value = parse_env_int("VLLM_XPU_KDA_CHUNK_STRICT", 0) != 0;
+  return value;
+}
+
+// Gate mode selector, mirroring `linear_attn_config.gate_lower_bound` in the
+// HuggingFace config: unset -> unbounded softplus gate, set (a negative value,
+// e.g. -5.0 for Kimi-K3) -> bounded sigmoid gate.
+float resolve_gate_lower_bound(const std::optional<double>& gate_lower_bound) {
+  if (!gate_lower_bound.has_value()) {
+    return kda_gate::no_lower_bound;
+  }
+  const double value = *gate_lower_bound;
+  TORCH_CHECK(
+      value < 0.0,
+      "gate_lower_bound must be negative (or None for the softplus gate), got ",
+      value);
+  return static_cast<float>(value);
+}
+
+void check_cache_layout(const torch::Tensor& tensor, const char* name) {
+  TORCH_CHECK(tensor.size(0) > 0, name, " must contain at least one slot");
+  TORCH_CHECK(
+      tensor[0].is_contiguous(), name, " of each slot must be contiguous");
+  TORCH_CHECK(
+      tensor.size(0) == 1 || tensor.stride(0) >= tensor[0].numel(),
+      name,
+      " slots must not overlap");
+}
+
+void check_device(
+    const torch::Tensor& tensor,
+    const torch::Device& device,
+    const char* name) {
+  TORCH_CHECK(tensor.device() == device, name, " must be on ", device);
+}
+
+void check_int32_tensor(
+    const std::optional<torch::Tensor>& tensor,
+    const char* name,
+    int64_t dim,
+    const torch::Device& device) {
+  TORCH_CHECK(tensor.has_value(), name, " must be provided");
+  check_device(*tensor, device, name);
+  TORCH_CHECK(tensor->is_contiguous(), name, " must be contiguous");
+  TORCH_CHECK(tensor->scalar_type() == at::kInt, name, " must be int32");
+  TORCH_CHECK(tensor->dim() == dim, name, " must be ", dim, "D");
+}
+
+void validate_metadata(
+    int64_t num_prefills,
+    int64_t num_decodes,
+    int64_t num_spec_decodes,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    int64_t num_actual_tokens,
+    const torch::Device& device) {
+  TORCH_CHECK(num_actual_tokens >= 0, "num_actual_tokens must be non-negative");
+  TORCH_CHECK(
+      num_prefills >= 0 && num_decodes >= 0 && num_spec_decodes >= 0,
+      "sequence counts must be non-negative");
+  constexpr int64_t max_kernel_int = std::numeric_limits<int>::max();
+  TORCH_CHECK(
+      num_actual_tokens <= max_kernel_int,
+      "num_actual_tokens exceeds the KDA kernel limit");
+  TORCH_CHECK(
+      num_prefills <= max_kernel_int && num_decodes <= max_kernel_int &&
+          num_spec_decodes <= max_kernel_int &&
+          num_prefills + num_decodes <= max_kernel_int,
+      "sequence counts exceed the KDA kernel limit");
+
+  const int64_t non_spec_batch_size = num_prefills + num_decodes;
+  if (non_spec_batch_size > 0) {
+    check_int32_tensor(
+        non_spec_query_start_loc, "non_spec_query_start_loc", 1, device);
+    check_int32_tensor(
+        non_spec_state_indices, "non_spec_state_indices", 1, device);
+    TORCH_CHECK(
+        non_spec_query_start_loc->size(0) >= non_spec_batch_size + 1,
+        "non_spec_query_start_loc must contain one offset per sequence plus "
+        "the final offset");
+    TORCH_CHECK(
+        non_spec_state_indices->size(0) >= non_spec_batch_size,
+        "non_spec_state_indices must contain one slot per sequence");
+    if (non_spec_token_indx.has_value()) {
+      check_int32_tensor(non_spec_token_indx, "non_spec_token_indx", 1, device);
+    }
+    if (has_initial_state.has_value()) {
+      check_device(*has_initial_state, device, "has_initial_state");
+      TORCH_CHECK(
+          has_initial_state->is_contiguous() &&
+              has_initial_state->scalar_type() == at::kBool &&
+              has_initial_state->dim() == 1 &&
+              has_initial_state->size(0) >= non_spec_batch_size,
+          "has_initial_state must be contiguous bool with one value per "
+          "non-spec sequence");
+    }
+  }
+
+  int64_t spec_tokens = 0;
+  if (num_spec_decodes > 0) {
+    check_int32_tensor(spec_query_start_loc, "spec_query_start_loc", 1, device);
+    check_int32_tensor(spec_token_indx, "spec_token_indx", 1, device);
+    check_int32_tensor(spec_state_indices, "spec_state_indices", 2, device);
+    check_int32_tensor(num_accepted_tokens, "num_accepted_tokens", 1, device);
+    TORCH_CHECK(
+        spec_query_start_loc->size(0) >= num_spec_decodes + 1,
+        "spec_query_start_loc must contain one offset per sequence plus the "
+        "final offset");
+    TORCH_CHECK(
+        spec_state_indices->size(0) >= num_spec_decodes,
+        "spec_state_indices must contain one row per sequence");
+    TORCH_CHECK(
+        spec_state_indices->size(1) > 0,
+        "spec_state_indices must contain at least one slot per sequence");
+    TORCH_CHECK(
+        num_accepted_tokens->size(0) >= num_spec_decodes,
+        "num_accepted_tokens must contain one value per spec sequence");
+    spec_tokens = spec_token_indx->numel();
+    TORCH_CHECK(
+        spec_tokens == num_spec_decodes * spec_state_indices->size(1),
+        "spec token and state-index counts must match");
+  }
+
+  const int64_t non_spec_tokens =
+      non_spec_batch_size == 0
+          ? 0
+          : (non_spec_token_indx.has_value() ? non_spec_token_indx->numel()
+                                             : num_actual_tokens - spec_tokens);
+  TORCH_CHECK(
+      non_spec_tokens >= 0 &&
+          non_spec_tokens + spec_tokens == num_actual_tokens,
+      "metadata token counts must equal num_actual_tokens");
+}
+
+struct ConvShape {
+  int64_t hidden_dim;
+  int64_t width;
+  int64_t dim_stride;
+  int64_t time_stride;
+  // Row stride shared by q/k/v. It is `hidden_dim` for standalone projections
+  // and `3 * hidden_dim` when the three tensors are slices of one fused
+  // mixed-QKV buffer.
+  int64_t qkv_row_stride;
+};
+
+ConvShape validate_conv_inputs(
+    const torch::Tensor& q_proj,
+    const torch::Tensor& k_proj,
+    const torch::Tensor& v_proj,
+    torch::Tensor& conv_state,
+    const torch::Tensor& q_conv_weight,
+    const torch::Tensor& k_conv_weight,
+    const torch::Tensor& v_conv_weight,
+    int64_t num_actual_tokens) {
+  const auto device = q_proj.device();
+  TORCH_CHECK(q_proj.is_xpu(), "q_proj must be on XPU");
+  TORCH_CHECK(q_proj.dim() == 2, "q_proj must be 2D");
+  TORCH_CHECK(
+      k_proj.sizes() == q_proj.sizes(), "k_proj shape must match q_proj");
+  TORCH_CHECK(
+      v_proj.sizes() == q_proj.sizes(), "v_proj shape must match q_proj");
+  TORCH_CHECK(
+      q_proj.size(0) >= num_actual_tokens,
+      "projection leading dimensions must be >= num_actual_tokens");
+  TORCH_CHECK(
+      q_proj.stride(1) == 1 && k_proj.stride(1) == 1 && v_proj.stride(1) == 1,
+      "KDA projections must be contiguous along the channel dimension");
+  TORCH_CHECK(
+      k_proj.stride(0) == q_proj.stride(0) &&
+          v_proj.stride(0) == q_proj.stride(0),
+      "KDA projections must share the same row stride");
+  TORCH_CHECK(
+      q_proj.scalar_type() == k_proj.scalar_type() &&
+          q_proj.scalar_type() == v_proj.scalar_type(),
+      "KDA projection dtypes must match");
+  TORCH_CHECK(
+      q_proj.scalar_type() == at::kHalf ||
+          q_proj.scalar_type() == at::kBFloat16 ||
+          q_proj.scalar_type() == at::kFloat,
+      "KDA projections must be float16, bfloat16, or float32");
+  check_device(k_proj, device, "k_proj");
+  check_device(v_proj, device, "v_proj");
+
+  const int64_t hidden_dim = q_proj.size(1);
+  TORCH_CHECK(hidden_dim > 0, "projection hidden dimension must be positive");
+  const int64_t qkv_row_stride = q_proj.stride(0);
+  TORCH_CHECK(
+      qkv_row_stride >= hidden_dim,
+      "KDA projection row stride must be >= the hidden dimension");
+  TORCH_CHECK(
+      hidden_dim <= std::numeric_limits<int>::max() / 3,
+      "projection hidden dimension exceeds the KDA kernel limit");
+  TORCH_CHECK(
+      q_conv_weight.dim() == 2 && q_conv_weight.size(0) == hidden_dim,
+      "q_conv_weight must have shape [hidden_dim, width]");
+  TORCH_CHECK(
+      k_conv_weight.sizes() == q_conv_weight.sizes() &&
+          v_conv_weight.sizes() == q_conv_weight.sizes(),
+      "KDA convolution weight shapes must match");
+  TORCH_CHECK(
+      q_conv_weight.scalar_type() == at::kFloat &&
+          k_conv_weight.scalar_type() == at::kFloat &&
+          v_conv_weight.scalar_type() == at::kFloat,
+      "KDA convolution weights must be float32");
+  TORCH_CHECK(
+      q_conv_weight.is_contiguous() && k_conv_weight.is_contiguous() &&
+          v_conv_weight.is_contiguous(),
+      "KDA convolution weights must be contiguous");
+  check_device(q_conv_weight, device, "q_conv_weight");
+  check_device(k_conv_weight, device, "k_conv_weight");
+  check_device(v_conv_weight, device, "v_conv_weight");
+
+  const int64_t width = q_conv_weight.size(1);
+  TORCH_CHECK(width >= 2 && width <= 5, "KDA convolution width must be 2-5");
+  TORCH_CHECK(conv_state.dim() == 3, "conv_state must be 3D");
+  TORCH_CHECK(
+      conv_state.scalar_type() == at::kHalf ||
+          conv_state.scalar_type() == at::kBFloat16 ||
+          conv_state.scalar_type() == at::kFloat,
+      "conv_state must be float16, bfloat16, or float32");
+  check_device(conv_state, device, "conv_state");
+  check_cache_layout(conv_state, "conv_state");
+
+  int64_t dim_stride;
+  int64_t time_stride;
+  if (conv_state.size(1) == 3 * hidden_dim && conv_state.size(2) == width - 1) {
+    dim_stride = conv_state.stride(1);
+    time_stride = conv_state.stride(2);
+  } else {
+    TORCH_CHECK(
+        conv_state.size(1) == width - 1 && conv_state.size(2) == 3 * hidden_dim,
+        "conv_state must have DS shape [slots, 3 * hidden_dim, width - 1] "
+        "or SD shape [slots, width - 1, 3 * hidden_dim]");
+    dim_stride = conv_state.stride(2);
+    time_stride = conv_state.stride(1);
+  }
+  return {hidden_dim, width, dim_stride, time_stride, qkv_row_stride};
+}
+
+struct RecurrentShape {
+  int64_t num_heads;
+  int64_t head_dim;
+};
+
+RecurrentShape validate_recurrent_inputs(
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& raw_gate,
+    const torch::Tensor& raw_beta,
+    torch::Tensor& recurrent_state,
+    const torch::Tensor& a_log,
+    const torch::Tensor& dt_bias,
+    int64_t num_actual_tokens) {
+  const auto device = q.device();
+  TORCH_CHECK(q.is_xpu(), "q must be on XPU");
+  TORCH_CHECK(raw_gate.dim() == 4, "raw_gate must be 4D");
+  TORCH_CHECK(raw_gate.size(0) == 1, "raw_gate batch dimension must be 1");
+  const int64_t num_heads = raw_gate.size(2);
+  const int64_t head_dim = raw_gate.size(3);
+  const int64_t hidden_dim = num_heads * head_dim;
+  TORCH_CHECK(num_heads > 0, "KDA num_heads must be positive");
+  TORCH_CHECK(
+      head_dim == 32 || head_dim == 64 || head_dim == 128 || head_dim == 256,
+      "KDA head_dim must be one of 32, 64, 128, or 256");
+
+  TORCH_CHECK(
+      q.dim() == 2 && q.size(0) == num_actual_tokens && q.size(1) == hidden_dim,
+      "q must have shape [num_actual_tokens, heads * dim]");
+  TORCH_CHECK(k.sizes() == q.sizes(), "k shape must match q");
+  TORCH_CHECK(v.sizes() == q.sizes(), "v shape must match q");
+  TORCH_CHECK(
+      q.is_contiguous() && k.is_contiguous() && v.is_contiguous() &&
+          raw_gate.is_contiguous() && raw_beta.is_contiguous() &&
+          core_attn_out.is_contiguous(),
+      "KDA recurrent activation tensors must be contiguous");
+  TORCH_CHECK(
+      q.scalar_type() == k.scalar_type() &&
+          q.scalar_type() == v.scalar_type() &&
+          q.scalar_type() == raw_gate.scalar_type() &&
+          q.scalar_type() == core_attn_out.scalar_type(),
+      "KDA recurrent activation tensor dtypes must match");
+  TORCH_CHECK(
+      q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16 ||
+          q.scalar_type() == at::kFloat,
+      "KDA recurrent activations must be float16, bfloat16, or float32");
+  TORCH_CHECK(
+      raw_gate.size(1) >= num_actual_tokens,
+      "raw_gate token dimension must be >= num_actual_tokens");
+  TORCH_CHECK(
+      raw_beta.dim() == 3 && raw_beta.size(0) == 1 &&
+          raw_beta.size(1) >= num_actual_tokens &&
+          raw_beta.size(2) == num_heads,
+      "raw_beta must have shape [1, >=num_actual_tokens, heads]");
+  TORCH_CHECK(raw_beta.scalar_type() == at::kFloat, "raw_beta must be float32");
+  TORCH_CHECK(
+      core_attn_out.dim() == 4 && core_attn_out.size(0) == 1 &&
+          core_attn_out.size(1) >= num_actual_tokens &&
+          core_attn_out.size(2) == num_heads &&
+          core_attn_out.size(3) == head_dim,
+      "core_attn_out must have shape [1, >=num_actual_tokens, heads, dim]");
+  check_device(k, device, "k");
+  check_device(v, device, "v");
+  check_device(raw_gate, device, "raw_gate");
+  check_device(raw_beta, device, "raw_beta");
+  check_device(core_attn_out, device, "core_attn_out");
+
+  TORCH_CHECK(
+      recurrent_state.dim() == 4 && recurrent_state.size(1) == num_heads &&
+          recurrent_state.size(2) == head_dim &&
+          recurrent_state.size(3) == head_dim,
+      "recurrent_state must have shape [slots, heads, dim, dim]");
+  TORCH_CHECK(
+      recurrent_state.scalar_type() == at::kFloat ||
+          recurrent_state.scalar_type() == q.scalar_type(),
+      "recurrent_state must be float32 or match the activation dtype");
+  check_device(recurrent_state, device, "recurrent_state");
+  check_cache_layout(recurrent_state, "recurrent_state");
+  TORCH_CHECK(
+      a_log.scalar_type() == at::kFloat && a_log.numel() == num_heads &&
+          a_log.is_contiguous() && a_log.dim() == 4 && a_log.size(0) == 1 &&
+          a_log.size(1) == 1 && a_log.size(2) == num_heads &&
+          a_log.size(3) == 1,
+      "A_log must have contiguous float32 shape [1, 1, heads, 1]");
+  TORCH_CHECK(
+      dt_bias.scalar_type() == at::kFloat && dt_bias.numel() == hidden_dim &&
+          dt_bias.is_contiguous() && dt_bias.dim() == 1,
+      "dt_bias must have contiguous float32 shape [heads * dim]");
+  check_device(a_log, device, "A_log");
+  check_device(dt_bias, device, "dt_bias");
+  return {num_heads, head_dim};
+}
+
+template <typename T, typename CacheT>
+void launch_kda_conv(
+    sycl::queue& queue,
+    torch::Tensor& q,
+    torch::Tensor& k,
+    torch::Tensor& v,
+    const torch::Tensor& q_proj,
+    const torch::Tensor& k_proj,
+    const torch::Tensor& v_proj,
+    torch::Tensor& conv_state,
+    const torch::Tensor& q_conv_weight,
+    const torch::Tensor& k_conv_weight,
+    const torch::Tensor& v_conv_weight,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    int num_prefills,
+    int num_decodes,
+    int num_spec_decodes,
+    int hidden_dim,
+    int width,
+    int64_t conv_state_dim_stride,
+    int64_t conv_state_time_stride,
+    int64_t qkv_row_stride) {
+#define LAUNCH_CONV(                                            \
+    WIDTH,                                                      \
+    IS_SPEC,                                                    \
+    QUERY_START,                                                \
+    TOKEN_INDX,                                                 \
+    STATE_INDICES,                                              \
+    STATE_STRIDE,                                               \
+    HAS_INITIAL,                                                \
+    ACCEPTED,                                                   \
+    BATCH_SIZE)                                                 \
+  kda::launch_causal_conv1d<T, CacheT, WIDTH, IS_SPEC>(         \
+      queue,                                                    \
+      reinterpret_cast<T*>(q.data_ptr()),                       \
+      reinterpret_cast<T*>(k.data_ptr()),                       \
+      reinterpret_cast<T*>(v.data_ptr()),                       \
+      reinterpret_cast<const T*>(q_proj.data_ptr()),            \
+      reinterpret_cast<const T*>(k_proj.data_ptr()),            \
+      reinterpret_cast<const T*>(v_proj.data_ptr()),            \
+      reinterpret_cast<const float*>(q_conv_weight.data_ptr()), \
+      reinterpret_cast<const float*>(k_conv_weight.data_ptr()), \
+      reinterpret_cast<const float*>(v_conv_weight.data_ptr()), \
+      reinterpret_cast<CacheT*>(conv_state.data_ptr()),         \
+      conv_state.stride(0),                                     \
+      conv_state_dim_stride,                                    \
+      conv_state_time_stride,                                   \
+      QUERY_START,                                              \
+      TOKEN_INDX,                                               \
+      STATE_INDICES,                                            \
+      STATE_STRIDE,                                             \
+      HAS_INITIAL,                                              \
+      ACCEPTED,                                                 \
+      BATCH_SIZE,                                               \
+      hidden_dim,                                               \
+      qkv_row_stride)
+
+#define WIDTH_DISPATCH(                                        \
+    IS_SPEC,                                                   \
+    QUERY_START,                                               \
+    TOKEN_INDX,                                                \
+    STATE_INDICES,                                             \
+    STATE_STRIDE,                                              \
+    HAS_INITIAL,                                               \
+    ACCEPTED,                                                  \
+    BATCH_SIZE)                                                \
+  switch (width) {                                             \
+    case 2:                                                    \
+      LAUNCH_CONV(                                             \
+          2,                                                   \
+          IS_SPEC,                                             \
+          QUERY_START,                                         \
+          TOKEN_INDX,                                          \
+          STATE_INDICES,                                       \
+          STATE_STRIDE,                                        \
+          HAS_INITIAL,                                         \
+          ACCEPTED,                                            \
+          BATCH_SIZE);                                         \
+      break;                                                   \
+    case 3:                                                    \
+      LAUNCH_CONV(                                             \
+          3,                                                   \
+          IS_SPEC,                                             \
+          QUERY_START,                                         \
+          TOKEN_INDX,                                          \
+          STATE_INDICES,                                       \
+          STATE_STRIDE,                                        \
+          HAS_INITIAL,                                         \
+          ACCEPTED,                                            \
+          BATCH_SIZE);                                         \
+      break;                                                   \
+    case 4:                                                    \
+      LAUNCH_CONV(                                             \
+          4,                                                   \
+          IS_SPEC,                                             \
+          QUERY_START,                                         \
+          TOKEN_INDX,                                          \
+          STATE_INDICES,                                       \
+          STATE_STRIDE,                                        \
+          HAS_INITIAL,                                         \
+          ACCEPTED,                                            \
+          BATCH_SIZE);                                         \
+      break;                                                   \
+    case 5:                                                    \
+      LAUNCH_CONV(                                             \
+          5,                                                   \
+          IS_SPEC,                                             \
+          QUERY_START,                                         \
+          TOKEN_INDX,                                          \
+          STATE_INDICES,                                       \
+          STATE_STRIDE,                                        \
+          HAS_INITIAL,                                         \
+          ACCEPTED,                                            \
+          BATCH_SIZE);                                         \
+      break;                                                   \
+    default:                                                   \
+      TORCH_CHECK(false, "unsupported KDA convolution width"); \
+  }
+
+#define LAUNCH_TILED_CONV(WIDTH, BATCH_SIZE, NUM_TOKENS)                  \
+  kda::launch_causal_conv1d_tiled<T, CacheT, WIDTH>(                      \
+      queue,                                                              \
+      reinterpret_cast<T*>(q.data_ptr()),                                 \
+      reinterpret_cast<T*>(k.data_ptr()),                                 \
+      reinterpret_cast<T*>(v.data_ptr()),                                 \
+      reinterpret_cast<const T*>(q_proj.data_ptr()),                      \
+      reinterpret_cast<const T*>(k_proj.data_ptr()),                      \
+      reinterpret_cast<const T*>(v_proj.data_ptr()),                      \
+      reinterpret_cast<const float*>(q_conv_weight.data_ptr()),           \
+      reinterpret_cast<const float*>(k_conv_weight.data_ptr()),           \
+      reinterpret_cast<const float*>(v_conv_weight.data_ptr()),           \
+      reinterpret_cast<CacheT*>(conv_state.data_ptr()),                   \
+      conv_state.stride(0),                                               \
+      conv_state_dim_stride,                                              \
+      conv_state_time_stride,                                             \
+      reinterpret_cast<const int*>(non_spec_query_start_loc->data_ptr()), \
+      non_spec_token_indx.has_value()                                     \
+          ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr()) \
+          : nullptr,                                                      \
+      reinterpret_cast<const int*>(non_spec_state_indices->data_ptr()),   \
+      has_initial_state.has_value()                                       \
+          ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())  \
+          : nullptr,                                                      \
+      BATCH_SIZE,                                                         \
+      NUM_TOKENS,                                                         \
+      hidden_dim,                                                         \
+      qkv_row_stride)
+
+#define TILED_WIDTH_DISPATCH(BATCH_SIZE, NUM_TOKENS)           \
+  switch (width) {                                             \
+    case 2:                                                    \
+      LAUNCH_TILED_CONV(2, BATCH_SIZE, NUM_TOKENS);            \
+      break;                                                   \
+    case 3:                                                    \
+      LAUNCH_TILED_CONV(3, BATCH_SIZE, NUM_TOKENS);            \
+      break;                                                   \
+    case 4:                                                    \
+      LAUNCH_TILED_CONV(4, BATCH_SIZE, NUM_TOKENS);            \
+      break;                                                   \
+    case 5:                                                    \
+      LAUNCH_TILED_CONV(5, BATCH_SIZE, NUM_TOKENS);            \
+      break;                                                   \
+    default:                                                   \
+      TORCH_CHECK(false, "unsupported KDA convolution width"); \
+  }
+
+  const int non_spec_batch_size = num_prefills + num_decodes;
+  if (non_spec_batch_size > 0) {
+    const int non_spec_tokens = non_spec_token_indx.has_value()
+                                    ? non_spec_token_indx->numel()
+                                    : q.size(0);
+    const bool tiled_batch_supported =
+        non_spec_batch_size <= kda::conv1d_tiled_max_batch_size;
+    const int64_t tiled_token_threshold =
+        tiled_batch_supported
+            ? static_cast<int64_t>(
+                  kda::conv1d_tiled_min_tokens_per_batch_squared) *
+                  non_spec_batch_size * non_spec_batch_size
+            : std::numeric_limits<int64_t>::max();
+    const bool use_tiled = num_prefills > 0 && num_decodes == 0 &&
+                           num_spec_decodes == 0 && tiled_batch_supported &&
+                           non_spec_tokens >= tiled_token_threshold &&
+                           q.scalar_type() == conv_state.scalar_type();
+    if (use_tiled) {
+      TILED_WIDTH_DISPATCH(non_spec_batch_size, non_spec_tokens);
+    } else {
+      WIDTH_DISPATCH(
+          false,
+          reinterpret_cast<const int*>(non_spec_query_start_loc->data_ptr()),
+          non_spec_token_indx.has_value()
+              ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
+              : nullptr,
+          reinterpret_cast<const int*>(non_spec_state_indices->data_ptr()),
+          0,
+          has_initial_state.has_value()
+              ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())
+              : nullptr,
+          nullptr,
+          non_spec_batch_size);
+    }
+  }
+  if (num_spec_decodes > 0) {
+    WIDTH_DISPATCH(
+        true,
+        reinterpret_cast<const int*>(spec_query_start_loc->data_ptr()),
+        reinterpret_cast<const int*>(spec_token_indx->data_ptr()),
+        reinterpret_cast<const int*>(spec_state_indices->data_ptr()),
+        spec_state_indices->stride(0),
+        nullptr,
+        reinterpret_cast<const int*>(num_accepted_tokens->data_ptr()),
+        num_spec_decodes);
+  }
+#undef WIDTH_DISPATCH
+#undef LAUNCH_CONV
+#undef TILED_WIDTH_DISPATCH
+#undef LAUNCH_TILED_CONV
+}
+
+// Batch-dependent pointers for one recurrent launch (non-spec vs spec).
+struct KdaRecurrentBatchArgs {
+  const int* query_start_loc;
+  const int* token_indx;
+  const int* state_indices;
+  int64_t state_indices_stride_0;
+  const bool* has_initial_state;
+  const int* num_accepted_tokens;
+  int batch_size;
+};
+
+template <typename T, typename StateT, int Mode>
+void launch_kda_recurrent_opt_bucket(
+    sycl::queue& queue,
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& raw_gate,
+    const torch::Tensor& raw_beta,
+    torch::Tensor& recurrent_state,
+    const torch::Tensor& a_log,
+    const torch::Tensor& dt_bias,
+    float lower_bound,
+    const KdaRecurrentBatchArgs& args,
+    int num_heads,
+    int head_dim) {
+#define KDA_LAUNCH_OPT(BUCKET)                               \
+  kda::launch_recurrent_kda_opt<T, StateT, BUCKET, Mode>(    \
+      queue,                                                 \
+      reinterpret_cast<T*>(core_attn_out.data_ptr()),        \
+      reinterpret_cast<const T*>(q.data_ptr()),              \
+      reinterpret_cast<const T*>(k.data_ptr()),              \
+      reinterpret_cast<const T*>(v.data_ptr()),              \
+      reinterpret_cast<const T*>(raw_gate.data_ptr()),       \
+      reinterpret_cast<const float*>(raw_beta.data_ptr()),   \
+      reinterpret_cast<const float*>(a_log.data_ptr()),      \
+      reinterpret_cast<const float*>(dt_bias.data_ptr()),    \
+      lower_bound,                                           \
+      reinterpret_cast<StateT*>(recurrent_state.data_ptr()), \
+      recurrent_state.stride(0),                             \
+      args.query_start_loc,                                  \
+      args.token_indx,                                       \
+      args.state_indices,                                    \
+      args.state_indices_stride_0,                           \
+      args.has_initial_state,                                \
+      args.num_accepted_tokens,                              \
+      args.batch_size,                                       \
+      num_heads,                                             \
+      state_vectorized)
+
+  // Wide state messages need the per-slot base address aligned to the vector
+  // width; a page-strided cache may use an arbitrary slot stride.
+  const bool state_vectorized =
+      recurrent_state.stride(0) % (head_dim / kda::sub_group_size) == 0;
+  switch (head_dim / kda::sub_group_size) {
+    case 1:
+      KDA_LAUNCH_OPT(1);
+      break;
+    case 2:
+      KDA_LAUNCH_OPT(2);
+      break;
+    case 4:
+      KDA_LAUNCH_OPT(4);
+      break;
+    case 8:
+      KDA_LAUNCH_OPT(8);
+      break;
+    default:
+      TORCH_CHECK(false, "unsupported KDA head dimension");
+  }
+#undef KDA_LAUNCH_OPT
+}
+
+// Only fp32 state (the historical layout) and state matching the activation
+// dtype are instantiated; other mixes have no practical use and would
+// needlessly multiply the number of compiled kernels.
+template <typename T, int Mode>
+void launch_kda_recurrent_opt(
+    sycl::queue& queue,
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& raw_gate,
+    const torch::Tensor& raw_beta,
+    torch::Tensor& recurrent_state,
+    const torch::Tensor& a_log,
+    const torch::Tensor& dt_bias,
+    float lower_bound,
+    const KdaRecurrentBatchArgs& args,
+    int num_heads,
+    int head_dim) {
+  const auto state_dtype = recurrent_state.scalar_type();
+  if (state_dtype == at::kFloat) {
+    launch_kda_recurrent_opt_bucket<T, float, Mode>(
+        queue,
+        core_attn_out,
+        q,
+        k,
+        v,
+        raw_gate,
+        raw_beta,
+        recurrent_state,
+        a_log,
+        dt_bias,
+        lower_bound,
+        args,
+        num_heads,
+        head_dim);
+    return;
+  }
+  if constexpr (!std::is_same_v<T, float>) {
+    if (state_dtype == q.scalar_type()) {
+      launch_kda_recurrent_opt_bucket<T, T, Mode>(
+          queue,
+          core_attn_out,
+          q,
+          k,
+          v,
+          raw_gate,
+          raw_beta,
+          recurrent_state,
+          a_log,
+          dt_bias,
+          lower_bound,
+          args,
+          num_heads,
+          head_dim);
+      return;
+    }
+  }
+  TORCH_CHECK(
+      false,
+      "KDA recurrent_state dtype must be float32 or match the activation "
+      "dtype, got ",
+      state_dtype);
+}
+
+template <typename T>
+void launch_kda_recurrent(
+    sycl::queue& queue,
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& raw_gate,
+    const torch::Tensor& raw_beta,
+    torch::Tensor& recurrent_state,
+    const torch::Tensor& a_log,
+    const torch::Tensor& dt_bias,
+    float lower_bound,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    int num_prefills,
+    int num_decodes,
+    int num_spec_decodes,
+    int num_heads,
+    int head_dim,
+    int64_t num_actual_tokens) {
+#define LAUNCH_RECURRENT(                                   \
+    BUCKET,                                                 \
+    IS_SPEC,                                                \
+    QUERY_START,                                            \
+    TOKEN_INDX,                                             \
+    STATE_INDICES,                                          \
+    STATE_STRIDE,                                           \
+    HAS_INITIAL,                                            \
+    ACCEPTED,                                               \
+    BATCH_SIZE)                                             \
+  kda::launch_recurrent_kda<T, BUCKET, IS_SPEC>(            \
+      queue,                                                \
+      reinterpret_cast<T*>(core_attn_out.data_ptr()),       \
+      reinterpret_cast<const T*>(q.data_ptr()),             \
+      reinterpret_cast<const T*>(k.data_ptr()),             \
+      reinterpret_cast<const T*>(v.data_ptr()),             \
+      reinterpret_cast<const T*>(raw_gate.data_ptr()),      \
+      reinterpret_cast<const float*>(raw_beta.data_ptr()),  \
+      reinterpret_cast<const float*>(a_log.data_ptr()),     \
+      reinterpret_cast<const float*>(dt_bias.data_ptr()),   \
+      lower_bound,                                          \
+      reinterpret_cast<float*>(recurrent_state.data_ptr()), \
+      recurrent_state.stride(0),                            \
+      QUERY_START,                                          \
+      TOKEN_INDX,                                           \
+      STATE_INDICES,                                        \
+      STATE_STRIDE,                                         \
+      HAS_INITIAL,                                          \
+      ACCEPTED,                                             \
+      BATCH_SIZE,                                           \
+      num_heads,                                            \
+      head_dim)
+
+#define BUCKET_DISPATCH(                                    \
+    IS_SPEC,                                                \
+    QUERY_START,                                            \
+    TOKEN_INDX,                                             \
+    STATE_INDICES,                                          \
+    STATE_STRIDE,                                           \
+    HAS_INITIAL,                                            \
+    ACCEPTED,                                               \
+    BATCH_SIZE)                                             \
+  switch (head_dim / kda::sub_group_size) {                 \
+    case 1:                                                 \
+      LAUNCH_RECURRENT(                                     \
+          1,                                                \
+          IS_SPEC,                                          \
+          QUERY_START,                                      \
+          TOKEN_INDX,                                       \
+          STATE_INDICES,                                    \
+          STATE_STRIDE,                                     \
+          HAS_INITIAL,                                      \
+          ACCEPTED,                                         \
+          BATCH_SIZE);                                      \
+      break;                                                \
+    case 2:                                                 \
+      LAUNCH_RECURRENT(                                     \
+          2,                                                \
+          IS_SPEC,                                          \
+          QUERY_START,                                      \
+          TOKEN_INDX,                                       \
+          STATE_INDICES,                                    \
+          STATE_STRIDE,                                     \
+          HAS_INITIAL,                                      \
+          ACCEPTED,                                         \
+          BATCH_SIZE);                                      \
+      break;                                                \
+    case 4:                                                 \
+      LAUNCH_RECURRENT(                                     \
+          4,                                                \
+          IS_SPEC,                                          \
+          QUERY_START,                                      \
+          TOKEN_INDX,                                       \
+          STATE_INDICES,                                    \
+          STATE_STRIDE,                                     \
+          HAS_INITIAL,                                      \
+          ACCEPTED,                                         \
+          BATCH_SIZE);                                      \
+      break;                                                \
+    case 8:                                                 \
+      LAUNCH_RECURRENT(                                     \
+          8,                                                \
+          IS_SPEC,                                          \
+          QUERY_START,                                      \
+          TOKEN_INDX,                                       \
+          STATE_INDICES,                                    \
+          STATE_STRIDE,                                     \
+          HAS_INITIAL,                                      \
+          ACCEPTED,                                         \
+          BATCH_SIZE);                                      \
+      break;                                                \
+    default:                                                \
+      TORCH_CHECK(false, "unsupported KDA head dimension"); \
+  }
+
+  const int non_spec_batch_size = num_prefills + num_decodes;
+  // The reference kernel only understands an fp32 state cache, so a narrower
+  // cache dtype implies the optimised kernel regardless of the env override.
+  const bool use_opt =
+      kda_recurrent_backend() != KdaRecurrentBackend::Reference ||
+      recurrent_state.scalar_type() != at::kFloat;
+  bool non_spec_done = false;
+
+#ifdef VLLM_XPU_ENABLE_XE2
+  if (non_spec_batch_size > 0 &&
+      kda_recurrent_backend() != KdaRecurrentBackend::Reference &&
+      kda_recurrent_backend() != KdaRecurrentBackend::Optimized &&
+      chunk_kda_xe2_supported(head_dim) && q.scalar_type() == at::kBFloat16) {
+    const int64_t num_non_spec_tokens =
+        non_spec_token_indx.has_value()
+            ? non_spec_token_indx->numel()
+            : static_cast<int64_t>(num_actual_tokens);
+    const int64_t avg_seqlen = num_non_spec_tokens / non_spec_batch_size;
+    const int64_t workspace = chunk_kda_xe2_workspace_bytes(
+        non_spec_batch_size,
+        num_non_spec_tokens,
+        num_heads,
+        head_dim,
+        q.element_size());
+    const bool forced = kda_recurrent_backend() == KdaRecurrentBackend::Chunk;
+    if ((forced || avg_seqlen >= kda_chunk_min_seqlen()) &&
+        workspace <= kda_chunk_max_workspace_bytes()) {
+      non_spec_done = chunk_kda_xe2(
+          queue,
+          core_attn_out,
+          q,
+          k,
+          v,
+          raw_gate,
+          raw_beta,
+          recurrent_state,
+          a_log,
+          dt_bias,
+          lower_bound,
+          *non_spec_query_start_loc,
+          *non_spec_state_indices,
+          has_initial_state,
+          non_spec_token_indx,
+          non_spec_batch_size,
+          num_non_spec_tokens,
+          num_heads,
+          head_dim,
+          kda_chunk_guard_decay_range(lower_bound) ||
+              kda_chunk_strict_decay_range(),
+          kda_chunk_strict_decay_range());
+    }
+  }
+#endif
+
+  if (non_spec_batch_size > 0 && !non_spec_done) {
+    if (use_opt) {
+      const KdaRecurrentBatchArgs args{
+          reinterpret_cast<const int*>(non_spec_query_start_loc->data_ptr()),
+          non_spec_token_indx.has_value()
+              ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
+              : nullptr,
+          reinterpret_cast<const int*>(non_spec_state_indices->data_ptr()),
+          0,
+          has_initial_state.has_value()
+              ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())
+              : nullptr,
+          nullptr,
+          non_spec_batch_size};
+      if (num_prefills == 0) {
+        launch_kda_recurrent_opt<T, kda::recurrent_mode_decode>(
+            queue,
+            core_attn_out,
+            q,
+            k,
+            v,
+            raw_gate,
+            raw_beta,
+            recurrent_state,
+            a_log,
+            dt_bias,
+            lower_bound,
+            args,
+            num_heads,
+            head_dim);
+      } else {
+        launch_kda_recurrent_opt<T, kda::recurrent_mode_general>(
+            queue,
+            core_attn_out,
+            q,
+            k,
+            v,
+            raw_gate,
+            raw_beta,
+            recurrent_state,
+            a_log,
+            dt_bias,
+            lower_bound,
+            args,
+            num_heads,
+            head_dim);
+      }
+    } else {
+      BUCKET_DISPATCH(
+          false,
+          reinterpret_cast<const int*>(non_spec_query_start_loc->data_ptr()),
+          non_spec_token_indx.has_value()
+              ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
+              : nullptr,
+          reinterpret_cast<const int*>(non_spec_state_indices->data_ptr()),
+          0,
+          has_initial_state.has_value()
+              ? reinterpret_cast<const bool*>(has_initial_state->data_ptr())
+              : nullptr,
+          nullptr,
+          non_spec_batch_size);
+    }
+  }
+  if (num_spec_decodes > 0) {
+    if (use_opt) {
+      const KdaRecurrentBatchArgs args{
+          reinterpret_cast<const int*>(spec_query_start_loc->data_ptr()),
+          reinterpret_cast<const int*>(spec_token_indx->data_ptr()),
+          reinterpret_cast<const int*>(spec_state_indices->data_ptr()),
+          spec_state_indices->stride(0),
+          nullptr,
+          reinterpret_cast<const int*>(num_accepted_tokens->data_ptr()),
+          num_spec_decodes};
+      launch_kda_recurrent_opt<T, kda::recurrent_mode_spec>(
+          queue,
+          core_attn_out,
+          q,
+          k,
+          v,
+          raw_gate,
+          raw_beta,
+          recurrent_state,
+          a_log,
+          dt_bias,
+          lower_bound,
+          args,
+          num_heads,
+          head_dim);
+    } else {
+      BUCKET_DISPATCH(
+          true,
+          reinterpret_cast<const int*>(spec_query_start_loc->data_ptr()),
+          reinterpret_cast<const int*>(spec_token_indx->data_ptr()),
+          reinterpret_cast<const int*>(spec_state_indices->data_ptr()),
+          spec_state_indices->stride(0),
+          nullptr,
+          reinterpret_cast<const int*>(num_accepted_tokens->data_ptr()),
+          num_spec_decodes);
+    }
+  }
+#undef BUCKET_DISPATCH
+#undef LAUNCH_RECURRENT
+}
+
+template <typename Fn>
+void dispatch_activation(at::ScalarType dtype, Fn&& fn) {
+  if (dtype == at::kBFloat16) {
+    fn(sycl::ext::oneapi::bfloat16{});
+  } else if (dtype == at::kHalf) {
+    fn(sycl::half{});
+  } else if (dtype == at::kFloat) {
+    fn(float{});
+  } else {
+    TORCH_CHECK(false, "unsupported KDA activation dtype");
+  }
+}
+
+}  // namespace
+
+std::vector<torch::Tensor> kda_causal_conv1d(
+    const torch::Tensor& q_proj,
+    const torch::Tensor& k_proj,
+    const torch::Tensor& v_proj,
+    torch::Tensor& conv_state,
+    const torch::Tensor& q_conv_weight,
+    const torch::Tensor& k_conv_weight,
+    const torch::Tensor& v_conv_weight,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const int64_t num_spec_decodes,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    const int64_t num_actual_tokens) {
+  validate_metadata(
+      num_prefills,
+      num_decodes,
+      num_spec_decodes,
+      has_initial_state,
+      non_spec_query_start_loc,
+      non_spec_token_indx,
+      non_spec_state_indices,
+      spec_query_start_loc,
+      spec_token_indx,
+      spec_state_indices,
+      num_accepted_tokens,
+      num_actual_tokens,
+      q_proj.device());
+  const auto shape = validate_conv_inputs(
+      q_proj,
+      k_proj,
+      v_proj,
+      conv_state,
+      q_conv_weight,
+      k_conv_weight,
+      v_conv_weight,
+      num_actual_tokens);
+
+  auto options =
+      torch::dtype(q_proj.dtype()).device(q_proj.device()).requires_grad(false);
+  auto q = torch::empty({num_actual_tokens, shape.hidden_dim}, options);
+  auto k = torch::empty({num_actual_tokens, shape.hidden_dim}, options);
+  auto v = torch::empty({num_actual_tokens, shape.hidden_dim}, options);
+  if (num_actual_tokens == 0) {
+    return {q, k, v};
+  }
+
+  auto& queue = vllm::xpu::vllmGetQueue();
+  dispatch_activation(q_proj.scalar_type(), [&](auto tag) {
+    using T = decltype(tag);
+    dispatch_activation(conv_state.scalar_type(), [&](auto cache_tag) {
+      using CacheT = decltype(cache_tag);
+      launch_kda_conv<T, CacheT>(
+          queue,
+          q,
+          k,
+          v,
+          q_proj,
+          k_proj,
+          v_proj,
+          conv_state,
+          q_conv_weight,
+          k_conv_weight,
+          v_conv_weight,
+          has_initial_state,
+          non_spec_query_start_loc,
+          non_spec_token_indx,
+          non_spec_state_indices,
+          spec_query_start_loc,
+          spec_token_indx,
+          spec_state_indices,
+          num_accepted_tokens,
+          num_prefills,
+          num_decodes,
+          num_spec_decodes,
+          shape.hidden_dim,
+          shape.width,
+          shape.dim_stride,
+          shape.time_stride,
+          shape.qkv_row_stride);
+    });
+  });
+  return {q, k, v};
+}
+
+void kda_gated_delta_rule(
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& raw_gate,
+    const torch::Tensor& raw_beta,
+    torch::Tensor& recurrent_state,
+    const torch::Tensor& a_log,
+    const torch::Tensor& dt_bias,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const int64_t num_spec_decodes,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    const int64_t num_actual_tokens,
+    const std::optional<double>& gate_lower_bound) {
+  validate_metadata(
+      num_prefills,
+      num_decodes,
+      num_spec_decodes,
+      has_initial_state,
+      non_spec_query_start_loc,
+      non_spec_token_indx,
+      non_spec_state_indices,
+      spec_query_start_loc,
+      spec_token_indx,
+      spec_state_indices,
+      num_accepted_tokens,
+      num_actual_tokens,
+      q.device());
+  const auto shape = validate_recurrent_inputs(
+      core_attn_out,
+      q,
+      k,
+      v,
+      raw_gate,
+      raw_beta,
+      recurrent_state,
+      a_log,
+      dt_bias,
+      num_actual_tokens);
+  if (num_actual_tokens == 0) {
+    return;
+  }
+
+  const float lower_bound = resolve_gate_lower_bound(gate_lower_bound);
+
+  auto& queue = vllm::xpu::vllmGetQueue();
+  dispatch_activation(q.scalar_type(), [&](auto tag) {
+    using T = decltype(tag);
+    launch_kda_recurrent<T>(
+        queue,
+        core_attn_out,
+        q,
+        k,
+        v,
+        raw_gate,
+        raw_beta,
+        recurrent_state,
+        a_log,
+        dt_bias,
+        lower_bound,
+        has_initial_state,
+        non_spec_query_start_loc,
+        non_spec_token_indx,
+        non_spec_state_indices,
+        spec_query_start_loc,
+        spec_token_indx,
+        spec_state_indices,
+        num_accepted_tokens,
+        num_prefills,
+        num_decodes,
+        num_spec_decodes,
+        shape.num_heads,
+        shape.head_dim,
+        num_actual_tokens);
+  });
+}
+
+void kda_attention(
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q_proj,
+    const torch::Tensor& k_proj,
+    const torch::Tensor& v_proj,
+    const torch::Tensor& raw_gate,
+    const torch::Tensor& raw_beta,
+    torch::Tensor& conv_state,
+    torch::Tensor& recurrent_state,
+    const torch::Tensor& q_conv_weight,
+    const torch::Tensor& k_conv_weight,
+    const torch::Tensor& v_conv_weight,
+    const torch::Tensor& a_log,
+    const torch::Tensor& dt_bias,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const int64_t num_spec_decodes,
+    const std::optional<torch::Tensor>& has_initial_state,
+    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const std::optional<torch::Tensor>& non_spec_token_indx,
+    const std::optional<torch::Tensor>& non_spec_state_indices,
+    const std::optional<torch::Tensor>& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const std::optional<torch::Tensor>& spec_state_indices,
+    const std::optional<torch::Tensor>& num_accepted_tokens,
+    const int64_t num_actual_tokens,
+    const std::optional<double>& gate_lower_bound) {
+  auto qkv = kda_causal_conv1d(
+      q_proj,
+      k_proj,
+      v_proj,
+      conv_state,
+      q_conv_weight,
+      k_conv_weight,
+      v_conv_weight,
+      num_prefills,
+      num_decodes,
+      num_spec_decodes,
+      has_initial_state,
+      non_spec_query_start_loc,
+      non_spec_token_indx,
+      non_spec_state_indices,
+      spec_query_start_loc,
+      spec_token_indx,
+      spec_state_indices,
+      num_accepted_tokens,
+      num_actual_tokens);
+  kda_gated_delta_rule(
+      core_attn_out,
+      qkv[0],
+      qkv[1],
+      qkv[2],
+      raw_gate,
+      raw_beta,
+      recurrent_state,
+      a_log,
+      dt_bias,
+      num_prefills,
+      num_decodes,
+      num_spec_decodes,
+      has_initial_state,
+      non_spec_query_start_loc,
+      non_spec_token_indx,
+      non_spec_state_indices,
+      spec_query_start_loc,
+      spec_token_indx,
+      spec_state_indices,
+      num_accepted_tokens,
+      num_actual_tokens,
+      gate_lower_bound);
+}
