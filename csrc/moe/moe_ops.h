@@ -104,3 +104,8 @@ void remap_hidden_states(
     torch::Tensor& topk_ids,
     int64_t total_experts_num,
     int64_t local_experts_num);
+
+torch::Tensor reorder_mxfp_scales(
+    const torch::Tensor& A_scales,
+    const torch::Tensor& rows_per_expert,
+    const int64_t total_padded_rows);
