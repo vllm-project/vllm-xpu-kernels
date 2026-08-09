@@ -349,7 +349,7 @@ def ref_paged_attn(query: torch.Tensor,
             k = (k.to(torch.float32) * k_descale).to(dtype)
             v = (v.to(torch.float32) * v_descale).to(dtype)
         attn = torch.einsum("qhd,khd->hqk", q, k).float()
-        empty_mask = torch.ones(query_len, kv_len)
+        empty_mask = torch.ones(query_len, kv_len).to(attn.device)
         mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
         if window_size_right > 0 or window_size_left > 0:
             if window_size_right < 0:

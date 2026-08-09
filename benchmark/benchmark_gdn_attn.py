@@ -36,6 +36,7 @@ from tests.utils import parse_args, seed_everything
 # isort: on
 
 DEVICE = "xpu"
+WARMUP = 50
 
 
 def clear_xpu_cache():
@@ -405,8 +406,9 @@ def benchmark_gdn(shape_name, workload_name, dtype_str, provider, iterations):
 
     print(f"Running config: shape={shape.name}, workload={workload.name}, "
           f"dtype={dtype_str}, Provider: {provider}", flush=True)
-    assert iterations > 5, \
-        "Number of iterations should be greater than 5 to account for warmup"
+    assert iterations > WARMUP, \
+        "Number of iterations should be greater than WARMUP to account " \
+        "for warmup"
 
     kwargs = make_inputs(shape, workload, dtype)
 
@@ -462,18 +464,18 @@ def benchmark_gdn(shape_name, workload_name, dtype_str, provider, iterations):
             tp_size=kwargs["tp_size"])
 
     # warmup
-    for _ in range(5):
+    for _ in range(WARMUP):
         _run()
     torch.xpu.synchronize()
 
     start_event = torch.xpu.Event(enable_timing=True)
     end_event = torch.xpu.Event(enable_timing=True)
     start_event.record()
-    for _ in range(5, iterations):
+    for _ in range(WARMUP, iterations):
         _run()
     end_event.record()
     torch.xpu.synchronize()
-    ms = start_event.elapsed_time(end_event) / (iterations - 5)
+    ms = start_event.elapsed_time(end_event) / (iterations - WARMUP)
 
     if provider == "gdn":
         clear_xpu_cache()
@@ -499,7 +501,7 @@ def benchmark_gdn(shape_name, workload_name, dtype_str, provider, iterations):
     raise ValueError(f"Unknown provider {provider}")
 
 
-def get_benchmark(configs, iterations=20):
+def get_benchmark(configs, iterations=200):
 
     @triton.testing.perf_report(
         triton.testing.Benchmark(
@@ -538,7 +540,7 @@ if __name__ == "__main__":
     args = parse_args()
     seed = 1234
     seed_everything(seed)
-    iterations = 30
+    iterations = 200
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
 
