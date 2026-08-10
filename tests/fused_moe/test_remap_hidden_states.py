@@ -11,7 +11,7 @@ DEVICE = "xpu"
 NUM_ROWS = [32, 1024]
 HIDDEN_SIZE = [128]
 TOTAL_EXPERTS_NUM = [32, 128]
-TOP_KS = [1, 8]
+TOP_KS = [1, 8, 16]
 RECIPE_TO_DTYPE = {
     "bf16": (torch.bfloat16, None),
     "fp16": (torch.float16, None),

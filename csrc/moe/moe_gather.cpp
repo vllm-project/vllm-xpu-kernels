@@ -138,6 +138,7 @@ void MoeGatherLauncher(
       CASE_TOPK(7, ElemsPerItem)                                               \
       CASE_TOPK(8, ElemsPerItem)                                               \
       CASE_TOPK(10, ElemsPerItem)                                              \
+      CASE_TOPK(16, ElemsPerItem)                                              \
       default:                                                                 \
         TORCH_CHECK(false, "error: not support TOPK=" + std::to_string(TOPK)); \
     }                                                                          \
