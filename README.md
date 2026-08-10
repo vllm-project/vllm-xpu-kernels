@@ -31,7 +31,7 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 |---|---|
 | **Normalization** | RMS norm, fused add-RMS norm, layer norm |
 | **Activation** | SiLU-and-mul, mul-and-SiLU, GeLU (fast/new/quick/tanh), SwigluOAI |
-| **Attention** | Flash attention (variable-length), GDN attention, XE2 attention variants |
+| **Attention** | Flash attention (variable-length), GDN and Kimi Delta attention, XE2 attention variants |
 | **Positional Encoding** | Rotary embedding (NeoX and GPT-J styles), DeepSeek scaling RoPE |
 | **Mixture of Experts** | TopK scoring (softmax/sigmoid), grouped TopK, fused grouped TopK; MoE align sum, MoE gather, expert remapping |
 | **LoRA** | LoRA operator support |

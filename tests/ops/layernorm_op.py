@@ -36,6 +36,22 @@ def rms_norm(x: torch.Tensor, weight: Optional[torch.Tensor],
     return out
 
 
+def rms_norm_gated(x: torch.Tensor, gate: torch.Tensor,
+                   weight: Optional[torch.Tensor], variance_epsilon: float,
+                   activation: str) -> torch.Tensor:
+    import tests.register_ops as ops
+    out = torch.empty_like(x)
+    ops.fused_rms_norm_gated(
+        out,
+        x,
+        gate,
+        weight,
+        variance_epsilon,
+        activation,
+    )
+    return out
+
+
 def dispatch_cuda_rmsnorm_func(add_residual: bool):
     if add_residual:
         return fused_add_rms_norm
@@ -136,4 +152,79 @@ class RMSNorm(CustomOp):
     def extra_repr(self) -> str:
         s = f"hidden_size={self.hidden_size}"
         s += f", eps={self.variance_epsilon}"
+        return s
+
+
+class RMSNormGated(CustomOp):
+    """Gated root mean square normalization.
+
+    Computes ``out = w * x / sqrt(E[x^2] + eps) * act(g)``, the output norm
+    used by linear-attention layers. Mirrors ``fla.modules.FusedRMSNormGated``
+    (and vLLM's ``RMSNormGated``): KDA uses ``sigmoid``, the Gated DeltaNet
+    family uses ``swish``.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-5,
+        activation: str = "sigmoid",
+        has_weight: bool = True,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        super().__init__()
+
+        if activation not in ("sigmoid", "swish", "silu"):
+            raise ValueError(f"Unsupported activation: {activation}")
+
+        self.hidden_size = hidden_size
+        self.variance_epsilon = eps
+        self.activation = activation
+        self.has_weight = has_weight
+        if dtype is not None:
+            self.weight = torch.ones(hidden_size, dtype=dtype)
+        else:
+            self.weight = torch.ones(hidden_size)
+        if self.has_weight:
+            self.weight = nn.Parameter(self.weight)
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        orig_dtype = x.dtype
+        x_f = x.to(torch.float32)
+        variance = x_f.pow(2).mean(dim=-1, keepdim=True)
+        x_f = x_f * torch.rsqrt(variance + self.variance_epsilon)
+        if self.has_weight:
+            x_f = x_f * self.weight.to(torch.float32)
+        g = gate.to(torch.float32)
+        if self.activation == "sigmoid":
+            x_f = x_f * torch.sigmoid(g)
+        else:
+            x_f = x_f * g * torch.sigmoid(g)
+        return x_f.to(orig_dtype)
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        weight = self.weight.data if self.has_weight else None
+        return rms_norm_gated(x, gate, weight, self.variance_epsilon,
+                              self.activation)
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.forward_cuda(x, gate)
+
+    def extra_repr(self) -> str:
+        s = f"hidden_size={self.hidden_size}"
+        s += f", eps={self.variance_epsilon}"
+        s += f", activation={self.activation}"
         return s
