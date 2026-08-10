@@ -43,9 +43,27 @@ CASES = {
     # diverged result.
     "prefill_b1_s256_d128_lbsat": (1, 256, 128, "bfloat16", "float32"),
     "prefill_b2_s192_d64_lbsat": (2, 192, 64, "bfloat16", "float32"),
+    # `_shallowlb` uses a bound so close to zero that a whole chunk of maximal
+    # decay still cannot reach the clamp. The chunked pipeline therefore skips
+    # the guard's synchronization, and has to stay correct without it even
+    # though the gate is driven as hard as `_lbsat` drives it.
+    "prefill_b1_s256_d128_shallowlb": (1, 256, 128, "bfloat16", "float32"),
+    "prefill_b2_s192_d64_shallowlb": (2, 192, 64, "bfloat16", "float32"),
+    # `mixed_*` batches carry decodes and prefills at once, decode-first, the
+    # way vLLM schedules them. The whole non-spec batch goes to one backend, so
+    # the chunked pipeline has to handle the length-1 sequences too rather than
+    # rely on the caller splitting them off.
+    "mixed_d3_p2_s128_d128": (5, (1, 1, 1, 128, 128), 128, "bfloat16",
+                              "float32"),
+    "mixed_d2_p2_s96_d64": (4, (1, 1, 96, 160), 64, "bfloat16", "float32"),
+    "mixed_d2_p1_s192_d128_lb": (3, (1, 1, 192), 128, "bfloat16", "float32"),
 }
 
 GATE_LOWER_BOUND = -5.0
+# Shallow enough that `chunk_size * bound` stays above the chunked pipeline's
+# `g_floor` clamp, so saturation is arithmetically impossible and the guard's
+# synchronization is skipped.
+SHALLOW_GATE_LOWER_BOUND = -1.0
 # Trained sigmoid-gate models sit deep in the retention regime, so the gate
 # logits are strongly negative. Without the shift a zero-mean logit would give
 # g ~ lower_bound/2 = -2.5 per token, i.e. a per-chunk cumulative decay of
@@ -59,7 +77,15 @@ def _build(case, seed=0, permute=False, lower_bound=None, shift_gate=True):
     dtype = getattr(torch, dtype_str)
     state_dtype = getattr(torch, state_dtype_str)
     gen = torch.Generator(device="cpu").manual_seed(seed)
-    num_tokens = batch * seqlen
+    # `seqlen` is either a uniform length or an explicit per-sequence list, the
+    # latter describing the decode-first mixed batches vLLM builds when
+    # prefills and decodes are scheduled together.
+    if isinstance(seqlen, (tuple, list)):
+        lens = list(seqlen)
+    else:
+        lens = [seqlen] * batch
+    assert len(lens) == batch
+    num_tokens = sum(lens)
     hidden = NUM_HEADS * head_dim
 
     def rand(*shape, scale=1.0):
@@ -73,6 +99,9 @@ def _build(case, seed=0, permute=False, lower_bound=None, shift_gate=True):
         token_indx = torch.cat([
             torch.arange(offset, num_tokens, batch) for offset in range(batch)
         ]).to(DEVICE, torch.int32)
+
+    query_start_loc = torch.zeros(batch + 1, dtype=torch.int32)
+    query_start_loc[1:] = torch.tensor(lens, dtype=torch.int32).cumsum(0)
 
     # Keep the gate scale in the range trained models produce: the chunked
     # path needs the per-chunk cumulative log-decay to stay representable.
@@ -92,13 +121,12 @@ def _build(case, seed=0, permute=False, lower_bound=None, shift_gate=True):
             if lower_bound is not None and shift_gate else 0.0)),
         "out": torch.zeros(1, num_tokens, NUM_HEADS, head_dim,
                            device=DEVICE, dtype=dtype),
-        "qsl": torch.arange(0, num_tokens + 1, seqlen,
-                            device=DEVICE, dtype=torch.int32),
+        "qsl": query_start_loc.to(DEVICE),
         "idx": torch.arange(batch, device=DEVICE, dtype=torch.int32),
         "tok": token_indx,
         "hi": torch.ones(batch, device=DEVICE, dtype=torch.bool),
-        "num_prefills": batch if seqlen > 1 else 0,
-        "num_decodes": 0 if seqlen > 1 else batch,
+        "num_prefills": sum(1 for length in lens if length > 1),
+        "num_decodes": sum(1 for length in lens if length == 1),
         "num_tokens": num_tokens,
         "lower_bound": lower_bound,
     }
@@ -136,18 +164,30 @@ def _permutation_pair(seed=7):
     return identity, permuted, perm
 
 
+def _gate_config(name):
+    """Gate parameterisation implied by a case name suffix."""
+    if name.endswith("_shallowlb"):
+        # Driven as hard as `_lbsat`, but with a bound the clamp cannot reach.
+        return SHALLOW_GATE_LOWER_BOUND, False
+    if name.endswith("_lbsat"):
+        return GATE_LOWER_BOUND, False
+    if name.endswith("_lb"):
+        return GATE_LOWER_BOUND, True
+    return None, True
+
+
 def _worker(out_path):
     import vllm_xpu_kernels._xpu_C  # noqa: F401
     results = {}
     for i, (name, case) in enumerate(sorted(CASES.items())):
+        lower_bound, shift_gate = _gate_config(name)
         results[name] = _run(
             _build(
                 case,
                 seed=i,
                 permute=name.endswith("_perm"),
-                lower_bound=(GATE_LOWER_BOUND if name.endswith(
-                    ("_lb", "_lbsat")) else None),
-                shift_gate=not name.endswith("_lbsat"),
+                lower_bound=lower_bound,
+                shift_gate=shift_gate,
             ))
     torch.save(results, out_path)
 
@@ -163,12 +203,12 @@ def _scatter_worker(out_path):
         }, out_path)
 
 
-def _strict_worker(out_path, a_log_scale):
+def _strict_worker(out_path, a_log_scale, lower_bound=None):
     """Run one chunked prefill with a scaled A_log under the strict decay
     check, and record whether the op accepted it."""
     import vllm_xpu_kernels._xpu_C  # noqa: F401
     case = (1, 256, 128, "bfloat16", "float32")
-    t = _build(case, seed=0)
+    t = _build(case, seed=0, lower_bound=lower_bound, shift_gate=False)
     t["a_log"] = t["a_log"] + float(a_log_scale)
     try:
         _run(t)
@@ -243,8 +283,8 @@ def test_chunk_honours_permuted_token_indx(tmp_path):
         msg=lambda m: f"chunk state depends on token_indx row order\n{m}")
 
 
-def _run_strict(tmp_path, a_log_shift):
-    out_path = str(tmp_path / f"strict_{a_log_shift}.pt")
+def _run_strict(tmp_path, a_log_shift, lower_bound=None):
+    out_path = str(tmp_path / f"strict_{a_log_shift}_{lower_bound}.pt")
     env = dict(os.environ)
     env["VLLM_XPU_KDA_RECURRENT_MODE"] = "chunk"
     env["VLLM_XPU_KDA_CHUNK_MIN_SEQLEN"] = "1"
@@ -252,7 +292,7 @@ def _run_strict(tmp_path, a_log_shift):
     env.setdefault("PYTHONPATH", os.getcwd())
     subprocess.run(
         [sys.executable, os.path.abspath(__file__), "--strict", out_path,
-         str(a_log_shift)],
+         str(a_log_shift), str(lower_bound)],
         check=True, env=env)
     return torch.load(out_path)["raised"]
 
@@ -277,10 +317,26 @@ def test_chunk_strict_rejects_saturating_decay(tmp_path):
     assert "VLLM_XPU_KDA_RECURRENT_MODE" in raised
 
 
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="requires XPU")
+def test_chunk_strict_accepts_a_bound_the_clamp_cannot_reach(tmp_path):
+    """A shallow enough gate bound makes saturation arithmetically impossible.
+
+    The sigmoid gate contributes more than `lower_bound` per token and the
+    cumulative log-decay restarts at every chunk boundary, so a chunk can decay
+    by at most `chunk_size * lower_bound`. When that stays above the clamp no
+    input can saturate it, which is what lets the dispatcher skip the guard's
+    synchronization. Drive the gate as hard as the saturating cases do and
+    check the strict switch still finds nothing to complain about.
+    """
+    assert _run_strict(tmp_path, 1.5, SHALLOW_GATE_LOWER_BOUND) is None
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "--scatter":
         _scatter_worker(sys.argv[2])
     elif sys.argv[1] == "--strict":
-        _strict_worker(sys.argv[2], sys.argv[3])
+        bound = sys.argv[4]
+        _strict_worker(sys.argv[2], sys.argv[3],
+                       None if bound == "None" else float(bound))
     else:
         _worker(sys.argv[1])

@@ -5,6 +5,7 @@
 
 #include "chunk_kda_launcher_xe2.hpp"
 #include "chunk_kda_xe2.h"
+#include "../kda_gate.hpp"
 
 namespace {
 
@@ -33,6 +34,18 @@ bool chunk_kda_xe2_supported(int64_t head_dim) {
   // The DPAS tiles are chunk_size x chunk_size, so the head dimension must be
   // a whole number of tiles.
   return head_dim >= kda_xe2::chunk_size && head_dim % kda_xe2::chunk_size == 0;
+}
+
+bool chunk_kda_xe2_decay_range_reachable(float lower_bound) {
+  if (!kda_gate::use_lower_bound(lower_bound)) {
+    return false;
+  }
+  // `prepare` resets the cumulative log-decay at every chunk boundary and the
+  // sigmoid gate contributes more than `lower_bound` per token, so the cumsum
+  // is bounded below by `chunk_size * lower_bound`. Kimi-K3's `-5.0` crosses
+  // the floor and still needs the guard; a shallower bound never can.
+  return static_cast<float>(kda_xe2::chunk_size) * lower_bound <
+         kda_xe2::g_floor;
 }
 
 int64_t chunk_kda_xe2_workspace_bytes(

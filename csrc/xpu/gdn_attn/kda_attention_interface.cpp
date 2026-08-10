@@ -90,8 +90,19 @@ int64_t kda_chunk_max_workspace_bytes() {
 // activation above 0.25 to saturate. That case is therefore guarded by
 // default: the pipeline synchronizes after its first stage and, when the clamp
 // engaged, hands the batch to the recurrent backend instead.
+//
+// The guard costs a device synchronization, so it is skipped when the bound is
+// shallow enough that a whole chunk of maximal decay still cannot reach the
+// floor. `chunk_kda_xe2_decay_range_reachable` owns that arithmetic because it
+// needs the chunked pipeline's own `chunk_size` and `g_floor`.
 bool kda_chunk_guard_decay_range(float lower_bound) {
-  return kda_gate::use_lower_bound(lower_bound);
+#ifdef VLLM_XPU_ENABLE_XE2
+  return chunk_kda_xe2_decay_range_reachable(lower_bound);
+#else
+  // No chunked pipeline in this build, so there is no clamp to guard.
+  (void)lower_bound;
+  return false;
+#endif
 }
 
 // Turn the same condition into an error rather than a silent fallback, so a
@@ -292,6 +303,9 @@ ConvShape validate_conv_inputs(
   TORCH_CHECK(
       qkv_row_stride >= hidden_dim,
       "KDA projection row stride must be >= the hidden dimension");
+  // The kernels address token `t` channel `c` as `base[t * qkv_row_stride + c]`
+  // in int64, and `q_proj.size(0) >= num_actual_tokens` above bounds `t`, so
+  // PyTorch's own storage invariant already keeps every such read in bounds.
   TORCH_CHECK(
       hidden_dim <= std::numeric_limits<int>::max() / 3,
       "projection hidden dimension exceeds the KDA kernel limit");
@@ -375,6 +389,14 @@ RecurrentShape validate_recurrent_inputs(
       "q must have shape [num_actual_tokens, heads * dim]");
   TORCH_CHECK(k.sizes() == q.sizes(), "k shape must match q");
   TORCH_CHECK(v.sizes() == q.sizes(), "v shape must match q");
+  // Unlike the convolution, the recurrent and chunked kernels index q/k/v with
+  // a packed `token * heads * dim` stride. Threading a row stride through them
+  // was measured at ~1.4% on the chunked prefill path -- the q/k/v and gate
+  // offsets stop being a common subexpression -- which is not worth paying on
+  // every call, because `kda_attention` always hands these kernels the dense
+  // buffers its own convolution just wrote. Row-strided views are therefore
+  // densified by the caller (see `kda_gated_delta_rule`), matching what the
+  // CUDA reference does for its non-packed KDA entry points.
   TORCH_CHECK(
       q.is_contiguous() && k.is_contiguous() && v.is_contiguous() &&
           raw_gate.is_contiguous() && raw_beta.is_contiguous() &&
@@ -424,10 +446,8 @@ RecurrentShape validate_recurrent_inputs(
   check_cache_layout(recurrent_state, "recurrent_state");
   TORCH_CHECK(
       a_log.scalar_type() == at::kFloat && a_log.numel() == num_heads &&
-          a_log.is_contiguous() && a_log.dim() == 4 && a_log.size(0) == 1 &&
-          a_log.size(1) == 1 && a_log.size(2) == num_heads &&
-          a_log.size(3) == 1,
-      "A_log must have contiguous float32 shape [1, 1, heads, 1]");
+          a_log.is_contiguous(),
+      "A_log must be contiguous float32 with one value per head");
   TORCH_CHECK(
       dt_bias.scalar_type() == at::kFloat && dt_bias.numel() == hidden_dim &&
           dt_bias.is_contiguous() && dt_bias.dim() == 1,
@@ -1224,11 +1244,18 @@ void kda_gated_delta_rule(
       num_accepted_tokens,
       num_actual_tokens,
       q.device());
+  // Callers slice q/k/v out of one fused mixed-QKV projection, so accept the
+  // row-strided views and densify them here rather than pushing the copy back
+  // onto every caller. `kda_attention` never reaches this path with strided
+  // input, so the fast case pays nothing beyond the flag test.
+  const torch::Tensor q_dense = q.contiguous();
+  const torch::Tensor k_dense = k.contiguous();
+  const torch::Tensor v_dense = v.contiguous();
   const auto shape = validate_recurrent_inputs(
       core_attn_out,
-      q,
-      k,
-      v,
+      q_dense,
+      k_dense,
+      v_dense,
       raw_gate,
       raw_beta,
       recurrent_state,
@@ -1247,9 +1274,9 @@ void kda_gated_delta_rule(
     launch_kda_recurrent<T>(
         queue,
         core_attn_out,
-        q,
-        k,
-        v,
+        q_dense,
+        k_dense,
+        v_dense,
         raw_gate,
         raw_beta,
         recurrent_state,

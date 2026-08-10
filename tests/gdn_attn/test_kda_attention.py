@@ -972,3 +972,290 @@ def test_kda_attention_accepts_fused_mixed_qkv(mode, gate_lower_bound):
         torch.testing.assert_close(
             from_strided, from_contiguous, atol=0.0, rtol=0.0
         )
+
+
+@pytest.mark.parametrize("a_log_shape", [(8, ), (1, 1, 8, 1), (1, 8)])
+@torch.inference_mode()
+def test_kda_attention_accepts_any_contiguous_a_log_layout(a_log_shape):
+    """``A_log`` carries one value per head; its shape is the caller's choice.
+
+    vLLM keeps it as ``[num_heads]`` while this repository's tests grew up
+    around the ``[1, 1, heads, 1]`` broadcast layout. The kernels only ever
+    index it linearly, so requiring one of them would force a reshape on the
+    caller for no reason.
+    """
+    device = "xpu"
+    num_heads, head_dim, width = 8, 64, 4
+    hidden_dim = num_heads * head_dim
+    batch_size, seq_len = 2, 96
+    num_actual_tokens = batch_size * seq_len
+
+    torch.manual_seed(11)
+    projections = tuple(
+        (torch.randn(num_actual_tokens, hidden_dim, device=device) * 0.2).to(
+            torch.bfloat16
+        )
+        for _ in range(3)
+    )
+    raw_gate = (
+        torch.randn(1, num_actual_tokens, num_heads, head_dim, device=device)
+        * 0.2
+    ).to(torch.bfloat16)
+    raw_beta = torch.randn(1, num_actual_tokens, num_heads, device=device)
+    weights = tuple(
+        torch.randn(hidden_dim, width, dtype=torch.float32, device=device)
+        * 0.1
+        for _ in range(3)
+    )
+    a_log_values = torch.randn(num_heads, device=device) * 0.1
+    dt_bias = torch.randn(hidden_dim, device=device) * 0.1
+    query_start_loc = torch.arange(
+        0, num_actual_tokens + 1, seq_len, device=device, dtype=torch.int32
+    )
+    state_indices = torch.arange(batch_size, device=device, dtype=torch.int32)
+    has_initial_state = torch.zeros(
+        batch_size, device=device, dtype=torch.bool
+    )
+
+    def run(a_log):
+        conv_state = torch.zeros(
+            batch_size, 3 * hidden_dim, width - 1, device=device
+        )
+        recurrent_state = torch.zeros(
+            batch_size, num_heads, head_dim, head_dim, device=device
+        )
+        output = torch.zeros(
+            1,
+            num_actual_tokens,
+            num_heads,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        torch.ops._xpu_C.kda_attention(
+            output,
+            *projections,
+            raw_gate,
+            raw_beta,
+            conv_state,
+            recurrent_state,
+            *weights,
+            a_log,
+            dt_bias,
+            batch_size,
+            0,
+            0,
+            has_initial_state,
+            query_start_loc,
+            None,
+            state_indices,
+            None,
+            None,
+            None,
+            None,
+            num_actual_tokens,
+            None,
+        )
+        return output, recurrent_state
+
+    reference = run(a_log_values.reshape(1, 1, num_heads, 1))
+    actual = run(a_log_values.reshape(a_log_shape))
+    for from_reference, from_actual in zip(reference, actual):
+        torch.testing.assert_close(
+            from_actual, from_reference, atol=0.0, rtol=0.0
+        )
+
+
+@pytest.mark.parametrize(
+    "mode,seq_len,num_prefills,num_decodes",
+    [
+        ("prefill", 256, 2, 0),
+        ("decode", 1, 0, 2),
+        ("short_prefill", 96, 2, 0),
+    ],
+)
+@pytest.mark.parametrize("gate_lower_bound", [None, -5.0])
+@torch.inference_mode()
+def test_kda_gated_delta_rule_accepts_fused_mixed_qkv(
+    mode, seq_len, num_prefills, num_decodes, gate_lower_bound
+):
+    """``kda_gated_delta_rule`` must accept the same row-strided q/k/v as conv.
+
+    A caller that runs the convolution itself ends up with a packed
+    ``[tokens, 3 * heads * dim]`` activation and slices q/k/v out of it. The
+    recurrent and chunked kernels index q/k/v with a packed stride, so the op
+    densifies such views itself; either way the result must be identical.
+    ``seq_len`` spans both sides of the chunked-backend admission threshold so
+    every backend is exercised.
+    """
+    device = "xpu"
+    num_heads, head_dim = 8, 64
+    hidden_dim = num_heads * head_dim
+    batch_size = num_prefills + num_decodes
+    num_actual_tokens = batch_size * seq_len
+
+    torch.manual_seed(23)
+    # The stride is a multiple of head_dim but not of 3 * hidden_dim, so the
+    # chunked backend's alignment precondition is met without the slices being
+    # trivially adjacent.
+    fused = (
+        torch.randn(
+            num_actual_tokens, 3 * hidden_dim + head_dim, device=device
+        )
+        * 0.2
+    ).to(torch.bfloat16)
+    strided = tuple(
+        fused[:, i * hidden_dim:(i + 1) * hidden_dim] for i in range(3)
+    )
+    contiguous = tuple(
+        projection.contiguous() for projection in strided
+    )
+    assert strided[0].stride(0) == 3 * hidden_dim + head_dim
+
+    raw_gate = (
+        torch.randn(1, num_actual_tokens, num_heads, head_dim, device=device)
+        * 0.2
+    ).to(torch.bfloat16)
+    raw_beta = torch.randn(1, num_actual_tokens, num_heads, device=device)
+    a_log = torch.randn(num_heads, device=device) * 0.1
+    dt_bias = torch.randn(hidden_dim, device=device) * 0.1
+    query_start_loc = torch.arange(
+        0, num_actual_tokens + 1, seq_len, device=device, dtype=torch.int32
+    )
+    state_indices = torch.arange(batch_size, device=device, dtype=torch.int32)
+    has_initial_state = torch.zeros(
+        batch_size, device=device, dtype=torch.bool
+    )
+    initial_state = (
+        torch.randn(
+            batch_size, num_heads, head_dim, head_dim, device=device
+        )
+        * 0.1
+    )
+
+    results = []
+    for projections in (strided, contiguous):
+        recurrent_state = initial_state.clone()
+        output = torch.zeros(
+            1,
+            num_actual_tokens,
+            num_heads,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        torch.ops._xpu_C.kda_gated_delta_rule(
+            output,
+            *projections,
+            raw_gate,
+            raw_beta,
+            recurrent_state,
+            a_log,
+            dt_bias,
+            num_prefills,
+            num_decodes,
+            0,
+            has_initial_state,
+            query_start_loc,
+            None,
+            state_indices,
+            None,
+            None,
+            None,
+            None,
+            num_actual_tokens,
+            gate_lower_bound,
+        )
+        results.append((output, recurrent_state))
+
+    for from_strided, from_contiguous in zip(*results):
+        torch.testing.assert_close(
+            from_strided, from_contiguous, atol=0.0, rtol=0.0
+        )
+
+
+@torch.inference_mode()
+def test_kda_gated_delta_rule_accepts_independently_strided_qkv():
+    """q/k/v need not share a buffer or a row pitch.
+
+    The op densifies whatever it is given, so unlike ``kda_causal_conv1d`` --
+    whose kernels really do index by a shared row stride -- there is no
+    matching-pitch requirement here.
+    """
+    device = "xpu"
+    num_heads, head_dim = 4, 64
+    hidden_dim = num_heads * head_dim
+    num_actual_tokens = 128
+
+    torch.manual_seed(29)
+    fused = (
+        torch.randn(
+            num_actual_tokens, 3 * hidden_dim, device=device
+        ) * 0.2
+    ).to(torch.bfloat16)
+    # q and k share one pitch, v another.
+    wide = (
+        torch.randn(num_actual_tokens, hidden_dim + 32, device=device) * 0.2
+    ).to(torch.bfloat16)
+    strided = (
+        fused[:, :hidden_dim],
+        fused[:, hidden_dim:2 * hidden_dim],
+        wide[:, :hidden_dim],
+    )
+    assert strided[0].stride(0) != strided[2].stride(0)
+    contiguous = tuple(x.contiguous() for x in strided)
+
+    raw_gate = (
+        torch.randn(1, num_actual_tokens, num_heads, head_dim, device=device)
+        * 0.2
+    ).to(torch.bfloat16)
+    raw_beta = torch.randn(1, num_actual_tokens, num_heads, device=device)
+    a_log = torch.randn(num_heads, device=device) * 0.1
+    dt_bias = torch.randn(hidden_dim, device=device) * 0.1
+    query_start_loc = torch.tensor(
+        [0, num_actual_tokens], device=device, dtype=torch.int32
+    )
+    state_indices = torch.zeros(1, device=device, dtype=torch.int32)
+    has_initial_state = torch.zeros(1, device=device, dtype=torch.bool)
+
+    results = []
+    for projections in (strided, contiguous):
+        recurrent_state = torch.zeros(
+            1, num_heads, head_dim, head_dim, device=device
+        )
+        output = torch.zeros(
+            1,
+            num_actual_tokens,
+            num_heads,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        torch.ops._xpu_C.kda_gated_delta_rule(
+            output,
+            *projections,
+            raw_gate,
+            raw_beta,
+            recurrent_state,
+            a_log,
+            dt_bias,
+            1,
+            0,
+            0,
+            has_initial_state,
+            query_start_loc,
+            None,
+            state_indices,
+            None,
+            None,
+            None,
+            None,
+            num_actual_tokens,
+            -5.0,
+        )
+        results.append((output, recurrent_state))
+
+    for from_strided, from_contiguous in zip(*results):
+        torch.testing.assert_close(
+            from_strided, from_contiguous, atol=0.0, rtol=0.0
+        )
