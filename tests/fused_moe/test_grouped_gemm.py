@@ -442,3 +442,84 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
     ref = torch.cat(ref, dim=0)
 
     torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("m,n,k", [(1, 256, 256), (4, 256, 128),
+                                    (16, 512, 256), (4, 5120, 8192)])
+@pytest.mark.parametrize("e", [2, 4])
+@pytest.mark.parametrize("topk", [1])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn],
+                         ids=format_tc)
+@pytest.mark.parametrize("has_bias", [False, True])
+@pytest.mark.parametrize("group_size", [128])
+def test_xe_grouped_gemm_fp8_block(m, n, k, e, topk, dtype, fp8_dtype,
+                                   has_bias, group_size):
+    """Block FP8 grouped GEMM: FP8 weights + float32 block scales
+    [E, K/gs, N/gs]."""
+    seed_everything(7)
+    num_experts = e
+    total_m = m * topk
+
+    assert k % group_size == 0
+    assert n % group_size == 0
+    group_num_k = k // group_size
+    group_num_n = n // group_size
+
+    # Activations (bf16/fp16)
+    input_A = torch.randn((total_m, k), dtype=dtype,
+                          device=DEVICE).contiguous() / 10
+
+    # Generate FP8 weights and block scales per expert
+    input_B = torch.empty(num_experts, k, n, dtype=fp8_dtype, device=DEVICE)
+    scale_B = torch.empty(num_experts, group_num_k, group_num_n,
+                          dtype=torch.float32, device=DEVICE)
+    input_B_dequant = torch.empty(num_experts, k, n, dtype=torch.float32,
+                                  device=DEVICE)
+
+    for i in range(num_experts):
+        w_hp = torch.randn(k, n, dtype=torch.float32, device=DEVICE) / 10
+        input_B[i] = w_hp.to(fp8_dtype)
+        # Positive block scales
+        scale_B[i] = (torch.rand(group_num_k, group_num_n,
+                                 dtype=torch.float32,
+                                 device=DEVICE) * 2 + 0.5)
+        # Dequantize reference: expand block scales to [K, N]
+        scale_expanded = scale_B[i].repeat_interleave(
+            group_size, dim=0).repeat_interleave(group_size, dim=1)
+        input_B_dequant[i] = input_B[i].to(torch.float32) * scale_expanded
+
+    if has_bias:
+        bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE) / 10
+    else:
+        bias = None
+
+    # Token distribution across experts
+    num_rows_per_expert = torch.zeros(num_experts, device=DEVICE,
+                                      dtype=torch.int32)
+    init_rows_for_experts(m, topk, num_rows_per_expert)
+
+    output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
+
+    cutlass_grouped_gemm_xe2(input_A, input_B, scale_B, bias, output,
+                             num_rows_per_expert, n, k, num_experts)
+
+    # Reference: per-expert matmul with dequantized weights in fp32
+    ref = []
+    pre_token_sum = 0
+    for i in range(num_experts):
+        cur_token_num = int(num_rows_per_expert[i].item())
+        if cur_token_num == 0:
+            continue
+        inp = input_A[pre_token_sum:pre_token_sum + cur_token_num].to(
+            torch.float32)
+        weight = input_B_dequant[i]
+        expert_output_fp32 = inp @ weight
+        if has_bias:
+            expert_output_fp32 += bias[i].to(torch.float32)
+        ref.append(expert_output_fp32.to(dtype))
+        pre_token_sum += cur_token_num
+    ref = torch.cat(ref, dim=0)
+
+    torch.testing.assert_close(output, ref, rtol=2e-2, atol=2e-2)
