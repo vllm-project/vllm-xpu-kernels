@@ -724,9 +724,7 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
   float* slm_mem = static_cast<float*>(
       slm_mem_const.template get_multi_ptr<sycl::access::decorated::no>()
           .get());
-  float* A_log_slm_ptr = slm_mem;
-  float* dt_bias_slm_ptr = A_log_slm_ptr + num_v_heads;
-  float* g_slm_ptr = dt_bias_slm_ptr + num_v_heads;
+  float* g_slm_ptr = slm_mem;
   float* beta_slm_ptr = g_slm_ptr + chunk_size;
 
   TiledMMA mma{};
@@ -1429,7 +1427,7 @@ void kernel_launcher(
        num_v_heads - 1) /
           num_v_heads * num_v_heads,
       1);
-  int slm_size_compute_wu = num_v_heads * 2 + chunk_size * 2;
+  int slm_size_compute_wu = chunk_size * 2;
 
   queue.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_mem(
