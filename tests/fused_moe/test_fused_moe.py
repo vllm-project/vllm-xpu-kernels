@@ -799,7 +799,8 @@ def test_fused_moe_fp8block(m, n, k, e, topk, dtype, has_bias):
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 16])
-def test_fused_moe_mxfp4_topk16(num_tokens):
+@pytest.mark.parametrize("activation", ["silu", "situ"])
+def test_fused_moe_mxfp4_topk16(num_tokens, activation):
     test_fused_moe_mxfp4(
         num_tokens,
         256,
@@ -808,6 +809,7 @@ def test_fused_moe_mxfp4_topk16(num_tokens):
         16,
         torch.bfloat16,
         False,
+        activation,
     )
 
 
