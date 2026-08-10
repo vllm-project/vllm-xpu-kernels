@@ -1533,3 +1533,128 @@ def test_spec_decode_uniform_qlen(
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
     torch.xpu.empty_cache()
+
+
+# ---------------------------------------------------------------------------
+# Regression: paged-decode attention-sink + small sliding-window NaN.
+#
+# gpt-oss style models combine per-layer sliding-window attention with an
+# attention sink (``s_aux``). On the xe_2 paged-decode path this produced NaN
+# (which poisoned the KV cache and caused runaway generation).
+#
+# Root cause (``inf * 0 = NaN``): the decode ``_64`` policy splits one 64-wide
+# K-tile column-wise across ReduceK=4 subgroups (``sg = (pos%64)//16``). With a
+# small window the surviving window covers only ~2 K-tiles. When one subgroup
+# (sg0) has a very negative in-window logit max while another (sg3) holds the
+# global max, and the first out-of-window column adjacent to the window
+# (``c = win_start-1``, also in sg0, masked to -inf) is present, the sink term
+# added on sg0's *local* max, ``exp2(sink*log2e - sg0_max)``, overflows to
+# ``+inf``; the cross-subgroup rescale ``exp2(sg0_max - gmax)`` is ``0`` ->
+# ``inf * 0 = NaN``. Fixed by folding the sink after reduce_A using the global
+# ``rA_max`` (and indexing the sink with the correct packed head-group row).
+#
+# The synthetic trigger below reproduces the exact necessary conditions (found
+# by per-element ablation of a captured failing tensor): unpatched kernel emits
+# 512 NaNs (5/5 seeds), patched kernel emits none. ``test_decode_with_paged_kv``
+# historically skips sink + sliding window, so this was never covered.
+# ---------------------------------------------------------------------------
+_SINKWIN_NUM_KV_HEADS = 8
+_SINKWIN_GQA = 8
+_SINKWIN_NUM_QUERY_HEADS = _SINKWIN_NUM_KV_HEADS * _SINKWIN_GQA  # 64
+_SINKWIN_HEAD_SIZE = 64
+_SINKWIN_BLOCK_SIZE = 64
+_SINKWIN_KV_LEN = 960          # 960 % 64 == 0 -> window covers 2 clean tiles
+_SINKWIN_WINDOW_LEFT = 127
+_SINKWIN_SCALE = _SINKWIN_HEAD_SIZE ** -0.5
+_SINKWIN_TILE_K = 64
+_SINKWIN_SUBW = 16             # 4 subgroups * 16 cols == TILE_K
+# Per-subgroup in-window scaled-logit targets: sg0 very negative, sg3 = gmax.
+_SINKWIN_SG_LOGIT = {0: -100.0, 1: -60.0, 2: -37.0, 3: 9.0}
+_SINKWIN_MASKED_COL_LOGIT = -133.0   # first out-of-window column (win_start-1)
+_SINKWIN_SINK_VALUE = 0.55
+
+
+def _build_sink_window_trigger(dtype, seed=0):
+    """Deterministically build a single-sequence decode call that trips the
+    sink + sliding-window ``inf*0`` NaN. Tensors are built on CPU."""
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    nq = _SINKWIN_NUM_QUERY_HEADS
+    nkv = _SINKWIN_NUM_KV_HEADS
+    hd = _SINKWIN_HEAD_SIZE
+    bs = _SINKWIN_BLOCK_SIZE
+    kv_len = _SINKWIN_KV_LEN
+    win_start = kv_len - _SINKWIN_WINDOW_LEFT
+    num_blocks = (kv_len + bs - 1) // bs
+
+    q = torch.randn(1, nq, hd, generator=gen, device="cpu")
+    k = torch.randn(num_blocks, bs, nkv, hd, generator=gen, device="cpu") * 0.5
+    v = torch.randn(num_blocks, bs, nkv, hd, generator=gen, device="cpu")
+
+    def set_logit(kv_head, col, target, qhat, qnorm):
+        amp = target / (_SINKWIN_SCALE * qnorm)
+        k[col // bs, col % bs, kv_head] = amp * qhat
+
+    for kvh in range(nkv):
+        qv = q[0, kvh * _SINKWIN_GQA].clone()
+        qnorm = float(qv.norm()) + 1e-6
+        qhat = qv / qnorm
+        for col in range(win_start, kv_len):
+            sg = (col % _SINKWIN_TILE_K) // _SINKWIN_SUBW
+            set_logit(kvh, col, _SINKWIN_SG_LOGIT[sg], qhat, qnorm)
+        # first masked out-of-window column adjacent to the window (sg0):
+        set_logit(kvh, win_start - 1, _SINKWIN_MASKED_COL_LOGIT, qhat, qnorm)
+
+    block_table = torch.arange(num_blocks, dtype=torch.int32,
+                               device="cpu").view(1, num_blocks)
+    sink = torch.full((nq,), _SINKWIN_SINK_VALUE, device="cpu")
+    return q.to(dtype), k.to(dtype), v.to(dtype), block_table, sink.to(dtype)
+
+def _run_sink_window_kernel(q, k, v, block_table, sink):
+    kv_len = _SINKWIN_KV_LEN
+    cu = torch.tensor([0, 1], dtype=torch.int32, device="xpu")
+    seqused_k = torch.tensor([kv_len], dtype=torch.int32, device="xpu")
+    return flash_attn_varlen_func(
+        q.to("xpu"), k.to("xpu"), v.to("xpu"),
+        1,                       # max_seqlen_q (pure decode)
+        cu,
+        kv_len,                  # max_seqlen_k
+        seqused_k=seqused_k,
+        softmax_scale=_SINKWIN_SCALE,
+        causal=True,
+        block_table=block_table.to("xpu"),
+        window_size=[_SINKWIN_WINDOW_LEFT, 0],
+        s_aux=sink.to("xpu") if sink is not None else None,
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half], ids=format_tc)
+@pytest.mark.parametrize("seed", [0, 1, 2])
+@torch.inference_mode()
+def test_decode_sink_sliding_window_no_nan(dtype, seed):
+    """Synthetic sink + small sliding-window decode reproducing the ``inf*0``
+    NaN on the unpatched kernel (512 NaNs, 5/5 seeds). The patched kernel must
+    emit no NaN/Inf and a finite, bounded output.
+
+    The trigger deliberately drives degenerate per-subgroup logits to force the
+    ``inf*0`` path, so tight numerical parity is not meaningful here; the
+    assertion is "no NaN/Inf and a sane, bounded softmax average of v".
+    """
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+
+    q, k, v, block_table, sink = _build_sink_window_trigger(dtype, seed)
+    output = _run_sink_window_kernel(q, k, v, block_table, sink).float()
+
+    n_nan = int(torch.isnan(output).sum())
+    assert n_nan == 0, (f"kernel produced {n_nan} NaN (sink + sliding window "
+                        f"inf*0 regression, dtype={dtype}, seed={seed})")
+    assert not torch.isinf(output).any(), "kernel produced Inf"
+
+    # Output is a convex combination of value rows, so it must stay within the
+    # magnitude of the V it averages -- an inf-poisoned / unnormalized result
+    # would blow past this bound.
+    v_absmax = v.float().abs().max().item()
+    assert output.abs().max().item() <= v_absmax + 1e-1, (
+        f"output magnitude {output.abs().max().item():.3f} exceeds |v| "
+        f"{v_absmax:.3f} -> not a valid softmax average")
+    torch.xpu.empty_cache()
