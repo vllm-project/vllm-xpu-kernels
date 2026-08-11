@@ -9,7 +9,7 @@ DEVICE = "xpu"
 INPUT_LENGTHS = [1, 8, 1024, 8192]
 HIDDEN_SIZE = [128, 1024, 8192]
 NUM_EXPERTS = [16, 32, 128]
-TOP_KS = [1, 4, 6, 8]
+TOP_KS = [1, 4, 6, 8, 16]
 EP_RANK = [0, 1, 2, 3]
 EP_SIZE = [4]
 
@@ -31,16 +31,14 @@ def ref_moe_gather(output, moe_output, topk_weights,
     topk = topk_weights.shape[1]
     moe_indices = unpermuted_row_to_permuted_row.view(input_len, topk)
 
-    selected_outputs = moe_output[
-        moe_indices]  # (input_len, topk, hidden_size)
-    mask = (moe_indices != -1).unsqueeze(-1)
-    selected_outputs = selected_outputs * mask
-    selected_outputs = selected_outputs.contiguous()
+    output_fp32 = torch.zeros_like(output, dtype=torch.float32)
+    for topk_idx in range(topk):
+        indices = moe_indices[:, topk_idx]
+        valid_weights = topk_weights[:, topk_idx] * (indices >= 0)
+        selected_output = moe_output[indices.clamp_min(0)].float()
+        selected_output.mul_(valid_weights[:, None])
+        output_fp32.add_(selected_output)
 
-    selected_outputs_fp32 = selected_outputs.float()
-    topk_weights_fp32 = topk_weights.float()
-    output_fp32 = torch.einsum('ijk,ij->ik', selected_outputs_fp32,
-                               topk_weights_fp32)
     output.copy_(output_fp32.to(output.dtype))
 
 
