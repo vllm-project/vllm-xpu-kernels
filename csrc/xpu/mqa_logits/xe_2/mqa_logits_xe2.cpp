@@ -186,7 +186,7 @@ class fp8_mqa_logits_kernel_t {
     int head_tile_count = ceil_div(num_heads, kBlockHeads);
     int k_tile_count = ceil_div(head_dim, mma_k_tile);
 
-    const int barrier_scope = 2;
+    constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
 
     float output = 0;
     const int64_t kv_index = kv_block_start + local_id;
@@ -393,7 +393,7 @@ class fp8_paged_mqa_logits_kernel_t {
     int head_tile_count = ceil_div(p.heads, kBlockHeads);
     int k_tile_count = ceil_div(p.index_dim, mma_k_tile);
     const int prefetch_dist = 3;
-    const int barrier_scope = 2;
+    constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
 
     for (int64_t q_token_id = 0; q_token_id < p.next_n; q_token_id++) {
       int64_t q_offset =
