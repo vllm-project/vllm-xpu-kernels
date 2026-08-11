@@ -315,7 +315,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mhc_fused_post_pre(
         K_val,
         static_cast<float>(rms_eps),
         static_cast<float>(hc_pre_eps),
-        static_cast<float>(hc_sinkhorn_eps),
+        static_cast<float>(hc_sinkhorn_eps),tmp/vllm-xpu-kernels/csrc/xpu/attn
         static_cast<float>(hc_post_mult_value),
         static_cast<int>(sinkhorn_repeat),
         norm_weight_ptr,

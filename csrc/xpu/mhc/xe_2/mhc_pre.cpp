@@ -442,24 +442,101 @@ class MhcPreSplitKGemmFunctor {
 }  // namespace
 
 // ===========================================================================
-// Fused trailing RMSNorm write path (attn_norm / ffn_norm)
+// Shared tuning constants for the layer_input write path.
 //
-// Computes layer_input = sum_hc(pre_mix * residual) and, instead of storing
-// the raw weighted sum, fuses the RMSNorm that would otherwise run in a
-// separate kernel:
-//   ol      = bf16(sum_hc(pre_mix * residual))    (matches the bf16 tensor a
-//                                                  standalone RMSNorm sees)
-//   rms     = rsqrt(mean(ol^2) + norm_eps)
-//   out     = ol * rms * norm_weight
-//
-// The unnormalized bf16 output is stashed in SLM so residual is read once,
-// then a work-group reduction over the per-position squared sums yields the
-// RMS coefficient. Tuned for Intel Xe (B70): 256-thread work-group, one
-// work-group per token, sub-group + SLM two-level reduction, and 128-bit
-// vectorized HBM traffic on the residual / weight / output tensors.
+// MAX_TILES bounds the per-thread element count: it covers hidden_size up to
+// WG_THREADS * VEC * MAX_TILES (= 8192 for 256x8x4), which covers the range
+// used by current models (4096 needs 2 tiles, 7168 needs 4). Keeping this as
+// tight as possible is critical for MBU: every extra tile is VEC live bf16
+// registers per thread held across the reduction barrier, which inflates GRF
+// pressure and drops occupancy in the fused-norm path. If a larger hidden size
+// is ever needed, template this kernel on the tile count and select it on the
+// host from hidden_size (in-lambda branching does not reduce the GRF
+// footprint). The host guards hidden_size <= WG_THREADS * VEC * MAX_TILES.
 // ===========================================================================
-template <int HC_, int VEC_, int WG_THREADS_, int SG_SIZE_>
-static inline void mhc_pre_write_layer_input_rmsnorm(
+static constexpr int MHC_PRE_OUT_MAX_TILES = 4;
+
+// ===========================================================================
+// Pre-barrier prefetch state for the layer_input write path.
+//
+// Holds the loads that do NOT depend on pre_mix (and therefore do not depend
+// on the Sinkhorn phase), so they can be issued before the work-group barrier
+// that separates Phase 1 from Phase 2:
+//   - residual tile 0: only the *multiply* needs pre_mix, the load does not.
+//     Restricting the early load to a single tile keeps the extra register
+//     pressure at HC*VEC bf16 (32 values) instead of HC*VEC*MAX_TILES.
+//   - norm_weight tiles: token-independent, so the whole set is hoisted and
+//     its latency is hidden behind Sinkhorn + the sumsq work-group reduction.
+// ===========================================================================
+template <int HC_, int VEC_, int MAX_TILES_, int WG_THREADS_>
+struct MhcPreOutPrefetch {
+  using vec_bf16_t = aligned_vec<bf16, VEC_>;
+  vec_bf16_t res0[HC_];       // residual tile 0 (k = tid*VEC)
+  vec_bf16_t wgt[MAX_TILES_];  // norm_weight tiles (fused-norm path only)
+  bool has_res0;
+};
+
+// Issue the pre_mix-independent loads. Call this BEFORE the Phase-1 barrier so
+// the memory latency overlaps with the SG0-only Sinkhorn computation, during
+// which the remaining sub-groups would otherwise sit idle on the barrier.
+template <int HC_, int VEC_, int MAX_TILES_, int WG_THREADS_>
+static inline void mhc_pre_prefetch_out_tiles(
+    int tid,
+    const bf16* residual,
+    const bf16* norm_weight,
+    int tok,
+    int hidden_size,
+    MhcPreOutPrefetch<HC_, VEC_, MAX_TILES_, WG_THREADS_>& pf) {
+  using vec_bf16_t = aligned_vec<bf16, VEC_>;
+  constexpr int STRIDE = WG_THREADS_ * VEC_;
+
+  const int k0 = tid * VEC_;
+  pf.has_res0 = (k0 < hidden_size);
+  if (pf.has_res0) {
+#pragma unroll
+    for (int m = 0; m < HC_; ++m) {
+      pf.res0[m] = *reinterpret_cast<const vec_bf16_t*>(
+          residual + (tok * HC_ + m) * hidden_size + k0);
+    }
+  }
+
+  if (norm_weight != nullptr) {
+#pragma unroll
+    for (int t = 0; t < MAX_TILES_; ++t) {
+      const int k = k0 + t * STRIDE;
+      if (k >= hidden_size) break;
+      pf.wgt[t] = *reinterpret_cast<const vec_bf16_t*>(norm_weight + k);
+    }
+  }
+}
+
+// ===========================================================================
+// layer_input write path, with optional fused trailing RMSNorm.
+//
+// Baseline (norm_weight == nullptr):
+//   out = bf16(sum_hc(pre_mix * residual))
+//
+// Fused (norm_weight != nullptr) — folds in the RMSNorm (attn_norm/ffn_norm)
+// that would otherwise run as a separate kernel:
+//   ol   = bf16(sum_hc(pre_mix * residual))   (matches the bf16 tensor a
+//                                              standalone RMSNorm would see)
+//   rms  = rsqrt(mean(ol^2) + norm_eps)
+//   out  = ol * rms * norm_weight
+// The unnormalized bf16 result is stashed in registers so residual is read
+// exactly once from HBM and no SLM round-trip is required; only the per-
+// sub-group squared sums go through SLM.
+//
+// Both paths are software-pipelined: the residual for tile t+1 is issued
+// before the multiply-accumulate for tile t (cur/nxt double buffer), and tile
+// 0 comes from the pre-barrier prefetch. This is the equivalent of a
+// num_stages=2 pipeline and costs only HC*VEC extra bf16 registers, so it does
+// not disturb the MAX_TILES GRF budget documented above.
+//
+// Tuned for Intel Xe (B70): 256-thread work-group, one work-group per token,
+// sub-group + SLM two-level reduction, 128-bit vectorized HBM traffic.
+// ===========================================================================
+template <int HC_, int VEC_, int MAX_TILES_, int WG_THREADS_, int SG_SIZE_>
+static inline void mhc_pre_write_layer_input(
     const sycl::nd_item<1>& item,
     const sycl::sub_group& sg,
     const bf16* residual,
@@ -469,34 +546,49 @@ static inline void mhc_pre_write_layer_input_rmsnorm(
     const float (&pre_mix)[HC_],
     int tok,
     int hidden_size,
-    float norm_eps) {
+    float norm_eps,
+    const MhcPreOutPrefetch<HC_, VEC_, MAX_TILES_, WG_THREADS_>& pf) {
   using vec_bf16_t = aligned_vec<bf16, VEC_>;
   constexpr int NUM_SG = WG_THREADS_ / SG_SIZE_;
   constexpr int STRIDE = WG_THREADS_ * VEC_;
-  // Keep the (bf16-rounded) weighted sum in registers so residual is read
-  // exactly once from HBM and no full-width SLM round-trip is required.
-  // MAX_TILES bounds the per-thread element count: it covers hidden_size up to
-  // WG_THREADS_ * VEC_ * MAX_TILES (= 8192 for 256x8x4), which covers the range
-  // used by current models (4096 needs 2 tiles, 7168 needs 4). Keeping this as
-  // tight as possible is critical for MBU: every extra tile is VEC_ live bf16
-  // registers per thread held across the reduction barrier, which inflates GRF
-  // pressure and drops occupancy in the fused-norm path. If a larger hidden
-  // size is ever needed, template this kernel on the tile count and select it
-  // on the host from hidden_size (in-lambda branching does not reduce the GRF
-  // footprint). The host guards hidden_size <= WG_THREADS * VEC * MAX_TILES.
-  constexpr int MAX_TILES = 4;
+
   const int tid = static_cast<int>(item.get_local_id(0));
   const int sg_id = static_cast<int>(sg.get_group_id()[0]);
   const int lane = static_cast<int>(sg.get_local_id()[0]);
+  const bool fused_norm = (norm_weight != nullptr);
 
-  bf16 stash[MAX_TILES * VEC_];
+  // Double-buffered residual registers: `cur` is the tile being consumed,
+  // `nxt` is the tile whose load has already been issued.
+  vec_bf16_t cur[HC_];
+  vec_bf16_t nxt[HC_];
+  if (pf.has_res0) {
+#pragma unroll
+    for (int m = 0; m < HC_; ++m)
+      cur[m] = pf.res0[m];
+  }
+
+  bf16 stash[MAX_TILES_ * VEC_];
   float partial_sumsq = 0.f;
 
-  // Pass 1: weighted sum -> bf16 register stash + per-thread squared sum.
+  // Pass 1: weighted sum. Non-fused path stores straight to HBM; fused path
+  // stashes the bf16-rounded result in registers and accumulates the squared
+  // sum from the *rounded* value so the numerics match the unfused
+  // "write bf16 -> RMSNorm reads it back" sequence exactly.
 #pragma unroll
-  for (int t = 0; t < MAX_TILES; ++t) {
+  for (int t = 0; t < MAX_TILES_; ++t) {
     const int k = tid * VEC_ + t * STRIDE;
     if (k >= hidden_size) break;
+
+    // Issue the next tile's loads before consuming the current one.
+    const int k_next = k + STRIDE;
+    if (k_next < hidden_size) {
+#pragma unroll
+      for (int m = 0; m < HC_; ++m) {
+        nxt[m] = *reinterpret_cast<const vec_bf16_t*>(
+            residual + (tok * HC_ + m) * hidden_size + k_next);
+      }
+    }
+
     float acc[VEC_];
 #pragma unroll
     for (int v = 0; v < VEC_; ++v)
@@ -504,21 +596,33 @@ static inline void mhc_pre_write_layer_input_rmsnorm(
 
 #pragma unroll
     for (int m = 0; m < HC_; ++m) {
-      auto rv = *reinterpret_cast<const vec_bf16_t*>(
-          residual + (tok * HC_ + m) * hidden_size + k);
 #pragma unroll
       for (int v = 0; v < VEC_; ++v)
-        acc[v] += pre_mix[m] * float(rv.val[v]);
+        acc[v] += pre_mix[m] * float(cur[m].val[v]);
+    }
+
+    if (fused_norm) {
+#pragma unroll
+      for (int v = 0; v < VEC_; ++v) {
+        bf16 b = static_cast<bf16>(acc[v]);
+        stash[t * VEC_ + v] = b;
+        float bf = static_cast<float>(b);
+        partial_sumsq += bf * bf;
+      }
+    } else {
+      vec_bf16_t ov;
+#pragma unroll
+      for (int v = 0; v < VEC_; ++v)
+        ov.val[v] = static_cast<bf16>(acc[v]);
+      *reinterpret_cast<vec_bf16_t*>(layer_input + tok * hidden_size + k) = ov;
     }
 
 #pragma unroll
-    for (int v = 0; v < VEC_; ++v) {
-      bf16 b = static_cast<bf16>(acc[v]);
-      stash[t * VEC_ + v] = b;
-      float bf = static_cast<float>(b);
-      partial_sumsq += bf * bf;
-    }
+    for (int m = 0; m < HC_; ++m)
+      cur[m] = nxt[m];
   }
+
+  if (!fused_norm) return;
 
   // Work-group reduction of the squared sum: sub-group reduce, then a single
   // barrier; every thread re-reads the NUM_SG partials and computes rnorm
@@ -535,11 +639,12 @@ static inline void mhc_pre_write_layer_input_rmsnorm(
       sycl::native::rsqrt(tot / static_cast<float>(hidden_size) + norm_eps);
 
   // Pass 2: scale the register stash by rms * norm_weight and store to HBM.
+  // norm_weight already resides in registers from the pre-barrier prefetch.
 #pragma unroll
-  for (int t = 0; t < MAX_TILES; ++t) {
+  for (int t = 0; t < MAX_TILES_; ++t) {
     const int k = tid * VEC_ + t * STRIDE;
     if (k >= hidden_size) break;
-    auto wv = *reinterpret_cast<const vec_bf16_t*>(norm_weight + k);
+    const vec_bf16_t wv = pf.wgt[t];
     vec_bf16_t outv;
 #pragma unroll
     for (int v = 0; v < VEC_; ++v) {
@@ -555,8 +660,9 @@ static inline void mhc_pre_write_layer_input_rmsnorm(
 //
 // Combines split-K reduction with post-processing in a single kernel.
 // Phase 0: ALL 256 threads load workspace → SLM, then 25 threads reduce
-// Phase 1: sigmoid + Sinkhorn (SG0 only)
-// Phase 2: layer_input = sum(pre_mix * residual, dim=HC)
+// Phase 1: sigmoid + Sinkhorn (SG0 only), overlapped with the pre_mix-
+//          independent residual / norm_weight loads issued by every thread
+// Phase 2: layer_input = sum(pre_mix * residual, dim=HC) [+ fused RMSNorm]
 //
 // Grid: 1 WG per token, 256 threads per WG.
 // ===========================================================================
@@ -590,7 +696,7 @@ void launch_mhc_pre_fused_reduce_stage2(
   static constexpr int HC3 = HC * (2 + HC);   // 24
   static constexpr int HC3_PLUS1 = HC3 + 1;   // 25 (24 mixes + 1 sqrsum)
   static constexpr int COMB_LANES = HC * HC;  // 16
-  using vec_bf16_t = aligned_vec<bf16, VEC>;
+  static constexpr int MAX_TILES = MHC_PRE_OUT_MAX_TILES;
 
   // Max supported n_splits for SLM sizing.
   static constexpr int MAX_SPLITS = 32;
@@ -653,6 +759,17 @@ void launch_mhc_pre_fused_reduce_stage2(
           if (tid < HC3) {
             slm[tid] = my_reduce_sum * slm[HC3];
           }
+
+          // ------------------------------------------------------------
+          // Pre-barrier prefetch: issue the residual tile-0 and the
+          // norm_weight loads now. They do not depend on the Sinkhorn
+          // result, so their latency is absorbed by the SG0-only Phase 1
+          // below plus the barrier that follows it.
+          // ------------------------------------------------------------
+          MhcPreOutPrefetch<HC, VEC, MAX_TILES, WG_THREADS> pf;
+          mhc_pre_prefetch_out_tiles<HC, VEC, MAX_TILES, WG_THREADS>(
+              tid, residual, norm_weight, tok, hidden_size, pf);
+
           sycl::group_barrier(item.get_group());
 
           // ============================================================
@@ -729,42 +846,18 @@ void launch_mhc_pre_fused_reduce_stage2(
           for (int m = 0; m < HC; ++m)
             pre_mix[m] = slm[m];
 
-          if (norm_weight == nullptr) {
-            for (int k = tid * VEC; k < hidden_size; k += WG_THREADS * VEC) {
-              float acc[VEC];
-#pragma unroll
-              for (int v = 0; v < VEC; ++v)
-                acc[v] = 0.f;
-
-#pragma unroll
-              for (int m = 0; m < HC; ++m) {
-                auto rv = *reinterpret_cast<const vec_bf16_t*>(
-                    residual + (tok * HC + m) * hidden_size + k);
-#pragma unroll
-                for (int v = 0; v < VEC; ++v)
-                  acc[v] += pre_mix[m] * float(rv.val[v]);
-              }
-
-              vec_bf16_t ov;
-#pragma unroll
-              for (int v = 0; v < VEC; ++v)
-                ov.val[v] = static_cast<bf16>(acc[v]);
-              *reinterpret_cast<vec_bf16_t*>(
-                  layer_input + tok * hidden_size + k) = ov;
-            }
-          } else {
-            mhc_pre_write_layer_input_rmsnorm<HC, VEC, WG_THREADS, SG_SIZE>(
-                item,
-                sg,
-                residual,
-                norm_weight,
-                layer_input,
-                &norm_red[0],
-                pre_mix,
-                tok,
-                hidden_size,
-                norm_eps);
-          }
+          mhc_pre_write_layer_input<HC, VEC, MAX_TILES, WG_THREADS, SG_SIZE>(
+              item,
+              sg,
+              residual,
+              norm_weight,
+              layer_input,
+              &norm_red[0],
+              pre_mix,
+              tok,
+              hidden_size,
+              norm_eps,
+              pf);
         });
   });
 }
@@ -838,7 +931,7 @@ void launch_mhc_pre_stage2(
   static constexpr int HC = 4;
   static constexpr int HC3 = HC * (2 + HC);
   static constexpr int COMB_LANES = HC * HC;
-  using vec_bf16_t = aligned_vec<bf16, VEC>;
+  static constexpr int MAX_TILES = MHC_PRE_OUT_MAX_TILES;
 
   sycl::range<1> global(static_cast<size_t>(num_tokens) * WG_THREADS);
   sycl::range<1> local(WG_THREADS);
@@ -857,6 +950,13 @@ void launch_mhc_pre_stage2(
           int sg_id = sg.get_group_id();
 
           if (tid < HC3) mixes_slm[tid] = rms_mixes[tok * HC3 + tid];
+
+          // Pre-barrier prefetch of the pre_mix-independent tiles; overlaps
+          // with the SG0-only Sinkhorn phase below.
+          MhcPreOutPrefetch<HC, VEC, MAX_TILES, WG_THREADS> pf;
+          mhc_pre_prefetch_out_tiles<HC, VEC, MAX_TILES, WG_THREADS>(
+              tid, residual, norm_weight, tok, hidden_size, pf);
+
           sycl::group_barrier(item.get_group());
 
           if (sg_id == 0) {
@@ -918,42 +1018,18 @@ void launch_mhc_pre_stage2(
           for (int m = 0; m < HC; ++m)
             pre_mix[m] = mixes_slm[m];
 
-          if (norm_weight == nullptr) {
-            for (int k = tid * VEC; k < hidden_size; k += WG_THREADS * VEC) {
-              float acc[VEC];
-#pragma unroll
-              for (int v = 0; v < VEC; ++v)
-                acc[v] = 0.f;
-
-#pragma unroll
-              for (int m = 0; m < HC; ++m) {
-                auto rv = *reinterpret_cast<const vec_bf16_t*>(
-                    residual + (tok * HC + m) * hidden_size + k);
-#pragma unroll
-                for (int v = 0; v < VEC; ++v)
-                  acc[v] += pre_mix[m] * float(rv.val[v]);
-              }
-
-              vec_bf16_t ov;
-#pragma unroll
-              for (int v = 0; v < VEC; ++v)
-                ov.val[v] = static_cast<bf16>(acc[v]);
-              *reinterpret_cast<vec_bf16_t*>(
-                  layer_input + tok * hidden_size + k) = ov;
-            }
-          } else {
-            mhc_pre_write_layer_input_rmsnorm<HC, VEC, WG_THREADS, SG_SIZE>(
-                item,
-                sg,
-                residual,
-                norm_weight,
-                layer_input,
-                &norm_red[0],
-                pre_mix,
-                tok,
-                hidden_size,
-                norm_eps);
-          }
+          mhc_pre_write_layer_input<HC, VEC, MAX_TILES, WG_THREADS, SG_SIZE>(
+              item,
+              sg,
+              residual,
+              norm_weight,
+              layer_input,
+              &norm_red[0],
+              pre_mix,
+              tok,
+              hidden_size,
+              norm_eps,
+              pf);
         });
   });
 }

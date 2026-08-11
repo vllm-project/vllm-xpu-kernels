@@ -4,6 +4,7 @@ import argparse
 
 import torch
 
+import vllm_xpu_kernels._C  # noqa: F401
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 HC = 4
@@ -55,11 +56,16 @@ def make_norm_weight(hidden_size: int, fuse_norm: bool):
     return torch.ones((hidden_size,), dtype=torch.bfloat16, device="xpu")
 
 
-def torch_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float):
-    """Reference eager RMSNorm, used for the unfused baselines."""
-    xf = x.to(torch.float32)
-    inv_rms = torch.rsqrt(xf.square().mean(dim=-1, keepdim=True) + eps)
-    return (xf * inv_rms * weight.to(torch.float32)).to(torch.bfloat16)
+def vllm_rmsnorm(
+    out: torch.Tensor, x: torch.Tensor, weight: torch.Tensor, eps: float
+):
+    """Unfused baseline norm.
+
+    Uses the same `rms_norm` kernel vLLM dispatches to at runtime, so the
+    fused-vs-unfused delta reflects what serving actually gains.
+    """
+    torch.ops._C.rms_norm(out, x, weight, eps)
+    return out
 
 
 def run_mhc_pre(
@@ -155,6 +161,9 @@ def run_mhc_pre_unfused(
     norm_weight = torch.ones(
         (hidden_size,), dtype=torch.bfloat16, device="xpu"
     )
+    norm_out = torch.empty(
+        (num_tokens, hidden_size), dtype=torch.bfloat16, device="xpu"
+    )
 
     rms_eps = 1e-6
     hc_pre_eps = 1e-3
@@ -176,7 +185,7 @@ def run_mhc_pre_unfused(
             None,
             NORM_EPS,
         )
-        torch_rmsnorm(layer_input, norm_weight, NORM_EPS)
+        vllm_rmsnorm(norm_out, layer_input, norm_weight, NORM_EPS)
 
     avg_s = benchmark_op(run, warmup, iters)
 
@@ -404,6 +413,9 @@ def run_mhc_fused_post_pre_unfused(
     norm_weight = torch.ones(
         (hidden_size,), dtype=torch.bfloat16, device="xpu"
     )
+    norm_out = torch.empty(
+        (num_tokens, hidden_size), dtype=torch.bfloat16, device="xpu"
+    )
 
     rms_eps = 1e-6
     hc_pre_eps = 1e-3
@@ -419,7 +431,7 @@ def run_mhc_fused_post_pre_unfused(
             hc_post_mult_value, sinkhorn_repeat,
             None, NORM_EPS,
         )
-        torch_rmsnorm(layer_input, norm_weight, NORM_EPS)
+        vllm_rmsnorm(norm_out, layer_input, norm_weight, NORM_EPS)
 
     avg_s = benchmark_op(run, warmup, iters)
 
