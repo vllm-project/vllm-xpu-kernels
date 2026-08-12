@@ -64,13 +64,24 @@ namespace MoE {
 using namespace cute;
 
 // type tag to define a unique sycl kernel name
-template <typename, typename, typename, typename, char, char, class>
+template <
+    typename,
+    typename,
+    typename,
+    typename,
+    char,
+    char,
+    class,
+    A_DTYPE,
+    B_DTYPE>
 class GemmCuteName;
 
 template <
     char layoutA,
     char layoutB,
     class policy,
+    A_DTYPE TENSOR_A_DTYPE,
+    B_DTYPE TENSOR_B_DTYPE,
     typename ElementA,
     typename ElementB,
     typename ElementS,
@@ -133,9 +144,13 @@ void MoEGEMMLauncher(
         ElementD,
         layoutA,
         layoutB,
-        policy>>(
+        policy,
+        TENSOR_A_DTYPE,
+        TENSOR_B_DTYPE>>(
         sycl::nd_range<3>{global * local, local}, kernel_props, [=](auto) {
           MoE::MoEGEMM<
+              TENSOR_A_DTYPE,
+              TENSOR_B_DTYPE,
               GmemTiledCopyA,
               GmemTiledCopyB,
               GmemTiledCopyD,
@@ -238,8 +253,15 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       at::empty({static_cast<long>(1)}, ptr_A.options().dtype(at::kInt));
 
 #define MoEGEMMLauncherCallER(                                                 \
-    LayoutA, LayoutB, Policy, ElementA, ElementB, ElementS)                    \
-  MoEGEMMLauncher<LayoutA, LayoutB, Policy>(                                   \
+    LayoutA,                                                                   \
+    LayoutB,                                                                   \
+    Policy,                                                                    \
+    TENSOR_A_DTYPE,                                                            \
+    TENSOR_B_DTYPE,                                                            \
+    ElementA,                                                                  \
+    ElementB,                                                                  \
+    ElementS)                                                                  \
+  MoEGEMMLauncher<LayoutA, LayoutB, Policy, TENSOR_A_DTYPE, TENSOR_B_DTYPE>(   \
       dpcpp_queue,                                                             \
       reinterpret_cast<ElementA*>(ptr_A.data_ptr()),                           \
       reinterpret_cast<ElementB*>(ptr_B.data_ptr()),                           \
@@ -278,23 +300,55 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
             group_size == 256,
         "group_size must be 32, 64, 128 or 256");
 
-#define W4A16LauncherCallER(policy)                                         \
-  if (is_B_int4) {                                                          \
-    if (A_dtype == at::kBFloat16) {                                         \
-      using scalar_t = bfloat16_t;                                          \
-      MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, scalar_t); \
-    } else if (A_dtype == at::kHalf) {                                      \
-      using scalar_t = half_t;                                              \
-      MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, scalar_t); \
-    }                                                                       \
-  } else if (is_B_mxfp4) {                                                  \
-    if (A_dtype == at::kBFloat16) {                                         \
-      using scalar_t = bfloat16_t;                                          \
-      MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, uint8_t);  \
-    } else if (A_dtype == at::kHalf) {                                      \
-      using scalar_t = half_t;                                              \
-      MoEGEMMLauncherCallER('R', 'C', policy, scalar_t, uint8_t, uint8_t);  \
-    }                                                                       \
+#define W4A16LauncherCallER(policy)    \
+  if (is_B_int4) {                     \
+    if (A_dtype == at::kBFloat16) {    \
+      using scalar_t = bfloat16_t;     \
+      MoEGEMMLauncherCallER(           \
+          'R',                         \
+          'C',                         \
+          policy,                      \
+          A_DTYPE::BITS16,             \
+          B_DTYPE::INT4,               \
+          scalar_t,                    \
+          uint8_t,                     \
+          scalar_t);                   \
+    } else if (A_dtype == at::kHalf) { \
+      using scalar_t = half_t;         \
+      MoEGEMMLauncherCallER(           \
+          'R',                         \
+          'C',                         \
+          policy,                      \
+          A_DTYPE::BITS16,             \
+          B_DTYPE::INT4,               \
+          scalar_t,                    \
+          uint8_t,                     \
+          scalar_t);                   \
+    }                                  \
+  } else if (is_B_mxfp4) {             \
+    if (A_dtype == at::kBFloat16) {    \
+      using scalar_t = bfloat16_t;     \
+      MoEGEMMLauncherCallER(           \
+          'R',                         \
+          'C',                         \
+          policy,                      \
+          A_DTYPE::BITS16,             \
+          B_DTYPE::MXFP4,              \
+          scalar_t,                    \
+          uint8_t,                     \
+          uint8_t);                    \
+    } else if (A_dtype == at::kHalf) { \
+      using scalar_t = half_t;         \
+      MoEGEMMLauncherCallER(           \
+          'R',                         \
+          'C',                         \
+          policy,                      \
+          A_DTYPE::BITS16,             \
+          B_DTYPE::MXFP4,              \
+          scalar_t,                    \
+          uint8_t,                     \
+          uint8_t);                    \
+    }                                  \
   }
 
     if (A_avg_M <= 4) {
@@ -352,8 +406,15 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     const c10::optional<at::Tensor>& ptr_scales_mx = scales_opt;
 #undef MoEGEMMLauncherCallER
 #define MoEGEMMLauncherCallER(                                                 \
-    LayoutA, LayoutB, Policy, ElementA, ElementB, ElementS)                    \
-  MoEGEMMLauncher<LayoutA, LayoutB, Policy>(                                   \
+    LayoutA,                                                                   \
+    LayoutB,                                                                   \
+    Policy,                                                                    \
+    TENSOR_A_DTYPE,                                                            \
+    TENSOR_B_DTYPE,                                                            \
+    ElementA,                                                                  \
+    ElementB,                                                                  \
+    ElementS)                                                                  \
+  MoEGEMMLauncher<LayoutA, LayoutB, Policy, TENSOR_A_DTYPE, TENSOR_B_DTYPE>(   \
       dpcpp_queue,                                                             \
       reinterpret_cast<ElementA*>(ptr_A.data_ptr()),                           \
       reinterpret_cast<ElementB*>(ptr_B.data_ptr()),                           \
@@ -370,24 +431,56 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       group_size,                                                              \
       static_cast<int*>(atomic_buffer.data_ptr()));
 
-#define W8MXFP8LauncherCallER(policy)                                         \
-  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {                \
-    using scalar_t = half_t;                                                  \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, uint8_t); \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {           \
-    using scalar_t = half_t;                                                  \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, uint8_t); \
-  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {     \
-    using scalar_t = bfloat16_t;                                              \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, uint8_t); \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {       \
-    using scalar_t = bfloat16_t;                                              \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, uint8_t); \
-  } else {                                                                    \
-    TORCH_CHECK(                                                              \
-        false,                                                                \
-        "mxfp8 grouped gemm requires A in {fp16,bf16} and B in "              \
-        "{float8_e4m3fn, float8_e5m2}");                                      \
+#define W8MXFP8LauncherCallER(policy)                                     \
+  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {            \
+    using scalar_t = half_t;                                              \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::MXFP8,                                                   \
+        scalar_t,                                                         \
+        float_e4m3_t,                                                     \
+        uint8_t);                                                         \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {       \
+    using scalar_t = half_t;                                              \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::MXFP8,                                                   \
+        scalar_t,                                                         \
+        float_e5m2_t,                                                     \
+        uint8_t);                                                         \
+  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) { \
+    using scalar_t = bfloat16_t;                                          \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::MXFP8,                                                   \
+        scalar_t,                                                         \
+        float_e4m3_t,                                                     \
+        uint8_t);                                                         \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {   \
+    using scalar_t = bfloat16_t;                                          \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::MXFP8,                                                   \
+        scalar_t,                                                         \
+        float_e5m2_t,                                                     \
+        uint8_t);                                                         \
+  } else {                                                                \
+    TORCH_CHECK(                                                          \
+        false,                                                            \
+        "mxfp8 grouped gemm requires A in {fp16,bf16} and B in "          \
+        "{float8_e4m3fn, float8_e5m2}");                                  \
   }
 
     if (A_avg_M <= 8) {
@@ -404,8 +497,15 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
 // Restore the default launcher macro for subsequent branches.
 #undef MoEGEMMLauncherCallER
 #define MoEGEMMLauncherCallER(                                                 \
-    LayoutA, LayoutB, Policy, ElementA, ElementB, ElementS)                    \
-  MoEGEMMLauncher<LayoutA, LayoutB, Policy>(                                   \
+    LayoutA,                                                                   \
+    LayoutB,                                                                   \
+    Policy,                                                                    \
+    TENSOR_A_DTYPE,                                                            \
+    TENSOR_B_DTYPE,                                                            \
+    ElementA,                                                                  \
+    ElementB,                                                                  \
+    ElementS)                                                                  \
+  MoEGEMMLauncher<LayoutA, LayoutB, Policy, TENSOR_A_DTYPE, TENSOR_B_DTYPE>(   \
       dpcpp_queue,                                                             \
       reinterpret_cast<ElementA*>(ptr_A.data_ptr()),                           \
       reinterpret_cast<ElementB*>(ptr_B.data_ptr()),                           \
@@ -449,24 +549,56 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
         ptr_scales->dtype() == at::kFloat, "block-fp8 scales must be float32");
     group_size = 128;
 
-#define W8BLOCKFP8LauncherCallER(policy)                                    \
-  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {              \
-    using scalar_t = half_t;                                                \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, float); \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {         \
-    using scalar_t = half_t;                                                \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, float); \
-  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {   \
-    using scalar_t = bfloat16_t;                                            \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, float); \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {     \
-    using scalar_t = bfloat16_t;                                            \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, float); \
-  } else {                                                                  \
-    TORCH_CHECK(                                                            \
-        false,                                                              \
-        "block-fp8 grouped gemm requires A in {fp16,bf16} and B in "        \
-        "{float8_e4m3fn, float8_e5m2}");                                    \
+#define W8BLOCKFP8LauncherCallER(policy)                                  \
+  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {            \
+    using scalar_t = half_t;                                              \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::BLOCK_FP8,                                               \
+        scalar_t,                                                         \
+        float_e4m3_t,                                                     \
+        float);                                                           \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {       \
+    using scalar_t = half_t;                                              \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::BLOCK_FP8,                                               \
+        scalar_t,                                                         \
+        float_e5m2_t,                                                     \
+        float);                                                           \
+  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) { \
+    using scalar_t = bfloat16_t;                                          \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::BLOCK_FP8,                                               \
+        scalar_t,                                                         \
+        float_e4m3_t,                                                     \
+        float);                                                           \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {   \
+    using scalar_t = bfloat16_t;                                          \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::BLOCK_FP8,                                               \
+        scalar_t,                                                         \
+        float_e5m2_t,                                                     \
+        float);                                                           \
+  } else {                                                                \
+    TORCH_CHECK(                                                          \
+        false,                                                            \
+        "block-fp8 grouped gemm requires A in {fp16,bf16} and B in "      \
+        "{float8_e4m3fn, float8_e5m2}");                                  \
   }
 
     if (A_avg_M <= 8) {
@@ -490,19 +622,51 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
         "ptr_scales.size(0) of fp8 must match num_experts");
     TORCH_CHECK(ptr_scales->dtype() == at::kFloat, "ptr_scales must be float");
 
-#define W8A16LauncherCallER(policy)                                         \
-  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {              \
-    using scalar_t = half_t;                                                \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, float); \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {         \
-    using scalar_t = half_t;                                                \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, float); \
-  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) {   \
-    using scalar_t = bfloat16_t;                                            \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e4m3_t, float); \
-  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {     \
-    using scalar_t = bfloat16_t;                                            \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, float_e5m2_t, float); \
+#define W8A16LauncherCallER(policy)                                       \
+  if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kHalf) {            \
+    using scalar_t = half_t;                                              \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::PER_TENSOR_FP8,                                          \
+        scalar_t,                                                         \
+        float_e4m3_t,                                                     \
+        float);                                                           \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kHalf) {       \
+    using scalar_t = half_t;                                              \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::PER_TENSOR_FP8,                                          \
+        scalar_t,                                                         \
+        float_e5m2_t,                                                     \
+        float);                                                           \
+  } else if (B_dtype == at::kFloat8_e4m3fn && A_dtype == at::kBFloat16) { \
+    using scalar_t = bfloat16_t;                                          \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::PER_TENSOR_FP8,                                          \
+        scalar_t,                                                         \
+        float_e4m3_t,                                                     \
+        float);                                                           \
+  } else if (B_dtype == at::kFloat8_e5m2 && A_dtype == at::kBFloat16) {   \
+    using scalar_t = bfloat16_t;                                          \
+    MoEGEMMLauncherCallER(                                                \
+        'R',                                                              \
+        'R',                                                              \
+        policy,                                                           \
+        A_DTYPE::BITS16,                                                  \
+        B_DTYPE::PER_TENSOR_FP8,                                          \
+        scalar_t,                                                         \
+        float_e5m2_t,                                                     \
+        float);                                                           \
   }
 
     if (A_avg_M <= 8) {
@@ -520,13 +684,29 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     TORCH_CHECK(
         !ptr_scales.has_value(), "w16a16 grouped gemm must not have scales");
 
-#define W16A16LauncherCallER(policy)                                       \
-  if (A_dtype == at::kBFloat16) {                                          \
-    using scalar_t = bfloat16_t;                                           \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, scalar_t, scalar_t); \
-  } else if (A_dtype == at::kHalf) {                                       \
-    using scalar_t = half_t;                                               \
-    MoEGEMMLauncherCallER('R', 'R', policy, scalar_t, scalar_t, scalar_t); \
+#define W16A16LauncherCallER(policy) \
+  if (A_dtype == at::kBFloat16) {    \
+    using scalar_t = bfloat16_t;     \
+    MoEGEMMLauncherCallER(           \
+        'R',                         \
+        'R',                         \
+        policy,                      \
+        A_DTYPE::BITS16,             \
+        B_DTYPE::BITS16,             \
+        scalar_t,                    \
+        scalar_t,                    \
+        scalar_t);                   \
+  } else if (A_dtype == at::kHalf) { \
+    using scalar_t = half_t;         \
+    MoEGEMMLauncherCallER(           \
+        'R',                         \
+        'R',                         \
+        policy,                      \
+        A_DTYPE::BITS16,             \
+        B_DTYPE::BITS16,             \
+        scalar_t,                    \
+        scalar_t,                    \
+        scalar_t);                   \
   }
 
     if (A_avg_M <= 8) {
