@@ -295,7 +295,7 @@ void xpuAsyncMemcpyBatch(
 bool hostRegister(void* ptr, size_t n_bytes) {
   if (ptr == nullptr || n_bytes == 0) return false;
 
-  auto ctx = vllm::xpu::vllmGetQueue(0).get_context();
+  auto ctx = vllm::xpu::vllmGetQueue().get_context();
   try {
     syclex::prepare_for_device_copy(ptr, n_bytes, ctx);
   } catch (const sycl::exception& e) {
@@ -311,7 +311,7 @@ bool hostRegister(void* ptr, size_t n_bytes) {
 bool hostUnregister(void* ptr) {
   if (ptr == nullptr) return false;
 
-  auto ctx = vllm::xpu::vllmGetQueue(0).get_context();
+  auto ctx = vllm::xpu::vllmGetQueue().get_context();
   try {
     syclex::release_from_device_copy(ptr, ctx);
   } catch (const sycl::exception& e) {
@@ -381,12 +381,14 @@ void xpu_memcpy_sync(
 
 bool xpu_host_register(int64_t ptr, int64_t n_bytes) {
   TORCH_CHECK(n_bytes >= 0, "n_bytes must be non-negative");
+  if (ptr <= 0) return false;
   return vllm::xpu::hostRegister(
       reinterpret_cast<void*>(static_cast<uintptr_t>(ptr)),
       static_cast<size_t>(n_bytes));
 }
 
 bool xpu_host_unregister(int64_t ptr) {
+  if (ptr <= 0) return false;
   return vllm::xpu::hostUnregister(
       reinterpret_cast<void*>(static_cast<uintptr_t>(ptr)));
 }
