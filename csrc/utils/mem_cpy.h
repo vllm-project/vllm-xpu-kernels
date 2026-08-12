@@ -57,32 +57,5 @@ void xpuAsyncMemcpyBatch(
     const uint64_t* sizes,
     int64_t n);
 
-/**
- * @brief Registers an existing host allocation for direct device DMA.
- *
- * Page-locks the range and imports it into the device's SYCL context, the
- * SYCL counterpart of cudaHostRegister. Host memory that cannot be obtained
- * from the caching host allocator -- notably a shared mmap region -- is
- * otherwise pageable, which forces staged (H2D) or synchronous (D2H) copies.
- *
- * Registration is scoped to the device's context, so it covers every queue
- * on that device. Each device that transfers to or from the range must
- * register it separately.
- *
- * @param ptr           Base address of the host range
- * @param n_bytes       Size of the host range in bytes
- * @return true if the range was registered and requires a later
- *         hostUnregister; false if registration is unsupported or failed
- */
-bool hostRegister(void* ptr, size_t n_bytes);
-
-/**
- * @brief Releases a host range previously passed to hostRegister.
- *
- * @param ptr           Base address of the host range
- * @return true if the range was released
- */
-bool hostUnregister(void* ptr);
-
 }  // namespace xpu
 }  // namespace vllm
