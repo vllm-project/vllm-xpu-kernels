@@ -349,4 +349,3 @@ void xpu_memcpy_sync(
           false, "Unsupported memcpy kind: ", kind, " (0=H2D, 1=D2H, 2=D2D)");
   }
 }
-
