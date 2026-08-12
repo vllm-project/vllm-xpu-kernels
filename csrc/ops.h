@@ -279,6 +279,10 @@ void xpu_memcpy_sync(
     int64_t kind,
     int64_t device = -1);
 
+bool xpu_host_register(int64_t ptr, int64_t n_bytes);
+
+bool xpu_host_unregister(int64_t ptr);
+
 void merge_attn_states(
     torch::Tensor& output,
     std::optional<torch::Tensor> output_lse,
