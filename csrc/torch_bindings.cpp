@@ -237,9 +237,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // memory outside the caching host allocator (e.g. a shared mmap region) has
   // no other way to become pinned. Returns false if registration is
   // unsupported, in which case transfers remain correct but slower.
-  ops.def("xpu_host_register(int ptr, int n_bytes) -> bool");
+  ops.def("xpu_host_register(Tensor ptr, int n_bytes) -> bool");
   ops.impl("xpu_host_register", &xpu_host_register);
-  ops.def("xpu_host_unregister(int ptr) -> bool");
+  ops.def("xpu_host_unregister(Tensor ptr) -> bool");
   ops.impl("xpu_host_unregister", &xpu_host_unregister);
 
   // Merge attn states

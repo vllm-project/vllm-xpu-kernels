@@ -18,6 +18,19 @@ MINI_PYTEST_PARAMS = {
 }
 
 
+def _ptr_tensor(ptr: int) -> torch.Tensor:
+    """Wrap a raw address in a single-element uint64 tensor.
+
+    xpu_host_register/xpu_host_unregister take the address this way because a
+    scalar int64 op argument cannot losslessly carry every 64-bit pointer bit
+    pattern (addresses with bit 63 set, as seen with USM-mapped host
+    allocations on XPU, overflow the signed range and fail to cast from
+    Python). The mask normalizes Tensor.data_ptr()'s Python int into the exact
+    bit pattern torch.uint64 expects.
+    """
+    return torch.tensor([ptr & 0xFFFFFFFFFFFFFFFF], dtype=torch.uint64)
+
+
 @pytest.mark.parametrize("device", ["xpu:0"])
 def test_host_register_mmap_roundtrip(device: str) -> None:
     """Registered mmap memory must still transfer correct bytes.
@@ -35,7 +48,7 @@ def test_host_register_mmap_roundtrip(device: str) -> None:
         host = torch.frombuffer(memoryview(region), dtype=torch.uint8)
         host_ptr = host.data_ptr()
 
-        assert ops.xpu_host_register(host_ptr, total)
+        assert ops.xpu_host_register(_ptr_tensor(host_ptr), total)
         try:
             expected = torch.randint(0, 256, (total, ), dtype=torch.uint8)
             dev = expected.to(device)
@@ -59,7 +72,7 @@ def test_host_register_mmap_roundtrip(device: str) -> None:
             torch.xpu.synchronize()
             torch.testing.assert_close(out.cpu(), expected)
         finally:
-            assert ops.xpu_host_unregister(host_ptr)
+            assert ops.xpu_host_unregister(_ptr_tensor(host_ptr))
             del host
 
 
@@ -69,6 +82,7 @@ def test_host_register_rejects_empty(device: str) -> None:
     torch.xpu.set_device(device)
     buf = torch.zeros(4096, dtype=torch.uint8)
 
-    assert not ops.xpu_host_register(0, 4096)
-    assert not ops.xpu_host_register(buf.data_ptr(), 0)
-    assert not ops.xpu_host_unregister(0)
+    assert not ops.xpu_host_register(_ptr_tensor(0), 4096)
+    assert not ops.xpu_host_register(_ptr_tensor(buf.data_ptr()), 0)
+    assert not ops.xpu_host_unregister(_ptr_tensor(0))
+
