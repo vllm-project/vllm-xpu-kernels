@@ -28,7 +28,9 @@ def _ptr_tensor(ptr: int) -> torch.Tensor:
     Python). The mask normalizes Tensor.data_ptr()'s Python int into the exact
     bit pattern torch.uint64 expects.
     """
-    return torch.tensor([ptr & 0xFFFFFFFFFFFFFFFF], dtype=torch.uint64)
+    return torch.tensor([ptr & 0xFFFFFFFFFFFFFFFF],
+                        dtype=torch.uint64,
+                        device="cpu")
 
 
 @pytest.mark.parametrize("device", ["xpu:0"])
