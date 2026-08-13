@@ -61,6 +61,10 @@ namespace {
 // full 64-bit bit pattern (e.g. bit 63 set) can exceed the signed int64
 // range and would otherwise fail to cast from Python.
 uint64_t ptrFromTensor(const torch::Tensor& ptr) {
+  // Must live on the CPU: the address is dereferenced with data_ptr<uint64_t>
+  // on the host, so a device-resident tensor here would be undefined
+  // behavior rather than a clean error.
+  TORCH_CHECK(ptr.device().is_cpu(), "ptr must be on CPU");
   TORCH_CHECK(
       ptr.numel() == 1,
       "ptr must be a single-element tensor, got ",
