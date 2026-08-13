@@ -249,8 +249,11 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     TORCH_CHECK(ptr_bias->size(1) == N, "ptr_bias.size(1) must match N");
   }
 
+  // Initialize the persistent scheduler counter before launching the kernel.
+  // An in-kernel store by work-group 0 cannot order other work-groups before
+  // their atomicAdd operations.
   at::Tensor atomic_buffer =
-      at::empty({static_cast<long>(1)}, ptr_A.options().dtype(at::kInt));
+      at::zeros({static_cast<long>(1)}, ptr_A.options().dtype(at::kInt));
 
 #define MoEGEMMLauncherCallER(                                                 \
     LayoutA,                                                                   \
