@@ -49,11 +49,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor? maybe_expert_map) -> () ");
   m.impl("moe_lora_align_block_size", torch::kXPU, &moe_lora_align_block_size);
 
-  // Apply grouped topk routing to select experts.
+  // Apply fused grouped topk routing to select experts.
+  // bias and scores may have different dtypes.
+  // scoring_func: 0=none (softmax pre-applied), 1=sigmoid.
+  // topk_values is always float32.
   m.def(
-      "grouped_topk(Tensor scores, Tensor scores_with_bias, int n_group, int "
-      "topk_group, int topk, bool renormalize, float "
-      "routed_scaling_factor) -> (Tensor, Tensor)");
+      "grouped_topk(Tensor scores, int n_group, int topk_group, "
+      "int topk, bool renormalize, float routed_scaling_factor, "
+      "Tensor bias, int scoring_func) -> (Tensor, Tensor)");
   m.impl("grouped_topk", torch::kXPU, &grouped_topk);
   // Apply topk softmax to the gating outputs.
   m.def(
