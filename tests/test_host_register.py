@@ -18,6 +18,22 @@ MINI_PYTEST_PARAMS = {
 }
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _force_cpu_default_device():
+    """Guard against default-device leakage from other test modules.
+
+    Some tests (e.g. in test_cache.py) call `torch.set_default_device(...)`
+    without restoring it, which is process-global state. If that leaks in
+    here, plain `torch.tensor(...)`/`torch.arange(...)` calls below would
+    silently land on XPU instead of CPU, breaking the CPU-only tensor
+    contract that `swap_blocks_batch` requires for its address/size args.
+    """
+    original = torch.get_default_device()
+    torch.set_default_device("cpu")
+    yield
+    torch.set_default_device(original)
+
+
 def _ptr_tensor(ptr: int) -> torch.Tensor:
     """Wrap a raw address in a single-element uint64 tensor.
 
