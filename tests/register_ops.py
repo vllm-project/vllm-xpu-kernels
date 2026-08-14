@@ -576,6 +576,29 @@ def swap_blocks_batch(
     torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
 
 
+def xpu_host_register(ptr: torch.Tensor, n_bytes: int) -> bool:
+    """Page-lock a host range and import it into the device context so
+    transfers use direct DMA. Intended for host memory that cannot come from
+    the caching host allocator, such as a shared mmap region. Returns False if
+    registration is unsupported; transfers stay correct but slower.
+
+    ptr is a single-element uint64 tensor holding the raw address rather than
+    a plain Python int: a scalar int64 op argument cannot losslessly carry
+    every 64-bit pointer bit pattern (addresses with bit 63 set, as seen with
+    USM-mapped host allocations on XPU, overflow the signed range and fail to
+    cast from Python), so the address is passed via a uint64 tensor instead,
+    matching the pattern used by swap_blocks_batch."""
+    return torch.ops._C.xpu_host_register(ptr, n_bytes)
+
+
+def xpu_host_unregister(ptr: torch.Tensor) -> bool:
+    """Release a host range previously passed to xpu_host_register.
+
+    ptr is a single-element uint64 tensor holding the raw address; see
+    xpu_host_register for why."""
+    return torch.ops._C.xpu_host_unregister(ptr)
+
+
 def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor, renormalize: bool,
