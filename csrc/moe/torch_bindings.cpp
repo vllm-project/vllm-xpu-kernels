@@ -96,6 +96,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "local_experts_num) -> "
       "()");
   m.impl("remap_hidden_states", torch::kXPU, &remap_hidden_states);
+
+  m.def(
+      "reorder_mxfp_scales(Tensor A_scales, Tensor rows_per_expert, "
+      "int total_padded_rows) -> Tensor");
+  m.impl("reorder_mxfp_scales", torch::kXPU, &reorder_mxfp_scales);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

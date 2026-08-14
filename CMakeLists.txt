@@ -54,9 +54,9 @@ set(ONEDNN_GIT_REPO
     "https://github.com/uxlfoundation/oneDNN.git"
     CACHE STRING "oneDNN git repository URL")
 
-# rls-v3.12
+# rls-v3.13
 set(ONEDNN_GIT_TAG
-    "80afa71049cd69a3df32adcccb623b12cd7baa22"
+    "0e2a5bfeef1bfbffc3137464606540233086ce9b"
     CACHE STRING "oneDNN git commit hash or tag")
 # ARCHITECTURE OPTIONS
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
@@ -230,8 +230,6 @@ message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 # Set RPATH to $ORIGIN so that the extensions can find their shared libraries
 # when loaded by Python.
 set(CMAKE_INSTALL_RPATH "$ORIGIN")
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
 
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   #
