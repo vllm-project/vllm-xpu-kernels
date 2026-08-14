@@ -52,6 +52,19 @@ namespace MoE {
 
 using namespace cute;
 
+enum class A_DTYPE {
+  BITS16,
+};
+
+enum class B_DTYPE {
+  BITS16,
+  INT4,
+  MXFP4,
+  PER_TENSOR_FP8,
+  MXFP8,
+  BLOCK_FP8,
+};
+
 template <typename TB>
 CUTE_DEVICE TB apply_scale(TB& x, float& y) {
   static_assert(
@@ -237,6 +250,7 @@ template <
     class GmemTiledCopyA,
     class GmemTiledCopyB,
     class GmemTiledCopyC,
+    B_DTYPE TENSOR_B_DTYPE,
     int GroupSize,
     class ATensor,
     class BTensor,
@@ -357,7 +371,7 @@ CUTE_DEVICE void xe_gemm_4bits(
     if (k_tile_prefetch * group_size < shape<1>(A)) {
       // MXFP8 / int4 1D scale prefetch ([N, K/gs]). Skip for float ElementS
       // (block-FP8 uses 2D [K/gs, N/gs] indexing).
-      if constexpr (!std::is_same_v<ElementS, float>) {
+      if constexpr (!(TENSOR_B_DTYPE == B_DTYPE::BLOCK_FP8)) {
         auto next_scales_tensor = make_tensor(
             make_gmem_ptr(
                 reinterpret_cast<const ElementS*>(
@@ -400,7 +414,7 @@ CUTE_DEVICE void xe_gemm_4bits(
               std::is_same_v<TB, float_e2m1_t> ||
               std::is_same_v<TB, float_e4m3_t> ||
               std::is_same_v<TB, float_e5m2_t>) {
-            if constexpr (std::is_same_v<ElementS, float>) {
+            if constexpr (TENSOR_B_DTYPE == B_DTYPE::BLOCK_FP8) {
               // Block-FP8: float32 scales [K/128, N/128] (B is (N,K)).
               int n_global = n_tile_start + n_sg_start + sg_local_n;
               int n_blocks = static_cast<int>(get<0>(B.shape())) / group_size;
@@ -425,7 +439,7 @@ CUTE_DEVICE void xe_gemm_4bits(
       }
 
       if ((group_idx + prefetch_dist) * group_size < shape<1>(A)) {
-        if constexpr (!std::is_same_v<ElementS, float>) {
+        if constexpr (!(TENSOR_B_DTYPE == B_DTYPE::BLOCK_FP8)) {
           auto next_scales_tensor = make_tensor(
               make_gmem_ptr(
                   reinterpret_cast<const ElementS*>(
