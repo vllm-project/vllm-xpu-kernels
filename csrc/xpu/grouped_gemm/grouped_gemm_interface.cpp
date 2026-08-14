@@ -33,7 +33,11 @@ torch::Tensor cutlass_grouped_gemm_interface(
 #endif
   } else if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
 #ifdef VLLM_XPU_ENABLE_XE2
-    // Use XE2 cutlass kernel
+    // Xe2 grouped GEMM currently consumes high-precision A (W16A16 / W8A16).
+    // When callers pass FP8 activations + ptr_A_scale, Python
+    // (fused_moe_interface._apply_kernel) dequants A before this entry.
+    // Device W8A8 with ptr_A_scale is not yet implemented here.
+    (void)ptr_A_scale;
     return cutlass_grouped_gemm_xe2(
         ptr_A,
         ptr_B,

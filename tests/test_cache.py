@@ -1290,3 +1290,72 @@ def test_swap_blocks_batch_h2d_mutation_race(device: str) -> None:
             dst_val[0][db].cpu(),
             msg=f"Value block {sb}→{db} corrupted by post-call mutation",
         )
+
+
+@pytest.mark.skipif(torch.xpu.device_count() < 2,
+                    reason="device-inference bug only manifests on a "
+                    "non-zero XPU device (needs >= 2 devices)")
+@torch.inference_mode()
+def test_swap_blocks_batch_d2h_stream_ordering() -> None:
+    """D2H swap_blocks_batch must run on the SOURCE device's stream, ordered
+    behind a still-in-flight write to the source.
+
+    Regression test for a device-inference bug: on Intel GPUs all XPU
+    sub-devices share one Level-Zero/SYCL context, so probing the pointer
+    *type* against each device's context reports ``usm::alloc::device`` for
+    every device and a first-match loop always resolves device 0.  The
+    resulting ``DeviceGuard(0)`` then submits the D2H copy on device 0's queue
+    instead of the source device's, so the copy is unordered w.r.t. the
+    compute stream that is still writing the source (the store-side
+    ``stream.wait_stream(compute)`` fence in the offloading worker is silently
+    defeated) and reads stale/partial data.
+
+    This only reproduces on a non-zero device with an in-flight write: the
+    plain ``test_swap_blocks_batch`` D2H case passes on the buggy kernel
+    because it copies fully-settled data with no concurrent writer.
+    """
+    device = "xpu:1"
+    torch.xpu.set_device(device)
+
+    n_blocks = 32
+    block_elems = 1 << 12  # 4096 floats/block
+    mm = 2048  # matmul dim -> slow, long in-flight write window
+    trials = 32
+    poison, value = -7.0, 3.0
+
+    src = torch.empty(n_blocks * block_elems, device=device,
+                      dtype=torch.float32)
+    dst = torch.empty(n_blocks * block_elems, device="cpu",
+                      dtype=torch.float32, pin_memory=True)
+    stride_bytes = block_elems * src.element_size()
+
+    sp = np.empty(n_blocks, dtype=np.uint64)
+    dp = np.empty(n_blocks, dtype=np.uint64)
+    sz = np.full(n_blocks, stride_bytes, dtype=np.uint64)
+    for i in range(n_blocks):
+        sp[i] = src.data_ptr() + i * stride_bytes
+        dp[i] = dst.data_ptr() + i * stride_bytes
+    sp = torch.from_numpy(sp)
+    dp = torch.from_numpy(dp)
+    sz = torch.from_numpy(sz)
+
+    a = torch.randn(mm, mm, device=device, dtype=torch.float32)
+    b = torch.randn(mm, mm, device=device, dtype=torch.float32)
+
+    stream = torch.xpu.current_stream(device)
+    for t in range(trials):
+        with torch.xpu.stream(stream):
+            src.fill_(poison)
+            # Slow producer keeps `src` in-flight while the copy is enqueued.
+            c = a
+            for _ in range(6):
+                c = torch.mm(c, b)
+            src.fill_(value)
+            # Same-stream program order: an in-order queue must run the copy
+            # AFTER the fill above.  If the copy is diverted to another
+            # device's queue it races the fill and observes `poison`.
+            ops.swap_blocks_batch(sp, dp, sz)
+        torch.xpu.synchronize(device)
+        assert torch.all(dst == value), (
+            f"trial {t}: D2H copy read stale data -> copy ran on the wrong "
+            f"device's queue (device inference resolved the wrong XPU)")

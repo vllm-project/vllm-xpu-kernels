@@ -99,6 +99,15 @@ def gelu_tanh_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.gelu_tanh_and_mul(out, input)
 
 
+def situ_and_mul(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    beta: float = 1.0,
+    linear_beta: float = -1.0,
+) -> None:
+    torch.ops._C.situ_and_mul(out, input, beta, linear_beta)
+
+
 def fatrelu_and_mul(out: torch.Tensor, input: torch.Tensor,
                     threshold: float) -> None:
     torch.ops._C.fatrelu_and_mul(out, input, threshold)
