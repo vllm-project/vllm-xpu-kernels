@@ -517,12 +517,12 @@ def batched_moe_align_block_size(
     )
 
 
-def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
-                 num_expert_group: int, topk_group: int, topk: int,
-                 renormalize: bool, routed_scaling_factor: float):
-    return torch.ops._moe_C.grouped_topk(scores, scores_with_bias,
-                                         num_expert_group, topk_group, topk,
-                                         renormalize, routed_scaling_factor)
+def grouped_topk(scores: torch.Tensor, n_group: int, topk_group: int,
+                 topk: int, renormalize: bool, routed_scaling_factor: float,
+                 bias: torch.Tensor, scoring_func: int):
+    return torch.ops._moe_C.grouped_topk(scores, n_group, topk_group, topk,
+                                         renormalize, routed_scaling_factor,
+                                         bias, scoring_func)
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,

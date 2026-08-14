@@ -9,8 +9,12 @@ namespace moe {
 
 constexpr float kNegInfinity = INFINITY * -1;
 constexpr int32_t WARP_SIZE = 32;
-constexpr int32_t BLOCK_SIZE = 512;
-constexpr int32_t NUM_WARPS_PER_BLOCK = BLOCK_SIZE / WARP_SIZE;
+
+// Scoring function enums (mirror CUDA version)
+enum ScoringFunc {
+  SCORING_NONE = 0,    // no activation function
+  SCORING_SIGMOID = 1  // apply sigmoid
+};
 
 namespace warp_topk {
 
@@ -42,15 +46,6 @@ is_better_than(T val, T baseline, idxT index, idxT baseline_index) {
           (index < baseline_index && !greater);
   }
   return res;
-}
-
-template <typename T, typename idxT>
-int calc_smem_size_for_block_wide(int num_of_warp, int64_t k) {
-  uint64_t cache_topk = (sizeof(T) + sizeof(idxT)) * num_of_warp * k;
-  uint64_t n = std::max<int>(num_of_warp / 2 * k, num_of_warp * WARP_SIZE);
-  return std::max(
-      cache_topk,
-      round_up_to_multiple_of<256>(n * sizeof(T)) + n * sizeof(idxT));
 }
 
 template <
@@ -248,6 +243,15 @@ class WarpSort {
     }
   }
 
+  // Accessors for per-lane selected value/index (mirrors CUDA WarpSort).
+  [[intel::device_indirectly_callable]] inline idxT get_idx(int i = 0) const {
+    return idx_arr_[i];
+  }
+
+  [[intel::device_indirectly_callable]] inline T get_val(int i = 0) const {
+    return val_arr_[i];
+  }
+
  protected:
   static constexpr int max_arr_len_ = capacity / WARP_SIZE;
 
@@ -401,30 +405,58 @@ sycl_cast<float, sycl::ext::oneapi::bfloat16>(sycl::ext::oneapi::bfloat16 val) {
   return static_cast<float>(val);
 }
 
+[[intel::device_indirectly_callable]] inline float sigmoid_accurate(float x) {
+  return 0.5f * sycl::tanh(0.5f * x) + 0.5f;
+}
+
 template <typename T>
-[[intel::device_indirectly_callable]] inline void topk_with_k2(
+[[intel::device_indirectly_callable]] inline T apply_sigmoid(T val) {
+  float f = sycl_cast<float, T>(val);
+  return sycl_cast<T, float>(sigmoid_accurate(f));
+}
+
+template <ScoringFunc SF, typename T>
+[[intel::device_indirectly_callable]] inline T apply_scoring(T val) {
+  if constexpr (SF == SCORING_NONE) {
+    return val;
+  } else {
+    return apply_sigmoid(val);
+  }
+}
+
+// -------------------------------------------------------------------------
+// topk_with_k2: compute sum of top-2 biased scores for one expert group.
+// Used as phase-1 in the fused kernel (one sub_group per expert group).
+// -------------------------------------------------------------------------
+template <typename T, typename BiasT, ScoringFunc SF>
+[[intel::device_indirectly_callable]] inline void topk_with_k2_biased(
     T* output,
     T const* input,
+    BiasT const* bias,
     sycl::sub_group const& sg,
     int32_t const lane_id,
     int const num_experts_per_group) {
-  // Get the top2 per thread
   float largest = -INFINITY;
   float second_largest = -INFINITY;
 
   if (num_experts_per_group > WARP_SIZE) {
     for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
-      float value = input[i];
-      if (value > largest) {
+      T value = apply_scoring<SF>(input[i]);
+      value = value + static_cast<T>(bias[i]);
+      float valuef = sycl_cast<float, T>(value);
+      if (valuef > largest) {
         second_largest = largest;
-        largest = value;
-      } else if (value > second_largest) {
-        second_largest = value;
+        largest = valuef;
+      } else if (valuef > second_largest) {
+        second_largest = valuef;
       }
     }
   } else {
+    // Each lane holds exactly one value (num_experts_per_group <= WARP_SIZE).
     for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
-      largest = input[i];
+      T value = apply_scoring<SF>(input[i]);
+      value = value + static_cast<T>(bias[i]);
+      largest = sycl_cast<float, T>(value);
     }
   }
 
@@ -432,7 +464,6 @@ template <typename T>
 
   float max2 = max1;
   bool equal_to_max1 = (max1 == largest);
-
   int count_max1 =
       sycl::reduce_over_group(sg, equal_to_max1 ? 1 : 0, sycl::plus<>());
 
@@ -442,265 +473,250 @@ template <typename T>
   }
 
   if (lane_id == 0) {
-    *output = max1 + max2;
+    *output = sycl_cast<T, float>(max1 + max2);
   }
 }
 
-template <typename T>
-class topk_with_k2_kernel {
+// -------------------------------------------------------------------------
+// Fused grouped_topk kernel (mirrors CUDA grouped_topk_fused_kernel).
+//
+// Launch parameters:
+//   - one work-group per token
+//   - work-group size = n_group * WARP_SIZE  (one sub_group per expert group)
+//
+// Shared-local memory layout (same as CUDA dynamic smem layout):
+//   [0 .. val_bytes_aligned-1]          : WarpSelect val staging (T)
+//   [val_bytes_aligned .. internal-1]   : WarpSelect idx staging (int32_t)
+//   [internal .. internal+align-1]      : padding to 16-byte boundary
+//   [internal+align .. end]             : s_group_scores[n_group] (T)
+// -------------------------------------------------------------------------
+template <typename T, typename BiasT, typename IdxT, ScoringFunc SF>
+class grouped_topk_fused_kernel_impl {
  public:
-  topk_with_k2_kernel(
-      T* output,
-      T* input,
-      int64_t const num_tokens,
-      int64_t const num_cases,
-      int64_t const n_group,
-      int64_t const num_experts_per_group)
-      : output(output),
-        input(input),
-        num_tokens(num_tokens),
-        num_cases(num_cases),
-        n_group(n_group),
-        num_experts_per_group(num_experts_per_group) {}
-
-  void operator()
-      [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
-    auto local_id = item.get_local_id(0);
-    auto group_id = item.get_group(0);
-    int32_t warp_id = local_id / WARP_SIZE;
-    int32_t lane_id = local_id % WARP_SIZE;
-
-    int32_t case_id = group_id * NUM_WARPS_PER_BLOCK + warp_id;
-    if (case_id < num_cases) {
-      auto current_input = input + case_id * num_experts_per_group;
-      auto current_output = output + case_id;
-      auto sg = item.get_sub_group();
-      topk_with_k2(
-          current_output, current_input, sg, lane_id, num_experts_per_group);
-    }
-  }
-
- private:
-  T* output;
-  T* input;
-  int64_t const num_tokens;
-  int64_t const num_cases;
-  int64_t const n_group;
-  int64_t const num_experts_per_group;
-};
-
-template <typename T, typename IdxT>
-class group_idx_and_topk_idx_kernel {
- public:
-  group_idx_and_topk_idx_kernel(
+  grouped_topk_fused_kernel_impl(
       sycl::local_accessor<char, 1>& slm,
       T* scores,
-      T const* group_scores,
-      T* topk_values,
+      float* topk_values,
       IdxT* topk_indices,
-      T* scores_with_bias,
+      BiasT const* bias,
       int64_t const num_tokens,
+      int64_t const num_experts,
       int64_t const n_group,
       int64_t const topk_group,
       int64_t const topk,
-      int64_t const num_experts,
-      int64_t const num_experts_per_group,
       bool renormalize,
       double routed_scaling_factor)
       : slm(slm),
         scores(scores),
-        group_scores(group_scores),
         topk_values(topk_values),
         topk_indices(topk_indices),
-        scores_with_bias(scores_with_bias),
+        bias(bias),
         num_tokens(num_tokens),
+        num_experts(num_experts),
         n_group(n_group),
         topk_group(topk_group),
         topk(topk),
-        num_experts(num_experts),
-        num_experts_per_group(num_experts_per_group),
         renormalize(renormalize),
         routed_scaling_factor(routed_scaling_factor) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
-    auto local_id = item.get_local_id(0);
-    auto group_id = item.get_group(0);
-    int32_t warp_id = local_id / WARP_SIZE;
-    int32_t lane_id = local_id % WARP_SIZE;
-    int32_t case_id =
-        group_id * NUM_WARPS_PER_BLOCK + warp_id;  // one per token
-    auto current_scores_with_bias = scores_with_bias + case_id * num_experts;
-    auto current_scores = scores + case_id * num_experts;
-    auto current_group_scores = group_scores + case_id * n_group;
-    auto current_topk_values = topk_values + case_id * topk;
-    auto current_topk_indices = topk_indices + case_id * topk;
+    int32_t const token_id = static_cast<int32_t>(item.get_group(0));
+    if (token_id >= static_cast<int32_t>(num_tokens)) {
+      return;
+    }
 
-    int32_t align_num_experts_per_group =
-        warp_topk::round_up_to_multiple_of<WARP_SIZE>(num_experts_per_group);
+    int32_t const local_id = static_cast<int32_t>(item.get_local_id(0));
+    int32_t const local_range = static_cast<int32_t>(item.get_local_range(0));
+    int32_t const warp_id = local_id / WARP_SIZE;
+    int32_t const lane_id = local_id % WARP_SIZE;
+    int32_t const n_group_i32 = static_cast<int32_t>(n_group);
+    int32_t const topk_group_i32 = static_cast<int32_t>(topk_group);
+    int32_t const topk_i32 = static_cast<int32_t>(topk);
+    int32_t const num_experts_i32 = static_cast<int32_t>(num_experts);
+    int32_t const num_warps = local_range / WARP_SIZE;
+
+    // Each work-group is launched with exactly n_group sub_groups.
+    if (warp_id >= n_group_i32 || num_warps < n_group_i32) {
+      return;
+    }
+
+    int32_t const num_experts_per_group = num_experts_i32 / n_group_i32;
+
+    T* scores_token = scores + static_cast<int64_t>(token_id) * num_experts;
 
     auto sg = item.get_sub_group();
 
+    // --- Shared memory layout ---
     char* smem_buf =
         slm.template get_multi_ptr<sycl::access::decorated::no>().get();
-    int32_t* s_topk_idx = reinterpret_cast<int32_t*>(smem_buf);
-    T* s_topk_value =
-        reinterpret_cast<T*>(s_topk_idx + NUM_WARPS_PER_BLOCK * topk) +
-        warp_id * topk;
-    s_topk_idx += warp_id * topk;
 
-    T value = kNegInfinity;
-    T topk_group_value = kNegInfinity;
-    int32_t num_equalto_topkth_group;
+    // WarpSelect internal staging occupies the first `internal_bytes`.
+    size_t const val_bytes =
+        static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(T);
+    size_t const val_bytes_aligned =
+        warp_topk::round_up_to_multiple_of<256>(val_bytes);
+    size_t const idx_bytes =
+        static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(int32_t);
+    size_t const internal_bytes = val_bytes_aligned + idx_bytes;
 
-    if (case_id < num_tokens) {
-      // calculate group_idx
-      int32_t target_num_min = WARP_SIZE - n_group + topk_group;
-      if (lane_id < n_group &&
-          (std::isfinite(
-              sycl_cast<float, T>(
-                  current_group_scores[lane_id]))))  // The check is necessary
-                                                     // to avoid abnormal input
-      {
-        value = current_group_scores[lane_id];
-      }
+    // User-managed smem starts after internal staging, aligned to 16 bytes.
+    uintptr_t ptr_u = reinterpret_cast<uintptr_t>(smem_buf + internal_bytes);
+    ptr_u = (ptr_u + 15) & ~static_cast<uintptr_t>(15);
+    T* s_group_scores = reinterpret_cast<T*>(ptr_u);
 
-      int count_equal_to_top_value = WARP_SIZE - n_group;
-      int pre_count_equal_to_top_value = 0;
-      // Use loop to find the largset top_group
-      while (count_equal_to_top_value < target_num_min) {
-        float value_f = sycl_cast<float, T>(value);
-        float topk_group_value_f =
-            sycl::reduce_over_group(sg, value_f, sycl::maximum<float>());
-        topk_group_value = sycl_cast<T, float>(topk_group_value_f);
-        if (value_f == topk_group_value_f) {
-          value = kNegInfinity;
-        }
-        pre_count_equal_to_top_value = count_equal_to_top_value;
-        count_equal_to_top_value = sycl::reduce_over_group(
-            sg, (value == kNegInfinity) ? 1 : 0, sycl::plus<>());
-      }
-      num_equalto_topkth_group = target_num_min - pre_count_equal_to_top_value;
-    }
+    // --- Phase 1: per-group scan (each sub_group handles one expert group) ---
+    int32_t const group_offset = warp_id * num_experts_per_group;
+    topk_with_k2_biased<T, BiasT, SF>(
+        s_group_scores + warp_id,
+        scores_token + group_offset,
+        bias + group_offset,
+        sg,
+        lane_id,
+        num_experts_per_group);
 
     item.barrier(sycl::access::fence_space::local_space);
 
-    warp_topk::WarpSelect</*capability*/ WARP_SIZE,
-                          /*greater*/ true,
-                          T,
-                          int32_t,
-                          /* is_stable */ true>
-        queue(
-            (int32_t)topk,
-            -INFINITY,
+    // --- Phase 2: sub_group 0 selects groups and experts ---
+    if (warp_id != 0) {
+      return;
+    }
+
+    float* topk_values_token =
+        topk_values + static_cast<int64_t>(token_id) * topk;
+    IdxT* topk_indices_token =
+        topk_indices + static_cast<int64_t>(token_id) * topk;
+
+    // Select topk_group groups by group score using WarpSelect.
+    warp_topk::WarpSelect<
+        /*capacity*/ WARP_SIZE,
+        /*greater*/ true,
+        T,
+        int32_t,
+        /*is_stable*/ true>
+        group_sel(
+            topk_group_i32,
+            sycl_cast<T, float>(-INFINITY),
             smem_buf,
             local_id,
-            item.get_local_range(0));
+            local_range);
 
-    int count_equalto_topkth_group = 0;
-    bool if_proceed_next_topk = (topk_group_value != kNegInfinity);
-    if (case_id < num_tokens && if_proceed_next_topk) {
-      for (int i_group = 0; i_group < n_group; i_group++) {
-        if ((current_group_scores[i_group] > topk_group_value) ||
-            ((current_group_scores[i_group] == topk_group_value) &&
-             (count_equalto_topkth_group < num_equalto_topkth_group))) {
-          int32_t offset = i_group * num_experts_per_group;
-          for (int32_t i = lane_id; i < align_num_experts_per_group;
-               i += WARP_SIZE) {
-            T candidates =
-                (i < num_experts_per_group) &&
-                        std::isfinite(
-                            sycl_cast<float, T>(
-                                current_scores_with_bias[offset + i]))
-                    ? current_scores_with_bias[offset + i]
-                    : sycl_cast<T, float>(kNegInfinity);
-            queue.add(candidates, offset + i, sg, local_id);
-          }
-          if (current_group_scores[i_group] == topk_group_value) {
-            count_equalto_topkth_group++;
-          }
-        }
+    // All lanes must participate; lanes beyond n_group feed -inf.
+    T gscore = (lane_id < n_group_i32) ? s_group_scores[lane_id]
+                                       : sycl_cast<T, float>(-INFINITY);
+    group_sel.add(gscore, lane_id, sg, local_id);
+    group_sel.done(sg, local_id);
+
+    // Proceed only if k-th selected group score is not -inf.
+    bool proceed = false;
+    if (topk_group_i32 > 0) {
+      int const kth_lane = topk_group_i32 - 1;
+      T kth_val = sycl::select_from_group(sg, group_sel.get_val(0), kth_lane);
+      proceed = (sycl_cast<float, T>(kth_val) != -INFINITY);
+    }
+
+    if (!proceed) {
+      for (int i = lane_id; i < topk_i32; i += WARP_SIZE) {
+        topk_indices_token[i] = static_cast<IdxT>(i);
+        topk_values_token[i] = 1.0f / static_cast<float>(topk_i32);
       }
-      queue.done(sg, local_id);
-    }
-    // after done(), smem is used for merging results among warps
-    item.barrier(sycl::access::fence_space::local_space);
-    if (case_id < num_tokens && if_proceed_next_topk) {
-      // Get the topk_idx
-      queue.dumpIdx(s_topk_idx);
-      ;
+      return;
     }
 
-    // Load the valid score value
-    // Calculate the summation
-    float topk_sum = 1e-20;
-    if (case_id < num_tokens && if_proceed_next_topk) {
-      for (int i = lane_id;
-           i < warp_topk::round_up_to_multiple_of<WARP_SIZE>(topk);
+    // Merge per-group topk candidates from selected groups, then select topk.
+    warp_topk::WarpSelect<
+        /*capacity*/ WARP_SIZE,
+        /*greater*/ true,
+        T,
+        int32_t,
+        /*is_stable*/ true>
+        expert_sel(
+            topk_i32,
+            sycl_cast<T, float>(-INFINITY),
+            smem_buf,
+            local_id,
+            local_range);
+
+    // Selected group ids reside in lanes [0, topk_group).
+    int32_t sel_gid_lane =
+        (lane_id < topk_group_i32) ? group_sel.get_idx(0) : 0;
+
+    int32_t const align_num_experts_per_group =
+        warp_topk::round_up_to_multiple_of<WARP_SIZE>(num_experts_per_group);
+
+    for (int32_t g = 0; g < topk_group_i32; ++g) {
+      int32_t gid = sycl::select_from_group(sg, sel_gid_lane, g);
+      int32_t const offset = gid * num_experts_per_group;
+      for (int32_t i = lane_id; i < align_num_experts_per_group;
            i += WARP_SIZE) {
-        T value =
-            i < topk
-                ? current_scores[s_topk_idx[i]]
-                : sycl_cast<T, float>(0.0f);  // Load the valid value of expert
-        if (i < topk) {
-          s_topk_value[i] = value;
+        // All lanes must call add() the same number of times.
+        T cand = sycl_cast<T, float>(-INFINITY);
+        int32_t idx = 0;
+        if (i < num_experts_per_group) {
+          idx = offset + i;
+          T input_val = scores_token[idx];
+          float input_f = sycl_cast<float, T>(input_val);
+          if (sycl::isinf(input_f) == 0) {
+            T score = apply_scoring<SF>(input_val);
+            cand = score + static_cast<T>(bias[idx]);
+          }
         }
-        topk_sum += sycl::reduce_over_group(
-            sg, sycl_cast<float, T>(value), sycl::plus<>());
+        expert_sel.add(cand, idx, sg, local_id);
       }
     }
+    expert_sel.done(sg, local_id);
 
-    item.barrier(sycl::access::fence_space::local_space);
+    // Compute unbiased routing weights + optional renorm.
+    float lane_unbiased = 0.0f;
+    IdxT lane_idx = 0;
+    if (lane_id < topk_i32) {
+      lane_idx = static_cast<IdxT>(expert_sel.get_idx(0));
+      T in = scores_token[static_cast<int32_t>(lane_idx)];
+      lane_unbiased = sycl_cast<float, T>(apply_scoring<SF>(in));
+    }
 
-    if (case_id < num_tokens) {
-      if (if_proceed_next_topk) {
-        for (int i = lane_id; i < topk; i += WARP_SIZE) {
-          float value;
-          if (renormalize) {
-            value = sycl_cast<float, T>(s_topk_value[i]) / topk_sum *
-                    routed_scaling_factor;
-          } else {
-            value =
-                sycl_cast<float, T>(s_topk_value[i]) * routed_scaling_factor;
-          }
-          current_topk_indices[i] = s_topk_idx[i];
-          current_topk_values[i] = sycl_cast<T, float>(value);
-        }
-      } else {
-        for (int i = lane_id; i < topk; i += WARP_SIZE) {
-          current_topk_indices[i] = i;
-          current_topk_values[i] = sycl_cast<T, float>(1.0f / topk);
-        }
-      }
-      // Note: when if_proceed_next_topk==false, choose the first 8 experts as
-      // the default result.
+    float topk_sum = 1e-20f;
+    if (renormalize) {
+      topk_sum +=
+          sycl::reduce_over_group(sg, lane_unbiased, sycl::plus<float>());
+    }
+
+    float scale = static_cast<float>(routed_scaling_factor);
+    if (renormalize) {
+      scale /= topk_sum;
+    }
+
+    if (lane_id < topk_i32) {
+      topk_indices_token[lane_id] = lane_idx;
+      topk_values_token[lane_id] = lane_unbiased * scale;
     }
   }
 
  private:
   sycl::local_accessor<char, 1> slm;
   T* scores;
-  T const* group_scores;
-  T* topk_values;
+  float* topk_values;
   IdxT* topk_indices;
-  T* scores_with_bias;
+  BiasT const* bias;
   int64_t const num_tokens;
+  int64_t const num_experts;
   int64_t const n_group;
   int64_t const topk_group;
   int64_t const topk;
-  int64_t const num_experts;
-  int64_t const num_experts_per_group;
   bool renormalize;
   double routed_scaling_factor;
 };
 
-template <typename T, typename IdxT>
-void invokeNoAuxTc(
+// -------------------------------------------------------------------------
+// invokeNoAuxTcFused: fused path (mirrors CUDA grouped_topk_fused_kernel).
+// Takes scores + separate bias tensor; no pre-computed scores_with_bias.
+// -------------------------------------------------------------------------
+template <typename T, typename BiasT, typename IdxT, ScoringFunc SF>
+void invokeNoAuxTcFused(
     T* scores,
-    T* group_scores,
-    T* topk_values,
+    float* topk_values,
     IdxT* topk_indices,
-    T* scores_with_bias,
+    BiasT const* bias,
     int64_t const num_tokens,
     int64_t const num_experts,
     int64_t const n_group,
@@ -708,169 +724,219 @@ void invokeNoAuxTc(
     int64_t const topk,
     bool const renormalize,
     double const routed_scaling_factor,
-    bool enable_pdl,
     sycl::queue& queue) {
-  int64_t num_cases = num_tokens * n_group;
-  int64_t topk_with_k2_num_blocks = (num_cases - 1) / NUM_WARPS_PER_BLOCK + 1;
-  sycl::range<1> grid(topk_with_k2_num_blocks);
-  sycl::range<1> block(BLOCK_SIZE);
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<1>(grid * block, block),
-        topk_with_k2_kernel<T>(
-            group_scores,
-            scores_with_bias,
-            num_tokens,
-            num_cases,
-            n_group,
-            num_experts / n_group));
-  });
+  // One work-group per token; one sub_group (warp) per expert group.
+  int32_t const num_warps = static_cast<int32_t>(n_group);
+  int32_t const block_size = num_warps * WARP_SIZE;
 
-  int64_t topk_with_k_group_num_blocks =
-      (num_tokens - 1) / NUM_WARPS_PER_BLOCK + 1;
-  size_t dynamic_smem_in_bytes =
-      warp_topk::calc_smem_size_for_block_wide<T, int32_t>(
-          NUM_WARPS_PER_BLOCK, topk);
-  sycl::range<1> grid2(topk_with_k_group_num_blocks);
-  sycl::range<1> block2(BLOCK_SIZE);
+  // Compute dynamic shared memory size (mirrors CUDA).
+  size_t const val_bytes =
+      static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(T);
+  size_t const val_bytes_aligned =
+      warp_topk::round_up_to_multiple_of<256>(val_bytes);
+  size_t const idx_bytes =
+      static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(int32_t);
+  size_t const internal_bytes = val_bytes_aligned + idx_bytes;
+  // extra: 16-byte alignment padding + s_group_scores[n_group]
+  size_t const extra_bytes = 16 + static_cast<size_t>(n_group) * sizeof(T);
+  size_t const smem_bytes = internal_bytes + extra_bytes;
+
+  sycl::range<1> grid(static_cast<size_t>(num_tokens));
+  sycl::range<1> block(static_cast<size_t>(block_size));
+
   queue.submit([&](sycl::handler& cgh) {
-    sycl::local_accessor<char, 1> slm(
-        sycl::range<1>(dynamic_smem_in_bytes), cgh);
+    sycl::local_accessor<char, 1> slm(sycl::range<1>(smem_bytes), cgh);
     cgh.parallel_for(
         sycl::nd_range<1>(grid * block, block),
-        group_idx_and_topk_idx_kernel<T, IdxT>(
+        grouped_topk_fused_kernel_impl<T, BiasT, IdxT, SF>(
             slm,
             scores,
-            group_scores,
             topk_values,
             topk_indices,
-            scores_with_bias,
+            bias,
             num_tokens,
+            num_experts,
             n_group,
             topk_group,
             topk,
-            num_experts,
-            num_experts / n_group,
             renormalize,
             routed_scaling_factor));
   });
 }
 
-#define INSTANTIATE_NOAUX_TC(T, IdxT)     \
-  template void invokeNoAuxTc<T, IdxT>(   \
-      T * scores,                         \
-      T * group_scores,                   \
-      T * topk_values,                    \
-      IdxT * topk_indices,                \
-      T * scores_with_bias,               \
-      int64_t const num_tokens,           \
-      int64_t const num_experts,          \
-      int64_t const n_group,              \
-      int64_t const topk_group,           \
-      int64_t const topk,                 \
-      bool const renormalize,             \
-      double const routed_scaling_factor, \
-      bool enable_pdl,                    \
+#define INSTANTIATE_NOAUX_TC_FUSED(T, BiasT, IdxT, SF)  \
+  template void invokeNoAuxTcFused<T, BiasT, IdxT, SF>( \
+      T * scores,                                       \
+      float* topk_values,                               \
+      IdxT* topk_indices,                               \
+      BiasT const* bias,                                \
+      int64_t const num_tokens,                         \
+      int64_t const num_experts,                        \
+      int64_t const n_group,                            \
+      int64_t const topk_group,                         \
+      int64_t const topk,                               \
+      bool const renormalize,                           \
+      double const routed_scaling_factor,               \
       sycl::queue& queue);
 
-INSTANTIATE_NOAUX_TC(float, int32_t);
-INSTANTIATE_NOAUX_TC(sycl::half, int32_t);
-INSTANTIATE_NOAUX_TC(sycl::ext::oneapi::bfloat16, int32_t);
+INSTANTIATE_NOAUX_TC_FUSED(float, float, int32_t, SCORING_SIGMOID);
+INSTANTIATE_NOAUX_TC_FUSED(float, sycl::half, int32_t, SCORING_SIGMOID);
+INSTANTIATE_NOAUX_TC_FUSED(
+    float, sycl::ext::oneapi::bfloat16, int32_t, SCORING_SIGMOID);
+INSTANTIATE_NOAUX_TC_FUSED(sycl::half, float, int32_t, SCORING_SIGMOID);
+INSTANTIATE_NOAUX_TC_FUSED(sycl::half, sycl::half, int32_t, SCORING_SIGMOID);
+INSTANTIATE_NOAUX_TC_FUSED(
+    sycl::half, sycl::ext::oneapi::bfloat16, int32_t, SCORING_SIGMOID);
+INSTANTIATE_NOAUX_TC_FUSED(
+    sycl::ext::oneapi::bfloat16, float, int32_t, SCORING_SIGMOID);
+INSTANTIATE_NOAUX_TC_FUSED(
+    sycl::ext::oneapi::bfloat16, sycl::half, int32_t, SCORING_SIGMOID);
+INSTANTIATE_NOAUX_TC_FUSED(
+    sycl::ext::oneapi::bfloat16,
+    sycl::ext::oneapi::bfloat16,
+    int32_t,
+    SCORING_SIGMOID);
+INSTANTIATE_NOAUX_TC_FUSED(float, float, int32_t, SCORING_NONE);
+INSTANTIATE_NOAUX_TC_FUSED(float, sycl::half, int32_t, SCORING_NONE);
+INSTANTIATE_NOAUX_TC_FUSED(
+    float, sycl::ext::oneapi::bfloat16, int32_t, SCORING_NONE);
+INSTANTIATE_NOAUX_TC_FUSED(sycl::half, float, int32_t, SCORING_NONE);
+INSTANTIATE_NOAUX_TC_FUSED(sycl::half, sycl::half, int32_t, SCORING_NONE);
+INSTANTIATE_NOAUX_TC_FUSED(
+    sycl::half, sycl::ext::oneapi::bfloat16, int32_t, SCORING_NONE);
+INSTANTIATE_NOAUX_TC_FUSED(
+    sycl::ext::oneapi::bfloat16, float, int32_t, SCORING_NONE);
+INSTANTIATE_NOAUX_TC_FUSED(
+    sycl::ext::oneapi::bfloat16, sycl::half, int32_t, SCORING_NONE);
+INSTANTIATE_NOAUX_TC_FUSED(
+    sycl::ext::oneapi::bfloat16,
+    sycl::ext::oneapi::bfloat16,
+    int32_t,
+    SCORING_NONE);
+
 }  // end namespace moe
 }  // namespace vllm
 
+// -------------------------------------------------------------------------
+// Python binding: fused grouped topk with separate bias + scoring_func.
+// Mirrors the CUDA grouped_topk signature in grouped_topk_kernels.cu.
+// topk_values output is always float32.
+// -------------------------------------------------------------------------
 std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
     torch::Tensor const& scores,
-    torch::Tensor const& scores_with_bias,
     int64_t n_group,
     int64_t topk_group,
     int64_t topk,
     bool renormalize,
-    double routed_scaling_factor) {
-  auto data_type = scores_with_bias.scalar_type();
-  auto input_size = scores_with_bias.sizes();
+    double routed_scaling_factor,
+    torch::Tensor const& bias,
+    int64_t scoring_func) {
+  auto data_type = scores.scalar_type();
+  auto bias_type = bias.scalar_type();
+  auto input_size = scores.sizes();
   int64_t num_tokens = input_size[0];
   int64_t num_experts = input_size[1];
-  TORCH_CHECK(input_size.size() == 2, "scores_with_bias must be a 2D Tensor");
+  TORCH_CHECK(input_size.size() == 2, "scores must be a 2D Tensor");
   TORCH_CHECK(
       num_experts % n_group == 0, "num_experts should be divisible by n_group");
   TORCH_CHECK(
       n_group <= 32, "n_group should be smaller than or equal to 32 for now");
   TORCH_CHECK(topk <= 32, "topk should be smaller than or equal to 32 for now");
+  TORCH_CHECK(
+      topk <= topk_group * (num_experts / n_group),
+      "topk must be <= topk_group * (num_experts / n_group)");
+  TORCH_CHECK(
+      scoring_func == vllm::moe::SCORING_NONE ||
+          scoring_func == vllm::moe::SCORING_SIGMOID,
+      "scoring_func must be SCORING_NONE (0) or SCORING_SIGMOID (1)");
 
-  torch::Tensor group_scores = torch::empty(
-      {num_tokens, n_group}, torch::dtype(data_type).device(torch::kXPU));
+  // topk_values is always float32 (matches CUDA behavior).
   torch::Tensor topk_values = torch::empty(
-      {num_tokens, topk}, torch::dtype(data_type).device(torch::kXPU));
+      {num_tokens, topk}, torch::dtype(torch::kFloat32).device(torch::kXPU));
   torch::Tensor topk_indices = torch::empty(
       {num_tokens, topk}, torch::dtype(torch::kInt32).device(torch::kXPU));
 
   auto& queue = vllm::xpu::vllmGetQueue();
 
+  auto sf = static_cast<vllm::moe::ScoringFunc>(scoring_func);
+
+#define LAUNCH_FUSED_SF(T, BiasT, IdxT)                                     \
+  do {                                                                      \
+    switch (sf) {                                                           \
+      case vllm::moe::SCORING_NONE:                                         \
+        vllm::moe::                                                         \
+            invokeNoAuxTcFused<T, BiasT, IdxT, vllm::moe::SCORING_NONE>(    \
+                reinterpret_cast<T*>(scores.mutable_data_ptr()),            \
+                reinterpret_cast<float*>(topk_values.mutable_data_ptr()),   \
+                reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),   \
+                reinterpret_cast<BiasT const*>(bias.data_ptr()),            \
+                num_tokens,                                                 \
+                num_experts,                                                \
+                n_group,                                                    \
+                topk_group,                                                 \
+                topk,                                                       \
+                renormalize,                                                \
+                routed_scaling_factor,                                      \
+                queue);                                                     \
+        break;                                                              \
+      case vllm::moe::SCORING_SIGMOID:                                      \
+        vllm::moe::                                                         \
+            invokeNoAuxTcFused<T, BiasT, IdxT, vllm::moe::SCORING_SIGMOID>( \
+                reinterpret_cast<T*>(scores.mutable_data_ptr()),            \
+                reinterpret_cast<float*>(topk_values.mutable_data_ptr()),   \
+                reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),   \
+                reinterpret_cast<BiasT const*>(bias.data_ptr()),            \
+                num_tokens,                                                 \
+                num_experts,                                                \
+                n_group,                                                    \
+                topk_group,                                                 \
+                topk,                                                       \
+                renormalize,                                                \
+                routed_scaling_factor,                                      \
+                queue);                                                     \
+        break;                                                              \
+      default:                                                              \
+        throw std::invalid_argument("Unsupported scoring_func");            \
+        break;                                                              \
+    }                                                                       \
+  } while (0)
+
+#define LAUNCH_FUSED(T, IdxT)                                                \
+  do {                                                                       \
+    switch (bias_type) {                                                     \
+      case torch::kFloat16:                                                  \
+        LAUNCH_FUSED_SF(T, sycl::half, IdxT);                                \
+        break;                                                               \
+      case torch::kFloat32:                                                  \
+        LAUNCH_FUSED_SF(T, float, IdxT);                                     \
+        break;                                                               \
+      case torch::kBFloat16:                                                 \
+        LAUNCH_FUSED_SF(T, sycl::ext::oneapi::bfloat16, IdxT);               \
+        break;                                                               \
+      default:                                                               \
+        throw std::invalid_argument(                                         \
+            "Invalid bias dtype, only supports float16, float32, bfloat16"); \
+        break;                                                               \
+    }                                                                        \
+  } while (0)
+
   switch (data_type) {
     case torch::kFloat16:
-      // Handle Float16
-      vllm::moe::invokeNoAuxTc<sycl::half, int32_t>(
-          reinterpret_cast<sycl::half*>(scores.mutable_data_ptr()),
-          reinterpret_cast<sycl::half*>(group_scores.mutable_data_ptr()),
-          reinterpret_cast<sycl::half*>(topk_values.mutable_data_ptr()),
-          reinterpret_cast<int32_t*>(topk_indices.mutable_data_ptr()),
-          reinterpret_cast<sycl::half*>(scores_with_bias.data_ptr()),
-          num_tokens,
-          num_experts,
-          n_group,
-          topk_group,
-          topk,
-          renormalize,
-          routed_scaling_factor,
-          false,
-          queue);
+      LAUNCH_FUSED(sycl::half, int32_t);
       break;
     case torch::kFloat32:
-      // Handle Float32
-      vllm::moe::invokeNoAuxTc<float, int32_t>(
-          reinterpret_cast<float*>(scores.mutable_data_ptr()),
-          reinterpret_cast<float*>(group_scores.mutable_data_ptr()),
-          reinterpret_cast<float*>(topk_values.mutable_data_ptr()),
-          reinterpret_cast<int32_t*>(topk_indices.mutable_data_ptr()),
-          reinterpret_cast<float*>(scores_with_bias.data_ptr()),
-          num_tokens,
-          num_experts,
-          n_group,
-          topk_group,
-          topk,
-          renormalize,
-          routed_scaling_factor,
-          false,
-          queue);
+      LAUNCH_FUSED(float, int32_t);
       break;
     case torch::kBFloat16:
-      // Handle BFloat16
-      vllm::moe::invokeNoAuxTc<sycl::ext::oneapi::bfloat16, int32_t>(
-          reinterpret_cast<sycl::ext::oneapi::bfloat16*>(
-              scores.mutable_data_ptr()),
-          reinterpret_cast<sycl::ext::oneapi::bfloat16*>(
-              group_scores.mutable_data_ptr()),
-          reinterpret_cast<sycl::ext::oneapi::bfloat16*>(
-              topk_values.mutable_data_ptr()),
-          reinterpret_cast<int32_t*>(topk_indices.mutable_data_ptr()),
-          reinterpret_cast<sycl::ext::oneapi::bfloat16*>(
-              scores_with_bias.data_ptr()),
-          num_tokens,
-          num_experts,
-          n_group,
-          topk_group,
-          topk,
-          renormalize,
-          routed_scaling_factor,
-          false,
-          queue);
+      LAUNCH_FUSED(sycl::ext::oneapi::bfloat16, int32_t);
       break;
     default:
-      // Handle other data types
       throw std::invalid_argument(
           "Invalid dtype, only supports float16, float32, and bfloat16");
       break;
   }
+#undef LAUNCH_FUSED
+#undef LAUNCH_FUSED_SF
+
   return {topk_values, topk_indices};
 }
