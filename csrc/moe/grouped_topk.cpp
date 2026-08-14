@@ -441,21 +441,22 @@ template <typename T, typename BiasT, ScoringFunc SF>
 
   if (num_experts_per_group > WARP_SIZE) {
     for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
-      float value = sycl_cast<float, T>(apply_scoring<SF>(input[i]));
-      value += sycl_cast<float, BiasT>(bias[i]);
-      if (value > largest) {
+      T value = apply_scoring<SF>(input[i]);
+      value = value + static_cast<T>(bias[i]);
+      float valuef = sycl_cast<float, T>(value);
+      if (valuef > largest) {
         second_largest = largest;
-        largest = value;
-      } else if (value > second_largest) {
-        second_largest = value;
+        largest = valuef;
+      } else if (valuef > second_largest) {
+        second_largest = valuef;
       }
     }
   } else {
     // Each lane holds exactly one value (num_experts_per_group <= WARP_SIZE).
     for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
-      float value = sycl_cast<float, T>(apply_scoring<SF>(input[i]));
-      value += sycl_cast<float, BiasT>(bias[i]);
-      largest = value;
+      T value = apply_scoring<SF>(input[i]);
+      value = value + static_cast<T>(bias[i]);
+      largest = sycl_cast<float, T>(value);
     }
   }
 
