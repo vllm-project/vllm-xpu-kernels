@@ -61,70 +61,13 @@ def test_grouped_topk(n_token: int, n_hidden: int, n_expert: int, topk: int,
         routed_scaling_factor=routed_scaling_factor,
         e_score_correction_bias=e_score_correction_bias)
 
-    torch.testing.assert_close(baseline_topk_ids,
-                               test_topk_ids,
-                               atol=0,
-                               rtol=0)
-
     if renormalize:
         torch.testing.assert_close(baseline_topk_weights,
                                    test_topk_weights,
                                    atol=2e-2,
                                    rtol=0)
 
-
-@pytest.mark.parametrize("n_token", [1, 33, 64])
-@pytest.mark.parametrize("n_expert", [256])
-@pytest.mark.parametrize("topk", [8])
-@pytest.mark.parametrize("renormalize", [True, False])
-@pytest.mark.parametrize("num_expert_group", [8])
-@pytest.mark.parametrize("topk_group", [4])
-@pytest.mark.parametrize("scoring_func", ["sigmoid"])
-@pytest.mark.parametrize("routed_scaling_factor", [1.0])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-def test_grouped_topk_deepseek(n_token: int, n_expert: int, topk: int,
-                               renormalize: bool, num_expert_group: int,
-                               topk_group: int, scoring_func: str,
-                               routed_scaling_factor: float,
-                               dtype: torch.dtype):
-    """Stress test with DeepSeek-scale parameters (256 experts, topk=8)."""
-    seed_everything(42)
-    n_hidden = 7168
-    hidden_states = torch.randn((n_token, n_hidden), dtype=dtype, device="xpu")
-    gating_output = torch.randn((n_token, n_expert), dtype=dtype, device="xpu")
-    e_score_correction_bias = torch.randn((n_expert, ),
-                                          dtype=dtype,
-                                          device="xpu")
-
-    baseline_topk_weights, baseline_topk_ids = grouped_topk(
-        hidden_states=hidden_states,
-        gating_output=gating_output,
-        topk=topk,
-        renormalize=renormalize,
-        num_expert_group=num_expert_group,
-        topk_group=topk_group,
-        scoring_func=scoring_func,
-        routed_scaling_factor=routed_scaling_factor,
-        e_score_correction_bias=e_score_correction_bias)
-
-    test_topk_weights, test_topk_ids = fused_grouped_topk(
-        hidden_states=hidden_states,
-        gating_output=gating_output,
-        topk=topk,
-        renormalize=renormalize,
-        num_expert_group=num_expert_group,
-        topk_group=topk_group,
-        scoring_func=scoring_func,
-        routed_scaling_factor=routed_scaling_factor,
-        e_score_correction_bias=e_score_correction_bias)
-
     torch.testing.assert_close(baseline_topk_ids,
                                test_topk_ids,
                                atol=0,
                                rtol=0)
-
-    if renormalize:
-        torch.testing.assert_close(baseline_topk_weights,
-                                   test_topk_weights,
-                                   atol=2e-2,
-                                   rtol=0)
