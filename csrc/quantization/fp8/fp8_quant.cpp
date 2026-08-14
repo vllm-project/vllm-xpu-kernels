@@ -770,8 +770,17 @@ void per_token_group_quant_fp8(
   const int hidden = static_cast<int>(input.numel() / num_tokens);
   const int elem_size = input.element_size();
   const int vec_width = 16 / elem_size;
-  const bool use_vec =
-      (group_size % vec_width == 0) && (hidden % vec_width == 0);
+  // The vectorized kernel reduces each group's absmax with a segmented
+  // sub-group XOR shuffle over lanes_per_group = group_size / vec_width lanes.
+  // The sub-group is pinned to 32 lanes (reqd_sub_group_size(32)), so once
+  // lanes_per_group exceeds 32 the XOR partner falls outside the sub-group and
+  // the reduction (and the per-group scale-write predicate) become undefined,
+  // producing wrong scales and corrupted output. Restrict the fast path to
+  // groups that fit inside a single sub-group and fall back to the scalar
+  // kernel (which reduces over the whole sub-group) otherwise.
+  const bool use_vec = (group_size % vec_width == 0) &&
+                       (hidden % vec_width == 0) &&
+                       (group_size / vec_width <= 32);
 
   if (use_vec) {
     const int num_groups_per_row = hidden / group_size;

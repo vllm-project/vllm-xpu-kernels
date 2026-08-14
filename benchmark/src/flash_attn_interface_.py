@@ -275,7 +275,7 @@ def flash_attn_varlen_func_CalKernelTime(
 
         if start_event is not None:
             start_event.record()
-        out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
+        varlen_fwd_args = [
             q,
             k,
             v,
@@ -306,7 +306,8 @@ def flash_attn_varlen_func_CalKernelTime(
             is_mix_batch,
             splits_per_seq_dev,
             work_list_dev,
-        )
+        ]
+        out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(*varlen_fwd_args)
         if end_event is not None:
             end_event.record()
     else:
