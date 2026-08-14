@@ -744,6 +744,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sycl/deepseek_fused_indexer_q_rope_mxfp4.cpp"
       "csrc/xpu/sycl/fused_input_norm.cpp"
       "csrc/xpu/sycl/fused_kv_compress_norm_rope_insert_sparse_attn.cpp"
+      "csrc/xpu/sycl/fused_rope_norm_store_kv_fp8.cpp"
       "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/sycl/apply_rotary_emb.cpp"
       "csrc/xpu/rand/exponential.cpp"

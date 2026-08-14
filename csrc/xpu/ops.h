@@ -131,6 +131,23 @@ void fused_kv_compress_norm_rope_insert_sparse_attn(
     int64_t token_stride,
     int64_t scale_dim,
     int64_t kv_block_stride);
+torch::Tensor fused_rope_norm_store_kv_fp8(
+    torch::Tensor& qkv,
+    const torch::Tensor& cos_sin_cache,
+    const torch::Tensor& positions,
+    torch::Tensor& key_cache,
+    torch::Tensor& value_cache,
+    const torch::Tensor& slot_mapping,
+    torch::Tensor& out_q,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    const torch::Tensor& k_scale,
+    const torch::Tensor& v_scale,
+    std::optional<torch::Tensor> q_norm_weight,
+    std::optional<torch::Tensor> k_norm_weight,
+    int64_t qk_norm_policy,
+    bool use_fp8);
 
 void multimodal_rotary_embedding(
     torch::Tensor& positions,  // [num_mrope_sections, num_tokens]
