@@ -406,8 +406,29 @@ def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
              scale_act: Optional[torch.Tensor],
              scale_wei: Optional[torch.Tensor],
              bias: Optional[torch.Tensor] = None):
+    """fp8 (w8a8) GEMM, allocating the output using `out_dtype`.
+
+    This functional variant carries no mutable argument, which is what keeps
+    it usable under torch.compile. Use `fp8_gemm_out` to write into a
+    caller-provided buffer.
+    """
     return torch.ops._xpu_C.fp8_gemm(input, weight, out_dtype, scale_act,
                                      scale_wei, bias)
+
+
+def fp8_gemm_out(out: torch.Tensor, input: torch.Tensor,
+                 weight: torch.Tensor,
+                 out_dtype: Optional[torch.dtype],
+                 scale_act: Optional[torch.Tensor],
+                 scale_wei: Optional[torch.Tensor],
+                 bias: Optional[torch.Tensor] = None):
+    """fp8 (w8a8) GEMM writing in place into `out`.
+
+    `out` must already match the expected dtype, shape and device; it is
+    returned unchanged.
+    """
+    return torch.ops._xpu_C.fp8_gemm_out(out, input, weight, out_dtype,
+                                         scale_act, scale_wei, bias)
 
 
 def fp8_bmm(input: torch.Tensor, weight: torch.Tensor,
