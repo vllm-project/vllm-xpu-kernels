@@ -58,7 +58,30 @@ torch::Tensor check_and_create_output_tensor(
   }
 
   if (out.has_value()) {
-    return out.value();
+    const auto& out_ = out.value();
+    const c10::IntArrayRef expected_shape(result_shape);
+    TORCH_CHECK(
+        out_.device() == A.device(),
+        "OneDNN Matmul expects out on device ",
+        A.device(),
+        ", got ",
+        out_.device(),
+        ".");
+    TORCH_CHECK(
+        out_.sizes() == expected_shape,
+        "OneDNN Matmul expects out of shape ",
+        expected_shape,
+        ", got ",
+        out_.sizes(),
+        ".");
+    TORCH_CHECK(
+        !out_dtype.has_value() || out_.scalar_type() == out_dtype.value(),
+        "OneDNN Matmul expects out of dtype ",
+        out_dtype.value_or(out_.scalar_type()),
+        ", got ",
+        out_.scalar_type(),
+        ".");
+    return out_;
   }
 
   // deal with input shape [m, b, k] stride [k, m * k, 1]
