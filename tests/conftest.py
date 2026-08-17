@@ -180,12 +180,17 @@ def pytest_generate_tests(metafunc):
     _apply_param_overrides(metafunc, profile)
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def reset_default_device():
     """
-    Some tests, such as `test_punica_ops.py`, explicitly set the
-    default device, which can affect subsequent tests. Adding this fixture
-    helps avoid this problem.
+    Some tests, such as `test_punica_ops.py` and `test_cache.py`, explicitly
+    set the default device via `torch.set_default_device(...)` but never
+    restore it. Since the default device is process-global state, this leaks
+    across tests within the same session (e.g. a later test that expects
+    plain `torch.tensor(...)`/`torch.arange(...)` calls to land on CPU can
+    silently get an XPU tensor on the wrong device instead). Making this
+    fixture autouse ensures every test starts and ends with the default
+    device unchanged, regardless of whether the test itself resets it.
     """
     import torch
     original_device = torch.get_default_device()

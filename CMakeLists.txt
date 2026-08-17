@@ -544,6 +544,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/attention/merge_attn_states.cpp"
       "csrc/tensor_utils.cpp"
       "csrc/utils/mem_cpy.cpp"
+      "csrc/utils/host_register.cpp"
       "csrc/utils/mem_info.cpp"
       "csrc/topk_per_row.cpp")
   include_directories("/usr/include")
