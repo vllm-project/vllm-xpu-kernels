@@ -109,11 +109,11 @@ class rms_norm_kernel {
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(src1.val[j]);
-        scalar_t normalized = static_cast<scalar_t>(x * s_variance_val);
         if constexpr (HasWeight) {
-          dst.val[j] = normalized * src2.val[j];
+          float w = static_cast<float>(src2.val[j]);
+          dst.val[j] = static_cast<scalar_t>(x * s_variance_val * w);
         } else {
-          dst.val[j] = normalized;
+          dst.val[j] = static_cast<scalar_t>(x * s_variance_val);
         }
       }
       v_out[idx] = dst;
@@ -216,11 +216,11 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
          idx += item_ct1.get_local_range(2)) {
       float x = (float)input_row[idx];
-      scalar_t normalized = static_cast<scalar_t>(x * (*s_variance_ptr));
       if constexpr (HasWeight) {
-        out_row[idx] = normalized * weight[idx];
+        float w = static_cast<float>(weight[idx]);
+        out_row[idx] = static_cast<scalar_t>(x * (*s_variance_ptr) * w);
       } else {
-        out_row[idx] = normalized;
+        out_row[idx] = static_cast<scalar_t>(x * (*s_variance_ptr));
       }
     }
   }
@@ -363,11 +363,11 @@ class rms_norm_multi_row_kernel {
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(src1.val[j]);
-        scalar_t normalized = static_cast<scalar_t>(x * s_var);
         if constexpr (HasWeight) {
-          dst.val[j] = normalized * src2.val[j];
+          float w = static_cast<float>(src2.val[j]);
+          dst.val[j] = static_cast<scalar_t>(x * s_var * w);
         } else {
-          dst.val[j] = normalized;
+          dst.val[j] = static_cast<scalar_t>(x * s_var);
         }
       }
       v_out[idx] = dst;
@@ -602,11 +602,11 @@ class fused_add_rms_norm_kernel {
 #pragma unroll
       for (int i = 0; i < width; i++) {
         float x = static_cast<float>(res.val[i]);
-        scalar_t normalized = static_cast<scalar_t>(x * s_var);
         if constexpr (HasWeight) {
-          out.val[i] = normalized * w.val[i];
+          float wf = static_cast<float>(w.val[i]);
+          out.val[i] = static_cast<scalar_t>(x * s_var * wf);
         } else {
-          out.val[i] = normalized;
+          out.val[i] = static_cast<scalar_t>(x * s_var);
         }
       }
       input_v[strided_id] = out;
@@ -673,12 +673,13 @@ class fused_add_rms_norm_kernel<scalar_t, 0, HasWeight> {
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
          idx += item_ct1.get_local_range(2)) {
       float x = (float)residual[item_ct1.get_group(2) * hidden_size + idx];
-      scalar_t normalized = static_cast<scalar_t>(x * (*s_variance_ptr));
       if constexpr (HasWeight) {
+        float w = static_cast<float>(weight[idx]);
         input[item_ct1.get_group(2) * input_stride + idx] =
-            normalized * weight[idx];
+            static_cast<scalar_t>(x * (*s_variance_ptr) * w);
       } else {
-        input[item_ct1.get_group(2) * input_stride + idx] = normalized;
+        input[item_ct1.get_group(2) * input_stride + idx] =
+            static_cast<scalar_t>(x * (*s_variance_ptr));
       }
     }
   }
