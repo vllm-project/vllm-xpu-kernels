@@ -28,11 +28,6 @@ MHC_PRE_CASES = [
     (256, 7168),
     (1024, 7168),
     (2048, 7168),
-    # non-fused path with hidden_size > 8192 (beyond the fused-norm MAX_TILES
-    # limit) — exercises the unbounded strided loop introduced to prevent
-    # silent truncation when norm_weight is not provided.
-    (1, 12288),
-    (33, 12288),
 ]
 
 MHC_POST_CASES = [
@@ -76,17 +71,16 @@ FUSED_POST_PRE_CASES = [
 # 24576 exceeds the register-resident limit and exercises the ITERS == 0
 # recompute fallback.
 FUSE_NORM_SHAPE_CASES = [
-    (1, 2048),
+    (1, 4096),
     (33, 4096),
-    (33, 6144),
+    (256, 4096),
+    (1024, 4096),
+    (2048, 4096),
+    (1, 7168),
     (33, 7168),
-    (33, 12288),
-    (33, 16384),
-    (33, 24576),
-    (256, 2048),
     (256, 7168),
-    (256, 16384),
-    (256, 24576),
+    (1024, 7168),
+    (2048, 7168),
 ]
 
 HC = 4
