@@ -471,7 +471,7 @@ static constexpr int MHC_PRE_OUT_MAX_TILES = 4;
 template <int HC_, int VEC_, int MAX_TILES_, int WG_THREADS_>
 struct MhcPreOutPrefetch {
   using vec_bf16_t = aligned_vec<bf16, VEC_>;
-  vec_bf16_t res0[HC_];       // residual tile 0 (k = tid*VEC)
+  vec_bf16_t res0[HC_];        // residual tile 0 (k = tid*VEC)
   vec_bf16_t wgt[MAX_TILES_];  // norm_weight tiles (fused-norm path only)
   bool has_res0;
 };
