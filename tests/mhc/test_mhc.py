@@ -28,6 +28,11 @@ MHC_PRE_CASES = [
     (256, 7168),
     (1024, 7168),
     (2048, 7168),
+    # non-fused path with hidden_size > 8192 (beyond the fused-norm MAX_TILES
+    # limit) — exercises the unbounded strided loop introduced to prevent
+    # silent truncation when norm_weight is not provided.
+    (1, 12288),
+    (33, 12288),
 ]
 
 MHC_POST_CASES = [
@@ -243,6 +248,10 @@ def make_norm_weight(hidden_size: int, device: str, fuse_norm: bool):
 @pytest.mark.parametrize("fuse_norm", [False, True])
 @pytest.mark.parametrize("num_tokens,hidden_size", MHC_PRE_CASES)
 def test_mhc_pre(num_tokens: int, hidden_size: int, fuse_norm: bool):
+    if fuse_norm and hidden_size > 8192:
+        pytest.skip(
+            "fused norm requires hidden_size <= 8192 (WG_THREADS*VEC*MAX_TILES)"
+        )
     torch.manual_seed(0)
     device = "xpu"
     hc3 = HC * 2 + HC * HC

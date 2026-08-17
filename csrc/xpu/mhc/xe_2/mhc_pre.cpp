@@ -444,15 +444,20 @@ class MhcPreSplitKGemmFunctor {
 // ===========================================================================
 // Shared tuning constants for the layer_input write path.
 //
-// MAX_TILES bounds the per-thread element count: it covers hidden_size up to
-// WG_THREADS * VEC * MAX_TILES (= 8192 for 256x8x4), which covers the range
-// used by current models (4096 needs 2 tiles, 7168 needs 4). Keeping this as
-// tight as possible is critical for MBU: every extra tile is VEC live bf16
-// registers per thread held across the reduction barrier, which inflates GRF
-// pressure and drops occupancy in the fused-norm path. If a larger hidden size
-// is ever needed, template this kernel on the tile count and select it on the
-// host from hidden_size (in-lambda branching does not reduce the GRF
-// footprint). The host guards hidden_size <= WG_THREADS * VEC * MAX_TILES.
+// MAX_TILES bounds the per-thread element count for the *fused-norm* path
+// only: it covers hidden_size up to WG_THREADS * VEC * MAX_TILES (= 8192 for
+// 256x8x4), which covers the range used by current models (4096 needs 2
+// tiles, 7168 needs 4). Keeping this as tight as possible is critical for
+// MBU: every extra tile is VEC live bf16 registers per thread held across the
+// reduction barrier, which inflates GRF pressure and drops occupancy in the
+// fused-norm path. If a larger hidden size is ever needed for the fused path,
+// template this kernel on the tile count and select it on the host from
+// hidden_size (in-lambda branching does not reduce the GRF footprint). The
+// host guards hidden_size <= WG_THREADS * VEC * MAX_TILES for the fused path.
+//
+// The non-fused path does NOT use this bound: it stores straight to HBM with
+// no register stash, so it uses an unbounded strided loop that handles any
+// hidden_size.
 // ===========================================================================
 static constexpr int MHC_PRE_OUT_MAX_TILES = 4;
 
@@ -515,6 +520,8 @@ static inline void mhc_pre_prefetch_out_tiles(
 //
 // Baseline (norm_weight == nullptr):
 //   out = bf16(sum_hc(pre_mix * residual))
+//   Uses an unbounded strided loop — no register stash, no GRF/MAX_TILES
+//   budget constraint, supports any hidden_size.
 //
 // Fused (norm_weight != nullptr) — folds in the RMSNorm (attn_norm/ffn_norm)
 // that would otherwise run as a separate kernel:
@@ -522,15 +529,15 @@ static inline void mhc_pre_prefetch_out_tiles(
 //                                              standalone RMSNorm would see)
 //   rms  = rsqrt(mean(ol^2) + norm_eps)
 //   out  = ol * rms * norm_weight
-// The unnormalized bf16 result is stashed in registers so residual is read
-// exactly once from HBM and no SLM round-trip is required; only the per-
-// sub-group squared sums go through SLM.
+//   Uses a MAX_TILES-bounded unrolled loop; the unnormalized bf16 result is
+//   stashed in registers so residual is read exactly once from HBM with no
+//   SLM round-trip. The host guards hidden_size <= WG_THREADS*VEC*MAX_TILES.
 //
 // Both paths are software-pipelined: the residual for tile t+1 is issued
 // before the multiply-accumulate for tile t (cur/nxt double buffer), and tile
 // 0 comes from the pre-barrier prefetch. This is the equivalent of a
 // num_stages=2 pipeline and costs only HC*VEC extra bf16 registers, so it does
-// not disturb the MAX_TILES GRF budget documented above.
+// not disturb the MAX_TILES GRF budget of the fused-norm path.
 //
 // Tuned for Intel Xe (B70): 256-thread work-group, one work-group per token,
 // sub-group + SLM two-level reduction, 128-bit vectorized HBM traffic.
@@ -553,9 +560,6 @@ static inline void mhc_pre_write_layer_input(
   constexpr int STRIDE = WG_THREADS_ * VEC_;
 
   const int tid = static_cast<int>(item.get_local_id(0));
-  const int sg_id = static_cast<int>(sg.get_group_id()[0]);
-  const int lane = static_cast<int>(sg.get_local_id()[0]);
-  const bool fused_norm = (norm_weight != nullptr);
 
   // Double-buffered residual registers: `cur` is the tile being consumed,
   // `nxt` is the tile whose load has already been issued.
@@ -567,13 +571,59 @@ static inline void mhc_pre_write_layer_input(
       cur[m] = pf.res0[m];
   }
 
+  // -------------------------------------------------------------------------
+  // Non-fused path: unbounded strided loop — no register stash needed, so
+  // there is no GRF / MAX_TILES budget constraint.  Supports any hidden_size.
+  // -------------------------------------------------------------------------
+  if (norm_weight == nullptr) {
+    for (int k = tid * VEC_; k < hidden_size; k += STRIDE) {
+      const int k_next = k + STRIDE;
+      if (k_next < hidden_size) {
+#pragma unroll
+        for (int m = 0; m < HC_; ++m) {
+          nxt[m] = *reinterpret_cast<const vec_bf16_t*>(
+              residual + (tok * HC_ + m) * hidden_size + k_next);
+        }
+      }
+
+      float acc[VEC_];
+#pragma unroll
+      for (int v = 0; v < VEC_; ++v)
+        acc[v] = 0.f;
+#pragma unroll
+      for (int m = 0; m < HC_; ++m) {
+#pragma unroll
+        for (int v = 0; v < VEC_; ++v)
+          acc[v] += pre_mix[m] * float(cur[m].val[v]);
+      }
+
+      vec_bf16_t ov;
+#pragma unroll
+      for (int v = 0; v < VEC_; ++v)
+        ov.val[v] = static_cast<bf16>(acc[v]);
+      *reinterpret_cast<vec_bf16_t*>(layer_input + tok * hidden_size + k) = ov;
+
+      if (k_next < hidden_size) {
+#pragma unroll
+        for (int m = 0; m < HC_; ++m)
+          cur[m] = nxt[m];
+      }
+    }
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Fused-norm path: MAX_TILES-bounded unrolled loop. Stashes the bf16-
+  // rounded result in registers and accumulates the squared sum from the
+  // *rounded* value so the numerics match the unfused "write bf16 -> RMSNorm
+  // reads it back" sequence exactly.
+  // hidden_size <= WG_THREADS * VEC * MAX_TILES is enforced on the host.
+  // -------------------------------------------------------------------------
+  const int sg_id = static_cast<int>(sg.get_group_id()[0]);
+  const int lane = static_cast<int>(sg.get_local_id()[0]);
   bf16 stash[MAX_TILES_ * VEC_];
   float partial_sumsq = 0.f;
 
-  // Pass 1: weighted sum. Non-fused path stores straight to HBM; fused path
-  // stashes the bf16-rounded result in registers and accumulates the squared
-  // sum from the *rounded* value so the numerics match the unfused
-  // "write bf16 -> RMSNorm reads it back" sequence exactly.
 #pragma unroll
   for (int t = 0; t < MAX_TILES_; ++t) {
     const int k = tid * VEC_ + t * STRIDE;
@@ -601,28 +651,20 @@ static inline void mhc_pre_write_layer_input(
         acc[v] += pre_mix[m] * float(cur[m].val[v]);
     }
 
-    if (fused_norm) {
 #pragma unroll
-      for (int v = 0; v < VEC_; ++v) {
-        bf16 b = static_cast<bf16>(acc[v]);
-        stash[t * VEC_ + v] = b;
-        float bf = static_cast<float>(b);
-        partial_sumsq += bf * bf;
-      }
-    } else {
-      vec_bf16_t ov;
-#pragma unroll
-      for (int v = 0; v < VEC_; ++v)
-        ov.val[v] = static_cast<bf16>(acc[v]);
-      *reinterpret_cast<vec_bf16_t*>(layer_input + tok * hidden_size + k) = ov;
+    for (int v = 0; v < VEC_; ++v) {
+      bf16 b = static_cast<bf16>(acc[v]);
+      stash[t * VEC_ + v] = b;
+      float bf = static_cast<float>(b);
+      partial_sumsq += bf * bf;
     }
 
+    if (k_next < hidden_size) {
 #pragma unroll
-    for (int m = 0; m < HC_; ++m)
-      cur[m] = nxt[m];
+      for (int m = 0; m < HC_; ++m)
+        cur[m] = nxt[m];
+    }
   }
-
-  if (!fused_norm) return;
 
   // Work-group reduction of the squared sum: sub-group reduce, then a single
   // barrier; every thread re-reads the NUM_SG partials and computes rnorm
