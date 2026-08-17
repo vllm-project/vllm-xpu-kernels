@@ -85,26 +85,47 @@ class XPUHostViewAllocator : public c10::Allocator {
 };
 }  // namespace vllm::xpu
 
-// This function assumes that `cpu_tensor` is a CPU tensor allocated with pinned
-// memory, and that UVA (Unified Virtual Addressing) is enabled.
+// This function assumes that `cpu_tensor` is a CPU tensor,
+// and that UVA (Unified Virtual Addressing) is enabled. If the given
+// `cpu_tensor` is not pinned, a new pinned buffer is allocated and the data is
+// copied into it, mirroring the CUDA implementation's fallback behavior.
 torch::Tensor get_xpu_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
   TORCH_CHECK(cpu_tensor.device().is_cpu(), "Input tensor must be on CPU");
-  TORCH_CHECK(cpu_tensor.is_contiguous(), "Input tensor must be contiguous");
-  TORCH_CHECK(
-      cpu_tensor.is_pinned(),
-      "Input tensor must be allocated with pinned memory");
-  // Get raw host pointer from CPU tensor
-  void* host_ptr = cpu_tensor.data_ptr();
 
-  // We'll use the same sizes, strides, and dtype as the CPU tensor.
+  auto device_id = c10::xpu::current_device();
+  c10::Device xpu_device(c10::DeviceType::XPU, device_id);
+
+  // Handle empty tensor.
+  if (cpu_tensor.numel() == 0) {
+    return torch::empty(
+        cpu_tensor.sizes(), cpu_tensor.options().device(xpu_device));
+  }
+
+  // If the CPU tensor isn't pinned, allocate a new pinned buffer and copy
+  // the (contiguous) data into it. Keep this pinned tensor alive as the
+  // owner of the resulting view, just like the pinned input tensor would be.
+  torch::Tensor pinned_owner;
+  if (cpu_tensor.is_pinned()) {
+    pinned_owner = cpu_tensor;
+  } else {
+    torch::Tensor contiguous_cpu = cpu_tensor.contiguous();
+    pinned_owner = at::empty_like(
+        contiguous_cpu, contiguous_cpu.options().pinned_memory(true));
+    pinned_owner.copy_(contiguous_cpu);
+  }
+
+  // Get raw host pointer from the pinned tensor.
+  void* host_ptr = pinned_owner.data_ptr();
+
+  // We'll use the same sizes, strides, and dtype as the pinned CPU tensor.
   // TODO: check if layout is respected.
-  auto sizes = cpu_tensor.sizes();
-  auto strides = cpu_tensor.strides();
-  auto scalar_type = cpu_tensor.scalar_type();
+  auto sizes = pinned_owner.sizes();
+  auto strides = pinned_owner.strides();
+  auto scalar_type = pinned_owner.scalar_type();
 
-  size_t byte_size = cpu_tensor.numel() * cpu_tensor.element_size();
-  // Keep `cpu_tensor` storage alive through the view tensor's lifetime.
-  vllm::xpu::XPUHostViewAllocator allocator(host_ptr, byte_size, cpu_tensor);
+  size_t byte_size = pinned_owner.numel() * pinned_owner.element_size();
+  // Keep `pinned_owner` storage alive through the view tensor's lifetime.
+  vllm::xpu::XPUHostViewAllocator allocator(host_ptr, byte_size, pinned_owner);
   c10::DataPtr data_ptr = allocator.allocate(byte_size);
   c10::Storage storage(
       c10::Storage::use_byte_size_t(), byte_size, std::move(data_ptr));
