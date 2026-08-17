@@ -8,7 +8,7 @@ variants are compiled.
 | `chunk_prefill_full.conf` | 216 | Chunk prefill — all combinations |
 | `chunk_prefill_default.conf` | ~13 | Chunk prefill — Llama, Qwen, DeepSeek MLA, Falcon |
 | `paged_decode_full.conf` | 384 | Paged decode — all combinations |
-| `paged_decode_default.conf` | ~24 | Paged decode — Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec |
+| `paged_decode_default.conf` | ~34 | Paged decode — Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec |
 
 For config file format, usage examples, model-specific guidance, and
 troubleshooting, see **[KERNEL_CONFIGURATION.md](../../../../KERNEL_CONFIGURATION.md)**

@@ -36,7 +36,7 @@ def gen_cutlass_fused_moe_correctness_configs():
 def gen_cutlass_fused_moe_perf_configs():
     configs = []
     x_dtype = [torch.float16, torch.bfloat16]
-    w_dtype = [torch.float8_e5m2, torch.float8_e4m3fn, None]
+    w_dtype = [torch.float8_e4m3fn, None]
     has_bias = [True, False]
     input_lens = [1, 4, 16, 1024, 8192]
 

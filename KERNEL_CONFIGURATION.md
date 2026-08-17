@@ -103,7 +103,7 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 | File | Kernels | Use Case |
 |------|---------|----------|
 | `paged_decode_full.conf` | 384 | All combinations — supports every model |
-| `paged_decode_default.conf` | ~31 | Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec + pagesize=128 |
+| `paged_decode_default.conf` | ~34 | Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec + pagesize=128 |
 
 ### Recommended Config per Model Family
 
@@ -421,7 +421,7 @@ cat build/temp_template/csrc/xpu/attn/xe_2/paged_decode_enabled_policies_gen.hpp
 
 | Config | Build Time | Chunk Prefill Kernels | Paged Decode Kernels | Flexibility |
 |--------|------------|----------------------|----------------------|-------------|
-| `default` | ~2–5 min | ~13 | ~31 | Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec (+ page128) |
+| `default` | ~2–5 min | ~13 | ~34 | Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec (+ page128) |
 | `full` | ~60 min | 216 | 384 | All models |
 
 ### Binary Size Impact
