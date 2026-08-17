@@ -115,6 +115,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_tanh_and_mul", torch::kXPU, &gelu_tanh_and_mul);
 
+  ops.def(
+      "situ_and_mul(Tensor! out, Tensor input, float beta=1.0, float "
+      "linear_beta=-1.0) -> ()");
+  ops.impl("situ_and_mul", torch::kXPU, &situ_and_mul);
+
   ops.def("fatrelu_and_mul(Tensor! out, Tensor! input, float threshold) -> ()");
   ops.impl("fatrelu_and_mul", torch::kXPU, &fatrelu_and_mul);
 
@@ -226,6 +231,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "xpu_memcpy_sync(int dst_ptr, int src_ptr, int n_bytes, int kind, "
       "int device=-1) -> ()");
   ops.impl("xpu_memcpy_sync", &xpu_memcpy_sync);
+
+  // Page-lock an existing host range and import it into the device context so
+  // transfers can use direct DMA instead of staged/synchronous copies. Host
+  // memory outside the caching host allocator (e.g. a shared mmap region) has
+  // no other way to become pinned. Returns false if registration is
+  // unsupported, in which case transfers remain correct but slower.
+  ops.def("xpu_host_register(Tensor ptr, int n_bytes) -> bool");
+  ops.impl("xpu_host_register", &xpu_host_register);
+  ops.def("xpu_host_unregister(Tensor ptr) -> bool");
+  ops.impl("xpu_host_unregister", &xpu_host_unregister);
 
   // Merge attn states
   // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005

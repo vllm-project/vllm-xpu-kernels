@@ -8,6 +8,10 @@ import torch
 import tests.register_ops as ops
 from tests.ops.topk_op import stable_topk
 
+# Scoring function constants matching the C++ enum ScoringFunc.
+SCORING_NONE = 0
+SCORING_SIGMOID = 1
+
 
 def grouped_topk(
     hidden_states: torch.Tensor,
@@ -20,19 +24,20 @@ def grouped_topk(
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pure-Python reference implementation used as baseline in tests."""
 
     assert hidden_states.size(0) == gating_output.size(0), (
         "Number of tokens mismatch")
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
     elif scoring_func == "sigmoid":
-        scores = gating_output.sigmoid()
+        scores = torch.sigmoid(gating_output)
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
     num_token = scores.size(0)
     if e_score_correction_bias is not None:
         # Store original scores before applying correction bias. We use biased
-        # scores for expert selection but original scores for routing weights
+        # scores for expert selection but original scores for routing weights.
         original_scores = scores
         scores = scores + e_score_correction_bias.unsqueeze(0)
         group_scores = (stable_topk(
@@ -52,7 +57,7 @@ def grouped_topk(
                                     float("-inf"))  # [n, e]
     if e_score_correction_bias is not None:
         _, topk_ids = stable_topk(tmp_scores, topk, dim=-1)
-        # Use original unbiased scores for the routing weights
+        # Use original unbiased scores for the routing weights.
         topk_weights = original_scores.gather(1, topk_ids)
     else:
         topk_weights, topk_ids = stable_topk(tmp_scores, topk, dim=-1)
@@ -74,18 +79,35 @@ def fused_grouped_topk(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused XPU kernel path.
+
+    Passes raw gating_output (pre-activation) plus the correction bias
+    directly to the kernel, which applies the scoring function internally.
+    scoring_func must be "softmax" (SCORING_NONE, caller pre-applies softmax)
+    or "sigmoid" (SCORING_SIGMOID, kernel applies sigmoid).
+    """
     assert hidden_states.size(0) == gating_output.size(0), (
         "Number of tokens mismatch")
 
     if scoring_func == "softmax":
+        # Kernel expects pre-activated scores when scoring_func==SCORING_NONE.
         scores = torch.softmax(gating_output, dim=-1)
+        sf = SCORING_NONE
     elif scoring_func == "sigmoid":
-        scores = gating_output.sigmoid()
+        # Kernel applies sigmoid internally.
+        scores = gating_output
+        sf = SCORING_SIGMOID
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
-    scores_with_bias = scores + e_score_correction_bias.unsqueeze(0)
     topk_values, topk_indices = ops.grouped_topk(
-        scores, scores_with_bias.to(scores.dtype), num_expert_group,
-        topk_group, topk, renormalize, routed_scaling_factor)
+        scores,
+        num_expert_group,
+        topk_group,
+        topk,
+        renormalize,
+        routed_scaling_factor,
+        e_score_correction_bias,
+        sf,
+    )
     return topk_values.to(torch.float32), topk_indices.to(torch.int32)

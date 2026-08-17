@@ -2,6 +2,7 @@
 import torch
 
 from . import _C  # noqa: F401
+from . import _moe_C  # noqa: F401
 from . import _xpu_C  # noqa: F401
 
 finfo = torch.finfo(torch.float8_e4m3fn)
@@ -229,6 +230,13 @@ def ref_fused_moe_activation(act_output, gemm1_output, activation):
         torch.ops._C.relu2_no_mul(act_output, gemm1_output)
     elif activation == "swiglustep":
         torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
+    elif activation == "situ":
+        torch.ops._C.situ_and_mul(
+            act_output,
+            gemm1_output,
+            4.0,
+            25.0,
+        )
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 

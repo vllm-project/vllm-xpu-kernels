@@ -530,6 +530,8 @@ void remap_hidden_states(
     LAUNCH_REMAP_HIDDEN_STATES(TA, TS, 8);              \
   } else if (TopK == 10) {                              \
     LAUNCH_REMAP_HIDDEN_STATES(TA, TS, 10);             \
+  } else if (TopK == 16) {                              \
+    LAUNCH_REMAP_HIDDEN_STATES(TA, TS, 16);             \
   } else {                                              \
     throw std::runtime_error("Unsupported TopK value"); \
   }
