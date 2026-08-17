@@ -9,7 +9,12 @@
 
 namespace vllm {
 
-template <typename scalar_t, int NUM_DIMS, int VEC_SIZE, bool HasWeight>
+template <
+    typename scalar_t,
+    int NUM_DIMS,
+    int VEC_SIZE,
+    bool HasWeight,
+    bool IS_GEMMA = false>
 class rms_norm_kernel {
  public:
   rms_norm_kernel(
@@ -110,8 +115,13 @@ class rms_norm_kernel {
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(src1.val[j]);
         if constexpr (HasWeight) {
-          float w = static_cast<float>(src2.val[j]);
-          dst.val[j] = static_cast<scalar_t>(x * s_variance_val * w);
+          if constexpr (IS_GEMMA) {
+            dst.val[j] = static_cast<scalar_t>(
+                x * s_variance_val * (static_cast<float>(src2.val[j]) + 1.0f));
+          } else {
+            float w = static_cast<float>(src2.val[j]);
+            dst.val[j] = static_cast<scalar_t>(x * s_variance_val * w);
+          }
         } else {
           dst.val[j] = static_cast<scalar_t>(x * s_variance_val);
         }
@@ -135,8 +145,8 @@ class rms_norm_kernel {
   sycl::local_accessor<float, 1> s_variance;
 };
 
-template <typename scalar_t, int NUM_DIMS, bool HasWeight>
-class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
+template <typename scalar_t, int NUM_DIMS, bool HasWeight, bool IS_GEMMA>
+class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight, IS_GEMMA> {
  public:
   rms_norm_kernel(
       scalar_t* out_,
@@ -217,8 +227,13 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
          idx += item_ct1.get_local_range(2)) {
       float x = (float)input_row[idx];
       if constexpr (HasWeight) {
-        float w = static_cast<float>(weight[idx]);
-        out_row[idx] = static_cast<scalar_t>(x * (*s_variance_ptr) * w);
+        if constexpr (IS_GEMMA) {
+          out_row[idx] = static_cast<scalar_t>(
+              x * (*s_variance_ptr) * (static_cast<float>(weight[idx]) + 1.0f));
+        } else {
+          float w = static_cast<float>(weight[idx]);
+          out_row[idx] = static_cast<scalar_t>(x * (*s_variance_ptr) * w);
+        }
       } else {
         out_row[idx] = static_cast<scalar_t>(x * (*s_variance_ptr));
       }
@@ -249,7 +264,8 @@ template <
     int NUM_DIMS,
     int VEC_SIZE,
     int ROWS_PER_WG,
-    bool HasWeight>
+    bool HasWeight,
+    bool IS_GEMMA = false>
 class rms_norm_multi_row_kernel {
  public:
   rms_norm_multi_row_kernel(
@@ -364,8 +380,13 @@ class rms_norm_multi_row_kernel {
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(src1.val[j]);
         if constexpr (HasWeight) {
-          float w = static_cast<float>(src2.val[j]);
-          dst.val[j] = static_cast<scalar_t>(x * s_var * w);
+          if constexpr (IS_GEMMA) {
+            dst.val[j] = static_cast<scalar_t>(
+                x * s_var * (static_cast<float>(src2.val[j]) + 1.0f));
+          } else {
+            float w = static_cast<float>(src2.val[j]);
+            dst.val[j] = static_cast<scalar_t>(x * s_var * w);
+          }
         } else {
           dst.val[j] = static_cast<scalar_t>(x * s_var);
         }
@@ -389,7 +410,7 @@ class rms_norm_multi_row_kernel {
   sycl::local_accessor<float, 1> s_variance;
 };
 
-template <typename scalar_t, bool HasWeight>
+template <typename scalar_t, bool HasWeight, bool IS_GEMMA = false>
 void call_rms_norm_kernel(
     torch::Tensor& out,
     torch::Tensor& input,
@@ -460,7 +481,8 @@ void call_rms_norm_kernel(
                   tensor_rank,
                   vec_size,
                   ROWS_PER_WG,
-                  HasWeight>(
+                  HasWeight,
+                  IS_GEMMA>(
                   (sycl_t*)out_ptr,
                   (const sycl_t*)input_ptr,
                   input_stride_d2,
@@ -485,7 +507,7 @@ void call_rms_norm_kernel(
         sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
         cgh.parallel_for(
             sycl::nd_range<3>(grid * block, block),
-            rms_norm_kernel<sycl_t, tensor_rank, vec_size, HasWeight>(
+            rms_norm_kernel<sycl_t, tensor_rank, vec_size, HasWeight, IS_GEMMA>(
                 (sycl_t*)out_ptr,
                 (const sycl_t*)input_ptr,
                 input_stride_d2,
@@ -508,7 +530,7 @@ void call_rms_norm_kernel(
         sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
         cgh.parallel_for(
             sycl::nd_range<3>(grid * block, block),
-            rms_norm_kernel<sycl_t, tensor_rank, 0, HasWeight>(
+            rms_norm_kernel<sycl_t, tensor_rank, 0, HasWeight, IS_GEMMA>(
                 (sycl_t*)out_ptr,
                 (const sycl_t*)input_ptr,
                 input_stride_d2,
@@ -526,7 +548,7 @@ void call_rms_norm_kernel(
   }
 }
 
-template <typename scalar_t, int width, bool HasWeight>
+template <typename scalar_t, int width, bool HasWeight, bool IS_GEMMA = false>
 class fused_add_rms_norm_kernel {
  public:
   fused_add_rms_norm_kernel(
@@ -603,8 +625,13 @@ class fused_add_rms_norm_kernel {
       for (int i = 0; i < width; i++) {
         float x = static_cast<float>(res.val[i]);
         if constexpr (HasWeight) {
-          float wf = static_cast<float>(w.val[i]);
-          out.val[i] = static_cast<scalar_t>(x * s_var * wf);
+          if constexpr (IS_GEMMA) {
+            out.val[i] = static_cast<scalar_t>(
+                x * s_var * (static_cast<float>(w.val[i]) + 1.0f));
+          } else {
+            float wf = static_cast<float>(w.val[i]);
+            out.val[i] = static_cast<scalar_t>(x * s_var * wf);
+          }
         } else {
           out.val[i] = static_cast<scalar_t>(x * s_var);
         }
@@ -624,8 +651,8 @@ class fused_add_rms_norm_kernel {
   sycl::local_accessor<float, 1> s_variance;  // local memory for variance
 };
 
-template <typename scalar_t, bool HasWeight>
-class fused_add_rms_norm_kernel<scalar_t, 0, HasWeight> {
+template <typename scalar_t, bool HasWeight, bool IS_GEMMA>
+class fused_add_rms_norm_kernel<scalar_t, 0, HasWeight, IS_GEMMA> {
  public:
   fused_add_rms_norm_kernel(
       scalar_t* __restrict__ input_,     // [..., hidden_size]
@@ -674,9 +701,16 @@ class fused_add_rms_norm_kernel<scalar_t, 0, HasWeight> {
          idx += item_ct1.get_local_range(2)) {
       float x = (float)residual[item_ct1.get_group(2) * hidden_size + idx];
       if constexpr (HasWeight) {
-        float w = static_cast<float>(weight[idx]);
-        input[item_ct1.get_group(2) * input_stride + idx] =
-            static_cast<scalar_t>(x * (*s_variance_ptr) * w);
+        if constexpr (IS_GEMMA) {
+          input[item_ct1.get_group(2) * input_stride + idx] =
+              static_cast<scalar_t>(
+                  x * (*s_variance_ptr) *
+                  (static_cast<float>(weight[idx]) + 1.0f));
+        } else {
+          float w = static_cast<float>(weight[idx]);
+          input[item_ct1.get_group(2) * input_stride + idx] =
+              static_cast<scalar_t>(x * (*s_variance_ptr) * w);
+        }
       } else {
         input[item_ct1.get_group(2) * input_stride + idx] =
             static_cast<scalar_t>(x * (*s_variance_ptr));
@@ -695,7 +729,7 @@ class fused_add_rms_norm_kernel<scalar_t, 0, HasWeight> {
   sycl::local_accessor<float, 1> s_variance;  // local memory for variance
 };
 
-template <typename scalar_t, bool HasWeight>
+template <typename scalar_t, bool HasWeight, bool IS_GEMMA = false>
 void call_fused_add_rms_norm_kernel(
     torch::Tensor& input,
     torch::Tensor& residual,
@@ -732,7 +766,7 @@ void call_fused_add_rms_norm_kernel(
       sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
-          fused_add_rms_norm_kernel<sycl_t, vector_width, HasWeight>(
+          fused_add_rms_norm_kernel<sycl_t, vector_width, HasWeight, IS_GEMMA>(
               (sycl_t*)input_ptr,
               (sycl_t*)residual_ptr,
               input_stride,
@@ -748,7 +782,7 @@ void call_fused_add_rms_norm_kernel(
       sycl::local_accessor<float, 1> s_variance(sycl::range<1>(1), cgh);
       cgh.parallel_for(
           sycl::nd_range<3>(grid * block, block),
-          fused_add_rms_norm_kernel<sycl_t, 0, HasWeight>(
+          fused_add_rms_norm_kernel<sycl_t, 0, HasWeight, IS_GEMMA>(
               (sycl_t*)input_ptr,
               (sycl_t*)residual_ptr,
               input_stride,
@@ -814,5 +848,50 @@ void fused_add_rms_norm(
           vllm::call_fused_add_rms_norm_kernel<scalar_t, false>(
               input, residual, weight_ptr, epsilon);
         }
+      });
+}
+
+void gemma_rms_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    double epsilon) {
+  const at::DeviceGuard device_guard(input.device());
+  TORCH_CHECK(out.is_contiguous());
+  if (input.stride(-1) != 1) {
+    input = input.contiguous();
+  }
+  TORCH_CHECK(input.stride(-1) == 1);
+  TORCH_CHECK(weight.is_contiguous());
+  TORCH_CHECK(
+      weight.scalar_type() == input.scalar_type(),
+      "gemma_rms_norm expects weight dtype to match input dtype");
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_gemma_rms_norm_kernel", [&] {
+        const scalar_t* weight_ptr = weight.data_ptr<scalar_t>();
+        vllm::call_rms_norm_kernel<
+            scalar_t,
+            /*HasWeight=*/true,
+            /*IS_GEMMA=*/true>(out, input, weight_ptr, epsilon);
+      });
+}
+
+void fused_add_gemma_rms_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    double epsilon) {
+  const at::DeviceGuard device_guard(input.device());
+  TORCH_CHECK(weight.is_contiguous());
+  TORCH_CHECK(
+      weight.scalar_type() == input.scalar_type(),
+      "fused_add_gemma_rms_norm expects weight dtype to match input dtype");
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_fused_add_gemma_rms_norm_kernel", [&] {
+        const scalar_t* weight_ptr = weight.data_ptr<scalar_t>();
+        vllm::call_fused_add_rms_norm_kernel<
+            scalar_t,
+            /*HasWeight=*/true,
+            /*IS_GEMMA=*/true>(input, residual, weight_ptr, epsilon);
       });
 }
