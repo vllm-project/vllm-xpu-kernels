@@ -37,6 +37,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("int4_gemm_w4a16", torch::kXPU, &int4_gemm_w4a16);
 
   xpu_ops.def(
+      "int8_gemm_w8a16(Tensor A, Tensor B, Tensor? bias, Tensor B_scale, "
+      "int group_size) -> Tensor");
+  xpu_ops.impl("int8_gemm_w8a16", torch::kXPU, &int8_gemm_w8a16);
+
+  xpu_ops.def(
       "int4_gemm_w4a8(Tensor A_, Tensor A_scale, Tensor A_zp, Tensor B, "
       "Tensor B_scale, Tensor B_zp, int group_size, Tensor? g_idx, Tensor? "
       "bias) -> Tensor");

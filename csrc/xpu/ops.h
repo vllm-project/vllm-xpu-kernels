@@ -49,6 +49,13 @@ torch::Tensor int4_gemm_w4a16(
     int64_t group_size,
     const std::optional<torch::Tensor>& g_idx);
 
+torch::Tensor int8_gemm_w8a16(
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    const std::optional<torch::Tensor>& bias,
+    const torch::Tensor& B_scale,
+    int64_t group_size);
+
 torch::Tensor int4_gemm_w4a8(
     const torch::Tensor& A_,
     const torch::Tensor& A_scale,
