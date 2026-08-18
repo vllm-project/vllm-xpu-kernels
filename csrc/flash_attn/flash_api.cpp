@@ -8,6 +8,33 @@
 
 namespace FLASH_NAMESPACE {
 
+namespace {
+
+constexpr float kLn2 = 0.6931471805599453f;
+
+void fill_paged_decode_softmax_lse(
+        at::Tensor& softmax_lse,
+        const at::Tensor& max_logits,
+        const at::Tensor& exp_sums) {
+    at::Tensor valid_splits = at::isfinite(max_logits) & at::isfinite(exp_sums) &
+                  exp_sums.gt(0);
+    at::Tensor masked_max_logits = at::where(
+        valid_splits,
+        max_logits,
+        at::full_like(max_logits, -std::numeric_limits<float>::infinity()));
+    at::Tensor global_max_logits = std::get<0>(masked_max_logits.max(-1, true));
+    at::Tensor rescaled_exp_sums = at::where(
+        valid_splits,
+        exp_sums * at::pow(2.0, masked_max_logits - global_max_logits),
+        at::zeros_like(exp_sums));
+    at::Tensor global_exp_sums = rescaled_exp_sums.sum(-1);
+    at::Tensor lse_base2 =
+        global_max_logits.squeeze(-1) + at::log2(global_exp_sums);
+    softmax_lse.copy_(lse_base2.transpose(0, 1).mul_(kLn2));
+}
+
+}  // namespace
+
 inline int get_num_splits(
     const sycl::queue& queue,
     const int& batch_size,
@@ -190,7 +217,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
 
-  // Allocated only in chunk_prefill path when return_softmax is true
+    // Allocated whenever softmax LSE is requested. Chunk-prefill writes it
+    // directly; paged decode reconstructs it from per-split stats.
   std::optional<at::Tensor> softmax_lse_opt;
   if (return_softmax) {
     int total_seqlen_q = q.size(0);
@@ -288,10 +316,11 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
     int num_kv_splits = 1;
     at::Tensor tmp_out = out;
-    at::Tensor decode_max_logits = at::empty(
+    at::Tensor decode_max_logits = at::full(
         {num_tokens, num_heads_q, num_kv_splits},
+        -std::numeric_limits<float>::infinity(),
         q.options().dtype(at::kFloat).device(q.device()));
-    at::Tensor decode_exp_sums = at::empty(
+    at::Tensor decode_exp_sums = at::zeros(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
 
@@ -324,6 +353,24 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_prefill_opt,
         splits_per_seq,
         work_list);
+
+    if (return_softmax && softmax_lse_opt.has_value()) {
+      at::Tensor decode_req_indices =
+          at::nonzero(seq_lens_q.eq(1)).squeeze(-1);
+      if (decode_req_indices.numel() > 0) {
+        at::Tensor decode_softmax_lse = torch::empty(
+            {num_heads_q, num_tokens},
+            q.options().dtype(at::kFloat).device(q.device()));
+        fill_paged_decode_softmax_lse(
+            decode_softmax_lse, decode_max_logits, decode_exp_sums);
+        at::Tensor decode_q_indices =
+            cu_seqlens_q.slice(0, 0, batch_size).index_select(
+                0, decode_req_indices);
+        softmax_lse_opt->index_put_(
+            {torch::indexing::Slice(), decode_q_indices},
+            decode_softmax_lse.index_select(1, decode_req_indices));
+      }
+    }
   } else {
     // Normalize -1 (unbounded) to max_seqlen_k for kernel masking logic
     // In decode phase the window_size_right doesn't have effect
@@ -384,10 +431,11 @@ std::vector<at::Tensor> mha_varlen_fwd(
             : at::empty(
                   {num_tokens, num_heads_q * num_kv_splits, v_head_dim},
                   q.options().device(q.device()));
-    at::Tensor max_logits = at::empty(
+    at::Tensor max_logits = at::full(
         {num_tokens, num_heads_q, num_kv_splits},
+        -std::numeric_limits<float>::infinity(),
         q.options().dtype(at::kFloat).device(q.device()));
-    at::Tensor exp_sums = at::empty(
+    at::Tensor exp_sums = at::zeros(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
 
@@ -427,6 +475,11 @@ std::vector<at::Tensor> mha_varlen_fwd(
         no_mask,
         splits_per_seq,
         work_list);
+
+    if (return_softmax && softmax_lse_opt.has_value()) {
+      fill_paged_decode_softmax_lse(
+          *softmax_lse_opt, max_logits, exp_sums);
+    }
   }
 
   if (return_softmax) {

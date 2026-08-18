@@ -48,7 +48,6 @@ try:
 except ValueError:
     _SPEC_DECODE_MAX_QLEN = 16
 
-
 def _spec_decode_varlen_fwd(
     q,
     k,
@@ -450,6 +449,10 @@ def flash_attn_varlen_func(
             when using paged KV cache. This is forwarded to the underlying
             C++ FlashAttention op as its ``num_splits`` parameter; the split
             unit is KV blocks, not individual tokens or pages.
+        return_softmax_lse: Return per-head log-sum-exp in
+            ``[num_query_heads, total_q]`` layout. Supported for non-local,
+            non-sink attention. With paged KV cache, XPU FA2 currently
+            supports this only for pure decode (``max_seqlen_q == 1``).
         fa_version: FlashAttention backend version selector.
     """
     if host_kv_lens is not None:
@@ -481,6 +484,9 @@ def flash_attn_varlen_func(
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
 
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
+    is_paged = block_table is not None and seqused_k is not None
+    is_local = real_window_size != (-1, -1)
+    is_sink = s_aux is not None
 
     if fa_version == 2:
         if scheduler_metadata is not None and q_descale is not None \
@@ -555,6 +561,12 @@ def flash_attn_varlen_func(
                 work_list_dev = work_list_cpu.to(
                     device=q.device, non_blocking=True)
 
+        if return_softmax_lse and (is_local or is_sink):
+            raise RuntimeError(
+                "XPU FA2 does not support return_softmax_lse with "
+                f"is_paged={is_paged}, is_local={is_local}, is_sink={is_sink}"
+            )
+
         try:
             out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
                 q,
@@ -591,26 +603,13 @@ def flash_attn_varlen_func(
         except RuntimeError as e:
             if "not compiled" not in str(e):
                 raise
-            # Fallback to PyTorch reference implementation.
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(
-                "XPU kernel not compiled for this config, falling back "
-                "to PyTorch reference attention. Performance will be "
-                "significantly degraded.\n"
-                "To fix: rebuild with the config line shown above.\n"
-                "If this is unexpected, report at: "
-                "https://github.com/vllm-project/vllm-xpu-kernels/issues/364\n"
-                "Original error: %s", e)
-            out, softmax_lse = _fallback_varlen_attn(
-                q, k, v, cu_seqlens_q, cu_seqlens_k, seqused_k,
-                block_table, softmax_scale, causal,
-                real_window_size, softcap,
-                k_descale=k_descale,
-                v_descale=v_descale,
-                s_aux=s_aux,
-                return_softmax_lse=return_softmax_lse,
-            )
+            raise RuntimeError(
+                "XPU kernel not compiled for this config. Rebuild with the "
+                "required config line shown by the kernel error. If this is "
+                "unexpected, report at: "
+                "https://github.com/vllm-project/vllm-xpu-kernels/issues/364. "
+                f"Original error: {e}"
+            ) from e
     else:
         raise NotImplementedError("not support yet")
     return (out, softmax_lse) if return_softmax_lse else (out)

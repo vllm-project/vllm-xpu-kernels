@@ -556,15 +556,9 @@ class DecodeFwdEpilogue {
 
     // Always store exp sum and max logits for current KV split.
     // assume seq_len_qo == 1
-    if (row_valid) {
-      if (is_single_split) {
-        // Sentinel values: make ReduceSplitK a pass-through copy.
-        exp_sums(q_row, idx_kv_split) = ElementA(1);
-        max_logits(q_row, idx_kv_split) = ElementA(0);
-      } else if (num_kv_splits > 1) {
-        exp_sums(q_row, idx_kv_split) = rA_sum(0);
-        max_logits(q_row, idx_kv_split) = rA_max(0);
-      }
+    if (active && row_valid) {
+      exp_sums(q_row, idx_kv_split) = rA_sum(0);
+      max_logits(q_row, idx_kv_split) = rA_max(0);
     }
 
     /* Some subgroups may not have any work to do; if so, quit early. */
