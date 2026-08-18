@@ -409,7 +409,7 @@ def test_gated_delta_rule(num_actual_tokens, batch_size, num_k_heads,
     z = torch.empty_like(core_attn_out)
 
     # Conv stage produces the intermediates consumed by gated_delta_rule.
-    intermediates = torch.ops._xpu_C.causal_conv1d(
+    intermediates = torch.ops._xpu_C.causal_conv1d_non_spec(
         z,
         projected_states_qkvz,
         projected_states_ba,
@@ -428,10 +428,6 @@ def test_gated_delta_rule(num_actual_tokens, batch_size, num_k_heads,
         non_spec_query_start_loc=non_spec_query_start_loc,
         non_spec_token_indx=None,
         non_spec_state_indices_tensor=non_spec_state_indices_tensor,
-        spec_query_start_loc=None,
-        spec_token_indx=None,
-        spec_state_indices_tensor=None,
-        num_accepted_tokens=None,
         num_actual_tokens=num_actual_tokens,
         tp_size=tp_size,
         reorder_input=reorder_input)
@@ -442,7 +438,7 @@ def test_gated_delta_rule(num_actual_tokens, batch_size, num_k_heads,
     ref_q, ref_k, ref_v, ref_beta, ref_a = unpad_intermediates(
         intermediates, non_spec_query_start_loc, num_actual_tokens)
 
-    torch.ops._xpu_C.gated_delta_rule(
+    torch.ops._xpu_C.gated_delta_rule_non_spec(
         core_attn_out,
         *intermediates,
         num_v_heads,
@@ -457,10 +453,6 @@ def test_gated_delta_rule(num_actual_tokens, batch_size, num_k_heads,
         non_spec_query_start_loc=non_spec_query_start_loc,
         non_spec_token_indx=None,
         non_spec_state_indices_tensor=non_spec_state_indices_tensor,
-        spec_query_start_loc=None,
-        spec_token_indx=None,
-        spec_state_indices_tensor=None,
-        num_accepted_tokens=None,
         num_actual_tokens=num_actual_tokens,
         tp_size=tp_size)
 
@@ -607,7 +599,7 @@ def test_gated_delta_rule_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                 device=device)
     z = torch.zeros_like(core_attn_out)
 
-    intermediates = torch.ops._xpu_C.causal_conv1d(
+    intermediates = torch.ops._xpu_C.causal_conv1d_spec(
         z,
         projected_states_qkvz,
         projected_states_ba,
@@ -622,10 +614,6 @@ def test_gated_delta_rule_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
         num_prefills=0,
         num_decodes=0,
         num_spec_decodes=num_spec_decodes,
-        has_initial_state=None,
-        non_spec_query_start_loc=None,
-        non_spec_token_indx=None,
-        non_spec_state_indices_tensor=None,
         spec_query_start_loc=spec_query_start_loc,
         spec_token_indx=spec_token_indx,
         spec_state_indices_tensor=spec_state_indices_tensor,
@@ -640,7 +628,7 @@ def test_gated_delta_rule_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
     ref_q, ref_k, ref_v, ref_beta, ref_a = unpad_intermediates(
         intermediates, spec_query_start_loc, num_actual_tokens)
 
-    torch.ops._xpu_C.gated_delta_rule(
+    torch.ops._xpu_C.gated_delta_rule_spec(
         core_attn_out,
         *intermediates,
         num_v_heads,
@@ -651,10 +639,6 @@ def test_gated_delta_rule_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
         num_prefills=0,
         num_decodes=0,
         num_spec_decodes=num_spec_decodes,
-        has_initial_state=None,
-        non_spec_query_start_loc=None,
-        non_spec_token_indx=None,
-        non_spec_state_indices_tensor=None,
         spec_query_start_loc=spec_query_start_loc,
         spec_token_indx=spec_token_indx,
         spec_state_indices_tensor=spec_state_indices_tensor,
