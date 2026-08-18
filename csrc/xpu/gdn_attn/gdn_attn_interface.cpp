@@ -11,6 +11,7 @@
   #include "xe_2/chunk_causal_conv1d_tiled_xe2.hpp"
   #include "xe_2/l2norm.h"
   #include "xe_2/chunk_gated_delta_rule_xe2.h"
+  #include "xe_2/gated_delta_rule_decode_xe2.h"
 #endif
 
 // Conv stage of GatedDeltaNet linear attention. Runs the causal conv1d (plus
@@ -567,6 +568,34 @@ void gated_delta_rule(
   std::optional<torch::Tensor> empty_tensor{std::nullopt};
 
   if (spec_token > 0) {
+#ifdef VLLM_XPU_ENABLE_XE2
+    const int num_spec_tokens = spec_state_indices_tensor->size(1);
+    const int* spec_token_indx_ptr =
+        spec_token_indx.has_value()
+            ? reinterpret_cast<const int*>(spec_token_indx->data_ptr())
+            : nullptr;
+
+    gated_delta_rule_decode_xe2_spec(
+        queue,
+        core_attn_out_active,
+        q,
+        k,
+        v,
+        b,
+        a,
+        A_log,
+        dt_bias,
+        ssm_state,
+        *spec_state_indices_tensor,
+        *num_accepted_tokens,
+        num_spec_decodes,
+        num_spec_tokens,
+        q.size(1),
+        q.size(2),
+        v.size(1),
+        v.size(2),
+        spec_token_indx_ptr);
+#else
     gdn::gated_delta_rule(
         queue,
         core_attn_out_active,
@@ -586,6 +615,7 @@ void gated_delta_rule(
         num_prefills,
         num_decodes,
         num_spec_decodes);
+    #endif
   }
 
   if (non_spec_token > 0) {
@@ -612,6 +642,36 @@ void gated_delta_rule(
           has_initial_state,
           num_prefills,
           num_decodes,
+          token_indx_ptr);
+    } else if (num_spec_decodes == 0 && num_decodes > 0) {
+      const int* token_indx_ptr =
+          non_spec_token_indx.has_value()
+              ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
+              : nullptr;
+      TORCH_CHECK(
+          has_initial_state.has_value(),
+          "XE2 decode path requires has_initial_state");
+      TORCH_CHECK(
+          has_initial_state->numel() == num_decodes,
+          "XE2 decode path requires has_initial_state size to match num_decodes");
+
+      gated_delta_rule_decode_xe2(
+          queue,
+          core_attn_out_active,
+          q,
+          k,
+          v,
+          b,
+          a,
+          A_log,
+          dt_bias,
+          ssm_state,
+          *non_spec_state_indices_tensor,
+          num_decodes,
+          q.size(1),
+          q.size(2),
+          v.size(1),
+          v.size(2),
           token_indx_ptr);
     } else {
       gdn::gated_delta_rule(
