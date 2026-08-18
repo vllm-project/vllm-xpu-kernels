@@ -817,6 +817,15 @@ class ReduceSplitK {
       global_max_logits =
           sycl::group_broadcast(get_work_group<1>(), global_max_logits, 0);
 
+      if (effective_splits == 1) {
+        for (int idx = thr_id; idx < s.head_size_vo;
+             idx += SGPerWG::value * intel::sg_size) {
+          O(seq_idx, idx, head_q, l_coord) = static_cast<ElementO>(
+              Oaccum(seq_idx, idx, head_q, l_coord));
+        }
+        continue;
+      }
+
       for (int idx = thr_id; idx < s.head_size_vo;
            idx += SGPerWG::value * intel::sg_size) {
         ElementLSE acc = 0;

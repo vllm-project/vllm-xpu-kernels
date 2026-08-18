@@ -38,12 +38,12 @@
       const chunk_prefill_args_t& args);
 
 // Generate bool combinations for a given policy.
-// softmax_lse (LSE) is only supported on the (Paged=false, Local=false,
-// Sink=false) specialization; for all other combos LSE is forced false.
-// Total per policy: 14 LSE=false combos + 2 LSE=T/F combos
-// (P=F,L=F,S=F × Causal=T/F) × 2 = 4 -> 14 + 4 = 18 instantiations.
+// softmax_lse (LSE) is only supported on the (Local=false, Sink=false)
+// specializations; paged and non-paged prefill share the same LSE writer.
+// Total per policy: 12 LSE=false combos + 4 LSE=T/F combos
+// (P={F,T},L=F,S=F × Causal=T/F) × 2 = 8 -> 12 + 8 = 20 instantiations.
 
-// LSE axis: both true and false (only valid when P=F,L=F,S=F)
+// LSE axis: both true and false (only valid when L=F,S=F)
 #define DECLARE_FOR_LSE_BOTH(POLICY, PAGED, CAUSAL, LOCAL, SINK)            \
   DECLARE_POLICY_DISPATCH_EXTERN(POLICY, PAGED, CAUSAL, LOCAL, SINK, false) \
   DECLARE_POLICY_DISPATCH_EXTERN(POLICY, PAGED, CAUSAL, LOCAL, SINK, true)
@@ -65,10 +65,12 @@
   DECLARE_FOR_LOCAL_FALSEONLY(POLICY, PAGED, false) \
   DECLARE_FOR_LOCAL_FALSEONLY(POLICY, PAGED, true)
 
-// P=F,L=F,S=F branch (LSE=T/F allowed): Causal axis only.
-#define DECLARE_LSE_ALLOWED_BRANCH(POLICY)                 \
+// L=F,S=F branches (LSE=T/F allowed) for both paged and non-paged kernels.
+#define DECLARE_LSE_ALLOWED_BRANCH(POLICY)                \
   DECLARE_FOR_LSE_BOTH(POLICY, false, false, false, false) \
-  DECLARE_FOR_LSE_BOTH(POLICY, false, true, false, false)
+  DECLARE_FOR_LSE_BOTH(POLICY, false, true, false, false)  \
+  DECLARE_FOR_LSE_BOTH(POLICY, true, false, false, false)  \
+  DECLARE_FOR_LSE_BOTH(POLICY, true, true, false, false)
 
 // P=F but (L=true OR S=true): LSE=false only. Causal × Local × Sink (minus
 // the all-false case already covered above).
@@ -86,7 +88,7 @@
   /* Causal=T, Local=T, Sink=T */                          \
   DECLARE_FOR_LSE_FALSE(POLICY, false, true, true, true)
 
-// P=T branch: LSE=false only across all Causal × Local × Sink.
+// P=T branch with Local=true or Sink=true: LSE=false only.
 #define DECLARE_ALL_BOOL_COMBINATIONS(POLICY) \
   DECLARE_LSE_ALLOWED_BRANCH(POLICY)          \
   DECLARE_PAGED_FALSE_OTHER(POLICY)           \

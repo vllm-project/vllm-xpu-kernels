@@ -900,8 +900,52 @@ def ref_softmax_lse(
     return torch.cat(lse_list, dim=1)
 
 
+def ref_paged_softmax_lse(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    query_lens: list[int],
+    kv_lens: list[int],
+    block_tables: torch.Tensor,
+    scale: float,
+    casual: bool,
+) -> torch.Tensor:
+    """Reference log-sum-exp for paged KV attention.
+
+    Mirrors the paged path in ref_paged_attn and returns LSE with shape
+    [num_query_heads, sum(query_lens)].
+    """
+    num_query_heads = query.shape[1]
+    _, block_size, num_kv_heads, head_size = key_cache.shape
+    block_tables_np = block_tables.cpu().numpy()
+    lse_list: list[torch.Tensor] = []
+    start_q = 0
+
+    for i, (query_len, kv_len) in enumerate(zip(query_lens, kv_lens)):
+        q = query[start_q:start_q + query_len].float()
+        num_kv_blocks = (kv_len + block_size - 1) // block_size
+        block_indices = block_tables_np[i, :num_kv_blocks]
+        k = key_cache[block_indices].view(-1, num_kv_heads, head_size)[:kv_len]
+        k = k.float()
+        if q.shape[1] != k.shape[1]:
+            k = torch.repeat_interleave(k, q.shape[1] // k.shape[1], dim=1)
+        attn = torch.einsum("qhd,khd->hqk", q, k) * scale
+        if casual:
+            mask = torch.triu(
+                torch.ones(query_len, kv_len, device=attn.device),
+                diagonal=kv_len - query_len + 1,
+            ).bool()
+            attn.masked_fill_(mask, float("-inf"))
+        lse = torch.logsumexp(attn, dim=-1)
+        assert lse.shape == (num_query_heads, query_len)
+        lse_list.append(lse)
+        start_q += query_len
+
+    return torch.cat(lse_list, dim=1)
+
+
 # softmax_lse return is only supported when:
-#   is_paged == False, window_size == (-1,-1) (i.e. !is_local), is_sink == False
+#   window_size == (-1,-1) (i.e. !is_local) and is_sink == False
+# Paged KV is supported for the decode path.
 # Causal is orthogonal. Keep the param grid small since the outer loop count
 # multiplies with these.
 #
@@ -1008,6 +1052,101 @@ def test_varlen_with_softmax_lse(
     torch.testing.assert_close(out, ref_output, atol=atol, rtol=rtol)
     # LSE is float32 and computed in log space — compare with a modest
     # tolerance that covers bf16 Q/K accumulation noise.
+    torch.testing.assert_close(softmax_lse.float(),
+                               ref_lse.float(),
+                               atol=5e-2,
+                               rtol=5e-2)
+    torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize("seq_lens", [[(1, 1328), (1, 18), (1, 463), (1, 37)]])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("is_casual", CASUAL)
+@torch.inference_mode()
+def test_paged_varlen_with_softmax_lse(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    dtype: torch.dtype,
+    is_casual: bool,
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(4242)
+
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    num_blocks = max(2048, (sum(kv_lens) + block_size - 1) // block_size)
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (len(seq_lens), max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+
+    out, softmax_lse = flash_attn_varlen_func(query,
+                                              key_cache,
+                                              value_cache,
+                                              max_query_len,
+                                              cu_query_lens,
+                                              max_kv_len,
+                                              seqused_k=seq_k,
+                                              softmax_scale=scale,
+                                              causal=is_casual,
+                                              block_table=block_tables,
+                                              window_size=(-1, -1),
+                                              return_softmax_lse=True)
+
+    ref_output = ref_paged_attn(query=query.contiguous(),
+                                key_cache=key_cache.contiguous(),
+                                value_cache=value_cache.contiguous(),
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=is_casual,
+                                is_paged=True,
+                                sink=None,
+                                window_size_left=-1,
+                                window_size_right=-1,
+                                dtype=dtype)
+    ref_lse = ref_paged_softmax_lse(query=query.contiguous(),
+                                    key_cache=key_cache.contiguous(),
+                                    query_lens=query_lens,
+                                    kv_lens=kv_lens,
+                                    block_tables=block_tables,
+                                    scale=scale,
+                                    casual=is_casual)
+
+    total_q = sum(query_lens)
+    assert softmax_lse.shape == (num_query_heads, total_q), softmax_lse.shape
+    assert softmax_lse.dtype == torch.float32
+
+    torch.testing.assert_close(out, ref_output, atol=2e-2, rtol=1e-2)
     torch.testing.assert_close(softmax_lse.float(),
                                ref_lse.float(),
                                atol=5e-2,

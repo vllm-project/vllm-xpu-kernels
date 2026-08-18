@@ -12,9 +12,9 @@
 #
 # Config file format: - Lines starting with # are comments - Empty lines are
 # ignored - 'all' keyword builds everything - Each line:
-# headsize[,paged,causal,local,sink,lse] - If boolean flags omitted, all 18
+# headsize[,paged,causal,local,sink,lse] - If boolean flags omitted, all 20
 # valid combinations are generated - LSE constraint: lse=true only valid when
-# paged=false,local=false,sink=false
+# local=false,sink=false
 #
 # Both standard and b16 policies are generated for each headsize.
 # =============================================================================
@@ -121,8 +121,7 @@ function(fmha_forward_configure FILENAME_SUFFIX)
             foreach(IMPL_KISSINK ${L_BOOLS})
               # LSE constraint
               set(LSE_BOOLS "false")
-              if(IMPL_KISPAGED STREQUAL "false"
-                 AND IMPL_KISLOCAL STREQUAL "false"
+              if(IMPL_KISLOCAL STREQUAL "false"
                  AND IMPL_KISSINK STREQUAL "false")
                 set(LSE_BOOLS ${L_BOOLS})
               endif()
@@ -181,13 +180,10 @@ function(fmha_forward_configure FILENAME_SUFFIX)
 
         # Validate LSE constraint
         if(_lse STREQUAL "true")
-          if(NOT
-             (_paged STREQUAL "false"
-              AND _local STREQUAL "false"
-              AND _sink STREQUAL "false"))
+          if(NOT (_local STREQUAL "false" AND _sink STREQUAL "false"))
             message(
               WARNING
-                "Skipping invalid config: lse=true requires paged=false,local=false,sink=false: ${_entry}"
+                "Skipping invalid config: lse=true requires local=false,sink=false: ${_entry}"
             )
             continue()
           endif()
@@ -205,14 +201,13 @@ function(fmha_forward_configure FILENAME_SUFFIX)
           "${b16_policy_${_headsize}}|${_paged}|${_causal}|${_local}|${_sink}|${_lse}"
         )
       else()
-        # No booleans specified: generate all 18 valid combinations
+        # No booleans specified: generate all 20 valid combinations
         foreach(IMPL_KISPAGED ${L_BOOLS})
           foreach(IMPL_KISCAUSAL ${L_BOOLS})
             foreach(IMPL_KISLOCAL ${L_BOOLS})
               foreach(IMPL_KISSINK ${L_BOOLS})
                 set(LSE_BOOLS "false")
-                if(IMPL_KISPAGED STREQUAL "false"
-                   AND IMPL_KISLOCAL STREQUAL "false"
+                if(IMPL_KISLOCAL STREQUAL "false"
                    AND IMPL_KISSINK STREQUAL "false")
                   set(LSE_BOOLS ${L_BOOLS})
                 endif()
