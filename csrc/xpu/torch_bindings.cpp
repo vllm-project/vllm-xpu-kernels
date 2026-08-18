@@ -11,10 +11,23 @@
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
 
+  // fp8_gemm is exposed as two schemas sharing one C++ implementation:
+  // a pure functional variant, and an explicit out-variant. Keeping the
+  // mutable `out` out of the functional schema is required for
+  // torch.compile: a `Tensor(a!)?` argument makes functionalization wrap
+  // every call in `auto_functionalized`, which Inductor cannot decompose
+  // for optional mutable tensors.
   xpu_ops.def(
       "fp8_gemm(Tensor A, Tensor B, ScalarType? out_dtype, Tensor? A_scale_, "
       "Tensor? B_scale_, Tensor? bias_) -> Tensor");
   xpu_ops.impl("fp8_gemm", torch::kXPU, &fp8_gemm);
+
+  // Writes the result in place into `out` (whose shape and device must
+  // already match A/B) and returns it.
+  xpu_ops.def(
+      "fp8_gemm_out(Tensor(a!) out, Tensor A, Tensor B, ScalarType? out_dtype, "
+      "Tensor? A_scale_, Tensor? B_scale_, Tensor? bias_) -> Tensor");
+  xpu_ops.impl("fp8_gemm_out", torch::kXPU, &fp8_gemm_out);
 
   xpu_ops.def(
       "fp8_bmm(Tensor A, Tensor B, ScalarType? out_dtype, Tensor? A_scale_, "
