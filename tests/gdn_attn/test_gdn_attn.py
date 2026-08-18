@@ -1000,6 +1000,289 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                        rtol=rtol)
 
 
+MIXED_NUM_SPEC_DECODES = [1, 4]
+MIXED_NUM_SPEC_TOKENS = [2, 3]  # num_speculative_tokens + 1
+
+
+@pytest.mark.parametrize("num_spec_decodes", MIXED_NUM_SPEC_DECODES)
+@pytest.mark.parametrize("num_spec_tokens", MIXED_NUM_SPEC_TOKENS)
+@pytest.mark.parametrize("non_spec_num_tokens", [1, 32, 257])
+@pytest.mark.parametrize("num_k_heads", [16])
+@pytest.mark.parametrize("head_k_dim", [128])
+@pytest.mark.parametrize("num_v_heads", [32])
+@pytest.mark.parametrize("head_v_dim", [128])
+@pytest.mark.parametrize("width", [4])
+@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize("has_bias", [True, False])
+@pytest.mark.parametrize("activation", ["silu"])
+@pytest.mark.parametrize("mode", ["prefill", "decode", "mix_mode"])
+@pytest.mark.parametrize("reorder_input", [True, False])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16],
+                         ids=format_tc)
+@pytest.mark.parametrize("ssm_state_is_fp32", [False, True])
+@torch.inference_mode()
+def test_gdn_attention_mixed_spec_non_spec(num_spec_decodes, num_spec_tokens,
+                                           non_spec_num_tokens, num_k_heads,
+                                           head_k_dim, num_v_heads, head_v_dim,
+                                           width, tp_size, has_bias, activation,
+                                           mode, reorder_input, dtype,
+                                           ssm_state_is_fp32):
+    """Mixed batch exercising the fused gdn_attention with BOTH a non-spec
+    (prefill + decode) group AND a spec-decode group in a single call.
+
+    Layout in the global token buffer:
+      - non-spec tokens occupy the leading segment [0, non_spec_token)
+        contiguously (validated with ref_gdn_attention);
+      - spec tokens occupy the trailing segment [non_spec_token,
+        num_actual_tokens), addressed through spec_token_indx with the
+        per-seq order shuffled to exercise gather/scatter (validated with
+        ref_gdn_attention_spec).
+    The two groups use disjoint conv/ssm cache slots so their execution order
+    inside the fused op cannot interfere.
+    """
+    if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
+            and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
+        pytest.skip("skip gdn attention kernels testing on PVC.")
+
+    device = "xpu"
+    random.seed(7)
+    torch.manual_seed(7)
+    ssm_state_dtype = torch.float32 if ssm_state_is_fp32 else dtype
+
+    assert head_k_dim == head_v_dim
+
+    # ---- non-spec segment sizing (prefill / decode split) ----
+    non_spec_batch = min(32, non_spec_num_tokens)
+    if mode == "prefill":
+        num_prefills = non_spec_batch
+    elif mode == "decode":
+        num_prefills = 0
+        # decode means one token per sequence; only valid when tokens == batch.
+        if non_spec_batch != non_spec_num_tokens:
+            pytest.skip("decode mode requires non_spec_num_tokens == batch")
+    else:
+        num_prefills = (random.randint(1, non_spec_batch - 1)
+                        if non_spec_batch > 1 else 1)
+    num_decodes = non_spec_batch - num_prefills
+
+    K = num_spec_tokens
+    spec_token = num_spec_decodes * K
+    non_spec_token = non_spec_num_tokens
+    num_actual_tokens = non_spec_token + spec_token
+    cache_batch_size = 400
+
+    mixed_qkvz_size = num_k_heads // tp_size * (
+        2 * head_k_dim + 2 * head_v_dim * num_v_heads // num_k_heads)
+    mixed_ba_size = num_k_heads // tp_size * (2 * num_v_heads // num_k_heads)
+    mixed_qkv_size = num_k_heads // tp_size * (
+        2 * head_k_dim + head_v_dim * num_v_heads // num_k_heads)
+
+    projected_states_qkvz = torch.randn((num_actual_tokens, mixed_qkvz_size),
+                                        dtype=dtype,
+                                        device=device)
+    projected_states_ba = torch.randn((num_actual_tokens, mixed_ba_size),
+                                      dtype=dtype,
+                                      device=device)
+
+    conv_state = torch.randn((cache_batch_size, width - 1, mixed_qkv_size),
+                             dtype=dtype,
+                             device=device)
+    ref_conv_state = conv_state.clone()
+    ssm_state = torch.randn(
+        (cache_batch_size, num_v_heads // tp_size, head_v_dim, head_k_dim),
+        dtype=ssm_state_dtype,
+        device=device)
+    ref_ssm_state = ssm_state.clone()
+
+    conv_weights = torch.randn((mixed_qkv_size, width),
+                               dtype=dtype,
+                               device=device)
+    conv_bias = None
+    if has_bias:
+        conv_bias = torch.randn((mixed_qkv_size), dtype=dtype, device=device)
+
+    A_log = torch.randn((num_v_heads // tp_size),
+                        dtype=torch.float32,
+                        device=device)
+    dt_bias = torch.randn((num_v_heads // tp_size), dtype=dtype, device=device)
+
+    # ---- disjoint cache slots for the two groups ----
+    all_slots = random.sample(range(cache_batch_size),
+                              non_spec_batch + spec_token)
+    non_spec_slots = all_slots[:non_spec_batch]
+    spec_slots = all_slots[non_spec_batch:]
+
+    # ---- non-spec indexing: leading segment [0, non_spec_token) ----
+    prefill_batches = simple_random_distribute(non_spec_token - num_decodes,
+                                               non_spec_batch - num_decodes)
+    token_batches = torch.cat([torch.ones([num_decodes]),
+                               prefill_batches]).to(device)
+    perm = torch.randperm(token_batches.size(0)).to(device)
+    shuffled_tensor = token_batches[perm]
+    non_spec_query_start_loc = torch.cat([
+        torch.zeros([1], device=device),
+        torch.cumsum(shuffled_tensor, dim=0)
+    ]).to(torch.int32)
+    has_initial_state = perm >= num_decodes
+    non_spec_state_indices_tensor = torch.tensor(non_spec_slots,
+                                                 device=device,
+                                                 dtype=torch.int32)
+    # Non-spec tokens are laid out contiguously at the front; the identity
+    # token index maps kernel writes to the same rows the reference uses.
+    non_spec_token_indx = torch.arange(non_spec_token,
+                                       dtype=torch.int32,
+                                       device=device)
+
+    # ---- spec indexing: trailing segment [non_spec_token, num_actual_tokens)
+    spec_state_indices_tensor = torch.tensor(spec_slots,
+                                             dtype=torch.int32,
+                                             device=device).reshape(
+                                                 num_spec_decodes, K)
+    num_accepted_tokens = torch.tensor(
+        [random.randint(0, K) for _ in range(num_spec_decodes)],
+        dtype=torch.int32,
+        device=device)
+    # Shuffle spec token positions WITHIN the trailing segment.
+    spec_perm = torch.randperm(spec_token, device=device)
+    spec_token_indx = (non_spec_token +
+                       spec_perm).to(torch.int32).contiguous()
+    spec_query_start_loc = (torch.arange(
+        num_spec_decodes + 1, dtype=torch.int32, device=device) * K)
+
+    core_attn_out = torch.zeros(
+        (num_actual_tokens, num_v_heads // tp_size, head_v_dim),
+        dtype=dtype,
+        device=device,
+    )
+    z = torch.zeros_like(core_attn_out)
+
+    torch.ops._xpu_C.gdn_attention(
+        core_attn_out,
+        z,
+        projected_states_qkvz,
+        projected_states_ba,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_state=conv_state,
+        ssm_state=ssm_state,
+        conv_weights=conv_weights,
+        conv_bias=conv_bias,
+        activation=activation,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        num_spec_decodes=num_spec_decodes,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_token_indx=non_spec_token_indx,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        spec_query_start_loc=spec_query_start_loc,
+        spec_token_indx=spec_token_indx,
+        spec_state_indices_tensor=spec_state_indices_tensor,
+        num_accepted_tokens=num_accepted_tokens,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size,
+        reorder_input=reorder_input)
+
+    # ---- reference: run non-spec ref on the leading segment and spec ref on
+    # the trailing segment, into a shared reference buffer ----
+    ref_core_attn_out = torch.zeros_like(core_attn_out)
+    ref_z = torch.zeros_like(core_attn_out)
+
+    # Non-spec reference consumes only the leading [0, non_spec_token) rows.
+    ref_gdn_attention(
+        ref_core_attn_out[:non_spec_token],
+        ref_z[:non_spec_token],
+        projected_states_qkvz[:non_spec_token].contiguous(),
+        projected_states_ba[:non_spec_token].contiguous(),
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_state=ref_conv_state,
+        ssm_state=ref_ssm_state,
+        conv_weights=conv_weights,
+        conv_bias=conv_bias,
+        activation=activation,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        num_actual_tokens=non_spec_token,
+        tp_size=tp_size,
+        reorder_input=reorder_input,
+    )
+
+    # Spec reference scatters through spec_token_indx (trailing rows).
+    ref_gdn_attention_spec(
+        ref_core_attn_out,
+        ref_z,
+        projected_states_qkvz,
+        projected_states_ba,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_state=ref_conv_state,
+        ssm_state=ref_ssm_state,
+        conv_weights=conv_weights,
+        conv_bias=conv_bias,
+        activation=activation,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_spec_decodes=num_spec_decodes,
+        spec_query_start_loc=spec_query_start_loc,
+        spec_token_indx=spec_token_indx,
+        spec_state_indices_tensor=spec_state_indices_tensor,
+        num_accepted_tokens=num_accepted_tokens,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size,
+        reorder_input=reorder_input,
+    )
+
+    atol = 5e-2
+    rtol = 5e-2
+
+    torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
+    torch.testing.assert_close(core_attn_out,
+                               ref_core_attn_out,
+                               atol=atol,
+                               rtol=rtol,
+                               equal_nan=True)
+
+    # non-spec conv/ssm cache slots.
+    for i in range(non_spec_batch):
+        slot = non_spec_state_indices_tensor[i]
+        torch.testing.assert_close(conv_state[slot],
+                                   ref_conv_state[slot],
+                                   atol=atol,
+                                   rtol=rtol)
+        torch.testing.assert_close(ssm_state[slot],
+                                   ref_ssm_state[slot],
+                                   atol=atol,
+                                   rtol=rtol)
+
+    # spec conv (final slot) / ssm (all K per-step slots) cache checks.
+    for n in range(num_spec_decodes):
+        final_slot = int(spec_state_indices_tensor[n, K - 1].item())
+        torch.testing.assert_close(conv_state[final_slot],
+                                   ref_conv_state[final_slot],
+                                   atol=atol,
+                                   rtol=rtol)
+        for t in range(K):
+            slot = int(spec_state_indices_tensor[n, t].item())
+            torch.testing.assert_close(ssm_state[slot],
+                                       ref_ssm_state[slot],
+                                       atol=atol,
+                                       rtol=rtol)
+
+
 # GQA ratio num_v_heads/num_k_heads == 3 regression. The SLM-tiled prefill
 # conv1d (chunk_causal_conv1d_tiled_xe2) reorders the z gate one feat_chunk at a
 # time: its 64 work-items cover feats_per_wg = wg_size * elems_per_item = 256 z
