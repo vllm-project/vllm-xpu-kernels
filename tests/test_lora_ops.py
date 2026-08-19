@@ -139,6 +139,110 @@ def sgmv_expand_for_nslices(
 _dict_lock = Lock()
 
 
+def test_lora_shrink_uses_active_rank_with_padded_weights():
+    batch_size = 4
+    hidden_size = 128
+    active_rank = 64
+    stored_rank = 128
+    num_loras = 2
+    num_slices = 2
+    scaling = 0.5
+    dtype = torch.float16
+    device = "xpu:0"
+    lora_indices = torch.tensor([0, 1, -1, 0],
+                                dtype=torch.int32,
+                                device=device)
+    inputs = torch.randn(batch_size, hidden_size, dtype=dtype, device=device)
+    lora_a = [
+        torch.randn(num_loras,
+                    1,
+                    stored_rank,
+                    hidden_size,
+                    dtype=dtype,
+                    device=device) for _ in range(num_slices)
+    ]
+    output = torch.ones(num_slices,
+                        batch_size,
+                        active_rank,
+                        dtype=dtype,
+                        device=device)
+    expected = torch.zeros_like(output)
+    active_rows = lora_indices >= 0
+    active_indices = lora_indices[active_rows].long()
+    for slice_id, weight in enumerate(lora_a):
+        selected = weight[active_indices, 0, :active_rank]
+        expected[slice_id, active_rows] = scaling * torch.einsum(
+            "bi,boi->bo", inputs[active_rows], selected)
+
+    torch.ops._xpu_C.lora_shrink(inputs, lora_a, output, lora_indices, scaling)
+
+    assert_close(output, expected)
+
+
+@pytest.mark.parametrize("add_inputs", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("output_slices", [[48], [48, 32], [48, 32, 16, 24]])
+def test_lora_linear_uses_active_rank_with_padded_weights(
+        add_inputs, dtype, output_slices):
+    batch_size = 4
+    hidden_size = 128
+    active_rank = 64
+    stored_rank = 128
+    num_loras = 2
+    scaling = 0.5
+    device = "xpu:0"
+    lora_indices = torch.tensor([0, 1, -1, 0],
+                                dtype=torch.int32,
+                                device=device)
+    inputs = torch.randn(batch_size, hidden_size, dtype=dtype, device=device)
+    lora_a = [
+        torch.randn(num_loras,
+                    1,
+                    stored_rank,
+                    hidden_size,
+                    dtype=dtype,
+                    device=device) for _ in output_slices
+    ]
+    lora_b = [
+        torch.randn(num_loras,
+                    1,
+                    output_size,
+                    stored_rank,
+                    dtype=dtype,
+                    device=device) for output_size in output_slices
+    ]
+    output = torch.randn(batch_size,
+                         sum(output_slices),
+                         dtype=dtype,
+                         device=device)
+    expected = output.clone()
+    active_rows = lora_indices >= 0
+    active_indices = lora_indices[active_rows].long()
+    offset = 0
+    for a, b, output_size in zip(lora_a, lora_b, output_slices):
+        selected_a = a[active_indices, 0, :active_rank]
+        shrunk = torch.einsum("bi,boi->bo", inputs[active_rows], selected_a)
+        selected_b = b[active_indices, 0, :, :active_rank]
+        expanded = scaling * torch.einsum("bi,boi->bo", shrunk, selected_b)
+        output_slice = slice(offset, offset + output_size)
+        if add_inputs:
+            expected[active_rows, output_slice] += expanded
+        else:
+            expected[active_rows, output_slice] = expanded
+        offset += output_size
+
+    xpu_ops.lora_linear(inputs,
+                        lora_a,
+                        lora_b,
+                        output,
+                        lora_indices,
+                        active_rank,
+                        scaling=scaling,
+                        add_inputs=add_inputs)
+
+    assert_close(output, expected)
+
+
 def check_lora_shrink_kernel(
     batches: int,
     num_loras: int,

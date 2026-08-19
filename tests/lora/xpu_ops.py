@@ -166,3 +166,25 @@ def lora_expand(
         offset_start,
         add_inputs,
     )
+
+
+def lora_linear(
+    inputs: torch.Tensor,
+    lora_a_weights: list[torch.Tensor],
+    lora_b_weights: list[torch.Tensor],
+    output_tensor: torch.Tensor,
+    token_lora_mapping: torch.Tensor,
+    active_rank: int,
+    scaling: float = 1.0,
+    add_inputs: bool = True,
+) -> None:
+    torch.ops._xpu_C.lora_linear(
+        inputs,
+        lora_a_weights,
+        lora_b_weights,
+        output_tensor,
+        token_lora_mapping,
+        scaling,
+        active_rank,
+        add_inputs,
+    )

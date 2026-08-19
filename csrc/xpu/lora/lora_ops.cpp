@@ -12,8 +12,9 @@
 //
 //   Tensor shapes:
 //     inputs  : [batch_size, hidden_size]
-//     weights : num_slices tensors, each [num_loras, 1, rank, hidden_size]
-//     output  : [num_slices, batch_size, rank]
+//     weights : num_slices tensors, each [num_loras, 1, stored_rank,
+//               hidden_size]
+//     output  : [num_slices, batch_size, active_rank]
 //     indices : [batch_size]
 //
 // Expand (lora_expand):
@@ -22,8 +23,9 @@
 //         inputs[s, b, :] @ weights_s[indices[b], :, :]
 //
 //   Tensor shapes:
-//     inputs  : [num_slices, batch_size, rank]
-//     weights : num_slices tensors, each [num_loras, 1, slice_size, rank]
+//     inputs  : [num_slices, batch_size, active_rank]
+//     weights : num_slices tensors, each [num_loras, 1, slice_size,
+//               stored_rank]
 //     output  : [batch_size, total_output_dim]
 //     indices : [batch_size]
 
@@ -41,6 +43,12 @@ namespace vllm::lora {
 // Maximum number of slices supported (QKV typically has 3).
 // Weight pointers are stored in a fixed-size array passed to the kernel.
 constexpr int kMaxSlices = 8;
+constexpr uint32_t kSmallProblemThreshold = 8192;
+constexpr uint32_t kMediumProblemThreshold = 65536;
+constexpr uint32_t kLargeProblemThreshold = 1048576;
+constexpr uint32_t kMaxWorkgroups = 8192;
+constexpr uint32_t kLargeProblemElementsPerThread = 16;
+constexpr uint32_t kBalancedThreeSliceFallbackOutput = 8192;
 
 // ============================================================================
 // Shrink kernel
@@ -172,7 +180,7 @@ class lora_shrink_kernel {
     const acc_t group_sum = sycl::reduce_over_group(
         item.get_group(), local_sum, sycl::plus<acc_t>());
 
-    if (local_id == 0 && valid) {
+    if (local_id == 0) {
       // output layout: [num_slices, batch_size, rank]
       const uint64_t out_idx =
           static_cast<uint64_t>(slice_id) * batch_size_ * rank_ +
@@ -222,6 +230,7 @@ class lora_expand_kernel {
   // Per-slice metadata
   const weight_t* __restrict__ weight_ptrs_[kMaxSlices];
   uint64_t weight_lora_stride_[kMaxSlices];  // stride between LoRAs
+  uint64_t weight_row_stride_[kMaxSlices];   // stride between output rows
   uint32_t slice_offsets_[kMaxSlices];
   // Cumulative slice sizes for slice lookup.
   uint32_t cum_slice_sizes_[kMaxSlices + 1];
@@ -243,6 +252,7 @@ class lora_expand_kernel {
       const uint32_t total_slice_cols,
       const weight_t* const* weight_ptrs,
       const uint64_t* weight_lora_strides,
+      const uint64_t* weight_row_strides,
       const uint32_t* slice_offsets,
       const uint32_t* slice_sizes)
       : output_(output),
@@ -258,6 +268,7 @@ class lora_expand_kernel {
     for (uint32_t i = 0; i < num_slices && i < kMaxSlices; ++i) {
       weight_ptrs_[i] = weight_ptrs[i];
       weight_lora_stride_[i] = weight_lora_strides[i];
+      weight_row_stride_[i] = weight_row_strides[i];
       slice_offsets_[i] = slice_offsets[i];
       cum_slice_sizes_[i + 1] = cum_slice_sizes_[i] + slice_sizes[i];
     }
@@ -300,7 +311,7 @@ class lora_expand_kernel {
       const weight_t* __restrict__ weight_base =
           weight_ptrs_[slice_id] +
           static_cast<uint64_t>(lora_idx) * weight_lora_stride_[slice_id] +
-          col_in_slice * rank_;
+          col_in_slice * weight_row_stride_[slice_id];
 
       // Dot product over rank
       acc_t sum = 0;
@@ -350,9 +361,9 @@ class lora_expand_kernel {
 // vec_size*sizeof(T)-aligned AND row_elems*sizeof(T) is divisible by
 // vec_size*sizeof(T).  Falls back to 1 when no wider width is safe.
 template <typename T>
-static uint32_t aligned_vec_size(const T* ptr, uint32_t row_elems) {
+static uint32_t aligned_vec_size(const T* ptr, uint64_t row_elems) {
   uint32_t vec_bytes = 16;
-  const uint32_t row_bytes = row_elems * static_cast<uint32_t>(sizeof(T));
+  const uint64_t row_bytes = row_elems * sizeof(T);
   const auto base_align = reinterpret_cast<uintptr_t>(ptr);
   while (vec_bytes > sizeof(T) &&
          (row_bytes % vec_bytes != 0 || base_align % vec_bytes != 0)) {
@@ -480,6 +491,7 @@ void launch_lora_expand(
     const uint32_t num_slices,
     const weight_t* const* weight_ptrs,
     const uint64_t* weight_lora_strides,
+    const uint64_t* weight_row_strides,
     const uint32_t* slice_offsets,
     const uint32_t* slice_sizes) {
   // Compute runtime vec_size: must be safe for all input rows (rank wide)
@@ -487,8 +499,10 @@ void launch_lora_expand(
   // For row offset batch_id*rank (and col_in_slice*rank for weights) to be
   // 16-byte aligned, rank*sizeof(T) must be divisible by 16.
   uint32_t vec_size = aligned_vec_size(input, rank);
-  for (uint32_t i = 0; i < num_slices; ++i)
-    vec_size = std::min(vec_size, aligned_vec_size(weight_ptrs[i], rank));
+  for (uint32_t i = 0; i < num_slices; ++i) {
+    vec_size = std::min(
+        vec_size, aligned_vec_size(weight_ptrs[i], weight_row_strides[i]));
+  }
 
   at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
   at::DeviceGuard device_guard(curDevice);
@@ -515,21 +529,28 @@ void launch_lora_expand(
   dispatch_vec_size(vec_size, [&](auto vec_c) {
     constexpr uint32_t VS = decltype(vec_c)::value;
 
-    // Workgroup configuration.
-    //
-    // Each output element requires a dot-product of length `rank`, costing
-    // (rank / VS) vectorized MAD iterations.  Bound vector loads per thread
-    // to ~256 so that no single thread becomes a bottleneck on large problems.
-    uint32_t wg_size = std::min(256u, max_wg_size);
-    const uint32_t vecs_per_dot = std::max((rank + VS - 1) / VS, 1u);
-    constexpr uint32_t kMaxVecLoadsPerThread = 256;
-    const uint32_t max_elems_per_thread =
-        std::max(1u, kMaxVecLoadsPerThread / vecs_per_dot);
-    const uint32_t min_total_threads =
-        (total_elements + max_elems_per_thread - 1) / max_elems_per_thread;
-    const uint32_t ideal_wgs = (total_elements + wg_size - 1) / wg_size;
-    uint32_t num_wgs =
-        std::min((min_total_threads + wg_size - 1) / wg_size, ideal_wgs);
+    uint32_t max_slice_cols = 0;
+    for (uint32_t s = 0; s < num_slices; ++s)
+      max_slice_cols = std::max(max_slice_cols, slice_sizes[s]);
+    const uint32_t slice_problem_size = batch_size * max_slice_cols;
+
+    uint32_t wg_size = 256;
+    if (slice_problem_size <= vllm::lora::kSmallProblemThreshold) {
+      wg_size = 64;
+    } else if (slice_problem_size <= vllm::lora::kMediumProblemThreshold) {
+      wg_size = 128;
+    }
+    wg_size = std::min(wg_size, max_wg_size);
+
+    uint32_t num_wgs;
+    if (total_elements <= vllm::lora::kLargeProblemThreshold) {
+      num_wgs = (total_elements + wg_size - 1) / wg_size;
+    } else {
+      num_wgs = (total_elements +
+                 vllm::lora::kLargeProblemElementsPerThread * wg_size - 1) /
+                (vllm::lora::kLargeProblemElementsPerThread * wg_size);
+      num_wgs = std::min(num_wgs, vllm::lora::kMaxWorkgroups);
+    }
     if (total_elements < wg_size) {
       wg_size = std::max(total_elements, 1u);
       num_wgs = 1;
@@ -556,6 +577,7 @@ void launch_lora_expand(
               total_slice_cols,
               sycl_weight_ptrs,
               weight_lora_strides,
+              weight_row_strides,
               slice_offsets,
               slice_sizes);
       cgh.parallel_for(sycl::nd_range<1>(global_range, local_range), kfn);
@@ -571,10 +593,9 @@ void launch_lora_expand(
  * Multi-slice LoRA shrink op entry point.
  *
  * @param inputs          [batch_size, hidden_size]
- * @param lora_a_weights  list of tensors, each [num_loras, 1, rank,
- * hidden_size]
- * @param output_tensor   [num_slices, batch_size, rank]  (zeroed, accumulated
- * in-place)
+ * @param lora_a_weights  list of tensors, each
+ * [num_loras, 1, stored_rank, hidden_size]
+ * @param output_tensor   [num_slices, batch_size, active_rank]
  * @param lora_indices    [batch_size]
  * @param scaling         scaling factor
  */
@@ -615,6 +636,7 @@ void lora_shrink(
 
   const uint32_t batch_size = inputs.size(0);
   const uint32_t hidden = inputs.size(1);
+  const uint32_t rank = output_tensor.size(2);
 
   TORCH_CHECK(
       lora_indices.numel() == static_cast<int64_t>(batch_size),
@@ -623,6 +645,7 @@ void lora_shrink(
       ") must equal batch_size (",
       batch_size,
       ")");
+  TORCH_CHECK(rank > 0, "output_tensor rank must be positive");
 
   if (batch_size == 0) return;
 
@@ -646,21 +669,18 @@ void lora_shrink(
         w.size(-1) == static_cast<int64_t>(hidden),
         "weight hidden dim mismatch at slice ",
         s);
+    TORCH_CHECK(
+        w.size(-2) >= static_cast<int64_t>(rank),
+        "weight rank at slice ",
+        s,
+        " must be at least the active rank ",
+        rank);
     weights_3d.push_back(w);
   }
 
-  const uint32_t rank = static_cast<uint32_t>(weights_3d[0].size(-2));
   const uint32_t num_loras = static_cast<uint32_t>(weights_3d[0].size(0));
   const auto weight_dtype = weights_3d[0].scalar_type();
   for (int64_t s = 1; s < num_slices; ++s) {
-    TORCH_CHECK(
-        weights_3d[s].size(-2) == static_cast<int64_t>(rank),
-        "lora_a_weights[",
-        s,
-        "] rank mismatch: expected ",
-        rank,
-        " but got ",
-        weights_3d[s].size(-2));
     TORCH_CHECK(
         weights_3d[s].size(0) == static_cast<int64_t>(num_loras),
         "lora_a_weights[",
@@ -679,12 +699,6 @@ void lora_shrink(
   TORCH_CHECK(
       output_tensor.size(1) == static_cast<int64_t>(batch_size),
       "output_tensor batch dim mismatch");
-  TORCH_CHECK(
-      output_tensor.size(2) == static_cast<int64_t>(rank),
-      "output_tensor rank dim mismatch");
-
-  // Zeroing output (triton shrink does output_tensor.zero_())
-  output_tensor.zero_();
 
   auto scale_f = static_cast<float>(scaling);
 
@@ -744,8 +758,9 @@ void lora_shrink(
 /**
  * Multi-slice LoRA expand op entry point.
  *
- * @param inputs          [num_slices, batch_size, rank]
- * @param lora_b_weights  list of tensors, each [num_loras, 1, slice_size, rank]
+ * @param inputs          [num_slices, batch_size, active_rank]
+ * @param lora_b_weights  list of tensors, each
+ * [num_loras, 1, slice_size, stored_rank]
  * @param output_tensor   [batch_size, total_output_dim]  (mutated in-place)
  * @param lora_indices    [batch_size]
  * @param offset_start    starting column offset in output
@@ -834,9 +849,11 @@ void lora_expand(
     }
     TORCH_CHECK(w.dim() == 3);
     TORCH_CHECK(
-        w.size(-1) == static_cast<int64_t>(rank),
-        "weight rank dim mismatch at slice ",
-        s);
+        w.size(-1) >= static_cast<int64_t>(rank),
+        "weight rank at slice ",
+        s,
+        " must be at least the active rank ",
+        rank);
 
     uint32_t ss = static_cast<uint32_t>(w.size(-2));
     slice_offsets[s] = cur_offset;
@@ -847,6 +864,7 @@ void lora_expand(
   }
 
   const uint32_t num_loras = static_cast<uint32_t>(weights_3d[0].size(0));
+  const auto weight_dtype = weights_3d[0].scalar_type();
   for (int64_t s = 1; s < num_slices; ++s) {
     TORCH_CHECK(
         weights_3d[s].size(0) == static_cast<int64_t>(num_loras),
@@ -856,6 +874,11 @@ void lora_expand(
         num_loras,
         " but got ",
         weights_3d[s].size(0));
+    TORCH_CHECK(
+        weights_3d[s].scalar_type() == weight_dtype,
+        "lora_b_weights[",
+        s,
+        "] dtype mismatches slice 0");
   }
   TORCH_CHECK(
       cur_offset <= output_dim,
@@ -866,6 +889,18 @@ void lora_expand(
       ") exceeds output_tensor.size(1) (",
       output_dim,
       ")");
+
+  // Large balanced rank-128 slices retain better occupancy as separate kernels.
+  bool use_multi_slice = true;
+  if (num_slices == 3 && rank >= 128) {
+    const auto [min_slice, max_slice] =
+        std::minmax_element(slice_sizes, slice_sizes + num_slices);
+    const uint32_t total_slice_cols =
+        cur_offset - static_cast<uint32_t>(offset_start);
+    use_multi_slice =
+        total_slice_cols < vllm::lora::kBalancedThreeSliceFallbackOutput ||
+        *max_slice > 2 * *min_slice;
+  }
 
   // Dispatch on types — add_inputs is dispatched as a template parameter
   // to eliminate the runtime branch in the hot kernel loop.
@@ -880,57 +915,67 @@ void lora_expand(
 
             const weight_t* weight_ptrs[vllm::lora::kMaxSlices];
             uint64_t weight_lora_strides[vllm::lora::kMaxSlices];
+            uint64_t weight_row_strides[vllm::lora::kMaxSlices];
             for (int64_t s = 0; s < num_slices; ++s) {
               weight_ptrs[s] = weights_3d[s].data_ptr<weight_t>();
               weight_lora_strides[s] =
                   static_cast<uint64_t>(weights_3d[s].stride(0));
+              weight_row_strides[s] =
+                  static_cast<uint64_t>(weights_3d[s].stride(-2));
             }
+
+            auto launch = [&](auto* output_ptr) {
+              using output_t = std::remove_pointer_t<decltype(output_ptr)>;
+              if (use_multi_slice) {
+                launch_lora_expand<output_t, input_t, weight_t, ADD>(
+                    output_ptr,
+                    inputs.data_ptr<input_t>(),
+                    lora_indices.data_ptr<int32_t>(),
+                    batch_size,
+                    output_dim,
+                    rank,
+                    num_loras,
+                    static_cast<uint32_t>(num_slices),
+                    weight_ptrs,
+                    weight_lora_strides,
+                    weight_row_strides,
+                    slice_offsets,
+                    slice_sizes);
+                return;
+              }
+
+              for (int64_t s = 0; s < num_slices; ++s) {
+                const weight_t* slice_weight_ptrs[] = {weight_ptrs[s]};
+                const uint64_t slice_lora_strides[] = {weight_lora_strides[s]};
+                const uint64_t slice_row_strides[] = {weight_row_strides[s]};
+                const uint32_t single_slice_offsets[] = {slice_offsets[s]};
+                const uint32_t single_slice_sizes[] = {slice_sizes[s]};
+                launch_lora_expand<output_t, input_t, weight_t, ADD>(
+                    output_ptr,
+                    inputs.data_ptr<input_t>() + s * batch_size * rank,
+                    lora_indices.data_ptr<int32_t>(),
+                    batch_size,
+                    output_dim,
+                    rank,
+                    num_loras,
+                    1,
+                    slice_weight_ptrs,
+                    slice_lora_strides,
+                    slice_row_strides,
+                    single_slice_offsets,
+                    single_slice_sizes);
+              }
+            };
 
             switch (output_tensor.scalar_type()) {
               case at::ScalarType::Half:
-                launch_lora_expand<at::Half, input_t, weight_t, ADD>(
-                    output_tensor.data_ptr<at::Half>(),
-                    inputs.data_ptr<input_t>(),
-                    lora_indices.data_ptr<int32_t>(),
-                    batch_size,
-                    output_dim,
-                    rank,
-                    num_loras,
-                    static_cast<uint32_t>(num_slices),
-                    weight_ptrs,
-                    weight_lora_strides,
-                    slice_offsets,
-                    slice_sizes);
+                launch(output_tensor.data_ptr<at::Half>());
                 break;
               case at::ScalarType::BFloat16:
-                launch_lora_expand<at::BFloat16, input_t, weight_t, ADD>(
-                    output_tensor.data_ptr<at::BFloat16>(),
-                    inputs.data_ptr<input_t>(),
-                    lora_indices.data_ptr<int32_t>(),
-                    batch_size,
-                    output_dim,
-                    rank,
-                    num_loras,
-                    static_cast<uint32_t>(num_slices),
-                    weight_ptrs,
-                    weight_lora_strides,
-                    slice_offsets,
-                    slice_sizes);
+                launch(output_tensor.data_ptr<at::BFloat16>());
                 break;
               case at::ScalarType::Float:
-                launch_lora_expand<float, input_t, weight_t, ADD>(
-                    output_tensor.data_ptr<float>(),
-                    inputs.data_ptr<input_t>(),
-                    lora_indices.data_ptr<int32_t>(),
-                    batch_size,
-                    output_dim,
-                    rank,
-                    num_loras,
-                    static_cast<uint32_t>(num_slices),
-                    weight_ptrs,
-                    weight_lora_strides,
-                    slice_offsets,
-                    slice_sizes);
+                launch(output_tensor.data_ptr<float>());
                 break;
               default:
                 TORCH_CHECK(
@@ -961,4 +1006,30 @@ void lora_expand(
   } else {
     dispatch_all(std::false_type{});
   }
+}
+
+void lora_linear(
+    const at::Tensor& inputs,
+    const std::vector<at::Tensor>& lora_a_weights,
+    const std::vector<at::Tensor>& lora_b_weights,
+    at::Tensor& output_tensor,
+    const at::Tensor& lora_indices,
+    double scaling,
+    int64_t active_rank,
+    bool add_inputs) {
+  TORCH_CHECK(
+      lora_a_weights.size() == lora_b_weights.size(),
+      "lora_a_weights and lora_b_weights must have the same length");
+  TORCH_CHECK(!lora_a_weights.empty(), "LoRA weights must not be empty");
+  TORCH_CHECK(active_rank > 0, "active_rank must be positive");
+  TORCH_CHECK(inputs.dim() == 2, "inputs must be 2D [batch_size, hidden_size]");
+
+  auto buffer = torch::empty(
+      {static_cast<int64_t>(lora_a_weights.size()),
+       inputs.size(0),
+       active_rank},
+      inputs.options());
+  lora_shrink(inputs, lora_a_weights, buffer, lora_indices, scaling);
+  lora_expand(
+      buffer, lora_b_weights, output_tensor, lora_indices, 0, add_inputs);
 }

@@ -169,6 +169,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "bool add_inputs) -> ()");
   xpu_ops.impl("lora_expand", torch::kXPU, &lora_expand);
 
+  xpu_ops.def(
+      "lora_linear(Tensor inputs, Tensor[] lora_a_weights, "
+      "Tensor[] lora_b_weights, Tensor! output_tensor, Tensor lora_indices, "
+      "float scaling, int active_rank, bool add_inputs) -> ()");
+  xpu_ops.impl("lora_linear", torch::kXPU, &lora_linear);
+
 #ifdef VLLM_GDN_ENABLED
   xpu_ops.def(
       "causal_conv1d(Tensor! z, Tensor "

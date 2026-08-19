@@ -107,8 +107,8 @@ void bgmv_expand(
 //
 // Tensor shapes:
 //   inputs        : [batch_size, hidden_size]
-//   lora_a_weights: list of [num_loras, 1, rank, hidden_size]
-//   output_tensor : [num_slices, batch_size, rank]
+//   lora_a_weights: list of [num_loras, 1, stored_rank, hidden_size]
+//   output_tensor : [num_slices, batch_size, active_rank]
 //   lora_indices  : [batch_size]
 //------------------------------------------------------------------------------
 void lora_shrink(
@@ -126,8 +126,8 @@ void lora_shrink(
 //   output[b, offset_s + c] += inputs[s, b, :] @ weights_s[indices[b], c, :]
 //
 // Tensor shapes:
-//   inputs        : [num_slices, batch_size, rank]
-//   lora_b_weights: list of [num_loras, 1, slice_size, rank]
+//   inputs        : [num_slices, batch_size, active_rank]
+//   lora_b_weights: list of [num_loras, 1, slice_size, stored_rank]
 //   output_tensor : [batch_size, total_output_dim]
 //   lora_indices  : [batch_size]
 //------------------------------------------------------------------------------
@@ -137,4 +137,23 @@ void lora_expand(
     torch::Tensor& output_tensor,
     const torch::Tensor& lora_indices,
     int64_t offset_start,
+    bool add_inputs);
+
+//------------------------------------------------------------------------------
+// lora_linear
+//------------------------------------------------------------------------------
+// Multi-slice LoRA linear projection using a temporary active-rank buffer.
+//
+//   output += (inputs @ lora_a_weights.T) @ lora_b_weights.T
+//
+// The stored weights may be padded to a rank larger than active_rank.
+//------------------------------------------------------------------------------
+void lora_linear(
+    const torch::Tensor& inputs,
+    const std::vector<torch::Tensor>& lora_a_weights,
+    const std::vector<torch::Tensor>& lora_b_weights,
+    torch::Tensor& output_tensor,
+    const torch::Tensor& lora_indices,
+    double scaling,
+    int64_t active_rank,
     bool add_inputs);
