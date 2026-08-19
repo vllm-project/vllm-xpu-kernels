@@ -7,7 +7,7 @@ from tests.ops.fp8_quant_op import (fp8_block_dequant_2d, fp8_block_quant_2d,
                                     per_token_group_quant_fp8,
                                     scaled_fp8_quant)
 from tests.ops.mx_utils import from_blocked_format, to_mxfp
-from tests.register_ops import fp8_bmm, fp8_gemm, fp8_gemm_w8a16
+from tests.register_ops import fp8_bmm, fp8_gemm, fp8_gemm_out, fp8_gemm_w8a16
 
 BATCHES = [1, 2, 8]
 OUT_DTYPES = [torch.float16, torch.bfloat16]
@@ -173,6 +173,81 @@ def test_fp8_gemm_per_tensor(fp8_dtype, out_dtype, is_nt, batch, mnk_factors):
     )
 
     torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)
+
+
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
+@pytest.mark.parametrize("out_dtype", OUT_DTYPES)
+@pytest.mark.parametrize("is_nt", [True, False])
+@pytest.mark.parametrize("batch", [1])
+@pytest.mark.parametrize("mnk_factors", MINI_MNK_FACTORS)
+def test_fp8_gemm_out_arg_per_tensor(fp8_dtype, out_dtype, is_nt, batch,
+                                     mnk_factors):
+    seed = 1234
+    torch.manual_seed(seed)
+
+    m, n, k = mnk_factors
+
+    input = torch.randn(
+        [batch, m, k], dtype=out_dtype, device=torch.device("xpu")) / 10.0
+    weight = torch.randn([n, k], dtype=out_dtype).xpu() / 10.0
+
+    scale_src = torch.tensor(4.0).xpu()
+    scale_wei = torch.tensor(4.0).xpu()
+
+    input_fp8, _ = scaled_fp8_quant(input.reshape(-1, k),
+                                    scale_src,
+                                    fp8_dtype=fp8_dtype)
+    weight_fp8, _ = scaled_fp8_quant(weight, scale_wei, fp8_dtype=fp8_dtype)
+
+    weight_fp8 = weight_fp8.transpose(0, 1)
+    if is_nt:
+        weight_fp8 = weight_fp8.contiguous()
+
+    output = torch.empty((batch * m, n), dtype=out_dtype, device="xpu")
+    returned = fp8_gemm_out(output, input_fp8, weight_fp8, out_dtype,
+                            scale_src, scale_wei, torch.Tensor())
+
+    output_ref = fp8_gemm(input_fp8, weight_fp8, out_dtype, scale_src,
+                          scale_wei, torch.Tensor())
+    assert returned.data_ptr() == output.data_ptr()
+    torch.testing.assert_close(output, output_ref, atol=0, rtol=0)
+
+
+def test_fp8_gemm_out_arg_validates_out():
+    """`out` must match the expected result shape and dtype.
+
+    oneDNN derives `n` from `out.sizes()`, so an unvalidated `out` would
+    silently configure the matmul with the wrong problem size.
+    """
+    torch.manual_seed(1234)
+    out_dtype = torch.float16
+    m, n, k = 32, 64, 128
+
+    input = torch.randn([m, k], dtype=out_dtype, device="xpu") / 10.0
+    weight = torch.randn([n, k], dtype=out_dtype, device="xpu") / 10.0
+
+    scale_src = torch.tensor(4.0).xpu()
+    scale_wei = torch.tensor(4.0).xpu()
+
+    input_fp8, _ = scaled_fp8_quant(input, scale_src)
+    weight_fp8, _ = scaled_fp8_quant(weight, scale_wei)
+    weight_fp8 = weight_fp8.transpose(0, 1)
+
+    def run(out, dtype=out_dtype):
+        fp8_gemm_out(out, input_fp8, weight_fp8, dtype, scale_src, scale_wei,
+                     torch.Tensor())
+
+    with pytest.raises(RuntimeError, match="shape"):
+        run(torch.empty((m, n * 2), dtype=out_dtype, device="xpu"))
+
+    with pytest.raises(RuntimeError, match="shape"):
+        run(torch.empty((m, n, 1), dtype=out_dtype, device="xpu"))
+
+    with pytest.raises(RuntimeError, match="dtype"):
+        run(torch.empty((m, n), dtype=torch.bfloat16, device="xpu"))
+
+    with pytest.raises(RuntimeError, match="device"):
+        run(torch.empty((m, n), dtype=out_dtype, device="cpu"))
 
 
 @pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
