@@ -134,7 +134,7 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
         ssm_state=args["ssm_state"].clone(),
     )
 
-    intermediates_padded = torch.ops._xpu_C.causal_conv1d(
+    intermediates_padded = torch.ops._xpu_C.causal_conv1d_non_spec(
         z_padded,
         args_padded["projected_states_qkvz"],
         args_padded["projected_states_ba"],
@@ -154,16 +154,12 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
         non_spec_token_indx=None,
         non_spec_state_indices_tensor=args_padded[
             "non_spec_state_indices_tensor"],
-        spec_query_start_loc=None,
-        spec_token_indx=None,
-        spec_state_indices_tensor=None,
-        num_accepted_tokens=None,
         num_actual_tokens=args_padded["num_actual_tokens"],
         tp_size=args_padded["tp_size"],
         reorder_input=args_padded["reorder_input"],
     )
 
-    torch.ops._xpu_C.gated_delta_rule(
+    torch.ops._xpu_C.gated_delta_rule_non_spec(
         core_attn_out_padded,
         *intermediates_padded,
         args_padded["num_v_heads"],
@@ -179,10 +175,6 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
         non_spec_token_indx=None,
         non_spec_state_indices_tensor=args_padded[
             "non_spec_state_indices_tensor"],
-        spec_query_start_loc=None,
-        spec_token_indx=None,
-        spec_state_indices_tensor=None,
-        num_accepted_tokens=None,
         num_actual_tokens=args_padded["num_actual_tokens"],
         tp_size=args_padded["tp_size"],
     )
@@ -196,7 +188,7 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
                                     dtype=dtype, device=device)
     z_ref = torch.empty_like(core_attn_out_ref)
 
-    intermediates_ref = torch.ops._xpu_C.causal_conv1d(
+    intermediates_ref = torch.ops._xpu_C.causal_conv1d_non_spec(
         z_ref,
         args["projected_states_qkvz"][:num_actual_tokens].contiguous(),
         args["projected_states_ba"][:num_actual_tokens].contiguous(),
@@ -215,16 +207,12 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
         non_spec_query_start_loc=args["non_spec_query_start_loc"],
         non_spec_token_indx=None,
         non_spec_state_indices_tensor=args["non_spec_state_indices_tensor"],
-        spec_query_start_loc=None,
-        spec_token_indx=None,
-        spec_state_indices_tensor=None,
-        num_accepted_tokens=None,
         num_actual_tokens=args["num_actual_tokens"],
         tp_size=args["tp_size"],
         reorder_input=args["reorder_input"],
     )
 
-    torch.ops._xpu_C.gated_delta_rule(
+    torch.ops._xpu_C.gated_delta_rule_non_spec(
         core_attn_out_ref,
         *intermediates_ref,
         args["num_v_heads"],
@@ -239,10 +227,6 @@ def test_gdn_attention_accepts_padded_leading_dim(num_actual_tokens,
         non_spec_query_start_loc=args["non_spec_query_start_loc"],
         non_spec_token_indx=None,
         non_spec_state_indices_tensor=args["non_spec_state_indices_tensor"],
-        spec_query_start_loc=None,
-        spec_token_indx=None,
-        spec_state_indices_tensor=None,
-        num_accepted_tokens=None,
         num_actual_tokens=args["num_actual_tokens"],
         tp_size=args["tp_size"],
     )
