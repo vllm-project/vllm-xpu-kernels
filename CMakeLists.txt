@@ -532,6 +532,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/cache.cpp"
       "csrc/layernorm.cpp"
       "csrc/layernorm_quant.cpp"
+      "csrc/fused_input_norm.cpp"
       "csrc/activation.cpp"
       "csrc/pos_encoding_kernels.cpp"
       "csrc/fused_qknorm_rope.cpp"
