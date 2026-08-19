@@ -339,8 +339,10 @@ class MhcPreStage1VectorFunctor {
   static constexpr int NUM_REDUCE_VALUES = BLOCK_N + 1;
   static constexpr int SCRATCH_PER_SG = BLOCK_M * NUM_REDUCE_VALUES;
   static constexpr int SCRATCH_FLOATS = NUM_SG * SCRATCH_PER_SG;
-  static_assert(SCRATCH_PER_SG <= WG_SIZE, "final reduce needs one thread per "
-                                           "reduced value");
+  static_assert(
+      SCRATCH_PER_SG <= WG_SIZE,
+      "final reduce needs one thread per "
+      "reduced value");
 
   struct Params {
     const bf16* residual;
@@ -987,8 +989,7 @@ void launch_mhc_pre_stage1_vector(
   F::Params params{
       residual, fn, ws_c, ws_sqr, N, H, k_size, n_splits, M_padded};
 
-  const int smem_size =
-      static_cast<int>(F::SCRATCH_FLOATS * sizeof(float));
+  const int smem_size = static_cast<int>(F::SCRATCH_FLOATS * sizeof(float));
 
   const auto sycl_block = compat::dim3(1, F::WG_SIZE, 1);
   const auto sycl_grid = compat::dim3(
