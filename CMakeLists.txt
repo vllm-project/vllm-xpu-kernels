@@ -31,7 +31,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
 #
-set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
+set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12" "3.13" "3.14")
 
 # Supported Intel GPU architectures.
 set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
