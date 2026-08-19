@@ -32,10 +32,12 @@ void decode_policy_dispatch_func(
   constexpr bool Sink = flags[2];
 
   // Extract policy parameters at compile time.
-  // ShapeOut = Shape<q_packed, head_dim>, ShapeQK = Shape<q_packed, kv_tile,
-  // ...>
+  // ShapeOut = Shape<q_packed, v_tile>, ShapeQK = Shape<q_packed, kv_tile,
+  // ...>. ShapeOut's V-dim may be smaller than the policy's head-size bucket
+  // (see decode_shapeout_v), so report HeadDim -- that is what the config
+  // file keys on.
   constexpr int _qgroup = cute::size<0>(typename decode_policy::ShapeOut{});
-  constexpr int _head_sz = cute::size<1>(typename decode_policy::ShapeOut{});
+  constexpr int _head_sz = decode_policy::HeadDim::value;
   constexpr int _page_sz = cute::size<1>(typename decode_policy::ShapeQK{});
 
   if constexpr (!is_decode_policy_enabled<decode_policy>::value) {
