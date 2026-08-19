@@ -116,7 +116,7 @@ jobs:
           git submodule sync && git submodule update --init --recursive
           uv pip install -r requirements.txt
           rm -rf dist/*
-          MAX_JOBS=128 uv build --no-build-isolation --wheel -v
+          uv build --no-build-isolation --wheel -v
           ccache -s || true
 
       - name: print wheel size
@@ -169,7 +169,7 @@ jobs:
           VLLM_CHUNK_PREFILL_CONFIG=chunk_prefill_default.conf \
           VLLM_PAGED_DECODE_CONFIG=paged_decode_default.conf \
           VLLM_VERSION_OVERRIDE="$(git describe --tags --long --match 'v*' 2>/dev/null | sed 's/^v//' || echo '0.0.0.dev0')" \
-          MAX_JOBS=128 uv build --no-build-isolation --wheel -v
+          uv build --no-build-isolation --wheel -v
           ccache -s || true
 
       - name: print wheel size
