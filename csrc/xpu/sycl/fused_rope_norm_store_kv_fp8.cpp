@@ -60,8 +60,8 @@ class fused_rope_norm_store_kv_fp8_kernel {
       const float* __restrict__ q_norm_weight,
       const float* __restrict__ k_norm_weight,
       const int qk_norm_policy,
-      const float k_scale,
-      const float v_scale,
+      const float* __restrict__ k_scale,
+      const float* __restrict__ v_scale,
       const int block_size,
       const int64_t kv_page_stride,
       const int64_t kv_seq_stride,
@@ -216,7 +216,7 @@ class fused_rope_norm_store_kv_fp8_kernel {
 
       // Write K to cache.
       if (valid_slot) {
-        store_kv_to_cache(lane, elems, k_cache_, cache_offset, k_scale_);
+        store_kv_to_cache(lane, elems, k_cache_, cache_offset, *k_scale_);
       }
     }
 
@@ -233,7 +233,7 @@ class fused_rope_norm_store_kv_fp8_kernel {
       }
 
       if (valid_slot) {
-        store_kv_to_cache(lane, elems, v_cache_, cache_offset, v_scale_);
+        store_kv_to_cache(lane, elems, v_cache_, cache_offset, *v_scale_);
       }
     }
   }
@@ -370,8 +370,8 @@ class fused_rope_norm_store_kv_fp8_kernel {
   const float* __restrict__ q_norm_weight_;
   const float* __restrict__ k_norm_weight_;
   const int qk_norm_policy_;
-  const float k_scale_;
-  const float v_scale_;
+  const float* __restrict__ k_scale_;
+  const float* __restrict__ v_scale_;
   const int block_size_;
   const int64_t kv_page_stride_;
   const int64_t kv_seq_stride_;
@@ -392,8 +392,8 @@ void launch_fused_rope_norm_store_kv_fp8(
     int num_q_heads,
     int num_kv_heads,
     int head_dim,
-    float k_scale,
-    float v_scale,
+    const float* k_scale,
+    const float* v_scale,
     const float* q_norm_weight_ptr,
     const float* k_norm_weight_ptr,
     int qk_norm_policy,
@@ -535,8 +535,8 @@ torch::Tensor fused_rope_norm_store_kv_fp8(
       {num_tokens, num_q_heads},
       torch::TensorOptions().dtype(torch::kFloat32).device(qkv.device()));
 
-  float k_scale_val = k_scale.item<float>();
-  float v_scale_val = v_scale.item<float>();
+  const float* k_scale_ptr = k_scale.data_ptr<float>();
+  const float* v_scale_ptr = v_scale.data_ptr<float>();
 
   const float* q_norm_ptr = nullptr;
   const float* k_norm_ptr = nullptr;
@@ -561,8 +561,8 @@ torch::Tensor fused_rope_norm_store_kv_fp8(
             static_cast<int>(num_q_heads),
             static_cast<int>(num_kv_heads),
             static_cast<int>(head_dim),
-            k_scale_val,
-            v_scale_val,
+            k_scale_ptr,
+            v_scale_ptr,
             q_norm_ptr,
             k_norm_ptr,
             static_cast<int>(qk_norm_policy),
