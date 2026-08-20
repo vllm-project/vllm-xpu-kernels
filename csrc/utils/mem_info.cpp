@@ -6,7 +6,20 @@
 #include <iostream>
 #include <limits>
 #include <tuple>
-#ifdef VLLM_XPU_HAS_ZE_USABLEMEM
+
+namespace {
+
+// Level Zero headers predating the device-usablemem-size-properties extension
+// declare neither of these, which is a compile error rather than something a
+// runtime check can guard, so spell out the spec-fixed stype and layout here.
+constexpr auto kUsableMemStype = static_cast<ze_structure_type_t>(0x00020041);
+
+struct UsableMemProps {
+  ze_structure_type_t stype;
+  void* pNext;
+  uint64_t currUsableMemSize;
+};
+
 size_t getTotalMemory(ze_device_handle_t& device) {
   uint32_t memoryCount = 0;
   zeDeviceGetMemoryProperties(device, &memoryCount, nullptr);
@@ -25,36 +38,39 @@ size_t getTotalMemory(ze_device_handle_t& device) {
   return totalMemory;
 }
 
+// Zero means the extension is unavailable: a driver that does not implement it
+// ignores the unrecognized pNext and still reports success, leaving the
+// zero-initialized field untouched.
 size_t getUsableMemory(ze_device_handle_t& device) {
   ze_device_properties_t deviceProperties{};
-  ze_device_usablemem_size_ext_properties_t usableMemProps{};
+  UsableMemProps usableMemProps{};
 
-  usableMemProps.stype = ZE_STRUCTURE_TYPE_DEVICE_USABLEMEM_SIZE_EXT_PROPERTIES;
+  usableMemProps.stype = kUsableMemStype;
   deviceProperties.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
   deviceProperties.pNext = &usableMemProps;
 
-  zeDeviceGetProperties(device, &deviceProperties);
+  if (zeDeviceGetProperties(device, &deviceProperties) != ZE_RESULT_SUCCESS) {
+    return 0;
+  }
   return usableMemProps.currUsableMemSize;
 }
-#endif
+
+}  // namespace
 
 std::tuple<int64_t, int64_t> getMemoryInfo(int64_t device_index) {
-#ifdef VLLM_XPU_HAS_ZE_USABLEMEM
   const auto& device =
       c10::xpu::get_raw_device(static_cast<c10::DeviceIndex>(device_index));
   auto level_zero_device =
       sycl::get_native<sycl::backend::ext_oneapi_level_zero>(device);
-  const size_t free = getUsableMemory(level_zero_device);
-  const size_t total = getTotalMemory(level_zero_device);
-#else
-  // Level Zero loader < 1.27.0: the device-usablemem-size extension is not
-  // available in the headers. Defer to PyTorch's XPU caching allocator, which
-  // reports {free, total} and raises a descriptive error if the device cannot
-  // report free memory.
-  const auto [free, total] =
-      c10::xpu::XPUCachingAllocator::get()->getMemoryInfo(
-          static_cast<c10::DeviceIndex>(device_index));
-#endif
+
+  size_t free = getUsableMemory(level_zero_device);
+  size_t total = 0;
+  if (free == 0) {
+    std::tie(free, total) = c10::xpu::XPUCachingAllocator::get()->getMemoryInfo(
+        static_cast<c10::DeviceIndex>(device_index));
+  } else {
+    total = getTotalMemory(level_zero_device);
+  }
 
   if (total > static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
       free > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
