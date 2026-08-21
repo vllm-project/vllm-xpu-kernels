@@ -4,14 +4,11 @@
 #include <sycl/sycl.hpp>
 
 #include <iostream>
-#include <limits>
-#include <tuple>
-
-namespace {
 
 // Level Zero headers predating the device-usablemem-size-properties extension
 // declare neither of these, which is a compile error rather than something a
 // runtime check can guard, so spell out the spec-fixed stype and layout here.
+namespace {
 constexpr auto kUsableMemStype = static_cast<ze_structure_type_t>(0x00020041);
 
 struct UsableMemProps {
@@ -19,6 +16,7 @@ struct UsableMemProps {
   void* pNext;
   uint64_t currUsableMemSize;
 };
+}  // namespace
 
 size_t getTotalMemory(ze_device_handle_t& device) {
   uint32_t memoryCount = 0;
@@ -54,8 +52,6 @@ size_t getUsableMemory(ze_device_handle_t& device) {
   }
   return usableMemProps.currUsableMemSize;
 }
-
-}  // namespace
 
 std::tuple<int64_t, int64_t> getMemoryInfo(int64_t device_index) {
   const auto& device =
