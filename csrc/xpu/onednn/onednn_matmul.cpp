@@ -4,6 +4,7 @@
 #include "fp8_gemm_w8a16.h"
 #include "int4_gemm_w4a16.h"
 #include "int4_gemm_w4a8.h"
+#include "int8_gemm_w8a16.h"
 
 inline bool is_supported_fp8(at::ScalarType t) {
   return (t == at::ScalarType::Float8_e5m2) ||
@@ -272,6 +273,30 @@ torch::Tensor int4_gemm_w4a16(
   torch::Tensor result = check_and_create_output_tensor(A, B, A.scalar_type());
 
   oneDNN::dnnl_matmul_w4a16_int4(result, A, B, bias, B_scale, B_zp, group_size);
+  return result;
+}
+
+torch::Tensor int8_gemm_w8a16(
+    const torch::Tensor& A,  // src, [b, m, k] bf16/f16
+    const torch::Tensor& B,  // quantized weight, [k, n] s8
+    const std::optional<torch::Tensor>& bias,
+    const torch::Tensor& B_scale,  // [k/group_size, n] bf16
+    int64_t group_size) {
+  const at::DeviceGuard device_guard(A.device());
+
+  TORCH_CHECK(
+      B_scale.is_contiguous(), "B_scale must be contiguous for int8 matmul");
+  TORCH_CHECK(
+      B.scalar_type() == at::ScalarType::Char,
+      "weight must be int8 (s8) for int8 matmul");
+  TORCH_CHECK(
+      A.scalar_type() == at::ScalarType::BFloat16 ||
+          A.scalar_type() == at::ScalarType::Half,
+      "input must be bfloat16 or float16 for int8 matmul");
+
+  torch::Tensor result = check_and_create_output_tensor(A, B, A.scalar_type());
+
+  oneDNN::dnnl_matmul_w8a16_int8(result, A, B, bias, B_scale, group_size);
   return result;
 }
 
