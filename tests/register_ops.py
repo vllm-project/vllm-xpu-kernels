@@ -25,8 +25,7 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 
 def gemma_rms_norm(out: torch.Tensor, input: torch.Tensor,
                    weight: torch.Tensor, epsilon: float) -> None:
-    input_contiguous = input.contiguous()
-    torch.ops._C.gemma_rms_norm(out, input_contiguous, weight, epsilon)
+    torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
 
 
 def fused_add_gemma_rms_norm(input: torch.Tensor, residual: torch.Tensor,
