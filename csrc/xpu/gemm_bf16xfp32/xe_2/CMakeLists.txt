@@ -1,0 +1,3 @@
+cmake_minimum_required(VERSION 3.18)
+
+add_xe2_kernel_library(gemm_bf16xfp32_xe_2 INCLUDE_CMAKE_SOURCE_DIR)
