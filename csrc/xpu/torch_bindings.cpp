@@ -291,6 +291,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "deepseek_fused_indexer_q_rope_mxfp4",
       torch::kXPU,
       &deepseek_fused_indexer_q_rope_mxfp4);
+
+  xpu_ops.def(
+      "fused_input_norm(Tensor! out, Tensor input, Tensor weight, "
+      "Tensor bias) -> ()");
+  xpu_ops.impl("fused_input_norm", torch::kXPU, &fused_input_norm);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

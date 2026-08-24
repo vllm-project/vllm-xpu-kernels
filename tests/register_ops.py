@@ -25,7 +25,7 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 
 def fused_input_norm(out: torch.Tensor, input: torch.Tensor,
                      weight: torch.Tensor, bias: torch.Tensor) -> None:
-    torch.ops._C.fused_input_norm(out, input, weight, bias)
+    torch.ops._xpu_C.fused_input_norm(out, input, weight, bias)
 
 
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:

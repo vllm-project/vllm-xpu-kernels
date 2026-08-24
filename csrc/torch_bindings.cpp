@@ -35,14 +35,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 
-  // Fused image rescale + normalize (per-channel affine) for multimodal
-  // preprocessing. out = input.to(float) * weight[c] + bias[c], cast to
-  // out.dtype. Replaces the fp32 batch_norm path of FusedInputNorm on XPU.
-  ops.def(
-      "fused_input_norm(Tensor! out, Tensor input, Tensor weight, "
-      "Tensor bias) -> ()");
-  ops.impl("fused_input_norm", torch::kXPU, &fused_input_norm);
-
   // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8).
   ops.def(
       "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "

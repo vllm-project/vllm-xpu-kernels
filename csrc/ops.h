@@ -17,14 +17,6 @@ void fused_add_rms_norm(
     std::optional<torch::Tensor> weight,
     double epsilon);
 
-// Fused image rescale + normalize (per-channel affine) for multimodal
-// preprocessing. Replaces the fp32 batch_norm path of FusedInputNorm.
-void fused_input_norm(
-    torch::Tensor& out,
-    torch::Tensor& input,
-    torch::Tensor& weight,
-    torch::Tensor& bias);
-
 // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8 output).
 void rms_norm_dynamic_per_token_quant(
     torch::Tensor& out,

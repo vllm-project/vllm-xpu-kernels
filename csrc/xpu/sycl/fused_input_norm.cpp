@@ -132,9 +132,12 @@ void fused_input_norm(
   TORCH_CHECK(
       input.is_contiguous() && out.is_contiguous(),
       "fused_input_norm: input and out must be contiguous");
-  TORCH_CHECK(weight.is_contiguous() && bias.is_contiguous());
+  TORCH_CHECK(
+      weight.is_contiguous() && bias.is_contiguous(),
+      "fused_input_norm: weight and bias must be contiguous");
 
   const int channel = weight.numel();
+  TORCH_CHECK(channel > 0, "fused_input_norm: weight must be non-empty");
   TORCH_CHECK(
       bias.numel() == channel,
       "fused_input_norm: weight and bias must have the same length");

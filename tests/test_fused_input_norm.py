@@ -97,4 +97,4 @@ def test_fused_input_norm(
         atol, rtol = 1e-2, 1e-2
     torch.testing.assert_close(out, ref_out, atol=atol, rtol=rtol)
 
-    opcheck(torch.ops._C.fused_input_norm, (out, x, weight, bias))
+    opcheck(torch.ops._xpu_C.fused_input_norm, (out, x, weight, bias))
