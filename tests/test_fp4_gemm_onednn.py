@@ -4,7 +4,12 @@ import torch
 
 from tests.ops.mx_utils import (FP4_EBITS, FP4_MBITS, _floatx_unpacked_to_f32,
                                 from_blocked_format, to_mxfp, unpack_uint4)
-from tests.register_ops import fp4_gemm
+from tests.register_ops import fp4_gemm, onednn_available
+
+pytestmark = pytest.mark.skipif(
+    not onednn_available(),
+    reason="oneDNN kernels are not built "
+    "(rebuild with VLLM_XPU_ENABLE_ONEDNN=ON)")
 
 OUT_DTYPES = [torch.float16, torch.bfloat16]
 MNK_FACTORS = [
