@@ -5,19 +5,6 @@
 
 #include <iostream>
 
-// Level Zero headers predating the device-usablemem-size-properties extension
-// declare neither of these, which is a compile error rather than something a
-// runtime check can guard, so spell out the spec-fixed stype and layout here.
-namespace {
-constexpr auto kUsableMemStype = static_cast<ze_structure_type_t>(0x00020041);
-
-struct UsableMemProps {
-  ze_structure_type_t stype;
-  void* pNext;
-  uint64_t currUsableMemSize;
-};
-}  // namespace
-
 size_t getTotalMemory(ze_device_handle_t& device) {
   uint32_t memoryCount = 0;
   zeDeviceGetMemoryProperties(device, &memoryCount, nullptr);
@@ -36,21 +23,22 @@ size_t getTotalMemory(ze_device_handle_t& device) {
   return totalMemory;
 }
 
-// Zero means the extension is unavailable: a driver that does not implement it
-// ignores the unrecognized pNext and still reports success, leaving the
-// zero-initialized field untouched.
+// A driver that does not implement the extension leaves the zero-initialized
+// size untouched and still returns success, so zero means unavailable.
 size_t getUsableMemory(ze_device_handle_t& device) {
+#ifdef ZE_DEVICE_USABLEMEM_SIZE_PROPERTIES_EXT_NAME
   ze_device_properties_t deviceProperties{};
-  UsableMemProps usableMemProps{};
+  ze_device_usablemem_size_ext_properties_t usableMemProps{};
 
-  usableMemProps.stype = kUsableMemStype;
+  usableMemProps.stype = ZE_STRUCTURE_TYPE_DEVICE_USABLEMEM_SIZE_EXT_PROPERTIES;
   deviceProperties.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
   deviceProperties.pNext = &usableMemProps;
 
-  if (zeDeviceGetProperties(device, &deviceProperties) != ZE_RESULT_SUCCESS) {
-    return 0;
-  }
+  zeDeviceGetProperties(device, &deviceProperties);
   return usableMemProps.currUsableMemSize;
+#else
+  return 0;
+#endif
 }
 
 std::tuple<int64_t, int64_t> getMemoryInfo(int64_t device_index) {
