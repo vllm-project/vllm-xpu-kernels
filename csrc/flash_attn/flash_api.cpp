@@ -93,9 +93,9 @@ inline int get_num_splits(
 }
 
 std::vector<at::Tensor> mha_varlen_fwd(
-    const at::Tensor& q,
-    const at::Tensor& k,
-    const at::Tensor& v,
+    const at::Tensor& q_in,
+    const at::Tensor& k_in,
+    const at::Tensor& v_in,
     std::optional<at::Tensor>& out_,
     const at::Tensor& cu_seqlens_q,  // b+1
     const at::Tensor& cu_seqlens_k,  // b+1
@@ -122,6 +122,24 @@ std::vector<at::Tensor> mha_varlen_fwd(
     bool mix_batch,
     std::optional<at::Tensor>& splits_per_seq,
     std::optional<at::Tensor>& work_list) {
+  // --- Xe2 head-dim alignment padding --------------------------------------
+  const int64_t elem_size = q_in.element_size();
+  auto head_pad_for = [&](int64_t head_size) -> int64_t {
+    const int64_t rem = (head_size * elem_size) % 16;
+    return rem == 0 ? 0 : (16 - rem) / elem_size;
+  };
+  const int64_t orig_qk_head = q_in.size(-1);
+  const int64_t orig_v_head = v_in.size(-1);
+  const int64_t qk_pad = head_pad_for(orig_qk_head);
+  const int64_t v_pad = head_pad_for(orig_v_head);
+  const bool head_padded = (qk_pad > 0) || (v_pad > 0);
+  at::Tensor q = qk_pad > 0 ? at::constant_pad_nd(q_in, {0, qk_pad}) : q_in;
+  at::Tensor k = qk_pad > 0 ? at::constant_pad_nd(k_in, {0, qk_pad}) : k_in;
+  at::Tensor v = v_pad > 0 ? at::constant_pad_nd(v_in, {0, v_pad}) : v_in;
+  std::optional<at::Tensor> caller_out = out_;
+  if (head_padded) {
+    out_ = std::nullopt;
+  }
   auto q_type = q.scalar_type();
   auto k_type = k.scalar_type();
   TORCH_CHECK(
@@ -427,6 +445,17 @@ std::vector<at::Tensor> mha_varlen_fwd(
         no_mask,
         splits_per_seq,
         work_list);
+  }
+
+  if (head_padded) {
+    // Slice the padded output back to the original V head dim.
+    out = out.slice(-1, 0, orig_v_head);
+    if (caller_out.has_value()) {
+      caller_out->copy_(out);
+      out = *caller_out;
+    } else {
+      out = out.contiguous();
+    }
   }
 
   if (return_softmax) {
