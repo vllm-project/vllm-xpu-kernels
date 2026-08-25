@@ -554,11 +554,20 @@ def test_causal_conv1d_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                       device=device)
     # Sliding-window layout: state_len = (width-1) + num_spec rows per line.
     state_len = (width - 1) + num_spec
-    conv_state = torch.randn(cache_batch_size,
-                             state_len,
-                             mixed_qkv_size,
-                             dtype=dtype,
-                             device=device)
+    # vLLM stores every layer in one allocation and passes a per-layer view.
+    # Keep one extra cache line so a stride-derived state length corrupts only
+    # the guard storage instead of writing past the allocation.
+    num_layers = 3
+    layer_idx = 1
+    conv_state_storage = torch.randn(cache_batch_size + 1,
+                                     num_layers,
+                                     state_len,
+                                     mixed_qkv_size,
+                                     dtype=dtype,
+                                     device=device)
+    conv_state = conv_state_storage[:cache_batch_size, layer_idx]
+    assert conv_state.stride(0) != state_len * mixed_qkv_size
+    neighbor_states = conv_state_storage[:, (0, 2)].clone()
     ref_conv_state = conv_state.clone()
     conv_weights = torch.randn(mixed_qkv_size,
                                width,
@@ -642,6 +651,12 @@ def test_causal_conv1d_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
     rtol = 5e-2
 
     torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
+
+    # The kernel must not overwrite adjacent layers in the shared allocation.
+    torch.testing.assert_close(conv_state_storage[:, (0, 2)],
+                               neighbor_states,
+                               atol=0,
+                               rtol=0)
 
     # Conv writes back to column 0; assert that slot.
     for n in range(num_spec_decodes):

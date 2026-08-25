@@ -261,7 +261,9 @@ def _make_spec_inputs(shape: GdnShape, workload: Workload, dtype):
     projected_states_ba = torch.randn(
         (num_actual_tokens, mixed_ba_size), dtype=dtype, device=DEVICE)
     conv_state = torch.randn(
-        (cache_batch_size, width - 1, mixed_qkv_size),
+        (cache_batch_size,
+         width - 1 + num_spec_tokens,
+         mixed_qkv_size),
         dtype=dtype, device=DEVICE)
     ssm_state = torch.randn(
         (cache_batch_size, num_v_heads // tp_size, head_v_dim, head_k_dim),
@@ -356,6 +358,7 @@ def estimate_bytes_moved(kwargs):
     ba_per_tok = nk * (2 * nv // nk)
     qkv_per_tok = nk * (2 * hk + hv * nv // nk)
     out_per_tok = nv * hv
+    conv_state_len = kwargs["conv_state"].shape[1]
 
     batch = max(1,
                 kwargs["num_prefills"] + kwargs["num_decodes"]
@@ -363,7 +366,7 @@ def estimate_bytes_moved(kwargs):
 
     bytes_in = n_tok * (qkvz_per_tok + ba_per_tok) * bpe_in
     bytes_out = n_tok * (out_per_tok * 2) * bpe_out     # core_attn_out + z
-    bytes_conv_state = batch * (width - 1) * qkv_per_tok * bpe_in * 2  # RW
+    bytes_conv_state = batch * conv_state_len * qkv_per_tok * bpe_in * 2
     bytes_ssm_state = batch * nv * hk * hv * bpe_ssm * 2              # RW
     bytes_weights = qkv_per_tok * width * bpe_in + qkv_per_tok * bpe_in
 
