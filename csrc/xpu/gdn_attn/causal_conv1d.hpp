@@ -674,7 +674,10 @@ struct causal_conv1d_spec_kernel {
     // Single cache line (column 0); accepted window starts at row init_row.
     int init_row = num_accepted_tokens[batch_id] - 1;
     if (init_row < 0) init_row = 0;
-    const int state_len = conv_states_stride_0 / conv_elems;
+    // Match the effective state length used by the CUDA/Triton path.  The
+    // leading stride may span interleaved states from multiple layers, so it
+    // cannot be used to recover this dimension.
+    const int state_len = Width - 1 + (num_spec_tokens - 1);
     const int state_id = cache_indices[batch_id * cache_indices_stride_0 + 0];
     const bool has_conv_state = (state_id != pad_slot_id);
     T* state_line_ptr = has_conv_state
