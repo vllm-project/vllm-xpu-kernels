@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from tests.ops.layernorm_op import RMSNorm
+from tests.ops.layernorm_op import GemmaRMSNorm, RMSNorm
 from tests.utils import opcheck
 
 DTYPES = [torch.half, torch.bfloat16]
@@ -125,3 +125,53 @@ def test_rms_norm_uncontigous(
         torch.ops._C.rms_norm,
         (out, q_by_head, layer.weight.data, layer.variance_epsilon),
     )
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@pytest.mark.parametrize("strided_input", [False, True])
+@torch.inference_mode()
+def test_gemma_rms_norm(
+    num_tokens: int,
+    hidden_size: int,
+    add_residual: bool,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    strided_input: bool,
+) -> None:
+    torch.manual_seed(seed)
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
+    layer = GemmaRMSNorm(hidden_size).to(dtype=dtype)
+    # Gemma weight is zero-centered; use a small spread around 0.
+    layer.weight.data.normal_(mean=0.0, std=0.1)
+    scale = 1 / (2 * hidden_size)
+    last_dim = 2 * hidden_size if strided_input else hidden_size
+    x = torch.randn(num_tokens, last_dim, dtype=dtype)
+    x = x[..., :hidden_size]
+    if num_tokens > 1:
+        assert x.is_contiguous() != strided_input
+    x *= scale
+    residual = torch.randn_like(x) * scale if add_residual else None
+
+    # NOTE: reference runs first because the fused kernel is in-place.
+    ref_out = layer.forward_native(x, residual)
+    out = layer(x, residual)
+    if add_residual:
+        torch.testing.assert_close(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
+    else:
+        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+    weight = layer.weight.data
+    if residual is not None:
+        opcheck(torch.ops._C.fused_add_gemma_rms_norm,
+                (x, residual, weight, layer.variance_epsilon))
+    else:
+        opcheck(torch.ops._C.gemma_rms_norm,
+                (out, x, weight, layer.variance_epsilon))

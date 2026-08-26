@@ -24,7 +24,8 @@ class rms_norm_kernel {
       const float epsilon_,
       const int num_tokens_,
       const int hidden_size_,
-      sycl::local_accessor<float, 1> s_variance_)
+      sycl::local_accessor<float, 1> s_variance_,
+      const float weight_bias_ = 0.0f)
       : out(out_),
         input(input_),
         input_stride_d2(input_stride_d2_),
@@ -36,6 +37,7 @@ class rms_norm_kernel {
         epsilon(epsilon_),
         num_tokens(num_tokens_),
         hidden_size(hidden_size_),
+        weight_bias(weight_bias_),
         s_variance(s_variance_) {}
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
@@ -110,8 +112,9 @@ class rms_norm_kernel {
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(src1.val[j]);
         if constexpr (HasWeight) {
-          float w = static_cast<float>(src2.val[j]);
-          dst.val[j] = static_cast<scalar_t>(x * s_variance_val * w);
+          dst.val[j] = static_cast<scalar_t>(
+              x * s_variance_val *
+              (static_cast<float>(src2.val[j]) + weight_bias));
         } else {
           dst.val[j] = static_cast<scalar_t>(x * s_variance_val);
         }
@@ -132,6 +135,7 @@ class rms_norm_kernel {
   const float epsilon;
   const int num_tokens;
   const int hidden_size;
+  const float weight_bias;
   sycl::local_accessor<float, 1> s_variance;
 };
 
@@ -150,7 +154,8 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
       const float epsilon_,
       const int num_tokens_,
       const int hidden_size_,
-      sycl::local_accessor<float, 1> s_variance_)
+      sycl::local_accessor<float, 1> s_variance_,
+      const float weight_bias_ = 0.0f)
       : out(out_),
         input(input_),
         input_stride_d2(input_stride_d2_),
@@ -162,6 +167,7 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
         epsilon(epsilon_),
         num_tokens(num_tokens_),
         hidden_size(hidden_size_),
+        weight_bias(weight_bias_),
         s_variance(s_variance_) {}
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
@@ -216,11 +222,12 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
          idx += item_ct1.get_local_range(2)) {
       float x = (float)input_row[idx];
+      float inv_rms = *s_variance_ptr;
       if constexpr (HasWeight) {
-        float w = static_cast<float>(weight[idx]);
-        out_row[idx] = static_cast<scalar_t>(x * (*s_variance_ptr) * w);
+        out_row[idx] = static_cast<scalar_t>(
+            x * inv_rms * (static_cast<float>(weight[idx]) + weight_bias));
       } else {
-        out_row[idx] = static_cast<scalar_t>(x * (*s_variance_ptr));
+        out_row[idx] = static_cast<scalar_t>(x * inv_rms);
       }
     }
   }
@@ -237,6 +244,7 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
   const float epsilon;
   const int num_tokens;
   const int hidden_size;
+  const float weight_bias;
   sycl::local_accessor<float, 1> s_variance;
 };
 
@@ -264,7 +272,8 @@ class rms_norm_multi_row_kernel {
       const float epsilon_,
       const int num_tokens_,
       const int hidden_size_,
-      sycl::local_accessor<float, 1> s_variance_)
+      sycl::local_accessor<float, 1> s_variance_,
+      const float weight_bias_ = 0.0f)
       : out(out_),
         input(input_),
         input_stride_d2(input_stride_d2_),
@@ -276,6 +285,7 @@ class rms_norm_multi_row_kernel {
         epsilon(epsilon_),
         num_tokens(num_tokens_),
         hidden_size(hidden_size_),
+        weight_bias(weight_bias_),
         s_variance(s_variance_) {}
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
@@ -364,8 +374,8 @@ class rms_norm_multi_row_kernel {
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(src1.val[j]);
         if constexpr (HasWeight) {
-          float w = static_cast<float>(src2.val[j]);
-          dst.val[j] = static_cast<scalar_t>(x * s_var * w);
+          dst.val[j] = static_cast<scalar_t>(
+              x * s_var * (static_cast<float>(src2.val[j]) + weight_bias));
         } else {
           dst.val[j] = static_cast<scalar_t>(x * s_var);
         }
@@ -386,6 +396,7 @@ class rms_norm_multi_row_kernel {
   const float epsilon;
   const int num_tokens;
   const int hidden_size;
+  const float weight_bias;
   sycl::local_accessor<float, 1> s_variance;
 };
 
@@ -394,7 +405,8 @@ void call_rms_norm_kernel(
     torch::Tensor& out,
     torch::Tensor& input,
     const scalar_t* weight_ptr,
-    float epsilon) {
+    float epsilon,
+    float weight_bias = 0.0f) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -472,7 +484,8 @@ void call_rms_norm_kernel(
                   epsilon,
                   num_tokens,
                   hidden_size,
-                  s_variance));
+                  s_variance,
+                  weight_bias));
         });
       });
       return;
@@ -497,7 +510,8 @@ void call_rms_norm_kernel(
                 epsilon,
                 num_tokens,
                 hidden_size,
-                s_variance));
+                s_variance,
+                weight_bias));
       });
     });
   } else {
@@ -520,7 +534,8 @@ void call_rms_norm_kernel(
                 epsilon,
                 num_tokens,
                 hidden_size,
-                s_variance));
+                s_variance,
+                weight_bias));
       });
     });
   }
@@ -537,7 +552,8 @@ class fused_add_rms_norm_kernel {
       const float epsilon_,
       const int num_tokens_,
       const int hidden_size_,
-      sycl::local_accessor<float, 1> s_variance_)
+      sycl::local_accessor<float, 1> s_variance_,
+      const float weight_bias_ = 0.0f)
       : input(input_),
         residual(residual_),
         input_stride(input_stride_),
@@ -545,6 +561,7 @@ class fused_add_rms_norm_kernel {
         epsilon(epsilon_),
         num_tokens(num_tokens_),
         hidden_size(hidden_size_),
+        weight_bias(weight_bias_),
         s_variance(s_variance_) {}
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
@@ -603,8 +620,8 @@ class fused_add_rms_norm_kernel {
       for (int i = 0; i < width; i++) {
         float x = static_cast<float>(res.val[i]);
         if constexpr (HasWeight) {
-          float wf = static_cast<float>(w.val[i]);
-          out.val[i] = static_cast<scalar_t>(x * s_var * wf);
+          out.val[i] = static_cast<scalar_t>(
+              x * s_var * (static_cast<float>(w.val[i]) + weight_bias));
         } else {
           out.val[i] = static_cast<scalar_t>(x * s_var);
         }
@@ -621,6 +638,7 @@ class fused_add_rms_norm_kernel {
   const float epsilon;
   const int num_tokens;
   const int hidden_size;
+  const float weight_bias;
   sycl::local_accessor<float, 1> s_variance;  // local memory for variance
 };
 
@@ -635,7 +653,8 @@ class fused_add_rms_norm_kernel<scalar_t, 0, HasWeight> {
       const float epsilon_,
       const int num_tokens_,
       const int hidden_size_,
-      sycl::local_accessor<float, 1> s_variance_)
+      sycl::local_accessor<float, 1> s_variance_,
+      const float weight_bias_ = 0.0f)
       : input(input_),
         residual(residual_),
         input_stride(input_stride_),
@@ -643,6 +662,7 @@ class fused_add_rms_norm_kernel<scalar_t, 0, HasWeight> {
         epsilon(epsilon_),
         num_tokens(num_tokens_),
         hidden_size(hidden_size_),
+        weight_bias(weight_bias_),
         s_variance(s_variance_) {}
 
   void operator() [[sycl::reqd_sub_group_size(32)]] (
@@ -673,13 +693,14 @@ class fused_add_rms_norm_kernel<scalar_t, 0, HasWeight> {
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
          idx += item_ct1.get_local_range(2)) {
       float x = (float)residual[item_ct1.get_group(2) * hidden_size + idx];
+      float inv_rms = *s_variance_ptr;
       if constexpr (HasWeight) {
-        float w = static_cast<float>(weight[idx]);
         input[item_ct1.get_group(2) * input_stride + idx] =
-            static_cast<scalar_t>(x * (*s_variance_ptr) * w);
+            static_cast<scalar_t>(
+                x * inv_rms * (static_cast<float>(weight[idx]) + weight_bias));
       } else {
         input[item_ct1.get_group(2) * input_stride + idx] =
-            static_cast<scalar_t>(x * (*s_variance_ptr));
+            static_cast<scalar_t>(x * inv_rms);
       }
     }
   }
@@ -692,6 +713,7 @@ class fused_add_rms_norm_kernel<scalar_t, 0, HasWeight> {
   const float epsilon;
   const int num_tokens;
   const int hidden_size;
+  const float weight_bias;
   sycl::local_accessor<float, 1> s_variance;  // local memory for variance
 };
 
@@ -700,7 +722,8 @@ void call_fused_add_rms_norm_kernel(
     torch::Tensor& input,
     torch::Tensor& residual,
     const scalar_t* weight_ptr,
-    float epsilon) {
+    float epsilon,
+    float weight_bias = 0.0f) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -740,7 +763,8 @@ void call_fused_add_rms_norm_kernel(
               epsilon,
               num_tokens,
               hidden_size,
-              s_variance));
+              s_variance,
+              weight_bias));
     });
   } else {
     sycl::range<3> block(1, 1, std::min(hidden_size, max_block_size));
@@ -756,7 +780,8 @@ void call_fused_add_rms_norm_kernel(
               epsilon,
               num_tokens,
               hidden_size,
-              s_variance));
+              s_variance,
+              weight_bias));
     });
   }
 }
@@ -814,5 +839,46 @@ void fused_add_rms_norm(
           vllm::call_fused_add_rms_norm_kernel<scalar_t, false>(
               input, residual, weight_ptr, epsilon);
         }
+      });
+}
+
+void gemma_rms_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    double epsilon) {
+  const at::DeviceGuard device_guard(input.device());
+  TORCH_CHECK(out.is_contiguous());
+  if (input.stride(-1) != 1) {
+    input = input.contiguous();
+  }
+  TORCH_CHECK(input.stride(-1) == 1);
+  TORCH_CHECK(weight.is_contiguous());
+  TORCH_CHECK(
+      weight.scalar_type() == input.scalar_type(),
+      "gemma_rms_norm expects weight dtype to match input dtype");
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_gemma_rms_norm_kernel", [&] {
+        const scalar_t* weight_ptr = weight.data_ptr<scalar_t>();
+        vllm::call_rms_norm_kernel<scalar_t, /*HasWeight=*/true>(
+            out, input, weight_ptr, epsilon, /*weight_bias=*/1.0f);
+      });
+}
+
+void fused_add_gemma_rms_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    double epsilon) {
+  const at::DeviceGuard device_guard(input.device());
+  TORCH_CHECK(weight.is_contiguous());
+  TORCH_CHECK(
+      weight.scalar_type() == input.scalar_type(),
+      "fused_add_gemma_rms_norm expects weight dtype to match input dtype");
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_fused_add_gemma_rms_norm_kernel", [&] {
+        const scalar_t* weight_ptr = weight.data_ptr<scalar_t>();
+        vllm::call_fused_add_rms_norm_kernel<scalar_t, /*HasWeight=*/true>(
+            input, residual, weight_ptr, epsilon, /*weight_bias=*/1.0f);
       });
 }
