@@ -444,6 +444,123 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
     torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
 
 
+def dequantize_nvfp4(qweight, scales, group_size, dtype):
+    """Dequant packed E2M1 weight [N, K/2] with E4M3 scales [N, K/group]."""
+    import numpy as np
+    k = qweight.shape[1] * 2
+    n = qweight.shape[0]
+    unpack_idx = np.array([0, 1])
+    data = qweight[:, [i // 2 for i in range(k)]]
+    shift = (torch.tensor(unpack_idx[[i % 2 for i in range(k)]],
+                          dtype=torch.int32,
+                          device="xpu")[None, :].expand([n, -1]) * 4)
+    dst_data = (data >> shift) & 0xF
+
+    table = torch.tensor([
+        +0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        -0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
+    ],
+                         dtype=dtype,
+                         device="xpu")
+    dst_data = table[dst_data]
+    # E4M3 block scales carry a mantissa, so unlike MXFP4's E8M0 they are
+    # ordinary small floats rather than a value reconstructed from an exponent
+    # field.
+    expand_scales = scales[:, [i // group_size for i in range(k)]]
+    dst_scale = expand_scales.to(torch.float32).to(dtype)
+
+    return (dst_data * dst_scale).to(dtype)
+
+
+# Upstream grouped-GEMM coverage runs at 16 experts. 85 is included here
+# because a routed MoE layer commonly shards far more experts than that onto
+# one device, and at these token counts it also exercises empty experts.
+NVFP4_NUM_EXPERTS = [16, 85]
+
+
+@pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
+@pytest.mark.parametrize("e", NVFP4_NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_xe_grouped_gemm_nvfp4(m, n, k, e, topk, dtype, has_bias):
+    """Native NVFP4 (E2M1 + E4M3 group-16) grouped GEMM vs dequant gold."""
+    seed_everything(7)
+    num_experts = e
+    group_size = 16
+    group_num = k // group_size
+    total_m = m * topk
+    # input
+    input_A = torch.randn((total_m, k), dtype=dtype,
+                          device=DEVICE).contiguous()
+    ref_A = input_A
+    # weight
+    input_B_nvfp4 = (torch.randint(0,
+                                   0xff, [num_experts, n, k // 2],
+                                   device=DEVICE)).to(torch.uint8)
+    # scale: E4M3 in [0.5, 1.0), which keeps the dequantised weights in range
+    # for both bf16 and fp16 while still exercising the mantissa bits that
+    # distinguish E4M3 from E8M0.
+    scale_B = (torch.rand((num_experts, n, group_num), device=DEVICE) * 0.5 +
+               0.5).to(torch.float8_e4m3fn)
+
+    if has_bias:
+        bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE) * 100
+    else:
+        bias = None
+
+    input_B_16 = torch.empty(num_experts, n, k, dtype=dtype, device=DEVICE)
+    for i in range(num_experts):
+        input_B_16[i] = dequantize_nvfp4(input_B_nvfp4[i], scale_B[i],
+                                         group_size, dtype)
+
+    # output offset
+    num_rows_per_expert = torch.zeros(num_experts,
+                                      device=DEVICE,
+                                      dtype=torch.int32)
+    init_rows_for_experts(m, topk, num_rows_per_expert)
+
+    output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
+    input_B_nvfp4 = input_B_nvfp4.view(torch.float4_e2m1fn_x2)
+    cutlass_grouped_gemm_xe2(input_A, input_B_nvfp4, scale_B, bias, output,
+                             num_rows_per_expert, n, k, num_experts)
+    # ref gg
+    ref = []
+    pre_token_sum = 0
+    for i in range(num_experts):
+        cur_token_num = num_rows_per_expert[i]
+        if cur_token_num == 0:
+            continue
+        # mma uses fp32 as calculate dtype
+        # so here use fp32 to avoid accuracy error
+        input = ref_A[pre_token_sum:pre_token_sum + cur_token_num, :].to(
+            torch.float32)
+        weight = input_B_16[i, :, :].to(torch.float32)
+        expert_output_fp32 = input @ weight.T
+        if has_bias:
+            expert_output_fp32 += bias[i]
+        ref.append(expert_output_fp32.to(dtype))
+        pre_token_sum += cur_token_num
+    ref = torch.cat(ref, dim=0)
+
+    torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
+
+
 def dequantize_mxfp8_wei_kn(wei, wei_scale, group_size=32):
     """Dequant MXFP8 weight [K, N] with scales [K/group, N] (E8M0 bits)."""
     scale_f = wei_scale.view(torch.float8_e8m0fnu).to(torch.float32)

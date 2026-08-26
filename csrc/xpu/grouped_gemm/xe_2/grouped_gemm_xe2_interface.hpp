@@ -191,8 +191,14 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
   bool is_weight_fp8 =
       ((B_dtype == at::kFloat8_e4m3fn) || (B_dtype == at::kFloat8_e5m2));
   bool is_B_int4 = (B_dtype == at::kChar) && ptr_scales.has_value();
-  bool is_B_mxfp4 =
-      (B_dtype == at::kFloat4_e2m1fn_x2) && ptr_scales.has_value();
+  // NVFP4 and MXFP4 share the packed E2M1 weight dtype and are told apart by
+  // the scale dtype: NVFP4 carries E4M3 block scales (group 16), MXFP4 carries
+  // E8M0 (group 32). Checking this keeps E4M3 scales from being decoded as
+  // E8M0, which silently produces wrong results.
+  bool is_B_nvfp4 = (B_dtype == at::kFloat4_e2m1fn_x2) &&
+      ptr_scales.has_value() && (ptr_scales->dtype() == at::kFloat8_e4m3fn);
+  bool is_B_mxfp4 = (B_dtype == at::kFloat4_e2m1fn_x2) &&
+      ptr_scales.has_value() && !is_B_nvfp4;
   // MXFP8: FP8 weights + E8M0 (uint8 / float8_e8m0fnu) block scales, gs=32.
   bool is_B_mxfp8 = false;
   if (is_weight_fp8 && ptr_scales.has_value() && ptr_scales->dim() == 3) {
@@ -228,7 +234,7 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
   int B_E = ptr_B.size(0);
   int B_K = ptr_B.size(1);
   int B_N = ptr_B.size(2);
-  if (is_B_int4 || is_B_mxfp4) {
+  if (is_B_int4 || is_B_mxfp4 || is_B_nvfp4) {
     B_K = ptr_B.size(2) * 2;
     B_N = ptr_B.size(1);
   }
@@ -278,7 +284,7 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       group_size,                                                              \
       static_cast<int*>(atomic_buffer.data_ptr()));
 
-  if (is_B_int4 || is_B_mxfp4) {
+  if (is_B_int4 || is_B_mxfp4 || is_B_nvfp4) {
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
     TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");
     TORCH_CHECK(
@@ -295,10 +301,18 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     int group_num = ptr_scales->size(2);
     group_size = K / group_num;
 
-    TORCH_CHECK(
-        group_size == 32 || group_size == 64 || group_size == 128 ||
-            group_size == 256,
-        "group_size must be 32, 64, 128 or 256");
+    if (is_B_nvfp4) {
+      TORCH_CHECK(
+          group_size == 16,
+          "nvfp4 group_size must be 16 (E4M3 block scales are defined over 16 "
+          "elements); got ",
+          group_size);
+    } else {
+      TORCH_CHECK(
+          group_size == 32 || group_size == 64 || group_size == 128 ||
+              group_size == 256,
+          "group_size must be 32, 64, 128 or 256");
+    }
 
 #define W4A16LauncherCallER(policy)    \
   if (is_B_int4) {                     \
@@ -351,7 +365,9 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     }                                  \
   }
 
-    if (A_avg_M <= 4) {
+    if (is_B_nvfp4) {
+      // handled by the NVFP4 ladder below
+    } else if (A_avg_M <= 4) {
       using policy = w4a16_policy_m_8;
       W4A16LauncherCallER(policy);
     } else if (A_avg_M <= 8) {
@@ -365,6 +381,52 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       W4A16LauncherCallER(policy);
     }
 #undef W4A16LauncherCallER
+
+    // NVFP4 needs its own ladder because correctness requires tile_k == 16,
+    // so it cannot share the tile_k=32 policies above. Tiers mirror the w4a16
+    // ladder. Guarded so the tile_k=16 templates are only instantiated for
+    // this dtype.
+    if (is_B_nvfp4) {
+#define NVFP4LauncherCallER(policy)    \
+  if (A_dtype == at::kBFloat16) {      \
+    using scalar_t = bfloat16_t;       \
+    MoEGEMMLauncherCallER(             \
+        'R',                           \
+        'C',                           \
+        policy,                        \
+        A_DTYPE::BITS16,               \
+        B_DTYPE::NVFP4,                \
+        scalar_t,                      \
+        uint8_t,                       \
+        uint8_t);                      \
+  } else if (A_dtype == at::kHalf) {   \
+    using scalar_t = half_t;           \
+    MoEGEMMLauncherCallER(             \
+        'R',                           \
+        'C',                           \
+        policy,                        \
+        A_DTYPE::BITS16,               \
+        B_DTYPE::NVFP4,                \
+        scalar_t,                      \
+        uint8_t,                       \
+        uint8_t);                      \
+  }
+
+    if (A_avg_M <= 4) {
+      using policy = w4a16_policy_m_8_k16;
+      NVFP4LauncherCallER(policy);
+    } else if (A_avg_M <= 8) {
+      using policy = w4a16_policy_m_16_k16;
+      NVFP4LauncherCallER(policy);
+    } else if (A_avg_M <= 128) {
+      using policy = w4a16_policy_m_32_k16;
+      NVFP4LauncherCallER(policy);
+    } else {
+      using policy = w4a16_policy_k16;
+      NVFP4LauncherCallER(policy);
+    }
+#undef NVFP4LauncherCallER
+    }
   } else if (is_B_mxfp8) {
     TORCH_CHECK(ptr_scales.has_value(), "mxfp8 grouped gemm must have scales");
     TORCH_CHECK(ptr_scales->is_contiguous(), "ptr_scales must be contiguous");
