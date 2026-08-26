@@ -171,6 +171,12 @@ MINI_PYTEST_PARAMS = {
     "test_decode_paged_kv_large_surface_height": {
         "dtype": [torch.bfloat16],
     },
+    "test_decode_with_paged_kv_softmax_lse": {
+        "seq_lens": [[(1, 523), (1, 37), (1, 2011)]],
+        "num_heads": [(8, 2)],
+        "head_size": [128],
+        "block_size": [16, 64],
+    },
     "test_decode_with_cross_layer_paged_kv": {
         "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
         "num_heads": [(8, 2)],
@@ -1008,6 +1014,276 @@ def test_varlen_with_softmax_lse(
     torch.testing.assert_close(out, ref_output, atol=atol, rtol=rtol)
     # LSE is float32 and computed in log space — compare with a modest
     # tolerance that covers bf16 Q/K accumulation noise.
+    torch.testing.assert_close(softmax_lse.float(),
+                               ref_lse.float(),
+                               atol=5e-2,
+                               rtol=5e-2)
+    torch.xpu.empty_cache()
+
+
+def ref_paged_decode_softmax_lse(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    kv_lens: list[int],
+    block_tables: torch.Tensor,
+    scale: float,
+    window_size_left: int = -1,
+    window_size_right: int = -1,
+    sink: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Reference log-sum-exp for single-token (decode) paged queries.
+
+    Mirrors the masking of ref_paged_attn with query_len == 1 and returns
+    [num_query_heads, num_seqs] in float32:
+        lse[h, i] = log( sum_k exp(scale * Q.K) [+ exp(sink[h])] )
+    The optional sink term is included because the kernel folds it into the
+    softmax denominator (see DecodeFwdEpilogue / chunk_prefill_kernel).
+    """
+    block_tables_np = block_tables.cpu().numpy()
+    _, block_size, num_kv_heads, head_size = key_cache.shape
+    lse_list: list[torch.Tensor] = []
+    for i, kv_len in enumerate(kv_lens):
+        q = query[i:i + 1].float() * scale
+        num_kv_blocks = (kv_len + block_size - 1) // block_size
+        block_indices = block_tables_np[i, :num_kv_blocks]
+        k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
+        k = k[:kv_len].float()
+        if q.shape[1] != k.shape[1]:
+            k = torch.repeat_interleave(k, q.shape[1] // k.shape[1], dim=1)
+        # [heads, 1, kv_len]
+        attn = torch.einsum("qhd,khd->hqk", q, k).float()
+        if window_size_left > 0 or window_size_right > 0:
+            empty_mask = torch.ones(1, kv_len)
+            left = max(kv_lens) if window_size_left < 0 else window_size_left
+            right = max(kv_lens) if window_size_right < 0 else window_size_right
+            mask_right = torch.triu(empty_mask,
+                                    diagonal=kv_len - 1 + right + 1).bool()
+            mask_left = torch.triu(empty_mask,
+                                   diagonal=kv_len - 1 -
+                                   left).bool().logical_not()
+            attn.masked_fill_(mask_right | mask_left, float("-inf"))
+        if sink is not None:
+            sink_expanded = sink.float().view(-1, 1, 1).expand(
+                attn.shape[0], 1, 1)
+            attn = torch.cat([attn, sink_expanded], dim=-1)
+        lse_list.append(torch.logsumexp(attn, dim=-1))  # [heads, 1]
+    return torch.cat(lse_list, dim=1)
+
+
+# Paged decode softmax_lse. Unlike chunk_prefill (which only supports LSE on
+# the !Paged && !Local && !Sink specialization), the decode path writes LSE
+# from a runtime pointer, so paged / sliding-window / sink are all covered.
+#
+# The parameter grid deliberately spans the three code paths that produce the
+# final softmax statistics:
+#   * num_splits_kv=1              -> FMHA epilogue writes LSE (no reduce)
+#   * num_splits_kv>1, long seqs   -> ReduceSplitK combines per-split stats
+#   * num_splits_kv>1, short seqs  -> single-split sentinel round-trips
+#                                     through ReduceSplitK
+# `use_split_plan` additionally exercises the compact-grid (work_list) path.
+@pytest.mark.parametrize("seq_lens", [
+    [(1, 523), (1, 37), (1, 2011)],
+    [(1, 13000)],
+    [(1, 64), (1, 8192), (1, 5)],
+])
+@pytest.mark.parametrize("num_heads", [(8, 2), (16, 16)])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
+@pytest.mark.parametrize("num_splits_kv", [None, 1, 8])
+@pytest.mark.parametrize("use_split_plan", [False, True])
+@pytest.mark.parametrize("extra", [(False, (-1, -1)), (True, (-1, -1)),
+                                   (False, (127, -1))])
+@torch.inference_mode()
+def test_decode_with_paged_kv_softmax_lse(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    dtype: torch.dtype,
+    num_splits_kv: Optional[int],
+    use_split_plan: bool,
+    extra: tuple[bool, tuple[int, int]],
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(42)
+
+    is_sink, window_size = extra
+    if use_split_plan and (num_splits_kv is None or num_splits_kv <= 1):
+        pytest.skip("split plan requires num_splits_kv > 1")
+    if window_size != (-1, -1) and os.getenv("SKIP_HANG_KERNEL") == "1":
+        pytest.skip("skip local attn to avoid runtime hang on CI.")
+
+    # Smaller than NUM_BLOCKS[0] to keep the (16, 16) x block_size=64 cache
+    # allocation reasonable; still covers the longest kv_len in the grid.
+    num_blocks = 1024
+    num_seqs = len(seq_lens)
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.arange(num_seqs + 1, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+    sink = torch.randn(num_query_heads, dtype=dtype) if is_sink else None
+
+    kwargs = {}
+    if use_split_plan:
+        kwargs["host_kv_lens"] = torch.tensor(kv_lens, dtype=torch.int32)
+    else:
+        kwargs["seqused_k"] = torch.tensor(kv_lens, dtype=torch.int32)
+
+    out, softmax_lse = flash_attn_varlen_func(
+        query,
+        key_cache,
+        value_cache,
+        1,  # max_seqlen_q
+        cu_query_lens,
+        max_kv_len,
+        softmax_scale=scale,
+        causal=False,
+        block_table=block_tables,
+        window_size=window_size,
+        s_aux=sink,
+        num_splits_kv=num_splits_kv,
+        return_softmax_lse=True,
+        **kwargs,
+    )
+
+    assert softmax_lse.shape == (num_query_heads, num_seqs)
+    assert softmax_lse.dtype == torch.float32
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=[1] * num_seqs,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False,
+                                is_paged=True,
+                                sink=sink,
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1],
+                                dtype=dtype)
+    ref_lse = ref_paged_decode_softmax_lse(
+        query=query,
+        key_cache=key_cache,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        window_size_left=window_size[0],
+        window_size_right=window_size[1],
+        sink=sink,
+    )
+
+    torch.testing.assert_close(out, ref_output, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(softmax_lse.float(),
+                               ref_lse.float(),
+                               atol=5e-2,
+                               rtol=5e-2)
+    torch.xpu.empty_cache()
+
+
+# Regression test for the attention sink row mapping in the decode epilogue.
+# The softmax statistics (exp_sums / max_logits / softmax_lse) are reported per
+# packed-GQA row, and the sink must be the one belonging to that row. A random
+# sink over a long KV cache is nearly invisible in the result, so this test
+# makes the sink dominate: sink[h] = 20 + (h % head_group_q) is far above every
+# score, hence lse[h] ~= sink[h] and any row mix-up shows up immediately.
+@pytest.mark.parametrize("num_heads", [(8, 1), (8, 2), (8, 4), (16, 2)])
+@pytest.mark.parametrize("num_splits_kv", [1, 8])
+@pytest.mark.parametrize("kv_len", [5, 2048])
+@torch.inference_mode()
+def test_decode_paged_kv_sink_row_mapping(
+    num_heads: tuple[int, int],
+    num_splits_kv: int,
+    kv_len: int,
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(0)
+
+    num_query_heads, num_kv_heads = num_heads
+    head_group_q = num_query_heads // num_kv_heads
+    head_size, block_size, dtype = 64, 64, torch.bfloat16
+    num_blocks = 128
+    scale = head_size**-0.5
+    num_kv_blocks = (kv_len + block_size - 1) // block_size
+
+    query = torch.randn(1, num_query_heads, head_size, dtype=dtype)
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.arange(2, dtype=torch.int32)
+    block_tables = torch.randint(0,
+                                 num_blocks, (1, num_kv_blocks),
+                                 dtype=torch.int32)
+    sink = torch.tensor([20.0 + (h % head_group_q)
+                         for h in range(num_query_heads)],
+                        dtype=dtype)
+
+    out, softmax_lse = flash_attn_varlen_func(
+        query,
+        key_cache,
+        value_cache,
+        1,
+        cu_query_lens,
+        kv_len,
+        softmax_scale=scale,
+        causal=False,
+        block_table=block_tables,
+        window_size=(-1, -1),
+        s_aux=sink,
+        num_splits_kv=num_splits_kv,
+        return_softmax_lse=True,
+        seqused_k=torch.tensor([kv_len], dtype=torch.int32),
+    )
+
+    # Each row must recover its own sink, not a neighbour's.
+    recovered = (softmax_lse.float().flatten() - 20.0).round().int().cpu()
+    expected = torch.tensor([h % head_group_q for h in range(num_query_heads)],
+                            dtype=torch.int32,
+                            device="cpu")
+    torch.testing.assert_close(recovered, expected)
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=[1],
+                                kv_lens=[kv_len],
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False,
+                                is_paged=True,
+                                sink=sink,
+                                window_size_left=-1,
+                                window_size_right=-1,
+                                dtype=dtype)
+    ref_lse = ref_paged_decode_softmax_lse(query=query,
+                                           key_cache=key_cache,
+                                           kv_lens=[kv_len],
+                                           block_tables=block_tables,
+                                           scale=scale,
+                                           sink=sink)
+
+    torch.testing.assert_close(out, ref_output, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(softmax_lse.float(),
                                ref_lse.float(),
                                atol=5e-2,

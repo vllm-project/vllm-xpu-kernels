@@ -204,6 +204,7 @@ def build_decode_split_plan(
     num_kv_splits: int,
     num_xe_cores: int,
     num_heads_kv: int,
+    window_size_left: int = -1,
 ):
     """Produce (splits_per_seq, work_list) for the compact-grid decode kernel.
 
@@ -215,6 +216,10 @@ def build_decode_split_plan(
     num_kv_splits   : global cap on per-seq split count (buffer dim).
     num_xe_cores    : Xe-core count used for the target-WG heuristic.
     num_heads_kv    : KV heads (workload is sliced across heads_kv heads).
+    window_size_left: sliding-window size (-1 = unlimited). Tiles before the
+                      window are skipped by the kernel, which offsets every
+                      work item by its own `k_block0`, so the plan must only
+                      partition the tiles that are actually inside the window.
 
     Returns
     -------
@@ -237,8 +242,18 @@ def build_decode_split_plan(
     else:
         kv_lens_list = [int(v) for v in kv_lens]
 
-    tiles_per_seq = [max(1, (kv + kv_tile - 1) // kv_tile)
-                     for kv in kv_lens_list]
+    # Mirror the kernel's k_block0: for decode all packed GQA heads sit at
+    # position kv_len - 1, so a left window of W makes tiles before
+    # (kv_len - 1 - W) / kv_tile unreachable. work_list tile indices are
+    # relative to k_block0, matching `kv_split_offset = k_block0 + tile_start`.
+    def _windowed_tiles(kv: int) -> int:
+        total = (kv + kv_tile - 1) // kv_tile
+        if window_size_left is not None and window_size_left >= 0:
+            k_block0 = max(kv - 1 - window_size_left, 0) // kv_tile
+            total -= k_block0
+        return max(1, total)
+
+    tiles_per_seq = [_windowed_tiles(kv) for kv in kv_lens_list]
     total_tiles = sum(tiles_per_seq)
 
     # Target: ~2x oversubscription of Xe cores per kv head, minimum 4 tiles
@@ -548,12 +563,20 @@ def flash_attn_varlen_func(
             kv_tile = _kv_tile_from_block_size(block_size)
             num_xe_cores = _infer_num_xe_cores(q.device)
             num_heads_kv = k.size(2)
+            # Mirror flash_api.cpp: any window bound enables local masking,
+            # and an unbounded left edge is normalized to max_seqlen_k.
+            if real_window_size[0] != -1 or real_window_size[1] != -1:
+                eff_window_left = (max_seqlen_k if real_window_size[0] == -1
+                                   else real_window_size[0])
+            else:
+                eff_window_left = -1
             splits_cpu, work_list_cpu = build_decode_split_plan(
                 host_kv_lens,
                 kv_tile=kv_tile,
                 num_kv_splits=num_splits_kv,
                 num_xe_cores=num_xe_cores,
                 num_heads_kv=num_heads_kv,
+                window_size_left=eff_window_left,
             )
             if work_list_cpu.numel() > 0:
                 splits_per_seq_dev = splits_cpu.to(
