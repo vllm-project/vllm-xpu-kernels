@@ -534,6 +534,7 @@ def test_gated_delta_rule_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
 
     assert head_k_dim == head_v_dim
     K = num_spec_tokens
+    num_spec = K - 1  # num_speculative_tokens
     num_actual_tokens = num_spec_decodes * K
     cache_batch_size = 200
 
@@ -551,8 +552,9 @@ def test_gated_delta_rule_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                       mixed_ba_size,
                                       dtype=dtype,
                                       device=device)
+    # Sliding-window layout: state_len = (width-1) + num_spec rows per line.
     conv_state = torch.randn(cache_batch_size,
-                             width - 1,
+                             (width - 1) + num_spec,
                              mixed_qkv_size,
                              dtype=dtype,
                              device=device)
@@ -574,7 +576,7 @@ def test_gated_delta_rule_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                         device=device)
     dt_bias = torch.randn(num_v_heads // tp_size, dtype=dtype, device=device)
 
-    # Each spec seq owns K consecutive cache slots (cols 0..K-1).
+    # K slots per seq: conv uses only column 0, ssm uses all K columns.
     state_slots = random.sample(range(cache_batch_size), num_spec_decodes * K)
     spec_state_indices_tensor = torch.tensor(state_slots,
                                              dtype=torch.int32,

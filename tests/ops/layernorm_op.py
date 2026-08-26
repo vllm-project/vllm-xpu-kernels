@@ -42,6 +42,109 @@ def dispatch_cuda_rmsnorm_func(add_residual: bool):
     return rms_norm
 
 
+def gemma_rms_norm(x: torch.Tensor, weight: torch.Tensor,
+                   variance_epsilon: float) -> torch.Tensor:
+    import tests.register_ops as ops
+    out = torch.empty_like(x)
+    ops.gemma_rms_norm(
+        out,
+        x,
+        weight,
+        variance_epsilon,
+    )
+    return out
+
+
+def fused_add_gemma_rms_norm(
+        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+    import tests.register_ops as ops
+    ops.fused_add_gemma_rms_norm(
+        x,
+        residual,
+        weight,
+        variance_epsilon,
+    )
+    return x, residual
+
+
+def dispatch_cuda_gemma_rmsnorm_func(add_residual: bool):
+    if add_residual:
+        return fused_add_gemma_rms_norm
+    return gemma_rms_norm
+
+
+class GemmaRMSNorm(CustomOp):
+    """RMS normalization for Gemma.
+
+    Two differences from RMSNorm:
+        1. x * (1 + w) instead of x * w.
+        2. (x * (1 + w)) is computed in fp32 then downcast.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.variance_epsilon = eps
+        if dtype is not None:
+            self.weight = nn.Parameter(torch.zeros(hidden_size, dtype=dtype))
+        else:
+            self.weight = nn.Parameter(torch.zeros(hidden_size))
+
+    @staticmethod
+    def forward_static(
+        weight: torch.Tensor,
+        variance_epsilon: float,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor],
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        orig_dtype = x.dtype
+        if residual is not None:
+            x = x + residual.to(torch.float32)
+            residual = x.to(orig_dtype)
+
+        x = x.to(torch.float32)
+        variance = x.pow(2).mean(dim=-1, keepdim=True)
+        x = x * torch.rsqrt(variance + variance_epsilon)
+        # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
+        # See https://github.com/huggingface/transformers/pull/29402
+        x = x * (1.0 + weight.float())
+        x = x.to(orig_dtype)
+        return x if residual is None else (x, residual)
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        return self.forward_static(self.weight.data, self.variance_epsilon, x,
+                                   residual)
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        add_residual = residual is not None
+        norm_func = dispatch_cuda_gemma_rmsnorm_func(add_residual)
+        weight = self.weight.data
+        if add_residual:
+            return norm_func(x, residual, weight, self.variance_epsilon)
+        return norm_func(x, weight, self.variance_epsilon)
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        return self.forward_cuda(x, residual)
+
+
 class RMSNorm(CustomOp):
     """Root mean square normalization.
 

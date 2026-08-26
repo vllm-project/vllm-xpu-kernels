@@ -75,6 +75,7 @@ def estimate_bytes_moved(kwargs):
     ba_per_tok = nk * (2 * nv // nk)
     qkv_per_tok = nk * (2 * hk + hv * nv // nk)
     z_per_tok = nv * hv
+    conv_state_len = kwargs["conv_state"].shape[1]
     # {q,k,v} (=qkv_per_tok) plus b, a (2*nv) intermediates written out.
     inter_per_tok = qkv_per_tok + 2 * nv
 
@@ -85,7 +86,7 @@ def estimate_bytes_moved(kwargs):
     bytes_in = n_tok * (qkvz_per_tok + ba_per_tok) * bpe_in
     bytes_z = n_tok * z_per_tok * bpe_out
     bytes_inter = n_tok * inter_per_tok * bpe_out
-    bytes_conv_state = batch * (width - 1) * qkv_per_tok * bpe_in * 2  # RW
+    bytes_conv_state = batch * conv_state_len * qkv_per_tok * bpe_in * 2
     bytes_weights = qkv_per_tok * width * bpe_in
     # Bias is only read when conv_bias is provided.
     bytes_bias = qkv_per_tok * bpe_in if kwargs["conv_bias"] is not None else 0

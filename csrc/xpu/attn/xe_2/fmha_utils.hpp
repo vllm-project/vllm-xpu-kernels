@@ -173,21 +173,84 @@ struct decode_policy_qpacked_head {
       "(supported: _16, _32, _64, _128)");
 };
 
+// Maximum V-dim (head_size_vo) a single decode work-group may own.
+//
+// The softmax/output accumulator held in registers is
+// (q_packed x ShapeOut[1]) floats, and the epilogue's cross-SG reduction
+// buffer is q_packed * ShapeOut[1] * SGPerWG * sizeof(float) of SLM. At
+// head_dim 512/576 that accumulator needs the entire Xe2 register file (256
+// GRF at -cl-intel-256-GRF-per-thread), so the kernel spills it to memory on
+// *every* KV tile: measured ~65 GB/s at head 512 and ~30 GB/s at head 576
+// (MLA) versus ~440 GB/s at head 256 on the same card. With q_packed 16 the
+// kernel does not even launch (UR_RESULT_ERROR_OUT_OF_RESOURCES at head 512,
+// 128 KiB of SLM at head 576).
+//
+// Capping the V-dim makes the decode scheduler split V across grid.x (it
+// derives grid.x = ceil_div(head_size_vo, ShapeOut[1]); the mainloop and
+// epilogue already tile V by blk_v, and the chunk-prefill head-512 policy
+// uses the same 256-wide split). The split costs an extra K read per V tile
+// but restores head-256-class memory-level parallelism, and it keeps the SLM
+// reduction buffer within the per-WG cap.
+//
+// Because the accumulator is q_packed x ShapeOut[1], the cap has to scale
+// with q_packed: a fixed 256 leaves q_packed 16 spilling nearly as badly as
+// before (measured 4.5x slower than q_packed 8 on MLA, tracking q_packed
+// almost exactly). kDecodeAccBudget bounds the product instead, giving every
+// q_packed the same accumulator footprint that makes q_packed 8 fast.
+// q_packed is only ever _8 or _16 (see paged_decode_xe2.cpp: GQA ratios above
+// 8 are split across work-groups using the _16 tile), so this resolves to
+// V=256 for _8 and V=128 for _16.
+//
+// The budget was tuned by sweeping it on MLA (head_size_qk 576) decode:
+//
+//   budget   q8 V / q16 V   q8 kv=54k   q16 kv=54k
+//   8192     256 / 256      0.335 ms    1.492 ms
+//   2048     256 / 128      0.336 ms    0.499 ms   <- chosen
+//   1024     128 /  64      0.436 ms    0.523 ms
+//
+// 8192 (no q_packed scaling) leaves q_packed 16 spilling; 1024 over-splits,
+// costing q_packed 8 30% because each extra V tile re-reads K.
+//
+// Only head_dim > 256 is affected; smaller head dims already fit and are left
+// bit-identical so existing tuned configs do not change.
+//
+// Note head_dim here is the *Q/K* head size bucket; the V split is driven by
+// the runtime head_size_vo, which differs for MLA (head_size_qk 576 with
+// head_size_vo 512).
+static constexpr int kDecodeMaxShapeOutV = 256;
+static constexpr int kDecodeAccBudget = 2048;
+
+template <typename q_packed, typename head_dim>
+constexpr int decode_shapeout_v_value() {
+  if constexpr (head_dim::value <= kDecodeMaxShapeOutV) {
+    return head_dim::value;
+  } else {
+    constexpr int budgeted = kDecodeAccBudget / q_packed::value;
+    return budgeted < kDecodeMaxShapeOutV ? budgeted : kDecodeMaxShapeOutV;
+  }
+}
+
+template <typename q_packed, typename head_dim>
+using decode_shapeout_v =
+    cute::Int<decode_shapeout_v_value<q_packed, head_dim>()>;
+
 // kv_tile == _16 (block_size == 16)
 template <typename q_packed, typename head_dim>
 struct decode_policy_qpacked_head<q_packed, head_dim, _16> {
+  using HeadDim = head_dim;
   using ShapeQK = Shape<q_packed, _16, _64>;
   using ShapePV = Shape<q_packed, _32, _16>;
-  using ShapeOut = Shape<q_packed, head_dim>;
+  using ShapeOut = Shape<q_packed, decode_shapeout_v<q_packed, head_dim>>;
   using SubgroupLayoutQK = Layout<Shape<_1, _1, _1>>;
 };
 
 // kv_tile == _32 (block_size == 32)
 template <typename q_packed, typename head_dim>
 struct decode_policy_qpacked_head<q_packed, head_dim, _32> {
+  using HeadDim = head_dim;
   using ShapeQK = Shape<q_packed, _32, _64>;
   using ShapePV = Shape<q_packed, _32, _32>;
-  using ShapeOut = Shape<q_packed, head_dim>;
+  using ShapeOut = Shape<q_packed, decode_shapeout_v<q_packed, head_dim>>;
   using SubgroupLayoutQK = Layout<Shape<_1, _2, _1>>;
 };
 
@@ -197,9 +260,10 @@ struct decode_policy_qpacked_head<q_packed, head_dim, _32> {
 // page_size / 64 sub-tiles per page via the page-table indirection.
 template <typename q_packed, typename head_dim>
 struct decode_policy_qpacked_head<q_packed, head_dim, _64> {
+  using HeadDim = head_dim;
   using ShapeQK = Shape<q_packed, _64, _64>;
   using ShapePV = Shape<q_packed, _32, _64>;
-  using ShapeOut = Shape<q_packed, head_dim>;
+  using ShapeOut = Shape<q_packed, decode_shapeout_v<q_packed, head_dim>>;
   using SubgroupLayoutQK = Layout<Shape<_1, _4, _1>>;
 };
 
@@ -213,8 +277,9 @@ struct decode_policy_qpacked_head<q_packed, head_dim, _64> {
 // re-enabled once the upstream ReduceK=8 reduction path is fixed.
 template <typename q_packed, typename head_dim>
 struct decode_policy_qpacked_head<q_packed, head_dim, _128> {
+  using HeadDim = head_dim;
   using ShapeQK = Shape<q_packed, _128, _64>;
   using ShapePV = Shape<q_packed, _32, _128>;
-  using ShapeOut = Shape<q_packed, head_dim>;
+  using ShapeOut = Shape<q_packed, decode_shapeout_v<q_packed, head_dim>>;
   using SubgroupLayoutQK = Layout<Shape<_1, _8, _1>>;
 };

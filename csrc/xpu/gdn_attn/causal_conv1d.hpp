@@ -477,25 +477,11 @@ struct update_states_kernel {
 // -----------------------------------------------------------------------------
 // Spec-decoding kernel for causal_conv1d.
 //
-// Each spec sequence contributes exactly num_spec_tokens (== num_spec + 1)
-// contiguous tokens in the LOCAL q/k/v/b/a buffers, ordered by
-// spec_query_start_loc; their corresponding GLOBAL positions in
-// mixed_qkvz / mixed_ba / z_out are given by token_indx.
-//
-// Grid: (num_spec_decodes, groups_per_token). Each thread owns a feature
-// chunk of `elems_per_item` lanes and walks all num_spec_tokens tokens of
-// one sequence in a sliding window:
-//   - q/k/v lanes: load Width-1 prior values from
-//     conv_states[cache_indices[batch, num_accepted_tokens[batch] - 1]],
-//     then for every t_local in [0, num_spec_tokens) shift the window left
-//     by one, load the new input from mixed_qkvz[token_indx[...]], apply the
-//     conv (+bias +activation) and store to local q/k/v outputs.
-//   - z lanes: pure reorder, no conv.
-//   - b/a lanes: pure reorder.
-// After processing all tokens we write the trailing Width-1 input values to
-// ONLY the last cache slot: conv_states[cache_indices[batch, num_spec]],
-// matching the Triton fused_recurrent path which keeps a single rollback
-// reference for the next forward.
+// Sliding-window conv state (single cache line, matches CUDA/Triton and vLLM
+// get_conv_copy_spec): the conv state lives in column 0 of the cache_indices
+// row, with state_len = (Width-1) + num_spec rows. The accepted window starts
+// at row num_accepted_tokens-1; after processing, the rolled state (shifted
+// history + the K draft inputs) is written back to that same line.
 // -----------------------------------------------------------------------------
 template <typename T, int Width, bool ReorderInput>
 struct causal_conv1d_spec_kernel {
@@ -685,14 +671,18 @@ struct causal_conv1d_spec_kernel {
     }
 
     // -- conv1d on q/k/v lanes ----------------------------------------------
-    // Pick the initial conv-state slot using num_accepted_tokens. The slot
-    // at column num_accepted_tokens[batch_id] - 1 was written by the previous
-    // step's last accepted token; we fall back to col 0 defensively when
-    // num_accepted_tokens == 0.
-    int init_col = num_accepted_tokens[batch_id] - 1;
-    if (init_col < 0) init_col = 0;
-    const int init_state_id =
-        cache_indices[batch_id * cache_indices_stride_0 + init_col];
+    // Single cache line (column 0); accepted window starts at row init_row.
+    int init_row = num_accepted_tokens[batch_id] - 1;
+    if (init_row < 0) init_row = 0;
+    // Match the effective state length used by the CUDA/Triton path.  The
+    // leading stride may span interleaved states from multiple layers, so it
+    // cannot be used to recover this dimension.
+    const int state_len = Width - 1 + (num_spec_tokens - 1);
+    const int state_id = cache_indices[batch_id * cache_indices_stride_0 + 0];
+    const bool has_conv_state = (state_id != pad_slot_id);
+    T* state_line_ptr = has_conv_state
+                            ? conv_states + state_id * conv_states_stride_0
+                            : nullptr;
 
     // Load weights
     T local_weights[Width * elems_per_item];
@@ -705,23 +695,20 @@ struct causal_conv1d_spec_kernel {
       }
     }
 
-    // Sliding window of size Width. Positions [0, Width-1) start with the
-    // prior conv_state; position Width-1 is filled per-iter with the new
-    // input. When the cache slot is the pad slot the prior is zeroed.
+    // Prime the window from rows [init_row, init_row + Width - 1); the trailing
+    // slot is filled per-iter. Pad slot => zeroed prior.
     T local_input[Width * elems_per_item];
 #pragma unroll
     for (int i = 0; i < Width * elems_per_item; ++i) {
       local_input[i] = static_cast<T>(0);
     }
-    if (Width > 1 && init_state_id != pad_slot_id) {
-      const T* init_state_ptr =
-          conv_states + init_state_id * conv_states_stride_0;
+    if (Width > 1 && has_conv_state) {
 #pragma unroll
       for (int i = 0; i < Width - 1; ++i) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          local_input[Width * e + i] =
-              init_state_ptr[i * conv_elems + reordered_elems_id + e];
+          local_input[Width * e + i] = state_line_ptr
+              [(init_row + i) * conv_elems + reordered_elems_id + e];
         }
       }
     }
@@ -801,25 +788,29 @@ struct causal_conv1d_spec_kernel {
                qkvz_dim_id - (q_dim + k_dim) + e] = res[e];
         }
       }
+    }
 
-      // Checkpoint the rolling conv state at every step into the cache slot
-      // that the next decoding round will read when `num_accepted_tokens ==
-      // t_local + 1`. Writing each column (not only the last one) keeps the
-      // scheduler's per-acceptance rollback consistent: column `t_local`
-      // holds the conv state right after consuming spec token `t_local`.
-      if (Width > 1) {
-        const int save_state_id =
-            cache_indices[batch_id * cache_indices_stride_0 + t_local];
-        if (save_state_id != pad_slot_id) {
-          T* save_state_ptr =
-              conv_states + save_state_id * conv_states_stride_0;
+    // Roll the line back to column 0: rows [0, hist_rows) = shifted history
+    // from row init_row+1, rows [hist_rows, state_len) = the K draft inputs.
+    // In-place left shift is safe since src row (init_row+1+j) >= dst row j.
+    if (Width > 1 && has_conv_state) {
+      const int hist_rows = state_len - num_spec_tokens;
+      for (int j = 0; j < state_len; ++j) {
+        if (j < hist_rows) {
+          const int src_row = init_row + 1 + j;
 #pragma unroll
-          for (int i = 0; i < Width - 1; ++i) {
+          for (int e = 0; e < elems_per_item; ++e) {
+            state_line_ptr[j * conv_elems + reordered_elems_id + e] =
+                state_line_ptr[src_row * conv_elems + reordered_elems_id + e];
+          }
+        } else {
+          const int draft_t = j - hist_rows;
+          const int token_id_local = batch_id * num_spec_tokens + draft_t;
+          const int global_t = token_indx[token_id_local];
 #pragma unroll
-            for (int e = 0; e < elems_per_item; ++e) {
-              save_state_ptr[i * conv_elems + reordered_elems_id + e] =
-                  local_input[Width * e + i + 1];
-            }
+          for (int e = 0; e < elems_per_item; ++e) {
+            state_line_ptr[j * conv_elems + reordered_elems_id + e] =
+                mixed_qkvz[global_t * qkvz_elems + mixed_qkvz_id + e];
           }
         }
       }

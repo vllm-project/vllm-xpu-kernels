@@ -35,6 +35,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 
+  // Gemma RMS Normalization: out = (x / rms(x)) * (1 + weight), folding the
+  // Gemma unit-offset and fp32 weighted multiply into the kernel.
+  ops.def(
+      "gemma_rms_norm(Tensor! result, Tensor! input, Tensor! weight, "
+      "float epsilon) -> ()");
+  ops.impl("gemma_rms_norm", torch::kXPU, &gemma_rms_norm);
+
+  // In-place fused Add and Gemma RMS Normalization.
+  ops.def(
+      "fused_add_gemma_rms_norm(Tensor! input, Tensor! residual, "
+      "Tensor! weight, float epsilon) -> ()");
+  ops.impl("fused_add_gemma_rms_norm", torch::kXPU, &fused_add_gemma_rms_norm);
+
   // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8).
   ops.def(
       "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
