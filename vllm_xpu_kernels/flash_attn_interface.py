@@ -18,7 +18,7 @@ except ImportError as e:
 
 DEFAULT_FA_VERSION = 2
 
-# Tracks paged-decode configs we have already warned about so the
+# Tracks configs we have already warned about so the
 # missing-kernel fallback notice is emitted once per config rather
 # than on every decode step.
 _warned_missing_configs: set = set()
@@ -599,11 +599,7 @@ def flash_attn_varlen_func(
                 raise
             # Fallback to PyTorch reference implementation.
             # Emit the notice once per unique missing config and write
-            # it straight to stderr.  This module's stdlib logger has
-            # no handler under vLLM's logging config (only the "vllm"
-            # logger is wired up) and its records are dropped inside the
-            # engine worker subprocess, so logger.warning alone is
-            # invisible in a live server.
+            # it straight to stderr.
             _msg = (
                 "XPU kernel not compiled for this config, falling back "
                 "to PyTorch reference attention. Performance will be "
@@ -627,12 +623,6 @@ def flash_attn_varlen_func(
                 s_aux=s_aux,
                 return_softmax_lse=return_softmax_lse,
             )
-            # Honor the in-place ``out`` contract: callers such as
-            # vLLM pass a preallocated ``out`` buffer and read the
-            # result from it, discarding this function's return value.
-            # ``ref_paged_attn`` returns a fresh tensor, so copy it
-            # back into ``out`` to avoid leaving the caller's buffer
-            # uninitialized (which surfaces as garbage output).
             if out is not None:
                 out.copy_(fallback_out.reshape(out.shape))
             else:
