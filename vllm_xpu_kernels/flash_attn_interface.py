@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+import sys
 from typing import Optional
 
 import torch
@@ -16,6 +17,11 @@ except ImportError as e:
 #isort: on
 
 DEFAULT_FA_VERSION = 2
+
+# Tracks paged-decode configs we have already warned about so the
+# missing-kernel fallback notice is emitted once per config rather
+# than on every decode step.
+_warned_missing_configs: set = set()
 
 # Speculative-decoding fast path.
 #
@@ -592,17 +598,27 @@ def flash_attn_varlen_func(
             if "not compiled" not in str(e):
                 raise
             # Fallback to PyTorch reference implementation.
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(
+            # Emit the notice once per unique missing config and write
+            # it straight to stderr.  This module's stdlib logger has
+            # no handler under vLLM's logging config (only the "vllm"
+            # logger is wired up) and its records are dropped inside the
+            # engine worker subprocess, so logger.warning alone is
+            # invisible in a live server.
+            _msg = (
                 "XPU kernel not compiled for this config, falling back "
                 "to PyTorch reference attention. Performance will be "
                 "significantly degraded.\n"
                 "To fix: rebuild with the config line shown above.\n"
                 "If this is unexpected, report at: "
                 "https://github.com/vllm-project/vllm-xpu-kernels/issues/364\n"
-                "Original error: %s", e)
-            out, softmax_lse = _fallback_varlen_attn(
+                "Original error: %s" % e)
+            if str(e) not in _warned_missing_configs:
+                _warned_missing_configs.add(str(e))
+                import logging
+                logging.getLogger(__name__).warning(_msg)
+                print("[vllm_xpu_kernels] " + _msg, file=sys.stderr,
+                      flush=True)
+            fallback_out, softmax_lse = _fallback_varlen_attn(
                 q, k, v, cu_seqlens_q, cu_seqlens_k, seqused_k,
                 block_table, softmax_scale, causal,
                 real_window_size, softcap,
@@ -611,6 +627,16 @@ def flash_attn_varlen_func(
                 s_aux=s_aux,
                 return_softmax_lse=return_softmax_lse,
             )
+            # Honor the in-place ``out`` contract: callers such as
+            # vLLM pass a preallocated ``out`` buffer and read the
+            # result from it, discarding this function's return value.
+            # ``ref_paged_attn`` returns a fresh tensor, so copy it
+            # back into ``out`` to avoid leaving the caller's buffer
+            # uninitialized (which surfaces as garbage output).
+            if out is not None:
+                out.copy_(fallback_out.reshape(out.shape))
+            else:
+                out = fallback_out
     else:
         raise NotImplementedError("not support yet")
     return (out, softmax_lse) if return_softmax_lse else (out)
