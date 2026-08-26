@@ -607,7 +607,7 @@ def flash_attn_varlen_func(
                 "To fix: rebuild with the config line shown above.\n"
                 "If this is unexpected, report at: "
                 "https://github.com/vllm-project/vllm-xpu-kernels/issues/364\n"
-                "Original error: %s" % e)
+                f"Original error: {e}")
             if str(e) not in _warned_missing_configs:
                 _warned_missing_configs.add(str(e))
                 import logging
