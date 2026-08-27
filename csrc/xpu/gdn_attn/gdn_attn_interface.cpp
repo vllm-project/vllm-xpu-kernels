@@ -688,28 +688,58 @@ void gated_delta_rule_non_spec(
 
 #ifdef VLLM_XPU_ENABLE_XE2
   if (num_prefills > 0) {
-    const int* token_indx_ptr =
-        non_spec_token_indx.has_value()
-            ? reinterpret_cast<const int*>(non_spec_token_indx->data_ptr())
-            : nullptr;
-
-    chunk_gated_delta_rule_xe2(
-        queue,
-        core_attn_out_active,
-        q,
-        k,
-        v,
-        b,
-        a,
-        A_log,
-        dt_bias,
-        ssm_state,
-        non_spec_query_start_loc,
-        non_spec_state_indices_tensor,
-        has_initial_state,
-        num_prefills,
-        num_decodes,
-        token_indx_ptr);
+    // The XE2 delta kernel writes core_attn_out in chunk-contiguous blocks
+    // after a SINGLE token_indx lookup per chunk (kernels_xe2.hpp O_tensor
+    // epilogue) — it silently assumes token_indx values are run-contiguous
+    // within every sequence. Mixed spec/non-spec batches produce shuffled
+    // index sets, so rows land at wrong global positions (silent corruption
+    // or overrun). Make the assumption true by construction: with token_indx
+    // present, write into a compact staging buffer with identity indexing,
+    // then scatter per-row.
+    if (non_spec_token_indx.has_value()) {
+      torch::Tensor o_compact = torch::zeros(
+          {non_spec_token,
+           core_attn_out_active.size(1),
+           core_attn_out_active.size(2)},
+          core_attn_out_active.options());
+      chunk_gated_delta_rule_xe2(
+          queue,
+          o_compact,
+          q,
+          k,
+          v,
+          b,
+          a,
+          A_log,
+          dt_bias,
+          ssm_state,
+          non_spec_query_start_loc,
+          non_spec_state_indices_tensor,
+          has_initial_state,
+          num_prefills,
+          num_decodes,
+          /*token_indx=*/nullptr);
+      core_attn_out_active.index_copy_(
+          0, non_spec_token_indx->to(torch::kLong), o_compact);
+    } else {
+      chunk_gated_delta_rule_xe2(
+          queue,
+          core_attn_out_active,
+          q,
+          k,
+          v,
+          b,
+          a,
+          A_log,
+          dt_bias,
+          ssm_state,
+          non_spec_query_start_loc,
+          non_spec_state_indices_tensor,
+          has_initial_state,
+          num_prefills,
+          num_decodes,
+          /*token_indx=*/nullptr);
+    }
   } else {
     gdn::gated_delta_rule(
         queue,
