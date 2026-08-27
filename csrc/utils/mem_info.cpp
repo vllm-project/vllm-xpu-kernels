@@ -3,7 +3,10 @@
 #include <level_zero/ze_api.h>
 #include <sycl/sycl.hpp>
 
+#include <cstring>
 #include <iostream>
+#include <optional>
+#include <vector>
 
 size_t getTotalMemory(ze_device_handle_t& device) {
   uint32_t memoryCount = 0;
@@ -23,10 +26,37 @@ size_t getTotalMemory(ze_device_handle_t& device) {
   return totalMemory;
 }
 
-// A driver that does not implement the extension leaves the zero-initialized
-// size untouched and still returns success, so zero means unavailable.
-size_t getUsableMemory(ze_device_handle_t& device) {
 #ifdef ZE_DEVICE_USABLEMEM_SIZE_PROPERTIES_EXT_NAME
+static bool driverSupportsUsableMem(ze_driver_handle_t driver) {
+  uint32_t extCount = 0;
+  if (zeDriverGetExtensionProperties(driver, &extCount, nullptr) !=
+      ZE_RESULT_SUCCESS) {
+    return false;
+  }
+  std::vector<ze_driver_extension_properties_t> extProps(extCount);
+  if (zeDriverGetExtensionProperties(driver, &extCount, extProps.data()) !=
+      ZE_RESULT_SUCCESS) {
+    return false;
+  }
+  for (const auto& ext : extProps) {
+    if (std::strcmp(ext.name, ZE_DEVICE_USABLEMEM_SIZE_PROPERTIES_EXT_NAME) ==
+            0 &&
+        ext.version >= ZE_DEVICE_USABLEMEM_SIZE_PROPERTIES_EXT_VERSION_1_0) {
+      return true;
+    }
+  }
+  return false;
+}
+#endif
+
+// Returns nullopt when the usable-memory extension is unavailable, which is a
+// different thing from a device that genuinely has zero usable memory left.
+std::optional<size_t>
+getUsableMemory(ze_device_handle_t& device, ze_driver_handle_t& driver) {
+#ifdef ZE_DEVICE_USABLEMEM_SIZE_PROPERTIES_EXT_NAME
+  if (!driverSupportsUsableMem(driver)) {
+    return std::nullopt;
+  }
   ze_device_properties_t deviceProperties{};
   ze_device_usablemem_size_ext_properties_t usableMemProps{};
 
@@ -34,10 +64,12 @@ size_t getUsableMemory(ze_device_handle_t& device) {
   deviceProperties.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES;
   deviceProperties.pNext = &usableMemProps;
 
-  zeDeviceGetProperties(device, &deviceProperties);
+  if (zeDeviceGetProperties(device, &deviceProperties) != ZE_RESULT_SUCCESS) {
+    return std::nullopt;
+  }
   return usableMemProps.currUsableMemSize;
 #else
-  return 0;
+  return std::nullopt;
 #endif
 }
 
@@ -46,14 +78,18 @@ std::tuple<int64_t, int64_t> getMemoryInfo(int64_t device_index) {
       c10::xpu::get_raw_device(static_cast<c10::DeviceIndex>(device_index));
   auto level_zero_device =
       sycl::get_native<sycl::backend::ext_oneapi_level_zero>(device);
+  auto level_zero_driver =
+      sycl::get_native<sycl::backend::ext_oneapi_level_zero>(
+          device.get_platform());
 
-  size_t free = getUsableMemory(level_zero_device);
+  size_t free = 0;
   size_t total = 0;
-  if (free == 0) {
+  if (auto usable = getUsableMemory(level_zero_device, level_zero_driver)) {
+    free = *usable;
+    total = getTotalMemory(level_zero_device);
+  } else {
     std::tie(free, total) = c10::xpu::XPUCachingAllocator::get()->getMemoryInfo(
         static_cast<c10::DeviceIndex>(device_index));
-  } else {
-    total = getTotalMemory(level_zero_device);
   }
 
   if (total > static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
