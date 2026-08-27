@@ -41,6 +41,17 @@ MINI_PYTEST_PARAMS = {
         "seed": [0],
         "op_type": ["shrink", "expand"],
     },
+    "test_kernels_mixed_precision": {
+        "batches": [1],
+        "num_loras": [1],
+        "rank": [1],
+        "hidden_size": [128],
+        "nslices": [1],
+        "weight_dtype": [torch.float16],
+        "device": ["xpu:0"],
+        "seed": [0],
+        "op_type": ["shrink", "expand"],
+    },
 }
 
 
