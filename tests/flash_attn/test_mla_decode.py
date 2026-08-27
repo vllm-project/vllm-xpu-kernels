@@ -152,15 +152,6 @@ def test_mla_decode_deepseek_v3(block_size, query_lens, kv_lens, num_heads_q):
         pytest.skip("XPU not available")
     kv_lora_rank = 512
     qk_rope_head_dim = 64
-    head_size_qk = kv_lora_rank + qk_rope_head_dim
-    # SLM limits on Intel Xe restrict head_size_qk=576 to q_packed<=8
-    # (block_size only affects per-page tiling, not SLM). Larger configs are
-    # rejected by mha_varlen_fwd via TORCH_CHECK; covered by the rejection
-    # test below.
-    if head_size_qk > 512 and num_heads_q > 8:
-        pytest.skip(
-            "MLA head_size=576 requires num_heads_q<=8 due to Intel Xe SLM "
-            "limits")
     dtype = torch.bfloat16
 
     batch = len(query_lens)
@@ -187,23 +178,33 @@ def test_mla_decode_deepseek_v3(block_size, query_lens, kv_lens, num_heads_q):
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
 
 
-def _call_with(num_heads_q, block_size):
-    kv_lora_rank, rope = 512, 64
-    q_nope, q_pe, cache, cu_q, sk, bt = _make_inputs(
-        batch=1, query_lens=[1], kv_lens=[64],
-        num_heads_q=num_heads_q, kv_lora_rank=kv_lora_rank,
-        qk_rope_head_dim=rope, block_size=block_size, num_blocks=4,
-        dtype=torch.bfloat16)
-    return _mla_decode_via_varlen(
-        q_nope, q_pe, cache, bt, cu_q, sk,
-        max_seqlen_q=1, max_seqlen_k=64,
-        softmax_scale=(kv_lora_rank + rope) ** -0.5,
-    )
+@pytest.mark.parametrize("num_heads_q", [16, 32])
+@pytest.mark.parametrize("block_size", [64, 128])
+def test_mla_decode_large_q_packed(num_heads_q, block_size):
+    """q_packed > 8 must work at head_size_qk=576.
 
-
-def test_mla_decode_rejects_large_q_packed():
-    """SLM-oversize configs must fail fast (not hang) for head_size=576."""
+    The decode policies cap the per-work-group V tile at 256 and split V
+    across grid.x (see decode_shapeout_v in fmha_utils.hpp), which keeps the
+    epilogue's cross-SG SLM reduction buffer at 64 KiB for q_packed=16
+    instead of the 128 KiB that previously hung at submit and therefore had
+    to be rejected up front.
+    """
     if not torch.xpu.is_available():
         pytest.skip("XPU not available")
-    with pytest.raises(RuntimeError, match="num_heads_q"):
-        _call_with(num_heads_q=16, block_size=64)
+    kv_lora_rank, rope = 512, 64
+    query_lens, kv_lens = [1, 1], [129, 4096]
+    q_nope, q_pe, cache, cu_q, sk, bt = _make_inputs(
+        batch=2, query_lens=query_lens, kv_lens=kv_lens,
+        num_heads_q=num_heads_q, kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=rope, block_size=block_size, num_blocks=256,
+        dtype=torch.bfloat16)
+    softmax_scale = (kv_lora_rank + rope)**-0.5
+
+    out = _mla_decode_via_varlen(
+        q_nope, q_pe, cache, bt, cu_q, sk,
+        max_seqlen_q=1, max_seqlen_k=max(kv_lens),
+        softmax_scale=softmax_scale,
+    )
+    ref = _ref_mla_decode(q_nope, q_pe, cache, bt, cu_q, sk,
+                          softmax_scale, causal=False)
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)

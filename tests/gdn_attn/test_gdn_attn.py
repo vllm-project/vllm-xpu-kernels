@@ -91,11 +91,16 @@ def ref_gdn_attention(
     if conv_bias is not None:
         conv_bias = conv_bias.to(torch.float)
 
+    # Cache lines may reserve extra spec-decode rows; non-spec uses only the
+    # leading (width - 1) history rows.
+    width = conv_weights.shape[-1]
+
     for batch in range(batch_size):
         if has_initial_state[batch]:
-            conv_state_batch = conv_state[non_spec_state_indices_tensor[batch]]
+            conv_state_batch = conv_state[
+                non_spec_state_indices_tensor[batch]][:width - 1]
         else:
-            conv_state_batch = torch.zeros_like(conv_state[0])
+            conv_state_batch = torch.zeros_like(conv_state[0][:width - 1])
 
         batch_start_id = non_spec_query_start_loc[batch]
         batch_end_id = non_spec_query_start_loc[batch + 1]
@@ -103,8 +108,8 @@ def ref_gdn_attention(
 
         qkv_batch = qkv[batch_start_id:batch_end_id]
         qkv_conv_input = torch.cat([conv_state_batch, qkv_batch], dim=0)
-        conv_state[non_spec_state_indices_tensor[batch]] = qkv_conv_input[
-            batch_num_tokens:]
+        conv_state[non_spec_state_indices_tensor[batch]][:width - 1] = (
+            qkv_conv_input[batch_num_tokens:])
 
         qkv_conv_input = qkv_conv_input.transpose(0, 1).unsqueeze(0)
 
@@ -315,7 +320,7 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
     )
     z = torch.empty_like(core_attn_out)
 
-    intermediates = torch.ops._xpu_C.causal_conv1d(
+    intermediates = torch.ops._xpu_C.causal_conv1d_non_spec(
         z,
         projected_states_qkvz,
         projected_states_ba,
@@ -334,15 +339,11 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
         non_spec_query_start_loc=non_spec_query_start_loc,
         non_spec_token_indx=None,
         non_spec_state_indices_tensor=non_spec_state_indices_tensor,
-        spec_query_start_loc=None,
-        spec_token_indx=None,
-        spec_state_indices_tensor=None,
-        num_accepted_tokens=None,
         num_actual_tokens=num_actual_tokens,
         tp_size=tp_size,
         reorder_input=reorder_input)
 
-    torch.ops._xpu_C.gated_delta_rule(
+    torch.ops._xpu_C.gated_delta_rule_non_spec(
         core_attn_out,
         *intermediates,
         num_v_heads,
@@ -357,10 +358,6 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
         non_spec_query_start_loc=non_spec_query_start_loc,
         non_spec_token_indx=None,
         non_spec_state_indices_tensor=non_spec_state_indices_tensor,
-        spec_query_start_loc=None,
-        spec_token_indx=None,
-        spec_state_indices_tensor=None,
-        num_accepted_tokens=None,
         num_actual_tokens=num_actual_tokens,
         tp_size=tp_size)
 
@@ -709,9 +706,9 @@ def ref_gdn_attention_spec(
     tp_size,
     reorder_input,
 ):
-    """Spec-decode reference. Mirrors the non-spec ref but routes gather/
-    scatter through spec_token_indx and writes per-step ssm-state + final
-    conv-state into spec_state_indices_tensor."""
+    """Spec-decode reference. Conv uses the single-cache-line sliding-window
+    convention (column 0 + row offset); ssm keeps the token-indexed
+    convention (per-step writeback to every column)."""
     eps = 0.000001
     scale = 1.0 / math.sqrt(head_k_dim)
     dtype = projected_states_qkvz.dtype
@@ -749,15 +746,24 @@ def ref_gdn_attention_spec(
 
         naccepted = int(num_accepted_tokens[n].item())
         init_col = max(naccepted - 1, 0)
-        init_slot = int(spec_state_indices_tensor[n, init_col].item())
-        final_conv_slot = int(spec_state_indices_tensor[n, K - 1].item())
+        init_slot = int(spec_state_indices_tensor[n, init_col].item())  # ssm
+        conv_slot = int(spec_state_indices_tensor[n, 0].item())  # conv, col 0
+        conv_state_len = conv_state.shape[1]
+        conv_init_row = init_col
 
-        # ---- conv1d on the K gathered tokens (with Width-1 history) ----
-        conv_state_batch = conv_state[init_slot].clone()
+        # conv1d: window = rows [init_row, init_row + width - 1), col 0
+        conv_line = conv_state[conv_slot]
+        prior = conv_line[conv_init_row:conv_init_row + (width - 1)].clone()
         qkv_batch = qkv[globals_]  # [K, qkv_elems]
-        qkv_conv_input = torch.cat([conv_state_batch, qkv_batch], dim=0)
-        # Final conv state goes ONLY to the last cache slot.
-        conv_state[final_conv_slot] = qkv_conv_input[-(width - 1):]
+        qkv_conv_input = torch.cat([prior, qkv_batch], dim=0)
+        # Roll the line: history from init_row+1, then the K draft inputs.
+        new_conv_line = torch.empty_like(conv_line)
+        hist_rows = conv_state_len - K
+        if hist_rows > 0:
+            new_conv_line[:hist_rows] = conv_line[
+                conv_init_row + 1:conv_init_row + 1 + hist_rows]
+        new_conv_line[hist_rows:] = qkv_batch
+        conv_state[conv_slot] = new_conv_line
 
         qkv_conv_in = qkv_conv_input.transpose(0, 1).unsqueeze(0).to(
             torch.float32)
@@ -847,6 +853,7 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
 
     assert head_k_dim == head_v_dim
     K = num_spec_tokens
+    num_spec = K - 1  # num_speculative_tokens
     num_actual_tokens = num_spec_decodes * K
     cache_batch_size = 200
 
@@ -864,8 +871,9 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                       mixed_ba_size,
                                       dtype=dtype,
                                       device=device)
+    # Sliding-window layout: state_len = (width-1) + num_spec rows per line.
     conv_state = torch.randn(cache_batch_size,
-                             width - 1,
+                             (width - 1) + num_spec,
                              mixed_qkv_size,
                              dtype=dtype,
                              device=device)
@@ -888,15 +896,15 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                         device=device)
     dt_bias = torch.randn(num_v_heads // tp_size, dtype=dtype, device=device)
 
-    # Each spec seq owns K consecutive cache slots (cols 0..K-1).
+    # K slots per seq: conv uses only column 0, ssm uses all K columns.
     state_slots = random.sample(range(cache_batch_size), num_spec_decodes * K)
     spec_state_indices_tensor = torch.tensor(state_slots,
                                              dtype=torch.int32,
                                              device=device).reshape(
                                                  num_spec_decodes, K)
-    # Mix of acceptance counts including the 0 edge case.
+    # Cover acceptance 0..K (0 edge case and num_accepted > 1).
     num_accepted_tokens = torch.tensor(
-        [random.randint(0, K) for _ in range(num_spec_decodes)],
+        [n % (K + 1) for n in range(num_spec_decodes)],
         dtype=torch.int32,
         device=device)
 
@@ -913,7 +921,7 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                 device=device)
     z = torch.zeros_like(core_attn_out)
 
-    intermediates = torch.ops._xpu_C.causal_conv1d(
+    intermediates = torch.ops._xpu_C.causal_conv1d_spec(
         z,
         projected_states_qkvz,
         projected_states_ba,
@@ -928,10 +936,6 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
         num_prefills=0,
         num_decodes=0,
         num_spec_decodes=num_spec_decodes,
-        has_initial_state=None,
-        non_spec_query_start_loc=None,
-        non_spec_token_indx=None,
-        non_spec_state_indices_tensor=None,
         spec_query_start_loc=spec_query_start_loc,
         spec_token_indx=spec_token_indx,
         spec_state_indices_tensor=spec_state_indices_tensor,
@@ -940,7 +944,7 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
         tp_size=tp_size,
         reorder_input=reorder_input)
 
-    torch.ops._xpu_C.gated_delta_rule(
+    torch.ops._xpu_C.gated_delta_rule_spec(
         core_attn_out,
         *intermediates,
         num_v_heads,
@@ -951,10 +955,6 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
         num_prefills=0,
         num_decodes=0,
         num_spec_decodes=num_spec_decodes,
-        has_initial_state=None,
-        non_spec_query_start_loc=None,
-        non_spec_token_indx=None,
-        non_spec_state_indices_tensor=None,
         spec_query_start_loc=spec_query_start_loc,
         spec_token_indx=spec_token_indx,
         spec_state_indices_tensor=spec_state_indices_tensor,
@@ -1000,14 +1000,301 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                rtol=rtol,
                                equal_nan=True)
 
-    # Final conv-state slot per seq (col K-1) must match the reference.
+    # Conv state uses a single cache line (column 0); assert that slot.
     for n in range(num_spec_decodes):
-        final_slot = int(spec_state_indices_tensor[n, K - 1].item())
-        torch.testing.assert_close(conv_state[final_slot],
-                                   ref_conv_state[final_slot],
+        conv_slot = int(spec_state_indices_tensor[n, 0].item())
+        torch.testing.assert_close(conv_state[conv_slot],
+                                   ref_conv_state[conv_slot],
                                    atol=atol,
                                    rtol=rtol)
         # All K ssm-state slots are written per-step.
+        for t in range(K):
+            slot = int(spec_state_indices_tensor[n, t].item())
+            torch.testing.assert_close(ssm_state[slot],
+                                       ref_ssm_state[slot],
+                                       atol=atol,
+                                       rtol=rtol)
+
+
+MIXED_NUM_SPEC_DECODES = [1, 4]
+MIXED_NUM_SPEC_TOKENS = [2, 3]  # num_speculative_tokens + 1
+
+
+@pytest.mark.parametrize("num_spec_decodes", MIXED_NUM_SPEC_DECODES)
+@pytest.mark.parametrize("num_spec_tokens", MIXED_NUM_SPEC_TOKENS)
+@pytest.mark.parametrize("non_spec_num_tokens", [1, 32, 257])
+@pytest.mark.parametrize("num_k_heads", [16])
+@pytest.mark.parametrize("head_k_dim", [128])
+@pytest.mark.parametrize("num_v_heads", [32])
+@pytest.mark.parametrize("head_v_dim", [128])
+@pytest.mark.parametrize("width", [4])
+@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize("has_bias", [True, False])
+@pytest.mark.parametrize("activation", ["silu"])
+@pytest.mark.parametrize("mode", ["prefill", "decode", "mix_mode"])
+@pytest.mark.parametrize("reorder_input", [True, False])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16],
+                         ids=format_tc)
+@pytest.mark.parametrize("ssm_state_is_fp32", [False, True])
+@torch.inference_mode()
+def test_gdn_attention_mixed_spec_non_spec(num_spec_decodes, num_spec_tokens,
+                                           non_spec_num_tokens, num_k_heads,
+                                           head_k_dim, num_v_heads, head_v_dim,
+                                           width, tp_size, has_bias, activation,
+                                           mode, reorder_input, dtype,
+                                           ssm_state_is_fp32):
+    """Mixed batch exercising the fused gdn_attention with BOTH a non-spec
+    (prefill + decode) group AND a spec-decode group in a single call.
+
+    Layout in the global token buffer:
+      - non-spec tokens occupy the leading segment [0, non_spec_token)
+        contiguously (validated with ref_gdn_attention);
+      - spec tokens occupy the trailing segment [non_spec_token,
+        num_actual_tokens), addressed through spec_token_indx with the
+        per-seq order shuffled to exercise gather/scatter (validated with
+        ref_gdn_attention_spec).
+    The two groups use disjoint conv/ssm cache slots so their execution order
+    inside the fused op cannot interfere.
+    """
+    if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
+            and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
+        pytest.skip("skip gdn attention kernels testing on PVC.")
+
+    device = "xpu"
+    random.seed(7)
+    torch.manual_seed(7)
+    ssm_state_dtype = torch.float32 if ssm_state_is_fp32 else dtype
+
+    assert head_k_dim == head_v_dim
+
+    # ---- non-spec segment sizing (prefill / decode split) ----
+    non_spec_batch = min(32, non_spec_num_tokens)
+    if mode == "prefill":
+        num_prefills = non_spec_batch
+    elif mode == "decode":
+        num_prefills = 0
+        # decode means one token per sequence; only valid when tokens == batch.
+        if non_spec_batch != non_spec_num_tokens:
+            pytest.skip("decode mode requires non_spec_num_tokens == batch")
+    else:
+        num_prefills = (random.randint(1, non_spec_batch - 1)
+                        if non_spec_batch > 1 else 1)
+    num_decodes = non_spec_batch - num_prefills
+
+    K = num_spec_tokens
+    spec_token = num_spec_decodes * K
+    non_spec_token = non_spec_num_tokens
+    num_actual_tokens = non_spec_token + spec_token
+    cache_batch_size = 400
+
+    mixed_qkvz_size = num_k_heads // tp_size * (
+        2 * head_k_dim + 2 * head_v_dim * num_v_heads // num_k_heads)
+    mixed_ba_size = num_k_heads // tp_size * (2 * num_v_heads // num_k_heads)
+    mixed_qkv_size = num_k_heads // tp_size * (
+        2 * head_k_dim + head_v_dim * num_v_heads // num_k_heads)
+
+    projected_states_qkvz = torch.randn((num_actual_tokens, mixed_qkvz_size),
+                                        dtype=dtype,
+                                        device=device)
+    projected_states_ba = torch.randn((num_actual_tokens, mixed_ba_size),
+                                      dtype=dtype,
+                                      device=device)
+
+    # Shared conv cache: state_len=(width-1)+num_spec. non-spec uses only the
+    # leading width-1 rows; spec uses the full sliding window in column 0.
+    num_spec = K - 1
+    conv_state = torch.randn(
+        (cache_batch_size, (width - 1) + num_spec, mixed_qkv_size),
+        dtype=dtype,
+        device=device)
+    ref_conv_state = conv_state.clone()
+    ssm_state = torch.randn(
+        (cache_batch_size, num_v_heads // tp_size, head_v_dim, head_k_dim),
+        dtype=ssm_state_dtype,
+        device=device)
+    ref_ssm_state = ssm_state.clone()
+
+    conv_weights = torch.randn((mixed_qkv_size, width),
+                               dtype=dtype,
+                               device=device)
+    conv_bias = None
+    if has_bias:
+        conv_bias = torch.randn((mixed_qkv_size), dtype=dtype, device=device)
+
+    A_log = torch.randn((num_v_heads // tp_size),
+                        dtype=torch.float32,
+                        device=device)
+    dt_bias = torch.randn((num_v_heads // tp_size), dtype=dtype, device=device)
+
+    # ---- disjoint cache slots for the two groups ----
+    all_slots = random.sample(range(cache_batch_size),
+                              non_spec_batch + spec_token)
+    non_spec_slots = all_slots[:non_spec_batch]
+    spec_slots = all_slots[non_spec_batch:]
+
+    # ---- non-spec indexing: leading segment [0, non_spec_token) ----
+    prefill_batches = simple_random_distribute(non_spec_token - num_decodes,
+                                               non_spec_batch - num_decodes)
+    token_batches = torch.cat([torch.ones([num_decodes]),
+                               prefill_batches]).to(device)
+    perm = torch.randperm(token_batches.size(0)).to(device)
+    shuffled_tensor = token_batches[perm]
+    non_spec_query_start_loc = torch.cat([
+        torch.zeros([1], device=device),
+        torch.cumsum(shuffled_tensor, dim=0)
+    ]).to(torch.int32)
+    has_initial_state = perm >= num_decodes
+    non_spec_state_indices_tensor = torch.tensor(non_spec_slots,
+                                                 device=device,
+                                                 dtype=torch.int32)
+    # Non-spec tokens are laid out contiguously at the front; the identity
+    # token index maps kernel writes to the same rows the reference uses.
+    non_spec_token_indx = torch.arange(non_spec_token,
+                                       dtype=torch.int32,
+                                       device=device)
+
+    # ---- spec indexing: trailing segment [non_spec_token, num_actual_tokens)
+    spec_state_indices_tensor = torch.tensor(spec_slots,
+                                             dtype=torch.int32,
+                                             device=device).reshape(
+                                                 num_spec_decodes, K)
+    num_accepted_tokens = torch.tensor(
+        [n % (K + 1) for n in range(num_spec_decodes)],
+        dtype=torch.int32,
+        device=device)
+    # Shuffle spec token positions WITHIN the trailing segment.
+    spec_perm = torch.randperm(spec_token, device=device)
+    spec_token_indx = (non_spec_token +
+                       spec_perm).to(torch.int32).contiguous()
+    spec_query_start_loc = (torch.arange(
+        num_spec_decodes + 1, dtype=torch.int32, device=device) * K)
+
+    core_attn_out = torch.zeros(
+        (num_actual_tokens, num_v_heads // tp_size, head_v_dim),
+        dtype=dtype,
+        device=device,
+    )
+    z = torch.zeros_like(core_attn_out)
+
+    torch.ops._xpu_C.gdn_attention(
+        core_attn_out,
+        z,
+        projected_states_qkvz,
+        projected_states_ba,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_state=conv_state,
+        ssm_state=ssm_state,
+        conv_weights=conv_weights,
+        conv_bias=conv_bias,
+        activation=activation,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        num_spec_decodes=num_spec_decodes,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_token_indx=non_spec_token_indx,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        spec_query_start_loc=spec_query_start_loc,
+        spec_token_indx=spec_token_indx,
+        spec_state_indices_tensor=spec_state_indices_tensor,
+        num_accepted_tokens=num_accepted_tokens,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size,
+        reorder_input=reorder_input)
+
+    # ---- reference: run non-spec ref on the leading segment and spec ref on
+    # the trailing segment, into a shared reference buffer ----
+    ref_core_attn_out = torch.zeros_like(core_attn_out)
+    ref_z = torch.zeros_like(core_attn_out)
+
+    # Non-spec reference consumes only the leading [0, non_spec_token) rows.
+    ref_gdn_attention(
+        ref_core_attn_out[:non_spec_token],
+        ref_z[:non_spec_token],
+        projected_states_qkvz[:non_spec_token].contiguous(),
+        projected_states_ba[:non_spec_token].contiguous(),
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_state=ref_conv_state,
+        ssm_state=ref_ssm_state,
+        conv_weights=conv_weights,
+        conv_bias=conv_bias,
+        activation=activation,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        num_actual_tokens=non_spec_token,
+        tp_size=tp_size,
+        reorder_input=reorder_input,
+    )
+
+    # Spec reference scatters through spec_token_indx (trailing rows).
+    ref_gdn_attention_spec(
+        ref_core_attn_out,
+        ref_z,
+        projected_states_qkvz,
+        projected_states_ba,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_state=ref_conv_state,
+        ssm_state=ref_ssm_state,
+        conv_weights=conv_weights,
+        conv_bias=conv_bias,
+        activation=activation,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        num_spec_decodes=num_spec_decodes,
+        spec_query_start_loc=spec_query_start_loc,
+        spec_token_indx=spec_token_indx,
+        spec_state_indices_tensor=spec_state_indices_tensor,
+        num_accepted_tokens=num_accepted_tokens,
+        num_actual_tokens=num_actual_tokens,
+        tp_size=tp_size,
+        reorder_input=reorder_input,
+    )
+
+    atol = 5e-2
+    rtol = 5e-2
+
+    torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
+    torch.testing.assert_close(core_attn_out,
+                               ref_core_attn_out,
+                               atol=atol,
+                               rtol=rtol,
+                               equal_nan=True)
+
+    # non-spec conv/ssm cache slots.
+    for i in range(non_spec_batch):
+        slot = non_spec_state_indices_tensor[i]
+        torch.testing.assert_close(conv_state[slot],
+                                   ref_conv_state[slot],
+                                   atol=atol,
+                                   rtol=rtol)
+        torch.testing.assert_close(ssm_state[slot],
+                                   ref_ssm_state[slot],
+                                   atol=atol,
+                                   rtol=rtol)
+
+    # spec conv (single cache line, column 0) / ssm (all K per-step slots).
+    for n in range(num_spec_decodes):
+        conv_slot = int(spec_state_indices_tensor[n, 0].item())
+        torch.testing.assert_close(conv_state[conv_slot],
+                                   ref_conv_state[conv_slot],
+                                   atol=atol,
+                                   rtol=rtol)
         for t in range(K):
             slot = int(spec_state_indices_tensor[n, t].item())
             torch.testing.assert_close(ssm_state[slot],
@@ -1252,7 +1539,6 @@ def test_causal_conv1d_conv_elems_oob_guard(dtype):
                                         dtype=dtype, device=device)
     projected_states_ba = torch.randn((num_actual_tokens, mixed_ba_size),
                                       dtype=dtype, device=device)
-                                      
     conv_state = torch.randn((cache_batch_size, width - 1, mixed_qkv_size),
                              dtype=dtype, device=device)
     ref_conv_state = conv_state.clone()

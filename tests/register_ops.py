@@ -28,6 +28,16 @@ def fused_input_norm(out: torch.Tensor, input: torch.Tensor,
     torch.ops._xpu_C.fused_input_norm(out, input, weight, bias)
 
 
+def gemma_rms_norm(out: torch.Tensor, input: torch.Tensor,
+                   weight: torch.Tensor, epsilon: float) -> None:
+    torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
+
+
+def fused_add_gemma_rms_norm(input: torch.Tensor, residual: torch.Tensor,
+                             weight: torch.Tensor, epsilon: float) -> None:
+    torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
+
+
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 

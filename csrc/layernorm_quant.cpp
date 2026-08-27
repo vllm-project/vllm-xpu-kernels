@@ -561,9 +561,9 @@ class rms_norm_static_fp8_quant_kernel {
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(src[j]);
-        // Weight multiply in scalar_t precision to match unfused path
-        float norm_x =
-            static_cast<float>(static_cast<scalar_t>(x * inv_rms) * wgt[j]);
+        // Weight multiply in fp32 (promoting weight) to match unfused path and
+        // CUDA, applying a single rounding at store time.
+        float norm_x = x * inv_rms * static_cast<float>(wgt[j]);
         float q = norm_x * scale_inv;
         token_output[i * VEC_SIZE + j] =
             static_cast<out_t>(sycl::max(sycl::min(q, fp8_max), -fp8_max));
@@ -655,9 +655,9 @@ class fused_add_rms_norm_static_fp8_quant_kernel {
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(res[j]);
-        // Weight multiply in scalar_t precision to match unfused path
-        float norm_x =
-            static_cast<float>(static_cast<scalar_t>(x * inv_rms) * wgt[j]);
+        // Weight multiply in fp32 (promoting weight) to match unfused path and
+        // CUDA, applying a single rounding at store time.
+        float norm_x = x * inv_rms * static_cast<float>(wgt[j]);
         float q = norm_x * scale_inv;
         token_output[i * VEC_SIZE + j] =
             static_cast<out_t>(sycl::max(sycl::min(q, fp8_max), -fp8_max));

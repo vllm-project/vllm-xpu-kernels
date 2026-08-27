@@ -21,6 +21,21 @@ struct is_chunk_policy_tuple_enabled : std::true_type {};
 
 using namespace cute;
 
+template <typename Policy>
+struct chunk_policy_reported_head_size {
+  static constexpr int value = cute::size<1>(typename Policy::ShapeOut{});
+};
+
+// Some policy reuses a 256-wide output tile due to register pressure.
+// Keep diagnostics aligned with the logical model head_size.
+template <>
+struct chunk_policy_reported_head_size<chunk_policy_head512>
+    : std::integral_constant<int, 512> {};
+
+template <>
+struct chunk_policy_reported_head_size<chunk_policy_head512_b16>
+    : std::integral_constant<int, 512> {};
+
 template <typename chunk_policy, bool... Bs>
 void policy_dispatch_func(
     sycl::queue& queue,
@@ -40,8 +55,8 @@ void policy_dispatch_func(
   constexpr bool Local = flags[2];
   constexpr bool Sink = flags[3];
   constexpr bool SoftmaxLSE = flags[4];
-  // Extract head_size from policy at compile time.
-  constexpr int _head_sz = cute::size<1>(typename chunk_policy::ShapeOut{});
+  // Report the logical head_size in diagnostics instead of ShapeOut width.
+  constexpr int _head_sz = chunk_policy_reported_head_size<chunk_policy>::value;
 
   if constexpr (SoftmaxLSE && (Paged || Local || Sink)) {
     TORCH_CHECK(
