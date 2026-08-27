@@ -981,11 +981,11 @@ void situ_and_mul(
 }
 
 #define LAUNCH_SILU_AND_MUL_WITH_CLAMP(KERNEL, LIMIT, ALPHA, BETA)         \
-  int d = input.size(-1) / 2;                                              \
-  int64_t num_tokens = input.numel() / input.size(-1);                     \
-  if (num_tokens == 0) {                                                   \
+  if (input.numel() == 0) {                                                \
     return;                                                                \
   }                                                                        \
+  int d = input.size(-1) / 2;                                              \
+  int64_t num_tokens = input.numel() / input.size(-1);                     \
   at::DeviceGuard device_guard(input.device());                            \
   auto& queue = vllm::xpu::vllmGetQueue();                                 \
   VLLM_DISPATCH_FLOATING_TYPES(                                            \

@@ -11,9 +11,7 @@ D = [512, 13824, 17]  # 17 exercises the scalar fallback (d % vec_size != 0)
 LIMITS = [7.0]
 PARAMS = [(1.0, 0.0), (1.702, 1.0)]  # (alpha, beta)
 SEEDS = [0]
-XPU_DEVICES = [
-    f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
-]
+XPU_DEVICES = [f"xpu:{i}" for i in range(min(torch.xpu.device_count(), 2))]
 
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
@@ -57,7 +55,9 @@ def test_silu_and_mul_with_clamp(
     device: str,
 ) -> None:
     seed_everything(seed)
-    torch.set_default_device(device)
+    # Note: torch.set_default_device("xpu:1") not works.
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
     alpha, beta = params
     x = torch.randn(num_tokens, 2 * d, dtype=dtype)
 
@@ -76,3 +76,21 @@ def test_silu_and_mul_with_clamp(
     out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
     fn = torch.ops._C.silu_and_mul_with_clamp
     opcheck(fn, (out, x, limit, alpha, beta))
+
+
+@pytest.mark.parametrize("shape", [(0, 512), (4, 0)])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@torch.inference_mode()
+def test_silu_and_mul_with_clamp_empty_input(
+    shape: tuple,
+    dtype: torch.dtype,
+    device: str,
+) -> None:
+    num_tokens, d = shape
+    x = torch.randn(num_tokens, 2 * d, dtype=dtype, device=device)
+    out = torch.empty(num_tokens, d, dtype=dtype, device=device)
+
+    torch.ops._C.silu_and_mul_with_clamp(out, x, 7.0, 1.0, 0.0)
+
+    assert out.numel() == 0
