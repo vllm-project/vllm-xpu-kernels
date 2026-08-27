@@ -1078,8 +1078,8 @@ def ref_paged_decode_softmax_lse(
 # final softmax statistics:
 #   * num_splits_kv=1              -> FMHA epilogue writes LSE (no reduce)
 #   * num_splits_kv>1, long seqs   -> ReduceSplitK combines per-split stats
-#   * num_splits_kv>1, short seqs  -> single-split sentinel round-trips
-#                                     through ReduceSplitK
+#   * num_splits_kv>1, short seqs  -> one active split passes through
+#                                     ReduceSplitK
 # `use_split_plan` additionally exercises the compact-grid (work_list) path.
 @pytest.mark.parametrize("seq_lens", [
     [(1, 523), (1, 37), (1, 2011)],
@@ -1195,6 +1195,146 @@ def test_decode_with_paged_kv_softmax_lse(
                                ref_lse.float(),
                                atol=5e-2,
                                rtol=5e-2)
+    torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize(
+    "case,num_splits_kv,head_size,block_size,kv_len",
+    [
+        pytest.param("single", 1, 64, 64, 2053, id="single-split"),
+        pytest.param("short-fallback",
+                     8,
+                     64,
+                     64,
+                     31 * 64,
+                     id="requested-8-short-fallback"),
+        pytest.param("true-even",
+                     8,
+                     64,
+                     64,
+                     32 * 64,
+                     id="true-split-even"),
+        pytest.param("true-tail",
+                     8,
+                     64,
+                     64,
+                     32 * 64 + 5,
+                     id="true-split-uneven-tail"),
+        pytest.param("true-block16",
+                     8,
+                     128,
+                     16,
+                     32 * 16,
+                     id="true-split-block16"),
+    ],
+)
+@torch.inference_mode()
+def test_decode_paged_kv_split_k_accuracy(
+    case: str,
+    num_splits_kv: int,
+    head_size: int,
+    block_size: int,
+    kv_len: int,
+) -> None:
+    """Compare path-guaranteed decode split modes with a torch reference."""
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(2026)
+
+    num_query_heads, num_kv_heads = 8, 2
+    num_kv_blocks = (kv_len + block_size - 1) // block_size
+    scale = head_size**-0.5
+    dtype = torch.bfloat16
+
+    # block_size is also the selected K tile width for these cases. The kernel
+    # only collapses requested split-K when there are fewer than 32 K tiles.
+    if case == "short-fallback":
+        assert num_kv_blocks < 32
+    elif num_splits_kv > 1:
+        assert num_kv_blocks >= 32
+
+    query = torch.zeros(1,
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    head_scale = torch.linspace(0.85,
+                                1.15,
+                                num_query_heads,
+                                dtype=torch.float32).to(dtype)
+    query[0, :, 0] = head_size**0.5 * head_scale
+
+    key_cache = torch.zeros(num_kv_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    page_logits = torch.linspace(-3.0,
+                                 3.0,
+                                 num_kv_blocks,
+                                 dtype=torch.float32).to(dtype)
+    key_cache[:, :, 0, 0] = page_logits[:, None]
+    key_cache[:, :, 1, 0] = page_logits[:, None] + 0.375
+    value_cache = torch.randn_like(key_cache)
+
+    cu_query_lens = torch.tensor([0, 1], dtype=torch.int32)
+    kv_lens = torch.tensor([kv_len], dtype=torch.int32)
+    block_tables = torch.arange(num_kv_blocks,
+                                dtype=torch.int32).reshape(1, -1)
+
+    def run(splits: int, return_lse: bool):
+        return flash_attn_varlen_func(
+            query,
+            key_cache,
+            value_cache,
+            1,
+            cu_query_lens,
+            kv_len,
+            seqused_k=kv_lens,
+            softmax_scale=scale,
+            causal=False,
+            block_table=block_tables,
+            window_size=(-1, -1),
+            num_splits_kv=splits,
+            return_softmax_lse=return_lse,
+        )
+
+    out, softmax_lse = run(num_splits_kv, True)
+    out_without_lse = run(num_splits_kv, False)
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=[1],
+                                kv_lens=[kv_len],
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False,
+                                is_paged=True,
+                                window_size_left=-1,
+                                window_size_right=-1,
+                                dtype=dtype)
+    ref_lse = ref_paged_decode_softmax_lse(query=query,
+                                           key_cache=key_cache,
+                                           kv_lens=[kv_len],
+                                           block_tables=block_tables,
+                                           scale=scale)
+
+    assert softmax_lse.shape == (num_query_heads, 1)
+    assert softmax_lse.dtype == torch.float32
+    torch.testing.assert_close(out, ref_output, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(out_without_lse, out, atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(softmax_lse.float(),
+                               ref_lse.float(),
+                               atol=2e-2,
+                               rtol=2e-2)
+
+    if num_splits_kv > 1:
+        single_out, single_lse = run(1, True)
+        torch.testing.assert_close(out, single_out, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(softmax_lse,
+                                   single_lse,
+                                   atol=2e-2,
+                                   rtol=2e-2)
     torch.xpu.empty_cache()
 
 
