@@ -1339,7 +1339,7 @@ def test_decode_paged_kv_split_k_accuracy(
 
 
 # Regression test for the attention sink row mapping in the decode epilogue.
-# The softmax statistics (exp_sums / max_logits / softmax_lse) are reported per
+# The softmax statistics (softmax_lse) are reported per
 # packed-GQA row, and the sink must be the one belonging to that row. A random
 # sink over a long KV cache is nearly invisible in the result, so this test
 # makes the sink dominate: sink[h] = 20 + (h % head_group_q) is far above every

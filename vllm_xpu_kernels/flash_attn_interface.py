@@ -248,7 +248,7 @@ def build_decode_split_plan(
     # relative to k_block0, matching `kv_split_offset = k_block0 + tile_start`.
     def _windowed_tiles(kv: int) -> int:
         total = (kv + kv_tile - 1) // kv_tile
-        if window_size_left is not None and window_size_left >= 0:
+        if window_size_left >= 0:
             k_block0 = max(kv - 1 - window_size_left, 0) // kv_tile
             total -= k_block0
         return max(1, total)
