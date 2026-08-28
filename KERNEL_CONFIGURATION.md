@@ -84,8 +84,8 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 
 | File | Kernels | Use Case |
 |------|---------|----------|
-| `chunk_prefill_full.conf` | 216 | All combinations — supports every model |
-| `chunk_prefill_default.conf` | ~13 | Llama, Qwen, DeepSeek MLA, Falcon (default build) |
+| `chunk_prefill_full.conf` | 240 | All combinations — supports every model |
+| `chunk_prefill_default.conf` | ~31 | Llama, Qwen, DeepSeek MLA, Falcon (default build) |
 
 ### Paged Decode
 
@@ -117,8 +117,9 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 
 # Format: headsize,paged,causal,local,sink,lse
 128,true,true,false,false,false
+128,true,true,false,false,true    # paged LSE
 128,false,true,false,false,false
-128,false,true,false,false,true   # lse=true: only valid when paged=false,local=false,sink=false
+128,false,true,false,false,true   # non-paged LSE
 192,true,true,false,false,false
 ```
 
@@ -128,9 +129,11 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 - `causal` — whether causal masking is applied
 - `local` — whether sliding window attention is used
 - `sink` — whether StreamingLLM attention sinks are used
-- `lse` — whether log-sum-exp is output (requires `paged=false`, `local=false`, `sink=false`)
+- `lse` — whether log-sum-exp is output. Paged and non-paged kernels require
+  `local=false`, `sink=false`.
 
-If boolean flags are omitted, all 18 valid combinations are generated for that headsize.
+If boolean flags are omitted, all 20 valid combinations are generated for
+that headsize.
 
 ### Paged Decode
 
@@ -191,18 +194,20 @@ Common model parameters:
 
 ### Chunk Prefill: 5 Bool Parameters (`paged`, `causal`, `local`, `sink`, `lse`)
 
-**LSE constraint:** `lse=true` is only valid when `paged=false`, `local=false`, `sink=false`.
-It is used for distributed attention merging (chunked prefill states).
+Paged and non-paged chunk prefill support `lse=true` for global attention
+without sinks.
 
 | paged | causal | local | sink | lse | Valid? | Use Case |
 |-------|--------|-------|------|-----|--------|----------|
 | true  | true   | false | false | false | ✅ | Paged KV cache |
+| true  | true   | false | false | true  | ✅ | Paged KV cache with LSE |
 | false | true   | false | false | false | ✅ | Initial prompt, no paging |
 | false | true   | false | false | true  | ✅ | Chunked prefill state merge |
 | false | true   | true  | false | false | ✅ | Sliding window attention |
 | false | true   | true  | true  | false | ✅ | Sliding window + sink tokens |
 | false | true   | false | true  | false | ✅ | Sink token optimization |
-| any   | any    | any   | any   | true  | ❌ | LSE requires paged=false, local=false, sink=false |
+| any   | any    | true  | any   | true  | ❌ | Local LSE is not instantiated |
+| any   | any    | any   | true  | true  | ❌ | Sink LSE is not instantiated |
 
 ### Paged Decode: 3 Bool Parameters (`causal`, `local`, `sink`)
 
@@ -391,8 +396,8 @@ cat build/temp_template/csrc/xpu/attn/xe_2/paged_decode_enabled_policies_gen.hpp
 
 | Config | Build Time | Chunk Prefill Kernels | Paged Decode Kernels | Flexibility |
 |--------|------------|----------------------|----------------------|-------------|
-| `default` | ~2 min | ~13 | ~17 | Llama, Qwen, DeepSeek MLA, Falcon |
-| `full` | ~60 min | 216 | 384 | All models |
+| `default` | ~2 min | ~31 | ~17 | Llama, Qwen, DeepSeek MLA, Falcon |
+| `full` | ~60 min | 240 | 384 | All models |
 
 ### Binary Size Impact
 

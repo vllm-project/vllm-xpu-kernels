@@ -177,6 +177,15 @@ MINI_PYTEST_PARAMS = {
         "head_size": [128],
         "block_size": [16, 64],
     },
+    "test_varlen_with_paged_kv_softmax_lse": {
+        "seq_lens": [[(17, 73), (130, 211)]],
+        "head_size": [128],
+        "block_size": [64],
+        "extra": [(False, (-1, -1), False)],
+    },
+    "test_mixed_paged_kv_softmax_lse": {
+        "extra": [(False, (-1, -1))],
+    },
     "test_decode_with_cross_layer_paged_kv": {
         "seq_lens": [[(1, 1025), (1, 523), (1, 37)]],
         "num_heads": [(8, 2)],
@@ -875,8 +884,8 @@ def ref_softmax_lse(
 
     Matches the LSE produced by the xe_2 chunk_prefill kernel:
         lse[q, h] = log( sum_k exp(scale * (Q[q, h] . K[k, h])) )
-    with optional causal masking. Kernel restricts LSE to
-    Paged=False, Local=False, Sink=False, so this ref mirrors the same.
+    with optional causal masking. This helper covers the non-paged global
+    attention tests; ref_paged_softmax_lse covers paged/local/sink cases.
     Returns a tensor of shape [num_query_heads, sum(query_lens)] in float32.
     """
     num_query_heads = query.shape[1]
@@ -906,10 +915,9 @@ def ref_softmax_lse(
     return torch.cat(lse_list, dim=1)
 
 
-# softmax_lse return is only supported when:
-#   is_paged == False, window_size == (-1,-1) (i.e. !is_local), is_sink == False
-# Causal is orthogonal. Keep the param grid small since the outer loop count
-# multiplies with these.
+# Non-paged softmax_lse remains limited to global attention without sinks.
+# Causal is orthogonal. Keep the parameter grid small since the outer loop
+# count multiplies with these.
 #
 # Note on seq_lens: the cases mix single-token (decode-style) sequences with
 # multi-token prefill sequences that span more than one query row per tile.
@@ -1014,6 +1022,265 @@ def test_varlen_with_softmax_lse(
     torch.testing.assert_close(out, ref_output, atol=atol, rtol=rtol)
     # LSE is float32 and computed in log space — compare with a modest
     # tolerance that covers bf16 Q/K accumulation noise.
+    torch.testing.assert_close(softmax_lse.float(),
+                               ref_lse.float(),
+                               atol=5e-2,
+                               rtol=5e-2)
+    torch.xpu.empty_cache()
+
+
+def ref_paged_softmax_lse(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    query_lens: list[int],
+    kv_lens: list[int],
+    block_tables: torch.Tensor,
+    scale: float,
+    casual: bool,
+    window_size: tuple[int, int] = (-1, -1),
+    sink: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Reference LSE for paged prefill and mixed prefill/decode batches."""
+    block_tables_np = block_tables.cpu().numpy()
+    _, block_size, num_kv_heads, head_size = key_cache.shape
+    num_query_heads = query.shape[1]
+    window_size_left, window_size_right = window_size
+    lse_list: list[torch.Tensor] = []
+    start_q = 0
+
+    for i, (query_len, kv_len) in enumerate(zip(query_lens, kv_lens)):
+        q = query[start_q:start_q + query_len].float()
+        num_kv_blocks = (kv_len + block_size - 1) // block_size
+        block_indices = block_tables_np[i, :num_kv_blocks]
+        k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
+        k = k[:kv_len].float()
+        if num_query_heads != num_kv_heads:
+            k = torch.repeat_interleave(k,
+                                        num_query_heads // num_kv_heads,
+                                        dim=1)
+
+        attn = torch.einsum("qhd,khd->hqk", q, k) * scale
+        empty_mask = torch.ones(query_len, kv_len, device=attn.device)
+        if window_size_left > 0 or window_size_right > 0:
+            left = (max(kv_lens)
+                    if window_size_left < 0 else window_size_left)
+            right = (max(kv_lens)
+                     if window_size_right < 0 else window_size_right)
+            mask_right = torch.triu(
+                empty_mask,
+                diagonal=kv_len - query_len + right + 1).bool()
+            mask_left = torch.triu(
+                empty_mask,
+                diagonal=kv_len - query_len - left).bool().logical_not()
+            attn.masked_fill_(mask_right | mask_left, float("-inf"))
+        if casual:
+            causal_mask = torch.triu(
+                empty_mask, diagonal=kv_len - query_len + 1).bool()
+            attn.masked_fill_(causal_mask, float("-inf"))
+        if sink is not None:
+            sink_expanded = sink.float().view(-1, 1, 1).expand(
+                num_query_heads, query_len, 1)
+            attn = torch.cat([attn, sink_expanded], dim=-1)
+
+        lse = torch.logsumexp(attn, dim=-1)
+        assert lse.shape == (num_query_heads, query_len)
+        lse_list.append(lse)
+        start_q += query_len
+
+    return torch.cat(lse_list, dim=1)
+
+
+@pytest.mark.parametrize("seq_lens", [[(17, 73), (130, 211)]])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param((False, (-1, -1), False), id="global"),
+        pytest.param((True, (-1, -1), False), id="causal"),
+    ],
+)
+@torch.inference_mode()
+def test_varlen_with_paged_kv_softmax_lse(
+    seq_lens: list[tuple[int, int]],
+    head_size: int,
+    block_size: int,
+    extra: tuple[bool, tuple[int, int], bool],
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(31415)
+
+    casual, window_size, is_sink = extra
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = 8, 2
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    num_blocks = 64
+    scale = head_size**-0.5
+    dtype = torch.bfloat16
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(0,
+                                                          dtype=torch.int32)
+    max_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (len(seq_lens), max_blocks_per_seq),
+                                 dtype=torch.int32)
+    seqused_k = torch.tensor(kv_lens, dtype=torch.int32)
+    sink = torch.randn(num_query_heads, dtype=dtype) if is_sink else None
+
+    out, softmax_lse = flash_attn_varlen_func(
+        query,
+        key_cache,
+        value_cache,
+        max_query_len,
+        cu_query_lens,
+        max_kv_len,
+        seqused_k=seqused_k,
+        softmax_scale=scale,
+        causal=casual,
+        block_table=block_tables,
+        window_size=window_size,
+        s_aux=sink,
+        return_softmax_lse=True,
+        is_mix_batch=False,
+    )
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=casual,
+                                is_paged=True,
+                                sink=sink,
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1],
+                                dtype=dtype)
+    ref_lse = ref_paged_softmax_lse(query=query,
+                                    key_cache=key_cache,
+                                    query_lens=query_lens,
+                                    kv_lens=kv_lens,
+                                    block_tables=block_tables,
+                                    scale=scale,
+                                    casual=casual,
+                                    window_size=window_size,
+                                    sink=sink)
+
+    assert softmax_lse.shape == (num_query_heads, sum(query_lens))
+    assert softmax_lse.dtype == torch.float32
+    torch.testing.assert_close(out, ref_output, atol=2e-2, rtol=1e-2)
+    torch.testing.assert_close(softmax_lse.float(),
+                               ref_lse.float(),
+                               atol=5e-2,
+                               rtol=5e-2)
+    torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param((False, (-1, -1)), id="global"),
+    ],
+)
+@torch.inference_mode()
+def test_mixed_paged_kv_softmax_lse(
+    extra: tuple[bool, tuple[int, int]],
+) -> None:
+    """Both chunk prefill and paged decode populate one shared LSE output."""
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(2718)
+
+    is_sink, window_size = extra
+    query_lens = [17, 1, 5, 1]
+    kv_lens = [73, 129, 37, 205]
+    num_query_heads, num_kv_heads = 8, 2
+    head_size, block_size = 64, 64
+    num_blocks = 32
+    scale = head_size**-0.5
+    dtype = torch.bfloat16
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(0,
+                                                          dtype=torch.int32)
+    max_kv_len = max(kv_lens)
+    max_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (len(query_lens), max_blocks_per_seq),
+                                 dtype=torch.int32)
+    seqused_k = torch.tensor(kv_lens, dtype=torch.int32)
+    sink = torch.randn(num_query_heads, dtype=dtype) if is_sink else None
+
+    out, softmax_lse = flash_attn_varlen_func(
+        query,
+        key_cache,
+        value_cache,
+        max(query_lens),
+        cu_query_lens,
+        max_kv_len,
+        seqused_k=seqused_k,
+        softmax_scale=scale,
+        causal=False,
+        block_table=block_tables,
+        window_size=window_size,
+        s_aux=sink,
+        return_softmax_lse=True,
+        is_mix_batch=True,
+    )
+
+    ref_output = ref_paged_attn(query=query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=False,
+                                is_paged=True,
+                                sink=sink,
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1],
+                                dtype=dtype)
+    ref_lse = ref_paged_softmax_lse(query=query,
+                                    key_cache=key_cache,
+                                    query_lens=query_lens,
+                                    kv_lens=kv_lens,
+                                    block_tables=block_tables,
+                                    scale=scale,
+                                    casual=False,
+                                    window_size=window_size,
+                                    sink=sink)
+
+    assert softmax_lse.shape == (num_query_heads, sum(query_lens))
+    assert softmax_lse.dtype == torch.float32
+    torch.testing.assert_close(out, ref_output, atol=2e-2, rtol=1e-2)
     torch.testing.assert_close(softmax_lse.float(),
                                ref_lse.float(),
                                atol=5e-2,
