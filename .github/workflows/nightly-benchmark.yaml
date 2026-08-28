@@ -20,6 +20,8 @@ on:
   pull_request:
     branches: [main]
     types: [labeled]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
@@ -28,7 +30,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -46,12 +48,19 @@ jobs:
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.conclusion == 'success') ||
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'pull_request'
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, 'trigger benchmark'))
     outputs:
       head_sha: ${{ steps.resolve.outputs.head_sha }}
       run_id: ${{ steps.resolve.outputs.run_id }}
       should_run: ${{ steps.resolve.outputs.should_run }}
       short_sha: ${{ steps.resolve.outputs.short_sha }}
+      trigger: ${{ steps.resolve.outputs.trigger }}
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      head_branch: ${{ steps.resolve.outputs.head_branch }}
     steps:
       - name: Resolve unit-test wheel artifact run
         id: resolve
@@ -92,10 +101,13 @@ jobs:
 
             let runId = '';
             let headSha = context.sha;
+            let trigger = 'nightly';
+            let prNumber = '';
+            let headBranch = '';
 
             if (context.eventName === 'workflow_run') {
               if (context.payload.workflow_run.event === 'pull_request') {
-                const prNumber = await associatedPullRequestNumber(context.payload.workflow_run);
+                prNumber = await associatedPullRequestNumber(context.payload.workflow_run);
                 if (!prNumber) {
                   skip('Unit-test workflow run is not associated with a pull request.');
                   return;
@@ -104,6 +116,8 @@ jobs:
                   skip(`Pull request #${prNumber} does not have ${needBenchmarkLabel}.`);
                   return;
                 }
+                trigger = 'pr';
+                headBranch = context.payload.workflow_run.head_branch || '';
               } else if (context.payload.workflow_run.event !== 'schedule') {
                 skip(
                   `Ignoring unit-test workflow_run event ${context.payload.workflow_run.event}.`,
@@ -118,8 +132,26 @@ jobs:
                 return;
               }
               headSha = context.payload.pull_request.head.sha;
+              trigger = 'pr';
+              prNumber = context.payload.pull_request.number;
+              headBranch = context.payload.pull_request.head.ref || '';
             } else if (context.eventName === 'workflow_dispatch') {
               runId = context.payload.inputs?.test_workflow_run_id || '';
+            } else if (context.eventName === 'issue_comment') {
+              const comment = (context.payload.comment?.body || '').trim().toLowerCase();
+              if (!context.payload.issue?.pull_request || comment !== 'trigger benchmark') {
+                skip(`Ignoring comment: ${context.payload.comment?.body || '<empty>'}`);
+                return;
+              }
+              prNumber = context.payload.issue.number;
+              const {data: pr} = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: prNumber,
+              });
+              headSha = pr.head.sha;
+              headBranch = pr.head.ref || '';
+              trigger = 'pr';
             }
 
             if (runId) {
@@ -157,7 +189,7 @@ jobs:
               );
               const run = runs.find((item) => item.conclusion === 'success');
               if (!run) {
-                if (context.eventName === 'pull_request') {
+                if (context.eventName === 'pull_request' || context.eventName === 'issue_comment') {
                   skip(
                     `No successful ${process.env.UNIT_TEST_WORKFLOW} run is ready for ${headSha}; waiting for workflow_run completion.`,
                   );
@@ -175,6 +207,9 @@ jobs:
             core.setOutput('should_run', 'true');
             core.setOutput('short_sha', headSha.slice(0, 7));
             core.setOutput('run_id', runId);
+            core.setOutput('trigger', trigger);
+            core.setOutput('pr_number', String(prNumber || ''));
+            core.setOutput('head_branch', headBranch);
 
   build-docker-image-bmg:
     runs-on: self-hosted-bmg
@@ -272,6 +307,34 @@ jobs:
             --threshold "${{ env.REGRESSION_THRESHOLD }}" \
             --output-dir "${{ env.BENCHMARK_RESULTS_DIR }}" \
             --fail-on-regression
+
+      - name: Upload benchmark results to database
+        if: always()
+        continue-on-error: true
+        env:
+          DB_HOST: ${{ vars.DB_HOST || 'localhost' }}
+          DB_PORT: ${{ vars.DB_PORT || '5432' }}
+          DB_NAME: ${{ vars.DB_NAME || 'vllm_benchmarks' }}
+          DB_USER: ${{ vars.DB_USER || 'vllmadmin' }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          TRIGGER: ${{ needs.resolve-wheel-artifact.outputs.trigger }}
+          SHORT_SHA: ${{ needs.resolve-wheel-artifact.outputs.short_sha }}
+          PR_NUMBER: ${{ needs.resolve-wheel-artifact.outputs.pr_number }}
+          HEAD_BRANCH: ${{ needs.resolve-wheel-artifact.outputs.head_branch }}
+        run: |
+          if [ "${TRIGGER}" = "pr" ]; then
+            DOCKER_TAG="pr-${PR_NUMBER}-${SHORT_SHA}"
+            RESULT_ID="pr-${PR_NUMBER}-${HEAD_BRANCH}-${SHORT_SHA}"
+          else
+            DOCKER_TAG="nightly-${SHORT_SHA}"
+            RESULT_ID="nightly-${SHORT_SHA}"
+          fi
+          uv pip install "psycopg[binary]"
+          python tools/upload_benchmark_db.py \
+            --results-dir "${{ env.BENCHMARK_RESULTS_DIR }}/raw" \
+            --docker-tag "${DOCKER_TAG}" \
+            --node-label bmg \
+            --result-id "${RESULT_ID}"
 
       - name: Add benchmark summary
         if: always()
