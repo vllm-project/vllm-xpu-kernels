@@ -17,6 +17,15 @@ except ImportError as e:
 
 DEFAULT_FA_VERSION = 2
 
+# Dedup registry for the missing-config fallback notice. The compiled kernel
+# only contains the (qgroup, head, page, causal, local, sink) tuples selected
+# at build time; anything else raises "not compiled ..." and transparently
+# falls back to the PyTorch reference implementation. That fallback is orders
+# of magnitude slower, so we surface it -- but a decode loop would hit the
+# same missing tuple on every step, so we emit the notice at most once per
+# unique config. Keyed by the kernel's error string (which embeds the tuple).
+_warned_missing_configs: set = set()
+
 # Speculative-decoding fast path.
 #
 # In speculative decoding every sequence in the batch issues the same small
@@ -110,6 +119,7 @@ def _spec_decode_varlen_fwd(
         1,  # max_seqlen_q
         max_seqlen_k,
         0.0,  # dropout_p
+        None,  # q_scale
         k_descale,
         v_descale,
         softmax_scale,
@@ -370,7 +380,7 @@ def ref_paged_attn(query: torch.Tensor,
         if casual:
             attn.masked_fill_(mask, float("-inf"))
         if sink is not None:
-            sink_expanded = sink.view(sink.size()[0], 1,
+            sink_expanded = sink.to(attn.dtype).view(sink.size()[0], 1,
                                       1).expand(attn.size()[0],
                                                 attn.size()[1], 1)
             attn = torch.cat([attn, sink_expanded], dim=-1)
@@ -450,7 +460,6 @@ def flash_attn_varlen_func(
             when using paged KV cache. This is forwarded to the underlying
             C++ FlashAttention op as its ``num_splits`` parameter; the split
             unit is KV blocks, not individual tokens or pages.
-        fa_version: FlashAttention backend version selector.
     """
     if host_kv_lens is not None:
         if seqused_k is not None:
@@ -469,6 +478,7 @@ def flash_attn_varlen_func(
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
+    q_descale = _normalize_descale_tensor(q_descale, "q_descale")
     k_descale = _normalize_descale_tensor(k_descale, "k_descale")
     v_descale = _normalize_descale_tensor(v_descale, "v_descale")
     # custom op does not support non-tuple input
@@ -483,15 +493,8 @@ def flash_attn_varlen_func(
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
 
     if fa_version == 2:
-        if scheduler_metadata is not None and q_descale is not None \
-            and k_descale is not None and v_descale is not None:
-            raise NotImplementedError(
-                "FA2 does not support scheduler_metadata, q_descale, "
-                "k_descale, v_descale")
         if num_splits > 1:
             raise NotImplementedError("FA2 does not support num_splits > 1")
-        if q_descale is not None:
-            raise NotImplementedError("FA2 does not support q_descale")
         if scheduler_metadata is not None:
             raise NotImplementedError(
                 "FA2 does not support scheduler_metadata")
@@ -507,6 +510,7 @@ def flash_attn_varlen_func(
         # comment on _SPEC_DECODE_MAX_QLEN above for the rationale.
         batch = cu_seqlens_q.numel() - 1
         is_uniform_qlen = (batch > 0 and q.shape[0] == batch * max_seqlen_q)
+        # TODO: We could also support the case where q_descale is not None.
         if (block_table is not None and causal and not return_softmax_lse
                 and softcap == 0.0 and alibi_slopes is None and q_v is None
                 and q_descale is None and scheduler_metadata is None
@@ -572,6 +576,7 @@ def flash_attn_varlen_func(
                 max_seqlen_q,
                 max_seqlen_k,
                 dropout_p,
+                q_descale,
                 k_descale,
                 v_descale,
                 softmax_scale,
@@ -594,23 +599,47 @@ def flash_attn_varlen_func(
             # Fallback to PyTorch reference implementation.
             import logging
             logger = logging.getLogger(__name__)
-            logger.warning(
+            notice = (
                 "XPU kernel not compiled for this config, falling back "
                 "to PyTorch reference attention. Performance will be "
                 "significantly degraded.\n"
                 "To fix: rebuild with the config line shown above.\n"
                 "If this is unexpected, report at: "
                 "https://github.com/vllm-project/vllm-xpu-kernels/issues/364\n"
-                "Original error: %s", e)
-            out, softmax_lse = _fallback_varlen_attn(
+                "Original error: %s")
+            # Announce the fallback once per unique missing config. A decode
+            # loop would otherwise hit the same missing tuple on every step,
+            # so dedup keyed by the kernel's error string (which embeds the
+            # (qgroup, head, page, causal, local, sink) tuple). Emit to stderr
+            # as well: vLLM runs the model in an engine subprocess where the
+            # module logger is often dropped, so the warning can be invisible.
+            key = str(e)
+            if key not in _warned_missing_configs:
+                _warned_missing_configs.add(key)
+                logger.warning(notice, e)
+                import sys
+                sys.stderr.write(notice.replace("%s", str(e)) + "\n")
+            fallback_out, softmax_lse = _fallback_varlen_attn(
                 q, k, v, cu_seqlens_q, cu_seqlens_k, seqused_k,
                 block_table, softmax_scale, causal,
                 real_window_size, softcap,
+                q_descale=q_descale,
                 k_descale=k_descale,
                 v_descale=v_descale,
                 s_aux=s_aux,
                 return_softmax_lse=return_softmax_lse,
             )
+            # Honor the in-place ``out=`` contract. The reference
+            # implementation allocates a fresh tensor, but callers such as
+            # vLLM invoke this as a bare call with a preallocated ``out=``
+            # buffer and read the result from that buffer, discarding the
+            # return value. The compiled kernel path above writes into
+            # ``out`` directly, so the fallback must do the same or the
+            # caller silently reads uninitialized memory.
+            if out is not None:
+                out.copy_(fallback_out)
+            else:
+                out = fallback_out
     else:
         raise NotImplementedError("not support yet")
     return (out, softmax_lse) if return_softmax_lse else (out)
@@ -628,6 +657,7 @@ def _fallback_varlen_attn(
     causal: bool,
     window_size: tuple[int, int],
     softcap: float,
+    q_descale: Optional[torch.Tensor] = None,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
     s_aux: Optional[torch.Tensor] = None,
@@ -645,15 +675,18 @@ def _fallback_varlen_attn(
         k_descale = k_descale.flatten()[0]
     if v_descale is not None:
         v_descale = v_descale.flatten()[0]
+    if q_descale is not None:
+        q_descale = q_descale.flatten()[0]
 
+    _fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2,
+                   torch.float8_e4m3fnuz, torch.float8_e5m2fnuz)
     # Determine if KV cache is FP8 and needs dequantization
-    is_fp8kv = k_descale is not None and k.dtype in (
-        torch.float8_e4m3fn, torch.float8_e5m2,
-        torch.float8_e4m3fnuz, torch.float8_e5m2fnuz)
+    is_fp8kv = k_descale is not None and k.dtype in _fp8_dtypes
+    # Determine if the query is FP8 and needs dequantization
+    is_fp8_query = q.dtype in _fp8_dtypes
     # Infer the compute dtype from query (if query is also fp8, fall back to
     # float16 as the compute type)
-    if q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2,
-                   torch.float8_e4m3fnuz, torch.float8_e5m2fnuz):
+    if is_fp8_query:
         compute_dtype = torch.float16
     else:
         compute_dtype = q.dtype
@@ -676,9 +709,11 @@ def _fallback_varlen_attn(
             is_paged=True,
             casual=causal,
             sink=s_aux,
+            q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
             is_fp8kv=is_fp8kv,
+            is_fp8_query=is_fp8_query,
             dtype=compute_dtype,
             return_softmax_lse=return_softmax_lse,
         )
@@ -700,9 +735,11 @@ def _fallback_varlen_attn(
             is_paged=False,
             casual=causal,
             sink=s_aux,
+            q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
             is_fp8kv=is_fp8kv,
+            is_fp8_query=is_fp8_query,
             dtype=compute_dtype,
             return_softmax_lse=return_softmax_lse,
         )
@@ -710,5 +747,3 @@ def _fallback_varlen_attn(
     if return_softmax_lse:
         return result[0], result[1]
     return result, None
-
-

@@ -1,16 +1,14 @@
-#include "fmha_xe2.h"
+#include "fmha_xe3.h"
 #include "chunk_prefill_utils.hpp"
-// Use the generated extern header (only declares enabled policies)
 #if __has_include("chunk_prefill_extern_gen.hpp")
   #include "chunk_prefill_extern_gen.hpp"
 #else
   #include "chunk_prefill_extern.hpp"
 #endif
+#include "csrc/xpu/attn/paged_kv_utils.h"
 
-namespace vllm::xpu::xe2 {
-using namespace cute;
-
-void cutlass_chunk_prefill_xe2(
+namespace vllm::xpu::xe3 {
+void cutlass_chunk_prefill_xe3(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]
     const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
@@ -21,6 +19,7 @@ void cutlass_chunk_prefill_xe2(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -45,6 +44,7 @@ void cutlass_chunk_prefill_xe2(
       cu_seqlens_k,
       max_seqlen_q,
       max_seqlen_k,
+      q_scale,
       k_scale,
       v_scale,
       sm_scale,
@@ -71,6 +71,7 @@ void cutlass_chunk_prefill_impl(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -101,10 +102,10 @@ void cutlass_chunk_prefill_impl(
     // query: [batch, num_heads, seq, head_size]
     batch_size = query.size(0);
     num_heads_q = query.size(1);
-    num_heads_kv = is_paged ? key_cache.size(2) : key_cache.size(1);
+    num_heads_kv = key_cache.size(1);
     head_size = query.size(3);
     max_seqlen_q = query.size(2);
-    max_seqlen_k = is_paged ? max_seqlen_q : key_cache.size(2);
+    max_seqlen_k = key_cache.size(2);
   }
 
   if (is_paged) {
@@ -128,6 +129,9 @@ void cutlass_chunk_prefill_impl(
   bool is_fp8_kv =
       (key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
        key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn);
+  bool is_fp8_q =
+      (query.scalar_type() == at::ScalarType::Float8_e5m2 ||
+       query.scalar_type() == at::ScalarType::Float8_e4m3fn);
 
   chunk_prefill_args_t args = {
       query.data_ptr(),
@@ -141,6 +145,7 @@ void cutlass_chunk_prefill_impl(
       max_seqlen_k,
       total_seqlen_q,
       total_seqlen_k,
+      (is_fp8_q && q_scale.has_value()) ? q_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
@@ -159,16 +164,23 @@ void cutlass_chunk_prefill_impl(
       is_local,
       is_sink};
 
-  // Populate softmax_lse output pointer if requested
-  if (softmax_lse.has_value()) {
+  // softmax_lse output is only supported on the
+  // !Paged && !Local && !Sink specialization (template-constrained to
+  // keep kernel instantiation count bounded).
+  bool is_lse = softmax_lse.has_value();
+  TORCH_CHECK(
+      !is_lse || (!is_paged && !is_local && !is_sink),
+      "softmax_lse output is only supported when is_paged=false, "
+      "is_local=false, is_sink=false");
+  if (is_lse) {
     args.softmax_lse = softmax_lse.value().data_ptr<float>();
     // softmax_lse is allocated as (num_heads_q, total_seqlen_q); stride
     // along the query-row dimension is total_seqlen_q.
     args.lse_stride = total_seqlen_q;
   }
-  // Per-batch prefill/decode mask (nullptr -> process all batches)
   args.is_prefill =
       is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr;
+
   // Extract Q, K, V, O strides from tensors
   if (is_varlen) {
     // Q/O: [total_seq, num_heads, head_size]
@@ -225,7 +237,9 @@ void cutlass_chunk_prefill_impl(
   // For non-contiguous paged KV (e.g., cross-layer KV cache), enlarge
   // total_seqlen_k to cover the full physical extent for the 2D block
   // load surface descriptor. Without this, block loads for blocks at
-  // higher physical addresses would return zeros.
+  // higher physical addresses would return zeros. The page_stride_elements
+  // is also required by the paged index computation in the xe_3
+  // mainloop; leaving it at 0 makes every paged block resolve to block 0.
   if (is_paged) {
     args.page_stride_elements =
         static_cast<int>(get_paged_kv_cache_page_stride_elements(key_cache));
@@ -238,20 +252,34 @@ void cutlass_chunk_prefill_impl(
 
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
 
+  // Full fp8 attention: when the query itself is fp8, Q/K/V all flow through
+  // the fp8 MMAs. The output precision is independent of the fp8 inputs, so
+  // carry it explicitly. q_scale/k_scale/v_scale are passed as device pointers
+  // and fused inside the kernel (q_scale and k_scale into the softmax scale,
+  // v_scale as a post-loop output rescale), so the caller passes raw per-tensor
+  // scales.
+  if (is_fp8_q) {
+    TORCH_CHECK(
+        head_size == 128,
+        "Full fp8 chunk_prefill only supports head dimension 128, got ",
+        head_size,
+        ".");
+    TORCH_CHECK(
+        cuQKType.q_type == cuQKType.k_type,
+        "Full fp8 chunk_prefill requires Q and K/V cache to share the same fp8 "
+        "type (both e4m3 or both e5m2).");
+    TORCH_CHECK(
+        out.scalar_type() == at::ScalarType::Half ||
+            out.scalar_type() == at::ScalarType::BFloat16,
+        "Full fp8 chunk_prefill output must be half or bfloat16.");
+    cuQKType.o_type = aten_to_dtype(out);
+  }
+
   static constexpr int max_head_size = 512;
   TORCH_CHECK(
       head_size <= max_head_size,
       "FMHA forward only supports head dimension at most " +
           std::to_string(max_head_size));
-
-  // softmax_lse output is only supported on the
-  // !Paged && !Local && !Sink specialization (template-constrained to
-  // keep kernel instantiation count bounded).
-  bool is_lse = softmax_lse.has_value();
-  TORCH_CHECK(
-      !is_lse || (!is_paged && !is_local && !is_sink),
-      "softmax_lse output is only supported when is_paged=false, "
-      "is_local=false, is_sink=false");
 
   // Validate block_size: 16, 32, or any positive multiple of 64. Non-paged
   // mode does not use block_size, so only enforce the check when paged.
@@ -356,4 +384,4 @@ void cutlass_chunk_prefill_impl(
   }
 }
 
-}  // namespace vllm::xpu::xe2
+}  // namespace vllm::xpu::xe3

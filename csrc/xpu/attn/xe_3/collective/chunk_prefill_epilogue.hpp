@@ -48,7 +48,7 @@ namespace cutlass::fmha::collective {
 // Arch-tagged inline namespace: gives these definitions a mangled name
 // distinct from the other Xe architecture's identically named copies,
 // while leaving name lookup (cutlass::fmha::...) unchanged.
-inline namespace vllm_xpu_xe2 {
+inline namespace vllm_xpu_xe3 {
 
 using namespace cute;
 
@@ -82,6 +82,13 @@ class FMHAFwdEpilogue {
   // softmax sink, same dtype
   static constexpr bool Sink = Sink_;
   using ElementSink = typename CollectiveMainloop::TensorQ::element_type;
+  // Full-fp8: the mainloop biases the softmax exponent by +8 (see softmax()),
+  // scaling both the P*V numerator and the row-sum denominator by 2^8. The sink
+  // term is added to the denominator here, so it must carry the same bias.
+  static constexpr bool Fp8Q =
+      cute::is_same_v<ElementSink, cutlass::float_e5m2_t> ||
+      cute::is_same_v<ElementSink, cutlass::float_e4m3_t>;
+  static constexpr int kFp8SinkOffset = Fp8Q ? 8 : 0;
 
   // Split k-reduced tiles between participating subgroups.
   // Assumption: the A tile is contiguous.
@@ -162,12 +169,12 @@ class FMHAFwdEpilogue {
   CUTLASS_HOST_DEVICE
   FMHAFwdEpilogue(Params const&, SharedStorage& shared_) : shared(shared_) {}
 
-  template <typename QVCoord>
+  template <bool SumIsReduced = false, typename QVCoord, typename FragSPRow>
   CUTLASS_DEVICE void operator()(
       TensorO2D const& O,        // Global O tensor: (q,v)
       FragA& tArA,               // O accumulator:   (q,v)
       FragARow& tA_max,          // Softmax row-wise max accumulator
-      FragARow& tA_sum,          // Softmax row-wise sum accumulator
+      FragSPRow& tA_sum,         // Softmax row-wise partial sum (per-lane)
       QVCoord blk_qv,            // WG tile indices: (q,v)
       ElementSink const& tSink,  // Sink for current head
       int thr_id) {              // Work-item ID
@@ -175,8 +182,17 @@ class FMHAFwdEpilogue {
     using namespace cute;
     using ElementA = typename FragA::element_type;
 
+    // Collapse the deferred per-lane partial row sums into the full row sum,
+    // unless the caller already performed the horizontal reduction.
+    auto tA_sum_full = [&]() -> decltype(auto) {
+      if constexpr (SumIsReduced)
+        return (tA_sum);
+      else
+        return reduce<0, ReduceMode::Horizontal>(tA_sum, sycl::plus<void>{});
+    }();
+
     // Reduce k-blocks of A and A_sum across WG, if needed.
-    auto [rA, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
+    auto [rA, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum_full, thr_id);
 
     /* Some subgroups may not have any work to do; if so, quit early. */
     if (!active) return;
@@ -187,7 +203,8 @@ class FMHAFwdEpilogue {
       if constexpr (Sink) {
         constexpr double kLog2e = 1.4426950408889634074;
         rA_sum(i) += sycl::native::exp2(
-            static_cast<ElementA>(tSink * kLog2e) - tA_max(i));
+            static_cast<ElementA>(tSink * kLog2e) - tA_max(i) +
+            ElementA(kFp8SinkOffset));
       }
       rA_sum(i) = ElementA(1) / rA_sum(i);
     }
@@ -215,12 +232,12 @@ class FMHAFwdEpilogue {
   // Reduce k-blocks of A and A_sum across WG, if needed.
   // Note that each k block has its own scale factor based on A_max,
   //   so A/A_sum contributions need to be rescaled to match.
-  template <typename FragA, typename FragARow>
+  template <typename FragA, typename FragARow, typename FragSPRow>
   CUTLASS_DEVICE decltype(auto) reduce_A(
-      FragA& tArA,       // O accumulator:   (q,v)
-      FragARow& tA_max,  // Softmax row-wise max accumulator
-      FragARow& tA_sum,  // Softmax row-wise sum accumulator
-      int thr_id) {      // Work-item ID
+      FragA& tArA,        // O accumulator:   (q,v)
+      FragARow& tA_max,   // Softmax row-wise max accumulator
+      FragSPRow& tA_sum,  // Softmax row-wise sum accumulator (reduced)
+      int thr_id) {       // Work-item ID
 
     using namespace sycl::ext::oneapi::this_work_item;
 
@@ -296,16 +313,17 @@ class FMHAFwdEpilogue {
         rA_max = rA_kmax[0];
         for (int kr = 1; kr < ReduceK{}; kr++) {
           CUTLASS_PRAGMA_UNROLL
-          for (int i = 0; i < rA_max.size(); ++i)
-            rA_max(i) =
-                (rA_max(i) < rA_kmax[kr](i)) ? rA_kmax[kr](i) : rA_max(i);
+          for (int i = 0; i < rA_max.size(); i++) {
+            rA_max(i) = cute::max(rA_max(i), rA_kmax[kr](i));
+          }
         }
 
         /* Calculate scale factors for aligning per-block maxima. */
         for (int kr = 0; kr < ReduceK{}; kr++) {
           CUTLASS_PRAGMA_UNROLL
-          for (int i = 0; i < rA_max.size(); ++i)
+          for (int i = 0; i < rA_max.size(); i++) {
             rA_kmax[kr](i) = sycl::native::exp2(rA_kmax[kr](i) - rA_max(i));
+          }
         }
       }
 
@@ -388,6 +406,13 @@ class DecodeFwdEpilogue {
   // softmax sink, same dtype
   static constexpr bool Sink = Sink_;
   using ElementSink = typename CollectiveMainloop::TensorQ::element_type;
+  // Full-fp8: the mainloop biases the softmax exponent by +8 (see softmax()),
+  // scaling both the P*V numerator and the row-sum denominator by 2^8. The sink
+  // term is added to the denominator here, so it must carry the same bias.
+  static constexpr bool Fp8Q =
+      cute::is_same_v<ElementSink, cutlass::float_e5m2_t> ||
+      cute::is_same_v<ElementSink, cutlass::float_e4m3_t>;
+  static constexpr int kFp8SinkOffset = Fp8Q ? 8 : 0;
 
   // Split k-reduced tiles between participating subgroups.
   // Assumption: the A tile is contiguous.
@@ -531,35 +556,24 @@ class DecodeFwdEpilogue {
     using namespace cute;
     using ElementA = typename FragA::element_type;
 
+    // Reduce k-blocks of A and A_sum across WG, if needed.
+    int sg_id = thr_id / intel::sg_size;
     // Decode tiles head_group_q across the grid's Q dimension (blk_qv[0]).
     // The work-item's row within this tile is thr_id; its global head-group
     // row is offset by the tile start. q_tile_rows is the packed-Q tile size.
     constexpr int q_tile_rows = cute::size<0>(TileShapeO{});
     int q_row = get<0>(blk_qv) * q_tile_rows + thr_id;
     bool row_valid = (thr_id < q_tile_rows) && (q_row < head_group_q);
-
-    auto [rA, rA_max, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
-
-    Tensor cO = make_identity_tensor(O.shape());       // (q,v)
-    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);  // (q,v)
-    TiledCopyO copy_o{O};
-    auto thr_copy_o = copy_o.get_slice(thr_id);
-    auto tOgO = thr_copy_o.partition_D(gO);  // fragment coords (q,v)
-
     if constexpr (Sink) {
       constexpr double kLog2e = 1.4426950408889634074;
-      if (active && idx_kv_split == 0) {
-        int base_row = cute::get<0>(tOgO(cute::_0{}, cute::_0{}, cute::_0{}));
-        int lane =
-            static_cast<int>(sycl::ext::oneapi::this_work_item::get_sub_group()
-                                 .get_local_id()[0]);
-        int row_i = base_row + (lane % cute::size<0>(SGTileShapeO{}));
-        if (row_i < head_group_q) {
-          rA_sum(0) += sycl::native::exp2(
-              static_cast<ElementA>(tSink(row_i) * kLog2e) - rA_max(0));
-        }
+      if (idx_kv_split == 0 && sg_id == 0 && row_valid) {
+        tA_sum(0) += sycl::native::exp2(
+            static_cast<ElementA>(tSink(q_row) * kLog2e) - tA_max(0) +
+            ElementA(kFp8SinkOffset));
       }
     }
+
+    auto [rA, rA_max, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
 
     // Always store exp sum and max logits for current KV split.
     // assume seq_len_qo == 1
@@ -593,8 +607,16 @@ class DecodeFwdEpilogue {
       }
     }
 
-    /* Tile output (cO/gO/copy_o/thr_copy_o/tOgO computed above for the sink) */
+    /* Tile output */
+    Tensor cO = make_identity_tensor(O.shape());       // (q,v)
+    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);  // (q,v)
+
+    /* Prepare slices */
+    TiledCopyO copy_o{O};
+    auto thr_copy_o = copy_o.get_slice(thr_id);
+
     auto tOrO = thr_copy_o.partition_sg_fragment_S(gO);
+    auto tOgO = thr_copy_o.partition_D(gO);
 
     /* Reorder tile and write out */
     reorder(rA, tOrO);
@@ -685,16 +707,17 @@ class DecodeFwdEpilogue {
         rA_max = rA_kmax[0];
         for (int kr = 1; kr < ReduceK{}; kr++) {
           CUTLASS_PRAGMA_UNROLL
-          for (int i = 0; i < rA_max.size(); ++i)
-            rA_max(i) =
-                (rA_max(i) < rA_kmax[kr](i)) ? rA_kmax[kr](i) : rA_max(i);
+          for (int i = 0; i < rA_max.size(); i++) {
+            rA_max(i) = cute::max(rA_max(i), rA_kmax[kr](i));
+          }
         }
 
         /* Calculate scale factors for aligning per-block maxima. */
         for (int kr = 0; kr < ReduceK{}; kr++) {
           CUTLASS_PRAGMA_UNROLL
-          for (int i = 0; i < rA_max.size(); ++i)
+          for (int i = 0; i < rA_max.size(); i++) {
             rA_kmax[kr](i) = sycl::native::exp2(rA_kmax[kr](i) - rA_max(i));
+          }
         }
       }
 
@@ -736,6 +759,6 @@ class DecodeFwdEpilogue {
   }
 };
 
-}  // namespace vllm_xpu_xe2
+}  // namespace vllm_xpu_xe3
 
 }  // namespace cutlass::fmha::collective

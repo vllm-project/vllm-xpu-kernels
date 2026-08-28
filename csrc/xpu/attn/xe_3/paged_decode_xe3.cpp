@@ -1,16 +1,12 @@
-#include "paged_decode_xe2.h"
-#include "paged_decode_utils.hpp"
-// Use the generated extern header (only declares enabled policies)
-#if __has_include("paged_decode_extern_gen.hpp")
-  #include "paged_decode_extern_gen.hpp"
-#else
-  #include "paged_decode_extern.hpp"
-#endif
+#include "paged_decode_xe3.h"
+#include "csrc/xpu/attn/xe_3/paged_decode_utils.hpp"
+#include "csrc/xpu/attn/xe_3/paged_decode_extern.hpp"
+#include "csrc/xpu/attn/paged_kv_utils.h"
 
-namespace vllm::xpu::xe2 {
+namespace vllm::xpu::xe3 {
 using namespace cute;
 
-void cutlass_paged_decode_xe2(
+void cutlass_paged_decode_xe3(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]
     const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
@@ -25,6 +21,7 @@ void cutlass_paged_decode_xe2(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -37,9 +34,9 @@ void cutlass_paged_decode_xe2(
     bool is_local,
     bool is_sink,
     int num_kv_splits,
-    std::optional<const at::Tensor>& is_prefill,
-    std::optional<at::Tensor>& splits_per_seq,
-    std::optional<at::Tensor>& work_list) {
+    std::optional<const at::Tensor>& is_prefill) {
+  std::optional<at::Tensor> splits_per_seq_empty;
+  std::optional<at::Tensor> work_list_empty;
   cutlass_paged_decode_impl(
       queue,
       query,
@@ -54,6 +51,7 @@ void cutlass_paged_decode_xe2(
       cu_seqlens_k,
       max_seqlen_q,
       max_seqlen_k,
+      q_scale,
       k_scale,
       v_scale,
       sm_scale,
@@ -67,20 +65,8 @@ void cutlass_paged_decode_xe2(
       is_sink,
       num_kv_splits,
       is_prefill,
-      splits_per_seq,
-      work_list);
-}
-
-inline bool is_single_value_broadcast_tensor(const at::Tensor& t) {
-  if (t.scalar_type() != at::ScalarType::Float) {
-    return false;
-  }
-  for (int64_t i = 0; i < t.dim(); ++i) {
-    if (t.size(i) > 1 && t.stride(i) != 0) {
-      return false;
-    }
-  }
-  return true;
+      splits_per_seq_empty,
+      work_list_empty);
 }
 
 void cutlass_paged_decode_impl(
@@ -90,7 +76,7 @@ void cutlass_paged_decode_impl(
     const at::Tensor& value_cache,
     at::Tensor& out,
     at::Tensor&
-        temp_out,  // [batch, num_kv_splits, num_head_q, seq_q, head_size]
+        temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
     at::Tensor& exp_sums,    // [batch, num_head_q, seq_q, num_kv_splits]
     at::Tensor& max_logits,  // [batch, num_head_q, seq_q, num_kv_splits]
     const at::Tensor& block_table,
@@ -98,6 +84,7 @@ void cutlass_paged_decode_impl(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -115,21 +102,14 @@ void cutlass_paged_decode_impl(
     std::optional<at::Tensor>& work_list) {
   bool is_fp8_kv = key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
                    key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn;
+  bool is_fp8_q = query.scalar_type() == at::ScalarType::Float8_e5m2 ||
+                  query.scalar_type() == at::ScalarType::Float8_e4m3fn;
   if (is_fp8_kv) {
     TORCH_CHECK(
         k_scale.has_value() && v_scale.has_value(),
         "FP8 KV cache requires both k_scale and v_scale tensors to be "
         "provided.");
-    TORCH_CHECK(
-        k_scale->scalar_type() == at::ScalarType::Float &&
-            is_single_value_broadcast_tensor(*k_scale),
-        "FP8 KV k_scale must be a float32 tensor with a single element.");
-    TORCH_CHECK(
-        v_scale->scalar_type() == at::ScalarType::Float &&
-            is_single_value_broadcast_tensor(*v_scale),
-        "FP8 KV v_scale must be a float32 tensor with a single element.");
   }
-
   // general params
   int batch_size, num_heads_q, num_heads_kv, head_size, v_head_size;
   // additional params
@@ -154,7 +134,6 @@ void cutlass_paged_decode_impl(
     max_seqlen_q = query.size(2);
     max_seqlen_k = key_cache.size(2);
   }
-
   if (is_paged) {
     // num_blocks is used to build total_seqlen_k for shape_K in kernels
     // it is not just the meaning of used blocks for kv.
@@ -192,6 +171,7 @@ void cutlass_paged_decode_impl(
       max_seqlen_k,
       total_seqlen_q,
       total_seqlen_k,
+      (is_fp8_q && q_scale.has_value()) ? q_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
       is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
       static_cast<float>(sm_scale),
@@ -211,9 +191,10 @@ void cutlass_paged_decode_impl(
       is_local,
       is_sink,
       num_kv_splits,
-      nullptr,  // splits_per_seq, filled in below if applicable
-      nullptr,  // work_list, filled in below if applicable
-      0,        // total_wgs, filled in below if applicable
+      nullptr,  // splits_per_seq
+      nullptr,  // work_list
+      0,        // total_wgs
+      // KV cache strides
       key_cache.stride(0),
       key_cache.stride(1),
       key_cache.stride(2),
@@ -221,8 +202,7 @@ void cutlass_paged_decode_impl(
       value_cache.stride(1),
       value_cache.stride(2),
       is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr,
-      // Q strides: for varlen Q is [total_seq, num_heads, head_size]; for
-      // non-varlen Q is [batch, num_heads, seq, head_size].
+      // Q strides
       is_varlen ? query.stride(0) : query.stride(2),
       is_varlen ? query.stride(1) : query.stride(1),
       is_varlen ? int64_t{0} : query.stride(0),
@@ -240,36 +220,30 @@ void cutlass_paged_decode_impl(
     }
   }
 
-  // Per-sequence adaptive split-K: use pre-computed splits_per_seq from Python
-  // if available. This avoids GPU→CPU sync and extra computation here.
-  if (splits_per_seq.has_value() && splits_per_seq->numel() > 0) {
-    args.splits_per_seq = splits_per_seq->data_ptr<int>();
-  }
-
-  // Per-sequence work_list for compact grid scheduling
-  if (work_list.has_value() && work_list->numel() > 0) {
-    args.work_list = work_list->data_ptr<int>();
-    args.total_wgs = work_list->size(0);  // [total_wgs, 4]
-  }
-
-  TORCH_CHECK(
-      query.stride(-1) == 1,
-      "paged_decode_xe2: query must be contiguous in the last dimension "
-      "(head_dim), got stride=",
-      query.stride(-1));
-
-  TORCH_CHECK(
-      key_cache.stride(-1) == 1,
-      "paged_decode_xe2: key_cache must be contiguous in the last dimension "
-      "(head_dim), got stride=",
-      key_cache.stride(-1));
-  TORCH_CHECK(
-      value_cache.stride(-1) == 1,
-      "paged_decode_xe2: value_cache must be contiguous in the last dimension "
-      "(head_dim), got stride=",
-      value_cache.stride(-1));
-
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
+
+  // Full fp8 attention: when the query itself is fp8, Q/K/V all flow through
+  // the fp8 MMAs. The output (temp_out/out) precision is independent of the fp8
+  // inputs, so carry it explicitly. q_scale/k_scale/v_scale are passed as
+  // device pointers and fused inside the kernel (q_scale and k_scale into the
+  // softmax scale, v_scale as a post-loop output rescale), so the caller passes
+  // raw per-tensor scales.
+  if (is_fp8_q) {
+    TORCH_CHECK(
+        head_size == 128,
+        "Full fp8 paged_decode only supports head dimension 128, got ",
+        head_size,
+        ".");
+    TORCH_CHECK(
+        is_fp8_kv && cuQKType.q_type == cuQKType.k_type,
+        "Full fp8 paged_decode requires Q and K/V cache to share the same fp8 "
+        "type (both e4m3 or both e5m2).");
+    TORCH_CHECK(
+        out.scalar_type() == at::ScalarType::Half ||
+            out.scalar_type() == at::ScalarType::BFloat16,
+        "Full fp8 paged_decode output must be half or bfloat16.");
+    cuQKType.o_type = aten_to_dtype(out);
+  }
 
   static constexpr int max_head_size = 576;
   TORCH_CHECK(
@@ -303,4 +277,4 @@ void cutlass_paged_decode_impl(
   }
 }
 
-}  // namespace vllm::xpu::xe2
+}  // namespace vllm::xpu::xe3
