@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+import sys
 from typing import Optional
 
 import torch
@@ -17,13 +18,9 @@ except ImportError as e:
 
 DEFAULT_FA_VERSION = 2
 
-# Dedup registry for the missing-config fallback notice. The compiled kernel
-# only contains the (qgroup, head, page, causal, local, sink) tuples selected
-# at build time; anything else raises "not compiled ..." and transparently
-# falls back to the PyTorch reference implementation. That fallback is orders
-# of magnitude slower, so we surface it -- but a decode loop would hit the
-# same missing tuple on every step, so we emit the notice at most once per
-# unique config. Keyed by the kernel's error string (which embeds the tuple).
+# Tracks configs we have already warned about so the
+# missing-kernel fallback notice is emitted once per config rather
+# than on every decode step.
 _warned_missing_configs: set = set()
 
 # Speculative-decoding fast path.
@@ -597,28 +594,22 @@ def flash_attn_varlen_func(
             if "not compiled" not in str(e):
                 raise
             # Fallback to PyTorch reference implementation.
-            import logging
-            logger = logging.getLogger(__name__)
-            notice = (
+            # Emit the notice once per unique missing config and write
+            # it straight to stderr.
+            _msg = (
                 "XPU kernel not compiled for this config, falling back "
                 "to PyTorch reference attention. Performance will be "
                 "significantly degraded.\n"
                 "To fix: rebuild with the config line shown above.\n"
                 "If this is unexpected, report at: "
                 "https://github.com/vllm-project/vllm-xpu-kernels/issues/364\n"
-                "Original error: %s")
-            # Announce the fallback once per unique missing config. A decode
-            # loop would otherwise hit the same missing tuple on every step,
-            # so dedup keyed by the kernel's error string (which embeds the
-            # (qgroup, head, page, causal, local, sink) tuple). Emit to stderr
-            # as well: vLLM runs the model in an engine subprocess where the
-            # module logger is often dropped, so the warning can be invisible.
-            key = str(e)
-            if key not in _warned_missing_configs:
-                _warned_missing_configs.add(key)
-                logger.warning(notice, e)
-                import sys
-                sys.stderr.write(notice.replace("%s", str(e)) + "\n")
+                f"Original error: {e}")
+            if str(e) not in _warned_missing_configs:
+                _warned_missing_configs.add(str(e))
+                import logging
+                logging.getLogger(__name__).warning(_msg)
+                print("[vllm_xpu_kernels] " + _msg, file=sys.stderr,
+                      flush=True)
             fallback_out, softmax_lse = _fallback_varlen_attn(
                 q, k, v, cu_seqlens_q, cu_seqlens_k, seqused_k,
                 block_table, softmax_scale, causal,
@@ -629,15 +620,8 @@ def flash_attn_varlen_func(
                 s_aux=s_aux,
                 return_softmax_lse=return_softmax_lse,
             )
-            # Honor the in-place ``out=`` contract. The reference
-            # implementation allocates a fresh tensor, but callers such as
-            # vLLM invoke this as a bare call with a preallocated ``out=``
-            # buffer and read the result from that buffer, discarding the
-            # return value. The compiled kernel path above writes into
-            # ``out`` directly, so the fallback must do the same or the
-            # caller silently reads uninitialized memory.
             if out is not None:
-                out.copy_(fallback_out)
+                out.copy_(fallback_out.reshape(out.shape))
             else:
                 out = fallback_out
     else:

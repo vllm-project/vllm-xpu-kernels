@@ -396,3 +396,9 @@ void deepseek_fused_indexer_q_rope_mxfp4(
     torch::Tensor& packed_out,
     torch::Tensor& scales_out,
     torch::Tensor& weights_out);
+
+void fused_input_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    torch::Tensor& bias);
