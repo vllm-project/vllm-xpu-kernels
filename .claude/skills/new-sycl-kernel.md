@@ -258,7 +258,7 @@ XPU_KERNEL_PYTEST_PROFILER=MINI .venv/bin/python -m pytest tests/test_your_kerne
 | `blockDim.x` | `item_ct1.get_local_range(2)` |
 | `gridDim.x` | `item_ct1.get_group_range(2)` |
 | `__shared__` | `sycl::local_accessor<T, 1>` |
-| `__syncthreads()` | `item_ct1.barrier(sycl::access::fence_space::local_space)` |
+| `__syncthreads()` | `sycl::group_barrier(item_ct1.get_group())` |
 | `warpReduceSum` | `sycl::reduce_over_group` |
 | `__half` | `sycl::half` |
 | `__nv_bfloat16` | `sycl::ext::oneapi::bfloat16` |
