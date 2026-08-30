@@ -670,10 +670,7 @@ def _fallback_varlen_attn(
     is_fp8_query = q.dtype in _fp8_dtypes
     # Infer the compute dtype from query (if query is also fp8, fall back to
     # float16 as the compute type)
-    if is_fp8_query:
-        compute_dtype = torch.float16
-    else:
-        compute_dtype = q.dtype
+    compute_dtype = torch.float16 if is_fp8_query else q.dtype
 
     is_paged = block_table is not None and seqused_k is not None
 

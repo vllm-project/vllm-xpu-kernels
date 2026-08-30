@@ -95,7 +95,7 @@ struct XeFHMAIndividualTileScheduler {
       // Causal: (V, (h,b), Q)
       idx_b = BlockIdxY();
       params.divmod_num_heads(idx_b, head, idx_b);
-      // Reverse Q dispach order for causal
+      // Reverse Q dispatch order for causal
       int q_tile = params.grid.z - 1 - BlockIdxZ();
       return make_coord(q_tile, BlockIdxX(), head, idx_b);
     } else {
