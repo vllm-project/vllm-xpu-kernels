@@ -23,6 +23,21 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def fused_input_norm(out: torch.Tensor, input: torch.Tensor,
+                     weight: torch.Tensor, bias: torch.Tensor) -> None:
+    torch.ops._xpu_C.fused_input_norm(out, input, weight, bias)
+
+
+def gemma_rms_norm(out: torch.Tensor, input: torch.Tensor,
+                   weight: torch.Tensor, epsilon: float) -> None:
+    torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
+
+
+def fused_add_gemma_rms_norm(input: torch.Tensor, residual: torch.Tensor,
+                             weight: torch.Tensor, epsilon: float) -> None:
+    torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
+
+
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 
@@ -97,6 +112,15 @@ def gelu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
 
 def gelu_tanh_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.gelu_tanh_and_mul(out, input)
+
+
+def situ_and_mul(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    beta: float = 1.0,
+    linear_beta: float = -1.0,
+) -> None:
+    torch.ops._C.situ_and_mul(out, input, beta, linear_beta)
 
 
 def fatrelu_and_mul(out: torch.Tensor, input: torch.Tensor,
@@ -397,8 +421,29 @@ def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
              scale_act: Optional[torch.Tensor],
              scale_wei: Optional[torch.Tensor],
              bias: Optional[torch.Tensor] = None):
+    """fp8 (w8a8) GEMM, allocating the output using `out_dtype`.
+
+    This functional variant carries no mutable argument, which is what keeps
+    it usable under torch.compile. Use `fp8_gemm_out` to write into a
+    caller-provided buffer.
+    """
     return torch.ops._xpu_C.fp8_gemm(input, weight, out_dtype, scale_act,
                                      scale_wei, bias)
+
+
+def fp8_gemm_out(out: torch.Tensor, input: torch.Tensor,
+                 weight: torch.Tensor,
+                 out_dtype: Optional[torch.dtype],
+                 scale_act: Optional[torch.Tensor],
+                 scale_wei: Optional[torch.Tensor],
+                 bias: Optional[torch.Tensor] = None):
+    """fp8 (w8a8) GEMM writing in place into `out`.
+
+    `out` must already match the expected dtype, shape and device; it is
+    returned unchanged.
+    """
+    return torch.ops._xpu_C.fp8_gemm_out(out, input, weight, out_dtype,
+                                         scale_act, scale_wei, bias)
 
 
 def fp8_bmm(input: torch.Tensor, weight: torch.Tensor,
@@ -508,12 +553,12 @@ def batched_moe_align_block_size(
     )
 
 
-def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
-                 num_expert_group: int, topk_group: int, topk: int,
-                 renormalize: bool, routed_scaling_factor: float):
-    return torch.ops._moe_C.grouped_topk(scores, scores_with_bias,
-                                         num_expert_group, topk_group, topk,
-                                         renormalize, routed_scaling_factor)
+def grouped_topk(scores: torch.Tensor, n_group: int, topk_group: int,
+                 topk: int, renormalize: bool, routed_scaling_factor: float,
+                 bias: torch.Tensor, scoring_func: int):
+    return torch.ops._moe_C.grouped_topk(scores, n_group, topk_group, topk,
+                                         renormalize, routed_scaling_factor,
+                                         bias, scoring_func)
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
@@ -565,6 +610,29 @@ def swap_blocks_batch(
     triples in a single call. The target XPU device is auto-inferred from the
     device-side pointers in src_ptrs/dst_ptrs."""
     torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
+
+
+def xpu_host_register(ptr: int, n_bytes: int) -> bool:
+    """Page-lock a host range and import it into the device context so
+    transfers use direct DMA. Intended for host memory that cannot come from
+    the caching host allocator, such as a shared mmap region. Returns False if
+    registration is unsupported; transfers stay correct but slower.
+
+    ptr is a single-element uint64 tensor holding the raw address rather than
+    a plain Python int: a scalar int64 op argument cannot losslessly carry
+    every 64-bit pointer bit pattern (addresses with bit 63 set, as seen with
+    USM-mapped host allocations on XPU, overflow the signed range and fail to
+    cast from Python), so the address is passed via a uint64 tensor instead,
+    matching the pattern used by swap_blocks_batch."""
+    return torch.ops._C.xpu_host_register(ptr, n_bytes)
+
+
+def xpu_host_unregister(ptr: int) -> bool:
+    """Release a host range previously passed to xpu_host_register.
+
+    ptr is a single-element uint64 tensor holding the raw address; see
+    xpu_host_register for why."""
+    return torch.ops._C.xpu_host_unregister(ptr)
 
 
 def topk_sigmoid(topk_weights: torch.Tensor, topk_ids: torch.Tensor,

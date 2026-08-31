@@ -290,15 +290,18 @@ class FMHAFwdEpilogue {
         }
 
         rA_max = rA_kmax[0];
-        for (int kr = 1; kr < ReduceK{}; kr++)
-          cute::transform(rA_max, rA_kmax[kr], rA_max, cute::max_fn{});
+        for (int kr = 1; kr < ReduceK{}; kr++) {
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < rA_max.size(); ++i)
+            rA_max(i) =
+                (rA_max(i) < rA_kmax[kr](i)) ? rA_kmax[kr](i) : rA_max(i);
+        }
 
         /* Calculate scale factors for aligning per-block maxima. */
         for (int kr = 0; kr < ReduceK{}; kr++) {
-          cute::transform(
-              rA_max, rA_kmax[kr], rA_kmax[kr], [](auto gmax, auto kmax) {
-                return sycl::native::exp2(kmax - gmax);
-              });
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < rA_max.size(); ++i)
+            rA_kmax[kr](i) = sycl::native::exp2(rA_kmax[kr](i) - rA_max(i));
         }
       }
 
@@ -524,23 +527,35 @@ class DecodeFwdEpilogue {
     using namespace cute;
     using ElementA = typename FragA::element_type;
 
-    // Reduce k-blocks of A and A_sum across WG, if needed.
-    int sg_id = thr_id / intel::sg_size;
     // Decode tiles head_group_q across the grid's Q dimension (blk_qv[0]).
     // The work-item's row within this tile is thr_id; its global head-group
     // row is offset by the tile start. q_tile_rows is the packed-Q tile size.
     constexpr int q_tile_rows = cute::size<0>(TileShapeO{});
     int q_row = get<0>(blk_qv) * q_tile_rows + thr_id;
     bool row_valid = (thr_id < q_tile_rows) && (q_row < head_group_q);
-    if constexpr (Sink) {
-      constexpr double kLog2e = 1.4426950408889634074;
-      if (idx_kv_split == 0 && sg_id == 0 && row_valid) {
-        tA_sum(0) += sycl::native::exp2(
-            static_cast<ElementA>(tSink(q_row) * kLog2e) - tA_max(0));
-      }
-    }
 
     auto [rA, rA_max, rA_sum, active] = reduce_A(tArA, tA_max, tA_sum, thr_id);
+
+    Tensor cO = make_identity_tensor(O.shape());       // (q,v)
+    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);  // (q,v)
+    TiledCopyO copy_o{O};
+    auto thr_copy_o = copy_o.get_slice(thr_id);
+    auto tOgO = thr_copy_o.partition_D(gO);  // fragment coords (q,v)
+
+    if constexpr (Sink) {
+      constexpr double kLog2e = 1.4426950408889634074;
+      if (active && idx_kv_split == 0) {
+        int base_row = cute::get<0>(tOgO(cute::_0{}, cute::_0{}, cute::_0{}));
+        int lane =
+            static_cast<int>(sycl::ext::oneapi::this_work_item::get_sub_group()
+                                 .get_local_id()[0]);
+        int row_i = base_row + (lane % cute::size<0>(SGTileShapeO{}));
+        if (row_i < head_group_q) {
+          rA_sum(0) += sycl::native::exp2(
+              static_cast<ElementA>(tSink(row_i) * kLog2e) - rA_max(0));
+        }
+      }
+    }
 
     // Always store exp sum and max logits for current KV split.
     // assume seq_len_qo == 1
@@ -574,16 +589,8 @@ class DecodeFwdEpilogue {
       }
     }
 
-    /* Tile output */
-    Tensor cO = make_identity_tensor(O.shape());       // (q,v)
-    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);  // (q,v)
-
-    /* Prepare slices */
-    TiledCopyO copy_o{O};
-    auto thr_copy_o = copy_o.get_slice(thr_id);
-
+    /* Tile output (cO/gO/copy_o/thr_copy_o/tOgO computed above for the sink) */
     auto tOrO = thr_copy_o.partition_sg_fragment_S(gO);
-    auto tOgO = thr_copy_o.partition_D(gO);
 
     /* Reorder tile and write out */
     reorder(rA, tOrO);
@@ -672,15 +679,18 @@ class DecodeFwdEpilogue {
         }
 
         rA_max = rA_kmax[0];
-        for (int kr = 1; kr < ReduceK{}; kr++)
-          cute::transform(rA_max, rA_kmax[kr], rA_max, cute::max_fn{});
+        for (int kr = 1; kr < ReduceK{}; kr++) {
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < rA_max.size(); ++i)
+            rA_max(i) =
+                (rA_max(i) < rA_kmax[kr](i)) ? rA_kmax[kr](i) : rA_max(i);
+        }
 
         /* Calculate scale factors for aligning per-block maxima. */
         for (int kr = 0; kr < ReduceK{}; kr++) {
-          cute::transform(
-              rA_max, rA_kmax[kr], rA_kmax[kr], [](auto gmax, auto kmax) {
-                return sycl::native::exp2(kmax - gmax);
-              });
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < rA_max.size(); ++i)
+            rA_kmax[kr](i) = sycl::native::exp2(rA_kmax[kr](i) - rA_max(i));
         }
       }
 

@@ -42,12 +42,13 @@ void moe_lora_align_block_size(
 
 std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
     torch::Tensor const& scores,
-    torch::Tensor const& scores_with_bias,
     int64_t n_group,
     int64_t topk_group,
     int64_t topk,
     bool renormalize,
-    double routed_scaling_factor);
+    double routed_scaling_factor,
+    torch::Tensor const& bias,
+    int64_t scoring_func);
 
 void topk_softmax(
     torch::Tensor& topk_weights,
@@ -104,3 +105,8 @@ void remap_hidden_states(
     torch::Tensor& topk_ids,
     int64_t total_experts_num,
     int64_t local_experts_num);
+
+torch::Tensor reorder_mxfp_scales(
+    const torch::Tensor& A_scales,
+    const torch::Tensor& rows_per_expert,
+    const int64_t total_padded_rows);

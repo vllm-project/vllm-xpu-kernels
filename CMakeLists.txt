@@ -31,7 +31,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
 #
-set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
+set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12" "3.13" "3.14")
 
 # Supported Intel GPU architectures.
 set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
@@ -54,9 +54,9 @@ set(ONEDNN_GIT_REPO
     "https://github.com/uxlfoundation/oneDNN.git"
     CACHE STRING "oneDNN git repository URL")
 
-# rls-v3.12
+# rls-v3.13
 set(ONEDNN_GIT_TAG
-    "80afa71049cd69a3df32adcccb623b12cd7baa22"
+    "0e2a5bfeef1bfbffc3137464606540233086ce9b"
     CACHE STRING "oneDNN git commit hash or tag")
 # ARCHITECTURE OPTIONS
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
@@ -231,8 +231,6 @@ message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 # when loaded by Python.
 set(CMAKE_INSTALL_RPATH "$ORIGIN")
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
-
 if(VLLM_GPU_LANG STREQUAL "SYCL")
   #
   # For SYCL we want to use the same flags as CUDA, so we set them here. Note
@@ -323,7 +321,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages
   # when building.
   set(CUTLASS_REVISION
-      "cd763790ad2f74d7294435ecf77682bac0062c3a"
+      "87f6850680a580654b9ea2c80dbc01aeb36ad231"
       CACHE STRING "CUTLASS revision to use")
 
   if(DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -546,6 +544,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/attention/merge_attn_states.cpp"
       "csrc/tensor_utils.cpp"
       "csrc/utils/mem_cpy.cpp"
+      "csrc/utils/host_register.cpp"
       "csrc/utils/mem_info.cpp"
       "csrc/topk_per_row.cpp")
   include_directories("/usr/include")
@@ -629,6 +628,8 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sycl/deepseek_inv_rope_fp8_quant.cpp"
       "csrc/xpu/sycl/deepseek_fused_indexer_q_rope_fp8.cpp"
       "csrc/xpu/sycl/deepseek_fused_indexer_q_rope_mxfp4.cpp"
+      "csrc/xpu/sycl/fused_input_norm.cpp"
+      "csrc/xpu/sycl/fused_kv_compress_norm_rope_insert_sparse_attn.cpp"
       "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/sycl/apply_rotary_emb.cpp"
       "csrc/xpu/rand/exponential.cpp"

@@ -32,6 +32,15 @@ static inline void dnnl_matmul_w8a16_fp8(
   bool is_block_quant = (m2_sc.dim() == 2) && (m2_sc.size(0) > 1);
   int64_t blk_group_size = -1;
   if (is_block_quant) {
+    TORCH_CHECK(
+        k % m2_sc.size(0) == 0 && n % m2_sc.size(1) == 0,
+        "Weight block scale dims must divide [K, N], got K=",
+        k,
+        ", N=",
+        n,
+        ", scale shape ",
+        m2_sc.sizes(),
+        ".");
     blk_group_size = k / m2_sc.size(0);
   }
 

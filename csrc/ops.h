@@ -17,6 +17,18 @@ void fused_add_rms_norm(
     std::optional<torch::Tensor> weight,
     double epsilon);
 
+void gemma_rms_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    double epsilon);
+
+void fused_add_gemma_rms_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    double epsilon);
+
 // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8 output).
 void rms_norm_dynamic_per_token_quant(
     torch::Tensor& out,
@@ -90,6 +102,9 @@ void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
+
+void situ_and_mul(
+    torch::Tensor& out, torch::Tensor& input, double beta, double linear_beta);
 
 void fatrelu_and_mul(
     torch::Tensor& out, torch::Tensor& input, double threshold);
@@ -275,6 +290,10 @@ void xpu_memcpy_sync(
     int64_t n_bytes,
     int64_t kind,
     int64_t device = -1);
+
+bool xpu_host_register(int64_t ptr, int64_t n_bytes);
+
+bool xpu_host_unregister(int64_t ptr);
 
 void merge_attn_states(
     torch::Tensor& output,

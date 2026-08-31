@@ -10,7 +10,20 @@
  * a packed representation with 8 int4 values packed into one byte along the k
  * dimension.
  */
+// Computes A @ B into a newly allocated output tensor using `out_dtype`
+// (defaulting to fp16).
 torch::Tensor fp8_gemm(
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    std::optional<c10::ScalarType> out_dtype,
+    const std::optional<torch::Tensor>& A_scale_,
+    const std::optional<torch::Tensor>& B_scale_,
+    const std::optional<torch::Tensor>& bias_);
+
+// Same as fp8_gemm, but writes the result in place into `out` (its dtype,
+// shape and device must already match A/B) and returns `out` itself.
+torch::Tensor fp8_gemm_out(
+    torch::Tensor out,
     const torch::Tensor& A,
     const torch::Tensor& B,
     std::optional<c10::ScalarType> out_dtype,
@@ -82,6 +95,25 @@ std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
     const at::Tensor& cos_sin_cache,
     int64_t rotary_dim,
     bool is_neox);
+
+void fused_kv_compress_norm_rope_insert_sparse_attn(
+    const torch::Tensor& state_cache,
+    const torch::Tensor& token_to_req_indices,
+    const torch::Tensor& positions,
+    const torch::Tensor& slot_mapping,
+    const torch::Tensor& block_table,
+    const torch::Tensor& rms_norm_weight,
+    double rms_norm_eps,
+    const torch::Tensor& cos_sin_cache,
+    torch::Tensor& k_cache,
+    const torch::Tensor& kv_slot_mapping,
+    int64_t kv_cache_block_size,
+    int64_t compress_ratio,
+    int64_t overlap,
+    int64_t rope_head_dim,
+    int64_t token_stride,
+    int64_t scale_dim,
+    int64_t kv_block_stride);
 
 void multimodal_rotary_embedding(
     torch::Tensor& positions,  // [num_mrope_sections, num_tokens]
@@ -171,7 +203,30 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mhc_fused_post_pre(
 #endif
 
 #ifdef VLLM_GDN_ENABLED
-std::vector<torch::Tensor> causal_conv1d(
+std::vector<torch::Tensor> causal_conv1d_spec(
+    torch::Tensor& z,
+    const torch::Tensor& projected_states_qkvz,
+    const torch::Tensor& projected_states_ba,
+    const int64_t num_k_heads,
+    const int64_t num_v_heads,
+    const int64_t head_k_dim,
+    const int64_t head_v_dim,
+    torch::Tensor& conv_state,
+    const torch::Tensor& conv_weights,
+    const std::optional<torch::Tensor>& conv_bias,
+    const std::string& activation,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const int64_t num_spec_decodes,
+    const torch::Tensor& spec_query_start_loc,
+    const torch::Tensor& spec_token_indx,
+    const torch::Tensor& spec_state_indices_tensor,
+    const torch::Tensor& num_accepted_tokens,
+    const int64_t num_actual_tokens,
+    const int64_t tp_size,
+    const bool reorder_input);
+
+std::vector<torch::Tensor> causal_conv1d_non_spec(
     torch::Tensor& z,
     const torch::Tensor& projected_states_qkvz,
     const torch::Tensor& projected_states_ba,
@@ -187,18 +242,36 @@ std::vector<torch::Tensor> causal_conv1d(
     const int64_t num_decodes,
     const int64_t num_spec_decodes,
     const std::optional<torch::Tensor>& has_initial_state,
-    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const torch::Tensor& non_spec_query_start_loc,
     const std::optional<torch::Tensor>& non_spec_token_indx,
-    const std::optional<torch::Tensor>& non_spec_state_indices_tensor,
-    const std::optional<torch::Tensor>& spec_query_start_loc,
-    const std::optional<torch::Tensor>& spec_token_indx,
-    const std::optional<torch::Tensor>& spec_state_indices_tensor,
-    const std::optional<torch::Tensor>& num_accepted_tokens,
+    const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
     const int64_t tp_size,
     const bool reorder_input);
 
-void gated_delta_rule(
+void gated_delta_rule_spec(
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& b,
+    const torch::Tensor& a,
+    const int64_t num_v_heads,
+    const int64_t head_v_dim,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    torch::Tensor& ssm_state,
+    const int64_t num_prefills,
+    const int64_t num_decodes,
+    const int64_t num_spec_decodes,
+    const torch::Tensor& spec_query_start_loc,
+    const torch::Tensor& spec_token_indx,
+    const torch::Tensor& spec_state_indices_tensor,
+    const torch::Tensor& num_accepted_tokens,
+    const int64_t num_actual_tokens,
+    const int64_t tp_size);
+
+void gated_delta_rule_non_spec(
     torch::Tensor& core_attn_out,
     const torch::Tensor& q,
     const torch::Tensor& k,
@@ -214,13 +287,9 @@ void gated_delta_rule(
     const int64_t num_decodes,
     const int64_t num_spec_decodes,
     const std::optional<torch::Tensor>& has_initial_state,
-    const std::optional<torch::Tensor>& non_spec_query_start_loc,
+    const torch::Tensor& non_spec_query_start_loc,
     const std::optional<torch::Tensor>& non_spec_token_indx,
-    const std::optional<torch::Tensor>& non_spec_state_indices_tensor,
-    const std::optional<torch::Tensor>& spec_query_start_loc,
-    const std::optional<torch::Tensor>& spec_token_indx,
-    const std::optional<torch::Tensor>& spec_state_indices_tensor,
-    const std::optional<torch::Tensor>& num_accepted_tokens,
+    const torch::Tensor& non_spec_state_indices_tensor,
     const int64_t num_actual_tokens,
     const int64_t tp_size);
 
@@ -327,3 +396,9 @@ void deepseek_fused_indexer_q_rope_mxfp4(
     torch::Tensor& packed_out,
     torch::Tensor& scales_out,
     torch::Tensor& weights_out);
+
+void fused_input_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    torch::Tensor& bias);

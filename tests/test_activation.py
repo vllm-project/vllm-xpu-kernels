@@ -12,7 +12,7 @@ from tests.utils import opcheck, seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
-D = [512, 13824]  # Arbitrary values for testing
+D = [512, 1800, 3000, 13824]  # Cover scalar and vectorized kernels
 SEEDS = [0]
 XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
@@ -78,6 +78,102 @@ def test_act_and_mul(
         opcheck(fn, (out, x, threshold))
     else:
         opcheck(fn, (out, x))
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("d", D)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("linear_beta", [-1.0, 2.0])
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@torch.inference_mode()
+def test_situ_and_mul(
+    num_tokens: int,
+    d: int,
+    dtype: torch.dtype,
+    linear_beta: float,
+    device: str,
+) -> None:
+    seed_everything(0)
+    beta = 1.7
+    x = torch.randn(num_tokens, 2 * d, dtype=dtype, device=device)
+    gate, up = x.float().chunk(2, dim=-1)
+    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
+    if linear_beta > 0:
+        up = linear_beta * torch.tanh(up / linear_beta)
+    ref_out = (gate * up).to(dtype)
+    out = torch.empty_like(ref_out)
+
+    torch.ops._C.situ_and_mul(out, x, beta, linear_beta)
+
+    torch.testing.assert_close(
+        out,
+        ref_out,
+        atol=get_default_atol(out),
+        rtol=get_default_rtol(out),
+    )
+    opcheck(torch.ops._C.situ_and_mul, (out, x, beta, linear_beta))
+
+
+@pytest.mark.parametrize(
+    ("case", "error"),
+    [
+        ("odd_width", "last dimension must be positive and even"),
+        ("noncontiguous_input", "input must be contiguous"),
+        ("noncontiguous_output", "output must be contiguous"),
+        ("wrong_output_shape", "output last dimension must be half"),
+        ("wrong_output_dtype", "input and output must have the same dtype"),
+    ],
+)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+def test_situ_and_mul_rejects_invalid_tensor_contract(
+    case: str,
+    error: str,
+    device: str,
+) -> None:
+    x = torch.randn(2, 8, device=device)
+    out = torch.empty(2, 4, device=device)
+    if case == "odd_width":
+        x = torch.randn(2, 7, device=device)
+        out = torch.empty(2, 3, device=device)
+    elif case == "noncontiguous_input":
+        x = torch.randn(2, 16, device=device)[:, ::2]
+    elif case == "noncontiguous_output":
+        out = torch.empty(2, 8, device=device)[:, ::2]
+    elif case == "wrong_output_shape":
+        out = torch.empty(2, 3, device=device)
+    elif case == "wrong_output_dtype":
+        out = out.to(torch.bfloat16)
+
+    with pytest.raises(RuntimeError, match=error):
+        torch.ops._C.situ_and_mul(out, x, 1.7, 2.0)
+
+
+@pytest.mark.parametrize("beta", [0.0, -1.0, float("nan"), float("inf")])
+@pytest.mark.parametrize("device", XPU_DEVICES)
+def test_situ_and_mul_rejects_invalid_beta(
+    beta: float,
+    device: str,
+) -> None:
+    x = torch.randn(2, 8, device=device)
+    out = torch.empty(2, 4, device=device)
+
+    with pytest.raises(RuntimeError, match="finite and greater than zero"):
+        torch.ops._C.situ_and_mul(out, x, beta, 2.0)
+
+
+@pytest.mark.parametrize(
+    "linear_beta", [float("nan"), float("inf"), float("-inf")]
+)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+def test_situ_and_mul_rejects_invalid_linear_beta(
+    linear_beta: float,
+    device: str,
+) -> None:
+    x = torch.randn(2, 8, device=device)
+    out = torch.empty(2, 4, device=device)
+
+    with pytest.raises(RuntimeError, match="linear_beta must be finite"):
+        torch.ops._C.situ_and_mul(out, x, 1.7, linear_beta)
 
 
 @pytest.mark.parametrize("activation",
