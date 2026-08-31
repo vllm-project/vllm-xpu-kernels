@@ -291,14 +291,9 @@ void xpu_memcpy_sync(
     int64_t kind,
     int64_t device = -1);
 
-// ptr is a single-element uint64 tensor holding the raw address. A scalar
-// int64 op argument cannot losslessly carry every 64-bit pointer bit
-// pattern (addresses with bit 63 set overflow the signed range and fail to
-// cast from Python), so the address is passed via a uint64 Tensor instead,
-// matching the pattern used by swap_blocks_batch.
-bool xpu_host_register(const torch::Tensor& ptr, int64_t n_bytes);
+bool xpu_host_register(int64_t ptr, int64_t n_bytes);
 
-bool xpu_host_unregister(const torch::Tensor& ptr);
+bool xpu_host_unregister(int64_t ptr);
 
 void merge_attn_states(
     torch::Tensor& output,
