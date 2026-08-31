@@ -95,7 +95,7 @@ class batched_moe_align_block_size_kernel {
 
     // Compute prefix sum over token counts per expert
     temp_storage[local_id_x] = ceil_b_num_tokens;
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     int cumsum_val;
     sycl::joint_exclusive_scan(
@@ -188,7 +188,7 @@ void _moe_align_block_size(
     }
   }
 
-  item.barrier(sycl::access::fence_space::local_space);
+  sycl::group_barrier(item.get_group());
 
   const size_t tid = local_id_x;
   const size_t stride = local_range_x;
@@ -217,7 +217,7 @@ void _moe_align_block_size(
     atomic_count.fetch_add(mask);
   }
 
-  item.barrier(sycl::access::fence_space::local_space);
+  sycl::group_barrier(item.get_group());
 
   // Compute prefix sum over token counts per expert
   int expert_count = 0;
@@ -230,7 +230,7 @@ void _moe_align_block_size(
   }
 
   temp_storage[local_id_x] = expert_count;
-  item.barrier(sycl::access::fence_space::local_space);
+  sycl::group_barrier(item.get_group());
 
   int cumsum_val;
   sycl::joint_exclusive_scan(
@@ -253,7 +253,7 @@ void _moe_align_block_size(
     total_tokens_post_pad[model_offset] = cumsum_val;
   }
 
-  item.barrier(sycl::access::fence_space::local_space);
+  sycl::group_barrier(item.get_group());
 
   if (local_id_x < num_experts) {
     for (int i = cumsum[cumsum_offset + local_id_x];
@@ -310,7 +310,7 @@ void _moe_align_block_size_small_batch_expert(
           static_cast<int32_t>(numel);
     }
   }
-  item.barrier(sycl::access::fence_space::local_space);
+  sycl::group_barrier(item.get_group());
   const size_t tid = local_id_x - fill_threads;
   const size_t stride = local_range_x - fill_threads;
 
@@ -325,7 +325,7 @@ void _moe_align_block_size_small_batch_expert(
     }
   }
 
-  item.barrier(sycl::access::fence_space::local_space);
+  sycl::group_barrier(item.get_group());
   if (local_id_x >= fill_threads) {
     for (size_t i = tid; i < numel; i += stride) {
       int32_t expert_id = static_cast<int32_t>(topk_ids[i]);
@@ -339,7 +339,7 @@ void _moe_align_block_size_small_batch_expert(
     }
   }
 
-  item.barrier(sycl::access::fence_space::local_space);
+  sycl::group_barrier(item.get_group());
 
   if (local_id_x >= fill_threads) {
     if (tid < num_experts) {
@@ -351,7 +351,7 @@ void _moe_align_block_size_small_batch_expert(
     }
   }
 
-  item.barrier(sycl::access::fence_space::local_space);
+  sycl::group_barrier(item.get_group());
 
   if (local_id_x >= fill_threads) {
     if (tid == 0) {
@@ -367,7 +367,7 @@ void _moe_align_block_size_small_batch_expert(
     }
   }
 
-  item.barrier(sycl::access::fence_space::local_space);
+  sycl::group_barrier(item.get_group());
   if (local_id_x >= fill_threads) {
     if (tid < num_experts) {
       for (int i = cumsum[tid]; i < cumsum[tid + 1]; i += block_size) {
@@ -820,7 +820,7 @@ class moe_lora_align_block_size_kernel {
       }
     }
 
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     _moe_align_block_size(
         topk_ids,
@@ -1003,7 +1003,7 @@ class moe_lora_align_block_size_small_batch_expert_kernel {
       }
     }
 
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     _moe_align_block_size_small_batch_expert<scalar_t, fill_threads>(
         topk_ids,
