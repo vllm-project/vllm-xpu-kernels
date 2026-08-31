@@ -714,7 +714,7 @@ class cp_gather_indexer_k_quant_cache_kernel {
     }
 
     // Synchronise SLM writes before any thread reads batch_idx_acc_
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     // Exit threads after barrier to make sure nothing to write.
     if (head_idx >= static_cast<int>(head_dim_) || token_idx >= num_tokens_) {

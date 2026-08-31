@@ -91,7 +91,7 @@ class rms_norm_kernel {
       *s_variance_ptr = sycl::rsqrt(variance / hidden_size + epsilon);
     }
 
-    item_ct1.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item_ct1.get_group());
 
     scalar_t* out_row = out + item_ct1.get_group(2) * hidden_size;
     auto* v_in =
@@ -215,7 +215,7 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
       *s_variance_ptr = sycl::rsqrt(variance / hidden_size + epsilon);
     }
 
-    item_ct1.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item_ct1.get_group());
 
     scalar_t* out_row = out + item_ct1.get_group(2) * hidden_size;
 #pragma unroll
@@ -353,7 +353,7 @@ class rms_norm_multi_row_kernel {
       s_variance_ptr[row_in_wg] = sycl::rsqrt(variance / hidden_size + epsilon);
     }
 
-    item_ct1.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item_ct1.get_group());
 
     // Phase 2: normalize
     scalar_t* out_row = out + global_row * hidden_size;
@@ -603,7 +603,7 @@ class fused_add_rms_norm_kernel {
       *s_variance_ptr = sycl::rsqrt(variance / hidden_size + epsilon);
     }
 
-    item_ct1.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item_ct1.get_group());
 
     float s_var = *s_variance_ptr;
     for (int idx = item_ct1.get_local_id(2); idx < vec_hidden_size;
@@ -688,7 +688,7 @@ class fused_add_rms_norm_kernel<scalar_t, 0, HasWeight> {
       *s_variance_ptr = sycl::rsqrt(variance / hidden_size + epsilon);
     }
 
-    item_ct1.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item_ct1.get_group());
 
     for (int idx = item_ct1.get_local_id(2); idx < hidden_size;
          idx += item_ct1.get_local_range(2)) {

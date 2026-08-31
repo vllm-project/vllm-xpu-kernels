@@ -23,6 +23,11 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def fused_input_norm(out: torch.Tensor, input: torch.Tensor,
+                     weight: torch.Tensor, bias: torch.Tensor) -> None:
+    torch.ops._xpu_C.fused_input_norm(out, input, weight, bias)
+
+
 def gemma_rms_norm(out: torch.Tensor, input: torch.Tensor,
                    weight: torch.Tensor, epsilon: float) -> None:
     torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
@@ -607,7 +612,7 @@ def swap_blocks_batch(
     torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
 
 
-def xpu_host_register(ptr: torch.Tensor, n_bytes: int) -> bool:
+def xpu_host_register(ptr: int, n_bytes: int) -> bool:
     """Page-lock a host range and import it into the device context so
     transfers use direct DMA. Intended for host memory that cannot come from
     the caching host allocator, such as a shared mmap region. Returns False if
@@ -622,7 +627,7 @@ def xpu_host_register(ptr: torch.Tensor, n_bytes: int) -> bool:
     return torch.ops._C.xpu_host_register(ptr, n_bytes)
 
 
-def xpu_host_unregister(ptr: torch.Tensor) -> bool:
+def xpu_host_unregister(ptr: int) -> bool:
     """Release a host range previously passed to xpu_host_register.
 
     ptr is a single-element uint64 tensor holding the raw address; see
