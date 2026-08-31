@@ -228,7 +228,7 @@ CUTE_DEVICE void MoEGEMM(
       if (local_id == 0) {
         slm_mem[0] = cutlass::atomicAdd(atomic_buffer, 1);
       }
-      item.barrier(sycl::access::fence_space::local_space);
+      sycl::group_barrier(item.get_group());
       group_id = group_range + slm_mem[0];
       group_m_id = (group_id * wg_tile_n) / gemm_n_pad;
     }
