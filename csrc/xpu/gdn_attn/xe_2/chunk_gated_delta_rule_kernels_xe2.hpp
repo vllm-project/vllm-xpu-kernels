@@ -214,20 +214,20 @@ CUTE_DEVICE void chunk_compute_A_kernel(
 
       item.barrier(sycl::access::fence_space::local_space);
 
-      auto k_ptr = k +
-                   static_cast<int64_t>(chunk_start_offset) * num_k_heads *
-                       head_k_dim +
-                   (v_head_id / kv_ratio) * head_k_dim;
+      auto k_ptr =
+          k +
+          static_cast<int64_t>(chunk_start_offset) * num_k_heads * head_k_dim +
+          (v_head_id / kv_ratio) * head_k_dim;
       auto K_tensor_shape = make_shape(chunk_size, head_k_dim);
       auto K_tensor = make_tensor(
           make_gmem_ptr(k_ptr),
           make_layout(
               K_tensor_shape, make_stride(head_k_dim * num_k_heads, _1{})));
 
-      auto A_ptr = A +
-                   static_cast<int64_t>(v_head_id) * total_virtual_seqlen *
-                       chunk_size +
-                   chunk_start_offset * chunk_size;
+      auto A_ptr =
+          A +
+          static_cast<int64_t>(v_head_id) * total_virtual_seqlen * chunk_size +
+          chunk_start_offset * chunk_size;
       auto A_tensor_shape = make_shape(chunk_size, chunk_size);
       auto A_tensor = make_tensor(
           make_gmem_ptr(A_ptr),
@@ -788,28 +788,28 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
 
       item.barrier(sycl::access::fence_space::local_space);
 
-      auto A_ptr = A +
-                   static_cast<int64_t>(v_head_id) * total_virtual_seqlen *
-                       chunk_size +
-                   chunk_start_offset * chunk_size;
+      auto A_ptr =
+          A +
+          static_cast<int64_t>(v_head_id) * total_virtual_seqlen * chunk_size +
+          chunk_start_offset * chunk_size;
       auto A_tensor_shape = make_shape(chunk_size, chunk_size);
       auto A_tensor = make_tensor(
           make_gmem_ptr(A_ptr),
           make_layout(A_tensor_shape, make_stride(chunk_size, _1{})));
 
-      auto v_ptr = v +
-                   static_cast<int64_t>(chunk_start_offset) * num_v_heads *
-                       head_v_dim +
-                   v_head_id * head_v_dim;
+      auto v_ptr =
+          v +
+          static_cast<int64_t>(chunk_start_offset) * num_v_heads * head_v_dim +
+          v_head_id * head_v_dim;
       auto V_tensor_T_shape = make_shape(head_v_dim, chunk_size);
       auto V_tensor_T = make_tensor(
           make_gmem_ptr(v_ptr),
           make_layout(
               V_tensor_T_shape, make_stride(_1{}, head_v_dim * num_v_heads)));
-      auto U_ptr = u +
-                   static_cast<int64_t>(v_head_id) * total_virtual_seqlen *
-                       head_v_dim +
-                   chunk_start_offset * head_v_dim;
+      auto U_ptr =
+          u +
+          static_cast<int64_t>(v_head_id) * total_virtual_seqlen * head_v_dim +
+          chunk_start_offset * head_v_dim;
       auto U_tensor_shape = make_shape(chunk_size, head_v_dim);
       auto U_tensor = make_tensor(
           make_gmem_ptr(U_ptr),
@@ -841,8 +841,7 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
         auto K_tensor_T = make_tensor(
             make_gmem_ptr(k_ptr),
             make_layout(
-                K_tensor_T_shape,
-                make_stride(_1{}, head_k_dim * num_k_heads)));
+                K_tensor_T_shape, make_stride(_1{}, head_k_dim * num_k_heads)));
         auto W_ptr = w +
                      static_cast<int64_t>(v_head_id) * total_virtual_seqlen *
                          head_k_dim +
@@ -857,14 +856,13 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
         auto thr_copy_W_c = copy_W_c.get_slice(local_id);
 
         for (int dk = 0; dk < head_k_dim / chunk_size; ++dk) {
-          Tensor gW_C = local_tile(
-              cW, wg_tile, make_coord(0, dk, 0), Step<_1, _1, X>{});
+          Tensor gW_C =
+              local_tile(cW, wg_tile, make_coord(0, dk, 0), Step<_1, _1, X>{});
           auto tCrW_c = thr_copy_W_c.partition_sg_fragment_S(gW_C);
           auto tCgW_c = thr_copy_W_c.partition_D(gW_C);
           auto tSrW_c = thr_mma.partition_sg_fragment_C(gW_C);
           clear(tSrW_c);
-          gemm_TTS_k_multi(
-              A_tensor, K_tensor_T, tSrW_c, 0, dk, mma, g_slm_ptr);
+          gemm_TTS_k_multi(A_tensor, K_tensor_T, tSrW_c, 0, dk, mma, g_slm_ptr);
           reorder(tSrW_c, tCrW_c);
           copy(copy_W_c, tCrW_c, tCgW_c);
         }
@@ -906,8 +904,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
   // (v_head_id, dv_idx) pairs so each work-group owns a single
   // head_v_dim/chunk_size output tile.
   const int dv_split = head_v_dim / chunk_size;
-  if (dv_split <= 0)
-    return;
+  if (dv_split <= 0) return;
 
   int v_head_id = item.get_group(1) / dv_split;
   int dv = item.get_group(1) % dv_split;
