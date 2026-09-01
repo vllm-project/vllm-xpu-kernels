@@ -900,11 +900,11 @@ struct top_p_only_kernel {
 
 #pragma unroll
           for (int e = 0; e < VEC_SIZE; ++e) {
-            float logit = local_data[e];
-            logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
+            float prob = sycl::native::exp(local_data[e] - max_softmax_value) /
+                         sum_softmax;
 
-            if (logit >= pivot) {
-              pivot_count_local += logit;
+            if (prob >= pivot) {
+              pivot_count_local += prob;
             }
           }
         }
@@ -917,11 +917,11 @@ struct top_p_only_kernel {
 
 #pragma unroll
           for (int e = 0; e < remained_vec_size; ++e) {
-            float logit = local_data[e];
-            logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
+            float prob = sycl::native::exp(local_data[e] - max_softmax_value) /
+                         sum_softmax;
 
-            if (logit >= pivot) {
-              pivot_count_local += logit;
+            if (prob >= pivot) {
+              pivot_count_local += prob;
             }
           }
         }
