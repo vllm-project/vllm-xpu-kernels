@@ -153,3 +153,55 @@ def test_topk_topp_infinite(
     )
 
     torch.xpu.synchronize()
+
+
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("vocab_size", [33, 50, 513])
+@pytest.mark.parametrize("k", [1, 8, None])
+@pytest.mark.parametrize("p", [0.5, None])
+@pytest.mark.parametrize("logprobs_mode", ["raw_logits"])
+def test_topk_topp_unaligned_vocab_size(
+    batch_size, vocab_size, k, p, logprobs_mode):
+
+    if k is None and p is None:
+        pytest.skip("Nothing to sample against; covered by other tests.")
+
+    seed_everything(42)
+
+    generators = {}
+
+    logits = torch.randn(batch_size,
+                         vocab_size,
+                         dtype=torch.float,
+                         device=DEVICE)
+    ref_logits = logits.clone()
+
+    top_k = None
+    top_p = None
+    if k is not None:
+        top_k = torch.randint(1, k + 1, (batch_size, ), device=DEVICE)
+    if p is not None:
+        top_p = 1.0 - torch.rand(
+            batch_size, dtype=torch.float, device=DEVICE)
+
+    topk_topp_sampler = TopKTopPSampler(logprobs_mode=logprobs_mode)
+
+    random_sampled, logits_to_return = topk_topp_sampler.forward_xpu(
+        logits=logits,
+        generators=generators,
+        k=top_k,
+        p=top_p,
+    )
+
+    ref_random_sampled, ref_logits_to_return =\
+        topk_topp_sampler.forward_native(
+        logits=ref_logits,
+        generators=generators,
+        k=top_k,
+        p=top_p,
+    )
+
+    torch.testing.assert_close(random_sampled,
+                               ref_random_sampled,
+                               rtol=0,
+                               atol=0)

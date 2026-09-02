@@ -105,7 +105,8 @@ struct random_sampler_only_kernel {
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
     const int local_offset = local_id * local_handle_size;
     const int remained_size = vocab_size - local_offset;
-    const int handle_size = sycl::min(local_handle_size, remained_size);
+    const int handle_size =
+        sycl::max(sycl::min(local_handle_size, remained_size), 0);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
     float* logits_ptr = logits + batch_id * vocab_size + local_offset;
@@ -334,7 +335,8 @@ struct top_k_only_kernel {
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
     const int local_offset = local_id * local_handle_size;
     const int remained_size = vocab_size - local_offset;
-    const int handle_size = sycl::min(local_handle_size, remained_size);
+    const int handle_size =
+        sycl::max(sycl::min(local_handle_size, remained_size), 0);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
     float* logits_ptr = logits + batch_id * vocab_size + local_offset;
@@ -784,7 +786,8 @@ struct top_p_only_kernel {
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
     const int local_offset = local_id * local_handle_size;
     const int remained_size = vocab_size - local_offset;
-    const int handle_size = sycl::min(local_handle_size, remained_size);
+    const int handle_size =
+        sycl::max(sycl::min(local_handle_size, remained_size), 0);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
     float* logits_ptr = logits + batch_id * vocab_size + local_offset;
@@ -1117,7 +1120,8 @@ struct top_k_top_p_kernel {
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
     const int local_offset = local_id * local_handle_size;
     const int remained_size = vocab_size - local_offset;
-    const int handle_size = sycl::min(local_handle_size, remained_size);
+    const int handle_size =
+        sycl::max(sycl::min(local_handle_size, remained_size), 0);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
     float* logits_ptr = logits + batch_id * vocab_size + local_offset;

@@ -58,7 +58,8 @@ struct exponential_2d_kernel {
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
     const int local_offset = local_id * local_handle_size;
     const int remained_size = vocab_size - local_offset;
-    const int handle_size = sycl::min(local_handle_size, remained_size);
+    const int handle_size =
+        sycl::max(sycl::min(local_handle_size, remained_size), 0);
 
     T* tensor_local_ptr = tensor_ptr + batch_id * vocab_size + local_offset;
 
