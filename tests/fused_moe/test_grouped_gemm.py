@@ -618,8 +618,8 @@ def test_xe_grouped_gemm_block_fp8_wide_scales(m, n, k, pattern, dtype):
     magnitude. Random exponents would not reliably produce large ratios, so
     each pattern is constructed:
       alternating -- every adjacent pair swings the full 2^(2*MAX_EXP)
-      descending  -- scales shrink, so the carried accumulator grows monotonically
-      ascending   -- scales grow, so the carried accumulator shrinks monotonically
+      descending  -- scales shrink, so the accumulator grows monotonically
+      ascending   -- scales grow, so the accumulator shrinks monotonically
     """
     if not torch.xpu.is_available():
         pytest.skip("XPU required")
