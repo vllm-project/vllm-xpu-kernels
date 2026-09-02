@@ -108,10 +108,11 @@ torch::Tensor get_xpu_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
   if (cpu_tensor.is_pinned()) {
     pinned_owner = cpu_tensor;
   } else {
-    torch::Tensor contiguous_cpu = cpu_tensor.contiguous();
-    pinned_owner = at::empty_like(
-        contiguous_cpu, contiguous_cpu.options().pinned_memory(true));
-    pinned_owner.copy_(contiguous_cpu);
+    pinned_owner = at::empty_strided(
+        cpu_tensor.sizes(),
+        cpu_tensor.strides(),
+        cpu_tensor.options().pinned_memory(true));
+    pinned_owner.copy_(cpu_tensor);
   }
 
   // Get raw host pointer from the pinned tensor.
