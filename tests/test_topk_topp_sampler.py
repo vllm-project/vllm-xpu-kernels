@@ -205,3 +205,22 @@ def test_topk_topp_unaligned_vocab_size(
                                ref_random_sampled,
                                rtol=0,
                                atol=0)
+    if logits_to_return is not None:
+        if top_p is None:
+            torch.testing.assert_close(logits_to_return,
+                                       ref_logits_to_return,
+                                       rtol=1e-5,
+                                       atol=1e-5)
+        else:
+            # Top-p involved: allow small differences
+            # Either < 1% of kept values OR < 5 values absolute
+            xpu_kept = (logits_to_return != float("-inf")).sum(dim=-1)
+            ref_kept = (ref_logits_to_return != float("-inf")).sum(dim=-1)
+
+            max_diff = (ref_kept - xpu_kept).abs().max().item()
+            max_kept = ref_kept.max().item()
+            if max_kept > 0 and max_diff > 3:
+                diff_pct = max_diff / max_kept * 100
+                assert diff_pct < 0.5, (
+                    f"Top-p mask difference too large: {diff_pct:.2f}% "
+                    f"(max diff {max_diff} values out of {max_kept})")

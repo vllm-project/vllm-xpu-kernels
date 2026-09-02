@@ -103,7 +103,8 @@ struct random_sampler_only_kernel {
     auto group = item.get_group();
 
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
-    const int local_offset = local_id * local_handle_size;
+    const int local_offset =
+        sycl::min(local_id * local_handle_size, vocab_size);
     const int remained_size = vocab_size - local_offset;
     const int handle_size =
         sycl::max(sycl::min(local_handle_size, remained_size), 0);
@@ -333,7 +334,8 @@ struct top_k_only_kernel {
     const int top_k_value = top_k[batch_id];
 
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
-    const int local_offset = local_id * local_handle_size;
+    const int local_offset =
+        sycl::min(local_id * local_handle_size, vocab_size);
     const int remained_size = vocab_size - local_offset;
     const int handle_size =
         sycl::max(sycl::min(local_handle_size, remained_size), 0);
@@ -784,7 +786,8 @@ struct top_p_only_kernel {
     const float top_p_value = top_p[batch_id];
 
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
-    const int local_offset = local_id * local_handle_size;
+    const int local_offset =
+        sycl::min(local_id * local_handle_size, vocab_size);
     const int remained_size = vocab_size - local_offset;
     const int handle_size =
         sycl::max(sycl::min(local_handle_size, remained_size), 0);
@@ -1118,7 +1121,8 @@ struct top_k_top_p_kernel {
     const float top_p_value = top_p[batch_id];
 
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
-    const int local_offset = local_id * local_handle_size;
+    const int local_offset =
+        sycl::min(local_id * local_handle_size, vocab_size);
     const int remained_size = vocab_size - local_offset;
     const int handle_size =
         sycl::max(sycl::min(local_handle_size, remained_size), 0);
