@@ -1,4 +1,4 @@
-FROM intel/deep-learning-essentials:2026.1.2-devel-ubuntu24.04 AS vllm-base
+FROM intel/deep-learning-essentials:2026.1.3-devel-ubuntu24.04 AS vllm-base
 
 WORKDIR /workspace/
 
