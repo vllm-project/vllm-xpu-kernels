@@ -12,6 +12,11 @@ DEVICES = [i for i in range(torch.xpu.device_count())]
 def test_get_memory_info(device) -> None:
     free, total = torch.ops._C_cache_ops.getMemoryInfo(device)
 
+    # Drivers without the usable-memory extension report 0; the fallback must
+    # still produce real numbers on every device.
+    assert free > 0
+    assert total > 0
+
     # FIXME:
     # After update neo, the results of torch is changed
     # ref_free 24385683456
