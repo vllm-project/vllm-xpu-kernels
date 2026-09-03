@@ -95,6 +95,21 @@ CUTE_DEVICE void report_decay_saturation(int* saturated) {
 static constexpr int prepare_sub_group_size = 32;
 static constexpr int prepare_work_group_size = 256;
 
+// `Vp` is a pure gather of `v` into the chunk-aligned workspace: no scaling, no
+// decay, just a layout change. `compute_wu` can therefore consume `v` in place
+// through a strided view, which saves `prepare` a full read of `v` and a full
+// write of `Vp` - together a quarter of the stage's traffic, and `prepare` runs
+// at the streaming bandwidth limit.
+//
+// That substitution needs the chunk's rows to map affinely onto the token axis,
+// so it is only taken when there is no speculative token gather and the chunk
+// is full. The tail chunk of a sequence would otherwise have the 2D block load
+// read past the end of `v`, so it keeps the materialized copy; at one such
+// chunk per sequence the remaining traffic is negligible.
+CUTE_DEVICE inline bool chunk_kda_needs_vp(const int* token_indx, int valid) {
+  return token_indx != nullptr || valid < chunk_size;
+}
+
 // DPAS tiling policies. These mirror the GDN chunk pipeline's proven shapes but
 // are declared locally so this file does not have to include
 // `chunk_gated_delta_rule_kernels_xe2.hpp` (which defines non-inline symbols
@@ -292,6 +307,7 @@ CUTE_DEVICE void chunk_kda_prepare_vec_kernel(
     while (chunk_id < cumsum_chunks) {
       const int chunk_token_start = (chunk_id - pre_chunks) * chunk_size;
       const int valid = sycl::min(chunk_size, seq_len - chunk_token_start);
+      const bool materialize_vp = chunk_kda_needs_vp(token_indx, valid);
       const int64_t out_base =
           static_cast<int64_t>(head_id) * total_virtual_seqlen * head_dim +
           static_cast<int64_t>(chunk_id) * chunk_size * head_dim + lane * V;
@@ -311,7 +327,8 @@ CUTE_DEVICE void chunk_kda_prepare_vec_kernel(
         const int64_t in_off =
             static_cast<int64_t>(global_token) * token_stride + lane_off;
 
-        const VecPack<T, V> v_pack = load_pack<T, V>(v + in_off);
+        const VecPack<T, V> v_pack =
+            materialize_vp ? load_pack<T, V>(v + in_off) : VecPack<T, V>{};
         float qv[V];
         float kv[V];
         float gv[V];
@@ -361,7 +378,9 @@ CUTE_DEVICE void chunk_kda_prepare_vec_kernel(
         store_from_float<T, V>(Ka + out_off, ka);
         store_from_float<T, V>(Kb + out_off, kb);
         store_from_float<T, V>(Qt + out_off, qt);
-        store_pack<T, V>(Vp + out_off, v_pack);
+        if (materialize_vp) {
+          store_pack<T, V>(Vp + out_off, v_pack);
+        }
       }
 
       // The GEMM stages read whole chunks unpredicated, so the tail past the
@@ -482,6 +501,7 @@ CUTE_DEVICE void chunk_kda_prepare_kernel(
       const int local_chunk = chunk_id - pre_chunks;
       const int chunk_token_start = local_chunk * chunk_size;
       const int valid = sycl::min(chunk_size, seq_len - chunk_token_start);
+      const bool materialize_vp = chunk_kda_needs_vp(token_indx, valid);
 
       item.barrier(sycl::access::fence_space::local_space);
 
@@ -580,7 +600,9 @@ CUTE_DEVICE void chunk_kda_prepare_kernel(
           Ka[out_off] = static_cast<T>(k_hat * decay);
           Kb[out_off] = static_cast<T>(k_hat * inv_decay * beta_slm[c]);
           Qt[out_off] = static_cast<T>(q_hat * decay);
-          Vp[out_off] = vv;
+          if (materialize_vp) {
+            Vp[out_off] = vv;
+          }
         };
 
         int c = 0;
@@ -600,7 +622,7 @@ CUTE_DEVICE void chunk_kda_prepare_kernel(
             gate[u] = static_cast<float>(raw_gate[in_off[u]]);
             kv[u] = static_cast<float>(k[in_off[u]]);
             qv[u] = static_cast<float>(q[in_off[u]]);
-            vv[u] = v[in_off[u]];
+            vv[u] = materialize_vp ? v[in_off[u]] : static_cast<T>(0.0f);
           }
           CUTE_UNROLL
           for (int u = 0; u < prepare_unroll; ++u) {
@@ -615,7 +637,7 @@ CUTE_DEVICE void chunk_kda_prepare_kernel(
               static_cast<float>(raw_gate[in_off]),
               static_cast<float>(k[in_off]),
               static_cast<float>(q[in_off]),
-              v[in_off]);
+              materialize_vp ? v[in_off] : static_cast<T>(0.0f));
         }
         // Tail padding: the GEMM stages read the whole chunk unpredicated, so
         // the workspace has to be zero-filled past the sequence end.
@@ -1152,7 +1174,9 @@ CUTE_DEVICE void chunk_kda_compute_wu_kernel(
     T* U,
     const T* Ka,
     const T* Vp,
+    const T* v,
     const int* query_start_loc,
+    const int* token_indx,
     const int total_virtual_seqlen,
     const int batch_size,
     const int num_heads,
@@ -1200,10 +1224,29 @@ CUTE_DEVICE void chunk_kda_compute_wu_kernel(
             make_gmem_ptr(Ka + operand_offset),
             make_layout(
                 make_shape(head_dim, chunk_size), make_stride(_1{}, head_dim)));
+
+        // `Vp` is only materialized for the chunks whose rows do not map
+        // affinely onto the token axis (see `chunk_kda_needs_vp`); everywhere
+        // else the same tile is read straight out of `v`, one token row every
+        // `num_heads * head_dim` elements. Both cases are the same strided
+        // transposed view, they only differ in base pointer and row pitch.
+        const int chunk_token_start = (chunk_id - pre_chunks) * chunk_size;
+        const int valid = sycl::min(chunk_size, seq_len - chunk_token_start);
+        const int token_stride = num_heads * head_dim;
+        const bool materialized = chunk_kda_needs_vp(token_indx, valid);
+        const T* v_ptr =
+            materialized
+                ? Vp + operand_offset
+                : v +
+                      static_cast<int64_t>(seq_start + chunk_token_start) *
+                          token_stride +
+                      static_cast<int64_t>(head_id) * head_dim;
+        const int v_row_stride = materialized ? head_dim : token_stride;
         auto Vp_tensor_T = make_tensor(
-            make_gmem_ptr(Vp + operand_offset),
+            make_gmem_ptr(v_ptr),
             make_layout(
-                make_shape(head_dim, chunk_size), make_stride(_1{}, head_dim)));
+                make_shape(head_dim, chunk_size),
+                make_stride(_1{}, v_row_stride)));
 
         auto W_tensor = make_tensor(
             make_gmem_ptr(W + operand_offset),
