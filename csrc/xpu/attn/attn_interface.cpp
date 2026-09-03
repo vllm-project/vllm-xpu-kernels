@@ -109,8 +109,7 @@ void cutlass_paged_decode_interface(
     at::Tensor& out,
     at::Tensor&
         temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
-    at::Tensor& exp_sums,    // [batch, num_head_q, seq_q, num_kv_splits]
-    at::Tensor& max_logits,  // [batch, num_head_q, seq_q, num_kv_splits]
+    at::Tensor& softmax_lse_accum,  // [batch, num_head_q, seq_q, num_kv_splits]
     const at::Tensor& block_table,
     const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k,
@@ -131,7 +130,8 @@ void cutlass_paged_decode_interface(
     int num_kv_splits,
     std::optional<const at::Tensor>& is_prefill,
     std::optional<at::Tensor>& splits_per_seq,
-    std::optional<at::Tensor>& work_list) {
+    std::optional<at::Tensor>& work_list,
+    std::optional<at::Tensor>& softmax_lse) {
   if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel (also used as WA for XE3/XE3P)
@@ -142,8 +142,7 @@ void cutlass_paged_decode_interface(
         value_cache,
         out,
         temp_out,
-        exp_sums,
-        max_logits,
+        softmax_lse_accum,
         block_table,
         cu_seqlens_q,
         cu_seqlens_k,
@@ -163,7 +162,8 @@ void cutlass_paged_decode_interface(
         num_kv_splits,
         is_prefill,
         splits_per_seq,
-        work_list);
+        work_list,
+        softmax_lse);
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif

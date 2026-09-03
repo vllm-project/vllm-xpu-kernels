@@ -244,14 +244,14 @@ void cutlass_chunk_prefill_impl(
       "FMHA forward only supports head dimension at most " +
           std::to_string(max_head_size));
 
-  // softmax_lse output is only supported on the
-  // !Paged && !Local && !Sink specialization (template-constrained to
-  // keep kernel instantiation count bounded).
+  // Paged and non-paged chunk prefill support LSE for global attention
+  // without sinks. Local/Sink specializations remain disabled to keep the
+  // kernel matrix bounded.
   bool is_lse = softmax_lse.has_value();
   TORCH_CHECK(
-      !is_lse || (!is_paged && !is_local && !is_sink),
-      "softmax_lse output is only supported when is_paged=false, "
-      "is_local=false, is_sink=false");
+      !is_lse || (!is_local && !is_sink),
+      "chunk prefill softmax_lse output is only supported when "
+      "is_local=false and is_sink=false");
 
   // Validate block_size: 16, 32, or any positive multiple of 64. Non-paged
   // mode does not use block_size, so only enforce the check when paged.

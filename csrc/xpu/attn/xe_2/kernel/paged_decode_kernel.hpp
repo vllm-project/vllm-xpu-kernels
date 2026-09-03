@@ -143,10 +143,8 @@ class XeFMHAFwdSplitKVKernel {
     StrideV dV;
     ElementO* Oaccum;
     StrideO dOaccum;
-    ElementLSE* exp_sums;
-    StrideO dExp_sums;
-    ElementLSE* max_logits;
-    StrideO dMax_logits;
+    ElementLSE* softmax_lse_accum;
+    StrideO dSoftmax_lse_accum;
 
     const ElementSink* sm_sink;
 
@@ -154,6 +152,10 @@ class XeFMHAFwdSplitKVKernel {
     const bool* is_prefill;
     const int* splits_per_seq =
         nullptr;  // per-seq split counts; null => use global num_kv_splits
+    // softmax_lse output [num_heads_q, total_seqlen_q]; nullptr = disabled.
+    // Only written here when num_kv_splits <= 1 (no ReduceSplitK pass).
+    float* softmax_lse = nullptr;
+    int lse_stride = 0;
   };
   using KernelParams = KernelArguments;
 
@@ -305,7 +307,8 @@ class XeFMHAFwdSplitKVKernel {
       const int windowed_k_blocks = k_blocks - k_block0;
 
       int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
-      int offset_exp_sums = 0, offset_max_logits = 0;
+      int offset_softmax_lse_accum = 0;
+      int offset_lse = 0;
       if constexpr (is_var_len) {
         auto qo_cumulative = s.seq_len_qo.cumulative_length;
 
@@ -316,12 +319,18 @@ class XeFMHAFwdSplitKVKernel {
         offset_q = get<0>(p.dQ) * qo_cumulative[idx_b];
         offset_o = s.num_heads_q * s.head_size_vo * num_kv_splits *
                    qo_cumulative[idx_b];
-        offset_exp_sums = s.num_heads_q * num_kv_splits * qo_cumulative[idx_b];
-        offset_max_logits =
+        offset_softmax_lse_accum =
             s.num_heads_q * num_kv_splits * qo_cumulative[idx_b];
+        // softmax_lse is (num_heads_q, total_seqlen_q); decode has one query
+        // token per sequence, so the column is the sequence's cumulative
+        // query offset.
+        offset_lse = qo_cumulative[idx_b];
 
         // for gqa packing, seq_len_qo must be 1
         seq_len_qo = 1;
+      } else {
+        // Non-varlen decode has exactly one query token per batch entry.
+        offset_lse = idx_b;
       }
 
       // neglect seq_len_qo since it's always 1 for decode
@@ -341,9 +350,7 @@ class XeFMHAFwdSplitKVKernel {
           s.num_heads_kv,
           num_kv_splits,
           batch_dim);
-      auto shape_exp_sums =
-          make_shape(head_group_q, num_kv_splits, s.num_heads_kv, batch_dim);
-      auto shape_max_logits =
+      auto shape_softmax_lse_accum =
           make_shape(head_group_q, num_kv_splits, s.num_heads_kv, batch_dim);
       auto shape_sink = make_shape(s.num_heads_kv, head_group_q);
 
@@ -402,8 +409,17 @@ class XeFMHAFwdSplitKVKernel {
       auto dcK = const_cast<ElementK*>(p.K);
       auto dcV = const_cast<ElementV*>(p.V);
       auto ptrO = p.Oaccum + offset_o;
-      auto ptrExp_sums = p.exp_sums + offset_exp_sums;
-      auto ptrMax_logits = p.max_logits + offset_max_logits;
+      auto ptrSoftmax_lse_accum =
+          p.softmax_lse_accum + offset_softmax_lse_accum;
+
+      // softmax_lse row base for this (kv head, sequence). Rows of the packed
+      // GQA head-group are lse_stride apart. Only written here when no
+      // ReduceSplitK pass follows; otherwise ReduceSplitK owns the write
+      // because it holds the cross-split statistics.
+      ElementLSE* ptrLSE =
+          (p.softmax_lse != nullptr && num_kv_splits <= 1)
+              ? p.softmax_lse + head_q_start * p.lse_stride + offset_lse
+              : nullptr;
 
       // Q layout uses the tensor's actual head stride (get<2>(dQ)) so
       // non-contiguous Q (e.g. permuted heads or sliced from a wider
@@ -423,20 +439,16 @@ class XeFMHAFwdSplitKVKernel {
           shape_V, make_stride(_1{}, get<1>(p.dV), get<2>(p.dV), get<3>(p.dV)));
 
       auto layout_o = make_ordered_layout(shape_O, Step<_1, _0, _2, _3, _4>{});
-      auto layout_exp_sums =
-          make_ordered_layout(shape_exp_sums, Step<_1, _0, _2, _3>{});
-      auto layout_max_logits =
-          make_ordered_layout(shape_max_logits, Step<_1, _0, _2, _3>{});
+      auto layout_softmax_lse_accum =
+          make_ordered_layout(shape_softmax_lse_accum, Step<_1, _0, _2, _3>{});
       auto layout_sink = make_ordered_layout(shape_sink, Step<_1, _0>{});
 
       Tensor Q = make_tensor(make_gmem_ptr(dcQ), layout_q);
       Tensor K = make_tensor(make_gmem_ptr(dcK), layout_k);
       Tensor V = make_tensor(make_gmem_ptr(dcV), layout_v);
       Tensor O = make_tensor(make_gmem_ptr(ptrO), layout_o);
-      Tensor exp_sums =
-          make_tensor(make_gmem_ptr(ptrExp_sums), layout_exp_sums);
-      Tensor max_logits =
-          make_tensor(make_gmem_ptr(ptrMax_logits), layout_max_logits);
+      Tensor softmax_lse_accum = make_tensor(
+          make_gmem_ptr(ptrSoftmax_lse_accum), layout_softmax_lse_accum);
       Tensor sinks = make_tensor(
           make_gmem_ptr(const_cast<ElementSink*>(p.sm_sink)), layout_sink);
 
@@ -505,13 +517,13 @@ class XeFMHAFwdSplitKVKernel {
             tA_sum,
             blk_qv,
             thr_id,
-            exp_sums(_, _, head, l_coord),
-            max_logits(_, _, head, l_coord),
+            softmax_lse_accum(_, _, head, l_coord),
             idx_kv_split,
             head_group_q,
             sinks_per_kv,
             num_kv_splits,
-            is_single_split);
+            ptrLSE,
+            p.lse_stride);
       } else {
         epilogue(
             O(_, _, head, idx_kv_split, l_coord),
@@ -520,13 +532,13 @@ class XeFMHAFwdSplitKVKernel {
             tA_sum,
             blk_qv,
             thr_id,
-            exp_sums(_, _, head, l_coord),
-            max_logits(_, _, head, l_coord),
+            softmax_lse_accum(_, _, head, l_coord),
             idx_kv_split,
             head_group_q,
             sinks,
             num_kv_splits,
-            is_single_split);
+            ptrLSE,
+            p.lse_stride);
       }
     }
   }
@@ -574,15 +586,16 @@ class ReduceSplitK {
     // TODO: whether same dtype as output or accum?
     const ElementO* Oaccum;
     StrideO dOaccum;
-    const ElementLSE* exp_sums;
-    StrideO dExp_sums;
-    const ElementLSE* max_logits;
-    StrideO dMax_logits;
+    const ElementLSE* softmax_lse_accum;
+    StrideO dSoftmax_lse_accum;
     int window_size_left = -1;
 
     // per-batch mask: true = prefill, false = decode; nullptr = process all
     const bool* is_prefill;
     const int* splits_per_seq = nullptr;  // per-seq split counts
+    // softmax_lse output [num_heads_q, total_seqlen_q]; nullptr = disabled.
+    float* softmax_lse = nullptr;
+    int lse_stride = 0;
   };
   using KernelParams = KernelArguments;
 
@@ -600,9 +613,7 @@ class ReduceSplitK {
 
   struct SharedStorage {
     cutlass::Array<ElementLSE, FMHAKernel_::max_num_kv_splits>
-        max_logits_slm_array;
-    cutlass::Array<ElementLSE, FMHAKernel_::max_num_kv_splits>
-        exp_sums_slm_array;
+        softmax_lse_slm_array;
   };
 
   static constexpr int SharedStorageSize =
@@ -673,9 +684,6 @@ class ReduceSplitK {
     ProblemShape const& s = p.shape;
 
     int thr_id = int(ThreadIdxX());
-    int sub_group_id = thr_id / intel::sg_size;
-    int tid_in_sg = thr_id % intel::sg_size;
-
     TileScheduler tile_scheduler{params.scheduler};
     auto num_kv_splits = params.scheduler.num_kv_splits;
 
@@ -716,8 +724,19 @@ class ReduceSplitK {
       // host provides splits_per_seq, the host has already applied the same
       // policy (see build_decode_split_plan in flash_attn_interface.py), so
       // trust it directly. Otherwise (legacy path), mirror the FMHA kernel.
+      //
+      // plan_driven also selects how empty splits are detected. In the legacy
+      // path the FMHA kernel derives each split's tile range from the same
+      // ceil_div(windowed_k_blocks, splits) formula, so
+      // "i * num_blocks_per_split >= windowed_k_blocks" identifies exactly the
+      // splits it skipped. The host plan instead partitions the tiles evenly
+      // (base / base+1) and guarantees every emitted split owns at least one
+      // tile, and that partition is *finer* than num_blocks_per_split; using
+      // the tile-derived guard there can therefore drop a split that really
+      // did produce output (e.g. 33 tiles over 8 splits).
+      const bool plan_driven = (p.splits_per_seq != nullptr);
       int effective_splits;
-      if (p.splits_per_seq != nullptr) {
+      if (plan_driven) {
         effective_splits = seq_num_kv_splits;
       } else {
         constexpr int tile_n = get<1>(typename FMHAKernel_::TileShapeQK{});
@@ -728,15 +747,14 @@ class ReduceSplitK {
       }
 
       int offset_o = 0, offset_o_accum = 0;
-      int offset_exp_sums = 0, offset_max_logits = 0;
+      int offset_softmax_lse_accum = 0;
 
       if constexpr (is_var_len) {
         auto qo_cumulative = s.seq_len_qo.cumulative_length;
 
         offset_o_accum = s.num_heads_q * s.head_size_vo * num_kv_splits *
                          qo_cumulative[idx_b];
-        offset_exp_sums = s.num_heads_q * num_kv_splits * qo_cumulative[idx_b];
-        offset_max_logits =
+        offset_softmax_lse_accum =
             s.num_heads_q * num_kv_splits * qo_cumulative[idx_b];
 
         offset_o = s.num_heads_q * s.head_size_vo * qo_cumulative[idx_b];
@@ -755,15 +773,12 @@ class ReduceSplitK {
                                            num_heads_q * num_kv_splits,
                                            batch_dim);
 
-      auto shape_exp_sums =
-          make_shape(seq_len_qo, num_kv_splits, num_heads_q, batch_dim);
-      auto shape_max_logits =
+      auto shape_softmax_lse_accum =
           make_shape(seq_len_qo, num_kv_splits, num_heads_q, batch_dim);
 
       auto dcOaccum = const_cast<ElementO*>(p.Oaccum + offset_o_accum);
-      auto ptrExp_sums = const_cast<ElementLSE*>(p.exp_sums + offset_exp_sums);
-      auto ptrMax_logits =
-          const_cast<ElementLSE*>(p.max_logits + offset_max_logits);
+      auto ptrSoftmax_lse_accum = const_cast<ElementLSE*>(
+          p.softmax_lse_accum + offset_softmax_lse_accum);
       auto ptrO = p.O + offset_o;
 
       auto stride_o = is_var_len
@@ -772,86 +787,90 @@ class ReduceSplitK {
       auto stride_o_accum =
           is_var_len ? cutlass::make_cute_packed_stride(StrideO{}, shape_Oaccum)
                      : p.dOaccum;
-      auto stride_exp_sums = is_var_len ? cutlass::make_cute_packed_stride(
-                                              StrideO{}, shape_exp_sums)
-                                        : p.dExp_sums;
-      auto stride_max_logits = is_var_len ? cutlass::make_cute_packed_stride(
-                                                StrideO{}, shape_max_logits)
-                                          : p.dMax_logits;
+      auto stride_softmax_lse_accum =
+          is_var_len ? cutlass::make_cute_packed_stride(
+                           StrideO{}, shape_softmax_lse_accum)
+                     : p.dSoftmax_lse_accum;
 
       Tensor Oaccum = make_tensor(
           make_gmem_ptr(dcOaccum), make_layout(shape_Oaccum, stride_o_accum));
       Tensor O =
           make_tensor(make_gmem_ptr(ptrO), make_layout(shape_O, stride_o));
 
-      Tensor exp_sums = make_tensor(
-          make_gmem_ptr(ptrExp_sums),
-          make_layout(shape_exp_sums, stride_exp_sums));
-      Tensor max_logits = make_tensor(
-          make_gmem_ptr(ptrMax_logits),
-          make_layout(shape_max_logits, stride_max_logits));
+      Tensor softmax_lse_accum = make_tensor(
+          make_gmem_ptr(ptrSoftmax_lse_accum),
+          make_layout(shape_softmax_lse_accum, stride_softmax_lse_accum));
 
       int l_coord = is_var_len ? 0 : idx_b;
 
-      // Step 1: reduce max logits across different partitions
-      // store into SLM for later use
-
-      ElementLSE global_max_logits{
+      // Load the per-split natural-log LSE values into SLM and find their
+      // maximum. This matches CUDA FlashAttention's split-K combine contract.
+      bool split_thread_active =
+          thr_id < effective_splits &&
+          (plan_driven || thr_id * num_blocks_per_split < windowed_k_blocks);
+      ElementLSE local_lse{
           cutlass::platform::numeric_limits<ElementLSE>::lowest()};
-      ElementLSE global_exp_sums{0};
-      // only first subgroup participates
-      if (thr_id < effective_splits &&
-          thr_id * num_blocks_per_split < windowed_k_blocks) {
-        ElementLSE cur_max_logit = max_logits(seq_idx, thr_id, head_q, l_coord);
-        global_max_logits = sycl::max(global_max_logits, cur_max_logit);
-        shared_storage.max_logits_slm_array[thr_id] = cur_max_logit;
-
-        ElementLSE cur_exp_sum = exp_sums(seq_idx, thr_id, head_q, l_coord);
-        shared_storage.exp_sums_slm_array[thr_id] = cur_exp_sum;
+      ElementLSE global_max_lse{
+          cutlass::platform::numeric_limits<ElementLSE>::lowest()};
+      if (split_thread_active) {
+        local_lse = softmax_lse_accum(seq_idx, thr_id, head_q, l_coord);
+        global_max_lse = local_lse;
+        shared_storage.softmax_lse_slm_array[thr_id] = local_lse;
       }
 
-      // barrier for SLM writes finished
       sycl::group_barrier(get_work_group<3>());
 
-      // reduce across wg
-      global_max_logits = reduce_over_group(
-          get_work_group<1>(), global_max_logits, sycl::maximum<>());
+      global_max_lse = reduce_over_group(
+          get_work_group<1>(), global_max_lse, sycl::maximum<>());
+      global_max_lse =
+          sycl::group_broadcast(get_work_group<1>(), global_max_lse, 0);
 
-      // broadcast to all other threads
-      global_max_logits =
-          sycl::group_broadcast(get_work_group<1>(), global_max_logits, 0);
+      constexpr float kLog2e = 1.4426950408889634074f;
+      ElementLSE local_weight{0};
+      if (split_thread_active) {
+        local_weight = sycl::native::exp2(
+            (local_lse - global_max_lse) * ElementLSE(kLog2e));
+      }
+      ElementLSE lse_exp_sum =
+          reduce_over_group(get_work_group<1>(), local_weight, sycl::plus<>());
+      lse_exp_sum = sycl::group_broadcast(get_work_group<1>(), lse_exp_sum, 0);
+      ElementLSE inv_lse_exp_sum = ElementLSE(1) / lse_exp_sum;
+
+      // Convert LSE values to normalized weights once per split. All output
+      // elements reuse the SLM weights instead of recomputing exponentials.
+      if (split_thread_active) {
+        shared_storage.softmax_lse_slm_array[thr_id] =
+            local_weight * inv_lse_exp_sum;
+      }
+
+      if (p.softmax_lse != nullptr && thr_id == 0) {
+        int global_q = seq_idx;
+        if constexpr (is_var_len) {
+          global_q += s.seq_len_qo.cumulative_length[idx_b];
+        } else {
+          global_q += idx_b * seq_len_qo;
+        }
+        p.softmax_lse[head_q * p.lse_stride + global_q] =
+            static_cast<float>(global_max_lse) +
+            sycl::log(static_cast<float>(lse_exp_sum));
+      }
+
+      sycl::group_barrier(get_work_group<3>());
 
       for (int idx = thr_id; idx < s.head_size_vo;
            idx += SGPerWG::value * intel::sg_size) {
         ElementLSE acc = 0;
-        global_exp_sums = 0;
         for (int i = 0; i < effective_splits; ++i) {
-          if (i * num_blocks_per_split >= windowed_k_blocks) {
+          if (!plan_driven && i * num_blocks_per_split >= windowed_k_blocks) {
             break;
           }
-          ElementLSE local_max_logit = shared_storage.max_logits_slm_array[i];
-          ElementLSE local_exp_sum = shared_storage.exp_sums_slm_array[i];
+          ElementLSE weight = shared_storage.softmax_lse_slm_array[i];
 
-          // Skip splits with no valid data (short sequences treated as
-          // single-split have exp_sums=0 / max_logits=-inf for unused splits).
-          if (local_exp_sum <= ElementLSE(0)) continue;
-
-          ElementLSE rescale =
-              sycl::native::exp2(local_max_logit - global_max_logits);
-
-          // Partial outputs are unnormalized (not divided by exp_sum in the
-          // epilogue), so combine them directly with the rescale factor.
           ElementLSE o_accum_val = static_cast<ElementLSE>(
               Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord));
-          acc += o_accum_val * rescale;
-
-          // update global exp sum
-          global_exp_sums += local_exp_sum * rescale;
+          acc += o_accum_val * weight;
         }
 
-        ElementLSE inv_global_exp_sums = 1. / global_exp_sums;
-
-        acc *= inv_global_exp_sums;
         O(seq_idx, idx, head_q, l_coord) = static_cast<ElementO>(acc);
       }
     }
