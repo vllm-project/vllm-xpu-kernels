@@ -37,6 +37,7 @@
 #include <utility>
 
 #include "utils.h"
+#include "xpu/p2p/p2p_fptr.h"
 
 namespace vllm {
 namespace xpu {
@@ -45,7 +46,8 @@ namespace p2p {
 // One workgroup per 2048 elements, capped.  The cap also fixes the size of
 // the flag and counter pages the caller must allocate: kMaxWorkgroups
 // entries at kLineStride uint32 each, i.e. 4096 bytes.  Callers should read
-// it back through xpu_p2p_max_workgroups() rather than hardcoding it.
+// that size back through xpu_p2p_signal_page_bytes() rather than hardcoding
+// it.
 constexpr int64_t kMaxWorkgroups = 64;
 constexpr int64_t kWorkgroupSize = 256;
 
@@ -402,8 +404,6 @@ inline std::pair<int64_t, int64_t> launch_grid(int64_t n, int64_t vec) {
   return {(n + chunk - 1) / chunk, chunk};
 }
 
-inline uint32_t* as_u32(int64_t p) { return reinterpret_cast<uint32_t*>(p); }
-
 template <typename Op, int kVec>
 void submit_all_reduce(
     sycl::queue& q,
@@ -428,11 +428,11 @@ void submit_all_reduce(
         p2p_all_reduce_kernel<Op, kVec>(
             reinterpret_cast<T*>(dst),
             reinterpret_cast<const T*>(input),
-            reinterpret_cast<T*>(my_stage),
-            reinterpret_cast<const T*>(peer_stage),
-            as_u32(lflags),
-            as_u32(pflags),
-            as_u32(counters),
+            from_fptr<T>(my_stage),
+            from_fptr<const T>(peer_stage),
+            from_fptr<uint32_t>(lflags),
+            from_fptr<uint32_t>(pflags),
+            from_fptr<uint32_t>(counters),
             static_cast<size_t>(n),
             static_cast<size_t>(chunk),
             static_cast<size_t>(slot),
@@ -645,11 +645,11 @@ void xpu_p2p_all_gather(
         p2p::p2p_all_gather_kernel<kVec>(
             reinterpret_cast<uint8_t*>(out.data_ptr()),
             reinterpret_cast<const uint8_t*>(input.data_ptr()),
-            reinterpret_cast<uint8_t*>(my_stage),
-            reinterpret_cast<const uint8_t*>(peer_stage),
-            reinterpret_cast<uint32_t*>(local_flags),
-            reinterpret_cast<uint32_t*>(peer_flags),
-            reinterpret_cast<uint32_t*>(counters),
+            p2p::from_fptr<uint8_t>(my_stage),
+            p2p::from_fptr<const uint8_t>(peer_stage),
+            p2p::from_fptr<uint32_t>(local_flags),
+            p2p::from_fptr<uint32_t>(peer_flags),
+            p2p::from_fptr<uint32_t>(counters),
             static_cast<size_t>(n),
             static_cast<size_t>(chunk),
             static_cast<size_t>(slot_bytes),

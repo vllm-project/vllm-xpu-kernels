@@ -17,6 +17,7 @@ the kernel, and reduce locally -- so the reference is exact, deterministic
 and dependency-free.
 """
 
+import contextlib
 import multiprocessing as mp
 import os
 import socket
@@ -134,7 +135,11 @@ def _exchange_handle(rank, sock_path, barrier, stage_ptr):
     finally:
         if srv is not None:
             srv.close()
-            os.unlink(sock_path)
+            # Best effort: bind() may never have created the path, or it may
+            # already be gone. Raising here would replace whatever exception
+            # brought us into this finally -- the one worth seeing.
+            with contextlib.suppress(OSError):
+                os.unlink(sock_path)
 
     peer_off = struct.unpack_from("<Q", data)[0]
     peer_handle = torch.frombuffer(bytearray(data[8:]), dtype=torch.uint8)

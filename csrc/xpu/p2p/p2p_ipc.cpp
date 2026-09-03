@@ -31,10 +31,14 @@
 #include <c10/xpu/XPUStream.h>
 #include <torch/all.h>
 
-#include <algorithm>
 #include <cstring>
 #include <ios>
 #include <tuple>
+
+#include "xpu/p2p/p2p_fptr.h"
+
+using vllm::xpu::p2p::from_fptr;
+using vllm::xpu::p2p::to_fptr;
 
 namespace {
 
@@ -65,11 +69,20 @@ handle_from_bytes(const torch::Tensor& handle_bytes, const char* what) {
           handle_bytes.scalar_type() == torch::kUInt8,
       what,
       ": handle_bytes must be a contiguous uint8 CPU tensor");
+  // Exactly the handle size, not at most: silently truncating or zero-padding
+  // builds a handle that looks fine and then fails inside open or release,
+  // far from whatever produced the wrong tensor.
+  TORCH_CHECK(
+      static_cast<size_t>(handle_bytes.numel()) ==
+          sizeof(ze_ipc_mem_handle_t::data),
+      what,
+      ": handle_bytes must be exactly ",
+      sizeof(ze_ipc_mem_handle_t::data),
+      " bytes, the size of a ze_ipc_mem_handle_t, got ",
+      handle_bytes.numel());
   ze_ipc_mem_handle_t handle;
   std::memset(&handle, 0, sizeof(handle));
-  const size_t n =
-      std::min(static_cast<size_t>(handle_bytes.numel()), sizeof(handle.data));
-  std::memcpy(handle.data, handle_bytes.data_ptr(), n);
+  std::memcpy(handle.data, handle_bytes.data_ptr(), sizeof(handle.data));
   return handle;
 }
 
@@ -137,8 +150,7 @@ std::tuple<torch::Tensor, int64_t, int64_t> xpu_ipc_export_handle(int64_t ptr) {
   ze_context_handle_t ctx = current_ze_context();
   void* base = nullptr;
   size_t size = 0;
-  ZE_CHECK(
-      zeMemGetAddressRange(ctx, reinterpret_cast<void*>(ptr), &base, &size));
+  ZE_CHECK(zeMemGetAddressRange(ctx, from_fptr<void>(ptr), &base, &size));
 
   reject_untested_multi_tile_allocation(ctx, base);
 
@@ -154,8 +166,7 @@ std::tuple<torch::Tensor, int64_t, int64_t> xpu_ipc_export_handle(int64_t ptr) {
       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
   std::memcpy(out.data_ptr(), handle.data, sizeof(handle.data));
 
-  const int64_t offset = static_cast<char*>(reinterpret_cast<void*>(ptr)) -
-                         static_cast<char*>(base);
+  const int64_t offset = from_fptr<char>(ptr) - static_cast<char*>(base);
   return {out, static_cast<int64_t>(fd), offset};
 }
 
@@ -211,14 +222,14 @@ int64_t xpu_ipc_open_handle(
   void* base = nullptr;
   ZE_CHECK(zeMemOpenIpcHandle(
       current_ze_context(), current_ze_device(), handle, 0, &base));
-  return reinterpret_cast<int64_t>(static_cast<char*>(base) + offset);
+  return to_fptr(static_cast<char*>(base) + offset);
 }
 
 // Closes a mapping opened by xpu_ipc_open_handle.  `base_ptr` must be the
 // allocation base, i.e. what open returned minus the offset passed to it.
 void xpu_ipc_close_handle(int64_t base_ptr) {
-  ZE_CHECK(zeMemCloseIpcHandle(
-      current_ze_context(), reinterpret_cast<void*>(base_ptr)));
+  ZE_CHECK(
+      zeMemCloseIpcHandle(current_ze_context(), from_fptr<void>(base_ptr)));
 }
 
 // Enqueues a device-to-device copy on the current stream.  Takes raw
@@ -230,8 +241,8 @@ void xpu_p2p_memcpy(int64_t dst, int64_t src, int64_t nbytes) {
     return;
   }
   current_queue().memcpy(
-      reinterpret_cast<void*>(dst),
-      reinterpret_cast<const void*>(src),
+      from_fptr<void>(dst),
+      from_fptr<const void>(src),
       static_cast<size_t>(nbytes));
 }
 
