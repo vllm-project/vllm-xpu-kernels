@@ -195,6 +195,7 @@ class cmake_build_ext(build_ext):
             "MQA_LOGITS_KERNELS_ENABLED",
             "XPU_SPECIFIC_KERNELS_ENABLED",
             "XPUMEM_ALLOCATOR_ENABLED",
+            "VLLM_XPU_ENABLE_ONEDNN",
         ]
         for opt in _kernel_options:
             cmake_args.append('-D{}={}'.format(

@@ -190,7 +190,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
 
-  // Allocated only in chunk_prefill path when return_softmax is true
+  // Allocated when return_softmax is true; written by the chunk_prefill
+  // kernel for prefill rows and by the paged decode kernels (FMHA epilogue
+  // or ReduceSplitK) for decode rows.
   std::optional<at::Tensor> softmax_lse_opt;
   if (return_softmax) {
     int total_seqlen_q = q.size(0);
@@ -290,10 +292,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
     int num_kv_splits = 1;
     at::Tensor tmp_out = out;
-    at::Tensor decode_max_logits = at::empty(
-        {num_tokens, num_heads_q, num_kv_splits},
-        q.options().dtype(at::kFloat).device(q.device()));
-    at::Tensor decode_exp_sums = at::empty(
+    at::Tensor decode_softmax_lse_accum = at::empty(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
 
@@ -304,8 +303,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
         v,
         out,
         tmp_out,
-        decode_exp_sums,
-        decode_max_logits,
+        decode_softmax_lse_accum,
         block_table,
         cu_seqlens_q,
         seqlens_k,
@@ -325,7 +323,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
         num_kv_splits,
         is_prefill_opt,
         splits_per_seq,
-        work_list);
+        work_list,
+        softmax_lse_opt);
   } else {
     // Normalize -1 (unbounded) to max_seqlen_k for kernel masking logic
     // In decode phase the window_size_right doesn't have effect
@@ -374,10 +373,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
             : at::empty(
                   {num_tokens, num_heads_q * num_kv_splits, v_head_dim},
                   q.options().device(q.device()));
-    at::Tensor max_logits = at::empty(
-        {num_tokens, num_heads_q, num_kv_splits},
-        q.options().dtype(at::kFloat).device(q.device()));
-    at::Tensor exp_sums = at::empty(
+    at::Tensor softmax_lse_accum = at::empty(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
 
@@ -395,8 +391,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
         v,
         out,
         tmp_out,
-        exp_sums,
-        max_logits,
+        softmax_lse_accum,
         block_table,
         cu_seqlens_q,
         seqlens_k,
@@ -416,7 +411,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
         num_kv_splits,
         no_mask,
         splits_per_seq,
-        work_list);
+        work_list,
+        softmax_lse_opt);
   }
 
   if (return_softmax) {

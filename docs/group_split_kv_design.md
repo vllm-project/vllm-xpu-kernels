@@ -61,10 +61,17 @@ Two execution modes live side-by-side in the kernels:
 
 ## 3. Algorithm — `build_decode_split_plan`
 
-Inputs: `kv_lens[B]`, `kv_tile`, `num_kv_splits`, `num_xe_cores`, `num_heads_kv`.
+Inputs: `kv_lens[B]`, `kv_tile`, `num_kv_splits`, `num_xe_cores`, `num_heads_kv`,
+`window_size_left`.
 
 ```
-tiles_per_seq[i]      = max(1, ceil_div(kv_lens[i], kv_tile))
+# Sliding window: for decode the query sits at position kv_len - 1, so tiles
+# before k_block0 are outside the window. The kernel offsets every work item
+# by its own k_block0 (kv_split_offset = k_block0 + kv_tile_start), so the
+# plan must partition only the tiles inside the window.
+k_block0[i]           = max(kv_lens[i] - 1 - window_size_left, 0) / kv_tile
+                        if window_size_left >= 0 else 0
+tiles_per_seq[i]      = max(1, ceil_div(kv_lens[i], kv_tile) - k_block0[i])
 total_tiles           = Σ tiles_per_seq
 
 min_wgs               = max(1, num_xe_cores * 2 / num_heads_kv)
@@ -98,11 +105,19 @@ The function returns `(splits_per_seq, work_list)` with these guarantees:
 3. Per seq, the work items partition `[0, tiles)` exactly once
    (`Σ counts == tiles`, half-open, contiguous).
 4. `splits_per_seq[i] ≤ num_kv_splits` so the static reduction buffer
-   `[Oaccum, exp_sums, max_logits]` indexing on the GPU is in-bounds.
+   `[Oaccum, softmax_lse_accum]` indexing on the GPU is in-bounds.
 
 Properties 1 and 4 are exactly what `ReduceSplitK` needs to read only the
 slots that were written. Properties 2 and 3 prevent the "phantom split"
 problem that motivated the patch.
+
+Because of properties 2 and 3, the reducer must *not* re-derive empty splits
+from `ceil_div(windowed_k_blocks, splits)` in compact mode: that formula
+belongs to the legacy on-device partition and is coarser than the host's
+`base` / `base + 1` split, so it can discard a split that really produced
+output (e.g. 33 tiles over 8 splits drops split 7). `ReduceSplitK` therefore
+branches on `plan_driven = (splits_per_seq != nullptr)` and trusts
+`splits_per_seq` verbatim in compact mode.
 
 ### Heuristics chosen
 

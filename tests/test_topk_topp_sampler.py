@@ -153,3 +153,74 @@ def test_topk_topp_infinite(
     )
 
     torch.xpu.synchronize()
+
+
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("vocab_size", [33, 50, 513])
+@pytest.mark.parametrize("k", [1, 8, None])
+@pytest.mark.parametrize("p", [0.5, None])
+@pytest.mark.parametrize("logprobs_mode", ["raw_logits"])
+def test_topk_topp_unaligned_vocab_size(
+    batch_size, vocab_size, k, p, logprobs_mode):
+
+    if k is None and p is None:
+        pytest.skip("Nothing to sample against; covered by other tests.")
+
+    seed_everything(42)
+
+    generators = {}
+
+    logits = torch.randn(batch_size,
+                         vocab_size,
+                         dtype=torch.float,
+                         device=DEVICE)
+    ref_logits = logits.clone()
+
+    top_k = None
+    top_p = None
+    if k is not None:
+        top_k = torch.randint(1, k + 1, (batch_size, ), device=DEVICE)
+    if p is not None:
+        top_p = 1.0 - torch.rand(
+            batch_size, dtype=torch.float, device=DEVICE)
+
+    topk_topp_sampler = TopKTopPSampler(logprobs_mode=logprobs_mode)
+
+    random_sampled, logits_to_return = topk_topp_sampler.forward_xpu(
+        logits=logits,
+        generators=generators,
+        k=top_k,
+        p=top_p,
+    )
+
+    ref_random_sampled, ref_logits_to_return =\
+        topk_topp_sampler.forward_native(
+        logits=ref_logits,
+        generators=generators,
+        k=top_k,
+        p=top_p,
+    )
+
+    torch.testing.assert_close(random_sampled,
+                               ref_random_sampled,
+                               rtol=0,
+                               atol=0)
+    if logits_to_return is not None:
+        if top_p is None:
+            torch.testing.assert_close(logits_to_return,
+                                       ref_logits_to_return,
+                                       rtol=1e-5,
+                                       atol=1e-5)
+        else:
+            # Top-p involved: allow small differences
+            # Either < 1% of kept values OR < 5 values absolute
+            xpu_kept = (logits_to_return != float("-inf")).sum(dim=-1)
+            ref_kept = (ref_logits_to_return != float("-inf")).sum(dim=-1)
+
+            max_diff = (ref_kept - xpu_kept).abs().max().item()
+            max_kept = ref_kept.max().item()
+            if max_kept > 0 and max_diff > 3:
+                diff_pct = max_diff / max_kept * 100
+                assert diff_pct < 0.5, (
+                    f"Top-p mask difference too large: {diff_pct:.2f}% "
+                    f"(max diff {max_diff} values out of {max_kept})")
