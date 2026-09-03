@@ -7,7 +7,13 @@ from tests.ops.fp8_quant_op import (fp8_block_dequant_2d, fp8_block_quant_2d,
                                     per_token_group_quant_fp8,
                                     scaled_fp8_quant)
 from tests.ops.mx_utils import from_blocked_format, to_mxfp
-from tests.register_ops import fp8_bmm, fp8_gemm, fp8_gemm_out, fp8_gemm_w8a16
+from tests.register_ops import (fp8_bmm, fp8_gemm, fp8_gemm_out,
+                                fp8_gemm_w8a16, onednn_available)
+
+pytestmark = pytest.mark.skipif(
+    not onednn_available(),
+    reason="oneDNN kernels are not built "
+    "(rebuild with VLLM_XPU_ENABLE_ONEDNN=ON)")
 
 BATCHES = [1, 2, 8]
 OUT_DTYPES = [torch.float16, torch.bfloat16]

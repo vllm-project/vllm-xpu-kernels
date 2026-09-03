@@ -42,11 +42,8 @@ void policy_dispatch_func(
     CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args) {
   // Pack is expected in order: (Paged, Causal, Local, Sink, SoftmaxLSE).
-  // SoftmaxLSE=true is only supported when Paged=false, Local=false,
-  // and Sink=false; other combos are not instantiated (no TUs generated),
-  // so statically skip the call for those to avoid implicit instantiation
-  // and guarantee the runtime TORCH_CHECK in fmha_xe2.cpp is the only
-  // path that can surface a bad request.
+  // Paged and non-paged kernels support LSE for global attention without
+  // sinks. Local/Sink LSE tuples are not instantiated.
   constexpr bool flags[] = {Bs...};
   static_assert(
       sizeof...(Bs) == 5, "policy_dispatch_func expects 5 bool parameters");
@@ -58,11 +55,11 @@ void policy_dispatch_func(
   // Report the logical head_size in diagnostics instead of ShapeOut width.
   constexpr int _head_sz = chunk_policy_reported_head_size<chunk_policy>::value;
 
-  if constexpr (SoftmaxLSE && (Paged || Local || Sink)) {
+  if constexpr (SoftmaxLSE && (Local || Sink)) {
     TORCH_CHECK(
         false,
-        "Unreachable: softmax_lse is only supported when is_paged=false, "
-        "is_local=false, is_sink=false");
+        "Unreachable: chunk prefill softmax_lse requires is_local=false "
+        "and is_sink=false");
   } else if constexpr (!is_chunk_policy_enabled<chunk_policy>::value) {
     TORCH_CHECK(
         false,
