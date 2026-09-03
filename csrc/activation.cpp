@@ -430,6 +430,128 @@ class situ_and_mul_kernel {
   const float linear_beta;
 };
 
+template <typename T>
+[[intel::device_indirectly_callable]] inline __attribute__((always_inline)) T
+silu_and_mul_with_clamp(
+    const T& gate, const T& up, float limit, float alpha, float beta) {
+  // gate = gate.clamp(max=limit)
+  const float gate_f = (float)gate;
+  const float clamped_gate = gate_f > limit ? limit : gate_f;
+
+  // up = up.clamp(min=-limit, max=limit)
+  const float up_f = (float)up;
+  const float clamped_up =
+      up_f > limit ? limit : (up_f < -limit ? -limit : up_f);
+
+  // silu(gate) = gate * sigmoid(alpha * gate)
+  const float silu = clamped_gate / (1.0f + sycl::exp(-clamped_gate * alpha));
+
+  return (T)(silu * (clamped_up + beta));
+}
+
+template <
+    typename scalar_t,
+    scalar_t (*ACT_FN)(
+        const scalar_t&,
+        const scalar_t&,
+        const float,
+        const float,
+        const float)>
+class silu_and_mul_with_clamp_kernel {
+ public:
+  silu_and_mul_with_clamp_kernel(
+      scalar_t* __restrict__ out,          // [..., d]
+      const scalar_t* __restrict__ input,  // [..., 2 * d]
+      const int d,
+      const float limit,
+      const float alpha,
+      const float beta)
+      : out(out), input(input), d(d), limit(limit), alpha(alpha), beta(beta) {}
+
+  void operator()(sycl::nd_item<1> item) const {
+    const int64_t token_idx = item.get_group(0);
+    for (int64_t idx = item.get_local_id(0); idx < d;
+         idx += item.get_local_range(0)) {
+      // gate = first half, up = second half (contiguous chunks)
+      const scalar_t gate = VLLM_LDG(&input[token_idx * 2 * d + idx]);
+      const scalar_t up = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
+
+      out[token_idx * d + idx] = ACT_FN(gate, up, limit, alpha, beta);
+    }
+  }
+
+ private:
+  scalar_t* out;
+  const scalar_t* input;
+  const int d;
+  const float limit;
+  const float alpha;
+  const float beta;
+};
+
+// Vectorized variant of silu_and_mul_with_clamp_kernel: each work-item handles
+// VEC contiguous elements via aligned loads/stores, and the grid strides over
+// all (token, chunk) pairs so occupancy is independent of the token count.
+template <
+    typename scalar_t,
+    scalar_t (*ACT_FN)(
+        const scalar_t&,
+        const scalar_t&,
+        const float,
+        const float,
+        const float),
+    int VEC>
+class silu_and_mul_with_clamp_vec_kernel {
+ public:
+  silu_and_mul_with_clamp_vec_kernel(
+      scalar_t* __restrict__ out,          // [..., d]
+      const scalar_t* __restrict__ input,  // [..., 2 * d]
+      const int d,
+      const float limit,
+      const float alpha,
+      const float beta,
+      const int64_t total_chunks)
+      : out(out),
+        input(input),
+        d(d),
+        limit(limit),
+        alpha(alpha),
+        beta(beta),
+        total_chunks(total_chunks) {}
+
+  void operator()(sycl::nd_item<1> item) const {
+    using vec_t = vllm::xpu::aligned_vec<scalar_t, VEC>;
+    const int64_t bound = d / VEC;
+    const int64_t step = item.get_global_range(0);
+    const auto* in_vec = reinterpret_cast<const vec_t*>(input);
+    auto* out_vec = reinterpret_cast<vec_t*>(out);
+
+    for (int64_t chunk_idx = item.get_global_id(0); chunk_idx < total_chunks;
+         chunk_idx += step) {
+      const int64_t token_idx = chunk_idx / bound;
+      const int64_t i = chunk_idx - token_idx * bound;
+      // gate = first half, up = second half (contiguous chunks)
+      const vec_t gate = in_vec[token_idx * bound * 2 + i];
+      const vec_t up = in_vec[token_idx * bound * 2 + bound + i];
+      vec_t out_v;
+#pragma unroll
+      for (int j = 0; j < VEC; ++j) {
+        out_v[j] = ACT_FN(gate[j], up[j], limit, alpha, beta);
+      }
+      out_vec[token_idx * bound + i] = out_v;
+    }
+  }
+
+ private:
+  scalar_t* out;
+  const scalar_t* input;
+  const int d;
+  const float limit;
+  const float alpha;
+  const float beta;
+  const int64_t total_chunks;
+};
+
 }  // namespace vllm
 
 // Launch activation and gating kernel.
@@ -856,4 +978,68 @@ void situ_and_mul(
         TORCH_CHECK(false, "Unsupported vector size: ", vec_size);
     }
   });
+}
+
+#define LAUNCH_SILU_AND_MUL_WITH_CLAMP(KERNEL, LIMIT, ALPHA, BETA)         \
+  if (input.numel() == 0) {                                                \
+    return;                                                                \
+  }                                                                        \
+  int d = input.size(-1) / 2;                                              \
+  int64_t num_tokens = input.numel() / input.size(-1);                     \
+  at::DeviceGuard device_guard(input.device());                            \
+  auto& queue = vllm::xpu::vllmGetQueue();                                 \
+  VLLM_DISPATCH_FLOATING_TYPES(                                            \
+      input.scalar_type(), "silu_and_mul_with_clamp_kernel", [&] {         \
+        /* 16-byte aligned vectors: 8 x bf16/half, 4 x float. */           \
+        constexpr int VEC = sizeof(float) * 4 / sizeof(scalar_t);          \
+        if (d % VEC == 0) {                                                \
+          const int64_t total_chunks = num_tokens * (d / VEC);             \
+          constexpr int64_t wg_size = 256;                                 \
+          /* Cap the grid to fill the GPU; grid-stride covers the rest. */ \
+          constexpr int64_t max_wgs = 2560;                                \
+          const int64_t num_wgs = std::max(                                \
+              int64_t{1},                                                  \
+              std::min(max_wgs, (total_chunks + wg_size - 1) / wg_size));  \
+          queue.submit([&](sycl::handler& cgh) {                           \
+            cgh.parallel_for(                                              \
+                sycl::nd_range<1>(num_wgs * wg_size, wg_size),             \
+                vllm::silu_and_mul_with_clamp_vec_kernel<                  \
+                    scalar_t,                                              \
+                    KERNEL<scalar_t>,                                      \
+                    VEC>(                                                  \
+                    out.data_ptr<scalar_t>(),                              \
+                    input.data_ptr<scalar_t>(),                            \
+                    d,                                                     \
+                    LIMIT,                                                 \
+                    ALPHA,                                                 \
+                    BETA,                                                  \
+                    total_chunks));                                        \
+          });                                                              \
+        } else {                                                           \
+          sycl::range<1> grid(num_tokens);                                 \
+          sycl::range<1> block(std::min(d, 1024));                         \
+          queue.submit([&](sycl::handler& cgh) {                           \
+            cgh.parallel_for(                                              \
+                sycl::nd_range<1>(grid * block, block),                    \
+                vllm::silu_and_mul_with_clamp_kernel<                      \
+                    scalar_t,                                              \
+                    KERNEL<scalar_t>>(                                     \
+                    out.data_ptr<scalar_t>(),                              \
+                    input.data_ptr<scalar_t>(),                            \
+                    d,                                                     \
+                    LIMIT,                                                 \
+                    ALPHA,                                                 \
+                    BETA));                                                \
+          });                                                              \
+        }                                                                  \
+      });
+
+void silu_and_mul_with_clamp(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input,  // [..., 2 * d]
+    double limit,
+    double alpha,
+    double beta) {
+  LAUNCH_SILU_AND_MUL_WITH_CLAMP(
+      vllm::silu_and_mul_with_clamp, limit, alpha, beta);
 }

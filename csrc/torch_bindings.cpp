@@ -218,6 +218,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> ()");
   ops.impl("swiglustep_and_mul", torch::kXPU, &swiglustep_and_mul);
 
+  // silu_and_mul_with_clamp
+  ops.def(
+      "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit, "
+      "float alpha=1.0, float beta=0.0) -> ()");
+  ops.impl("silu_and_mul_with_clamp", torch::kXPU, &silu_and_mul_with_clamp);
+
   ops.def(
       "get_xpu_view_from_cpu_tensor(Tensor cpu_tensor) -> "
       "Tensor");
