@@ -561,7 +561,7 @@ CUTE_DEVICE void gemm_TTS_fused_2B(
 
   const int prefetch_dist = 3;
 
-  constexpr int barrier_scope = 2;
+  constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
 
   int k_tile_count = ceil_div(shape<1>(A), get<2>(wg_tile));
   int k_tile_prefetch = 0;
