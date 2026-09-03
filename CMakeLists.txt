@@ -638,6 +638,8 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/sycl/apply_rotary_emb.cpp"
       "csrc/xpu/rand/exponential.cpp"
+      "csrc/xpu/p2p/p2p_collective.cpp"
+      "csrc/xpu/p2p/p2p_ipc.cpp"
       "csrc/xpu/utils.cpp")
   if(MOE_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC

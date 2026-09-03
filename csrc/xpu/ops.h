@@ -402,3 +402,59 @@ void fused_input_norm(
     torch::Tensor& input,
     torch::Tensor& weight,
     torch::Tensor& bias);
+
+// ---------------------------------------------------------------------------
+// 2-rank peer-to-peer collectives over Level Zero IPC (csrc/xpu/p2p/).
+//
+// The caller owns every buffer these take: the staging slots, the signal
+// pages and the peer pointers obtained from xpu_ipc_open_handle.  Raw device
+// addresses cross the boundary as int64_t.
+// ---------------------------------------------------------------------------
+
+// Bytes to allocate for each of the two per-collective signal pages (the
+// flag page the peer writes into, and this rank's counter page).
+int64_t xpu_p2p_signal_page_bytes();
+
+// out[i] = input[i] + peer_input[i], for bfloat16 / float16 / float32.
+// Enqueue-only: the host never blocks on the peer.
+void xpu_p2p_all_reduce(
+    torch::Tensor& out,
+    const torch::Tensor& input,
+    int64_t my_stage,
+    int64_t peer_stage,
+    int64_t local_flags,
+    int64_t peer_flags,
+    int64_t counters,
+    int64_t slot_bytes);
+
+// Concatenates both ranks' shards along dim 0 into `out`, whose element
+// count must be twice the input's.  Byte-granular, so it serves any dtype.
+void xpu_p2p_all_gather(
+    torch::Tensor& out,
+    const torch::Tensor& input,
+    int64_t my_stage,
+    int64_t peer_stage,
+    int64_t local_flags,
+    int64_t peer_flags,
+    int64_t counters,
+    int64_t slot_bytes,
+    int64_t rank);
+
+// Level Zero IPC: (handle_bytes, dma_buf_fd, offset).  The fd is only valid
+// in this process and must reach the peer over SCM_RIGHTS.  Raises on a
+// multi-tile allocation: only single-tile devices were validated, and one
+// IPC handle cannot cover more.  See
+// reject_untested_multi_tile_allocation() in csrc/xpu/p2p/p2p_ipc.cpp for
+// what that guard costs and how to lift it.
+std::tuple<torch::Tensor, int64_t, int64_t> xpu_ipc_export_handle(int64_t ptr);
+// Releases an exported handle once the peer has opened it.  Must not be
+// paired with a manual close of the exported fd: the driver may close it
+// here.
+void xpu_ipc_release_handle(const torch::Tensor& handle_bytes);
+int64_t xpu_ipc_open_handle(
+    const torch::Tensor& handle_bytes, int64_t fd, int64_t offset);
+void xpu_ipc_close_handle(int64_t base_ptr);
+
+// Peer-pointer copy and host wait on the current stream.
+void xpu_p2p_memcpy(int64_t dst, int64_t src, int64_t nbytes);
+void xpu_p2p_queue_sync();
