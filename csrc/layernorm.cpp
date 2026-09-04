@@ -1301,13 +1301,32 @@ void layer_norm(
     input = input.contiguous();
   }
   TORCH_CHECK(input.is_contiguous());
+  const int64_t hidden_size = input.size(-1);
   const bool has_weight = weight.has_value();
   const bool has_bias = bias.has_value();
   if (has_weight) {
     TORCH_CHECK(weight->is_contiguous());
+    TORCH_CHECK(
+        weight->scalar_type() == input.scalar_type(),
+        "layer_norm expects weight dtype to match input dtype");
+    TORCH_CHECK(
+        weight->device() == input.device(),
+        "layer_norm expects weight to be on the same device as input");
+    TORCH_CHECK(
+        weight->numel() == hidden_size,
+        "layer_norm expects weight numel to match input's last dimension");
   }
   if (has_bias) {
     TORCH_CHECK(bias->is_contiguous());
+    TORCH_CHECK(
+        bias->scalar_type() == input.scalar_type(),
+        "layer_norm expects bias dtype to match input dtype");
+    TORCH_CHECK(
+        bias->device() == input.device(),
+        "layer_norm expects bias to be on the same device as input");
+    TORCH_CHECK(
+        bias->numel() == hidden_size,
+        "layer_norm expects bias numel to match input's last dimension");
   }
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "call_layer_norm_kernel", [&] {
     const scalar_t* weight_ptr =
@@ -1337,13 +1356,36 @@ void fused_add_layer_norm(
     std::optional<torch::Tensor> bias,
     double epsilon) {
   const at::DeviceGuard device_guard(input.device());
+  const int64_t hidden_size = input.size(-1);
   const bool has_weight = weight.has_value();
   const bool has_bias = bias.has_value();
   if (has_weight) {
     TORCH_CHECK(weight->is_contiguous());
+    TORCH_CHECK(
+        weight->scalar_type() == input.scalar_type(),
+        "fused_add_layer_norm expects weight dtype to match input dtype");
+    TORCH_CHECK(
+        weight->device() == input.device(),
+        "fused_add_layer_norm expects weight to be on the same device as "
+        "input");
+    TORCH_CHECK(
+        weight->numel() == hidden_size,
+        "fused_add_layer_norm expects weight numel to match input's last "
+        "dimension");
   }
   if (has_bias) {
     TORCH_CHECK(bias->is_contiguous());
+    TORCH_CHECK(
+        bias->scalar_type() == input.scalar_type(),
+        "fused_add_layer_norm expects bias dtype to match input dtype");
+    TORCH_CHECK(
+        bias->device() == input.device(),
+        "fused_add_layer_norm expects bias to be on the same device as "
+        "input");
+    TORCH_CHECK(
+        bias->numel() == hidden_size,
+        "fused_add_layer_norm expects bias numel to match input's last "
+        "dimension");
   }
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_fused_add_layer_norm_kernel", [&] {
