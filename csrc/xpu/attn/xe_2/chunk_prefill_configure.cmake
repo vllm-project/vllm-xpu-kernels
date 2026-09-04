@@ -146,9 +146,9 @@ function(fmha_forward_configure FILENAME_SUFFIX)
       string(REPLACE "|" ";" _parts "${_entry}")
       list(LENGTH _parts _nparts)
 
-      # Every entry is fully explicit: headsize plus the six boolean flags.
-      # Any other field count is a typo, and accepting it would silently drop
-      # or invent flags and yield an unexpected kernel set.
+      # Every entry is fully explicit: headsize plus the six boolean flags. Any
+      # other field count is a typo, and accepting it would silently drop or
+      # invent flags and yield an unexpected kernel set.
       if(NOT _nparts EQUAL 7)
         message(
           WARNING
@@ -175,9 +175,9 @@ function(fmha_forward_configure FILENAME_SUFFIX)
         continue()
       endif()
 
-      # Validate boolean values. Quote the values and iterate with IN LISTS
-      # so that empty fields (for example from a doubled comma) are actually
-      # seen rather than dropped by list expansion.
+      # Validate boolean values. Quote the values and iterate with IN LISTS so
+      # that empty fields (for example from a doubled comma) are actually seen
+      # rather than dropped by list expansion.
       set(_bools "${_paged}" "${_causal}" "${_local}" "${_sink}" "${_lse}"
                  "${_b16}")
       set(_invalid_bool FALSE)
@@ -202,9 +202,8 @@ function(fmha_forward_configure FILENAME_SUFFIX)
         continue()
       endif()
 
-      # The _b16 policies are selected by fmha_xe2.cpp only when
-      # is_paged && block_size == 16, so a non-paged _b16 kernel can never be
-      # dispatched.
+      # The _b16 policies are selected by fmha_xe2.cpp only when is_paged &&
+      # block_size == 16, so a non-paged _b16 kernel can never be dispatched.
       if(_b16 STREQUAL "true" AND _paged STREQUAL "false")
         message(
           WARNING
