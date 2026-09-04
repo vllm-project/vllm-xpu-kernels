@@ -85,7 +85,7 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 | File | Kernels | Use Case |
 |------|---------|----------|
 | `chunk_prefill_full.conf` | 240 | All combinations — supports every model |
-| `chunk_prefill_default.conf` | 70 | Llama, Qwen, DeepSeek MLA, Falcon, Gemma, Phi, GLM (default build) |
+| `chunk_prefill_default.conf` | 49 | Llama, Qwen, DeepSeek MLA, Falcon, Gemma, Phi, GLM (default build) |
 
 ### Paged Decode
 
@@ -115,12 +115,16 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 # Lines starting with # are comments. Empty lines are ignored.
 # Use 'all' to build everything (same as chunk_prefill_full.conf).
 
-# Format: headsize,paged,causal,local,sink,lse
+# Format: headsize,paged,causal,local,sink,lse[,b16]
 128,true,true,false,false,false
 128,true,true,false,false,true    # paged LSE
 128,false,true,false,false,false
 128,false,true,false,false,true   # non-paged LSE
 192,true,true,false,false,false
+
+# Explicit tile policy (7th field):
+128,true,true,false,false,false,false   # standard policy only
+128,true,true,false,false,false,true    # _b16 policy only (page size 16)
 ```
 
 **Parameters:**
@@ -131,9 +135,17 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 - `sink` — whether StreamingLLM attention sinks are used
 - `lse` — whether log-sum-exp is output. Paged and non-paged kernels require
   `local=false`, `sink=false`.
+- `b16` — *optional*. Selects the tile policy for the head size:
+  `false` builds `chunk_policy_head<N>` (`TileShapeQK` K-dim 32) and `true`
+  builds `chunk_policy_head<N>_b16` (K-dim 16). When omitted, **both** are
+  built. The `_b16` policy exists so that `tiles_per_page` stays 1 for a KV
+  cache page size of 16, and the dispatcher selects it only when the request
+  is paged and the page size is 16 — so `b16=true` requires `paged=true`.
+  Entries with `b16=true, paged=false` are unreachable and are skipped with a
+  warning.
 
 If boolean flags are omitted, all 20 valid combinations are generated for
-that headsize.
+that headsize (each in both tile policies).
 
 ### Paged Decode
 
@@ -396,7 +408,7 @@ cat build/temp_template/csrc/xpu/attn/xe_2/paged_decode_enabled_policies_gen.hpp
 
 | Config | Build Time | Chunk Prefill Kernels | Paged Decode Kernels | Flexibility |
 |--------|------------|----------------------|----------------------|-------------|
-| `default` | ~2 min | ~31 | ~17 | Llama, Qwen, DeepSeek MLA, Falcon |
+| `default` | ~2 min | 49 | 32 | Llama, Qwen, DeepSeek MLA, Falcon |
 | `full` | ~60 min | 240 | 384 | All models |
 
 ### Binary Size Impact
