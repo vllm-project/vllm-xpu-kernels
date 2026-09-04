@@ -252,21 +252,24 @@ void cutlass_chunk_prefill_impl(
       "chunk prefill softmax_lse output is only supported when "
       "is_local=false and is_sink=false");
 
-  // Validate block_size: 16, 32, or any positive multiple of 64. Non-paged
-  // mode does not use block_size, so only enforce the check when paged.
+  // Validate block_size: any positive multiple of 16. Non-paged mode does not
+  // use block_size, so only enforce the check when paged.
   if (is_paged) {
     TORCH_CHECK(
-        block_size == 16 || block_size == 32 ||
-            (block_size > 0 && (block_size % 64) == 0),
+        block_size > 0 && (block_size % 16) == 0,
         "chunk_prefill: unsupported block_size=",
         block_size,
-        " (supported: 16, 32, or any positive multiple of 64)");
+        " (supported: any positive multiple of 16)");
   }
 
-  // Block_size == 16 needs the *_b16 policies (TileShapeQK[1] = 16).
-  // All other supported sizes (32, 64*n) divide cleanly by the default
-  // TileShapeQK[1] = 32 used in the standard chunk_policy_head* set.
-  const bool use_b16_policy = is_paged && (block_size == 16);
+  // Policy selection preserves the original routing for the previously
+  // supported sizes: block_size == 32 and every positive multiple of 64 use
+  // the default chunk_policy_head* set (TileShapeQK[1] = 32), which divides
+  // those page sizes cleanly. Every other supported multiple of 16 (16, 48,
+  // 80, 96, 112, 160, ...) uses the *_b16 policies (TileShapeQK[1] = 16) so
+  // that tiles_per_page = page_size / TileShapeQK[1] is exact.
+  const bool use_b16_policy =
+      is_paged && (block_size != 32) && (block_size % 64 != 0);
 
   if (use_b16_policy) {
     if (args.head_size <= HEAD_SIZE_LIMIT_0) {
