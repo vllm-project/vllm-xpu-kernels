@@ -14,71 +14,7 @@ void cutlass_paged_decode_xe3(
     at::Tensor& out,
     at::Tensor&
         temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
-    at::Tensor& exp_sums,    // [batch, num_head_q, seq_q, num_kv_splits]
-    at::Tensor& max_logits,  // [batch, num_head_q, seq_q, num_kv_splits]
-    const at::Tensor& block_table,
-    const at::Tensor& cu_seqlens_q,
-    const at::Tensor& cu_seqlens_k,
-    int max_seqlen_q,
-    int max_seqlen_k,
-    std::optional<const at::Tensor>& q_scale,
-    std::optional<const at::Tensor>& k_scale,
-    std::optional<const at::Tensor>& v_scale,
-    double sm_scale,
-    std::optional<const at::Tensor>& sm_sink_,
-    int window_size_left,
-    int window_size_right,
-    bool is_varlen,
-    bool is_paged,
-    bool is_causal,
-    bool is_local,
-    bool is_sink,
-    int num_kv_splits,
-    std::optional<const at::Tensor>& is_prefill) {
-  std::optional<at::Tensor> splits_per_seq_empty;
-  std::optional<at::Tensor> work_list_empty;
-  cutlass_paged_decode_impl(
-      queue,
-      query,
-      key_cache,
-      value_cache,
-      out,
-      temp_out,
-      exp_sums,
-      max_logits,
-      block_table,
-      cu_seqlens_q,
-      cu_seqlens_k,
-      max_seqlen_q,
-      max_seqlen_k,
-      q_scale,
-      k_scale,
-      v_scale,
-      sm_scale,
-      sm_sink_,
-      window_size_left,
-      window_size_right,
-      is_varlen,
-      is_paged,
-      is_causal,
-      is_local,
-      is_sink,
-      num_kv_splits,
-      is_prefill,
-      splits_per_seq_empty,
-      work_list_empty);
-}
-
-void cutlass_paged_decode_impl(
-    sycl::queue& queue,
-    const at::Tensor& query,      // [seq_q, heads, head_size]
-    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
-    const at::Tensor& value_cache,
-    at::Tensor& out,
-    at::Tensor&
-        temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
-    at::Tensor& exp_sums,    // [batch, num_head_q, seq_q, num_kv_splits]
-    at::Tensor& max_logits,  // [batch, num_head_q, seq_q, num_kv_splits]
+    at::Tensor& softmax_lse_accum,  // [batch, num_head_q, seq_q, num_kv_splits]
     const at::Tensor& block_table,
     const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k,
@@ -99,7 +35,71 @@ void cutlass_paged_decode_impl(
     int num_kv_splits,
     std::optional<const at::Tensor>& is_prefill,
     std::optional<at::Tensor>& splits_per_seq,
-    std::optional<at::Tensor>& work_list) {
+    std::optional<at::Tensor>& work_list,
+    std::optional<at::Tensor>& softmax_lse) {
+  cutlass_paged_decode_impl(
+      queue,
+      query,
+      key_cache,
+      value_cache,
+      out,
+      temp_out,
+      softmax_lse_accum,
+      block_table,
+      cu_seqlens_q,
+      cu_seqlens_k,
+      max_seqlen_q,
+      max_seqlen_k,
+      q_scale,
+      k_scale,
+      v_scale,
+      sm_scale,
+      sm_sink_,
+      window_size_left,
+      window_size_right,
+      is_varlen,
+      is_paged,
+      is_causal,
+      is_local,
+      is_sink,
+      num_kv_splits,
+      is_prefill,
+      splits_per_seq,
+      work_list,
+      softmax_lse);
+}
+
+void cutlass_paged_decode_impl(
+    sycl::queue& queue,
+    const at::Tensor& query,      // [seq_q, heads, head_size]
+    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& value_cache,
+    at::Tensor& out,
+    at::Tensor&
+        temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
+    at::Tensor& softmax_lse_accum,  // [batch, num_head_q, seq_q, num_kv_splits]
+    const at::Tensor& block_table,
+    const at::Tensor& cu_seqlens_q,
+    const at::Tensor& cu_seqlens_k,
+    int max_seqlen_q,
+    int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
+    std::optional<const at::Tensor>& k_scale,
+    std::optional<const at::Tensor>& v_scale,
+    double sm_scale,
+    std::optional<const at::Tensor>& sm_sink_,
+    int window_size_left,
+    int window_size_right,
+    bool is_varlen,
+    bool is_paged,
+    bool is_causal,
+    bool is_local,
+    bool is_sink,
+    int num_kv_splits,
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<at::Tensor>& splits_per_seq,
+    std::optional<at::Tensor>& work_list,
+    std::optional<at::Tensor>& softmax_lse) {
   bool is_fp8_kv = key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
                    key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn;
   bool is_fp8_q = query.scalar_type() == at::ScalarType::Float8_e5m2 ||
@@ -162,8 +162,7 @@ void cutlass_paged_decode_impl(
       value_cache.data_ptr(),
       out.data_ptr(),
       temp_out.data_ptr(),
-      exp_sums.data_ptr(),
-      max_logits.data_ptr(),
+      softmax_lse_accum.data_ptr(),
       block_table.data_ptr(),
       cu_seqlens_q.data_ptr(),
       cu_seqlens_k.data_ptr(),
@@ -218,6 +217,36 @@ void cutlass_paged_decode_impl(
     if (effective_total > args.total_seqlen_k) {
       args.total_seqlen_k = static_cast<int>(effective_total);
     }
+  }
+
+  // Per-sequence adaptive split-K: use pre-computed splits_per_seq from Python
+  // if available. This avoids GPU→CPU sync and extra computation here.
+  if (splits_per_seq.has_value() && splits_per_seq->numel() > 0) {
+    args.splits_per_seq = splits_per_seq->data_ptr<int>();
+  }
+
+  // Per-sequence work_list for compact grid scheduling
+  if (work_list.has_value() && work_list->numel() > 0) {
+    args.work_list = work_list->data_ptr<int>();
+    args.total_wgs = work_list->size(0);  // [total_wgs, 4]
+  }
+
+  // Optional softmax_lse output, laid out as (num_heads_q, total_seqlen_q)
+  // to match the CUDA/upstream FlashAttention convention (and the layout
+  // chunk_prefill writes), so callers need no transpose.
+  if (softmax_lse.has_value()) {
+    const at::Tensor& lse = softmax_lse.value();
+    TORCH_CHECK(
+        lse.scalar_type() == at::ScalarType::Float,
+        "paged_decode_xe3: softmax_lse must be float32");
+    TORCH_CHECK(
+        lse.dim() == 2 && lse.size(0) == num_heads_q,
+        "paged_decode_xe3: softmax_lse must be (num_heads_q, total_seqlen_q)");
+    TORCH_CHECK(
+        lse.is_contiguous(),
+        "paged_decode_xe3: softmax_lse must be contiguous");
+    args.softmax_lse = lse.data_ptr<float>();
+    args.lse_stride = static_cast<int>(lse.size(1));
   }
 
   CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);

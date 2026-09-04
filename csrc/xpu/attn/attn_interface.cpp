@@ -178,8 +178,7 @@ void cutlass_paged_decode_interface(
         value_cache,
         out,
         temp_out,
-        exp_sums,
-        max_logits,
+        softmax_lse_accum,
         block_table,
         cu_seqlens_q,
         cu_seqlens_k,
@@ -198,7 +197,10 @@ void cutlass_paged_decode_interface(
         is_local,
         is_sink,
         num_kv_splits,
-        is_prefill);
+        is_prefill,
+        splits_per_seq,
+        work_list,
+        softmax_lse);
   }
 #endif
   else {
