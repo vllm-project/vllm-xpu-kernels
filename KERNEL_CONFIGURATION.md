@@ -84,7 +84,7 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 
 | File | Kernels | Use Case |
 |------|---------|----------|
-| `chunk_prefill_full.conf` | 240 | All combinations — supports every model |
+| `chunk_prefill_full.conf` | 180 | All combinations — supports every model |
 | `chunk_prefill_default.conf` | 49 | Llama, Qwen, DeepSeek MLA, Falcon, Gemma, Phi, GLM (default build) |
 
 ### Paged Decode
@@ -144,7 +144,9 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 Every line must have exactly 7 comma-separated fields. Any other count is
 rejected with a warning rather than silently truncated or expanded, so a
 typo cannot quietly change the generated kernel set. Use `all` on its own
-line to build every combination.
+line to build every reachable combination; `all` applies the same
+`b16=true` requires `paged=true` rule, so it never emits the unreachable
+`b16=true, paged=false` kernels.
 
 ### Paged Decode
 
@@ -408,7 +410,7 @@ cat build/temp_template/csrc/xpu/attn/xe_2/paged_decode_enabled_policies_gen.hpp
 | Config | Build Time | Chunk Prefill Kernels | Paged Decode Kernels | Flexibility |
 |--------|------------|----------------------|----------------------|-------------|
 | `default` | ~2 min | 49 | 32 | Llama, Qwen, DeepSeek MLA, Falcon |
-| `full` | ~60 min | 240 | 384 | All models |
+| `full` | ~45 min | 180 | 384 | All models |
 
 ### Binary Size Impact
 

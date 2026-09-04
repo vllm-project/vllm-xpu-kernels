@@ -7,11 +7,11 @@
 #
 # CMake Options: VLLM_CHUNK_PREFILL_CONFIG - Path to kernel config file
 # (default: chunk_prefill_full.conf) Config files located in:
-# csrc/xpu/attn/kernel_configs/ chunk_prefill_full.conf    - All 240
+# csrc/xpu/attn/kernel_configs/ chunk_prefill_full.conf    - All 180 reachable
 # combinations chunk_prefill_default.conf - Default model configs
 #
 # Config file format: - Lines starting with # are comments - Empty lines are
-# ignored - 'all' keyword builds everything - Each line:
+# ignored - 'all' keyword builds every reachable combination - Each line:
 # headsize,paged,causal,local,sink,lse,b16 - All seven fields are required, and
 # each line maps to exactly one kernel. Paged and non-paged LSE require
 # local=false,sink=false.
@@ -20,6 +20,7 @@
 # chunk_policy_head<N>_b16 (TileShapeQK[1] = 16, required for block_size = 16),
 # b16=false builds chunk_policy_head<N>. b16=true requires paged=true, since
 # fmha_xe2.cpp selects the _b16 policies only when is_paged && block_size == 16.
+# This applies to the 'all' keyword too, so it emits 180 kernels and not 240.
 # =============================================================================
 
 # Default config path
@@ -116,9 +117,18 @@ function(fmha_forward_configure FILENAME_SUFFIX)
   set(BUILD_TUPLES)
 
   if(CONFIG_IS_FULL)
-    # Full mode: generate all valid combinations (original behavior)
+    # Full mode: generate every reachable combination
     foreach(IMPL_POLICY ${policy_list})
+      set(_policy_is_b16 FALSE)
+      if(IMPL_POLICY MATCHES "_b16$")
+        set(_policy_is_b16 TRUE)
+      endif()
       foreach(IMPL_KISPAGED ${L_BOOLS})
+        # The _b16 policies are selected by fmha_xe2.cpp only when is_paged &&
+        # block_size == 16, so a non-paged _b16 kernel can never be dispatched.
+        if(_policy_is_b16 AND IMPL_KISPAGED STREQUAL "false")
+          continue()
+        endif()
         foreach(IMPL_KISCAUSAL ${L_BOOLS})
           foreach(IMPL_KISLOCAL ${L_BOOLS})
             foreach(IMPL_KISSINK ${L_BOOLS})
