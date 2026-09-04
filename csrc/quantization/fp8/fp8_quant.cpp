@@ -3,6 +3,8 @@
 #include <ATen/xpu/XPUContext.h>
 #include <sycl/sycl.hpp>
 
+#include <type_traits>
+
 #include "dispatch_utils.h"
 #include "ops.h"
 #include "utils.h"
@@ -288,7 +290,7 @@ class per_token_group_quant_8bit_kernel {
 // cover a group. This maximizes global-memory bandwidth versus the
 // 1-element-per-thread path. Used for the common case where group_size is a
 // multiple of VEC.
-template <typename scalar_t, typename fp8_type>
+template <typename scalar_t, typename fp8_type, int CPT>
 class per_token_group_quant_8bit_vec_kernel {
  private:
   fp8_type* out;
@@ -340,26 +342,35 @@ class per_token_group_quant_8bit_vec_kernel {
     const int lane = sg.get_local_id()[0];
 
     constexpr int VEC = 16 / sizeof(scalar_t);
-    const int lanes_per_group = group_size / VEC;
+    const int chunks_per_group = group_size / VEC;
+    const int lanes_per_group = chunks_per_group / CPT;
     const int num_chunks = hidden / VEC;
+    const int threads_per_row = num_chunks / CPT;
 
     scalar_t const* row_in = input + static_cast<int64_t>(row) * hidden;
     fp8_type* row_out = out + static_cast<int64_t>(row) * hidden;
     const auto* vin = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(row_in);
     auto* vout = reinterpret_cast<vec_n_t<fp8_type, VEC>*>(row_out);
 
-    for (int base = 0; base < num_chunks; base += local_range) {
-      const int c = base + tid;
-      const bool active = c < num_chunks;
+    for (int base = 0; base < threads_per_row; base += local_range) {
+      const int t = base + tid;
+      const bool active = t < threads_per_row;
+      const int c0 = t * CPT;
 
-      vec_n_t<scalar_t, VEC> xv;
+      vec_n_t<scalar_t, VEC> xv[CPT];
       float lane_absmax = active ? eps : 0.0f;
       if (active) {
-        xv = vin[c];
 #pragma unroll
-        for (int k = 0; k < VEC; ++k) {
-          lane_absmax =
-              sycl::max(lane_absmax, sycl::fabs(static_cast<float>(xv.val[k])));
+        for (int j = 0; j < CPT; ++j) {
+          xv[j] = vin[c0 + j];
+        }
+#pragma unroll
+        for (int j = 0; j < CPT; ++j) {
+#pragma unroll
+          for (int k = 0; k < VEC; ++k) {
+            lane_absmax = sycl::max(
+                lane_absmax, sycl::fabs(static_cast<float>(xv[j].val[k])));
+          }
         }
       }
 
@@ -377,8 +388,8 @@ class per_token_group_quant_8bit_vec_kernel {
             sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(y_s), 1e-10f))));
       }
 
-      if (active && (lane % lanes_per_group) == 0) {
-        const int g_idx = c / lanes_per_group;
+      if (active && (lanes_per_group <= 1 || (lane % lanes_per_group) == 0)) {
+        const int g_idx = c0 / chunks_per_group;
         if (moe_layout.enabled()) {
           moe_layout.store(row, g_idx, y_s);
         } else {
@@ -398,12 +409,15 @@ class per_token_group_quant_8bit_vec_kernel {
       if (active) {
         const float inv = 1.0f / y_s;
         fp8::ConvertWithScaleOp<true, fp8_type> op{inv};
-        vec_n_t<fp8_type, VEC> o;
 #pragma unroll
-        for (int k = 0; k < VEC; ++k) {
-          op(o.val[k], static_cast<float>(xv.val[k]));
+        for (int j = 0; j < CPT; ++j) {
+          vec_n_t<fp8_type, VEC> o;
+#pragma unroll
+          for (int k = 0; k < VEC; ++k) {
+            op(o.val[k], static_cast<float>(xv[j].val[k]));
+          }
+          vout[c0 + j] = o;
         }
-        vout[c] = o;
       }
     }
   }
@@ -819,36 +833,61 @@ void per_token_group_quant_fp8(
 
   if (use_vec) {
     const int num_groups_per_row = hidden / group_size;
+    const int chunks_per_group = group_size / vec_width;
     const int num_chunks = hidden / vec_width;
-    int wg = std::min<int>(((num_chunks + 31) / 32) * 32, 1024);
+    auto& vqueue = vllm::xpu::vllmGetQueue();
+    const int eu_count = static_cast<int>(
+        vqueue.get_device().get_info<sycl::info::device::max_compute_units>());
+    const long long saturate_wi = static_cast<long long>(eu_count) * 128;
+    const long long base_wi = static_cast<long long>(num_tokens) * num_chunks;
+    int cpt = 1;
+    for (int c : {4, 2}) {
+      if (chunks_per_group % c == 0 && base_wi / c >= saturate_wi) {
+        cpt = c;
+        break;
+      }
+    }
+    const int threads_per_row = num_chunks / cpt;
+    int wg = std::min<int>(((threads_per_row + 31) / 32) * 32, 1024);
     if (wg < 32) wg = 32;
     sycl::range<1> vgrid(num_tokens);
     sycl::range<1> vblock(wg);
-    auto& vqueue = vllm::xpu::vllmGetQueue();
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "per_token_group_quant_8bit_vec_scale_type", [&] {
           VLLM_DISPATCH_FP8_TYPES(
               output_q.scalar_type(),
               "per_token_group_quant_8bit_vec_fp8_type",
               [&] {
-                vqueue.submit([&](sycl::handler& cgh) {
-                  auto kernel = vllm::
-                      per_token_group_quant_8bit_vec_kernel<scalar_t, fp8_t>(
-                          output_q.data_ptr<fp8_t>(),
-                          scale_ptr,
-                          input.data_ptr<scalar_t>(),
-                          group_size,
-                          hidden,
-                          num_groups_per_row,
-                          eps,
-                          scale_ue8m0,
-                          scale_num_rows,
-                          scale_stride,
-                          is_column_major,
-                          moe_layout);
-                  cgh.parallel_for(
-                      sycl::nd_range<1>(vgrid * vblock, vblock), kernel);
-                });
+                auto launch = [&](auto cpt_tag) {
+                  constexpr int CPT = decltype(cpt_tag)::value;
+                  vqueue.submit([&](sycl::handler& cgh) {
+                    auto kernel = vllm::per_token_group_quant_8bit_vec_kernel<
+                        scalar_t,
+                        fp8_t,
+                        CPT>(
+                        output_q.data_ptr<fp8_t>(),
+                        scale_ptr,
+                        input.data_ptr<scalar_t>(),
+                        group_size,
+                        hidden,
+                        num_groups_per_row,
+                        eps,
+                        scale_ue8m0,
+                        scale_num_rows,
+                        scale_stride,
+                        is_column_major,
+                        moe_layout);
+                    cgh.parallel_for(
+                        sycl::nd_range<1>(vgrid * vblock, vblock), kernel);
+                  });
+                };
+                if (cpt == 4) {
+                  launch(std::integral_constant<int, 4>{});
+                } else if (cpt == 2) {
+                  launch(std::integral_constant<int, 2>{});
+                } else {
+                  launch(std::integral_constant<int, 1>{});
+                }
               });
         });
     return;
