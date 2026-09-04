@@ -84,8 +84,8 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 
 | File | Kernels | Use Case |
 |------|---------|----------|
-| `chunk_prefill_full.conf` | 240 | All combinations — supports every model |
-| `chunk_prefill_default.conf` | 70 | Llama, Qwen, DeepSeek MLA, Falcon, Gemma, Phi, GLM (default build) |
+| `chunk_prefill_full.conf` | 180 | All combinations — supports every model |
+| `chunk_prefill_default.conf` | 49 | Llama, Qwen, DeepSeek MLA, Falcon, Gemma, Phi, GLM (default build) |
 
 ### Paged Decode
 
@@ -115,12 +115,14 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 # Lines starting with # are comments. Empty lines are ignored.
 # Use 'all' to build everything (same as chunk_prefill_full.conf).
 
-# Format: headsize,paged,causal,local,sink,lse
-128,true,true,false,false,false
-128,true,true,false,false,true    # paged LSE
-128,false,true,false,false,false
-128,false,true,false,false,true   # non-paged LSE
-192,true,true,false,false,false
+# Format: headsize,paged,causal,local,sink,lse,b16
+# All seven fields are required. Each line maps to exactly one kernel.
+128,true,true,false,false,false,false    # standard policy
+128,true,true,false,false,false,true     # _b16 policy (KV page size 16)
+128,true,true,false,false,true,false     # paged LSE
+128,false,true,false,false,false,false
+128,false,true,false,false,true,false    # non-paged LSE
+192,true,true,false,false,false,false
 ```
 
 **Parameters:**
@@ -131,9 +133,20 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 - `sink` — whether StreamingLLM attention sinks are used
 - `lse` — whether log-sum-exp is output. Paged and non-paged kernels require
   `local=false`, `sink=false`.
+- `b16` — selects the tile policy for the head size: `false` builds
+  `chunk_policy_head<N>` (`TileShapeQK` K-dim 32), `true` builds
+  `chunk_policy_head<N>_b16` (K-dim 16). The `_b16` policy exists so that
+  `tiles_per_page` stays 1 for a KV cache page size of 16, and the dispatcher
+  selects it only when the request is paged and the page size is 16 — so
+  `b16=true` requires `paged=true`. Entries with `b16=true, paged=false` are
+  unreachable and are skipped with a warning.
 
-If boolean flags are omitted, all 20 valid combinations are generated for
-that headsize.
+Every line must have exactly 7 comma-separated fields. Any other count is
+rejected with a warning rather than silently truncated or expanded, so a
+typo cannot quietly change the generated kernel set. Use `all` on its own
+line to build every reachable combination; `all` applies the same
+`b16=true` requires `paged=true` rule, so it never emits the unreachable
+`b16=true, paged=false` kernels.
 
 ### Paged Decode
 
@@ -396,8 +409,8 @@ cat build/temp_template/csrc/xpu/attn/xe_2/paged_decode_enabled_policies_gen.hpp
 
 | Config | Build Time | Chunk Prefill Kernels | Paged Decode Kernels | Flexibility |
 |--------|------------|----------------------|----------------------|-------------|
-| `default` | ~2 min | ~31 | ~17 | Llama, Qwen, DeepSeek MLA, Falcon |
-| `full` | ~60 min | 240 | 384 | All models |
+| `default` | ~2 min | 49 | 32 | Llama, Qwen, DeepSeek MLA, Falcon |
+| `full` | ~45 min | 180 | 384 | All models |
 
 ### Binary Size Impact
 
