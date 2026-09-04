@@ -161,6 +161,20 @@ function(fmha_forward_configure FILENAME_SUFFIX)
         continue()
       endif()
 
+      # A config entry is either a bare head size (all 20 valid combinations
+      # are generated) or a head size plus the five boolean flags, optionally
+      # followed by the b16 tile policy selector. Any other field count is a
+      # typo. Accepting it would silently drop the extra fields, or silently
+      # expand a partially specified entry into all 20 combinations, either of
+      # which yields an unexpected kernel set.
+      if(NOT (_nparts EQUAL 1 OR _nparts EQUAL 6 OR _nparts EQUAL 7))
+        message(
+          WARNING
+            "Skipping invalid config: expected 1, 6 or 7 comma-separated fields, got ${_nparts}: ${_entry}"
+        )
+        continue()
+      endif()
+
       if(_nparts GREATER_EQUAL 6)
         # Explicit boolean values provided
         list(GET _parts 1 _paged)
@@ -172,17 +186,19 @@ function(fmha_forward_configure FILENAME_SUFFIX)
         # Optional 7th field selects the tile policy explicitly. When omitted,
         # both the standard and the _b16 policy are generated.
         set(_b16 "")
-        if(_nparts GREATER_EQUAL 7)
+        if(_nparts EQUAL 7)
           list(GET _parts 6 _b16)
         endif()
 
-        # Validate boolean values
-        set(_bools ${_paged} ${_causal} ${_local} ${_sink} ${_lse})
-        if(NOT "${_b16}" STREQUAL "")
-          list(APPEND _bools ${_b16})
+        # Validate boolean values. Quote the values and iterate with IN LISTS
+        # so that empty fields (for example from a trailing or doubled comma)
+        # are actually seen rather than dropped by list expansion.
+        set(_bools "${_paged}" "${_causal}" "${_local}" "${_sink}" "${_lse}")
+        if(_nparts EQUAL 7)
+          list(APPEND _bools "${_b16}")
         endif()
         set(_invalid_bool FALSE)
-        foreach(_v ${_bools})
+        foreach(_v IN LISTS _bools)
           if(NOT (_v STREQUAL "true" OR _v STREQUAL "false"))
             message(WARNING "Skipping invalid config boolean entry: ${_entry}")
             set(_invalid_bool TRUE)
@@ -230,7 +246,7 @@ function(fmha_forward_configure FILENAME_SUFFIX)
           )
         endif()
       else()
-        # No booleans specified: generate all 20 valid combinations.
+        # Bare head size (_nparts == 1): generate all 20 valid combinations.
         foreach(IMPL_KISPAGED ${L_BOOLS})
           foreach(IMPL_KISCAUSAL ${L_BOOLS})
             foreach(IMPL_KISLOCAL ${L_BOOLS})

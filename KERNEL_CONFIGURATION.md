@@ -145,7 +145,9 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
   warning.
 
 If boolean flags are omitted, all 20 valid combinations are generated for
-that headsize (each in both tile policies).
+that headsize (each in both tile policies). A line must therefore have
+exactly 1, 6, or 7 comma-separated fields; any other count is rejected with
+a warning rather than silently truncated or expanded.
 
 ### Paged Decode
 
