@@ -48,6 +48,34 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! weight, float epsilon) -> ()");
   ops.impl("fused_add_gemma_rms_norm", torch::kXPU, &fused_add_gemma_rms_norm);
 
+  // Standard (non-RMS) LayerNorm: mean-centered, optional weight and bias.
+  ops.def(
+      "layer_norm(Tensor! result, Tensor input, Tensor? weight, Tensor? bias, "
+      "float epsilon) -> ()");
+  ops.impl("layer_norm", torch::kXPU, &layer_norm);
+
+  // In-place fused Add and LayerNorm.
+  ops.def(
+      "fused_add_layer_norm(Tensor! input, Tensor! residual, Tensor? weight, "
+      "Tensor? bias, float epsilon) -> ()");
+  ops.impl("fused_add_layer_norm", torch::kXPU, &fused_add_layer_norm);
+
+  // Nemotron LayerNorm: out = layer_norm(x) * (1 + weight) + bias, folding
+  // the +1 weight offset into the kernel (same trick as gemma_rms_norm).
+  ops.def(
+      "nemotron_layer_norm(Tensor! result, Tensor! input, Tensor! weight, "
+      "Tensor? bias, float epsilon) -> ()");
+  ops.impl("nemotron_layer_norm", torch::kXPU, &nemotron_layer_norm);
+
+  // In-place fused Add and Nemotron LayerNorm.
+  ops.def(
+      "fused_add_nemotron_layer_norm(Tensor! input, Tensor! residual, "
+      "Tensor! weight, Tensor? bias, float epsilon) -> ()");
+  ops.impl(
+      "fused_add_nemotron_layer_norm",
+      torch::kXPU,
+      &fused_add_nemotron_layer_norm);
+
   // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8).
   ops.def(
       "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
