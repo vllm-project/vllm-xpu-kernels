@@ -93,9 +93,12 @@ struct chunk_policy_head512 {
   using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };
 
-// chunk_prefill policies with TileShapeQK[1] = 16 (for block_size = 16).
-// These mirror the head-size policies above but halve the K-dim sub-tile so
-// that page_size=16 satisfies tiles_per_page = page_size / TileShapeQK[1] = 1.
+// chunk_prefill policies with TileShapeQK[1] = 16. Used for every supported
+// block_size except 32 and multiples of 64 (which keep the default 32-wide
+// K-dim tile): i.e. 16, 48, 80, 96, 112, 160, ... These mirror the head-size
+// policies above but halve the K-dim sub-tile so that such page_sizes satisfy
+// tiles_per_page = page_size / TileShapeQK[1] exactly (e.g. 16/16=1, 48/16=3,
+// 96/16=6).
 struct chunk_policy_head64_b16 {
   using ShapeQK = Shape<_128, _16, _32>;
   using ShapePV = Shape<_128, _32, _16>;

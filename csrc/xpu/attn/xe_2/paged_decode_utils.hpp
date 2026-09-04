@@ -189,18 +189,21 @@ inline void dispatch_by_page_size(
   // for page=256, ...), so correctness is preserved at a small parallelism
   // cost. Restore the _128 routing once the underlying ReduceK=8 bug is fixed
   // upstream.
-  if (page_size == 16) {
-    dispatch_by_head_size<QGroup, _16>(head_case, queue, cuQKType, args);
+  if (page_size > 0 && (page_size % 64) == 0) {
+    // 64, 128, 192, 256, ... (any positive multiple of 64)
+    dispatch_by_head_size<QGroup, _64>(head_case, queue, cuQKType, args);
   } else if (page_size == 32) {
     dispatch_by_head_size<QGroup, _32>(head_case, queue, cuQKType, args);
-  } else if (page_size > 0 && (page_size % 64) == 0) {
-    dispatch_by_head_size<QGroup, _64>(head_case, queue, cuQKType, args);
+  } else if (page_size > 0 && (page_size % 16) == 0) {
+    // 16, 48, 80, 96, 112, 160, ... (every other multiple of 16). The _16
+    // policy iterates page_size / 16 sub-tiles per page.
+    dispatch_by_head_size<QGroup, _16>(head_case, queue, cuQKType, args);
   } else {
     TORCH_CHECK(
         false,
         "Unsupported page size for fmha: ",
         page_size,
-        " (supported: 16, 32, or any positive multiple of 64)");
+        " (supported: any positive multiple of 16)");
   }
 }
 
