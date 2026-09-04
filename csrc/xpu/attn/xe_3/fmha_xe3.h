@@ -1,20 +1,18 @@
 #include <torch/all.h>
 
-namespace vllm::xpu::xe2 {
-void cutlass_paged_decode_xe2(
+namespace vllm::xpu::xe3 {
+void cutlass_chunk_prefill_xe3(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]
     const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
     const at::Tensor& value_cache,
     at::Tensor& out,
-    at::Tensor&
-        temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
-    at::Tensor& softmax_lse_accum,  // [batch, num_head_q, seq_q, num_kv_splits]
     const at::Tensor& block_table,
     const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -26,9 +24,7 @@ void cutlass_paged_decode_xe2(
     bool is_causal,
     bool is_local,
     bool is_sink,
-    int num_kv_splits,
-    std::optional<const at::Tensor>& is_prefill,
-    std::optional<at::Tensor>& splits_per_seq,
-    std::optional<at::Tensor>& work_list,
-    std::optional<at::Tensor>& softmax_lse);
-}  // namespace vllm::xpu::xe2
+    std::optional<at::Tensor>& softmax_lse,
+    std::optional<const at::Tensor>& is_prefill);
+
+}  // namespace vllm::xpu::xe3

@@ -7,17 +7,17 @@
 #if __has_include("paged_decode_enabled_policies_gen.hpp")
   #include "paged_decode_enabled_policies_gen.hpp"
 #else
-namespace vllm::xpu::xe2 {
+namespace vllm::xpu::xe3 {
 // Fallback: if the generated header is not available (e.g., IDE indexing),
 // assume all policies are enabled.
 template <typename Policy>
 struct is_decode_policy_enabled : std::true_type {};
 template <typename Policy, bool Causal, bool Local, bool Sink>
 struct is_decode_policy_tuple_enabled : std::true_type {};
-}  // namespace vllm::xpu::xe2
+}  // namespace vllm::xpu::xe3
 #endif
 
-namespace vllm::xpu::xe2 {
+namespace vllm::xpu::xe3 {
 using namespace cute;
 
 // Runtime dispatcher helper - base case (all bools resolved)
@@ -35,12 +35,10 @@ void decode_policy_dispatch_func(
   constexpr bool Sink = flags[2];
 
   // Extract policy parameters at compile time.
-  // ShapeOut = Shape<q_packed, v_tile>, ShapeQK = Shape<q_packed, kv_tile,
-  // ...>. ShapeOut's V-dim may be smaller than the policy's head-size bucket
-  // (see decode_shapeout_v), so report HeadDim -- that is what the config
-  // file keys on.
+  // ShapeOut = Shape<q_packed, head_dim>, ShapeQK = Shape<q_packed, kv_tile,
+  // ...>
   constexpr int _qgroup = cute::size<0>(typename decode_policy::ShapeOut{});
-  constexpr int _head_sz = decode_policy::HeadDim::value;
+  constexpr int _head_sz = cute::size<1>(typename decode_policy::ShapeOut{});
   constexpr int _page_sz = cute::size<1>(typename decode_policy::ShapeQK{});
 
   if constexpr (!is_decode_policy_enabled<decode_policy>::value) {
@@ -102,7 +100,15 @@ void decode_policy_dispatch_func(
         "If this is unexpected, please report at:\n"
         "  https://github.com/vllm-project/vllm-xpu-kernels/issues/364");
   } else {
-    decode_policy_dispatch_impl<decode_policy, Bs...>(queue, cuQKType, args);
+    const bool full_fp8 = cuQKType.q_type == CutlassDType::float8_e4m3 ||
+                          cuQKType.q_type == CutlassDType::float8_e5m2;
+    if (full_fp8) {
+      decode_policy_dispatch_impl<decode_policy, Bs..., true>(
+          queue, cuQKType, args);
+    } else {
+      decode_policy_dispatch_impl<decode_policy, Bs..., false>(
+          queue, cuQKType, args);
+    }
   }
 }
 
@@ -207,7 +213,7 @@ inline void dispatch_by_page_size(
   }
 }
 
-// Defence in depth: this implementation lives in vllm::xpu::xe2, so the XE2 and
+// Defence in depth: this implementation lives in vllm::xpu::xe3, so the XE2 and
 // XE3 libraries no longer export a symbol with the same mangled name. Hidden
 // visibility keeps it unexported even if a future refactor reintroduces one.
 __attribute__((visibility("hidden"))) void cutlass_paged_decode_impl(
@@ -224,6 +230,7 @@ __attribute__((visibility("hidden"))) void cutlass_paged_decode_impl(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -240,4 +247,5 @@ __attribute__((visibility("hidden"))) void cutlass_paged_decode_impl(
     std::optional<at::Tensor>& splits_per_seq,
     std::optional<at::Tensor>& work_list,
     std::optional<at::Tensor>& softmax_lse);
-}  // namespace vllm::xpu::xe2
+
+}  // namespace vllm::xpu::xe3

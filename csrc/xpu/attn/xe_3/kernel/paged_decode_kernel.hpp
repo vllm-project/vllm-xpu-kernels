@@ -39,14 +39,14 @@
 
 #include "cute/util/type_traits.hpp"
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
-#include "csrc/xpu/attn/xe_2/collective/chunk_prefill_mainloop.hpp"
-#include "csrc/xpu/attn/xe_2/collective/chunk_prefill_epilogue.hpp"
+#include "csrc/xpu/attn/xe_3/collective/chunk_prefill_mainloop.hpp"
+#include "csrc/xpu/attn/xe_3/collective/chunk_prefill_epilogue.hpp"
 
 namespace cutlass::fmha::kernel {
 // Arch-tagged inline namespace: gives these definitions a mangled name
 // distinct from the other Xe architecture's identically named copies,
 // while leaving name lookup (cutlass::fmha::...) unchanged.
-inline namespace vllm_xpu_xe2 {
+inline namespace vllm_xpu_xe3 {
 
 using namespace cute;
 
@@ -129,8 +129,6 @@ class XeFMHAFwdSplitKVKernel {
   static constexpr int dpas_max_repeat_count = 8;
   static constexpr bool Sink = CollectiveEpilogue::Sink;
   using ElementSink = typename CollectiveEpilogue::ElementSink;
-
-  static constexpr int kXeMaxSurfaceRows = 1 << 24;
 
   // Device side arguments
   struct KernelArguments {
@@ -463,42 +461,23 @@ class XeFMHAFwdSplitKVKernel {
       int end_blk = kv_split_offset + num_effective_kv_blocks;
 
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
-      bool has_large_surface = kXeMaxSurfaceRows < total_seqlen_kv;
-      if (has_large_surface) {
-        mainloop.template operator()<true>(
-            Q(_, _, head, l_coord),
-            K(_, _, head, l_coord),
-            V(_, _, head, l_coord),
-            tArA,
-            tA_max,
-            tA_sum,
-            blk_qv,
-            idx_b,
-            start_blk,
-            end_blk,
-            k_blocks,
-            thr_id,
-            seq_len,
-            full_tile_offset,
-            discard_seq_coord);
-      } else {
-        mainloop.template operator()<false>(
-            Q(_, _, head, l_coord),
-            K(_, _, head, l_coord),
-            V(_, _, head, l_coord),
-            tArA,
-            tA_max,
-            tA_sum,
-            blk_qv,
-            idx_b,
-            start_blk,
-            end_blk,
-            k_blocks,
-            thr_id,
-            seq_len,
-            full_tile_offset,
-            discard_seq_coord);
-      }
+
+      mainloop(
+          Q(_, _, head, l_coord),
+          K(_, _, head, l_coord),
+          V(_, _, head, l_coord),
+          tArA,
+          tA_max,
+          tA_sum,
+          blk_qv,
+          idx_b,
+          start_blk,
+          end_blk,
+          k_blocks,
+          thr_id,
+          seq_len,
+          full_tile_offset,
+          discard_seq_coord);
 
       if constexpr (
           !is_empty_v<MainloopSharedStorage> &&
@@ -684,6 +663,9 @@ class ReduceSplitK {
     ProblemShape const& s = p.shape;
 
     int thr_id = int(ThreadIdxX());
+    int sub_group_id = thr_id / intel::sg_size;
+    int tid_in_sg = thr_id % intel::sg_size;
+
     TileScheduler tile_scheduler{params.scheduler};
     auto num_kv_splits = params.scheduler.num_kv_splits;
 
@@ -877,6 +859,6 @@ class ReduceSplitK {
   }
 };
 
-}  // namespace vllm_xpu_xe2
+}  // namespace vllm_xpu_xe3
 
 }  // namespace cutlass::fmha::kernel

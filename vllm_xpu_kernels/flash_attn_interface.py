@@ -116,6 +116,7 @@ def _spec_decode_varlen_fwd(
         1,  # max_seqlen_q
         max_seqlen_k,
         0.0,  # dropout_p
+        None,  # q_scale
         k_descale,
         v_descale,
         softmax_scale,
@@ -232,7 +233,7 @@ def build_decode_split_plan(
     - sum(splits_per_seq) == work_list.size(0) == total_wgs
     - For every emitted work item, kv_tile_count >= 1
     - For each seq, the work items partition [0, kv_tiles) exactly once
-    - splits_per_seq[i] <= num_kv_splits (so Oaccum/exp_sums/max_logits
+    - splits_per_seq[i] <= num_kv_splits (so Oaccum/softmax_lse_accum
       buffer indexing is safe)
     - splits_per_seq[i] folds in {single-split heuristic, balanced
       assignment, hard cap}; the kernel never needs to second-guess it.
@@ -391,7 +392,7 @@ def ref_paged_attn(query: torch.Tensor,
         if casual:
             attn.masked_fill_(mask, float("-inf"))
         if sink is not None:
-            sink_expanded = sink.view(sink.size()[0], 1,
+            sink_expanded = sink.to(attn.dtype).view(sink.size()[0], 1,
                                       1).expand(attn.size()[0],
                                                 attn.size()[1], 1)
             attn = torch.cat([attn, sink_expanded], dim=-1)
@@ -471,7 +472,6 @@ def flash_attn_varlen_func(
             when using paged KV cache. This is forwarded to the underlying
             C++ FlashAttention op as its ``num_splits`` parameter; the split
             unit is KV blocks, not individual tokens or pages.
-        fa_version: FlashAttention backend version selector.
     """
     if host_kv_lens is not None:
         if seqused_k is not None:
@@ -490,6 +490,7 @@ def flash_attn_varlen_func(
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
+    q_descale = _normalize_descale_tensor(q_descale, "q_descale")
     k_descale = _normalize_descale_tensor(k_descale, "k_descale")
     v_descale = _normalize_descale_tensor(v_descale, "v_descale")
     # custom op does not support non-tuple input
@@ -504,15 +505,8 @@ def flash_attn_varlen_func(
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
 
     if fa_version == 2:
-        if scheduler_metadata is not None and q_descale is not None \
-            and k_descale is not None and v_descale is not None:
-            raise NotImplementedError(
-                "FA2 does not support scheduler_metadata, q_descale, "
-                "k_descale, v_descale")
         if num_splits > 1:
             raise NotImplementedError("FA2 does not support num_splits > 1")
-        if q_descale is not None:
-            raise NotImplementedError("FA2 does not support q_descale")
         if scheduler_metadata is not None:
             raise NotImplementedError(
                 "FA2 does not support scheduler_metadata")
@@ -528,6 +522,7 @@ def flash_attn_varlen_func(
         # comment on _SPEC_DECODE_MAX_QLEN above for the rationale.
         batch = cu_seqlens_q.numel() - 1
         is_uniform_qlen = (batch > 0 and q.shape[0] == batch * max_seqlen_q)
+        # TODO: We could also support the case where q_descale is not None.
         if (block_table is not None and causal and not return_softmax_lse
                 and softcap == 0.0 and alibi_slopes is None and q_v is None
                 and q_descale is None and scheduler_metadata is None
@@ -601,6 +596,7 @@ def flash_attn_varlen_func(
                 max_seqlen_q,
                 max_seqlen_k,
                 dropout_p,
+                q_descale,
                 k_descale,
                 v_descale,
                 softmax_scale,
@@ -641,6 +637,7 @@ def flash_attn_varlen_func(
                 q, k, v, cu_seqlens_q, cu_seqlens_k, seqused_k,
                 block_table, softmax_scale, causal,
                 real_window_size, softcap,
+                q_descale=q_descale,
                 k_descale=k_descale,
                 v_descale=v_descale,
                 s_aux=s_aux,
@@ -667,6 +664,7 @@ def _fallback_varlen_attn(
     causal: bool,
     window_size: tuple[int, int],
     softcap: float,
+    q_descale: Optional[torch.Tensor] = None,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
     s_aux: Optional[torch.Tensor] = None,
@@ -684,18 +682,18 @@ def _fallback_varlen_attn(
         k_descale = k_descale.flatten()[0]
     if v_descale is not None:
         v_descale = v_descale.flatten()[0]
+    if q_descale is not None:
+        q_descale = q_descale.flatten()[0]
 
+    _fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2,
+                   torch.float8_e4m3fnuz, torch.float8_e5m2fnuz)
     # Determine if KV cache is FP8 and needs dequantization
-    is_fp8kv = k_descale is not None and k.dtype in (
-        torch.float8_e4m3fn, torch.float8_e5m2,
-        torch.float8_e4m3fnuz, torch.float8_e5m2fnuz)
+    is_fp8kv = k_descale is not None and k.dtype in _fp8_dtypes
+    # Determine if the query is FP8 and needs dequantization
+    is_fp8_query = q.dtype in _fp8_dtypes
     # Infer the compute dtype from query (if query is also fp8, fall back to
     # float16 as the compute type)
-    if q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2,
-                   torch.float8_e4m3fnuz, torch.float8_e5m2fnuz):
-        compute_dtype = torch.float16
-    else:
-        compute_dtype = q.dtype
+    compute_dtype = torch.float16 if is_fp8_query else q.dtype
 
     is_paged = block_table is not None and seqused_k is not None
 
@@ -715,9 +713,11 @@ def _fallback_varlen_attn(
             is_paged=True,
             casual=causal,
             sink=s_aux,
+            q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
             is_fp8kv=is_fp8kv,
+            is_fp8_query=is_fp8_query,
             dtype=compute_dtype,
             return_softmax_lse=return_softmax_lse,
         )
@@ -739,9 +739,11 @@ def _fallback_varlen_attn(
             is_paged=False,
             casual=causal,
             sink=s_aux,
+            q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
             is_fp8kv=is_fp8kv,
+            is_fp8_query=is_fp8_query,
             dtype=compute_dtype,
             return_softmax_lse=return_softmax_lse,
         )
@@ -749,5 +751,3 @@ def _fallback_varlen_attn(
     if return_softmax_lse:
         return result[0], result[1]
     return result, None
-
-

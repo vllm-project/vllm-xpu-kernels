@@ -5,7 +5,7 @@
 #if __has_include("chunk_prefill_enabled_policies_gen.hpp")
   #include "chunk_prefill_enabled_policies_gen.hpp"
 #else
-namespace vllm::xpu::xe2 {
+namespace vllm::xpu::xe3 {
 // Fallback: if the generated header is not available (e.g., IDE indexing),
 // assume all policies are enabled.
 template <typename Policy>
@@ -18,26 +18,11 @@ template <
     bool Sink,
     bool Lse>
 struct is_chunk_policy_tuple_enabled : std::true_type {};
-}  // namespace vllm::xpu::xe2
+}  // namespace vllm::xpu::xe3
 #endif
 
-namespace vllm::xpu::xe2 {
+namespace vllm::xpu::xe3 {
 using namespace cute;
-
-template <typename Policy>
-struct chunk_policy_reported_head_size {
-  static constexpr int value = cute::size<1>(typename Policy::ShapeOut{});
-};
-
-// Some policy reuses a 256-wide output tile due to register pressure.
-// Keep diagnostics aligned with the logical model head_size.
-template <>
-struct chunk_policy_reported_head_size<chunk_policy_head512>
-    : std::integral_constant<int, 512> {};
-
-template <>
-struct chunk_policy_reported_head_size<chunk_policy_head512_b16>
-    : std::integral_constant<int, 512> {};
 
 template <typename chunk_policy, bool... Bs>
 __attribute__((visibility("hidden"))) void policy_dispatch_func(
@@ -45,8 +30,11 @@ __attribute__((visibility("hidden"))) void policy_dispatch_func(
     CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args) {
   // Pack is expected in order: (Paged, Causal, Local, Sink, SoftmaxLSE).
-  // Paged and non-paged kernels support LSE for global attention without
-  // sinks. Local/Sink LSE tuples are not instantiated.
+  // SoftmaxLSE=true is only supported when Paged=false, Local=false,
+  // and Sink=false; other combos are not instantiated (no TUs generated),
+  // so statically skip the call for those to avoid implicit instantiation
+  // and guarantee the runtime TORCH_CHECK in fmha_xe2.cpp is the only
+  // path that can surface a bad request.
   constexpr bool flags[] = {Bs...};
   static_assert(
       sizeof...(Bs) == 5, "policy_dispatch_func expects 5 bool parameters");
@@ -55,14 +43,14 @@ __attribute__((visibility("hidden"))) void policy_dispatch_func(
   constexpr bool Local = flags[2];
   constexpr bool Sink = flags[3];
   constexpr bool SoftmaxLSE = flags[4];
-  // Report the logical head_size in diagnostics instead of ShapeOut width.
-  constexpr int _head_sz = chunk_policy_reported_head_size<chunk_policy>::value;
+  // Extract head_size from policy at compile time.
+  constexpr int _head_sz = cute::size<1>(typename chunk_policy::ShapeOut{});
 
-  if constexpr (SoftmaxLSE && (Local || Sink)) {
+  if constexpr (SoftmaxLSE && (Paged || Local || Sink)) {
     TORCH_CHECK(
         false,
-        "Unreachable: chunk prefill softmax_lse requires is_local=false "
-        "and is_sink=false");
+        "Unreachable: softmax_lse is only supported when is_paged=false, "
+        "is_local=false, is_sink=false");
   } else if constexpr (!is_chunk_policy_enabled<chunk_policy>::value) {
     TORCH_CHECK(
         false,
@@ -126,7 +114,13 @@ __attribute__((visibility("hidden"))) void policy_dispatch_func(
         "If this is unexpected, please report at:\n"
         "  https://github.com/vllm-project/vllm-xpu-kernels/issues/364");
   } else {
-    policy_dispatch_impl<chunk_policy, Bs...>(queue, cuQKType, args);
+    const bool full_fp8 = cuQKType.q_type == CutlassDType::float8_e4m3 ||
+                          cuQKType.q_type == CutlassDType::float8_e5m2;
+    if (full_fp8) {
+      policy_dispatch_impl<chunk_policy, Bs..., true>(queue, cuQKType, args);
+    } else {
+      policy_dispatch_impl<chunk_policy, Bs..., false>(queue, cuQKType, args);
+    }
   }
 }
 
@@ -146,7 +140,7 @@ __attribute__((visibility("hidden"))) void policy_dispatch_func(
   }
 }
 
-// Defence in depth: this implementation lives in vllm::xpu::xe2, so the XE2 and
+// Defence in depth: this implementation lives in vllm::xpu::xe3, so the XE2 and
 // XE3 libraries no longer export a symbol with the same mangled name. Hidden
 // visibility keeps it unexported even if a future refactor reintroduces one.
 __attribute__((visibility("hidden"))) void cutlass_chunk_prefill_impl(
@@ -160,6 +154,7 @@ __attribute__((visibility("hidden"))) void cutlass_chunk_prefill_impl(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -174,4 +169,4 @@ __attribute__((visibility("hidden"))) void cutlass_chunk_prefill_impl(
     std::optional<at::Tensor>& softmax_lse,
     std::optional<const at::Tensor>& is_prefill);
 
-}  // namespace vllm::xpu::xe2
+}  // namespace vllm::xpu::xe3
