@@ -4,6 +4,39 @@
 
 namespace TopkToppSamplerImpl {
 
+// Percentile (in units of 0.5%, i.e. index = k/vocab*200) to Gaussian sigma
+// multiplier. Used to estimate a top-k pivot from the sampled mean/std so the
+// pivot search only has to scan gathered outliers instead of the full vocab.
+// Mirrors _PERCENTILE_TO_STD_TABLE in vLLM's topk_topp_triton.py.
+static constexpr float kPercentileToStdTable[200] = {
+    2.576f,  2.319f,  2.178f,  2.064f,  1.968f,  1.892f,  1.819f,  1.757f,
+    1.708f,  1.659f,  1.616f,  1.568f,  1.526f,  1.492f,  1.456f,  1.420f,
+    1.382f,  1.342f,  1.309f,  1.280f,  1.249f,  1.221f,  1.193f,  1.169f,
+    1.145f,  1.121f,  1.095f,  1.073f,  1.050f,  1.030f,  1.008f,  0.987f,
+    0.966f,  0.945f,  0.926f,  0.910f,  0.891f,  0.871f,  0.854f,  0.837f,
+    0.819f,  0.803f,  0.784f,  0.767f,  0.753f,  0.734f,  0.719f,  0.702f,
+    0.690f,  0.675f,  0.658f,  0.640f,  0.625f,  0.609f,  0.595f,  0.578f,
+    0.564f,  0.550f,  0.537f,  0.521f,  0.509f,  0.495f,  0.481f,  0.466f,
+    0.453f,  0.439f,  0.424f,  0.410f,  0.397f,  0.383f,  0.370f,  0.356f,
+    0.343f,  0.330f,  0.316f,  0.302f,  0.289f,  0.274f,  0.261f,  0.247f,
+    0.235f,  0.223f,  0.209f,  0.196f,  0.184f,  0.172f,  0.159f,  0.149f,
+    0.137f,  0.124f,  0.112f,  0.100f,  0.086f,  0.074f,  0.062f,  0.050f,
+    0.035f,  0.023f,  0.009f,  -0.003f, -0.015f, -0.027f, -0.039f, -0.052f,
+    -0.063f, -0.074f, -0.085f, -0.097f, -0.109f, -0.122f, -0.134f, -0.147f,
+    -0.158f, -0.171f, -0.184f, -0.196f, -0.210f, -0.223f, -0.235f, -0.248f,
+    -0.261f, -0.275f, -0.289f, -0.302f, -0.317f, -0.328f, -0.341f, -0.353f,
+    -0.368f, -0.382f, -0.396f, -0.410f, -0.426f, -0.439f, -0.452f, -0.465f,
+    -0.480f, -0.493f, -0.507f, -0.521f, -0.537f, -0.551f, -0.568f, -0.582f,
+    -0.597f, -0.614f, -0.628f, -0.643f, -0.658f, -0.673f, -0.691f, -0.706f,
+    -0.721f, -0.738f, -0.754f, -0.769f, -0.789f, -0.808f, -0.824f, -0.838f,
+    -0.857f, -0.877f, -0.893f, -0.912f, -0.929f, -0.947f, -0.965f, -0.983f,
+    -1.003f, -1.027f, -1.050f, -1.070f, -1.092f, -1.117f, -1.139f, -1.162f,
+    -1.189f, -1.216f, -1.241f, -1.272f, -1.300f, -1.330f, -1.367f, -1.404f,
+    -1.441f, -1.485f, -1.523f, -1.564f, -1.607f, -1.658f, -1.710f, -1.778f,
+    -1.832f, -1.901f, -1.978f, -2.068f, -2.174f, -2.325f, -2.577f, -3.813f};
+
+static constexpr int kMaxBisectIters = 40;
+
 enum class LogprobsMode {
   default_mode,
   raw_logits,
@@ -70,9 +103,11 @@ struct random_sampler_only_kernel {
     auto group = item.get_group();
 
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
-    const int local_offset = local_id * local_handle_size;
+    const int local_offset =
+        sycl::min(local_id * local_handle_size, vocab_size);
     const int remained_size = vocab_size - local_offset;
-    const int handle_size = sycl::min(local_handle_size, remained_size);
+    const int handle_size =
+        sycl::max(sycl::min(local_handle_size, remained_size), 0);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
     float* logits_ptr = logits + batch_id * vocab_size + local_offset;
@@ -249,6 +284,7 @@ struct top_k_only_kernel {
       int64_t* random_sampled,
       float* logits_to_return,
       float* logits,
+      float* buffer,
       const int64_t* top_k,
       const int batch_size,
       const int vocab_size,
@@ -258,6 +294,7 @@ struct top_k_only_kernel {
       : random_sampled(random_sampled),
         logits_to_return(logits_to_return),
         logits(logits),
+        buffer(buffer),
         top_k(top_k),
         batch_size(batch_size),
         vocab_size(vocab_size),
@@ -297,12 +334,15 @@ struct top_k_only_kernel {
     const int top_k_value = top_k[batch_id];
 
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
-    const int local_offset = local_id * local_handle_size;
+    const int local_offset =
+        sycl::min(local_id * local_handle_size, vocab_size);
     const int remained_size = vocab_size - local_offset;
-    const int handle_size = sycl::min(local_handle_size, remained_size);
+    const int handle_size =
+        sycl::max(sycl::min(local_handle_size, remained_size), 0);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
     float* logits_ptr = logits + batch_id * vocab_size + local_offset;
+    float* buffer_ptr = buffer + batch_id * vocab_size + local_offset;
     float* logits_to_return_ptr =
         logits_to_return + batch_id * vocab_size + local_offset;
 
@@ -320,7 +360,11 @@ struct top_k_only_kernel {
 
     float max_softmax_value = -INFINITY;
 
-    // low, high, and max value for softmax
+    // low, high, sample mean/std (for outlier pivot estimate) and max value
+    // for softmax.
+    float sum_logit = 0.0f;
+    float sum_sq_logit = 0.0f;
+    int finite_count = 0;
     for (int l = 0; l < loop_times; ++l) {
 #pragma unroll
       for (int e = 0; e < VEC_SIZE; ++e) {
@@ -332,6 +376,10 @@ struct top_k_only_kernel {
         float logit = local_data[e];
 
         if (!sycl::isfinite(logit)) continue;
+
+        sum_logit += logit;
+        sum_sq_logit += logit * logit;
+        ++finite_count;
 
         if (logit < low) {
           low = logit;
@@ -355,6 +403,10 @@ struct top_k_only_kernel {
 
         if (!sycl::isfinite(logit)) continue;
 
+        sum_logit += logit;
+        sum_sq_logit += logit * logit;
+        ++finite_count;
+
         if (logit < low) {
           low = logit;
         }
@@ -367,6 +419,9 @@ struct top_k_only_kernel {
 
     low = sycl::reduce_over_group(group, low, sycl::minimum<>());
     high = sycl::reduce_over_group(group, high, sycl::maximum<>());
+    sum_logit = sycl::reduce_over_group(group, sum_logit, sycl::plus<>());
+    sum_sq_logit = sycl::reduce_over_group(group, sum_sq_logit, sycl::plus<>());
+    finite_count = sycl::reduce_over_group(group, finite_count, sycl::plus<>());
     pivot = low;
     max_softmax_value = high;
 
@@ -374,42 +429,144 @@ struct top_k_only_kernel {
       max_softmax_value = INFINITY;
     }
 
+    // Estimate an outlier pivot from the Gaussian statistics and gather logits
+    // above it into this work-item's slice of the scratch buffer. When the
+    // estimate captures at least top_k_value elements the pivot search scans
+    // only these outliers instead of the full vocab. Falls back to the full
+    // scan otherwise.
+    bool use_outliers = false;
+    int outlier_size = 0;
+    float outlier_pivot = -INFINITY;
+    if ((top_k_value != vocab_size) &&
+        (sycl::isfinite(low) && sycl::isfinite(high)) && finite_count > 0) {
+      float mean = sum_logit / finite_count;
+      float var = sum_sq_logit / finite_count - mean * mean;
+      float std_logit = sycl::sqrt(sycl::fmax(var, 0.0f));
+
+      int percentile = static_cast<int>(
+          static_cast<float>(top_k_value) / vocab_size * 200.0f);
+      percentile = sycl::min(percentile, 199);
+      percentile = sycl::max(percentile, 0);
+      float sigma = kPercentileToStdTable[percentile];
+      sigma = sigma + sycl::fabs(sigma) * -0.15f;
+      outlier_pivot = mean + std_logit * sigma;
+
+      for (int l = 0; l < loop_times; ++l) {
+#pragma unroll
+        for (int e = 0; e < VEC_SIZE; ++e) {
+          local_data[e] = logits_ptr[l * VEC_SIZE + e];
+        }
+
+#pragma unroll
+        for (int e = 0; e < VEC_SIZE; ++e) {
+          float logit = local_data[e];
+          if (logit > outlier_pivot) {
+            buffer_ptr[outlier_size] = logit;
+            ++outlier_size;
+          }
+        }
+      }
+
+      if (has_last_loop) {
+#pragma unroll
+        for (int e = 0; e < remained_vec_size; ++e) {
+          local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
+        }
+
+#pragma unroll
+        for (int e = 0; e < remained_vec_size; ++e) {
+          float logit = local_data[e];
+          if (logit > outlier_pivot) {
+            buffer_ptr[outlier_size] = logit;
+            ++outlier_size;
+          }
+        }
+      }
+
+      int num_outliers =
+          sycl::reduce_over_group(group, outlier_size, sycl::plus<>());
+      use_outliers = (num_outliers >= top_k_value);
+    }
+
+    const int outlier_loop_count = (outlier_size + VEC_SIZE - 1) / VEC_SIZE;
+    const int outlier_remained =
+        outlier_size - (outlier_loop_count - 1) * VEC_SIZE;
+    const int outlier_loop_times = (outlier_remained == VEC_SIZE)
+                                       ? outlier_loop_count
+                                       : (outlier_loop_count - 1);
+    const bool outlier_has_last =
+        (outlier_size > 0) && (outlier_remained != VEC_SIZE);
+
     // topk
     if ((top_k_value != vocab_size) &&
         (sycl::isfinite(low) && sycl::isfinite(high))) {
+      if (use_outliers) {
+        low = outlier_pivot;
+      }
+      int iter = 0;
       do {
         int pivot_count_local = 0;
 
         pivot = (low + high) / 2;
 
-        for (int l = 0; l < loop_times; ++l) {
+        if (use_outliers) {
+          for (int l = 0; l < outlier_loop_times; ++l) {
 #pragma unroll
-          for (int e = 0; e < VEC_SIZE; ++e) {
-            local_data[e] = logits_ptr[l * VEC_SIZE + e];
-          }
+            for (int e = 0; e < VEC_SIZE; ++e) {
+              local_data[e] = buffer_ptr[l * VEC_SIZE + e];
+            }
 
 #pragma unroll
-          for (int e = 0; e < VEC_SIZE; ++e) {
-            float logit = local_data[e];
-
-            if (logit >= pivot) {
-              pivot_count_local += 1;
+            for (int e = 0; e < VEC_SIZE; ++e) {
+              if (local_data[e] >= pivot) {
+                pivot_count_local += 1;
+              }
             }
           }
-        }
 
-        if (has_last_loop) {
+          if (outlier_has_last) {
 #pragma unroll
-          for (int e = 0; e < remained_vec_size; ++e) {
-            local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
+            for (int e = 0; e < outlier_remained; ++e) {
+              local_data[e] = buffer_ptr[outlier_loop_times * VEC_SIZE + e];
+            }
+
+#pragma unroll
+            for (int e = 0; e < outlier_remained; ++e) {
+              if (local_data[e] >= pivot) {
+                pivot_count_local += 1;
+              }
+            }
+          }
+        } else {
+          for (int l = 0; l < loop_times; ++l) {
+#pragma unroll
+            for (int e = 0; e < VEC_SIZE; ++e) {
+              local_data[e] = logits_ptr[l * VEC_SIZE + e];
+            }
+
+#pragma unroll
+            for (int e = 0; e < VEC_SIZE; ++e) {
+              float logit = local_data[e];
+
+              if (logit >= pivot) {
+                pivot_count_local += 1;
+              }
+            }
           }
 
+          if (has_last_loop) {
 #pragma unroll
-          for (int e = 0; e < remained_vec_size; ++e) {
-            float logit = local_data[e];
+            for (int e = 0; e < remained_vec_size; ++e) {
+              local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
+            }
 
-            if (logit >= pivot) {
-              pivot_count_local += 1;
+#pragma unroll
+            for (int e = 0; e < remained_vec_size; ++e) {
+              float logit = local_data[e];
+
+              if (logit >= pivot) {
+                pivot_count_local += 1;
+              }
             }
           }
         }
@@ -424,7 +581,8 @@ struct top_k_only_kernel {
         } else {
           low = pivot;
         }
-      } while (((high - low) > eps));
+        ++iter;
+      } while (((high - low) > eps) && iter < kMaxBisectIters);
 
       if (pivot_count < top_k_value) {
         pivot = low;
@@ -557,6 +715,7 @@ struct top_k_only_kernel {
   int64_t* random_sampled;
   float* logits_to_return;
   float* logits;
+  float* buffer;
   const int64_t* top_k;
   const int batch_size;
   const int vocab_size;
@@ -627,9 +786,11 @@ struct top_p_only_kernel {
     const float top_p_value = top_p[batch_id];
 
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
-    const int local_offset = local_id * local_handle_size;
+    const int local_offset =
+        sycl::min(local_id * local_handle_size, vocab_size);
     const int remained_size = vocab_size - local_offset;
-    const int handle_size = sycl::min(local_handle_size, remained_size);
+    const int handle_size =
+        sycl::max(sycl::min(local_handle_size, remained_size), 0);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
     float* logits_ptr = logits + batch_id * vocab_size + local_offset;
@@ -731,6 +892,7 @@ struct top_p_only_kernel {
     // topp
     if (top_p_value != 1.0f) {
       float low_count = 1.0f;
+      int iter = 0;
       do {
         float pivot_count_local = 0.0f;
 
@@ -744,11 +906,11 @@ struct top_p_only_kernel {
 
 #pragma unroll
           for (int e = 0; e < VEC_SIZE; ++e) {
-            float logit = local_data[e];
-            logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
+            float prob = sycl::native::exp(local_data[e] - max_softmax_value) /
+                         sum_softmax;
 
-            if (logit >= pivot) {
-              pivot_count_local += logit;
+            if (prob >= pivot) {
+              pivot_count_local += prob;
             }
           }
         }
@@ -761,11 +923,11 @@ struct top_p_only_kernel {
 
 #pragma unroll
           for (int e = 0; e < remained_vec_size; ++e) {
-            float logit = local_data[e];
-            logit = sycl::native::exp(logit - max_softmax_value) / sum_softmax;
+            float prob = sycl::native::exp(local_data[e] - max_softmax_value) /
+                         sum_softmax;
 
-            if (logit >= pivot) {
-              pivot_count_local += logit;
+            if (prob >= pivot) {
+              pivot_count_local += prob;
             }
           }
         }
@@ -781,8 +943,8 @@ struct top_p_only_kernel {
           low = pivot;
           low_count = pivot_count;
         }
-
-      } while ((high - low) > eps);
+        ++iter;
+      } while (((high - low) > eps) && iter < kMaxBisectIters);
 
       if (pivot_count < top_p_value) {
         pivot = low;
@@ -959,9 +1121,11 @@ struct top_k_top_p_kernel {
     const float top_p_value = top_p[batch_id];
 
     const int local_handle_size = (vocab_size + local_range - 1) / local_range;
-    const int local_offset = local_id * local_handle_size;
+    const int local_offset =
+        sycl::min(local_id * local_handle_size, vocab_size);
     const int remained_size = vocab_size - local_offset;
-    const int handle_size = sycl::min(local_handle_size, remained_size);
+    const int handle_size =
+        sycl::max(sycl::min(local_handle_size, remained_size), 0);
 
     int64_t* random_sampled_ptr = random_sampled + batch_id;
     float* logits_ptr = logits + batch_id * vocab_size + local_offset;
@@ -982,7 +1146,12 @@ struct top_k_top_p_kernel {
 
     float max_softmax_value = -INFINITY;
 
-    // low, high, and max value for softmax
+    // low, high, sample mean/std (for outlier pivot estimate) and max value
+    // for softmax. mean/std are computed from this work-item's slice and then
+    // reduced over the group; this approximates the full-row statistics.
+    float sum_logit = 0.0f;
+    float sum_sq_logit = 0.0f;
+    int finite_count = 0;
     for (int l = 0; l < loop_times; ++l) {
 #pragma unroll
       for (int e = 0; e < VEC_SIZE; ++e) {
@@ -994,6 +1163,10 @@ struct top_k_top_p_kernel {
         float logit = local_data[e];
 
         if (!sycl::isfinite(logit)) continue;
+
+        sum_logit += logit;
+        sum_sq_logit += logit * logit;
+        ++finite_count;
 
         if (logit < low_k) {
           low_k = logit;
@@ -1017,6 +1190,10 @@ struct top_k_top_p_kernel {
 
         if (!sycl::isfinite(logit)) continue;
 
+        sum_logit += logit;
+        sum_sq_logit += logit * logit;
+        ++finite_count;
+
         if (logit < low_k) {
           low_k = logit;
         }
@@ -1029,6 +1206,9 @@ struct top_k_top_p_kernel {
 
     low_k = sycl::reduce_over_group(group, low_k, sycl::minimum<>());
     high_k = sycl::reduce_over_group(group, high_k, sycl::maximum<>());
+    sum_logit = sycl::reduce_over_group(group, sum_logit, sycl::plus<>());
+    sum_sq_logit = sycl::reduce_over_group(group, sum_sq_logit, sycl::plus<>());
+    finite_count = sycl::reduce_over_group(group, finite_count, sycl::plus<>());
     pivot_k = low_k;
     max_softmax_value = high_k;
 
@@ -1036,43 +1216,148 @@ struct top_k_top_p_kernel {
       max_softmax_value = INFINITY;
     }
 
+    // Estimate an outlier pivot from the Gaussian statistics and gather the
+    // logits above it into this work-item's own slice of the scratch buffer.
+    // If the estimate captures at least top_k_value elements, the pivot binary
+    // search below scans only these gathered outliers instead of the full
+    // vocab, which is the main speedup over the naive full-scan bisection.
+    // Each work-item compacts into buffer_ptr (offset by its slice), so no
+    // cross-item scan is needed; the search then reduces per-item counts.
+    bool use_outliers = false;
+    int outlier_size = 0;
+    float outlier_pivot = -INFINITY;
+    if ((top_k_value != vocab_size) &&
+        (sycl::isfinite(low_k) && sycl::isfinite(high_k)) && finite_count > 0) {
+      float mean = sum_logit / finite_count;
+      float var = sum_sq_logit / finite_count - mean * mean;
+      float std_logit = sycl::sqrt(sycl::fmax(var, 0.0f));
+
+      int percentile = static_cast<int>(
+          static_cast<float>(top_k_value) / vocab_size * 200.0f);
+      percentile = sycl::min(percentile, 199);
+      percentile = sycl::max(percentile, 0);
+      float sigma = kPercentileToStdTable[percentile];
+      sigma = sigma + sycl::fabs(sigma) * -0.15f;
+      outlier_pivot = mean + std_logit * sigma;
+
+      for (int l = 0; l < loop_times; ++l) {
+#pragma unroll
+        for (int e = 0; e < VEC_SIZE; ++e) {
+          local_data[e] = logits_ptr[l * VEC_SIZE + e];
+        }
+
+#pragma unroll
+        for (int e = 0; e < VEC_SIZE; ++e) {
+          float logit = local_data[e];
+          if (logit > outlier_pivot) {
+            buffer_ptr[outlier_size] = logit;
+            ++outlier_size;
+          }
+        }
+      }
+
+      if (has_last_loop) {
+#pragma unroll
+        for (int e = 0; e < remained_vec_size; ++e) {
+          local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
+        }
+
+#pragma unroll
+        for (int e = 0; e < remained_vec_size; ++e) {
+          float logit = local_data[e];
+          if (logit > outlier_pivot) {
+            buffer_ptr[outlier_size] = logit;
+            ++outlier_size;
+          }
+        }
+      }
+
+      int num_outliers =
+          sycl::reduce_over_group(group, outlier_size, sycl::plus<>());
+      use_outliers = (num_outliers >= top_k_value);
+    }
+
+    const int outlier_loop_count = (outlier_size + VEC_SIZE - 1) / VEC_SIZE;
+    const int outlier_remained =
+        outlier_size - (outlier_loop_count - 1) * VEC_SIZE;
+    const int outlier_loop_times = (outlier_remained == VEC_SIZE)
+                                       ? outlier_loop_count
+                                       : (outlier_loop_count - 1);
+    const bool outlier_has_last =
+        (outlier_size > 0) && (outlier_remained != VEC_SIZE);
+
     // topk
     if ((top_k_value != vocab_size) &&
         (sycl::isfinite(low_k) && sycl::isfinite(high_k))) {
       int pivot_count_k = top_k_value;
+      if (use_outliers) {
+        low_k = outlier_pivot;
+      }
+      int iter = 0;
       do {
         int pivot_count_local = 0;
 
         pivot_k = (low_k + high_k) / 2;
 
-        for (int l = 0; l < loop_times; ++l) {
+        if (use_outliers) {
+          // Scan only the gathered outliers in the per-item buffer slice.
+          for (int l = 0; l < outlier_loop_times; ++l) {
 #pragma unroll
-          for (int e = 0; e < VEC_SIZE; ++e) {
-            local_data[e] = logits_ptr[l * VEC_SIZE + e];
-          }
+            for (int e = 0; e < VEC_SIZE; ++e) {
+              local_data[e] = buffer_ptr[l * VEC_SIZE + e];
+            }
 
 #pragma unroll
-          for (int e = 0; e < VEC_SIZE; ++e) {
-            float logit = local_data[e];
-
-            if (logit >= pivot_k) {
-              pivot_count_local += 1;
+            for (int e = 0; e < VEC_SIZE; ++e) {
+              if (local_data[e] >= pivot_k) {
+                pivot_count_local += 1;
+              }
             }
           }
-        }
 
-        if (has_last_loop) {
+          if (outlier_has_last) {
 #pragma unroll
-          for (int e = 0; e < remained_vec_size; ++e) {
-            local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
+            for (int e = 0; e < outlier_remained; ++e) {
+              local_data[e] = buffer_ptr[outlier_loop_times * VEC_SIZE + e];
+            }
+
+#pragma unroll
+            for (int e = 0; e < outlier_remained; ++e) {
+              if (local_data[e] >= pivot_k) {
+                pivot_count_local += 1;
+              }
+            }
+          }
+        } else {
+          for (int l = 0; l < loop_times; ++l) {
+#pragma unroll
+            for (int e = 0; e < VEC_SIZE; ++e) {
+              local_data[e] = logits_ptr[l * VEC_SIZE + e];
+            }
+
+#pragma unroll
+            for (int e = 0; e < VEC_SIZE; ++e) {
+              float logit = local_data[e];
+
+              if (logit >= pivot_k) {
+                pivot_count_local += 1;
+              }
+            }
           }
 
+          if (has_last_loop) {
 #pragma unroll
-          for (int e = 0; e < remained_vec_size; ++e) {
-            float logit = local_data[e];
+            for (int e = 0; e < remained_vec_size; ++e) {
+              local_data[e] = logits_ptr[loop_times * VEC_SIZE + e];
+            }
 
-            if (logit >= pivot_k) {
-              pivot_count_local += 1;
+#pragma unroll
+            for (int e = 0; e < remained_vec_size; ++e) {
+              float logit = local_data[e];
+
+              if (logit >= pivot_k) {
+                pivot_count_local += 1;
+              }
             }
           }
         }
@@ -1087,7 +1372,8 @@ struct top_k_top_p_kernel {
         } else {
           low_k = pivot_k;
         }
-      } while (((high_k - low_k) > eps));
+        ++iter;
+      } while (((high_k - low_k) > eps) && iter < kMaxBisectIters);
 
       if (pivot_count_k < top_k_value) {
         pivot_k = low_k;
@@ -1154,6 +1440,7 @@ struct top_k_top_p_kernel {
     // topp
     if (top_p_value != 1.0f) {
       float low_count = 1.0f;
+      int iter_p = 0;
       do {
         float pivot_count_local = 0.0f;
 
@@ -1204,8 +1491,8 @@ struct top_k_top_p_kernel {
           low_p = pivot_p;
           low_count = pivot_count_p;
         }
-
-      } while ((high_p - low_p) > eps);
+        ++iter_p;
+      } while (((high_p - low_p) > eps) && iter_p < kMaxBisectIters);
 
       if (pivot_count_p < top_p_value) {
         pivot_p = low_p;
@@ -1340,6 +1627,7 @@ void topk_topp_sampler_kernel_launcher(
           random_sampled,
           logits_to_return,
           logits,
+          buffer,
           top_k,
           batch_size,
           vocab_size,
