@@ -29,6 +29,34 @@ void fused_add_gemma_rms_norm(
     torch::Tensor& weight,
     double epsilon);
 
+void layer_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    std::optional<torch::Tensor> weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
+void fused_add_layer_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    std::optional<torch::Tensor> weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
+void nemotron_layer_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
+void fused_add_nemotron_layer_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
 // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8 output).
 void rms_norm_dynamic_per_token_quant(
     torch::Tensor& out,

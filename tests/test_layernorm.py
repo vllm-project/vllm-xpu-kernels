@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from tests.ops.layernorm_op import GemmaRMSNorm, RMSNorm
+from tests.ops.layernorm_op import GemmaRMSNorm, NemotronLayerNorm, LayerNorm, RMSNorm
 from tests.utils import opcheck
 
 DTYPES = [torch.half, torch.bfloat16]
@@ -17,6 +17,7 @@ NUM_Q_HEADS = [32, 40, 64]
 NUM_KV_HEADS = [8, 32]
 ADD_RESIDUAL = [False, True]
 HAS_WEIGHT = [False, True]
+HAS_BIAS = [False, True]
 SEEDS = [0]
 XPU_DEVICES = [
     f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
@@ -175,3 +176,115 @@ def test_gemma_rms_norm(
     else:
         opcheck(torch.ops._C.gemma_rms_norm,
                 (out, x, weight, layer.variance_epsilon))
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("has_weight", HAS_WEIGHT)
+@pytest.mark.parametrize("has_bias", HAS_BIAS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@pytest.mark.parametrize("strided_input", [False, True])
+@torch.inference_mode()
+def test_layer_norm(
+    num_tokens: int,
+    hidden_size: int,
+    add_residual: bool,
+    has_weight: bool,
+    has_bias: bool,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    strided_input: bool,
+) -> None:
+    torch.manual_seed(seed)
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
+    layer = LayerNorm(hidden_size, has_weight=has_weight,
+                      has_bias=has_bias).to(dtype=dtype)
+    if has_weight:
+        layer.weight.data.normal_(mean=1.0, std=0.1)
+    if has_bias:
+        layer.bias.data.normal_(mean=0.0, std=0.1)
+    scale = 1 / (2 * hidden_size)
+    last_dim = 2 * hidden_size if strided_input else hidden_size
+    x = torch.randn(num_tokens, last_dim, dtype=dtype)
+    x = x[..., :hidden_size]
+    if num_tokens > 1:
+        assert x.is_contiguous() != strided_input
+    x *= scale
+    residual = torch.randn_like(x) * scale if add_residual else None
+
+    # NOTE: reference runs first because the fused kernel is in-place.
+    ref_out = layer.forward_native(x, residual)
+    out = layer(x, residual)
+    if add_residual:
+        torch.testing.assert_close(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
+    else:
+        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+    weight = layer.weight.data if has_weight else None
+    bias = layer.bias.data if has_bias else None
+    if residual is not None:
+        opcheck(torch.ops._C.fused_add_layer_norm,
+                (x, residual, weight, bias, layer.variance_epsilon))
+    else:
+        opcheck(torch.ops._C.layer_norm,
+                (out, x, weight, bias, layer.variance_epsilon))
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("has_bias", HAS_BIAS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@pytest.mark.parametrize("strided_input", [False, True])
+@torch.inference_mode()
+def test_nemotron_layer_norm(
+    num_tokens: int,
+    hidden_size: int,
+    add_residual: bool,
+    has_bias: bool,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    strided_input: bool,
+) -> None:
+    torch.manual_seed(seed)
+    torch.set_default_device("xpu")
+    torch.xpu.set_device(device)
+    layer = NemotronLayerNorm(hidden_size, has_bias=has_bias).to(dtype=dtype)
+    # Nemotron weight is zero-centered (the kernel adds the +1 itself).
+    layer.weight.data.normal_(mean=0.0, std=0.1)
+    if has_bias:
+        layer.bias.data.normal_(mean=0.0, std=0.1)
+    scale = 1 / (2 * hidden_size)
+    last_dim = 2 * hidden_size if strided_input else hidden_size
+    x = torch.randn(num_tokens, last_dim, dtype=dtype)
+    x = x[..., :hidden_size]
+    if num_tokens > 1:
+        assert x.is_contiguous() != strided_input
+    x *= scale
+    residual = torch.randn_like(x) * scale if add_residual else None
+
+    ref_out = layer.forward_native(x, residual)
+    out = layer(x, residual)
+    if add_residual:
+        torch.testing.assert_close(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
+    else:
+        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+    weight = layer.weight.data
+    bias = layer.bias.data if has_bias else None
+    if residual is not None:
+        opcheck(torch.ops._C.fused_add_nemotron_layer_norm,
+                (x, residual, weight, bias, layer.variance_epsilon))
+    else:
+        opcheck(torch.ops._C.nemotron_layer_norm,
+                (out, x, weight, bias, layer.variance_epsilon))
