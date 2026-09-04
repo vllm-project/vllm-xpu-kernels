@@ -1297,10 +1297,10 @@ void layer_norm(
     double epsilon) {
   const at::DeviceGuard device_guard(input.device());
   TORCH_CHECK(out.is_contiguous());
-  if (input.stride(-1) != 1) {
+  if (!input.is_contiguous()) {
     input = input.contiguous();
   }
-  TORCH_CHECK(input.stride(-1) == 1);
+  TORCH_CHECK(input.is_contiguous());
   const bool has_weight = weight.has_value();
   const bool has_bias = bias.has_value();
   if (has_weight) {
@@ -1376,10 +1376,10 @@ void nemotron_layer_norm(
     double epsilon) {
   const at::DeviceGuard device_guard(input.device());
   TORCH_CHECK(out.is_contiguous());
-  if (input.stride(-1) != 1) {
+  if (!input.is_contiguous()) {
     input = input.contiguous();
   }
-  TORCH_CHECK(input.stride(-1) == 1);
+  TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(weight.is_contiguous());
   TORCH_CHECK(
       weight.scalar_type() == input.scalar_type(),

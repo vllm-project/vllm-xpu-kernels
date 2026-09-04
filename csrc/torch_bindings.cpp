@@ -63,14 +63,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Nemotron LayerNorm: out = layer_norm(x) * (1 + weight) + bias, folding
   // the +1 weight offset into the kernel (same trick as gemma_rms_norm).
   ops.def(
-      "nemotron_layer_norm(Tensor! result, Tensor! input, Tensor! weight, "
+      "nemotron_layer_norm(Tensor! result, Tensor input, Tensor weight, "
       "Tensor? bias, float epsilon) -> ()");
   ops.impl("nemotron_layer_norm", torch::kXPU, &nemotron_layer_norm);
 
   // In-place fused Add and Nemotron LayerNorm.
   ops.def(
       "fused_add_nemotron_layer_norm(Tensor! input, Tensor! residual, "
-      "Tensor! weight, Tensor? bias, float epsilon) -> ()");
+      "Tensor weight, Tensor? bias, float epsilon) -> ()");
   ops.impl(
       "fused_add_nemotron_layer_norm",
       torch::kXPU,
