@@ -115,16 +115,14 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 # Lines starting with # are comments. Empty lines are ignored.
 # Use 'all' to build everything (same as chunk_prefill_full.conf).
 
-# Format: headsize,paged,causal,local,sink,lse[,b16]
-128,true,true,false,false,false
-128,true,true,false,false,true    # paged LSE
-128,false,true,false,false,false
-128,false,true,false,false,true   # non-paged LSE
-192,true,true,false,false,false
-
-# Explicit tile policy (7th field):
-128,true,true,false,false,false,false   # standard policy only
-128,true,true,false,false,false,true    # _b16 policy only (page size 16)
+# Format: headsize,paged,causal,local,sink,lse,b16
+# All seven fields are required. Each line maps to exactly one kernel.
+128,true,true,false,false,false,false    # standard policy
+128,true,true,false,false,false,true     # _b16 policy (KV page size 16)
+128,true,true,false,false,true,false     # paged LSE
+128,false,true,false,false,false,false
+128,false,true,false,false,true,false    # non-paged LSE
+192,true,true,false,false,false,false
 ```
 
 **Parameters:**
@@ -135,19 +133,18 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 - `sink` — whether StreamingLLM attention sinks are used
 - `lse` — whether log-sum-exp is output. Paged and non-paged kernels require
   `local=false`, `sink=false`.
-- `b16` — *optional*. Selects the tile policy for the head size:
-  `false` builds `chunk_policy_head<N>` (`TileShapeQK` K-dim 32) and `true`
-  builds `chunk_policy_head<N>_b16` (K-dim 16). When omitted, **both** are
-  built. The `_b16` policy exists so that `tiles_per_page` stays 1 for a KV
-  cache page size of 16, and the dispatcher selects it only when the request
-  is paged and the page size is 16 — so `b16=true` requires `paged=true`.
-  Entries with `b16=true, paged=false` are unreachable and are skipped with a
-  warning.
+- `b16` — selects the tile policy for the head size: `false` builds
+  `chunk_policy_head<N>` (`TileShapeQK` K-dim 32), `true` builds
+  `chunk_policy_head<N>_b16` (K-dim 16). The `_b16` policy exists so that
+  `tiles_per_page` stays 1 for a KV cache page size of 16, and the dispatcher
+  selects it only when the request is paged and the page size is 16 — so
+  `b16=true` requires `paged=true`. Entries with `b16=true, paged=false` are
+  unreachable and are skipped with a warning.
 
-If boolean flags are omitted, all 20 valid combinations are generated for
-that headsize (each in both tile policies). A line must therefore have
-exactly 1, 6, or 7 comma-separated fields; any other count is rejected with
-a warning rather than silently truncated or expanded.
+Every line must have exactly 7 comma-separated fields. Any other count is
+rejected with a warning rather than silently truncated or expanded, so a
+typo cannot quietly change the generated kernel set. Use `all` on its own
+line to build every combination.
 
 ### Paged Decode
 

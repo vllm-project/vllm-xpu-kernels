@@ -14,8 +14,8 @@ For config file format, usage examples, model-specific guidance, and
 troubleshooting, see **[KERNEL_CONFIGURATION.md](../../../../KERNEL_CONFIGURATION.md)**
 at the repository root.
 
-Note: a chunk prefill config line that omits the trailing `b16` field expands
-to two kernels (the standard and `_b16` policy for that head size). Adding an
-explicit `b16` value selects a single policy, so each such line produces one
-kernel. `chunk_prefill_default.conf` is fully explicit and its 49 lines produce
-49 kernels. Paged decode config lines map one-to-one to kernels.
+Note: every chunk prefill config line has seven required fields and maps to
+exactly one kernel, so the 49 lines in `chunk_prefill_default.conf` produce 49
+kernels. The trailing `b16` field picks the tile policy (`chunk_policy_head<N>`
+or `chunk_policy_head<N>_b16`). Paged decode config lines map one-to-one to
+kernels.

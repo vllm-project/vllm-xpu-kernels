@@ -2,8 +2,8 @@
 # Chunk Prefill Kernel Configuration
 # =============================================================================
 # This function generates kernel source files based on a configuration file that
-# specifies which (headsize, paged, causal, local, sink, lse) combinations to
-# build.
+# specifies which (headsize, paged, causal, local, sink, lse, b16) combinations
+# to build.
 #
 # CMake Options: VLLM_CHUNK_PREFILL_CONFIG - Path to kernel config file
 # (default: chunk_prefill_full.conf) Config files located in:
@@ -12,15 +12,14 @@
 #
 # Config file format: - Lines starting with # are comments - Empty lines are
 # ignored - 'all' keyword builds everything - Each line:
-# headsize[,paged,causal,local,sink,lse[,b16]] - If boolean flags are omitted,
-# all 20 valid combinations are generated. Paged and non-paged LSE require
+# headsize,paged,causal,local,sink,lse,b16 - All seven fields are required, and
+# each line maps to exactly one kernel. Paged and non-paged LSE require
 # local=false,sink=false.
 #
-# The optional 7th field selects the tile policy: b16=true builds only
+# The b16 field selects the tile policy: b16=true builds
 # chunk_policy_head<N>_b16 (TileShapeQK[1] = 16, required for block_size = 16),
-# b16=false builds only chunk_policy_head<N>. Omit it to build both. b16=true
-# requires paged=true, since fmha_xe2.cpp selects the _b16 policies only when
-# is_paged && block_size == 16.
+# b16=false builds chunk_policy_head<N>. b16=true requires paged=true, since
+# fmha_xe2.cpp selects the _b16 policies only when is_paged && block_size == 16.
 # =============================================================================
 
 # Default config path
@@ -146,11 +145,26 @@ function(fmha_forward_configure FILENAME_SUFFIX)
     foreach(_entry ${CONFIG_TUPLES})
       string(REPLACE "|" ";" _parts "${_entry}")
       list(LENGTH _parts _nparts)
-      if(_nparts LESS 1)
-        message(WARNING "Skipping invalid config entry: ${_entry}")
+
+      # Every entry is fully explicit: headsize plus the six boolean flags.
+      # Any other field count is a typo, and accepting it would silently drop
+      # or invent flags and yield an unexpected kernel set.
+      if(NOT _nparts EQUAL 7)
+        message(
+          WARNING
+            "Skipping invalid config: expected 7 comma-separated fields "
+            "(headsize,paged,causal,local,sink,lse,b16), got ${_nparts}: ${_entry}"
+        )
         continue()
       endif()
+
       list(GET _parts 0 _headsize)
+      list(GET _parts 1 _paged)
+      list(GET _parts 2 _causal)
+      list(GET _parts 3 _local)
+      list(GET _parts 4 _sink)
+      list(GET _parts 5 _lse)
+      list(GET _parts 6 _b16)
 
       # Guard against malformed entries (for example, BOM-prefixed comment
       # lines) that would otherwise expand to an empty policy name.
@@ -161,118 +175,52 @@ function(fmha_forward_configure FILENAME_SUFFIX)
         continue()
       endif()
 
-      # A config entry is either a bare head size (all 20 valid combinations
-      # are generated) or a head size plus the five boolean flags, optionally
-      # followed by the b16 tile policy selector. Any other field count is a
-      # typo. Accepting it would silently drop the extra fields, or silently
-      # expand a partially specified entry into all 20 combinations, either of
-      # which yields an unexpected kernel set.
-      if(NOT (_nparts EQUAL 1 OR _nparts EQUAL 6 OR _nparts EQUAL 7))
+      # Validate boolean values. Quote the values and iterate with IN LISTS
+      # so that empty fields (for example from a doubled comma) are actually
+      # seen rather than dropped by list expansion.
+      set(_bools "${_paged}" "${_causal}" "${_local}" "${_sink}" "${_lse}"
+                 "${_b16}")
+      set(_invalid_bool FALSE)
+      foreach(_v IN LISTS _bools)
+        if(NOT (_v STREQUAL "true" OR _v STREQUAL "false"))
+          message(WARNING "Skipping invalid config boolean entry: ${_entry}")
+          set(_invalid_bool TRUE)
+          break()
+        endif()
+      endforeach()
+      if(_invalid_bool)
+        continue()
+      endif()
+
+      # Local/Sink LSE tuples remain unsupported.
+      if(_lse STREQUAL "true" AND (_local STREQUAL "true" OR _sink STREQUAL
+                                                             "true"))
         message(
           WARNING
-            "Skipping invalid config: expected 1, 6 or 7 comma-separated fields, got ${_nparts}: ${_entry}"
+            "Skipping invalid config: lse=true requires local=false,sink=false: ${_entry}"
         )
         continue()
       endif()
 
-      if(_nparts GREATER_EQUAL 6)
-        # Explicit boolean values provided
-        list(GET _parts 1 _paged)
-        list(GET _parts 2 _causal)
-        list(GET _parts 3 _local)
-        list(GET _parts 4 _sink)
-        list(GET _parts 5 _lse)
-
-        # Optional 7th field selects the tile policy explicitly. When omitted,
-        # both the standard and the _b16 policy are generated.
-        set(_b16 "")
-        if(_nparts EQUAL 7)
-          list(GET _parts 6 _b16)
-        endif()
-
-        # Validate boolean values. Quote the values and iterate with IN LISTS
-        # so that empty fields (for example from a trailing or doubled comma)
-        # are actually seen rather than dropped by list expansion.
-        set(_bools "${_paged}" "${_causal}" "${_local}" "${_sink}" "${_lse}")
-        if(_nparts EQUAL 7)
-          list(APPEND _bools "${_b16}")
-        endif()
-        set(_invalid_bool FALSE)
-        foreach(_v IN LISTS _bools)
-          if(NOT (_v STREQUAL "true" OR _v STREQUAL "false"))
-            message(WARNING "Skipping invalid config boolean entry: ${_entry}")
-            set(_invalid_bool TRUE)
-            break()
-          endif()
-        endforeach()
-        if(_invalid_bool)
-          continue()
-        endif()
-
-        # Local/Sink LSE tuples remain unsupported.
-        if(_lse STREQUAL "true" AND (_local STREQUAL "true" OR _sink STREQUAL
-                                                               "true"))
-          message(
-            WARNING
-              "Skipping invalid config: lse=true requires local=false,sink=false: ${_entry}"
-          )
-          continue()
-        endif()
-
-        # The _b16 policies are selected by fmha_xe2.cpp only when
-        # is_paged && block_size == 16, so a non-paged _b16 kernel can never be
-        # dispatched.
-        if(_b16 STREQUAL "true" AND _paged STREQUAL "false")
-          message(
-            WARNING
-              "Skipping unreachable config: b16=true requires paged=true: ${_entry}"
-          )
-          continue()
-        endif()
-
-        # Generate the requested policies for this head size.
-        if("${_b16}" STREQUAL "" OR _b16 STREQUAL "false")
-          list(
-            APPEND
-            BUILD_TUPLES
-            "${std_policy_${_headsize}}|${_paged}|${_causal}|${_local}|${_sink}|${_lse}"
-          )
-        endif()
-        if("${_b16}" STREQUAL "" OR _b16 STREQUAL "true")
-          list(
-            APPEND
-            BUILD_TUPLES
-            "${b16_policy_${_headsize}}|${_paged}|${_causal}|${_local}|${_sink}|${_lse}"
-          )
-        endif()
-      else()
-        # Bare head size (_nparts == 1): generate all 20 valid combinations.
-        foreach(IMPL_KISPAGED ${L_BOOLS})
-          foreach(IMPL_KISCAUSAL ${L_BOOLS})
-            foreach(IMPL_KISLOCAL ${L_BOOLS})
-              foreach(IMPL_KISSINK ${L_BOOLS})
-                set(LSE_BOOLS "false")
-                if(IMPL_KISLOCAL STREQUAL "false" AND IMPL_KISSINK STREQUAL
-                                                      "false")
-                  set(LSE_BOOLS ${L_BOOLS})
-                endif()
-                foreach(IMPL_KISLSE ${LSE_BOOLS})
-                  list(
-                    APPEND
-                    BUILD_TUPLES
-                    "${std_policy_${_headsize}}|${IMPL_KISPAGED}|${IMPL_KISCAUSAL}|${IMPL_KISLOCAL}|${IMPL_KISSINK}|${IMPL_KISLSE}"
-                  )
-                  list(
-                    APPEND
-                    BUILD_TUPLES
-                    "${b16_policy_${_headsize}}|${IMPL_KISPAGED}|${IMPL_KISCAUSAL}|${IMPL_KISLOCAL}|${IMPL_KISSINK}|${IMPL_KISLSE}"
-                  )
-                endforeach()
-              endforeach()
-            endforeach()
-          endforeach()
-        endforeach()
+      # The _b16 policies are selected by fmha_xe2.cpp only when
+      # is_paged && block_size == 16, so a non-paged _b16 kernel can never be
+      # dispatched.
+      if(_b16 STREQUAL "true" AND _paged STREQUAL "false")
+        message(
+          WARNING
+            "Skipping unreachable config: b16=true requires paged=true: ${_entry}"
+        )
+        continue()
       endif()
+
+      # Emit the single policy selected by the b16 flag.
+      if(_b16 STREQUAL "true")
+        set(_policy "${b16_policy_${_headsize}}")
+      else()
+        set(_policy "${std_policy_${_headsize}}")
+      endif()
+      list(APPEND BUILD_TUPLES
+           "${_policy}|${_paged}|${_causal}|${_local}|${_sink}|${_lse}")
     endforeach()
   endif()
 
