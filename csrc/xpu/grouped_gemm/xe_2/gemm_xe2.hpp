@@ -63,6 +63,17 @@ enum class B_DTYPE {
   PER_TENSOR_FP8,
   MXFP8,
   BLOCK_FP8,
+  // NVFP4: packed E2M1 weights with E4M3 block scales over 16 elements, as
+  // shipped by NVIDIA-ecosystem checkpoints (ModelOpt, compressed-tensors).
+  // It cannot reuse the MXFP4 path because both axes differ: MXFP4 scales are
+  // E8M0 (exponent-only) over 32 elements, decoded by shifting the byte into
+  // the float exponent field, which produces garbage for E4M3 bits.
+  //
+  // The per-expert FP32 global scale that NVFP4 checkpoints also carry is not
+  // handled here. It is constant per expert, so it factors out of the dot
+  // product and is cheaper for the caller to apply to that expert's output
+  // rows than to apply per weight.
+  NVFP4,
 };
 
 template <typename TB>
@@ -282,6 +293,16 @@ CUTE_DEVICE void xe_gemm_4bits(
   auto wg_tile = mma.tile_mnk();
   auto wg_coord = make_coord(wg_m, wg_n, 0);
 
+  // A block-scaled tile must not span more than one scale group. The scale
+  // reload below is gated on `k_tile * tile_k % group_size == 0`, so a tile
+  // whose K extent exceeds group_size would load only the first group's scale
+  // and apply it across the whole tile -- wrong results, no error. Fail the
+  // build instead.
+  static_assert(
+      cute::size<2>(decltype(wg_tile){}) <= group_size,
+      "tile_k must not exceed the block-scale group size; pair a group_size "
+      "of 16 with a tile_k=16 policy (see w4a16_policy_*_k16)");
+
   Tensor gA = local_tile(
       cA, select<0, 2>(wg_tile), make_coord(wg_m, _));  // (BLK_M,BLK_K,k)
   Tensor gB = local_tile(
@@ -422,6 +443,21 @@ CUTE_DEVICE void xe_gemm_4bits(
               int k_block = group_idx;
               scale = static_cast<scaleStoreType>(
                   Scales[k_block * n_blocks + n_block]);
+            } else if constexpr (TENSOR_B_DTYPE == B_DTYPE::NVFP4) {
+              // NVFP4: uint8 E4M3 bits -> float. E4M3 carries a mantissa, so
+              // the E8M0 `bits << 23` shift does not apply; go through
+              // cutlass's float_e4m3_t conversion, which is table-free bit
+              // manipulation and lands in the same registers.
+              //
+              // Scale indexing is identical to the MX path -- [N,
+              // K/group_size] per expert, row-major -- so no rearrangement is
+              // needed for checkpoints that already store scales that way.
+              uint8_t bits =
+                  Scales
+                      [(n_tile_start + n_sg_start + sg_local_n) * group_num +
+                       group_idx];
+              scale = static_cast<scaleStoreType>(static_cast<float>(
+                  reinterpret_cast<cutlass::float_e4m3_t const&>(bits)));
             } else {
               // MXFP4 / MXFP8: uint8 E8M0 bits -> float via (bits << 23).
               uint32_t scale_u32 =

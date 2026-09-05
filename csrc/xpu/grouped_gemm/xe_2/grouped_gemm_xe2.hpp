@@ -88,8 +88,12 @@ CUTE_DEVICE void MoEGEMM(
     int32_t* atomic_buffer,
     const sycl::local_accessor<int32_t, 1>& slm_mem_const) {
   constexpr char actual_layout_of_B = LayoutKindB ^ ('R' ^ 'C');
+  // NVFP4 joins the 4-bit family here. This gate drives the /2 on the weight
+  // offset (two values per byte) and the [E, N, K/group_size] scale offset, so
+  // omitting it would address weights and scales as though they were 16-bit.
   static constexpr bool is_B_4bits =
-      (TENSOR_B_DTYPE == B_DTYPE::INT4 || TENSOR_B_DTYPE == B_DTYPE::MXFP4);
+      (TENSOR_B_DTYPE == B_DTYPE::INT4 || TENSOR_B_DTYPE == B_DTYPE::MXFP4 ||
+       TENSOR_B_DTYPE == B_DTYPE::NVFP4);
 
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
   auto wg_tile = mma.tile_mnk();
@@ -168,7 +172,10 @@ CUTE_DEVICE void MoEGEMM(
       if constexpr (TENSOR_B_DTYPE == B_DTYPE::INT4) {
         return make_moe_tensor<int4_t, actual_layout_of_B>(
             reinterpret_cast<int4_t*>(ptr_B_curr_batch), gemm_n, gemm_k);
-      } else if constexpr (TENSOR_B_DTYPE == B_DTYPE::MXFP4) {
+      } else if constexpr (
+          TENSOR_B_DTYPE == B_DTYPE::MXFP4 ||
+          TENSOR_B_DTYPE == B_DTYPE::NVFP4) {
+        // Identical packed E2M1 payload for both; only the scales differ.
         return make_moe_tensor<float_e2m1_t, actual_layout_of_B>(
             reinterpret_cast<float_e2m1_t*>(ptr_B_curr_batch), gemm_n, gemm_k);
       } else {
@@ -204,7 +211,15 @@ CUTE_DEVICE void MoEGEMM(
       D_tensor,                         \
       tile_coord,                       \
       mma);
-        if (group_size == 32) {
+        if constexpr (TENSOR_B_DTYPE == B_DTYPE::NVFP4) {
+          // NVFP4 block scales are defined at group 16, and the host entry
+          // pairs this dtype exclusively with a tile_k=16 policy so that one
+          // tile covers exactly one scale group. Dispatching at compile time
+          // keeps the other group sizes out of this instantiation, and keeps
+          // group_size 16 out of the tile_k=32 instantiations, which
+          // xe_gemm_4bits static_asserts against.
+          XE_GEMM_4BITS_CALLER(16)
+        } else if (group_size == 32) {
           XE_GEMM_4BITS_CALLER(32)
         } else if (group_size == 64) {
           XE_GEMM_4BITS_CALLER(64)
