@@ -63,6 +63,33 @@ static inline void barrier() {
 
 using namespace cute;
 
+// --- Head-dim (d) tail masking ----------------------------------------------
+// Q/K are fetched with Xe 2D block loads whose surface width is the real head
+// size, while the d dimension is tiled by TileShapeQK[2]. When the head size
+// is not a multiple of that tile the final d tile reads past the surface width
+// (e.g. head size 72 with a 16-wide d tile, or head size 80 with a 64-wide
+// one). What the hardware returns for those out-of-bounds columns is not
+// architecturally guaranteed across Xe generations, so zero the padding lanes
+// of the loaded fragment explicitly. They then contribute exactly 0 to Q*K^T
+// instead of an architecture-dependent (and possibly NaN) product.
+//
+// `frag` is a subgroup fragment whose TV-layout maps (lane, value) to a
+// (seq, d) coordinate inside the current d tile; `d_tail` is the number of
+// valid d elements in that tile.
+template <class Fragment>
+CUTLASS_DEVICE void mask_d_tail(Fragment& frag, int lane_id, int d_tail) {
+  using Element = typename Fragment::value_type;
+  auto tv = frag.tv_layout();
+  auto tv2 = cute::group<1, cute::rank(decltype(tv){})>(tv);
+  constexpr int kFragSize = cute::size(typename Fragment::layout_type{});
+  CUTLASS_PRAGMA_UNROLL
+  for (int v = 0; v < kFragSize; v++) {
+    if (cute::get<1>(tv2(lane_id, v)) >= d_tail) {
+      frag(v) = Element(0);
+    }
+  }
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 template <
@@ -186,6 +213,8 @@ struct FMHAFwdMainloop<
   static constexpr bool CausalMask = CausalMask_;
   static constexpr bool LocalMask = LocalMask_;
   static constexpr bool PagedKV = PagedKV_;
+  // Size of the head-dimension (d) tile used by the Q*K^T GEMM.
+  static constexpr int kTileD = get<2>(TileShapeQK{});
 
   // User-facing arguments
   struct Arguments {
@@ -455,6 +484,11 @@ struct FMHAFwdMainloop<
     int row_base = get<0>(blk_qv) * get<0>(TileShapeQK{}) +
                    (thr_id / intel::sg_size) * sg_tile_q;
 
+    /* Head-dim (d) remainder masking, see mask_d_tail() for details. */
+    const int head_size_qk = get<1>(Q_2D.shape());
+    const int d_tail = head_size_qk % kTileD;
+    const int d_tail_tile = head_size_qk / kTileD;
+
     // PagedKV
     [[maybe_unused]] int page_idx = blk_k0;
     [[maybe_unused]] int next_page_idx = blk_k0;
@@ -578,6 +612,10 @@ struct FMHAFwdMainloop<
       for (int D = 0; D < size<4>(tKgK); D++) {
         copy(copy_q, tQgQ(_, _, _, D), tQrQ);
         copy(copy_k, tKgK_cache(_, _, _, D), tKrK);
+        if (d_tail != 0 && D == d_tail_tile) {
+          mask_d_tail(tQrQ, lane_id, d_tail);
+          mask_d_tail(tKrK, lane_id, d_tail);
+        }
         reorder(tQrQ, tSrQ);
         // reorder() performs the (vectorized) fp8 -> ElementQ cast; the
         // per-tensor scale_k has been folded into effective_scale above.
@@ -843,6 +881,8 @@ struct DecodeFwdMainloop<
   using ElementA = typename TiledMMAPV::ValTypeD;
 
   static constexpr bool PagedKV = PagedKV_;
+  // Size of the head-dimension (d) tile used by the Q*K^T GEMM.
+  static constexpr int kTileD = get<2>(TileShapeQK{});
   static constexpr bool CausalMask = CausalMask_;
   static constexpr bool Fp8KV =
       is_any_of_v<ElementK, float_e5m2_t, float_e4m3_t>;
@@ -1097,6 +1137,12 @@ struct DecodeFwdMainloop<
     auto pKgK = prefetch_k.get_slice(thr_id).partition_S(gK);
     auto pVgV = prefetch_v.get_slice(thr_id).partition_S(gV);
 
+    /* Head-dim (d) remainder masking, see mask_d_tail() for details. */
+    int lane_id = thr_id % intel::sg_size;
+    const int head_size_qk = get<1>(Q_2D.shape());
+    const int d_tail = head_size_qk % kTileD;
+    const int d_tail_tile = head_size_qk / kTileD;
+
     // ------
     // Kernel
     // ------
@@ -1208,6 +1254,11 @@ struct DecodeFwdMainloop<
       for (int D = 0; D < size<4>(tKgK); D++) {
         copy(copy_q, tQgQ(_, _, _, D), tQrQ);
         copy(copy_k, tKgK_cache(_, _, _, D), tKrK);
+
+        if (d_tail != 0 && D == d_tail_tile) {
+          mask_d_tail(tQrQ, lane_id, d_tail);
+          mask_d_tail(tKrK, lane_id, d_tail);
+        }
 
         reorder(tQrQ, tSrQ);
         // reorder() performs the (vectorized) fp8 -> ElementQ cast; the
