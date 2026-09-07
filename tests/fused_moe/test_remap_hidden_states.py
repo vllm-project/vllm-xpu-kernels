@@ -243,6 +243,9 @@ def test_remap_ignores_negative_expert_ids(id_dtype):
     map_storage = torch.tensor([0, 0, -1], dtype=torch.int32,
                                device=DEVICE)
     expert_map = map_storage[1:]
+    assert expert_map.storage_offset() == 1
+    assert (expert_map.untyped_storage().data_ptr() ==
+            map_storage.untyped_storage().data_ptr())
     ids = torch.tensor([[0, 1], [-1, -1]], dtype=id_dtype, device=DEVICE)
     remapped = torch.empty((4, 128), dtype=hidden.dtype, device=DEVICE)
     counts = torch.zeros(1, dtype=torch.int32, device=DEVICE)
