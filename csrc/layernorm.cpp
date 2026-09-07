@@ -786,7 +786,6 @@ void call_fused_add_rms_norm_kernel(
   }
 }
 
-
 template <typename scalar_t, int VEC_SIZE, bool HasWeight, bool HasBias>
 class layer_norm_kernel {
  public:
@@ -927,12 +926,11 @@ void call_layer_norm_kernel(
   auto out_addr = reinterpret_cast<std::uintptr_t>(out_ptr);
   auto wt_addr = reinterpret_cast<std::uintptr_t>(weight_ptr);
   auto bias_addr = reinterpret_cast<std::uintptr_t>(bias_ptr);
-  bool ptrs_aligned = (inp_addr % req_alignment_bytes == 0) &&
-                      (out_addr % req_alignment_bytes == 0) &&
-                      (weight_ptr == nullptr ||
-                       wt_addr % req_alignment_bytes == 0) &&
-                      (bias_ptr == nullptr ||
-                       bias_addr % req_alignment_bytes == 0);
+  bool ptrs_aligned =
+      (inp_addr % req_alignment_bytes == 0) &&
+      (out_addr % req_alignment_bytes == 0) &&
+      (weight_ptr == nullptr || wt_addr % req_alignment_bytes == 0) &&
+      (bias_ptr == nullptr || bias_addr % req_alignment_bytes == 0);
   bool can_vec = ptrs_aligned && (hidden_size % vec_size == 0);
 
   sycl::range<3> grid(1, 1, num_tokens);
@@ -1144,8 +1142,7 @@ void call_fused_add_layer_norm_kernel(
       res_ptr % req_alignment_bytes == 0 &&
       (weight_ptr == nullptr || wt_ptr % req_alignment_bytes == 0) &&
       (bias_ptr == nullptr || bias_ptr_addr % req_alignment_bytes == 0);
-  bool can_vec = ptrs_are_aligned &&
-                 hidden_size % vector_width == 0 &&
+  bool can_vec = ptrs_are_aligned && hidden_size % vector_width == 0 &&
                  input_stride % vector_width == 0;
 
   sycl::range<3> grid(1, 1, num_tokens);
@@ -1328,25 +1325,26 @@ void layer_norm(
         bias->numel() == hidden_size,
         "layer_norm expects bias numel to match input's last dimension");
   }
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "call_layer_norm_kernel", [&] {
-    const scalar_t* weight_ptr =
-        has_weight ? weight->data_ptr<scalar_t>() : nullptr;
-    const scalar_t* bias_ptr =
-        has_bias ? bias->data_ptr<scalar_t>() : nullptr;
-    if (has_weight && has_bias) {
-      vllm::call_layer_norm_kernel<scalar_t, true, true>(
-          out, input, weight_ptr, bias_ptr, epsilon);
-    } else if (has_weight) {
-      vllm::call_layer_norm_kernel<scalar_t, true, false>(
-          out, input, weight_ptr, bias_ptr, epsilon);
-    } else if (has_bias) {
-      vllm::call_layer_norm_kernel<scalar_t, false, true>(
-          out, input, weight_ptr, bias_ptr, epsilon);
-    } else {
-      vllm::call_layer_norm_kernel<scalar_t, false, false>(
-          out, input, weight_ptr, bias_ptr, epsilon);
-    }
-  });
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "call_layer_norm_kernel", [&] {
+        const scalar_t* weight_ptr =
+            has_weight ? weight->data_ptr<scalar_t>() : nullptr;
+        const scalar_t* bias_ptr =
+            has_bias ? bias->data_ptr<scalar_t>() : nullptr;
+        if (has_weight && has_bias) {
+          vllm::call_layer_norm_kernel<scalar_t, true, true>(
+              out, input, weight_ptr, bias_ptr, epsilon);
+        } else if (has_weight) {
+          vllm::call_layer_norm_kernel<scalar_t, true, false>(
+              out, input, weight_ptr, bias_ptr, epsilon);
+        } else if (has_bias) {
+          vllm::call_layer_norm_kernel<scalar_t, false, true>(
+              out, input, weight_ptr, bias_ptr, epsilon);
+        } else {
+          vllm::call_layer_norm_kernel<scalar_t, false, false>(
+              out, input, weight_ptr, bias_ptr, epsilon);
+        }
+      });
 }
 
 void fused_add_layer_norm(
@@ -1409,7 +1407,6 @@ void fused_add_layer_norm(
       });
 }
 
-
 void nemotron_layer_norm(
     torch::Tensor& out,
     torch::Tensor& input,
@@ -1439,10 +1436,16 @@ void nemotron_layer_norm(
         const scalar_t* bias_ptr =
             has_bias ? bias->data_ptr<scalar_t>() : nullptr;
         if (has_bias) {
-          vllm::call_layer_norm_kernel<scalar_t, /*HasWeight=*/true, /*HasBias=*/true>(
+          vllm::call_layer_norm_kernel<
+              scalar_t,
+              /*HasWeight=*/true,
+              /*HasBias=*/true>(
               out, input, weight_ptr, bias_ptr, epsilon, /*weight_bias=*/1.0f);
         } else {
-          vllm::call_layer_norm_kernel<scalar_t, /*HasWeight=*/true, /*HasBias=*/false>(
+          vllm::call_layer_norm_kernel<
+              scalar_t,
+              /*HasWeight=*/true,
+              /*HasBias=*/false>(
               out, input, weight_ptr, bias_ptr, epsilon, /*weight_bias=*/1.0f);
         }
       });
@@ -1458,13 +1461,15 @@ void fused_add_nemotron_layer_norm(
   TORCH_CHECK(weight.is_contiguous());
   TORCH_CHECK(
       weight.scalar_type() == input.scalar_type(),
-      "fused_add_nemotron_layer_norm expects weight dtype to match input dtype");
+      "fused_add_nemotron_layer_norm expects weight dtype to match input "
+      "dtype");
   const bool has_bias = bias.has_value();
   if (has_bias) {
     TORCH_CHECK(bias->is_contiguous());
     TORCH_CHECK(
         bias->scalar_type() == input.scalar_type(),
-        "fused_add_nemotron_layer_norm expects bias dtype to match input dtype");
+        "fused_add_nemotron_layer_norm expects bias dtype to match input "
+        "dtype");
   }
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_fused_add_nemotron_layer_norm_kernel", [&] {
@@ -1472,11 +1477,27 @@ void fused_add_nemotron_layer_norm(
         const scalar_t* bias_ptr =
             has_bias ? bias->data_ptr<scalar_t>() : nullptr;
         if (has_bias) {
-          vllm::call_fused_add_layer_norm_kernel<scalar_t, /*HasWeight=*/true, /*HasBias=*/true>(
-              input, residual, weight_ptr, bias_ptr, epsilon, /*weight_bias=*/1.0f);
+          vllm::call_fused_add_layer_norm_kernel<
+              scalar_t,
+              /*HasWeight=*/true,
+              /*HasBias=*/true>(
+              input,
+              residual,
+              weight_ptr,
+              bias_ptr,
+              epsilon,
+              /*weight_bias=*/1.0f);
         } else {
-          vllm::call_fused_add_layer_norm_kernel<scalar_t, /*HasWeight=*/true, /*HasBias=*/false>(
-              input, residual, weight_ptr, bias_ptr, epsilon, /*weight_bias=*/1.0f);
+          vllm::call_fused_add_layer_norm_kernel<
+              scalar_t,
+              /*HasWeight=*/true,
+              /*HasBias=*/false>(
+              input,
+              residual,
+              weight_ptr,
+              bias_ptr,
+              epsilon,
+              /*weight_bias=*/1.0f);
         }
       });
 }
