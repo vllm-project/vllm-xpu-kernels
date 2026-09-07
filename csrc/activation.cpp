@@ -491,13 +491,13 @@ class situ_and_mul_kernel {
   auto& queue = vllm::xpu::vllmGetQueue();                               \
   int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(scalar_t)); \
   {                                                                      \
-    int64_t tmp_wg =                                                     \
-        std::min(static_cast<int64_t>(d), static_cast<int64_t>(1024));   \
-    while (vec_size > 1 && (vec_size >> 1) * tmp_wg >= d) {              \
+    const int64_t elems = num_tokens * static_cast<int64_t>(d);          \
+    while (vec_size > 1 &&                                               \
+           (d % vec_size != 0 ||                                         \
+            (d / vec_size < 256 && elems < (int64_t(1) << 19)))) {       \
       vec_size = vec_size >> 1;                                          \
     }                                                                    \
   }                                                                      \
-  if (d % vec_size != 0) vec_size = 1;                                   \
   int64_t wg_size = std::min(                                            \
       static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));   \
   switch (vec_size) {                                                    \
@@ -524,13 +524,13 @@ class situ_and_mul_kernel {
   auto& queue = vllm::xpu::vllmGetQueue();                               \
   int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(scalar_t)); \
   {                                                                      \
-    int64_t tmp_wg =                                                     \
-        std::min(static_cast<int64_t>(d), static_cast<int64_t>(1024));   \
-    while (vec_size > 1 && (vec_size >> 1) * tmp_wg >= d) {              \
+    const int64_t elems = num_tokens * static_cast<int64_t>(d);          \
+    while (vec_size > 1 &&                                               \
+           (d % vec_size != 0 ||                                         \
+            (d / vec_size < 256 && elems < (int64_t(1) << 19)))) {       \
       vec_size = vec_size >> 1;                                          \
     }                                                                    \
   }                                                                      \
-  if (d % vec_size != 0) vec_size = 1;                                   \
   int64_t wg_size = std::min(                                            \
       static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));   \
   switch (vec_size) {                                                    \
@@ -586,13 +586,13 @@ void silu_and_mul(
   /* Compute vec_size like non-quant path: gcd(4*sizeof(float)/sizeof, d) */ \
   int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(sycl_t));       \
   {                                                                          \
-    int64_t tmp_wg =                                                         \
-        std::min(static_cast<int64_t>(d), static_cast<int64_t>(1024));       \
-    while (vec_size > 1 && (vec_size >> 1) * tmp_wg >= d) {                  \
+    const int64_t elems = num_tokens * static_cast<int64_t>(d);              \
+    while (vec_size > 1 &&                                                   \
+           (d % vec_size != 0 ||                                             \
+            (d / vec_size < 256 && elems < (int64_t(1) << 19)))) {           \
       vec_size = vec_size >> 1;                                              \
     }                                                                        \
   }                                                                          \
-  if (d % vec_size != 0) vec_size = 1;                                       \
   switch (vec_size) {                                                        \
     LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 1);                                 \
     LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 2);                                 \
@@ -812,13 +812,11 @@ void situ_and_mul(
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "situ_and_mul", [&] {
     using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
     int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(sycl_t));
-    int64_t tmp_wg =
-        std::min(static_cast<int64_t>(d), static_cast<int64_t>(1024));
-    while (vec_size > 1 && (vec_size >> 1) * tmp_wg >= d) {
+    const int64_t elems = num_tokens * static_cast<int64_t>(d);
+    while (vec_size > 1 &&
+           (d % vec_size != 0 ||
+            (d / vec_size < 256 && elems < (int64_t(1) << 19)))) {
       vec_size >>= 1;
-    }
-    if (d % vec_size != 0) {
-      vec_size = 1;
     }
     const int64_t wg_size = std::min(
         static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));
