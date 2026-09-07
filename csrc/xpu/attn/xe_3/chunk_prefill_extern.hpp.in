@@ -12,7 +12,7 @@
 
 #include "chunk_prefill.hpp"
 
-namespace vllm::xpu::xe2 {
+namespace vllm::xpu::xe3 {
 // =============================================================================
 // Enabled policies (from config)
 // =============================================================================
@@ -26,7 +26,12 @@ namespace vllm::xpu::xe2 {
 #define DECLARE_POLICY_DISPATCH_EXTERN(                          \
     POLICY, PAGED, CAUSAL, LOCAL, SINK, LSE)                     \
   extern template void                                           \
-  policy_dispatch_impl<POLICY, PAGED, CAUSAL, LOCAL, SINK, LSE>( \
+  policy_dispatch_impl<POLICY, PAGED, CAUSAL, LOCAL, SINK, LSE, false>( \
+      sycl::queue & queue,                                       \
+      CutlassQKType & cuQKType,                                  \
+      const chunk_prefill_args_t& args);                          \
+  extern template void                                           \
+  policy_dispatch_impl<POLICY, PAGED, CAUSAL, LOCAL, SINK, LSE, true>( \
       sycl::queue & queue,                                       \
       CutlassQKType & cuQKType,                                  \
       const chunk_prefill_args_t& args);
@@ -85,4 +90,4 @@ CHUNK_POLICY_LIST(DECLARE_ALL_BOOL_COMBINATIONS)
 #undef DECLARE_FOR_LSE_BOTH
 #undef DECLARE_POLICY_DISPATCH_EXTERN
 
-}  // namespace vllm::xpu::xe2
+}  // namespace vllm::xpu::xe3
