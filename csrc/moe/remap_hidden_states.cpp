@@ -57,7 +57,7 @@ class RowsPerExpertCount {
           is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
                             : reinterpret_cast<int64_t*>(topk_ids)[global_id];
       int local_expert_id = global_expert_id;
-      if (expert_map != nullptr) {
+      if (expert_map != nullptr && global_expert_id >= 0) {
         local_expert_id = expert_map[global_expert_id];
       }
 
@@ -100,7 +100,7 @@ class RowsPerExpertCount {
           is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
                             : reinterpret_cast<int64_t*>(topk_ids)[global_id];
       int local_expert_id = global_expert_id;
-      if (expert_map != nullptr) {
+      if (expert_map != nullptr && global_expert_id >= 0) {
         local_expert_id = expert_map[global_expert_id];
       }
 
@@ -221,7 +221,8 @@ class RemapHiddenStates {
     if (expert_map != nullptr) {
 #pragma unroll
       for (int i = 0; i < TopK; ++i) {
-        local_expert_id[i] = expert_map[global_expert_id[i]];
+        local_expert_id[i] =
+            global_expert_id[i] < 0 ? -1 : expert_map[global_expert_id[i]];
       }
     } else {
 #pragma unroll

@@ -235,6 +235,27 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
             print("Mismatched ref:", ref_unpermuted_scales[mismatched_indices])
 
 
+@pytest.mark.parametrize("id_dtype", [torch.int32, torch.int64])
+def test_remap_ignores_negative_expert_ids(id_dtype):
+    """A padded route must not read the entry before the expert map."""
+    hidden = torch.ones((2, 128), dtype=torch.bfloat16, device=DEVICE)
+    # Make an erroneous expert_map[-1] access deterministic.
+    map_storage = torch.tensor([0, 0, -1], dtype=torch.int32,
+                               device=DEVICE)
+    expert_map = map_storage[1:]
+    ids = torch.tensor([[0, 1], [-1, -1]], dtype=id_dtype, device=DEVICE)
+    remapped = torch.empty((4, 128), dtype=hidden.dtype, device=DEVICE)
+    counts = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+    mapping = torch.empty((2, 2), dtype=torch.int32, device=DEVICE)
+
+    torch.ops._moe_C.remap_hidden_states(
+        hidden, None, remapped, None, expert_map, counts, mapping, ids, 2, 1)
+
+    assert counts.tolist() == [1]
+    assert mapping.cpu().tolist() == [[0, -1], [-1, -1]]
+    torch.testing.assert_close(remapped[0], hidden[0], rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("num_rows", [262144])
 @pytest.mark.parametrize("hidden_size", [2048])
 @pytest.mark.parametrize("total_experts_num", [128])
