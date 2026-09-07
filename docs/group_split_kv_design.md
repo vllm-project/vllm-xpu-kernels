@@ -134,8 +134,8 @@ branches on `plan_driven = (splits_per_seq != nullptr)` and trusts
 | File | Change |
 |---|---|
 | `flash_api.cpp` | Schema gains `Tensor? splits_per_seq, Tensor? work_list`. Forwarded to both prefill-opt and decode paths of `cutlass_paged_decode_interface`. |
-| `attn_interface.{h,cpp}` | Adds the two optional tensors and forwards them to `cutlass_paged_decode_xe2`. |
-| `paged_decode_xe2.{h,cpp}` | Wires the tensors into `paged_decode_args_t`: `args.splits_per_seq`, `args.work_list`, `args.total_wgs`. Both default to null/0 (legacy behavior). |
+| `attn_interface.{h,cpp}` | Adds the two optional tensors and forwards them to `cutlass_paged_decode_xe2` / `cutlass_paged_decode_xe3`. |
+| `paged_decode_xe{2,3}.{h,cpp}` | Wires the tensors into `paged_decode_args_t`: `args.splits_per_seq`, `args.work_list`, `args.total_wgs`. Both default to null/0 (legacy behavior). |
 | `paged_decode.hpp` | `paged_decode_args_t` gains `splits_per_seq`, `work_list`, `total_wgs`. `DecodeKernelLauncher::run` patches the scheduler params *after* `to_underlying_arguments` so the compact-grid path is opt-in per launch. |
 | `chunk_prefill_scheduler.hpp` | Adds `DecodeWorkItem` POD struct. `DecodeTileScheduler::Params` gains `work_list`, `total_wgs`. `to_underlying_arguments` shrinks `grid.z` to `total_wgs × heads_kv` when work-list is present. `get_block_coord()` returns a 7-tuple `(blk_q, blk_v, head, idx_b, idx_kv_split, wl_tile_start, wl_tile_count)`; the last two fields are `-1` in legacy mode so the FMHA kernel can branch. |
 | `paged_decode_kernel.hpp` | `XeFMHAFwdSplitKVKernel` reads the 7-tuple, branches on `wl_tile_start >= 0`. Compact branch uses the precomputed range. Legacy branch keeps the original heuristic. `ReduceSplitK` reads `splits_per_seq[idx_b]` when provided and trusts it; otherwise mirrors the legacy heuristic. |
@@ -189,9 +189,10 @@ tensors are forwarded and the kernel takes the legacy branch.
   be declared inside the legacy `else` block but referenced by the epilogue
   call after the block. The work-list path would have left it undeclared.
   Now it is declared once at outer scope and set in both branches.
-- **`cutlass_paged_decode_xe2` forwards `work_list`.** Previously the wrapper
-  swallowed `work_list`, so the compact-grid path was effectively dead code.
-  Now both `splits_per_seq` and `work_list` are forwarded.
+- **`cutlass_paged_decode_xe2` / `cutlass_paged_decode_xe3` forward
+  `work_list`.** Previously the wrappers swallowed `work_list`, so the
+  compact-grid path was effectively dead code. Now both `splits_per_seq` and
+  `work_list` are forwarded.
 
 ### Robustness
 

@@ -1,6 +1,6 @@
-#include "paged_decode.hpp"
+#include "csrc/xpu/attn/xe_3/paged_decode.hpp"
 
-namespace vllm::xpu::xe2 {
+namespace vllm::xpu::xe3 {
 using namespace cute;
 
 // =============================================================================
@@ -11,6 +11,7 @@ using namespace cute;
 
 // clang-format off
 #define IMPL_POLICY ${IMPL_POLICY}
+#cmakedefine01 IMPL_FULL_FP8
 #cmakedefine01 IMPL_KISCAUSAL
 #cmakedefine01 IMPL_KISLOCAL
 #cmakedefine01 IMPL_KISSINK
@@ -20,19 +21,20 @@ using namespace cute;
 // Explicit Template Instantiation
 // =============================================================================
 // Instantiate the decode_policy_dispatch_impl function template with the
-// specific policy and boolean flag combinations provided by CMake. This
-// produces one compiled kernel per source file.
+// specific policy and boolean flag combinations provided by CMake. Full-FP8
+// query kernels are instantiated separately from the existing Q dtypes.
 
 #define INSTANTIATE_KERNEL()                 \
   template void decode_policy_dispatch_impl< \
       IMPL_POLICY,                           \
       static_cast<bool>(IMPL_KISCAUSAL),     \
       static_cast<bool>(IMPL_KISLOCAL),      \
-      static_cast<bool>(IMPL_KISSINK)>(      \
+      static_cast<bool>(IMPL_KISSINK),       \
+      static_cast<bool>(IMPL_FULL_FP8)>(     \
       sycl::queue & queue,                   \
       CutlassQKType & cuQKType,              \
       const paged_decode_args_t& args);
 
 INSTANTIATE_KERNEL()
 
-}  // namespace vllm::xpu::xe2
+}  // namespace vllm::xpu::xe3
