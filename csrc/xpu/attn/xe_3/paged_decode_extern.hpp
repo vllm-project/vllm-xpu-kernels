@@ -2,7 +2,7 @@
 
 #include "paged_decode.hpp"
 
-namespace vllm::xpu::xe2 {
+namespace vllm::xpu::xe3 {
 // =============================================================================
 // Configuration: Add new policies here
 // =============================================================================
@@ -73,7 +73,12 @@ namespace vllm::xpu::xe2 {
 // Helper macro to declare a single extern template instantiation
 #define DECLARE_DECODE_DISPATCH_EXTERN(POLICY, CAUSAL, LOCAL, SINK) \
   extern template void                                              \
-  decode_policy_dispatch_impl<POLICY, CAUSAL, LOCAL, SINK>(         \
+  decode_policy_dispatch_impl<POLICY, CAUSAL, LOCAL, SINK, false>(  \
+      sycl::queue & queue,                                          \
+      CutlassQKType & cuQKType,                                     \
+      const paged_decode_args_t& args);                             \
+  extern template void                                              \
+  decode_policy_dispatch_impl<POLICY, CAUSAL, LOCAL, SINK, true>(   \
       sycl::queue & queue,                                          \
       CutlassQKType & cuQKType,                                     \
       const paged_decode_args_t& args);
@@ -106,4 +111,4 @@ PAGED_DECODE_POLICY_LIST(DECLARE_ALL_BOOL_COMBINATIONS)
 #undef DECLARE_FOR_SINK
 #undef DECLARE_DECODE_DISPATCH_EXTERN
 
-}  // namespace vllm::xpu::xe2
+}  // namespace vllm::xpu::xe3

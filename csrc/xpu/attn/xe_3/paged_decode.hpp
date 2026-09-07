@@ -38,7 +38,7 @@
 // Keeping each architecture in its own namespace makes the mangled names
 // disjoint, so the two libraries can never cross-bind. Do not move any of these
 // declarations back to global namespace.
-namespace vllm::xpu::xe2 {
+namespace vllm::xpu::xe3 {
 using namespace cute;
 
 using _576 = cute::Int<576>;
@@ -115,6 +115,7 @@ struct paged_decode_args_t {
   int max_keys;
   int total_seqlen_q;
   int total_seqlen_k;
+  void* q_scale = nullptr;
   void* k_scale = nullptr;
   void* v_scale = nullptr;
   float sm_scale;
@@ -159,8 +160,8 @@ struct paged_decode_args_t {
   int64_t q_stride_batch = 0;
   int page_stride_elements = 0;
   // softmax_lse output [num_heads_q, total_seqlen_q] (nullptr if disabled).
-  // Written by the FMHA kernel epilogue when num_kv_splits <= 1 (no reduce
-  // pass), otherwise by the ReduceSplitK kernel.
+  // Written by ReduceSplitK when num_kv_splits > 1, otherwise by the FMHA
+  // epilogue.
   float* softmax_lse = nullptr;
   int lse_stride = 0;  // stride along the head dim (= total_seqlen_q)
 };
@@ -341,6 +342,7 @@ struct DecodeKernelLauncher {
             args.lse_stride,
         },
         {args.sm_scale,
+         args.q_scale,
          args.k_scale,
          args.v_scale,
          static_cast<int*>(args.block_table),
@@ -595,107 +597,254 @@ struct PagedDecodeConfig {
   }
 };
 
+// fp8 P*V GEMM needs the contraction depth per subgroup to be a multiple of the
+// fp8 DPAS atom K (= 32). The decode policies split the kv tile across
+// subgroups (SubgroupLayoutQK = <_1, kvSplit, _1>), so for fp8 we re-derive the
+// kv split such that (kv_tile / kvSplit) == 32, i.e. each subgroup owns exactly
+// one fp8 K block. This makes the fp8 P operand fully populated (no broadcast),
+// which is required for a correct fp8 P*V GEMM.
+//
+//   kv_tile == 32  -> kvSplit = 1
+//   kv_tile == 64  -> kvSplit = 2
+//   kv_tile == 128 -> kvSplit = 4
+//
+// kv_tile == 16 cannot reach K = 32 within a single tile; those policies are
+// rejected for fp8 by the kPVContract % 32 guard in the dispatch below, so the
+// (clamped) layout produced here is never instantiated for them.
+template <typename ShapeQK, typename SubgroupLayoutQK>
+struct fp8_decode_subgroup_layout {
+  static constexpr int kKvTile = cute::size<1>(ShapeQK{});
+  static constexpr int kKvSplit = (kKvTile >= 32) ? (kKvTile / 32) : 1;
+  using type = cute::Layout<cute::Shape<cute::_1, cute::C<kKvSplit>, cute::_1>>;
+};
+
+template <typename ShapeQK, typename SubgroupLayoutQK>
+using fp8_decode_subgroup_layout_t =
+    typename fp8_decode_subgroup_layout<ShapeQK, SubgroupLayoutQK>::type;
+
 // Template function for explicit instantiation
-template <typename decode_policy, bool Causal, bool Local, bool Sink>
+template <
+    typename decode_policy,
+    bool Causal,
+    bool Local,
+    bool Sink,
+    bool FullFp8>
 void decode_policy_dispatch_impl(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const paged_decode_args_t& args) {
   const int PipelineStages = 1;
-  if (cuQKType.q_type == CutlassDType::half) {
-    if (cuQKType.k_type == CutlassDType::half) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          half_t,
-          half_t,
-          half_t,
-          half_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          half_t,
-          float_e4m3_t,
-          float_e4m3_t,
-          half_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          half_t,
-          float_e5m2_t,
-          float_e5m2_t,
-          half_t>::kernel_dispatch(queue, args);
+  if constexpr (!FullFp8) {
+    // Existing Q dtypes, including FP8 KV-cache combinations.
+    if (cuQKType.q_type == CutlassDType::half) {
+      if (cuQKType.k_type == CutlassDType::half) {
+        return PagedDecodeConfig<
+            typename decode_policy::ShapeQK,
+            typename decode_policy::ShapePV,
+            typename decode_policy::ShapeOut,
+            typename decode_policy::SubgroupLayoutQK,
+            void,
+            PipelineStages,
+            Causal,
+            Local,
+            Sink,
+            half_t,
+            half_t,
+            half_t,
+            half_t>::kernel_dispatch(queue, args);
+      } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+        return PagedDecodeConfig<
+            typename decode_policy::ShapeQK,
+            typename decode_policy::ShapePV,
+            typename decode_policy::ShapeOut,
+            typename decode_policy::SubgroupLayoutQK,
+            void,
+            PipelineStages,
+            Causal,
+            Local,
+            Sink,
+            half_t,
+            float_e4m3_t,
+            float_e4m3_t,
+            half_t>::kernel_dispatch(queue, args);
+      } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+        return PagedDecodeConfig<
+            typename decode_policy::ShapeQK,
+            typename decode_policy::ShapePV,
+            typename decode_policy::ShapeOut,
+            typename decode_policy::SubgroupLayoutQK,
+            void,
+            PipelineStages,
+            Causal,
+            Local,
+            Sink,
+            half_t,
+            float_e5m2_t,
+            float_e5m2_t,
+            half_t>::kernel_dispatch(queue, args);
+      }
+    } else if (cuQKType.q_type == CutlassDType::bfloat16) {
+      if (cuQKType.k_type == CutlassDType::bfloat16) {
+        return PagedDecodeConfig<
+            typename decode_policy::ShapeQK,
+            typename decode_policy::ShapePV,
+            typename decode_policy::ShapeOut,
+            typename decode_policy::SubgroupLayoutQK,
+            void,
+            PipelineStages,
+            Causal,
+            Local,
+            Sink,
+            bfloat16_t,
+            bfloat16_t,
+            bfloat16_t,
+            bfloat16_t>::kernel_dispatch(queue, args);
+      } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
+        return PagedDecodeConfig<
+            typename decode_policy::ShapeQK,
+            typename decode_policy::ShapePV,
+            typename decode_policy::ShapeOut,
+            typename decode_policy::SubgroupLayoutQK,
+            void,
+            PipelineStages,
+            Causal,
+            Local,
+            Sink,
+            bfloat16_t,
+            float_e4m3_t,
+            float_e4m3_t,
+            bfloat16_t>::kernel_dispatch(queue, args);
+      } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
+        return PagedDecodeConfig<
+            typename decode_policy::ShapeQK,
+            typename decode_policy::ShapePV,
+            typename decode_policy::ShapeOut,
+            typename decode_policy::SubgroupLayoutQK,
+            void,
+            PipelineStages,
+            Causal,
+            Local,
+            Sink,
+            bfloat16_t,
+            float_e5m2_t,
+            float_e5m2_t,
+            bfloat16_t>::kernel_dispatch(queue, args);
+      }
     }
-  } else if (cuQKType.q_type == CutlassDType::bfloat16) {
-    if (cuQKType.k_type == CutlassDType::bfloat16) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          bfloat16_t,
-          bfloat16_t,
-          bfloat16_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e4m3) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          bfloat16_t,
-          float_e4m3_t,
-          float_e4m3_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
-    } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          bfloat16_t,
-          float_e5m2_t,
-          float_e5m2_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
+  } else {
+#if defined(SYCL_INTEL_TARGET) && (SYCL_INTEL_TARGET == 35)
+    // ---------------------------------------------------------------------------
+    // Full FP8 attention (XE3 only): fp8 Q/K/V -> fp8 Q*K and P*V GEMMs.
+    //
+    // When the query is fp8, the entire attention runs in fp8: Q/K/V are loaded
+    // as fp8 and fed directly into the fp8 DPAS MMAs, and the softmax output P
+    // is packed back to fp8 for the P*V GEMM (see reorder_to_P in
+    // chunk_prefill_mainloop.hpp). The per-tensor q_scale is fused into the
+    // softmax scale inside the kernel (alongside k_scale); v_scale is applied
+    // as a post-loop output rescale. The output (temp_out) precision is carried
+    // by o_type.
+    //
+    // The fp8 DPAS atom has a contraction depth of 32 (vs 16 for bf16/fp16), so
+    // the P*V contraction tile (ShapePV[2] == kv_tile) must be a multiple
+    // of 32. This excludes page_size 16; use page_size >= 32 for fp8.
+    // Instantiated only in the generated *_fp8_ translation units.
+    if (cuQKType.q_type == CutlassDType::float8_e4m3 ||
+        cuQKType.q_type == CutlassDType::float8_e5m2) {
+      constexpr int kHeadDim =
+          cute::size<1>(typename decode_policy::ShapeOut{});
+      if constexpr (kHeadDim != 128) {
+        TORCH_CHECK(
+            false, "Full fp8 paged_decode only supports head dimension 128.");
+      } else {
+        constexpr int kPVContract =
+            cute::size<2>(typename decode_policy::ShapePV{});
+        if constexpr (kPVContract % 32 == 0) {
+          TORCH_CHECK(
+              cuQKType.q_type == cuQKType.k_type,
+              "Full fp8 paged_decode requires Q and K/V to share the same fp8 "
+              "type (both e4m3 or both e5m2).");
+          if (cuQKType.q_type == CutlassDType::float8_e4m3) {
+            if (cuQKType.o_type == CutlassDType::half) {
+              return PagedDecodeConfig<
+                  typename decode_policy::ShapeQK,
+                  typename decode_policy::ShapePV,
+                  typename decode_policy::ShapeOut,
+                  fp8_decode_subgroup_layout_t<
+                      typename decode_policy::ShapeQK,
+                      typename decode_policy::SubgroupLayoutQK>,
+                  void,
+                  PipelineStages,
+                  Causal,
+                  Local,
+                  Sink,
+                  float_e4m3_t,
+                  float_e4m3_t,
+                  float_e4m3_t,
+                  half_t>::kernel_dispatch(queue, args);
+            } else {
+              return PagedDecodeConfig<
+                  typename decode_policy::ShapeQK,
+                  typename decode_policy::ShapePV,
+                  typename decode_policy::ShapeOut,
+                  fp8_decode_subgroup_layout_t<
+                      typename decode_policy::ShapeQK,
+                      typename decode_policy::SubgroupLayoutQK>,
+                  void,
+                  PipelineStages,
+                  Causal,
+                  Local,
+                  Sink,
+                  float_e4m3_t,
+                  float_e4m3_t,
+                  float_e4m3_t,
+                  bfloat16_t>::kernel_dispatch(queue, args);
+            }
+          } else {  // float8_e5m2
+            if (cuQKType.o_type == CutlassDType::half) {
+              return PagedDecodeConfig<
+                  typename decode_policy::ShapeQK,
+                  typename decode_policy::ShapePV,
+                  typename decode_policy::ShapeOut,
+                  fp8_decode_subgroup_layout_t<
+                      typename decode_policy::ShapeQK,
+                      typename decode_policy::SubgroupLayoutQK>,
+                  void,
+                  PipelineStages,
+                  Causal,
+                  Local,
+                  Sink,
+                  float_e5m2_t,
+                  float_e5m2_t,
+                  float_e5m2_t,
+                  half_t>::kernel_dispatch(queue, args);
+            } else {
+              return PagedDecodeConfig<
+                  typename decode_policy::ShapeQK,
+                  typename decode_policy::ShapePV,
+                  typename decode_policy::ShapeOut,
+                  fp8_decode_subgroup_layout_t<
+                      typename decode_policy::ShapeQK,
+                      typename decode_policy::SubgroupLayoutQK>,
+                  void,
+                  PipelineStages,
+                  Causal,
+                  Local,
+                  Sink,
+                  float_e5m2_t,
+                  float_e5m2_t,
+                  float_e5m2_t,
+                  bfloat16_t>::kernel_dispatch(queue, args);
+            }
+          }
+        } else {
+          TORCH_CHECK(
+              false,
+              "Full fp8 paged_decode requires the P*V contraction tile "
+              "(page sub-tile) to be a multiple of 32; use page_size >= 32.");
+        }
+      }
     }
+#endif
   }
   TORCH_CHECK(
       false,
@@ -705,4 +854,4 @@ void decode_policy_dispatch_impl(
       static_cast<int>(cuQKType.k_type));
 }
 
-}  // namespace vllm::xpu::xe2
+}  // namespace vllm::xpu::xe3
