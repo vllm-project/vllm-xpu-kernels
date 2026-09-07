@@ -344,7 +344,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.def(
       "xpu_p2p_all_gather(Tensor! out, Tensor input, int my_stage, "
       "int peer_stage, int local_flags, int peer_flags, int counters, "
-      "int slot_bytes, int rank) -> ()");
+      "int slot_bytes, int out_my_offset, int out_peer_offset) -> ()");
   xpu_ops.impl("xpu_p2p_all_gather", torch::kXPU, &xpu_p2p_all_gather);
 
   // Pointer- and handle-only ops: no tensor to dispatch on, so they are

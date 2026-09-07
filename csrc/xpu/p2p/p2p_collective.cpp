@@ -275,11 +275,13 @@ class p2p_all_reduce_kernel {
   sycl::local_accessor<uint32_t, 1> lseq;
 };
 
-// 2-rank all-gather along dim 0 of a contiguous input: pure placement, so it
-// works on bytes and serves every dtype.  Phase 1 stages the local chunk for
-// the peer and copies it into this rank's slice of dst; phase 2 copies the
-// peer's staged chunk into the peer's slice.  Same per-workgroup handshake
-// and double buffer as the all-reduce, on its own slots, flags and counters.
+// 2-rank all-gather of a contiguous input: pure placement, so it works on
+// bytes and serves every dtype.  Phase 1 stages the local chunk for the peer
+// and copies it to dst + my_off; phase 2 copies the peer's staged chunk to
+// dst + peer_off.  Where those two windows sit is the caller's choice, which
+// is what lets one collective be split across several launches.  Same
+// per-workgroup handshake and double buffer as the all-reduce, on its own
+// slots, flags and counters.
 template <int kVec>
 class p2p_all_gather_kernel {
  public:
@@ -585,7 +587,8 @@ void xpu_p2p_all_gather(
     int64_t peer_flags,
     int64_t counters,
     int64_t slot_bytes,
-    int64_t rank) {
+    int64_t out_my_offset,
+    int64_t out_peer_offset) {
   namespace p2p = vllm::xpu::p2p;
   const at::DeviceGuard device_guard(input.device());
   CHECK_DEVICE(input);
@@ -605,22 +608,54 @@ void xpu_p2p_all_gather(
   TORCH_CHECK(
       out.scalar_type() == input.scalar_type(),
       "xpu_p2p_all_gather: out and input must have the same dtype");
-  TORCH_CHECK(
-      out.numel() == 2 * input.numel(),
-      "xpu_p2p_all_gather: out must hold exactly both ranks' shards");
-  // The double-buffered handshake is written, and validated, for exactly two
-  // ranks; the same limit is enforced on the vLLM side before a communicator
-  // is built.
-  TORCH_CHECK(
-      rank == 0 || rank == 1,
-      "xpu_p2p_all_gather: rank must be 0 or 1; these collectives support "
-      "exactly two ranks, got rank ",
-      rank);
 
   const int64_t n = input.numel() * input.element_size();  // bytes
   if (n == 0) {
     return;
   }
+
+  // Where each rank's shard lands in `out` is the caller's decision, not this
+  // op's.  A chunked all-gather writes chunk c of both shards into two
+  // disjoint windows of one output, which no offset derived from a rank id
+  // can express.  Both are byte offsets into `out`.
+  const int64_t out_bytes = out.numel() * out.element_size();
+  TORCH_CHECK(
+      out_my_offset >= 0 && out_peer_offset >= 0,
+      "xpu_p2p_all_gather: output offsets must be non-negative, got ",
+      out_my_offset,
+      " and ",
+      out_peer_offset);
+  // Compared by subtraction rather than by adding n to an offset: the
+  // offsets are caller-supplied, and one near INT64_MAX would overflow the
+  // addition and let a check pass that should have failed.  n <= out_bytes
+  // is established first so out_bytes - n cannot go negative.
+  TORCH_CHECK(
+      n <= out_bytes && out_my_offset <= out_bytes - n &&
+          out_peer_offset <= out_bytes - n,
+      "xpu_p2p_all_gather: writing ",
+      n,
+      " bytes at offsets ",
+      out_my_offset,
+      " and ",
+      out_peer_offset,
+      " runs past the ",
+      out_bytes,
+      " byte output");
+  // Overlapping windows would race: one is written before the handshake and
+  // the other after it.  Checked because the symptom is silently wrong
+  // output rather than a fault.  Both offsets are now within [0, out_bytes],
+  // so their difference cannot overflow.
+  const int64_t gap = out_my_offset > out_peer_offset
+                          ? out_my_offset - out_peer_offset
+                          : out_peer_offset - out_my_offset;
+  TORCH_CHECK(
+      gap >= n,
+      "xpu_p2p_all_gather: the two output windows overlap: ",
+      n,
+      " bytes at ",
+      out_my_offset,
+      " and at ",
+      out_peer_offset);
 
   constexpr int kVec = 16;
   TORCH_CHECK(
@@ -653,8 +688,8 @@ void xpu_p2p_all_gather(
             static_cast<size_t>(n),
             static_cast<size_t>(chunk),
             static_cast<size_t>(slot_bytes),
-            static_cast<size_t>(rank * n),
-            static_cast<size_t>((1 - rank) * n),
+            static_cast<size_t>(out_my_offset),
+            static_cast<size_t>(out_peer_offset),
             lseq));
   });
 }

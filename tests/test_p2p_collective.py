@@ -60,6 +60,10 @@ OTHER_CASES = [
     "all_gather/at_slot_limit",
     "all_reduce/over_slot_raises",
     "all_gather/over_slot_raises",
+    "all_gather/chunked",
+    "all_gather/overlap_raises",
+    "all_gather/offset_past_out_raises",
+    "all_gather/offset_overflow_raises",
     "all_reduce/empty_is_noop",
     "errors/out_on_other_device",
     "interleaved/reduce_and_gather",
@@ -220,17 +224,31 @@ class _Region:
         )
         return out
 
+    def all_gather_into(self, out, x, my_off, peer_off):
+        """One launch, writing the two shards at caller-chosen byte offsets."""
+        my_stage, peer_stage, lf, pf, ctr = self.ag
+        torch.ops._xpu_C.xpu_p2p_all_gather(
+            out,
+            x,
+            my_stage,
+            peer_stage,
+            lf,
+            pf,
+            ctr,
+            AG_SLOT_BYTES,
+            my_off,
+            peer_off,
+        )
+        return out
+
     def all_gather(self, x, rank):
         out = torch.empty(
             (2 * x.shape[0],) + tuple(x.shape[1:]),
             dtype=x.dtype,
             device=x.device,
         )
-        my_stage, peer_stage, lf, pf, ctr = self.ag
-        torch.ops._xpu_C.xpu_p2p_all_gather(
-            out, x, my_stage, peer_stage, lf, pf, ctr, AG_SLOT_BYTES, rank
-        )
-        return out
+        n = x.numel() * x.element_size()
+        return self.all_gather_into(out, x, rank * n, (1 - rank) * n)
 
     def close(self):
         p2p.close_handle(self.peer_base)
@@ -349,6 +367,70 @@ def _run_rank(rank, sock_path, barrier):
                 str(e)[:200],
             )
         del big
+
+        # --- one collective as several launches ---------------------------
+        # The offsets exist so a caller can split a message larger than the
+        # staging slot. Chunk c of both shards lands in two disjoint windows
+        # of one output, which no offset derived from a rank id can express.
+        # Both ranks launch the same number of times, so the handshake stays
+        # in step across the split.
+        step = AG_SLOT_BYTES // 2  # bf16 elements per chunk
+        total = 3 * step + 17  # deliberately not a multiple: 4 chunks
+        a, b = _pair((total,), torch.bfloat16, dev, 6100)
+        mine = (a, b)[rank]
+        esz = mine.element_size()
+        buf = torch.empty(2 * total, dtype=torch.bfloat16, device=dev)
+        for s in range(0, total, step):
+            e = min(s + step, total)
+            reg.all_gather_into(
+                buf,
+                mine[s:e],
+                (rank * total + s) * esz,
+                ((1 - rank) * total + s) * esz,
+            )
+        torch.xpu.synchronize()
+        record(
+            "all_gather/chunked",
+            torch.equal(buf.cpu(), torch.cat([a, b]).cpu()),
+        )
+        del a, b, buf, mine
+
+        # --- offsets that would corrupt must raise ------------------------
+        # Overlapping windows are the dangerous case: one is written before
+        # the handshake and the other after, so the symptom is silently wrong
+        # output rather than a fault.
+        a, b = _pair((64,), torch.bfloat16, dev, 6200)
+        buf = torch.empty(256, dtype=torch.bfloat16, device=dev)
+        try:
+            reg.all_gather_into(buf, (a, b)[rank], 0, 8)
+            record("all_gather/overlap_raises", False, "no exception")
+        except RuntimeError as e:
+            record(
+                "all_gather/overlap_raises",
+                "overlap" in str(e),
+                str(e)[:200],
+            )
+        try:
+            reg.all_gather_into(buf, (a, b)[rank], 0, 512)
+            record("all_gather/offset_past_out_raises", False, "no exception")
+        except RuntimeError as e:
+            record(
+                "all_gather/offset_past_out_raises",
+                "runs past" in str(e),
+                str(e)[:200],
+            )
+        # An offset near the top of int64: the bounds check must not add the
+        # message size to it, or the sum wraps and the check passes.
+        try:
+            reg.all_gather_into(buf, (a, b)[rank], 0, (1 << 63) - 1)
+            record("all_gather/offset_overflow_raises", False, "no exception")
+        except RuntimeError as e:
+            record(
+                "all_gather/offset_overflow_raises",
+                "runs past" in str(e),
+                str(e)[:200],
+            )
+        del a, b, buf
 
         # --- out on a different XPU must be rejected ----------------------
         # The staging and signal pointers belong to one device and the

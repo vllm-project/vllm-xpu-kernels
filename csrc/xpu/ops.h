@@ -427,8 +427,13 @@ void xpu_p2p_all_reduce(
     int64_t counters,
     int64_t slot_bytes);
 
-// Concatenates both ranks' shards along dim 0 into `out`, whose element
-// count must be twice the input's.  Byte-granular, so it serves any dtype.
+// Writes this rank's shard at `out_my_offset` and the peer's at
+// `out_peer_offset`, both byte offsets into `out`, which must be large enough
+// to hold two non-overlapping windows of the input's size.  The caller owns
+// that layout: `(0, n)` and `(n, 0)` on the two ranks reproduce a plain
+// concatenation, while a caller splitting one collective into several calls
+// walks both offsets across a single output.  Byte-granular, so it serves any
+// dtype.
 void xpu_p2p_all_gather(
     torch::Tensor& out,
     const torch::Tensor& input,
@@ -438,7 +443,8 @@ void xpu_p2p_all_gather(
     int64_t peer_flags,
     int64_t counters,
     int64_t slot_bytes,
-    int64_t rank);
+    int64_t out_my_offset,
+    int64_t out_peer_offset);
 
 // Level Zero IPC: (handle_bytes, dma_buf_fd, offset).  The fd is only valid
 // in this process and must reach the peer over SCM_RIGHTS.  Raises on a
