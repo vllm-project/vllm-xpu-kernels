@@ -4,7 +4,8 @@
 import pytest
 import torch
 
-from tests.ops.layernorm_op import GemmaRMSNorm, NemotronLayerNorm, LayerNorm, RMSNorm
+from tests.ops.layernorm_op import (GemmaRMSNorm, LayerNorm, NemotronLayerNorm,
+                                    RMSNorm)
 from tests.utils import opcheck
 
 DTYPES = [torch.half, torch.bfloat16]
