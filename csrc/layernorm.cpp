@@ -21,6 +21,7 @@ class rms_norm_kernel {
       const int64_t input_shape_d2_,   // input.size(-2)
       const int64_t input_shape_d3_,   // input.size(-3)
       const scalar_t* weight_,
+      const int64_t weight_stride_,  // 0 for 1D weight, else weight.stride(0)
       const float epsilon_,
       const int num_tokens_,
       const int hidden_size_,
@@ -34,6 +35,7 @@ class rms_norm_kernel {
         input_shape_d2(input_shape_d2_),
         input_shape_d3(input_shape_d3_),
         weight(weight_),
+        weight_stride(weight_stride_),
         epsilon(epsilon_),
         num_tokens(num_tokens_),
         hidden_size(hidden_size_),
@@ -47,24 +49,29 @@ class rms_norm_kernel {
     float variance = 0.0f;
 
     const scalar_t* input_row;
+    // batch_idx selects the weight row for a 2D (stacked) weight; unused
+    // (stays 0) when weight is 1D since weight_stride is 0 in that case.
+    int batch_idx = 0;
     if constexpr (NUM_DIMS == 2) {
       // 2D for layernorm normal case [batch_size, hidden]
+      batch_idx = item_ct1.get_group(2);
       input_row = input + item_ct1.get_group(2) * input_stride_d2;
     } else if constexpr (NUM_DIMS == 3) {
       // 3D for q/k norm [batch_size, num_heads, head_size]
-      int batch_idx = item_ct1.get_group(2) / input_shape_d2;
+      batch_idx = item_ct1.get_group(2) / input_shape_d2;
       int head_idx = item_ct1.get_group(2) % input_shape_d2;
       input_row =
           input + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
     } else if constexpr (NUM_DIMS == 4) {
       // 4D for transformers model_impl qk norm [batch, seq, head, head_dim]
-      int batch_idx = item_ct1.get_group(2) / (input_shape_d3 * input_shape_d2);
+      batch_idx = item_ct1.get_group(2) / (input_shape_d3 * input_shape_d2);
       int remaining = item_ct1.get_group(2) % (input_shape_d3 * input_shape_d2);
       int seq_idx = remaining / input_shape_d2;
       int head_idx = remaining % input_shape_d2;
       input_row = input + batch_idx * input_stride_d4 +
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
     }
+    const scalar_t* weight_row = weight + batch_idx * weight_stride;
 
     auto vec_op = [&variance](const vec_n_t<scalar_t, VEC_SIZE>& vec) {
 #pragma unroll
@@ -96,7 +103,8 @@ class rms_norm_kernel {
     scalar_t* out_row = out + item_ct1.get_group(2) * hidden_size;
     auto* v_in =
         reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
-    auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+    auto* v_w =
+        reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight_row);
     auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
     int64_t const out_num_vec_elems = hidden_size / VEC_SIZE;
     float s_variance_val = *s_variance_ptr;
@@ -131,7 +139,9 @@ class rms_norm_kernel {
   const int64_t input_stride_d4;
   const int64_t input_shape_d2;
   const int64_t input_shape_d3;
-  const scalar_t* __restrict__ weight;  // [hidden_size]
+  const scalar_t* __restrict__ weight;  // [hidden_size] or [num_rows,
+                                        // hidden_size]
+  const int64_t weight_stride;  // 0 for 1D weight, else weight.stride(0)
   const float epsilon;
   const int num_tokens;
   const int hidden_size;
@@ -151,6 +161,7 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
       const int64_t input_shape_d2_,   // input.size(-2)
       const int64_t input_shape_d3_,   // input.size(-3)
       const scalar_t* weight_,
+      const int64_t weight_stride_,  // 0 for 1D weight, else weight.stride(0)
       const float epsilon_,
       const int num_tokens_,
       const int hidden_size_,
@@ -164,6 +175,7 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
         input_shape_d2(input_shape_d2_),
         input_shape_d3(input_shape_d3_),
         weight(weight_),
+        weight_stride(weight_stride_),
         epsilon(epsilon_),
         num_tokens(num_tokens_),
         hidden_size(hidden_size_),
@@ -177,24 +189,29 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
     float variance = 0.0f;
 
     const scalar_t* input_row;
+    // batch_idx selects the weight row for a 2D (stacked) weight; unused
+    // (stays 0) when weight is 1D since weight_stride is 0 in that case.
+    int batch_idx = 0;
     if constexpr (NUM_DIMS == 2) {
       // 2D for layernorm normal case [batch_size, hidden]
+      batch_idx = item_ct1.get_group(2);
       input_row = input + item_ct1.get_group(2) * input_stride_d2;
     } else if constexpr (NUM_DIMS == 3) {
       // 3D for q/k norm [batch_size, num_heads, head_size]
-      int batch_idx = item_ct1.get_group(2) / input_shape_d2;
+      batch_idx = item_ct1.get_group(2) / input_shape_d2;
       int head_idx = item_ct1.get_group(2) % input_shape_d2;
       input_row =
           input + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
     } else if constexpr (NUM_DIMS == 4) {
       // 4D for transformers model_impl qk norm [batch, seq, head, head_dim]
-      int batch_idx = item_ct1.get_group(2) / (input_shape_d3 * input_shape_d2);
+      batch_idx = item_ct1.get_group(2) / (input_shape_d3 * input_shape_d2);
       int remaining = item_ct1.get_group(2) % (input_shape_d3 * input_shape_d2);
       int seq_idx = remaining / input_shape_d2;
       int head_idx = remaining % input_shape_d2;
       input_row = input + batch_idx * input_stride_d4 +
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
     }
+    const scalar_t* weight_row = weight + batch_idx * weight_stride;
 
     auto scalar_op = [&variance](const scalar_t& val) {
       float x = static_cast<float>(val);
@@ -225,7 +242,7 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
       float inv_rms = *s_variance_ptr;
       if constexpr (HasWeight) {
         out_row[idx] = static_cast<scalar_t>(
-            x * inv_rms * (static_cast<float>(weight[idx]) + weight_bias));
+            x * inv_rms * (static_cast<float>(weight_row[idx]) + weight_bias));
       } else {
         out_row[idx] = static_cast<scalar_t>(x * inv_rms);
       }
@@ -240,7 +257,9 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
   const int64_t input_stride_d4;
   const int64_t input_shape_d2;
   const int64_t input_shape_d3;
-  const scalar_t* __restrict__ weight;  // [hidden_size]
+  const scalar_t* __restrict__ weight;  // [hidden_size] or [num_rows,
+                                        // hidden_size]
+  const int64_t weight_stride;  // 0 for 1D weight, else weight.stride(0)
   const float epsilon;
   const int num_tokens;
   const int hidden_size;
@@ -269,6 +288,7 @@ class rms_norm_multi_row_kernel {
       const int64_t input_shape_d2_,
       const int64_t input_shape_d3_,
       const scalar_t* weight_,
+      const int64_t weight_stride_,  // 0 for 1D weight, else weight.stride(0)
       const float epsilon_,
       const int num_tokens_,
       const int hidden_size_,
@@ -282,6 +302,7 @@ class rms_norm_multi_row_kernel {
         input_shape_d2(input_shape_d2_),
         input_shape_d3(input_shape_d3_),
         weight(weight_),
+        weight_stride(weight_stride_),
         epsilon(epsilon_),
         num_tokens(num_tokens_),
         hidden_size(hidden_size_),
@@ -304,21 +325,26 @@ class rms_norm_multi_row_kernel {
         s_variance.template get_multi_ptr<sycl::access::decorated::no>().get();
 
     const scalar_t* input_row;
+    // batch_idx selects the weight row for a 2D (stacked) weight; unused
+    // (stays 0) when weight is 1D since weight_stride is 0 in that case.
+    int batch_idx = 0;
     if constexpr (NUM_DIMS == 2) {
+      batch_idx = global_row;
       input_row = input + global_row * input_stride_d2;
     } else if constexpr (NUM_DIMS == 3) {
-      int batch_idx = global_row / input_shape_d2;
+      batch_idx = global_row / input_shape_d2;
       int head_idx = global_row % input_shape_d2;
       input_row =
           input + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
     } else if constexpr (NUM_DIMS == 4) {
-      int batch_idx = global_row / (input_shape_d3 * input_shape_d2);
+      batch_idx = global_row / (input_shape_d3 * input_shape_d2);
       int remaining = global_row % (input_shape_d3 * input_shape_d2);
       int seq_idx = remaining / input_shape_d2;
       int head_idx = remaining % input_shape_d2;
       input_row = input + batch_idx * input_stride_d4 +
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
     }
+    const scalar_t* weight_row = weight + batch_idx * weight_stride;
 
     float variance = 0.0f;
     const int64_t num_vec_elems = hidden_size / VEC_SIZE;
@@ -359,7 +385,8 @@ class rms_norm_multi_row_kernel {
     scalar_t* out_row = out + global_row * hidden_size;
     auto* v_in =
         reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
-    auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+    auto* v_w =
+        reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight_row);
     auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
     float s_var = s_variance_ptr[row_in_wg];
 
@@ -392,7 +419,9 @@ class rms_norm_multi_row_kernel {
   const int64_t input_stride_d4;
   const int64_t input_shape_d2;
   const int64_t input_shape_d3;
-  const scalar_t* __restrict__ weight;
+  const scalar_t* __restrict__ weight;  // [hidden_size] or [num_rows,
+                                        // hidden_size]
+  const int64_t weight_stride;  // 0 for 1D weight, else weight.stride(0)
   const float epsilon;
   const int num_tokens;
   const int hidden_size;
@@ -405,6 +434,7 @@ void call_rms_norm_kernel(
     torch::Tensor& out,
     torch::Tensor& input,
     const scalar_t* weight_ptr,
+    int64_t weight_stride,  // 0 for 1D weight, else weight.stride(0)
     float epsilon,
     float weight_bias = 0.0f) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
@@ -481,6 +511,7 @@ void call_rms_norm_kernel(
                   input_shape_d2,
                   input_shape_d3,
                   (const sycl_t*)weight_ptr,
+                  weight_stride,
                   epsilon,
                   num_tokens,
                   hidden_size,
@@ -507,6 +538,7 @@ void call_rms_norm_kernel(
                 input_shape_d2,
                 input_shape_d3,
                 (const sycl_t*)weight_ptr,
+                weight_stride,
                 epsilon,
                 num_tokens,
                 hidden_size,
@@ -531,6 +563,7 @@ void call_rms_norm_kernel(
                 input_shape_d2,
                 input_shape_d3,
                 (const sycl_t*)weight_ptr,
+                weight_stride,
                 epsilon,
                 num_tokens,
                 hidden_size,
@@ -800,8 +833,30 @@ void rms_norm(
   }
   TORCH_CHECK(input.stride(-1) == 1);
   const bool has_weight = weight.has_value();
+  // weight may be 1D `[hidden_size]` (the common case) or 2D
+  // `[input.size(0), hidden_size]` (a stacked per-outer-row weight, e.g. one
+  // row per speculative-decoding draft layer). weight_stride selects which
+  // row a given input row uses: 0 disables per-row selection (every row
+  // reads the same 1D weight), matching CUDA's rms_norm_kernel contract.
+  int64_t weight_stride = 0;
   if (has_weight) {
     TORCH_CHECK(weight->is_contiguous());
+    if (weight->dim() == 1) {
+      TORCH_CHECK(
+          weight->size(0) == input.size(-1),
+          "rms_norm: 1D weight size must match hidden_size");
+    } else if (weight->dim() == 2) {
+      TORCH_CHECK(
+          weight->size(0) == input.size(0),
+          "rms_norm: 2D weight's outer dim must match input's outer "
+          "dim");
+      TORCH_CHECK(
+          weight->size(-1) == input.size(-1),
+          "rms_norm: 2D weight's hidden dim must match hidden_size");
+      weight_stride = weight->stride(0);
+    } else {
+      TORCH_CHECK(false, "rms_norm: weight must be 1D or 2D");
+    }
   }
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_rms_norm_kernel", [&] {
@@ -809,10 +864,10 @@ void rms_norm(
             has_weight ? weight->data_ptr<scalar_t>() : nullptr;
         if (has_weight) {
           vllm::call_rms_norm_kernel<scalar_t, true>(
-              out, input, weight_ptr, epsilon);
+              out, input, weight_ptr, weight_stride, epsilon);
         } else {
           vllm::call_rms_norm_kernel<scalar_t, false>(
-              out, input, weight_ptr, epsilon);
+              out, input, weight_ptr, weight_stride, epsilon);
         }
       });
 }
@@ -861,7 +916,12 @@ void gemma_rms_norm(
       input.scalar_type(), "call_gemma_rms_norm_kernel", [&] {
         const scalar_t* weight_ptr = weight.data_ptr<scalar_t>();
         vllm::call_rms_norm_kernel<scalar_t, /*HasWeight=*/true>(
-            out, input, weight_ptr, epsilon, /*weight_bias=*/1.0f);
+            out,
+            input,
+            weight_ptr,
+            /*weight_stride=*/0,
+            epsilon,
+            /*weight_bias=*/1.0f);
       });
 }
 
