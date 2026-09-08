@@ -47,8 +47,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
 
   int num_reqs = logits.size(0);
   int vocab_size = logits.size(1);
-  int real_max_num_kept =
-      std::min({max_num_kept, vocab_size, MAX_COMPACT_SUPPORT});
+  int real_max_num_kept = std::min(
+      {static_cast<int64_t>(max_num_kept),
+       static_cast<int64_t>(vocab_size),
+       MAX_COMPACT_SUPPORT});
   int aligned_vocab_size = (vocab_size + 7) / 8;
 
   auto device = logits.device();

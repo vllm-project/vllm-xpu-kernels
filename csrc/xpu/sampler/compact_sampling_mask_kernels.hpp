@@ -48,7 +48,7 @@ struct compact_sampling_mask_kernel {
 
     const int aligned_vocab_size = (vocab_size + 7) / 8;
 
-    float* logits_ptr = logits + batch_id * vocab_size;
+    const float* logits_ptr = logits + batch_id * vocab_size;
     int* token_ids_ptr = token_ids + batch_id * max_num_kept;
     uint8_t* packed_mask_ptr = packed_mask + batch_id * aligned_vocab_size;
 
@@ -166,7 +166,8 @@ struct compact_sampling_mask_kernel {
       const int nibble_shift = (chunk_index % 2) * VEC_SIZE;
       const int shifted_nibble = static_cast<int>(nibble) << nibble_shift;
 
-      const int partner_nibble = sub_group.shuffle_xor(shifted_nibble, 1);
+      const int partner_nibble =
+          sycl::permute_group_by_xor(sub_group, shifted_nibble, 1);
       const uint8_t byte_val =
           static_cast<uint8_t>(shifted_nibble | partner_nibble);
 
