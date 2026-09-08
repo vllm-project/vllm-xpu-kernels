@@ -14,7 +14,8 @@ bootstrap_benchmark_env(__file__)
 
 from tests import register_ops as ops
 from tests.utils import (STR_DTYPE_TO_TORCH_DTYPE,
-                         create_kv_caches_with_random_flash)
+                         create_kv_caches_with_random_flash,
+                         paged_block_size)
 
 
 @torch.inference_mode()
@@ -160,8 +161,7 @@ if __name__ == "__main__":
         default=128,
     )
     parser.add_argument("--block-size",
-                        type=int,
-                        choices=[16, 32, 64],
+                        type=paged_block_size,
                         default=64)
     parser.add_argument("--num-blocks", type=int, default=512)
 

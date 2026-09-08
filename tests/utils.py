@@ -479,6 +479,21 @@ def round_up(x: int, y: int) -> int:
     return ((x + y - 1) // y) * y
 
 
+def paged_block_size(value: str) -> int:
+    """argparse type for --block-size: any positive multiple of 16.
+
+    Mirrors the kernel's own rule (fmha_xe2.cpp, paged_decode_utils.hpp): the
+    mainloop walks block_size / TileShapeQK[1] sub-tiles per page, so a page
+    size only has to be an exact multiple of a supported tile width. A fixed
+    allowlist rejects valid sizes before the kernel ever sees them.
+    """
+    parsed = int(value)
+    if parsed <= 0 or parsed % 16 != 0:
+        raise argparse.ArgumentTypeError(
+            f"block size must be a positive multiple of 16, got {parsed}")
+    return parsed
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -537,8 +552,7 @@ def parse_args():
         default="auto",
     )
     parser.add_argument("--block-size",
-                        type=int,
-                        choices=[16, 32, 64],
+                        type=paged_block_size,
                         default=64)
     parser.add_argument("--head-num-range",
                         type=int,
