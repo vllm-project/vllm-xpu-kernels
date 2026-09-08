@@ -432,6 +432,34 @@ class situ_and_mul_kernel {
 
 }  // namespace vllm
 
+namespace {
+
+// Below this many columns per vector lane, VEC_SIZE>1 has a per-call
+// device-time floor that regresses small-batch decode (see PR description).
+constexpr int kActAndMulMinVecCols = 256;
+// Below this total element count, the decode-regime floor above applies;
+// above it, larger batches amortize the floor enough that wider vector
+// loads still win.
+constexpr int64_t kActAndMulMinElemsForNarrowVec = int64_t(1) << 19;
+
+// Shrinks `max_vec_size` until `d` divides evenly by it and either the
+// resulting per-lane column count clears the small-batch decode floor, or
+// the input is large enough to amortize that floor anyway.
+inline int
+ComputeActAndMulVecSize(int d, int64_t num_tokens, int max_vec_size) {
+  const int64_t elems =
+      static_cast<int64_t>(num_tokens) * static_cast<int64_t>(d);
+  int vec_size = max_vec_size;
+  while (vec_size > 1 &&
+         (d % vec_size != 0 || (d / vec_size < kActAndMulMinVecCols &&
+                                elems < kActAndMulMinElemsForNarrowVec))) {
+    vec_size >>= 1;
+  }
+  return vec_size;
+}
+
+}  // namespace
+
 // Launch activation and gating kernel.
 // Use ACT_FIRST (bool) indicating whether to apply the activation function
 // first.
@@ -478,69 +506,55 @@ class situ_and_mul_kernel {
     break;                                                            \
   }
 
-#define LAUNCH_ACTIVATION_GATE_KERNEL_VEC(KERNEL, ACT_FIRST)             \
-  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;               \
-  int d = input.size(-1) / 2;                                            \
-  int64_t num_tokens = input.numel() / input.size(-1);                   \
-  if (num_tokens == 0) {                                                 \
-    return;                                                              \
-  }                                                                      \
-  auto out_ptr = out.data_ptr<scalar_t>();                               \
-  auto input_ptr = input.data_ptr<scalar_t>();                           \
-  at::DeviceGuard device_guard(input.device());                          \
-  auto& queue = vllm::xpu::vllmGetQueue();                               \
-  int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(scalar_t)); \
-  {                                                                      \
-    const int64_t elems = num_tokens * static_cast<int64_t>(d);          \
-    while (vec_size > 1 &&                                               \
-           (d % vec_size != 0 ||                                         \
-            (d / vec_size < 256 && elems < (int64_t(1) << 19)))) {       \
-      vec_size = vec_size >> 1;                                          \
-    }                                                                    \
-  }                                                                      \
-  int64_t wg_size = std::min(                                            \
-      static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));   \
-  switch (vec_size) {                                                    \
-    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 1);                        \
-    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 2);                        \
-    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 4);                        \
-    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 8);                        \
-    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 16);                       \
-    default:                                                             \
-      TORCH_CHECK(false, "Unsupported vector size: ", vec_size);         \
+#define LAUNCH_ACTIVATION_GATE_KERNEL_VEC(KERNEL, ACT_FIRST)                  \
+  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;                    \
+  int d = input.size(-1) / 2;                                                 \
+  int64_t num_tokens = input.numel() / input.size(-1);                        \
+  if (num_tokens == 0) {                                                      \
+    return;                                                                   \
+  }                                                                           \
+  auto out_ptr = out.data_ptr<scalar_t>();                                    \
+  auto input_ptr = input.data_ptr<scalar_t>();                                \
+  at::DeviceGuard device_guard(input.device());                               \
+  auto& queue = vllm::xpu::vllmGetQueue();                                    \
+  int vec_size = ComputeActAndMulVecSize(                                     \
+      d, num_tokens, static_cast<int>(sizeof(float) * 4 / sizeof(scalar_t))); \
+  int64_t wg_size = std::min(                                                 \
+      static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));        \
+  switch (vec_size) {                                                         \
+    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 1);                             \
+    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 2);                             \
+    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 4);                             \
+    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 8);                             \
+    VEC_LAUNCH_ACT_AND_MUL(KERNEL, ACT_FIRST, 16);                            \
+    default:                                                                  \
+      TORCH_CHECK(false, "Unsupported vector size: ", vec_size);              \
   }
 
-#define LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM_VEC(KERNEL, PARAM)      \
-  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;               \
-  int d = input.size(-1) / 2;                                            \
-  int64_t num_tokens = input.numel() / input.size(-1);                   \
-  if (num_tokens == 0) {                                                 \
-    return;                                                              \
-  }                                                                      \
-  auto out_ptr = out.data_ptr<scalar_t>();                               \
-  auto input_ptr = input.data_ptr<scalar_t>();                           \
-  const float param = static_cast<float>(PARAM);                         \
-  at::DeviceGuard device_guard(input.device());                          \
-  auto& queue = vllm::xpu::vllmGetQueue();                               \
-  int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(scalar_t)); \
-  {                                                                      \
-    const int64_t elems = num_tokens * static_cast<int64_t>(d);          \
-    while (vec_size > 1 &&                                               \
-           (d % vec_size != 0 ||                                         \
-            (d / vec_size < 256 && elems < (int64_t(1) << 19)))) {       \
-      vec_size = vec_size >> 1;                                          \
-    }                                                                    \
-  }                                                                      \
-  int64_t wg_size = std::min(                                            \
-      static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));   \
-  switch (vec_size) {                                                    \
-    VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 1);                        \
-    VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 2);                        \
-    VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 4);                        \
-    VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 8);                        \
-    VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 16);                       \
-    default:                                                             \
-      TORCH_CHECK(false, "Unsupported vector size: ", vec_size);         \
+#define LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM_VEC(KERNEL, PARAM)           \
+  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;                    \
+  int d = input.size(-1) / 2;                                                 \
+  int64_t num_tokens = input.numel() / input.size(-1);                        \
+  if (num_tokens == 0) {                                                      \
+    return;                                                                   \
+  }                                                                           \
+  auto out_ptr = out.data_ptr<scalar_t>();                                    \
+  auto input_ptr = input.data_ptr<scalar_t>();                                \
+  const float param = static_cast<float>(PARAM);                              \
+  at::DeviceGuard device_guard(input.device());                               \
+  auto& queue = vllm::xpu::vllmGetQueue();                                    \
+  int vec_size = ComputeActAndMulVecSize(                                     \
+      d, num_tokens, static_cast<int>(sizeof(float) * 4 / sizeof(scalar_t))); \
+  int64_t wg_size = std::min(                                                 \
+      static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));        \
+  switch (vec_size) {                                                         \
+    VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 1);                             \
+    VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 2);                             \
+    VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 4);                             \
+    VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 8);                             \
+    VEC_LAUNCH_ACT_AND_MUL_WITH_PARAM(KERNEL, 16);                            \
+    default:                                                                  \
+      TORCH_CHECK(false, "Unsupported vector size: ", vec_size);              \
   }
 
 void silu_and_mul(
@@ -572,35 +586,29 @@ void silu_and_mul(
     break;                                                                    \
   }
 
-#define LAUNCH_ACTIVATION_GATE_QUANT_KERNEL(KERNEL)                          \
-  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;                   \
-  int d = input.size(-1) / 2;                                                \
-  int64_t num_tokens = input.numel() / input.size(-1);                       \
-  if (num_tokens == 0) {                                                     \
-    return;                                                                  \
-  }                                                                          \
-  auto input_ptr = input.data_ptr<scalar_t>();                               \
-  auto scale_ptr = scale.data_ptr<float>();                                  \
-  at::DeviceGuard device_guard(input.device());                              \
-  auto& queue = vllm::xpu::vllmGetQueue();                                   \
-  /* Compute vec_size like non-quant path: gcd(4*sizeof(float)/sizeof, d) */ \
-  int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(sycl_t));       \
-  {                                                                          \
-    const int64_t elems = num_tokens * static_cast<int64_t>(d);              \
-    while (vec_size > 1 &&                                                   \
-           (d % vec_size != 0 ||                                             \
-            (d / vec_size < 256 && elems < (int64_t(1) << 19)))) {           \
-      vec_size = vec_size >> 1;                                              \
-    }                                                                        \
-  }                                                                          \
-  switch (vec_size) {                                                        \
-    LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 1);                                 \
-    LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 2);                                 \
-    LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 4);                                 \
-    LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 8);                                 \
-    LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 16);                                \
-    default:                                                                 \
-      TORCH_CHECK(false, "Unsupported vector size: ", vec_size);             \
+#define LAUNCH_ACTIVATION_GATE_QUANT_KERNEL(KERNEL)                         \
+  using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;                  \
+  int d = input.size(-1) / 2;                                               \
+  int64_t num_tokens = input.numel() / input.size(-1);                      \
+  if (num_tokens == 0) {                                                    \
+    return;                                                                 \
+  }                                                                         \
+  auto input_ptr = input.data_ptr<scalar_t>();                              \
+  auto scale_ptr = scale.data_ptr<float>();                                 \
+  at::DeviceGuard device_guard(input.device());                             \
+  auto& queue = vllm::xpu::vllmGetQueue();                                  \
+  /* Same vec_size heuristic as the non-quant path, see */                  \
+  /* ComputeActAndMulVecSize above.                     */                  \
+  int vec_size = ComputeActAndMulVecSize(                                   \
+      d, num_tokens, static_cast<int>(sizeof(float) * 4 / sizeof(sycl_t))); \
+  switch (vec_size) {                                                       \
+    LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 1);                                \
+    LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 2);                                \
+    LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 4);                                \
+    LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 8);                                \
+    LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, 16);                               \
+    default:                                                                \
+      TORCH_CHECK(false, "Unsupported vector size: ", vec_size);            \
   }
 
 void silu_and_mul_quant(
@@ -811,13 +819,8 @@ void situ_and_mul(
   auto& queue = vllm::xpu::vllmGetQueue();
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "situ_and_mul", [&] {
     using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
-    int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(sycl_t));
-    const int64_t elems = num_tokens * static_cast<int64_t>(d);
-    while (vec_size > 1 &&
-           (d % vec_size != 0 ||
-            (d / vec_size < 256 && elems < (int64_t(1) << 19)))) {
-      vec_size >>= 1;
-    }
+    const int vec_size = ComputeActAndMulVecSize(
+        d, num_tokens, static_cast<int>(sizeof(float) * 4 / sizeof(sycl_t)));
     const int64_t wg_size = std::min(
         static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));
 
