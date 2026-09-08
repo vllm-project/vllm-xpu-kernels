@@ -71,7 +71,10 @@ class rms_norm_kernel {
       input_row = input + batch_idx * input_stride_d4 +
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
     }
-    const scalar_t* weight_row = weight + batch_idx * weight_stride;
+    const scalar_t* weight_row = nullptr;
+    if constexpr (HasWeight) {
+      weight_row = weight + batch_idx * weight_stride;
+    }
 
     auto vec_op = [&variance](const vec_n_t<scalar_t, VEC_SIZE>& vec) {
 #pragma unroll
@@ -211,7 +214,10 @@ class rms_norm_kernel<scalar_t, NUM_DIMS, 0, HasWeight> {
       input_row = input + batch_idx * input_stride_d4 +
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
     }
-    const scalar_t* weight_row = weight + batch_idx * weight_stride;
+    const scalar_t* weight_row = nullptr;
+    if constexpr (HasWeight) {
+      weight_row = weight + batch_idx * weight_stride;
+    }
 
     auto scalar_op = [&variance](const scalar_t& val) {
       float x = static_cast<float>(val);
@@ -344,7 +350,10 @@ class rms_norm_multi_row_kernel {
       input_row = input + batch_idx * input_stride_d4 +
                   seq_idx * input_stride_d3 + head_idx * input_stride_d2;
     }
-    const scalar_t* weight_row = weight + batch_idx * weight_stride;
+    const scalar_t* weight_row = nullptr;
+    if constexpr (HasWeight) {
+      weight_row = weight + batch_idx * weight_stride;
+    }
 
     float variance = 0.0f;
     const int64_t num_vec_elems = hidden_size / VEC_SIZE;
@@ -841,6 +850,9 @@ void rms_norm(
   int64_t weight_stride = 0;
   if (has_weight) {
     TORCH_CHECK(weight->is_contiguous());
+    TORCH_CHECK(
+        weight->scalar_type() == input.scalar_type(),
+        "rms_norm: weight dtype must match input dtype");
     if (weight->dim() == 1) {
       TORCH_CHECK(
           weight->size(0) == input.size(-1),
