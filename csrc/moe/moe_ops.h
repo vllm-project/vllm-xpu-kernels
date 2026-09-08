@@ -104,7 +104,8 @@ void remap_hidden_states(
     torch::Tensor& unpermuted_row_to_permuted_row,
     torch::Tensor& topk_ids,
     int64_t total_experts_num,
-    int64_t local_experts_num);
+    int64_t local_experts_num,
+    const c10::optional<torch::Tensor>& expert_scale_desc = c10::nullopt);
 
 torch::Tensor reorder_mxfp_scales(
     const torch::Tensor& A_scales,

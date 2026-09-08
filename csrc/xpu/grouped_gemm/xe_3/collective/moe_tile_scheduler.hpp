@@ -51,11 +51,13 @@ class PersistentTileSchedulerMoE {
 
  private:
   uint64_t current_work_linear_idx_ = 0;
+  uint64_t end_work_linear_idx_ = 0;
   uint64_t total_grid_size_ = 0;
+  bool use_contiguous_ranges_ = false;
   int64_t N_ = 0;
   int64_t K_ = 0;
   int64_t num_experts_ = 0;
-  const int64_t* expert_first_token_offset_ = nullptr;
+  const int* rows_per_expert_ = nullptr;
 
   // Tracking current group, its starting linear idx and total tiles
   struct GroupInfo {
@@ -185,7 +187,7 @@ class PersistentTileSchedulerMoE {
 
   CUTLASS_DEVICE explicit PersistentTileSchedulerMoE(
       Params const& params_,
-      const int64_t* expert_first_token_offset,
+      const int* rows_per_expert,
       int64_t N,
       int64_t K,
       int64_t num_experts)
@@ -224,7 +226,51 @@ class PersistentTileSchedulerMoE {
     N_ = N;
     K_ = K;
     num_experts_ = num_experts;
-    expert_first_token_offset_ = expert_first_token_offset;
+    rows_per_expert_ = rows_per_expert;
+
+    // Direction 2: precompute the total number of valid work tiles across all
+    // groups so that the end-of-work detection in
+    // get_current_work_for_linear_idx() can take the cheap
+    // `linear_idx >= blocks_across_problem_` early-out instead of running the
+    // swizzle/divmod scan in get_work_idx_m_and_n(). The tile layout is linear
+    // across groups, so the first invalid linear index is exactly the sum over
+    // groups of round_up(ceil(M_g/cta_m)) * round_up(ceil(N/cta_n)), matching
+    // the per-group total_tiles computed in get_work_idx_m_and_n().
+    uint64_t total_work_tiles = 0;
+    auto const& sp = scheduler_params;
+    uint64_t ctas_along_n =
+        sp.divmod_cta_shape_n_.divide(N_ + sp.divmod_cta_shape_n_.divisor - 1);
+    uint64_t problem_blocks_n = round_up(
+        ctas_along_n,
+        (uint64_t(1) << sp.log_swizzle_size_) * sp.cluster_shape_.n());
+    for (int g = 0; g < int(num_experts_); ++g) {
+      int64_t M_g = rows_per_expert_[g];
+      uint64_t ctas_along_m = sp.divmod_cta_shape_m_.divide(
+          M_g + sp.divmod_cta_shape_m_.divisor - 1);
+      uint64_t problem_blocks_m = round_up(
+          ctas_along_m,
+          (uint64_t(1) << sp.log_swizzle_size_) * sp.cluster_shape_.m());
+      total_work_tiles += problem_blocks_m * problem_blocks_n;
+    }
+    scheduler_params.blocks_across_problem_ = total_work_tiles;
+    scheduler_params.pre_processed_problem_shapes = true;
+
+    // Contiguous AlongM chunks improve locality for the tuned short-K MXFP4
+    // 256x256 policy. Other policies retain grid-stride scheduling, which
+    // provides better wave balance for BF16, MXFP8, and wider tiles.
+    use_contiguous_ranges_ = K_ <= 1024 &&
+                             scheduler_params.cta_shape_.m() == 256 &&
+                             scheduler_params.cta_shape_.n() == 256;
+    if (use_contiguous_ranges_) {
+      uint64_t block_linear_idx = current_work_linear_idx_;
+      uint64_t tiles_per_workgroup =
+          (total_work_tiles + total_grid_size_ - 1) / total_grid_size_;
+      current_work_linear_idx_ = block_linear_idx * tiles_per_workgroup;
+      end_work_linear_idx_ = cute::min(
+          current_work_linear_idx_ + tiles_per_workgroup, total_work_tiles);
+    } else {
+      end_work_linear_idx_ = total_work_tiles;
+    }
 #else
     CUTLASS_ASSERT(false && "This line should never be reached");
 #endif
@@ -237,6 +283,9 @@ class PersistentTileSchedulerMoE {
 
   CUTLASS_DEVICE
   WorkTileInfo get_current_work_for_linear_idx(uint64_t linear_idx) {
+    if (linear_idx >= end_work_linear_idx_) {
+      return WorkTileInfo::invalid_work_tile();
+    }
     if (scheduler_params.pre_processed_problem_shapes &&
         linear_idx >= scheduler_params.blocks_across_problem_) {
       return WorkTileInfo::invalid_work_tile();
@@ -257,7 +306,9 @@ class PersistentTileSchedulerMoE {
 
   CUTLASS_DEVICE
   void advance_to_next_work(uint32_t advance_count = 1) {
-    current_work_linear_idx_ += total_grid_size_ * uint64_t(advance_count);
+    current_work_linear_idx_ +=
+        (use_contiguous_ranges_ ? 1 : total_grid_size_) *
+        uint64_t(advance_count);
   }
 
   // get work_idx_m, work_idx_n from linear_idx while applying swizzle
@@ -276,8 +327,7 @@ class PersistentTileSchedulerMoE {
     bool valid_tile = true;
     uint64_t ctas_along_m, ctas_along_n;
     int total_problem_groups = num_experts_;
-    int64_t M_ = expert_first_token_offset_[group_info.group_idx + 1] -
-                 expert_first_token_offset_[group_info.group_idx];
+    int64_t M_ = rows_per_expert_[group_info.group_idx];
     ctas_along_m =
         divmod_cta_shape_m.divide(M_ + divmod_cta_shape_m.divisor - 1);
     ctas_along_n =
@@ -297,8 +347,7 @@ class PersistentTileSchedulerMoE {
 
       group_info.start_linear_idx += group_info.total_tiles;
 
-      M_ = expert_first_token_offset_[group_info.group_idx + 1] -
-           expert_first_token_offset_[group_info.group_idx];
+      M_ = rows_per_expert_[group_info.group_idx];
       ctas_along_m =
           divmod_cta_shape_m.divide(M_ + divmod_cta_shape_m.divisor - 1);
       ctas_along_n =

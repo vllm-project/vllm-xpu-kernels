@@ -142,7 +142,8 @@ class RemapHiddenStates {
       const int hidden_size,
       const int block_k,
       const int total_experts_num,
-      const int local_experts_num)
+      const int local_experts_num,
+      int* expert_scale_desc)
       : slm(slm),
         hidden_states(hidden_states),
         hidden_states_scales(hidden_states_scales),
@@ -157,7 +158,8 @@ class RemapHiddenStates {
         hidden_size(hidden_size),
         block_k(block_k),
         total_experts_num(total_experts_num),
-        local_experts_num(local_experts_num) {}
+        local_experts_num(local_experts_num),
+        expert_scale_desc(expert_scale_desc) {}
 
   static constexpr int GroupWorkItem = 256;
   static constexpr int WARP_SIZE = 16;
@@ -184,21 +186,58 @@ class RemapHiddenStates {
     int32_t* expert_cumsum_ptr = static_cast<int32_t*>(
         slm.template get_multi_ptr<sycl::access::decorated::no>().get());
 
+    // Second SLM region: exclusive prefix sum of round_up_4(rows_per_expert),
+    // i.e. the per-expert base row of the padded MN-major scale surface. Only
+    // populated when that layout is requested.
+    const bool padded_scales = expert_scale_desc != nullptr;
+    const int desc_len = local_experts_num + 1;
+    int32_t* expert_pad_cumsum_ptr = expert_cumsum_ptr + desc_len;
+
     if (local_id == 0) {
       expert_cumsum_ptr[0] = 0;
+      if (padded_scales) {
+        expert_pad_cumsum_ptr[0] = 0;
+      }
     }
-    for (int i = local_id; i < local_experts_num - 1; i += local_range) {
+    for (int i = local_id; i < local_experts_num; i += local_range) {
       expert_cumsum_ptr[i + 1] = rows_per_expert[i];
+      if (padded_scales) {
+        expert_pad_cumsum_ptr[i + 1] = (rows_per_expert[i] + 3) & ~3;
+      }
     }
 
     sycl::group_barrier(item.get_group());
 
+    // Scanning desc_len entries makes index e the exclusive prefix for every
+    // expert and index local_experts_num the total, which is exactly the
+    // descriptor consumers need.
     sycl::joint_inclusive_scan(
         item.get_group(),
         expert_cumsum_ptr,
-        expert_cumsum_ptr + local_experts_num,
+        expert_cumsum_ptr + desc_len,
         expert_cumsum_ptr,
         sycl::plus<int>{});
+
+    if (padded_scales) {
+      sycl::joint_inclusive_scan(
+          item.get_group(),
+          expert_pad_cumsum_ptr,
+          expert_pad_cumsum_ptr + desc_len,
+          expert_pad_cumsum_ptr,
+          sycl::plus<int>{});
+
+      // Every work-group computes the same prefixes; group 0 publishes them so
+      // that downstream consumers need neither a scan kernel nor a reorder
+      // pass. Row 0 is the source row prefix, row 1 the padded scale row
+      // prefix; per-expert row counts and leading dimensions are the
+      // successive differences.
+      if (group_id == 0) {
+        for (int i = local_id; i < desc_len; i += local_range) {
+          expert_scale_desc[i] = expert_cumsum_ptr[i];
+          expert_scale_desc[desc_len + i] = expert_pad_cumsum_ptr[i];
+        }
+      }
+    }
 
     int row = group_id;
     int global_expert_id[TopK];
@@ -231,15 +270,29 @@ class RemapHiddenStates {
     }
 
     int rows_offset[TopK];
+    int scale_row_local[TopK];
+    int scale_block_off[TopK];
+    int scale_block_ld[TopK];
 #pragma unroll
     for (int i = 0; i < TopK; ++i) {
       if (local_expert_id[i] != -1) {
         int cumsum_offset =
             local_expert_id[i] == 0 ? 0 : expert_cumsum_ptr[local_expert_id[i]];
-        rows_offset[i] =
-            unpermuted_row_to_permuted_row[row * TopK + i] + cumsum_offset;
+        int local_row = unpermuted_row_to_permuted_row[row * TopK + i];
+        rows_offset[i] = local_row + cumsum_offset;
+        scale_row_local[i] = local_row;
+        if (padded_scales) {
+          scale_block_off[i] = expert_pad_cumsum_ptr[local_expert_id[i]];
+          scale_block_ld[i] = (rows_per_expert[local_expert_id[i]] + 3) & ~3;
+        } else {
+          scale_block_off[i] = 0;
+          scale_block_ld[i] = 0;
+        }
       } else {
         rows_offset[i] = -1;
+        scale_row_local[i] = -1;
+        scale_block_off[i] = 0;
+        scale_block_ld[i] = 0;
       }
     }
 
@@ -277,41 +330,61 @@ class RemapHiddenStates {
     if (hidden_states_scales != nullptr &&
         remapped_hidden_states_scales != nullptr) {
       int64_t scaled_hidden_size = hidden_size / block_k;
-      loop_count = (scaled_hidden_size + stride - 1) / stride;
 
-      for (int l = 0; l < loop_count; ++l) {
-        int start_id = l * stride + local_id * ElemsPerItem;
-        int remained_elems = scaled_hidden_size - start_id;
-
-        if (remained_elems >= ElemsPerItem) {
-          using load_type = sycl::vec<TS, ElemsPerItem>;
-          load_type data;
-          data = *(reinterpret_cast<load_type*>(
-              hidden_states_scales + row * scaled_hidden_size + start_id));
+      if (expert_scale_desc != nullptr) {
+        // Scatter directly into the per-expert MN-major, M-padded-to-4 surface
+        // consumed by the mxfp grouped-GEMM mainloop, so no separate reorder
+        // pass is needed. Element (m_local, k) of expert e lives at
+        //   pad_prefix[e] * scale_k + k * round_up_4(rows[e]) + m_local
+        for (int k = local_id; k < scaled_hidden_size; k += local_range) {
+          TS data = hidden_states_scales[row * scaled_hidden_size + k];
 #pragma unroll
           for (int i = 0; i < TopK; ++i) {
-            int offset = rows_offset[i];
-            if (offset == -1) continue;
-            *(reinterpret_cast<load_type*>(
-                remapped_hidden_states_scales + offset * scaled_hidden_size +
-                start_id)) = data;
+            if (rows_offset[i] == -1) continue;
+            int64_t dst =
+                static_cast<int64_t>(scale_block_off[i]) * scaled_hidden_size +
+                static_cast<int64_t>(k) * scale_block_ld[i] +
+                scale_row_local[i];
+            remapped_hidden_states_scales[dst] = data;
           }
-        } else if (remained_elems > 0) {
-          TS data[ElemsPerItem];
-#pragma unroll
-          for (int e = 0; e < remained_elems; ++e) {
-            data[e] =
-                hidden_states_scales[row * scaled_hidden_size + start_id + e];
-          }
+        }
+      } else {
+        loop_count = (scaled_hidden_size + stride - 1) / stride;
 
+        for (int l = 0; l < loop_count; ++l) {
+          int start_id = l * stride + local_id * ElemsPerItem;
+          int remained_elems = scaled_hidden_size - start_id;
+
+          if (remained_elems >= ElemsPerItem) {
+            using load_type = sycl::vec<TS, ElemsPerItem>;
+            load_type data;
+            data = *(reinterpret_cast<load_type*>(
+                hidden_states_scales + row * scaled_hidden_size + start_id));
 #pragma unroll
-          for (int i = 0; i < TopK; ++i) {
-            int offset = rows_offset[i];
-            if (offset == -1) continue;
+            for (int i = 0; i < TopK; ++i) {
+              int offset = rows_offset[i];
+              if (offset == -1) continue;
+              *(reinterpret_cast<load_type*>(
+                  remapped_hidden_states_scales + offset * scaled_hidden_size +
+                  start_id)) = data;
+            }
+          } else if (remained_elems > 0) {
+            TS data[ElemsPerItem];
 #pragma unroll
             for (int e = 0; e < remained_elems; ++e) {
-              remapped_hidden_states_scales
-                  [offset * scaled_hidden_size + start_id + e] = data[e];
+              data[e] =
+                  hidden_states_scales[row * scaled_hidden_size + start_id + e];
+            }
+
+#pragma unroll
+            for (int i = 0; i < TopK; ++i) {
+              int offset = rows_offset[i];
+              if (offset == -1) continue;
+#pragma unroll
+              for (int e = 0; e < remained_elems; ++e) {
+                remapped_hidden_states_scales
+                    [offset * scaled_hidden_size + start_id + e] = data[e];
+              }
             }
           }
         }
@@ -342,6 +415,7 @@ class RemapHiddenStates {
   const int block_k;
   const int total_experts_num;
   const int local_experts_num;
+  int* expert_scale_desc;
 };
 
 template <typename TA, typename TS, int TopK>
@@ -360,6 +434,7 @@ void RemapHiddenStatesLauncher(
     const int block_k,
     const int total_experts_num,
     const int local_experts_num,
+    int* expert_scale_desc,
     sycl::queue& queue) {
   TORCH_CHECK(
       (local_experts_num <= (RemapHiddenStates<TA, TS, TopK>::EXCLUSIVE_SIZE)),
@@ -386,8 +461,11 @@ void RemapHiddenStatesLauncher(
   });
 
   queue.submit([&](sycl::handler& cgh) {
+    // Two int32 prefix arrays: the raw row cumsum and the padded scale-row
+    // cumsum used by the MN-major scale layout. Each has one extra entry
+    // holding the total.
     sycl::local_accessor<int32_t, 1> slm(
-        sycl::range<1>(local_experts_num), cgh);
+        sycl::range<1>(2 * (local_experts_num + 1)), cgh);
     cgh.parallel_for(
         RemapHiddenStates<TA, TS, TopK>::get_nd_range(num_rows, hidden_size),
         RemapHiddenStates<TA, TS, TopK>{
@@ -405,7 +483,8 @@ void RemapHiddenStatesLauncher(
             hidden_size,
             block_k,
             total_experts_num,
-            local_experts_num});
+            local_experts_num,
+            expert_scale_desc});
   });
 }
 
@@ -426,7 +505,8 @@ void remap_hidden_states(
     torch::Tensor& unpermuted_row_to_permuted_row,   // [num_rows, TopK]
     torch::Tensor& topk_ids,                         // [num_rows, TopK]
     int64_t total_experts_num,
-    int64_t local_experts_num) {
+    int64_t local_experts_num,
+    const c10::optional<torch::Tensor>& expert_scale_desc) {
   // dtype check
   TORCH_CHECK(
       hidden_states.scalar_type() == remapped_hidden_states.scalar_type(),
@@ -469,12 +549,43 @@ void remap_hidden_states(
       "hidden_size]");
   if (hidden_states_scales.has_value()) {
     block_k = hidden_size / hidden_states_scales->size(1);
+    if (expert_scale_desc.has_value()) {
+      // Padded MN-major surface: [total_padded_rows, scale_k] with
+      // total_padded_rows >= num_rows * TopK + 3 * local_experts_num, since
+      // each expert's M is rounded up to a multiple of 4.
+      TORCH_CHECK(
+          remapped_hidden_states_scales->scalar_type() == at::kFloat8_e8m0fnu,
+          "the padded MN-major scale layout requires float8_e8m0fnu scales");
+      TORCH_CHECK(
+          remapped_hidden_states_scales->size(0) >=
+                  num_rows * TopK + 3 * local_experts_num &&
+              hidden_states_scales->size(1) ==
+                  remapped_hidden_states_scales->size(1),
+          "remapped_hidden_states_scales must be [num_rows * TopK + 3 * "
+          "local_experts_num, hidden_size // block_k] when "
+          "expert_scale_desc is given");
+    } else {
+      TORCH_CHECK(
+          remapped_hidden_states_scales->size(0) == num_rows * TopK &&
+              hidden_states_scales->size(1) ==
+                  remapped_hidden_states_scales->size(1),
+          "remapped_hidden_states_scales must be [num_rows * "
+          "TopK, hidden_size // block_k]");
+    }
+  } else {
     TORCH_CHECK(
-        remapped_hidden_states_scales->size(0) == num_rows * TopK &&
-            hidden_states_scales->size(1) ==
-                remapped_hidden_states_scales->size(1),
-        "remapped_hidden_states_scales must be [num_rows * "
-        "TopK, hidden_size // block_k]");
+        !expert_scale_desc.has_value(),
+        "expert_scale_desc requires hidden_states_scales");
+  }
+
+  if (expert_scale_desc.has_value()) {
+    TORCH_CHECK(
+        expert_scale_desc->scalar_type() == torch::kInt32 &&
+            expert_scale_desc->is_contiguous() &&
+            expert_scale_desc->dim() == 2 && expert_scale_desc->size(0) == 2 &&
+            expert_scale_desc->size(1) == local_experts_num + 1,
+        "expert_scale_desc must be a contiguous int32 [2, local_experts_num + "
+        "1] tensor");
   }
 
   if (expert_map.has_value()) {
@@ -513,6 +624,9 @@ void remap_hidden_states(
       block_k,                                                                \
       total_experts_num,                                                      \
       local_experts_num,                                                      \
+      expert_scale_desc.has_value()                                           \
+          ? reinterpret_cast<int*>(expert_scale_desc->data_ptr())             \
+          : nullptr,                                                          \
       queue);
 
 #define DISPATCH_TOPK_LAUNCH(TA, TS, TopK)              \

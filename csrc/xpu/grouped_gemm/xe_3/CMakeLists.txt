@@ -1,0 +1,3 @@
+cmake_minimum_required(VERSION 3.18)
+
+add_xe3_kernel_library(grouped_gemm_xe_3 INCLUDE_CMAKE_SOURCE_DIR)

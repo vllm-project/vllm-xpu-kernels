@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+from typing import Optional
+
 import torch
 
 from . import _C  # noqa: F401
@@ -74,25 +76,36 @@ def dequant_mxfp8(x_lp, x_scale):
         (x_scale.reshape(-1, 1).to(torch.float32))
     return x.reshape(ori_shape)
 
-def dequant_mxfp8_wei(wei, wei_scale):
-    wei_scale = wei_scale.view(torch.float8_e8m0fnu).to(torch.float32)
-    return wei.to(torch.float32) * wei_scale.repeat_interleave(32, dim=0)
-
-def quant_mxfp_act_xpu(x, recipe):
+def quant_mxfp_act_xpu(x, recipe, expert_scale_desc=None, scale_rows=0):
     assert recipe in ("mxfp8", "mxfp4")
     if recipe == "mxfp8":
-        return _quant_mxfp8_act_xpu(x)
+        return _quant_mxfp8_act_xpu(x, expert_scale_desc, scale_rows)
     else:
-        return _quant_mxfp4_act_xpu(x)
+        return _quant_mxfp4_act_xpu(x, expert_scale_desc, scale_rows)
 
-def _quant_mxfp8_act_xpu(x):
+
+def _alloc_mx_act_scale(x, scale_k, expert_scale_desc, scale_rows):
+    # Without a MoE descriptor the kernel writes float32 scales that the
+    # caller converts to e8m0. With one it writes the padded MN-major e8m0
+    # surface the mxfp grouped-GEMM mainloop indexes directly, which removes
+    # both the conversion pass and the separate reorder pass.
+    if expert_scale_desc is None:
+        return torch.empty(x.shape[:-1] + (scale_k, ),
+                           device=x.device,
+                           dtype=torch.float32)
+    return torch.zeros((scale_rows, scale_k),
+                       device=x.device,
+                       dtype=torch.float8_e8m0fnu)
+
+
+def _quant_mxfp8_act_xpu(x, expert_scale_desc=None, scale_rows=0):
     MXFP8_BLOCK_SIZE = 32
     assert x.shape[-1] % MXFP8_BLOCK_SIZE == 0
 
     eps = 1e-10
     x_q = torch.empty_like(x, device=x.device, dtype=torch.float8_e4m3fn)
-    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
-    x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+    x_s = _alloc_mx_act_scale(x, x.shape[-1] // MXFP8_BLOCK_SIZE,
+                              expert_scale_desc, scale_rows)
     torch.ops._C.per_token_group_fp8_quant(
         x,
         x_q,
@@ -104,23 +117,28 @@ def _quant_mxfp8_act_xpu(x):
         True,
         False,
         False,  # dummy_is_scale_transposed, dummy_is_tma_aligned
+        expert_scale_desc,
     )
-    x_s = x_s.to(torch.float8_e8m0fnu)
+    if expert_scale_desc is None:
+        x_s = x_s.to(torch.float8_e8m0fnu)
     return x_q, x_s
 
-def _quant_mxfp4_act_xpu(x):
+def _quant_mxfp4_act_xpu(x, expert_scale_desc=None, scale_rows=0):
     MXFP4_BLOCK_SIZE = 32
     eps = 1e-10
     M, N = x.shape
     # Packed FP4 output: two nibbles per byte
     x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
-    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device)
+    x_s = _alloc_mx_act_scale(x, N // MXFP4_BLOCK_SIZE, expert_scale_desc,
+                              scale_rows)
 
-    torch.ops._C.per_token_group_quant_mxfp4(x, x_q, x_s, MXFP4_BLOCK_SIZE, eps)
+    torch.ops._C.per_token_group_quant_mxfp4(x, x_q, x_s, MXFP4_BLOCK_SIZE,
+                                             eps, expert_scale_desc)
 
     x_q = x_q.view(torch.float4_e2m1fn_x2)
-    x_s = x_s.to(dtype=torch.float8_e8m0fnu, 
-                 memory_format=torch.preserve_format)
+    if expert_scale_desc is None:
+        x_s = x_s.to(dtype=torch.float8_e8m0fnu,
+                     memory_format=torch.preserve_format)
     return x_q, x_s
 
 def qdq_fp8_act(x):
@@ -177,11 +195,14 @@ def _as_e8m0(s):
 def dequant_act(x, x_scale, recipe):
     if recipe == "fp8block":
         return dequant_fp8_block_act(x, x_scale)
-    elif recipe in ("fp8", "mxfp4_fp8"):
+    elif recipe == "fp8":
         return x.to(torch.float32) * _as_e8m0(x_scale).to(torch.float32)
     elif recipe == "mxfp4":
         return dequant_mxfp4(x, x_scale)
-    elif recipe == "mxfp8":
+    elif recipe in ("mxfp8", "mxfp4_fp8"):
+        # W4A8 (mxfp4_fp8): mxfp4 weights + mxfp8 activations. The activation
+        # is e4m3 with an e8m0 per-32-block scale, i.e. dequantized exactly
+        # like the mxfp8 recipe.
         return dequant_mxfp8(x, x_scale)
     else:
         # bf16: no quantization noise, return unchanged
@@ -191,12 +212,14 @@ def qdq_act(x, recipe):
     if recipe == "fp8block":
         _q, _s = quant_fp8_block_act(x)
         return dequant_fp8_block_act(_q, _s)
-    elif recipe in ("fp8", "mxfp4_fp8"):
+    elif recipe == "fp8":
         return qdq_fp8_act(x)
     elif recipe == "mxfp4":
         _aq, _as = quant_mxfp_act_xpu(x, "mxfp4")
         return dequant_mxfp4(_aq, _as)
-    elif recipe == "mxfp8":
+    elif recipe in ("mxfp8", "mxfp4_fp8"):
+        # W4A8 (mxfp4_fp8): the activation is quantized to mxfp8 (e4m3 + e8m0
+        # per-32-block scale), matching the XE3 W4A8 grouped-GEMM kernel.
         _aq, _as = quant_mxfp_act_xpu(x, "mxfp8")
         return dequant_mxfp8(_aq, _as)
     else:
@@ -207,7 +230,7 @@ def dequant_wei(wei, wei_scale, recipe):
     if recipe in ("mxfp4", "mxfp4_fp8"):
         return dequant_mxfp4(wei, _as_e8m0(wei_scale))
     elif recipe == "mxfp8":
-        return dequant_mxfp8_wei(wei, _as_e8m0(wei_scale))
+        return dequant_mxfp8(wei, _as_e8m0(wei_scale))
     elif recipe == "fp8block":
         return dequant_fp8_block_wei(wei, wei_scale)
     elif recipe == "fp8":
@@ -259,16 +282,23 @@ def ref_fused_moe(recipe,
                   ep_size=1,
                   expert_map=None,
                   a1q_scale=None,
+                  a2_scale=None,
+                  gemm1_clamp_limit: Optional[float] = None,
 ):
     """
     Reference fused MoE implementation with quantization simulation.
+
+    Weights and scales are taken in the loaded [E, N, K] / [E, N, K // group]
+    layout, not in any grouped-GEMM layout.
 
     Supported recipes:
         bf16          - no quantization (direct matmul)
         fp8block      - block-wise fp8 quant/dequant on activations and weights
         mxfp8         - mxfp8 (per-32-element group)
         mxfp4         - mxfp4 (per-32-element group)
-        mxfp4_fp8     - mxfp4 weights + per-tensor fp8 activations
+        mxfp4_fp8     - mxfp4 weights + mxfp8 activations (W4A8; e4m3 activation
+                        with e8m0 per-32-block scale, matching the XE3 W4A8
+                        grouped-GEMM kernel)
         fp8           - per-tensor fp8 quant/dequant on activations
 
     NOT supported (raise NotImplementedError):
@@ -285,10 +315,7 @@ def ref_fused_moe(recipe,
         "mxfp4_fp8", "fp8"), f"Unsupported recipe: {recipe}"
     
     num_rows, hidden_size = hidden_states.shape
-    if recipe in ("mxfp4", "mxfp4_fp8"):
-        inter_size = w13.shape[-2] // 2
-    else:
-        inter_size = w13.shape[-1] // 2
+    inter_size = w13.shape[-2] // 2
     num_moe_inputs = n_experts_per_token * num_rows
     compute_dtype = hidden_states.dtype if a1q_scale is None else torch.bfloat16
 
@@ -308,9 +335,12 @@ def ref_fused_moe(recipe,
     
 
     # ---- remap hidden states (unchanged from _apply_kernel) ----
-    if a1q_scale is not None:
-        remapped_scales = torch.empty_like(a1q_scale).repeat_interleave(
-            n_experts_per_token, dim=0)
+    per_tensor_scale = a1q_scale is not None and a1q_scale.numel() == 1
+    if a1q_scale is not None and not per_tensor_scale:
+        remapped_scales = torch.empty(
+                (num_rows * n_experts_per_token, a1q_scale.shape[1]),
+                dtype=a1q_scale.dtype,
+                device=a1q_scale.device)
     else:
         remapped_scales = None
     remapped_hidden_states = torch.empty(
@@ -327,7 +357,7 @@ def ref_fused_moe(recipe,
 
     torch.ops._moe_C.remap_hidden_states(
         hidden_states=hidden_states,
-        hidden_states_scales=a1q_scale,
+        hidden_states_scales=None if per_tensor_scale else a1q_scale,
         remapped_hidden_states=remapped_hidden_states,
         remapped_hidden_states_scales=remapped_scales,
         expert_map=expert_map,
@@ -337,6 +367,10 @@ def ref_fused_moe(recipe,
         total_experts_num=total_experts_num,
         local_experts_num=local_experts_num)
 
+    # mxfp4 packs two activation values per byte, so the stored hidden dim is
+    # half the logical size and must be doubled here. mxfp4_fp8 (W4A8) keeps
+    # the activation as unpacked mxfp8 (e4m3), so its hidden dim is already the
+    # logical size and must NOT be doubled.
     if a1q_scale is not None and recipe == "mxfp4":
         hidden_size = 2 * hidden_size
 
@@ -352,7 +386,12 @@ def ref_fused_moe(recipe,
         tokens_i = remapped_hidden_states[offset:offset + n_tokens]
 
         # activation: quant → dequant round-trip
-        if a1q_scale is not None:
+        if per_tensor_scale:
+            # Per-tensor: dequant with the single global scale
+            # (keep the scale on-device)
+            tokens_i_qdq = (tokens_i.to(torch.float32)
+                            * a1q_scale.to(torch.float32)).to(compute_dtype)
+        elif a1q_scale is not None:
             tokens_i_qdq = dequant_act(
                 tokens_i,
                 remapped_scales[offset:offset + n_tokens],
@@ -360,15 +399,19 @@ def ref_fused_moe(recipe,
         else:
             tokens_i_qdq = qdq_act(tokens_i, recipe).to(compute_dtype)
         # weight dequant
-        w13_i = dequant_wei(w13[i], w13_scales[i], recipe).to(compute_dtype)
-        if recipe in ("fp8block", "mxfp8"):
-            out_i = tokens_i_qdq @ w13_i
-        else:
-            out_i = tokens_i_qdq @ w13_i.T
+        w13_scales_i = None if w13_scales is None else w13_scales[i]
+        w13_i = dequant_wei(w13[i], w13_scales_i, recipe).to(compute_dtype)
+        out_i = tokens_i_qdq @ w13_i.T
         if w13_bias is not None:
             out_i = out_i + w13_bias[i].to(compute_dtype)
         gemm1_output[offset:offset + n_tokens] = out_i
         offset += n_tokens
+
+    # Apply swiglu_limit clamping before activation
+    if gemm1_clamp_limit is not None and gemm1_clamp_limit > 0:
+        gemm1_output[:, :inter_size].clamp_(max=gemm1_clamp_limit)
+        gemm1_output[:, inter_size:].clamp_(min=-gemm1_clamp_limit,
+                                            max=gemm1_clamp_limit)
 
     # ---- activation (unchanged from _apply_kernel) ----
     inter_size_scale = 2 if activation == "relu2_no_mul" else 1
@@ -390,15 +433,19 @@ def ref_fused_moe(recipe,
         act_i = act_output[offset:offset + n_tokens]
 
         # activation: quant → dequant round-trip
-        act_i_qdq = qdq_act(act_i, recipe).to(compute_dtype)
+        if a2_scale is not None:
+            # Static per-tensor: quantize with static scale, then dequant
+            act_i_qdq = ((act_i.float() / a2_scale.float()).clamp(
+                FP8_E4M3_MIN, FP8_E4M3_MAX
+            ).to(torch.float8_e4m3fn).float() * a2_scale.float()).to(
+                compute_dtype)
+        else:
+            act_i_qdq = qdq_act(act_i, recipe).to(compute_dtype)
 
         # weight dequant
-        w2_i = dequant_wei(w2[i], w2_scales[i], recipe).to(compute_dtype)
-
-        if recipe in ("fp8block", "mxfp8"):
-            out_i = act_i_qdq @ w2_i
-        else:
-            out_i = act_i_qdq @ w2_i.T
+        w2_scales_i = None if w2_scales is None else w2_scales[i]
+        w2_i = dequant_wei(w2[i], w2_scales_i, recipe).to(compute_dtype)
+        out_i = act_i_qdq @ w2_i.T
         if w2_bias is not None:
             out_i = out_i + w2_bias[i].to(compute_dtype)
         gemm2_output[offset:offset + n_tokens] = out_i
@@ -410,10 +457,67 @@ def ref_fused_moe(recipe,
                                 num_experts)
     return output
 
-def quant_act_xpu(x, recipe):
+def quant_fp8_pertensor_act(x: torch.Tensor):
+    """Dynamic per-tensor FP8 quantization (single global scale)."""
+    x_fp8 = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+    scale = torch.empty(1, device=x.device, dtype=torch.float32)
+    torch.ops._C.dynamic_scaled_fp8_quant(x_fp8, x, scale)
+    return x_fp8, scale
+
+
+def quant_fp8_static_pertensor_act(x: torch.Tensor,
+                                    static_scale: torch.Tensor):
+    """Static per-tensor FP8 quantization using pre-computed scale."""
+    x_fp8 = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+    scale = static_scale.float().reshape(1)
+    torch.ops._C.static_scaled_fp8_quant(x_fp8, x, scale, None)
+    return x_fp8, scale
+
+
+def quant_act_xpu(x,
+                  recipe,
+                  expert_scale_desc=None,
+                  scale_rows=0,
+                  static_scale=None):
+    """Quantize MoE activations.
+
+    ``expert_scale_desc`` is the int32 ``[2, num_experts + 1]`` tensor that
+    ``remap_hidden_states`` publishes. When given, the mx kernels write the
+    per-expert MN-major, M-padded-to-4 scale surface (``scale_rows`` tall)
+    that the grouped GEMM indexes directly. The rows of ``x`` must already be
+    grouped per expert, as they are between the two grouped GEMMs, which is
+    what lets the quant kernel place each scale at its final position and
+    makes the reorder pass unnecessary.
+    """
     if recipe in ("mxfp4", "mxfp8"):
-        return quant_mxfp_act_xpu(x, recipe)
+        return quant_mxfp_act_xpu(x, recipe, expert_scale_desc, scale_rows)
+    elif recipe == "mxfp4_fp8":
+        # W4A8: mxfp4 weights + mxfp8 activations. The activation is quantized
+        # to mxfp8 (e4m3 + e8m0 per-32-block scale) to match the XE3 W4A8
+        # grouped-GEMM kernel (see PR #165).
+        return quant_mxfp_act_xpu(x, "mxfp8", expert_scale_desc, scale_rows)
     elif recipe == "fp8block":
         return quant_fp8_block_act(x)
+    elif recipe == "fp8":
+        if static_scale is not None:
+            return quant_fp8_static_pertensor_act(x, static_scale)
+        return quant_fp8_pertensor_act(x)
     else:
         raise NotImplementedError(f"Unsupported recipe for quant_act_xpu: {recipe}") # noqa: E501
+    
+def mxfp_scale_padded_rows(num_rows, num_experts):
+    # After cutlass-sycl PR #570, the optimized mxfp mainloop requires the
+    # per-expert scale-A surface width (M dim, since scale is MN-major) to be
+    # a multiple of 4 (ScaleAlignElems for 8-bit scales). Each expert's M is
+    # rounded up to a multiple of 4, so the worst case adds 3 rows per expert.
+    return num_rows + 3 * num_experts
+
+
+def reorder_mxfp_scales(A_scales, rows_per_expert):
+    # Pad each expert's M up to a multiple of 4 with zeros so the cumulative
+    # scale offsets used by the grouped-gemm kernel (sum of round_up_4(rows))
+    # remain aligned.
+    num_experts = rows_per_expert.shape[0]
+    total_padded = mxfp_scale_padded_rows(A_scales.shape[0], num_experts)
+    return torch.ops._moe_C.reorder_mxfp_scales(A_scales, rows_per_expert,
+                                                total_padded)
