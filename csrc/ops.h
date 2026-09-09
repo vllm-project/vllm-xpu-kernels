@@ -137,6 +137,31 @@ void fused_qk_norm_rope(
     torch::Tensor& position_ids,
     int64_t forced_token_heads_per_warp);
 
+// Kimi-K3 MLA epilogues (bf16/fp16 only; no fp8 / fp8_ds_mla variants).
+void fused_kimi_k3_mla_key_concat_kv_cache_insert(
+    torch::Tensor& q,
+    torch::Tensor const& k_nope,
+    torch::Tensor const& k_pe,
+    torch::Tensor const& kv_c_normed,
+    torch::Tensor& k_out,
+    torch::Tensor& k_cache,
+    torch::Tensor const& slot_mapping,
+    int64_t cache_block_size,
+    std::optional<torch::Tensor> position_ids,
+    std::optional<torch::Tensor> cos_sin_cache);
+
+void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
+    torch::Tensor const& ql_nope,
+    torch::Tensor const& q_pe,
+    torch::Tensor const& kv_c_normed,
+    torch::Tensor const& k_pe,
+    torch::Tensor& mqa_q,
+    torch::Tensor& k_cache,
+    torch::Tensor const& slot_mapping,
+    int64_t cache_block_size,
+    std::optional<torch::Tensor> position_ids,
+    std::optional<torch::Tensor> cos_sin_cache);
+
 void reshape_and_cache(
     torch::Tensor& key,
     torch::Tensor& value,
