@@ -342,7 +342,7 @@ bool is_xe3_arch(int64_t device_index);
 
 void exponential_2d_(
     torch::Tensor& tensor,
-    torch::Tensor& seeds,  // should on CPU
+    torch::Tensor& seeds,  // CPU [2] shared
     const double lambda);
 
 void topk_topp_sampler(
@@ -352,7 +352,7 @@ void topk_topp_sampler(
     const std::optional<torch::Tensor>& k,
     const std::optional<torch::Tensor>& p,
     const std::string& logprobs_mode,
-    torch::Tensor& seeds,  // should on CPU
+    torch::Tensor& seeds,  // CPU [2] shared or XPU [batch_size, 2] per-row
     const double lambda);
 
 #ifdef VLLM_MQA_LOGITS_ENABLED
