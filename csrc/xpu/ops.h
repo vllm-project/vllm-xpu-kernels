@@ -407,4 +407,4 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
     const torch::Tensor& logits,
     const torch::Tensor& num_sampled_tokens,
     int64_t max_num_kept,
-    int64_t MAX_COMPACT_SUPPORT);
+    int64_t max_compact_support);
