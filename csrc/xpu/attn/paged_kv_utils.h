@@ -14,11 +14,24 @@ get_paged_kv_cache_page_stride_elements(const at::Tensor& key_cache) {
 
 // Return the sequence length needed by the 2D load surface to cover the full
 // physical KV extent, not just the logical num_blocks * block_size range.
+//
+// The surface must reach the last row of the last page, i.e.
+//   (num_blocks - 1) * page_stride_elements + block_size
+// and must NOT be rounded up to num_blocks * page_stride_elements: for
+// non-contiguous layouts (page_stride_elements > block_size) the trailing
+// page_stride_elements - block_size rows lie in the physical gap after the
+// last page. Including them makes the 2D block surface descriptor extend past
+// the end of the allocation, which faults for V (whose base pointer is already
+// offset into the same allocation).
 inline int64_t
 get_paged_kv_cache_effective_total_seqlen(const at::Tensor& key_cache) {
-  int64_t effective_total =
-      key_cache.size(0) * get_paged_kv_cache_page_stride_elements(key_cache);
-  return effective_total;
+  int64_t num_blocks = key_cache.size(0);
+  int64_t block_size = key_cache.size(1);
+  if (num_blocks <= 0) {
+    return 0;
+  }
+  return (num_blocks - 1) * get_paged_kv_cache_page_stride_elements(key_cache) +
+         block_size;
 }
 
 // Validate that the physical page stride can be converted to sequence-position

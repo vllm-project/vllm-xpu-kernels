@@ -250,15 +250,17 @@ def test_moe_align_block_size(m: int, topk: int, num_experts: int,
 @pytest.mark.parametrize("topk", [2, 4])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("block_size", [64])
+@pytest.mark.parametrize("mask_inactive_experts", [False, True])
 def test_moe_align_block_size_with_expert_map(m: int, topk: int,
                                               num_experts: int,
-                                              block_size: int):
-    """Test moe_align_block_size with expert mapping (EP scenario)"""
-    topk_ids = torch.zeros((m, topk), device="xpu", dtype=torch.int32)
-    for i in range(m):
-        experts = torch.randperm(num_experts, device="xpu")[:topk]
-        topk_ids[i] = experts
+                                              block_size: int,
+                                              mask_inactive_experts: bool):
+    """Test moe_align_block_size with expert mapping (EP scenario).
 
+    mask_inactive_experts=True feeds topk_ids=-1 for experts not owned by
+    this rank's expert_map (the padding-sentinel case), exercising the
+    expert_id < 0 guard on the OOB-read side of moe_align_block_size.
+    """
     expert_map = torch.full((num_experts, ),
                             -1,
                             device="xpu",
@@ -266,6 +268,14 @@ def test_moe_align_block_size_with_expert_map(m: int, topk: int,
     local_experts = list(range(0, num_experts, 2))
     for i, expert_id in enumerate(local_experts):
         expert_map[expert_id] = i
+
+    topk_ids = torch.empty((m, topk), device="xpu", dtype=torch.int32)
+    for i in range(m):
+        experts = torch.randperm(num_experts, device="xpu")[:topk]
+        for k in range(topk):
+            topk_ids[i, k] = (experts[k] if (
+                experts[k].item() in local_experts) or not mask_inactive_experts
+                              else -1)
 
     actual_sorted_ids, actual_expert_ids, actual_num_tokens = (
         moe_align_block_size(
@@ -299,6 +309,69 @@ def test_moe_align_block_size_with_expert_map(m: int, topk: int,
         actual_num_tokens.item(),
         m * topk,
     )
+
+
+@pytest.mark.parametrize("m", [16, 32])
+@pytest.mark.parametrize("topk", [2, 4])
+@pytest.mark.parametrize("num_experts", [8])
+@pytest.mark.parametrize("block_size", [64])
+def test_moe_align_block_size_negative_topk_ids_no_expert_map(
+        m: int, topk: int, num_experts: int, block_size: int):
+    """Test moe_align_block_size with topk_ids=-1 padding sentinels and
+    expert_map=None.
+
+    This is the DP/cudagraph padding path (VLLM_MOE_SKIP_PADDING), distinct
+    from test_moe_align_block_size_with_expert_map's EP path above: with no
+    expert_map, a missing `expert_id < 0` guard corrupts the small-batch
+    counting/sorting loops directly instead of going through the expert_map
+    lookup. Golden-compare below proves the valid (non-negative) tokens are
+    still routed correctly; it does not by itself prove the absence of an
+    out-of-bounds write for the padding rows on real hardware — that needs a
+    build with a memory sanitizer or validation layer, which this environment
+    cannot run.
+    """
+    topk_ids = torch.empty((m, topk), device="xpu", dtype=torch.int32)
+    num_valid_rows = m // 2
+    for i in range(m):
+        if i < num_valid_rows:
+            experts = torch.randperm(num_experts, device="xpu")[:topk]
+            topk_ids[i] = experts
+        else:
+            topk_ids[i] = -1
+
+    actual_sorted_ids, actual_expert_ids, actual_num_tokens = (
+        moe_align_block_size(
+            topk_ids=topk_ids,
+            block_size=block_size,
+            num_experts=num_experts,
+            ignore_invalid_experts=True,
+        ))
+    golden_sorted_ids, golden_expert_ids, golden_num_tokens = (
+        torch_moe_align_block_size(
+            topk_ids=topk_ids,
+            block_size=block_size,
+            num_experts=num_experts,
+        ))
+
+    torch.testing.assert_close(actual_num_tokens,
+                               golden_num_tokens,
+                               atol=0,
+                               rtol=0)
+    torch.testing.assert_close(actual_expert_ids,
+                               golden_expert_ids,
+                               atol=0,
+                               rtol=0)
+    _verify_expert_level_sorting(
+        actual_sorted_ids,
+        golden_sorted_ids,
+        actual_expert_ids,
+        block_size,
+        actual_num_tokens.item(),
+        m * topk,
+    )
+    assert (actual_expert_ids
+            >= 0).all() and (actual_expert_ids < num_experts).all(), (
+                "expert_ids should contain valid expert indices")
 
 
 @pytest.mark.parametrize("m", [128])

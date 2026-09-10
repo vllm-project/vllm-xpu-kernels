@@ -6,6 +6,15 @@
 namespace vllm {
 namespace moe {
 
+static inline int
+to_local_expert_id(int global_expert_id, const int* expert_map) {
+  if (global_expert_id < 0) {
+    return -1;
+  }
+  return expert_map == nullptr ? global_expert_id
+                               : expert_map[global_expert_id];
+}
+
 class RowsPerExpertCount {
  public:
   RowsPerExpertCount(
@@ -56,10 +65,7 @@ class RowsPerExpertCount {
       int global_expert_id =
           is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
                             : reinterpret_cast<int64_t*>(topk_ids)[global_id];
-      int local_expert_id = global_expert_id;
-      if (expert_map != nullptr) {
-        local_expert_id = expert_map[global_expert_id];
-      }
+      int local_expert_id = to_local_expert_id(global_expert_id, expert_map);
 
       if (local_expert_id == -1) {
         unpermuted_row_to_permuted_row[global_id] = -1;
@@ -99,10 +105,7 @@ class RowsPerExpertCount {
       int global_expert_id =
           is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
                             : reinterpret_cast<int64_t*>(topk_ids)[global_id];
-      int local_expert_id = global_expert_id;
-      if (expert_map != nullptr) {
-        local_expert_id = expert_map[global_expert_id];
-      }
+      int local_expert_id = to_local_expert_id(global_expert_id, expert_map);
 
       if (local_expert_id != -1) {
         // local_old + base_offset = global_offset
@@ -218,16 +221,9 @@ class RemapHiddenStates {
       }
     }
 
-    if (expert_map != nullptr) {
 #pragma unroll
-      for (int i = 0; i < TopK; ++i) {
-        local_expert_id[i] = expert_map[global_expert_id[i]];
-      }
-    } else {
-#pragma unroll
-      for (int i = 0; i < TopK; ++i) {
-        local_expert_id[i] = global_expert_id[i];
-      }
+    for (int i = 0; i < TopK; ++i) {
+      local_expert_id[i] = to_local_expert_id(global_expert_id[i], expert_map);
     }
 
     int rows_offset[TopK];

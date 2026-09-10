@@ -15,12 +15,30 @@
 
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
+#ifndef VLLM_GRF_SIZE
+  #define VLLM_GRF_SIZE 256
+#endif
+
 #include "collective/chunk_prefill_scheduler.hpp"
 #include "collective/chunk_prefill_epilogue.hpp"
 #include "kernel/paged_decode_kernel.hpp"
 
-#include "fmha_utils.hpp"
+#include "csrc/xpu/attn/fmha_utils.hpp"
 
+// Everything below belongs to this architecture alone.
+//
+// XE2 and XE3 are built into separate shared libraries but instantiate kernel
+// templates with the same names from divergent sources (for example
+// paged_decode_args_t differs between the two). At global namespace those
+// instantiations mangle identically and are emitted as weak, default-visibility
+// symbols, so the dynamic loader binds every reference to whichever library it
+// resolves first -- an XE3 caller then runs XE2 code and reads the argument
+// struct with the wrong layout, silently corrupting the KV cache strides.
+//
+// Keeping each architecture in its own namespace makes the mangled names
+// disjoint, so the two libraries can never cross-bind. Do not move any of these
+// declarations back to global namespace.
+namespace vllm::xpu::xe2 {
 using namespace cute;
 
 using _576 = cute::Int<576>;
@@ -423,7 +441,8 @@ struct DecodeKernelLauncher {
         syclex::work_group_scratch_size(smem_size),
     };
     compat::experimental::kernel_properties kernel_props{
-        syclex::sub_group_size<cute::intel::sg_size>, intelex::grf_size<256>};
+        syclex::sub_group_size<cute::intel::sg_size>,
+        intelex::grf_size<VLLM_GRF_SIZE>};
     compat::experimental::launch_policy policy{
         sycl_grid, sycl_block, launch_props, kernel_props};
     compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
@@ -685,3 +704,5 @@ void decode_policy_dispatch_impl(
       " k_type=",
       static_cast<int>(cuQKType.k_type));
 }
+
+}  // namespace vllm::xpu::xe2

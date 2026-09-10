@@ -42,13 +42,23 @@
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
 
 namespace cutlass::fmha {
+// Arch-tagged inline namespace: gives these definitions a mangled name
+// distinct from the other Xe architecture's identically named copies,
+// while leaving name lookup (cutlass::fmha::...) unchanged.
+inline namespace vllm_xpu_xe2 {
 
 template <int Stages>
 class XeDefault {};  // Default FMHA mainloop, P in registers.
 
+}  // namespace vllm_xpu_xe2
+
 };  // namespace cutlass::fmha
 
 namespace cutlass::fmha::collective {
+// Arch-tagged inline namespace: gives these definitions a mangled name
+// distinct from the other Xe architecture's identically named copies,
+// while leaving name lookup (cutlass::fmha::...) unchanged.
+inline namespace vllm_xpu_xe2 {
 
 static inline void sbarrier_wait() { asm volatile("sbarrier.wait\n"); }
 
@@ -1405,6 +1415,8 @@ CUTLASS_HOST_DEVICE constexpr auto get_tiled_mma_pv(
 
   return TiledMMAHelper<MMAOp, WGTilePV, SGLayoutPV>{};
 }
+
+}  // namespace vllm_xpu_xe2
 
 }  // namespace cutlass::fmha::collective
 
