@@ -75,8 +75,9 @@
    variable: $ export IGC_VectorAliasBBThreshold=10000
 */
 
+#pragma once
 #include "helper.h"
-#include "csrc/xpu/grouped_gemm/collective/gemm/moe_dtype_policy.hpp"
+#include "collective/moe_dtype_policy.hpp"
 
 using namespace cute;
 using ProblemShape =
@@ -88,37 +89,46 @@ using ProblemShape =
 namespace gpu::cutlass_kernel {
 namespace grouped_gemm {
 
-template <class Gemm>
+template <typename Gemm, bool NeedScale>
+struct ElementScaleSelector {
+  using A = void;
+  using B = void;
+};
+
+template <typename Gemm>
+struct ElementScaleSelector<Gemm, true> {
+  using A = typename Gemm::CollectiveMainloop::ElementScaleA;
+  using B = typename Gemm::CollectiveMainloop::ElementScaleB;
+};
+
+template <class Gemm, bool NeedScale>
 struct GroupedGemmRunner {
-  using StrideA = typename Gemm::GemmKernel::InternalStrideA;
-  using StrideB = typename Gemm::GemmKernel::InternalStrideB;
-  using StrideC = typename Gemm::GemmKernel::InternalStrideC;
-  using StrideD = typename Gemm::GemmKernel::InternalStrideD;
-
-  using LayoutA = typename Gemm::LayoutA;
-  using LayoutB = typename Gemm::LayoutB;
-  using LayoutC = typename Gemm::LayoutC;
-  using LayoutD = typename Gemm::LayoutD;
-
   using ElementA = typename Gemm::ElementA;
   using ElementB = typename Gemm::ElementB;
   using ElementC = typename Gemm::ElementC;
 
+  using CollectiveMainloop = typename Gemm::CollectiveMainloop;
   using CollectiveEpilogue = typename Gemm::CollectiveEpilogue;
-  using ElementOutput = typename Gemm::ElementA;
-  using ElementAccumulator = float_t;
+  using ElementOutput = CollectiveEpilogue::ElementOutput;
+  using ElementAccumulator = typename Gemm::ElementAccumulator;
+
+  using ElementScaleA = typename ElementScaleSelector<Gemm, NeedScale>::A;
+  using ElementScaleB = typename ElementScaleSelector<Gemm, NeedScale>::B;
 
   /// Populates a Gemm::Arguments structure from the given commandline options
   typename Gemm::Arguments args_from_options(
       const cutlass::KernelHardwareInfo& hw_info,
-      int64_t const* expert_first_token_offset,
+      int const* rows_per_expert,
       const ElementA* ptr_A,
+      const ElementScaleA* ptr_A_scale,
       const ElementB* ptr_B,
+      const ElementScaleB* ptr_B_scale,
       const ElementC* ptr_C,
       ElementOutput* ptr_D,
       int64_t N,
       int64_t K,
-      int64_t groups) {
+      int64_t groups,
+      int block_size) {
     typename Gemm::Arguments arguments;
     decltype(arguments.epilogue.thread) fusion_args;
 
@@ -136,21 +146,30 @@ struct GroupedGemmRunner {
     using RasterOrderOptions = typename cutlass::gemm::kernel::detail::
         PersistentTileSchedulerMoE::RasterOrderOptions;
 
-    bool has_bias = ptr_C ? true : false;
     // Per-GEMM problem shape info may only exist on the device.
-    arguments = typename Gemm::Arguments{
-        cutlass::gemm::GemmUniversalMode::kGrouped,
-        {ptr_A,
-         ptr_B,
-         cutlass::make_cute_packed_stride(
-             StrideB{}, {static_cast<int>(N), static_cast<int>(K), 1})},
-        {fusion_args, ptr_C, ptr_D, has_bias},
-        expert_first_token_offset,
-        N,
-        K,
-        groups,
-        hw_info,
-        {1, RasterOrderOptions::AlongN}};
+    if constexpr (!NeedScale) {
+      arguments = typename Gemm::Arguments{
+          cutlass::gemm::GemmUniversalMode::kGrouped,
+          {ptr_A, ptr_B},
+          {fusion_args, ptr_C, ptr_D},
+          rows_per_expert,
+          N,
+          K,
+          groups,
+          hw_info,
+          {1, RasterOrderOptions::AlongN}};
+    } else {
+      arguments = typename Gemm::Arguments{
+          cutlass::gemm::GemmUniversalMode::kGrouped,
+          {ptr_A, ptr_B, ptr_A_scale, ptr_B_scale, block_size},
+          {fusion_args, ptr_C, ptr_D},
+          rows_per_expert,
+          N,
+          K,
+          groups,
+          hw_info,
+          {1, RasterOrderOptions::AlongN}};
+    }
 
     return arguments;
   }
@@ -158,37 +177,42 @@ struct GroupedGemmRunner {
   cutlass::Status
   run(sycl::queue& stream,
       const cutlass::KernelHardwareInfo& hw_info,
-      int64_t const* expert_first_token_offset,
+      int const* rows_per_expert,
       const ElementA* ptr_A,
+      const ElementScaleA* ptr_A_scale,
       const ElementB* ptr_B,
+      const ElementScaleB* ptr_B_scale,
       const ElementC* ptr_C,
       ElementOutput* ptr_D,
       int64_t N,
       int64_t K,
-      int64_t groups) {
+      int64_t groups,
+      int block_size) {
     Gemm gemm_op;
 
     auto arguments = args_from_options(
         hw_info,
-        expert_first_token_offset,
+        rows_per_expert,
         ptr_A,
+        ptr_A_scale,
         ptr_B,
+        ptr_B_scale,
         ptr_C,
         ptr_D,
         N,
         K,
-        groups);
+        groups,
+        block_size);
 
     size_t workspace_size = Gemm::get_workspace_size(arguments);
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
     CUTLASS_CHECK(gemm_op.can_implement(arguments));
 
-    CUTLASS_CHECK(gemm_op.initialize(arguments, workspace.get()));
+    CUTLASS_CHECK(gemm_op.initialize(arguments, workspace.get(), &stream));
 
     // Run the GEMM
-    CUTLASS_CHECK(gemm_op.run());
-    stream.throw_asynchronous();
+    CUTLASS_CHECK(gemm_op.run(&stream));
     return cutlass::Status::kSuccess;
   }
 };
@@ -197,18 +221,18 @@ template <class moe_policy>
 void kernel_functor(
     sycl::queue& stream,
     void* ptr_A,
+    void* ptr_A_scale,
     void* ptr_B,
+    void* ptr_B_scale,
     void* ptr_bias,
     void* ptr_D,
-    void* expert_first_token_offset,
+    void* rows_per_expert,
     int64_t N,
     int64_t K,
     int64_t groups) {
   //
   // Run examples
   //
-  compat::set_default_queue(stream);
-
   // The KernelHardwareInfo struct holds the number of EUs on the GPU with a
   // given device ID. This information is used by the underlying kernel.
   cutlass::KernelHardwareInfo hw_info;
@@ -219,121 +243,74 @@ void kernel_functor(
       cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
           hw_info.device_id);
 
-  using ElementAccumulator = typename moe_policy::ElementAccumulator;
-  using ElementComputeEpilogue = typename moe_policy::ElementComputeEpilogue;
-  using ElementA = typename moe_policy::ElementA;
-  using ElementB = typename moe_policy::ElementB;
-  using ElementOutput = typename moe_policy::ElementOutput;
-  using ElementScale = typename moe_policy::ElementScale;
+  using Gemm = typename moe_policy::Gemm;
+  GroupedGemmRunner<Gemm, moe_policy::NeedScale> runner;
 
-  using LayoutA = cutlass::layout::RowMajor;
-  using LayoutB = cutlass::layout::RowMajor;
-  using LayoutC = cutlass::layout::RowMajor;
-  using LayoutD = cutlass::layout::RowMajor;
-
-  using TileShape = typename moe_policy::TileShape;
-  using SGLayout = typename moe_policy::SGLayout;
-
-  using GmemTiledCopyA = void;  // XE_LOAD_2D<16, 32, 32>;
-                                // Note: This
-                                // shape has to match the shape used for
-                                //  the scaling factors
-  using GmemTiledCopyB = void;  // XE_LOAD_2D_VNNI<16, 32, 32>;
-                                // Note: This shape
-                                // has to match the shape used for
-                                //  the scaling factors
-  using TiledMma = typename TiledMMAHelper<
-      MMA_Atom<XE_DPAS_TT<8, ElementAccumulator, ElementA>>,
-      Layout<TileShape>,
-      SGLayout>::TiledMMA;
-
-  constexpr int PipelineStages = 2;
-  using GEMMDispatchPolicy = cutlass::gemm::MainloopMoE16Group<PipelineStages>;
-  using EpilogueDispatchPolicy = cutlass::epilogue::MoE16Group;
-  using EpilogueOp = cutlass::epilogue::fusion::LinearCombination<
-      ElementAccumulator,
-      ElementComputeEpilogue,
-      ElementAccumulator,
-      ElementAccumulator,
-      cutlass::FloatRoundStyle::round_to_nearest>;
-
-  using FusionCallbacks = cutlass::epilogue::fusion::FusionCallbacks<
-      EpilogueDispatchPolicy,
-      EpilogueOp,
-      TileShape,
-      decltype(tile_shape(TiledMma()))>;
-  using CollectiveEpilogue = cutlass::epilogue::collective::CollectiveEpilogue<
-      EpilogueDispatchPolicy,
-      TileShape,
-      ElementAccumulator,
-      cutlass::detail::TagToStrideC_t<LayoutC*>,
-      ElementOutput,
-      cutlass::detail::TagToStrideC_t<LayoutD*>,
-      FusionCallbacks,
-      XE_2D_U32x8x16_LD_N,
-      void,
-      void,
-      XE_2D_U16x8x16_ST_N,
-      void,
-      void>;
-
-  // Mainloop
-  using CollectiveMainloop = cutlass::gemm::collective::CollectiveMma<
-      GEMMDispatchPolicy,
-      TileShape,
-      ElementA,
-      cutlass::gemm::TagToStrideA_t<LayoutA>,
-      ElementB,
-      cutlass::gemm::TagToStrideB_t<LayoutB>,
-      TiledMma,
-      GmemTiledCopyA,
-      void,
-      void,
-      cute::identity,  // A
-      GmemTiledCopyB,
-      void,
-      void,
-      cute::identity  // B
-      >;
-
-  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      ProblemShape,
-      CollectiveMainloop,
-      CollectiveEpilogue,
-      cutlass::gemm::GroupScheduler>;
-
-  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
-
-  GroupedGemmRunner<Gemm> runner;
   runner.run(
       stream,
       hw_info,
-      reinterpret_cast<const int64_t*>(expert_first_token_offset),
-      reinterpret_cast<const ElementA*>(ptr_A),
-      reinterpret_cast<const ElementB*>(ptr_B),
-      reinterpret_cast<const ElementAccumulator*>(ptr_bias),
-      reinterpret_cast<ElementOutput*>(ptr_D),
+      reinterpret_cast<const int*>(rows_per_expert),
+      reinterpret_cast<const typename moe_policy::ElementA*>(ptr_A),
+      reinterpret_cast<const typename moe_policy::ElementScaleA*>(ptr_A_scale),
+      reinterpret_cast<const typename moe_policy::ElementB*>(ptr_B),
+      reinterpret_cast<const typename moe_policy::ElementScaleB*>(ptr_B_scale),
+      reinterpret_cast<const typename moe_policy::ElementAccumulator*>(
+          ptr_bias),
+      reinterpret_cast<typename moe_policy::ElementOutput*>(ptr_D),
       N,
       K,
-      groups);
+      groups,
+      moe_policy::BlockSize);
 }
 
 #define INSTANTIATE_KERNEL(POLICY)      \
   template void kernel_functor<POLICY>( \
       sycl::queue & stream,             \
       void* ptr_A,                      \
+      void* ptr_A_scale,                \
       void* ptr_B,                      \
+      void* ptr_B_scale,                \
       void* ptr_bias,                   \
       void* ptr_D,                      \
-      void* expert_first_token_offset,  \
+      void* rows_per_expert,            \
       int64_t N,                        \
       int64_t K,                        \
       int64_t groups);
 
 INSTANTIATE_KERNEL(moe_bf16_policy)
+INSTANTIATE_KERNEL(moe_bf16_256x128_policy)
+INSTANTIATE_KERNEL(moe_bf16_128x256_policy)
+INSTANTIATE_KERNEL(moe_bf16_128x128_policy)
+INSTANTIATE_KERNEL(moe_bf16_mid_policy)
 INSTANTIATE_KERNEL(moe_bf16_decode_policy)
+INSTANTIATE_KERNEL(moe_bf16_decode_k64_policy)
 INSTANTIATE_KERNEL(moe_fp16_policy)
+INSTANTIATE_KERNEL(moe_fp16_mid_policy)
 INSTANTIATE_KERNEL(moe_fp16_decode_policy)
+INSTANTIATE_KERNEL(moe_mxfp4_policy)
+INSTANTIATE_KERNEL(moe_mxfp4_downproj_wide_policy)
+INSTANTIATE_KERNEL(moe_mxfp4_256x128_policy)
+INSTANTIATE_KERNEL(moe_mxfp4_128x256_policy)
+INSTANTIATE_KERNEL(moe_mxfp4_128x128_policy)
+INSTANTIATE_KERNEL(moe_mxfp4_mid_policy)
+INSTANTIATE_KERNEL(moe_mxfp4_decode_policy)
+INSTANTIATE_KERNEL(moe_mxfp8_policy)
+INSTANTIATE_KERNEL(moe_mxfp8_256x128_policy)
+INSTANTIATE_KERNEL(moe_mxfp8_128x256_policy)
+INSTANTIATE_KERNEL(moe_mxfp8_128x128_policy)
+INSTANTIATE_KERNEL(moe_mxfp8_mid_policy)
+INSTANTIATE_KERNEL(moe_mxfp8_decode_policy)
+INSTANTIATE_KERNEL(moe_w4a8_policy)
+INSTANTIATE_KERNEL(moe_w4a8_mid_policy)
+INSTANTIATE_KERNEL(moe_fp8block_policy)
+INSTANTIATE_KERNEL(moe_fp8block_mid_policy)
+INSTANTIATE_KERNEL(moe_fp8block_decode_policy)
+INSTANTIATE_KERNEL(moe_fp8pertensor_policy)
+INSTANTIATE_KERNEL(moe_fp8pertensor_mid_policy)
+INSTANTIATE_KERNEL(moe_fp8pertensor_decode_policy)
+INSTANTIATE_KERNEL(moe_fp8pertensor_decode_lowk_policy)
+INSTANTIATE_KERNEL(moe_fp8pertensor_decode_narrow_policy)
+INSTANTIATE_KERNEL(moe_fp8pertensor_decode_shortk_policy)
 
 }  // namespace grouped_gemm
 }  // namespace gpu::cutlass_kernel

@@ -278,6 +278,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.def("is_xe3_arch(int device_index=-1) -> bool");
   xpu_ops.impl("is_xe3_arch", &is_xe3_arch);
 
+  xpu_ops.def("is_xe3p_arch(int device_index=-1) -> bool");
+  xpu_ops.impl("is_xe3p_arch", &is_xe3p_arch);
+
+  xpu_ops.def("is_cri(int device_index=-1) -> bool");
+  xpu_ops.impl("is_cri", &is_cri);
+
+  xpu_ops.def("is_nvl_p(int device_index=-1) -> bool");
+  xpu_ops.impl("is_nvl_p", &is_nvl_p);
+
   // test only, will not use in vllm
   xpu_ops.def(
       "exponential_2d_(Tensor! tensor, Tensor! seeds, float lambda) -> ()");

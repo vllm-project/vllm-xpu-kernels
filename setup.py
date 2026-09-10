@@ -187,7 +187,6 @@ class cmake_build_ext(build_ext):
         _kernel_options = [
             "BUILD_SYCL_TLA_KERNELS",
             "VLLM_XPU_ENABLE_XE2",
-            "VLLM_XPU_ENABLE_XE_DEFAULT",
             "BASIC_KERNELS_ENABLED",
             "FA2_KERNELS_ENABLED",
             "MOE_KERNELS_ENABLED",
@@ -571,15 +570,13 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
         if _is_enabled("MOE_KERNELS_ENABLED"):
             additional_libraries["grouped_gemm_xe_2"] = (
                 "/csrc/xpu/grouped_gemm/xe_2")
-    # Attention-only XE3 upstreaming: the XE3 grouped_gemm / quant_asm
-    # components are intentionally not wired here.
-    if _is_enabled("VLLM_XPU_ENABLE_XE3P", default="ON") and _is_enabled(
-            "FA2_KERNELS_ENABLED"):
-        additional_libraries["attn_kernels_xe_3"] = "/csrc/xpu/attn/xe_3"
-    if _is_enabled("VLLM_XPU_ENABLE_XE_DEFAULT") and _is_enabled(
-            "MOE_KERNELS_ENABLED"):
-        additional_libraries["grouped_gemm_xe_default"] = (
-            "/csrc/xpu/grouped_gemm/xe_default")
+    # The XE3 quant_asm components are intentionally not wired here.
+    if _is_enabled("VLLM_XPU_ENABLE_XE3P", default="ON"):
+        if _is_enabled("FA2_KERNELS_ENABLED"):
+            additional_libraries["attn_kernels_xe_3"] = "/csrc/xpu/attn/xe_3"
+        if _is_enabled("MOE_KERNELS_ENABLED"):
+            additional_libraries["grouped_gemm_xe_3"] = (
+                "/csrc/xpu/grouped_gemm/xe_3")
 
 if _build_custom_ops():
     if _is_enabled("BASIC_KERNELS_ENABLED"):

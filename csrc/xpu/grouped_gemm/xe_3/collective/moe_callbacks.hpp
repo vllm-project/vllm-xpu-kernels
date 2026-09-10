@@ -131,6 +131,20 @@ struct FusionCallbacks<
     }
   };
 
+  // Identity epilogue (D = acc): alpha == 1, beta == 0 with no per-group
+  // alpha/beta pointer arrays. Lets the grouped epilogue take the fast path.
+  CUTLASS_DEVICE bool is_identity() const {
+    using OuterVisitorImpl = typename Impl::Impl;
+    auto const& outer_ops = static_cast<OuterVisitorImpl const&>(*this).ops;
+    if (!get<0>(outer_ops).is_zero()) return false;
+    auto const& inner_tree = get<2>(outer_ops);
+    using InnerTreeType = cute::remove_cvref_t<decltype(inner_tree)>;
+    using InnerVisitorImpl = typename InnerTreeType::Impl;
+    auto const& alpha_op =
+        get<0>(static_cast<InnerVisitorImpl const&>(inner_tree).ops);
+    return alpha_op.scalar == ElementScalar(1);
+  }
+
   // Ctor inheritance
   using Impl::Impl;
 };

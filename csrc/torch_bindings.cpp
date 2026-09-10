@@ -189,7 +189,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "per_token_group_fp8_quant(Tensor input, Tensor! output_q, Tensor! "
       "output_s, "
       "int group_size, float eps, float fp8_min, float fp8_max, bool "
-      "scale_ue8m0, bool dummy_is_scale_transposed, bool dummy_is_tma_aligned "
+      "scale_ue8m0, bool dummy_is_scale_transposed, bool dummy_is_tma_aligned, "
+      "Tensor? expert_scale_desc=None"
       ") -> ()");
   ops.impl(
       "per_token_group_fp8_quant", torch::kXPU, &per_token_group_quant_fp8);
@@ -197,7 +198,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Compute per-token-group MXFP4 quantized tensor and scaling factor.
   ops.def(
       "per_token_group_quant_mxfp4(Tensor input, Tensor! output_q, Tensor! "
-      "output_s, int group_size, float eps) -> ()");
+      "output_s, int group_size, float eps, Tensor? expert_scale_desc=None) "
+      "-> ()");
   ops.impl(
       "per_token_group_quant_mxfp4", torch::kXPU, &per_token_group_quant_mxfp4);
 

@@ -340,6 +340,12 @@ bool is_xe2_arch(int64_t device_index);
 
 bool is_xe3_arch(int64_t device_index);
 
+bool is_xe3p_arch(int64_t device_index);
+
+bool is_cri(int64_t device_index);
+
+bool is_nvl_p(int64_t device_index);
+
 void exponential_2d_(
     torch::Tensor& tensor,
     torch::Tensor& seeds,  // CPU [2] shared
