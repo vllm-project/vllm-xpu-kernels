@@ -1,5 +1,6 @@
 #include "chunk_prefill.hpp"
 
+namespace vllm::xpu::xe2 {
 using namespace cute;
 
 // clang-format off
@@ -27,3 +28,5 @@ using namespace cute;
       const chunk_prefill_args_t& args);
 
 INSTANTIATE_KERNEL()
+
+}  // namespace vllm::xpu::xe2

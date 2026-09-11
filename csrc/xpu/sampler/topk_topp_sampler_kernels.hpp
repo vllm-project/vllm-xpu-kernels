@@ -59,6 +59,7 @@ struct random_sampler_only_kernel {
       int64_t* random_sampled,
       float* logits_to_return,
       float* logits,
+      const int64_t* seed_offsets,
       const int batch_size,
       const int vocab_size,
       const int64_t seed,
@@ -67,6 +68,7 @@ struct random_sampler_only_kernel {
       : random_sampled(random_sampled),
         logits_to_return(logits_to_return),
         logits(logits),
+        seed_offsets(seed_offsets),
         batch_size(batch_size),
         vocab_size(vocab_size),
         seed(seed),
@@ -91,11 +93,15 @@ struct random_sampler_only_kernel {
     const int local_id = item.get_local_linear_id();
     const int local_range = item.get_local_range(0);
 
-    const int global_id = item.get_global_linear_id();
-    uint64_t philox_seed = seed;
-    uint64_t philox_offset = offset;
+    const bool has_per_row_rng = seed_offsets != nullptr;
+    const int64_t* row_rng =
+        has_per_row_rng ? seed_offsets + batch_id * 2 : nullptr;
+    uint64_t philox_seed = has_per_row_rng ? row_rng[0] : seed;
+    uint64_t philox_offset = has_per_row_rng ? row_rng[1] : offset;
+    const int philox_subsequence =
+        has_per_row_rng ? local_id : item.get_global_linear_id();
     RAND::randStatePhilox4_32_10_t state;
-    RAND::rand_init(philox_seed, global_id, philox_offset, &state);
+    RAND::rand_init(philox_seed, philox_subsequence, philox_offset, &state);
 
     RAND::Uniform4DistributionFunctor dist_func;
     RAND::ExponentialFunctor<scalar_t, acc_scalar_t> exponential_func(lambda);
@@ -263,6 +269,7 @@ struct random_sampler_only_kernel {
   int64_t* random_sampled;
   float* logits_to_return;
   float* logits;
+  const int64_t* seed_offsets;
   const int batch_size;
   const int vocab_size;
   const int64_t seed;
@@ -286,6 +293,7 @@ struct top_k_only_kernel {
       float* logits,
       float* buffer,
       const int64_t* top_k,
+      const int64_t* seed_offsets,
       const int batch_size,
       const int vocab_size,
       const int64_t seed,
@@ -296,6 +304,7 @@ struct top_k_only_kernel {
         logits(logits),
         buffer(buffer),
         top_k(top_k),
+        seed_offsets(seed_offsets),
         batch_size(batch_size),
         vocab_size(vocab_size),
         seed(seed),
@@ -320,11 +329,15 @@ struct top_k_only_kernel {
     const int local_id = item.get_local_linear_id();
     const int local_range = item.get_local_range(0);
 
-    const int global_id = item.get_global_linear_id();
-    uint64_t philox_seed = seed;
-    uint64_t philox_offset = offset;
+    const bool has_per_row_rng = seed_offsets != nullptr;
+    const int64_t* row_rng =
+        has_per_row_rng ? seed_offsets + batch_id * 2 : nullptr;
+    uint64_t philox_seed = has_per_row_rng ? row_rng[0] : seed;
+    uint64_t philox_offset = has_per_row_rng ? row_rng[1] : offset;
+    const int philox_subsequence =
+        has_per_row_rng ? local_id : item.get_global_linear_id();
     RAND::randStatePhilox4_32_10_t state;
-    RAND::rand_init(philox_seed, global_id, philox_offset, &state);
+    RAND::rand_init(philox_seed, philox_subsequence, philox_offset, &state);
 
     RAND::Uniform4DistributionFunctor dist_func;
     RAND::ExponentialFunctor<scalar_t, acc_scalar_t> exponential_func(lambda);
@@ -717,6 +730,7 @@ struct top_k_only_kernel {
   float* logits;
   float* buffer;
   const int64_t* top_k;
+  const int64_t* seed_offsets;
   const int batch_size;
   const int vocab_size;
   const int64_t seed;
@@ -739,6 +753,7 @@ struct top_p_only_kernel {
       float* logits_to_return,
       float* logits,
       const float* top_p,
+      const int64_t* seed_offsets,
       const int batch_size,
       const int vocab_size,
       const int64_t seed,
@@ -748,6 +763,7 @@ struct top_p_only_kernel {
         logits_to_return(logits_to_return),
         logits(logits),
         top_p(top_p),
+        seed_offsets(seed_offsets),
         batch_size(batch_size),
         vocab_size(vocab_size),
         seed(seed),
@@ -772,11 +788,15 @@ struct top_p_only_kernel {
     const int local_id = item.get_local_linear_id();
     const int local_range = item.get_local_range(0);
 
-    const int global_id = item.get_global_linear_id();
-    uint64_t philox_seed = seed;
-    uint64_t philox_offset = offset;
+    const bool has_per_row_rng = seed_offsets != nullptr;
+    const int64_t* row_rng =
+        has_per_row_rng ? seed_offsets + batch_id * 2 : nullptr;
+    uint64_t philox_seed = has_per_row_rng ? row_rng[0] : seed;
+    uint64_t philox_offset = has_per_row_rng ? row_rng[1] : offset;
+    const int philox_subsequence =
+        has_per_row_rng ? local_id : item.get_global_linear_id();
     RAND::randStatePhilox4_32_10_t state;
-    RAND::rand_init(philox_seed, global_id, philox_offset, &state);
+    RAND::rand_init(philox_seed, philox_subsequence, philox_offset, &state);
 
     RAND::Uniform4DistributionFunctor dist_func;
     RAND::ExponentialFunctor<scalar_t, acc_scalar_t> exponential_func(lambda);
@@ -892,11 +912,30 @@ struct top_p_only_kernel {
     // topp
     if (top_p_value != 1.0f) {
       float low_count = 1.0f;
+      // Approximate count(high); replaced with the exact value once
+      // `high` actually moves.
+      float high_count = static_cast<float>(high);
+      // Illinois side tracker: +1 if `low` moved last, -1 if `high` did.
+      int last_side = 0;
       int iter = 0;
       do {
         float pivot_count_local = 0.0f;
 
-        pivot = (low + high) / 2;
+        // Regula falsi: interpolate the next pivot from the endpoints'
+        // measured counts instead of a plain midpoint; falls back to
+        // bisection if degenerate. Margin only guards zero-progress.
+        double denom =
+            static_cast<double>(low_count) - static_cast<double>(high_count);
+        double margin = (high - low) * 0.01;
+        if (denom > 1e-12 && margin > 0.0) {
+          pivot = low + (high - low) *
+                            (static_cast<double>(low_count) - top_p_value) /
+                            denom;
+          if (pivot < low + margin) pivot = low + margin;
+          if (pivot > high - margin) pivot = high - margin;
+        } else {
+          pivot = (low + high) / 2;
+        }
 
         for (int l = 0; l < loop_times; ++l) {
 #pragma unroll
@@ -938,10 +977,20 @@ struct top_p_only_kernel {
         if (pivot_count == top_p_value) {
           break;
         } else if (pivot_count < top_p_value) {
+          // Illinois: halve the stale side's count to avoid stalling.
+          if (last_side == -1) {
+            low_count = top_p_value + (low_count - top_p_value) * 0.5f;
+          }
           high = pivot;
+          high_count = pivot_count;
+          last_side = -1;
         } else {
+          if (last_side == 1) {
+            high_count = top_p_value + (high_count - top_p_value) * 0.5f;
+          }
           low = pivot;
           low_count = pivot_count;
+          last_side = 1;
         }
         ++iter;
       } while (((high - low) > eps) && iter < kMaxBisectIters);
@@ -1047,6 +1096,7 @@ struct top_p_only_kernel {
   float* logits_to_return;
   float* logits;
   const float* top_p;
+  const int64_t* seed_offsets;
   const int batch_size;
   const int vocab_size;
   const int64_t seed;
@@ -1071,6 +1121,7 @@ struct top_k_top_p_kernel {
       float* buffer,
       const int64_t* top_k,
       const float* top_p,
+      const int64_t* seed_offsets,
       const int batch_size,
       const int vocab_size,
       const int64_t seed,
@@ -1082,6 +1133,7 @@ struct top_k_top_p_kernel {
         buffer(buffer),
         top_k(top_k),
         top_p(top_p),
+        seed_offsets(seed_offsets),
         batch_size(batch_size),
         vocab_size(vocab_size),
         seed(seed),
@@ -1106,11 +1158,15 @@ struct top_k_top_p_kernel {
     const int local_id = item.get_local_linear_id();
     const int local_range = item.get_local_range(0);
 
-    const int global_id = item.get_global_linear_id();
-    uint64_t philox_seed = seed;
-    uint64_t philox_offset = offset;
+    const bool has_per_row_rng = seed_offsets != nullptr;
+    const int64_t* row_rng =
+        has_per_row_rng ? seed_offsets + batch_id * 2 : nullptr;
+    uint64_t philox_seed = has_per_row_rng ? row_rng[0] : seed;
+    uint64_t philox_offset = has_per_row_rng ? row_rng[1] : offset;
+    const int philox_subsequence =
+        has_per_row_rng ? local_id : item.get_global_linear_id();
     RAND::randStatePhilox4_32_10_t state;
-    RAND::rand_init(philox_seed, global_id, philox_offset, &state);
+    RAND::rand_init(philox_seed, philox_subsequence, philox_offset, &state);
 
     RAND::Uniform4DistributionFunctor dist_func;
     RAND::ExponentialFunctor<scalar_t, acc_scalar_t> exponential_func(lambda);
@@ -1597,6 +1653,7 @@ struct top_k_top_p_kernel {
   float* buffer;
   const int64_t* top_k;
   const float* top_p;
+  const int64_t* seed_offsets;
   const int batch_size;
   const int vocab_size;
   const int64_t seed;
@@ -1613,6 +1670,7 @@ void topk_topp_sampler_kernel_launcher(
     float* buffer,
     const int64_t* top_k,
     const float* top_p,
+    const int64_t* seed_offsets,
     const int batch_size,
     const int vocab_size,
     const int64_t seed,
@@ -1629,6 +1687,7 @@ void topk_topp_sampler_kernel_launcher(
           logits,
           buffer,
           top_k,
+          seed_offsets,
           batch_size,
           vocab_size,
           seed,
@@ -1646,6 +1705,7 @@ void topk_topp_sampler_kernel_launcher(
           logits_to_return,
           logits,
           top_p,
+          seed_offsets,
           batch_size,
           vocab_size,
           seed,
@@ -1665,6 +1725,7 @@ void topk_topp_sampler_kernel_launcher(
           buffer,
           top_k,
           top_p,
+          seed_offsets,
           batch_size,
           vocab_size,
           seed,
@@ -1681,6 +1742,7 @@ void topk_topp_sampler_kernel_launcher(
           random_sampled,
           logits_to_return,
           logits,
+          seed_offsets,
           batch_size,
           vocab_size,
           seed,
