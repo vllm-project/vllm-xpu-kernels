@@ -161,6 +161,27 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int forced_token_heads_per_warp=-1) -> ()");
   ops.impl("fused_qk_norm_rope", torch::kXPU, &fused_qk_norm_rope);
 
+  // Kimi-K3 MLA epilogues (bf16/fp16 only)
+  ops.def(
+      "fused_kimi_k3_mla_key_concat_kv_cache_insert(Tensor! q, "
+      "Tensor k_nope, Tensor k_pe, Tensor kv_c_normed, Tensor! k_out, "
+      "Tensor! k_cache, Tensor slot_mapping, int cache_block_size, "
+      "Tensor? position_ids, Tensor? cos_sin_cache) -> ()");
+  ops.impl(
+      "fused_kimi_k3_mla_key_concat_kv_cache_insert",
+      torch::kXPU,
+      &fused_kimi_k3_mla_key_concat_kv_cache_insert);
+
+  ops.def(
+      "fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(Tensor ql_nope, "
+      "Tensor q_pe, Tensor kv_c_normed, Tensor k_pe, Tensor! mqa_q, "
+      "Tensor! k_cache, Tensor slot_mapping, int cache_block_size, "
+      "Tensor? position_ids, Tensor? cos_sin_cache) -> ()");
+  ops.impl(
+      "fused_kimi_k3_mla_decode_q_concat_kv_cache_insert",
+      torch::kXPU,
+      &fused_kimi_k3_mla_decode_q_concat_kv_cache_insert);
+
   // Compute FP8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
