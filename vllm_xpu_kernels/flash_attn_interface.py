@@ -180,9 +180,8 @@ def _kv_tile_from_block_size(block_size: int) -> int:
 
 
 def _min_blocks_for_split(kv_tile: int) -> int:
-    # Mirror of XeFMHAFwdSplitKVKernel::kMinBlocksForSplit /
-    # ReduceSplitK::kMinBlocksForSplit. Below this threshold a sequence is
-    # processed as a single split for numerical stability.
+    # Floor for the default decode policies. Deliberately not a mirror of every
+    # policy -- see build_decode_split_plan's docstring.
     return 32 if kv_tile <= 64 else 128
 
 
@@ -241,6 +240,13 @@ def build_decode_split_plan(
       buffer indexing is safe)
     - splits_per_seq[i] folds in {single-split heuristic, balanced
       assignment, hard cap}; the kernel never needs to second-guess it.
+
+    Split floor
+    -----------
+    Plans override the kernel's split heuristic. This architecture-independent
+    planner uses the default policy's floor (32 tiles at kv_tile=64), not Xe2
+    MLA split-V's 2-tile floor. Use seqused_k without a host plan to retain the
+    device policy. Comparing these paths changes both splitting and scheduling.
     """
     if isinstance(kv_lens, torch.Tensor):
         kv_lens_list = kv_lens.to(dtype=torch.int32, device="cpu").tolist()
@@ -266,8 +272,7 @@ def build_decode_split_plan(
     min_wgs = max(1, num_xe_cores * 2 // max(1, num_heads_kv))
     target_tiles_per_wg = max(4, total_tiles // min_wgs)
 
-    # Mirror of the kernel's is_single_split heuristic: avoid split-reduce
-    # for short sequences (numerical stability + overhead).
+    # Default-policy floor; see the split-V exception above.
     min_blocks_for_split = _min_blocks_for_split(kv_tile)
 
     splits_per_seq = []

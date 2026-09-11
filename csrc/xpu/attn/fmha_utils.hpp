@@ -251,6 +251,7 @@ struct chunk_policy_head512_b16 {
 // the runtime head_size_vo, which differs for MLA (head_size_qk 576 with
 // head_size_vo 512).
 static constexpr int kDecodeMaxShapeOutV = 256;
+
 static constexpr int kDecodeAccBudget = 2048;
 
 template <typename q_packed, typename head_dim>
@@ -284,6 +285,7 @@ struct decode_policy_qpacked_head<q_packed, head_dim, _16> {
   using ShapePV = Shape<q_packed, _32, _16>;
   using ShapeOut = Shape<q_packed, decode_shapeout_v<q_packed, head_dim>>;
   using SubgroupLayoutQK = Layout<Shape<_1, _1, _1>>;
+  using SubgroupLayoutPV = void;
 };
 
 // kv_tile == _32 (block_size == 32)
@@ -294,6 +296,7 @@ struct decode_policy_qpacked_head<q_packed, head_dim, _32> {
   using ShapePV = Shape<q_packed, _32, _32>;
   using ShapeOut = Shape<q_packed, decode_shapeout_v<q_packed, head_dim>>;
   using SubgroupLayoutQK = Layout<Shape<_1, _2, _1>>;
+  using SubgroupLayoutPV = void;
 };
 
 // kv_tile == _64
@@ -307,6 +310,27 @@ struct decode_policy_qpacked_head<q_packed, head_dim, _64> {
   using ShapePV = Shape<q_packed, _32, _64>;
   using ShapeOut = Shape<q_packed, decode_shapeout_v<q_packed, head_dim>>;
   using SubgroupLayoutQK = Layout<Shape<_1, _4, _1>>;
+  using SubgroupLayoutPV = void;
+};
+
+static constexpr int kSplitVExpectedShapeOutV = 512;
+
+// Xe2 MLA: subgroups own disjoint V slices and exchange scores through SLM.
+// One work-group covers all 512 V channels, eliminating repeated QK work
+// across V tiles and the epilogue's cross-subgroup reduction.
+template <typename q_packed, typename head_dim>
+struct decode_policy_kv64_splitv {
+  static_assert(head_dim::value == 576, "split-V requires the MLA Q/K bucket");
+  static_assert(
+      q_packed::value == 8 || q_packed::value == 16,
+      "split-V supports Q8 and Q16 tiles");
+
+  using HeadDim = head_dim;
+  using ShapeQK = Shape<q_packed, _64, _64>;
+  using ShapePV = Shape<q_packed, _128, _64>;
+  using ShapeOut = Shape<q_packed, cute::Int<kSplitVExpectedShapeOutV>>;
+  using SubgroupLayoutQK = Layout<Shape<_1, _4, _1>>;
+  using SubgroupLayoutPV = Layout<Shape<_1, _4, _1>>;
 };
 
 // kv_tile == _128
@@ -324,4 +348,5 @@ struct decode_policy_qpacked_head<q_packed, head_dim, _128> {
   using ShapePV = Shape<q_packed, _32, _128>;
   using ShapeOut = Shape<q_packed, decode_shapeout_v<q_packed, head_dim>>;
   using SubgroupLayoutQK = Layout<Shape<_1, _8, _1>>;
+  using SubgroupLayoutPV = void;
 };

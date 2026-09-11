@@ -97,6 +97,11 @@ class XeFMHAFwdSplitKVKernel {
 
   using SGPerWG = typename CollectiveMainloop::SGPerWG;
 
+  // Split-V removes grid.x parallelism, so allow KV splits on short sequences.
+  static constexpr int kMinBlocksForSplit = CollectiveMainloop::SplitV
+      ? 2
+      : ((get<1>(TileShapeQK{}) <= 64) ? 32 : 128);
+
   using FragA = typename CollectiveMainloop::FragA;
   using FragARow = typename CollectiveMainloop::FragARow;
 
@@ -382,8 +387,6 @@ class XeFMHAFwdSplitKVKernel {
         int num_blocks_per_split =
             cute::ceil_div(windowed_k_blocks, seq_num_kv_splits);
 
-        constexpr int tile_n = get<1>(TileShapeQK{});
-        constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
         is_single_split =
             (seq_num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
 
@@ -739,10 +742,9 @@ class ReduceSplitK {
       if (plan_driven) {
         effective_splits = seq_num_kv_splits;
       } else {
-        constexpr int tile_n = get<1>(typename FMHAKernel_::TileShapeQK{});
-        constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
         bool is_single_split =
-            (seq_num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
+            (seq_num_kv_splits > 1) &&
+            (windowed_k_blocks < FMHAKernel_::kMinBlocksForSplit);
         effective_splits = is_single_split ? 1 : seq_num_kv_splits;
       }
 

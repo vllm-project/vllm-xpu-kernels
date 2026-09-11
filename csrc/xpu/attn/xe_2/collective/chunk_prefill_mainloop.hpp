@@ -66,6 +66,9 @@ static inline void sbarrier_signal() { asm volatile("sbarrier.signal\n"); }
 
 static inline void gfence() { asm volatile("lsc_fence.ugm.none.group\n"); }
 
+// No "memory" clobber: this orders the hardware, not the compiler. Safe only
+// while no caller touches SLM inside the loop it closes (split-V does, and
+// uses sycl::group_barrier instead).
 static inline void barrier() {
   asm volatile("lsc_fence.ugm.none.group\n");
   asm volatile("barrier\n");
@@ -878,16 +881,39 @@ struct DecodeFwdMainloop<
   // Kernel-facing parameters
   using Params = Arguments;
 
+  // N-split PV needs a score exchange; M-split PV also has ReduceK == 1
+  // but owns disjoint query rows and must not use this path.
+  using ReduceKPV = decltype(size<3>(typename TiledMMAPV::ThrLayoutVMNK{}));
+  using SplitNPV = decltype(size<2>(typename TiledMMAPV::ThrLayoutVMNK{}));
+  static constexpr bool SplitV =
+      (ReduceKPV::value == 1) && (SplitNPV::value > 1);
+
+  // Gather in QK accumulator order, then reorder into the PV A operand.
+  using TiledMMAQKFull = typename TiledMMAHelper<
+      typename TiledMMAQK::Atom,
+      Layout<TileShapeQK>,
+      Layout<Shape<_1, _1, _1>>>::TiledMMA;
+
+  static constexpr int kTileQ = size<0>(TileShapeQK{});
+  static constexpr int kTileK = size<1>(TileShapeQK{});
+
   // SLM data
-  struct SharedStorage {};
+  struct SharedStorageSplitV {
+    cute::array<ElementS, kTileQ * kTileK> s_data;
+  };
+  struct SharedStorageNone {};
+  using SharedStorage =
+      cute::conditional_t<SplitV, SharedStorageSplitV, SharedStorageNone>;
 
   Params params;
+  SharedStorage& shared;
 
   //
   // Methods
   //
 
-  DecodeFwdMainloop(Params const& params_, SharedStorage&) : params(params_) {}
+  DecodeFwdMainloop(Params const& params_, SharedStorage& shared_)
+      : params(params_), shared(shared_) {}
 
   static constexpr Params
   to_underlying_arguments(Arguments const& args, void* /* workspace */) {
@@ -1093,6 +1119,8 @@ struct DecodeFwdMainloop<
     auto tSrS = thr_mma_qk.partition_sg_fragment_C(cP);
     auto tArP = thr_mma_pv.partition_sg_fragment_A(cP);
 
+    auto cS_local = thr_mma_qk.partition_C(cP);
+
     auto tVrV = thr_copy_v.partition_sg_fragment_D(gV_split(_, _, 0, 0));
     auto tArV = thr_mma_pv.partition_sg_fragment_B(gV_split(_, _, 0, 0));
 
@@ -1285,8 +1313,35 @@ struct DecodeFwdMainloop<
       }
 
       /* Apply softmax and scaling */
-      softmax(effective_scale, K == blk_k0, tSrS, tA_max, tA_sum, tArA);
-      reorder(tSrS, tArP);
+      if constexpr (SplitV) {
+        // Exchange scores so every V subgroup computes the same full-row
+        // softmax statistics.
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS.size(); i++)
+          shared.s_data
+              [get<0>(cS_local(i)) * kTileK + get<1>(cS_local(i))] = tSrS(i);
+
+        // Publish SLM writes before gathering. The loop-end group barrier
+        // prevents the next iteration from overwriting scores still in use.
+        sycl::group_barrier(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+
+        const int lane_id = thr_id % intel::sg_size;
+        auto thr_mma_full = TiledMMAQKFull{}.get_slice(lane_id);
+        auto tSrS_full = thr_mma_full.partition_sg_fragment_C(cP);
+        auto cS_full = thr_mma_full.partition_C(cP);
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS_full.size(); i++)
+          tSrS_full(i) = shared.s_data
+              [get<0>(cS_full(i)) * kTileK + get<1>(cS_full(i))];
+
+        softmax(effective_scale, K == blk_k0, tSrS_full, tA_max, tA_sum, tArA);
+        reorder(tSrS_full, tArP);
+      } else {
+        softmax(effective_scale, K == blk_k0, tSrS, tA_max, tA_sum, tArA);
+        reorder(tSrS, tArP);
+      }
 
       /* GEMM 2: A += P * V, split in v dimension */
       CUTLASS_PRAGMA_UNROLL
@@ -1298,7 +1353,13 @@ struct DecodeFwdMainloop<
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
 
-      barrier();
+      // SLM reuse requires compiler ordering as well as a hardware barrier.
+      if constexpr (SplitV) {
+        sycl::group_barrier(
+            sycl::ext::oneapi::this_work_item::get_work_group<3>());
+      } else {
+        barrier();
+      }
 
       // next tile_idx
       next_tile_idx = K + 1;
@@ -1338,12 +1399,13 @@ struct DecodeFwdMainloop<
     }
   }
 
-  // Single step of blocked softmax.
-  CUTLASS_DEVICE
-  void softmax(
+  // Single step of blocked softmax. Templated on the score fragment so that
+  // split-V can pass the full-kv-width tile it gathers from SLM.
+  template <typename FragSAny>
+  CUTLASS_DEVICE void softmax(
       ElementS scale,    // Effective softmax scale (fp8 K scale folded in)
       bool first_block,  // First softmax block?
-      FragS& tS,         // Softmax src/dst block
+      FragSAny& tS,      // Softmax src/dst block
       FragSRow& tS_max,  // Softmax row-wise max accumulator
       FragSRow& tS_sum,  // Softmax row-wise sum accumulator
       FragA& tA) {       // O accumulator (for rescaling)
