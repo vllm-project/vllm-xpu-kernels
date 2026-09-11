@@ -3,7 +3,7 @@
 
 Tests the fused prefill (q-RoPE + K concat + latent cache insert) and decode
 (Q concat + latent cache insert) kernels against a pure-PyTorch reference.
-bf16 only -- fp8 / fp8_ds_mla cache-layout variants are not implemented.
+bf16/fp16 only -- fp8 / fp8_ds_mla cache-layout variants are not implemented.
 
 Run:
     pytest tests/test_kimi_k3_mla_epilogue.py -v
@@ -28,10 +28,10 @@ def _rope_pair(x: torch.Tensor, cos_sin: torch.Tensor) -> torch.Tensor:
     cos = cos_sin[:HALF_ROPE].float()
     sin = cos_sin[HALF_ROPE:].float()
     xf = x.float()
-    x_even, x_odd = xf[0::2], xf[1::2]
+    x_even, x_odd = xf[..., 0::2], xf[..., 1::2]
     new_even = x_even * cos - x_odd * sin
     new_odd = x_even * sin + x_odd * cos
-    return torch.stack([new_even, new_odd], dim=-1).flatten().to(x.dtype)
+    return torch.stack([new_even, new_odd], dim=-1).flatten(-2).to(x.dtype)
 
 
 def reference_prefill(q, k_nope, k_pe, kv_c, k_out, k_cache, slot_mapping,
@@ -92,18 +92,19 @@ def _make_rope(num_tokens, max_pos, apply_rope, device):
 @pytest.mark.parametrize("num_tokens", [1, 5, 37])
 @pytest.mark.parametrize("num_heads", [1, 8])
 @pytest.mark.parametrize("apply_rope", [False, True])
-def test_prefill_correctness(num_tokens, num_heads, apply_rope):
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_prefill_correctness(num_tokens, num_heads, apply_rope, dtype):
     torch.manual_seed(0)
     block_size, num_blocks = 16, num_tokens + 1
     max_pos = 4096
 
-    q = torch.randn(num_tokens, num_heads, QK_HEAD_DIM, dtype=torch.bfloat16,
+    q = torch.randn(num_tokens, num_heads, QK_HEAD_DIM, dtype=dtype,
                     device=DEVICE)
     k_nope = torch.randn(num_tokens, num_heads, QK_NOPE_DIM,
-                         dtype=torch.bfloat16, device=DEVICE)
-    k_pe = torch.randn(num_tokens, QK_ROPE_DIM, dtype=torch.bfloat16,
+                         dtype=dtype, device=DEVICE)
+    k_pe = torch.randn(num_tokens, QK_ROPE_DIM, dtype=dtype,
                        device=DEVICE)
-    kv_c = torch.randn(num_tokens, KV_LORA_RANK, dtype=torch.bfloat16,
+    kv_c = torch.randn(num_tokens, KV_LORA_RANK, dtype=dtype,
                        device=DEVICE)
     slot_mapping = torch.randperm(num_blocks * block_size,
                                   device=DEVICE)[:num_tokens].to(torch.int64)
@@ -111,10 +112,10 @@ def test_prefill_correctness(num_tokens, num_heads, apply_rope):
 
     q_ref = q.clone()
     k_out = torch.empty(num_tokens, num_heads, QK_HEAD_DIM,
-                        dtype=torch.bfloat16, device=DEVICE)
+                        dtype=dtype, device=DEVICE)
     k_out_ref = k_out.clone()
     k_cache = torch.zeros(num_blocks, block_size, CACHE_ENTRY,
-                          dtype=torch.bfloat16, device=DEVICE)
+                          dtype=dtype, device=DEVICE)
     k_cache_ref = k_cache.clone()
 
     reference_prefill(q_ref, k_nope, k_pe, kv_c, k_out_ref, k_cache_ref,
@@ -133,28 +134,29 @@ def test_prefill_correctness(num_tokens, num_heads, apply_rope):
 @pytest.mark.parametrize("num_tokens", [1, 5, 37])
 @pytest.mark.parametrize("num_heads", [1, 8])
 @pytest.mark.parametrize("apply_rope", [False, True])
-def test_decode_correctness(num_tokens, num_heads, apply_rope):
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_decode_correctness(num_tokens, num_heads, apply_rope, dtype):
     torch.manual_seed(0)
     block_size, num_blocks = 16, num_tokens + 1
     max_pos = 4096
 
     ql_nope = torch.randn(num_tokens, num_heads, KV_LORA_RANK,
-                          dtype=torch.bfloat16, device=DEVICE)
+                          dtype=dtype, device=DEVICE)
     q_pe = torch.randn(num_tokens, num_heads, QK_ROPE_DIM,
-                       dtype=torch.bfloat16, device=DEVICE)
-    kv_c = torch.randn(num_tokens, KV_LORA_RANK, dtype=torch.bfloat16,
+                       dtype=dtype, device=DEVICE)
+    kv_c = torch.randn(num_tokens, KV_LORA_RANK, dtype=dtype,
                        device=DEVICE)
-    k_pe = torch.randn(num_tokens, QK_ROPE_DIM, dtype=torch.bfloat16,
+    k_pe = torch.randn(num_tokens, QK_ROPE_DIM, dtype=dtype,
                        device=DEVICE)
     slot_mapping = torch.randperm(num_blocks * block_size,
                                   device=DEVICE)[:num_tokens].to(torch.int64)
     positions, cos_sin = _make_rope(num_tokens, max_pos, apply_rope, DEVICE)
 
     mqa_q = torch.empty(num_tokens, num_heads, CACHE_ENTRY,
-                        dtype=torch.bfloat16, device=DEVICE)
+                        dtype=dtype, device=DEVICE)
     mqa_q_ref = mqa_q.clone()
     k_cache = torch.zeros(num_blocks, block_size, CACHE_ENTRY,
-                          dtype=torch.bfloat16, device=DEVICE)
+                          dtype=dtype, device=DEVICE)
     k_cache_ref = k_cache.clone()
 
     reference_decode(ql_nope, q_pe, kv_c, k_pe, mqa_q_ref, k_cache_ref,

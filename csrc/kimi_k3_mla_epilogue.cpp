@@ -312,16 +312,17 @@ bool check_rope_inputs(
   auto const& rope_cache = cos_sin_cache.value();
   CHECK_DEVICE(positions);
   CHECK_DEVICE(rope_cache);
+  CHECK_CONTIGUOUS(positions);
+  CHECK_CONTIGUOUS(rope_cache);
   TORCH_CHECK(
       positions.dim() == 1 && positions.scalar_type() == torch::kInt64 &&
           positions.size(0) == num_tokens,
-      "position_ids must be int64 XPU with shape [num_tokens]");
+      "position_ids must be int64 XPU with shape [num_tokens], contiguous");
   TORCH_CHECK(
       rope_cache.dim() == 2 && rope_cache.size(1) == 64 &&
-          rope_cache.stride(1) == 1 &&
           rope_cache.scalar_type() == torch::kFloat32,
-      "cos_sin_cache must have shape [max_position, 64], unit last-dim "
-      "stride, and be fp32");
+      "cos_sin_cache must have shape [max_position, 64], contiguous, and be "
+      "fp32");
   return true;
 }
 }  // namespace
@@ -344,7 +345,9 @@ void fused_kimi_k3_mla_key_concat_kv_cache_insert(
   CHECK_DEVICE(k_out);
   CHECK_DEVICE(k_cache);
   CHECK_DEVICE(slot_mapping);
+  CHECK_STRIDE_ALIGNMENT(k_nope);
   TORCH_CHECK(k_nope.dim() == 3 && k_nope.size(2) == 128, "k_nope [Tp,H,128]");
+  CHECK_STRIDE_ALIGNMENT(q);
   TORCH_CHECK(q.dim() == 3 && q.size(2) == 192, "q [Tp,H,192]");
   CHECK_STRIDE_ALIGNMENT(k_pe);
   TORCH_CHECK(k_pe.dim() == 2 && k_pe.size(1) == 64, "k_pe [Tp,64]");
@@ -359,8 +362,10 @@ void fused_kimi_k3_mla_key_concat_kv_cache_insert(
       k_cache.dim() == 3 && k_cache.size(1) == cache_block_size &&
           k_cache.size(2) == 576,
       "k_cache [nblk,block_size,576] contiguous");
+  CHECK_CONTIGUOUS(slot_mapping);
   TORCH_CHECK(
-      slot_mapping.scalar_type() == torch::kInt64, "slot_mapping int64");
+      slot_mapping.scalar_type() == torch::kInt64,
+      "slot_mapping int64, contiguous");
   auto const dt = k_nope.scalar_type();
   TORCH_CHECK(
       q.scalar_type() == dt && k_pe.scalar_type() == dt &&
@@ -458,8 +463,10 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
   CHECK_DEVICE(k_cache);
   CHECK_DEVICE(slot_mapping);
   auto const dt = ql_nope.scalar_type();
+  CHECK_STRIDE_ALIGNMENT(ql_nope);
   TORCH_CHECK(
       ql_nope.dim() == 3 && ql_nope.size(2) == 512, "ql_nope [B,H,512]");
+  CHECK_STRIDE_ALIGNMENT(q_pe);
   TORCH_CHECK(
       q_pe.scalar_type() == dt && q_pe.dim() == 3 && q_pe.size(2) == 64,
       "q_pe [B,H,64]");
@@ -481,8 +488,10 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
       k_cache.scalar_type() == dt && k_cache.dim() == 3 &&
           k_cache.size(1) == cache_block_size && k_cache.size(2) == 576,
       "k_cache [nblk,block_size,576] contiguous, matches ql_nope dtype");
+  CHECK_CONTIGUOUS(slot_mapping);
   TORCH_CHECK(
-      slot_mapping.scalar_type() == torch::kInt64, "slot_mapping int64");
+      slot_mapping.scalar_type() == torch::kInt64,
+      "slot_mapping int64, contiguous");
 
   int const num_tokens = static_cast<int>(ql_nope.size(0));
   int const num_heads = static_cast<int>(ql_nope.size(1));
