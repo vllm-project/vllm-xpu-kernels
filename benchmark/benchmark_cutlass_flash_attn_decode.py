@@ -4,6 +4,7 @@
 
 # isort: off
 import gc
+from unittest.mock import patch
 
 import torch
 import triton
@@ -21,7 +22,9 @@ from benchmark.src.get_model_config import (
     gen_cutlass_flash_attn_decode_perf_configs as gen_perf_configs)
 from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
 from tests.utils import parse_args, seed_everything
-from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+from vllm_xpu_kernels.flash_attn_interface import (
+    flash_attn_varlen_func, build_decode_split_plan, _infer_num_xe_cores,
+    _kv_tile_from_block_size)
 from benchmark.presets import get_hardware_preset
 # isort: on
 
@@ -74,7 +77,8 @@ def make_decode_with_paged_kv_input(config):
                             num_kv_heads,
                             head_size,
                             dtype=output_dtype)
-    value_cache = torch.randn_like(key_cache)
+    value_cache = (key_cache[..., :512] if head_size == 576
+                   else torch.randn_like(key_cache))
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
                                                            dtype=torch.int32)
@@ -382,11 +386,29 @@ BATCH_DECODE_CONFIGS = [
             (16, 16), 64, "32x512_uniform_(16,16)_MHA"),
     _mk_cfg("8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384",
             (16, 16), 64, "8xmixed_128-16384_(16,16)_MHA"),
+    *[
+        _mk_cfg(
+            f"{len(kv_lens)}," + "+".join(["1"] * len(kv_lens)) + ","
+            + "+".join(map(str, kv_lens)),
+            (128, 1), block_size, f"mla_{name}_bs{block_size}", head_size=576)
+        for block_size in (64, 128)
+        for name, kv_lens in (
+            ("1x1100", [1100]),
+            ("4x1100", [1100] * 4),
+            ("4xragged", [110, 733, 1467, 2090]),
+            ("16x1100", [1100] * 16),
+        )
+    ],
 ]
 
 
-def benchmark_batch_decode(config, iterations=200):
+def benchmark_batch_decode(config, iterations=200, num_splits_kv=None,
+                           path="seqused"):
     """Benchmark a single batch decode config with GPU-event timing."""
+    if iterations <= WARMUP:
+        raise ValueError("iterations must exceed WARMUP")
+    if path not in ("seqused", "hostlens"):
+        raise ValueError(f"Unknown decode path: {path}")
     (seq_lens, num_heads, head_size, block_size, dtype, soft_cap,
      num_blocks, fa_versions, q_dtype, is_sink, name) = config
 
@@ -407,35 +429,58 @@ def benchmark_batch_decode(config, iterations=200):
                              dtype=torch.int32)
                for _ in range(iterations)]
 
-    def _run(i):
-        flash_attn_varlen_func(
-            queries[i], maybe_quantized_key_cache,
+    kv_lens = list(map(int, seq_lens.split(",")[2].split("+")))
+    length_args = ({"seqused_k": seq_k} if path == "seqused" else
+                   {"host_kv_lens": kv_lens})
+    if path == "hostlens" and num_splits_kv is not None and num_splits_kv > 1:
+        plan, work = build_decode_split_plan(
+            kv_lens, kv_tile=_kv_tile_from_block_size(block_size),
+            num_kv_splits=num_splits_kv,
+            num_xe_cores=_infer_num_xe_cores(maybe_quantized_query.device),
+            num_heads_kv=num_heads[1])
+        print(f"Host plan: splits={plan.tolist()}, work_items={work.size(0)}")
+    v_head_size = maybe_quantized_value_cache.size(-1)
+    output = torch.full(
+        (*maybe_quantized_query.shape[:-1], v_head_size),
+        float("nan"), dtype=dtype, device=maybe_quantized_query.device)
+
+    def _run(index):
+        return flash_attn_varlen_func(
+            queries[index], maybe_quantized_key_cache,
             maybe_quantized_value_cache,
             max_query_len, cu_query_lens, max_kv_len,
-            seqused_k=seq_k, softmax_scale=scale,
-            causal=False, block_table=bt_list[i],
-            window_size=(-1, -1), s_aux=sink)
+            softmax_scale=scale, num_splits_kv=num_splits_kv, out=output,
+            causal=False, block_table=bt_list[index],
+            window_size=(-1, -1), s_aux=sink, **length_args)
 
-    # Warmup
-    for i in range(min(WARMUP, iterations)):
-        _run(i)
-    torch.xpu.synchronize()
+    with patch(
+        "vllm_xpu_kernels.flash_attn_interface._fallback_varlen_attn",
+        side_effect=RuntimeError("Reference fallback disabled in benchmark"),
+    ):
+        _run(0)
+        torch.xpu.synchronize()
+        if not torch.isfinite(output).all().item():
+            raise RuntimeError("Decode produced nonfinite or unwritten output")
 
-    # Timed
-    start_event = torch.xpu.Event(enable_timing=True)
-    end_event = torch.xpu.Event(enable_timing=True)
-    measured = iterations - WARMUP
-    start_event.record()
-    for i in range(WARMUP, iterations):
-        _run(i)
-    end_event.record()
-    torch.xpu.synchronize()
+        for index in range(WARMUP):
+            _run(index)
+        torch.xpu.synchronize()
+
+        start_event = torch.xpu.Event(enable_timing=True)
+        end_event = torch.xpu.Event(enable_timing=True)
+        measured = iterations - WARMUP
+        start_event.record()
+        for index in range(WARMUP, iterations):
+            _run(index)
+        end_event.record()
+        torch.xpu.synchronize()
 
     avg_us = start_event.elapsed_time(end_event) * 1000.0 / measured
 
-    # KV bandwidth (K + V, bf16 -> 2 bytes)
-    kv_lens = list(map(int, seq_lens.split(",")[2].split("+")))
-    kv_bytes = sum(kv_lens) * num_heads[1] * head_size * 2 * 2
+    # Logical KV bytes, not measured memory traffic. MLA K and V alias.
+    kv_width = head_size if head_size == 576 else 2 * head_size
+    kv_bytes = (sum(kv_lens) * num_heads[1] * kv_width
+                * maybe_quantized_key_cache.element_size())
     bw_gbs = (kv_bytes / 1e9) / (avg_us / 1e6)
 
     clear_xpu_cache()
@@ -471,7 +516,7 @@ if __name__ == "__main__":
     # Batch Decode Benchmark (per-seq adaptive split-K evaluation)
     # ================================================================
     print("\n" + "=" * 80)
-    print("Batch Decode Benchmark (per-seq adaptive split-K)")
+    print("Batch Decode Benchmark (split policy and scheduling)")
     print("=" * 80)
     hdr = (f"{'config':<40} | {'batch':>5} {'kv_sum':>7} | "
            f"{'time(us)':>9} {'BW(GB/s)':>9}")
@@ -484,13 +529,19 @@ if __name__ == "__main__":
         num_seqs = int(seq_lens.split(",")[0])
         kv_lens = list(map(int, seq_lens.split(",")[2].split("+")))
         kv_sum = sum(kv_lens)
-        try:
-            avg_us, bw_gbs = benchmark_batch_decode(cfg, iterations=200)
-            print(f"{name:<40} | {num_seqs:>5} {kv_sum:>7} | "
-                  f"{avg_us:>9.1f} {bw_gbs:>9.1f}")
-        except Exception as e:
-            print(f"{name:<40} | {num_seqs:>5} {kv_sum:>7} | "
-                  f"{'ERROR':>9} {str(e)[:20]}")
-        clear_xpu_cache()
+        variants = ([('seqused', None)] if cfg[2] != 576 else
+                    [(path, splits) for path in ("seqused", "hostlens")
+                     for splits in (None, 1, 4, 8, 16, 32)])
+        for path, splits in variants:
+            label = f"{name}/{path}/{splits or 'auto'}"
+            try:
+                avg_us, bw_gbs = benchmark_batch_decode(
+                    cfg, iterations=iterations, num_splits_kv=splits, path=path)
+                print(f"{label:<40} | {num_seqs:>5} {kv_sum:>7} | "
+                      f"{avg_us:>9.1f} {bw_gbs:>9.1f}")
+            except Exception as exc:
+                print(f"{label:<40} | {num_seqs:>5} {kv_sum:>7} | "
+                      f"{'ERROR':>9} {str(exc).splitlines()[0][:80]}")
+            clear_xpu_cache()
 
     print("=" * 80)
