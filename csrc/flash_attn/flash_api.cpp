@@ -220,10 +220,13 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
   if (is_prefill_only) {
     if (!out_.has_value()) {
+      // Output head dim follows V (may differ from QK for asym attention).
       // For fp8 query the output cannot be fp8; default to fp16 (matches the
       // compute dtype inferred by the Python wrapper for fp8 inputs).
       auto out_dtype = q_is_fp8 ? at::kHalf : q_type;
-      out = torch::empty_like(q, q.options().dtype(out_dtype));
+      out = torch::empty(
+          {q.size(0), q.size(1), v.size(-1)},
+          q.options().dtype(out_dtype));
     }
     // Non-paged: always use chunk_prefill for everything
     std::optional<const at::Tensor> no_mask = std::nullopt;
@@ -254,10 +257,13 @@ std::vector<at::Tensor> mha_varlen_fwd(
         no_mask);
   } else if (max_seqlen_q > 1) {
     if (!out_.has_value()) {
+      // Output head dim follows V (may differ from QK for asym attention).
       // For fp8 query the output cannot be fp8; default to fp16 (matches the
       // compute dtype inferred by the Python wrapper for fp8 inputs).
       auto out_dtype = q_is_fp8 ? at::kHalf : q_type;
-      out = torch::empty_like(q, q.options().dtype(out_dtype));
+      out = torch::empty(
+          {q.size(0), q.size(1), v.size(-1)},
+          q.options().dtype(out_dtype));
     }
     int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
     at::Tensor seq_lens_q = cu_seqlens_q.slice(0, 1, batch_size + 1) -
