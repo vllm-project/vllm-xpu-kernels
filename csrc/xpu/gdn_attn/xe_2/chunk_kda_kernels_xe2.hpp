@@ -41,8 +41,8 @@
 //
 // Because `exp(-G)` grows without bound, `G` is clamped to `g_floor` and the
 // cumsum restarts every chunk, which keeps both operands inside the bf16/fp16
-// exponent range. The products that actually matter (`m > n`) are unaffected
-// since the two exponentials cancel there.
+// exponent range. Clipping changes the recurrence, so saturation detection
+// must reject the chunked path whenever the clamp engages.
 //
 // Everything the GEMM stages read is written by `prepare` into a chunk-aligned,
 // zero-padded workspace, so no stage below needs predication and the KDA conv
@@ -67,10 +67,11 @@ static constexpr int pad_slot_id = -1;
 // so the per-channel cumulative log-decay across one chunk must fit in the
 // float exponent range. exp(80) ~ 5.5e34 leaves headroom below the bf16/fp32
 // maximum of 3.4e38 (both have an 8-bit exponent, so fp32 operands would not
-// help). The unbounded softplus gate of a trained model stays far below this,
-// but the bounded sigmoid gate decays by up to `lower_bound` per token, so at
+// help). The unbounded softplus gate can exceed this for valid inputs. The
+// bounded sigmoid gate decays by up to `lower_bound` per token, so at
 // `lower_bound = -5` an average gate activation above 0.25 already crosses it.
-// The dispatcher therefore guards the sigmoid gate: it synchronizes after
+// The dispatcher therefore guards both gate modes (except provably safe
+// shallow sigmoid bounds): it synchronizes after
 // `prepare` and, if the clamp engaged, runs the recurrent kernel instead. Set
 // `VLLM_XPU_KDA_CHUNK_STRICT=1` to raise on that condition instead.
 static constexpr float g_floor = -80.0f;

@@ -134,3 +134,51 @@ def test_rms_norm_gated_rejects_unknown_activation() -> None:
     out = torch.empty_like(x)
     with pytest.raises(RuntimeError, match="unsupported activation"):
         torch.ops._C.fused_rms_norm_gated(out, x, gate, None, 1e-5, "relu")
+
+
+@pytest.mark.parametrize("shape", [(), (1, 0)])
+@pytest.mark.parametrize("has_weight", HAS_WEIGHT)
+@torch.inference_mode()
+def test_rms_norm_gated_rejects_invalid_dimensions(shape, has_weight):
+    x = torch.empty(shape, device="xpu", dtype=torch.bfloat16)
+    gate = torch.empty_like(x)
+    out = torch.empty_like(x)
+    weight = torch.empty(0, device="xpu", dtype=x.dtype) if has_weight else None
+    message = "at least one dimension" if not shape else "hidden_size"
+    with pytest.raises(RuntimeError, match=message):
+        torch.ops._C.fused_rms_norm_gated(out, x, gate, weight, 1e-5)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("activation", ACTIVATIONS)
+@pytest.mark.parametrize("has_weight", HAS_WEIGHT)
+@torch.inference_mode()
+def test_rms_norm_gated_empty_rows(dtype, activation, has_weight):
+    x = torch.empty(0, 128, device="xpu", dtype=dtype)
+    gate = torch.empty_like(x)
+    out = torch.empty_like(x)
+    weight = torch.ones(128, device="xpu", dtype=dtype) if has_weight else None
+    torch.ops._C.fused_rms_norm_gated(out, x, gate, weight, 1e-5, activation)
+    torch.xpu.synchronize()
+    assert out.shape == x.shape
+    assert out.numel() == 0
+
+
+@pytest.mark.parametrize("operand", ["input", "gate", "out", "weight"])
+@pytest.mark.parametrize("other_device", ["cpu", "xpu:1"])
+@torch.inference_mode()
+def test_rms_norm_gated_rejects_mixed_devices(operand, other_device):
+    if other_device == "xpu:1" and torch.xpu.device_count() < 2:
+        pytest.skip("requires two XPU devices")
+    tensors = {
+        name: torch.ones(2, 128, device="xpu:0", dtype=torch.bfloat16)
+        for name in ("input", "gate", "out")
+    }
+    tensors["weight"] = torch.ones(128, device="xpu:0", dtype=torch.bfloat16)
+    tensors[operand] = tensors[operand].to(other_device)
+    message = ("input must be on XPU" if operand == "input"
+               and other_device == "cpu" else "same device")
+    with pytest.raises(RuntimeError, match=message):
+        torch.ops._C.fused_rms_norm_gated(
+            tensors["out"], tensors["input"], tensors["gate"],
+            tensors["weight"], 1e-5)

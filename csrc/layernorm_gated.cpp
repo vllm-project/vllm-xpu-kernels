@@ -400,6 +400,20 @@ void fused_rms_norm_gated(
     std::optional<torch::Tensor> weight,
     double epsilon,
     const std::string& activation) {
+  TORCH_CHECK(input.is_xpu(), "fused_rms_norm_gated: input must be on XPU");
+  TORCH_CHECK(
+      input.dim() > 0,
+      "fused_rms_norm_gated: input must have at least one dimension");
+  TORCH_CHECK(
+      input.size(-1) > 0, "fused_rms_norm_gated: hidden_size must be positive");
+  TORCH_CHECK(
+      gate.device() == input.device() && out.device() == input.device(),
+      "fused_rms_norm_gated: gate and out must be on the same device as input");
+  if (weight.has_value()) {
+    TORCH_CHECK(
+        weight->device() == input.device(),
+        "fused_rms_norm_gated: weight must be on the same device as input");
+  }
   const at::DeviceGuard device_guard(input.device());
 
   TORCH_CHECK(
@@ -450,6 +464,10 @@ void fused_rms_norm_gated(
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "call_rms_norm_gated_kernel", [&] {
+        // Preserve validation for empty inputs, but never launch a zero grid.
+        if (input.numel() == 0) {
+          return;
+        }
         const scalar_t* weight_ptr =
             has_weight ? weight->data_ptr<scalar_t>() : nullptr;
         using Act = vllm::GateActivation;

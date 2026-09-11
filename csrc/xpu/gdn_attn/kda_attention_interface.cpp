@@ -1,5 +1,6 @@
 #include <sycl/sycl.hpp>
 #include <torch/all.h>
+#include <ATen/DeviceGuard.h>
 
 #include <limits>
 #include <cstdlib>
@@ -116,14 +117,12 @@ int64_t kda_chunk_max_workspace_bytes() {
 // clamps the per-chunk cumulative log-decay to keep both representable. Beyond
 // the clamp its result silently stops matching the sequential recurrence.
 //
-// How close a gate gets to that clamp depends on its parameterisation. The
-// softplus gate decays by -exp(A_log) * softplus(x) per token, which for a
-// trained model stays far away from `g_floor / chunk_size`. The bounded
-// sigmoid gate instead decays by up to `lower_bound` per token, so at
-// `lower_bound = -5` and 64-token chunks it only takes an average gate
-// activation above 0.25 to saturate. That case is therefore guarded by
-// default: the pipeline synchronizes after its first stage and, when the clamp
-// engaged, hands the batch to the `opt` backend instead.
+// The softplus gate decays by -exp(A_log) * softplus(x) per token and has no
+// input-independent lower bound. The bounded sigmoid gate can also saturate:
+// at `lower_bound = -5` and 64-token chunks an average gate activation above
+// 0.25 is enough. Both cases are guarded by default: the pipeline synchronizes
+// after its first stage and, when the clamp engaged, hands the batch to the
+// `opt` backend instead. Trained weights are not a numerical safety bound.
 //
 // The guard costs a device synchronization, so it is skipped when the bound is
 // shallow enough that a whole chunk of maximal decay still cannot reach the
@@ -1065,6 +1064,7 @@ std::vector<torch::Tensor> kda_causal_conv1d(
     const std::optional<torch::Tensor>& spec_state_indices,
     const std::optional<torch::Tensor>& num_accepted_tokens,
     const int64_t num_actual_tokens) {
+  const at::DeviceGuard device_guard(q_proj.device());
   validate_metadata(
       num_prefills,
       num_decodes,
@@ -1159,6 +1159,7 @@ void kda_gated_delta_rule(
     const std::optional<torch::Tensor>& num_accepted_tokens,
     const int64_t num_actual_tokens,
     const std::optional<double>& gate_lower_bound) {
+  const at::DeviceGuard device_guard(q.device());
   validate_metadata(
       num_prefills,
       num_decodes,

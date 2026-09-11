@@ -32,8 +32,8 @@ bool chunk_kda_xe2(
     // per-chunk cumulative log-decay hit the clamp, abandons the launch
     // without touching `core_attn_out` or `recurrent_state`. Callers should
     // then run the `opt` backend, which has no such range limit. Costs one
-    // device synchronization per call, so it is enabled only for the bounded
-    // sigmoid gate, whose per-token decay can plausibly reach the clamp.
+    // device synchronization per call. Enabled for softplus and for sigmoid
+    // bounds that permit saturation; shallow sigmoid bounds skip the check.
     bool guard_decay_range,
     // Raise instead of reporting the saturation back to the caller. Used by
     // VLLM_XPU_KDA_CHUNK_STRICT=1 to make the condition visible in tests.
@@ -42,13 +42,13 @@ bool chunk_kda_xe2(
 // True when the chunked pipeline supports this shape at all.
 bool chunk_kda_xe2_supported(int64_t head_dim);
 
-// True when a gate bounded below by `lower_bound` can drive the per-chunk
-// cumulative log-decay into the clamp at all. The bounded sigmoid gate decays
-// by strictly less than `lower_bound` per token, so over one chunk the cumsum
+// True when the gate can drive per-chunk cumulative log-decay into the clamp.
+// The bounded sigmoid gate contributes more than `lower_bound` per token, so
+// over one chunk the cumsum
 // stays above `chunk_size * lower_bound`; if that already sits above the floor
 // the clamp is unreachable and the guard's synchronization can be skipped.
-// Always false for the unbounded softplus gate, whose decay rate is a property
-// of the trained weights rather than of a configured bound.
+// Always true for the unbounded softplus gate, whose logits and trained
+// weights do not provide an input-independent safety bound.
 bool chunk_kda_xe2_decay_range_reachable(float lower_bound);
 
 // Bytes of scratch the chunked pipeline needs for the given problem.

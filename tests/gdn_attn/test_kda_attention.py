@@ -293,6 +293,64 @@ def _make_inputs(
     )
 
 
+@pytest.mark.skipif(torch.xpu.device_count() < 2, reason="requires two XPUs")
+@pytest.mark.parametrize("entrypoint", ["conv", "recurrent", "attention"])
+@pytest.mark.parametrize("dtype,head_dim,num_tokens", [
+    (torch.float16, 32, 3),
+    (torch.bfloat16, 64, 128),
+])
+@torch.inference_mode()
+def test_kda_uses_input_device(entrypoint, dtype, head_dim, num_tokens):
+    """Each entry point must use device 1's stream even with device 0 current.
+    """
+    device = torch.device("xpu:1")
+    with torch.xpu.device(device):
+        stream = torch.xpu.Stream(device=device)
+        with torch.xpu.stream(stream):
+            (projections, raw_gate, raw_beta, weights, conv_state,
+             recurrent_state, a_log, dt_bias, output) = _make_inputs(
+                 num_tokens, 2, head_dim, dtype, True, device=device)
+            # Also exercise recurrent densification on the guarded device.
+            projections = _as_fused_qkv_views(projections)
+            metadata = (
+                1, 0, 0,
+                torch.ones(1, device=device, dtype=torch.bool),
+                torch.tensor([0, num_tokens], device=device, dtype=torch.int32),
+                None,
+                torch.tensor([1], device=device, dtype=torch.int32),
+                None, None, None, None, num_tokens,
+            )
+
+            def invoke(out, conv, state):
+                if entrypoint == "conv":
+                    qkv = torch.ops._xpu_C.kda_causal_conv1d(
+                        *projections, conv, *weights, *metadata)
+                    return (*qkv, conv)
+                if entrypoint == "recurrent":
+                    torch.ops._xpu_C.kda_gated_delta_rule(
+                        out, *(p[:num_tokens] for p in projections),
+                        raw_gate, raw_beta, state, a_log, dt_bias, *metadata)
+                    return out, state
+                torch.ops._xpu_C.kda_attention(
+                    out, *projections, raw_gate, raw_beta, conv, state,
+                    *weights, a_log, dt_bias, *metadata)
+                return out, conv, state
+
+            expected = invoke(output.clone(), conv_state.clone(),
+                              recurrent_state.clone())
+            actual_out = output.clone()
+            actual_conv = conv_state.clone()
+            actual_state = recurrent_state.clone()
+            with torch.xpu.device(0):
+                actual = invoke(actual_out, actual_conv, actual_state)
+                assert torch.xpu.current_device() == 0
+            assert torch.xpu.current_stream(device) == stream
+        stream.synchronize()
+        for result, reference in zip(actual, expected):
+            assert result.device == device
+            torch.testing.assert_close(result, reference)
+
+
 def _as_fused_qkv_views(projections):
     """Repack q/k/v as row-strided slices of one fused mixed-QKV buffer.
 

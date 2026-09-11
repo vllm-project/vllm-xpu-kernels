@@ -218,6 +218,48 @@ def _strict_worker(out_path, a_log_scale, lower_bound=None):
         torch.save({"raised": str(exc)}, out_path)
 
 
+def _softplus_saturation_worker(out_path):
+    """Deterministic softplus input that clips at token 38 without a guard."""
+    import vllm_xpu_kernels._xpu_C  # noqa: F401
+    t = _build((1, 128, 64, "bfloat16", "float32"))
+    for name in ("q", "k", "v"):
+        t[name].zero_()
+        t[name].view(128, NUM_HEADS, 64)[:, :, 0] = 1
+    t["raw_gate"].fill_(2)
+    t["raw_beta"].zero_()
+    t["a_log"].zero_()
+    t["dt_bias"].zero_()
+    t["state"].zero_()
+    torch.save(_run(t), out_path)
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="requires XPU")
+def test_softplus_saturation_falls_back_without_strict_mode(tmp_path):
+    results = {}
+    for mode in ("opt", "auto", "chunk"):
+        out_path = str(tmp_path / f"softplus_{mode}.pt")
+        env = dict(os.environ)
+        env["VLLM_XPU_KDA_RECURRENT_MODE"] = mode
+        for name in ("VLLM_XPU_KDA_CHUNK_STRICT",
+                     "VLLM_XPU_KDA_CHUNK_MIN_SEQLEN",
+                     "VLLM_XPU_KDA_CHUNK_MAX_WORKSPACE_MB"):
+            env.pop(name, None)
+        env.setdefault("PYTHONPATH", os.getcwd())
+        subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--softplus-saturation",
+             out_path], check=True, env=env)
+        results[mode] = torch.load(out_path)
+
+    ref_out, ref_state = results["opt"]
+    # The unguarded chunk path implies output ~0.125 instead of ~0.06646.
+    assert abs(ref_out[0, 63, 0, 0].item() - 0.0664611) < 1e-3
+    assert abs(ref_state[0, 0, 0, 0].item() - 0.5316892) < 1e-3
+    for mode in ("auto", "chunk"):
+        out, state = results[mode]
+        torch.testing.assert_close(out, ref_out, atol=1e-4, rtol=1e-3)
+        torch.testing.assert_close(state, ref_state, atol=1e-4, rtol=1e-3)
+
+
 def _collect(mode, tmp_path):
     out_path = str(tmp_path / f"{mode}.pt")
     env = dict(os.environ)
@@ -361,6 +403,8 @@ def test_chunk_strict_accepts_a_bound_the_clamp_cannot_reach(tmp_path):
 if __name__ == "__main__":
     if sys.argv[1] == "--scatter":
         _scatter_worker(sys.argv[2])
+    elif sys.argv[1] == "--softplus-saturation":
+        _softplus_saturation_worker(sys.argv[2])
     elif sys.argv[1] == "--strict":
         bound = sys.argv[4]
         _strict_worker(sys.argv[2], sys.argv[3],

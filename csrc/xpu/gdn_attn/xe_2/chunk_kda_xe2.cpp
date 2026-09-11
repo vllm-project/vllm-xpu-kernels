@@ -38,7 +38,8 @@ bool chunk_kda_xe2_supported(int64_t head_dim) {
 
 bool chunk_kda_xe2_decay_range_reachable(float lower_bound) {
   if (!kda_gate::use_lower_bound(lower_bound)) {
-    return false;
+    // Softplus has no lower bound: valid logits or A_log can saturate a chunk.
+    return true;
   }
   // `prepare` resets the cumulative log-decay at every chunk boundary and the
   // sigmoid gate contributes more than `lower_bound` per token, so the cumsum
