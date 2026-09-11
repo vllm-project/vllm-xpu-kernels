@@ -48,6 +48,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! weight, float epsilon) -> ()");
   ops.impl("fused_add_gemma_rms_norm", torch::kXPU, &fused_add_gemma_rms_norm);
 
+  // Fused gated RMSNorm: rms_norm(input) * weight * act(gate).
+  ops.def(
+      "fused_rms_norm_gated(Tensor! result, Tensor input, Tensor gate, "
+      "Tensor? weight, float epsilon, str activation=\"sigmoid\") -> ()");
+  ops.impl("fused_rms_norm_gated", torch::kXPU, &fused_rms_norm_gated);
+
   // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8).
   ops.def(
       "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
