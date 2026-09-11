@@ -24,25 +24,29 @@ inline int get_num_splits(
   // The decode kernel iterates kv_tile-sized work units within each page,
   // not page-sized units. The dispatch (see paged_decode_utils.hpp::
   // dispatch_by_page_size) routes
-  //   block_size == 16              -> kv_tile=_16 (SubgroupLayoutQK<_1,_1,_1>,
-  //   SGPerWG=1) block_size == 32              -> kv_tile=_32
-  //   (SubgroupLayoutQK<_1,_2,_1>, SGPerWG=2) block_size > 0 && %% 64 == 0  ->
-  //   kv_tile=_64  (SubgroupLayoutQK<_1,_4,_1>, SGPerWG=4)
+  //   block_size > 0 && %% 64 == 0  -> kv_tile=_64 (SubgroupLayoutQK<_1,_4,_1>,
+  //   SGPerWG=4)
+  //   block_size == 32              -> kv_tile=_32 (SubgroupLayoutQK<_1,_2,_1>,
+  //   SGPerWG=2)
+  //   every other multiple of 16 (16, 48, 80, 96, 112, 160, ...)
+  //                                 -> kv_tile=_16 (SubgroupLayoutQK<_1,_1,_1>,
+  //   SGPerWG=1)
   int kv_tile;
   int sg_per_wg;
   int policy_split_cap;
-  if (block_size == 16) {
-    kv_tile = 16;
-    sg_per_wg = 1;
-    policy_split_cap = 16;
+  if (block_size > 0 && (block_size % 64) == 0) {
+    kv_tile = 64;
+    sg_per_wg = 4;
+    policy_split_cap = 64;
   } else if (block_size == 32) {
     kv_tile = 32;
     sg_per_wg = 2;
     policy_split_cap = 32;
   } else {
-    kv_tile = 64;
-    sg_per_wg = 4;
-    policy_split_cap = 64;
+    // 16, 48, 80, 96, 112, 160, ... (every other multiple of 16)
+    kv_tile = 16;
+    sg_per_wg = 1;
+    policy_split_cap = 16;
   }
 
   int kv_tiles = (max_seqlen_k + kv_tile - 1) / kv_tile;
