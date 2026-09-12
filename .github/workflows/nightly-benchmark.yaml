@@ -28,6 +28,7 @@ permissions:
   actions: write
   issues: read
   pull-requests: read
+  checks: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
@@ -61,6 +62,8 @@ jobs:
       trigger: ${{ steps.resolve.outputs.trigger }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       head_branch: ${{ steps.resolve.outputs.head_branch }}
+      wheel_mode: ${{ steps.resolve.outputs.wheel_mode }}
+      check_run_id: ${{ steps.create-check.outputs.result }}
     steps:
       - name: Resolve unit-test wheel artifact run
         id: resolve
@@ -163,44 +166,67 @@ jobs:
               headSha = run.head_sha;
             }
 
-            if (!runId) {
-              const workflows = await github.paginate(
-                github.rest.actions.listRepoWorkflows,
-                {owner, repo, per_page: 100},
-              );
-              const workflow = workflows.find(
-                (item) => item.name === process.env.UNIT_TEST_WORKFLOW,
-              );
-              if (!workflow) {
-                core.setFailed(`Workflow not found: ${process.env.UNIT_TEST_WORKFLOW}`);
-                return;
+            // PR reuses the unit-test wheel; only builds from source when that
+            // run failed or never produced the artifact. Nightly always builds
+            // from source against the tested commit.
+            let wheelMode = trigger === 'pr' ? 'artifact' : 'source';
+
+            if (wheelMode === 'artifact') {
+              const artifactName = 'xpu-kernel-wheel';
+
+              async function runHasWheel(id) {
+                const artifacts = await github.paginate(
+                  github.rest.actions.listWorkflowRunArtifacts,
+                  {owner, repo, run_id: Number(id), per_page: 100},
+                );
+                return artifacts.some(
+                  (item) => item.name === artifactName && !item.expired,
+                );
               }
 
-              const runs = await github.paginate(
-                github.rest.actions.listWorkflowRuns,
-                {
-                  owner,
-                  repo,
-                  workflow_id: workflow.id,
-                  head_sha: headSha,
-                  status: 'completed',
-                  per_page: 20,
-                },
-              );
-              const run = runs.find((item) => item.conclusion === 'success');
-              if (!run) {
-                if (context.eventName === 'pull_request' || context.eventName === 'issue_comment') {
-                  skip(
-                    `No successful ${process.env.UNIT_TEST_WORKFLOW} run is ready for ${headSha}; waiting for workflow_run completion.`,
-                  );
-                  return;
-                }
-                core.setFailed(
-                  `No successful ${process.env.UNIT_TEST_WORKFLOW} run found for ${headSha}`,
+              let resolvedRunId = '';
+              if (runId && (await runHasWheel(runId))) {
+                resolvedRunId = String(runId);
+              } else {
+                const workflows = await github.paginate(
+                  github.rest.actions.listRepoWorkflows,
+                  {owner, repo, per_page: 100},
                 );
-                return;
+                const workflow = workflows.find(
+                  (item) => item.name === process.env.UNIT_TEST_WORKFLOW,
+                );
+                if (workflow) {
+                  const runs = await github.paginate(
+                    github.rest.actions.listWorkflowRuns,
+                    {
+                      owner,
+                      repo,
+                      workflow_id: workflow.id,
+                      head_sha: headSha,
+                      status: 'completed',
+                      per_page: 20,
+                    },
+                  );
+                  for (const run of runs) {
+                    if (run.conclusion === 'success' && (await runHasWheel(run.id))) {
+                      resolvedRunId = String(run.id);
+                      break;
+                    }
+                  }
+                }
               }
-              runId = String(run.id);
+
+              if (resolvedRunId) {
+                runId = resolvedRunId;
+              } else {
+                core.notice(
+                  `No usable ${process.env.UNIT_TEST_WORKFLOW} wheel artifact found for ${headSha}; building wheel from source.`,
+                );
+                wheelMode = 'source';
+                runId = '';
+              }
+            } else {
+              runId = '';
             }
 
             core.setOutput('head_sha', headSha);
@@ -210,6 +236,27 @@ jobs:
             core.setOutput('trigger', trigger);
             core.setOutput('pr_number', String(prNumber || ''));
             core.setOutput('head_branch', headBranch);
+            core.setOutput('wheel_mode', wheelMode);
+
+      - name: Create benchmark check run
+        id: create-check
+        if: steps.resolve.outputs.should_run == 'true' && steps.resolve.outputs.pr_number != ''
+        uses: actions/github-script@v8
+        with:
+          result-encoding: string
+          script: |
+            const {data} = await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'benchmark/bmg',
+              head_sha: '${{ steps.resolve.outputs.head_sha }}',
+              status: 'in_progress',
+              output: {
+                title: 'Nightly BMG Benchmark',
+                summary: 'Benchmark run in progress...',
+              },
+            });
+            return String(data.id);
 
   build-docker-image-bmg:
     runs-on: self-hosted-bmg
@@ -258,6 +305,7 @@ jobs:
           ref: ${{ needs.resolve-wheel-artifact.outputs.head_sha }}
 
       - name: Download wheel artifact
+        if: needs.resolve-wheel-artifact.outputs.wheel_mode == 'artifact'
         uses: actions/download-artifact@v4
         with:
           name: xpu-kernel-wheel
@@ -266,13 +314,20 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Install wheel
+        env:
+          WHEEL_MODE: ${{ needs.resolve-wheel-artifact.outputs.wheel_mode }}
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           uv pip install -r requirements.txt
-          WHEEL=$(find dist -name '*.whl' -print -quit)
-          VLLM_USE_PRECOMPILED=1 \
-          VLLM_PRECOMPILED_WHEEL_LOCATION="${WHEEL}" \
-          uv pip install --no-build-isolation -e . -v
+          if [ "${WHEEL_MODE}" = "artifact" ]; then
+            WHEEL=$(find dist -name '*.whl' -print -quit)
+            VLLM_USE_PRECOMPILED=1 \
+            VLLM_PRECOMPILED_WHEEL_LOCATION="${WHEEL}" \
+            uv pip install --no-build-isolation -e . -v
+          else
+            git submodule sync && git submodule update --init --recursive
+            MAX_JOBS=128 uv pip install --no-build-isolation -e . -v
+          fi
 
       - name: Restore main benchmark baseline
         id: restore-baseline
@@ -322,12 +377,13 @@ jobs:
           PR_NUMBER: ${{ needs.resolve-wheel-artifact.outputs.pr_number }}
           HEAD_BRANCH: ${{ needs.resolve-wheel-artifact.outputs.head_branch }}
         run: |
+          TS=$(date -u +%y%m%d_%H%M)
           if [ "${TRIGGER}" = "pr" ]; then
-            DOCKER_TAG="pr-${PR_NUMBER}-${SHORT_SHA}"
-            RESULT_ID="pr-${PR_NUMBER}-${HEAD_BRANCH}-${SHORT_SHA}"
+            DOCKER_TAG="pr-${PR_NUMBER}-${SHORT_SHA}-${TS}"
+            RESULT_ID="pr-${PR_NUMBER}-${HEAD_BRANCH}-${SHORT_SHA}-${TS}"
           else
-            DOCKER_TAG="nightly-${SHORT_SHA}"
-            RESULT_ID="nightly-${SHORT_SHA}"
+            DOCKER_TAG="nightly-${SHORT_SHA}-${TS}"
+            RESULT_ID="nightly-${SHORT_SHA}-${TS}"
           fi
           uv pip install "psycopg[binary]"
           python tools/upload_benchmark_db.py \
@@ -392,6 +448,51 @@ jobs:
         with:
           path: benchmark-baseline
           key: benchmark-baseline-${{ github.event.repository.default_branch }}-${{ github.run_id }}
+
+  finalize-check-bmg:
+    runs-on: self-hosted-bmg
+    needs: [resolve-wheel-artifact, run-benchmarks-bmg]
+    if: |
+      always() &&
+      needs.resolve-wheel-artifact.outputs.should_run == 'true' &&
+      needs.resolve-wheel-artifact.outputs.pr_number != '' &&
+      needs.resolve-wheel-artifact.outputs.check_run_id != ''
+    steps:
+      - name: Download benchmark results
+        if: needs.run-benchmarks-bmg.result != 'skipped'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-results-${{ needs.resolve-wheel-artifact.outputs.head_sha }}
+          path: benchmark-results
+
+      - name: Complete benchmark check run
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const result = '${{ needs.run-benchmarks-bmg.result }}';
+            const conclusion = result === 'success'
+              ? 'success'
+              : (result === 'skipped' ? 'neutral' : 'failure');
+            let summary = `Benchmark job result: **${result}**.`;
+            try {
+              summary += '\n\n' + fs.readFileSync(
+                'benchmark-results/regression_report.md', 'utf8');
+            } catch (err) {
+              summary += `\n\n_No regression report available (${err.message})._`;
+            }
+            await github.rest.checks.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              check_run_id: Number('${{ needs.resolve-wheel-artifact.outputs.check_run_id }}'),
+              status: 'completed',
+              conclusion,
+              output: {
+                title: 'Nightly BMG Benchmark',
+                summary: summary.slice(0, 65000),
+              },
+            });
 
   clean-repo-bmg:
     runs-on: self-hosted-bmg

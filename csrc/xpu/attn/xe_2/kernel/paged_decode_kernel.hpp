@@ -39,10 +39,14 @@
 
 #include "cute/util/type_traits.hpp"
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
-#include "./collective/chunk_prefill_mainloop.hpp"
-#include "./collective/chunk_prefill_epilogue.hpp"
+#include "csrc/xpu/attn/xe_2/collective/chunk_prefill_mainloop.hpp"
+#include "csrc/xpu/attn/xe_2/collective/chunk_prefill_epilogue.hpp"
 
 namespace cutlass::fmha::kernel {
+// Arch-tagged inline namespace: gives these definitions a mangled name
+// distinct from the other Xe architecture's identically named copies,
+// while leaving name lookup (cutlass::fmha::...) unchanged.
+inline namespace vllm_xpu_xe2 {
 
 using namespace cute;
 
@@ -872,5 +876,7 @@ class ReduceSplitK {
     }
   }
 };
+
+}  // namespace vllm_xpu_xe2
 
 }  // namespace cutlass::fmha::kernel

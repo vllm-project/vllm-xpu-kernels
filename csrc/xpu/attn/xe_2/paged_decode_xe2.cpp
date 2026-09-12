@@ -7,6 +7,7 @@
   #include "paged_decode_extern.hpp"
 #endif
 
+namespace vllm::xpu::xe2 {
 using namespace cute;
 
 void cutlass_paged_decode_xe2(
@@ -318,3 +319,5 @@ void cutlass_paged_decode_impl(
     dispatch_by_page_size<_16>(block_size, head_case, queue, cuQKType, args);
   }
 }
+
+}  // namespace vllm::xpu::xe2

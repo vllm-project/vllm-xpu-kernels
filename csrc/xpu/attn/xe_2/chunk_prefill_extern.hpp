@@ -2,6 +2,7 @@
 
 #include "chunk_prefill.hpp"
 
+namespace vllm::xpu::xe2 {
 // =============================================================================
 // Configuration: Add new policies here
 // =============================================================================
@@ -103,3 +104,5 @@ CHUNK_POLICY_LIST(DECLARE_ALL_BOOL_COMBINATIONS)
 #undef DECLARE_FOR_LSE_FALSE
 #undef DECLARE_FOR_LSE_BOTH
 #undef DECLARE_POLICY_DISPATCH_EXTERN
+
+}  // namespace vllm::xpu::xe2
