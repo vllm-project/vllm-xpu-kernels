@@ -69,50 +69,6 @@ def _commands_for_suite(suite: str, raw_dir: Path) -> list[BenchmarkCommand]:
 
     commands.extend([
         BenchmarkCommand(
-            "grouped_topk",
-            [
-                python,
-                "benchmark/benchmark_grouped_topk.py",
-                "--save-path",
-                str(raw_dir / "grouped_topk"),
-            ],
-            required=False,
-        ),
-        BenchmarkCommand(
-            "topk_softmax",
-            [
-                python,
-                "benchmark/benchmark_topk.py",
-                "--scoring-func",
-                "softmax",
-                "--save-path",
-                str(raw_dir / "topk"),
-            ],
-            required=False,
-        ),
-        BenchmarkCommand(
-            "topk_sigmoid",
-            [
-                python,
-                "benchmark/benchmark_topk.py",
-                "--scoring-func",
-                "sigmoid",
-                "--save-path",
-                str(raw_dir / "topk"),
-            ],
-            required=False,
-        ),
-        BenchmarkCommand(
-            "topk_softplus_sqrt",
-            [
-                python,
-                "benchmark/benchmark_topk_softplus_sqrt.py",
-                "--save-path",
-                str(raw_dir / "topk_softplus_sqrt"),
-            ],
-            required=False,
-        ),
-        BenchmarkCommand(
             "gemm_onednn",
             [
                 python,
@@ -132,61 +88,6 @@ def _commands_for_suite(suite: str, raw_dir: Path) -> list[BenchmarkCommand]:
                 "benchmark/benchmark_gdn_attn.py",
                 "--save-path",
                 str(raw_dir / "gdn_attn"),
-            ],
-            required=False,
-        ),
-        BenchmarkCommand(
-            "causal_conv1d",
-            [
-                python,
-                "benchmark/benchmark_causal_conv1d.py",
-                "--save-path",
-                str(raw_dir / "causal_conv1d"),
-            ],
-            required=False,
-        ),
-        BenchmarkCommand(
-            "gated_delta_rule",
-            [
-                python,
-                "benchmark/benchmark_gated_delta_rule.py",
-                "--save-path",
-                str(raw_dir / "gated_delta_rule"),
-            ],
-            required=False,
-        ),
-        BenchmarkCommand(
-            "lora",
-            [
-                python,
-                "benchmark/benchmark_lora.py",
-                "list_bench",
-                "--dtype",
-                "torch.float16",
-                "--arg-pool-size",
-                "32",
-                "--batch-sizes",
-                "1",
-                "16",
-                "64",
-                "--hidden-sizes",
-                "2048",
-                "4096",
-                "--lora-ranks",
-                "16",
-                "--num-loras",
-                "1",
-                "4",
-                "--op-types",
-                "bgmv_shrink",
-                "bgmv_expand",
-                "bgmv_expand_slice",
-                "--seq-lengths",
-                "1",
-                "--sort-by-lora-id",
-                "1",
-                "-o",
-                str(raw_dir / "lora"),
             ],
             required=False,
         ),
@@ -573,13 +474,27 @@ def _format_report(
     ])
 
     if regressions:
+        by_suite: dict[str, int] = {}
+        for item in regressions:
+            by_suite[item["benchmark"]] = by_suite.get(item["benchmark"], 0) + 1
         lines.extend([
-            "### Regressions",
+            "### Regressions by suite",
+            "",
+            "| Suite | Regressions |",
+            "| --- | ---: |",
+        ])
+        for suite in sorted(by_suite):
+            lines.append(f"| {suite} | {by_suite[suite]} |")
+        lines.extend([
+            "",
+            "### All regressions",
             "",
             "| Benchmark | Metric | Baseline | Current | Change | Case |",
             "| --- | --- | ---: | ---: | ---: | --- |",
         ])
-        for item in regressions[:50]:
+        for item in sorted(
+            regressions, key=lambda i: (i["benchmark"], -i["change"])
+        ):
             lines.append(
                 "| {benchmark} | {metric} | {baseline:.4g} | "
                 "{current:.4g} | {change:.1%} | `{case_id}` |".format(

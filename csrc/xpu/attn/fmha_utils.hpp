@@ -17,11 +17,17 @@ enum class CutlassDType { half, bfloat16, float8_e4m3, float8_e5m2 };
 struct CutlassQKType {
   CutlassDType q_type;
   CutlassDType k_type;
+  // Output (accumulator/temp_out) dtype. For non-fp8 Q this mirrors q_type; for
+  // fp8 Q the output precision is independent of the (fp8) input and is set
+  // from the output tensor by the host.
+  CutlassDType o_type;
 
   // Convenience: construct with identical types
-  explicit CutlassQKType(CutlassDType t) : q_type(t), k_type(t) {}
+  explicit CutlassQKType(CutlassDType t) : q_type(t), k_type(t), o_type(t) {}
   CutlassQKType(CutlassDType q_t, CutlassDType k_t)
-      : q_type(q_t), k_type(k_t) {}
+      : q_type(q_t), k_type(k_t), o_type(q_t) {}
+  CutlassQKType(CutlassDType q_t, CutlassDType k_t, CutlassDType o_t)
+      : q_type(q_t), k_type(k_t), o_type(o_t) {}
 };
 
 inline CutlassDType aten_to_dtype(const at::ScalarType st) {
@@ -66,10 +72,23 @@ struct chunk_policy_head96 {
 };
 
 struct chunk_policy_head128 {
+#ifdef VLLM_XPU_ENABLE_XE2
   using ShapeQK = Shape<_256, _32, _32>;
   using ShapePV = Shape<_256, _32, _32>;
   using ShapeOut = Shape<_256, _128>;
   using SubgroupLayoutQK = Layout<Shape<_16, _1, _1>>;
+#endif
+#ifdef VLLM_XPU_ENABLE_XE3P
+  using ShapeQK = Shape<_512, _64, _64>;
+  using ShapePV = Shape<_512, _64, _64>;
+  using ShapeOut = Shape<_512, _128>;
+  using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
+
+  using ShapeQK_Causal = Shape<_256, _64, _64>;
+  using ShapePV_Causal = Shape<_256, _64, _64>;
+  using ShapeOut_Causal = Shape<_256, _128>;
+  using SubgroupLayoutQK_Causal = Layout<Shape<_16, _1, _1>>;
+#endif
 };
 
 struct chunk_policy_head192 {
@@ -92,6 +111,54 @@ struct chunk_policy_head512 {
   using ShapeOut = Shape<_256, _256>;
   using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };
+
+// -----------------------------------------------------------------------------
+// Full-FP8 chunk_prefill tile policies (TUNE THESE DIRECTLY).
+//
+// The full-fp8 attention path (fp8 Q/K/V) is tuned INDEPENDENTLY of the
+// half/bf16 path. fp8's 1-byte K/V/P fragments leave register headroom that the
+// 2-byte half/bf16 fragments lack, so the fp8 path can afford a larger KV (or
+// Q) tile without register spills. Edit the structs below to retune the fp8
+// tiles; the half/bf16 policies (chunk_policy_head*) are unaffected.
+//
+// Tile-shape mode semantics (shared by all three shapes in a policy):
+//   ShapeQK  = <Q_tile,  KV_block,  headdim_contract>
+//   ShapePV  = <Q_tile,  V_headdim, KV_contract>
+//   ShapeOut = <Q_tile,  head_size>
+// Constraints the tuner MUST preserve (enforced by static_asserts in
+// FMHAConfig):
+//   * get<0>(ShapeQK) == get<0>(ShapePV) == get<0>(ShapeOut)   (Q tile match)
+//   * get<1>(ShapeOut) == head_size  (output head dim; do NOT scale with the KV
+//     tile -- e.g. head128 keeps ShapeOut = <Q_tile, 128>)
+//   * get<1>(ShapeQK) (the KV block) must divide the paged block_size, so a
+//     KV block of 128 requires the paged block_size to be a multiple of 128.
+//   * get<1>(ShapeQK) == get<2>(ShapePV)  (both are the KV block/contract, so a
+//     KV=128 tile is ShapeQK=<Q,128,d>, ShapePV=<Q,Vsub,128>)
+//
+// These initially mirror the corresponding chunk_policy_head* shapes, so the
+// default behavior is identical to the half/bf16 path until you change them.
+// -----------------------------------------------------------------------------
+struct fp8_chunk_policy_head128 {
+  using ShapeQK = Shape<_512, _64, _128>;
+  using ShapePV = Shape<_512, _128, _64>;
+  using ShapeOut = Shape<_512, _128>;
+  using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
+};
+
+// Maps a standard (half/bf16) chunk_policy to the isolated full-fp8 policy used
+// by the full-fp8 dispatch branch. The primary template defaults to identity so
+// any policy without a dedicated fp8 counterpart (e.g. the *_b16 block_size==16
+// policies) keeps its existing tile shapes.
+template <typename StdPolicy>
+struct fp8_policy_of {
+  using type = StdPolicy;
+};
+template <>
+struct fp8_policy_of<chunk_policy_head128> {
+  using type = fp8_chunk_policy_head128;
+};
+template <typename StdPolicy>
+using fp8_policy_of_t = typename fp8_policy_of<StdPolicy>::type;
 
 // chunk_prefill policies with TileShapeQK[1] = 16 (for block_size = 16).
 // These mirror the head-size policies above but halve the K-dim sub-tile so
@@ -139,15 +206,6 @@ struct chunk_policy_head512_b16 {
 };
 
 // define decode policy
-template <typename q_packed, typename head_dim, typename kv_tile>
-struct decode_policy_qpacked_head {
-  static_assert(
-      cute::is_same_v<kv_tile, _16> || cute::is_same_v<kv_tile, _32> ||
-          cute::is_same_v<kv_tile, _64> || cute::is_same_v<kv_tile, _128>,
-      "Unsupported kv_tile for decode_policy_qpacked_head "
-      "(supported: _16, _32, _64, _128)");
-};
-
 // Maximum V-dim (head_size_vo) a single decode work-group may own.
 //
 // The softmax/output accumulator held in registers is
@@ -208,6 +266,15 @@ constexpr int decode_shapeout_v_value() {
 template <typename q_packed, typename head_dim>
 using decode_shapeout_v =
     cute::Int<decode_shapeout_v_value<q_packed, head_dim>()>;
+
+template <typename q_packed, typename head_dim, typename kv_tile>
+struct decode_policy_qpacked_head {
+  static_assert(
+      cute::is_same_v<kv_tile, _16> || cute::is_same_v<kv_tile, _32> ||
+          cute::is_same_v<kv_tile, _64> || cute::is_same_v<kv_tile, _128>,
+      "Unsupported kv_tile for decode_policy_qpacked_head "
+      "(supported: _16, _32, _64, _128)");
+};
 
 // kv_tile == _16 (block_size == 16)
 template <typename q_packed, typename head_dim>

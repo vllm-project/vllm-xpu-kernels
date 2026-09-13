@@ -342,7 +342,7 @@ bool is_xe3_arch(int64_t device_index);
 
 void exponential_2d_(
     torch::Tensor& tensor,
-    torch::Tensor& seeds,  // should on CPU
+    torch::Tensor& seeds,  // CPU [2] shared
     const double lambda);
 
 void topk_topp_sampler(
@@ -352,7 +352,7 @@ void topk_topp_sampler(
     const std::optional<torch::Tensor>& k,
     const std::optional<torch::Tensor>& p,
     const std::string& logprobs_mode,
-    torch::Tensor& seeds,  // should on CPU
+    torch::Tensor& seeds,  // CPU [2] shared or XPU [batch_size, 2] per-row
     const double lambda);
 
 #ifdef VLLM_MQA_LOGITS_ENABLED
@@ -402,6 +402,12 @@ void fused_input_norm(
     torch::Tensor& input,
     torch::Tensor& weight,
     torch::Tensor& bias);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
+    const torch::Tensor& logits,
+    const torch::Tensor& num_sampled_tokens,
+    int64_t max_num_kept,
+    int64_t max_compact_support);
 
 // ---------------------------------------------------------------------------
 // 2-rank peer-to-peer collectives over Level Zero IPC (csrc/xpu/p2p/).
