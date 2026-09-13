@@ -636,8 +636,7 @@ function(add_xe3_kernel_library LIBRARY_NAME)
   endif()
 
   # Set C++ standard
-  set(CMAKE_CXX_STANDARD 17)
-  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  set_property(TARGET ${LIBRARY_NAME} PROPERTY CXX_STANDARD 20)
 
   # Find all source files
   file(GLOB_RECURSE KERNEL_SOURCES "*.cpp" ${ATTN_KERNEL_SRCS_GEN})
