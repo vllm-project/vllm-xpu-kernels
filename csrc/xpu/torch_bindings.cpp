@@ -333,6 +333,48 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "compact_sampling_mask(Tensor logits, Tensor num_sampled_tokens,"
       "int max_num_kept, int max_compact_support) -> (Tensor, Tensor, Tensor)");
   xpu_ops.impl("compact_sampling_mask", torch::kXPU, &compact_sampling_mask);
+
+  // 2-rank peer-to-peer collectives over Level Zero IPC.
+  //
+  // The staging slots, signal pages and peer pointers are all owned by the
+  // caller and cross as raw device addresses in int64_t, the way vLLM's
+  // custom_all_reduce passes `fptr_t`.  `out` is the only tensor these
+  // mutate.
+  xpu_ops.def(
+      "xpu_p2p_all_reduce(Tensor! out, Tensor input, int my_stage, "
+      "int peer_stage, int local_flags, int peer_flags, int counters, "
+      "int slot_bytes) -> ()");
+  xpu_ops.impl("xpu_p2p_all_reduce", torch::kXPU, &xpu_p2p_all_reduce);
+
+  xpu_ops.def(
+      "xpu_p2p_all_gather(Tensor! out, Tensor input, int my_stage, "
+      "int peer_stage, int local_flags, int peer_flags, int counters, "
+      "int slot_bytes, int out_my_offset, int out_peer_offset) -> ()");
+  xpu_ops.impl("xpu_p2p_all_gather", torch::kXPU, &xpu_p2p_all_gather);
+
+  // Pointer- and handle-only ops: no tensor to dispatch on, so they are
+  // registered without a dispatch key, like is_bmg_g21 above.
+  xpu_ops.def("xpu_p2p_signal_page_bytes() -> int");
+  xpu_ops.impl("xpu_p2p_signal_page_bytes", &xpu_p2p_signal_page_bytes);
+
+  xpu_ops.def("xpu_ipc_export_handle(int ptr) -> (Tensor, int, int)");
+  xpu_ops.impl("xpu_ipc_export_handle", &xpu_ipc_export_handle);
+
+  xpu_ops.def("xpu_ipc_release_handle(Tensor handle_bytes) -> ()");
+  xpu_ops.impl("xpu_ipc_release_handle", &xpu_ipc_release_handle);
+
+  xpu_ops.def(
+      "xpu_ipc_open_handle(Tensor handle_bytes, int fd, int offset) -> int");
+  xpu_ops.impl("xpu_ipc_open_handle", &xpu_ipc_open_handle);
+
+  xpu_ops.def("xpu_ipc_close_handle(int base_ptr) -> ()");
+  xpu_ops.impl("xpu_ipc_close_handle", &xpu_ipc_close_handle);
+
+  xpu_ops.def("xpu_p2p_memcpy(int dst, int src, int nbytes) -> ()");
+  xpu_ops.impl("xpu_p2p_memcpy", &xpu_p2p_memcpy);
+
+  xpu_ops.def("xpu_p2p_queue_sync() -> ()");
+  xpu_ops.impl("xpu_p2p_queue_sync", &xpu_p2p_queue_sync);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
