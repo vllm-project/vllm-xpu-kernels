@@ -635,9 +635,6 @@ function(add_xe3_kernel_library LIBRARY_NAME)
     set(ARG_DESTINATION "vllm_xpu_kernels")
   endif()
 
-  # Set C++ standard
-  set_property(TARGET ${LIBRARY_NAME} PROPERTY CXX_STANDARD 20)
-
   # Find all source files
   file(GLOB_RECURSE KERNEL_SOURCES "*.cpp" ${ATTN_KERNEL_SRCS_GEN})
 
@@ -654,6 +651,9 @@ function(add_xe3_kernel_library LIBRARY_NAME)
   if(ARG_INCLUDE_CMAKE_SOURCE_DIR)
     target_include_directories(${LIBRARY_NAME} PUBLIC ${CMAKE_SOURCE_DIR})
   endif()
+
+  # Set C++ standard
+  set_property(TARGET ${LIBRARY_NAME} PROPERTY CXX_STANDARD 20)
 
   # Set compile options and definitions
   target_compile_options(
