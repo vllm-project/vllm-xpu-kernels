@@ -173,6 +173,8 @@ jobs:
 
             if (wheelMode === 'artifact') {
               const artifactName = 'xpu-kernel-wheel';
+              const waitDeadline = Date.now() + 90 * 60 * 1000;
+              const pollIntervalMs = 60 * 1000;
 
               async function runHasWheel(id) {
                 const artifacts = await github.paginate(
@@ -184,35 +186,52 @@ jobs:
                 );
               }
 
+              const workflows = await github.paginate(
+                github.rest.actions.listRepoWorkflows,
+                {owner, repo, per_page: 100},
+              );
+              const workflow = workflows.find(
+                (item) => item.name === process.env.UNIT_TEST_WORKFLOW,
+              );
+
+              async function latestUnitTestRun() {
+                if (!workflow) {
+                  return null;
+                }
+                const runs = await github.paginate(
+                  github.rest.actions.listWorkflowRuns,
+                  {owner, repo, workflow_id: workflow.id, head_sha: headSha, per_page: 20},
+                );
+                return runs[0] || null;
+              }
+
               let resolvedRunId = '';
               if (runId && (await runHasWheel(runId))) {
                 resolvedRunId = String(runId);
               } else {
-                const workflows = await github.paginate(
-                  github.rest.actions.listRepoWorkflows,
-                  {owner, repo, per_page: 100},
-                );
-                const workflow = workflows.find(
-                  (item) => item.name === process.env.UNIT_TEST_WORKFLOW,
-                );
-                if (workflow) {
-                  const runs = await github.paginate(
-                    github.rest.actions.listWorkflowRuns,
-                    {
-                      owner,
-                      repo,
-                      workflow_id: workflow.id,
-                      head_sha: headSha,
-                      status: 'completed',
-                      per_page: 20,
-                    },
-                  );
-                  for (const run of runs) {
+                // Comment/label triggers may fire before unit tests finish;
+                // wait for the unit-test run to conclude instead of rebuilding
+                // from source prematurely. Only fall back to source once the
+                // run has failed, produced no wheel, or the wait times out.
+                while (true) {
+                  const run = await latestUnitTestRun();
+                  if (run && run.status === 'completed') {
                     if (run.conclusion === 'success' && (await runHasWheel(run.id))) {
                       resolvedRunId = String(run.id);
-                      break;
                     }
+                    break;
                   }
+                  if (Date.now() > waitDeadline) {
+                    core.notice(
+                      `Timed out waiting for ${process.env.UNIT_TEST_WORKFLOW} on ${headSha}.`,
+                    );
+                    break;
+                  }
+                  core.notice(
+                    `Waiting for ${process.env.UNIT_TEST_WORKFLOW} on ${headSha} ` +
+                    `(status=${run ? run.status : 'not-started'})...`,
+                  );
+                  await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
                 }
               }
 
@@ -325,8 +344,19 @@ jobs:
             VLLM_PRECOMPILED_WHEEL_LOCATION="${WHEEL}" \
             uv pip install --no-build-isolation -e . -v
           else
+            export CCACHE_DIR=/root/.ccache
+            export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
+            export CCACHE_NOHASHDIR=1
+            export CCACHE_COMPILERCHECK=content
+            ccache -s || true
             git submodule sync && git submodule update --init --recursive
-            MAX_JOBS=128 uv pip install --no-build-isolation -e . -v
+            rm -rf dist/*
+            MAX_JOBS=$(( $(nproc) * 3 / 4 ))
+            [ "${MAX_JOBS}" -lt 1 ] && MAX_JOBS=1
+            MAX_JOBS="${MAX_JOBS}" uv build --no-build-isolation --wheel -v
+            ccache -s || true
+            BUILT_WHEEL=$(find dist -name '*.whl' -print -quit)
+            uv pip install --no-build-isolation "${BUILT_WHEEL}"
           fi
 
       - name: Restore main benchmark baseline
