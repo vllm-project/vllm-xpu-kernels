@@ -217,7 +217,7 @@ bool chunk_kda_launcher(
       cute::MMA_Atom<decltype(op)>,
       cute::Layout<WGTileInv>,
       SGLayoutInv>::TiledMMA;
-  if (vllm::xpu::is_bmg()) {
+  if (!vllm::xpu::is_pvc()) {
     auto mma = MMAInverse{};
     const int wg_size = cute::size(mma);
     sycl::range<3> local(1, 1, wg_size);
