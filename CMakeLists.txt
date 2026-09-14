@@ -681,6 +681,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/lora/lora_expand.cpp"
       "csrc/xpu/lora/lora_ops.cpp"
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
+      "csrc/xpu/sampler/compact_sampling_mask.cpp"
       "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
       "csrc/xpu/sycl/deepseek_qnorm_rope_kv_insert.cpp"
       "csrc/xpu/sycl/deepseek_inv_rope_bf16.cpp"
