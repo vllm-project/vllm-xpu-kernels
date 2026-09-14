@@ -61,24 +61,18 @@ def layernorm_compile(
     return x, residual
 
 
-def layernorm_vllm(
-    x: torch.Tensor,
-    weight: Optional[torch.Tensor],
-    bias: Optional[torch.Tensor],
-    residual: Optional[torch.Tensor] = None,
-    eps: float = 1e-5,
-):
+def _run_vllm_norm(fused_op, plain_op, x, weight, bias, residual, eps):
     orig_shape = x.shape
     x = x.view(-1, x.shape[-1])
     if residual is not None:
         residual = residual.view(-1, residual.shape[-1])
 
     if residual is not None:
-        vllm_ops.fused_add_layer_norm(x, residual, weight, bias, eps)
+        fused_op(x, residual, weight, bias, eps)
         output = (x, residual)
     else:
         out = torch.empty_like(x)
-        vllm_ops.layer_norm(out, x, weight, bias, eps)
+        plain_op(out, x, weight, bias, eps)
         output = out
 
     if isinstance(output, tuple):
@@ -86,6 +80,17 @@ def layernorm_vllm(
     else:
         output = output.view(orig_shape)
     return output
+
+
+def layernorm_vllm(
+    x: torch.Tensor,
+    weight: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor],
+    residual: Optional[torch.Tensor] = None,
+    eps: float = 1e-5,
+):
+    return _run_vllm_norm(vllm_ops.fused_add_layer_norm, vllm_ops.layer_norm,
+                          x, weight, bias, residual, eps)
 
 
 def nemotron_layernorm_naive(
@@ -122,24 +127,35 @@ def nemotron_layernorm_vllm(
     residual: Optional[torch.Tensor] = None,
     eps: float = 1e-5,
 ):
-    orig_shape = x.shape
-    x = x.view(-1, x.shape[-1])
-    if residual is not None:
-        residual = residual.view(-1, residual.shape[-1])
+    return _run_vllm_norm(vllm_ops.fused_add_nemotron_layer_norm,
+                          vllm_ops.nemotron_layer_norm, x, weight, bias,
+                          residual, eps)
 
-    if residual is not None:
-        vllm_ops.fused_add_nemotron_layer_norm(x, residual, weight, bias, eps)
-        output = (x, residual)
-    else:
-        out = torch.empty_like(x)
-        vllm_ops.nemotron_layer_norm(out, x, weight, bias, eps)
-        output = out
 
-    if isinstance(output, tuple):
-        output = (output[0].view(orig_shape), output[1].view(orig_shape))
-    else:
-        output = output.view(orig_shape)
-    return output
+@torch.compile
+def nemotron_layernorm_compile(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    residual: Optional[torch.Tensor] = None,
+    eps: float = 1e-5,
+):
+    orig_dtype = x.dtype
+    x = x.to(torch.float32)
+    if residual is not None:
+        x = x + residual.to(torch.float32)
+        residual = x.to(orig_dtype)
+
+    mean = x.mean(dim=-1, keepdim=True)
+    var = (x - mean).pow(2).mean(dim=-1, keepdim=True)
+    x = (x - mean) * torch.rsqrt(var + eps)
+    x = x * (1.0 + weight.float())
+    if bias is not None:
+        x = x + bias.float()
+    x = x.to(orig_dtype)
+    if residual is None:
+        return x
+    return x, residual
 
 
 def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True,
@@ -150,16 +166,13 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True,
                     hidden_size,
                     dtype=dtype,
                     device="xpu")
+    weight = torch.randn(hidden_size, dtype=dtype, device="xpu")
     bias = torch.randn(hidden_size, dtype=dtype, device="xpu")
     residual = torch.randn_like(x) if use_residual else None
 
     if nemotron:
-        # Weight starts at 0 so that (1 + weight) == 1, matching
-        # NemotronLayerNorm1P's init.
-        weight = torch.randn(hidden_size, dtype=dtype, device="xpu")
         naive_fn, vllm_fn = nemotron_layernorm_naive, nemotron_layernorm_vllm
     else:
-        weight = torch.randn(hidden_size, dtype=dtype, device="xpu")
         naive_fn, vllm_fn = layernorm_naive, layernorm_vllm
 
     output_naive = naive_fn(
@@ -185,8 +198,10 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True,
 def get_benchmark(use_residual, dtype, nemotron=False):
     if nemotron:
         naive_fn, vllm_fn = nemotron_layernorm_naive, nemotron_layernorm_vllm
+        compile_fn = nemotron_layernorm_compile
     else:
         naive_fn, vllm_fn = layernorm_naive, layernorm_vllm
+        compile_fn = layernorm_compile
 
     @triton.testing.perf_report(
         triton.testing.Benchmark(
@@ -230,8 +245,7 @@ def get_benchmark(use_residual, dtype, nemotron=False):
             )
         elif provider == "t.compile":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: layernorm_compile(x_bench, weight, bias,
-                                          residual_bench),
+                lambda: compile_fn(x_bench, weight, bias, residual_bench),
                 quantiles=quantiles,
             )
         else:
@@ -247,6 +261,11 @@ def get_benchmark(use_residual, dtype, nemotron=False):
 if __name__ == "__main__":
 
     args = parse_args()
+    # parse_args()'s shared --save-path default ("./configs/rmsnorm/") is
+    # named for its original RMSNorm benchmark; give this file its own
+    # default instead of intermixing results in that directory.
+    if args.save_path == "./configs/rmsnorm/":
+        args.save_path = "./configs/layernorm/"
 
     print("Final configuration:")
     print(f"  Batch size: {args.batch_size}")
