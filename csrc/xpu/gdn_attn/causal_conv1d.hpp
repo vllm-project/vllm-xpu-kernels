@@ -674,10 +674,9 @@ struct causal_conv1d_spec_kernel {
     // Single cache line (column 0); accepted window starts at row init_row.
     int init_row = num_accepted_tokens[batch_id] - 1;
     if (init_row < 0) init_row = 0;
-    // Match the effective state length used by the CUDA/Triton path.  The
-    // leading stride may span interleaved states from multiple layers, so it
-    // cannot be used to recover this dimension.
-    const int state_len = Width - 1 + (num_spec_tokens - 1);
+    // Effective state length (CUDA/Triton convention) is
+    // Width - 1 + (num_spec_tokens - 1); rows are written from registers
+    // below, so it is not materialized here.
     const int state_id = cache_indices[batch_id * cache_indices_stride_0 + 0];
     const bool has_conv_state = (state_id != pad_slot_id);
     T* state_line_ptr = has_conv_state
@@ -711,6 +710,18 @@ struct causal_conv1d_spec_kernel {
               [(init_row + i) * conv_elems + reordered_elems_id + e];
         }
       }
+      // Rolled-state history rows [0, Width-2) equal window slots
+      // [1, Width-1); write them back now from registers (the priming reads
+      // above are complete, lanes are disjoint across items) instead of an
+      // aliased in-place shift after the loop.
+#pragma unroll
+      for (int i = 1; i < Width - 1; ++i) {
+#pragma unroll
+        for (int e = 0; e < elems_per_item; ++e) {
+          state_line_ptr[(i - 1) * conv_elems + reordered_elems_id + e] =
+              local_input[Width * e + i];
+        }
+      }
     }
 
     for (int t_local = 0; t_local < num_spec_tokens; ++t_local) {
@@ -727,11 +738,20 @@ struct causal_conv1d_spec_kernel {
           }
         }
       }
-      // Load new input at the trailing slot.
+      // Load new input at the trailing slot; it is also rolled-state row
+      // (Width-2 + t_local), so store it from the register while it is hot.
 #pragma unroll
       for (int e = 0; e < elems_per_item; ++e) {
         local_input[Width * e + Width - 1] =
             mixed_qkvz[global_t * qkvz_elems + mixed_qkvz_id + e];
+      }
+      if (Width > 1 && has_conv_state) {
+#pragma unroll
+        for (int e = 0; e < elems_per_item; ++e) {
+          state_line_ptr
+              [(Width - 2 + t_local) * conv_elems + reordered_elems_id + e] =
+                  local_input[Width * e + Width - 1];
+        }
       }
 
       float res[elems_per_item];
@@ -790,31 +810,8 @@ struct causal_conv1d_spec_kernel {
       }
     }
 
-    // Roll the line back to column 0: rows [0, hist_rows) = shifted history
-    // from row init_row+1, rows [hist_rows, state_len) = the K draft inputs.
-    // In-place left shift is safe since src row (init_row+1+j) >= dst row j.
-    if (Width > 1 && has_conv_state) {
-      const int hist_rows = state_len - num_spec_tokens;
-      for (int j = 0; j < state_len; ++j) {
-        if (j < hist_rows) {
-          const int src_row = init_row + 1 + j;
-#pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            state_line_ptr[j * conv_elems + reordered_elems_id + e] =
-                state_line_ptr[src_row * conv_elems + reordered_elems_id + e];
-          }
-        } else {
-          const int draft_t = j - hist_rows;
-          const int token_id_local = batch_id * num_spec_tokens + draft_t;
-          const int global_t = token_indx[token_id_local];
-#pragma unroll
-          for (int e = 0; e < elems_per_item; ++e) {
-            state_line_ptr[j * conv_elems + reordered_elems_id + e] =
-                mixed_qkvz[global_t * qkvz_elems + mixed_qkvz_id + e];
-          }
-        }
-      }
-    }
+    // Rolled state (rows [0, state_len)) was already written from registers:
+    // history rows during priming, draft rows as each input was loaded.
   }
 
  private:
