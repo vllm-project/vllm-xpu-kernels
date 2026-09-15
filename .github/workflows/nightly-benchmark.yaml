@@ -173,6 +173,8 @@ jobs:
 
             if (wheelMode === 'artifact') {
               const artifactName = 'xpu-kernel-wheel';
+              const waitDeadline = Date.now() + 90 * 60 * 1000;
+              const pollIntervalMs = 60 * 1000;
 
               async function runHasWheel(id) {
                 const artifacts = await github.paginate(
@@ -184,35 +186,56 @@ jobs:
                 );
               }
 
+              const workflows = await github.paginate(
+                github.rest.actions.listRepoWorkflows,
+                {owner, repo, per_page: 100},
+              );
+              const workflow = workflows.find(
+                (item) => item.name === process.env.UNIT_TEST_WORKFLOW,
+              );
+
+              async function latestUnitTestRun() {
+                if (!workflow) {
+                  return null;
+                }
+                const runs = await github.paginate(
+                  github.rest.actions.listWorkflowRuns,
+                  {owner, repo, workflow_id: workflow.id, head_sha: headSha, per_page: 20},
+                );
+                return runs[0] || null;
+              }
+
               let resolvedRunId = '';
               if (runId && (await runHasWheel(runId))) {
                 resolvedRunId = String(runId);
               } else {
-                const workflows = await github.paginate(
-                  github.rest.actions.listRepoWorkflows,
-                  {owner, repo, per_page: 100},
-                );
-                const workflow = workflows.find(
-                  (item) => item.name === process.env.UNIT_TEST_WORKFLOW,
-                );
-                if (workflow) {
-                  const runs = await github.paginate(
-                    github.rest.actions.listWorkflowRuns,
-                    {
-                      owner,
-                      repo,
-                      workflow_id: workflow.id,
-                      head_sha: headSha,
-                      status: 'completed',
-                      per_page: 20,
-                    },
-                  );
-                  for (const run of runs) {
-                    if (run.conclusion === 'success' && (await runHasWheel(run.id))) {
+                // Comment/label triggers may fire before unit tests finish. The
+                // build-wheel job uploads the artifact early (well before the
+                // full run completes), so poll for the wheel itself and use it
+                // as soon as it appears; only fall back to source once the run
+                // has finished without a wheel or the wait times out.
+                while (true) {
+                  const run = await latestUnitTestRun();
+                  if (run) {
+                    if (await runHasWheel(run.id)) {
                       resolvedRunId = String(run.id);
                       break;
                     }
+                    if (run.status === 'completed') {
+                      break;
+                    }
                   }
+                  if (Date.now() > waitDeadline) {
+                    core.notice(
+                      `Timed out waiting for ${process.env.UNIT_TEST_WORKFLOW} wheel on ${headSha}.`,
+                    );
+                    break;
+                  }
+                  core.notice(
+                    `Waiting for ${process.env.UNIT_TEST_WORKFLOW} wheel on ${headSha} ` +
+                    `(status=${run ? run.status : 'not-started'})...`,
+                  );
+                  await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
                 }
               }
 
@@ -289,10 +312,93 @@ jobs:
           docker tag "xpu-kernel-ci-image:${IMAGE_TAG}" "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
           docker push "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
 
+  build-docker-image-pvc:
+    runs-on: self-hosted-pvc-cpu
+    needs: resolve-wheel-artifact
+    if: |
+      needs.resolve-wheel-artifact.outputs.should_run == 'true' &&
+      needs.resolve-wheel-artifact.outputs.wheel_mode == 'source'
+    outputs:
+      image_tag: ${{ steps.set-tag.outputs.image_tag }}
+    steps:
+      - name: Clean workspace
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          git clean -ffdx || true
+          git reset --hard || true
+
+      - name: Checkout tested commit
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          set-safe-directory: true
+          clean: true
+          ref: ${{ needs.resolve-wheel-artifact.outputs.head_sha }}
+
+      - name: Set image tag
+        id: set-tag
+        run: echo "image_tag=${{ needs.resolve-wheel-artifact.outputs.short_sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build benchmark docker image
+        run: |
+          IMAGE_TAG=${{ needs.resolve-wheel-artifact.outputs.short_sha }}
+          docker build -t "xpu-kernel-ci-image:${IMAGE_TAG}" -f Dockerfile.xpu .
+          docker tag "xpu-kernel-ci-image:${IMAGE_TAG}" "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
+          docker push "${{ env.REGISTRY }}/xpu-kernel-ci-image:${IMAGE_TAG}"
+
+  # Source fallback builds the wheel on the PVC CPU box (like the unit-test
+  # build) so the GPU BMG runner never compiles, then hands it over via artifact.
+  build-wheel-source-pvc:
+    runs-on: self-hosted-pvc-cpu
+    needs: [resolve-wheel-artifact, build-docker-image-pvc]
+    if: |
+      needs.resolve-wheel-artifact.outputs.should_run == 'true' &&
+      needs.resolve-wheel-artifact.outputs.wheel_mode == 'source'
+    container:
+      image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-pvc.outputs.image_tag }}
+      options: --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --privileged -v ccache:/root/.ccache -e CCACHE_DIR=/root/.ccache
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          set-safe-directory: true
+          ref: ${{ needs.resolve-wheel-artifact.outputs.head_sha }}
+
+      - name: Build wheel from source
+        run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          export CCACHE_DIR=/root/.ccache
+          export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
+          export CCACHE_NOHASHDIR=1
+          export CCACHE_COMPILERCHECK=content
+          ccache -s || true
+          git submodule sync && git submodule update --init --recursive
+          uv pip install -r requirements.txt
+          rm -rf dist/*
+          MAX_JOBS=$(( $(nproc) * 3 / 4 ))
+          [ "${MAX_JOBS}" -lt 1 ] && MAX_JOBS=1
+          MAX_JOBS="${MAX_JOBS}" uv build --no-build-isolation --wheel -v
+          ccache -s || true
+
+      - name: Upload source-built wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: xpu-kernel-wheel-source
+          path: dist/*.whl
+          retention-days: 7
+
   run-benchmarks-bmg:
     runs-on: self-hosted-bmg
-    needs: [resolve-wheel-artifact, build-docker-image-bmg]
-    if: needs.resolve-wheel-artifact.outputs.should_run == 'true'
+    needs: [resolve-wheel-artifact, build-docker-image-bmg, build-wheel-source-pvc]
+    if: |
+      always() &&
+      needs.resolve-wheel-artifact.outputs.should_run == 'true' &&
+      needs.build-docker-image-bmg.result == 'success' &&
+      (
+        (needs.resolve-wheel-artifact.outputs.wheel_mode == 'artifact' &&
+         needs.build-wheel-source-pvc.result == 'skipped') ||
+        (needs.resolve-wheel-artifact.outputs.wheel_mode == 'source' &&
+         needs.build-wheel-source-pvc.result == 'success')
+      )
     timeout-minutes: 240
     container:
       image: localhost:5000/xpu-kernel-ci-image:${{ needs.build-docker-image-bmg.outputs.image_tag }}
@@ -304,7 +410,7 @@ jobs:
           set-safe-directory: true
           ref: ${{ needs.resolve-wheel-artifact.outputs.head_sha }}
 
-      - name: Download wheel artifact
+      - name: Download unit-test wheel artifact
         if: needs.resolve-wheel-artifact.outputs.wheel_mode == 'artifact'
         uses: actions/download-artifact@v4
         with:
@@ -313,21 +419,21 @@ jobs:
           run-id: ${{ needs.resolve-wheel-artifact.outputs.run_id }}
           github-token: ${{ github.token }}
 
+      - name: Download source-built wheel artifact
+        if: needs.resolve-wheel-artifact.outputs.wheel_mode == 'source'
+        uses: actions/download-artifact@v4
+        with:
+          name: xpu-kernel-wheel-source
+          path: dist/
+
       - name: Install wheel
-        env:
-          WHEEL_MODE: ${{ needs.resolve-wheel-artifact.outputs.wheel_mode }}
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           uv pip install -r requirements.txt
-          if [ "${WHEEL_MODE}" = "artifact" ]; then
-            WHEEL=$(find dist -name '*.whl' -print -quit)
-            VLLM_USE_PRECOMPILED=1 \
-            VLLM_PRECOMPILED_WHEEL_LOCATION="${WHEEL}" \
-            uv pip install --no-build-isolation -e . -v
-          else
-            git submodule sync && git submodule update --init --recursive
-            MAX_JOBS=128 uv pip install --no-build-isolation -e . -v
-          fi
+          WHEEL=$(find dist -name '*.whl' -print -quit)
+          VLLM_USE_PRECOMPILED=1 \
+          VLLM_PRECOMPILED_WHEEL_LOCATION="${WHEEL}" \
+          uv pip install --no-build-isolation -e . -v
 
       - name: Restore main benchmark baseline
         id: restore-baseline
@@ -498,6 +604,20 @@ jobs:
     runs-on: self-hosted-bmg
     needs: [resolve-wheel-artifact, run-benchmarks-bmg]
     if: always() && needs.resolve-wheel-artifact.outputs.should_run == 'true'
+    steps:
+      - name: Clean workspace
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          git clean -ffdx || true
+          git reset --hard || true
+
+  clean-repo-pvc:
+    runs-on: self-hosted-pvc-cpu
+    needs: [resolve-wheel-artifact, build-wheel-source-pvc]
+    if: |
+      always() &&
+      needs.resolve-wheel-artifact.outputs.should_run == 'true' &&
+      needs.resolve-wheel-artifact.outputs.wheel_mode == 'source'
     steps:
       - name: Clean workspace
         run: |
