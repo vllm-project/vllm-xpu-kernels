@@ -1,11 +1,42 @@
 #include <sycl/sycl.hpp>
 
+#include <cstdint>
+#include <limits>
+
 #include "../utils.h"
 #include "../dispatch_utils.h"
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 static constexpr int WARP_SIZE = 32;
+
+#ifndef MST_SG
+  #define MST_SG 16
+#endif
+#ifndef MST_WG
+  #define MST_WG 64
+#endif
+#ifndef MST_VPL
+  #define MST_VPL 64
+#endif
+#ifndef MST_MIN_LANES
+  #define MST_MIN_LANES 4
+#endif
+#ifndef MST_S
+  #define MST_S 8
+#endif
+#ifndef MST_SSG
+  #define MST_SSG 16
+#endif
+#ifndef MST_SMALL_T
+  #define MST_SMALL_T 196608
+#endif
+#ifndef MST_MID_T
+  #define MST_MID_T 4194304
+#endif
+#ifndef MST_VPL_MID
+  #define MST_VPL_MID 16
+#endif
 
 namespace vllm {
 namespace moe {
@@ -614,6 +645,473 @@ class TopKGating {
   const bool* is_padding;
 };
 
+namespace fast_topk_softmax {
+
+constexpr int kSgSize = MST_SG;
+constexpr int kSSgSize = MST_SSG;
+constexpr int kWgSize = MST_WG;
+constexpr float kNegInf = -std::numeric_limits<float>::infinity();
+
+inline float ieee_div(float a, float b) {
+  volatile float denom = b;
+  return a / denom;
+}
+
+template <typename T, int W>
+struct alignas(sizeof(T) * W) WideVec {
+  T v[W];
+};
+
+using F4 = WideVec<float, 4>;
+
+inline F4 ld4(const float* __restrict__ p) {
+  return *reinterpret_cast<const F4*>(p);
+}
+
+constexpr int pow2_floor(int l) {
+  int p = 1;
+  while (p * 2 <= l)
+    p *= 2;
+  return p;
+}
+
+constexpr int lanes_for_vpl(int n, int vpl) {
+  int l = n / vpl;
+  if (l < MST_MIN_LANES) l = MST_MIN_LANES;
+  if (l > kSgSize) l = kSgSize;
+  if (l > n / 4) l = n / 4;
+  if (l < 1) l = 1;
+  return pow2_floor(l);
+}
+
+constexpr int lanes_for(int n) { return lanes_for_vpl(n, MST_VPL); }
+constexpr int lanes_for_mid(int n) { return lanes_for_vpl(n, MST_VPL_MID); }
+
+constexpr int small_lanes_for(int n) {
+  int l = n / 4;
+  if (l > kSSgSize) l = kSSgSize;
+  if (l < 1) l = 1;
+  return pow2_floor(l);
+}
+
+constexpr int groups_per_chunk(int kg) {
+  int gpc = MST_S / 4;
+  if (gpc < 1) gpc = 1;
+  while (gpc > 1 && (kg % gpc != 0 || kg / gpc < 2))
+    gpc >>= 1;
+  return gpc;
+}
+
+constexpr int store_width(int topk) {
+  return topk % 4 == 0 ? 4 : (topk % 2 == 0 ? 2 : 1);
+}
+
+template <int LANES>
+inline void lane_group_argmax(const sycl::sub_group& sg, float& s, int& i) {
+#pragma unroll
+  for (int m = 1; m < LANES; m <<= 1) {
+    const float os = sycl::permute_group_by_xor(sg, s, static_cast<size_t>(m));
+    const int oi = sycl::permute_group_by_xor(sg, i, static_cast<size_t>(m));
+    const bool take = (os > s) | ((os == s) & (oi < i));
+    s = take ? os : s;
+    i = take ? oi : i;
+  }
+}
+
+template <int TOPK, int W>
+inline void store_row(
+    float* __restrict__ weights,
+    int* __restrict__ indices,
+    int* __restrict__ source_rows,
+    int64_t token,
+    int64_t num_tokens,
+    const float* __restrict__ num,
+    const int* __restrict__ wid,
+    float inv,
+    bool is_pad) {
+  float* __restrict__ wo = weights + token * TOPK;
+  int* __restrict__ io = indices + token * TOPK;
+  int* __restrict__ so = source_rows + token * TOPK;
+#pragma unroll
+  for (int b = 0; b < TOPK; b += W) {
+    WideVec<float, W> tw;
+    WideVec<int, W> ti;
+#pragma unroll
+    for (int e = 0; e < W; ++e) {
+      const int k = b + e;
+      tw.v[e] = is_pad ? 0.0f : num[k] * inv;
+      ti.v[e] = is_pad ? -1 : wid[k];
+      so[k] = k * num_tokens + token;
+    }
+    *reinterpret_cast<WideVec<float, W>*>(wo + b) = tw;
+    *reinterpret_cast<WideVec<int, W>*>(io + b) = ti;
+  }
+}
+
+template <int N, int TOPK, int LANES>
+struct MoeSoftmaxTopk {
+  static constexpr int kVpl = N / LANES;
+  static constexpr int kG = kVpl / 4;
+  static constexpr int kGpc = groups_per_chunk(kG);
+  static constexpr int kChunks = kG / kGpc;
+  static constexpr int kW = store_width(TOPK);
+
+  static_assert(
+      kVpl % 4 == 0, "per-lane slice must be a whole number of float4");
+  static_assert(kChunks >= 1, "empty chunk cache");
+
+  const float* __restrict__ gating;
+  float* __restrict__ weights;
+  int* __restrict__ indices;
+  int* __restrict__ source_rows;
+  const bool* __restrict__ is_padding;
+  int64_t num_tokens;
+
+  [[sycl::reqd_sub_group_size(kSgSize)]] void
+  operator()(sycl::nd_item<1> it) const {
+    const sycl::sub_group sg = it.get_sub_group();
+    const int64_t gid = static_cast<int64_t>(it.get_global_linear_id());
+    const int lane = LANES == 1 ? 0 : static_cast<int>(gid & (LANES - 1));
+    const int64_t token = LANES == 1 ? gid : gid / LANES;
+    const bool active = token < num_tokens;
+    const float* __restrict__ row = gating + (active ? token : 0) * N;
+
+    float cs[kChunks];
+    int ci[kChunks];
+#pragma unroll
+    for (int c = 0; c < kChunks; ++c) {
+      float bs = kNegInf;
+      int bi = N;
+#pragma unroll
+      for (int g = 0; g < kGpc; ++g) {
+        const int i0 = ((c * kGpc + g) * LANES + lane) * 4;
+        const F4 x = ld4(row + i0);
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+          const float val = x.v[e];
+          const bool take = val > bs;
+          bs = take ? val : bs;
+          bi = take ? i0 + e : bi;
+        }
+      }
+      cs[c] = bs;
+      ci[c] = bi;
+    }
+
+    float num[TOPK];
+    int wid[TOPK];
+    float row_max = 0.0f;
+    float sum = 0.0f;
+#pragma unroll
+    for (int k = 0; k < TOPK; ++k) {
+      float ws = cs[0];
+      int wi = ci[0];
+      int bc = 0;
+#pragma unroll
+      for (int c = 1; c < kChunks; ++c) {
+        const bool take = cs[c] > ws;
+        ws = take ? cs[c] : ws;
+        wi = take ? ci[c] : wi;
+        bc = take ? c : bc;
+      }
+      if constexpr (LANES > 1) lane_group_argmax<LANES>(sg, ws, wi);
+      if (k == 0) row_max = ws;
+      num[k] = sycl::native::exp(ws - row_max);
+      sum += num[k];
+      wid[k] = wi;
+
+      const bool mine = LANES == 1 || (((wi >> 2) & (LANES - 1)) == lane);
+      if (mine) {
+        float ns = kNegInf;
+        int ni = N;
+#pragma unroll
+        for (int g = 0; g < kGpc; ++g) {
+          const int i0 = ((bc * kGpc + g) * LANES + lane) * 4;
+          const F4 x = ld4(row + i0);
+#pragma unroll
+          for (int e = 0; e < 4; ++e) {
+            const float val = x.v[e];
+            const int idx = i0 + e;
+            const bool below = (val < ws) | ((val == ws) & (idx > wi));
+            const bool take = below & (val > ns);
+            ns = take ? val : ns;
+            ni = take ? idx : ni;
+          }
+        }
+#pragma unroll
+        for (int c = 0; c < kChunks; ++c) {
+          const bool hit = c == bc;
+          cs[c] = hit ? ns : cs[c];
+          ci[c] = hit ? ni : ci[c];
+        }
+      }
+    }
+
+    if (active & (lane == 0)) {
+      const bool is_pad = is_padding != nullptr && is_padding[token];
+      store_row<TOPK, kW>(
+          weights,
+          indices,
+          source_rows,
+          token,
+          num_tokens,
+          num,
+          wid,
+          ieee_div(1.0f, sum),
+          is_pad);
+    }
+  }
+};
+
+template <int N, int TOPK, int LANES>
+struct MoeSoftmaxTopkSmall {
+  static constexpr int kVpl = N / LANES;
+  static constexpr int kG = kVpl / 4;
+  static constexpr int kW = store_width(TOPK);
+
+  static_assert(kG >= 1, "small kernel needs at least one float4 per lane");
+
+  const float* __restrict__ gating;
+  float* __restrict__ weights;
+  int* __restrict__ indices;
+  int* __restrict__ source_rows;
+  const bool* __restrict__ is_padding;
+  int64_t num_tokens;
+
+  [[sycl::reqd_sub_group_size(kSSgSize)]] void
+  operator()(sycl::nd_item<1> it) const {
+    const sycl::sub_group sg = it.get_sub_group();
+    const int64_t gid = static_cast<int64_t>(it.get_global_linear_id());
+    const int lane = LANES == 1 ? 0 : static_cast<int>(gid & (LANES - 1));
+    const int64_t token = LANES == 1 ? gid : gid / LANES;
+    const bool active = token < num_tokens;
+    const float* __restrict__ row = gating + (active ? token : 0) * N;
+
+    F4 v[kG];
+#pragma unroll
+    for (int g = 0; g < kG; ++g)
+      v[g] = ld4(row + (g * LANES + lane) * 4);
+
+    float num[TOPK];
+    int wid[TOPK];
+    float row_max = 0.0f;
+    float sum = 0.0f;
+#pragma unroll
+    for (int k = 0; k < TOPK; ++k) {
+      float acc[4];
+#pragma unroll
+      for (int e = 0; e < 4; ++e)
+        acc[e] = v[0].v[e];
+#pragma unroll
+      for (int g = 1; g < kG; ++g) {
+#pragma unroll
+        for (int e = 0; e < 4; ++e)
+          acc[e] = sycl::fmax(acc[e], v[g].v[e]);
+      }
+      acc[0] = sycl::fmax(acc[0], acc[2]);
+      acc[1] = sycl::fmax(acc[1], acc[3]);
+      float ws = sycl::fmax(acc[0], acc[1]);
+
+      int iacc[4];
+#pragma unroll
+      for (int e = 0; e < 4; ++e)
+        iacc[e] = v[0].v[e] == ws ? lane * 4 + e : N;
+#pragma unroll
+      for (int g = 1; g < kG; ++g) {
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+          const int idx = (g * LANES + lane) * 4 + e;
+          iacc[e] = v[g].v[e] == ws ? sycl::min(iacc[e], idx) : iacc[e];
+        }
+      }
+      iacc[0] = sycl::min(iacc[0], iacc[2]);
+      iacc[1] = sycl::min(iacc[1], iacc[3]);
+      int wi = sycl::min(iacc[0], iacc[1]);
+
+      if constexpr (LANES > 1) lane_group_argmax<LANES>(sg, ws, wi);
+      if (k == 0) row_max = ws;
+      num[k] = sycl::native::exp(ws - row_max);
+      sum += num[k];
+      wid[k] = wi;
+
+#pragma unroll
+      for (int g = 0; g < kG; ++g) {
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+          const int idx = (g * LANES + lane) * 4 + e;
+          v[g].v[e] = idx == wi ? kNegInf : v[g].v[e];
+        }
+      }
+    }
+
+    if (active & (lane == 0)) {
+      const bool is_pad = is_padding != nullptr && is_padding[token];
+      store_row<TOPK, kW>(
+          weights,
+          indices,
+          source_rows,
+          token,
+          num_tokens,
+          num,
+          wid,
+          ieee_div(1.0f, sum),
+          is_pad);
+    }
+  }
+};
+
+template <int N, int TOPK, int LANES>
+void launch_chunked(
+    sycl::queue& q,
+    const float* gating,
+    float* weights,
+    int* indices,
+    int* source_rows,
+    const bool* is_padding,
+    int64_t num_tokens) {
+  constexpr int kTokensPerWg = kWgSize / LANES;
+  const size_t groups =
+      static_cast<size_t>((num_tokens + kTokensPerWg - 1) / kTokensPerWg);
+  q.parallel_for(
+      sycl::nd_range<1>{
+          sycl::range<1>{groups * kWgSize}, sycl::range<1>{kWgSize}},
+      MoeSoftmaxTopk<N, TOPK, LANES>{
+          gating, weights, indices, source_rows, is_padding, num_tokens});
+}
+
+template <int N, int TOPK>
+void launch_fast(
+    sycl::queue& q,
+    const float* gating,
+    float* weights,
+    int* indices,
+    int* source_rows,
+    const bool* is_padding,
+    int64_t num_tokens) {
+  const int64_t elems = num_tokens * N;
+
+  if (elems <= MST_SMALL_T) {
+    constexpr int kSLanes = small_lanes_for(N);
+    constexpr int kSTokensPerWg = kWgSize / kSLanes;
+    const size_t groups =
+        static_cast<size_t>((num_tokens + kSTokensPerWg - 1) / kSTokensPerWg);
+    q.parallel_for(
+        sycl::nd_range<1>{
+            sycl::range<1>{groups * kWgSize}, sycl::range<1>{kWgSize}},
+        MoeSoftmaxTopkSmall<N, TOPK, kSLanes>{
+            gating, weights, indices, source_rows, is_padding, num_tokens});
+    return;
+  }
+
+  if (elems <= MST_MID_T) {
+    launch_chunked<N, TOPK, lanes_for_mid(N)>(
+        q, gating, weights, indices, source_rows, is_padding, num_tokens);
+    return;
+  }
+
+  launch_chunked<N, TOPK, lanes_for(N)>(
+      q, gating, weights, indices, source_rows, is_padding, num_tokens);
+}
+
+template <int N>
+bool dispatch_topk(
+    sycl::queue& q,
+    const float* gating,
+    float* weights,
+    int* indices,
+    int* source_rows,
+    const bool* is_padding,
+    int64_t num_tokens,
+    int topk) {
+  switch (topk) {
+    case 1:
+      launch_fast<N, 1>(
+          q, gating, weights, indices, source_rows, is_padding, num_tokens);
+      return true;
+    case 2:
+      launch_fast<N, 2>(
+          q, gating, weights, indices, source_rows, is_padding, num_tokens);
+      return true;
+    case 4:
+      launch_fast<N, 4>(
+          q, gating, weights, indices, source_rows, is_padding, num_tokens);
+      return true;
+    case 6:
+      launch_fast<N, 6>(
+          q, gating, weights, indices, source_rows, is_padding, num_tokens);
+      return true;
+    case 8:
+      launch_fast<N, 8>(
+          q, gating, weights, indices, source_rows, is_padding, num_tokens);
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool dispatch_experts_topk(
+    sycl::queue& q,
+    const float* gating,
+    float* weights,
+    int* indices,
+    int* source_rows,
+    const bool* is_padding,
+    int64_t num_tokens,
+    int num_experts,
+    int topk) {
+  const bool aligned = (reinterpret_cast<uintptr_t>(gating) % 16 == 0) &&
+                       (reinterpret_cast<uintptr_t>(weights) % 16 == 0) &&
+                       (reinterpret_cast<uintptr_t>(indices) % 16 == 0);
+  if (!aligned) return false;
+
+  switch (num_experts) {
+    case 32:
+      return dispatch_topk<32>(
+          q,
+          gating,
+          weights,
+          indices,
+          source_rows,
+          is_padding,
+          num_tokens,
+          topk);
+    case 64:
+      return dispatch_topk<64>(
+          q,
+          gating,
+          weights,
+          indices,
+          source_rows,
+          is_padding,
+          num_tokens,
+          topk);
+    case 128:
+      return dispatch_topk<128>(
+          q,
+          gating,
+          weights,
+          indices,
+          source_rows,
+          is_padding,
+          num_tokens,
+          topk);
+    case 256:
+      return dispatch_topk<256>(
+          q,
+          gating,
+          weights,
+          indices,
+          source_rows,
+          is_padding,
+          num_tokens,
+          topk);
+    default:
+      return false;
+  }
+}
+
+}  // namespace fast_topk_softmax
+
 namespace detail {
 // Constructs some constants needed to partition the work across threads at
 // compile time.
@@ -900,13 +1398,32 @@ void topk_softmax(
   const int topk = topk_weights.size(-1);
   check_is_padding(is_padding, num_tokens);
 
+  const at::DeviceGuard device_guard(gating_output.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+
+  const bool can_use_fast_softmax =
+      renormalize && !bias.has_value() && topk < num_experts &&
+      gating_output.scalar_type() == at::ScalarType::Float &&
+      topk_indices.scalar_type() == at::ScalarType::Int;
+  if (can_use_fast_softmax &&
+      vllm::moe::fast_topk_softmax::dispatch_experts_topk(
+          queue,
+          gating_output.data_ptr<float>(),
+          topk_weights.data_ptr<float>(),
+          topk_indices.data_ptr<int>(),
+          token_expert_indices.data_ptr<int>(),
+          is_padding.has_value() ? is_padding->data_ptr<bool>() : nullptr,
+          num_tokens,
+          num_experts,
+          topk)) {
+    return;
+  }
+
   const bool is_pow_2 =
       (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
   const bool needs_workspace = !is_pow_2 || num_experts > 256;
   const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
 
-  const at::DeviceGuard device_guard(gating_output.device());
-  auto& queue = vllm::xpu::vllmGetQueue();
   torch::Tensor scoring_workspace = torch::empty(
       {workspace_size}, gating_output.options().dtype(torch::kFloat));
 
