@@ -747,7 +747,6 @@ def ref_gdn_attention_spec(
         init_col = max(naccepted - 1, 0)
         init_slot = int(spec_state_indices_tensor[n, init_col].item())  # ssm
         conv_slot = int(spec_state_indices_tensor[n, 0].item())  # conv, col 0
-        conv_state_len = conv_state.shape[1]
         conv_init_row = init_col
 
         # conv1d: window = rows [init_row, init_row + width - 1), col 0
