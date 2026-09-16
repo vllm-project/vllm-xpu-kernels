@@ -44,6 +44,8 @@
 
 #include "flash_attention_v2/collective/copy_block_slm.hpp"
 
+#include "block_2d_align.hpp"
+
 namespace cutlass::fmha::collective {
 // Arch-tagged inline namespace: gives these definitions a mangled name
 // distinct from the other Xe architecture's identically named copies,
@@ -196,12 +198,14 @@ class FMHAFwdEpilogue {
     for (int i = 0; i < rA.size(); i++)
       rA(i) *= broadcast<0>(rA_sum, rA, i);
 
-    /* Tile output */
-    Tensor cO = make_identity_tensor(O.shape());       // (q,v)
-    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);  // (q,v)
+    /* Tile output (64B-aligned surface, see block_2d_align.hpp) */
+    int x_shift_o;
+    auto O_al = align_block_2d_base<1>(O, x_shift_o);
+    Tensor cO = make_shifted_identity_tensor<1>(O.shape(), x_shift_o);  // (q,v)
+    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);                 // (q,v)
 
     /* Prepare slices */
-    TiledCopyO copy_o{O};
+    TiledCopyO copy_o{O_al};
     auto thr_copy_o = copy_o.get_slice(thr_id);
 
     auto tOrO = thr_copy_o.partition_sg_fragment_S(gO);
@@ -496,12 +500,14 @@ class DecodeFwdEpilogue {
     for (int i = 0; i < rA.size(); i++)
       rA(i) *= broadcast<0>(rA_sum, rA, i);
 
-    /* Tile output */
-    Tensor cO = make_identity_tensor(O.shape());       // (q,v)
-    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);  // (q,v)
+    /* Tile output (64B-aligned surface, see block_2d_align.hpp) */
+    int x_shift_o;
+    auto O_al = align_block_2d_base<1>(O, x_shift_o);
+    Tensor cO = make_shifted_identity_tensor<1>(O.shape(), x_shift_o);  // (q,v)
+    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);                 // (q,v)
 
     /* Prepare slices */
-    TiledCopyO copy_o{O};
+    TiledCopyO copy_o{O_al};
     auto thr_copy_o = copy_o.get_slice(thr_id);
 
     auto tOrO = thr_copy_o.partition_sg_fragment_S(gO);
@@ -549,9 +555,12 @@ class DecodeFwdEpilogue {
     // q_row explicitly so the reported statistics stay correct.
     ElementA stats_sum = rA_sum(0);
 
-    Tensor cO = make_identity_tensor(O.shape());       // (q,v)
-    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);  // (q,v)
-    TiledCopyO copy_o{O};
+    /* Tile output (64B-aligned surface, see block_2d_align.hpp) */
+    int x_shift_o;
+    auto O_al = align_block_2d_base<1>(O, x_shift_o);
+    Tensor cO = make_shifted_identity_tensor<1>(O.shape(), x_shift_o);  // (q,v)
+    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);                 // (q,v)
+    TiledCopyO copy_o{O_al};
     auto thr_copy_o = copy_o.get_slice(thr_id);
     auto tOgO = thr_copy_o.partition_D(gO);  // fragment coords (q,v)
 
