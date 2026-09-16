@@ -269,8 +269,12 @@ void cutlass_chunk_prefill_impl(
   // those page sizes cleanly. Every other supported multiple of 16 (16, 48,
   // 80, 96, 112, 160, ...) uses the *_b16 policies (TileShapeQK[1] = 16) so
   // that tiles_per_page = page_size / TileShapeQK[1] is exact.
-  const bool use_b16_policy =
-      is_paged && (block_size != 32) && (block_size % 64 != 0);
+  // chunk_policy_head80 uses a 64-wide KV tile, so block_size == 32 must also
+  // take the b16 policy in that bucket.
+  const bool head80_bucket = args.head_size > HEAD_SIZE_LIMIT_0 &&
+                             args.head_size <= HEAD_SIZE_LIMIT_1;
+  const bool use_b16_policy = is_paged && (block_size % 64 != 0) &&
+                              (block_size != 32 || head80_bucket);
 
   if (use_b16_policy) {
     if (args.head_size <= HEAD_SIZE_LIMIT_0) {
