@@ -245,7 +245,7 @@ struct MoeSoftmaxTopk {
         const T4<InputT> x = ld4(row + i0);
 #pragma unroll
         for (int e = 0; e < 4; ++e)
-          zs += sycl::native::exp(x.v[e] - row_max);
+          zs += sycl::native::exp(static_cast<float>(x.v[e]) - row_max);
       }
     }
     if constexpr (LANES > 1) zs = lane_group_sum<LANES>(sg, zs);
@@ -322,7 +322,7 @@ struct MoeSoftmaxTopk {
 #pragma unroll
           for (int e = 0; e < 4; ++e) {
             const float sel =
-                sycl::native::exp(x.v[e] - row_max) * prob_scale + bias[i0 + e];
+                sycl::native::exp(static_cast<float>(x.v[e]) - row_max) * prob_scale + bias[i0 + e];
             const bool take = sel > bs;
             bs = take ? sel : bs;
             bi = take ? i0 + e : bi;
@@ -371,10 +371,15 @@ struct MoeSoftmaxTopk {
 #pragma unroll
           for (int e = 0; e < 4; ++e) {
             const int idx = i0 + e;
-            if (idx == wi) continue;  // exclude the winner by identity
             const float sel = selection_value<SF, HAS_BIAS>(
                 x.v[e], idx, row_max, prob_scale, bias);
-            const bool take = sel > ns;
+
+            const bool after_winner =
+                sel < ws || ((sel == ws) && idx > wi);
+            const bool take =
+                after_winner &&
+                (sel > ns || ((sel == ns) && idx < ni));
+
             ns = take ? sel : ns;
             ni = take ? idx : ni;
           }
