@@ -274,10 +274,9 @@ struct gated_delta_rule_kernel {
 };
 
 // -----------------------------------------------------------------------------
-// Spec-decoding kernel: every spec sequence contributes exactly
-// `num_spec_tokens` (== num_speculative_tokens + 1) tokens, laid out
-// contiguously inside q/k/v/b/a (which are LOCAL buffers of size
-// `num_spec_decodes * num_spec_tokens`).
+// Spec-decoding kernel: each sequence contributes a packed query range given
+// by query_start_loc. The cache-index row retains the configured maximum width
+// so each processed token can write its rollback state to column t_local.
 //
 // - The initial SSM state for sequence n is read from cache slot
 //   `cache_indices[n, num_accepted_tokens[n] - 1]` (the last accepted token of
@@ -310,6 +309,7 @@ struct gated_delta_rule_spec_kernel {
       const T* dt_bias,
       StateT* ssm_state,
       const int ssm_state_stride_0,
+      const int* query_start_loc,
       const int* token_indx,
       const int* cache_indices,
       const int cache_indices_stride_0,
@@ -330,6 +330,7 @@ struct gated_delta_rule_spec_kernel {
         dt_bias(dt_bias),
         ssm_state(ssm_state),
         ssm_state_stride_0(ssm_state_stride_0),
+        query_start_loc(query_start_loc),
         token_indx(token_indx),
         cache_indices(cache_indices),
         cache_indices_stride_0(cache_indices_stride_0),
@@ -371,6 +372,10 @@ struct gated_delta_rule_spec_kernel {
     int sg_id = sg.get_group_id();
     int sg_local_id = sg.get_local_id();
 
+    const int seq_start = query_start_loc[batch_id];
+    const int seq_end = query_start_loc[batch_id + 1];
+    const int query_len = seq_end - seq_start;
+
     int kv_ratio = num_v_heads / num_k_heads;
     int head_v_dim_id = v_bucket_id * v_dim_per_group + sg_id * v_dim_per_sg;
     if (head_v_dim_id >= head_v_dim) {
@@ -407,12 +412,9 @@ struct gated_delta_rule_spec_kernel {
       }
     }
 
-    // -- Iterate over the num_spec_tokens tokens of this sequence -------------
-    for (int t_local = 0; t_local < num_spec_tokens; ++t_local) {
-      // Local token index inside q/k/v/b/a (which were sized
-      // num_spec_decodes * num_spec_tokens and ordered by
-      // spec_query_start_loc).
-      const int t = batch_id * num_spec_tokens + t_local;
+    // -- Iterate over this sequence's packed speculative query range. ---------
+    for (int t_local = 0; t_local < query_len; ++t_local) {
+      const int t = seq_start + t_local;
 
       float b_local = b[t * num_v_heads + num_v_heads_id];
       float beta = act_sigmoid(b_local);
@@ -537,6 +539,7 @@ struct gated_delta_rule_spec_kernel {
   const T* dt_bias;
   StateT* ssm_state;
   const int ssm_state_stride_0;
+  const int* query_start_loc;
   const int* token_indx;
   const int* cache_indices;
   const int cache_indices_stride_0;
@@ -616,6 +619,7 @@ void kernel_launcher_spec(
     const T* dt_bias,
     StateT* ssm_state,
     const int ssm_state_stride_0,
+    const int* query_start_loc,
     const int* token_indx,
     const int* cache_indices,
     const int cache_indices_stride_0,
@@ -641,6 +645,7 @@ void kernel_launcher_spec(
         dt_bias,
         ssm_state,
         ssm_state_stride_0,
+        query_start_loc,
         token_indx,
         cache_indices,
         cache_indices_stride_0,
@@ -737,6 +742,7 @@ void gated_delta_rule(
         reinterpret_cast<scalar_t*>(dt_bias.data_ptr()),             \
         reinterpret_cast<state_scalar_t*>(ssm_state.data_ptr()),     \
         ssm_state_stride_0,                                          \
+        reinterpret_cast<int*>(query_start_loc->data_ptr()),         \
         token_indx.has_value()                                       \
             ? reinterpret_cast<int*>(token_indx->data_ptr())         \
             : nullptr,                                               \

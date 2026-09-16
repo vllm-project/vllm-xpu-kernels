@@ -714,7 +714,6 @@ def ref_gdn_attention_spec(
     dtype = projected_states_qkvz.dtype
     width = conv_weights.shape[-1]
     rep = num_v_heads // num_k_heads
-    K = spec_state_indices_tensor.shape[1]
     qkv_elems_size = num_k_heads // tp_size * (
         2 * head_k_dim + num_v_heads // num_k_heads * head_v_dim)
 
@@ -741,7 +740,7 @@ def ref_gdn_attention_spec(
     for n in range(num_spec_decodes):
         start = int(spec_query_start_loc[n].item())
         end = int(spec_query_start_loc[n + 1].item())
-        assert end - start == K, (end - start, K)
+        query_len = end - start
         globals_ = spec_token_indx[start:end].to(torch.long)
 
         naccepted = int(num_accepted_tokens[n].item())
@@ -754,15 +753,16 @@ def ref_gdn_attention_spec(
         # conv1d: window = rows [init_row, init_row + width - 1), col 0
         conv_line = conv_state[conv_slot]
         prior = conv_line[conv_init_row:conv_init_row + (width - 1)].clone()
-        qkv_batch = qkv[globals_]  # [K, qkv_elems]
+        qkv_batch = qkv[globals_]
         qkv_conv_input = torch.cat([prior, qkv_batch], dim=0)
-        # Roll the line: history from init_row+1, then the K draft inputs.
-        new_conv_line = torch.empty_like(conv_line)
-        hist_rows = conv_state_len - K
+        # Roll the active prefix; capacity reserved for longer proposals stays
+        # untouched when this request has a shorter query.
+        new_conv_line = conv_line.clone()
+        hist_rows = width - 2
         if hist_rows > 0:
             new_conv_line[:hist_rows] = conv_line[
                 conv_init_row + 1:conv_init_row + 1 + hist_rows]
-        new_conv_line[hist_rows:] = qkv_batch
+        new_conv_line[hist_rows:hist_rows + query_len] = qkv_batch
         conv_state[conv_slot] = new_conv_line
 
         qkv_conv_in = qkv_conv_input.transpose(0, 1).unsqueeze(0).to(
@@ -775,12 +775,12 @@ def ref_gdn_attention_spec(
         qkv_conv_out = (qkv_conv_out if activation is None else
                         F.silu(qkv_conv_out)).to(dtype=dtype)
         qkv_conv_out = qkv_conv_out.transpose(-2, -1).reshape(
-            K, qkv_elems_size)
+            query_len, qkv_elems_size)
 
         q_out, k_out, v_out = torch.split(qkv_conv_out, split_qkv, dim=-1)
-        q_out = q_out.reshape(K, num_k_heads // tp_size, head_k_dim)
-        k_out = k_out.reshape(K, num_k_heads // tp_size, head_k_dim)
-        v_out = v_out.reshape(K, num_v_heads // tp_size, head_v_dim)
+        q_out = q_out.reshape(query_len, num_k_heads // tp_size, head_k_dim)
+        k_out = k_out.reshape(query_len, num_k_heads // tp_size, head_k_dim)
+        v_out = v_out.reshape(query_len, num_v_heads // tp_size, head_v_dim)
 
         # ---- SSM recurrence (same as non-spec, just per-step writeback) ----
         ssm_state_batch = ssm_state[init_slot].to(torch.float32).clone()
@@ -800,7 +800,7 @@ def ref_gdn_attention_spec(
             q_all = q_all.repeat_interleave(rep, dim=1)
             k_all = k_all.repeat_interleave(rep, dim=1)
 
-        for t in range(K):
+        for t in range(query_len):
             g_t = g_batch[t]
             beta_t = beta_batch[t]
             q_t = q_all[t]
@@ -819,8 +819,11 @@ def ref_gdn_attention_spec(
                 ssm_state_batch.to(ssm_state.dtype))
 
 
-@pytest.mark.parametrize("num_spec_decodes", NUM_SPEC_DECODES)
-@pytest.mark.parametrize("num_spec_tokens", NUM_SPEC_TOKENS)
+@pytest.mark.parametrize(
+    "num_spec_decodes,num_spec_tokens,query_lens",
+    [(num_decodes, num_tokens, None)
+     for num_decodes in NUM_SPEC_DECODES for num_tokens in NUM_SPEC_TOKENS] +
+    [(3, 4, [2, 4, 3])])
 @pytest.mark.parametrize("num_k_heads", [16])
 @pytest.mark.parametrize("head_k_dim", [128])
 @pytest.mark.parametrize("num_v_heads", [32])
@@ -834,14 +837,13 @@ def ref_gdn_attention_spec(
                          ids=format_tc)
 @pytest.mark.parametrize("ssm_state_is_fp32", [False, True])
 @torch.inference_mode()
-def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
-                           head_k_dim, num_v_heads, head_v_dim, width,
-                           tp_size, has_bias, activation, reorder_input,
+def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, query_lens,
+                           num_k_heads, head_k_dim, num_v_heads, head_v_dim,
+                           width, tp_size, has_bias, activation, reorder_input,
                            dtype, ssm_state_is_fp32):
-    """Pure spec-decode batch: num_prefills == num_decodes == 0,
-    num_spec_decodes sequences each contributing num_spec_tokens tokens.
-    Token positions are shuffled in the global buffer via spec_token_indx
-    so the kernel's gather/scatter is exercised."""
+    """Pure spec-decode batch with fixed or per-request query lengths.
+    Token positions are shuffled in the global buffer via spec_token_indx so
+    the kernel's gather/scatter is exercised."""
     if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
             and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
         pytest.skip("skip gdn attention kernels testing on PVC.")
@@ -854,7 +856,9 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
     assert head_k_dim == head_v_dim
     K = num_spec_tokens
     num_spec = K - 1  # num_speculative_tokens
-    num_actual_tokens = num_spec_decodes * K
+    if query_lens is None:
+        query_lens = [K] * num_spec_decodes
+    num_actual_tokens = sum(query_lens)
     cache_batch_size = 200
 
     mixed_qkvz_size = num_k_heads // tp_size * (
@@ -884,6 +888,7 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                             head_k_dim,
                             dtype=ssm_state_dtype,
                             device=device)
+    original_ssm_state = ssm_state.clone()
     ref_ssm_state = ssm_state.clone()
     conv_weights = torch.randn(mixed_qkv_size,
                                width,
@@ -908,11 +913,13 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
         dtype=torch.int32,
         device=device)
 
-    # Shuffle global token positions across the K-tokens-per-seq layout.
+    # Shuffle global token positions across the packed per-sequence layout.
     perm = torch.randperm(num_actual_tokens, device=device).to(torch.int32)
     spec_token_indx = perm.contiguous()
-    spec_query_start_loc = (torch.arange(
-        num_spec_decodes + 1, dtype=torch.int32, device=device) * K)
+    spec_query_start_loc = torch.tensor(
+        [0] + list(torch.tensor(query_lens).cumsum(0).tolist()),
+        dtype=torch.int32,
+        device=device)
 
     core_attn_out = torch.zeros(num_actual_tokens,
                                 num_v_heads // tp_size,
@@ -1007,13 +1014,19 @@ def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                    ref_conv_state[conv_slot],
                                    atol=atol,
                                    rtol=rtol)
-        # All K ssm-state slots are written per-step.
-        for t in range(K):
+        query_len = query_lens[n]
+        for t in range(query_len):
             slot = int(spec_state_indices_tensor[n, t].item())
             torch.testing.assert_close(ssm_state[slot],
                                        ref_ssm_state[slot],
                                        atol=atol,
                                        rtol=rtol)
+        for t in range(query_len, K):
+            slot = int(spec_state_indices_tensor[n, t].item())
+            torch.testing.assert_close(ssm_state[slot],
+                                       original_ssm_state[slot],
+                                       atol=0,
+                                       rtol=0)
 
 
 MIXED_NUM_SPEC_DECODES = [1, 4]
