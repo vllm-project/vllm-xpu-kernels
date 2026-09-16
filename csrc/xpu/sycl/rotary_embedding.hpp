@@ -9,8 +9,9 @@
 //   GPT-J: [x0 y0 x1 y1 x2 y2 …]
 //
 // Vectorized variants:
-//   - apply_token_rotary_embedding_vec<VEC_SIZE>:  NeoX vec4  (4 offsets/call)
+//   - apply_token_rotary_embedding_vec<VEC_SIZE>:  NeoX  (VEC_SIZE offsets)
 //   - apply_token_rotary_embedding_gptj_vec4:      GPT-J vec4 (2 pairs/call)
+//   - apply_token_rotary_embedding_gptj_vec<VEC_SIZE>: GPT-J (VEC_SIZE pairs)
 
 #pragma once
 
@@ -158,6 +159,36 @@ inline void apply_token_rotary_embedding_gptj_vec4(
     // Rotation: output = v * cos + vr * sin
     *reinterpret_cast<vec4_t*>(output + rot_offset * 2) = v * c4 + vr * s4;
   }
+}
+
+// ── Vectorized GPT-J rotation (generic width) ───────────────────────────────
+// Processes VEC_SIZE consecutive rotation offsets, i.e. 2 * VEC_SIZE
+// consecutive elements of the interleaved layout, per call.
+// Requires rot_offset to be VEC_SIZE-aligned and
+// rot_offset + VEC_SIZE <= embed_dim.
+
+template <typename scalar_t, int VEC_SIZE>
+inline void apply_token_rotary_embedding_gptj_vec(
+    const scalar_t* __restrict__ input,
+    scalar_t* __restrict__ output,
+    const scalar_t* __restrict__ cos_ptr,
+    const scalar_t* __restrict__ sin_ptr,
+    int rot_offset) {
+  using vec_t = sycl::vec<scalar_t, VEC_SIZE>;
+  using vec2_t = sycl::vec<scalar_t, VEC_SIZE * 2>;
+
+  vec2_t v = *reinterpret_cast<const vec2_t*>(input + rot_offset * 2);
+  vec_t c = *reinterpret_cast<const vec_t*>(cos_ptr + rot_offset);
+  vec_t s = *reinterpret_cast<const vec_t*>(sin_ptr + rot_offset);
+
+#pragma unroll
+  for (int j = 0; j < VEC_SIZE; ++j) {
+    const scalar_t x = v[2 * j];
+    const scalar_t y = v[2 * j + 1];
+    v[2 * j] = x * c[j] - y * s[j];
+    v[2 * j + 1] = y * c[j] + x * s[j];
+  }
+  *reinterpret_cast<vec2_t*>(output + rot_offset * 2) = v;
 }
 
 }  // namespace vllm
