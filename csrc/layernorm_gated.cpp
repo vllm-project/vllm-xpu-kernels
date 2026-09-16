@@ -460,6 +460,9 @@ void fused_rms_norm_gated(
     TORCH_CHECK(
         weight->scalar_type() == input.scalar_type(),
         "fused_rms_norm_gated: weight must share the input dtype");
+    TORCH_CHECK(
+        weight->device() == input.device(),
+        "fused_rms_norm_gated: weight must be on the same device as input");
   }
 
   VLLM_DISPATCH_FLOATING_TYPES(
