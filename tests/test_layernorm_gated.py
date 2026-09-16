@@ -46,18 +46,16 @@ def test_rms_norm_gated(
     device: str,
 ) -> None:
     torch.manual_seed(seed)
-    torch.set_default_device("xpu")
-    torch.xpu.set_device(device)
 
     layer = RMSNormGated(hidden_size,
                          activation=activation,
-                         has_weight=has_weight).to(dtype=dtype)
+                         has_weight=has_weight).to(device=device, dtype=dtype)
     if has_weight:
         layer.weight.data.normal_(mean=1.0, std=0.1)
 
     scale = 1 / (2 * hidden_size)
-    x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
-    gate = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device) * scale
+    gate = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
 
     ref_out = layer.forward_native(x, gate)
     out = layer(x, gate)
