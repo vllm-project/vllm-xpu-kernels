@@ -412,7 +412,13 @@ def _to_page_strided_xpu_cache(tensor: torch.Tensor) -> torch.Tensor:
 )
 @torch.inference_mode()
 def test_kda_attention_non_spec(
-    dtype, head_dim, dim_first, mode, state_dtype, page_strided_cache, gate_lower_bound
+    dtype,
+    head_dim,
+    dim_first,
+    mode,
+    state_dtype,
+    page_strided_cache,
+    gate_lower_bound
 ):
     device = torch.device("xpu")
     num_actual_tokens = {
@@ -989,10 +995,19 @@ def test_kda_attention_accepts_fused_mixed_qkv(mode, gate_lower_bound):
     results = []
     for projections in (strided, contiguous):
         conv_state = torch.zeros(
-            batch_size, 3 * hidden_dim, width - 1, dtype=torch.bfloat16, device=device
+            batch_size,
+            3 * hidden_dim,
+            width - 1,
+            dtype=torch.bfloat16,
+            device=device
         )
         recurrent_state = torch.zeros(
-            batch_size, num_heads, head_dim, head_dim, dtype=torch.bfloat16, device=device
+            batch_size,
+            num_heads,
+            head_dim,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=device
         )
         output = torch.zeros(
             1,
@@ -1079,10 +1094,19 @@ def test_kda_attention_accepts_any_contiguous_a_log_layout(a_log_shape):
 
     def run(a_log):
         conv_state = torch.zeros(
-            batch_size, 3 * hidden_dim, width - 1, dtype=torch.bfloat16, device=device
+            batch_size,
+            3 * hidden_dim,
+            width - 1,
+            dtype=torch.bfloat16,
+            device=device
         )
         recurrent_state = torch.zeros(
-            batch_size, num_heads, head_dim, head_dim, dtype=torch.bfloat16, device=device
+            batch_size,
+            num_heads,
+            head_dim,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=device
         )
         output = torch.zeros(
             1,
@@ -1281,7 +1305,12 @@ def test_kda_gated_delta_rule_accepts_independently_strided_qkv():
     results = []
     for projections in (strided, contiguous):
         recurrent_state = torch.zeros(
-            1, num_heads, head_dim, head_dim, dtype=torch.bfloat16, device=device
+            1,
+            num_heads,
+            head_dim,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=device
         )
         output = torch.zeros(
             1,
