@@ -10,6 +10,8 @@ import torch.nn.functional as F
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 from tests.utils import format_tc
 
+pytestmark = pytest.mark.skipif(not torch.xpu.is_available(), reason="requires XPU")
+
 
 def _conv_history(
     conv_state: torch.Tensor,
@@ -239,6 +241,7 @@ def _make_inputs(
     dtype: torch.dtype,
     dim_first: bool,
     device: str = "xpu",
+    state_dtype: torch.dtype = torch.float32,
 ):
     torch.manual_seed(42)
     capture_tokens = num_actual_tokens + 2
@@ -271,7 +274,7 @@ def _make_inputs(
     recurrent_state = (
         torch.randn(num_slots, num_heads, head_dim, head_dim, device=device)
         * 0.05
-    )
+    ).to(state_dtype)
     a_log = torch.randn(1, 1, num_heads, 1, device=device) * 0.1
     dt_bias = torch.randn(hidden_dim, device=device) * 0.1
     core_attn_out = torch.full(
@@ -398,12 +401,12 @@ def _to_page_strided_xpu_cache(tensor: torch.Tensor) -> torch.Tensor:
     ids=["contiguous-cache", "page-strided-cache"],
 )
 @pytest.mark.parametrize(
-    ("dtype", "head_dim", "dim_first", "mode"),
+    ("dtype", "head_dim", "dim_first", "mode", "state_dtype"),
     [
-        (torch.float16, 32, False, "prefill"),
-        (torch.bfloat16, 128, True, "decode"),
-        (torch.float16, 64, True, "prefill+decode"),
-        (torch.bfloat16, 128, True, "long-prefill"),
+        (torch.float16, 32, False, "prefill", torch.float32),
+        (torch.bfloat16, 128, True, "decode", torch.bfloat16),
+        (torch.float16, 64, True, "prefill+decode", torch.float16),
+        (torch.bfloat16, 128, True, "long-prefill", torch.float32),
     ],
     ids=lambda value: (
         format_tc(value) if isinstance(value, torch.dtype) else str(value)
@@ -411,7 +414,7 @@ def _to_page_strided_xpu_cache(tensor: torch.Tensor) -> torch.Tensor:
 )
 @torch.inference_mode()
 def test_kda_attention_non_spec(
-    dtype, head_dim, dim_first, mode, page_strided_cache, gate_lower_bound
+    dtype, head_dim, dim_first, mode, state_dtype, page_strided_cache, gate_lower_bound
 ):
     device = torch.device("xpu")
     num_actual_tokens = {
@@ -438,6 +441,7 @@ def test_kda_attention_non_spec(
         dtype,
         dim_first,
         device=device,
+        state_dtype=state_dtype,
     )
     if mode == "long-prefill":
         query_start_loc = torch.tensor(
@@ -987,10 +991,10 @@ def test_kda_attention_accepts_fused_mixed_qkv(mode, gate_lower_bound):
     results = []
     for projections in (strided, contiguous):
         conv_state = torch.zeros(
-            batch_size, 3 * hidden_dim, width - 1, device=device
+            batch_size, 3 * hidden_dim, width - 1, dtype=torch.bfloat16, device=device
         )
         recurrent_state = torch.zeros(
-            batch_size, num_heads, head_dim, head_dim, device=device
+            batch_size, num_heads, head_dim, head_dim, dtype=torch.bfloat16, device=device
         )
         output = torch.zeros(
             1,
@@ -1077,10 +1081,10 @@ def test_kda_attention_accepts_any_contiguous_a_log_layout(a_log_shape):
 
     def run(a_log):
         conv_state = torch.zeros(
-            batch_size, 3 * hidden_dim, width - 1, device=device
+            batch_size, 3 * hidden_dim, width - 1, dtype=torch.bfloat16, device=device
         )
         recurrent_state = torch.zeros(
-            batch_size, num_heads, head_dim, head_dim, device=device
+            batch_size, num_heads, head_dim, head_dim, dtype=torch.bfloat16, device=device
         )
         output = torch.zeros(
             1,
@@ -1279,7 +1283,7 @@ def test_kda_gated_delta_rule_accepts_independently_strided_qkv():
     results = []
     for projections in (strided, contiguous):
         recurrent_state = torch.zeros(
-            1, num_heads, head_dim, head_dim, device=device
+            1, num_heads, head_dim, head_dim, dtype=torch.bfloat16, device=device
         )
         output = torch.zeros(
             1,
