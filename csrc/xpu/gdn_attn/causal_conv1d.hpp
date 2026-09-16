@@ -570,13 +570,12 @@ struct causal_conv1d_spec_kernel {
     const int qkvz_elems_id =
         local_group_id * elems_per_group + local_id * elems_per_item;
 
-    const int seq_start = query_start_loc[batch_id];
-    const int seq_end = query_start_loc[batch_id + 1];
-    const int query_len = seq_end - seq_start;
-
     if (qkvz_elems_id >= qkvz_elems) {
       return;
     }
+
+    const int seq_start = query_start_loc[batch_id];
+    const int query_len = query_start_loc[batch_id + 1] - seq_start;
 
     const int q_dim = head_k_dim;
     const int k_dim = head_k_dim;

@@ -372,15 +372,14 @@ struct gated_delta_rule_spec_kernel {
     int sg_id = sg.get_group_id();
     int sg_local_id = sg.get_local_id();
 
-    const int seq_start = query_start_loc[batch_id];
-    const int seq_end = query_start_loc[batch_id + 1];
-    const int query_len = seq_end - seq_start;
-
     int kv_ratio = num_v_heads / num_k_heads;
     int head_v_dim_id = v_bucket_id * v_dim_per_group + sg_id * v_dim_per_sg;
     if (head_v_dim_id >= head_v_dim) {
       return;
     }
+
+    const int seq_start = query_start_loc[batch_id];
+    const int query_len = query_start_loc[batch_id + 1] - seq_start;
 
     const float scale = 1.0f / sycl::sqrt(float(head_k_dim));
     float A_log_local = A_log[num_v_heads_id];
