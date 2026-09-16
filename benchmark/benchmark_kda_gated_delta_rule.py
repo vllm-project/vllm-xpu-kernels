@@ -53,7 +53,7 @@ def _run(kwargs, intermediates):
         kwargs["core_attn_out"],
         *intermediates,
         kwargs["raw_gate"],
-        kwargs["beta"],
+        kwargs["raw_beta"],
         kwargs["recurrent_state"],
         kwargs["a_log"],
         kwargs["dt_bias"],

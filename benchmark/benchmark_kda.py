@@ -215,13 +215,13 @@ def make_inputs(shape, workload, dtype):
             )
             * 0.2
         ).to(dtype),
-        beta=torch.randn(
+        raw_beta=torch.randn(
             1,
             num_actual_tokens,
             local_num_heads,
             dtype=torch.float32,
             device=DEVICE,
-        ).sigmoid(),
+        ),
         conv_state=(
             torch.randn(
                 cache_batch_size,
@@ -277,7 +277,7 @@ def _run_kda(kwargs):
         kwargs["k_proj"],
         kwargs["v_proj"],
         kwargs["raw_gate"],
-        kwargs["beta"],
+        kwargs["raw_beta"],
         kwargs["conv_state"],
         kwargs["recurrent_state"],
         kwargs["q_conv_weight"],

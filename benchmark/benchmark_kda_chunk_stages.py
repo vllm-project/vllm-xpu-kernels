@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-License-Identifier: Apache-2.0
 """Focused benchmark for the Xe2 chunked KDA prefill pipeline.
 
 Runs only shapes that reach the `chunk` backend so that unitrace's per-kernel
