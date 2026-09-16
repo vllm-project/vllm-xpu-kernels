@@ -34,8 +34,8 @@ void fused_add_gemma_rms_norm(
 // is "sigmoid" (KDA) or "swish"/"silu" (Gated DeltaNet).
 void fused_rms_norm_gated(
     torch::Tensor& out,
-    torch::Tensor& input,
-    torch::Tensor& gate,
+    const torch::Tensor& input,
+    const torch::Tensor& gate,
     std::optional<torch::Tensor> weight,
     double epsilon,
     const std::string& activation);
