@@ -59,8 +59,7 @@ class rms_norm_gated_kernel {
         hidden_size(hidden_size_),
         s_variance(s_variance_) {}
 
-  void operator() [[sycl::reqd_sub_group_size(32)]] (
-      const sycl::nd_item<3>& item_ct1) const {
+  void operator()(const sycl::nd_item<3>& item_ct1) const {
     using vec_t = vec_n_t<scalar_t, VEC_SIZE>;
 
     const int64_t row = item_ct1.get_group(2);
@@ -148,8 +147,7 @@ class rms_norm_gated_scalar_kernel {
         hidden_size(hidden_size_),
         s_variance(s_variance_) {}
 
-  void operator() [[sycl::reqd_sub_group_size(32)]] (
-      const sycl::nd_item<3>& item_ct1) const {
+   void operator()(const sycl::nd_item<3>& item_ct1) const {
     const int64_t row_offset =
         static_cast<int64_t>(item_ct1.get_group(2)) * hidden_size;
     const int tid = item_ct1.get_local_id(2);
@@ -221,8 +219,8 @@ class rms_norm_gated_multi_row_kernel {
         hidden_size(hidden_size_),
         s_variance(s_variance_) {}
 
-  void operator() [[sycl::reqd_sub_group_size(32)]] (
-      const sycl::nd_item<3>& item_ct1) const {
+   void operator() (
+       const sycl::nd_item<3>& item_ct1) const {
     using vec_t = vec_n_t<scalar_t, VEC_SIZE>;
 
     const int row_in_wg = item_ct1.get_local_id(0);
