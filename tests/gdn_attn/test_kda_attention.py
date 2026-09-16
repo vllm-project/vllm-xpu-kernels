@@ -10,8 +10,6 @@ import torch.nn.functional as F
 import vllm_xpu_kernels._xpu_C  # noqa: F401
 from tests.utils import format_tc
 
-pytestmark = pytest.mark.skipif(not torch.xpu.is_available(), reason="requires XPU")
-
 
 def _conv_history(
     conv_state: torch.Tensor,

@@ -16,8 +16,8 @@ ACTIVATIONS = ["sigmoid", "swish"]
 HAS_WEIGHT = [False, True]
 SEEDS = [0]
 XPU_DEVICES = [
-    f"xpu:{i}" for i in range(1 if torch.xpu.device_count() == 1 else 2)
-]
+    f"xpu:{i}" for i in range(min(2, torch.xpu.device_count()))
+] if torch.xpu.is_available() else []
 
 # override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
