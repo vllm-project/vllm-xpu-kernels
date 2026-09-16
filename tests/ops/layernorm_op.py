@@ -515,12 +515,13 @@ class RMSNormGated(CustomOp):
         self.variance_epsilon = eps
         self.activation = activation
         self.has_weight = has_weight
-        if dtype is not None:
-            self.weight = torch.ones(hidden_size, dtype=dtype)
-        else:
-            self.weight = torch.ones(hidden_size)
         if self.has_weight:
-            self.weight = nn.Parameter(self.weight)
+            if dtype is not None:
+                self.weight = nn.Parameter(torch.ones(hidden_size, dtype=dtype))
+            else:
+                self.weight = nn.Parameter(torch.ones(hidden_size))
+        else:
+            self.register_parameter("weight", None)
 
     def forward_native(
         self,
