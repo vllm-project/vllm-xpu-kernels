@@ -67,7 +67,7 @@ KdaRecurrentBackend parse_kda_recurrent_backend() {
     return KdaRecurrentBackend::Auto;
   }
   const std::string value(raw);
-  if (value == "opt" || value == "decode") {
+  if (value == "opt") {
     return KdaRecurrentBackend::Optimized;
   }
   if (value == "chunk") {
