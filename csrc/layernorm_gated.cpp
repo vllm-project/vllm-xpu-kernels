@@ -31,7 +31,7 @@ enum class GateActivation { Sigmoid, Swish };
 
 template <GateActivation ACT>
 inline float apply_gate_activation(float g) {
-  const float s = 1.0f / (1.0f + sycl::exp(-g));
+  const float s = sycl::native::recip(1.0f + sycl::native::exp(-g));
   if constexpr (ACT == GateActivation::Swish) {
     return g * s;
   } else {
@@ -395,8 +395,8 @@ void call_rms_norm_gated_kernel(
 
 void fused_rms_norm_gated(
     torch::Tensor& out,
-    torch::Tensor& input,
-    torch::Tensor& gate,
+    const torch::Tensor& input,
+    const torch::Tensor& gate,
     std::optional<torch::Tensor> weight,
     double epsilon,
     const std::string& activation) {
@@ -453,6 +453,9 @@ void fused_rms_norm_gated(
 
   const bool has_weight = weight.has_value();
   if (has_weight) {
+    TORCH_CHECK(
+        weight->device() == input.device(),
+        "fused_rms_norm_gated: weight must be on the same device as input");
     TORCH_CHECK(weight->is_contiguous());
     TORCH_CHECK(
         weight->numel() == input.size(-1),
