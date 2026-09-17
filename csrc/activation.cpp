@@ -8,6 +8,7 @@
 #include <c10/util/Float8_e4m3fn.h>
 #include <c10/util/Float8_e5m2.h>
 #include "quantization/fp8/quant_utils.h"
+#include "quantization/utils.h"
 
 #define VLLM_LDG(arg) *(arg)
 
@@ -216,13 +217,17 @@ class act_and_mul_quant_vec_kernel {
     for (int64_t i = offset; i < bound; i += step) {
       vec_t xv = v_x[i];
       vec_t yv = v_y[i];
+      // Pack VEC_SIZE fp8 results into an aligned vector for a single
+      // coalesced store instead of VEC_SIZE scalar byte stores.
+      vllm::xpu::aligned_vec<fp8_type, VEC_SIZE> out_vec;
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; j++) {
         float val = static_cast<float>(ACT_FN(xv[j]) * yv[j]) * inv_scale;
         float clamped = sycl::fmax(-fp8_max, sycl::fmin(val, fp8_max));
-        out_[token_idx * d_ + i * VEC_SIZE + j] =
-            static_cast<fp8_type>(clamped);
+        out_vec[j] = static_cast<fp8_type>(clamped);
       }
+      reinterpret_cast<vllm::xpu::aligned_vec<fp8_type, VEC_SIZE>*>(
+          out_)[token_idx * bound + i] = out_vec;
     }
   }
 
@@ -557,8 +562,7 @@ void silu_and_mul(
 // Dispatches to the vectorized kernel (VEC_SIZE=1..8) based on alignment.
 #define LAUNCH_ACT_AND_MUL_QUANT_VEC(KERNEL, N)                               \
   case N: {                                                                   \
-    int64_t wg_size =                                                         \
-        std::min(static_cast<int64_t>(d / N), static_cast<int64_t>(1024));    \
+    int64_t wg_size = vllm::fused_quant_block_size(d / N, 2, false);          \
     VLLM_DISPATCH_FP8_TYPES(                                                  \
         out.scalar_type(), "act_and_mul_quant_vec_kernel_fp8", [&] {          \
           auto out_ptr = out.data_ptr<fp8_t>();                               \
@@ -583,9 +587,9 @@ void silu_and_mul(
   auto scale_ptr = scale.data_ptr<float>();                                    \
   at::DeviceGuard device_guard(input.device());                                \
   auto& queue = vllm::xpu::vllmGetQueue();                                     \
-  /* Prefer the widest vector that divides d (see act_and_mul note): wide      \
-     vectorized access maximizes HBM bandwidth on this memory-bound op.        \
-     Large d is handled by the 1024-capped work-group loop in the launcher. */ \
+  /* Use the widest vector the row divides by: the kernel already strides over \
+     the row, and shrinking vec_size just so every work-item runs exactly one  \
+     iteration narrows each access from 16B to 8B and costs ~30% of peak. */   \
   int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(sycl_t));         \
   while (vec_size > 1 && d % vec_size != 0) {                                  \
     vec_size = vec_size >> 1;                                                  \
