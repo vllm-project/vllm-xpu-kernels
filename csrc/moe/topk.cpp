@@ -969,9 +969,8 @@ struct FallbackTopK {
       if (active && lane == 0) {
         const int64_t out = token * topk + k;
         weights[out] = is_pad ? 0.0f : weight;
-        indices[out] =
-                 is_pad ? static_cast<IndexType>(-1)
-                   : static_cast<IndexType>(local_index);
+        indices[out] = is_pad ? static_cast<IndexType>(-1)
+                              : static_cast<IndexType>(local_index);
         source_rows[out] = static_cast<int64_t>(k) * num_tokens + token;
       }
       previous_score = local_score;
@@ -1237,7 +1236,7 @@ void launch_fast(
 template <
     int N,
     typename InputT,
-  typename IndexType,
+    typename IndexType,
     ScoringFunc SF,
     bool HAS_BIAS>
 void launch_static(
@@ -1287,19 +1286,19 @@ bool dispatch_static_experts(
     int64_t num_tokens,
     int num_experts,
     int topk) {
-#define LAUNCH_STATIC(N)                          \
+#define LAUNCH_STATIC(N)                             \
   launch_static<N, InputT, IndexType, SF, HAS_BIAS>( \
-      q,                                          \
-      gating,                                     \
-      weights,                                    \
-      indices,                                    \
-      source_rows,                                \
-      is_padding,                                 \
-      bias,                                       \
-      renormalize,                                \
-      routed_scaling_factor,                      \
-      num_tokens,                                 \
-      topk);                                      \
+      q,                                             \
+      gating,                                        \
+      weights,                                       \
+      indices,                                       \
+      source_rows,                                   \
+      is_padding,                                    \
+      bias,                                          \
+      renormalize,                                   \
+      routed_scaling_factor,                         \
+      num_tokens,                                    \
+      topk);                                         \
   return true
 
   switch (num_experts) {
@@ -1451,18 +1450,18 @@ void dispatch_topk_all(
 
   const bool launched =
       dispatch_static_experts<InputT, IndexType, SF, HAS_BIAS>(
-      q,
-      gating,
-      weights,
-      indices,
-      source_rows,
-      is_padding,
-      bias,
-      renormalize,
-      routed_scaling_factor,
-      num_tokens,
-      num_experts,
-      topk);
+          q,
+          gating,
+          weights,
+          indices,
+          source_rows,
+          is_padding,
+          bias,
+          renormalize,
+          routed_scaling_factor,
+          num_tokens,
+          num_experts,
+          topk);
   TORCH_CHECK(launched, "topk: unsupported num_experts: ", num_experts);
 }
 
