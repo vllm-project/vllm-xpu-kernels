@@ -893,13 +893,13 @@ struct RegisterTopK {
 // Fallback engine: streams the row from global memory once per pick (full
 // sub-group per token). Handles any N and any index type.
 // ---------------------------------------------------------------------------
-template <int N, typename IndexT, typename Policy>
+template <int N, typename IndexType, typename Policy>
 struct FallbackTopK {
   using InputT = typename Policy::InputT;
 
   const InputT* __restrict__ gating;
   float* __restrict__ weights;
-  IndexT* __restrict__ indices;
+  IndexType* __restrict__ indices;
   int* __restrict__ source_rows;
   const bool* __restrict__ is_padding;
   Policy policy;
@@ -970,7 +970,8 @@ struct FallbackTopK {
         const int64_t out = token * topk + k;
         weights[out] = is_pad ? 0.0f : weight;
         indices[out] =
-            is_pad ? static_cast<IndexT>(-1) : static_cast<IndexT>(local_index);
+                 is_pad ? static_cast<IndexType>(-1)
+                   : static_cast<IndexType>(local_index);
         source_rows[out] = static_cast<int64_t>(k) * num_tokens + token;
       }
       previous_score = local_score;
@@ -1236,14 +1237,14 @@ void launch_fast(
 template <
     int N,
     typename InputT,
-    typename IndexT,
+  typename IndexType,
     ScoringFunc SF,
     bool HAS_BIAS>
 void launch_static(
     sycl::queue& q,
     const InputT* gating,
     float* weights,
-    IndexT* indices,
+    IndexType* indices,
     int* source_rows,
     const bool* is_padding,
     const float* bias,
@@ -1258,7 +1259,7 @@ void launch_static(
   q.parallel_for(
       sycl::nd_range<1>{
           sycl::range<1>{groups * kWgSize}, sycl::range<1>{kWgSize}},
-      FallbackTopK<N, IndexT, Policy>{
+      FallbackTopK<N, IndexType, Policy>{
           gating,
           weights,
           indices,
@@ -1272,12 +1273,12 @@ void launch_static(
 
 //**************************Layer 4: dispatch****************************
 
-template <typename InputT, typename IndexT, ScoringFunc SF, bool HAS_BIAS>
+template <typename InputT, typename IndexType, ScoringFunc SF, bool HAS_BIAS>
 bool dispatch_static_experts(
     sycl::queue& q,
     const InputT* gating,
     float* weights,
-    IndexT* indices,
+    IndexType* indices,
     int* source_rows,
     const bool* is_padding,
     const float* bias,
@@ -1287,7 +1288,7 @@ bool dispatch_static_experts(
     int num_experts,
     int topk) {
 #define LAUNCH_STATIC(N)                          \
-  launch_static<N, InputT, IndexT, SF, HAS_BIAS>( \
+  launch_static<N, InputT, IndexType, SF, HAS_BIAS>( \
       q,                                          \
       gating,                                     \
       weights,                                    \
@@ -1341,12 +1342,12 @@ bool dispatch_static_experts(
 #undef LAUNCH_STATIC
 }
 
-template <typename InputT, typename IndexT, ScoringFunc SF, bool HAS_BIAS>
+template <typename InputT, typename IndexType, ScoringFunc SF, bool HAS_BIAS>
 bool dispatch_experts_topk(
     sycl::queue& q,
     const InputT* gating,
     float* weights,
-    IndexT* indices,
+    IndexType* indices,
     int* source_rows,
     const bool* is_padding,
     const float* bias,
@@ -1413,12 +1414,12 @@ bool dispatch_experts_topk(
 #undef LAUNCH_FAST
 }
 
-template <typename InputT, typename IndexT, ScoringFunc SF, bool HAS_BIAS>
+template <typename InputT, typename IndexType, ScoringFunc SF, bool HAS_BIAS>
 void dispatch_topk_all(
     sycl::queue& q,
     const InputT* gating,
     float* weights,
-    IndexT* indices,
+    IndexType* indices,
     int* source_rows,
     const bool* is_padding,
     const float* bias,
@@ -1427,11 +1428,11 @@ void dispatch_topk_all(
     int64_t num_tokens,
     int num_experts,
     int topk) {
-  if constexpr (std::is_same_v<IndexT, int>) {
+  if constexpr (std::is_same_v<IndexType, int>) {
     const bool aligned = (reinterpret_cast<uintptr_t>(gating) % 16 == 0) &&
                          (reinterpret_cast<uintptr_t>(weights) % 16 == 0) &&
                          (reinterpret_cast<uintptr_t>(indices) % 16 == 0);
-    if (aligned && dispatch_experts_topk<InputT, IndexT, SF, HAS_BIAS>(
+    if (aligned && dispatch_experts_topk<InputT, IndexType, SF, HAS_BIAS>(
                        q,
                        gating,
                        weights,
@@ -1448,7 +1449,8 @@ void dispatch_topk_all(
     }
   }
 
-  const bool launched = dispatch_static_experts<InputT, IndexT, SF, HAS_BIAS>(
+  const bool launched =
+      dispatch_static_experts<InputT, IndexType, SF, HAS_BIAS>(
       q,
       gating,
       weights,
@@ -1469,12 +1471,12 @@ void dispatch_topk_all(
 }  // namespace moe
 }  // namespace vllm
 
-template <typename InputT, typename IndexT, vllm::moe::ScoringFunc SF>
+template <typename InputT, typename IndexType, vllm::moe::ScoringFunc SF>
 static void dispatch_topk_typed(
     sycl::queue& queue,
     const InputT* gating,
     float* weights,
-    IndexT* indices,
+    IndexType* indices,
     int* source_rows,
     const bool* is_padding,
     const float* bias,
@@ -1484,7 +1486,7 @@ static void dispatch_topk_typed(
     int num_experts,
     int topk) {
   if (bias != nullptr) {
-    vllm::moe::topk::dispatch_topk_all<InputT, IndexT, SF, true>(
+    vllm::moe::topk::dispatch_topk_all<InputT, IndexType, SF, true>(
         queue,
         gating,
         weights,
@@ -1498,7 +1500,7 @@ static void dispatch_topk_typed(
         num_experts,
         topk);
   } else {
-    vllm::moe::topk::dispatch_topk_all<InputT, IndexT, SF, false>(
+    vllm::moe::topk::dispatch_topk_all<InputT, IndexType, SF, false>(
         queue,
         gating,
         weights,
