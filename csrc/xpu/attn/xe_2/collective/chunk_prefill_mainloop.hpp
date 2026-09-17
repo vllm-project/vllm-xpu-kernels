@@ -313,7 +313,7 @@ struct FMHAFwdMainloop<
         make_shifted_identity_tensor<1>(K_2D.shape(), x_shift_k);  // (k,d)
     Tensor cV =
         make_shifted_identity_tensor<0>(V_2D.shape(), x_shift_v);  // (v,k)
-    Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));  // (q,k)
+    Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));   // (q,k)
 
     auto K_2D_0 = K_2D_al;
     auto V_2D_0 = V_2D_al;
@@ -973,7 +973,7 @@ struct DecodeFwdMainloop<
         make_shifted_identity_tensor<1>(K_2D.shape(), x_shift_k);  // (k,d)
     Tensor cV =
         make_shifted_identity_tensor<0>(V_2D.shape(), x_shift_v);  // (v,k)
-    Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));  // (q,k)
+    Tensor cP = make_identity_tensor(take<0, 2>(TileShapeQK{}));   // (q,k)
 
     auto K_2D_0 = K_2D_al;
     auto V_2D_0 = V_2D_al;

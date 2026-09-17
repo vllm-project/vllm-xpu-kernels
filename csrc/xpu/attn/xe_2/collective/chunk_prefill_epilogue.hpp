@@ -202,7 +202,7 @@ class FMHAFwdEpilogue {
     int x_shift_o;
     auto O_al = align_block_2d_base<1>(O, x_shift_o);
     Tensor cO = make_shifted_identity_tensor<1>(O.shape(), x_shift_o);  // (q,v)
-    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);                 // (q,v)
+    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);                   // (q,v)
 
     /* Prepare slices */
     TiledCopyO copy_o{O_al};
@@ -504,7 +504,7 @@ class DecodeFwdEpilogue {
     int x_shift_o;
     auto O_al = align_block_2d_base<1>(O, x_shift_o);
     Tensor cO = make_shifted_identity_tensor<1>(O.shape(), x_shift_o);  // (q,v)
-    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);                 // (q,v)
+    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);                   // (q,v)
 
     /* Prepare slices */
     TiledCopyO copy_o{O_al};
@@ -559,7 +559,7 @@ class DecodeFwdEpilogue {
     int x_shift_o;
     auto O_al = align_block_2d_base<1>(O, x_shift_o);
     Tensor cO = make_shifted_identity_tensor<1>(O.shape(), x_shift_o);  // (q,v)
-    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);                 // (q,v)
+    Tensor gO = local_tile(cO, TileShapeO{}, blk_qv);                   // (q,v)
     TiledCopyO copy_o{O_al};
     auto thr_copy_o = copy_o.get_slice(thr_id);
     auto tOgO = thr_copy_o.partition_D(gO);  // fragment coords (q,v)
