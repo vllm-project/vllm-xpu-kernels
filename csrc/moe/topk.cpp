@@ -305,7 +305,7 @@ inline void store_row_dispatch(
 }
 
 //**************************Layer 1: scoring
-//policies****************************
+// policies****************************
 //
 // Policy interface consumed by the selection engines:
 //
@@ -504,7 +504,7 @@ using RegisterKernelPolicy = std::conditional_t<
     SigmoidScoring<T, HAS_BIAS, !HAS_BIAS && std::is_same_v<T, float>>>;
 
 //**************************Layer 2: selection
-//engines****************************
+// engines****************************
 
 // ---------------------------------------------------------------------------
 // Chunked engine: keeps one running selection maximum per chunk of the
@@ -1332,6 +1332,8 @@ bool dispatch_static_experts(
       LAUNCH_STATIC(512);
     case 576:
       LAUNCH_STATIC(576);
+    case 1024:
+      LAUNCH_STATIC(1024);
     default:
       return false;
   }
@@ -1402,6 +1404,8 @@ bool dispatch_experts_topk(
       LAUNCH_FAST(512);
     case 576:
       LAUNCH_FAST(576);
+    case 1024:
+      LAUNCH_FAST(1024);
     default:
       return false;
   }
