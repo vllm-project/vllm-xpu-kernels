@@ -755,7 +755,7 @@ void topk_softplus_sqrt(
   const int topk = topk_weights.size(-1);
 
   const c10::OptionalDeviceGuard device_guard(device_of(gating_output));
-  sycl::queue& q = at::xpu::getCurrentXPUStream().queue();
+  sycl::queue& q = vllm::xpu::vllmGetQueue();
 
   using vllm::moe::bfloat16_t;
   using vllm::moe::half_t;
