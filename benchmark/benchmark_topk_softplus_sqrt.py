@@ -25,6 +25,8 @@ def topk_softplus_sqrt_compile(
     routed_scaling_factor: float = 1.0,
     input_ids: Optional[torch.Tensor] = None,
     tid2eid: Optional[torch.Tensor] = None,
+    bias_vl: Optional[torch.Tensor] = None,
+    image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     del hidden_states, indices_type
 
@@ -35,10 +37,28 @@ def topk_softplus_sqrt_compile(
     if tid2eid is not None:
         assert input_ids is not None
         expert_ids = tid2eid[input_ids.to(torch.long)].to(torch.long)
-        topk_weights = torch.gather(routing_weights, dim=-1, index=expert_ids)
         topk_ids = expert_ids
+        if bias_vl is not None and image_sentinel_lo > 0:
+            image_mask = (input_ids.to(torch.long) >= image_sentinel_lo) & (
+                input_ids.to(torch.long) < image_sentinel_lo + 5
+            )
+            vl_ids = torch.topk(
+                routing_weights + bias_vl, topk, dim=-1
+            ).indices
+            topk_ids = torch.where(image_mask.unsqueeze(-1), vl_ids, topk_ids)
+        topk_weights = torch.gather(routing_weights, dim=-1, index=topk_ids)
     else:
-        topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+        scores_for_choice = routing_weights
+        if bias_vl is not None and image_sentinel_lo > 0:
+            assert input_ids is not None
+            image_mask = (input_ids.to(torch.long) >= image_sentinel_lo) & (
+                input_ids.to(torch.long) < image_sentinel_lo + 5
+            )
+            scores_for_choice = routing_weights + (
+                image_mask.unsqueeze(-1) * bias_vl.unsqueeze(0)
+            )
+        topk_ids = torch.topk(scores_for_choice, topk, dim=-1).indices
+        topk_weights = torch.gather(routing_weights, dim=-1, index=topk_ids)
 
     if renormalize:
         denom = topk_weights.sum(dim=-1, keepdim=True)
@@ -57,6 +77,8 @@ def topk_softplus_sqrt_native(
     routed_scaling_factor: float = 1.0,
     input_ids: Optional[torch.Tensor] = None,
     tid2eid: Optional[torch.Tensor] = None,
+    bias_vl: Optional[torch.Tensor] = None,
+    image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     del hidden_states, indices_type
 
@@ -67,10 +89,28 @@ def topk_softplus_sqrt_native(
     if tid2eid is not None:
         assert input_ids is not None
         expert_ids = tid2eid[input_ids.to(torch.long)].to(torch.long)
-        topk_weights = torch.gather(routing_weights, dim=-1, index=expert_ids)
         topk_ids = expert_ids
+        if bias_vl is not None and image_sentinel_lo > 0:
+            image_mask = (input_ids.to(torch.long) >= image_sentinel_lo) & (
+                input_ids.to(torch.long) < image_sentinel_lo + 5
+            )
+            vl_ids = torch.topk(
+                routing_weights + bias_vl, topk, dim=-1
+            ).indices
+            topk_ids = torch.where(image_mask.unsqueeze(-1), vl_ids, topk_ids)
+        topk_weights = torch.gather(routing_weights, dim=-1, index=topk_ids)
     else:
-        topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+        scores_for_choice = routing_weights
+        if bias_vl is not None and image_sentinel_lo > 0:
+            assert input_ids is not None
+            image_mask = (input_ids.to(torch.long) >= image_sentinel_lo) & (
+                input_ids.to(torch.long) < image_sentinel_lo + 5
+            )
+            scores_for_choice = routing_weights + (
+                image_mask.unsqueeze(-1) * bias_vl.unsqueeze(0)
+            )
+        topk_ids = torch.topk(scores_for_choice, topk, dim=-1).indices
+        topk_weights = torch.gather(routing_weights, dim=-1, index=topk_ids)
 
     if renormalize:
         denom = topk_weights.sum(dim=-1, keepdim=True)
@@ -89,6 +129,8 @@ def fused_topk_softplus_sqrt(
     routed_scaling_factor: float = 1.0,
     input_ids: Optional[torch.Tensor] = None,
     tid2eid: Optional[torch.Tensor] = None,
+    bias_vl: Optional[torch.Tensor] = None,
+    image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Python adapter for the in-place C++ op signature."""
     del hidden_states
@@ -117,6 +159,9 @@ def fused_topk_softplus_sqrt(
         None,
         input_ids,
         tid2eid,
+        None,
+        bias_vl,
+        image_sentinel_lo,
     )
     return topk_weights, topk_indices.to(torch.int32)
 
@@ -148,12 +193,30 @@ def make_hash_inputs(
     return input_ids, tid2eid.contiguous()
 
 
+def make_vl_input_ids(
+    n_token: int,
+    image_sentinel_lo: int,
+    device: str = "xpu",
+) -> torch.Tensor:
+    input_ids = torch.randint(
+        0, image_sentinel_lo, (n_token,), dtype=torch.int32, device=device
+    )
+    positions = torch.arange(n_token, device=device)
+    image_rows = positions % 3 == 0
+    input_ids[image_rows] = (
+        image_sentinel_lo + (positions[image_rows] // 3) % 5
+    ).to(torch.int32)
+    input_ids[positions % 6 == 3] = image_sentinel_lo + 5
+    return input_ids
+
+
 n_token_range = [1, 64, 256]
 # Keep only expert counts supported by the current C++ dispatch switch.
 n_expert_range = [16, 192, 512]
 topk_range = [2, 4, 8]
 renormalize_range = [True, False]
 with_hash_range = [False, True]
+with_vl_range = [False, True]
 dtype_range = [torch.float16, torch.bfloat16, torch.float32]
 configs = list(
     itertools.product(
@@ -162,6 +225,7 @@ configs = list(
         topk_range,
         renormalize_range,
         with_hash_range,
+        with_vl_range,
         dtype_range,
     )
 )
@@ -175,13 +239,14 @@ configs = list(
             "topk",
             "renormalize",
             "with_hash",
+            "with_vl",
             "dtype",
         ],
         x_vals=[tuple(_) for _ in configs],
         line_arg="provider",
-        line_vals=["vllm", "native", "compile"],
-        line_names=["vllm", "native", "compile"],
-        styles=[("blue", "-"), ("green", "-"), ("orange", "-")],
+        line_vals=["vllm",],
+        line_names=["vllm",],
+        styles=[("blue", "-")],
         ylabel="us",
         plot_name="topk_softplus_sqrt-perf",
         args={},
@@ -193,6 +258,7 @@ def benchmark(
     topk: int,
     renormalize: bool,
     with_hash: bool,
+    with_vl: bool,
     dtype: torch.dtype,
     provider: str = "vllm",
 ):
@@ -209,6 +275,18 @@ def benchmark(
     else:
         input_ids, tid2eid = None, None
 
+    bias_vl = None
+    image_sentinel_lo = 0
+    if with_vl:
+        image_sentinel_lo = max(n_token, 16)
+        input_ids = make_vl_input_ids(n_token, image_sentinel_lo)
+        if with_hash:
+            vocab_size = image_sentinel_lo + 8
+            tid2eid = torch.stack(
+                [torch.randperm(n_expert)[:topk] for _ in range(vocab_size)]
+            ).to(device="xpu", dtype=torch.int32)
+        bias_vl = torch.randn(n_expert, dtype=torch.float32, device="xpu")
+
     quantiles = [0.5, 0.2, 0.8]
 
     common_kwargs = dict(
@@ -220,6 +298,8 @@ def benchmark(
         routed_scaling_factor=1.0,
         input_ids=input_ids,
         tid2eid=tid2eid,
+        bias_vl=bias_vl,
+        image_sentinel_lo=image_sentinel_lo,
     )
 
     if provider == "vllm":
@@ -250,7 +330,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save-path",
         type=str,
-        default="./configs/topk/",
+        default="./configs/topk-softplus-sqrt/",
         help="Path to save topk softplus-sqrt benchmark results",
     )
 
