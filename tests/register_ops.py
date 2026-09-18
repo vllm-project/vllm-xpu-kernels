@@ -707,6 +707,8 @@ def topk_softplus_sqrt(
     input_ids: Optional[torch.Tensor] = None,
     tid2eid: Optional[torch.Tensor] = None,
     is_padding: Optional[torch.Tensor] = None,
+    bias_vl: Optional[torch.Tensor] = None,
+    image_sentinel_lo: int = 0,
 ) -> None:
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
@@ -719,6 +721,8 @@ def topk_softplus_sqrt(
         input_ids,
         tid2eid,
         is_padding,
+        bias_vl,
+        image_sentinel_lo,
     )
 
 
