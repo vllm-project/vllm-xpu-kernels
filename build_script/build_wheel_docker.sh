@@ -148,7 +148,8 @@ uv pip install \
     wheel \
     regex \
     jinja2 \
-    build
+    build \
+    psutil
 
 echo ">>> Building wheel..."
 python setup.py bdist_wheel --dist-dir /workspace/dist --py-limited-api=cp38
