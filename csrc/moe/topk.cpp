@@ -121,12 +121,14 @@ struct alignas(sizeof(T) * W) WideVec {
   T v[W];
 };
 
-template <typename T>
-using T4 = WideVec<T, 4>;
+template <typename T, int VALUES_PER_LANE>
+constexpr int load_width() {
+  return sizeof(T) == 2 && VALUES_PER_LANE % 8 == 0 ? 8 : 4;
+}
 
-template <typename T>
-inline T4<T> ld4(const T* __restrict__ p) {
-  return *reinterpret_cast<const T4<T>*>(p);
+template <typename T, int W>
+inline WideVec<T, W> ld(const T* __restrict__ p) {
+  return *reinterpret_cast<const WideVec<T, W>*>(p);
 }
 
 // Feasible lane counts are powers of two (xor-shuffle reductions) that leave
@@ -170,8 +172,8 @@ constexpr int small_lanes_for(int num_experts) {
   return lanes_for_vpl(num_experts, kSmallTargetValuesPerLane);
 }
 
-constexpr int groups_per_chunk(int groups_per_lane) {
-  int chunk_groups = kTargetChunkSize / 4;
+constexpr int groups_per_chunk(int groups_per_lane, int load_width) {
+  int chunk_groups = kTargetChunkSize / load_width;
   if (chunk_groups < 1) chunk_groups = 1;
   while (chunk_groups > 1 && (groups_per_lane % chunk_groups != 0 ||
                               groups_per_lane / chunk_groups < 2))
@@ -326,8 +328,9 @@ inline void store_row_dispatch(
 //                             selection score in place (kNeedsRowNorm only)
 //   norm_accum(x)             exp(x - M) contribution to Z
 //   winner_weight(ws, wi)     winner weight from its selection score
-//   weight_from_raw(raw, wi)  winner weight from its raw logit (streaming
-//                             fallback; avoids score - bias cancellation)
+//   kWeightFromRaw            winner weight must use the raw input rather than
+//                             recovering it from a bias-augmented score
+//   weight_from_raw(raw, wi)  winner weight from its raw logit
 //   output_scale()            normalizer folded into the one-shot store scale
 //                             (1/Z for softmax-no-bias, 1 otherwise)
 //   kRegisterWhenFits         routing hint: register engine wins whenever the
@@ -361,9 +364,10 @@ struct NoRowStats {
 template <typename T, bool HAS_BIAS, bool RAW_SELECT>
 struct SigmoidScoring : NoRowStats {
   using InputT = T;
-  // Biased scores are cached as float (the prob is recoverable as
-  // score - bias); unbiased caches keep the input type.
+  // Biased selection scores are cached as float; unbiased caches keep the
+  // input type.
   using CacheT = std::conditional_t<HAS_BIAS, float, T>;
+  static constexpr bool kWeightFromRaw = HAS_BIAS;
 
   // An elementwise score is cheap to cache and caching avoids recomputing
   // the scoring function in every pick, so the register engine wins whenever
@@ -390,10 +394,9 @@ struct SigmoidScoring : NoRowStats {
     }
   }
 
-  float winner_weight(float ws, int wi) const {
-    if constexpr (HAS_BIAS) {
-      return ws - bias[wi];
-    } else if constexpr (RAW_SELECT) {
+  float winner_weight(float ws, int /*wi*/) const {
+    static_assert(!HAS_BIAS);
+    if constexpr (RAW_SELECT) {
       return sigmoid_typed(static_cast<T>(ws));  // ws is the raw logit
     } else {
       return ws;  // ws is already the sigmoid value
@@ -425,6 +428,7 @@ template <typename T, bool HAS_BIAS>
 struct SoftmaxScoring {
   using InputT = T;
   using CacheT = T;  // the register engine caches raw logits
+  static constexpr bool kWeightFromRaw = HAS_BIAS;
 
   static constexpr bool kUsesRowStats = true;
   static constexpr bool kNeedsRowNorm = HAS_BIAS;     // selection needs M, 1/Z
@@ -468,12 +472,9 @@ struct SoftmaxScoring {
 
   // Softmax weights are exp(x - M); for the no-bias policy the 1/Z factor is
   // folded into the one-shot store scale instead of multiplying every pick.
-  float winner_weight(float ws, int wi) const {
-    if constexpr (HAS_BIAS) {
-      return ws - bias[wi];  // softmax prob at the winner
-    } else {
-      return sycl::native::exp(ws - row_max);
-    }
+  float winner_weight(float ws, int /*wi*/) const {
+    static_assert(!HAS_BIAS);
+    return sycl::native::exp(ws - row_max);
   }
 
   float weight_from_raw(T raw, int /*wi*/) const {
@@ -516,11 +517,13 @@ struct ChunkedTopK {
   static_assert(TOPK == 0 || TOPK == 4 || TOPK == 8);
   using InputT = typename Policy::InputT;
   static constexpr int kVpl = N / LANES;
-  static constexpr int kG = kVpl / 4;
-  static constexpr int kGpc = groups_per_chunk(kG);
+  static constexpr int kLoadWidth = load_width<InputT, kVpl>();
+  static constexpr int kG = kVpl / kLoadWidth;
+  static constexpr int kGpc = groups_per_chunk(kG, kLoadWidth);
   static constexpr int kChunks = kG / kGpc;
   static_assert(
-      kVpl % 4 == 0, "per-lane slice must be a whole number of float4");
+      kVpl % kLoadWidth == 0,
+      "per-lane slice must be a whole number of vector loads");
   static_assert(kChunks >= 1, "empty chunk cache");
 
   const InputT* __restrict__ gating;
@@ -548,10 +551,10 @@ struct ChunkedTopK {
     for (int c = 0; c < kChunks; ++c) {
 #pragma unroll
       for (int g = 0; g < kGpc; ++g) {
-        const int i0 = ((c * kGpc + g) * LANES + lane_of(sg)) * 4;
-        const T4<InputT> x = ld4(row + i0);
+        const int i0 = ((c * kGpc + g) * LANES + lane_of(sg)) * kLoadWidth;
+        const WideVec<InputT, kLoadWidth> x = ld<InputT, kLoadWidth>(row + i0);
 #pragma unroll
-        for (int e = 0; e < 4; ++e)
+        for (int e = 0; e < kLoadWidth; ++e)
           zs += scoring.norm_accum(static_cast<float>(x.v[e]));
       }
     }
@@ -583,10 +586,10 @@ struct ChunkedTopK {
       int bi = N;
 #pragma unroll
       for (int g = 0; g < kGpc; ++g) {
-        const int i0 = ((c * kGpc + g) * LANES + lane) * 4;
-        const T4<InputT> x = ld4(row + i0);
+        const int i0 = ((c * kGpc + g) * LANES + lane) * kLoadWidth;
+        const WideVec<InputT, kLoadWidth> x = ld<InputT, kLoadWidth>(row + i0);
 #pragma unroll
-        for (int e = 0; e < 4; ++e) {
+        for (int e = 0; e < kLoadWidth; ++e) {
           const float sel = Policy::kNeedsRowNorm
                                 ? static_cast<float>(x.v[e])
                                 : policy.select(x.v[e], i0 + e);
@@ -615,10 +618,11 @@ struct ChunkedTopK {
         int bi = N;
 #pragma unroll
         for (int g = 0; g < kGpc; ++g) {
-          const int i0 = ((c * kGpc + g) * LANES + lane) * 4;
-          const T4<InputT> x = ld4(row + i0);
+          const int i0 = ((c * kGpc + g) * LANES + lane) * kLoadWidth;
+          const WideVec<InputT, kLoadWidth> x =
+              ld<InputT, kLoadWidth>(row + i0);
 #pragma unroll
-          for (int e = 0; e < 4; ++e) {
+          for (int e = 0; e < kLoadWidth; ++e) {
             const float sel =
                 policy.norm_score(static_cast<float>(x.v[e]), i0 + e);
             const bool take = sel > bs;
@@ -659,7 +663,12 @@ struct ChunkedTopK {
         }
       }
 
-      const float w = policy.winner_weight(ws, wi);
+      float w;
+      if constexpr (Policy::kWeightFromRaw) {
+        w = policy.weight_from_raw(row[wi], wi);
+      } else {
+        w = policy.winner_weight(ws, wi);
+      }
       num[k] = w;
       sum += num[k];
       wid[k] = wi;
@@ -667,16 +676,18 @@ struct ChunkedTopK {
       // Rescan the winner's chunk for the next-best score below (ws, wi).
       // Branchless: iteration order is ascending idx, so on a tie the first
       // (lowest-index) candidate is kept.
-      const bool mine = LANES == 1 || (((wi >> 2) & (LANES - 1)) == lane);
+      const int winner_group = kLoadWidth == 4 ? (wi >> 2) : (wi >> 3);
+      const bool mine = LANES == 1 || ((winner_group & (LANES - 1)) == lane);
       if (mine) {
         float ns = kNegInf;
         int ni = N;
 #pragma unroll
         for (int g = 0; g < kGpc; ++g) {
-          const int i0 = ((bc * kGpc + g) * LANES + lane) * 4;
-          const T4<InputT> x = ld4(row + i0);
+          const int i0 = ((bc * kGpc + g) * LANES + lane) * kLoadWidth;
+          const WideVec<InputT, kLoadWidth> x =
+              ld<InputT, kLoadWidth>(row + i0);
 #pragma unroll
-          for (int e = 0; e < 4; ++e) {
+          for (int e = 0; e < kLoadWidth; ++e) {
             const int idx = i0 + e;
             const float sel = policy.select(x.v[e], idx);
             const bool below = (sel < ws) | ((sel == ws) & (idx > wi));
@@ -728,9 +739,10 @@ struct RegisterTopK {
   using InputT = typename Policy::InputT;
   using CacheT = typename Policy::CacheT;
   static constexpr int kVpl = N / LANES;
-  static constexpr int kG = kVpl / 4;
+  static constexpr int kLoadWidth = load_width<InputT, kVpl>();
+  static constexpr int kG = kVpl / kLoadWidth;
 
-  static_assert(kG >= 1, "small kernel needs at least one float4 per lane");
+  static_assert(kG >= 1, "small kernel needs at least one vector per lane");
 
   const InputT* __restrict__ gating;
   float* __restrict__ weights;
@@ -756,13 +768,13 @@ struct RegisterTopK {
 
     // Fill the register cache. What is cached (raw logits, rounded scores,
     // biased scores) is the policy's CacheT/to_cache decision.
-    T4<CacheT> v[kG];
+    WideVec<CacheT, kLoadWidth> v[kG];
 #pragma unroll
     for (int g = 0; g < kG; ++g) {
-      const int i0 = (g * LANES + lane) * 4;
-      const T4<InputT> x = ld4(row + i0);
+      const int i0 = (g * LANES + lane) * kLoadWidth;
+      const WideVec<InputT, kLoadWidth> x = ld<InputT, kLoadWidth>(row + i0);
 #pragma unroll
-      for (int e = 0; e < 4; ++e)
+      for (int e = 0; e < kLoadWidth; ++e)
         v[g].v[e] = policy.to_cache(x.v[e], i0 + e);
     }
 
@@ -775,7 +787,7 @@ struct RegisterTopK {
 #pragma unroll
       for (int g = 0; g < kG; ++g)
 #pragma unroll
-        for (int e = 0; e < 4; ++e)
+        for (int e = 0; e < kLoadWidth; ++e)
           rm = sycl::fmax(rm, static_cast<float>(v[g].v[e]));
       if constexpr (LANES > 1) rm = lane_group_max<LANES>(sg, rm);
       policy.set_row_max(rm);
@@ -783,16 +795,17 @@ struct RegisterTopK {
 #pragma unroll
       for (int g = 0; g < kG; ++g)
 #pragma unroll
-        for (int e = 0; e < 4; ++e)
+        for (int e = 0; e < kLoadWidth; ++e)
           zs += policy.norm_accum(static_cast<float>(v[g].v[e]));
       if constexpr (LANES > 1) zs = lane_group_sum<LANES>(sg, zs);
       policy.set_inv_z(ieee_div(1.0f, zs));
 #pragma unroll
       for (int g = 0; g < kG; ++g)
 #pragma unroll
-        for (int e = 0; e < 4; ++e)
+        for (int e = 0; e < kLoadWidth; ++e)
           v[g].v[e] = policy.materialize_score(
-              static_cast<float>(v[g].v[e]), (g * LANES + lane) * 4 + e);
+              static_cast<float>(v[g].v[e]),
+              (g * LANES + lane) * kLoadWidth + e);
     }
 
     float num[TOPK == 0 ? kMaxTopK : TOPK];
@@ -800,37 +813,58 @@ struct RegisterTopK {
     float sum = 0.0f;
 #pragma unroll
     for (int k = 0; k < topk; ++k) {
-      float acc[4];
+      float acc[kLoadWidth];
 #pragma unroll
-      for (int e = 0; e < 4; ++e)
+      for (int e = 0; e < kLoadWidth; ++e)
         acc[e] = static_cast<float>(v[0].v[e]);
 #pragma unroll
       for (int g = 1; g < kG; ++g) {
 #pragma unroll
-        for (int e = 0; e < 4; ++e)
+        for (int e = 0; e < kLoadWidth; ++e)
           acc[e] = sycl::fmax(acc[e], static_cast<float>(v[g].v[e]));
       }
-      acc[0] = sycl::fmax(acc[0], acc[2]);
-      acc[1] = sycl::fmax(acc[1], acc[3]);
-      float ws = sycl::fmax(acc[0], acc[1]);
-
-      int iacc[4];
+      float ws;
+      if constexpr (kLoadWidth == 4) {
+        acc[0] = sycl::fmax(acc[0], acc[2]);
+        acc[1] = sycl::fmax(acc[1], acc[3]);
+        ws = sycl::fmax(acc[0], acc[1]);
+      } else {
 #pragma unroll
-      for (int e = 0; e < 4; ++e)
-        iacc[e] = static_cast<float>(v[0].v[e]) == ws ? lane * 4 + e : N;
+        for (int stride = kLoadWidth / 2; stride > 0; stride >>= 1)
+#pragma unroll
+          for (int e = 0; e < stride; ++e)
+            acc[e] = sycl::fmax(acc[e], acc[e + stride]);
+        ws = acc[0];
+      }
+
+      int iacc[kLoadWidth];
+#pragma unroll
+      for (int e = 0; e < kLoadWidth; ++e)
+        iacc[e] =
+            static_cast<float>(v[0].v[e]) == ws ? lane * kLoadWidth + e : N;
 #pragma unroll
       for (int g = 1; g < kG; ++g) {
 #pragma unroll
-        for (int e = 0; e < 4; ++e) {
-          const int idx = (g * LANES + lane) * 4 + e;
+        for (int e = 0; e < kLoadWidth; ++e) {
+          const int idx = (g * LANES + lane) * kLoadWidth + e;
           iacc[e] = static_cast<float>(v[g].v[e]) == ws
                         ? sycl::min(iacc[e], idx)
                         : iacc[e];
         }
       }
-      iacc[0] = sycl::min(iacc[0], iacc[2]);
-      iacc[1] = sycl::min(iacc[1], iacc[3]);
-      int wi = sycl::min(iacc[0], iacc[1]);
+      int wi;
+      if constexpr (kLoadWidth == 4) {
+        iacc[0] = sycl::min(iacc[0], iacc[2]);
+        iacc[1] = sycl::min(iacc[1], iacc[3]);
+        wi = sycl::min(iacc[0], iacc[1]);
+      } else {
+#pragma unroll
+        for (int stride = kLoadWidth / 2; stride > 0; stride >>= 1)
+#pragma unroll
+          for (int e = 0; e < stride; ++e)
+            iacc[e] = sycl::min(iacc[e], iacc[e + stride]);
+        wi = iacc[0];
+      }
 
       if constexpr (LANES > 1) lane_group_argmax<LANES>(sg, ws, wi);
 
@@ -843,7 +877,7 @@ struct RegisterTopK {
 #pragma unroll
             for (int g = 0; g < kG; ++g)
 #pragma unroll
-              for (int e = 0; e < 4; ++e)
+              for (int e = 0; e < kLoadWidth; ++e)
                 zs += policy.norm_accum(static_cast<float>(v[g].v[e]));
             if constexpr (LANES > 1) zs = lane_group_sum<LANES>(sg, zs);
             policy.set_inv_z(ieee_div(1.0f, zs));
@@ -851,7 +885,12 @@ struct RegisterTopK {
         }
       }
 
-      const float w = policy.winner_weight(ws, wi);
+      float w;
+      if constexpr (Policy::kWeightFromRaw) {
+        w = policy.weight_from_raw(row[wi], wi);
+      } else {
+        w = policy.winner_weight(ws, wi);
+      }
       num[k] = w;
       sum += num[k];
       wid[k] = wi;
@@ -859,8 +898,8 @@ struct RegisterTopK {
 #pragma unroll
       for (int g = 0; g < kG; ++g) {
 #pragma unroll
-        for (int e = 0; e < 4; ++e) {
-          const int idx = (g * LANES + lane) * 4 + e;
+        for (int e = 0; e < kLoadWidth; ++e) {
+          const int idx = (g * LANES + lane) * kLoadWidth + e;
           v[g].v[e] = idx == wi ? static_cast<CacheT>(kNegInf) : v[g].v[e];
         }
       }
@@ -891,9 +930,9 @@ struct RegisterTopK {
 
 // ---------------------------------------------------------------------------
 // Fallback engine: streams the row from global memory once per pick (full
-// sub-group per token). Handles any N and any index type.
+// sub-group per token). Handles any expert count and any index type.
 // ---------------------------------------------------------------------------
-template <int N, typename IndexType, typename Policy>
+template <typename IndexType, typename Policy>
 struct FallbackTopK {
   using InputT = typename Policy::InputT;
 
@@ -905,6 +944,7 @@ struct FallbackTopK {
   Policy policy;
   const double routed_scaling_factor;
   int64_t num_tokens;
+  int num_experts;
   int topk;
 
   [[sycl::reqd_sub_group_size(kSgSize)]] void
@@ -915,7 +955,7 @@ struct FallbackTopK {
     const int64_t token = gid / kSgSize;
     const bool active = token < num_tokens;
     const bool is_pad = is_padding != nullptr && active && is_padding[token];
-    const InputT* row = gating + (active ? token : 0) * N;
+    const InputT* row = gating + (active ? token : 0) * num_experts;
 
     Policy policy = this->policy;
 
@@ -923,19 +963,19 @@ struct FallbackTopK {
     // every pick, so M (and Z when needed) are computed once here.
     if constexpr (Policy::kUsesRowStats) {
       float local_max = kNegInf;
-      for (int i = lane; i < N; i += kSgSize)
+      for (int i = lane; i < num_experts; i += kSgSize)
         local_max = sycl::fmax(local_max, static_cast<float>(row[i]));
       policy.set_row_max(lane_group_max<kSgSize>(sg, local_max));
 
       if constexpr (Policy::kNeedsRowNorm) {
         float local_sum = 0.0f;
-        for (int i = lane; i < N; i += kSgSize)
+        for (int i = lane; i < num_experts; i += kSgSize)
           local_sum += policy.norm_accum(static_cast<float>(row[i]));
         policy.set_inv_z(
             ieee_div(1.0f, lane_group_sum<kSgSize>(sg, local_sum)));
       } else if (policy.needs_full_z()) {
         float local_sum = 0.0f;
-        for (int i = lane; i < N; i += kSgSize)
+        for (int i = lane; i < num_experts; i += kSgSize)
           local_sum += policy.norm_accum(static_cast<float>(row[i]));
         policy.set_inv_z(
             ieee_div(1.0f, lane_group_sum<kSgSize>(sg, local_sum)));
@@ -947,8 +987,8 @@ struct FallbackTopK {
     int previous_index = -1;
     for (int k = 0; k < topk; ++k) {
       float local_score = kNegInf;
-      int local_index = N;
-      for (int i = lane; i < N; i += kSgSize) {
+      int local_index = num_experts;
+      for (int i = lane; i < num_experts; i += kSgSize) {
         const float score = policy.select(row[i], i);
         const bool after_previous =
             k == 0 || score < previous_score ||
@@ -1007,9 +1047,11 @@ struct FallbackTopK {
 template <int N, int LANES, typename Policy, int TOPK>
 constexpr int register_state_dwords() {
   using CacheT = typename Policy::CacheT;
+  using InputT = typename Policy::InputT;
+  constexpr int kLoadWidth = load_width<InputT, N / LANES>();
   constexpr int kCache = (N / LANES) * static_cast<int>(sizeof(CacheT)) / 4;
   constexpr int kOut = 2 * (TOPK == 0 ? kMaxTopK : TOPK);  // num[] + wid[]
-  constexpr int kArgmax = 8;                               // acc[4] + iacc[4]
+  constexpr int kArgmax = 2 * kLoadWidth;                  // acc[] + iacc[]
   constexpr int kNorm = Policy::kNeedsRowNorm ? 8 : 0;     // M/Z + materialize
   constexpr int kTempFactor = 2;
   constexpr int kFixedDWords = 52;
@@ -1233,47 +1275,8 @@ void launch_fast(
   }
 }
 
-template <
-    int N,
-    typename InputT,
-    typename IndexType,
-    ScoringFunc SF,
-    bool HAS_BIAS>
-void launch_static(
-    sycl::queue& q,
-    const InputT* gating,
-    float* weights,
-    IndexType* indices,
-    int* source_rows,
-    const bool* is_padding,
-    const float* bias,
-    bool renormalize,
-    double routed_scaling_factor,
-    int64_t num_tokens,
-    int topk) {
-  using Policy = KernelPolicy<SF, InputT, HAS_BIAS>;
-  constexpr int kTokensPerWg = kWgSize / kSgSize;
-  const size_t groups =
-      static_cast<size_t>((num_tokens + kTokensPerWg - 1) / kTokensPerWg);
-  q.parallel_for(
-      sycl::nd_range<1>{
-          sycl::range<1>{groups * kWgSize}, sycl::range<1>{kWgSize}},
-      FallbackTopK<N, IndexType, Policy>{
-          gating,
-          weights,
-          indices,
-          source_rows,
-          is_padding,
-          Policy{bias, renormalize},
-          routed_scaling_factor,
-          num_tokens,
-          topk});
-}
-
-//**************************Layer 4: dispatch****************************
-
 template <typename InputT, typename IndexType, ScoringFunc SF, bool HAS_BIAS>
-bool dispatch_static_experts(
+void launch_fallback(
     sycl::queue& q,
     const InputT* gating,
     float* weights,
@@ -1286,60 +1289,27 @@ bool dispatch_static_experts(
     int64_t num_tokens,
     int num_experts,
     int topk) {
-#define LAUNCH_STATIC(N)                             \
-  launch_static<N, InputT, IndexType, SF, HAS_BIAS>( \
-      q,                                             \
-      gating,                                        \
-      weights,                                       \
-      indices,                                       \
-      source_rows,                                   \
-      is_padding,                                    \
-      bias,                                          \
-      renormalize,                                   \
-      routed_scaling_factor,                         \
-      num_tokens,                                    \
-      topk);                                         \
-  return true
-
-  switch (num_experts) {
-    case 1:
-      LAUNCH_STATIC(1);
-    case 2:
-      LAUNCH_STATIC(2);
-    case 4:
-      LAUNCH_STATIC(4);
-    case 8:
-      LAUNCH_STATIC(8);
-    case 16:
-      LAUNCH_STATIC(16);
-    case 32:
-      LAUNCH_STATIC(32);
-    case 64:
-      LAUNCH_STATIC(64);
-    case 128:
-      LAUNCH_STATIC(128);
-    case 192:
-      LAUNCH_STATIC(192);
-    case 256:
-      LAUNCH_STATIC(256);
-    case 320:
-      LAUNCH_STATIC(320);
-    case 384:
-      LAUNCH_STATIC(384);
-    case 448:
-      LAUNCH_STATIC(448);
-    case 512:
-      LAUNCH_STATIC(512);
-    case 576:
-      LAUNCH_STATIC(576);
-    case 1024:
-      LAUNCH_STATIC(1024);
-    default:
-      return false;
-  }
-
-#undef LAUNCH_STATIC
+  using Policy = KernelPolicy<SF, InputT, HAS_BIAS>;
+  constexpr int kTokensPerWg = kWgSize / kSgSize;
+  const size_t groups =
+      static_cast<size_t>((num_tokens + kTokensPerWg - 1) / kTokensPerWg);
+  q.parallel_for(
+      sycl::nd_range<1>{
+          sycl::range<1>{groups * kWgSize}, sycl::range<1>{kWgSize}},
+      FallbackTopK<IndexType, Policy>{
+          gating,
+          weights,
+          indices,
+          source_rows,
+          is_padding,
+          Policy{bias, renormalize},
+          routed_scaling_factor,
+          num_tokens,
+          num_experts,
+          topk});
 }
+
+//**************************Layer 4: dispatch****************************
 
 template <typename InputT, typename IndexType, ScoringFunc SF, bool HAS_BIAS>
 bool dispatch_experts_topk(
@@ -1448,21 +1418,19 @@ void dispatch_topk_all(
     }
   }
 
-  const bool launched =
-      dispatch_static_experts<InputT, IndexType, SF, HAS_BIAS>(
-          q,
-          gating,
-          weights,
-          indices,
-          source_rows,
-          is_padding,
-          bias,
-          renormalize,
-          routed_scaling_factor,
-          num_tokens,
-          num_experts,
-          topk);
-  TORCH_CHECK(launched, "topk: unsupported num_experts: ", num_experts);
+  launch_fallback<InputT, IndexType, SF, HAS_BIAS>(
+      q,
+      gating,
+      weights,
+      indices,
+      source_rows,
+      is_padding,
+      bias,
+      renormalize,
+      routed_scaling_factor,
+      num_tokens,
+      num_experts,
+      topk);
 }
 
 }  // namespace topk
@@ -1568,9 +1536,9 @@ static void check_topk_inputs(
       op,
       ": output shape mismatch");
   TORCH_CHECK(
-      topk > 0 && topk < num_experts,
+      topk > 0 && topk <= num_experts,
       op,
-      ": topk must be smaller than num_experts");
+      ": topk must be smaller than or equal to num_experts");
   if (bias.has_value()) {
     TORCH_CHECK(
         bias->scalar_type() == torch::kFloat && bias->dim() == 1 &&
