@@ -12,19 +12,64 @@ namespace mxfp4 {
 // Maximum representable FP4 E2M1 value.
 static constexpr float FP4_MAX = 6.0f;
 
-// Convert a single float32 value to a 4-bit FP4 E2M1 code (stored in the
-// lower 4 bits of a uint8_t) using round-to-nearest-even (RNE).
-inline uint8_t float_to_fp4_e2m1(float x) {
-  const float b[7] = {0.25f, 0.75f, 1.25f, 1.75f, 2.5f, 3.5f, 5.0f};
+struct ue8m0_scale {
+  float scale;
+  uint8_t ue8m0;
+};
 
+// Compute MXFP4 block scale and encoded ue8m0 exponent byte from block amax.
+// scale = 2^ceil(log2(amax / FP4_MAX)), clamped to the smallest normal float.
+inline ue8m0_scale compute_ue8m0_scale(float amax) {
+  float ratio = amax / FP4_MAX;
+  uint32_t bits;
+  __builtin_memcpy(&bits, &ratio, 4);
+  if ((bits & 0x7F800000u) == 0) bits = 0x00800000u;
+  if (bits & 0x007FFFFFu) bits = (bits + 0x00800000u) & 0xFF800000u;
+
+  float scale;
+  __builtin_memcpy(&scale, &bits, 4);
+  return {scale, static_cast<uint8_t>((bits >> 23) & 0xFFu)};
+}
+
+// Tie-break policy for the FP4 E2M1 encoder at the exact block midpoints
+// 0.75, 1.75 and 3.5.
+//   AwayFromZero : ties round away from zero via strict `>` at every threshold
+//                  (staircase encoder).
+//   ToEven       : ties at those midpoints round to the even representable
+//                  value (`>=`), i.e. true round-to-nearest-even.
+enum class Fp4TieBreak { AwayFromZero, ToEven };
+
+// Convert a single float32 value to a 4-bit FP4 E2M1 code (stored in the
+// lower 4 bits of a uint8_t). See Fp4TieBreak for the midpoint behavior; the
+// indexer KV-compress path uses ToEven, all other callers use AwayFromZero.
+template <Fp4TieBreak Tie = Fp4TieBreak::AwayFromZero>
+inline uint8_t float_to_fp4_e2m1(float x) {
   uint8_t sign = (x < 0.0f) ? 0x8u : 0x0u;
   float a = sycl::fabs(x);
 
   // midpoint rounding: branchless
-  uint8_t code = (a > b[0]) + (a > b[1]) + (a > b[2]) + (a > b[3]) +
-                 (a > b[4]) + (a > b[5]) + (a > b[6]);
+  uint8_t code;
+  if constexpr (Tie == Fp4TieBreak::ToEven) {
+    code = (a > 0.25f) + (a >= 0.75f) + (a > 1.25f) + (a >= 1.75f) +
+           (a > 2.5f) + (a >= 3.5f) + (a > 5.0f);
+  } else {
+    code = (a > 0.25f) + (a > 0.75f) + (a > 1.25f) + (a > 1.75f) + (a > 2.5f) +
+           (a > 3.5f) + (a > 5.0f);
+  }
 
   return code | sign;
+}
+
+// Quantize two values with a shared inverse scale and pack into one byte:
+// low nibble stores x0, high nibble stores x1. Tie is forwarded to the
+// underlying E2M1 encoder (see float_to_fp4_e2m1).
+template <Fp4TieBreak Tie = Fp4TieBreak::AwayFromZero>
+inline uint8_t quantize_pair_to_mxfp4(float x0, float x1, float inv_scale) {
+  float q0 = sycl::fmax(-FP4_MAX, sycl::fmin(x0 * inv_scale, FP4_MAX));
+  float q1 = sycl::fmax(-FP4_MAX, sycl::fmin(x1 * inv_scale, FP4_MAX));
+  uint8_t n0 = float_to_fp4_e2m1<Tie>(q0);
+  uint8_t n1 = float_to_fp4_e2m1<Tie>(q1);
+  return static_cast<uint8_t>(((n1 & 0x0Fu) << 4) | (n0 & 0x0Fu));
 }
 
 // Quantise an input tensor [M, N] to MXFP4 block format.
