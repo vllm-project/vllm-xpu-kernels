@@ -33,7 +33,8 @@ void cutlass_chunk_prefill_xe2(
     bool is_local,
     bool is_sink,
     std::optional<at::Tensor>& softmax_lse,
-    std::optional<const at::Tensor>& is_prefill) {
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<const at::Tensor>& dynamic_causal) {
   cutlass_chunk_prefill_impl(
       queue,
       query,
@@ -57,7 +58,8 @@ void cutlass_chunk_prefill_xe2(
       is_local,
       is_sink,
       softmax_lse,
-      is_prefill);
+      is_prefill,
+      dynamic_causal);
 }
 
 void cutlass_chunk_prefill_impl(
@@ -83,7 +85,8 @@ void cutlass_chunk_prefill_impl(
     bool is_local,
     bool is_sink,
     std::optional<at::Tensor>& softmax_lse,
-    std::optional<const at::Tensor>& is_prefill) {
+    std::optional<const at::Tensor>& is_prefill,
+    std::optional<const at::Tensor>& dynamic_causal) {
   // general params
   int batch_size, num_heads_q, num_heads_kv, head_size;
   // additional params
@@ -119,10 +122,19 @@ void cutlass_chunk_prefill_impl(
     window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
     window_size_right =
         window_size_right == -1 ? max_seqlen_k : window_size_right;
-    if (is_causal) {
+    if (dynamic_causal.has_value() && window_size_right == 0) {
+      window_size_right = window_size_left;
+    } else if (is_causal && !dynamic_causal.has_value()) {
       window_size_right = 0;
       is_causal = false;
     }
+  }
+
+  // A dynamic batch may contain causal sequences even when the global flag is
+  // false. Select the causal-capable specialization and let each sequence's
+  // tensor value control whether triangular masking is applied.
+  if (dynamic_causal.has_value()) {
+    is_causal = true;
   }
 
   bool is_fp8_kv =
@@ -169,6 +181,9 @@ void cutlass_chunk_prefill_impl(
   // Per-batch prefill/decode mask (nullptr -> process all batches)
   args.is_prefill =
       is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr;
+  args.dynamic_causal = dynamic_causal.has_value()
+                            ? dynamic_causal.value().data_ptr<int>()
+                            : nullptr;
   // Extract Q, K, V, O strides from tensors
   if (is_varlen) {
     // Q/O: [total_seq, num_heads, head_size]

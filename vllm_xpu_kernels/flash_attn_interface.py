@@ -453,6 +453,7 @@ def flash_attn_varlen_func(
     num_splits_kv: Optional[int] = None,
     is_mix_batch: bool = True,
     host_kv_lens: Optional[torch.Tensor] = None,
+    dynamic_causal: Optional[torch.Tensor] = None,
 ):
     """
     FlashAttention interface for variable-length sequences, with optional
@@ -476,6 +477,9 @@ def flash_attn_varlen_func(
             when using paged KV cache. This is forwarded to the underlying
             C++ FlashAttention op as its ``num_splits`` parameter; the split
             unit is KV blocks, not individual tokens or pages.
+        dynamic_causal: Optional int32 tensor with one entry per sequence.
+            Nonzero entries use causal masking and zero entries use
+            bidirectional attention. When provided, it overrides ``causal``.
     """
     if host_kv_lens is not None:
         if seqused_k is not None:
@@ -504,6 +508,8 @@ def flash_attn_varlen_func(
     else:
         assert len(window_size) == 2
         real_window_size = (window_size[0], window_size[1])
+    if (dynamic_causal is not None and real_window_size[1] == 0):
+        real_window_size = (real_window_size[0], real_window_size[0])
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
 
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
@@ -527,7 +533,8 @@ def flash_attn_varlen_func(
         batch = cu_seqlens_q.numel() - 1
         is_uniform_qlen = (batch > 0 and q.shape[0] == batch * max_seqlen_q)
         # TODO: We could also support the case where q_descale is not None.
-        if (block_table is not None and causal and not return_softmax_lse
+        if (block_table is not None and causal and dynamic_causal is None
+                and not return_softmax_lse
                 and softcap == 0.0 and alibi_slopes is None and q_v is None
                 and q_descale is None and scheduler_metadata is None
                 and seqused_k is not None
@@ -616,9 +623,10 @@ def flash_attn_varlen_func(
                 is_mix_batch,
                 splits_per_seq_dev,
                 work_list_dev,
+                dynamic_causal,
             )
         except RuntimeError as e:
-            if "not compiled" not in str(e):
+            if "not compiled" not in str(e) or dynamic_causal is not None:
                 raise
             # Fallback to PyTorch reference implementation.
             # Emit the notice once per unique missing config and write

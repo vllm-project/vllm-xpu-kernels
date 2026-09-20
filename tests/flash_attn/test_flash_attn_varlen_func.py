@@ -2341,3 +2341,246 @@ def test_decode_sink_sliding_window_no_nan(dtype, seed):
         f"output magnitude {output.abs().max().item():.3f} exceeds |v| "
         f"{v_absmax:.3f} -> not a valid softmax average")
     torch.xpu.empty_cache()
+
+
+def _dynamic_causal_inputs(dtype, head_size, paged):
+    query_lens = [1, 5, 7]
+    kv_lens = [9, 12, 7]
+    num_query_heads, num_kv_heads = 4, 2
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype,
+                        device="xpu")
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32,
+                                 device="xpu").cumsum(0, dtype=torch.int32)
+
+    if not paged:
+        key = torch.randn(sum(kv_lens),
+                          num_kv_heads,
+                          head_size,
+                          dtype=dtype,
+                          device="xpu")
+        value = torch.randn_like(key)
+        cu_kv_lens = torch.tensor([0] + kv_lens,
+                                  dtype=torch.int32,
+                                  device="xpu").cumsum(0, dtype=torch.int32)
+        return (query, key, value, query_lens, kv_lens, cu_query_lens,
+                cu_kv_lens, None, None)
+
+    block_size = 64
+    blocks_per_seq = [(length + block_size - 1) // block_size
+                      for length in kv_lens]
+    key = torch.randn(sum(blocks_per_seq),
+                      block_size,
+                      num_kv_heads,
+                      head_size,
+                      dtype=dtype,
+                      device="xpu")
+    value = torch.randn_like(key)
+    block_table = torch.zeros(len(kv_lens),
+                              max(blocks_per_seq),
+                              dtype=torch.int32,
+                              device="xpu")
+    next_block = 0
+    for seq, count in enumerate(blocks_per_seq):
+        block_table[seq, :count] = torch.arange(next_block,
+                                                next_block + count,
+                                                dtype=torch.int32,
+                                                device="xpu")
+        next_block += count
+    seqused_k = torch.tensor(kv_lens, dtype=torch.int32, device="xpu")
+    return (query, key, value, query_lens, kv_lens, cu_query_lens, None,
+            seqused_k, block_table)
+
+
+def _dynamic_causal_reference(query, key, value, query_lens, kv_lens,
+                              block_table, dynamic_causal, window_size,
+                              dtype):
+    outputs = []
+    query_start = 0
+    kv_start = 0
+    for seq, (query_len, kv_len) in enumerate(zip(query_lens, kv_lens)):
+        query_slice = query[query_start:query_start + query_len]
+        if block_table is None:
+            key_slice = key[kv_start:kv_start + kv_len]
+            value_slice = value[kv_start:kv_start + kv_len]
+            table = torch.zeros((1, 1), dtype=torch.int32, device=query.device)
+        else:
+            key_slice = key
+            value_slice = value
+            table = block_table[seq:seq + 1]
+        outputs.append(
+            ref_paged_attn(query=query_slice,
+                           key_cache=key_slice,
+                           value_cache=value_slice,
+                           query_lens=[query_len],
+                           kv_lens=[kv_len],
+                           block_tables=table,
+                           scale=query.shape[-1]**-0.5,
+                           casual=bool(dynamic_causal[seq]),
+                           is_paged=block_table is not None,
+                           window_size_left=window_size[0],
+                           window_size_right=window_size[1],
+                           dtype=dtype))
+        query_start += query_len
+        kv_start += kv_len
+    return torch.cat(outputs)
+
+
+@pytest.mark.parametrize("paged", [False, True])
+@pytest.mark.parametrize("window_size", [(-1, -1), (31, 0)])
+@pytest.mark.parametrize("head_size", [64, 256])
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@torch.inference_mode()
+def test_dynamic_causal_varlen(paged, window_size, head_size, dtype):
+    """One launch must honor mixed, all-causal, and all-bidirectional masks."""
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(2026)
+    inputs = _dynamic_causal_inputs(dtype, head_size, paged)
+    (query, key, value, query_lens, kv_lens, cu_query_lens, cu_kv_lens,
+     seqused_k, block_table) = inputs
+
+    for causal_values in ([1, 0, 1], [1, 1, 1], [0, 0, 0]):
+        dynamic_causal = torch.tensor(causal_values,
+                                      dtype=torch.int32,
+                                      device="xpu")
+        output = flash_attn_varlen_func(
+            query,
+            key,
+            value,
+            max(query_lens),
+            cu_query_lens,
+            max(kv_lens),
+            cu_seqlens_k=cu_kv_lens,
+            seqused_k=seqused_k,
+            softmax_scale=head_size**-0.5,
+            causal=causal_values == [0, 0, 0],
+            block_table=block_table,
+            window_size=list(window_size),
+            dynamic_causal=dynamic_causal,
+        )
+        reference_window = ((window_size[0], window_size[0])
+                            if window_size[1] == 0 else window_size)
+        reference = _dynamic_causal_reference(
+            query, key, value, query_lens, kv_lens, block_table,
+            causal_values, reference_window, dtype)
+        torch.testing.assert_close(output, reference, atol=2e-2, rtol=2e-2)
+    torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize("paged", [False, True])
+@torch.inference_mode()
+def test_legacy_causal_window_remains_one_sided(paged):
+    torch.set_default_device("xpu")
+    torch.manual_seed(2027)
+    inputs = _dynamic_causal_inputs(torch.bfloat16, 64, paged)
+    (query, key, value, query_lens, kv_lens, cu_q, cu_k, seqused_k,
+     block_table) = inputs
+    output = flash_attn_varlen_func(query,
+                                    key,
+                                    value,
+                                    max(query_lens),
+                                    cu_q,
+                                    max(kv_lens),
+                                    cu_seqlens_k=cu_k,
+                                    seqused_k=seqused_k,
+                                    causal=True,
+                                    block_table=block_table,
+                                    window_size=[31, 0])
+    reference = _dynamic_causal_reference(query, key, value, query_lens,
+                                          kv_lens, block_table, [1, 1, 1],
+                                          (31, 0), torch.bfloat16)
+    torch.testing.assert_close(output, reference, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    "dynamic_causal,error",
+    [
+        (lambda: torch.tensor([1, 0], dtype=torch.int64, device="xpu"),
+         "dtype torch.int32"),
+        (lambda: torch.tensor([[1, 0]], dtype=torch.int32, device="xpu"),
+         "1-D tensor"),
+        (lambda: torch.tensor([1], dtype=torch.int32, device="xpu"),
+         "length must equal"),
+        (lambda: torch.zeros(4, dtype=torch.int32, device="xpu")[::2],
+         "contiguous"),
+        (lambda: torch.tensor([1, 0], dtype=torch.int32, device="cpu"),
+         "XPU"),
+    ],
+)
+@torch.inference_mode()
+def test_dynamic_causal_validation(dynamic_causal, error):
+    torch.set_default_device("xpu")
+    inputs = _dynamic_causal_inputs(torch.bfloat16, 64, False)
+    query, key, value, query_lens, kv_lens, cu_q, cu_k, _, _ = inputs
+    with pytest.raises(RuntimeError, match=error):
+        flash_attn_varlen_func(query,
+                               key,
+                               value,
+                               max(query_lens),
+                               cu_q,
+                               max(kv_lens),
+                               cu_seqlens_k=cu_k,
+                               dynamic_causal=dynamic_causal())
+
+
+@torch.inference_mode()
+def test_dynamic_causal_missing_kernel_does_not_fallback(monkeypatch):
+    torch.set_default_device("xpu")
+    inputs = _dynamic_causal_inputs(torch.bfloat16, 64, False)
+    query, key, value, query_lens, kv_lens, cu_q, cu_k, _, _ = inputs
+
+    def missing_kernel(*args):
+        raise RuntimeError("kernel configuration was not compiled")
+
+    monkeypatch.setattr(torch.ops._vllm_fa2_C, "varlen_fwd", missing_kernel)
+    with pytest.raises(RuntimeError, match="not compiled"):
+        flash_attn_varlen_func(
+            query,
+            key,
+            value,
+            max(query_lens),
+            cu_q,
+            max(kv_lens),
+            cu_seqlens_k=cu_k,
+            dynamic_causal=torch.tensor([1, 0, 1],
+                                        dtype=torch.int32,
+                                        device="xpu"),
+        )
+
+
+@torch.inference_mode()
+def test_dynamic_causal_xpu_graph_replay():
+    torch.set_default_device("xpu")
+    inputs = _dynamic_causal_inputs(torch.bfloat16, 64, False)
+    query, key, value, query_lens, kv_lens, cu_q, cu_k, _, _ = inputs
+    dynamic_causal = torch.tensor([1, 0, 1],
+                                  dtype=torch.int32,
+                                  device="xpu")
+    output = torch.empty_like(query)
+
+    graph = torch.xpu.XPUGraph()
+    with torch.xpu.graph(graph):
+        flash_attn_varlen_func(query,
+                               key,
+                               value,
+                               max(query_lens),
+                               cu_q,
+                               max(kv_lens),
+                               cu_seqlens_k=cu_k,
+                               out=output,
+                               dynamic_causal=dynamic_causal)
+    torch.xpu.synchronize()
+
+    dynamic_causal.copy_(torch.tensor([0, 1, 0],
+                                      dtype=torch.int32,
+                                      device="xpu"))
+    graph.replay()
+    torch.xpu.synchronize()
+    reference = _dynamic_causal_reference(query, key, value, query_lens,
+                                          kv_lens, None, [0, 1, 0],
+                                          (-1, -1), torch.bfloat16)
+    torch.testing.assert_close(output, reference, atol=2e-2, rtol=2e-2)
