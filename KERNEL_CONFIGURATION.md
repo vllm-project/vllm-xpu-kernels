@@ -85,14 +85,14 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 | File | Kernels | Use Case |
 |------|---------|----------|
 | `chunk_prefill_full.conf` | 240 | All combinations — supports every model |
-| `chunk_prefill_default.conf` | 70 | Llama, Qwen, DeepSeek MLA, Falcon, Gemma, Phi, GLM (default build) |
+| `chunk_prefill_default.conf` | 96 | Llama, Qwen, DeepSeek MLA, Falcon, Gemma, Phi, GLM (default build) |
 
 ### Paged Decode
 
 | File | Kernels | Use Case |
 |------|---------|----------|
 | `paged_decode_full.conf` | 384 | All combinations — supports every model |
-| `paged_decode_default.conf` | 32 | Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec (default build) |
+| `paged_decode_default.conf` | 35 | Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec (default build) |
 
 ### Recommended Config per Model Family
 
@@ -103,6 +103,7 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 | Phi-4-MM, Phi3V / VLM2Vec | 96/128 | `default` | `default` |
 | Starcoder2-3B | 128 | `default` | `default` |
 | Gemma-2 | 256 | `full` | `full` |
+| DiffusionGemma dynamic causal | 256 | `default` | `default` |
 | Mixed / other models | multiple | `full` | `full` |
 
 ---
@@ -134,6 +135,11 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 
 If boolean flags are omitted, all 20 valid combinations are generated for
 that headsize.
+
+Dynamic causal batches use a `causal=true` chunk-prefill specialization even
+when some sequences are bidirectional. The runtime `dynamic_causal` tensor
+selects triangular masking per sequence; local windows remain symmetric and
+are combined with the triangular mask for causal sequences.
 
 ### Paged Decode
 
