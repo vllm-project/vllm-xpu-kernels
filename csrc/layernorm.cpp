@@ -954,3 +954,69 @@ void fused_add_gemma_rms_norm(
             input, residual, weight_ptr, epsilon, /*weight_bias=*/1.0f);
       });
 }
+
+// One subgroup per 128-element row; norm and SiLU remain in FP32 until store.
+void rms_norm_gated_decode(
+    torch::Tensor& out,
+    const torch::Tensor& input,
+    const torch::Tensor& gate,
+    const torch::Tensor& weight,
+    double epsilon) {
+  const at::DeviceGuard device_guard(input.device());
+  TORCH_CHECK(
+      input.is_xpu() && input.scalar_type() == at::kHalf,
+      "input must be XPU float16");
+  TORCH_CHECK(
+      input.dim() == 2 && input.size(1) == 128,
+      "input must have shape [rows, 128]");
+  TORCH_CHECK(
+      out.sizes() == input.sizes() && gate.sizes() == input.sizes(),
+      "out and gate must match input shape");
+  TORCH_CHECK(
+      weight.dim() == 1 && weight.numel() == 128,
+      "weight must have shape [128]");
+  for (const auto& t : {out, gate, weight}) {
+    TORCH_CHECK(
+        t.device() == input.device() && t.scalar_type() == at::kHalf,
+        "all tensors must have the same XPU device and float16 dtype");
+    TORCH_CHECK(t.is_contiguous(), "all tensors must be contiguous");
+  }
+  TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
+  TORCH_CHECK(epsilon > 0, "epsilon must be positive");
+  const auto rows = input.size(0);
+  if (rows == 0) return;
+  const auto* x =
+      reinterpret_cast<const sycl::half*>(input.data_ptr<at::Half>());
+  const auto* z =
+      reinterpret_cast<const sycl::half*>(gate.data_ptr<at::Half>());
+  const auto* w =
+      reinterpret_cast<const sycl::half*>(weight.data_ptr<at::Half>());
+  auto* y = reinterpret_cast<sycl::half*>(out.data_ptr<at::Half>());
+  const float eps = static_cast<float>(epsilon);
+  auto& queue = vllm::xpu::vllmGetQueue();
+  queue.parallel_for(
+      sycl::nd_range<1>(rows * 32, 32),
+      [=](sycl::nd_item<1> item) [[sycl::reqd_sub_group_size(32)]] {
+        const auto row = item.get_group(0);
+        const int lane = item.get_local_id(0);
+        float values[4];
+        float sum = 0.f;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          values[i] = static_cast<float>(x[row * 128 + lane + i * 32]);
+          sum += values[i] * values[i];
+        }
+        sum = sycl::reduce_over_group(
+            item.get_sub_group(), sum, sycl::plus<float>());
+        const float inv = sycl::rsqrt(sum / 128.f + eps);
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          const int col = lane + i * 32;
+          const auto index = row * 128 + col;
+          const float g = static_cast<float>(z[index]);
+          const float silu = g / (1.f + sycl::exp(-g));
+          const float normalized = values[i] * inv * static_cast<float>(w[col]);
+          y[index] = static_cast<sycl::half>(normalized * silu);
+        }
+      });
+}
