@@ -622,10 +622,25 @@ class ReduceSplitK {
  public:
   static Params
   to_underlying_arguments(Arguments const& args, void* workspace) {
+    // Split the head_dim (head_size_vo) reduction across extra grid
+    // workgroups instead of a single serial per-thread loop over the whole
+    // head_dim -- the original single-tile grid(seq_len_qo, num_heads_q,
+    // batch) launches only num_heads_q*batch workgroups total (e.g. 8 for
+    // batch=1/num_heads_q=8), which badly underutilizes a 32-XE-core GPU for
+    // small-batch decode. num_vals_per_thread is this kernel's own per-thread
+    // iteration count over head_size_vo at the ORIGINAL (untiled) grid size;
+    // using it as the tile count turns each thread's multi-iteration loop
+    // into ~1 iteration per (now more numerous) workgroup, restoring full
+    // core occupancy without changing the reduction math.
+    int num_hd_tiles = cute::max(1, num_vals_per_thread);
     return {
         args.kernel,
         TileScheduler::to_underlying_arguments(
-            args.kernel.shape, args.hw_info, TileShapeO{}, args.num_kv_splits)};
+            args.kernel.shape,
+            args.hw_info,
+            TileShapeO{},
+            args.num_kv_splits,
+            num_hd_tiles)};
   }
 
   static bool can_implement(Arguments const& args) {
@@ -691,9 +706,12 @@ class ReduceSplitK {
     auto num_heads_q = s.num_heads_q;
     auto head_size_vo = s.head_size_vo;
 
+    auto num_hd_tiles = cute::max(1, params.scheduler.num_hd_tiles);
+
     CUTLASS_PRAGMA_NO_UNROLL
     for (; tile_scheduler.is_valid(); ++tile_scheduler) {
-      auto [seq_idx, head_q, idx_b] = tile_scheduler.get_block_coord();
+      auto [seq_idx, head_q, idx_b, hd_tile_idx] =
+          tile_scheduler.get_block_coord();
 
       // Skip prefill batches when is_prefill mask is provided
       if (p.is_prefill != nullptr && p.is_prefill[idx_b]) continue;
@@ -857,7 +875,14 @@ class ReduceSplitK {
 
       sycl::group_barrier(get_work_group<3>());
 
-      for (int idx = thr_id; idx < s.head_size_vo;
+      // Each workgroup now only covers its assigned head_dim tile (instead
+      // of the WHOLE head_size_vo, striding by the full WG thread count) --
+      // ceil_div + clamp so this is correct even when head_size_vo isn't an
+      // exact multiple of num_hd_tiles.
+      int hd_tile_size = cute::ceil_div(int(s.head_size_vo), int(num_hd_tiles));
+      int hd_start = hd_tile_idx * hd_tile_size;
+      int hd_stop = cute::min(hd_start + hd_tile_size, int(s.head_size_vo));
+      for (int idx = hd_start + thr_id; idx < hd_stop;
            idx += SGPerWG::value * intel::sg_size) {
         ElementLSE acc = 0;
         for (int i = 0; i < effective_splits; ++i) {
