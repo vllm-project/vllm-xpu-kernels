@@ -28,8 +28,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
       "num_sampled_tokens tensor must be 1D [num_reqs], but got dim ",
       num_sampled_tokens.dim());
   TORCH_CHECK(
-      num_sampled_tokens.dtype() == torch::kInt32,
-      "num_sampled_tokens tensor must be int32, but got ",
+      num_sampled_tokens.dtype() == torch::kInt32 ||
+          num_sampled_tokens.dtype() == torch::kInt64,
+      "num_sampled_tokens tensor must be int32 or int64, but got ",
       num_sampled_tokens.dtype());
   TORCH_CHECK(
       num_sampled_tokens.size(0) == logits.size(0),
@@ -67,16 +68,19 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
 
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  CompactSamplingMaskImpl::compact_sampling_mask_kernel_launcher(
-      queue,
-      logits.data_ptr<float>(),
-      num_sampled_tokens.data_ptr<int>(),
-      token_ids.data_ptr<int>(),
-      packed_mask.data_ptr<uint8_t>(),
-      counts.data_ptr<int>(),
-      num_reqs,
-      real_max_num_kept,
-      vocab_size);
+  AT_DISPATCH_INDEX_TYPES(
+      num_sampled_tokens.scalar_type(), "compact_sampling_mask", [&] {
+        CompactSamplingMaskImpl::compact_sampling_mask_kernel_launcher<index_t>(
+            queue,
+            logits.data_ptr<float>(),
+            num_sampled_tokens.data_ptr<index_t>(),
+            token_ids.data_ptr<int>(),
+            packed_mask.data_ptr<uint8_t>(),
+            counts.data_ptr<int>(),
+            num_reqs,
+            real_max_num_kept,
+            vocab_size);
+      });
 
   return {token_ids, packed_mask, counts};
 }

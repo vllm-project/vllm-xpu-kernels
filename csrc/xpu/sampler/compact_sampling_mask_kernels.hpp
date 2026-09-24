@@ -4,6 +4,7 @@
 #include <limits>
 
 namespace CompactSamplingMaskImpl {
+template <typename index_t>
 struct compact_sampling_mask_kernel {
  public:
   static constexpr int sub_group_size = 16;
@@ -12,7 +13,7 @@ struct compact_sampling_mask_kernel {
 
   compact_sampling_mask_kernel(
       const float* logits,
-      const int* num_sampled_tokens,
+      const index_t* num_sampled_tokens,
       int* token_ids,
       uint8_t* packed_mask,
       int* counts,
@@ -52,7 +53,8 @@ struct compact_sampling_mask_kernel {
     int* token_ids_ptr = token_ids + batch_id * max_num_kept;
     uint8_t* packed_mask_ptr = packed_mask + batch_id * aligned_vocab_size;
 
-    int num_sampled_tokens_ = num_sampled_tokens[batch_id];
+    const index_t num_sampled_tokens_raw = num_sampled_tokens[batch_id];
+    const int num_sampled_tokens_ = static_cast<int>(num_sampled_tokens_raw);
     bool is_active = num_sampled_tokens_ > 0;
 
     if (!is_active) {
@@ -185,7 +187,7 @@ struct compact_sampling_mask_kernel {
 
  private:
   const float* logits;
-  const int* num_sampled_tokens;
+  const index_t* num_sampled_tokens;
   int* token_ids;
   uint8_t* packed_mask;
   int* counts;
@@ -194,17 +196,18 @@ struct compact_sampling_mask_kernel {
   const int vocab_size;
 };
 
+template <typename index_t>
 void compact_sampling_mask_kernel_launcher(
     sycl::queue& queue,
     const float* logits,
-    const int* num_sampled_tokens,
+    const index_t* num_sampled_tokens,
     int* token_ids,
     uint8_t* packed_mask,
     int* counts,
     const int num_reqs,
     const int max_num_kept,
     const int vocab_size) {
-  using KERNEL = compact_sampling_mask_kernel;
+  using KERNEL = compact_sampling_mask_kernel<index_t>;
   auto range = KERNEL::get_nd_range(num_reqs, vocab_size);
   queue.submit([&](sycl::handler& cgh) {
     KERNEL task(
