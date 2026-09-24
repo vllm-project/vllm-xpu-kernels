@@ -140,6 +140,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl(
       "deepseek_inv_rope_fp8_quant", torch::kXPU, &deepseek_inv_rope_fp8_quant);
 
+  xpu_ops.def("softmax(Tensor! out, Tensor input) -> ()");
+  xpu_ops.impl("softmax", torch::kXPU, &softmax);
+
 #ifdef VLLM_MHC_ENABLED
   xpu_ops.def(
       "mhc_pre(Tensor residual, Tensor fn, Tensor hc_scale, Tensor hc_base,"

@@ -161,6 +161,11 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
     int64_t nope_dim,
     int64_t rope_dim);
 
+// Row-wise softmax over the last dimension of a 2D [batch, dim] tensor.
+void softmax(
+    torch::Tensor& out,
+    torch::Tensor& input);
+
 #ifdef VLLM_MHC_ENABLED
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
     const at::Tensor& residual,
