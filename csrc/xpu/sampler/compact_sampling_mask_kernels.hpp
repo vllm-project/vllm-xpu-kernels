@@ -53,7 +53,8 @@ struct compact_sampling_mask_kernel {
     int* token_ids_ptr = token_ids + batch_id * max_num_kept;
     uint8_t* packed_mask_ptr = packed_mask + batch_id * aligned_vocab_size;
 
-    index_t num_sampled_tokens_ = num_sampled_tokens[batch_id];
+    const index_t num_sampled_tokens_raw = num_sampled_tokens[batch_id];
+    const int num_sampled_tokens_ = static_cast<int>(num_sampled_tokens_raw);
     bool is_active = num_sampled_tokens_ > 0;
 
     if (!is_active) {
