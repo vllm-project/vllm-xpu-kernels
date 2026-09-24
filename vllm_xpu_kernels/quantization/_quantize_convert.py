@@ -197,6 +197,23 @@ class AWQUtils:
 
         return qweight, qzeros
 
+    @classmethod
+    def moe_repack(cls, qweight: torch.Tensor) -> torch.Tensor:
+        # awq moe repack
+        num_experts, k, n_packed = qweight.shape
+        pack_factor = len(cls.AWQ_PACK_ORDER)
+        out = torch.empty((num_experts, k // pack_factor,
+                          n_packed * pack_factor),
+                          dtype=torch.int32,
+                          device=qweight.device)
+        for e in range(num_experts):
+            iweight = cls.unpack(qweight[e], direction="column")
+            iweight = cls.apply_order(iweight,
+                                      direction="column",
+                                      order=cls.REVERSE_AWQ_PACK_ORDER)
+            out[e] = cls.pack(iweight, direction="row")
+        return out
+
 
 def transpose_onednn_woq_format(layer: torch.nn.Module,
                                 method: str,
