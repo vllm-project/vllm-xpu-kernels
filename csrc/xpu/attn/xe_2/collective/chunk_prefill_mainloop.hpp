@@ -212,6 +212,8 @@ struct FMHAFwdMainloop<
     int local_left, local_right;
     // Physical stride between paged blocks in seq-position units.
     int page_stride_elements;
+    // GQA packing factor. 1 = no packing.
+    int pack_gqa = 1;
   };
 
   // Kernel-facing parameters
@@ -242,7 +244,8 @@ struct FMHAFwdMainloop<
         args.total_seqlen_kv,
         args.local_left,
         args.local_right,
-        args.page_stride_elements};
+        args.page_stride_elements,
+        args.pack_gqa};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -605,7 +608,8 @@ struct FMHAFwdMainloop<
           CUTLASS_PRAGMA_UNROLL
           for (int n = 0; n < n_reps; n++) {
             int col = k_base + n * intel::sg_size + lane_id;
-            int causal_bound = col - full_tile_offset - row_base;
+            int causal_bound =
+                params.pack_gqa * (col - full_tile_offset) - row_base;
             CUTLASS_PRAGMA_UNROLL
             for (int j = 0; j < elems_per_n; j++) {
               if (j < causal_bound) {
@@ -640,7 +644,7 @@ struct FMHAFwdMainloop<
           auto cS_thread = thr_mma_qk.partition_C(gP);
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tSrS.size(); ++i) {
-            int row_idx = get<0>(cS_thread(i));
+            int row_idx = get<0>(cS_thread(i)) / params.pack_gqa;
             int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
             bool left_mask = col_idx < row_idx - params.local_left;
             bool right_mask = col_idx > row_idx + params.local_right;

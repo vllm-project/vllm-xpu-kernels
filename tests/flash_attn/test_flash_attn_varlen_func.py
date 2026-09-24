@@ -740,6 +740,176 @@ def test_decode_large_gqa_ratio(
     torch.xpu.empty_cache()
 
 
+def _run_chunk_prefill_gqa_case(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    dtype: torch.dtype,
+    causal: bool,
+    window_size: tuple[int, int] = (-1, -1),
+    num_blocks: int = 2048,
+    out_is_query: bool = False,
+) -> None:
+    torch.set_default_device("xpu")
+    torch.xpu.set_device("xpu:0")
+    torch.manual_seed(42)
+
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    assert len(set(query_lens)) > 1, (
+        "query_lens must be ragged so is_uniform_qlen stays False in "
+        "flash_attn_varlen_func and these cases reach chunk_prefill "
+        "instead of the speculative-decode path")
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens),
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
+    key_cache = torch.randn(num_blocks,
+                            block_size,
+                            num_kv_heads,
+                            head_size,
+                            dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    cu_query_lens = torch.tensor([0] + query_lens,
+                                 dtype=torch.int32).cumsum(dim=0,
+                                                           dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+    max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
+    block_tables = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32)
+    # out=query makes the kernel overwrite its own input, so the reference
+    # needs a pristine copy.
+    ref_query = query.clone() if out_is_query else query
+
+    output = flash_attn_varlen_func(query,
+                                    key_cache,
+                                    value_cache,
+                                    max_query_len,
+                                    cu_query_lens,
+                                    max_kv_len,
+                                    seqused_k=seq_k,
+                                    softmax_scale=scale,
+                                    causal=causal,
+                                    block_table=block_tables,
+                                    window_size=window_size,
+                                    out=query if out_is_query else None)
+    ref_output = ref_paged_attn(query=ref_query,
+                                key_cache=key_cache,
+                                value_cache=value_cache,
+                                query_lens=query_lens,
+                                kv_lens=kv_lens,
+                                block_tables=block_tables,
+                                scale=scale,
+                                casual=causal,
+                                is_paged=True,
+                                window_size_left=window_size[0],
+                                window_size_right=window_size[1],
+                                dtype=dtype)
+    atol, rtol = 1.5e-2, 1.5e-2
+    torch.testing.assert_close(
+        output,
+        ref_output,
+        atol=atol,
+        rtol=rtol,
+        msg=lambda _: f"max abs diff: "
+        f"{torch.max(torch.abs(output.float() - ref_output.float()))}")
+    torch.xpu.empty_cache()
+
+
+# The head ratios below target the packed geometry: 28/4 gives G=7, a
+# non-power-of-two whose subgroup row range straddles query positions, 71/1 is
+# the MQA extreme, and 16/16 is G=1, which must leave the unpacked path
+# untouched. head_size covers both chunk_prefill TileM policies (128 for <= 96,
+# 256 above).
+@pytest.mark.parametrize("seq_lens", [
+    [(3, 523), (17, 8192), (1, 211)],
+    [(2, 1031), (31, 4096)],
+])
+@pytest.mark.parametrize("num_heads", [(32, 4), (28, 4), (71, 1), (16, 16)])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("block_size", [64])
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("causal", [False, True])
+@torch.inference_mode()
+def test_chunk_prefill_gqa_packing(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    dtype: torch.dtype,
+    causal: bool,
+) -> None:
+    _run_chunk_prefill_gqa_case(seq_lens, num_heads, head_size, block_size,
+                                dtype, causal)
+
+
+# Two cases the plain packing test does not reach: the local (sliding-window)
+# mask, which divides the packed row index by G on its own path, and batches
+# that mix prefill and decode rows, where the packed output buffer holds
+# garbage for the decode rows until the paged-decode kernel overwrites them.
+@pytest.mark.parametrize("seq_lens", [
+    [(1, 523), (13, 4096), (1, 37), (5, 2011)],
+    [(2, 8192), (29, 311)],
+])
+@pytest.mark.parametrize("num_heads", [(32, 4), (28, 4)])
+@pytest.mark.parametrize("window_size", [(-1, -1), (127, -1)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
+@torch.inference_mode()
+def test_chunk_prefill_gqa_packing_window_and_mixed(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    window_size: tuple[int, int],
+    dtype: torch.dtype,
+) -> None:
+    _run_chunk_prefill_gqa_case(seq_lens,
+                                num_heads,
+                                head_size=128,
+                                block_size=64,
+                                dtype=dtype,
+                                causal=True,
+                                window_size=window_size)
+
+
+# Mixed batches where the caller aliases out with query. Packing runs the
+# kernel on a permuted copy and unpacks into out afterwards, but the kernel
+# skips decode batches, so those rows are uninitialized; copying them into an
+# out that aliases query would corrupt the rows the paged-decode launch reads
+# next. chunk_prefill_pack_gqa_factor declines to pack in this case.
+@pytest.mark.parametrize("seq_lens", [
+    [(1, 523), (3, 777)],
+    [(1, 4096), (7, 311), (1, 37), (5, 2011)],
+])
+@pytest.mark.parametrize("num_heads", [(8, 2), (32, 4)])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
+@torch.inference_mode()
+def test_chunk_prefill_gqa_packing_out_aliases_query(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+) -> None:
+    assert any(x[0] == 1 for x in seq_lens), "needs a decode sequence"
+    _run_chunk_prefill_gqa_case(seq_lens,
+                                num_heads,
+                                head_size=head_size,
+                                block_size=64,
+                                dtype=dtype,
+                                causal=True,
+                                out_is_query=True)
+
+
 @pytest.mark.parametrize("seq_lens",
                          [[(1, 523), (1, 37), (1, 2011)], [(1, 13000)]])
 @pytest.mark.parametrize("num_heads", [(8, 2)])
