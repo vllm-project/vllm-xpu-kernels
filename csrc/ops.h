@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 #include <torch/all.h>
 
 torch::Tensor weak_ref_tensor(torch::Tensor& tensor);
@@ -28,6 +29,16 @@ void fused_add_gemma_rms_norm(
     torch::Tensor& residual,
     torch::Tensor& weight,
     double epsilon);
+
+// Fused gated RMSNorm: out = rms_norm(input) * weight * act(gate), where act
+// is "sigmoid" (KDA) or "swish"/"silu" (Gated DeltaNet).
+void fused_rms_norm_gated(
+    torch::Tensor& out,
+    const torch::Tensor& input,
+    const torch::Tensor& gate,
+    std::optional<torch::Tensor> weight,
+    double epsilon,
+    const std::string& activation);
 
 void layer_norm(
     torch::Tensor& out,
