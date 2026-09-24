@@ -19,7 +19,7 @@
   #define VLLM_GRF_SIZE 256
 #endif
 
-#include "collective/chunk_prefill_scheduler.hpp"
+#include "collective/reduce_splitk_scheduler.hpp"
 #include "collective/chunk_prefill_epilogue.hpp"
 #include "kernel/paged_decode_kernel.hpp"
 
