@@ -333,4 +333,17 @@ void merge_attn_states(
     std::optional<int64_t> prefill_tokens_with_context = std::nullopt,
     const std::optional<torch::Tensor>& output_scale = std::nullopt);
 
+// LongCat n-gram embedding index kernel (see ngram_embedding_kernels.cpp).
+void ngram_compute_n_gram_ids(
+    int64_t ne_n,
+    int64_t ne_k,
+    torch::Tensor& ne_weights,
+    torch::Tensor& ne_mods,
+    torch::Tensor& exclusive_ne_embedder_size_sums,
+    torch::Tensor& exclusive_req_len_sums,
+    torch::Tensor& ne_token_table,
+    torch::Tensor& row_indices,
+    torch::Tensor& column_starts,
+    torch::Tensor& n_gram_ids);
+
 std::tuple<int64_t, int64_t> getMemoryInfo(int64_t device_index);
