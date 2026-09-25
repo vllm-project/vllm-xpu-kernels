@@ -166,6 +166,14 @@ void softmax(
     torch::Tensor& out,
     torch::Tensor& input);
 
+// Out-of-place weighted LayerNorm (no bias) over the last dimension of a 2D
+// [batch, norm_dim] tensor. weight is always float32.
+void layer_norm(
+    torch::Tensor& out,
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    double epsilon);
+
 #ifdef VLLM_MHC_ENABLED
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
     const at::Tensor& residual,

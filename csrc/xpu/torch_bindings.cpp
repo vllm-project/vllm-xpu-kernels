@@ -143,6 +143,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.def("softmax(Tensor! out, Tensor input) -> ()");
   xpu_ops.impl("softmax", torch::kXPU, &softmax);
 
+  xpu_ops.def(
+      "layer_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) "
+      "-> ()");
+  xpu_ops.impl("layer_norm", torch::kXPU, &layer_norm);
+
 #ifdef VLLM_MHC_ENABLED
   xpu_ops.def(
       "mhc_pre(Tensor residual, Tensor fn, Tensor hc_scale, Tensor hc_base,"
