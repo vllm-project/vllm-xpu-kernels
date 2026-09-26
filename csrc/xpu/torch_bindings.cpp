@@ -161,12 +161,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("deepseek_inv_rope_bf16", torch::kXPU, &deepseek_inv_rope_bf16);
 
   // DeepSeek-V4 fused inverse RoPE + FP8 quantization: inv GPT-J rotation +
-  // per-128-block UE8M0 FP8 E4M3 quantization + group-major layout transform.
+  // block-scaled FP8 E4M3 quantization + group-major layout transform.
+  // use_mxfp8=False: per-128-block UE8M0 scales as float32.
+  // use_mxfp8=True:  per-32-block raw E8M0 scales (float8_e8m0fnu).
   xpu_ops.def(
       "deepseek_inv_rope_fp8_quant(Tensor attn_output, Tensor positions,"
       "                            Tensor cos_sin_cache, int n_groups,"
       "                            int heads_per_group, int nope_dim,"
-      "                            int rope_dim) -> (Tensor, Tensor)");
+      "                            int rope_dim, bool use_mxfp8=False)"
+      "                            -> (Tensor, Tensor)");
   xpu_ops.impl(
       "deepseek_inv_rope_fp8_quant", torch::kXPU, &deepseek_inv_rope_fp8_quant);
 

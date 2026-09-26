@@ -193,7 +193,8 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
     int64_t n_groups,
     int64_t heads_per_group,
     int64_t nope_dim,
-    int64_t rope_dim);
+    int64_t rope_dim,
+    bool use_mxfp8);
 
 #ifdef VLLM_MHC_ENABLED
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
