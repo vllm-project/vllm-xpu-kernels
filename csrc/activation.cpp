@@ -279,6 +279,65 @@ class act_and_mul_with_param_vec_kernel {
   const float param_;
 };
 
+// Clamped SwiGLU used by DeepSeek-V4 style MoE shared experts. Unlike
+// swigluoai_and_mul (interleaved gate/up and a hardcoded up bias of 1.0) this
+// takes the split layout gate = input[..., :d], up = input[..., d:] and a
+// configurable bias:
+//   gate = clamp(gate, max=limit)
+//   up   = clamp(up, min=-limit, max=limit)
+//   out  = gate * sigmoid(alpha * gate) * (up + beta)
+template <typename scalar_t, int VEC_SIZE>
+class silu_and_mul_with_clamp_vec_kernel {
+ public:
+  silu_and_mul_with_clamp_vec_kernel(
+      scalar_t* __restrict__ out,          // [..., d]
+      const scalar_t* __restrict__ input,  // [..., 2 * d]
+      const int d,
+      const float limit,
+      const float alpha,
+      const float beta)
+      : out_(out),
+        input_(input),
+        d_(d),
+        limit_(limit),
+        alpha_(alpha),
+        beta_(beta) {}
+
+  void operator()(sycl::nd_item<1> item) const {
+    using vec_t = vllm::xpu::aligned_vec<scalar_t, VEC_SIZE>;
+    const int64_t token_idx = item.get_group(0);
+    const int64_t offset = item.get_local_linear_id();
+    const int64_t step = item.get_local_range(0);
+    const int64_t bound = d_ / VEC_SIZE;
+
+    for (int64_t i = offset; i < bound; i += step) {
+      auto gate_vec =
+          reinterpret_cast<const vec_t*>(input_)[token_idx * bound * 2 + i];
+      auto up_vec = reinterpret_cast<const vec_t*>(
+          input_)[token_idx * bound * 2 + i + bound];
+      vec_t out_vec;
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        float gate = static_cast<float>(gate_vec[j]);
+        gate = gate > limit_ ? limit_ : gate;
+        float up = static_cast<float>(up_vec[j]);
+        up = up > limit_ ? limit_ : (up < -limit_ ? -limit_ : up);
+        const float glu = gate / (1.0f + sycl::exp(-alpha_ * gate));
+        out_vec[j] = static_cast<scalar_t>(glu * (up + beta_));
+      }
+      reinterpret_cast<vec_t*>(out_)[token_idx * bound + i] = out_vec;
+    }
+  }
+
+ private:
+  scalar_t* __restrict__ out_;          // [..., d]
+  const scalar_t* __restrict__ input_;  // [..., 2 * d]
+  const int d_;
+  const float limit_;
+  const float alpha_;
+  const float beta_;
+};
+
 template <typename T>
 [[intel::device_indirectly_callable]] inline __attribute__((always_inline)) T
 swigluoai_and_mul(const T& gate, const T& up, float alpha, float limit) {
@@ -857,4 +916,76 @@ void situ_and_mul(
         TORCH_CHECK(false, "Unsupported vector size: ", vec_size);
     }
   });
+}
+
+#define VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(N)                     \
+  case N: {                                                       \
+    queue.submit([&](sycl::handler& cgh) {                        \
+      cgh.parallel_for(                                           \
+          sycl::nd_range<1>(num_tokens * wg_size, wg_size),       \
+          vllm::silu_and_mul_with_clamp_vec_kernel<sycl_t, N>(    \
+              (sycl_t*)out_ptr,                                   \
+              (sycl_t*)input_ptr,                                 \
+              d,                                                  \
+              static_cast<float>(limit),                          \
+              static_cast<float>(alpha),                          \
+              static_cast<float>(beta)));                         \
+    });                                                           \
+    break;                                                        \
+  }
+
+void silu_and_mul_with_clamp(
+    torch::Tensor& out,    // [..., d]
+    torch::Tensor& input,  // [..., 2 * d]
+    double limit,
+    double alpha,
+    double beta) {
+  CHECK_DEVICE(input);
+  CHECK_DEVICE(out);
+  TORCH_CHECK(
+      input.device() == out.device(),
+      "input and out must be on the same device");
+  TORCH_CHECK(
+      input.scalar_type() == out.scalar_type(),
+      "input and out must have the same dtype");
+  TORCH_CHECK(
+      input.is_contiguous() && out.is_contiguous(),
+      "input and out must be contiguous");
+  TORCH_CHECK(
+      input.dim() > 0 && input.size(-1) > 0 && input.size(-1) % 2 == 0,
+      "input must have a positive even last dimension");
+  TORCH_CHECK(
+      out.dim() == input.dim() && out.size(-1) * 2 == input.size(-1) &&
+          out.numel() * 2 == input.numel(),
+      "out must be shaped [..., d] for input [..., 2 * d]");
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "silu_and_mul_with_clamp", [&] {
+        using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+        const int d = input.size(-1) / 2;
+        const int64_t num_tokens = input.numel() / input.size(-1);
+        if (num_tokens == 0) {
+          return;
+        }
+        auto out_ptr = out.data_ptr<scalar_t>();
+        auto input_ptr = input.data_ptr<scalar_t>();
+        at::DeviceGuard device_guard(input.device());
+        auto& queue = vllm::xpu::vllmGetQueue();
+        // Widest vector that still divides d (see act_and_mul note): this op
+        // is purely memory bound, so wide access maximizes HBM bandwidth.
+        int vec_size = static_cast<int>(sizeof(float) * 4 / sizeof(scalar_t));
+        while (vec_size > 1 && d % vec_size != 0) {
+          vec_size = vec_size >> 1;
+        }
+        const int64_t wg_size = std::min(
+            static_cast<int64_t>(d / vec_size), static_cast<int64_t>(1024));
+        switch (vec_size) {
+          VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(1);
+          VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(2);
+          VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(4);
+          VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(8);
+          VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(16);
+          default:
+            TORCH_CHECK(false, "Unsupported vector size: ", vec_size);
+        }
+      });
 }

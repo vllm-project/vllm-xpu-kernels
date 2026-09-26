@@ -308,6 +308,26 @@ def cp_gather_and_upconvert_fp8_kv_cache(
         src_cache, dst, block_table, workspace_starts, batch_size, seq_starts)
 
 
+def dequantize_and_gather_k_cache(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: Optional[torch.Tensor],
+    block_table: torch.Tensor,
+    block_size: int,
+    offset: int,
+) -> None:
+    torch.ops._C_cache_ops.dequantize_and_gather_k_cache(
+        out,
+        k_cache,
+        seq_lens,
+        gather_lens,
+        block_table,
+        block_size,
+        offset,
+    )
+
+
 def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor,
                               slot_mapping: torch.Tensor,
                               quant_block_size: int, scale_fmt: str) -> None:
@@ -460,6 +480,18 @@ def swiglustep_and_mul(
 ) -> None:
     """SwiGLU-step and Mul activation function."""
     torch.ops._C.swiglustep_and_mul(out, input, limit)
+
+
+def silu_and_mul_with_clamp(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    limit: float,
+    alpha: float = 1.0,
+    beta: float = 0.0,
+) -> None:
+    """Clamped SwiGLU over the split layout gate=input[..., :d],
+    up=input[..., d:]."""
+    torch.ops._C.silu_and_mul_with_clamp(out, input, limit, alpha, beta)
 
 
 # onednn gemm
