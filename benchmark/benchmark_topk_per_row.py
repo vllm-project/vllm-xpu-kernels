@@ -90,6 +90,7 @@ PRESETS: list[Case] = [
     _prefill("dsv32-p-8k", "dsv32/glm5", 2048, (8192, 8192)),
     _prefill("dsv32-p-16k", "dsv32/glm5", 2048, (8192, 16384)),
     _prefill("dsv32-p-32k", "dsv32/glm5", 2048, (4096, 32768)),
+    # Also the AE prefill shape.
     _prefill("dsv32-p-48k", "dsv32/glm5", 2048, (2048, 49152)),
     _prefill("dsv32-p-64k", "dsv32/glm5", 2048, (2048, 65536)),
     _prefill("dsv32-p-128k", "dsv32/glm5", 2048, (1024, 131072)),
@@ -130,6 +131,18 @@ PRESETS: list[Case] = [
     _decode("dsv4pro-d-b512-32k", "dsv4-pro", 1024, 512, 8192, 262144),
     _decode("dsv4flash-d-b128-8k", "dsv4-flash", 512, 128, 2048, 262144),
     _decode("dsv4flash-d-b512-32k", "dsv4-flash", 512, 512, 8192, 262144),
+    # AE decode: rows as long as the logits buffer.
+    _decode("ae-d-b1-50k", "ae", 2048, 1, 50000, 50000),
+    _decode("ae-d-b8-50k", "ae", 2048, 8, 50000, 50000),
+    _decode("ae-d-b4-mtp2-50k", "ae", 2048, 4, 50000, 50000, 2),
+    # The edges of the split decode path: just below and at its smallest
+    # width, long rows, its most rows, and just past them.
+    _decode("split-d-b1-12k", "split", 2048, 1, 12288, 12288),
+    _decode("split-d-b1-16k", "split", 2048, 1, 16384, 16384),
+    _decode("split-d-b1-128k", "split", 2048, 1, 131072, 131072),
+    _decode("split-d-b1-300k", "split", 2048, 1, 300000, 300000),
+    _decode("split-d-b16-128k", "split", 2048, 16, 131072, 131072),
+    _decode("split-d-b32-50k", "split", 2048, 32, 50000, 50000),
 ]
 
 
