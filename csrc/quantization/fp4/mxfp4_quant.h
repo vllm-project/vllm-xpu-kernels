@@ -9,7 +9,6 @@
 
 namespace vllm {
 namespace mxfp4 {
-
 // Maximum representable FP4 E2M1 value.
 static constexpr float FP4_MAX = 6.0f;
 
@@ -143,7 +142,11 @@ class per_token_group_quant_mxfp4_kernel {
   }
 };
 
-template <typename scalar_t>
+// Vectorized MXFP4 quantiser: one work-group per row (or per rows_per_wg
+// rows), each work-item reads CPT consecutive 16-byte chunks. CPT is picked in
+// mxfp4_quant.cpp and always divides the chunks in a group; when
+// CPT == chunks_per_group the cross-lane absmax reduction disappears.
+template <typename scalar_t, int CPT = 1, bool FLAT_GROUPS = false>
 class per_token_group_quant_mxfp4_vec_kernel {
  private:
   uint8_t* __restrict__ out;
@@ -154,6 +157,8 @@ class per_token_group_quant_mxfp4_vec_kernel {
   float eps;
   const int64_t scale_stride_token;
   const int64_t scale_stride_group;
+  const int num_rows;
+  const int rows_per_wg;
   MoEScaleLayout moe_layout;
 
  public:
@@ -166,6 +171,8 @@ class per_token_group_quant_mxfp4_vec_kernel {
       float eps_,
       const int64_t scale_stride_token_,
       const int64_t scale_stride_group_,
+      const int num_rows_,
+      const int rows_per_wg_,
       MoEScaleLayout moe_layout_ = {})
       : out(out_),
         scale(scale_),
@@ -175,41 +182,64 @@ class per_token_group_quant_mxfp4_vec_kernel {
         eps(eps_),
         scale_stride_token(scale_stride_token_),
         scale_stride_group(scale_stride_group_),
+        num_rows(num_rows_),
+        rows_per_wg(rows_per_wg_),
         moe_layout(moe_layout_) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
-    const int row_idx = static_cast<int>(item.get_group(0));
     const int tid = static_cast<int>(item.get_local_id(0));
     const int local_range = static_cast<int>(item.get_local_range(0));
     auto sg = item.get_sub_group();
-    const int lane = sg.get_local_id()[0];
 
     constexpr int VEC = 16 / sizeof(scalar_t);
-    const int lanes_per_group = group_size / VEC;  // 32/8 = 4
-    const int num_chunks = hidden_size / VEC;
+    constexpr int OUT_VEC = CPT * VEC / 2;
+    static_assert(!FLAT_GROUPS || CPT * VEC == 32);
+    const int width = FLAT_GROUPS ? 32 : hidden_size;
+    const int chunks_per_group = (FLAT_GROUPS ? 32 : group_size) / VEC;
+    const int lanes_per_group = chunks_per_group / CPT;
+    const int num_chunks = width / VEC;
+    const int threads_per_row = num_chunks / CPT;
+
+    // Packing rows_per_wg rows into one work-group keeps every lane issuing
+    // loads when a row is narrower than a sub-group. Under FLAT_GROUPS a
+    // 32-element group is itself treated as a row.
+    const int stride = FLAT_GROUPS ? 1 : local_range / rows_per_wg;
+    const int row_idx = FLAT_GROUPS
+        ? static_cast<int>(item.get_global_id(0))
+        : static_cast<int>(item.get_group(0)) * rows_per_wg + tid / stride;
+    const int t0 = FLAT_GROUPS ? 0 : tid % stride;
+    if (row_idx >= num_rows) return;
 
     const scalar_t* row_input =
-        input + static_cast<int64_t>(row_idx) * hidden_size;
+        input + static_cast<int64_t>(row_idx) * width;
     uint8_t* row_output =
-        out + static_cast<int64_t>(row_idx) * (hidden_size / 2);
+        out + static_cast<int64_t>(row_idx) * (width / 2);
     const auto* vin =
         reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(row_input);
-    auto* vout = reinterpret_cast<vec_n_t<uint8_t, VEC / 2>*>(row_output);
+    auto* vout = reinterpret_cast<vec_n_t<uint8_t, OUT_VEC>*>(row_output);
 
-    for (int base = 0; base < num_chunks; base += local_range) {
-      const int c = base + tid;
-      const bool active = c < num_chunks;
+    for (int base = 0; base < threads_per_row; base += stride) {
+      const int t = base + t0;
+      const bool active = t < threads_per_row;
+      const int c0 = t * CPT;
 
-      float val[VEC];
+      float val[CPT][VEC];
       float lane_absmax = 0.0f;
       if (active) {
-        vec_n_t<scalar_t, VEC> v = vin[c];
+        vec_n_t<scalar_t, VEC> v[CPT];
 #pragma unroll
-        for (int k = 0; k < VEC; ++k) {
-          const float f = static_cast<float>(v.val[k]);
-          val[k] = f;
-          lane_absmax = sycl::max(lane_absmax, sycl::fabs(f));
+        for (int j = 0; j < CPT; ++j) {
+          v[j] = vin[c0 + j];
+        }
+#pragma unroll
+        for (int j = 0; j < CPT; ++j) {
+#pragma unroll
+          for (int k = 0; k < VEC; ++k) {
+            const float f = static_cast<float>(v[j].val[k]);
+            val[j][k] = f;
+            lane_absmax = sycl::max(lane_absmax, sycl::fabs(f));
+          }
         }
       }
 
@@ -223,34 +253,167 @@ class per_token_group_quant_mxfp4_vec_kernel {
       y_s =
           sycl::exp2(sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(y_s), eps))));
 
-      if (active && (lane % lanes_per_group) == 0) {
-        const int g_idx = c / lanes_per_group;
-        if (moe_layout.enabled()) {
-          moe_layout.store(row_idx, g_idx, y_s);
+      if (active && (lanes_per_group <= 1 || (t % lanes_per_group) == 0)) {
+        const int g_idx = c0 / chunks_per_group;
+        if constexpr (FLAT_GROUPS) {
+          scale[row_idx] = y_s;
         } else {
-          const int64_t scale_idx =
-              static_cast<int64_t>(row_idx) * scale_stride_token +
-              static_cast<int64_t>(g_idx) * scale_stride_group;
-          scale[scale_idx] = y_s;
+          if (moe_layout.enabled()) {
+            moe_layout.store(row_idx, g_idx, y_s);
+          } else {
+            const int64_t scale_idx =
+                static_cast<int64_t>(row_idx) * scale_stride_token +
+                static_cast<int64_t>(g_idx) * scale_stride_group;
+            scale[scale_idx] = y_s;
+          }
         }
       }
 
       if (active) {
         const float inv_scale = 1.0f / y_s;
-        vec_n_t<uint8_t, VEC / 2> o;
+        vec_n_t<uint8_t, OUT_VEC> o;
 #pragma unroll
-        for (int k = 0; k < VEC; k += 2) {
-          float s0 =
-              sycl::fmax(-FP4_MAX, sycl::fmin(val[k] * inv_scale, FP4_MAX));
-          float s1 =
-              sycl::fmax(-FP4_MAX, sycl::fmin(val[k + 1] * inv_scale, FP4_MAX));
-          uint8_t n0 = float_to_fp4_e2m1(s0);
-          uint8_t n1 = float_to_fp4_e2m1(s1);
-          o.val[k / 2] =
-              static_cast<uint8_t>(((n1 & 0x0Fu) << 4) | (n0 & 0x0Fu));
+        for (int j = 0; j < CPT; ++j) {
+#pragma unroll
+          for (int k = 0; k < VEC; k += 2) {
+            float s0 = sycl::fmax(
+                -FP4_MAX, sycl::fmin(val[j][k] * inv_scale, FP4_MAX));
+            float s1 = sycl::fmax(
+                -FP4_MAX, sycl::fmin(val[j][k + 1] * inv_scale, FP4_MAX));
+            uint8_t n0 = float_to_fp4_e2m1(s0);
+            uint8_t n1 = float_to_fp4_e2m1(s1);
+            o.val[j * (VEC / 2) + k / 2] =
+                static_cast<uint8_t>(((n1 & 0x0Fu) << 4) | (n0 & 0x0Fu));
+          }
         }
-        vout[c] = o;
+        vout[t] = o;
       }
+    }
+  }
+};
+
+// Quantise one whole 32-element group within a single work-item, so the absmax
+// reduction stays local. Returns the scale; packed bytes land in `o`.
+template <typename scalar_t, int VEC, int CPT>
+inline float mxfp4_quant_one_group(
+    const vec_n_t<scalar_t, VEC>* __restrict__ vin,
+    int c0,
+    float eps,
+    vec_n_t<uint8_t, CPT * VEC / 2>& o) {
+  vec_n_t<scalar_t, VEC> v[CPT];
+#pragma unroll
+  for (int j = 0; j < CPT; ++j) {
+    v[j] = vin[c0 + j];
+  }
+
+  float val[CPT][VEC];
+  float absmax = 0.0f;
+#pragma unroll
+  for (int j = 0; j < CPT; ++j) {
+#pragma unroll
+    for (int k = 0; k < VEC; ++k) {
+      const float f = static_cast<float>(v[j].val[k]);
+      val[j][k] = f;
+      absmax = sycl::max(absmax, sycl::fabs(f));
+    }
+  }
+
+  const float y_s = sycl::exp2(
+      sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(absmax / FP4_MAX), eps))));
+  const float inv_scale = 1.0f / y_s;
+
+#pragma unroll
+  for (int j = 0; j < CPT; ++j) {
+#pragma unroll
+    for (int k = 0; k < VEC; k += 2) {
+      const float s0 =
+          sycl::fmax(-FP4_MAX, sycl::fmin(val[j][k] * inv_scale, FP4_MAX));
+      const float s1 =
+          sycl::fmax(-FP4_MAX, sycl::fmin(val[j][k + 1] * inv_scale, FP4_MAX));
+      const uint8_t n0 = float_to_fp4_e2m1(s0);
+      const uint8_t n1 = float_to_fp4_e2m1(s1);
+      o.val[j * (VEC / 2) + k / 2] =
+          static_cast<uint8_t>(((n1 & 0x0Fu) << 4) | (n0 & 0x0Fu));
+    }
+  }
+  return y_s;
+}
+
+// MoE variant with SLM-staged scale stores.
+//
+// The MoE scale surface is group-major (scale(row, k) at
+// `dst[e]*scale_k + k*ld + (row - src[e])`), so one row per work-group writes
+// single e8m0 bytes `ld` apart, i.e. one cache line per byte (774 vs 946 GB/s
+// at [39040, 2048] on CRI). Here a work-group owns ROWS rows x K groups and
+// stages its bytes in SLM, then re-maps lanes so the row index varies fastest
+// and each sub-group writes a contiguous run. Requires CPT*VEC == group_size.
+template <typename scalar_t, int CPT>
+class per_token_group_quant_mxfp4_moe_slm_kernel {
+ private:
+  uint8_t* __restrict__ out;
+  scalar_t const* __restrict__ input;
+  sycl::local_accessor<uint8_t, 1> tile;
+  const int hidden_size;
+  float eps;
+  const int num_rows;
+  const int rows_per_wg;
+  MoEScaleLayout moe_layout;
+
+ public:
+  per_token_group_quant_mxfp4_moe_slm_kernel(
+      uint8_t* out_,
+      scalar_t const* input_,
+      sycl::local_accessor<uint8_t, 1> tile_,
+      const int hidden_size_,
+      float eps_,
+      const int num_rows_,
+      const int rows_per_wg_,
+      MoEScaleLayout moe_layout_)
+      : out(out_),
+        input(input_),
+        tile(tile_),
+        hidden_size(hidden_size_),
+        eps(eps_),
+        num_rows(num_rows_),
+        rows_per_wg(rows_per_wg_),
+        moe_layout(moe_layout_) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
+    constexpr int VEC = 16 / sizeof(scalar_t);
+    constexpr int OUT_VEC = CPT * VEC / 2;
+
+    const int tid = static_cast<int>(item.get_local_id(0));
+    const int groups_per_row = hidden_size / (CPT * VEC);
+    // The work-group is rounded up to whole sub-groups, so tail lanes own no
+    // group and sit out both phases.
+    const int tile_threads = rows_per_wg * groups_per_row;
+    const int row_local = tid / groups_per_row;
+    const int k = tid - row_local * groups_per_row;
+    const int row_base = static_cast<int>(item.get_group(0)) * rows_per_wg;
+    const int row_idx = row_base + row_local;
+
+    if (tid < tile_threads && row_idx < num_rows) {
+      const auto* vin = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(
+          input + static_cast<int64_t>(row_idx) * hidden_size);
+      auto* vout = reinterpret_cast<vec_n_t<uint8_t, OUT_VEC>*>(
+          out + static_cast<int64_t>(row_idx) * (hidden_size / 2));
+
+      vec_n_t<uint8_t, OUT_VEC> o;
+      const float y_s =
+          mxfp4_quant_one_group<scalar_t, VEC, CPT>(vin, k * CPT, eps, o);
+      vout[k] = o;
+      tile[row_local * groups_per_row + k] = MoEScaleLayout::encode(y_s);
+    }
+
+    sycl::group_barrier(item.get_group());
+
+    // Re-map so consecutive lanes hold consecutive rows of one group index.
+    const int r2 = tid % rows_per_wg;
+    const int k2 = tid / rows_per_wg;
+    const int row_out = row_base + r2;
+    if (tid < tile_threads && row_out < num_rows) {
+      moe_layout.store_byte(row_out, k2, tile[r2 * groups_per_row + k2]);
     }
   }
 };
