@@ -148,6 +148,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "-> ()");
   xpu_ops.impl("layer_norm", torch::kXPU, &layer_norm);
 
+  xpu_ops.def(
+      "scatter_row(Tensor! dst, Tensor src, Tensor index) -> ()");
+  xpu_ops.impl("scatter_row", torch::kXPU, &scatter_row);
+
 #ifdef VLLM_MHC_ENABLED
   xpu_ops.def(
       "mhc_pre(Tensor residual, Tensor fn, Tensor hc_scale, Tensor hc_base,"

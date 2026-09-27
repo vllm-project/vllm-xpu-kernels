@@ -174,6 +174,14 @@ void layer_norm(
     const torch::Tensor& weight,
     double epsilon);
 
+// Row-wise scatter: dst[index[i], :] = src[i, :] for i in
+// [0, index.size(0)). dtype-agnostic (plain byte copy); dim_size *
+// element_size must be a multiple of 16 bytes, and index must be int64.
+void scatter_row(
+    torch::Tensor& dst,
+    const torch::Tensor& src,
+    const torch::Tensor& index);
+
 #ifdef VLLM_MHC_ENABLED
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
     const at::Tensor& residual,
