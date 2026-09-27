@@ -182,6 +182,18 @@ void scatter_row(
     const torch::Tensor& src,
     const torch::Tensor& index);
 
+// Row-wise argmax/argmin over the last dimension of a 2D [batch, dim]
+// tensor. indices dtype must be int32; values dtype matches input.
+void reduce_max_row_wise(
+    torch::Tensor& values,
+    torch::Tensor& indices,
+    const torch::Tensor& input);
+
+void reduce_min_row_wise(
+    torch::Tensor& values,
+    torch::Tensor& indices,
+    const torch::Tensor& input);
+
 #ifdef VLLM_MHC_ENABLED
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
     const at::Tensor& residual,

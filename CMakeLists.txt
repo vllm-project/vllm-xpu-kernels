@@ -696,6 +696,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sycl/softmax.cpp"
       "csrc/xpu/sycl/layer_norm.cpp"
       "csrc/xpu/sycl/scatter_row.cpp"
+      "csrc/xpu/sycl/reduce.cpp"
       "csrc/xpu/rand/exponential.cpp"
       "csrc/xpu/utils.cpp")
   if(MOE_KERNELS_ENABLED)
