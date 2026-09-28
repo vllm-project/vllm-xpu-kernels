@@ -20,6 +20,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("weak_ref_tensor", torch::kXPU, &weak_ref_tensor);
 
   // Layernorm
+  ops.def(
+      "rms_norm_gated_decode(Tensor(a!) out, Tensor input, Tensor gate, "
+      "Tensor weight, float epsilon) -> ()");
+  ops.impl("rms_norm_gated_decode", torch::kXPU, &rms_norm_gated_decode);
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   // FIXME: torch op check consider input & weight is mutable in some ut
   // cases. so we make it mutable here.

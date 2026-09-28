@@ -22,6 +22,19 @@ USE_MXFP4_FP8_ENV = "VLLM_XPU_FUSED_MOE_USE_MXFP4_FP8"
 # MXFP8 / block-FP8 use the native Xe2 path by default.
 NATIVE_MXFP8_ENV = "VLLM_XPU_FUSED_MOE_NATIVE_MXFP8"
 NATIVE_BLOCK_FP8_ENV = "VLLM_XPU_FUSED_MOE_NATIVE_BLOCK_FP8"
+# Qwen3.5-35B-A3B (TP2) decode fast path: shape-specialized grouped GEMM with
+# a direct-indexed compact tile map (moe_qwen35_sp::fused_forward). Off by
+# default; enable with VLLM_XPU_MOE_QWEN35_FASTPATH=1. Only activates when the
+# layer shape exactly matches the kernel's hardcoded domain (H=2048,
+# I_local=256, E=256, top_k=8, fp8-e4m3 per-tensor(per-expert) weights, SiLU).
+QWEN35_FASTPATH_ENV = "VLLM_XPU_MOE_QWEN35_FASTPATH"
+
+try:
+    from .fused_moe_interface_v4 import XpuFusedMoeV4  # noqa: F401
+    _V4_AVAILABLE = True
+except Exception:  # pragma: no cover - optional fast path
+    XpuFusedMoeV4 = None
+    _V4_AVAILABLE = False
 
 def _is_env_enabled(env_name: str, default: str = "0") -> bool:
     value = os.environ.get(env_name, default).strip().upper()
@@ -311,6 +324,47 @@ class XpuFusedMoe:
             self.total_experts_num = self.num_experts * self.ep_size
         self.local_experts_num = self.num_experts
 
+        # Optional shape-specialized decode fast path (impl4). Strictly
+        # opt-in via env var, and gated to the exact shape domain the
+        # specialized kernel was built for; everything else falls through
+        # to the default kernel path unchanged.
+        self._v4_impl = None
+        if (
+            _V4_AVAILABLE
+            and _is_env_enabled(QWEN35_FASTPATH_ENV)
+            and w13.dtype == torch.float8_e4m3fn
+            and w2.dtype == torch.float8_e4m3fn
+            and w13_scales is not None
+            and w13_scales.dtype == torch.float32
+            and w13_scales.dim() == 1
+            and w13.dim() == 3 and w13.shape[0] == 256
+            and w13.shape[1] == 2048 and w13.shape[2] == 512
+            and w2.dim() == 3 and w2.shape[1] == 256 and w2.shape[2] == 2048
+            and num_experts == 256
+            and n_experts_per_token == 8
+            and activation == "silu"
+            and w13_bias is None and w2_bias is None
+            and ep_size == 1 and expert_map is None
+            and gemm1_clamp_limit is None
+        ):
+            self._v4_impl = XpuFusedMoeV4(
+                w13=w13,
+                w13_scales=w13_scales,
+                w13_bias=w13_bias,
+                w2=w2,
+                w2_scales=w2_scales,
+                w2_bias=w2_bias,
+                n_experts_per_token=n_experts_per_token,
+                activation=activation,
+                num_experts=num_experts,
+                ep_rank=ep_rank,
+                ep_size=ep_size,
+                expert_map=expert_map,
+                gemm1_clamp_limit=gemm1_clamp_limit,
+            )
+            print("vllm_xpu_kernels: Qwen3.5 MoE specialized fast path "
+                  "(VLLM_XPU_MOE_QWEN35_FASTPATH) enabled", flush=True)
+
     def apply(
         self,
         output,
@@ -320,6 +374,17 @@ class XpuFusedMoe:
         expert_map=None,
         a1q_scale=None,
     ):
+        if self._v4_impl is not None and hidden_states.shape[0] <= 32:
+            # The specialized map kernel's shared memory and tile map are
+            # sized for R = M*top_k <= 256 (MAX_R=512 SLM, umt=min(R,E)=256
+            # tile slots) -- i.e. M <= 32 at top_k=8. Larger batches (vLLM's
+            # profile-run dummy prefill uses M=max_num_batched_tokens!) must
+            # fall through to the default kernel path or they corrupt device
+            # memory.
+            return self._v4_impl.apply(
+                output, hidden_states, topk_weights, topk_ids,
+                expert_map=expert_map, a1q_scale=a1q_scale,
+            )
         if self._use_ref:
             self._apply_ref(output, hidden_states,
                             topk_weights, topk_ids,
