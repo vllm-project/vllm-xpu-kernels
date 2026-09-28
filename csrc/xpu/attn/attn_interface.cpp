@@ -148,7 +148,7 @@ void cutlass_chunk_prefill_interface(
                      .permute({0, 2, 1, 3})
                      .contiguous()
                      .view({total_q * pack_gqa, num_heads_kv, head_size});
-      out_in = at::empty_like(query_in);
+      out_in = at::empty(query_in.sizes(), out.options());
       cu_seqlens_q_in = cu_seqlens_q * pack_gqa;
       max_seqlen_q_in = max_seqlen_q * pack_gqa;
     }
