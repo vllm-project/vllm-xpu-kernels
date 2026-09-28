@@ -172,6 +172,7 @@ __attribute__((visibility("hidden"))) void cutlass_chunk_prefill_impl(
     bool is_local,
     bool is_sink,
     std::optional<at::Tensor>& softmax_lse,
-    std::optional<const at::Tensor>& is_prefill);
+    std::optional<const at::Tensor>& is_prefill,
+    int pack_gqa = 1);
 
 }  // namespace vllm::xpu::xe2
