@@ -42,6 +42,15 @@ struct softmax_packed_io<sycl::ext::oneapi::bfloat16, N> {
   }
 };
 
+// Use 16-byte transactions in the double-read kernel. The row-cache kernel
+// keeps vec4 to avoid increasing register pressure alongside its SLM cache.
+constexpr std::size_t kSoftmaxVecBytes = 16;
+
+template <typename scalar_t>
+constexpr int softmax_vec_size() {
+  return static_cast<int>(kSoftmaxVecBytes / sizeof(scalar_t));
+}
+
 template <typename scalar_t>
 int pick_softmax_wg_size(int dim_size, int device_wg_max) {
   int wg_size;
@@ -236,9 +245,9 @@ class softmax_row_cache_kernel {
 };
 
 // Generic double-read fallback: works for any dtype/dim_size/alignment.
-// Internally picks a vec4 or scalar strided load/store depending on whether
-// the row is vec4-aligned (decided once on the host, passed in as can_vec).
-template <typename scalar_t>
+// Internally picks a 16-byte vector or scalar strided load/store depending on
+// whether the row is aligned (decided once on the host, passed in as can_vec).
+template <typename scalar_t, int kVec>
 class softmax_kernel {
  public:
   softmax_kernel(
@@ -267,7 +276,6 @@ class softmax_kernel {
     float thread_max = -std::numeric_limits<float>::infinity();
     float thread_sum = 0.0f;
 
-    constexpr int kVec = 4;
     using pio = softmax_packed_io<scalar_t, kVec>;
     using vec_type = typename pio::vec_type;
     const scalar_t* row_in = input_ + base;
@@ -390,23 +398,18 @@ void launch_softmax_kernel(
   sycl::range<1> local_range(static_cast<std::size_t>(wg_size));
   sycl::range<1> global_range(static_cast<std::size_t>(batch) * local_range[0]);
 
-  constexpr int kVec = 4;
-  constexpr std::size_t kVecBytes = kVec * sizeof(sycl_t);
-  const bool can_vec =
-      ((reinterpret_cast<std::uintptr_t>(d_in) & (kVecBytes - 1)) == 0) &&
-      ((reinterpret_cast<std::uintptr_t>(d_out) & (kVecBytes - 1)) == 0) &&
-      ((dim_size & (kVec - 1)) == 0) &&
-      // Require every wg lane to own >=1 vec, otherwise idle subgroups would
-      // inject NaN into the online-softmax reduction ((-inf)-(-inf) in exp2()).
-      (dim_size >= kVec * wg_size);
+  constexpr int kRowCacheVec = 4; // Keep 4 for row cache kernel
+  constexpr std::size_t kRowCacheVecBytes = kRowCacheVec * sizeof(scalar_t);
 
-  // Row cache only pays off for 16-bit dtypes (see softmax_row_cache_kernel)
-  // and once the row is large enough that a second global read wouldn't
-  // already be served by cache.
-  constexpr bool kDtypeEligible = sizeof(sycl_t) == 2;
-  constexpr int kRowCacheMinDim = 4096;
-  const bool row_cache_eligible =
-      kDtypeEligible && can_vec && dim_size >= kRowCacheMinDim;
+  constexpr std::size_t kRowCacheMinBytes = 8192;
+  const std::size_t row_cache_min_dim = kRowCacheMinBytes / sizeof(scalar_t);
+
+  const bool can_row_cache_vec =
+      static_cast<std::size_t>(dim_size) >= row_cache_min_dim &&
+      ((reinterpret_cast<std::uintptr_t>(d_in) & (kRowCacheVecBytes - 1)) == 0) &&
+      ((reinterpret_cast<std::uintptr_t>(d_out) & (kRowCacheVecBytes - 1)) == 0) &&
+      ((dim_size & (kRowCacheVec - 1)) == 0) &&
+      (dim_size >= kRowCacheVec * wg_size);
 
   const std::size_t local_mem_size = static_cast<std::size_t>(
       q.get_device().get_info<sycl::info::device::local_mem_size>());
@@ -422,7 +425,7 @@ void launch_softmax_kernel(
   // that regress.
   constexpr std::size_t kRowCacheSlmCap = 49152;
   const std::size_t slm_budget = std::min(local_mem_size, kRowCacheSlmCap);
-  const bool use_row_cache = row_cache_eligible && slm_budget > kSlmReserve &&
+  const bool use_row_cache = can_row_cache_vec && slm_budget > kSlmReserve &&
       (reduction_bytes + row_cache_bytes <= slm_budget - kSlmReserve);
 
   if (use_row_cache) {
@@ -439,10 +442,17 @@ void launch_softmax_kernel(
     return;
   }
 
+  constexpr int kVec = softmax_vec_size<sycl_t>();
+  const bool can_vec =
+      ((reinterpret_cast<std::uintptr_t>(d_in) & (kSoftmaxVecBytes - 1)) == 0) &&
+      ((reinterpret_cast<std::uintptr_t>(d_out) & (kSoftmaxVecBytes - 1)) == 0) &&
+      ((dim_size & (kVec - 1)) == 0) &&
+      (dim_size >= kVec * wg_size);
+
   q.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_max(local_range, cgh);
     sycl::local_accessor<float, 1> local_sum(local_range, cgh);
-    vllm::softmax_kernel<sycl_t> kfn(
+    vllm::softmax_kernel<sycl_t, kVec> kfn(
         d_in, d_out, dim_size, wg_size, scale_log2e, can_vec, local_max,
         local_sum);
     cgh.parallel_for(sycl::nd_range<1>(global_range, local_range), kfn);
