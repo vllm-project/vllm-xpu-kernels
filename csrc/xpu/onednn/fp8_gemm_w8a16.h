@@ -26,11 +26,13 @@ static inline void dnnl_matmul_w8a16_fp8(
   const int n = o_sz.back();  // presume channel last format
   const int k = *(src_sz.end() - 1);
 
-  // block quant: m2_sc is 2D with size(0) > 1, i.e. [k/group_size,
-  // n/group_size] Per-channel scale [1, N] has size(0)==1 and must NOT enter
-  // this branch.
-  bool is_block_quant = (m2_sc.dim() == 2) && (m2_sc.size(0) > 1);
-  int64_t blk_group_size = -1;
+  // block quant: m2_sc is 2D [k/group_k, n/group_n]. [1, N / block_n]
+  // (K == block_k) is still block; per-channel [1, N] must NOT enter here.
+  bool is_block_quant =
+      (m2_sc.dim() == 2) &&
+      ((m2_sc.size(0) > 1) || (m2_sc.size(1) > 1 && m2_sc.size(1) < n));
+  int64_t blk_group_k = -1;
+  int64_t blk_group_n = -1;
   if (is_block_quant) {
     TORCH_CHECK(
         k % m2_sc.size(0) == 0 && n % m2_sc.size(1) == 0,
@@ -41,8 +43,16 @@ static inline void dnnl_matmul_w8a16_fp8(
         ", scale shape ",
         m2_sc.sizes(),
         ".");
-    blk_group_size = k / m2_sc.size(0);
+    blk_group_k = k / m2_sc.size(0);
+    blk_group_n = n / m2_sc.size(1);
   }
+  TORCH_CHECK(
+      is_block_quant || m2_sc.numel() == 1 || m2_sc.numel() == n,
+      "Per-channel weight scale must have N=",
+      n,
+      " elements, got shape ",
+      m2_sc.sizes(),
+      ".");
 
   // get joint dtypes
   joint_dtypes_t jd;
@@ -92,7 +102,7 @@ static inline void dnnl_matmul_w8a16_fp8(
       pattr.set_scales(
           DNNL_ARG_WEIGHTS,
           /* mask */ (1 << 0) + (1 << 1),
-          {blk_group_size, blk_group_size},
+          {blk_group_k, blk_group_n},
           get_onednn_dtype(m2_sc));
       /* per block quant */
     } else if (m2_sc.numel() == 1) {
