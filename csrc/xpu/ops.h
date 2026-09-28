@@ -408,3 +408,18 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
     const torch::Tensor& num_sampled_tokens,
     int64_t max_num_kept,
     int64_t max_compact_support);
+
+// 2-rank all-reduce over Level Zero IPC (csrc/xpu/p2p/).  Device addresses
+// cross as int64_t; see csrc/xpu/p2p/p2p_fptr.h.
+torch::Tensor xpu_p2p_alloc_region(int64_t slot_bytes);
+void xpu_p2p_all_reduce(
+    torch::Tensor& out,
+    const torch::Tensor& input,
+    int64_t my_region,
+    int64_t peer_region,
+    int64_t slot_bytes);
+std::tuple<torch::Tensor, int64_t, int64_t> xpu_ipc_export_handle(int64_t ptr);
+void xpu_ipc_release_handle(const torch::Tensor& handle_bytes);
+int64_t xpu_ipc_open_handle(
+    const torch::Tensor& handle_bytes, int64_t fd, int64_t offset);
+void xpu_ipc_close_handle(int64_t base_ptr);
