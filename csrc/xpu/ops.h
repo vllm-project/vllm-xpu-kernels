@@ -194,6 +194,14 @@ void reduce_min_row_wise(
     torch::Tensor& indices,
     const torch::Tensor& input);
 
+// Row-wise top-k (values + int64 indices) over the last dimension, matching
+// torch.topk(input, k, dim=-1, largest, sorted=True). Last dim must be a
+// multiple of 32 and k must be in [1, 16].
+std::tuple<torch::Tensor, torch::Tensor> topk_row_wise(
+    const torch::Tensor& input,
+    int64_t k,
+    bool largest);
+
 #ifdef VLLM_MHC_ENABLED
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
     const at::Tensor& residual,

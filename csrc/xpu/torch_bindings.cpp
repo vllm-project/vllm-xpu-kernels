@@ -147,7 +147,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "layer_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) "
       "-> ()");
   xpu_ops.impl("layer_norm", torch::kXPU, &layer_norm);
-  
+
   xpu_ops.def(
       "reduce_max_row_wise(Tensor! values, Tensor! indices, Tensor input) "
       "-> ()");
@@ -161,6 +161,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.def(
       "scatter_row(Tensor! dst, Tensor src, Tensor index) -> ()");
   xpu_ops.impl("scatter_row", torch::kXPU, &scatter_row);
+
+  xpu_ops.def(
+      "topk_row_wise(Tensor input, int k, bool largest) -> (Tensor, Tensor)");
+  xpu_ops.impl("topk_row_wise", torch::kXPU, &topk_row_wise);
 
 #ifdef VLLM_MHC_ENABLED
   xpu_ops.def(
