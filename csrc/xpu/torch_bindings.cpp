@@ -94,7 +94,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "multimodal_rotary_embedding(Tensor positions, Tensor! query,"
       "                            Tensor!? key, int head_size,"
       "                            Tensor cos_sin_cache, bool is_neox,"
-      "                            int[] mrope_section) -> ()");
+      "                            int[] mrope_section,"
+      "                            bool mrope_interleaved=False) -> ()");
   xpu_ops.impl(
       "multimodal_rotary_embedding", torch::kXPU, &multimodal_rotary_embedding);
 
