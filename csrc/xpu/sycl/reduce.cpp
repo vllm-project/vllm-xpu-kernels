@@ -21,6 +21,8 @@
 
 namespace vllm {
 
+constexpr int kVectorSizeInBytes = 16;
+
 // ---- min/max comparison functors ----
 struct ReduceMaxOp {
   using Compare = std::greater<float>;
@@ -30,6 +32,11 @@ struct ReduceMaxOp {
 struct ReduceMinOp {
   using Compare = std::less<float>;
   static constexpr float kIdentity = std::numeric_limits<float>::infinity();
+};
+
+template <typename scalar_t, int size>
+struct alignas(sizeof(scalar_t) * size) ReduceInputVector {
+  scalar_t data[size];
 };
 
 // NaN-aware "keep lhs" predicate: NaN always wins (propagates), ties and
@@ -49,20 +56,29 @@ inline bool reduce_keep_lhs(float lhs_v, int lhs_i, float rhs_v, int rhs_i) {
   return typename Op::Compare{}(lhs_v, rhs_v);
 }
 
-inline int reduce_normalize_rows_per_group(int rows_per_group) {
-  if (rows_per_group <= 0) return 1;
-  if (rows_per_group > 256) rows_per_group = 256;
-  while (rows_per_group > 1 && (256 % rows_per_group != 0)) --rows_per_group;
-  return rows_per_group;
-}
+// Mirrors the tuned xpu-perf max/min "auto" rows-per-group selection.
+template <typename scalar_t>
+inline int reduce_auto_rows_per_group(int batch, int dim_size) {
+  // One row per group selects the baseline kernel for large dimensions.
+  if (dim_size > 4096) return 1;
+  if (dim_size != 1024 && dim_size != 2048 && dim_size != 4096) return 4;
 
-// Mirrors reduce_max.py's _resolve_rows_per_group "auto" table: pick a
-// conservative rows-per-group default from dim_size when the caller passes
-// a negative sentinel (i.e. left rows_per_group unspecified).
-inline int reduce_auto_rows_per_group(int dim_size) {
-  if (dim_size <= 1024) return 8;
-  if (dim_size <= 2048) return 4;
-  return 0;
+  if (batch <= 1024) return 4;
+  if (batch <= 2048) return 8;
+
+  if (dim_size == 4096) {
+    if (sizeof(scalar_t) == 2) return batch <= 8192 ? 16 : 32;
+    return batch <= 8192 ? 4 : 2;
+  }
+
+  if (batch <= 4096) return 16;
+  if (sizeof(scalar_t) == 2) return 32;
+  if (dim_size == 1024) {
+    if (batch <= 8192) return 16;
+    if (batch <= 32768) return 32;
+    return 8;
+  }
+  return batch <= 16384 ? 32 : 4;
 }
 
 // ==========================================================================
@@ -258,13 +274,23 @@ class reduce_multirow_kernel {
     if (row < batch_) {
       std::size_t base =
           static_cast<std::size_t>(row) * static_cast<std::size_t>(dim_size_);
-      for (int i = lane; i < dim_size_; i += threads_per_row_) {
-        float v = static_cast<float>(input_[base + i]);
-        if (!reduce_keep_lhs<Op>(thread_val, thread_idx, v, i)) {
-          thread_val = v;
-          thread_idx = i;
+      constexpr int kInputVec = kVectorSizeInBytes / sizeof(scalar_t);
+      using InputVector = ReduceInputVector<scalar_t, kInputVec>;
+      int vec_end = (dim_size_ / kInputVec) * kInputVec;
+      for (int i = lane * kInputVec; i < vec_end;
+           i += threads_per_row_ * kInputVec) {
+        InputVector values = *reinterpret_cast<const InputVector*>(
+            input_ + base + static_cast<std::size_t>(i));
+#pragma unroll
+        for (int j = 0; j < kInputVec; ++j) {
+          float v = static_cast<float>(values.data[j]);
+          if (!reduce_keep_lhs<Op>(thread_val, thread_idx, v, i + j)) {
+            thread_val = v;
+            thread_idx = i + j;
+          }
         }
       }
+      // There is no tail in multi-row kernel.
     }
 
     local_val_[lid] = thread_val;
@@ -376,14 +402,12 @@ template <typename Op, typename scalar_t>
 void launch_reduce_kernel(
     torch::Tensor& values,
     torch::Tensor& indices,
-    const torch::Tensor& input,
-    int64_t rows_per_group_i64) {
+    const torch::Tensor& input) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
   const int batch = static_cast<int>(input.size(0));
   const int dim_size = static_cast<int>(input.size(1));
-  const int rows_per_group =
-      reduce_normalize_rows_per_group(static_cast<int>(rows_per_group_i64));
+  const int rows_per_group = reduce_auto_rows_per_group<sycl_t>(batch, dim_size);
 
   auto* d_in =
       reinterpret_cast<const sycl_t*>(input.const_data_ptr<scalar_t>());
@@ -392,7 +416,11 @@ void launch_reduce_kernel(
 
   auto& q = vllm::xpu::vllmGetQueue();
 
-  const bool use_multirow = dim_size <= 2048 && rows_per_group > 1;
+  constexpr int kInputVec = kVectorSizeInBytes / sizeof(sycl_t);
+  const bool use_multirow =
+      dim_size <= 4096 && rows_per_group > 1 &&
+      (reinterpret_cast<std::uintptr_t>(d_in) & (kVectorSizeInBytes - 1)) == 0 &&
+      dim_size % kInputVec == 0;
   if (use_multirow) {
     launch_reduce_multirow_kernel<Op, sycl_t>(
         q, d_in, d_val, d_idx, batch, dim_size, rows_per_group);
@@ -437,12 +465,8 @@ void reduce(
       input.size(0) > 0 && input.size(1) > 0,
       "batch/dim_size must be positive");
 
-  const int64_t rows_per_group =
-      reduce_auto_rows_per_group(static_cast<int>(input.size(1)));
-
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "reduce", [&] {
-    vllm::launch_reduce_kernel<Op, scalar_t>(
-        values, indices, input, rows_per_group);
+    vllm::launch_reduce_kernel<Op, scalar_t>(values, indices, input);
   });
 }
 

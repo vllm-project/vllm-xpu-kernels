@@ -91,3 +91,31 @@ def test_reduce_min(
     values_k = torch.empty_like(values).to(KERNEL_DEVICE)
     indices_k = torch.empty_like(indices).to(KERNEL_DEVICE)
     opcheck(fn, (values_k, indices_k, _to_kernel(x)))
+
+
+@pytest.mark.parametrize("batch,d, dtype", [
+    (7, 1025, torch.half),  # Unaligned rows fall back to the baseline kernel.
+    (2049, 4096, torch.float),
+    (2049, 4096, torch.bfloat16),
+])
+@pytest.mark.parametrize("op,ref", [
+    ("reduce_max_row_wise", torch.max),
+    ("reduce_min_row_wise", torch.min),
+])
+@torch.inference_mode()
+def test_reduce_vectorized_multirow(batch, d, dtype, op, ref):
+    seed_everything(0)
+    x = torch.randn(batch, d, dtype=dtype)
+    # Duplicate extrema in each row to exercise the lowest-index tie rule.
+    extreme = 10 if op == "reduce_max_row_wise" else -10
+    x[:, 0] = extreme
+    x[:, -1] = extreme
+    ref_values, ref_indices = ref(x, dim=-1, keepdim=True)
+
+    x_xpu = x.to(KERNEL_DEVICE)
+    values = torch.empty((batch, 1), device=KERNEL_DEVICE, dtype=dtype)
+    indices = torch.empty((batch, 1), device=KERNEL_DEVICE, dtype=torch.int32)
+    getattr(torch.ops._xpu_C, op)(values, indices, x_xpu)
+
+    torch.testing.assert_close(values.cpu(), ref_values)
+    torch.testing.assert_close(indices.cpu(), ref_indices.to(torch.int32))
