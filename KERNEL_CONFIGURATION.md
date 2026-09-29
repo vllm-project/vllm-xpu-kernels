@@ -163,22 +163,6 @@ that headsize.
 - `local` — whether sliding window attention is used
 - `sink` — whether StreamingLLM attention sinks are used
 
-DeepSeek-V3 MLA decode uses Q/K width 576 and V width 512. The default
-preset includes both `8,576,64,false,false,false` and
-`16,576,64,false,false,false`; page sizes 64 and 128 both use these entries.
-On Xe2, this shape uses split-V and selects Q8 below batch 4, otherwise Q16
-when the GQA ratio exceeds 8. Batch 1 with one resolved KV split instead uses
-the default policy and Q16 when the GQA ratio exceeds 8; this also applies
-when automatic split selection resolves to one. Other V widths retain the
-default decode policy under the same config entries. Xe3 retains its existing
-decode policy. The batch-1 exception is performance-validated on PVC only.
-
-The batch-decode suite in `benchmark/benchmark_cutlass_flash_attn_decode.py`
-includes MLA uniform/ragged lengths, single/multiple KV splits, and both
-device-length and host-plan paths. Their comparison includes split-policy
-differences: Xe2 split-V permits splitting from 2 tiles, while the host planner
-retains the default 32-tile floor.
-
 ---
 
 ## How to Determine Your Model's Config

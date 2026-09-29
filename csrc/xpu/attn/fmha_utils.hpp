@@ -251,7 +251,6 @@ struct chunk_policy_head512_b16 {
 // the runtime head_size_vo, which differs for MLA (head_size_qk 576 with
 // head_size_vo 512).
 static constexpr int kDecodeMaxShapeOutV = 256;
-
 static constexpr int kDecodeAccBudget = 2048;
 
 template <typename q_packed, typename head_dim>
