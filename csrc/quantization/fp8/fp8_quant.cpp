@@ -3,6 +3,7 @@
 #include <ATen/xpu/XPUContext.h>
 #include <sycl/sycl.hpp>
 
+#include <algorithm>
 #include <type_traits>
 
 #include "dispatch_utils.h"
@@ -112,6 +113,140 @@ class scaled_fp8_quant_kernel_strided_group_shape {
         const int gj = n / group_n;
         fp8::ConvertWithScaleOp<true, fp8_type> op{get_inv_scale_cached(gj)};
         op(token_out[n], token_in[n]);
+      }
+    }
+  }
+};
+
+template <
+    typename scalar_t,
+    typename fp8_type,
+    bool STRIDE_I_ZERO,
+    bool ELEM_SCALE,
+    int VEC,
+    int CPT>
+class scaled_fp8_quant_kernel_strided_group_shape_vec {
+ private:
+  fp8_type* out;
+  const scalar_t* input;
+  const float* scale;
+  int hidden_size;
+  int64_t in_row_stride;
+  int64_t out_row_stride;
+  int group_m;
+  int group_n;
+  int chunks_per_group;
+  int64_t num_tokens;
+  int64_t scale_stride_i;
+  int64_t scale_stride_j;
+  int col_tiles;
+
+ public:
+  scaled_fp8_quant_kernel_strided_group_shape_vec(
+      fp8_type* out_,
+      const scalar_t* input_,
+      const float* scale_,
+      int hidden_size_,
+      int64_t in_row_stride_,
+      int64_t out_row_stride_,
+      int group_m_,
+      int group_n_,
+      int chunks_per_group_,
+      int64_t num_tokens_,
+      int64_t scale_stride_i_,
+      int64_t scale_stride_j_,
+      int col_tiles_)
+      : out(out_),
+        input(input_),
+        scale(scale_),
+        hidden_size(hidden_size_),
+        in_row_stride(in_row_stride_),
+        out_row_stride(out_row_stride_),
+        group_m(group_m_),
+        group_n(group_n_),
+        chunks_per_group(chunks_per_group_),
+        num_tokens(num_tokens_),
+        scale_stride_i(scale_stride_i_),
+        scale_stride_j(scale_stride_j_),
+        col_tiles(col_tiles_) {}
+
+  void operator()(sycl::nd_item<1> item) const {
+    const int64_t gid = item.get_group(0);
+    const int64_t row_blocks = item.get_group_range(0) / col_tiles;
+    const int ct = ELEM_SCALE ? static_cast<int>(gid % col_tiles) : 0;
+    const int64_t rb = ELEM_SCALE ? gid / col_tiles : gid;
+    const int local_range = static_cast<int>(item.get_local_range(0));
+    const int thread_begin =
+        ct * local_range + static_cast<int>(item.get_local_id(0));
+
+    const int num_chunks = hidden_size / VEC;
+    const int threads_per_row = num_chunks / CPT;
+    for (int t = thread_begin; t < threads_per_row;
+         t += ELEM_SCALE ? threads_per_row : local_range) {
+      const int c0 = t * CPT;
+
+      constexpr int NUM_SCALES = ELEM_SCALE ? VEC * CPT : 1;
+      const int64_t col_off =
+          ELEM_SCALE
+              ? 0
+              : static_cast<int64_t>(c0 / chunks_per_group) * scale_stride_j;
+      float inv_scale[NUM_SCALES];
+      auto load_inv_scale = [&](int64_t scale_row_base) {
+        if constexpr (ELEM_SCALE) {
+#pragma unroll
+          for (int j = 0; j < CPT; ++j) {
+#pragma unroll
+            for (int k = 0; k < VEC; ++k) {
+              const int col = (c0 + j) * VEC + k;
+              inv_scale[j * VEC + k] =
+                  1.0f /
+                  scale
+                      [scale_row_base +
+                       static_cast<int64_t>(col / group_n) * scale_stride_j];
+            }
+          }
+        } else {
+          inv_scale[0] = 1.0f / scale[scale_row_base + col_off];
+        }
+      };
+      if constexpr (STRIDE_I_ZERO) {
+        load_inv_scale(0);
+      }
+
+      const auto* vin = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(input);
+      auto* vout = reinterpret_cast<vec_n_t<fp8_type, VEC>*>(out);
+      const int64_t in_vstride = in_row_stride / VEC;
+      const int64_t out_vstride = out_row_stride / VEC;
+
+      const int64_t row_end = ELEM_SCALE ? num_tokens : rb + 1;
+      const int64_t row_step = ELEM_SCALE ? row_blocks : 1;
+      for (int64_t row = rb; row < row_end; row += row_step) {
+        if constexpr (!STRIDE_I_ZERO) {
+          load_inv_scale(
+              static_cast<int64_t>(static_cast<int>(row) / group_m) *
+              scale_stride_i);
+        }
+
+        const auto* row_in = vin + row * in_vstride;
+        auto* row_out = vout + row * out_vstride;
+
+        vec_n_t<scalar_t, VEC> xv[CPT];
+#pragma unroll
+        for (int j = 0; j < CPT; ++j) {
+          xv[j] = row_in[c0 + j];
+        }
+
+#pragma unroll
+        for (int j = 0; j < CPT; ++j) {
+          vec_n_t<fp8_type, VEC> o;
+#pragma unroll
+          for (int k = 0; k < VEC; ++k) {
+            const float inv = inv_scale[ELEM_SCALE ? j * VEC + k : 0];
+            fp8::ConvertWithScaleOp<true, fp8_type> op{inv};
+            op(o.val[k], xv[j].val[k]);
+          }
+          row_out[c0 + j] = o;
+        }
       }
     }
   }
@@ -665,13 +800,113 @@ void static_scaled_fp8_quant(
   const at::DeviceGuard device_guard(input.device());
 
   auto& queue = vllm::xpu::vllmGetQueue();
+  const int eu_count = static_cast<int>(
+      queue.get_device().get_info<sycl::info::device::max_compute_units>());
+
+  constexpr int kWorkGroupMultiple = 32;
+  constexpr int kMaxWorkGroup = 1024;
+  constexpr int kWorkItemsPerEU = 128;
+  constexpr int kMaxScalesPerItem = 16;
+  constexpr int64_t kMaxRowsPerItem = 8;
+  const int vec = 16 / input.element_size();
+  bool vectorizable = reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0 &&
+                      reinterpret_cast<uintptr_t>(out.data_ptr()) % vec == 0 &&
+                      in_row_stride % vec == 0 && out_row_stride % vec == 0 &&
+                      hidden_size % vec == 0;
+  const bool elem_scale = scale_stride_j != 0 && group_n % vec != 0;
+  const int num_chunks = hidden_size / vec;
+  const int chunks_per_group =
+      (scale_stride_j == 0 || elem_scale) ? num_chunks : group_n / vec;
+  int chunks_per_item = 1;
+  vllm::dispatch_quant_chunks(
+      num_tokens, num_chunks, chunks_per_group, eu_count, [&](auto tag) {
+        chunks_per_item = decltype(tag)::value;
+      });
+  if (elem_scale) {
+    chunks_per_item = std::min(chunks_per_item, kMaxScalesPerItem / vec);
+  }
+  const int threads_per_row = num_chunks / chunks_per_item;
+  const int work_group = std::clamp(
+      (threads_per_row + kWorkGroupMultiple - 1) / kWorkGroupMultiple *
+          kWorkGroupMultiple,
+      kWorkGroupMultiple,
+      elem_scale ? kWorkItemsPerEU : kMaxWorkGroup);
+  const int col_tiles =
+      elem_scale ? std::max(1, (threads_per_row + work_group - 1) / work_group)
+                 : 1;
+  const int64_t row_blocks =
+      elem_scale
+          ? std::min(
+                num_tokens,
+                std::max(
+                    (num_tokens + kMaxRowsPerItem - 1) / kMaxRowsPerItem,
+                    std::max<int64_t>(
+                        1,
+                        static_cast<int64_t>(eu_count) * kWorkItemsPerEU /
+                            (static_cast<int64_t>(col_tiles) * work_group))))
+          : num_tokens;
+  vectorizable = vectorizable && (!elem_scale || row_blocks < num_tokens);
+  const sycl::nd_range<1> range(
+      sycl::range<1>(static_cast<size_t>(col_tiles) * row_blocks * work_group),
+      sycl::range<1>(work_group));
+
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
               VLLM_DISPATCH_BOOL(scale_stride_i == 0, S0_ZERO, [&] {
+                auto* out_ptr = out.data_ptr<fp8_t>();
+                auto* in_ptr = input.data_ptr<scalar_t>();
+                auto* scale_ptr = scale.data_ptr<float>();
+
+                constexpr int VEC = 16 / sizeof(scalar_t);
+
+                if (vectorizable) {
+                  auto launch = [&](auto elem_tag, auto cpt_tag) {
+                    queue.submit([&](sycl::handler& cgh) {
+                      cgh.parallel_for(
+                          range,
+                          vllm::scaled_fp8_quant_kernel_strided_group_shape_vec<
+                              scalar_t,
+                              fp8_t,
+                              S0_ZERO,
+                              decltype(elem_tag)::value,
+                              VEC,
+                              decltype(cpt_tag)::value>(
+                              out_ptr,
+                              in_ptr,
+                              scale_ptr,
+                              hidden_size,
+                              in_row_stride,
+                              out_row_stride,
+                              group_m,
+                              group_n,
+                              chunks_per_group,
+                              num_tokens,
+                              scale_stride_i,
+                              scale_stride_j,
+                              col_tiles));
+                    });
+                  };
+
+                  auto dispatch = [&](auto elem_tag) {
+                    if (chunks_per_item == 4) {
+                      launch(elem_tag, std::integral_constant<int, 4>{});
+                    } else if (chunks_per_item == 2) {
+                      launch(elem_tag, std::integral_constant<int, 2>{});
+                    } else {
+                      launch(elem_tag, std::integral_constant<int, 1>{});
+                    }
+                  };
+                  if (elem_scale) {
+                    dispatch(std::true_type{});
+                  } else {
+                    dispatch(std::false_type{});
+                  }
+                  return;
+                }
+
                 VLLM_DISPATCH_BOOL(scale_stride_j == 0, S1_ZERO, [&] {
-                  // Launch the kernel
                   queue.submit([&](sycl::handler& cgh) {
                     auto kernel =
                         vllm::scaled_fp8_quant_kernel_strided_group_shape<
@@ -679,9 +914,9 @@ void static_scaled_fp8_quant(
                             fp8_t,
                             S0_ZERO,
                             S1_ZERO>(
-                            out.data_ptr<fp8_t>(),
-                            input.data_ptr<scalar_t>(),
-                            scale.data_ptr<float>(),
+                            out_ptr,
+                            in_ptr,
+                            scale_ptr,
                             hidden_size,
                             in_row_stride,
                             out_row_stride,
