@@ -22,9 +22,7 @@ from benchmark.src.get_model_config import (
     gen_cutlass_flash_attn_decode_perf_configs as gen_perf_configs)
 from tests.flash_attn.test_flash_attn_varlen_func import ref_paged_attn
 from tests.utils import parse_args, seed_everything
-from vllm_xpu_kernels.flash_attn_interface import (
-    flash_attn_varlen_func, build_decode_split_plan, _infer_num_xe_cores,
-    _kv_tile_from_block_size)
+from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 from benchmark.presets import get_hardware_preset
 # isort: on
 
@@ -402,13 +400,10 @@ BATCH_DECODE_CONFIGS = [
 ]
 
 
-def benchmark_batch_decode(config, iterations=200, num_splits_kv=None,
-                           path="seqused"):
+def benchmark_batch_decode(config, iterations=200, num_splits_kv=None):
     """Benchmark a single batch decode config with GPU-event timing."""
     if iterations <= WARMUP:
         raise ValueError("iterations must exceed WARMUP")
-    if path not in ("seqused", "hostlens"):
-        raise ValueError(f"Unknown decode path: {path}")
     (seq_lens, num_heads, head_size, block_size, dtype, soft_cap,
      num_blocks, fa_versions, q_dtype, is_sink, name) = config
 
@@ -430,15 +425,6 @@ def benchmark_batch_decode(config, iterations=200, num_splits_kv=None,
                for _ in range(iterations)]
 
     kv_lens = list(map(int, seq_lens.split(",")[2].split("+")))
-    length_args = ({"seqused_k": seq_k} if path == "seqused" else
-                   {"host_kv_lens": kv_lens})
-    if path == "hostlens" and num_splits_kv is not None and num_splits_kv > 1:
-        plan, work = build_decode_split_plan(
-            kv_lens, kv_tile=_kv_tile_from_block_size(block_size),
-            num_kv_splits=num_splits_kv,
-            num_xe_cores=_infer_num_xe_cores(maybe_quantized_query.device),
-            num_heads_kv=num_heads[1])
-        print(f"Host plan: splits={plan.tolist()}, work_items={work.size(0)}")
     v_head_size = maybe_quantized_value_cache.size(-1)
     output = torch.full(
         (*maybe_quantized_query.shape[:-1], v_head_size),
@@ -451,7 +437,7 @@ def benchmark_batch_decode(config, iterations=200, num_splits_kv=None,
             max_query_len, cu_query_lens, max_kv_len,
             softmax_scale=scale, num_splits_kv=num_splits_kv, out=output,
             causal=False, block_table=bt_list[index],
-            window_size=(-1, -1), s_aux=sink, **length_args)
+            window_size=(-1, -1), s_aux=sink, seqused_k=seq_k)
 
     with patch(
         "vllm_xpu_kernels.flash_attn_interface._fallback_varlen_attn",
@@ -516,7 +502,7 @@ if __name__ == "__main__":
     # Batch Decode Benchmark (per-seq adaptive split-K evaluation)
     # ================================================================
     print("\n" + "=" * 80)
-    print("Batch Decode Benchmark (split policy and scheduling)")
+    print("Batch Decode Benchmark")
     print("=" * 80)
     hdr = (f"{'config':<40} | {'batch':>5} {'kv_sum':>7} | "
            f"{'time(us)':>9} {'BW(GB/s)':>9}")
@@ -529,14 +515,12 @@ if __name__ == "__main__":
         num_seqs = int(seq_lens.split(",")[0])
         kv_lens = list(map(int, seq_lens.split(",")[2].split("+")))
         kv_sum = sum(kv_lens)
-        variants = ([('seqused', None)] if cfg[2] != 576 else
-                    [(path, splits) for path in ("seqused", "hostlens")
-                     for splits in (None, 1, 4, 8, 16, 32)])
-        for path, splits in variants:
-            label = f"{name}/{path}/{splits or 'auto'}"
+        variants = (None, 1, 8) if cfg[2] == 576 else (None,)
+        for splits in variants:
+            label = f"{name}/{splits or 'auto'}"
             try:
                 avg_us, bw_gbs = benchmark_batch_decode(
-                    cfg, iterations=iterations, num_splits_kv=splits, path=path)
+                    cfg, iterations=iterations, num_splits_kv=splits)
                 print(f"{label:<40} | {num_seqs:>5} {kv_sum:>7} | "
                       f"{avg_us:>9.1f} {bw_gbs:>9.1f}")
             except Exception as exc:
