@@ -82,6 +82,8 @@ static constexpr int kLongRowMinLen = 16384;
 
 // Rows at least this long read the row as 16-byte vectors.
 static constexpr int kVecRowMinLen = 262144;
+// The longest row whose pass two reserves candidates once per chunk.
+static constexpr int kCandBatchMaxRowLen = 131072;
 
 // The 27 MiB of output for the S=3500 triangle would fit the 32 MB last level
 // cache, but the 16 MB of logits streaming past it evicts it, and the two
@@ -100,9 +102,19 @@ struct FinalItems {
 // of a subgroup counts into copy l % kHistCopies.
 static constexpr int kHistCopies = 4;
 
+// What a row long enough for the large candidate buffer keeps instead. The 32
+// lanes of a subgroup then share kLongHistCopies counters per bin rather than
+// kHistCopies, so a row whose elements crowd into one fp16 bin serialises half
+// as many same-address atomics: Intel Xe has no same-address coalescing for
+// subgroup atomics, and on logits quantised to a few fp16 bins (26k of a 49152
+// row in one bin) pass one is where the time goes. A shorter row keeps
+// kHistCopies, so that it does not pay the wider clear and scan of the
+// histogram over a row that is too short to hide them.
+static constexpr int kLongHistCopies = 7;
+
 struct Histogram {
   // 16-byte aligned so the reduce path can sweep a thread's bins as one vector.
-  alignas(16) int data[kNumBins * kHistCopies];
+  alignas(16) int data[kNumBins * kLongHistCopies];
   int tmp[SUBGROUP_SIZE + 1];  // used in prefix sum computation
 };
 
@@ -716,14 +728,36 @@ static inline void vectorizedProcessDeep(
   }
 }
 
-// Width, in fp32 key units, of one processRefineStep() bucket, and the slack
-// left below the first one. An fp16 bin is 32 consecutive halves of one
-// exponent, i.e. 32 * 2^13 = 2^18 consecutive fp32 keys, plus at most one fp16
-// ulp (2^13 keys) of rounding at either end. At 2^8 per bucket that is at most
-// 1088 buckets, so the 2048-bin histogram holds any refinable bin without
-// wrapping.
-static constexpr int kRefineShift = 8;
+// Slack, in fp32 key units, left below the first processRefineStep() bucket and
+// above the last: one fp16 ulp, for the values that round onto the bin.
 static constexpr uint32_t kRefineSlack = 1u << 13;
+
+// Width, as a shift of the fp32 key, of one processRefineStep() bucket. An fp16
+// bin of 2^kFastShift halves of one exponent is 2^(kFastShift + 13) consecutive
+// fp32 keys, plus the slack at either end, so the pass reaches
+// (2^(kFastShift + 13) + 2 * kRefineSlack) >> refineShift buckets: 1088 at
+// kLongRefineShift + 2 and 4352 at kLongRefineShift, of the
+// kNumBins * kLongHistCopies ints the histogram it borrows holds. A long row
+// takes the finer one, so that a row packed into one fp16 bin splits fine
+// enough for its threshold bucket to fit the final items; a short row takes the
+// coarse one, because clearing the difference costs more than the extra reads
+// it saves. The shift is a plain argument, not a template one, so that the two
+// choices share one copy of the pass in the kernel.
+static constexpr int kLongRefineShift = 6;
+
+// Buckets processRefineStep() splits its fp16 bin into at this shift, rounded
+// up to what its scan splits evenly over the threads. Clearing and scanning
+// only these, rather than the whole borrowed histogram, is what keeps the finer
+// resolution affordable.
+template <int kNumThreadsPerBlock, int kNumBins>
+static constexpr int refineNumBuckets(int refineShift) {
+  constexpr int kFastShift = 16 - constexprLog2(kNumBins);
+  const int reached =
+      ((1 << (kFastShift + 13)) + 2 * static_cast<int>(kRefineSlack)) >>
+      refineShift;
+  return ((reached + kNumThreadsPerBlock - 1) / kNumThreadsPerBlock) *
+         kNumThreadsPerBlock;
+}
 
 // Whether processRefineStep() can split this fp16 bin. The bin shares the top
 // 11 bits of the fp16 key, and with them one exponent. Exponent 0 (zero and
@@ -785,6 +819,7 @@ static bool processRefineStep(
     int rowStart,
     int rowEnd,
     int fastBin,
+    int refineShift,
     int accepted,
     int32_t* smemOutput,
     int* smemThresholdBinIdx,
@@ -802,16 +837,27 @@ static bool processRefineStep(
   auto sg_id = threadIdx_x / SUBGROUP_SIZE;
   auto sg_num = (kNumThreadsPerBlock + SUBGROUP_SIZE - 1) / SUBGROUP_SIZE;
 
+  // Buckets this pass splits fastBin into, out of the ints of the borrowed
+  // histogram, which is kLongHistCopies times what the fp16 pass needed. A row
+  // packed into one fp16 bin then splits fine enough for its threshold bucket
+  // to fit the final items, instead of giving up here and paying the whole
+  // fp32 chain (six more reads of the row).
+  const int numBuckets =
+      refineNumBuckets<kNumThreadsPerBlock, kNumBins>(refineShift);
+  static_assert(
+      refineNumBuckets<kNumThreadsPerBlock, kNumBins>(kLongRefineShift) <=
+          kNumBins * kLongHistCopies,
+      "the buckets of the finest shift fit the histogram this borrows");
   const uint32_t base = refineBase<kNumBins>(fastBin);
-  // Only called on elements of fastBin, which lie in [base, base + 1088 << 8).
-  // The clamp is there for memory safety only.
+  // Only called on elements of fastBin, which lie in the first numBuckets
+  // buckets. The clamp is there for memory safety only.
   auto bucketOf = [&](float logit) {
-    const uint32_t b = (convert_to_uint32(logit) - base) >> kRefineShift;
-    return static_cast<int>(sycl::min(b, static_cast<uint32_t>(kNumBins - 1)));
+    const uint32_t b = (convert_to_uint32(logit) - base) >> refineShift;
+    return static_cast<int>(
+        sycl::min(b, static_cast<uint32_t>(numBuckets - 1)));
   };
 
-#pragma unroll
-  for (int idx = threadIdx_x; idx < kNumBins; idx += kNumThreadsPerBlock) {
+  for (int idx = threadIdx_x; idx < numBuckets; idx += kNumThreadsPerBlock) {
     smemFinal.histo.data[idx] = 0;
   }
   if (threadIdx_x == 0) {
@@ -842,13 +888,14 @@ static bool processRefineStep(
 
   // The same block-wide exclusive scan as processHistogramStep(), based at the
   // count of elements the fp16 bins before fastBin already accepted.
-  constexpr int kBinsPerThread = kNumBins / kNumThreadsPerBlock;
-  static_assert(kBinsPerThread * kNumThreadsPerBlock == kNumBins);
+  // refineNumBuckets() rounds up to a multiple of the threads, so the buckets
+  // split evenly.
+  const int binsPerThread = numBuckets / kNumThreadsPerBlock;
   static_assert(kNumThreadsPerBlock <= SUBGROUP_SIZE * SUBGROUP_SIZE);
-  const int binBase = threadIdx_x * kBinsPerThread;
+  const int binBase = threadIdx_x * binsPerThread;
 
   int threadSum = 0;
-  for (int j = 0; j < kBinsPerThread; ++j) {
+  for (int j = 0; j < binsPerThread; ++j) {
     threadSum += smemFinal.histo.data[binBase + j];
   }
   int sgInclusive = threadSum;
@@ -881,7 +928,7 @@ static bool processRefineStep(
   // topK.
   int prefixSum =
       accepted + smemFinal.histo.tmp[sg_id] + (sgInclusive - threadSum);
-  for (int j = 0; j < kBinsPerThread; ++j) {
+  for (int j = 0; j < binsPerThread; ++j) {
     const int binCount = smemFinal.histo.data[binBase + j];
     smemFinal.histo.data[binBase + j] = prefixSum;
     const int nextPrefixSum = prefixSum + binCount;
@@ -977,6 +1024,7 @@ template <
     int kNumThreadsPerBlock,
     int kThreadsPerRow,
     int kNumFastBins,
+    int kCopies,
     int kMaxRegItems,
     int kMaxCandidates,
     bool kRegResident>
@@ -1005,6 +1053,9 @@ static bool topKPerRowReduce(
   static_assert(
       kMaxCandidates <= kNumFinalItems, "shares the final-items slots");
   static_assert(
+      kNumFastBins * kCopies <= kNumBins * kLongHistCopies,
+      "the bins and their copies fit the histogram");
+  static_assert(
       kThreadsPerRow % SUBGROUP_SIZE == 0, "a row keeps whole subgroups");
 
   sycl::group group = item.get_group();
@@ -1025,7 +1076,7 @@ static bool topKPerRowReduce(
   int* acceptCursor = smemTmp + SUBGROUP_SIZE - kRowsPerGroup +
                       item.get_local_id(0) / kThreadsPerRow;
   int* candCursor = acceptCursor - kRowsPerGroup;
-  const int histCopy = lane_id % kHistCopies;
+  const int histCopy = lane_id % kCopies;
 
   constexpr int kChunk = kMaxRegItems * kThreadsPerRow;
   constexpr int kNumReg = kRegResident ? kMaxRegItems : 1;
@@ -1127,9 +1178,8 @@ static bool topKPerRowReduce(
       };
 
   {
-    int zero[kBinsPerThread * kHistCopies] = {};
-    binsStore<kBinsPerThread * kHistCopies>(
-        smemBins + binBase * kHistCopies, zero);
+    int zero[kBinsPerThread * kCopies] = {};
+    binsStore<kBinsPerThread * kCopies>(smemBins + binBase * kCopies, zero);
   }
   sycl::group_barrier(group);
 
@@ -1179,7 +1229,7 @@ static bool topKPerRowReduce(
         break;
       }
       regBin[i] = extractFastBinIdx<kNumFastBins>(regVal[i]);
-      atomicAdd(&smemBins[regBin[i] * kHistCopies + histCopy], 1);
+      atomicAdd(&smemBins[regBin[i] * kCopies + histCopy], 1);
     }
   } else {
     // Same two-loop shape as the register-resident case above, one chunk at a
@@ -1193,8 +1243,7 @@ static bool topKPerRowReduce(
     if (threadIdx_x < head) {
       atomicAdd(
           &smemBins
-              [extractFastBinIdx<kNumFastBins>(rowBase[threadIdx_x]) *
-                   kHistCopies +
+              [extractFastBinIdx<kNumFastBins>(rowBase[threadIdx_x]) * kCopies +
                histCopy],
           1);
     }
@@ -1208,7 +1257,7 @@ static bool topKPerRowReduce(
         if (chunkOff[i] < rowLen) {
           atomicAdd(
               &smemBins
-                  [extractFastBinIdx<kNumFastBins>(chunkVal[i]) * kHistCopies +
+                  [extractFastBinIdx<kNumFastBins>(chunkVal[i]) * kCopies +
                    histCopy],
               1);
         }
@@ -1227,15 +1276,14 @@ static bool topKPerRowReduce(
   int threadSum = 0;
   int binCount[kBinsPerThread];
   {
-    int raw[kBinsPerThread * kHistCopies];
-    binsLoad<kBinsPerThread * kHistCopies>(
-        smemBins + binBase * kHistCopies, raw);
+    int raw[kBinsPerThread * kCopies];
+    binsLoad<kBinsPerThread * kCopies>(smemBins + binBase * kCopies, raw);
 #pragma unroll
     for (int b = 0; b < kBinsPerThread; ++b) {
       binCount[b] = 0;
 #pragma unroll
-      for (int c = 0; c < kHistCopies; ++c) {
-        binCount[b] += raw[b * kHistCopies + c];
+      for (int c = 0; c < kCopies; ++c) {
+        binCount[b] += raw[b * kCopies + c];
       }
     }
   }
@@ -1272,7 +1320,7 @@ static bool topKPerRowReduce(
       !kGrouped && !kRegResident && rowLen >= kLongRowMinLen;
   if (bigCandidates) {
     itemLogits = reinterpret_cast<float*>(smemBins);
-    itemIndices = smemBins + kNumFastBins * kHistCopies / 2;
+    itemIndices = smemBins + kNumFastBins * kCopies / 2;
   }
 
   // rowLen > topK, so some bin is always the threshold bin. Bail out only when
@@ -1294,7 +1342,7 @@ static bool topKPerRowReduce(
     }
   } else if (
       smemFinalBinSize[0] >
-      (bigCandidates ? kNumFastBins * kHistCopies / 2 : kMaxCandidates)) {
+      (bigCandidates ? kNumFastBins * kCopies / 2 : kMaxCandidates)) {
     return false;
   }
 
@@ -1410,33 +1458,94 @@ static bool topKPerRowReduce(
     }
     // Backwards, so that it starts on the end of the row, which pass one read
     // last and the last level cache still holds.
-    for (int c = numChunks - 1; c >= 0; --c) {
-      const int chunk = chunkAt(c);
-      float chunkVal[kMaxRegItems];
-      int chunkOff[kMaxRegItems];
-      loadChunk(chunk, chunkVal, chunkOff);
-      uint32_t accMask[kMaxRegItems];
-      int sgAccepted = 0;
+    // Rows longer than kCandBatchMaxRowLen keep one candidate atomic per slot:
+    // batching them was 1.016 slower at 512 rows of 163840 and 1.069 at
+    // 262144 (topK=512), growing with the row, against 1.004 at 131072 and
+    // 0.94-0.97 at 49152-98304 (topK=2048). The
+    // two loops are whole, as a branch per slot cost the batched loop its gain.
+    if (rowLen > kCandBatchMaxRowLen) {
+      for (int c = numChunks - 1; c >= 0; --c) {
+        const int chunk = chunkAt(c);
+        float chunkVal[kMaxRegItems];
+        int chunkOff[kMaxRegItems];
+        loadChunk(chunk, chunkVal, chunkOff);
+        uint32_t accMask[kMaxRegItems];
+        int sgAccepted = 0;
 #pragma unroll
-      for (int i = 0; i < kMaxRegItems; ++i) {
-        // Elements past the end of the row get a bin one past the last, which
-        // no threshold bin can match.
-        const int bin =
-            chunkOff[i] < rowLen
-                ? static_cast<int>(extractFastBinIdx<kNumFastBins>(chunkVal[i]))
-                : kNumFastBins;
-        accMask[i] = ballot(bin < thresholdBin);
-        sgAccepted += sycl::popcount(accMask[i]);
-        emitCandidates(bin == thresholdBin, chunkOff[i], chunkVal[i]);
-      }
-      int base = reserve(sgAccepted);
-#pragma unroll
-      for (int i = 0; i < kMaxRegItems; ++i) {
-        if ((accMask[i] >> lane_id) & 1u) {
-          outIndices[base + sycl::popcount(accMask[i] & lowerLanes)] =
-              chunkOff[i];
+        for (int i = 0; i < kMaxRegItems; ++i) {
+          // Elements past the end of the row get a bin one past the last, which
+          // no threshold bin can match.
+          const int bin =
+              chunkOff[i] < rowLen
+                  ? static_cast<int>(
+                        extractFastBinIdx<kNumFastBins>(chunkVal[i]))
+                  : kNumFastBins;
+          accMask[i] = ballot(bin < thresholdBin);
+          sgAccepted += sycl::popcount(accMask[i]);
+          emitCandidates(bin == thresholdBin, chunkOff[i], chunkVal[i]);
         }
-        base += sycl::popcount(accMask[i]);
+        int base = reserve(sgAccepted);
+#pragma unroll
+        for (int i = 0; i < kMaxRegItems; ++i) {
+          if ((accMask[i] >> lane_id) & 1u) {
+            outIndices[base + sycl::popcount(accMask[i] & lowerLanes)] =
+                chunkOff[i];
+          }
+          base += sycl::popcount(accMask[i]);
+        }
+      }
+    } else {
+      for (int c = numChunks - 1; c >= 0; --c) {
+        const int chunk = chunkAt(c);
+        float chunkVal[kMaxRegItems];
+        int chunkOff[kMaxRegItems];
+        loadChunk(chunk, chunkVal, chunkOff);
+        uint32_t accMask[kMaxRegItems];
+        uint32_t candMask[kMaxRegItems];
+        int sgAccepted = 0;
+        int sgCands = 0;
+#pragma unroll
+        for (int i = 0; i < kMaxRegItems; ++i) {
+          // Elements past the end of the row get a bin one past the last, which
+          // no threshold bin can match.
+          const int bin =
+              chunkOff[i] < rowLen
+                  ? static_cast<int>(
+                        extractFastBinIdx<kNumFastBins>(chunkVal[i]))
+                  : kNumFastBins;
+          accMask[i] = ballot(bin < thresholdBin);
+          sgAccepted += sycl::popcount(accMask[i]);
+          candMask[i] = ballot(bin == thresholdBin);
+          sgCands += sycl::popcount(candMask[i]);
+        }
+        int base = reserve(sgAccepted);
+#pragma unroll
+        for (int i = 0; i < kMaxRegItems; ++i) {
+          if ((accMask[i] >> lane_id) & 1u) {
+            outIndices[base + sycl::popcount(accMask[i] & lowerLanes)] =
+                chunkOff[i];
+          }
+          base += sycl::popcount(accMask[i]);
+        }
+        // The candidates of the whole chunk take one atomic, like the accepted
+        // ones: on clustered logits most slots hold candidates, and one atomic
+        // per slot on the one cursor every subgroup shares serialised them.
+        if (sgCands > 0) {
+          int cand = 0;
+          if (lane_id == 0) {
+            cand = atomicAdd(candCursor, sgCands);
+          }
+          cand = sycl::group_broadcast(sg, cand, 0) - candBase;
+#pragma unroll
+          for (int i = 0; i < kMaxRegItems; ++i) {
+            if ((candMask[i] >> lane_id) & 1u) {
+              const int slot = cand + sycl::popcount(candMask[i] & lowerLanes);
+              itemLogits[slot] = chunkVal[i];
+              itemIndices[slot] = chunkOff[i];
+            }
+            cand += sycl::popcount(candMask[i]);
+          }
+        }
       }
     }
   }
@@ -1667,49 +1776,81 @@ static void topKPerRowJob(
   if constexpr (!multipleBlocksPerRow && !mergeBlocks) {
     if (topK <= kFastMaxTopK) {
       const float* rowBase = logits + static_cast<int64_t>(rowStart) * stride1;
-      const bool done = rowLen <= kFastMaxRegItems * kNumThreadsPerBlock
-                            ? topKPerRowReduce<
-                                  kNumThreadsPerBlock,
-                                  kNumThreadsPerBlock,
-                                  kNumBins,
-                                  kFastMaxRegItems,
-                                  kFastMaxCandidates,
-                                  true>(
-                                  item,
-                                  rowBase,
-                                  rowLen,
-                                  outIndices,
-                                  smemFinal.histo.data,
-                                  smemFinal.histo.tmp,
-                                  smemFinal.items.indices,
-                                  smemFinal.items.logits,
-                                  smemThresholdBinIdx,
-                                  smemFinalBinSize,
-                                  smemFoundTopKValues,
-                                  sharedStates->smemGroupBail,
-                                  stride1,
-                                  topK)
-                            : topKPerRowReduce<
-                                  kNumThreadsPerBlock,
-                                  kNumThreadsPerBlock,
-                                  kNumBins,
-                                  kFastMaxRegItems,
-                                  kFastMaxCandidates,
-                                  false>(
-                                  item,
-                                  rowBase,
-                                  rowLen,
-                                  outIndices,
-                                  smemFinal.histo.data,
-                                  smemFinal.histo.tmp,
-                                  smemFinal.items.indices,
-                                  smemFinal.items.logits,
-                                  smemThresholdBinIdx,
-                                  smemFinalBinSize,
-                                  smemFoundTopKValues,
-                                  sharedStates->smemGroupBail,
-                                  stride1,
-                                  topK);
+      // Three shapes of the same pass: the register-resident one for a row
+      // that fits kFastMaxRegItems slots per thread, and for a longer row the
+      // chunked one, with the extra histogram copies once the row is long
+      // enough to hide their clear and scan.
+      bool done;
+      if (rowLen <= kFastMaxRegItems * kNumThreadsPerBlock) {
+        done = topKPerRowReduce<
+            kNumThreadsPerBlock,
+            kNumThreadsPerBlock,
+            kNumBins,
+            kHistCopies,
+            kFastMaxRegItems,
+            kFastMaxCandidates,
+            /*kRegResident=*/true>(
+            item,
+            rowBase,
+            rowLen,
+            outIndices,
+            smemFinal.histo.data,
+            smemFinal.histo.tmp,
+            smemFinal.items.indices,
+            smemFinal.items.logits,
+            smemThresholdBinIdx,
+            smemFinalBinSize,
+            smemFoundTopKValues,
+            sharedStates->smemGroupBail,
+            stride1,
+            topK);
+      } else if (rowLen >= kLongRowMinLen) {
+        done = topKPerRowReduce<
+            kNumThreadsPerBlock,
+            kNumThreadsPerBlock,
+            kNumBins,
+            kLongHistCopies,
+            kFastMaxRegItems,
+            kFastMaxCandidates,
+            /*kRegResident=*/false>(
+            item,
+            rowBase,
+            rowLen,
+            outIndices,
+            smemFinal.histo.data,
+            smemFinal.histo.tmp,
+            smemFinal.items.indices,
+            smemFinal.items.logits,
+            smemThresholdBinIdx,
+            smemFinalBinSize,
+            smemFoundTopKValues,
+            sharedStates->smemGroupBail,
+            stride1,
+            topK);
+      } else {
+        done = topKPerRowReduce<
+            kNumThreadsPerBlock,
+            kNumThreadsPerBlock,
+            kNumBins,
+            kHistCopies,
+            kFastMaxRegItems,
+            kFastMaxCandidates,
+            /*kRegResident=*/false>(
+            item,
+            rowBase,
+            rowLen,
+            outIndices,
+            smemFinal.histo.data,
+            smemFinal.histo.tmp,
+            smemFinal.items.indices,
+            smemFinal.items.logits,
+            smemThresholdBinIdx,
+            smemFinalBinSize,
+            smemFoundTopKValues,
+            sharedStates->smemGroupBail,
+            stride1,
+            topK);
+      }
       if (done) {
         return;
       }
@@ -1742,6 +1883,8 @@ static void topKPerRowJob(
   bool refined = false;
   if constexpr (!multipleBlocksPerRow && !mergeBlocks) {
     if (refineBin >= 0 && fastBinIsRefinable<kNumBins>(refineBin)) {
+      // Same split as the reduction path above: only a long row is worth the
+      // finer buckets, and only a long row can have given up with them.
       refined =
           processRefineStep<kNumThreadsPerBlock, kNumBins, kNumFinalItems>(
               item,
@@ -1749,6 +1892,8 @@ static void topKPerRowJob(
               rowStart,
               rowEnd,
               refineBin,
+              rowLen >= kLongRowMinLen ? kLongRefineShift
+                                       : kLongRefineShift + 2,
               refineAccepted,
               smemOutput,
               smemThresholdBinIdx,
@@ -1963,6 +2108,7 @@ static bool topKPerRowGroupReduce(
         kNumThreadsPerBlock,
         kThreadsPerRow,
         kBins,
+        kHistCopies,
         kFastMaxRegItems,
         kFastMaxCandidates,
         /*kRegResident=*/true>(
