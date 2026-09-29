@@ -143,7 +143,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.def(
       "mhc_pre(Tensor residual, Tensor fn, Tensor hc_scale, Tensor hc_base,"
       "        float rms_eps, float hc_pre_eps, float hc_sinkhorn_eps,"
-      "        float hc_post_mult_value, int sinkhorn_repeat)"
+      "        float hc_post_mult_value, int sinkhorn_repeat,"
+      "        Tensor? norm_weight=None, float norm_eps=1e-6)"
       "        -> (Tensor, Tensor, Tensor)");
   xpu_ops.impl("mhc_pre", torch::kXPU, &mhc_pre);
 
@@ -163,7 +164,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "                   Tensor comb_res_mix, Tensor fn, Tensor hc_scale,"
       "                   Tensor hc_base, float rms_eps, float hc_pre_eps,"
       "                   float hc_sinkhorn_eps, float hc_post_mult_value,"
-      "                   int sinkhorn_repeat)"
+      "                   int sinkhorn_repeat,"
+      "                   Tensor? norm_weight=None, float norm_eps=1e-6)"
       "                   -> (Tensor, Tensor, Tensor, Tensor)");
   xpu_ops.impl("mhc_fused_post_pre", torch::kXPU, &mhc_fused_post_pre);
 #endif
