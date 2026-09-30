@@ -1247,19 +1247,88 @@ static bool topKPerRowReduce(
                histCopy],
           1);
     }
-    for (int c = 0; c < numChunks; ++c) {
-      const int chunk = chunkAt(c);
-      float chunkVal[kMaxRegItems];
-      int chunkOff[kMaxRegItems];
-      loadChunk(chunk, chunkVal, chunkOff);
+    // Clustered logits put most of a row into a few bins, and the lanes of
+    // one atomic that hit the same address serialise even across the copies:
+    // at 2730 rows of 49152 that doubled this pass. So each subgroup samples
+    // one element per lane and picks the window of kHotBins consecutive bins
+    // that covers most of the sample, and if that is most of it, counts the
+    // elements of the window in registers, kHotBits per bin in one 64-bit
+    // word, with one atomic per bin at the end of the row. The counts are
+    // exact whatever the sample; it only decides which bins skip the atomics.
+    constexpr int kHotBins = 4;
+    constexpr int kHotBits = 16;
+    constexpr int kHotMinLanes = 16;
+    int hotLo = 0;
+    bool hotLoop = false;
+    {
+      const int s = threadIdx_x < rowLen ? threadIdx_x : 0;
+      const int sample = static_cast<int>(
+          extractFastBinIdx<kNumFastBins>(rowBase[s * stride1]));
+      const int lead = sycl::group_broadcast(sg, sample, 0);
+      int best = -1;
 #pragma unroll
-      for (int i = 0; i < kMaxRegItems; ++i) {
-        if (chunkOff[i] < rowLen) {
-          atomicAdd(
-              &smemBins
-                  [extractFastBinIdx<kNumFastBins>(chunkVal[i]) * kCopies +
-                   histCopy],
-              1);
+      for (int w = -(kHotBins - 1); w <= kHotBins - 1; ++w) {
+        const int lo = sycl::clamp(lead + w, 0, kNumFastBins - kHotBins);
+        uint32_t mask;
+        sycl::ext::oneapi::group_ballot(
+            sg, static_cast<uint32_t>(sample - lo) < kHotBins)
+            .extract_bits(mask);
+        const int covered = static_cast<int>(sycl::popcount(mask));
+        if (covered > best) {
+          best = covered;
+          hotLo = lo;
+        }
+      }
+      // A lane counts at most rowLen / kThreadsPerRow elements per bin.
+      hotLoop = best >= kHotMinLanes &&
+                rowLen / kThreadsPerRow < (1 << kHotBits) - kMaxRegItems;
+    }
+    if (hotLoop) {
+      uint64_t hotCount = 0;
+      for (int c = 0; c < numChunks; ++c) {
+        const int chunk = chunkAt(c);
+        float chunkVal[kMaxRegItems];
+        int chunkOff[kMaxRegItems];
+        loadChunk(chunk, chunkVal, chunkOff);
+#pragma unroll
+        for (int i = 0; i < kMaxRegItems; ++i) {
+          const int bin =
+              chunkOff[i] < rowLen
+                  ? static_cast<int>(
+                        extractFastBinIdx<kNumFastBins>(chunkVal[i]))
+                  : -1;
+          const uint32_t d = static_cast<uint32_t>(bin - hotLo);
+          if (d < kHotBins) {
+            hotCount += uint64_t{1} << (d * kHotBits);
+          } else if (bin >= 0) {
+            atomicAdd(&smemBins[bin * kCopies + histCopy], 1);
+          }
+        }
+      }
+#pragma unroll
+      for (int k = 0; k < kHotBins; ++k) {
+        const int count = static_cast<int>(
+            (hotCount >> (k * kHotBits)) & ((uint64_t{1} << kHotBits) - 1));
+        const int total = sycl::reduce_over_group(sg, count, sycl::plus<int>());
+        if (lane_id == 0 && total > 0) {
+          atomicAdd(&smemBins[(hotLo + k) * kCopies], total);
+        }
+      }
+    } else {
+      for (int c = 0; c < numChunks; ++c) {
+        const int chunk = chunkAt(c);
+        float chunkVal[kMaxRegItems];
+        int chunkOff[kMaxRegItems];
+        loadChunk(chunk, chunkVal, chunkOff);
+#pragma unroll
+        for (int i = 0; i < kMaxRegItems; ++i) {
+          if (chunkOff[i] < rowLen) {
+            atomicAdd(
+                &smemBins
+                    [extractFastBinIdx<kNumFastBins>(chunkVal[i]) * kCopies +
+                     histCopy],
+                1);
+          }
         }
       }
     }
