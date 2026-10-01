@@ -791,7 +791,7 @@ static inline uint32_t refineBase(int bin) {
 //
 // This replaces steps 0 and 1 of the chain above for such rows, and both were
 // wasted work there. Step 0 rebuilds the reduction path's histogram bit for bit
-// (see skipStep0 in topKPerRowJob()). Step 1 then starts over on the top 11
+// (the same top 11 bits of the fp16 key). Step 1 then starts over on the top 11
 // bits of the fp32 key, which are sign, 8 exponent bits and only 2 mantissa
 // bits, so its bins are 8 fp16 bins wide and its threshold bin is about 8 times
 // too large again. At s_kv=49152 the fp16 threshold bin holds ~910 elements, so
@@ -807,7 +807,7 @@ static inline uint32_t refineBase(int bin) {
 //
 // Returns false, having written nothing but shared state, if even the threshold
 // bucket does not fit kNumFinalItems (a row of mostly exact duplicates). The
-// caller then goes on to step 1 as before.
+// caller then finishes the row with processTieSelect().
 template <
     int kNumThreadsPerBlock,
     int kNumBins,
@@ -981,6 +981,280 @@ static bool processRefineStep(
   }
   sycl::group_barrier(group);
   return true;
+}
+
+// Digit width of processTieSelect(): 4096 buckets, 8 per thread at 512
+// threads, in the ints of the histogram it borrows.
+static constexpr int kTieSelectDigitBits = 12;
+
+// Takes over a single-block row whose fp16 threshold bin neither the reduction
+// path nor processRefineStep() could split: exact duplicates, or values that
+// all round into the zero (or inf) fp16 bin, which processRefineStep() cannot
+// split at all. Those rows used to go through steps 1 to 3, seven or more reads
+// of the row, each of whose histogram passes funnels the whole tie into one
+// SLM address one atomic at a time. At s_q=2730, s_kv=49152, topK=2048 a
+// prefill with every logit 0.0 (dummy weights) took 3.0 ms against 0.93 ms on
+// spread logits; this takes it to 1.33 ms.
+//
+// Instead this ranks only fastBin's elements, on their fp32 key relative to the
+// smallest one, and only on as many bits as their spread needs:
+//
+//   * One read writes the elements of the bins before fastBin, fills the rest
+//     of the output with fastBin's elements as if they were all tied, and takes
+//     their minimum and maximum key. If those are equal, which is the case for
+//     a row of ties, that read was the answer.
+//   * Otherwise one histogram read per kTieSelectDigitBits digit of the
+//     spread, most significant first, each over the elements that share the
+//     digits chosen so far, stopping once the chosen bucket is taken whole or
+//     the remaining keys are exact ties.
+//   * Then one emit read rewrites fastBin's share of the output: the elements
+//     ranked strictly above the final bucket and `need` of those in it.
+//
+// Histogram increments and slot claims are aggregated per subgroup: the lanes
+// that share the lowest active lane's bucket add as one, so a tie costs one
+// atomic per subgroup instead of 32 to the same address.
+template <int kNumThreadsPerBlock, int kNumBins>
+static void processTieSelect(
+    const sycl::nd_item<3>& item,
+    const float* rowBase,
+    int rowLen,
+    int stride1,
+    int fastBin,
+    int accepted,
+    int* outIndices,
+    int* hist,
+    int* scanTmp,
+    int* selVars,
+    int topK) {
+  constexpr int kItems = 4;
+  constexpr int kNumDigitBuckets = 1 << kTieSelectDigitBits;
+  constexpr int kBucketsPerThread = kNumDigitBuckets / kNumThreadsPerBlock;
+  static_assert(
+      kNumDigitBuckets % kNumThreadsPerBlock == 0,
+      "the buckets split evenly over the threads");
+  static_assert(
+      kNumDigitBuckets <= kNumBins * kLongHistCopies,
+      "the buckets fit the histogram this borrows");
+
+  sycl::group group = item.get_group();
+  auto sg = item.get_sub_group();
+  const int tid = static_cast<int>(item.get_local_id(0));
+  const int lane = tid % SUBGROUP_SIZE;
+  const int sgId = tid / SUBGROUP_SIZE;
+
+  int* inCursor = selVars + 3;
+  int* tieCursor = selVars + 4;
+  if (tid == 0) {
+    *inCursor = 0;
+    *tieCursor = 0;
+  }
+  sycl::group_barrier(group);
+
+  // Every thread runs the same number of iterations, so the subgroup
+  // operations inside fn see all of their lanes. Element k of a thread's chunk
+  // is kNumThreadsPerBlock apart from element k + 1, so each load is one
+  // coalesced run across the subgroup.
+  constexpr int kPerIteration = kNumThreadsPerBlock * kItems;
+  const int numIterations = (rowLen + kPerIteration - 1) / kPerIteration;
+  auto walk = [&](auto&& fn) {
+    for (int it = 0; it < numIterations; ++it) {
+      const int base = it * kPerIteration + tid;
+      float v[kItems];
+#pragma unroll
+      for (int k = 0; k < kItems; ++k) {
+        const int j = base + k * kNumThreadsPerBlock;
+        v[k] = j < rowLen ? rowBase[static_cast<int64_t>(j) * stride1] : 0.f;
+      }
+#pragma unroll
+      for (int k = 0; k < kItems; ++k) {
+        const int j = base + k * kNumThreadsPerBlock;
+        fn(v[k], j, j < rowLen);
+      }
+    }
+  };
+  auto inFastBin = [&](float x) {
+    return static_cast<int>(extractFastBinIdx<kNumBins>(x)) == fastBin;
+  };
+  // Subgroup-uniform: counters[b] += 1 for every active lane.
+  auto aggregatedInc = [&](int* counters, bool active, int b) {
+    if (!sycl::any_of_group(sg, active)) {
+      return;
+    }
+    const int leader = sycl::reduce_over_group(
+        sg, active ? lane : SUBGROUP_SIZE, sycl::minimum<int>());
+    const int leaderBucket = sycl::select_from_group(sg, b, leader);
+    const bool match = active && b == leaderBucket;
+    const int n = sycl::reduce_over_group(sg, match ? 1 : 0, sycl::plus<int>());
+    if (lane == leader) {
+      atomicAdd(&counters[leaderBucket], n);
+    } else if (active && !match) {
+      atomicAdd(&counters[b], 1);
+    }
+  };
+  // Subgroup-uniform: a slot from *cursor for every active lane. end is the
+  // cursor after this subgroup's claim, the same in every lane.
+  auto claim = [&](int* cursor, bool active, int& end) {
+    const int flag = active ? 1 : 0;
+    const int n = sycl::reduce_over_group(sg, flag, sycl::plus<int>());
+    if (n == 0) {
+      return 0;
+    }
+    const int rank =
+        sycl::exclusive_scan_over_group(sg, flag, sycl::plus<int>());
+    int first = 0;
+    if (lane == 0) {
+      first = atomicAdd(cursor, n);
+    }
+    first = sycl::group_broadcast(sg, first, 0);
+    end = first + n;
+    return first + rank;
+  };
+
+  sycl::group_barrier(group);
+
+  // Pass one: the elements of the bins before fastBin take slots [0, accepted),
+  // and those of fastBin fill [accepted, topK) as if they were all tied, while
+  // their minimum and maximum key are taken. If they are tied, which is what
+  // brings a row here, that is already the answer; otherwise the passes below
+  // rank them and the final one rewrites [accepted, topK).
+  const int need0 = topK - accepted;
+  uint32_t lo = 0xffffffffu;
+  uint32_t hi = 0;
+  bool tiesOpen = true;
+  walk([&](float x, int j, bool valid) {
+    bool in = false;
+    bool tie = false;
+    if (valid) {
+      const int bin = static_cast<int>(extractFastBinIdx<kNumBins>(x));
+      in = bin < fastBin;
+      if (bin == fastBin) {
+        const uint32_t key = convert_to_uint32(x);
+        lo = sycl::min(lo, key);
+        hi = sycl::max(hi, key);
+        tie = tiesOpen;
+      }
+    }
+    int end = 0;
+    const int inSlot = claim(inCursor, in, end);
+    if (in) {
+      outIndices[inSlot] = j;
+    }
+    end = 0;
+    const int tieSlot = claim(tieCursor, tie, end);
+    if (tie && tieSlot < need0) {
+      outIndices[accepted + tieSlot] = j;
+    }
+    tiesOpen = tiesOpen && end < need0;
+  });
+  const uint32_t minKey =
+      sycl::reduce_over_group(group, lo, sycl::minimum<uint32_t>());
+  const uint32_t range =
+      sycl::reduce_over_group(group, hi, sycl::maximum<uint32_t>()) - minKey;
+  if (range == 0) {
+    sycl::group_barrier(group);
+    return;
+  }
+  // Every claim of pass one is done.
+  sycl::group_barrier(group);
+  if (tid == 0) {
+    *inCursor = accepted;
+    *tieCursor = 0;
+  }
+
+  // The fastBin elements still in play are those whose key offset, shifted
+  // right by `shift`, equals `prefix`; `need` of them complete the top-k. The
+  // barrier of the first histogram pass publishes the reset cursors.
+  int need = need0;
+  int shift = 0;
+  uint32_t prefix = 0;
+  {
+    const int rangeBits = 32 - static_cast<int>(sycl::clz(range));
+    int hiShift = 32;
+    shift = sycl::max(0, rangeBits - kTieSelectDigitBits);
+    while (true) {
+      int* myBuckets = hist + tid * kBucketsPerThread;
+      int counts[kBucketsPerThread] = {};
+      binsStore(myBuckets, counts);
+      sycl::group_barrier(group);
+
+      const uint32_t digitMask =
+          hiShift == 32 ? static_cast<uint32_t>(kNumDigitBuckets - 1)
+                        : (1u << (hiShift - shift)) - 1;
+      walk([&](float x, int /* j */, bool valid) {
+        bool active = valid && inFastBin(x);
+        uint32_t off = 0;
+        if (active) {
+          off = convert_to_uint32(x) - minKey;
+          active = hiShift == 32 || (off >> hiShift) == prefix;
+        }
+        aggregatedInc(
+            hist, active, static_cast<int>((off >> shift) & digitMask));
+      });
+      sycl::group_barrier(group);
+
+      binsLoad(myBuckets, counts);
+      int sum = 0;
+#pragma unroll
+      for (int i = 0; i < kBucketsPerThread; ++i) {
+        sum += counts[i];
+      }
+      int total;
+      int before = blockExclusiveScan<kNumThreadsPerBlock>(
+          group, sg, lane, sgId, scanTmp, sum, total);
+      // The candidates number at least need, so one bucket brackets it.
+      if (before < need && before + sum >= need) {
+#pragma unroll
+        for (int i = 0; i < kBucketsPerThread; ++i) {
+          if (before < need && before + counts[i] >= need) {
+            selVars[0] = tid * kBucketsPerThread + i;
+            selVars[1] = before;
+            selVars[2] = counts[i];
+          }
+          before += counts[i];
+        }
+      }
+      sycl::group_barrier(group);
+
+      const uint32_t bucket = static_cast<uint32_t>(selVars[0]);
+      prefix = hiShift == 32 ? bucket : (prefix << (hiShift - shift)) | bucket;
+      need -= selVars[1];
+      const int count = selVars[2];
+      hiShift = shift;
+      if (count == need || shift == 0) {
+        break;
+      }
+      shift = sycl::max(0, shift - kTieSelectDigitBits);
+      // selVars is rewritten by the next scan only after the barriers of its
+      // histogram pass, which every thread reaches after the reads above.
+    }
+  }
+
+  // The elements of fastBin below the final bucket take slots
+  // [accepted, topK - need), and `need` of the final bucket's take the rest.
+  // Once a subgroup sees the tie slots filled it stops claiming them.
+  const int tieBase = topK - need;
+  tiesOpen = true;
+  walk([&](float x, int j, bool valid) {
+    bool in = false;
+    bool tie = false;
+    if (valid && inFastBin(x)) {
+      const uint32_t top = (convert_to_uint32(x) - minKey) >> shift;
+      in = top < prefix;
+      tie = tiesOpen && top == prefix;
+    }
+    int end = 0;
+    const int inSlot = claim(inCursor, in, end);
+    if (in) {
+      outIndices[inSlot] = j;
+    }
+    end = 0;
+    const int tieSlot = claim(tieCursor, tie, end);
+    if (tie && tieSlot < need) {
+      outIndices[tieBase + tieSlot] = j;
+    }
+    tiesOpen = tiesOpen && end < need;
+  });
+  sycl::group_barrier(group);
 }
 
 // One-pass, reduction-based selection. Returns false without touching global
@@ -1824,15 +2098,6 @@ static void topKPerRowJob(
     return;
   }
 
-  // Set when the reduction path gave up on a threshold bin that step 0 cannot
-  // take either. The two histograms are the same one:
-  // extractFastBinIdx<kNumBins> and extractBinIdx<0> both keep the top 11 bits
-  // of the fp16 key, over the same elements. So step 0 would find the same bin,
-  // find it too large as well, and everything it wrote would be thrown away,
-  // because step 1 re-derives the accepted set from zero. Skipping it saves two
-  // reads of the row, which at s_kv=49152 is two of the seven the fallback used
-  // to make.
-  bool skipStep0 = false;
   // The threshold fp16 bin the reduction path gave up on, and the number of
   // elements in the bins before it, for processRefineStep(). -1 if it did not
   // run.
@@ -1926,9 +2191,7 @@ static void topKPerRowJob(
       // Everything the reduction path touched is either re-initialised below or
       // cleared by processHistogramStep() before it is read.
       sycl::group_barrier(group);
-      // Its only way to give up is a threshold bin over kFastMaxCandidates, and
-      // the size it left behind is read before anything below rewrites it.
-      skipStep0 = smemFinalBinSize[0] > kNumFinalItems;
+      // The bin it gave up on is read before anything below rewrites it.
       refineBin = smemThresholdBinIdx[0];
       refineAccepted = smemFoundTopKValues[0];
       // Every thread holds its copy before thread 0 resets them below.
@@ -1946,9 +2209,8 @@ static void topKPerRowJob(
   uint32_t logitPattern = 0;
 
   // Split the reduction path's threshold bin further if its exponent allows it.
-  // Should even its threshold bucket be too large, processRefineStep() leaves
-  // this to step 1, and step 0 is still skipped: step 0's threshold bin is the
-  // same one, and it is at least as large as the bucket.
+  // Should even its threshold bucket be too large, processTieSelect() finishes
+  // the row, so a row the reduction path gave up on never reaches the steps.
   bool refined = false;
   if constexpr (!multipleBlocksPerRow && !mergeBlocks) {
     if (refineBin >= 0 && fastBinIsRefinable<kNumBins>(refineBin)) {
@@ -1974,31 +2236,49 @@ static void topKPerRowJob(
               stride1,
               topK);
     }
+    // Neither could split the bin: finish the row on the fp32 keys of that bin
+    // alone rather than on steps 1 to 3, which re-derive everything from the
+    // whole row and funnel a tie into one SLM address per pass.
+    if (refineBin >= 0 && !refined) {
+      processTieSelect<kNumThreadsPerBlock, kNumBins>(
+          item,
+          logits + static_cast<int64_t>(rowStart) * stride1,
+          rowLen,
+          stride1,
+          refineBin,
+          refineAccepted,
+          outIndices,
+          smemFinal.histo.data,
+          smemFinal.histo.tmp,
+          smemFinal.items.indices,
+          topK);
+      return;
+    }
   }
 
   // Step 0: Process first 11 bits of half representation
-  bool continueToNextStep = !refined && (skipStep0 || processHistogramStep<
-                                                          0,
-                                                          kNumThreadsPerBlock,
-                                                          kNumBins,
-                                                          kNumFinalItems,
-                                                          multipleBlocksPerRow,
-                                                          mergeBlocks>(
-                                                          item,
-                                                          indices,
-                                                          logits,
-                                                          rowEnd,
-                                                          logitPattern,
-                                                          thresholdBinIdx,
-                                                          smemOutput,
-                                                          smemThresholdBinIdx,
-                                                          smemFinalDstIdx,
-                                                          smemFinalBinSize,
-                                                          smemFoundTopKValues,
-                                                          smemFinal,
-                                                          stride1,
-                                                          rowStart,
-                                                          topK));
+  bool continueToNextStep = !refined && processHistogramStep<
+                                            0,
+                                            kNumThreadsPerBlock,
+                                            kNumBins,
+                                            kNumFinalItems,
+                                            multipleBlocksPerRow,
+                                            mergeBlocks>(
+                                            item,
+                                            indices,
+                                            logits,
+                                            rowEnd,
+                                            logitPattern,
+                                            thresholdBinIdx,
+                                            smemOutput,
+                                            smemThresholdBinIdx,
+                                            smemFinalDstIdx,
+                                            smemFinalBinSize,
+                                            smemFoundTopKValues,
+                                            smemFinal,
+                                            stride1,
+                                            rowStart,
+                                            topK);
 
   if (continueToNextStep) {
     // Step 1: Process next 11 bits
