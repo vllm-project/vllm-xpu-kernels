@@ -284,6 +284,14 @@ void per_token_group_quant_mxfp4(
     double eps,
     const c10::optional<torch::Tensor>& expert_scale_desc = c10::nullopt);
 
+void silu_and_mul_per_token_group_quant_mxfp4(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    int64_t group_size,
+    double eps,
+    const c10::optional<torch::Tensor>& expert_scale_desc = c10::nullopt);
+
 void swigluoai_and_mul(
     torch::Tensor& out,
     torch::Tensor& input,

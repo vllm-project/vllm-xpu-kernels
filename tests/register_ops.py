@@ -425,6 +425,17 @@ def per_token_group_quant_mxfp4(input: torch.Tensor,
                                              group_size, eps)
 
 
+def silu_and_mul_per_token_group_quant_mxfp4(
+        input: torch.Tensor,
+        output_q: torch.Tensor,
+        output_s: torch.Tensor,
+        group_size: int = 32,
+        eps: float = 1e-10,
+        expert_scale_desc: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C.silu_and_mul_per_token_group_quant_mxfp4(
+        input, output_q, output_s, group_size, eps, expert_scale_desc)
+
+
 def swigluoai_and_mul(
     out: torch.Tensor,
     input: torch.Tensor,

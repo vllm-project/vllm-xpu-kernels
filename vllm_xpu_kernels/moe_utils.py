@@ -285,8 +285,6 @@ def _fused_silu_mul_quant_mxfp4_xpu(gate_up,
                                     expert_scale_desc=None,
                                     scale_rows=0,
                                     static_scale=None):
-    if expert_scale_desc is not None:
-        return None
     MXFP4_BLOCK_SIZE = 32
     inter_size = gate_up.shape[-1] // 2
     if inter_size % MXFP4_BLOCK_SIZE != 0:
@@ -295,13 +293,18 @@ def _fused_silu_mul_quant_mxfp4_xpu(gate_up,
     x_q = torch.empty((gate_up.shape[0], inter_size // 2),
                       device=gate_up.device,
                       dtype=torch.uint8)
-    x_s = torch.empty((gate_up.shape[0], inter_size // MXFP4_BLOCK_SIZE),
-                      device=gate_up.device,
-                      dtype=torch.float32)
-    torch.ops._C.silu_and_mul_mxfp4_quant(x_q, gate_up, x_s, MXFP4_BLOCK_SIZE,
-                                          1e-10)
-    return x_q.view(torch.float4_e2m1fn_x2), x_s.to(
-        dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+    x_s = _alloc_mx_act_scale(gate_up[..., :inter_size],
+                              inter_size // MXFP4_BLOCK_SIZE,
+                              expert_scale_desc, scale_rows)
+
+    torch.ops._C.silu_and_mul_per_token_group_quant_mxfp4(
+        gate_up, x_q, x_s, MXFP4_BLOCK_SIZE, 1e-10, expert_scale_desc)
+
+    x_q = x_q.view(torch.float4_e2m1fn_x2)
+    if expert_scale_desc is None:
+        x_s = x_s.to(dtype=torch.float8_e8m0fnu,
+                     memory_format=torch.preserve_format)
+    return x_q, x_s
 
 
 def _fused_silu_mul_quant_fp8_xpu(gate_up,

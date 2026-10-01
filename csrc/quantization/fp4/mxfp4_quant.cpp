@@ -259,3 +259,141 @@ void per_token_group_quant_mxfp4(
         }
       });
 }
+
+// silu_and_mul_per_token_group_quant_mxfp4
+//
+// Same as per_token_group_quant_mxfp4, but the input holds the gate and up
+// halves of a SwiGLU back to back ([M, 2N]) and the activation is folded into
+// the quantiser. This avoids materialising and re-reading the [M, N] bf16
+// activation between the two grouped GEMMs of a MoE layer.
+void silu_and_mul_per_token_group_quant_mxfp4(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    int64_t group_size,
+    double eps,
+    const c10::optional<torch::Tensor>& expert_scale_desc) {
+  TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
+  TORCH_CHECK(output_q.is_contiguous(), "output_q must be contiguous");
+  TORCH_CHECK(
+      group_size == 32, "MXFP4 requires group_size == 32, got ", group_size);
+  TORCH_CHECK(input.dim() == 2, "input must be 2-D");
+  TORCH_CHECK(output_s.dim() == 2, "output_s must be 2-D");
+  TORCH_CHECK(
+      output_q.scalar_type() == at::ScalarType::Byte, "output_q must be uint8");
+  TORCH_CHECK(
+      input.size(1) % 2 == 0,
+      "input last dim must be even, got ",
+      input.size(1));
+
+  const int hidden = static_cast<int>(input.size(1) / 2);
+  const int64_t num_rows = input.size(0);
+  TORCH_CHECK(
+      hidden % group_size == 0,
+      "hidden_size must be divisible by group_size, got ",
+      hidden);
+  TORCH_CHECK(
+      output_q.size(0) == num_rows && output_q.size(1) == hidden / 2,
+      "output_q must have shape [M, hidden_size / 2]");
+  TORCH_CHECK(
+      output_s.size(1) == hidden / static_cast<int>(group_size),
+      "output_s must have shape [M, hidden_size / group_size]");
+
+  const auto moe_layout = vllm::make_moe_scale_layout(
+      output_s,
+      expert_scale_desc,
+      hidden / static_cast<int>(group_size),
+      num_rows);
+
+  // make_moe_scale_layout already sizes and type-checks the padded e8m0
+  // surface, so these only constrain the plain float32 scale tensor.
+  if (!moe_layout.enabled()) {
+    TORCH_CHECK(
+        output_s.scalar_type() == at::ScalarType::Float,
+        "output_s must be float32 without expert_scale_desc");
+    TORCH_CHECK(
+        output_s.size(0) == num_rows,
+        "output_s must have shape [M, hidden_size / group_size]");
+  }
+
+  if (num_rows == 0 || hidden == 0) {
+    return;
+  }
+
+  const at::DeviceGuard device_guard(input.device());
+
+  const bool is_column_major =
+      !moe_layout.enabled() && output_s.stride(0) < output_s.stride(1);
+  float* const scale_ptr =
+      moe_layout.enabled() ? nullptr : output_s.data_ptr<float>();
+  const int scale_num_cols = static_cast<int>(output_s.size(1));
+  const int64_t scale_stride_token =
+      is_column_major ? 1LL : static_cast<int64_t>(scale_num_cols);
+  const int64_t scale_stride_group = is_column_major ? output_s.stride(1) : 1LL;
+
+  auto& queue = vllm::xpu::vllmGetQueue();
+
+  const int eu_count = static_cast<int>(
+      queue.get_device().get_info<sycl::info::device::max_compute_units>());
+
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "silu_and_mul_per_token_group_quant_mxfp4", [&] {
+        using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+        constexpr int VEC = 16 / sizeof(sycl_t);
+        TORCH_CHECK(
+            hidden % VEC == 0 && group_size % VEC == 0,
+            "fused silu+mxfp4 quant needs hidden_size divisible by ",
+            VEC);
+        const int num_chunks = hidden / VEC;
+        const int chunks_per_group = static_cast<int>(group_size) / VEC;
+        // Same chunks-per-thread heuristic as per_token_group_quant_mxfp4:
+        // widen the per-thread tile only while the launch still saturates.
+        const int64_t saturate_wi = static_cast<int64_t>(eu_count) * 128;
+        const int64_t base_wi = num_rows * num_chunks;
+        int cpt = 1;
+        for (int c : {4, 2}) {
+          if (chunks_per_group % c == 0 && base_wi / c >= saturate_wi) {
+            cpt = c;
+            break;
+          }
+        }
+        const int threads_per_row = num_chunks / cpt;
+        const int rows_per_wg = threads_per_row >= 32 ? 1 : 32 / threads_per_row;
+        int64_t wg_size = std::min<int64_t>(
+            ((static_cast<int64_t>(threads_per_row) * rows_per_wg + 31) / 32) *
+                32,
+            1024);
+        if (wg_size < 32) wg_size = 32;
+        const int64_t num_wgs = (num_rows + rows_per_wg - 1) / rows_per_wg;
+        auto launch = [&](auto cpt_tag) {
+          constexpr int CPT = decltype(cpt_tag)::value;
+          queue.submit([&](sycl::handler& cgh) {
+            auto kernel = vllm::mxfp4::per_token_group_quant_mxfp4_vec_kernel<
+                sycl_t,
+                CPT,
+                false,
+                true>(
+                output_q.data_ptr<uint8_t>(),
+                scale_ptr,
+                reinterpret_cast<const sycl_t*>(input.data_ptr<scalar_t>()),
+                hidden,
+                static_cast<int>(group_size),
+                static_cast<float>(eps),
+                scale_stride_token,
+                scale_stride_group,
+                static_cast<int>(num_rows),
+                rows_per_wg,
+                moe_layout);
+            cgh.parallel_for(
+                sycl::nd_range<1>(num_wgs * wg_size, wg_size), kernel);
+          });
+        };
+        if (cpt == 4) {
+          launch(std::integral_constant<int, 4>{});
+        } else if (cpt == 2) {
+          launch(std::integral_constant<int, 2>{});
+        } else {
+          launch(std::integral_constant<int, 1>{});
+        }
+      });
+}

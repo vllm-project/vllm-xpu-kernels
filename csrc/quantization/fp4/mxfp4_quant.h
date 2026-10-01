@@ -146,7 +146,13 @@ class per_token_group_quant_mxfp4_kernel {
 // rows), each work-item reads CPT consecutive 16-byte chunks. CPT is picked in
 // mxfp4_quant.cpp and always divides the chunks in a group; when
 // CPT == chunks_per_group the cross-lane absmax reduction disappears.
-template <typename scalar_t, int CPT = 1, bool FLAT_GROUPS = false>
+// FUSE_SILU_MUL folds a SwiGLU activation into the load: the row then holds
+// the gate and up halves back to back and is twice as wide.
+template <
+    typename scalar_t,
+    int CPT = 1,
+    bool FLAT_GROUPS = false,
+    bool FUSE_SILU_MUL = false>
 class per_token_group_quant_mxfp4_vec_kernel {
  private:
   uint8_t* __restrict__ out;
@@ -211,8 +217,13 @@ class per_token_group_quant_mxfp4_vec_kernel {
     const int t0 = FLAT_GROUPS ? 0 : tid % stride;
     if (row_idx >= num_rows) return;
 
+    // With FUSE_SILU_MUL the row holds gate and up back to back, so it is
+    // twice as wide and the up half starts num_chunks vectors in.
+    static_assert(!(FUSE_SILU_MUL && FLAT_GROUPS));
+    const int64_t row_stride =
+        static_cast<int64_t>(width) * (FUSE_SILU_MUL ? 2 : 1);
     const scalar_t* row_input =
-        input + static_cast<int64_t>(row_idx) * width;
+        input + static_cast<int64_t>(row_idx) * row_stride;
     uint8_t* row_output =
         out + static_cast<int64_t>(row_idx) * (width / 2);
     const auto* vin =
@@ -232,13 +243,37 @@ class per_token_group_quant_mxfp4_vec_kernel {
         for (int j = 0; j < CPT; ++j) {
           v[j] = vin[c0 + j];
         }
+        if constexpr (FUSE_SILU_MUL) {
+          vec_n_t<scalar_t, VEC> u[CPT];
 #pragma unroll
-        for (int j = 0; j < CPT; ++j) {
+          for (int j = 0; j < CPT; ++j) {
+            u[j] = vin[c0 + j + num_chunks];
+          }
 #pragma unroll
-          for (int k = 0; k < VEC; ++k) {
-            const float f = static_cast<float>(v[j].val[k]);
-            val[j][k] = f;
-            lane_absmax = sycl::max(lane_absmax, sycl::fabs(f));
+          for (int j = 0; j < CPT; ++j) {
+#pragma unroll
+            for (int k = 0; k < VEC; ++k) {
+              // Mirror activation.cpp's silu_and_mul rounding exactly so the
+              // fused path is bit-identical to running the two kernels.
+              const scalar_t g = v[j].val[k];
+              const scalar_t sg = static_cast<scalar_t>(
+                  static_cast<float>(g) /
+                  (1.0f + sycl::exp(-static_cast<float>(g))));
+              const float f =
+                  static_cast<float>(static_cast<scalar_t>(sg * u[j].val[k]));
+              val[j][k] = f;
+              lane_absmax = sycl::max(lane_absmax, sycl::fabs(f));
+            }
+          }
+        } else {
+#pragma unroll
+          for (int j = 0; j < CPT; ++j) {
+#pragma unroll
+            for (int k = 0; k < VEC; ++k) {
+              const float f = static_cast<float>(v[j].val[k]);
+              val[j][k] = f;
+              lane_absmax = sycl::max(lane_absmax, sycl::fabs(f));
+            }
           }
         }
       }

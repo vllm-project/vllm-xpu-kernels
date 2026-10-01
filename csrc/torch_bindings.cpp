@@ -232,6 +232,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl(
       "per_token_group_quant_mxfp4", torch::kXPU, &per_token_group_quant_mxfp4);
 
+  // As above, but folds silu_and_mul over a [M, 2N] gate/up input into the
+  // quantiser so the bf16 activation is never materialised.
+  ops.def(
+      "silu_and_mul_per_token_group_quant_mxfp4(Tensor input, Tensor! "
+      "output_q, Tensor! output_s, int group_size, float eps, "
+      "Tensor? expert_scale_desc=None) -> ()");
+  ops.impl(
+      "silu_and_mul_per_token_group_quant_mxfp4",
+      torch::kXPU,
+      &silu_and_mul_per_token_group_quant_mxfp4);
+
   // swigluoai_and_mul
   ops.def(
       "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
