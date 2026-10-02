@@ -172,7 +172,10 @@ def _kv_tile_from_block_size(block_size: int) -> int:
     # Supported block sizes: any positive multiple of 16. The previously
     # supported sizes keep their tile (multiples of 64 -> 64, 32 -> 32); every
     # other multiple of 16 (16, 48, 80, 96, 112, 160, ...) uses the _16 tile.
-    if block_size % 64 == 0:
+    # The positivity guard keeps block_size <= 0 out of the 64 branch, since
+    # 0 % 64 == 0 would otherwise size a split plan for a tile the kernel does
+    # not run.
+    if block_size > 0 and block_size % 64 == 0:
         return 64
     if block_size == 32:
         return 32
