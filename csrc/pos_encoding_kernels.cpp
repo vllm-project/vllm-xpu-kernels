@@ -2,6 +2,7 @@
 #include "utils.h"
 #include "dispatch_utils.h"
 #include "xpu/sycl/rotary_embedding.hpp"
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <c10/macros/Macros.h>
@@ -246,18 +247,57 @@ namespace {
 
 // Tuned on Crescent Island (32 Xe cores / 256 XVEs, sub-group size 32).
 //
-// kRopeVecBytes: bytes touched per work-item per access.  A sweep of
-// {8, 16, 32} x work-group {64 … 1024} on the Qwen3-30B-A3B shape
-// (4096 tokens, 32 q heads, 4 kv heads, head_dim 128, bf16) gave
-// 97 us / 58 us / 55.7 us for 8 / 16 / 32 bytes, so the widest access wins:
-// it halves the number of memory messages and keeps the HBM pipe saturated.
-// kRopeVecWorkGroupSize: flat within 55.0-55.7 us for 64…1024; 256 is picked
-// as the middle of that plateau.
+// Widest access to try first (kRopeVecBytes), then the work-group size, both
+// picked from the size of the rotary slice (x and y halves of q and k):
+//   - over twice the LLC (streaming from DRAM): 16 bytes, 1024-wide groups;
+//   - up to kRopeVecSmallPairs rotation pairs (decode-sized): 16 bytes, 256;
+//   - otherwise (LLC resident): the previous 32 bytes, 256.
 constexpr int kRopeVecBytes = 32;
+constexpr int kRopeVecSmallBytes = 16;
+constexpr int64_t kRopeVecSmallPairs = int64_t(1) << 19;
 constexpr int kRopeVecWorkGroupSize = 256;
+constexpr int kRopeVecStreamWorkGroupSize = 1024;
+
+// Queried once: assumes every XPU in the process is the same model.
+inline int64_t rope_llc_bytes(const sycl::queue& queue) {
+  static const int64_t llc = static_cast<int64_t>(
+      queue.get_device()
+          .get_info<sycl::info::device::global_mem_cache_size>());
+  return llc;
+}
+
+// The vec kernel requires 32-wide sub-groups, so a work-group also has to fit
+// in max_num_sub_groups of them.
+inline int rope_stream_work_group_size(const sycl::queue& queue) {
+  static const int wg = [&] {
+    const auto device = queue.get_device();
+    return static_cast<int>(std::min<size_t>(
+        {static_cast<size_t>(kRopeVecStreamWorkGroupSize),
+         device.get_info<sycl::info::device::max_work_group_size>(),
+         static_cast<size_t>(
+             device.get_info<sycl::info::device::max_num_sub_groups>()) *
+             32}));
+  }();
+  return wg;
+}
+
+struct RopeVecLaunch {
+  int max_bytes;
+  int work_group;
+};
+
+inline RopeVecLaunch rope_vec_launch(
+    const sycl::queue& queue, int64_t rot_pairs, int elem_bytes) {
+  if (rot_pairs * 2 * elem_bytes > 2 * rope_llc_bytes(queue))
+    return {kRopeVecSmallBytes, rope_stream_work_group_size(queue)};
+  if (rot_pairs <= kRopeVecSmallPairs)
+    return {kRopeVecSmallBytes, kRopeVecWorkGroupSize};
+  return {kRopeVecBytes, kRopeVecWorkGroupSize};
+}
 
 template <typename sycl_t, bool IS_NEOX, int VEC_SIZE>
 bool try_launch_rotary_embedding_vec(
+    int wg,
     sycl::queue& queue,
     const int64_t* positions_ptr,
     sycl_t* query_ptr,
@@ -302,7 +342,6 @@ bool try_launch_rotary_embedding_vec(
   // cheap; fall back to the reference kernel for anything larger.
   if (total_vecs > std::numeric_limits<int>::max()) return false;
 
-  const int wg = kRopeVecWorkGroupSize;
   const size_t global =
       static_cast<size_t>((total_vecs + wg - 1) / wg) * static_cast<size_t>(wg);
 
@@ -335,22 +374,26 @@ struct RopeVecCandidate {
 };
 
 template <typename sycl_t, bool IS_NEOX, int BYTES, typename... Args>
-bool try_rope_vec_width(Args&&... args) {
+bool try_rope_vec_width(const RopeVecLaunch& launch, Args&&... args) {
   using C = RopeVecCandidate<sycl_t, IS_NEOX, BYTES>;
   if constexpr (C::kValid && BYTES <= kRopeVecBytes) {
-    return try_launch_rotary_embedding_vec<sycl_t, IS_NEOX, C::kVec>(args...);
+    if (BYTES > launch.max_bytes) return false;
+    return try_launch_rotary_embedding_vec<sycl_t, IS_NEOX, C::kVec>(
+        BYTES == launch.max_bytes ? launch.work_group : kRopeVecWorkGroupSize,
+        args...);
   }
   return false;
 }
 
 template <typename sycl_t, bool IS_NEOX, typename... Args>
-bool launch_rotary_embedding_vec(Args&&... args) {
-  // Widest access first, then progressively narrower ones so that shapes or
-  // alignments that cannot sustain the wide access still get vectorized.
-  return try_rope_vec_width<sycl_t, IS_NEOX, 32>(args...) ||
-         try_rope_vec_width<sycl_t, IS_NEOX, 16>(args...) ||
-         try_rope_vec_width<sycl_t, IS_NEOX, 8>(args...) ||
-         try_rope_vec_width<sycl_t, IS_NEOX, 4>(args...);
+bool launch_rotary_embedding_vec(const RopeVecLaunch& launch, Args&&... args) {
+  // Widest allowed access first, then progressively narrower ones so that
+  // shapes or alignments that cannot sustain the wide access still get
+  // vectorized.
+  return try_rope_vec_width<sycl_t, IS_NEOX, 32>(launch, args...) ||
+         try_rope_vec_width<sycl_t, IS_NEOX, 16>(launch, args...) ||
+         try_rope_vec_width<sycl_t, IS_NEOX, 8>(launch, args...) ||
+         try_rope_vec_width<sycl_t, IS_NEOX, 4>(launch, args...);
 }
 
 }  // namespace
@@ -419,7 +462,13 @@ void call_rotary_embedding_kernel(
   auto& queue = vllm::xpu::vllmGetQueue();
 
   // Fast path: fully vectorized, flat index space over query + key.
+  const int64_t rot_pairs = num_tokens * (rot_dim / 2) *
+                            (static_cast<int64_t>(num_heads) +
+                             (key.has_value() ? num_kv_heads : 0));
+  const RopeVecLaunch launch =
+      rope_vec_launch(queue, rot_pairs, static_cast<int>(sizeof(sycl_t)));
   const bool launched = is_neox ? launch_rotary_embedding_vec<sycl_t, true>(
+                                      launch,
                                       queue,
                                       positions_ptr,
                                       (sycl_t*)query_ptr,
@@ -433,6 +482,7 @@ void call_rotary_embedding_kernel(
                                       num_heads,
                                       num_kv_heads)
                                 : launch_rotary_embedding_vec<sycl_t, false>(
+                                      launch,
                                       queue,
                                       positions_ptr,
                                       (sycl_t*)query_ptr,
