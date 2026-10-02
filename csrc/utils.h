@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <memory>
 #include <ATen/ATen.h>
 #include <c10/xpu/XPUStream.h>
@@ -197,6 +198,15 @@ struct alignas(sizeof(scalar_t) * vec_size) aligned_vec {
 
   scalar_t const& operator[](int index) const { return val[index]; }
 };
+
+// True if every pointer is aligned to sizeof(*ptr) * vec_sz bytes.
+template <int vec_sz, typename... Ts>
+inline bool is_vec_eligible(const Ts*... ptrs) {
+  static_assert(vec_sz > 0, "vec_sz must be positive");
+  return (
+      (reinterpret_cast<std::uintptr_t>(ptrs) % (sizeof(Ts) * vec_sz) == 0) &&
+      ...);
+}
 
 // From float to float.
 inline void from_float(float& dst, float src) { dst = src; }

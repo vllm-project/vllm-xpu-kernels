@@ -16,6 +16,11 @@ constexpr int kLayerNormSgSize = 32;
 // (norm_dim <= 512) kernels: 512 bytes / (lanes * 4-byte uint32 unit).
 constexpr int kLayerNormSmallNU = 512 / (kLayerNormSgSize * 4);
 
+template <typename scalar_t, int size>
+struct alignas(sizeof(scalar_t) * size) LayerNormVec {
+  scalar_t data[size];
+};
+
 template <int N>
 inline void layer_norm_ld_flat(const uint32_t* p, int lane, uint32_t* d) {
 #pragma unroll
@@ -293,9 +298,16 @@ void layer_norm_small(
 // Medium kernel: 1 work-group per row, data retained in registers.
 // Specialised for norm_dim in {1024, 2048, 4096, 7168, 8192, 16384, 32768}.
 // ==========================================================================
-template <typename Scalar, int NORM_DIM, int WG>
+template <typename Scalar, int NORM_DIM, int WG, int vec_sz = 4>
 class layer_norm_medium_kernel {
  public:
+   static_assert(
+      NORM_DIM % (vec_sz * WG) == 0,
+      "NORM_DIM must be divisible by vec_sz * WG");
+ 
+  using v_vec_t = LayerNormVec<Scalar, vec_sz>;
+  using w_vec_t = LayerNormVec<float, vec_sz>;
+
   layer_norm_medium_kernel(
       const uint8_t* input_buf,
       uint8_t* output_buf,
@@ -307,31 +319,30 @@ class layer_norm_medium_kernel {
         epsilon_(epsilon) {}
 
   void operator()(sycl::nd_item<1> it) const {
-    using pio = LayerNormPacked16<Scalar>;
-    constexpr int PACKED = NORM_DIM / 2;
-    constexpr int N = PACKED / WG;
+    constexpr int N = NORM_DIM / vec_sz / WG;
     int row = it.get_group_linear_id();
     int tid = it.get_local_linear_id();
-    const uint32_t* input = reinterpret_cast<const uint32_t*>(input_buf_) +
-        (int64_t)row * PACKED;
-    uint32_t* output = reinterpret_cast<uint32_t*>(output_buf_) +
-        (int64_t)row * PACKED;
 
-    uint32_t values[N];
-    float wlo[N], whi[N];
+    const v_vec_t* input_vec = reinterpret_cast<const v_vec_t*>(
+        reinterpret_cast<const Scalar*>(input_buf_) +
+        (int64_t)row * NORM_DIM);
+    v_vec_t* output_vec = reinterpret_cast<v_vec_t*>(
+        reinterpret_cast<Scalar*>(output_buf_) + (int64_t)row * NORM_DIM);
+    const w_vec_t* weight_vec = reinterpret_cast<const w_vec_t*>(weight_);
+
+    v_vec_t values[N];
     float sum = 0.0f;
     float sum_sq = 0.0f;
 #pragma unroll
     for (int i = 0; i < N; i++) {
-      int packed_idx = i * WG + tid;
-      uint32_t value = input[packed_idx];
-      values[i] = value;
-      wlo[i] = weight_[packed_idx * 2];
-      whi[i] = weight_[packed_idx * 2 + 1];
-      float lo = pio::lo(value);
-      float hi = pio::hi(value);
-      sum += lo + hi;
-      sum_sq += lo * lo + hi * hi;
+      int idx = i * WG + tid;
+      values[i] = input_vec[idx];
+#pragma unroll
+      for (int v = 0; v < vec_sz; v++) {
+        float value = static_cast<float>(values[i].data[v]);
+        sum += value;
+        sum_sq += value * value;
+      }
     }
 
     sum = sycl::reduce_over_group(it.get_group(), sum, sycl::plus<float>());
@@ -343,9 +354,15 @@ class layer_norm_medium_kernel {
 
 #pragma unroll
     for (int i = 0; i < N; i++) {
-      float lo = (pio::lo(values[i]) - mean) * inv_std * wlo[i];
-      float hi = (pio::hi(values[i]) - mean) * inv_std * whi[i];
-      output[i * WG + tid] = pio::pack(lo, hi);
+      int idx = i * WG + tid;
+      w_vec_t scale = weight_vec[idx];
+#pragma unroll
+      for (int v = 0; v < vec_sz; v++) {
+        float value = static_cast<float>(values[i].data[v]);
+        values[i].data[v] = static_cast<Scalar>(
+            (value - mean) * inv_std * scale.data[v]);
+      }
+      output_vec[idx] = values[i];
     }
   }
 
@@ -365,30 +382,35 @@ void layer_norm_medium(
     int batch,
     int norm_dim,
     float epsilon) {
-  auto launch = [&]<int NORM_DIM, int WG>() {
+  auto launch_kernel = [&]<int NORM_DIM, int WG, int VEC_SZ>() {
     q.submit([&](sycl::handler& h) {
-      layer_norm_medium_kernel<Scalar, NORM_DIM, WG> kfn(
+      layer_norm_medium_kernel<Scalar, NORM_DIM, WG, VEC_SZ> kfn(
           input_buf, output_buf, weight, epsilon);
       h.parallel_for(sycl::nd_range<1>((int64_t)batch * WG, WG), kfn);
     });
   };
 
-  if (norm_dim == 1024)
-    launch.template operator()<1024, 256>();
-  else if (norm_dim == 2048)
-    launch.template operator()<2048, 256>();
-  else if (norm_dim == 4096)
-    launch.template operator()<4096, 256>();
-  else if (norm_dim == 7168)
-    launch.template operator()<7168, 256>();
-  else if (norm_dim == 8192)
-    launch.template operator()<8192, 256>();
-  else if (norm_dim == 16384)
-    launch.template operator()<16384, 1024>();
-  else if (norm_dim == 32768)
-    launch.template operator()<32768, 1024>();
-  else
-    TORCH_CHECK(false, "layer_norm: unsupported norm_dim ", norm_dim);
+  auto launch = [&]<int NORM_DIM, int WG, int VEC_SZ>() {
+    if (xpu::is_vec_eligible<VEC_SZ>(
+            reinterpret_cast<const Scalar*>(input_buf),
+            reinterpret_cast<const Scalar*>(output_buf),
+            weight)) {
+      launch_kernel.template operator()<NORM_DIM, WG, VEC_SZ>();
+    } else {
+      launch_kernel.template operator()<NORM_DIM, WG, 1>();
+    }
+  };
+
+  switch (norm_dim) {
+    case 1024: launch.template operator()<1024, 128, 8>(); break;
+    case 2048: launch.template operator()<2048, 256, 8>(); break;
+    case 4096: launch.template operator()<4096, 256, 8>(); break;
+    case 7168: launch.template operator()<7168, 128, 8>(); break;
+    case 8192: launch.template operator()<8192, 256, 8>(); break;
+    case 16384: launch.template operator()<16384, 1024, 8>(); break;
+    case 32768: launch.template operator()<32768, 1024, 8>(); break;
+    default: TORCH_CHECK(false, "layer_norm: unsupported norm_dim ", norm_dim);
+  }
 }
 
 // norm_dim == 131072 keeps only half of the row in registers; the other
@@ -673,9 +695,13 @@ inline void layer_norm_fp32_large(
   });
 }
 
-template <int NORM_DIM, int WG>
+template <int NORM_DIM, int WG, int vec_sz = 4>
 class layer_norm_non_packed_dtype_kernel {
  public:
+  static_assert(NORM_DIM % (vec_sz * WG) == 0,
+      "NORM_DIM must be divisible by vec_sz * WG");
+  using vec_t = LayerNormVec<float, vec_sz>;
+
   layer_norm_non_packed_dtype_kernel(
       const float* input,
       float* output,
@@ -684,21 +710,28 @@ class layer_norm_non_packed_dtype_kernel {
       : input_(input), output_(output), weight_(weight), epsilon_(epsilon) {}
 
   void operator()(sycl::nd_item<1> it) const {
-    constexpr int N = NORM_DIM / WG;
+    constexpr int N = NORM_DIM / WG / vec_sz;
     int row = it.get_group_linear_id();
     int tid = it.get_local_linear_id();
-    const float* row_input = input_ + (int64_t)row * NORM_DIM;
-    float* row_output = output_ + (int64_t)row * NORM_DIM;
+    const vec_t* row_input =
+        reinterpret_cast<const vec_t*>(input_ + (int64_t)row * NORM_DIM);
+    vec_t* row_output =
+        reinterpret_cast<vec_t*>(output_ + (int64_t)row * NORM_DIM);
+    const vec_t* weight_vec = reinterpret_cast<const vec_t*>(weight_);
 
-    float values[N];
+    vec_t values[N];
     float sum = 0.0f;
     float sum_sq = 0.0f;
 #pragma unroll
     for (int i = 0; i < N; i++) {
       int index = i * WG + tid;
       values[i] = row_input[index];
-      sum += values[i];
-      sum_sq += values[i] * values[i];
+#pragma unroll
+      for (int v = 0; v < vec_sz; v++) {
+        auto acc = values[i].data[v];
+        sum += acc;
+        sum_sq += acc * acc;
+      }
     }
 
     sum = sycl::reduce_over_group(it.get_group(), sum, sycl::plus<float>());
@@ -711,7 +744,13 @@ class layer_norm_non_packed_dtype_kernel {
 #pragma unroll
     for (int i = 0; i < N; i++) {
       int index = i * WG + tid;
-      row_output[index] = (values[i] - mean) * inv_std * weight_[index];
+      vec_t scale = weight_vec[index];
+#pragma unroll
+      for (int v = 0; v < vec_sz; v++) {
+        values[i].data[v] =
+            (values[i].data[v] - mean) * inv_std * scale.data[v];
+      }
+      row_output[index] = values[i];
     }
   }
 
@@ -730,30 +769,37 @@ inline void layer_norm_non_packed_dtype(
     int batch,
     int norm_dim,
     float epsilon) {
-  auto launch = [&]<int NORM_DIM, int WG>() {
+  auto launch_kernel = [&]<int NORM_DIM, int WG, int vec_sz>() {
     q.submit([&](sycl::handler& h) {
-      layer_norm_non_packed_dtype_kernel<NORM_DIM, WG> kfn(
+      layer_norm_non_packed_dtype_kernel<NORM_DIM, WG, vec_sz> kfn(
           input, output, weight, epsilon);
       h.parallel_for(sycl::nd_range<1>((int64_t)batch * WG, WG), kfn);
     });
   };
 
+  auto launch = [&]<int NORM_DIM, int WG, int vec_sz>() {
+    if (xpu::is_vec_eligible<vec_sz>(input, output, weight))
+      launch_kernel.template operator()<NORM_DIM, WG, vec_sz>();
+    else
+      launch_kernel.template operator()<NORM_DIM, WG, 1>();
+  };
+
   switch (norm_dim) {
-    case 128: launch.template operator()<128, 32>(); break;
-    case 256: launch.template operator()<256, 32>(); break;
-    case 512: launch.template operator()<512, 32>(); break;
-    case 1024: launch.template operator()<1024, 256>(); break;
-    case 2048: launch.template operator()<2048, 256>(); break;
-    case 4096: launch.template operator()<4096, 256>(); break;
+    case 128: launch.template operator()<128, 32, 4>(); break;
+    case 256: launch.template operator()<256, 32, 4>(); break;
+    case 512: launch.template operator()<512, 32, 4>(); break;
+    case 1024: launch.template operator()<1024, 256, 4>(); break;
+    case 2048: launch.template operator()<2048, 256, 4>(); break;
+    case 4096: launch.template operator()<4096, 256, 4>(); break;
     // NOTE: the xpu-perf reference kernel omits this case (norm_dim==7168
     // is only handled for the half/bfloat16 medium path there), which would
     // make the fp32 path throw despite the op's shape check allowing it.
     // Added here for parity with layer_norm_medium.
-    case 7168: launch.template operator()<7168, 256>(); break;
-    case 8192: launch.template operator()<8192, 256>(); break;
-    case 16384: launch.template operator()<16384, 1024>(); break;
-    case 32768: launch.template operator()<32768, 1024>(); break;
-    case 65536: launch.template operator()<65536, 1024>(); break;
+    case 7168: launch.template operator()<7168, 256, 4>(); break;
+    case 8192: launch.template operator()<8192, 512, 4>(); break;
+    case 16384: launch.template operator()<16384, 1024, 4>(); break;
+    case 32768: launch.template operator()<32768, 1024, 4>(); break;
+    case 65536: launch.template operator()<65536, 1024, 1>(); break;
     case 131072:
       layer_norm_fp32_large(q, input, output, weight, batch, epsilon);
       break;
