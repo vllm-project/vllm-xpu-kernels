@@ -36,9 +36,9 @@ def _kv_tile_from_block_size(block_size: int) -> int:
 
 
 def _min_blocks_for_split(kv_tile: int) -> int:
-    # Mirror of XeFMHAFwdSplitKVKernel::kMinBlocksForSplit /
-    # ReduceSplitK::kMinBlocksForSplit. Below this threshold a sequence is
-    # processed as a single split for numerical stability.
+    # Floor for the default decode policies. Not a mirror of every policy: the
+    # split-V policy xe_2 uses for MLA at kv_tile 64 has a kernel-side floor of
+    # 2, which only applies on the seqused path.
     return 32 if kv_tile <= 64 else 128
 
 

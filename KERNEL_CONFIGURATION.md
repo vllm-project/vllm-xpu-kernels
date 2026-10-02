@@ -157,7 +157,7 @@ that headsize.
   `qgroup` is a tile size, **not** a hard cap on `num_heads_q / num_heads_kv`.
   Large MQA ratios (e.g. Falcon-7B's 71 query heads / 1 KV head) use the `16`
   bucket and are split into `ceil(ratio / 16)` work-groups.
-- `headsize` — head dimension: `64`, `96`, `128`, `192`, `256`, or `512`
+- `headsize` — Q/K head dimension: `64`, `96`, `128`, `192`, `256`, `512`, or `576`
 - `pagesize` — KV cache block size: `16`, `32`, `64`, or `128`
 - `causal` — whether causal masking is used (almost always `true` for decode)
 - `local` — whether sliding window attention is used
@@ -180,7 +180,7 @@ Common model parameters:
 | Llama-3-70B | 128 | 8 | 8 |
 | Qwen2-72B | 128 | 8 | 8 |
 | Qwen3-30B-A3B | 128 | 4 | 8 |
-| DeepSeek-V3 (MLA) | 128 + 192 | varies | 8 |
+| DeepSeek-V3 (MLA decode) | Q/K 576, V 512 | 128 (TP=1) | 8 and 16 |
 | Phi-4-multimodal | 128 | <= 8 | 8 |
 | VLM2Vec-Full | 96 | <= 8 | 8 |
 | Starcoder2-3B | 128 | 12 | 16 |
