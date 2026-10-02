@@ -5,6 +5,7 @@
 #include <sycl/sycl.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <type_traits>
 
 #include "dispatch_utils.h"
@@ -20,10 +21,148 @@
 // Arguments:
 //   input    [M, N]       – float / half / bfloat16 input tensor
 //   output_q [M, N/2]     – packed FP4 output (uint8, two nibbles per byte)
-//   output_s [M, N/g]     – UE8M0-rounded power-of-two scale (float32)
-//                           May be column-major (see below).
+//   output_s [M, N/g]     – UE8M0-rounded power-of-two scale, float32 or
+//                           e8m0 (16-bit input only). May be column-major
+//                           (see below).
+//   moe_*                 – optional MoE scale-layout descriptor. When given,
+//                           output_s is instead the padded MN-major e8m0
+//                           surface consumed directly by the grouped GEMM.
 //   group_size            – block size; must be 32 for the MX format
 //   eps                   – absolute minimum to avoid log2(0); default 1e-10
+//
+
+namespace {
+
+// Quantize a 16-bit input with a [M, N/32] scale tensor. Contiguous
+// row-major scales dispatch to the flat kernel; other layouts dispatch to
+// the tile kernel.
+void launch_mxfp4_half_quant(
+    const torch::Tensor& input,
+    torch::Tensor& output_q,
+    torch::Tensor& output_s,
+    double eps,
+    bool scale_is_e8m0) {
+  const int hidden = static_cast<int>(input.size(-1));
+  const int64_t num_rows = input.numel() / hidden;
+  const int groups_per_row = hidden / 32;
+
+  auto& queue = vllm::xpu::vllmGetQueue();
+  if (output_s.is_contiguous()) {
+    constexpr int kFlatWgSize = 256;
+    const int64_t num_groups = num_rows * groups_per_row;
+    const int64_t num_wgs = (num_groups + kFlatWgSize - 1) / kFlatWgSize;
+    VLLM_DISPATCH_HALF_TYPES(
+        input.scalar_type(), "per_token_group_quant_mxfp4_flat_kernel", [&] {
+          auto launch = [&](auto* scale_ptr) {
+            using scale_t = std::remove_pointer_t<decltype(scale_ptr)>;
+            queue.submit([&](sycl::handler& cgh) {
+              auto kernel = vllm::mxfp4::
+                  per_token_group_quant_mxfp4_flat_kernel<scalar_t, scale_t>(
+                      output_q.data_ptr<uint8_t>(),
+                      scale_ptr,
+                      input.data_ptr<scalar_t>(),
+                      num_groups,
+                      static_cast<float>(eps));
+              cgh.parallel_for(
+                  sycl::nd_range<1>(num_wgs * kFlatWgSize, kFlatWgSize),
+                  kernel);
+            });
+          };
+          if (scale_is_e8m0) {
+            launch(static_cast<uint8_t*>(output_s.data_ptr()));
+          } else {
+            launch(output_s.data_ptr<float>());
+          }
+        });
+    return;
+  }
+
+  const bool is_column_major = output_s.stride(0) < output_s.stride(1);
+  const int64_t scale_stride_token = output_s.stride(0);
+  const int64_t scale_stride_group = output_s.stride(1);
+
+  // Column-major tile: 64 rows (one column of e8m0 scales = one 64-byte
+  // cache line); cols = largest power-of-two divisor of groups_per_row,
+  // capped at 16, so a 64x16 tile gives each of the 1024 work items in a
+  // workgroup one group.
+  // Row-major tile: up to kMaxRowTileGroups groups per row; wider rows
+  // are split across workgroups to keep the SLM tile size small.
+  constexpr int kMaxRowTileGroups = 2048;
+  auto pow2_divisor = [&](int cap) {
+    int g = 1;
+    while (g < cap && groups_per_row % (g * 2) == 0) {
+      g *= 2;
+    }
+    return g;
+  };
+  int rows_per_wg;
+  int groups_per_wg;
+  int max_wg_size;
+  if (is_column_major) {
+    groups_per_wg = pow2_divisor(16);
+    rows_per_wg = 64;
+    max_wg_size = 1024;
+  } else {
+    groups_per_wg = groups_per_row <= kMaxRowTileGroups
+                        ? groups_per_row
+                        : pow2_divisor(kMaxRowTileGroups);
+    rows_per_wg = std::max(1, 2560 / (groups_per_wg * 4));
+    max_wg_size = 512;
+  }
+  rows_per_wg = static_cast<int>(std::min<int64_t>(rows_per_wg, num_rows));
+  const int64_t tile_groups = static_cast<int64_t>(rows_per_wg) * groups_per_wg;
+  const int64_t passes = (tile_groups + max_wg_size - 1) / max_wg_size;
+  const int64_t wg_size = ((tile_groups + passes - 1) / passes + 31) / 32 * 32;
+  const int64_t row_wgs = (num_rows + rows_per_wg - 1) / rows_per_wg;
+  const int64_t k_wgs = groups_per_row / groups_per_wg;
+
+  VLLM_DISPATCH_HALF_TYPES(
+      input.scalar_type(), "per_token_group_quant_mxfp4_tile_kernel", [&] {
+        auto launch = [&](auto* scale_ptr, auto col_major_tag) {
+          using scale_t = std::remove_pointer_t<decltype(scale_ptr)>;
+          constexpr bool COL_MAJOR = decltype(col_major_tag)::value;
+          queue.submit([&](sycl::handler& cgh) {
+            sycl::local_accessor<scale_t, 1> tile(
+                sycl::range<1>(tile_groups), cgh);
+            auto kernel = vllm::mxfp4::per_token_group_quant_mxfp4_tile_kernel<
+                scalar_t,
+                scale_t,
+                COL_MAJOR>(
+                output_q.data_ptr<uint8_t>(),
+                scale_ptr,
+                input.data_ptr<scalar_t>(),
+                tile,
+                groups_per_row,
+                groups_per_wg,
+                static_cast<float>(eps),
+                static_cast<int>(num_rows),
+                rows_per_wg,
+                scale_stride_token,
+                scale_stride_group);
+            cgh.parallel_for(
+                sycl::nd_range<2>(
+                    sycl::range<2>(row_wgs, k_wgs * wg_size),
+                    sycl::range<2>(1, wg_size)),
+                kernel);
+          });
+        };
+        auto dispatch_layout = [&](auto* scale_ptr) {
+          if (is_column_major) {
+            launch(scale_ptr, std::true_type{});
+          } else {
+            launch(scale_ptr, std::false_type{});
+          }
+        };
+        if (scale_is_e8m0) {
+          dispatch_layout(static_cast<uint8_t*>(output_s.data_ptr()));
+        } else {
+          dispatch_layout(output_s.data_ptr<float>());
+        }
+      });
+}
+
+}  // namespace
+
 void per_token_group_quant_mxfp4(
     const torch::Tensor& input,
     torch::Tensor& output_q,
@@ -46,6 +185,9 @@ void per_token_group_quant_mxfp4(
       input.size(-1) > 0 ? input.numel() / input.size(-1) : 0);
   TORCH_CHECK(
       output_q.scalar_type() == at::ScalarType::Byte, "output_q must be uint8");
+  TORCH_CHECK(
+      output_q.numel() == input.numel() / 2,
+      "output_q must contain input.numel() / 2 packed bytes");
 
   const int num_groups = static_cast<int>(input.numel() / group_size);
   if (num_groups == 0) {
@@ -59,6 +201,35 @@ void per_token_group_quant_mxfp4(
   }
 
   const at::DeviceGuard device_guard(input.device());
+
+  const bool scale_is_e8m0 =
+      output_s.scalar_type() == at::ScalarType::Float8_e8m0fnu ||
+      output_s.scalar_type() == at::ScalarType::Byte;
+  TORCH_CHECK(
+      moe_layout.enabled() || scale_is_e8m0 ||
+          output_s.scalar_type() == at::ScalarType::Float,
+      "output_s must be float32, float8_e8m0fnu or uint8");
+  const bool half_input = input.scalar_type() == at::ScalarType::BFloat16 ||
+                          input.scalar_type() == at::ScalarType::Half;
+  // Each work item reads a 32-element group as four 16-byte vector loads and
+  // writes its 16 packed bytes as one 16-byte store, so N must be a multiple
+  // of group_size and input/output_q 16-byte aligned. One scale is written
+  // per group, so output_s must be exactly [M, N/group_size].
+  const int64_t last_dim = input.size(-1);
+  const bool tile_aligned =
+      last_dim % group_size == 0 &&
+      output_s.size(0) == input.numel() / last_dim &&
+      output_s.size(1) == last_dim / group_size &&
+      reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(output_q.data_ptr()) % 16 == 0;
+  if (!moe_layout.enabled() && half_input && tile_aligned) {
+    launch_mxfp4_half_quant(input, output_q, output_s, eps, scale_is_e8m0);
+    return;
+  }
+  TORCH_CHECK(
+      moe_layout.enabled() || !scale_is_e8m0,
+      "e8m0 output_s without expert_scale_desc needs a 16-byte aligned "
+      "half/bfloat16 input and a [M, N/group_size] output_s");
 
   // Choose how many sub-groups to pack into one work-group.
   constexpr int THREADS_PER_GROUP = 32;

@@ -3,6 +3,7 @@
 
 #include <sycl/sycl.hpp>
 #include <cstdint>
+#include <type_traits>
 
 #include "quantization/moe_scale_layout.h"
 #include "quantization/utils.h"
@@ -13,16 +14,26 @@ namespace mxfp4 {
 static constexpr float FP4_MAX = 6.0f;
 
 // Convert a single float32 value to a 4-bit FP4 E2M1 code (stored in the
-// lower 4 bits of a uint8_t) using round-to-nearest-even (RNE).
+// lower 4 bits of a uint8_t). Matches the to_mxfp reference: rounds to bf16
+// first, then to e2m1 with round-to-nearest-even (RNE).
 inline uint8_t float_to_fp4_e2m1(float x) {
-  const float b[7] = {0.25f, 0.75f, 1.25f, 1.75f, 2.5f, 3.5f, 5.0f};
+  // E2M1 midpoints shifted by half a bf16 ulp, so that comparing x matches
+  // comparing bf16(x); >= where the tie rounds up to the even code.
+  const float b[7] = {
+      0.25f + 0x1p-10f,
+      0.75f - 0x1p-9f,
+      1.25f + 0x1p-8f,
+      1.75f - 0x1p-8f,
+      2.5f + 0x1p-7f,
+      3.5f - 0x1p-7f,
+      5.0f + 0x1p-6f};
 
   uint8_t sign = (x < 0.0f) ? 0x8u : 0x0u;
   float a = sycl::fabs(x);
 
   // midpoint rounding: branchless
-  uint8_t code = (a > b[0]) + (a > b[1]) + (a > b[2]) + (a > b[3]) +
-                 (a > b[4]) + (a > b[5]) + (a > b[6]);
+  uint8_t code = (a > b[0]) + (a >= b[1]) + (a > b[2]) + (a >= b[3]) +
+                 (a > b[4]) + (a >= b[5]) + (a > b[6]);
 
   return code | sign;
 }
@@ -373,6 +384,207 @@ inline float mxfp4_quant_one_group(
   }
   return y_s;
 }
+
+inline float mxfp4_pow2_scale(float absmax, float eps, float& inv_scale) {
+  const float x = sycl::fmax(sycl::fabs(absmax / FP4_MAX), eps);
+  const uint32_t xb = sycl::bit_cast<uint32_t>(x);
+  const uint32_t e = (xb >> 23) + ((xb & 0x007FFFFFu) != 0u);
+  float y_s;
+  if (xb >= 0x00800000u && e <= 253u) {
+    y_s = sycl::bit_cast<float>(e << 23);
+    inv_scale = sycl::bit_cast<float>((254u - e) << 23);
+  } else {
+    y_s = sycl::exp2(sycl::ceil(sycl::log2(x)));
+    inv_scale = 1.0f / y_s;
+  }
+  return y_s;
+}
+
+template <typename scalar_t>
+inline uint32_t mxfp4_pack8(const float (&val)[8], float inv_scale) {
+  uint32_t o;
+  uint32_t word = 0;
+#pragma unroll
+  for (int k = 0; k < 8; ++k) {
+    const float s =
+        sycl::fmax(-FP4_MAX, sycl::fmin(val[k] * inv_scale, FP4_MAX));
+    const uint8_t code = float_to_fp4_e2m1(s);
+    word |= static_cast<uint32_t>(code & 0x0Fu) << (4 * k);
+  }
+  o = word;
+  return o;
+}
+
+template <typename scalar_t>
+inline float mxfp4_quant_group32(
+    const vec_n_t<scalar_t, 8>* __restrict__ vin,
+    bool active,
+    float eps,
+    vec_n_t<uint32_t, 4>& o) {
+  static_assert(sizeof(scalar_t) == 2);
+  vec_n_t<scalar_t, 8> v[4];
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    v[j] = active ? vin[j] : vec_n_t<scalar_t, 8>{};
+  }
+  float val[4][8];
+  float absmax = 0.0f;
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+#pragma unroll
+    for (int k = 0; k < 8; ++k) {
+      val[j][k] = static_cast<float>(v[j].val[k]);
+      absmax = sycl::max(absmax, sycl::fabs(val[j][k]));
+    }
+  }
+  float inv_scale;
+  const float y_s = mxfp4_pow2_scale(absmax, eps, inv_scale);
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    o.val[j] = mxfp4_pack8<scalar_t>(val[j], inv_scale);
+  }
+  return y_s;
+}
+
+template <typename scalar_t, typename scale_t>
+class per_token_group_quant_mxfp4_flat_kernel {
+ private:
+  uint8_t* __restrict__ out;
+  scale_t* __restrict__ scale;
+  scalar_t const* __restrict__ input;
+  const int64_t num_groups;
+  float eps;
+
+ public:
+  per_token_group_quant_mxfp4_flat_kernel(
+      uint8_t* out_,
+      scale_t* scale_,
+      scalar_t const* input_,
+      const int64_t num_groups_,
+      float eps_)
+      : out(out_),
+        scale(scale_),
+        input(input_),
+        num_groups(num_groups_),
+        eps(eps_) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
+    const int64_t g = static_cast<int64_t>(item.get_global_id(0));
+    const bool active = g < num_groups;
+    vec_n_t<uint32_t, 4> o;
+    const float y_s = mxfp4_quant_group32<scalar_t>(
+        reinterpret_cast<const vec_n_t<scalar_t, 8>*>(input) + g * 4,
+        active,
+        eps,
+        o);
+    if (!active) {
+      return;
+    }
+    reinterpret_cast<vec_n_t<uint32_t, 4>*>(out)[g] = o;
+    if constexpr (std::is_same_v<scale_t, float>) {
+      scale[g] = y_s;
+    } else {
+      scale[g] = MoEScaleLayout::encode(y_s);
+    }
+  }
+};
+
+template <typename scalar_t, typename scale_t, bool COL_MAJOR>
+class per_token_group_quant_mxfp4_tile_kernel {
+ private:
+  uint8_t* __restrict__ out;
+  scale_t* __restrict__ scale;
+  scalar_t const* __restrict__ input;
+  sycl::local_accessor<scale_t, 1> tile;
+  const int groups_per_row;
+  const int groups_per_wg;
+  float eps;
+  const int num_rows;
+  const int rows_per_wg;
+  const int64_t scale_stride_token;
+  const int64_t scale_stride_group;
+
+  static scale_t encode(float y_s) {
+    if constexpr (std::is_same_v<scale_t, float>) {
+      return y_s;
+    } else {
+      return MoEScaleLayout::encode(y_s);
+    }
+  }
+
+ public:
+  per_token_group_quant_mxfp4_tile_kernel(
+      uint8_t* out_,
+      scale_t* scale_,
+      scalar_t const* input_,
+      sycl::local_accessor<scale_t, 1> tile_,
+      const int groups_per_row_,
+      const int groups_per_wg_,
+      float eps_,
+      const int num_rows_,
+      const int rows_per_wg_,
+      const int64_t scale_stride_token_,
+      const int64_t scale_stride_group_)
+      : out(out_),
+        scale(scale_),
+        input(input_),
+        tile(tile_),
+        groups_per_row(groups_per_row_),
+        groups_per_wg(groups_per_wg_),
+        eps(eps_),
+        num_rows(num_rows_),
+        rows_per_wg(rows_per_wg_),
+        scale_stride_token(scale_stride_token_),
+        scale_stride_group(scale_stride_group_) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<2> item) const {
+    const int tid = static_cast<int>(item.get_local_id(1));
+    const int local_range = static_cast<int>(item.get_local_range(1));
+    const int row_base = static_cast<int>(item.get_group(0)) * rows_per_wg;
+    const int k_base = static_cast<int>(item.get_group(1)) * groups_per_wg;
+    const int rows = sycl::min(rows_per_wg, num_rows - row_base);
+    const int tile_groups = rows * groups_per_wg;
+
+    const int row_chunks = groups_per_row * 4;
+    const int64_t first_chunk =
+        static_cast<int64_t>(row_base) * row_chunks + k_base * 4;
+    const auto* vin =
+        reinterpret_cast<const vec_n_t<scalar_t, 8>*>(input) + first_chunk;
+    auto* vout = reinterpret_cast<uint32_t*>(out) + first_chunk;
+
+    for (int base = 0; base < tile_groups; base += local_range) {
+      const int gi = base + tid;
+      const bool active = gi < tile_groups;
+      const int r = gi / groups_per_wg;
+      const int off = r * row_chunks + (gi - r * groups_per_wg) * 4;
+      vec_n_t<uint32_t, 4> o;
+      const float y_s =
+          mxfp4_quant_group32<scalar_t>(vin + off, active, eps, o);
+      if (active) {
+        *reinterpret_cast<vec_n_t<uint32_t, 4>*>(vout + off) = o;
+        tile[gi] = encode(y_s);
+      }
+    }
+
+    sycl::group_barrier(item.get_group());
+    for (int idx = tid; idx < tile_groups; idx += local_range) {
+      int r, k;
+      if constexpr (COL_MAJOR) {
+        k = idx / rows;
+        r = idx - k * rows;
+      } else {
+        r = idx / groups_per_wg;
+        k = idx - r * groups_per_wg;
+      }
+      scale
+          [static_cast<int64_t>(row_base + r) * scale_stride_token +
+           static_cast<int64_t>(k_base + k) * scale_stride_group] =
+              tile[r * groups_per_wg + k];
+    }
+  }
+};
 
 // MoE variant with SLM-staged scale stores.
 //
