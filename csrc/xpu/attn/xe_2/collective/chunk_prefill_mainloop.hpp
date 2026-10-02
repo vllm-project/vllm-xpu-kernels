@@ -1318,8 +1318,8 @@ struct DecodeFwdMainloop<
         // softmax statistics.
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < tSrS.size(); i++)
-          shared.s_data
-              [get<0>(cS_local(i)) * kTileK + get<1>(cS_local(i))] = tSrS(i);
+          shared.s_data[get<0>(cS_local(i)) * kTileK + get<1>(cS_local(i))] =
+              tSrS(i);
 
         // Publish SLM writes before gathering. The loop-end group barrier
         // prevents the next iteration from overwriting scores still in use.
@@ -1333,8 +1333,8 @@ struct DecodeFwdMainloop<
 
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < tSrS_full.size(); i++)
-          tSrS_full(i) = shared.s_data
-              [get<0>(cS_full(i)) * kTileK + get<1>(cS_full(i))];
+          tSrS_full(i) =
+              shared.s_data[get<0>(cS_full(i)) * kTileK + get<1>(cS_full(i))];
 
         softmax(effective_scale, K == blk_k0, tSrS_full, tA_max, tA_sum, tArA);
         reorder(tSrS_full, tArP);

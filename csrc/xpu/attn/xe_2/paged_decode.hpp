@@ -175,8 +175,8 @@ struct paged_decode_args_t {
 inline bool use_mla_split_v(const paged_decode_args_t& args) {
   return args.head_size == 576 &&
          args.v_head_size == kSplitVExpectedShapeOutV && args.block_size > 0 &&
-      (args.block_size % 64) == 0 &&
-      !(args.batch_size == 1 && args.num_kv_splits == 1);
+         (args.block_size % 64) == 0 &&
+         !(args.batch_size == 1 && args.num_kv_splits == 1);
 }
 
 template <class FMHAKernel, class ReductionSplitKernel, bool isVarLen>
