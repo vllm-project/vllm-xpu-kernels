@@ -98,9 +98,9 @@ class XeFMHAFwdSplitKVKernel {
   using SGPerWG = typename CollectiveMainloop::SGPerWG;
 
   // Split-V removes grid.x parallelism, so allow KV splits on short sequences.
-  static constexpr int kMinBlocksForSplit = CollectiveMainloop::SplitV
-      ? 2
-      : ((get<1>(TileShapeQK{}) <= 64) ? 32 : 128);
+  static constexpr int kMinBlocksForSplit =
+      CollectiveMainloop::SplitV ? 2
+                                 : ((get<1>(TileShapeQK{}) <= 64) ? 32 : 128);
 
   using FragA = typename CollectiveMainloop::FragA;
   using FragARow = typename CollectiveMainloop::FragARow;
