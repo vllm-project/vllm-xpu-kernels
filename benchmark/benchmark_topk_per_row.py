@@ -26,6 +26,24 @@ Three logit layouts control where the winners sit inside each row: spread
 over it (``uniform``), packed into its first (``front``) or last (``tail``)
 ``--concentration`` of it.
 
+``--values`` sets how the logit values are distributed, which is what decides
+the kernel's path: elements are histogrammed on the top 11 bits of their fp16
+value (32 bins per power of two), and elements sharing a bin share an SLM
+atomic and a threshold bin that may need further passes. The ``bins`` and
+``maxbin%`` columns report the last row's non-empty bins and largest bin.
+
+``wide``      standard normal plus the boosted winners; hundreds of bins
+``binsN``     mapped through 1.5 * 2^(c * x), monotone so the top-k set is
+              unchanged, to span ~N bins (N = 512 ... 1)
+``bins0.1``   a tenth of one bin, so it stays packed in the fp32 passes too
+``dups``      rounded to a 0.5 grid: ~1000 exact ties at the threshold
+``equal``     every logit 0.0 (the zero bin, which cannot be refined)
+``const``     every logit 1.0 (an ordinary bin of exact ties)
+``zerosP``    P% exactly 0.0, the rest uniform in (0, 1); the threshold falls
+              on the zeros
+
+The last four are what a model on dummy weights produces.
+
 Examples
 --------
     python benchmark_topk_per_row.py                      # every preset
@@ -33,20 +51,30 @@ Examples
     python benchmark_topk_per_row.py --list
     python benchmark_topk_per_row.py --check --csv out.csv
     python benchmark_topk_per_row.py --custom prefill:2048:49152:2048
+    python benchmark_topk_per_row.py --filter dsv32-p-48k --dist uniform \
+        --values all --check
 """
 
 import argparse
 import csv
 import dataclasses
+import math
 import time
 from typing import Optional
 
 import torch
 
 DISTS = ("uniform", "front", "tail")
+VALUES = ("wide", "bins512", "bins256", "bins128", "bins64", "bins32",
+          "bins16", "bins4", "bins1", "bins0.1", "dups", "equal", "const",
+          "zeros97", "zeros99.5")
 
 # Standard-normal logits stay well under this, so boosted positions win.
 BOOST = 20.0
+# Rough value range of a row: noise down to ~-4, boosted up to ~24.
+ROW_LO, ROW_HI = -4.0, 24.0
+# fp16 histogram bins per power of two (5 mantissa bits).
+BINS_PER_OCTAVE = 32
 
 
 @dataclasses.dataclass
@@ -180,7 +208,7 @@ def row_bounds(case: Case) -> tuple[torch.Tensor, torch.Tensor, int]:
     return torch.cat(starts), torch.cat(ends), base
 
 
-def build_logits(case: Case, dist: str, starts: torch.Tensor,
+def build_logits(case: Case, dist: str, values: str, starts: torch.Tensor,
                  ends: torch.Tensor, width: int, concentration: float,
                  device: torch.device, seed: int) -> torch.Tensor:
     gen = torch.Generator(device=device).manual_seed(seed)
@@ -205,13 +233,40 @@ def build_logits(case: Case, dist: str, starts: torch.Tensor,
         del draw
     logits.add_(mask.to(logits.dtype), alpha=BOOST)
     del mask
+
+    if values.startswith("bins"):
+        octaves = float(values[4:]) / BINS_PER_OCTAVE / (ROW_HI - ROW_LO)
+        logits.sub_((ROW_LO + ROW_HI) / 2).mul_(octaves * math.log(2.0))
+        logits.exp_().mul_(1.5)
+    elif values == "dups":
+        logits.mul_(2.0).round_().div_(2.0)
+    elif values == "equal":
+        logits.zero_()
+    elif values == "const":
+        logits.fill_(1.0)
+    elif values.startswith("zeros"):
+        keep = 1.0 - float(values[5:]) / 100.0
+        draw = torch.rand(rows, width, dtype=torch.float32, device=device,
+                          generator=gen)
+        logits.uniform_(generator=gen).mul_(draw < keep)
+        del draw
     return logits
 
 
-def make_runner(case: Case, dist: str, args, device: torch.device):
+def bin_stats(logits: torch.Tensor, starts: torch.Tensor,
+              ends: torch.Tensor) -> tuple[int, float]:
+    """Non-empty fp16 bins and the largest bin's share, on the last row."""
+    row = logits[-1, int(starts[-1]):int(ends[-1])]
+    key = (row.half().view(torch.int16).to(torch.int32) & 0xFFFF) >> 5
+    cnt = torch.bincount(key, minlength=2048)
+    return int((cnt > 0).sum()), float(cnt.max()) / max(row.numel(), 1)
+
+
+def make_runner(case: Case, dist: str, values: str, args,
+                device: torch.device):
     starts, ends, width = row_bounds(case)
-    logits = build_logits(case, dist, starts, ends, width, args.concentration,
-                          device, args.seed)
+    logits = build_logits(case, dist, values, starts, ends, width,
+                          args.concentration, device, args.seed)
     rows = logits.shape[0]
     indices = torch.empty((rows, case.top_k), dtype=torch.int32,
                           device=device)
@@ -304,6 +359,8 @@ def parse_args() -> argparse.Namespace:
                     "decode:BATCH:NEXT_N:S_KV:WIDTH:TOP_K; repeatable, "
                     "replaces the presets")
     ap.add_argument("--dist", choices=DISTS + ("all", ), default="all")
+    ap.add_argument("--values", choices=VALUES + ("all", ), default="wide",
+                    help="logit value distribution (see above)")
     ap.add_argument("--concentration", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--warmup-iters", type=int, default=10)
@@ -344,9 +401,11 @@ def main() -> None:
         return
     device = resolve_device(args.device)
     dists = DISTS if args.dist == "all" else (args.dist, )
+    values_list = VALUES if args.values == "all" else (args.values, )
 
     header = (f"{'case':<24}{'top_k':>6}  {'shape':<34}{'dist':<9}"
-              f"{'us':>10}{'GB/s':>9}")
+              f"{'values':<11}{'us':>10}{'GB/s':>9}{'bins':>6}"
+              f"{'maxbin%':>9}")
     if args.check:
         header += f"{'bad rows':>10}"
     print(f"device={device.type} concentration={args.concentration} "
@@ -359,29 +418,37 @@ def main() -> None:
         fh = open(args.csv, "w", newline="")
         writer = csv.writer(fh)
         writer.writerow(["case", "model", "mode", "top_k", "shape", "dist",
-                         "us", "GBps", "bad_rows"])
+                         "values", "us", "GBps", "bins", "maxbin_pct",
+                         "bad_rows"])
     try:
         for case in cases:
             for dist in dists:
-                run, logits, indices, starts, ends = make_runner(
-                    case, dist, args, device)
-                us = bench(run, device, args.warmup_iters, args.num_iters)
-                scanned = float((ends - starts).clamp(min=0).sum())
-                gbps = scanned * 4 / us / 1e3
-                line = (f"{case.name:<24}{case.top_k:>6}  "
-                        f"{case.shape():<34}{dist:<9}{us:>10.1f}{gbps:>9.1f}")
-                bad = ""
-                if args.check:
-                    bad = check(case, logits, indices, starts, ends,
-                                args.check_rows)
-                    line += f"{bad:>10}"
-                print(line, flush=True)
-                if writer:
-                    writer.writerow([case.name, case.model, case.mode,
-                                     case.top_k, case.shape(), dist,
-                                     f"{us:.1f}", f"{gbps:.1f}", bad])
-                del run, logits, indices
-                getattr(torch, device.type).empty_cache()
+                for values in values_list:
+                    run, logits, indices, starts, ends = make_runner(
+                        case, dist, values, args, device)
+                    nbins, share = bin_stats(logits, starts, ends)
+                    us = bench(run, device, args.warmup_iters,
+                               args.num_iters)
+                    scanned = float((ends - starts).clamp(min=0).sum())
+                    gbps = scanned * 4 / us / 1e3
+                    line = (f"{case.name:<24}{case.top_k:>6}  "
+                            f"{case.shape():<34}{dist:<9}{values:<11}"
+                            f"{us:>10.1f}{gbps:>9.1f}{nbins:>6}"
+                            f"{share * 100:>9.1f}")
+                    bad = ""
+                    if args.check:
+                        bad = check(case, logits, indices, starts, ends,
+                                    args.check_rows)
+                        line += f"{bad:>10}"
+                    print(line, flush=True)
+                    if writer:
+                        writer.writerow([
+                            case.name, case.model, case.mode, case.top_k,
+                            case.shape(), dist, values, f"{us:.1f}",
+                            f"{gbps:.1f}", nbins, f"{share * 100:.1f}", bad
+                        ])
+                    del run, logits, indices
+                    getattr(torch, device.type).empty_cache()
     finally:
         if fh:
             fh.close()
