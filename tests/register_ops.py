@@ -38,6 +38,38 @@ def fused_add_gemma_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
 
 
+def layer_norm(out: torch.Tensor, input: torch.Tensor,
+               weight: Optional[torch.Tensor], bias: Optional[torch.Tensor],
+               epsilon: float) -> None:
+    # Mirrors rms_norm's own .contiguous() call above; the kernel already
+    # handles this internally, kept here for parity.
+    input_contiguous = input.contiguous()
+    torch.ops._C.layer_norm(out, input_contiguous, weight, bias, epsilon)
+
+
+def fused_add_layer_norm(input: torch.Tensor, residual: torch.Tensor,
+                         weight: Optional[torch.Tensor],
+                         bias: Optional[torch.Tensor],
+                         epsilon: float) -> None:
+    torch.ops._C.fused_add_layer_norm(input, residual, weight, bias, epsilon)
+
+
+def nemotron_layer_norm(out: torch.Tensor, input: torch.Tensor,
+                        weight: torch.Tensor,
+                        bias: Optional[torch.Tensor], epsilon: float) -> None:
+    input_contiguous = input.contiguous()
+    torch.ops._C.nemotron_layer_norm(out, input_contiguous, weight, bias,
+                                     epsilon)
+
+
+def fused_add_nemotron_layer_norm(input: torch.Tensor, residual: torch.Tensor,
+                                  weight: torch.Tensor,
+                                  bias: Optional[torch.Tensor],
+                                  epsilon: float) -> None:
+    torch.ops._C.fused_add_nemotron_layer_norm(input, residual, weight, bias,
+                                               epsilon)
+
+
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 
@@ -675,6 +707,8 @@ def topk_softplus_sqrt(
     input_ids: Optional[torch.Tensor] = None,
     tid2eid: Optional[torch.Tensor] = None,
     is_padding: Optional[torch.Tensor] = None,
+    bias_vl: Optional[torch.Tensor] = None,
+    image_sentinel_lo: int = 0,
 ) -> None:
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
@@ -687,6 +721,8 @@ def topk_softplus_sqrt(
         input_ids,
         tid2eid,
         is_padding,
+        bias_vl,
+        image_sentinel_lo,
     )
 
 
@@ -727,4 +763,30 @@ def topk_per_row_decode(
         logits.stride(0),
         logits.stride(1),
         top_k,
+    )
+
+
+def ngram_compute_n_gram_ids(
+    ne_n: int,
+    ne_k: int,
+    ne_weights: torch.Tensor,
+    ne_mods: torch.Tensor,
+    exclusive_ne_embedder_size_sums: torch.Tensor,
+    exclusive_req_len_sums: torch.Tensor,
+    ne_token_table: torch.Tensor,
+    row_indices: torch.Tensor,
+    column_starts: torch.Tensor,
+    n_gram_ids: torch.Tensor,
+) -> None:
+    torch.ops._C.ngram_compute_n_gram_ids(
+        ne_n,
+        ne_k,
+        ne_weights,
+        ne_mods,
+        exclusive_ne_embedder_size_sums,
+        exclusive_req_len_sums,
+        ne_token_table,
+        row_indices,
+        column_starts,
+        n_gram_ids,
     )

@@ -521,13 +521,26 @@ def test_xe_grouped_gemm_mxfp8(m, n, k, e, topk, dtype, has_bias):
     torch.testing.assert_close(output, ref, rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.parametrize("m,n,k", [(1, 256, 256), (4, 256, 256)])
+# A_avg_M = m * topk / e picks the tile policy, so with e=2 these m values
+# straddle both dispatch thresholds (<=8, <=32, else).
+BLOCK_FP8_MNK_FACTORS = [
+    (1, 256, 256),
+    (4, 256, 256),
+    (64, 256, 256),
+    (128, 256, 256),
+]
+
+
+@pytest.mark.parametrize("m,n,k", BLOCK_FP8_MNK_FACTORS)
 @pytest.mark.parametrize("e", [2])
 @pytest.mark.parametrize("topk", [1])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
                          ids=format_tc)
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e5m2, torch.float8_e4m3fn],
+                         ids=format_tc)
 @pytest.mark.parametrize("has_bias", [False, True])
-def test_xe_grouped_gemm_block_fp8(m, n, k, e, topk, dtype, has_bias):
+def test_xe_grouped_gemm_block_fp8(m, n, k, e, topk, dtype, fp8_dtype,
+                                   has_bias):
     """Native block-FP8 W8A16 grouped GEMM vs dequant+matmul gold.
 
     Keeps FP8 weights + float32 2D scales [E, K/128, N/128] in memory.
@@ -544,7 +557,7 @@ def test_xe_grouped_gemm_block_fp8(m, n, k, e, topk, dtype, has_bias):
 
     input_A = torch.randn((total_m, k), dtype=dtype,
                           device=DEVICE).contiguous() / 10
-    input_B = torch.empty(num_experts, k, n, dtype=torch.float8_e4m3fn,
+    input_B = torch.empty(num_experts, k, n, dtype=fp8_dtype,
                           device=DEVICE)
     scale_B = (torch.randn(num_experts,
                            k // group_size,
@@ -554,7 +567,7 @@ def test_xe_grouped_gemm_block_fp8(m, n, k, e, topk, dtype, has_bias):
 
     for i in range(num_experts):
         hp = torch.randn(k, n, dtype=torch.float32, device=DEVICE) / 10
-        input_B[i] = hp.to(torch.float8_e4m3fn)
+        input_B[i] = hp.to(fp8_dtype)
 
     if has_bias:
         bias = torch.randn((num_experts, n), dtype=dtype, device=DEVICE) / 10
@@ -587,3 +600,89 @@ def test_xe_grouped_gemm_block_fp8(m, n, k, e, topk, dtype, has_bias):
     ref = torch.cat(ref, dim=0)
 
     torch.testing.assert_close(output, ref, rtol=2e-2, atol=2e-2)
+
+
+# Exponent extremes for the wide-scale test: adjacent K blocks differ by
+# 2^(2*BLOCK_FP8_MAX_EXP), and the full range spans 2^-20 .. 2^20 ratios.
+BLOCK_FP8_MAX_EXP = 10
+
+
+@pytest.mark.parametrize("m,n,k", [(4, 256, 1024), (128, 256, 1024)])
+@pytest.mark.parametrize("pattern", ["alternating", "descending", "ascending"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
+def test_xe_grouped_gemm_block_fp8_wide_scales(m, n, k, pattern, dtype):
+    """Block scales laid out to force the worst case for the K-block rescale.
+
+    The mainloop carries the accumulator in units of the current block's
+    scale, so what matters is the ratio between adjacent K blocks, not the
+    magnitude. Random exponents would not reliably produce large ratios, so
+    each pattern is constructed:
+      alternating -- every adjacent pair swings the full 2^(2*MAX_EXP)
+      descending  -- scales shrink, so the accumulator grows monotonically
+      ascending   -- scales grow, so the accumulator shrinks monotonically
+    """
+    if not torch.xpu.is_available():
+        pytest.skip("XPU required")
+    seed_everything(7)
+    from vllm_xpu_kernels.moe_utils import dequant_fp8_block_wei
+
+    num_experts, topk, group_size = 2, 1, 128
+    total_m = m * topk
+    num_k_blocks = k // group_size
+    num_n_blocks = n // group_size
+
+    input_A = torch.randn((total_m, k), dtype=dtype,
+                          device=DEVICE).contiguous() / 10
+    input_B = torch.empty(num_experts, k, n, dtype=torch.float8_e4m3fn,
+                          device=DEVICE)
+    for i in range(num_experts):
+        hp = torch.randn(k, n, dtype=torch.float32, device=DEVICE) / 10
+        input_B[i] = hp.to(torch.float8_e4m3fn)
+
+    hi = float(BLOCK_FP8_MAX_EXP)
+    if pattern == "alternating":
+        per_k = torch.tensor([hi if i % 2 == 0 else -hi
+                              for i in range(num_k_blocks)])
+    elif pattern == "descending":
+        per_k = torch.linspace(hi, -hi, num_k_blocks)
+    else:
+        per_k = torch.linspace(-hi, hi, num_k_blocks)
+
+    # Exact powers of two so the reference dequant introduces no rounding of
+    # its own and any mismatch is attributable to the kernel.
+    exponents = per_k.to(DEVICE).view(1, num_k_blocks, 1).expand(
+        num_experts, num_k_blocks, num_n_blocks)
+    scale_B = torch.pow(2.0, exponents).contiguous()
+
+    # Fail loudly if a shape change ever makes this test stop being "wide".
+    assert scale_B.max() / scale_B.min() >= 2.0**(2 * BLOCK_FP8_MAX_EXP - 1)
+
+    num_rows_per_expert = torch.zeros(num_experts,
+                                      device=DEVICE,
+                                      dtype=torch.int32)
+    init_rows_for_experts(m, topk, num_rows_per_expert)
+
+    output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
+    cutlass_grouped_gemm_xe2(input_A, input_B, scale_B, None, output,
+                             num_rows_per_expert, n, k, num_experts)
+
+    ref = []
+    pre_token_sum = 0
+    for i in range(num_experts):
+        cur_token_num = int(num_rows_per_expert[i].item())
+        if cur_token_num == 0:
+            continue
+        inp = input_A[pre_token_sum:pre_token_sum + cur_token_num].to(
+            torch.float32)
+        wei = dequant_fp8_block_wei(input_B[i], scale_B[i])
+        ref.append((inp @ wei).to(dtype))
+        pre_token_sum += cur_token_num
+    ref = torch.cat(ref, dim=0)
+
+    # Scales spanning 2^20 make the dominant K block ~1e6 larger than the
+    # smallest results, and a near-cancelled element cannot be resolved more
+    # finely than one bf16 ULP of the terms that formed it. Measured error is
+    # flat in the block ratio (~1e-3 of max) rather than growing with it, so
+    # the floor is set from the output magnitude instead of using atol=0.
+    atol = float(ref.abs().max()) * 2**-8
+    torch.testing.assert_close(output, ref, rtol=3e-2, atol=atol)
