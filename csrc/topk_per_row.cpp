@@ -51,6 +51,15 @@ static constexpr int kNumBins = 2048;
 //     rows write kRowsPerGroup * topK words as one contiguous run.
 static constexpr int kRowsPerGroup = 4;
 
+template <int kThreads>
+static constexpr int kReduceCursorBase = std::max(
+    SUBGROUP_SIZE - kRowsPerGroup,
+    kThreads / SUBGROUP_SIZE + 2 * kRowsPerGroup);
+
+template <int kThreads>
+static constexpr int kReduceScratchSlots =
+    kReduceCursorBase<kThreads> + kRowsPerGroup;
+
 // The reduction path (topKPerRowReduce) keeps this many of the row's elements
 // per thread in registers, so it can read the row once. 8 covers every row up
 // to 8 * 512 = 4096 elements, which is where DSA prefill rows sit; longer rows
@@ -61,6 +70,7 @@ static constexpr int kRowsPerGroup = 4;
 // read and write of level 1 lost 11, because half as many threads on a row
 // means half as many loads in flight to hide the latency.
 static constexpr int kFastMaxRegItems = 8;
+static constexpr int kMediumRowCapacity = 10240;
 
 // The reduction path hands the threshold bin's elements to a pairwise ranking,
 // which is O(n^2), so it gives up above this many of them and lets the
@@ -1013,7 +1023,10 @@ static constexpr int kTieSelectDigitBits = 12;
 // Histogram increments and slot claims are aggregated per subgroup: the lanes
 // that share the lowest active lane's bucket add as one, so a tie costs one
 // atomic per subgroup instead of 32 to the same address.
-template <int kNumThreadsPerBlock, int kNumBins>
+template <
+    int kNumThreadsPerBlock,
+    int kNumBins,
+    int kDigitBits = kTieSelectDigitBits>
 static void processTieSelect(
     const sycl::nd_item<3>& item,
     const float* rowBase,
@@ -1027,7 +1040,7 @@ static void processTieSelect(
     int* selVars,
     int topK) {
   constexpr int kItems = 4;
-  constexpr int kNumDigitBuckets = 1 << kTieSelectDigitBits;
+  constexpr int kNumDigitBuckets = 1 << kDigitBits;
   constexpr int kBucketsPerThread = kNumDigitBuckets / kNumThreadsPerBlock;
   static_assert(
       kNumDigitBuckets % kNumThreadsPerBlock == 0,
@@ -1170,7 +1183,7 @@ static void processTieSelect(
   {
     const int rangeBits = 32 - static_cast<int>(sycl::clz(range));
     int hiShift = 32;
-    shift = sycl::max(0, rangeBits - kTieSelectDigitBits);
+    shift = sycl::max(0, rangeBits - kDigitBits);
     while (true) {
       int* myBuckets = hist + tid * kBucketsPerThread;
       int counts[kBucketsPerThread] = {};
@@ -1223,7 +1236,7 @@ static void processTieSelect(
       if (count == need || shift == 0) {
         break;
       }
-      shift = sycl::max(0, shift - kTieSelectDigitBits);
+      shift = sycl::max(0, shift - kDigitBits);
       // selVars is rewritten by the next scan only after the barriers of its
       // histogram pass, which every thread reaches after the reads above.
     }
@@ -1301,7 +1314,8 @@ template <
     int kCopies,
     int kMaxRegItems,
     int kMaxCandidates,
-    bool kRegResident>
+    bool kRegResident,
+    int kRowCapacity = std::numeric_limits<int>::max()>
 static bool topKPerRowReduce(
     const sycl::nd_item<3>& item,
     const float* rowBase,
@@ -1344,11 +1358,14 @@ static bool topKPerRowReduce(
   // Output cursor of the accepted elements, one per row of the group, in scan
   // scratch that blockExclusiveScan() leaves alone (it uses the first
   // kNumThreadsPerBlock / SUBGROUP_SIZE + kRowsPerGroup slots).
+  // A 1024-thread group occupies all 33 scan slots. The scratch-size formula
+  // leaves the emission counters disjoint from that scan.
+  constexpr int kCursorBase = kReduceCursorBase<kNumThreadsPerBlock>;
   static_assert(
       kNumThreadsPerBlock / SUBGROUP_SIZE + kRowsPerGroup <=
-      SUBGROUP_SIZE - 2 * kRowsPerGroup);
-  int* acceptCursor = smemTmp + SUBGROUP_SIZE - kRowsPerGroup +
-                      item.get_local_id(0) / kThreadsPerRow;
+      kCursorBase - kRowsPerGroup);
+  int* acceptCursor =
+      smemTmp + kCursorBase + item.get_local_id(0) / kThreadsPerRow;
   int* candCursor = acceptCursor - kRowsPerGroup;
   const int histCopy = lane_id % kCopies;
 
@@ -1388,8 +1405,9 @@ static bool topKPerRowReduce(
   // to keep its own reads streaming, and a vec4 load moves four times as much
   // per message as the strided scalar ones.
   static_assert(kRegResident || kMaxRegItems % 4 == 0);
-  const bool vecLoads =
-      !kRegResident && stride1 == 1 && rowLen >= kVecRowMinLen;
+  const bool vecLoads = !kRegResident && stride1 == 1 &&
+                        kRowCapacity >= kVecRowMinLen &&
+                        rowLen >= kVecRowMinLen;
   const int head =
       vecLoads
           ? sycl::min(
@@ -1659,8 +1677,9 @@ static bool topKPerRowReduce(
   // The items buffer it replaces then holds the radix select below.
   int* const selHist = itemIndices;
   int* const selVars = reinterpret_cast<int*>(itemLogits);
-  const bool bigCandidates =
-      !kGrouped && !kRegResident && rowLen >= kLongRowMinLen;
+  const bool bigCandidates = !kGrouped && !kRegResident &&
+                             kRowCapacity >= kLongRowMinLen &&
+                             rowLen >= kLongRowMinLen;
   if (bigCandidates) {
     itemLogits = reinterpret_cast<float*>(smemBins);
     itemIndices = smemBins + kNumFastBins * kCopies / 2;
@@ -1806,7 +1825,7 @@ static bool topKPerRowReduce(
     // 262144 (topK=512), growing with the row, against 1.004 at 131072 and
     // 0.94-0.97 at 49152-98304 (topK=2048). The
     // two loops are whole, as a branch per slot cost the batched loop its gain.
-    if (rowLen > kCandBatchMaxRowLen) {
+    if (kRowCapacity > kCandBatchMaxRowLen && rowLen > kCandBatchMaxRowLen) {
       for (int c = numChunks - 1; c >= 0; --c) {
         const int chunk = chunkAt(c);
         float chunkVal[kMaxRegItems];
@@ -1913,7 +1932,7 @@ static bool topKPerRowReduce(
   // fp16 bin keeps those to about 19 bits, so that is two or three passes over
   // the candidates. The ranks within the selected set are not needed: any order
   // of the top-k is a valid output.
-  if constexpr (!kGrouped) {
+  if constexpr (!kGrouped && !kRegResident && kRowCapacity >= kLongRowMinLen) {
     if (numCandidates > kMaxCandidates) {
       constexpr int kSelBins = kThreadsPerRow;
       constexpr int kSelBits = constexprLog2(kSelBins);
@@ -3001,9 +3020,10 @@ static inline bool splitRowBarrier(
     while (seen < splitBlocks) {
       if (++spins < kSplitSpinLimit) {
         seen = arrived.load(sycl::memory_order::acquire);
-      } else if (
-          arrived.compare_exchange_strong(
-              seen, seen | kSplitAbandoned, sycl::memory_order::acq_rel)) {
+      } else if (arrived.compare_exchange_strong(
+                     seen,
+                     seen | kSplitAbandoned,
+                     sycl::memory_order::acq_rel)) {
         gaveUp = true;
         break;
       }
@@ -3633,6 +3653,138 @@ static inline int splitBlocksForDecode(int64_t numRows, int64_t numColumns) {
   return static_cast<int>(blocks);
 }
 
+// Medium rows need considerably less scratch than the long-row fallback.
+// Keep their histogram and candidate storage local to this launch so resident
+// work-groups can hide the latency of histogram updates and output stores.
+template <bool kDecode>
+struct MediumTopKScratch {
+  static constexpr int kThreads = kDecode ? 1024 : 128;
+  static constexpr int kBins = kDecode ? 4096 : 2048;
+  static constexpr int kStagedMaxTopK = 512;
+  // Threshold bin, bin size, accepted count, and two fallback cursors.
+  static constexpr int kSelectionVars = 5;
+  // Decode uses a finer first histogram to reduce candidate ranking work.
+  // The exact fallback uses 11-bit digits within the same storage.
+  alignas(16) int bins[kBins];
+  int tmp[kReduceScratchSlots<kThreads>];
+  int indices[kFastMaxCandidates];
+  float values[kFastMaxCandidates];
+  int vars[kSelectionVars];
+  alignas(16) int output[kDecode ? kStagedMaxTopK : 1];
+};
+
+template <bool kDecode, bool kStaged>
+struct MediumTopKKernel {
+  using Scratch = MediumTopKScratch<kDecode>;
+  static constexpr int kThreads = Scratch::kThreads;
+  static constexpr int kItems =
+      kDecode ? (kMediumRowCapacity + kThreads - 1) / kThreads : 8;
+  static_assert(!kDecode || kItems * kThreads >= kMediumRowCapacity);
+  const float* logits;
+  const int* starts;
+  const int* ends;
+  int* output;
+  int64_t stride0;
+  int stride1;
+  int topK;
+  int nextN;
+
+  void operator() [[sycl::reqd_sub_group_size(SUBGROUP_SIZE)]] (
+      const sycl::nd_item<3>& item) const {
+    const int row = item.get_group(0);
+    const int tid = item.get_local_id(0);
+    const int begin = kDecode ? 0 : starts[row];
+    const int end =
+        kDecode ? ends[row / nextN] - nextN + row % nextN + 1 : ends[row];
+    const int length = end - begin;
+    const float* input = logits + row * stride0 + int64_t(begin) * stride1;
+    int* out = output + int64_t(row) * topK;
+    if (length <= topK) {
+      for (int i = tid; i < topK; i += kThreads)
+        out[i] = i < length ? i : -1;
+      return;
+    }
+    auto& s = *sycl::ext::oneapi::group_local_memory_for_overwrite<
+        MediumTopKScratch<kDecode>>(item.get_group());
+    constexpr int kBins = Scratch::kBins;
+    // Coalesce the small decode result into one output store per lane.
+    int* selected = kStaged ? s.output : out;
+    // Host dispatch guarantees this row bound. Excluding the long-row paths
+    // here also keeps their register requirements out of the common kernel.
+    if (topKPerRowReduce<
+            kThreads,
+            kThreads,
+            kBins,
+            1,
+            kItems,
+            kFastMaxCandidates,
+            kDecode,
+            kMediumRowCapacity>(
+            item,
+            input,
+            length,
+            selected,
+            s.bins,
+            s.tmp,
+            s.indices,
+            s.values,
+            s.vars,
+            s.vars + 1,
+            s.vars + 2,
+            s.vars + 3,
+            stride1,
+            topK)) {
+      if constexpr (kStaged) {
+        sycl::group_barrier(item.get_group());
+        for (int i = tid; i < topK; i += kThreads)
+          out[i] = s.output[i];
+      }
+      return;
+    }
+
+    // Reuse the general kernel's exact tie/clustered-value fallback. A failed
+    // histogram selection has published the threshold bin and accepted count
+    // but has not written any indices yet.
+    const int threshold = s.vars[0];
+    const int accepted = s.vars[2];
+    processTieSelect<kThreads, kBins, 11>(
+        item,
+        input,
+        length,
+        stride1,
+        threshold,
+        accepted,
+        out,
+        s.bins,
+        s.tmp,
+        s.vars,
+        topK);
+  }
+};
+
+template <bool kDecode, bool kStaged = false>
+void launchMediumTopK(
+    sycl::queue& queue,
+    const float* logits,
+    const int* starts,
+    const int* ends,
+    int* output,
+    int rows,
+    int64_t stride0,
+    int stride1,
+    int topK,
+    int nextN = 1) {
+  constexpr int kThreads = MediumTopKKernel<kDecode, kStaged>::kThreads;
+  queue.submit([&](sycl::handler& cgh) {
+    cgh.parallel_for(
+        sycl::nd_range<3>(
+            sycl::range<3>(size_t(rows) * kThreads, 1, 1),
+            sycl::range<3>(kThreads, 1, 1)),
+        MediumTopKKernel<kDecode, kStaged>{
+            logits, starts, ends, output, stride0, stride1, topK, nextN});
+  });
+}
+
 }  // namespace vllm
 
 void top_k_per_row_decode(
@@ -3654,7 +3806,7 @@ void top_k_per_row_decode(
   TORCH_CHECK(indices.size(1) == topK);
 
   // Nothing to select, and an empty launch is an error.
-  if (numRows == 0) return;
+  if (numRows == 0 || topK == 0) return;
 
   constexpr int kSortingAlgorithmThreshold = 12288;
   constexpr int kSplitWorkThreshold = 200 * 1000;
@@ -3663,6 +3815,35 @@ void top_k_per_row_decode(
   const at::DeviceGuard device_guard(logits.device());
 
   const auto numColumns = logits.size(1);
+  if (numColumns > 4096 && numColumns <= vllm::kMediumRowCapacity && topK > 0 &&
+      topK <= 2048) {
+    if (topK <= vllm::MediumTopKScratch<true>::kStagedMaxTopK) {
+      vllm::launchMediumTopK<true, true>(
+          queue,
+          logits.data_ptr<float>(),
+          nullptr,
+          seqLens.data_ptr<int>(),
+          indices.data_ptr<int>(),
+          numRows,
+          stride0,
+          stride1,
+          topK,
+          next_n);
+    } else {
+      vllm::launchMediumTopK<true>(
+          queue,
+          logits.data_ptr<float>(),
+          nullptr,
+          seqLens.data_ptr<int>(),
+          indices.data_ptr<int>(),
+          numRows,
+          stride0,
+          stride1,
+          topK,
+          next_n);
+    }
+    return;
+  }
 
   // Rows long enough that one work-group per row leaves the machine idle are
   // split over several groups that cooperate inside a single launch.
@@ -3827,10 +4008,27 @@ void top_k_per_row_prefill(
   TORCH_CHECK(indices.size(0) == numRows);
   TORCH_CHECK(indices.size(1) == topK);
 
+  if (numRows == 0 || topK == 0) return;
+
   constexpr int kSortingAlgorithmThreshold = 12288;
   constexpr int kNumThreadsPerBlock = 512;
   auto& queue = vllm::xpu::vllmGetQueue();
   const at::DeviceGuard device_guard(logits.device());
+
+  if (numRows > 0 && logits.size(1) > 4096 &&
+      logits.size(1) <= vllm::kMediumRowCapacity && topK > 0 && topK <= 2048) {
+    vllm::launchMediumTopK<false>(
+        queue,
+        logits.data_ptr<float>(),
+        rowStarts.data_ptr<int>(),
+        rowEnds.data_ptr<int>(),
+        indices.data_ptr<int>(),
+        numRows,
+        stride0,
+        stride1,
+        topK);
+    return;
+  }
 
   int numInsertionBlocks =
       std::min(static_cast<int>(numRows), kSortingAlgorithmThreshold);

@@ -51,6 +51,7 @@ Examples
     python benchmark_topk_per_row.py --list
     python benchmark_topk_per_row.py --check --csv out.csv
     python benchmark_topk_per_row.py --custom prefill:2048:49152:2048
+    python benchmark_topk_per_row.py --custom prefill-fixed:32768:8320:512:32263
     python benchmark_topk_per_row.py --filter dsv32-p-48k --dist uniform \
         --values all --check
 """
@@ -59,7 +60,6 @@ import argparse
 import csv
 import dataclasses
 import math
-import time
 from typing import Optional
 
 import torch
@@ -91,8 +91,13 @@ class Case:
     next_n: int = 1
     seq_len: int = 0
     width: int = 0  # logits row stride, max_model_len
+    fixed_rows: int = 0  # non-causal prefill rows with the full width
+    chunk_rows: int = 0  # maximum rows in one prefill op call
 
     def shape(self) -> str:
+        if self.fixed_rows:
+            return (f"rows={self.fixed_rows} width={self.width} "
+                    f"chunk={self.chunk_rows}")
         if self.mode == "decode":
             return (f"B={self.batch} next_n={self.next_n} "
                     f"kv={self.seq_len} width={self.width}")
@@ -194,6 +199,10 @@ def sync(device: torch.device) -> None:
 
 def row_bounds(case: Case) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Per-row [start, end) inside the logits row, and the logits width."""
+    if case.fixed_rows:
+        return (torch.zeros(case.fixed_rows, dtype=torch.int64),
+                torch.full((case.fixed_rows, ), case.width,
+                           dtype=torch.int64), case.width)
     if case.mode == "decode":
         rows = torch.arange(case.batch * case.next_n, dtype=torch.int64)
         ends = case.seq_len - case.next_n + rows % case.next_n + 1
@@ -273,12 +282,21 @@ def make_runner(case: Case, dist: str, values: str, args,
     if case.mode == "prefill":
         row_starts = starts.to(torch.int32).to(device)
         row_ends = ends.to(torch.int32).to(device)
+        chunk_rows = case.chunk_rows or rows
+        chunks = [
+            (logits.narrow(0, offset, min(chunk_rows, rows - offset)),
+             row_starts.narrow(0, offset, min(chunk_rows, rows - offset)),
+             row_ends.narrow(0, offset, min(chunk_rows, rows - offset)),
+             indices.narrow(0, offset, min(chunk_rows, rows - offset)))
+            for offset in range(0, rows, chunk_rows)
+        ]
 
         def run() -> None:
-            torch.ops._C.top_k_per_row_prefill(logits, row_starts, row_ends,
-                                               indices, rows,
-                                               logits.stride(0),
-                                               logits.stride(1), case.top_k)
+            for chunk_logits, chunk_starts, chunk_ends, chunk_indices in chunks:
+                torch.ops._C.top_k_per_row_prefill(
+                    chunk_logits, chunk_starts, chunk_ends, chunk_indices,
+                    chunk_logits.shape[0], chunk_logits.stride(0),
+                    chunk_logits.stride(1), case.top_k)
     else:
         seq_lens = torch.full((case.batch, ), case.seq_len,
                               dtype=torch.int32, device=device)
@@ -325,16 +343,27 @@ def bench(run, device: torch.device, warmup: int, iters: int) -> float:
     for _ in range(warmup):
         run()
     sync(device)
-    start = time.perf_counter()
-    for _ in range(iters):
+    event_type = getattr(torch, device.type).Event
+    starts = [event_type(enable_timing=True) for _ in range(iters)]
+    ends = [event_type(enable_timing=True) for _ in range(iters)]
+    for i in range(iters):
+        starts[i].record()
         run()
+        ends[i].record()
     sync(device)
-    return (time.perf_counter() - start) * 1e6 / iters
+    return sum(start.elapsed_time(end) for start, end in zip(starts, ends)) \
+        * 1e3 / iters
 
 
 def parse_custom(spec: str) -> Case:
-    """prefill:S_Q:S_KV:TOP_K or decode:BATCH:NEXT_N:S_KV:WIDTH:TOP_K"""
+    """Parse one custom prefill, fixed prefill, or decode workload."""
     parts = spec.split(":")
+    if parts[0] == "prefill-fixed" and len(parts) == 5:
+        rows, width, k, chunk = map(int, parts[1:])
+        if min(rows, width, k, chunk) <= 0:
+            raise SystemExit(f"bad --custom spec: {spec}")
+        return Case(f"fixed-p-{rows}x{width}-k{k}", "custom", "prefill", k,
+                    width=width, fixed_rows=rows, chunk_rows=chunk)
     if parts[0] == "prefill" and len(parts) == 4:
         q, kv, k = map(int, parts[1:])
         return _prefill(f"custom-p-{q}x{kv}-k{k}", "custom", k, (q, kv))
@@ -355,9 +384,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--mode", choices=("prefill", "decode", "all"),
                     default="all")
     ap.add_argument("--custom", action="append", default=[],
-                    help="prefill:S_Q:S_KV:TOP_K or "
-                    "decode:BATCH:NEXT_N:S_KV:WIDTH:TOP_K; repeatable, "
-                    "replaces the presets")
+                    help="prefill:S_Q:S_KV:TOP_K, "
+                    "prefill-fixed:ROWS:WIDTH:TOP_K:CHUNK_ROWS, or "
+                    "decode:BATCH:NEXT_N:S_KV:WIDTH:TOP_K; "
+                    "repeatable, replaces the presets")
     ap.add_argument("--dist", choices=DISTS + ("all", ), default="all")
     ap.add_argument("--values", choices=VALUES + ("all", ), default="wide",
                     help="logit value distribution (see above)")
@@ -415,13 +445,15 @@ def main() -> None:
     writer: Optional[csv.writer] = None
     fh = None
     if args.csv:
-        fh = open(args.csv, "w", newline="")
+        fh = open(args.csv, "w", newline="")  # noqa: SIM115 (closed below)
         writer = csv.writer(fh)
         writer.writerow(["case", "model", "mode", "top_k", "shape", "dist",
                          "values", "us", "GBps", "bins", "maxbin_pct",
                          "bad_rows"])
     try:
-        for case in cases:
+        for case_idx, case in enumerate(cases):
+            if case_idx:
+                sync(device)
             for dist in dists:
                 for values in values_list:
                     run, logits, indices, starts, ends = make_runner(
@@ -430,7 +462,8 @@ def main() -> None:
                     us = bench(run, device, args.warmup_iters,
                                args.num_iters)
                     scanned = float((ends - starts).clamp(min=0).sum())
-                    gbps = scanned * 4 / us / 1e3
+                    gbps = ((scanned + logits.shape[0] * case.top_k) * 4
+                            / us / 1e3)
                     line = (f"{case.name:<24}{case.top_k:>6}  "
                             f"{case.shape():<34}{dist:<9}{values:<11}"
                             f"{us:>10.1f}{gbps:>9.1f}{nbins:>6}"
