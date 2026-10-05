@@ -137,6 +137,18 @@ std::vector<at::Tensor> mha_varlen_fwd(
       "VLLM Kernel XPU only supports fp16, bf16, and fp8 (e4m3/e5m2) query "
       "types");
 
+  // Previously accepted then silently ignored — that silently wrong-results
+  // Gemma-style softcap / ALIBI models. Fail closed until device support lands.
+  TORCH_CHECK(
+      !alibi_slopes_.has_value(),
+      "alibi_slopes is not implemented on XPU flash attention yet");
+  TORCH_CHECK(
+      softcap == 0.0f,
+      "softcap=",
+      softcap,
+      " is not implemented on XPU flash attention yet "
+      "(pass softcap=0 or use a model without softcap)");
+
   TORCH_CHECK(
       v.scalar_type() == k_type, "key and value must have the same dtype");
   if (k_type != at::ScalarType::Float8_e5m2 &&
