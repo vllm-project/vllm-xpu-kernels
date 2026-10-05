@@ -14,6 +14,8 @@ decode is expressed as a varlen call by:
 """
 
 
+from typing import Union
+
 import pytest
 import torch
 
@@ -42,7 +44,11 @@ def _ref_mla_decode(
     softmax_scale: float,
     causal: bool,
     return_softmax_lse: bool = False,
-):
+) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    """Return output [tokens, h_q, lora], optionally paired with softmax LSE.
+
+    LSE has shape [num_heads_q, total_q_tokens], concatenated along tokens.
+    """
     lora = q_nope.shape[-1]
     rope = q_pe.shape[-1]
     head_qk = lora + rope
@@ -203,10 +209,10 @@ def test_mla_decode_deepseek_v3(block_size, query_lens, kv_lens, num_heads_q):
 
 
 @pytest.mark.parametrize("num_heads_q", [16, 32])
-@pytest.mark.parametrize("block_size", [64, 128])
+@pytest.mark.parametrize("block_size", [64, 128, 192, 256])
 @pytest.mark.parametrize("batch", [1, 2, 4])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("num_splits_kv", [1, 8])
+@pytest.mark.parametrize("num_splits_kv", [None, 1, 8])
 @pytest.mark.parametrize("path", ["seqused", "hostlens"])
 def test_mla_decode_large_q_packed(num_heads_q, block_size, batch, dtype,
                                   num_splits_kv, path):
@@ -215,7 +221,11 @@ def test_mla_decode_large_q_packed(num_heads_q, block_size, batch, dtype,
         pytest.skip("XPU not available")
     kv_lora_rank, rope = 512, 64
     query_lens = [1] * batch
-    kv_lens = {1: [2113], 2: [129, 2113], 4: [37, 65, 129, 2113]}[batch]
+    kv_lens = {
+        1: [2113],
+        2: [block_size + 1, 2113],
+        4: [block_size - 1, block_size, block_size + 1, 2113],
+    }[batch]
     q_nope, q_pe, cache, cu_q, sk, bt = _make_inputs(
         batch=batch, query_lens=query_lens, kv_lens=kv_lens,
         num_heads_q=num_heads_q, kv_lora_rank=kv_lora_rank,
