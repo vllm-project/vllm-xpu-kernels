@@ -463,7 +463,10 @@ class XeFMHAFwdSplitKVKernel {
       int end_blk = kv_split_offset + num_effective_kv_blocks;
 
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
-      bool has_large_surface = kXeMaxSurfaceRows < total_seqlen_kv;
+      // INT8 KV builds one 2D surface per KV block (page_size rows), so the
+      // 2^24-row surface split never applies to it.
+      bool has_large_surface = !CollectiveMainloop::Int8KV &&
+                               kXeMaxSurfaceRows < total_seqlen_kv;
       if (has_large_surface) {
         mainloop.template operator()<true>(
             Q(_, _, head, l_coord),
@@ -480,7 +483,8 @@ class XeFMHAFwdSplitKVKernel {
             thr_id,
             seq_len,
             full_tile_offset,
-            discard_seq_coord);
+            discard_seq_coord,
+            head);
       } else {
         mainloop.template operator()<false>(
             Q(_, _, head, l_coord),
@@ -497,7 +501,8 @@ class XeFMHAFwdSplitKVKernel {
             thr_id,
             seq_len,
             full_tile_offset,
-            discard_seq_coord);
+            discard_seq_coord,
+            head);
       }
 
       if constexpr (

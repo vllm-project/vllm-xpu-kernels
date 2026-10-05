@@ -227,6 +227,18 @@ void cutlass_paged_decode_impl(
       is_varlen ? int64_t{0} : query.stride(0),
       page_stride_elements};
 
+  // INT8 per-token-head KV: k_scale / v_scale are the per-token scale caches
+  // (validated in check_int8_kv_cache); the split layout's block stride is
+  // passed in bytes.
+  if (key_cache.scalar_type() == at::ScalarType::Char) {
+    args.k_scale = k_scale.value().data_ptr();
+    args.v_scale = v_scale.value().data_ptr();
+    args.kv_scale_stride_block = k_scale->stride(0);
+    args.kv_scale_stride_slot = k_scale->stride(1);
+    args.kv_scale_stride_head = k_scale->stride(2);
+    args.kv_page_stride_bytes = key_cache.stride(0);
+  }
+
   // For non-contiguous paged KV (e.g., cross-layer KV cache), enlarge
   // total_seqlen_k to cover the full physical extent for the 2D block
   // load surface descriptor. Without this, block loads for blocks at

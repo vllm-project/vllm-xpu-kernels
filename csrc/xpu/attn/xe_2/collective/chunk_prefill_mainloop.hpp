@@ -875,6 +875,10 @@ struct DecodeFwdMainloop<
   static constexpr bool CausalMask = CausalMask_;
   static constexpr bool Fp8KV =
       is_any_of_v<ElementK, float_e5m2_t, float_e4m3_t>;
+  // INT8 per-token-head KV: int8 K/V tiles plus one fp32 scale per (KV token,
+  // KV head), read from [num_blocks, block_size, num_heads_kv] scale caches
+  // (scale_k / scale_v point to them). Paged KV only.
+  static constexpr bool Int8KV = is_same_v<ElementK, int8_t>;
   static constexpr bool LocalMask = LocalMask_;
 
   // User-facing arguments
@@ -892,6 +896,11 @@ struct DecodeFwdMainloop<
     int window_size_right;
     // Physical stride between paged blocks in seq-position units
     int page_stride_elements;
+    // INT8 KV only (see FMHAFwdMainloop::Arguments).
+    int64_t scale_stride_block = 0;
+    int64_t scale_stride_slot = 0;
+    int64_t scale_stride_head = 0;
+    int64_t page_stride_bytes = 0;
   };
 
   // Kernel-facing parameters
@@ -922,7 +931,11 @@ struct DecodeFwdMainloop<
         args.total_seqlen_kv,
         args.window_size_left,
         args.window_size_right,
-        args.page_stride_elements};
+        args.page_stride_elements,
+        args.scale_stride_block,
+        args.scale_stride_slot,
+        args.scale_stride_head,
+        args.page_stride_bytes};
   }
 
   CUTLASS_HOST_DEVICE static bool can_implement(Arguments const&) {
@@ -945,7 +958,8 @@ struct DecodeFwdMainloop<
       int thr_id,
       int seq_len,
       int full_tile_offset,
-      int discard_seq_coord) {
+      int discard_seq_coord,
+      int head_kv = 0) {
     using namespace sycl::ext::oneapi::this_work_item;
 
     // Short dimension names:
@@ -1214,7 +1228,9 @@ struct DecodeFwdMainloop<
     }
 
     for (int D = 0; D < size<4>(pKgK); D++) {
-      prefetch(prefetch_k, pKgK(_, _, _, tile_idx, D));
+      if constexpr (!Int8KV) {
+        prefetch(prefetch_k, pKgK(_, _, _, tile_idx, D));
+      }
     }
 
     clear(tArA);
@@ -1238,9 +1254,171 @@ struct DecodeFwdMainloop<
       effective_scale = params.scale * ElementS(scale_k);
     }
 
+    // INT8 KV helpers (only instantiated for int8 K/V; see Arguments).
+    auto int8_phys_block = [&](int k_tile) {
+      int page_local = k_tile * get<1>(TileShapeQK{}) / params.page_size;
+      page_local = page_local < params.max_pages_per_seq
+                       ? page_local
+                       : params.max_pages_per_seq - 1;
+      return params
+          .ptr_page_table[idx_b * params.max_pages_per_seq + page_local];
+    };
+    auto int8_tile_in_block = [&](int k_tile) {
+      return k_tile % (params.page_size / get<1>(TileShapeQK{}));
+    };
+    // INT8 decode tile step: one page-table read per tile, scale loads issued
+    // before the K loads, per-block K/V surfaces built once per tile, V of this
+    // tile and K of the next tile prefetched through per-block surfaces.
+    auto int8_k_surface = [&](int pblk) {
+      return make_tensor(
+          K_2D.data() + int64_t(pblk) * params.page_stride_bytes,
+          make_layout(
+              make_shape(params.page_size, get<1>(K_2D.shape())),
+              K_2D.stride()));
+    };
+    auto int8_v_surface = [&](int pblk) {
+      return make_tensor(
+          V_2D.data() + int64_t(pblk) * params.page_stride_bytes,
+          make_layout(
+              make_shape(get<0>(V_2D.shape()), params.page_size),
+              V_2D.stride()));
+    };
+    auto int8_scales = [&](void* cache, int k_tile, int pblk) {
+      FragSCol sc;
+      const float* base = static_cast<const float*>(cache) +
+                          int64_t(pblk) * params.scale_stride_block +
+                          int64_t(head_kv) * params.scale_stride_head;
+      int k =
+          get<0>(tKgK(0, 0, 0, k_tile, 0)) + get_sub_group().get_local_id()[0];
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < sc.size(); i++, k += intel::sg_size) {
+        sc(i) = (k < seq_len) ? ElementS(
+                                    base
+                                        [int64_t(k % params.page_size) *
+                                         params.scale_stride_slot])
+                              : ElementS(0);
+      }
+      return sc;
+    };
+    auto int8_prefetch_k = [&](int k_tile) {
+      if (k_tile >= blk_k1) return;
+      auto K_blk = int8_k_surface(int8_phys_block(k_tile));
+      TiledCopyK copy_k_blk{K_blk};
+      auto pf_k = make_block_2d_prefetch(copy_k_blk);
+      auto pKgK_blk = pf_k.get_slice(thr_id).partition_S(local_tile(
+          make_identity_tensor(K_blk.shape()),
+          TileShapeQK{},
+          make_coord(_, _, _),
+          Step<X, _1, _1>{}));
+      CUTLASS_PRAGMA_UNROLL
+      for (int D = 0; D < size<4>(pKgK_blk); D++) {
+        prefetch(pf_k, pKgK_blk(_, _, _, int8_tile_in_block(k_tile), D));
+      }
+    };
+    auto int8_decode_tile = [&](int K) {
+      const int pblk = int8_phys_block(K);
+      const int t = int8_tile_in_block(K);
+      FragSCol ksc = int8_scales(params.scale_k, K, pblk);
+      FragSCol vsc = int8_scales(params.scale_v, K, pblk);
+
+      auto K_blk = int8_k_surface(pblk);
+      TiledCopyK copy_k_blk{K_blk};
+      auto tKgK_blk = thr_copy_k.partition_S(local_tile(
+          make_identity_tensor(K_blk.shape()),
+          TileShapeQK{},
+          make_coord(_, _, _),
+          Step<X, _1, _1>{}));
+      auto V_blk = int8_v_surface(pblk);
+      TiledCopyV copy_v_blk{V_blk};
+      auto gV_blk = local_tile(
+          make_identity_tensor(V_blk.shape()),
+          tile_shape_v,
+          make_coord(get<1>(blk_qv), _));
+      auto tVgV_blk = thr_copy_v.partition_S(local_tile(
+          gV_blk, TileShapePV{}, make_coord(_, _, 0), Step<X, _1, _1>{}));
+      auto pf_v = make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_blk);
+      auto pVgV_blk = pf_v.get_slice(thr_id).partition_S(gV_blk);
+
+      /* GEMM 1: S = K * Q */
+      clear(tSrS);
+      for (int D = 0; D < size<4>(tKgK); D++) {
+        copy(copy_q, tQgQ(_, _, _, D), tQrQ);
+        copy(copy_k_blk, tKgK_blk(_, _, _, t, D), tKrK);
+        reorder(tQrQ, tSrQ);
+        reorder(tKrK, tSrK);
+        cute::gemm(mma_qk, tSrQ, tSrK, tSrS);
+      }
+      prefetch(pf_v, pVgV_blk(_, _, _, t));
+      int8_prefetch_k(K + 1);
+
+      // S(:, j) *= k_scale[j]: per-token K dequantization (before masking).
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < tSrS.size(); i++) {
+        tSrS(i) *= broadcast<1>(ksc, tSrS, i);
+      }
+
+      /* Local/sliding window masking */
+      if constexpr (LocalMask) {
+        int decode_row = seq_len - 1 - full_tile_offset;
+        Tensor cPgP = make_identity_tensor(make_shape(seq_len, seq_len));
+        Tensor gP = local_tile(
+            cPgP, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
+        auto cS_thread = thr_mma_qk.partition_C(gP);
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS.size(); ++i) {
+          int col_idx = get<1>(cS_thread(i)) - full_tile_offset;
+          bool left_mask = col_idx < decode_row - params.window_size_left;
+          bool right_mask = col_idx > decode_row + params.window_size_right;
+          if (left_mask || right_mask) {
+            tSrS(i) = ElementS(-INFINITY);
+          }
+        }
+      }
+
+      /* k masking for remainder tiles */
+      if (check_remainder_k && K == blk_k1 - 1) {
+        FragSCol k_rem_mask;
+        int k = get<0>(tKgK(0, 0, 0, K, 0)) + get_sub_group().get_local_id()[0];
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < k_rem_mask.size(); i++, k += intel::sg_size) {
+          k_rem_mask(i) =
+              (k < seq_len) ? ElementS(sycl::nan(0u)) : ElementS(-INFINITY);
+        }
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tSrS.size(); i++) {
+          tSrS(i) = sycl::fmin(tSrS(i), broadcast<1>(k_rem_mask, tSrS, i));
+        }
+      }
+
+      softmax(effective_scale, K == blk_k0, tSrS, tA_max, tA_sum, tArA);
+      // P(:, j) *= v_scale[j]: per-token V dequantization, applied after the
+      // softmax row sums so the normalizer is unaffected.
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < tSrS.size(); i++) {
+        tSrS(i) *= broadcast<1>(vsc, tSrS, i);
+      }
+      reorder(tSrS, tArP);
+
+      /* GEMM 2: A += P * V, split in v dimension */
+      CUTLASS_PRAGMA_UNROLL
+      for (int VV = 0; VV < VTiles; VV++) {
+        copy(copy_v_blk, tVgV_blk(_, _, _, VV, t), tVrV);
+        reorder(tVrV, tArV);
+        cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
+      }
+      barrier();
+    };
+    if constexpr (Int8KV) {
+      int8_prefetch_k(blk_k0);
+    }
+
     /* Main loop, blocked in k. */
     int next_tile_idx;
     for (int K = blk_k0; K < blk_k1; K++) {
+      if constexpr (Int8KV) {
+        int8_decode_tile(K);
+        continue;
+      }
       /* Split barrier to keep threads together */
       // barrier_arrive(ScopeWorkgroup);
 

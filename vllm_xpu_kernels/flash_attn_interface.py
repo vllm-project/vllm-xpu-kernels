@@ -489,8 +489,14 @@ def flash_attn_varlen_func(
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
     q_descale = _normalize_descale_tensor(q_descale, "q_descale")
-    k_descale = _normalize_descale_tensor(k_descale, "k_descale")
-    v_descale = _normalize_descale_tensor(v_descale, "v_descale")
+    if k.dtype == torch.int8:
+        # INT8 per-token-head KV: k_descale / v_descale are the fp32 scale
+        # caches [num_blocks, block_size, num_heads_kv] (validated in C++).
+        assert k_descale is not None and v_descale is not None, \
+            "INT8 KV cache requires per-token-head k_descale and v_descale"
+    else:
+        k_descale = _normalize_descale_tensor(k_descale, "k_descale")
+        v_descale = _normalize_descale_tensor(v_descale, "v_descale")
     # custom op does not support non-tuple input
     real_window_size: tuple[int, int]
     if window_size is None:
