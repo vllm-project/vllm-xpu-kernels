@@ -91,7 +91,7 @@ pip install vllm-xpu-kernels
   If you are working on a bare-metal machine, you need download and install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html).
 
 
-After the oneAPI is well prepared, you need source the enviroment with below command:
+After the environment is well installed, you need source the environment with below command:
 
 ```bash
 source /opt/intel/oneapi/setvars.sh
