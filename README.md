@@ -114,7 +114,6 @@ cd vllm-xpu-kernels
   Install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html)
   matching the source-build requirements above.
 
-
 Initialize the oneAPI environment in the shell where you will build:
 
 ```bash
