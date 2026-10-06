@@ -94,7 +94,7 @@ pip install vllm-xpu-kernels
 After the oneAPI is well prepared, you need source the enviroment with below command:
 
 ```bash
-source /opt/insource /opt/intel/oneapi/setvars.sh
+source /opt/intel/oneapi/setvars.sh
 ```
 
 **2. Create a virtual environment and install dependencies**
