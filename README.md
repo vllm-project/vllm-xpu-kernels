@@ -99,7 +99,6 @@ cd vllm-xpu-kernels
   
   ```bash
   docker run -it \
-             --privileged \
              -v /dev/dri/by-path:/dev/dri/by-path \
              -v "$(pwd):/workspace/vllm-xpu-kernels" \
              --device=/dev/dri \
