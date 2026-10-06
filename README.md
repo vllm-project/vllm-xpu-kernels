@@ -72,8 +72,7 @@ pip install "vllm-xpu-kernels==0.1.15.4"
 
 **1. Clone the repository**
 
-Run these commands on the host before building the Docker image or setting up a
-bare-metal build:
+Run these commands on the host before building the Docker image or setting up a bare-metal build:
 
 ```bash
 git clone https://github.com/vllm-project/vllm-xpu-kernels.git
