@@ -14,7 +14,6 @@ A [vLLM](https://github.com/vllm-project/vllm) component that provides optimized
   - [Using with vLLM](#using-with-vllm)
 - [Testing](#testing)
 - [Benchmarks](#benchmarks)
-- [Design Notes](#design-notes)
 - [License](#license)
 
 ---
@@ -64,12 +63,12 @@ pip install vllm-xpu-kernels
 
 **1. Prepare oneAPI**
 
-- Option 1: Docker Contianer
+- Option 1: Docker Container
 
-  You are recommended to build a docker image using the `Dockerfile.xpu` included in this repo to build `vllm-xpu-kernels`. Please follow below command to build and launch the docker container. You also need set proxies properlly according to your network requirements.
+  You are recommended to build a docker image using the `Dockerfile.xpu` included in this repo to build `vllm-xpu-kernels`. Please follow below command to build and launch the docker container. Configure proxies as needed for your network.
 
   ```bash
-  # Clone the repository and enter its directory on the host before building the Docker image:
+  # Clone the repository and enter its directory on the host before building the Docker image.
 
   git clone https://github.com/vllm-project/vllm-xpu-kernels.git
   cd vllm-xpu-kernels
