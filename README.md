@@ -132,9 +132,9 @@ pip install --no-build-isolation .
 **Build a wheel** (output goes to `dist/`):
 
 ```bash
-pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu .
+pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu --wheel-dir dist .
 # or
-pip wheel --no-build-isolation .
+pip wheel --no-build-isolation --wheel-dir dist .
 ```
 
 **Incremental rebuild** (fastest for iterative development):
