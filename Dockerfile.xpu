@@ -21,7 +21,8 @@ RUN apt clean && apt-get update -y && \
     wget \
     vim \
     python3.12 \
-    python3.12-dev
+    python3.12-dev \
+    python3.12-venv
 
 # ─── GPU compute runtime (configurable via gpu_runtime_packages.json) ──────
 ARG GPU_RUNTIME_PROFILE=default

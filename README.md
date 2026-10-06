@@ -41,9 +41,9 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 
 ## Requirements
 
-- **Python**: 3.9 – 3.12
+- **Python**: 3.12
 - **PyTorch**: 2.14.0+xpu
-- **oneAPI**: 2026.0 ([Base Toolkit download](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html))
+- **oneAPI**: 2026.1 ([Base Toolkit download](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html))
 - **CMake**: ≥ 3.26
 - **Ninja** build system
 
@@ -54,13 +54,47 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 vLLM calls `import vllm_xpu_kernels._C` at startup, which registers all custom ops into the PyTorch dispatcher. From that point on, XPU ops are dispatched automatically whenever vLLM runs on Intel GPU hardware — no additional code changes are required in vLLM itself.
 
 ### Installation
-
-**1. Install oneAPI 2026.0**
-
-Download and install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html), then source the environment:
+`vllm-xpu-kernels` is released through `pip`, you can use below command to install it.
 
 ```bash
-source /opt/intel/oneapi/setvars.sh
+pip install vllm-xpu-kernels
+```
+
+### Build from source
+
+**1. Prepare oneAPI**
+
+- Option 1: Docker Contianer
+
+You are recommended to build a docker image using the `Dockerfile.xpu` included in this repo to build `vllm-xpu-kernels`. Please follow below command to build and launch the docker container. You also need set proxies properlly according to your network requirements.
+
+```bash
+# in vllm-xpu-kernels repo directory in your host environment
+docker build --no-cache \
+             -f ./Dockerfile.xpu \
+             -t vllm/vllm-xpu-kernels:latest .
+```
+
+```bash
+  docker run -it \
+    --privileged \
+    -v /dev/dri/by-path:/dev/dri/by-path \
+    --device=/dev/dri \
+    --ipc=host \
+    --name vllm-xpu-kernels \
+    --entrypoint /bin/bash \
+    vllm/vllm-xpu-kernels:latest
+```
+
+- Option 2: Bare-metal
+
+If you are working on a bare-metal machine, you need download and install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html).
+
+
+After the oneAPI is well prepared, you need source the enviroment with below command:
+
+```bash
+source /opt/insource /opt/intel/oneapi/setvars.sh
 ```
 
 **2. Create a virtual environment and install dependencies**
