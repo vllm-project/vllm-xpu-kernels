@@ -66,29 +66,29 @@ pip install vllm-xpu-kernels
 
 - Option 1: Docker Contianer
 
-You are recommended to build a docker image using the `Dockerfile.xpu` included in this repo to build `vllm-xpu-kernels`. Please follow below command to build and launch the docker container. You also need set proxies properlly according to your network requirements.
+  You are recommended to build a docker image using the `Dockerfile.xpu` included in this repo to build `vllm-xpu-kernels`. Please follow below command to build and launch the docker container. You also need set proxies properlly according to your network requirements.
 
-```bash
-# in vllm-xpu-kernels repo directory in your host environment
-docker build --no-cache \
-             -f ./Dockerfile.xpu \
-             -t vllm/vllm-xpu-kernels:latest .
-```
+  ```bash
+  # in vllm-xpu-kernels repo directory in your host environment
+  docker build --no-cache \
+               -f ./Dockerfile.xpu \
+               -t vllm/vllm-xpu-kernels:latest .
+  ```
 
-```bash
-  docker run -it \
-    --privileged \
-    -v /dev/dri/by-path:/dev/dri/by-path \
-    --device=/dev/dri \
-    --ipc=host \
-    --name vllm-xpu-kernels \
-    --entrypoint /bin/bash \
-    vllm/vllm-xpu-kernels:latest
-```
+  ```bash
+    docker run -it \
+      --privileged \
+      -v /dev/dri/by-path:/dev/dri/by-path \
+      --device=/dev/dri \
+      --ipc=host \
+      --name vllm-xpu-kernels \
+      --entrypoint /bin/bash \
+      vllm/vllm-xpu-kernels:latest
+  ```
 
 - Option 2: Bare-metal
 
-If you are working on a bare-metal machine, you need download and install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html).
+  If you are working on a bare-metal machine, you need download and install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html).
 
 
 After the oneAPI is well prepared, you need source the enviroment with below command:
