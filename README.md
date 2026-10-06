@@ -69,7 +69,17 @@ pip install "vllm-xpu-kernels==0.1.15.4"
 
 ### Build from Source
 
-**1. Prepare oneAPI**
+**1. Clone the repository**
+
+Run these commands on the host before building the Docker image or setting up a
+bare-metal build:
+
+```bash
+git clone https://github.com/vllm-project/vllm-xpu-kernels.git
+cd vllm-xpu-kernels
+```
+
+**2. Prepare oneAPI**
 
 - Option 1: Docker Container
 
@@ -112,15 +122,16 @@ Initialize the oneAPI environment in the shell where you will build:
 source /opt/intel/oneapi/setvars.sh
 ```
 
-**2. Create a virtual environment and install dependencies**
+**3. Set up the Python environment and install dependencies**
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+```
 
-git clone https://github.com/vllm-project/vllm-xpu-kernels
-cd vllm-xpu-kernels
+In either environment, install the dependencies from the mounted or cloned repository:
 
+```bash
 pip install -r requirements.txt
 ```
 
