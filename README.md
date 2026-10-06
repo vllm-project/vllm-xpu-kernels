@@ -10,6 +10,7 @@ A [vLLM](https://github.com/vllm-project/vllm) component that provides optimized
 - [Getting Started](#getting-started)
   - [How It Works](#how-it-works)
   - [Installation](#installation)
+  - [Build from Source](#build-from-source)
   - [Build Options](#build-options)
   - [Using with vLLM](#using-with-vllm)
 - [Testing](#testing)
@@ -53,19 +54,26 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 vLLM calls `import vllm_xpu_kernels._C` at startup, which registers all custom ops into the PyTorch dispatcher. From that point on, XPU ops are dispatched automatically whenever vLLM runs on Intel GPU hardware — no additional code changes are required in vLLM itself.
 
 ### Installation
-`vllm-xpu-kernels` is released through `pip`, you can use below command to install it.
+
+With a compatible PyTorch XPU installation already available, install the published package from PyPI into your active environment:
 
 ```bash
-pip install vllm-xpu-kernels
+pip install --upgrade vllm-xpu-kernels
 ```
 
-### Build from source
+To pin a specific release, for example:
+
+```bash
+pip install "vllm-xpu-kernels==0.1.15.4"
+```
+
+### Build from Source
 
 **1. Prepare oneAPI**
 
 - Option 1: Docker Container
 
-  You are recommended to build a docker image using the `Dockerfile.xpu` included in this repo to build `vllm-xpu-kernels`. Please follow below command to build and launch the docker container. Configure proxies as needed for your network.
+  Build the development image using this repository's `Dockerfile.xpu`. Configure proxies as needed for your network.
 
   ```bash
   # Clone the repository and enter its directory on the host before building the Docker image.
@@ -77,12 +85,16 @@ pip install vllm-xpu-kernels
                -t vllm/vllm-xpu-kernels:latest .
   ```
 
+  Launch the container with the checkout mounted as its working directory:
+  
   ```bash
   docker run -it \
              --privileged \
              -v /dev/dri/by-path:/dev/dri/by-path \
+             -v "$(pwd):/workspace/vllm-xpu-kernels" \
              --device=/dev/dri \
              --ipc=host \
+             --workdir /workspace/vllm-xpu-kernels \
              --name vllm-xpu-kernels \
              --entrypoint /bin/bash \
              vllm/vllm-xpu-kernels:latest
@@ -90,10 +102,11 @@ pip install vllm-xpu-kernels
 
 - Option 2: Bare-metal
 
-  If you are working on a bare-metal machine, you need download and install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html).
+  Install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html)
+  matching the source-build requirements above.
 
 
-After the environment is well installed, you need source the environment with below command:
+Initialize the oneAPI environment in the shell where you will build:
 
 ```bash
 source /opt/intel/oneapi/setvars.sh
