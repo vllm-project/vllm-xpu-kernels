@@ -69,7 +69,10 @@ pip install vllm-xpu-kernels
   You are recommended to build a docker image using the `Dockerfile.xpu` included in this repo to build `vllm-xpu-kernels`. Please follow below command to build and launch the docker container. You also need set proxies properlly according to your network requirements.
 
   ```bash
-  # in vllm-xpu-kernels repo directory in your host environment
+  # Clone the repository and enter its directory on the host before building the Docker image:
+
+  git clone https://github.com/vllm-project/vllm-xpu-kernels.git
+  cd vllm-xpu-kernels
   docker build --no-cache \
                -f ./Dockerfile.xpu \
                -t vllm/vllm-xpu-kernels:latest .
