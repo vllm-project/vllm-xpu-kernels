@@ -76,14 +76,14 @@ pip install vllm-xpu-kernels
   ```
 
   ```bash
-    docker run -it \
-      --privileged \
-      -v /dev/dri/by-path:/dev/dri/by-path \
-      --device=/dev/dri \
-      --ipc=host \
-      --name vllm-xpu-kernels \
-      --entrypoint /bin/bash \
-      vllm/vllm-xpu-kernels:latest
+  docker run -it \
+             --privileged \
+             -v /dev/dri/by-path:/dev/dri/by-path \
+             --device=/dev/dri \
+             --ipc=host \
+             --name vllm-xpu-kernels \
+             --entrypoint /bin/bash \
+             vllm/vllm-xpu-kernels:latest
   ```
 
 - Option 2: Bare-metal
