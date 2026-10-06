@@ -13,6 +13,7 @@ A [vLLM](https://github.com/vllm-project/vllm) component that provides optimized
   - [Build from Source](#build-from-source)
   - [Build Options](#build-options)
   - [Using with vLLM](#using-with-vllm)
+  - [Kernel Configuration](#kernel-configuration)
 - [Testing](#testing)
 - [Benchmarks](#benchmarks)
 - [License](#license)
