@@ -120,12 +120,7 @@ Initialize the oneAPI environment in the shell where you will build:
 source /opt/intel/oneapi/setvars.sh
 ```
 
-**3. Set up the Python environment and install dependencies**
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
+**3. Install dependencies**
 
 In either environment, install the dependencies from the mounted or cloned repository:
 
