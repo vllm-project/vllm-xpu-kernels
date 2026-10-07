@@ -3,10 +3,7 @@
 #include <cstdint>
 #include <limits>
 
-#if __has_include(<sycl/ext/intel/experimental/grf_size_properties.hpp>)
-  #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
-  #define MOE_GATHER_HAS_GRF_PROP 1
-#endif
+#include "xpu/grf_mode.hpp"
 
 #include "../utils.h"
 #include "../dispatch_utils.h"
@@ -253,8 +250,7 @@ class MoeGather {
     namespace syclex = sycl::ext::oneapi::experimental;
 #ifdef MOE_GATHER_HAS_GRF_PROP
     return syclex::properties{
-        syclex::sub_group_size<kSubGroupSize>,
-        sycl::ext::intel::experimental::grf_size<MOE_GATHER_GRF>};
+        syclex::sub_group_size<kSubGroupSize>, VLLM_GRF_PROP(MOE_GATHER_GRF)};
 #else
     return syclex::properties{syclex::sub_group_size<kSubGroupSize>};
 #endif
