@@ -34,6 +34,11 @@ MINI_PYTEST_PARAMS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def reset_device(reset_default_device):
+    pass
+
+
 def _ref_rms_norm(
     layer: RMSNorm,
     x: torch.Tensor,
@@ -559,7 +564,8 @@ def test_fused_add_rms_norm_static_fp8_quant(
 
 
 MXFP8_GROUP_SIZES = [32]
-MXFP8_HIDDEN_SIZES = [128, 1024, 5120]
+# 32..256 use the short-row kernel.
+MXFP8_HIDDEN_SIZES = [32, 64, 128, 256, 1024, 5120]
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -639,7 +645,7 @@ def test_rms_norm_per_block_mxfp8_quant(
 from tests.ops.mx_utils import to_mxfp  # noqa: E402
 
 MXFP4_GROUP_SIZE = 32
-MXFP4_HIDDEN_SIZES = [128, 1024, 5120]
+MXFP4_HIDDEN_SIZES = [32, 64, 128, 256, 1024, 5120]
 
 
 def _ops_rms_norm_mxfp4_quant(
@@ -735,3 +741,55 @@ def test_rms_norm_mxfp4_quant(
     if add_residual:
         torch.testing.assert_close(ref_residual, ops_residual,
                                    atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("num_tokens, num_heads, hidden_size", [(1, 48, 128),
+                                                                (4, 24, 128),
+                                                                (16, 12, 128),
+                                                                (3, 5, 1024)])
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_rms_norm_mx_quant_3d_input(
+    num_tokens: int,
+    num_heads: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+) -> None:
+    """A [tokens, heads, hidden] input is normalized per row of its 2-D view.
+
+    Rows used to be strided by input.stride(0), i.e. heads * hidden.
+    """
+    torch.manual_seed(0)
+    rows = num_tokens * num_heads
+    num_groups = hidden_size // 32
+    x = torch.randn(num_tokens,
+                    num_heads,
+                    hidden_size,
+                    dtype=dtype,
+                    device="xpu")
+    weight = torch.randn(hidden_size, dtype=dtype, device="xpu")
+
+    def mxfp8(inp):
+        out = torch.empty(rows,
+                          hidden_size,
+                          dtype=torch.float8_e4m3fn,
+                          device="xpu")
+        scales = torch.empty(rows, num_groups, device="xpu")
+        torch.ops._C.rms_norm_per_block_quant(out, inp, weight, scales, EPS,
+                                              None, None, 32, False, True)
+        return out.view(torch.uint8), scales
+
+    def mxfp4(inp):
+        out = torch.empty(rows,
+                          hidden_size // 2,
+                          dtype=torch.uint8,
+                          device="xpu")
+        scales = torch.empty(rows, num_groups, device="xpu")
+        torch.ops._C.rms_norm_mxfp4_quant(out, inp, weight, scales, EPS, None,
+                                          32)
+        return out, scales
+
+    x2d = x.reshape(rows, hidden_size)
+    for op in (mxfp8, mxfp4):
+        for got, want in zip(op(x), op(x2d)):
+            torch.testing.assert_close(got, want, rtol=0, atol=0)

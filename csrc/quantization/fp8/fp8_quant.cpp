@@ -4,6 +4,7 @@
 #include <sycl/sycl.hpp>
 
 #include <algorithm>
+#include <limits>
 #include <type_traits>
 
 #include "dispatch_utils.h"
@@ -13,6 +14,7 @@
 #include "quantization/fp8/fp8_quant.h"
 #include "quantization/fp8/quant_utils.h"
 #include "quantization/moe_scale_layout.h"
+#include "quantization/mx_quant_utils.h"
 #include "quantization/utils.h"
 
 namespace vllm {
@@ -558,6 +560,77 @@ class per_token_group_quant_8bit_vec_kernel {
   }
 };
 
+// MXFP8 of 16-bit input, one lane per 16-byte vector, so a group consists of 4
+// lanes: vector v is in group v / 4.
+template <typename scalar_t, typename fp8_type, mx::ScaleLayout LAYOUT>
+class per_token_group_quant_mxfp8_kernel {
+ private:
+  fp8_type* __restrict__ out;
+  float* __restrict__ scale;
+  scalar_t const* __restrict__ input;
+  const int num_vecs;
+  float eps;
+  const int scale_num_rows;
+  const int scale_stride;
+  MoEScaleLayout moe_layout;
+
+ public:
+  per_token_group_quant_mxfp8_kernel(
+      fp8_type* out_,
+      float* scale_,
+      scalar_t const* input_,
+      const int num_vecs_,
+      float eps_,
+      const int scale_num_rows_,
+      const int scale_stride_,
+      MoEScaleLayout moe_layout_)
+      : out(out_),
+        scale(scale_),
+        input(input_),
+        num_vecs(num_vecs_),
+        eps(eps_),
+        scale_num_rows(scale_num_rows_),
+        scale_stride(scale_stride_),
+        moe_layout(moe_layout_) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(32),
+        sycl::reqd_work_group_size(mx::kWorkGroupSize)]] (
+          sycl::nd_item<1> item) const {
+    constexpr int VEC = mx::kVec;
+    const int v = mx::flat_index(item);
+    const bool active = v < num_vecs;
+
+    float x[VEC];
+    float absmax = eps;
+    if (active) {
+      const auto xv = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(input)[v];
+#pragma unroll
+      for (int k = 0; k < VEC; ++k) {
+        x[k] = static_cast<float>(xv.val[k]);
+        absmax = sycl::fmax(absmax, sycl::fabs(x[k]));
+      }
+    }
+    absmax = mx::group_absmax(item.get_sub_group(), absmax, mx::kLanesPerGroup);
+    float inv_scale;
+    const float y_s = mx::mxfp8_scale<fp8_type>(absmax, inv_scale);
+    if (!active) return;
+
+    if (v % mx::kLanesPerGroup == 0) {
+      const int g = v / mx::kLanesPerGroup;
+      if constexpr (LAYOUT == mx::ScaleLayout::kMoE) {
+        moe_layout.store(g / moe_layout.scale_k, g % moe_layout.scale_k, y_s);
+      } else if constexpr (LAYOUT == mx::ScaleLayout::kColMajor) {
+        scale[(g % scale_num_rows) * scale_stride + g / scale_num_rows] = y_s;
+      } else {
+        scale[g] = y_s;
+      }
+    }
+    reinterpret_cast<mx::fp8x8_t*>(out)[v] =
+        mx::mxfp8_pack8<fp8_type>(x, inv_scale);
+  }
+};
+
 template <typename scalar_t, typename fp8_type>
 class dynamic_per_token_scaled_fp8_quant_kernel {
  private:
@@ -1065,6 +1138,55 @@ void per_token_group_quant_fp8(
   const bool use_vec = (group_size % vec_width == 0) &&
                        (hidden % vec_width == 0) &&
                        (group_size / vec_width <= 32);
+
+  const int64_t mx_num_vecs = input.numel() / vllm::mx::kVec;
+  // Groups are numbered over the flat tensor, so hidden must be a multiple of
+  // the group size (32).
+  const bool use_mx = group_size == vllm::mx::kGroupSize && scale_ue8m0 &&
+                      elem_size == 2 && hidden % vllm::mx::kGroupSize == 0 &&
+                      mx_num_vecs <= std::numeric_limits<int>::max() &&
+                      reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0 &&
+                      reinterpret_cast<uintptr_t>(output_q.data_ptr()) % 8 == 0;
+  if (use_mx) {
+    if (mx_num_vecs == 0) return;
+    auto& mqueue = vllm::xpu::vllmGetQueue();
+    const int64_t wg = vllm::mx::kWorkGroupSize;
+    sycl::range<1> mgrid((mx_num_vecs + wg - 1) / wg);
+    sycl::range<1> mblock(wg);
+    VLLM_DISPATCH_HALF_TYPES(
+        input.scalar_type(), "per_token_group_quant_mxfp8_scale_type", [&] {
+          VLLM_DISPATCH_FP8_TYPES(
+              output_q.scalar_type(), "per_token_group_quant_mxfp8_type", [&] {
+                auto launch = [&](auto layout_tag) {
+                  mqueue.submit([&](sycl::handler& cgh) {
+                    cgh.parallel_for(
+                        sycl::nd_range<1>(mgrid * mblock, mblock),
+                        vllm::per_token_group_quant_mxfp8_kernel<
+                            scalar_t,
+                            fp8_t,
+                            decltype(layout_tag)::value>(
+                            output_q.data_ptr<fp8_t>(),
+                            scale_ptr,
+                            input.data_ptr<scalar_t>(),
+                            static_cast<int>(mx_num_vecs),
+                            eps,
+                            scale_num_rows,
+                            scale_stride,
+                            moe_layout));
+                  });
+                };
+                using L = vllm::mx::ScaleLayout;
+                if (moe_layout.enabled()) {
+                  launch(std::integral_constant<L, L::kMoE>{});
+                } else if (is_column_major) {
+                  launch(std::integral_constant<L, L::kColMajor>{});
+                } else {
+                  launch(std::integral_constant<L, L::kRowMajor>{});
+                }
+              });
+        });
+    return;
+  }
 
   if (use_vec) {
     const int num_groups_per_row = hidden / group_size;

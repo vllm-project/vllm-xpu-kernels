@@ -188,3 +188,68 @@ def test_silu_and_mul_per_block_quant_edge_cases(
     assert not torch.isnan(out.float()).any()
     assert not torch.isnan(scales).any()
     assert not torch.isinf(scales).any()
+
+
+def ref_silu_and_mul_mxfp8_quant(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """MXFP8 reference in fp32, on the CPU for an exact fp8 cast."""
+    hidden = x.shape[-1] // 2
+    xf = x.float().cpu()
+    gate, up = xf[:, :hidden], xf[:, hidden:]
+    res = gate / (1.0 + torch.exp(-gate)) * up
+    grouped = res.view(res.shape[0], -1, 32)
+    fp8_max = torch.finfo(quant_dtype).max
+    min_scale = 1.0 / (fp8_max * 512.0)
+    y = (grouped.abs().amax(dim=-1) / fp8_max).clamp(min=min_scale)
+    scale = torch.exp2(torch.ceil(torch.log2(y.double()))).float()
+    q = (grouped / scale.unsqueeze(-1)).clamp(-fp8_max, fp8_max)
+    return q.view_as(res).to(quant_dtype), scale
+
+
+@pytest.mark.parametrize("num_tokens, hidden_size", [(1, 32), (1, 5120),
+                                                     (7, 96), (64, 2048),
+                                                     (300, 7168)])
+@pytest.mark.parametrize("is_scale_transposed", IS_SCALE_TRANSPOSED)
+@pytest.mark.parametrize("quant_dtype",
+                         [torch.float8_e4m3fn, torch.float8_e5m2])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@torch.inference_mode()
+def test_silu_and_mul_mxfp8_quant(
+    num_tokens: int,
+    hidden_size: int,
+    is_scale_transposed: bool,
+    quant_dtype: torch.dtype,
+    dtype: torch.dtype,
+    device: str,
+) -> None:
+    """group_size 32 with scale_ue8m0: the MXFP8 path."""
+    seed_everything(0)
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device=device)
+    x[:, ::97] *= 64  # outliers, so that groups get different scales
+
+    num_groups = hidden_size // 32
+    out = torch.empty(num_tokens,
+                      hidden_size,
+                      dtype=quant_dtype,
+                      device=device)
+    if is_scale_transposed:
+        scales = torch.empty(num_groups, num_tokens, device=device).t()
+    else:
+        scales = torch.empty(num_tokens, num_groups, device=device)
+    torch.ops._C.silu_and_mul_per_block_quant(out, x, scales, 32, None,
+                                              is_scale_transposed, True)
+
+    ref_out, ref_scales = ref_silu_and_mul_mxfp8_quant(x, quant_dtype)
+    # exp differs from the CPU's in the last bit, which can flip an fp8
+    # rounding but not a scale.
+    torch.testing.assert_close(scales.cpu(), ref_scales, rtol=0, atol=0)
+    torch.testing.assert_close(out.cpu().float(),
+                               ref_out.float(),
+                               rtol=0.13,
+                               atol=0)
+    mismatch = (out.cpu().view(torch.uint8)
+                != ref_out.view(torch.uint8)).float().mean().item()
+    assert mismatch < 1e-3, f"{mismatch:.2%} of fp8 values differ"

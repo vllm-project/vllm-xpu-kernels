@@ -4,6 +4,7 @@
 #include <sycl/sycl.hpp>
 #include <torch/all.h>
 
+#include <limits>
 #include <type_traits>
 
 #include "dispatch_utils.h"
@@ -11,10 +12,10 @@
 #include "quantization/fp8/quant_utils.h"
 #include "quantization/fused_kernels/quant_conversions.h"
 #include "quantization/moe_scale_layout.h"
+#include "quantization/mx_quant_utils.h"
 #include "quantization/utils.h"
 
 namespace vllm {
-
 template <typename scalar_t, typename out_t, int CPT>
 class silu_and_mul_per_block_quant_kernel {
  public:
@@ -156,6 +157,80 @@ class silu_and_mul_per_block_quant_kernel {
   const MoEScaleLayout moe_layout;
 };
 
+// MXFP8, one lane per 16-byte vector of the output.
+template <typename scalar_t, typename out_t, mx::ScaleLayout LAYOUT>
+class silu_and_mul_mxfp8_quant_kernel {
+ public:
+  silu_and_mul_mxfp8_quant_kernel(
+      out_t* __restrict__ out_,
+      float* __restrict__ scales_,
+      const scalar_t* __restrict__ input_,
+      const int num_vecs_,
+      const int vecs_per_row_,
+      const int num_tokens_,
+      const MoEScaleLayout moe_layout_)
+      : input(input_),
+        num_vecs(num_vecs_),
+        vecs_per_row(vecs_per_row_),
+        out(out_),
+        scales(scales_),
+        num_tokens(num_tokens_),
+        moe_layout(moe_layout_) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(32),
+        sycl::reqd_work_group_size(mx::kWorkGroupSize)]] (
+          sycl::nd_item<1> item) const {
+    constexpr int VEC = mx::kVec;
+    const int v = mx::flat_index(item);
+    const bool active = v < num_vecs;
+    const int token = v / vecs_per_row;
+    const int col = v - token * vecs_per_row;
+
+    float res[VEC];
+    float absmax = 0.0f;
+    if (active) {
+      const auto* vin = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(input);
+      const int gate = 2 * token * vecs_per_row + col;
+      const vec_n_t<scalar_t, VEC> g = vin[gate];
+      const vec_n_t<scalar_t, VEC> u = vin[gate + vecs_per_row];
+#pragma unroll
+      for (int k = 0; k < VEC; ++k) {
+        const float gf = static_cast<float>(g.val[k]);
+        const float uf = static_cast<float>(u.val[k]);
+        res[k] = (gf / (1.0f + sycl::exp(-gf))) * uf;
+        absmax = sycl::fmax(absmax, sycl::fabs(res[k]));
+      }
+    }
+    absmax = mx::group_absmax(item.get_sub_group(), absmax, mx::kLanesPerGroup);
+    float inv_scale;
+    const float y_s = mx::mxfp8_scale<out_t>(absmax, inv_scale);
+    if (!active) return;
+
+    if (col % mx::kLanesPerGroup == 0) {
+      if constexpr (LAYOUT == mx::ScaleLayout::kMoE) {
+        moe_layout.store(token, col / mx::kLanesPerGroup, y_s);
+      } else if constexpr (LAYOUT == mx::ScaleLayout::kColMajor) {
+        scales[(col / mx::kLanesPerGroup) * num_tokens + token] = y_s;
+      } else {
+        // Row-major: group v / 4.
+        scales[v / mx::kLanesPerGroup] = y_s;
+      }
+    }
+    reinterpret_cast<mx::fp8x8_t*>(out)[v] =
+        mx::mxfp8_pack8<out_t>(res, inv_scale);
+  }
+
+ private:
+  const scalar_t* __restrict__ input;
+  const int num_vecs;
+  const int vecs_per_row;
+  out_t* __restrict__ out;
+  float* __restrict__ scales;
+  const int num_tokens;
+  const MoEScaleLayout moe_layout;
+};
+
 }  // namespace vllm
 
 void silu_and_mul_per_block_quant(
@@ -232,6 +307,59 @@ void silu_and_mul_per_block_quant(
 
   const float* scale_ub_ptr =
       scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr;
+
+  const int64_t mx_num_vecs = num_tokens * hidden_size / vllm::mx::kVec;
+  const bool use_mx = group_size == vllm::mx::kGroupSize && scale_ue8m0 &&
+                      out.dtype() != torch::kInt8 && !scale_ub.has_value() &&
+                      mx_num_vecs <= std::numeric_limits<int>::max() / 2 &&
+                      reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0 &&
+                      reinterpret_cast<uintptr_t>(out.data_ptr()) % 8 == 0;
+  if (use_mx) {
+    const int64_t wg_size = vllm::mx::kWorkGroupSize;
+    const int64_t mx_num_wgs = (mx_num_vecs + wg_size - 1) / wg_size;
+    VLLM_DISPATCH_HALF_TYPES(
+        input.scalar_type(), "silu_and_mul_mxfp8_quant", [&] {
+          using sycl_t = vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+          const auto* input_ptr =
+              reinterpret_cast<const sycl_t*>(input.data_ptr<scalar_t>());
+          float* scales_ptr =
+              moe_layout.enabled() ? nullptr : scales.data_ptr<float>();
+          auto launch = [&](auto out_ptr, auto layout_tag) {
+            using out_t = std::remove_pointer_t<decltype(out_ptr)>;
+            queue.submit([&](sycl::handler& h) {
+              h.parallel_for(
+                  sycl::nd_range<1>(mx_num_wgs * wg_size, wg_size),
+                  vllm::silu_and_mul_mxfp8_quant_kernel<
+                      sycl_t,
+                      out_t,
+                      decltype(layout_tag)::value>(
+                      out_ptr,
+                      scales_ptr,
+                      input_ptr,
+                      static_cast<int>(mx_num_vecs),
+                      static_cast<int>(hidden_size / vllm::mx::kVec),
+                      static_cast<int>(num_tokens),
+                      moe_layout));
+            });
+          };
+          auto dispatch = [&](auto out_ptr) {
+            using L = vllm::mx::ScaleLayout;
+            if (moe_layout.enabled()) {
+              launch(out_ptr, std::integral_constant<L, L::kMoE>{});
+            } else if (is_scale_transposed) {
+              launch(out_ptr, std::integral_constant<L, L::kColMajor>{});
+            } else {
+              launch(out_ptr, std::integral_constant<L, L::kRowMajor>{});
+            }
+          };
+          if (out.dtype() == torch::kFloat8_e4m3fn) {
+            dispatch(out.data_ptr<at::Float8_e4m3fn>());
+          } else {
+            dispatch(out.data_ptr<at::Float8_e5m2>());
+          }
+        });
+    return;
+  }
 
   const int64_t num_wgs = num_tokens;
   // The kernel is instantiated for half types only, so a 16-byte access is

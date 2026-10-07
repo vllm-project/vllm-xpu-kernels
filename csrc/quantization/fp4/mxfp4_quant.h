@@ -385,8 +385,7 @@ inline float mxfp4_quant_one_group(
   return y_s;
 }
 
-inline float mxfp4_pow2_scale(float absmax, float eps, float& inv_scale) {
-  const float x = sycl::fmax(sycl::fabs(absmax / FP4_MAX), eps);
+inline float pow2_ceil_scale(float x, float& inv_scale) {
   const uint32_t xb = sycl::bit_cast<uint32_t>(x);
   const uint32_t e = (xb >> 23) + ((xb & 0x007FFFFFu) != 0u);
   float y_s;
@@ -394,10 +393,20 @@ inline float mxfp4_pow2_scale(float absmax, float eps, float& inv_scale) {
     y_s = sycl::bit_cast<float>(e << 23);
     inv_scale = sycl::bit_cast<float>((254u - e) << 23);
   } else {
-    y_s = sycl::exp2(sycl::ceil(sycl::log2(x)));
+    const bool tiny = xb < 0x00800000u;
+    const uint32_t sb = sycl::bit_cast<uint32_t>(tiny ? x * 0x1p64f : x);
+    const uint32_t se =
+        sycl::min((sb >> 23) + ((sb & 0x007FFFFFu) != 0u), 255u);
+    y_s = sycl::bit_cast<float>(se << 23) * (tiny ? 0x1p-64f : 1.0f);
+    if (sycl::isnan(x)) y_s = x;
     inv_scale = 1.0f / y_s;
   }
   return y_s;
+}
+
+inline float mxfp4_pow2_scale(float absmax, float eps, float& inv_scale) {
+  return pow2_ceil_scale(
+      sycl::fmax(sycl::fabs(absmax / FP4_MAX), eps), inv_scale);
 }
 
 template <typename scalar_t>

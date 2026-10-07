@@ -4,129 +4,90 @@
 #include <sycl/sycl.hpp>
 #include <torch/all.h>
 #include <ATen/DeviceGuard.h>
+
+#include <limits>
+
 #include "dispatch_utils.h"
 #include "ops.h"
 #include "utils.h"
 #include "quantization/fp4/mxfp4_quant.h"
+#include "quantization/mx_quant_utils.h"
 #include "quantization/utils.h"
 
 namespace vllm {
-
 // Input  [M, 2*H]   – concatenated (gate, up) activations
 // Output [M, H/2]   – packed FP4 nibbles, two per byte (low=even, high=odd)
 // Scales [M, H/32]  – float32 UE8M0 (power-of-two) scales
-template <typename scalar_t>
+// One lane per 16-byte vector of the output.
+template <typename scalar_t, bool COL_MAJOR>
 class silu_and_mul_mxfp4_quant_kernel {
  public:
   silu_and_mul_mxfp4_quant_kernel(
       uint8_t* __restrict__ out_,
       float* __restrict__ scales_,
       const scalar_t* __restrict__ input_,
-      const int hidden_size_,
-      const int num_groups_,
-      const int group_size_,
+      const int num_vecs_,
+      const int vecs_per_row_,
       const float epsilon_,
-      const int64_t scale_stride_token_,
-      const int64_t scale_stride_group_)
-      : out(out_),
+      const int num_tokens_)
+      : input(input_),
+        num_vecs(num_vecs_),
+        vecs_per_row(vecs_per_row_),
+        out(out_),
         scales(scales_),
-        input(input_),
-        hidden_size(hidden_size_),
-        num_groups(num_groups_),
-        group_size(group_size_),
         epsilon(epsilon_),
-        scale_stride_token(scale_stride_token_),
-        scale_stride_group(scale_stride_group_) {}
+        num_tokens(num_tokens_) {}
 
   void operator()
-      [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
-    const int token_idx = static_cast<int>(item.get_group(0));
-    const int tid = static_cast<int>(item.get_local_id(0));
-    const int local_range = static_cast<int>(item.get_local_range(0));
-    auto sg = item.get_sub_group();
-    const int lane = sg.get_local_id()[0];
+      [[sycl::reqd_sub_group_size(32),
+        sycl::reqd_work_group_size(mx::kWorkGroupSize)]] (
+          sycl::nd_item<1> item) const {
+    constexpr int VEC = mx::kVec;
+    const int v = mx::flat_index(item);
+    const bool active = v < num_vecs;
+    const int token = v / vecs_per_row;
+    const int col = v - token * vecs_per_row;
 
-    constexpr int VEC = 16 / sizeof(scalar_t);
-    const int lanes_per_group = group_size / VEC;  // 32/8 = 4
-    const int num_chunks = hidden_size / VEC;
-    constexpr float FP4_MAX = vllm::mxfp4::FP4_MAX;
-
-    const scalar_t* token_gate =
-        input + static_cast<int64_t>(token_idx) * hidden_size * 2;
-    const scalar_t* token_up = token_gate + hidden_size;
-    uint8_t* token_output =
-        out + static_cast<int64_t>(token_idx) * (hidden_size / 2);
-    const auto* vgate =
-        reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(token_gate);
-    const auto* vup = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(token_up);
-    auto* vout = reinterpret_cast<vec_n_t<uint8_t, VEC / 2>*>(token_output);
-
-    for (int base = 0; base < num_chunks; base += local_range) {
-      const int c = base + tid;
-      const bool active = c < num_chunks;
-
-      float res[VEC];
-      float lane_absmax = 0.0f;
-      if (active) {
-        vec_n_t<scalar_t, VEC> g = vgate[c];
-        vec_n_t<scalar_t, VEC> u = vup[c];
+    float res[VEC];
+    float absmax = 0.0f;
+    if (active) {
+      const auto* vin = reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(input);
+      const int gate = 2 * token * vecs_per_row + col;
+      const vec_n_t<scalar_t, VEC> g = vin[gate];
+      const vec_n_t<scalar_t, VEC> u = vin[gate + vecs_per_row];
 #pragma unroll
-        for (int k = 0; k < VEC; ++k) {
-          const float gf = static_cast<float>(g.val[k]);
-          const float uf = static_cast<float>(u.val[k]);
-          const float r = (gf / (1.0f + sycl::exp(-gf))) * uf;
-          res[k] = r;
-          lane_absmax = sycl::max(lane_absmax, sycl::fabs(r));
-        }
-      }
-
-      float gmax = lane_absmax;
-#pragma unroll
-      for (int off = 1; off < lanes_per_group; off <<= 1) {
-        gmax = sycl::max(gmax, sycl::permute_group_by_xor(sg, gmax, off));
-      }
-
-      float y_s = gmax / FP4_MAX;
-      y_s = sycl::exp2(
-          sycl::ceil(sycl::log2(sycl::fmax(sycl::fabs(y_s), epsilon))));
-
-      if (active && (lane % lanes_per_group) == 0) {
-        const int g_idx = c / lanes_per_group;
-        const int64_t scale_idx =
-            static_cast<int64_t>(token_idx) * scale_stride_token +
-            static_cast<int64_t>(g_idx) * scale_stride_group;
-        scales[scale_idx] = y_s;
-      }
-
-      if (active) {
-        const float inv_scale = 1.0f / y_s;
-        vec_n_t<uint8_t, VEC / 2> o;
-#pragma unroll
-        for (int k = 0; k < VEC; k += 2) {
-          float s0 =
-              sycl::fmax(-FP4_MAX, sycl::fmin(res[k] * inv_scale, FP4_MAX));
-          float s1 =
-              sycl::fmax(-FP4_MAX, sycl::fmin(res[k + 1] * inv_scale, FP4_MAX));
-          uint8_t n0 = vllm::mxfp4::float_to_fp4_e2m1(s0);
-          uint8_t n1 = vllm::mxfp4::float_to_fp4_e2m1(s1);
-          o.val[k / 2] =
-              static_cast<uint8_t>(((n1 & 0x0Fu) << 4) | (n0 & 0x0Fu));
-        }
-        vout[c] = o;
+      for (int k = 0; k < VEC; ++k) {
+        const float gf = static_cast<float>(g.val[k]);
+        const float uf = static_cast<float>(u.val[k]);
+        res[k] = (gf / (1.0f + sycl::exp(-gf))) * uf;
+        absmax = sycl::fmax(absmax, sycl::fabs(res[k]));
       }
     }
+    absmax = mx::group_absmax(item.get_sub_group(), absmax, mx::kLanesPerGroup);
+    float inv_scale;
+    const float y_s = mxfp4::mxfp4_pow2_scale(absmax, epsilon, inv_scale);
+    const uint32_t o = mxfp4::mxfp4_pack8<float>(res, inv_scale);
+    if (!active) return;
+
+    if (col % mx::kLanesPerGroup == 0) {
+      if constexpr (COL_MAJOR) {
+        scales[(col / mx::kLanesPerGroup) * num_tokens + token] = y_s;
+      } else {
+        // Row-major: group v / 4.
+        scales[v / mx::kLanesPerGroup] = y_s;
+      }
+    }
+    reinterpret_cast<uint32_t*>(out)[v] = o;
   }
 
  private:
+  const scalar_t* __restrict__ input;
+  const int num_vecs;
+  const int vecs_per_row;
   uint8_t* __restrict__ out;
   float* __restrict__ scales;
-  const scalar_t* __restrict__ input;
-  const int hidden_size;
-  const int num_groups;
-  const int group_size;
   const float epsilon;
-  const int64_t scale_stride_token;
-  const int64_t scale_stride_group;
+  const int num_tokens;
 };
 
 }  // namespace vllm
@@ -171,17 +132,19 @@ void silu_and_mul_mxfp4_quant(
   if (num_tokens == 0) return;
 
   const bool is_scale_transposed = scales.stride(0) < scales.stride(1);
-  const int64_t scale_stride_token =
-      is_scale_transposed ? 1LL : static_cast<int64_t>(num_groups);
-  const int64_t scale_stride_group = is_scale_transposed ? num_tokens : 1LL;
 
   const at::DeviceGuard device_guard(input.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  const int64_t num_wgs = num_tokens;
-  const int64_t num_chunks = hidden_size / 8;  // 16 bytes / 2-byte half
-  int64_t wg_size = std::min<int64_t>(((num_chunks + 31) / 32) * 32, 1024);
-  if (wg_size < 32) wg_size = 32;
+  const int64_t num_vecs = num_tokens * hidden_size / vllm::mx::kVec;
+  TORCH_CHECK(
+      num_vecs <= std::numeric_limits<int>::max() / 2, "input is too large");
+  TORCH_CHECK(
+      reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0 &&
+          reinterpret_cast<uintptr_t>(out.data_ptr()) % 4 == 0,
+      "input must be 16-byte and out 4-byte aligned");
+  const int64_t wg_size = vllm::mx::kWorkGroupSize;
+  const int64_t num_wgs = (num_vecs + wg_size - 1) / wg_size;
 
   VLLM_DISPATCH_HALF_TYPES(
       input.scalar_type(), "silu_and_mul_mxfp4_quant", [&] {
@@ -191,19 +154,26 @@ void silu_and_mul_mxfp4_quant(
         float* scales_ptr = scales.data_ptr<float>();
         uint8_t* out_ptr = out.data_ptr<uint8_t>();
 
-        queue.submit([&](sycl::handler& h) {
-          h.parallel_for(
-              sycl::nd_range<1>(num_wgs * wg_size, wg_size),
-              vllm::silu_and_mul_mxfp4_quant_kernel<sycl_t>(
-                  out_ptr,
-                  scales_ptr,
-                  input_ptr,
-                  static_cast<int>(hidden_size),
-                  static_cast<int>(num_groups),
-                  static_cast<int>(group_size),
-                  static_cast<float>(eps),
-                  scale_stride_token,
-                  scale_stride_group));
-        });
+        auto launch = [&](auto col_major_tag) {
+          queue.submit([&](sycl::handler& h) {
+            h.parallel_for(
+                sycl::nd_range<1>(num_wgs * wg_size, wg_size),
+                vllm::silu_and_mul_mxfp4_quant_kernel<
+                    sycl_t,
+                    decltype(col_major_tag)::value>(
+                    out_ptr,
+                    scales_ptr,
+                    input_ptr,
+                    static_cast<int>(num_vecs),
+                    static_cast<int>(hidden_size / vllm::mx::kVec),
+                    static_cast<float>(eps),
+                    static_cast<int>(num_tokens)));
+          });
+        };
+        if (is_scale_transposed) {
+          launch(std::true_type{});
+        } else {
+          launch(std::false_type{});
+        }
       });
 }
