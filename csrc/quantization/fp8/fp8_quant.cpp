@@ -562,11 +562,15 @@ class per_token_group_quant_8bit_vec_kernel {
 
 // MXFP8 of 16-bit input, one lane per 16-byte vector, so a group consists of 4
 // lanes: vector v is in group v / 4.
-template <typename scalar_t, typename fp8_type, mx::ScaleLayout LAYOUT>
+template <
+    typename scalar_t,
+    typename fp8_type,
+    typename scale_t,
+    mx::ScaleLayout LAYOUT>
 class per_token_group_quant_mxfp8_kernel {
  private:
   fp8_type* __restrict__ out;
-  float* __restrict__ scale;
+  scale_t* __restrict__ scale;
   scalar_t const* __restrict__ input;
   const int num_vecs;
   float eps;
@@ -577,7 +581,7 @@ class per_token_group_quant_mxfp8_kernel {
  public:
   per_token_group_quant_mxfp8_kernel(
       fp8_type* out_,
-      float* scale_,
+      scale_t* scale_,
       scalar_t const* input_,
       const int num_vecs_,
       float eps_,
@@ -611,19 +615,50 @@ class per_token_group_quant_mxfp8_kernel {
         absmax = sycl::fmax(absmax, sycl::fabs(x[k]));
       }
     }
-    absmax = mx::group_absmax(item.get_sub_group(), absmax, mx::kLanesPerGroup);
+    auto sg = item.get_sub_group();
+    absmax = mx::group_absmax(sg, absmax, mx::kLanesPerGroup);
     float inv_scale;
     const float y_s = mx::mxfp8_scale<fp8_type>(absmax, inv_scale);
+
+    constexpr bool kPackedE8m0 =
+        !std::is_same_v<scale_t, float> && LAYOUT == mx::ScaleLayout::kRowMajor;
+    if constexpr (kPackedE8m0) {
+      using scale8_t = vec_n_t<uint8_t, 8>;
+      const uint32_t e = MoEScaleLayout::encode(y_s);
+      scale8_t packed;
+#pragma unroll
+      for (int k = 0; k < 8; ++k) {
+        packed.val[k] = static_cast<uint8_t>(
+            sycl::select_from_group(sg, e, k * mx::kLanesPerGroup));
+      }
+      if (active && sg.get_local_linear_id() == 0) {
+        const int g = v / mx::kLanesPerGroup;
+        const int num_g = num_vecs / mx::kLanesPerGroup;
+        if (g + 8 <= num_g && reinterpret_cast<uintptr_t>(scale + g) % 8 == 0) {
+          *reinterpret_cast<scale8_t*>(scale + g) = packed;
+        } else {
+          for (int k = 0; k < 8 && g + k < num_g; ++k) {
+            scale[g + k] = packed.val[k];
+          }
+        }
+      }
+    }
     if (!active) return;
 
-    if (v % mx::kLanesPerGroup == 0) {
+    if (!kPackedE8m0 && v % mx::kLanesPerGroup == 0) {
       const int g = v / mx::kLanesPerGroup;
+      scale_t s;
+      if constexpr (std::is_same_v<scale_t, float>) {
+        s = y_s;
+      } else {
+        s = MoEScaleLayout::encode(y_s);
+      }
       if constexpr (LAYOUT == mx::ScaleLayout::kMoE) {
         moe_layout.store(g / moe_layout.scale_k, g % moe_layout.scale_k, y_s);
       } else if constexpr (LAYOUT == mx::ScaleLayout::kColMajor) {
-        scale[(g % scale_num_rows) * scale_stride + g / scale_num_rows] = y_s;
+        scale[(g % scale_num_rows) * scale_stride + g / scale_num_rows] = s;
       } else {
-        scale[g] = y_s;
+        scale[g] = s;
       }
     }
     reinterpret_cast<mx::fp8x8_t*>(out)[v] =
@@ -1116,8 +1151,13 @@ void per_token_group_quant_fp8(
       !moe_layout.enabled() && output_s.stride(0) < output_s.stride(1);
   const int scale_num_rows = output_s.size(1);
   const int scale_stride = output_s.stride(1);
-  float* const scale_ptr =
-      moe_layout.enabled() ? nullptr : output_s.data_ptr<float>();
+  const bool scale_is_e8m0 =
+      !moe_layout.enabled() &&
+      (output_s.scalar_type() == at::ScalarType::Float8_e8m0fnu ||
+       output_s.scalar_type() == at::ScalarType::Byte);
+  float* const scale_ptr = moe_layout.enabled() || scale_is_e8m0
+                               ? nullptr
+                               : output_s.data_ptr<float>();
 
   // Fast vectorized path: one work-group per row with 16-byte loads. Requires
   // group_size to be a multiple of the (dtype-dependent) vector width.
@@ -1147,6 +1187,10 @@ void per_token_group_quant_fp8(
                       mx_num_vecs <= std::numeric_limits<int>::max() &&
                       reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0 &&
                       reinterpret_cast<uintptr_t>(output_q.data_ptr()) % 8 == 0;
+  TORCH_CHECK(
+      !scale_is_e8m0 || use_mx,
+      "e8m0 output_s requires group_size 32, scale_ue8m0, 16-bit input, a "
+      "hidden size divisible by 32 and aligned tensors");
   if (use_mx) {
     if (mx_num_vecs == 0) return;
     auto& mqueue = vllm::xpu::vllmGetQueue();
@@ -1157,16 +1201,17 @@ void per_token_group_quant_fp8(
         input.scalar_type(), "per_token_group_quant_mxfp8_scale_type", [&] {
           VLLM_DISPATCH_FP8_TYPES(
               output_q.scalar_type(), "per_token_group_quant_mxfp8_type", [&] {
-                auto launch = [&](auto layout_tag) {
+                auto launch = [&](auto out_s, auto layout_tag) {
                   mqueue.submit([&](sycl::handler& cgh) {
                     cgh.parallel_for(
                         sycl::nd_range<1>(mgrid * mblock, mblock),
                         vllm::per_token_group_quant_mxfp8_kernel<
                             scalar_t,
                             fp8_t,
+                            std::remove_pointer_t<decltype(out_s)>,
                             decltype(layout_tag)::value>(
                             output_q.data_ptr<fp8_t>(),
-                            scale_ptr,
+                            out_s,
                             input.data_ptr<scalar_t>(),
                             static_cast<int>(mx_num_vecs),
                             eps,
@@ -1176,12 +1221,19 @@ void per_token_group_quant_fp8(
                   });
                 };
                 using L = vllm::mx::ScaleLayout;
-                if (moe_layout.enabled()) {
-                  launch(std::integral_constant<L, L::kMoE>{});
-                } else if (is_column_major) {
-                  launch(std::integral_constant<L, L::kColMajor>{});
+                auto by_layout = [&](auto out_s) {
+                  if (moe_layout.enabled()) {
+                    launch(out_s, std::integral_constant<L, L::kMoE>{});
+                  } else if (is_column_major) {
+                    launch(out_s, std::integral_constant<L, L::kColMajor>{});
+                  } else {
+                    launch(out_s, std::integral_constant<L, L::kRowMajor>{});
+                  }
+                };
+                if (scale_is_e8m0) {
+                  by_layout(reinterpret_cast<uint8_t*>(output_s.data_ptr()));
                 } else {
-                  launch(std::integral_constant<L, L::kRowMajor>{});
+                  by_layout(scale_ptr);
                 }
               });
         });

@@ -542,6 +542,38 @@ def test_static_fp8_quant_1d_scale(
                                atol=0.0)
 
 
+@pytest.mark.parametrize("num_tokens, hidden_size", [(1, 32), (64, 2560)])
+@pytest.mark.parametrize("column_major", [False, True])
+@torch.inference_mode()
+def test_per_token_group_quant_mxfp8_e8m0_scales(num_tokens: int,
+                                                 hidden_size: int,
+                                                 column_major: bool) -> None:
+    torch.manual_seed(0)
+    x = torch.randn(num_tokens,
+                    hidden_size,
+                    dtype=torch.bfloat16,
+                    device="xpu")
+
+    def run(scale_dtype):
+        q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+        shape = (num_tokens, hidden_size // 32)
+        if column_major:
+            s = torch.empty(shape[::-1],
+                            dtype=scale_dtype,
+                            device="xpu").t()
+        else:
+            s = torch.empty(shape, dtype=scale_dtype, device="xpu")
+        torch.ops._C.per_token_group_fp8_quant(x, q, s, 32, 1e-10, -448.0,
+                                               448.0, True, False, False)
+        return q, s
+
+    ref_q, ref_s = run(torch.float32)
+    q, s = run(torch.float8_e8m0fnu)
+    assert torch.equal(q.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(s.view(torch.uint8),
+                       ref_s.to(torch.float8_e8m0fnu).view(torch.uint8))
+
+
 if __name__ == "__main__":
     test_dynamic_per_tensor_fp8_quant(1024, 1024, torch.float8_e5m2,
                                       torch.float16, 0)
