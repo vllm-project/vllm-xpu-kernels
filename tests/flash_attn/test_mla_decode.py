@@ -14,12 +14,24 @@ decode is expressed as a varlen call by:
 """
 
 
+from typing import Union
+
 import pytest
 import torch
 
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 DEVICE = "xpu"
+
+
+@pytest.fixture(autouse=True)
+def require_compiled_decode(monkeypatch):
+    def reject_fallback(*args, **kwargs):
+        pytest.fail("MLA kernel test reached the Python reference fallback")
+
+    monkeypatch.setattr(
+        "vllm_xpu_kernels.flash_attn_interface._fallback_varlen_attn",
+        reject_fallback)
 
 
 def _ref_mla_decode(
@@ -31,7 +43,12 @@ def _ref_mla_decode(
     seqused_k: torch.Tensor,     # [b]
     softmax_scale: float,
     causal: bool,
-) -> torch.Tensor:
+    return_softmax_lse: bool = False,
+) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    """Return output [tokens, h_q, lora], optionally paired with softmax LSE.
+
+    LSE has shape [num_heads_q, total_q_tokens], concatenated along tokens.
+    """
     lora = q_nope.shape[-1]
     rope = q_pe.shape[-1]
     head_qk = lora + rope
@@ -40,6 +57,7 @@ def _ref_mla_decode(
     cu = cu_seqlens_q.cpu().tolist()
     sk = seqused_k.cpu().tolist()
     out_chunks = []
+    lse_chunks = []
     for i in range(len(sk)):
         q0, q1 = cu[i], cu[i + 1]
         ql = q1 - q0
@@ -51,17 +69,22 @@ def _ref_mla_decode(
         v = kv[:, :lora]                            # [kl, lora]
         q = torch.cat([q_nope[q0:q1],
                        q_pe[q0:q1]], dim=-1)  # [ql, h_q, head_qk]
-        attn = torch.einsum("qhd,kd->hqk", q, k).float() * softmax_scale
+        attn = torch.einsum("qhd,kd->hqk", q.float(), k.float()) * softmax_scale
         if causal and ql > 1:
             mask = torch.triu(
                 torch.ones(ql, kl, device=attn.device, dtype=torch.bool),
                 diagonal=kl - ql + 1,
             )
             attn.masked_fill_(mask, float("-inf"))
+        if return_softmax_lse:
+            lse_chunks.append(torch.logsumexp(attn, dim=-1))
         attn = torch.softmax(attn, dim=-1).to(v.dtype)
         out = torch.einsum("hqk,kd->qhd", attn, v)
         out_chunks.append(out)
-    return torch.cat(out_chunks, dim=0)
+    output = torch.cat(out_chunks, dim=0)
+    if return_softmax_lse:
+        return output, torch.cat(lse_chunks, dim=-1)
+    return output
 
 
 def _make_inputs(
@@ -98,6 +121,8 @@ def _make_inputs(
 def _mla_decode_via_varlen(
     q_nope, q_pe, cache, block_table, cu_seqlens_q, seqused_k,
     max_seqlen_q, max_seqlen_k, softmax_scale,
+    *, num_splits_kv=None, return_softmax_lse=False, host_kv_lens=None,
+    v_head_size=None,
 ):
     """Pack MLA inputs and call ``flash_attn_varlen_func``.
 
@@ -111,7 +136,8 @@ def _mla_decode_via_varlen(
     assert cache.dim() == 4 and cache.size(-2) == 1
 
     k_cache = cache
-    v_cache = cache.narrow(-1, 0, kv_lora_rank)
+    v_cache = cache.narrow(
+        -1, 0, kv_lora_rank if v_head_size is None else v_head_size)
     # Sanity: V must remain non-contiguous in seq stride but contiguous in
     # the last dim (kernel honors per-tensor strides).
     assert v_cache.stride(-1) == 1
@@ -121,6 +147,8 @@ def _mla_decode_via_varlen(
     if not q.is_contiguous():
         q = q.contiguous()
 
+    length_args = ({"seqused_k": seqused_k} if host_kv_lens is None else
+                   {"host_kv_lens": host_kv_lens})
     return flash_attn_varlen_func(
         q,
         k_cache,
@@ -128,11 +156,13 @@ def _mla_decode_via_varlen(
         max_seqlen_q=max_seqlen_q,
         cu_seqlens_q=cu_seqlens_q,
         max_seqlen_k=max_seqlen_k,
-        seqused_k=seqused_k,
         block_table=block_table,
         softmax_scale=softmax_scale,
         causal=False,
         fa_version=2,
+        num_splits_kv=num_splits_kv,
+        return_softmax_lse=return_softmax_lse,
+        **length_args,
     )
 
 
@@ -179,32 +209,62 @@ def test_mla_decode_deepseek_v3(block_size, query_lens, kv_lens, num_heads_q):
 
 
 @pytest.mark.parametrize("num_heads_q", [16, 32])
-@pytest.mark.parametrize("block_size", [64, 128])
-def test_mla_decode_large_q_packed(num_heads_q, block_size):
-    """q_packed > 8 must work at head_size_qk=576.
-
-    The decode policies cap the per-work-group V tile at 256 and split V
-    across grid.x (see decode_shapeout_v in fmha_utils.hpp), which keeps the
-    epilogue's cross-SG SLM reduction buffer at 64 KiB for q_packed=16
-    instead of the 128 KiB that previously hung at submit and therefore had
-    to be rejected up front.
-    """
+@pytest.mark.parametrize("block_size", [64, 128, 192, 256])
+@pytest.mark.parametrize("batch", [1, 2, 4])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("num_splits_kv", [None, 1, 8])
+@pytest.mark.parametrize("path", ["seqused", "hostlens"])
+def test_mla_decode_large_q_packed(num_heads_q, block_size, batch, dtype,
+                                  num_splits_kv, path):
+    """Cover Q8/Q16 dispatch, split reduction, and partial KV tiles."""
     if not torch.xpu.is_available():
         pytest.skip("XPU not available")
     kv_lora_rank, rope = 512, 64
-    query_lens, kv_lens = [1, 1], [129, 4096]
+    query_lens = [1] * batch
+    kv_lens = {
+        1: [2113],
+        2: [block_size + 1, 2113],
+        4: [block_size - 1, block_size, block_size + 1, 2113],
+    }[batch]
     q_nope, q_pe, cache, cu_q, sk, bt = _make_inputs(
-        batch=2, query_lens=query_lens, kv_lens=kv_lens,
+        batch=batch, query_lens=query_lens, kv_lens=kv_lens,
         num_heads_q=num_heads_q, kv_lora_rank=kv_lora_rank,
         qk_rope_head_dim=rope, block_size=block_size, num_blocks=256,
-        dtype=torch.bfloat16)
+        dtype=dtype)
     softmax_scale = (kv_lora_rank + rope)**-0.5
 
-    out = _mla_decode_via_varlen(
+    out, lse = _mla_decode_via_varlen(
         q_nope, q_pe, cache, bt, cu_q, sk,
         max_seqlen_q=1, max_seqlen_k=max(kv_lens),
         softmax_scale=softmax_scale,
+        num_splits_kv=num_splits_kv,
+        return_softmax_lse=True,
+        host_kv_lens=kv_lens if path == "hostlens" else None,
     )
-    ref = _ref_mla_decode(q_nope, q_pe, cache, bt, cu_q, sk,
-                          softmax_scale, causal=False)
+    ref, ref_lse = _ref_mla_decode(
+        q_nope, q_pe, cache, bt, cu_q, sk, softmax_scale,
+        causal=False, return_softmax_lse=True)
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(lse, ref_lse, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("head_qk", [544, 576])
+@pytest.mark.parametrize("num_heads_q", [8, 32])
+def test_mla_decode_default_v_width(head_qk, num_heads_q):
+    """Non-split-V shapes in the 576 bucket retain the default policy."""
+    if not torch.xpu.is_available():
+        pytest.skip("XPU not available")
+    kv_lens = [37, 65, 129, 2113]
+    q_nope, q_pe, cache, cu_q, sk, bt = _make_inputs(
+        batch=4, query_lens=[1] * 4, kv_lens=kv_lens,
+        num_heads_q=num_heads_q, kv_lora_rank=512,
+        qk_rope_head_dim=head_qk - 512, block_size=64, num_blocks=256,
+        dtype=torch.bfloat16)
+    softmax_scale = head_qk**-0.5
+    out = _mla_decode_via_varlen(
+        q_nope, q_pe, cache, bt, cu_q, sk,
+        max_seqlen_q=1, max_seqlen_k=max(kv_lens),
+        softmax_scale=softmax_scale, v_head_size=256, num_splits_kv=1)
+    ref = _ref_mla_decode(
+        q_nope, q_pe, cache, bt, cu_q, sk, softmax_scale, causal=False)
+    torch.testing.assert_close(out, ref[..., :256], atol=2e-2, rtol=2e-2)
