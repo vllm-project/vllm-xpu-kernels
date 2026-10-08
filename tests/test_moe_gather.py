@@ -9,7 +9,7 @@ DEVICE = "xpu"
 INPUT_LENGTHS = [1, 8, 1024, 8192]
 HIDDEN_SIZE = [128, 1024, 8192]
 NUM_EXPERTS = [16, 32, 128]
-TOP_KS = [1, 4, 6, 8, 16]
+TOP_KS = [1, 4, 6, 8, 12, 16]
 EP_RANK = [0, 1, 2, 3]
 EP_SIZE = [4]
 
