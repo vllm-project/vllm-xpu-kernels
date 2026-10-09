@@ -2,6 +2,7 @@
 
 #include "../utils.h"
 #include "../dispatch_utils.h"
+#include "packed_topk.hpp"
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -288,6 +289,8 @@ class MoeTopK {
   This implementation assumes k is small, but will work for any k.
 */
 
+struct EmptyTopkScratch {};
+
 template <
     int VPT,
     int NUM_EXPERTS,
@@ -296,10 +299,18 @@ template <
     int WARP_SIZE_PARAM,
     typename InputdType,
     typename IndType,
-    ScoringFunc ScoringFuncParam>
+    ScoringFunc ScoringFuncParam,
+    bool HAS_BIAS,
+    bool COMPACT>
 class TopKGating {
+  using Scratch = std::conditional_t<
+      COMPACT,
+      sycl::local_accessor<uint64_t, 1>,
+      EmptyTopkScratch>;
+
  public:
   TopKGating(
+      Scratch candidate_scratch,
       const InputdType* input,
       const bool* finished,
       float* output,
@@ -313,7 +324,8 @@ class TopKGating {
       const float* bias,
       const double routed_scaling_factor,
       const bool* is_padding)
-      : input(input),
+      : candidate_scratch(candidate_scratch),
+        input(input),
         finished(finished),
         output(output),
         num_rows(num_rows),
@@ -327,8 +339,8 @@ class TopKGating {
         routed_scaling_factor(routed_scaling_factor),
         is_padding(is_padding) {}
 
-  void operator()
-      [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<2> item) const {
+  void operator() [[sycl::reqd_sub_group_size(WARP_SIZE_PARAM)]] (
+      sycl::nd_item<2> item) const {
     auto sg = item.get_sub_group();
     auto local_id_x = item.get_local_id(1);
     auto local_id_y = item.get_local_id(0);
@@ -432,14 +444,19 @@ class TopKGating {
         thread_max = MAX(thread_max, row_chunk[ii]);
       }
 
-// Now, we find the max within the thread group and distribute among the
-// threads. We use a butterfly reduce.
-#pragma unroll
-      for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-        auto other_thread_max =
-            sycl::permute_group_by_xor(sg, thread_max, mask);
+      // Now, we find the max within the thread group and distribute among the
+      // threads. We use a butterfly reduce.
+      if constexpr (THREADS_PER_ROW == WARP_SIZE_PARAM) {
         thread_max =
-            thread_max > other_thread_max ? thread_max : other_thread_max;
+            sycl::reduce_over_group(sg, thread_max, sycl::maximum<float>());
+      } else {
+#pragma unroll
+        for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+          auto other_thread_max =
+              sycl::permute_group_by_xor(sg, thread_max, mask);
+          thread_max =
+              thread_max > other_thread_max ? thread_max : other_thread_max;
+        }
       }
 
       // From this point, thread max in all the threads have the max within the
@@ -448,15 +465,19 @@ class TopKGating {
       float row_sum = 0;
 #pragma unroll
       for (int ii = 0; ii < VPT; ++ii) {
-        row_chunk[ii] = sycl::exp(row_chunk[ii] - thread_max);
+        row_chunk[ii] = sycl::native::exp(row_chunk[ii] - thread_max);
         row_sum += row_chunk[ii];
       }
 
-// Now, we perform the sum reduce within each thread group. Similar to the max
-// reduce, we use a bufferfly pattern.
+      // Now, we perform the sum reduce within each thread group. Similar to the
+      // max reduce, we use a bufferfly pattern.
+      if constexpr (THREADS_PER_ROW == WARP_SIZE_PARAM) {
+        row_sum = sycl::reduce_over_group(sg, row_sum, sycl::plus<float>());
+      } else {
 #pragma unroll
-      for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-        row_sum += sycl::permute_group_by_xor(sg, row_sum, mask);
+        for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+          row_sum += sycl::permute_group_by_xor(sg, row_sum, mask);
+        }
       }
 
       // From this point, all threads have the max and the sum for their rows in
@@ -481,10 +502,23 @@ class TopKGating {
 
     static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
 
+    if constexpr (COMPACT) {
+      if (compact_topk<ELTS_PER_LDG, COLS_PER_GROUP_LDG>(
+              row_chunk,
+              sg,
+              local_id_y * WARP_SIZE_PARAM,
+              first_elt_read_by_thread,
+              thread_row,
+              row_is_active,
+              is_pad_row)) {
+        return;
+      }
+    }
+
     // If bias is not null, use biased value for selection
     float row_chunk_with_bias[VPT];
     // Apply correction bias
-    if (bias != nullptr) {
+    if constexpr (HAS_BIAS) {
 #pragma unroll
       for (int ldg = 0; ldg < LDG_PER_THREAD; ++ldg) {
 #pragma unroll
@@ -507,28 +541,35 @@ class TopKGating {
     // find the topk elements in each row, along with the max index.
     int start_col = first_elt_read_by_thread;
     float sum_val = 0.0f;
+    float selected_weight = 0.0f;
+    int selected_expert = 0;
 
     for (int k_idx = 0; k_idx < k; ++k_idx) {
       // First, each thread does the local argmax
       float max_val_with_bias = row_chunk_with_bias[0];
       float max_val = row_chunk[0];
       int expert_local = start_col;
-      int max_val_idx = 0;
+      if constexpr (
+          !HAS_BIAS && VPT >= 8 && VPT % 4 == 0 &&
+          THREADS_PER_ROW == WARP_SIZE_PARAM) {
+        local_argmax<ELTS_PER_LDG, COLS_PER_GROUP_LDG>(
+            row_chunk_with_bias, start_col, max_val_with_bias, expert_local);
+      } else {
 #pragma unroll
-      for (int ldg = 0, col = start_col; ldg < LDG_PER_THREAD;
-           ++ldg, col += COLS_PER_GROUP_LDG) {
+        for (int ldg = 0, col = start_col; ldg < LDG_PER_THREAD;
+             ++ldg, col += COLS_PER_GROUP_LDG) {
 #pragma unroll
-        for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
-          float val_with_bias = row_chunk_with_bias[ldg * ELTS_PER_LDG + ii];
-          float val = row_chunk[ldg * ELTS_PER_LDG + ii];
+          for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
+            float val_with_bias = row_chunk_with_bias[ldg * ELTS_PER_LDG + ii];
+            float val = row_chunk[ldg * ELTS_PER_LDG + ii];
 
-          // No check on the experts here since columns with the smallest index
-          // are processed first and only updated if > (not >=)
-          if (val_with_bias > max_val_with_bias) {
-            max_val_with_bias = val_with_bias;
-            max_val = val;
-            expert_local = col + ii;
-            max_val_idx = ldg * ELTS_PER_LDG + ii;
+            // Columns with the smallest index are processed first and only
+            // updated if > (not >=).
+            if (val_with_bias > max_val_with_bias) {
+              max_val_with_bias = val_with_bias;
+              max_val = val;
+              expert_local = col + ii;
+            }
           }
         }
       }
@@ -539,58 +580,84 @@ class TopKGating {
       // then blank out their max with -inf and the warp can run more
       // iterations...
       int expert = expert_local;
+      if constexpr (THREADS_PER_ROW == WARP_SIZE_PARAM) {
+        const float local_max_with_bias = max_val_with_bias;
+        max_val_with_bias = sycl::reduce_over_group(
+            sg, max_val_with_bias, sycl::maximum<float>());
+        expert = sycl::reduce_over_group(
+            sg,
+            local_max_with_bias == max_val_with_bias ? expert_local
+                                                     : 0x7fffffff,
+            sycl::minimum<int>());
+        if constexpr (HAS_BIAS) {
+          max_val = sycl::select_from_group(
+              sg, max_val, (expert / ELTS_PER_LDG) % THREADS_PER_ROW);
+        } else {
+          max_val = max_val_with_bias;
+        }
+      } else {
 #pragma unroll
-      for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-        float other_max_with_bias =
-            sycl::permute_group_by_xor(sg, max_val_with_bias, mask);
-        float other_max = sycl::permute_group_by_xor(sg, max_val, mask);
-        int other_expert = sycl::permute_group_by_xor(sg, expert, mask);
+        for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+          float other_max_with_bias =
+              sycl::permute_group_by_xor(sg, max_val_with_bias, mask);
+          float other_max = sycl::permute_group_by_xor(sg, max_val, mask);
+          int other_expert = sycl::permute_group_by_xor(sg, expert, mask);
 
-        // We want lower indices to "win" in every thread so we break ties this
-        // way
-        if (other_max_with_bias > max_val_with_bias ||
-            (other_max_with_bias == max_val_with_bias &&
-             other_expert < expert)) {
-          max_val_with_bias = other_max_with_bias;
-          max_val = other_max;
-          expert = other_expert;
+          // Lower indices win ties in every thread.
+          if (other_max_with_bias > max_val_with_bias ||
+              (other_max_with_bias == max_val_with_bias &&
+               other_expert < expert)) {
+            max_val_with_bias = other_max_with_bias;
+            max_val = other_max;
+            expert = other_expert;
+          }
         }
       }
 
       sum_val += is_pad_row ? 0.0f : max_val;
 
-      // Write the max for this k iteration to global memory.
-      if (thread_group_idx == 0) {
-        // Add a guard to ignore experts not included by this node
-        const bool node_uses_expert =
-            expert >= start_expert && expert < end_expert;
-        const bool should_process_row = row_is_active && node_uses_expert;
-
-        // The lead thread from each sub-group will write out the final results
-        // to global memory. (This will be a single) thread per row of the
-        // input/output matrices.
-        const int idx = k * thread_row + k_idx;
-        output[idx] = is_pad_row ? 0.0f : max_val;
-        indices[idx] =
-            is_pad_row
-                ? static_cast<IndType>(-1)
-                : (should_process_row ? (expert - start_expert) : NUM_EXPERTS);
-        source_rows[idx] = k_idx * num_rows + thread_row;
+      if (k <= THREADS_PER_ROW) {
+        if (thread_group_idx == k_idx) {
+          selected_weight = max_val;
+          selected_expert = expert;
+        }
+      } else if (thread_group_idx == 0) {
+        store_result(
+            thread_row, k_idx, expert, max_val, row_is_active, is_pad_row);
       }
 
       // Finally, we clear the value in the thread with the current max if there
       // is another iteration to run.
-      if (expert == expert_local) {
-        row_chunk_with_bias[max_val_idx] = -10000.f;
+#pragma unroll
+      for (int ldg = 0; ldg < LDG_PER_THREAD; ++ldg) {
+#pragma unroll
+        for (int element = 0; element < ELTS_PER_LDG; ++element) {
+          const int column = start_col + ldg * COLS_PER_GROUP_LDG + element;
+          if (expert == column) {
+            row_chunk_with_bias[ldg * ELTS_PER_LDG + element] = -10000.f;
+          }
+        }
       }
     }
 
-    if (thread_group_idx == 0) {
-      float scale = static_cast<float>(routed_scaling_factor);
-      if (renormalize) {
-        const float denom = sum_val > 0.0f ? sum_val : 1.0f;
-        scale /= denom;
+    float scale = static_cast<float>(routed_scaling_factor);
+    if (renormalize) {
+      const float denom = sum_val > 0.0f ? sum_val : 1.0f;
+      scale /= denom;
+    }
+    if (k <= THREADS_PER_ROW) {
+      if (thread_group_idx < k) {
+        store_result(
+            thread_row,
+            thread_group_idx,
+            selected_expert,
+            selected_weight * scale,
+            row_is_active,
+            is_pad_row);
       }
+    } else if (
+        thread_group_idx == 0 &&
+        (renormalize || routed_scaling_factor != 1.0)) {
       for (int k_idx = 0; k_idx < k; ++k_idx) {
         const int idx = k * thread_row + k_idx;
         output[idx] *= scale;
@@ -599,6 +666,158 @@ class TopKGating {
   }
 
  private:
+  template <int ELTS_PER_LDG, int COLS_PER_GROUP_LDG>
+  bool compact_topk(
+      const float (&values)[VPT],
+      sycl::sub_group subgroup,
+      int scratch_base,
+      int start_col,
+      int row,
+      bool row_is_active,
+      bool is_pad_row) const {
+    float maximum = values[0];
+#pragma unroll
+    for (int position = 1; position < VPT; ++position) {
+      maximum = MAX(maximum, values[position]);
+    }
+    maximum =
+        sycl::reduce_over_group(subgroup, maximum, sycl::maximum<float>());
+
+    float lower = 0.0f;
+    float upper = maximum;
+    float threshold = 0.0f;
+    int local_count = 0;
+    int candidate_count = 0;
+    for (int iteration = 0; iteration < 8; ++iteration) {
+      threshold = (lower + upper) * 0.5f;
+      local_count = 0;
+#pragma unroll
+      for (int position = 0; position < VPT; ++position) {
+        local_count += values[position] > threshold;
+      }
+      candidate_count =
+          sycl::reduce_over_group(subgroup, local_count, sycl::plus<int>());
+      if (candidate_count >= k && candidate_count <= WARP_SIZE_PARAM) {
+        break;
+      }
+      if (candidate_count < k) {
+        upper = threshold;
+      } else {
+        lower = threshold;
+      }
+    }
+    if (candidate_count < k || candidate_count > WARP_SIZE_PARAM) {
+      return false;
+    }
+
+    int offset = sycl::exclusive_scan_over_group(
+        subgroup, local_count, sycl::plus<int>());
+#pragma unroll
+    for (int position = 0; position < VPT; ++position) {
+      if (values[position] > threshold) {
+        const int expert = start_col +
+                           position / ELTS_PER_LDG * COLS_PER_GROUP_LDG +
+                           position % ELTS_PER_LDG;
+        candidate_scratch[scratch_base + offset++] =
+            (static_cast<uint64_t>(sycl::bit_cast<uint32_t>(values[position]))
+             << 32) |
+            static_cast<uint32_t>(expert);
+      }
+    }
+    sycl::group_barrier(subgroup);
+
+    const int lane = subgroup.get_local_linear_id();
+    float value = -INFINITY;
+    int expert = 0x7fffffff;
+    if (lane < candidate_count) {
+      const uint64_t candidate = candidate_scratch[scratch_base + lane];
+      value = sycl::bit_cast<float>(static_cast<uint32_t>(candidate >> 32));
+      expert = static_cast<uint32_t>(candidate);
+    }
+    int rank = 0;
+#pragma unroll
+    for (int source = 0; source < WARP_SIZE_PARAM; ++source) {
+      const float other_value =
+          sycl::select_from_group(subgroup, value, source);
+      const int other_expert =
+          sycl::select_from_group(subgroup, expert, source);
+      rank += other_value > value ||
+              (other_value == value && other_expert < expert);
+    }
+    const bool selected = lane < candidate_count && rank < k;
+    const float sum = sycl::reduce_over_group(
+        subgroup, selected && !is_pad_row ? value : 0.0f, sycl::plus<float>());
+    float scale = static_cast<float>(routed_scaling_factor);
+    if (renormalize) {
+      scale /= sum > 0.0f ? sum : 1.0f;
+    }
+    if (selected) {
+      store_result(row, rank, expert, value * scale, row_is_active, is_pad_row);
+    }
+    return true;
+  }
+
+  template <int ELTS_PER_LDG, int COLS_PER_GROUP_LDG>
+  static void local_argmax(
+      const float (&values)[VPT], int start_col, float& maximum, int& expert) {
+    constexpr int CHUNKS = 4;
+    constexpr int CHUNK_SIZE = VPT / CHUNKS;
+    float chunk_max[CHUNKS];
+    int chunk_expert[CHUNKS];
+#pragma unroll
+    for (int chunk = 0; chunk < CHUNKS; ++chunk) {
+      const int position = chunk * CHUNK_SIZE;
+      chunk_max[chunk] = values[position];
+      chunk_expert[chunk] = start_col +
+                            position / ELTS_PER_LDG * COLS_PER_GROUP_LDG +
+                            position % ELTS_PER_LDG;
+    }
+#pragma unroll
+    for (int offset = 1; offset < CHUNK_SIZE; ++offset) {
+#pragma unroll
+      for (int chunk = 0; chunk < CHUNKS; ++chunk) {
+        const int position = chunk * CHUNK_SIZE + offset;
+        const float value = values[position];
+        if (value > chunk_max[chunk]) {
+          chunk_max[chunk] = value;
+          chunk_expert[chunk] = start_col +
+                                position / ELTS_PER_LDG * COLS_PER_GROUP_LDG +
+                                position % ELTS_PER_LDG;
+        }
+      }
+    }
+#pragma unroll
+    for (int stride = 1; stride < CHUNKS; stride *= 2) {
+#pragma unroll
+      for (int chunk = 0; chunk < CHUNKS; chunk += 2 * stride) {
+        if (chunk_max[chunk + stride] > chunk_max[chunk]) {
+          chunk_max[chunk] = chunk_max[chunk + stride];
+          chunk_expert[chunk] = chunk_expert[chunk + stride];
+        }
+      }
+    }
+    maximum = chunk_max[0];
+    expert = chunk_expert[0];
+  }
+
+  void store_result(
+      int row,
+      int rank,
+      int expert,
+      float weight,
+      bool row_is_active,
+      bool is_pad_row) const {
+    const bool node_uses_expert = expert >= start_expert && expert < end_expert;
+    const bool should_process_row = row_is_active && node_uses_expert;
+    const int offset = k * row + rank;
+    output[offset] = is_pad_row ? 0.0f : weight;
+    indices[offset] =
+        is_pad_row ? static_cast<IndType>(-1)
+                   : (should_process_row ? expert - start_expert : NUM_EXPERTS);
+    source_rows[offset] = rank * num_rows + row;
+  }
+
+  Scratch candidate_scratch;
   const InputdType* input;
   const bool* finished;
   float* output;
@@ -670,32 +889,58 @@ void topk_gating_launcher_helper(
 
   sycl::range<2> grid(1, num_blocks);
   sycl::range<2> block(WARPS_PER_TB, WARP_SIZE_PARAM);
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<2>(grid * block, block),
-        TopKGating<
-            VPT,
-            EXPERTS,
-            WARPS_PER_TB,
-            BYTES_PER_LDG,
-            WARP_SIZE_PARAM,
-            InputdType,
-            IndType,
-            ScoringFuncParam>(
-            input,
-            finished,
-            output,
-            num_rows,
-            indices,
-            source_row,
-            k,
-            start_expert,
-            end_expert,
-            renormalize,
-            bias,
-            routed_scaling_factor,
-            is_padding));
-  });
+  auto submit = [&]<bool HAS_BIAS, bool COMPACT>() {
+    queue.submit([&](sycl::handler& cgh) {
+      auto candidate_scratch = [&]() {
+        if constexpr (COMPACT) {
+          return sycl::local_accessor<uint64_t, 1>(
+              sycl::range<1>(WARPS_PER_TB * WARP_SIZE_PARAM), cgh);
+        } else {
+          return EmptyTopkScratch{};
+        }
+      }();
+      cgh.parallel_for(
+          sycl::nd_range<2>(grid * block, block),
+          TopKGating<
+              VPT,
+              EXPERTS,
+              WARPS_PER_TB,
+              BYTES_PER_LDG,
+              WARP_SIZE_PARAM,
+              InputdType,
+              IndType,
+              ScoringFuncParam,
+              HAS_BIAS,
+              COMPACT>(
+              candidate_scratch,
+              input,
+              finished,
+              output,
+              num_rows,
+              indices,
+              source_row,
+              k,
+              start_expert,
+              end_expert,
+              renormalize,
+              bias,
+              routed_scaling_factor,
+              is_padding));
+    });
+  };
+  if (bias != nullptr) {
+    submit.template operator()<true, false>();
+  } else {
+    if constexpr (
+        EXPERTS == 512 && std::is_same_v<InputdType, float> &&
+        ScoringFuncParam == ScoringFunc::SOFTMAX && ROWS_PER_WARP == 1) {
+      if (num_rows >= 4096 && k == 10) {
+        submit.template operator()<false, true>();
+        return;
+      }
+    }
+    submit.template operator()<false, false>();
+  }
 }
 
 #define LAUNCH_TOPK(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES, SCORING_FUNC)        \
@@ -739,9 +984,47 @@ void topk_gating_kernel_launcher(
     const double routed_scaling_factor,
     const bool* is_padding,
     sycl::queue& queue) {
+  if constexpr (
+      ScoringFuncParam == ScoringFunc::SOFTMAX && sizeof(InputdType) == 2 &&
+      std::is_same_v<IndType, int>) {
+    if (num_experts == 512 && bias == nullptr && num_tokens > 0 &&
+        num_tokens <= 2048 && (topk == 3 || topk == 10)) {
+      const bool narrow_subgroup = num_tokens > 512;
+      constexpr int wg = 64;
+      auto submit = [&]<int TOPK, int SG_SIZE>() {
+        const size_t groups = (num_tokens + wg / SG_SIZE - 1) / (wg / SG_SIZE);
+        queue.parallel_for(
+            sycl::nd_range<1>{{groups * wg}, {wg}},
+            packed_topk::PackedTopK<InputdType, TOPK, SG_SIZE>{
+                gating_output,
+                topk_weights,
+                topk_indices,
+                token_expert_indices,
+                is_padding,
+                {renormalize},
+                routed_scaling_factor,
+                num_tokens});
+      };
+      if (topk == 3) {
+        if (narrow_subgroup) {
+          submit.template operator()<3, 16>();
+        } else {
+          submit.template operator()<3, 32>();
+        }
+      } else if (narrow_subgroup) {
+        submit.template operator()<10, 16>();
+      } else {
+        submit.template operator()<10, 32>();
+      }
+      return;
+    }
+  }
   static constexpr int WARPS_PER_TB = 4;
   static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
   static constexpr int BYTES_PER_LDG_MULTIPLE_64 = 2 * sizeof(InputdType);
+  static constexpr int BYTES_PER_LDG_512 = std::is_same_v<InputdType, float>
+                                               ? 4 * sizeof(InputdType)
+                                               : sizeof(InputdType);
 
   switch (num_experts) {
     case 1:
@@ -774,8 +1057,7 @@ void topk_gating_kernel_launcher(
           256, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
       break;
     case 512:
-      LAUNCH_TOPK(
-          512, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2, ScoringFuncParam);
+      LAUNCH_TOPK(512, WARPS_PER_TB, BYTES_PER_LDG_512, ScoringFuncParam);
       break;
     case 192:
       LAUNCH_TOPK(

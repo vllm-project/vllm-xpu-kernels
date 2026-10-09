@@ -222,6 +222,34 @@ class ExpertCumsum {
   int* expert_scale_desc;
 };
 
+// Publish immutable copy destinations before the bandwidth-bound phase. This
+// avoids a workgroup barrier in every route-copy group protecting the in-place
+// transition from local expert offsets to global row offsets.
+class FinalizeRowMapping {
+ public:
+  int* expert_map;
+  int* row_mapping;
+  int* inverse_mapping;
+  const int* expert_cumsum;
+  const void* topk_ids;
+  bool ids_int32;
+  int topk;
+
+  void operator()(sycl::id<1> id) const {
+    const int route = id[0];
+    const int global_expert =
+        ids_int32 ? static_cast<const int32_t*>(topk_ids)[route]
+                  : static_cast<const int64_t*>(topk_ids)[route];
+    const int expert = expert_map ? expert_map[global_expert] : global_expert;
+    const int offset = expert < 0
+                           ? -1
+                           : row_mapping[route] +
+                                 (expert == 0 ? 0 : expert_cumsum[expert - 1]);
+    row_mapping[route] = offset;
+    if (inverse_mapping && offset >= 0) inverse_mapping[offset] = route / topk;
+  }
+};
+
 template <typename TA, typename TS, int TopK>
 class RemapHiddenStates {
  public:
@@ -230,135 +258,93 @@ class RemapHiddenStates {
       TS* hidden_states_scales,
       TA* remapped_hidden_states,
       TS* remapped_hidden_states_scales,
-      int* expert_map,
       int* unpermuted_row_to_permuted_row,
-      int* permuted_to_unpermuted_row,
-      int* rows_per_expert,
-      int* expert_cumsum,
-      void* topk_ids,
-      bool is_topk_ids_int32,
-      const int num_rows,
       const int hidden_size,
       const int block_k,
-      const int total_experts_num,
-      const int local_experts_num,
       int* expert_scale_desc)
       : hidden_states(hidden_states),
         hidden_states_scales(hidden_states_scales),
         remapped_hidden_states(remapped_hidden_states),
         remapped_hidden_states_scales(remapped_hidden_states_scales),
-        expert_map(expert_map),
         unpermuted_row_to_permuted_row(unpermuted_row_to_permuted_row),
-        permuted_to_unpermuted_row(permuted_to_unpermuted_row),
-        rows_per_expert(rows_per_expert),
-        expert_cumsum(expert_cumsum),
-        topk_ids(topk_ids),
-        is_topk_ids_int32(is_topk_ids_int32),
-        num_rows(num_rows),
         hidden_size(hidden_size),
         block_k(block_k),
-        total_experts_num(total_experts_num),
-        local_experts_num(local_experts_num),
         expert_scale_desc(expert_scale_desc) {}
 
   static constexpr int GroupWorkItem = 256;
-  static constexpr int WARP_SIZE = 16;
+  static constexpr int WARP_SIZE = 32;
   static constexpr int ElemsPerItem = sizeof(float) * 4 / sizeof(TA);
+  static constexpr int CopyWords = 4;
+  static constexpr int CopyElemsPerItem =
+      CopyWords * sizeof(uint32_t) / sizeof(TA);
 
-  static inline sycl::nd_range<1>
+  static inline sycl::nd_range<3>
   get_nd_range(const int num_rows, const int hidden_size) {
     int local_num = GroupWorkItem;
-    if (local_num * ElemsPerItem > hidden_size) {
-      local_num = (hidden_size + ElemsPerItem - 1) / ElemsPerItem;
+    if (local_num * CopyElemsPerItem > hidden_size) {
+      local_num = sycl::max(
+          WARP_SIZE,
+          ((hidden_size + CopyElemsPerItem * WARP_SIZE - 1) /
+           (CopyElemsPerItem * WARP_SIZE)) *
+              WARP_SIZE);
     }
-    sycl::range<1> local(local_num);
-    sycl::range<1> group(num_rows);
-    return sycl::nd_range<1>(local * group, local);
+    sycl::range<3> local(1, 1, local_num);
+    sycl::range<3> group(1, 1, num_rows * TopK);
+    return sycl::nd_range<3>(local * group, local);
   }
 
   void operator()
-      [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
-    auto local_id = item.get_local_id(0);
-    auto local_range = item.get_local_range(0);
-    auto group_id = item.get_group(0);
+      [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<3> item) const {
+    auto local_id = item.get_local_id(2);
+    auto local_range = item.get_local_range(2);
+    auto group_id = item.get_group(2);
+    auto subgroup = item.get_sub_group();
 
-    // // Second SLM region: exclusive prefix sum of
-    // round_up_4(rows_per_expert),
-    // // i.e. the per-expert base row of the padded MN-major scale surface.
-    // Only
-    // // populated when that layout is requested.
-
-    int row = group_id;
-    int global_expert_id[TopK];
-    int local_expert_id[TopK];
-
-    if (is_topk_ids_int32) {
-      auto topk_ids_32 = reinterpret_cast<int32_t*>(topk_ids);
-#pragma unroll
-      for (int i = 0; i < TopK; ++i) {
-        global_expert_id[i] = topk_ids_32[row * TopK + i];
-      }
-    } else {
-      auto topk_ids_64 = reinterpret_cast<int64_t*>(topk_ids);
-#pragma unroll
-      for (int i = 0; i < TopK; ++i) {
-        global_expert_id[i] = topk_ids_64[row * TopK + i];
-      }
-    }
-
-    if (expert_map != nullptr) {
-#pragma unroll
-      for (int i = 0; i < TopK; ++i) {
-        local_expert_id[i] = expert_map[global_expert_id[i]];
-      }
-    } else {
-#pragma unroll
-      for (int i = 0; i < TopK; ++i) {
-        local_expert_id[i] = global_expert_id[i];
-      }
-    }
-
-    int rows_offset[TopK];
-#pragma unroll
-    for (int i = 0; i < TopK; ++i) {
-      if (local_expert_id[i] != -1) {
-        int cumsum_offset =
-            local_expert_id[i] == 0 ? 0 : expert_cumsum[local_expert_id[i] - 1];
-        int local_row = unpermuted_row_to_permuted_row[row * TopK + i];
-        rows_offset[i] = local_row + cumsum_offset;
-      } else {
-        rows_offset[i] = -1;
-      }
-    }
-
-    sycl::group_barrier(item.get_group());
-
-    auto hidden_states_base = hidden_states +
-                              row * static_cast<int64_t>(hidden_size) +
-                              local_id * ElemsPerItem;
-    TA* remapped_hidden_states_base[TopK];
-#pragma unroll
-    for (int i = 0; i < TopK; ++i) {
-      remapped_hidden_states_base[i] =
-          remapped_hidden_states +
-          rows_offset[i] * static_cast<int64_t>(hidden_size) +
-          local_id * ElemsPerItem;
-    }
+    // Each group copies one route. Neighbouring groups read the same token,
+    // allowing the source to be reused through cache while writes proceed
+    // independently. FinalizeRowMapping has made the map read-only.
+    const int row = group_id / TopK;
+    const int output_row = unpermuted_row_to_permuted_row[group_id];
+    if (output_row < 0) return;
 
     int stride = local_range * ElemsPerItem;
-    int loop_count = (hidden_size + stride - 1) / stride;
+    int copy_stride = local_range * CopyElemsPerItem;
+    int loop_count = (hidden_size + copy_stride - 1) / copy_stride;
 
     for (int l = 0; l < loop_count; ++l) {
+      const int subgroup_start = l * copy_stride + (local_id / WARP_SIZE) *
+                                                       WARP_SIZE *
+                                                       CopyElemsPerItem;
+      if (subgroup_start + WARP_SIZE * CopyElemsPerItem <= hidden_size) {
+        // A whole subgroup copies a contiguous block with one group load and
+        // store. Both operations use the same layout for bitwise copies.
+        using CopyVector = sycl::vec<uint32_t, CopyWords>;
+        namespace syclex = sycl::ext::oneapi::experimental;
+        constexpr auto properties = syclex::properties{
+            syclex::contiguous_memory, syclex::alignment<sizeof(CopyVector)>};
+        CopyVector values;
+        const auto* source = reinterpret_cast<const uint32_t*>(
+            hidden_states + row * static_cast<int64_t>(hidden_size) +
+            subgroup_start);
+        auto* destination = reinterpret_cast<uint32_t*>(
+            remapped_hidden_states +
+            output_row * static_cast<int64_t>(hidden_size) + subgroup_start);
+        syclex::group_load(subgroup, source, values, properties);
+        syclex::group_store(subgroup, values, destination, properties);
+        continue;
+      }
       using load_type = sycl::vec<TA, ElemsPerItem>;
-      load_type data;
-      if (l * stride + local_id * ElemsPerItem < hidden_size) {
-        data = *(reinterpret_cast<load_type*>(hidden_states_base + l * stride));
 #pragma unroll
-        for (int i = 0; i < TopK; ++i) {
-          if (rows_offset[i] == -1) continue;
-          *(reinterpret_cast<load_type*>(
-              remapped_hidden_states_base[i] + l * stride)) = data;
-        }
+      for (int v = 0; v < CopyElemsPerItem / ElemsPerItem; ++v) {
+        const int offset =
+            subgroup_start +
+            (local_id % WARP_SIZE + v * WARP_SIZE) * ElemsPerItem;
+        if (offset >= hidden_size) continue;
+        load_type data = *reinterpret_cast<load_type*>(
+            hidden_states + row * static_cast<int64_t>(hidden_size) + offset);
+        *reinterpret_cast<load_type*>(
+            remapped_hidden_states +
+            output_row * static_cast<int64_t>(hidden_size) + offset) = data;
       }
     }
 
@@ -378,14 +364,9 @@ class RemapHiddenStates {
             load_type data;
             data = *(reinterpret_cast<load_type*>(
                 hidden_states_scales + row * scaled_hidden_size + start_id));
-#pragma unroll
-            for (int i = 0; i < TopK; ++i) {
-              int offset = rows_offset[i];
-              if (offset == -1) continue;
-              *(reinterpret_cast<load_type*>(
-                  remapped_hidden_states_scales + offset * scaled_hidden_size +
-                  start_id)) = data;
-            }
+            *(reinterpret_cast<load_type*>(
+                remapped_hidden_states_scales +
+                output_row * scaled_hidden_size + start_id)) = data;
           } else if (remained_elems > 0) {
             TS data[ElemsPerItem];
 #pragma unroll
@@ -395,30 +376,10 @@ class RemapHiddenStates {
             }
 
 #pragma unroll
-            for (int i = 0; i < TopK; ++i) {
-              int offset = rows_offset[i];
-              if (offset == -1) continue;
-#pragma unroll
-              for (int e = 0; e < remained_elems; ++e) {
-                remapped_hidden_states_scales
-                    [offset * scaled_hidden_size + start_id + e] = data[e];
-              }
+            for (int e = 0; e < remained_elems; ++e) {
+              remapped_hidden_states_scales
+                  [output_row * scaled_hidden_size + start_id + e] = data[e];
             }
-          }
-        }
-      }
-    }
-
-    if (local_id == 0) {
-#pragma unroll
-      for (int i = 0; i < TopK; ++i) {
-        unpermuted_row_to_permuted_row[row * TopK + i] = rows_offset[i];
-      }
-      if (permuted_to_unpermuted_row != nullptr) {
-#pragma unroll
-        for (int i = 0; i < TopK; ++i) {
-          if (rows_offset[i] != -1) {
-            permuted_to_unpermuted_row[rows_offset[i]] = row;
           }
         }
       }
@@ -430,18 +391,9 @@ class RemapHiddenStates {
   TS* hidden_states_scales;
   TA* remapped_hidden_states;
   TS* remapped_hidden_states_scales;
-  int* expert_map;
   int* unpermuted_row_to_permuted_row;
-  int* permuted_to_unpermuted_row;
-  int* rows_per_expert;
-  int* expert_cumsum;
-  void* topk_ids;
-  bool is_topk_ids_int32;
-  const int num_rows;
   const int hidden_size;
   const int block_k;
-  const int total_experts_num;
-  const int local_experts_num;
   int* expert_scale_desc;
 };
 
@@ -924,7 +876,7 @@ void RemapHiddenStatesLauncher(
 
   if (!use_split) {
     // Fused 2-kernel path: compute the cumsum in SLM and scatter scales inline,
-    // avoiding the extra ExpertCumsum + ScaleRemap launches.
+    // avoiding the split path's prefix, mapping, and scale-remap launches.
     queue.submit([&](sycl::handler& cgh) {
       sycl::local_accessor<int32_t, 1> slm(
           sycl::range<1>(2 * (local_experts_num + 1)), cgh);
@@ -966,9 +918,20 @@ void RemapHiddenStatesLauncher(
   });
 
   queue.submit([&](sycl::handler& cgh) {
-    // Two int32 prefix arrays: the raw row cumsum and the padded scale-row
-    // cumsum used by the MN-major scale layout. Each has one extra entry
-    // holding the total.
+    // Convert local expert offsets once; the following copies only read them.
+    cgh.parallel_for(
+        sycl::range<1>(num_rows * TopK),
+        FinalizeRowMapping{
+            expert_map,
+            unpermuted_row_to_permuted_row,
+            permuted_to_unpermuted_row,
+            expert_cumsum,
+            topk_ids,
+            is_topk_ids_int32,
+            TopK});
+  });
+
+  queue.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         RemapHiddenStates<TA, TS, TopK>::get_nd_range(num_rows, hidden_size),
         RemapHiddenStates<TA, TS, TopK>{
@@ -976,18 +939,9 @@ void RemapHiddenStatesLauncher(
             hidden_states_scales,
             remapped_hidden_states,
             remapped_hidden_states_scales,
-            expert_map,
             unpermuted_row_to_permuted_row,
-            permuted_to_unpermuted_row,
-            rows_per_expert,
-            expert_cumsum,
-            topk_ids,
-            is_topk_ids_int32,
-            num_rows,
             hidden_size,
             block_k,
-            total_experts_num,
-            local_experts_num,
             expert_scale_desc});
   });
 
@@ -1124,10 +1078,10 @@ void remap_hidden_states(
   auto& queue = vllm::xpu::vllmGetQueue();
 
   // Small row counts don't have enough rows per expert to amortize the split
-  // path's extra ExpertCumsum + ScaleRemap launches (plus the inverse-map
-  // allocation), so fall back to the fused 2-kernel implementation there. Large
-  // row counts benefit from ScaleRemap's coalesced MN-major transpose. Tune the
-  // threshold against your shapes if needed.
+  // path's prefix, mapping, and scale-remap launches (plus the inverse-map
+  // allocation), so use the fused 2-kernel implementation there. Large row
+  // counts benefit from independent route copies and ScaleRemap's coalesced
+  // MN-major transpose.
   constexpr int kSplitRowThreshold = 512;
   const bool use_split = num_rows > kSplitRowThreshold;
 
