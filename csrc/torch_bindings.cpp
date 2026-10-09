@@ -348,7 +348,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   cache_ops.def(
       "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
       "Tensor block_table, Tensor workspace_starts, int batch_size, "
-      "Tensor? seq_starts) -> ()");
+      "Tensor? seq_starts, Tensor? host_cache=None, Tensor? host_row_ids=None, "
+      "Tensor? device_row_ids=None) -> ()");
   cache_ops.impl(
       "cp_gather_and_upconvert_fp8_kv_cache",
       torch::kXPU,

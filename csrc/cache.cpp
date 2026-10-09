@@ -1336,7 +1336,18 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     torch::Tensor const& block_table,      // [batch_size, max_blocks]
     torch::Tensor const& workspace_starts, // [batch_size]
     int64_t batch_size,
-    std::optional<torch::Tensor> seq_starts) {
+    std::optional<torch::Tensor> seq_starts,
+    std::optional<torch::Tensor> host_cache,
+    std::optional<torch::Tensor> host_row_ids,
+    std::optional<torch::Tensor> device_row_ids) {
+  // Host-staged gather of non-resident KV rows is CUDA-only; the XPU kernel
+  // reads exclusively from the device-resident src_cache.
+  TORCH_CHECK(
+      !host_cache.has_value() && !host_row_ids.has_value() &&
+          !device_row_ids.has_value(),
+      "cp_gather_and_upconvert_fp8_kv_cache on XPU does not support host "
+      "offload (host_cache/host_row_ids/device_row_ids); all KV rows must be "
+      "device-resident.");
   const int32_t total_tokens = static_cast<int32_t>(dst.size(0));
   if (total_tokens == 0 || batch_size == 0) {
     return;
