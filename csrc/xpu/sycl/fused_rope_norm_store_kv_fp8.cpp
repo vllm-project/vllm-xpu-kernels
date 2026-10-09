@@ -102,8 +102,10 @@ class fused_rope_norm_store_kv_fp8_kernel {
 
     const bool valid = (token_idx < num_tokens_);
 
-    float* my_cos_sin = slm_.get_pointer() + sg_in_wg * HEAD_DIM;
-    float* slm_q_norm = slm_.get_pointer() + sgs_per_wg * HEAD_DIM;
+    float* slm_base =
+        slm_.template get_multi_ptr<sycl::access::decorated::no>().get();
+    float* my_cos_sin = slm_base + sg_in_wg * HEAD_DIM;
+    float* slm_q_norm = slm_base + sgs_per_wg * HEAD_DIM;
     float* slm_k_norm = slm_q_norm + HEAD_DIM;
 
     const int lane_offset = lane * ELEMS;
