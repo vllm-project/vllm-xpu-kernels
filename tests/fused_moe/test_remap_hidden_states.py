@@ -92,7 +92,8 @@ def ref_remap_hidden_states(hidden_states, scales, remapped_hidden_states,
 @pytest.mark.parametrize("recipe",
                          ["bf16", "fp16", "fp8", "mxfp8", "mxfp4", "fp8block"])
 def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
-                             has_expert_map, recipe):
+                             has_expert_map, recipe, *, ids_dtype=None,
+                             routing="random"):
     seed_everything(7)
 
     data_dtype, scale_dtype = RECIPE_TO_DTYPE.get(recipe, (None, None))
@@ -167,11 +168,20 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
                          device=DEVICE,
                          dtype=torch.float32)
     _, topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)
+    if routing == "all_nonlocal":
+        assert expert_map is not None
+        nonlocal_ids = torch.where(expert_map < 0)[0]
+        topk_ids = nonlocal_ids[:topk].expand(num_rows, topk).clone()
+    elif routing == "concentrated":
+        topk_ids = torch.arange(topk, device=DEVICE).expand(num_rows,
+                                                            topk).clone()
     is_topk_ids_32 = random.randint(0, 1)
     if is_topk_ids_32:
         topk_ids = topk_ids.to(torch.int32)
     else:
         topk_ids = topk_ids.to(torch.int64)
+    if ids_dtype is not None:
+        topk_ids = topk_ids.to(ids_dtype)
 
     ref_remapped_hidden_states = remapped_hidden_states.clone()
     ref_rows_per_expert = rows_per_expert.clone()
@@ -198,10 +208,15 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
         ref_remapped_hidden_states = ref_remapped_hidden_states.view(
             torch.uint8)
 
-    unpermuted_hidden_states = remapped_hidden_states[
-        unpermuted_row_to_permuted_row.flatten()]
-    ref_unpermuted_hidden_states = ref_remapped_hidden_states[
-        ref_unpermuted_row_to_permuted_row.flatten()]
+    valid = ref_unpermuted_row_to_permuted_row >= 0
+    assert torch.all(unpermuted_row_to_permuted_row[~valid] == -1)
+    valid_rows = unpermuted_row_to_permuted_row[valid]
+    ref_valid_rows = ref_unpermuted_row_to_permuted_row[valid]
+    assert torch.all(valid_rows >= 0)
+    assert torch.all(valid_rows < rows_per_expert.sum())
+    assert torch.unique(valid_rows).numel() == valid_rows.numel()
+    unpermuted_hidden_states = remapped_hidden_states[valid_rows]
+    ref_unpermuted_hidden_states = ref_remapped_hidden_states[ref_valid_rows]
 
     torch.testing.assert_close(unpermuted_hidden_states,
                                ref_unpermuted_hidden_states,
@@ -213,26 +228,43 @@ def test_remap_hidden_states(num_rows, hidden_size, total_experts_num, topk,
                                rtol=0,
                                atol=0)
     if scale_dtype is not None:
-        unpermuted_scales = remapped_scales[
-            unpermuted_row_to_permuted_row.flatten()]
-        ref_unpermuted_scales = ref_remapped_scales[
-            ref_unpermuted_row_to_permuted_row.flatten()]
+        unpermuted_scales = remapped_scales[valid_rows]
+        ref_unpermuted_scales = ref_remapped_scales[ref_valid_rows]
         if unpermuted_scales.dtype is torch.float8_e8m0fnu:
             unpermuted_scales = unpermuted_scales.view(torch.uint8)
             ref_unpermuted_scales = ref_unpermuted_scales.view(torch.uint8)
-        try:
-            torch.testing.assert_close(unpermuted_scales,
-                                       ref_unpermuted_scales,
-                                       rtol=0,
-                                       atol=0,
-                                       equal_nan=True)
-        except AssertionError:
-            # Fp8block may fails on g31 CI
-            mismatched_indices = torch.nonzero(
-                unpermuted_scales != ref_unpermuted_scales)
-            print("Mismatched scales at indices:", mismatched_indices)
-            print("Mismatched scales:", unpermuted_scales[mismatched_indices])
-            print("Mismatched ref:", ref_unpermuted_scales[mismatched_indices])
+        torch.testing.assert_close(unpermuted_scales,
+                                   ref_unpermuted_scales,
+                                   rtol=0,
+                                   atol=0,
+                                   equal_nan=True)
+
+
+@pytest.mark.parametrize("recipe,num_rows,hidden_size,topk,routing,ids_dtype", [
+    ("bf16", 1, 16, 1, "random", torch.int32),
+    ("fp16", 32, 128, 8, "random", torch.int64),
+    ("bf16", 512, 4224, 10, "random", torch.int32),
+    ("fp16", 512, 4224, 10, "random", torch.int64),
+    ("bf16", 513, 4224, 10, "random", torch.int64),
+    ("fp16", 513, 4224, 10, "random", torch.int32),
+    ("fp8", 513, 4224, 10, "random", torch.int64),
+    ("mxfp8", 513, 4224, 10, "random", torch.int32),
+    ("mxfp4", 513, 4224, 10, "random", torch.int64),
+    ("fp8block", 513, 4224, 10, "random", torch.int32),
+    ("bf16", 1024, 4096, 8, "random", torch.int32),
+    ("fp16", 1025, 4128, 10, "random", torch.int64),
+    ("mxfp8", 1025, 128, 1, "random", torch.int32),
+    ("bf16", 513, 4224, 10, "all_nonlocal", torch.int32),
+    ("fp16", 1025, 128, 8, "all_nonlocal", torch.int64),
+    ("bf16", 1025, 4096, 1, "concentrated", torch.int64),
+])
+def test_remap_hidden_states_copy_edges(recipe, num_rows, hidden_size, topk,
+                                       routing, ids_dtype):
+    # Use representative combinations, not a full Cartesian product.
+    # 4224 is scale-block aligned with a copy tail for every recipe.
+    test_remap_hidden_states(
+        num_rows, hidden_size, 32, topk,
+        routing != "concentrated", recipe, ids_dtype=ids_dtype, routing=routing)
 
 
 @pytest.mark.parametrize("id_dtype", [torch.int32, torch.int64])
@@ -347,8 +379,44 @@ def test_remap_hidden_states_overflow(num_rows, hidden_size, total_experts_num,
         expert_map, rows_per_expert, unpermuted_row_to_permuted_row,
         topk_ids, total_experts_num, local_experts_num)
 
-    print("remapped_hidden_states", remapped_hidden_states, flush=True)
-    print("remapped_scales", remapped_scales, flush=True)
+    # Keep the reference checks on the host.
+    def _cpu(x):
+        return None if x is None else x.cpu()
+
+    mapping = unpermuted_row_to_permuted_row.cpu().to(torch.int64)
+    counts_k = rows_per_expert.cpu()
+    hidden_states, scales, expert_map, topk_ids = map(
+        _cpu, (hidden_states, scales, expert_map, topk_ids))
+    remapped_hidden_states, remapped_scales = map(
+        _cpu, (remapped_hidden_states, remapped_scales))
+    local_ids = expert_map[topk_ids] if expert_map is not None else topk_ids
+    valid = local_ids >= 0
+    counts = torch.bincount(local_ids[valid], minlength=local_experts_num)
+    torch.testing.assert_close(counts_k.to(torch.int64), counts)
+    assert torch.all(mapping[~valid] == -1)
+    torch.testing.assert_close(
+        mapping[valid].sort().values, torch.arange(int(counts.sum())))
+    prefix = torch.cat([torch.zeros(1, dtype=torch.int64), counts.cumsum(0)])
+    assert torch.all(mapping[valid] >= prefix[local_ids[valid]])
+    assert torch.all(mapping[valid] < prefix[local_ids[valid] + 1])
+
+    # Check every copied byte in bounded chunks, including packed/scale dtypes.
+    # Avoid materializing another full num_rows * topk reference tensor.
+    for start in range(0, num_rows, 1024):
+        end = min(start + 1024, num_rows)
+        mask = valid[start:end].flatten()
+        destinations = mapping[start:end].flatten()[mask]
+        actual = remapped_hidden_states.view(torch.uint8).index_select(
+            0, destinations)
+        expected = hidden_states[start:end].view(torch.uint8).repeat_interleave(
+            topk, dim=0)[mask]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        if scales is not None:
+            actual = remapped_scales.view(torch.uint8).index_select(
+                0, destinations)
+            expected = scales[start:end].view(torch.uint8).repeat_interleave(
+                topk, dim=0)[mask]
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def ref_init_expert_map(expert_map, local_experts_num, ep_rank, ep_size):
@@ -516,3 +584,9 @@ def test_remap_hidden_states_mn_major_padded(num_rows, hidden_size,
             idx = base + torch.arange(scale_k) * ld + m_local
             expected_pad[idx] = src[r]
     torch.testing.assert_close(ref_flat, expected_pad, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("hidden_size", [128, 4224])
+def test_remap_hidden_states_split_padded(hidden_size):
+    # Existing padded cases use <=257 rows, so they miss the split inverse map.
+    test_remap_hidden_states_mn_major_padded(513, hidden_size, 32, 8)
