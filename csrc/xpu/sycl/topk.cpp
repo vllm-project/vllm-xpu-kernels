@@ -69,8 +69,7 @@ struct topk_ops {
   // `inserted` flag serialises K dependent ops per element and costs ~3x
   // here.
   template <bool Eq>
-  static inline void insert_body(
-      CompT* v, IndexT* ix, CompT val, IndexT idx) {
+  static inline void insert_body(CompT* v, IndexT* ix, CompT val, IndexT idx) {
 #pragma unroll
     for (int i = K - 1; i > 0; --i) {
       bool shift, hit;
@@ -98,8 +97,8 @@ struct topk_ops {
   // `thr` must be a value that no member of the global top-K can fall
   // below, i.e. any lane's K-th best (they all hold K elements >= their
   // own K-th).
-  static inline void insert(
-      CompT* v, IndexT* ix, CompT val, IndexT idx, CompT thr) {
+  static inline void
+  insert(CompT* v, IndexT* ix, CompT val, IndexT idx, CompT thr) {
     if (!beats(val, thr)) return;
     insert_body<false>(v, ix, val, idx);
   }
@@ -150,10 +149,12 @@ struct topk_ops {
   // element pays the full O(K) insert. This bound is the tightest valid
   // one, and lifts that to the majority of elements. Non-destructive: the
   // per-lane arrays keep indices.
-  static inline CompT sg_kth(sycl::sub_group sg, int sg_lid, const CompT* vals) {
+  static inline CompT
+  sg_kth(sycl::sub_group sg, int sg_lid, const CompT* vals) {
     CompT a[K];
 #pragma unroll
-    for (int i = 0; i < K; ++i) a[i] = vals[i];
+    for (int i = 0; i < K; ++i)
+      a[i] = vals[i];
 #pragma unroll
     for (int d = 0; d < kTopkSgMergeLevels; ++d) {
       int partner = sg_lid ^ (1 << d);
@@ -166,11 +167,8 @@ struct topk_ops {
     return a[K - 1];
   }
 
-  static inline void bitonic_merge(
-      CompT* A,
-      IndexT* A_idx,
-      const CompT* B,
-      const IndexT* B_idx) {
+  static inline void
+  bitonic_merge(CompT* A, IndexT* A_idx, const CompT* B, const IndexT* B_idx) {
 #pragma unroll
     for (int i = 0; i < K; ++i) {
       CompT bv = B[K - 1 - i];
@@ -209,11 +207,7 @@ struct topk_ops {
 
   // Butterfly-exchange the per-lane top-K across `levels` sub-group levels.
   static inline void sg_reduce(
-      sycl::sub_group sg,
-      int sg_lid,
-      int levels,
-      CompT* vals,
-      IndexT* idx) {
+      sycl::sub_group sg, int sg_lid, int levels, CompT* vals, IndexT* idx) {
     for (int d = 0; d < levels; ++d) {
       int partner = sg_lid ^ (1 << d);
       CompT pv[K];
@@ -259,13 +253,13 @@ class subgroup_topk_kernel {
         slice_size_(slice_size),
         k_(k) {}
 
-  void operator() [[sycl::reqd_sub_group_size(kTopkSgSize)]] (
-      sycl::nd_item<1> item) const {
+  void operator()
+      [[sycl::reqd_sub_group_size(kTopkSgSize)]] (sycl::nd_item<1> item) const {
     sycl::sub_group sg = item.get_sub_group();
     int sg_lid = sg.get_local_linear_id();
     int sgs_per_wg = item.get_local_range(0) / kTopkSgSize;
-    IndexT slice = static_cast<IndexT>(item.get_group_linear_id()) *
-            sgs_per_wg +
+    IndexT slice =
+        static_cast<IndexT>(item.get_group_linear_id()) * sgs_per_wg +
         sg.get_group_linear_id();
     if (slice >= num_slices_) return;
 
@@ -321,16 +315,17 @@ class subgroup_topk_kernel {
           ops::insert(top_vals, top_idx_local, val, (IndexT)(base + v), thr);
         else
           ops::insert(
-              top_vals, top_idx_local, val, (IndexT)(base + v),
+              top_vals,
+              top_idx_local,
+              val,
+              (IndexT)(base + v),
               top_vals[K - 1]);
       }
     }
-    for (IndexT idx = (IndexT)base;
-         idx < slice_size_ && idx < base + VEC_SIZE;
+    for (IndexT idx = (IndexT)base; idx < slice_size_ && idx < base + VEC_SIZE;
          ++idx)
       ops::insert_warm(
-          top_vals, top_idx_local, static_cast<comp_t>(input_slice[idx]),
-          idx);
+          top_vals, top_idx_local, static_cast<comp_t>(input_slice[idx]), idx);
 
     ops::sg_reduce(sg, sg_lid, kTopkSgMergeLevels, top_vals, top_idx_local);
 
@@ -384,8 +379,8 @@ class wg_topk_kernel {
         slm_vals_(slm_vals),
         slm_idx_(slm_idx) {}
 
-  void operator() [[sycl::reqd_sub_group_size(kTopkSgSize)]] (
-      sycl::nd_item<1> item) const {
+  void operator()
+      [[sycl::reqd_sub_group_size(kTopkSgSize)]] (sycl::nd_item<1> item) const {
     sycl::sub_group sg = item.get_sub_group();
     const int sg_lid = sg.get_local_linear_id();
     const int sg_id = sg.get_group_linear_id();
@@ -442,7 +437,10 @@ class wg_topk_kernel {
           ops::insert(top_vals, top_idx_local, val, (IndexT)(base + v), thr);
         else
           ops::insert(
-              top_vals, top_idx_local, val, (IndexT)(base + v),
+              top_vals,
+              top_idx_local,
+              val,
+              (IndexT)(base + v),
               top_vals[K - 1]);
       }
     }
@@ -456,7 +454,7 @@ class wg_topk_kernel {
         slm_idx_[sg_id * K + i] = top_idx_local[i];
       }
     }
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     if (sg_id != 0) return;
     if (sg_lid < nsg) {
@@ -473,7 +471,8 @@ class wg_topk_kernel {
       }
     }
     int levels = 0;
-    while ((1 << levels) < nsg) ++levels;
+    while ((1 << levels) < nsg)
+      ++levels;
     ops::sg_reduce(sg, sg_lid, levels, top_vals, top_idx_local);
 
     if (sg_lid == 0) {
@@ -516,8 +515,7 @@ void launch_subgroup_topk_kernel(
   q.submit([&](sycl::handler& cgh) {
     subgroup_topk_kernel<scalar_t, K, VEC_SIZE, Largest> kfn(
         input, out_vals, out_idx, num_slices, slice_size, k);
-    cgh.parallel_for(
-        sycl::nd_range<1>(num_wgs * kWgSize, kWgSize), kfn);
+    cgh.parallel_for(sycl::nd_range<1>(num_wgs * kWgSize, kWgSize), kfn);
   });
 }
 
@@ -537,8 +535,7 @@ void launch_wg_topk_kernel(
     sycl::local_accessor<comp_t, 1> slm_vals(nsg * K, cgh);
     sycl::local_accessor<int, 1> slm_idx(nsg * K, cgh);
     wg_topk_kernel<scalar_t, K, VEC_SIZE, Largest> kfn(
-        input, out_vals, out_idx, num_slices, slice_size, k, slm_vals,
-        slm_idx);
+        input, out_vals, out_idx, num_slices, slice_size, k, slm_vals, slm_idx);
     cgh.parallel_for(
         sycl::nd_range<1>((int64_t)num_slices * wg_size, wg_size), kfn);
   });
@@ -598,7 +595,7 @@ void launch_topk_vec_dispatch(
   auto align = reinterpret_cast<uintptr_t>(input);
   auto can = [&](int v) {
     return slice_size % v == 0 && kTopkSgSize * v <= slice_size &&
-        align % (sizeof(scalar_t) * v) == 0;
+           align % (sizeof(scalar_t) * v) == 0;
   };
   if (can(kMaxVec))
     launch_topk_size_dispatch<scalar_t, K, kMaxVec, Largest>(
@@ -627,7 +624,8 @@ void launch_topk_dispatch(
     int k,
     bool largest) {
   int k_sel = 1;
-  while (k_sel < k && k_sel < 16) k_sel <<= 1;
+  while (k_sel < k && k_sel < 16)
+    k_sel <<= 1;
   if (k_sel < k) k_sel = 16;
 
   switch (k_sel) {
@@ -680,10 +678,8 @@ void launch_topk_dispatch(
 // matching torch.topk(input, k, dim=-1, largest, sorted=True). indices are
 // int64. Last dim must be a multiple of 32 (the sub-group width) and >= 32,
 // and k must be in [1, 16].
-std::tuple<torch::Tensor, torch::Tensor> topk_row_wise(
-    const torch::Tensor& input,
-    int64_t k,
-    bool largest) {
+std::tuple<torch::Tensor, torch::Tensor>
+topk_row_wise(const torch::Tensor& input, int64_t k, bool largest) {
   const at::DeviceGuard device_guard(input.device());
   CHECK_DEVICE(input);
   TORCH_CHECK(input.dim() >= 1, "input must have at least 1 dimension");
@@ -697,9 +693,10 @@ std::tuple<torch::Tensor, torch::Tensor> topk_row_wise(
 
   const int64_t dim_size = input.size(-1);
   TORCH_CHECK(
-      dim_size % vllm::kTopkSgSize == 0 &&
-          dim_size >= vllm::kTopkSgSize,
-      "last dim must be a multiple of ", vllm::kTopkSgSize, " and >= ",
+      dim_size % vllm::kTopkSgSize == 0 && dim_size >= vllm::kTopkSgSize,
+      "last dim must be a multiple of ",
+      vllm::kTopkSgSize,
+      " and >= ",
       vllm::kTopkSgSize);
   const int64_t batch = input.numel() / dim_size;
 

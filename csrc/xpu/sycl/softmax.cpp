@@ -35,8 +35,8 @@ struct softmax_packed_io<sycl::ext::oneapi::bfloat16, N> {
     return sycl::bit_cast<float>((j & 1) ? (w & 0xFFFF0000u) : (w << 16));
   }
   static void set(vec_type& v, int j, float f) {
-    uint32_t h = sycl::bit_cast<uint16_t>(
-        static_cast<sycl::ext::oneapi::bfloat16>(f));
+    uint32_t h =
+        sycl::bit_cast<uint16_t>(static_cast<sycl::ext::oneapi::bfloat16>(f));
     uint32_t& w = v.val[j >> 1];
     w = (j & 1) ? ((w & 0x0000FFFFu) | (h << 16)) : ((w & 0xFFFF0000u) | h);
   }
@@ -109,7 +109,7 @@ inline void merge_row_reduction(
   if (wg_size >= 512) {
     local_max[lid] = thread_max;
     local_sum[lid] = thread_sum;
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     for (int stride = wg_size / 2; stride > 0; stride >>= 1) {
       if (lid < stride) {
@@ -118,12 +118,13 @@ inline void merge_row_reduction(
         float m1 = local_max[lid + stride];
         float s1 = local_sum[lid + stride];
         float merged_max = sycl::fmax(m0, m1);
-        float merged_sum = s0 * sycl::native::exp2(scale_log2e * (m0 - merged_max)) +
-                            s1 * sycl::native::exp2(scale_log2e * (m1 - merged_max));
+        float merged_sum =
+            s0 * sycl::native::exp2(scale_log2e * (m0 - merged_max)) +
+            s1 * sycl::native::exp2(scale_log2e * (m1 - merged_max));
         local_max[lid] = merged_max;
         local_sum[lid] = merged_sum;
       }
-      item.barrier(sycl::access::fence_space::local_space);
+      sycl::group_barrier(item.get_group());
     }
   } else {
     sycl::sub_group sg = item.get_sub_group();
@@ -131,7 +132,8 @@ inline void merge_row_reduction(
     int sg_id = lid / sg_size;
     int num_sg = (wg_size + sg_size - 1) / sg_size;
 
-    float sg_max = sycl::reduce_over_group(sg, thread_max, sycl::maximum<float>());
+    float sg_max =
+        sycl::reduce_over_group(sg, thread_max, sycl::maximum<float>());
     float sg_sum = sycl::reduce_over_group(
         sg,
         thread_sum * sycl::native::exp2(scale_log2e * (thread_max - sg_max)),
@@ -141,7 +143,7 @@ inline void merge_row_reduction(
       local_max[sg_id] = sg_max;
       local_sum[sg_id] = sg_sum;
     }
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     if (lid == 0) {
       float row_max = local_max[0];
@@ -150,15 +152,16 @@ inline void merge_row_reduction(
         float m1 = local_max[g];
         float s1 = local_sum[g];
         float merged_max = sycl::fmax(row_max, m1);
-        float merged_sum = row_sum * sycl::native::exp2(scale_log2e * (row_max - merged_max)) +
-                            s1 * sycl::native::exp2(scale_log2e * (m1 - merged_max));
+        float merged_sum =
+            row_sum * sycl::native::exp2(scale_log2e * (row_max - merged_max)) +
+            s1 * sycl::native::exp2(scale_log2e * (m1 - merged_max));
         row_max = merged_max;
         row_sum = merged_sum;
       }
       local_max[0] = row_max;
       local_sum[0] = row_sum;
     }
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
   }
 }
 
@@ -190,7 +193,8 @@ class softmax_row_cache_kernel {
 
     int lid = static_cast<int>(item.get_local_id(0));
     int row = static_cast<int>(item.get_group(0));
-    std::size_t base = static_cast<std::size_t>(row) * static_cast<std::size_t>(dim_size_);
+    std::size_t base =
+        static_cast<std::size_t>(row) * static_cast<std::size_t>(dim_size_);
 
     float thread_max = -std::numeric_limits<float>::infinity();
     float thread_sum = 0.0f;
@@ -207,14 +211,21 @@ class softmax_row_cache_kernel {
         float v = pio::get(tmp, j);
         row_cache_[vi * kVec + j] = v;
         float new_max = sycl::fmax(thread_max, v);
-        thread_sum = thread_sum * sycl::native::exp2(scale_log2e_ * (thread_max - new_max)) +
+        thread_sum = thread_sum * sycl::native::exp2(
+                                      scale_log2e_ * (thread_max - new_max)) +
                      sycl::native::exp2(scale_log2e_ * (v - new_max));
         thread_max = new_max;
       }
     }
 
     merge_row_reduction(
-        lid, wg_size_, item, local_max_, local_sum_, thread_max, thread_sum,
+        lid,
+        wg_size_,
+        item,
+        local_max_,
+        local_sum_,
+        thread_max,
+        thread_sum,
         scale_log2e_);
 
     float row_max = local_max_[0];
@@ -271,7 +282,8 @@ class softmax_kernel {
   void operator()(sycl::nd_item<1> item) const {
     int lid = static_cast<int>(item.get_local_id(0));
     int row = static_cast<int>(item.get_group(0));
-    std::size_t base = static_cast<std::size_t>(row) * static_cast<std::size_t>(dim_size_);
+    std::size_t base =
+        static_cast<std::size_t>(row) * static_cast<std::size_t>(dim_size_);
 
     float thread_max = -std::numeric_limits<float>::infinity();
     float thread_sum = 0.0f;
@@ -290,7 +302,8 @@ class softmax_kernel {
         for (int j = 0; j < kVec; ++j) {
           float v = pio::get(tmp, j);
           float new_max = sycl::fmax(thread_max, v);
-          thread_sum = thread_sum * sycl::native::exp2(scale_log2e_ * (thread_max - new_max)) +
+          thread_sum = thread_sum * sycl::native::exp2(
+                                        scale_log2e_ * (thread_max - new_max)) +
                        sycl::native::exp2(scale_log2e_ * (v - new_max));
           thread_max = new_max;
         }
@@ -301,28 +314,37 @@ class softmax_kernel {
       for (; i + wg_size_ < dim_size_; i += step) {
         float v0 = static_cast<float>(row_in[i]);
         float new_max0 = sycl::fmax(thread_max, v0);
-        thread_sum = thread_sum * sycl::native::exp2(scale_log2e_ * (thread_max - new_max0)) +
+        thread_sum = thread_sum * sycl::native::exp2(
+                                      scale_log2e_ * (thread_max - new_max0)) +
                      sycl::native::exp2(scale_log2e_ * (v0 - new_max0));
         thread_max = new_max0;
 
         int i1 = i + wg_size_;
         float v1 = static_cast<float>(row_in[i1]);
         float new_max1 = sycl::fmax(thread_max, v1);
-        thread_sum = thread_sum * sycl::native::exp2(scale_log2e_ * (thread_max - new_max1)) +
+        thread_sum = thread_sum * sycl::native::exp2(
+                                      scale_log2e_ * (thread_max - new_max1)) +
                      sycl::native::exp2(scale_log2e_ * (v1 - new_max1));
         thread_max = new_max1;
       }
       for (; i < dim_size_; i += wg_size_) {
         float v = static_cast<float>(row_in[i]);
         float new_max = sycl::fmax(thread_max, v);
-        thread_sum = thread_sum * sycl::native::exp2(scale_log2e_ * (thread_max - new_max)) +
+        thread_sum = thread_sum * sycl::native::exp2(
+                                      scale_log2e_ * (thread_max - new_max)) +
                      sycl::native::exp2(scale_log2e_ * (v - new_max));
         thread_max = new_max;
       }
     }
 
     merge_row_reduction(
-        lid, wg_size_, item, local_max_, local_sum_, thread_max, thread_sum,
+        lid,
+        wg_size_,
+        item,
+        local_max_,
+        local_sum_,
+        thread_max,
+        thread_sum,
         scale_log2e_);
 
     float row_max = local_max_[0];
@@ -376,9 +398,7 @@ class softmax_kernel {
 };
 
 template <typename scalar_t>
-void launch_softmax_kernel(
-    torch::Tensor& out,
-    const torch::Tensor& input) {
+void launch_softmax_kernel(torch::Tensor& out, const torch::Tensor& input) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
   const int batch = static_cast<int>(input.size(0));
@@ -391,14 +411,13 @@ void launch_softmax_kernel(
   const int device_wg_max = static_cast<int>(
       q.get_device().get_info<sycl::info::device::max_work_group_size>());
 
-  const int wg_size =
-      pick_softmax_wg_size<sycl_t>(dim_size, device_wg_max);
+  const int wg_size = pick_softmax_wg_size<sycl_t>(dim_size, device_wg_max);
   const float scale_log2e = static_cast<float>(1.4426950408889634);
 
   sycl::range<1> local_range(static_cast<std::size_t>(wg_size));
   sycl::range<1> global_range(static_cast<std::size_t>(batch) * local_range[0]);
 
-  constexpr int kRowCacheVec = 4; // Keep 4 for row cache kernel
+  constexpr int kRowCacheVec = 4;  // Keep 4 for row cache kernel
   constexpr std::size_t kRowCacheVecBytes = kRowCacheVec * sizeof(scalar_t);
 
   constexpr std::size_t kRowCacheMinBytes = 8192;
@@ -406,8 +425,10 @@ void launch_softmax_kernel(
 
   const bool can_row_cache_vec =
       static_cast<std::size_t>(dim_size) >= row_cache_min_dim &&
-      ((reinterpret_cast<std::uintptr_t>(d_in) & (kRowCacheVecBytes - 1)) == 0) &&
-      ((reinterpret_cast<std::uintptr_t>(d_out) & (kRowCacheVecBytes - 1)) == 0) &&
+      ((reinterpret_cast<std::uintptr_t>(d_in) & (kRowCacheVecBytes - 1)) ==
+       0) &&
+      ((reinterpret_cast<std::uintptr_t>(d_out) & (kRowCacheVecBytes - 1)) ==
+       0) &&
       ((dim_size & (kRowCacheVec - 1)) == 0) &&
       (dim_size >= kRowCacheVec * wg_size);
 
@@ -417,7 +438,8 @@ void launch_softmax_kernel(
       2 * static_cast<std::size_t>(wg_size) * sizeof(float);
   const std::size_t row_cache_bytes =
       static_cast<std::size_t>(dim_size) * sizeof(float);
-  constexpr std::size_t kSlmReserve = 2048;  // headroom for driver/runtime SLM usage
+  constexpr std::size_t kSlmReserve =
+      2048;  // headroom for driver/runtime SLM usage
   // Cap far below the device-reported max: letting one workgroup claim most
   // of a Xe-core's SLM collapses how many workgroups can be co-resident on
   // that core, which regresses large dim_size despite the reduced HBM
@@ -425,7 +447,8 @@ void launch_softmax_kernel(
   // that regress.
   constexpr std::size_t kRowCacheSlmCap = 49152;
   const std::size_t slm_budget = std::min(local_mem_size, kRowCacheSlmCap);
-  const bool use_row_cache = can_row_cache_vec && slm_budget > kSlmReserve &&
+  const bool use_row_cache =
+      can_row_cache_vec && slm_budget > kSlmReserve &&
       (reduction_bytes + row_cache_bytes <= slm_budget - kSlmReserve);
 
   if (use_row_cache) {
@@ -435,7 +458,13 @@ void launch_softmax_kernel(
       sycl::local_accessor<float, 1> row_cache(
           sycl::range<1>(static_cast<std::size_t>(dim_size)), cgh);
       vllm::softmax_row_cache_kernel<sycl_t> kfn(
-          d_in, d_out, dim_size, wg_size, scale_log2e, local_max, local_sum,
+          d_in,
+          d_out,
+          dim_size,
+          wg_size,
+          scale_log2e,
+          local_max,
+          local_sum,
           row_cache);
       cgh.parallel_for(sycl::nd_range<1>(global_range, local_range), kfn);
     });
@@ -444,16 +473,23 @@ void launch_softmax_kernel(
 
   constexpr int kVec = softmax_vec_size<sycl_t>();
   const bool can_vec =
-      ((reinterpret_cast<std::uintptr_t>(d_in) & (kSoftmaxVecBytes - 1)) == 0) &&
-      ((reinterpret_cast<std::uintptr_t>(d_out) & (kSoftmaxVecBytes - 1)) == 0) &&
-      ((dim_size & (kVec - 1)) == 0) &&
-      (dim_size >= kVec * wg_size);
+      ((reinterpret_cast<std::uintptr_t>(d_in) & (kSoftmaxVecBytes - 1)) ==
+       0) &&
+      ((reinterpret_cast<std::uintptr_t>(d_out) & (kSoftmaxVecBytes - 1)) ==
+       0) &&
+      ((dim_size & (kVec - 1)) == 0) && (dim_size >= kVec * wg_size);
 
   q.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_max(local_range, cgh);
     sycl::local_accessor<float, 1> local_sum(local_range, cgh);
     vllm::softmax_kernel<sycl_t, kVec> kfn(
-        d_in, d_out, dim_size, wg_size, scale_log2e, can_vec, local_max,
+        d_in,
+        d_out,
+        dim_size,
+        wg_size,
+        scale_log2e,
+        can_vec,
+        local_max,
         local_sum);
     cgh.parallel_for(sycl::nd_range<1>(global_range, local_range), kfn);
   });
@@ -461,16 +497,16 @@ void launch_softmax_kernel(
 
 }  // namespace vllm
 
-void softmax(
-    torch::Tensor& out,
-    torch::Tensor& input) {
+void softmax(torch::Tensor& out, torch::Tensor& input) {
   const at::DeviceGuard device_guard(input.device());
   CHECK_DEVICE(input);
   CHECK_DEVICE(out);
   TORCH_CHECK(
       input.device() == out.device(),
       "input/output must be on the same device");
-  TORCH_CHECK(input.dim() == 2 && out.dim() == 2, "input/output must be 2D [batch, dim]");
+  TORCH_CHECK(
+      input.dim() == 2 && out.dim() == 2,
+      "input/output must be 2D [batch, dim]");
   TORCH_CHECK(
       input.size(0) == out.size(0) && input.size(1) == out.size(1),
       "input/output shape mismatch");
@@ -480,7 +516,8 @@ void softmax(
   TORCH_CHECK(
       input.scalar_type() == out.scalar_type(), "input/output dtype mismatch");
   TORCH_CHECK(
-      input.size(0) > 0 && input.size(1) > 0, "batch/dim_size must be positive");
+      input.size(0) > 0 && input.size(1) > 0,
+      "batch/dim_size must be positive");
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "softmax", [&] {
     vllm::launch_softmax_kernel<scalar_t>(out, input);

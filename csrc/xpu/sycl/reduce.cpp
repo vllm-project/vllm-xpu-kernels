@@ -202,7 +202,7 @@ class reduce_baseline_kernel {
 
     local_val_[lid] = thread_val;
     local_idx_[lid] = thread_idx;
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     for (int stride = wg_size_ / 2; stride > 0; stride >>= 1) {
       if (lid < stride) {
@@ -214,7 +214,7 @@ class reduce_baseline_kernel {
           local_idx_[lid] = cand_i;
         }
       }
-      item.barrier(sycl::access::fence_space::local_space);
+      sycl::group_barrier(item.get_group());
     }
 
     if (lid == 0) {
@@ -295,7 +295,7 @@ class reduce_multirow_kernel {
 
     local_val_[lid] = thread_val;
     local_idx_[lid] = thread_idx;
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     int seg_base = row_in_group * threads_per_row_;
     for (int stride = threads_per_row_ / 2; stride > 0; stride >>= 1) {
@@ -310,7 +310,7 @@ class reduce_multirow_kernel {
           local_idx_[left] = cand_i;
         }
       }
-      item.barrier(sycl::access::fence_space::local_space);
+      sycl::group_barrier(item.get_group());
     }
 
     if (lane == 0 && row < batch_) {
@@ -342,12 +342,12 @@ void launch_reduce_baseline_kernel(
   int wg_size = 256;
   if (dim_size < wg_size) {
     wg_size = 1;
-    while (wg_size * 2 <= dim_size) wg_size *= 2;
+    while (wg_size * 2 <= dim_size)
+      wg_size *= 2;
   }
 
   sycl::range<1> local_range(static_cast<std::size_t>(wg_size));
-  sycl::range<1> global_range(
-      static_cast<std::size_t>(batch) * local_range[0]);
+  sycl::range<1> global_range(static_cast<std::size_t>(batch) * local_range[0]);
 
   q.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<float, 1> local_val(local_range, cgh);
@@ -400,14 +400,13 @@ void launch_reduce_multirow_kernel(
 
 template <typename Op, typename scalar_t>
 void launch_reduce_kernel(
-    torch::Tensor& values,
-    torch::Tensor& indices,
-    const torch::Tensor& input) {
+    torch::Tensor& values, torch::Tensor& indices, const torch::Tensor& input) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
   const int batch = static_cast<int>(input.size(0));
   const int dim_size = static_cast<int>(input.size(1));
-  const int rows_per_group = reduce_auto_rows_per_group<sycl_t>(batch, dim_size);
+  const int rows_per_group =
+      reduce_auto_rows_per_group<sycl_t>(batch, dim_size);
 
   auto* d_in =
       reinterpret_cast<const sycl_t*>(input.const_data_ptr<scalar_t>());
@@ -417,23 +416,22 @@ void launch_reduce_kernel(
   auto& q = vllm::xpu::vllmGetQueue();
 
   constexpr int kInputVec = kVectorSizeInBytes / sizeof(sycl_t);
-  const bool use_multirow =
-      dim_size <= 4096 && rows_per_group > 1 &&
-      (reinterpret_cast<std::uintptr_t>(d_in) & (kVectorSizeInBytes - 1)) == 0 &&
-      dim_size % kInputVec == 0;
+  const bool use_multirow = dim_size <= 4096 && rows_per_group > 1 &&
+                            (reinterpret_cast<std::uintptr_t>(d_in) &
+                             (kVectorSizeInBytes - 1)) == 0 &&
+                            dim_size % kInputVec == 0;
   if (use_multirow) {
     launch_reduce_multirow_kernel<Op, sycl_t>(
         q, d_in, d_val, d_idx, batch, dim_size, rows_per_group);
   } else {
-    launch_reduce_baseline_kernel<Op, sycl_t>(q, d_in, d_val, d_idx, batch, dim_size);
+    launch_reduce_baseline_kernel<Op, sycl_t>(
+        q, d_in, d_val, d_idx, batch, dim_size);
   }
 }
 
 template <typename Op>
 void reduce(
-    torch::Tensor& values,
-    torch::Tensor& indices,
-    const torch::Tensor& input) {
+    torch::Tensor& values, torch::Tensor& indices, const torch::Tensor& input) {
   const at::DeviceGuard device_guard(input.device());
   CHECK_DEVICE(input);
   CHECK_DEVICE(values);
@@ -475,17 +473,13 @@ void reduce(
 // Row-wise argmax: writes the max value and its index over the last
 // dimension of a 2D [batch, dim] input into values/indices ([batch, 1]).
 void reduce_max_row_wise(
-    torch::Tensor& values,
-    torch::Tensor& indices,
-    const torch::Tensor& input) {
+    torch::Tensor& values, torch::Tensor& indices, const torch::Tensor& input) {
   vllm::reduce<vllm::ReduceMaxOp>(values, indices, input);
 }
 
 // Row-wise argmin: writes the min value and its index over the last
 // dimension of a 2D [batch, dim] input into values/indices ([batch, 1]).
 void reduce_min_row_wise(
-    torch::Tensor& values,
-    torch::Tensor& indices,
-    const torch::Tensor& input) {
+    torch::Tensor& values, torch::Tensor& indices, const torch::Tensor& input) {
   vllm::reduce<vllm::ReduceMinOp>(values, indices, input);
 }
