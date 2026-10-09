@@ -4,8 +4,8 @@
 #include <limits>
 
 #if __has_include(<sycl/ext/intel/experimental/grf_size_properties.hpp>)
-#include <sycl/ext/intel/experimental/grf_size_properties.hpp>
-#define MOE_GATHER_HAS_GRF_PROP 1
+  #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
+  #define MOE_GATHER_HAS_GRF_PROP 1
 #endif
 
 #include "../utils.h"
@@ -249,6 +249,17 @@ class MoeGather {
         hidden_size(hidden_size),
         src_stride(src_stride) {}
 
+  auto get(sycl::ext::oneapi::experimental::properties_tag) const {
+    namespace syclex = sycl::ext::oneapi::experimental;
+#ifdef MOE_GATHER_HAS_GRF_PROP
+    return syclex::properties{
+        syclex::sub_group_size<kSubGroupSize>,
+        sycl::ext::intel::experimental::grf_size<MOE_GATHER_GRF>};
+#else
+    return syclex::properties{syclex::sub_group_size<kSubGroupSize>};
+#endif
+  }
+
   void operator()(sycl::nd_item<1> item) const {
     constexpr int kTokensPerGroup = kWorkGroupSize / LANES;
     int token_idx;
@@ -349,20 +360,9 @@ void launch_direct_moe_gather(
   const sycl::range<1> global(groups * kWorkGroupSize);
   const sycl::nd_range<1> range(global, local);
 
-  namespace syclex = sycl::ext::oneapi::experimental;
-#ifdef MOE_GATHER_HAS_GRF_PROP
-  const syclex::properties kernel_props{
-      syclex::sub_group_size<kSubGroupSize>,
-      sycl::ext::intel::experimental::grf_size<MOE_GATHER_GRF>};
-#else
-  const syclex::properties kernel_props{
-      syclex::sub_group_size<kSubGroupSize>};
-#endif
-
   queue.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         range,
-        kernel_props,
         MoeGather<T, TOPK, VEC, BLOCK, LANES, SPARSE>{
             output,
             moe_output,
