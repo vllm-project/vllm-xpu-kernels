@@ -38,6 +38,38 @@ def fused_add_gemma_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
 
 
+def layer_norm(out: torch.Tensor, input: torch.Tensor,
+               weight: Optional[torch.Tensor], bias: Optional[torch.Tensor],
+               epsilon: float) -> None:
+    # Mirrors rms_norm's own .contiguous() call above; the kernel already
+    # handles this internally, kept here for parity.
+    input_contiguous = input.contiguous()
+    torch.ops._C.layer_norm(out, input_contiguous, weight, bias, epsilon)
+
+
+def fused_add_layer_norm(input: torch.Tensor, residual: torch.Tensor,
+                         weight: Optional[torch.Tensor],
+                         bias: Optional[torch.Tensor],
+                         epsilon: float) -> None:
+    torch.ops._C.fused_add_layer_norm(input, residual, weight, bias, epsilon)
+
+
+def nemotron_layer_norm(out: torch.Tensor, input: torch.Tensor,
+                        weight: torch.Tensor,
+                        bias: Optional[torch.Tensor], epsilon: float) -> None:
+    input_contiguous = input.contiguous()
+    torch.ops._C.nemotron_layer_norm(out, input_contiguous, weight, bias,
+                                     epsilon)
+
+
+def fused_add_nemotron_layer_norm(input: torch.Tensor, residual: torch.Tensor,
+                                  weight: torch.Tensor,
+                                  bias: Optional[torch.Tensor],
+                                  epsilon: float) -> None:
+    torch.ops._C.fused_add_nemotron_layer_norm(input, residual, weight, bias,
+                                               epsilon)
+
+
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 

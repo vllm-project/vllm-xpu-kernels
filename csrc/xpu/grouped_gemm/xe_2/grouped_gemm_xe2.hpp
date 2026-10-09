@@ -102,15 +102,6 @@ CUTE_DEVICE void MoEGEMM(
   int group_range = item.get_group_range(1);
   int local_id = item.get_local_linear_id();
 
-  if (group_id == 0 && local_id == 0) {
-    auto atm = sycl::atomic_ref<
-        int,
-        sycl::memory_order::relaxed,
-        sycl::memory_scope::device,
-        sycl::access::address_space::global_space>(atomic_buffer[0]);
-    atm.store(0);
-  }
-
   int pre_rows = 0;
   int pre_tiles = 0;
 
