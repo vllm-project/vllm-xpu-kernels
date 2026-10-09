@@ -44,7 +44,7 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
 #
 # TODO: we need to align torch version with used in vLLM.
 #
-set(TORCH_SUPPORTED_VERSION_XPU "2.13.0")
+set(TORCH_SUPPORTED_VERSION_XPU "2.14.0")
 
 set(BUILD_SYCL_TLA_KERNELS
     ON
@@ -605,7 +605,8 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/utils/mem_cpy.cpp"
       "csrc/utils/host_register.cpp"
       "csrc/utils/mem_info.cpp"
-      "csrc/topk_per_row.cpp")
+      "csrc/topk_per_row.cpp"
+      "csrc/ngram_embedding_kernels.cpp")
   include_directories("/usr/include")
 
   define_gpu_extension_target(

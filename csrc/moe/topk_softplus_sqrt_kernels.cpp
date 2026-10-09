@@ -159,6 +159,8 @@ struct TopkGatingSoftplusSqrtKernel {
   const IndType* input_ids;
   const IndType* tid2eid;
   const bool* is_padding;
+  const float* bias_vl;
+  int64_t image_sentinel_lo;
 
   [[sycl::reqd_sub_group_size(WARP_SIZE_PARAM)]]
   void operator()(sycl::nd_item<3> item) const {
@@ -221,6 +223,13 @@ struct TopkGatingSoftplusSqrtKernel {
     const bool row_is_active = finished ? !finished[thread_row] : true;
     const bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
 
+    const int64_t token_id =
+        input_ids != nullptr ? static_cast<int64_t>(input_ids[thread_row]) : 0;
+    const bool use_vl_bias = bias_vl != nullptr && image_sentinel_lo > 0 &&
+                             token_id >= image_sentinel_lo &&
+                             token_id < image_sentinel_lo + 5;
+    const float* row_bias = use_vl_bias ? bias_vl : correction_bias;
+
     const InputType* thread_row_ptr = input + thread_row * ELTS_PER_ROW;
 
     const int thread_group_idx = tidx % THREADS_PER_ROW;
@@ -238,72 +247,73 @@ struct TopkGatingSoftplusSqrtKernel {
     sycl::sub_group sg = item.get_sub_group();
 
     if constexpr (USE_HASH) {
-      const IndType token_id = input_ids[thread_row];
-      const IndType* expert_indices_for_token = tid2eid + token_id * k;
+      if (!use_vl_bias) {
+        const IndType* expert_indices_for_token = tid2eid + token_id * k;
 
-      float selected_sum = 0.f;
-      for (int k_idx = 0; k_idx < k; ++k_idx) {
-        const int expert = static_cast<int>(expert_indices_for_token[k_idx]);
-        const int idx = k * thread_row + k_idx;
+        float selected_sum = 0.f;
+        for (int k_idx = 0; k_idx < k; ++k_idx) {
+          const int expert = static_cast<int>(expert_indices_for_token[k_idx]);
+          const int idx = k * thread_row + k_idx;
 
-        float selected_weight_lane = 0.f;
-        if (!is_pad_row) {
+          float selected_weight_lane = 0.f;
+          if (!is_pad_row) {
 #pragma unroll
-          for (int ii = 0; ii < VPT; ++ii) {
-            const int group_id = ii / ELTS_PER_LDG;
-            const int local_id = ii % ELTS_PER_LDG;
-            const int expert_idx = first_elt_read_by_thread +
-                                   group_id * THREADS_PER_ROW * ELTS_PER_LDG +
-                                   local_id;
-            if (expert == expert_idx) {
-              float val = row_chunk[ii];
-              float val_b = val * beta;
-              val = (val_b > threshold)
-                        ? val
-                        : (sycl::log(1.0f + sycl::exp(val_b))) / beta;
-              val = sycl::sqrt(val);
-              if (sycl::isnan(val) || sycl::isinf(val)) {
-                val = 0.f;
+            for (int ii = 0; ii < VPT; ++ii) {
+              const int group_id = ii / ELTS_PER_LDG;
+              const int local_id = ii % ELTS_PER_LDG;
+              const int expert_idx = first_elt_read_by_thread +
+                                     group_id * THREADS_PER_ROW * ELTS_PER_LDG +
+                                     local_id;
+              if (expert == expert_idx) {
+                float val = row_chunk[ii];
+                float val_b = val * beta;
+                val = (val_b > threshold)
+                          ? val
+                          : (sycl::log(1.0f + sycl::exp(val_b))) / beta;
+                val = sycl::sqrt(val);
+                if (sycl::isnan(val) || sycl::isinf(val)) {
+                  val = 0.f;
+                }
+                selected_weight_lane = val;
+                break;
               }
-              selected_weight_lane = val;
-              break;
+            }
+          }
+
+          const float selected_weight =
+              warpReduceSumWidth(selected_weight_lane, sg, THREADS_PER_ROW);
+
+          if (thread_group_idx == 0) {
+            const bool node_uses_expert =
+                expert >= start_expert && expert < end_expert;
+            const bool should_process_row = row_is_active && node_uses_expert;
+
+            output[idx] = selected_weight;
+            indices[idx] = is_pad_row
+                               ? static_cast<IndType>(-1)
+                               : (should_process_row ? (expert - start_expert)
+                                                     : NUM_EXPERTS);
+            source_rows[idx] = k_idx * num_rows + thread_row;
+            if (renormalize && !is_pad_row) {
+              selected_sum += selected_weight;
             }
           }
         }
 
-        const float selected_weight =
-            warpReduceSumWidth(selected_weight_lane, sg, THREADS_PER_ROW);
-
         if (thread_group_idx == 0) {
-          const bool node_uses_expert =
-              expert >= start_expert && expert < end_expert;
-          const bool should_process_row = row_is_active && node_uses_expert;
-
-          output[idx] = selected_weight;
-          indices[idx] = is_pad_row
-                             ? static_cast<IndType>(-1)
-                             : (should_process_row ? (expert - start_expert)
-                                                   : NUM_EXPERTS);
-          source_rows[idx] = k_idx * num_rows + thread_row;
-          if (renormalize && !is_pad_row) {
-            selected_sum += selected_weight;
+          float scale = static_cast<float>(routed_scaling_factor);
+          if (renormalize) {
+            const float denom = selected_sum > 0.f ? selected_sum : 1.f;
+            scale /= denom;
+          }
+#pragma unroll
+          for (int k_idx = 0; k_idx < k; ++k_idx) {
+            const int idx = k * thread_row + k_idx;
+            output[idx] = output[idx] * scale;
           }
         }
+        return;
       }
-
-      if (thread_group_idx == 0) {
-        float scale = static_cast<float>(routed_scaling_factor);
-        if (renormalize) {
-          const float denom = selected_sum > 0.f ? selected_sum : 1.f;
-          scale /= denom;
-        }
-#pragma unroll
-        for (int k_idx = 0; k_idx < k; ++k_idx) {
-          const int idx = k * thread_row + k_idx;
-          output[idx] = output[idx] * scale;
-        }
-      }
-      return;
     }
 
 #pragma unroll
@@ -318,13 +328,13 @@ struct TopkGatingSoftplusSqrtKernel {
         if (sycl::isnan(val) || sycl::isinf(val)) {
           val = 0.f;
         }
-        if (correction_bias) {
+        if (row_bias) {
           const int group_id = ii / ELTS_PER_LDG;
           const int local_id = ii % ELTS_PER_LDG;
           const int expert_idx = first_elt_read_by_thread +
                                  group_id * THREADS_PER_ROW * ELTS_PER_LDG +
                                  local_id;
-          val = val + correction_bias[expert_idx];
+          val = val + row_bias[expert_idx];
         }
       }
       row_chunk[ii] = val;
@@ -371,8 +381,8 @@ struct TopkGatingSoftplusSqrtKernel {
         float output_val = max_val;
         if (is_pad_row) {
           output_val = 0.f;
-        } else if (correction_bias != nullptr) {
-          output_val -= correction_bias[expert];
+        } else if (row_bias != nullptr) {
+          output_val -= row_bias[expert];
         }
         output[idx] = output_val;
         indices[idx] =
@@ -465,6 +475,8 @@ void topkGatingSoftplusSqrtLauncherHelper(
     const IndType* input_ids,
     const IndType* tid2eid,
     const bool* is_padding,
+    const float* bias_vl,
+    int64_t image_sentinel_lo,
     sycl::queue& q) {
   static constexpr int BYTES_PER_LDG =
       MIN(MAX_BYTES_PER_LDG, sizeof(InputType) * EXPERTS);
@@ -505,7 +517,9 @@ void topkGatingSoftplusSqrtLauncherHelper(
         correction_bias,
         input_ids,
         tid2eid,
-        is_padding};
+        is_padding,
+        bias_vl,
+        image_sentinel_lo};
     q.parallel_for(ndr, k_obj);
   })
 }
@@ -532,6 +546,8 @@ void topkGatingSoftplusSqrtLauncherHelper(
       input_ids,                                                   \
       tid2eid,                                                     \
       is_padding,                                                  \
+      bias_vl,                                                     \
+      image_sentinel_lo,                                           \
       q);
 
 template <typename IndType, typename InputType>
@@ -550,6 +566,8 @@ void topkGatingSoftplusSqrtKernelLauncher(
     const IndType* input_ids,
     const IndType* tid2eid,
     const bool* is_padding,
+    const float* bias_vl,
+    int64_t image_sentinel_lo,
     sycl::queue& q) {
   static constexpr int WARPS_PER_TB = 4;
   static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
@@ -628,6 +646,8 @@ void dispatch_topk_softplus_sqrt_launch(
     const c10::optional<torch::Tensor>& input_ids,
     const c10::optional<torch::Tensor>& tid2eid,
     const c10::optional<torch::Tensor>& is_padding,
+    const c10::optional<torch::Tensor>& bias_vl,
+    int64_t image_sentinel_lo,
     sycl::queue& q) {
   const float* bias_ptr = nullptr;
   if (correction_bias.has_value()) {
@@ -638,6 +658,26 @@ void dispatch_topk_softplus_sqrt_launch(
         correction_bias.value().is_contiguous(),
         "correction_bias must be contiguous");
     bias_ptr = correction_bias.value().data_ptr<float>();
+  }
+  const float* bias_vl_ptr = nullptr;
+  if (bias_vl.has_value()) {
+    const torch::Tensor& bias_vl_tensor = bias_vl.value();
+    TORCH_CHECK(
+        input_ids.has_value(), "input_ids is required when bias_vl is set");
+    TORCH_CHECK(
+        bias_vl_tensor.scalar_type() == at::ScalarType::Float,
+        "bias_vl tensor must be float32");
+    TORCH_CHECK(bias_vl_tensor.dim() == 1, "bias_vl tensor must be 1D");
+    TORCH_CHECK(
+        bias_vl_tensor.size(0) == num_experts,
+        "bias_vl size mismatch, expected: ",
+        num_experts);
+    TORCH_CHECK(
+        bias_vl_tensor.is_contiguous(), "bias_vl tensor must be contiguous");
+    TORCH_CHECK(
+        input_ids.value().scalar_type() == topk_indices.scalar_type(),
+        "input_ids dtype must match topk_indices dtype");
+    bias_vl_ptr = bias_vl_tensor.data_ptr<float>();
   }
   bool use_hash = false;
   if (tid2eid.has_value()) {
@@ -667,10 +707,10 @@ void dispatch_topk_softplus_sqrt_launch(
     is_padding_ptr = is_padding_tensor.data_ptr<bool>();
   }
   if (topk_indices.scalar_type() == at::ScalarType::Int) {
-    const int* input_ids_ptr = nullptr;
+    const int* input_ids_ptr =
+        input_ids.has_value() ? input_ids.value().data_ptr<int>() : nullptr;
     const int* tid2eid_ptr = nullptr;
     if (tid2eid.has_value()) {
-      input_ids_ptr = input_ids.value().data_ptr<int>();
       tid2eid_ptr = tid2eid.value().data_ptr<int>();
     }
     vllm::moe::topkGatingSoftplusSqrtKernelLauncher<int, ComputeType>(
@@ -688,12 +728,15 @@ void dispatch_topk_softplus_sqrt_launch(
         input_ids_ptr,
         tid2eid_ptr,
         is_padding_ptr,
+        bias_vl_ptr,
+        image_sentinel_lo,
         q);
   } else if (topk_indices.scalar_type() == at::ScalarType::UInt32) {
-    const uint32_t* input_ids_ptr = nullptr;
+    const uint32_t* input_ids_ptr = input_ids.has_value()
+                                        ? input_ids.value().data_ptr<uint32_t>()
+                                        : nullptr;
     const uint32_t* tid2eid_ptr = nullptr;
     if (tid2eid.has_value()) {
-      input_ids_ptr = input_ids.value().data_ptr<uint32_t>();
       tid2eid_ptr = tid2eid.value().data_ptr<uint32_t>();
     }
     vllm::moe::topkGatingSoftplusSqrtKernelLauncher<uint32_t, ComputeType>(
@@ -711,13 +754,15 @@ void dispatch_topk_softplus_sqrt_launch(
         input_ids_ptr,
         tid2eid_ptr,
         is_padding_ptr,
+        bias_vl_ptr,
+        image_sentinel_lo,
         q);
   } else {
     TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
-    const int64_t* input_ids_ptr = nullptr;
+    const int64_t* input_ids_ptr =
+        input_ids.has_value() ? input_ids.value().data_ptr<int64_t>() : nullptr;
     const int64_t* tid2eid_ptr = nullptr;
     if (tid2eid.has_value()) {
-      input_ids_ptr = input_ids.value().data_ptr<int64_t>();
       tid2eid_ptr = tid2eid.value().data_ptr<int64_t>();
     }
     vllm::moe::topkGatingSoftplusSqrtKernelLauncher<int64_t, ComputeType>(
@@ -735,6 +780,8 @@ void dispatch_topk_softplus_sqrt_launch(
         input_ids_ptr,
         tid2eid_ptr,
         is_padding_ptr,
+        bias_vl_ptr,
+        image_sentinel_lo,
         q);
   }
 }
@@ -749,13 +796,15 @@ void topk_softplus_sqrt(
     const c10::optional<torch::Tensor>& correction_bias,
     const c10::optional<torch::Tensor>& input_ids,
     const c10::optional<torch::Tensor>& tid2eid,
-    const c10::optional<torch::Tensor>& is_padding) {
+    const c10::optional<torch::Tensor>& is_padding,
+    const c10::optional<torch::Tensor>& bias_vl,
+    int64_t image_sentinel_lo) {
   const int num_experts = gating_output.size(-1);
   const auto num_tokens = gating_output.numel() / num_experts;
   const int topk = topk_weights.size(-1);
 
   const c10::OptionalDeviceGuard device_guard(device_of(gating_output));
-  sycl::queue& q = at::xpu::getCurrentXPUStream().queue();
+  sycl::queue& q = vllm::xpu::vllmGetQueue();
 
   using vllm::moe::bfloat16_t;
   using vllm::moe::half_t;
@@ -775,6 +824,8 @@ void topk_softplus_sqrt(
         input_ids,
         tid2eid,
         is_padding,
+        bias_vl,
+        image_sentinel_lo,
         q);
   } else if (gating_output.scalar_type() == at::ScalarType::Half) {
     dispatch_topk_softplus_sqrt_launch<half_t>(
@@ -791,6 +842,8 @@ void topk_softplus_sqrt(
         input_ids,
         tid2eid,
         is_padding,
+        bias_vl,
+        image_sentinel_lo,
         q);
   } else if (gating_output.scalar_type() == at::ScalarType::BFloat16) {
     dispatch_topk_softplus_sqrt_launch<bfloat16_t>(
@@ -808,6 +861,8 @@ void topk_softplus_sqrt(
         input_ids,
         tid2eid,
         is_padding,
+        bias_vl,
+        image_sentinel_lo,
         q);
   } else {
     TORCH_CHECK(
