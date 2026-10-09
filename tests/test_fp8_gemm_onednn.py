@@ -51,6 +51,13 @@ MNK_W8A16_BLOCK_FACTORS = [
     # (4, 256, 512),
 ]
 
+# K == group size: activation scale [M, 1], weight scale [1, N / gs].
+MNK_SINGLE_K_BLOCK_FACTORS = [
+    (1, 256, 128),
+    (4, 2560, 128),
+    (2048, 2560, 128),  # Ling-3.0-flash-fp8 TP=8 shared_experts.down_proj
+]
+
 MINI_MX_MNK_FACTORS = [
     (1, 32, 32),
     (1, 64, 32),
@@ -85,6 +92,12 @@ MINI_PYTEST_PARAMS = {
     },
     "test_fp8_gemm_w8a16_block": {
         "mnk_factors": MINI_MNK_BLOCK_FACTORS,
+    },
+    "test_fp8_gemm_per_block_single_k_block": {
+        "mnk_factors": MNK_SINGLE_K_BLOCK_FACTORS[:1],
+    },
+    "test_fp8_gemm_w8a16_block_single_k_block": {
+        "mnk_factors": MNK_SINGLE_K_BLOCK_FACTORS[:1],
     },
 }
 
@@ -563,4 +576,92 @@ def test_fp8_gemm_w8a16_block(fp8_dtype, dtype, is_nt, batch, group_size,
 
     # bf16 has lower mantissa precision (7-bit vs 10-bit for f16), which causes
     # larger accumulated error in the bf16+fp8 block matmul kernel.
+    torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)
+
+
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("is_nt", [True, False])
+@pytest.mark.parametrize("use_ue8m0", [False, True])
+@pytest.mark.parametrize("mnk_factors", MNK_SINGLE_K_BLOCK_FACTORS)
+def test_fp8_gemm_per_block_single_k_block(fp8_dtype, dtype, is_nt, use_ue8m0,
+                                           mnk_factors):
+    seed = 1234
+    torch.manual_seed(seed)
+
+    m, n, k = mnk_factors
+    group_size = k
+
+    input = torch.randn([m, k], dtype=dtype, device=torch.device("xpu")) / 10.0
+    weight = torch.randn([n, k], dtype=dtype).xpu() / 10.0
+
+    input_fp8, scale_src_fp8 = per_token_group_quant_fp8(input,
+                                                         group_size,
+                                                         dtype=fp8_dtype,
+                                                         use_ue8m0=use_ue8m0)
+    weight_fp8, scale_wei_fp8 = fp8_block_quant_2d(weight,
+                                                   group_size,
+                                                   group_size,
+                                                   use_ue8m0=use_ue8m0)
+    assert scale_src_fp8.shape == (m, 1)
+    assert scale_wei_fp8.t().shape == (1, n // group_size)
+
+    input_deq = per_token_group_dequant_fp8(input_fp8, scale_src_fp8,
+                                            group_size, dtype)
+    weight_deq = fp8_block_dequant_2d(weight_fp8, scale_wei_fp8, group_size,
+                                      group_size, dtype)
+    output_ref = torch.matmul(input_deq, weight_deq.t())
+
+    weight_fp8 = weight_fp8.transpose(0, 1)
+    if is_nt:
+        weight_fp8 = weight_fp8.contiguous()
+
+    output_fp8 = fp8_gemm(
+        input_fp8,
+        weight_fp8,
+        dtype,
+        scale_src_fp8,
+        scale_wei_fp8.t().contiguous(),
+        torch.Tensor(),
+    )
+
+    torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)
+
+
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("is_nt", [True, False])
+@pytest.mark.parametrize("mnk_factors", MNK_SINGLE_K_BLOCK_FACTORS)
+def test_fp8_gemm_w8a16_block_single_k_block(fp8_dtype, dtype, is_nt,
+                                             mnk_factors):
+    seed = 1234
+    torch.manual_seed(seed)
+
+    m, n, k = mnk_factors
+    group_size = k
+
+    input = torch.randn([m, k], dtype=dtype, device=torch.device("xpu")) / 10.0
+    weight = torch.randn([n, k], dtype=dtype).xpu() / 10.0
+
+    weight_fp8, scale_wei_fp8 = fp8_block_quant_2d(weight,
+                                                   group_size,
+                                                   group_size,
+                                                   fp8_dtype=fp8_dtype)
+    assert scale_wei_fp8.t().shape == (1, n // group_size)
+
+    weight_deq = fp8_block_dequant_2d(weight_fp8, scale_wei_fp8, group_size,
+                                      group_size, dtype)
+    output_ref = torch.matmul(input, weight_deq.t())
+
+    weight_fp8 = weight_fp8.transpose(0, 1)
+    if is_nt:
+        weight_fp8 = weight_fp8.contiguous()
+
+    output_fp8 = fp8_gemm_w8a16(
+        input,
+        weight_fp8,
+        scale_wei_fp8.t().contiguous(),
+        torch.Tensor(),
+    )
+
     torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)

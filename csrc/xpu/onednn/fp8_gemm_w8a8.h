@@ -25,7 +25,12 @@ static inline void dnnl_matmul_w8a8_fp8(
   const int n = o_sz.back();  // presume channel last format
   const int k = *(src_sz.end() - 1);
 
-  bool is_block_quant = (m1_sc.dim() == 2) && (m1_sc.size(1) > 1);
+  // K == block_k gives m1_sc [M, 1] and m2_sc [1, N / block_n]: still block.
+  bool single_k_block = (m1_sc.dim() == 2) && (m1_sc.size(1) == 1) &&
+                        (m2_sc.dim() == 2) && (m2_sc.size(0) == 1) &&
+                        (m2_sc.size(1) > 1) && (m2_sc.size(1) < n);
+  bool is_block_quant =
+      ((m1_sc.dim() == 2) && (m1_sc.size(1) > 1)) || single_k_block;
 
   int64_t wei_group_k = -1;
   int64_t wei_group_n = -1;
@@ -48,6 +53,13 @@ static inline void dnnl_matmul_w8a8_fp8(
     wei_group_k = k / m2_sc.size(0);
     wei_group_n = n / m2_sc.size(1);
   }
+  TORCH_CHECK(
+      is_block_quant || m2_sc.numel() == 1 || m2_sc.numel() == n,
+      "Per-channel weight scale must have N=",
+      n,
+      " elements, got shape ",
+      m2_sc.sizes(),
+      ".");
 
   // get joint dtypes
   joint_dtypes_t jd;
