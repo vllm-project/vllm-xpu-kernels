@@ -44,7 +44,8 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 
 - **Python**: 3.12
 - **PyTorch**: 2.15.0+xpu (from `https://download.pytorch.org/whl/test/xpu`)
-- **oneAPI**: 2026.1 ([Base Toolkit download](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html))
+- **Intel OMIX**: 0.4, including the oneAPI 2026.1 DPC++ compiler
+  ([installation guide](https://dgpu-docs.intel.com/installation-guides/installing-omix.html))
 - **CMake**: ≥ 3.26
 - **Ninja** build system
 
@@ -79,7 +80,7 @@ git clone https://github.com/vllm-project/vllm-xpu-kernels.git
 cd vllm-xpu-kernels
 ```
 
-**2. Prepare oneAPI**
+**2. Prepare Intel OMIX**
 
 - Option 1: Docker Container
 
@@ -111,8 +112,10 @@ cd vllm-xpu-kernels
 
 - Option 2: Bare-metal
 
-  Install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html)
-  matching the source-build requirements above.
+  Install the `intel-omix-dev` package by following the
+  [Intel OMIX installation guide](https://dgpu-docs.intel.com/installation-guides/installing-omix.html).
+  It provides the Intel GPU compute driver, DPC++ compiler, and required
+  compute libraries as a validated stack.
 
 Initialize the oneAPI environment in the shell where you will build:
 
