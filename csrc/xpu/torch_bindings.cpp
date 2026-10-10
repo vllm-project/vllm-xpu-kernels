@@ -58,6 +58,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "gated_rmsnorm_fp8_gemm",
       torch::kXPU,
       &vllm::fp8_gemv::gated_rmsnorm_fp8_gemm);
+  xpu_ops.def(
+      "resadd_rmsnorm_fp8_gemm(Tensor x, Tensor residual, Tensor "
+      "norm_weight, float eps, Tensor B, Tensor B_scale) -> (Tensor, Tensor)");
+  xpu_ops.impl(
+      "resadd_rmsnorm_fp8_gemm",
+      torch::kXPU,
+      &vllm::fp8_gemv::resadd_rmsnorm_fp8_gemm);
+  xpu_ops.def(
+      "resadd_rmsnorm_fp8_gemm_pair(Tensor x, Tensor residual, Tensor "
+      "norm_weight, float eps, Tensor B1, Tensor B1_scale, Tensor B2, Tensor "
+      "B2_scale) -> (Tensor, Tensor, Tensor)");
+  xpu_ops.impl(
+      "resadd_rmsnorm_fp8_gemm_pair",
+      torch::kXPU,
+      &vllm::fp8_gemv::resadd_rmsnorm_fp8_gemm_pair);
 #endif
 
   xpu_ops.def(
