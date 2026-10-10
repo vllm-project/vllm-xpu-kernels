@@ -153,7 +153,10 @@ def test_moe_shared_fused_decode_rejects_mixed_shared_gate_dtype():
                                              (torch.bfloat16, True),
                                              (torch.float32, False),
                                              (torch.float64, False)])
-def test_moe_activation_dtype_contract(monkeypatch, dtype, supported):
+def test_moe_and_router_activation_dtype_contract(monkeypatch, dtype,
+                                                  supported):
     monkeypatch.setattr(interface, "is_available", lambda: True)
+    monkeypatch.setattr(interface, "router_is_available", lambda: True)
     assert interface.supports(dtype, torch.float8_e4m3fn, 1, 8, 2048,
                               256) is supported
+    assert interface.router_supports(dtype, 256, 8, 2048) is supported
