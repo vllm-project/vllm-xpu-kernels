@@ -47,4 +47,14 @@ std::tuple<torch::Tensor, torch::Tensor> fp8_gemm_w8a16_pair(
     const torch::Tensor& b2_kn,
     const torch::Tensor& scale2);
 
+// RMSNormGated (norm_before_gate, per head of D = norm_weight.numel()) of
+// x with gate z, then fp8_gemm_w8a16 with B = W^T. One launch for decode.
+torch::Tensor gated_rmsnorm_fp8_gemm(
+    const torch::Tensor& x,
+    const torch::Tensor& z,
+    const torch::Tensor& norm_weight,
+    double eps,
+    const torch::Tensor& b_kn,
+    const torch::Tensor& scale);
+
 }  // namespace vllm::fp8_gemv

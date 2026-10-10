@@ -49,6 +49,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor B2_scale) -> (Tensor, Tensor)");
   xpu_ops.impl(
       "fp8_gemm_w8a16_pair", torch::kXPU, &vllm::fp8_gemv::fp8_gemm_w8a16_pair);
+  // RMSNorm-prologue + fp8 linear fusions (one GEMV launch for decode rows,
+  // unfused norm + fp8_gemm_w8a16 otherwise).
+  xpu_ops.def(
+      "gated_rmsnorm_fp8_gemm(Tensor x, Tensor z, Tensor norm_weight, "
+      "float eps, Tensor B, Tensor B_scale) -> Tensor");
+  xpu_ops.impl(
+      "gated_rmsnorm_fp8_gemm",
+      torch::kXPU,
+      &vllm::fp8_gemv::gated_rmsnorm_fp8_gemm);
 #endif
 
   xpu_ops.def(
