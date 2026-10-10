@@ -41,7 +41,6 @@ ENV ONEAPI_ROOT="/opt/intel/oneapi"
 ENV CMPLR_ROOT="${ONEAPI_ROOT}/compiler/latest"
 ENV MKLROOT="${ONEAPI_ROOT}/mkl/latest"
 ENV PATH="${ONEAPI_ROOT}/compiler/latest/bin:${PATH}"
-ENV LD_LIBRARY_PATH="${ONEAPI_ROOT}/compiler/latest/lib"
 
 ENV PATH="/root/.local/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
