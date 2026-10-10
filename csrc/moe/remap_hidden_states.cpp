@@ -6,6 +6,15 @@
 namespace vllm {
 namespace moe {
 
+static inline int
+to_local_expert_id(int global_expert_id, const int* expert_map) {
+  if (global_expert_id < 0) {
+    return -1;
+  }
+  return expert_map == nullptr ? global_expert_id
+                               : expert_map[global_expert_id];
+}
+
 class RowsPerExpertCount {
  public:
   RowsPerExpertCount(
@@ -49,17 +58,14 @@ class RowsPerExpertCount {
     for (int i = local_id; i < local_experts_num; i += local_range) {
       local_counts[i] = 0;
     }
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     // ===== Phase 2: local atomic =====
     if (global_id < num_rows * TopK) {
       int global_expert_id =
           is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
                             : reinterpret_cast<int64_t*>(topk_ids)[global_id];
-      int local_expert_id = global_expert_id;
-      if (expert_map != nullptr) {
-        local_expert_id = expert_map[global_expert_id];
-      }
+      int local_expert_id = to_local_expert_id(global_expert_id, expert_map);
 
       if (local_expert_id == -1) {
         unpermuted_row_to_permuted_row[global_id] = -1;
@@ -76,7 +82,7 @@ class RowsPerExpertCount {
       }
     }
 
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     // ===== Phase 3: global atomic =====
     for (int i = local_id; i < local_experts_num; i += local_range) {
@@ -92,17 +98,14 @@ class RowsPerExpertCount {
       }
     }
 
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     // ===== Phase 4: fix unpermuted_row_to_permuted_row =====
     if (global_id < num_rows * TopK) {
       int global_expert_id =
           is_topk_ids_int32 ? reinterpret_cast<int32_t*>(topk_ids)[global_id]
                             : reinterpret_cast<int64_t*>(topk_ids)[global_id];
-      int local_expert_id = global_expert_id;
-      if (expert_map != nullptr) {
-        local_expert_id = expert_map[global_expert_id];
-      }
+      int local_expert_id = to_local_expert_id(global_expert_id, expert_map);
 
       if (local_expert_id != -1) {
         // local_old + base_offset = global_offset
@@ -191,7 +194,7 @@ class RemapHiddenStates {
       expert_cumsum_ptr[i + 1] = rows_per_expert[i];
     }
 
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     sycl::joint_inclusive_scan(
         item.get_group(),
@@ -218,16 +221,9 @@ class RemapHiddenStates {
       }
     }
 
-    if (expert_map != nullptr) {
 #pragma unroll
-      for (int i = 0; i < TopK; ++i) {
-        local_expert_id[i] = expert_map[global_expert_id[i]];
-      }
-    } else {
-#pragma unroll
-      for (int i = 0; i < TopK; ++i) {
-        local_expert_id[i] = global_expert_id[i];
-      }
+    for (int i = 0; i < TopK; ++i) {
+      local_expert_id[i] = to_local_expert_id(global_expert_id[i], expert_map);
     }
 
     int rows_offset[TopK];
@@ -243,7 +239,7 @@ class RemapHiddenStates {
       }
     }
 
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     auto hidden_states_base = hidden_states +
                               row * static_cast<int64_t>(hidden_size) +
@@ -530,6 +526,8 @@ void remap_hidden_states(
     LAUNCH_REMAP_HIDDEN_STATES(TA, TS, 8);              \
   } else if (TopK == 10) {                              \
     LAUNCH_REMAP_HIDDEN_STATES(TA, TS, 10);             \
+  } else if (TopK == 12) {                              \
+    LAUNCH_REMAP_HIDDEN_STATES(TA, TS, 12);             \
   } else if (TopK == 16) {                              \
     LAUNCH_REMAP_HIDDEN_STATES(TA, TS, 16);             \
   } else {                                              \

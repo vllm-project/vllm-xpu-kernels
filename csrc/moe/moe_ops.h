@@ -79,7 +79,9 @@ void topk_softplus_sqrt(
     const c10::optional<torch::Tensor>& correction_bias,
     const c10::optional<torch::Tensor>& input_ids,
     const c10::optional<torch::Tensor>& tid2eid,
-    const c10::optional<torch::Tensor>& is_padding);
+    const c10::optional<torch::Tensor>& is_padding,
+    const c10::optional<torch::Tensor>& bias_vl,
+    int64_t image_sentinel_lo);
 
 void moe_gather(
     torch::Tensor& output,

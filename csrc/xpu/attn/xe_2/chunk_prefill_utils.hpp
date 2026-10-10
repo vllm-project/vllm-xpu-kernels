@@ -5,6 +5,7 @@
 #if __has_include("chunk_prefill_enabled_policies_gen.hpp")
   #include "chunk_prefill_enabled_policies_gen.hpp"
 #else
+namespace vllm::xpu::xe2 {
 // Fallback: if the generated header is not available (e.g., IDE indexing),
 // assume all policies are enabled.
 template <typename Policy>
@@ -17,8 +18,10 @@ template <
     bool Sink,
     bool Lse>
 struct is_chunk_policy_tuple_enabled : std::true_type {};
+}  // namespace vllm::xpu::xe2
 #endif
 
+namespace vllm::xpu::xe2 {
 using namespace cute;
 
 template <typename Policy>
@@ -37,16 +40,13 @@ struct chunk_policy_reported_head_size<chunk_policy_head512_b16>
     : std::integral_constant<int, 512> {};
 
 template <typename chunk_policy, bool... Bs>
-void policy_dispatch_func(
+__attribute__((visibility("hidden"))) void policy_dispatch_func(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args) {
   // Pack is expected in order: (Paged, Causal, Local, Sink, SoftmaxLSE).
-  // SoftmaxLSE=true is only supported when Paged=false, Local=false,
-  // and Sink=false; other combos are not instantiated (no TUs generated),
-  // so statically skip the call for those to avoid implicit instantiation
-  // and guarantee the runtime TORCH_CHECK in fmha_xe2.cpp is the only
-  // path that can surface a bad request.
+  // Paged and non-paged kernels support LSE for global attention without
+  // sinks. Local/Sink LSE tuples are not instantiated.
   constexpr bool flags[] = {Bs...};
   static_assert(
       sizeof...(Bs) == 5, "policy_dispatch_func expects 5 bool parameters");
@@ -58,11 +58,11 @@ void policy_dispatch_func(
   // Report the logical head_size in diagnostics instead of ShapeOut width.
   constexpr int _head_sz = chunk_policy_reported_head_size<chunk_policy>::value;
 
-  if constexpr (SoftmaxLSE && (Paged || Local || Sink)) {
+  if constexpr (SoftmaxLSE && (Local || Sink)) {
     TORCH_CHECK(
         false,
-        "Unreachable: softmax_lse is only supported when is_paged=false, "
-        "is_local=false, is_sink=false");
+        "Unreachable: chunk prefill softmax_lse requires is_local=false "
+        "and is_sink=false");
   } else if constexpr (!is_chunk_policy_enabled<chunk_policy>::value) {
     TORCH_CHECK(
         false,
@@ -131,7 +131,7 @@ void policy_dispatch_func(
 }
 
 template <typename chunk_policy, bool... Bs, typename... Ts>
-void policy_dispatch_func(
+__attribute__((visibility("hidden"))) void policy_dispatch_func(
     sycl::queue& queue,
     CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args,
@@ -146,7 +146,10 @@ void policy_dispatch_func(
   }
 }
 
-void cutlass_chunk_prefill_impl(
+// Defence in depth: this implementation lives in vllm::xpu::xe2, so the XE2 and
+// XE3 libraries no longer export a symbol with the same mangled name. Hidden
+// visibility keeps it unexported even if a future refactor reintroduces one.
+__attribute__((visibility("hidden"))) void cutlass_chunk_prefill_impl(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]
     const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
@@ -170,3 +173,5 @@ void cutlass_chunk_prefill_impl(
     bool is_sink,
     std::optional<at::Tensor>& softmax_lse,
     std::optional<const at::Tensor>& is_prefill);
+
+}  // namespace vllm::xpu::xe2

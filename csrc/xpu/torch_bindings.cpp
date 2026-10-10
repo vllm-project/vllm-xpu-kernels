@@ -232,6 +232,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("gated_delta_rule_spec", torch::kXPU, &gated_delta_rule_spec);
 
   xpu_ops.def(
+      "gated_delta_rule_spec_recoverssm(Tensor! core_attn_out,"
+      "Tensor q, Tensor k, Tensor v, Tensor b, Tensor a,"
+      "int num_v_heads, int head_v_dim,"
+      "Tensor A_log, Tensor dt_bias, Tensor ssm_state, Tensor! replay_state,"
+      "int num_spec_decodes, Tensor spec_query_start_loc, "
+      "Tensor? spec_token_indx, Tensor spec_state_indices_tensor,"
+      "int null_block_id, int num_actual_tokens, int tp_size) -> ()");
+  xpu_ops.impl(
+      "gated_delta_rule_spec_recoverssm",
+      torch::kXPU,
+      &gated_delta_rule_spec_recoverssm);
+
+  xpu_ops.def(
       "gated_delta_rule_non_spec(Tensor! core_attn_out,"
       "Tensor q, Tensor k, Tensor v, Tensor b, Tensor a,"
       "int num_v_heads, int head_v_dim,"
@@ -328,6 +341,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "fused_input_norm(Tensor! out, Tensor input, Tensor weight, "
       "Tensor bias) -> ()");
   xpu_ops.impl("fused_input_norm", torch::kXPU, &fused_input_norm);
+
+  xpu_ops.def(
+      "compact_sampling_mask(Tensor logits, Tensor num_sampled_tokens,"
+      "int max_num_kept, int max_compact_support) -> (Tensor, Tensor, Tensor)");
+  xpu_ops.impl("compact_sampling_mask", torch::kXPU, &compact_sampling_mask);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

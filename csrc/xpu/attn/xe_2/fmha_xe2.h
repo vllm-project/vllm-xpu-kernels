@@ -1,5 +1,6 @@
 #include <torch/all.h>
 
+namespace vllm::xpu::xe2 {
 void cutlass_chunk_prefill_xe2(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]
@@ -24,3 +25,5 @@ void cutlass_chunk_prefill_xe2(
     bool is_sink,
     std::optional<at::Tensor>& softmax_lse,
     std::optional<const at::Tensor>& is_prefill);
+
+}  // namespace vllm::xpu::xe2

@@ -54,42 +54,16 @@ bool hostUnregister(void* ptr) {
 }  // namespace xpu
 }  // namespace vllm
 
-namespace {
-
-// Extracts the raw address from a single-element uint64 tensor. Addresses
-// are passed this way (rather than as a scalar int64) because a pointer's
-// full 64-bit bit pattern (e.g. bit 63 set) can exceed the signed int64
-// range and would otherwise fail to cast from Python.
-uint64_t ptrFromTensor(const torch::Tensor& ptr) {
-  // Must live on the CPU: the address is dereferenced with data_ptr<uint64_t>
-  // on the host, so a device-resident tensor here would be undefined
-  // behavior rather than a clean error.
-  TORCH_CHECK(ptr.device().is_cpu(), "ptr must be on CPU");
-  TORCH_CHECK(
-      ptr.numel() == 1,
-      "ptr must be a single-element tensor, got ",
-      ptr.numel());
-  TORCH_CHECK(
-      ptr.scalar_type() == torch::kUInt64,
-      "ptr must be a uint64 tensor, got ",
-      ptr.scalar_type());
-  return *ptr.data_ptr<uint64_t>();
-}
-
-}  // namespace
-
-bool xpu_host_register(const torch::Tensor& ptr, int64_t n_bytes) {
+bool xpu_host_register(int64_t ptr, int64_t n_bytes) {
   TORCH_CHECK(n_bytes >= 0, "n_bytes must be non-negative");
-  uint64_t addr = ptrFromTensor(ptr);
-  if (addr == 0 || n_bytes == 0) return false;
+  if (ptr == 0 || n_bytes == 0) return false;
   return vllm::xpu::hostRegister(
-      reinterpret_cast<void*>(static_cast<uintptr_t>(addr)),
+      reinterpret_cast<void*>(static_cast<uintptr_t>(ptr)),
       static_cast<size_t>(n_bytes));
 }
 
-bool xpu_host_unregister(const torch::Tensor& ptr) {
-  uint64_t addr = ptrFromTensor(ptr);
-  if (addr == 0) return false;
+bool xpu_host_unregister(int64_t ptr) {
+  if (ptr == 0) return false;
   return vllm::xpu::hostUnregister(
-      reinterpret_cast<void*>(static_cast<uintptr_t>(addr)));
+      reinterpret_cast<void*>(static_cast<uintptr_t>(ptr)));
 }

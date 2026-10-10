@@ -10,6 +10,7 @@ void cutlass_chunk_prefill_interface(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -32,13 +33,13 @@ void cutlass_paged_decode_interface(
     at::Tensor& out,
     at::Tensor&
         temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
-    at::Tensor& exp_sums,    // [batch, num_head_q, seq_q, num_kv_splits]
-    at::Tensor& max_logits,  // [batch, num_head_q, seq_q, num_kv_splits]
+    at::Tensor& softmax_lse_accum,  // [batch, num_head_q, seq_q, num_kv_splits]
     const at::Tensor& block_table,
     const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -53,4 +54,5 @@ void cutlass_paged_decode_interface(
     int num_kv_splits,
     std::optional<const at::Tensor>& is_prefill,
     std::optional<at::Tensor>& splits_per_seq,
-    std::optional<at::Tensor>& work_list);
+    std::optional<at::Tensor>& work_list,
+    std::optional<at::Tensor>& softmax_lse);

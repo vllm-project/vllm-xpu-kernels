@@ -108,10 +108,11 @@ torch::Tensor get_xpu_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
   if (cpu_tensor.is_pinned()) {
     pinned_owner = cpu_tensor;
   } else {
-    torch::Tensor contiguous_cpu = cpu_tensor.contiguous();
-    pinned_owner = at::empty_like(
-        contiguous_cpu, contiguous_cpu.options().pinned_memory(true));
-    pinned_owner.copy_(contiguous_cpu);
+    pinned_owner = at::empty_strided(
+        cpu_tensor.sizes(),
+        cpu_tensor.strides(),
+        cpu_tensor.options().pinned_memory(true));
+    pinned_owner.copy_(cpu_tensor);
   }
 
   // Get raw host pointer from the pinned tensor.
@@ -123,7 +124,26 @@ torch::Tensor get_xpu_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
   auto strides = pinned_owner.strides();
   auto scalar_type = pinned_owner.scalar_type();
 
-  size_t byte_size = pinned_owner.numel() * pinned_owner.element_size();
+  // Compute the number of bytes addressable from `host_ptr` given these
+  // sizes/strides. This must NOT be `numel() * element_size()`: that is
+  // only correct for a "dense" layout (e.g. a plain transpose/permute,
+  // where every element in [0, numel) is used exactly once). A tensor with
+  // gaps in its strides (e.g. produced by `narrow`/slicing) can require
+  // more storage than `numel * element_size` to cover every element it
+  // addresses, which would under-declare the view's Storage size. Nor can
+  // we simply use `pinned_owner.storage().nbytes()`: when `pinned_owner`
+  // is a caller-supplied already-pinned tensor with a non-zero
+  // `storage_offset()` (e.g. itself a slice of a larger pinned buffer),
+  // that reports the whole underlying storage's size measured from byte 0,
+  // not from `host_ptr` (which already starts at the offset) -- that would
+  // over-declare the view's size instead. Compute the span directly from
+  // sizes/strides so it is correct in both cases.
+  int64_t max_elem_offset = 0;
+  for (size_t i = 0; i < sizes.size(); ++i) {
+    if (sizes[i] > 1) max_elem_offset += (sizes[i] - 1) * strides[i];
+  }
+  size_t byte_size =
+      static_cast<size_t>(max_elem_offset + 1) * pinned_owner.element_size();
   // Keep `pinned_owner` storage alive through the view tensor's lifetime.
   vllm::xpu::XPUHostViewAllocator allocator(host_ptr, byte_size, pinned_owner);
   c10::DataPtr data_ptr = allocator.allocate(byte_size);

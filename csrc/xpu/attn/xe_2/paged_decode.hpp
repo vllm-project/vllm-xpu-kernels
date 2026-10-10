@@ -15,12 +15,30 @@
 
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 
+#ifndef VLLM_GRF_SIZE
+  #define VLLM_GRF_SIZE 256
+#endif
+
 #include "collective/chunk_prefill_scheduler.hpp"
 #include "collective/chunk_prefill_epilogue.hpp"
 #include "kernel/paged_decode_kernel.hpp"
 
-#include "fmha_utils.hpp"
+#include "csrc/xpu/attn/fmha_utils.hpp"
 
+// Everything below belongs to this architecture alone.
+//
+// XE2 and XE3 are built into separate shared libraries but instantiate kernel
+// templates with the same names from divergent sources (for example
+// paged_decode_args_t differs between the two). At global namespace those
+// instantiations mangle identically and are emitted as weak, default-visibility
+// symbols, so the dynamic loader binds every reference to whichever library it
+// resolves first -- an XE3 caller then runs XE2 code and reads the argument
+// struct with the wrong layout, silently corrupting the KV cache strides.
+//
+// Keeping each architecture in its own namespace makes the mangled names
+// disjoint, so the two libraries can never cross-bind. Do not move any of these
+// declarations back to global namespace.
+namespace vllm::xpu::xe2 {
 using namespace cute;
 
 using _576 = cute::Int<576>;
@@ -89,8 +107,7 @@ struct paged_decode_args_t {
   void* value;
   void* out;
   void* tem_out;
-  void* exp_sums;
-  void* max_logits;
+  void* softmax_lse_accum;
   void* block_table;
   void* cu_seqlens_q;
   void* cu_seqlens_k;
@@ -141,6 +158,11 @@ struct paged_decode_args_t {
   int64_t q_stride_heads = 0;
   int64_t q_stride_batch = 0;
   int page_stride_elements = 0;
+  // softmax_lse output [num_heads_q, total_seqlen_q] (nullptr if disabled).
+  // Written by the FMHA kernel epilogue when num_kv_splits <= 1 (no reduce
+  // pass), otherwise by the ReduceSplitK kernel.
+  float* softmax_lse = nullptr;
+  int lse_stride = 0;  // stride along the head dim (= total_seqlen_q)
 };
 
 template <class FMHAKernel, class ReductionSplitKernel, bool isVarLen>
@@ -168,8 +190,7 @@ struct DecodeKernelLauncher {
   StrideV stride_V;
   StrideO stride_O;
   StrideO stride_Oaccum;
-  StrideO stride_exp_sums;
-  StrideO stride_max_logits;
+  StrideO stride_softmax_lse_accum;
 
   int num_kv_splits;
 
@@ -287,11 +308,7 @@ struct DecodeKernelLauncher {
         cute::make_shape(
             seq_len_qo, head_size_vo, num_heads_q * num_kv_splits, batch));
 
-    stride_exp_sums = cutlass::make_cute_packed_stride(
-        StrideO{},
-        cute::make_shape(seq_len_qo, num_kv_splits, num_heads_q, batch));
-
-    stride_max_logits = cutlass::make_cute_packed_stride(
+    stride_softmax_lse_accum = cutlass::make_cute_packed_stride(
         StrideO{},
         cute::make_shape(seq_len_qo, num_kv_splits, num_heads_q, batch));
 
@@ -315,13 +332,13 @@ struct DecodeKernelLauncher {
             stride_V,
             reinterpret_cast<ElementO*>(args.tem_out),
             stride_Oaccum,
-            reinterpret_cast<ElementLSE*>(args.exp_sums),
-            stride_exp_sums,
-            reinterpret_cast<ElementLSE*>(args.max_logits),
-            stride_max_logits,
+            reinterpret_cast<ElementLSE*>(args.softmax_lse_accum),
+            stride_softmax_lse_accum,
             reinterpret_cast<ElementQ*>(args.sm_sink),
             static_cast<const bool*>(args.is_prefill),
             args.splits_per_seq,
+            args.softmax_lse,
+            args.lse_stride,
         },
         {args.sm_scale,
          args.k_scale,
@@ -345,13 +362,13 @@ struct DecodeKernelLauncher {
          stride_O,
          reinterpret_cast<ElementO*>(args.tem_out),
          stride_Oaccum,
-         reinterpret_cast<ElementLSE*>(args.exp_sums),
-         stride_exp_sums,
-         reinterpret_cast<ElementLSE*>(args.max_logits),
-         stride_max_logits,
+         reinterpret_cast<ElementLSE*>(args.softmax_lse_accum),
+         stride_softmax_lse_accum,
          args.window_size_left,
          static_cast<const bool*>(args.is_prefill),
-         args.splits_per_seq},
+         args.splits_per_seq,
+         args.softmax_lse,
+         args.lse_stride},
         hw_info,
         args.num_kv_splits};
 
@@ -424,7 +441,8 @@ struct DecodeKernelLauncher {
         syclex::work_group_scratch_size(smem_size),
     };
     compat::experimental::kernel_properties kernel_props{
-        syclex::sub_group_size<cute::intel::sg_size>, intelex::grf_size<256>};
+        syclex::sub_group_size<cute::intel::sg_size>,
+        intelex::grf_size<VLLM_GRF_SIZE>};
     compat::experimental::launch_policy policy{
         sycl_grid, sycl_block, launch_props, kernel_props};
     compat::experimental::launch<cutlass::device_kernel<FMHAKernel>>(
@@ -686,3 +704,5 @@ void decode_policy_dispatch_impl(
       " k_type=",
       static_cast<int>(cuQKType.k_type));
 }
+
+}  // namespace vllm::xpu::xe2

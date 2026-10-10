@@ -48,6 +48,34 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! weight, float epsilon) -> ()");
   ops.impl("fused_add_gemma_rms_norm", torch::kXPU, &fused_add_gemma_rms_norm);
 
+  // Standard (non-RMS) LayerNorm: mean-centered, optional weight and bias.
+  ops.def(
+      "layer_norm(Tensor! result, Tensor input, Tensor? weight, Tensor? bias, "
+      "float epsilon) -> ()");
+  ops.impl("layer_norm", torch::kXPU, &layer_norm);
+
+  // In-place fused Add and LayerNorm.
+  ops.def(
+      "fused_add_layer_norm(Tensor! input, Tensor! residual, Tensor? weight, "
+      "Tensor? bias, float epsilon) -> ()");
+  ops.impl("fused_add_layer_norm", torch::kXPU, &fused_add_layer_norm);
+
+  // Nemotron LayerNorm: out = layer_norm(x) * (1 + weight) + bias, folding
+  // the +1 weight offset into the kernel (same trick as gemma_rms_norm).
+  ops.def(
+      "nemotron_layer_norm(Tensor! result, Tensor input, Tensor weight, "
+      "Tensor? bias, float epsilon) -> ()");
+  ops.impl("nemotron_layer_norm", torch::kXPU, &nemotron_layer_norm);
+
+  // In-place fused Add and Nemotron LayerNorm.
+  ops.def(
+      "fused_add_nemotron_layer_norm(Tensor! input, Tensor! residual, "
+      "Tensor weight, Tensor? bias, float epsilon) -> ()");
+  ops.impl(
+      "fused_add_nemotron_layer_norm",
+      torch::kXPU,
+      &fused_add_nemotron_layer_norm);
+
   // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8).
   ops.def(
       "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
@@ -250,9 +278,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // memory outside the caching host allocator (e.g. a shared mmap region) has
   // no other way to become pinned. Returns false if registration is
   // unsupported, in which case transfers remain correct but slower.
-  ops.def("xpu_host_register(Tensor ptr, int n_bytes) -> bool");
+  ops.def("xpu_host_register(int ptr, int n_bytes) -> bool");
   ops.impl("xpu_host_register", &xpu_host_register);
-  ops.def("xpu_host_unregister(Tensor ptr) -> bool");
+  ops.def("xpu_host_unregister(int ptr) -> bool");
   ops.impl("xpu_host_unregister", &xpu_host_unregister);
 
   // Merge attn states
@@ -269,6 +297,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int? prefill_tokens_with_context=None,"
       "    Tensor? output_scale=None) -> ()");
   ops.impl("merge_attn_states", torch::kXPU, &merge_attn_states);
+
+  // LongCat n-gram embedding index kernel. Schema mirrors upstream vLLM.
+  ops.def(
+      "ngram_compute_n_gram_ids(int ne_n, int ne_k, Tensor(a!) ne_weights, "
+      "Tensor(b!) ne_mods, Tensor(c!) exclusive_ne_embedder_size_sums, "
+      "Tensor(d!) exclusive_req_len_sums, Tensor(e!) ne_token_table, "
+      "Tensor(f!) row_indices, Tensor(g!) column_starts, "
+      "Tensor(h!) n_gram_ids) -> ()");
+  ops.impl("ngram_compute_n_gram_ids", torch::kXPU, &ngram_compute_n_gram_ids);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {

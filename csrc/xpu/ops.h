@@ -271,6 +271,27 @@ void gated_delta_rule_spec(
     const int64_t num_actual_tokens,
     const int64_t tp_size);
 
+void gated_delta_rule_spec_recoverssm(
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& b,
+    const torch::Tensor& a,
+    const int64_t num_v_heads,
+    const int64_t head_v_dim,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    const torch::Tensor& ssm_state,
+    torch::Tensor& replay_state,
+    const int64_t num_spec_decodes,
+    const torch::Tensor& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const torch::Tensor& spec_state_indices_tensor,
+    const int64_t null_block_id,
+    const int64_t num_actual_tokens,
+    const int64_t tp_size);
+
 void gated_delta_rule_non_spec(
     torch::Tensor& core_attn_out,
     const torch::Tensor& q,
@@ -342,7 +363,7 @@ bool is_xe3_arch(int64_t device_index);
 
 void exponential_2d_(
     torch::Tensor& tensor,
-    torch::Tensor& seeds,  // should on CPU
+    torch::Tensor& seeds,  // CPU [2] shared
     const double lambda);
 
 void topk_topp_sampler(
@@ -352,7 +373,7 @@ void topk_topp_sampler(
     const std::optional<torch::Tensor>& k,
     const std::optional<torch::Tensor>& p,
     const std::string& logprobs_mode,
-    torch::Tensor& seeds,  // should on CPU
+    torch::Tensor& seeds,  // CPU [2] shared or XPU [batch_size, 2] per-row
     const double lambda);
 
 #ifdef VLLM_MQA_LOGITS_ENABLED
@@ -402,3 +423,9 @@ void fused_input_norm(
     torch::Tensor& input,
     torch::Tensor& weight,
     torch::Tensor& bias);
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
+    const torch::Tensor& logits,
+    const torch::Tensor& num_sampled_tokens,
+    int64_t max_num_kept,
+    int64_t max_compact_support);

@@ -1,0 +1,387 @@
+#include "fmha_xe3.h"
+#include "chunk_prefill_utils.hpp"
+#if __has_include("chunk_prefill_extern_gen.hpp")
+  #include "chunk_prefill_extern_gen.hpp"
+#else
+  #include "chunk_prefill_extern.hpp"
+#endif
+#include "csrc/xpu/attn/paged_kv_utils.h"
+
+namespace vllm::xpu::xe3 {
+void cutlass_chunk_prefill_xe3(
+    sycl::queue& queue,
+    const at::Tensor& query,      // [seq_q, heads, head_size]
+    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& value_cache,
+    at::Tensor& out,
+    const at::Tensor& block_table,
+    const at::Tensor& cu_seqlens_q,
+    const at::Tensor& cu_seqlens_k,
+    int max_seqlen_q,
+    int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
+    std::optional<const at::Tensor>& k_scale,
+    std::optional<const at::Tensor>& v_scale,
+    double sm_scale,
+    std::optional<const at::Tensor>& sm_sink_,
+    int window_size_left,
+    int window_size_right,
+    bool is_varlen,
+    bool is_paged,
+    bool is_causal,
+    bool is_local,
+    bool is_sink,
+    std::optional<at::Tensor>& softmax_lse,
+    std::optional<const at::Tensor>& is_prefill) {
+  cutlass_chunk_prefill_impl(
+      queue,
+      query,
+      key_cache,
+      value_cache,
+      out,
+      block_table,
+      cu_seqlens_q,
+      cu_seqlens_k,
+      max_seqlen_q,
+      max_seqlen_k,
+      q_scale,
+      k_scale,
+      v_scale,
+      sm_scale,
+      sm_sink_,
+      window_size_left,
+      window_size_right,
+      is_varlen,
+      is_paged,
+      is_causal,
+      is_local,
+      is_sink,
+      softmax_lse,
+      is_prefill);
+}
+
+void cutlass_chunk_prefill_impl(
+    sycl::queue& queue,
+    const at::Tensor& query,      // [seq_q, heads, head_size]
+    const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
+    const at::Tensor& value_cache,
+    at::Tensor& out,
+    const at::Tensor& block_table,
+    const at::Tensor& cu_seqlens_q,
+    const at::Tensor& cu_seqlens_k,
+    int max_seqlen_q,
+    int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
+    std::optional<const at::Tensor>& k_scale,
+    std::optional<const at::Tensor>& v_scale,
+    double sm_scale,
+    std::optional<const at::Tensor>& sm_sink_,
+    int window_size_left,
+    int window_size_right,
+    bool is_varlen,
+    bool is_paged,
+    bool is_causal,
+    bool is_local,
+    bool is_sink,
+    std::optional<at::Tensor>& softmax_lse,
+    std::optional<const at::Tensor>& is_prefill) {
+  // general params
+  int batch_size, num_heads_q, num_heads_kv, head_size;
+  // additional params
+  int total_seqlen_q, total_seqlen_k;
+  int num_blocks, block_size, max_blocks_per_seq;
+  if (is_varlen) {
+    // query: [total_seq, num_heads, head_size]
+    batch_size = cu_seqlens_q.numel() - 1;
+    num_heads_q = query.size(1);
+    num_heads_kv = key_cache.size(1);
+    head_size = query.size(2);
+    total_seqlen_q = query.size(0);
+    total_seqlen_k = key_cache.size(0);
+  } else {
+    // query: [batch, num_heads, seq, head_size]
+    batch_size = query.size(0);
+    num_heads_q = query.size(1);
+    num_heads_kv = key_cache.size(1);
+    head_size = query.size(3);
+    max_seqlen_q = query.size(2);
+    max_seqlen_k = key_cache.size(2);
+  }
+
+  if (is_paged) {
+    num_blocks = key_cache.size(0);
+    block_size = key_cache.size(1);
+    num_heads_kv = key_cache.size(2);
+    max_blocks_per_seq = block_table.size(1);
+    total_seqlen_k = num_blocks * block_size;
+  }
+
+  if (is_local) {
+    window_size_left = window_size_left == -1 ? max_seqlen_k : window_size_left;
+    window_size_right =
+        window_size_right == -1 ? max_seqlen_k : window_size_right;
+    if (is_causal) {
+      window_size_right = 0;
+      is_causal = false;
+    }
+  }
+
+  bool is_fp8_kv =
+      (key_cache.scalar_type() == at::ScalarType::Float8_e5m2 ||
+       key_cache.scalar_type() == at::ScalarType::Float8_e4m3fn);
+  bool is_fp8_q =
+      (query.scalar_type() == at::ScalarType::Float8_e5m2 ||
+       query.scalar_type() == at::ScalarType::Float8_e4m3fn);
+
+  chunk_prefill_args_t args = {
+      query.data_ptr(),
+      key_cache.data_ptr(),
+      value_cache.data_ptr(),
+      out.data_ptr(),
+      is_paged ? block_table.data_ptr() : nullptr,
+      cu_seqlens_q.data_ptr(),
+      cu_seqlens_k.data_ptr(),
+      max_seqlen_q,
+      max_seqlen_k,
+      total_seqlen_q,
+      total_seqlen_k,
+      (is_fp8_q && q_scale.has_value()) ? q_scale.value().data_ptr() : nullptr,
+      is_fp8_kv ? k_scale.value().data_ptr() : nullptr,
+      is_fp8_kv ? v_scale.value().data_ptr() : nullptr,
+      static_cast<float>(sm_scale),
+      is_sink ? sm_sink_.value().data_ptr() : nullptr,
+      batch_size,
+      num_heads_q,
+      num_heads_kv,
+      head_size,
+      max_blocks_per_seq,
+      block_size,
+      window_size_left,
+      window_size_right,
+      is_varlen,  // varlen
+      is_paged,   // paged
+      is_causal,
+      is_local,
+      is_sink};
+
+  // softmax_lse output is only supported on the
+  // !Paged && !Local && !Sink specialization (template-constrained to
+  // keep kernel instantiation count bounded).
+  bool is_lse = softmax_lse.has_value();
+  TORCH_CHECK(
+      !is_lse || (!is_paged && !is_local && !is_sink),
+      "softmax_lse output is only supported when is_paged=false, "
+      "is_local=false, is_sink=false");
+  if (is_lse) {
+    args.softmax_lse = softmax_lse.value().data_ptr<float>();
+    // softmax_lse is allocated as (num_heads_q, total_seqlen_q); stride
+    // along the query-row dimension is total_seqlen_q.
+    args.lse_stride = total_seqlen_q;
+  }
+  args.is_prefill =
+      is_prefill.has_value() ? is_prefill.value().data_ptr() : nullptr;
+
+  // Extract Q, K, V, O strides from tensors
+  if (is_varlen) {
+    // Q/O: [total_seq, num_heads, head_size]
+    args.q_stride_seq = query.stride(0);
+    args.q_stride_heads = query.stride(1);
+    args.q_stride_batch = 0;
+    args.o_stride_seq = out.stride(0);
+    args.o_stride_heads = out.stride(1);
+    args.o_stride_batch = 0;
+    if (is_paged) {
+      // K/V: [num_blocks, block_size, num_heads_kv, head_size]
+      args.k_stride_seq = key_cache.stride(1);
+      args.k_stride_heads = key_cache.stride(2);
+      args.k_stride_batch = 0;
+      args.v_stride_seq = value_cache.stride(1);
+      args.v_stride_heads = value_cache.stride(2);
+      args.v_stride_batch = 0;
+    } else {
+      // K/V: [total_seq_k, num_heads_kv, head_size]
+      args.k_stride_seq = key_cache.stride(0);
+      args.k_stride_heads = key_cache.stride(1);
+      args.k_stride_batch = 0;
+      args.v_stride_seq = value_cache.stride(0);
+      args.v_stride_heads = value_cache.stride(1);
+      args.v_stride_batch = 0;
+    }
+  } else {
+    // Q/O: [batch, num_heads, seq, head_size]
+    args.q_stride_seq = query.stride(2);
+    args.q_stride_heads = query.stride(1);
+    args.q_stride_batch = query.stride(0);
+    args.o_stride_seq = out.stride(2);
+    args.o_stride_heads = out.stride(1);
+    args.o_stride_batch = out.stride(0);
+    if (is_paged) {
+      // K/V: [num_blocks, block_size, num_heads_kv, head_size]
+      args.k_stride_seq = key_cache.stride(1);
+      args.k_stride_heads = key_cache.stride(2);
+      args.k_stride_batch = 0;
+      args.v_stride_seq = value_cache.stride(1);
+      args.v_stride_heads = value_cache.stride(2);
+      args.v_stride_batch = 0;
+    } else {
+      // K/V: [batch, num_heads_kv, seq, head_size]
+      args.k_stride_seq = key_cache.stride(2);
+      args.k_stride_heads = key_cache.stride(1);
+      args.k_stride_batch = key_cache.stride(0);
+      args.v_stride_seq = value_cache.stride(2);
+      args.v_stride_heads = value_cache.stride(1);
+      args.v_stride_batch = value_cache.stride(0);
+    }
+  }
+
+  // For non-contiguous paged KV (e.g., cross-layer KV cache), enlarge
+  // total_seqlen_k to cover the full physical extent for the 2D block
+  // load surface descriptor. Without this, block loads for blocks at
+  // higher physical addresses would return zeros. The page_stride_elements
+  // is also required by the paged index computation in the xe_3
+  // mainloop; leaving it at 0 makes every paged block resolve to block 0.
+  if (is_paged) {
+    args.page_stride_elements =
+        static_cast<int>(get_paged_kv_cache_page_stride_elements(key_cache));
+    int64_t effective_total =
+        get_paged_kv_cache_effective_total_seqlen(key_cache);
+    if (effective_total > args.total_seqlen_k) {
+      args.total_seqlen_k = static_cast<int>(effective_total);
+    }
+  }
+
+  CutlassQKType cuQKType = aten_to_Cutlass_qk_dtype(query, key_cache);
+
+  // Full fp8 attention: when the query itself is fp8, Q/K/V all flow through
+  // the fp8 MMAs. The output precision is independent of the fp8 inputs, so
+  // carry it explicitly. q_scale/k_scale/v_scale are passed as device pointers
+  // and fused inside the kernel (q_scale and k_scale into the softmax scale,
+  // v_scale as a post-loop output rescale), so the caller passes raw per-tensor
+  // scales.
+  if (is_fp8_q) {
+    TORCH_CHECK(
+        head_size == 128,
+        "Full fp8 chunk_prefill only supports head dimension 128, got ",
+        head_size,
+        ".");
+    TORCH_CHECK(
+        cuQKType.q_type == cuQKType.k_type,
+        "Full fp8 chunk_prefill requires Q and K/V cache to share the same fp8 "
+        "type (both e4m3 or both e5m2).");
+    TORCH_CHECK(
+        out.scalar_type() == at::ScalarType::Half ||
+            out.scalar_type() == at::ScalarType::BFloat16,
+        "Full fp8 chunk_prefill output must be half or bfloat16.");
+    cuQKType.o_type = aten_to_dtype(out);
+  }
+
+  static constexpr int max_head_size = 512;
+  TORCH_CHECK(
+      head_size <= max_head_size,
+      "FMHA forward only supports head dimension at most " +
+          std::to_string(max_head_size));
+
+  // Validate block_size: 16, 32, or any positive multiple of 64. Non-paged
+  // mode does not use block_size, so only enforce the check when paged.
+  if (is_paged) {
+    TORCH_CHECK(
+        block_size == 16 || block_size == 32 ||
+            (block_size > 0 && (block_size % 64) == 0),
+        "chunk_prefill: unsupported block_size=",
+        block_size,
+        " (supported: 16, 32, or any positive multiple of 64)");
+  }
+
+  // Block_size == 16 needs the *_b16 policies (TileShapeQK[1] = 16).
+  // All other supported sizes (32, 64*n) divide cleanly by the default
+  // TileShapeQK[1] = 32 used in the standard chunk_policy_head* set.
+  const bool use_b16_policy = is_paged && (block_size == 16);
+
+  if (use_b16_policy) {
+    if (args.head_size <= HEAD_SIZE_LIMIT_0) {
+      policy_dispatch_func<chunk_policy_head64_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
+      policy_dispatch_func<chunk_policy_head96_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
+      policy_dispatch_func<chunk_policy_head128_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
+      policy_dispatch_func<chunk_policy_head192_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
+      policy_dispatch_func<chunk_policy_head256_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
+      policy_dispatch_func<chunk_policy_head512_b16>(
+          queue,
+          cuQKType,
+          args,
+          is_paged,
+          is_causal,
+          is_local,
+          is_sink,
+          is_lse);
+    } else {
+      TORCH_CHECK(false, "Unsupported head size for fmha");
+    }
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_0) {
+    policy_dispatch_func<chunk_policy_head64>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_1) {
+    policy_dispatch_func<chunk_policy_head96>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_2) {
+    policy_dispatch_func<chunk_policy_head128>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_3) {
+    policy_dispatch_func<chunk_policy_head192>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_4) {
+    policy_dispatch_func<chunk_policy_head256>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+  } else if (args.head_size <= HEAD_SIZE_LIMIT_5) {
+    policy_dispatch_func<chunk_policy_head512>(
+        queue, cuQKType, args, is_paged, is_causal, is_local, is_sink, is_lse);
+  } else {
+    TORCH_CHECK(false, "Unsupported head size for fmha");
+  }
+}
+
+}  // namespace vllm::xpu::xe3

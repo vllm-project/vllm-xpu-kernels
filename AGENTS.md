@@ -18,8 +18,8 @@ can dispatch on Intel GPU hardware.
 - Python package metadata currently requires Python `>=3.9,<3.14`; CMake still
   searches `3.9` through `3.12`, so verify interpreter support before changing
   build behavior.
-- PyTorch XPU support is currently `2.13.0+xpu` in `pyproject.toml`, with CMake
-  expecting torch `2.13.0` for XPU.
+- PyTorch XPU support is currently `2.14.0+xpu` in `pyproject.toml`, with CMake
+  expecting torch `2.14.0` for XPU.
 - oneAPI 2026.0 is the expected toolchain. Source
   `/opt/intel/oneapi/setvars.sh` before building native extensions.
 
@@ -78,6 +78,11 @@ Important build environment variables:
   `GDN_KERNELS_ENABLED`, `MQA_LOGITS_KERNELS_ENABLED`,
   `XPU_SPECIFIC_KERNELS_ENABLED`, `XPUMEM_ALLOCATOR_ENABLED`: extension or
   kernel-family toggles forwarded from `setup.py` to CMake.
+- `VLLM_XPU_ENABLE_ONEDNN`: enable or disable the oneDNN-backed GEMM kernels in
+  the `_xpu_C` extension (fp8/int4/fp4 GEMM ops and `get_onednn_version`). When
+  disabled, oneDNN is not fetched or linked and the ops are still registered but
+  raise a runtime error instructing the user to rebuild with
+  `VLLM_XPU_ENABLE_ONEDNN=ON`.
 - `VLLM_CHUNK_PREFILL_CONFIG`: selects the chunk prefill attention kernel
   config used for prompt processing. Accepts a preset name with or without the
   `.conf` suffix from `csrc/xpu/attn/kernel_configs/`, or an absolute path to a
