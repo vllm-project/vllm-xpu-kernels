@@ -271,6 +271,27 @@ void gated_delta_rule_spec(
     const int64_t num_actual_tokens,
     const int64_t tp_size);
 
+void gated_delta_rule_spec_recoverssm(
+    torch::Tensor& core_attn_out,
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& b,
+    const torch::Tensor& a,
+    const int64_t num_v_heads,
+    const int64_t head_v_dim,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    const torch::Tensor& ssm_state,
+    torch::Tensor& replay_state,
+    const int64_t num_spec_decodes,
+    const torch::Tensor& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const torch::Tensor& spec_state_indices_tensor,
+    const int64_t null_block_id,
+    const int64_t num_actual_tokens,
+    const int64_t tp_size);
+
 void gated_delta_rule_non_spec(
     torch::Tensor& core_attn_out,
     const torch::Tensor& q,
