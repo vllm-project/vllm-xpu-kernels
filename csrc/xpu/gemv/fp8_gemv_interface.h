@@ -30,4 +30,21 @@ std::optional<torch::Tensor> try_fp8_gemv_w8a16(
 torch::Tensor fp8_gemv_w8a16(
     const torch::Tensor& x, const torch::Tensor& w, const torch::Tensor& scale);
 
+// Two weights sharing x in one launch.
+std::tuple<torch::Tensor, torch::Tensor> fp8_gemv2_w8a16(
+    const torch::Tensor& x,
+    const torch::Tensor& w1,
+    const torch::Tensor& scale1,
+    const torch::Tensor& w2,
+    const torch::Tensor& scale2);
+
+// fp8_gemm_w8a16 for two weights sharing A (both [K, N] NT views): one GEMV
+// launch when both are supported, otherwise two fp8_gemm_w8a16 calls.
+std::tuple<torch::Tensor, torch::Tensor> fp8_gemm_w8a16_pair(
+    const torch::Tensor& a,
+    const torch::Tensor& b1_kn,
+    const torch::Tensor& scale1,
+    const torch::Tensor& b2_kn,
+    const torch::Tensor& scale2);
+
 }  // namespace vllm::fp8_gemv
