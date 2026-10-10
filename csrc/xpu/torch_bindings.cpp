@@ -5,6 +5,7 @@
 #endif
 #ifdef VLLM_MOE_ENABLED
   #include "xpu/grouped_gemm/grouped_gemm_interface.h"
+  #include "xpu/grouped_gemm/moe_shared_fused_interface.h"
 #endif
 #include "xpu/lora/lora_ops.h"
 
@@ -100,6 +101,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "cutlass_grouped_gemm_interface",
       torch::kXPU,
       &cutlass_grouped_gemm_interface);
+
+  // Fused routed + shared-expert MoE for small-M decode (fp16 activations,
+  // fp8-e4m3 per-tensor weights). tile_m = 0 selects the tile by M.
+  xpu_ops.def(
+      "moe_shared_fused_decode_interface(Tensor(a!) output, Tensor x, "
+      "Tensor topk_ids, Tensor topk_weights, Tensor w13, Tensor w13_scale, "
+      "Tensor w2, Tensor w2_scale, Tensor shared_w13, Tensor "
+      "shared_w13_scale, Tensor shared_w2, Tensor shared_w2_scale, Tensor "
+      "shared_gate, Tensor(b!) ws, int tile_m=0) -> ()");
+  xpu_ops.impl(
+      "moe_shared_fused_decode_interface",
+      torch::kXPU,
+      &moe_shared_fused_decode_interface);
 #endif
 
   xpu_ops.def(
