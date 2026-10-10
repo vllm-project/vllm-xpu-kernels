@@ -333,6 +333,30 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "compact_sampling_mask(Tensor logits, Tensor num_sampled_tokens,"
       "int max_num_kept, int max_compact_support) -> (Tensor, Tensor, Tensor)");
   xpu_ops.impl("compact_sampling_mask", torch::kXPU, &compact_sampling_mask);
+
+  // 2-rank all-reduce over Level Zero IPC.  The pointer- and handle-only ops
+  // have no tensor to dispatch on, so they register without a key, like
+  // is_bmg_g21 above.
+  xpu_ops.def(
+      "xpu_p2p_all_reduce(Tensor! out, Tensor input, int my_region, "
+      "int peer_region, int slot_bytes) -> ()");
+  xpu_ops.impl("xpu_p2p_all_reduce", torch::kXPU, &xpu_p2p_all_reduce);
+
+  xpu_ops.def("xpu_p2p_alloc_region(int slot_bytes) -> Tensor");
+  xpu_ops.impl("xpu_p2p_alloc_region", &xpu_p2p_alloc_region);
+
+  xpu_ops.def("xpu_ipc_export_handle(int ptr) -> (Tensor, int, int)");
+  xpu_ops.impl("xpu_ipc_export_handle", &xpu_ipc_export_handle);
+
+  xpu_ops.def("xpu_ipc_release_handle(Tensor handle_bytes) -> ()");
+  xpu_ops.impl("xpu_ipc_release_handle", &xpu_ipc_release_handle);
+
+  xpu_ops.def(
+      "xpu_ipc_open_handle(Tensor handle_bytes, int fd, int offset) -> int");
+  xpu_ops.impl("xpu_ipc_open_handle", &xpu_ipc_open_handle);
+
+  xpu_ops.def("xpu_ipc_close_handle(int base_ptr) -> ()");
+  xpu_ops.impl("xpu_ipc_close_handle", &xpu_ipc_close_handle);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
