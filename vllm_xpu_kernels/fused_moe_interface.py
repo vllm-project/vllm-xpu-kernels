@@ -384,6 +384,16 @@ class XpuFusedMoe:
             (num_rows * self.n_experts_per_token, hidden_size),
             dtype=hidden_states.dtype,
             device=hidden_states.device)
+
+        # DP padding rows carry an all-negative top-k route. The native
+        # remap_hidden_states kernel maps those to expert 0, so the garbage
+        # activations in padding rows reach a real expert and produce NaNs that
+        # poison the whole MoE output. Zero them before the native remap.
+        invalid_padding_rows = (topk_ids < 0).all(dim=1)
+        hidden_states = hidden_states.masked_fill(
+            invalid_padding_rows.unsqueeze(1), 0
+        )
+
         rows_per_expert = torch.zeros((self.num_experts),
                                                 dtype=torch.int32,
                                                 device=hidden_states.device)
