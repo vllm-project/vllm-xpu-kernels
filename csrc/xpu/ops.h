@@ -408,3 +408,21 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
     const torch::Tensor& num_sampled_tokens,
     int64_t max_num_kept,
     int64_t max_compact_support);
+
+void qkv_split_norm_rope(
+    const torch::Tensor& qkv,
+    const torch::Tensor& positions,
+    const torch::Tensor& q_weight,
+    const torch::Tensor& k_weight,
+    const torch::Tensor& cos_sin_cache,
+    torch::Tensor& q_out,
+    torch::Tensor& k_out,
+    const std::optional<torch::Tensor>& gate_out,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    int64_t rotary_dim,
+    double eps,
+    double weight_offset,
+    std::vector<int64_t> mrope_section,
+    bool mrope_interleaved);
