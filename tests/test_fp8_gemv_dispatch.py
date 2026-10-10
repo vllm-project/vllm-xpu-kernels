@@ -43,6 +43,20 @@ def test_fp8_gemm_w8a16_strided_row(dtype):
                                atol=2e-3, rtol=2e-2)
 
 
+@pytest.mark.parametrize("m", [1, 4])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fp8_gemm_w8a16_pair(m, dtype):
+    torch.manual_seed(0)
+    w1 = (torch.randn(6144, 2048, device=DEVICE) * 0.05).to(torch.float8_e4m3fn)
+    w2 = (torch.randn(32, 2048, device=DEVICE) * 0.05).to(torch.float8_e4m3fn)
+    s1 = torch.tensor([0.02], device=DEVICE)
+    s2 = torch.tensor([0.03], device=DEVICE)
+    x = torch.randn(m, 2048, device=DEVICE, dtype=dtype)
+    o1, o2 = torch.ops._xpu_C.fp8_gemm_w8a16_pair(x, w1.t(), s1, w2.t(), s2)
+    torch.testing.assert_close(o1, _reference(x, w1, s1), atol=2e-3, rtol=2e-2)
+    torch.testing.assert_close(o2, _reference(x, w2, s2), atol=2e-3, rtol=2e-2)
+
+
 @pytest.mark.parametrize("value", [2.0**17, -(2.0**17), 2.0**-100])
 def test_bf16_gemv_preserves_values_outside_fp16_range(value):
     """BF16 activations must not overflow or underflow through FP16."""

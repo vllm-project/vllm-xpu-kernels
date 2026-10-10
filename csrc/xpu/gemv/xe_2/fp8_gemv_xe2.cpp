@@ -321,6 +321,59 @@ torch::Tensor fp8_gemv_w8a16(
   return fp8_gemv_w8a16_impl<sycl::ext::oneapi::bfloat16>(x, w, scale);
 }
 
+template <typename Scalar>
+std::tuple<torch::Tensor, torch::Tensor> fp8_gemv2_w8a16_impl(
+    const torch::Tensor& x,
+    const torch::Tensor& w1,
+    const torch::Tensor& scale1,
+    const torch::Tensor& w2,
+    const torch::Tensor& scale2) {
+  int64_t M, K, pitch;
+  check_common(x, M, K, pitch);
+  check_weight(w1, scale1, x, K, "w1");
+  check_weight(w2, scale2, x, K, "w2");
+  const at::DeviceGuard guard(x.device());
+  const int64_t N1 = w1.size(0), N2 = w2.size(0);
+  auto out1 = at::empty(out_shape(x, N1), x.options());
+  auto out2 = at::empty(out_shape(x, N2), x.options());
+  auto& q = vllm::xpu::vllmGetQueue();
+  Seg<Scalar> s0{
+      reinterpret_cast<const uint8_t*>(w1.data_ptr()),
+      scale1.data_ptr<float>(),
+      reinterpret_cast<Scalar*>(out1.data_ptr()),
+      int(N1),
+      int(N1),
+      0};
+  Seg<Scalar> s1{
+      reinterpret_cast<const uint8_t*>(w2.data_ptr()),
+      scale2.data_ptr<float>(),
+      reinterpret_cast<Scalar*>(out2.data_ptr()),
+      int(N2),
+      int(N2),
+      0};
+  run_gemv<2>(
+      q,
+      reinterpret_cast<const Scalar*>(x.data_ptr()),
+      int(pitch * 2),
+      int(M),
+      int(K),
+      s0,
+      s1);
+  return {out1, out2};
+}
+
+std::tuple<torch::Tensor, torch::Tensor> fp8_gemv2_w8a16(
+    const torch::Tensor& x,
+    const torch::Tensor& w1,
+    const torch::Tensor& scale1,
+    const torch::Tensor& w2,
+    const torch::Tensor& scale2) {
+  if (x.scalar_type() == at::kHalf)
+    return fp8_gemv2_w8a16_impl<sycl::half>(x, w1, scale1, w2, scale2);
+  return fp8_gemv2_w8a16_impl<sycl::ext::oneapi::bfloat16>(
+      x, w1, scale1, w2, scale2);
+}
+
 // Bridge entry for the existing fp8_gemm_w8a16(A, B=[K,N] NT view, ...) op:
 // full checks first, returns nullopt (caller keeps its oneDNN path) when
 // unsupported.
@@ -331,6 +384,28 @@ std::optional<torch::Tensor> try_fp8_gemv_w8a16(
     const std::optional<torch::Tensor>& bias) {
   if (!fp8_gemv_w8a16_supported_nt(a, b_kn, scale, bias)) return std::nullopt;
   return fp8_gemv_w8a16(a, b_kn.t(), *scale);
+}
+
+std::tuple<torch::Tensor, torch::Tensor> fp8_gemm_w8a16_pair(
+    const torch::Tensor& a,
+    const torch::Tensor& b1_kn,
+    const torch::Tensor& scale1,
+    const torch::Tensor& b2_kn,
+    const torch::Tensor& scale2) {
+  if (fp8_gemv_w8a16_supported_nt(a, b1_kn, scale1, std::nullopt) &&
+      fp8_gemv_w8a16_supported_nt(a, b2_kn, scale2, std::nullopt))
+    return fp8_gemv2_w8a16(a, b1_kn.t(), scale1, b2_kn.t(), scale2);
+  using Sig = torch::Tensor(
+      const torch::Tensor&,
+      const torch::Tensor&,
+      const std::optional<torch::Tensor>&,
+      const std::optional<torch::Tensor>&);
+  static auto gemm = c10::Dispatcher::singleton()
+                         .findSchemaOrThrow("_xpu_C::fp8_gemm_w8a16", "")
+                         .typed<Sig>();
+  return {
+      gemm.call(a, b1_kn, scale1, std::nullopt),
+      gemm.call(a, b2_kn, scale2, std::nullopt)};
 }
 
 }  // namespace vllm::fp8_gemv
