@@ -43,8 +43,9 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 ## Requirements
 
 - **Python**: 3.12
-- **PyTorch**: 2.14.0+xpu
-- **oneAPI**: 2026.1 ([Base Toolkit download](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html))
+- **PyTorch**: 2.15.0+xpu (from `https://download.pytorch.org/whl/test/xpu`)
+- **Intel OMIX**: 0.4, including the oneAPI 2026.1 DPC++ compiler
+  ([installation guide](https://dgpu-docs.intel.com/installation-guides/installing-omix.html))
 - **CMake**: ≥ 3.26
 - **Ninja** build system
 
@@ -79,7 +80,7 @@ git clone https://github.com/vllm-project/vllm-xpu-kernels.git
 cd vllm-xpu-kernels
 ```
 
-**2. Prepare oneAPI**
+**2. Prepare Intel OMIX**
 
 - Option 1: Docker Container
 
@@ -111,8 +112,10 @@ cd vllm-xpu-kernels
 
 - Option 2: Bare-metal
 
-  Install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html)
-  matching the source-build requirements above.
+  Install the `intel-omix-dev` package by following the
+  [Intel OMIX installation guide](https://dgpu-docs.intel.com/installation-guides/installing-omix.html).
+  It provides the Intel GPU compute driver, DPC++ compiler, and required
+  compute libraries as a validated stack.
 
 Initialize the oneAPI environment in the shell where you will build:
 
@@ -133,7 +136,7 @@ pip install -r requirements.txt
 **Development install** (editable, source in current directory):
 
 ```bash
-pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
+pip install --extra-index-url=https://download.pytorch.org/whl/test/xpu -e . -v
 # Faster: skip build isolation if dependencies are already present
 pip install --no-build-isolation -e . -v
 ```
@@ -141,7 +144,7 @@ pip install --no-build-isolation -e . -v
 **Standard install** (to site-packages):
 
 ```bash
-pip install --extra-index-url=https://download.pytorch.org/whl/xpu .
+pip install --extra-index-url=https://download.pytorch.org/whl/test/xpu .
 # or
 pip install --no-build-isolation .
 ```
@@ -149,7 +152,7 @@ pip install --no-build-isolation .
 **Build a wheel** (output goes to `dist/`):
 
 ```bash
-pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu --wheel-dir dist .
+pip wheel --extra-index-url=https://download.pytorch.org/whl/test/xpu --wheel-dir dist .
 # or
 pip wheel --no-build-isolation --wheel-dir dist .
 ```
