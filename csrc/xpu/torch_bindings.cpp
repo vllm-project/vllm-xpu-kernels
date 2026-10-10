@@ -1,7 +1,11 @@
 #include "core/registration.h"
 #include "xpu/ops.h"
+#ifdef VLLM_XPU_ENABLE_XE2
+  #include "xpu/gemv/fp8_gemv_interface.h"
+#endif
 #ifdef VLLM_MOE_ENABLED
   #include "xpu/grouped_gemm/grouped_gemm_interface.h"
+  #include "xpu/grouped_gemm/moe_shared_fused_interface.h"
 #endif
 #include "xpu/lora/lora_ops.h"
 
@@ -38,6 +42,39 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "fp8_gemm_w8a16(Tensor A, Tensor B, Tensor? B_scale_, "
       "Tensor? bias_) -> Tensor");
   xpu_ops.impl("fp8_gemm_w8a16", torch::kXPU, &fp8_gemm_w8a16);
+#ifdef VLLM_XPU_ENABLE_XE2
+  // Two fp8_gemm_w8a16 sharing A (e.g. GDN in_proj_qkvz + in_proj_ba): one
+  // GEMV launch for single-row A, two oneDNN calls otherwise.
+  xpu_ops.def(
+      "fp8_gemm_w8a16_pair(Tensor A, Tensor B1, Tensor B1_scale, Tensor B2, "
+      "Tensor B2_scale) -> (Tensor, Tensor)");
+  xpu_ops.impl(
+      "fp8_gemm_w8a16_pair", torch::kXPU, &vllm::fp8_gemv::fp8_gemm_w8a16_pair);
+  // RMSNorm-prologue + fp8 linear fusions (one GEMV launch for decode rows,
+  // unfused norm + fp8_gemm_w8a16 otherwise).
+  xpu_ops.def(
+      "gated_rmsnorm_fp8_gemm(Tensor x, Tensor z, Tensor norm_weight, "
+      "float eps, Tensor B, Tensor B_scale) -> Tensor");
+  xpu_ops.impl(
+      "gated_rmsnorm_fp8_gemm",
+      torch::kXPU,
+      &vllm::fp8_gemv::gated_rmsnorm_fp8_gemm);
+  xpu_ops.def(
+      "resadd_rmsnorm_fp8_gemm(Tensor x, Tensor residual, Tensor "
+      "norm_weight, float eps, Tensor B, Tensor B_scale) -> (Tensor, Tensor)");
+  xpu_ops.impl(
+      "resadd_rmsnorm_fp8_gemm",
+      torch::kXPU,
+      &vllm::fp8_gemv::resadd_rmsnorm_fp8_gemm);
+  xpu_ops.def(
+      "resadd_rmsnorm_fp8_gemm_pair(Tensor x, Tensor residual, Tensor "
+      "norm_weight, float eps, Tensor B1, Tensor B1_scale, Tensor B2, Tensor "
+      "B2_scale) -> (Tensor, Tensor, Tensor)");
+  xpu_ops.impl(
+      "resadd_rmsnorm_fp8_gemm_pair",
+      torch::kXPU,
+      &vllm::fp8_gemv::resadd_rmsnorm_fp8_gemm_pair);
+#endif
 
   xpu_ops.def(
       "fp4_gemm(Tensor A, Tensor B, Tensor A_scale, Tensor B_scale, "
@@ -64,6 +101,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "cutlass_grouped_gemm_interface",
       torch::kXPU,
       &cutlass_grouped_gemm_interface);
+
+  // Fused routed + shared-expert MoE for small-M decode (fp16 activations,
+  // fp8-e4m3 per-tensor weights). tile_m = 0 selects the tile by M.
+  xpu_ops.def(
+      "moe_shared_fused_decode_interface(Tensor(a!) output, Tensor x, "
+      "Tensor topk_ids, Tensor topk_weights, Tensor w13, Tensor w13_scale, "
+      "Tensor w2, Tensor w2_scale, Tensor shared_w13, Tensor "
+      "shared_w13_scale, Tensor shared_w2, Tensor shared_w2_scale, Tensor "
+      "shared_gate, Tensor(b!) ws, int tile_m=0) -> ()");
+  xpu_ops.impl(
+      "moe_shared_fused_decode_interface",
+      torch::kXPU,
+      &moe_shared_fused_decode_interface);
 #endif
 
   xpu_ops.def(
@@ -346,6 +396,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "compact_sampling_mask(Tensor logits, Tensor num_sampled_tokens,"
       "int max_num_kept, int max_compact_support) -> (Tensor, Tensor, Tensor)");
   xpu_ops.impl("compact_sampling_mask", torch::kXPU, &compact_sampling_mask);
+
+  // Split of a (gated) QKV projection + per-head q/k RMSNorm + NeoX (M)RoPE
+  // [+ copy of the raw output gate]; v stays a view of qkv.
+  xpu_ops.def(
+      "qkv_split_norm_rope(Tensor qkv, Tensor positions, Tensor q_weight, "
+      "Tensor k_weight, Tensor cos_sin_cache, Tensor! q_out, Tensor! k_out, "
+      "Tensor!? gate_out, int num_q_heads, int num_kv_heads, int head_dim, "
+      "int rotary_dim, float eps, float weight_offset, int[] mrope_section, "
+      "bool mrope_interleaved) -> ()");
+  xpu_ops.impl("qkv_split_norm_rope", torch::kXPU, &qkv_split_norm_rope);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

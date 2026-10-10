@@ -64,6 +64,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
       "bias, Tensor? is_padding) -> ()");
   m.impl("topk_softmax", torch::kXPU, &topk_softmax);
+  // Small-M decode router: fp16 router GEMV + softmax top-k in one op.
+  m.def(
+      "router_gemv_topk_softmax(Tensor x, Tensor router_weight, Tensor! "
+      "logits, Tensor! topk_weights, Tensor! topk_ids, bool renormalize) -> "
+      "()");
+  m.impl("router_gemv_topk_softmax", torch::kXPU, &router_gemv_topk_softmax);
+  // Same with a fused residual-add + Gemma (1 + w) RMSNorm prologue; writes
+  // the normed input and the new residual (either may alias its input).
+  m.def(
+      "router_resadd_norm_gemv_topk_softmax(Tensor x, Tensor residual, "
+      "Tensor norm_weight, float eps, Tensor router_weight, Tensor! logits, "
+      "Tensor! topk_weights, Tensor! topk_ids, Tensor! normed_out, Tensor! "
+      "residual_out, bool renormalize) -> ()");
+  m.impl(
+      "router_resadd_norm_gemv_topk_softmax",
+      torch::kXPU,
+      &router_resadd_norm_gemv_topk_softmax);
   // Apply topk sigmoid to the gating outputs.
   m.def(
       "topk_sigmoid(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
