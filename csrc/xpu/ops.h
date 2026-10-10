@@ -122,7 +122,8 @@ void multimodal_rotary_embedding(
     int64_t head_size,
     torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
     bool is_neox,
-    std::vector<int64_t> mrope_section);  // host int list [num_mrope_sections]
+    std::vector<int64_t> mrope_section,  // host int list [num_mrope_sections]
+    bool mrope_interleaved);
 
 void apply_rotary_emb(
     torch::Tensor& output,  // [num_tokens, num_heads, head_size]
