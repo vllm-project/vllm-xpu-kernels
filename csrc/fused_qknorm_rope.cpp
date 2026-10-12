@@ -6,6 +6,7 @@
 
 #include <ATen/DeviceGuard.h>
 #include <cmath>
+#include <type_traits>
 
 #include "dispatch_utils.h"
 #include "utils.h"
@@ -186,11 +187,14 @@ template <
     typename scalar_t_cache,
     int head_dim,
     bool IS_NEOX,
-    int HEADS_PER_SG>
+    int HEADS_PER_SG,
+    bool INTERLEAVED = false>
 class fused_qk_norm_rope_n_heads_kernel {
  public:
   static constexpr int SUB_GROUP_SIZE = 32;
   static constexpr int NUM_ELEMS_PER_THREAD = head_dim / SUB_GROUP_SIZE;
+  static constexpr int HALF_NEPT = NUM_ELEMS_PER_THREAD / 2;
+  static constexpr int HALF_DIM = head_dim / 2;
 
   static_assert(
       head_dim % (SUB_GROUP_SIZE * 2) == 0, "head_dim must be divisible by 64");
@@ -207,7 +211,9 @@ class fused_qk_norm_rope_n_heads_kernel {
       const int64_t* __restrict__ position_ids_,
       const int num_tokens_,
       const int rotary_dim_,
-      sycl::local_accessor<scalar_t_cache, 1> slm_cos_sin_)
+      const int rotary_lanes_,
+      const int pair_offset_,
+      const int embed_dim_)
       : qkv(qkv_),
         num_heads_q(num_heads_q_),
         num_heads_k(num_heads_k_),
@@ -219,141 +225,188 @@ class fused_qk_norm_rope_n_heads_kernel {
         position_ids(position_ids_),
         num_tokens(num_tokens_),
         rotary_dim(rotary_dim_),
-        slm_cos_sin(slm_cos_sin_) {}
+        rotary_lanes(rotary_lanes_),
+        pair_offset(pair_offset_),
+        embed_dim(embed_dim_) {}
 
   void operator() [[sycl::reqd_sub_group_size(SUB_GROUP_SIZE)]] (
       const sycl::nd_item<1>& item) const {
     auto sg = item.get_sub_group();
     const int lane_id = sg.get_local_linear_id();
-    const int sg_id_in_wg = sg.get_group_linear_id();
-    const int sgs_per_wg = sg.get_group_linear_range();
-    const int global_sg_id = item.get_group(0) * sgs_per_wg + sg_id_in_wg;
+    const int global_sg_id = item.get_group(0) * sg.get_group_linear_range() +
+                             sg.get_group_linear_id();
 
     const int total_qk_heads = num_heads_q + num_heads_k;
-    const int num_heads = num_heads_q + num_heads_k + num_heads_v;
+    const int num_heads = total_qk_heads + num_heads_v;
     const int head_chunks_per_token =
         (total_qk_heads + HEADS_PER_SG - 1) / HEADS_PER_SG;
 
     const int token_idx = global_sg_id / head_chunks_per_token;
-    const int head_chunk = global_sg_id % head_chunks_per_token;
-    const int first_head = head_chunk * HEADS_PER_SG;
-    const int num_heads_this_sg = (first_head + HEADS_PER_SG <= total_qk_heads)
-                                      ? HEADS_PER_SG
-                                      : (total_qk_heads - first_head);
-
     if (token_idx >= num_tokens) return;
+    const int first_head =
+        (global_sg_id % head_chunks_per_token) * HEADS_PER_SG;
+    const int last_qk_head = total_qk_heads - 1;
+    const int token_base = token_idx * num_heads;
 
-    const int64_t pos_id = position_ids[token_idx];
-    const int embed_dim = rotary_dim / 2;
-    const scalar_t_cache* cache_ptr = cos_sin_cache + pos_id * rotary_dim;
+    const scalar_t_cache* cos_ptr =
+        cos_sin_cache + position_ids[token_idx] * rotary_dim;
 
-    scalar_t_cache* my_slm =
-        slm_cos_sin.template get_multi_ptr<sycl::access::decorated::no>()
-            .get() +
-        sg_id_in_wg * rotary_dim;
+    HeadBatch sos{};
+    bool is_q_all[HEADS_PER_SG];
 
-    const int elems_per_lane =
-        (rotary_dim + SUB_GROUP_SIZE - 1) / SUB_GROUP_SIZE;
-    for (int i = 0; i < elems_per_lane; i++) {
-      int idx = lane_id + i * SUB_GROUP_SIZE;
-      if (idx < rotary_dim) {
-        my_slm[idx] = cache_ptr[idx];
+    if constexpr (INTERLEAVED) {
+      const scalar_t_cache* sin_ptr = cos_ptr + HALF_DIM;
+      float qw_f[HALF_NEPT], qw_p[HALF_NEPT], kw_f[HALF_NEPT], kw_p[HALF_NEPT];
+      float cos_j[HALF_NEPT], sin_j[HALF_NEPT];
+#pragma unroll
+      for (int j = 0; j < HALF_NEPT; j++) {
+        const int fd = lane_id * HALF_NEPT + j;
+        qw_f[j] = static_cast<float>(q_weight[fd]);
+        qw_p[j] = static_cast<float>(q_weight[fd + HALF_DIM]);
+        kw_f[j] = static_cast<float>(k_weight[fd]);
+        kw_p[j] = static_cast<float>(k_weight[fd + HALF_DIM]);
+        cos_j[j] = static_cast<float>(cos_ptr[fd]);
+        sin_j[j] = static_cast<float>(sin_ptr[fd]);
       }
+
+      int off_all[HEADS_PER_SG];
+      float ef[HEADS_PER_SG][HALF_NEPT];
+      float ep[HEADS_PER_SG][HALF_NEPT];
+#pragma unroll
+      for (int k = 0; k < HEADS_PER_SG; k++) {
+        const int head = sycl::min(first_head + k, last_qk_head);
+        is_q_all[k] = head < num_heads_q;
+        off_all[k] = (token_base + head) * head_dim + lane_id * HALF_NEPT;
+#pragma unroll
+        for (int j = 0; j < HALF_NEPT; j++) {
+          ef[k][j] = static_cast<float>(qkv[off_all[k] + j]);
+          ep[k][j] = static_cast<float>(qkv[off_all[k] + HALF_DIM + j]);
+          sos.v[k] += ef[k][j] * ef[k][j] + ep[k][j] * ep[k][j];
+        }
+      }
+
+      sub_group_sum(sg, sos);
+
+#pragma unroll
+      for (int k = 0; k < HEADS_PER_SG; k++) {
+        const float rms_rcp =
+            sycl::rsqrt(sos.v[k] / static_cast<float>(head_dim) + eps);
+#pragma unroll
+        for (int j = 0; j < HALF_NEPT; j++) {
+          const float nf =
+              ef[k][j] * rms_rcp * (is_q_all[k] ? qw_f[j] : kw_f[j]);
+          const float np =
+              ep[k][j] * rms_rcp * (is_q_all[k] ? qw_p[j] : kw_p[j]);
+          qkv[off_all[k] + j] =
+              static_cast<scalar_t>(nf * cos_j[j] - np * sin_j[j]);
+          qkv[off_all[k] + HALF_DIM + j] =
+              static_cast<scalar_t>(nf * sin_j[j] + np * cos_j[j]);
+        }
+      }
+      return;
     }
-    sycl::group_barrier(sg);
 
-    const scalar_t_cache* cos_ptr = my_slm;
-    const scalar_t_cache* sin_ptr = my_slm + embed_dim;
-    const int rotary_lanes = rotary_dim / NUM_ELEMS_PER_THREAD;
-
+    const scalar_t_cache* sin_ptr = cos_ptr + embed_dim;
     float q_w[NUM_ELEMS_PER_THREAD];
     float k_w[NUM_ELEMS_PER_THREAD];
 #pragma unroll
     for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
-      int dim = lane_id * NUM_ELEMS_PER_THREAD + i;
+      const int dim = lane_id * NUM_ELEMS_PER_THREAD + i;
       q_w[i] = static_cast<float>(q_weight[dim]);
       k_w[i] = static_cast<float>(k_weight[dim]);
     }
 
-    for (int k = 0; k < num_heads_this_sg; ++k) {
-      const int local_head_idx = first_head + k;
-      const bool is_q = local_head_idx < num_heads_q;
-      const int head_idx = is_q ? local_head_idx : local_head_idx - num_heads_q;
+    int off_all[HEADS_PER_SG];
+    float elems[HEADS_PER_SG][NUM_ELEMS_PER_THREAD];
+#pragma unroll
+    for (int k = 0; k < HEADS_PER_SG; k++) {
+      const int head = sycl::min(first_head + k, last_qk_head);
+      is_q_all[k] = head < num_heads_q;
+      off_all[k] =
+          (token_base + head) * head_dim + lane_id * NUM_ELEMS_PER_THREAD;
+#pragma unroll
+      for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
+        elems[k][i] = static_cast<float>(qkv[off_all[k] + i]);
+        sos.v[k] += elems[k][i] * elems[k][i];
+      }
+    }
 
-      int offset_warp;
-      if (is_q) {
-        offset_warp = token_idx * num_heads * head_dim + head_idx * head_dim;
+    sub_group_sum(sg, sos);
+
+#pragma unroll
+    for (int k = 0; k < HEADS_PER_SG; k++) {
+      const float rms_rcp =
+          sycl::rsqrt(sos.v[k] / static_cast<float>(head_dim) + eps);
+#pragma unroll
+      for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
+        elems[k][i] *= rms_rcp * (is_q_all[k] ? q_w[i] : k_w[i]);
+      }
+    }
+
+    if (lane_id < rotary_lanes) {
+      if constexpr (!IS_NEOX) {
+#pragma unroll
+        for (int i = 0; i < HALF_NEPT; ++i) {
+          const int half_dim = lane_id * HALF_NEPT + i;
+          const float cos_val = static_cast<float>(cos_ptr[half_dim]);
+          const float sin_val = static_cast<float>(sin_ptr[half_dim]);
+#pragma unroll
+          for (int k = 0; k < HEADS_PER_SG; k++) {
+            const float val0 = elems[k][2 * i];
+            const float val1 = elems[k][2 * i + 1];
+            elems[k][2 * i] = val0 * cos_val - val1 * sin_val;
+            elems[k][2 * i + 1] = val0 * sin_val + val1 * cos_val;
+          }
+        }
       } else {
-        offset_warp = token_idx * num_heads * head_dim +
-                      num_heads_q * head_dim + head_idx * head_dim;
-      }
-      int offset_thread = offset_warp + lane_id * NUM_ELEMS_PER_THREAD;
-
-      float elements[NUM_ELEMS_PER_THREAD];
-      float sum_of_squares = 0.0f;
-
 #pragma unroll
-      for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
-        float val = static_cast<float>(qkv[offset_thread + i]);
-        elements[i] = val;
-        sum_of_squares += val * val;
-      }
-
-      sum_of_squares =
-          sycl::reduce_over_group(sg, sum_of_squares, sycl::plus<float>());
-
-      float rms_rcp =
-          sycl::rsqrt(sum_of_squares / static_cast<float>(head_dim) + eps);
-
+        for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
+          HeadBatch payload;
 #pragma unroll
-      for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
-        elements[i] *= rms_rcp * (is_q ? q_w[i] : k_w[i]);
-      }
+          for (int k = 0; k < HEADS_PER_SG; k++)
+            payload.v[k] = elems[k][i];
+          const HeadBatch partner =
+              sycl::permute_group_by_xor(sg, payload, pair_offset);
+          const float sign = (lane_id < pair_offset) ? -1.0f : 1.0f;
 
-      if (lane_id < rotary_lanes) {
-        if constexpr (!IS_NEOX) {
+          int dim_idx = (lane_id * NUM_ELEMS_PER_THREAD + i) * 2;
+          if (dim_idx >= rotary_dim) dim_idx -= rotary_dim;
+          const int half_dim = dim_idx >> 1;
+          const float cos_val = static_cast<float>(cos_ptr[half_dim]);
+          const float sin_val = static_cast<float>(sin_ptr[half_dim]);
 #pragma unroll
-          for (int i = 0; i < NUM_ELEMS_PER_THREAD / 2; ++i) {
-            const int idx0 = 2 * i;
-            const int idx1 = 2 * i + 1;
-            const int dim_idx = lane_id * NUM_ELEMS_PER_THREAD + idx0;
-            const float val0 = elements[idx0];
-            const float val1 = elements[idx1];
-            const int half_dim = dim_idx / 2;
-            const float cos_val = static_cast<float>(cos_ptr[half_dim]);
-            const float sin_val = static_cast<float>(sin_ptr[half_dim]);
-            elements[idx0] = val0 * cos_val - val1 * sin_val;
-            elements[idx1] = val0 * sin_val + val1 * cos_val;
+          for (int k = 0; k < HEADS_PER_SG; k++) {
+            elems[k][i] =
+                payload.v[k] * cos_val + sign * partner.v[k] * sin_val;
           }
-        } else {
-          sycl::group_barrier(sg);
-          const int pair_offset = (rotary_dim / 2) / NUM_ELEMS_PER_THREAD;
-#pragma unroll
-          for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
-            float partner_val =
-                sycl::permute_group_by_xor(sg, elements[i], pair_offset);
-            if (lane_id < pair_offset) {
-              partner_val = -partner_val;
-            }
-            int dim_idx = lane_id * NUM_ELEMS_PER_THREAD + i;
-            dim_idx = (dim_idx * 2) % rotary_dim;
-            int half_dim = dim_idx / 2;
-            const float cos_val = static_cast<float>(cos_ptr[half_dim]);
-            const float sin_val = static_cast<float>(sin_ptr[half_dim]);
-            elements[i] = elements[i] * cos_val + partner_val * sin_val;
-          }
-          sycl::group_barrier(sg);
         }
       }
+    }
 
 #pragma unroll
+    for (int k = 0; k < HEADS_PER_SG; k++) {
+#pragma unroll
       for (int i = 0; i < NUM_ELEMS_PER_THREAD; i++) {
-        qkv[offset_thread + i] = static_cast<scalar_t>(elements[i]);
+        qkv[off_all[k] + i] = static_cast<scalar_t>(elems[k][i]);
       }
     }
   }
 
  private:
+  struct HeadBatch {
+    float v[HEADS_PER_SG];
+  };
+
+  static void sub_group_sum(const sycl::sub_group& sg, HeadBatch& s) {
+#pragma unroll
+    for (int offset = SUB_GROUP_SIZE / 2; offset > 0; offset >>= 1) {
+      const HeadBatch other = sycl::permute_group_by_xor(sg, s, offset);
+#pragma unroll
+      for (int k = 0; k < HEADS_PER_SG; k++)
+        s.v[k] += other.v[k];
+    }
+  }
+
   scalar_t* __restrict__ qkv;
   const int num_heads_q;
   const int num_heads_k;
@@ -365,7 +418,9 @@ class fused_qk_norm_rope_n_heads_kernel {
   const int64_t* __restrict__ position_ids;
   const int num_tokens;
   const int rotary_dim;
-  sycl::local_accessor<scalar_t_cache, 1> slm_cos_sin;
+  const int rotary_lanes;
+  const int pair_offset;
+  const int embed_dim;
 };
 
 // heads_per_sg only changes the launch configuration; every value gives
@@ -466,31 +521,40 @@ void launch_fused_qk_norm_rope(
           (total_qk_heads + HEADS_PER_SG_V - 1) / HEADS_PER_SG_V;    \
       const int total_sgs = num_tokens * head_chunks_per_token;      \
       const int grid_sz = (total_sgs + sgs_per_wg - 1) / sgs_per_wg; \
-      const int slm_size = sgs_per_wg * rotary_dim;                  \
-      queue.submit([&](sycl::handler& cgh) {                         \
-        sycl::local_accessor<sycl_cache_t, 1> slm(                   \
-            sycl::range<1>(slm_size), cgh);                          \
-        cgh.parallel_for(                                            \
-            sycl::nd_range<1>(grid_sz * block_size, block_size),     \
-            fused_qk_norm_rope_n_heads_kernel<                       \
-                sycl_t,                                              \
-                sycl_cache_t,                                        \
-                HEAD_DIM,                                            \
-                IS_NEOX_V,                                           \
-                HEADS_PER_SG_V>(                                     \
-                qkv_ptr,                                             \
-                num_heads_q,                                         \
-                num_heads_k,                                         \
-                num_heads_v,                                         \
-                eps,                                                 \
-                q_weight_ptr,                                        \
-                k_weight_ptr,                                        \
-                cos_sin_cache_ptr,                                   \
-                position_ids_ptr,                                    \
-                num_tokens,                                          \
-                rotary_dim,                                          \
-                slm));                                               \
-      });                                                            \
+      const int nept = (HEAD_DIM) / 32;                              \
+      const int embed_dim = rotary_dim / 2;                          \
+      auto submit = [&](auto interleaved) {                          \
+        queue.submit([&](sycl::handler& cgh) {                       \
+          cgh.parallel_for(                                          \
+              sycl::nd_range<1>(grid_sz * block_size, block_size),   \
+              fused_qk_norm_rope_n_heads_kernel<                     \
+                  sycl_t,                                            \
+                  sycl_cache_t,                                      \
+                  HEAD_DIM,                                          \
+                  IS_NEOX_V,                                         \
+                  HEADS_PER_SG_V,                                    \
+                  decltype(interleaved)::value>(                     \
+                  qkv_ptr,                                           \
+                  num_heads_q,                                       \
+                  num_heads_k,                                       \
+                  num_heads_v,                                       \
+                  eps,                                               \
+                  q_weight_ptr,                                      \
+                  k_weight_ptr,                                      \
+                  cos_sin_cache_ptr,                                 \
+                  position_ids_ptr,                                  \
+                  num_tokens,                                        \
+                  rotary_dim,                                        \
+                  rotary_dim / nept,                                 \
+                  embed_dim / nept,                                  \
+                  embed_dim));                                       \
+        });                                                          \
+      };                                                             \
+      if (IS_NEOX_V && rotary_dim == (HEAD_DIM)) {                   \
+        submit(std::bool_constant<IS_NEOX_V>{});                     \
+      } else {                                                       \
+        submit(std::false_type{});                                   \
+      }                                                              \
     }                                                                \
   } while (0)
 
