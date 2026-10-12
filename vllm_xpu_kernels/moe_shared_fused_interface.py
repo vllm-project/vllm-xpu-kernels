@@ -6,7 +6,9 @@ and the single sigmoid-gated shared expert run in one op (six kernels, no
 per-call allocation).
 
 FP16 or BF16 activations with fp8-e4m3 per-tensor (per-expert) weights and fp32
-scalar scales are supported, with SiLU activation and no bias. The output is
+scalar scales are supported, with SiLU activation and no bias. Padding expert
+IDs (-1) contribute zero to routed experts; the shared expert still runs.
+The output is
 the per-rank partial sum (tensor-parallel reduction is left to the caller).
 """
 
@@ -59,7 +61,8 @@ def moe_shared_fused_workspace_bytes(
 ) -> int:
     """Workspace size in bytes; must match the carve-out in the C++ op."""
     rows = num_tokens * top_k
-    umt = min(rows, num_experts)
+    # A hot expert can span multiple tiles; reserve one tile per routed row.
+    umt = rows
 
     def align(b: int) -> int:
         return (b + 255) // 256 * 256
@@ -107,7 +110,8 @@ class XpuMoESharedFusedDecode:
         top_k: int,
         tile_m: int = 0,
     ):
-        assert tile_m in (0, 8, 16), "tile_m must be 0 (auto), 8 or 16"
+        if tile_m not in (0, 8, 16):
+            raise ValueError("tile_m must be 0 (auto), 8 or 16")
         self.w13 = w13.contiguous()
         self.w13_scales = w13_scales.contiguous()
         self.w2 = w2.contiguous()

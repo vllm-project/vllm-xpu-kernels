@@ -26,21 +26,47 @@ from utils import bootstrap_benchmark_env
 bootstrap_benchmark_env(__file__)
 import vllm_xpu_kernels._C  # noqa: F401
 import vllm_xpu_kernels._xpu_C  # noqa: F401
-from tests.fused_moe.test_moe_shared_fused_decode import (HIDDEN, NUM_EXPERTS,
-                                                           TOP_K, make_op,
-                                                           make_weights, route)
+from vllm_xpu_kernels.moe_shared_fused_interface import XpuMoESharedFusedDecode
 from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 # isort: on
 
 DEVICE = "xpu"
+HIDDEN = 2048
+NUM_EXPERTS = 256
+TOP_K = 8
 M_LIST = [1, 2, 3, 4, 6, 8]
 NUM_WEIGHT_COPIES = 2
 NUM_INPUTS = 8
 
 
+def make_weights(inter, dtype):
+    """Generate benchmark weights without retaining FP32 reference copies."""
+    shapes = [(NUM_EXPERTS, HIDDEN, 2 * inter),
+              (NUM_EXPERTS, inter, HIDDEN), (HIDDEN, 2 * inter),
+              (inter, HIDDEN)]
+    weights = []
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    for shape in shapes:
+        w = torch.randn(*shape, device=DEVICE) / 32
+        dims = (1, 2) if w.dim() == 3 else (0, 1)
+        scale = w.abs().amax(dim=dims) / fp8_max
+        divisor = scale[:, None, None] if w.dim() == 3 else scale
+        weights.append(((w / divisor).to(torch.float8_e4m3fn),
+                        scale.float().reshape(-1)))
+    gate = (torch.randn(1, HIDDEN, device=DEVICE) / 32).to(dtype)
+    return weights + [gate]
+
+
+def route(m):
+    probs = torch.softmax(torch.randn(m, NUM_EXPERTS, device=DEVICE), dim=-1)
+    weights, ids = torch.topk(probs, TOP_K, dim=-1)
+    return ((weights / weights.sum(dim=-1, keepdim=True)).contiguous(),
+            ids.to(torch.int32).contiguous())
+
+
 def make_baseline(weights):
     """XpuFusedMoe for routed experts + shared expert from existing ops."""
-    (w13, s13, _), (w2, s2, _), (sw13, ss13, _), (sw2, ss2, _), gate = weights
+    (w13, s13), (w2, s2), (sw13, ss13), (sw2, ss2), gate = weights
     routed = XpuFusedMoe(w13=w13, w13_scales=s13, w13_bias=None, w2=w2,
                          w2_scales=s2, w2_bias=None,
                          n_experts_per_token=TOP_K, activation="silu",
@@ -61,7 +87,9 @@ def make_baseline(weights):
 
 
 def make_fused(weights, tile_m):
-    op = make_op(weights, tile_m)
+    (w13, s13), (w2, s2), (sw13, ss13), (sw2, ss2), gate = weights
+    op = XpuMoESharedFusedDecode(w13, s13, w2, s2, sw13, ss13, sw2, ss2,
+                                gate, TOP_K, tile_m=tile_m)
 
     def run(x, topk_weights, topk_ids):
         return op.forward(torch.empty_like(x), x, topk_weights, topk_ids)

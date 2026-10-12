@@ -28,17 +28,18 @@ def quant_fp8_per_tensor(w: torch.Tensor):
     return q, scale.float(), q.float() * scale
 
 
-def make_weights(inter: int, dtype=torch.float16):
-    w13f = torch.randn(NUM_EXPERTS, HIDDEN, 2 * inter, device=DEVICE) / 32
-    w2f = torch.randn(NUM_EXPERTS, inter, HIDDEN, device=DEVICE) / 32
-    sw13f = torch.randn(HIDDEN, 2 * inter, device=DEVICE) / 32
-    sw2f = torch.randn(inter, HIDDEN, device=DEVICE) / 32
-    gate = (torch.randn(1, HIDDEN, device=DEVICE) / 32).to(dtype)
+def make_weights(inter: int, dtype=torch.float16, hidden=HIDDEN,
+                 num_experts=NUM_EXPERTS):
+    w13f = torch.randn(num_experts, hidden, 2 * inter, device=DEVICE) / 32
+    w2f = torch.randn(num_experts, inter, hidden, device=DEVICE) / 32
+    sw13f = torch.randn(hidden, 2 * inter, device=DEVICE) / 32
+    sw2f = torch.randn(inter, hidden, device=DEVICE) / 32
+    gate = (torch.randn(1, hidden, device=DEVICE) / 32).to(dtype)
     return [quant_fp8_per_tensor(w) for w in (w13f, w2f, sw13f, sw2f)] + [gate]
 
 
-def route(m: int):
-    logits = torch.randn(m, NUM_EXPERTS, device=DEVICE)
+def route(m: int, num_experts: int = NUM_EXPERTS):
+    logits = torch.randn(m, num_experts, device=DEVICE)
     probs = torch.softmax(logits, dim=-1)
     topk_weights, topk_ids = torch.topk(probs, TOP_K, dim=-1)
     topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
@@ -56,6 +57,8 @@ def ref_moe_shared(x, weights, topk_weights, topk_ids, inter):
     for m in range(x.shape[0]):
         for k in range(TOP_K):
             e = int(topk_ids[m, k])
+            if e < 0 or e >= w13.shape[0]:
+                continue
             h = (xf[m] @ w13[e]).to(x.dtype).float()
             act = torch.nn.functional.silu(h[:inter]) * h[inter:]
             projection = (act.to(x.dtype).float() @ w2[e]).to(x.dtype).float()
@@ -192,3 +195,104 @@ def test_moe_activation_dtype_contract(monkeypatch, dtype, supported):
     monkeypatch.setattr(interface, "is_available", lambda: True)
     assert interface.supports(dtype, torch.float8_e4m3fn, 1, 8, 2048,
                               256) is supported
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@requires_moe_kernel
+def test_moe_shared_fused_decode_gather_tail(dtype):
+    """A legal H%16 shape need not fill a gather work-group."""
+    seed_everything(7)
+    hidden, inter, experts = 2064, 256, 8
+    weights = make_weights(inter, dtype, hidden, experts)
+    op = make_op(weights)
+    x = (torch.randn(2, hidden, device=DEVICE) / 4).to(dtype)
+    tw, ids = route(2, experts)
+    out = op.forward(torch.empty_like(x), x, tw, ids)
+    ref = ref_moe_shared(x, weights, tw, ids, inter)
+    torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("tile_m", [0, 8, 16])
+@requires_moe_kernel
+def test_moe_shared_fused_decode_skewed_multi_tile_routes(dtype, tile_m):
+    """Valid routes can require more tiles than the number of experts."""
+    seed_everything(7)
+    m, inter = 64, 256
+    weights = make_weights(inter, dtype)
+    op = make_op(weights, tile_m)
+    x = (torch.randn(m, HIDDEN, device=DEVICE) / 4).to(dtype)
+    row = torch.arange(m, device=DEVICE)[:, None]
+    rest = 1 + (row * 7 + torch.arange(7, device=DEVICE)) % 255
+    ids = torch.cat((torch.zeros(m, 1, device=DEVICE, dtype=torch.int64),
+                     rest), dim=1).to(torch.int32).contiguous()
+    tw = torch.full((m, TOP_K), 1 / TOP_K, device=DEVICE, dtype=torch.float32)
+    out = op.forward(torch.empty_like(x), x, tw, ids)
+    ref = ref_moe_shared(x, weights, tw, ids, inter)
+    torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
+
+
+_NATIVE_ARGS = ("output", "x", "topk_ids", "topk_weights", "w13",
+                "w13_scale", "w2", "w2_scale", "shared_w13",
+                "shared_w13_scale", "shared_w2", "shared_w2_scale",
+                "shared_gate", "ws")
+
+
+@pytest.mark.parametrize("argument", _NATIVE_ARGS)
+@pytest.mark.parametrize("destination", ["cpu", "xpu:1"])
+@requires_moe_kernel
+def test_moe_shared_fused_decode_rejects_wrong_device(argument, destination):
+    """Reject every foreign pointer before any SYCL submission."""
+    if destination == "xpu:1" and torch.xpu.device_count() < 2:
+        pytest.skip("requires two XPUs")
+    seed_everything(7)
+    hidden, inter, experts = 256, 8, 8
+    weights = make_weights(inter, hidden=hidden, num_experts=experts)
+    (w13, s13, _), (w2, s2, _), (sw13, ss13, _), (sw2, ss2, _), gate = weights
+    x = torch.randn(1, hidden, device=DEVICE, dtype=torch.float16)
+    output = torch.full_like(x, float("nan"))
+    tw, ids = route(1, experts)
+    nbytes = moe_shared_fused_workspace_bytes(1, TOP_K, experts, hidden,
+                                              2 * inter, inter)
+    args = [output, x, ids, tw, w13, s13, w2, s2, sw13, ss13,
+            sw2, ss2, gate.reshape(-1),
+            torch.empty(nbytes, device=DEVICE, dtype=torch.uint8)]
+    args[_NATIVE_ARGS.index(argument)] = args[
+        _NATIVE_ARGS.index(argument)].to(destination)
+    with pytest.raises(RuntimeError, match="XPU"):
+        torch.ops._xpu_C.moe_shared_fused_decode_interface(*args, 0)
+    assert torch.isnan(output).all()
+
+
+@pytest.mark.parametrize("tile_m", [-1, 1, 32])
+def test_moe_shared_fused_decode_invalid_tile_raises_value_error(tile_m):
+    with pytest.raises(ValueError, match="tile_m"):
+        dummy = torch.empty(0, device="cpu")
+        XpuMoESharedFusedDecode(*([dummy] * 9), top_k=TOP_K, tile_m=tile_m)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("m", [8, 32])
+@pytest.mark.parametrize("ids_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("all_padding", [False, True])
+@requires_moe_kernel
+def test_moe_shared_fused_decode_padding_routes(dtype, m, ids_dtype,
+                                              all_padding):
+    """Padding IDs skip routed experts while preserving the shared expert."""
+    seed_everything(7)
+    inter, experts = 256, 8
+    weights = make_weights(inter, dtype, num_experts=experts)
+    op = make_op(weights)
+    x = (torch.randn(m, HIDDEN, device=DEVICE) / 4).to(dtype)
+    tw, ids = route(m, experts)
+    ids = ids.to(ids_dtype)
+    # Reuse a populated workspace to catch stale permutation indices.
+    op.forward(torch.empty_like(x), x, tw, ids)
+    if all_padding:
+        ids.fill_(-1)
+    else:
+        ids[0].fill_(-1)
+        ids[:, 0] = -1
+    out = op.forward(torch.empty_like(x), x, tw, ids)
+    ref = ref_moe_shared(x, weights, tw, ids, inter)
+    torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
