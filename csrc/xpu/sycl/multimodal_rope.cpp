@@ -11,7 +11,7 @@ namespace vllm {
 // temporal / height / width).
 constexpr int MROPE_MAX_SECTIONS = 4;
 
-template <typename scalar_t, bool IS_NEOX>
+template <typename scalar_t, bool IS_NEOX, bool IS_MROPE_INTERLEAVED>
 class multimodal_rotary_embedding_kernel {
  public:
   multimodal_rotary_embedding_kernel(
@@ -22,6 +22,8 @@ class multimodal_rotary_embedding_kernel {
       const int* mrope_section_data,
       const int num_mrope_sections_,
       const int num_tokens_,
+      const int64_t positions_row_stride_,
+      const int64_t positions_column_stride_,
       const int rot_dim_,
       const int64_t query_stride_,
       const int64_t key_stride_,
@@ -35,6 +37,8 @@ class multimodal_rotary_embedding_kernel {
         cos_sin_cache(cos_sin_cache_),
         num_mrope_sections(num_mrope_sections_),
         num_tokens(num_tokens_),
+        positions_row_stride(positions_row_stride_),
+        positions_column_stride(positions_column_stride_),
         rot_dim(rot_dim_),
         query_stride(query_stride_),
         key_stride(key_stride_),
@@ -67,7 +71,8 @@ class multimodal_rotary_embedding_kernel {
     // L1-cached across threads.
     const scalar_t* section_src[MROPE_MAX_SECTIONS];
     for (int s = 0; s < num_mrope_sections; ++s) {
-      const int64_t pos = positions[s * num_tokens + token_idx];
+      const int64_t pos = positions
+          [s * positions_row_stride + token_idx * positions_column_stride];
       section_src[s] = cos_sin_cache + pos * rot_dim;
     }
 
@@ -112,15 +117,91 @@ class multimodal_rotary_embedding_kernel {
   }
 
  private:
-  // ── Section lookup: find which section owns `rot_offset` ──
-  // Returns index s such that section_end[s-1] <= rot_offset < section_end[s].
-  // At most num_mrope_sections-1 comparisons (typically ≤ 3).
+  // ── Section lookup for contiguous or T/H/W-interleaved M-RoPE ──
   inline int find_section(int rot_offset) const {
+    if constexpr (IS_MROPE_INTERLEAVED) {
+      const int axis = rot_offset % 3;
+      if (axis == 1 && rot_offset <= 3 * mrope_section[1]) return 1;
+      if (axis == 2 && rot_offset <= 3 * mrope_section[2]) return 2;
+      return 0;
+    }
+
+    // Returns index s such that section_end[s-1] <= rot_offset <
+    // section_end[s].
     int s = 0;
     for (; s < num_mrope_sections - 1; ++s) {
       if (rot_offset < section_end[s]) break;
     }
     return s;
+  }
+
+  inline void rotate_neox_interleaved_vec4(
+      scalar_t* data,
+      int rot_offset,
+      int embed_dim,
+      const scalar_t* section_src[MROPE_MAX_SECTIONS]) const {
+    using vec4_t = sycl::vec<scalar_t, VEC_SIZE>;
+    vec4_t cos_v;
+    vec4_t sin_v;
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      const int offset = rot_offset + j;
+      const int section = find_section(offset);
+      cos_v[j] = section_src[section][offset];
+      sin_v[j] = section_src[section][embed_dim + offset];
+    }
+    vec4_t x = *reinterpret_cast<const vec4_t*>(data + rot_offset);
+    vec4_t y = *reinterpret_cast<const vec4_t*>(data + embed_dim + rot_offset);
+    if constexpr (
+        std::is_same_v<scalar_t, sycl::ext::oneapi::bfloat16> ||
+        std::is_same_v<scalar_t, sycl::half>) {
+      vec4_t rotated_x;
+      vec4_t rotated_y;
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        const float x_value = static_cast<float>(x[j]);
+        const float y_value = static_cast<float>(y[j]);
+        const float cos_value = static_cast<float>(cos_v[j]);
+        const float sin_value = static_cast<float>(sin_v[j]);
+        rotated_x[j] = x_value * cos_value - y_value * sin_value;
+        rotated_y[j] = y_value * cos_value + x_value * sin_value;
+      }
+      *reinterpret_cast<vec4_t*>(data + rot_offset) = rotated_x;
+      *reinterpret_cast<vec4_t*>(data + embed_dim + rot_offset) = rotated_y;
+    } else {
+      *reinterpret_cast<vec4_t*>(data + rot_offset) = x * cos_v - y * sin_v;
+      *reinterpret_cast<vec4_t*>(data + embed_dim + rot_offset) =
+          y * cos_v + x * sin_v;
+    }
+  }
+
+  inline void rotate_gptj_interleaved_vec4(
+      scalar_t* data,
+      int rot_offset,
+      int embed_dim,
+      const scalar_t* section_src[MROPE_MAX_SECTIONS]) const {
+    using vec4_t = sycl::vec<scalar_t, 4>;
+    const int first_section = find_section(rot_offset);
+    const int second_section = find_section(rot_offset + 1);
+    const scalar_t c0 = section_src[first_section][rot_offset];
+    const scalar_t s0 = section_src[first_section][embed_dim + rot_offset];
+    const scalar_t c1 = section_src[second_section][rot_offset + 1];
+    const scalar_t s1 = section_src[second_section][embed_dim + rot_offset + 1];
+    const vec4_t values =
+        *reinterpret_cast<const vec4_t*>(data + rot_offset * 2);
+    vec4_t rotated;
+    using acc_t = rotary_acc_t<scalar_t>;
+    const acc_t c0_acc = static_cast<acc_t>(c0);
+    const acc_t s0_acc = static_cast<acc_t>(s0);
+    const acc_t c1_acc = static_cast<acc_t>(c1);
+    const acc_t s1_acc = static_cast<acc_t>(s1);
+    const acc_t x0 = static_cast<acc_t>(values[0]);
+    const acc_t y0 = static_cast<acc_t>(values[1]);
+    const acc_t x1 = static_cast<acc_t>(values[2]);
+    const acc_t y1 = static_cast<acc_t>(values[3]);
+    rotated[0] = static_cast<scalar_t>(x0 * c0_acc - y0 * s0_acc);
+    rotated[1] = static_cast<scalar_t>(y0 * c0_acc + x0 * s0_acc);
+    rotated[2] = static_cast<scalar_t>(x1 * c1_acc - y1 * s1_acc);
+    rotated[3] = static_cast<scalar_t>(y1 * c1_acc + x1 * s1_acc);
+    *reinterpret_cast<vec4_t*>(data + rot_offset * 2) = rotated;
   }
 
   // ── Rotate one head (used by 2D grid mode) ──
@@ -139,7 +220,10 @@ class multimodal_rotary_embedding_kernel {
         const int s = find_section(rot_offset);
         // Guard: if the vec4 straddles a section boundary,
         // fall back to scalar to use the correct cos/sin for each.
-        if (find_section(rot_offset + VEC_SIZE - 1) != s) {
+        if constexpr (IS_MROPE_INTERLEAVED) {
+          rotate_neox_interleaved_vec4(
+              data, rot_offset, embed_dim, section_src);
+        } else if (find_section(rot_offset + VEC_SIZE - 1) != s) {
           for (int j = 0; j < VEC_SIZE; ++j) {
             const int sj = find_section(rot_offset + j);
             apply_token_rotary_embedding<scalar_t, true>(
@@ -179,7 +263,11 @@ class multimodal_rotary_embedding_kernel {
         const int s = find_section(rot_offset);
         // Guard: if the two offsets straddle a section boundary,
         // fall back to scalar to use the correct cos/sin for each.
-        if (rot_offset + 1 < embed_dim && find_section(rot_offset + 1) != s) {
+        if constexpr (IS_MROPE_INTERLEAVED) {
+          rotate_gptj_interleaved_vec4(
+              data, rot_offset, embed_dim, section_src);
+        } else if (
+            rot_offset + 1 < embed_dim && find_section(rot_offset + 1) != s) {
           apply_token_rotary_embedding<scalar_t, false>(
               data,
               data,
@@ -240,7 +328,10 @@ class multimodal_rotary_embedding_kernel {
             token_idx * data_stride + head_idx * head_stride;
         // Guard: if the vec4 straddles a section boundary,
         // fall back to scalar to use the correct cos/sin for each.
-        if (find_section(rot_offset + VEC_SIZE - 1) != s) {
+        if constexpr (IS_MROPE_INTERLEAVED) {
+          rotate_neox_interleaved_vec4(
+              data + token_head, rot_offset, embed_dim, section_src);
+        } else if (find_section(rot_offset + VEC_SIZE - 1) != s) {
           for (int j = 0; j < VEC_SIZE; ++j) {
             const int sj = find_section(rot_offset + j);
             apply_token_rotary_embedding<scalar_t, true>(
@@ -291,7 +382,11 @@ class multimodal_rotary_embedding_kernel {
         const int64_t token_head =
             token_idx * data_stride + head_idx * head_stride;
         // Guard: section boundary crossing.
-        if (rot_offset + 1 < embed_dim && find_section(rot_offset + 1) != s) {
+        if constexpr (IS_MROPE_INTERLEAVED) {
+          rotate_gptj_interleaved_vec4(
+              data + token_head, rot_offset, embed_dim, section_src);
+        } else if (
+            rot_offset + 1 < embed_dim && find_section(rot_offset + 1) != s) {
           apply_token_rotary_embedding<scalar_t, false>(
               data + token_head,
               data + token_head,
@@ -341,6 +436,8 @@ class multimodal_rotary_embedding_kernel {
   int section_end[MROPE_MAX_SECTIONS];
   const int num_mrope_sections;
   const int num_tokens;
+  const int64_t positions_row_stride;
+  const int64_t positions_column_stride;
   const int rot_dim;
   const int64_t query_stride;
   const int64_t key_stride;
@@ -363,6 +460,7 @@ class multimodal_rotary_embedding_kernel {
 // cos_sin_cache  : [max_position, rot_dim]
 // mrope_section  : host int list [num_mrope_sections], values in embed_dim
 //                  units summing to rot_dim / 2
+// mrope_interleaved: select T/H/W sections cyclically, matching Triton M-RoPE
 
 namespace {
 
@@ -381,6 +479,7 @@ void call_multimodal_rotary_embedding_kernel(
     int64_t head_size,
     torch::Tensor& cos_sin_cache,
     bool is_neox,
+    bool mrope_interleaved,
     const std::vector<int64_t>& mrope_section) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
 
@@ -399,6 +498,9 @@ void call_multimodal_rotary_embedding_kernel(
       num_mrope_sections <= vllm::MROPE_MAX_SECTIONS,
       "num_mrope_sections exceeds MROPE_MAX_SECTIONS=",
       vllm::MROPE_MAX_SECTIONS);
+  TORCH_CHECK(
+      !mrope_interleaved || num_mrope_sections == 3,
+      "interleaved M-RoPE requires exactly three T/H/W sections");
 
   const int query_hidden_size = query.numel() / num_tokens;
   const int key_hidden_size = key.has_value() ? key->numel() / num_tokens : 0;
@@ -419,8 +521,8 @@ void call_multimodal_rotary_embedding_kernel(
   const int64_t key_stride = key.has_value() ? key->stride(0) : 0;
   const int64_t head_stride = (query.dim() == 3) ? query.stride(-2) : head_size;
 
-  // Ensure positions is contiguous for raw pointer arithmetic.
-  at::Tensor positions_contig = positions.contiguous();
+  const int64_t positions_row_stride = positions.stride(0);
+  const int64_t positions_column_stride = positions.stride(1);
 
   // Verify sections sum to embed_dim (= rot_dim / 2).
   int mrope_section_arr[vllm::MROPE_MAX_SECTIONS] = {};
@@ -467,7 +569,7 @@ void call_multimodal_rotary_embedding_kernel(
   }
 
   // ── Launch kernel ──
-  auto positions_ptr = positions_contig.data_ptr<int64_t>();
+  auto positions_ptr = positions.data_ptr<int64_t>();
   auto query_ptr = query.data_ptr<scalar_t>();
   auto key_ptr = key.has_value() ? key->data_ptr<scalar_t>() : nullptr;
   auto cos_sin_cache_ptr = cos_sin_cache.data_ptr<scalar_t>();
@@ -475,45 +577,97 @@ void call_multimodal_rotary_embedding_kernel(
   at::DeviceGuard device_guard(query.device());
   auto& queue = vllm::xpu::vllmGetQueue();
   if (is_neox) {
-    queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<3>(grid * block, block),
-          vllm::multimodal_rotary_embedding_kernel<sycl_t, true>(
-              positions_ptr,
-              (sycl_t*)query_ptr,
-              (sycl_t*)key_ptr,
-              (sycl_t*)cos_sin_cache_ptr,
-              mrope_section_arr,
-              num_mrope_sections,
-              num_tokens,
-              rot_dim,
-              query_stride,
-              key_stride,
-              head_stride,
-              num_heads,
-              num_kv_heads,
-              head_size));
-    });
+    if (mrope_interleaved) {
+      queue.submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(
+            sycl::nd_range<3>(grid * block, block),
+            vllm::multimodal_rotary_embedding_kernel<sycl_t, true, true>(
+                positions_ptr,
+                (sycl_t*)query_ptr,
+                (sycl_t*)key_ptr,
+                (sycl_t*)cos_sin_cache_ptr,
+                mrope_section_arr,
+                num_mrope_sections,
+                num_tokens,
+                positions_row_stride,
+                positions_column_stride,
+                rot_dim,
+                query_stride,
+                key_stride,
+                head_stride,
+                num_heads,
+                num_kv_heads,
+                head_size));
+      });
+    } else {
+      queue.submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(
+            sycl::nd_range<3>(grid * block, block),
+            vllm::multimodal_rotary_embedding_kernel<sycl_t, true, false>(
+                positions_ptr,
+                (sycl_t*)query_ptr,
+                (sycl_t*)key_ptr,
+                (sycl_t*)cos_sin_cache_ptr,
+                mrope_section_arr,
+                num_mrope_sections,
+                num_tokens,
+                positions_row_stride,
+                positions_column_stride,
+                rot_dim,
+                query_stride,
+                key_stride,
+                head_stride,
+                num_heads,
+                num_kv_heads,
+                head_size));
+      });
+    }
   } else {
-    queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<3>(grid * block, block),
-          vllm::multimodal_rotary_embedding_kernel<sycl_t, false>(
-              positions_ptr,
-              (sycl_t*)query_ptr,
-              (sycl_t*)key_ptr,
-              (sycl_t*)cos_sin_cache_ptr,
-              mrope_section_arr,
-              num_mrope_sections,
-              num_tokens,
-              rot_dim,
-              query_stride,
-              key_stride,
-              head_stride,
-              num_heads,
-              num_kv_heads,
-              head_size));
-    });
+    if (mrope_interleaved) {
+      queue.submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(
+            sycl::nd_range<3>(grid * block, block),
+            vllm::multimodal_rotary_embedding_kernel<sycl_t, false, true>(
+                positions_ptr,
+                (sycl_t*)query_ptr,
+                (sycl_t*)key_ptr,
+                (sycl_t*)cos_sin_cache_ptr,
+                mrope_section_arr,
+                num_mrope_sections,
+                num_tokens,
+                positions_row_stride,
+                positions_column_stride,
+                rot_dim,
+                query_stride,
+                key_stride,
+                head_stride,
+                num_heads,
+                num_kv_heads,
+                head_size));
+      });
+    } else {
+      queue.submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(
+            sycl::nd_range<3>(grid * block, block),
+            vllm::multimodal_rotary_embedding_kernel<sycl_t, false, false>(
+                positions_ptr,
+                (sycl_t*)query_ptr,
+                (sycl_t*)key_ptr,
+                (sycl_t*)cos_sin_cache_ptr,
+                mrope_section_arr,
+                num_mrope_sections,
+                num_tokens,
+                positions_row_stride,
+                positions_column_stride,
+                rot_dim,
+                query_stride,
+                key_stride,
+                head_stride,
+                num_heads,
+                num_kv_heads,
+                head_size));
+      });
+    }
   }
 }
 
@@ -524,7 +678,8 @@ void multimodal_rotary_embedding(
     int64_t head_size,
     torch::Tensor& cos_sin_cache,
     bool is_neox,
-    std::vector<int64_t> mrope_section) {
+    std::vector<int64_t> mrope_section,
+    bool mrope_interleaved) {
   VLLM_DISPATCH_FLOATING_TYPES(
       query.scalar_type(), "multimodal_rotary_embedding", [&] {
         call_multimodal_rotary_embedding_kernel<scalar_t>(
@@ -534,6 +689,7 @@ void multimodal_rotary_embedding(
             head_size,
             cos_sin_cache,
             is_neox,
+            mrope_interleaved,
             mrope_section);
       });
 }
