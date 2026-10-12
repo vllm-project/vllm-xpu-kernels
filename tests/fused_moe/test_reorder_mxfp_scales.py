@@ -8,7 +8,9 @@ from tests.utils import seed_everything
 KERNEL_DEVICE = "xpu"
 
 # scale_k = hidden_size // block_k (block_k = 32 for mxfp).
-SCALE_K = [4, 8, 40]
+# 128 is Qwen3-235B (hidden 4096); 72/200 straddle the kernel's 64-wide
+# SLM column slabs.
+SCALE_K = [4, 8, 40, 72, 128, 200]
 # Per-expert row counts covering: zeros, non-multiples of 4, exact multiples.
 ROWS_PER_EXPERT = [
     [0, 1, 2, 3, 4, 5, 7, 8],
@@ -16,6 +18,8 @@ ROWS_PER_EXPERT = [
     [1],
     [0, 0, 0],
     [128, 256, 200, 137],
+    # Experts larger than and straddling the 128-row work-group tile.
+    [300, 0, 1, 129, 127, 513],
 ]
 
 
@@ -62,8 +66,12 @@ def test_reorder_mxfp_scales(rows_list, scale_k):
     ref, total_padded = ref_reorder(A_scales, rows_list, scale_k)
 
     upper = total_rows + 3 * num_experts
+    desc = torch.full((2, num_experts + 1),
+                      -1,
+                      dtype=torch.int32,
+                      device=KERNEL_DEVICE)
     out = torch.ops._moe_C.reorder_mxfp_scales(A_scales, rows_per_expert,
-                                               upper)
+                                               upper, desc)
 
     assert out.shape[0] == upper
     assert out.shape[1] == scale_k
@@ -75,3 +83,25 @@ def test_reorder_mxfp_scales(rows_list, scale_k):
     assert torch.equal(
         out[total_padded:].view(torch.uint8),
         torch.zeros_like(out[total_padded:].view(torch.uint8)))
+
+    # The published descriptor matches remap_hidden_states' convention.
+    padded = [round_up_4(r) for r in rows_list]
+    ref_desc = torch.tensor(
+        [[sum(rows_list[:i]) for i in range(num_experts + 1)],
+         [sum(padded[:i]) for i in range(num_experts + 1)]],
+        dtype=torch.int32)
+    assert torch.equal(desc.cpu(), ref_desc)
+
+
+def test_reorder_mxfp_scales_no_desc():
+    rows_list = [5, 0, 17]
+    scale_k = 8
+    raw = torch.randint(0, 256, (sum(rows_list), scale_k), dtype=torch.uint8)
+    A_scales = raw.view(torch.float8_e8m0fnu).to(KERNEL_DEVICE)
+    rows_per_expert = torch.tensor(rows_list,
+                                   dtype=torch.int32,
+                                   device=KERNEL_DEVICE)
+    ref, total_padded = ref_reorder(A_scales, rows_list, scale_k)
+    out = torch.ops._moe_C.reorder_mxfp_scales(A_scales, rows_per_expert,
+                                               total_padded)
+    assert torch.equal(out.view(torch.uint8), ref.view(torch.uint8))
