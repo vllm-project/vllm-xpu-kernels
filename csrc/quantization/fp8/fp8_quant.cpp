@@ -740,6 +740,10 @@ void per_token_group_quant_fp8(
   TORCH_CHECK(input.numel() % group_size == 0);
   TORCH_CHECK(output_s.dim() == 2);
 
+  if (num_groups == 0) {
+    return;
+  }
+
   const at::DeviceGuard device_guard(input.device());
 
   constexpr int THREADS_PER_GROUP = 32;

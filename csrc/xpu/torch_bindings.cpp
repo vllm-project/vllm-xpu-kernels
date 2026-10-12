@@ -94,7 +94,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "multimodal_rotary_embedding(Tensor positions, Tensor! query,"
       "                            Tensor!? key, int head_size,"
       "                            Tensor cos_sin_cache, bool is_neox,"
-      "                            int[] mrope_section) -> ()");
+      "                            int[] mrope_section,"
+      "                            bool mrope_interleaved=False) -> ()");
   xpu_ops.impl(
       "multimodal_rotary_embedding", torch::kXPU, &multimodal_rotary_embedding);
 
@@ -230,6 +231,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor spec_state_indices_tensor, Tensor num_accepted_tokens,"
       "int num_actual_tokens, int tp_size) -> ()");
   xpu_ops.impl("gated_delta_rule_spec", torch::kXPU, &gated_delta_rule_spec);
+
+  xpu_ops.def(
+      "gated_delta_rule_spec_recoverssm(Tensor! core_attn_out,"
+      "Tensor q, Tensor k, Tensor v, Tensor b, Tensor a,"
+      "int num_v_heads, int head_v_dim,"
+      "Tensor A_log, Tensor dt_bias, Tensor ssm_state, Tensor! replay_state,"
+      "int num_spec_decodes, Tensor spec_query_start_loc, "
+      "Tensor? spec_token_indx, Tensor spec_state_indices_tensor,"
+      "int null_block_id, int num_actual_tokens, int tp_size) -> ()");
+  xpu_ops.impl(
+      "gated_delta_rule_spec_recoverssm",
+      torch::kXPU,
+      &gated_delta_rule_spec_recoverssm);
 
   xpu_ops.def(
       "gated_delta_rule_non_spec(Tensor! core_attn_out,"
