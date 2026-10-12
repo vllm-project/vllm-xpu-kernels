@@ -130,8 +130,16 @@ static inline void dnnl_matmul_w8a16_fp8(
   at::Device curDevice = at::Device(at::kXPU, dev_id);
   auto engine = GpuEngineManager::Instance().get_engine(curDevice);
 
-  int m2_sc_group_size = m2_sc.numel();
-  int sc_group_size = (group_size << 8) | m2_sc_group_size;
+  // Scale shape selects the mask and {group_k, group_n}, so it must be keyed:
+  // e.g. [1, 20] and [2, 10] have the same numel but different groups.
+  auto hash_dims = [](const torch::Tensor& tensor) {
+    int hash = tensor.dim();
+    for (const auto size : tensor.sizes()) {
+      hash = hash * 131 + static_cast<int>(size);
+    }
+    return hash;
+  };
+  int sc_group_size = (group_size << 8) ^ hash_dims(m2_sc);
   auto& matmul_ext = matmul_primitive_create_and_cache(
       jd, tt, b_type, m, n, k, lda, ldb, ldc, dev_id, f_attr, sc_group_size);
 

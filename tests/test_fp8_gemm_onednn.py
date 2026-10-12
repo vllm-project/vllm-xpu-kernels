@@ -33,15 +33,20 @@ MINI_MNK_FACTORS = [
 ]
 
 GROUP_SIZE = [128, 256]
+# K == 256 with group_size 256 is a single K block: activation scale [M, 1],
+# weight scale [1, N / 256].
 MNK_BLOCK_FACTORS = [
     (1, 256, 1024),
     (4, 256, 1024),
     (8, 256, 1024),
     (8, 512, 1024),
+    (4, 2560, 256),
+    (2048, 2560, 256),
 ]
 
 MINI_MNK_BLOCK_FACTORS = [
     (1, 256, 256),
+    (1, 512, 256),
 ]
 
 MNK_W8A16_BLOCK_FACTORS = [
@@ -49,14 +54,13 @@ MNK_W8A16_BLOCK_FACTORS = [
     (4, 256, 512),
     # (2, 256, 1024),
     # (4, 256, 512),
+    (4, 2560, 256),
+    (2048, 2560, 256),
 ]
 
-# K == group size: activation scale [M, 1], weight scale [1, N / gs].
-MNK_SINGLE_K_BLOCK_FACTORS = [
-    (1, 256, 128),
-    (4, 2560, 128),
-    (2048, 2560, 128),  # Ling-3.0-flash-fp8 TP=8 shared_experts.down_proj
-]
+# (block_k, block_n). At K=256, N=2560 the two non-square shapes give scales
+# [1, 20] and [2, 10]: same numel, different groups.
+W8A16_BLOCK_SHAPES = [(128, 128), (256, 256), (256, 128), (128, 256)]
 
 MINI_MX_MNK_FACTORS = [
     (1, 32, 32),
@@ -92,12 +96,6 @@ MINI_PYTEST_PARAMS = {
     },
     "test_fp8_gemm_w8a16_block": {
         "mnk_factors": MINI_MNK_BLOCK_FACTORS,
-    },
-    "test_fp8_gemm_per_block_single_k_block": {
-        "mnk_factors": MNK_SINGLE_K_BLOCK_FACTORS[:1],
-    },
-    "test_fp8_gemm_w8a16_block_single_k_block": {
-        "mnk_factors": MNK_SINGLE_K_BLOCK_FACTORS[:1],
     },
 }
 
@@ -531,19 +529,20 @@ def test_fp8_gemm_per_block(fp8_dtype, dtype, is_nt, batch, group_size,
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("is_nt", [True, False])
 @pytest.mark.parametrize("batch", BATCHES)
-@pytest.mark.parametrize("group_size", GROUP_SIZE)
+@pytest.mark.parametrize("block_shape", W8A16_BLOCK_SHAPES)
 @pytest.mark.parametrize("mnk_factors", MNK_W8A16_BLOCK_FACTORS)
-def test_fp8_gemm_w8a16_block(fp8_dtype, dtype, is_nt, batch, group_size,
+def test_fp8_gemm_w8a16_block(fp8_dtype, dtype, is_nt, batch, block_shape,
                               mnk_factors):
     """Test fp8 w8a16 block quantization GEMM.
 
-    The weight is fp8 with per-block scale of shape [k/gs, n/gs].
+    The weight is fp8 with per-block scale of shape [k/block_k, n/block_n].
     The activation is fp16/bf16 (not quantized).
     """
     seed = 1234
     torch.manual_seed(seed)
 
     m, n, k = mnk_factors
+    block_k, block_n = block_shape
 
     # fp16/bf16 activation (not quantized)
     input = torch.randn(
@@ -551,15 +550,15 @@ def test_fp8_gemm_w8a16_block(fp8_dtype, dtype, is_nt, batch, group_size,
     # fp16/bf16 weight (to be quantized to fp8 with block scale)
     weight = torch.randn([n, k], dtype=dtype).xpu() / 10.0
 
-    # Block quantize weight: [n, k] -> fp8 [n, k], scale [n/gs, k/gs]
+    # Block quantize weight: [n, k] -> fp8 [n, k], scale [n/bn, k/bk]
     weight_fp8, scale_wei_fp8 = fp8_block_quant_2d(weight,
-                                                   group_size,
-                                                   group_size,
+                                                   block_n,
+                                                   block_k,
                                                    fp8_dtype=fp8_dtype)
 
     # Reference: dequantize FP8 weight, then multiply with fp16/bf16 input
-    weight_deq = fp8_block_dequant_2d(weight_fp8, scale_wei_fp8, group_size,
-                                      group_size, dtype)
+    weight_deq = fp8_block_dequant_2d(weight_fp8, scale_wei_fp8, block_n,
+                                      block_k, dtype)
     output_ref = torch.matmul(input, weight_deq.t())
 
     # Transpose weight for gemm: [n, k] -> [k, n]
@@ -576,92 +575,4 @@ def test_fp8_gemm_w8a16_block(fp8_dtype, dtype, is_nt, batch, group_size,
 
     # bf16 has lower mantissa precision (7-bit vs 10-bit for f16), which causes
     # larger accumulated error in the bf16+fp8 block matmul kernel.
-    torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)
-
-
-@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("is_nt", [True, False])
-@pytest.mark.parametrize("use_ue8m0", [False, True])
-@pytest.mark.parametrize("mnk_factors", MNK_SINGLE_K_BLOCK_FACTORS)
-def test_fp8_gemm_per_block_single_k_block(fp8_dtype, dtype, is_nt, use_ue8m0,
-                                           mnk_factors):
-    seed = 1234
-    torch.manual_seed(seed)
-
-    m, n, k = mnk_factors
-    group_size = k
-
-    input = torch.randn([m, k], dtype=dtype, device=torch.device("xpu")) / 10.0
-    weight = torch.randn([n, k], dtype=dtype).xpu() / 10.0
-
-    input_fp8, scale_src_fp8 = per_token_group_quant_fp8(input,
-                                                         group_size,
-                                                         dtype=fp8_dtype,
-                                                         use_ue8m0=use_ue8m0)
-    weight_fp8, scale_wei_fp8 = fp8_block_quant_2d(weight,
-                                                   group_size,
-                                                   group_size,
-                                                   use_ue8m0=use_ue8m0)
-    assert scale_src_fp8.shape == (m, 1)
-    assert scale_wei_fp8.t().shape == (1, n // group_size)
-
-    input_deq = per_token_group_dequant_fp8(input_fp8, scale_src_fp8,
-                                            group_size, dtype)
-    weight_deq = fp8_block_dequant_2d(weight_fp8, scale_wei_fp8, group_size,
-                                      group_size, dtype)
-    output_ref = torch.matmul(input_deq, weight_deq.t())
-
-    weight_fp8 = weight_fp8.transpose(0, 1)
-    if is_nt:
-        weight_fp8 = weight_fp8.contiguous()
-
-    output_fp8 = fp8_gemm(
-        input_fp8,
-        weight_fp8,
-        dtype,
-        scale_src_fp8,
-        scale_wei_fp8.t().contiguous(),
-        torch.Tensor(),
-    )
-
-    torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)
-
-
-@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("is_nt", [True, False])
-@pytest.mark.parametrize("mnk_factors", MNK_SINGLE_K_BLOCK_FACTORS)
-def test_fp8_gemm_w8a16_block_single_k_block(fp8_dtype, dtype, is_nt,
-                                             mnk_factors):
-    seed = 1234
-    torch.manual_seed(seed)
-
-    m, n, k = mnk_factors
-    group_size = k
-
-    input = torch.randn([m, k], dtype=dtype, device=torch.device("xpu")) / 10.0
-    weight = torch.randn([n, k], dtype=dtype).xpu() / 10.0
-
-    weight_fp8, scale_wei_fp8 = fp8_block_quant_2d(weight,
-                                                   group_size,
-                                                   group_size,
-                                                   fp8_dtype=fp8_dtype)
-    assert scale_wei_fp8.t().shape == (1, n // group_size)
-
-    weight_deq = fp8_block_dequant_2d(weight_fp8, scale_wei_fp8, group_size,
-                                      group_size, dtype)
-    output_ref = torch.matmul(input, weight_deq.t())
-
-    weight_fp8 = weight_fp8.transpose(0, 1)
-    if is_nt:
-        weight_fp8 = weight_fp8.contiguous()
-
-    output_fp8 = fp8_gemm_w8a16(
-        input,
-        weight_fp8,
-        scale_wei_fp8.t().contiguous(),
-        torch.Tensor(),
-    )
-
     torch.testing.assert_close(output_fp8, output_ref, atol=6e-2, rtol=6e-2)
