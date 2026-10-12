@@ -116,8 +116,11 @@ void launch_map_build(
           // Cooperative coalesced load of topk_ids into local memory first:
           // the naive per-lane rescans of global ids[] serialize one ~600ns
           // memory round-trip per element and cost ~40us at R=16.
-          for (int r = lane; r < R; r += MAP_WG)
+          for (int r = lane; r < R; r += MAP_WG) {
             ids_slm[r] = (int32_t)ids[r];
+            // vLLM marks padded tokens with expert ID -1.
+            perm_pos[r] = -1;
+          }
           sycl::group_barrier(item.get_group());
 
           if (R <= MAP_WG && num_tokens <= tile_m) {
@@ -129,18 +132,18 @@ void launch_map_build(
             int32_t* first = rows;  // first[r]: route r is its id's first
             if (lane < R) {
               const int e = ids_slm[lane];
-              int f = 1;
+              int f = (e >= 0 && e < num_experts);
               for (int s = 0; s < lane; ++s)
                 f &= ids_slm[s] != e;
               first[lane] = f;
             }
             sycl::group_barrier(item.get_group());
-            if (lane < R) {
+            if (lane < R && ids_slm[lane] >= 0 && ids_slm[lane] < num_experts) {
               const int e = ids_slm[lane];
               int less = 0, before = 0, cnt = 0, tile = 0;
               for (int s = 0; s < R; ++s) {
                 const int es = ids_slm[s];
-                less += es < e;
+                less += es >= 0 && es < num_experts && es < e;
                 cnt += es == e;
                 before += (es == e) & (s < lane);
                 tile += (es < e) & first[s];
@@ -203,6 +206,7 @@ void launch_map_build(
 
           for (int r = lane; r < R; r += MAP_WG) {
             const int e = ids_slm[r];
+            if (e < 0 || e >= num_experts) continue;
             sycl::atomic_ref<
                 int,
                 sycl::memory_order::relaxed,
@@ -213,11 +217,6 @@ void launch_map_build(
             perm_pos[r] = p;
             w_perm[p] = weights[r];
           }
-
-          // Shared-expert gate: sigmoid(dot(x[m], gate_vec)) per token,
-          // vectorized (16 halves / 32B per load), computed here so the
-          // finalize kernel is a pure weighted sum. Skipped entirely when
-          // there is no shared expert (gate_out stays unwritten then).
         });
   });
 }
@@ -240,11 +239,15 @@ class SpGatherLauncher {
     // work-item indices need no integer division; R*K fully-coalesced.
     q.submit([&](sycl::handler& cgh) {
       cgh.parallel_for<SpGatherName<ElementA>>(
-          sycl::nd_range<2>(sycl::range<2>(R, K / 4), sycl::range<2>(1, 64)),
+          sycl::nd_range<2>(
+              sycl::range<2>(R, ceil_div(K / 4, 64) * 64),
+              sycl::range<2>(1, 64)),
           [=](sycl::nd_item<2> item) {
             const int r = item.get_global_id(0);
             const int c = item.get_global_id(1) * 4;
+            if (c >= K) return;
             const int dst = perm_pos[r];
+            if (dst < 0) return;
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
               a_perm[(int64_t)dst * K + c + j] =
@@ -256,7 +259,7 @@ class SpGatherLauncher {
 };
 
 // ---------------------------------------------------------------------------
-// Kernels 3/5/6/8: the specialized grouped-GEMM tile launcher. Reuses the
+// Kernels 3/5: the specialized grouped-GEMM tile launcher. Reuses the
 // unchanged `MoE::xe_gemm` mainloop; replaces the persistent+atomic
 // scheduler with direct tile-map indexing.
 //   SINGLE_GROUP=false: routed grouped GEMM over the tile map.
@@ -286,8 +289,7 @@ void launch_sp_gemm_merged(
     void* D_shared,
     int gemm_m_shared,
     int N,
-    int K,
-    bool has_shared) {
+    int K) {
   auto op = XE_DPAS_TT<8, float, ElementA>{};
   using WGTile = typename Policy::WGTile;
   using SGLayout = typename Policy::SGLayout;
@@ -300,8 +302,7 @@ void launch_sp_gemm_merged(
   const int wg_tile_m = get<0>(WGTile{});
   const int wg_tile_n = get<1>(WGTile{});
   const int n_tiles = ceil_div(N, wg_tile_n);
-  const int shared_m_tiles =
-      has_shared ? ceil_div(gemm_m_shared, wg_tile_m) : 0;
+  const int shared_m_tiles = ceil_div(gemm_m_shared, wg_tile_m);
   const int total_wgs = umt * n_tiles + shared_m_tiles * n_tiles;
 
   q.submit([&](sycl::handler& cgh) {
@@ -357,15 +358,14 @@ void launch_sp_gemm_merged(
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 6: SiLU-and-mul over a COMBINED buffer of [R + M] rows (routed act
+// Kernel 4: SiLU-and-mul over a COMBINED buffer of [R + M] rows (routed act
 // rows first, shared-expert rows after) -- one launch for both activations.
 //   in  [rows, 2*ic] -> out [rows, ic] : silu(in[:, :ic]) * in[:, ic:]
 // ---------------------------------------------------------------------------
 template <typename ElementA>
 class SpSiluMulLauncher {
  public:
-  // Silu-and-mul over a COMBINED buffer of [R + M] rows, plus (when the
-  // shared expert is present) the shared-expert gate dots for the M tokens,
+  // SiLU-and-mul over [R + M] rows and shared-expert gate dots for M tokens,
   // all in ONE launch: work-groups [0, silu_wgs) do silu rows, work-groups
   // [silu_wgs, silu_wgs + num_tokens) each cooperatively reduce one token's
   // gate dot (64 lanes x vec16 loads + SLM reduce). Folding the gate here
@@ -381,13 +381,12 @@ class SpSiluMulLauncher {
       const ElementA* gate_vec,
       float* gate_out,
       int num_tokens,
-      int h_size,
-      bool has_shared) {
+      int h_size) {
     constexpr int VEC = 8;
     const int cols = ic / VEC;
     const int total = rows * cols;
     const int silu_wgs = (total + 63) / 64;
-    const int wgs = silu_wgs + (has_shared ? num_tokens : 0);
+    const int wgs = silu_wgs + num_tokens;
     q.submit([&](sycl::handler& cgh) {
       sycl::local_accessor<float, 1> red(sycl::range<1>(64), cgh);
       cgh.parallel_for<SpSiluMulName<ElementA>>(
@@ -443,7 +442,7 @@ class SpSiluMulLauncher {
 };
 
 // ---------------------------------------------------------------------------
-// Kernel 8: finalize. out[m, c:c+8] = sum_k w_perm[perm_pos[m,k]] *
+// Kernel 6: finalize. out[m, c:c+8] = sum_k w_perm[perm_pos[m,k]] *
 // D2[perm_pos[m,k], c:c+8] + sigmoid(dot(x[m], gate_vec)) * sh2[m, c:c+8]
 // ---------------------------------------------------------------------------
 template <typename ElementA>
@@ -459,8 +458,7 @@ class SpFinalizeLauncher {
       ElementA* out,
       int num_tokens,
       int H,
-      int top_k,
-      bool has_shared) {
+      int top_k) {
     constexpr int VEC = 8;
     const int cols = H / VEC;
     const int total = num_tokens * cols;
@@ -474,31 +472,20 @@ class SpFinalizeLauncher {
             const int m = i / cols;
             const int c = (i % cols) * VEC;
 
-            // Gate was precomputed by the map kernel (vectorized dot there);
+            // Gate was precomputed by the combined activation kernel;
             // this kernel is a pure weighted sum + gated shared add.
 
             ElementA* o = out + (int64_t)m * H + c;
-            if (has_shared) {
 #pragma unroll
-              for (int j = 0; j < VEC; ++j) {
-                float acc = 0.f;
-                for (int kk = 0; kk < top_k; ++kk) {
-                  const int p = perm_pos[m * top_k + kk];
+            for (int j = 0; j < VEC; ++j) {
+              float acc = 0.f;
+              for (int kk = 0; kk < top_k; ++kk) {
+                const int p = perm_pos[m * top_k + kk];
+                if (p >= 0)
                   acc += w_perm[p] * (float)d2[(int64_t)p * H + c + j];
-                }
-                o[j] = ElementA(
-                    acc + gate[m] * (float)sh2[(int64_t)m * H + c + j]);
               }
-            } else {
-#pragma unroll
-              for (int j = 0; j < VEC; ++j) {
-                float acc = 0.f;
-                for (int kk = 0; kk < top_k; ++kk) {
-                  const int p = perm_pos[m * top_k + kk];
-                  acc += w_perm[p] * (float)d2[(int64_t)p * H + c + j];
-                }
-                o[j] = ElementA(acc);
-              }
+              o[j] =
+                  ElementA(acc + gate[m] * (float)sh2[(int64_t)m * H + c + j]);
             }
           });
     });
@@ -525,14 +512,41 @@ void moe_shared_fused_decode_xe2_impl(
     const torch::Tensor& w13_scale,
     const torch::Tensor& w2,
     const torch::Tensor& w2_scale,
-    const torch::Tensor& shared_w13_t,
-    const torch::Tensor& shared_w13_scale_t,
-    const torch::Tensor& shared_w2_t,
-    const torch::Tensor& shared_w2_scale_t,
-    const torch::Tensor& shared_gate_t,
+    const torch::Tensor& shared_w13,
+    const torch::Tensor& shared_w13_scale,
+    const torch::Tensor& shared_w2,
+    const torch::Tensor& shared_w2_scale,
+    const torch::Tensor& shared_gate,
     torch::Tensor& ws,
     int64_t tile_m) {
   using namespace moe_shared_fused;
+  TORCH_CHECK(x.is_xpu(), "x must be an XPU tensor");
+  const auto check_device = [&x](
+                                const torch::Tensor& tensor, const char* name) {
+    TORCH_CHECK(
+        tensor.is_xpu() && tensor.device() == x.device(),
+        name,
+        " must be on the same XPU device as x");
+  };
+  check_device(output, "output");
+  check_device(topk_ids, "topk_ids");
+  check_device(topk_weights, "topk_weights");
+  check_device(w13, "w13");
+  check_device(w13_scale, "w13_scale");
+  check_device(w2, "w2");
+  check_device(w2_scale, "w2_scale");
+  check_device(shared_w13, "shared_w13");
+  check_device(shared_w13_scale, "shared_w13_scale");
+  check_device(shared_w2, "shared_w2");
+  check_device(shared_w2_scale, "shared_w2_scale");
+  check_device(shared_gate, "shared_gate");
+  check_device(ws, "ws");
+  TORCH_CHECK(
+      w13.dim() == 3 && w2.dim() == 3, "routed weights must be rank three");
+  TORCH_CHECK(
+      w13_scale.is_contiguous() && w2_scale.is_contiguous(),
+      "routed scales must be contiguous");
+  TORCH_CHECK(ws.is_contiguous(), "workspace must be contiguous");
   constexpr const char* kRecipe =
       "moe_shared_fused_decode only supports fp16/bf16 activations + fp8-e4m3 "
       "per-tensor weights: ";
@@ -544,8 +558,8 @@ void moe_shared_fused_decode_xe2_impl(
   TORCH_CHECK(
       w13.scalar_type() == at::kFloat8_e4m3fn &&
           w2.scalar_type() == at::kFloat8_e4m3fn &&
-          shared_w13_t.scalar_type() == at::kFloat8_e4m3fn &&
-          shared_w2_t.scalar_type() == at::kFloat8_e4m3fn,
+          shared_w13.scalar_type() == at::kFloat8_e4m3fn &&
+          shared_w2.scalar_type() == at::kFloat8_e4m3fn,
       kRecipe,
       "routed and shared weights must be float8_e4m3fn");
   TORCH_CHECK(
@@ -555,14 +569,14 @@ void moe_shared_fused_decode_xe2_impl(
       kRecipe,
       "routed scales must be float32 [E]");
   TORCH_CHECK(
-      shared_w13_scale_t.scalar_type() == at::kFloat &&
-          shared_w13_scale_t.numel() == 1 &&
-          shared_w2_scale_t.scalar_type() == at::kFloat &&
-          shared_w2_scale_t.numel() == 1,
+      shared_w13_scale.scalar_type() == at::kFloat &&
+          shared_w13_scale.numel() == 1 &&
+          shared_w2_scale.scalar_type() == at::kFloat &&
+          shared_w2_scale.numel() == 1,
       kRecipe,
       "shared scales must be float32 scalars");
   TORCH_CHECK(
-      shared_gate_t.scalar_type() == x.scalar_type(),
+      shared_gate.scalar_type() == x.scalar_type(),
       kRecipe,
       "shared_gate must have the input dtype");
   TORCH_CHECK(
@@ -577,54 +591,44 @@ void moe_shared_fused_decode_xe2_impl(
   TORCH_CHECK(x.dim() == 2 && x.is_contiguous() && output.is_contiguous());
   TORCH_CHECK(output.sizes() == x.sizes(), "output must match x");
   TORCH_CHECK(topk_ids.dim() == 2 && topk_ids.is_contiguous());
+  TORCH_CHECK(topk_ids.size(0) == x.size(0), "routing rows must match x");
   TORCH_CHECK(
       topk_weights.sizes() == topk_ids.sizes() && topk_weights.is_contiguous());
   TORCH_CHECK(w13.is_contiguous() && w2.is_contiguous());
   TORCH_CHECK(
-      shared_w13_t.is_contiguous() && shared_w2_t.is_contiguous() &&
-          shared_gate_t.is_contiguous(),
+      shared_w13.is_contiguous() && shared_w2.is_contiguous() &&
+          shared_gate.is_contiguous(),
       "shared weights must be contiguous");
   TORCH_CHECK(
-      w13.size(1) == x.size(1) && w2.size(2) == x.size(1) &&
-          w13.size(2) == 2 * w2.size(1),
+      w13.size(0) == w2.size(0) && w13.size(1) == x.size(1) &&
+          w2.size(2) == x.size(1) && w13.size(2) == 2 * w2.size(1),
       "routed weight shapes must be w13 [E, H, 2I], w2 [E, I, H]");
   TORCH_CHECK(
-      shared_w13_t.dim() == 2 && shared_w13_t.size(0) == w13.size(1) &&
-          shared_w13_t.size(1) == w13.size(2) && shared_w2_t.dim() == 2 &&
-          shared_w2_t.size(0) == w2.size(1) &&
-          shared_w2_t.size(1) == w2.size(2) &&
-          shared_gate_t.numel() == x.size(1),
+      shared_w13.dim() == 2 && shared_w13.size(0) == w13.size(1) &&
+          shared_w13.size(1) == w13.size(2) && shared_w2.dim() == 2 &&
+          shared_w2.size(0) == w2.size(1) && shared_w2.size(1) == w2.size(2) &&
+          shared_gate.numel() == x.size(1),
       "shared weight shapes must be [H, 2I], [I, H] and gate [H]");
   TORCH_CHECK(
       x.size(1) % 16 == 0 && w2.size(1) % 8 == 0,
       "H must be a multiple of 16 and I a multiple of 8");
-  const c10::optional<torch::Tensor> shared_w13 = shared_w13_t;
-  const c10::optional<torch::Tensor> shared_w13_scale = shared_w13_scale_t;
-  const c10::optional<torch::Tensor> shared_w2 = shared_w2_t;
-  const c10::optional<torch::Tensor> shared_w2_scale = shared_w2_scale_t;
-  const c10::optional<torch::Tensor> shared_gate = shared_gate_t;
 
   const int num_tokens = x.size(0);
   const int H = x.size(1);
   const int top_k = topk_ids.size(1);
   const int R = num_tokens * top_k;
   const int E = w13.size(0);
+  TORCH_CHECK(
+      num_tokens > 0 && top_k > 0 && E > 0 && top_k <= E,
+      "token, expert and top-k counts must be positive and top_k <= E");
   TORCH_CHECK(R <= MAX_R, "num_tokens * top_k exceeds ", MAX_R);
   const int K1 = w13.size(1);
   const int N1 = w13.size(2);
   const int K2 = w2.size(1);
   const int N2 = w2.size(2);
   TORCH_CHECK(num_experts_static_ok(E), "E > 512 unsupported");
-  const bool has_shared = shared_w13.has_value();
-  TORCH_CHECK(
-      !has_shared ||
-          (shared_w13->is_contiguous() && shared_w2->is_contiguous() &&
-           shared_w13_scale->scalar_type() == at::kFloat &&
-           shared_w2_scale->scalar_type() == at::kFloat &&
-           shared_gate->scalar_type() == x.scalar_type()),
-      "shared expert weight/scale dtypes");
-
-  const int umt = R < E ? R : E;
+  // Each routed row can require its own tile; skewed routes may exceed E.
+  const int umt = R;
   const int M_s = num_tokens;
 
   // ---- ONE flat byte workspace (allocated once per batch size by the
@@ -656,7 +660,7 @@ void moe_shared_fused_decode_xe2_impl(
 
   auto& q = c10::xpu::getCurrentXPUStream(x.device().index()).queue();
 
-  // 1: map + gate (single work-group), 2: gather
+  // 1: tile map (single work-group), 2: gather
   if (topk_ids.scalar_type() == at::kLong) {
     launch_map_build<int64_t>(
         q,
@@ -711,13 +715,12 @@ void moe_shared_fused_decode_xe2_impl(
         total_mt,
         umt,
         (ElementA*)x.data_ptr(),
-        shared_w13.value_or(w13).data_ptr(),
-        shared_w13_scale.value_or(w13_scale).data_ptr<float>(),
+        shared_w13.data_ptr(),
+        shared_w13_scale.data_ptr<float>(),
         d1 + (int64_t)R * N1,
         M_s,
         N1,
-        K1,
-        has_shared);
+        K1);
   } else {
     launch_sp_gemm_merged<
         MoE::w8a16_policy_m_16,
@@ -734,28 +737,26 @@ void moe_shared_fused_decode_xe2_impl(
         total_mt,
         umt,
         (ElementA*)x.data_ptr(),
-        shared_w13.value_or(w13).data_ptr(),
-        shared_w13_scale.value_or(w13_scale).data_ptr<float>(),
+        shared_w13.data_ptr(),
+        shared_w13_scale.data_ptr<float>(),
         d1 + (int64_t)R * N1,
         M_s,
         N1,
-        K1,
-        has_shared);
+        K1);
   }
 
-  // 4: combined activation (routed rows + shared rows)
+  // 4: combined activation and shared-gate dot/sigmoid
   SpSiluMulLauncher<ElementA>::launch(
       q,
       d1,
       act,
-      R + (has_shared ? M_s : 0),
+      R + M_s,
       K2,
       (ElementA*)x.data_ptr(),
-      has_shared ? (ElementA*)shared_gate->data_ptr() : (ElementA*)x.data_ptr(),
+      (ElementA*)shared_gate.data_ptr(),
       gate_out,
       num_tokens,
-      H,
-      has_shared);
+      H);
 
   // 5: gemm2 (routed tiles + shared panel in one grid)
   if (tile_m == kMoeSharedFusedTileM8) {
@@ -774,13 +775,12 @@ void moe_shared_fused_decode_xe2_impl(
         total_mt,
         umt,
         act + (int64_t)R * K2,
-        shared_w2.value_or(w2).data_ptr(),
-        shared_w2_scale.value_or(w2_scale).data_ptr<float>(),
+        shared_w2.data_ptr(),
+        shared_w2_scale.data_ptr<float>(),
         sh2,
         M_s,
         N2,
-        K2,
-        has_shared);
+        K2);
   } else {
     launch_sp_gemm_merged<
         MoE::w8a16_policy_m_16,
@@ -797,13 +797,12 @@ void moe_shared_fused_decode_xe2_impl(
         total_mt,
         umt,
         act + (int64_t)R * K2,
-        shared_w2.value_or(w2).data_ptr(),
-        shared_w2_scale.value_or(w2_scale).data_ptr<float>(),
+        shared_w2.data_ptr(),
+        shared_w2_scale.data_ptr<float>(),
         sh2,
         M_s,
         N2,
-        K2,
-        has_shared);
+        K2);
   }
 
   // 6: finalize (pure weighted sum + gated shared add) into output
@@ -817,8 +816,7 @@ void moe_shared_fused_decode_xe2_impl(
       (ElementA*)output.data_ptr(),
       num_tokens,
       H,
-      top_k,
-      has_shared);
+      top_k);
 }
 
 void moe_shared_fused_decode_xe2(
@@ -830,11 +828,11 @@ void moe_shared_fused_decode_xe2(
     const torch::Tensor& w13_scale,
     const torch::Tensor& w2,
     const torch::Tensor& w2_scale,
-    const torch::Tensor& shared_w13_t,
-    const torch::Tensor& shared_w13_scale_t,
-    const torch::Tensor& shared_w2_t,
-    const torch::Tensor& shared_w2_scale_t,
-    const torch::Tensor& shared_gate_t,
+    const torch::Tensor& shared_w13,
+    const torch::Tensor& shared_w13_scale,
+    const torch::Tensor& shared_w2,
+    const torch::Tensor& shared_w2_scale,
+    const torch::Tensor& shared_gate,
     torch::Tensor& ws,
     int64_t tile_m) {
   if (x.scalar_type() == at::kBFloat16)
@@ -847,11 +845,11 @@ void moe_shared_fused_decode_xe2(
         w13_scale,
         w2,
         w2_scale,
-        shared_w13_t,
-        shared_w13_scale_t,
-        shared_w2_t,
-        shared_w2_scale_t,
-        shared_gate_t,
+        shared_w13,
+        shared_w13_scale,
+        shared_w2,
+        shared_w2_scale,
+        shared_gate,
         ws,
         tile_m);
   return moe_shared_fused_decode_xe2_impl<cutlass::half_t>(
@@ -863,11 +861,11 @@ void moe_shared_fused_decode_xe2(
       w13_scale,
       w2,
       w2_scale,
-      shared_w13_t,
-      shared_w13_scale_t,
-      shared_w2_t,
-      shared_w2_scale_t,
-      shared_gate_t,
+      shared_w13,
+      shared_w13_scale,
+      shared_w2,
+      shared_w2_scale,
+      shared_gate,
       ws,
       tile_m);
 }
