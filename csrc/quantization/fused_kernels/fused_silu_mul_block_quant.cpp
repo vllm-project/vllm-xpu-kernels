@@ -12,6 +12,7 @@
 #include "quantization/fp8/quant_utils.h"
 #include "quantization/fused_kernels/quant_conversions.h"
 #include "quantization/moe_scale_layout.h"
+#include "quantization/swiglu_limit.h"
 #include "quantization/mx_quant_utils.h"
 #include "quantization/utils.h"
 
@@ -30,7 +31,8 @@ class silu_and_mul_per_block_quant_kernel {
       const int64_t scale_stride_token_,
       const int64_t scale_stride_group_,
       const bool scale_ue8m0_,
-      const MoEScaleLayout moe_layout_ = {})
+      const MoEScaleLayout moe_layout_ = {},
+      const float swiglu_limit_ = kSwigluLimitDisabled)
       : out(out_),
         scales(scales_),
         input(input_),
@@ -41,7 +43,8 @@ class silu_and_mul_per_block_quant_kernel {
         scale_stride_token(scale_stride_token_),
         scale_stride_group(scale_stride_group_),
         scale_ue8m0(scale_ue8m0_),
-        moe_layout(moe_layout_) {}
+        moe_layout(moe_layout_),
+        swiglu_limit(swiglu_limit_) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
@@ -80,8 +83,12 @@ class silu_and_mul_per_block_quant_kernel {
           vec_n_t<scalar_t, VEC> u = vup[c0 + j];
 #pragma unroll
           for (int k = 0; k < VEC; ++k) {
-            const float gf = static_cast<float>(g.val[k]);
-            const float uf = static_cast<float>(u.val[k]);
+            float gf = static_cast<float>(g.val[k]);
+            float uf = static_cast<float>(u.val[k]);
+            if (swiglu_limit < kSwigluLimitDisabled) {
+              gf = swiglu_clamp_gate(gf, swiglu_limit);
+              uf = swiglu_clamp_up(uf, swiglu_limit);
+            }
             const float r = (gf / (1.0f + sycl::exp(-gf))) * uf;
             res[j][k] = r;
             lane_absmax = sycl::max(lane_absmax, sycl::fabs(r));
@@ -155,6 +162,7 @@ class silu_and_mul_per_block_quant_kernel {
   const int64_t scale_stride_group;
   const bool scale_ue8m0;
   const MoEScaleLayout moe_layout;
+  const float swiglu_limit;
 };
 
 // MXFP8, one lane per 16-byte vector of the output.
@@ -168,14 +176,16 @@ class silu_and_mul_mxfp8_quant_kernel {
       const int num_vecs_,
       const int vecs_per_row_,
       const int num_tokens_,
-      const MoEScaleLayout moe_layout_)
+      const MoEScaleLayout moe_layout_,
+      const float swiglu_limit_ = kSwigluLimitDisabled)
       : input(input_),
         num_vecs(num_vecs_),
         vecs_per_row(vecs_per_row_),
         out(out_),
         scales(scales_),
         num_tokens(num_tokens_),
-        moe_layout(moe_layout_) {}
+        moe_layout(moe_layout_),
+        swiglu_limit(swiglu_limit_) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(32),
@@ -196,8 +206,12 @@ class silu_and_mul_mxfp8_quant_kernel {
       const vec_n_t<scalar_t, VEC> u = vin[gate + vecs_per_row];
 #pragma unroll
       for (int k = 0; k < VEC; ++k) {
-        const float gf = static_cast<float>(g.val[k]);
-        const float uf = static_cast<float>(u.val[k]);
+        float gf = static_cast<float>(g.val[k]);
+        float uf = static_cast<float>(u.val[k]);
+        if (swiglu_limit < kSwigluLimitDisabled) {
+          gf = swiglu_clamp_gate(gf, swiglu_limit);
+          uf = swiglu_clamp_up(uf, swiglu_limit);
+        }
         res[k] = (gf / (1.0f + sycl::exp(-gf))) * uf;
         absmax = sycl::fmax(absmax, sycl::fabs(res[k]));
       }
@@ -229,6 +243,7 @@ class silu_and_mul_mxfp8_quant_kernel {
   float* __restrict__ scales;
   const int num_tokens;
   const MoEScaleLayout moe_layout;
+  const float swiglu_limit;
 };
 
 }  // namespace vllm
@@ -241,7 +256,8 @@ void silu_and_mul_per_block_quant(
     std::optional<torch::Tensor> scale_ub,
     bool is_scale_transposed,
     bool scale_ue8m0,
-    std::optional<torch::Tensor> expert_scale_desc) {
+    std::optional<torch::Tensor> expert_scale_desc,
+    std::optional<double> swiglu_limit) {
   TORCH_CHECK(
       out.dtype() == torch::kFloat8_e4m3fn ||
           out.dtype() == torch::kFloat8_e5m2 || out.dtype() == torch::kInt8,
@@ -293,6 +309,7 @@ void silu_and_mul_per_block_quant(
       "scales must have logical shape [num_tokens, num_groups], or "
       "[padded_scale_rows, num_groups] with expert_scale_desc");
 
+  const float limit = vllm::swiglu_limit_value(swiglu_limit);
   if (num_tokens == 0) return;
 
   const auto moe_layout = vllm::make_moe_scale_layout(
@@ -339,7 +356,8 @@ void silu_and_mul_per_block_quant(
                       static_cast<int>(mx_num_vecs),
                       static_cast<int>(hidden_size / vllm::mx::kVec),
                       static_cast<int>(num_tokens),
-                      moe_layout));
+                      moe_layout,
+                      vllm::swiglu_limit_as<scalar_t>(limit)));
             });
           };
           auto dispatch = [&](auto out_ptr) {
@@ -397,7 +415,8 @@ void silu_and_mul_per_block_quant(
                     scale_stride_token,
                     scale_stride_group,
                     scale_ue8m0,
-                    moe_layout));
+                    moe_layout,
+                    vllm::swiglu_limit_as<scalar_t>(limit)));
           });
         };
 

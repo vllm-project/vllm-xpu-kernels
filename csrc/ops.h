@@ -117,14 +117,16 @@ void silu_and_mul_per_block_quant(
     std::optional<torch::Tensor> scale_ub,
     bool is_scale_transposed,
     bool scale_ue8m0,
-    std::optional<torch::Tensor> expert_scale_desc);
+    std::optional<torch::Tensor> expert_scale_desc,
+    std::optional<double> swiglu_limit);
 
 void silu_and_mul_mxfp4_quant(
     torch::Tensor& out,
     torch::Tensor const& input,
     torch::Tensor& scales,
     int64_t group_size,
-    double eps);
+    double eps,
+    std::optional<double> swiglu_limit);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
@@ -290,7 +292,8 @@ void silu_and_mul_per_token_group_quant_mxfp4(
     torch::Tensor& output_s,
     int64_t group_size,
     double eps,
-    const c10::optional<torch::Tensor>& expert_scale_desc = c10::nullopt);
+    const c10::optional<torch::Tensor>& expert_scale_desc = c10::nullopt,
+    std::optional<double> swiglu_limit = std::nullopt);
 
 void swigluoai_and_mul(
     torch::Tensor& out,

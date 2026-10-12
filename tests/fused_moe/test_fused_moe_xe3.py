@@ -71,7 +71,12 @@ MINI_PYTEST_PARAMS = {
         "topk": [2],
         "recipe": ["bf16", "mxfp8", "mxfp4", "fp8block", "fp8", "mxfp4_fp8"],
         "has_bias": [True]
-    }
+    },
+    "test_fused_moe_swiglu_limit_in_act_quant": {
+        "m,n,k": [(256, 512, 256)],
+        "recipe": ["mxfp8", "mxfp4", "fp8block", "mxfp4_fp8"],
+        "gemm1_clamp_limit": [0.05],
+    },
 }
 
 RECIPE_TO_DTYPE = {
@@ -425,3 +430,84 @@ def test_fused_moe(m, n, k, e, topk, recipe, has_bias, monkeypatch):
         rtol = 2e-2
         atol = 2e-2
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
+
+
+# Recipes whose fused act+quant kernel applies the SwiGLU limit itself.
+SWIGLU_LIMIT_FUSED_RECIPES = ["mxfp8", "mxfp4", "fp8block", "mxfp4_fp8"]
+
+
+@pytest.mark.parametrize("m,n,k", [(16, 256, 256), (256, 512, 256)])
+@pytest.mark.parametrize("recipe", SWIGLU_LIMIT_FUSED_RECIPES)
+@pytest.mark.parametrize("gemm1_clamp_limit", [0.05, 0.1])
+def test_fused_moe_swiglu_limit_in_act_quant(m, n, k, recipe,
+                                             gemm1_clamp_limit, monkeypatch):
+    """Clamping inside the fused act+quant kernel is bitwise identical to the
+    eager gate/up clamp_ it replaces."""
+    import vllm_xpu_kernels.fused_moe_interface as fmi
+    if recipe in ("mxfp4", "mxfp4_fp8") and torch.ops._xpu_C.is_nvl_p(0):
+        pytest.skip(reason="MXFP4 is not supported on NVL_P")
+    if recipe == "mxfp4_fp8":
+        monkeypatch.setenv(USE_MXFP4_FP8_ENV, "1")
+    assert fmi.fused_act_quant_applies_swiglu_limit("silu", recipe)
+
+    seed_everything(7)
+    e, topk = 4, 2
+    data_dtype, _ = RECIPE_TO_DTYPE[recipe]
+    data_factor = 1.0 / math.sqrt(k)
+    x = torch.randn((m, k), device=DEVICE, dtype=torch.float32) * data_factor
+    w13 = torch.randn(
+        (e, 2 * n, k), device=DEVICE, dtype=torch.float32) * data_factor
+    w2 = torch.randn(
+        (e, k, n), device=DEVICE, dtype=torch.float32) * data_factor
+    if recipe == "fp8block":
+        w13_scales = torch.rand((e, 2 * n // 128, k // 128),
+                                device=DEVICE) * 0.01 + 0.01
+        w2_scales = torch.rand((e, k // 128, n // 128),
+                               device=DEVICE) * 0.005 + 0.005
+        w13, w2 = w13.to(data_dtype), w2.to(data_dtype)
+    else:
+        w_recipe = "mxfp8" if recipe == "mxfp8" else "mxfp4"
+        w13, w13_scales = quant_mxfp_weight(w13, w_recipe)
+        w2, w2_scales = quant_mxfp_weight(w2, w_recipe)
+    w13_bias = torch.randn((e, 2 * n), device=DEVICE) / 16
+    w2_bias = torch.randn((e, k), device=DEVICE) / 16
+    scores = torch.randn((m, e), device=DEVICE, dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)
+    # vLLM quantizes bf16 activations, and the MX quant kernels writing e8m0
+    # scales only take 16-bit input.
+    hidden_states, a1q_scale = quant_act_xpu(
+        _to_kernel(x).to(torch.bfloat16), recipe)
+
+    def _run(limit):
+        moe = XpuFusedMoe(w13=_to_kernel(w13),
+                          w13_scales=_to_kernel(w13_scales),
+                          w13_bias=_to_kernel(w13_bias),
+                          w2=_to_kernel(w2),
+                          w2_scales=_to_kernel(w2_scales),
+                          w2_bias=_to_kernel(w2_bias),
+                          n_experts_per_token=topk,
+                          activation="silu",
+                          num_experts=e,
+                          gemm1_clamp_limit=limit,
+                          is_mxfp8=(recipe == "mxfp8"),
+                          is_mxfp4=(recipe in ("mxfp4", "mxfp4_fp8")),
+                          is_block_fp8=(recipe == "fp8block"))
+        assert moe.recipe == recipe
+        out = torch.empty((m, k), dtype=torch.float32, device=KERNEL_DEVICE)
+        moe.apply(output=out,
+                  hidden_states=hidden_states,
+                  topk_weights=_to_kernel(topk_weights),
+                  topk_ids=_to_kernel(topk_ids),
+                  a1q_scale=a1q_scale)
+        return out
+
+    fused = _run(gemm1_clamp_limit)
+    unclamped = _run(None)
+    with monkeypatch.context() as mp:
+        mp.setattr(fmi, "fused_act_quant_applies_swiglu_limit",
+                   lambda *args: False)
+        eager = _run(gemm1_clamp_limit)
+
+    torch.testing.assert_close(fused, eager, atol=0, rtol=0)
+    assert not torch.equal(fused, unclamped), \
+        "the limit should clamp part of gemm1's output"

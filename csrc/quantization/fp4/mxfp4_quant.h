@@ -6,10 +6,12 @@
 #include <type_traits>
 
 #include "quantization/moe_scale_layout.h"
+#include "quantization/swiglu_limit.h"
 #include "quantization/utils.h"
 
 namespace vllm {
 namespace mxfp4 {
+
 // Maximum representable FP4 E2M1 value.
 static constexpr float FP4_MAX = 6.0f;
 
@@ -177,6 +179,8 @@ class per_token_group_quant_mxfp4_vec_kernel {
   const int num_rows;
   const int rows_per_wg;
   MoEScaleLayout moe_layout;
+  // Only read with FUSE_SILU_MUL; kSwigluLimitDisabled turns it off.
+  float swiglu_limit;
 
  public:
   per_token_group_quant_mxfp4_vec_kernel(
@@ -190,7 +194,8 @@ class per_token_group_quant_mxfp4_vec_kernel {
       const int64_t scale_stride_group_,
       const int num_rows_,
       const int rows_per_wg_,
-      MoEScaleLayout moe_layout_ = {})
+      MoEScaleLayout moe_layout_ = {},
+      float swiglu_limit_ = kSwigluLimitDisabled)
       : out(out_),
         scale(scale_),
         input(input_),
@@ -201,7 +206,8 @@ class per_token_group_quant_mxfp4_vec_kernel {
         scale_stride_group(scale_stride_group_),
         num_rows(num_rows_),
         rows_per_wg(rows_per_wg_),
-        moe_layout(moe_layout_) {}
+        moe_layout(moe_layout_),
+        swiglu_limit(swiglu_limit_) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(32)]] (sycl::nd_item<1> item) const {
@@ -222,9 +228,10 @@ class per_token_group_quant_mxfp4_vec_kernel {
     // loads when a row is narrower than a sub-group. Under FLAT_GROUPS a
     // 32-element group is itself treated as a row.
     const int stride = FLAT_GROUPS ? 1 : local_range / rows_per_wg;
-    const int row_idx = FLAT_GROUPS
-        ? static_cast<int>(item.get_global_id(0))
-        : static_cast<int>(item.get_group(0)) * rows_per_wg + tid / stride;
+    const int row_idx =
+        FLAT_GROUPS
+            ? static_cast<int>(item.get_global_id(0))
+            : static_cast<int>(item.get_group(0)) * rows_per_wg + tid / stride;
     const int t0 = FLAT_GROUPS ? 0 : tid % stride;
     if (row_idx >= num_rows) return;
 
@@ -235,8 +242,7 @@ class per_token_group_quant_mxfp4_vec_kernel {
         static_cast<int64_t>(width) * (FUSE_SILU_MUL ? 2 : 1);
     const scalar_t* row_input =
         input + static_cast<int64_t>(row_idx) * row_stride;
-    uint8_t* row_output =
-        out + static_cast<int64_t>(row_idx) * (width / 2);
+    uint8_t* row_output = out + static_cast<int64_t>(row_idx) * (width / 2);
     const auto* vin =
         reinterpret_cast<const vec_n_t<scalar_t, VEC>*>(row_input);
     auto* vout = reinterpret_cast<vec_n_t<uint8_t, OUT_VEC>*>(row_output);
@@ -266,12 +272,19 @@ class per_token_group_quant_mxfp4_vec_kernel {
             for (int k = 0; k < VEC; ++k) {
               // Mirror activation.cpp's silu_and_mul rounding exactly so the
               // fused path is bit-identical to running the two kernels.
-              const scalar_t g = v[j].val[k];
-              const scalar_t sg = static_cast<scalar_t>(
-                  static_cast<float>(g) /
-                  (1.0f + sycl::exp(-static_cast<float>(g))));
-              const float f =
-                  static_cast<float>(static_cast<scalar_t>(sg * u[j].val[k]));
+              // The limit is pre-rounded to scalar_t, so the clamped values
+              // are exact in scalar_t and can stay in float. Clamping against
+              // kSwigluLimitDisabled (+inf) is a no-op.
+              const float g = swiglu_clamp_gate(
+                  static_cast<float>(v[j].val[k]), swiglu_limit);
+              const float up = swiglu_clamp_up(
+                  static_cast<float>(u[j].val[k]), swiglu_limit);
+              const scalar_t sg =
+                  static_cast<scalar_t>(g / (1.0f + sycl::exp(-g)));
+              // The product of two 16-bit floats is exact in float, so this
+              // rounds like sg * up in scalar_t.
+              const float f = static_cast<float>(
+                  static_cast<scalar_t>(static_cast<float>(sg) * up));
               val[j][k] = f;
               lane_absmax = sycl::max(lane_absmax, sycl::fabs(f));
             }

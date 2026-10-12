@@ -38,6 +38,17 @@ MINI_PYTEST_PARAMS = {
     "test_silu_and_mul_per_block_quant_shapes": {
         "device": [XPU_DEVICES[0]],
     },
+    "test_silu_and_mul_per_block_quant_swiglu_limit": {
+        "num_tokens, hidden_size": [(83, 1024)],
+        "quant_dtype, group_size, scale_ue8m0": [
+            (torch.float8_e4m3fn, 32, True),
+            (torch.float8_e4m3fn, 128, False),
+        ],
+        "is_scale_transposed": [False],
+        "dtype": [torch.bfloat16],
+        "swiglu_limit": [3.3],
+        "device": [XPU_DEVICES[0]],
+    },
     "test_silu_and_mul_per_block_quant_edge_cases": {
         "hidden_size": [1024],
         "batch_size": [1],
@@ -253,3 +264,99 @@ def test_silu_and_mul_mxfp8_quant(
     mismatch = (out.cpu().view(torch.uint8)
                 != ref_out.view(torch.uint8)).float().mean().item()
     assert mismatch < 1e-3, f"{mismatch:.2%} of fp8 values differ"
+
+
+def _eager_swiglu_limit(x: torch.Tensor, limit: float) -> torch.Tensor:
+    x = x.clone()
+    hidden = x.shape[-1] // 2
+    x[:, :hidden].clamp_(max=limit)
+    x[:, hidden:].clamp_(min=-limit, max=limit)
+    return x
+
+
+def _run_per_block_quant(x, group_size, quant_dtype, scale_ue8m0,
+                         is_scale_transposed, swiglu_limit):
+    num_tokens, hidden = x.shape[0], x.shape[-1] // 2
+    out = torch.empty((num_tokens, hidden), dtype=quant_dtype)
+    num_groups = hidden // group_size
+    if is_scale_transposed:
+        scales = torch.empty((num_groups, num_tokens), dtype=torch.float32).t()
+    else:
+        scales = torch.empty((num_tokens, num_groups), dtype=torch.float32)
+    torch.ops._C.silu_and_mul_per_block_quant(out, x, scales, group_size, None,
+                                              is_scale_transposed,
+                                              scale_ue8m0, None, swiglu_limit)
+    return out, scales
+
+
+# group_size 32 + ue8m0 + fp8 takes the dedicated MXFP8 kernel, the rest the
+# generic per-block kernel. 0.1 and 3.3 are not representable in fp16/bf16,
+# and 1e-8 rounds to 0 in fp16, which must still clamp (to 0).
+@pytest.mark.parametrize("num_tokens, hidden_size", [(1, 256), (83, 1024),
+                                                     (128, 5120)])
+@pytest.mark.parametrize("quant_dtype, group_size, scale_ue8m0", [
+    (torch.float8_e4m3fn, 32, True),
+    (torch.float8_e4m3fn, 128, False),
+    (torch.float8_e4m3fn, 128, True),
+    (torch.int8, 128, False),
+])
+@pytest.mark.parametrize("is_scale_transposed", IS_SCALE_TRANSPOSED)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("swiglu_limit", [1e-8, 0.1, 1.0, 3.3, 7.0, 10.0])
+@pytest.mark.parametrize("device", XPU_DEVICES[:1])
+@torch.inference_mode()
+def test_silu_and_mul_per_block_quant_swiglu_limit(
+    num_tokens: int,
+    hidden_size: int,
+    quant_dtype: torch.dtype,
+    group_size: int,
+    scale_ue8m0: bool,
+    is_scale_transposed: bool,
+    dtype: torch.dtype,
+    swiglu_limit: float,
+    device: str,
+) -> None:
+    """The in-kernel SwiGLU limit is bitwise identical to the eager clamp."""
+    seed_everything(0)
+    torch.set_default_device(device)
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype) * 8.0
+    ref_out, ref_scales = _run_per_block_quant(
+        _eager_swiglu_limit(x, swiglu_limit), group_size, quant_dtype,
+        scale_ue8m0, is_scale_transposed, None)
+    out, scales = _run_per_block_quant(x, group_size, quant_dtype,
+                                       scale_ue8m0, is_scale_transposed,
+                                       swiglu_limit)
+    torch.testing.assert_close(scales, ref_scales, atol=0, rtol=0)
+    torch.testing.assert_close(out.view(torch.uint8),
+                               ref_out.view(torch.uint8),
+                               atol=0,
+                               rtol=0)
+
+
+@pytest.mark.parametrize("swiglu_limit", [None, 0.0])
+@torch.inference_mode()
+def test_silu_and_mul_per_block_quant_swiglu_limit_disabled(swiglu_limit):
+    seed_everything(0)
+    torch.set_default_device(XPU_DEVICES[0])
+    x = torch.randn(16, 512, dtype=torch.bfloat16) * 8.0
+    ref_out, ref_scales = _run_per_block_quant(x, 128, torch.float8_e4m3fn,
+                                               False, False, None)
+    out, scales = _run_per_block_quant(x, 128, torch.float8_e4m3fn, False,
+                                       False, swiglu_limit)
+    torch.testing.assert_close(scales, ref_scales, atol=0, rtol=0)
+    torch.testing.assert_close(out.view(torch.uint8),
+                               ref_out.view(torch.uint8),
+                               atol=0,
+                               rtol=0)
+
+
+@pytest.mark.parametrize("swiglu_limit", [-1.0, float("nan")])
+@pytest.mark.parametrize("num_tokens", [0, 4])
+@torch.inference_mode()
+def test_silu_and_mul_per_block_quant_swiglu_limit_invalid(
+        swiglu_limit, num_tokens):
+    torch.set_default_device(XPU_DEVICES[0])
+    x = torch.randn(num_tokens, 256, dtype=torch.bfloat16)
+    with pytest.raises(RuntimeError, match="swiglu_limit"):
+        _run_per_block_quant(x, 128, torch.float8_e4m3fn, False, False,
+                             swiglu_limit)

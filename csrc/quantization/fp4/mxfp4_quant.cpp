@@ -11,6 +11,7 @@
 #include "dispatch_utils.h"
 #include "ops.h"
 #include "utils.h"
+#include "quantization/swiglu_limit.h"
 
 #include "quantization/fp4/mxfp4_quant.h"
 
@@ -307,9 +308,11 @@ void per_token_group_quant_mxfp4(
                     (static_cast<int64_t>(num_groups) + FLAT_WG_SIZE - 1) /
                     FLAT_WG_SIZE;
                 queue.submit([&](sycl::handler& cgh) {
-                  auto kernel = vllm::mxfp4::
-                      per_token_group_quant_mxfp4_vec_kernel<
-                          scalar_t, CPT, true>(
+                  auto kernel =
+                      vllm::mxfp4::per_token_group_quant_mxfp4_vec_kernel<
+                          scalar_t,
+                          CPT,
+                          true>(
                           output_q.data_ptr<uint8_t>(),
                           scale_ptr,
                           input.data_ptr<scalar_t>(),
@@ -443,7 +446,8 @@ void silu_and_mul_per_token_group_quant_mxfp4(
     torch::Tensor& output_s,
     int64_t group_size,
     double eps,
-    const c10::optional<torch::Tensor>& expert_scale_desc) {
+    const c10::optional<torch::Tensor>& expert_scale_desc,
+    std::optional<double> swiglu_limit) {
   TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
   TORCH_CHECK(output_q.is_contiguous(), "output_q must be contiguous");
   TORCH_CHECK(
@@ -452,6 +456,7 @@ void silu_and_mul_per_token_group_quant_mxfp4(
   TORCH_CHECK(output_s.dim() == 2, "output_s must be 2-D");
   TORCH_CHECK(
       output_q.scalar_type() == at::ScalarType::Byte, "output_q must be uint8");
+  const float limit = vllm::swiglu_limit_value(swiglu_limit);
   TORCH_CHECK(
       input.size(1) % 2 == 0,
       "input last dim must be even, got ",
@@ -529,7 +534,8 @@ void silu_and_mul_per_token_group_quant_mxfp4(
           }
         }
         const int threads_per_row = num_chunks / cpt;
-        const int rows_per_wg = threads_per_row >= 32 ? 1 : 32 / threads_per_row;
+        const int rows_per_wg =
+            threads_per_row >= 32 ? 1 : 32 / threads_per_row;
         int64_t wg_size = std::min<int64_t>(
             ((static_cast<int64_t>(threads_per_row) * rows_per_wg + 31) / 32) *
                 32,
@@ -554,7 +560,8 @@ void silu_and_mul_per_token_group_quant_mxfp4(
                 scale_stride_group,
                 static_cast<int>(num_rows),
                 rows_per_wg,
-                moe_layout);
+                moe_layout,
+                vllm::swiglu_limit_as<scalar_t>(limit));
             cgh.parallel_for(
                 sycl::nd_range<1>(num_wgs * wg_size, wg_size), kernel);
           });

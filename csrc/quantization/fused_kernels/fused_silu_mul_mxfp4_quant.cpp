@@ -12,6 +12,7 @@
 #include "utils.h"
 #include "quantization/fp4/mxfp4_quant.h"
 #include "quantization/mx_quant_utils.h"
+#include "quantization/swiglu_limit.h"
 #include "quantization/utils.h"
 
 namespace vllm {
@@ -29,14 +30,16 @@ class silu_and_mul_mxfp4_quant_kernel {
       const int num_vecs_,
       const int vecs_per_row_,
       const float epsilon_,
-      const int num_tokens_)
+      const int num_tokens_,
+      const float swiglu_limit_ = kSwigluLimitDisabled)
       : input(input_),
         num_vecs(num_vecs_),
         vecs_per_row(vecs_per_row_),
         out(out_),
         scales(scales_),
         epsilon(epsilon_),
-        num_tokens(num_tokens_) {}
+        num_tokens(num_tokens_),
+        swiglu_limit(swiglu_limit_) {}
 
   void operator()
       [[sycl::reqd_sub_group_size(32),
@@ -57,8 +60,12 @@ class silu_and_mul_mxfp4_quant_kernel {
       const vec_n_t<scalar_t, VEC> u = vin[gate + vecs_per_row];
 #pragma unroll
       for (int k = 0; k < VEC; ++k) {
-        const float gf = static_cast<float>(g.val[k]);
-        const float uf = static_cast<float>(u.val[k]);
+        float gf = static_cast<float>(g.val[k]);
+        float uf = static_cast<float>(u.val[k]);
+        if (swiglu_limit < kSwigluLimitDisabled) {
+          gf = swiglu_clamp_gate(gf, swiglu_limit);
+          uf = swiglu_clamp_up(uf, swiglu_limit);
+        }
         res[k] = (gf / (1.0f + sycl::exp(-gf))) * uf;
         absmax = sycl::fmax(absmax, sycl::fabs(res[k]));
       }
@@ -88,6 +95,7 @@ class silu_and_mul_mxfp4_quant_kernel {
   float* __restrict__ scales;
   const float epsilon;
   const int num_tokens;
+  const float swiglu_limit;
 };
 
 }  // namespace vllm
@@ -97,7 +105,8 @@ void silu_and_mul_mxfp4_quant(
     torch::Tensor const& input,
     torch::Tensor& scales,
     int64_t group_size,
-    double eps) {
+    double eps,
+    std::optional<double> swiglu_limit) {
   TORCH_CHECK(
       input.dtype() == torch::kFloat16 || input.dtype() == torch::kBFloat16,
       "input must be float16 or bfloat16");
@@ -129,6 +138,7 @@ void silu_and_mul_mxfp4_quant(
       scales.size(0) == num_tokens && scales.size(1) == num_groups,
       "scales must have logical shape [num_tokens, num_groups]");
 
+  const float limit = vllm::swiglu_limit_value(swiglu_limit);
   if (num_tokens == 0) return;
 
   const bool is_scale_transposed = scales.stride(0) < scales.stride(1);
@@ -167,7 +177,8 @@ void silu_and_mul_mxfp4_quant(
                     static_cast<int>(num_vecs),
                     static_cast<int>(hidden_size / vllm::mx::kVec),
                     static_cast<float>(eps),
-                    static_cast<int>(num_tokens)));
+                    static_cast<int>(num_tokens),
+                    vllm::swiglu_limit_as<scalar_t>(limit)));
           });
         };
         if (is_scale_transposed) {

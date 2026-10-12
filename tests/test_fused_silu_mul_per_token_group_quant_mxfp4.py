@@ -142,3 +142,67 @@ def test_matches_separate_act_and_quant_moe_layout(dtype):
                                atol=0,
                                rtol=0)
     torch.testing.assert_close(out_q, ref_q, atol=0, rtol=0)
+
+
+def _eager_swiglu_limit(x, limit):
+    x = x.clone()
+    inter_size = x.shape[1] // 2
+    x[:, :inter_size].clamp_(max=limit)
+    x[:, inter_size:].clamp_(min=-limit, max=limit)
+    return x
+
+
+# 0.1 and 3.3 are not representable in half/bf16, so the kernel must clamp to
+# the limit rounded to the activation dtype, like the eager clamp_ does. 1e-8
+# rounds to 0 in half, which must still clamp (to 0).
+@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("swiglu_limit", [1e-8, 0.1, 3.3, 7.0])
+@pytest.mark.parametrize("moe_layout", [False, True])
+@torch.inference_mode()
+def test_swiglu_limit_matches_eager_clamp(shape, dtype, swiglu_limit,
+                                          moe_layout):
+    torch.manual_seed(0)
+    num_tokens, inter_size = shape
+    scale_k = inter_size // MXFP4_GROUP_SIZE
+    x = torch.randn(num_tokens,
+                    2 * inter_size,
+                    dtype=dtype,
+                    device=DEVICE) * 8.0
+
+    desc = None
+    if moe_layout:
+        # One expert holding every row.
+        padded = (num_tokens + 3) // 4 * 4
+        desc = torch.tensor([[0, num_tokens], [0, padded]],
+                            dtype=torch.int32,
+                            device=DEVICE)
+
+    def _alloc_scale():
+        if moe_layout:
+            return torch.zeros(
+                (mxfp_scale_padded_rows(num_tokens, 1), scale_k),
+                dtype=torch.float8_e8m0fnu,
+                device=DEVICE)
+        return torch.empty((num_tokens, scale_k),
+                           dtype=torch.float32,
+                           device=DEVICE)
+
+    def _run(inp, limit):
+        out_s = _alloc_scale()
+        out_q = torch.empty(num_tokens,
+                            inter_size // 2,
+                            dtype=torch.uint8,
+                            device=DEVICE)
+        torch.ops._C.silu_and_mul_per_token_group_quant_mxfp4(
+            inp, out_q, out_s, MXFP4_GROUP_SIZE, 1e-10, desc, limit)
+        return out_q, out_s
+
+    ref_q, ref_s = _run(_eager_swiglu_limit(x, swiglu_limit), None)
+    out_q, out_s = _run(x, swiglu_limit)
+
+    torch.testing.assert_close(out_s.view(torch.uint8),
+                               ref_s.view(torch.uint8),
+                               atol=0,
+                               rtol=0)
+    torch.testing.assert_close(out_q, ref_q, atol=0, rtol=0)

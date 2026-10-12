@@ -228,8 +228,12 @@ def moe_activation_op(activation,
     return op
 
 
-def _fused_silu_mul_per_block_quant(gate_up, group_size, scales, scale_ue8m0,
-                                    expert_scale_desc):
+def _fused_silu_mul_per_block_quant(gate_up,
+                                    group_size,
+                                    scales,
+                                    scale_ue8m0,
+                                    expert_scale_desc,
+                                    swiglu_limit=None):
     inter_size = gate_up.shape[-1] // 2
     x_q = torch.empty((gate_up.shape[0], inter_size),
                       device=gate_up.device,
@@ -243,6 +247,7 @@ def _fused_silu_mul_per_block_quant(gate_up, group_size, scales, scale_ue8m0,
         False,  # is_scale_transposed
         scale_ue8m0,
         expert_scale_desc,
+        swiglu_limit,
     )
     return x_q
 
@@ -250,7 +255,8 @@ def _fused_silu_mul_per_block_quant(gate_up, group_size, scales, scale_ue8m0,
 def _fused_silu_mul_quant_mxfp8_xpu(gate_up,
                                     expert_scale_desc=None,
                                     scale_rows=0,
-                                    static_scale=None):
+                                    static_scale=None,
+                                    swiglu_limit=None):
     MXFP8_BLOCK_SIZE = 32
     inter_size = gate_up.shape[-1] // 2
     assert inter_size % MXFP8_BLOCK_SIZE == 0
@@ -258,7 +264,7 @@ def _fused_silu_mul_quant_mxfp8_xpu(gate_up,
     x_s = _alloc_mx_act_scale(gate_up, inter_size // MXFP8_BLOCK_SIZE,
                               expert_scale_desc, scale_rows)
     x_q = _fused_silu_mul_per_block_quant(gate_up, MXFP8_BLOCK_SIZE, x_s, True,
-                                          expert_scale_desc)
+                                          expert_scale_desc, swiglu_limit)
     if expert_scale_desc is None:
         x_s = x_s.to(torch.float8_e8m0fnu)
     return x_q, x_s
@@ -267,21 +273,24 @@ def _fused_silu_mul_quant_mxfp8_xpu(gate_up,
 def _fused_silu_mul_quant_fp8block_xpu(gate_up,
                                        expert_scale_desc=None,
                                        scale_rows=0,
-                                       static_scale=None):
+                                       static_scale=None,
+                                       swiglu_limit=None):
     assert expert_scale_desc is None, \
         "fp8block activation scales do not use the padded per-expert layout"
     inter_size = gate_up.shape[-1] // 2
     x_s = torch.empty((gate_up.shape[0], inter_size // 128),
                       device=gate_up.device,
                       dtype=torch.float32)
-    x_q = _fused_silu_mul_per_block_quant(gate_up, 128, x_s, False, None)
+    x_q = _fused_silu_mul_per_block_quant(gate_up, 128, x_s, False, None,
+                                          swiglu_limit)
     return x_q, x_s
 
 
 def _fused_silu_mul_quant_mxfp4_xpu(gate_up,
                                     expert_scale_desc=None,
                                     scale_rows=0,
-                                    static_scale=None):
+                                    static_scale=None,
+                                    swiglu_limit=None):
     MXFP4_BLOCK_SIZE = 32
     inter_size = gate_up.shape[-1] // 2
     if inter_size % MXFP4_BLOCK_SIZE != 0:
@@ -295,7 +304,8 @@ def _fused_silu_mul_quant_mxfp4_xpu(gate_up,
                               expert_scale_desc, scale_rows)
 
     torch.ops._C.silu_and_mul_per_token_group_quant_mxfp4(
-        gate_up, x_q, x_s, MXFP4_BLOCK_SIZE, 1e-10, expert_scale_desc)
+        gate_up, x_q, x_s, MXFP4_BLOCK_SIZE, 1e-10, expert_scale_desc,
+        swiglu_limit)
 
     x_q = x_q.view(torch.float4_e2m1fn_x2)
     if expert_scale_desc is None:
@@ -327,17 +337,36 @@ _FUSED_ACT_QUANT_KERNELS = {
     ("silu", "fp8"): _fused_silu_mul_quant_fp8_xpu,
 }
 
+# Fused act+quant kernels that apply the SwiGLU limit themselves (gate clamped
+# from above, up clamped to [-limit, limit]) while reading gate_up.
+_SWIGLU_LIMIT_FUSED = {
+    ("silu", "mxfp8"),
+    ("silu", "mxfp4_fp8"),
+    ("silu", "fp8block"),
+    ("silu", "mxfp4"),
+}
+
+
+def fused_act_quant_applies_swiglu_limit(activation, recipe) -> bool:
+    return (canonical_activation(activation), recipe) in _SWIGLU_LIMIT_FUSED
+
 
 def fused_act_quant_xpu(activation,
                         gate_up,
                         recipe,
                         expert_scale_desc=None,
                         scale_rows=0,
-                        static_scale=None):
+                        static_scale=None,
+                        swiglu_limit=None):
     fn = _FUSED_ACT_QUANT_KERNELS.get(
         (canonical_activation(activation), recipe))
     if fn is None:
         return None
+    if swiglu_limit is not None:
+        assert fused_act_quant_applies_swiglu_limit(activation, recipe), \
+            f"the fused {activation}/{recipe} act+quant kernel cannot clamp"
+        return fn(gate_up, expert_scale_desc, scale_rows, static_scale,
+                  swiglu_limit=swiglu_limit)
     return fn(gate_up, expert_scale_desc, scale_rows, static_scale)
 
 
