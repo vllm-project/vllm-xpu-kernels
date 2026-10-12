@@ -496,6 +496,22 @@ struct FMHAFwdMainloop<
       const float scale_k = *static_cast<const float*>(params.scale_k);
       scale_v = *static_cast<const float*>(params.scale_v);
       effective_scale = params.scale * ElementS(scale_k);
+#ifdef CUTE_XE_E4M3_HALF_UNSCALED_ACTIVE
+      // The fast e4m3 -> half reorder yields value * 2^-8; fold the 256 back
+      // into the same two scales.
+      if constexpr (
+          std::is_same_v<ElementQ, half_t> &&
+          std::is_same_v<ElementK, float_e4m3_t>) {
+        effective_scale *= ElementS(256.f);
+      }
+      if constexpr (
+          std::is_same_v<ElementQ, half_t> &&
+          std::is_same_v<
+              typename TensorV::engine_type::value_type,
+              float_e4m3_t>) {
+        scale_v *= 256.f;
+      }
+#endif
     }
 
     [[maybe_unused]] auto route_current = [&](int cur) -> int {
@@ -1200,6 +1216,22 @@ struct DecodeFwdMainloop<
       const float scale_k = *static_cast<const float*>(params.scale_k);
       scale_v = *static_cast<const float*>(params.scale_v);
       effective_scale = params.scale * ElementS(scale_k);
+#ifdef CUTE_XE_E4M3_HALF_UNSCALED_ACTIVE
+      // The fast e4m3 -> half reorder yields value * 2^-8; fold the 256 back
+      // into the same two scales.
+      if constexpr (
+          std::is_same_v<ElementQ, half_t> &&
+          std::is_same_v<ElementK, float_e4m3_t>) {
+        effective_scale *= ElementS(256.f);
+      }
+      if constexpr (
+          std::is_same_v<ElementQ, half_t> &&
+          std::is_same_v<
+              typename TensorV::engine_type::value_type,
+              float_e4m3_t>) {
+        scale_v *= 256.f;
+      }
+#endif
     }
 
     /* Main loop, blocked in k. */
