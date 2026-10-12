@@ -4,9 +4,9 @@ import pytest
 import torch
 
 from tests.ops.reduce_op import ReduceMax, ReduceMin
-from tests.utils import opcheck, seed_everything
+from tests.utils import REF_DEVICE, opcheck, seed_everything
 
-DEVICE = "cpu"
+DEVICE = REF_DEVICE
 KERNEL_DEVICE = "xpu"
 
 
@@ -44,14 +44,14 @@ def test_reduce_max(
 ) -> None:
     seed_everything(seed)
     torch.xpu.set_device(device)
-    x = torch.randn(num_tokens, d, dtype=dtype)
+    x = torch.randn(num_tokens, d, dtype=dtype, device=DEVICE)
     layer = ReduceMax()
     fn = torch.ops._xpu_C.reduce_max_row_wise
     ref_values, ref_indices = layer.forward_native(x)
     layer_k = layer.to(KERNEL_DEVICE)
     values, indices = layer_k(_to_kernel(x))
-    values = values.cpu()
-    indices = indices.cpu()
+    values = values.to(DEVICE)
+    indices = indices.to(DEVICE)
 
     torch.testing.assert_close(values, ref_values)
     torch.testing.assert_close(indices, ref_indices)
@@ -76,14 +76,14 @@ def test_reduce_min(
 ) -> None:
     seed_everything(seed)
     torch.xpu.set_device(device)
-    x = torch.randn(num_tokens, d, dtype=dtype)
+    x = torch.randn(num_tokens, d, dtype=dtype, device=DEVICE)
     layer = ReduceMin()
     fn = torch.ops._xpu_C.reduce_min_row_wise
     ref_values, ref_indices = layer.forward_native(x)
     layer_k = layer.to(KERNEL_DEVICE)
     values, indices = layer_k(_to_kernel(x))
-    values = values.cpu()
-    indices = indices.cpu()
+    values = values.to(DEVICE)
+    indices = indices.to(DEVICE)
 
     torch.testing.assert_close(values, ref_values)
     torch.testing.assert_close(indices, ref_indices)
@@ -105,7 +105,7 @@ def test_reduce_min(
 @torch.inference_mode()
 def test_reduce_vectorized_multirow(batch, d, dtype, op, ref):
     seed_everything(0)
-    x = torch.randn(batch, d, dtype=dtype)
+    x = torch.randn(batch, d, dtype=dtype, device=DEVICE)
     # Duplicate extrema in each row to exercise the lowest-index tie rule.
     extreme = 10 if op == "reduce_max_row_wise" else -10
     x[:, 0] = extreme
@@ -117,5 +117,5 @@ def test_reduce_vectorized_multirow(batch, d, dtype, op, ref):
     indices = torch.empty((batch, 1), device=KERNEL_DEVICE, dtype=torch.int32)
     getattr(torch.ops._xpu_C, op)(values, indices, x_xpu)
 
-    torch.testing.assert_close(values.cpu(), ref_values)
-    torch.testing.assert_close(indices.cpu(), ref_indices.to(torch.int32))
+    torch.testing.assert_close(values.to(DEVICE), ref_values)
+    torch.testing.assert_close(indices.to(DEVICE), ref_indices.to(torch.int32))

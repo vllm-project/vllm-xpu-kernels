@@ -4,9 +4,9 @@ import pytest
 import torch
 
 from tests.ops.scatter_op import scatter_row, scatter_row_native
-from tests.utils import opcheck, seed_everything
+from tests.utils import REF_DEVICE, opcheck, seed_everything
 
-DEVICE = "cpu"
+DEVICE = REF_DEVICE
 KERNEL_DEVICE = "xpu"
 
 
@@ -48,11 +48,11 @@ def test_scatter_row(
 ) -> None:
     seed_everything(seed)
     torch.xpu.set_device(device)
-    src = torch.randn(num_tokens, d, dtype=dtype)
+    src = torch.randn(num_tokens, d, dtype=dtype, device=DEVICE)
     # A permutation guarantees every dst row is written exactly once, so the
     # result is well-defined regardless of scatter order.
-    index = torch.randperm(num_tokens, dtype=torch.int64)
-    dst = torch.zeros(num_tokens, d, dtype=dtype)
+    index = torch.randperm(num_tokens, dtype=torch.int64, device=DEVICE)
+    dst = torch.zeros(num_tokens, d, dtype=dtype, device=DEVICE)
 
     ref_out = scatter_row_native(dst, src, index)
 
@@ -60,7 +60,7 @@ def test_scatter_row(
     src_k = _to_kernel(src)
     index_k = _to_kernel(index)
     out = scatter_row(dst_k, src_k, index_k)
-    out = out.cpu()
+    out = out.to(DEVICE)
 
     torch.testing.assert_close(out, ref_out)
 

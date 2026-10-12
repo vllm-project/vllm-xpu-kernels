@@ -3,10 +3,10 @@ import pytest
 import torch
 
 from tests.ops.softmax_op import Softmax
-from tests.utils import opcheck, seed_everything
+from tests.utils import REF_DEVICE, opcheck, seed_everything
 
 
-DEVICE = "cpu"
+DEVICE = REF_DEVICE
 KERNEL_DEVICE = "xpu"
 
 
@@ -44,13 +44,13 @@ def test_softmax(
 ) -> None:
     seed_everything(seed)
     torch.xpu.set_device(device)
-    x = torch.randn(num_tokens, d, dtype=dtype)
+    x = torch.randn(num_tokens, d, dtype=dtype, device=DEVICE)
     layer = Softmax()
     fn = torch.ops._xpu_C.softmax
     ref_out = layer.forward_native(x)
     layer_k = layer.to(KERNEL_DEVICE)
     out = layer_k(_to_kernel(x))
-    out = out.cpu()
+    out = out.to(DEVICE)
 
     torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-3)
 
