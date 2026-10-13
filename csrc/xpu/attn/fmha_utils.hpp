@@ -72,8 +72,8 @@ struct chunk_policy_head80 {
   using ShapeQK = Shape<_128, _32, _16>;
   using ShapePV = Shape<_128, _16, _32>;
 #else
-  using ShapeQK = Shape<_128, _64, _16>;
-  using ShapePV = Shape<_128, _16, _64>;
+  using ShapeQK = Shape<_128, _32, _16>;
+  using ShapePV = Shape<_128, _32, _32>;
 #endif
   using ShapeOut = Shape<_128, _80>;
   using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
@@ -190,10 +190,11 @@ struct chunk_policy_head80_b16 {
   // The XE3 mainloop requires the head size to be a multiple of the QK d-tile
   // (static DTiles), so use a 16-wide d-tile that divides 80.
   using ShapeQK = Shape<_128, _16, _16>;
-#else
-  using ShapeQK = Shape<_128, _16, _32>;
-#endif
   using ShapePV = Shape<_128, _16, _16>;
+#else
+  using ShapeQK = Shape<_128, _16, _16>;
+  using ShapePV = Shape<_128, _32, _16>;
+#endif
   using ShapeOut = Shape<_128, _80>;
   using SubgroupLayoutQK = Layout<Shape<_8, _1, _1>>;
 };
