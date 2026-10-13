@@ -30,6 +30,64 @@ MINI_PYTEST_PARAMS = {
 }
 
 
+@pytest.mark.parametrize("num_experts,num_tokens", [(32, 8), (256, 8),
+                                                    (256, 1024)])
+@pytest.mark.parametrize("use_expert_map", [False, True])
+def test_moe_align_scatter_masks_invalid_routes(num_experts, num_tokens,
+                                                use_expert_map):
+    """Test the scatter_idx output of moe_align_block_size.
+
+    scatter_idx is an int32 [numel, 1] tensor holding the original routed row
+    index for valid routes and -1 for invalid ones (negative topk_id,
+    out-of-range topk_id, or -- with an expert_map -- an expert not owned by
+    this rank). Enabling scatter_idx must not change sorted_ids/expert_ids/
+    num_tokens_post_pad versus the baseline call.
+    """
+    topk_ids = torch.arange(num_tokens * 4, device="xpu").reshape(-1, 4)
+    topk_ids = (topk_ids % num_experts).to(torch.int32)
+    topk_ids[0] = torch.tensor([-1, num_experts, 0, 1],
+                               device="xpu",
+                               dtype=torch.int32)
+    expert_map = None
+    valid = (topk_ids >= 0) & (topk_ids < num_experts)
+    if use_expert_map:
+        expert_map = torch.full((num_experts, ),
+                                -1,
+                                dtype=torch.int32,
+                                device="xpu")
+        expert_map[::2] = torch.arange(num_experts // 2,
+                                       device="xpu",
+                                       dtype=torch.int32)
+        valid &= topk_ids % 2 == 0
+
+    sorted_ids, expert_ids, num_padded, scatter_idx = moe_align_block_size(
+        topk_ids,
+        32,
+        num_experts,
+        expert_map,
+        ignore_invalid_experts=True,
+        return_scatter_idx=True,
+    )
+    expected = torch.arange(topk_ids.numel(),
+                            device="xpu",
+                            dtype=torch.int32)
+    expected[~valid.flatten()] = -1
+    torch.testing.assert_close(scatter_idx, expected[:, None])
+    active_sorted = sorted_ids[:num_padded.item()]
+    active_sorted = active_sorted[active_sorted < topk_ids.numel()]
+    torch.testing.assert_close(active_sorted.sort().values,
+                               expected[expected >= 0])
+
+    baseline = moe_align_block_size(topk_ids,
+                                    32,
+                                    num_experts,
+                                    expert_map,
+                                    ignore_invalid_experts=True)
+    assert len(baseline) == 3
+    torch.testing.assert_close(num_padded, baseline[2])
+    torch.testing.assert_close(expert_ids, baseline[1])
+
+
 def _group_tokens_by_expert(
     sorted_ids: torch.Tensor,
     expert_ids: torch.Tensor,
@@ -545,6 +603,24 @@ def test_moe_align_block_size_opcheck(ep_size):
             expert_ids,
             num_tokens_post_pad,
             expert_map,
+            None,
+        ),
+    )
+
+    scatter_idx = torch.empty((topk_ids.numel(), 1),
+                              dtype=torch.int32,
+                              device=topk_ids.device)
+    opcheck(
+        torch.ops._moe_C.moe_align_block_size,
+        (
+            topk_ids,
+            num_experts,
+            block_size,
+            sorted_ids,
+            expert_ids,
+            num_tokens_post_pad,
+            expert_map,
+            scatter_idx,
         ),
     )
 
