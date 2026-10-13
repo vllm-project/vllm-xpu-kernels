@@ -3,7 +3,7 @@
  *
  * Fused routed + shared-expert MoE forward for small-M decode (Qwen3.5/3.6-A3B
  * per-tensor FP8 recipe: FP16/BF16 activations, fp8-e4m3 per-expert weights
- *with fp32 scalar scales, SiLU, one sigmoid-gated shared expert).
+ * with fp32 scalar scales, SiLU, one sigmoid-gated shared expert).
  *
  * One op submits six kernels with no per-call allocation:
  *   1. map     : topk_ids -> compact per-expert tile map, route->row
@@ -18,18 +18,25 @@
  *
  * Output is the per-rank partial sum (TP all-reduce is left to the caller).
  *
- * Weight layouts (all contiguous):
- *   w13        [E, H, 2I] fp8, w13_scale [E] fp32   (gate cols [0,I), up
- *[I,2I)) w2         [E, I, H]  fp8, w2_scale  [E] fp32 shared_w13 [H, 2I] fp8,
- *shared_w13_scale [1] fp32 shared_w2  [I, H]     fp8, shared_w2_scale  [1] fp32
+ * H and I are positive multiples of 32, so compact routed row bases
+ * remain 64-byte aligned for block-2D copies.
+ * Weight layouts (all contiguous, with 64-byte-aligned matrix bases):
+ *   w13        [E, H, 2I] fp8, w13_scale [E] fp32
+ *              (gate cols [0,I), up cols [I,2I))
+ *   w2         [E, I, H] fp8, w2_scale [E] fp32
+ *   shared_w13 [H, 2I] fp8, shared_w13_scale [1] fp32
+ *   shared_w2  [I, H] fp8, shared_w2_scale [1] fp32
  *   shared_gate[H] (or [1, H]) matches the activation dtype
  * ws is a caller-owned uint8 workspace sized by the Python helper
- * (moe_shared_fused_workspace_bytes); the op checks it is large enough.
+ * (moe_shared_fused_workspace_bytes); it must be 64-byte aligned and
+ * disjoint from all other arguments. The op checks these requirements.
  * tile_m selects the GEMM M-tile (kMoeSharedFusedTileM8 or
  * kMoeSharedFusedTileM16); the interface resolves 0 (auto) before calling.
  **************************************************************************************************/
 #include <torch/all.h>
+#include <ATen/MemoryOverlap.h>
 #include <c10/xpu/XPUStream.h>
+#include <cstdint>
 
 #include <cute/tensor.hpp>
 #include <cute/util/compat.hpp>
@@ -60,7 +67,7 @@ constexpr int MAX_R =
 constexpr int GEMM_WG = 64;  // size(mma) for both m_8 and m_16 policies
 constexpr int MAP_WG = 64;
 
-inline bool num_experts_static_ok(int64_t e) { return e <= MAX_E; }
+constexpr int64_t MAX_BLOCK_2D_BYTES = (1 << 24) - 1;
 
 // ---------------------------------------------------------------------------
 // Kernel name tags (unique types per instantiation)
@@ -73,7 +80,7 @@ template <typename ElementA>
 class SpSiluMulName;
 template <typename ElementA>
 class SpFinalizeName;
-template <class Policy, bool SingleGroup, typename ElementA>
+template <class Policy, typename ElementA>
 class SpGemmName;
 
 // ---------------------------------------------------------------------------
@@ -91,7 +98,6 @@ void launch_map_build(
     int top_k,
     int num_experts,
     int tile_m,
-    int umt,
     int32_t* mt_expert,
     int32_t* mt_row_base,
     int32_t* mt_rows,
@@ -117,7 +123,9 @@ void launch_map_build(
           // the naive per-lane rescans of global ids[] serialize one ~600ns
           // memory round-trip per element and cost ~40us at R=16.
           for (int r = lane; r < R; r += MAP_WG) {
-            ids_slm[r] = (int32_t)ids[r];
+            // Check the original width before narrowing int64 IDs.
+            const IDT id = ids[r];
+            ids_slm[r] = (id >= 0 && id < num_experts) ? (int32_t)id : -1;
             // vLLM marks padded tokens with expert ID -1.
             perm_pos[r] = -1;
           }
@@ -262,11 +270,6 @@ class SpGatherLauncher {
 // Kernels 3/5: the specialized grouped-GEMM tile launcher. Reuses the
 // unchanged `MoE::xe_gemm` mainloop; replaces the persistent+atomic
 // scheduler with direct tile-map indexing.
-//   SINGLE_GROUP=false: routed grouped GEMM over the tile map.
-//   SINGLE_GROUP=true : one dense panel (shared expert); A is already
-//                       contiguous, expert id 0, grid = exact tile count.
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 // Merged gemm launcher: routed tiles (direct-indexed map) + shared panel
 // (single group) in ONE grid, ONE submit per gemm stage. The two segments
 // share the same N/K/policy but differ in A/B/D/scale pointers.
@@ -306,7 +309,7 @@ void launch_sp_gemm_merged(
   const int total_wgs = umt * n_tiles + shared_m_tiles * n_tiles;
 
   q.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for<SpGemmName<Policy, false, ElementA>>(
+    cgh.parallel_for<SpGemmName<Policy, ElementA>>(
         sycl::nd_range<3>(
             sycl::range<3>(1, total_wgs, GEMM_WG),
             sycl::range<3>(1, 1, GEMM_WG)),
@@ -600,6 +603,11 @@ void moe_shared_fused_decode_xe2_impl(
           shared_gate.is_contiguous(),
       "shared weights must be contiguous");
   TORCH_CHECK(
+      x.size(1) > 0 && w2.size(1) > 0 && x.size(1) % 32 == 0 &&
+          w2.size(1) % 32 == 0 && x.size(1) <= MAX_BLOCK_2D_BYTES / 2 &&
+          w2.size(1) <= MAX_BLOCK_2D_BYTES / 4,
+      "H and I must be positive multiples of 32 within block-2D limits");
+  TORCH_CHECK(
       w13.size(0) == w2.size(0) && w13.size(1) == x.size(1) &&
           w2.size(2) == x.size(1) && w13.size(2) == 2 * w2.size(1),
       "routed weight shapes must be w13 [E, H, 2I], w2 [E, I, H]");
@@ -609,30 +617,67 @@ void moe_shared_fused_decode_xe2_impl(
           shared_w2.size(0) == w2.size(1) && shared_w2.size(1) == w2.size(2) &&
           shared_gate.numel() == x.size(1),
       "shared weight shapes must be [H, 2I], [I, H] and gate [H]");
-  TORCH_CHECK(
-      x.size(1) % 16 == 0 && w2.size(1) % 8 == 0,
-      "H must be a multiple of 16 and I a multiple of 8");
+  const auto check_alignment =
+      [](const torch::Tensor& tensor, const char* name, uintptr_t bytes) {
+        TORCH_CHECK(
+            reinterpret_cast<uintptr_t>(tensor.data_ptr()) % bytes == 0,
+            name,
+            " must have a ",
+            bytes,
+            "-byte-aligned base address");
+      };
+  check_alignment(x, "x", 64);
+  check_alignment(w13, "w13", 64);
+  check_alignment(w2, "w2", 64);
+  check_alignment(shared_w13, "shared_w13", 64);
+  check_alignment(shared_w2, "shared_w2", 64);
+  check_alignment(shared_gate, "shared_gate", 32);
+  check_alignment(ws, "workspace", 64);
 
+  // Scratch is mutable and must not overlap any user tensor.
+  const torch::Tensor* inputs[] = {
+      &output,
+      &x,
+      &topk_ids,
+      &topk_weights,
+      &w13,
+      &w13_scale,
+      &w2,
+      &w2_scale,
+      &shared_w13,
+      &shared_w13_scale,
+      &shared_w2,
+      &shared_w2_scale,
+      &shared_gate};
+  for (const auto* tensor : inputs) {
+    at::assert_no_overlap(ws, *tensor);
+  }
+
+  // Check 64-bit metadata before converting dimensions or multiplying.
+  TORCH_CHECK(
+      x.size(0) > 0 && x.size(0) <= MAX_R && w13.size(0) > 0 &&
+          w13.size(0) <= MAX_E && topk_ids.size(1) > 0 &&
+          topk_ids.size(1) <= w13.size(0),
+      "require positive token count <= 512 and 1 <= top_k <= E <= 512");
+  TORCH_CHECK(
+      x.size(0) * topk_ids.size(1) <= MAX_R,
+      "num_tokens * top_k exceeds ",
+      MAX_R);
   const int num_tokens = x.size(0);
   const int H = x.size(1);
   const int top_k = topk_ids.size(1);
   const int R = num_tokens * top_k;
   const int E = w13.size(0);
-  TORCH_CHECK(
-      num_tokens > 0 && top_k > 0 && E > 0 && top_k <= E,
-      "token, expert and top-k counts must be positive and top_k <= E");
-  TORCH_CHECK(R <= MAX_R, "num_tokens * top_k exceeds ", MAX_R);
   const int K1 = w13.size(1);
   const int N1 = w13.size(2);
   const int K2 = w2.size(1);
   const int N2 = w2.size(2);
-  TORCH_CHECK(num_experts_static_ok(E), "E > 512 unsupported");
   // Each routed row can require its own tile; skewed routes may exceed E.
   const int umt = R;
   const int M_s = num_tokens;
 
   // ---- ONE flat byte workspace (allocated once per batch size by the
-  // Python side): [int32 map arrays][w_perm fp32][gate fp32][fp16 buffers]
+  // Python side): [int32 map arrays][w_perm fp32][gate fp32][16-bit buffers]
   uint8_t* wsb = reinterpret_cast<uint8_t*>(ws.data_ptr());
   const int64_t o_int = 0;
   const int64_t o_wperm = align256(o_int + 4 * (3 * umt + 1 + R));
@@ -670,7 +715,6 @@ void moe_shared_fused_decode_xe2_impl(
         top_k,
         E,
         tile_m,
-        umt,
         mt_expert,
         mt_row_base,
         mt_rows,
@@ -687,7 +731,6 @@ void moe_shared_fused_decode_xe2_impl(
         top_k,
         E,
         tile_m,
-        umt,
         mt_expert,
         mt_row_base,
         mt_rows,

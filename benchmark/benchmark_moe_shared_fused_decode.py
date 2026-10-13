@@ -98,7 +98,6 @@ def make_fused(weights, tile_m):
 
 
 def bench(fns, inputs, iters):
-    n = len(fns) * len(inputs)
     for i in range(20):
         fns[i % len(fns)](*inputs[i % len(inputs)])
     torch.xpu.synchronize()
@@ -106,7 +105,6 @@ def bench(fns, inputs, iters):
     for i in range(iters):
         fns[i % len(fns)](*inputs[(i // len(fns)) % len(inputs)])
     torch.xpu.synchronize()
-    assert n > 0
     return (time.perf_counter() - t0) / iters * 1e6
 
 
@@ -117,6 +115,10 @@ def main():
     parser.add_argument("--dtype", choices=["float16", "bfloat16"],
                         default="float16")
     args = parser.parse_args()
+    if args.iters <= 0:
+        parser.error("--iters must be positive")
+    if args.inter <= 0 or args.inter % 32:
+        parser.error("--inter must be a positive multiple of 32")
     dtype = getattr(torch, args.dtype)
 
     torch.manual_seed(0)

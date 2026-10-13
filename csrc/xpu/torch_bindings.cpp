@@ -66,7 +66,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       torch::kXPU,
       &cutlass_grouped_gemm_interface);
 
-  // Fused routed + shared-expert MoE for small-M decode (fp16 activations,
+  // Fused routed + shared-expert MoE for small-M decode (fp16/bf16 activations,
   // fp8-e4m3 per-tensor weights). tile_m = 0 selects the tile by M.
   xpu_ops.def(
       "moe_shared_fused_decode_interface(Tensor(a!) output, Tensor x, "

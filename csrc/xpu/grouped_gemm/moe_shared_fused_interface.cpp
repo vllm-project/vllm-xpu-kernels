@@ -28,11 +28,19 @@ void moe_shared_fused_decode_interface(
     const torch::Tensor& shared_gate,
     torch::Tensor& ws,
     int64_t tile_m) {
-  if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
+  TORCH_CHECK(x.is_xpu(), "x must be an XPU tensor");
+  TORCH_CHECK(
+      x.dim() == 2 && topk_ids.dim() == 2, "x and topk_ids must be rank two");
+  TORCH_CHECK(
+      x.size(0) > 0 && topk_ids.size(1) > 0,
+      "token and top-k counts must be positive");
+  const auto device_index = x.get_device();
+  if (vllm::xpu::is_xe2_arch(device_index) ||
+      vllm::xpu::is_xe3_arch(device_index)) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Xe3 reuses the Xe2 implementation, as the grouped GEMM does.
     if (tile_m == 0) {
-      tile_m = x.size(0) * topk_ids.size(1) <= kMoeSharedFusedTileM8MaxRows
+      tile_m = x.size(0) <= kMoeSharedFusedTileM8MaxRows / topk_ids.size(1)
                    ? kMoeSharedFusedTileM8
                    : kMoeSharedFusedTileM16;
     }
