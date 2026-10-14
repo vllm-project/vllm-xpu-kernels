@@ -286,7 +286,6 @@ def test_heads_per_sg_equivalence(
 ) -> None:
     """Every heads_per_sg value must give bit-identical output."""
     torch.manual_seed(13)
-    torch.set_default_device("xpu")
     torch.xpu.set_device(device)
 
     num_heads_q, num_heads_kv = head_config
@@ -336,3 +335,22 @@ def test_heads_per_sg_equivalence(
         if forced > num_heads_q + num_heads_kv:
             continue
         torch.testing.assert_close(run(forced), reference, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@pytest.mark.parametrize("forced", [3, 6, 16])
+@torch.inference_mode()
+def test_heads_per_sg_rejects_unsupported(device: str, forced: int) -> None:
+    torch.xpu.set_device(device)
+    num_heads_q, num_heads_kv, head_dim = 16, 8, 128
+    qkv = torch.randn(4, (num_heads_q + 2 * num_heads_kv) * head_dim,
+                      dtype=torch.bfloat16,
+                      device=device)
+    positions = torch.arange(4, dtype=torch.long, device=device)
+    weight = torch.ones(head_dim, dtype=torch.bfloat16, device=device)
+    cos_sin_cache = torch.ones(8, head_dim, dtype=torch.float32, device=device)
+    with pytest.raises(RuntimeError, match="forced_token_heads_per_warp"):
+        torch.ops._C.fused_qk_norm_rope(qkv, num_heads_q, num_heads_kv,
+                                        num_heads_kv, head_dim, 1e-6, weight,
+                                        weight, cos_sin_cache, True, positions,
+                                        forced)

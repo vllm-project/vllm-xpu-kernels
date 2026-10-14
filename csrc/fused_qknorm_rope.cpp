@@ -598,6 +598,13 @@ void fused_qk_norm_rope(
       "Key weights size must match head dimension");
   TORCH_CHECK(cos_sin_cache.size(1) % 2 == 0, "rotary_dim must be even");
   TORCH_CHECK(
+      forced_token_heads_per_warp <= 0 || forced_token_heads_per_warp == 1 ||
+          forced_token_heads_per_warp == 2 ||
+          forced_token_heads_per_warp == 4 || forced_token_heads_per_warp == 8,
+      "forced_token_heads_per_warp must be <= 0 (auto) or one of 1, 2, 4, 8, "
+      "got ",
+      forced_token_heads_per_warp);
+  TORCH_CHECK(
       cos_sin_cache.size(1) <= head_dim,
       "rotary_dim must be less than or equal to head_dim");
   TORCH_CHECK(

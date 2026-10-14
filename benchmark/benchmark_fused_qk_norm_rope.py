@@ -115,10 +115,10 @@ def time_us(fn) -> float:
 
 def bench_case(shape: Shape, num_tokens: int, is_neox: bool,
                dtype: torch.dtype, rounds: int) -> dict[int, float]:
-    qkv, positions, q_weight, k_weight, cache = make_inputs(
+    base, positions, q_weight, k_weight, cache = make_inputs(
         shape, num_tokens, dtype)
 
-    def run(h):
+    def run(qkv, h):
         torch.ops._C.fused_qk_norm_rope(qkv, shape.num_heads_q,
                                         shape.num_heads_kv,
                                         shape.num_heads_kv, shape.head_dim,
@@ -131,7 +131,9 @@ def bench_case(shape: Shape, num_tokens: int, is_neox: bool,
         order = variants[:]
         random.shuffle(order)
         for h in order:
-            samples[h].append(time_us(lambda h=h: run(h)))
+            # The op is in-place: start every variant from the same input.
+            qkv = base.clone()
+            samples[h].append(time_us(lambda h=h, qkv=qkv: run(qkv, h)))
     return {h: statistics.median(v) for h, v in samples.items()}
 
 
