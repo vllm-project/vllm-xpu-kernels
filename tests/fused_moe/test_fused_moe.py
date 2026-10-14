@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from tests.ops.fp8_quant_op import scaled_fp8_quant
-from tests.utils import format_tc, seed_everything
+from tests.utils import format_tc, run_with_xpu_graph, seed_everything
 from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 
 DEVICE = "xpu"
@@ -176,7 +176,9 @@ def ref_fused_moe(x,
                          ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
 @pytest.mark.parametrize("activation", ["silu", "situ"])
-def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation):
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation,
+                   use_graph):
     seed_everything(7)
 
     input_len = m
@@ -280,13 +282,20 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation):
                     25.0 if activation == "situ" else None),
             )
 
-    output = torch.empty_like(ref_out)
-    fused_moe_impl.apply(
-        output=output,
-        hidden_states=a,
-        topk_weights=expert_scores,
-        topk_ids=expert_indices,
-    )
+    def run(hidden_states, topk_weights, topk_ids):
+        output = torch.empty_like(ref_out)
+        fused_moe_impl.apply(
+            output=output,
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
+        return output
+
+    # Under graph, routing is zeroed during capture (all tokens -> expert 0).
+    moe_inputs = [a, expert_scores, expert_indices]
+    output = (run_with_xpu_graph(run, moe_inputs)
+              if use_graph else run(*moe_inputs))
 
     if dtype == torch.float16:
         rtol = 1e-2
