@@ -964,9 +964,14 @@ void qwen4_exp_ple_conv(
           conv_weights.is_contiguous() && state_indices.is_contiguous(),
       "PLE convolution input, output, weights, and indices must be "
       "contiguous");
+  // The kernels address conv_state purely through its strides, so either the
+  // window (ds, stride(2)==1) or the channel (sd, stride(1)==1) axis may be
+  // innermost.
   TORCH_CHECK(
-      conv_state.size(1) == inputs.size(1) && conv_state.stride(2) == 1,
-      "conv_state channels must match inputs and window stride must be one");
+      conv_state.size(1) == inputs.size(1) &&
+          (conv_state.stride(1) == 1 || conv_state.stride(2) == 1),
+      "conv_state channels must match inputs and either the channel or the "
+      "window axis must be contiguous");
   TORCH_CHECK(dilation > 0, "dilation must be positive");
   TORCH_CHECK(spec_query_len > 0, "spec_query_len must be positive");
   const int64_t state_length = (conv_weights.size(1) - 1) * dilation;
