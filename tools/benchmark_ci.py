@@ -91,6 +91,16 @@ def _commands_for_suite(suite: str, raw_dir: Path) -> list[BenchmarkCommand]:
             ],
             required=False,
         ),
+        BenchmarkCommand(
+            "fused_qk_norm_rope",
+            [
+                python,
+                "benchmark/benchmark_fused_qk_norm_rope.py",
+                "--save-path",
+                str(raw_dir / "fused_qk_norm_rope"),
+            ],
+            required=False,
+        ),
     ])
     return commands
 

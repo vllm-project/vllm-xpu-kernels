@@ -368,6 +368,35 @@ class fused_qk_norm_rope_n_heads_kernel {
   sycl::local_accessor<scalar_t_cache, 1> slm_cos_sin;
 };
 
+// heads_per_sg only changes the launch configuration; every value gives
+// identical output. Thresholds on num_tokens * total_qk_heads, tuned on B70.
+static inline int select_heads_per_sg(
+    int forced_token_heads_per_warp,
+    int64_t num_tokens,
+    int total_qk_heads,
+    int head_dim) {
+  int heads_per_sg = 1;
+
+  if (forced_token_heads_per_warp > 0) {
+    heads_per_sg = forced_token_heads_per_warp;
+  } else if (total_qk_heads >= 8) {
+    const int64_t total_qk_units = num_tokens * total_qk_heads;
+    if (head_dim >= 256) {
+      heads_per_sg = (total_qk_units >= 196608) ? 8 : 1;
+    } else if (total_qk_units >= 8192) {
+      heads_per_sg = 8;
+    } else if (total_qk_units >= 4096) {
+      heads_per_sg = 4;
+    }
+  }
+
+  // Clamp to an instantiated value (1/2/4/8) that fits total_qk_heads.
+  while (heads_per_sg > 1 && heads_per_sg > total_qk_heads) {
+    heads_per_sg /= 2;
+  }
+  return heads_per_sg;
+}
+
 template <typename scalar_t, typename scalar_t_cache>
 void launch_fused_qk_norm_rope(
     torch::Tensor& qkv,
@@ -403,18 +432,8 @@ void launch_fused_qk_norm_rope(
 
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  int heads_per_sg = 1;
-  // Auto-tune heads_per_sg based on benchmark results:
-  if (forced_token_heads_per_warp > 0) {
-    heads_per_sg = forced_token_heads_per_warp;
-  } else if (total_qk_heads >= 20) {
-    heads_per_sg = 8;
-  } else if (total_qk_heads >= 8) {
-    heads_per_sg = 4;
-  }
-  if (heads_per_sg > total_qk_heads) {
-    heads_per_sg = total_qk_heads;
-  }
+  const int heads_per_sg = select_heads_per_sg(
+      forced_token_heads_per_warp, num_tokens, total_qk_heads, head_dim);
 
 // HEADS_PER_SG == 1 falls through to the original baseline kernel.
 #define DISPATCH_KERNEL(HEAD_DIM, IS_NEOX_V, HEADS_PER_SG_V)         \
