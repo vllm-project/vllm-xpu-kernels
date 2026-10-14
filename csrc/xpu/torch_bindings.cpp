@@ -4,6 +4,7 @@
   #include "xpu/grouped_gemm/grouped_gemm_interface.h"
   #include "xpu/grouped_gemm/moe_shared_fused_interface.h"
 #endif
+#include "xpu/qwen4_exp/qwen4_exp_ops.h"
 #include "xpu/lora/lora_ops.h"
 
 #include <torch/library.h>
@@ -396,6 +397,61 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor num_sampled_tokens, int max_num_kept, int max_compact_support, "
       "int rows_per_request) -> (Tensor, Tensor, Tensor)");
   xpu_ops.impl("compact_sampling_mask", torch::kXPU, &compact_sampling_mask);
+
+  xpu_ops.def(
+      "qwen4_exp_ple_ngram_ids(Tensor input_ids, Tensor query_start_loc, "
+      "Tensor ngram_context, Tensor layer_multipliers, "
+      "Tensor ngram_heads_vocab_sizes, Tensor ngram_heads_offsets, "
+      "int eos_token_id, int heads_per_ngram) -> Tensor");
+  xpu_ops.impl(
+      "qwen4_exp_ple_ngram_ids", torch::kXPU, &qwen4_exp_ple_ngram_ids);
+
+  xpu_ops.def(
+      "qwen4_exp_ple_conv(Tensor inputs, Tensor! output, "
+      "Tensor! conv_state, Tensor conv_weights, Tensor state_indices, "
+      "str mode, int dilation, Tensor? query_start_loc, "
+      "Tensor? num_accepted_tokens, Tensor? has_initial_states, "
+      "int spec_query_len, Tensor? token_indices) -> ()");
+  xpu_ops.impl("qwen4_exp_ple_conv", torch::kXPU, &qwen4_exp_ple_conv);
+
+  xpu_ops.def(
+      "qwen4_exp_qsa_visible_blocks(Tensor query_positions, "
+      "Tensor sequence_lengths, Tensor token_to_request, "
+      "int compress_ratio) -> Tensor");
+  xpu_ops.impl(
+      "qwen4_exp_qsa_visible_blocks",
+      torch::kXPU,
+      &qwen4_exp_qsa_visible_blocks);
+
+  xpu_ops.def(
+      "qwen4_exp_qsa_expand_block_indices(Tensor block_indices, "
+      "Tensor query_positions, Tensor sequence_lengths, "
+      "Tensor token_to_request, int compress_ratio, int token_topk) "
+      "-> Tensor");
+  xpu_ops.impl(
+      "qwen4_exp_qsa_expand_block_indices",
+      torch::kXPU,
+      &qwen4_exp_qsa_expand_block_indices);
+
+  xpu_ops.def(
+      "qwen4_exp_qsa_store_cache_rows(Tensor! cache, "
+      "Tensor slot_mapping, Tensor rows) -> ()");
+  xpu_ops.impl(
+      "qwen4_exp_qsa_store_cache_rows",
+      torch::kXPU,
+      &qwen4_exp_qsa_store_cache_rows);
+
+  xpu_ops.def(
+      "qwen4_exp_qsa_compress_groups(Tensor raw_keys, "
+      "Tensor raw_positions, Tensor compressor_state_cache, "
+      "Tensor compressor_state_block_table, Tensor token_to_request, "
+      "Tensor query_start_loc, Tensor logical_positions, "
+      "Tensor compressed_slots, int compress_ratio, Tensor? rope_cache) "
+      "-> (Tensor, Tensor)");
+  xpu_ops.impl(
+      "qwen4_exp_qsa_compress_groups",
+      torch::kXPU,
+      &qwen4_exp_qsa_compress_groups);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
