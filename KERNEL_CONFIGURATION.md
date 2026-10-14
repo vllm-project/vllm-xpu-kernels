@@ -92,7 +92,7 @@ Config files are located in `csrc/xpu/attn/kernel_configs/`.
 | File | Kernels | Use Case |
 |------|---------|----------|
 | `paged_decode_full.conf` | 384 | All combinations — supports every model |
-| `paged_decode_default.conf` | 35 | Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec (default build) |
+| `paged_decode_default.conf` | 38 | Llama, Qwen, DeepSeek MLA, Falcon, Starcoder2, Phi, VLM2Vec (default build) |
 
 ### Recommended Config per Model Family
 
