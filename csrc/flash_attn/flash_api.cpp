@@ -24,25 +24,29 @@ inline int get_num_splits(
   // The decode kernel iterates kv_tile-sized work units within each page,
   // not page-sized units. The dispatch (see paged_decode_utils.hpp::
   // dispatch_by_page_size) routes
-  //   block_size == 16              -> kv_tile=_16 (SubgroupLayoutQK<_1,_1,_1>,
-  //   SGPerWG=1) block_size == 32              -> kv_tile=_32
-  //   (SubgroupLayoutQK<_1,_2,_1>, SGPerWG=2) block_size > 0 && %% 64 == 0  ->
-  //   kv_tile=_64  (SubgroupLayoutQK<_1,_4,_1>, SGPerWG=4)
+  //   block_size > 0 && %% 64 == 0  -> kv_tile=_64 (SubgroupLayoutQK<_1,_4,_1>,
+  //   SGPerWG=4)
+  //   block_size == 32              -> kv_tile=_32 (SubgroupLayoutQK<_1,_2,_1>,
+  //   SGPerWG=2)
+  //   every other multiple of 16 (16, 48, 80, 96, 112, 160, ...)
+  //                                 -> kv_tile=_16 (SubgroupLayoutQK<_1,_1,_1>,
+  //   SGPerWG=1)
   int kv_tile;
   int sg_per_wg;
   int policy_split_cap;
-  if (block_size == 16) {
-    kv_tile = 16;
-    sg_per_wg = 1;
-    policy_split_cap = 16;
+  if (block_size > 0 && (block_size % 64) == 0) {
+    kv_tile = 64;
+    sg_per_wg = 4;
+    policy_split_cap = 64;
   } else if (block_size == 32) {
     kv_tile = 32;
     sg_per_wg = 2;
     policy_split_cap = 32;
   } else {
-    kv_tile = 64;
-    sg_per_wg = 4;
-    policy_split_cap = 64;
+    // 16, 48, 80, 96, 112, 160, ... (every other multiple of 16)
+    kv_tile = 16;
+    sg_per_wg = 1;
+    policy_split_cap = 16;
   }
 
   int kv_tiles = (max_seqlen_k + kv_tile - 1) / kv_tile;
@@ -107,6 +111,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int max_seqlen_q,
     int max_seqlen_k,
     float p_dropout,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     float softmax_scale,
@@ -124,9 +129,13 @@ std::vector<at::Tensor> mha_varlen_fwd(
     std::optional<at::Tensor>& work_list) {
   auto q_type = q.scalar_type();
   auto k_type = k.scalar_type();
+  bool q_is_fp8 = q_type == at::ScalarType::Float8_e5m2 ||
+                  q_type == at::ScalarType::Float8_e4m3fn;
   TORCH_CHECK(
-      q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16,
-      "VLLM Kernel XPU only supports fp16 and bf16 type");
+      q_type == at::ScalarType::Half || q_type == at::ScalarType::BFloat16 ||
+          q_is_fp8,
+      "VLLM Kernel XPU only supports fp16, bf16, and fp8 (e4m3/e5m2) query "
+      "types");
 
   TORCH_CHECK(
       v.scalar_type() == k_type, "key and value must have the same dtype");
@@ -190,7 +199,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
   bool is_local = (window_size_left != -1) | (window_size_right != -1);
   bool is_sink = softmax_sink_.has_value();
 
-  // Allocated only in chunk_prefill path when return_softmax is true
+  // Allocated when return_softmax is true; written by the chunk_prefill
+  // kernel for prefill rows and by the paged decode kernels (FMHA epilogue
+  // or ReduceSplitK) for decode rows.
   std::optional<at::Tensor> softmax_lse_opt;
   if (return_softmax) {
     int total_seqlen_q = q.size(0);
@@ -209,7 +220,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
   if (is_prefill_only) {
     if (!out_.has_value()) {
-      out = torch::empty_like(q);
+      // For fp8 query the output cannot be fp8; default to fp16 (matches the
+      // compute dtype inferred by the Python wrapper for fp8 inputs).
+      auto out_dtype = q_is_fp8 ? at::kHalf : q_type;
+      out = torch::empty_like(q, q.options().dtype(out_dtype));
     }
     // Non-paged: always use chunk_prefill for everything
     std::optional<const at::Tensor> no_mask = std::nullopt;
@@ -224,6 +238,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
         seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
+        q_scale,
         k_scale,
         v_scale,
         softmax_scale,
@@ -239,7 +254,10 @@ std::vector<at::Tensor> mha_varlen_fwd(
         no_mask);
   } else if (max_seqlen_q > 1) {
     if (!out_.has_value()) {
-      out = torch::empty_like(q);
+      // For fp8 query the output cannot be fp8; default to fp16 (matches the
+      // compute dtype inferred by the Python wrapper for fp8 inputs).
+      auto out_dtype = q_is_fp8 ? at::kHalf : q_type;
+      out = torch::empty_like(q, q.options().dtype(out_dtype));
     }
     int batch_size = static_cast<int>(cu_seqlens_q.size(0)) - 1;
     at::Tensor seq_lens_q = cu_seqlens_q.slice(0, 1, batch_size + 1) -
@@ -258,6 +276,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
         seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
+        q_scale,
         k_scale,
         v_scale,
         softmax_scale,
@@ -288,10 +307,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
 
     int num_kv_splits = 1;
     at::Tensor tmp_out = out;
-    at::Tensor decode_max_logits = at::empty(
-        {num_tokens, num_heads_q, num_kv_splits},
-        q.options().dtype(at::kFloat).device(q.device()));
-    at::Tensor decode_exp_sums = at::empty(
+    at::Tensor decode_softmax_lse_accum = at::empty(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
 
@@ -302,13 +318,13 @@ std::vector<at::Tensor> mha_varlen_fwd(
         v,
         out,
         tmp_out,
-        decode_exp_sums,
-        decode_max_logits,
+        decode_softmax_lse_accum,
         block_table,
         cu_seqlens_q,
         seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
+        q_scale,
         k_scale,
         v_scale,
         softmax_scale,
@@ -323,7 +339,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
         num_kv_splits,
         is_prefill_opt,
         splits_per_seq,
-        work_list);
+        work_list,
+        softmax_lse_opt);
   } else {
     // Normalize -1 (unbounded) to max_seqlen_k for kernel masking logic
     // In decode phase the window_size_right doesn't have effect
@@ -351,11 +368,14 @@ std::vector<at::Tensor> mha_varlen_fwd(
     // (SGPerWG=4) q_packed=16 needs only 64 KiB and the guard is no longer
     // required.
 
-    // Output shape uses V's head_dim (may differ from Q/K for MLA)
+    // Output shape uses V's head_dim (may differ from Q/K for MLA).
+    // For fp8 query the output cannot be fp8; default to fp16 (matches the
+    // compute dtype inferred by the Python wrapper for fp8 inputs).
     if (!out_.has_value()) {
+      auto out_dtype = q_is_fp8 ? at::kHalf : q_type;
       out = torch::empty(
           {num_tokens, num_heads_q, v_head_dim},
-          q.options().device(q.device()));
+          q.options().dtype(out_dtype).device(q.device()));
     }
 
     int num_kv_splits = num_splits.value_or(get_num_splits(
@@ -372,10 +392,7 @@ std::vector<at::Tensor> mha_varlen_fwd(
             : at::empty(
                   {num_tokens, num_heads_q * num_kv_splits, v_head_dim},
                   q.options().device(q.device()));
-    at::Tensor max_logits = at::empty(
-        {num_tokens, num_heads_q, num_kv_splits},
-        q.options().dtype(at::kFloat).device(q.device()));
-    at::Tensor exp_sums = at::empty(
+    at::Tensor softmax_lse_accum = at::empty(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
 
@@ -393,13 +410,13 @@ std::vector<at::Tensor> mha_varlen_fwd(
         v,
         out,
         tmp_out,
-        exp_sums,
-        max_logits,
+        softmax_lse_accum,
         block_table,
         cu_seqlens_q,
         seqlens_k,
         max_seqlen_q,
         max_seqlen_k,
+        q_scale,
         k_scale,
         v_scale,
         softmax_scale,
@@ -414,7 +431,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
         num_kv_splits,
         no_mask,
         splits_per_seq,
-        work_list);
+        work_list,
+        softmax_lse_opt);
   }
 
   if (return_softmax) {
@@ -434,7 +452,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cu_seqlens_q, "
       "Tensor cu_seqlens_k, Tensor? seqused_k, Tensor? leftpad_k, Tensor? "
       "block_table, Tensor? alibi_slopes, "
-      "int max_seqlen_q, int max_seqlen_k, float p_dropout, Tensor? k_scale, "
+      "int max_seqlen_q, int max_seqlen_k, float p_dropout, Tensor? q_scale, "
+      "Tensor? k_scale, "
       "Tensor? v_scale, "
       "float softmax_scale, Tensor? softmax_sink, bool zero_tensors, "
       "bool is_causal, int window_size_left, int window_size_right, float "

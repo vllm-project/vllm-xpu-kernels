@@ -7,14 +7,17 @@
 #if __has_include("paged_decode_enabled_policies_gen.hpp")
   #include "paged_decode_enabled_policies_gen.hpp"
 #else
+namespace vllm::xpu::xe2 {
 // Fallback: if the generated header is not available (e.g., IDE indexing),
 // assume all policies are enabled.
 template <typename Policy>
 struct is_decode_policy_enabled : std::true_type {};
 template <typename Policy, bool Causal, bool Local, bool Sink>
 struct is_decode_policy_tuple_enabled : std::true_type {};
+}  // namespace vllm::xpu::xe2
 #endif
 
+namespace vllm::xpu::xe2 {
 using namespace cute;
 
 // Runtime dispatcher helper - base case (all bools resolved)
@@ -189,22 +192,28 @@ inline void dispatch_by_page_size(
   // for page=256, ...), so correctness is preserved at a small parallelism
   // cost. Restore the _128 routing once the underlying ReduceK=8 bug is fixed
   // upstream.
-  if (page_size == 16) {
-    dispatch_by_head_size<QGroup, _16>(head_case, queue, cuQKType, args);
+  if (page_size > 0 && (page_size % 64) == 0) {
+    // 64, 128, 192, 256, ... (any positive multiple of 64)
+    dispatch_by_head_size<QGroup, _64>(head_case, queue, cuQKType, args);
   } else if (page_size == 32) {
     dispatch_by_head_size<QGroup, _32>(head_case, queue, cuQKType, args);
-  } else if (page_size > 0 && (page_size % 64) == 0) {
-    dispatch_by_head_size<QGroup, _64>(head_case, queue, cuQKType, args);
+  } else if (page_size > 0 && (page_size % 16) == 0) {
+    // 16, 48, 80, 96, 112, 160, ... (every other multiple of 16). The _16
+    // policy iterates page_size / 16 sub-tiles per page.
+    dispatch_by_head_size<QGroup, _16>(head_case, queue, cuQKType, args);
   } else {
     TORCH_CHECK(
         false,
         "Unsupported page size for fmha: ",
         page_size,
-        " (supported: 16, 32, or any positive multiple of 64)");
+        " (supported: any positive multiple of 16)");
   }
 }
 
-void cutlass_paged_decode_impl(
+// Defence in depth: this implementation lives in vllm::xpu::xe2, so the XE2 and
+// XE3 libraries no longer export a symbol with the same mangled name. Hidden
+// visibility keeps it unexported even if a future refactor reintroduces one.
+__attribute__((visibility("hidden"))) void cutlass_paged_decode_impl(
     sycl::queue& queue,
     const at::Tensor& query,      // [seq_q, heads, head_size]
     const at::Tensor& key_cache,  // [num_block, block_size, heads, head_size]
@@ -212,8 +221,7 @@ void cutlass_paged_decode_impl(
     at::Tensor& out,
     at::Tensor&
         temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
-    at::Tensor& exp_sums,    // [batch, num_head_q, seq_q, num_kv_splits]
-    at::Tensor& max_logits,  // [batch, num_head_q, seq_q, num_kv_splits]
+    at::Tensor& softmax_lse_accum,  // [batch, num_head_q, seq_q, num_kv_splits]
     const at::Tensor& block_table,
     const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k,
@@ -233,4 +241,6 @@ void cutlass_paged_decode_impl(
     int num_kv_splits,
     std::optional<const at::Tensor>& is_prefill,
     std::optional<at::Tensor>& splits_per_seq,
-    std::optional<at::Tensor>& work_list);
+    std::optional<at::Tensor>& work_list,
+    std::optional<at::Tensor>& softmax_lse);
+}  // namespace vllm::xpu::xe2

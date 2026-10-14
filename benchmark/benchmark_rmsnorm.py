@@ -231,40 +231,37 @@ def get_benchmark(use_residual, dtype):
 
         quantiles = [0.5, 0.2, 0.8]
 
+        # Clone once, outside the timed region. Some providers (e.g. vLLM's
+        # fused_add_rms_norm) mutate their input/residual buffers in place,
+        # so do_bench's repeated calls will keep operating on the same
+        # buffers across iterations -- that's fine, since this op's runtime
+        # is data-independent (determined by shape/dtype, not values), and
+        # it matches how the kernel is actually used in production (no
+        # per-call clone). Cloning *inside* the do_bench lambda would add a
+        # full extra memory-bound copy to every timed iteration, roughly
+        # doubling the measured latency of in-place ops and understating
+        # their true achieved memory bandwidth.
+        x_bench = x.clone()
+        residual_bench = residual.clone() if residual is not None else None
+
         if provider == "huggingface":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: rmsnorm_naive(
-                    x.clone(),
-                    weight,
-                    residual.clone() if residual is not None else None,
-                ),
+                lambda: rmsnorm_naive(x_bench, weight, residual_bench),
                 quantiles=quantiles,
             )
         elif provider == "t.compile":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: rmsnorm_compile(
-                    x.clone(),
-                    weight,
-                    residual.clone() if residual is not None else None,
-                ),
+                lambda: rmsnorm_compile(x_bench, weight, residual_bench),
                 quantiles=quantiles,
             )
         elif provider == "ipex" and HAS_IPEX:
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: rmsnorm_ipex(
-                    x.clone(),
-                    weight,
-                    residual.clone() if residual is not None else None,
-                ),
+                lambda: rmsnorm_ipex(x_bench, weight, residual_bench),
                 quantiles=quantiles,
             )
         else:
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: rmsnorm_vllm(
-                    x.clone(),
-                    weight,
-                    residual.clone() if residual is not None else None,
-                ),
+                lambda: rmsnorm_vllm(x_bench, weight, residual_bench),
                 quantiles=quantiles,
             )
         return 1000 * ms, 1000 * max_ms, 1000 * min_ms

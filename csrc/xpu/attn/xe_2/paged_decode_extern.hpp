@@ -2,6 +2,7 @@
 
 #include "paged_decode.hpp"
 
+namespace vllm::xpu::xe2 {
 // =============================================================================
 // Configuration: Add new policies here
 // =============================================================================
@@ -104,3 +105,5 @@ PAGED_DECODE_POLICY_LIST(DECLARE_ALL_BOOL_COMBINATIONS)
 #undef DECLARE_FOR_LOCAL
 #undef DECLARE_FOR_SINK
 #undef DECLARE_DECODE_DISPATCH_EXTERN
+
+}  // namespace vllm::xpu::xe2

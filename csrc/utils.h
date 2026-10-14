@@ -85,6 +85,20 @@ static inline bool is_xe3_arch(at::DeviceIndex device_index = -1) {
          arch == syclex::architecture::intel_gpu_wcl;
 }
 
+// Xe3p (CRI / Nova Lake P) architecture check used to dispatch the XE3
+// attention kernels. The intel_gpu_cri architecture enumerator only exists on
+// CRI-enabled oneAPI toolchains, so it is referenced only when the build system
+// detects it (VLLM_XPU_HAS_INTEL_GPU_CRI). intel_gpu_nvl_p is available on the
+// baseline toolchain, so the check still compiles without CRI support.
+static inline bool is_xe3p_arch(at::DeviceIndex device_index = -1) {
+  auto arch = get_device_architecture(device_index);
+  return
+#ifdef VLLM_XPU_HAS_INTEL_GPU_CRI
+      arch == syclex::architecture::intel_gpu_cri ||
+#endif
+      arch == syclex::architecture::intel_gpu_nvl_p;
+}
+
 static inline std::optional<std::string> getEnv(const char* name) {
   if (const char* val = std::getenv(name)) return val;
   return std::nullopt;

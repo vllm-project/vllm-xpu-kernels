@@ -7,14 +7,14 @@
 #
 # CMake Options: VLLM_CHUNK_PREFILL_CONFIG - Path to kernel config file
 # (default: chunk_prefill_full.conf) Config files located in:
-# csrc/xpu/attn/kernel_configs/ chunk_prefill_full.conf    - All 216
+# csrc/xpu/attn/kernel_configs/ chunk_prefill_full.conf    - All 240
 # combinations chunk_prefill_default.conf - Default model configs
 #
 # Config file format: - Lines starting with # are comments - Empty lines are
 # ignored - 'all' keyword builds everything - Each line:
-# headsize[,paged,causal,local,sink,lse] - If boolean flags omitted, all 18
-# valid combinations are generated - LSE constraint: lse=true only valid when
-# paged=false,local=false,sink=false
+# headsize[,paged,causal,local,sink,lse] - If boolean flags are omitted, all 20
+# valid combinations are generated. Paged and non-paged LSE require
+# local=false,sink=false.
 #
 # Both standard and b16 policies are generated for each headsize.
 # =============================================================================
@@ -69,15 +69,24 @@ function(fmha_forward_configure FILENAME_SUFFIX)
   set(BOOL_FLAG_false "f")
   set(BOOL_FLAG_true "t")
 
-  set(headsize_list "64" "96" "128" "192" "256" "512")
+  set(headsize_list
+      "64"
+      "80"
+      "96"
+      "128"
+      "192"
+      "256"
+      "512")
   set(policy_list
       "chunk_policy_head64"
+      "chunk_policy_head80"
       "chunk_policy_head96"
       "chunk_policy_head128"
       "chunk_policy_head192"
       "chunk_policy_head256"
       "chunk_policy_head512"
       "chunk_policy_head64_b16"
+      "chunk_policy_head80_b16"
       "chunk_policy_head96_b16"
       "chunk_policy_head128_b16"
       "chunk_policy_head192_b16"
@@ -86,12 +95,14 @@ function(fmha_forward_configure FILENAME_SUFFIX)
 
   # Map headsize to policy names
   set(std_policy_64 "chunk_policy_head64")
+  set(std_policy_80 "chunk_policy_head80")
   set(std_policy_96 "chunk_policy_head96")
   set(std_policy_128 "chunk_policy_head128")
   set(std_policy_192 "chunk_policy_head192")
   set(std_policy_256 "chunk_policy_head256")
   set(std_policy_512 "chunk_policy_head512")
   set(b16_policy_64 "chunk_policy_head64_b16")
+  set(b16_policy_80 "chunk_policy_head80_b16")
   set(b16_policy_96 "chunk_policy_head96_b16")
   set(b16_policy_128 "chunk_policy_head128_b16")
   set(b16_policy_192 "chunk_policy_head192_b16")
@@ -119,11 +130,10 @@ function(fmha_forward_configure FILENAME_SUFFIX)
         foreach(IMPL_KISCAUSAL ${L_BOOLS})
           foreach(IMPL_KISLOCAL ${L_BOOLS})
             foreach(IMPL_KISSINK ${L_BOOLS})
-              # LSE constraint
+              # LSE is supported for paged and non-paged global attention.
               set(LSE_BOOLS "false")
-              if(IMPL_KISPAGED STREQUAL "false"
-                 AND IMPL_KISLOCAL STREQUAL "false"
-                 AND IMPL_KISSINK STREQUAL "false")
+              if(IMPL_KISLOCAL STREQUAL "false" AND IMPL_KISSINK STREQUAL
+                                                    "false")
                 set(LSE_BOOLS ${L_BOOLS})
               endif()
               foreach(IMPL_KISLSE ${LSE_BOOLS})
@@ -179,18 +189,14 @@ function(fmha_forward_configure FILENAME_SUFFIX)
           continue()
         endif()
 
-        # Validate LSE constraint
-        if(_lse STREQUAL "true")
-          if(NOT
-             (_paged STREQUAL "false"
-              AND _local STREQUAL "false"
-              AND _sink STREQUAL "false"))
-            message(
-              WARNING
-                "Skipping invalid config: lse=true requires paged=false,local=false,sink=false: ${_entry}"
-            )
-            continue()
-          endif()
+        # Local/Sink LSE tuples remain unsupported.
+        if(_lse STREQUAL "true" AND (_local STREQUAL "true" OR _sink STREQUAL
+                                                               "true"))
+          message(
+            WARNING
+              "Skipping invalid config: lse=true requires local=false,sink=false: ${_entry}"
+          )
+          continue()
         endif()
 
         # Generate for both standard and b16 policies
@@ -205,15 +211,14 @@ function(fmha_forward_configure FILENAME_SUFFIX)
           "${b16_policy_${_headsize}}|${_paged}|${_causal}|${_local}|${_sink}|${_lse}"
         )
       else()
-        # No booleans specified: generate all 18 valid combinations
+        # No booleans specified: generate all 20 valid combinations.
         foreach(IMPL_KISPAGED ${L_BOOLS})
           foreach(IMPL_KISCAUSAL ${L_BOOLS})
             foreach(IMPL_KISLOCAL ${L_BOOLS})
               foreach(IMPL_KISSINK ${L_BOOLS})
                 set(LSE_BOOLS "false")
-                if(IMPL_KISPAGED STREQUAL "false"
-                   AND IMPL_KISLOCAL STREQUAL "false"
-                   AND IMPL_KISSINK STREQUAL "false")
+                if(IMPL_KISLOCAL STREQUAL "false" AND IMPL_KISSINK STREQUAL
+                                                      "false")
                   set(LSE_BOOLS ${L_BOOLS})
                 endif()
                 foreach(IMPL_KISLSE ${LSE_BOOLS})

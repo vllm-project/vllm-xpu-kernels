@@ -29,6 +29,34 @@ void fused_add_gemma_rms_norm(
     torch::Tensor& weight,
     double epsilon);
 
+void layer_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    std::optional<torch::Tensor> weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
+void fused_add_layer_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    std::optional<torch::Tensor> weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
+void nemotron_layer_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
+void fused_add_nemotron_layer_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
 // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8 output).
 void rms_norm_dynamic_per_token_quant(
     torch::Tensor& out,
@@ -304,5 +332,18 @@ void merge_attn_states(
     const torch::Tensor& suffix_lse,
     std::optional<int64_t> prefill_tokens_with_context = std::nullopt,
     const std::optional<torch::Tensor>& output_scale = std::nullopt);
+
+// LongCat n-gram embedding index kernel (see ngram_embedding_kernels.cpp).
+void ngram_compute_n_gram_ids(
+    int64_t ne_n,
+    int64_t ne_k,
+    torch::Tensor& ne_weights,
+    torch::Tensor& ne_mods,
+    torch::Tensor& exclusive_ne_embedder_size_sums,
+    torch::Tensor& exclusive_req_len_sums,
+    torch::Tensor& ne_token_table,
+    torch::Tensor& row_indices,
+    torch::Tensor& column_starts,
+    torch::Tensor& n_gram_ids);
 
 std::tuple<int64_t, int64_t> getMemoryInfo(int64_t device_index);

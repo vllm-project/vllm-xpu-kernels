@@ -240,3 +240,234 @@ class RMSNorm(CustomOp):
         s = f"hidden_size={self.hidden_size}"
         s += f", eps={self.variance_epsilon}"
         return s
+
+
+def fused_add_layer_norm(
+        x: torch.Tensor, residual: torch.Tensor,
+        weight: Optional[torch.Tensor], bias: Optional[torch.Tensor],
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+    import tests.register_ops as ops
+    ops.fused_add_layer_norm(
+        x,
+        residual,
+        weight,
+        bias,
+        variance_epsilon,
+    )
+    return x, residual
+
+
+def layer_norm(x: torch.Tensor, weight: Optional[torch.Tensor],
+               bias: Optional[torch.Tensor],
+               variance_epsilon: float) -> torch.Tensor:
+    import tests.register_ops as ops
+    out = torch.empty_like(x)
+    ops.layer_norm(
+        out,
+        x,
+        weight,
+        bias,
+        variance_epsilon,
+    )
+    return out
+
+
+def dispatch_cuda_layernorm_func(add_residual: bool):
+    if add_residual:
+        return fused_add_layer_norm
+    return layer_norm
+
+
+def nemotron_layer_norm(x: torch.Tensor, weight: torch.Tensor,
+                        bias: Optional[torch.Tensor],
+                        variance_epsilon: float) -> torch.Tensor:
+    import tests.register_ops as ops
+    out = torch.empty_like(x)
+    ops.nemotron_layer_norm(
+        out,
+        x,
+        weight,
+        bias,
+        variance_epsilon,
+    )
+    return out
+
+
+def fused_add_nemotron_layer_norm(
+        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+        bias: Optional[torch.Tensor],
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+    import tests.register_ops as ops
+    ops.fused_add_nemotron_layer_norm(
+        x,
+        residual,
+        weight,
+        bias,
+        variance_epsilon,
+    )
+    return x, residual
+
+
+def dispatch_cuda_nemotron_layernorm_func(add_residual: bool):
+    if add_residual:
+        return fused_add_nemotron_layer_norm
+    return nemotron_layer_norm
+
+
+class LayerNorm(CustomOp):
+    """Standard (non-RMS) LayerNorm: mean-centered, optional weight and bias.
+
+    Computes x -> (x - E[x]) / sqrt(Var[x] + eps) * w + b.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-5,
+        has_weight: bool = True,
+        has_bias: bool = True,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.variance_epsilon = eps
+        self.has_weight = has_weight
+        self.has_bias = has_bias
+        if dtype is not None:
+            self.weight = torch.ones(hidden_size, dtype=dtype)
+            self.bias = torch.zeros(hidden_size, dtype=dtype)
+        else:
+            self.weight = torch.ones(hidden_size)
+            self.bias = torch.zeros(hidden_size)
+        if self.has_weight:
+            self.weight = nn.Parameter(self.weight)
+        if self.has_bias:
+            self.bias = nn.Parameter(self.bias)
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        orig_dtype = x.dtype
+        x = x.to(torch.float32)
+        if residual is not None:
+            x = x + residual.to(torch.float32)
+            residual = x.to(orig_dtype)
+
+        mean = x.mean(dim=-1, keepdim=True)
+        var = (x - mean).pow(2).mean(dim=-1, keepdim=True)
+        x = (x - mean) * torch.rsqrt(var + self.variance_epsilon)
+        if self.has_weight:
+            x = x * self.weight.float()
+        if self.has_bias:
+            x = x + self.bias.float()
+        x = x.to(orig_dtype)
+        if residual is None:
+            return x
+        else:
+            return x, residual
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        add_residual = residual is not None
+        norm_func = dispatch_cuda_layernorm_func(add_residual)
+        weight = self.weight.data if self.has_weight else None
+        bias = self.bias.data if self.has_bias else None
+
+        if add_residual:
+            return norm_func(x, residual, weight, bias, self.variance_epsilon)
+        else:
+            return norm_func(x, weight, bias, self.variance_epsilon)
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        return self.forward_cuda(x, residual)
+
+    def extra_repr(self) -> str:
+        s = f"hidden_size={self.hidden_size}"
+        s += f", eps={self.variance_epsilon}"
+        return s
+
+
+class NemotronLayerNorm(CustomOp):
+    """LayerNorm with a +1 offset folded into the weight (NemotronLayerNorm1P).
+
+    Same weight_bias trick as GemmaRMSNorm: out = layer_norm(x) * (1 + w) + b.
+    Weight is required (mirrors gemma_rms_norm); bias is optional.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-5,
+        has_bias: bool = True,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.variance_epsilon = eps
+        self.has_bias = has_bias
+        if dtype is not None:
+            self.weight = nn.Parameter(torch.zeros(hidden_size, dtype=dtype))
+            bias_t = torch.zeros(hidden_size, dtype=dtype)
+        else:
+            self.weight = nn.Parameter(torch.zeros(hidden_size))
+            bias_t = torch.zeros(hidden_size)
+        self.bias = nn.Parameter(bias_t) if self.has_bias else None
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        orig_dtype = x.dtype
+        x = x.to(torch.float32)
+        if residual is not None:
+            x = x + residual.to(torch.float32)
+            residual = x.to(orig_dtype)
+
+        mean = x.mean(dim=-1, keepdim=True)
+        var = (x - mean).pow(2).mean(dim=-1, keepdim=True)
+        x = (x - mean) * torch.rsqrt(var + self.variance_epsilon)
+        x = x * (1.0 + self.weight.float())
+        if self.has_bias:
+            x = x + self.bias.float()
+        x = x.to(orig_dtype)
+        if residual is None:
+            return x
+        else:
+            return x, residual
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        add_residual = residual is not None
+        norm_func = dispatch_cuda_nemotron_layernorm_func(add_residual)
+        weight = self.weight.data
+        bias = self.bias.data if self.has_bias else None
+
+        if add_residual:
+            return norm_func(x, residual, weight, bias, self.variance_epsilon)
+        else:
+            return norm_func(x, weight, bias, self.variance_epsilon)
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        return self.forward_cuda(x, residual)
+
+    def extra_repr(self) -> str:
+        s = f"hidden_size={self.hidden_size}"
+        s += f", eps={self.variance_epsilon}"
+        return s

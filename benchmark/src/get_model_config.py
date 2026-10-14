@@ -261,41 +261,71 @@ def gen_cutlass_flash_attn_decode_correctness_configs():
 
 
 def gen_cutlass_flash_attn_decode_perf_configs():
-    seq_lens = [
-        "1,1,4096", "8,1+1+1+1+1+1+1+1,128+256+512+1024+2048+4096+8192+16384",
-        "32," + "+".join(["1"] * 32) + "," + "+".join(["512"] * 32)
-    ]
-    num_heads = [(4, 4), (16, 1)]
-    head_size = [64, 128, 256]
-    block_size = [64, 128]
-    output_dtype = [torch.float16, torch.bfloat16]
-    soft_cap = [None]
-    num_blocks = [2048]
-    fa_versions = [2]
-    q_dtype = [None]
-    is_sink = [False, True]
+    # Case groups for seq_len-increasing line charts (MBU / latency vs
+    # seq_len). Each (num_heads, head_size, block_size, batch) is one line;
+    # the uniform KV-length sweep are the points along it. Decode => one query
+    # token per sequence, uniform KV per sequence.
+    kv_len_sweep = [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+    batch_sizes = [1, 8, 16, 32]
+    output_dtype = torch.bfloat16
+    soft_cap = None
+    fa_version = 2
+    q_dtype = None
+    is_sink = False
+    # Cap the K+V block pool so its bf16 cache stays within device memory.
+    mem_budget_bytes = 12 * 1000**3
 
-    configs = []
+    # Distinct decode shapes from decode_compare.html Batch Decode Benchmark
+    # (num_q, num_kv, head_size, block_size).
+    hardcoded_decode_shapes = [
+        # batch-1 latency head-size sweep (GQA 4:1)
+        (8, 2, 64, 64),
+        (8, 2, 128, 64),
+        (8, 2, 192, 64),
+        (8, 2, 256, 64),
+        # MBU / bandwidth shapes (head_dim 128)
+        (16, 16, 128, 64),    # MHA
+        (32, 2, 128, 64),
+        (32, 4, 128, 64),
+        (32, 8, 128, 64),
+        (40, 8, 128, 64),
+        (32, 2, 128, 128),    # block_size=128 comparison
+    ]
+
+    shapes = set(hardcoded_decode_shapes)
     for model in model_lists:
         model_config = get_model_config(model, tp_size=1)
-        head_size = [model_config["head_dim"]]
-        num_heads = [(model_config["num_attention_heads"],
-                      model_config["num_key_value_heads"])]
+        shapes.add((model_config["num_attention_heads"],
+                    model_config["num_key_value_heads"],
+                    model_config["head_dim"], 64))
 
-        configs += list(
-            itertools.product(seq_lens, num_heads, head_size, block_size,
-                              output_dtype, soft_cap, num_blocks, fa_versions,
-                              q_dtype, is_sink))
+    def make_uniform_seq_lens(batch, kv_len):
+        query_lens = "+".join(["1"] * batch)
+        kv_lens = "+".join([str(kv_len)] * batch)
+        return f"{batch},{query_lens},{kv_lens}"
 
-    configs = set(configs)  # remove duplicates
+    configs = set()
+    for num_q, num_kv, head_size, block_size in shapes:
+        for batch in batch_sizes:
+            for kv_len in kv_len_sweep:
+                # Size the pool so no block is aliased within the batch,
+                # otherwise KV reads hit cache and inflate bandwidth.
+                blocks_per_seq = (kv_len + block_size - 1) // block_size
+                num_blocks = max(2048, batch * blocks_per_seq)
+                kv_cache_bytes = (2 * num_blocks * block_size * num_kv *
+                                  head_size * 2)
+                if kv_cache_bytes > mem_budget_bytes:
+                    continue
+                configs.add(
+                    (make_uniform_seq_lens(batch, kv_len), (num_q, num_kv),
+                     head_size, block_size, output_dtype, soft_cap, num_blocks,
+                     fa_version, q_dtype, is_sink))
 
     def sort_key(x):
-        (seq_len, num_head, head_size, block_size, output_dtype_, soft_cap,
-         num_blocks, fa_version, q_dtype, is_sink) = x
-
-        return (seq_len, num_head, head_size, block_size, str(output_dtype_),
-                soft_cap if soft_cap is not None else -1, num_blocks,
-                fa_version, str(q_dtype), is_sink)
+        seq_len, num_head, head_size, block_size = x[0], x[1], x[2], x[3]
+        batch = int(seq_len.split(",")[0])
+        kv_len = int(seq_len.split(",")[2].split("+")[0])
+        return (num_head, head_size, block_size, batch, kv_len)
 
     configs = sorted(configs, key=sort_key)
 

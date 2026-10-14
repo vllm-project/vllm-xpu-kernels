@@ -5,6 +5,10 @@
   #include "csrc/xpu/attn/xe_2/fmha_xe2.h"
   #include "csrc/xpu/attn/xe_2/paged_decode_xe2.h"
 #endif
+#ifdef VLLM_XPU_ENABLE_XE3P
+  #include "csrc/xpu/attn/xe_3/fmha_xe3.h"
+  #include "csrc/xpu/attn/xe_3/paged_decode_xe3.h"
+#endif
 
 void cutlass_chunk_prefill_interface(
     sycl::queue& queue,
@@ -17,6 +21,7 @@ void cutlass_chunk_prefill_interface(
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -33,7 +38,7 @@ void cutlass_chunk_prefill_interface(
   if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel (also used as WA for XE3/XE3P)
-    cutlass_chunk_prefill_xe2(
+    vllm::xpu::xe2::cutlass_chunk_prefill_xe2(
         queue,
         query,
         key_cache,
@@ -60,7 +65,38 @@ void cutlass_chunk_prefill_interface(
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif
-  } else {
+  }
+#ifdef VLLM_XPU_ENABLE_XE3P
+  else if (vllm::xpu::is_xe3p_arch()) {
+    // Use XE3 cutlass kernel
+    vllm::xpu::xe3::cutlass_chunk_prefill_xe3(
+        queue,
+        query,
+        key_cache,
+        value_cache,
+        out,
+        block_table,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        q_scale,
+        k_scale,
+        v_scale,
+        sm_scale,
+        sm_sink_,
+        window_size_left,
+        window_size_right,
+        is_varlen,
+        is_paged,
+        is_causal,
+        is_local,
+        is_sink,
+        softmax_lse,
+        is_prefill);
+  }
+#endif
+  else {
     TORCH_CHECK(false, "Only XE2/XE3 cutlass kernel is supported currently.");
   }
 }
@@ -73,13 +109,13 @@ void cutlass_paged_decode_interface(
     at::Tensor& out,
     at::Tensor&
         temp_out,  // [batch, num_head_q, seq_q, head_size, num_kv_splits]
-    at::Tensor& exp_sums,    // [batch, num_head_q, seq_q, num_kv_splits]
-    at::Tensor& max_logits,  // [batch, num_head_q, seq_q, num_kv_splits]
+    at::Tensor& softmax_lse_accum,  // [batch, num_head_q, seq_q, num_kv_splits]
     const at::Tensor& block_table,
     const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k,
     int max_seqlen_q,
     int max_seqlen_k,
+    std::optional<const at::Tensor>& q_scale,
     std::optional<const at::Tensor>& k_scale,
     std::optional<const at::Tensor>& v_scale,
     double sm_scale,
@@ -94,19 +130,19 @@ void cutlass_paged_decode_interface(
     int num_kv_splits,
     std::optional<const at::Tensor>& is_prefill,
     std::optional<at::Tensor>& splits_per_seq,
-    std::optional<at::Tensor>& work_list) {
+    std::optional<at::Tensor>& work_list,
+    std::optional<at::Tensor>& softmax_lse) {
   if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel (also used as WA for XE3/XE3P)
-    cutlass_paged_decode_xe2(
+    vllm::xpu::xe2::cutlass_paged_decode_xe2(
         queue,
         query,
         key_cache,
         value_cache,
         out,
         temp_out,
-        exp_sums,
-        max_logits,
+        softmax_lse_accum,
         block_table,
         cu_seqlens_q,
         cu_seqlens_k,
@@ -126,11 +162,48 @@ void cutlass_paged_decode_interface(
         num_kv_splits,
         is_prefill,
         splits_per_seq,
-        work_list);
+        work_list,
+        softmax_lse);
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif
-  } else {
+  }
+#ifdef VLLM_XPU_ENABLE_XE3P
+  else if (vllm::xpu::is_xe3p_arch()) {
+    // Use XE3 cutlass kernel for XE3P (CRI simulator)
+    vllm::xpu::xe3::cutlass_paged_decode_xe3(
+        queue,
+        query,
+        key_cache,
+        value_cache,
+        out,
+        temp_out,
+        softmax_lse_accum,
+        block_table,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        q_scale,
+        k_scale,
+        v_scale,
+        sm_scale,
+        sm_sink_,
+        window_size_left,
+        window_size_right,
+        is_varlen,
+        is_paged,
+        is_causal,
+        is_local,
+        is_sink,
+        num_kv_splits,
+        is_prefill,
+        splits_per_seq,
+        work_list,
+        softmax_lse);
+  }
+#endif
+  else {
     TORCH_CHECK(false, "Only XE2/XE3 cutlass kernel is supported currently.");
   }
 }
