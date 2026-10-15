@@ -282,9 +282,9 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation,
                     25.0 if activation == "situ" else None),
             )
 
-    def run(hidden_states, topk_weights, topk_ids):
+    def run(hidden_states, topk_weights, topk_ids, impl=fused_moe_impl):
         output = torch.empty_like(ref_out)
-        fused_moe_impl.apply(
+        impl.apply(
             output=output,
             hidden_states=hidden_states,
             topk_weights=topk_weights,

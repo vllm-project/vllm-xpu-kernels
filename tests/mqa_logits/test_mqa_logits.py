@@ -286,7 +286,12 @@ def test_fp8_paged_mqa_logits_xpu(bs_nextn, device, use_graph):
                 max_model_len,
             )
 
-            def run(q_in, kv_in, weights_in):
+            def run(q_in,
+                    kv_in,
+                    weights_in,
+                    context_lens=context_lens,
+                    block_tables=block_tables,
+                    schedule_metadata=schedule_metadata):
                 return torch.ops._xpu_C.fp8_paged_mqa_logits(
                     q_in,
                     kv_in,
