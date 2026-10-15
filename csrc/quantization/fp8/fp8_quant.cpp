@@ -748,6 +748,16 @@ void per_token_group_quant_fp8(
 
   constexpr int THREADS_PER_GROUP = 32;
 
+  // An empty batch has nothing to quantize, and the host-side setup below
+  // recovers the hidden size as `input.numel() / num_tokens`, which traps
+  // (SIGFPE) rather than raising when `num_tokens` is 0 -- killing the process
+  // before any kernel is submitted. The CUDA implementation guards the same
+  // point; this restores parity. `input.numel() % group_size == 0` is checked
+  // above, so `num_groups == 0` here means `input.numel() == 0`.
+  if (num_groups == 0) {
+    return;
+  }
+
   int groups_per_block = 1;
 
   if (num_groups % 16 == 0) {
