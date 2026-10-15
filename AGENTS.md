@@ -11,6 +11,8 @@ for Intel GPUs (XPU). Kernels are written in SYCL/DPC++ and use oneDNN and
 SYCL-TLA where appropriate. The package registers PyTorch custom ops that vLLM
 can dispatch on Intel GPU hardware.
 
+## just a test
+
 ## Source Of Truth
 
 - Prefer current build metadata over stale docs when versions disagree:
