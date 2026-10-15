@@ -1,9 +1,9 @@
 name: nightly benchmark on Intel BMG
 
+# NOTE: The automatic/external triggers (workflow_run, pull_request:[labeled] and
+# issue_comment:[created]) are temporarily disabled while this benchmark workflow is
+# being redesigned. For now it can only be started manually via workflow_dispatch.
 on:
-  workflow_run:
-    workflows: ["run unit tests on Intel GPU."]
-    types: [completed]
   workflow_dispatch:
     inputs:
       benchmark_suite:
@@ -21,11 +21,6 @@ on:
         description: 'Accept this run''s results as the new main baseline (skips regression failure; only effective on the default branch)'
         required: false
         default: 'false'
-  pull_request:
-    branches: [main]
-    types: [labeled]
-  issue_comment:
-    types: [created]
 
 permissions:
   contents: read
@@ -480,34 +475,8 @@ jobs:
             --output-dir "${{ env.BENCHMARK_RESULTS_DIR }}" \
             ${FAIL_FLAG}
 
-      - name: Upload benchmark results to database
-        if: always()
-        continue-on-error: true
-        env:
-          DB_HOST: ${{ vars.DB_HOST || 'localhost' }}
-          DB_PORT: ${{ vars.DB_PORT || '5432' }}
-          DB_NAME: ${{ vars.DB_NAME || 'vllm_benchmarks' }}
-          DB_USER: ${{ vars.DB_USER || 'vllmadmin' }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          TRIGGER: ${{ needs.resolve-wheel-artifact.outputs.trigger }}
-          SHORT_SHA: ${{ needs.resolve-wheel-artifact.outputs.short_sha }}
-          PR_NUMBER: ${{ needs.resolve-wheel-artifact.outputs.pr_number }}
-          HEAD_BRANCH: ${{ needs.resolve-wheel-artifact.outputs.head_branch }}
-        run: |
-          TS=$(date -u +%y%m%d_%H%M)
-          if [ "${TRIGGER}" = "pr" ]; then
-            DOCKER_TAG="pr-${PR_NUMBER}-${SHORT_SHA}-${TS}"
-            RESULT_ID="pr-${PR_NUMBER}-${HEAD_BRANCH}-${SHORT_SHA}-${TS}"
-          else
-            DOCKER_TAG="nightly-${SHORT_SHA}-${TS}"
-            RESULT_ID="nightly-${SHORT_SHA}-${TS}"
-          fi
-          uv pip install "psycopg[binary]"
-          python tools/upload_benchmark_db.py \
-            --results-dir "${{ env.BENCHMARK_RESULTS_DIR }}/raw" \
-            --docker-tag "${DOCKER_TAG}" \
-            --node-label bmg \
-            --result-id "${RESULT_ID}"
+      # NOTE: the database upload has been moved into the dedicated upload-benchmark-db job
+      # below, which runs from the default branch and consumes the uploaded results artifact.
 
       - name: Add benchmark summary
         if: always()
@@ -575,6 +544,64 @@ jobs:
         with:
           path: benchmark-baseline
           key: benchmark-baseline-${{ github.event.repository.default_branch }}-${{ github.run_id }}
+
+  # Database upload. Runs after the benchmark job, checks out the default branch and
+  # consumes the uploaded results artifact, keeping the upload on default-branch tooling
+  # rather than the benchmark image.
+  upload-benchmark-db:
+    runs-on: self-hosted-bmg
+    needs: [resolve-wheel-artifact, run-benchmarks-bmg]
+    if: |
+      always() &&
+      needs.resolve-wheel-artifact.outputs.should_run == 'true' &&
+      needs.run-benchmarks-bmg.result != 'skipped'
+    steps:
+      - name: Clean workspace
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" . || true
+          git clean -ffdx || true
+          git reset --hard || true
+
+      - name: Checkout default branch (trusted)
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          set-safe-directory: true
+          clean: true
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-results-${{ needs.resolve-wheel-artifact.outputs.head_sha }}
+          path: benchmark-results
+
+      - name: Upload benchmark results to database
+        continue-on-error: true
+        env:
+          DB_HOST: ${{ vars.DB_HOST || 'localhost' }}
+          DB_PORT: ${{ vars.DB_PORT || '5432' }}
+          DB_NAME: ${{ vars.DB_NAME || 'vllm_benchmarks' }}
+          DB_USER: ${{ vars.DB_USER || 'vllmadmin' }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          TRIGGER: ${{ needs.resolve-wheel-artifact.outputs.trigger }}
+          SHORT_SHA: ${{ needs.resolve-wheel-artifact.outputs.short_sha }}
+          PR_NUMBER: ${{ needs.resolve-wheel-artifact.outputs.pr_number }}
+          HEAD_BRANCH: ${{ needs.resolve-wheel-artifact.outputs.head_branch }}
+        run: |
+          TS=$(date -u +%y%m%d_%H%M)
+          if [ "${TRIGGER}" = "pr" ]; then
+            DOCKER_TAG="pr-${PR_NUMBER}-${SHORT_SHA}-${TS}"
+            RESULT_ID="pr-${PR_NUMBER}-${HEAD_BRANCH}-${SHORT_SHA}-${TS}"
+          else
+            DOCKER_TAG="nightly-${SHORT_SHA}-${TS}"
+            RESULT_ID="nightly-${SHORT_SHA}-${TS}"
+          fi
+          uv pip install "psycopg[binary]"
+          python tools/upload_benchmark_db.py \
+            --results-dir "${{ env.BENCHMARK_RESULTS_DIR }}/raw" \
+            --docker-tag "${DOCKER_TAG}" \
+            --node-label bmg \
+            --result-id "${RESULT_ID}"
 
   finalize-check-bmg:
     runs-on: self-hosted-bmg
