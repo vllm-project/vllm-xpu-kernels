@@ -85,6 +85,16 @@ torch::Tensor cutlass_grouped_gemm_interface(
     int64_t N,
     int64_t K,
     int64_t num_experts);
+
+void moe_int4_gemv(
+    const torch::Tensor& A,
+    const torch::Tensor& B,
+    const torch::Tensor& B_scale,
+    const torch::Tensor& rows_per_expert,
+    torch::Tensor& D,
+    int64_t N,
+    int64_t K,
+    int64_t num_experts);
 #endif
 
 std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
