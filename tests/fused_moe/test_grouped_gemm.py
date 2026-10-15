@@ -39,8 +39,7 @@ MINI_PYTEST_PARAMS = {
     },
     "test_moe_int4_gemv": {
         "m,topk": [(1, 8)],
-        "n,k": [(1024, 2048)],
-        "e": [16],
+        "n,k,e": [(1024, 2048, 16)],
         "dtype": [torch.bfloat16],
     },
 }
@@ -694,13 +693,14 @@ def test_xe_grouped_gemm_block_fp8_wide_scales(m, n, k, pattern, dtype):
     torch.testing.assert_close(output, ref, rtol=3e-2, atol=atol)
 
 
-# Qwen3.6-35B-A3B expert projections (w13, w2) and a wide case.
-MOE_INT4_GEMV_NK = [(1024, 2048), (2048, 512), (5120, 8192)]
+# Qwen3.6-35B-A3B expert projections (w13, w2) with 16 and 256 experts, and
+# the Llama-4-scout shape used above (16 experts; 256 would need ~10 GiB).
+MOE_INT4_GEMV_NKE = [(1024, 2048, 16), (1024, 2048, 256), (2048, 512, 16),
+                     (2048, 512, 256), (5120, 8192, 16)]
 
 
 @pytest.mark.parametrize("m,topk", [(1, 8), (2, 4), (1, 1)])
-@pytest.mark.parametrize("n,k", MOE_INT4_GEMV_NK)
-@pytest.mark.parametrize("e", [16, 256])
+@pytest.mark.parametrize("n,k,e", MOE_INT4_GEMV_NKE)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
                          ids=format_tc)
 def test_moe_int4_gemv(m, topk, n, k, e, dtype):
@@ -717,7 +717,7 @@ def test_moe_int4_gemv(m, topk, n, k, e, dtype):
     random_exponents = torch.randint(-3, 4, (e, n, k // group_size),
                                      device=DEVICE)
     scale_B = torch.pow(2.0, random_exponents.float()).to(dtype)
-    input_B_int4 = torch.empty_like(input_B_uint4).to(torch.int8)
+    input_B_int4 = torch.empty_like(input_B_uint4, dtype=torch.int8)
     for i in range(e):
         input_B_int4[i] = implement_zp(input_B_uint4[i], None)
 
