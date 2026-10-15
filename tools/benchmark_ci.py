@@ -226,6 +226,8 @@ def _looks_like_metric(name: str) -> bool:
 
 def _unit_for_metric(name: str) -> str:
     lowered = name.lower()
+    if lowered.endswith("_ratio"):
+        return "ratio"
     if "tflops" in lowered:
         return "tflops"
     if "bandwidth" in lowered or "gb/s" in lowered or "gbs" in lowered:

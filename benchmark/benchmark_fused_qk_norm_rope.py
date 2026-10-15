@@ -125,7 +125,10 @@ def bench_case(shape: Shape, num_tokens: int, is_neox: bool,
                                         EPS, q_weight, k_weight, cache,
                                         is_neox, positions, h)
 
-    variants = [AUTO, *H_VALUES]
+    # Forced values above the head count are clamped by the kernel, so they
+    # would only re-time a smaller h under the wrong label.
+    total_qk_heads = shape.num_heads_q + shape.num_heads_kv
+    variants = [AUTO, *(h for h in H_VALUES if h <= total_qk_heads)]
     samples: dict[int, list[float]] = {h: [] for h in variants}
     for _ in range(rounds):
         order = variants[:]
@@ -175,7 +178,8 @@ def main() -> int:
                 for num_tokens in tokens:
                     t = bench_case(shape, num_tokens, is_neox, dtype,
                                    args.rounds)
-                    best_us, best_h = min((t[h], h) for h in H_VALUES)
+                    best_us, best_h = min(
+                        (t[h], h) for h in H_VALUES if h in t)
                     ratio = t[AUTO] / best_us
                     rows.append({
                         "shape": shape.name,
@@ -188,7 +192,8 @@ def main() -> int:
                         "auto_us": round(t[AUTO], 3),
                         "best_us": round(best_us, 3),
                         **{
-                            f"forced_h{h}_us": round(t[h], 3)
+                            f"forced_h{h}_us":
+                            round(t[h], 3) if h in t else ""
                             for h in H_VALUES
                         },
                         # "_time" keeps it a metric in benchmark_ci.py.
