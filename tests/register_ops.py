@@ -38,6 +38,13 @@ def fused_add_gemma_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
 
 
+def fused_rms_norm_gated(out: torch.Tensor, input: torch.Tensor,
+                         gate: torch.Tensor, weight: Optional[torch.Tensor],
+                         epsilon: float, activation: str) -> None:
+    torch.ops._C.fused_rms_norm_gated(out, input, gate, weight, epsilon,
+                                      activation)
+
+
 def layer_norm(out: torch.Tensor, input: torch.Tensor,
                weight: Optional[torch.Tensor], bias: Optional[torch.Tensor],
                epsilon: float) -> None:
