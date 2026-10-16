@@ -184,6 +184,159 @@ def quant_fp8_block_act(x: torch.Tensor):
         )
     return x_q, x_s
 
+
+_ACTIVATION_NAMES = {
+    "silu", "gelu", "gelu_tanh", "swigluoai", "relu2_no_mul", "swiglustep",
+    "situ"
+}
+
+
+def canonical_activation(activation) -> Optional[str]:
+    if "SWIGLUOAI" in str(activation):
+        return "swigluoai"
+    if not isinstance(activation, str):
+        return None
+    name = activation.lower().removesuffix("_and_mul")
+    return name if name in _ACTIVATION_NAMES else None
+
+
+_MOE_ACTIVATION_OPS = {
+    "silu": torch.ops._C.silu_and_mul,
+    "gelu": torch.ops._C.gelu_and_mul,
+    "gelu_tanh": torch.ops._C.gelu_tanh_and_mul,
+    "swigluoai": torch.ops._C.swigluoai_and_mul,
+    "relu2_no_mul": torch.ops._C.relu2_no_mul,
+    "swiglustep": torch.ops._C.swiglustep_and_mul,
+    "situ": torch.ops._C.situ_and_mul,
+}
+
+
+def moe_activation_op(activation):
+    op = _MOE_ACTIVATION_OPS.get(canonical_activation(activation))
+    if op is None:
+        raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
+    return op
+
+
+def _fused_silu_mul_per_block_quant(gate_up, group_size, scales, scale_ue8m0,
+                                    expert_scale_desc):
+    inter_size = gate_up.shape[-1] // 2
+    x_q = torch.empty((gate_up.shape[0], inter_size),
+                      device=gate_up.device,
+                      dtype=torch.float8_e4m3fn)
+    torch.ops._C.silu_and_mul_per_block_quant(
+        x_q,
+        gate_up,
+        scales,
+        group_size,
+        None,  # scale_ub
+        False,  # is_scale_transposed
+        scale_ue8m0,
+        expert_scale_desc,
+    )
+    return x_q
+
+
+def _fused_silu_mul_quant_mxfp8_xpu(gate_up,
+                                    expert_scale_desc=None,
+                                    scale_rows=0,
+                                    static_scale=None):
+    MXFP8_BLOCK_SIZE = 32
+    inter_size = gate_up.shape[-1] // 2
+    assert inter_size % MXFP8_BLOCK_SIZE == 0
+
+    x_s = _alloc_mx_act_scale(gate_up, inter_size // MXFP8_BLOCK_SIZE,
+                              expert_scale_desc, scale_rows)
+    x_q = _fused_silu_mul_per_block_quant(gate_up, MXFP8_BLOCK_SIZE, x_s, True,
+                                          expert_scale_desc)
+    if expert_scale_desc is None:
+        x_s = x_s.to(torch.float8_e8m0fnu)
+    return x_q, x_s
+
+
+def _fused_silu_mul_quant_fp8block_xpu(gate_up,
+                                       expert_scale_desc=None,
+                                       scale_rows=0,
+                                       static_scale=None):
+    assert expert_scale_desc is None, \
+        "fp8block activation scales do not use the padded per-expert layout"
+    inter_size = gate_up.shape[-1] // 2
+    x_s = torch.empty((gate_up.shape[0], inter_size // 128),
+                      device=gate_up.device,
+                      dtype=torch.float32)
+    x_q = _fused_silu_mul_per_block_quant(gate_up, 128, x_s, False, None)
+    return x_q, x_s
+
+
+def _fused_silu_mul_quant_mxfp4_xpu(gate_up,
+                                    expert_scale_desc=None,
+                                    scale_rows=0,
+                                    static_scale=None):
+    if expert_scale_desc is not None:
+        return None
+    MXFP4_BLOCK_SIZE = 32
+    inter_size = gate_up.shape[-1] // 2
+    if inter_size % MXFP4_BLOCK_SIZE != 0:
+        return None
+
+    x_q = torch.empty((gate_up.shape[0], inter_size // 2),
+                      device=gate_up.device,
+                      dtype=torch.uint8)
+    x_s = torch.empty((gate_up.shape[0], inter_size // MXFP4_BLOCK_SIZE),
+                      device=gate_up.device,
+                      dtype=torch.float32)
+    torch.ops._C.silu_and_mul_mxfp4_quant(x_q, gate_up, x_s, MXFP4_BLOCK_SIZE,
+                                          1e-10)
+    return x_q.view(torch.float4_e2m1fn_x2), x_s.to(
+        dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+
+
+def _fused_silu_mul_quant_fp8_xpu(gate_up,
+                                  expert_scale_desc=None,
+                                  scale_rows=0,
+                                  static_scale=None):
+    if static_scale is None or expert_scale_desc is not None:
+        return None
+    inter_size = gate_up.shape[-1] // 2
+    x_q = torch.empty((gate_up.shape[0], inter_size),
+                      device=gate_up.device,
+                      dtype=torch.float8_e4m3fn)
+    x_s = static_scale.float().reshape(1)
+    torch.ops._C.silu_and_mul_quant(x_q, gate_up, x_s)
+    return x_q, x_s
+
+
+_FUSED_ACT_QUANT_KERNELS = {
+    ("silu", "mxfp8"): _fused_silu_mul_quant_mxfp8_xpu,
+    ("silu", "mxfp4_fp8"): _fused_silu_mul_quant_mxfp8_xpu,
+    ("silu", "fp8block"): _fused_silu_mul_quant_fp8block_xpu,
+    ("silu", "mxfp4"): _fused_silu_mul_quant_mxfp4_xpu,
+    ("silu", "fp8"): _fused_silu_mul_quant_fp8_xpu,
+}
+
+
+def fused_act_quant_xpu(activation,
+                        gate_up,
+                        recipe,
+                        expert_scale_desc=None,
+                        scale_rows=0,
+                        static_scale=None):
+    fn = _FUSED_ACT_QUANT_KERNELS.get(
+        (canonical_activation(activation), recipe))
+    if fn is None:
+        return None
+    return fn(gate_up, expert_scale_desc, scale_rows, static_scale)
+
+
+def fused_silu_mul_quant_act_xpu(gate_up,
+                                 recipe,
+                                 expert_scale_desc=None,
+                                 scale_rows=0,
+                                 static_scale=None):
+    return fused_act_quant_xpu("silu", gate_up, recipe, expert_scale_desc,
+                               scale_rows, static_scale)
+
+
 def _as_e8m0(s):
         """Reinterpret uint8 scale bits as float8_e8m0fnu for correct
         conversion to float32 (2^(e-127)).  float8_e8m0fnu tensors are
@@ -241,27 +394,10 @@ def dequant_wei(wei, wei_scale, recipe):
 
 
 def ref_fused_moe_activation(act_output, gemm1_output, activation):
-    if activation == "silu":
-        torch.ops._C.silu_and_mul(act_output, gemm1_output)
-    elif activation == "gelu":
-        torch.ops._C.gelu_and_mul(act_output, gemm1_output)
-    elif activation == "gelu_tanh":
-        torch.ops._C.gelu_tanh_and_mul(act_output, gemm1_output)
-    elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
-        torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
-    elif activation == "relu2_no_mul":
-        torch.ops._C.relu2_no_mul(act_output, gemm1_output)
-    elif activation == "swiglustep":
-        torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
-    elif activation == "situ":
-        torch.ops._C.situ_and_mul(
-            act_output,
-            gemm1_output,
-            4.0,
-            25.0,
-        )
+    if canonical_activation(activation) == "situ":
+        torch.ops._C.situ_and_mul(act_output, gemm1_output, 4.0, 25.0)
     else:
-        raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
+        moe_activation_op(activation)(act_output, gemm1_output)
 
 
 def ref_fused_moe(recipe,
@@ -414,7 +550,8 @@ def ref_fused_moe(recipe,
                                             max=gemm1_clamp_limit)
 
     # ---- activation (unchanged from _apply_kernel) ----
-    inter_size_scale = 2 if activation == "relu2_no_mul" else 1
+    inter_size_scale = 2 if canonical_activation(
+        activation) == "relu2_no_mul" else 1
     act_output = torch.empty(
         (num_moe_inputs, inter_size * inter_size_scale),
         dtype=compute_dtype,

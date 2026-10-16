@@ -39,7 +39,8 @@ void per_token_group_quant_mxfp4(
   const auto moe_layout = vllm::make_moe_scale_layout(
       output_s,
       expert_scale_desc,
-      static_cast<int>(input.size(-1) / group_size));
+      static_cast<int>(input.size(-1) / group_size),
+      input.size(-1) > 0 ? input.numel() / input.size(-1) : 0);
   TORCH_CHECK(
       output_q.scalar_type() == at::ScalarType::Byte, "output_q must be uint8");
 

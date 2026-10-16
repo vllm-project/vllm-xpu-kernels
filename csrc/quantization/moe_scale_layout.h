@@ -9,7 +9,7 @@ namespace vllm {
 
 // Describes the per-expert, MN-major, M-padded-to-4 scale-A surface that the
 // mxfp grouped-GEMM mainloop indexes (see
-// grouped_gemm/xe_3/collective/moe_array_mma_mxfp.hpp: expert e's block is
+// grouped_gemm/xe_3/kernel/xe_moe_gemm_greedy.hpp: expert e's block is
 // based at sum_{i<e} round_up_4(rows[i]) * scale_k and has leading dim
 // round_up_4(rows[e])).
 //
@@ -77,7 +77,8 @@ struct MoEScaleLayout {
 inline MoEScaleLayout make_moe_scale_layout(
     const torch::Tensor& output_s,
     const c10::optional<torch::Tensor>& expert_scale_desc,
-    int scale_k) {
+    int scale_k,
+    int64_t num_rows) {
   MoEScaleLayout layout{};
   if (!expert_scale_desc.has_value()) {
     return layout;
@@ -98,9 +99,25 @@ inline MoEScaleLayout make_moe_scale_layout(
       output_s.is_contiguous(),
       "expert_scale_desc requires a contiguous output_s surface");
 
+  const int64_t num_experts = desc.size(1) - 1;
+  const int64_t required = (num_rows + 3 * num_experts) * scale_k;
+  TORCH_CHECK(
+      output_s.numel() >= required,
+      "output_s is too small for the padded MoE scale surface: need at least ",
+      required,
+      " elements ((num_rows ",
+      num_rows,
+      " + 3 * num_experts ",
+      num_experts,
+      ") * scale_k ",
+      scale_k,
+      "), got ",
+      output_s.numel(),
+      ". Size it with mxfp_scale_padded_rows(num_rows, num_experts).");
+
   layout.desc = desc.data_ptr<int32_t>();
   layout.scale_e8m0 = reinterpret_cast<uint8_t*>(output_s.data_ptr());
-  layout.num_experts = static_cast<int>(desc.size(1)) - 1;
+  layout.num_experts = static_cast<int>(num_experts);
   layout.scale_k = scale_k;
   return layout;
 }

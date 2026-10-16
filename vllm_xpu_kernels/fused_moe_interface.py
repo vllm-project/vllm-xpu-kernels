@@ -14,7 +14,8 @@ except ImportError as e:
     FUSEDMOE_UNAVAILABLE_REASON = str(e)
     FUSEDMOE_AVAILABLE = False
 
-from .moe_utils import (dequant_fp8_block_act, dequant_mxfp8,
+from .moe_utils import (canonical_activation, dequant_fp8_block_act,
+                        dequant_mxfp8, fused_act_quant_xpu, moe_activation_op,
                         mxfp_scale_padded_rows, quant_act_xpu, ref_fused_moe)
 
 REF_FUSED_MOE_ENV = "VLLM_XPU_FUSED_MOE_USE_REF"
@@ -182,27 +183,10 @@ def compute_num_tokens_per_block(num_tokens, num_experts_per_node):
 
 
 def fused_moe_activation(act_output, gemm1_output, activation):
-    if activation == "silu":
-        torch.ops._C.silu_and_mul(act_output, gemm1_output)
-    elif activation == "gelu":
-        torch.ops._C.gelu_and_mul(act_output, gemm1_output)
-    elif activation == "gelu_tanh":
-        torch.ops._C.gelu_tanh_and_mul(act_output, gemm1_output)
-    elif activation == "swigluoai" or ("SWIGLUOAI" in str(activation)):
-        torch.ops._C.swigluoai_and_mul(act_output, gemm1_output, 1.702, 7.0)
-    elif activation == "relu2_no_mul":
-        torch.ops._C.relu2_no_mul(act_output, gemm1_output)
-    elif activation == "swiglustep":
-        torch.ops._C.swiglustep_and_mul(act_output, gemm1_output, 7.0)
-    elif activation == "situ":
-        torch.ops._C.situ_and_mul(
-            act_output,
-            gemm1_output,
-            4.0,
-            25.0,
-        )
+    if canonical_activation(activation) == "situ":
+        torch.ops._C.situ_and_mul(act_output, gemm1_output, 4.0, 25.0)
     else:
-        raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
+        moe_activation_op(activation)(act_output, gemm1_output)
 
 def implement_zp(qweight):
     # change u4 to s4 to avoid zero point in gemm kernel
@@ -337,7 +321,11 @@ class XpuFusedMoe:
         self.activation = activation
         self.activation_situ_beta = activation_situ_beta
         self.activation_situ_linear_beta = activation_situ_linear_beta
-        if self.activation == "situ":
+        # Resolve aliases once so the activation-specific branches agree with
+        # the op moe_activation_op() picks.
+        act_name = canonical_activation(self.activation)
+        self._is_situ = act_name == "situ"
+        if self._is_situ:
             import math
 
             if self.activation_situ_beta is None:
@@ -346,7 +334,7 @@ class XpuFusedMoe:
                 raise ValueError("SITU activation_situ_beta must be finite")
             if self.activation_situ_beta <= 0:
                 raise ValueError("SITU activation_situ_beta must be positive")
-        self.inter_size_scale = 2 if self.activation == "relu2_no_mul" else 1
+        self.inter_size_scale = 2 if act_name == "relu2_no_mul" else 1
         self.num_experts = num_experts
         self.ep_rank = ep_rank
         self.ep_size = ep_size
@@ -358,24 +346,7 @@ class XpuFusedMoe:
         self.gemm1_clamp_limit = gemm1_clamp_limit
         self.recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
                                    is_block_fp8)
-        if self.activation == "silu":
-            self.act_func = torch.ops._C.silu_and_mul
-        elif self.activation == "gelu":
-            self.act_func = torch.ops._C.gelu_and_mul
-        elif self.activation == "gelu_tanh":
-            self.act_func = torch.ops._C.gelu_tanh_and_mul
-        elif self.activation == "swigluoai" \
-            or ("SWIGLUOAI" in str(self.activation)):
-            self.act_func = torch.ops._C.swigluoai_and_mul
-        elif self.activation == "relu2_no_mul":
-            self.act_func = torch.ops._C.relu2_no_mul
-        elif self.activation == "swiglustep":
-            self.act_func = torch.ops._C.swiglustep_and_mul
-        elif self.activation == "situ":
-            self.act_func = torch.ops._C.situ_and_mul
-        else:
-            raise ValueError(
-                f"Unsupported FusedMoe activation: {self.activation}.")
+        self.act_func = moe_activation_op(self.activation)
 
         self.expert_map = expert_map
         if self.expert_map is None and self.ep_size > 1:
@@ -505,10 +476,14 @@ class XpuFusedMoe:
         # remap_hidden_states kernel maps those to expert 0, so the garbage
         # activations in padding rows reach a real expert and produce NaNs that
         # poison the whole MoE output. Zero them before the native remap.
+        # masked_fill has no XPU kernel for the fp8 / packed-fp4 activation
+        # dtypes, so 1-byte activations are cleared through a uint8 view (an
+        # all-zero bit pattern is +0 in every one of those formats).
         invalid_padding_rows = (topk_ids < 0).all(dim=1)
-        hidden_states = hidden_states.masked_fill(
-            invalid_padding_rows.unsqueeze(1), 0
-        )
+        fill_view = hidden_states.view(torch.uint8) \
+            if hidden_states.element_size() == 1 else hidden_states
+        hidden_states = fill_view.masked_fill(
+            invalid_padding_rows.unsqueeze(1), 0).view(hidden_states.dtype)
 
         rows_per_expert = torch.zeros((self.num_experts),
                                                 dtype=torch.int32,
@@ -554,7 +529,7 @@ class XpuFusedMoe:
         # The grouped-GEMM writes ptr_D as its policy ElementOutput, so the
         # scratch buffers must match that dtype rather than the caller's
         # output dtype. Every policy emits bf16 except the fp16 one (see
-        # csrc/xpu/grouped_gemm/xe_3/collective/moe_dtype_policy.hpp).
+        # csrc/xpu/grouped_gemm/xe_3/runner/moe_types.hpp).
         gemm_output_dtype = (torch.float16 if output.dtype == torch.float16
                              else torch.bfloat16)
         gemm1_output = torch.empty((num_moe_inputs, 2 * self.inter_size),
@@ -583,21 +558,30 @@ class XpuFusedMoe:
             gate.clamp_(max=self.gemm1_clamp_limit)
             up.clamp_(min=-self.gemm1_clamp_limit, max=self.gemm1_clamp_limit)
 
-        # act
-        act_output = torch.empty(
-            (num_moe_inputs, self.inter_size * self.inter_size_scale),
-            dtype=gemm1_output.dtype,
-            device=gemm1_output.device)
-        if self.activation == "situ":
-            self.act_func(
-                act_output,
-                gemm1_output,
-                self.activation_situ_beta,
-                -1.0 if self.activation_situ_linear_beta is None else
-                self.activation_situ_linear_beta,
-            )
-        else:
-            self.act_func(act_output, gemm1_output)
+        # act. When the recipe has a fused SiLU+quant kernel the bf16
+        # intermediate is never materialized, so the activation and the gemm2
+        # input quantization cost a single pass instead of two.
+        fused_act = None
+        if act_quant:
+            fused_act = fused_act_quant_xpu(self.activation, gemm1_output,
+                                            self.recipe, expert_scale_desc,
+                                            padded_scale_rows,
+                                            static_scale=a2_scale)
+        if fused_act is None:
+            act_output = torch.empty(
+                (num_moe_inputs, self.inter_size * self.inter_size_scale),
+                dtype=gemm1_output.dtype,
+                device=gemm1_output.device)
+            if self._is_situ:
+                self.act_func(
+                    act_output,
+                    gemm1_output,
+                    self.activation_situ_beta,
+                    -1.0 if self.activation_situ_linear_beta is None else
+                    self.activation_situ_linear_beta,
+                )
+            else:
+                self.act_func(act_output, gemm1_output)
 
         ########### gemm2 ##################
         gemm2_output = torch.empty((num_moe_inputs, gemm_hidden_size),
@@ -607,9 +591,12 @@ class XpuFusedMoe:
             # mx recipes get the padded MN-major surface straight out of the
             # quant kernel: the rows are already grouped per expert here, so
             # the descriptor tells it where each scale belongs.
-            act_output, gemm2_act_scale = quant_act_xpu(
-                act_output, self.recipe, expert_scale_desc, padded_scale_rows,
-                static_scale=a2_scale)
+            if fused_act is not None:
+                act_output, gemm2_act_scale = fused_act
+            else:
+                act_output, gemm2_act_scale = quant_act_xpu(
+                    act_output, self.recipe, expert_scale_desc,
+                    padded_scale_rows, static_scale=a2_scale)
             if self._uses_xe2:
                 if self.is_mxfp8:
                     act_output = dequant_mxfp8(

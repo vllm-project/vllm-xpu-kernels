@@ -116,7 +116,8 @@ void silu_and_mul_per_block_quant(
     int64_t group_size,
     std::optional<torch::Tensor> scale_ub,
     bool is_scale_transposed,
-    bool scale_ue8m0);
+    bool scale_ue8m0,
+    std::optional<torch::Tensor> expert_scale_desc);
 
 void silu_and_mul_mxfp4_quant(
     torch::Tensor& out,

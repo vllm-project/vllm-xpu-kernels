@@ -1,72 +1,10 @@
 #include <torch/all.h>
+#include <limits>
 
-#include <cstdlib>
-
-#include "collective/moe_dtype_policy.hpp"
+#include "runner/greedy_dispatch.hpp"
 #include "csrc/utils.h"
 
 namespace gpu::cutlass_kernel {
-
-namespace grouped_gemm {
-template <class moe_policy>
-void kernel_functor(
-    sycl::queue& stream,
-    void* ptr_A,
-    void* ptr_A_scale,
-    void* ptr_B,
-    void* ptr_B_scale,
-    void* ptr_bias,
-    void* ptr_D,
-    void* rows_per_expert,
-    int64_t N,
-    int64_t K,
-    int64_t groups);
-
-// Work-group tiles for the high-occupancy ("prefill", avg_tokens > 32) path.
-// Ids match XE3_GG_FORCE_TILE for profiling overrides.
-enum class PrefillTile : int {
-  k256x256 = 0,
-  k256x128 = 1,
-  k128x256 = 2,
-  k128x128 = 3,
-};
-
-// Dtype families that share a tile-selection rule on the prefill path.
-enum class PrefillFamily { kBF16, kMXFP8, kMXFP4 };
-
-// Selects the prefill work-group tile. Only two tiles are ever optimal:
-// 256x256 (best arithmetic intensity) and 128x256 (packs the 32 Xe cores more
-// fully when 256x256's last wave is short). The choice follows one rule per
-// dtype family:
-//
-// BF16, MXFP8, and MXFP4 keep their base tile while it keeps the cores busy,
-// then fall back to
-//      128x256 once the final wave drops below a utilization threshold. MXFP4
-//      is 4-bit and compute-bound, so it tolerates a shorter tail wave (>=0.85)
-//      than the more wave-quantization-sensitive BF16 (>=0.90).
-inline PrefillTile pick_prefill_tile(
-    PrefillFamily family, int64_t M_total, int64_t N, int64_t groups) {
-  // Manual override for tuning/profiling.
-  if (const char* env = std::getenv("XE3_GG_FORCE_TILE")) {
-    return static_cast<PrefillTile>(std::atoi(env));
-  }
-
-  constexpr int kCores = 32;
-  const double kMinUtil = (family == PrefillFamily::kMXFP4) ? 0.85 : 0.90;
-  const int64_t M_g = M_total / (groups > 0 ? groups : 1);
-  auto ceil_div = [](int64_t a, int64_t b) { return (a + b - 1) / b; };
-  int64_t tiles_256 =
-      groups * ceil_div(M_g > 0 ? M_g : 1, 256) * ceil_div(N, 256);
-  int64_t waves_256 = ceil_div(tiles_256, kCores);
-  double util_256 =
-      static_cast<double>(tiles_256) / static_cast<double>(waves_256 * kCores);
-
-  if (util_256 >= kMinUtil) {
-    return PrefillTile::k256x256;
-  }
-  return PrefillTile::k128x256;
-}
-}  // namespace grouped_gemm
 
 /* gemm2(group_A, w2, output, offset) */
 
@@ -84,7 +22,6 @@ at::Tensor grouped_gemm_func(
   auto& dpcpp_queue =
       at::xpu::getCurrentXPUStream(ptr_A.device().index()).queue();
   auto A_dtype = ptr_A.dtype();
-  auto avg_tokens_cnt = ptr_A.size(0) / groups;
 
   // Every stride is rebuilt from {N, K, groups} via make_cute_packed_stride()
   // and the tensors' own strides are never read, so a mismatched layout is
@@ -103,12 +40,16 @@ at::Tensor grouped_gemm_func(
   // boundary, and cutlass reports a violation by aborting the process rather
   // than returning, so reject it here instead.
   const int64_t b_bits = ptr_B.dtype().itemsize() * 8 / (b_is_fp4 ? 2 : 1);
+  const int64_t a_bits = ptr_A.dtype().itemsize() * 8 / (a_is_fp4 ? 2 : 1);
   const int64_t d_bits = ptr_D.dtype().itemsize() * 8;
   TORCH_CHECK(
       (N * b_bits) % 128 == 0 && (N * d_bits) % 128 == 0,
       "N must be a multiple of 128 bits of the weight and output element type, "
       "so N must be a multiple of 32 for 4-bit, 16 for 8-bit and 8 for 16-bit "
       "weights");
+  TORCH_CHECK(
+      K % (128 / a_bits) == 0 && (!b_is_fp4 || K % (128 / b_bits) == 0),
+      "K must provide 128-bit aligned activation and packed-weight rows");
 
   TORCH_CHECK(
       ptr_A.dim() == 2 && ptr_A.size(1) == A_K && ptr_A.is_contiguous(),
@@ -141,8 +82,10 @@ at::Tensor grouped_gemm_func(
 
   TORCH_CHECK(
       rows_per_expert.dim() == 1 && rows_per_expert.numel() == groups &&
-          rows_per_expert.scalar_type() == at::kInt,
-      "rows_per_expert must be a 1D int32 tensor with one entry per expert");
+          rows_per_expert.scalar_type() == at::kInt &&
+          rows_per_expert.is_contiguous(),
+      "rows_per_expert must be a contiguous 1D int32 tensor with one entry "
+      "per expert");
 
   // cutlass_grouped_gemm_xe3() has already expanded the caller's
   // [num_experts, N] bias into one fp32 row per token (ElementC).
@@ -207,159 +150,54 @@ at::Tensor grouped_gemm_func(
     }
   }
 
-#define CALL_KERNEL_WITH_POLICY(POLICY)                \
-  grouped_gemm::kernel_functor<POLICY>(                \
-      dpcpp_queue,                                     \
-      ptr_A.data_ptr(),                                \
-      ptr_A_scale ? ptr_A_scale->data_ptr() : nullptr, \
-      ptr_B.data_ptr(),                                \
-      ptr_B_scale ? ptr_B_scale->data_ptr() : nullptr, \
-      ptr_bias ? ptr_bias->data_ptr() : nullptr,       \
-      ptr_D.data_ptr(),                                \
-      rows_per_expert.data_ptr(),                      \
-      N,                                               \
-      K,                                               \
-      groups)
+  TORCH_CHECK(
+      N <= std::numeric_limits<int>::max() &&
+          K <= std::numeric_limits<int>::max() &&
+          groups <= std::numeric_limits<int>::max(),
+      "Xe3 greedy GEMM requires N, K and num_experts to fit in int32");
 
-// Dispatches the high-occupancy path to the wave-quantization-selected tile.
-// FAMILY is a dtype prefix providing FAMILY##_policy (256x256) plus the
-// _256x128 / _128x256 / _128x128 tile variants. FAM is the PrefillFamily tag.
-#define DISPATCH_PREFILL_TILE(FAMILY, FAM)                           \
-  switch (grouped_gemm::pick_prefill_tile(                           \
-      grouped_gemm::PrefillFamily::FAM, ptr_A.size(0), N, groups)) { \
-    case grouped_gemm::PrefillTile::k256x128: {                      \
-      using moe_policy = grouped_gemm::FAMILY##_256x128_policy;      \
-      CALL_KERNEL_WITH_POLICY(moe_policy);                           \
-      break;                                                         \
-    }                                                                \
-    case grouped_gemm::PrefillTile::k128x256: {                      \
-      using moe_policy = grouped_gemm::FAMILY##_128x256_policy;      \
-      CALL_KERNEL_WITH_POLICY(moe_policy);                           \
-      break;                                                         \
-    }                                                                \
-    case grouped_gemm::PrefillTile::k128x128: {                      \
-      using moe_policy = grouped_gemm::FAMILY##_128x128_policy;      \
-      CALL_KERNEL_WITH_POLICY(moe_policy);                           \
-      break;                                                         \
-    }                                                                \
-    default: {                                                       \
-      using moe_policy = grouped_gemm::FAMILY##_policy;              \
-      CALL_KERNEL_WITH_POLICY(moe_policy);                           \
-    }                                                                \
-  }
+#define CALL_GREEDY(DTYPE)                                       \
+  grouped_gemm::launch_greedy<grouped_gemm::GreedyDtype::DTYPE>( \
+      dpcpp_queue,                                               \
+      {ptr_A.data_ptr(),                                         \
+       ptr_A_scale ? ptr_A_scale->data_ptr() : nullptr,          \
+       ptr_B.data_ptr(),                                         \
+       ptr_B_scale ? ptr_B_scale->data_ptr() : nullptr,          \
+       ptr_bias ? ptr_bias->data_ptr<float>() : nullptr,         \
+       ptr_D.data_ptr(),                                         \
+       rows_per_expert.data_ptr<int>(),                          \
+       int(N),                                                   \
+       int(K),                                                   \
+       int(groups),                                              \
+       int64_t(ptr_A.size(0))})
 
   if (A_dtype == at::kBFloat16) {
-    if (avg_tokens_cnt > 32) {
-      DISPATCH_PREFILL_TILE(moe_bf16, kBF16);
-    } else if (avg_tokens_cnt > 4) {
-      using moe_policy = grouped_gemm::moe_bf16_mid_policy;
-      CALL_KERNEL_WITH_POLICY(moe_policy);
-    } else {
-      if (K >= 1024) {
-        using moe_policy = grouped_gemm::moe_bf16_decode_k64_policy;
-        CALL_KERNEL_WITH_POLICY(moe_policy);
-      } else {
-        using moe_policy = grouped_gemm::moe_bf16_decode_policy;
-        CALL_KERNEL_WITH_POLICY(moe_policy);
-      }
-    }
+    CALL_GREEDY(BF16);
   } else if (A_dtype == at::kHalf) {
-    if (avg_tokens_cnt > 32) {
-      using moe_policy = grouped_gemm::moe_fp16_policy;
-      CALL_KERNEL_WITH_POLICY(moe_policy);
-    } else if (avg_tokens_cnt > 4) {
-      using moe_policy = grouped_gemm::moe_fp16_mid_policy;
-      CALL_KERNEL_WITH_POLICY(moe_policy);
-    } else {
-      using moe_policy = grouped_gemm::moe_fp16_decode_policy;
-      CALL_KERNEL_WITH_POLICY(moe_policy);
-    }
+    CALL_GREEDY(FP16);
   } else if (
       A_dtype == at::kFloat8_e4m3fn && ptr_A_scale &&
       ptr_A_scale->dtype() == at::kFloat8_e8m0fnu) {
-    // After cutlass PR #570 the optimized block-scaled MXFP mainloop
-    // handles unaligned M directly (the 2D scale loader rounds the
-    // surface width up to 4-byte alignment internally), so we no longer
-    // need the scalar scale-load fallback.
     if (ptr_B.dtype() == at::kFloat4_e2m1fn_x2) {
       // W4A8: MXFP8 activation (A=e4m3) x MXFP4 weight (B=e2m1). Same e8m0
       // block scales as the symmetric recipes; only the weight is 4-bit.
-      if (avg_tokens_cnt > 32) {
-        using moe_policy = grouped_gemm::moe_w4a8_policy;
-        CALL_KERNEL_WITH_POLICY(moe_policy);
-      } else {
-        using moe_policy = grouped_gemm::moe_w4a8_mid_policy;
-        CALL_KERNEL_WITH_POLICY(moe_policy);
-      }
-    } else if (avg_tokens_cnt > 32) {
-      DISPATCH_PREFILL_TILE(moe_mxfp8, kMXFP8);
-    } else if (avg_tokens_cnt > 4) {
-      using moe_policy = grouped_gemm::moe_mxfp8_mid_policy;
-      CALL_KERNEL_WITH_POLICY(moe_policy);
+      CALL_GREEDY(W4A8);
     } else {
-      using moe_policy = grouped_gemm::moe_mxfp8_decode_policy;
-      CALL_KERNEL_WITH_POLICY(moe_policy);
+      CALL_GREEDY(MXFP8);
     }
   } else if (
       A_dtype == at::kFloat4_e2m1fn_x2 && ptr_A_scale &&
       ptr_A_scale->dtype() == at::kFloat8_e8m0fnu) {
-    if (avg_tokens_cnt > 32) {
-      if (K <= 1024 && N >= 1024) {
-        if (avg_tokens_cnt <= 2048) {
-          using moe_policy = grouped_gemm::moe_mxfp4_256x128_policy;
-          CALL_KERNEL_WITH_POLICY(moe_policy);
-        } else {
-          using moe_policy = grouped_gemm::moe_mxfp4_downproj_wide_policy;
-          CALL_KERNEL_WITH_POLICY(moe_policy);
-        }
-      } else {
-        DISPATCH_PREFILL_TILE(moe_mxfp4, kMXFP4);
-      }
-    } else if (avg_tokens_cnt > 4) {
-      using moe_policy = grouped_gemm::moe_mxfp4_mid_policy;
-      CALL_KERNEL_WITH_POLICY(moe_policy);
-    } else {
-      using moe_policy = grouped_gemm::moe_mxfp4_decode_policy;
-      CALL_KERNEL_WITH_POLICY(moe_policy);
-    }
+    CALL_GREEDY(MXFP4);
   } else if (
       A_dtype == at::kFloat8_e4m3fn && ptr_A_scale &&
       ptr_A_scale->dtype() == at::kFloat) {
+    // Per-tensor FP8 carries a single scalar A scale [1] and one scalar per
+    // expert [E]; anything else is the 128x128 block-scaled recipe.
     if (ptr_A_scale->numel() == 1) {
-      // Per-tensor FP8: A scale is a single scalar [1], B scale is one scalar
-      // per expert [E].
-      if (avg_tokens_cnt > 32) {
-        using moe_policy = grouped_gemm::moe_fp8pertensor_policy;
-        CALL_KERNEL_WITH_POLICY(moe_policy);
-      } else if (avg_tokens_cnt > 4) {
-        using moe_policy = grouped_gemm::moe_fp8pertensor_mid_policy;
-        CALL_KERNEL_WITH_POLICY(moe_policy);
-      } else {
-        if (K <= 512) {
-          using moe_policy =
-              grouped_gemm::moe_fp8pertensor_decode_shortk_policy;
-          CALL_KERNEL_WITH_POLICY(moe_policy);
-        } else if (N <= 1024) {
-          using moe_policy =
-              grouped_gemm::moe_fp8pertensor_decode_narrow_policy;
-          CALL_KERNEL_WITH_POLICY(moe_policy);
-        } else if (K <= 1024) {
-          using moe_policy = grouped_gemm::moe_fp8pertensor_decode_lowk_policy;
-          CALL_KERNEL_WITH_POLICY(moe_policy);
-        } else {
-          using moe_policy = grouped_gemm::moe_fp8pertensor_decode_policy;
-          CALL_KERNEL_WITH_POLICY(moe_policy);
-        }
-      }
-    } else if (avg_tokens_cnt > 32) {
-      using moe_policy = grouped_gemm::moe_fp8block_policy;
-      CALL_KERNEL_WITH_POLICY(moe_policy);
-    } else if (avg_tokens_cnt > 4) {
-      using moe_policy = grouped_gemm::moe_fp8block_mid_policy;
-      CALL_KERNEL_WITH_POLICY(moe_policy);
+      CALL_GREEDY(FP8Tensor);
     } else {
-      using moe_policy = grouped_gemm::moe_fp8block_decode_policy;
-      CALL_KERNEL_WITH_POLICY(moe_policy);
+      CALL_GREEDY(FP8Block);
     }
   } else {
     TORCH_CHECK(
@@ -368,6 +206,7 @@ at::Tensor grouped_gemm_func(
         "dtypes, but got: ",
         A_dtype);
   }
+#undef CALL_GREEDY
   return ptr_D;
 }
 

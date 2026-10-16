@@ -788,7 +788,8 @@ void per_token_group_quant_fp8(
   const auto moe_layout = vllm::make_moe_scale_layout(
       output_s,
       expert_scale_desc,
-      static_cast<int>(input.size(-1) / group_size));
+      static_cast<int>(input.size(-1) / group_size),
+      input.size(-1) > 0 ? input.numel() / input.size(-1) : 0);
   const bool is_column_major =
       !moe_layout.enabled() && output_s.stride(0) < output_s.stride(1);
   const int scale_num_rows = output_s.size(1);

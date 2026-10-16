@@ -17,7 +17,7 @@ from vllm_xpu_kernels.moe_utils import quant_act_xpu, quant_fp8_pertensor_act
 
 pytestmark = pytest.mark.skipif(
     not torch.xpu.is_available() or
-    not torch.ops._xpu_C.is_xe3p_arch(0),
+    (not torch.ops._xpu_C.is_cri(0) and not torch.ops._xpu_C.is_nvl_p(0)),
     reason="XE3 tests only run on CRI or NVL_P.")
 
 # Device on which the reference tensors are built and the reference
