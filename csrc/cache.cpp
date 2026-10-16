@@ -353,10 +353,10 @@ class concat_and_cache_mla_kernel {
       const scalar_t* __restrict__ k_pe,
       cache_t* __restrict__ kv_cache,
       const int64_t* __restrict__ slot_mapping,
-      const int block_stride,
-      const int entry_stride,
-      const int kv_c_stride,
-      const int k_pe_stride,
+      const int64_t block_stride,
+      const int64_t entry_stride,
+      const int64_t kv_c_stride,
+      const int64_t k_pe_stride,
       const int kv_lora_rank,
       const int pe_dim,
       const int block_size,
@@ -381,32 +381,34 @@ class concat_and_cache_mla_kernel {
     if (slot_idx < 0) {
       return;
     }
-    const int block_idx = slot_idx / block_size;
-    const int block_offset = slot_idx % block_size;
+    // 64-bit: one layer's cache view can exceed 2^31 elements (e.g. a 5 GiB
+    // bf16 GLM-5.3 latent cache); 32-bit offsets wrap and write out of bounds.
+    const int64_t block_idx = slot_idx / block_size;
+    const int64_t block_offset = slot_idx % block_size;
 
     auto copy = [&](const scalar_t* __restrict__ src,
                     cache_t* dst,
-                    int src_stride,
-                    int dst_stride,
+                    int64_t src_stride,
+                    int64_t dst_stride,
                     int size,
                     int offset) {
+      const scalar_t* __restrict__ src_row = src + token_idx * src_stride;
+      cache_t* dst_row =
+          dst + block_idx * block_stride + block_offset * entry_stride + offset;
       for (int i = item_id.get_local_id(0); i < size;
            i += item_id.get_local_range(0)) {
-        const int src_idx = token_idx * src_stride + i;
-        const int dst_idx =
-            block_idx * block_stride + block_offset * entry_stride + i + offset;
         if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
-          dst[dst_idx] = src[src_idx];
+          dst_row[i] = src_row[i];
         } else {
           using fp8_dtype = std::conditional_t<
               kv_dt == Fp8KVCacheDataType::kFp8E5M2,
               at::Float8_e5m2,
               at::Float8_e4m3fn>;
           const float fp8_max = vllm::fp8::quant_type_max_v<fp8_dtype>;
-          float x = static_cast<float>(src[src_idx]) / *scale;
+          float x = static_cast<float>(src_row[i]) / *scale;
           x = sycl::fmax(-fp8_max, sycl::fmin(x, fp8_max));
           auto fp8_val = static_cast<fp8_dtype>(x);
-          dst[dst_idx] = sycl::bit_cast<cache_t>(fp8_val);
+          dst_row[i] = sycl::bit_cast<cache_t>(fp8_val);
         }
       }
     };
@@ -421,10 +423,10 @@ class concat_and_cache_mla_kernel {
   cache_t* __restrict__ kv_cache;  // [num_blocks, block_size, (kv_lora_rank +
                                    // pe_dim)]
   const int64_t* __restrict__ slot_mapping;  // [num_tokens]
-  const int block_stride;                    //
-  const int entry_stride;                    //
-  const int kv_c_stride;                     //
-  const int k_pe_stride;                     //
+  const int64_t block_stride;                //
+  const int64_t entry_stride;                //
+  const int64_t kv_c_stride;                 //
+  const int64_t k_pe_stride;                 //
   const int kv_lora_rank;                    //
   const int pe_dim;                          //
   const int block_size;                      //
@@ -1275,10 +1277,10 @@ void concat_and_cache_mla(
     TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
   }
 
-  int kv_c_stride = kv_c.stride(0);
-  int k_pe_stride = k_pe.stride(0);
-  int block_stride = kv_cache.stride(0);
-  int entry_stride = kv_cache.stride(1);
+  int64_t kv_c_stride = kv_c.stride(0);
+  int64_t k_pe_stride = k_pe.stride(0);
+  int64_t block_stride = kv_cache.stride(0);
+  int64_t entry_stride = kv_cache.stride(1);
 
   const at::DeviceGuard device_guard(kv_c.device());
   auto& queue = vllm::xpu::vllmGetQueue();
