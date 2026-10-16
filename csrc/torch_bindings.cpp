@@ -344,6 +344,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("gather_cache", torch::kXPU, &gather_cache);
 
+  // Gather cache entries from src_cache to dst with token-granular
+  // seq_starts. Same schema and semantics as vLLM's CUDA cp_gather_cache.
+  cache_ops.def(
+      "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
+      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
+  cache_ops.impl("cp_gather_cache", torch::kXPU, &cp_gather_cache);
+
   // Convert between FP8 and FP16/BF16/FP32 formats with scaling
   cache_ops.def(
       "convert_fp8(Tensor! dst, Tensor src, "

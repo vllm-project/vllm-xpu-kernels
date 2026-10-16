@@ -68,6 +68,11 @@ MINI_PYTEST_PARAMS = {
         "block_size": [8],
         "max_seq_len": [4],
     },
+    "test_cp_gather_cache": {
+        "block_size": [1, 16],
+        "max_seq_len": [40],
+        "dtype": [torch.bfloat16],
+    },
     "test_swap_blocks": {
         "direction": [("xpu", "cpu")],
         "num_mappings": [8],
@@ -553,6 +558,74 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
 
     ops.gather_cache(src_cache, dst, block_table, cu_seq_lens, batch_size)
     torch.testing.assert_close(dst, expected)
+
+
+@pytest.mark.parametrize("entry_size,row_size", [(576, 576), (1088, 1088),
+                                                 (576, 1088), (7, 9)])
+@pytest.mark.parametrize("block_size", [1, 16, 64])
+@pytest.mark.parametrize("num_blocks", [512])
+@pytest.mark.parametrize("max_seq_len", [300])
+@pytest.mark.parametrize("batch_size", [5])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32, torch.uint8])
+@pytest.mark.parametrize("use_seq_starts", [False, True])
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_cp_gather_cache(entry_size, row_size, block_size, num_blocks,
+                         max_seq_len, batch_size, dtype, use_seq_starts,
+                         device):
+    """cp_gather_cache: token-granular seq_starts, strided cache rows."""
+    seed_everything(0)
+    torch.set_default_device(device)
+    if dtype == torch.uint8:
+        full_cache = torch.randint(0,
+                                   256, (num_blocks, block_size, row_size),
+                                   dtype=dtype)
+    else:
+        full_cache = torch.randn(num_blocks, block_size, row_size, dtype=dtype)
+    # entry_size < row_size exercises the strided (non-contiguous) path,
+    # e.g. reading the 576-wide prefix of a padded 1088-wide MLA cache row.
+    src_cache = full_cache[..., :entry_size]
+
+    seq_lens = torch.randint(0, max_seq_len + 1, (batch_size, ),
+                             dtype=torch.int32)
+    if use_seq_starts:
+        # Arbitrary, block-unaligned start inside each request's table.
+        seq_starts = torch.randint(0,
+                                   3 * block_size + 1, (batch_size, ),
+                                   dtype=torch.int32)
+    else:
+        seq_starts = None
+    cu_seq_lens = torch.zeros(batch_size + 1, dtype=torch.int32)
+    cu_seq_lens[1:] = seq_lens.cumsum(0)
+    total_tokens = int(cu_seq_lens[-1].item())
+
+    max_blocks = (max_seq_len + 4 * block_size) // block_size + 1
+    assert max_blocks <= num_blocks
+    block_table = torch.stack([
+        torch.randperm(num_blocks, dtype=torch.int32)[:max_blocks]
+        for _ in range(batch_size)
+    ])
+
+    expected = torch.empty(total_tokens, entry_size, dtype=dtype)
+    for b in range(batch_size):
+        n = int(seq_lens[b].item())
+        if n == 0:
+            continue
+        begin = 0 if seq_starts is None else int(seq_starts[b].item())
+        pos = torch.arange(begin, begin + n, device=device)
+        blocks = block_table[b, pos // block_size].long()
+        out0 = int(cu_seq_lens[b].item())
+        expected[out0:out0 + n] = src_cache[blocks, pos % block_size]
+
+    dst = torch.full((total_tokens, entry_size), 0, dtype=dtype)
+
+    opcheck(
+        torch.ops._C_cache_ops.cp_gather_cache,
+        (src_cache, dst, block_table, cu_seq_lens, batch_size, seq_starts),
+    )
+    ops.cp_gather_cache(src_cache, dst, block_table, cu_seq_lens, batch_size,
+                        seq_starts)
+    torch.testing.assert_close(dst, expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("kv_lora_rank", [512])
