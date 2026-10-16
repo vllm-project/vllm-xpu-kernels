@@ -7,7 +7,7 @@ from typing import Optional
 import pytest
 import torch
 
-from tests.utils import format_tc
+from tests.utils import format_tc, run_with_xpu_graph
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 NUM_HEADS = [(8, 2)]
@@ -1766,11 +1766,13 @@ def test_decode_paged_kv_split_k_accuracy(
 @pytest.mark.parametrize("num_heads", [(8, 1), (8, 2), (8, 4), (16, 2)])
 @pytest.mark.parametrize("num_splits_kv", [1, 8])
 @pytest.mark.parametrize("kv_len", [5, 2048])
+@pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
 def test_decode_paged_kv_sink_row_mapping(
     num_heads: tuple[int, int],
     num_splits_kv: int,
     kv_len: int,
+    use_graph: bool,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -1797,23 +1799,31 @@ def test_decode_paged_kv_sink_row_mapping(
     sink = torch.tensor([20.0 + (h % head_group_q)
                          for h in range(num_query_heads)],
                         dtype=dtype)
+    seq_k = torch.tensor([kv_len], dtype=torch.int32)
 
-    out, softmax_lse = flash_attn_varlen_func(
-        query,
-        key_cache,
-        value_cache,
-        1,
-        cu_query_lens,
-        kv_len,
-        softmax_scale=scale,
-        causal=False,
-        block_table=block_tables,
-        window_size=(-1, -1),
-        s_aux=sink,
-        num_splits_kv=num_splits_kv,
-        return_softmax_lse=True,
-        seqused_k=torch.tensor([kv_len], dtype=torch.int32),
-    )
+    def run(q, k, v):
+        return flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            1,
+            cu_query_lens,
+            kv_len,
+            softmax_scale=scale,
+            causal=False,
+            block_table=block_tables,
+            window_size=(-1, -1),
+            s_aux=sink,
+            num_splits_kv=num_splits_kv,
+            return_softmax_lse=True,
+            seqused_k=seq_k,
+        )
+
+    if use_graph:
+        out, softmax_lse = run_with_xpu_graph(
+            run, [query, key_cache, value_cache])
+    else:
+        out, softmax_lse = run(query, key_cache, value_cache)
 
     # Each row must recover its own sink, not a neighbour's.
     recovered = (softmax_lse.float().flatten() - 20.0).round().int().cpu()
@@ -1858,6 +1868,7 @@ def test_decode_paged_kv_sink_row_mapping(
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=format_tc)
 @pytest.mark.parametrize("num_layers", NUM_LAYERS)
 @pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
+@pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
 def test_varlen_with_cross_layer_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -1868,6 +1879,7 @@ def test_varlen_with_cross_layer_paged_kv(
     num_layers: int,
     window_size: tuple[int, int],
     fp8_dtype: Optional[torch.dtype],
+    use_graph: bool,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -1925,22 +1937,30 @@ def test_varlen_with_cross_layer_paged_kv(
         maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
         maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
 
-    output = flash_attn_varlen_func(maybe_quantized_query,
-                                    maybe_quantized_key_cache,
-                                    maybe_quantized_value_cache,
-                                    max_query_len,
-                                    cu_query_lens,
-                                    max_kv_len,
-                                    seqused_k=seq_k,
-                                    k_descale=k_descale.expand(scale_shape)
-                                    if k_descale is not None else None,
-                                    v_descale=v_descale.expand(scale_shape)
-                                    if v_descale is not None else None,
-                                    softmax_scale=scale,
-                                    causal=False,
-                                    block_table=block_tables,
-                                    window_size=window_size,
-                                    s_aux=None)
+    def run(q, k, v):
+        return flash_attn_varlen_func(q,
+                                      k,
+                                      v,
+                                      max_query_len,
+                                      cu_query_lens,
+                                      max_kv_len,
+                                      seqused_k=seq_k,
+                                      k_descale=k_descale.expand(scale_shape)
+                                      if k_descale is not None else None,
+                                      v_descale=v_descale.expand(scale_shape)
+                                      if v_descale is not None else None,
+                                      softmax_scale=scale,
+                                      causal=False,
+                                      block_table=block_tables,
+                                      window_size=window_size,
+                                      s_aux=None)
+
+    kv_inputs = [
+        maybe_quantized_query, maybe_quantized_key_cache,
+        maybe_quantized_value_cache
+    ]
+    output = (run_with_xpu_graph(run, kv_inputs)
+              if use_graph else run(*kv_inputs))
 
     ref_output = ref_paged_attn(
         query=query.contiguous(),
@@ -2152,6 +2172,7 @@ def test_decode_paged_kv_large_surface_height(
 @pytest.mark.parametrize("num_layers", NUM_LAYERS)
 @pytest.mark.parametrize("window_size", [(-1, -1), (127, -1)])
 @pytest.mark.parametrize("fp8_dtype", FP8KV, ids=format_tc)
+@pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
 def test_decode_with_cross_layer_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -2162,6 +2183,7 @@ def test_decode_with_cross_layer_paged_kv(
     num_layers: int,
     window_size: tuple[int, int],
     fp8_dtype: Optional[torch.dtype],
+    use_graph: bool,
 ) -> None:
     torch.set_default_device("xpu")
     torch.xpu.set_device("xpu:0")
@@ -2219,22 +2241,30 @@ def test_decode_with_cross_layer_paged_kv(
         maybe_quantized_key_cache = (key_cache / k_descale).to(fp8_dtype)
         maybe_quantized_value_cache = (value_cache / v_descale).to(fp8_dtype)
 
-    output = flash_attn_varlen_func(maybe_quantized_query,
-                                    maybe_quantized_key_cache,
-                                    maybe_quantized_value_cache,
-                                    max_query_len,
-                                    cu_query_lens,
-                                    max_kv_len,
-                                    seqused_k=seq_k,
-                                    softmax_scale=scale,
-                                    causal=False,
-                                    block_table=block_tables,
-                                    k_descale=k_descale.expand(scale_shape)
-                                    if k_descale is not None else None,
-                                    v_descale=v_descale.expand(scale_shape)
-                                    if v_descale is not None else None,
-                                    window_size=window_size,
-                                    s_aux=None)
+    def run(q, k, v):
+        return flash_attn_varlen_func(q,
+                                      k,
+                                      v,
+                                      max_query_len,
+                                      cu_query_lens,
+                                      max_kv_len,
+                                      seqused_k=seq_k,
+                                      softmax_scale=scale,
+                                      causal=False,
+                                      block_table=block_tables,
+                                      k_descale=k_descale.expand(scale_shape)
+                                      if k_descale is not None else None,
+                                      v_descale=v_descale.expand(scale_shape)
+                                      if v_descale is not None else None,
+                                      window_size=window_size,
+                                      s_aux=None)
+
+    kv_inputs = [
+        maybe_quantized_query, maybe_quantized_key_cache,
+        maybe_quantized_value_cache
+    ]
+    output = (run_with_xpu_graph(run, kv_inputs)
+              if use_graph else run(*kv_inputs))
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=maybe_quantized_key_cache.contiguous(),
@@ -2273,6 +2303,7 @@ def test_decode_with_cross_layer_paged_kv(
 @pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @pytest.mark.parametrize("is_sink", [False, True])
 @pytest.mark.parametrize("num_blocks", [4096])
+@pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
 def test_spec_decode_uniform_qlen(
     q_len: int,
@@ -2284,6 +2315,7 @@ def test_spec_decode_uniform_qlen(
     dtype: torch.dtype,
     is_sink: bool,
     num_blocks: int,
+    use_graph: bool,
 ) -> None:
     import vllm_xpu_kernels.flash_attn_interface as fai
 
@@ -2329,20 +2361,26 @@ def test_spec_decode_uniform_qlen(
         used["q_len"] = args[0].shape[0] // (args[4].numel() - 1)
         return orig_spec(*args, **kwargs)
 
+    def run(q, k, v):
+        return flash_attn_varlen_func(q,
+                                      k,
+                                      v,
+                                      q_len,
+                                      cu_query_lens,
+                                      max_kv_len,
+                                      seqused_k=seq_k,
+                                      softmax_scale=scale,
+                                      causal=True,
+                                      block_table=block_tables,
+                                      window_size=list(window_size),
+                                      s_aux=sink)
+
     fai._spec_decode_varlen_fwd = _traced
     try:
-        output = flash_attn_varlen_func(query,
-                                        key_cache,
-                                        value_cache,
-                                        q_len,
-                                        cu_query_lens,
-                                        max_kv_len,
-                                        seqused_k=seq_k,
-                                        softmax_scale=scale,
-                                        causal=True,
-                                        block_table=block_tables,
-                                        window_size=list(window_size),
-                                        s_aux=sink)
+        if use_graph:
+            output = run_with_xpu_graph(run, [query, key_cache, value_cache])
+        else:
+            output = run(query, key_cache, value_cache)
     finally:
         fai._spec_decode_varlen_fwd = orig_spec
 
@@ -2444,28 +2482,38 @@ def _build_sink_window_trigger(dtype, seed=0):
     sink = torch.full((nq,), _SINKWIN_SINK_VALUE, device="cpu")
     return q.to(dtype), k.to(dtype), v.to(dtype), block_table, sink.to(dtype)
 
-def _run_sink_window_kernel(q, k, v, block_table, sink):
+def _run_sink_window_kernel(q, k, v, block_table, sink, use_graph=False):
     kv_len = _SINKWIN_KV_LEN
     cu = torch.tensor([0, 1], dtype=torch.int32, device="xpu")
     seqused_k = torch.tensor([kv_len], dtype=torch.int32, device="xpu")
-    return flash_attn_varlen_func(
-        q.to("xpu"), k.to("xpu"), v.to("xpu"),
-        1,                       # max_seqlen_q (pure decode)
-        cu,
-        kv_len,                  # max_seqlen_k
-        seqused_k=seqused_k,
-        softmax_scale=_SINKWIN_SCALE,
-        causal=True,
-        block_table=block_table.to("xpu"),
-        window_size=[_SINKWIN_WINDOW_LEFT, 0],
-        s_aux=sink.to("xpu") if sink is not None else None,
-    )
+    q, k, v = q.to("xpu"), k.to("xpu"), v.to("xpu")
+    block_table = block_table.to("xpu")
+    sink = sink.to("xpu") if sink is not None else None
+
+    def run(q_in):
+        return flash_attn_varlen_func(
+            q_in, k, v,
+            1,                       # max_seqlen_q (pure decode)
+            cu,
+            kv_len,                  # max_seqlen_k
+            seqused_k=seqused_k,
+            softmax_scale=_SINKWIN_SCALE,
+            causal=True,
+            block_table=block_table,
+            window_size=[_SINKWIN_WINDOW_LEFT, 0],
+            s_aux=sink,
+        )
+
+    if not use_graph:
+        return run(q)
+    return run_with_xpu_graph(run, [q])
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half], ids=format_tc)
 @pytest.mark.parametrize("seed", [0, 1, 2])
+@pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
-def test_decode_sink_sliding_window_no_nan(dtype, seed):
+def test_decode_sink_sliding_window_no_nan(dtype, seed, use_graph):
     """Synthetic sink + small sliding-window decode reproducing the ``inf*0``
     NaN on the unpatched kernel (512 NaNs, 5/5 seeds). The patched kernel must
     emit no NaN/Inf and a finite, bounded output.
@@ -2478,7 +2526,8 @@ def test_decode_sink_sliding_window_no_nan(dtype, seed):
     torch.xpu.set_device("xpu:0")
 
     q, k, v, block_table, sink = _build_sink_window_trigger(dtype, seed)
-    output = _run_sink_window_kernel(q, k, v, block_table, sink).float()
+    output = _run_sink_window_kernel(q, k, v, block_table, sink,
+                                     use_graph=use_graph).float()
 
     n_nan = int(torch.isnan(output).sum())
     assert n_nan == 0, (f"kernel produced {n_nan} NaN (sink + sliding window "
@@ -2492,4 +2541,9 @@ def test_decode_sink_sliding_window_no_nan(dtype, seed):
     assert output.abs().max().item() <= v_absmax + 1e-1, (
         f"output magnitude {output.abs().max().item():.3f} exceeds |v| "
         f"{v_absmax:.3f} -> not a valid softmax average")
+
+    if use_graph:
+        eager_output = _run_sink_window_kernel(q, k, v, block_table,
+                                               sink).float()
+        torch.testing.assert_close(output, eager_output, atol=0, rtol=0)
     torch.xpu.empty_cache()

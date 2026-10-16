@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import numpy as np
+import pytest
 import torch
 from torch._prims_common import TensorLikeType
 
@@ -159,6 +160,44 @@ class TcLimitedFormatter:
 
 def format_tc(val):
     return TcLimitedFormatter()(val)
+
+
+def run_with_xpu_graph(fn, live_inputs, restore=()):
+    """Capture ``fn(*inputs)`` into an XPUGraph and return the replay output.
+
+    Mirrors vLLM's CUDAGraphWrapper: eager warmup, then capture on the current
+    stream into a graph pool. Capture runs on zeroed copies of ``live_inputs``
+    that are refilled only before replay, so a kernel that baked captured
+    values in (or read them on the host) fails the caller's checks. Tensors in
+    ``restore`` are updated in place by ``fn`` and are reset after warmup so
+    the replay starts from the original state.
+    """
+    if not hasattr(torch.xpu, "XPUGraph"):
+        pytest.skip("torch.xpu.XPUGraph is not available")
+
+    # empty_strided keeps the exact strides of strided views (e.g. KV caches).
+    static_inputs = [
+        torch.empty_strided(t.shape, t.stride(), dtype=t.dtype,
+                            device=t.device).zero_() for t in live_inputs
+    ]
+    snapshots = [t.clone() for t in restore]
+
+    fn(*static_inputs)
+    torch.xpu.synchronize()
+    for t, snapshot in zip(restore, snapshots):
+        t.copy_(snapshot)
+
+    graph = torch.xpu.XPUGraph()
+    with torch.xpu.graph(graph,
+                         pool=torch.xpu.graph_pool_handle(),
+                         stream=torch.xpu.current_stream()):
+        static_out = fn(*static_inputs)
+
+    for static, live in zip(static_inputs, live_inputs):
+        static.copy_(live)
+    graph.replay()
+    torch.xpu.synchronize()
+    return static_out
 
 
 def _convert_from_fp8(
