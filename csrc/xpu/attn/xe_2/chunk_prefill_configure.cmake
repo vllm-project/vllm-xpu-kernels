@@ -69,15 +69,24 @@ function(fmha_forward_configure FILENAME_SUFFIX)
   set(BOOL_FLAG_false "f")
   set(BOOL_FLAG_true "t")
 
-  set(headsize_list "64" "96" "128" "192" "256" "512")
+  set(headsize_list
+      "64"
+      "80"
+      "96"
+      "128"
+      "192"
+      "256"
+      "512")
   set(policy_list
       "chunk_policy_head64"
+      "chunk_policy_head80"
       "chunk_policy_head96"
       "chunk_policy_head128"
       "chunk_policy_head192"
       "chunk_policy_head256"
       "chunk_policy_head512"
       "chunk_policy_head64_b16"
+      "chunk_policy_head80_b16"
       "chunk_policy_head96_b16"
       "chunk_policy_head128_b16"
       "chunk_policy_head192_b16"
@@ -86,12 +95,14 @@ function(fmha_forward_configure FILENAME_SUFFIX)
 
   # Map headsize to policy names
   set(std_policy_64 "chunk_policy_head64")
+  set(std_policy_80 "chunk_policy_head80")
   set(std_policy_96 "chunk_policy_head96")
   set(std_policy_128 "chunk_policy_head128")
   set(std_policy_192 "chunk_policy_head192")
   set(std_policy_256 "chunk_policy_head256")
   set(std_policy_512 "chunk_policy_head512")
   set(b16_policy_64 "chunk_policy_head64_b16")
+  set(b16_policy_80 "chunk_policy_head80_b16")
   set(b16_policy_96 "chunk_policy_head96_b16")
   set(b16_policy_128 "chunk_policy_head128_b16")
   set(b16_policy_192 "chunk_policy_head192_b16")
