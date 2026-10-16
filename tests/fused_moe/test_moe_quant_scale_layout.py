@@ -87,7 +87,7 @@ def test_quant_act_moe_scale_layout(rows_per_expert_list, hidden, recipe,
 
 @pytest.mark.parametrize("rows_per_expert_list", ROWS_PER_EXPERT)
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
-@pytest.mark.parametrize("recipe", ["mxfp8", "mxfp4_fp8"])
+@pytest.mark.parametrize("recipe", ["mxfp8", "mxfp4_fp8", "mxfp4"])
 @pytest.mark.parametrize("dtype", DTYPES)
 @torch.inference_mode()
 def test_fused_silu_mul_quant_act_moe_scale_layout(rows_per_expert_list,
@@ -160,8 +160,15 @@ def test_fused_silu_mul_quant_act_declines_unfusable_recipes():
     assert fused_silu_mul_quant_act_xpu(gate_up, "int4") is None
     assert fused_silu_mul_quant_act_xpu(gate_up, "bf16") is None
     assert fused_silu_mul_quant_act_xpu(gate_up, "fp8") is None
+    # Per-tensor fp8 has no padded per-expert scale surface, so a MoE
+    # descriptor must make it decline even with a static scale.
     desc = torch.zeros((2, 3), dtype=torch.int32, device=KERNEL_DEVICE)
-    assert fused_silu_mul_quant_act_xpu(gate_up, "mxfp4", desc, 16) is None
+    static_scale = torch.ones(1, dtype=torch.float32, device=KERNEL_DEVICE)
+    assert fused_silu_mul_quant_act_xpu(gate_up,
+                                        "fp8",
+                                        desc,
+                                        mxfp_scale_padded_rows(16, 2),
+                                        static_scale=static_scale) is None
 
 
 @torch.inference_mode()
