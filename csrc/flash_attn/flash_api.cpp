@@ -1,6 +1,7 @@
 #include "pytorch_shim.h"
 
 #include "core/registration.h"
+#include "mla_qv_varlen.h"
 #include "xpu/attn/attn_interface.h"
 #include "xpu/attn/paged_kv_utils.h"
 #include "utils.h"
@@ -464,6 +465,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "varlen_fwd",
       torch::kXPU,
       make_pytorch_shim(&FLASH_NAMESPACE::mha_varlen_fwd));
+
+  // Absorbed-MLA (FA3 q_v) varlen attention over a paged KV cache.
+  ops.def(
+      "mla_qv_varlen_fwd(Tensor q, Tensor q_v, Tensor k, Tensor v, "
+      "Tensor!? out, Tensor cu_seqlens_q, Tensor seqused_k, "
+      "Tensor block_table, float softmax_scale, bool is_causal, "
+      "bool return_softmax_lse) -> Tensor[]");
+  ops.impl("mla_qv_varlen_fwd", torch::kXPU, &vllm::mla_qv::mla_qv_varlen_fwd);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
