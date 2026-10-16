@@ -22,6 +22,12 @@ USE_MXFP4_FP8_ENV = "VLLM_XPU_FUSED_MOE_USE_MXFP4_FP8"
 # MXFP8 / block-FP8 use the native Xe2 path by default.
 NATIVE_MXFP8_ENV = "VLLM_XPU_FUSED_MOE_NATIVE_MXFP8"
 NATIVE_BLOCK_FP8_ENV = "VLLM_XPU_FUSED_MOE_NATIVE_BLOCK_FP8"
+# Int4 grouped GEMMs with at most INT4_GEMV_MAX_ROWS rows (one decode token
+# with top-8 routing) run moe_int4_gemv instead of the grouped GEMM, whose
+# fixed cost per call dominates at that size. Disable with
+# VLLM_XPU_FUSED_MOE_INT4_GEMV=0.
+INT4_GEMV_ENV = "VLLM_XPU_FUSED_MOE_INT4_GEMV"
+INT4_GEMV_MAX_ROWS = 8
 
 def _is_env_enabled(env_name: str, default: str = "0") -> bool:
     value = os.environ.get(env_name, default).strip().upper()
@@ -268,6 +274,8 @@ class XpuFusedMoe:
         self.ep_size = ep_size
         self.is_fp8 = is_fp8
         self.is_int4 = is_int4
+        self._use_int4_gemv = is_int4 and _env_native_default_on(
+            INT4_GEMV_ENV)
         self.is_mxfp4 = is_mxfp4
         self.is_mxfp8 = is_mxfp8
         self.is_block_fp8 = is_block_fp8
@@ -357,6 +365,29 @@ class XpuFusedMoe:
                             expert_map=expert_map,
                             a1q_scale=a1q_scale)
 
+    def _grouped_gemm(self, A, A_scale, B, B_scale, bias, D,
+                      rows_per_expert, N, K):
+        if (self._use_int4_gemv and A_scale is None and bias is None
+                and A.shape[0] <= INT4_GEMV_MAX_ROWS
+                and A.dtype in (torch.float16, torch.bfloat16)
+                and B_scale is not None and B_scale.dtype == A.dtype
+                and B_scale.dim() == 3 and B_scale.is_contiguous()
+                and K % 512 == 0 and (K // B_scale.shape[-1]) % 32 == 0):
+            torch.ops._xpu_C.moe_int4_gemv(A, B, B_scale, rows_per_expert, D,
+                                           N, K, self.num_experts)
+            return
+        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
+            ptr_A=A,
+            ptr_A_scale=A_scale,
+            ptr_B=B,
+            ptr_B_scale=B_scale,
+            ptr_bias=bias,
+            ptr_D=D,
+            rows_per_expert=rows_per_expert,
+            N=N,
+            K=K,
+            num_experts=self.num_experts)
+
     def _apply_kernel(
         self,
         output,
@@ -431,17 +462,9 @@ class XpuFusedMoe:
         gemm1_output = torch.empty((num_moe_inputs, 2 * self.inter_size),
                                 dtype=output.dtype,
                                 device=output.device)
-        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
-            ptr_A=remapped_hidden_states,
-            ptr_A_scale=remapped_scales,
-            ptr_B=self.w13,
-            ptr_B_scale=self.gemm1_wei_scales,
-            ptr_bias=self.w13_bias,
-            ptr_D=gemm1_output,
-            rows_per_expert=rows_per_expert,
-            N=2 * self.inter_size,
-            K=hidden_size,
-            num_experts=self.num_experts)
+        self._grouped_gemm(remapped_hidden_states, remapped_scales, self.w13,
+                           self.gemm1_wei_scales, self.w13_bias, gemm1_output,
+                           rows_per_expert, 2 * self.inter_size, hidden_size)
 
         # Apply swiglu_limit clamping before activation
         if self.gemm1_clamp_limit is not None and self.gemm1_clamp_limit > 0:
@@ -485,17 +508,10 @@ class XpuFusedMoe:
                 gemm2_act_scale = None
         else:
             gemm2_act_scale = None
-        torch.ops._xpu_C.cutlass_grouped_gemm_interface(
-            ptr_A=act_output,
-            ptr_A_scale=gemm2_act_scale,
-            ptr_B=self.w2,
-            ptr_B_scale=self.gemm2_wei_scales,
-            ptr_bias=self.w2_bias,
-            ptr_D=gemm2_output,
-            rows_per_expert=rows_per_expert,
-            N=hidden_size,
-            K=self.inter_size * self.inter_size_scale,
-            num_experts=self.num_experts)
+        self._grouped_gemm(act_output, gemm2_act_scale, self.w2,
+                           self.gemm2_wei_scales, self.w2_bias, gemm2_output,
+                           rows_per_expert, hidden_size,
+                           self.inter_size * self.inter_size_scale)
 
         torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
                                     unpermuted_row_to_permuted_row,

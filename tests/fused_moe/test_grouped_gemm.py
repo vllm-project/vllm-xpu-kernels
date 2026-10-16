@@ -36,7 +36,12 @@ MINI_PYTEST_PARAMS = {
         "topk": [1],
         "dtype": [torch.bfloat16],
         "has_bias": [True]
-    }
+    },
+    "test_moe_int4_gemv": {
+        "m,topk": [(1, 8)],
+        "n,k,e": [(1024, 2048, 16)],
+        "dtype": [torch.bfloat16],
+    },
 }
 
 
@@ -686,3 +691,58 @@ def test_xe_grouped_gemm_block_fp8_wide_scales(m, n, k, pattern, dtype):
     # the floor is set from the output magnitude instead of using atol=0.
     atol = float(ref.abs().max()) * 2**-8
     torch.testing.assert_close(output, ref, rtol=3e-2, atol=atol)
+
+
+# Qwen3.6-35B-A3B expert projections (w13, w2) with 16 and 256 experts, and
+# the Llama-4-scout shape used above (16 experts; 256 would need ~10 GiB).
+MOE_INT4_GEMV_NKE = [(1024, 2048, 16), (1024, 2048, 256), (2048, 512, 16),
+                     (2048, 512, 256), (5120, 8192, 16)]
+
+
+@pytest.mark.parametrize("m,topk", [(1, 8), (2, 4), (1, 1)])
+@pytest.mark.parametrize("n,k,e", MOE_INT4_GEMV_NKE)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
+def test_moe_int4_gemv(m, topk, n, k, e, dtype):
+    """moe_int4_gemv matches the dequantized reference and the int4 grouped
+    GEMM it replaces for decode-sized calls (one or two rows per expert)."""
+    seed_everything(7)
+    group_size = 128
+    total_m = m * topk
+    input_A = torch.randn((total_m, k), dtype=dtype, device=DEVICE)
+    input_B_uint4 = torch.randint(0,
+                                  0xff, [e, n, k // 2],
+                                  dtype=torch.uint8,
+                                  device=DEVICE)
+    random_exponents = torch.randint(-3, 4, (e, n, k // group_size),
+                                     device=DEVICE)
+    scale_B = torch.pow(2.0, random_exponents.float()).to(dtype)
+    input_B_int4 = torch.empty_like(input_B_uint4, dtype=torch.int8)
+    for i in range(e):
+        input_B_int4[i] = implement_zp(input_B_uint4[i], None)
+
+    num_rows_per_expert = torch.zeros(e, device=DEVICE, dtype=torch.int32)
+    init_rows_for_experts(m, topk, num_rows_per_expert)
+
+    output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
+    torch.ops._xpu_C.moe_int4_gemv(input_A, input_B_int4, scale_B,
+                                   num_rows_per_expert, output, n, k, e)
+
+    ref = []
+    row = 0
+    for i in range(e):
+        rows = int(num_rows_per_expert[i])
+        if rows == 0:
+            continue
+        weight = dequantize_uint4(input_B_uint4[i], scale_B[i],
+                                  group_size).to(torch.float32)
+        ref.append((input_A[row:row + rows].to(torch.float32) @ weight.T).to(
+            dtype))
+        row += rows
+    ref = torch.cat(ref, dim=0)
+    torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
+
+    grouped = torch.empty_like(output)
+    cutlass_grouped_gemm_xe2(input_A, input_B_int4, scale_B, None, grouped,
+                             num_rows_per_expert, n, k, e)
+    torch.testing.assert_close(output, grouped, rtol=1e-2, atol=1e-2)
