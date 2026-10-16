@@ -493,7 +493,9 @@ def flash_attn_varlen_func(
         "when block_table is disabled, cu_seqlens_k is needed"
 
     if softmax_scale is None:
-        softmax_scale = q.shape[-1]**(-0.5)
+        # FA3 convention: with q_v the logical head dim is d_qk + d_v.
+        head_dim = q.shape[-1] + (q_v.shape[-1] if q_v is not None else 0)
+        softmax_scale = head_dim**(-0.5)
     q_descale = _normalize_descale_tensor(q_descale, "q_descale")
     k_descale = _normalize_descale_tensor(k_descale, "k_descale")
     v_descale = _normalize_descale_tensor(v_descale, "v_descale")
@@ -505,6 +507,31 @@ def flash_attn_varlen_func(
         assert len(window_size) == 2
         real_window_size = (window_size[0], window_size[1])
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
+
+    if q_v is not None:
+        return _mla_qv_varlen_fwd(
+            q,
+            maybe_contiguous(q_v),
+            k,
+            v,
+            out,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            seqused_k,
+            block_table,
+            softmax_scale,
+            causal,
+            real_window_size,
+            dropout_p=dropout_p,
+            softcap=softcap,
+            alibi_slopes=alibi_slopes,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            s_aux=s_aux,
+            num_splits=num_splits,
+            return_softmax_lse=return_softmax_lse,
+        )
 
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
 
@@ -654,6 +681,74 @@ def flash_attn_varlen_func(
     else:
         raise NotImplementedError("not support yet")
     return (out, softmax_lse) if return_softmax_lse else (out)
+
+
+def _mla_qv_varlen_fwd(
+    q: torch.Tensor,
+    q_v: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: Optional[torch.Tensor],
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: Optional[torch.Tensor],
+    seqused_k: Optional[torch.Tensor],
+    block_table: Optional[torch.Tensor],
+    softmax_scale: float,
+    causal: bool,
+    window_size: tuple[int, int],
+    *,
+    dropout_p: float,
+    softcap: float,
+    alibi_slopes: Optional[torch.Tensor],
+    q_descale: Optional[torch.Tensor],
+    k_descale: Optional[torch.Tensor],
+    v_descale: Optional[torch.Tensor],
+    s_aux: Optional[torch.Tensor],
+    num_splits: int,
+    return_softmax_lse: bool,
+):
+    """Absorbed-MLA attention (FA3 ``q_v``) over a paged KV cache.
+
+    ``scores = q @ k^T + q_v @ v^T`` and ``out = softmax(scores) @ v``,
+    i.e. the value cache doubles as the second half of the key. Used by
+    the FlashAttention MLA sparse backend, where ``block_table`` holds the
+    per-token top-k cache slots with page size 1.
+    """
+    if block_table is None or seqused_k is None:
+        raise NotImplementedError(
+            "q_v requires a paged KV cache (block_table and seqused_k)")
+    if cu_seqlens_k is not None:
+        raise NotImplementedError("q_v does not support cu_seqlens_k")
+    if window_size != (-1, -1):
+        raise NotImplementedError("q_v does not support sliding window")
+    if dropout_p != 0.0:
+        raise NotImplementedError("q_v does not support dropout")
+    if softcap != 0.0:
+        raise NotImplementedError("q_v does not support softcap")
+    if alibi_slopes is not None:
+        raise NotImplementedError("q_v does not support alibi")
+    if s_aux is not None:
+        raise NotImplementedError("q_v does not support attention sinks")
+    if (q_descale is not None or k_descale is not None
+            or v_descale is not None):
+        raise NotImplementedError("q_v does not support fp8 descales")
+    if num_splits > 1:
+        raise NotImplementedError("q_v does not support num_splits > 1")
+
+    out, softmax_lse = torch.ops._vllm_fa2_C.mla_qv_varlen_fwd(
+        q,
+        q_v,
+        k,
+        v,
+        out,
+        cu_seqlens_q,
+        seqused_k,
+        block_table,
+        softmax_scale,
+        causal,
+        return_softmax_lse,
+    )
+    return (out, softmax_lse) if return_softmax_lse else out
 
 
 def _fallback_varlen_attn(
