@@ -2,6 +2,9 @@
 #include "fp4_gemm_w4a4.h"
 #include "fp8_gemm_w8a8.h"
 #include "fp8_gemm_w8a16.h"
+#ifdef VLLM_XPU_ENABLE_XE2
+  #include "xpu/gemv/fp8_gemv_interface.h"
+#endif
 #include "int4_gemm_w4a16.h"
 #include "int4_gemm_w4a8.h"
 
@@ -204,6 +207,11 @@ torch::Tensor fp8_gemm_w8a16(
     const std::optional<torch::Tensor>& B_scale_,
     const std::optional<torch::Tensor>& bias_) {
   const at::DeviceGuard device_guard(A.device());
+#ifdef VLLM_XPU_ENABLE_XE2
+  // Single-row (decode) fp16 x per-tensor fp8: SYCL GEMV, no oneDNN setup.
+  if (auto out = vllm::fp8_gemv::try_fp8_gemv_w8a16(A, B, B_scale_, bias_))
+    return *out;
+#endif
   // The weight B may be provided in a transposed (NT) layout, and A supports
   // strided layouts, so both are excluded from the contiguity check.
   TORCH_CHECK(
