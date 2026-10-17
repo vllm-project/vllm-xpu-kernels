@@ -571,6 +571,8 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
         if _is_enabled("MOE_KERNELS_ENABLED"):
             additional_libraries["grouped_gemm_xe_2"] = (
                 "/csrc/xpu/grouped_gemm/xe_2")
+        if _is_enabled("XPU_SPECIFIC_KERNELS_ENABLED"):
+            additional_libraries["gemv_kernels_xe_2"] = "/csrc/xpu/gemv/xe_2"
     # Attention-only XE3 upstreaming: the XE3 grouped_gemm / quant_asm
     # components are intentionally not wired here.
     if _is_enabled("VLLM_XPU_ENABLE_XE3P", default="ON") and _is_enabled(
