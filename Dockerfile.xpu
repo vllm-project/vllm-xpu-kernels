@@ -1,17 +1,20 @@
-FROM intel/deep-learning-essentials:2026.1.2-devel-ubuntu24.04 AS vllm-base
+FROM ubuntu:24.04 AS vllm-base
 
 WORKDIR /workspace/
 
 ARG PYTHON_VERSION=3.12
-ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/xpu"
+ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/test/xpu"
+ARG INTEL_OMIX_VERSION=0.4
+ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt clean && apt-get update -y && \
-    apt remove libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing intel-ocloc libigc2 -y && \
-    apt-get install -y --no-install-recommends --fix-missing \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
     curl \
     ffmpeg \
     git \
     ccache \
+    gnupg \
     libsndfile1 \
     libsm6 \
     libxext6 \
@@ -21,12 +24,23 @@ RUN apt clean && apt-get update -y && \
     wget \
     vim \
     python3.12 \
-    python3.12-dev
+    python3.12-dev && \
+    rm -rf /var/lib/apt/lists/*
 
-# ─── GPU compute runtime (configurable via gpu_runtime_packages.json) ──────
-ARG GPU_RUNTIME_PROFILE=default
-COPY build_script/gpu_runtime_packages.json build_script/install_gpu_runtime.sh /tmp/
-RUN bash /tmp/install_gpu_runtime.sh /tmp/gpu_runtime_packages.json ${GPU_RUNTIME_PROFILE}
+RUN \
+    curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | \
+        gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble/intel-omix/${INTEL_OMIX_VERSION} unified" \
+        > /etc/apt/sources.list.d/intel-gpu-noble.list && \
+    apt-get update -o APT::Update::Error-Mode=any && \
+    apt-get install -y --no-install-recommends intel-omix-dev && \
+    /opt/intel/oneapi/compiler/latest/bin/icpx --version && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV ONEAPI_ROOT="/opt/intel/oneapi"
+ENV CMPLR_ROOT="${ONEAPI_ROOT}/compiler/latest"
+ENV MKLROOT="${ONEAPI_ROOT}/mkl/latest"
+ENV PATH="${ONEAPI_ROOT}/compiler/latest/bin:${PATH}"
 
 ENV PATH="/root/.local/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
