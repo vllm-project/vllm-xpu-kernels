@@ -2370,6 +2370,89 @@ def test_spec_decode_uniform_qlen(
     torch.xpu.empty_cache()
 
 
+@pytest.mark.parametrize("query_lens", [(8, 1, 3, 4), (0, 8, 0, 3), (8, 0)])
+@pytest.mark.parametrize("window_size,is_sink", [((-1, -1), False),
+                                               ((256, 0), False),
+                                               ((-1, -1), True)])
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@torch.inference_mode()
+def test_spec_decode_varlen_graph_replay(query_lens, window_size, dtype,
+                                        is_sink, monkeypatch):
+    """Variable causal queries and padding remain correct after graph replay."""
+
+    torch.set_default_device("xpu")
+    torch.manual_seed(4242)
+    device = "xpu:0"
+    num_seqs = len(query_lens)
+    num_tokens = max(16, sum(query_lens))
+    query = torch.randn(num_tokens, 4, 128, dtype=dtype, device=device)
+    key_cache = torch.randn(128, 64, 1, 128, dtype=dtype, device=device)
+    value_cache = torch.randn_like(key_cache)
+    tables = torch.randint(0, 128, (num_seqs, 40), dtype=torch.int32,
+                           device=device)
+    block_tables = tables.clone()
+    boundaries = torch.empty(num_seqs + 1, dtype=torch.int32, device=device)
+    seq_k = torch.empty(num_seqs, dtype=torch.int32, device=device)
+    sink = torch.randn(4, dtype=dtype, device=device) if is_sink else None
+    native_fwd = torch.ops._vllm_fa2_C.varlen_fwd
+    launches = []
+
+    def checked_fwd(*args):
+        launches.append(args[10])
+        assert args[10] == 1
+        return native_fwd(*args)
+
+    monkeypatch.setattr(torch.ops._vllm_fa2_C, "varlen_fwd", checked_fwd)
+
+    def set_lengths(lengths, step=0):
+        boundaries.copy_(torch.tensor([0] + list(lengths), dtype=torch.int32,
+                                     device=device).cumsum(0))
+        kv_lens = [2039 + 29 * index + 17 * step if length else 0
+                   for index, length in enumerate(lengths)]
+        seq_k.copy_(torch.tensor(kv_lens, dtype=torch.int32, device=device))
+        block_tables.copy_(tables)
+        block_tables.masked_fill_((seq_k == 0)[:, None], -1)
+        return kv_lens
+
+    def run():
+        return flash_attn_varlen_func(
+            query, key_cache, value_cache, 8, boundaries, 2200,
+            seqused_k=seq_k, softmax_scale=128**-0.5, causal=True,
+            block_table=block_tables, window_size=window_size, s_aux=sink)
+
+    set_lengths(query_lens)
+    run()
+    run()
+    torch.xpu.synchronize()
+    graph = torch.xpu.XPUGraph()
+    with torch.xpu.graph(graph):
+        captured_output = run()
+    assert launches and all(length == 1 for length in launches)
+
+    layouts = (query_lens, tuple(reversed(query_lens)),
+               tuple(length // 2 for length in query_lens))
+    for step, lengths in enumerate(layouts):
+        tables.copy_(tables.roll(1, dims=1))
+        kv_lens = set_lengths(lengths, step)
+        query.normal_()
+        eager_output = run()
+        graph.replay()
+        active = [index for index, length in enumerate(lengths) if length]
+        reference = ref_paged_attn(
+            query=query[:sum(lengths)], key_cache=key_cache,
+            value_cache=value_cache,
+            query_lens=[lengths[index] for index in active],
+            kv_lens=[kv_lens[index] for index in active],
+            block_tables=block_tables[active], scale=128**-0.5,
+            casual=True, is_paged=True, sink=sink,
+            window_size_left=window_size[0],
+            window_size_right=window_size[1], dtype=dtype)
+        for output in (eager_output, captured_output):
+            torch.testing.assert_close(output[:sum(lengths)], reference,
+                                       atol=2e-2, rtol=1.5e-2)
+            assert torch.count_nonzero(output[sum(lengths):]).item() == 0
+
+
 # ---------------------------------------------------------------------------
 # Regression: paged-decode attention-sink + small sliding-window NaN.
 #

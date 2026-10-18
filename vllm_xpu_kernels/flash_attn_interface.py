@@ -25,14 +25,14 @@ _warned_missing_configs: set = set()
 
 # Speculative-decoding fast path.
 #
-# In speculative decoding every sequence in the batch issues the same small
-# number of query tokens (q_len = num_speculative_tokens + 1, e.g. 2/3/4). By
+# In speculative decoding each sequence issues a small number of query tokens,
+# potentially different across requests with adaptive verification. By
 # default such a batch (max_seqlen_q > 1) is routed to the chunk-prefill
 # kernel, which has no split-K parallelism over the KV dimension. With a long
 # KV cache and only a handful of query rows the GPU is heavily under-utilized,
 # so prefill is slow.
 #
-# Instead we reuse the split-K *decode* kernel: for a uniform, causal, paged
+# Instead we reuse the split-K *decode* kernel: for a causal, paged
 # batch we treat each (sequence, query-position) pair as an independent
 # single-token decode "sequence" and run the whole batch in one decode
 # launch. Query token ``j`` (0-indexed within the q_len window) attends
@@ -42,7 +42,7 @@ _warned_missing_configs: set = set()
 # exact (it matches the causal reference) and gets the decode path's split-K
 # parallelism.
 #
-# The path only triggers for small, uniform query lengths; larger uniform
+# The path only triggers for small query lengths; larger
 # query lengths keep using chunk-prefill (which reuses the shared KV tile
 # across the Q block, whereas the decode path rescans KV per query token).
 # The default threshold (16) stays within the measured win region across KV
@@ -71,18 +71,9 @@ def _spec_decode_varlen_fwd(
     window_size,
     softcap,
 ):
-    """Run the split-K decode kernel once for a speculative-decode batch.
-
-    Assumes a uniform query length: every sequence contributes the same
-    ``q_len`` consecutive query tokens, laid out as ``q[i * q_len + j]`` for
-    sequence ``i`` and position ``j``. Each (sequence, position) pair is
-    treated as an independent single-token decode "sequence", so the whole
-    batch runs in a single ``varlen_fwd`` launch. Returns the output tensor
-    (same row order as ``q``).
-    """
+    """Decode causal query rows, including empty requests and query padding."""
     batch = cu_seqlens_q.numel() - 1
-    q_len = q.shape[0] // batch
-    total = q.shape[0]  # batch * q_len
+    total = q.shape[0]
 
     # One decode query per (sequence, position) pair; the row order already
     # matches q, so the output needs no reordering.
@@ -90,17 +81,16 @@ def _spec_decode_varlen_fwd(
                                      dtype=torch.int32,
                                      device=q.device)
     dummy_cu_seqlens_k = torch.zeros_like(cu_seqlens_q_spec)
-    # Causal per-position KV length: query row i*q_len + j (position j within
-    # the q_len window of sequence i) attends to seqused_k[i] - (q_len-1-j)
-    # tokens.
-    pos = torch.arange(q_len, device=q.device, dtype=seqused_k.dtype)
-    seqused_k_spec = (seqused_k.view(batch, 1) -
-                      (q_len - 1 - pos).view(1, q_len)).clamp_(min=1).reshape(
-                          total).to(torch.int32)
-
-    # Expand the block table so each pseudo-sequence points at its parent
-    # sequence's blocks.
-    block_table_spec = block_table.repeat_interleave(q_len, dim=0)
+    positions = cu_seqlens_q_spec[:-1]
+    request_ids = torch.searchsorted(cu_seqlens_q[1:], positions,
+                                    right=True).clamp_(max=batch - 1)
+    query_ends = cu_seqlens_q[1:].index_select(0, request_ids)
+    is_padding = positions >= cu_seqlens_q[-1]
+    seqused_k_spec = (seqused_k.index_select(0, request_ids) -
+                     (query_ends - positions - 1)).clamp_(min=1).to(torch.int32)
+    seqused_k_spec.masked_fill_(is_padding, 1)
+    block_table_spec = block_table.index_select(0, request_ids)
+    block_table_spec.masked_fill_(is_padding[:, None], 0)
 
     out, _ = torch.ops._vllm_fa2_C.varlen_fwd(
         q,
@@ -133,7 +123,7 @@ def _spec_decode_varlen_fwd(
         None,  # splits_per_seq
         None,  # work_list
     )
-    return out
+    return out.masked_fill_(is_padding[:, None, None], 0)
 
 
 def maybe_contiguous(x):
@@ -520,19 +510,18 @@ def flash_attn_varlen_func(
             raise NotImplementedError(
                 "FA2 only supports both KV cache descaled")
 
-        # Speculative-decoding fast path: redirect small, uniform, causal,
+        # Speculative-decoding fast path: redirect small, causal,
         # paged query batches (q_len = num_speculative_tokens + 1) from the
         # slow chunk-prefill kernel to the split-K decode kernel. See the
         # comment on _SPEC_DECODE_MAX_QLEN above for the rationale.
         batch = cu_seqlens_q.numel() - 1
-        is_uniform_qlen = (batch > 0 and q.shape[0] == batch * max_seqlen_q)
         # TODO: We could also support the case where q_descale is not None.
         if (block_table is not None and causal and not return_softmax_lse
                 and softcap == 0.0 and alibi_slopes is None and q_v is None
                 and q_descale is None and scheduler_metadata is None
                 and seqused_k is not None
                 and 1 < max_seqlen_q <= _SPEC_DECODE_MAX_QLEN
-                and is_uniform_qlen):
+                and batch > 0 and q.shape[0] > 0):
             return _spec_decode_varlen_fwd(
                 q,
                 k,
