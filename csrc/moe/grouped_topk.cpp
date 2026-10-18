@@ -439,13 +439,26 @@ template <ScoringFunc SF, typename T>
   }
 }
 
+// fp32 scoring: keeps the sigmoid entirely in fp32 (no intermediate cast back
+// to the input dtype). Used by the WarpSelect fallback path so that scoring,
+// bias add and top-k selection match the fp32 reference oracle.
+template <ScoringFunc SF, typename T>
+[[intel::device_indirectly_callable]] inline float apply_scoring_f32(T val) {
+  float f = sycl_cast<float, T>(val);
+  if constexpr (SF == SCORING_NONE) {
+    return f;
+  } else {
+    return sigmoid_accurate(f);
+  }
+}
+
 // -------------------------------------------------------------------------
 // topk_with_k2: compute sum of top-2 biased scores for one expert group.
 // Used as phase-1 in the fused kernel (one sub_group per expert group).
 // -------------------------------------------------------------------------
 template <typename T, typename BiasT, ScoringFunc SF>
 [[intel::device_indirectly_callable]] inline void topk_with_k2_biased(
-    T* output,
+    float* output,
     T const* input,
     BiasT const* bias,
     sycl::sub_group const& sg,
@@ -454,11 +467,14 @@ template <typename T, typename BiasT, ScoringFunc SF>
   float largest = -INFINITY;
   float second_largest = -INFINITY;
 
+  // Scoring, bias add and comparison are performed in fp32 to match the
+  // reference contract and the other dispatch paths. Doing this in the input
+  // dtype (e.g. bf16) breaks top-k ties differently and diverges from the
+  // oracle.
   if (num_experts_per_group > WARP_SIZE) {
     for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
-      T value = apply_scoring<SF>(input[i]);
-      value = value + static_cast<T>(bias[i]);
-      float valuef = sycl_cast<float, T>(value);
+      float valuef = apply_scoring_f32<SF, T>(input[i]);
+      valuef = valuef + static_cast<float>(bias[i]);
       if (valuef > largest) {
         second_largest = largest;
         largest = valuef;
@@ -469,9 +485,9 @@ template <typename T, typename BiasT, ScoringFunc SF>
   } else {
     // Each lane holds exactly one value (num_experts_per_group <= WARP_SIZE).
     for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
-      T value = apply_scoring<SF>(input[i]);
-      value = value + static_cast<T>(bias[i]);
-      largest = sycl_cast<float, T>(value);
+      float valuef = apply_scoring_f32<SF, T>(input[i]);
+      valuef = valuef + static_cast<float>(bias[i]);
+      largest = valuef;
     }
   }
 
@@ -488,7 +504,7 @@ template <typename T, typename BiasT, ScoringFunc SF>
   }
 
   if (lane_id == 0) {
-    *output = sycl_cast<T, float>(max1 + max2);
+    *output = max1 + max2;
   }
 }
 
@@ -500,10 +516,10 @@ template <typename T, typename BiasT, ScoringFunc SF>
 //   - work-group size = n_group * WARP_SIZE  (one sub_group per expert group)
 //
 // Shared-local memory layout (same as CUDA dynamic smem layout):
-//   [0 .. val_bytes_aligned-1]          : WarpSelect val staging (T)
+//   [0 .. val_bytes_aligned-1]          : WarpSelect val staging (float)
 //   [val_bytes_aligned .. internal-1]   : WarpSelect idx staging (int32_t)
 //   [internal .. internal+align-1]      : padding to 16-byte boundary
-//   [internal+align .. end]             : s_group_scores[n_group] (T)
+//   [internal+align .. end]             : s_group_scores[n_group] (float)
 // -------------------------------------------------------------------------
 template <typename T, typename BiasT, typename IdxT, ScoringFunc SF>
 class grouped_topk_fused_kernel_impl {
@@ -567,8 +583,10 @@ class grouped_topk_fused_kernel_impl {
         slm.template get_multi_ptr<sycl::access::decorated::no>().get();
 
     // WarpSelect internal staging occupies the first `internal_bytes`.
+    // Group scores, expert candidates and the WarpSelect comparisons are all
+    // carried in fp32, so size the staging for float.
     size_t const val_bytes =
-        static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(T);
+        static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(float);
     size_t const val_bytes_aligned =
         warp_topk::round_up_to_multiple_of<256>(val_bytes);
     size_t const idx_bytes =
@@ -578,7 +596,7 @@ class grouped_topk_fused_kernel_impl {
     // User-managed smem starts after internal staging, aligned to 16 bytes.
     uintptr_t ptr_u = reinterpret_cast<uintptr_t>(smem_buf + internal_bytes);
     ptr_u = (ptr_u + 15) & ~static_cast<uintptr_t>(15);
-    T* s_group_scores = reinterpret_cast<T*>(ptr_u);
+    float* s_group_scores = reinterpret_cast<float*>(ptr_u);
 
     // --- Phase 1: per-group scan (each sub_group handles one expert group) ---
     int32_t const group_offset = warp_id * num_experts_per_group;
@@ -606,19 +624,14 @@ class grouped_topk_fused_kernel_impl {
     warp_topk::WarpSelect<
         /*capacity*/ WARP_SIZE,
         /*greater*/ true,
-        T,
+        float,
         int32_t,
         /*is_stable*/ true>
-        group_sel(
-            topk_group_i32,
-            sycl_cast<T, float>(-INFINITY),
-            smem_buf,
-            local_id,
-            local_range);
+        group_sel(topk_group_i32, -INFINITY, smem_buf, local_id, local_range);
 
     // All lanes must participate; lanes beyond n_group feed -inf.
-    T gscore = (lane_id < n_group_i32) ? s_group_scores[lane_id]
-                                       : sycl_cast<T, float>(-INFINITY);
+    float gscore =
+        (lane_id < n_group_i32) ? s_group_scores[lane_id] : -INFINITY;
     group_sel.add(gscore, lane_id, sg, local_id);
     group_sel.done(sg, local_id);
 
@@ -626,8 +639,9 @@ class grouped_topk_fused_kernel_impl {
     bool proceed = false;
     if (topk_group_i32 > 0) {
       int const kth_lane = topk_group_i32 - 1;
-      T kth_val = sycl::select_from_group(sg, group_sel.get_val(0), kth_lane);
-      proceed = (sycl_cast<float, T>(kth_val) != -INFINITY);
+      float kth_val =
+          sycl::select_from_group(sg, group_sel.get_val(0), kth_lane);
+      proceed = (kth_val != -INFINITY);
     }
 
     if (!proceed) {
@@ -642,15 +656,10 @@ class grouped_topk_fused_kernel_impl {
     warp_topk::WarpSelect<
         /*capacity*/ WARP_SIZE,
         /*greater*/ true,
-        T,
+        float,
         int32_t,
         /*is_stable*/ true>
-        expert_sel(
-            topk_i32,
-            sycl_cast<T, float>(-INFINITY),
-            smem_buf,
-            local_id,
-            local_range);
+        expert_sel(topk_i32, -INFINITY, smem_buf, local_id, local_range);
 
     // Selected group ids reside in lanes [0, topk_group).
     int32_t sel_gid_lane =
@@ -665,15 +674,16 @@ class grouped_topk_fused_kernel_impl {
       for (int32_t i = lane_id; i < align_num_experts_per_group;
            i += WARP_SIZE) {
         // All lanes must call add() the same number of times.
-        T cand = sycl_cast<T, float>(-INFINITY);
+        // Scoring + bias add + comparison are done in fp32.
+        float cand = -INFINITY;
         int32_t idx = 0;
         if (i < num_experts_per_group) {
           idx = offset + i;
           T input_val = scores_token[idx];
           float input_f = sycl_cast<float, T>(input_val);
           if (sycl::isinf(input_f) == 0) {
-            T score = apply_scoring<SF>(input_val);
-            cand = score + static_cast<T>(bias[idx]);
+            float score = apply_scoring_f32<SF, T>(input_val);
+            cand = score + static_cast<float>(bias[idx]);
           }
         }
         expert_sel.add(cand, idx, sg, local_id);
@@ -687,7 +697,7 @@ class grouped_topk_fused_kernel_impl {
     if (lane_id < topk_i32) {
       lane_idx = static_cast<IdxT>(expert_sel.get_idx(0));
       T in = scores_token[static_cast<int32_t>(lane_idx)];
-      lane_unbiased = sycl_cast<float, T>(apply_scoring<SF>(in));
+      lane_unbiased = apply_scoring_f32<SF, T>(in);
     }
 
     float topk_sum = 1e-20f;
@@ -745,15 +755,17 @@ void launchGroupedTopkWarpSelect(
   int32_t const block_size = num_warps * WARP_SIZE;
 
   // Compute dynamic shared memory size (mirrors CUDA).
+  // Group scores and WarpSelect comparisons run in fp32, so the staging and
+  // the s_group_scores buffer are sized for float.
   size_t const val_bytes =
-      static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(T);
+      static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(float);
   size_t const val_bytes_aligned =
       warp_topk::round_up_to_multiple_of<256>(val_bytes);
   size_t const idx_bytes =
       static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(int32_t);
   size_t const internal_bytes = val_bytes_aligned + idx_bytes;
   // extra: 16-byte alignment padding + s_group_scores[n_group]
-  size_t const extra_bytes = 16 + static_cast<size_t>(n_group) * sizeof(T);
+  size_t const extra_bytes = 16 + static_cast<size_t>(n_group) * sizeof(float);
   size_t const smem_bytes = internal_bytes + extra_bytes;
 
   sycl::range<1> grid(static_cast<size_t>(num_tokens));
