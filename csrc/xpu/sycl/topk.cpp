@@ -15,6 +15,7 @@
 
 #include "utils.h"
 #include "dispatch_utils.h"
+#include "sycl_launch.h"
 
 namespace vllm {
 
@@ -512,11 +513,10 @@ void launch_subgroup_topk_kernel(
   constexpr int kSgsPerWg = kWgSize / kTopkSgSize;
   int64_t num_wgs = ((int64_t)num_slices + kSgsPerWg - 1) / kSgsPerWg;
 
-  q.submit([&](sycl::handler& cgh) {
-    subgroup_topk_kernel<scalar_t, K, VEC_SIZE, Largest> kfn(
-        input, out_vals, out_idx, num_slices, slice_size, k);
-    cgh.parallel_for(sycl::nd_range<1>(num_wgs * kWgSize, kWgSize), kfn);
-  });
+  subgroup_topk_kernel<scalar_t, K, VEC_SIZE, Largest> kfn(
+      input, out_vals, out_idx, num_slices, slice_size, k);
+  vllm::xpu::sycl_kernel_submit(
+      q, sycl::nd_range<1>(num_wgs * kWgSize, kWgSize), kfn);
 }
 
 template <typename scalar_t, int K, int VEC_SIZE, bool Largest>

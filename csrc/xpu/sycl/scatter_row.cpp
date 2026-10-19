@@ -14,6 +14,7 @@
 
 #include "utils.h"
 #include "dispatch_utils.h"
+#include "sycl_launch.h"
 
 namespace vllm {
 
@@ -42,8 +43,8 @@ struct ScatterRowVecType<4> {
 };
 
 template <int N>
-inline typename ScatterRowVecType<N>::type scatter_row_ld_vec(
-    const char* addr) {
+inline typename ScatterRowVecType<N>::type
+scatter_row_ld_vec(const char* addr) {
   using vec_t = typename ScatterRowVecType<N>::type;
   vec_t v;
   std::memcpy(&v, addr, sizeof(vec_t));
@@ -51,8 +52,8 @@ inline typename ScatterRowVecType<N>::type scatter_row_ld_vec(
 }
 
 template <int N>
-inline void scatter_row_st_vec(
-    char* addr, typename ScatterRowVecType<N>::type v) {
+inline void
+scatter_row_st_vec(char* addr, typename ScatterRowVecType<N>::type v) {
   if constexpr (N == 16) {
     *reinterpret_cast<uint64_t*>(addr) = v.lo;
     *reinterpret_cast<uint64_t*>(addr + 8) = v.hi;
@@ -87,13 +88,13 @@ class scatter_row_kernel {
     int64_t off = (static_cast<int64_t>(item.get_local_range(1)) *
                        static_cast<int64_t>(item.get_group(0)) +
                    static_cast<int64_t>(item.get_local_id(1))) *
-        kScatterRowAlignment;
+                  kScatterRowAlignment;
     if (off >= slice_bytes_) return;
 
     int64_t input_offset =
         static_cast<int64_t>(item.get_group(1)) * input_stride_;
-    auto vec = scatter_row_ld_vec<kScatterRowAlignment>(
-        input_ + input_offset + off);
+    auto vec =
+        scatter_row_ld_vec<kScatterRowAlignment>(input_ + input_offset + off);
     scatter_row_st_vec<kScatterRowAlignment>(
         out_ + dst_row * out_stride_ + off, vec);
   }
@@ -135,11 +136,10 @@ inline void launch_scatter_row_kernel(
       static_cast<std::size_t>(num_indices) *
           static_cast<std::size_t>(wg_size));
 
-  q.submit([&](sycl::handler& cgh) {
-    scatter_row_kernel kfn(
-        out, input, idx, slice_bytes, input_stride, out_stride);
-    cgh.parallel_for(sycl::nd_range<2>(global_range, local_range), kfn);
-  });
+  scatter_row_kernel kfn(
+      out, input, idx, slice_bytes, input_stride, out_stride);
+  vllm::xpu::sycl_kernel_submit(
+      q, sycl::nd_range<2>(global_range, local_range), kfn);
 }
 
 // Row-copy is only vectorizable when every base pointer/stride/slice size
@@ -154,10 +154,10 @@ inline bool scatter_row_vectorized_eligible(
     return (v % kScatterRowAlignment) == 0;
   };
   return check_align(reinterpret_cast<uintptr_t>(dst_ptr)) &&
-      check_align(reinterpret_cast<uintptr_t>(src_ptr)) &&
-      check_align(static_cast<uintptr_t>(slice_bytes)) &&
-      check_align(static_cast<uintptr_t>(src_stride)) &&
-      check_align(static_cast<uintptr_t>(dst_stride));
+         check_align(reinterpret_cast<uintptr_t>(src_ptr)) &&
+         check_align(static_cast<uintptr_t>(slice_bytes)) &&
+         check_align(static_cast<uintptr_t>(src_stride)) &&
+         check_align(static_cast<uintptr_t>(dst_stride));
 }
 
 }  // namespace vllm
@@ -166,9 +166,7 @@ inline bool scatter_row_vectorized_eligible(
 // dtype-agnostic (plain byte copy); dim_size * element_size must be a
 // multiple of 16 bytes, and index must be int64.
 void scatter_row(
-    torch::Tensor& dst,
-    const torch::Tensor& src,
-    const torch::Tensor& index) {
+    torch::Tensor& dst, const torch::Tensor& src, const torch::Tensor& index) {
   const at::DeviceGuard device_guard(src.device());
   CHECK_DEVICE(dst);
   CHECK_DEVICE(src);
@@ -181,8 +179,7 @@ void scatter_row(
       "dst/src/index must be contiguous");
   TORCH_CHECK(
       index.scalar_type() == at::ScalarType::Long, "index must be int64");
-  TORCH_CHECK(
-      dst.scalar_type() == src.scalar_type(), "dst/src dtype mismatch");
+  TORCH_CHECK(dst.scalar_type() == src.scalar_type(), "dst/src dtype mismatch");
   TORCH_CHECK(
       dst.device() == src.device() && dst.device() == index.device(),
       "dst/src/index must be on the same device");
@@ -210,10 +207,16 @@ void scatter_row(
       "); dim_size * element_size must be a multiple of ",
       vllm::kScatterRowAlignment);
 
-if (num_indices == 0 || slice_bytes == 0) return;
+  if (num_indices == 0 || slice_bytes == 0) return;
 
   auto& q = vllm::xpu::vllmGetQueue();
   vllm::launch_scatter_row_kernel(
-      q, dst_ptr, src_ptr, idx_ptr, num_indices, slice_bytes, src_stride,
+      q,
+      dst_ptr,
+      src_ptr,
+      idx_ptr,
+      num_indices,
+      slice_bytes,
+      src_stride,
       dst_stride);
 }
