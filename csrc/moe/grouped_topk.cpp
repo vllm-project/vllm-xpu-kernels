@@ -6,6 +6,7 @@
 #include "../utils.h"
 #include "../dispatch_utils.h"
 #include "moe_topk_funcs.h"
+#include "sycl_launch.h"
 
 namespace vllm {
 namespace moe {
@@ -1093,30 +1094,29 @@ void submitSmallExpertCount(
     double routed_scaling_factor) {
   sycl::range<1> grid(static_cast<size_t>(num_tokens));
   sycl::range<1> block(static_cast<size_t>(MaxNumExperts));
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<1>(grid * block, block),
-        grouped_topk_fused_small_expert_count_impl<
-            T,
-            BiasT,
-            IdxT,
-            SF,
-            MaxNumExperts,
-            UseGroups,
-            MaxNumTopExperts>(
-            scores,
-            topk_values,
-            topk_indices,
-            bias,
-            num_tokens,
-            n_group,
-            topk_group,
-            topk,
-            num_experts,
-            num_experts_per_group,
-            renormalize,
-            routed_scaling_factor));
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(grid * block, block),
+      grouped_topk_fused_small_expert_count_impl<
+          T,
+          BiasT,
+          IdxT,
+          SF,
+          MaxNumExperts,
+          UseGroups,
+          MaxNumTopExperts>(
+          scores,
+          topk_values,
+          topk_indices,
+          bias,
+          num_tokens,
+          n_group,
+          topk_group,
+          topk,
+          num_experts,
+          num_experts_per_group,
+          renormalize,
+          routed_scaling_factor));
 }
 
 template <typename T, typename BiasT, typename IdxT, ScoringFunc SF>
@@ -1693,49 +1693,47 @@ void launch_tier(
   if (use_block_kernel) {
     sycl::range<1> grid(static_cast<size_t>(num_tokens));
     sycl::range<1> block(static_cast<size_t>(BlockDim));
-    queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<1>(grid * block, block),
-          single_group_topk_block_impl<
-              T,
-              BiasT,
-              IdxT,
-              SF,
-              MaxNumExperts,
-              MaxNumTopExperts>(
-              scores,
-              topk_values,
-              topk_indices,
-              bias,
-              num_experts,
-              topk,
-              renormalize,
-              scale));
-    });
+    vllm::xpu::sycl_kernel_submit(
+        queue,
+        sycl::nd_range<1>(grid * block, block),
+        single_group_topk_block_impl<
+            T,
+            BiasT,
+            IdxT,
+            SF,
+            MaxNumExperts,
+            MaxNumTopExperts>(
+            scores,
+            topk_values,
+            topk_indices,
+            bias,
+            num_experts,
+            topk,
+            renormalize,
+            scale));
   } else {
     using WarpConfig = WarpTopKLaunchConfig<MaxNumExperts>;
     sycl::range<1> grid(static_cast<size_t>(WarpConfig::grid_dim(num_tokens)));
     sycl::range<1> block(static_cast<size_t>(WarpConfig::BlockDim));
-    queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<1>(grid * block, block),
-          single_group_topk_warp_impl<
-              T,
-              BiasT,
-              IdxT,
-              SF,
-              MaxNumExperts,
-              MaxNumTopExperts>(
-              scores,
-              topk_values,
-              topk_indices,
-              bias,
-              num_tokens,
-              num_experts,
-              topk,
-              renormalize,
-              scale));
-    });
+    vllm::xpu::sycl_kernel_submit(
+        queue,
+        sycl::nd_range<1>(grid * block, block),
+        single_group_topk_warp_impl<
+            T,
+            BiasT,
+            IdxT,
+            SF,
+            MaxNumExperts,
+            MaxNumTopExperts>(
+            scores,
+            topk_values,
+            topk_indices,
+            bias,
+            num_tokens,
+            num_experts,
+            topk,
+            renormalize,
+            scale));
   }
 }
 

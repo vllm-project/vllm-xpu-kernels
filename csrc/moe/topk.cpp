@@ -3,6 +3,7 @@
 #include "../utils.h"
 #include "../dispatch_utils.h"
 #include "packed_topk.hpp"
+#include "sycl_launch.h"
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -1096,34 +1097,32 @@ void topk_gating_kernel_launcher(
                   slm, gating_output, nullptr, scoring_workspace, num_experts));
         });
       } else {
-        queue.submit([&](sycl::handler& cgh) {
-          cgh.parallel_for(
-              sycl::nd_range<1>(grid1 * block1, block1),
-              MoeSigmoid<TPB, InputdType>(
-                  gating_output, nullptr, scoring_workspace, num_experts));
-        });
+        vllm::xpu::sycl_kernel_submit(
+            queue,
+            sycl::nd_range<1>(grid1 * block1, block1),
+            MoeSigmoid<TPB, InputdType>(
+                gating_output, nullptr, scoring_workspace, num_experts));
       }
 
       sycl::range<1> grid2(num_tokens);
       sycl::range<1> block2(TPB);
-      queue.submit([&](sycl::handler& cgh) {
-        cgh.parallel_for(
-            sycl::nd_range<1>(grid2 * block2, block2),
-            MoeTopK<TPB, IndType>(
-                scoring_workspace,
-                nullptr,
-                topk_weights,
-                topk_indices,
-                token_expert_indices,
-                num_experts,
-                topk,
-                0,
-                num_experts,
-                renormalize,
-                bias,
-                routed_scaling_factor,
-                is_padding));
-      });
+      vllm::xpu::sycl_kernel_submit(
+          queue,
+          sycl::nd_range<1>(grid2 * block2, block2),
+          MoeTopK<TPB, IndType>(
+              scoring_workspace,
+              nullptr,
+              topk_weights,
+              topk_indices,
+              token_expert_indices,
+              num_experts,
+              topk,
+              0,
+              num_experts,
+              renormalize,
+              bias,
+              routed_scaling_factor,
+              is_padding));
     }
   }
 }

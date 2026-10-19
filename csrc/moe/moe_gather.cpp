@@ -7,6 +7,7 @@
 
 #include "../utils.h"
 #include "../dispatch_utils.h"
+#include "sycl_launch.h"
 
 namespace vllm {
 namespace moe {
@@ -356,19 +357,18 @@ void launch_direct_moe_gather(
   const sycl::range<1> global(groups * kWorkGroupSize);
   const sycl::nd_range<1> range(global, local);
 
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        range,
-        MoeGather<T, TOPK, VEC, BLOCK, LANES, SPARSE>{
-            output,
-            moe_output,
-            topk_weights,
-            unpermuted_row_to_permuted_row,
-            num_experts,
-            num_tokens,
-            hidden_size,
-            src_stride});
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      range,
+      MoeGather<T, TOPK, VEC, BLOCK, LANES, SPARSE>{
+          output,
+          moe_output,
+          topk_weights,
+          unpermuted_row_to_permuted_row,
+          num_experts,
+          num_tokens,
+          hidden_size,
+          src_stride});
 }
 
 template <typename T>

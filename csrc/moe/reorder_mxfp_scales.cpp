@@ -2,6 +2,7 @@
 
 #include "../utils.h"
 #include "../dispatch_utils.h"
+#include "sycl_launch.h"
 
 namespace vllm {
 namespace moe {
@@ -41,7 +42,7 @@ namespace moe {
 // dispatch collective) can hand it to the fused act+quant kernel so gemm2's
 // scales are produced in GEMM layout without a second reorder.
 template <bool VecLoad>
-class ReorderMxfpScalesKernel {
+class ReorderMxfpScalesKernel : public vllm::xpu::SyclKernelConfigConvention {
  public:
   static constexpr int GroupWorkItem = 256;
   // Destination rows owned by one work-group.
@@ -71,17 +72,21 @@ class ReorderMxfpScalesKernel {
       const int* rows_per_expert,
       int* desc,
       const int scale_k,
-      const int num_experts,
-      sycl::local_accessor<uint8_t, 1> tile_slm,
-      sycl::local_accessor<int, 1> prefix_slm)
+      const int num_experts)
       : src(src),
         dst(dst),
         rows_per_expert(rows_per_expert),
         desc(desc),
         scale_k(scale_k),
-        num_experts(num_experts),
-        tile_slm(tile_slm),
-        prefix_slm(prefix_slm) {}
+        num_experts(num_experts) {}
+
+  // Shared local memory has to be bound while the command group is being
+  // built, so sycl_kernel_submit() calls this back on the handler.
+  void sycl_ker_config_convention(sycl::handler& cgh) {
+    tile_slm = sycl::local_accessor<uint8_t, 1>(sycl::range<1>(TileBytes), cgh);
+    prefix_slm = sycl::local_accessor<int, 1>(
+        sycl::range<1>(2 * (num_experts + 1)), cgh);
+  }
 
   static inline sycl::nd_range<1> get_nd_range(const int num_row_groups) {
     return sycl::nd_range<1>(
@@ -256,23 +261,10 @@ void launch_reorder_mxfp_scales(
     const int num_experts,
     const int num_row_groups) {
   using Kernel = ReorderMxfpScalesKernel<VecLoad>;
-  queue.submit([&](sycl::handler& cgh) {
-    sycl::local_accessor<uint8_t, 1> tile_slm(
-        sycl::range<1>(Kernel::TileBytes), cgh);
-    sycl::local_accessor<int, 1> prefix_slm(
-        sycl::range<1>(2 * (num_experts + 1)), cgh);
-    cgh.parallel_for(
-        Kernel::get_nd_range(num_row_groups),
-        Kernel{
-            src,
-            dst,
-            rows_per_expert,
-            desc,
-            scale_k,
-            num_experts,
-            tile_slm,
-            prefix_slm});
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      Kernel::get_nd_range(num_row_groups),
+      Kernel{src, dst, rows_per_expert, desc, scale_k, num_experts});
 }
 
 }  // namespace moe

@@ -2,6 +2,7 @@
 
 #include "../utils.h"
 #include "../dispatch_utils.h"
+#include "sycl_launch.h"
 
 namespace vllm {
 namespace moe {
@@ -948,48 +949,44 @@ void RemapHiddenStatesLauncher(
             expert_scale_desc});
   });
 
-  queue.submit([&](sycl::handler& cgh) {
-    // Convert local expert offsets once; the following copies only read them.
-    cgh.parallel_for(
-        sycl::range<1>(num_rows * TopK),
-        FinalizeRowMapping{
-            expert_map,
-            unpermuted_row_to_permuted_row,
-            permuted_to_unpermuted_row,
-            expert_cumsum,
-            topk_ids,
-            is_topk_ids_int32,
-            TopK});
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::range<1>(num_rows * TopK),
+      FinalizeRowMapping{
+          expert_map,
+          unpermuted_row_to_permuted_row,
+          permuted_to_unpermuted_row,
+          expert_cumsum,
+          topk_ids,
+          is_topk_ids_int32,
+          TopK});
 
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        RemapHiddenStates<TA, TS, TopK>::get_nd_range(num_rows, hidden_size),
-        RemapHiddenStates<TA, TS, TopK>{
-            hidden_states,
-            hidden_states_scales,
-            remapped_hidden_states,
-            remapped_hidden_states_scales,
-            unpermuted_row_to_permuted_row,
-            hidden_size,
-            block_k,
-            expert_scale_desc});
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      RemapHiddenStates<TA, TS, TopK>::get_nd_range(num_rows, hidden_size),
+      RemapHiddenStates<TA, TS, TopK>{
+          hidden_states,
+          hidden_states_scales,
+          remapped_hidden_states,
+          remapped_hidden_states_scales,
+          unpermuted_row_to_permuted_row,
+          hidden_size,
+          block_k,
+          expert_scale_desc});
 
   if (expert_scale_desc != nullptr) {
     int64_t scaled_hidden_size = hidden_size / block_k;
-    queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          ScaleRemap<TS>::get_nd_range(scaled_hidden_size, local_experts_num),
-          ScaleRemap<TS>{
-              hidden_states_scales,
-              remapped_hidden_states_scales,
-              permuted_to_unpermuted_row,
-              rows_per_expert,
-              expert_scale_desc,
-              scaled_hidden_size,
-              local_experts_num});
-    });
+    vllm::xpu::sycl_kernel_submit(
+        queue,
+        ScaleRemap<TS>::get_nd_range(scaled_hidden_size, local_experts_num),
+        ScaleRemap<TS>{
+            hidden_states_scales,
+            remapped_hidden_states_scales,
+            permuted_to_unpermuted_row,
+            rows_per_expert,
+            expert_scale_desc,
+            scaled_hidden_size,
+            local_experts_num});
   }
 }
 
