@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 #include <c10/macros/Macros.h>
+#include "sycl_launch.h"
 
 namespace vllm {
 
@@ -261,8 +262,7 @@ constexpr int kRopeVecStreamWorkGroupSize = 1024;
 // Queried once: assumes every XPU in the process is the same model.
 inline int64_t rope_llc_bytes(const sycl::queue& queue) {
   static const int64_t llc = static_cast<int64_t>(
-      queue.get_device()
-          .get_info<sycl::info::device::global_mem_cache_size>());
+      queue.get_device().get_info<sycl::info::device::global_mem_cache_size>());
   return llc;
 }
 
@@ -286,8 +286,8 @@ struct RopeVecLaunch {
   int work_group;
 };
 
-inline RopeVecLaunch rope_vec_launch(
-    const sycl::queue& queue, int64_t rot_pairs, int elem_bytes) {
+inline RopeVecLaunch
+rope_vec_launch(const sycl::queue& queue, int64_t rot_pairs, int elem_bytes) {
   if (rot_pairs * 2 * elem_bytes > 2 * rope_llc_bytes(queue))
     return {kRopeVecSmallBytes, rope_stream_work_group_size(queue)};
   if (rot_pairs <= kRopeVecSmallPairs)
@@ -345,23 +345,22 @@ bool try_launch_rotary_embedding_vec(
   const size_t global =
       static_cast<size_t>((total_vecs + wg - 1) / wg) * static_cast<size_t>(wg);
 
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<1>(sycl::range<1>(global), sycl::range<1>(wg)),
-        vllm::rotary_embedding_vec_kernel<sycl_t, IS_NEOX, VEC_SIZE>(
-            positions_ptr,
-            query_ptr,
-            key_ptr,
-            cos_sin_cache_ptr,
-            rot_dim,
-            query_stride,
-            key_stride,
-            head_stride,
-            vecs_per_head,
-            static_cast<int>(query_vecs_per_token),
-            static_cast<int>(vecs_per_token),
-            static_cast<int>(total_vecs)));
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(sycl::range<1>(global), sycl::range<1>(wg)),
+      vllm::rotary_embedding_vec_kernel<sycl_t, IS_NEOX, VEC_SIZE>(
+          positions_ptr,
+          query_ptr,
+          key_ptr,
+          cos_sin_cache_ptr,
+          rot_dim,
+          query_stride,
+          key_stride,
+          head_stride,
+          vecs_per_head,
+          static_cast<int>(query_vecs_per_token),
+          static_cast<int>(vecs_per_token),
+          static_cast<int>(total_vecs)));
   return true;
 }
 
@@ -462,9 +461,9 @@ void call_rotary_embedding_kernel(
   auto& queue = vllm::xpu::vllmGetQueue();
 
   // Fast path: fully vectorized, flat index space over query + key.
-  const int64_t rot_pairs = num_tokens * (rot_dim / 2) *
-                            (static_cast<int64_t>(num_heads) +
-                             (key.has_value() ? num_kv_heads : 0));
+  const int64_t rot_pairs =
+      num_tokens * (rot_dim / 2) *
+      (static_cast<int64_t>(num_heads) + (key.has_value() ? num_kv_heads : 0));
   const RopeVecLaunch launch =
       rope_vec_launch(queue, rot_pairs, static_cast<int>(sizeof(sycl_t)));
   const bool launched = is_neox ? launch_rotary_embedding_vec<sycl_t, true>(
@@ -501,39 +500,37 @@ void call_rotary_embedding_kernel(
   sycl::range<3> block(1, 1, std::min<int64_t>(num_heads * rot_dim / 2, 512));
 
   if (is_neox) {
-    queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<3>(grid * block, block),
-          vllm::rotary_embedding_kernel<sycl_t, true>(
-              positions_ptr,
-              (sycl_t*)query_ptr,
-              (sycl_t*)key_ptr,
-              (sycl_t*)cos_sin_cache_ptr,
-              rot_dim,
-              query_stride,
-              key_stride,
-              head_stride,
-              num_heads,
-              num_kv_heads,
-              head_size));
-    });
+    vllm::xpu::sycl_kernel_submit(
+        queue,
+        sycl::nd_range<3>(grid * block, block),
+        vllm::rotary_embedding_kernel<sycl_t, true>(
+            positions_ptr,
+            (sycl_t*)query_ptr,
+            (sycl_t*)key_ptr,
+            (sycl_t*)cos_sin_cache_ptr,
+            rot_dim,
+            query_stride,
+            key_stride,
+            head_stride,
+            num_heads,
+            num_kv_heads,
+            head_size));
   } else {
-    queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<3>(grid * block, block),
-          vllm::rotary_embedding_kernel<sycl_t, false>(
-              positions_ptr,
-              (sycl_t*)query_ptr,
-              (sycl_t*)key_ptr,
-              (sycl_t*)cos_sin_cache_ptr,
-              rot_dim,
-              query_stride,
-              key_stride,
-              head_stride,
-              num_heads,
-              num_kv_heads,
-              head_size));
-    });
+    vllm::xpu::sycl_kernel_submit(
+        queue,
+        sycl::nd_range<3>(grid * block, block),
+        vllm::rotary_embedding_kernel<sycl_t, false>(
+            positions_ptr,
+            (sycl_t*)query_ptr,
+            (sycl_t*)key_ptr,
+            (sycl_t*)cos_sin_cache_ptr,
+            rot_dim,
+            query_stride,
+            key_stride,
+            head_stride,
+            num_heads,
+            num_kv_heads,
+            head_size));
   }
 }
 

@@ -17,6 +17,7 @@
 #include <c10/util/Float8_e4m3fn.h>
 #include <cstdint>
 #include <type_traits>
+#include "sycl_launch.h"
 
 // File-local constants, at global scope rather than inside `namespace vllm`:
 // both the kernel class and the host-side validation need them, and a
@@ -648,33 +649,32 @@ void fused_kv_compress_norm_rope_insert_sparse_attn(
     using WT = std::remove_const_t<std::remove_pointer_t<decltype(rw)>>;
     using K = vllm::sparse_kv_insert_fp8mix_generic_kernel<WT>;
     constexpr int WG = K::WG_SIZE;
-    q.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<1>(num_tokens * WG, WG),
-          K{sc,
-            state_cache.stride(0),
-            state_cache.stride(1),
-            state_width,
-            tr,
-            pos,
-            sm,
-            bt,
-            block_table.stride(0),
-            state_block_size,
-            rw,
-            eps,
-            cs,
-            cos_sin_cache.stride(0),
-            kc,
-            kvs,
-            static_cast<int>(kv_cache_block_size),
-            kv_block_stride,
-            static_cast<int>(token_stride),
-            static_cast<int>(scale_dim),
-            static_cast<int>(compress_ratio),
-            static_cast<int>(overlap),
-            static_cast<int>(rope_head_dim)});
-    });
+    vllm::xpu::sycl_kernel_submit(
+        q,
+        sycl::nd_range<1>(num_tokens * WG, WG),
+        K{sc,
+          state_cache.stride(0),
+          state_cache.stride(1),
+          state_width,
+          tr,
+          pos,
+          sm,
+          bt,
+          block_table.stride(0),
+          state_block_size,
+          rw,
+          eps,
+          cs,
+          cos_sin_cache.stride(0),
+          kc,
+          kvs,
+          static_cast<int>(kv_cache_block_size),
+          kv_block_stride,
+          static_cast<int>(token_stride),
+          static_cast<int>(scale_dim),
+          static_cast<int>(compress_ratio),
+          static_cast<int>(overlap),
+          static_cast<int>(rope_head_dim)});
   };
 
   if (rms_norm_weight.scalar_type() == torch::kBFloat16) {

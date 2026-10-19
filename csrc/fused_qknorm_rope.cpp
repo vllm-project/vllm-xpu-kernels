@@ -10,6 +10,7 @@
 
 #include "dispatch_utils.h"
 #include "utils.h"
+#include "sycl_launch.h"
 
 namespace vllm {
 
@@ -496,14 +497,43 @@ void launch_fused_qk_norm_rope(
     if constexpr (HEADS_PER_SG_V == 1) {                             \
       const int total_sgs = num_tokens * total_qk_heads;             \
       const int grid_sz = (total_sgs + sgs_per_wg - 1) / sgs_per_wg; \
-      queue.submit([&](sycl::handler& cgh) {                         \
-        cgh.parallel_for(                                            \
+      vllm::xpu::sycl_kernel_submit(                                 \
+          queue,                                                     \
+          sycl::nd_range<1>(grid_sz * block_size, block_size),       \
+          fused_qk_norm_rope_kernel<                                 \
+              sycl_t,                                                \
+              sycl_cache_t,                                          \
+              HEAD_DIM,                                              \
+              IS_NEOX_V>(                                            \
+              qkv_ptr,                                               \
+              num_heads_q,                                           \
+              num_heads_k,                                           \
+              num_heads_v,                                           \
+              eps,                                                   \
+              q_weight_ptr,                                          \
+              k_weight_ptr,                                          \
+              cos_sin_cache_ptr,                                     \
+              position_ids_ptr,                                      \
+              num_tokens,                                            \
+              rotary_dim));                                          \
+    } else {                                                         \
+      const int head_chunks_per_token =                              \
+          (total_qk_heads + HEADS_PER_SG_V - 1) / HEADS_PER_SG_V;    \
+      const int total_sgs = num_tokens * head_chunks_per_token;      \
+      const int grid_sz = (total_sgs + sgs_per_wg - 1) / sgs_per_wg; \
+      const int nept = (HEAD_DIM) / 32;                              \
+      const int embed_dim = rotary_dim / 2;                          \
+      auto submit = [&](auto interleaved) {                          \
+        vllm::xpu::sycl_kernel_submit(                               \
+            queue,                                                   \
             sycl::nd_range<1>(grid_sz * block_size, block_size),     \
-            fused_qk_norm_rope_kernel<                               \
+            fused_qk_norm_rope_n_heads_kernel<                       \
                 sycl_t,                                              \
                 sycl_cache_t,                                        \
                 HEAD_DIM,                                            \
-                IS_NEOX_V>(                                          \
+                IS_NEOX_V,                                           \
+                HEADS_PER_SG_V,                                      \
+                decltype(interleaved)::value>(                       \
                 qkv_ptr,                                             \
                 num_heads_q,                                         \
                 num_heads_k,                                         \
@@ -514,41 +544,10 @@ void launch_fused_qk_norm_rope(
                 cos_sin_cache_ptr,                                   \
                 position_ids_ptr,                                    \
                 num_tokens,                                          \
-                rotary_dim));                                        \
-      });                                                            \
-    } else {                                                         \
-      const int head_chunks_per_token =                              \
-          (total_qk_heads + HEADS_PER_SG_V - 1) / HEADS_PER_SG_V;    \
-      const int total_sgs = num_tokens * head_chunks_per_token;      \
-      const int grid_sz = (total_sgs + sgs_per_wg - 1) / sgs_per_wg; \
-      const int nept = (HEAD_DIM) / 32;                              \
-      const int embed_dim = rotary_dim / 2;                          \
-      auto submit = [&](auto interleaved) {                          \
-        queue.submit([&](sycl::handler& cgh) {                       \
-          cgh.parallel_for(                                          \
-              sycl::nd_range<1>(grid_sz * block_size, block_size),   \
-              fused_qk_norm_rope_n_heads_kernel<                     \
-                  sycl_t,                                            \
-                  sycl_cache_t,                                      \
-                  HEAD_DIM,                                          \
-                  IS_NEOX_V,                                         \
-                  HEADS_PER_SG_V,                                    \
-                  decltype(interleaved)::value>(                     \
-                  qkv_ptr,                                           \
-                  num_heads_q,                                       \
-                  num_heads_k,                                       \
-                  num_heads_v,                                       \
-                  eps,                                               \
-                  q_weight_ptr,                                      \
-                  k_weight_ptr,                                      \
-                  cos_sin_cache_ptr,                                 \
-                  position_ids_ptr,                                  \
-                  num_tokens,                                        \
-                  rotary_dim,                                        \
-                  rotary_dim / nept,                                 \
-                  embed_dim / nept,                                  \
-                  embed_dim));                                       \
-        });                                                          \
+                rotary_dim,                                          \
+                rotary_dim / nept,                                   \
+                embed_dim / nept,                                    \
+                embed_dim));                                         \
       };                                                             \
       if (IS_NEOX_V && rotary_dim == (HEAD_DIM)) {                   \
         submit(std::bool_constant<IS_NEOX_V>{});                     \

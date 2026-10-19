@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <type_traits>
 #include <torch/all.h>
+#include "sycl_launch.h"
 
 namespace vllm {
 inline namespace VLLM_INV_ROPE_IMPL_NS {
@@ -95,10 +96,11 @@ inline uint8_t fcvt_half_e4m3(sycl::half h) {
 // bf16-sourced values that is still a single rounding: 8 significant bits
 // survive the power-of-two scale and fit fp16 exactly. Rope outputs are full
 // fp32 and would round twice, so they take the software path instead.
-inline uint8_t scale_to_fp8(float val, float inv_scale, uint32_t scale_exp,
-                            bool from_bf16) {
+inline uint8_t
+scale_to_fp8(float val, float inv_scale, uint32_t scale_exp, bool from_bf16) {
 #ifdef VLLM_INV_ROPE_USE_FCVT
-  if (from_bf16) return fcvt_half_e4m3(static_cast<sycl::half>(val * inv_scale));
+  if (from_bf16)
+    return fcvt_half_e4m3(static_cast<sycl::half>(val * inv_scale));
 #endif
   (void)inv_scale;
   (void)from_bf16;
@@ -212,10 +214,13 @@ class deepseek_inv_rope_fp8_quant_kernel {
     // Rope register FIRST_ROPE_REG + k of lane l holds pair k * 16 + l, which
     // is exactly a striped block load.
     float c2[ROPE_REGS], s2[ROPE_REGS];
-    syclex::group_load(sg, cos_ptr, sycl::span<float, ROPE_REGS>{c2, ROPE_REGS},
-                       kStriped);
-    syclex::group_load(sg, cos_ptr + half_rope_,
-                       sycl::span<float, ROPE_REGS>{s2, ROPE_REGS}, kStriped);
+    syclex::group_load(
+        sg, cos_ptr, sycl::span<float, ROPE_REGS>{c2, ROPE_REGS}, kStriped);
+    syclex::group_load(
+        sg,
+        cos_ptr + half_rope_,
+        sycl::span<float, ROPE_REGS>{s2, ROPE_REGS},
+        kStriped);
 
     const load_t* src = reinterpret_cast<const load_t*>(
         o_ + token_idx * o_stride_token_ + head_idx * o_stride_head_);
@@ -234,8 +239,10 @@ class deepseek_inv_rope_fp8_quant_kernel {
 #pragma unroll
     for (int b = 0; b < NLOADS; ++b)
       syclex::group_load(
-          sg, src + b * PER_LOAD * SG_SIZE,
-          sycl::span<load_t, PER_LOAD>{raw + b * PER_LOAD, PER_LOAD}, kStriped);
+          sg,
+          src + b * PER_LOAD * SG_SIZE,
+          sycl::span<load_t, PER_LOAD>{raw + b * PER_LOAD, PER_LOAD},
+          kStriped);
 
     float vals[REGS_PER_LANE][ELEMS_PER_REG];
 #pragma unroll
@@ -315,7 +322,8 @@ class deepseek_inv_rope_fp8_quant_kernel {
         const float block_absmax =
             sycl::reduce_over_group(sg, local_absmax, sycl::maximum<float>());
         scales[blk] = fast_ceil_pow2(
-            sycl::fmax(block_absmax, 1e-10f) * (1.0f / FP8_E4M3_MAX), scale_exp);
+            sycl::fmax(block_absmax, 1e-10f) * (1.0f / FP8_E4M3_MAX),
+            scale_exp);
         inv_scale = 1.0f / scales[blk];
       }
 
@@ -343,15 +351,17 @@ class deepseek_inv_rope_fp8_quant_kernel {
 #pragma unroll
     for (int b = 0; b < NLOADS; ++b)
       syclex::group_store(
-          sg, sycl::span<const store_t, PER_LOAD>{out + b * PER_LOAD, PER_LOAD},
-          dst + b * PER_LOAD * SG_SIZE, kStriped);
+          sg,
+          sycl::span<const store_t, PER_LOAD>{out + b * PER_LOAD, PER_LOAD},
+          dst + b * PER_LOAD * SG_SIZE,
+          kStriped);
 
     if constexpr (MXFP8) {
       if ((lane & (SG_SIZE / 2 - 1)) == 0)
         *reinterpret_cast<sycl::vec<uint32_t, 2>*>(
             scale_dst + (lane ? SCALES_PER_HEAD / 2 : 0)) =
-            sycl::vec<uint32_t, 2>{scale_pack[lane ? 2 : 0],
-                                   scale_pack[lane ? 3 : 1]};
+            sycl::vec<uint32_t, 2>{
+                scale_pack[lane ? 2 : 0], scale_pack[lane ? 3 : 1]};
     }
   }
 
@@ -432,9 +442,8 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
 
   const int64_t half_rope = rope_dim / 2;
   const int64_t d = heads_per_group * head_dim;
-  const int64_t blocks_per_head =
-      use_mxfp8 ? head_dim / vllm::MXFP8_GROUP_SIZE
-                : head_dim / QUANT_GROUP_SIZE;
+  const int64_t blocks_per_head = use_mxfp8 ? head_dim / vllm::MXFP8_GROUP_SIZE
+                                            : head_dim / QUANT_GROUP_SIZE;
   const int64_t num_scale_blocks = heads_per_group * blocks_per_head;
 
   auto fp8_out = torch::empty(
@@ -442,8 +451,7 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
 
   auto scale_out = torch::empty(
       {n_groups, num_tokens, num_scale_blocks},
-      o.options().dtype(
-          use_mxfp8 ? torch::kFloat8_e8m0fnu : torch::kFloat32));
+      o.options().dtype(use_mxfp8 ? torch::kFloat8_e8m0fnu : torch::kFloat32));
 
   if (num_tokens == 0) {
     return {fp8_out, scale_out};
@@ -475,29 +483,28 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
     using kernel_t =
         vllm::deepseek_inv_rope_fp8_quant_kernel<decltype(mxfp8_tag)::value>;
     using scale_ptr_t = typename kernel_t::scale_t;
-    q.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<3>(global, local),
-          kernel_t(
-              reinterpret_cast<const bf16_t*>(o.data_ptr()),
-              reinterpret_cast<const int64_t*>(positions.data_ptr()),
-              reinterpret_cast<const float*>(cos_sin_cache.data_ptr()),
-              reinterpret_cast<fp8_t*>(fp8_out.data_ptr()),
-              reinterpret_cast<scale_ptr_t*>(scale_out.data_ptr()),
-              num_tokens,
-              num_heads,
-              heads_per_group,
-              head_dim,
-              nope_dim,
-              half_rope,
-              o_stride_token,
-              o_stride_head,
-              cache_stride_pos,
-              fp8_stride_group,
-              fp8_stride_token,
-              scale_stride_group,
-              scale_stride_token));
-    });
+    vllm::xpu::sycl_kernel_submit(
+        q,
+        sycl::nd_range<3>(global, local),
+        kernel_t(
+            reinterpret_cast<const bf16_t*>(o.data_ptr()),
+            reinterpret_cast<const int64_t*>(positions.data_ptr()),
+            reinterpret_cast<const float*>(cos_sin_cache.data_ptr()),
+            reinterpret_cast<fp8_t*>(fp8_out.data_ptr()),
+            reinterpret_cast<scale_ptr_t*>(scale_out.data_ptr()),
+            num_tokens,
+            num_heads,
+            heads_per_group,
+            head_dim,
+            nope_dim,
+            half_rope,
+            o_stride_token,
+            o_stride_head,
+            cache_stride_pos,
+            fp8_stride_group,
+            fp8_stride_token,
+            scale_stride_group,
+            scale_stride_token));
   };
 
   if (use_mxfp8) {

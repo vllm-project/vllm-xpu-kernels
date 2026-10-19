@@ -9,6 +9,7 @@
 #include <c10/util/Float8_e5m2.h>
 #include "quantization/fp8/quant_utils.h"
 #include "quantization/utils.h"
+#include "sycl_launch.h"
 
 #define VLLM_LDG(arg) *(arg)
 
@@ -918,20 +919,19 @@ void situ_and_mul(
   });
 }
 
-#define VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(N)                     \
-  case N: {                                                       \
-    queue.submit([&](sycl::handler& cgh) {                        \
-      cgh.parallel_for(                                           \
-          sycl::nd_range<1>(num_tokens * wg_size, wg_size),       \
-          vllm::silu_and_mul_with_clamp_vec_kernel<sycl_t, N>(    \
-              (sycl_t*)out_ptr,                                   \
-              (sycl_t*)input_ptr,                                 \
-              d,                                                  \
-              static_cast<float>(limit),                          \
-              static_cast<float>(alpha),                          \
-              static_cast<float>(beta)));                         \
-    });                                                           \
-    break;                                                        \
+#define VEC_LAUNCH_SILU_AND_MUL_WITH_CLAMP(N)                \
+  case N: {                                                  \
+    vllm::xpu::sycl_kernel_submit(                           \
+        queue,                                               \
+        sycl::nd_range<1>(num_tokens * wg_size, wg_size),    \
+        vllm::silu_and_mul_with_clamp_vec_kernel<sycl_t, N>( \
+            (sycl_t*)out_ptr,                                \
+            (sycl_t*)input_ptr,                              \
+            d,                                               \
+            static_cast<float>(limit),                       \
+            static_cast<float>(alpha),                       \
+            static_cast<float>(beta)));                      \
+    break;                                                   \
   }
 
 void silu_and_mul_with_clamp(

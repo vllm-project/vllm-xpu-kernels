@@ -1738,22 +1738,21 @@ void dequantize_and_gather_k_cache(
   const at::DeviceGuard device_guard(out.device());
   auto& queue = vllm::xpu::vllmGetQueue();
 
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<2>(grid * block, block),
-        vllm::dequantize_and_gather_k_cache_kernel(
-            out.data_ptr<at::BFloat16>(),
-            k_cache.data_ptr<uint8_t>(),
-            seq_lens.data_ptr<int32_t>(),
-            gather_lens_ptr,
-            block_table.data_ptr<int32_t>(),
-            out_stride0,
-            out_stride1,
-            cache_block_stride,
-            block_table_stride,
-            block_size_i32,
-            offset_i32));
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<2>(grid * block, block),
+      vllm::dequantize_and_gather_k_cache_kernel(
+          out.data_ptr<at::BFloat16>(),
+          k_cache.data_ptr<uint8_t>(),
+          seq_lens.data_ptr<int32_t>(),
+          gather_lens_ptr,
+          block_table.data_ptr<int32_t>(),
+          out_stride0,
+          out_stride1,
+          cache_block_stride,
+          block_table_stride,
+          block_size_i32,
+          offset_i32));
 }
 
   // Macro to dispatch the kernel based on the data type.
