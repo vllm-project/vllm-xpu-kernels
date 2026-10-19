@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include "sycl_launch.h"
 
 namespace {
 
@@ -905,25 +906,23 @@ torch::Tensor qwen4_exp_ple_ngram_ids(
   at::DeviceGuard guard(input_ids.device());
   auto& queue = c10::xpu::getCurrentXPUStream().queue();
   const int64_t global = round_up(output.numel(), kWorkGroupSize);
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<1>(
-            sycl::range<1>(global), sycl::range<1>(kWorkGroupSize)),
-        PleNgramIdsKernel(
-            input_ids.data_ptr<int64_t>(),
-            query_start_loc.data_ptr<int32_t>(),
-            ngram_context.data_ptr<int64_t>(),
-            layer_multipliers.data_ptr<int64_t>(),
-            ngram_heads_vocab_sizes.data_ptr<int64_t>(),
-            ngram_heads_offsets.data_ptr<int64_t>(),
-            output.data_ptr<int64_t>(),
-            input_ids.numel(),
-            num_requests,
-            context_length,
-            heads_per_ngram,
-            num_heads,
-            eos_token_id));
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(sycl::range<1>(global), sycl::range<1>(kWorkGroupSize)),
+      PleNgramIdsKernel(
+          input_ids.data_ptr<int64_t>(),
+          query_start_loc.data_ptr<int32_t>(),
+          ngram_context.data_ptr<int64_t>(),
+          layer_multipliers.data_ptr<int64_t>(),
+          ngram_heads_vocab_sizes.data_ptr<int64_t>(),
+          ngram_heads_offsets.data_ptr<int64_t>(),
+          output.data_ptr<int64_t>(),
+          input_ids.numel(),
+          num_requests,
+          context_length,
+          heads_per_ngram,
+          num_heads,
+          eos_token_id));
   return output;
 }
 
@@ -1075,30 +1074,61 @@ void qwen4_exp_ple_conv(
       token_indices.has_value() ? token_indices->numel() : inputs.size(0);
   at::DeviceGuard guard(inputs.device());
   auto& queue = c10::xpu::getCurrentXPUStream().queue();
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(
+          sycl::range<1>(token_count * channel_groups * kWorkGroupSize),
+          sycl::range<1>(kWorkGroupSize)),
+      PleConvKernel(
+          reinterpret_cast<const bf16*>(inputs.data_ptr()),
+          reinterpret_cast<bf16*>(output.data_ptr()),
+          reinterpret_cast<bf16*>(conv_state.data_ptr()),
+          reinterpret_cast<const bf16*>(conv_weights.data_ptr()),
+          state_indices.data_ptr<int32_t>(),
+          query_start_loc.has_value() ? query_start_loc->data_ptr<int32_t>()
+                                      : nullptr,
+          accepted_ptr,
+          initial_ptr,
+          token_indices_i64,
+          token_indices_i32,
+          token_count,
+          inputs.size(0),
+          channels,
+          channel_groups,
+          conv_weights.size(1),
+          dilation,
+          state_length,
+          spec_query_len,
+          num_requests,
+          conv_state.size(0),
+          token_indices_count,
+          conv_state.stride(0),
+          conv_state.stride(1),
+          conv_state.stride(2),
+          mode_code,
+          has_initial_states.has_value(),
+          token_indices.has_value(),
+          token_indices_are_i64));
+  if (mode_code != 0) {
+    vllm::xpu::sycl_kernel_submit(
+        queue,
         sycl::nd_range<1>(
-            sycl::range<1>(token_count * channel_groups * kWorkGroupSize),
+            sycl::range<1>(num_requests * channel_groups * kWorkGroupSize),
             sycl::range<1>(kWorkGroupSize)),
-        PleConvKernel(
+        PleConvWritebackKernel(
             reinterpret_cast<const bf16*>(inputs.data_ptr()),
-            reinterpret_cast<bf16*>(output.data_ptr()),
             reinterpret_cast<bf16*>(conv_state.data_ptr()),
-            reinterpret_cast<const bf16*>(conv_weights.data_ptr()),
             state_indices.data_ptr<int32_t>(),
-            query_start_loc.has_value() ? query_start_loc->data_ptr<int32_t>()
-                                        : nullptr,
+            query_start_loc->data_ptr<int32_t>(),
             accepted_ptr,
             initial_ptr,
             token_indices_i64,
             token_indices_i32,
-            token_count,
             inputs.size(0),
             channels,
             channel_groups,
-            conv_weights.size(1),
-            dilation,
             state_length,
+            state_width,
             spec_query_len,
             num_requests,
             conv_state.size(0),
@@ -1110,39 +1140,6 @@ void qwen4_exp_ple_conv(
             has_initial_states.has_value(),
             token_indices.has_value(),
             token_indices_are_i64));
-  });
-  if (mode_code != 0) {
-    queue.submit([&](sycl::handler& cgh) {
-      cgh.parallel_for(
-          sycl::nd_range<1>(
-              sycl::range<1>(num_requests * channel_groups * kWorkGroupSize),
-              sycl::range<1>(kWorkGroupSize)),
-          PleConvWritebackKernel(
-              reinterpret_cast<const bf16*>(inputs.data_ptr()),
-              reinterpret_cast<bf16*>(conv_state.data_ptr()),
-              state_indices.data_ptr<int32_t>(),
-              query_start_loc->data_ptr<int32_t>(),
-              accepted_ptr,
-              initial_ptr,
-              token_indices_i64,
-              token_indices_i32,
-              inputs.size(0),
-              channels,
-              channel_groups,
-              state_length,
-              state_width,
-              spec_query_len,
-              num_requests,
-              conv_state.size(0),
-              token_indices_count,
-              conv_state.stride(0),
-              conv_state.stride(1),
-              conv_state.stride(2),
-              mode_code,
-              has_initial_states.has_value(),
-              token_indices.has_value(),
-              token_indices_are_i64));
-    });
   }
 }
 
@@ -1174,19 +1171,17 @@ torch::Tensor qwen4_exp_qsa_visible_blocks(
   at::DeviceGuard guard(query_positions.device());
   auto& queue = c10::xpu::getCurrentXPUStream().queue();
   const int64_t global = round_up(output.numel(), kWorkGroupSize);
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<1>(
-            sycl::range<1>(global), sycl::range<1>(kWorkGroupSize)),
-        QsaVisibleBlocksKernel(
-            query_positions.data_ptr<int64_t>(),
-            sequence_lengths.data_ptr<int32_t>(),
-            token_to_request.data_ptr<int32_t>(),
-            output.data_ptr<int32_t>(),
-            output.numel(),
-            sequence_lengths.numel(),
-            compress_ratio));
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(sycl::range<1>(global), sycl::range<1>(kWorkGroupSize)),
+      QsaVisibleBlocksKernel(
+          query_positions.data_ptr<int64_t>(),
+          sequence_lengths.data_ptr<int32_t>(),
+          token_to_request.data_ptr<int32_t>(),
+          output.data_ptr<int32_t>(),
+          output.numel(),
+          sequence_lengths.numel(),
+          compress_ratio));
   return output;
 }
 
@@ -1229,22 +1224,20 @@ torch::Tensor qwen4_exp_qsa_expand_block_indices(
   at::DeviceGuard guard(block_indices.device());
   auto& queue = c10::xpu::getCurrentXPUStream().queue();
   const int64_t global = round_up(output.numel(), kWorkGroupSize);
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<1>(
-            sycl::range<1>(global), sycl::range<1>(kWorkGroupSize)),
-        QsaExpandBlockIndicesKernel(
-            block_indices.data_ptr<int32_t>(),
-            query_positions.data_ptr<int64_t>(),
-            sequence_lengths.data_ptr<int32_t>(),
-            token_to_request.data_ptr<int32_t>(),
-            output.data_ptr<int32_t>(),
-            block_indices.size(0),
-            sequence_lengths.numel(),
-            block_topk,
-            compress_ratio,
-            output_width));
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(sycl::range<1>(global), sycl::range<1>(kWorkGroupSize)),
+      QsaExpandBlockIndicesKernel(
+          block_indices.data_ptr<int32_t>(),
+          query_positions.data_ptr<int64_t>(),
+          sequence_lengths.data_ptr<int32_t>(),
+          token_to_request.data_ptr<int32_t>(),
+          output.data_ptr<int32_t>(),
+          block_indices.size(0),
+          sequence_lengths.numel(),
+          block_topk,
+          compress_ratio,
+          output_width));
   return output;
 }
 
@@ -1287,24 +1280,22 @@ void qwen4_exp_qsa_store_cache_rows(
   at::DeviceGuard guard(cache.device());
   auto& queue = c10::xpu::getCurrentXPUStream().queue();
   const int64_t global = round_up(bytes, kWorkGroupSize);
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<1>(
-            sycl::range<1>(global), sycl::range<1>(kWorkGroupSize)),
-        QsaStoreCacheRowsKernel(
-            static_cast<uint8_t*>(cache.data_ptr()),
-            slot_mapping.scalar_type() == at::kLong
-                ? slot_mapping.data_ptr<int64_t>()
-                : nullptr,
-            slot_mapping.scalar_type() == at::kInt
-                ? slot_mapping.data_ptr<int32_t>()
-                : nullptr,
-            static_cast<const uint8_t*>(rows.data_ptr()),
-            num_rows,
-            cache.size(0) * cache.size(1),
-            row_bytes,
-            slot_mapping.scalar_type() == at::kLong));
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(sycl::range<1>(global), sycl::range<1>(kWorkGroupSize)),
+      QsaStoreCacheRowsKernel(
+          static_cast<uint8_t*>(cache.data_ptr()),
+          slot_mapping.scalar_type() == at::kLong
+              ? slot_mapping.data_ptr<int64_t>()
+              : nullptr,
+          slot_mapping.scalar_type() == at::kInt
+              ? slot_mapping.data_ptr<int32_t>()
+              : nullptr,
+          static_cast<const uint8_t*>(rows.data_ptr()),
+          num_rows,
+          cache.size(0) * cache.size(1),
+          row_bytes,
+          slot_mapping.scalar_type() == at::kLong));
 }
 
 std::tuple<torch::Tensor, torch::Tensor> qwen4_exp_qsa_compress_groups(
@@ -1396,32 +1387,31 @@ std::tuple<torch::Tensor, torch::Tensor> qwen4_exp_qsa_compress_groups(
   const int64_t row_groups = (head_dim + kWorkGroupSize - 1) / kWorkGroupSize;
   at::DeviceGuard guard(raw_keys.device());
   auto& queue = c10::xpu::getCurrentXPUStream().queue();
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<1>(
-            sycl::range<1>(rows * row_groups * kWorkGroupSize),
-            sycl::range<1>(kWorkGroupSize)),
-        QsaCompressGroupsKernel(
-            reinterpret_cast<const bf16*>(raw_keys.data_ptr()),
-            raw_positions.data_ptr<int64_t>(),
-            reinterpret_cast<const bf16*>(compressor_state_cache.data_ptr()),
-            compressor_state_block_table.data_ptr<int32_t>(),
-            token_to_request.data_ptr<int32_t>(),
-            query_start_loc.data_ptr<int32_t>(),
-            logical_positions.data_ptr<int64_t>(),
-            compressed_slots.data_ptr<int64_t>(),
-            rope_ptr,
-            reinterpret_cast<bf16*>(pooled.data_ptr()),
-            first_positions.data_ptr<int64_t>(),
-            rows,
-            head_dim,
-            compressor_state_cache.size(0),
-            compressor_state_cache.size(1),
-            compressor_state_block_table.stride(0),
-            num_requests,
-            compress_ratio,
-            row_groups,
-            rope_cache.has_value()));
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(
+          sycl::range<1>(rows * row_groups * kWorkGroupSize),
+          sycl::range<1>(kWorkGroupSize)),
+      QsaCompressGroupsKernel(
+          reinterpret_cast<const bf16*>(raw_keys.data_ptr()),
+          raw_positions.data_ptr<int64_t>(),
+          reinterpret_cast<const bf16*>(compressor_state_cache.data_ptr()),
+          compressor_state_block_table.data_ptr<int32_t>(),
+          token_to_request.data_ptr<int32_t>(),
+          query_start_loc.data_ptr<int32_t>(),
+          logical_positions.data_ptr<int64_t>(),
+          compressed_slots.data_ptr<int64_t>(),
+          rope_ptr,
+          reinterpret_cast<bf16*>(pooled.data_ptr()),
+          first_positions.data_ptr<int64_t>(),
+          rows,
+          head_dim,
+          compressor_state_cache.size(0),
+          compressor_state_cache.size(1),
+          compressor_state_block_table.stride(0),
+          num_requests,
+          compress_ratio,
+          row_groups,
+          rope_cache.has_value()));
   return {pooled, first_positions};
 }

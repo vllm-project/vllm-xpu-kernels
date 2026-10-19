@@ -12,6 +12,7 @@
 
 #include "dispatch_utils.h"
 #include "utils.h"
+#include "sycl_launch.h"
 
 namespace vllm {
 
@@ -3775,14 +3776,13 @@ void launchMediumTopK(
     int topK,
     int nextN = 1) {
   constexpr int kThreads = MediumTopKKernel<kDecode, kStaged>::kThreads;
-  queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for(
-        sycl::nd_range<3>(
-            sycl::range<3>(size_t(rows) * kThreads, 1, 1),
-            sycl::range<3>(kThreads, 1, 1)),
-        MediumTopKKernel<kDecode, kStaged>{
-            logits, starts, ends, output, stride0, stride1, topK, nextN});
-  });
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<3>(
+          sycl::range<3>(size_t(rows) * kThreads, 1, 1),
+          sycl::range<3>(kThreads, 1, 1)),
+      MediumTopKKernel<kDecode, kStaged>{
+          logits, starts, ends, output, stride0, stride1, topK, nextN});
 }
 
 }  // namespace vllm
