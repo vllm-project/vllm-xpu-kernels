@@ -2,6 +2,7 @@
 
 #include "../utils.h"
 #include "../dispatch_utils.h"
+#include "sycl_launch.h"
 
 namespace vllm {
 namespace moe {
@@ -165,20 +166,19 @@ void MoeGatherLauncher(
   case TOPK: {                                                              \
     const int lanes_per_token =                                             \
         MoeGather<T, TOPK, ElemsPerItem>::get_lanes_per_token(hidden_size); \
-    queue.submit([&](sycl::handler& cgh) {                                  \
-      cgh.parallel_for(                                                     \
-          MoeGather<T, TOPK, ElemsPerItem>::get_nd_range(                   \
-              num_tokens, lanes_per_token),                                 \
-          MoeGather<T, TOPK, ElemsPerItem>{                                 \
-              output,                                                       \
-              moe_output,                                                   \
-              topk_weights,                                                 \
-              unpermuted_row_to_permuted_row,                               \
-              num_experts,                                                  \
-              num_tokens,                                                   \
-              hidden_size,                                                  \
-              lanes_per_token});                                            \
-    });                                                                     \
+    vllm::xpu::sycl_kernel_submit(                                          \
+        queue,                                                              \
+        MoeGather<T, TOPK, ElemsPerItem>::get_nd_range(                     \
+            num_tokens, lanes_per_token),                                   \
+        MoeGather<T, TOPK, ElemsPerItem>{                                   \
+            output,                                                         \
+            moe_output,                                                     \
+            topk_weights,                                                   \
+            unpermuted_row_to_permuted_row,                                 \
+            num_experts,                                                    \
+            num_tokens,                                                     \
+            hidden_size,                                                    \
+            lanes_per_token});                                              \
   } break;
 
 #define CASE_ElemsPerItem(TOPK, ElemsPerItem)                                  \
