@@ -68,6 +68,15 @@ class reshape_and_cache_kernel {
     const int block_idx = slot_idx / block_size_;
     const int block_offset = slot_idx % block_size_;
     const int n = num_heads_ * head_size_;
+    // fp8 caches are stored as uint8_t, so the fp8 bit pattern has to be
+    // written (a plain assignment would convert the fp8 value to an integer).
+    // CopyWithScaleOp divides by the dequant scale and saturates.
+    const float k_scale_val =
+        (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale_;
+    const float v_scale_val =
+        (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale_;
+    const fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+    const fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
     for (int i = local_idx; i < n; i += local_range) {
       const int src_key_idx = group_idx * key_stride_ + i;
       const int src_value_idx = group_idx * value_stride_ + i;
@@ -82,22 +91,8 @@ class reshape_and_cache_kernel {
       const int dst_value_idx = block_idx * n * block_size_ +
                                 head_idx * head_size_ * block_size_ +
                                 head_offset * block_size_ + block_offset;
-      scalar_t tgt_key = key_[src_key_idx];
-      scalar_t tgt_value = value_[src_value_idx];
-      if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
-        key_cache_[dst_key_idx] =
-            static_cast<at::Float8_e5m2>(tgt_key / (*k_scale_));
-        value_cache_[dst_value_idx] =
-            static_cast<at::Float8_e5m2>(tgt_value / (*v_scale_));
-      } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
-        key_cache_[dst_key_idx] =
-            static_cast<at::Float8_e4m3fn>(tgt_key / (*k_scale_));
-        value_cache_[dst_value_idx] =
-            static_cast<at::Float8_e4m3fn>(tgt_value / (*v_scale_));
-      } else {  // kv_dt == Fp8KVCacheDataType::kAuto
-        key_cache_[dst_key_idx] = tgt_key;
-        value_cache_[dst_value_idx] = tgt_value;
-      }
+      k_op(key_cache_[dst_key_idx], key_[src_key_idx]);
+      v_op(value_cache_[dst_value_idx], value_[src_value_idx]);
     }
   }
 

@@ -227,7 +227,10 @@ def _generate_random_fp8(tensor: torch.Tensor, low: float, high: float,
         f"Unsupported torch dtype for fp8: {torch_dtype}"
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
-    return tensor_tmp.to(torch_dtype)
+    # Fill `tensor` in place too: create_kv_caches_with_random ignores the
+    # return value, which left its fp8 caches uninitialized (NaN bytes).
+    tensor.copy_(tensor_tmp.to(torch_dtype))
+    return tensor
 
 
 def get_kv_cache_torch_dtype(
