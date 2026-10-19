@@ -10,6 +10,7 @@
 #include "quantization/utils.h"
 #include "utils.h"
 #include "utils/mem_cpy.h"
+#include "sycl_launch.h"
 
 // FP8 E4M3 scale divisor for Intel GPU
 constexpr float kFp8E4M3ScaleDivisor = 448.f;
@@ -948,9 +949,9 @@ class concat_and_cache_ds_mla_kernel {
   }
 
  private:
-  const scalar_t* __restrict__ kv_c_;  // [num_tokens, 512]
-  const scalar_t* __restrict__ k_pe_;  // [num_tokens, 64]
-  uint8_t* __restrict__ kv_cache_;     // [num_blocks, block_size, 656]
+  const scalar_t* __restrict__ kv_c_;         // [num_tokens, 512]
+  const scalar_t* __restrict__ k_pe_;         // [num_tokens, 64]
+  uint8_t* __restrict__ kv_cache_;            // [num_blocks, block_size, 656]
   const int64_t* __restrict__ slot_mapping_;  // [num_tokens]
   const int64_t block_stride_;
   const int64_t entry_stride_;
@@ -1031,9 +1032,9 @@ class cp_gather_and_upconvert_fp8_kv_cache_kernel {
   }
 
  private:
-  const uint8_t* __restrict__ src_cache_;  // [num_blocks, block_size, 656]
-  scalar_t* __restrict__ dst_;             // [total_tokens, 576]
-  const int32_t* __restrict__ block_table_;       // [num_reqs, max_blocks]
+  const uint8_t* __restrict__ src_cache_;    // [num_blocks, block_size, 656]
+  scalar_t* __restrict__ dst_;               // [total_tokens, 576]
+  const int32_t* __restrict__ block_table_;  // [num_reqs, max_blocks]
   const int32_t* __restrict__ workspace_starts_;  // [num_reqs]
   const int32_t* __restrict__ seq_starts_;        // optional [num_reqs]
   const int32_t num_reqs_;
@@ -1049,25 +1050,24 @@ class cp_gather_and_upconvert_fp8_kv_cache_kernel {
 // KV_T is the stored data type of kv-cache.
 // CACHE_T is the data type of key and value tensors.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)           \
-  queue.submit([&](sycl::handler& cgh) {                          \
-    cgh.parallel_for(                                             \
-        sycl::nd_range<1>(grid * block, block),                   \
-        vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>(  \
-            reinterpret_cast<KV_T*>(key.data_ptr()),              \
-            reinterpret_cast<KV_T*>(value.data_ptr()),            \
-            reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),     \
-            reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),   \
-            slot_mapping.data_ptr<int64_t>(),                     \
-            key_stride,                                           \
-            value_stride,                                         \
-            num_heads,                                            \
-            head_size,                                            \
-            block_size,                                           \
-            x,                                                    \
-            reinterpret_cast<const float*>(k_scale.data_ptr()),   \
-            reinterpret_cast<const float*>(v_scale.data_ptr()))); \
-  });
+#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)        \
+  vllm::xpu::sycl_kernel_submit(                               \
+      queue,                                                   \
+      sycl::nd_range<1>(grid * block, block),                  \
+      vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+          reinterpret_cast<KV_T*>(key.data_ptr()),             \
+          reinterpret_cast<KV_T*>(value.data_ptr()),           \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),    \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),  \
+          slot_mapping.data_ptr<int64_t>(),                    \
+          key_stride,                                          \
+          value_stride,                                        \
+          num_heads,                                           \
+          head_size,                                           \
+          block_size,                                          \
+          x,                                                   \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),  \
+          reinterpret_cast<const float*>(v_scale.data_ptr())));
 
 void reshape_and_cache(
     torch::Tensor& key,
@@ -1096,50 +1096,48 @@ void reshape_and_cache(
       key.scalar_type(), kv_cache_dtype, CALL_RESHAPE_AND_CACHE);
 }
 
-#define CALL_RESHAPE_AND_CACHE_FLASH_STRIDED(KV_T, CACHE_T, KV_DTYPE)          \
-  queue.submit([&](sycl::handler& cgh) {                                       \
-    cgh.parallel_for(                                                          \
-        sycl::nd_range<1>(grid * block, block),                                \
-        vllm::reshape_and_cache_flash_strided_kernel<KV_T, CACHE_T, KV_DTYPE>( \
-            reinterpret_cast<KV_T*>(key.data_ptr()),                           \
-            reinterpret_cast<KV_T*>(value.data_ptr()),                         \
-            reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                  \
-            slot_mapping.data_ptr<int64_t>(),                                  \
-            block_stride,                                                      \
-            page_stride,                                                       \
-            head_stride,                                                       \
-            key_stride,                                                        \
-            value_stride,                                                      \
-            num_heads,                                                         \
-            head_size,                                                         \
-            block_size,                                                        \
-            reinterpret_cast<const float*>(k_scale.data_ptr()),                \
-            reinterpret_cast<const float*>(v_scale.data_ptr())));              \
-  });
+#define CALL_RESHAPE_AND_CACHE_FLASH_STRIDED(KV_T, CACHE_T, KV_DTYPE)        \
+  vllm::xpu::sycl_kernel_submit(                                             \
+      queue,                                                                 \
+      sycl::nd_range<1>(grid * block, block),                                \
+      vllm::reshape_and_cache_flash_strided_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                           \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                         \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                  \
+          slot_mapping.data_ptr<int64_t>(),                                  \
+          block_stride,                                                      \
+          page_stride,                                                       \
+          head_stride,                                                       \
+          key_stride,                                                        \
+          value_stride,                                                      \
+          num_heads,                                                         \
+          head_size,                                                         \
+          block_size,                                                        \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),                \
+          reinterpret_cast<const float*>(v_scale.data_ptr())));
 
 // KV_T is the stored data type of kv-cache.
 // CACHE_T is the data type of key and value tensors.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)          \
-  queue.submit([&](sycl::handler& cgh) {                               \
-    cgh.parallel_for(                                                  \
-        sycl::nd_range<1>(grid * block, block),                        \
-        vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>( \
-            reinterpret_cast<KV_T*>(key.data_ptr()),                   \
-            reinterpret_cast<KV_T*>(value.data_ptr()),                 \
-            reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),          \
-            reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),        \
-            slot_mapping.data_ptr<int64_t>(),                          \
-            block_stride,                                              \
-            page_stride,                                               \
-            key_stride,                                                \
-            value_stride,                                              \
-            num_heads,                                                 \
-            head_size,                                                 \
-            block_size,                                                \
-            reinterpret_cast<const float*>(k_scale.data_ptr()),        \
-            reinterpret_cast<const float*>(v_scale.data_ptr())));      \
-  });
+#define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)        \
+  vllm::xpu::sycl_kernel_submit(                                     \
+      queue,                                                         \
+      sycl::nd_range<1>(grid * block, block),                        \
+      vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                   \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                 \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),          \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),        \
+          slot_mapping.data_ptr<int64_t>(),                          \
+          block_stride,                                              \
+          page_stride,                                               \
+          key_stride,                                                \
+          value_stride,                                              \
+          num_heads,                                                 \
+          head_size,                                                 \
+          block_size,                                                \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),        \
+          reinterpret_cast<const float*>(v_scale.data_ptr())));
 
 void reshape_and_cache_flash(
     torch::Tensor& key,
@@ -1195,40 +1193,38 @@ void reshape_and_cache_flash(
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)          \
-  queue.submit([&](sycl::handler& cgh) {                            \
-    cgh.parallel_for(                                               \
-        sycl::nd_range<1>(grid * block, block),                     \
-        vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>( \
-            reinterpret_cast<KV_T*>(kv_c.data_ptr()),               \
-            reinterpret_cast<KV_T*>(k_pe.data_ptr()),               \
-            reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),        \
-            slot_mapping.data_ptr<int64_t>(),                       \
-            block_stride,                                           \
-            entry_stride,                                           \
-            kv_c_stride,                                            \
-            k_pe_stride,                                            \
-            kv_lora_rank,                                           \
-            pe_dim,                                                 \
-            block_size,                                             \
-            reinterpret_cast<const float*>(scale.data_ptr())));     \
-  });
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)        \
+  vllm::xpu::sycl_kernel_submit(                                  \
+      queue,                                                      \
+      sycl::nd_range<1>(grid * block, block),                     \
+      vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),               \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),               \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),        \
+          slot_mapping.data_ptr<int64_t>(),                       \
+          block_stride,                                           \
+          entry_stride,                                           \
+          kv_c_stride,                                            \
+          k_pe_stride,                                            \
+          kv_lora_rank,                                           \
+          pe_dim,                                                 \
+          block_size,                                             \
+          reinterpret_cast<const float*>(scale.data_ptr())));
 
-#define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T)                                 \
-  queue.submit([&](sycl::handler& cgh) {                                   \
-    cgh.parallel_for(                                                      \
-        sycl::nd_range<2>(grid * block, block),                            \
-        vllm::concat_and_cache_ds_mla_kernel<KV_T, kDsMlaTileThreads>(     \
-            reinterpret_cast<const KV_T*>(kv_c.data_ptr()),                \
-            reinterpret_cast<const KV_T*>(k_pe.data_ptr()),                \
-            reinterpret_cast<uint8_t*>(kv_cache.data_ptr()),               \
-            slot_mapping.data_ptr<int64_t>(),                              \
-            block_stride,                                                  \
-            entry_stride,                                                  \
-            kv_c_stride,                                                   \
-            k_pe_stride,                                                   \
-            block_size));                                                  \
-  });
+#define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T)                           \
+  vllm::xpu::sycl_kernel_submit(                                     \
+      queue,                                                         \
+      sycl::nd_range<2>(grid * block, block),                        \
+      vllm::concat_and_cache_ds_mla_kernel<KV_T, kDsMlaTileThreads>( \
+          reinterpret_cast<const KV_T*>(kv_c.data_ptr()),            \
+          reinterpret_cast<const KV_T*>(k_pe.data_ptr()),            \
+          reinterpret_cast<uint8_t*>(kv_cache.data_ptr()),           \
+          slot_mapping.data_ptr<int64_t>(),                          \
+          block_stride,                                              \
+          entry_stride,                                              \
+          kv_c_stride,                                               \
+          k_pe_stride,                                               \
+          block_size));
 
 void concat_and_cache_mla(
     torch::Tensor& kv_c,          // [num_tokens, kv_lora_rank]
@@ -1293,9 +1289,7 @@ void concat_and_cache_mla(
       CALL_CONCAT_AND_CACHE_DS_MLA(sycl::half);
     } else {
       TORCH_CHECK(
-          false,
-          "Unsupported input type for fp8_ds_mla: ",
-          kv_c.scalar_type());
+          false, "Unsupported input type for fp8_ds_mla: ", kv_c.scalar_type());
     }
     return;
   }
@@ -1307,31 +1301,30 @@ void concat_and_cache_mla(
       kv_c.scalar_type(), kv_cache_dtype, CALL_CONCAT_AND_CACHE_MLA);
 }
 
-#define CALL_CP_GATHER_AND_UPCONVERT_FP8_KV_CACHE(DST_T)                   \
-  queue.submit([&](sycl::handler& cgh) {                                   \
-    cgh.parallel_for(                                                      \
-        sycl::nd_range<1>(grid * block, block),                            \
-        vllm::cp_gather_and_upconvert_fp8_kv_cache_kernel<                 \
-            DST_T,                                                         \
-            kUpconvertThreads>(                                            \
-            reinterpret_cast<const uint8_t*>(src_cache.data_ptr()),        \
-            reinterpret_cast<DST_T*>(dst.data_ptr()),                      \
-            block_table.data_ptr<int32_t>(),                               \
-            workspace_starts.data_ptr<int32_t>(),                          \
-            seq_starts_ptr,                                                \
-            static_cast<int32_t>(batch_size),                              \
-            block_size,                                                    \
-            block_table_stride,                                            \
-            cache_block_stride,                                            \
-            cache_entry_stride,                                            \
-            dst_entry_stride));                                            \
-  });
+#define CALL_CP_GATHER_AND_UPCONVERT_FP8_KV_CACHE(DST_T)          \
+  vllm::xpu::sycl_kernel_submit(                                  \
+      queue,                                                      \
+      sycl::nd_range<1>(grid * block, block),                     \
+      vllm::cp_gather_and_upconvert_fp8_kv_cache_kernel<          \
+          DST_T,                                                  \
+          kUpconvertThreads>(                                     \
+          reinterpret_cast<const uint8_t*>(src_cache.data_ptr()), \
+          reinterpret_cast<DST_T*>(dst.data_ptr()),               \
+          block_table.data_ptr<int32_t>(),                        \
+          workspace_starts.data_ptr<int32_t>(),                   \
+          seq_starts_ptr,                                         \
+          static_cast<int32_t>(batch_size),                       \
+          block_size,                                             \
+          block_table_stride,                                     \
+          cache_block_stride,                                     \
+          cache_entry_stride,                                     \
+          dst_entry_stride));
 
 void cp_gather_and_upconvert_fp8_kv_cache(
-    torch::Tensor const& src_cache,        // [num_blocks, block_size, 656]
-    torch::Tensor const& dst,              // [total_tokens, 576]
-    torch::Tensor const& block_table,      // [batch_size, max_blocks]
-    torch::Tensor const& workspace_starts, // [batch_size]
+    torch::Tensor const& src_cache,         // [num_blocks, block_size, 656]
+    torch::Tensor const& dst,               // [total_tokens, 576]
+    torch::Tensor const& block_table,       // [batch_size, max_blocks]
+    torch::Tensor const& workspace_starts,  // [batch_size]
     int64_t batch_size,
     std::optional<torch::Tensor> seq_starts,
     std::optional<torch::Tensor> host_cache,
@@ -1362,8 +1355,7 @@ void cp_gather_and_upconvert_fp8_kv_cache(
       dst.size(1) == kDsMlaNopeDim + kDsMlaPeDim,
       "dst head_dim must be 576 for MLA");
   TORCH_CHECK(
-      src_cache.element_size() == 1 &&
-          src_cache.size(2) == kDsMlaEntryBytes,
+      src_cache.element_size() == 1 && src_cache.size(2) == kDsMlaEntryBytes,
       "src_cache must be a byte tensor with 656-byte entries");
   TORCH_CHECK(
       src_cache.device() == dst.device() &&
@@ -1395,23 +1387,22 @@ void cp_gather_and_upconvert_fp8_kv_cache(
 }
 
 // Macro to dispatch the kernel based on the data type.
-#define CALL_GATHER_CACHE(CPY_DTYPE)                            \
-  queue.submit([&](sycl::handler& cgh) {                        \
-    cgh.parallel_for(                                           \
-        sycl::nd_range<2>(grid * block, block),                 \
-        vllm::gather_cache_kernel<CPY_DTYPE>(                   \
-            reinterpret_cast<CPY_DTYPE*>(src_cache.data_ptr()), \
-            reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),       \
-            block_table.data_ptr<int32_t>(),                    \
-            cu_seq_lens.data_ptr<int32_t>(),                    \
-            block_size,                                         \
-            entry_size,                                         \
-            block_table_stride,                                 \
-            cache_block_stride,                                 \
-            cache_entry_stride,                                 \
-            dst_entry_stride,                                   \
-            seq_starts_ptr));                                   \
-  });
+#define CALL_GATHER_CACHE(CPY_DTYPE)                          \
+  vllm::xpu::sycl_kernel_submit(                              \
+      queue,                                                  \
+      sycl::nd_range<2>(grid * block, block),                 \
+      vllm::gather_cache_kernel<CPY_DTYPE>(                   \
+          reinterpret_cast<CPY_DTYPE*>(src_cache.data_ptr()), \
+          reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),       \
+          block_table.data_ptr<int32_t>(),                    \
+          cu_seq_lens.data_ptr<int32_t>(),                    \
+          block_size,                                         \
+          entry_size,                                         \
+          block_table_stride,                                 \
+          cache_block_stride,                                 \
+          cache_entry_stride,                                 \
+          dst_entry_stride,                                   \
+          seq_starts_ptr));
 
 // Gather sequences from the cache into the destination tensor.
 //  - cu_seq_lens contains the cumulative sequence lengths for each batch
@@ -1486,29 +1477,26 @@ void gather_cache(
 // SCALAR_T is the data type of the destination tensor.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_GATHER_AND_MAYBE_DEQUANT_CACHE(SCALAR_T, CACHE_T, KV_DTYPE) \
-  queue.submit([&](sycl::handler& cgh) {                                 \
-    cgh.parallel_for(                                                    \
-        sycl::nd_range<1>(grid * block, block),                          \
-        vllm::gather_and_maybe_dequant_cache_kernel<                     \
-            SCALAR_T,                                                    \
-            CACHE_T,                                                     \
-            KV_DTYPE>(                                                   \
-            reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),            \
-            reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                 \
-            block_table.data_ptr<int32_t>(),                             \
-            cu_seq_lens.data_ptr<int32_t>(),                             \
-            token_to_seq.data_ptr<int32_t>(),                            \
-            num_tokens_i32,                                              \
-            block_size,                                                  \
-            entry_size,                                                  \
-            block_table_stride,                                          \
-            cache_block_stride,                                          \
-            cache_entry_stride,                                          \
-            dst_entry_stride,                                            \
-            reinterpret_cast<const float*>(scale.data_ptr()),            \
-            seq_starts_ptr));                                            \
-  });
+#define CALL_GATHER_AND_MAYBE_DEQUANT_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)      \
+  vllm::xpu::sycl_kernel_submit(                                              \
+      queue,                                                                  \
+      sycl::nd_range<1>(grid * block, block),                                 \
+      vllm::                                                                  \
+          gather_and_maybe_dequant_cache_kernel<SCALAR_T, CACHE_T, KV_DTYPE>( \
+              reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),               \
+              reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                    \
+              block_table.data_ptr<int32_t>(),                                \
+              cu_seq_lens.data_ptr<int32_t>(),                                \
+              token_to_seq.data_ptr<int32_t>(),                               \
+              num_tokens_i32,                                                 \
+              block_size,                                                     \
+              entry_size,                                                     \
+              block_table_stride,                                             \
+              cache_block_stride,                                             \
+              cache_entry_stride,                                             \
+              dst_entry_stride,                                               \
+              reinterpret_cast<const float*>(scale.data_ptr()),               \
+              seq_starts_ptr));
 
 // Gather sequences from the cache into the destination tensor, with
 // optional FP8 dequantization.
@@ -1781,16 +1769,15 @@ class convert_fp8_kernel {
 
 }  // namespace vllm
 
-#define CALL_CONVERT_FP8(Tout, Tin, KV_DTYPE)          \
-  queue.submit([&](sycl::handler& cgh) {               \
-    cgh.parallel_for(                                  \
-        sycl::nd_range<1>(grid * block, block),        \
-        vllm::convert_fp8_kernel<Tout, Tin, KV_DTYPE>( \
-            reinterpret_cast<Tin*>(src.data_ptr()),    \
-            reinterpret_cast<Tout*>(dst.data_ptr()),   \
-            scale,                                     \
-            block_stride));                            \
-  });
+#define CALL_CONVERT_FP8(Tout, Tin, KV_DTYPE)        \
+  vllm::xpu::sycl_kernel_submit(                     \
+      queue,                                         \
+      sycl::nd_range<1>(grid * block, block),        \
+      vllm::convert_fp8_kernel<Tout, Tin, KV_DTYPE>( \
+          reinterpret_cast<Tin*>(src.data_ptr()),    \
+          reinterpret_cast<Tout*>(dst.data_ptr()),   \
+          scale,                                     \
+          block_stride));
 
 // Only for testing.
 /**
@@ -1876,20 +1863,19 @@ void convert_fp8(
     TORCH_CHECK(false, "Unsupported data type: ", kv_cache_dtype);
   }
 }
-#define CALL_INDEXER_K_QUANT_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)          \
-  queue.submit([&](sycl::handler& cgh) {                                 \
-    cgh.parallel_for(                                                    \
-        sycl::nd_range<2>(grid * block, block),                          \
-        vllm::indexer_k_quant_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>( \
-            reinterpret_cast<KV_T*>(k.data_ptr()),                       \
-            reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),             \
-            slot_mapping.data_ptr<int64_t>(),                            \
-            head_dim,                                                    \
-            quant_block_size,                                            \
-            cache_block_size,                                            \
-            cache_stride,                                                \
-            use_ue8m0));                                                 \
-  });
+#define CALL_INDEXER_K_QUANT_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)        \
+  vllm::xpu::sycl_kernel_submit(                                       \
+      queue,                                                           \
+      sycl::nd_range<2>(grid * block, block),                          \
+      vllm::indexer_k_quant_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+          reinterpret_cast<KV_T*>(k.data_ptr()),                       \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),             \
+          slot_mapping.data_ptr<int64_t>(),                            \
+          head_dim,                                                    \
+          quant_block_size,                                            \
+          cache_block_size,                                            \
+          cache_stride,                                                \
+          use_ue8m0));
 
 void indexer_k_quant_and_cache(
     torch::Tensor& k,             // [num_tokens, head_dim]
