@@ -171,7 +171,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
     double hc_pre_eps,
     double hc_sinkhorn_eps,
     double hc_post_mult_value,
-    int64_t sinkhorn_repeat);
+    int64_t sinkhorn_repeat,
+    const std::optional<at::Tensor>& norm_weight,
+    double norm_eps);
 
 at::Tensor mhc_post(
     const at::Tensor& x,
@@ -200,7 +202,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> mhc_fused_post_pre(
     double hc_pre_eps,
     double hc_sinkhorn_eps,
     double hc_post_mult_value,
-    int64_t sinkhorn_repeat);
+    int64_t sinkhorn_repeat,
+    const std::optional<at::Tensor>& norm_weight,
+    double norm_eps);
 #endif
 
 #ifdef VLLM_GDN_ENABLED
