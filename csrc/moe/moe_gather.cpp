@@ -249,12 +249,8 @@ class MoeGather {
 
   auto get(sycl::ext::oneapi::experimental::properties_tag) const {
     namespace syclex = sycl::ext::oneapi::experimental;
-#ifdef MOE_GATHER_HAS_GRF_PROP
     return syclex::properties{
         syclex::sub_group_size<kSubGroupSize>, VLLM_GRF_PROP(MOE_GATHER_GRF)};
-#else
-    return syclex::properties{syclex::sub_group_size<kSubGroupSize>};
-#endif
   }
 
   void operator()(sycl::nd_item<1> item) const {
@@ -459,7 +455,7 @@ void MoeGatherLauncher(
         tuned_lanes = kMinLanesPerRow;
       } else {
         tuned_bytes = kMaxRowBytesPerItem;
-        tuned_lanes = 2 * kMinLanesPerRow;
+        tuned_lanes = kWorkGroupSize;
       }
     }
   }
