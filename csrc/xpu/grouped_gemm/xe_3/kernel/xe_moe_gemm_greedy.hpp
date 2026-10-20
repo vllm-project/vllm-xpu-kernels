@@ -18,7 +18,7 @@
 #pragma once
 
 #include <c10/util/Exception.h>
-
+#include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 #include "../runner/greedy_dispatch.hpp"
 #include "../mainloop/xe_moe_mainloop.hpp"
 #include "../mainloop/xe_moe_scale_copy.hpp"
