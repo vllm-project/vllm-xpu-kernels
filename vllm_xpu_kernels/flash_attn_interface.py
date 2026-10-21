@@ -510,35 +510,6 @@ def flash_attn_varlen_func(
             raise NotImplementedError(
                 "FA2 only supports both KV cache descaled")
 
-        # Speculative-decoding fast path: redirect small, causal,
-        # paged query batches (q_len = num_speculative_tokens + 1) from the
-        # slow chunk-prefill kernel to the split-K decode kernel. See the
-        # comment on _SPEC_DECODE_MAX_QLEN above for the rationale.
-        batch = cu_seqlens_q.numel() - 1
-        # TODO: We could also support the case where q_descale is not None.
-        if (block_table is not None and causal and not return_softmax_lse
-                and softcap == 0.0 and alibi_slopes is None and q_v is None
-                and q_descale is None and scheduler_metadata is None
-                and seqused_k is not None
-                and 1 < max_seqlen_q <= _SPEC_DECODE_MAX_QLEN
-                and batch > 0 and q.shape[0] > 0):
-            return _spec_decode_varlen_fwd(
-                q,
-                k,
-                v,
-                out,
-                cu_seqlens_q,
-                seqused_k,
-                block_table,
-                max_seqlen_k,
-                k_descale,
-                v_descale,
-                softmax_scale,
-                s_aux,
-                real_window_size,
-                softcap,
-            )
-
         # Compute per-seq splits and work_list on host, upload to device.
         # Only enable for decode (max_seqlen_q == 1) with paged KV cache,
         # multi-seq batches, and global num_splits_kv > 1.
@@ -573,6 +544,34 @@ def flash_attn_varlen_func(
                     device=q.device, non_blocking=True)
 
         try:
+            # Speculative-decoding fast path: redirect small, causal,
+            # paged query batches to the split-K decode kernel. See the
+            # comment on _SPEC_DECODE_MAX_QLEN above for the rationale.
+            batch = cu_seqlens_q.numel() - 1
+            # TODO: We could also support the case where q_descale is not None.
+            if (block_table is not None and causal and not return_softmax_lse
+                    and softcap == 0.0 and alibi_slopes is None and q_v is None
+                    and q_descale is None and scheduler_metadata is None
+                    and seqused_k is not None
+                    and 1 < max_seqlen_q <= _SPEC_DECODE_MAX_QLEN
+                    and batch > 0 and q.shape[0] > 0):
+                return _spec_decode_varlen_fwd(
+                    q,
+                    k,
+                    v,
+                    out,
+                    cu_seqlens_q,
+                    seqused_k,
+                    block_table,
+                    max_seqlen_k,
+                    k_descale,
+                    v_descale,
+                    softmax_scale,
+                    s_aux,
+                    real_window_size,
+                    softcap,
+                )
+
             out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
                 q,
                 k,
@@ -636,10 +635,15 @@ def flash_attn_varlen_func(
                 s_aux=s_aux,
                 return_softmax_lse=return_softmax_lse,
             )
-            if out is not None:
-                out.copy_(fallback_out.reshape(out.shape))
-            else:
+            if out is None and fallback_out.shape[0] == q.shape[0]:
                 out = fallback_out
+            else:
+                if out is None:
+                    out = fallback_out.new_empty(
+                        (q.shape[0], *fallback_out.shape[1:]))
+                num_valid_tokens = fallback_out.shape[0]
+                out[:num_valid_tokens].copy_(fallback_out)
+                out[num_valid_tokens:].zero_()
     else:
         raise NotImplementedError("not support yet")
     return (out, softmax_lse) if return_softmax_lse else (out)

@@ -2491,6 +2491,71 @@ def test_spec_decode_varlen_graph_replay(query_lens, window_size, dtype,
             assert torch.count_nonzero(output[sum(lengths):]).item() == 0
 
 
+@pytest.mark.parametrize("provide_out", [False, True])
+@pytest.mark.parametrize("error_message", [
+    "decode variant not compiled",
+    "unrelated decode failure",
+])
+@torch.inference_mode()
+def test_spec_decode_varlen_kernel_error(provide_out, error_message,
+                                         monkeypatch):
+    """Missing variants preserve padded outputs; unrelated errors propagate."""
+    torch.set_default_device("xpu")
+    torch.manual_seed(4242)
+    query = torch.randn(16, 4, 128, dtype=torch.bfloat16)
+    key_cache = torch.randn(128, 64, 1, 128, dtype=query.dtype)
+    value_cache = torch.randn_like(key_cache)
+    query_lens = [0, 8, 0, 3, 0]
+    kv_lens = [0, 2039, 0, 2097, 0]
+    boundaries = torch.tensor([0, 0, 8, 8, 11, 11], dtype=torch.int32)
+    seq_k = torch.tensor(kv_lens, dtype=torch.int32)
+    block_tables = torch.randint(0, 128, (5, 40), dtype=torch.int32)
+    block_tables[seq_k == 0] = -1
+    metadata = [boundaries, seq_k, block_tables]
+    original_metadata = [tensor.clone() for tensor in metadata]
+    out = torch.full_like(query, float("nan")) if provide_out else None
+    error = RuntimeError(error_message)
+    launches = []
+
+    def missing_decode(*args):
+        launches.append(args[10])
+        assert args[10] == 1
+        raise error
+
+    monkeypatch.setattr(torch.ops._vllm_fa2_C, "varlen_fwd", missing_decode)
+
+    def run():
+        return flash_attn_varlen_func(
+            query, key_cache, value_cache, 8, boundaries, max(kv_lens),
+            seqused_k=seq_k, causal=True, block_table=block_tables, out=out)
+
+    if "not compiled" not in error_message:
+        with pytest.raises(RuntimeError, match=error_message) as exc_info:
+            run()
+        assert exc_info.value is error
+    else:
+        output = run()
+        active = [1, 3]
+        reference = ref_paged_attn(
+            query=query[:sum(query_lens)], key_cache=key_cache,
+            value_cache=value_cache,
+            query_lens=[query_lens[index] for index in active],
+            kv_lens=[kv_lens[index] for index in active],
+            block_tables=block_tables[active], scale=128**-0.5,
+            casual=True, window_size_left=-1, window_size_right=-1,
+            dtype=query.dtype)
+        assert output.shape == query.shape
+        if provide_out:
+            assert output is out
+        torch.testing.assert_close(output[:sum(query_lens)], reference,
+                                   atol=2e-2, rtol=1.5e-2)
+        assert torch.count_nonzero(output[sum(query_lens):]).item() == 0
+
+    assert launches == [1]
+    for actual, original in zip(metadata, original_metadata):
+        torch.testing.assert_close(actual, original)
+
+
 # ---------------------------------------------------------------------------
 # Regression: paged-decode attention-sink + small sliding-window NaN.
 #
