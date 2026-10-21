@@ -426,8 +426,11 @@ void layer_norm_medium(
 
 // norm_dim == 131072 keeps only half of the row in registers; the other
 // half is staged through SLM (each lane only ever reads what it wrote, so
-// no barrier is required) to bound register pressure.
-template <typename Scalar>
+// no barrier is required) to bound register pressure. When the device cannot
+// fit the 128 KiB staging buffer next to the group reduction scratch (e.g.
+// BMG/PVC, whose SLM is exactly 128 KiB), kUseSlm=false re-reads the second
+// half from global memory instead.
+template <typename Scalar, bool kUseSlm>
 class layer_norm_131072_kernel {
  public:
   layer_norm_131072_kernel(
@@ -480,7 +483,7 @@ class layer_norm_131072_kernel {
       float hi = pio::hi(value);
       sum += lo + hi;
       sum_sq += lo * lo + hi * hi;
-      input_slm_[slm_idx] = value;
+      if constexpr (kUseSlm) input_slm_[slm_idx] = value;
     }
 
     sum = sycl::reduce_over_group(it.get_group(), sum, sycl::plus<float>());
@@ -504,7 +507,11 @@ class layer_norm_131072_kernel {
     for (int i = 0; i < HALF_N; i++) {
       int slm_idx = i * WG + tid;
       int packed_idx = SLM_PACKED + slm_idx;
-      uint32_t value = input_slm_[slm_idx];
+      uint32_t value;
+      if constexpr (kUseSlm)
+        value = input_slm_[slm_idx];
+      else
+        value = input[packed_idx];
       float lo = (pio::lo(value) - mean) * inv_std * weight_[packed_idx * 2];
       float hi =
           (pio::hi(value) - mean) * inv_std * weight_[packed_idx * 2 + 1];
@@ -533,11 +540,26 @@ void layer_norm_131072(
   constexpr int WG = 1024;
   constexpr int SLM_PACKED = PACKED / 2;
 
+  // Leave headroom for the scratch SLM used by reduce_over_group.
+  constexpr size_t kSlmBytes = SLM_PACKED * sizeof(uint32_t);
+  constexpr size_t kReduceSlmHeadroom = 4096;
+  const bool use_slm =
+      q.get_device().get_info<sycl::info::device::local_mem_size>() >=
+      kSlmBytes + kReduceSlmHeadroom;
+
   q.submit([&](sycl::handler& h) {
-    sycl::local_accessor<uint32_t, 1> input_slm(sycl::range<1>(SLM_PACKED), h);
-    layer_norm_131072_kernel<Scalar> kfn(
-        input_buf, output_buf, weight, epsilon, input_slm);
-    h.parallel_for(sycl::nd_range<1>((int64_t)batch * WG, WG), kfn);
+    if (use_slm) {
+      sycl::local_accessor<uint32_t, 1> input_slm(
+          sycl::range<1>(SLM_PACKED), h);
+      layer_norm_131072_kernel<Scalar, true> kfn(
+          input_buf, output_buf, weight, epsilon, input_slm);
+      h.parallel_for(sycl::nd_range<1>((int64_t)batch * WG, WG), kfn);
+    } else {
+      sycl::local_accessor<uint32_t, 1> input_slm(sycl::range<1>(1), h);
+      layer_norm_131072_kernel<Scalar, false> kfn(
+          input_buf, output_buf, weight, epsilon, input_slm);
+      h.parallel_for(sycl::nd_range<1>((int64_t)batch * WG, WG), kfn);
+    }
   });
 }
 
