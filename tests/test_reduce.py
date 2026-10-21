@@ -16,7 +16,8 @@ def _to_kernel(x):
 
 DTYPES = [torch.float, torch.half, torch.bfloat16]
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing (batch size)
-D = [1, 8, 128, 512, 1024, 2048, 4096, 16384]  # Arbitrary values for testing (reduce dim)
+# Arbitrary values for testing (reduce dim)
+D = [1, 8, 128, 512, 1024, 2048, 4096, 16384]
 SEEDS = [0]
 XPU_DEVICES = ["xpu:0"]
 
@@ -93,11 +94,14 @@ def test_reduce_min(
     opcheck(fn, (values_k, indices_k, _to_kernel(x)))
 
 
-@pytest.mark.parametrize("batch,d, dtype", [
-    (7, 1025, torch.half),  # Unaligned rows fall back to the baseline kernel.
-    (2049, 4096, torch.float),
-    (2049, 4096, torch.bfloat16),
-])
+@pytest.mark.parametrize(
+    "batch,d, dtype",
+    [
+        # Unaligned rows fall back to the baseline kernel.
+        (7, 1025, torch.half),
+        (2049, 4096, torch.float),
+        (2049, 4096, torch.bfloat16),
+    ])
 @pytest.mark.parametrize("op,ref", [
     ("reduce_max_row_wise", torch.max),
     ("reduce_min_row_wise", torch.min),

@@ -158,8 +158,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "-> ()");
   xpu_ops.impl("reduce_min_row_wise", torch::kXPU, &reduce_min_row_wise);
 
-  xpu_ops.def(
-      "scatter_row(Tensor! dst, Tensor src, Tensor index) -> ()");
+  xpu_ops.def("scatter_row(Tensor! dst, Tensor src, Tensor index) -> ()");
   xpu_ops.impl("scatter_row", torch::kXPU, &scatter_row);
 
   xpu_ops.def(

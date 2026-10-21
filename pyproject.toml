@@ -111,7 +111,7 @@ files = [
 ]
 
 [tool.codespell]
-ignore-words-list = "dout, te, indicies, subtile, ElementE"
+ignore-words-list = "dout, te, indicies, subtile, ElementE, IndexT"
 skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora/data/*,build/*,vllm/third_party/*"
 
 [tool.isort]

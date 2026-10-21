@@ -5,7 +5,6 @@ import torch
 from tests.ops.softmax_op import Softmax
 from tests.utils import REF_DEVICE, opcheck, seed_everything
 
-
 DEVICE = REF_DEVICE
 KERNEL_DEVICE = "xpu"
 

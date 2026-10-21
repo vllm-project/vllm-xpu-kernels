@@ -18,16 +18,20 @@ class ReduceMax(CustomOp):
         super().__init__()
         self.op = torch.ops._xpu_C.reduce_max_row_wise
 
-    def forward_native(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward_native(self,
+                       x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         values, indices = torch.max(x, dim=-1, keepdim=True)
         return values, indices.to(torch.int32)
 
-    def forward_xpu(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward_xpu(self,
+                    x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = x.shape[0]
         values = torch.empty(num_tokens, 1, dtype=x.dtype, device=x.device)
-        indices = torch.empty(
-            num_tokens, 1, dtype=torch.int32, device=x.device)
+        indices = torch.empty(num_tokens,
+                              1,
+                              dtype=torch.int32,
+                              device=x.device)
         self.op(values, indices, x)
         return values, indices
 
@@ -44,15 +48,19 @@ class ReduceMin(CustomOp):
         super().__init__()
         self.op = torch.ops._xpu_C.reduce_min_row_wise
 
-    def forward_native(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward_native(self,
+                       x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         values, indices = torch.min(x, dim=-1, keepdim=True)
         return values, indices.to(torch.int32)
 
-    def forward_xpu(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward_xpu(self,
+                    x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = x.shape[0]
         values = torch.empty(num_tokens, 1, dtype=x.dtype, device=x.device)
-        indices = torch.empty(
-            num_tokens, 1, dtype=torch.int32, device=x.device)
+        indices = torch.empty(num_tokens,
+                              1,
+                              dtype=torch.int32,
+                              device=x.device)
         self.op(values, indices, x)
         return values, indices
