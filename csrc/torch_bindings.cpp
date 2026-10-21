@@ -297,6 +297,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int? prefill_tokens_with_context=None,"
       "    Tensor? output_scale=None) -> ()");
   ops.impl("merge_attn_states", torch::kXPU, &merge_attn_states);
+
+  // LongCat n-gram embedding index kernel. Schema mirrors upstream vLLM.
+  ops.def(
+      "ngram_compute_n_gram_ids(int ne_n, int ne_k, Tensor(a!) ne_weights, "
+      "Tensor(b!) ne_mods, Tensor(c!) exclusive_ne_embedder_size_sums, "
+      "Tensor(d!) exclusive_req_len_sums, Tensor(e!) ne_token_table, "
+      "Tensor(f!) row_indices, Tensor(g!) column_starts, "
+      "Tensor(h!) n_gram_ids) -> ()");
+  ops.impl("ngram_compute_n_gram_ids", torch::kXPU, &ngram_compute_n_gram_ids);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {

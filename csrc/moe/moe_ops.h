@@ -15,7 +15,8 @@ void moe_align_block_size(
     torch::Tensor sorted_token_ids,
     torch::Tensor experts_ids,
     torch::Tensor num_tokens_post_pad,
-    std::optional<torch::Tensor> maybe_expert_map);
+    std::optional<torch::Tensor> maybe_expert_map,
+    std::optional<torch::Tensor> scatter_idx);
 
 void batched_moe_align_block_size(
     int64_t max_tokens_per_batch,

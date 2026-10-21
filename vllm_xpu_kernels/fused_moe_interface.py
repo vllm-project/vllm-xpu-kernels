@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 
@@ -319,7 +319,33 @@ class XpuFusedMoe:
         topk_ids,
         expert_map=None,
         a1q_scale=None,
+        activation_hook: Optional[Callable[[torch.Tensor, torch.Tensor],
+                                           None]] = None,
+        output_hook: Optional[Callable[
+            [torch.Tensor, torch.Tensor, torch.Tensor], None]] = None,
     ):
+        """Run the fused MoE, optionally updating grouped intermediates.
+
+        Args:
+            activation_hook: Called as ``hook(gemm1_output, row_map)`` right
+                after GEMM1, before clamping and activation. May modify
+                ``gemm1_output`` in place.
+            output_hook: Called as ``hook(gemm2_output, act_output, row_map)``
+                right after GEMM2, before routing weights are applied. May
+                modify ``gemm2_output`` in place.
+
+        ``row_map`` has shape ``[num_tokens, top_k]`` and maps each
+        token/top-k pair to its row in the expert-grouped tensors; -1 denotes
+        a non-local or invalid expert. Hooks require the kernel path and
+        unquantized activations.
+        """
+        if activation_hook is not None or output_hook is not None:
+            if self._use_ref:
+                raise NotImplementedError(
+                    "MoE hooks are not supported by the reference path")
+            if a1q_scale is not None:
+                raise NotImplementedError(
+                    "MoE hooks require unquantized activations")
         if self._use_ref:
             self._apply_ref(output, hidden_states,
                             topk_weights, topk_ids,
@@ -327,7 +353,8 @@ class XpuFusedMoe:
         else:
             self._apply_kernel(output, hidden_states,
                                topk_weights, topk_ids,
-                               expert_map, a1q_scale)
+                               expert_map, a1q_scale,
+                               activation_hook, output_hook)
 
     def _apply_ref(
         self,
@@ -365,6 +392,8 @@ class XpuFusedMoe:
         topk_ids,
         expert_map=None,
         a1q_scale=None,
+        activation_hook=None,
+        output_hook=None,
     ):
         num_rows, hidden_size = hidden_states.shape
         num_moe_inputs = self.n_experts_per_token * num_rows
@@ -384,6 +413,16 @@ class XpuFusedMoe:
             (num_rows * self.n_experts_per_token, hidden_size),
             dtype=hidden_states.dtype,
             device=hidden_states.device)
+
+        # DP padding rows carry an all-negative top-k route. The native
+        # remap_hidden_states kernel maps those to expert 0, so the garbage
+        # activations in padding rows reach a real expert and produce NaNs that
+        # poison the whole MoE output. Zero them before the native remap.
+        invalid_padding_rows = (topk_ids < 0).all(dim=1)
+        hidden_states = hidden_states.masked_fill(
+            invalid_padding_rows.unsqueeze(1), 0
+        )
+
         rows_per_expert = torch.zeros((self.num_experts),
                                                 dtype=torch.int32,
                                                 device=hidden_states.device)
@@ -432,6 +471,9 @@ class XpuFusedMoe:
             N=2 * self.inter_size,
             K=hidden_size,
             num_experts=self.num_experts)
+
+        if activation_hook is not None:
+            activation_hook(gemm1_output, unpermuted_row_to_permuted_row)
 
         # Apply swiglu_limit clamping before activation
         if self.gemm1_clamp_limit is not None and self.gemm1_clamp_limit > 0:
@@ -486,6 +528,10 @@ class XpuFusedMoe:
             N=hidden_size,
             K=self.inter_size * self.inter_size_scale,
             num_experts=self.num_experts)
+
+        if output_hook is not None:
+            output_hook(gemm2_output, act_output,
+                        unpermuted_row_to_permuted_row)
 
         torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
                                     unpermuted_row_to_permuted_row,

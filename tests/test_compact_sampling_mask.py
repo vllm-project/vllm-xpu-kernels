@@ -43,10 +43,11 @@ def _make_logits(batch_size, vocab_size, finite_fraction, device):
     return logits
 
 
-def _make_num_sampled_tokens(batch_size, inactive_fraction, device):
-    num_sampled_tokens = torch.ones(batch_size,
-                                    dtype=torch.int32,
-                                    device=device)
+def _make_num_sampled_tokens(batch_size,
+                             inactive_fraction,
+                             device,
+                             dtype=torch.int32):
+    num_sampled_tokens = torch.ones(batch_size, dtype=dtype, device=device)
     num_inactive = int(round(batch_size * inactive_fraction))
     if num_inactive > 0:
         num_sampled_tokens[:num_inactive] = 0
@@ -171,3 +172,26 @@ def test_compact_sampling_mask_non_finite_values(batch_size, vocab_size,
                                     device=DEVICE)
 
     _check_against_reference(logits, num_sampled_tokens, max_num_kept=64)
+
+
+@pytest.mark.parametrize("num_sampled_tokens_dtype",
+                        [torch.int32, torch.int64])
+@pytest.mark.parametrize("batch_size", [1, 4, 32])
+@pytest.mark.parametrize("vocab_size", [128, 4096])
+@pytest.mark.parametrize("inactive_fraction", [0.0, 0.5, 1.0])
+def test_compact_sampling_mask_num_sampled_tokens_dtype(
+        num_sampled_tokens_dtype, batch_size, vocab_size, inactive_fraction):
+    """num_sampled_tokens must be accepted as either int32 or int64, with
+    identical results (the kernel is templated on the index dtype)."""
+    seed_everything(42)
+
+    max_num_kept = min(64, vocab_size)
+
+    logits = _make_logits(batch_size, vocab_size, 0.5, DEVICE)
+    num_sampled_tokens = _make_num_sampled_tokens(
+        batch_size,
+        inactive_fraction,
+        DEVICE,
+        dtype=num_sampled_tokens_dtype)
+
+    _check_against_reference(logits, num_sampled_tokens, max_num_kept)
