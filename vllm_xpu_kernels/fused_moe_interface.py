@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 
@@ -374,7 +374,33 @@ class XpuFusedMoe:
         expert_map=None,
         a1q_scale=None,
         a2_scale=None,
+        activation_hook: Optional[Callable[[torch.Tensor, torch.Tensor],
+                                           None]] = None,
+        output_hook: Optional[Callable[
+            [torch.Tensor, torch.Tensor, torch.Tensor], None]] = None,
     ):
+        """Run the fused MoE, optionally updating grouped intermediates.
+
+        Args:
+            activation_hook: Called as ``hook(gemm1_output, row_map)`` right
+                after GEMM1, before clamping and activation. May modify
+                ``gemm1_output`` in place.
+            output_hook: Called as ``hook(gemm2_output, act_output, row_map)``
+                right after GEMM2, before routing weights are applied. May
+                modify ``gemm2_output`` in place.
+
+        ``row_map`` has shape ``[num_tokens, top_k]`` and maps each
+        token/top-k pair to its row in the expert-grouped tensors; -1 denotes
+        a non-local or invalid expert. Hooks require the kernel path and
+        unquantized activations.
+        """
+        if activation_hook is not None or output_hook is not None:
+            if self._use_ref:
+                raise NotImplementedError(
+                    "MoE hooks are not supported by the reference path")
+            if a1q_scale is not None:
+                raise NotImplementedError(
+                    "MoE hooks require unquantized activations")
         if self._use_ref:
             self._apply_ref(output, hidden_states,
                             topk_weights, topk_ids,
@@ -384,7 +410,7 @@ class XpuFusedMoe:
             self._apply_kernel(output, hidden_states,
                                topk_weights, topk_ids,
                                expert_map, a1q_scale,
-                               a2_scale)
+                               a2_scale, activation_hook, output_hook)
 
     def _apply_ref(
         self,
@@ -426,6 +452,8 @@ class XpuFusedMoe:
         expert_map=None,
         a1q_scale=None,
         a2_scale=None,
+        activation_hook=None,
+        output_hook=None,
     ):
         num_rows, hidden_size = hidden_states.shape
         num_moe_inputs = self.n_experts_per_token * num_rows
@@ -551,6 +579,9 @@ class XpuFusedMoe:
             K=gemm_hidden_size,
             num_experts=self.num_experts)
 
+        if activation_hook is not None:
+            activation_hook(gemm1_output, unpermuted_row_to_permuted_row)
+
         # Apply swiglu_limit clamping before activation
         if self.gemm1_clamp_limit is not None and self.gemm1_clamp_limit > 0:
             gate = gemm1_output[:, :self.inter_size]
@@ -622,6 +653,10 @@ class XpuFusedMoe:
             N=gemm_hidden_size,
             K=self.inter_size * self.inter_size_scale,
             num_experts=self.num_experts)
+
+        if output_hook is not None:
+            output_hook(gemm2_output, act_output,
+                        unpermuted_row_to_permuted_row)
 
         if gemm2_output.dtype != output.dtype:
             gather_output = torch.empty_like(output,

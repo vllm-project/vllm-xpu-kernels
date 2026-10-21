@@ -302,6 +302,84 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation):
     del fused_moe_impl
 
 
+@pytest.mark.parametrize("m,n,k", [(1, 256, 128), (16, 256, 128)])
+@pytest.mark.parametrize("e", [4])
+@pytest.mark.parametrize("topk", [1, 2])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
+def test_fused_moe_hooks(m, n, k, e, topk, dtype):
+    """Hooks adding biases to the grouped GEMM outputs must match a
+    reference that applies the same biases inside the experts."""
+    seed_everything(7)
+
+    a = torch.randn((m, n), device=DEVICE, dtype=dtype) / 16
+    w13 = torch.randn((e, 2 * k, n), device=DEVICE, dtype=dtype) / 16
+    w2 = torch.randn((e, n, k), device=DEVICE, dtype=dtype) / 16
+    w13_bias = torch.randn((e, 2 * k), device=DEVICE, dtype=dtype) / 16
+    w2_bias = torch.randn((e, n), device=DEVICE, dtype=dtype) / 16
+
+    scores = torch.randn((m, e), device=DEVICE, dtype=torch.float32)
+    expert_scores, expert_indices = torch.topk(scores,
+                                               k=topk,
+                                               dim=-1,
+                                               sorted=False)
+
+    ref_out = ref_fused_moe(
+        a.clone(),
+        w13,
+        w13_bias,
+        w2,
+        w2_bias,
+        expert_scores.view(-1, 1),
+        expert_indices.view(-1),
+        topk,
+        "silu",
+        e,
+    )
+
+    fused_moe_impl = XpuFusedMoe(
+        w13=w13,
+        w13_scales=None,
+        w13_bias=None,
+        w2=w2,
+        w2_scales=None,
+        w2_bias=None,
+        n_experts_per_token=topk,
+        activation="silu",
+        num_experts=e,
+    )
+
+    flat_experts = expert_indices.view(-1).long()
+    calls = []
+
+    def activation_hook(gemm1_output, row_map):
+        calls.append(("act", tuple(gemm1_output.shape), tuple(row_map.shape)))
+        gemm1_output[row_map.view(-1).long()] += w13_bias[flat_experts]
+
+    def output_hook(gemm2_output, act_output, row_map):
+        calls.append(("out", tuple(gemm2_output.shape), tuple(row_map.shape)))
+        assert act_output.shape == (m * topk, k)
+        gemm2_output[row_map.view(-1).long()] += w2_bias[flat_experts]
+
+    output = torch.empty_like(ref_out)
+    fused_moe_impl.apply(
+        output=output,
+        hidden_states=a,
+        topk_weights=expert_scores,
+        topk_ids=expert_indices,
+        activation_hook=activation_hook,
+        output_hook=output_hook,
+    )
+
+    assert calls == [
+        ("act", (m * topk, 2 * k), (m, topk)),
+        ("out", (m * topk, n), (m, topk)),
+    ]
+    rtol, atol = (1e-2, 1e-2) if dtype == torch.float16 else (2e-2, 2e-2)
+    torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
+    del fused_moe_impl
+
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
