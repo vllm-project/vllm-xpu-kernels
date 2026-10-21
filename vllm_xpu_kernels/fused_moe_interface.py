@@ -183,10 +183,7 @@ def compute_num_tokens_per_block(num_tokens, num_experts_per_node):
 
 
 def fused_moe_activation(act_output, gemm1_output, activation):
-    if canonical_activation(activation) == "situ":
-        torch.ops._C.situ_and_mul(act_output, gemm1_output, 4.0, 25.0)
-    else:
-        moe_activation_op(activation)(act_output, gemm1_output)
+    moe_activation_op(activation)(act_output, gemm1_output)
 
 def implement_zp(qweight):
     # change u4 to s4 to avoid zero point in gemm kernel
@@ -324,8 +321,7 @@ class XpuFusedMoe:
         # Resolve aliases once so the activation-specific branches agree with
         # the op moe_activation_op() picks.
         act_name = canonical_activation(self.activation)
-        self._is_situ = act_name == "situ"
-        if self._is_situ:
+        if act_name == "situ":
             import math
 
             if self.activation_situ_beta is None:
@@ -346,7 +342,11 @@ class XpuFusedMoe:
         self.gemm1_clamp_limit = gemm1_clamp_limit
         self.recipe = _get_recipe(is_fp8, is_mxfp8, is_mxfp4, is_int4,
                                    is_block_fp8)
-        self.act_func = moe_activation_op(self.activation)
+        self.act_func = moe_activation_op(
+            self.activation,
+            situ_beta=self.activation_situ_beta,
+            situ_linear_beta=(-1.0 if self.activation_situ_linear_beta is None
+                              else self.activation_situ_linear_beta))
 
         self.expert_map = expert_map
         if self.expert_map is None and self.ep_size > 1:
@@ -603,16 +603,7 @@ class XpuFusedMoe:
                 (num_moe_inputs, self.inter_size * self.inter_size_scale),
                 dtype=gemm1_output.dtype,
                 device=gemm1_output.device)
-            if self._is_situ:
-                self.act_func(
-                    act_output,
-                    gemm1_output,
-                    self.activation_situ_beta,
-                    -1.0 if self.activation_situ_linear_beta is None else
-                    self.activation_situ_linear_beta,
-                )
-            else:
-                self.act_func(act_output, gemm1_output)
+            self.act_func(act_output, gemm1_output)
 
         ########### gemm2 ##################
         gemm2_output = torch.empty((num_moe_inputs, gemm_hidden_size),

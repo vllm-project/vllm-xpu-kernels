@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import functools
 from typing import Optional
 
 import torch
@@ -211,10 +212,22 @@ _MOE_ACTIVATION_OPS = {
 }
 
 
-def moe_activation_op(activation):
-    op = _MOE_ACTIVATION_OPS.get(canonical_activation(activation))
+def moe_activation_op(activation,
+                      situ_beta: float = 4.0,
+                      situ_linear_beta: float = 25.0):
+    """Return ``fn(out, gate_up)`` applying ``activation``.
+
+    SITU is the only op whose schema defaults (beta=1.0, linear_beta=-1.0)
+    differ from what fused MoE uses, so its betas are bound here.
+    """
+    act_name = canonical_activation(activation)
+    op = _MOE_ACTIVATION_OPS.get(act_name)
     if op is None:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
+    if act_name == "situ":
+        return functools.partial(op,
+                                 beta=situ_beta,
+                                 linear_beta=situ_linear_beta)
     return op
 
 
@@ -394,10 +407,7 @@ def dequant_wei(wei, wei_scale, recipe):
 
 
 def ref_fused_moe_activation(act_output, gemm1_output, activation):
-    if canonical_activation(activation) == "situ":
-        torch.ops._C.situ_and_mul(act_output, gemm1_output, 4.0, 25.0)
-    else:
-        moe_activation_op(activation)(act_output, gemm1_output)
+    moe_activation_op(activation)(act_output, gemm1_output)
 
 
 def ref_fused_moe(recipe,
