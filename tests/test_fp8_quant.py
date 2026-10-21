@@ -354,6 +354,39 @@ def test_per_block_fp8_quant(
                 num_tokens_block_quant, 4)
 
 
+@pytest.mark.parametrize("hidden_size_block_quant", HIDDEN_SIZES_BLOCK_QUANT)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("group_size", GROUP_SIZE)
+@pytest.mark.parametrize("column_major_scale", COLUMN_MAJOR_SCALE)
+@torch.inference_mode()
+def test_per_block_fp8_quant_zero_tokens(
+    hidden_size_block_quant: int,
+    dtype: torch.dtype,
+    group_size: int,
+    column_major_scale: bool,
+) -> None:
+    """A batch with no tokens must come back empty rather than trap.
+
+    Before the guard in `per_token_group_quant_fp8`, the host-side setup
+    computed the hidden size as `input.numel() / num_tokens`, so a 0-row input
+    raised SIGFPE and took the process down -- there was no Python-level
+    exception for a caller to catch, which is why this asserts nothing about
+    the values and only that the call returns.
+    """
+    x = torch.empty(0, hidden_size_block_quant, dtype=dtype, device="xpu")
+
+    ops_out, ops_scales = per_token_group_quant_fp8(
+        x,
+        group_size=group_size,
+        dtype=torch.float8_e4m3fn,
+        use_ue8m0=False,
+        column_major_scales=column_major_scale)
+
+    assert ops_out.shape == x.shape
+    assert ops_out.numel() == 0
+    assert ops_scales.numel() == 0
+
+
 @pytest.mark.parametrize("num_tokens_block_quant", NUM_TOKENS_BLOCK_QUANT)
 @pytest.mark.parametrize("hidden_size_block_quant", HIDDEN_SIZES_BLOCK_QUANT)
 @pytest.mark.parametrize("mxfp8_hp_dtypes", MXFP8_HP_DTYPES)
