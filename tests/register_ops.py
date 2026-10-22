@@ -180,10 +180,12 @@ def multimodal_rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     mrope_section: list[int],
+    mrope_interleaved: bool = False,
 ) -> None:
     torch.ops._xpu_C.multimodal_rotary_embedding(positions, query, key,
                                                  head_size, cos_sin_cache,
-                                                 is_neox, mrope_section)
+                                                 is_neox, mrope_section,
+                                                 mrope_interleaved)
 
 
 def deepseek_scaling_rope(
@@ -573,6 +575,7 @@ def moe_align_block_size(
     experts_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
     expert_map: torch.Tensor | None = None,
+    scatter_idx: torch.Tensor | None = None,
 ) -> None:
     torch.ops._moe_C.moe_align_block_size(
         topk_ids,
@@ -582,6 +585,7 @@ def moe_align_block_size(
         experts_ids,
         num_tokens_post_pad,
         expert_map,
+        scatter_idx,
     )
 
 

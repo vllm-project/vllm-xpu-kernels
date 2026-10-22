@@ -6,6 +6,7 @@
 
 #include "causal_conv1d.hpp"
 #include "gated_delta_rule.hpp"
+#include "gated_delta_rule_recoverssm.hpp"
 #ifdef VLLM_XPU_ENABLE_XE2
   #include "xe_2/chunk_causal_conv1d_xe2.hpp"
   #include "xe_2/chunk_causal_conv1d_tiled_xe2.hpp"
@@ -624,6 +625,114 @@ void gated_delta_rule_spec(
       num_prefills,
       num_decodes,
       num_spec_decodes);
+}
+
+// RecoverSSM spec-decode delta stage (vLLM --use-replayssm): consumes the spec
+// {q, k, v, b, a} produced by causal_conv1d_spec, writes core_attn_out, and
+// records per-token replay entries instead of per-draft states. ssm_state is
+// only read (the checkpoint); vLLM commits the accepted prefix after sampling.
+// Each request owns one state block, so spec_state_indices_tensor is 1D.
+void gated_delta_rule_spec_recoverssm(
+    torch::Tensor& core_attn_out,  // [num_actual_tokens, num_v_heads / tp_size,
+                                   // head_v_dim]
+    const torch::Tensor& q,
+    const torch::Tensor& k,
+    const torch::Tensor& v,
+    const torch::Tensor& b,
+    const torch::Tensor& a,
+    const int64_t num_v_heads,
+    const int64_t head_v_dim,
+    const torch::Tensor& A_log,
+    const torch::Tensor& dt_bias,
+    const torch::Tensor& ssm_state,
+    torch::Tensor& replay_state,
+    const int64_t num_spec_decodes,
+    const torch::Tensor& spec_query_start_loc,
+    const std::optional<torch::Tensor>& spec_token_indx,
+    const torch::Tensor& spec_state_indices_tensor,
+    const int64_t null_block_id,
+    const int64_t num_actual_tokens,
+    const int64_t tp_size) {
+  TORCH_CHECK(
+      core_attn_out.is_contiguous(), "core_attn_out must be contiguous");
+  TORCH_CHECK(
+      q.is_contiguous() && k.is_contiguous() && v.is_contiguous() &&
+          b.is_contiguous() && a.is_contiguous(),
+      "q, k, v, b and a must be contiguous");
+  TORCH_CHECK(
+      ssm_state.dim() == 4 && ssm_state[0].is_contiguous(),
+      "ssm_state must be [blocks, num_v_heads, head_v_dim, head_k_dim] with "
+      "contiguous blocks");
+  TORCH_CHECK(A_log.is_contiguous(), "A_log must be contiguous");
+  TORCH_CHECK(dt_bias.is_contiguous(), "dt_bias must be contiguous");
+  TORCH_CHECK(
+      A_log.scalar_type() == at::kFloat,
+      "A_log dtype must be float32, but got ",
+      A_log.scalar_type());
+  TORCH_CHECK(
+      dt_bias.scalar_type() == core_attn_out.scalar_type() &&
+          q.scalar_type() == core_attn_out.scalar_type(),
+      "q and dt_bias dtypes must match core_attn_out");
+
+  TORCH_CHECK(core_attn_out.size(0) >= num_actual_tokens);
+  TORCH_CHECK(core_attn_out.size(1) == num_v_heads / tp_size);
+  TORCH_CHECK(core_attn_out.size(2) == head_v_dim);
+
+  const int64_t head_k_dim = q.size(2);
+  TORCH_CHECK(
+      replay_state.dim() == 4 && replay_state.scalar_type() == at::kFloat,
+      "replay_state must be float32 [blocks, num_v_heads, max_query_len, "
+      "head_v_dim + head_k_dim + 1]");
+  TORCH_CHECK(
+      replay_state.size(1) == num_v_heads / tp_size &&
+          replay_state.size(3) == head_v_dim + head_k_dim + 1,
+      "replay_state must be [blocks, num_v_heads, max_query_len, "
+      "head_v_dim + head_k_dim + 1]");
+
+  TORCH_CHECK(
+      spec_state_indices_tensor.dim() == 1 &&
+          spec_state_indices_tensor.size(0) == num_spec_decodes,
+      "spec_state_indices_tensor must be [num_spec_decodes] (one state block "
+      "per request)");
+  TORCH_CHECK(
+      spec_query_start_loc.size(0) == num_spec_decodes + 1,
+      "spec_query_start_loc must be [num_spec_decodes + 1]");
+  for (const torch::Tensor* t :
+       {&spec_query_start_loc, &spec_state_indices_tensor}) {
+    TORCH_CHECK(
+        t->scalar_type() == at::kInt && t->is_contiguous(),
+        "index tensors must be contiguous int32");
+  }
+  if (spec_token_indx.has_value()) {
+    TORCH_CHECK(
+        spec_token_indx->scalar_type() == at::kInt &&
+            spec_token_indx->is_contiguous(),
+        "spec_token_indx must be contiguous int32");
+  }
+  if (num_spec_decodes == 0) {
+    return;
+  }
+
+  // Narrow the (possibly cudagraph-padded) leading dim to the active prefix.
+  auto core_attn_out_active = core_attn_out.narrow(0, 0, num_actual_tokens);
+
+  auto& queue = vllm::xpu::vllmGetQueue();
+  gdn::gated_delta_rule_recoverssm(
+      queue,
+      core_attn_out_active,
+      q,
+      k,
+      v,
+      b,
+      a,
+      A_log,
+      dt_bias,
+      ssm_state,
+      replay_state,
+      spec_query_start_loc,
+      spec_token_indx,
+      spec_state_indices_tensor,
+      null_block_id);
 }
 
 // Non-spec (prefill + decode) delta stage: consumes the non-spec
