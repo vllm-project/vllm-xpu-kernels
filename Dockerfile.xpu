@@ -4,11 +4,11 @@ WORKDIR /workspace/
 
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/test/xpu"
-ARG INTEL_OMIX_VERSION=0.4
+ARG INTEL_OMIX_VERSION=0.4.1
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+    apt-get install -y \
     ca-certificates \
     curl \
     ffmpeg \
