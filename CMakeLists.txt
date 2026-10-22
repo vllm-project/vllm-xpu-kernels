@@ -420,6 +420,7 @@ set(GROUPED_GEMM_LIB_NAME "")
 set(GDN_ATTN_LIB_NAME "")
 set(MQA_LOGITS_LIB_NAME "")
 set(MHC_LIB_NAME "")
+set(GEMV_LIB_NAME "")
 
 if(BUILD_SYCL_TLA_KERNELS)
 
@@ -462,6 +463,10 @@ if(BUILD_SYCL_TLA_KERNELS)
     if(MHC_KERNELS_ENABLED)
       add_subdirectory(csrc/xpu/mhc/xe_2)
       list(APPEND MHC_LIB_NAME "mhc_kernels_xe_2")
+    endif()
+    if(XPU_SPECIFIC_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/gemv/xe_2)
+      list(APPEND GEMV_LIB_NAME "gemv_kernels_xe_2")
     endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
   endif()
@@ -693,11 +698,13 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sycl/fused_kv_compress_norm_rope_insert_sparse_attn.cpp"
       "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/sycl/apply_rotary_emb.cpp"
+      "csrc/xpu/sycl/qkv_split_norm_rope.cpp"
       "csrc/xpu/rand/exponential.cpp"
       "csrc/xpu/utils.cpp")
   if(MOE_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC
-         "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp")
+         "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp"
+         "csrc/xpu/grouped_gemm/moe_shared_fused_interface.cpp")
   endif()
   if(GDN_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
@@ -745,7 +752,7 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
     INCLUDE_DIRECTORIES
     ${VLLM_XPU_INCLUDE_DIR}
     LIBRARIES
-    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME};${MQA_LOGITS_LIB_NAME};${MHC_LIB_NAME}
+    ${GROUPED_GEMM_LIB_NAME};${GDN_ATTN_LIB_NAME};${MQA_LOGITS_LIB_NAME};${MHC_LIB_NAME};${GEMV_LIB_NAME}
     USE_SABI
     3
     WITH_SOABI)
