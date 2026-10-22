@@ -516,6 +516,8 @@ void remap_hidden_states(
     LAUNCH_REMAP_HIDDEN_STATES(TA, TS, 1);              \
   } else if (TopK == 2) {                               \
     LAUNCH_REMAP_HIDDEN_STATES(TA, TS, 2);              \
+  } else if (TopK == 3) {                               \
+    LAUNCH_REMAP_HIDDEN_STATES(TA, TS, 3);              \
   } else if (TopK == 4) {                               \
     LAUNCH_REMAP_HIDDEN_STATES(TA, TS, 4);              \
   } else if (TopK == 6) {                               \
