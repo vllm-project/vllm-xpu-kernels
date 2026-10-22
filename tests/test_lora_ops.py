@@ -649,6 +649,27 @@ def test_active_rank_out_of_bounds(op, active_rank):
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("add_inputs", [False, True])
+def test_active_rank_expand_checks_adapter_stride(dtype, add_inputs):
+    """A contiguous singleton column can hide an unaligned adapter stride."""
+    torch.manual_seed(42)
+    weights = torch.randn(1, 8, 9, device="xpu", dtype=dtype).transpose(0, 1)
+    assert weights.is_contiguous()
+    assert weights.stride() == (9, 72, 1)
+    inputs = torch.randn(1, 32, 8, device="xpu", dtype=dtype) * 0.1
+    indices = torch.arange(32, device="xpu", dtype=torch.int32) % 8
+    output = torch.randn(32, 1, device="xpu", dtype=dtype)
+    delta = (
+        inputs[0].float() * weights[indices.long(), 0, :8].float()
+    ).sum(dim=-1, keepdim=True).to(dtype)
+    expected = output + delta if add_inputs else delta
+    torch.ops._xpu_C.lora_expand(
+        inputs, [weights], output, indices, 0, add_inputs
+    )
+    torch.testing.assert_close(output, expected, atol=2e-3, rtol=2e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("add_inputs", [False, True])
 @pytest.mark.parametrize("nslices", [1, 3, 8])
 def test_active_rank_linear(dtype, add_inputs, nslices):
     torch.manual_seed(123)

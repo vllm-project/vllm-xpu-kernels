@@ -493,13 +493,16 @@ void launch_lora_expand(
     const uint32_t* slice_offsets,
     const uint32_t* slice_sizes) {
   // Compute runtime vec_size: must be safe for all input rows (rank wide)
-  // and all stored weight rows across every slice. The active rank can be
-  // smaller than the stored rank, so their alignments must be checked
+  // and all stored weight rows and adapters across every slice. Active rank can
+  // be smaller than the stored rank, so their alignments must be checked
   // separately.
   uint32_t vec_size = aligned_vec_size(input, rank);
-  for (uint32_t i = 0; i < num_slices; ++i)
+  for (uint32_t i = 0; i < num_slices; ++i) {
     vec_size = std::min(
         vec_size, aligned_vec_size(weight_ptrs[i], weight_row_strides[i]));
+    vec_size = std::min(
+        vec_size, aligned_vec_size(weight_ptrs[i], weight_lora_strides[i]));
+  }
 
   at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
   at::DeviceGuard device_guard(curDevice);
