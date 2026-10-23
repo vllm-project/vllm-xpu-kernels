@@ -1,5 +1,10 @@
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
+#include <initializer_list>
+#include <type_traits>
+
 // Vectorization containers
 template <typename scalar_t, size_t vec_size>
 struct alignas(vec_size * sizeof(scalar_t)) vec_n_t {
@@ -95,3 +100,53 @@ void vectorize_with_alignment(
     scalar_op(out[i], in[i]);
   }
 }
+
+// Launch configuration for the fused *-and-quant kernels.
+namespace vllm {
+inline int64_t fused_quant_block_size(
+    int64_t work_items, int items_per_wi, bool reduces_over_group) {
+  const int64_t want = (work_items + items_per_wi - 1) / items_per_wi;
+  int64_t wg;
+  if (reduces_over_group) {
+    int64_t hi = 1;
+    while (hi < want) {
+      hi <<= 1;
+    }
+    const int64_t lo = hi >> 1;
+    wg = (lo >= 1 && (want - lo) < (hi - want)) ? lo : hi;
+    const int64_t even_divisor = work_items & (-work_items);
+    if (even_divisor >= 32) {
+      wg = std::min(wg, even_divisor);
+    }
+  } else {
+    wg = (want + 31) / 32 * 32;
+    if (wg < 1024) {
+      wg = std::min(wg, static_cast<int64_t>(512));
+    }
+  }
+  wg = std::min(
+      wg, std::max((work_items + 31) / 32 * 32, static_cast<int64_t>(32)));
+  return std::min(
+      std::max(wg, static_cast<int64_t>(32)), static_cast<int64_t>(1024));
+}
+
+template <typename Fn>
+inline void dispatch_quant_chunks(
+    int64_t num_tokens,
+    int64_t num_chunks,
+    int64_t chunks_per_group,
+    int eu_count,
+    Fn&& fn) {
+  const int64_t work_items = num_tokens * num_chunks;
+  const int64_t saturating_work_items = static_cast<int64_t>(eu_count) * 128;
+  if (chunks_per_group % 4 == 0 && work_items / 4 >= saturating_work_items) {
+    fn(std::integral_constant<int, 4>{});
+  } else if (
+      chunks_per_group % 2 == 0 && work_items / 2 >= saturating_work_items) {
+    fn(std::integral_constant<int, 2>{});
+  } else {
+    fn(std::integral_constant<int, 1>{});
+  }
+}
+
+}  // namespace vllm
