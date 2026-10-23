@@ -33,7 +33,8 @@ void cutlass_chunk_prefill_xe2(
     bool is_local,
     bool is_sink,
     std::optional<at::Tensor>& softmax_lse,
-    std::optional<const at::Tensor>& is_prefill) {
+    std::optional<const at::Tensor>& is_prefill,
+    int pack_gqa) {
   cutlass_chunk_prefill_impl(
       queue,
       query,
@@ -57,7 +58,8 @@ void cutlass_chunk_prefill_xe2(
       is_local,
       is_sink,
       softmax_lse,
-      is_prefill);
+      is_prefill,
+      pack_gqa);
 }
 
 void cutlass_chunk_prefill_impl(
@@ -83,7 +85,8 @@ void cutlass_chunk_prefill_impl(
     bool is_local,
     bool is_sink,
     std::optional<at::Tensor>& softmax_lse,
-    std::optional<const at::Tensor>& is_prefill) {
+    std::optional<const at::Tensor>& is_prefill,
+    int pack_gqa) {
   // general params
   int batch_size, num_heads_q, num_heads_kv, head_size;
   // additional params
@@ -158,6 +161,7 @@ void cutlass_chunk_prefill_impl(
       is_causal,
       is_local,
       is_sink};
+  args.pack_gqa = pack_gqa;
 
   // Populate softmax_lse output pointer if requested
   if (softmax_lse.has_value()) {
