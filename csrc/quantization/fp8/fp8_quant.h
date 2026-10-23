@@ -13,6 +13,18 @@ using namespace at;
 
 namespace vllm {
 
+// Device fp32 divide is not correctly rounded; refine it with one FMA step so
+// the scale matches the IEEE `absmax / fp8_max`. `fp8_max` must be a
+// compile-time constant so that `1.0f / fp8_max` is folded to the correctly
+// rounded reciprocal. inf is returned as is, since the FMA step would turn it
+// into NaN.
+inline float absmax_to_scale(float absmax, float fp8_max) {
+  float q = absmax / fp8_max;
+  if (sycl::isinf(q)) return q;
+  float r = sycl::fma(-q, fp8_max, absmax);
+  return sycl::fma(r, 1.0f / fp8_max, q);
+}
+
 template <typename scalar_t>
 inline float thread_max_vec(
     scalar_t const* input,
@@ -109,7 +121,8 @@ class segmented_max_reduction_strided {
           sycl::memory_scope::device,
           sycl::access::address_space::global_space>;
       atomic_t atomic_max(*scale);
-      atomic_max.fetch_max(cache[0] / fp8::quant_type_max_v<fp8_type>);
+      atomic_max.fetch_max(
+          absmax_to_scale(cache[0], fp8::quant_type_max_v<fp8_type>));
     }
   }
 };
