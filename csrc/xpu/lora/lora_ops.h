@@ -138,3 +138,14 @@ void lora_expand(
     const torch::Tensor& lora_indices,
     int64_t offset_start,
     bool add_inputs);
+
+// Apply LoRA using an active-rank temporary and padded weight storage.
+void lora_linear(
+    const torch::Tensor& inputs,
+    const std::vector<torch::Tensor>& lora_a_weights,
+    const std::vector<torch::Tensor>& lora_b_weights,
+    torch::Tensor& output_tensor,
+    const torch::Tensor& lora_indices,
+    double scaling,
+    int64_t active_rank,
+    bool add_inputs);
