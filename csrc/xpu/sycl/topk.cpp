@@ -16,6 +16,7 @@
 #include "utils.h"
 #include "dispatch_utils.h"
 #include "sycl_launch.h"
+#include "xpu/grf_mode.hpp"
 
 namespace vllm {
 
@@ -51,6 +52,20 @@ struct TopkComputeTypeHelper<sycl::ext::oneapi::bfloat16> {
 };
 template <typename T>
 using topk_compute_t = typename TopkComputeTypeHelper<T>::type;
+
+// From K=16 on, the per-lane arrays plus the merge scratch no longer fit the
+// default 128-GRF budget on Xe2 and the kernel spills heavily. Let IGC pick
+// the register file size: Xe2 then gets 256 GRF, while Xe3/Xe3p keep the
+// size their own heuristic already chooses (forcing 256 there is slower).
+template <int K>
+inline auto topk_kernel_props() {
+  namespace syclexp = sycl::ext::oneapi::experimental;
+  if constexpr (K >= kTopkSharedThrMin)
+    return syclexp::properties{
+        syclexp::sub_group_size<kTopkSgSize>, VLLM_GRF_AUTO_PROP};
+  else
+    return syclexp::properties{syclexp::sub_group_size<kTopkSgSize>};
+}
 
 // ==========================================================================
 // Per-lane top-K primitives (branch-free insert, bitonic merge, sub-group
@@ -254,8 +269,11 @@ class subgroup_topk_kernel {
         slice_size_(slice_size),
         k_(k) {}
 
-  void operator()
-      [[sycl::reqd_sub_group_size(kTopkSgSize)]] (sycl::nd_item<1> item) const {
+  auto get(sycl::ext::oneapi::experimental::properties_tag) const {
+    return topk_kernel_props<K>();
+  }
+
+  void operator()(sycl::nd_item<1> item) const {
     sycl::sub_group sg = item.get_sub_group();
     int sg_lid = sg.get_local_linear_id();
     int sgs_per_wg = item.get_local_range(0) / kTopkSgSize;
@@ -380,8 +398,11 @@ class wg_topk_kernel {
         slm_vals_(slm_vals),
         slm_idx_(slm_idx) {}
 
-  void operator()
-      [[sycl::reqd_sub_group_size(kTopkSgSize)]] (sycl::nd_item<1> item) const {
+  auto get(sycl::ext::oneapi::experimental::properties_tag) const {
+    return topk_kernel_props<K>();
+  }
+
+  void operator()(sycl::nd_item<1> item) const {
     sycl::sub_group sg = item.get_sub_group();
     const int sg_lid = sg.get_local_linear_id();
     const int sg_id = sg.get_group_linear_id();
