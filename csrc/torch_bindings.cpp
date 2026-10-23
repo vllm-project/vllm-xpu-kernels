@@ -48,6 +48,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! weight, float epsilon) -> ()");
   ops.impl("fused_add_gemma_rms_norm", torch::kXPU, &fused_add_gemma_rms_norm);
 
+  // Fused gated RMSNorm: rms_norm(input) * weight * act(gate).
+  ops.def(
+      "fused_rms_norm_gated(Tensor! result, Tensor input, Tensor gate, "
+      "Tensor? weight, float epsilon, str activation=\"sigmoid\") -> ()");
+  ops.impl("fused_rms_norm_gated", torch::kXPU, &fused_rms_norm_gated);
+
   // Standard (non-RMS) LayerNorm: mean-centered, optional weight and bias.
   ops.def(
       "layer_norm(Tensor! result, Tensor input, Tensor? weight, Tensor? bias, "
