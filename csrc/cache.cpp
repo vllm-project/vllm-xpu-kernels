@@ -855,6 +855,199 @@ class gather_and_maybe_dequant_cache_kernel {
                                             // batch
 };
 
+// One cache page (or the part of it that belongs to a request) copied by one
+// work-group of cp_gather_cache. Mirrors GatherPageTask in vLLM's
+// csrc/cache_kernels.cu.
+struct GatherPageTask {
+  int32_t req_id;
+  int32_t logical_block;
+  int32_t page_token_begin;
+  int32_t page_token_end;
+  int32_t output_token_begin;
+};
+
+// Map a linear work-group id to (request, page). seq_starts gives a
+// token-granular start inside each request's block table, so the first and
+// last pages of a request may be partial. Returns false for surplus groups.
+inline bool map_gather_page_task(
+    int32_t task,
+    const int32_t* __restrict__ cu_seq_lens,
+    int32_t num_reqs,
+    int32_t total_tokens,
+    int32_t block_size,
+    const int32_t* __restrict__ seq_starts,
+    GatherPageTask& page) {
+  int32_t relative_page = task;
+  for (int32_t req_id = 0; req_id < num_reqs; ++req_id) {
+    const int32_t output_begin = sycl::min(cu_seq_lens[req_id], total_tokens);
+    const int32_t output_end = sycl::min(cu_seq_lens[req_id + 1], total_tokens);
+    const int32_t seq_len = sycl::max(output_end - output_begin, 0);
+    const int32_t source_begin = seq_starts == nullptr ? 0 : seq_starts[req_id];
+    const int32_t first_block = source_begin / block_size;
+    const int32_t num_pages =
+        (source_begin + seq_len + block_size - 1) / block_size - first_block;
+    if (relative_page < num_pages) {
+      page.req_id = req_id;
+      page.logical_block = first_block + relative_page;
+      const int32_t page_begin = page.logical_block * block_size;
+      const int32_t copy_begin = sycl::max(source_begin, page_begin);
+      const int32_t copy_end =
+          sycl::min(source_begin + seq_len, page_begin + block_size);
+      page.page_token_begin = copy_begin - page_begin;
+      page.page_token_end = copy_end - page_begin;
+      page.output_token_begin = output_begin + copy_begin - source_begin;
+      return true;
+    }
+    relative_page -= num_pages;
+  }
+  return false;
+}
+
+// Per-work-group task shared through SLM (CUDA keeps it in __shared__).
+struct GatherPageSlm {
+  GatherPageTask page;
+  int64_t physical_block;
+  bool has_task;
+};
+
+// Byte-wise gather of cache entries into a dense [TOT_TOKENS, ENTRY] buffer.
+// Port of cp_gather_cache_page from vLLM's csrc/cache_kernels.cu: one
+// work-group per (request, page); all strides are in bytes.
+template <bool contiguous_entries, bool vectorized>
+class cp_gather_cache_page_kernel {
+  using vec_t = sycl::vec<uint32_t, 4>;  // 16 bytes, same as CUDA int4
+  static constexpr int32_t kLanesPerToken = 32;
+
+ public:
+  cp_gather_cache_page_kernel(
+      const uint8_t* __restrict__ src_cache,
+      uint8_t* __restrict__ dst,
+      const int32_t* __restrict__ block_table,
+      const int32_t* __restrict__ cu_seq_lens,
+      const int32_t num_reqs,
+      const int32_t block_size,
+      const int32_t entry_size_bytes,
+      const int32_t total_tokens,
+      const int64_t block_table_stride,
+      const int64_t cache_block_stride,
+      const int64_t cache_entry_stride,
+      const int64_t dst_entry_stride,
+      const int32_t* __restrict__ seq_starts,
+      sycl::local_accessor<GatherPageSlm, 1> slm_task)
+      : src_cache_(src_cache),
+        dst_(dst),
+        block_table_(block_table),
+        cu_seq_lens_(cu_seq_lens),
+        num_reqs_(num_reqs),
+        block_size_(block_size),
+        entry_size_bytes_(entry_size_bytes),
+        total_tokens_(total_tokens),
+        block_table_stride_(block_table_stride),
+        cache_block_stride_(cache_block_stride),
+        cache_entry_stride_(cache_entry_stride),
+        dst_entry_stride_(dst_entry_stride),
+        seq_starts_(seq_starts),
+        slm_task_(slm_task) {}
+
+  void operator()(const sycl::nd_item<1>& item) const {
+    const int32_t tid = static_cast<int32_t>(item.get_local_id(0));
+    const int32_t nthreads = static_cast<int32_t>(item.get_local_range(0));
+
+    // One work-item maps the group to its (request, page) and looks up the
+    // physical block; the rest of the group reads the result from SLM.
+    if (tid == 0) {
+      GatherPageSlm& task = slm_task_[0];
+      task.has_task = map_gather_page_task(
+          static_cast<int32_t>(item.get_group(0)),
+          cu_seq_lens_,
+          num_reqs_,
+          total_tokens_,
+          block_size_,
+          seq_starts_,
+          task.page);
+      if (task.has_task) {
+        task.physical_block = block_table_
+            [task.page.req_id * block_table_stride_ + task.page.logical_block];
+      }
+    }
+    sycl::group_barrier(item.get_group());
+    if (!slm_task_[0].has_task) {
+      return;
+    }
+    const GatherPageTask page = slm_task_[0].page;
+    const int64_t physical_block = slm_task_[0].physical_block;
+
+    if constexpr (contiguous_entries) {
+      const int64_t src_offset =
+          physical_block * cache_block_stride_ +
+          static_cast<int64_t>(page.page_token_begin) * entry_size_bytes_;
+      const int64_t dst_offset =
+          static_cast<int64_t>(page.output_token_begin) * entry_size_bytes_;
+      const int32_t copy_bytes =
+          (page.page_token_end - page.page_token_begin) * entry_size_bytes_;
+      if constexpr (vectorized) {
+        const vec_t* src =
+            reinterpret_cast<const vec_t*>(src_cache_ + src_offset);
+        vec_t* out = reinterpret_cast<vec_t*>(dst_ + dst_offset);
+        const int32_t num_vectors = copy_bytes / sizeof(vec_t);
+        for (int32_t idx = tid; idx < num_vectors; idx += nthreads) {
+          out[idx] = src[idx];
+        }
+      } else {
+        const uint8_t* src = src_cache_ + src_offset;
+        uint8_t* out = dst_ + dst_offset;
+        for (int32_t idx = tid; idx < copy_bytes; idx += nthreads) {
+          out[idx] = src[idx];
+        }
+      }
+    } else {
+      const int32_t tokens_per_group = nthreads / kLanesPerToken;
+      const int32_t token_group = tid / kLanesPerToken;
+      const int32_t lane_id = tid % kLanesPerToken;
+      for (int32_t page_token = page.page_token_begin + token_group;
+           page_token < page.page_token_end;
+           page_token += tokens_per_group) {
+        const int64_t output_token =
+            page.output_token_begin + page_token - page.page_token_begin;
+        const uint8_t* src = src_cache_ + physical_block * cache_block_stride_ +
+                             page_token * cache_entry_stride_;
+        uint8_t* out = dst_ + output_token * dst_entry_stride_;
+        if constexpr (vectorized) {
+          const vec_t* src_vec = reinterpret_cast<const vec_t*>(src);
+          vec_t* dst_vec = reinterpret_cast<vec_t*>(out);
+          const int32_t num_vectors = entry_size_bytes_ / sizeof(vec_t);
+          for (int32_t idx = lane_id; idx < num_vectors;
+               idx += kLanesPerToken) {
+            dst_vec[idx] = src_vec[idx];
+          }
+        } else {
+          for (int32_t idx = lane_id; idx < entry_size_bytes_;
+               idx += kLanesPerToken) {
+            out[idx] = src[idx];
+          }
+        }
+      }
+    }
+  }
+
+ private:
+  const uint8_t* __restrict__ src_cache_;    // [NUM_BLOCKS, BLOCK_SIZE, ENTRY]
+  uint8_t* __restrict__ dst_;                // [TOT_TOKENS, ENTRY]
+  const int32_t* __restrict__ block_table_;  // [BATCH, BLOCK_INDICES]
+  const int32_t* __restrict__ cu_seq_lens_;  // [BATCH+1]
+  const int32_t num_reqs_;
+  const int32_t block_size_;
+  const int32_t entry_size_bytes_;
+  const int32_t total_tokens_;
+  const int64_t block_table_stride_;
+  const int64_t cache_block_stride_;
+  const int64_t cache_entry_stride_;
+  const int64_t dst_entry_stride_;
+  const int32_t* __restrict__ seq_starts_;  // Optional: token-granular start
+                                            // per request
+  sycl::local_accessor<GatherPageSlm, 1> slm_task_;
+};
+
 }  // namespace vllm
 
 // KV_T is the stored data type of kv-cache.
@@ -1151,6 +1344,129 @@ void gather_cache(
     TORCH_CHECK(false, "Unsupported data type width: ", dtype_bits);
   }
 }
+
+#define CALL_CP_GATHER_CACHE(CONTIGUOUS, VECTORIZED)                \
+  queue.submit([&](sycl::handler& cgh) {                            \
+    sycl::local_accessor<vllm::GatherPageSlm, 1> slm_task(1, cgh);  \
+    cgh.parallel_for(                                               \
+        sycl::nd_range<1>(grid * block, block),                     \
+        vllm::cp_gather_cache_page_kernel<CONTIGUOUS, VECTORIZED>(  \
+            reinterpret_cast<const uint8_t*>(src_cache.data_ptr()), \
+            reinterpret_cast<uint8_t*>(dst.data_ptr()),             \
+            block_table.data_ptr<int32_t>(),                        \
+            cu_seq_lens.data_ptr<int32_t>(),                        \
+            num_reqs,                                               \
+            block_size,                                             \
+            entry_size_bytes,                                       \
+            total_tokens,                                           \
+            block_table_stride,                                     \
+            cache_block_stride,                                     \
+            cache_entry_stride,                                     \
+            dst_entry_stride,                                       \
+            seq_starts_ptr,                                         \
+            slm_task));                                             \
+  });
+
+// Gather sequences from the cache into the destination tensor.
+//  - cu_seq_lens contains the cumulative sequence lengths for each batch
+//  - block_table contains the cache block indices for each sequence
+//  - Optionally, seq_starts (if provided) offsets the starting slot index by
+//  seq_starts[bid] (token granular, unlike gather_cache)
+// Same schema and semantics as vLLM's CUDA cp_gather_cache.
+void cp_gather_cache(
+    torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
+    torch::Tensor const& dst,          // [TOT_TOKENS, ENTRIES...]
+    torch::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
+    torch::Tensor const& cu_seq_lens,  // [BATCH+1]
+    int64_t batch_size,
+    std::optional<torch::Tensor> seq_starts = std::nullopt) {
+  const at::DeviceGuard device_guard(src_cache.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+
+  int32_t block_size = src_cache.size(1);
+  int32_t entry_size = src_cache.flatten(2, -1).size(2);
+
+  TORCH_CHECK(block_table.dtype() == at::kInt, "block_table must be int32");
+  TORCH_CHECK(cu_seq_lens.dtype() == at::kInt, "cu_seq_lens must be int32");
+  if (seq_starts.has_value()) {
+    TORCH_CHECK(
+        seq_starts.value().dtype() == at::kInt, "seq_starts must be int32");
+  }
+
+  TORCH_CHECK(
+      src_cache.device() == dst.device(),
+      "src_cache and dst must be on the same device");
+  TORCH_CHECK(
+      src_cache.device() == block_table.device(),
+      "src_cache and block_table must be on the same device");
+  TORCH_CHECK(
+      src_cache.device() == cu_seq_lens.device(),
+      "src_cache and cu_seq_lens must be on the same device");
+  if (seq_starts.has_value()) {
+    TORCH_CHECK(
+        src_cache.device() == seq_starts.value().device(),
+        "src_cache and seq_starts must be on the same device");
+  }
+
+  TORCH_CHECK(
+      src_cache.dtype() == dst.dtype(),
+      "src_cache and dst must have the same dtype");
+  const int32_t element_size = src_cache.element_size();
+  TORCH_CHECK(
+      element_size == 1 || element_size == 2 || element_size == 4,
+      "Unsupported data type width: ",
+      element_size * 8);
+  TORCH_CHECK(
+      batch_size == cu_seq_lens.size(0) - 1,
+      "batch_size must match cu_seq_lens");
+
+  const int32_t total_tokens = dst.size(0);
+  if (total_tokens == 0) {
+    return;
+  }
+
+  const int32_t entry_size_bytes = entry_size * element_size;
+  const int64_t block_table_stride = block_table.stride(0);
+  const int64_t cache_block_stride = src_cache.stride(0) * element_size;
+  const int64_t cache_entry_stride = src_cache.stride(1) * element_size;
+  const int64_t dst_entry_stride = dst.stride(0) * element_size;
+  const int32_t* seq_starts_ptr =
+      seq_starts.has_value() ? seq_starts.value().data_ptr<int32_t>() : nullptr;
+
+  constexpr std::uintptr_t vector_alignment = 16;
+  const bool vectorized =
+      reinterpret_cast<std::uintptr_t>(src_cache.data_ptr()) %
+              vector_alignment ==
+          0 &&
+      reinterpret_cast<std::uintptr_t>(dst.data_ptr()) % vector_alignment ==
+          0 &&
+      entry_size_bytes % vector_alignment == 0 &&
+      cache_block_stride % vector_alignment == 0 &&
+      cache_entry_stride % vector_alignment == 0 &&
+      dst_entry_stride % vector_alignment == 0;
+  const bool contiguous_entries = cache_entry_stride == entry_size_bytes &&
+                                  dst_entry_stride == entry_size_bytes;
+
+  const int32_t num_reqs = static_cast<int32_t>(batch_size);
+  // Upper bound on (request, page) tasks: every request may add a partial
+  // first and last page on top of the fully covered ones.
+  const int32_t required_blocks =
+      (total_tokens + block_size - 1) / block_size + 2 * num_reqs;
+  sycl::range<1> grid(required_blocks);
+  sycl::range<1> block(256);
+
+  if (contiguous_entries && vectorized) {
+    CALL_CP_GATHER_CACHE(true, true);
+  } else if (contiguous_entries) {
+    CALL_CP_GATHER_CACHE(true, false);
+  } else if (vectorized) {
+    CALL_CP_GATHER_CACHE(false, true);
+  } else {
+    CALL_CP_GATHER_CACHE(false, false);
+  }
+}
+
+#undef CALL_CP_GATHER_CACHE
 
 // Macro to dispatch the gather_and_maybe_dequant_cache kernel.
 // SCALAR_T is the data type of the destination tensor.
