@@ -156,7 +156,7 @@ struct chunk_causal_conv1d_kernel {
     // get states cache location
     int states_id = cache_indices[batch_id];
 
-    if (states_id == pad_slot_id) {
+    if (states_id <= pad_slot_id) {
       return;
     }
 

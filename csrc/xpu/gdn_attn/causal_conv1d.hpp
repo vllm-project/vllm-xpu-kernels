@@ -164,7 +164,7 @@ struct causal_conv1d_kernel {
     // get states cache location
     int states_id = cache_indices[batch_id];
 
-    if (states_id == pad_slot_id) {
+    if (states_id <= pad_slot_id) {
       return;
     }
 
@@ -685,7 +685,7 @@ struct causal_conv1d_spec_kernel {
     // cannot be used to recover this dimension.
     const int state_len = Width - 1 + (num_spec_tokens - 1);
     const int state_id = cache_indices[batch_id * cache_indices_stride_0 + 0];
-    const bool has_conv_state = (state_id != pad_slot_id);
+    const bool has_conv_state = (state_id > pad_slot_id);
     T* state_line_ptr = has_conv_state
                             ? conv_states + state_id * conv_states_stride_0
                             : nullptr;
