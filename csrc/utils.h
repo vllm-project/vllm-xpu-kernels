@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <memory>
 #include <ATen/ATen.h>
 #include <c10/xpu/XPUStream.h>
@@ -68,6 +69,23 @@ static inline bool is_bmg(at::DeviceIndex device_index = -1) {
 static inline bool is_pvc(at::DeviceIndex device_index = -1) {
   return get_device_architecture(device_index) ==
          syclex::architecture::intel_gpu_pvc;
+}
+
+// intel_gpu_cri only exists on CRI-enabled oneAPI toolchains; see
+// is_xe3p_arch() below for how VLLM_XPU_HAS_INTEL_GPU_CRI is detected.
+static inline bool is_cri(at::DeviceIndex device_index = -1) {
+#ifdef VLLM_XPU_HAS_INTEL_GPU_CRI
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_cri;
+#else
+  (void)device_index;
+  return false;
+#endif
+}
+
+static inline bool is_nvl_p(at::DeviceIndex device_index = -1) {
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_nvl_p;
 }
 
 static inline bool is_xe2_arch(at::DeviceIndex device_index = -1) {
@@ -180,6 +198,15 @@ struct alignas(sizeof(scalar_t) * vec_size) aligned_vec {
 
   scalar_t const& operator[](int index) const { return val[index]; }
 };
+
+// True if every pointer is aligned to sizeof(*ptr) * vec_sz bytes.
+template <int vec_sz, typename... Ts>
+inline bool is_vec_eligible(const Ts*... ptrs) {
+  static_assert(vec_sz > 0, "vec_sz must be positive");
+  return (
+      (reinterpret_cast<std::uintptr_t>(ptrs) % (sizeof(Ts) * vec_sz) == 0) &&
+      ...);
+}
 
 // From float to float.
 inline void from_float(float& dst, float src) { dst = src; }

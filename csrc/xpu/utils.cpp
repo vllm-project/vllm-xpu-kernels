@@ -22,6 +22,16 @@ bool is_pvc(int64_t device_index = -1) {
   return vllm::xpu::is_pvc(dev_idx);
 }
 
+bool is_cri(int64_t device_index = -1) {
+  at::DeviceIndex dev_idx = device_index;
+  return vllm::xpu::is_cri(dev_idx);
+}
+
+bool is_nvl_p(int64_t device_index = -1) {
+  at::DeviceIndex dev_idx = device_index;
+  return vllm::xpu::is_nvl_p(dev_idx);
+}
+
 bool is_xe2_arch(int64_t device_index = -1) {
   at::DeviceIndex dev_idx = device_index;
   return vllm::xpu::is_xe2_arch(dev_idx);
