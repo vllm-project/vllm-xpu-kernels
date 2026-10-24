@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import mmap
 import random
 
 import numpy as np
@@ -110,6 +111,12 @@ MINI_PYTEST_PARAMS = {
         "device": ["xpu:0"],
     },
     "test_swap_blocks_batch_h2d_mutation_race": {
+        "device": ["xpu:0"],
+    },
+    "test_swap_blocks_batch_h2d_pinned_no_snapshot": {
+        "device": ["xpu:0"],
+    },
+    "test_swap_blocks_batch_h2d_registered_no_snapshot": {
         "device": ["xpu:0"],
     },
     "test_gather_and_maybe_dequant_cache_mla": {
@@ -1114,6 +1121,110 @@ def test_swap_blocks_batch_h2d_mutation_race(device: str) -> None:
             dst_val[0][db].cpu(),
             msg=f"Value block {sb}→{db} corrupted by post-call mutation",
         )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_swap_blocks_batch_h2d_pinned_no_snapshot(device: str) -> None:
+    """With snapshot_src=False, H2D from pinned memory reads the source in
+    stream order: it must see a non-blocking D2H copy into the same pinned
+    buffer that was queued just before it."""
+    torch.xpu.set_device(device)
+
+    n_blocks = 32
+    block_elems = 1 << 12
+    mm = 2048
+    trials = 8
+    poison, value = -7.0, 3.0
+
+    src = torch.empty(n_blocks * block_elems,
+                      device=device,
+                      dtype=torch.float32)
+    host = torch.full(src.shape, poison, dtype=src.dtype, pin_memory=True)
+    assert host.is_pinned()
+    dst = torch.empty_like(src)
+    stride_bytes = block_elems * src.element_size()
+    block_mapping = [(i, i) for i in range(n_blocks)]
+    sp, dp, sz = _build_batch_args(host.view(n_blocks, block_elems),
+                                   dst.view(n_blocks, block_elems),
+                                   block_mapping, stride_bytes)
+
+    a = torch.randn(mm, mm, device=device, dtype=torch.float32)
+    b = torch.randn(mm, mm, device=device, dtype=torch.float32)
+
+    for t in range(trials):
+        host.fill_(poison)
+        dst.fill_(poison)
+        torch.xpu.synchronize(device)
+        # Keep the stream busy so the D2H copy is still pending when
+        # swap_blocks_batch is called.
+        c = a
+        for _ in range(6):
+            c = torch.mm(c, b)
+        src.fill_(value + t)
+        host.copy_(src, non_blocking=True)
+        ops.swap_blocks_batch(sp, dp, sz, snapshot_src=False)
+        torch.xpu.synchronize(device)
+        assert torch.all(dst == value + t), (
+            f"trial {t}: H2D copy did not see the preceding D2H copy")
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_swap_blocks_batch_h2d_registered_no_snapshot(device: str) -> None:
+    """Host memory registered with xpu_host_register is reported by SYCL as
+    usm::alloc::unknown, not USM host. With snapshot_src=False it must still
+    be copied directly, reading the source in stream order rather than being
+    snapshotted at call time: a CPU write to the source made after the call,
+    while the copy is still queued behind other work, must be what arrives."""
+    torch.xpu.set_device(device)
+
+    n_blocks = 32
+    block_elems = 1 << 12
+    block_bytes = block_elems * 4
+    total = n_blocks * block_bytes
+    mm = 4096
+    trials = 8
+    old, new = 3.0, -7.0
+
+    dst = torch.empty(n_blocks * block_elems,
+                      device=device,
+                      dtype=torch.float32)
+    a = torch.randn(mm, mm, device=device, dtype=torch.float32)
+    b = torch.randn(mm, mm, device=device, dtype=torch.float32)
+
+    with mmap.mmap(-1, total) as region:
+        host = torch.frombuffer(memoryview(region), dtype=torch.float32)
+        assert ops.xpu_host_register(host.data_ptr(), total)
+        try:
+            h2d = _build_batch_args(host.view(n_blocks, block_elems),
+                                    dst.view(n_blocks, block_elems),
+                                    [(i, i) for i in range(n_blocks)],
+                                    block_bytes)
+            failed_trial = None
+            for t in range(trials):
+                host.fill_(old)
+                dst.fill_(0.0)
+                torch.xpu.synchronize(device)
+                # Keep the stream busy so the H2D copy is still pending when
+                # the CPU rewrites the source.
+                c = a
+                for _ in range(12):
+                    c = torch.mm(c, b)
+                ops.swap_blocks_batch(*h2d, snapshot_src=False)
+                host.fill_(new)
+                torch.xpu.synchronize(device)
+                # A staged copy would hold `old` (snapshot at call time).
+                if not torch.all(dst == new):
+                    failed_trial = t
+                    break
+        finally:
+            assert ops.xpu_host_unregister(host.data_ptr())
+            del host
+
+    assert failed_trial is None, (
+        f"trial {failed_trial}: registered source was staged, not read in "
+        "stream order")
 
 
 @pytest.mark.skipif(torch.xpu.device_count() < 2,

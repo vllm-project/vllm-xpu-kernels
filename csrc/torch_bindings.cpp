@@ -363,7 +363,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   // The target XPU device is auto-inferred from the device pointer.
   cache_ops.def(
       "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
-      "                  Tensor sizes) -> ()");
+      "                  Tensor sizes, bool snapshot_src=True) -> ()");
   cache_ops.impl("swap_blocks_batch", torch::kCPU, &swap_blocks_batch);
   cache_ops.def(
       "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache,"
