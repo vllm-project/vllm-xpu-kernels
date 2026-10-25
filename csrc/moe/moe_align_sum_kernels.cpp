@@ -290,7 +290,8 @@ void _moe_align_block_size_small_batch_expert(
     int32_t* __restrict__ token_mask,
     bool has_expert_map,
     sycl::local_accessor<int32_t, 1> slm,
-    sycl::nd_item<1> item) {
+    sycl::nd_item<1> item,
+    int32_t* __restrict__ scatter_idx = nullptr) {
   auto local_id_x = item.get_local_id(0);
   auto local_range_x = item.get_local_range(0);
   // Compute input buffer offsets. Typically these will all be 0, except when
@@ -387,13 +388,19 @@ void _moe_align_block_size_small_batch_expert(
 
     for (size_t i = tid; i < numel; i += stride) {
       int32_t expert_id = static_cast<int32_t>(topk_ids[i]);
-      if (expert_id >= num_experts || expert_id < 0) {
-        continue;
-      }
-      if (has_expert_map) {
+      bool invalid = (expert_id >= num_experts || expert_id < 0);
+      if (!invalid && has_expert_map) {
         expert_id = expert_map[expert_id];
         // filter invalid expert
-        if (expert_id == -1) continue;
+        if (expert_id == -1) invalid = true;
+      }
+      bool const valid =
+          !invalid && (token_mask == nullptr || token_mask[i / topk_num]);
+      if (scatter_idx != nullptr) {
+        scatter_idx[i] = valid ? static_cast<int32_t>(i) : -1;
+      }
+      if (invalid) {
+        continue;
       }
       int32_t rank_post_pad =
           tokens_cnts[tid * num_experts + expert_id] + cumsum[expert_id];
@@ -420,7 +427,8 @@ void _count_and_sort_expert_tokens(
     int32_t model_offset,
     int32_t topk_num,
     bool has_expert_map,
-    sycl::nd_item<2> item) {
+    sycl::nd_item<2> item,
+    int32_t* __restrict__ scatter_idx = nullptr) {
   auto group_y = item.get_group(1);
   auto local_id_x = item.get_local_id(0);
   auto local_range_x = item.get_local_range(0);
@@ -431,14 +439,22 @@ void _count_and_sort_expert_tokens(
 
   for (size_t i = tid; i < numel; i += stride) {
     int32_t expert_id = static_cast<int32_t>(topk_ids[i]);
-    if (expert_id >= num_experts || expert_id < 0) {
-      continue;
-    }
+    bool invalid = (expert_id >= num_experts || expert_id < 0);
 
-    if (has_expert_map) {
+    if (!invalid && has_expert_map) {
       expert_id = expert_map[expert_id];
       // filter invalid experts
-      if (expert_id == -1) continue;
+      if (expert_id == -1) invalid = true;
+    }
+
+    bool const valid =
+        !invalid && (token_mask == nullptr || token_mask[i / topk_num]);
+    if (scatter_idx != nullptr) {
+      scatter_idx[i] = valid ? static_cast<int32_t>(i) : -1;
+    }
+
+    if (invalid) {
+      continue;
     }
 
     if (token_mask == nullptr || token_mask[i / topk_num]) {
@@ -549,6 +565,7 @@ class count_and_sort_expert_tokens_kernel {
   int32_t max_num_tokens_padded;
   int32_t topk_num;
   bool has_expert_map;
+  int32_t* scatter_idx;
 
  public:
   count_and_sort_expert_tokens_kernel(
@@ -560,7 +577,8 @@ class count_and_sort_expert_tokens_kernel {
       int32_t num_experts,
       int32_t max_num_tokens_padded,
       int32_t topk_num,
-      bool has_expert_map)
+      bool has_expert_map,
+      int32_t* scatter_idx)
       : topk_ids(topk_ids),
         sorted_token_ids(sorted_token_ids),
         cumsum_buffer(cumsum_buffer),
@@ -569,7 +587,8 @@ class count_and_sort_expert_tokens_kernel {
         num_experts(num_experts),
         max_num_tokens_padded(max_num_tokens_padded),
         topk_num(topk_num),
-        has_expert_map(has_expert_map) {}
+        has_expert_map(has_expert_map),
+        scatter_idx(scatter_idx) {}
 
   void operator()(sycl::nd_item<2> item) const {
     _count_and_sort_expert_tokens(
@@ -584,7 +603,8 @@ class count_and_sort_expert_tokens_kernel {
         0,
         topk_num,
         has_expert_map,
-        item);
+        item,
+        scatter_idx);
   }
 };
 
@@ -684,6 +704,7 @@ class moe_align_block_size_small_batch_expert_kernel {
   int32_t topk_num;
   bool has_expert_map;
   sycl::local_accessor<int32_t, 1> slm;
+  int32_t* scatter_idx;
 
  public:
   moe_align_block_size_small_batch_expert_kernel(
@@ -698,7 +719,8 @@ class moe_align_block_size_small_batch_expert_kernel {
       int32_t max_num_tokens_padded,
       int32_t topk_num,
       bool has_expert_map,
-      sycl::local_accessor<int32_t, 1> slm)
+      sycl::local_accessor<int32_t, 1> slm,
+      int32_t* scatter_idx)
       : topk_ids(topk_ids),
         sorted_token_ids(sorted_token_ids),
         expert_ids(expert_ids),
@@ -710,7 +732,8 @@ class moe_align_block_size_small_batch_expert_kernel {
         max_num_tokens_padded(max_num_tokens_padded),
         topk_num(topk_num),
         has_expert_map(has_expert_map),
-        slm(slm) {}
+        slm(slm),
+        scatter_idx(scatter_idx) {}
 
   void operator()(sycl::nd_item<1> item) const {
     _moe_align_block_size_small_batch_expert<scalar_t, fill_threads>(
@@ -730,7 +753,8 @@ class moe_align_block_size_small_batch_expert_kernel {
         nullptr,
         has_expert_map,
         slm,
-        item);
+        item,
+        scatter_idx);
   }
 };
 
@@ -1044,12 +1068,26 @@ void moe_align_block_size(
     torch::Tensor sorted_token_ids,
     torch::Tensor experts_ids,
     torch::Tensor num_tokens_post_pad,
-    std::optional<torch::Tensor> maybe_expert_map) {
+    std::optional<torch::Tensor> maybe_expert_map,
+    std::optional<torch::Tensor> scatter_idx) {
   at::Device curDevice = at::Device(at::kXPU, at::xpu::current_device());
   at::DeviceGuard device_guard(curDevice);
   auto& queue = vllm::xpu::vllmGetQueue();
   size_t device_max_shared_mem =
       queue.get_device().get_info<sycl::info::device::local_mem_size>();
+
+  int32_t* scatter_ptr = nullptr;
+  if (scatter_idx.has_value()) {
+    TORCH_CHECK(
+        scatter_idx->scalar_type() == at::kInt, "scatter_idx must be int32");
+    TORCH_CHECK(
+        scatter_idx->device() == topk_ids.device() &&
+            scatter_idx->is_contiguous() &&
+            scatter_idx->numel() == topk_ids.numel(),
+        "scatter_idx must be contiguous, on the same device, and "
+        "match topk_ids.numel()");
+    scatter_ptr = scatter_idx->data_ptr<int32_t>();
+  }
 
   int64_t padded_num_experts =
       ((num_experts + vllm::moe::WARP_SIZE - 1) / vllm::moe::WARP_SIZE) *
@@ -1114,7 +1152,8 @@ void moe_align_block_size(
                     sorted_token_ids.size(0),
                     topk_ids.size(1),
                     has_expert_map,
-                    shared_mem);
+                    shared_mem,
+                    scatter_ptr);
             h.parallel_for(sycl::nd_range<1>(global_range, local_range), kfn);
           });
         } else {
@@ -1178,7 +1217,8 @@ void moe_align_block_size(
                 num_experts,
                 sorted_token_ids.size(0),
                 topk_ids.size(1),
-                has_expert_map);
+                has_expert_map,
+                scatter_ptr);
             cgh.parallel_for(
                 sycl::nd_range<2>(global_range2, local_range2), kfn);
           });
