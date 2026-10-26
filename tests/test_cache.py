@@ -408,6 +408,7 @@ def _fill_mla_cache(cache: torch.Tensor, kv_cache_dtype: str):
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE_ALL)
+@pytest.mark.parametrize("skip_scale", [False, True])
 @torch.inference_mode()
 def test_concat_and_cache_mla(
     kv_lora_rank: int,
@@ -419,6 +420,7 @@ def test_concat_and_cache_mla(
     seed: int,
     device: str,
     kv_cache_dtype: str,
+    skip_scale: bool,
 ) -> None:
     seed_everything(seed)
     torch.set_default_device(device)
@@ -437,6 +439,8 @@ def test_concat_and_cache_mla(
     entry_size = kv_lora_rank + qk_rope_head_dim
 
     scale = torch.tensor(0.1, dtype=torch.float32, device=device)
+    # skip_scale means a cast-only conversion, i.e. unit scale.
+    ref_scale = 1.0 if skip_scale else scale.item()
     kv_cache = _create_mla_cache(num_blocks, block_size, entry_size, dtype,
                                  kv_cache_dtype, device)
     ref_temp = torch.zeros(*kv_cache.shape, dtype=dtype, device=device)
@@ -452,30 +456,31 @@ def test_concat_and_cache_mla(
         ref_kv_cache = torch.empty_like(ref_temp, dtype=kv_cache.dtype)
         ops.convert_fp8(ref_kv_cache,
                         ref_temp,
-                        scale.item(),
+                        ref_scale,
                         kv_dtype=kv_cache_dtype)
     else:
         ref_kv_cache = ref_temp
 
     opcheck(
         torch.ops._C_cache_ops.concat_and_cache_mla,
-        (kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale),
+        (kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale,
+         skip_scale),
         # test_utils=DEFAULT_OPCHECK_TEST_UTILS,
     )
 
     ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping,
-                             kv_cache_dtype, scale)
+                             kv_cache_dtype, scale, skip_scale)
 
     if kv_cache_dtype == "fp8":
         result_temp = torch.empty_like(kv_cache, dtype=torch.float16)
         ops.convert_fp8(result_temp,
                         kv_cache.contiguous(),
-                        scale.item(),
+                        ref_scale,
                         kv_dtype=kv_cache_dtype)
         expected_temp = torch.empty_like(ref_kv_cache, dtype=torch.float16)
         ops.convert_fp8(expected_temp,
                         ref_kv_cache,
-                        scale.item(),
+                        ref_scale,
                         kv_dtype=kv_cache_dtype)
         torch.testing.assert_close(result_temp,
                                    expected_temp,

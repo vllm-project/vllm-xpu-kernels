@@ -366,7 +366,8 @@ class concat_and_cache_mla_kernel {
       const int kv_lora_rank,
       const int pe_dim,
       const int block_size,
-      const float* scale)
+      const float* scale,
+      const bool skip_scale)
       : kv_c(kv_c),
         k_pe(k_pe),
         kv_cache(kv_cache),
@@ -378,7 +379,8 @@ class concat_and_cache_mla_kernel {
         kv_lora_rank(kv_lora_rank),
         pe_dim(pe_dim),
         block_size(block_size),
-        scale(scale) {}
+        scale(scale),
+        skip_scale(skip_scale) {}
 
   void operator()(const sycl::nd_item<1> item_id) const {
     const int64_t token_idx = item_id.get_group(0);
@@ -412,7 +414,10 @@ class concat_and_cache_mla_kernel {
               at::Float8_e5m2,
               at::Float8_e4m3fn>;
           const float fp8_max = vllm::fp8::quant_type_max_v<fp8_dtype>;
-          float x = static_cast<float>(src_row[i]) / *scale;
+          float x = static_cast<float>(src_row[i]);
+          if (!skip_scale) {
+            x /= *scale;
+          }
           x = sycl::fmax(-fp8_max, sycl::fmin(x, fp8_max));
           auto fp8_val = static_cast<fp8_dtype>(x);
           dst_row[i] = sycl::bit_cast<cache_t>(fp8_val);
@@ -438,6 +443,7 @@ class concat_and_cache_mla_kernel {
   const int pe_dim;                          //
   const int block_size;                      //
   const float* scale;                        //
+  const bool skip_scale;                     //
 };
 
 // grid is launched with dimensions (batch, num_splits)
@@ -1221,7 +1227,8 @@ void reshape_and_cache_flash(
           kv_lora_rank,                                                    \
           pe_dim,                                                          \
           block_size,                                                      \
-          reinterpret_cast<const float*>(scale.data_ptr())));
+          reinterpret_cast<const float*>(scale.data_ptr()),                \
+          skip_scale));
 
 #define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)           \
   if (use_int32_index) {                                             \
@@ -1252,7 +1259,8 @@ void concat_and_cache_mla(
                                   // pe_dim)]
     torch::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
     const std::string& kv_cache_dtype,
-    torch::Tensor& scale) {
+    torch::Tensor& scale,
+    bool skip_scale) {
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
