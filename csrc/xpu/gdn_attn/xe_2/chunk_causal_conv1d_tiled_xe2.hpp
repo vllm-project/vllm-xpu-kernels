@@ -217,7 +217,8 @@ struct chunk_causal_conv1d_tiled_kernel {
     const bool has_init_conv_states =
         (has_initial_state == nullptr ||
          (has_initial_state != nullptr && has_initial_state[batch_id]));
-    T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
+    T* conv_states_ptr =
+        conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
 
     // ========================================================================
     // Phase 1: COOPERATIVE load of (TileT + Width - 1) tokens into SLM
@@ -582,7 +583,8 @@ struct chunk_causal_conv1d_tiled_kernel {
         }
       }
     } else if (seq_len == 1) {
-      T* st = conv_states + states_id * conv_states_stride_0;
+      T* st =
+          conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
 #pragma unroll
       for (int i = 0; i < Width - 1; ++i) {
         int slot = i + 1;

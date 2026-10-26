@@ -18,7 +18,7 @@ from benchmark.src.get_model_config import (
     gen_cutlass_fused_moe_correctness_configs as gen_correctness_config)
 from benchmark.src.get_model_config import (gen_cutlass_fused_moe_perf_configs
                                             as gen_perf_configs)
-from tests.fused_moe.test_fused_moe import ref_fused_moe
+from tests.fused_moe.test_fused_moe_xe2 import ref_fused_moe
 from tests.ops.fp8_quant_op import scaled_fp8_quant
 from tests.utils import parse_args, seed_everything
 from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
