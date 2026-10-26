@@ -167,7 +167,6 @@ class RemapHiddenStates {
   static constexpr int GroupWorkItem = 256;
   static constexpr int WARP_SIZE = 16;
   static constexpr int ElemsPerItem = sizeof(float) * 4 / sizeof(TA);
-  static constexpr int EXCLUSIVE_SIZE = 1024;
 
   static inline sycl::nd_range<1>
   get_nd_range(const int num_rows, const int hidden_size) {
@@ -433,8 +432,9 @@ void RemapHiddenStatesLauncher(
     int* expert_scale_desc,
     sycl::queue& queue) {
   TORCH_CHECK(
-      (local_experts_num <= (RemapHiddenStates<TA, TS, TopK>::EXCLUSIVE_SIZE)),
-      "local_experts_num exceeds the maximum supported number");
+      local_experts_num * sizeof(int32_t) <=
+          queue.get_device().get_info<sycl::info::device::local_mem_size>(),
+      "local_experts_num exceeds the device local memory capacity");
   TORCH_CHECK(
       (hidden_size % RemapHiddenStates<TA, TS, TopK>::ElemsPerItem == 0),
       "hidden_size must be divisible by ElemsPerItem");
