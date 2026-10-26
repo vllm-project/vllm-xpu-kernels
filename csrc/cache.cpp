@@ -92,8 +92,12 @@ class reshape_and_cache_kernel {
       const int dst_value_idx = block_idx * n * block_size_ +
                                 head_idx * head_size_ * block_size_ +
                                 head_offset * block_size_ + block_offset;
-      k_op(key_cache_[dst_key_idx], key_[src_key_idx]);
-      v_op(value_cache_[dst_value_idx], value_[src_value_idx]);
+      // Load both inputs before storing so the loads are not serialized
+      // behind the (possibly aliasing) cache stores.
+      const scalar_t tgt_key = key_[src_key_idx];
+      const scalar_t tgt_value = value_[src_value_idx];
+      k_op(key_cache_[dst_key_idx], tgt_key);
+      v_op(value_cache_[dst_value_idx], tgt_value);
     }
   }
 
@@ -341,7 +345,13 @@ class reshape_and_cache_flash_kernel {
   const float* v_scale_;
 };
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+// index_t is int64_t when the cache or input offsets may exceed INT32_MAX,
+// int otherwise (64-bit integer math is emulated and measurably slower).
+template <
+    typename scalar_t,
+    typename cache_t,
+    Fp8KVCacheDataType kv_dt,
+    typename index_t>
 class concat_and_cache_mla_kernel {
  public:
   concat_and_cache_mla_kernel(
@@ -361,10 +371,10 @@ class concat_and_cache_mla_kernel {
         k_pe(k_pe),
         kv_cache(kv_cache),
         slot_mapping(slot_mapping),
-        block_stride(block_stride),
-        entry_stride(entry_stride),
-        kv_c_stride(kv_c_stride),
-        k_pe_stride(k_pe_stride),
+        block_stride(static_cast<index_t>(block_stride)),
+        entry_stride(static_cast<index_t>(entry_stride)),
+        kv_c_stride(static_cast<index_t>(kv_c_stride)),
+        k_pe_stride(static_cast<index_t>(k_pe_stride)),
         kv_lora_rank(kv_lora_rank),
         pe_dim(pe_dim),
         block_size(block_size),
@@ -379,16 +389,17 @@ class concat_and_cache_mla_kernel {
     }
     // 64-bit: one layer's cache view can exceed 2^31 elements (e.g. a 5 GiB
     // bf16 GLM-5.3 latent cache); 32-bit offsets wrap and write out of bounds.
-    const int64_t block_idx = slot_idx / block_size;
-    const int64_t block_offset = slot_idx % block_size;
+    const index_t token = static_cast<index_t>(token_idx);
+    const index_t block_idx = static_cast<index_t>(slot_idx / block_size);
+    const index_t block_offset = static_cast<index_t>(slot_idx % block_size);
 
     auto copy = [&](const scalar_t* __restrict__ src,
                     cache_t* dst,
-                    int64_t src_stride,
-                    int64_t dst_stride,
+                    index_t src_stride,
+                    index_t dst_stride,
                     int size,
                     int offset) {
-      const scalar_t* __restrict__ src_row = src + token_idx * src_stride;
+      const scalar_t* __restrict__ src_row = src + token * src_stride;
       cache_t* dst_row =
           dst + block_idx * block_stride + block_offset * entry_stride + offset;
       for (int i = item_id.get_local_id(0); i < size;
@@ -419,10 +430,10 @@ class concat_and_cache_mla_kernel {
   cache_t* __restrict__ kv_cache;  // [num_blocks, block_size, (kv_lora_rank +
                                    // pe_dim)]
   const int64_t* __restrict__ slot_mapping;  // [num_tokens]
-  const int64_t block_stride;                //
-  const int64_t entry_stride;                //
-  const int64_t kv_c_stride;                 //
-  const int64_t k_pe_stride;                 //
+  const index_t block_stride;                //
+  const index_t entry_stride;                //
+  const index_t kv_c_stride;                 //
+  const index_t k_pe_stride;                 //
   const int kv_lora_rank;                    //
   const int pe_dim;                          //
   const int block_size;                      //
@@ -1193,23 +1204,30 @@ void reshape_and_cache_flash(
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)        \
-  vllm::xpu::sycl_kernel_submit(                                  \
-      queue,                                                      \
-      sycl::nd_range<1>(grid * block, block),                     \
-      vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>( \
-          reinterpret_cast<KV_T*>(kv_c.data_ptr()),               \
-          reinterpret_cast<KV_T*>(k_pe.data_ptr()),               \
-          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),        \
-          slot_mapping.data_ptr<int64_t>(),                       \
-          block_stride,                                           \
-          entry_stride,                                           \
-          kv_c_stride,                                            \
-          k_pe_stride,                                            \
-          kv_lora_rank,                                           \
-          pe_dim,                                                 \
-          block_size,                                             \
+#define CALL_CONCAT_AND_CACHE_MLA_IDX(KV_T, CACHE_T, KV_DTYPE, INDEX_T)    \
+  vllm::xpu::sycl_kernel_submit(                                           \
+      queue,                                                               \
+      sycl::nd_range<1>(grid * block, block),                              \
+      vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE, INDEX_T>( \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                        \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                        \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                 \
+          slot_mapping.data_ptr<int64_t>(),                                \
+          block_stride,                                                    \
+          entry_stride,                                                    \
+          kv_c_stride,                                                     \
+          k_pe_stride,                                                     \
+          kv_lora_rank,                                                    \
+          pe_dim,                                                          \
+          block_size,                                                      \
           reinterpret_cast<const float*>(scale.data_ptr())));
+
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)           \
+  if (use_int32_index) {                                             \
+    CALL_CONCAT_AND_CACHE_MLA_IDX(KV_T, CACHE_T, KV_DTYPE, int);     \
+  } else {                                                           \
+    CALL_CONCAT_AND_CACHE_MLA_IDX(KV_T, CACHE_T, KV_DTYPE, int64_t); \
+  }
 
 #define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T)                           \
   vllm::xpu::sycl_kernel_submit(                                     \
@@ -1293,6 +1311,19 @@ void concat_and_cache_mla(
     }
     return;
   }
+
+  // Use 32-bit indexing unless an element offset may exceed INT32_MAX.
+  auto max_offset = [](const torch::Tensor& t) {
+    int64_t off = 0;
+    for (int64_t d = 0; d < t.dim(); ++d) {
+      off += std::max<int64_t>(t.size(d) - 1, 0) * t.stride(d);
+    }
+    return off;
+  };
+  constexpr int64_t kInt32Max = std::numeric_limits<int32_t>::max();
+  const bool use_int32_index = max_offset(kv_cache) <= kInt32Max &&
+                               max_offset(kv_c) <= kInt32Max &&
+                               max_offset(k_pe) <= kInt32Max;
 
   sycl::range<1> grid(num_tokens);
   sycl::range<1> block(std::min(kv_lora_rank, 1024));
