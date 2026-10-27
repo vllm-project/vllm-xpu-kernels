@@ -200,7 +200,8 @@ struct chunk_causal_conv1d_kernel {
     const bool has_init_conv_states =
         (has_initial_state == nullptr ||
          (has_initial_state != nullptr && has_initial_state[batch_id]));
-    T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
+    T* conv_states_ptr =
+        conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
 
     // load weights
     T local_weights[Width * elems_per_item];
@@ -624,7 +625,8 @@ struct chunk_update_states_kernel {
     }
 
     int states_id = cache_indices[batch_id];
-    T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
+    T* conv_states_ptr =
+        conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
     const T* conv_states_tmp_ptr =
         conv_states_tmp + batch_id * (width - 1) * conv_elems;
     for (int i = elems_start_offset_group + local_id;
