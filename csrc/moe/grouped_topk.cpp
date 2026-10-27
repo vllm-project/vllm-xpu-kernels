@@ -1685,10 +1685,12 @@ void launch_tier(
     int64_t topk,
     bool renormalize,
     double routed_scaling_factor) {
+  // One work-group per token only pays off for small batches: on both BMG
+  // and CRI the warp kernel is faster from ~128 tokens on.
   bool const use_block_kernel =
       use_tuned_block_path<MaxNumExperts, MaxNumTopExperts>() ||
       MaxNumExperts > 1024 || num_experts >= 1024 ||
-      (num_experts >= 256 && num_tokens <= 1024);
+      (num_experts >= 256 && num_tokens <= 64);
   float const scale = static_cast<float>(routed_scaling_factor);
   if (use_block_kernel) {
     sycl::range<1> grid(static_cast<size_t>(num_tokens));
