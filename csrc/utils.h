@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include <cctype>
 #include <memory>
 #include <ATen/ATen.h>
 #include <c10/xpu/XPUStream.h>
@@ -119,6 +121,19 @@ static inline bool is_xe3p_arch(at::DeviceIndex device_index = -1) {
 static inline std::optional<std::string> getEnv(const char* name) {
   if (const char* val = std::getenv(name)) return val;
   return std::nullopt;
+}
+
+// Set FORCE_XE3P_KERNEL to 1/ON/TRUE/YES/Y to bypass architecture dispatch.
+static inline bool force_xe3p_kernel() {
+  auto env_value = getEnv("FORCE_XE3P_KERNEL");
+  if (!env_value.has_value()) return false;
+
+  auto value = env_value.value();
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::toupper(c));
+  });
+  return value == "1" || value == "ON" || value == "TRUE" || value == "YES" ||
+         value == "Y";
 }
 
 // Control whether MHC kernels use the TF32 DPAS GEMM path (split-K).

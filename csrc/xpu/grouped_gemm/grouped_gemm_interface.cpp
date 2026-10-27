@@ -20,8 +20,9 @@ torch::Tensor cutlass_grouped_gemm_interface(
     int64_t N,
     int64_t K,
     int64_t num_experts) {
+  const bool force_xe3p = vllm::xpu::force_xe3p_kernel();
 #ifdef VLLM_XPU_ENABLE_XE3P
-  if (vllm::xpu::is_xe3p_arch()) {
+  if (force_xe3p || vllm::xpu::is_xe3p_arch()) {
     // Xe3P consumes block-scaled activations (MXFP8 / MXFP4 / block-FP8)
     // natively, so ptr_A_scale is forwarded to the device kernel.
     return cutlass_grouped_gemm_xe3(
@@ -36,6 +37,11 @@ torch::Tensor cutlass_grouped_gemm_interface(
         K,
         num_experts);
   }
+#else
+  TORCH_CHECK(
+      !force_xe3p,
+      "FORCE_XE3P_KERNEL is set, but XE3P grouped GEMM is not enabled in "
+      "this build.");
 #endif
 #ifdef VLLM_XPU_ENABLE_XE2
   // BMG / PVC / LNL and the Xe3 client parts run the xe_2 kernel, which
