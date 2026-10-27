@@ -241,7 +241,7 @@ class FinalizeRowMapping {
     const int global_expert =
         ids_int32 ? static_cast<const int32_t*>(topk_ids)[route]
                   : static_cast<const int64_t*>(topk_ids)[route];
-    const int expert = expert_map ? expert_map[global_expert] : global_expert;
+    const int expert = to_local_expert_id(global_expert, expert_map);
     const int offset = expert < 0
                            ? -1
                            : row_mapping[route] +
@@ -881,8 +881,10 @@ void RemapHiddenStatesLauncher(
     int* expert_scale_desc,
     bool use_split,
     sycl::queue& queue) {
+  // The cumsum kernels keep two (local_experts_num + 1)-entry prefix tables
+  // in SLM, which is more than RowsPerExpertCount needs.
   TORCH_CHECK(
-      local_experts_num * sizeof(int32_t) <=
+      2 * (static_cast<size_t>(local_experts_num) + 1) * sizeof(int32_t) <=
           queue.get_device().get_info<sycl::info::device::local_mem_size>(),
       "local_experts_num exceeds the device local memory capacity");
   TORCH_CHECK(
