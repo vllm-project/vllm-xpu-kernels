@@ -34,6 +34,9 @@ namespace moe {
 //      column slabs, so global loads walk source rows along k and global
 //      stores walk destination rows along m. With 16-byte aligned rows the
 //      loads are 16-byte vectors and the stores are 4-byte (4 rows) words.
+//      Tiles that span many small expert blocks (small batches), or rows
+//      that cannot use vector loads, skip the SLM staging and pack each
+//      4-row word directly from global memory.
 //
 // Work-group 0 also publishes the int32 [2, num_experts + 1]
 // expert_scale_desc that remap_hidden_states produces when asked (row 0:
@@ -59,6 +62,9 @@ class ReorderMxfpScalesKernel : public vllm::xpu::SyclKernelConfigConvention {
   static constexpr int VecPerRowShift = 2;
   static constexpr int Quads = RowsPerGroup / 4;
   static constexpr int QuadShift = 4;
+  // Tiles overlapping at least this many expert blocks take the direct path
+  // (tuned on BMG).
+  static constexpr int DirectMinBlocks = 6;
 
   static_assert((1 << KChunkShift) == KChunk);
   static_assert((1 << VecPerRowShift) == VecPerRow);
@@ -142,17 +148,20 @@ class ReorderMxfpScalesKernel : public vllm::xpu::SyclKernelConfigConvention {
 
     // Last expert whose padded block starts at or before row_begin. Experts
     // with zero rows share a prefix with their successor and are skipped.
-    int lo = 0;
-    int hi = num_experts;
-    while (lo < hi) {
-      const int mid = (lo + hi) >> 1;
-      if (dst_prefix[mid] <= row_begin) {
-        lo = mid + 1;
-      } else {
-        hi = mid;
-      }
+    int expert = first_block_after(dst_prefix, row_begin) - 1;
+
+    // With only a few rows per expert (small batches) the tile spans many
+    // expert blocks, and transposing them one by one through SLM serializes
+    // tiny segments behind barriers. Pack each 4-row word straight from
+    // global memory instead. Without vector loads the SLM staging does not
+    // pay off at all.
+    const bool use_direct =
+        !VecLoad ||
+        first_block_after(dst_prefix, tile_end - 1) - expert >= DirectMinBlocks;
+    if (use_direct) {
+      copy_direct(src_prefix, dst_prefix, row_begin, dst_carry, local_id);
+      return;
     }
-    int expert = lo - 1;
 
     // All values steering the loops below are uniform across the
     // work-group, so every work-item reaches every barrier.
@@ -240,6 +249,56 @@ class ReorderMxfpScalesKernel : public vllm::xpu::SyclKernelConfigConvention {
   }
 
  private:
+  // First expert whose padded destination block starts after `row`.
+  inline int first_block_after(const int* dst_prefix, const int row) const {
+    int lo = 0;
+    int hi = num_experts;
+    while (lo < hi) {
+      const int mid = (lo + hi) >> 1;
+      if (dst_prefix[mid] <= row) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo;
+  }
+
+  // Barrier-free path: each work-item gathers 4 rows of one column and
+  // writes them as one aligned 32-bit word; adjacent work-items take
+  // adjacent columns so the source reads stay contiguous.
+  inline void copy_direct(
+      const int* src_prefix,
+      const int* dst_prefix,
+      const int row_begin,
+      const int dst_total,
+      const int local_id) const {
+    const int words = Quads * scale_k;
+    for (int idx = local_id; idx < words; idx += GroupWorkItem) {
+      const int k = idx % scale_k;
+      const int row = row_begin + (idx / scale_k) * 4;
+      if (row >= dst_total) break;
+      const int e = first_block_after(dst_prefix, row) - 1;
+      const int e_src_off = src_prefix[e];
+      const int rows = src_prefix[e + 1] - e_src_off;
+      const int e_dst_off = dst_prefix[e];
+      const int padded_rows = dst_prefix[e + 1] - e_dst_off;
+      const int m = row - e_dst_off;
+      uint32_t w = 0;
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        if (m + j < rows) {
+          w |= static_cast<uint32_t>(
+                   src[static_cast<int64_t>(e_src_off + m + j) * scale_k + k])
+               << (8 * j);
+        }
+      }
+      *reinterpret_cast<uint32_t*>(
+          dst + static_cast<int64_t>(e_dst_off) * scale_k +
+          static_cast<int64_t>(k) * padded_rows + m) = w;
+    }
+  }
+
   const uint8_t* src;
   uint8_t* dst;
   const int* rows_per_expert;

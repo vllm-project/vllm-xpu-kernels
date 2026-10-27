@@ -20,6 +20,8 @@ ROWS_PER_EXPERT = [
     [128, 256, 200, 137],
     # Experts larger than and straddling the 128-row work-group tile.
     [300, 0, 1, 129, 127, 513],
+    # Many small experts spanning several tiles (direct, barrier-free path).
+    [(i * 7) % 11 for i in range(96)],
 ]
 
 
