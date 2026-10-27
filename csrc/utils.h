@@ -129,9 +129,10 @@ static inline bool force_xe3p_kernel() {
   if (!env_value.has_value()) return false;
 
   auto value = env_value.value();
-  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-    return static_cast<char>(std::toupper(c));
-  });
+  std::transform(
+      value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+      });
   return value == "1" || value == "ON" || value == "TRUE" || value == "YES" ||
          value == "Y";
 }
