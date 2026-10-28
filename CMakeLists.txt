@@ -61,7 +61,6 @@ set(ONEDNN_GIT_TAG
 # ARCHITECTURE OPTIONS
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
 option(VLLM_XPU_ENABLE_XE3P "Enable XE3 architecture kernels" ON)
-option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
 
 # KERNEL OPTIONS — each controls whether the corresponding Python extension is
 # built. Override from the command line with -D<NAME>=OFF or via the
@@ -141,7 +140,6 @@ message(STATUS "  ONEDNN_GIT_TAG               = ${ONEDNN_GIT_TAG}")
 message(STATUS "  BUILD_SYCL_TLA_KERNELS       = ${BUILD_SYCL_TLA_KERNELS}")
 message(STATUS "  VLLM_XPU_ENABLE_XE2          = ${VLLM_XPU_ENABLE_XE2}")
 message(STATUS "  VLLM_XPU_ENABLE_XE3P          = ${VLLM_XPU_ENABLE_XE3P}")
-message(STATUS "  VLLM_XPU_ENABLE_XE_DEFAULT   = ${VLLM_XPU_ENABLE_XE_DEFAULT}")
 message(STATUS "  BASIC_KERNELS_ENABLED        = ${BASIC_KERNELS_ENABLED}")
 message(STATUS "  FA2_KERNELS_ENABLED          = ${FA2_KERNELS_ENABLED}")
 message(STATUS "  MOE_KERNELS_ENABLED          = ${MOE_KERNELS_ENABLED}")
@@ -434,13 +432,6 @@ if(BUILD_SYCL_TLA_KERNELS)
   # compile static library for attn and grouped_gemm, link this library to vLLM
   # extensions shared library
   set(SYCL_TLA_COMPILE_OPTIONS "")
-  if(VLLM_XPU_ENABLE_XE_DEFAULT)
-    if(MOE_KERNELS_ENABLED)
-      add_subdirectory(csrc/xpu/grouped_gemm/xe_default)
-      list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_default")
-    endif()
-    list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE_DEFAULT)
-  endif()
   if(VLLM_XPU_ENABLE_XE2)
     include_directories(${CMAKE_SOURCE_DIR}/csrc)
     if(MOE_KERNELS_ENABLED)
@@ -494,6 +485,10 @@ if(BUILD_SYCL_TLA_KERNELS)
     # Xe3p can use 512-GRF per thread on newer toolchains, but pin to 256-GRF
     # for now so the XE3 kernels build consistently across oneAPI releases.
     set(VLLM_XPU_XE3P_GRF_SIZE 256)
+    if(MOE_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/grouped_gemm/xe_3)
+      list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_3")
+    endif()
     if(FA2_KERNELS_ENABLED)
       add_subdirectory(csrc/xpu/attn/xe_3)
       list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels_xe_3")

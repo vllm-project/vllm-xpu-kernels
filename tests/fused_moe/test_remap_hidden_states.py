@@ -10,8 +10,8 @@ from tests.utils import seed_everything
 DEVICE = "xpu"
 NUM_ROWS = [32, 1024]
 HIDDEN_SIZE = [128]
-TOTAL_EXPERTS_NUM = [32, 128]
-TOP_KS = [1, 8, 12, 16]
+TOTAL_EXPERTS_NUM = [32, 128, 2560]
+TOP_KS = [1, 3, 8, 12, 16]
 RECIPE_TO_DTYPE = {
     "bf16": (torch.bfloat16, None),
     "fp16": (torch.float16, None),

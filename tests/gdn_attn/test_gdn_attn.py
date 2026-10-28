@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm_xpu_kernels._xpu_C  # noqa: F401
-from tests.utils import format_tc
+from tests.utils import format_tc, run_with_xpu_graph
 
 # QWEN NEXT shape
 NUM_TOKENS = [1, 32, 1024, 8192]
@@ -229,11 +229,12 @@ def simple_random_distribute(N, batch_size):
 @pytest.mark.parametrize("reorder_input", REORDER_INPUT)
 @pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @pytest.mark.parametrize("ssm_state_is_fp32", SSM_STATE_IS_FP32)
+@pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
 def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                        num_v_heads, head_v_dim, width, tp_size, has_bias,
                        activation, reorder_input, mode, dtype,
-                       ssm_state_is_fp32):
+                       ssm_state_is_fp32, use_graph):
     # FIXME: remove skip
     if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
             and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
@@ -320,46 +321,54 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
     )
     z = torch.empty_like(core_attn_out)
 
-    intermediates = torch.ops._xpu_C.causal_conv1d_non_spec(
-        z,
-        projected_states_qkvz,
-        projected_states_ba,
-        num_k_heads,
-        num_v_heads,
-        head_k_dim,
-        head_v_dim,
-        conv_state=conv_state,
-        conv_weights=conv_weights,
-        conv_bias=conv_bias,
-        activation=activation,
-        num_prefills=num_prefills,
-        num_decodes=num_decodes,
-        num_spec_decodes=0,
-        has_initial_state=has_initial_state,
-        non_spec_query_start_loc=non_spec_query_start_loc,
-        non_spec_token_indx=None,
-        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
-        num_actual_tokens=num_actual_tokens,
-        tp_size=tp_size,
-        reorder_input=reorder_input)
+    def run(qkvz, ba):
+        intermediates = torch.ops._xpu_C.causal_conv1d_non_spec(
+            z,
+            qkvz,
+            ba,
+            num_k_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_state=conv_state,
+            conv_weights=conv_weights,
+            conv_bias=conv_bias,
+            activation=activation,
+            num_prefills=num_prefills,
+            num_decodes=num_decodes,
+            num_spec_decodes=0,
+            has_initial_state=has_initial_state,
+            non_spec_query_start_loc=non_spec_query_start_loc,
+            non_spec_token_indx=None,
+            non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+            num_actual_tokens=num_actual_tokens,
+            tp_size=tp_size,
+            reorder_input=reorder_input)
 
-    torch.ops._xpu_C.gated_delta_rule_non_spec(
-        core_attn_out,
-        *intermediates,
-        num_v_heads,
-        head_v_dim,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        ssm_state=ssm_state,
-        num_prefills=num_prefills,
-        num_decodes=num_decodes,
-        num_spec_decodes=0,
-        has_initial_state=has_initial_state,
-        non_spec_query_start_loc=non_spec_query_start_loc,
-        non_spec_token_indx=None,
-        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
-        num_actual_tokens=num_actual_tokens,
-        tp_size=tp_size)
+        torch.ops._xpu_C.gated_delta_rule_non_spec(
+            core_attn_out,
+            *intermediates,
+            num_v_heads,
+            head_v_dim,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            ssm_state=ssm_state,
+            num_prefills=num_prefills,
+            num_decodes=num_decodes,
+            num_spec_decodes=0,
+            has_initial_state=has_initial_state,
+            non_spec_query_start_loc=non_spec_query_start_loc,
+            non_spec_token_indx=None,
+            non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+            num_actual_tokens=num_actual_tokens,
+            tp_size=tp_size)
+
+    # Under graph, the in-place conv/ssm state is reset after eager warmup.
+    if use_graph:
+        run_with_xpu_graph(run, [projected_states_qkvz, projected_states_ba],
+                           restore=[conv_state, ssm_state])
+    else:
+        run(projected_states_qkvz, projected_states_ba)
 
     ref_core_attn_out = torch.zeros_like(core_attn_out)
     ref_z = torch.empty_like(core_attn_out)
@@ -426,11 +435,12 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
 @pytest.mark.parametrize("reorder_input", REORDER_INPUT)
 @pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @pytest.mark.parametrize("ssm_state_is_fp32", SSM_STATE_IS_FP32)
+@pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
 def test_gdn_attention_legacy(num_actual_tokens, batch_size, num_k_heads,
                               head_k_dim, num_v_heads, head_v_dim, width,
                               tp_size, has_bias, activation, reorder_input,
-                              mode, dtype, ssm_state_is_fp32):
+                              mode, dtype, ssm_state_is_fp32, use_graph):
     # Backward-compat test for the legacy fused gdn_attention op, which is now
     # a thin wrapper that chains causal_conv1d and gated_delta_rule. This is
     # the original test_gdn_attention case kept verbatim against the fused
@@ -521,36 +531,44 @@ def test_gdn_attention_legacy(num_actual_tokens, batch_size, num_k_heads,
     )
     z = torch.empty_like(core_attn_out)
 
-    torch.ops._xpu_C.gdn_attention(
-        core_attn_out,
-        z,
-        projected_states_qkvz,
-        projected_states_ba,
-        num_k_heads,
-        num_v_heads,
-        head_k_dim,
-        head_v_dim,
-        conv_state=conv_state,
-        ssm_state=ssm_state,
-        conv_weights=conv_weights,
-        conv_bias=conv_bias,
-        activation=activation,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        num_prefills=num_prefills,
-        num_decodes=num_decodes,
-        num_spec_decodes=0,
-        has_initial_state=has_initial_state,
-        non_spec_query_start_loc=non_spec_query_start_loc,
-        non_spec_token_indx=None,
-        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
-        spec_query_start_loc=None,
-        spec_token_indx=None,
-        spec_state_indices_tensor=None,
-        num_accepted_tokens=None,
-        num_actual_tokens=num_actual_tokens,
-        tp_size=tp_size,
-        reorder_input=reorder_input)
+    def run(qkvz, ba):
+        torch.ops._xpu_C.gdn_attention(
+            core_attn_out,
+            z,
+            qkvz,
+            ba,
+            num_k_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_state=conv_state,
+            ssm_state=ssm_state,
+            conv_weights=conv_weights,
+            conv_bias=conv_bias,
+            activation=activation,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            num_prefills=num_prefills,
+            num_decodes=num_decodes,
+            num_spec_decodes=0,
+            has_initial_state=has_initial_state,
+            non_spec_query_start_loc=non_spec_query_start_loc,
+            non_spec_token_indx=None,
+            non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+            spec_query_start_loc=None,
+            spec_token_indx=None,
+            spec_state_indices_tensor=None,
+            num_accepted_tokens=None,
+            num_actual_tokens=num_actual_tokens,
+            tp_size=tp_size,
+            reorder_input=reorder_input)
+
+    # Under graph, the in-place conv/ssm state is reset after eager warmup.
+    if use_graph:
+        run_with_xpu_graph(run, [projected_states_qkvz, projected_states_ba],
+                           restore=[conv_state, ssm_state])
+    else:
+        run(projected_states_qkvz, projected_states_ba)
 
     ref_core_attn_out = torch.zeros_like(core_attn_out)
     ref_z = torch.empty_like(core_attn_out)
