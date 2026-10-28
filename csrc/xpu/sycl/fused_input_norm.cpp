@@ -26,14 +26,15 @@ namespace vllm {
 // Each work-item handles one output element. ``weight`` and ``bias`` are
 // per-channel (small, e.g. channel == 3) so they are read from global memory
 // directly and stay resident in cache.
-template <typename scalar_t>
+// Coefficients may be fp32 / fp16 / bf16; arithmetic is always fp32.
+template <typename scalar_t, typename coeff_t>
 class fused_input_norm_kernel {
  public:
   fused_input_norm_kernel(
       scalar_t* __restrict__ out_,
       const uint8_t* __restrict__ input_,
-      const float* __restrict__ weight_,  // [channel]
-      const float* __restrict__ bias_,    // [channel]
+      const coeff_t* __restrict__ weight_,  // [channel]
+      const coeff_t* __restrict__ bias_,    // [channel]
       const int64_t num_elems_,
       const int channel_,
       const int patch_size_)
@@ -54,21 +55,22 @@ class fused_input_norm_kernel {
       const int col = static_cast<int>(idx % row_size);
       const int c = col / patch_size;
       const float x = static_cast<float>(input[idx]);
-      out[idx] = static_cast<scalar_t>(x * weight[c] + bias[c]);
+      out[idx] = static_cast<scalar_t>(
+          x * static_cast<float>(weight[c]) + static_cast<float>(bias[c]));
     }
   }
 
  private:
   scalar_t* __restrict__ out;
   const uint8_t* __restrict__ input;
-  const float* __restrict__ weight;
-  const float* __restrict__ bias;
+  const coeff_t* __restrict__ weight;
+  const coeff_t* __restrict__ bias;
   const int64_t num_elems;
   const int channel;
   const int patch_size;
 };
 
-template <typename scalar_t>
+template <typename scalar_t, typename coeff_t>
 void call_fused_input_norm_kernel(
     torch::Tensor& out,
     const torch::Tensor& input,
@@ -77,11 +79,14 @@ void call_fused_input_norm_kernel(
     const int channel,
     const int patch_size) {
   using sycl_t = typename vllm::xpu::SyclTypeTrait<scalar_t>::Type;
+  using sycl_coeff_t = typename vllm::xpu::SyclTypeTrait<coeff_t>::Type;
   const int64_t num_elems = input.numel();
   auto out_ptr = reinterpret_cast<sycl_t*>(out.data_ptr<scalar_t>());
   auto input_ptr = input.data_ptr<uint8_t>();
-  auto weight_ptr = weight.data_ptr<float>();
-  auto bias_ptr = bias.data_ptr<float>();
+  auto weight_ptr =
+      reinterpret_cast<const sycl_coeff_t*>(weight.data_ptr<coeff_t>());
+  auto bias_ptr =
+      reinterpret_cast<const sycl_coeff_t*>(bias.data_ptr<coeff_t>());
 
   auto& queue = vllm::xpu::vllmGetQueue();
 
@@ -97,7 +102,7 @@ void call_fused_input_norm_kernel(
   queue.submit([&](sycl::handler& cgh) {
     cgh.parallel_for(
         sycl::nd_range<1>(global, local),
-        fused_input_norm_kernel<sycl_t>(
+        fused_input_norm_kernel<sycl_t, sycl_coeff_t>(
             out_ptr,
             input_ptr,
             weight_ptr,
@@ -113,18 +118,20 @@ void call_fused_input_norm_kernel(
 void fused_input_norm(
     torch::Tensor& out,     // [num_patches, channel * patch_size]
     torch::Tensor& input,   // uint8, same shape as out
-    torch::Tensor& weight,  // float32 [channel]
-    torch::Tensor& bias) {  // float32 [channel]
+    torch::Tensor& weight,  // fp32 / fp16 / bf16 [channel]
+    torch::Tensor& bias) {  // same dtype as weight [channel]
   const at::DeviceGuard device_guard(input.device());
   TORCH_CHECK(
       input.scalar_type() == at::ScalarType::Byte,
       "fused_input_norm: input must be uint8");
   TORCH_CHECK(
-      weight.scalar_type() == at::ScalarType::Float,
-      "fused_input_norm: weight must be float32");
+      weight.scalar_type() == at::ScalarType::Float ||
+          weight.scalar_type() == at::ScalarType::Half ||
+          weight.scalar_type() == at::ScalarType::BFloat16,
+      "fused_input_norm: weight must be float32, float16 or bfloat16");
   TORCH_CHECK(
-      bias.scalar_type() == at::ScalarType::Float,
-      "fused_input_norm: bias must be float32");
+      bias.scalar_type() == weight.scalar_type(),
+      "fused_input_norm: weight and bias must have the same dtype");
   TORCH_CHECK(input.dim() == 2, "fused_input_norm: input must be 2D");
   TORCH_CHECK(
       out.sizes() == input.sizes(),
@@ -149,7 +156,11 @@ void fused_input_norm(
 
   VLLM_DISPATCH_FLOATING_TYPES(
       out.scalar_type(), "call_fused_input_norm_kernel", [&] {
-        vllm::call_fused_input_norm_kernel<scalar_t>(
-            out, input, weight, bias, channel, patch_size);
+        using output_t = scalar_t;
+        VLLM_DISPATCH_FLOATING_TYPES(
+            weight.scalar_type(), "fused_input_norm_coefficients", [&] {
+              vllm::call_fused_input_norm_kernel<output_t, scalar_t>(
+                  out, input, weight, bias, channel, patch_size);
+            });
       });
 }
