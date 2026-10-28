@@ -362,8 +362,11 @@ def test_nonsequential_slots():
         q, kv, cache, slots, position_ids, cos_sin_cache,
         EPS, block_size, "bf16")
 
-    q_diff = (q.float() - q_ref.float()).abs()
-    assert q_diff.max().item() < 0.001, f"Q diff {q_diff.max().item():.6f}"
+    # Summation order differs from mean(), so bf16 rounding can flip by 1 ULP.
+    q_ulp = (q.cpu().view(torch.int16).to(torch.int32) -
+             q_ref.cpu().view(torch.int16).to(torch.int32)).abs()
+    assert q_ulp.max().item() <= 1, \
+        f"Q differs by {q_ulp.max().item()} bf16 ULP"
 
     assert (cache[:, :, :NOPE_DIM] == cache_ref[:, :, :NOPE_DIM]).all(), \
         "NoPE should be exact copy for scattered slots"
