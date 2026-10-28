@@ -30,11 +30,8 @@ __attribute__((visibility("hidden"))) void policy_dispatch_func(
     CutlassQKType& cuQKType,
     const chunk_prefill_args_t& args) {
   // Pack is expected in order: (Paged, Causal, Local, Sink, SoftmaxLSE).
-  // SoftmaxLSE=true is only supported when Paged=false, Local=false,
-  // and Sink=false; other combos are not instantiated (no TUs generated),
-  // so statically skip the call for those to avoid implicit instantiation
-  // and guarantee the runtime TORCH_CHECK in fmha_xe2.cpp is the only
-  // path that can surface a bad request.
+  // Paged and non-paged kernels support LSE for global attention without
+  // sinks. Local/Sink LSE tuples are not instantiated.
   constexpr bool flags[] = {Bs...};
   static_assert(
       sizeof...(Bs) == 5, "policy_dispatch_func expects 5 bool parameters");
@@ -46,11 +43,11 @@ __attribute__((visibility("hidden"))) void policy_dispatch_func(
   // Extract head_size from policy at compile time.
   constexpr int _head_sz = cute::size<1>(typename chunk_policy::ShapeOut{});
 
-  if constexpr (SoftmaxLSE && (Paged || Local || Sink)) {
+  if constexpr (SoftmaxLSE && (Local || Sink)) {
     TORCH_CHECK(
         false,
-        "Unreachable: softmax_lse is only supported when is_paged=false, "
-        "is_local=false, is_sink=false");
+        "Unreachable: chunk prefill softmax_lse requires is_local=false "
+        "and is_sink=false");
   } else if constexpr (!is_chunk_policy_enabled<chunk_policy>::value) {
     TORCH_CHECK(
         false,
@@ -114,13 +111,7 @@ __attribute__((visibility("hidden"))) void policy_dispatch_func(
         "If this is unexpected, please report at:\n"
         "  https://github.com/vllm-project/vllm-xpu-kernels/issues/364");
   } else {
-    const bool full_fp8 = cuQKType.q_type == CutlassDType::float8_e4m3 ||
-                          cuQKType.q_type == CutlassDType::float8_e5m2;
-    if (full_fp8) {
-      policy_dispatch_impl<chunk_policy, Bs..., true>(queue, cuQKType, args);
-    } else {
-      policy_dispatch_impl<chunk_policy, Bs..., false>(queue, cuQKType, args);
-    }
+    policy_dispatch_impl<chunk_policy, Bs...>(queue, cuQKType, args);
   }
 }
 

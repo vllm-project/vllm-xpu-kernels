@@ -24,6 +24,7 @@
 #include "kernel/paged_decode_kernel.hpp"
 
 #include "csrc/xpu/attn/fmha_utils.hpp"
+#include "csrc/xpu/attn/paged_decode_tuning.h"
 
 // Everything below belongs to this architecture alone.
 //
@@ -53,7 +54,14 @@ using decode_policy_q16_h64_p64 = decode_policy_qpacked_head<_16, _64, _64>;
 using decode_policy_q16_h96_p64 = decode_policy_qpacked_head<_16, _96, _64>;
 using decode_policy_q16_h128_p64 = decode_policy_qpacked_head<_16, _128, _64>;
 using decode_policy_q16_h192_p64 = decode_policy_qpacked_head<_16, _192, _64>;
-using decode_policy_q16_h256_p64 = decode_policy_qpacked_head<_16, _256, _64>;
+// head_dim 256, GQA ratio 9..16 (see paged_decode_xe3.cpp for the exceptions):
+// one 16-row work-group reads each K/V tile once for all 16 query heads, where
+// two 8-row work-groups would each stream it. Subgroups are 2 (Q rows) x 4 (KV
+// slices), so each keeps the 8 x 256 accumulator of the 8-row policy (full
+// fp8: 2 x 2, see fp8_decode_subgroup_layout).
+struct decode_policy_q16_h256_p64 : decode_policy_qpacked_head<_16, _256, _64> {
+  using SubgroupLayoutQK = Layout<Shape<_2, _4, _1>>;
+};
 using decode_policy_q16_h512_p64 = decode_policy_qpacked_head<_16, _512, _64>;
 using decode_policy_q8_h576_p64 = decode_policy_qpacked_head<_8, _576, _64>;
 using decode_policy_q16_h576_p64 = decode_policy_qpacked_head<_16, _576, _64>;
@@ -160,8 +168,8 @@ struct paged_decode_args_t {
   int64_t q_stride_batch = 0;
   int page_stride_elements = 0;
   // softmax_lse output [num_heads_q, total_seqlen_q] (nullptr if disabled).
-  // Written by ReduceSplitK when num_kv_splits > 1, otherwise by the FMHA
-  // epilogue.
+  // Written by the FMHA kernel epilogue when num_kv_splits <= 1 (no reduce
+  // pass), otherwise by the ReduceSplitK kernel.
   float* softmax_lse = nullptr;
   int lse_stride = 0;  // stride along the head dim (= total_seqlen_q)
 };
@@ -433,6 +441,36 @@ struct DecodeKernelLauncher {
 
     // configure smem size and carveout
     int smem_size = FMHAKernel::SharedStorageSize;
+    if constexpr (FMHAKernel::kTunedDecode) {
+      // Cap work-groups per Xe core by reserving SLM (paged_decode_tuning.h).
+      // grid.y is the number of q-tiles per KV head. Device limits are read
+      // per launch, like the host split heuristic: the queue's device can
+      // change between calls.
+      const auto device = queue.get_device();
+      const int local_mem_size = static_cast<int>(
+          device.get_info<sycl::info::device::local_mem_size>());
+      const int num_xe_cores =
+          device.get_info<sycl::ext::intel::info::device::gpu_slices>() *
+          device.get_info<
+              sycl::ext::intel::info::device::gpu_subslices_per_slice>();
+      constexpr int kv_tile = get<1>(typename FMHAKernel::TileShapeQK{});
+      const int max_seqlen_kv = params.kernel.shape.seq_len_kv;
+      const int kv_tiles =
+          static_cast<int>((int64_t{max_seqlen_kv} + kv_tile - 1) / kv_tile);
+      const int wgs_per_core = vllm::xpu::paged_decode_tuning::occupancy_cap(
+          FMHAKernel::kHeadDimBucket,
+          FMHAKernel::kPrecision,
+          cute::ceil_div(
+              kv_tiles, std::max(params.scheduler.num_kv_splits_, 1)),
+          int64_t{grid.x} * int64_t{grid.y} * int64_t{grid.z},
+          num_xe_cores,
+          grid.y,
+          FMHAKernel::SGPerWG::value);
+      if (wgs_per_core > 0) {
+        smem_size =
+            std::max(smem_size, (local_mem_size / wgs_per_core) & ~1023);
+      }
+    }
 
     const auto sycl_block = compat::dim3(block.x, block.y, block.z);
     const auto sycl_grid = compat::dim3(grid.x, grid.y, grid.z);
@@ -456,7 +494,9 @@ struct DecodeKernelLauncher {
       dim3 const reduce_grid =
           ReductionSplitKernel::get_grid_shape(reduce_params);
       int reduce_smem_size = ReductionSplitKernel::SharedStorageSize;
-      const auto reduce_sycl_block = compat::dim3(block.x, block.y, block.z);
+      const auto reduce_block = ReductionSplitKernel::get_block_shape();
+      const auto reduce_sycl_block =
+          compat::dim3(reduce_block.x, reduce_block.y, reduce_block.z);
       const auto reduce_sycl_grid =
           compat::dim3(reduce_grid.x, reduce_grid.y, reduce_grid.z);
       compat::experimental::launch_properties launch_props_reduce{
@@ -586,6 +626,22 @@ struct PagedDecodeConfig {
         cutlass::fmha::kernel::XeReduceSplitKTileScheduler,
         FMHAKernel>;
 
+    // A K/V pool taller than one Xe 2D block-load surface needs the kernel
+    // variant that splits it into sub-surfaces. The split-K reduction does not
+    // read K/V, so both variants share it.
+    if (args.total_seqlen_k > cutlass::fmha::collective::kXeMaxSurfaceRows) {
+      using LargeSurfaceKernel = cutlass::fmha::kernel::XeFMHAFwdSplitKVKernel<
+          ProblemShapeType,
+          CollectiveMainloop,
+          CollectiveEpilogue,
+          Scheduler,
+          true>;
+      DecodeKernelLauncher<LargeSurfaceKernel, ReduceSplitKernel, VarLen>
+          launcher;
+      launcher.run(queue, args, hw_info);
+      return;
+    }
+
     DecodeKernelLauncher<FMHAKernel, ReduceSplitKernel, VarLen> launcher;
 
     launcher.run(queue, args, hw_info);
@@ -608,6 +664,9 @@ struct PagedDecodeConfig {
 //   kv_tile == 64  -> kvSplit = 2
 //   kv_tile == 128 -> kvSplit = 4
 //
+// The policy's split of the Q rows across subgroups (SubgroupLayoutQK[0]) is
+// kept, e.g. 2 x 2 subgroups for decode_policy_q16_h256_p64.
+//
 // kv_tile == 16 cannot reach K = 32 within a single tile; those policies are
 // rejected for fp8 by the kPVContract % 32 guard in the dispatch below, so the
 // (clamped) layout produced here is never instantiated for them.
@@ -615,12 +674,32 @@ template <typename ShapeQK, typename SubgroupLayoutQK>
 struct fp8_decode_subgroup_layout {
   static constexpr int kKvTile = cute::size<1>(ShapeQK{});
   static constexpr int kKvSplit = (kKvTile >= 32) ? (kKvTile / 32) : 1;
-  using type = cute::Layout<cute::Shape<cute::_1, cute::C<kKvSplit>, cute::_1>>;
+  static constexpr int kQSplit = cute::size<0>(SubgroupLayoutQK{});
+  using type =
+      cute::Layout<cute::Shape<cute::C<kQSplit>, cute::C<kKvSplit>, cute::_1>>;
 };
 
 template <typename ShapeQK, typename SubgroupLayoutQK>
 using fp8_decode_subgroup_layout_t =
     typename fp8_decode_subgroup_layout<ShapeQK, SubgroupLayoutQK>::type;
+
+// bf16 Q with an fp8 KV cache on a tile whose subgroups split the Q rows
+// (decode_policy_q16_h256_p64): every Q-row subgroup converts each K/V slice,
+// which bounds the kernel, and fp8 -> bf16 takes three times the instructions
+// of fp8 -> fp16 on XE3. Run both GEMMs in fp16, like SYCL-TLA's fp8 KV
+// decode: bf16 Q converts exactly within the fp16 range, and P in [0, 1] keeps
+// more mantissa bits.
+template <typename decode_policy>
+using fp8_kv_mma_t = cute::conditional_t<
+    (cute::size<0>(typename decode_policy::SubgroupLayoutQK{}) > 1),
+    XE_DPAS_TT<
+        cute::gcd(
+            cute::size<0>(typename decode_policy::ShapeQK{}) /
+                cute::size<0>(typename decode_policy::SubgroupLayoutQK{}),
+            8),
+        float,
+        half_t>,
+    void>;
 
 // Template function for explicit instantiation
 template <
@@ -713,7 +792,8 @@ void decode_policy_dispatch_impl(
             bfloat16_t,
             float_e4m3_t,
             float_e4m3_t,
-            bfloat16_t>::kernel_dispatch(queue, args);
+            bfloat16_t,
+            fp8_kv_mma_t<decode_policy>>::kernel_dispatch(queue, args);
       } else if (cuQKType.k_type == CutlassDType::float8_e5m2) {
         return PagedDecodeConfig<
             typename decode_policy::ShapeQK,
@@ -728,7 +808,8 @@ void decode_policy_dispatch_impl(
             bfloat16_t,
             float_e5m2_t,
             float_e5m2_t,
-            bfloat16_t>::kernel_dispatch(queue, args);
+            bfloat16_t,
+            fp8_kv_mma_t<decode_policy>>::kernel_dispatch(queue, args);
       }
     }
   } else {
@@ -752,9 +833,10 @@ void decode_policy_dispatch_impl(
         cuQKType.q_type == CutlassDType::float8_e5m2) {
       constexpr int kHeadDim =
           cute::size<1>(typename decode_policy::ShapeOut{});
-      if constexpr (kHeadDim != 128) {
+      if constexpr (kHeadDim != 128 && kHeadDim != 256) {
         TORCH_CHECK(
-            false, "Full fp8 paged_decode only supports head dimension 128.");
+            false,
+            "Full fp8 paged_decode only supports head dimension 128 or 256.");
       } else {
         constexpr int kPVContract =
             cute::size<2>(typename decode_policy::ShapePV{});
