@@ -4,7 +4,7 @@
 #include <limits>
 
 namespace CompactSamplingMaskImpl {
-template <typename index_t>
+template <typename index_t, typename cu_index_t>
 struct compact_sampling_mask_kernel {
  public:
   static constexpr int sub_group_size = 16;
@@ -13,52 +13,61 @@ struct compact_sampling_mask_kernel {
 
   compact_sampling_mask_kernel(
       const float* logits,
+      const cu_index_t* cu_num_logits,
       const index_t* num_sampled_tokens,
       int* token_ids,
       uint8_t* packed_mask,
       int* counts,
       const int num_reqs,
+      const int rows_per_request,
       const int max_num_kept,
       const int vocab_size)
       : logits(logits),
+        cu_num_logits(cu_num_logits),
         num_sampled_tokens(num_sampled_tokens),
         token_ids(token_ids),
         packed_mask(packed_mask),
         counts(counts),
         num_reqs(num_reqs),
+        rows_per_request(rows_per_request),
         max_num_kept(max_num_kept),
         vocab_size(vocab_size) {}
 
-  static inline sycl::nd_range<1>
-  get_nd_range(const int num_reqs, const int vocab_size) {
+  static inline sycl::nd_range<1> get_nd_range(
+      const int num_reqs, const int rows_per_request, const int vocab_size) {
     int local_size = group_size;
     if (vocab_size < group_size) {
       local_size =
           (vocab_size + sub_group_size - 1) / sub_group_size * sub_group_size;
     }
     sycl::range<1> local(local_size);
-    sycl::range<1> global(num_reqs);
+    sycl::range<1> global(num_reqs * rows_per_request);
     return sycl::nd_range<1>(global * local, local);
   }
 
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<1> item) const {
-    const int batch_id = item.get_group(0);
+    // Request-major fixed output slots: the group index addresses the output
+    // row; the matching source logits row is resolved via cu_num_logits.
+    const int output_row = item.get_group(0);
+    const int req_idx = output_row / rows_per_request;
+    const int slot_idx = output_row % rows_per_request;
     const int local_id = item.get_local_linear_id();
     const int local_range = item.get_local_range(0);
 
     const int aligned_vocab_size = (vocab_size + 7) / 8;
 
-    const float* logits_ptr = logits + batch_id * vocab_size;
-    int* token_ids_ptr = token_ids + batch_id * max_num_kept;
-    uint8_t* packed_mask_ptr = packed_mask + batch_id * aligned_vocab_size;
+    int* token_ids_ptr = token_ids + output_row * max_num_kept;
+    uint8_t* packed_mask_ptr = packed_mask + output_row * aligned_vocab_size;
 
-    const index_t num_sampled_tokens_raw = num_sampled_tokens[batch_id];
-    const int num_sampled_tokens_ = static_cast<int>(num_sampled_tokens_raw);
-    bool is_active = num_sampled_tokens_ > 0;
+    const int num_sampled_tokens_ =
+        static_cast<int>(num_sampled_tokens[req_idx]);
+    // A request fills its first num_sampled_tokens[req_idx] slots; the rest
+    // are inactive (matching the Triton kernel's slot_idx threshold check).
+    bool is_active = slot_idx < num_sampled_tokens_;
 
     if (!is_active) {
-      counts[batch_id] = 0;
+      counts[output_row] = 0;
 
       using VecT = sycl::vec<int, VEC_SIZE>;
       constexpr int bytes_per_vec = static_cast<int>(sizeof(int) * VEC_SIZE);
@@ -79,6 +88,11 @@ struct compact_sampling_mask_kernel {
 
       return;
     }
+
+    // Output layout is request-major with fixed slots, but the source logits
+    // are CSR-packed per request: resolve the real logits row for this slot.
+    const int source_row = static_cast<int>(cu_num_logits[req_idx]) + slot_idx;
+    const float* logits_ptr = logits + source_row * vocab_size;
 
     // Same-sized "wave" (local_range * VEC_SIZE contiguous tokens) per
     // iteration for every work-item, so the group-wide scan/reduce calls
@@ -181,42 +195,48 @@ struct compact_sampling_mask_kernel {
     }
 
     if (0 == local_id) {
-      counts[batch_id] = running_count;
+      counts[output_row] = running_count;
     }
   }
 
  private:
   const float* logits;
+  const cu_index_t* cu_num_logits;
   const index_t* num_sampled_tokens;
   int* token_ids;
   uint8_t* packed_mask;
   int* counts;
   const int num_reqs;
+  const int rows_per_request;
   const int max_num_kept;
   const int vocab_size;
 };
 
-template <typename index_t>
+template <typename index_t, typename cu_index_t>
 void compact_sampling_mask_kernel_launcher(
     sycl::queue& queue,
     const float* logits,
+    const cu_index_t* cu_num_logits,
     const index_t* num_sampled_tokens,
     int* token_ids,
     uint8_t* packed_mask,
     int* counts,
     const int num_reqs,
+    const int rows_per_request,
     const int max_num_kept,
     const int vocab_size) {
-  using KERNEL = compact_sampling_mask_kernel<index_t>;
-  auto range = KERNEL::get_nd_range(num_reqs, vocab_size);
+  using KERNEL = compact_sampling_mask_kernel<index_t, cu_index_t>;
+  auto range = KERNEL::get_nd_range(num_reqs, rows_per_request, vocab_size);
   queue.submit([&](sycl::handler& cgh) {
     KERNEL task(
         logits,
+        cu_num_logits,
         num_sampled_tokens,
         token_ids,
         packed_mask,
         counts,
         num_reqs,
+        rows_per_request,
         max_num_kept,
         vocab_size);
     cgh.parallel_for(range, task);
