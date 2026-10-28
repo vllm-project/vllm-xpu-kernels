@@ -353,8 +353,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("fused_input_norm", torch::kXPU, &fused_input_norm);
 
   xpu_ops.def(
-      "compact_sampling_mask(Tensor logits, Tensor num_sampled_tokens,"
-      "int max_num_kept, int max_compact_support) -> (Tensor, Tensor, Tensor)");
+      "compact_sampling_mask(Tensor logits, Tensor cu_num_logits, "
+      "Tensor num_sampled_tokens, int max_num_kept, int max_compact_support, "
+      "int rows_per_request) -> (Tensor, Tensor, Tensor)");
   xpu_ops.impl("compact_sampling_mask", torch::kXPU, &compact_sampling_mask);
 }
 
