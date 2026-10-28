@@ -119,8 +119,8 @@ def make_fused_moe_input(config):
         ref_w13 = w13
         ref_w2 = w2
 
-    w13 = w13.transpose(-1, -2).contiguous()
-    w2 = w2.transpose(-1, -2).contiguous()
+    # XpuFusedMoe takes weights in checkpoint layout ([E, N, K]) and converts
+    # them to the kernel layout itself, so they must not be transposed here.
     return (ref_a, ref_w13, w13_bias, ref_w2, w2_bias, flat_expert_weights,
             flat_expert_indices, a, w13, w13_scales, w2, w2_scales,
             expert_scores, expert_indices)
