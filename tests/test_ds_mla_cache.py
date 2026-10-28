@@ -37,7 +37,9 @@ def _ref_pack(kv_c: torch.Tensor, k_pe: torch.Tensor) -> torch.Tensor:
     packed[:, :SCALES_OFFSET] = quantized.reshape(num_tokens,
                                                   NOPE_DIM).view(torch.uint8)
     packed[:, SCALES_OFFSET:ROPE_OFFSET] = scales.contiguous().view(torch.uint8)
-    packed[:, ROPE_OFFSET:] = k_pe.contiguous().view(torch.uint8)
+    # The RoPE tail is always stored as BF16.
+    packed[:, ROPE_OFFSET:] = k_pe.to(torch.bfloat16).contiguous().view(
+        torch.uint8)
     return packed
 
 
@@ -52,7 +54,8 @@ def _ref_unpack(packed: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
                       device=packed.device)
     out[:, :NOPE_DIM] = (nope * scales.unsqueeze(-1)).reshape(
         num_tokens, NOPE_DIM).to(dtype)
-    out[:, NOPE_DIM:] = packed[:, ROPE_OFFSET:].contiguous().view(dtype)
+    out[:, NOPE_DIM:] = packed[:, ROPE_OFFSET:].contiguous().view(
+        torch.bfloat16).to(dtype)
     return out
 
 
@@ -160,3 +163,98 @@ def test_cp_gather_and_upconvert_fp8_kv_cache(block_size: int,
 
     ref = _ref_unpack(entries[src_slots_t], torch.bfloat16)
     torch.testing.assert_close(dst.cpu(), ref.cpu())
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_ds_mla_pack_then_gather(dtype: torch.dtype) -> None:
+    """Pack with concat_and_cache_mla and read back with the gather op."""
+    seed_everything(0)
+    block_size = 16
+    num_tokens = 2 * block_size
+    kv_c = torch.randn(num_tokens, NOPE_DIM, dtype=dtype, device=KERNEL_DEVICE)
+    k_pe = torch.randn(num_tokens, PE_DIM, dtype=dtype, device=KERNEL_DEVICE)
+    k_pe[0, :4] = torch.tensor([1.0, -1.0, 0.5, 2.0], dtype=dtype)
+    kv_cache = torch.zeros(2,
+                           block_size,
+                           ENTRY_BYTES,
+                           dtype=torch.uint8,
+                           device=KERNEL_DEVICE)
+    slots = torch.arange(num_tokens, dtype=torch.int64, device=KERNEL_DEVICE)
+    scale = torch.ones(1, dtype=torch.float32, device=KERNEL_DEVICE)
+    concat_and_cache_mla(kv_c, k_pe, kv_cache, slots, "fp8_ds_mla", scale)
+
+    dst = torch.zeros(num_tokens,
+                      NOPE_DIM + PE_DIM,
+                      dtype=torch.bfloat16,
+                      device=KERNEL_DEVICE)
+    block_table = torch.tensor([[0, 1]],
+                               dtype=torch.int32,
+                               device=KERNEL_DEVICE)
+    workspace_starts = torch.zeros(1, dtype=torch.int32, device=KERNEL_DEVICE)
+    cp_gather_and_upconvert_fp8_kv_cache(kv_cache, dst, block_table,
+                                         workspace_starts, 1, None)
+
+    torch.testing.assert_close(dst[:, NOPE_DIM:].cpu(),
+                               k_pe.to(torch.bfloat16).cpu(),
+                               atol=0,
+                               rtol=0)
+    torch.testing.assert_close(dst[:, :NOPE_DIM].float().cpu(),
+                               kv_c.float().cpu(),
+                               atol=0.1,
+                               rtol=0.1)
+
+
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float32])
+@torch.inference_mode()
+def test_concat_and_cache_ds_mla_non_byte_cache(
+        cache_dtype: torch.dtype) -> None:
+    """A cache with wider elements is still laid out as 656-byte entries."""
+    seed_everything(0)
+    num_blocks, block_size, num_tokens = 4, 16, 42
+    elem = torch.empty(0, dtype=cache_dtype).element_size()
+    kv_c = torch.randn(num_tokens,
+                       NOPE_DIM,
+                       dtype=torch.bfloat16,
+                       device=KERNEL_DEVICE)
+    k_pe = torch.randn(num_tokens,
+                       PE_DIM,
+                       dtype=torch.bfloat16,
+                       device=KERNEL_DEVICE)
+    kv_cache = torch.zeros(num_blocks,
+                           block_size,
+                           ENTRY_BYTES // elem,
+                           dtype=cache_dtype,
+                           device=KERNEL_DEVICE)
+    slots = torch.randperm(num_blocks * block_size,
+                           device=KERNEL_DEVICE)[:num_tokens].to(torch.int64)
+    scale = torch.ones(1, dtype=torch.float32, device=KERNEL_DEVICE)
+    concat_and_cache_mla(kv_c, k_pe, kv_cache, slots, "fp8_ds_mla", scale)
+
+    entries = kv_cache.view(torch.uint8).view(-1, ENTRY_BYTES)
+    torch.testing.assert_close(entries[slots].cpu(),
+                               _ref_pack(kv_c, k_pe).cpu())
+    untouched = torch.ones(num_blocks * block_size,
+                           dtype=torch.bool,
+                           device=KERNEL_DEVICE)
+    untouched[slots] = False
+    assert entries[untouched].sum().item() == 0
+
+
+@torch.inference_mode()
+def test_cp_gather_and_upconvert_rejects_host_seq_starts() -> None:
+    kv_cache = torch.zeros(1,
+                           16,
+                           ENTRY_BYTES,
+                           dtype=torch.uint8,
+                           device=KERNEL_DEVICE)
+    dst = torch.zeros(1,
+                      NOPE_DIM + PE_DIM,
+                      dtype=torch.bfloat16,
+                      device=KERNEL_DEVICE)
+    block_table = torch.zeros(1, 1, dtype=torch.int32, device=KERNEL_DEVICE)
+    workspace_starts = torch.zeros(1, dtype=torch.int32, device=KERNEL_DEVICE)
+    seq_starts = torch.zeros(1, dtype=torch.int32)
+    with pytest.raises(RuntimeError, match="same device"):
+        cp_gather_and_upconvert_fp8_kv_cache(kv_cache, dst, block_table,
+                                             workspace_starts, 1, seq_starts)

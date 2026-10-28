@@ -16,8 +16,8 @@
 constexpr float kFp8E4M3ScaleDivisor = 448.f;
 
 // DSV3.2 packed MLA cache entry ("fp8_ds_mla"): 512B fp8-e4m3 NoPE stored as
-// 4 tiles of 128 elements, 16B of per-tile fp32 scales, then 128B of raw
-// 16-bit RoPE.
+// 4 tiles of 128 elements, 16B of per-tile fp32 scales, then 128B of BF16 RoPE
+// (FP16 inputs are converted so readers can always decode it as BF16).
 constexpr int kDsMlaNopeDim = 512;
 constexpr int kDsMlaPeDim = 64;
 constexpr int kDsMlaTile = 128;
@@ -878,8 +878,8 @@ class gather_and_maybe_dequant_cache_kernel {
 
 // Writes the DSV3.2 packed ("fp8_ds_mla") entry for one token.
 // Work-group grid is (kDsMlaNumTiles + 1, num_tokens): groups 0..3 each own one
-// 128-element NoPE tile and its fp32 scale, the last group copies the RoPE tail
-// through unquantized.
+// 128-element NoPE tile and its fp32 scale, the last group stores the RoPE tail
+// unquantized as BF16. Strides are in bytes.
 template <typename scalar_t, int TILE_THREADS>
 class concat_and_cache_ds_mla_kernel {
  public:
@@ -919,11 +919,12 @@ class concat_and_cache_ds_mla_kernel {
     const int lid = static_cast<int>(item.get_local_id(0));
 
     if (part == kDsMlaNumTiles) {
+      using rope_t = sycl::ext::oneapi::bfloat16;
       const scalar_t* __restrict__ src = k_pe_ + token_idx * k_pe_stride_;
-      scalar_t* __restrict__ dst =
-          reinterpret_cast<scalar_t*>(entry + kDsMlaRopeOffset);
+      rope_t* __restrict__ dst =
+          reinterpret_cast<rope_t*>(entry + kDsMlaRopeOffset);
       for (int i = lid; i < kDsMlaPeDim; i += TILE_THREADS) {
-        dst[i] = src[i];
+        dst[i] = static_cast<rope_t>(static_cast<float>(src[i]));
       }
       return;
     }
@@ -1280,8 +1281,11 @@ void concat_and_cache_mla(
         kv_c.element_size() == 2,
         "kv_c.element_size() must be 2 for fp8_ds_mla");
     TORCH_CHECK(
-        k_pe.element_size() == 2,
-        "k_pe.element_size() must be 2 for fp8_ds_mla");
+        k_pe.scalar_type() == kv_c.scalar_type(),
+        "k_pe and kv_c must have the same dtype for fp8_ds_mla");
+    TORCH_CHECK(
+        kv_cache.stride(2) == 1,
+        "kv_cache entries must be contiguous for fp8_ds_mla");
   } else {
     TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
   }
@@ -1298,6 +1302,9 @@ void concat_and_cache_mla(
     if (num_tokens == 0) {
       return;
     }
+    // The kernel addresses kv_cache as bytes, whatever its element type.
+    block_stride *= kv_cache.element_size();
+    entry_stride *= kv_cache.element_size();
     constexpr int kDsMlaTileThreads = 32;
     sycl::range<2> grid(kDsMlaNumTiles + 1, num_tokens);
     sycl::range<2> block(kDsMlaTileThreads, 1);
@@ -1399,6 +1406,9 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     TORCH_CHECK(
         seq_starts.value().scalar_type() == at::ScalarType::Int,
         "seq_starts must be int32");
+    TORCH_CHECK(
+        seq_starts.value().device() == src_cache.device(),
+        "src_cache and seq_starts must be on the same device");
     seq_starts_ptr = seq_starts.value().data_ptr<int32_t>();
   }
 
