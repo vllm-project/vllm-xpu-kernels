@@ -251,7 +251,12 @@ class FinalizeRowMapping {
   }
 };
 
-template <typename TA, typename TS, int TopK>
+// FanOut: one work-group per source token that reads the token once and
+// stores it to all TopK destination rows. Otherwise one work-group per route;
+// sibling routes read the same token, which is then mostly served by cache.
+// The fan-out variant runs with 16-wide sub-groups, which measured faster for
+// its TopK-way store loop.
+template <typename TA, typename TS, int TopK, bool FanOut>
 class RemapHiddenStates {
  public:
   RemapHiddenStates(
@@ -273,7 +278,7 @@ class RemapHiddenStates {
         expert_scale_desc(expert_scale_desc) {}
 
   static constexpr int GroupWorkItem = 256;
-  static constexpr int WARP_SIZE = 32;
+  static constexpr int WARP_SIZE = FanOut ? 16 : 32;
   static constexpr int ElemsPerItem = sizeof(float) * 4 / sizeof(TA);
   static constexpr int CopyWords = 4;
   static constexpr int CopyElemsPerItem =
@@ -290,11 +295,7 @@ class RemapHiddenStates {
               WARP_SIZE);
     }
     sycl::range<3> local(1, 1, local_num);
-    // One group per source token (not per route): the group reads the token
-    // once and scatters it to all of its TopK destination rows, so each source
-    // row is read from DRAM exactly once instead of relying on TopK sibling
-    // groups happening to overlap in cache.
-    sycl::range<3> group(1, 1, num_rows);
+    sycl::range<3> group(1, 1, FanOut ? num_rows : num_rows * TopK);
     return sycl::nd_range<3>(local * group, local);
   }
 
@@ -305,17 +306,15 @@ class RemapHiddenStates {
     auto group_id = item.get_group(2);
     auto subgroup = item.get_sub_group();
 
-    // Each group owns one source token `row` and writes it to all TopK
-    // destination rows. Reading the source once and fanning out the TopK
-    // stores keeps the source read at num_rows * hidden_size regardless of
-    // TopK; the earlier per-route grid re-read the source TopK times and only
-    // avoided the DRAM cost when siblings overlapped in cache.
-    const int row = group_id;
-    int output_row[TopK];
+    // FinalizeRowMapping has made the map read-only.
+    constexpr int NumOut = FanOut ? TopK : 1;
+    const int row = FanOut ? group_id : group_id / TopK;
+    const int first_route = FanOut ? row * TopK : group_id;
+    int output_row[NumOut];
     bool any_live = false;
 #pragma unroll
-    for (int i = 0; i < TopK; ++i) {
-      output_row[i] = unpermuted_row_to_permuted_row[row * TopK + i];
+    for (int i = 0; i < NumOut; ++i) {
+      output_row[i] = unpermuted_row_to_permuted_row[first_route + i];
       any_live |= (output_row[i] >= 0);
     }
     if (!any_live) return;
@@ -341,7 +340,7 @@ class RemapHiddenStates {
             subgroup_start);
         syclex::group_load(subgroup, source, values, properties);
 #pragma unroll
-        for (int i = 0; i < TopK; ++i) {
+        for (int i = 0; i < NumOut; ++i) {
           if (output_row[i] < 0) continue;
           auto* destination = reinterpret_cast<uint32_t*>(
               remapped_hidden_states +
@@ -361,7 +360,7 @@ class RemapHiddenStates {
         load_type data = *reinterpret_cast<load_type*>(
             hidden_states + row * static_cast<int64_t>(hidden_size) + offset);
 #pragma unroll
-        for (int i = 0; i < TopK; ++i) {
+        for (int i = 0; i < NumOut; ++i) {
           if (output_row[i] < 0) continue;
           *reinterpret_cast<load_type*>(
               remapped_hidden_states +
@@ -388,7 +387,7 @@ class RemapHiddenStates {
             data = *(reinterpret_cast<load_type*>(
                 hidden_states_scales + row * scaled_hidden_size + start_id));
 #pragma unroll
-            for (int i = 0; i < TopK; ++i) {
+            for (int i = 0; i < NumOut; ++i) {
               if (output_row[i] < 0) continue;
               *(reinterpret_cast<load_type*>(
                   remapped_hidden_states_scales +
@@ -403,7 +402,7 @@ class RemapHiddenStates {
             }
 
 #pragma unroll
-            for (int i = 0; i < TopK; ++i) {
+            for (int i = 0; i < NumOut; ++i) {
               if (output_row[i] < 0) continue;
 #pragma unroll
               for (int e = 0; e < remained_elems; ++e) {
@@ -881,6 +880,11 @@ void RemapHiddenStatesLauncher(
     int* expert_scale_desc,
     bool use_split,
     sycl::queue& queue) {
+  // Tuned on BMG and CRI: the per-route grid is faster for 2-byte
+  // activations, while 1-byte (fp8/mxfp) rows are short enough that reading
+  // each token once and fanning it out wins.
+  using RemapKernel = RemapHiddenStates<TA, TS, TopK, sizeof(TA) == 1>;
+
   // The cumsum kernels keep two (local_experts_num + 1)-entry prefix tables
   // in SLM, which is more than RowsPerExpertCount needs.
   TORCH_CHECK(
@@ -888,7 +892,7 @@ void RemapHiddenStatesLauncher(
           queue.get_device().get_info<sycl::info::device::local_mem_size>(),
       "local_experts_num exceeds the device local memory capacity");
   TORCH_CHECK(
-      (hidden_size % RemapHiddenStates<TA, TS, TopK>::ElemsPerItem == 0),
+      (hidden_size % RemapKernel::ElemsPerItem == 0),
       "hidden_size must be divisible by ElemsPerItem");
 
   queue.submit([&](sycl::handler& cgh) {
@@ -965,8 +969,8 @@ void RemapHiddenStatesLauncher(
 
   vllm::xpu::sycl_kernel_submit(
       queue,
-      RemapHiddenStates<TA, TS, TopK>::get_nd_range(num_rows, hidden_size),
-      RemapHiddenStates<TA, TS, TopK>{
+      RemapKernel::get_nd_range(num_rows, hidden_size),
+      RemapKernel{
           hidden_states,
           hidden_states_scales,
           remapped_hidden_states,
