@@ -559,3 +559,146 @@ def test_kernels_mixed_precision(
             add_inputs=True,
             input_dtype=torch.float32,
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "active_rank,stored_rank", [(8, 32), (7, 19), (32, 32)]
+)
+@pytest.mark.parametrize("nslices", [1, 3, 8])
+@pytest.mark.parametrize("add_inputs", [False, True])
+def test_active_rank_storage(
+    dtype, active_rank, stored_rank, nslices, add_inputs
+):
+    """Active rank must not change the strides between stored rows/adapters."""
+    torch.manual_seed(42)
+    device = "xpu:0"
+    batch, hidden, num_loras = 5, 128, 2
+    indices = torch.tensor([1, 0, -1, 2, 0], device=device, dtype=torch.int32)
+    x = torch.randn(batch, hidden, device=device, dtype=dtype) * 0.1
+    a = [
+        torch.randn(
+            num_loras, 1, stored_rank + 3 * s, hidden,
+            device=device, dtype=dtype
+        )
+        * 0.1
+        for s in range(nslices)
+    ]
+    b = [
+        torch.randn(
+            num_loras, 1, 17 + s, stored_rank + 3 * s,
+            device=device, dtype=dtype
+        )
+        * 0.1
+        for s in range(nslices)
+    ]
+    intermediate = torch.full(
+        (nslices, batch, active_rank),
+        float("nan"),
+        device=device,
+        dtype=torch.float32,
+    )
+    torch.ops._xpu_C.lora_shrink(x, a, intermediate, indices, 0.5)
+    expected = torch.zeros_like(intermediate)
+    for s in range(nslices):
+        for row, adapter in enumerate([1, 0, -1, 2, 0]):
+            if 0 <= adapter < num_loras:
+                expected[s, row] = (
+                    x[row].float() @ a[s][adapter, 0, :active_rank].float().T
+                ) * 0.5
+    torch.testing.assert_close(intermediate, expected, atol=1e-5, rtol=1e-4)
+    # Nonzero offset and trailing columns must be left untouched.
+    output = torch.randn(
+        batch, 5 + sum(w.size(-2) for w in b), device=device, dtype=dtype
+    )
+    reference = output.clone()
+    offset = 2
+    for s, w in enumerate(b):
+        width = w.size(-2)
+        for row, adapter in enumerate([1, 0, -1, 2, 0]):
+            if 0 <= adapter < num_loras:
+                delta = (
+                    expected[s, row] @ w[adapter, 0, :, :active_rank].float().T
+                ).to(dtype)
+                if add_inputs:
+                    reference[row, offset : offset + width] += delta
+                else:
+                    reference[row, offset : offset + width] = delta
+        offset += width
+    torch.ops._xpu_C.lora_expand(
+        intermediate, b, output, indices, 2, add_inputs
+    )
+    torch.testing.assert_close(output, reference, atol=2e-3, rtol=2e-2)
+
+
+@pytest.mark.parametrize("op", ["shrink", "expand"])
+@pytest.mark.parametrize("active_rank", [0, 9])
+def test_active_rank_out_of_bounds(op, active_rank):
+    weights = [torch.zeros(2, 1, 8, 8, device="xpu", dtype=torch.float16)]
+    indices = torch.zeros(1, device="xpu", dtype=torch.int32)
+    intermediate = torch.zeros(1, 1, active_rank, device="xpu")
+    x = torch.zeros(1, 8, device="xpu", dtype=torch.float16)
+    with pytest.raises(RuntimeError, match="rank"):
+        if op == "shrink":
+            torch.ops._xpu_C.lora_shrink(x, weights, intermediate, indices, 1.0)
+        else:
+            torch.ops._xpu_C.lora_expand(
+                intermediate, weights, x, indices, 0, True
+            )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("add_inputs", [False, True])
+def test_active_rank_expand_checks_adapter_stride(dtype, add_inputs):
+    """A contiguous singleton column can hide an unaligned adapter stride."""
+    torch.manual_seed(42)
+    weights = torch.randn(1, 8, 9, device="xpu", dtype=dtype).transpose(0, 1)
+    assert weights.is_contiguous()
+    assert weights.stride() == (9, 72, 1)
+    inputs = torch.randn(1, 32, 8, device="xpu", dtype=dtype) * 0.1
+    indices = torch.arange(32, device="xpu", dtype=torch.int32) % 8
+    output = torch.randn(32, 1, device="xpu", dtype=dtype)
+    delta = (
+        inputs[0].float() * weights[indices.long(), 0, :8].float()
+    ).sum(dim=-1, keepdim=True).to(dtype)
+    expected = output + delta if add_inputs else delta
+    torch.ops._xpu_C.lora_expand(
+        inputs, [weights], output, indices, 0, add_inputs
+    )
+    torch.testing.assert_close(output, expected, atol=2e-3, rtol=2e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("add_inputs", [False, True])
+@pytest.mark.parametrize("nslices", [1, 3, 8])
+def test_active_rank_linear(dtype, add_inputs, nslices):
+    torch.manual_seed(123)
+    x = torch.randn(4, 128, device="xpu", dtype=dtype) * 0.1
+    a = [
+        torch.randn(2, 1, 32 + s * 3, 128, device="xpu", dtype=dtype) * 0.1
+        for s in range(nslices)
+    ]
+    b = [
+        torch.randn(2, 1, 17 + s, 32 + s * 3, device="xpu", dtype=dtype) * 0.1
+        for s in range(nslices)
+    ]
+    indices = torch.tensor([1, -1, 2, 0], device="xpu", dtype=torch.int32)
+    output = torch.randn(
+        4, 3 + sum(w.size(-2) for w in b), device="xpu", dtype=dtype
+    )
+    expected = output.clone()
+    offset = 0
+    for aw, bw in zip(a, b):
+        width = bw.shape[-2]
+        for row, adapter in enumerate([1, -1, 2, 0]):
+            if 0 <= adapter < 2:
+                delta = (
+                    (x[row].float() @ aw[adapter, 0, :8].float().T) * 0.5
+                ).to(dtype).float() @ bw[adapter, 0, :, :8].float().T
+                if add_inputs:
+                    expected[row, offset : offset + width] += delta.to(dtype)
+                else:
+                    expected[row, offset : offset + width] = delta.to(dtype)
+        offset += width
+    torch.ops._xpu_C.lora_linear(x, a, b, output, indices, 0.5, 8, add_inputs)
+    torch.testing.assert_close(output, expected, atol=2e-3, rtol=2e-2)
