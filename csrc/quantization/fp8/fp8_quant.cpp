@@ -939,6 +939,12 @@ void static_scaled_fp8_quant(
       num_tokens, num_chunks, chunks_per_group, eu_count, [&](auto tag) {
         chunks_per_item = decltype(tag)::value;
       });
+  // On BMG, one 16-byte chunk per work-item measured 10-30% faster than
+  // several adjacent chunks per work-item for T >= 128; Xe3P prefers the
+  // wider items.
+  if (!elem_scale && vllm::xpu::is_bmg()) {
+    chunks_per_item = 1;
+  }
   if (elem_scale) {
     chunks_per_item = std::min(chunks_per_item, kMaxScalesPerItem / vec);
   }
