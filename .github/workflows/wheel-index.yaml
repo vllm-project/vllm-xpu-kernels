@@ -1,0 +1,94 @@
+name: Publish wheel index
+
+on:
+  release:
+    types: [published, edited, deleted]
+  # GITHUB_TOKEN release uploads do not trigger another release workflow.
+  workflow_run:
+    workflows: ["wheel-per-commit"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+  # Asset uploads/deletions do not emit release events.
+  schedule:
+    - cron: "23 */6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/wheel-index.yaml
+      - .github/workflows/wheel-per-commit.yaml
+      - tools/generate_wheel_index.py
+      - tools/nightly_release.py
+      - tools/tests/**
+  pull_request:
+    paths:
+      - .github/workflows/wheel-index.yaml
+      - .github/workflows/wheel-per-commit.yaml
+      - tools/generate_wheel_index.py
+      - tools/nightly_release.py
+      - tools/tests/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheel-index-${{ github.event_name == 'pull_request' && github.ref || 'pages' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          # Release events must use the current generator, not the tagged code.
+          ref: ${{ github.event_name == 'pull_request' && github.ref || github.event.repository.default_branch }}
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+      - name: Prepare index environment
+        run: |
+          uv venv --python 3.12
+          uv pip install packaging
+      - name: Test index generator
+        run: .venv/bin/python -m unittest discover -s tools/tests -v
+      - name: Fetch all releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            > "${RUNNER_TEMP}/releases.json"
+      - name: Generate wheel index
+        run: |
+          .venv/bin/python tools/generate_wheel_index.py \
+            --releases-json "${RUNNER_TEMP}/releases.json" \
+            --output "${RUNNER_TEMP}/wheel-site"
+      - name: Configure Pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: ${{ runner.temp }}/wheel-site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy wheel index
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
