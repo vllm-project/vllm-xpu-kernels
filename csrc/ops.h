@@ -304,7 +304,8 @@ void swap_blocks(
 void swap_blocks_batch(
     const torch::Tensor& src_ptrs,
     const torch::Tensor& dst_ptrs,
-    const torch::Tensor& sizes);
+    const torch::Tensor& sizes,
+    bool snapshot_src);
 
 void top_k_per_row_decode(
     const torch::Tensor& logits,

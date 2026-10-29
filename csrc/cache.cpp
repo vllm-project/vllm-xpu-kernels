@@ -1732,7 +1732,8 @@ void swap_blocks(
 void swap_blocks_batch(
     const torch::Tensor& src_ptrs,
     const torch::Tensor& dst_ptrs,
-    const torch::Tensor& sizes) {
+    const torch::Tensor& sizes,
+    bool snapshot_src) {
   TORCH_CHECK(src_ptrs.device().is_cpu(), "src_ptrs must be on CPU");
   TORCH_CHECK(dst_ptrs.device().is_cpu(), "dst_ptrs must be on CPU");
   TORCH_CHECK(sizes.device().is_cpu(), "sizes must be on CPU");
@@ -1750,7 +1751,8 @@ void swap_blocks_batch(
       src_ptrs.data_ptr<uint64_t>(),
       dst_ptrs.data_ptr<uint64_t>(),
       sizes.data_ptr<uint64_t>(),
-      n);
+      n,
+      snapshot_src);
 }
 
 namespace vllm {
