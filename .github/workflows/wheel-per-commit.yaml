@@ -54,9 +54,12 @@ jobs:
       - name: Get build metadata
         id: metadata
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          version_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*')
+          commit=$(git rev-parse HEAD)
           .venv/bin/python tools/nightly_release.py metadata \
-            --version-tag "$(git describe --tags --abbrev=0 --match 'v[0-9]*')" \
-            --commit "$(git rev-parse HEAD)" \
+            --version-tag "$version_tag" \
+            --commit "$commit" \
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
@@ -65,7 +68,6 @@ jobs:
           VLLM_VERSION_OVERRIDE: ${{ steps.metadata.outputs.version }}
         run: |
           source /opt/intel/oneapi/2026.1/oneapi-vars.sh
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           git submodule sync && git submodule update --init --recursive
           uv pip install -r requirements.txt
           .venv/bin/python setup.py bdist_wheel \
