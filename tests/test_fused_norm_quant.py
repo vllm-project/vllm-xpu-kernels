@@ -118,9 +118,13 @@ def _ref_per_group_quant(
         else:
             scale = torch.clamp(absmax / fp8_max, min=min_sf)
             if scale_ue8m0:
+                # log2 in fp64 so a scale one ulp above a power of two still
+                # rounds up, matching the kernel's exact exponent ceil.
                 scale = torch.exp2(
                     torch.ceil(
-                        torch.log2(torch.clamp(scale.abs(), min=1e-10))))
+                        torch.log2(
+                            torch.clamp(scale.abs(),
+                                        min=1e-10).double()))).float()
             inv_scale = 1.0 / scale
             q = (chunk * inv_scale).clamp(-fp8_max, fp8_max).to(quant_dtype)
 
