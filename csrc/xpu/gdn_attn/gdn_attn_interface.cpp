@@ -177,7 +177,9 @@ std::vector<torch::Tensor> causal_conv1d_spec(
   } else {
     TORCH_CHECK(false);
   }
-  const int pad_slot_id = -1;
+  // Rows whose state index is <= pad_slot_id are padding: vLLM marks them
+  // with NULL_BLOCK_ID (0) or PAD_SLOT_ID (-1).
+  const int pad_slot_id = 0;
 
   std::optional<torch::Tensor> empty_tensor{std::nullopt};
 
@@ -385,7 +387,9 @@ std::vector<torch::Tensor> causal_conv1d_non_spec(
   } else {
     TORCH_CHECK(false);
   }
-  const int pad_slot_id = -1;
+  // Rows whose state index is <= pad_slot_id are padding: vLLM marks them
+  // with NULL_BLOCK_ID (0) or PAD_SLOT_ID (-1).
+  const int pad_slot_id = 0;
 
   std::optional<torch::Tensor> empty_tensor{std::nullopt};
 
