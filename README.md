@@ -43,7 +43,7 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 ## Requirements
 
 - **Python**: 3.12
-- **PyTorch**: 2.15.0+xpu (from `https://download.pytorch.org/whl/test/xpu`)
+- **PyTorch**: 2.15.0+xpu (from `https://download.pytorch.org/whl/xpu`)
 - **Intel OMIX**: 0.4, including the oneAPI 2026.1 DPC++ compiler
   ([installation guide](https://dgpu-docs.intel.com/installation-guides/installing-omix.html))
 - **CMake**: ≥ 3.26
@@ -136,7 +136,7 @@ pip install -r requirements.txt
 **Development install** (editable, source in current directory):
 
 ```bash
-pip install --extra-index-url=https://download.pytorch.org/whl/test/xpu -e . -v
+pip install --extra-index-url=https://download.pytorch.org/whl/xpu -e . -v
 # Faster: skip build isolation if dependencies are already present
 pip install --no-build-isolation -e . -v
 ```
@@ -144,7 +144,7 @@ pip install --no-build-isolation -e . -v
 **Standard install** (to site-packages):
 
 ```bash
-pip install --extra-index-url=https://download.pytorch.org/whl/test/xpu .
+pip install --extra-index-url=https://download.pytorch.org/whl/xpu .
 # or
 pip install --no-build-isolation .
 ```
@@ -152,7 +152,7 @@ pip install --no-build-isolation .
 **Build a wheel** (output goes to `dist/`):
 
 ```bash
-pip wheel --extra-index-url=https://download.pytorch.org/whl/test/xpu --wheel-dir dist .
+pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu --wheel-dir dist .
 # or
 pip wheel --no-build-isolation --wheel-dir dist .
 ```

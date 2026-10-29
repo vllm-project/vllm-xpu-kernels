@@ -20,7 +20,7 @@ can dispatch on Intel GPU hardware.
   build behavior.
 - PyTorch XPU support is currently `2.15.0+xpu` in `pyproject.toml`, with CMake
   expecting torch `2.15.0` for XPU. Install from
-  `https://download.pytorch.org/whl/test/xpu`.
+  `https://download.pytorch.org/whl/xpu`.
 - oneAPI 2026.0 is the expected toolchain. Source
   `/opt/intel/oneapi/setvars.sh` before building native extensions.
 
