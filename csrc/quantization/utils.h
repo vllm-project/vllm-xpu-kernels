@@ -130,6 +130,23 @@ inline int64_t fused_quant_block_size(
       std::max(wg, static_cast<int64_t>(32)), static_cast<int64_t>(1024));
 }
 
+// For the fused norm-and-quant kernels, which run one work-group per row.
+// When the rows cannot fill the device, spreading each row over up to 1024
+// lanes cuts latency more than packing several items into each lane.
+inline int64_t fused_norm_quant_block_size(
+    int64_t num_rows,
+    int eu_count,
+    int64_t work_items,
+    int items_per_wi,
+    bool reduces_over_group) {
+  if (num_rows < eu_count) {
+    return std::min(
+        std::max((work_items + 31) / 32 * 32, static_cast<int64_t>(32)),
+        static_cast<int64_t>(1024));
+  }
+  return fused_quant_block_size(work_items, items_per_wi, reduces_over_group);
+}
+
 template <typename Fn>
 inline void dispatch_quant_chunks(
     int64_t num_tokens,

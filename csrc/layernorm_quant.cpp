@@ -1014,8 +1014,6 @@ void call_rms_norm_dynamic_per_token_quant_kernel(
   // reproduces the original scalar traversal for odd hidden sizes).
   const int vec_size =
       std::gcd(static_cast<int>(16 / sizeof(sycl_t)), hidden_size);
-  const int block_size =
-      fused_quant_block_size(hidden_size / vec_size, 4, true);
 
   auto* out_ptr = out.data_ptr<out_t>();
   auto* input_ptr = input.data_ptr<scalar_t>();
@@ -1025,6 +1023,10 @@ void call_rms_norm_dynamic_per_token_quant_kernel(
       scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr;
 
   auto& queue = vllm::xpu::vllmGetQueue();
+  const int eu_count = static_cast<int>(
+      queue.get_device().get_info<sycl::info::device::max_compute_units>());
+  const int block_size = static_cast<int>(fused_norm_quant_block_size(
+      num_tokens, eu_count, hidden_size / vec_size, 4, true));
 
   auto launch = [&](auto has_residual_tag, auto vec_tag) {
     constexpr bool has_residual = decltype(has_residual_tag)::value;
@@ -1291,8 +1293,8 @@ void call_rms_norm_per_block_quant_kernel(
     constexpr int CPT = decltype(cpt_tag)::value;
     // Only the variance pass reduces over the group; the quantized store loop
     // reduces within a sub-group, so it uses the barrier-free sizing rule.
-    const int64_t block_size =
-        fused_quant_block_size(num_chunks / CPT, 1, false);
+    const int64_t block_size = fused_norm_quant_block_size(
+        num_tokens, eu_count, num_chunks / CPT, 1, false);
     sycl_t* residual_ptr = nullptr;
     if constexpr (has_residual) {
       residual_ptr = (sycl_t*)residual->data_ptr<scalar_t>();
