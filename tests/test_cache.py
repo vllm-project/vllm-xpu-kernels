@@ -485,6 +485,34 @@ def test_concat_and_cache_mla(
         torch.testing.assert_close(kv_cache, ref_kv_cache)
 
 
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@torch.inference_mode()
+def test_concat_and_cache_mla_skip_scale(dtype: torch.dtype) -> None:
+    seed_everything(0)
+    num_tokens, kv_lora_rank, pe_dim = 16, 512, 64
+    block_size, num_blocks = 16, 4
+    kv_c = torch.randn(num_tokens, kv_lora_rank, dtype=dtype, device="xpu")
+    k_pe = torch.randn(num_tokens, pe_dim, dtype=dtype, device="xpu")
+    slot_mapping = torch.arange(num_tokens, dtype=torch.long, device="xpu")
+    scale = torch.tensor(0.1, dtype=torch.float32, device="xpu")
+    unit_scale = torch.tensor(1.0, dtype=torch.float32, device="xpu")
+
+    def run(cache_scale, skip_scale):
+        cache = torch.zeros(num_blocks,
+                            block_size,
+                            kv_lora_rank + pe_dim,
+                            dtype=torch.uint8,
+                            device="xpu")
+        ops.concat_and_cache_mla(kv_c, k_pe, cache, slot_mapping, "fp8",
+                                 cache_scale, skip_scale)
+        return cache
+
+    skipped = run(scale, True)
+    # skip_scale is a cast-only write, i.e. the same as scale == 1.0.
+    assert torch.equal(skipped, run(unit_scale, False))
+    assert not torch.equal(skipped, run(scale, False))
+
+
 @torch.inference_mode()
 def test_concat_and_cache_mla_large_cache() -> None:
     # A cache view past 2^31 elements (one 4+ GiB bf16 MLA layer); 32-bit
