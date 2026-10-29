@@ -10,6 +10,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <type_traits>
 
 namespace vllm {
 
@@ -49,6 +50,17 @@ inline float swiglu_clamp_gate(float g, float limit) {
 
 inline float swiglu_clamp_up(float u, float limit) {
   return u > limit ? limit : (u < -limit ? -limit : u);
+}
+
+// Calls fn(std::true_type) when the limit is enabled, else fn(std::false_type),
+// so kernels can drop the clamp at compile time on the default path.
+template <typename Fn>
+inline void dispatch_swiglu_limit(float limit, Fn&& fn) {
+  if (limit < kSwigluLimitDisabled) {
+    fn(std::true_type{});
+  } else {
+    fn(std::false_type{});
+  }
 }
 
 }  // namespace vllm

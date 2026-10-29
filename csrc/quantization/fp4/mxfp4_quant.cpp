@@ -544,26 +544,29 @@ void silu_and_mul_per_token_group_quant_mxfp4(
         const int64_t num_wgs = (num_rows + rows_per_wg - 1) / rows_per_wg;
         auto launch = [&](auto cpt_tag) {
           constexpr int CPT = decltype(cpt_tag)::value;
-          queue.submit([&](sycl::handler& cgh) {
-            auto kernel = vllm::mxfp4::per_token_group_quant_mxfp4_vec_kernel<
-                sycl_t,
-                CPT,
-                false,
-                true>(
-                output_q.data_ptr<uint8_t>(),
-                scale_ptr,
-                reinterpret_cast<const sycl_t*>(input.data_ptr<scalar_t>()),
-                hidden,
-                static_cast<int>(group_size),
-                static_cast<float>(eps),
-                scale_stride_token,
-                scale_stride_group,
-                static_cast<int>(num_rows),
-                rows_per_wg,
-                moe_layout,
-                vllm::swiglu_limit_as<scalar_t>(limit));
-            cgh.parallel_for(
-                sycl::nd_range<1>(num_wgs * wg_size, wg_size), kernel);
+          vllm::dispatch_swiglu_limit(limit, [&](auto clamp_tag) {
+            queue.submit([&](sycl::handler& cgh) {
+              auto kernel = vllm::mxfp4::per_token_group_quant_mxfp4_vec_kernel<
+                  sycl_t,
+                  CPT,
+                  false,
+                  true,
+                  decltype(clamp_tag)::value>(
+                  output_q.data_ptr<uint8_t>(),
+                  scale_ptr,
+                  reinterpret_cast<const sycl_t*>(input.data_ptr<scalar_t>()),
+                  hidden,
+                  static_cast<int>(group_size),
+                  static_cast<float>(eps),
+                  scale_stride_token,
+                  scale_stride_group,
+                  static_cast<int>(num_rows),
+                  rows_per_wg,
+                  moe_layout,
+                  vllm::swiglu_limit_as<scalar_t>(limit));
+              cgh.parallel_for(
+                  sycl::nd_range<1>(num_wgs * wg_size, wg_size), kernel);
+            });
           });
         };
         if (cpt == 4) {

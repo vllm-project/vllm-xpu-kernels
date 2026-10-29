@@ -17,7 +17,7 @@
 #include "quantization/utils.h"
 
 namespace vllm {
-template <typename scalar_t, typename out_t, int CPT>
+template <typename scalar_t, typename out_t, int CPT, bool CLAMP = false>
 class silu_and_mul_per_block_quant_kernel {
  public:
   silu_and_mul_per_block_quant_kernel(
@@ -85,7 +85,7 @@ class silu_and_mul_per_block_quant_kernel {
           for (int k = 0; k < VEC; ++k) {
             float gf = static_cast<float>(g.val[k]);
             float uf = static_cast<float>(u.val[k]);
-            if (swiglu_limit < kSwigluLimitDisabled) {
+            if constexpr (CLAMP) {
               gf = swiglu_clamp_gate(gf, swiglu_limit);
               uf = swiglu_clamp_up(uf, swiglu_limit);
             }
@@ -166,7 +166,11 @@ class silu_and_mul_per_block_quant_kernel {
 };
 
 // MXFP8, one lane per 16-byte vector of the output.
-template <typename scalar_t, typename out_t, mx::ScaleLayout LAYOUT>
+template <
+    typename scalar_t,
+    typename out_t,
+    mx::ScaleLayout LAYOUT,
+    bool CLAMP = false>
 class silu_and_mul_mxfp8_quant_kernel {
  public:
   silu_and_mul_mxfp8_quant_kernel(
@@ -208,7 +212,7 @@ class silu_and_mul_mxfp8_quant_kernel {
       for (int k = 0; k < VEC; ++k) {
         float gf = static_cast<float>(g.val[k]);
         float uf = static_cast<float>(u.val[k]);
-        if (swiglu_limit < kSwigluLimitDisabled) {
+        if constexpr (CLAMP) {
           gf = swiglu_clamp_gate(gf, swiglu_limit);
           uf = swiglu_clamp_up(uf, swiglu_limit);
         }
@@ -343,21 +347,24 @@ void silu_and_mul_per_block_quant(
               moe_layout.enabled() ? nullptr : scales.data_ptr<float>();
           auto launch = [&](auto out_ptr, auto layout_tag) {
             using out_t = std::remove_pointer_t<decltype(out_ptr)>;
-            queue.submit([&](sycl::handler& h) {
-              h.parallel_for(
-                  sycl::nd_range<1>(mx_num_wgs * wg_size, wg_size),
-                  vllm::silu_and_mul_mxfp8_quant_kernel<
-                      sycl_t,
-                      out_t,
-                      decltype(layout_tag)::value>(
-                      out_ptr,
-                      scales_ptr,
-                      input_ptr,
-                      static_cast<int>(mx_num_vecs),
-                      static_cast<int>(hidden_size / vllm::mx::kVec),
-                      static_cast<int>(num_tokens),
-                      moe_layout,
-                      vllm::swiglu_limit_as<scalar_t>(limit)));
+            vllm::dispatch_swiglu_limit(limit, [&](auto clamp_tag) {
+              queue.submit([&](sycl::handler& h) {
+                h.parallel_for(
+                    sycl::nd_range<1>(mx_num_wgs * wg_size, wg_size),
+                    vllm::silu_and_mul_mxfp8_quant_kernel<
+                        sycl_t,
+                        out_t,
+                        decltype(layout_tag)::value,
+                        decltype(clamp_tag)::value>(
+                        out_ptr,
+                        scales_ptr,
+                        input_ptr,
+                        static_cast<int>(mx_num_vecs),
+                        static_cast<int>(hidden_size / vllm::mx::kVec),
+                        static_cast<int>(num_tokens),
+                        moe_layout,
+                        vllm::swiglu_limit_as<scalar_t>(limit)));
+              });
             });
           };
           auto dispatch = [&](auto out_ptr) {
@@ -401,22 +408,28 @@ void silu_and_mul_per_block_quant(
           constexpr int CPT = decltype(cpt_tag)::value;
           const int64_t wg_size =
               vllm::fused_quant_block_size(num_chunks / CPT, 1, false);
-          queue.submit([&](sycl::handler& h) {
-            h.parallel_for(
-                sycl::nd_range<1>(num_wgs * wg_size, wg_size),
-                vllm::silu_and_mul_per_block_quant_kernel<sycl_t, out_t, CPT>(
-                    out_ptr,
-                    scales_ptr,
-                    input_ptr,
-                    scale_ub_ptr,
-                    static_cast<int>(hidden_size),
-                    static_cast<int>(num_groups),
-                    static_cast<int>(group_size),
-                    scale_stride_token,
-                    scale_stride_group,
-                    scale_ue8m0,
-                    moe_layout,
-                    vllm::swiglu_limit_as<scalar_t>(limit)));
+          vllm::dispatch_swiglu_limit(limit, [&](auto clamp_tag) {
+            queue.submit([&](sycl::handler& h) {
+              h.parallel_for(
+                  sycl::nd_range<1>(num_wgs * wg_size, wg_size),
+                  vllm::silu_and_mul_per_block_quant_kernel<
+                      sycl_t,
+                      out_t,
+                      CPT,
+                      decltype(clamp_tag)::value>(
+                      out_ptr,
+                      scales_ptr,
+                      input_ptr,
+                      scale_ub_ptr,
+                      static_cast<int>(hidden_size),
+                      static_cast<int>(num_groups),
+                      static_cast<int>(group_size),
+                      scale_stride_token,
+                      scale_stride_group,
+                      scale_ue8m0,
+                      moe_layout,
+                      vllm::swiglu_limit_as<scalar_t>(limit)));
+            });
           });
         };
 

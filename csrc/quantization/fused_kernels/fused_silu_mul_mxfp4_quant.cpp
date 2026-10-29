@@ -20,7 +20,7 @@ namespace vllm {
 // Output [M, H/2]   – packed FP4 nibbles, two per byte (low=even, high=odd)
 // Scales [M, H/32]  – float32 UE8M0 (power-of-two) scales
 // One lane per 16-byte vector of the output.
-template <typename scalar_t, bool COL_MAJOR>
+template <typename scalar_t, bool COL_MAJOR, bool CLAMP = false>
 class silu_and_mul_mxfp4_quant_kernel {
  public:
   silu_and_mul_mxfp4_quant_kernel(
@@ -62,7 +62,7 @@ class silu_and_mul_mxfp4_quant_kernel {
       for (int k = 0; k < VEC; ++k) {
         float gf = static_cast<float>(g.val[k]);
         float uf = static_cast<float>(u.val[k]);
-        if (swiglu_limit < kSwigluLimitDisabled) {
+        if constexpr (CLAMP) {
           gf = swiglu_clamp_gate(gf, swiglu_limit);
           uf = swiglu_clamp_up(uf, swiglu_limit);
         }
@@ -165,20 +165,23 @@ void silu_and_mul_mxfp4_quant(
         uint8_t* out_ptr = out.data_ptr<uint8_t>();
 
         auto launch = [&](auto col_major_tag) {
-          queue.submit([&](sycl::handler& h) {
-            h.parallel_for(
-                sycl::nd_range<1>(num_wgs * wg_size, wg_size),
-                vllm::silu_and_mul_mxfp4_quant_kernel<
-                    sycl_t,
-                    decltype(col_major_tag)::value>(
-                    out_ptr,
-                    scales_ptr,
-                    input_ptr,
-                    static_cast<int>(num_vecs),
-                    static_cast<int>(hidden_size / vllm::mx::kVec),
-                    static_cast<float>(eps),
-                    static_cast<int>(num_tokens),
-                    vllm::swiglu_limit_as<scalar_t>(limit)));
+          vllm::dispatch_swiglu_limit(limit, [&](auto clamp_tag) {
+            queue.submit([&](sycl::handler& h) {
+              h.parallel_for(
+                  sycl::nd_range<1>(num_wgs * wg_size, wg_size),
+                  vllm::silu_and_mul_mxfp4_quant_kernel<
+                      sycl_t,
+                      decltype(col_major_tag)::value,
+                      decltype(clamp_tag)::value>(
+                      out_ptr,
+                      scales_ptr,
+                      input_ptr,
+                      static_cast<int>(num_vecs),
+                      static_cast<int>(hidden_size / vllm::mx::kVec),
+                      static_cast<float>(eps),
+                      static_cast<int>(num_tokens),
+                      vllm::swiglu_limit_as<scalar_t>(limit)));
+            });
           });
         };
         if (is_scale_transposed) {

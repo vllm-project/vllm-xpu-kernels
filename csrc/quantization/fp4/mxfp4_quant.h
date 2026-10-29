@@ -165,7 +165,8 @@ template <
     typename scalar_t,
     int CPT = 1,
     bool FLAT_GROUPS = false,
-    bool FUSE_SILU_MUL = false>
+    bool FUSE_SILU_MUL = false,
+    bool CLAMP = false>
 class per_token_group_quant_mxfp4_vec_kernel {
  private:
   uint8_t* __restrict__ out;
@@ -179,7 +180,7 @@ class per_token_group_quant_mxfp4_vec_kernel {
   const int num_rows;
   const int rows_per_wg;
   MoEScaleLayout moe_layout;
-  // Only read with FUSE_SILU_MUL; kSwigluLimitDisabled turns it off.
+  // Only read with FUSE_SILU_MUL and CLAMP.
   float swiglu_limit;
 
  public:
@@ -273,12 +274,13 @@ class per_token_group_quant_mxfp4_vec_kernel {
               // Mirror activation.cpp's silu_and_mul rounding exactly so the
               // fused path is bit-identical to running the two kernels.
               // The limit is pre-rounded to scalar_t, so the clamped values
-              // are exact in scalar_t and can stay in float. Clamping against
-              // kSwigluLimitDisabled (+inf) is a no-op.
-              const float g = swiglu_clamp_gate(
-                  static_cast<float>(v[j].val[k]), swiglu_limit);
-              const float up = swiglu_clamp_up(
-                  static_cast<float>(u[j].val[k]), swiglu_limit);
+              // are exact in scalar_t and can stay in float.
+              float g = static_cast<float>(v[j].val[k]);
+              float up = static_cast<float>(u[j].val[k]);
+              if constexpr (CLAMP) {
+                g = swiglu_clamp_gate(g, swiglu_limit);
+                up = swiglu_clamp_up(up, swiglu_limit);
+              }
               const scalar_t sg =
                   static_cast<scalar_t>(g / (1.0f + sycl::exp(-g)));
               // The product of two 16-bit floats is exact in float, so this
