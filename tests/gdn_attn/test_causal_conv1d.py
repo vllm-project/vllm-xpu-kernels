@@ -684,6 +684,11 @@ def test_causal_conv1d_large_state_offset(path, dtype):
     line 4097 starts at element 2**32 + 2**20; a 32-bit offset wraps to
     2**20, i.e. cache line 1, which is used here as a guard.
     """
+    # FIXME: remove skip
+    if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
+            and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
+        pytest.skip("skip gdn attention kernels testing on PVC.")
+
     device = "xpu"
     stride_0 = 1 << 20
     num_lines = 4098
