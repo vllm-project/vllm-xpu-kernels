@@ -65,6 +65,158 @@ inline uint8_t fused_scale_to_fp8(float val, uint32_t scale_exp) {
   return static_cast<uint8_t>((sign << 7) | (result & 0x7Fu));
 }
 
+#ifndef VLLM_XPU_SYCL_FCVT_ENABLED
+// Software-convert kernel for the 128-element float32-scale format: one
+// sub-group per (token, head), 8 contiguous elements per lane per block. On
+// Xe2 this layout is faster than the register-striped kernel below once the
+// convert is done in software, so the generic build keeps it for that format.
+class deepseek_inv_rope_fp8_quant_sw_kernel {
+ public:
+  static constexpr int SG_SIZE = 16;
+  static constexpr int CHUNKS_PER_HEAD = 4;
+  static constexpr int ELEMS_PER_LANE = QUANT_GROUP_SIZE / SG_SIZE;
+
+  deepseek_inv_rope_fp8_quant_sw_kernel(
+      const bf16_t* __restrict__ o,
+      const int64_t* __restrict__ positions,
+      const float* __restrict__ cos_sin_cache,
+      fp8_t* __restrict__ fp8_out,
+      float* __restrict__ scale_out,
+      int64_t num_tokens,
+      int64_t num_heads,
+      int64_t heads_per_group,
+      int64_t head_dim,
+      int64_t nope_dim,
+      int64_t half_rope,
+      int64_t o_stride_token,
+      int64_t o_stride_head,
+      int64_t cache_stride_pos,
+      int64_t fp8_stride_group,
+      int64_t fp8_stride_token,
+      int64_t scale_stride_group,
+      int64_t scale_stride_token)
+      : o_(o),
+        positions_(positions),
+        cos_sin_cache_(cos_sin_cache),
+        fp8_out_(fp8_out),
+        scale_out_(scale_out),
+        num_tokens_(num_tokens),
+        num_heads_(num_heads),
+        heads_per_group_(heads_per_group),
+        head_dim_(head_dim),
+        nope_dim_(nope_dim),
+        half_rope_(half_rope),
+        o_stride_token_(o_stride_token),
+        o_stride_head_(o_stride_head),
+        cache_stride_pos_(cache_stride_pos),
+        fp8_stride_group_(fp8_stride_group),
+        fp8_stride_token_(fp8_stride_token),
+        scale_stride_group_(scale_stride_group),
+        scale_stride_token_(scale_stride_token) {}
+
+  [[sycl::reqd_sub_group_size(SG_SIZE)]]
+  void operator()(sycl::nd_item<3> item) const {
+    const int64_t token_idx = item.get_global_id(0);
+    const int64_t head_idx = item.get_global_id(1);
+    const int64_t lane = item.get_local_id(2);
+
+    if (token_idx >= num_tokens_ || head_idx >= num_heads_) return;
+
+    const int64_t group = head_idx / heads_per_group_;
+    const int64_t head_in_group = head_idx % heads_per_group_;
+
+    const bf16_t* src =
+        o_ + token_idx * o_stride_token_ + head_idx * o_stride_head_;
+
+    fp8_t* fp8_dst = fp8_out_ + group * fp8_stride_group_ +
+                     token_idx * fp8_stride_token_ + head_in_group * head_dim_;
+
+    float* scale_dst = scale_out_ + group * scale_stride_group_ +
+                       token_idx * scale_stride_token_ +
+                       head_in_group * CHUNKS_PER_HEAD;
+
+    const int lane32 = static_cast<int>(lane);
+    auto sg = item.get_sub_group();
+
+    // Load all 4 chunks into registers upfront.
+    float vals[CHUNKS_PER_HEAD][ELEMS_PER_LANE];
+
+  #pragma unroll
+    for (int chunk = 0; chunk < CHUNKS_PER_HEAD; ++chunk) {
+      const uint32_t* s = reinterpret_cast<const uint32_t*>(
+          src + chunk * QUANT_GROUP_SIZE + lane32 * ELEMS_PER_LANE);
+  #pragma unroll
+      for (int e = 0; e < ELEMS_PER_LANE / 2; ++e) {
+        uint32_t pair = s[e];
+        vals[chunk][e * 2] = static_cast<float>(
+            sycl::bit_cast<bf16_t>(static_cast<uint16_t>(pair)));
+        vals[chunk][e * 2 + 1] = static_cast<float>(
+            sycl::bit_cast<bf16_t>(static_cast<uint16_t>(pair >> 16)));
+      }
+    }
+
+    const int64_t pos = positions_[token_idx];
+    const float* cos_ptr = cos_sin_cache_ + pos * cache_stride_pos_;
+    const float* sin_ptr = cos_ptr + half_rope_;
+
+    // Inverse RoPE on chunk 3 (lanes 8-15 = rope region).
+    if (lane32 >= 8) {
+      const int pair_base = (lane32 - 8) * 4;
+  #pragma unroll
+      for (int p = 0; p < 4; ++p) {
+        float c = cos_ptr[pair_base + p];
+        float s = sin_ptr[pair_base + p];
+        float x_even = vals[3][2 * p];
+        float x_odd = vals[3][2 * p + 1];
+        vals[3][2 * p] = x_even * c + x_odd * s;
+        vals[3][2 * p + 1] = x_odd * c - x_even * s;
+      }
+    }
+
+  // Per-128-block: absmax reduce → pow2 scale → fused fp8 quantize.
+  #pragma unroll
+    for (int chunk = 0; chunk < CHUNKS_PER_HEAD; ++chunk) {
+      float local_absmax = 0.0f;
+  #pragma unroll
+      for (int e = 0; e < ELEMS_PER_LANE; ++e)
+        local_absmax = sycl::fmax(local_absmax, sycl::fabs(vals[chunk][e]));
+
+      float block_absmax =
+          sycl::reduce_over_group(sg, local_absmax, sycl::maximum<float>());
+      float scale_raw =
+          sycl::fmax(block_absmax, 1e-10f) * (1.0f / FP8_E4M3_MAX);
+      uint32_t scale_exp;
+      float scale = fast_ceil_pow2(scale_raw, scale_exp);
+      if (lane == 0) scale_dst[chunk] = scale;
+
+      uint64_t packed = 0;
+  #pragma unroll
+      for (int e = 0; e < ELEMS_PER_LANE; ++e)
+        packed |=
+            (static_cast<uint64_t>(
+                 fused_scale_to_fp8(vals[chunk][e], scale_exp))
+             << (e * 8));
+      *reinterpret_cast<uint64_t*>(
+          fp8_dst + chunk * QUANT_GROUP_SIZE + lane32 * ELEMS_PER_LANE) =
+          packed;
+    }
+  }
+
+ private:
+  const bf16_t* __restrict__ o_;
+  const int64_t* __restrict__ positions_;
+  const float* __restrict__ cos_sin_cache_;
+  fp8_t* __restrict__ fp8_out_;
+  float* __restrict__ scale_out_;
+  int64_t num_tokens_, num_heads_;
+  int64_t heads_per_group_, head_dim_, nope_dim_, half_rope_;
+  int64_t o_stride_token_, o_stride_head_;
+  int64_t cache_stride_pos_;
+  int64_t fp8_stride_group_, fp8_stride_token_;
+  int64_t scale_stride_group_, scale_stride_token_;
+};
+#endif  // !VLLM_XPU_SYCL_FCVT_ENABLED
+
 // `fcvt` with an e4m3 destination only exists on Xe3. _xpu_C is preprocessed
 // once but AOT compiled for every device in AOT_DEVICES, so the macro can only
 // be set for an Xe3-only build; a combined Xe2+Xe3 build has to take the
@@ -510,7 +662,34 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
   if (use_mxfp8) {
     launch(std::true_type{});
   } else {
+#ifdef VLLM_XPU_SYCL_FCVT_ENABLED
     launch(std::false_type{});
+#else
+    vllm::xpu::sycl_kernel_submit(
+        q,
+        sycl::nd_range<3>(
+            sycl::range<3>(num_tokens, num_heads, SG_SIZE),
+            sycl::range<3>(1, 1, SG_SIZE)),
+        vllm::deepseek_inv_rope_fp8_quant_sw_kernel(
+            reinterpret_cast<const bf16_t*>(o.data_ptr()),
+            reinterpret_cast<const int64_t*>(positions.data_ptr()),
+            reinterpret_cast<const float*>(cos_sin_cache.data_ptr()),
+            reinterpret_cast<fp8_t*>(fp8_out.data_ptr()),
+            reinterpret_cast<float*>(scale_out.data_ptr()),
+            num_tokens,
+            num_heads,
+            heads_per_group,
+            head_dim,
+            nope_dim,
+            half_rope,
+            o_stride_token,
+            o_stride_head,
+            cache_stride_pos,
+            fp8_stride_group,
+            fp8_stride_token,
+            scale_stride_group,
+            scale_stride_token));
+#endif
   }
 
   return {fp8_out, scale_out};
