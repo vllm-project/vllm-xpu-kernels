@@ -705,7 +705,9 @@ void deepseek_qnorm_rope_kv_insert(
   }
 
   auto* cache_ptr = reinterpret_cast<uint8_t*>(cache.data_ptr());
-  if (num_tokens < 256) {
+  // The per-row decode kernel is faster than the 512-wide reduce-grid kernel
+  // on both BMG and CRI until about 64K (token, q-head) rows.
+  if (num_tokens * num_heads_q < 65536) {
     vllm::qnorm_rope_kv_insert_fp8_kernel_decode<512, 64>(
         q_xpu,
         q_ptr,

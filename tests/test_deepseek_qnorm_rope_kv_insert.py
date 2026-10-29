@@ -219,7 +219,7 @@ def test_bf16_correctness(num_tokens, seed):
         f"Cache max diff {cache_diff.max().item():.6f}")
 
 
-@pytest.mark.parametrize("num_tokens", [1, 65, 128, 255, 256])
+@pytest.mark.parametrize("num_tokens", [1, 65, 128, 1023, 1024])
 @pytest.mark.parametrize("seed", [0, 42])
 def test_fp8_correctness(num_tokens, seed):
     """Test fp8 ds-mla cache path correctness."""
