@@ -156,11 +156,21 @@ void fused_input_norm(
 
   VLLM_DISPATCH_FLOATING_TYPES(
       out.scalar_type(), "call_fused_input_norm_kernel", [&] {
-        using output_t = scalar_t;
-        VLLM_DISPATCH_FLOATING_TYPES(
-            weight.scalar_type(), "fused_input_norm_coefficients", [&] {
-              vllm::call_fused_input_norm_kernel<output_t, scalar_t>(
-                  out, input, weight, bias, channel, patch_size);
-            });
+        switch (weight.scalar_type()) {
+          case at::ScalarType::Float:
+            return vllm::call_fused_input_norm_kernel<scalar_t, float>(
+                out, input, weight, bias, channel, patch_size);
+          case at::ScalarType::Half:
+            return vllm::call_fused_input_norm_kernel<scalar_t, at::Half>(
+                out, input, weight, bias, channel, patch_size);
+          case at::ScalarType::BFloat16:
+            return vllm::call_fused_input_norm_kernel<scalar_t, at::BFloat16>(
+                out, input, weight, bias, channel, patch_size);
+          default:
+            TORCH_CHECK(
+                false,
+                "fused_input_norm: weight must be float32, float16 or "
+                "bfloat16");
+        }
       });
 }
