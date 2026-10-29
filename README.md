@@ -68,6 +68,11 @@ To pin a specific release, for example:
 pip install "vllm-xpu-kernels==0.1.15.4"
 ```
 
+For Release-hosted wheels and the GitHub Pages package index, see
+[Wheel publishing and installation](WHEEL_RELEASES.md). The guide covers
+multiple binaries per release, Pages setup (no purchased domain required),
+pip installation commands, and the isolated [nightly channel](WHEEL_RELEASES.md#nightly-wheels).
+
 ### Build from Source
 
 **1. Clone the repository**
