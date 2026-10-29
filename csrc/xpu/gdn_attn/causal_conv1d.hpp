@@ -229,7 +229,8 @@ struct causal_conv1d_kernel {
     const bool has_init_conv_states =
         (has_initial_state == nullptr ||
          (has_initial_state != nullptr && has_initial_state[batch_id]));
-    T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
+    T* conv_states_ptr =
+        conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
 
     // load weights
     T local_weights[Width * elems_per_item];
@@ -449,7 +450,8 @@ struct update_states_kernel {
     }
 
     int states_id = cache_indices[batch_id];
-    T* conv_states_ptr = conv_states + states_id * conv_states_stride_0;
+    T* conv_states_ptr =
+        conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
     const T* conv_states_tmp_ptr =
         conv_states_tmp + batch_id * (width - 1) * conv_elems;
     for (int i = elems_start_offset_group + local_id;
@@ -687,7 +689,8 @@ struct causal_conv1d_spec_kernel {
     const int state_id = cache_indices[batch_id * cache_indices_stride_0 + 0];
     const bool has_conv_state = (state_id != pad_slot_id);
     T* state_line_ptr = has_conv_state
-                            ? conv_states + state_id * conv_states_stride_0
+                            ? conv_states + static_cast<int64_t>(state_id) *
+                                                conv_states_stride_0
                             : nullptr;
 
     // Load weights

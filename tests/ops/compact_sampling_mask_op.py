@@ -69,10 +69,20 @@ def compact_sampling_mask_xpu(
     num_sampled_tokens: torch.Tensor,
     max_num_kept: int,
     max_compact_support: int = MAX_COMPACT_SUPPORT,
+    cu_num_logits: torch.Tensor | None = None,
+    rows_per_request: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """XPU (SYCL) implementation."""
+    if cu_num_logits is None:
+        # Ordinary sampling: one source logits row per request. cu_num_logits
+        # is the CSR prefix sum of source rows, so it has num_reqs + 1 entries.
+        cu_num_logits = torch.arange(
+            num_sampled_tokens.shape[0] + 1,
+            dtype=num_sampled_tokens.dtype,
+            device=num_sampled_tokens.device)
     return torch.ops._xpu_C.compact_sampling_mask(
-        logits, num_sampled_tokens, max_num_kept, max_compact_support)
+        logits, cu_num_logits, num_sampled_tokens, max_num_kept,
+        max_compact_support, rows_per_request)
 
 
 def compact_sampling_mask_triton(
@@ -102,10 +112,17 @@ def compact_sampling_mask_triton(
                               device=device)
     counts = torch.empty(num_reqs, dtype=torch.int32, device=device)
 
+    # Ordinary sampling: one source logits row per request, one output slot.
+    # cu_num_logits is the CSR prefix sum, so it has num_reqs + 1 entries.
+    cu_num_logits = torch.arange(num_reqs + 1,
+                                 dtype=num_sampled_tokens.dtype,
+                                 device=device)
+
     _compact_sampling_mask_kernel[(num_reqs, )](
         logits,
         logits.stride(0),
         logits.stride(1),
+        cu_num_logits,
         num_sampled_tokens,
         token_ids,
         token_ids.stride(0),
@@ -114,6 +131,7 @@ def compact_sampling_mask_triton(
         counts,
         vocab_size,
         max_num_kept,
+        ROWS_PER_REQUEST=1,
         BLOCK_SIZE=8192,
     )
     return token_ids, packed_mask, counts

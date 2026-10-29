@@ -4,10 +4,16 @@ import random
 import pytest
 import torch
 
+import vllm_xpu_kernels._xpu_C  # noqa: F401
 from tests.ops.fp8_quant_op import scaled_fp8_quant
-from tests.utils import format_tc, seed_everything
+from tests.utils import format_tc, run_with_xpu_graph, seed_everything
 from vllm_xpu_kernels.fused_moe_interface import (cutlass_grouped_gemm,
                                                   cutlass_grouped_gemm_xe2)
+
+pytestmark = pytest.mark.skipif(
+    not torch.xpu.is_available() or
+    (not torch.ops._xpu_C.is_bmg(0) and not torch.ops._xpu_C.is_pvc(0)),
+    reason="XE2 CUTLASS tests only run on BMG or PVC.")
 
 DEVICE = "xpu"
 
@@ -105,7 +111,8 @@ def init_rows_for_experts(tokens, topk, num_rows_per_expert):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
                          ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
-def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias, use_graph):
     seed_everything(7)
     num_experts = e
     total_m = m * topk
@@ -125,10 +132,17 @@ def test_xe_grouped_gemm(m, n, k, e, topk, dtype, has_bias):
                                       device=DEVICE,
                                       dtype=torch.int32)
     init_rows_for_experts(m, topk, num_rows_per_expert)
-    output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
 
-    cutlass_grouped_gemm_xe2(input_A, input_B, None, bias, output,
-                             num_rows_per_expert, n, k, num_experts)
+    def run(a, rows_per_expert):
+        output = torch.empty((total_m, n), dtype=dtype, device=DEVICE)
+        cutlass_grouped_gemm_xe2(a, input_B, None, bias, output,
+                                 rows_per_expert, n, k, num_experts)
+        return output
+
+    # Under graph, rows per expert are zeroed during capture.
+    gemm_inputs = [input_A, num_rows_per_expert]
+    output = (run_with_xpu_graph(run, gemm_inputs)
+              if use_graph else run(*gemm_inputs))
 
     # ref gg
     ref = []

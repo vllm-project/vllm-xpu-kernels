@@ -133,6 +133,7 @@ void MoeGatherLauncher(
     switch (TOPK) {                                                            \
       CASE_TOPK(1, ElemsPerItem)                                               \
       CASE_TOPK(2, ElemsPerItem)                                               \
+      CASE_TOPK(3, ElemsPerItem)                                               \
       CASE_TOPK(4, ElemsPerItem)                                               \
       CASE_TOPK(6, ElemsPerItem)                                               \
       CASE_TOPK(7, ElemsPerItem)                                               \

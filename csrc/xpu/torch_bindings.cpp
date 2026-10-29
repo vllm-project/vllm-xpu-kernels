@@ -292,6 +292,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.def("is_xe3_arch(int device_index=-1) -> bool");
   xpu_ops.impl("is_xe3_arch", &is_xe3_arch);
 
+  xpu_ops.def("is_xe3p_arch(int device_index=-1) -> bool");
+  xpu_ops.impl("is_xe3p_arch", &is_xe3p_arch);
+
+  xpu_ops.def("is_cri(int device_index=-1) -> bool");
+  xpu_ops.impl("is_cri", &is_cri);
+
+  xpu_ops.def("is_nvl_p(int device_index=-1) -> bool");
+  xpu_ops.impl("is_nvl_p", &is_nvl_p);
+
   // test only, will not use in vllm
   xpu_ops.def(
       "exponential_2d_(Tensor! tensor, Tensor! seeds, float lambda) -> ()");
@@ -344,8 +353,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl("fused_input_norm", torch::kXPU, &fused_input_norm);
 
   xpu_ops.def(
-      "compact_sampling_mask(Tensor logits, Tensor num_sampled_tokens,"
-      "int max_num_kept, int max_compact_support) -> (Tensor, Tensor, Tensor)");
+      "compact_sampling_mask(Tensor logits, Tensor cu_num_logits, "
+      "Tensor num_sampled_tokens, int max_num_kept, int max_compact_support, "
+      "int rows_per_request) -> (Tensor, Tensor, Tensor)");
   xpu_ops.impl("compact_sampling_mask", torch::kXPU, &compact_sampling_mask);
 }
 
