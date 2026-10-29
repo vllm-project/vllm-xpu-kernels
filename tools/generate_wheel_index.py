@@ -25,10 +25,13 @@ def write_page(path, title, links):
 
 
 def generate_index(releases, output):
-    wheels = {}
+    channels = {"": {}, "nightly/": {}}
     for release in releases:
         if release.get("draft"):
             continue
+        channel = ("nightly/" if release.get("tag_name", "").startswith(
+            "nightly-") else "")
+        wheels = channels[channel]
         for asset in release.get("assets", []):
             name = asset["name"]
             try:
@@ -47,19 +50,24 @@ def generate_index(releases, output):
                 url += f"#sha256={value}"
             wheels[url] = (version, name)
 
-    links = [
-        f'<a href="{escape(url, quote=True)}">{escape(name)}</a><br>'
-        for url, (_, name) in sorted(
-            wheels.items(), key=lambda item: (*item[1], item[0]))
-    ]
-    write_page(output / "whl" / PACKAGE / "index.html",
-               f"Links for {PACKAGE}", links)
+    for channel, wheels in channels.items():
+        links = [
+            f'<a href="{escape(url, quote=True)}">{escape(name)}</a><br>'
+            for url, (_, name) in sorted(
+                wheels.items(), key=lambda item: (*item[1], item[0]))
+        ]
+        write_page(output / "whl" / channel / PACKAGE / "index.html",
+                   f"Links for {PACKAGE} ({channel.rstrip('/') or 'release'})",
+                   links)
+    write_page(output / "whl" / "nightly" / "index.html", "Nightly wheel index",
+               [f'<a href="{PACKAGE}/">{PACKAGE}</a><br>'])
     write_page(output / "whl" / "index.html", "Wheel index",
                [f'<a href="{PACKAGE}/">{PACKAGE}</a><br>'])
     write_page(output / "index.html", "vllm-xpu-kernels wheels",
-               ['<a href="whl/">Wheel index</a>'])
+               ['<a href="whl/">Wheel index</a>',
+                '<a href="whl/nightly/">Nightly wheel index</a>'])
     (output / ".nojekyll").touch()
-    return len(wheels)
+    return sum(len(wheels) for wheels in channels.values())
 
 
 def main():

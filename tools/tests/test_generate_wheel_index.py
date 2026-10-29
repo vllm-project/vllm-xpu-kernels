@@ -63,7 +63,7 @@ class WheelIndexTest(unittest.TestCase):
              for name in names},
         )
         self.assertEqual(self.links("whl/index.html"), ["vllm-xpu-kernels/"])
-        self.assertEqual(self.links("index.html"), ["whl/"])
+        self.assertEqual(self.links("index.html"), ["whl/", "whl/nightly/"])
 
     def test_drafts_and_non_package_assets_are_excluded(self):
         wheel = "vllm_xpu_kernels-1.0-cp39-abi3-linux_x86_64.whl"
@@ -84,6 +84,29 @@ class WheelIndexTest(unittest.TestCase):
         generate_index(releases, self.output)
         self.assertEqual(self.links("whl/vllm-xpu-kernels/index.html"),
                          [BASE_URL + name])
+
+    def test_nightly_channel_is_isolated_from_releases_and_rcs(self):
+        stable = asset("vllm_xpu_kernels-1.0-cp39-abi3-linux_x86_64.whl")
+        rc = asset("vllm_xpu_kernels-1.1rc1-cp39-abi3-linux_x86_64.whl")
+        nightly = asset(
+            "vllm_xpu_kernels-1.1.dev20261029030000+gabcdef1"
+            "-cp39-abi3-linux_x86_64.whl", "sha256:" + "b" * 64)
+        releases = [
+            {"tag_name": "v1.0", "assets": [stable]},
+            {"tag_name": "v1.1rc1", "prerelease": True, "assets": [rc]},
+            {"tag_name": "nightly-20261029-abcdef1", "prerelease": True,
+             "assets": [nightly]},
+            {"tag_name": "nightly-draft", "draft": True, "assets": [stable]},
+        ]
+        self.assertEqual(generate_index(releases, self.output), 3)
+        self.assertEqual(
+            set(self.links("whl/vllm-xpu-kernels/index.html")),
+            {stable["browser_download_url"], rc["browser_download_url"]})
+        self.assertEqual(
+            self.links("whl/nightly/vllm-xpu-kernels/index.html"),
+            [nightly["browser_download_url"] + "#sha256=" + "b" * 64])
+        self.assertEqual(self.links("whl/nightly/index.html"),
+                         ["vllm-xpu-kernels/"])
 
     def test_invalid_digest_is_rejected(self):
         name = "vllm_xpu_kernels-1.0-cp39-abi3-linux_x86_64.whl"

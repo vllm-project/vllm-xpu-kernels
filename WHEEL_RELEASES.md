@@ -38,11 +38,12 @@ already configure a custom Pages domain. The deployment's environment URL is
 the source of truth for the site base URL. For a fork, replace the owner and
 repository path with the fork's values.
 
-Only public, non-draft releases should be used for distribution. Pre-release
-wheels are included; pip normally selects stable versions unless `--pre` or an
-explicit pre-release version is requested. Assets for other packages are
-ignored. SHA-256 fragments are included when GitHub supplies an asset digest;
-older assets without a digest remain installable without a hash fragment.
+Only public, non-draft releases should be used for distribution. Releases with
+a `nightly-` tag prefix go to `/whl/nightly/`; all other releases, including RCs,
+go to `/whl/`. pip normally selects stable versions unless `--pre` or an explicit
+pre-release version is requested. Assets for other packages are ignored.
+SHA-256 fragments are included when GitHub supplies an asset digest; older
+assets without a digest remain installable without a hash fragment.
 
 The workflow refreshes on release publication, editing, or deletion, and on
 generator changes on `main`. Uploading, replacing, or deleting an asset on an
@@ -112,8 +113,8 @@ metadata; do not just rename the output. Consumers must then pin the complete
 local version. A plain `==X.Y.Z` requirement can also match local variants and
 is not sufficient to choose between them.
 
-This initial index deliberately uses one package listing, not separate
-Torch/XPU channels. If channels are needed later, define a compatibility matrix
+Each release/nightly channel uses one package listing, not separate Torch/XPU
+channels. If those channels are needed later, define a compatibility matrix
 and channel naming convention first.
 
 ## Install with pip
@@ -162,3 +163,70 @@ a dedicated `wheels.example.com` project domain would serve the index at
 `https://wheels.example.com/whl/` without the repository path. Update install
 commands to match the actual deployed URL; binary links still point to GitHub
 Releases.
+
+## Nightly wheels
+
+The existing **wheel-per-commit** workflow builds and publishes nightly wheels
+after a successful **run unit tests on Intel GPU.** run on `main`, for both
+pushes and the existing daily scheduled test run. This reuses the native build
+job rather than adding another nightly build matrix. The checkout uses the
+upstream run's exact `head_sha`, not the latest moving `main`.
+
+You can also run **Actions > wheel-per-commit > Run workflow > main** manually.
+Manual builds do not wait for a test run. Dispatches on other branches, PR test
+runs, failed test runs, and runs from other repositories cannot publish.
+Merge these changes into `main` before triggering the workflow.
+
+The build derives a base version from the nearest reachable `v[0-9]*` tag:
+it increments the final numeric component of a final release, or retains the
+base of a prerelease tag. A UTC timestamp, commit SHA, workflow run ID, and
+attempt number produce a unique development version, for example:
+
+```text
+Tag used for versioning: v0.1.16
+Wheel version:          0.1.17.dev20261029030000+gabcdef1.r12345.a1
+Release tag:            nightly-20261029030000-abcdef1-12345-1
+```
+
+`VLLM_VERSION_OVERRIDE` sets the version during the native build. Before
+publication, the workflow checks both the filename and wheel metadata against
+that version. Existing ABI/platform build settings are unchanged; these checks
+do not replace native compatibility testing.
+
+A separate Ubuntu publishing job downloads only this run's wheel artifact and
+uses `contents: write` to create a draft prerelease at the built commit, upload
+the wheels and build information, and publish it with `--latest=false`.
+The native build job has read-only repository permissions. Retrying publication
+can resume an existing draft; already-published releases are not overwritten.
+
+After publication, releases older than 30 days are deleted **only** if they
+have the `nightly-` tag prefix, are prereleases, and are not drafts. This prefix
+is reserved for nightly releases. Formal releases and RC releases are retained.
+Deletion removes release assets but leaves Git tags intact; old nightly URLs
+are therefore not permanent. Cleanup runs after successful publishing, not on
+an independent daily schedule.
+
+The index workflow refreshes after a successful `wheel-per-commit` completion.
+This explicit `workflow_run` trigger is necessary because releases created
+with `GITHUB_TOKEN` do not trigger another workflow's `release` event. Both
+workflows must exist on the default branch. The six-hour index refresh and
+manual index dispatch remain available as fallbacks.
+
+Nightly index URLs:
+
+```text
+https://vllm-project.github.io/vllm-xpu-kernels/whl/nightly/
+https://vllm-project.github.io/vllm-xpu-kernels/whl/nightly/vllm-xpu-kernels/
+```
+
+With compatible PyTorch XPU and runtime dependencies already installed:
+
+```bash
+pip install --upgrade --pre --no-deps --only-binary=vllm-xpu-kernels \
+  --index-url https://vllm-project.github.io/vllm-xpu-kernels/whl/nightly/ \
+  vllm-xpu-kernels
+```
+
+Use the full development version with `==` to pin a particular retained build.
+For `--find-links`, use the nightly **package listing** URL. The formal release
+index excludes nightly-tagged releases, even when installing with `--pre`.

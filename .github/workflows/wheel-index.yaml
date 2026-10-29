@@ -3,6 +3,11 @@ name: Publish wheel index
 on:
   release:
     types: [published, edited, deleted]
+  # GITHUB_TOKEN release uploads do not trigger another release workflow.
+  workflow_run:
+    workflows: ["wheel-per-commit"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
   # Asset uploads/deletions do not emit release events.
   schedule:
@@ -11,13 +16,17 @@ on:
     branches: [main]
     paths:
       - .github/workflows/wheel-index.yaml
+      - .github/workflows/wheel-per-commit.yaml
       - tools/generate_wheel_index.py
-      - tools/tests/test_generate_wheel_index.py
+      - tools/nightly_release.py
+      - tools/tests/**
   pull_request:
     paths:
       - .github/workflows/wheel-index.yaml
+      - .github/workflows/wheel-per-commit.yaml
       - tools/generate_wheel_index.py
-      - tools/tests/test_generate_wheel_index.py
+      - tools/nightly_release.py
+      - tools/tests/**
 
 permissions:
   contents: read
@@ -29,6 +38,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    if: |
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     permissions:
       contents: read
       pages: read
