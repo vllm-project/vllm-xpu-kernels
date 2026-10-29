@@ -192,7 +192,8 @@ void concat_and_cache_mla(
     torch::Tensor& kv_cache,
     torch::Tensor& slot_mapping,
     const std::string& kv_cache_dtype,
-    torch::Tensor& scale);
+    torch::Tensor& scale,
+    bool skip_scale);
 
 void gather_cache(
     torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]

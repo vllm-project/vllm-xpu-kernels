@@ -338,7 +338,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                     Tensor! kv_cache,"
       "                     Tensor slot_mapping,"
       "                     str kv_cache_dtype,"
-      "                     Tensor scale) -> ()");
+      "                     Tensor scale,"
+      "                     bool skip_scale=False) -> ()");
   cache_ops.impl("concat_and_cache_mla", torch::kXPU, &concat_and_cache_mla);
 
   // Gather cache blocks from src_cache to dst.
