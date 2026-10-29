@@ -223,7 +223,17 @@ void per_token_group_quant_mxfp4(
       output_s.size(1) == last_dim / group_size &&
       reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0 &&
       reinterpret_cast<uintptr_t>(output_q.data_ptr()) % 16 == 0;
-  if (!moe_layout.enabled() && half_input && tile_aligned) {
+  // The half kernels give each work item a whole 32-element group, so small
+  // inputs leave most lanes idle; the per-row vector kernel below spreads a
+  // group over four lanes and has lower latency there.
+  auto& queue = vllm::xpu::vllmGetQueue();
+  const int eu_count = static_cast<int>(
+      queue.get_device().get_info<sycl::info::device::max_compute_units>());
+  const int64_t saturate_chunks = static_cast<int64_t>(eu_count) * 128;
+  const bool small_input =
+      input.numel() / (16 / input.element_size()) < saturate_chunks;
+  if (!moe_layout.enabled() && half_input && tile_aligned &&
+      (scale_is_e8m0 || !small_input)) {
     launch_mxfp4_half_quant(input, output_q, output_s, eps, scale_is_e8m0);
     return;
   }
@@ -258,7 +268,6 @@ void per_token_group_quant_mxfp4(
 
   sycl::range<1> grid(num_blocks);
   sycl::range<1> block(num_threads);
-  auto& queue = vllm::xpu::vllmGetQueue();
 
   const int hidden = static_cast<int>(input.size(-1));
   const int64_t num_rows = input.numel() / hidden;
@@ -268,9 +277,6 @@ void per_token_group_quant_mxfp4(
       is_column_major ? static_cast<int64_t>(scale_stride) : 1LL;
 
   bool use_vec = (hidden % group_size == 0);
-
-  const int eu_count = static_cast<int>(
-      queue.get_device().get_info<sycl::info::device::max_compute_units>());
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_mxfp4_kernel", [&] {
@@ -389,23 +395,36 @@ void per_token_group_quant_mxfp4(
                 }
               }
             }
-            queue.submit([&](sycl::handler& cgh) {
-              auto kernel = vllm::mxfp4::
-                  per_token_group_quant_mxfp4_vec_kernel<scalar_t, CPT>(
-                      output_q.data_ptr<uint8_t>(),
-                      scale_ptr,
-                      input.data_ptr<scalar_t>(),
-                      hidden,
-                      static_cast<int>(group_size),
-                      static_cast<float>(eps),
-                      scale_stride_token,
-                      scale_stride_group,
-                      static_cast<int>(num_rows),
-                      rows_per_wg,
-                      moe_layout);
-              cgh.parallel_for(
-                  sycl::nd_range<1>(num_wgs * wg_size, wg_size), kernel);
-            });
+            auto submit = [&](auto multi_row_tag) {
+              queue.submit([&](sycl::handler& cgh) {
+                auto kernel =
+                    vllm::mxfp4::per_token_group_quant_mxfp4_vec_kernel<
+                        scalar_t,
+                        CPT,
+                        false,
+                        false,
+                        false,
+                        decltype(multi_row_tag)::value>(
+                        output_q.data_ptr<uint8_t>(),
+                        scale_ptr,
+                        input.data_ptr<scalar_t>(),
+                        hidden,
+                        static_cast<int>(group_size),
+                        static_cast<float>(eps),
+                        scale_stride_token,
+                        scale_stride_group,
+                        static_cast<int>(num_rows),
+                        rows_per_wg,
+                        moe_layout);
+                cgh.parallel_for(
+                    sycl::nd_range<1>(num_wgs * wg_size, wg_size), kernel);
+              });
+            };
+            if (rows_per_wg == 1) {
+              submit(std::false_type{});
+            } else {
+              submit(std::true_type{});
+            }
           };
           if (cpt == 4) {
             launch(std::integral_constant<int, 4>{});

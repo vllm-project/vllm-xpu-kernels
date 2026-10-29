@@ -161,12 +161,15 @@ class per_token_group_quant_mxfp4_kernel {
 // CPT == chunks_per_group the cross-lane absmax reduction disappears.
 // FUSE_SILU_MUL folds a SwiGLU activation into the load: the row then holds
 // the gate and up halves back to back and is twice as wide.
+// MULTI_ROW = false requires rows_per_wg == 1 and drops the row-packing index
+// math, which is measurable on the latency-bound few-row launches.
 template <
     typename scalar_t,
     int CPT = 1,
     bool FLAT_GROUPS = false,
     bool FUSE_SILU_MUL = false,
-    bool CLAMP = false>
+    bool CLAMP = false,
+    bool MULTI_ROW = true>
 class per_token_group_quant_mxfp4_vec_kernel {
  private:
   uint8_t* __restrict__ out;
@@ -228,13 +231,25 @@ class per_token_group_quant_mxfp4_vec_kernel {
     // Packing rows_per_wg rows into one work-group keeps every lane issuing
     // loads when a row is narrower than a sub-group. Under FLAT_GROUPS a
     // 32-element group is itself treated as a row.
-    const int stride = FLAT_GROUPS ? 1 : local_range / rows_per_wg;
-    const int row_idx =
-        FLAT_GROUPS
-            ? static_cast<int>(item.get_global_id(0))
-            : static_cast<int>(item.get_group(0)) * rows_per_wg + tid / stride;
-    const int t0 = FLAT_GROUPS ? 0 : tid % stride;
-    if (row_idx >= num_rows) return;
+    int stride;
+    int row_idx;
+    int t0;
+    if constexpr (FLAT_GROUPS) {
+      stride = 1;
+      row_idx = static_cast<int>(item.get_global_id(0));
+      t0 = 0;
+      if (row_idx >= num_rows) return;
+    } else if constexpr (!MULTI_ROW) {
+      stride = local_range;
+      row_idx = static_cast<int>(item.get_group(0));
+      t0 = tid;
+    } else {
+      stride = local_range / rows_per_wg;
+      row_idx =
+          static_cast<int>(item.get_group(0)) * rows_per_wg + tid / stride;
+      t0 = tid % stride;
+      if (row_idx >= num_rows) return;
+    }
 
     // With FUSE_SILU_MUL the row holds gate and up back to back, so it is
     // twice as wide and the up half starts num_chunks vectors in.
