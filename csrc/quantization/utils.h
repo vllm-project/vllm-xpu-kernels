@@ -14,6 +14,30 @@ struct alignas(vec_size * sizeof(scalar_t)) vec_n_t {
 template <typename scalar_t>
 using vec4_t = vec_n_t<scalar_t, 4>;
 
+// N one-byte outputs (e.g. fp8) packed into 32-bit words and written with one
+// N-byte store. Assembling a vec_n_t of one-byte elements costs a register
+// move per byte, which made vectorized fp8 stores slower than scalar ones on
+// some GPUs; shifting into words keeps the vector store cheap everywhere.
+template <int N>
+struct PackedBytes {
+  static_assert(N % 4 == 0, "PackedBytes needs a multiple of 4 bytes");
+  uint32_t words[N / 4] = {};
+
+  inline void set(int i, uint8_t byte) {
+    words[i / 4] |= static_cast<uint32_t>(byte) << ((i % 4) * 8);
+  }
+
+  // dst must be N-byte aligned.
+  inline void store(void* dst) const {
+    vec_n_t<uint32_t, N / 4> v;
+#pragma unroll
+    for (int w = 0; w < N / 4; ++w) {
+      v.val[w] = words[w];
+    }
+    *reinterpret_cast<vec_n_t<uint32_t, N / 4>*>(dst) = v;
+  }
+};
+
 template <int VEC_SIZE, typename InT, typename OutT, typename ScaOp>
 struct DefaultVecOp {
   ScaOp scalar_op;

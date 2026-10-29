@@ -867,12 +867,11 @@ class rms_norm_static_fp8_quant_kernel {
 
     // Pass 2: normalize, apply weight, quantize — same vectorization as Pass 1
     const auto* v_w = reinterpret_cast<const vec_t*>(weight);
-    using out_vec_t = vllm::xpu::aligned_vec<out_t, VEC_SIZE>;
-    auto* v_out = reinterpret_cast<out_vec_t*>(token_output);
+    constexpr bool kPackStore = VEC_SIZE % 4 == 0;
     for (int i = tid; i < nvec; i += local_range) {
       vec_t src = v_in[i];
       vec_t wgt = v_w[i];
-      out_vec_t out_vec;
+      PackedBytes<kPackStore ? VEC_SIZE : 4> packed;
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(src[j]);
@@ -880,10 +879,17 @@ class rms_norm_static_fp8_quant_kernel {
         // CUDA, applying a single rounding at store time.
         float norm_x = x * inv_rms * static_cast<float>(wgt[j]);
         float q = norm_x * scale_inv;
-        out_vec[j] =
+        const out_t o =
             static_cast<out_t>(sycl::max(sycl::min(q, fp8_max), -fp8_max));
+        if constexpr (kPackStore) {
+          packed.set(j, o.x);
+        } else {
+          token_output[i * VEC_SIZE + j] = o;
+        }
       }
-      v_out[i] = out_vec;
+      if constexpr (kPackStore) {
+        packed.store(token_output + i * VEC_SIZE);
+      }
     }
   }
 
@@ -965,12 +971,11 @@ class fused_add_rms_norm_static_fp8_quant_kernel {
 
     // Pass 2: normalize from residual, apply weight, quantize
     const auto* v_w = reinterpret_cast<const vec_t*>(weight);
-    using out_vec_t = vllm::xpu::aligned_vec<out_t, VEC_SIZE>;
-    auto* v_out = reinterpret_cast<out_vec_t*>(token_output);
+    constexpr bool kPackStore = VEC_SIZE % 4 == 0;
     for (int i = tid; i < nvec; i += local_range) {
       vec_t res = v_res[i];
       vec_t wgt = v_w[i];
-      out_vec_t out_vec;
+      PackedBytes<kPackStore ? VEC_SIZE : 4> packed;
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; j++) {
         float x = static_cast<float>(res[j]);
@@ -978,10 +983,17 @@ class fused_add_rms_norm_static_fp8_quant_kernel {
         // CUDA, applying a single rounding at store time.
         float norm_x = x * inv_rms * static_cast<float>(wgt[j]);
         float q = norm_x * scale_inv;
-        out_vec[j] =
+        const out_t o =
             static_cast<out_t>(sycl::max(sycl::min(q, fp8_max), -fp8_max));
+        if constexpr (kPackStore) {
+          packed.set(j, o.x);
+        } else {
+          token_output[i * VEC_SIZE + j] = o;
+        }
       }
-      v_out[i] = out_vec;
+      if constexpr (kPackStore) {
+        packed.store(token_output + i * VEC_SIZE);
+      }
     }
   }
 
@@ -1361,13 +1373,15 @@ void call_rms_norm_static_fp8_quant_kernel(
   const int input_stride = input.stride(-2);
   const int64_t num_tokens = input.numel() / hidden_size;
 
+  // Match CUDA: smaller blocks when num_tokens is large for better occupancy
+  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+
   // Dispatch VEC_SIZE = gcd(16 / sizeof(sycl_t), hidden_size) matching CUDA
   const int candidate_vec_size =
       std::gcd(static_cast<int>(16 / sizeof(sycl_t)), hidden_size);
   const int vec_size =
       (input_stride % candidate_vec_size == 0) ? candidate_vec_size : 1;
-  const int block_size =
-      fused_quant_block_size(hidden_size / vec_size, 4, true);
+  const int block_size = std::min(hidden_size / vec_size, max_block_size);
 
   auto& queue = vllm::xpu::vllmGetQueue();
 

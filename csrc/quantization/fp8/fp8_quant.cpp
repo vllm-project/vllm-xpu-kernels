@@ -240,14 +240,23 @@ class scaled_fp8_quant_kernel_strided_group_shape_vec {
 
 #pragma unroll
         for (int j = 0; j < CPT; ++j) {
+          constexpr bool kPackStore = VEC % 4 == 0;
           vec_n_t<fp8_type, VEC> o;
+          PackedBytes<kPackStore ? VEC : 4> packed;
 #pragma unroll
           for (int k = 0; k < VEC; ++k) {
             const float inv = inv_scale[ELEM_SCALE ? j * VEC + k : 0];
             fp8::ConvertWithScaleOp<true, fp8_type> op{inv};
             op(o.val[k], xv[j].val[k]);
+            if constexpr (kPackStore) {
+              packed.set(k, o.val[k].x);
+            }
           }
-          row_out[c0 + j] = o;
+          if constexpr (kPackStore) {
+            packed.store(row_out + c0 + j);
+          } else {
+            row_out[c0 + j] = o;
+          }
         }
       }
     }
