@@ -30,7 +30,7 @@ struct chunk_causal_conv1d_kernel {
       const T* conv_weights,
       const T* conv_bias,
       T* conv_states,
-      const int conv_states_stride_0,
+      const ConvStateStrides conv_states_strides,
       T* conv_states_tmp,
       int* query_start_loc,
       int* cache_indices,
@@ -60,7 +60,7 @@ struct chunk_causal_conv1d_kernel {
         conv_weights(conv_weights),
         conv_bias(conv_bias),
         conv_states(conv_states),
-        conv_states_stride_0(conv_states_stride_0),
+        conv_states_strides(conv_states_strides),
         conv_states_tmp(conv_states_tmp),
         query_start_loc(query_start_loc),
         cache_indices(cache_indices),
@@ -200,8 +200,8 @@ struct chunk_causal_conv1d_kernel {
     const bool has_init_conv_states =
         (has_initial_state == nullptr ||
          (has_initial_state != nullptr && has_initial_state[batch_id]));
-    T* conv_states_ptr =
-        conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
+    T* conv_states_ptr = conv_states + static_cast<int64_t>(states_id) *
+                                           conv_states_strides.slot;
 
     // load weights
     T local_weights[Width * elems_per_item];
@@ -232,9 +232,9 @@ struct chunk_causal_conv1d_kernel {
       for (int i = 0; i < states_load_len; ++i) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          local_input[Width * e + i] = conv_states_ptr
-              [(Width - 1 - states_load_len + i) * conv_elems +
-               reordered_elems_offset + e];
+          local_input[Width * e + i] =
+              conv_states_ptr[conv_states_strides.offset(
+                  Width - 1 - states_load_len + i, reordered_elems_offset + e)];
         }
       }
     }
@@ -291,8 +291,8 @@ struct chunk_causal_conv1d_kernel {
       for (int i = 0; i < Width - 1; ++i) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          conv_states_ptr[i * conv_elems + reordered_elems_offset + e] =
-              local_input[Width * e + i + 1];
+          conv_states_ptr[conv_states_strides.offset(
+              i, reordered_elems_offset + e)] = local_input[Width * e + i + 1];
         }
       }
     }
@@ -407,7 +407,7 @@ struct chunk_causal_conv1d_kernel {
   const T* conv_weights;
   const T* conv_bias;
   T* conv_states;
-  const int conv_states_stride_0;
+  const ConvStateStrides conv_states_strides;
   T* conv_states_tmp;
   const int32_t* query_start_loc;
   const int* cache_indices;
@@ -584,7 +584,7 @@ struct chunk_update_states_kernel {
 
   chunk_update_states_kernel(
       T* conv_states,
-      const int conv_states_stride_0,
+      const ConvStateStrides conv_states_strides,
       const T* conv_states_tmp,
       const int* cache_indices,
       const int width,
@@ -592,7 +592,7 @@ struct chunk_update_states_kernel {
       const int32_t* query_start_loc,
       const int batch_size)
       : conv_states(conv_states),
-        conv_states_stride_0(conv_states_stride_0),
+        conv_states_strides(conv_states_strides),
         conv_states_tmp(conv_states_tmp),
         cache_indices(cache_indices),
         width(width),
@@ -625,15 +625,15 @@ struct chunk_update_states_kernel {
     }
 
     int states_id = cache_indices[batch_id];
-    T* conv_states_ptr =
-        conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
+    T* conv_states_ptr = conv_states + static_cast<int64_t>(states_id) *
+                                           conv_states_strides.slot;
     const T* conv_states_tmp_ptr =
         conv_states_tmp + batch_id * (width - 1) * conv_elems;
     for (int i = elems_start_offset_group + local_id;
          i < (local_group_id + 1) * elems_per_group;
          i += group_size) {
       if (i < conv_elems) {
-        conv_states_ptr[width_id * conv_elems + i] =
+        conv_states_ptr[conv_states_strides.offset(width_id, i)] =
             conv_states_tmp_ptr[width_id * conv_elems + i];
       }
     }
@@ -641,7 +641,7 @@ struct chunk_update_states_kernel {
 
  private:
   T* conv_states;
-  const int conv_states_stride_0;
+  const ConvStateStrides conv_states_strides;
   const T* conv_states_tmp;
   const int* cache_indices;
   const int width;
@@ -664,7 +664,7 @@ void kernel_launcher(
     const T* conv_weights,
     const T* conv_bias,
     T* conv_states,
-    const int conv_states_stride_0,
+    const ConvStateStrides conv_states_strides,
     T* conv_states_tmp,
     int* query_start_loc,
     int* cache_indices,
@@ -708,7 +708,7 @@ void kernel_launcher(
           conv_weights,
           conv_bias,
           conv_states,
-          conv_states_stride_0,
+          conv_states_strides,
           conv_states_tmp,
           query_start_loc,
           cache_indices,
@@ -764,7 +764,7 @@ void kernel_launcher(
     queue.submit([&](sycl::handler& cgh) {
       KERNEL_UPDATE task(
           conv_states,
-          conv_states_stride_0,
+          conv_states_strides,
           conv_states_tmp,
           cache_indices,
           Width,
@@ -795,9 +795,11 @@ void chunk_causal_conv1d_xe2(
     const std::optional<torch::Tensor>&
         conv_bias,  // [num_k_heads * (2 * head_k_dim + head_v_dim * num_v_heads
                     // / num_k_heads)] or None
-    torch::Tensor&
-        conv_states,  // [cache_batch_size, width - 1, num_k_heads * (2 *
-                      // head_k_dim + head_v_dim * num_v_heads / num_k_heads)]
+    torch::Tensor& conv_states,  // SD [cache_batch_size, state_len, conv_elems]
+                                 // or DS [cache_batch_size, conv_elems,
+                                 // state_len], with state_len >= width - 1 and
+                                 // conv_elems = num_k_heads * (2 * head_k_dim +
+                                 // head_v_dim * num_v_heads / num_k_heads)
     const torch::Tensor& query_start_loc,  // [batch_size + 1]
     const torch::Tensor& cache_indices,    // [batch_size]
     const std::optional<torch::Tensor>&
@@ -826,7 +828,8 @@ void chunk_causal_conv1d_xe2(
   const int qkvz_elems = mixed_qkvz.size(1);
   const int conv_elems = conv_weights.size(0);
   const int width = conv_weights.size(1);
-  const int conv_states_stride_0 = conv_states.stride(0);
+  const ConvStateStrides conv_states_strides =
+      get_conv_state_strides(conv_states, conv_elems, width);
 
   auto dtype = conv_states.dtype();
   auto device = conv_states.device();
@@ -850,7 +853,7 @@ void chunk_causal_conv1d_xe2(
           ? reinterpret_cast<scalar_t*>(conv_bias->data_ptr())     \
           : nullptr,                                               \
       reinterpret_cast<scalar_t*>(conv_states.data_ptr()),         \
-      conv_states_stride_0,                                        \
+      conv_states_strides,                                         \
       reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),     \
       reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
       reinterpret_cast<int*>(cache_indices.data_ptr()),            \

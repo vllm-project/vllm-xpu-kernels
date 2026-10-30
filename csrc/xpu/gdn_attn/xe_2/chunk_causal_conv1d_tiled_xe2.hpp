@@ -43,7 +43,7 @@ struct chunk_causal_conv1d_tiled_kernel {
       const T* conv_weights,
       const T* conv_bias,
       T* conv_states,
-      const int conv_states_stride_0,
+      const ConvStateStrides conv_states_strides,
       T* conv_states_tmp,
       int* query_start_loc,
       int* cache_indices,
@@ -72,7 +72,7 @@ struct chunk_causal_conv1d_tiled_kernel {
         conv_weights(conv_weights),
         conv_bias(conv_bias),
         conv_states(conv_states),
-        conv_states_stride_0(conv_states_stride_0),
+        conv_states_strides(conv_states_strides),
         conv_states_tmp(conv_states_tmp),
         query_start_loc(query_start_loc),
         cache_indices(cache_indices),
@@ -217,8 +217,8 @@ struct chunk_causal_conv1d_tiled_kernel {
     const bool has_init_conv_states =
         (has_initial_state == nullptr ||
          (has_initial_state != nullptr && has_initial_state[batch_id]));
-    T* conv_states_ptr =
-        conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
+    T* conv_states_ptr = conv_states + static_cast<int64_t>(states_id) *
+                                           conv_states_strides.slot;
 
     // ========================================================================
     // Phase 1: COOPERATIVE load of (TileT + Width - 1) tokens into SLM
@@ -302,8 +302,8 @@ struct chunk_causal_conv1d_tiled_kernel {
           if (has_init_conv_states && state_row >= 0 && state_row < Width - 1) {
 #pragma unroll
             for (int e = 0; e < elems_per_item; ++e) {
-              vals[e] =
-                  conv_states_ptr[state_row * conv_elems + reordered_feat + e];
+              vals[e] = conv_states_ptr[conv_states_strides.offset(
+                  state_row, reordered_feat + e)];
             }
           } else {
 #pragma unroll
@@ -583,14 +583,14 @@ struct chunk_causal_conv1d_tiled_kernel {
         }
       }
     } else if (seq_len == 1) {
-      T* st =
-          conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
+      T* st = conv_states +
+              static_cast<int64_t>(states_id) * conv_states_strides.slot;
 #pragma unroll
       for (int i = 0; i < Width - 1; ++i) {
         int slot = i + 1;
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          st[i * conv_elems + reordered_feat + e] =
+          st[conv_states_strides.offset(i, reordered_feat + e)] =
               slm_input[slot * feats_per_wg + local_feat + e];
         }
       }
@@ -609,7 +609,7 @@ struct chunk_causal_conv1d_tiled_kernel {
   const T* conv_weights;
   const T* conv_bias;
   T* conv_states;
-  const int conv_states_stride_0;
+  const ConvStateStrides conv_states_strides;
   T* conv_states_tmp;
   const int32_t* query_start_loc;
   const int* cache_indices;
@@ -643,7 +643,7 @@ void tiled_kernel_launcher(
     const T* conv_weights,
     const T* conv_bias,
     T* conv_states,
-    const int conv_states_stride_0,
+    const ConvStateStrides conv_states_strides,
     T* conv_states_tmp,
     int* query_start_loc,
     int* cache_indices,
@@ -692,7 +692,7 @@ void tiled_kernel_launcher(
           conv_weights,
           conv_bias,
           conv_states,
-          conv_states_stride_0,
+          conv_states_strides,
           conv_states_tmp,
           query_start_loc,
           cache_indices,
@@ -722,7 +722,7 @@ void tiled_kernel_launcher(
     queue.submit([&](sycl::handler& cgh) {
       KERNEL_UPDATE task(
           conv_states,
-          conv_states_stride_0,
+          conv_states_strides,
           conv_states_tmp,
           cache_indices,
           Width,
@@ -774,7 +774,8 @@ void chunk_causal_conv1d_tiled_xe2(
   const int qkvz_elems = mixed_qkvz.size(1);
   const int conv_elems = conv_weights.size(0);
   const int width = conv_weights.size(1);
-  const int conv_states_stride_0 = conv_states.stride(0);
+  const ConvStateStrides conv_states_strides =
+      get_conv_state_strides(conv_states, conv_elems, width);
 
   // Upper bound on tile count: each token can start a new tile at worst,
   // plus each batch boundary can add one partial tile. The kernel handles
@@ -809,7 +810,7 @@ void chunk_causal_conv1d_tiled_xe2(
           ? reinterpret_cast<scalar_t*>(conv_bias->data_ptr())     \
           : nullptr,                                               \
       reinterpret_cast<scalar_t*>(conv_states.data_ptr()),         \
-      conv_states_stride_0,                                        \
+      conv_states_strides,                                         \
       reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),     \
       reinterpret_cast<int*>(query_start_loc.data_ptr()),          \
       reinterpret_cast<int*>(cache_indices.data_ptr()),            \

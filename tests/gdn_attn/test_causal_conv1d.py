@@ -21,8 +21,11 @@ CHUNK_SIZE_XE2 = 64
 # split helper and token-distribution helper from the gdn attention test, but
 # assert against a standalone conv-stage reference defined below (no call into
 # the fused ref_gdn_attention).
+from test_gdn_attn import CONV_STATE_LAYOUTS  # noqa: E402
 from test_gdn_attn import _extract_qkv_b_a_z  # noqa: E402
+from test_gdn_attn import conv_state_as_sd  # noqa: E402
 from test_gdn_attn import simple_random_distribute  # noqa: E402
+from test_gdn_attn import to_conv_state_layout  # noqa: E402
 
 # QWEN NEXT shape
 NUM_TOKENS = [1, 32, 1024, 8192]
@@ -41,6 +44,9 @@ DTYPES = [torch.float16, torch.bfloat16]
 
 NUM_SPEC_DECODES = [1, 4]
 NUM_SPEC_TOKENS = [2, 3]  # num_speculative_tokens + 1
+
+# Extra conv-state rows past width - 1 (vLLM adds num_spec of them).
+CONV_STATE_PAD = [0, 2]
 
 # Override pytest parameters when enabling mini pytest
 MINI_PYTEST_PARAMS = {
@@ -359,10 +365,13 @@ def _assert_conv_intermediates(intermediates, ref_q, ref_k, ref_v, ref_b,
 @pytest.mark.parametrize("mode", MODE)
 @pytest.mark.parametrize("reorder_input", REORDER_INPUT)
 @pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@pytest.mark.parametrize("conv_state_layout", CONV_STATE_LAYOUTS)
+@pytest.mark.parametrize("conv_state_pad", CONV_STATE_PAD)
 @torch.inference_mode()
 def test_causal_conv1d(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                        num_v_heads, head_v_dim, width, tp_size, has_bias,
-                       activation, reorder_input, mode, dtype):
+                       activation, reorder_input, mode, dtype,
+                       conv_state_layout, conv_state_pad):
     # FIXME: remove skip
     if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
             and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
@@ -407,6 +416,12 @@ def test_causal_conv1d(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                              dtype=dtype,
                              device=device)
     ref_conv_state = conv_state.clone()
+    # The kernel must leave rows past width - 1 untouched.
+    pad_rows = torch.randn((cache_batch_size, conv_state_pad, mixed_qkv_size),
+                           dtype=dtype,
+                           device=device)
+    conv_state = to_conv_state_layout(torch.cat([conv_state, pad_rows], dim=1),
+                                      conv_state_layout)
 
     conv_weights = torch.randn((mixed_qkv_size, width),
                                dtype=dtype,
@@ -491,12 +506,17 @@ def test_causal_conv1d(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
     # Conv stage writes z and updates conv_state.
     torch.testing.assert_close(z, ref_z, atol=atol, rtol=rtol)
 
+    conv_state_sd = conv_state_as_sd(conv_state, conv_state_layout)
     for i in range(batch_size):
         state_id = non_spec_state_indices_tensor[i]
-        torch.testing.assert_close(conv_state[state_id],
+        torch.testing.assert_close(conv_state_sd[state_id, :width - 1],
                                    ref_conv_state[state_id],
                                    atol=atol,
                                    rtol=rtol)
+    torch.testing.assert_close(conv_state_sd[:, width - 1:],
+                               pad_rows,
+                               atol=0,
+                               rtol=0)
 
     # Conv stage also returns the {q, k, v, b, a} intermediates.
     _assert_conv_intermediates(intermediates, ref_q, ref_k, ref_v, ref_b,
@@ -517,11 +537,12 @@ def test_causal_conv1d(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
 @pytest.mark.parametrize("reorder_input", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16],
                          ids=format_tc)
+@pytest.mark.parametrize("conv_state_layout", CONV_STATE_LAYOUTS)
 @torch.inference_mode()
 def test_causal_conv1d_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                            head_k_dim, num_v_heads, head_v_dim, width,
                            tp_size, has_bias, activation, reorder_input,
-                           dtype):
+                           dtype, conv_state_layout):
     """Pure spec-decode conv stage, single-cache-line sliding-window layout.
     Asserts z and the column-0 conv-state slot match the reference."""
     if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
@@ -565,10 +586,12 @@ def test_causal_conv1d_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                                      mixed_qkv_size,
                                      dtype=dtype,
                                      device=device)
+    conv_state_storage = to_conv_state_layout(conv_state_storage,
+                                              conv_state_layout)
     conv_state = conv_state_storage[:cache_batch_size, layer_idx]
     assert conv_state.stride(0) != state_len * mixed_qkv_size
     neighbor_states = conv_state_storage[:, (0, 2)].clone()
-    ref_conv_state = conv_state.clone()
+    ref_conv_state = conv_state_as_sd(conv_state, conv_state_layout).clone()
     conv_weights = torch.randn(mixed_qkv_size,
                                width,
                                dtype=dtype,
@@ -661,7 +684,8 @@ def test_causal_conv1d_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
     # Conv writes back to column 0; assert that slot.
     for n in range(num_spec_decodes):
         slot = int(spec_state_indices_tensor[n, 0].item())
-        torch.testing.assert_close(conv_state[slot],
+        torch.testing.assert_close(conv_state_as_sd(conv_state,
+                                                    conv_state_layout)[slot],
                                    ref_conv_state[slot],
                                    atol=atol,
                                    rtol=rtol)
