@@ -32,7 +32,7 @@ jobs:
       release_tag: ${{ steps.metadata.outputs.release_tag }}
       artifact_id: ${{ steps.upload-artifact.outputs.artifact-id }}
     container:                      
-      image: pytorch/manylinux2_28-builder:xpu-v2.14.0-rc10
+      image: pytorch/manylinux2_28-builder:xpu-v2.15.0-rc10
       options: --user root
     steps:
       - name: Checkout
