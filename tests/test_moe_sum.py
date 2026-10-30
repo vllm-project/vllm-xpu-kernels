@@ -36,7 +36,7 @@ def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
 
-    opcheck(torch.ops._moe_C.moe_sum, (input, actual, None, None))
+    opcheck(torch.ops._moe_C.moe_sum, (input, actual))
 
 
 @pytest.mark.parametrize("m", [1, 33, 64])
