@@ -1514,6 +1514,280 @@ void gather_cache(
   }
 }
 
+namespace vllm {
+
+struct CpGatherPageTask {
+  int32_t req_id;
+  int32_t logical_block;
+  int32_t page_token_begin;
+  int32_t page_token_end;
+  int32_t output_token_begin;
+  int32_t physical_block;
+  bool has_task;
+};
+
+inline bool map_cp_gather_page_task(
+    int32_t task,
+    const int32_t* output_starts,
+    int32_t num_reqs,
+    int32_t total_tokens,
+    int32_t block_size,
+    const int32_t* seq_starts,
+    CpGatherPageTask& page) {
+  int32_t relative_page = task;
+  for (int32_t req_id = 0; req_id < num_reqs; ++req_id) {
+    const int32_t output_begin = sycl::min(output_starts[req_id], total_tokens);
+    const int32_t output_end =
+        sycl::min(output_starts[req_id + 1], total_tokens);
+    const int32_t seq_len = sycl::max(output_end - output_begin, 0);
+    const int32_t source_begin = seq_starts ? seq_starts[req_id] : 0;
+    const int32_t first_block = source_begin / block_size;
+    const int32_t num_pages =
+        (source_begin + seq_len + block_size - 1) / block_size - first_block;
+    if (relative_page < num_pages) {
+      page.req_id = req_id;
+      page.logical_block = first_block + relative_page;
+      const int32_t page_begin = page.logical_block * block_size;
+      const int32_t copy_begin = sycl::max(source_begin, page_begin);
+      const int32_t copy_end =
+          sycl::min(source_begin + seq_len, page_begin + block_size);
+      page.page_token_begin = copy_begin - page_begin;
+      page.page_token_end = copy_end - page_begin;
+      page.output_token_begin = output_begin + copy_begin - source_begin;
+      return true;
+    }
+    relative_page -= num_pages;
+  }
+  return false;
+}
+
+struct CpGatherCacheParams {
+  const uint8_t* src;
+  uint8_t* dst;
+  const int32_t* block_table;
+  const int32_t* cu_seq_lens;
+  const int32_t* seq_starts;
+  int32_t num_reqs;
+  int32_t total_tokens;
+  int32_t block_size;
+  int64_t entry_size_bytes;
+  int64_t block_table_stride;
+  int64_t block_table_col_stride;
+  int64_t cache_block_stride;
+  int64_t cache_entry_stride;
+  int64_t dst_entry_stride;
+};
+
+template <bool contiguous_entries, bool vectorized>
+class CpGatherCachePage : public xpu::SyclKernelConfigConvention {
+ public:
+  explicit CpGatherCachePage(CpGatherCacheParams params) : params_(params) {}
+
+  void sycl_ker_config_convention(sycl::handler& cgh) {
+    page_ = sycl::local_accessor<CpGatherPageTask, 1>(1, cgh);
+  }
+
+  void operator()(sycl::nd_item<1> item) const {
+    constexpr int32_t threads = 256;
+    constexpr int32_t threads_per_token = 32;
+    constexpr int32_t tokens_per_group = threads / threads_per_token;
+    const int32_t tid = item.get_local_id(0);
+    const auto& p = params_;
+    if (tid == 0) {
+      CpGatherPageTask task{};
+      task.has_task = map_cp_gather_page_task(
+          item.get_group(0),
+          p.cu_seq_lens,
+          p.num_reqs,
+          p.total_tokens,
+          p.block_size,
+          p.seq_starts,
+          task);
+      if (task.has_task) {
+        task.physical_block =
+            p.block_table
+                [task.req_id * p.block_table_stride +
+                 task.logical_block * p.block_table_col_stride];
+      }
+      page_[0] = task;
+    }
+    item.barrier(sycl::access::fence_space::local_space);
+    const CpGatherPageTask page = page_[0];
+    if (!page.has_task) return;
+
+    if constexpr (contiguous_entries) {
+      const int64_t src_offset = page.physical_block * p.cache_block_stride +
+                                 page.page_token_begin * p.entry_size_bytes;
+      const int64_t dst_offset = page.output_token_begin * p.entry_size_bytes;
+      const int64_t copy_bytes =
+          (page.page_token_end - page.page_token_begin) * p.entry_size_bytes;
+      if constexpr (vectorized) {
+        const auto* src =
+            reinterpret_cast<const sycl::int4*>(p.src + src_offset);
+        auto* dst = reinterpret_cast<sycl::int4*>(p.dst + dst_offset);
+        const int64_t num_vectors = copy_bytes / sizeof(sycl::int4);
+        int64_t idx = tid;
+        for (; idx + threads < num_vectors; idx += 2 * threads) {
+          const sycl::int4 first = src[idx];
+          const sycl::int4 second = src[idx + threads];
+          dst[idx] = first;
+          dst[idx + threads] = second;
+        }
+        for (; idx < num_vectors; idx += threads) {
+          dst[idx] = src[idx];
+        }
+      } else {
+        for (int64_t idx = tid; idx < copy_bytes; idx += threads) {
+          p.dst[dst_offset + idx] = p.src[src_offset + idx];
+        }
+      }
+    } else {
+      const int32_t token_group = tid / threads_per_token;
+      const int32_t lane = tid % threads_per_token;
+      for (int32_t token = page.page_token_begin + token_group;
+           token < page.page_token_end;
+           token += tokens_per_group) {
+        const int64_t output_token =
+            page.output_token_begin + token - page.page_token_begin;
+        const auto* src = p.src + page.physical_block * p.cache_block_stride +
+                          token * p.cache_entry_stride;
+        auto* dst = p.dst + output_token * p.dst_entry_stride;
+        if constexpr (vectorized) {
+          const auto* src_vec = reinterpret_cast<const sycl::int4*>(src);
+          auto* dst_vec = reinterpret_cast<sycl::int4*>(dst);
+          const int64_t num_vectors = p.entry_size_bytes / sizeof(sycl::int4);
+          for (int64_t idx = lane; idx < num_vectors;
+               idx += threads_per_token) {
+            dst_vec[idx] = src_vec[idx];
+          }
+        } else {
+          for (int64_t idx = lane; idx < p.entry_size_bytes;
+               idx += threads_per_token) {
+            dst[idx] = src[idx];
+          }
+        }
+      }
+    }
+  }
+
+ private:
+  CpGatherCacheParams params_;
+  sycl::local_accessor<CpGatherPageTask, 1> page_;
+};
+
+}  // namespace vllm
+
+template <bool contiguous_entries, bool vectorized>
+void launch_cp_gather_cache(const vllm::CpGatherCacheParams& params) {
+  constexpr int threads = 256;
+  const int64_t groups =
+      (int64_t(params.total_tokens) + params.block_size - 1) /
+          params.block_size +
+      2 * int64_t(params.num_reqs);
+  auto& queue = vllm::xpu::vllmGetQueue();
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(groups * threads, threads),
+      vllm::CpGatherCachePage<contiguous_entries, vectorized>(params));
+}
+
+void cp_gather_cache(
+    torch::Tensor const& src_cache,
+    torch::Tensor const& dst,
+    torch::Tensor const& block_table,
+    torch::Tensor const& cu_seq_lens,
+    int64_t batch_size,
+    std::optional<torch::Tensor> seq_starts) {
+  const at::DeviceGuard device_guard(src_cache.device());
+  TORCH_CHECK(
+      src_cache.dim() >= 3 && dst.dim() >= 2,
+      "Cache and destination require token and entry dimensions");
+  TORCH_CHECK(
+      block_table.dim() == 2 && cu_seq_lens.dim() == 1,
+      "block_table must be 2D and cu_seq_lens must be 1D");
+  TORCH_CHECK(
+      batch_size >= 0 && batch_size == cu_seq_lens.numel() - 1 &&
+          block_table.size(0) >= batch_size,
+      "batch_size must match cache gather metadata");
+  TORCH_CHECK(
+      src_cache.device() == dst.device() &&
+          src_cache.device() == block_table.device() &&
+          src_cache.device() == cu_seq_lens.device(),
+      "Cache gather tensors must be on the same device");
+  TORCH_CHECK(
+      block_table.scalar_type() == at::kInt &&
+          cu_seq_lens.scalar_type() == at::kInt && cu_seq_lens.is_contiguous(),
+      "Metadata must be int32; cu_seq_lens must be contiguous");
+  if (seq_starts) {
+    TORCH_CHECK(
+        seq_starts->device() == src_cache.device() &&
+            seq_starts->scalar_type() == at::kInt && seq_starts->dim() == 1 &&
+            seq_starts->numel() >= batch_size && seq_starts->is_contiguous(),
+        "seq_starts must be contiguous int32 on the cache device");
+  }
+  TORCH_CHECK(
+      src_cache.scalar_type() == dst.scalar_type(),
+      "Cache and destination must have matching dtypes");
+  int64_t entry_size = 1;
+  for (int64_t dim = src_cache.dim() - 1; dim >= 2; --dim) {
+    TORCH_CHECK(
+        src_cache.stride(dim) == entry_size,
+        "Cache entry dimensions must be contiguous");
+    entry_size *= src_cache.size(dim);
+  }
+  int64_t dst_entry_size = 1;
+  for (int64_t dim = dst.dim() - 1; dim >= 1; --dim) {
+    TORCH_CHECK(
+        dst.stride(dim) == dst_entry_size,
+        "Destination entry dimensions must be contiguous");
+    dst_entry_size *= dst.size(dim);
+  }
+  TORCH_CHECK(entry_size == dst_entry_size, "Cache entry sizes must match");
+  TORCH_CHECK(
+      src_cache.size(0) > 0 && src_cache.size(1) > 0,
+      "Cache block dimensions must be positive");
+  TORCH_CHECK(
+      src_cache.element_size() == 1 || src_cache.element_size() == 2 ||
+          src_cache.element_size() == 4,
+      "Cache gather supports 8/16/32-bit entries");
+  if (dst.size(0) == 0) return;
+  const int64_t element_size = src_cache.element_size();
+  const vllm::CpGatherCacheParams params{
+      reinterpret_cast<const uint8_t*>(src_cache.data_ptr()),
+      reinterpret_cast<uint8_t*>(dst.data_ptr()),
+      block_table.data_ptr<int32_t>(),
+      cu_seq_lens.data_ptr<int32_t>(),
+      seq_starts ? seq_starts->data_ptr<int32_t>() : nullptr,
+      static_cast<int32_t>(batch_size),
+      static_cast<int32_t>(dst.size(0)),
+      static_cast<int32_t>(src_cache.size(1)),
+      entry_size * element_size,
+      block_table.stride(0),
+      block_table.stride(1),
+      src_cache.stride(0) * element_size,
+      src_cache.stride(1) * element_size,
+      dst.stride(0) * element_size};
+  constexpr auto alignment = alignof(sycl::int4);
+  const bool vectorized =
+      reinterpret_cast<std::uintptr_t>(params.src) % alignment == 0 &&
+      reinterpret_cast<std::uintptr_t>(params.dst) % alignment == 0 &&
+      params.entry_size_bytes % alignment == 0 &&
+      params.cache_block_stride % alignment == 0 &&
+      params.cache_entry_stride % alignment == 0 &&
+      params.dst_entry_stride % alignment == 0;
+  const bool contiguous_entries =
+      params.cache_entry_stride == params.entry_size_bytes &&
+      params.dst_entry_stride == params.entry_size_bytes;
+  if (contiguous_entries && vectorized)
+    launch_cp_gather_cache<true, true>(params);
+  else if (contiguous_entries)
+    launch_cp_gather_cache<true, false>(params);
+  else if (vectorized)
+    launch_cp_gather_cache<false, true>(params);
+  else
+    launch_cp_gather_cache<false, false>(params);
+}
+
 // Macro to dispatch the gather_and_maybe_dequant_cache kernel.
 // SCALAR_T is the data type of the destination tensor.
 // CACHE_T is the stored data type of kv-cache.

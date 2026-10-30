@@ -285,6 +285,16 @@ def gather_cache(src_cache: torch.Tensor,
                                         cu_seq_lens, batch_size, seq_starts)
 
 
+def cp_gather_cache(src_cache: torch.Tensor,
+                    dst: torch.Tensor,
+                    block_table: torch.Tensor,
+                    cu_seq_lens: torch.Tensor,
+                    batch_size: int,
+                    seq_starts: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C_cache_ops.cp_gather_cache(src_cache, dst, block_table,
+                                          cu_seq_lens, batch_size, seq_starts)
+
+
 def cp_gather_and_upconvert_fp8_kv_cache(
     src_cache: torch.Tensor,
     dst: torch.Tensor,

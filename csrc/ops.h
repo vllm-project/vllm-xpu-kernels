@@ -202,6 +202,14 @@ void gather_cache(
     int64_t batch_size,
     std::optional<torch::Tensor> seq_starts = std::nullopt);
 
+void cp_gather_cache(
+    torch::Tensor const& src_cache,
+    torch::Tensor const& dst,
+    torch::Tensor const& block_table,
+    torch::Tensor const& cu_seq_lens,
+    int64_t batch_size,
+    std::optional<torch::Tensor> seq_starts = std::nullopt);
+
 void cp_gather_and_upconvert_fp8_kv_cache(
     torch::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
     torch::Tensor const& dst,               // [TOT_TOKENS, 576]
