@@ -244,6 +244,37 @@ def test_mla_qv_default_scale():
     _check(out, lse, ref_out, ref_lse, dtype)
 
 
+@pytest.mark.parametrize("block_size", [1, 16])
+@torch.inference_mode()
+def test_mla_qv_seqused_k_beyond_block_table(block_size):
+    """Keys past the end of a block table row are skipped, not read from
+    the next row or out of bounds."""
+    torch.manual_seed(0)
+    dtype = torch.bfloat16
+    num_seqs = 3
+    max_blocks = 8
+    capacity = max_blocks * block_size
+    k, v = _padded_mla_cache(64, block_size, 1, D_V + D_QK, dtype)
+    q = torch.randn(num_seqs, 16, D_QK, dtype=dtype, device=DEVICE)
+    q_v = torch.randn(num_seqs, 16, D_V, dtype=dtype, device=DEVICE)
+    block_table = torch.randint(0,
+                                64, (num_seqs, max_blocks),
+                                dtype=torch.int32,
+                                device=DEVICE)
+    cu = list(range(num_seqs + 1))
+    cu_seqlens_q = torch.tensor(cu, dtype=torch.int32, device=DEVICE)
+    seqused_k = torch.tensor([capacity + 5, capacity, capacity + 100],
+                             dtype=torch.int32,
+                             device=DEVICE)
+    scale = (D_QK + D_V)**-0.5
+
+    out, lse = _run(q, q_v, k, v, cu_seqlens_q, seqused_k, block_table,
+                    scale, False)
+    ref_out, ref_lse = ref_mla_qv(q, q_v, k, v, cu, [capacity] * num_seqs,
+                                  block_table, scale, False)
+    _check(out, lse, ref_out, ref_lse, dtype)
+
+
 @pytest.mark.parametrize("kwargs", [
     dict(window_size=[128, 0]),
     dict(softcap=30.0),

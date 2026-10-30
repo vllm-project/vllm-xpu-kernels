@@ -467,11 +467,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       make_pytorch_shim(&FLASH_NAMESPACE::mha_varlen_fwd));
 
   // Absorbed-MLA (FA3 q_v) varlen attention over a paged KV cache.
+  // Writes the attention output into `out` in place and returns only
+  // softmax_lse, so no returned tensor aliases an input.
   ops.def(
       "mla_qv_varlen_fwd(Tensor q, Tensor q_v, Tensor k, Tensor v, "
-      "Tensor!? out, Tensor cu_seqlens_q, Tensor seqused_k, "
+      "Tensor(a!) out, Tensor cu_seqlens_q, Tensor seqused_k, "
       "Tensor block_table, float softmax_scale, bool is_causal, "
-      "bool return_softmax_lse) -> Tensor[]");
+      "bool return_softmax_lse) -> Tensor");
   ops.impl("mla_qv_varlen_fwd", torch::kXPU, &vllm::mla_qv::mla_qv_varlen_fwd);
 }
 

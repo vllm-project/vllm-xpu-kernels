@@ -66,6 +66,7 @@ class MlaQvVarlenKernel {
       int64_t o_s0,
       int64_t o_s1,
       int64_t bt_s0,
+      int32_t max_blocks,
       int32_t batch_size,
       int32_t total_q,
       int32_t page_size,
@@ -98,6 +99,7 @@ class MlaQvVarlenKernel {
         o_s0_(o_s0),
         o_s1_(o_s1),
         bt_s0_(bt_s0),
+        max_blocks_(max_blocks),
         batch_size_(batch_size),
         total_q_(total_q),
         page_size_(page_size),
@@ -184,8 +186,13 @@ class MlaQvVarlenKernel {
         bool valid = n < n_keys;
         int64_t blk = -1;
         if (valid) {
-          blk = bt[n / page_size_];
-          valid = blk >= 0;
+          // Keys beyond the block table row are skipped, like -1 entries.
+          const int bi = n / page_size_;
+          valid = bi < max_blocks_;
+          if (valid) {
+            blk = bt[bi];
+            valid = blk >= 0;
+          }
         }
         if (valid) {
           const int64_t off = n % page_size_;
@@ -296,6 +303,7 @@ class MlaQvVarlenKernel {
   int64_t o_s0_;
   int64_t o_s1_;
   int64_t bt_s0_;
+  int32_t max_blocks_;
   int32_t batch_size_;
   int32_t total_q_;
   int32_t page_size_;
@@ -364,6 +372,7 @@ void launch(
             out.stride(0),
             out.stride(1),
             block_table.stride(0),
+            static_cast<int32_t>(block_table.size(1)),
             batch_size,
             total_q,
             page_size,
@@ -383,12 +392,12 @@ void check_int32_device(
 
 }  // namespace
 
-std::vector<at::Tensor> mla_qv_varlen_fwd(
+at::Tensor mla_qv_varlen_fwd(
     const at::Tensor& q,
     const at::Tensor& q_v,
     const at::Tensor& k,
     const at::Tensor& v,
-    const std::optional<at::Tensor>& out_,
+    at::Tensor& out,
     const at::Tensor& cu_seqlens_q,
     const at::Tensor& seqused_k,
     const at::Tensor& block_table,
@@ -452,26 +461,18 @@ std::vector<at::Tensor> mla_qv_varlen_fwd(
           block_table.stride(1) == 1,
       "block_table must be [batch, max_blocks] with dense rows");
 
-  at::Tensor out;
-  if (out_.has_value()) {
-    out = out_.value();
-    TORCH_CHECK(out.scalar_type() == dtype, "out must match q dtype");
-    TORCH_CHECK(out.device() == q.device(), "out must be on q's device");
-    TORCH_CHECK(
-        out.dim() == 3 && out.size(0) == total_q && out.size(1) == num_heads &&
-            out.size(2) == d_v,
-        "out must be [total_q, num_heads, d_v]");
-    TORCH_CHECK(out.stride(-1) == 1, "last dim of out must be dense");
-  } else {
-    out = torch::empty({total_q, num_heads, d_v}, q.options());
-  }
-  at::Tensor softmax_lse;
-  if (return_softmax_lse) {
-    softmax_lse =
-        torch::empty({num_heads, total_q}, q.options().dtype(at::kFloat));
-  }
+  TORCH_CHECK(out.scalar_type() == dtype, "out must match q dtype");
+  TORCH_CHECK(out.device() == q.device(), "out must be on q's device");
+  TORCH_CHECK(
+      out.dim() == 3 && out.size(0) == total_q && out.size(1) == num_heads &&
+          out.size(2) == d_v,
+      "out must be [total_q, num_heads, d_v]");
+  TORCH_CHECK(out.stride(-1) == 1, "last dim of out must be dense");
+  at::Tensor softmax_lse = torch::empty(
+      {return_softmax_lse ? num_heads : 0, total_q},
+      q.options().dtype(at::kFloat));
   if (total_q == 0) {
-    return {out, softmax_lse};
+    return softmax_lse;
   }
 
   const at::DeviceGuard device_guard(q.device());
@@ -515,7 +516,7 @@ std::vector<at::Tensor> mla_qv_varlen_fwd(
         d_v,
         " (supported: d_qk=64, d_v=512)");
   }
-  return {out, softmax_lse};
+  return softmax_lse;
 }
 
 }  // namespace vllm::mla_qv

@@ -728,7 +728,12 @@ def _mla_qv_varlen_fwd(
     if num_splits > 1:
         raise NotImplementedError("q_v does not support num_splits > 1")
 
-    out, softmax_lse = torch.ops._vllm_fa2_C.mla_qv_varlen_fwd(
+    if out is None:
+        out = torch.empty(*q.shape[:-1],
+                          q_v.shape[-1],
+                          dtype=q.dtype,
+                          device=q.device)
+    softmax_lse = torch.ops._vllm_fa2_C.mla_qv_varlen_fwd(
         q,
         q_v,
         k,
