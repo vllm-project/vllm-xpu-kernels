@@ -69,7 +69,7 @@ jobs:
         run: |
           source /opt/intel/oneapi/2026.1/oneapi-vars.sh
           git submodule sync && git submodule update --init --recursive
-          uv pip install -r requirements.txt
+          uv pip install --index-strategy unsafe-best-match -r requirements.txt
           .venv/bin/python setup.py bdist_wheel \
             --dist-dir="$NIGHTLY_DIST" --py-limited-api=cp38
           for f in "$NIGHTLY_DIST"/*-linux_x86_64.whl; do
