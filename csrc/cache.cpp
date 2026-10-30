@@ -1540,6 +1540,7 @@ inline bool map_cp_gather_page_task(
     const int32_t output_end =
         sycl::min(output_starts[req_id + 1], total_tokens);
     const int32_t seq_len = sycl::max(output_end - output_begin, 0);
+    if (seq_len == 0) continue;
     const int32_t source_begin = seq_starts ? seq_starts[req_id] : 0;
     const int32_t first_block = source_begin / block_size;
     const int32_t num_pages =
