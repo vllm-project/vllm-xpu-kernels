@@ -27,7 +27,7 @@ struct causal_conv1d_kernel {
       const T* conv_weights,
       const T* conv_bias,
       T* conv_states,
-      const int conv_states_stride_0,
+      const ConvStateStrides conv_states_strides,
       T* conv_states_tmp,
       int* query_start_loc,
       int* token_indx,
@@ -56,7 +56,7 @@ struct causal_conv1d_kernel {
         conv_weights(conv_weights),
         conv_bias(conv_bias),
         conv_states(conv_states),
-        conv_states_stride_0(conv_states_stride_0),
+        conv_states_strides(conv_states_strides),
         conv_states_tmp(conv_states_tmp),
         query_start_loc(query_start_loc),
         token_indx(token_indx),
@@ -91,6 +91,15 @@ struct causal_conv1d_kernel {
 
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<2> item) const {
+    if (conv_states_strides.elem == 1) {
+      run<true>(item);
+    } else {
+      run<false>(item);
+    }
+  }
+
+  template <bool ElemContig>
+  inline void run(sycl::nd_item<2> item) const {
     const int token_id = item.get_group(0);
     const int local_group_id = item.get_group(1);
     const int local_id = item.get_local_linear_id();
@@ -229,8 +238,8 @@ struct causal_conv1d_kernel {
     const bool has_init_conv_states =
         (has_initial_state == nullptr ||
          (has_initial_state != nullptr && has_initial_state[batch_id]));
-    T* conv_states_ptr =
-        conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
+    T* conv_states_ptr = conv_states + static_cast<int64_t>(states_id) *
+                                           conv_states_strides.slot;
 
     // load weights
     T local_weights[Width * elems_per_item];
@@ -261,9 +270,9 @@ struct causal_conv1d_kernel {
       for (int i = 0; i < states_load_len; ++i) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          local_input[Width * e + i] = conv_states_ptr
-              [(Width - 1 - states_load_len + i) * conv_elems +
-               reordered_elems_id + e];
+          local_input[Width * e + i] =
+              conv_states_ptr[conv_states_strides.offset<ElemContig>(
+                  Width - 1 - states_load_len + i, reordered_elems_id + e)];
         }
       }
     }
@@ -322,8 +331,8 @@ struct causal_conv1d_kernel {
       for (int i = 0; i < Width - 1; ++i) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          conv_states_ptr[i * conv_elems + reordered_elems_id + e] =
-              local_input[Width * e + i + 1];
+          conv_states_ptr[conv_states_strides.offset<ElemContig>(
+              i, reordered_elems_id + e)] = local_input[Width * e + i + 1];
         }
       }
     }
@@ -377,7 +386,7 @@ struct causal_conv1d_kernel {
   const T* conv_weights;
   const T* conv_bias;
   T* conv_states;
-  const int conv_states_stride_0;
+  const ConvStateStrides conv_states_strides;
   T* conv_states_tmp;
   const int32_t* query_start_loc;
   const int* token_indx;
@@ -407,7 +416,7 @@ struct update_states_kernel {
 
   update_states_kernel(
       T* conv_states,
-      const int conv_states_stride_0,
+      const ConvStateStrides conv_states_strides,
       const T* conv_states_tmp,
       const int* cache_indices,
       const int width,
@@ -416,7 +425,7 @@ struct update_states_kernel {
       const int* token_indx,
       const int batch_size)
       : conv_states(conv_states),
-        conv_states_stride_0(conv_states_stride_0),
+        conv_states_strides(conv_states_strides),
         conv_states_tmp(conv_states_tmp),
         cache_indices(cache_indices),
         width(width),
@@ -450,15 +459,15 @@ struct update_states_kernel {
     }
 
     int states_id = cache_indices[batch_id];
-    T* conv_states_ptr =
-        conv_states + static_cast<int64_t>(states_id) * conv_states_stride_0;
+    T* conv_states_ptr = conv_states + static_cast<int64_t>(states_id) *
+                                           conv_states_strides.slot;
     const T* conv_states_tmp_ptr =
         conv_states_tmp + batch_id * (width - 1) * conv_elems;
     for (int i = elems_start_offset_group + local_id;
          i < (local_group_id + 1) * elems_per_group;
          i += group_size) {
       if (i < conv_elems) {
-        conv_states_ptr[width_id * conv_elems + i] =
+        conv_states_ptr[conv_states_strides.offset(width_id, i)] =
             conv_states_tmp_ptr[width_id * conv_elems + i];
       }
     }
@@ -466,7 +475,7 @@ struct update_states_kernel {
 
  private:
   T* conv_states;
-  const int conv_states_stride_0;
+  const ConvStateStrides conv_states_strides;
   const T* conv_states_tmp;
   const int* cache_indices;
   const int width;
@@ -505,7 +514,7 @@ struct causal_conv1d_spec_kernel {
       const T* conv_weights,
       const T* conv_bias,
       T* conv_states,
-      const int conv_states_stride_0,
+      const ConvStateStrides conv_states_strides,
       const int* query_start_loc,
       const int* token_indx,
       const int* cache_indices,
@@ -532,7 +541,7 @@ struct causal_conv1d_spec_kernel {
         conv_weights(conv_weights),
         conv_bias(conv_bias),
         conv_states(conv_states),
-        conv_states_stride_0(conv_states_stride_0),
+        conv_states_strides(conv_states_strides),
         query_start_loc(query_start_loc),
         token_indx(token_indx),
         cache_indices(cache_indices),
@@ -565,6 +574,15 @@ struct causal_conv1d_spec_kernel {
 
   [[sycl::reqd_sub_group_size(sub_group_size)]] void
   operator()(sycl::nd_item<2> item) const {
+    if (conv_states_strides.elem == 1) {
+      run<true>(item);
+    } else {
+      run<false>(item);
+    }
+  }
+
+  template <bool ElemContig>
+  inline void run(sycl::nd_item<2> item) const {
     const int batch_id = item.get_group(0);
     const int local_group_id = item.get_group(1);
     const int local_id = item.get_local_linear_id();
@@ -690,7 +708,7 @@ struct causal_conv1d_spec_kernel {
     const bool has_conv_state = (state_id != pad_slot_id);
     T* state_line_ptr = has_conv_state
                             ? conv_states + static_cast<int64_t>(state_id) *
-                                                conv_states_stride_0
+                                                conv_states_strides.slot
                             : nullptr;
 
     // Load weights
@@ -716,8 +734,9 @@ struct causal_conv1d_spec_kernel {
       for (int i = 0; i < Width - 1; ++i) {
 #pragma unroll
         for (int e = 0; e < elems_per_item; ++e) {
-          local_input[Width * e + i] = state_line_ptr
-              [(init_row + i) * conv_elems + reordered_elems_id + e];
+          local_input[Width * e + i] =
+              state_line_ptr[conv_states_strides.offset<ElemContig>(
+                  init_row + i, reordered_elems_id + e)];
         }
       }
     }
@@ -814,8 +833,10 @@ struct causal_conv1d_spec_kernel {
           const int src_row = init_row + 1 + j;
 #pragma unroll
           for (int e = 0; e < elems_per_item; ++e) {
-            state_line_ptr[j * conv_elems + reordered_elems_id + e] =
-                state_line_ptr[src_row * conv_elems + reordered_elems_id + e];
+            state_line_ptr[conv_states_strides.offset<ElemContig>(
+                j, reordered_elems_id + e)] =
+                state_line_ptr[conv_states_strides.offset<ElemContig>(
+                    src_row, reordered_elems_id + e)];
           }
         } else {
           const int draft_t = j - hist_rows;
@@ -823,7 +844,8 @@ struct causal_conv1d_spec_kernel {
           const int global_t = token_indx[token_id_local];
 #pragma unroll
           for (int e = 0; e < elems_per_item; ++e) {
-            state_line_ptr[j * conv_elems + reordered_elems_id + e] =
+            state_line_ptr[conv_states_strides.offset<ElemContig>(
+                j, reordered_elems_id + e)] =
                 mixed_qkvz[global_t * qkvz_elems + mixed_qkvz_id + e];
           }
         }
@@ -843,7 +865,7 @@ struct causal_conv1d_spec_kernel {
   const T* conv_weights;
   const T* conv_bias;
   T* conv_states;
-  const int conv_states_stride_0;
+  const ConvStateStrides conv_states_strides;
   const int* query_start_loc;
   const int* token_indx;
   const int* cache_indices;
@@ -875,7 +897,7 @@ void kernel_launcher(
     const T* conv_weights,
     const T* conv_bias,
     T* conv_states,
-    const int conv_states_stride_0,
+    const ConvStateStrides conv_states_strides,
     T* conv_states_tmp,
     int* query_start_loc,
     int* token_indx,
@@ -918,7 +940,7 @@ void kernel_launcher(
           conv_weights,
           conv_bias,
           conv_states,
-          conv_states_stride_0,
+          conv_states_strides,
           query_start_loc,
           token_indx,
           cache_indices,
@@ -956,7 +978,7 @@ void kernel_launcher(
         conv_weights,
         conv_bias,
         conv_states,
-        conv_states_stride_0,
+        conv_states_strides,
         conv_states_tmp,
         query_start_loc,
         token_indx,
@@ -983,7 +1005,7 @@ void kernel_launcher(
     queue.submit([&](sycl::handler& cgh) {
       KERNEL_UPDATE task(
           conv_states,
-          conv_states_stride_0,
+          conv_states_strides,
           conv_states_tmp,
           cache_indices,
           Width,
@@ -1015,9 +1037,11 @@ void causal_conv1d(
     const std::optional<torch::Tensor>&
         conv_bias,  // [num_k_heads * (2 * head_k_dim + head_v_dim * num_v_heads
                     // / num_k_heads)] or None
-    torch::Tensor&
-        conv_states,  // [cache_batch_size, width - 1, num_k_heads * (2 *
-                      // head_k_dim + head_v_dim * num_v_heads / num_k_heads)]
+    torch::Tensor& conv_states,  // SD [cache_batch_size, state_len, conv_elems]
+                                 // or DS [cache_batch_size, conv_elems,
+                                 // state_len], with state_len >= width - 1 and
+                                 // conv_elems = num_k_heads * (2 * head_k_dim +
+                                 // head_v_dim * num_v_heads / num_k_heads)
     const std::optional<torch::Tensor>& query_start_loc,  // [batch_size + 1]
     const std::optional<torch::Tensor>&
         token_indx,  // [num_virtual_tokens] or None
@@ -1045,7 +1069,8 @@ void causal_conv1d(
   const int qkvz_elems = mixed_qkvz.size(1);
   const int conv_elems = conv_weights.size(0);
   const int width = conv_weights.size(1);
-  const int conv_states_stride_0 = conv_states.stride(0);
+  const ConvStateStrides conv_states_strides =
+      get_conv_state_strides(conv_states, conv_elems, width);
 
   int num_spec_tokens = 0;
   int cache_indices_stride_0 = 0;
@@ -1079,7 +1104,7 @@ void causal_conv1d(
           ? reinterpret_cast<scalar_t*>(conv_bias->data_ptr())                \
           : nullptr,                                                          \
       reinterpret_cast<scalar_t*>(conv_states.data_ptr()),                    \
-      conv_states_stride_0,                                                   \
+      conv_states_strides,                                                    \
       reinterpret_cast<scalar_t*>(conv_states_tmp.data_ptr()),                \
       reinterpret_cast<int*>(query_start_loc->data_ptr()),                    \
       token_indx.has_value() ? reinterpret_cast<int*>(token_indx->data_ptr()) \
