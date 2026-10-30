@@ -116,7 +116,8 @@ void silu_and_mul_per_block_quant(
     int64_t group_size,
     std::optional<torch::Tensor> scale_ub,
     bool is_scale_transposed,
-    bool scale_ue8m0);
+    bool scale_ue8m0,
+    std::optional<torch::Tensor> expert_scale_desc);
 
 void silu_and_mul_mxfp4_quant(
     torch::Tensor& out,
@@ -201,6 +202,17 @@ void gather_cache(
     int64_t batch_size,
     std::optional<torch::Tensor> seq_starts = std::nullopt);
 
+void cp_gather_and_upconvert_fp8_kv_cache(
+    torch::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
+    torch::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size,
+    std::optional<torch::Tensor> seq_starts = std::nullopt,
+    std::optional<torch::Tensor> host_cache = std::nullopt,
+    std::optional<torch::Tensor> host_row_ids = std::nullopt,
+    std::optional<torch::Tensor> device_row_ids = std::nullopt);
+
 void indexer_k_quant_and_cache(
     torch::Tensor& k,             // [num_tokens, head_dim]
     torch::Tensor& kv_cache,      // [num_blocks, block_size, cache_stride]
@@ -252,14 +264,16 @@ void per_token_group_quant_fp8(
     double fp8_max,
     bool scale_ue8m0,
     bool dummy_is_scale_transposed = false,
-    bool dummy_is_tma_aligned = false);
+    bool dummy_is_tma_aligned = false,
+    const c10::optional<torch::Tensor>& expert_scale_desc = c10::nullopt);
 
 void per_token_group_quant_mxfp4(
     const torch::Tensor& input,
     torch::Tensor& output_q,
     torch::Tensor& output_s,
     int64_t group_size,
-    double eps);
+    double eps,
+    const c10::optional<torch::Tensor>& expert_scale_desc = c10::nullopt);
 
 void swigluoai_and_mul(
     torch::Tensor& out,

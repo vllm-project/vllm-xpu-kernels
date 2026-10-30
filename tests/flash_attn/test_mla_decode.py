@@ -19,6 +19,7 @@ from typing import Union
 import pytest
 import torch
 
+from tests.utils import run_with_xpu_graph
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
 DEVICE = "xpu"
@@ -214,8 +215,10 @@ def test_mla_decode_deepseek_v3(block_size, query_lens, kv_lens, num_heads_q):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("num_splits_kv", [None, 1, 8])
 @pytest.mark.parametrize("path", ["seqused", "hostlens"])
+@pytest.mark.parametrize("use_graph", [False, True])
+@torch.inference_mode()
 def test_mla_decode_large_q_packed(num_heads_q, block_size, batch, dtype,
-                                  num_splits_kv, path):
+                                  num_splits_kv, path, use_graph):
     """Cover Q8/Q16 dispatch, split reduction, and partial KV tiles."""
     if not torch.xpu.is_available():
         pytest.skip("XPU not available")
@@ -233,14 +236,20 @@ def test_mla_decode_large_q_packed(num_heads_q, block_size, batch, dtype,
         dtype=dtype)
     softmax_scale = (kv_lora_rank + rope)**-0.5
 
-    out, lse = _mla_decode_via_varlen(
-        q_nope, q_pe, cache, bt, cu_q, sk,
-        max_seqlen_q=1, max_seqlen_k=max(kv_lens),
-        softmax_scale=softmax_scale,
-        num_splits_kv=num_splits_kv,
-        return_softmax_lse=True,
-        host_kv_lens=kv_lens if path == "hostlens" else None,
-    )
+    def run(q_nope_in, q_pe_in, cache_in):
+        return _mla_decode_via_varlen(
+            q_nope_in, q_pe_in, cache_in, bt, cu_q, sk,
+            max_seqlen_q=1, max_seqlen_k=max(kv_lens),
+            softmax_scale=softmax_scale,
+            num_splits_kv=num_splits_kv,
+            return_softmax_lse=True,
+            host_kv_lens=kv_lens if path == "hostlens" else None,
+        )
+
+    if use_graph:
+        out, lse = run_with_xpu_graph(run, [q_nope, q_pe, cache])
+    else:
+        out, lse = run(q_nope, q_pe, cache)
     ref, ref_lse = _ref_mla_decode(
         q_nope, q_pe, cache, bt, cu_q, sk, softmax_scale,
         causal=False, return_softmax_lse=True)

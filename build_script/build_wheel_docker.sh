@@ -14,7 +14,6 @@
 # Options:
 #   --output-dir <dir>     Host directory for the built wheel  (default: ./dist)
 #   --image-name <name>    Docker image tag                    (default: vllm-xpu-kernels-builder)
-#   --gpu-profile <name>   GPU runtime profile                 (default: default)
 #   --version <ver>        Override wheel version via VLLM_VERSION_OVERRIDE
 #   --max-jobs <n>         Limit parallel compilation jobs     (default: auto)
 #   --no-cache             Build Docker image without layer cache
@@ -33,7 +32,6 @@ OUTPUT_DIR="${REPO_ROOT}/dist"
 IMAGE_NAME="vllm-xpu-kernels-builder"
 CONTAINER_NAME="vllm-xpu-wheel-build-$$"
 DOCKER_NO_CACHE=""
-GPU_RUNTIME_PROFILE="default"
 VLLM_VERSION_OVERRIDE=""
 MAX_JOBS=""
 
@@ -44,8 +42,6 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"; shift 2 ;;
         --image-name)
             IMAGE_NAME="$2"; shift 2 ;;
-        --gpu-profile)
-            GPU_RUNTIME_PROFILE="$2"; shift 2 ;;
         --version)
             VLLM_VERSION_OVERRIDE="$2"; shift 2 ;;
         --max-jobs)
@@ -75,7 +71,6 @@ echo "=========================================="
 
 docker build \
     ${DOCKER_NO_CACHE} \
-    --build-arg GPU_RUNTIME_PROFILE="${GPU_RUNTIME_PROFILE}" \
     -f "${REPO_ROOT}/Dockerfile.xpu" \
     -t "${IMAGE_NAME}" \
     "${REPO_ROOT}"
@@ -144,7 +139,7 @@ uv pip install \
     "packaging>=24.2" \
     "setuptools>=77.0.3,<80.0.0" \
     "setuptools-scm>=8" \
-    "torch==2.14.0+xpu" \
+    "torch==2.15.0+xpu" \
     wheel \
     regex \
     jinja2 \

@@ -8,7 +8,8 @@ import torch
 
 from tests import register_ops as ops
 from tests.register_ops import reshape_and_cache, reshape_and_cache_flash
-from tests.utils import (_convert_from_fp8, create_kv_caches_with_pinned,
+from tests.utils import (KERNEL_DEVICE, _convert_from_fp8,
+                         create_kv_caches_with_pinned,
                          create_kv_caches_with_random,
                          create_kv_caches_with_random_flash, opcheck,
                          seed_everything)
@@ -482,6 +483,40 @@ def test_concat_and_cache_mla(
                                    rtol=0.1)
     else:
         torch.testing.assert_close(kv_cache, ref_kv_cache)
+
+
+@torch.inference_mode()
+def test_concat_and_cache_mla_large_cache() -> None:
+    # A cache view past 2^31 elements (one 4+ GiB bf16 MLA layer); 32-bit
+    # offsets wrapped there and the rows were written out of bounds.
+    kv_lora_rank, pe_dim, block_size = 512, 64, 64
+    entry_size = kv_lora_rank + pe_dim
+    num_blocks = 2**31 // (block_size * entry_size) + 2
+    cache_bytes = num_blocks * block_size * entry_size * 2
+    if torch.xpu.mem_get_info()[0] < cache_bytes + 2**30:
+        pytest.skip("needs a free device allocation above 4 GiB")
+    seed_everything(0)
+    kv_cache = torch.zeros(num_blocks, block_size, entry_size,
+                           dtype=torch.bfloat16, device=KERNEL_DEVICE)
+    total_slots = num_blocks * block_size
+    # First block, the blocks around the 2^31-element boundary and the end.
+    boundary_slot = 2**31 // entry_size
+    slots = [0, 1, boundary_slot - 1, boundary_slot, boundary_slot + 1,
+             total_slots - block_size, total_slots - 1]
+    slot_mapping = torch.tensor(slots, dtype=torch.long, device=KERNEL_DEVICE)
+    num_tokens = len(slots)
+    kv_c = torch.randn(num_tokens, kv_lora_rank, dtype=torch.bfloat16,
+                       device=KERNEL_DEVICE)
+    k_pe = torch.randn(num_tokens, pe_dim, dtype=torch.bfloat16,
+                       device=KERNEL_DEVICE)
+    scale = torch.tensor(1.0, dtype=torch.float32, device=KERNEL_DEVICE)
+
+    ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping, "auto",
+                             scale)
+
+    rows = kv_cache.view(-1, entry_size)[slot_mapping]
+    torch.testing.assert_close(rows, torch.cat([kv_c, k_pe], dim=-1),
+                               atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("kv_lora_rank", [512])

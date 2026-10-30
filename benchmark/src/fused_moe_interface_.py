@@ -36,7 +36,7 @@ class XpuFusedMoe_CalKernelTime(XpuFusedMoe):
             ep_rank,
             ep_size,
             expert_map,
-            gemm1_clamp_limit)
+            gemm1_clamp_limit=gemm1_clamp_limit)
 
     def apply(
         self,

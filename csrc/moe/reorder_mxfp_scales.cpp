@@ -8,8 +8,8 @@ namespace moe {
 
 // Reorders and pads the per-expert mxfp (e8m0) activation scales into the
 // MN-major, M-padded-to-4 layout expected by the optimized mxfp grouped-GEMM
-// mainloop (see grouped_gemm/xe_3/collective/moe_gemm_array_cooperative.hpp,
-// which advances the per-expert scale offset by (rows + 3) & ~3).
+// mainloop (see grouped_gemm/xe_3/kernel/xe_moe_gemm_greedy.hpp, which
+// advances the per-expert scale offset by (rows + 3) & ~3).
 //
 // Source `A_scales` is [total_rows, scale_k] row-major, concatenated per
 // expert. For expert e with M = rows_per_expert[e] rows, its scale block is

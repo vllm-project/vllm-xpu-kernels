@@ -267,6 +267,38 @@ def test_dynamic_per_tensor_fp8_quant(
                                ops_out.to(dtype=torch.float32))
 
 
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_dynamic_per_tensor_fp8_quant_scale_exact(
+    fp8_dtype: torch.dtype,
+    dtype: torch.dtype,
+    seed: int,
+) -> None:
+    seed_everything(seed)
+    fp8_max = torch.tensor(torch.finfo(fp8_dtype).max, dtype=torch.float32)
+
+    # Vary the magnitude so that absmax / fp8_max covers many different values.
+    for magnitude in torch.rand(64) * 100 + 0.01:
+        x = (torch.rand(8, 256, device="xpu") * magnitude).to(dtype)
+        _, ops_scale = scaled_fp8_quant(x, fp8_dtype=fp8_dtype)
+        # Divide on the CPU: the scale must equal the IEEE absmax / fp8_max.
+        ref_scale = x.abs().max().float().cpu() / fp8_max
+        assert torch.equal(ops_scale.cpu().view(()), ref_scale)
+
+
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
+@torch.inference_mode()
+def test_dynamic_per_tensor_fp8_quant_scale_inf(
+    fp8_dtype: torch.dtype,
+) -> None:
+    x = torch.rand(8, 256, device="xpu")
+    x[0, 0] = float("inf")
+    _, ops_scale = scaled_fp8_quant(x, fp8_dtype=fp8_dtype)
+    assert torch.isinf(ops_scale).all()
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)

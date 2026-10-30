@@ -40,6 +40,8 @@ def _ref_forward(
     patches, size = x.shape
     patch_size = size // channel
     xf = x.view(patches, channel, patch_size).to(torch.float32)
+    weight = weight.to(torch.float32)
+    bias = bias.to(torch.float32)
     running_mean = torch.zeros_like(weight)
     running_var = torch.ones_like(weight)
     y = F.batch_norm(
@@ -58,6 +60,7 @@ def _ref_forward(
 @pytest.mark.parametrize("patch_size", PATCH_SIZES)
 @pytest.mark.parametrize("channel", CHANNELS)
 @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("coeff_dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", XPU_DEVICES)
 @torch.inference_mode()
@@ -66,6 +69,7 @@ def test_fused_input_norm(
     patch_size: int,
     channel: int,
     dtype: torch.dtype,
+    coeff_dtype: torch.dtype,
     seed: int,
     device: str,
 ) -> None:
@@ -83,8 +87,8 @@ def test_fused_input_norm(
     rescale_factor = 1.0 / 255.0
     mean_t = image_mean * (1.0 / rescale_factor)
     std_t = image_std * (1.0 / rescale_factor)
-    weight = (1.0 / std_t).contiguous()
-    bias = (-mean_t / std_t).contiguous()
+    weight = (1.0 / std_t).to(coeff_dtype).contiguous()
+    bias = (-mean_t / std_t).to(coeff_dtype).contiguous()
 
     ref_out = _ref_forward(x, weight, bias, channel, dtype)
 
