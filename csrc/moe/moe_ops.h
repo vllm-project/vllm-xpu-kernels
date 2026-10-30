@@ -113,4 +113,5 @@ void remap_hidden_states(
 torch::Tensor reorder_mxfp_scales(
     const torch::Tensor& A_scales,
     const torch::Tensor& rows_per_expert,
-    const int64_t total_padded_rows);
+    const int64_t total_padded_rows,
+    const c10::optional<torch::Tensor>& expert_scale_desc = c10::nullopt);
