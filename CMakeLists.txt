@@ -688,6 +688,11 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sycl/fused_kv_compress_norm_rope_insert_sparse_attn.cpp"
       "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/sycl/apply_rotary_emb.cpp"
+      "csrc/xpu/sycl/softmax.cpp"
+      "csrc/xpu/sycl/layer_norm.cpp"
+      "csrc/xpu/sycl/scatter_row.cpp"
+      "csrc/xpu/sycl/reduce.cpp"
+      "csrc/xpu/sycl/topk.cpp"
       "csrc/xpu/rand/exponential.cpp"
       "csrc/xpu/utils.cpp")
   if(MOE_KERNELS_ENABLED)

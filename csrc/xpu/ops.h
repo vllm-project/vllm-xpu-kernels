@@ -161,6 +161,37 @@ std::tuple<torch::Tensor, torch::Tensor> deepseek_inv_rope_fp8_quant(
     int64_t nope_dim,
     int64_t rope_dim);
 
+// Row-wise softmax over the last dimension of a 2D [batch, dim] tensor.
+void softmax(torch::Tensor& out, torch::Tensor& input);
+
+// Out-of-place weighted LayerNorm (no bias) over the last dimension of a 2D
+// [batch, norm_dim] tensor. weight is always float32.
+void layer_norm(
+    torch::Tensor& out,
+    const torch::Tensor& input,
+    const torch::Tensor& weight,
+    double epsilon);
+
+// Row-wise scatter: dst[index[i], :] = src[i, :] for i in
+// [0, index.size(0)). dtype-agnostic (plain byte copy); dim_size *
+// element_size must be a multiple of 16 bytes, and index must be int64.
+void scatter_row(
+    torch::Tensor& dst, const torch::Tensor& src, const torch::Tensor& index);
+
+// Row-wise argmax/argmin over the last dimension of a 2D [batch, dim]
+// tensor. indices dtype must be int32; values dtype matches input.
+void reduce_max_row_wise(
+    torch::Tensor& values, torch::Tensor& indices, const torch::Tensor& input);
+
+void reduce_min_row_wise(
+    torch::Tensor& values, torch::Tensor& indices, const torch::Tensor& input);
+
+// Row-wise top-k (values + int64 indices) over the last dimension, matching
+// torch.topk(input, k, dim=-1, largest, sorted=True). Last dim must be a
+// multiple of 32 and k must be in [1, 16].
+std::tuple<torch::Tensor, torch::Tensor>
+topk_row_wise(const torch::Tensor& input, int64_t k, bool largest);
+
 #ifdef VLLM_MHC_ENABLED
 std::tuple<at::Tensor, at::Tensor, at::Tensor> mhc_pre(
     const at::Tensor& residual,
@@ -357,6 +388,10 @@ bool is_bmg_g31(int64_t device_index);
 bool is_bmg(int64_t device_index);
 
 bool is_pvc(int64_t device_index);
+
+bool is_cri(int64_t device_index);
+
+bool is_nvl_p(int64_t device_index);
 
 bool is_xe2_arch(int64_t device_index);
 
