@@ -70,7 +70,8 @@ template <
     class CollectiveMainloop_,
     class CollectiveEpilogue_,
     class TileScheduler_,
-    bool SoftmaxLSE_ = false>
+    bool SoftmaxLSE_ = false,
+    bool LargeSurface_ = false>
 class XeFMHAFwdKernel {
  public:
   //
@@ -124,6 +125,10 @@ class XeFMHAFwdKernel {
   static constexpr bool LocalMask = CollectiveMainloop::LocalMask;
   static constexpr bool Sink = CollectiveEpilogue::Sink;
   static constexpr bool SoftmaxLSE = SoftmaxLSE_;
+  // Split paged K/V taller than kXeMaxSurfaceRows into sub-surfaces.
+  static constexpr bool LargeSurface = LargeSurface_;
+  static_assert(
+      !LargeSurface || PagedKV, "LargeSurface only applies to paged K/V");
   using ElementSink = typename CollectiveEpilogue::ElementSink;
 
   // Kernel level shared memory storage
@@ -354,15 +359,16 @@ class XeFMHAFwdKernel {
                           wg, sg_k_block_local_r_safe, sycl::minimum<int>{})
                     : 0;
 
-      int offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
+      // 64-bit: stride * cumulative_length exceeds 2^31 for large batches.
+      int64_t offset_q = 0, offset_k = 0, offset_v = 0, offset_o = 0;
       if constexpr (is_var_len) {
         auto qo_cumulative = s.seq_len_qo.cumulative_length;
         auto kv_cumulative = s.seq_len_kv.cumulative_length;
         // Use actual seq strides for offset computation
-        offset_q = get<0>(p.dQ) * qo_cumulative[idx_b];
-        offset_k = PagedKV ? 0 : get<0>(p.dK) * kv_cumulative[idx_b];
-        offset_v = PagedKV ? 0 : get<1>(p.dV) * kv_cumulative[idx_b];
-        offset_o = get<0>(p.dO) * qo_cumulative[idx_b];
+        offset_q = int64_t(get<0>(p.dQ)) * qo_cumulative[idx_b];
+        offset_k = PagedKV ? 0 : int64_t(get<0>(p.dK)) * kv_cumulative[idx_b];
+        offset_v = PagedKV ? 0 : int64_t(get<1>(p.dV)) * kv_cumulative[idx_b];
+        offset_o = int64_t(get<0>(p.dO)) * qo_cumulative[idx_b];
       }
 
       auto batch_dim = is_var_len ? 1 : s.batch;
@@ -400,7 +406,7 @@ class XeFMHAFwdKernel {
       // Main loop
       int l_coord = is_var_len ? 0 : idx_b;
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
-      mainloop(
+      mainloop.template operator()<LargeSurface>(
           Q(_, _, head_q, l_coord),
           K(_, _, head, l_coord),
           V(_, _, head, l_coord),
@@ -427,7 +433,10 @@ class XeFMHAFwdKernel {
         static_assert(
             size<3>(typename TiledMMAPV::ThrLayoutVMNK{}) == 1,
             "softmax_lse requires ReduceK == 1 in TiledMMAPV");
-        if (get<1>(blk_qv) == 0 && (thr_id % intel::sg_size == 0)) {
+        // Only the first V-block of a (q-tile, head, batch) writes LSE: the
+        // softmax stats (tA_max/tA_sum) are reduced over keys and are therefore
+        // identical for every V-block covering the same query rows.
+        if (get<1>(blk_qv) == 0) {
           using ElementA = typename FragA::value_type;
           constexpr float kLn2 = 0.6931471805599453f;
           int q_tile_start = blk_q * get<0>(TileShapeQK{});
@@ -436,9 +445,17 @@ class XeFMHAFwdKernel {
             qo_cumul = s.seq_len_qo.cumulative_length[idx_b];
           }
 
+          // Same row ownership as the XE2 kernel: after the key reduction a
+          // subgroup's logical row r lives in lane (r % sg_size), register
+          // (r / sg_size), so every work-item writes the rows it owns. Only
+          // lane 0 used to write, which stored one row in sg_size and left the
+          // rest of the LSE uninitialized. Lanes past q_sg_tile hold no row.
+          int lane_id = thr_id % intel::sg_size;
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tA_sum.size(); i++) {
-            int q_in_batch = q_tile_start + q_offset_sg + i;
+            int row_in_sg = lane_id + intel::sg_size * i;
+            if (row_in_sg >= q_sg_tile) continue;
+            int q_in_batch = q_tile_start + q_offset_sg + row_in_sg;
             if (q_in_batch < seq_len_qo) {
               ElementA sum_val = tA_sum(i);
               // Include sink contribution for LSE computation

@@ -41,6 +41,7 @@
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
 #include "csrc/xpu/attn/xe_3/collective/chunk_prefill_mainloop.hpp"
 #include "csrc/xpu/attn/xe_3/collective/chunk_prefill_epilogue.hpp"
+#include "csrc/xpu/attn/paged_decode_tuning.h"
 
 namespace cutlass::fmha::kernel {
 // Arch-tagged inline namespace: gives these definitions a mangled name
@@ -67,7 +68,8 @@ template <
     class ProblemShape_,
     class CollectiveMainloop_,
     class CollectiveEpilogue_,
-    class TileScheduler_>
+    class TileScheduler_,
+    bool LargeSurface_ = false>
 class XeFMHAFwdSplitKVKernel {
  public:
   //
@@ -127,8 +129,32 @@ class XeFMHAFwdSplitKVKernel {
 
   static constexpr int max_num_kv_splits = SGPerWG::value * intel::sg_size;
   static constexpr int dpas_max_repeat_count = 8;
+
+  // Paged decode tuned for XE3P (csrc/xpu/attn/paged_decode_tuning.h): the
+  // launcher caps work-groups per Xe core and the host may split short
+  // sequences. Otherwise sequences shorter than the legacy minimum KV tile
+  // count ignore the requested split count and run as a single split.
+  using TuningPrecision = vllm::xpu::paged_decode_tuning::Precision;
+  static constexpr int kHeadDimBucket = get<1>(TileShapeO{});
+  static constexpr bool kTunedDecode = vllm::xpu::paged_decode_tuning::is_tuned(
+      kHeadDimBucket, get<1>(TileShapeQK{}));
+  static constexpr TuningPrecision kPrecision =
+      CollectiveMainloop::Fp8Q    ? TuningPrecision::kFullFp8
+      : CollectiveMainloop::Fp8KV ? TuningPrecision::kFp8KV
+                                  : TuningPrecision::k16Bit;
+  static constexpr int kMinBlocksForSplit =
+      kTunedDecode ? vllm::xpu::paged_decode_tuning::kMinTilesForSplit
+                   : ((get<1>(TileShapeQK{}) <= 64) ? 32 : 128);
   static constexpr bool Sink = CollectiveEpilogue::Sink;
   using ElementSink = typename CollectiveEpilogue::ElementSink;
+
+  // Set for paged K/V pools taller than one Xe 2D block-load surface (see
+  // collective::kXeMaxSurfaceRows); the mainloop then splits K/V into
+  // sub-surfaces. A separate instantiation leaves the common path unchanged.
+  static constexpr bool LargeSurface = LargeSurface_;
+  static_assert(
+      !LargeSurface || CollectiveMainloop::PagedKV,
+      "LargeSurface only applies to paged K/V");
 
   // Device side arguments
   struct KernelArguments {
@@ -380,8 +406,6 @@ class XeFMHAFwdSplitKVKernel {
         int num_blocks_per_split =
             cute::ceil_div(windowed_k_blocks, seq_num_kv_splits);
 
-        constexpr int tile_n = get<1>(TileShapeQK{});
-        constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
         is_single_split =
             (seq_num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
 
@@ -462,7 +486,16 @@ class XeFMHAFwdSplitKVKernel {
 
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
 
-      mainloop(
+      // KV-head pair prefetch (full fp8, token-major caches) pays off unless
+      // the work-group streams a single KV tile, or a large grid streams long
+      // sequences (>= 2048 work-groups of >= 128 KV tiles each).
+      const int wg_tiles = end_blk - start_blk;
+      const int64_t grid_wgs =
+          int64_t{GridDimX()} * int64_t{GridDimY()} * int64_t{GridDimZ()};
+      const bool pair_kv_heads =
+          wg_tiles >= 2 && !(grid_wgs >= 2048 && wg_tiles >= 128);
+
+      mainloop.template operator()<LargeSurface>(
           Q(_, _, head, l_coord),
           K(_, _, head, l_coord),
           V(_, _, head, l_coord),
@@ -471,6 +504,7 @@ class XeFMHAFwdSplitKVKernel {
           tA_sum,
           blk_qv,
           idx_b,
+          pair_kv_heads ? head : -1,
           start_blk,
           end_blk,
           k_blocks,
@@ -547,10 +581,17 @@ class ReduceSplitK {
   using ElementLSE = typename FMHAKernel_::ElementLSE;
 
   using SGPerWG = typename FMHAKernel_::SGPerWG;
+  // Subgroups per reduce work-group. Tuned decode kernels use at least
+  // head_dim / 64, so each work-item combines at most four outputs on the
+  // vectorized path below (full fp8 decode work-groups have only 2 subgroups).
+  static constexpr int kReduceSGs =
+      FMHAKernel_::kTunedDecode
+          ? cute::max(int(SGPerWG::value), int(get<1>(TileShapeO{})) / 64)
+          : int(SGPerWG::value);
 
   // num values (head_dim) processed by each thread
   constexpr static int num_vals_per_thread =
-      int(get<1>(TileShapeO{}) / (SGPerWG::value * intel::sg_size));
+      int(get<1>(TileShapeO{}) / (kReduceSGs * intel::sg_size));
 
   //
   // Types
@@ -635,7 +676,7 @@ class ReduceSplitK {
   }
 
   static dim3 get_block_shape() {
-    return dim3(SGPerWG::value * intel::sg_size, 1, 1);
+    return dim3(kReduceSGs * intel::sg_size, 1, 1);
   }
 
   CUTLASS_DEVICE
@@ -663,9 +704,6 @@ class ReduceSplitK {
     ProblemShape const& s = p.shape;
 
     int thr_id = int(ThreadIdxX());
-    int sub_group_id = thr_id / intel::sg_size;
-    int tid_in_sg = thr_id % intel::sg_size;
-
     TileScheduler tile_scheduler{params.scheduler};
     auto num_kv_splits = params.scheduler.num_kv_splits;
 
@@ -721,10 +759,9 @@ class ReduceSplitK {
       if (plan_driven) {
         effective_splits = seq_num_kv_splits;
       } else {
-        constexpr int tile_n = get<1>(typename FMHAKernel_::TileShapeQK{});
-        constexpr int kMinBlocksForSplit = (tile_n <= 64) ? 32 : 128;
         bool is_single_split =
-            (seq_num_kv_splits > 1) && (windowed_k_blocks < kMinBlocksForSplit);
+            (seq_num_kv_splits > 1) &&
+            (windowed_k_blocks < FMHAKernel_::kMinBlocksForSplit);
         effective_splits = is_single_split ? 1 : seq_num_kv_splits;
       }
 
@@ -785,11 +822,19 @@ class ReduceSplitK {
 
       int l_coord = is_var_len ? 0 : idx_b;
 
+      // Splits [0, num_valid_splits) produced output. A legacy-path sequence
+      // without KV blocks has no valid splits.
+      const int num_valid_splits =
+          plan_driven ? effective_splits
+          : num_blocks_per_split > 0
+              ? cute::min(
+                    effective_splits,
+                    cute::ceil_div(windowed_k_blocks, num_blocks_per_split))
+              : 0;
+      const bool split_thread_active = thr_id < num_valid_splits;
+
       // Load the per-split natural-log LSE values into SLM and find their
       // maximum. This matches CUDA FlashAttention's split-K combine contract.
-      bool split_thread_active =
-          thr_id < effective_splits &&
-          (plan_driven || thr_id * num_blocks_per_split < windowed_k_blocks);
       ElementLSE local_lse{
           cutlass::platform::numeric_limits<ElementLSE>::lowest()};
       ElementLSE global_max_lse{
@@ -839,21 +884,119 @@ class ReduceSplitK {
 
       sycl::group_barrier(get_work_group<3>());
 
-      for (int idx = thr_id; idx < s.head_size_vo;
-           idx += SGPerWG::value * intel::sg_size) {
-        ElementLSE acc = 0;
-        for (int i = 0; i < effective_splits; ++i) {
-          if (!plan_driven && i * num_blocks_per_split >= windowed_k_blocks) {
-            break;
+      // Combine the normalized partial outputs with the normalized split
+      // weights. Loads for kSplitChunk splits and kVals output elements are
+      // issued together so their latencies overlap (a serial loop over splits
+      // made this kernel latency bound).
+      constexpr int kWgThreads = kReduceSGs * intel::sg_size;
+      constexpr int kVals = cute::max(
+          1, (int(get<1>(TileShapeO{})) + kWgThreads - 1) / kWgThreads);
+      constexpr int kSplitChunk = 8;
+      bool combined = false;
+      if constexpr (
+          FMHAKernel_::kTunedDecode && (kVals == 2 || kVals == 4) &&
+          sizeof(ElementO) == 2) {
+        // kVals 16-bit outputs per work-item = kWords 32-bit words.
+        constexpr int kWords = kVals / 2;
+        const bool vec_ok =
+            (reinterpret_cast<uintptr_t>(&Oaccum(seq_idx, 0, head_q, l_coord)) %
+                 (4 * kWords) ==
+             0) &&
+            (reinterpret_cast<uintptr_t>(&O(seq_idx, 0, head_q, l_coord)) %
+                 (4 * kWords) ==
+             0) &&
+            (get<2>(Oaccum.stride()) % kVals == 0) &&
+            (s.head_size_vo % kVals == 0);
+        if (vec_ok) {
+          combined = true;
+          // Each work-item owns kVals contiguous outputs and loads them with
+          // kWords 32-bit loads per split. Index clamping plus zero weights
+          // keep the unrolled split loop branch-free so all loads are in flight
+          // at once.
+          using VecT = uint64_t;
+          const int idx0 = thr_id * kVals;
+          if (idx0 < s.head_size_vo) {
+            ElementLSE acc[kVals];
+            CUTLASS_PRAGMA_UNROLL
+            for (int v = 0; v < kVals; ++v)
+              acc[v] = ElementLSE(0);
+            const ElementO* base = &Oaccum(seq_idx, idx0, head_q, l_coord);
+            const int64_t split_stride =
+                int64_t(num_heads_q) * get<2>(Oaccum.stride());
+            for (int i0 = 0; i0 < num_valid_splits; i0 += kSplitChunk) {
+              VecT raw[kSplitChunk];
+              ElementLSE w[kSplitChunk];
+              CUTLASS_PRAGMA_UNROLL
+              for (int j = 0; j < kSplitChunk; ++j) {
+                const int i = cute::min(i0 + j, num_valid_splits - 1);
+                const uint32_t* p32 =
+                    reinterpret_cast<const uint32_t*>(base + i * split_stride);
+                raw[j] = VecT(p32[0]);
+                if constexpr (kWords > 1) raw[j] |= VecT(p32[1]) << 32;
+                w[j] = (i0 + j < num_valid_splits)
+                           ? shared_storage.softmax_lse_slm_array[i0 + j]
+                           : ElementLSE(0);
+              }
+              CUTLASS_PRAGMA_UNROLL
+              for (int j = 0; j < kSplitChunk; ++j) {
+                CUTLASS_PRAGMA_UNROLL
+                for (int v = 0; v < kVals; ++v) {
+                  ElementLSE x = static_cast<ElementLSE>(ElementO::bitcast(
+                      static_cast<uint16_t>(raw[j] >> (16 * v))));
+                  // Empty splits may hold uninitialized data: select, not *0.
+                  acc[v] += w[j] > ElementLSE(0) ? x * w[j] : ElementLSE(0);
+                }
+              }
+            }
+            VecT out_raw = 0;
+            CUTLASS_PRAGMA_UNROLL
+            for (int v = 0; v < kVals; ++v)
+              out_raw |= VecT(static_cast<ElementO>(acc[v]).raw()) << (16 * v);
+            uint32_t* o32 =
+                reinterpret_cast<uint32_t*>(&O(seq_idx, idx0, head_q, l_coord));
+            o32[0] = static_cast<uint32_t>(out_raw);
+            if constexpr (kWords > 1)
+              o32[1] = static_cast<uint32_t>(out_raw >> 32);
           }
-          ElementLSE weight = shared_storage.softmax_lse_slm_array[i];
-
-          ElementLSE o_accum_val = static_cast<ElementLSE>(
-              Oaccum(seq_idx, idx, i * num_heads_q + head_q, l_coord));
-          acc += o_accum_val * weight;
         }
+      }
+      if (!combined) {
+        for (int idx0 = thr_id; idx0 < s.head_size_vo;
+             idx0 += kVals * kWgThreads) {
+          ElementLSE acc[kVals];
+          CUTLASS_PRAGMA_UNROLL
+          for (int v = 0; v < kVals; ++v)
+            acc[v] = ElementLSE(0);
 
-        O(seq_idx, idx, head_q, l_coord) = static_cast<ElementO>(acc);
+          for (int i0 = 0; i0 < num_valid_splits; i0 += kSplitChunk) {
+            CUTLASS_PRAGMA_UNROLL
+            for (int j = 0; j < kSplitChunk; ++j) {
+              const int i = i0 + j;
+              if (i < num_valid_splits) {
+                const ElementLSE weight =
+                    shared_storage.softmax_lse_slm_array[i];
+                CUTLASS_PRAGMA_UNROLL
+                for (int v = 0; v < kVals; ++v) {
+                  const int idx = idx0 + v * kWgThreads;
+                  if (idx < s.head_size_vo) {
+                    ElementLSE o_accum_val = static_cast<ElementLSE>(Oaccum(
+                        seq_idx, idx, i * num_heads_q + head_q, l_coord));
+                    acc[v] += weight > ElementLSE(0) ? o_accum_val * weight
+                                                     : ElementLSE(0);
+                  }
+                }
+              }
+            }
+          }
+
+          CUTLASS_PRAGMA_UNROLL
+          for (int v = 0; v < kVals; ++v) {
+            const int idx = idx0 + v * kWgThreads;
+            if (idx < s.head_size_vo) {
+              O(seq_idx, idx, head_q, l_coord) = static_cast<ElementO>(acc[v]);
+            }
+          }
+        }
       }
     }
   }

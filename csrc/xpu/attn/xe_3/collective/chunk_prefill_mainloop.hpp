@@ -43,6 +43,19 @@
 #include "cute/atom/mma_atom.hpp"
 #include "cute/util/sycl_vec.hpp"
 #include "flash_attention_v2/collective/fmha_fusion.hpp"
+#include "csrc/xpu/attn/paged_decode_tuning.h"
+
+#ifndef VLLM_GRF_SIZE
+  #define VLLM_GRF_SIZE 256
+#endif
+
+#ifdef __SYCL_DEVICE_ONLY__
+// SYCL-TLA declares this builtin as ...PayloadHeigth, a spelling IGC does not
+// resolve (the call is silently dropped). Declare the name IGC implements.
+SYCL_EXTERNAL extern "C" void
+__builtin_IB_subgroup_setBlock2DAddressPayloadHeight(
+    int* addrPayload, int height_minus_one);
+#endif
 
 namespace cutlass::fmha {
 // Arch-tagged inline namespace: gives these definitions a mangled name
@@ -75,6 +88,101 @@ static inline void barrier() {
 }
 
 using namespace cute;
+
+// The Xe LSC 2D block descriptor stores the surface height in a 24-bit field,
+// so one block-load surface addresses at most 2^24 rows. A paged K/V pool can
+// be taller; the host then runs the paged mainloops in has_large_surface mode,
+// which splits K/V into sub-surfaces of kXeMaxSurfaceRows rows and routes
+// each physical K tile to the sub-surface holding it.
+inline constexpr int kXeMaxSurfaceRows = 1 << 24;
+
+// Sub-surface holding physical K tile `tile`, and the tile's index within it.
+// Both are a shift/mask since tiles are a power of two in rows.
+template <int TileK>
+CUTLASS_DEVICE int xe_kv_surface(int tile) {
+  static_assert(
+      kXeMaxSurfaceRows % TileK == 0, "K tiles must not straddle sub-surfaces");
+  return static_cast<int>(
+      static_cast<unsigned>(tile) / (kXeMaxSurfaceRows / TileK));
+}
+
+template <int TileK>
+CUTLASS_DEVICE int xe_kv_surface_tile(int tile) {
+  return static_cast<int>(
+      static_cast<unsigned>(tile) % (kXeMaxSurfaceRows / TileK));
+}
+
+// View of sub-surface `surf` of a 2D K or V tensor. RowMode is the token
+// mode: 0 for K (k,d), 1 for V (d,k).
+template <int RowMode, class Tensor2D>
+CUTLASS_DEVICE auto xe_kv_sub_surface(Tensor2D const& t, int surf) {
+  int64_t const row0 = int64_t(surf) * kXeMaxSurfaceRows;
+  int64_t rows = int64_t(get<RowMode>(t.shape())) - row0;
+  rows = rows < kXeMaxSurfaceRows ? rows : kXeMaxSurfaceRows;
+  rows = rows < 1 ? 1 : rows;
+  return make_tensor(
+      t.data() + row0 * get<RowMode>(t.stride()),
+      make_layout(replace<RowMode>(t.shape(), int(rows)), t.stride()));
+}
+
+// Re-point an existing block 2D payload at sub-surface `surf` of `t` by
+// rewriting its base address and height in place, so a sub-surface switch
+// needs no new copy atoms.
+template <int RowMode, class Tensor2D>
+CUTLASS_DEVICE void
+xe_kv_retarget_payload(int* payload, Tensor2D const& t, int surf) {
+#ifdef __SYCL_DEVICE_ONLY__
+  auto const s = xe_kv_sub_surface<RowMode>(t, surf);
+  __builtin_IB_subgroup_setBlock2DAddressPayloadBase(
+      payload, static_cast<long>((uint64_t)raw_pointer_cast(s.data())));
+  __builtin_IB_subgroup_setBlock2DAddressPayloadHeight(
+      payload, int(get<RowMode>(s.shape())) - 1);
+#endif
+}
+
+// Re-point every payload of a prepared K/V copy at sub-surface `surf`.
+template <int RowMode, int N, class Tensor2D>
+CUTLASS_DEVICE void xe_kv_retarget_payloads(
+    Xe2DPreparedPayloads<N>& prepared, Tensor2D const& t, int surf) {
+  CUTLASS_PRAGMA_UNROLL
+  for (int i = 0; i < N; ++i) {
+    xe_kv_retarget_payload<RowMode>(prepared.payloads[i], t, surf);
+  }
+}
+
+// Sub-surface 0 of `t` in large-surface mode, `t` itself otherwise.
+template <bool LargeSurface, int RowMode, class Tensor2D>
+CUTLASS_DEVICE decltype(auto) xe_kv_first_sub_surface(Tensor2D const& t) {
+  if constexpr (LargeSurface) {
+    return xe_kv_sub_surface<RowMode>(t, 0);
+  } else {
+    return (t);
+  }
+}
+
+#if defined(__SYCL_DEVICE_ONLY__) && defined(SYCL_INTEL_TARGET)
+CUTE_DEVICE
+uint32_t subgroup_any_less(float const& lhs, float const& rhs) {
+  uint32_t result;
+  asm("{\n"
+      ".decl OUT_UD v_type=G type=UD num_elts=16 alias=<%0,0>\n"
+      ".decl LHS_F v_type=G type=F num_elts=16 alias=<%1,0>\n"
+      ".decl RHS_F v_type=G type=F num_elts=16 alias=<%2,0>\n"
+      ".decl ANY_LESS v_type=P num_elts=16\n"
+      "cmp.lt (M1_NM, 16) ANY_LESS LHS_F(0,0)<1;1,0> RHS_F(0,0)<1;1,0>\n"
+      "(ANY_LESS.any) sel (M1_NM, 16) OUT_UD(0,0)<1> 0x1:ud 0x0:ud\n"
+      "}\n"
+      : "=rw"(result)
+      : "rw"(lhs), "rw"(rhs));
+  return result;
+}
+#else
+CUTE_DEVICE
+uint32_t subgroup_any_less(float const& /* lhs */, float const& /* rhs */) {
+  CUTE_INVALID_CONTROL_PATH(
+      "subgroup_any_less requires Intel Xe SYCL device target");
+}
+#endif
 
 #if defined(__SYCL_DEVICE_ONLY__) && defined(SYCL_INTEL_TARGET)
 CUTE_DEVICE
@@ -397,12 +505,11 @@ struct FMHAFwdMainloop<
 
   static constexpr bool Fp8KV =
       is_any_of_v<ElementK, float_e5m2_t, float_e4m3_t>;
-  // Full-fp8 path: the query is also fp8, so the Q*K DPAS GEMM runs natively in
-  // fp8. The per-tensor q/k descales are folded into the softmax scale and the
-  // softmax exponent is biased (see softmax()) so the packed P operand fits the
-  // fp8 dynamic range.
-  static constexpr bool Fp8Q =
-      is_any_of_v<ElementQ, float_e5m2_t, float_e4m3_t>;
+  // bf16 Q consumed by an fp16 MMA (bf16 Q + fp8 KV): Q is range-guarded
+  // before the narrowing bf16 -> fp16 conversion.
+  static constexpr bool NarrowQToHalf =
+      cute::is_same_v<ElementQ, bfloat16_t> &&
+      cute::is_same_v<typename TiledMMAQK::ValTypeA, half_t>;
   static constexpr bool CausalMask = CausalMask_;
   static constexpr bool LocalMask = LocalMask_;
   static constexpr bool PagedKV = PagedKV_;
@@ -462,9 +569,22 @@ struct FMHAFwdMainloop<
   }
 
   CUTLASS_DEVICE int get_paged_idx(int K, int idx_b) {
-    int tiles_per_page = params.page_size / get<1>(TileShapeQK{});
+    constexpr int kv_tile = get<1>(TileShapeQK{});
+    int tiles_per_page = params.page_size / kv_tile;
     int b_offset = idx_b * params.max_pages_per_seq;
-    int page_local_idx = K * get<1>(TileShapeQK{}) / params.page_size;
+    int page_local_idx, tile_in_page;
+
+    // Xe lacks integer divide, so shift/mask when tiles_per_page is a power of
+    // two (true for every supported page_size/tile combination).
+    if (tiles_per_page > 0 && (tiles_per_page & (tiles_per_page - 1)) == 0) {
+      unsigned const shift = static_cast<unsigned>(
+          __builtin_ctz(static_cast<unsigned>(tiles_per_page)));
+      page_local_idx = K >> shift;
+      tile_in_page = K & (tiles_per_page - 1);
+    } else {
+      page_local_idx = K * kv_tile / params.page_size;
+      tile_in_page = K % tiles_per_page;
+    }
 
     // Clamp page_local_idx to the valid range [0, max_pages_per_seq - 1]
     if (page_local_idx >= params.max_pages_per_seq) {
@@ -472,11 +592,11 @@ struct FMHAFwdMainloop<
     }
 
     int block_idx = params.ptr_page_table[b_offset + page_local_idx];
-    int page_stride_tiles = params.page_stride_elements / get<1>(TileShapeQK{});
-    return block_idx * page_stride_tiles + K % tiles_per_page;
+    int page_stride_tiles = params.page_stride_elements / kv_tile;
+    return block_idx * page_stride_tiles + tile_in_page;
   }
 
-  template <typename QVCoord>
+  template <bool has_large_surface, typename QVCoord>
   CUTLASS_DEVICE void operator()(
       TensorQ2D const& Q_2D,    // (q,d)
       TensorK2D const& K_2D,    // (k,d)
@@ -538,8 +658,8 @@ struct FMHAFwdMainloop<
 
     /* Create global -> register copies */
     TiledCopyQ copy_q{Q_2D};
-    TiledCopyK copy_k{K_2D};
-    TiledCopyV copy_v{V_2D};
+    TiledCopyK copy_k{xe_kv_first_sub_surface<has_large_surface, 0>(K_2D)};
+    TiledCopyV copy_v{xe_kv_first_sub_surface<has_large_surface, 1>(V_2D)};
 
     /* Create MMAs */
     TiledMMAQK mma_qk{};
@@ -570,13 +690,26 @@ struct FMHAFwdMainloop<
     auto tArV = thr_mma_pv.partition_sg_fragment_B(gV_split(_, _, 0, 0));
 
     /* Create TiledCopy objects for prefetches */
-    auto prefetch_k =
-        make_block_2d_prefetch<SGPerWG::value>(tile_shape_k, K_2D);
-    auto prefetch_v =
-        make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D);
+    constexpr int RegularKVPrefetchSGs =
+        cute::bit_floor(static_cast<unsigned>(SGPerWG::value));
+    constexpr int RegularKVPrefetchThreads =
+        RegularKVPrefetchSGs * intel::sg_size;
+    constexpr bool kAllSGsPrefetch =
+        (RegularKVPrefetchSGs == static_cast<int>(SGPerWG::value));
+    int const prefetch_thr_id =
+        kAllSGsPrefetch ? thr_id
+                        : (thr_id < RegularKVPrefetchThreads ? thr_id : 0);
+    const auto subgroup_id = thr_id / intel::sg_size;
+    bool const prefetch_sg_active =
+        kAllSGsPrefetch || (subgroup_id < RegularKVPrefetchSGs);
+
+    auto prefetch_k = make_block_2d_prefetch<RegularKVPrefetchSGs>(
+        tile_shape_k, xe_kv_first_sub_surface<has_large_surface, 0>(K_2D));
+    auto prefetch_v = make_block_2d_prefetch<RegularKVPrefetchSGs>(
+        tile_shape_v, xe_kv_first_sub_surface<has_large_surface, 1>(V_2D));
     /* Partition global tensors for prefetch */
-    auto pKgK = prefetch_k.get_slice(thr_id).partition_S(gK_prefetch);
-    auto pVgV = prefetch_v.get_slice(thr_id).partition_S(gV);
+    auto pKgK = prefetch_k.get_slice(prefetch_thr_id).partition_S(gK_prefetch);
+    auto pVgV = prefetch_v.get_slice(prefetch_thr_id).partition_S(gV);
 
     // ------
     // Kernel
@@ -591,10 +724,44 @@ struct FMHAFwdMainloop<
     std::array<PreparedV_t, VTiles> prepared_v;
 
     /* Preload + reorder Q once; reused across all K iterations. */
+    [[maybe_unused]] float q_amax = 0.f;
     CUTLASS_PRAGMA_UNROLL
-    for (int d = 0; d < DTiles; d++) {
-      copy(copy_q, tQgQ(_, _, _, d), tQrQ);
-      reorder(tQrQ, tSrQ_arr[d]);
+    for (int D = 0; D < DTiles; D++) {
+      copy(copy_q, tQgQ(_, _, _, D), tQrQ);
+      if constexpr (NarrowQToHalf) {
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < tQrQ.size(); i++)
+          q_amax = sycl::fmax(q_amax, sycl::fabs(static_cast<float>(tQrQ(i))));
+      }
+      reorder(tQrQ, tSrQ_arr[D]);
+    }
+
+    // bf16 -> fp16 Q range guard. bf16 values >= 2^16 overflow fp16 and very
+    // small ones lose precision as fp16 subnormals. If this subgroup's Q rows
+    // fall outside [2^-6, 2^16), reload Q scaled by 2^-q_shift (moving max|q|
+    // into [2^14, 2^15)) and fold 2^q_shift into the softmax scale.
+    // Power-of-two scaling is exact, so S = Q*K^T is unchanged; in-range tiles
+    // (the normal case) take the fast path unmodified. Subgroups own whole Q
+    // rows, so the per-subgroup shift is consistent for every row-wise softmax
+    // reduction.
+    [[maybe_unused]] int q_shift = 0;
+    if constexpr (NarrowQToHalf) {
+      auto sg = sycl::ext::oneapi::this_work_item::get_sub_group();
+      q_amax = sycl::reduce_over_group(sg, q_amax, sycl::maximum<float>());
+      bool const q_out_of_range = sycl::isfinite(q_amax) && q_amax != 0.f &&
+                                  (q_amax >= 65536.f || q_amax < 0.015625f);
+      if (q_out_of_range) {
+        q_shift = sycl::ilogb(q_amax) - 14;
+        float const q_rescale = sycl::ldexp(1.f, -q_shift);
+        CUTLASS_PRAGMA_UNROLL
+        for (int D = 0; D < DTiles; D++) {
+          copy(copy_q, tQgQ(_, _, _, D), tQrQ);
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < tQrQ.size(); i++)
+            tQrQ(i) = ElementQ(static_cast<float>(tQrQ(i)) * q_rescale);
+          reorder(tQrQ, tSrQ_arr[D]);
+        }
+      }
     }
 
     /* Masking scalars */
@@ -626,8 +793,36 @@ struct FMHAFwdMainloop<
     auto prepared_pv = prepare_payloads(
         prefetch_v, pVgV(_, _, _, next_page_idx), pVgV(_, _, _, next_page_idx));
 
-    prefetch_with_payloads(prefetch_k, prepared_pk, shape(pKgK(_, _, _, 0)));
-    prefetch_with_payloads(prefetch_v, prepared_pv, shape(pVgV(_, _, _, 0)));
+    // Large-surface mode: payloads address tiles relative to their sub-surface.
+    // Payload deltas move the block Y offset, which is the token mode of both
+    // K (k,d) and V (d,k).
+    [[maybe_unused]] int kv_surf = 0, last_surf = 0;
+    if constexpr (has_large_surface) {
+      last_surf = xe_kv_surface<1>(get<0>(K_2D.shape()) - 1);
+      kv_surf = cute::min(xe_kv_surface<tile_k>(next_page_idx), last_surf);
+      if (kv_surf != 0) {
+        int const rows = -kv_surf * kXeMaxSurfaceRows;
+        CUTLASS_PRAGMA_UNROLL
+        for (int D = 0; D < DTiles; D++) {
+          update_payloads(prepared_k[D], rows);
+          xe_kv_retarget_payloads<0>(prepared_k[D], K_2D, kv_surf);
+        }
+        CUTLASS_PRAGMA_UNROLL
+        for (int VV = 0; VV < VTiles; VV++) {
+          update_payloads(prepared_v[VV], rows);
+          xe_kv_retarget_payloads<1>(prepared_v[VV], V_2D, kv_surf);
+        }
+        update_payloads(prepared_pk, rows);
+        xe_kv_retarget_payloads<0>(prepared_pk, K_2D, kv_surf);
+        update_payloads(prepared_pv, rows);
+        xe_kv_retarget_payloads<1>(prepared_pv, V_2D, kv_surf);
+      }
+    }
+
+    if (prefetch_sg_active) {
+      prefetch_with_payloads(prefetch_k, prepared_pk, shape(pKgK(_, _, _, 0)));
+      prefetch_with_payloads(prefetch_v, prepared_pv, shape(pVgV(_, _, _, 0)));
+    }
 
     clear(tArA);
     fill(tA_max, cutlass::platform::numeric_limits<ElementA>::lowest());
@@ -635,25 +830,21 @@ struct FMHAFwdMainloop<
 
     bool check_remainder_k = (seq_len % tile_k != 0);
 
-    // FP8 KV Scale: Currently we only support per-tensor scale for KV
+    // FP8 KV Scale (per-tensor): fold scale_k into the softmax scale (S = Q·K
+    // is linear in K) and defer scale_v to a single post-loop output rescale
+    // (O = sum P_i·V_i is linear in V), so no per-element dequantize is needed
+    // in the K loop.
     ElementS effective_scale = params.scale;
-    float scale_k = 1.f, scale_v = 1.f;
+    float scale_v = 1.f;
     if constexpr (Fp8KV) {
-      scale_k = *static_cast<const float*>(params.scale_k);
+      const float scale_k = *static_cast<const float*>(params.scale_k);
       scale_v = *static_cast<const float*>(params.scale_v);
-    }
-    // Full-fp8: fold the per-tensor q/k descales into the softmax scale (S =
-    // Q·K is linear in Q and K) and defer scale_v to a single post-loop output
-    // rescale (O = sum P_i·V_i is linear in V). K/V are then consumed directly
-    // as fp8 by the DPAS GEMMs, so the per-element dequantize is skipped.
-    if constexpr (Fp8Q) {
       effective_scale = params.scale * ElementS(scale_k);
-      if (params.scale_q != nullptr) {
-        effective_scale = effective_scale *
-                          ElementS(*static_cast<const float*>(params.scale_q));
-      }
     }
-
+    if constexpr (NarrowQToHalf) {
+      if (q_shift != 0)
+        effective_scale = effective_scale * ElementS(sycl::ldexp(1.f, q_shift));
+    }
     constexpr int kAtomsPerD =
         decltype(get<2>(TileShapeQK{}))::value /
         decltype(get<2>(typename TiledMMAQK::AtomShape_MNK{}))::value;
@@ -673,14 +864,26 @@ struct FMHAFwdMainloop<
         page_offset = (next_page_idx - page_idx) * kv_stride;
       }
 
-      auto tKgK_cache =
-          PagedKV ? tKgK(_, _, _, page_idx, _) : tKgK(_, _, _, K, _);
-      auto tVgV_cache =
-          PagedKV ? tVgV(_, _, _, _, page_idx) : tVgV(_, _, _, _, K);
+      // Large-surface mode: sub-surface relative delta; prefetches switch here.
+      [[maybe_unused]] bool surf_switch = false;
+      if constexpr (has_large_surface) {
+        int const surf =
+            cute::min(xe_kv_surface<tile_k>(next_page_idx), last_surf);
+        page_offset -= (surf - kv_surf) * kXeMaxSurfaceRows;
+        surf_switch = surf != kv_surf;
+        kv_surf = surf;
+        if (surf_switch) {
+          xe_kv_retarget_payloads<0>(prepared_pk, K_2D, kv_surf);
+          xe_kv_retarget_payloads<1>(prepared_pv, V_2D, kv_surf);
+        }
+      }
 
       /* V prefetch for next iter */
-      update_payloads(prepared_pv, page_offset);
-      prefetch_with_payloads(prefetch_v, prepared_pv, shape(pVgV(_, _, _, 0)));
+      if (prefetch_sg_active) {
+        update_payloads(prepared_pv, page_offset);
+        prefetch_with_payloads(
+            prefetch_v, prepared_pv, shape(pVgV(_, _, _, 0)));
+      }
 
       /* GEMM 1: S = Q * K^T */
       CUTLASS_PRAGMA_UNROLL
@@ -689,12 +892,10 @@ struct FMHAFwdMainloop<
         update_payloads(prepared_k[D], page_offset);
         reorder(tKrK, tSrK);
 
-        if constexpr (Fp8KV && !Fp8Q) {
-          dequantize(tSrK, scale_k);
-        }
-
         auto const& tSrQ_d = tSrQ_arr[D];
         if (D == 0) {
+          // Null-src0 DPAS on the first K atom initializes tSrS without a
+          // clear().
           cute::gemm<true>(mma_qk, tSrQ_d(_, _, 0), tSrK(_, _, 0), tSrS);
           CUTLASS_PRAGMA_UNROLL
           for (int k = 1; k < kAtomsPerD; k++) {
@@ -706,8 +907,11 @@ struct FMHAFwdMainloop<
       }
 
       /* K prefetch for next iteration */
-      update_payloads(prepared_pk, page_offset);
-      prefetch_with_payloads(prefetch_k, prepared_pk, shape(pKgK(_, _, _, 0)));
+      if (prefetch_sg_active) {
+        update_payloads(prepared_pk, page_offset);
+        prefetch_with_payloads(
+            prefetch_k, prepared_pk, shape(pKgK(_, _, _, 0)));
+      }
 
       /* Early V-load for VV=0: overlap memory latency with softmax scalar work
        */
@@ -736,22 +940,17 @@ struct FMHAFwdMainloop<
       }
       /* k masking for remainder tiles */
       if (check_remainder_k && K == blk_k1 - 1) {
-        // Mask KV columns that fall past the logical sequence length. Derive
-        // the per-element column coordinate from the MMA C partition (the same
-        // layout as tSrS) rather than from the copy-K partition + broadcast:
-        // the copy and MMA-output subgroup layouts need not agree on how lanes
-        // map to KV columns, and a mismatch would mask the wrong columns
-        // (leaving garbage scores in the remainder that inflate the softmax
-        // row-max -> P == 0 -> inf). This mirrors the LocalMask/CausalMask
-        // coordinate handling above.
-        Tensor cKrem = make_identity_tensor(make_shape(seq_len, seq_len));
-        Tensor gKrem = local_tile(
-            cKrem, take<0, 2>(TileShapeQK{}), make_coord(get<0>(blk_qv), K));
-        auto cS_rem = thr_mma_qk.partition_C(gKrem);
+        // Tensor-free remainder masking
+        constexpr int n_reps = tile_k / intel::sg_size;
+        constexpr int elems_per_n = tSrS.size() / n_reps;
+        int k_base = K * tile_k + lane_id;
         CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < tSrS.size(); i++) {
-          if (get<1>(cS_rem(i)) >= seq_len) {
-            tSrS(i) = ElementS(-INFINITY);
+        for (int n = 0; n < n_reps; n++) {
+          if (k_base + n * intel::sg_size >= seq_len) {
+            CUTLASS_PRAGMA_UNROLL
+            for (int j = 0; j < elems_per_n; j++) {
+              tSrS(n * elems_per_n + j) = ElementS(-INFINITY);
+            }
           }
         }
       }
@@ -778,32 +977,14 @@ struct FMHAFwdMainloop<
       }
 
       /* Apply softmax (deferred row-sum hreduce) */
-      auto [rescale, tS_partial_sum] =
+      auto [rescale, tS_partial_sum, subgroup_needs_rescale] =
           softmax(effective_scale, tSrS, tA_max, tA_sum);
       auto sg = sycl::ext::oneapi::this_work_item::get_sub_group();
       constexpr int kSumSize = decltype(tA_sum.size())::value;
       constexpr bool kSumDivVT = (kSumSize % VTiles == 0);
       constexpr int kSumPerVT = kSumDivVT ? (kSumSize / VTiles) : 0;
 
-      using ElementP = typename TiledMMAPV::ValTypeA;
-      if constexpr (std::is_same_v<ElementP, bfloat16_t>) {
-        static_assert(
-            decltype(tArP.size())::value % 2 == 0,
-            "tArP per-WI element count must be even for f32x2->bf16x2 packing");
-        constexpr int kCvtPairs = decltype(tSrS.size())::value / 2;
-        cute::intel::uint2 cvt_tmp[kCvtPairs];
-        CUTLASS_PRAGMA_UNROLL
-        for (int p = 0; p < kCvtPairs; p++) {
-          cvt_f32x2_to_bf16x2_bias(tSrS(2 * p), tSrS(2 * p + 1), cvt_tmp[p]);
-        }
-        CUTLASS_PRAGMA_UNROLL
-        for (int p = 0; p < kCvtPairs; p++) {
-          cvt_f32x2_to_bf16x2_pack(
-              cvt_tmp[p], reinterpret_cast<cute::intel::ushort2&>(tArP(2 * p)));
-        }
-      } else {
-        reorder_to_P_fp8<ElementP>(tSrS, tArP);
-      }
+      reorder(tSrS, tArP);
 
       /* GEMM 2: A += P * V, split in v dimension.
        * VV=0 pre-loaded before softmax; VV>0 loaded inline. */
@@ -815,27 +996,45 @@ struct FMHAFwdMainloop<
         }
         reorder(tVrV, tArV);
 
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = tArA.size() / VTiles - 1; i >= 0; i--)
-          tArA(_, _, _, VV)(i) *= broadcast<0>(rescale, tArA, i);
+        if (subgroup_needs_rescale) {
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = tArA.size() / VTiles - 1; i >= 0; i--)
+            tArA(_, _, _, VV)(i) *= broadcast<0>(rescale, tArA, i);
+        }
         /* Rescale + accumulate per-lane partial row sums, fused into V loop. */
         if constexpr (kSumDivVT) {
           CUTLASS_PRAGMA_UNROLL
           for (int j = 0; j < kSumPerVT; j++) {
             int const i = VV * kSumPerVT + j;
-            tA_sum(i) = tA_sum(i) * group_broadcast(sg, rescale(0), i) +
-                        tS_partial_sum(i);
+            // rescale is subgroup-interleaved: row i lives in lane
+            // i % sg_size, register i / sg_size.
+            tA_sum(i) =
+                tA_sum(i) *
+                    group_broadcast(
+                        sg, rescale(i / intel::sg_size), i % intel::sg_size) +
+                tS_partial_sum(i);
           }
-        }
-        if constexpr (Fp8KV && !Fp8Q) {
-          dequantize(tArV, scale_v);
         }
         cute::gemm(mma_pv, tArP, tArV, tArA(_, _, _, VV));
       }
+
+      // Large-surface mode: loads switch once this tile's loads are issued.
+      if constexpr (has_large_surface) {
+        if (surf_switch) {
+          CUTLASS_PRAGMA_UNROLL
+          for (int D = 0; D < DTiles; D++) {
+            xe_kv_retarget_payloads<0>(prepared_k[D], K_2D, kv_surf);
+          }
+          CUTLASS_PRAGMA_UNROLL
+          for (int VV = 0; VV < VTiles; VV++) {
+            xe_kv_retarget_payloads<1>(prepared_v[VV], V_2D, kv_surf);
+          }
+        }
+      }
     }
 
-    // Full-fp8: apply the deferred per-tensor V scale once after the K loop.
-    if constexpr (Fp8Q) {
+    // FP8 KV: apply the deferred per-tensor V scale once after the K loop.
+    if constexpr (Fp8KV) {
       CUTLASS_PRAGMA_UNROLL
       for (int i = 0; i < tArA.size(); ++i) {
         tArA(i) *= ElementA(scale_v);
@@ -849,18 +1048,10 @@ struct FMHAFwdMainloop<
   // and is collapsed once in the epilogue (reduce<0, Horizontal>).
   CUTLASS_DEVICE
   auto softmax(
-      ElementS scale,    // Effective softmax scale (fp8 q/k descales folded in)
-      FragS& tS,         // Softmax src/dst block
-      FragARow& tA_max,  // Softmax row-wise max accumulator
+      ElementS scale,             // Softmax scale
+      FragS& tS,                  // Softmax src/dst block
+      FragARow& tA_max,           // Softmax row-wise max accumulator
       FragSPartialRow& tA_sum) {  // Softmax row-wise partial sum (per-lane)
-
-    // Full-fp8: bias the softmax exponent by +8 so the (unnormalized) P block
-    // is scaled by 2^8 = 256 into a range better represented by fp8. The bias
-    // is applied uniformly to every element of P and cancels in the final
-    // O = (P·V) / rowsum(P) normalization (both numerator and denominator carry
-    // the same 256 factor). It is excluded from the running max so the online
-    // rescale factors are unaffected.
-    constexpr ElementS kFp8ExpOffset = Fp8Q ? ElementS(8) : ElementS(0);
 
     /* Compute row-wise maxima for this block */
     auto tS_bmax =
@@ -868,9 +1059,11 @@ struct FMHAFwdMainloop<
             tS, sycl::maximum<void>{});
 
     FragARow rescale;
+    uint32_t subgroup_needs_rescale = 0;
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tA_max.size(); i++) {
       ElementS new_max = sycl::max(tA_max(i), scale * tS_bmax(i));
+      subgroup_needs_rescale |= subgroup_any_less(tA_max(i), new_max);
       rescale(i) = sycl::native::exp2(tA_max(i) - new_max);
       tA_max(i) = new_max;
     }
@@ -878,7 +1071,7 @@ struct FMHAFwdMainloop<
     /* Scale S and subtract maxima, then exponentiate */
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++)
-      tS(i) = scale * tS(i) - broadcast<0>(tA_max, tS, i) + kFp8ExpOffset;
+      tS(i) = scale * tS(i) - broadcast<0>(tA_max, tS, i);
 
     CUTLASS_PRAGMA_UNROLL
     for (int i = 0; i < tS.size(); i++)
@@ -897,12 +1090,17 @@ struct FMHAFwdMainloop<
       auto sg = sycl::ext::oneapi::this_work_item::get_sub_group();
       CUTLASS_PRAGMA_UNROLL
       for (int i = 0; i < kSumSize; i++) {
+        // rescale is subgroup-interleaved: row i lives in lane
+        // i % sg_size, register i / sg_size.
         tA_sum(i) =
-            tA_sum(i) * group_broadcast(sg, rescale(0), i) + tS_partial_sum(i);
+            tA_sum(i) *
+                group_broadcast(
+                    sg, rescale(i / intel::sg_size), i % intel::sg_size) +
+            tS_partial_sum(i);
       }
     }
 
-    return cute::make_tuple(rescale, tS_partial_sum);
+    return cute::make_tuple(rescale, tS_partial_sum, subgroup_needs_rescale);
   }
 };
 
@@ -1090,7 +1288,7 @@ struct DecodeFwdMainloop<
     return true;
   }
 
-  template <typename QVCoord>
+  template <bool has_large_surface, typename QVCoord>
   CUTLASS_DEVICE void operator()(
       TensorQ2D const& Q_2D,  // (q,d)
       TensorK2D const& K_2D,  // (k,d)
@@ -1100,6 +1298,7 @@ struct DecodeFwdMainloop<
       FragARow& tA_sum,       // Softmax row-wise sum accumulator
       QVCoord blk_qv,         // WG tile indices: (Q,V)
       int const& idx_b,       // WG tile indices: (B)
+      int pair_head,          // KV head of K_2D/V_2D to pair-prefetch, or -1
       int blk_k0,             // K block range: [K0,K1)
       int blk_k1,
       int total_blk,  // Total # of K blocks
@@ -1143,10 +1342,22 @@ struct DecodeFwdMainloop<
         make_coord(_, _, 0),
         Step<X, _1, _1>{});  // (v,k,VV,K)
 
+    // In has_large_surface mode the K/V copy and prefetch payloads address
+    // one sub-surface at a time (see kXeMaxSurfaceRows), starting with the
+    // first. Copies use absolute tile coordinates, so a sub-surface switch
+    // only re-points base and height of the existing payloads.
+    auto K_2D_0 = K_2D;
+    auto V_2D_0 = V_2D;
+    if constexpr (has_large_surface) {
+      static_assert(PagedKV, "only paged K/V is split into sub-surfaces");
+      K_2D_0 = xe_kv_sub_surface<0>(K_2D, 0);
+      V_2D_0 = xe_kv_sub_surface<1>(V_2D, 0);
+    }
+
     /* Create global -> register copies */
     TiledCopyQ copy_q{Q_2D};
-    TiledCopyK copy_k{K_2D};
-    TiledCopyV copy_v{V_2D};
+    TiledCopyK copy_k{K_2D_0};
+    TiledCopyV copy_v{V_2D_0};
 
     /* Create MMAs */
     TiledMMAQK mma_qk{};
@@ -1183,7 +1394,7 @@ struct DecodeFwdMainloop<
     auto prefetch_q = make_block_2d_prefetch(copy_q);
     auto prefetch_k = make_block_2d_prefetch(copy_k);
     auto prefetch_v =
-        make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D);
+        make_block_2d_prefetch<SGPerWG::value>(tile_shape_v, V_2D_0);
 
     /* Partition global tensors for prefetch */
     auto pQgQ = prefetch_q.get_slice(thr_id).partition_S(gQ);
@@ -1205,15 +1416,119 @@ struct DecodeFwdMainloop<
       tile_idx = block_idx * page_stride_tiles + tile_idx % tiles_per_page;
     }
 
+    // Tuned decode kernels (paged_decode_tuning.h) read the page table one
+    // tile ahead, so the next tile's K prefetch at the end of an iteration
+    // does not wait for a dependent page-table load. (Issuing the K/V
+    // prefetches earlier than they are today was measured slower.)
+    constexpr bool kPipelined =
+        PagedKV && vllm::xpu::paged_decode_tuning::is_tuned(
+                       get<1>(TileShapePV{}) * VTiles, get<1>(TileShapeQK{}));
+    int tile_idx_next = tile_idx;
+    if constexpr (kPipelined) {
+      const int k1 = blk_k0 + 1;
+      if (k1 < blk_k1) {
+        int page_local_idx = k1 * get<1>(TileShapeQK{}) / params.page_size;
+        tile_idx_next = params.ptr_page_table[b_offset + page_local_idx] *
+                            page_stride_tiles +
+                        k1 % tiles_per_page;
+      }
+    }
+
+    // Full fp8 head_dim 256 with a token-major (NHD) cache: a token's KV heads
+    // sit side by side, so one head's K/V are 256-byte runs that stream poorly
+    // from DRAM. Each work-group prefetches the rows of its head and of the
+    // paired head (pair_head ^ 1), so DRAM sees 512 contiguous bytes per token
+    // (pairing 128-byte rows at head_dim 128 was slower). The pair prefetch
+    // spans the whole K/V pool, so it is off in has_large_surface mode. Its
+    // payloads stay live next to the per-head ones, which spills with 256 GRF.
+    constexpr int kHeadDim = get<1>(TileShapePV{}) * VTiles;
+    constexpr bool kPairPrefetch = kPipelined && Fp8Q && kHeadDim > 128 &&
+                                   !has_large_surface && VLLM_GRF_SIZE >= 512;
+    const int kv_row = stride<0>(K_2D);  // elements between tokens
+    const bool pair_prefetch = kPairPrefetch && pair_head >= 0 &&
+                               kv_row >= 2 * kHeadDim &&
+                               ((pair_head | 1) + 1) * kHeadDim <= kv_row;
+    auto pair = [&]() {
+      if constexpr (kPairPrefetch) {
+        using KvTile = decltype(get<1>(TileShapeQK{}));
+        using PairTileK = Shape<KvTile, Int<2 * kHeadDim>>;
+        using PairTileV = Shape<Int<2 * kHeadDim>, KvTile>;
+        const int offset = -(pair_head & 1) * kHeadDim;
+        auto K_pair = make_tensor(
+            K_2D.data() + offset,
+            make_layout(
+                make_shape(get<0>(K_2D.shape()), Int<2 * kHeadDim>{}),
+                make_stride(kv_row, _1{})));
+        auto V_pair = make_tensor(
+            V_2D.data() + offset,
+            make_layout(
+                make_shape(Int<2 * kHeadDim>{}, get<1>(V_2D.shape())),
+                make_stride(_1{}, stride<1>(V_2D))));
+        auto copy_k_pair =
+            make_block_2d_prefetch<SGPerWG::value>(PairTileK{}, K_pair);
+        auto copy_v_pair =
+            make_block_2d_prefetch<SGPerWG::value>(PairTileV{}, V_pair);
+        auto pK = copy_k_pair.get_slice(thr_id).partition_S(local_tile(
+            make_identity_tensor(K_pair.shape()),
+            PairTileK{},
+            make_coord(_, 0)));  // (atom_val,k',d',K)
+        auto pV = copy_v_pair.get_slice(thr_id).partition_S(local_tile(
+            make_identity_tensor(V_pair.shape()),
+            PairTileV{},
+            make_coord(0, _)));  // (atom_val,v',k',K)
+        return cute::make_tuple(copy_k_pair, pK, copy_v_pair, pV);
+      } else {
+        return 0;
+      }
+    }();
+    auto prefetch_k_tile = [&](int tile) {
+      if constexpr (kPairPrefetch) {
+        if (pair_prefetch) {
+          prefetch(get<0>(pair), get<1>(pair)(_, _, _, tile));
+          return;
+        }
+      }
+      for (int D = 0; D < size<4>(pKgK); D++) {
+        prefetch(prefetch_k, pKgK(_, _, _, tile, D));
+      }
+    };
+    auto prefetch_v_tile = [&](int tile) {
+      if constexpr (kPairPrefetch) {
+        if (pair_prefetch) {
+          prefetch(get<2>(pair), get<3>(pair)(_, _, _, tile));
+          return;
+        }
+      }
+      prefetch(prefetch_v, pVgV(_, _, _, tile));
+    };
+
     /* Initialization steps for first block: Q/K prefetch, O init */
     /* TODO: limit D prefetch for large head size, and reorder K prefetches */
     for (int D = 0; D < size<3>(pQgQ); D++) {
       prefetch(prefetch_q, pQgQ(_, _, _, D));
     }
 
-    for (int D = 0; D < size<4>(pKgK); D++) {
-      prefetch(prefetch_k, pKgK(_, _, _, tile_idx, D));
+    // Large-surface mode: make a physical tile index local to its sub-surface
+    // and re-point the K/V payloads when the sub-surface changes.
+    constexpr int tile_k = get<1>(TileShapeQK{});
+    [[maybe_unused]] int kv_surf = 0;
+    [[maybe_unused]] auto route_tile = [&](int& tile) {
+      int const surf = xe_kv_surface<tile_k>(tile);
+      tile = xe_kv_surface_tile<tile_k>(tile);
+      if (surf != kv_surf) {
+        kv_surf = surf;
+        xe_kv_retarget_payload<0>(copy_k.payload, K_2D, surf);
+        xe_kv_retarget_payload<0>(prefetch_k.payload, K_2D, surf);
+        xe_kv_retarget_payload<1>(copy_v.payload, V_2D, surf);
+        xe_kv_retarget_payload<1>(prefetch_v.payload, V_2D, surf);
+      }
+    };
+
+    if constexpr (has_large_surface) {
+      route_tile(tile_idx);
     }
+
+    prefetch_k_tile(tile_idx);
 
     clear(tArA);
     fill(tA_max, cutlass::platform::numeric_limits<ElementA>::lowest());
@@ -1255,6 +1570,18 @@ struct DecodeFwdMainloop<
       auto tVgV_cache =
           PagedKV ? tVgV(_, _, _, _, tile_idx) : tVgV(_, _, _, _, K);
 
+      // Pipelined path: read the page-table entry of tile K+2 now; it is
+      // consumed at the end of this iteration.
+      const int k2 = K + 2;
+      int block_idx_k2 = 0;
+      if constexpr (kPipelined) {
+        if (k2 < blk_k1) {
+          block_idx_k2 =
+              params.ptr_page_table
+                  [b_offset + k2 * get<1>(TileShapeQK{}) / params.page_size];
+        }
+      }
+
       /* GEMM 1: S = K * Q */
       clear(tSrS); /* TODO: fuse w/ initial gemm call */
       for (int D = 0; D < size<4>(tKgK); D++) {
@@ -1270,7 +1597,7 @@ struct DecodeFwdMainloop<
       }
 
       /* V prefetch for GEMM 2 */
-      prefetch(prefetch_v, pVgV(_, _, _, tile_idx));
+      prefetch_v_tile(tile_idx);
 
       /* Causal masking */
       // No Causal masking in decoding
@@ -1342,6 +1669,22 @@ struct DecodeFwdMainloop<
 
       barrier();
 
+      if constexpr (kPipelined) {
+        tile_idx = tile_idx_next;
+        if (k2 < blk_k1) {
+          tile_idx_next =
+              block_idx_k2 * page_stride_tiles + k2 % tiles_per_page;
+        }
+        /* K prefetch (page index already resolved one tile ahead) */
+        if constexpr (has_large_surface) {
+          route_tile(tile_idx);
+        }
+        if (K + 1 < blk_k1) {
+          prefetch_k_tile(tile_idx);
+        }
+        continue;
+      }
+
       // next tile_idx
       next_tile_idx = K + 1;
       if constexpr (PagedKV) {
@@ -1358,6 +1701,10 @@ struct DecodeFwdMainloop<
         }
       }
       tile_idx = next_tile_idx;
+
+      if constexpr (has_large_surface) {
+        route_tile(tile_idx);
+      }
 
       /* K prefetch */
       for (int D = 0; D < size<4>(pKgK); D++) {

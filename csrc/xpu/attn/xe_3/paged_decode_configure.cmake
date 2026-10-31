@@ -76,7 +76,8 @@ function(paged_decode_configure FILENAME_SUFFIX)
   # Policy Configuration Mapping (XE3)
   # =============================================================================
   # Maps (q_group_size, head_size, page_size) to policy type names XE3 supports:
-  # qgroup 8/16, headsize 64-576, pagesize 64/128 (512/576 for MLA decode)
+  # qgroup 8 (headsize 64-576) / 16 (headsize 64-128), pagesize 16-128 (512/576
+  # for MLA decode)
 
   # Q-group size 8 policies
   set(policy_8_64_16 "decode_policy_q8_h64_p16")
@@ -109,36 +110,25 @@ function(paged_decode_configure FILENAME_SUFFIX)
   set(policy_8_512_128 "decode_policy_q8_h512_p128")
   set(policy_8_576_128 "decode_policy_q8_h576_p128")
 
-  # Q-group size 16 policies
+  # Q-group size 16 policies. Head sizes above 128 dispatch to the _8 tile (see
+  # paged_decode_xe3.cpp) except 256 with page size 64, so q16 is only mapped
+  # for those; unreachable q16 kernels are not generated.
   set(policy_16_64_16 "decode_policy_q16_h64_p16")
   set(policy_16_96_16 "decode_policy_q16_h96_p16")
   set(policy_16_128_16 "decode_policy_q16_h128_p16")
-  set(policy_16_192_16 "decode_policy_q16_h192_p16")
-  set(policy_16_256_16 "decode_policy_q16_h256_p16")
-  set(policy_16_512_16 "decode_policy_q16_h512_p16")
 
   set(policy_16_64_32 "decode_policy_q16_h64_p32")
   set(policy_16_96_32 "decode_policy_q16_h96_p32")
   set(policy_16_128_32 "decode_policy_q16_h128_p32")
-  set(policy_16_192_32 "decode_policy_q16_h192_p32")
-  set(policy_16_256_32 "decode_policy_q16_h256_p32")
-  set(policy_16_512_32 "decode_policy_q16_h512_p32")
 
   set(policy_16_64_64 "decode_policy_q16_h64_p64")
   set(policy_16_96_64 "decode_policy_q16_h96_p64")
   set(policy_16_128_64 "decode_policy_q16_h128_p64")
-  set(policy_16_192_64 "decode_policy_q16_h192_p64")
   set(policy_16_256_64 "decode_policy_q16_h256_p64")
-  set(policy_16_512_64 "decode_policy_q16_h512_p64")
-  set(policy_16_576_64 "decode_policy_q16_h576_p64")
 
   set(policy_16_64_128 "decode_policy_q16_h64_p128")
   set(policy_16_96_128 "decode_policy_q16_h96_p128")
   set(policy_16_128_128 "decode_policy_q16_h128_p128")
-  set(policy_16_192_128 "decode_policy_q16_h192_p128")
-  set(policy_16_256_128 "decode_policy_q16_h256_p128")
-  set(policy_16_512_128 "decode_policy_q16_h512_p128")
-  set(policy_16_576_128 "decode_policy_q16_h576_p128")
 
   # Configuration space dimensions (for "all" mode)
   set(qgroup_list "8" "16")
@@ -169,6 +159,11 @@ function(paged_decode_configure FILENAME_SUFFIX)
     foreach(IMPL_QGROUP ${qgroup_list})
       foreach(IMPL_HEADSIZE ${headsize_list})
         foreach(IMPL_PAGESIZE ${pagesize_list})
+          # Skip combinations without a policy (e.g. q16 with head size > 128)
+          if("${policy_${IMPL_QGROUP}_${IMPL_HEADSIZE}_${IMPL_PAGESIZE}}"
+             STREQUAL "")
+            continue()
+          endif()
           foreach(IMPL_KISCAUSAL ${L_BOOLS})
             foreach(IMPL_KISLOCAL ${L_BOOLS})
               foreach(IMPL_KISSINK ${L_BOOLS})

@@ -259,8 +259,8 @@ void cutlass_paged_decode_impl(
   // raw per-tensor scales.
   if (is_fp8_q) {
     TORCH_CHECK(
-        head_size == 128,
-        "Full fp8 paged_decode only supports head dimension 128, got ",
+        head_size == 128 || head_size == 256,
+        "Full fp8 paged_decode only supports head dimension 128 or 256, got ",
         head_size,
         ".");
     TORCH_CHECK(
@@ -280,6 +280,8 @@ void cutlass_paged_decode_impl(
       "FMHA forward only supports head dimension at most " +
           std::to_string(max_head_size));
 
+  // XE3 has no head-size-80 decode policy, so head sizes in (64, 96] use the
+  // head-96 bucket (HEAD_SIZE_LIMIT_1 is skipped).
   auto get_head_size_case = [](int head_size) -> int {
     if (head_size <= HEAD_SIZE_LIMIT_0) return 0;
     if (head_size <= HEAD_SIZE_LIMIT_2) return 1;
@@ -287,6 +289,7 @@ void cutlass_paged_decode_impl(
     if (head_size <= HEAD_SIZE_LIMIT_4) return 3;
     if (head_size <= HEAD_SIZE_LIMIT_5) return 4;
     if (head_size <= HEAD_SIZE_LIMIT_6) return 5;
+    if (head_size <= HEAD_SIZE_LIMIT_7) return 6;
     return -1;
   };
 
@@ -298,7 +301,27 @@ void cutlass_paged_decode_impl(
   // a packed-Q tile size rather than a hard cap on the GQA ratio. Ratios <= 8
   // fit a single _8 tile; larger ratios (e.g. falcon-7b's 71 query heads / 1 KV
   // head) are processed by ceil(ratio / qgroup) work-groups using the _16 tile.
-  if (num_q_group_size <= 8) {
+  //
+  // Head sizes above 128 use the _8 tile. The _16 tile's cross-SG
+  // reduction (chunk_prefill_epilogue.hpp::reduce_A) needs q_packed * head_dim
+  // * 4 B * ReduceK of SLM, which reaches 64 KB at head_size=256 and hangs on
+  // XE3 (bf16/fp16 and fp8 alike). Two _8 tiles per KV head re-read K/V once
+  // but keep the reduction at 32 KB.
+  //
+  // Exception: head_dim 256 with GQA ratio 9..16 and a block size that is a
+  // multiple of 64 uses decode_policy_q16_h256_p64 (an 8 x 256 accumulator per
+  // subgroup), which reads K/V once per KV head; its 16,256,64 tuples must be
+  // compiled. Full fp8 with an attention sink (bf16 output) keeps the 8-row
+  // tile: that 16-row kernel hangs the GPU. fp16 Q with an fp8 KV cache hangs
+  // on every 16-row tile, so it always uses the 8-row tile.
+  const bool fp16_q_fp8_kv =
+      is_fp8_kv && query.scalar_type() == at::ScalarType::Half;
+  if (head_case == 4 && num_q_group_size > 8 && num_q_group_size <= 16 &&
+      block_size % 64 == 0 && !(is_fp8_q && args.is_sink) && !fp16_q_fp8_kv) {
+    dispatch_by_page_size<_16>(block_size, head_case, queue, cuQKType, args);
+  } else if (
+      num_q_group_size <= 8 || args.head_size > HEAD_SIZE_LIMIT_3 ||
+      fp16_q_fp8_kv) {
     dispatch_by_page_size<_8>(block_size, head_case, queue, cuQKType, args);
   } else {
     dispatch_by_page_size<_16>(block_size, head_case, queue, cuQKType, args);
