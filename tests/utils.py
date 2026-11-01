@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
+import os
 import random
 import types
 import unittest
@@ -17,6 +18,19 @@ ALL_OPCHECK_TEST_UTILS: tuple[str, ...] = (
     "test_faketensor",
     "test_aot_dispatch_dynamic",
 )
+
+# Device on which test inputs are built and reference (golden) computations
+# run. Defaults to "xpu" so references run on the GPU. Set
+# VLLM_XPU_TEST_REF_DEVICE=cpu to build inputs and run references on the host
+# instead (e.g. to keep GPU memory usage low on simulators). The kernels under
+# test always run on KERNEL_DEVICE. References that are inherently host-only
+# (numpy/scipy based, pinned host memory, ...) stay on CPU regardless.
+REF_DEVICE_ENV = "VLLM_XPU_TEST_REF_DEVICE"
+REF_DEVICE = os.environ.get(REF_DEVICE_ENV, "xpu").strip().lower() or "xpu"
+if REF_DEVICE not in ("xpu", "cpu"):
+    raise ValueError(
+        f"{REF_DEVICE_ENV} must be 'xpu' or 'cpu', got {REF_DEVICE!r}")
+KERNEL_DEVICE = "xpu"
 
 
 # Copied/modified from torch._refs.__init__.py
@@ -213,7 +227,10 @@ def _generate_random_fp8(tensor: torch.Tensor, low: float, high: float,
         f"Unsupported torch dtype for fp8: {torch_dtype}"
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
-    return tensor_tmp.to(torch_dtype)
+    # Fill `tensor` in place too: create_kv_caches_with_random ignores the
+    # return value, which left its fp8 caches uninitialized (NaN bytes).
+    tensor.copy_(tensor_tmp.to(torch_dtype))
+    return tensor
 
 
 def get_kv_cache_torch_dtype(

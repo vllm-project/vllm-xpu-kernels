@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  actions: write  # to post comments
 
 env:
   REGISTRY: localhost:5000
@@ -18,94 +17,162 @@ jobs:
   build-wheel-on-pvc:
     runs-on: self-hosted-pvc-cpu
     if: |
-      github.event_name == 'workflow_dispatch' || 
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' && 
-      github.event.workflow_run.event == 'push')
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' ||
+       github.event.workflow_run.event == 'schedule'))
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      commit: ${{ steps.metadata.outputs.commit }}
+      version: ${{ steps.metadata.outputs.version }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+      artifact_id: ${{ steps.upload-artifact.outputs.artifact-id }}
     container:                      
-      image: pytorch/manylinux2_28-builder:xpu-v2.14.0-rc10
+      image: pytorch/manylinux2_28-builder:xpu-v2.15.0-rc10
       options: --user root
     steps:
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           set-safe-directory: true
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+
+      - name: Prepare nightly environment
+        run: |
+          echo "NIGHTLY_DIST=$RUNNER_TEMP/nightly-dist" >> "$GITHUB_ENV"
+          uv venv --python 3.12 --system-site-packages
+          uv pip install packaging
 
       - name: Get build metadata
         id: metadata
         run: |
-          cat >> "$GITHUB_OUTPUT" << EOF
-          short_sha=$(git rev-parse --short HEAD)
-          commit_msg=$(git log -1 --pretty=%s | head -c 50)
-          build_date=$(date +'%Y%m%d-%H%M%S')
-          branch=${GITHUB_REF#refs/heads/}
-          EOF
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          version_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*')
+          commit=$(git rev-parse HEAD)
+          .venv/bin/python tools/nightly_release.py metadata \
+            --version-tag "$version_tag" \
+            --commit "$commit" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
       - name: build wheel
+        env:
+          VLLM_VERSION_OVERRIDE: ${{ steps.metadata.outputs.version }}
         run: |
           source /opt/intel/oneapi/2026.1/oneapi-vars.sh
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
           git submodule sync && git submodule update --init --recursive
-          pip install -r requirements.txt
-          python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
-          for f in dist/*-linux_x86_64.whl; do mv "$f" "${f/linux_x86_64/manylinux_2_28_x86_64}"; done
+          uv pip install --index-strategy unsafe-best-match -r requirements.txt
+          .venv/bin/python setup.py bdist_wheel \
+            --dist-dir="$NIGHTLY_DIST" --py-limited-api=cp38
+          for f in "$NIGHTLY_DIST"/*-linux_x86_64.whl; do
+            mv "$f" "${f/linux_x86_64/manylinux_2_28_x86_64}"
+          done
+          .venv/bin/python tools/nightly_release.py validate \
+            --dist "$NIGHTLY_DIST" --version "$VLLM_VERSION_OVERRIDE"
 
       - name: Create build info file
+        env:
+          BUILD_COMMIT: ${{ steps.metadata.outputs.commit }}
+          BUILD_VERSION: ${{ steps.metadata.outputs.version }}
+          BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
         run: |
-          cat > build_info.txt << EOF
+          cat > "$NIGHTLY_DIST/build_info.txt" << EOF
           Build Information
           =================
-          Commit: ${{ github.sha }}
-          Short SHA: ${{ steps.metadata.outputs.short_sha }}
-          Branch: ${{ steps.metadata.outputs.branch }}
-          Commit Message: ${{ steps.metadata.outputs.commit_msg }}
-          Build Date: ${{ steps.metadata.outputs.build_date }}
-          Build Number: ${{ github.run_number }}
-          Workflow: ${{ github.workflow }}
-          Actor: ${{ github.actor }}
+          Commit: $BUILD_COMMIT
+          Version: $BUILD_VERSION
+          Branch: main
+          Build Date (UTC): $BUILD_DATE
+          Build Number: $GITHUB_RUN_NUMBER
+          Workflow: $GITHUB_WORKFLOW
+          Actor: $GITHUB_ACTOR
           EOF
 
       - name: Upload wheel to artifact
         id: upload-artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: vllm-xpu-kernels-${{ steps.metadata.outputs.short_sha }}-${{ steps.metadata.outputs.build_date }}
-          path: |
-            dist/vllm_xpu_kernels*.whl
-            build_info.txt
+          name: nightly-wheel-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nightly-dist/
+          if-no-files-found: error
           retention-days: 30
 
       - name: Generate download summary
-        if: success()
+        env:
+          BUILD_COMMIT: ${{ steps.metadata.outputs.commit }}
+          BUILD_VERSION: ${{ steps.metadata.outputs.version }}
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          ## 🎉 Wheel Build Successful
-          
-          ### Build Information
-          - **Commit**: [\`${{ steps.metadata.outputs.short_sha }}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
-          - **Branch**: \`${{ steps.metadata.outputs.branch }}\`
-          - **Date**: ${{ steps.metadata.outputs.build_date }}
-          - **Commit Message**: ${{ steps.metadata.outputs.commit_msg }}
-          
-          ### Download
-          - **Artifact Name**: \`vllm-xpu-kernels-${{ steps.metadata.outputs.short_sha }}-${{ steps.metadata.outputs.build_date }}\`
-          - **Direct Link**: [Download from Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          
-          ### Usage
-          \`\`\`bash
-          # Download via GitHub CLI
-          gh run download ${{ github.run_id }} -n vllm-xpu-kernels-${{ steps.metadata.outputs.short_sha }}-${{ steps.metadata.outputs.build_date }}
-          
-          # Or use the web interface
-          # Visit: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          \`\`\`
+          ## Nightly wheel built
+
+          - Version: \`$BUILD_VERSION\`
+          - Commit: [\`$BUILD_COMMIT\`]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$BUILD_COMMIT)
+          - [Actions artifact]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
           EOF
 
-      - name: Comment on commit (optional)
-        if: success() && github.event_name == 'push'
-        continue-on-error: true
+  publish-nightly:
+    needs: build-wheel-on-pvc
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-nightly
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NIGHTLY_TAG: ${{ needs.build-wheel-on-pvc.outputs.release_tag }}
+      NIGHTLY_VERSION: ${{ needs.build-wheel-on-pvc.outputs.version }}
+      NIGHTLY_COMMIT: ${{ needs.build-wheel-on-pvc.outputs.commit }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ needs.build-wheel-on-pvc.outputs.commit }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+      - name: Prepare publishing environment
         run: |
-          echo "Wheel built successfully for commit ${{ github.sha }}"
-          echo "Download: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "NIGHTLY_DIST=$RUNNER_TEMP/nightly-dist" >> "$GITHUB_ENV"
+          uv venv --python 3.12
+          uv pip install packaging
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.build-wheel-on-pvc.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/nightly-dist
+      - name: Validate nightly wheel versions
+        run: |
+          .venv/bin/python tools/nightly_release.py validate \
+            --dist "$NIGHTLY_DIST" --version "$NIGHTLY_VERSION"
+      - name: Publish nightly prerelease
+        run: |
+          state=$(gh release view "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft --jq .isDraft 2>/dev/null || true)
+          if [ "$state" != "false" ]; then
+            if [ "$state" != "true" ]; then
+              gh release create "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
+                --target "$NIGHTLY_COMMIT" --draft --prerelease --latest=false \
+                --title "Nightly $NIGHTLY_VERSION" \
+                --notes "Automated main build from commit $NIGHTLY_COMMIT. Requires compatible PyTorch XPU and Intel GPU runtime dependencies."
+            fi
+            gh release upload "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
+              "$NIGHTLY_DIST"/*.whl "$NIGHTLY_DIST/build_info.txt" --clobber
+            gh release edit "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
+              --draft=false --prerelease --latest=false
+          fi
+          echo "[Nightly release]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$NIGHTLY_TAG)" \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Prune nightly releases older than 30 days
+        run: |
+          .venv/bin/python tools/nightly_release.py prune \
+            --repository "$GITHUB_REPOSITORY" --retention-days 30
 
   clean-repo-pvc:
     runs-on: self-hosted-pvc-cpu

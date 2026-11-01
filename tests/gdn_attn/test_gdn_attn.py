@@ -215,6 +215,24 @@ def simple_random_distribute(N, batch_size):
     return distribution
 
 
+# vLLM stores each conv-state slot as SD (state_len, dim) or, with
+# VLLM_SSM_CONV_STATE_LAYOUT=DS, as DS (dim, state_len).
+CONV_STATE_LAYOUTS = ["SD", "DS"]
+
+
+def to_conv_state_layout(conv_state, layout):
+    """Copy an SD ``[..., state_len, dim]`` conv state into ``layout``."""
+    if layout == "DS":
+        return conv_state.transpose(-1, -2).contiguous()
+    return conv_state
+
+
+def conv_state_as_sd(conv_state, layout):
+    """View a conv state stored in ``layout`` as SD ``[..., state_len,
+    dim]``."""
+    return conv_state.transpose(-1, -2) if layout == "DS" else conv_state
+
+
 @pytest.mark.parametrize("num_actual_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("batch_size", BATCH_SIZE)
 @pytest.mark.parametrize("num_k_heads", NUM_K_HEADS)
@@ -230,11 +248,12 @@ def simple_random_distribute(N, batch_size):
 @pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
 @pytest.mark.parametrize("ssm_state_is_fp32", SSM_STATE_IS_FP32)
 @pytest.mark.parametrize("use_graph", [False, True])
+@pytest.mark.parametrize("conv_state_layout", CONV_STATE_LAYOUTS)
 @torch.inference_mode()
 def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                        num_v_heads, head_v_dim, width, tp_size, has_bias,
                        activation, reorder_input, mode, dtype,
-                       ssm_state_is_fp32, use_graph):
+                       ssm_state_is_fp32, use_graph, conv_state_layout):
     # FIXME: remove skip
     if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
             and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
@@ -280,6 +299,7 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                              dtype=dtype,
                              device=device)
     ref_conv_state = conv_state.clone()
+    conv_state = to_conv_state_layout(conv_state, conv_state_layout)
     ssm_state = torch.randn(
         (cache_batch_size, num_v_heads // tp_size, head_v_dim, head_k_dim),
         dtype=ssm_state_dtype,
@@ -411,7 +431,8 @@ def test_gdn_attention(num_actual_tokens, batch_size, num_k_heads, head_k_dim,
                                equal_nan=True)
     for i in range(batch_size):
         state_id = non_spec_state_indices_tensor[i]
-        torch.testing.assert_close(conv_state[state_id],
+        torch.testing.assert_close(conv_state_as_sd(
+            conv_state, conv_state_layout)[state_id],
                                    ref_conv_state[state_id],
                                    atol=atol,
                                    rtol=rtol)
@@ -842,7 +863,7 @@ def _run_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                             head_k_dim, num_v_heads, head_v_dim, width,
                             tp_size, has_bias, activation, reorder_input,
                             dtype, ssm_state_is_fp32, spec_lengths=None,
-                            run_second_step=False):
+                            run_second_step=False, conv_state_layout="SD"):
     """Run a pure spec-decode batch with fixed-capacity state rows."""
     if (os.getenv("SKIP_ACC_ERROR_KERNEL") is not None
             and os.getenv("SKIP_ACC_ERROR_KERNEL") == "1"):
@@ -884,6 +905,7 @@ def _run_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                              dtype=dtype,
                              device=device)
     ref_conv_state = conv_state.clone()
+    conv_state = to_conv_state_layout(conv_state, conv_state_layout)
     ssm_state = torch.randn(cache_batch_size,
                             num_v_heads // tp_size,
                             head_v_dim,
@@ -1011,7 +1033,8 @@ def _run_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
     # Conv state uses a single cache line (column 0); assert that slot.
     for n in range(num_spec_decodes):
         conv_slot = int(spec_state_indices_tensor[n, 0].item())
-        torch.testing.assert_close(conv_state[conv_slot],
+        torch.testing.assert_close(conv_state_as_sd(
+            conv_state, conv_state_layout)[conv_slot],
                                    ref_conv_state[conv_slot],
                                    atol=atol,
                                    rtol=rtol)
@@ -1179,14 +1202,25 @@ def _run_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16],
                          ids=format_tc)
 @pytest.mark.parametrize("ssm_state_is_fp32", [False, True])
+@pytest.mark.parametrize("conv_state_layout", CONV_STATE_LAYOUTS)
 def test_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
                            head_k_dim, num_v_heads, head_v_dim, width,
                            tp_size, has_bias, activation, reorder_input,
-                           dtype, ssm_state_is_fp32):
-    _run_gdn_attention_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
-                           head_k_dim, num_v_heads, head_v_dim, width,
-                           tp_size, has_bias, activation, reorder_input, dtype,
-                           ssm_state_is_fp32)
+                           dtype, ssm_state_is_fp32, conv_state_layout):
+    _run_gdn_attention_mtp(num_spec_decodes,
+                           num_spec_tokens,
+                           num_k_heads,
+                           head_k_dim,
+                           num_v_heads,
+                           head_v_dim,
+                           width,
+                           tp_size,
+                           has_bias,
+                           activation,
+                           reorder_input,
+                           dtype,
+                           ssm_state_is_fp32,
+                           conv_state_layout=conv_state_layout)
 
 
 @pytest.mark.parametrize("spec_lengths", [
