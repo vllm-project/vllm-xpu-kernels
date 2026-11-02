@@ -66,9 +66,31 @@ gh workflow run wheel-per-commit.yaml \
 Manually running the unit-test workflow does not trigger a wheel build or
 publication.
 
-Nightlies use unique `.dev` versions and `nightly-` prerelease tags without
-changing the formal Latest release. Publishing refreshes the separate
-`/whl/nightly/` index; other releases, including RCs, remain under `/whl/`.
+Nightlies follow FlashInfer's UTC date-based naming convention:
+
+- Wheel version: `0.1.17.dev20261102`
+- Release tag: `nightly-v0.1.17-20261102`
+- Release title: `Nightly Release v0.1.17-20261102`
+
+The base version still comes from the nearest version tag: final tags increment
+the last version component, while prerelease tags retain their release version.
+The source commit remains in release notes, and `build_info.txt` records both
+the commit and build timestamp. Re-publishing the same base version on the same
+UTC date replaces the existing nightly release and tag with the new build; it
+does not create another daily release. Because the wheel version is unchanged,
+clients may need to force reinstall without their cached wheel to pick up a
+same-day replacement.
+Artifact-only per-commit builds retain unique timestamp, commit, run ID and
+attempt suffixes.
+
+Once a daily nightly is available for a base version, the nightly index omits
+legacy long-timestamp builds of that same base version so pip does not prefer
+them over the new daily versions. Their release assets remain available until
+normal retention cleanup.
+
+Nightlies do not change the formal Latest release. Publishing refreshes the
+separate `/whl/nightly/` index; other releases, including RCs, remain under
+`/whl/`.
 
 ```bash
 pip install --upgrade --pre --no-deps --only-binary=vllm-xpu-kernels \

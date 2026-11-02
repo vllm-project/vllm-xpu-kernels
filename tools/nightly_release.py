@@ -13,21 +13,25 @@ from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
 
 
-def build_metadata(version_tag, commit, run_id, run_attempt, now):
+def build_metadata(version_tag, commit, run_id, run_attempt, now,
+                   nightly=False):
     version = Version(version_tag)
     release = list(version.release)
     if not version.is_prerelease:
         release[-1] += 1
     base_version = ".".join(str(part) for part in release)
     timestamp = now.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S")
+    date = timestamp[:8]
     short_sha = commit[:7]
     return {
         "commit": commit,
         "short_sha": short_sha,
         "build_date": timestamp,
-        "version": (f"{base_version}.dev{timestamp}"
+        "version": (f"{base_version}.dev{date}" if nightly else
+                    f"{base_version}.dev{timestamp}"
                     f"+g{short_sha}.r{run_id}.a{run_attempt}"),
-        "release_tag": (f"nightly-{timestamp}-{short_sha}"
+        "release_tag": (f"nightly-v{base_version}-{date}" if nightly else
+                        f"nightly-{timestamp}-{short_sha}"
                         f"-{run_id}-{run_attempt}"),
     }
 
@@ -93,6 +97,7 @@ def main():
     metadata.add_argument("--commit", required=True)
     metadata.add_argument("--run-id", type=int, required=True)
     metadata.add_argument("--run-attempt", type=int, required=True)
+    metadata.add_argument("--nightly", action="store_true")
     validate = commands.add_parser("validate")
     validate.add_argument("--dist", type=Path, required=True)
     validate.add_argument("--version", required=True)
@@ -104,7 +109,7 @@ def main():
     if args.command == "metadata":
         for key, value in build_metadata(
                 args.version_tag, args.commit, args.run_id, args.run_attempt,
-                now).items():
+                now, nightly=args.nightly).items():
             print(f"{key}={value}")
     elif args.command == "validate":
         validate_wheels(args.dist, args.version)

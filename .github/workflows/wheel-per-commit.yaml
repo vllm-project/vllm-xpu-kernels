@@ -58,15 +58,22 @@ jobs:
 
       - name: Get build metadata
         id: metadata
+        env:
+          PUBLISH_NIGHTLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_nightly) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'schedule') }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           version_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*')
           commit=$(git rev-parse HEAD)
+          metadata_args=()
+          if [ "$PUBLISH_NIGHTLY" = "true" ]; then
+            metadata_args+=(--nightly)
+          fi
           .venv/bin/python tools/nightly_release.py metadata \
             --version-tag "$version_tag" \
             --commit "$commit" \
             --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            "${metadata_args[@]}" >> "$GITHUB_OUTPUT"
 
       - name: build wheel
         env:
@@ -164,18 +171,18 @@ jobs:
         run: |
           state=$(gh release view "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
             --json isDraft --jq .isDraft 2>/dev/null || true)
-          if [ "$state" != "false" ]; then
-            if [ "$state" != "true" ]; then
-              gh release create "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
-                --target "$NIGHTLY_COMMIT" --draft --prerelease --latest=false \
-                --title "Nightly $NIGHTLY_VERSION" \
-                --notes "Automated main build from commit $NIGHTLY_COMMIT. Requires compatible PyTorch XPU and Intel GPU runtime dependencies."
-            fi
-            gh release upload "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
-              "$NIGHTLY_DIST"/*.whl "$NIGHTLY_DIST/build_info.txt" --clobber
-            gh release edit "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
-              --draft=false --prerelease --latest=false
+          if [ "$state" = "false" ] || [ "$state" = "true" ]; then
+            gh release delete "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
+              --yes --cleanup-tag
           fi
+          gh release create "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$NIGHTLY_COMMIT" --draft --prerelease --latest=false \
+            --title "Nightly Release ${NIGHTLY_TAG#nightly-}" \
+            --notes "Automated main build from commit $NIGHTLY_COMMIT. Requires compatible PyTorch XPU and Intel GPU runtime dependencies."
+          gh release upload "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
+            "$NIGHTLY_DIST"/*.whl "$NIGHTLY_DIST/build_info.txt" --clobber
+          gh release edit "$NIGHTLY_TAG" --repo "$GITHUB_REPOSITORY" \
+            --draft=false --prerelease --latest=false
           echo "[Nightly release]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$NIGHTLY_TAG)" \
             >> "$GITHUB_STEP_SUMMARY"
       - name: Prune nightly releases older than 30 days

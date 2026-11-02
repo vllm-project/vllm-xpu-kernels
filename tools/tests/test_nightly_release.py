@@ -38,6 +38,22 @@ class NightlyReleaseTest(unittest.TestCase):
             self.assertTrue(metadata["version"].startswith(
                 "0.1.17.dev20261029030000+"))
 
+    def test_nightly_uses_utc_date_and_same_name_on_reruns(self):
+        local_time = NOW.astimezone(timezone(timedelta(hours=-8)))
+        first = build_metadata("v0.1.16", COMMIT, 42, 1, local_time,
+                               nightly=True)
+        rerun = build_metadata("v0.1.16", "f" * 40, 43, 2, NOW,
+                               nightly=True)
+        self.assertEqual(first["version"], "0.1.17.dev20261029")
+        self.assertEqual(first["release_tag"], "nightly-v0.1.17-20261029")
+        self.assertEqual(first["version"], rerun["version"])
+        self.assertEqual(first["release_tag"], rerun["release_tag"])
+        self.assertEqual(first["commit"], COMMIT)
+        tomorrow = build_metadata("v0.1.17rc1", COMMIT, 44, 1,
+                                  NOW + timedelta(days=1), nightly=True)
+        self.assertEqual(tomorrow["version"], "0.1.17.dev20261030")
+        self.assertEqual(tomorrow["release_tag"], "nightly-v0.1.17-20261030")
+
     def test_retention_only_deletes_expired_published_nightlies(self):
         old = "2026-09-28T03:00:00Z"
         releases = [
