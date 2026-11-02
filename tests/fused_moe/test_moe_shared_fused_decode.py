@@ -5,7 +5,8 @@ import torch
 import vllm_xpu_kernels.moe_shared_fused_interface as interface
 from tests.utils import seed_everything
 from vllm_xpu_kernels.moe_shared_fused_interface import (
-    XpuMoESharedFusedDecode, is_available, moe_shared_fused_workspace_bytes)
+    XpuFusedMoeWithSharedExpert, is_available,
+    moe_shared_fused_workspace_bytes)
 
 DEVICE = "xpu"
 HIDDEN = 2048
@@ -82,8 +83,34 @@ def ref_moe_shared(x, weights, topk_weights, topk_ids, inter):
 
 def make_op(weights, tile_m=0):
     (w13, s13, _), (w2, s2, _), (sw13, ss13, _), (sw2, ss2, _), gate = weights
-    return XpuMoESharedFusedDecode(w13, s13, w2, s2, sw13, ss13, sw2, ss2,
+    return XpuFusedMoeWithSharedExpert(w13, s13, w2, s2, sw13, ss13, sw2, ss2,
                                    gate, TOP_K, tile_m=tile_m)
+
+
+@pytest.mark.parametrize("argument", ["w13", "w2", "shared_w13", "shared_w2"])
+@requires_moe_kernel
+def test_moe_plan_rejects_noncontiguous_prepared_weights(argument):
+    """Noncontiguous weights must be prepared by the caller."""
+    weights = make_weights(32, hidden=256, num_experts=8)
+    (w13, s13, _), (w2, s2, _), (sw13, ss13, _), (sw2, ss2, _), gate = weights
+    args = dict(
+        w13=w13,
+        w13_scales=s13,
+        w2=w2,
+        w2_scales=s2,
+        shared_w13=sw13,
+        shared_w13_scale=ss13,
+        shared_w2=sw2,
+        shared_w2_scale=ss2,
+        shared_gate=gate,
+        top_k=TOP_K,
+    )
+    weight = args[argument]
+    args[argument] = weight.transpose(-1, -2).contiguous().transpose(-1, -2)
+    assert args[argument].shape == weight.shape
+    assert not args[argument].is_contiguous()
+    with pytest.raises(ValueError, match="contiguous"):
+        XpuFusedMoeWithSharedExpert(**args)
 
 
 @pytest.mark.parametrize("m", [1, 2, 3, 4, 8])
@@ -197,20 +224,32 @@ def test_moe_shared_fused_decode_rejects_mixed_shared_gate_dtype():
         op.forward(torch.empty_like(x), x, topk_weights, topk_ids)
 
 
-@pytest.mark.parametrize("dtype,supported", [(torch.float16, True),
-                                             (torch.bfloat16, True),
-                                             (torch.float32, False),
-                                             (torch.float64, False)])
+@pytest.mark.parametrize(
+    "dtype,supported",
+    [
+        (torch.float16, True),
+        (torch.bfloat16, True),
+        (torch.float32, False),
+        (torch.float64, False),
+    ],
+)
 def test_moe_activation_dtype_contract(monkeypatch, dtype, supported):
     monkeypatch.setattr(interface, "is_available", lambda: True)
-    assert interface.supports(dtype, torch.float8_e4m3fn, 1, 8, 2048,
-                              256) is supported
+    assert (interface.supports(dtype, torch.float8_e4m3fn, 8, 2048, 256)
+            is supported)
 
 
-@pytest.mark.parametrize("shape", [(0, 8, 2048, 256), (-1, 8, 2048, 256),
-                                   (1, 0, 2048, 256), (1, -8, 2048, 256),
-                                   (1, 8, 0, 256), (1, 8, -16, 256),
-                                   (1, 8, 2048, 0), (1, 8, 2048, -8)])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (0, 2048, 256),
+        (-8, 2048, 256),
+        (8, 0, 256),
+        (8, -16, 256),
+        (8, 2048, 0),
+        (8, 2048, -8),
+    ],
+)
 def test_moe_supports_rejects_nonpositive_dimensions(monkeypatch, shape):
     monkeypatch.setattr(interface, "is_available", lambda: True)
     assert not interface.supports(torch.float16, torch.float8_e4m3fn, *shape)
@@ -232,7 +271,7 @@ def test_moe_plan_rejects_weights_on_wrong_device(argument, destination):
                 shared_w2_scale=ss2, shared_gate=gate, top_k=TOP_K)
     args[argument] = args[argument].to(destination)
     with pytest.raises(ValueError, match="XPU"):
-        XpuMoESharedFusedDecode(**args)
+        XpuFusedMoeWithSharedExpert(**args)
 
 
 @pytest.mark.parametrize("destination", ["cpu", "xpu:1"])
@@ -298,10 +337,22 @@ def test_moe_shared_fused_decode_skewed_multi_tile_routes(dtype, tile_m):
     torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
 
 
-_NATIVE_ARGS = ("output", "x", "topk_ids", "topk_weights", "w13",
-                "w13_scale", "w2", "w2_scale", "shared_w13",
-                "shared_w13_scale", "shared_w2", "shared_w2_scale",
-                "shared_gate", "ws")
+_NATIVE_ARGS = (
+    "output",
+    "x",
+    "topk_ids",
+    "topk_weights",
+    "w13",
+    "w13_scale",
+    "w2",
+    "w2_scale",
+    "shared_w13",
+    "shared_w13_scale",
+    "shared_w2",
+    "shared_w2_scale",
+    "shared_gate",
+    "ws",
+)
 
 
 @pytest.mark.parametrize("argument", _NATIVE_ARGS)
@@ -334,7 +385,7 @@ def test_moe_shared_fused_decode_rejects_wrong_device(argument, destination):
 def test_moe_shared_fused_decode_invalid_tile_raises_value_error(tile_m):
     with pytest.raises(ValueError, match="tile_m"):
         dummy = torch.empty(0, device="cpu")
-        XpuMoESharedFusedDecode(*([dummy] * 9), top_k=TOP_K, tile_m=tile_m)
+        XpuFusedMoeWithSharedExpert(*([dummy] * 9), top_k=TOP_K, tile_m=tile_m)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -364,25 +415,34 @@ def test_moe_shared_fused_decode_padding_routes(dtype, m, ids_dtype,
     torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
 
 
-@pytest.mark.parametrize("shape", [(1, 8, 16, 256), (1, 8, 2064, 256),
-                                   (1, 8, 2048, 8), (1, 8, 2048, 16),
-                                   (65, 8, 2048, 256),
-                                   (1, 8, 1 << 24, 256),
-                                   (1, 8, 2048, 1 << 24)])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (8, 16, 256),
+        (8, 2064, 256),
+        (8, 2048, 8),
+        (8, 2048, 16),
+        (513, 2048, 256),
+        (8, 1 << 24, 256),
+        (8, 2048, 1 << 24),
+    ],
+)
 def test_moe_supports_rejects_unsupported_layout(monkeypatch, shape):
     monkeypatch.setattr(interface, "is_available", lambda: True)
     assert not interface.supports(torch.float16, torch.float8_e4m3fn, *shape)
 
 
-@pytest.mark.parametrize("shape", [(0, 8, 256, 64, 32),
-                                   (-1, 8, 256, 64, 32),
-                                   (1, 0, 256, 64, 32),
-                                   (65, 8, 256, 64, 32),
-                                   (1, 8, 0, 64, 32),
-                                   (1, 8, 16, 64, 32),
-                                   (1, 8, 256, 32, 16),
-                                   (1, 8, 256, 96, 32),
-                                   (1, 8, 1 << 24, 64, 32)])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (1, 0, 256, 64, 32),
+        (1, 8, 0, 64, 32),
+        (1, 8, 16, 64, 32),
+        (1, 8, 256, 32, 16),
+        (1, 8, 256, 96, 32),
+        (1, 8, 1 << 24, 64, 32),
+    ],
+)
 def test_moe_workspace_rejects_invalid_dimensions(shape):
     with pytest.raises(ValueError):
         moe_shared_fused_workspace_bytes(*shape)

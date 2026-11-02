@@ -26,7 +26,9 @@ from utils import bootstrap_benchmark_env
 bootstrap_benchmark_env(__file__)
 import vllm_xpu_kernels._C  # noqa: F401
 import vllm_xpu_kernels._xpu_C  # noqa: F401
-from vllm_xpu_kernels.moe_shared_fused_interface import XpuMoESharedFusedDecode
+from vllm_xpu_kernels.moe_shared_fused_interface import (
+    XpuFusedMoeWithSharedExpert,
+)
 from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 # isort: on
 
@@ -88,7 +90,7 @@ def make_baseline(weights):
 
 def make_fused(weights, tile_m):
     (w13, s13), (w2, s2), (sw13, ss13), (sw2, ss2), gate = weights
-    op = XpuMoESharedFusedDecode(w13, s13, w2, s2, sw13, ss13, sw2, ss2,
+    op = XpuFusedMoeWithSharedExpert(w13, s13, w2, s2, sw13, ss13, sw2, ss2,
                                 gate, TOP_K, tile_m=tile_m)
 
     def run(x, topk_weights, topk_ids):

@@ -15,8 +15,6 @@ to the caller).
 
 import torch
 
-# Largest num_tokens * top_k handled by the kernel's routing map.
-_MAX_ROUTED_ROWS = 512
 # Xe block-2D descriptors use 24-bit byte widths/pitches.
 _MAX_BLOCK_2D_BYTES = (1 << 24) - 1
 
@@ -33,31 +31,23 @@ def is_available() -> bool:
 def supports(
     hidden_states_dtype: torch.dtype,
     weight_dtype: torch.dtype,
-    num_tokens: int,
     top_k: int,
     hidden_size: int,
     intermediate_size: int,
 ) -> bool:
-    """Whether the op supports this configuration.
+    """Whether the op supports the static weight configuration.
 
     Requires FP16/BF16 activations, fp8-e4m3 per-tensor weights,
-    positive dimensions, num_tokens * top_k <= 512, and H/I multiples of
-    32. Each compact routed row must start at a 64-byte-aligned address.
+    positive dimensions and H/I multiples of 32. The caller selects
+    eligible token counts before invoking the op.
     """
-    return (
-        is_available()
-        and hidden_states_dtype in (torch.float16, torch.bfloat16)
-        and weight_dtype == torch.float8_e4m3fn
-        and num_tokens > 0
-        and top_k > 0
-        and num_tokens * top_k <= _MAX_ROUTED_ROWS
-        and hidden_size > 0
-        and hidden_size % 32 == 0
-        and hidden_size <= _MAX_BLOCK_2D_BYTES // 2
-        and intermediate_size > 0
-        and intermediate_size % 32 == 0
-        and intermediate_size <= _MAX_BLOCK_2D_BYTES // 4
-    )
+    return (is_available()
+            and hidden_states_dtype in (torch.float16, torch.bfloat16)
+            and weight_dtype == torch.float8_e4m3fn and 0 < top_k <= 512
+            and hidden_size > 0 and hidden_size % 32 == 0
+            and hidden_size <= _MAX_BLOCK_2D_BYTES // 2
+            and intermediate_size > 0 and intermediate_size % 32 == 0
+            and intermediate_size <= _MAX_BLOCK_2D_BYTES // 4)
 
 
 def moe_shared_fused_workspace_bytes(
@@ -68,14 +58,11 @@ def moe_shared_fused_workspace_bytes(
     w2_k: int,
 ) -> int:
     """Workspace size in bytes; must match the carve-out in the C++ op."""
-    if num_tokens <= 0 or top_k <= 0:
-        raise ValueError("num_tokens and top_k must be positive")
+    if not 0 < top_k <= 512:
+        raise ValueError("top_k must be in [1, 512]")
     rows = num_tokens * top_k
-    if rows > _MAX_ROUTED_ROWS:
-        raise ValueError("num_tokens * top_k must not exceed 512")
-    if (hidden_size <= 0 or w2_k <= 0 or w13_n != 2 * w2_k
-            or hidden_size % 32 or w2_k % 32
-            or hidden_size > _MAX_BLOCK_2D_BYTES // 2
+    if (hidden_size <= 0 or w2_k <= 0 or w13_n != 2 * w2_k or hidden_size % 32
+            or w2_k % 32 or hidden_size > _MAX_BLOCK_2D_BYTES // 2
             or w2_k > _MAX_BLOCK_2D_BYTES // 4):
         raise ValueError(
             "H and I must be positive multiples of 32 within the block-2D "
@@ -89,23 +76,19 @@ def moe_shared_fused_workspace_bytes(
     o_wperm = align(4 * (3 * umt + 1 + rows))
     o_gate = align(o_wperm + 4 * rows)
     o_ap = align(o_gate + 4 * num_tokens)
-    return o_ap + 2 * (
-        rows * hidden_size
-        + (rows + num_tokens) * w13_n
-        + (rows + num_tokens) * w2_k
-        + rows * hidden_size
-        + num_tokens * hidden_size
-    )
+    return o_ap + 2 * (rows * hidden_size + (rows + num_tokens) * w13_n +
+                       (rows + num_tokens) * w2_k + rows * hidden_size +
+                       num_tokens * hidden_size)
 
 
-class XpuMoESharedFusedDecode:
-    """Holds the weights of one MoE block and a per-M persistent workspace.
+class XpuFusedMoeWithSharedExpert:
+    """Bind prepared weights without copying or changing their layout.
 
     Weight layouts:
       w13 [E, H, 2I] fp8-e4m3, w13_scales [E] fp32
       w2  [E, I, H]  fp8-e4m3, w2_scales  [E] fp32
-      shared_w13 [H, 2I] fp8-e4m3, shared_w13_scale [1] fp32
-      shared_w2  [I, H]  fp8-e4m3, shared_w2_scale  [1] fp32
+      shared_w13 [H, 2I] fp8-e4m3, shared_w13_scale scalar fp32
+      shared_w2  [I, H]  fp8-e4m3, shared_w2_scale scalar fp32
       shared_gate [H] or [1, H] with the activation dtype
 
     Matrices and hidden states require 64-byte-aligned base addresses;
@@ -159,17 +142,39 @@ class XpuMoESharedFusedDecode:
         if w2.shape[0] != num_experts or w2.shape[2] != hidden:
             raise ValueError(
                 "routed weight shapes must be [E, H, 2I], [E, I, H]")
-        # Validate dimensions before copying weights or allocating scratch.
+        if shared_w13.shape != w13.shape[1:] or shared_w2.shape != w2.shape[1:]:
+            raise ValueError("shared weights must be [H, 2I] and [I, H]")
+        if shared_gate.shape not in ((hidden, ), (1, hidden)):
+            raise ValueError("shared_gate must be [H] or [1, H]")
+        matrices = (w13, w2, shared_w13, shared_w2)
+        scales = (w13_scales, w2_scales, shared_w13_scale, shared_w2_scale)
+        if any(t.dtype != torch.float8_e4m3fn for t in matrices):
+            raise ValueError("routed and shared weights must be float8_e4m3fn")
+        if any(t.dtype != torch.float32 for t in scales):
+            raise ValueError("weight scales must be float32")
+        if w13_scales.shape != (num_experts, ) or w2_scales.shape != (
+                num_experts, ):
+            raise ValueError("routed scales must be [E]")
+        if shared_w13_scale.numel() != 1 or shared_w2_scale.numel() != 1:
+            raise ValueError("shared scales must be scalars")
+        if shared_gate.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("shared_gate must be float16 or bfloat16")
+        if any(not t.is_contiguous()
+               for t in (*matrices, *scales, shared_gate)):
+            raise ValueError("prepared weights and scales must be contiguous")
+        if (any(t.data_ptr() % 64 for t in matrices)
+                or shared_gate.data_ptr() % 32):
+            raise ValueError("prepared weights require aligned base addresses")
         moe_shared_fused_workspace_bytes(1, top_k, hidden, w13_n, w2.shape[1])
-        self.w13 = w13.contiguous()
-        self.w13_scales = w13_scales.contiguous()
-        self.w2 = w2.contiguous()
-        self.w2_scales = w2_scales.contiguous()
-        self.shared_w13 = shared_w13.contiguous()
-        self.shared_w13_scale = shared_w13_scale.reshape(1).contiguous()
-        self.shared_w2 = shared_w2.contiguous()
-        self.shared_w2_scale = shared_w2_scale.reshape(1).contiguous()
-        self.shared_gate = shared_gate.reshape(-1).contiguous()
+        self.w13 = w13
+        self.w13_scales = w13_scales
+        self.w2 = w2
+        self.w2_scales = w2_scales
+        self.shared_w13 = shared_w13
+        self.shared_w13_scale = shared_w13_scale
+        self.shared_w2 = shared_w2
+        self.shared_w2_scale = shared_w2_scale
+        self.shared_gate = shared_gate
         self.top_k = top_k
         self.num_experts = w13.shape[0]
         self.tile_m = tile_m
