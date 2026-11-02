@@ -97,12 +97,14 @@ std::vector<torch::Tensor> causal_conv1d_spec(
   const int num_speculative_tokens = spec_state_indices_tensor.size(1) - 1;
   const int64_t required_conv_state_len =
       conv_weights.size(1) - 1 + num_speculative_tokens;
+  const int64_t conv_state_len = gdn::get_conv_state_len(
+      conv_state, conv_weights.size(0), conv_weights.size(1));
   TORCH_CHECK(
-      conv_state.size(1) >= required_conv_state_len,
+      conv_state_len >= required_conv_state_len,
       "conv_state must have at least ",
       required_conv_state_len,
       " rows for speculative decoding, but got ",
-      conv_state.size(1));
+      conv_state_len);
 
   TORCH_CHECK(
       num_accepted_tokens.is_contiguous(),
@@ -177,7 +179,9 @@ std::vector<torch::Tensor> causal_conv1d_spec(
   } else {
     TORCH_CHECK(false);
   }
-  const int pad_slot_id = -1;
+  // Rows whose state index is <= pad_slot_id are padding: vLLM marks them
+  // with NULL_BLOCK_ID (0) or PAD_SLOT_ID (-1).
+  const int pad_slot_id = 0;
 
   std::optional<torch::Tensor> empty_tensor{std::nullopt};
 
@@ -385,7 +389,9 @@ std::vector<torch::Tensor> causal_conv1d_non_spec(
   } else {
     TORCH_CHECK(false);
   }
-  const int pad_slot_id = -1;
+  // Rows whose state index is <= pad_slot_id are padding: vLLM marks them
+  // with NULL_BLOCK_ID (0) or PAD_SLOT_ID (-1).
+  const int pad_slot_id = 0;
 
   std::optional<torch::Tensor> empty_tensor{std::nullopt};
 

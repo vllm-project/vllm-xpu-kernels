@@ -85,6 +85,23 @@ static inline bool is_xe3_arch(at::DeviceIndex device_index = -1) {
          arch == syclex::architecture::intel_gpu_wcl;
 }
 
+// Individual Xe3p parts. intel_gpu_cri only exists on CRI-enabled oneAPI
+// toolchains, so is_cri() reports false when the toolchain lacks it.
+static inline bool is_cri(at::DeviceIndex device_index = -1) {
+#ifdef VLLM_XPU_HAS_INTEL_GPU_CRI
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_cri;
+#else
+  (void)device_index;
+  return false;
+#endif
+}
+
+static inline bool is_nvl_p(at::DeviceIndex device_index = -1) {
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_nvl_p;
+}
+
 // Xe3p (CRI / Nova Lake P) architecture check used to dispatch the XE3
 // attention kernels. The intel_gpu_cri architecture enumerator only exists on
 // CRI-enabled oneAPI toolchains, so it is referenced only when the build system
@@ -102,15 +119,6 @@ static inline bool is_xe3p_arch(at::DeviceIndex device_index = -1) {
 static inline std::optional<std::string> getEnv(const char* name) {
   if (const char* val = std::getenv(name)) return val;
   return std::nullopt;
-}
-
-static inline bool force_xe_default_kernel() {
-  auto env_val = getEnv("VLLM_XPU_FORCE_XE_DEFAULT_KERNEL");
-  if (env_val.has_value()) {
-    return env_val.value() == "1" || env_val.value() == "true" ||
-           env_val.value() == "TRUE";
-  }
-  return false;
 }
 
 // Control whether MHC kernels use the TF32 DPAS GEMM path (split-K).

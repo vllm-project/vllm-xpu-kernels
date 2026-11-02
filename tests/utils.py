@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
+import os
 import random
 import types
 import unittest
@@ -7,6 +8,7 @@ from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import numpy as np
+import pytest
 import torch
 from torch._prims_common import TensorLikeType
 
@@ -16,6 +18,19 @@ ALL_OPCHECK_TEST_UTILS: tuple[str, ...] = (
     "test_faketensor",
     "test_aot_dispatch_dynamic",
 )
+
+# Device on which test inputs are built and reference (golden) computations
+# run. Defaults to "xpu" so references run on the GPU. Set
+# VLLM_XPU_TEST_REF_DEVICE=cpu to build inputs and run references on the host
+# instead (e.g. to keep GPU memory usage low on simulators). The kernels under
+# test always run on KERNEL_DEVICE. References that are inherently host-only
+# (numpy/scipy based, pinned host memory, ...) stay on CPU regardless.
+REF_DEVICE_ENV = "VLLM_XPU_TEST_REF_DEVICE"
+REF_DEVICE = os.environ.get(REF_DEVICE_ENV, "xpu").strip().lower() or "xpu"
+if REF_DEVICE not in ("xpu", "cpu"):
+    raise ValueError(
+        f"{REF_DEVICE_ENV} must be 'xpu' or 'cpu', got {REF_DEVICE!r}")
+KERNEL_DEVICE = "xpu"
 
 
 # Copied/modified from torch._refs.__init__.py
@@ -161,6 +176,44 @@ def format_tc(val):
     return TcLimitedFormatter()(val)
 
 
+def run_with_xpu_graph(fn, live_inputs, restore=()):
+    """Capture ``fn(*inputs)`` into an XPUGraph and return the replay output.
+
+    Mirrors vLLM's CUDAGraphWrapper: eager warmup, then capture on the current
+    stream into a graph pool. Capture runs on zeroed copies of ``live_inputs``
+    that are refilled only before replay, so a kernel that baked captured
+    values in (or read them on the host) fails the caller's checks. Tensors in
+    ``restore`` are updated in place by ``fn`` and are reset after warmup so
+    the replay starts from the original state.
+    """
+    if not hasattr(torch.xpu, "XPUGraph"):
+        pytest.skip("torch.xpu.XPUGraph is not available")
+
+    # empty_strided keeps the exact strides of strided views (e.g. KV caches).
+    static_inputs = [
+        torch.empty_strided(t.shape, t.stride(), dtype=t.dtype,
+                            device=t.device).zero_() for t in live_inputs
+    ]
+    snapshots = [t.clone() for t in restore]
+
+    fn(*static_inputs)
+    torch.xpu.synchronize()
+    for t, snapshot in zip(restore, snapshots):
+        t.copy_(snapshot)
+
+    graph = torch.xpu.XPUGraph()
+    with torch.xpu.graph(graph,
+                         pool=torch.xpu.graph_pool_handle(),
+                         stream=torch.xpu.current_stream()):
+        static_out = fn(*static_inputs)
+
+    for static, live in zip(static_inputs, live_inputs):
+        static.copy_(live)
+    graph.replay()
+    torch.xpu.synchronize()
+    return static_out
+
+
 def _convert_from_fp8(
     tensor: torch.Tensor,
     scale: float = 1.0,
@@ -174,7 +227,10 @@ def _generate_random_fp8(tensor: torch.Tensor, low: float, high: float,
         f"Unsupported torch dtype for fp8: {torch_dtype}"
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
-    return tensor_tmp.to(torch_dtype)
+    # Fill `tensor` in place too: create_kv_caches_with_random ignores the
+    # return value, which left its fp8 caches uninitialized (NaN bytes).
+    tensor.copy_(tensor_tmp.to(torch_dtype))
+    return tensor
 
 
 def get_kv_cache_torch_dtype(

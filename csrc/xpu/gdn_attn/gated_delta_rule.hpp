@@ -106,9 +106,13 @@ struct gated_delta_rule_kernel {
     float k_local[k_bucket_size];
     float v_local[v_dim_per_sg];
 
+    // Padding row (NULL_BLOCK_ID or PAD_SLOT_ID): touch no state.
+    const int state_idx = cache_indices[batch_id];
+    if (state_idx <= 0) {
+      return;
+    }
     StateT* ssm_state_ptr =
-        ssm_state +
-        static_cast<int64_t>(cache_indices[batch_id]) * ssm_state_stride_0;
+        ssm_state + static_cast<int64_t>(state_idx) * ssm_state_stride_0;
 
     // load state
     if (has_initial_state == nullptr || has_initial_state[batch_id]) {
@@ -395,6 +399,10 @@ struct gated_delta_rule_spec_kernel {
     if (init_col < 0) init_col = 0;
     const int init_state_idx =
         cache_indices[batch_id * cache_indices_stride_0 + init_col];
+    // Padding row (NULL_BLOCK_ID or PAD_SLOT_ID): touch no state.
+    if (init_state_idx <= 0) {
+      return;
+    }
     const StateT* init_state_ptr =
         ssm_state + static_cast<int64_t>(init_state_idx) * ssm_state_stride_0;
 #pragma unroll
@@ -509,6 +517,9 @@ struct gated_delta_rule_spec_kernel {
       // num_accepted_tokens.
       const int final_state_idx =
           cache_indices[batch_id * cache_indices_stride_0 + t_local];
+      if (final_state_idx <= 0) {
+        continue;
+      }
       StateT* final_state_ptr =
           ssm_state +
           static_cast<int64_t>(final_state_idx) * ssm_state_stride_0;

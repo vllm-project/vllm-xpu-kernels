@@ -31,3 +31,18 @@ bool is_xe3_arch(int64_t device_index = -1) {
   at::DeviceIndex dev_idx = device_index;
   return vllm::xpu::is_xe3_arch(dev_idx);
 }
+
+bool is_xe3p_arch(int64_t device_index = -1) {
+  at::DeviceIndex dev_idx = device_index;
+  return vllm::xpu::is_xe3p_arch(dev_idx);
+}
+
+bool is_cri(int64_t device_index = -1) {
+  at::DeviceIndex dev_idx = device_index;
+  return vllm::xpu::is_cri(dev_idx);
+}
+
+bool is_nvl_p(int64_t device_index = -1) {
+  at::DeviceIndex dev_idx = device_index;
+  return vllm::xpu::is_nvl_p(dev_idx);
+}

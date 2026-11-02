@@ -362,6 +362,12 @@ bool is_xe2_arch(int64_t device_index);
 
 bool is_xe3_arch(int64_t device_index);
 
+bool is_xe3p_arch(int64_t device_index);
+
+bool is_cri(int64_t device_index);
+
+bool is_nvl_p(int64_t device_index);
+
 void exponential_2d_(
     torch::Tensor& tensor,
     torch::Tensor& seeds,  // CPU [2] shared
@@ -427,6 +433,8 @@ void fused_input_norm(
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
     const torch::Tensor& logits,
+    const torch::Tensor& cu_num_logits,
     const torch::Tensor& num_sampled_tokens,
     int64_t max_num_kept,
-    int64_t max_compact_support);
+    int64_t max_compact_support,
+    int64_t rows_per_request);

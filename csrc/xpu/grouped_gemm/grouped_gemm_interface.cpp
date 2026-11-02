@@ -5,8 +5,8 @@
 #ifdef VLLM_XPU_ENABLE_XE2
   #include "xe_2/grouped_gemm_xe2.h"
 #endif
-#ifdef VLLM_XPU_ENABLE_XE_DEFAULT
-  #include "xe_default/grouped_gemm_xe_default.h"
+#ifdef VLLM_XPU_ENABLE_XE3P
+  #include "xe_3/grouped_gemm_xe3.h"
 #endif
 
 torch::Tensor cutlass_grouped_gemm_interface(
@@ -20,26 +20,13 @@ torch::Tensor cutlass_grouped_gemm_interface(
     int64_t N,
     int64_t K,
     int64_t num_experts) {
-  if (vllm::xpu::force_xe_default_kernel()) {
-#ifdef VLLM_XPU_ENABLE_XE_DEFAULT
-    int64_t groups = num_experts;
-    return cutlass_grouped_gemm_xe_default(
-        ptr_A, ptr_B, ptr_bias, ptr_D, rows_per_expert, N, K, groups);
-#else
-    TORCH_CHECK(
-        false,
-        "XE default cutlass kernel is not enabled in this build, force use XE "
-        "default kernel failed.");
-#endif
-  } else if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
-#ifdef VLLM_XPU_ENABLE_XE2
-    // Xe2 grouped GEMM currently consumes high-precision A (W16A16 / W8A16).
-    // When callers pass FP8 activations + ptr_A_scale, Python
-    // (fused_moe_interface._apply_kernel) dequants A before this entry.
-    // Device W8A8 with ptr_A_scale is not yet implemented here.
-    (void)ptr_A_scale;
-    return cutlass_grouped_gemm_xe2(
+#ifdef VLLM_XPU_ENABLE_XE3P
+  if (vllm::xpu::is_xe3p_arch()) {
+    // Xe3P consumes block-scaled activations (MXFP8 / MXFP4 / block-FP8)
+    // natively, so ptr_A_scale is forwarded to the device kernel.
+    return cutlass_grouped_gemm_xe3(
         ptr_A,
+        ptr_A_scale,
         ptr_B,
         ptr_B_scale,
         ptr_bias,
@@ -48,17 +35,24 @@ torch::Tensor cutlass_grouped_gemm_interface(
         N,
         K,
         num_experts);
-#else
-    TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
-#endif
-  } else {
-#ifdef VLLM_XPU_ENABLE_XE_DEFAULT
-    int64_t groups = num_experts;
-    return cutlass_grouped_gemm_xe_default(
-        ptr_A, ptr_B, ptr_bias, ptr_D, rows_per_expert, N, K, groups);
-#else
-    TORCH_CHECK(
-        false, "XE default cutlass kernel is not enabled in this build.");
-#endif
   }
+#endif
+#ifdef VLLM_XPU_ENABLE_XE2
+  // BMG / PVC / LNL and the Xe3 client parts run the xe_2 kernel, which
+  // consumes high-precision activations only.
+  (void)ptr_A_scale;
+  return cutlass_grouped_gemm_xe2(
+      ptr_A,
+      ptr_B,
+      ptr_B_scale,
+      ptr_bias,
+      ptr_D,
+      rows_per_expert,
+      N,
+      K,
+      num_experts);
+#else
+  TORCH_CHECK(
+      false, "No cutlass grouped GEMM kernel is enabled in this build.");
+#endif
 }
