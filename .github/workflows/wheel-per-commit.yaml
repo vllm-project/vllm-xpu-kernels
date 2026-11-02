@@ -6,6 +6,11 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:  # allow manual trigger
+    inputs:
+      publish_nightly:
+        description: Publish a nightly prerelease after building
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -47,7 +52,7 @@ jobs:
 
       - name: Prepare nightly environment
         run: |
-          echo "NIGHTLY_DIST=$RUNNER_TEMP/nightly-dist" >> "$GITHUB_ENV"
+          echo "NIGHTLY_DIST=$(mktemp -d "$RUNNER_TEMP/wheel-dist.XXXXXX")" >> "$GITHUB_ENV"
           uv venv --python 3.12 --system-site-packages
           uv pip install packaging
 
@@ -100,8 +105,8 @@ jobs:
         id: upload-artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: nightly-wheel-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/nightly-dist/
+          name: commit-wheel-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.NIGHTLY_DIST }}/
           if-no-files-found: error
           retention-days: 30
 
@@ -111,7 +116,7 @@ jobs:
           BUILD_VERSION: ${{ steps.metadata.outputs.version }}
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          ## Nightly wheel built
+          ## Development wheel built
 
           - Version: \`$BUILD_VERSION\`
           - Commit: [\`$BUILD_COMMIT\`]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$BUILD_COMMIT)
@@ -120,6 +125,10 @@ jobs:
 
   publish-nightly:
     needs: build-wheel-on-pvc
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.publish_nightly) ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'schedule')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -139,14 +148,14 @@ jobs:
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
       - name: Prepare publishing environment
         run: |
-          echo "NIGHTLY_DIST=$RUNNER_TEMP/nightly-dist" >> "$GITHUB_ENV"
+          echo "NIGHTLY_DIST=$(mktemp -d "$RUNNER_TEMP/wheel-dist.XXXXXX")" >> "$GITHUB_ENV"
           uv venv --python 3.12
           uv pip install packaging
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           artifact-ids: ${{ needs.build-wheel-on-pvc.outputs.artifact_id }}
           merge-multiple: true
-          path: ${{ runner.temp }}/nightly-dist
+          path: ${{ env.NIGHTLY_DIST }}
       - name: Validate nightly wheel versions
         run: |
           .venv/bin/python tools/nightly_release.py validate \

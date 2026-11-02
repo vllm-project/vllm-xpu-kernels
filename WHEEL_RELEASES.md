@@ -45,9 +45,26 @@ pip install --only-binary=vllm-xpu-kernels \
 
 ## Nightly wheels
 
-**wheel-per-commit** publishes nightly wheels after successful push or daily
-scheduled tests on `main`, using the tested commit. To build manually, run
-**Actions > wheel-per-commit > Run workflow > main**; this bypasses the test wait.
+**wheel-per-commit** builds development wheels after successful push or daily
+scheduled tests on `main`, using the tested commit. Push builds only upload an
+Actions artifact, retained for 30 days. Daily scheduled tests start at 19:00 UTC
+(03:00 UTC+8); after they succeed, the wheel is built and published to the
+nightly channel. Scheduled runs can publish the same commit again even when
+`main` has not changed.
+
+To build manually, run **Actions > wheel-per-commit > Run workflow > main**.
+Enable **Publish a nightly prerelease after building** to also publish it;
+otherwise, the build only uploads an artifact. Manual builds bypass the test
+wait. To explicitly publish from the command line:
+
+```bash
+gh workflow run wheel-per-commit.yaml \
+  --repo vllm-project/vllm-xpu-kernels --ref main \
+  -F publish_nightly=true
+```
+
+Manually running the unit-test workflow does not trigger a wheel build or
+publication.
 
 Nightlies use unique `.dev` versions and `nightly-` prerelease tags without
 changing the formal Latest release. Publishing refreshes the separate
