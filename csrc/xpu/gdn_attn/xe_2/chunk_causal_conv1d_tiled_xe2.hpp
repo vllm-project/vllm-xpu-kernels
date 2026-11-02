@@ -207,7 +207,7 @@ struct chunk_causal_conv1d_tiled_kernel {
     }
 
     int states_id = cache_indices[batch_id];
-    if (states_id == pad_slot_id) {
+    if (states_id <= pad_slot_id) {
       return;
     }
 
