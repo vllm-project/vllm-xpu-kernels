@@ -140,6 +140,31 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
   xpu_ops.impl(
       "deepseek_inv_rope_fp8_quant", torch::kXPU, &deepseek_inv_rope_fp8_quant);
 
+  xpu_ops.def("softmax(Tensor! out, Tensor input) -> ()");
+  xpu_ops.impl("softmax", torch::kXPU, &softmax);
+
+  xpu_ops.def(
+      "layer_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) "
+      "-> ()");
+  xpu_ops.impl("layer_norm", torch::kXPU, &layer_norm);
+
+  xpu_ops.def(
+      "reduce_max_row_wise(Tensor! values, Tensor! indices, Tensor input) "
+      "-> ()");
+  xpu_ops.impl("reduce_max_row_wise", torch::kXPU, &reduce_max_row_wise);
+
+  xpu_ops.def(
+      "reduce_min_row_wise(Tensor! values, Tensor! indices, Tensor input) "
+      "-> ()");
+  xpu_ops.impl("reduce_min_row_wise", torch::kXPU, &reduce_min_row_wise);
+
+  xpu_ops.def("scatter_row(Tensor! dst, Tensor src, Tensor index) -> ()");
+  xpu_ops.impl("scatter_row", torch::kXPU, &scatter_row);
+
+  xpu_ops.def(
+      "topk_row_wise(Tensor input, int k, bool largest) -> (Tensor, Tensor)");
+  xpu_ops.impl("topk_row_wise", torch::kXPU, &topk_row_wise);
+
 #ifdef VLLM_MHC_ENABLED
   xpu_ops.def(
       "mhc_pre(Tensor residual, Tensor fn, Tensor hc_scale, Tensor hc_base,"
@@ -285,6 +310,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 
   xpu_ops.def("is_pvc(int device_index) -> bool");
   xpu_ops.impl("is_pvc", &is_pvc);
+
+  xpu_ops.def("is_cri(int device_index=-1) -> bool");
+  xpu_ops.impl("is_cri", &is_cri);
+
+  xpu_ops.def("is_nvl_p(int device_index=-1) -> bool");
+  xpu_ops.impl("is_nvl_p", &is_nvl_p);
 
   xpu_ops.def("is_xe2_arch(int device_index=-1) -> bool");
   xpu_ops.impl("is_xe2_arch", &is_xe2_arch);
