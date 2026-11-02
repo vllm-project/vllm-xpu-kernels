@@ -356,12 +356,9 @@ CUTE_DEVICE void xe_gemm_4bits(
   int group_num = get<1>(A.shape()) / group_size;
   int x_idx = sg_local_id / channel_num;
 
-  // The scale block-2D prefetch needs a hardware-supported pitch. Indexed
-  // scale loads below do not have this requirement.
-  const int scale_pitch_bytes = group_num * static_cast<int>(sizeof(ElementS));
-  const bool can_prefetch_scales =
-      scale_pitch_bytes >= 64 && scale_pitch_bytes % 16 == 0;
-
+  // Scales are not block-2D prefetched: each row of an [N, K/gs] scale
+  // prefetch is a single element, below the 64-byte minimum surface width
+  // required by the 2D block I/O restrictions (SPV_INTEL_2d_block_io).
   using scaleStoreType = conditional_t<is_same_v<TA, half_t>, half_t, float>;
   scaleStoreType scales[thr_N * channel_num];
 
@@ -383,29 +380,6 @@ CUTE_DEVICE void xe_gemm_4bits(
   for (; k_tile_prefetch < prefetch_dist; k_tile_prefetch++) {
     prefetch(prefetch_a, pAgA(_, _, _, k_tile_prefetch));
     prefetch(prefetch_b, pBgB(_, _, _, k_tile_prefetch));
-
-    if (k_tile_prefetch * group_size < shape<1>(A)) {
-      // MXFP8 / int4 1D scale prefetch ([N, K/gs]). Skip for float ElementS
-      // (block-FP8 uses 2D [K/gs, N/gs] indexing).
-      if constexpr (!(TENSOR_B_DTYPE == B_DTYPE::BLOCK_FP8)) {
-        if (can_prefetch_scales) {
-          auto next_scales_tensor = make_tensor(
-              make_gmem_ptr(
-                  reinterpret_cast<const ElementS*>(
-                      Scales + (n_tile_start + n_sg_start) * group_num +
-                      k_tile_prefetch)),
-              make_layout(
-                  make_shape(Int<SG_N>{}, Int<1>{}),
-                  make_stride(group_num, Int<1>{})));
-          auto prefetch_scales = make_block_2d_prefetch<1>(
-              make_shape(Int<SG_N>{}, Int<1>{}), next_scales_tensor);
-          auto thr_prefetch_scales = prefetch_scales.get_slice(sg_local_id);
-          auto pSgS = thr_prefetch_scales.partition_S(
-              make_identity_tensor(make_shape(Int<SG_N>{}, Int<1>{})));
-          prefetch(prefetch_scales, pSgS(_, 0, 0));
-        }
-      }
-    }
   }
 
   for (int k_tile = 0; k_tile < k_tile_count; k_tile++, k_tile_prefetch++) {
@@ -458,27 +432,6 @@ CUTE_DEVICE void xe_gemm_4bits(
             }
 
             scales[n * channel_num + c] = scale;
-          }
-        }
-      }
-
-      if ((group_idx + prefetch_dist) * group_size < shape<1>(A)) {
-        if constexpr (!(TENSOR_B_DTYPE == B_DTYPE::BLOCK_FP8)) {
-          if (can_prefetch_scales) {
-            auto next_scales_tensor = make_tensor(
-                make_gmem_ptr(
-                    reinterpret_cast<const ElementS*>(
-                        Scales + (n_tile_start + n_sg_start) * group_num +
-                        group_idx + prefetch_dist)),
-                make_layout(
-                    make_shape(Int<SG_N>{}, Int<1>{}),
-                    make_stride(group_num, Int<1>{})));
-            auto prefetch_scales = make_block_2d_prefetch<1>(
-                make_shape(Int<SG_N>{}, Int<1>{}), next_scales_tensor);
-            auto thr_prefetch_scales = prefetch_scales.get_slice(sg_local_id);
-            auto pSgS = thr_prefetch_scales.partition_S(
-                make_identity_tensor(make_shape(Int<SG_N>{}, Int<1>{})));
-            prefetch(prefetch_scales, pSgS(_, 0, 0));
           }
         }
       }
