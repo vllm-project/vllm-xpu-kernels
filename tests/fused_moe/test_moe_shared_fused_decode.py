@@ -240,6 +240,33 @@ def test_moe_activation_dtype_contract(monkeypatch, dtype, supported):
 
 
 @pytest.mark.parametrize(
+    "xe2,xe3,supported",
+    [(True, False, True), (False, True, True), (False, False, False)],
+)
+def test_moe_supports_device_architecture(monkeypatch, xe2, xe3, supported):
+    """An installed op must not select fused decode on an unsupported GPU."""
+    monkeypatch.setattr(interface, "is_available", lambda: True)
+    monkeypatch.setattr(torch.ops._xpu_C, "is_xe2_arch", lambda _: xe2)
+    monkeypatch.setattr(torch.ops._xpu_C, "is_xe3_arch", lambda _: xe3)
+    assert (interface.supports(torch.float16, torch.float8_e4m3fn,
+                               8, 2048, 256) is supported)
+
+
+def test_moe_supports_explicit_device(monkeypatch):
+    """Eligibility follows the supplied device rather than the current GPU."""
+    monkeypatch.setattr(interface, "is_available", lambda: True)
+    monkeypatch.setattr(torch.ops._xpu_C, "is_xe2_arch",
+                        lambda device_index: device_index == 1)
+    monkeypatch.setattr(torch.ops._xpu_C, "is_xe3_arch", lambda _: False)
+    assert interface.supports(torch.float16, torch.float8_e4m3fn,
+                              8, 2048, 256, device=torch.device("xpu:1"))
+    assert not interface.supports(torch.float16, torch.float8_e4m3fn,
+                                  8, 2048, 256, device=torch.device("xpu:0"))
+    assert not interface.supports(torch.float16, torch.float8_e4m3fn,
+                                  8, 2048, 256, device=torch.device("cpu"))
+
+
+@pytest.mark.parametrize(
     "shape",
     [
         (0, 2048, 256),

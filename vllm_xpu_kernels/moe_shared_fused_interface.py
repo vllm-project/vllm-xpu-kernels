@@ -34,20 +34,30 @@ def supports(
     top_k: int,
     hidden_size: int,
     intermediate_size: int,
+    *,
+    device: torch.device | None = None,
 ) -> bool:
-    """Whether the op supports the static weight configuration.
+    """Whether the op supports the static weights on the given XPU device.
 
-    Requires FP16/BF16 activations, fp8-e4m3 per-tensor weights,
-    positive dimensions and H/I multiples of 32. The caller selects
-    eligible token counts before invoking the op.
+    Defaults to the current XPU. Requires a device supported by the native
+    Xe2/Xe3 dispatcher, FP16/BF16 activations, fp8-e4m3 per-tensor weights,
+    positive dimensions and H/I multiples of 32. The caller selects eligible
+    token counts before invoking the op.
     """
+    if device is not None and device.type != "xpu":
+        return False
+    device_index = (-1 if device is None or device.index is None
+                    else device.index)
     return (is_available()
+            and torch.xpu.is_available()
             and hidden_states_dtype in (torch.float16, torch.bfloat16)
             and weight_dtype == torch.float8_e4m3fn and 0 < top_k <= 512
             and hidden_size > 0 and hidden_size % 32 == 0
             and hidden_size <= _MAX_BLOCK_2D_BYTES // 2
             and intermediate_size > 0 and intermediate_size % 32 == 0
-            and intermediate_size <= _MAX_BLOCK_2D_BYTES // 4)
+            and intermediate_size <= _MAX_BLOCK_2D_BYTES // 4
+            and (torch.ops._xpu_C.is_xe2_arch(device_index)
+                 or torch.ops._xpu_C.is_xe3_arch(device_index)))
 
 
 def moe_shared_fused_workspace_bytes(
@@ -70,15 +80,24 @@ def moe_shared_fused_workspace_bytes(
     # A hot expert can span multiple tiles; reserve one tile per routed row.
     umt = rows
 
-    def align(b: int) -> int:
-        return (b + 255) // 256 * 256
+    def align_workspace_offset(num_bytes: int) -> int:
+        # Match the C++ op's align256 scratch-region boundaries.
+        alignment_bytes = 256
+        return ((num_bytes + alignment_bytes - 1) // alignment_bytes
+                * alignment_bytes)
 
-    o_wperm = align(4 * (3 * umt + 1 + rows))
-    o_gate = align(o_wperm + 4 * rows)
-    o_ap = align(o_gate + 4 * num_tokens)
-    return o_ap + 2 * (rows * hidden_size + (rows + num_tokens) * w13_n +
-                       (rows + num_tokens) * w2_k + rows * hidden_size +
-                       num_tokens * hidden_size)
+    int32_bytes = float32_bytes = 4
+    activation_bytes = 2  # FP16/BF16 intermediates.
+    # mt_expert, mt_row_base, mt_rows [umt], total_mt [1], perm_pos [rows].
+    o_wperm = align_workspace_offset(int32_bytes * (3 * umt + 1 + rows))
+    # Permuted routing weights [rows], then sigmoid shared gates [num_tokens].
+    o_gate = align_workspace_offset(o_wperm + float32_bytes * rows)
+    o_ap = align_workspace_offset(o_gate + float32_bytes * num_tokens)
+    # a_perm [R,H], d1 [R+M,2I], act [R+M,I], d2 [R,H], sh2 [M,H].
+    return o_ap + activation_bytes * (
+        rows * hidden_size + (rows + num_tokens) * w13_n +
+        (rows + num_tokens) * w2_k + rows * hidden_size +
+        num_tokens * hidden_size)
 
 
 class XpuFusedMoeWithSharedExpert:
@@ -162,6 +181,8 @@ class XpuFusedMoeWithSharedExpert:
         if any(not t.is_contiguous()
                for t in (*matrices, *scales, shared_gate)):
             raise ValueError("prepared weights and scales must be contiguous")
+        # GEMM matrices use 64-byte-aligned block-2D loads. The shared gate
+        # dot-product loads alignas(32) vectors of 16 FP16/BF16 elements.
         if (any(t.data_ptr() % 64 for t in matrices)
                 or shared_gate.data_ptr() % 32):
             raise ValueError("prepared weights require aligned base addresses")
