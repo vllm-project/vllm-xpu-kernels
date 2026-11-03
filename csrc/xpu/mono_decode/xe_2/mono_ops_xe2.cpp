@@ -40,6 +40,20 @@ void launch_attn_b(
     const Ptrs& P,
     const Scratch& S,
     const ScratchB& SB);
+bool launch_gdn_s(
+    sycl::queue& q,
+    int nb,
+    int t,
+    const Ptrs& P,
+    const Scratch& S,
+    const ScratchB& SB);
+bool launch_attn_s(
+    sycl::queue& q,
+    int nb,
+    int t,
+    const Ptrs& P,
+    const Scratch& S,
+    const ScratchB& SB);
 }  // namespace mono_decode
 
 namespace vllm::mono_decode {
@@ -491,6 +505,66 @@ void mono_decode_layer(
     else
       launch_gdn_b(q, (int)nb, P, L.S, L.SB);
   }
+}
+
+bool mono_decode_layer_spec(
+    int64_t layer,
+    int64_t tokens,
+    const torch::Tensor& hidden,
+    const torch::Tensor& residual,
+    torch::Tensor& hid_out,
+    torch::Tensor& res_out,
+    const torch::Tensor& positions,
+    const torch::Tensor& m0,
+    const torch::Tensor& m1,
+    const std::optional<torch::Tensor>& m2) {
+  using namespace ::mono_decode;
+  auto it = g_layers.find(layer);
+  TORCH_CHECK(it != g_layers.end(), "mono: layer ", layer, " not registered");
+  Layer& L = it->second;
+  TORCH_CHECK(
+      hidden.get_device() == L.device,
+      "mono: layer ",
+      layer,
+      " registered on another device");
+  const int64_t nb = hidden.dim() == 2 ? hidden.size(0) : 1;
+  TORCH_CHECK(
+      tokens >= 2 && nb % tokens == 0,
+      "mono: spec verify needs rows = requests x tokens, got ",
+      nb,
+      " rows of ",
+      tokens,
+      " tokens");
+  const int64_t nrq = nb / tokens;
+  Ptrs P = L.P;
+  P.hs_in = f16(hidden, nb * HID, "hidden");
+  P.res_in = f16(residual, nb * HID, "residual");
+  P.hid_out = const_cast<sycl::half*>(f16(hid_out, nb * HID, "hid_out"));
+  P.res_out = const_cast<sycl::half*>(f16(res_out, nb * HID, "res_out"));
+  TORCH_CHECK(
+      m0.scalar_type() == at::kInt && m0.dim() == 2 && m0.stride(1) == 1 &&
+          m0.size(0) >= nrq,
+      "mono: spec block table / state indices must be int32 [requests, n]");
+  TORCH_CHECK(
+      m1.scalar_type() == at::kInt && m1.numel() >= nrq,
+      "mono: spec seq_lens / num_accepted_tokens must be int32 [requests]");
+  P.block_table = m0.data_ptr<int>();
+  P.bt_stride = (int)m0.stride(0);
+  P.seq_lens = m1.data_ptr<int>();
+  sycl::queue& q = c10::xpu::getCurrentXPUStream().queue();
+  if (L.attn) {
+    TORCH_CHECK(
+        m2.has_value() && m2->scalar_type() == at::kLong && m2->numel() >= nb,
+        "mono: spec attention needs slot_mapping int64 [rows]");
+    TORCH_CHECK(
+        positions.scalar_type() == at::kLong && positions.size(-1) >= nb,
+        "mono: positions must be int64 [rows]");
+    P.slot = m2->data_ptr<int64_t>();
+    P.pos = positions.data_ptr<int64_t>();
+    return launch_attn_s(q, (int)nb, (int)tokens, P, L.S, L.SB);
+  }
+  TORCH_CHECK(m0.size(1) >= tokens, "mono: spec state indices narrower than T");
+  return launch_gdn_s(q, (int)nb, (int)tokens, P, L.S, L.SB);
 }
 
 }  // namespace vllm::mono_decode

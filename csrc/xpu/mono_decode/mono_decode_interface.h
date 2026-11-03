@@ -76,6 +76,25 @@ void mono_decode_layer(
     const std::optional<torch::Tensor>& m1,
     const std::optional<torch::Tensor>& m2);
 
+// Speculative-decoding verify step of layer `layer`: hidden holds requests x
+// `tokens` rows (request-major, tokens = 1 + draft tokens). attn: m0
+// block_table [B, n] int32, m1 seq_lens [B] int32 (context + tokens), m2
+// slot_mapping [rows] int64; gdn: m0 spec_state_indices [B, >= tokens] int32,
+// m1 num_accepted_tokens [B] int32. Returns false (nothing launched) for a
+// shape without a kernel (supported rows x tokens: 2x2, 3x3, 4x2, 4x4, 6x3,
+// 8x2, 8x4, 8x8).
+bool mono_decode_layer_spec(
+    int64_t layer,
+    int64_t tokens,
+    const torch::Tensor& hidden,
+    const torch::Tensor& residual,
+    torch::Tensor& hid_out,
+    torch::Tensor& res_out,
+    const torch::Tensor& positions,
+    const torch::Tensor& m0,
+    const torch::Tensor& m1,
+    const std::optional<torch::Tensor>& m2);
+
 // Top-k candidates of the vocabulary-parallel logits (TP2, B <= 8 rows,
 // k <= mono_shard_topk_max_k()) instead of all-gathering them: vals / idx
 // [B, w >= 2k] f32 / int32 = rank 0's k largest logits of its shard, then

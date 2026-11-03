@@ -218,6 +218,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor positions, Tensor m0, Tensor? m1, Tensor? m2) -> ()");
   xpu_ops.impl(
       "mono_decode_layer", torch::kXPU, &vllm::mono_decode::mono_decode_layer);
+  xpu_ops.def(
+      "mono_decode_layer_spec(int layer, int tokens, Tensor hidden, Tensor "
+      "residual, Tensor(a!) hid_out, Tensor(b!) res_out, Tensor positions, "
+      "Tensor m0, Tensor m1, Tensor? m2) -> bool");
+  xpu_ops.impl(
+      "mono_decode_layer_spec",
+      torch::kXPU,
+      &vllm::mono_decode::mono_decode_layer_spec);
   xpu_ops.def("mono_lmhead_mbox_bytes() -> int");
   xpu_ops.impl(
       "mono_lmhead_mbox_bytes", &vllm::mono_decode::mono_lmhead_mbox_bytes);
