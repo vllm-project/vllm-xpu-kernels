@@ -5,6 +5,7 @@ import pytest
 import torch
 
 import vllm_xpu_kernels._xpu_C  # noqa: F401
+from tests.utils import run_with_xpu_graph
 
 DEVICES = ["xpu:0"]
 
@@ -229,7 +230,8 @@ def test_fp8_mqa_logits_xpu(seq_len_qkv, disable_cp, device):
 
 @pytest.mark.parametrize("bs_nextn", [(4, 1), (4, 2), (2, 2)])
 @pytest.mark.parametrize("device", DEVICES)
-def test_fp8_paged_mqa_logits_xpu(bs_nextn, device):
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_fp8_paged_mqa_logits_xpu(bs_nextn, device, use_graph):
     torch.manual_seed(0)
     random.seed(0)
 
@@ -284,15 +286,25 @@ def test_fp8_paged_mqa_logits_xpu(bs_nextn, device):
                 max_model_len,
             )
 
-            logits = torch.ops._xpu_C.fp8_paged_mqa_logits(
-                q_fp8,
-                kv_cache_fp8,
-                weights,
-                context_lens,
-                block_tables,
-                schedule_metadata,
-                max_model_len,
-            )
+            def run(q_in,
+                    kv_in,
+                    weights_in,
+                    context_lens=context_lens,
+                    block_tables=block_tables,
+                    schedule_metadata=schedule_metadata):
+                return torch.ops._xpu_C.fp8_paged_mqa_logits(
+                    q_in,
+                    kv_in,
+                    weights_in,
+                    context_lens,
+                    block_tables,
+                    schedule_metadata,
+                    max_model_len,
+                )
+
+            logits_inputs = [q_fp8, kv_cache_fp8, weights]
+            logits = (run_with_xpu_graph(run, logits_inputs)
+                      if use_graph else run(*logits_inputs))
 
             ref_neginf_mask = ref_logits == float("-inf")
             neginf_mask = logits == float("-inf")

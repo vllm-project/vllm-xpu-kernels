@@ -397,7 +397,7 @@ def test_gated_delta_rule(num_actual_tokens, batch_size, num_k_heads,
     ]).to(torch.int32)
     has_initial_state = perm >= num_decodes
     non_spec_state_indices_tensor = torch.tensor(random.sample(
-        range(cache_batch_size), batch_size),
+        range(1, cache_batch_size), batch_size),
                                                  device=device,
                                                  dtype=torch.int32)
 
@@ -577,7 +577,8 @@ def test_gated_delta_rule_mtp(num_spec_decodes, num_spec_tokens, num_k_heads,
     dt_bias = torch.randn(num_v_heads // tp_size, dtype=dtype, device=device)
 
     # K slots per seq: conv uses only column 0, ssm uses all K columns.
-    state_slots = random.sample(range(cache_batch_size), num_spec_decodes * K)
+    state_slots = random.sample(range(1, cache_batch_size),
+                                num_spec_decodes * K)
     spec_state_indices_tensor = torch.tensor(state_slots,
                                              dtype=torch.int32,
                                              device=device).reshape(

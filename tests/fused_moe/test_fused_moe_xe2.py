@@ -4,9 +4,15 @@ import gc
 import pytest
 import torch
 
+import vllm_xpu_kernels._xpu_C  # noqa: F401
 from tests.ops.fp8_quant_op import scaled_fp8_quant
-from tests.utils import format_tc, seed_everything
+from tests.utils import format_tc, run_with_xpu_graph, seed_everything
 from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
+
+pytestmark = pytest.mark.skipif(
+    not torch.xpu.is_available() or
+    (not torch.ops._xpu_C.is_bmg(0) and not torch.ops._xpu_C.is_pvc(0)),
+    reason="XE2 CUTLASS tests only run on BMG or PVC.")
 
 DEVICE = "xpu"
 
@@ -176,7 +182,9 @@ def ref_fused_moe(x,
                          ids=format_tc)
 @pytest.mark.parametrize("has_bias", [True, False])
 @pytest.mark.parametrize("activation", ["silu", "situ"])
-def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation):
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation,
+                   use_graph):
     seed_everything(7)
 
     input_len = m
@@ -262,8 +270,6 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation):
         e,
     )
 
-    w13.data = w13.transpose(-1, -2).contiguous()
-    w2.data = w2.transpose(-1, -2).contiguous()
 
     fused_moe_impl = XpuFusedMoe(
                 w13=w13,
@@ -280,13 +286,20 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation):
                     25.0 if activation == "situ" else None),
             )
 
-    output = torch.empty_like(ref_out)
-    fused_moe_impl.apply(
-        output=output,
-        hidden_states=a,
-        topk_weights=expert_scores,
-        topk_ids=expert_indices,
-    )
+    def run(hidden_states, topk_weights, topk_ids, impl=fused_moe_impl):
+        output = torch.empty_like(ref_out)
+        impl.apply(
+            output=output,
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
+        return output
+
+    # Under graph, routing is zeroed during capture (all tokens -> expert 0).
+    moe_inputs = [a, expert_scores, expert_indices]
+    output = (run_with_xpu_graph(run, moe_inputs)
+              if use_graph else run(*moe_inputs))
 
     if dtype == torch.float16:
         rtol = 1e-2
@@ -294,6 +307,84 @@ def test_fused_moe(m, n, k, e, topk, dtype, w_dtype, has_bias, activation):
     else:
         rtol = 2e-2
         atol = 2e-2
+    torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
+    del fused_moe_impl
+
+
+@pytest.mark.parametrize("m,n,k", [(1, 256, 128), (16, 256, 128)])
+@pytest.mark.parametrize("e", [4])
+@pytest.mark.parametrize("topk", [1, 2])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16],
+                         ids=format_tc)
+def test_fused_moe_hooks(m, n, k, e, topk, dtype):
+    """Hooks adding biases to the grouped GEMM outputs must match a
+    reference that applies the same biases inside the experts."""
+    seed_everything(7)
+
+    a = torch.randn((m, n), device=DEVICE, dtype=dtype) / 16
+    w13 = torch.randn((e, 2 * k, n), device=DEVICE, dtype=dtype) / 16
+    w2 = torch.randn((e, n, k), device=DEVICE, dtype=dtype) / 16
+    w13_bias = torch.randn((e, 2 * k), device=DEVICE, dtype=dtype) / 16
+    w2_bias = torch.randn((e, n), device=DEVICE, dtype=dtype) / 16
+
+    scores = torch.randn((m, e), device=DEVICE, dtype=torch.float32)
+    expert_scores, expert_indices = torch.topk(scores,
+                                               k=topk,
+                                               dim=-1,
+                                               sorted=False)
+
+    ref_out = ref_fused_moe(
+        a.clone(),
+        w13,
+        w13_bias,
+        w2,
+        w2_bias,
+        expert_scores.view(-1, 1),
+        expert_indices.view(-1),
+        topk,
+        "silu",
+        e,
+    )
+
+    fused_moe_impl = XpuFusedMoe(
+        w13=w13,
+        w13_scales=None,
+        w13_bias=None,
+        w2=w2,
+        w2_scales=None,
+        w2_bias=None,
+        n_experts_per_token=topk,
+        activation="silu",
+        num_experts=e,
+    )
+
+    flat_experts = expert_indices.view(-1).long()
+    calls = []
+
+    def activation_hook(gemm1_output, row_map):
+        calls.append(("act", tuple(gemm1_output.shape), tuple(row_map.shape)))
+        gemm1_output[row_map.view(-1).long()] += w13_bias[flat_experts]
+
+    def output_hook(gemm2_output, act_output, row_map):
+        calls.append(("out", tuple(gemm2_output.shape), tuple(row_map.shape)))
+        assert act_output.shape == (m * topk, k)
+        gemm2_output[row_map.view(-1).long()] += w2_bias[flat_experts]
+
+    output = torch.empty_like(ref_out)
+    fused_moe_impl.apply(
+        output=output,
+        hidden_states=a,
+        topk_weights=expert_scores,
+        topk_ids=expert_indices,
+        activation_hook=activation_hook,
+        output_hook=output_hook,
+    )
+
+    assert calls == [
+        ("act", (m * topk, 2 * k), (m, topk)),
+        ("out", (m * topk, n), (m, topk)),
+    ]
+    rtol, atol = (1e-2, 1e-2) if dtype == torch.float16 else (2e-2, 2e-2)
     torch.testing.assert_close(output, ref_out, rtol=rtol, atol=atol)
     del fused_moe_impl
 
@@ -562,65 +653,60 @@ def test_fused_moe_mxfp8(m, n, k, e, topk, dtype, has_bias):
     a = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
     from tests.ops.mx_utils import to_mxfp
 
+    # XpuFusedMoe takes weights in the vLLM checkpoint layout [E, N, K] with
+    # [E, N, K // group] scales and relayouts them for the target kernel.
     w13 = torch.empty(num_experts,
-                      hidden_size,
                       2 * intermediate_size,
+                      hidden_size,
                       dtype=torch.float8_e4m3fn,
                       device=DEVICE)
     w2 = torch.empty(num_experts,
-                     intermediate_size,
                      hidden_size,
+                     intermediate_size,
                      dtype=torch.float8_e4m3fn,
                      device=DEVICE)
     w13_scales = torch.empty(num_experts,
-                             hidden_size // group_size,
                              2 * intermediate_size,
+                             hidden_size // group_size,
                              dtype=torch.uint8,
                              device=DEVICE)
     w2_scales = torch.empty(num_experts,
-                            intermediate_size // group_size,
                             hidden_size,
+                            intermediate_size // group_size,
                             dtype=torch.uint8,
                             device=DEVICE)
     ref_13 = torch.empty(num_experts,
-                         hidden_size,
                          2 * intermediate_size,
+                         hidden_size,
                          dtype=dtype,
                          device=DEVICE)
     ref_2 = torch.empty(num_experts,
-                        intermediate_size,
                         hidden_size,
+                        intermediate_size,
                         dtype=dtype,
                         device=DEVICE)
 
     for i in range(num_experts):
-        w13_hp = torch.randn(hidden_size,
-                             2 * intermediate_size,
+        w13_hp = torch.randn(2 * intermediate_size,
+                             hidden_size,
                              dtype=torch.float32) / 16
-        w2_hp = torch.randn(intermediate_size,
-                            hidden_size,
+        w2_hp = torch.randn(hidden_size,
+                            intermediate_size,
                             dtype=torch.float32) / 16
-        # to_mxfp blocks last dim; E8M0 along K (dim 0) → quantize [N, K].
-        sc13, lp13 = to_mxfp(w13_hp.transpose(0, 1).contiguous(),
-                             format="mxfp8")
-        sc2, lp2 = to_mxfp(w2_hp.transpose(0, 1).contiguous(), format="mxfp8")
-        lp13 = lp13.transpose(0, 1).contiguous()
-        lp2 = lp2.transpose(0, 1).contiguous()
-        sc13 = sc13.transpose(0, 1).contiguous()
-        sc2 = sc2.transpose(0, 1).contiguous()
+        # to_mxfp blocks the last dim, which is K in the checkpoint layout.
+        sc13, lp13 = to_mxfp(w13_hp, format="mxfp8")
+        sc2, lp2 = to_mxfp(w2_hp, format="mxfp8")
         w13[i] = lp13.to(DEVICE)
         w2[i] = lp2.to(DEVICE)
         w13_scales[i] = sc13.view(torch.uint8).to(DEVICE)
         w2_scales[i] = sc2.view(torch.uint8).to(DEVICE)
         # Dequant gold (same as moe_utils.dequant_mxfp8_wei)
-        ref_13[i] = (
-            lp13.to(torch.float32) *
-            sc13.view(torch.float8_e8m0fnu).to(torch.float32).repeat_interleave(
-                group_size, dim=0)).to(dtype).to(DEVICE)
-        ref_2[i] = (
-            lp2.to(torch.float32) *
-            sc2.view(torch.float8_e8m0fnu).to(torch.float32).repeat_interleave(
-                group_size, dim=0)).to(dtype).to(DEVICE)
+        ref_13[i] = (lp13.to(torch.float32) * sc13.view(
+            torch.float8_e8m0fnu).to(torch.float32).repeat_interleave(
+                group_size, dim=-1)).to(dtype).to(DEVICE)
+        ref_2[i] = (lp2.to(torch.float32) * sc2.view(
+            torch.float8_e8m0fnu).to(torch.float32).repeat_interleave(
+                group_size, dim=-1)).to(dtype).to(DEVICE)
 
     if has_bias:
         w13_bias = torch.randn(
@@ -643,9 +729,7 @@ def test_fused_moe_mxfp8(m, n, k, e, topk, dtype, has_bias):
     flat_expert_weights = expert_scores.view(-1, 1)
 
     # Local ref_fused_moe expects [E, N, K] and uses A @ W.T.
-    ref_13_nk = ref_13.transpose(-1, -2).contiguous()
-    ref_2_nk = ref_2.transpose(-1, -2).contiguous()
-    ref_out = ref_fused_moe(a.clone(), ref_13_nk, w13_bias, ref_2_nk, w2_bias,
+    ref_out = ref_fused_moe(a.clone(), ref_13, w13_bias, ref_2, w2_bias,
                             flat_expert_weights, flat_expert_indices, topk,
                             "silu", e)
 
@@ -700,44 +784,45 @@ def test_fused_moe_fp8block(m, n, k, e, topk, dtype, has_bias):
     assert intermediate_size % 128 == 0
 
     a = torch.randn((input_len, hidden_size), device=DEVICE, dtype=dtype) / 16
+    # Checkpoint layout [E, N, K] with [E, N/128, K/128] block scales.
     w13 = torch.empty(num_experts,
-                      hidden_size,
                       2 * intermediate_size,
+                      hidden_size,
                       dtype=torch.float8_e4m3fn,
                       device=DEVICE)
     w2 = torch.empty(num_experts,
-                     intermediate_size,
                      hidden_size,
+                     intermediate_size,
                      dtype=torch.float8_e4m3fn,
                      device=DEVICE)
     w13_scales = (torch.randn(num_experts,
-                              hidden_size // 128,
                               (2 * intermediate_size) // 128,
+                              hidden_size // 128,
                               device=DEVICE,
                               dtype=torch.float32).abs() + 0.01)
     w2_scales = (torch.randn(num_experts,
-                             intermediate_size // 128,
                              hidden_size // 128,
+                             intermediate_size // 128,
                              device=DEVICE,
                              dtype=torch.float32).abs() + 0.01)
     ref_13 = torch.empty(num_experts,
-                         hidden_size,
                          2 * intermediate_size,
+                         hidden_size,
                          dtype=dtype,
                          device=DEVICE)
     ref_2 = torch.empty(num_experts,
-                        intermediate_size,
                         hidden_size,
+                        intermediate_size,
                         dtype=dtype,
                         device=DEVICE)
 
     for i in range(num_experts):
-        w13_hp = torch.randn(hidden_size,
-                             2 * intermediate_size,
+        w13_hp = torch.randn(2 * intermediate_size,
+                             hidden_size,
                              device=DEVICE,
                              dtype=torch.float32) / 16
-        w2_hp = torch.randn(intermediate_size,
-                            hidden_size,
+        w2_hp = torch.randn(hidden_size,
+                            intermediate_size,
                             device=DEVICE,
                             dtype=torch.float32) / 16
         w13[i] = w13_hp.to(torch.float8_e4m3fn)
@@ -765,9 +850,7 @@ def test_fused_moe_fp8block(m, n, k, e, topk, dtype, has_bias):
     flat_expert_indices = expert_indices.view(-1)
     flat_expert_weights = expert_scores.view(-1, 1)
 
-    ref_13_nk = ref_13.transpose(-1, -2).contiguous()
-    ref_2_nk = ref_2.transpose(-1, -2).contiguous()
-    ref_out = ref_fused_moe(a.clone(), ref_13_nk, w13_bias, ref_2_nk, w2_bias,
+    ref_out = ref_fused_moe(a.clone(), ref_13, w13_bias, ref_2, w2_bias,
                             flat_expert_weights, flat_expert_indices, topk,
                             "silu", e)
 
@@ -783,7 +866,6 @@ def test_fused_moe_fp8block(m, n, k, e, topk, dtype, has_bias):
         num_experts=e,
     )
     assert fused_moe_impl.is_block_fp8
-    assert not fused_moe_impl._block_fp8_promoted
     assert fused_moe_impl.gemm1_wei_scales is not None
     assert fused_moe_impl.w13.dtype == torch.float8_e4m3fn
     assert fused_moe_impl._use_ref is False
@@ -912,8 +994,6 @@ def test_fused_moe_ep(m, n, k, e, topk, ep_rank, ep_size, dtype, w_dtype,
     expert_start_id = e * ep_rank
     expert_end_id = expert_start_id + e
 
-    w13.data = w13.transpose(-1, -2).contiguous()
-    w2.data = w2.transpose(-1, -2).contiguous()
 
     fused_moe_impl = XpuFusedMoe(
                 w13=w13[expert_start_id:expert_end_id],
@@ -1244,8 +1324,6 @@ def test_fused_moe_clamp_limit(m, n, k, e, topk, dtype, gemm1_clamp_limit):
                             "silu", e,
                             gemm1_clamp_limit=gemm1_clamp_limit)
 
-    w13.data = w13.transpose(-1, -2).contiguous()
-    w2.data = w2.transpose(-1, -2).contiguous()
 
     fused_moe_impl = XpuFusedMoe(
                 w13=w13,

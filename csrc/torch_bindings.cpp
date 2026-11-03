@@ -135,7 +135,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int group_size, "
       "Tensor? scale_ub=None, "
       "bool is_scale_transposed=False, "
-      "bool scale_ue8m0=False) -> ()");
+      "bool scale_ue8m0=False, "
+      "Tensor? expert_scale_desc=None) -> ()");
   ops.impl(
       "silu_and_mul_per_block_quant",
       torch::kXPU,
@@ -217,7 +218,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "per_token_group_fp8_quant(Tensor input, Tensor! output_q, Tensor! "
       "output_s, "
       "int group_size, float eps, float fp8_min, float fp8_max, bool "
-      "scale_ue8m0, bool dummy_is_scale_transposed, bool dummy_is_tma_aligned "
+      "scale_ue8m0, bool dummy_is_scale_transposed, bool dummy_is_tma_aligned, "
+      "Tensor? expert_scale_desc=None"
       ") -> ()");
   ops.impl(
       "per_token_group_fp8_quant", torch::kXPU, &per_token_group_quant_fp8);
@@ -225,7 +227,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Compute per-token-group MXFP4 quantized tensor and scaling factor.
   ops.def(
       "per_token_group_quant_mxfp4(Tensor input, Tensor! output_q, Tensor! "
-      "output_s, int group_size, float eps) -> ()");
+      "output_s, int group_size, float eps, Tensor? expert_scale_desc=None) "
+      "-> ()");
   ops.impl(
       "per_token_group_quant_mxfp4", torch::kXPU, &per_token_group_quant_mxfp4);
 
@@ -343,6 +346,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("gather_cache", torch::kXPU, &gather_cache);
+
+  // Gather DSV3.2 packed fp8_ds_mla entries into a dense BF16 workspace.
+  cache_ops.def(
+      "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor workspace_starts, int batch_size, "
+      "Tensor? seq_starts, Tensor? host_cache=None, Tensor? host_row_ids=None, "
+      "Tensor? device_row_ids=None) -> ()");
+  cache_ops.impl(
+      "cp_gather_and_upconvert_fp8_kv_cache",
+      torch::kXPU,
+      &cp_gather_and_upconvert_fp8_kv_cache);
 
   // Convert between FP8 and FP16/BF16/FP32 formats with scaling
   cache_ops.def(

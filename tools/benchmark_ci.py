@@ -91,6 +91,16 @@ def _commands_for_suite(suite: str, raw_dir: Path) -> list[BenchmarkCommand]:
             ],
             required=False,
         ),
+        BenchmarkCommand(
+            "fused_qk_norm_rope",
+            [
+                python,
+                "benchmark/benchmark_fused_qk_norm_rope.py",
+                "--save-path",
+                str(raw_dir / "fused_qk_norm_rope"),
+            ],
+            required=False,
+        ),
     ])
     return commands
 
@@ -216,6 +226,8 @@ def _looks_like_metric(name: str) -> bool:
 
 def _unit_for_metric(name: str) -> str:
     lowered = name.lower()
+    if lowered.endswith("_ratio"):
+        return "ratio"
     if "tflops" in lowered:
         return "tflops"
     if "bandwidth" in lowered or "gb/s" in lowered or "gbs" in lowered:

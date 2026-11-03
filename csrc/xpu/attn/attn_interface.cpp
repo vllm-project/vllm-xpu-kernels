@@ -35,7 +35,8 @@ void cutlass_chunk_prefill_interface(
     bool is_sink,
     std::optional<at::Tensor>& softmax_lse,
     std::optional<const at::Tensor>& is_prefill) {
-  if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
+  const bool force_xe3p = vllm::xpu::force_xe3p_kernel();
+  if (!force_xe3p && (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch())) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel (also used as WA for XE3/XE3P)
     vllm::xpu::xe2::cutlass_chunk_prefill_xe2(
@@ -67,7 +68,7 @@ void cutlass_chunk_prefill_interface(
 #endif
   }
 #ifdef VLLM_XPU_ENABLE_XE3P
-  else if (vllm::xpu::is_xe3p_arch()) {
+  else if (force_xe3p || vllm::xpu::is_xe3p_arch()) {
     // Use XE3 cutlass kernel
     vllm::xpu::xe3::cutlass_chunk_prefill_xe3(
         queue,
@@ -132,7 +133,8 @@ void cutlass_paged_decode_interface(
     std::optional<at::Tensor>& splits_per_seq,
     std::optional<at::Tensor>& work_list,
     std::optional<at::Tensor>& softmax_lse) {
-  if (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch()) {
+  const bool force_xe3p = vllm::xpu::force_xe3p_kernel();
+  if (!force_xe3p && (vllm::xpu::is_xe2_arch() || vllm::xpu::is_xe3_arch())) {
 #ifdef VLLM_XPU_ENABLE_XE2
     // Use XE2 cutlass kernel (also used as WA for XE3/XE3P)
     vllm::xpu::xe2::cutlass_paged_decode_xe2(
@@ -169,7 +171,7 @@ void cutlass_paged_decode_interface(
 #endif
   }
 #ifdef VLLM_XPU_ENABLE_XE3P
-  else if (vllm::xpu::is_xe3p_arch()) {
+  else if (force_xe3p || vllm::xpu::is_xe3p_arch()) {
     // Use XE3 cutlass kernel for XE3P (CRI simulator)
     vllm::xpu::xe3::cutlass_paged_decode_xe3(
         queue,

@@ -29,8 +29,15 @@ static inline void dnnl_matmul_w8a8_fp8(
   bool single_k_block = (m1_sc.dim() == 2) && (m1_sc.size(1) == 1) &&
                         (m2_sc.dim() == 2) && (m2_sc.size(0) == 1) &&
                         (m2_sc.size(1) > 1) && (m2_sc.size(1) < n);
-  bool is_block_quant =
-      ((m1_sc.dim() == 2) && (m1_sc.size(1) > 1)) || single_k_block;
+  // MXFP8 with K == 32 gives e8m0 m1_sc [M, 1] and m2_sc [1, N]. Route it to
+  // the block path too: e8m0 scales are rejected by oneDNN with a per-tensor
+  // (mask 0) src scale, which is where M == 1 would otherwise land.
+  bool mx_single_k_block =
+      (m1_sc.dim() == 2) && (m1_sc.size(1) == 1) && (m2_sc.dim() == 2) &&
+      (m2_sc.size(0) == 1) &&
+      (m1_sc.scalar_type() == at::ScalarType::Float8_e8m0fnu);
+  bool is_block_quant = ((m1_sc.dim() == 2) && (m1_sc.size(1) > 1)) ||
+                        single_k_block || mx_single_k_block;
 
   int64_t wei_group_k = -1;
   int64_t wei_group_n = -1;
