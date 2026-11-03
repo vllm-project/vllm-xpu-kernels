@@ -713,6 +713,10 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
   if(MQA_LOGITS_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/mqa_logits/mqa_logits_interface.cpp")
   endif()
+  if(MONO_DECODE_KERNELS_ENABLED AND MONO_DECODE_LIB_NAME)
+    list(APPEND VLLM_EXT_XPU_SRC
+         "csrc/xpu/mono_decode/mono_decode_interface.cpp")
+  endif()
   include_directories("/usr/include")
   # TODO: check if we need this flags list(APPEND VLLM_GPU_FLAGS
   # "-gline-tables-only")

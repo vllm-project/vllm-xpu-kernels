@@ -11,11 +11,14 @@
 // Decode-only "mono" decoder layers for Qwen3.5 / Qwen3.6 MoE (35B-A3B shapes)
 // at TP2 on Xe2: one resident kernel per decoder layer, the TP all-reduces done
 // inside the kernel through a P2P mailbox in the peer card's memory.
-// Implemented in xe_2/ (mono_decode_kernels_xe_2).
+// Checked and dispatched in mono_decode_interface.cpp (the device must be Xe2),
+// implemented in xe_2/ (mono_decode_kernels_xe_2). Python wrapper:
+// vllm_xpu_kernels/mono_decode_interface.py.
 namespace vllm::mono_decode {
 
-// Whether the device has the kernels' architecture (Xe2: Battlemage). The other
-// ops raise an error on any other device.
+// Whether the device has the kernels' architecture (Xe2: Battlemage) and at
+// least 32 Xe cores (the layer kernels keep 32 work-groups resident). The
+// other ops raise an error on any other device.
 bool mono_decode_supported(int64_t device);
 
 // Longest context (cached tokens per request) the attention kernels are
@@ -74,7 +77,12 @@ void mono_register_layer(
 // One decode step (one token) of layer `layer` on the current XPU stream.
 // hid_out = MoE output (all-reduced), res_out = residual after the mixer. m0:
 // attn block_table [B, n] int32 | gdn state indices [B] int32; m1: attn
-// seq_lens [B] int32; m2: attn slot_mapping [T] int64.
+// seq_lens [B] int32; m2: attn slot_mapping [T] int64. Padding rows: slot -1
+// and sequence length 0 (attention), a state index the caller does not use
+// (GatedDeltaNet). Besides the new K / V row, an attention layer zeroes the V
+// half of the rows after it up to the end of its 16-token tile when that tile
+// holds cached tokens (the request's own block, rows not written yet): stale
+// rows there would turn into NaN.
 void mono_decode_layer(
     int64_t layer,
     const torch::Tensor& hidden,

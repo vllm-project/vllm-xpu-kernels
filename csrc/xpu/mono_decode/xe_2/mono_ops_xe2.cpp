@@ -22,8 +22,7 @@
 #include <vector>
 
 #include "mono_mtp.hpp"
-#include "../mono_decode_interface.h"
-#include "../mono_arch.h"
+#include "mono_decode_xe2.h"
 
 namespace mono_decode {
 void launch_gdn(sycl::queue& q, const Ptrs& P, const Scratch& S);
@@ -58,7 +57,7 @@ bool launch_mtp(
     sycl::queue& q, int nb, const Ptrs& P, const Scratch& S, int rank);
 }  // namespace mono_decode
 
-namespace vllm::mono_decode {
+namespace vllm::mono_decode::xe2 {
 
 using ::mono_decode::Ptrs;
 using ::mono_decode::Scratch;
@@ -105,7 +104,7 @@ Region& region(int64_t h) {
 }
 }  // namespace
 
-bool mono_decode_supported(int64_t device) { return xe2_device(device); }
+int64_t mono_max_context() { return 512 * 1024; }
 
 int* health_words(int device) {
   static std::mutex mu;
@@ -121,7 +120,6 @@ int* health_words(int device) {
 }
 
 torch::Tensor mono_health(int64_t device) {
-  require_xe2("mono_health");
   const int d = device < 0 ? (int)c10::xpu::current_device() : (int)device;
   return torch::from_blob(
       health_words(d),
@@ -129,10 +127,7 @@ torch::Tensor mono_health(int64_t device) {
       torch::TensorOptions().dtype(torch::kInt32).device(torch::kXPU, d));
 }
 
-int64_t mono_max_context() { return 512 * 1024; }
-
 int64_t mono_ipc_create(int64_t bytes) {
-  require_xe2("mono_ipc_create");
   auto r = std::make_unique<Region>();
   sycl::queue& q = c10::xpu::getCurrentXPUStream().queue();
   r->ctx =
@@ -350,7 +345,6 @@ void mono_register_layer(
     int64_t mbox,
     int64_t peer,
     const std::vector<torch::Tensor>& t) {
-  require_xe2("mono_register_layer");
   using namespace ::mono_decode;
   TORCH_CHECK(
       t.size() == (attn ? 19u : 24u),
@@ -606,7 +600,6 @@ void mono_register_mtp(
     int64_t peer,
     const std::vector<torch::Tensor>& t,
     int64_t rank) {
-  require_xe2("mono_register_mtp");
   using namespace ::mono_decode;
   TORCH_CHECK(t.size() == 4u, "mono: MTP prologue takes 4 tensors");
   TORCH_CHECK(rank == 0 || rank == 1, "mono: MTP prologue is TP2 only");
@@ -668,4 +661,4 @@ void mono_fault_inject(int64_t layer, int64_t delta) {
   });
 }
 
-}  // namespace vllm::mono_decode
+}  // namespace vllm::mono_decode::xe2

@@ -28,8 +28,7 @@
 #include <map>
 #include <vector>
 
-#include "../mono_arch.h"
-#include "../mono_decode_interface.h"
+#include "mono_decode_xe2.h"
 
 namespace mono_decode {
 namespace {
@@ -328,7 +327,7 @@ std::map<int, uint64_t*> g_part;
 }  // namespace
 }  // namespace mono_decode
 
-namespace vllm::mono_decode {
+namespace vllm::mono_decode::xe2 {
 
 int64_t mono_lmhead_mbox_bytes() {
   return (int64_t)(2 * ::mono_decode::BMAX * ::mono_decode::KMAX * 2 *
@@ -347,7 +346,6 @@ namespace {
     int64_t mbox,
     int64_t peer,
     const char* op) {
-  require_xe2(op);
   using namespace ::mono_decode;
   const int B = (int)logits.size(0);
   TORCH_CHECK(
@@ -380,7 +378,7 @@ namespace {
   a.peer = reinterpret_cast<uint64_t*>(peer);
   a.tag = tag;
   a.part = part;
-  a.health = vllm::mono_decode::health_words(dev);
+  a.health = vllm::mono_decode::xe2::health_words(dev);
   return a;
 }
 
@@ -415,4 +413,4 @@ void mono_shard_topk(
     shard_topk<false>(q, a, B);
 }
 
-}  // namespace vllm::mono_decode
+}  // namespace vllm::mono_decode::xe2

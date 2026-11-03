@@ -189,9 +189,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
 #endif
 
 #ifdef VLLM_MONO_DECODE_ENABLED
-  // Decode-only mono decoder layers (Qwen3.5 / 3.6 MoE, TP2): one kernel per
-  // layer, in-kernel all-reduces through a P2P mailbox in the peer card's
-  // memory (Level Zero IPC).
+  #ifdef VLLM_XPU_ENABLE_XE2
+  // Decode-only mono decoder layers (Qwen3.5 / 3.6 MoE, TP2, Xe2): one kernel
+  // per layer, in-kernel all-reduces through a P2P mailbox in the peer card's
+  // memory (Level Zero IPC). See mono_decode/mono_decode_interface.h.
   xpu_ops.def("mono_decode_supported(int device) -> bool");
   xpu_ops.impl(
       "mono_decode_supported", &vllm::mono_decode::mono_decode_supported);
@@ -248,6 +249,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "int rank, int mbox, int peer) -> ()");
   xpu_ops.impl(
       "mono_shard_topk", torch::kXPU, &vllm::mono_decode::mono_shard_topk);
+  #endif
 #endif
 
   xpu_ops.def(
