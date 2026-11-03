@@ -89,8 +89,11 @@ def _uses_xe2_grouped_gemm(weight):
     """Mirrors the routing in csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp.
 
     BMG / PVC / LNL and the XE3 client parts run the xe_2 kernel; only CRI and
-    NVL-P run the xe_3 one.
+    NVL-P run the xe_3 one. FORCE_XE3P_KERNEL also selects xe_3 layouts and
+    preserves block-scaled activations for the forced Xe3 path.
     """
+    if _is_env_enabled("FORCE_XE3P_KERNEL"):
+        return False
     device_index = -1 if weight.device.index is None else weight.device.index
     return bool(torch.ops._xpu_C.is_xe2_arch(device_index)
                 or torch.ops._xpu_C.is_xe3_arch(device_index))
