@@ -286,6 +286,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("xpu_host_unregister(int ptr) -> bool");
   ops.impl("xpu_host_unregister", &xpu_host_unregister);
 
+  // Virtual memory management on PyTorch's SYCL context, mirroring cuMem*:
+  // reserve an address range, then map physical memory into it on demand.
+  ops.def("vmm_granularity(int device_index) -> int");
+  ops.impl("vmm_granularity", &vmm_granularity);
+  ops.def("vmm_reserve(int size) -> int");
+  ops.impl("vmm_reserve", &vmm_reserve);
+  ops.def("vmm_free_reserved(int ptr, int size) -> ()");
+  ops.impl("vmm_free_reserved", &vmm_free_reserved);
+  ops.def("vmm_create(int size, int device_index) -> int");
+  ops.impl("vmm_create", &vmm_create);
+  ops.def("vmm_map(int ptr, int size, int handle) -> ()");
+  ops.impl("vmm_map", &vmm_map);
+  ops.def("vmm_set_access(int ptr, int size, int device_index) -> ()");
+  ops.impl("vmm_set_access", &vmm_set_access);
+  ops.def("vmm_unmap(int ptr, int size) -> ()");
+  ops.impl("vmm_unmap", &vmm_unmap);
+  ops.def("vmm_release(int handle) -> ()");
+  ops.impl("vmm_release", &vmm_release);
+  ops.def(
+      "vmm_tensor_from_ptr(int ptr, int num_bytes, int device_index) -> "
+      "Tensor");
+  ops.impl("vmm_tensor_from_ptr", &vmm_tensor_from_ptr);
+
   // Merge attn states
   // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
   // can be used to combine partial attention results (in the split-KV case)

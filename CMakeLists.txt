@@ -600,6 +600,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/utils/mem_cpy.cpp"
       "csrc/utils/host_register.cpp"
       "csrc/utils/mem_info.cpp"
+      "csrc/utils/vmm.cpp"
       "csrc/topk_per_row.cpp"
       "csrc/ngram_embedding_kernels.cpp")
   include_directories("/usr/include")
