@@ -21,7 +21,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "mono_layers_b.hpp"
+#include "mono_mtp.hpp"
 #include "../mono_decode_interface.h"
 #include "../mono_arch.h"
 
@@ -54,6 +54,8 @@ bool launch_attn_s(
     const Ptrs& P,
     const Scratch& S,
     const ScratchB& SB);
+bool launch_mtp(
+    sycl::queue& q, int nb, const Ptrs& P, const Scratch& S, int rank);
 }  // namespace mono_decode
 
 namespace vllm::mono_decode {
@@ -247,6 +249,8 @@ int64_t mono_mbox_bytes() {
 namespace {
 struct Layer {
   bool attn = false;
+  bool mtp = false;  // MTP drafter prologue (mono_register_mtp)
+  int rank = 0;
   Ptrs P{};
   Scratch S{};
   ScratchB SB{};
@@ -565,6 +569,58 @@ bool mono_decode_layer_spec(
   }
   TORCH_CHECK(m0.size(1) >= tokens, "mono: spec state indices narrower than T");
   return launch_gdn_s(q, (int)nb, (int)tokens, P, L.S, L.SB);
+}
+
+void mono_register_mtp(
+    int64_t layer,
+    int64_t mbox,
+    int64_t peer,
+    const std::vector<torch::Tensor>& t,
+    int64_t rank) {
+  require_xe2("mono_register_mtp");
+  using namespace ::mono_decode;
+  TORCH_CHECK(t.size() == 4u, "mono: MTP prologue takes 4 tensors");
+  TORCH_CHECK(rank == 0 || rank == 1, "mono: MTP prologue is TP2 only");
+  Layer L;
+  L.mtp = true;
+  L.rank = (int)rank;
+  L.device = t[0].get_device();
+  Ptrs& P = L.P;
+  P.in_norm_w = f16(t[0], HID, "pre_fc_norm_embedding");
+  P.post_norm_w = f16(t[1], HID, "pre_fc_norm_hidden");
+  P.qkv_w = w_nk(t[2], MTP_FC_OUT, MTP_FC_IN, "fc_w");
+  P.qkv_s = scale1(t[3], "fc_scale");
+  sycl::queue& q = c10::xpu::getCurrentXPUStream().queue();
+  auto it = g_layers.find(layer);
+  if (it != g_layers.end() && it->second.scratch) {
+    L.scratch = it->second.scratch;
+  } else {
+    L.scratch = sycl::malloc_device(scratch_bytes(), q);
+    q.memset(L.scratch, 0, scratch_bytes()).wait();
+  }
+  L.S = scratch_carve(
+      L.scratch,
+      reinterpret_cast<uint64_t*>(mbox),
+      reinterpret_cast<uint64_t*>(peer));
+  g_layers[layer] = L;
+}
+
+bool mono_mtp_prologue(
+    int64_t layer, const torch::Tensor& x, torch::Tensor& out) {
+  using namespace ::mono_decode;
+  auto it = g_layers.find(layer);
+  TORCH_CHECK(
+      it != g_layers.end() && it->second.mtp,
+      "mono: MTP prologue ",
+      layer,
+      " not registered");
+  Layer& L = it->second;
+  const int64_t nb = x.dim() == 2 ? x.size(0) : 1;
+  Ptrs P = L.P;
+  P.hs_in = f16(x, nb * MTP_FC_IN, "x");
+  P.hid_out = const_cast<sycl::half*>(f16(out, nb * HID, "out"));
+  sycl::queue& q = c10::xpu::getCurrentXPUStream().queue();
+  return launch_mtp(q, (int)nb, P, L.S, L.rank);
 }
 
 }  // namespace vllm::mono_decode

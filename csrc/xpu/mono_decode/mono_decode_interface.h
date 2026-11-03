@@ -95,6 +95,21 @@ bool mono_decode_layer_spec(
     const torch::Tensor& m1,
     const std::optional<torch::Tensor>& m2);
 
+// MTP drafter prologue `layer` (its own id and mailbox): tensors =
+// pre_fc_norm_embedding, pre_fc_norm_hidden, fc_w (logical [4096, 1024] = t()
+// of [N][K] fp8), fc_scale; rank: this rank of the TP pair.
+void mono_register_mtp(
+    int64_t layer,
+    int64_t mbox,
+    int64_t peer,
+    const std::vector<torch::Tensor>& tensors,
+    int64_t rank);
+// out = fc([norm_e(e); norm_h(h)]) of x = [e; h] ([rows, 4096] fp16) for 1, 2,
+// 3, 4, 6 or 8 rows (all-gathered fc output, the same on both ranks). Returns
+// false (nothing launched) for other row counts.
+bool mono_mtp_prologue(
+    int64_t layer, const torch::Tensor& x, torch::Tensor& out);
+
 // Top-k candidates of the vocabulary-parallel logits (TP2, B <= 8 rows,
 // k <= mono_shard_topk_max_k()) instead of all-gathering them: vals / idx
 // [B, w >= 2k] f32 / int32 = rank 0's k largest logits of its shard, then

@@ -226,6 +226,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "mono_decode_layer_spec",
       torch::kXPU,
       &vllm::mono_decode::mono_decode_layer_spec);
+  xpu_ops.def(
+      "mono_register_mtp(int layer, int mbox, int peer, Tensor[] tensors, int "
+      "rank) -> ()");
+  xpu_ops.impl("mono_register_mtp", &vllm::mono_decode::mono_register_mtp);
+  xpu_ops.def("mono_mtp_prologue(int layer, Tensor x, Tensor(a!) out) -> bool");
+  xpu_ops.impl(
+      "mono_mtp_prologue", torch::kXPU, &vllm::mono_decode::mono_mtp_prologue);
   xpu_ops.def("mono_lmhead_mbox_bytes() -> int");
   xpu_ops.impl(
       "mono_lmhead_mbox_bytes", &vllm::mono_decode::mono_lmhead_mbox_bytes);
