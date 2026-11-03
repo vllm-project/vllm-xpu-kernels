@@ -45,13 +45,52 @@ pip install --only-binary=vllm-xpu-kernels \
 
 ## Nightly wheels
 
-**wheel-per-commit** publishes nightly wheels after successful push or daily
-scheduled tests on `main`, using the tested commit. To build manually, run
-**Actions > wheel-per-commit > Run workflow > main**; this bypasses the test wait.
+**wheel-per-commit** builds development wheels after successful push or daily
+scheduled tests on `main`, using the tested commit. Push builds only upload an
+Actions artifact, retained for 30 days. Daily scheduled tests start at 19:00 UTC
+(03:00 UTC+8); after they succeed, the wheel is built and published to the
+nightly channel. Scheduled runs can publish the same commit again even when
+`main` has not changed.
 
-Nightlies use unique `.dev` versions and `nightly-` prerelease tags without
-changing the formal Latest release. Publishing refreshes the separate
-`/whl/nightly/` index; other releases, including RCs, remain under `/whl/`.
+To build manually, run **Actions > wheel-per-commit > Run workflow > main**.
+Enable **Publish a nightly prerelease after building** to also publish it;
+otherwise, the build only uploads an artifact. Manual builds bypass the test
+wait. To explicitly publish from the command line:
+
+```bash
+gh workflow run wheel-per-commit.yaml \
+  --repo vllm-project/vllm-xpu-kernels --ref main \
+  -F publish_nightly=true
+```
+
+Manually running the unit-test workflow does not trigger a wheel build or
+publication.
+
+Nightlies follow FlashInfer's UTC date-based naming convention:
+
+- Wheel version: `0.1.17.dev20261102`
+- Release tag: `nightly-v0.1.17-20261102`
+- Release title: `Nightly Release v0.1.17-20261102`
+
+The base version still comes from the nearest version tag: final tags increment
+the last version component, while prerelease tags retain their release version.
+The source commit remains in release notes, and `build_info.txt` records both
+the commit and build timestamp. Re-publishing the same base version on the same
+UTC date replaces the existing nightly release and tag with the new build; it
+does not create another daily release. Because the wheel version is unchanged,
+clients may need to force reinstall without their cached wheel to pick up a
+same-day replacement.
+Artifact-only per-commit builds retain unique timestamp, commit, run ID and
+attempt suffixes.
+
+Once a daily nightly is available for a base version, the nightly index omits
+legacy long-timestamp builds of that same base version so pip does not prefer
+them over the new daily versions. Their release assets remain available until
+normal retention cleanup.
+
+Nightlies do not change the formal Latest release. Publishing refreshes the
+separate `/whl/nightly/` index; other releases, including RCs, remain under
+`/whl/`.
 
 ```bash
 pip install --upgrade --pre --no-deps --only-binary=vllm-xpu-kernels \

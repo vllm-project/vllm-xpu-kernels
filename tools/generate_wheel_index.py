@@ -50,6 +50,18 @@ def generate_index(releases, output):
                 url += f"#sha256={value}"
             wheels[url] = (version, name)
 
+    nightlies = channels["nightly/"]
+    daily_bases = {
+        version.release for version, _ in nightlies.values()
+        if version.dev is not None and len(str(version.dev)) == 8
+    }
+    # Legacy 14-digit dev timestamps sort above the new 8-digit daily versions.
+    channels["nightly/"] = {
+        url: (version, name) for url, (version, name) in nightlies.items()
+        if not (version.release in daily_bases and version.dev is not None
+                and len(str(version.dev)) > 8)
+    }
+
     for channel, wheels in channels.items():
         links = [
             f'<a href="{escape(url, quote=True)}">{escape(name)}</a><br>'

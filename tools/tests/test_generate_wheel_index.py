@@ -114,6 +114,27 @@ class WheelIndexTest(unittest.TestCase):
             generate_index([{"assets": [asset(name, "sha256:invalid")]}],
                            self.output)
 
+    def test_daily_nightly_hides_legacy_versions_of_same_base_only(self):
+        versions = [
+            "1.1.dev20261029030000+gabcdef1",
+            "1.1.dev20261101",
+            "1.1.dev20261102",
+            "1.2.dev20261029030000+gabcdef1",
+        ]
+        wheels = [
+            asset(f"vllm_xpu_kernels-{version}-cp39-abi3-linux_x86_64.whl")
+            for version in versions
+        ]
+        releases = [
+            {"tag_name": "nightly-legacy", "assets": [wheels[0], wheels[3]]},
+            {"tag_name": "nightly-v1.1-20261101", "assets": [wheels[1]]},
+            {"tag_name": "nightly-v1.1-20261102", "assets": [wheels[2]]},
+        ]
+        self.assertEqual(generate_index(releases, self.output), 3)
+        self.assertEqual(
+            set(self.links("whl/nightly/vllm-xpu-kernels/index.html")),
+            {wheel["browser_download_url"] for wheel in wheels[1:]})
+
     def test_paginated_cli_and_html_escaping(self):
         name = "vllm_xpu_kernels-1.0-cp39-abi3-linux_x86_64.whl"
         wheel = asset(name)
