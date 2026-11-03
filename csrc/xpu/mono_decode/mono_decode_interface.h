@@ -76,4 +76,21 @@ void mono_decode_layer(
     const std::optional<torch::Tensor>& m1,
     const std::optional<torch::Tensor>& m2);
 
+// Top-k candidates of the vocabulary-parallel logits (TP2, B <= 8 rows,
+// k <= mono_shard_topk_max_k()) instead of all-gathering them: vals / idx
+// [B, w >= 2k] f32 / int32 = rank 0's k largest logits of its shard, then
+// rank 1's (each part in ascending token id order, idx = vocabulary token
+// ids), then -inf / 0 padding; the same on both ranks. logits: this rank's [B,
+// V/2] fp16 shard; mbox / peer: own / peer mailbox of mono_lmhead_mbox_bytes()
+// bytes.
+int64_t mono_lmhead_mbox_bytes();
+int64_t mono_shard_topk_max_k();
+void mono_shard_topk(
+    torch::Tensor& vals,
+    torch::Tensor& idx,
+    const torch::Tensor& logits,
+    int64_t k,
+    int64_t rank,
+    int64_t mbox,
+    int64_t peer);
 }  // namespace vllm::mono_decode

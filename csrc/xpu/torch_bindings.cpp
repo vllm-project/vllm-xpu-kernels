@@ -218,6 +218,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor positions, Tensor m0, Tensor? m1, Tensor? m2) -> ()");
   xpu_ops.impl(
       "mono_decode_layer", torch::kXPU, &vllm::mono_decode::mono_decode_layer);
+  xpu_ops.def("mono_lmhead_mbox_bytes() -> int");
+  xpu_ops.impl(
+      "mono_lmhead_mbox_bytes", &vllm::mono_decode::mono_lmhead_mbox_bytes);
+  xpu_ops.def("mono_shard_topk_max_k() -> int");
+  xpu_ops.impl(
+      "mono_shard_topk_max_k", &vllm::mono_decode::mono_shard_topk_max_k);
+  xpu_ops.def(
+      "mono_shard_topk(Tensor(a!) vals, Tensor(b!) idx, Tensor logits, int k, "
+      "int rank, int mbox, int peer) -> ()");
+  xpu_ops.impl(
+      "mono_shard_topk", torch::kXPU, &vllm::mono_decode::mono_shard_topk);
 #endif
 
   xpu_ops.def(
