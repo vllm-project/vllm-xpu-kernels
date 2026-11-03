@@ -33,4 +33,7 @@ inline void require_xe2(const char* op) {
       "mono_decode_supported() first");
 }
 
+// The device's health words (mono_health), allocated on first use.
+int* health_words(int device);
+
 }  // namespace vllm::mono_decode

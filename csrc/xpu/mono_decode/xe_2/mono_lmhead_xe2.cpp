@@ -18,6 +18,7 @@
 // k = 1 (greedy) has its own kernel: the slice maximum is a work-group
 // reduction.
 #include <sycl/sycl.hpp>
+#include <sycl/ext/oneapi/experimental/clock.hpp>
 
 #include <c10/xpu/XPUStream.h>
 #include <torch/all.h>
@@ -77,6 +78,15 @@ using k64_ref = sycl::atomic_ref<
     sycl::memory_order::relaxed,
     sycl::memory_scope::device,
     sycl::access::address_space::global_space>;
+using h_ref = sycl::atomic_ref<
+    int,
+    sycl::memory_order::relaxed,
+    sycl::memory_scope::device,
+    sycl::access::address_space::global_space>;
+// the device's health words and the wait bound, as in the layers
+// (mono_layers.hpp)
+enum { H_FAILED = 0, H_TIMEOUTS };
+constexpr uint64_t WAIT_CYCLES = 1ull << 35;
 using lcnt_ref = sycl::atomic_ref<
     int,
     sycl::memory_order::relaxed,
@@ -98,6 +108,7 @@ struct Args {
   uint32_t* tag;   // [0] call counter (advanced by the last work-group to read
                    // it), [1 + row] row arrivals, [1 + BMAX] protocol failures,
                    // [2 + BMAX] call arrivals
+  int* health;     // the device's health words (mono_health)
   uint64_t*
       part;   // [BMAX][NW][KMAX] keys: the k largest of each work-group's slice
   float* ov;  // [B][lo]
@@ -273,15 +284,25 @@ void shard_topk(sycl::queue& q, const Args& a, int rows) {
             a.ov[(size_t)row * a.lo + j] = -INFINITY;
             a.oi[(size_t)row * a.lo + j] = 0;
           }
-          if (lid < a.k) {  // bounded: a protocol failure must not hang the
-                            // server (peer part -inf, counted in tag[1 + BMAX])
+          if (lid < a.k) {  // bounded like the layers' waits: a stalled peer
+                            // must not hang the server (peer part -inf,
+                            // counted in tag[1 + BMAX], health FAILED)
+            namespace syclex = sycl::ext::oneapi::experimental;
             const size_t mw =
                 (((size_t)(tag & 1u) * BMAX + row) * KMAX + lid) * 2;
             uint64_t x = 0, y = 0;
             bool okx = false, oky = false;
-            for (int n = 0; n < (1 << 22) && !(okx && oky); ++n) {
+            uint64_t t0 = 0;
+            for (uint32_t n = 0; !(okx && oky); ++n) {
               if (!okx) okx = mb_match(x = mb_ref(a.mine[mw]).load(), tag);
               if (!oky) oky = mb_match(y = mb_ref(a.mine[mw + 1]).load(), tag);
+              if ((n & 255u) != 255u) continue;
+              const uint64_t now =
+                  syclex::clock<syclex::clock_scope::sub_group>();
+              if (n == 255u) t0 = now;
+              if (h_ref(a.health[H_FAILED]).load() != 0 ||
+                  now - t0 > WAIT_CYCLES)
+                break;
             }
             const size_t o = (size_t)row * a.lo + (1 - a.rank) * a.k + lid;
             if (okx && oky) {
@@ -290,7 +311,11 @@ void shard_topk(sycl::queue& q, const Args& a, int rows) {
             } else {
               a.ov[o] = -INFINITY;
               a.oi[o] = 0;
-              if (lid == 0) u32_ref(a.tag[1 + BMAX]).fetch_add(1u);
+              if (lid == 0) {
+                u32_ref(a.tag[1 + BMAX]).fetch_add(1u);
+                h_ref(a.health[H_FAILED]).store(1);
+                h_ref(a.health[H_TIMEOUTS]).fetch_add(1);
+              }
             }
           }
         });
@@ -355,6 +380,7 @@ namespace {
   a.peer = reinterpret_cast<uint64_t*>(peer);
   a.tag = tag;
   a.part = part;
+  a.health = vllm::mono_decode::health_words(dev);
   return a;
 }
 

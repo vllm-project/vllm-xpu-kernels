@@ -419,13 +419,11 @@ inline void ar_two(
     size_t word,
     float& v0,
     float& v1,
-    uint32_t call) {
+    uint32_t call,
+    const uint32_t* cnt) {
   const half a0 = (half)v0, a1 = (half)v1;
   mb_ref(peer[word]).store(mb_word(pack_h2(a0, a1), call));
-  uint64_t w;
-  do {
-    w = mb_ref(mine[word]).load();
-  } while (!mb_match(w, call));
+  const uint64_t w = mb_wait(mine + word, call, cnt);
   const h2 b = sycl::bit_cast<h2>(mb_val(w));
   v0 = (float)a0 + (float)b[0];
   v1 = (float)a1 + (float)b[1];
@@ -484,7 +482,8 @@ inline void tail_b(
         MB0 + (((size_t)pb * HID + n0 + pc) >> 1),
         v0,
         v1,
-        mtag);
+        mtag,
+        S.cnt);
 #pragma unroll
     for (int e = 0; e < 2; ++e) {
       const int n = n0 + pc + e;
@@ -868,7 +867,8 @@ inline void tail_b(
         MB1 + (((size_t)pb * HID + n0 + pc) >> 1),
         a0,
         a1,
-        mtag);
+        mtag,
+        S.cnt);
     P.hid_out[pb * HID + n0 + pc] = (half)a0;
     P.hid_out[pb * HID + n0 + pc + 1] = (half)a1;
   }

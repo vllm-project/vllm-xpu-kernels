@@ -25,6 +25,16 @@ bool mono_decode_supported(int64_t device);
 // numbers into 16 bits.
 int64_t mono_max_context();
 
+// The device's health words (int32 [8], device memory, never freed): [0]
+// FAILED, sticky: a kernel gave up an in-kernel wait for the peer (about 12 s),
+// so its outputs are garbage and every later wait exits at once; [1] the waits
+// that gave up. A caller reads [0] after its steps and stops every rank.
+torch::Tensor mono_health(int64_t device);
+// Test hook (fault injection): shifts layer `layer`'s mailbox tags on this rank
+// by `delta` (queued on the current stream), so the peer never sees the words
+// it waits for: both ranks give up their waits and record the failure.
+void mono_fault_inject(int64_t layer, int64_t delta);
+
 // Mailbox memory (one region per rank, shared with the peer through Level Zero
 // IPC).
 int64_t mono_ipc_create(int64_t bytes);

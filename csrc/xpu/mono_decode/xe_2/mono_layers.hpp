@@ -30,6 +30,7 @@
 #include <sycl/sycl.hpp>
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 #include <sycl/ext/intel/experimental/cache_control_properties.hpp>
+#include <sycl/ext/oneapi/experimental/clock.hpp>
 #include <sycl/ext/oneapi/experimental/prefetch.hpp>
 #include <cstdint>
 #include <cmath>
@@ -77,6 +78,14 @@ constexpr int EPOCH = NCNT * 16;
 // consecutive uses of a region carry consecutive tags, so a word left from an
 // older use never matches the 16-bit tag
 constexpr int MBT = EPOCH + 4, MBT2 = EPOCH + 16;
+// two words: the address of the device's health words (mono_health), written
+// at registration and read only by a wait that is taking long
+constexpr int HEALTH_PTR = EPOCH + 28;
+// health words: [0] FAILED (sticky: a wait gave up), [1] waits that gave up
+enum { H_FAILED = 0, H_TIMEOUTS, H_WORDS = 8 };
+// a mailbox wait gives up after about 12 s (2^35 cycles of the sub-group
+// clock, ~2.8 GHz): a stalled peer fails both ranks instead of hanging them
+constexpr uint64_t WAIT_CYCLES = 1ull << 35;
 
 // ----------------------------------------------------------------------------
 // arguments
@@ -209,12 +218,46 @@ inline uint32_t mb_val(uint64_t w) {
 inline void mb_send(uint64_t* peer, float v, uint32_t tag) {
   mb_ref(*peer).store(mb_word(sycl::bit_cast<uint32_t>(v), tag));
 }
-inline float mb_recv(uint64_t* mine, uint32_t tag) {
-  uint64_t w;
-  do {
-    w = mb_ref(*mine).load();
-  } while (!mb_match(w, tag));
-  return sycl::bit_cast<float>(mb_val(w));
+using h_ref = sycl::atomic_ref<
+    int,
+    sycl::memory_order::relaxed,
+    sycl::memory_scope::device,
+    sycl::access::address_space::global_space>;
+// The slow path of a mailbox wait (the first poll missed): polls until the
+// word matches, or gives up when this device already failed (health FAILED,
+// sticky: every later wait exits after a few hundred polls) or after
+// WAIT_CYCLES, recording the failure. False: gave up (w holds the last word).
+inline bool mb_wait_slow(
+    const uint64_t* mine, uint32_t tag, uint64_t& w, const uint32_t* cnt) {
+  namespace syclex = sycl::ext::oneapi::experimental;
+  const uint64_t t0 = syclex::clock<syclex::clock_scope::sub_group>();
+  for (uint32_t n = 1;; ++n) {
+    w = mb_ref(*const_cast<uint64_t*>(mine)).load();
+    if (mb_match(w, tag)) return true;
+    if ((n & 255u) == 0) {
+      int* h = reinterpret_cast<int*>(
+          *reinterpret_cast<const volatile uint64_t*>(cnt + HEALTH_PTR));
+      if (h == nullptr) continue;  // not registered: never in vLLM
+      const bool failed = h_ref(h[H_FAILED]).load() != 0;
+      if (failed ||
+          syclex::clock<syclex::clock_scope::sub_group>() - t0 > WAIT_CYCLES) {
+        if (!failed) h_ref(h[H_FAILED]).store(1);
+        h_ref(h[H_TIMEOUTS]).fetch_add(1);
+        return false;
+      }
+    }
+  }
+}
+// waits for this call's word (tag) in own mailbox word `mine`; on a timeout the
+// value is garbage and the device's health records the failure
+inline uint64_t
+mb_wait(const uint64_t* mine, uint32_t tag, const uint32_t* cnt) {
+  uint64_t w = mb_ref(*const_cast<uint64_t*>(mine)).load();
+  if (!mb_match(w, tag)) mb_wait_slow(mine, tag, w, cnt);
+  return w;
+}
+inline float mb_recv(uint64_t* mine, uint32_t tag, const uint32_t* cnt) {
+  return sycl::bit_cast<float>(mb_val(mb_wait(mine, tag, cnt)));
 }
 
 inline uint32_t fp8x2_lo(uint32_t w) {  // bytes 0,2 -> two fp16 = e4m3 / 256
@@ -570,7 +613,7 @@ inline void tail(
       if (lid < 64) {
         float v = ob[lid];
         mb_send(S.peer + wg * 64 + lid, v, mtag);
-        v += mb_recv(S.mbox + wg * 64 + lid, mtag);
+        v += mb_recv(S.mbox + wg * 64 + lid, mtag, S.cnt);
         ob[lid] = v;
       }
       wg_bar(grp);
@@ -830,7 +873,7 @@ inline void tail(
         a += L.mr[w2i * 64 + lid];
       a += L.red[lid];
       mb_send(S.peer + HID + wg * 64 + lid, a, mtag);  // all-reduce #2
-      a += mb_recv(S.mbox + HID + wg * 64 + lid, mtag);
+      a += mb_recv(S.mbox + HID + wg * 64 + lid, mtag, S.cnt);
       P.hid_out[wg * 64 + lid] = (half)a;
     }
   }

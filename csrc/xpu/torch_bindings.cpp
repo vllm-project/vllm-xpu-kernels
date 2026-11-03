@@ -197,6 +197,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "mono_decode_supported", &vllm::mono_decode::mono_decode_supported);
   xpu_ops.def("mono_max_context() -> int");
   xpu_ops.impl("mono_max_context", &vllm::mono_decode::mono_max_context);
+  xpu_ops.def("mono_health(int device) -> Tensor");
+  xpu_ops.impl("mono_health", &vllm::mono_decode::mono_health);
+  xpu_ops.def("mono_fault_inject(int layer, int delta) -> ()");
+  xpu_ops.impl("mono_fault_inject", &vllm::mono_decode::mono_fault_inject);
   xpu_ops.def("mono_ipc_create(int bytes) -> int");
   xpu_ops.impl("mono_ipc_create", &vllm::mono_decode::mono_ipc_create);
   xpu_ops.def("mono_ipc_export(int handle) -> int[]");

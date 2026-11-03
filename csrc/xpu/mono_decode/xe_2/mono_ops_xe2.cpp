@@ -107,6 +107,28 @@ Region& region(int64_t h) {
 
 bool mono_decode_supported(int64_t device) { return xe2_device(device); }
 
+int* health_words(int device) {
+  static std::mutex mu;
+  static std::unordered_map<int, int*> words;
+  std::lock_guard<std::mutex> lk(mu);
+  int*& w = words[device];
+  if (!w) {
+    sycl::queue& q = c10::xpu::getCurrentXPUStream().queue();
+    w = sycl::malloc_device<int>(::mono_decode::H_WORDS, q);
+    q.memset(w, 0, ::mono_decode::H_WORDS * sizeof(int)).wait();
+  }
+  return w;
+}
+
+torch::Tensor mono_health(int64_t device) {
+  require_xe2("mono_health");
+  const int d = device < 0 ? (int)c10::xpu::current_device() : (int)device;
+  return torch::from_blob(
+      health_words(d),
+      {::mono_decode::H_WORDS},
+      torch::TensorOptions().dtype(torch::kInt32).device(torch::kXPU, d));
+}
+
 int64_t mono_max_context() { return 512 * 1024; }
 
 int64_t mono_ipc_create(int64_t bytes) {
@@ -264,6 +286,12 @@ std::unordered_map<int64_t, Layer> g_layers;
 std::unordered_map<int, void*> g_attn_part;
 
 const void* ptr_of(const torch::Tensor& t) { return t.data_ptr(); }
+
+// the device's health words, for the slow path of the layer's mailbox waits
+void set_health(sycl::queue& q, const Layer& L) {
+  const uint64_t h = reinterpret_cast<uint64_t>(health_words(L.device));
+  q.memcpy(L.S.cnt + ::mono_decode::HEALTH_PTR, &h, sizeof(h)).wait();
+}
 
 // fp8 linear weight: vLLM keeps W^T as a [K, N] view of a row-major [N, K]
 // tensor
@@ -439,6 +467,7 @@ void mono_register_layer(
       L.scratch,
       reinterpret_cast<uint64_t*>(mbox),
       reinterpret_cast<uint64_t*>(peer));
+  set_health(q, L);
   g_layers[layer] = L;
 }
 
@@ -602,6 +631,7 @@ void mono_register_mtp(
       L.scratch,
       reinterpret_cast<uint64_t*>(mbox),
       reinterpret_cast<uint64_t*>(peer));
+  set_health(q, L);
   g_layers[layer] = L;
 }
 
@@ -621,6 +651,21 @@ bool mono_mtp_prologue(
   P.hid_out = const_cast<sycl::half*>(f16(out, nb * HID, "out"));
   sycl::queue& q = c10::xpu::getCurrentXPUStream().queue();
   return launch_mtp(q, (int)nb, P, L.S, L.rank);
+}
+
+void mono_fault_inject(int64_t layer, int64_t delta) {
+  using namespace ::mono_decode;
+  auto it = g_layers.find(layer);
+  TORCH_CHECK(it != g_layers.end(), "mono: layer ", layer, " not registered");
+  uint32_t* cnt = it->second.S.cnt;
+  const uint32_t d = (uint32_t)delta;
+  sycl::queue& q = c10::xpu::getCurrentXPUStream().queue();
+  q.single_task([=] {
+    for (int i = 0; i < 4; ++i)
+      cnt[MBT + i] += d;  // rows 1, 2, 4, 8
+    for (int i = 0; i < 2; ++i)
+      cnt[MBT2 + i] += d;  // rows 3, 6
+  });
 }
 
 }  // namespace vllm::mono_decode

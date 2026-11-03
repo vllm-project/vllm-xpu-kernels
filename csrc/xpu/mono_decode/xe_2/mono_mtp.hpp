@@ -145,10 +145,7 @@ inline void mtp_prologue(
     const int col = wg * NSG + 2 * p;
     *reinterpret_cast<h2*>(P.hid_out + b * HID + rank * MTP_FC_OUT + col) =
         mine;
-    uint64_t pw;
-    do {
-      pw = mb_ref(S.mbox[word]).load();
-    } while (!mb_match(pw, mtag));
+    const uint64_t pw = mb_wait(S.mbox + word, mtag, S.cnt);
     *reinterpret_cast<h2*>(
         P.hid_out + b * HID + (1 - rank) * MTP_FC_OUT + col) =
         sycl::bit_cast<h2>(mb_val(pw));
