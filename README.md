@@ -177,6 +177,9 @@ Per-commit wheel CI uses ccache with a persistent, runner-local Docker volume
 (`wheel-ccache`) and a 50 GB cache limit. Scheduled nightly wheels and manual
 builds with `publish_nightly=true` disable compiler caching. This does not
 change caching in the unit-test workflow.
+The wheel workflow can also be dispatched on upstream development branches
+with `publish_nightly=false` to test builds before merging. Nightly publication
+remains restricted to `main`.
 
 ### Using with vLLM
 

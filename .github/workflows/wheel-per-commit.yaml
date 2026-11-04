@@ -22,7 +22,9 @@ jobs:
   build-wheel-on-pvc:
     runs-on: self-hosted-pvc-cpu
     if: |
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.repository == 'vllm-project/vllm-xpu-kernels' &&
+       (github.ref == 'refs/heads/main' || !inputs.publish_nightly)) ||
       (github.event.workflow_run.conclusion == 'success' && 
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.head_branch == 'main' &&
@@ -120,13 +122,14 @@ jobs:
           BUILD_COMMIT: ${{ steps.metadata.outputs.commit }}
           BUILD_VERSION: ${{ steps.metadata.outputs.version }}
           BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
+          BUILD_BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
         run: |
           cat > "$NIGHTLY_DIST/build_info.txt" << EOF
           Build Information
           =================
           Commit: $BUILD_COMMIT
           Version: $BUILD_VERSION
-          Branch: main
+          Branch: $BUILD_BRANCH
           Build Date (UTC): $BUILD_DATE
           Build Number: $GITHUB_RUN_NUMBER
           Workflow: $GITHUB_WORKFLOW

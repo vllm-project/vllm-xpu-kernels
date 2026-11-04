@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from shutil import which
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
@@ -31,6 +32,22 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
     if value is None:
         return None
     return int(value)
+
+
+def get_compiler_cache() -> str:
+    compiler_cache = os.getenv("VLLM_COMPILER_CACHE", "auto")
+    if compiler_cache == "auto":
+        return next((name for name in ("sccache", "ccache") if which(name)), "")
+    if compiler_cache == "none":
+        return ""
+    if compiler_cache not in ("ccache", "sccache"):
+        raise ValueError(
+            "VLLM_COMPILER_CACHE must be auto, ccache, sccache, or none")
+    if which(compiler_cache) is None:
+        raise RuntimeError(
+            f"Requested compiler cache {compiler_cache!r} is not on PATH")
+    return compiler_cache
+
 
 
 def get_vllm_port() -> Optional[int]:

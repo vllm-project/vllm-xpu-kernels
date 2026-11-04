@@ -34,14 +34,6 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'tools',
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
 
-def is_sccache_available() -> bool:
-    return which("sccache") is not None
-
-
-def is_ccache_available() -> bool:
-    return which("ccache") is not None
-
-
 def is_ninja_available() -> bool:
     return which("ninja") is not None
 
@@ -163,22 +155,7 @@ class cmake_build_ext(build_ext):
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
-        compiler_cache = envs.VLLM_COMPILER_CACHE
-        if compiler_cache == "auto":
-            if is_sccache_available():
-                compiler_cache = "sccache"
-            elif is_ccache_available():
-                compiler_cache = "ccache"
-            else:
-                compiler_cache = ""
-        elif compiler_cache == "none":
-            compiler_cache = ""
-        elif compiler_cache not in ("ccache", "sccache"):
-            raise ValueError(
-                "VLLM_COMPILER_CACHE must be auto, ccache, sccache, or none")
-        elif which(compiler_cache) is None:
-            raise RuntimeError(
-                f"Requested compiler cache {compiler_cache!r} is not on PATH")
+        compiler_cache = envs.get_compiler_cache()
         cmake_args += [
             f'-DCMAKE_C_COMPILER_LAUNCHER={compiler_cache}',
             f'-DCMAKE_CXX_COMPILER_LAUNCHER={compiler_cache}',
