@@ -25,6 +25,11 @@ MNK_FACTORS = [
     (512, 1024, 2048),
     (1024, 2048, 2048),
 ]
+# MXFP8 with K == 32 (a single MX block): e8m0 scales [M, 1] and [1, N].
+MX_SINGLE_K_BLOCK_FACTORS = [
+    (1, 64, 32),
+    (32, 64, 32),
+]
 
 MINI_MNK_FACTORS = [
     (1, 4, 8),
@@ -445,7 +450,8 @@ def _convert_to_mxfp8_with_hp_ref(t):
     return t_hp, t_lp, t_scale
 
 
-@pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
+@pytest.mark.parametrize("mnk_factors",
+                         MNK_FACTORS + MX_SINGLE_K_BLOCK_FACTORS)
 @pytest.mark.parametrize("out_dtype", OUT_DTYPES)
 def test_mxfp8_gemm(mnk_factors, out_dtype):
     m, n, k = mnk_factors

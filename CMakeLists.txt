@@ -44,7 +44,7 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
 #
 # TODO: we need to align torch version with used in vLLM.
 #
-set(TORCH_SUPPORTED_VERSION_XPU "2.14.0")
+set(TORCH_SUPPORTED_VERSION_XPU "2.15.0")
 
 set(BUILD_SYCL_TLA_KERNELS
     ON
@@ -692,7 +692,8 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/utils.cpp")
   if(MOE_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC
-         "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp")
+         "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp"
+         "csrc/xpu/grouped_gemm/moe_shared_fused_interface.cpp")
   endif()
   if(GDN_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
