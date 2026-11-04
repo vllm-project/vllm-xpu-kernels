@@ -284,14 +284,18 @@ class XeFMHAFwdKernel {
                                                 p.dynamic_causal[idx_b] != 0);
 
       // calc sg level seq_len_kv
+      const int sg_causal_seq_len =
+          cute::min(seq_len_kv, full_tile_offset + seq_coord + q_sg_tile);
+      // Dynamic causal batches pass a symmetric local window, so a causal
+      // sequence must also stop at the causal bound to skip fully masked
+      // KV blocks to the right of the diagonal.
       const int sg_seq_len =
           LocalMask ? cute::min(
-                          seq_len_kv,
+                          seq_is_causal ? sg_causal_seq_len : seq_len_kv,
                           full_tile_offset + seq_coord + q_sg_tile +
                               params.mainloop.local_right)
-          : seq_is_causal
-              ? cute::min(seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
-              : seq_len_kv;
+          : seq_is_causal ? sg_causal_seq_len
+                          : seq_len_kv;
       const int sg_k_block0 =
           LocalMask
               ? cute::max(

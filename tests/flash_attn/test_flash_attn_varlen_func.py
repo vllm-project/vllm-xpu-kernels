@@ -2697,9 +2697,12 @@ def test_decode_sink_sliding_window_no_nan(dtype, seed, use_graph):
     torch.xpu.empty_cache()
 
 
-def _dynamic_causal_inputs(dtype, head_size, paged):
-    query_lens = [1, 5, 7]
-    kv_lens = [9, 12, 7]
+def _dynamic_causal_inputs(dtype,
+                           head_size,
+                           paged,
+                           query_lens=(1, 5, 7),
+                           kv_lens=(9, 12, 7)):
+    query_lens, kv_lens = list(query_lens), list(kv_lens)
     num_query_heads, num_kv_heads = 4, 2
     query = torch.randn(sum(query_lens),
                         num_query_heads,
@@ -2823,6 +2826,40 @@ def test_dynamic_causal_varlen(paged, window_size, head_size, dtype):
             causal_values, reference_window, dtype)
         torch.testing.assert_close(output, reference, atol=2e-2, rtol=2e-2)
     torch.xpu.empty_cache()
+
+
+@pytest.mark.parametrize("paged", [False, True])
+@pytest.mark.parametrize("head_size", [64, 256])
+@torch.inference_mode()
+def test_dynamic_causal_window_multi_tile(paged, head_size):
+    """Causal sequences must stop at the diagonal under a symmetric window."""
+    torch.set_default_device("xpu")
+    torch.manual_seed(2028)
+    query_lens, kv_lens = [300, 129, 257], [300, 200, 400]
+    (query, key, value, query_lens, kv_lens, cu_q, cu_k, seqused_k,
+     block_table) = _dynamic_causal_inputs(torch.bfloat16, head_size, paged,
+                                           query_lens, kv_lens)
+    for causal_values in ([1, 0, 1], [0, 1, 0], [1, 1, 1]):
+        output = flash_attn_varlen_func(
+            query,
+            key,
+            value,
+            max(query_lens),
+            cu_q,
+            max(kv_lens),
+            cu_seqlens_k=cu_k,
+            seqused_k=seqused_k,
+            block_table=block_table,
+            window_size=[64, 0],
+            dynamic_causal=torch.tensor(causal_values,
+                                        dtype=torch.int32,
+                                        device="xpu"),
+        )
+        reference = _dynamic_causal_reference(query, key, value, query_lens,
+                                              kv_lens, block_table,
+                                              causal_values, (64, 64),
+                                              torch.bfloat16)
+        torch.testing.assert_close(output, reference, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize("paged", [False, True])
