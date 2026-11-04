@@ -163,16 +163,26 @@ class cmake_build_ext(build_ext):
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
-        if is_sccache_available():
-            cmake_args += [
-                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
-            ]
-        elif is_ccache_available():
-            cmake_args += [
-                '-DCMAKE_C_COMPILER_LAUNCHER=ccache',
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
-            ]
+        compiler_cache = envs.VLLM_COMPILER_CACHE
+        if compiler_cache == "auto":
+            if is_sccache_available():
+                compiler_cache = "sccache"
+            elif is_ccache_available():
+                compiler_cache = "ccache"
+            else:
+                compiler_cache = ""
+        elif compiler_cache == "none":
+            compiler_cache = ""
+        elif compiler_cache not in ("ccache", "sccache"):
+            raise ValueError(
+                "VLLM_COMPILER_CACHE must be auto, ccache, sccache, or none")
+        elif which(compiler_cache) is None:
+            raise RuntimeError(
+                f"Requested compiler cache {compiler_cache!r} is not on PATH")
+        cmake_args += [
+            f'-DCMAKE_C_COMPILER_LAUNCHER={compiler_cache}',
+            f'-DCMAKE_CXX_COMPILER_LAUNCHER={compiler_cache}',
+        ]
 
         # Pass the python executable to cmake so it can find an exact
         # match.

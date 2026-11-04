@@ -31,6 +31,12 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      PUBLISH_NIGHTLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_nightly) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'schedule') }}
+      CCACHE_DIR: /root/.ccache
+      CCACHE_NOHASHDIR: '1'
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 50G
     outputs:
       commit: ${{ steps.metadata.outputs.commit }}
       version: ${{ steps.metadata.outputs.version }}
@@ -39,6 +45,8 @@ jobs:
     container:                      
       image: pytorch/manylinux2_28-builder:xpu-v2.15.0-rc10
       options: --user root
+      volumes:
+        - wheel-ccache:/root/.ccache
     steps:
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -58,8 +66,6 @@ jobs:
 
       - name: Get build metadata
         id: metadata
-        env:
-          PUBLISH_NIGHTLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_nightly) || (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'schedule') }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           version_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*')
@@ -75,6 +81,21 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             "${metadata_args[@]}" >> "$GITHUB_OUTPUT"
 
+      - name: Configure compiler cache
+        run: |
+          if [ "$PUBLISH_NIGHTLY" = "true" ]; then
+            echo "VLLM_COMPILER_CACHE=none" >> "$GITHUB_ENV"
+            echo "Compiler caching disabled for nightly wheel builds"
+          else
+            if ! command -v ccache >/dev/null 2>&1; then
+              yum install -y ccache
+            fi
+            echo "VLLM_COMPILER_CACHE=ccache" >> "$GITHUB_ENV"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+            ccache --version
+            ccache --show-stats
+          fi
+
       - name: build wheel
         env:
           VLLM_VERSION_OVERRIDE: ${{ steps.metadata.outputs.version }}
@@ -89,6 +110,10 @@ jobs:
           done
           .venv/bin/python tools/nightly_release.py validate \
             --dist "$NIGHTLY_DIST" --version "$VLLM_VERSION_OVERRIDE"
+
+      - name: Report compiler cache statistics
+        if: ${{ always() && env.VLLM_COMPILER_CACHE == 'ccache' }}
+        run: ccache --show-stats
 
       - name: Create build info file
         env:

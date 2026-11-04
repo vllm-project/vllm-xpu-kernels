@@ -168,6 +168,16 @@ pip wheel --no-build-isolation --wheel-dir dist .
 python -m build --wheel --no-isolation
 ```
 
+Compiler caching defaults to `VLLM_COMPILER_CACHE=auto`, which prefers
+`sccache`, then `ccache`, when available on `PATH`. Set
+`VLLM_COMPILER_CACHE=ccache` or `sccache` to require that tool, or `none` to
+disable compiler caching.
+
+Per-commit wheel CI uses ccache with a persistent, runner-local Docker volume
+(`wheel-ccache`) and a 50 GB cache limit. Scheduled nightly wheels and manual
+builds with `publish_nightly=true` disable compiler caching. This does not
+change caching in the unit-test workflow.
+
 ### Using with vLLM
 
 After [vLLM RFC#33214](https://github.com/vllm-project/vllm/issues/33214) was completed, vLLM-XPU migrated to a `vllm-xpu-kernels`-based implementation. Installing the latest vLLM for XPU will pull in `vllm-xpu-kernels` automatically as a wheel dependency — no manual integration is required.

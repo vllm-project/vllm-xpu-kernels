@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     CMAKE_BUILD_TYPE: Optional[str] = None
     VLLM_TARGET_DEVICE: str = "xpu"
     MAX_JOBS: Optional[str] = None
+    VLLM_COMPILER_CACHE: str = "auto"
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VERBOSE: bool = False
@@ -82,6 +83,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default this is the number of CPUs
     "MAX_JOBS":
     lambda: os.getenv("MAX_JOBS", None),
+
+    # Compiler cache: auto prefers sccache, then ccache; none disables both.
+    "VLLM_COMPILER_CACHE":
+    lambda: os.getenv("VLLM_COMPILER_CACHE", "auto"),
 
     # If set, vllm-xpu-kernels will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
