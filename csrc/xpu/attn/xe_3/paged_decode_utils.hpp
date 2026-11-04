@@ -156,9 +156,15 @@ inline void dispatch_by_head_size(
           queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 4:
-      decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _256, PageSize>>(
-          queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
+      if constexpr (
+          std::is_same_v<QGroup, _16> && std::is_same_v<PageSize, _64>) {
+        decode_policy_dispatch_func<decode_policy_q16_h256_p64>(
+            queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
+      } else {
+        decode_policy_dispatch_func<
+            decode_policy_qpacked_head<QGroup, _256, PageSize>>(
+            queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
+      }
       break;
     case 5:
       decode_policy_dispatch_func<

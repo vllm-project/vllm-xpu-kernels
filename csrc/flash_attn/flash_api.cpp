@@ -3,10 +3,18 @@
 #include "core/registration.h"
 #include "xpu/attn/attn_interface.h"
 #include "xpu/attn/paged_kv_utils.h"
+#include "xpu/attn/paged_decode_tuning.h"
 #include "utils.h"
 #include <torch/all.h>
 
 namespace FLASH_NAMESPACE {
+
+// Tuned XE3P decode (xpu/attn/paged_decode_tuning.h): head-size bucket 128 or
+// 256 (0 if untuned) and Q/KV precision.
+struct TunedDecodeConfig {
+  int head_dim = 0;
+  vllm::xpu::paged_decode_tuning::Precision precision{};
+};
 
 inline int get_num_splits(
     const sycl::queue& queue,
@@ -14,7 +22,8 @@ inline int get_num_splits(
     const int& num_heads_q,
     const int& num_heads_kv,
     const int& max_seqlen_k,
-    const int& block_size) {
+    const int& block_size,
+    const TunedDecodeConfig& tuned = {}) {
   auto device = queue.get_device();
   int num_xe_cores =
       device.get_info<sycl::ext::intel::info::device::gpu_slices>() *
@@ -49,7 +58,20 @@ inline int get_num_splits(
     policy_split_cap = 16;
   }
 
-  int kv_tiles = (max_seqlen_k + kv_tile - 1) / kv_tile;
+  int kv_tiles = (int64_t{max_seqlen_k} + kv_tile - 1) / kv_tile;
+
+  namespace tuning = vllm::xpu::paged_decode_tuning;
+  if (tuning::is_tuned(tuned.head_dim, kv_tile)) {
+    // The kernel also caps work-groups per Xe core for these shapes.
+    return tuning::num_splits(
+        tuned.head_dim,
+        tuned.precision,
+        batch_size,
+        num_heads_q,
+        num_heads_kv,
+        kv_tiles,
+        num_xe_cores);
+  }
 
   // Below ~16 tiles total the kernel falls back to single-split anyway; any
   // splitting only adds ReduceSplitK overhead.
@@ -94,6 +116,36 @@ inline int get_num_splits(
   // (5) Hard cap of 32 (beyond this the ReduceSplitK kernel dominates).
   return std::max(
       1, std::min({splits, max_splits_tiles, 32, policy_split_cap}));
+}
+
+// Tuned decode configuration for these tensors: the XE3P paged decode kernels
+// (csrc/xpu/attn/xe_3) with 16-bit Q/KV, fp8 KV and a 16-bit query, or full
+// fp8, and the policy head-size buckets (96, 128] and (192, 256]. Must match
+// XeFMHAFwdSplitKVKernel::kTunedDecode / kPrecision (get_num_splits checks the
+// KV tile).
+inline TunedDecodeConfig tuned_decode_config(
+    const at::Tensor& q, const at::Tensor& k, const at::Tensor& v) {
+  using vllm::xpu::paged_decode_tuning::Precision;
+  auto is_fp8 = [](at::ScalarType t) {
+    return t == at::kFloat8_e4m3fn || t == at::kFloat8_e5m2;
+  };
+  auto bucket = [](int64_t d) {
+    return (d > 96 && d <= 128) ? 128 : (d > 192 && d <= 256) ? 256 : 0;
+  };
+  const auto q_type = q.scalar_type();
+  const auto k_type = k.scalar_type();
+  const bool q16 = q_type == at::kBFloat16 || q_type == at::kHalf;
+  if (!(q16 || is_fp8(q_type)) || k_type != v.scalar_type() ||
+      !(k_type == q_type || (q16 && is_fp8(k_type))) ||
+      bucket(q.size(-1)) != bucket(v.size(-1)) ||
+      !vllm::xpu::is_xe3p_arch(q.device().index())) {
+    return {};
+  }
+  return {
+      bucket(q.size(-1)),
+      is_fp8(q_type)   ? Precision::kFullFp8
+      : is_fp8(k_type) ? Precision::kFp8KV
+                       : Precision::k16Bit};
 }
 
 std::vector<at::Tensor> mha_varlen_fwd(
@@ -366,7 +418,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     // decode policies now cap ShapeOut_V at 256 and split V across grid.x
     // (see decode_shapeout_v in fmha_utils.hpp), so with kv_tile=_64
     // (SGPerWG=4) q_packed=16 needs only 64 KiB and the guard is no longer
-    // required.
+    // required. XE3P keeps the full-width V tile but never uses q_packed=16
+    // above head_size 256 (see paged_decode_xe3.cpp).
 
     // Output shape uses V's head_dim (may differ from Q/K for MLA).
     // For fp8 query the output cannot be fp8; default to fp16 (matches the
@@ -384,14 +437,17 @@ std::vector<at::Tensor> mha_varlen_fwd(
         num_heads_q,
         num_heads_kv,
         effective_seqlen_k,
-        block_size));
+        block_size,
+        tuned_decode_config(q, k, v)));
 
+    // The partial outputs carry the output precision, which differs from Q's
+    // for full fp8 attention.
     at::Tensor tmp_out =
         num_kv_splits == 1
             ? out
             : at::empty(
                   {num_tokens, num_heads_q * num_kv_splits, v_head_dim},
-                  q.options().device(q.device()));
+                  out.options().device(out.device()));
     at::Tensor softmax_lse_accum = at::empty(
         {num_tokens, num_heads_q, num_kv_splits},
         q.options().dtype(at::kFloat).device(q.device()));
