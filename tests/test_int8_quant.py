@@ -50,3 +50,28 @@ def test_int8_quant_exact(dtype, m, k, scale_f32):
     torch.ops._C.dynamic_per_token_scaled_int8_quant(q, x, s)
     assert torch.equal(q, q_ref)
     assert torch.equal(s.to(torch.float32), s_ref.to(torch.float32))
+
+
+@pytest.mark.parametrize("dtype,absmax,scale,odd", [
+    (torch.bfloat16, 11.4375, 23.0 / 256, (3, 5, 7, 9, 11)),
+    (torch.float16, 12.7734375, 103.0 / 1024, (3, 5, 7, 9, 11, 13, 15, 17, 19)),
+])
+@pytest.mark.parametrize("scale_f32", [True, False])
+@torch.inference_mode()
+def test_int8_quant_exact_ties(dtype, absmax, scale, odd, scale_f32):
+    # absmax sets a scale that is not a power of two, and the other values are
+    # odd multiples of scale / 2, so each quotient is exactly q + 0.5. A power
+    # of two scale would not do: the division is then exact on the device too.
+    ties = torch.tensor(odd, dtype=torch.float32) * scale / 2
+    row = torch.cat([torch.tensor([absmax]), ties, -ties])
+    x = row.unsqueeze(0).to(dtype).to(DEVICE)
+    assert torch.equal(x.cpu().float().view(-1), row)
+    expected = torch.clamp(torch.round(row / scale), -128, 127).to(torch.int8)
+    q = torch.empty_like(x, dtype=torch.int8)
+    s = torch.empty(1,
+                    1,
+                    device=DEVICE,
+                    dtype=torch.float32 if scale_f32 else dtype)
+    torch.ops._C.dynamic_per_token_scaled_int8_quant(q, x, s)
+    assert s.to(torch.float32).item() == scale
+    assert torch.equal(q.cpu().view(-1), expected)
