@@ -34,6 +34,8 @@
 
 */
 #include <torch/all.h>
+#include <mutex>
+#include <unordered_set>
 #include "csrc/utils.h"
 
 #include <cute/tensor.hpp>
@@ -134,6 +136,60 @@ void MoEGEMMLauncher(
   using GmemTiledCopyA = typename policy::GmemTiledCopyA;
   using GmemTiledCopyB = typename policy::GmemTiledCopyB;
   using GmemTiledCopyD = typename policy::GmemTiledCopyD;
+
+  // Fresh tensors are not device-accessible until a regular load touches
+  // them, and the LSC block-2D first touch below is not such a load, so
+  // the first launch faults. Read weights and scales once, sized per
+  // recipe; later launches find them in the set and skip.
+  {
+      static std::mutex map_mu;
+      static std::unordered_set<const void*> mapped;
+      auto demand_map = [&](const void* p, size_t bytes) {
+        {
+          std::lock_guard<std::mutex> lk(map_mu);
+          if (!mapped.insert(p).second) return;
+        }
+        // Plain stores: the values are discarded, the loads are the
+        // point. No reduction (keeps the device code small).
+        uint64_t* sink = sycl::malloc_device<uint64_t>(1024, stream);
+        const uint64_t* u64 = static_cast<const uint64_t*>(p);
+        size_t n = bytes / 8;
+        stream.parallel_for(
+            sycl::range<1>(n),
+            [=](sycl::id<1> i) { sink[i.get(0) & 1023] = u64[i]; });
+        stream.wait();
+        sycl::free(sink, stream);
+      };
+      size_t w_bytes;
+      size_t s_bytes = 0;
+      if constexpr (TENSOR_B_DTYPE == B_DTYPE::INT4 ||
+                    TENSOR_B_DTYPE == B_DTYPE::MXFP4) {
+        w_bytes = static_cast<size_t>(num_experts) * gemm_n * gemm_k *
+                  sizeof(ElementB) / 2;
+        if (scales != nullptr) {
+          s_bytes = static_cast<size_t>(num_experts) * gemm_n *
+                    (gemm_k / group_size) * sizeof(ElementS);
+        }
+      } else {
+        w_bytes = static_cast<size_t>(num_experts) * gemm_n * gemm_k *
+                  sizeof(ElementB);
+        if (scales != nullptr) {
+          if constexpr (TENSOR_B_DTYPE == B_DTYPE::MXFP8) {
+            s_bytes = static_cast<size_t>(num_experts) * gemm_n *
+                      (gemm_k / group_size) * sizeof(ElementS);
+          } else if constexpr (TENSOR_B_DTYPE == B_DTYPE::BLOCK_FP8) {
+            s_bytes = static_cast<size_t>(num_experts) * (gemm_k / 128) *
+                      (gemm_n / 128) * sizeof(ElementS);
+          } else {
+            s_bytes = static_cast<size_t>(num_experts) * sizeof(ElementS);
+          }
+        }
+      }
+      demand_map(weights, w_bytes);
+      if (scales != nullptr && s_bytes > 0) {
+        demand_map(scales, s_bytes);
+      }
+    }
 
   stream.submit([&](sycl::handler& cgh) {
     sycl::local_accessor<int32_t, 1> local_mem(sycl::range<1>(1), cgh);
