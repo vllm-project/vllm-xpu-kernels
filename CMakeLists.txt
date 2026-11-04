@@ -591,6 +591,7 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/fused_qknorm_rope.cpp"
       "csrc/torch_bindings.cpp"
       "csrc/quantization/fp8/fp8_quant.cpp"
+      "csrc/quantization/int8/int8_quant.cpp"
       "csrc/quantization/fp4/mxfp4_quant.cpp"
       "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cpp"
       "csrc/quantization/fused_kernels/fused_silu_mul_mxfp4_quant.cpp"
@@ -603,6 +604,12 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/topk_per_row.cpp"
       "csrc/ngram_embedding_kernels.cpp")
   include_directories("/usr/include")
+  # The int8 act quant must match the torch reference bit for bit: IEEE fp32
+  # division and no fast-math for this TU ('#pragma float_control' is ignored
+  # for spir64).
+  set_source_files_properties(
+    "csrc/quantization/int8/int8_quant.cpp"
+    PROPERTIES COMPILE_OPTIONS "-ffp-model=precise;-foffload-fp32-prec-div")
 
   define_gpu_extension_target(
     _C
