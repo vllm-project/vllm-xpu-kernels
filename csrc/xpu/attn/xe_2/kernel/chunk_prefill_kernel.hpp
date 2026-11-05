@@ -61,6 +61,9 @@ struct FMHAProblemShape {
   int num_heads_q, num_heads_kv;
   SeqLenType seq_len_qo, seq_len_kv;
   int head_size_qk, head_size_vo;
+  // GQA packing factor. 1 = no packing. When > 1 the host has folded the GQA
+  // head group into the row dimension.
+  int pack_gqa = 1;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -273,18 +276,28 @@ class XeFMHAFwdKernel {
       auto [seq_len_qo, seq_len_kv] = sequence_length_shape;
       if (blk_q * get<0>(TileShapeQK{}) >= seq_len_qo) continue;
 
-      auto full_tile_offset = seq_len_kv - seq_len_qo;
-      int seq_coord =
+      // With GQA packing a row is (q_pos * pack_gqa + head_in_group), so the
+      // causal/local geometry below is expressed in query positions rather
+      // than rows. pack_gqa == 1 leaves every term unchanged.
+      const int pack_gqa = cute::max(s.pack_gqa, 1);
+      const int full_tile_offset = seq_len_kv - seq_len_qo / pack_gqa;
+      const int row_coord =
           cute::min(seq_len_qo, (blk_q * get<0>(TileShapeQK{}) + q_offset_sg));
+      const int seq_coord = row_coord / pack_gqa;
+      // Query positions spanned by this subgroup's q_sg_tile rows. Derived
+      // from the last row so it stays exact when row_coord or q_sg_tile is
+      // not a multiple of pack_gqa.
+      const int q_sg_span =
+          (row_coord + q_sg_tile - 1) / pack_gqa + 1 - seq_coord;
 
       // calc sg level seq_len_kv
       const int sg_seq_len =
           LocalMask ? cute::min(
                           seq_len_kv,
-                          full_tile_offset + seq_coord + q_sg_tile +
+                          full_tile_offset + seq_coord + q_sg_span +
                               params.mainloop.local_right)
           : CausalMask
-              ? cute::min(seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
+              ? cute::min(seq_len_kv, full_tile_offset + seq_coord + q_sg_span)
               : seq_len_kv;
       const int sg_k_block0 =
           LocalMask
@@ -300,7 +313,7 @@ class XeFMHAFwdKernel {
       const int sg_k_block_local_l_safe =
           LocalMask ? cute::ceil_div(
                           cute::max(
-                              seq_coord + q_sg_tile - 1 + full_tile_offset -
+                              seq_coord + q_sg_span - 1 + full_tile_offset -
                                   params.mainloop.local_left,
                               0),
                           get<1>(TileShapeQK{}))

@@ -70,6 +70,8 @@ struct chunk_prefill_args_t {
   bool is_causal = false;
   bool is_local = false;
   bool is_sink = false;
+  // GQA packing factor. 1 = no packing.
+  int pack_gqa = 1;
   // softmax_lse output (nullptr when not requested)
   float* softmax_lse = nullptr;
   int lse_stride = 0;  // stride along head dim (= total_seqlen_q)
@@ -130,6 +132,7 @@ struct KernelLauncher {
         args.head_size;
     auto head_size_vo = shape.head_size_vo = shape_init.head_size_vo =
         args.head_size;
+    shape.pack_gqa = shape_init.pack_gqa = args.pack_gqa;
 
     if constexpr (isVarLen) {
       batch = shape_init.batch = 1;
@@ -202,7 +205,8 @@ struct KernelLauncher {
          args.total_seqlen_k,
          args.window_size_left,
          args.window_size_right,
-         args.page_stride_elements},
+         args.page_stride_elements,
+         args.pack_gqa},
         {},
         hw_info};
 
