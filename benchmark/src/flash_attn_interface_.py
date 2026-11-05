@@ -27,12 +27,16 @@ def _as_int32_device_tensor(x, device: torch.device) -> torch.Tensor:
 
 
 def _kv_tile_from_block_size(block_size: int) -> int:
-    # Mirror of flash_api.cpp get_num_splits() / TileShapeQK<1>.
-    if block_size == 16:
-        return 16
+    # Mirror of paged_decode_utils.hpp::dispatch_by_page_size /
+    # flash_api.cpp get_num_splits() / TileShapeQK<1>. Keep in step with the
+    # copy in vllm_xpu_kernels/flash_attn_interface.py -- if this returns a
+    # wider tile than the kernel runs, build_decode_split_plan sizes the work
+    # list for too few tiles and part of the KV history is skipped.
+    if block_size > 0 and block_size % 64 == 0:
+        return 64
     if block_size == 32:
         return 32
-    return 64
+    return 16
 
 
 def _min_blocks_for_split(kv_tile: int) -> int:
