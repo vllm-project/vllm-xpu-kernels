@@ -358,6 +358,9 @@ std::vector<at::Tensor> mha_varlen_fwd(
     int num_heads_kv = k.size(2);
     int block_size = k.size(1);
 
+    // MLA Q16 needs no guard: default policies cap ShapeOut_V at 256, and
+    // split-V has ReduceK == 1, so neither needs the 128 KiB epilogue SLM.
+
     // Output shape uses V's head_dim (may differ from Q/K for MLA).
     // For fp8 query the output cannot be fp8; default to fp16 (matches the
     // compute dtype inferred by the Python wrapper for fp8 inputs).

@@ -217,8 +217,8 @@ def test_mla_decode_deepseek_v3(block_size, query_lens, kv_lens, num_heads_q):
 @pytest.mark.parametrize("path", ["seqused", "hostlens"])
 @pytest.mark.parametrize("use_graph", [False, True])
 @torch.inference_mode()
-def test_mla_decode_large_q_packed(num_heads_q, block_size, batch, dtype,
-                                  num_splits_kv, path, use_graph):
+def test_mla_decode_split_v(num_heads_q, block_size, batch, dtype,
+                            num_splits_kv, path, use_graph):
     """Cover Q8/Q16 dispatch, split reduction, and partial KV tiles."""
     if not torch.xpu.is_available():
         pytest.skip("XPU not available")

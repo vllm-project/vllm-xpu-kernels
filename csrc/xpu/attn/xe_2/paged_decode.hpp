@@ -45,7 +45,7 @@ using _576 = cute::Int<576>;
 
 // Only Xe2 implements the split-V score exchange.
 template <typename q_packed, typename head_dim, typename kv_tile>
-using decode_policy_xe2 = cute::conditional_t<
+using decode_policy_maybe_splitv = cute::conditional_t<
     cute::is_same_v<head_dim, _576> && cute::is_same_v<kv_tile, _64>,
     decode_policy_kv64_splitv<q_packed, head_dim>,
     decode_policy_qpacked_head<q_packed, head_dim, kv_tile>>;
@@ -62,8 +62,8 @@ using decode_policy_q16_h128_p64 = decode_policy_qpacked_head<_16, _128, _64>;
 using decode_policy_q16_h192_p64 = decode_policy_qpacked_head<_16, _192, _64>;
 using decode_policy_q16_h256_p64 = decode_policy_qpacked_head<_16, _256, _64>;
 using decode_policy_q16_h512_p64 = decode_policy_qpacked_head<_16, _512, _64>;
-using decode_policy_q8_h576_p64 = decode_policy_xe2<_8, _576, _64>;
-using decode_policy_q16_h576_p64 = decode_policy_xe2<_16, _576, _64>;
+using decode_policy_q8_h576_p64 = decode_policy_maybe_splitv<_8, _576, _64>;
+using decode_policy_q16_h576_p64 = decode_policy_maybe_splitv<_16, _576, _64>;
 
 using decode_policy_q8_h64_p128 = decode_policy_qpacked_head<_8, _64, _128>;
 using decode_policy_q8_h96_p128 = decode_policy_qpacked_head<_8, _96, _128>;
