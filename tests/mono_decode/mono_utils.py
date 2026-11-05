@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared helpers of the mono decode kernel tests: random decoder layers in the
 layouts mono_register_layer takes (Qwen3.5 / Qwen3.6 MoE 35B-A3B shapes, one
-TP2 rank), mailboxes and skip markers."""
+TP2 rank), mailboxes and skip markers. The 16-bit tensors take a dtype (fp16
+or bf16); the same seed gives the same values rounded to either."""
 
 import socket
 import time
@@ -48,9 +49,9 @@ def _fp8(shape, gen, device, std=1.0):
     return w.clamp_(-240.0, 240.0).to(torch.float8_e4m3fn).to(device)
 
 
-def _f16(shape, gen, device, std=1.0, mean=0.0):
+def _w16(shape, gen, device, std=1.0, mean=0.0, dtype=torch.float16):
     return (torch.randn(shape, generator=gen, dtype=torch.float32) * std +
-            mean).to(torch.float16).to(device)
+            mean).to(dtype).to(device)
 
 
 def _scale(k, device):
@@ -63,15 +64,16 @@ def _nk(n, k, gen, device):
     return _fp8((n, k), gen, device).t(), _scale(k, device)
 
 
-def common_tensors(gen, device, attn: bool) -> list:
+def common_tensors(gen, device, attn: bool, dtype=torch.float16) -> list:
     out_w, out_s = _nk(HID, NQ * HD if attn else NVH * DV, gen, device)
     sw13, sw13_s = _nk(2 * INTER, HID, gen, device)
     sw2, sw2_s = _nk(HID, INTER, gen, device)
+    w16 = lambda shape, std: _w16(shape, gen, device, std, dtype=dtype)
     return [
-        _f16((HID, ), gen, device, 0.1),  # input_layernorm (Gemma: 1 + w)
-        _f16((HID, ), gen, device, 0.1),  # post_attention_layernorm
-        _f16((NE, HID), gen, device, 0.05),  # router
-        _f16((1, HID), gen, device, 0.05),  # shared_expert_gate
+        w16((HID, ), 0.1),  # input_layernorm (Gemma: 1 + w)
+        w16((HID, ), 0.1),  # post_attention_layernorm
+        w16((NE, HID), 0.05),  # router
+        w16((1, HID), 0.05),  # shared_expert_gate
         out_w,
         out_s,
         _fp8((NE, HID, 2 * INTER), gen, device),  # w13 (XPU MoE layout)
@@ -86,43 +88,51 @@ def common_tensors(gen, device, attn: bool) -> list:
     ]
 
 
-def gdn_tensors(gen, device, slots: int, conv_rows: int = 3) -> list:
+def gdn_tensors(gen,
+                device,
+                slots: int,
+                conv_rows: int = 3,
+                dtype=torch.float16) -> list:
     qkvz, qkvz_s = _nk(QKVZ, HID, gen, device)
     ba, ba_s = _nk(2 * NVH, HID, gen, device)
     a_log = torch.log(torch.rand(NVH, generator=gen) * 15 + 1).to(device)
-    conv_state = _f16((slots, conv_rows, CONVD), gen, device, 0.5)
+    conv_state = _w16((slots, conv_rows, CONVD), gen, device, 0.5, dtype=dtype)
     ssm_state = (torch.randn((slots, NVH, DV, DK), generator=gen) *
                  0.05).to(device)
-    return common_tensors(gen, device, False) + [
+    return common_tensors(gen, device, False, dtype) + [
         qkvz,
         qkvz_s,
         ba,
         ba_s,
-        _f16((CONVD, 1, 4), gen, device, 0.3),  # conv1d
+        _w16((CONVD, 1, 4), gen, device, 0.3, dtype=dtype),  # conv1d
         a_log,
-        _f16((NVH, ), gen, device, 1.0),  # dt_bias
-        _f16((DV, ), gen, device, 0.1, 1.0),  # gated norm weight
+        _w16((NVH, ), gen, device, 1.0, dtype=dtype),  # dt_bias
+        _w16((DV, ), gen, device, 0.1, 1.0, dtype=dtype),  # gated norm weight
         conv_state,
         ssm_state,
     ]
 
 
-def attn_tensors(gen, device, blocks: int, block_size: int = 64) -> list:
+def attn_tensors(gen,
+                 device,
+                 blocks: int,
+                 block_size: int = 64,
+                 dtype=torch.float16) -> list:
     qkv, qkv_s = _nk(QKV_ROWS, HID, gen, device)
-    kv = _f16((blocks, 1, block_size, 2 * HD), gen, device, 1.0)
-    return common_tensors(gen, device, True) + [
+    kv = _w16((blocks, 1, block_size, 2 * HD), gen, device, 1.0, dtype=dtype)
+    return common_tensors(gen, device, True, dtype) + [
         qkv,
         qkv_s,
-        _f16((HD, ), gen, device, 0.1),  # q_norm (Gemma: 1 + w)
-        _f16((HD, ), gen, device, 0.1),  # k_norm
+        _w16((HD, ), gen, device, 0.1, dtype=dtype),  # q_norm (Gemma: 1 + w)
+        _w16((HD, ), gen, device, 0.1, dtype=dtype),  # k_norm
         kv,
     ]
 
 
-def rows(n, gen, device):
-    """n hidden rows and n residual rows (fp16)."""
-    return (_f16((n, HID), gen, device, 1.0), _f16((n, HID), gen, device,
-                                                    1.0))
+def rows(n, gen, device, dtype=torch.float16):
+    """n hidden rows and n residual rows."""
+    return (_w16((n, HID), gen, device, 1.0, dtype=dtype),
+            _w16((n, HID), gen, device, 1.0, dtype=dtype))
 
 
 def cos(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -167,15 +177,24 @@ def exchange_fd(rank, path, fd):
     return fds[0]
 
 
-def layer_tensors(attn, shard_seed, rank_dev, nb, tokens, blocks):
+def layer_tensors(attn,
+                  shard_seed,
+                  rank_dev,
+                  nb,
+                  tokens,
+                  blocks,
+                  dtype=torch.float16):
     """Replicated tensors from seed 0, sharded ones (and caches) from
     shard_seed."""
     def build(seed):
         gen = torch.Generator().manual_seed(seed)
         if attn:
-            return attn_tensors(gen, rank_dev, blocks)
-        return gdn_tensors(gen, rank_dev, slots=nb * tokens,
-                           conv_rows=tokens + 2)
+            return attn_tensors(gen, rank_dev, blocks, dtype=dtype)
+        return gdn_tensors(gen,
+                           rank_dev,
+                           slots=nb * tokens,
+                           conv_rows=tokens + 2,
+                           dtype=dtype)
     rep, own = build(0), build(shard_seed)
     keep = _REPLICATED_ATTN if attn else _REPLICATED_GDN
     return [rep[i] if i in keep else own[i] for i in range(len(rep))]

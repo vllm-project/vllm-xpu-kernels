@@ -7,7 +7,8 @@ the mailboxes shared through Level Zero IPC as in vLLM:
   all-reduces add the two partial sums; a rank reading its own partial instead
   of the peer's would not be symmetric);
 * MTP prologue: the gathered fc output against a torch reference;
-* vocabulary-parallel candidates (top-k and greedy) against the full logits.
+* vocabulary-parallel candidates (top-k and greedy) against the full logits;
+* in fp16 and in bf16 (the bf16 cases carry a _bf16 suffix).
 """
 
 import io
@@ -28,7 +29,7 @@ def _worker(rank, path, conn):
     ops = torch.ops._xpu_C
     torch.xpu.set_device(rank)
     dev = f"xpu:{rank}"
-    nl = 16
+    nl = 32
     h = ops.mono_ipc_create(nl * ops.mono_mbox_bytes() +
                             ops.mono_lmhead_mbox_bytes())
     info = ops.mono_ipc_export(h)
@@ -41,15 +42,15 @@ def _worker(rank, path, conn):
     slot = iter(range(nl))
     out = {}
 
-    def layer_case(name, attn, nb, tokens=1, swap=False):
+    def layer_case(name, attn, nb, tokens=1, swap=False, dtype=torch.float16):
         i = next(slot)
         seed = (2 if rank == 0 else 1) if swap else (1 if rank == 0 else 2)
         bt = torch.arange(nb * 4, dtype=torch.int32,
                           device=dev).view(nb, 4)
-        t = layer_tensors(attn, seed, dev, nb, tokens, nb * 4)
+        t = layer_tensors(attn, seed, dev, nb, tokens, nb * 4, dtype)
         ops.mono_register_layer(100 + i, attn, own + i * mb, peer + i * mb, t)
         gen = torch.Generator().manual_seed(5)
-        hs, rs = rows(nb * tokens, gen, dev)
+        hs, rs = rows(nb * tokens, gen, dev, dtype)
         ho, ro = torch.empty_like(hs), torch.empty_like(rs)
         n = nb * tokens
         if attn:
@@ -90,39 +91,48 @@ def _worker(rank, path, conn):
         layer_case(f"attn1_{s}", True, 1, swap=swap)
         layer_case(f"attn4_{s}", True, 4, swap=swap)
         layer_case(f"attn_spec_{s}", True, 1, tokens=8, swap=swap)
+        bf = torch.bfloat16
+        layer_case(f"gdn1_bf16_{s}", False, 1, swap=swap, dtype=bf)
+        layer_case(f"gdn_spec_bf16_{s}", False, 2, tokens=4, swap=swap,
+                   dtype=bf)
+        layer_case(f"attn4_bf16_{s}", True, 4, swap=swap, dtype=bf)
+        layer_case(f"attn_spec_bf16_{s}", True, 1, tokens=8, swap=swap,
+                   dtype=bf)
 
     # MTP prologue: rank r holds fc rows r * 1024 ..
-    gen = torch.Generator().manual_seed(9)
-    ne = (torch.randn(HID, generator=gen) * 0.1).half()
-    nh = (torch.randn(HID, generator=gen) * 0.1).half()
-    fc = (torch.randn((HID, 2 * HID), generator=gen)).clamp(-240, 240).to(
-        torch.float8_e4m3fn)
-    fsc = torch.tensor([0.002])
-    i = next(slot)
-    ops.mono_register_mtp(
-        200, own + i * mb, peer + i * mb,
-        [ne.to(dev), nh.to(dev),
-         fc[rank * 1024:(rank + 1) * 1024].to(dev).t(), fsc.to(dev)], rank)
-    x = (torch.randn((3, 2 * HID), generator=gen) * 2).half()
-    y = torch.empty((3, HID), dtype=torch.float16, device=dev)
-    assert ops.mono_mtp_prologue(200, x.to(dev), y)
-    torch.xpu.synchronize()
-    out["mtp"] = (y.cpu(), ne, nh, fc, fsc, x)
+    for dtype, sfx in ((torch.float16, ""), (torch.bfloat16, "_bf16")):
+        gen = torch.Generator().manual_seed(9)
+        ne = (torch.randn(HID, generator=gen) * 0.1).to(dtype)
+        nh = (torch.randn(HID, generator=gen) * 0.1).to(dtype)
+        fc = (torch.randn((HID, 2 * HID), generator=gen)).clamp(-240, 240).to(
+            torch.float8_e4m3fn)
+        fsc = torch.tensor([0.002])
+        i = next(slot)
+        ops.mono_register_mtp(
+            200 + i, own + i * mb, peer + i * mb,
+            [ne.to(dev), nh.to(dev),
+             fc[rank * 1024:(rank + 1) * 1024].to(dev).t(), fsc.to(dev)], rank)
+        x = (torch.randn((3, 2 * HID), generator=gen) * 2).to(dtype)
+        y = torch.empty((3, HID), dtype=dtype, device=dev)
+        assert ops.mono_mtp_prologue(200 + i, x.to(dev), y)
+        torch.xpu.synchronize()
+        out["mtp" + sfx] = (y.cpu(), ne, nh, fc, fsc, x)
 
     # candidates / argmax of distinct shards
     lm = own + nl * mb
     lmp = peer + nl * mb
-    gen = torch.Generator().manual_seed(11 + rank)
-    lg = (torch.randn((4, VS), generator=gen) * 3).half().to(dev)
-    vals = torch.empty((4, 128), dtype=torch.float32, device=dev)
-    idx = torch.empty((4, 128), dtype=torch.int32, device=dev)
-    ops.mono_shard_topk(vals, idx, lg, 20, rank, lm, lmp)
-    v1 = torch.empty((4, 2), dtype=torch.float32, device=dev)
-    i1 = torch.empty((4, 2), dtype=torch.int32, device=dev)
-    ops.mono_shard_topk(v1, i1, lg, 1, rank, lm, lmp)  # greedy (k = 1)
-    torch.xpu.synchronize()
-    tok = i1.gather(1, v1.argmax(dim=1, keepdim=True)).squeeze(1).long()
-    out["topk"] = (vals.cpu(), idx.cpu(), tok.cpu(), lg.cpu())
+    for dtype, sfx in ((torch.float16, ""), (torch.bfloat16, "_bf16")):
+        gen = torch.Generator().manual_seed(11 + rank)
+        lg = (torch.randn((4, VS), generator=gen) * 3).to(dtype).to(dev)
+        vals = torch.empty((4, 128), dtype=torch.float32, device=dev)
+        idx = torch.empty((4, 128), dtype=torch.int32, device=dev)
+        ops.mono_shard_topk(vals, idx, lg, 20, rank, lm, lmp)
+        v1 = torch.empty((4, 2), dtype=torch.float32, device=dev)
+        i1 = torch.empty((4, 2), dtype=torch.int32, device=dev)
+        ops.mono_shard_topk(v1, i1, lg, 1, rank, lm, lmp)  # greedy (k = 1)
+        torch.xpu.synchronize()
+        tok = i1.gather(1, v1.argmax(dim=1, keepdim=True)).squeeze(1).long()
+        out["topk" + sfx] = (vals.cpu(), idx.cpu(), tok.cpu(), lg.cpu())
 
     # fail-stop: no wait gave up so far; then rank 1's tags skip ahead, so
     # neither rank ever sees the words it waits for: both give up (about 12 s),
@@ -176,7 +186,10 @@ def pair():
     return _run_pair()
 
 
-CASES = ["gdn1", "gdn8", "gdn_spec", "attn1", "attn4", "attn_spec"]
+CASES = [
+    "gdn1", "gdn8", "gdn_spec", "attn1", "attn4", "attn_spec", "gdn1_bf16",
+    "gdn_spec_bf16", "attn4_bf16", "attn_spec_bf16"
+]
 
 
 @requires_two_cards
@@ -198,28 +211,31 @@ def test_layer_all_reduce_symmetric(pair, case):
 
 
 @requires_two_cards
-def test_mtp_prologue_gather(pair):
+@pytest.mark.parametrize("sfx", ["", "_bf16"])
+def test_mtp_prologue_gather(pair, sfx):
     r0, r1 = pair
-    y0, ne, nh, fc, fsc, x = r0["mtp"]
-    assert torch.equal(y0, r1["mtp"][0])
+    y0, ne, nh, fc, fsc, x = r0["mtp" + sfx]
+    assert torch.equal(y0, r1["mtp" + sfx][0])
+    assert y0.dtype == x.dtype
 
     def rms(v, w):
         v = v.float()
         return (v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6) *
-                (1 + w.float())).half().float()
+                (1 + w.float())).to(x.dtype).float()
 
     z = torch.cat([rms(x[:, :HID], ne), rms(x[:, HID:], nh)], dim=-1)
-    ref = (z @ fc.float().t() * fsc).half()
+    ref = (z @ fc.float().t() * fsc).to(x.dtype)
     c = torch.nn.functional.cosine_similarity(y0.float().flatten(),
                                               ref.float().flatten(), dim=0)
     assert c > 0.99999
 
 
 @requires_two_cards
-def test_candidates_and_greedy(pair):
+@pytest.mark.parametrize("sfx", ["", "_bf16"])
+def test_candidates_and_greedy(pair, sfx):
     r0, r1 = pair
-    v0, i0, t0, lg0 = r0["topk"]
-    v1, i1, t1, lg1 = r1["topk"]
+    v0, i0, t0, lg0 = r0["topk" + sfx]
+    v1, i1, t1, lg1 = r1["topk" + sfx]
     assert torch.equal(v0, v1) and torch.equal(i0, i1) and torch.equal(t0, t1)
     full = torch.cat([lg0, lg1], dim=1).float()
     assert torch.equal(t0, full.argmax(dim=-1))

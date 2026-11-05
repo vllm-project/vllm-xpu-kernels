@@ -5,7 +5,7 @@
 // (the embedding is looked up by the caller), with the fc a column-parallel
 // fp8 linear whose two halves are gathered through the P2P mailbox.
 //
-// Ptrs fields (the decoder-layer struct, reused):
+// Ptrs fields (the decoder-layer struct, reused; 16-bit data in the dtype DT):
 // - hs_in [NB][4096]: [e; h]; hid_out [NB][2048]: x.
 // - in_norm_w / post_norm_w: pre_fc_norm_embedding / pre_fc_norm_hidden
 //   (Gemma RMSNorm weights); qkv_w / qkv_s: fc [1024][4096] fp8 + scale.
@@ -23,7 +23,7 @@ static_assert(
 constexpr int MTP_SLM =
     NBMAX * MTP_FC_IN * 2 + 4096;  // z rows (fp16) + reductions
 
-template <int NB>
+template <int NB, typename DT>
 inline void mtp_prologue(
     sycl::nd_item<1> it,
     uint8_t* slm,
@@ -50,12 +50,16 @@ inline void mtp_prologue(
     float se = 0.f, sh = 0.f;
     if (gid < NB * HID / 2) {
       const int b = gid / (HID / 2), w = gid % (HID / 2);
-      const h2 ev =
-          *reinterpret_cast<const h2*>(P.hs_in + b * MTP_FC_IN + 2 * w);
-      const h2 hv =
-          *reinterpret_cast<const h2*>(P.hs_in + b * MTP_FC_IN + HID + 2 * w);
-      se = (float)ev[0] * (float)ev[0] + (float)ev[1] * (float)ev[1];
-      sh = (float)hv[0] * (float)hv[0] + (float)hv[1] * (float)hv[1];
+      const sycl::vec<uint16_t, 2> ev =
+          *reinterpret_cast<const sycl::vec<uint16_t, 2>*>(
+              P.hs_in + b * MTP_FC_IN + 2 * w);
+      const sycl::vec<uint16_t, 2> hv =
+          *reinterpret_cast<const sycl::vec<uint16_t, 2>*>(
+              P.hs_in + b * MTP_FC_IN + HID + 2 * w);
+      const float e0 = f32<DT>(ev[0]), e1 = f32<DT>(ev[1]);
+      const float h0 = f32<DT>(hv[0]), h1 = f32<DT>(hv[1]);
+      se = e0 * e0 + e1 * e1;
+      sh = h0 * h0 + h1 * h1;
     }
     se = sycl::reduce_over_group(sg, se, sycl::plus<float>());
     sh = sycl::reduce_over_group(sg, sh, sycl::plus<float>());
@@ -74,8 +78,8 @@ inline void mtp_prologue(
   }
   signal(it, S.cnt + C_A * 16);
 
-  // ---- norms of every row -> z = [norm_e(e); norm_h(h)] (fp16, natural order)
-  // in SLM
+  // ---- norms of every row -> z = [norm_e(e); norm_h(h)] (DT values in fp16,
+  // natural order) in SLM
   wait_for(it, S.cnt + C_A * 16, NWG * call);
   if (wg == 0 && lid == 0) {  // every WG has read the epoch and the mailbox tag
     cnt_ref(S.cnt[EPOCH]).store(call);
@@ -90,11 +94,12 @@ inline void mtp_prologue(
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const int k = lid * 4 + i;
-      z[b * MTP_FC_IN + k] = (half)((float)P.hs_in[b * MTP_FC_IN + k] * re *
-                                    (1.f + (float)P.in_norm_w[k]));
-      z[b * MTP_FC_IN + HID + k] =
-          (half)((float)P.hs_in[b * MTP_FC_IN + HID + k] * rh *
-                 (1.f + (float)P.post_norm_w[k]));
+      z[b * MTP_FC_IN + k] = toh<DT>(
+          ld16<DT>(P.hs_in, b * MTP_FC_IN + k) * re *
+          (1.f + ld16<DT>(P.in_norm_w, k)));
+      z[b * MTP_FC_IN + HID + k] = toh<DT>(
+          ld16<DT>(P.hs_in, b * MTP_FC_IN + HID + k) * rh *
+          (1.f + ld16<DT>(P.post_norm_w, k)));
     }
   }
   wg_bar(grp);
@@ -124,13 +129,13 @@ inline void mtp_prologue(
     }
   }
   const float sc = 256.f * P.qkv_s[0];
-  half* yo = reinterpret_cast<half*>(
-      red);  // [NB][32] this WG's outputs (reuses the reduction SLM)
+  e16* yo = reinterpret_cast<e16*>(
+      red);  // [NB][32] this WG's outputs, DT (reuses the reduction SLM)
   wg_bar(grp);
 #pragma unroll
   for (int b = 0; b < NB; ++b) {
     const float v = sycl::reduce_over_group(sg, acc[b], sycl::plus<float>());
-    if (lane == 0) yo[b * NSG + s] = (half)(v * sc);
+    if (lane == 0) st16<DT>(yo, b * NSG + s, v * sc);
   }
   wg_bar(grp);
 
@@ -138,21 +143,21 @@ inline void mtp_prologue(
   // global columns
   if (lid < NB * NSG / 2) {
     const int b = lid / (NSG / 2), p = lid % (NSG / 2);
-    const h2 mine(yo[b * NSG + 2 * p], yo[b * NSG + 2 * p + 1]);
+    const uint32_t mine =
+        pack16(yo[b * NSG + 2 * p].u, yo[b * NSG + 2 * p + 1].u);
     const size_t word =
         MTP_MB_FC + (size_t)b * (MTP_FC_OUT / 2) + wg * (NSG / 2) + p;
-    mb_ref(S.peer[word]).store(mb_word(pack_h2(mine[0], mine[1]), mtag));
+    mb_ref(S.peer[word]).store(mb_word(mine, mtag));
     const int col = wg * NSG + 2 * p;
-    *reinterpret_cast<h2*>(P.hid_out + b * HID + rank * MTP_FC_OUT + col) =
-        mine;
+    *reinterpret_cast<uint32_t*>(
+        P.hid_out + b * HID + rank * MTP_FC_OUT + col) = mine;
     const uint64_t pw = mb_wait(S.mbox + word, mtag, S.cnt);
-    *reinterpret_cast<h2*>(
-        P.hid_out + b * HID + (1 - rank) * MTP_FC_OUT + col) =
-        sycl::bit_cast<h2>(mb_val(pw));
+    *reinterpret_cast<uint32_t*>(
+        P.hid_out + b * HID + (1 - rank) * MTP_FC_OUT + col) = mb_val(pw);
   }
 }
 
-template <int NB>
+template <int NB, typename DT>
 sycl::event
 launch_mtp_prologue(sycl::queue& q, const Ptrs& P, const Scratch& S, int rank) {
   return q.submit([&](sycl::handler& h) {
@@ -162,7 +167,7 @@ launch_mtp_prologue(sycl::queue& q, const Ptrs& P, const Scratch& S, int rank) {
         sycl::nd_range<1>(NWG * WGS, WGS),
         props,
         [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(16)]] {
-          mtp_prologue<NB>(
+          mtp_prologue<NB, DT>(
               it,
               slm.get_multi_ptr<sycl::access::decorated::no>().get(),
               P,
@@ -170,6 +175,28 @@ launch_mtp_prologue(sycl::queue& q, const Ptrs& P, const Scratch& S, int rank) {
               rank);
         });
   });
+}
+
+// one dtype's launcher (mono_mtp[_bf16]_xe2): false for an unsupported row
+// count (nothing launched)
+template <typename DT>
+bool launch_mtp(
+    sycl::queue& q, int nb, const Ptrs& P, const Scratch& S, int rank) {
+  if (nb == 1)
+    launch_mtp_prologue<1, DT>(q, P, S, rank);
+  else if (nb == 2)
+    launch_mtp_prologue<2, DT>(q, P, S, rank);
+  else if (nb == 3)
+    launch_mtp_prologue<3, DT>(q, P, S, rank);
+  else if (nb == 4)
+    launch_mtp_prologue<4, DT>(q, P, S, rank);
+  else if (nb == 6)
+    launch_mtp_prologue<6, DT>(q, P, S, rank);
+  else if (nb == 8)
+    launch_mtp_prologue<8, DT>(q, P, S, rank);
+  else
+    return false;
+  return true;
 }
 
 }  // namespace mono_decode

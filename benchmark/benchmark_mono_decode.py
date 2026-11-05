@@ -8,9 +8,11 @@ mailboxes through Level Zero IPC as vLLM does. Each case registers one
 GatedDeltaNet and one full-attention layer (Qwen3.5 / 3.6 35B-A3B shapes, one
 TP2 rank's shards, random weights) and times back-to-back launches with XPU
 events on rank 0: decode steps of 1, 2, 4 and 8 rows and verify steps (rows x
-tokens), at the given attention context.
+tokens), at the given attention context, with fp16 or bf16 activations and
+caches.
 
 Usage: python benchmark/benchmark_mono_decode.py [--iters N] [--context T]
+           [--dtype float16|bfloat16]
 """
 
 # isort: off
@@ -58,14 +60,16 @@ def _worker(rank, path, conn, args):
     nblk = (args.context + 64 + BLOCK - 1) // BLOCK
     results = []
     lid = 0
+    dtype = getattr(torch, args.dtype)
     for nb, tokens in cases:
         n = nb * tokens
         for attn in (False, True):
-            t = layer_tensors(attn, 1 + rank, dev, nb, tokens, nb * nblk)
+            t = layer_tensors(attn, 1 + rank, dev, nb, tokens, nb * nblk,
+                              dtype)
             ops.mono_register_layer(lid, attn, own + lid * mb,
                                     peer + lid * mb, t)
             gen = torch.Generator().manual_seed(5)
-            hs, rs = rows(n, gen, dev)
+            hs, rs = rows(n, gen, dev, dtype)
             ho, ro = torch.empty_like(hs), torch.empty_like(rs)
             ctx = args.context
             if attn:
@@ -111,6 +115,10 @@ def main():
     parser.add_argument("--iters", type=int, default=500)
     parser.add_argument("--context", type=int, default=1024,
                         help="cached tokens of each request (attention)")
+    parser.add_argument("--dtype",
+                        choices=["float16", "bfloat16"],
+                        default="float16",
+                        help="activations, KV cache and conv state")
     args = parser.parse_args()
     if args.iters <= 0 or args.context < 0:
         parser.error("--iters must be positive, --context non-negative")
@@ -133,8 +141,8 @@ def main():
     for p in procs:
         p.join()
     assert health0 == [0, 0] and health1 == [0, 0], (health0, health1)
-    print(f"context {args.context}, {args.iters} launches per case "
-          "(device time per layer, rank 0)")
+    print(f"context {args.context}, {args.dtype}, {args.iters} launches per "
+          "case (device time per layer, rank 0)")
     print(f"{'requests':>8} {'tokens':>6} {'layer':>10} {'us':>8}")
     for nb, tokens, kind, us in res:
         print(f"{nb:>8} {tokens:>6} {kind:>10} {us:>8.1f}")

@@ -18,6 +18,7 @@
 // k = 1 (greedy) has its own kernel: the slice maximum is a work-group
 // reduction.
 #include <sycl/sycl.hpp>
+#include <sycl/ext/oneapi/bfloat16.hpp>
 #include <sycl/ext/oneapi/experimental/clock.hpp>
 
 #include <c10/xpu/XPUStream.h>
@@ -97,7 +98,7 @@ constexpr int NWR =
     4;  // work-groups per row (more: thinner slices, weaker thresholds, slower)
 
 struct Args {
-  const sycl::half* lg;  // [B][ld] logits of this rank's shard
+  const uint16_t* lg;  // [B][ld] logits of this rank's shard (fp16 or bf16)
   int vs, ld, k, rank,
       lo;          // lo: output row stride (>= 2k; [2k, lo) = -inf / 0)
   uint64_t* mine;  // own mailbox: [2 slots][BMAX][KMAX][2] words written by the
@@ -129,7 +130,7 @@ inline void top_of_list(
   }
 }
 
-template <bool K1>
+template <bool K1, typename DT>
 void shard_topk(sycl::queue& q, const Args& a, int rows) {
   const int nw = NWR;  // work-groups per row
   q.submit([&](sycl::handler& h) {
@@ -159,18 +160,18 @@ void shard_topk(sycl::queue& q, const Args& a, int rows) {
               u32_ref(a.tag[0]).store(tag);
             }
           }
-          const sycl::half* lg = a.lg + (size_t)row * a.ld;
+          const uint16_t* lg = a.lg + (size_t)row * a.ld;
           // slice of 8-logit vectors (vs and the slice bounds are multiples of
           // 8)
           const int nv = a.vs / 8, per = (nv + nw - 1) / nw;
           const int v0 = w * per, v1 = sycl::min(nv, v0 + per);
           auto keys8 = [&](int v, uint64_t (&kk)[8]) {
-            const sycl::vec<sycl::half, 8> x =
-                *reinterpret_cast<const sycl::vec<sycl::half, 8>*>(
+            const sycl::vec<uint16_t, 8> x =
+                *reinterpret_cast<const sycl::vec<uint16_t, 8>*>(
                     lg + (size_t)v * 8);
 #pragma unroll
             for (int e = 0; e < 8; ++e)
-              kk[e] = make_key((float)x[e], v * 8 + e);
+              kk[e] = make_key((float)sycl::bit_cast<DT>(x[e]), v * 8 + e);
           };
           // 1. the k largest keys of the slice: tau = the k-th largest
           // work-item maximum
@@ -349,10 +350,11 @@ namespace {
   using namespace ::mono_decode;
   const int B = (int)logits.size(0);
   TORCH_CHECK(
-      logits.scalar_type() == at::kHalf && logits.dim() == 2 &&
-          logits.stride(1) == 1,
+      (logits.scalar_type() == at::kHalf ||
+       logits.scalar_type() == at::kBFloat16) &&
+          logits.dim() == 2 && logits.stride(1) == 1,
       op,
-      ": logits must be [B, V] fp16 with unit column stride");
+      ": logits must be [B, V] fp16 or bf16 with unit column stride");
   TORCH_CHECK(
       logits.size(1) % 8 == 0 && logits.stride(0) % 8 == 0 &&
           reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 == 0,
@@ -370,7 +372,7 @@ namespace {
     part = sycl::malloc_device<uint64_t>((size_t)BMAX * NW * KMAX, q);
   }
   Args a{};
-  a.lg = reinterpret_cast<const sycl::half*>(logits.data_ptr());
+  a.lg = reinterpret_cast<const uint16_t*>(logits.data_ptr());
   a.vs = (int)logits.size(1);
   a.ld = (int)logits.stride(0);
   a.rank = (int)rank;
@@ -407,10 +409,16 @@ void mono_shard_topk(
   a.ov = vals.data_ptr<float>();
   a.oi = idx.data_ptr<int32_t>();
   auto& q = c10::xpu::getCurrentXPUStream().queue();
-  if (k == 1)
-    shard_topk<true>(q, a, B);
+  using bf16 = sycl::ext::oneapi::bfloat16;
+  const bool bf = logits.scalar_type() == at::kBFloat16;
+  if (k == 1 && bf)
+    shard_topk<true, bf16>(q, a, B);
+  else if (k == 1)
+    shard_topk<true, sycl::half>(q, a, B);
+  else if (bf)
+    shard_topk<false, bf16>(q, a, B);
   else
-    shard_topk<false>(q, a, B);
+    shard_topk<false, sycl::half>(q, a, B);
 }
 
 }  // namespace vllm::mono_decode::xe2

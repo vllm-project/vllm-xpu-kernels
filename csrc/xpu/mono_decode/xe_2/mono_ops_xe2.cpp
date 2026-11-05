@@ -21,44 +21,33 @@
 #include <unordered_map>
 #include <vector>
 
+#include "mono_layers_s.hpp"
 #include "mono_mtp.hpp"
 #include "mono_decode_xe2.h"
 
+// the kernels are compiled in their own translation units (one per layer kind
+// and dtype)
 namespace mono_decode {
-void launch_gdn(sycl::queue& q, const Ptrs& P, const Scratch& S);
-void launch_attn(sycl::queue& q, const Ptrs& P, const Scratch& S);
-void launch_gdn_b(
-    sycl::queue& q,
-    int nb,
-    const Ptrs& P,
-    const Scratch& S,
-    const ScratchB& SB);
-void launch_attn_b(
-    sycl::queue& q,
-    int nb,
-    const Ptrs& P,
-    const Scratch& S,
-    const ScratchB& SB);
-bool launch_gdn_s(
-    sycl::queue& q,
-    int nb,
-    int t,
-    const Ptrs& P,
-    const Scratch& S,
-    const ScratchB& SB);
-bool launch_attn_s(
-    sycl::queue& q,
-    int nb,
-    int t,
-    const Ptrs& P,
-    const Scratch& S,
-    const ScratchB& SB);
-bool launch_mtp(
-    sycl::queue& q, int nb, const Ptrs& P, const Scratch& S, int rank);
+#define MONO_EXTERN_LAUNCHERS(DT)                                            \
+  extern template void launch_gdn<DT>(                                       \
+      sycl::queue&, int, const Ptrs&, const Scratch&, const ScratchB&);      \
+  extern template void launch_attn<DT>(                                      \
+      sycl::queue&, int, const Ptrs&, const Scratch&, const ScratchB&);      \
+  extern template bool launch_gdn_spec<DT>(                                  \
+      sycl::queue&, int, int, const Ptrs&, const Scratch&, const ScratchB&); \
+  extern template bool launch_attn_spec<DT>(                                 \
+      sycl::queue&, int, int, const Ptrs&, const Scratch&, const ScratchB&); \
+  extern template bool launch_mtp<DT>(                                       \
+      sycl::queue&, int, const Ptrs&, const Scratch&, int);
+MONO_EXTERN_LAUNCHERS(half)
+MONO_EXTERN_LAUNCHERS(bf16)
+#undef MONO_EXTERN_LAUNCHERS
 }  // namespace mono_decode
 
 namespace vllm::mono_decode::xe2 {
 
+using ::mono_decode::bf16;
+using ::mono_decode::e16;
 using ::mono_decode::Ptrs;
 using ::mono_decode::Scratch;
 using ::mono_decode::ScratchB;
@@ -266,7 +255,8 @@ int64_t mono_mbox_bytes() {
 namespace {
 struct Layer {
   bool attn = false;
-  bool mtp = false;  // MTP drafter prologue (mono_register_mtp)
+  bool mtp = false;                  // MTP drafter prologue (mono_register_mtp)
+  at::ScalarType dtype = at::kHalf;  // fp16 or bf16: every 16-bit tensor
   int rank = 0;
   Ptrs P{};
   Scratch S{};
@@ -324,18 +314,36 @@ const float* scale1(const torch::Tensor& s, const char* name) {
       " must be one fp32 (per-tensor)");
   return s.data_ptr<float>();
 }
-const sycl::half* f16(const torch::Tensor& t, int64_t numel, const char* name) {
+// the layer's dtype, from its first 16-bit tensor
+at::ScalarType dtype16(const torch::Tensor& t, const char* name) {
   TORCH_CHECK(
-      t.scalar_type() == at::kHalf && t.numel() == numel && t.is_contiguous(),
+      t.scalar_type() == at::kHalf || t.scalar_type() == at::kBFloat16,
       "mono: ",
       name,
-      " must be contiguous fp16 with ",
+      " must be fp16 or bf16, got ",
+      t.scalar_type());
+  return t.scalar_type();
+}
+// a contiguous 16-bit tensor in the layer's dtype: activations, norm / router /
+// conv weights all share it (no mixed fp16 / bf16 layers)
+e16* t16(
+    const torch::Tensor& t,
+    int64_t numel,
+    const char* name,
+    at::ScalarType dt) {
+  TORCH_CHECK(
+      t.scalar_type() == dt && t.numel() == numel && t.is_contiguous(),
+      "mono: ",
+      name,
+      " must be contiguous ",
+      dt,
+      " (the layer's dtype) with ",
       numel,
       " elements, got ",
       t.scalar_type(),
       " ",
       t.sizes());
-  return reinterpret_cast<const sycl::half*>(t.data_ptr());
+  return reinterpret_cast<e16*>(t.data_ptr());
 }
 }  // namespace
 
@@ -353,11 +361,12 @@ void mono_register_layer(
   Layer L;
   L.attn = attn;
   L.device = t[0].get_device();
+  const at::ScalarType dt = L.dtype = dtype16(t[0], "input_norm_w");
   Ptrs& P = L.P;
-  P.in_norm_w = f16(t[0], HID, "input_norm_w");
-  P.post_norm_w = f16(t[1], HID, "post_norm_w");
-  P.router_w = f16(t[2], (int64_t)NE * HID, "router_w");
-  P.sgate_w = f16(t[3], HID, "shared_gate_w");
+  P.in_norm_w = t16(t[0], HID, "input_norm_w", dt);
+  P.post_norm_w = t16(t[1], HID, "post_norm_w", dt);
+  P.router_w = t16(t[2], (int64_t)NE * HID, "router_w", dt);
+  P.sgate_w = t16(t[3], HID, "shared_gate_w", dt);
   P.out_w = w_nk(t[4], HID, attn ? NQ * HD : VD, "out_w");
   P.out_s = scale1(t[5], "out_scale");
   TORCH_CHECK(
@@ -386,19 +395,25 @@ void mono_register_layer(
   if (attn) {
     P.qkv_w = w_nk(t[14], QKV_ROWS, HID, "qkv_w");
     P.qkv_s = scale1(t[15], "qkv_scale");
-    P.q_norm_w = f16(t[16], HD, "q_norm_w");
-    P.k_norm_w = f16(t[17], HD, "k_norm_w");
+    P.q_norm_w = t16(t[16], HD, "q_norm_w", dt);
+    P.k_norm_w = t16(t[17], HD, "k_norm_w", dt);
     const torch::Tensor& kv = t[18];
     TORCH_CHECK(
-        kv.scalar_type() == at::kHalf && kv.dim() == 4 && kv.size(1) == 1 &&
-            kv.size(3) == 2 * HD && kv.stride(3) == 1 &&
-            kv.stride(2) == 2 * HD && kv.size(2) % 64 == 0,
-        "mono: kv_cache must be [blocks, 1, bs (multiple of 64), 512] fp16 "
-        "rows, got ",
+        kv.scalar_type() == dt,
+        "mono: kv_cache must have the layer's dtype ",
+        dt,
+        " (an fp16 / bf16 mix of activations and KV cache is not supported), "
+        "got ",
+        kv.scalar_type());
+    TORCH_CHECK(
+        kv.dim() == 4 && kv.size(1) == 1 && kv.size(3) == 2 * HD &&
+            kv.stride(3) == 1 && kv.stride(2) == 2 * HD && kv.size(2) % 64 == 0,
+        "mono: kv_cache must be [blocks, 1, bs (multiple of 64), 512] rows, "
+        "got ",
         kv.sizes(),
         " ",
         kv.strides());
-    P.kv = reinterpret_cast<sycl::half*>(kv.data_ptr());
+    P.kv = reinterpret_cast<e16*>(kv.data_ptr());
     P.blk_stride = kv.stride(0);
     P.bs = (int)kv.size(2);
   } else {
@@ -406,20 +421,22 @@ void mono_register_layer(
     P.qkvz_s = scale1(t[15], "qkvz_scale");
     P.ba_w = w_nk(t[16], 2 * NVH, HID, "ba_w");
     P.ba_s = scale1(t[17], "ba_scale");
-    P.conv_w = f16(t[18], (int64_t)CONVD * 4, "conv_w");
+    P.conv_w = t16(t[18], (int64_t)CONVD * 4, "conv_w", dt);
     TORCH_CHECK(
         t[19].scalar_type() == at::kFloat && t[19].numel() == NVH,
         "mono: A_log must be fp32 [16]");
     P.A_log = t[19].data_ptr<float>();
-    P.dt_bias = f16(t[20], NVH, "dt_bias");
-    P.gnorm_w = f16(t[21], DV, "norm_w");
+    P.dt_bias = t16(t[20], NVH, "dt_bias", dt);
+    P.gnorm_w = t16(t[21], DV, "norm_w", dt);
     const torch::Tensor& cs = t[22];
     const torch::Tensor& ss = t[23];
     TORCH_CHECK(
-        cs.scalar_type() == at::kHalf && cs.dim() == 3 && cs.size(1) >= 3 &&
+        cs.scalar_type() == dt && cs.dim() == 3 && cs.size(1) >= 3 &&
             cs.size(2) == CONVD && cs.stride(2) == 1 && cs.stride(1) == CONVD,
         "mono: conv state cache must be [slots, 3 (+ speculative tokens), "
-        "4096] fp16 (dim-first channels), got ",
+        "4096] in the layer's dtype (dim-first channels), got ",
+        cs.scalar_type(),
+        " ",
         cs.sizes(),
         " ",
         cs.strides());
@@ -431,7 +448,7 @@ void mono_register_layer(
         ss.sizes(),
         " ",
         ss.strides());
-    P.conv_cache = reinterpret_cast<sycl::half*>(cs.data_ptr());
+    P.conv_cache = reinterpret_cast<e16*>(cs.data_ptr());
     P.conv_stride = cs.stride(0);
     P.ssm_cache = ss.data_ptr<float>();
     P.ssm_stride = ss.stride(0);
@@ -492,10 +509,11 @@ void mono_decode_layer(
       nb,
       " rows (supported: 1, 2, 4, 8)");
   Ptrs P = L.P;
-  P.hs_in = f16(hidden, nb * HID, "hidden");
-  P.res_in = f16(residual, nb * HID, "residual");
-  P.hid_out = const_cast<sycl::half*>(f16(hid_out, nb * HID, "hid_out"));
-  P.res_out = const_cast<sycl::half*>(f16(res_out, nb * HID, "res_out"));
+  P.hs_in = t16(hidden, nb * HID, "hidden", L.dtype);
+  P.res_in = t16(residual, nb * HID, "residual", L.dtype);
+  P.hid_out = t16(hid_out, nb * HID, "hid_out", L.dtype);
+  P.res_out = t16(res_out, nb * HID, "res_out", L.dtype);
+  const bool bf = L.dtype == at::kBFloat16;
   sycl::queue& q = c10::xpu::getCurrentXPUStream().queue();
   if (L.attn) {
     TORCH_CHECK(
@@ -518,19 +536,19 @@ void mono_decode_layer(
     P.seq_lens = m1->data_ptr<int>();
     P.slot = m2->data_ptr<int64_t>();
     P.pos = positions.data_ptr<int64_t>();  // [T] or mrope [3, T]: row 0
-    if (nb == 1)
-      launch_attn(q, P, L.S);
+    if (bf)
+      launch_attn<bf16>(q, (int)nb, P, L.S, L.SB);
     else
-      launch_attn_b(q, (int)nb, P, L.S, L.SB);
+      launch_attn<sycl::half>(q, (int)nb, P, L.S, L.SB);
   } else {
     TORCH_CHECK(
         m0.scalar_type() == at::kInt, "mono: state indices must be int32");
     TORCH_CHECK(m0.numel() >= nb, "mono: state indices smaller than the batch");
     P.state_idx = m0.data_ptr<int>();
-    if (nb == 1)
-      launch_gdn(q, P, L.S);
+    if (bf)
+      launch_gdn<bf16>(q, (int)nb, P, L.S, L.SB);
     else
-      launch_gdn_b(q, (int)nb, P, L.S, L.SB);
+      launch_gdn<sycl::half>(q, (int)nb, P, L.S, L.SB);
   }
 }
 
@@ -564,10 +582,11 @@ bool mono_decode_layer_spec(
       " tokens");
   const int64_t nrq = nb / tokens;
   Ptrs P = L.P;
-  P.hs_in = f16(hidden, nb * HID, "hidden");
-  P.res_in = f16(residual, nb * HID, "residual");
-  P.hid_out = const_cast<sycl::half*>(f16(hid_out, nb * HID, "hid_out"));
-  P.res_out = const_cast<sycl::half*>(f16(res_out, nb * HID, "res_out"));
+  P.hs_in = t16(hidden, nb * HID, "hidden", L.dtype);
+  P.res_in = t16(residual, nb * HID, "residual", L.dtype);
+  P.hid_out = t16(hid_out, nb * HID, "hid_out", L.dtype);
+  P.res_out = t16(res_out, nb * HID, "res_out", L.dtype);
+  const bool bf = L.dtype == at::kBFloat16;
   TORCH_CHECK(
       m0.scalar_type() == at::kInt && m0.dim() == 2 && m0.stride(1) == 1 &&
           m0.size(0) >= nrq,
@@ -588,10 +607,14 @@ bool mono_decode_layer_spec(
         "mono: positions must be int64 [rows]");
     P.slot = m2->data_ptr<int64_t>();
     P.pos = positions.data_ptr<int64_t>();
-    return launch_attn_s(q, (int)nb, (int)tokens, P, L.S, L.SB);
+    return bf ? launch_attn_spec<bf16>(q, (int)nb, (int)tokens, P, L.S, L.SB)
+              : launch_attn_spec<sycl::half>(
+                    q, (int)nb, (int)tokens, P, L.S, L.SB);
   }
   TORCH_CHECK(m0.size(1) >= tokens, "mono: spec state indices narrower than T");
-  return launch_gdn_s(q, (int)nb, (int)tokens, P, L.S, L.SB);
+  return bf ? launch_gdn_spec<bf16>(q, (int)nb, (int)tokens, P, L.S, L.SB)
+            : launch_gdn_spec<sycl::half>(
+                  q, (int)nb, (int)tokens, P, L.S, L.SB);
 }
 
 void mono_register_mtp(
@@ -607,9 +630,10 @@ void mono_register_mtp(
   L.mtp = true;
   L.rank = (int)rank;
   L.device = t[0].get_device();
+  const at::ScalarType dt = L.dtype = dtype16(t[0], "pre_fc_norm_embedding");
   Ptrs& P = L.P;
-  P.in_norm_w = f16(t[0], HID, "pre_fc_norm_embedding");
-  P.post_norm_w = f16(t[1], HID, "pre_fc_norm_hidden");
+  P.in_norm_w = t16(t[0], HID, "pre_fc_norm_embedding", dt);
+  P.post_norm_w = t16(t[1], HID, "pre_fc_norm_hidden", dt);
   P.qkv_w = w_nk(t[2], MTP_FC_OUT, MTP_FC_IN, "fc_w");
   P.qkv_s = scale1(t[3], "fc_scale");
   sycl::queue& q = c10::xpu::getCurrentXPUStream().queue();
@@ -640,10 +664,12 @@ bool mono_mtp_prologue(
   Layer& L = it->second;
   const int64_t nb = x.dim() == 2 ? x.size(0) : 1;
   Ptrs P = L.P;
-  P.hs_in = f16(x, nb * MTP_FC_IN, "x");
-  P.hid_out = const_cast<sycl::half*>(f16(out, nb * HID, "out"));
+  P.hs_in = t16(x, nb * MTP_FC_IN, "x", L.dtype);
+  P.hid_out = t16(out, nb * HID, "out", L.dtype);
   sycl::queue& q = c10::xpu::getCurrentXPUStream().queue();
-  return launch_mtp(q, (int)nb, P, L.S, L.rank);
+  return L.dtype == at::kBFloat16
+             ? launch_mtp<bf16>(q, (int)nb, P, L.S, L.rank)
+             : launch_mtp<sycl::half>(q, (int)nb, P, L.S, L.rank);
 }
 
 void mono_fault_inject(int64_t layer, int64_t delta) {

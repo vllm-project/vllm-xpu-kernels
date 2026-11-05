@@ -17,18 +17,18 @@ def _mbox():
     return torch.zeros(n, dtype=torch.uint8, device=DEVICE)
 
 
-def _shard(rows, gen):
-    return (torch.randn((rows, VS), generator=gen) * 3).to(
-        torch.float16).to(DEVICE)
+def _shard(rows, gen, dtype):
+    return (torch.randn((rows, VS), generator=gen) * 3).to(dtype).to(DEVICE)
 
 
 @requires_mono
 @pytest.mark.parametrize("rows", [1, 2, 8])
 @pytest.mark.parametrize("k", [1, 20, 64])
 @pytest.mark.parametrize("rank", [0, 1])
-def test_shard_topk_loopback(rows, k, rank):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_shard_topk_loopback(rows, k, rank, dtype):
     gen = torch.Generator().manual_seed(rows * 100 + k)
-    lg = _shard(rows, gen)
+    lg = _shard(rows, gen, dtype)
     mb = _mbox()
     width = max(2 * k, 128)
     for _ in range(3):  # repeated calls: the mailbox tags must stay in step

@@ -56,16 +56,19 @@ int64_t mono_mbox_bytes();
 
 // Registers layer `layer` (weights, caches; vLLM tensors, used in place).
 // `attn`: full_attention layer, else linear_attention. mbox / peer: addresses
-// of this layer's mailbox in the own / peer region. tensors (common, then per
-// kind):
-//   input_norm_w, post_norm_w, router_w [256,2048] f16, shared_gate_w [1,2048]
-//   f16, out_w (o_proj / out_proj, logical [2048,2048] = t() of [N][K]),
+// of this layer's mailbox in the own / peer region. The 16-bit tensors (marked
+// t16: norms, router, gate, conv weight, dt_bias, KV cache, conv state, and
+// later the activations) are all fp16 or all bf16, the layer's dtype (taken
+// from input_norm_w; a mix, e.g. bf16 activations with an fp16 KV cache, is
+// refused). tensors (common, then per kind):
+//   input_norm_w, post_norm_w, router_w [256,2048] t16, shared_gate_w [1,2048]
+//   t16, out_w (o_proj / out_proj, logical [2048,2048] = t() of [N][K]),
 //   out_scale, w13 [E,2048,512] e4m3 + scale [E], w2 [E,256,2048] + scale [E],
 //   shared w13 (logical [2048,512]) + scale, shared w2 (logical [256,2048]) +
 //   scale, attn: qkv_w (logical [2048,4608]) + scale, q_norm_w, k_norm_w,
-//   kv_cache [blocks,1,bs,512] f16 gdn : qkvz_w (logical [2048,6144]) + scale,
+//   kv_cache [blocks,1,bs,512] t16 gdn : qkvz_w (logical [2048,6144]) + scale,
 //   ba_w (logical [2048,32]) + scale, conv_w [4096,1,4], A_log,
-//         dt_bias, norm_w, conv_state cache [slots,3,4096] f16, ssm_state cache
+//         dt_bias, norm_w, conv_state cache [slots,3,4096] t16, ssm_state cache
 //         [slots,16,128,128] f32
 void mono_register_layer(
     int64_t layer,
@@ -75,6 +78,7 @@ void mono_register_layer(
     const std::vector<torch::Tensor>& tensors);
 
 // One decode step (one token) of layer `layer` on the current XPU stream.
+// hidden / residual / hid_out / res_out: [B, 2048] in the layer's dtype.
 // hid_out = MoE output (all-reduced), res_out = residual after the mixer. m0:
 // attn block_table [B, n] int32 | gdn state indices [B] int32; m1: attn
 // seq_lens [B] int32; m2: attn slot_mapping [T] int64. Padding rows: slot -1
@@ -122,9 +126,9 @@ void mono_register_mtp(
     int64_t peer,
     const std::vector<torch::Tensor>& tensors,
     int64_t rank);
-// out = fc([norm_e(e); norm_h(h)]) of x = [e; h] ([rows, 4096] fp16) for 1, 2,
-// 3, 4, 6 or 8 rows (all-gathered fc output, the same on both ranks). Returns
-// false (nothing launched) for other row counts.
+// out = fc([norm_e(e); norm_h(h)]) of x = [e; h] ([rows, 4096], the norms'
+// dtype, fp16 or bf16) for 1, 2, 3, 4, 6 or 8 rows (all-gathered fc output, the
+// same on both ranks). Returns false (nothing launched) for other row counts.
 bool mono_mtp_prologue(
     int64_t layer, const torch::Tensor& x, torch::Tensor& out);
 
@@ -133,8 +137,8 @@ bool mono_mtp_prologue(
 // [B, w >= 2k] f32 / int32 = rank 0's k largest logits of its shard, then
 // rank 1's (each part in ascending token id order, idx = vocabulary token
 // ids), then -inf / 0 padding; the same on both ranks. logits: this rank's [B,
-// V/2] fp16 shard; mbox / peer: own / peer mailbox of mono_lmhead_mbox_bytes()
-// bytes.
+// V/2] fp16 or bf16 shard; mbox / peer: own / peer mailbox of
+// mono_lmhead_mbox_bytes() bytes.
 int64_t mono_lmhead_mbox_bytes();
 int64_t mono_shard_topk_max_k();
 void mono_shard_topk(

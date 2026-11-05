@@ -11,10 +11,11 @@ mailbox in the peer GPU's memory (Level Zero IPC). The MTP drafter's prologue
 are ops of the same kind.
 
 The kernels are built for the 35B-A3B shapes: hidden 2048, 256 experts of
-intermediate 512 (top-8) plus one gated shared expert, fp16 activations,
-fp8-e4m3 per-tensor weights, an fp16 KV cache with blocks of a multiple of 64
-tokens and an fp32 recurrent state. They read the caller's weights and caches
-in place, launch on the current XPU stream and allocate nothing per call.
+intermediate 512 (top-8) plus one gated shared expert, fp8-e4m3 per-tensor
+weights, fp16 or bf16 activations with a KV cache (blocks of a multiple of 64
+tokens) and conv state of the same dtype, and an fp32 recurrent state. They
+read the caller's weights and caches in place, launch on the current XPU stream
+and allocate nothing per call.
 
 Every wait for the peer GPU gives up after about 12 s and records the failure
 in the device's health words (``health``), so a stalled peer fails both ranks

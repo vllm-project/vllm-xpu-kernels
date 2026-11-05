@@ -3,7 +3,8 @@
 // Decode-only "mono" (one resident kernel per decoder layer) for Qwen3.5 /
 // Qwen3.6 MoE (35B-A3B shapes) at TP2 on two Intel Arc Pro B70 (Xe2, 32 Xe
 // cores): M = 1 token, fp8 e4m3 per-tensor weights (vLLM online fp8), fp16
-// activations / KV cache, fp16 conv state, fp32 recurrent state. The
+// or bf16 activations / KV cache / conv state (one dtype DT per layer, a
+// template parameter), fp32 recurrent state. The
 // tensor-parallel all-reduces are done inside the kernel by pushing (value |
 // call) words into the peer card's mailbox (PCIe P2P stores).
 //
@@ -28,6 +29,7 @@
 // launch on the peer card.
 #pragma once
 #include <sycl/sycl.hpp>
+#include <sycl/ext/oneapi/bfloat16.hpp>
 #include <sycl/ext/intel/experimental/grf_size_properties.hpp>
 #include <sycl/ext/intel/experimental/cache_control_properties.hpp>
 #include <sycl/ext/oneapi/experimental/clock.hpp>
@@ -40,6 +42,7 @@ namespace mono_decode {
 
 using half = sycl::half;
 using h2 = sycl::vec<half, 2>;
+using bf16 = sycl::ext::oneapi::bfloat16;
 namespace syclex = sycl::ext::oneapi::experimental;
 namespace intelex = sycl::ext::intel::experimental;
 
@@ -88,14 +91,52 @@ enum { H_FAILED = 0, H_TIMEOUTS, H_WORDS = 8 };
 constexpr uint64_t WAIT_CYCLES = 1ull << 35;
 
 // ----------------------------------------------------------------------------
-// arguments
+// The layer's 16-bit dtype DT (half or bf16): hidden states, norm / router /
+// conv weights, KV cache, conv state. e16 has no arithmetic, so every access
+// names DT. The fp16 scratch and SLM vectors hold values rounded to DT where
+// vLLM rounds to its dtype (a bf16 value in the fp16 range is exact in fp16):
+// the fp8 GEMVs keep their fp16 products in both dtypes.
+struct e16 {
+  uint16_t u;
+};
+template <typename DT>
+inline float f32(uint16_t u) {
+  return (float)sycl::bit_cast<DT>(u);
+}
+template <typename DT>
+inline float ld16(const e16* p, size_t i) {
+  return f32<DT>(p[i].u);
+}
+template <typename DT>
+inline uint16_t bits(float v) {
+  return sycl::bit_cast<uint16_t>((DT)v);
+}
+template <typename DT>
+inline void st16(e16* p, size_t i, float v) {
+  p[i].u = bits<DT>(v);
+}
+template <typename DT>
+inline float rnd(float v) {
+  return (float)(DT)v;
+}
+// v rounded to DT, held in fp16
+template <typename DT>
+inline half toh(float v) {
+  if constexpr (std::is_same_v<DT, half>)
+    return (half)v;
+  else
+    return (half)(float)(DT)v;
+}
+
+// ----------------------------------------------------------------------------
+// arguments (e16: the layer's dtype DT)
 struct Ptrs {
   // common
-  const half *hs_in,
+  const e16 *hs_in,
       *res_in;  // layer input hidden / residual (zeros for layer 0)
-  half *hid_out,
+  e16 *hid_out,
       *res_out;  // MoE output (after all-reduce #2), residual after the mixer
-  const half *in_norm_w, *post_norm_w, *router_w, *sgate_w;
+  const e16 *in_norm_w, *post_norm_w, *router_w, *sgate_w;
   const uint8_t *out_w, *w13, *w2, *sw13,
       *sw2;  // out_proj / o_proj [2048][2048], w13 [E][2048][512],
              // w2 [E][256][2048], shared w13 [512][2048], shared w2 [2048][256]
@@ -103,8 +144,8 @@ struct Ptrs {
   // GDN
   const uint8_t *qkvz_w, *ba_w;  // [6144][2048] (q|k|v|z), [32][2048] (b|a)
   const float *qkvz_s, *ba_s, *A_log;
-  const half *conv_w, *dt_bias, *gnorm_w;  // conv_w [4096][4]
-  half* conv_cache;  // [slots][3][4096] (slot stride conv_stride)
+  const e16 *conv_w, *dt_bias, *gnorm_w;  // conv_w [4096][4]
+  e16* conv_cache;   // [slots][3][4096] (slot stride conv_stride)
   float* ssm_cache;  // [slots][16][128 v][128 k] (slot stride ssm_stride)
   int64_t conv_stride, ssm_stride;
   const int* state_idx;  // [1] slot of this sequence (< 0: padding)
@@ -112,8 +153,8 @@ struct Ptrs {
   const uint8_t*
       qkv_w;  // [4608][2048]: per head q (256) | gate (256), then k, v
   const float* qkv_s;
-  const half *q_norm_w, *k_norm_w;
-  half* kv;                           // [blocks][1][bs][K 256 | V 256]
+  const e16 *q_norm_w, *k_norm_w;
+  e16* kv;                            // [blocks][1][bs][K 256 | V 256]
   int64_t blk_stride;                 // halves per block
   int bs;                             // tokens per block (multiple of 64)
   const int *block_table, *seq_lens;  // row 0 / [0] of this sequence
@@ -135,7 +176,7 @@ struct Scratch {
   float* part_sh;    // NWG * 2 * INTER
   float* part_sg;    // NWG * 2
   half* hbuf;        // (TOPK + 1) * INTER
-  half* dummy_conv;  // GDN padding slot: 3 * CONVD
+  e16* dummy_conv;   // GDN padding slot: 3 * CONVD
   float* dummy_ssm;  // GDN padding slot: NVH * DV * DK
   uint64_t* mbox;    // 2 * HID words written by the peer card
   uint64_t* peer;    // the peer card's mbox (P2P mapping)
@@ -186,7 +227,7 @@ inline Scratch scratch_carve(void* base, uint64_t* mbox, uint64_t* peer) {
   S.part_sh = (float*)take((size_t)NWG * 2 * INTER * 4);
   S.part_sg = (float*)take(NWG * 2 * 4);
   S.hbuf = (half*)take((TOPK + 1) * INTER * 2);
-  S.dummy_conv = (half*)take(3 * CONVD * 2);
+  S.dummy_conv = (e16*)take(3 * CONVD * 2);
   S.dummy_ssm = (float*)take((size_t)NVH * DV * DK * 4);
   S.mbox = mbox;
   S.peer = peer;
@@ -483,9 +524,31 @@ inline void dpas_hf(v8f& d, const v4u& a, const v8u& b) {
   (void)b;
 #endif
 }
+// the same for DT operands (attention: q, P, K and V in the KV cache dtype)
+template <typename DT>
+inline void dpas16(v8f& d, const v4u& a, const v8u& b) {
+  if constexpr (std::is_same_v<DT, half>) {
+    dpas_hf(d, a, b);
+  } else {
+#ifdef __SYCL_DEVICE_ONLY__
+    asm("{\n"
+        ".decl DST     v_type=G type=f num_elts=128 alias=<%0,0>\n"
+        ".decl SRC1_UD v_type=G type=UD num_elts=128 alias=<%2,0>\n"
+        ".decl SRC2_UD v_type=G type=UD num_elts=64 alias=<%1,0>\n"
+        "dpas.bf.bf.8.8 (M1, 16) DST.0 DST.0 SRC1_UD.0 SRC2_UD(0,0)\n"
+        "}\n"
+        : "+rw"(d)
+        : "rw"(a), "rw"(b));
+#else
+    (void)d;
+    (void)a;
+    (void)b;
+#endif
+  }
+}
 // K tile: 16 token rows x 16 dims at dims dw*2.. (dw in dwords) -> VNNI B of
 // K^T (lane = token)
-inline v8u load_k_tile(const half* row0, int dw) {
+inline v8u load_k_tile(const void* row0, int dw) {
 #ifdef __SYCL_DEVICE_ONLY__
   return __builtin_IB_subgroup_block_read_flat_transpose_u32_k8(
       (intptr_t)row0, HD * 2 - 1, 15, KROW * 2 - 1, v2i{dw, 0});
@@ -496,7 +559,7 @@ inline v8u load_k_tile(const half* row0, int dw) {
 #endif
 }
 // V tile: 16 token rows x 16 dims (VNNI-transformed) of a 128-dim half
-inline v8u load_v_tile(const half* row0, int col) {
+inline v8u load_v_tile(const void* row0, int col) {
 #ifdef __SYCL_DEVICE_ONLY__
   return __builtin_IB_subgroup_block_read_flat_transform_u16_k16(
       (intptr_t)row0, 128 * 2 - 1, 15, KROW * 2 - 1, v2i{col, 0});
@@ -510,21 +573,25 @@ inline uint32_t pack_h2(half a, half b) {
   return (uint32_t)sycl::bit_cast<uint16_t>(a) |
          ((uint32_t)sycl::bit_cast<uint16_t>(b) << 16);
 }
+inline uint32_t pack16(uint16_t a, uint16_t b) {
+  return (uint32_t)a | ((uint32_t)b << 16);
+}
 
-// one head (256) -> (GemmaRMS + NeoX RoPE on dims 0..63 if nw) -> fp16 dst (and
+// one head (256) -> (GemmaRMS + NeoX RoPE on dims 0..63 if nw) -> DT dst (and
 // dst2).
+template <typename DT>
 inline void head_norm_rope(
     sycl::sub_group sg,
     int lane,
     const float* src,
-    const half* nw,
+    const e16* nw,
     const float* cs,
-    half* dst,
-    half* dst2) {
+    e16* dst,
+    e16* dst2) {
   float y[16];
 #pragma unroll
   for (int i = 0; i < 16; ++i)
-    y[i] = (float)(half)src[lane * 16 + i];
+    y[i] = rnd<DT>(src[lane * 16 + i]);
   if (nw) {
     float ss = 0.f;
 #pragma unroll
@@ -534,7 +601,7 @@ inline void head_norm_rope(
     const float rs = sycl::rsqrt(ss / HD + EPS);
 #pragma unroll
     for (int i = 0; i < 16; ++i)
-      y[i] = y[i] * rs * (1.f + (float)nw[lane * 16 + i]);
+      y[i] = y[i] * rs * (1.f + ld16<DT>(nw, lane * 16 + i));
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
       const float other = sycl::permute_group_by_xor(sg, y[i], 2);
@@ -547,8 +614,8 @@ inline void head_norm_rope(
   }
 #pragma unroll
   for (int i = 0; i < 16; ++i) {
-    dst[lane * 16 + i] = (half)y[i];
-    if (dst2) dst2[lane * 16 + i] = (half)y[i];
+    st16<DT>(dst, lane * 16 + i, y[i]);
+    if (dst2) st16<DT>(dst2, lane * 16 + i, y[i]);
   }
 }
 
@@ -582,6 +649,7 @@ struct Slm {  // tail view
 // tail Entry: the mixer output o (2048 fp16) is in SLM xp (permuted), the
 // out_proj rows ow[] of this SG are in registers (issued after the previous
 // signal), prt_r / prt_s the router / shared gate|up column blocks of this WG.
+template <typename DT>
 inline void tail(
     sycl::nd_item<1> it,
     const Ptrs& P,
@@ -624,15 +692,15 @@ inline void tail(
     half* xbp = reinterpret_cast<half*>(L.ao + 384);  // same, permuted
     if (lane < 2) {
       const int r = r0 + lane;
-      const float res = (float)(half)((float)P.hs_in[r] + (float)P.res_in[r]);
-      const half r2 = (half)(ov + res);
-      P.res_out[r] = r2;
-      rblk[s * 2 + lane] = (float)r2;
+      const float res = rnd<DT>(ld16<DT>(P.hs_in, r) + ld16<DT>(P.res_in, r));
+      const float r2 = rnd<DT>(ov + res);
+      st16<DT>(P.res_out, r, r2);
+      rblk[s * 2 + lane] = r2;
     }
     wg_bar(grp);
     if (lid < 64)
       xbn[lid] =
-          (half)(rblk[lid] * (1.f + (float)P.post_norm_w[wg * 64 + lid]));
+          (half)(rblk[lid] * (1.f + ld16<DT>(P.post_norm_w, wg * 64 + lid)));
     if (s == 2) {
       float q = rblk[lane * 4] * rblk[lane * 4] +
                 rblk[lane * 4 + 1] * rblk[lane * 4 + 1] +
@@ -647,12 +715,12 @@ inline void tail(
     {  // router partials: 8 experts per SG
 #pragma unroll
       for (int t = 0; t < 4; ++t) {
-        const sycl::vec<half, 8> wh =
-            sycl::bit_cast<sycl::vec<half, 8>>(prt_r[t]);
+        const sycl::vec<uint16_t, 8> wh =
+            sycl::bit_cast<sycl::vec<uint16_t, 8>>(prt_r[t]);
         float v = 0.f;
 #pragma unroll
         for (int i = 0; i < 8; ++i)
-          v += (float)wh[i] * (float)xbn[(lane & 7) * 8 + i];
+          v += f32<DT>(wh[i]) * (float)xbn[(lane & 7) * 8 + i];
         v += sycl::permute_group_by_xor(sg, v, 4);
         v += sycl::permute_group_by_xor(sg, v, 2);
         v += sycl::permute_group_by_xor(sg, v, 1);
@@ -673,7 +741,7 @@ inline void tail(
         float v = 0.f;
 #pragma unroll
         for (int i = 0; i < 4; ++i)
-          v += (float)P.sgate_w[wg * 64 + lane * 4 + i] *
+          v += ld16<DT>(P.sgate_w, wg * 64 + lane * 4 + i) *
                (float)xbn[lane * 4 + i];
         v = sycl::reduce_over_group(sg, v, sycl::plus<float>());
         if (lane == 0) S.part_sg[wg * 2] = v;
@@ -695,8 +763,9 @@ inline void tail(
     half x2[4];
 #pragma unroll
     for (int i = 0; i < 4; ++i)
-      x2[i] = (half)((float)P.res_out[lid * 4 + i] * rs *
-                     (1.f + (float)P.post_norm_w[lid * 4 + i]));
+      x2[i] = toh<DT>(
+          ld16<DT>(P.res_out, lid * 4 + i) * rs *
+          (1.f + ld16<DT>(P.post_norm_w, lid * 4 + i)));
     *reinterpret_cast<sycl::vec<half, 4>*>(L.xn + lid * 4) =
         sycl::vec<half, 4>(x2[0], x2[1], x2[2], x2[3]);
     if (lid < NE) {
@@ -716,7 +785,7 @@ inline void tail(
       const float sc = 256.f * P.sw13_s[0] * rs;
       g *= sc;
       u *= sc;
-      S.hbuf[TOPK * INTER + i] = (half)(g / (1.f + sycl::exp(-g)) * u);
+      S.hbuf[TOPK * INTER + i] = toh<DT>(g / (1.f + sycl::exp(-g)) * u);
     } else if (lid == NE + 32) {
       float a = 0.f;
 #pragma unroll
@@ -824,7 +893,8 @@ inline void tail(
     wg_bar(grp);
     if (lid < 64) {
       const float g = L.qk[lid], u = L.qk[64 + lid];
-      S.hbuf[j * INTER + q4 * 64 + lid] = (half)(g / (1.f + sycl::exp(-g)) * u);
+      S.hbuf[j * INTER + q4 * 64 + lid] =
+          toh<DT>(g / (1.f + sycl::exp(-g)) * u);
     }
   }
   signal(it, S.cnt + C_GU * 16);
@@ -874,7 +944,7 @@ inline void tail(
       a += L.red[lid];
       mb_send(S.peer + HID + wg * 64 + lid, a, mtag);  // all-reduce #2
       a += mb_recv(S.mbox + HID + wg * 64 + lid, mtag, S.cnt);
-      P.hid_out[wg * 64 + lid] = (half)a;
+      st16<DT>(P.hid_out, wg * 64 + lid, a);
     }
   }
 }
@@ -902,13 +972,14 @@ inline void load_prt(
 }
 
 // res = h + r ; x = GemmaRMS(res) -> xn (natural) and xp (permuted)
+template <typename DT>
 inline void input_norm(sycl::nd_item<1> it, const Ptrs& P, half* xn, half* xp) {
   const int lid = it.get_local_linear_id();
   float v[4], ss = 0.f;
 #pragma unroll
   for (int i = 0; i < 4; ++i) {
     const int k = lid * 4 + i;
-    v[i] = (float)(half)((float)P.hs_in[k] + (float)P.res_in[k]);
+    v[i] = rnd<DT>(ld16<DT>(P.hs_in, k) + ld16<DT>(P.res_in, k));
     ss += v[i] * v[i];
   }
   ss = sycl::reduce_over_group(it.get_group(), ss, sycl::plus<float>());
@@ -916,7 +987,7 @@ inline void input_norm(sycl::nd_item<1> it, const Ptrs& P, half* xn, half* xp) {
   half x[4];
 #pragma unroll
   for (int i = 0; i < 4; ++i)
-    x[i] = (half)(v[i] * rs * (1.f + (float)P.in_norm_w[lid * 4 + i]));
+    x[i] = toh<DT>(v[i] * rs * (1.f + ld16<DT>(P.in_norm_w, lid * 4 + i)));
   if (xn)
     *reinterpret_cast<sycl::vec<half, 4>*>(xn + lid * 4) =
         sycl::vec<half, 4>(x[0], x[1], x[2], x[3]);
@@ -926,6 +997,7 @@ inline void input_norm(sycl::nd_item<1> it, const Ptrs& P, half* xn, half* xp) {
 
 // ----------------------------------------------------------------------------
 // GDN layer
+template <typename DT>
 inline void
 gdn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
   const int wg = it.get_group(0);
@@ -955,7 +1027,7 @@ gdn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
   const int h = wg >> 1, c = wg & 1,
             kh = h >> 1;  // S2 role: v head h (k head h/2), v rows c*64..+64
   const int sidx = P.state_idx[0];
-  half* conv =
+  e16* conv =
       sidx >= 0 ? P.conv_cache + (size_t)sidx * P.conv_stride : S.dummy_conv;
   float* ssm =
       sidx >= 0 ? P.ssm_cache + (size_t)sidx * P.ssm_stride : S.dummy_ssm;
@@ -971,21 +1043,23 @@ gdn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
   const int cch = lid < 128   ? kh * DK + lid
                   : lid < 256 ? KD + kh * DK + (lid - 128)
                               : 2 * KD + h * DV + c * 64 + (lid - 256);
-  half cst[3], cwt[4];
+  e16 cst[3];
+  float cwt[4];
   if (lid < 320) {
 #pragma unroll
     for (int i = 0; i < 3; ++i)
       cst[i] = conv[i * CONVD + cch];
-    const sycl::vec<half, 4> w4 = *reinterpret_cast<const sycl::vec<half, 4>*>(
-        P.conv_w + (size_t)cch * 4);
+    const sycl::vec<uint16_t, 4> w4 =
+        *reinterpret_cast<const sycl::vec<uint16_t, 4>*>(
+            P.conv_w + (size_t)cch * 4);
 #pragma unroll
     for (int i = 0; i < 4; ++i)
-      cwt[i] = w4[i];
+      cwt[i] = f32<DT>(w4[i]);
   }
   sycl::uint4 baw[8];  // b (SG 0) and a (SG 1) rows of v head h
   if (s < 2) load_row<8>(baw, P.ba_w + (size_t)(s * NVH + h) * HID, lane);
 
-  input_norm(it, P, L.xn, L.xp);
+  input_norm<DT>(it, P, L.xn, L.xp);
   wg_bar(grp);
 
   // ---------------- S1: q|k|v rows of in_proj_qkvz (4 per SG) ----------------
@@ -999,7 +1073,7 @@ gdn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
 #pragma unroll
     for (int b = 0; b < 4; ++b) {
       const float v = dot_row_regs<8>(sg, lane, w[b], L.xp32);
-      if (lane == 0) S.qkv[r0 + b] = (half)(v * sc);
+      if (lane == 0) S.qkv[r0 + b] = toh<DT>(v * sc);
     }
   }
   signal(it, S.cnt + C_A * 16);
@@ -1011,30 +1085,30 @@ gdn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
         zw[rr],
         P.qkvz_w + (size_t)(CONVD + h * DV + c * 64 + 2 * s + rr) * HID,
         lane);
-  if (s < 2) {  // b, a of v head h (fp16, as vLLM's GEMM output)
+  if (s < 2) {  // b, a of v head h (DT, as vLLM's GEMM output)
     const float v = dot_row_regs<8>(sg, lane, baw, L.xp32) * 256.f * P.ba_s[0];
-    if (lane == 0) red[s] = (float)(half)v;
+    if (lane == 0) red[s] = rnd<DT>(v);
   }
 
   // ---------------- S2: conv1d + SiLU, L2 norm, gated delta rule -------------
   wait_for(it, S.cnt + C_A * 16, NWG * call);
   if (lid < 320) {
-    const half xnew = S.qkv[cch];
-    float acc = (float)cst[0] * (float)cwt[0];
-    acc += (float)cst[1] * (float)cwt[1];
-    acc += (float)cst[2] * (float)cwt[2];
-    acc += (float)xnew * (float)cwt[3];
-    qk[lid] = (float)(half)(acc / (1.f + sycl::exp(-acc)));
+    const float xnew = (float)S.qkv[cch];
+    float acc = ld16<DT>(cst, 0) * cwt[0];
+    acc += ld16<DT>(cst, 1) * cwt[1];
+    acc += ld16<DT>(cst, 2) * cwt[2];
+    acc += xnew * cwt[3];
+    qk[lid] = rnd<DT>(acc / (1.f + sycl::exp(-acc)));
     // conv state <- (s1, s2, x): q/k channels by the (even h, c = 0) WG of the
     // k head, v channels by the owner
     if (lid >= 256 || ((h & 1) == 0 && c == 0)) {
       conv[cch] = cst[1];
       conv[CONVD + cch] = cst[2];
-      conv[2 * CONVD + cch] = xnew;
+      st16<DT>(conv, 2 * CONVD + cch, xnew);
     }
   }
   if (lid == 0) {  // beta, g of v head h
-    const float b = red[0], a = red[1] + (float)P.dt_bias[h];
+    const float b = red[0], a = red[1] + ld16<DT>(P.dt_bias, h);
     const float sp = a < 20.f ? sycl::log(1.f + sycl::exp(a)) : a;
     qk[320] = 1.f / (1.f + sycl::exp(-b));
     qk[321] = sycl::exp(-sycl::exp(P.A_log[h]) * sp);
@@ -1092,7 +1166,7 @@ gdn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
     for (int rr = 0; rr < 2; ++rr)
       o[rr] = sycl::reduce_over_group(sg, o[rr], sycl::plus<float>());
     if (lane < 2)
-      S.core[h * DV + c * 64 + 2 * s + lane] = (half)(lane == 0 ? o[0] : o[1]);
+      S.core[h * DV + c * 64 + 2 * s + lane] = toh<DT>(lane == 0 ? o[0] : o[1]);
   }
   {  // z rows (registers since S1)
     const float sc = 256.f * P.qkvz_s[0];
@@ -1100,7 +1174,7 @@ gdn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
                 z1 = dot_row_regs<8>(sg, lane, zw[1], L.xp32);
     if (lane < 2)
       S.zbuf[h * DV + c * 64 + 2 * s + lane] =
-          (half)((lane == 0 ? z0 : z1) * sc);
+          toh<DT>((lane == 0 ? z0 : z1) * sc);
   }
   signal(it, S.cnt + C_B * 16);
 #pragma unroll
@@ -1134,22 +1208,22 @@ gdn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const float zf = (float)z4[i];
-      y[i] = (half)((float)o4[i] * rs *
-                    (float)P.gnorm_w[(lid * 4 + i) & (DV - 1)] *
-                    (zf / (1.f + sycl::exp(-zf))));
+      y[i] = toh<DT>(
+          (float)o4[i] * rs * ld16<DT>(P.gnorm_w, (lid * 4 + i) & (DV - 1)) *
+          (zf / (1.f + sycl::exp(-zf))));
     }
     *reinterpret_cast<sycl::vec<half, 4>*>(L.xp + lid * 4) =
         sycl::vec<half, 4>(y[0], y[2], y[1], y[3]);
     wg_bar(grp);
   }
-  tail(it, P, S, L, call, C_O, ow, prt_r, prt_s);
+  tail<DT>(it, P, S, L, call, C_O, ow, prt_r, prt_s);
 }
 
 // ----------------------------------------------------------------------------
 // full-attention layer
 #define MONO_ATTN_STEP(tb, NT)                                                \
   do {                                                                        \
-    const half* kb[NT];                                                       \
+    const e16* kb[NT];                                                        \
     _Pragma("unroll") for (int tt = 0; tt < NT; ++tt) kb[tt] =                \
         trow((tb) + tt * 16);                                                 \
     v8f S4[NT];                                                               \
@@ -1159,7 +1233,7 @@ gdn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
         const v8u bk = load_k_tile(kb[tt], kt * 8);                           \
         const v4u qa =                                                        \
             *reinterpret_cast<const v4u*>(qpk + (kt * 16 + lane) * 4);        \
-        dpas_hf(S4[tt], qa, bk);                                              \
+        dpas16<DT>(S4[tt], qa, bk);                                           \
       }                                                                       \
     }                                                                         \
     float sv[NT][8];                                                          \
@@ -1182,30 +1256,32 @@ gdn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
     _Pragma("unroll") for (int nt = 0; nt < 8; ++nt)                          \
         _Pragma("unroll") for (int i = 0; i < 8; ++i) O[nt][i] *= alpha[i];   \
     _Pragma("unroll") for (int tt = 0; tt < NT; ++tt) {                       \
-      half pv[8];                                                             \
+      uint16_t pv[8];                                                         \
       _Pragma("unroll") for (int i = 0; i < 8; ++i) {                         \
         const float p =                                                       \
             m[i] == -INFINITY ? 0.f : sycl::native::exp2(sv[tt][i] - m[i]);   \
         lp[i] += p;                                                           \
-        pv[i] = (half)p;                                                      \
+        pv[i] = bits<DT>(p);                                                  \
       }                                                                       \
       /* P (lane = token, element = head) -> dpas A: lane l, element j = P[2j \
        * + l/8][2(l%8) + {0,1}] */                                            \
       v4u pa;                                                                 \
       _Pragma("unroll") for (int j = 0; j < 4; ++j) {                         \
         const int t0_ = 2 * (lane & 7);                                       \
-        const half a0 = sycl::select_from_group(sg, pv[2 * j], t0_);          \
-        const half a1 = sycl::select_from_group(sg, pv[2 * j + 1], t0_);      \
-        const half b0 = sycl::select_from_group(sg, pv[2 * j], t0_ + 1);      \
-        const half b1 = sycl::select_from_group(sg, pv[2 * j + 1], t0_ + 1);  \
-        pa[j] = (lane < 8) ? pack_h2(a0, b0) : pack_h2(a1, b1);               \
+        const uint16_t a0 = sycl::select_from_group(sg, pv[2 * j], t0_);      \
+        const uint16_t a1 = sycl::select_from_group(sg, pv[2 * j + 1], t0_);  \
+        const uint16_t b0 = sycl::select_from_group(sg, pv[2 * j], t0_ + 1);  \
+        const uint16_t b1 =                                                   \
+            sycl::select_from_group(sg, pv[2 * j + 1], t0_ + 1);              \
+        pa[j] = (lane < 8) ? pack16(a0, b0) : pack16(a1, b1);                 \
       }                                                                       \
-      const half* vb = kb[tt] + HD + dh * 128;                                \
+      const e16* vb = kb[tt] + HD + dh * 128;                                 \
       _Pragma("unroll") for (int nt = 0; nt < 8; ++nt)                        \
-          dpas_hf(O[nt], pa, load_v_tile(vb, nt * 16));                       \
+          dpas16<DT>(O[nt], pa, load_v_tile(vb, nt * 16));                    \
     }                                                                         \
   } while (0)
 
+template <typename DT>
 inline void
 attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
   const int wg = it.get_group(0);
@@ -1229,8 +1305,8 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
   L.mr = reinterpret_cast<float*>(slm + A_MR);
   half* xp = L.xp;
   const uint32_t* xp32 = L.xp32;
-  half* qs = reinterpret_cast<half*>(slm + A_Q);
-  half* kvn = reinterpret_cast<half*>(slm + A_KV);
+  e16* qs = reinterpret_cast<e16*>(slm + A_Q);
+  e16* kvn = reinterpret_cast<e16*>(slm + A_KV);
   float* red = L.red;
   float* st = reinterpret_cast<float*>(slm + A_ST);
   half* ao = reinterpret_cast<half*>(slm + A_AO);
@@ -1259,7 +1335,7 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
            (size_t)(t % bs) * KROW;
   };
 
-  input_norm(it, P, nullptr, xp);
+  input_norm<DT>(it, P, nullptr, xp);
   wg_bar(grp);
 
   // ---------------- S1: q rows (2 per SG) ------------------------------------
@@ -1280,7 +1356,7 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
   {  // the q hand-off + q norm leave DRAM idle: warm L2 with the first K tile
      // of this SG pair
     if (t0 < lc) {
-      const half* kb = trow(t0);
+      const e16* kb = trow(t0);
 #pragma unroll
       for (int u = lane; u < 8 * 8; u += 16)
         syclex::prefetch(
@@ -1302,7 +1378,7 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
   // ---------------- S2: q norm + RoPE, attention split along the context -----
   wait_for(it, S.cnt + C_A * 16, NWG * call);
   if (s < NQ)
-    head_norm_rope(
+    head_norm_rope<DT>(
         sg,
         lane,
         S.qkv_raw + s * 512,
@@ -1316,8 +1392,8 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
   uint32_t* qpk = reinterpret_cast<uint32_t*>(slm + A_QPK);
   for (int u = lid; u < 16 * 16 * 4; u += WGS) {
     const int j = u & 3, l = (u >> 2) & 15, kt = u >> 6;
-    const half* src = qs + (2 * j + (l >> 3)) * HD + kt * 16 + 2 * (l & 7);
-    qpk[u] = pack_h2(src[0], src[1]);
+    const e16* src = qs + (2 * j + (l >> 3)) * HD + kt * 16 + 2 * (l & 7);
+    qpk[u] = pack16(src[0].u, src[1].u);
   }
   wg_bar(grp);
   {
@@ -1342,7 +1418,7 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
     // sequence's block and are written by later tokens anyway).
     if (lc > 0 && t0 < lc) {
       if ((lc & 15) && (lc & ~15) >= t0 && (lc & ~15) < t0 + T) {
-        half* vz = const_cast<half*>(trow(lc & ~15)) + HD + dh * 128;
+        e16* vz = trow(lc & ~15) + HD + dh * 128;
         for (int r = lc & 15; r < 16; ++r)
           *reinterpret_cast<sycl::vec<half, 8>*>(
               vz + (size_t)r * KROW + lane * 8) = sycl::vec<half, 8>(0.f);
@@ -1362,7 +1438,7 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
 #pragma unroll 1
       for (int tb = pb; tb < pb + T && tb < lc; tb += 16) {
         if ((lc & 15) && (lc & ~15) == tb) {  // the partial tile's stale V rows
-          half* vz = const_cast<half*>(trow(tb)) + HD + dh * 128;
+          e16* vz = trow(tb) + HD + dh * 128;
           for (int r = lc & 15; r < 16; ++r)
             *reinterpret_cast<sycl::vec<half, 8>*>(
                 vz + (size_t)r * KROW + lane * 8) = sycl::vec<half, 8>(0.f);
@@ -1479,11 +1555,11 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
     float* mrg = reinterpret_cast<float*>(slm + A_AO);  // [32][64]
     {  // new token: k (norm + rope) and v; WG 0 writes them to the cache
       const int64_t slot = P.slot[0];
-      half* row = slot >= 0 ? P.kv + (size_t)(slot / bs) * P.blk_stride +
-                                  (size_t)(slot % bs) * KROW
-                            : nullptr;
+      e16* row = slot >= 0 ? P.kv + (size_t)(slot / bs) * P.blk_stride +
+                                 (size_t)(slot % bs) * KROW
+                           : nullptr;
       if (s == 0)
-        head_norm_rope(
+        head_norm_rope<DT>(
             sg,
             lane,
             S.qkv_raw + NQ * 512,
@@ -1492,7 +1568,7 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
             kvn,
             wg == 0 ? row : nullptr);
       else if (s == 1)
-        head_norm_rope(
+        head_norm_rope<DT>(
             sg,
             lane,
             S.qkv_raw + NQ * 512 + HD,
@@ -1506,7 +1582,8 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
       float d = 0.f;
 #pragma unroll
       for (int i = 0; i < 16; ++i)
-        d += (float)qs[hh * HD + lane * 16 + i] * (float)kvn[lane * 16 + i];
+        d += ld16<DT>(qs, hh * HD + lane * 16 + i) *
+             ld16<DT>(kvn, lane * 16 + i);
       d = sycl::reduce_over_group(sg, d, sycl::plus<float>());
       if (lane == 0) red[96] = d * SM_SCALE;
     }
@@ -1525,14 +1602,15 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
     wg_bar(grp);
     if (lid < 64) {
       const int d = d0 + lid;
-      float Lw = sycl::native::exp2(red[96] - M), acc = Lw * (float)kvn[HD + d];
+      float Lw = sycl::native::exp2(red[96] - M),
+            acc = Lw * ld16<DT>(kvn, HD + d);
       for (int i = 0; i < 32; ++i) {
         acc += mrg[i * 64 + lid];
         Lw += red[32 + i];
       }
       const float o = acc / Lw;
       const float gate = S.qkv_raw[hh * 512 + 256 + d];
-      S.attn_out[hh * HD + d] = (half)(o / (1.f + sycl::exp(-gate)));
+      S.attn_out[hh * HD + d] = toh<DT>(o / (1.f + sycl::exp(-gate)));
     }
   }
   signal(it, S.cnt + C_C * 16);
@@ -1545,14 +1623,14 @@ attn_layer(sycl::nd_item<1> it, uint8_t* slm, const Ptrs& P, const Scratch& S) {
   for (int k = lid; k < NQ * HD; k += WGS)
     store_perm(xp, k, S.attn_out[k]);
   wg_bar(grp);
-  tail(it, P, S, L, call, C_O, ow, prt_r, prt_s);
+  tail<DT>(it, P, S, L, call, C_O, ow, prt_r, prt_s);
 }
 
 // ----------------------------------------------------------------------------
 // launch One template instance per layer kind: each translation unit
 // instantiates only the kernel it launches (an inline non-template launcher
 // with per-file bodies would be an ODR violation).
-template <bool ATTN>
+template <bool ATTN, typename DT>
 void launch_t(sycl::queue& q, const Ptrs& P, const Scratch& S) {
   q.submit([&](sycl::handler& h) {
     sycl::local_accessor<uint8_t, 1> slm(
@@ -1563,25 +1641,19 @@ void launch_t(sycl::queue& q, const Ptrs& P, const Scratch& S) {
         props,
         [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(16)]] {
           if constexpr (ATTN)
-            attn_layer(
+            attn_layer<DT>(
                 it,
                 slm.get_multi_ptr<sycl::access::decorated::no>().get(),
                 P,
                 S);
           else
-            gdn_layer(
+            gdn_layer<DT>(
                 it,
                 slm.get_multi_ptr<sycl::access::decorated::no>().get(),
                 P,
                 S);
         });
   });
-}
-inline void launch(sycl::queue& q, bool attn, const Ptrs& P, const Scratch& S) {
-  if (attn)
-    launch_t<true>(q, P, S);
-  else
-    launch_t<false>(q, P, S);
 }
 
 }  // namespace mono_decode

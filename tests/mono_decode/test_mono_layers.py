@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Single-card numerics of the mono decoder layers (all-reduces through a
 loopback mailbox): the batched kernels (2 / 4 / 8 rows) against the one-row
-kernel row by row, and the speculative-decoding verify kernels (requests x T
-tokens) against the one-row kernel run token by token from the same state."""
+kernel row by row, the speculative-decoding verify kernels (requests x T
+tokens) against the one-row kernel run token by token from the same state, in
+fp16 and bf16, and the bf16 kernels against the fp16 ones on the same
+values."""
 
 import itertools
 
@@ -15,6 +17,8 @@ from tests.mono_decode.mono_utils import (CONVD, HD, addr, attn_tensors, cos,
 
 DEVICE = "xpu:0"
 SPEC_SHAPES = [(2, 2), (3, 3), (4, 2), (4, 4), (6, 3), (8, 2), (8, 4), (8, 8)]
+F16, BF16 = torch.float16, torch.bfloat16
+DTYPES = [F16, BF16]
 _ids = itertools.count(9000)
 
 
@@ -38,13 +42,14 @@ def _check(got, ref, tol):
 
 
 @requires_mono
+@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("nb", [2, 4, 8])
-def test_gdn_batched_vs_single_row(nb):
+def test_gdn_batched_vs_single_row(nb, dtype):
     gen = torch.Generator().manual_seed(nb)
-    t = gdn_tensors(gen, DEVICE, slots=2 * nb)
+    t = gdn_tensors(gen, DEVICE, slots=2 * nb, dtype=dtype)
     conv, ssm = t[22], t[23]
     conv0, ssm0 = conv.clone(), ssm.clone()
-    h, r = rows(nb, gen, DEVICE)
+    h, r = rows(nb, gen, DEVICE, dtype)
     layer, _mb = _register(False, t)
     ref_layer, _mb1 = _register(False, t)
     # reference: row b alone on slot nb + b (the same initial state)
@@ -108,17 +113,19 @@ HYBRID_BLOCK = 1088
 
 @requires_mono
 @pytest.mark.parametrize(
-    "lc,block_size",
-    [(lc, 64) for lc in ATTN_LENGTHS] +
-    [(ATTN_LENGTHS[i], HYBRID_BLOCK) for i in (2, 4, 6)])
-def test_attn_batched_vs_single_row(lc, block_size):
+    "lc,block_size,dtype",
+    [(lc, 64, torch.float16) for lc in ATTN_LENGTHS] +
+    [(ATTN_LENGTHS[i], HYBRID_BLOCK, torch.float16) for i in (2, 4, 6)] +
+    [(ATTN_LENGTHS[i], 64, torch.bfloat16) for i in (0, 2, 4, 6)] +
+    [(ATTN_LENGTHS[4], HYBRID_BLOCK, torch.bfloat16)])
+def test_attn_batched_vs_single_row(lc, block_size, dtype):
     nb = len(lc)
     gen = torch.Generator().manual_seed(100 + sum(lc))
     bt, lc, slot, pos, blocks = _attn_case(gen, lc, 1, block_size)
-    t = attn_tensors(gen, DEVICE, blocks, block_size)
+    t = attn_tensors(gen, DEVICE, blocks, block_size, dtype)
     kv = t[18]
     kv0 = kv.clone()
-    h, r = rows(nb, gen, DEVICE)
+    h, r = rows(nb, gen, DEVICE, dtype)
     layer, _mb = _register(True, t)
     ref_layer, _mb1 = _register(True, t)
     seq = torch.tensor([c + 1 for c in lc], dtype=torch.int32, device=DEVICE)
@@ -140,17 +147,18 @@ def test_attn_batched_vs_single_row(lc, block_size):
 
 
 @requires_mono
-def test_attn_padded_rows():
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_attn_padded_rows(dtype):
     """A batch of 7 requests run by the 8-row kernel, padded like vLLM's
     graphs: the pad row has sequence length 0, slot -1, position 0 and a
     zero block-table row; it must not touch the real rows or the cache."""
     lc = [8, 70, 71, 72, 1007, 4104, 9008]
     gen = torch.Generator().manual_seed(77)
     bt, lc, slot, pos, blocks = _attn_case(gen, lc, 1, HYBRID_BLOCK)
-    t = attn_tensors(gen, DEVICE, blocks, HYBRID_BLOCK)
+    t = attn_tensors(gen, DEVICE, blocks, HYBRID_BLOCK, dtype)
     kv = t[18]
     kv0 = kv.clone()
-    h, r = rows(8, gen, DEVICE)
+    h, r = rows(8, gen, DEVICE, dtype)
     layer, _mb = _register(True, t)
     ref_layer, _mb1 = _register(True, t)
     seq = torch.tensor([c + 1 for c in lc], dtype=torch.int32, device=DEVICE)
@@ -191,19 +199,23 @@ def test_attn_padded_rows():
     assert torch.equal(flat[untouched], flat0[untouched])
 
 @requires_mono
+@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("nb,tokens", SPEC_SHAPES)
-def test_gdn_spec_vs_token_by_token(nb, tokens):
+def test_gdn_spec_vs_token_by_token(nb, tokens, dtype):
     gen = torch.Generator().manual_seed(200 + nb * 10 + tokens)
     nreq = nb // tokens
-    t = gdn_tensors(gen, DEVICE, slots=nreq * tokens + 1,
-                    conv_rows=tokens + 2)
+    t = gdn_tensors(gen,
+                    DEVICE,
+                    slots=nreq * tokens + 1,
+                    conv_rows=tokens + 2,
+                    dtype=dtype)
     conv, ssm = t[22], t[23]
     # num_accepted: different rollback columns per request
     acc = [1 + (3 * b + 1) % tokens for b in range(nreq)]
     idx = torch.arange(nreq * tokens, dtype=torch.int32,
                        device=DEVICE).view(nreq, tokens)
     conv0, ssm0 = conv.clone(), ssm.clone()
-    h, r = rows(nb, gen, DEVICE)
+    h, r = rows(nb, gen, DEVICE, dtype)
     layer, _mb = _register(False, t)
     # reference: a one-row layer on its own [1, 3, 4096] / [1, ...] state
     ref_conv = torch.empty((1, 3, CONVD), dtype=conv.dtype, device=DEVICE)
@@ -256,19 +268,22 @@ SPEC_IRREGULAR = [
 
 @requires_mono
 @pytest.mark.parametrize(
-    "nb,tokens,lc,block_size",
-    [(nb, t, _spec_lengths(nb // t, ctx), 64) for nb, t in SPEC_SHAPES
-     for ctx in (1000, 9000)] + [c + (64, ) for c in SPEC_IRREGULAR] +
-    [c + (HYBRID_BLOCK, ) for c in SPEC_IRREGULAR])
-def test_attn_spec_vs_token_by_token(nb, tokens, lc, block_size):
+    "nb,tokens,lc,block_size,dtype",
+    [(nb, t, _spec_lengths(nb // t, ctx), 64, F16) for nb, t in SPEC_SHAPES
+     for ctx in (1000, 9000)] + [c + (64, F16) for c in SPEC_IRREGULAR] +
+    [c + (HYBRID_BLOCK, F16) for c in SPEC_IRREGULAR] +
+    [(nb, t, _spec_lengths(nb // t, 1000), 64, BF16)
+     for nb, t in SPEC_SHAPES] + [c + (HYBRID_BLOCK, BF16)
+                                  for c in SPEC_IRREGULAR[:3]])
+def test_attn_spec_vs_token_by_token(nb, tokens, lc, block_size, dtype):
     gen = torch.Generator().manual_seed(300 + nb * 10 + tokens + sum(lc))
     nreq = nb // tokens
     assert len(lc) == nreq
     bt, lc, slot, pos, blocks = _attn_case(gen, lc, tokens, block_size)
-    t = attn_tensors(gen, DEVICE, blocks, block_size)
+    t = attn_tensors(gen, DEVICE, blocks, block_size, dtype)
     kv = t[18]
     kv0 = kv.clone()
-    h, r = rows(nb, gen, DEVICE)
+    h, r = rows(nb, gen, DEVICE, dtype)
     layer, _mb = _register(True, t)
     ref_layer, _mb1 = _register(True, t)
     exp = []
@@ -299,16 +314,18 @@ def test_attn_spec_vs_token_by_token(nb, tokens, lc, block_size):
 
 
 @requires_mono
-@pytest.mark.parametrize("ctx", [40959, 40960, 40961, 50001, 131109])
-def test_attn_long_context(ctx):
+@pytest.mark.parametrize("ctx,dtype", [(c, F16)
+                                       for c in (40959, 40960, 40961, 50001,
+                                                 131109)] + [(50001, BF16)])
+def test_attn_long_context(ctx, dtype):
     # The one-row kernel covers 40960 cached tokens a pass. Small residual
     # rows, so res_out - (h + r) is the attention's contribution; rescaling the
     # V rows past the first pass must change it in both kernels alike.
     gen = torch.Generator().manual_seed(ctx)
     bt, lc, slot, pos, blocks = _attn_case(gen, [ctx, 63], 1)
-    t = attn_tensors(gen, DEVICE, blocks)
+    t = attn_tensors(gen, DEVICE, blocks, dtype=dtype)
     kv = t[18]
-    h, r = rows(2, gen, DEVICE)
+    h, r = rows(2, gen, DEVICE, dtype)
     h, r = h * 0.01, r * 0.01
     hr = h.float() + r.float()
     seq = torch.tensor([c + 1 for c in lc], dtype=torch.int32, device=DEVICE)
@@ -355,3 +372,113 @@ def test_unsupported_shapes():
         torch.ops._xpu_C.mono_decode_layer(
             layer, h[:3], r[:3], ho[:3], ro[:3], idx[0, :1],
             torch.arange(3, dtype=torch.int32, device=DEVICE), None, None)
+
+
+def _mixer(ro, h, r):
+    """res_out - (h + r): the mixer's (attention / GDN) contribution."""
+    return ro.float() - h.float() - r.float()
+
+
+def _route_gap(ro, t):
+    """Per row: the gap between the 8th and 9th router logit (torch, from
+    res_out); a near tie may pick another 8th expert in either dtype."""
+    v = ro.float()
+    x = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6) * (
+        1 + t[1].float())
+    top = (x @ t[2].float().t()).topk(9, dim=-1).values
+    return top[:, 7] - top[:, 8]
+
+
+@requires_mono
+@pytest.mark.parametrize("attn,nb,tokens", [(False, 1, 1), (False, 2, 1),
+                                            (False, 8, 1), (False, 8, 4),
+                                            (True, 1, 1), (True, 4, 1),
+                                            (True, 8, 2)])
+def test_bf16_matches_fp16(attn, nb, tokens):
+    """The bf16 kernels against the fp16 ones on the same values (bf16 values,
+    exact in fp16): outputs, the mixer's contribution and the new recurrent
+    state / KV rows differ only by the rounding to bf16 inside the layer."""
+    nreq = nb // tokens
+    gen = torch.Generator().manual_seed(400 + nb * 10 + tokens + attn)
+    if attn:
+        bt, lc, slot, pos, blocks = _attn_case(gen,
+                                               _spec_lengths(nreq, 1000),
+                                               tokens)
+        tb = attn_tensors(gen, DEVICE, blocks, dtype=BF16)
+    else:
+        tb = gdn_tensors(gen,
+                         DEVICE,
+                         slots=nreq * tokens,
+                         conv_rows=tokens + 2,
+                         dtype=BF16)
+    # small residual rows: res_out is mostly the mixer's contribution (its
+    # rounding to bf16 would hide a small attention output)
+    hb, rb = rows(nb, gen, DEVICE, BF16)
+    hb, rb = hb * 0.01, rb * 0.01
+    out = {}
+    for dtype in DTYPES:
+        t = [x.to(dtype) if x.dtype == BF16 else x.clone() for x in tb]
+        h, r = hb.to(dtype), rb.to(dtype)
+        layer, _mb = _register(attn, t)
+        ho, ro = torch.empty_like(h), torch.empty_like(r)
+        if attn:
+            seq = torch.tensor([c + tokens for c in lc],
+                               dtype=torch.int32,
+                               device=DEVICE)
+            if tokens == 1:
+                torch.ops._xpu_C.mono_decode_layer(layer, h, r, ho, ro, pos,
+                                                   bt, seq, slot)
+            else:
+                assert torch.ops._xpu_C.mono_decode_layer_spec(
+                    layer, tokens, h, r, ho, ro, pos, bt, seq, slot)
+            state = t[18].view(-1, 2 * HD)[slot]
+        else:
+            zero = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+            idx = torch.arange(nreq * tokens, dtype=torch.int32,
+                               device=DEVICE)
+            if tokens == 1:
+                torch.ops._xpu_C.mono_decode_layer(layer, h, r, ho, ro, zero,
+                                                   idx, None, None)
+            else:
+                assert torch.ops._xpu_C.mono_decode_layer_spec(
+                    layer, tokens, h, r, ho, ro, zero,
+                    idx.view(nreq, tokens),
+                    torch.ones(nreq, dtype=torch.int32, device=DEVICE), None)
+            state = torch.cat([t[23].flatten(), t[22][:, 2:].flatten()])
+        torch.xpu.synchronize()
+        out[dtype] = (ho, ro, _mixer(ro, h, r), state)
+    a, b = out[F16], out[BF16]
+    assert b[0].dtype == BF16 and b[1].dtype == BF16
+    gap = _route_gap(b[1], tb)
+    for row in range(nb):
+        if gap[row] > 0.02:
+            _check(b[0][row], a[0][row], 0.9995)
+        _check(b[1][row], a[1][row], 0.9999)
+        _check(b[2][row], a[2][row], 0.9999)
+    _check(b[3], a[3], 0.9999)
+
+
+@requires_mono
+def test_mixed_dtypes_refused():
+    """Activations and KV cache / conv state in one dtype: an fp16 / bf16 mix
+    is refused at registration, activations of the other dtype at the call."""
+    gen = torch.Generator().manual_seed(8)
+    for dtype, other in ((F16, BF16), (BF16, F16)):
+        t = attn_tensors(gen, DEVICE, 4, dtype=dtype)
+        t[18] = t[18].to(other)
+        with pytest.raises(RuntimeError, match="mix of activations and KV"):
+            _register(True, t)
+        t = gdn_tensors(gen, DEVICE, slots=2, dtype=dtype)
+        t[22] = t[22].to(other)
+        with pytest.raises(RuntimeError, match="conv state"):
+            _register(False, t)
+        t = gdn_tensors(gen, DEVICE, slots=2, dtype=dtype)
+        t[1] = t[1].to(other)
+        with pytest.raises(RuntimeError, match="the layer's dtype"):
+            _register(False, t)
+        layer, _mb = _register(False, gdn_tensors(gen, DEVICE, 2,
+                                                  dtype=dtype))
+        h, r = rows(1, gen, DEVICE, other)
+        zero = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+        with pytest.raises(RuntimeError, match="the layer's dtype"):
+            _run(layer, h, r, zero, zero)
