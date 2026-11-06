@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from shutil import which
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     CMAKE_BUILD_TYPE: Optional[str] = None
     VLLM_TARGET_DEVICE: str = "xpu"
     MAX_JOBS: Optional[str] = None
+    VLLM_COMPILER_CACHE: str = "auto"
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VERBOSE: bool = False
@@ -30,6 +32,22 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
     if value is None:
         return None
     return int(value)
+
+
+def get_compiler_cache() -> str:
+    compiler_cache = os.getenv("VLLM_COMPILER_CACHE", "auto")
+    if compiler_cache == "auto":
+        return next((name for name in ("sccache", "ccache") if which(name)), "")
+    if compiler_cache == "none":
+        return ""
+    if compiler_cache not in ("ccache", "sccache"):
+        raise ValueError(
+            "VLLM_COMPILER_CACHE must be auto, ccache, sccache, or none")
+    if which(compiler_cache) is None:
+        raise RuntimeError(
+            f"Requested compiler cache {compiler_cache!r} is not on PATH")
+    return compiler_cache
+
 
 
 def get_vllm_port() -> Optional[int]:
@@ -82,6 +100,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default this is the number of CPUs
     "MAX_JOBS":
     lambda: os.getenv("MAX_JOBS", None),
+
+    # Compiler cache: auto prefers sccache, then ccache; none disables both.
+    "VLLM_COMPILER_CACHE":
+    lambda: os.getenv("VLLM_COMPILER_CACHE", "auto"),
 
     # If set, vllm-xpu-kernels will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
