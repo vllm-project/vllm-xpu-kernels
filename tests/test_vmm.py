@@ -45,18 +45,25 @@ def test_vmm_round_trip(device) -> None:
 def test_vmm_commit_reduces_free_memory(device) -> None:
     """Callers size what they map from getMemoryInfo, so mapped physical memory
     must be reported as used."""
-    size = 1 << 30
-    size -= size % ops.vmm_granularity(device)
+    granularity = ops.vmm_granularity(device)
+    size = max(256 << 20, granularity)
+    size -= size % granularity
     torch.xpu.synchronize(device)
+    # Earlier tests may leave the caching allocator holding most of the device.
+    torch.xpu.empty_cache()
     free_before, _ = torch.ops._C_cache_ops.getMemoryInfo(device)
+    if free_before < 2 * size:
+        pytest.skip(f"Only {free_before} bytes free on xpu:{device}.")
     base = ops.vmm_reserve(size)
-    handle = ops.vmm_create(size, device)
     try:
-        ops.vmm_map(base, size, handle)
-        free_after, _ = torch.ops._C_cache_ops.getMemoryInfo(device)
-        ops.vmm_unmap(base, size)
+        handle = ops.vmm_create(size, device)
+        try:
+            ops.vmm_map(base, size, handle)
+            free_after, _ = torch.ops._C_cache_ops.getMemoryInfo(device)
+            ops.vmm_unmap(base, size)
+        finally:
+            ops.vmm_release(handle)
     finally:
-        ops.vmm_release(handle)
         ops.vmm_free_reserved(base, size)
     assert free_before - free_after >= size // 2
 
