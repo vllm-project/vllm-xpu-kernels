@@ -28,7 +28,8 @@ def test_vmm_round_trip(device) -> None:
             assert view.data_ptr() == ptr
             assert view.untyped_storage().nbytes() == granularity
             view.fill_(3)
-            view[:256].copy_(torch.arange(256, device=view.device).to(torch.uint8))
+            view[:256].copy_(
+                torch.arange(256, device=view.device).to(torch.uint8))
             torch.xpu.synchronize(device)
             assert view[:256].cpu().tolist() == list(range(256))
             assert int(view[256:].sum()) == 3 * (granularity - 256)
