@@ -78,6 +78,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "moe_shared_fused_decode_interface",
       torch::kXPU,
       &moe_shared_fused_decode_interface);
+  xpu_ops.def(
+      "moe_int4_gemv(Tensor A, Tensor B, Tensor B_scale, "
+      "Tensor rows_per_expert, Tensor! D, int N, int K, int num_experts) -> "
+      "()");
+  xpu_ops.impl("moe_int4_gemv", torch::kXPU, &moe_int4_gemv);
 #endif
 
   xpu_ops.def(
