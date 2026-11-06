@@ -126,7 +126,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
     std::optional<int> num_splits,
     bool mix_batch,
     std::optional<at::Tensor>& splits_per_seq,
-    std::optional<at::Tensor>& work_list) {
+    std::optional<at::Tensor>& work_list,
+    std::optional<const at::Tensor>& dynamic_causal) {
   auto q_type = q.scalar_type();
   auto k_type = k.scalar_type();
   bool q_is_fp8 = q_type == at::ScalarType::Float8_e5m2 ||
@@ -187,6 +188,24 @@ std::vector<at::Tensor> mha_varlen_fwd(
   TORCH_CHECK(
       cu_seqlens_k.dtype() == torch::kInt32,
       "cu_seqlens_k must have dtype torch.int32");
+
+  if (dynamic_causal.has_value()) {
+    const auto& dynamic_causal_tensor = dynamic_causal.value();
+    CHECK_DEVICE(dynamic_causal_tensor);
+    CHECK_CONTIGUOUS(dynamic_causal_tensor);
+    TORCH_CHECK(
+        dynamic_causal_tensor.device() == q.device(),
+        "dynamic_causal must be on the same device as query");
+    TORCH_CHECK(
+        dynamic_causal_tensor.dtype() == torch::kInt32,
+        "dynamic_causal must have dtype torch.int32");
+    TORCH_CHECK(
+        dynamic_causal_tensor.dim() == 1,
+        "dynamic_causal must be a 1-D tensor");
+    TORCH_CHECK(
+        dynamic_causal_tensor.numel() == cu_seqlens_q.numel() - 1,
+        "dynamic_causal length must equal the number of sequences");
+  }
 
   auto& queue = vllm::xpu::vllmGetQueue(q.device().index());
 
@@ -251,7 +270,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_local,
         is_sink,
         softmax_lse_opt,
-        no_mask);
+        no_mask,
+        dynamic_causal);
   } else if (max_seqlen_q > 1) {
     if (!out_.has_value()) {
       // For fp8 query the output cannot be fp8; default to fp16 (matches the
@@ -289,7 +309,8 @@ std::vector<at::Tensor> mha_varlen_fwd(
         is_local,
         is_sink,
         softmax_lse_opt,
-        is_prefill_opt);
+        is_prefill_opt,
+        dynamic_causal);
 
     // Paged decode: processes only decode batches (skips prefill)
     int eff_window_left =
@@ -459,7 +480,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool is_causal, int window_size_left, int window_size_right, float "
       "softcap, bool return_softmax, "
       "Generator? gen, int? num_splits, bool mix_batch, Tensor? "
-      "splits_per_seq, Tensor? work_list) -> Tensor[]");
+      "splits_per_seq, Tensor? work_list, Tensor? dynamic_causal=None) -> "
+      "Tensor[]");
   ops.impl(
       "varlen_fwd",
       torch::kXPU,
