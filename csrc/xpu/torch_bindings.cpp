@@ -373,6 +373,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor num_sampled_tokens, int max_num_kept, int max_compact_support, "
       "int rows_per_request) -> (Tensor, Tensor, Tensor)");
   xpu_ops.impl("compact_sampling_mask", torch::kXPU, &compact_sampling_mask);
+
+  // Virtual memory management on PyTorch's SYCL context, mirroring cuMem*:
+  // reserve an address range, then map physical memory into it on demand.
+  xpu_ops.def("vmm_granularity(int device_index) -> int");
+  xpu_ops.impl("vmm_granularity", &vmm_granularity);
+  xpu_ops.def("vmm_reserve(int size) -> int");
+  xpu_ops.impl("vmm_reserve", &vmm_reserve);
+  xpu_ops.def("vmm_free_reserved(int ptr, int size) -> ()");
+  xpu_ops.impl("vmm_free_reserved", &vmm_free_reserved);
+  xpu_ops.def("vmm_create(int size, int device_index) -> int");
+  xpu_ops.impl("vmm_create", &vmm_create);
+  xpu_ops.def("vmm_map(int ptr, int size, int handle) -> ()");
+  xpu_ops.impl("vmm_map", &vmm_map);
+  xpu_ops.def("vmm_set_access(int ptr, int size, int device_index) -> ()");
+  xpu_ops.impl("vmm_set_access", &vmm_set_access);
+  xpu_ops.def("vmm_unmap(int ptr, int size) -> ()");
+  xpu_ops.impl("vmm_unmap", &vmm_unmap);
+  xpu_ops.def("vmm_release(int handle) -> ()");
+  xpu_ops.impl("vmm_release", &vmm_release);
+  xpu_ops.def(
+      "vmm_tensor_from_ptr(int ptr, int num_bytes, int device_index) -> "
+      "Tensor");
+  xpu_ops.impl("vmm_tensor_from_ptr", &vmm_tensor_from_ptr);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

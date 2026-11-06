@@ -455,3 +455,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
     int64_t max_num_kept,
     int64_t max_compact_support,
     int64_t rows_per_request);
+
+int64_t vmm_granularity(int64_t device_index);
+int64_t vmm_reserve(int64_t size);
+void vmm_free_reserved(int64_t ptr, int64_t size);
+int64_t vmm_create(int64_t size, int64_t device_index);
+void vmm_map(int64_t ptr, int64_t size, int64_t handle);
+void vmm_set_access(int64_t ptr, int64_t size, int64_t device_index);
+void vmm_unmap(int64_t ptr, int64_t size);
+void vmm_release(int64_t handle);
+torch::Tensor
+vmm_tensor_from_ptr(int64_t ptr, int64_t num_bytes, int64_t device_index);

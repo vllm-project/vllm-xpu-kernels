@@ -14,7 +14,7 @@
 #include <optional>
 #include <unordered_map>
 
-#include "ops.h"
+#include "xpu/ops.h"
 
 namespace syclex = sycl::ext::oneapi::experimental;
 

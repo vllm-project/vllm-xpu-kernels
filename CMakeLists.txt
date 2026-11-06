@@ -600,7 +600,6 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/utils/mem_cpy.cpp"
       "csrc/utils/host_register.cpp"
       "csrc/utils/mem_info.cpp"
-      "csrc/utils/vmm.cpp"
       "csrc/topk_per_row.cpp"
       "csrc/ngram_embedding_kernels.cpp")
   include_directories("/usr/include")
@@ -690,7 +689,8 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/sycl/apply_rotary_emb.cpp"
       "csrc/xpu/rand/exponential.cpp"
-      "csrc/xpu/utils.cpp")
+      "csrc/xpu/utils.cpp"
+      "csrc/xpu/vmm.cpp")
   if(MOE_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC
          "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp"

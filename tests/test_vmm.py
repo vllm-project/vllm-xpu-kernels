@@ -3,9 +3,10 @@ import pytest
 import torch
 
 import vllm_xpu_kernels._C  # noqa: F401
+import vllm_xpu_kernels._xpu_C  # noqa: F401
 
 DEVICES = [i for i in range(torch.xpu.device_count())]
-ops = torch.ops._C
+ops = torch.ops._xpu_C
 
 
 @pytest.mark.parametrize("device", DEVICES)
