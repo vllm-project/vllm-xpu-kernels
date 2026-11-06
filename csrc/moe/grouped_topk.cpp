@@ -1,14 +1,30 @@
 #include <sycl/sycl.hpp>
 #include <torch/all.h>
 
+#include <algorithm>
+
 #include "../utils.h"
 #include "../dispatch_utils.h"
+#include "moe_topk_funcs.h"
+#include "sycl_launch.h"
 
 namespace vllm {
 namespace moe {
 
 constexpr float kNegInfinity = INFINITY * -1;
 constexpr int32_t WARP_SIZE = 32;
+
+// Expert-count tiers / limits (mirror CUDA grouped_topk_kernels.cu).
+static constexpr int NumNemotronExperts = 512;
+static constexpr int NumKimiK2Experts = 384;
+static constexpr int NumDeepseekExperts = 256;
+static constexpr int MaxSupportedExpertCount =
+    std::max({NumNemotronExperts, NumKimiK2Experts, NumDeepseekExperts});
+static constexpr int MaxNumExpertsUnit = 128;
+static constexpr int NumTopGroupScores = 2;
+static constexpr int DefaultMaxNumTopExperts = 8;
+static constexpr int MaxSupportedTopExperts = 22;
+static constexpr int MaxNumTopGroups = 4;
 
 // Scoring function enums (mirror CUDA version)
 enum ScoringFunc {
@@ -424,13 +440,26 @@ template <ScoringFunc SF, typename T>
   }
 }
 
+// fp32 scoring: keeps the sigmoid entirely in fp32 (no intermediate cast back
+// to the input dtype). Used by the WarpSelect fallback path so that scoring,
+// bias add and top-k selection match the fp32 reference oracle.
+template <ScoringFunc SF, typename T>
+[[intel::device_indirectly_callable]] inline float apply_scoring_f32(T val) {
+  float f = sycl_cast<float, T>(val);
+  if constexpr (SF == SCORING_NONE) {
+    return f;
+  } else {
+    return sigmoid_accurate(f);
+  }
+}
+
 // -------------------------------------------------------------------------
 // topk_with_k2: compute sum of top-2 biased scores for one expert group.
 // Used as phase-1 in the fused kernel (one sub_group per expert group).
 // -------------------------------------------------------------------------
 template <typename T, typename BiasT, ScoringFunc SF>
 [[intel::device_indirectly_callable]] inline void topk_with_k2_biased(
-    T* output,
+    float* output,
     T const* input,
     BiasT const* bias,
     sycl::sub_group const& sg,
@@ -439,11 +468,14 @@ template <typename T, typename BiasT, ScoringFunc SF>
   float largest = -INFINITY;
   float second_largest = -INFINITY;
 
+  // Scoring, bias add and comparison are performed in fp32 to match the
+  // reference contract and the other dispatch paths. Doing this in the input
+  // dtype (e.g. bf16) breaks top-k ties differently and diverges from the
+  // oracle.
   if (num_experts_per_group > WARP_SIZE) {
     for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
-      T value = apply_scoring<SF>(input[i]);
-      value = value + static_cast<T>(bias[i]);
-      float valuef = sycl_cast<float, T>(value);
+      float valuef = apply_scoring_f32<SF, T>(input[i]);
+      valuef = valuef + static_cast<float>(bias[i]);
       if (valuef > largest) {
         second_largest = largest;
         largest = valuef;
@@ -454,9 +486,9 @@ template <typename T, typename BiasT, ScoringFunc SF>
   } else {
     // Each lane holds exactly one value (num_experts_per_group <= WARP_SIZE).
     for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
-      T value = apply_scoring<SF>(input[i]);
-      value = value + static_cast<T>(bias[i]);
-      largest = sycl_cast<float, T>(value);
+      float valuef = apply_scoring_f32<SF, T>(input[i]);
+      valuef = valuef + static_cast<float>(bias[i]);
+      largest = valuef;
     }
   }
 
@@ -473,7 +505,7 @@ template <typename T, typename BiasT, ScoringFunc SF>
   }
 
   if (lane_id == 0) {
-    *output = sycl_cast<T, float>(max1 + max2);
+    *output = max1 + max2;
   }
 }
 
@@ -485,10 +517,10 @@ template <typename T, typename BiasT, ScoringFunc SF>
 //   - work-group size = n_group * WARP_SIZE  (one sub_group per expert group)
 //
 // Shared-local memory layout (same as CUDA dynamic smem layout):
-//   [0 .. val_bytes_aligned-1]          : WarpSelect val staging (T)
+//   [0 .. val_bytes_aligned-1]          : WarpSelect val staging (float)
 //   [val_bytes_aligned .. internal-1]   : WarpSelect idx staging (int32_t)
 //   [internal .. internal+align-1]      : padding to 16-byte boundary
-//   [internal+align .. end]             : s_group_scores[n_group] (T)
+//   [internal+align .. end]             : s_group_scores[n_group] (float)
 // -------------------------------------------------------------------------
 template <typename T, typename BiasT, typename IdxT, ScoringFunc SF>
 class grouped_topk_fused_kernel_impl {
@@ -552,8 +584,10 @@ class grouped_topk_fused_kernel_impl {
         slm.template get_multi_ptr<sycl::access::decorated::no>().get();
 
     // WarpSelect internal staging occupies the first `internal_bytes`.
+    // Group scores, expert candidates and the WarpSelect comparisons are all
+    // carried in fp32, so size the staging for float.
     size_t const val_bytes =
-        static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(T);
+        static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(float);
     size_t const val_bytes_aligned =
         warp_topk::round_up_to_multiple_of<256>(val_bytes);
     size_t const idx_bytes =
@@ -563,7 +597,7 @@ class grouped_topk_fused_kernel_impl {
     // User-managed smem starts after internal staging, aligned to 16 bytes.
     uintptr_t ptr_u = reinterpret_cast<uintptr_t>(smem_buf + internal_bytes);
     ptr_u = (ptr_u + 15) & ~static_cast<uintptr_t>(15);
-    T* s_group_scores = reinterpret_cast<T*>(ptr_u);
+    float* s_group_scores = reinterpret_cast<float*>(ptr_u);
 
     // --- Phase 1: per-group scan (each sub_group handles one expert group) ---
     int32_t const group_offset = warp_id * num_experts_per_group;
@@ -591,19 +625,14 @@ class grouped_topk_fused_kernel_impl {
     warp_topk::WarpSelect<
         /*capacity*/ WARP_SIZE,
         /*greater*/ true,
-        T,
+        float,
         int32_t,
         /*is_stable*/ true>
-        group_sel(
-            topk_group_i32,
-            sycl_cast<T, float>(-INFINITY),
-            smem_buf,
-            local_id,
-            local_range);
+        group_sel(topk_group_i32, -INFINITY, smem_buf, local_id, local_range);
 
     // All lanes must participate; lanes beyond n_group feed -inf.
-    T gscore = (lane_id < n_group_i32) ? s_group_scores[lane_id]
-                                       : sycl_cast<T, float>(-INFINITY);
+    float gscore =
+        (lane_id < n_group_i32) ? s_group_scores[lane_id] : -INFINITY;
     group_sel.add(gscore, lane_id, sg, local_id);
     group_sel.done(sg, local_id);
 
@@ -611,8 +640,9 @@ class grouped_topk_fused_kernel_impl {
     bool proceed = false;
     if (topk_group_i32 > 0) {
       int const kth_lane = topk_group_i32 - 1;
-      T kth_val = sycl::select_from_group(sg, group_sel.get_val(0), kth_lane);
-      proceed = (sycl_cast<float, T>(kth_val) != -INFINITY);
+      float kth_val =
+          sycl::select_from_group(sg, group_sel.get_val(0), kth_lane);
+      proceed = (kth_val != -INFINITY);
     }
 
     if (!proceed) {
@@ -627,15 +657,10 @@ class grouped_topk_fused_kernel_impl {
     warp_topk::WarpSelect<
         /*capacity*/ WARP_SIZE,
         /*greater*/ true,
-        T,
+        float,
         int32_t,
         /*is_stable*/ true>
-        expert_sel(
-            topk_i32,
-            sycl_cast<T, float>(-INFINITY),
-            smem_buf,
-            local_id,
-            local_range);
+        expert_sel(topk_i32, -INFINITY, smem_buf, local_id, local_range);
 
     // Selected group ids reside in lanes [0, topk_group).
     int32_t sel_gid_lane =
@@ -650,15 +675,16 @@ class grouped_topk_fused_kernel_impl {
       for (int32_t i = lane_id; i < align_num_experts_per_group;
            i += WARP_SIZE) {
         // All lanes must call add() the same number of times.
-        T cand = sycl_cast<T, float>(-INFINITY);
+        // Scoring + bias add + comparison are done in fp32.
+        float cand = -INFINITY;
         int32_t idx = 0;
         if (i < num_experts_per_group) {
           idx = offset + i;
           T input_val = scores_token[idx];
           float input_f = sycl_cast<float, T>(input_val);
           if (sycl::isinf(input_f) == 0) {
-            T score = apply_scoring<SF>(input_val);
-            cand = score + static_cast<T>(bias[idx]);
+            float score = apply_scoring_f32<SF, T>(input_val);
+            cand = score + static_cast<float>(bias[idx]);
           }
         }
         expert_sel.add(cand, idx, sg, local_id);
@@ -672,7 +698,7 @@ class grouped_topk_fused_kernel_impl {
     if (lane_id < topk_i32) {
       lane_idx = static_cast<IdxT>(expert_sel.get_idx(0));
       T in = scores_token[static_cast<int32_t>(lane_idx)];
-      lane_unbiased = sycl_cast<float, T>(apply_scoring<SF>(in));
+      lane_unbiased = apply_scoring_f32<SF, T>(in);
     }
 
     float topk_sum = 1e-20f;
@@ -708,11 +734,12 @@ class grouped_topk_fused_kernel_impl {
 };
 
 // -------------------------------------------------------------------------
-// invokeNoAuxTcFused: fused path (mirrors CUDA grouped_topk_fused_kernel).
-// Takes scores + separate bias tensor; no pre-computed scores_with_bias.
+// launchGroupedTopkWarpSelect: WarpSelect fallback path (path 3).
+// Mirrors CUDA grouped_topk_fused_kernel. One work-group per token; one
+// sub_group (warp) per expert group.
 // -------------------------------------------------------------------------
 template <typename T, typename BiasT, typename IdxT, ScoringFunc SF>
-void invokeNoAuxTcFused(
+void launchGroupedTopkWarpSelect(
     T* scores,
     float* topk_values,
     IdxT* topk_indices,
@@ -725,20 +752,21 @@ void invokeNoAuxTcFused(
     bool const renormalize,
     double const routed_scaling_factor,
     sycl::queue& queue) {
-  // One work-group per token; one sub_group (warp) per expert group.
   int32_t const num_warps = static_cast<int32_t>(n_group);
   int32_t const block_size = num_warps * WARP_SIZE;
 
   // Compute dynamic shared memory size (mirrors CUDA).
+  // Group scores and WarpSelect comparisons run in fp32, so the staging and
+  // the s_group_scores buffer are sized for float.
   size_t const val_bytes =
-      static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(T);
+      static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(float);
   size_t const val_bytes_aligned =
       warp_topk::round_up_to_multiple_of<256>(val_bytes);
   size_t const idx_bytes =
       static_cast<size_t>(num_warps) * WARP_SIZE * sizeof(int32_t);
   size_t const internal_bytes = val_bytes_aligned + idx_bytes;
   // extra: 16-byte alignment padding + s_group_scores[n_group]
-  size_t const extra_bytes = 16 + static_cast<size_t>(n_group) * sizeof(T);
+  size_t const extra_bytes = 16 + static_cast<size_t>(n_group) * sizeof(float);
   size_t const smem_bytes = internal_bytes + extra_bytes;
 
   sycl::range<1> grid(static_cast<size_t>(num_tokens));
@@ -762,6 +790,1093 @@ void invokeNoAuxTcFused(
             renormalize,
             routed_scaling_factor));
   });
+}
+
+// =========================================================================
+// Path 2: grouped_topk_fused_small_expert_count kernel.
+// Register-resident top-K via reduce_topk::reduceTopK (mirrors CUDA
+// grouped_topk_fused_small_expert_count_kernel).
+//
+// NOTE on barrier safety: SYCL group_barrier is a collective over the whole
+// work-group, so the CUDA `if (warpIdx >= numGroup) return;` early-exit
+// (which precedes a __syncthreads) is converted into a `warp_active` guard so
+// every work-item still reaches the barrier.
+// =========================================================================
+template <
+    typename T,
+    typename BiasT,
+    typename IdxT,
+    ScoringFunc SF,
+    int MaxNumExperts,
+    bool UseGroups,
+    int MaxNumTopExperts = DefaultMaxNumTopExperts>
+class grouped_topk_fused_small_expert_count_impl {
+ public:
+  grouped_topk_fused_small_expert_count_impl(
+      T* scores,
+      float* topk_values,
+      IdxT* topk_indices,
+      BiasT const* routing_bias,
+      int64_t num_tokens,
+      int64_t num_group,
+      int64_t topk_group,
+      int64_t topk,
+      int64_t num_experts,
+      int64_t num_experts_per_group,
+      bool renormalize,
+      double routed_scaling_factor)
+      : scores(scores),
+        topk_values(topk_values),
+        topk_indices(topk_indices),
+        routing_bias(routing_bias),
+        num_tokens(num_tokens),
+        num_group(num_group),
+        topk_group(topk_group),
+        topk(topk),
+        num_experts(num_experts),
+        num_experts_per_group(num_experts_per_group),
+        renormalize(renormalize),
+        routed_scaling_factor(routed_scaling_factor) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
+    constexpr int NumWarps = MaxNumExperts / WARP_SIZE;
+    const float invalidScoreFloat = -INFINITY;
+
+    auto& smemScoreSigmoid =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<
+            float[MaxNumExperts]>(item.get_group());
+    auto& smemScoreBias = *sycl::ext::oneapi::group_local_memory_for_overwrite<
+        float[MaxNumExperts]>(item.get_group());
+    auto& smemGroupScores =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<float[NumWarps]>(
+            item.get_group());
+
+    auto sg = item.get_sub_group();
+    int32_t const block_idx = static_cast<int32_t>(item.get_group(0));
+    int32_t const local_id = static_cast<int32_t>(item.get_local_id(0));
+    int32_t const laneIdx = local_id % WARP_SIZE;
+    int32_t const warpIdx = local_id / WARP_SIZE;
+    int32_t const numGroup_i32 = static_cast<int32_t>(num_group);
+    int32_t const numExperts_i32 = static_cast<int32_t>(num_experts);
+    int32_t const numExpertsPerGroup_i32 =
+        static_cast<int32_t>(num_experts_per_group);
+    int32_t const topk_i32 = static_cast<int32_t>(topk);
+    int32_t const topkGroup_i32 = static_cast<int32_t>(topk_group);
+
+    bool warp_active = true;
+    if constexpr (UseGroups) {
+      warp_active = (warpIdx < numGroup_i32);
+    }
+
+    // Determine this thread's expert + whether it maps to a valid expert.
+    int32_t threadExpert = local_id;
+    bool expertSelected = threadExpert < numExperts_i32;
+    if constexpr (UseGroups) {
+      threadExpert = warpIdx * numExpertsPerGroup_i32 + laneIdx;
+      expertSelected = warp_active && (laneIdx < numExpertsPerGroup_i32);
+    }
+
+    int64_t const scoreIdx =
+        static_cast<int64_t>(block_idx) * numExperts_i32 + threadExpert;
+    float const biasVal =
+        expertSelected ? sycl_cast<float, BiasT>(routing_bias[threadExpert])
+                       : invalidScoreFloat;
+
+    float* topk_values_token =
+        topk_values + static_cast<int64_t>(block_idx) * topk;
+    IdxT* topk_indices_token =
+        topk_indices + static_cast<int64_t>(block_idx) * topk;
+
+    float const score = expertSelected ? sycl_cast<float, T>(scores[scoreIdx])
+                                       : invalidScoreFloat;
+    float const scoreSigmoid = apply_scoring<SF>(score);
+    if (expertSelected) {
+      smemScoreSigmoid[threadExpert] = scoreSigmoid;
+    }
+    float const scoreBias = scoreSigmoid + biasVal;
+    if (expertSelected) {
+      smemScoreBias[threadExpert] = scoreBias;
+    }
+
+    // Register staging for top group / expert reductions.
+    float topExpGroupScores[NumTopGroupScores];
+    int32_t topExpGroupIdx[NumTopGroupScores];
+    float topGroups[MaxNumTopGroups];
+    int32_t topGroupIdx[MaxNumTopGroups];
+    float expertScoreGroup[MaxNumTopGroups];
+    int32_t expertIdxGroup[MaxNumTopGroups];
+    float topScores[MaxNumTopExperts];
+    int32_t topExperts[MaxNumTopExperts];
+
+    if constexpr (UseGroups) {
+      if (warp_active) {
+        reduce_topk::reduceTopK(
+            sg,
+            topExpGroupScores,
+            topExpGroupIdx,
+            scoreBias,
+            threadExpert,
+            invalidScoreFloat);
+        if (laneIdx == 0) {
+          smemGroupScores[warpIdx] =
+              topExpGroupScores[0] + topExpGroupScores[1];
+        }
+      }
+    }
+
+    sycl::group_barrier(item.get_group());
+
+    if constexpr (UseGroups) {
+      if (warpIdx == 0) {
+        float groupScore = laneIdx < numGroup_i32 ? smemGroupScores[laneIdx]
+                                                  : invalidScoreFloat;
+        reduce_topk::reduceTopK(
+            sg, topGroups, topGroupIdx, groupScore, laneIdx, invalidScoreFloat);
+#pragma unroll
+        for (int ii = 0; ii < MaxNumTopGroups; ++ii) {
+          int32_t groupIdx = topGroupIdx[ii];
+          expertIdxGroup[ii] = groupIdx * numExpertsPerGroup_i32 + laneIdx;
+          expertScoreGroup[ii] = (ii < topkGroup_i32) && expertSelected
+                                     ? smemScoreBias[expertIdxGroup[ii]]
+                                     : invalidScoreFloat;
+        }
+        reduce_topk::reduceTopK(
+            sg,
+            topScores,
+            topExperts,
+            expertScoreGroup,
+            expertIdxGroup,
+            invalidScoreFloat,
+            topk_i32);
+      }
+    } else if constexpr (MaxNumExperts > MaxNumExpertsUnit) {
+      constexpr int NumExpertWarps =
+          (MaxNumExperts - 1) / MaxNumExpertsUnit + 1;
+      constexpr int NumInterTopK = NumExpertWarps * MaxNumTopExperts;
+      auto& smemInterTopScores =
+          *sycl::ext::oneapi::group_local_memory_for_overwrite<
+              float[NumInterTopK]>(item.get_group());
+      auto& smemInterTopExperts =
+          *sycl::ext::oneapi::group_local_memory_for_overwrite<
+              int32_t[NumInterTopK]>(item.get_group());
+      if (warpIdx < NumExpertWarps) {
+        int offset = warpIdx * WARP_SIZE * MaxNumTopGroups;
+#pragma unroll
+        for (int ii = 0; ii < MaxNumTopGroups; ++ii) {
+          int32_t expertIdx = ii * WARP_SIZE + laneIdx;
+          expertIdxGroup[ii] = offset + expertIdx;
+          expertScoreGroup[ii] = offset + expertIdx < numExperts_i32
+                                     ? smemScoreBias[offset + expertIdx]
+                                     : invalidScoreFloat;
+        }
+        reduce_topk::reduceTopK(
+            sg,
+            topScores,
+            topExperts,
+            expertScoreGroup,
+            expertIdxGroup,
+            invalidScoreFloat,
+            topk_i32);
+
+        if (laneIdx < topk_i32) {
+          smemInterTopScores[warpIdx * MaxNumTopExperts + laneIdx] =
+              topScores[laneIdx];
+          smemInterTopExperts[warpIdx * MaxNumTopExperts + laneIdx] =
+              topExperts[laneIdx];
+        } else if (laneIdx >= topk_i32 && laneIdx < MaxNumTopExperts) {
+          smemInterTopScores[warpIdx * MaxNumTopExperts + laneIdx] =
+              invalidScoreFloat;
+          smemInterTopExperts[warpIdx * MaxNumTopExperts + laneIdx] =
+              MaxNumExperts - 1;
+        }
+      }
+      sycl::group_barrier(item.get_group());
+      if (warpIdx == 0) {
+        constexpr int NumInterTopKPerThread =
+            (NumInterTopK - 1) / WARP_SIZE + 1;
+        float intermediateScore[NumInterTopKPerThread];
+        int32_t intermediateExpert[NumInterTopKPerThread];
+        for (int i = laneIdx; i < NumInterTopKPerThread * WARP_SIZE;
+             i += WARP_SIZE) {
+          int ii = i / WARP_SIZE;
+          if (i < NumInterTopK) {
+            intermediateScore[ii] = smemInterTopScores[i];
+            intermediateExpert[ii] = smemInterTopExperts[i];
+          } else {
+            intermediateScore[ii] = invalidScoreFloat;
+            intermediateExpert[ii] = MaxNumExperts - 1;
+          }
+        }
+        reduce_topk::reduceTopK(
+            sg,
+            topScores,
+            topExperts,
+            intermediateScore,
+            intermediateExpert,
+            invalidScoreFloat,
+            topk_i32);
+      }
+    } else {
+      if (warpIdx == 0) {
+#pragma unroll
+        for (int ii = 0; ii < MaxNumTopGroups; ++ii) {
+          int32_t expertIdx = ii * WARP_SIZE + laneIdx;
+          expertIdxGroup[ii] = expertIdx;
+          expertScoreGroup[ii] = expertIdx < numExperts_i32
+                                     ? smemScoreBias[expertIdx]
+                                     : invalidScoreFloat;
+        }
+        reduce_topk::reduceTopK(
+            sg,
+            topScores,
+            topExperts,
+            expertScoreGroup,
+            expertIdxGroup,
+            invalidScoreFloat,
+            topk_i32);
+      }
+    }
+
+    if (warpIdx == 0) {
+      int32_t expertIdx =
+          laneIdx < topk_i32 ? topExperts[laneIdx] : MaxNumExperts - 1;
+      float scoreNorm = laneIdx < topk_i32 ? smemScoreSigmoid[expertIdx] : 0.0f;
+      float finalScore = static_cast<float>(scoreNorm * routed_scaling_factor);
+      if (renormalize) {
+        float redNorm =
+            sycl::reduce_over_group(sg, scoreNorm, sycl::plus<float>());
+        finalScore /= (redNorm + 1e-20f);
+      }
+      if (laneIdx < topk_i32) {
+        topk_values_token[laneIdx] = finalScore;
+        topk_indices_token[laneIdx] = static_cast<IdxT>(expertIdx);
+      }
+    }
+  }
+
+ private:
+  T* scores;
+  float* topk_values;
+  IdxT* topk_indices;
+  BiasT const* routing_bias;
+  int64_t num_tokens;
+  int64_t num_group;
+  int64_t topk_group;
+  int64_t topk;
+  int64_t num_experts;
+  int64_t num_experts_per_group;
+  bool renormalize;
+  double routed_scaling_factor;
+};
+
+template <
+    typename T,
+    typename BiasT,
+    typename IdxT,
+    ScoringFunc SF,
+    int MaxNumExperts,
+    bool UseGroups,
+    int MaxNumTopExperts = DefaultMaxNumTopExperts>
+void submitSmallExpertCount(
+    sycl::queue& queue,
+    T* scores,
+    float* topk_values,
+    IdxT* topk_indices,
+    BiasT const* bias,
+    int64_t num_tokens,
+    int64_t n_group,
+    int64_t topk_group,
+    int64_t topk,
+    int64_t num_experts,
+    int64_t num_experts_per_group,
+    bool renormalize,
+    double routed_scaling_factor) {
+  sycl::range<1> grid(static_cast<size_t>(num_tokens));
+  sycl::range<1> block(static_cast<size_t>(MaxNumExperts));
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(grid * block, block),
+      grouped_topk_fused_small_expert_count_impl<
+          T,
+          BiasT,
+          IdxT,
+          SF,
+          MaxNumExperts,
+          UseGroups,
+          MaxNumTopExperts>(
+          scores,
+          topk_values,
+          topk_indices,
+          bias,
+          num_tokens,
+          n_group,
+          topk_group,
+          topk,
+          num_experts,
+          num_experts_per_group,
+          renormalize,
+          routed_scaling_factor));
+}
+
+template <typename T, typename BiasT, typename IdxT, ScoringFunc SF>
+void launchSmallExpertCount(
+    sycl::queue& queue,
+    T* scores,
+    float* topk_values,
+    IdxT* topk_indices,
+    BiasT const* bias,
+    int64_t num_tokens,
+    int64_t n_group,
+    int64_t topk_group,
+    int64_t topk,
+    int64_t num_experts,
+    bool renormalize,
+    double routed_scaling_factor,
+    bool is_single_group) {
+  int64_t const experts_per_group = num_experts / n_group;
+  if (!is_single_group) {
+    // Multi-group path: UseGroups=true, bounded by NumDeepseekExperts threads.
+    submitSmallExpertCount<T, BiasT, IdxT, SF, NumDeepseekExperts, true>(
+        queue,
+        scores,
+        topk_values,
+        topk_indices,
+        bias,
+        num_tokens,
+        n_group,
+        topk_group,
+        topk,
+        num_experts,
+        experts_per_group,
+        renormalize,
+        routed_scaling_factor);
+    return;
+  }
+
+  // Single-group path: UseGroups=false, tier by expert count.
+  if (num_experts == NumNemotronExperts && n_group == 1 &&
+      topk == MaxSupportedTopExperts) {
+    submitSmallExpertCount<
+        T,
+        BiasT,
+        IdxT,
+        SF,
+        NumNemotronExperts,
+        false,
+        MaxSupportedTopExperts>(
+        queue,
+        scores,
+        topk_values,
+        topk_indices,
+        bias,
+        num_tokens,
+        n_group,
+        topk_group,
+        topk,
+        num_experts,
+        experts_per_group,
+        renormalize,
+        routed_scaling_factor);
+  } else if (
+      num_experts > NumKimiK2Experts &&
+      num_experts <= MaxSupportedExpertCount) {
+    submitSmallExpertCount<T, BiasT, IdxT, SF, MaxSupportedExpertCount, false>(
+        queue,
+        scores,
+        topk_values,
+        topk_indices,
+        bias,
+        num_tokens,
+        n_group,
+        topk_group,
+        topk,
+        num_experts,
+        experts_per_group,
+        renormalize,
+        routed_scaling_factor);
+  } else if (
+      num_experts > MaxNumExpertsUnit && num_experts <= NumKimiK2Experts) {
+    submitSmallExpertCount<T, BiasT, IdxT, SF, NumKimiK2Experts, false>(
+        queue,
+        scores,
+        topk_values,
+        topk_indices,
+        bias,
+        num_tokens,
+        n_group,
+        topk_group,
+        topk,
+        num_experts,
+        experts_per_group,
+        renormalize,
+        routed_scaling_factor);
+  } else {
+    submitSmallExpertCount<T, BiasT, IdxT, SF, MaxNumExpertsUnit, false>(
+        queue,
+        scores,
+        topk_values,
+        topk_indices,
+        bias,
+        num_tokens,
+        n_group,
+        topk_group,
+        topk,
+        num_experts,
+        experts_per_group,
+        renormalize,
+        routed_scaling_factor);
+  }
+}
+
+// =========================================================================
+// Path 1: single_group_topk (n_group == 1 && topk_group == 1).
+// flashinfer-adapted block / warp kernels with tiered (experts, topk)
+// dispatch. Mirrors CUDA namespace single_group_topk.
+// =========================================================================
+namespace single_group_topk {
+
+static constexpr int BlockDim = 256;
+static constexpr float InvalidScore = -INFINITY;
+
+template <int MaxNumExperts, int MaxNumTopExperts>
+inline constexpr bool use_tuned_block_path() {
+  return MaxNumTopExperts == 16 &&
+         (MaxNumExperts == 896 || MaxNumExperts == 1024);
+}
+
+template <typename T, typename BiasT, ScoringFunc SF>
+[[intel::device_indirectly_callable]] inline void preprocess_score(
+    T input,
+    BiasT correction_bias,
+    float& unbiased_score,
+    float& selection_score) {
+  unbiased_score = 0.0f;
+  selection_score = InvalidScore;
+  float const input_float = sycl_cast<float, T>(input);
+  float const bias = sycl_cast<float, BiasT>(correction_bias);
+  if (!sycl::isfinite(input_float) || !sycl::isfinite(bias)) {
+    return;
+  }
+  float const unbiased = apply_scoring<SF>(input_float);
+  float const biased = unbiased + bias;
+  if constexpr (SF == SCORING_NONE) {
+    if (!sycl::isfinite(biased)) {
+      return;
+    }
+  }
+  unbiased_score = unbiased;
+  selection_score = biased == 0.0f ? 0.0f : biased;
+}
+
+template <typename IdxT>
+[[intel::device_indirectly_callable]] inline void write_outputs(
+    sycl::sub_group const& sg,
+    float lane_selection_score,
+    float lane_unbiased,
+    int32_t lane_expert,
+    int32_t lane,
+    int32_t token,
+    int32_t topk,
+    float* topk_values,
+    IdxT* topk_indices,
+    bool renormalize,
+    float routed_scaling_factor) {
+  bool const finite_selection =
+      lane < topk && lane_selection_score != InvalidScore;
+  lane_unbiased = finite_selection ? lane_unbiased : 0.0f;
+  int const finite_count =
+      sycl::reduce_over_group(sg, finite_selection ? 1 : 0, sycl::plus<int>());
+  float const sum =
+      sycl::reduce_over_group(sg, lane_unbiased, sycl::plus<float>());
+
+  if (lane < topk) {
+    float output = 0.0f;
+    if (finite_count == 0) {
+      if (renormalize) {
+        output = 1.0f / static_cast<float>(topk);
+      }
+    } else if (finite_selection) {
+      float scale = routed_scaling_factor;
+      if (renormalize) {
+        scale /= sum + 1e-20f;
+      }
+      output = lane_unbiased * scale;
+    }
+    int64_t const output_index = static_cast<int64_t>(token) * topk + lane;
+    topk_values[output_index] = output;
+    topk_indices[output_index] = static_cast<IdxT>(lane_expert);
+  }
+}
+
+template <int MaxNumExperts>
+struct WarpTopKLaunchConfig {
+  static constexpr int DefaultBlockDim =
+      MaxNumExperts <= 1024 ? MaxNumExperts : 1024;
+  static constexpr int BlockDim = DefaultBlockDim > 256 ? 256 : DefaultBlockDim;
+  static constexpr int NumWarps = BlockDim / WARP_SIZE;
+  static constexpr int MaxBlockScale =
+      (DefaultBlockDim + BlockDim - 1) / BlockDim;
+  static constexpr int MaxBlocks = 1024 * MaxBlockScale;
+
+  static int grid_dim(int64_t num_tokens) {
+    int64_t const token_blocks = (num_tokens + NumWarps - 1) / NumWarps;
+    int64_t const selected =
+        token_blocks < MaxBlocks ? token_blocks : MaxBlocks;
+    return static_cast<int>(selected > 0 ? selected : 1);
+  }
+};
+
+template <
+    typename T,
+    typename BiasT,
+    typename IdxT,
+    ScoringFunc SF,
+    int MaxNumExperts,
+    int MaxNumTopExperts>
+class single_group_topk_block_impl {
+ public:
+  single_group_topk_block_impl(
+      T const* scores,
+      float* topk_values,
+      IdxT* topk_indices,
+      BiasT const* bias,
+      int64_t num_experts,
+      int64_t topk,
+      bool renormalize,
+      float routed_scaling_factor)
+      : scores(scores),
+        topk_values(topk_values),
+        topk_indices(topk_indices),
+        bias(bias),
+        num_experts(num_experts),
+        topk(topk),
+        renormalize(renormalize),
+        routed_scaling_factor(routed_scaling_factor) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
+    constexpr int NumChunks = (MaxNumExperts + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int WorkerValuesPerLane =
+        use_tuned_block_path<MaxNumExperts, MaxNumTopExperts>() ? 8 : 4;
+    constexpr int ExpertsPerWorkerWarp = WorkerValuesPerLane * WARP_SIZE;
+    using LaneOwnedRange = reduce_topk::
+        HighExpertLaneOwnedTopKRange<MaxNumExperts, MaxNumTopExperts>;
+    constexpr int NumWorkerWarps =
+        (MaxNumExperts + ExpertsPerWorkerWarp - 1) / ExpertsPerWorkerWarp;
+    constexpr int NumIntermediate = NumWorkerWarps * MaxNumTopExperts;
+    constexpr int MergeValuesPerLane =
+        (NumIntermediate + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr bool LaneOwnedResourcesFit =
+        NumWorkerWarps <= BlockDim / WARP_SIZE && MergeValuesPerLane <= 64;
+    constexpr bool UseHierarchicalLaneTopK =
+        LaneOwnedRange::kEnabled && LaneOwnedResourcesFit;
+
+    auto& biased_scores = *sycl::ext::oneapi::group_local_memory_for_overwrite<
+        float[MaxNumExperts]>(item.get_group());
+    auto& unbiased_scores =
+        *sycl::ext::oneapi::group_local_memory_for_overwrite<
+            float[MaxNumExperts]>(item.get_group());
+
+    int32_t const token = static_cast<int32_t>(item.get_group(0));
+    int32_t const local_id = static_cast<int32_t>(item.get_local_id(0));
+    int32_t const lane = local_id % WARP_SIZE;
+    int32_t const warp_id = local_id / WARP_SIZE;
+    int32_t const num_experts_i32 = static_cast<int32_t>(num_experts);
+    int32_t const topk_i32 = static_cast<int32_t>(topk);
+    T const* token_scores = scores + static_cast<int64_t>(token) * num_experts;
+    auto sg = item.get_sub_group();
+
+    for (int32_t expert = local_id; expert < num_experts_i32;
+         expert += BlockDim) {
+      preprocess_score<T, BiasT, SF>(
+          token_scores[expert],
+          bias[expert],
+          unbiased_scores[expert],
+          biased_scores[expert]);
+    }
+    sycl::group_barrier(item.get_group());
+
+    if constexpr (UseHierarchicalLaneTopK) {
+      auto& intermediate_scores =
+          *sycl::ext::oneapi::group_local_memory_for_overwrite<
+              float[NumIntermediate]>(item.get_group());
+      auto& intermediate_indices =
+          *sycl::ext::oneapi::group_local_memory_for_overwrite<
+              int32_t[NumIntermediate]>(item.get_group());
+
+      if (warp_id < NumWorkerWarps) {
+        float local_scores[WorkerValuesPerLane];
+        int32_t local_indices[WorkerValuesPerLane];
+#pragma unroll
+        for (int index = 0; index < WorkerValuesPerLane; ++index) {
+          int32_t const expert =
+              warp_id * ExpertsPerWorkerWarp + index * WARP_SIZE + lane;
+          local_scores[index] =
+              expert < num_experts_i32 ? biased_scores[expert] : InvalidScore;
+          local_indices[index] = expert;
+        }
+
+        float lane_score;
+        int32_t lane_expert;
+        reduce_topk::reduceTopKForLane<MaxNumTopExperts>(
+            sg,
+            lane_score,
+            lane_expert,
+            local_scores,
+            local_indices,
+            InvalidScore,
+            lane);
+        if (lane < MaxNumTopExperts) {
+          int32_t const intermediate = warp_id * MaxNumTopExperts + lane;
+          bool const active = lane < topk_i32;
+          intermediate_scores[intermediate] =
+              active ? lane_score : InvalidScore;
+          intermediate_indices[intermediate] =
+              active ? lane_expert : MaxNumExperts;
+        }
+      }
+      sycl::group_barrier(item.get_group());
+
+      if (warp_id != 0) {
+        return;
+      }
+
+      float merge_scores[MergeValuesPerLane];
+      int32_t merge_indices[MergeValuesPerLane];
+#pragma unroll
+      for (int index = 0; index < MergeValuesPerLane; ++index) {
+        int32_t const intermediate = index * WARP_SIZE + lane;
+        bool const active = intermediate < NumIntermediate;
+        merge_scores[index] =
+            active ? intermediate_scores[intermediate] : InvalidScore;
+        merge_indices[index] =
+            active ? intermediate_indices[intermediate] : MaxNumExperts;
+      }
+
+      float lane_score;
+      int32_t lane_expert;
+      reduce_topk::reduceTopKForLane<MaxNumTopExperts>(
+          sg,
+          lane_score,
+          lane_expert,
+          merge_scores,
+          merge_indices,
+          InvalidScore,
+          lane);
+      float const lane_unbiased =
+          lane < topk_i32 && lane_expert >= 0 && lane_expert < num_experts_i32
+              ? unbiased_scores[lane_expert]
+              : 0.0f;
+      write_outputs(
+          sg,
+          lane_score,
+          lane_unbiased,
+          lane_expert,
+          lane,
+          token,
+          topk_i32,
+          topk_values,
+          topk_indices,
+          renormalize,
+          routed_scaling_factor);
+    } else {
+      if (warp_id != 0) {
+        return;
+      }
+
+      float local_scores[NumChunks];
+      int32_t local_indices[NumChunks];
+#pragma unroll
+      for (int index = 0; index < NumChunks; ++index) {
+        int32_t const expert = index * WARP_SIZE + lane;
+        local_scores[index] =
+            expert < num_experts_i32 ? biased_scores[expert] : InvalidScore;
+        local_indices[index] = expert;
+      }
+
+      float top_scores[MaxNumTopExperts];
+      int32_t top_experts[MaxNumTopExperts];
+      reduce_topk::reduceTopK(
+          sg,
+          top_scores,
+          top_experts,
+          local_scores,
+          local_indices,
+          InvalidScore,
+          topk_i32);
+      float const lane_score =
+          lane < topk_i32 ? top_scores[lane] : InvalidScore;
+      int32_t const lane_expert = lane < topk_i32 ? top_experts[lane] : -1;
+      float const lane_unbiased =
+          lane < topk_i32 && lane_expert >= 0 && lane_expert < num_experts_i32
+              ? unbiased_scores[lane_expert]
+              : 0.0f;
+      write_outputs(
+          sg,
+          lane_score,
+          lane_unbiased,
+          lane_expert,
+          lane,
+          token,
+          topk_i32,
+          topk_values,
+          topk_indices,
+          renormalize,
+          routed_scaling_factor);
+    }
+  }
+
+ private:
+  T const* scores;
+  float* topk_values;
+  IdxT* topk_indices;
+  BiasT const* bias;
+  int64_t num_experts;
+  int64_t topk;
+  bool renormalize;
+  float routed_scaling_factor;
+};
+
+template <
+    typename T,
+    typename BiasT,
+    typename IdxT,
+    ScoringFunc SF,
+    int MaxNumExperts,
+    int MaxNumTopExperts>
+class single_group_topk_warp_impl {
+ public:
+  single_group_topk_warp_impl(
+      T const* scores,
+      float* topk_values,
+      IdxT* topk_indices,
+      BiasT const* bias,
+      int64_t num_tokens,
+      int64_t num_experts,
+      int64_t topk,
+      bool renormalize,
+      float routed_scaling_factor)
+      : scores(scores),
+        topk_values(topk_values),
+        topk_indices(topk_indices),
+        bias(bias),
+        num_tokens(num_tokens),
+        num_experts(num_experts),
+        topk(topk),
+        renormalize(renormalize),
+        routed_scaling_factor(routed_scaling_factor) {}
+
+  void operator()
+      [[sycl::reqd_sub_group_size(WARP_SIZE)]] (sycl::nd_item<1> item) const {
+    constexpr int NumChunks = (MaxNumExperts + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int WarpBlockDim = WarpTopKLaunchConfig<MaxNumExperts>::BlockDim;
+    using LaneOwnedRange = reduce_topk::
+        HighExpertLaneOwnedTopKRange<MaxNumExperts, MaxNumTopExperts>;
+
+    int32_t const local_id = static_cast<int32_t>(item.get_local_id(0));
+    int32_t const lane = local_id % WARP_SIZE;
+    int32_t const warp_id = local_id / WARP_SIZE;
+    int32_t const global_warp =
+        static_cast<int32_t>(item.get_group(0)) * WarpBlockDim / WARP_SIZE +
+        warp_id;
+    int32_t const global_warp_stride =
+        static_cast<int32_t>(item.get_group_range(0)) * WarpBlockDim /
+        WARP_SIZE;
+    int32_t const num_experts_i32 = static_cast<int32_t>(num_experts);
+    int32_t const topk_i32 = static_cast<int32_t>(topk);
+    int32_t const num_tokens_i32 = static_cast<int32_t>(num_tokens);
+    auto sg = item.get_sub_group();
+
+    for (int32_t token = global_warp; token < num_tokens_i32;
+         token += global_warp_stride) {
+      T const* token_scores =
+          scores + static_cast<int64_t>(token) * num_experts;
+      float local_scores[NumChunks];
+      int32_t local_indices[NumChunks];
+#pragma unroll
+      for (int index = 0; index < NumChunks; ++index) {
+        int32_t const expert = index * WARP_SIZE + lane;
+        float unbiased;
+        float selection;
+        if (expert < num_experts_i32) {
+          preprocess_score<T, BiasT, SF>(
+              token_scores[expert], bias[expert], unbiased, selection);
+        } else {
+          selection = InvalidScore;
+        }
+        local_scores[index] = selection;
+        local_indices[index] = expert;
+      }
+
+      float lane_score;
+      int32_t lane_expert;
+      if constexpr (LaneOwnedRange::kEnabled) {
+        reduce_topk::reduceTopKForLane<MaxNumTopExperts>(
+            sg,
+            lane_score,
+            lane_expert,
+            local_scores,
+            local_indices,
+            InvalidScore,
+            lane);
+      } else {
+        float top_scores[MaxNumTopExperts];
+        int32_t top_experts[MaxNumTopExperts];
+        reduce_topk::reduceTopK(
+            sg,
+            top_scores,
+            top_experts,
+            local_scores,
+            local_indices,
+            InvalidScore,
+            topk_i32);
+        lane_score = lane < topk_i32 ? top_scores[lane] : InvalidScore;
+        lane_expert = lane < topk_i32 ? top_experts[lane] : -1;
+      }
+
+      float lane_unbiased = 0.0f;
+      if (lane < topk_i32 && lane_expert >= 0 &&
+          lane_expert < num_experts_i32) {
+        lane_unbiased = lane_score - sycl_cast<float, BiasT>(bias[lane_expert]);
+      }
+      write_outputs(
+          sg,
+          lane_score,
+          lane_unbiased,
+          lane_expert,
+          lane,
+          token,
+          topk_i32,
+          topk_values,
+          topk_indices,
+          renormalize,
+          routed_scaling_factor);
+    }
+  }
+
+ private:
+  T const* scores;
+  float* topk_values;
+  IdxT* topk_indices;
+  BiasT const* bias;
+  int64_t num_tokens;
+  int64_t num_experts;
+  int64_t topk;
+  bool renormalize;
+  float routed_scaling_factor;
+};
+
+template <
+    typename T,
+    typename BiasT,
+    typename IdxT,
+    ScoringFunc SF,
+    int MaxNumExperts,
+    int MaxNumTopExperts>
+void launch_tier(
+    sycl::queue& queue,
+    T* scores,
+    float* topk_values,
+    IdxT* topk_indices,
+    BiasT const* bias,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t topk,
+    bool renormalize,
+    double routed_scaling_factor) {
+  // One work-group per token only pays off for small batches: on both BMG
+  // and CRI the warp kernel is faster from ~128 tokens on.
+  bool const use_block_kernel =
+      use_tuned_block_path<MaxNumExperts, MaxNumTopExperts>() ||
+      MaxNumExperts > 1024 || num_experts >= 1024 ||
+      (num_experts >= 256 && num_tokens <= 64);
+  float const scale = static_cast<float>(routed_scaling_factor);
+  if (use_block_kernel) {
+    sycl::range<1> grid(static_cast<size_t>(num_tokens));
+    sycl::range<1> block(static_cast<size_t>(BlockDim));
+    vllm::xpu::sycl_kernel_submit(
+        queue,
+        sycl::nd_range<1>(grid * block, block),
+        single_group_topk_block_impl<
+            T,
+            BiasT,
+            IdxT,
+            SF,
+            MaxNumExperts,
+            MaxNumTopExperts>(
+            scores,
+            topk_values,
+            topk_indices,
+            bias,
+            num_experts,
+            topk,
+            renormalize,
+            scale));
+  } else {
+    using WarpConfig = WarpTopKLaunchConfig<MaxNumExperts>;
+    sycl::range<1> grid(static_cast<size_t>(WarpConfig::grid_dim(num_tokens)));
+    sycl::range<1> block(static_cast<size_t>(WarpConfig::BlockDim));
+    vllm::xpu::sycl_kernel_submit(
+        queue,
+        sycl::nd_range<1>(grid * block, block),
+        single_group_topk_warp_impl<
+            T,
+            BiasT,
+            IdxT,
+            SF,
+            MaxNumExperts,
+            MaxNumTopExperts>(
+            scores,
+            topk_values,
+            topk_indices,
+            bias,
+            num_tokens,
+            num_experts,
+            topk,
+            renormalize,
+            scale));
+  }
+}
+
+template <typename T, typename BiasT, typename IdxT, ScoringFunc SF>
+bool invoke(
+    sycl::queue& queue,
+    T* scores,
+    float* topk_values,
+    IdxT* topk_indices,
+    BiasT const* bias,
+    int64_t num_tokens,
+    int64_t num_experts,
+    int64_t topk,
+    bool renormalize,
+    double routed_scaling_factor) {
+#define SG_TRY_TIER(E, TK)                      \
+  if (num_experts <= (E) && topk <= (TK)) {     \
+    launch_tier<T, BiasT, IdxT, SF, (E), (TK)>( \
+        queue,                                  \
+        scores,                                 \
+        topk_values,                            \
+        topk_indices,                           \
+        bias,                                   \
+        num_tokens,                             \
+        num_experts,                            \
+        topk,                                   \
+        renormalize,                            \
+        routed_scaling_factor);                 \
+    return true;                                \
+  }
+  if constexpr (SF == SCORING_SIGMOID) {
+    SG_TRY_TIER(128, 8)
+    SG_TRY_TIER(256, 8)
+    SG_TRY_TIER(384, 8)
+    SG_TRY_TIER(512, 8)
+    SG_TRY_TIER(512, 22)
+    SG_TRY_TIER(768, 16)
+    SG_TRY_TIER(896, 16)
+    SG_TRY_TIER(1024, 16)
+  } else {
+    SG_TRY_TIER(128, 4)
+    SG_TRY_TIER(128, 8)
+    SG_TRY_TIER(160, 8)
+    SG_TRY_TIER(256, 8)
+    SG_TRY_TIER(256, 16)
+    SG_TRY_TIER(512, 8)
+    SG_TRY_TIER(512, 16)
+    SG_TRY_TIER(512, 22)
+    SG_TRY_TIER(512, 32)
+    SG_TRY_TIER(576, 8)
+    SG_TRY_TIER(768, 16)
+    SG_TRY_TIER(896, 16)
+    SG_TRY_TIER(1024, 16)
+  }
+#undef SG_TRY_TIER
+  return false;
+}
+
+}  // namespace single_group_topk
+
+// -------------------------------------------------------------------------
+// invokeNoAuxTcFused: 3-way dispatch entry (mirrors CUDA invokeNoAuxTc).
+//   1. single_group_topk fast path  (n_group==1 && topk_group==1, tiered)
+//   2. grouped_topk_fused_small_expert_count  (register reduceTopK)
+//   3. WarpSelect fallback
+// -------------------------------------------------------------------------
+template <typename T, typename BiasT, typename IdxT, ScoringFunc SF>
+void invokeNoAuxTcFused(
+    T* scores,
+    float* topk_values,
+    IdxT* topk_indices,
+    BiasT const* bias,
+    int64_t const num_tokens,
+    int64_t const num_experts,
+    int64_t const n_group,
+    int64_t const topk_group,
+    int64_t const topk,
+    bool const renormalize,
+    double const routed_scaling_factor,
+    sycl::queue& queue) {
+  // Path 1: single-group tiered fast path.
+  if (n_group == 1 && topk_group == 1 &&
+      single_group_topk::invoke<T, BiasT, IdxT, SF>(
+          queue,
+          scores,
+          topk_values,
+          topk_indices,
+          bias,
+          num_tokens,
+          num_experts,
+          topk,
+          renormalize,
+          routed_scaling_factor)) {
+    return;
+  }
+
+  // Path 2: register-resident small-expert-count kernel.
+  bool const is_single_group =
+      (n_group == 1) && (topk_group == 1) &&
+      (num_experts <= MaxSupportedExpertCount) &&
+      (topk <= DefaultMaxNumTopExperts || topk == MaxSupportedTopExperts);
+
+  int64_t const experts_per_group = num_experts / n_group;
+  bool const is_multi_group =
+      (n_group > 1) && (num_experts <= NumDeepseekExperts) &&
+      (experts_per_group <= WARP_SIZE) &&
+      (experts_per_group * topk_group <= MaxNumExpertsUnit) &&
+      (topk <= DefaultMaxNumTopExperts) && (topk_group <= MaxNumTopGroups);
+
+  if (is_single_group || is_multi_group) {
+    launchSmallExpertCount<T, BiasT, IdxT, SF>(
+        queue,
+        scores,
+        topk_values,
+        topk_indices,
+        bias,
+        num_tokens,
+        n_group,
+        topk_group,
+        topk,
+        num_experts,
+        renormalize,
+        routed_scaling_factor,
+        is_single_group);
+    return;
+  }
+
+  // Path 3: WarpSelect fallback.
+  launchGroupedTopkWarpSelect<T, BiasT, IdxT, SF>(
+      scores,
+      topk_values,
+      topk_indices,
+      bias,
+      num_tokens,
+      num_experts,
+      n_group,
+      topk_group,
+      topk,
+      renormalize,
+      routed_scaling_factor,
+      queue);
 }
 
 #define INSTANTIATE_NOAUX_TC_FUSED(T, BiasT, IdxT, SF)  \

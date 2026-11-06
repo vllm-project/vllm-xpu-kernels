@@ -7,6 +7,7 @@
 
 #include "../utils.h"
 #include "../dispatch_utils.h"
+#include "sycl_launch.h"
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -520,7 +521,7 @@ void topkGatingSoftplusSqrtLauncherHelper(
         is_padding,
         bias_vl,
         image_sentinel_lo};
-    q.parallel_for(ndr, k_obj);
+    vllm::xpu::sycl_kernel_submit(q, ndr, k_obj);
   })
 }
 
