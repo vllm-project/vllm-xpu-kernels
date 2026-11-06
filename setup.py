@@ -192,6 +192,7 @@ class cmake_build_ext(build_ext):
             "MOE_KERNELS_ENABLED",
             "GDN_KERNELS_ENABLED",
             "MQA_LOGITS_KERNELS_ENABLED",
+            "MONO_DECODE_KERNELS_ENABLED",
             "XPU_SPECIFIC_KERNELS_ENABLED",
             "XPUMEM_ALLOCATOR_ENABLED",
             "VLLM_XPU_ENABLE_ONEDNN",
@@ -567,6 +568,9 @@ if _is_enabled("BUILD_SYCL_TLA_KERNELS"):
         if _is_enabled("MHC_KERNELS_ENABLED"):
             additional_libraries["mhc_kernels_xe_2"] = (
                 "/csrc/xpu/mhc/xe_2")
+        if _is_enabled("MONO_DECODE_KERNELS_ENABLED"):
+            additional_libraries["mono_decode_kernels_xe_2"] = (
+                "/csrc/xpu/mono_decode/xe_2")
         if _is_enabled("MOE_KERNELS_ENABLED"):
             additional_libraries["grouped_gemm_xe_2"] = (
                 "/csrc/xpu/grouped_gemm/xe_2")

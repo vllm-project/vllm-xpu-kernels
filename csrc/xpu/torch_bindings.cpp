@@ -4,6 +4,9 @@
   #include "xpu/grouped_gemm/grouped_gemm_interface.h"
   #include "xpu/grouped_gemm/moe_shared_fused_interface.h"
 #endif
+#ifdef VLLM_MONO_DECODE_ENABLED
+  #include "xpu/mono_decode/mono_decode_interface.h"
+#endif
 #include "xpu/lora/lora_ops.h"
 
 #include <torch/library.h>
@@ -183,6 +186,70 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "                   int sinkhorn_repeat)"
       "                   -> (Tensor, Tensor, Tensor, Tensor)");
   xpu_ops.impl("mhc_fused_post_pre", torch::kXPU, &mhc_fused_post_pre);
+#endif
+
+#ifdef VLLM_MONO_DECODE_ENABLED
+  #ifdef VLLM_XPU_ENABLE_XE2
+  // Decode-only mono decoder layers (Qwen3.5 / 3.6 MoE, TP2, Xe2): one kernel
+  // per layer, in-kernel all-reduces through a P2P mailbox in the peer card's
+  // memory (Level Zero IPC). See mono_decode/mono_decode_interface.h.
+  xpu_ops.def("mono_decode_supported(int device) -> bool");
+  xpu_ops.impl(
+      "mono_decode_supported", &vllm::mono_decode::mono_decode_supported);
+  xpu_ops.def("mono_max_context() -> int");
+  xpu_ops.impl("mono_max_context", &vllm::mono_decode::mono_max_context);
+  xpu_ops.def("mono_health(int device) -> Tensor");
+  xpu_ops.impl("mono_health", &vllm::mono_decode::mono_health);
+  xpu_ops.def("mono_fault_inject(int layer, int delta) -> ()");
+  xpu_ops.impl("mono_fault_inject", &vllm::mono_decode::mono_fault_inject);
+  xpu_ops.def("mono_ipc_create(int bytes) -> int");
+  xpu_ops.impl("mono_ipc_create", &vllm::mono_decode::mono_ipc_create);
+  xpu_ops.def("mono_ipc_export(int handle) -> int[]");
+  xpu_ops.impl("mono_ipc_export", &vllm::mono_decode::mono_ipc_export);
+  xpu_ops.def(
+      "mono_ipc_open(int handle, int[] peer_info, int local_fd=-1) -> int");
+  xpu_ops.impl("mono_ipc_open", &vllm::mono_decode::mono_ipc_open);
+  xpu_ops.def("mono_ipc_ptr(int handle, bool peer) -> int");
+  xpu_ops.impl("mono_ipc_ptr", &vllm::mono_decode::mono_ipc_ptr);
+  xpu_ops.def("mono_mbox_bytes() -> int");
+  xpu_ops.impl("mono_mbox_bytes", &vllm::mono_decode::mono_mbox_bytes);
+  xpu_ops.def(
+      "mono_register_layer(int layer, bool attn, int mbox, int peer, Tensor[] "
+      "tensors) -> ()");
+  xpu_ops.impl("mono_register_layer", &vllm::mono_decode::mono_register_layer);
+  xpu_ops.def(
+      "mono_decode_layer(int layer, Tensor hidden, Tensor residual, Tensor(a!) "
+      "hid_out, Tensor(b!) res_out, "
+      "Tensor positions, Tensor m0, Tensor? m1, Tensor? m2) -> ()");
+  xpu_ops.impl(
+      "mono_decode_layer", torch::kXPU, &vllm::mono_decode::mono_decode_layer);
+  xpu_ops.def(
+      "mono_decode_layer_spec(int layer, int tokens, Tensor hidden, Tensor "
+      "residual, Tensor(a!) hid_out, Tensor(b!) res_out, Tensor positions, "
+      "Tensor m0, Tensor m1, Tensor? m2) -> bool");
+  xpu_ops.impl(
+      "mono_decode_layer_spec",
+      torch::kXPU,
+      &vllm::mono_decode::mono_decode_layer_spec);
+  xpu_ops.def(
+      "mono_register_mtp(int layer, int mbox, int peer, Tensor[] tensors, int "
+      "rank) -> ()");
+  xpu_ops.impl("mono_register_mtp", &vllm::mono_decode::mono_register_mtp);
+  xpu_ops.def("mono_mtp_prologue(int layer, Tensor x, Tensor(a!) out) -> bool");
+  xpu_ops.impl(
+      "mono_mtp_prologue", torch::kXPU, &vllm::mono_decode::mono_mtp_prologue);
+  xpu_ops.def("mono_lmhead_mbox_bytes() -> int");
+  xpu_ops.impl(
+      "mono_lmhead_mbox_bytes", &vllm::mono_decode::mono_lmhead_mbox_bytes);
+  xpu_ops.def("mono_shard_topk_max_k() -> int");
+  xpu_ops.impl(
+      "mono_shard_topk_max_k", &vllm::mono_decode::mono_shard_topk_max_k);
+  xpu_ops.def(
+      "mono_shard_topk(Tensor(a!) vals, Tensor(b!) idx, Tensor logits, int k, "
+      "int rank, int mbox, int peer) -> ()");
+  xpu_ops.impl(
+      "mono_shard_topk", torch::kXPU, &vllm::mono_decode::mono_shard_topk);
+  #endif
 #endif
 
   xpu_ops.def(
