@@ -224,6 +224,10 @@ class XpuFusedMoe:
             self.inter_size = w13.shape[-2] // 2
 
         # FIXME: move this to vllm
+        # Contract: weights flagged xpu_fused_moe are int8-packed signed
+        # 4-bit two's-complement [E, N, K/2] (implement_zp output). The
+        # int4 GEMV below requires B.dtype == torch.int8; anything else
+        # (e.g. still-uint4 pre-packed weights) falls through to cutlass.
         if is_int4 and not hasattr(w13, 'xpu_fused_moe'):
             w13_tmp = torch.empty_like(w13).to(torch.int8)
             w2_tmp = torch.empty_like(w2).to(torch.int8)
@@ -370,6 +374,7 @@ class XpuFusedMoe:
         if (self._use_int4_gemv and A_scale is None and bias is None
                 and A.shape[0] <= INT4_GEMV_MAX_ROWS
                 and A.dtype in (torch.float16, torch.bfloat16)
+                and B.dtype == torch.int8
                 and B_scale is not None and B_scale.dtype == A.dtype
                 and B_scale.dim() == 3 and B_scale.is_contiguous()
                 and K % 512 == 0 and (K // B_scale.shape[-1]) % 32 == 0):
