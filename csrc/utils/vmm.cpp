@@ -20,11 +20,11 @@ namespace syclex = sycl::ext::oneapi::experimental;
 
 namespace {
 
-#define VMM_SYCL_CALL(call)                                       \
-  try {                                                           \
-    call;                                                         \
-  } catch (const sycl::exception& e) {                            \
-    TORCH_CHECK(false, #call " failed: ", e.what());              \
+#define VMM_SYCL_CALL(call)                          \
+  try {                                              \
+    call;                                            \
+  } catch (const sycl::exception& e) {               \
+    TORCH_CHECK(false, #call " failed: ", e.what()); \
   }
 
 // Physical memory objects keyed by the handle returned to Python; dropping the
@@ -77,16 +77,18 @@ int64_t vmm_reserve(int64_t size) {
 }
 
 void vmm_free_reserved(int64_t ptr, int64_t size) {
-  VMM_SYCL_CALL(syclex::free_virtual_mem(
-      static_cast<uintptr_t>(ptr), static_cast<size_t>(size), vmm_context()));
+  VMM_SYCL_CALL(
+      syclex::free_virtual_mem(
+          static_cast<uintptr_t>(ptr),
+          static_cast<size_t>(size),
+          vmm_context()));
 }
 
 int64_t vmm_create(int64_t size, int64_t device_index) {
   TORCH_CHECK(size > 0, "VMM physical memory size must be positive.");
   auto& device = vmm_device(device_index);
   std::optional<syclex::physical_mem> mem;
-  VMM_SYCL_CALL(
-      mem.emplace(device, vmm_context(), static_cast<size_t>(size)));
+  VMM_SYCL_CALL(mem.emplace(device, vmm_context(), static_cast<size_t>(size)));
   std::lock_guard<std::mutex> lock(g_handles_mutex);
   int64_t handle = g_next_handle++;
   g_handles.emplace(handle, std::move(*mem));
@@ -104,18 +106,20 @@ void vmm_map(int64_t ptr, int64_t size, int64_t handle) {
 void vmm_set_access(int64_t ptr, int64_t size, int64_t device_index) {
   // Access applies to the whole context, which spans every device.
   vmm_device(device_index);
-  VMM_SYCL_CALL(syclex::set_access_mode(
-      reinterpret_cast<const void*>(ptr),
-      static_cast<size_t>(size),
-      syclex::address_access_mode::read_write,
-      vmm_context()));
+  VMM_SYCL_CALL(
+      syclex::set_access_mode(
+          reinterpret_cast<const void*>(ptr),
+          static_cast<size_t>(size),
+          syclex::address_access_mode::read_write,
+          vmm_context()));
 }
 
 void vmm_unmap(int64_t ptr, int64_t size) {
-  VMM_SYCL_CALL(syclex::unmap(
-      reinterpret_cast<const void*>(ptr),
-      static_cast<size_t>(size),
-      vmm_context()));
+  VMM_SYCL_CALL(
+      syclex::unmap(
+          reinterpret_cast<const void*>(ptr),
+          static_cast<size_t>(size),
+          vmm_context()));
 }
 
 void vmm_release(int64_t handle) { take_handle(handle); }
@@ -127,7 +131,8 @@ torch::Tensor
 vmm_tensor_from_ptr(int64_t ptr, int64_t num_bytes, int64_t device_index) {
   TORCH_CHECK(num_bytes >= 0, "num_bytes must be non-negative.");
   vmm_device(device_index);
-  const at::Device device(at::kXPU, static_cast<c10::DeviceIndex>(device_index));
+  const at::Device device(
+      at::kXPU, static_cast<c10::DeviceIndex>(device_index));
   return at::for_blob(reinterpret_cast<void*>(ptr), {num_bytes})
       .options(at::TensorOptions().dtype(at::kByte).device(device))
       .target_device(device)
