@@ -6,8 +6,8 @@ on:
   push:
     branches: [main]
   schedule:
-    # Nightly full-scope run at 03:00 CST (19:00 UTC)
-    - cron: '0 19 * * *'
+    # Nightly full-scope run at 18:00 Beijing time (10:00 UTC)
+    - cron: '0 10 * * *'
   workflow_dispatch:
     inputs:
       test_scope:
@@ -19,9 +19,9 @@ permissions:
   contents: read
 
 concurrency:
-  # Group by PR number for pull_request, by ref for push/schedule/dispatch.
-  # Only cancel in-progress runs for pull_request events; push to main and schedule are never cancelled.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Supersede older PR runs, but give push/schedule/dispatch independent groups
+  # so new runs cannot replace pending main runs.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
