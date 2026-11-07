@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import logging
 import os
+import sys
 from typing import Optional
 
 import torch
@@ -55,16 +56,21 @@ def _should_fail_closed() -> bool:
     return not _env_allow_fallback()
 
 
+# Tracks configs we have already warned about so the
+# missing-kernel fallback notice is emitted once per config rather
+# than on every decode step.
+_warned_missing_configs: set = set()
+
 # Speculative-decoding fast path.
 #
-# In speculative decoding every sequence in the batch issues the same small
-# number of query tokens (q_len = num_speculative_tokens + 1, e.g. 2/3/4). By
+# In speculative decoding each sequence issues a small number of query tokens,
+# potentially different across requests with adaptive verification. By
 # default such a batch (max_seqlen_q > 1) is routed to the chunk-prefill
 # kernel, which has no split-K parallelism over the KV dimension. With a long
 # KV cache and only a handful of query rows the GPU is heavily under-utilized,
 # so prefill is slow.
 #
-# Instead we reuse the split-K *decode* kernel: for a uniform, causal, paged
+# Instead we reuse the split-K *decode* kernel: for a causal, paged
 # batch we treat each (sequence, query-position) pair as an independent
 # single-token decode "sequence" and run the whole batch in one decode
 # launch. Query token ``j`` (0-indexed within the q_len window) attends
@@ -74,7 +80,7 @@ def _should_fail_closed() -> bool:
 # exact (it matches the causal reference) and gets the decode path's split-K
 # parallelism.
 #
-# The path only triggers for small, uniform query lengths; larger uniform
+# The path only triggers for small query lengths; larger
 # query lengths keep using chunk-prefill (which reuses the shared KV tile
 # across the Q block, whereas the decode path rescans KV per query token).
 # The default threshold (16) stays within the measured win region across KV
@@ -103,18 +109,9 @@ def _spec_decode_varlen_fwd(
     window_size,
     softcap,
 ):
-    """Run the split-K decode kernel once for a speculative-decode batch.
-
-    Assumes a uniform query length: every sequence contributes the same
-    ``q_len`` consecutive query tokens, laid out as ``q[i * q_len + j]`` for
-    sequence ``i`` and position ``j``. Each (sequence, position) pair is
-    treated as an independent single-token decode "sequence", so the whole
-    batch runs in a single ``varlen_fwd`` launch. Returns the output tensor
-    (same row order as ``q``).
-    """
+    """Decode causal query rows, including empty requests and query padding."""
     batch = cu_seqlens_q.numel() - 1
-    q_len = q.shape[0] // batch
-    total = q.shape[0]  # batch * q_len
+    total = q.shape[0]
 
     # One decode query per (sequence, position) pair; the row order already
     # matches q, so the output needs no reordering.
@@ -122,17 +119,16 @@ def _spec_decode_varlen_fwd(
                                      dtype=torch.int32,
                                      device=q.device)
     dummy_cu_seqlens_k = torch.zeros_like(cu_seqlens_q_spec)
-    # Causal per-position KV length: query row i*q_len + j (position j within
-    # the q_len window of sequence i) attends to seqused_k[i] - (q_len-1-j)
-    # tokens.
-    pos = torch.arange(q_len, device=q.device, dtype=seqused_k.dtype)
-    seqused_k_spec = (seqused_k.view(batch, 1) -
-                      (q_len - 1 - pos).view(1, q_len)).clamp_(min=1).reshape(
-                          total).to(torch.int32)
-
-    # Expand the block table so each pseudo-sequence points at its parent
-    # sequence's blocks.
-    block_table_spec = block_table.repeat_interleave(q_len, dim=0)
+    positions = cu_seqlens_q_spec[:-1]
+    request_ids = torch.searchsorted(cu_seqlens_q[1:], positions,
+                                    right=True).clamp_(max=batch - 1)
+    query_ends = cu_seqlens_q[1:].index_select(0, request_ids)
+    is_padding = positions >= cu_seqlens_q[-1]
+    seqused_k_spec = (seqused_k.index_select(0, request_ids) -
+                     (query_ends - positions - 1)).clamp_(min=1).to(torch.int32)
+    seqused_k_spec.masked_fill_(is_padding, 1)
+    block_table_spec = block_table.index_select(0, request_ids)
+    block_table_spec.masked_fill_(is_padding[:, None], 0)
 
     out, _ = torch.ops._vllm_fa2_C.varlen_fwd(
         q,
@@ -148,6 +144,7 @@ def _spec_decode_varlen_fwd(
         1,  # max_seqlen_q
         max_seqlen_k,
         0.0,  # dropout_p
+        None,  # q_scale
         k_descale,
         v_descale,
         softmax_scale,
@@ -164,7 +161,7 @@ def _spec_decode_varlen_fwd(
         None,  # splits_per_seq
         None,  # work_list
     )
-    return out
+    return out.masked_fill_(is_padding[:, None, None], 0)
 
 
 def maybe_contiguous(x):
@@ -198,12 +195,16 @@ def _normalize_descale_tensor(
 
 
 def _kv_tile_from_block_size(block_size: int) -> int:
-    # Mirror of flash_api.cpp get_num_splits() / TileShapeQK<1>.
-    if block_size == 16:
-        return 16
+    # Mirror of paged_decode_utils.hpp::dispatch_by_page_size /
+    # flash_api.cpp get_num_splits() / TileShapeQK<1>.
+    # Supported block sizes: any positive multiple of 16. The previously
+    # supported sizes keep their tile (multiples of 64 -> 64, 32 -> 32); every
+    # other multiple of 16 (16, 48, 80, 96, 112, 160, ...) uses the _16 tile.
+    if block_size % 64 == 0:
+        return 64
     if block_size == 32:
         return 32
-    return 64
+    return 16
 
 
 def _min_blocks_for_split(kv_tile: int) -> int:
@@ -236,6 +237,7 @@ def build_decode_split_plan(
     num_kv_splits: int,
     num_xe_cores: int,
     num_heads_kv: int,
+    window_size_left: int = -1,
 ):
     """Produce (splits_per_seq, work_list) for the compact-grid decode kernel.
 
@@ -249,6 +251,10 @@ def build_decode_split_plan(
     num_kv_splits   : global cap on per-seq split count (buffer dim).
     num_xe_cores    : Xe-core count used for the target-WG heuristic.
     num_heads_kv    : KV heads (workload is sliced across heads_kv heads).
+    window_size_left: sliding-window size (-1 = unlimited). Tiles before the
+                      window are skipped by the kernel, which offsets every
+                      work item by its own `k_block0`, so the plan must only
+                      partition the tiles that are actually inside the window.
 
     Returns
     -------
@@ -261,7 +267,7 @@ def build_decode_split_plan(
     - sum(splits_per_seq) == work_list.size(0) == total_wgs
     - For every emitted work item, kv_tile_count >= 1
     - For each seq, the work items partition [0, kv_tiles) exactly once
-    - splits_per_seq[i] <= num_kv_splits (so Oaccum/exp_sums/max_logits
+    - splits_per_seq[i] <= num_kv_splits (so Oaccum/softmax_lse_accum
       buffer indexing is safe)
     - splits_per_seq[i] folds in {single-split heuristic, balanced
       assignment, hard cap}; the kernel never needs to second-guess it.
@@ -278,8 +284,18 @@ def build_decode_split_plan(
     else:
         kv_lens_list = [int(v) for v in kv_lens]
 
-    tiles_per_seq = [max(1, (kv + kv_tile - 1) // kv_tile)
-                     for kv in kv_lens_list]
+    # Mirror the kernel's k_block0: for decode all packed GQA heads sit at
+    # position kv_len - 1, so a left window of W makes tiles before
+    # (kv_len - 1 - W) / kv_tile unreachable. work_list tile indices are
+    # relative to k_block0, matching `kv_split_offset = k_block0 + tile_start`.
+    def _windowed_tiles(kv: int) -> int:
+        total = (kv + kv_tile - 1) // kv_tile
+        if window_size_left >= 0:
+            k_block0 = max(kv - 1 - window_size_left, 0) // kv_tile
+            total -= k_block0
+        return max(1, total)
+
+    tiles_per_seq = [_windowed_tiles(kv) for kv in kv_lens_list]
     total_tiles = sum(tiles_per_seq)
 
     # Target: ~2x oversubscription of Xe cores per kv head, minimum 4 tiles
@@ -417,7 +433,7 @@ def ref_paged_attn(query: torch.Tensor,
         if casual:
             attn.masked_fill_(mask, float("-inf"))
         if sink is not None:
-            sink_expanded = sink.view(sink.size()[0], 1,
+            sink_expanded = sink.to(attn.dtype).view(sink.size()[0], 1,
                                       1).expand(attn.size()[0],
                                                 attn.size()[1], 1)
             attn = torch.cat([attn, sink_expanded], dim=-1)
@@ -474,6 +490,7 @@ def flash_attn_varlen_func(
     num_splits_kv: Optional[int] = None,
     is_mix_batch: bool = True,
     host_kv_lens: Optional[torch.Tensor] = None,
+    dynamic_causal: Optional[torch.Tensor] = None,
 ):
     """
     FlashAttention interface for variable-length sequences, with optional
@@ -498,7 +515,9 @@ def flash_attn_varlen_func(
             when using paged KV cache. This is forwarded to the underlying
             C++ FlashAttention op as its ``num_splits`` parameter; the split
             unit is KV blocks, not individual tokens or pages.
-        fa_version: FlashAttention backend version selector.
+        dynamic_causal: Optional int32 tensor with one entry per sequence.
+            Nonzero entries use causal masking and zero entries use
+            bidirectional attention. When provided, it overrides ``causal``.
     """
     if host_kv_lens is not None:
         if seqused_k is not None:
@@ -524,6 +543,7 @@ def flash_attn_varlen_func(
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
+    q_descale = _normalize_descale_tensor(q_descale, "q_descale")
     k_descale = _normalize_descale_tensor(k_descale, "k_descale")
     v_descale = _normalize_descale_tensor(v_descale, "v_descale")
     # custom op does not support non-tuple input
@@ -533,20 +553,15 @@ def flash_attn_varlen_func(
     else:
         assert len(window_size) == 2
         real_window_size = (window_size[0], window_size[1])
+    if (dynamic_causal is not None and real_window_size[1] == 0):
+        real_window_size = (real_window_size[0], real_window_size[0])
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
 
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
 
     if fa_version == 2:
-        if scheduler_metadata is not None and q_descale is not None \
-            and k_descale is not None and v_descale is not None:
-            raise NotImplementedError(
-                "FA2 does not support scheduler_metadata, q_descale, "
-                "k_descale, v_descale")
         if num_splits > 1:
             raise NotImplementedError("FA2 does not support num_splits > 1")
-        if q_descale is not None:
-            raise NotImplementedError("FA2 does not support q_descale")
         if scheduler_metadata is not None:
             raise NotImplementedError(
                 "FA2 does not support scheduler_metadata")
@@ -555,38 +570,6 @@ def flash_attn_varlen_func(
                                            and v_descale is not None):
             raise NotImplementedError(
                 "FA2 only supports both KV cache descaled")
-
-        # Speculative-decoding fast path: redirect small, uniform, causal,
-        # paged query batches (q_len = num_speculative_tokens + 1) from the
-        # slow chunk-prefill kernel to the split-K decode kernel. See the
-        # comment on _SPEC_DECODE_MAX_QLEN above for the rationale.
-        # Skip under XPUGraph capture: the path allocates fresh metadata
-        # (arange / zeros / repeat_interleave) every call.
-        batch = cu_seqlens_q.numel() - 1
-        is_uniform_qlen = (batch > 0 and q.shape[0] == batch * max_seqlen_q)
-        if (not capturing and block_table is not None and causal
-                and not return_softmax_lse
-                and softcap == 0.0 and alibi_slopes is None and q_v is None
-                and q_descale is None and scheduler_metadata is None
-                and seqused_k is not None
-                and 1 < max_seqlen_q <= _SPEC_DECODE_MAX_QLEN
-                and is_uniform_qlen):
-            return _spec_decode_varlen_fwd(
-                q,
-                k,
-                v,
-                out,
-                cu_seqlens_q,
-                seqused_k,
-                block_table,
-                max_seqlen_k,
-                k_descale,
-                v_descale,
-                softmax_scale,
-                s_aux,
-                real_window_size,
-                softcap,
-            )
 
         # Compute per-seq splits and work_list on host, upload to device.
         # Only enable for decode (max_seqlen_q == 1) with paged KV cache,
@@ -602,12 +585,20 @@ def flash_attn_varlen_func(
             kv_tile = _kv_tile_from_block_size(block_size)
             num_xe_cores = _infer_num_xe_cores(q.device)
             num_heads_kv = k.size(2)
+            # Mirror flash_api.cpp: any window bound enables local masking,
+            # and an unbounded left edge is normalized to max_seqlen_k.
+            if real_window_size[0] != -1 or real_window_size[1] != -1:
+                eff_window_left = (max_seqlen_k if real_window_size[0] == -1
+                                   else real_window_size[0])
+            else:
+                eff_window_left = -1
             splits_cpu, work_list_cpu = build_decode_split_plan(
                 host_kv_lens,
                 kv_tile=kv_tile,
                 num_kv_splits=num_splits_kv,
                 num_xe_cores=num_xe_cores,
                 num_heads_kv=num_heads_kv,
+                window_size_left=eff_window_left,
             )
             if work_list_cpu.numel() > 0:
                 splits_per_seq_dev = splits_cpu.to(
@@ -616,6 +607,35 @@ def flash_attn_varlen_func(
                     device=q.device, non_blocking=True)
 
         try:
+            # Speculative-decoding fast path: redirect small, causal,
+            # paged query batches to the split-K decode kernel. See the
+            # comment on _SPEC_DECODE_MAX_QLEN above for the rationale.
+            batch = cu_seqlens_q.numel() - 1
+            # TODO: We could also support the case where q_descale is not None.
+            if (block_table is not None and causal and dynamic_causal is None
+                    and not return_softmax_lse and softcap == 0.0
+                    and alibi_slopes is None and q_v is None
+                    and q_descale is None and scheduler_metadata is None
+                    and seqused_k is not None
+                    and 1 < max_seqlen_q <= _SPEC_DECODE_MAX_QLEN
+                    and batch > 0 and q.shape[0] > 0):
+                return _spec_decode_varlen_fwd(
+                    q,
+                    k,
+                    v,
+                    out,
+                    cu_seqlens_q,
+                    seqused_k,
+                    block_table,
+                    max_seqlen_k,
+                    k_descale,
+                    v_descale,
+                    softmax_scale,
+                    s_aux,
+                    real_window_size,
+                    softcap,
+                )
+
             out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
                 q,
                 k,
@@ -632,6 +652,7 @@ def flash_attn_varlen_func(
                 max_seqlen_q,
                 max_seqlen_k,
                 dropout_p,
+                q_descale,
                 k_descale,
                 v_descale,
                 softmax_scale,
@@ -647,13 +668,16 @@ def flash_attn_varlen_func(
                 is_mix_batch,
                 splits_per_seq_dev,
                 work_list_dev,
+                dynamic_causal,
             )
         except RuntimeError as e:
-            if "not compiled" not in str(e):
+            if "not compiled" not in str(e) or dynamic_causal is not None:
                 raise
             # Missing AOT shape: fail closed by default. Opt into the slow
             # PyTorch path with VLLM_XPU_ATTN_ALLOW_FALLBACK=1 (eager only;
-            # XPUGraph capture always refuses).
+            # XPUGraph capture always refuses). When fallback is allowed,
+            # emit the notice once per unique missing config and write
+            # it straight to stderr.
             msg = (
                 "XPU kernel not compiled for this config, falling back "
                 "to PyTorch reference attention. Performance will be "
@@ -661,23 +685,37 @@ def flash_attn_varlen_func(
                 "To fix: rebuild with the config line shown above.\n"
                 "If this is unexpected, report at: "
                 "https://github.com/vllm-project/vllm-xpu-kernels/issues/364\n"
-                "Original error: %s")
+                f"Original error: {e}")
             if _should_fail_closed():
                 raise RuntimeError(
                     "Fail-closed attention (default): refusing PyTorch "
                     "attention fallback. Set VLLM_XPU_ATTN_ALLOW_FALLBACK=1 "
                     "to opt in for eager debug only (ignored under "
-                    "XPUGraph capture). " + (msg % e)) from e
-            _logger.warning(msg, e)
-            out, softmax_lse = _fallback_varlen_attn(
+                    "XPUGraph capture). " + msg) from e
+            if str(e) not in _warned_missing_configs:
+                _warned_missing_configs.add(str(e))
+                _logger.warning(msg)
+                print("[vllm_xpu_kernels] " + msg, file=sys.stderr,
+                      flush=True)
+            fallback_out, softmax_lse = _fallback_varlen_attn(
                 q, k, v, cu_seqlens_q, cu_seqlens_k, seqused_k,
                 block_table, softmax_scale, causal,
                 real_window_size, softcap,
+                q_descale=q_descale,
                 k_descale=k_descale,
                 v_descale=v_descale,
                 s_aux=s_aux,
                 return_softmax_lse=return_softmax_lse,
             )
+            if out is None and fallback_out.shape[0] == q.shape[0]:
+                out = fallback_out
+            else:
+                if out is None:
+                    out = fallback_out.new_empty(
+                        (q.shape[0], *fallback_out.shape[1:]))
+                num_valid_tokens = fallback_out.shape[0]
+                out[:num_valid_tokens].copy_(fallback_out)
+                out[num_valid_tokens:].zero_()
     else:
         raise NotImplementedError("not support yet")
     return (out, softmax_lse) if return_softmax_lse else (out)
@@ -695,6 +733,7 @@ def _fallback_varlen_attn(
     causal: bool,
     window_size: tuple[int, int],
     softcap: float,
+    q_descale: Optional[torch.Tensor] = None,
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
     s_aux: Optional[torch.Tensor] = None,
@@ -712,18 +751,18 @@ def _fallback_varlen_attn(
         k_descale = k_descale.flatten()[0]
     if v_descale is not None:
         v_descale = v_descale.flatten()[0]
+    if q_descale is not None:
+        q_descale = q_descale.flatten()[0]
 
+    _fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2,
+                   torch.float8_e4m3fnuz, torch.float8_e5m2fnuz)
     # Determine if KV cache is FP8 and needs dequantization
-    is_fp8kv = k_descale is not None and k.dtype in (
-        torch.float8_e4m3fn, torch.float8_e5m2,
-        torch.float8_e4m3fnuz, torch.float8_e5m2fnuz)
+    is_fp8kv = k_descale is not None and k.dtype in _fp8_dtypes
+    # Determine if the query is FP8 and needs dequantization
+    is_fp8_query = q.dtype in _fp8_dtypes
     # Infer the compute dtype from query (if query is also fp8, fall back to
     # float16 as the compute type)
-    if q.dtype in (torch.float8_e4m3fn, torch.float8_e5m2,
-                   torch.float8_e4m3fnuz, torch.float8_e5m2fnuz):
-        compute_dtype = torch.float16
-    else:
-        compute_dtype = q.dtype
+    compute_dtype = torch.float16 if is_fp8_query else q.dtype
 
     is_paged = block_table is not None and seqused_k is not None
 
@@ -743,9 +782,11 @@ def _fallback_varlen_attn(
             is_paged=True,
             casual=causal,
             sink=s_aux,
+            q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
             is_fp8kv=is_fp8kv,
+            is_fp8_query=is_fp8_query,
             dtype=compute_dtype,
             return_softmax_lse=return_softmax_lse,
         )
@@ -767,9 +808,11 @@ def _fallback_varlen_attn(
             is_paged=False,
             casual=causal,
             sink=s_aux,
+            q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
             is_fp8kv=is_fp8kv,
+            is_fp8_query=is_fp8_query,
             dtype=compute_dtype,
             return_softmax_lse=return_softmax_lse,
         )
@@ -777,5 +820,3 @@ def _fallback_varlen_attn(
     if return_softmax_lse:
         return result[0], result[1]
     return result, None
-
-

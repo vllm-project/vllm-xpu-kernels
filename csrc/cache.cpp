@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <limits>
 #include <string>
 
 #include "dispatch_utils.h"
@@ -9,9 +10,21 @@
 #include "quantization/utils.h"
 #include "utils.h"
 #include "utils/mem_cpy.h"
+#include "sycl_launch.h"
 
 // FP8 E4M3 scale divisor for Intel GPU
 constexpr float kFp8E4M3ScaleDivisor = 448.f;
+
+// DSV3.2 packed MLA cache entry ("fp8_ds_mla"): 512B fp8-e4m3 NoPE stored as
+// 4 tiles of 128 elements, 16B of per-tile fp32 scales, then 128B of BF16 RoPE
+// (FP16 inputs are converted so readers can always decode it as BF16).
+constexpr int kDsMlaNopeDim = 512;
+constexpr int kDsMlaPeDim = 64;
+constexpr int kDsMlaTile = 128;
+constexpr int kDsMlaNumTiles = kDsMlaNopeDim / kDsMlaTile;
+constexpr int kDsMlaScalesOffset = kDsMlaNopeDim;
+constexpr int kDsMlaRopeOffset = kDsMlaScalesOffset + kDsMlaNumTiles * 4;
+constexpr int kDsMlaEntryBytes = kDsMlaRopeOffset + kDsMlaPeDim * 2;
 
 namespace vllm {
 
@@ -56,6 +69,15 @@ class reshape_and_cache_kernel {
     const int block_idx = slot_idx / block_size_;
     const int block_offset = slot_idx % block_size_;
     const int n = num_heads_ * head_size_;
+    // fp8 caches are stored as uint8_t, so the fp8 bit pattern has to be
+    // written (a plain assignment would convert the fp8 value to an integer).
+    // CopyWithScaleOp divides by the dequant scale and saturates.
+    const float k_scale_val =
+        (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale_;
+    const float v_scale_val =
+        (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale_;
+    const fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+    const fp8::CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
     for (int i = local_idx; i < n; i += local_range) {
       const int src_key_idx = group_idx * key_stride_ + i;
       const int src_value_idx = group_idx * value_stride_ + i;
@@ -70,22 +92,12 @@ class reshape_and_cache_kernel {
       const int dst_value_idx = block_idx * n * block_size_ +
                                 head_idx * head_size_ * block_size_ +
                                 head_offset * block_size_ + block_offset;
-      scalar_t tgt_key = key_[src_key_idx];
-      scalar_t tgt_value = value_[src_value_idx];
-      if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E5M2) {
-        key_cache_[dst_key_idx] =
-            static_cast<at::Float8_e5m2>(tgt_key * (*k_scale_));
-        value_cache_[dst_value_idx] =
-            static_cast<at::Float8_e5m2>(tgt_value * (*v_scale_));
-      } else if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
-        key_cache_[dst_key_idx] =
-            static_cast<at::Float8_e4m3fn>(tgt_key * (*k_scale_));
-        value_cache_[dst_value_idx] =
-            static_cast<at::Float8_e4m3fn>(tgt_value * (*v_scale_));
-      } else {  // kv_dt == Fp8KVCacheDataType::kAuto
-        key_cache_[dst_key_idx] = tgt_key;
-        value_cache_[dst_value_idx] = tgt_value;
-      }
+      // Load both inputs before storing so the loads are not serialized
+      // behind the (possibly aliasing) cache stores.
+      const scalar_t tgt_key = key_[src_key_idx];
+      const scalar_t tgt_value = value_[src_value_idx];
+      k_op(key_cache_[dst_key_idx], tgt_key);
+      v_op(value_cache_[dst_value_idx], tgt_value);
     }
   }
 
@@ -333,7 +345,13 @@ class reshape_and_cache_flash_kernel {
   const float* v_scale_;
 };
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+// index_t is int64_t when the cache or input offsets may exceed INT32_MAX,
+// int otherwise (64-bit integer math is emulated and measurably slower).
+template <
+    typename scalar_t,
+    typename cache_t,
+    Fp8KVCacheDataType kv_dt,
+    typename index_t>
 class concat_and_cache_mla_kernel {
  public:
   concat_and_cache_mla_kernel(
@@ -341,26 +359,28 @@ class concat_and_cache_mla_kernel {
       const scalar_t* __restrict__ k_pe,
       cache_t* __restrict__ kv_cache,
       const int64_t* __restrict__ slot_mapping,
-      const int block_stride,
-      const int entry_stride,
-      const int kv_c_stride,
-      const int k_pe_stride,
+      const int64_t block_stride,
+      const int64_t entry_stride,
+      const int64_t kv_c_stride,
+      const int64_t k_pe_stride,
       const int kv_lora_rank,
       const int pe_dim,
       const int block_size,
-      const float* scale)
+      const float* scale,
+      const bool skip_scale)
       : kv_c(kv_c),
         k_pe(k_pe),
         kv_cache(kv_cache),
         slot_mapping(slot_mapping),
-        block_stride(block_stride),
-        entry_stride(entry_stride),
-        kv_c_stride(kv_c_stride),
-        k_pe_stride(k_pe_stride),
+        block_stride(static_cast<index_t>(block_stride)),
+        entry_stride(static_cast<index_t>(entry_stride)),
+        kv_c_stride(static_cast<index_t>(kv_c_stride)),
+        k_pe_stride(static_cast<index_t>(k_pe_stride)),
         kv_lora_rank(kv_lora_rank),
         pe_dim(pe_dim),
         block_size(block_size),
-        scale(scale) {}
+        scale(scale),
+        skip_scale(skip_scale) {}
 
   void operator()(const sycl::nd_item<1> item_id) const {
     const int64_t token_idx = item_id.get_group(0);
@@ -369,32 +389,38 @@ class concat_and_cache_mla_kernel {
     if (slot_idx < 0) {
       return;
     }
-    const int block_idx = slot_idx / block_size;
-    const int block_offset = slot_idx % block_size;
+    // 64-bit: one layer's cache view can exceed 2^31 elements (e.g. a 5 GiB
+    // bf16 GLM-5.3 latent cache); 32-bit offsets wrap and write out of bounds.
+    const index_t token = static_cast<index_t>(token_idx);
+    const index_t block_idx = static_cast<index_t>(slot_idx / block_size);
+    const index_t block_offset = static_cast<index_t>(slot_idx % block_size);
 
     auto copy = [&](const scalar_t* __restrict__ src,
                     cache_t* dst,
-                    int src_stride,
-                    int dst_stride,
+                    index_t src_stride,
+                    index_t dst_stride,
                     int size,
                     int offset) {
+      const scalar_t* __restrict__ src_row = src + token * src_stride;
+      cache_t* dst_row =
+          dst + block_idx * block_stride + block_offset * entry_stride + offset;
       for (int i = item_id.get_local_id(0); i < size;
            i += item_id.get_local_range(0)) {
-        const int src_idx = token_idx * src_stride + i;
-        const int dst_idx =
-            block_idx * block_stride + block_offset * entry_stride + i + offset;
         if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
-          dst[dst_idx] = src[src_idx];
+          dst_row[i] = src_row[i];
         } else {
           using fp8_dtype = std::conditional_t<
               kv_dt == Fp8KVCacheDataType::kFp8E5M2,
               at::Float8_e5m2,
               at::Float8_e4m3fn>;
           const float fp8_max = vllm::fp8::quant_type_max_v<fp8_dtype>;
-          float x = static_cast<float>(src[src_idx]) / *scale;
+          float x = static_cast<float>(src_row[i]);
+          if (!skip_scale) {
+            x /= *scale;
+          }
           x = sycl::fmax(-fp8_max, sycl::fmin(x, fp8_max));
           auto fp8_val = static_cast<fp8_dtype>(x);
-          dst[dst_idx] = sycl::bit_cast<cache_t>(fp8_val);
+          dst_row[i] = sycl::bit_cast<cache_t>(fp8_val);
         }
       }
     };
@@ -409,14 +435,15 @@ class concat_and_cache_mla_kernel {
   cache_t* __restrict__ kv_cache;  // [num_blocks, block_size, (kv_lora_rank +
                                    // pe_dim)]
   const int64_t* __restrict__ slot_mapping;  // [num_tokens]
-  const int block_stride;                    //
-  const int entry_stride;                    //
-  const int kv_c_stride;                     //
-  const int k_pe_stride;                     //
+  const index_t block_stride;                //
+  const index_t entry_stride;                //
+  const index_t kv_c_stride;                 //
+  const index_t k_pe_stride;                 //
   const int kv_lora_rank;                    //
   const int pe_dim;                          //
   const int block_size;                      //
   const float* scale;                        //
+  const bool skip_scale;                     //
 };
 
 // grid is launched with dimensions (batch, num_splits)
@@ -687,7 +714,7 @@ class cp_gather_indexer_k_quant_cache_kernel {
     }
 
     // Synchronise SLM writes before any thread reads batch_idx_acc_
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     // Exit threads after barrier to make sure nothing to write.
     if (head_idx >= static_cast<int>(head_dim_) || token_idx >= num_tokens_) {
@@ -855,30 +882,210 @@ class gather_and_maybe_dequant_cache_kernel {
                                             // batch
 };
 
+// Writes the DSV3.2 packed ("fp8_ds_mla") entry for one token.
+// Work-group grid is (kDsMlaNumTiles + 1, num_tokens): groups 0..3 each own one
+// 128-element NoPE tile and its fp32 scale, the last group stores the RoPE tail
+// unquantized as BF16. Strides are in bytes.
+template <typename scalar_t, int TILE_THREADS>
+class concat_and_cache_ds_mla_kernel {
+ public:
+  concat_and_cache_ds_mla_kernel(
+      const scalar_t* __restrict__ kv_c,
+      const scalar_t* __restrict__ k_pe,
+      uint8_t* __restrict__ kv_cache,
+      const int64_t* __restrict__ slot_mapping,
+      const int64_t block_stride,
+      const int64_t entry_stride,
+      const int64_t kv_c_stride,
+      const int64_t k_pe_stride,
+      const int block_size)
+      : kv_c_(kv_c),
+        k_pe_(k_pe),
+        kv_cache_(kv_cache),
+        slot_mapping_(slot_mapping),
+        block_stride_(block_stride),
+        entry_stride_(entry_stride),
+        kv_c_stride_(kv_c_stride),
+        k_pe_stride_(k_pe_stride),
+        block_size_(block_size) {}
+
+  void operator()(const sycl::nd_item<2>& item) const {
+    const int64_t token_idx = item.get_group(1);
+    const int64_t slot_idx = slot_mapping_[token_idx];
+    // NOTE: slot_idx can be -1 if the token is padded
+    if (slot_idx < 0) {
+      return;
+    }
+    const int64_t block_idx = slot_idx / block_size_;
+    const int64_t block_offset = slot_idx % block_size_;
+    uint8_t* __restrict__ entry =
+        kv_cache_ + block_idx * block_stride_ + block_offset * entry_stride_;
+
+    const int part = static_cast<int>(item.get_group(0));
+    const int lid = static_cast<int>(item.get_local_id(0));
+
+    if (part == kDsMlaNumTiles) {
+      using rope_t = sycl::ext::oneapi::bfloat16;
+      const scalar_t* __restrict__ src = k_pe_ + token_idx * k_pe_stride_;
+      rope_t* __restrict__ dst =
+          reinterpret_cast<rope_t*>(entry + kDsMlaRopeOffset);
+      for (int i = lid; i < kDsMlaPeDim; i += TILE_THREADS) {
+        dst[i] = static_cast<rope_t>(static_cast<float>(src[i]));
+      }
+      return;
+    }
+
+    constexpr int kValsPerItem = kDsMlaTile / TILE_THREADS;
+    const scalar_t* __restrict__ src = kv_c_ + token_idx * kv_c_stride_ +
+                                       part * kDsMlaTile + lid * kValsPerItem;
+
+    float vals[kValsPerItem];
+    float amax = 0.f;
+#pragma unroll
+    for (int i = 0; i < kValsPerItem; ++i) {
+      vals[i] = static_cast<float>(src[i]);
+      amax = sycl::fmax(amax, sycl::fabs(vals[i]));
+    }
+    amax =
+        sycl::reduce_over_group(item.get_group(), amax, sycl::maximum<float>{});
+
+    const float tile_scale = sycl::fmax(
+        amax / kFp8E4M3ScaleDivisor, std::numeric_limits<float>::min());
+    if (lid == 0) {
+      reinterpret_cast<float*>(entry + kDsMlaScalesOffset)[part] = tile_scale;
+    }
+
+    const float fp8_max = vllm::fp8::quant_type_max_v<at::Float8_e4m3fn>;
+    const float inv_scale = 1.f / tile_scale;
+    uint8_t* __restrict__ dst = entry + part * kDsMlaTile + lid * kValsPerItem;
+#pragma unroll
+    for (int i = 0; i < kValsPerItem; ++i) {
+      float x = vals[i] * inv_scale;
+      x = sycl::fmax(-fp8_max, sycl::fmin(x, fp8_max));
+      dst[i] = sycl::bit_cast<uint8_t>(static_cast<at::Float8_e4m3fn>(x));
+    }
+  }
+
+ private:
+  const scalar_t* __restrict__ kv_c_;         // [num_tokens, 512]
+  const scalar_t* __restrict__ k_pe_;         // [num_tokens, 64]
+  uint8_t* __restrict__ kv_cache_;            // [num_blocks, block_size, 656]
+  const int64_t* __restrict__ slot_mapping_;  // [num_tokens]
+  const int64_t block_stride_;
+  const int64_t entry_stride_;
+  const int64_t kv_c_stride_;
+  const int64_t k_pe_stride_;
+  const int block_size_;
+};
+
+// Gathers DSV3.2 packed entries out of the paged cache into a dense BF16
+// workspace, one work-group per destination row. Requests occupy contiguous
+// ranges of `dst` starting at their `workspace_starts` offset.
+template <typename scalar_t, int THREADS>
+class cp_gather_and_upconvert_fp8_kv_cache_kernel {
+ public:
+  cp_gather_and_upconvert_fp8_kv_cache_kernel(
+      const uint8_t* __restrict__ src_cache,
+      scalar_t* __restrict__ dst,
+      const int32_t* __restrict__ block_table,
+      const int32_t* __restrict__ workspace_starts,
+      const int32_t* __restrict__ seq_starts,
+      const int32_t num_reqs,
+      const int32_t block_size,
+      const int64_t block_table_stride,
+      const int64_t cache_block_stride,
+      const int64_t cache_entry_stride,
+      const int64_t dst_entry_stride)
+      : src_cache_(src_cache),
+        dst_(dst),
+        block_table_(block_table),
+        workspace_starts_(workspace_starts),
+        seq_starts_(seq_starts),
+        num_reqs_(num_reqs),
+        block_size_(block_size),
+        block_table_stride_(block_table_stride),
+        cache_block_stride_(cache_block_stride),
+        cache_entry_stride_(cache_entry_stride),
+        dst_entry_stride_(dst_entry_stride) {}
+
+  void operator()(const sycl::nd_item<1>& item) const {
+    const int32_t out_token = static_cast<int32_t>(item.get_group(0));
+
+    int32_t req_id = 0;
+    for (int32_t lo = 0, hi = num_reqs_ - 1; lo <= hi;) {
+      const int32_t mid = (lo + hi) >> 1;
+      if (workspace_starts_[mid] <= out_token) {
+        req_id = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+
+    const int32_t source_begin =
+        seq_starts_ == nullptr ? 0 : seq_starts_[req_id];
+    const int32_t src_token =
+        source_begin + out_token - workspace_starts_[req_id];
+    const int32_t physical_block =
+        block_table_[req_id * block_table_stride_ + src_token / block_size_];
+
+    const uint8_t* __restrict__ entry =
+        src_cache_ + physical_block * cache_block_stride_ +
+        (src_token % block_size_) * cache_entry_stride_;
+    scalar_t* __restrict__ out = dst_ + out_token * dst_entry_stride_;
+    const float* __restrict__ scales =
+        reinterpret_cast<const float*>(entry + kDsMlaScalesOffset);
+
+    const int lid = static_cast<int>(item.get_local_id(0));
+    for (int i = lid; i < kDsMlaNopeDim; i += THREADS) {
+      const auto fp8_val = sycl::bit_cast<at::Float8_e4m3fn>(entry[i]);
+      out[i] = static_cast<scalar_t>(
+          static_cast<float>(fp8_val) * scales[i / kDsMlaTile]);
+    }
+    const scalar_t* __restrict__ rope =
+        reinterpret_cast<const scalar_t*>(entry + kDsMlaRopeOffset);
+    for (int i = lid; i < kDsMlaPeDim; i += THREADS) {
+      out[kDsMlaNopeDim + i] = rope[i];
+    }
+  }
+
+ private:
+  const uint8_t* __restrict__ src_cache_;    // [num_blocks, block_size, 656]
+  scalar_t* __restrict__ dst_;               // [total_tokens, 576]
+  const int32_t* __restrict__ block_table_;  // [num_reqs, max_blocks]
+  const int32_t* __restrict__ workspace_starts_;  // [num_reqs]
+  const int32_t* __restrict__ seq_starts_;        // optional [num_reqs]
+  const int32_t num_reqs_;
+  const int32_t block_size_;
+  const int64_t block_table_stride_;
+  const int64_t cache_block_stride_;
+  const int64_t cache_entry_stride_;
+  const int64_t dst_entry_stride_;
+};
+
 }  // namespace vllm
 
 // KV_T is the stored data type of kv-cache.
 // CACHE_T is the data type of key and value tensors.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)           \
-  queue.submit([&](sycl::handler& cgh) {                          \
-    cgh.parallel_for(                                             \
-        sycl::nd_range<1>(grid * block, block),                   \
-        vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>(  \
-            reinterpret_cast<KV_T*>(key.data_ptr()),              \
-            reinterpret_cast<KV_T*>(value.data_ptr()),            \
-            reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),     \
-            reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),   \
-            slot_mapping.data_ptr<int64_t>(),                     \
-            key_stride,                                           \
-            value_stride,                                         \
-            num_heads,                                            \
-            head_size,                                            \
-            block_size,                                           \
-            x,                                                    \
-            reinterpret_cast<const float*>(k_scale.data_ptr()),   \
-            reinterpret_cast<const float*>(v_scale.data_ptr()))); \
-  });
+#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)        \
+  vllm::xpu::sycl_kernel_submit(                               \
+      queue,                                                   \
+      sycl::nd_range<1>(grid * block, block),                  \
+      vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+          reinterpret_cast<KV_T*>(key.data_ptr()),             \
+          reinterpret_cast<KV_T*>(value.data_ptr()),           \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),    \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),  \
+          slot_mapping.data_ptr<int64_t>(),                    \
+          key_stride,                                          \
+          value_stride,                                        \
+          num_heads,                                           \
+          head_size,                                           \
+          block_size,                                          \
+          x,                                                   \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),  \
+          reinterpret_cast<const float*>(v_scale.data_ptr())));
 
 void reshape_and_cache(
     torch::Tensor& key,
@@ -907,50 +1114,48 @@ void reshape_and_cache(
       key.scalar_type(), kv_cache_dtype, CALL_RESHAPE_AND_CACHE);
 }
 
-#define CALL_RESHAPE_AND_CACHE_FLASH_STRIDED(KV_T, CACHE_T, KV_DTYPE)          \
-  queue.submit([&](sycl::handler& cgh) {                                       \
-    cgh.parallel_for(                                                          \
-        sycl::nd_range<1>(grid * block, block),                                \
-        vllm::reshape_and_cache_flash_strided_kernel<KV_T, CACHE_T, KV_DTYPE>( \
-            reinterpret_cast<KV_T*>(key.data_ptr()),                           \
-            reinterpret_cast<KV_T*>(value.data_ptr()),                         \
-            reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                  \
-            slot_mapping.data_ptr<int64_t>(),                                  \
-            block_stride,                                                      \
-            page_stride,                                                       \
-            head_stride,                                                       \
-            key_stride,                                                        \
-            value_stride,                                                      \
-            num_heads,                                                         \
-            head_size,                                                         \
-            block_size,                                                        \
-            reinterpret_cast<const float*>(k_scale.data_ptr()),                \
-            reinterpret_cast<const float*>(v_scale.data_ptr())));              \
-  });
+#define CALL_RESHAPE_AND_CACHE_FLASH_STRIDED(KV_T, CACHE_T, KV_DTYPE)        \
+  vllm::xpu::sycl_kernel_submit(                                             \
+      queue,                                                                 \
+      sycl::nd_range<1>(grid * block, block),                                \
+      vllm::reshape_and_cache_flash_strided_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                           \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                         \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                  \
+          slot_mapping.data_ptr<int64_t>(),                                  \
+          block_stride,                                                      \
+          page_stride,                                                       \
+          head_stride,                                                       \
+          key_stride,                                                        \
+          value_stride,                                                      \
+          num_heads,                                                         \
+          head_size,                                                         \
+          block_size,                                                        \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),                \
+          reinterpret_cast<const float*>(v_scale.data_ptr())));
 
 // KV_T is the stored data type of kv-cache.
 // CACHE_T is the data type of key and value tensors.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)          \
-  queue.submit([&](sycl::handler& cgh) {                               \
-    cgh.parallel_for(                                                  \
-        sycl::nd_range<1>(grid * block, block),                        \
-        vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>( \
-            reinterpret_cast<KV_T*>(key.data_ptr()),                   \
-            reinterpret_cast<KV_T*>(value.data_ptr()),                 \
-            reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),          \
-            reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),        \
-            slot_mapping.data_ptr<int64_t>(),                          \
-            block_stride,                                              \
-            page_stride,                                               \
-            key_stride,                                                \
-            value_stride,                                              \
-            num_heads,                                                 \
-            head_size,                                                 \
-            block_size,                                                \
-            reinterpret_cast<const float*>(k_scale.data_ptr()),        \
-            reinterpret_cast<const float*>(v_scale.data_ptr())));      \
-  });
+#define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)        \
+  vllm::xpu::sycl_kernel_submit(                                     \
+      queue,                                                         \
+      sycl::nd_range<1>(grid * block, block),                        \
+      vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                   \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                 \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),          \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),        \
+          slot_mapping.data_ptr<int64_t>(),                          \
+          block_stride,                                              \
+          page_stride,                                               \
+          key_stride,                                                \
+          value_stride,                                              \
+          num_heads,                                                 \
+          head_size,                                                 \
+          block_size,                                                \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),        \
+          reinterpret_cast<const float*>(v_scale.data_ptr())));
 
 void reshape_and_cache_flash(
     torch::Tensor& key,
@@ -1006,24 +1211,46 @@ void reshape_and_cache_flash(
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)          \
-  queue.submit([&](sycl::handler& cgh) {                            \
-    cgh.parallel_for(                                               \
-        sycl::nd_range<1>(grid * block, block),                     \
-        vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>( \
-            reinterpret_cast<KV_T*>(kv_c.data_ptr()),               \
-            reinterpret_cast<KV_T*>(k_pe.data_ptr()),               \
-            reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),        \
-            slot_mapping.data_ptr<int64_t>(),                       \
-            block_stride,                                           \
-            entry_stride,                                           \
-            kv_c_stride,                                            \
-            k_pe_stride,                                            \
-            kv_lora_rank,                                           \
-            pe_dim,                                                 \
-            block_size,                                             \
-            reinterpret_cast<const float*>(scale.data_ptr())));     \
-  });
+#define CALL_CONCAT_AND_CACHE_MLA_IDX(KV_T, CACHE_T, KV_DTYPE, INDEX_T)    \
+  vllm::xpu::sycl_kernel_submit(                                           \
+      queue,                                                               \
+      sycl::nd_range<1>(grid * block, block),                              \
+      vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE, INDEX_T>( \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                        \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                        \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                 \
+          slot_mapping.data_ptr<int64_t>(),                                \
+          block_stride,                                                    \
+          entry_stride,                                                    \
+          kv_c_stride,                                                     \
+          k_pe_stride,                                                     \
+          kv_lora_rank,                                                    \
+          pe_dim,                                                          \
+          block_size,                                                      \
+          reinterpret_cast<const float*>(scale.data_ptr()),                \
+          skip_scale));
+
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)           \
+  if (use_int32_index) {                                             \
+    CALL_CONCAT_AND_CACHE_MLA_IDX(KV_T, CACHE_T, KV_DTYPE, int);     \
+  } else {                                                           \
+    CALL_CONCAT_AND_CACHE_MLA_IDX(KV_T, CACHE_T, KV_DTYPE, int64_t); \
+  }
+
+#define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T)                           \
+  vllm::xpu::sycl_kernel_submit(                                     \
+      queue,                                                         \
+      sycl::nd_range<2>(grid * block, block),                        \
+      vllm::concat_and_cache_ds_mla_kernel<KV_T, kDsMlaTileThreads>( \
+          reinterpret_cast<const KV_T*>(kv_c.data_ptr()),            \
+          reinterpret_cast<const KV_T*>(k_pe.data_ptr()),            \
+          reinterpret_cast<uint8_t*>(kv_cache.data_ptr()),           \
+          slot_mapping.data_ptr<int64_t>(),                          \
+          block_stride,                                              \
+          entry_stride,                                              \
+          kv_c_stride,                                               \
+          k_pe_stride,                                               \
+          block_size));
 
 void concat_and_cache_mla(
     torch::Tensor& kv_c,          // [num_tokens, kv_lora_rank]
@@ -1032,7 +1259,8 @@ void concat_and_cache_mla(
                                   // pe_dim)]
     torch::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
     const std::string& kv_cache_dtype,
-    torch::Tensor& scale) {
+    torch::Tensor& scale,
+    bool skip_scale) {
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
@@ -1048,40 +1276,182 @@ void concat_and_cache_mla(
   int pe_dim = k_pe.size(1);
   int block_size = kv_cache.size(1);
 
-  TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
+  const bool is_ds_mla = kv_cache_dtype == "fp8_ds_mla";
+  if (is_ds_mla) {
+    TORCH_CHECK(
+        kv_lora_rank == kDsMlaNopeDim,
+        "kv_lora_rank must be 512 for fp8_ds_mla");
+    TORCH_CHECK(pe_dim == kDsMlaPeDim, "pe_dim must be 64 for fp8_ds_mla");
+    TORCH_CHECK(
+        kv_cache.size(2) == kDsMlaEntryBytes / kv_cache.element_size(),
+        "kv_cache.size(2) must be 656 bytes for fp8_ds_mla");
+    TORCH_CHECK(
+        kv_c.element_size() == 2,
+        "kv_c.element_size() must be 2 for fp8_ds_mla");
+    TORCH_CHECK(
+        k_pe.scalar_type() == kv_c.scalar_type(),
+        "k_pe and kv_c must have the same dtype for fp8_ds_mla");
+    TORCH_CHECK(
+        kv_cache.stride(2) == 1,
+        "kv_cache entries must be contiguous for fp8_ds_mla");
+  } else {
+    TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
+  }
 
-  int kv_c_stride = kv_c.stride(0);
-  int k_pe_stride = k_pe.stride(0);
-  int block_stride = kv_cache.stride(0);
-  int entry_stride = kv_cache.stride(1);
+  int64_t kv_c_stride = kv_c.stride(0);
+  int64_t k_pe_stride = k_pe.stride(0);
+  int64_t block_stride = kv_cache.stride(0);
+  int64_t entry_stride = kv_cache.stride(1);
+
+  const at::DeviceGuard device_guard(kv_c.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+
+  if (is_ds_mla) {
+    if (num_tokens == 0) {
+      return;
+    }
+    // The kernel addresses kv_cache as bytes, whatever its element type.
+    block_stride *= kv_cache.element_size();
+    entry_stride *= kv_cache.element_size();
+    constexpr int kDsMlaTileThreads = 32;
+    sycl::range<2> grid(kDsMlaNumTiles + 1, num_tokens);
+    sycl::range<2> block(kDsMlaTileThreads, 1);
+    if (kv_c.scalar_type() == at::ScalarType::BFloat16) {
+      CALL_CONCAT_AND_CACHE_DS_MLA(sycl::ext::oneapi::bfloat16);
+    } else if (kv_c.scalar_type() == at::ScalarType::Half) {
+      CALL_CONCAT_AND_CACHE_DS_MLA(sycl::half);
+    } else {
+      TORCH_CHECK(
+          false, "Unsupported input type for fp8_ds_mla: ", kv_c.scalar_type());
+    }
+    return;
+  }
+
+  // Use 32-bit indexing unless an element offset may exceed INT32_MAX.
+  auto max_offset = [](const torch::Tensor& t) {
+    int64_t off = 0;
+    for (int64_t d = 0; d < t.dim(); ++d) {
+      off += std::max<int64_t>(t.size(d) - 1, 0) * t.stride(d);
+    }
+    return off;
+  };
+  constexpr int64_t kInt32Max = std::numeric_limits<int32_t>::max();
+  const bool use_int32_index = max_offset(kv_cache) <= kInt32Max &&
+                               max_offset(kv_c) <= kInt32Max &&
+                               max_offset(k_pe) <= kInt32Max;
 
   sycl::range<1> grid(num_tokens);
   sycl::range<1> block(std::min(kv_lora_rank, 1024));
-  const at::DeviceGuard device_guard(kv_c.device());
-  auto& queue = vllm::xpu::vllmGetQueue();
 
   DISPATCH_BY_KV_CACHE_DTYPE(
       kv_c.scalar_type(), kv_cache_dtype, CALL_CONCAT_AND_CACHE_MLA);
 }
 
+#define CALL_CP_GATHER_AND_UPCONVERT_FP8_KV_CACHE(DST_T)          \
+  vllm::xpu::sycl_kernel_submit(                                  \
+      queue,                                                      \
+      sycl::nd_range<1>(grid * block, block),                     \
+      vllm::cp_gather_and_upconvert_fp8_kv_cache_kernel<          \
+          DST_T,                                                  \
+          kUpconvertThreads>(                                     \
+          reinterpret_cast<const uint8_t*>(src_cache.data_ptr()), \
+          reinterpret_cast<DST_T*>(dst.data_ptr()),               \
+          block_table.data_ptr<int32_t>(),                        \
+          workspace_starts.data_ptr<int32_t>(),                   \
+          seq_starts_ptr,                                         \
+          static_cast<int32_t>(batch_size),                       \
+          block_size,                                             \
+          block_table_stride,                                     \
+          cache_block_stride,                                     \
+          cache_entry_stride,                                     \
+          dst_entry_stride));
+
+void cp_gather_and_upconvert_fp8_kv_cache(
+    torch::Tensor const& src_cache,         // [num_blocks, block_size, 656]
+    torch::Tensor const& dst,               // [total_tokens, 576]
+    torch::Tensor const& block_table,       // [batch_size, max_blocks]
+    torch::Tensor const& workspace_starts,  // [batch_size]
+    int64_t batch_size,
+    std::optional<torch::Tensor> seq_starts,
+    std::optional<torch::Tensor> host_cache,
+    std::optional<torch::Tensor> host_row_ids,
+    std::optional<torch::Tensor> device_row_ids) {
+  // Host-staged gather of non-resident KV rows is CUDA-only; the XPU kernel
+  // reads exclusively from the device-resident src_cache.
+  TORCH_CHECK(
+      !host_cache.has_value() && !host_row_ids.has_value() &&
+          !device_row_ids.has_value(),
+      "cp_gather_and_upconvert_fp8_kv_cache on XPU does not support host "
+      "offload (host_cache/host_row_ids/device_row_ids); all KV rows must be "
+      "device-resident.");
+  const int32_t total_tokens = static_cast<int32_t>(dst.size(0));
+  if (total_tokens == 0 || batch_size == 0) {
+    return;
+  }
+
+  TORCH_CHECK(
+      block_table.scalar_type() == at::ScalarType::Int,
+      "block_table must be int32");
+  TORCH_CHECK(
+      workspace_starts.scalar_type() == at::ScalarType::Int,
+      "workspace_starts must be int32");
+  TORCH_CHECK(
+      dst.scalar_type() == at::ScalarType::BFloat16, "dst must be bfloat16");
+  TORCH_CHECK(
+      dst.size(1) == kDsMlaNopeDim + kDsMlaPeDim,
+      "dst head_dim must be 576 for MLA");
+  TORCH_CHECK(
+      src_cache.element_size() == 1 && src_cache.size(2) == kDsMlaEntryBytes,
+      "src_cache must be a byte tensor with 656-byte entries");
+  TORCH_CHECK(
+      src_cache.device() == dst.device() &&
+          src_cache.device() == block_table.device() &&
+          src_cache.device() == workspace_starts.device(),
+      "src_cache, dst, block_table and workspace_starts must share a device");
+
+  const int32_t* seq_starts_ptr = nullptr;
+  if (seq_starts.has_value()) {
+    TORCH_CHECK(
+        seq_starts.value().scalar_type() == at::ScalarType::Int,
+        "seq_starts must be int32");
+    TORCH_CHECK(
+        seq_starts.value().device() == src_cache.device(),
+        "src_cache and seq_starts must be on the same device");
+    seq_starts_ptr = seq_starts.value().data_ptr<int32_t>();
+  }
+
+  const int32_t block_size = static_cast<int32_t>(src_cache.size(1));
+  const int64_t block_table_stride = block_table.stride(0);
+  const int64_t cache_block_stride = src_cache.stride(0);
+  const int64_t cache_entry_stride = src_cache.stride(1);
+  const int64_t dst_entry_stride = dst.stride(0);
+
+  constexpr int kUpconvertThreads = 64;
+  sycl::range<1> grid(total_tokens);
+  sycl::range<1> block(kUpconvertThreads);
+  const at::DeviceGuard device_guard(src_cache.device());
+  auto& queue = vllm::xpu::vllmGetQueue();
+
+  CALL_CP_GATHER_AND_UPCONVERT_FP8_KV_CACHE(sycl::ext::oneapi::bfloat16);
+}
+
 // Macro to dispatch the kernel based on the data type.
-#define CALL_GATHER_CACHE(CPY_DTYPE)                            \
-  queue.submit([&](sycl::handler& cgh) {                        \
-    cgh.parallel_for(                                           \
-        sycl::nd_range<2>(grid * block, block),                 \
-        vllm::gather_cache_kernel<CPY_DTYPE>(                   \
-            reinterpret_cast<CPY_DTYPE*>(src_cache.data_ptr()), \
-            reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),       \
-            block_table.data_ptr<int32_t>(),                    \
-            cu_seq_lens.data_ptr<int32_t>(),                    \
-            block_size,                                         \
-            entry_size,                                         \
-            block_table_stride,                                 \
-            cache_block_stride,                                 \
-            cache_entry_stride,                                 \
-            dst_entry_stride,                                   \
-            seq_starts_ptr));                                   \
-  });
+#define CALL_GATHER_CACHE(CPY_DTYPE)                          \
+  vllm::xpu::sycl_kernel_submit(                              \
+      queue,                                                  \
+      sycl::nd_range<2>(grid * block, block),                 \
+      vllm::gather_cache_kernel<CPY_DTYPE>(                   \
+          reinterpret_cast<CPY_DTYPE*>(src_cache.data_ptr()), \
+          reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),       \
+          block_table.data_ptr<int32_t>(),                    \
+          cu_seq_lens.data_ptr<int32_t>(),                    \
+          block_size,                                         \
+          entry_size,                                         \
+          block_table_stride,                                 \
+          cache_block_stride,                                 \
+          cache_entry_stride,                                 \
+          dst_entry_stride,                                   \
+          seq_starts_ptr));
 
 // Gather sequences from the cache into the destination tensor.
 //  - cu_seq_lens contains the cumulative sequence lengths for each batch
@@ -1152,33 +1522,305 @@ void gather_cache(
   }
 }
 
+namespace vllm {
+
+struct CpGatherPageTask {
+  int32_t req_id;
+  int32_t logical_block;
+  int32_t page_token_begin;
+  int32_t page_token_end;
+  int32_t output_token_begin;
+  int32_t physical_block;
+  bool has_task;
+};
+
+inline bool map_cp_gather_page_task(
+    int32_t task,
+    const int32_t* output_starts,
+    int32_t num_reqs,
+    int32_t total_tokens,
+    int32_t block_size,
+    const int32_t* seq_starts,
+    CpGatherPageTask& page) {
+  int32_t relative_page = task;
+  for (int32_t req_id = 0; req_id < num_reqs; ++req_id) {
+    const int32_t output_begin = sycl::min(output_starts[req_id], total_tokens);
+    const int32_t output_end =
+        sycl::min(output_starts[req_id + 1], total_tokens);
+    const int32_t seq_len = sycl::max(output_end - output_begin, 0);
+    if (seq_len == 0) continue;
+    const int32_t source_begin = seq_starts ? seq_starts[req_id] : 0;
+    const int32_t first_block = source_begin / block_size;
+    const int32_t num_pages =
+        (source_begin + seq_len + block_size - 1) / block_size - first_block;
+    if (relative_page < num_pages) {
+      page.req_id = req_id;
+      page.logical_block = first_block + relative_page;
+      const int32_t page_begin = page.logical_block * block_size;
+      const int32_t copy_begin = sycl::max(source_begin, page_begin);
+      const int32_t copy_end =
+          sycl::min(source_begin + seq_len, page_begin + block_size);
+      page.page_token_begin = copy_begin - page_begin;
+      page.page_token_end = copy_end - page_begin;
+      page.output_token_begin = output_begin + copy_begin - source_begin;
+      return true;
+    }
+    relative_page -= num_pages;
+  }
+  return false;
+}
+
+struct CpGatherCacheParams {
+  const uint8_t* src;
+  uint8_t* dst;
+  const int32_t* block_table;
+  const int32_t* cu_seq_lens;
+  const int32_t* seq_starts;
+  int32_t num_reqs;
+  int32_t total_tokens;
+  int32_t block_size;
+  int64_t entry_size_bytes;
+  int64_t block_table_stride;
+  int64_t block_table_col_stride;
+  int64_t cache_block_stride;
+  int64_t cache_entry_stride;
+  int64_t dst_entry_stride;
+};
+
+template <bool contiguous_entries, bool vectorized>
+class CpGatherCachePage : public xpu::SyclKernelConfigConvention {
+ public:
+  explicit CpGatherCachePage(CpGatherCacheParams params) : params_(params) {}
+
+  void sycl_ker_config_convention(sycl::handler& cgh) {
+    page_ = sycl::local_accessor<CpGatherPageTask, 1>(1, cgh);
+  }
+
+  void operator()(sycl::nd_item<1> item) const {
+    constexpr int32_t threads = 256;
+    constexpr int32_t threads_per_token = 32;
+    constexpr int32_t tokens_per_group = threads / threads_per_token;
+    const int32_t tid = item.get_local_id(0);
+    const auto& p = params_;
+    if (tid == 0) {
+      CpGatherPageTask task{};
+      task.has_task = map_cp_gather_page_task(
+          item.get_group(0),
+          p.cu_seq_lens,
+          p.num_reqs,
+          p.total_tokens,
+          p.block_size,
+          p.seq_starts,
+          task);
+      if (task.has_task) {
+        task.physical_block =
+            p.block_table
+                [task.req_id * p.block_table_stride +
+                 task.logical_block * p.block_table_col_stride];
+      }
+      page_[0] = task;
+    }
+    item.barrier(sycl::access::fence_space::local_space);
+    const CpGatherPageTask page = page_[0];
+    if (!page.has_task) return;
+
+    if constexpr (contiguous_entries) {
+      const int64_t src_offset = page.physical_block * p.cache_block_stride +
+                                 page.page_token_begin * p.entry_size_bytes;
+      const int64_t dst_offset = page.output_token_begin * p.entry_size_bytes;
+      const int64_t copy_bytes =
+          (page.page_token_end - page.page_token_begin) * p.entry_size_bytes;
+      if constexpr (vectorized) {
+        const auto* src =
+            reinterpret_cast<const sycl::int4*>(p.src + src_offset);
+        auto* dst = reinterpret_cast<sycl::int4*>(p.dst + dst_offset);
+        const int64_t num_vectors = copy_bytes / sizeof(sycl::int4);
+        int64_t idx = tid;
+        for (; idx + threads < num_vectors; idx += 2 * threads) {
+          const sycl::int4 first = src[idx];
+          const sycl::int4 second = src[idx + threads];
+          dst[idx] = first;
+          dst[idx + threads] = second;
+        }
+        for (; idx < num_vectors; idx += threads) {
+          dst[idx] = src[idx];
+        }
+      } else {
+        for (int64_t idx = tid; idx < copy_bytes; idx += threads) {
+          p.dst[dst_offset + idx] = p.src[src_offset + idx];
+        }
+      }
+    } else {
+      const int32_t token_group = tid / threads_per_token;
+      const int32_t lane = tid % threads_per_token;
+      for (int32_t token = page.page_token_begin + token_group;
+           token < page.page_token_end;
+           token += tokens_per_group) {
+        const int64_t output_token =
+            page.output_token_begin + token - page.page_token_begin;
+        const auto* src = p.src + page.physical_block * p.cache_block_stride +
+                          token * p.cache_entry_stride;
+        auto* dst = p.dst + output_token * p.dst_entry_stride;
+        if constexpr (vectorized) {
+          const auto* src_vec = reinterpret_cast<const sycl::int4*>(src);
+          auto* dst_vec = reinterpret_cast<sycl::int4*>(dst);
+          const int64_t num_vectors = p.entry_size_bytes / sizeof(sycl::int4);
+          for (int64_t idx = lane; idx < num_vectors;
+               idx += threads_per_token) {
+            dst_vec[idx] = src_vec[idx];
+          }
+        } else {
+          for (int64_t idx = lane; idx < p.entry_size_bytes;
+               idx += threads_per_token) {
+            dst[idx] = src[idx];
+          }
+        }
+      }
+    }
+  }
+
+ private:
+  CpGatherCacheParams params_;
+  sycl::local_accessor<CpGatherPageTask, 1> page_;
+};
+
+}  // namespace vllm
+
+template <bool contiguous_entries, bool vectorized>
+void launch_cp_gather_cache(const vllm::CpGatherCacheParams& params) {
+  constexpr int threads = 256;
+  const int64_t groups =
+      (int64_t(params.total_tokens) + params.block_size - 1) /
+          params.block_size +
+      2 * int64_t(params.num_reqs);
+  auto& queue = vllm::xpu::vllmGetQueue();
+  vllm::xpu::sycl_kernel_submit(
+      queue,
+      sycl::nd_range<1>(groups * threads, threads),
+      vllm::CpGatherCachePage<contiguous_entries, vectorized>(params));
+}
+
+void cp_gather_cache(
+    torch::Tensor const& src_cache,
+    torch::Tensor const& dst,
+    torch::Tensor const& block_table,
+    torch::Tensor const& cu_seq_lens,
+    int64_t batch_size,
+    std::optional<torch::Tensor> seq_starts) {
+  const at::DeviceGuard device_guard(src_cache.device());
+  TORCH_CHECK(
+      src_cache.dim() >= 3 && dst.dim() >= 2,
+      "Cache and destination require token and entry dimensions");
+  TORCH_CHECK(
+      block_table.dim() == 2 && cu_seq_lens.dim() == 1,
+      "block_table must be 2D and cu_seq_lens must be 1D");
+  TORCH_CHECK(
+      batch_size >= 0 && batch_size == cu_seq_lens.numel() - 1 &&
+          block_table.size(0) >= batch_size,
+      "batch_size must match cache gather metadata");
+  TORCH_CHECK(
+      src_cache.device() == dst.device() &&
+          src_cache.device() == block_table.device() &&
+          src_cache.device() == cu_seq_lens.device(),
+      "Cache gather tensors must be on the same device");
+  TORCH_CHECK(
+      block_table.scalar_type() == at::kInt &&
+          cu_seq_lens.scalar_type() == at::kInt && cu_seq_lens.is_contiguous(),
+      "Metadata must be int32; cu_seq_lens must be contiguous");
+  if (seq_starts) {
+    TORCH_CHECK(
+        seq_starts->device() == src_cache.device() &&
+            seq_starts->scalar_type() == at::kInt && seq_starts->dim() == 1 &&
+            seq_starts->numel() >= batch_size && seq_starts->is_contiguous(),
+        "seq_starts must be contiguous int32 on the cache device");
+  }
+  TORCH_CHECK(
+      src_cache.scalar_type() == dst.scalar_type(),
+      "Cache and destination must have matching dtypes");
+  int64_t entry_size = 1;
+  for (int64_t dim = src_cache.dim() - 1; dim >= 2; --dim) {
+    TORCH_CHECK(
+        src_cache.stride(dim) == entry_size,
+        "Cache entry dimensions must be contiguous");
+    entry_size *= src_cache.size(dim);
+  }
+  int64_t dst_entry_size = 1;
+  for (int64_t dim = dst.dim() - 1; dim >= 1; --dim) {
+    TORCH_CHECK(
+        dst.stride(dim) == dst_entry_size,
+        "Destination entry dimensions must be contiguous");
+    dst_entry_size *= dst.size(dim);
+  }
+  TORCH_CHECK(entry_size == dst_entry_size, "Cache entry sizes must match");
+  TORCH_CHECK(
+      src_cache.size(0) > 0 && src_cache.size(1) > 0,
+      "Cache block dimensions must be positive");
+  TORCH_CHECK(
+      src_cache.element_size() == 1 || src_cache.element_size() == 2 ||
+          src_cache.element_size() == 4,
+      "Cache gather supports 8/16/32-bit entries");
+  if (dst.size(0) == 0) return;
+  const int64_t element_size = src_cache.element_size();
+  const vllm::CpGatherCacheParams params{
+      reinterpret_cast<const uint8_t*>(src_cache.data_ptr()),
+      reinterpret_cast<uint8_t*>(dst.data_ptr()),
+      block_table.data_ptr<int32_t>(),
+      cu_seq_lens.data_ptr<int32_t>(),
+      seq_starts ? seq_starts->data_ptr<int32_t>() : nullptr,
+      static_cast<int32_t>(batch_size),
+      static_cast<int32_t>(dst.size(0)),
+      static_cast<int32_t>(src_cache.size(1)),
+      entry_size * element_size,
+      block_table.stride(0),
+      block_table.stride(1),
+      src_cache.stride(0) * element_size,
+      src_cache.stride(1) * element_size,
+      dst.stride(0) * element_size};
+  constexpr auto alignment = alignof(sycl::int4);
+  const bool vectorized =
+      reinterpret_cast<std::uintptr_t>(params.src) % alignment == 0 &&
+      reinterpret_cast<std::uintptr_t>(params.dst) % alignment == 0 &&
+      params.entry_size_bytes % alignment == 0 &&
+      params.cache_block_stride % alignment == 0 &&
+      params.cache_entry_stride % alignment == 0 &&
+      params.dst_entry_stride % alignment == 0;
+  const bool contiguous_entries =
+      params.cache_entry_stride == params.entry_size_bytes &&
+      params.dst_entry_stride == params.entry_size_bytes;
+  if (contiguous_entries && vectorized)
+    launch_cp_gather_cache<true, true>(params);
+  else if (contiguous_entries)
+    launch_cp_gather_cache<true, false>(params);
+  else if (vectorized)
+    launch_cp_gather_cache<false, true>(params);
+  else
+    launch_cp_gather_cache<false, false>(params);
+}
+
 // Macro to dispatch the gather_and_maybe_dequant_cache kernel.
 // SCALAR_T is the data type of the destination tensor.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_GATHER_AND_MAYBE_DEQUANT_CACHE(SCALAR_T, CACHE_T, KV_DTYPE) \
-  queue.submit([&](sycl::handler& cgh) {                                 \
-    cgh.parallel_for(                                                    \
-        sycl::nd_range<1>(grid * block, block),                          \
-        vllm::gather_and_maybe_dequant_cache_kernel<                     \
-            SCALAR_T,                                                    \
-            CACHE_T,                                                     \
-            KV_DTYPE>(                                                   \
-            reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),            \
-            reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                 \
-            block_table.data_ptr<int32_t>(),                             \
-            cu_seq_lens.data_ptr<int32_t>(),                             \
-            token_to_seq.data_ptr<int32_t>(),                            \
-            num_tokens_i32,                                              \
-            block_size,                                                  \
-            entry_size,                                                  \
-            block_table_stride,                                          \
-            cache_block_stride,                                          \
-            cache_entry_stride,                                          \
-            dst_entry_stride,                                            \
-            reinterpret_cast<const float*>(scale.data_ptr()),            \
-            seq_starts_ptr));                                            \
-  });
+#define CALL_GATHER_AND_MAYBE_DEQUANT_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)      \
+  vllm::xpu::sycl_kernel_submit(                                              \
+      queue,                                                                  \
+      sycl::nd_range<1>(grid * block, block),                                 \
+      vllm::                                                                  \
+          gather_and_maybe_dequant_cache_kernel<SCALAR_T, CACHE_T, KV_DTYPE>( \
+              reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),               \
+              reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                    \
+              block_table.data_ptr<int32_t>(),                                \
+              cu_seq_lens.data_ptr<int32_t>(),                                \
+              token_to_seq.data_ptr<int32_t>(),                               \
+              num_tokens_i32,                                                 \
+              block_size,                                                     \
+              entry_size,                                                     \
+              block_table_stride,                                             \
+              cache_block_stride,                                             \
+              cache_entry_stride,                                             \
+              dst_entry_stride,                                               \
+              reinterpret_cast<const float*>(scale.data_ptr()),               \
+              seq_starts_ptr));
 
 // Gather sequences from the cache into the destination tensor, with
 // optional FP8 dequantization.
@@ -1451,16 +2093,15 @@ class convert_fp8_kernel {
 
 }  // namespace vllm
 
-#define CALL_CONVERT_FP8(Tout, Tin, KV_DTYPE)          \
-  queue.submit([&](sycl::handler& cgh) {               \
-    cgh.parallel_for(                                  \
-        sycl::nd_range<1>(grid * block, block),        \
-        vllm::convert_fp8_kernel<Tout, Tin, KV_DTYPE>( \
-            reinterpret_cast<Tin*>(src.data_ptr()),    \
-            reinterpret_cast<Tout*>(dst.data_ptr()),   \
-            scale,                                     \
-            block_stride));                            \
-  });
+#define CALL_CONVERT_FP8(Tout, Tin, KV_DTYPE)        \
+  vllm::xpu::sycl_kernel_submit(                     \
+      queue,                                         \
+      sycl::nd_range<1>(grid * block, block),        \
+      vllm::convert_fp8_kernel<Tout, Tin, KV_DTYPE>( \
+          reinterpret_cast<Tin*>(src.data_ptr()),    \
+          reinterpret_cast<Tout*>(dst.data_ptr()),   \
+          scale,                                     \
+          block_stride));
 
 // Only for testing.
 /**
@@ -1546,20 +2187,19 @@ void convert_fp8(
     TORCH_CHECK(false, "Unsupported data type: ", kv_cache_dtype);
   }
 }
-#define CALL_INDEXER_K_QUANT_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)          \
-  queue.submit([&](sycl::handler& cgh) {                                 \
-    cgh.parallel_for(                                                    \
-        sycl::nd_range<2>(grid * block, block),                          \
-        vllm::indexer_k_quant_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>( \
-            reinterpret_cast<KV_T*>(k.data_ptr()),                       \
-            reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),             \
-            slot_mapping.data_ptr<int64_t>(),                            \
-            head_dim,                                                    \
-            quant_block_size,                                            \
-            cache_block_size,                                            \
-            cache_stride,                                                \
-            use_ue8m0));                                                 \
-  });
+#define CALL_INDEXER_K_QUANT_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)        \
+  vllm::xpu::sycl_kernel_submit(                                       \
+      queue,                                                           \
+      sycl::nd_range<2>(grid * block, block),                          \
+      vllm::indexer_k_quant_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>( \
+          reinterpret_cast<KV_T*>(k.data_ptr()),                       \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),             \
+          slot_mapping.data_ptr<int64_t>(),                            \
+          head_dim,                                                    \
+          quant_block_size,                                            \
+          cache_block_size,                                            \
+          cache_stride,                                                \
+          use_ue8m0));
 
 void indexer_k_quant_and_cache(
     torch::Tensor& k,             // [num_tokens, head_dim]

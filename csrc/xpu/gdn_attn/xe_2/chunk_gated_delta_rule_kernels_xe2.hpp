@@ -206,14 +206,14 @@ CUTE_DEVICE void chunk_compute_A_kernel(
         // iteration may still be reading g_slm_ptr in the exp()
         // epilogue; all must arrive before any sub-group refills the
         // SLM (g_slm_ptr) for this iteration.
-        item.barrier(sycl::access::fence_space::local_space);
+        sycl::group_barrier(item.get_group());
         CUTE_UNROLL
         for (int e = local_id; e < chunk_size; e += local_range) {
           g_slm_ptr[e] =
               a[(chunk_start_offset + e) + v_head_id * total_virtual_seqlen];
         }
 
-        item.barrier(sycl::access::fence_space::local_space);
+        sycl::group_barrier(item.get_group());
 
         auto k_ptr = k +
                      static_cast<int64_t>(chunk_start_offset) * num_k_heads *
@@ -350,7 +350,7 @@ CUTE_DEVICE void chunk_inverse_kernel(
         for (int idx = local_id; idx < chunk_size; idx += local_range) {
           A_ptr_save[idx * chunk_size + idx] = 1.0f;
         }
-        item.barrier(sycl::access::fence_space::local_space);
+        sycl::group_barrier(item.get_group());
 
         // inverse
         CUTE_UNROLL
@@ -370,7 +370,7 @@ CUTE_DEVICE void chunk_inverse_kernel(
           }
         }
 
-        item.barrier(sycl::access::fence_space::local_space);
+        sycl::group_barrier(item.get_group());
 
         CUTE_UNROLL
         for (int m_idx = sg_id; m_idx < chunk_size; m_idx += sg_range) {
@@ -780,7 +780,7 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
         // WAR fence: previous iteration's sub-groups may still be
         // reading beta_slm_ptr/g_slm_ptr; all must arrive before any
         // sub-group refills the SLM for this iteration.
-        item.barrier(sycl::access::fence_space::local_space);
+        sycl::group_barrier(item.get_group());
         CUTE_UNROLL
         for (int e = local_id; e < chunk_size; e += local_range) {
           float beta_value =
@@ -791,7 +791,7 @@ CUTE_DEVICE void chunk_compute_wu_kernel(
           g_slm_ptr[e] = sycl::exp(a_value) * beta_value;
         }
 
-        item.barrier(sycl::access::fence_space::local_space);
+        sycl::group_barrier(item.get_group());
 
         auto A_ptr = A +
                      static_cast<int64_t>(v_head_id) * total_virtual_seqlen *
@@ -982,7 +982,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
       // still be reading g_slm_ptr/g_multi_slm_ptr/g_exp_slm_ptr in
       // their output/state GEMM epilogues; all must arrive before any
       // sub-group refills these SLM buffers for this chunk.
-      item.barrier(sycl::access::fence_space::local_space);
+      sycl::group_barrier(item.get_group());
       CUTE_UNROLL
       for (int e = local_id; e < current_chunk_size; e += local_range) {
         float g_cumsum_value =
@@ -999,7 +999,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
         g_multi_slm_ptr[e] = 0.0f;
         g_exp_slm_ptr[e] = 0.0f;
       }
-      item.barrier(sycl::access::fence_space::local_space);
+      sycl::group_barrier(item.get_group());
 
       auto W_ptr = w + v_head_id * total_virtual_seqlen * head_k_dim +
                    chunk_offset * head_k_dim;
@@ -1157,7 +1157,7 @@ CUTE_DEVICE void chunk_fwd_o_kernel(
 
           // Barrier: ensure U_new[dv] is visible across all subgroups
           // before O2U reads it via U_tensor_T.
-          item.barrier(sycl::access::fence_space::local_space);
+          sycl::group_barrier(item.get_group());
 
           // --- O2U MMA: O[dv] += O1[dv] + O2 × U_T[dv] ---
           gemm_TTS(O2_tensor, U_tensor_T, tSrO_c, 0, dv, mma);

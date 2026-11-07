@@ -23,6 +23,53 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def fused_input_norm(out: torch.Tensor, input: torch.Tensor,
+                     weight: torch.Tensor, bias: torch.Tensor) -> None:
+    torch.ops._xpu_C.fused_input_norm(out, input, weight, bias)
+
+
+def gemma_rms_norm(out: torch.Tensor, input: torch.Tensor,
+                   weight: torch.Tensor, epsilon: float) -> None:
+    torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
+
+
+def fused_add_gemma_rms_norm(input: torch.Tensor, residual: torch.Tensor,
+                             weight: torch.Tensor, epsilon: float) -> None:
+    torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
+
+
+def layer_norm(out: torch.Tensor, input: torch.Tensor,
+               weight: Optional[torch.Tensor], bias: Optional[torch.Tensor],
+               epsilon: float) -> None:
+    # Mirrors rms_norm's own .contiguous() call above; the kernel already
+    # handles this internally, kept here for parity.
+    input_contiguous = input.contiguous()
+    torch.ops._C.layer_norm(out, input_contiguous, weight, bias, epsilon)
+
+
+def fused_add_layer_norm(input: torch.Tensor, residual: torch.Tensor,
+                         weight: Optional[torch.Tensor],
+                         bias: Optional[torch.Tensor],
+                         epsilon: float) -> None:
+    torch.ops._C.fused_add_layer_norm(input, residual, weight, bias, epsilon)
+
+
+def nemotron_layer_norm(out: torch.Tensor, input: torch.Tensor,
+                        weight: torch.Tensor,
+                        bias: Optional[torch.Tensor], epsilon: float) -> None:
+    input_contiguous = input.contiguous()
+    torch.ops._C.nemotron_layer_norm(out, input_contiguous, weight, bias,
+                                     epsilon)
+
+
+def fused_add_nemotron_layer_norm(input: torch.Tensor, residual: torch.Tensor,
+                                  weight: torch.Tensor,
+                                  bias: Optional[torch.Tensor],
+                                  epsilon: float) -> None:
+    torch.ops._C.fused_add_nemotron_layer_norm(input, residual, weight, bias,
+                                               epsilon)
+
+
 def silu_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, input)
 
@@ -133,10 +180,12 @@ def multimodal_rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     mrope_section: list[int],
+    mrope_interleaved: bool = False,
 ) -> None:
     torch.ops._xpu_C.multimodal_rotary_embedding(positions, query, key,
                                                  head_size, cos_sin_cache,
-                                                 is_neox, mrope_section)
+                                                 is_neox, mrope_section,
+                                                 mrope_interleaved)
 
 
 def deepseek_scaling_rope(
@@ -220,10 +269,11 @@ def concat_and_cache_mla(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
     scale: torch.Tensor,
+    skip_scale: bool = False,
 ) -> None:
     torch.ops._C_cache_ops.concat_and_cache_mla(kv_c, k_pe, kv_cache,
                                                 slot_mapping, kv_cache_dtype,
-                                                scale)
+                                                scale, skip_scale)
 
 
 def gather_cache(src_cache: torch.Tensor,
@@ -234,6 +284,28 @@ def gather_cache(src_cache: torch.Tensor,
                  seq_starts: Optional[torch.Tensor] = None) -> None:
     torch.ops._C_cache_ops.gather_cache(src_cache, dst, block_table,
                                         cu_seq_lens, batch_size, seq_starts)
+
+
+def cp_gather_cache(src_cache: torch.Tensor,
+                    dst: torch.Tensor,
+                    block_table: torch.Tensor,
+                    cu_seq_lens: torch.Tensor,
+                    batch_size: int,
+                    seq_starts: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C_cache_ops.cp_gather_cache(src_cache, dst, block_table,
+                                          cu_seq_lens, batch_size, seq_starts)
+
+
+def cp_gather_and_upconvert_fp8_kv_cache(
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    workspace_starts: torch.Tensor,
+    batch_size: int,
+    seq_starts: Optional[torch.Tensor] = None,
+) -> None:
+    torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
+        src_cache, dst, block_table, workspace_starts, batch_size, seq_starts)
 
 
 def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor,
@@ -406,8 +478,29 @@ def fp8_gemm(input: torch.Tensor, weight: torch.Tensor,
              scale_act: Optional[torch.Tensor],
              scale_wei: Optional[torch.Tensor],
              bias: Optional[torch.Tensor] = None):
+    """fp8 (w8a8) GEMM, allocating the output using `out_dtype`.
+
+    This functional variant carries no mutable argument, which is what keeps
+    it usable under torch.compile. Use `fp8_gemm_out` to write into a
+    caller-provided buffer.
+    """
     return torch.ops._xpu_C.fp8_gemm(input, weight, out_dtype, scale_act,
                                      scale_wei, bias)
+
+
+def fp8_gemm_out(out: torch.Tensor, input: torch.Tensor,
+                 weight: torch.Tensor,
+                 out_dtype: Optional[torch.dtype],
+                 scale_act: Optional[torch.Tensor],
+                 scale_wei: Optional[torch.Tensor],
+                 bias: Optional[torch.Tensor] = None):
+    """fp8 (w8a8) GEMM writing in place into `out`.
+
+    `out` must already match the expected dtype, shape and device; it is
+    returned unchanged.
+    """
+    return torch.ops._xpu_C.fp8_gemm_out(out, input, weight, out_dtype,
+                                         scale_act, scale_wei, bias)
 
 
 def fp8_bmm(input: torch.Tensor, weight: torch.Tensor,
@@ -435,6 +528,24 @@ def fp8_gemm_w8a16(input: torch.Tensor, weight: torch.Tensor,
                    scale_wei: Optional[torch.Tensor],
                    scale_act: Optional[torch.Tensor]):
     return torch.ops._xpu_C.fp8_gemm_w8a16(input, weight, scale_wei, scale_act)
+
+
+def get_onednn_version() -> str:
+    return torch.ops._xpu_C.get_onednn_version()
+
+
+def onednn_available() -> bool:
+    """Return True if the _xpu_C extension was built with oneDNN support.
+
+    When built with VLLM_XPU_ENABLE_ONEDNN=OFF the oneDNN ops are still
+    registered but raise a runtime error when invoked, so we probe the
+    lightweight `get_onednn_version` op to decide.
+    """
+    try:
+        get_onednn_version()
+    except Exception:
+        return False
+    return True
 
 
 # moe
@@ -487,6 +598,7 @@ def moe_align_block_size(
     experts_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
     expert_map: torch.Tensor | None = None,
+    scatter_idx: torch.Tensor | None = None,
 ) -> None:
     torch.ops._moe_C.moe_align_block_size(
         topk_ids,
@@ -496,6 +608,7 @@ def moe_align_block_size(
         experts_ids,
         num_tokens_post_pad,
         expert_map,
+        scatter_idx,
     )
 
 
@@ -576,7 +689,7 @@ def swap_blocks_batch(
     torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
 
 
-def xpu_host_register(ptr: torch.Tensor, n_bytes: int) -> bool:
+def xpu_host_register(ptr: int, n_bytes: int) -> bool:
     """Page-lock a host range and import it into the device context so
     transfers use direct DMA. Intended for host memory that cannot come from
     the caching host allocator, such as a shared mmap region. Returns False if
@@ -591,7 +704,7 @@ def xpu_host_register(ptr: torch.Tensor, n_bytes: int) -> bool:
     return torch.ops._C.xpu_host_register(ptr, n_bytes)
 
 
-def xpu_host_unregister(ptr: torch.Tensor) -> bool:
+def xpu_host_unregister(ptr: int) -> bool:
     """Release a host range previously passed to xpu_host_register.
 
     ptr is a single-element uint64 tensor holding the raw address; see
@@ -621,6 +734,8 @@ def topk_softplus_sqrt(
     input_ids: Optional[torch.Tensor] = None,
     tid2eid: Optional[torch.Tensor] = None,
     is_padding: Optional[torch.Tensor] = None,
+    bias_vl: Optional[torch.Tensor] = None,
+    image_sentinel_lo: int = 0,
 ) -> None:
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
@@ -633,6 +748,8 @@ def topk_softplus_sqrt(
         input_ids,
         tid2eid,
         is_padding,
+        bias_vl,
+        image_sentinel_lo,
     )
 
 
@@ -673,4 +790,30 @@ def topk_per_row_decode(
         logits.stride(0),
         logits.stride(1),
         top_k,
+    )
+
+
+def ngram_compute_n_gram_ids(
+    ne_n: int,
+    ne_k: int,
+    ne_weights: torch.Tensor,
+    ne_mods: torch.Tensor,
+    exclusive_ne_embedder_size_sums: torch.Tensor,
+    exclusive_req_len_sums: torch.Tensor,
+    ne_token_table: torch.Tensor,
+    row_indices: torch.Tensor,
+    column_starts: torch.Tensor,
+    n_gram_ids: torch.Tensor,
+) -> None:
+    torch.ops._C.ngram_compute_n_gram_ids(
+        ne_n,
+        ne_k,
+        ne_weights,
+        ne_mods,
+        exclusive_ne_embedder_size_sums,
+        exclusive_req_len_sums,
+        ne_token_table,
+        row_indices,
+        column_starts,
+        n_gram_ids,
     )

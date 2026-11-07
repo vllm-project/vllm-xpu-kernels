@@ -611,14 +611,19 @@ function(add_xe2_kernel_library LIBRARY_NAME)
 endfunction()
 
 #
-# Create a static library for XE default kernels with common configuration.
+# Create a shared library for XE3 kernels with common configuration.
 #
 # Arguments: LIBRARY_NAME: Name of the library to create (e.g.,
-# grouped_gemm_xe_default) DESTINATION: Installation destination directory
-# (optional, defaults to vllm_xpu_kernels) INCLUDE_CMAKE_SOURCE_DIR: Optional
-# flag to include ${CMAKE_SOURCE_DIR} in include directories
+# attn_kernels_xe_3) DESTINATION: Installation destination directory (optional,
+# defaults to vllm_xpu_kernels) INCLUDE_CMAKE_SOURCE_DIR: Optional flag to
+# include ${CMAKE_SOURCE_DIR} in include directories
 #
-function(add_xe_default_kernel_library LIBRARY_NAME)
+# NOTE: XE3 kernels target the Xe3(p)/CRI architecture and require the CRI
+# CUTLASS revision plus the intel_gpu_cri AOT target (see the
+# VLLM_XPU_ENABLE_XE3P branches in the top-level CMakeLists.txt). They are OFF
+# by default.
+#
+function(add_xe3_kernel_library LIBRARY_NAME)
   cmake_parse_arguments(
     PARSE_ARGV 1 ARG "INCLUDE_CMAKE_SOURCE_DIR" # Boolean options
     "DESTINATION" # Single value keywords
@@ -631,15 +636,16 @@ function(add_xe_default_kernel_library LIBRARY_NAME)
   endif()
 
   # Find all source files
-  file(GLOB_RECURSE KERNEL_SOURCES "*.cpp")
+  file(GLOB_RECURSE KERNEL_SOURCES "*.cpp" ${ATTN_KERNEL_SRCS_GEN})
 
-  # Create static library
+  # Create shared library
   add_library(${LIBRARY_NAME} SHARED ${KERNEL_SOURCES})
 
   # Set include directories
   target_include_directories(
-    ${LIBRARY_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-                           ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    ${LIBRARY_NAME}
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/..
+           ${CMAKE_CURRENT_BINARY_DIR})
 
   # Optionally add CMAKE_SOURCE_DIR
   if(ARG_INCLUDE_CMAKE_SOURCE_DIR)
@@ -650,27 +656,56 @@ function(add_xe_default_kernel_library LIBRARY_NAME)
   set_property(TARGET ${LIBRARY_NAME} PROPERTY CXX_STANDARD 20)
 
   # Set compile options and definitions
-  target_compile_options(${LIBRARY_NAME}
-                         PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC)
+  target_compile_options(
+    ${LIBRARY_NAME}
+    PRIVATE ${SYCL_TLA_KERNELS_COMPILE_FLAGS} -fPIC -Wno-c++20-extensions
+            -Wno-intel-compat -Wno-pragma-once-outside-header)
+  target_compile_definitions(${LIBRARY_NAME} PRIVATE -DSYCL_INTEL_TARGET=35
+                                                     -DVLLM_XPU_ENABLE_XE3P)
+  # GRF size: Xe3p prefers 512-GRF per thread. NVL uses 256, and toolchains
+  # whose SYCL grf_size property does not accept 512 fall back to 256 (detected
+  # by the top-level build as VLLM_XPU_XE3P_GRF_SIZE) so the kernels still
+  # build.
+  if(BUILD_ON_NVL)
+    set(_xe3_grf_size 256)
+  elseif(DEFINED VLLM_XPU_XE3P_GRF_SIZE)
+    set(_xe3_grf_size ${VLLM_XPU_XE3P_GRF_SIZE})
+  else()
+    set(_xe3_grf_size 512)
+  endif()
   target_compile_definitions(${LIBRARY_NAME}
-                             PRIVATE -DVLLM_XPU_ENABLE_XE_DEFAULT)
+                             PRIVATE -DVLLM_GRF_SIZE=${_xe3_grf_size})
   target_include_directories(${LIBRARY_NAME} PRIVATE ${SYCL_TLA_INCLUDE_DIRS})
 
   # Link torch libraries
   target_link_libraries(${LIBRARY_NAME} PRIVATE torch)
   target_link_libraries(${LIBRARY_NAME} PRIVATE ${TORCH_LIBRARIES})
+
+  message(
+    STATUS
+      "Setting library output directory for target '${LIBRARY_NAME}' to '${CMAKE_BINARY_DIR}/'."
+  )
   set_target_properties(${LIBRARY_NAME} PROPERTIES LIBRARY_OUTPUT_DIRECTORY
                                                    "${CMAKE_BINARY_DIR}/")
   install(TARGETS ${LIBRARY_NAME} LIBRARY DESTINATION ${ARG_DESTINATION}
                                           COMPONENT ${LIBRARY_NAME})
 
-  # Set link options for default devices (AOT_DEVICES instead of
-  # XE2_AOT_DEVICES)
-  set(XE_DEFAULT_GPU_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
-  if(AOT_DEVICES)
+  # Set link options for XE3 devices
+  set(XE3_GPU_LINK_FLAGS ${SYCL_DEVICE_LINK_FLAGS})
+  if(_xe3_grf_size EQUAL 256)
     list(
-      APPEND XE_DEFAULT_GPU_LINK_FLAGS
-      "-device ${AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread")
+      APPEND
+      XE3_GPU_LINK_FLAGS
+      -Xsycl-target-backend=spir64_gen
+      "-device ${XE3_AOT_DEVICES} -internal_options -cl-intel-256-GRF-per-thread"
+    )
+  else()
+    list(
+      APPEND
+      XE3_GPU_LINK_FLAGS
+      -Xsycl-target-backend=spir64_gen
+      "-device ${XE3_AOT_DEVICES} -internal_options -cl-intel-512-GRF-per-thread"
+    )
   endif()
-  target_link_options(${LIBRARY_NAME} PRIVATE ${XE_DEFAULT_GPU_LINK_FLAGS})
+  target_link_options(${LIBRARY_NAME} PRIVATE ${XE3_GPU_LINK_FLAGS})
 endfunction()

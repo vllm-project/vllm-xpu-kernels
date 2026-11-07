@@ -18,7 +18,8 @@ def moe_align_block_size(
     expert_map: torch.Tensor | None = None,
     pad_sorted_ids: bool = False,
     ignore_invalid_experts: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return_scatter_idx: bool = False,
+) -> tuple[torch.Tensor, ...]:
     """
     Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.
@@ -47,6 +48,10 @@ def moe_align_block_size(
     - expert_ids: A tensor indicating the assigned expert index for each block.
     - num_tokens_post_padded: The total number of tokens after padding,
         ensuring divisibility by block_size.
+    - scatter_idx: Only returned when return_scatter_idx=True. An int32 tensor
+        shaped [topk_ids.numel(), 1], containing the original routed row index
+        for valid routes and -1 otherwise. With expert_map, this requires
+        ignore_invalid_experts=True.
 
     This function pads the number of tokens that each expert needs to process
     so that it is divisible by block_size.
@@ -68,6 +73,17 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
+    if (return_scatter_idx and expert_map is not None
+            and not ignore_invalid_experts):
+        raise ValueError(
+            "scatter_idx with expert_map requires ignore_invalid_experts")
+    scatter_idx = None
+    if return_scatter_idx:
+        scatter_idx = torch.empty(
+            (topk_ids.numel(), 1),
+            dtype=torch.int32,
+            device=topk_ids.device,
+        )
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     if pad_sorted_ids:
         max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
@@ -93,11 +109,14 @@ def moe_align_block_size(
         expert_ids,
         num_tokens_post_pad,
         expert_map if ignore_invalid_experts else None,
+        scatter_idx,
     )
 
     if expert_map is not None and not ignore_invalid_experts:
         expert_ids = expert_map[expert_ids]
 
+    if scatter_idx is not None:
+        return sorted_ids, expert_ids, num_tokens_post_pad, scatter_idx
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 

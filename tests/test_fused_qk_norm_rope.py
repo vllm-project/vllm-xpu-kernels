@@ -26,6 +26,12 @@ MINI_PYTEST_PARAMS = {
         "head_config": [(16, 4)],
         "rotary_ratio": [1.0],
     },
+    # Cover the h1, h4 and h8 auto choices in mini scope.
+    "test_heads_per_sg_equivalence": {
+        "num_tokens": [1, 256, 1024],
+        "head_dim": [128, 256],
+        "head_config": [(16, 8)],
+    },
 }
 
 
@@ -256,3 +262,95 @@ def test_fused_qk_norm_rope_opcheck(
             positions,
         ),
     )
+
+
+# Straddles every threshold in select_heads_per_sg().
+EQUIV_NUM_TOKENS = [1, 32, 256, 1024, 4096, 8192]
+EQUIV_HEAD_CONFIGS = [(4, 2), (16, 2), (16, 8), (64, 8)]
+
+
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("is_neox", IS_NEOX)
+@pytest.mark.parametrize("head_dim", [64, 128, 256])
+@pytest.mark.parametrize("num_tokens", EQUIV_NUM_TOKENS)
+@pytest.mark.parametrize("head_config", EQUIV_HEAD_CONFIGS)
+@torch.inference_mode()
+def test_heads_per_sg_equivalence(
+    device: str,
+    dtype: torch.dtype,
+    is_neox: bool,
+    head_dim: int,
+    num_tokens: int,
+    head_config: tuple,
+) -> None:
+    """Every heads_per_sg value must give bit-identical output."""
+    torch.manual_seed(13)
+    torch.xpu.set_device(device)
+
+    num_heads_q, num_heads_kv = head_config
+    rotary_dim = head_dim
+    max_position = 8192
+    eps = 1e-6
+
+    total_dim = (num_heads_q + 2 * num_heads_kv) * head_dim
+    qkv_base = torch.randn(num_tokens, total_dim, dtype=dtype, device=device)
+    positions = torch.randint(0,
+                              max_position, (num_tokens, ),
+                              dtype=torch.long,
+                              device=device)
+
+    q_weight = torch.empty(head_dim, dtype=dtype, device=device)
+    q_weight.normal_(mean=1.0, std=0.1)
+    k_weight = torch.empty(head_dim, dtype=dtype, device=device)
+    k_weight.normal_(mean=1.0, std=0.1)
+
+    inv_freq = 1.0 / (10000.0**(
+        torch.arange(0, rotary_dim // 2, dtype=torch.float32, device=device) /
+        (rotary_dim // 2)))
+    t = torch.arange(max_position, dtype=torch.float32, device=device)
+    freqs = torch.outer(t, inv_freq)
+    cos_sin_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
+
+    def run(forced: int) -> torch.Tensor:
+        qkv = qkv_base.clone()
+        torch.ops._C.fused_qk_norm_rope(
+            qkv,
+            num_heads_q,
+            num_heads_kv,
+            num_heads_kv,
+            head_dim,
+            eps,
+            q_weight,
+            k_weight,
+            cos_sin_cache,
+            is_neox,
+            positions,
+            forced,
+        )
+        return qkv
+
+    reference = run(1)
+    for forced in (2, 4, 8, -1):
+        if forced > num_heads_q + num_heads_kv:
+            continue
+        torch.testing.assert_close(run(forced), reference, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize("device", XPU_DEVICES)
+@pytest.mark.parametrize("forced", [3, 6, 16])
+@torch.inference_mode()
+def test_heads_per_sg_rejects_unsupported(device: str, forced: int) -> None:
+    torch.xpu.set_device(device)
+    num_heads_q, num_heads_kv, head_dim = 16, 8, 128
+    qkv = torch.randn(4, (num_heads_q + 2 * num_heads_kv) * head_dim,
+                      dtype=torch.bfloat16,
+                      device=device)
+    positions = torch.arange(4, dtype=torch.long, device=device)
+    weight = torch.ones(head_dim, dtype=torch.bfloat16, device=device)
+    cos_sin_cache = torch.ones(8, head_dim, dtype=torch.float32, device=device)
+    with pytest.raises(RuntimeError, match="forced_token_heads_per_warp"):
+        torch.ops._C.fused_qk_norm_rope(qkv, num_heads_q, num_heads_kv,
+                                        num_heads_kv, head_dim, 1e-6, weight,
+                                        weight, cos_sin_cache, True, positions,
+                                        forced)

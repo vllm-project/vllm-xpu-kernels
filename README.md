@@ -10,11 +10,12 @@ A [vLLM](https://github.com/vllm-project/vllm) component that provides optimized
 - [Getting Started](#getting-started)
   - [How It Works](#how-it-works)
   - [Installation](#installation)
+  - [Build from Source](#build-from-source)
   - [Build Options](#build-options)
   - [Using with vLLM](#using-with-vllm)
+  - [Kernel Configuration](#kernel-configuration)
 - [Testing](#testing)
 - [Benchmarks](#benchmarks)
-- [Design Notes](#design-notes)
 - [License](#license)
 
 ---
@@ -32,6 +33,7 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 | **Normalization** | RMS norm, fused add-RMS norm, layer norm |
 | **Activation** | SiLU-and-mul, mul-and-SiLU, GeLU (fast/new/quick/tanh), SwigluOAI, SituGLU |
 | **Attention** | Flash attention (variable-length), GDN attention, XE2 attention variants |
+| **KV Cache** | Paged cache gather, CUDA-aligned page-wise context-parallel cache gather with token-level sequence offsets and aligned 16-byte copies (`_C_cache_ops.cp_gather_cache`) |
 | **Positional Encoding** | Rotary embedding (NeoX and GPT-J styles), DeepSeek scaling RoPE |
 | **Mixture of Experts** | TopK scoring (softmax/sigmoid), grouped TopK, fused grouped TopK; MoE align sum, MoE gather, expert remapping |
 | **LoRA** | LoRA operator support |
@@ -41,9 +43,10 @@ Kernels are written in SYCL/DPC++ and leverage [oneDNN](https://github.com/oneap
 
 ## Requirements
 
-- **Python**: 3.9 – 3.12
-- **PyTorch**: 2.13.0+xpu
-- **oneAPI**: 2026.0 ([Base Toolkit download](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html))
+- **Python**: 3.12
+- **PyTorch**: 2.15.0+xpu (from `https://download.pytorch.org/whl/xpu`)
+- **Intel OMIX**: 0.4, including the oneAPI 2026.1 DPC++ compiler
+  ([installation guide](https://dgpu-docs.intel.com/installation-guides/installing-omix.html))
 - **CMake**: ≥ 3.26
 - **Ninja** build system
 
@@ -55,23 +58,82 @@ vLLM calls `import vllm_xpu_kernels._C` at startup, which registers all custom o
 
 ### Installation
 
-**1. Install oneAPI 2026.0**
+With a compatible PyTorch XPU installation already available, install the published package from PyPI into your active environment:
 
-Download and install the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html), then source the environment:
+```bash
+pip install --upgrade vllm-xpu-kernels
+```
+
+To pin a specific release, for example:
+
+```bash
+pip install "vllm-xpu-kernels==0.1.15.4"
+```
+
+For Release-hosted wheels and the GitHub Pages package index, see
+[Wheel publishing and installation](WHEEL_RELEASES.md). The guide covers
+multiple binaries per release, Pages setup (no purchased domain required),
+pip installation commands, and the isolated [nightly channel](WHEEL_RELEASES.md#nightly-wheels).
+
+### Build from Source
+
+**1. Clone the repository**
+
+Run these commands on the host before building the Docker image or setting up a bare-metal build:
+
+```bash
+git clone https://github.com/vllm-project/vllm-xpu-kernels.git
+cd vllm-xpu-kernels
+```
+
+**2. Prepare Intel OMIX**
+
+- Option 1: Docker Container
+
+  Build the development image using this repository's `Dockerfile.xpu`. Configure proxies as needed for your network.
+
+  ```bash
+  # Clone the repository and enter its directory on the host before building the Docker image.
+
+  git clone https://github.com/vllm-project/vllm-xpu-kernels.git
+  cd vllm-xpu-kernels
+  docker build --no-cache \
+               -f ./Dockerfile.xpu \
+               -t vllm/vllm-xpu-kernels:latest .
+  ```
+
+  Launch the container with the checkout mounted as its working directory:
+  
+  ```bash
+  docker run -it \
+             -v /dev/dri/by-path:/dev/dri/by-path \
+             -v "$(pwd):/workspace/vllm-xpu-kernels" \
+             --device=/dev/dri \
+             --ipc=host \
+             --workdir /workspace/vllm-xpu-kernels \
+             --name vllm-xpu-kernels \
+             --entrypoint /bin/bash \
+             vllm/vllm-xpu-kernels:latest
+  ```
+
+- Option 2: Bare-metal
+
+  Install the `intel-omix-dev` package by following the
+  [Intel OMIX installation guide](https://dgpu-docs.intel.com/installation-guides/installing-omix.html).
+  It provides the Intel GPU compute driver, DPC++ compiler, and required
+  compute libraries as a validated stack.
+
+Initialize the oneAPI environment in the shell where you will build:
 
 ```bash
 source /opt/intel/oneapi/setvars.sh
 ```
 
-**2. Create a virtual environment and install dependencies**
+**3. Install dependencies**
+
+In either environment, install the dependencies from the mounted or cloned repository:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-
-git clone https://github.com/vllm-project/vllm-xpu-kernels
-cd vllm-xpu-kernels
-
 pip install -r requirements.txt
 ```
 
@@ -96,9 +158,9 @@ pip install --no-build-isolation .
 **Build a wheel** (output goes to `dist/`):
 
 ```bash
-pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu .
+pip wheel --extra-index-url=https://download.pytorch.org/whl/xpu --wheel-dir dist .
 # or
-pip wheel --no-build-isolation .
+pip wheel --no-build-isolation --wheel-dir dist .
 ```
 
 **Incremental rebuild** (fastest for iterative development):

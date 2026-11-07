@@ -128,3 +128,34 @@ def test_view_lifetime_after_owner_drop(device):
     xpu_view.add_(1)
     assert xpu_view[0, 0].item() == 1
     assert xpu_view[9, 9].item() == 100
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("device", XPU_DEVICES)
+def test_non_contiguous_strided_view(device, pinned):
+    torch.set_default_device(device)
+    # Simulate scale_kn: a [32, 16] contiguous tensor
+    scale_kn = torch.arange(512,
+                            dtype=torch.float32,
+                            device="cpu",
+                            pin_memory=pinned).view(32, 16)
+    # Transposed view: shape [16, 32], non-contiguous stride (1, 16)
+    cpu_view = scale_kn.t()
+    assert cpu_view.shape == (16, 32)
+    assert cpu_view.stride() == (1, 16)
+    assert not cpu_view.is_contiguous()
+
+    xpu_view = torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_view)
+    assert xpu_view.device.type == "xpu"
+    assert xpu_view.shape == (16, 32)
+    assert xpu_view.stride() == (1, 16)
+    assert not xpu_view.is_contiguous()
+
+    # Transposing xpu_view back should yield a contiguous [32, 16] tensor
+    xpu_view_t = xpu_view.t()
+    assert xpu_view_t.shape == (32, 16)
+    assert xpu_view_t.is_contiguous()
+
+    # Correctness check: values match original transposed CPU tensor
+    assert torch.equal(xpu_view.cpu(), cpu_view)
+

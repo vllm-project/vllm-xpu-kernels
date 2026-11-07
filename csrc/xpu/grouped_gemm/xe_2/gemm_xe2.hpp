@@ -165,7 +165,7 @@ CUTE_DEVICE void xe_gemm(
 
   const int prefetch_dist = 3;
 
-  constexpr int barrier_scope = 2;
+  constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
 
   int k_tile_count = ceil_div(shape<1>(A), get<2>(wg_tile));
   int k_tile_prefetch = 0;
@@ -321,9 +321,7 @@ CUTE_DEVICE void xe_gemm_4bits(
   auto pAgA = thr_prefetch_A.partition_S(gA);
   auto pBgB = thr_prefetch_B.partition_S(gB);
 
-  const int prefetch_dist = 6;
-
-  constexpr int barrier_scope = 2;
+  constexpr SPIRVScope barrier_scope = ScopeWorkgroup;
 
   int k_tile_count = ceil_div(shape<1>(A), get<2>(wg_tile));
   int k_tile_prefetch = 0;
@@ -343,6 +341,11 @@ CUTE_DEVICE void xe_gemm_4bits(
   static constexpr auto SG_N = tile_n / ATOM_N;  // BLK_N / ATOM_N;
   static constexpr auto SG_K = tile_k / ATOM_K;  // BLK_K / ATOM_K;
 
+  // 6 k-tiles in flight hide the packed-weight decode; block-fp8 has none to
+  // hide and measured best at 1 for the 16-row tile, 3 for the others.
+  static constexpr int prefetch_dist =
+      TENSOR_B_DTYPE != B_DTYPE::BLOCK_FP8 ? 6 : (tile_m <= 16 ? 1 : 3);
+
   static constexpr auto thr_N = get<1>(tCrB.shape());
   static constexpr auto channel_num = get<0>(get<0>(tCrB.shape()));
   auto n_tile_start = wg_n * tile_n;
@@ -353,8 +356,18 @@ CUTE_DEVICE void xe_gemm_4bits(
   int group_num = get<1>(A.shape()) / group_size;
   int x_idx = sg_local_id / channel_num;
 
+  // Scales are not block-2D prefetched: each row of an [N, K/gs] scale
+  // prefetch is a single element, below the 64-byte minimum surface width
+  // required by the 2D block I/O restrictions (SPV_INTEL_2d_block_io).
   using scaleStoreType = conditional_t<is_same_v<TA, half_t>, half_t, float>;
   scaleStoreType scales[thr_N * channel_num];
+
+  // A workgroup tile never straddles a 128-wide N block (tile_n is 64 or 128
+  // and n_tile_start is a multiple of tile_n), so for block-fp8 the scale is a
+  // single scalar per K block. The accumulator is kept in units of that scale.
+  float blk_scale_cur = 1.0f;
+  const int blk_n_blocks = static_cast<int>(get<0>(B.shape())) / group_size;
+  const int blk_n_block = n_tile_start / group_size;
 
   clear(tCrC);
 
@@ -367,27 +380,6 @@ CUTE_DEVICE void xe_gemm_4bits(
   for (; k_tile_prefetch < prefetch_dist; k_tile_prefetch++) {
     prefetch(prefetch_a, pAgA(_, _, _, k_tile_prefetch));
     prefetch(prefetch_b, pBgB(_, _, _, k_tile_prefetch));
-
-    if (k_tile_prefetch * group_size < shape<1>(A)) {
-      // MXFP8 / int4 1D scale prefetch ([N, K/gs]). Skip for float ElementS
-      // (block-FP8 uses 2D [K/gs, N/gs] indexing).
-      if constexpr (!(TENSOR_B_DTYPE == B_DTYPE::BLOCK_FP8)) {
-        auto next_scales_tensor = make_tensor(
-            make_gmem_ptr(
-                reinterpret_cast<const ElementS*>(
-                    Scales + (n_tile_start + n_sg_start) * group_num +
-                    k_tile_prefetch)),
-            make_layout(
-                make_shape(Int<SG_N>{}, Int<1>{}),
-                make_stride(group_num, Int<1>{})));
-        auto prefetch_scales = make_block_2d_prefetch<1>(
-            make_shape(Int<SG_N>{}, Int<1>{}), next_scales_tensor);
-        auto thr_prefetch_scales = prefetch_scales.get_slice(sg_local_id);
-        auto pSgS = thr_prefetch_scales.partition_S(
-            make_identity_tensor(make_shape(Int<SG_N>{}, Int<1>{})));
-        prefetch(prefetch_scales, pSgS(_, 0, 0));
-      }
-    }
   }
 
   for (int k_tile = 0; k_tile < k_tile_count; k_tile++, k_tile_prefetch++) {
@@ -399,30 +391,36 @@ CUTE_DEVICE void xe_gemm_4bits(
     if (k_tile * tile_k % group_size == 0) {
       int group_idx = (k_tile * tile_k) / group_size;
 
-      CUTLASS_PRAGMA_UNROLL
-      for (int n = 0; n < thr_N; ++n) {
+      if constexpr (TENSOR_B_DTYPE == B_DTYPE::BLOCK_FP8) {
+        // Re-express the running sum in the new block's units. One multiply
+        // per accumulator element per K block replaces scaling every B
+        // element on every k-tile, and needs no second accumulator.
+        float s_new =
+            static_cast<float>(Scales[group_idx * blk_n_blocks + blk_n_block]);
+        if (group_idx > 0) {
+          float ratio = blk_scale_cur / s_new;
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < tCrC.size(); ++i) {
+            tCrC(i) *= ratio;
+          }
+        }
+        blk_scale_cur = s_new;
+      } else {
         CUTLASS_PRAGMA_UNROLL
-        for (int c = 0; c < channel_num; ++c) {
-          int real_idx = x_idx + c * (sg_local_range / channel_num);
-          int sg_local_n = n * sg_local_range + real_idx;
-          scaleStoreType scale;
-          if constexpr (std::is_same_v<TB, int4_t>) {
-            scale = Scales
-                [(n_tile_start + n_sg_start + sg_local_n) * group_num +
-                 group_idx];
-          } else if constexpr (
-              std::is_same_v<TB, float_e2m1_t> ||
-              std::is_same_v<TB, float_e4m3_t> ||
-              std::is_same_v<TB, float_e5m2_t>) {
-            if constexpr (TENSOR_B_DTYPE == B_DTYPE::BLOCK_FP8) {
-              // Block-FP8: float32 scales [K/128, N/128] (B is (N,K)).
-              int n_global = n_tile_start + n_sg_start + sg_local_n;
-              int n_blocks = static_cast<int>(get<0>(B.shape())) / group_size;
-              int n_block = n_global / group_size;
-              int k_block = group_idx;
-              scale = static_cast<scaleStoreType>(
-                  Scales[k_block * n_blocks + n_block]);
-            } else {
+        for (int n = 0; n < thr_N; ++n) {
+          CUTLASS_PRAGMA_UNROLL
+          for (int c = 0; c < channel_num; ++c) {
+            int real_idx = x_idx + c * (sg_local_range / channel_num);
+            int sg_local_n = n * sg_local_range + real_idx;
+            scaleStoreType scale;
+            if constexpr (std::is_same_v<TB, int4_t>) {
+              scale = Scales
+                  [(n_tile_start + n_sg_start + sg_local_n) * group_num +
+                   group_idx];
+            } else if constexpr (
+                std::is_same_v<TB, float_e2m1_t> ||
+                std::is_same_v<TB, float_e4m3_t> ||
+                std::is_same_v<TB, float_e5m2_t>) {
               // MXFP4 / MXFP8: uint8 E8M0 bits -> float via (bits << 23).
               uint32_t scale_u32 =
                   Scales
@@ -432,28 +430,9 @@ CUTE_DEVICE void xe_gemm_4bits(
               scale = static_cast<scaleStoreType>(
                   reinterpret_cast<float&>(scale_u32));
             }
+
+            scales[n * channel_num + c] = scale;
           }
-
-          scales[n * channel_num + c] = scale;
-        }
-      }
-
-      if ((group_idx + prefetch_dist) * group_size < shape<1>(A)) {
-        if constexpr (!(TENSOR_B_DTYPE == B_DTYPE::BLOCK_FP8)) {
-          auto next_scales_tensor = make_tensor(
-              make_gmem_ptr(
-                  reinterpret_cast<const ElementS*>(
-                      Scales + (n_tile_start + n_sg_start) * group_num +
-                      group_idx + prefetch_dist)),
-              make_layout(
-                  make_shape(Int<SG_N>{}, Int<1>{}),
-                  make_stride(group_num, Int<1>{})));
-          auto prefetch_scales = make_block_2d_prefetch<1>(
-              make_shape(Int<SG_N>{}, Int<1>{}), next_scales_tensor);
-          auto thr_prefetch_scales = prefetch_scales.get_slice(sg_local_id);
-          auto pSgS = thr_prefetch_scales.partition_S(
-              make_identity_tensor(make_shape(Int<SG_N>{}, Int<1>{})));
-          prefetch(prefetch_scales, pSgS(_, 0, 0));
         }
       }
     }
@@ -466,17 +445,20 @@ CUTE_DEVICE void xe_gemm_4bits(
     reorder(tArA, tCrA);
     reorder(tBrB, tCrB);
 
-    CUTLASS_PRAGMA_UNROLL
-    for (int n = 0; n < thr_N; ++n) {
+    if constexpr (TENSOR_B_DTYPE != B_DTYPE::BLOCK_FP8) {
       CUTLASS_PRAGMA_UNROLL
-      for (int c = 0; c < channel_num; ++c) {
+      for (int n = 0; n < thr_N; ++n) {
         CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < tCrB.size() / thr_N / channel_num; ++i) {
-          if constexpr (std::is_same_v<TA, half_t>) {
-            tCrB(cute::tuple(c, _), n, _)[i] *= scales[n * channel_num + c];
-          } else {
-            tCrB(cute::tuple(c, _), n, _)[i] = apply_scale(
-                tCrB(cute::tuple(c, _), n, _)[i], scales[n * channel_num + c]);
+        for (int c = 0; c < channel_num; ++c) {
+          CUTLASS_PRAGMA_UNROLL
+          for (int i = 0; i < tCrB.size() / thr_N / channel_num; ++i) {
+            if constexpr (std::is_same_v<TA, half_t>) {
+              tCrB(cute::tuple(c, _), n, _)[i] *= scales[n * channel_num + c];
+            } else {
+              tCrB(cute::tuple(c, _), n, _)[i] = apply_scale(
+                  tCrB(cute::tuple(c, _), n, _)[i],
+                  scales[n * channel_num + c]);
+            }
           }
         }
       }
@@ -485,6 +467,13 @@ CUTE_DEVICE void xe_gemm_4bits(
     cute::gemm(mma, tCrA, tCrB, tCrC);
 
     barrier_wait(barrier_scope);
+  }
+
+  if constexpr (TENSOR_B_DTYPE == B_DTYPE::BLOCK_FP8) {
+    CUTLASS_PRAGMA_UNROLL
+    for (int i = 0; i < tCrC.size(); ++i) {
+      tCrC(i) *= blk_scale_cur;
+    }
   }
 
   if (Bias != nullptr) {

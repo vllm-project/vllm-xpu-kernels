@@ -31,7 +31,7 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
 #
-set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
+set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12" "3.13" "3.14")
 
 # Supported Intel GPU architectures.
 set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
@@ -44,7 +44,7 @@ set(SYCL_SUPPORTED_ARCHS "intel_gpu_pvc;intel_gpu_bmg_g21;intel_gpu_bmg_g31")
 #
 # TODO: we need to align torch version with used in vLLM.
 #
-set(TORCH_SUPPORTED_VERSION_XPU "2.13.0")
+set(TORCH_SUPPORTED_VERSION_XPU "2.15.0")
 
 set(BUILD_SYCL_TLA_KERNELS
     ON
@@ -60,7 +60,7 @@ set(ONEDNN_GIT_TAG
     CACHE STRING "oneDNN git commit hash or tag")
 # ARCHITECTURE OPTIONS
 option(VLLM_XPU_ENABLE_XE2 "Enable XE2 architecture kernels" ON)
-option(VLLM_XPU_ENABLE_XE_DEFAULT "Enable XE Default architecture kernels" ON)
+option(VLLM_XPU_ENABLE_XE3P "Enable XE3 architecture kernels" ON)
 
 # KERNEL OPTIONS — each controls whether the corresponding Python extension is
 # built. Override from the command line with -D<NAME>=OFF or via the
@@ -77,6 +77,8 @@ option(MHC_KERNELS_ENABLED
 option(XPU_SPECIFIC_KERNELS_ENABLED
        "Build XPU-specific kernels (_xpu_C extension)" ON)
 option(XPUMEM_ALLOCATOR_ENABLED "Build xpumem_allocator extension" ON)
+option(VLLM_XPU_ENABLE_ONEDNN
+       "Build oneDNN-backed kernels (GEMM ops in _xpu_C extension)" ON)
 
 # KERNEL CONFIGURATION — controls which paged decode kernel variants are
 # compiled. Use model-specific configs to dramatically reduce compile time. See
@@ -137,7 +139,7 @@ message(STATUS "  ONEDNN_GIT_REPO              = ${ONEDNN_GIT_REPO}")
 message(STATUS "  ONEDNN_GIT_TAG               = ${ONEDNN_GIT_TAG}")
 message(STATUS "  BUILD_SYCL_TLA_KERNELS       = ${BUILD_SYCL_TLA_KERNELS}")
 message(STATUS "  VLLM_XPU_ENABLE_XE2          = ${VLLM_XPU_ENABLE_XE2}")
-message(STATUS "  VLLM_XPU_ENABLE_XE_DEFAULT   = ${VLLM_XPU_ENABLE_XE_DEFAULT}")
+message(STATUS "  VLLM_XPU_ENABLE_XE3P          = ${VLLM_XPU_ENABLE_XE3P}")
 message(STATUS "  BASIC_KERNELS_ENABLED        = ${BASIC_KERNELS_ENABLED}")
 message(STATUS "  FA2_KERNELS_ENABLED          = ${FA2_KERNELS_ENABLED}")
 message(STATUS "  MOE_KERNELS_ENABLED          = ${MOE_KERNELS_ENABLED}")
@@ -147,6 +149,7 @@ message(STATUS "  MHC_KERNELS_ENABLED          = ${MHC_KERNELS_ENABLED}")
 message(
   STATUS "  XPU_SPECIFIC_KERNELS_ENABLED = ${XPU_SPECIFIC_KERNELS_ENABLED}")
 message(STATUS "  XPUMEM_ALLOCATOR_ENABLED     = ${XPUMEM_ALLOCATOR_ENABLED}")
+message(STATUS "  VLLM_XPU_ENABLE_ONEDNN       = ${VLLM_XPU_ENABLE_ONEDNN}")
 message(STATUS "  VLLM_PAGED_DECODE_CONFIG     = ${VLLM_PAGED_DECODE_CONFIG}")
 message(STATUS "  VLLM_CHUNK_PREFILL_CONFIG    = ${VLLM_CHUNK_PREFILL_CONFIG}")
 message(STATUS "")
@@ -174,7 +177,9 @@ append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 # Import torch cmake configuration.
 find_package(Torch REQUIRED)
 
-find_package(oneDNN REQUIRED)
+if(VLLM_XPU_ENABLE_ONEDNN)
+  find_package(oneDNN REQUIRED)
+endif()
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
@@ -247,6 +252,9 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # VLLM_XPU_XE2_AOT_DEVICES="pvc,bmg-g31-a0"
   set(AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
   set(XE2_AOT_DEVICES "pvc,bmg,bmg-g21-a0,bmg-g31-a0")
+  # XE3 (Xe3p / CRI) AOT targets. Only used when VLLM_XPU_ENABLE_XE3P is ON;
+  # add_xe3_kernel_library links the XE3 kernel lib for these devices.
+  set(XE3_AOT_DEVICES "cri,cri-a0")
 
   # Allow overriding via env, including explicitly disabling AOT by setting an
   # empty env var (e.g. export VLLM_XPU_AOT_DEVICES="").
@@ -255,6 +263,14 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   endif()
   if(DEFINED ENV{VLLM_XPU_XE2_AOT_DEVICES})
     set(XE2_AOT_DEVICES $ENV{VLLM_XPU_XE2_AOT_DEVICES})
+  endif()
+  if(DEFINED ENV{VLLM_XPU_XE3P_AOT_DEVICES})
+    set(XE3_AOT_DEVICES $ENV{VLLM_XPU_XE3P_AOT_DEVICES})
+  endif()
+  # Fold the XE3 targets into the general AOT device list so the _vllm_fa2_C
+  # extension (which links the XE3 kernel lib) is AOT-compiled for them too.
+  if(VLLM_XPU_ENABLE_XE3P AND AOT_DEVICES)
+    set(AOT_DEVICES "${AOT_DEVICES},${XE3_AOT_DEVICES}")
   endif()
 
   # ============= COMPILE OPTIONS ==================
@@ -321,7 +337,7 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages
   # when building.
   set(CUTLASS_REVISION
-      "cd763790ad2f74d7294435ecf77682bac0062c3a"
+      "7b56b936b87f799f80dde60c2fd8d11c1128cebb"
       CACHE STRING "CUTLASS revision to use")
 
   if(DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -357,9 +373,15 @@ if(VLLM_GPU_LANG STREQUAL "SYCL")
   # cutlass compilation flags
   set(CUTLASS_ENABLE_SYCL "ON")
   # TODO: make this a list
-  set(DPCPP_SYCL_TARGET
-      "intel_gpu_bmg_g21"
-      CACHE STRING "DPC++ SYCL target architectures")
+  if(VLLM_XPU_ENABLE_XE3P)
+    set(DPCPP_SYCL_TARGET
+        "intel_gpu_cri"
+        CACHE STRING "DPC++ SYCL target architectures")
+  else()
+    set(DPCPP_SYCL_TARGET
+        "intel_gpu_bmg_g21"
+        CACHE STRING "DPC++ SYCL target architectures")
+  endif()
   set(CMAKE_EXPORT_COMPILE_COMMANDS "ON")
   set(CUTLASS_ENABLE_BENCHMARKS "OFF")
   # disable cuda
@@ -410,13 +432,6 @@ if(BUILD_SYCL_TLA_KERNELS)
   # compile static library for attn and grouped_gemm, link this library to vLLM
   # extensions shared library
   set(SYCL_TLA_COMPILE_OPTIONS "")
-  if(VLLM_XPU_ENABLE_XE_DEFAULT)
-    if(MOE_KERNELS_ENABLED)
-      add_subdirectory(csrc/xpu/grouped_gemm/xe_default)
-      list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_default")
-    endif()
-    list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE_DEFAULT)
-  endif()
   if(VLLM_XPU_ENABLE_XE2)
     include_directories(${CMAKE_SOURCE_DIR}/csrc)
     if(MOE_KERNELS_ENABLED)
@@ -440,6 +455,45 @@ if(BUILD_SYCL_TLA_KERNELS)
       list(APPEND MHC_LIB_NAME "mhc_kernels_xe_2")
     endif()
     list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE2)
+  endif()
+  if(VLLM_XPU_ENABLE_XE3P)
+    include_directories(${CMAKE_SOURCE_DIR}/csrc)
+    # The CRI/Xe3p SYCL target is selected via a compile define so headers can
+    # branch on it (mirrors intel_gpu_cri DPC++ target above).
+    list(APPEND SYCL_TLA_KERNELS_COMPILE_FLAGS
+         "-D__SYCL_TARGET_INTEL_GPU_CRI__")
+    # The intel_gpu_cri SYCL architecture enumerator only exists on CRI-enabled
+    # oneAPI toolchains. Detect it so is_xe3p_arch() (csrc/utils.h) can
+    # reference it when available and fall back to intel_gpu_nvl_p otherwise.
+    get_filename_component(_icpx_bindir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set(_sycl_arch_def
+        "${_icpx_bindir}/../include/sycl/ext/oneapi/experimental/device_architecture.def"
+    )
+    if(EXISTS "${_sycl_arch_def}")
+      file(STRINGS "${_sycl_arch_def}" _cri_arch_lines
+           REGEX "intel_gpu_cri[^_]")
+      if(_cri_arch_lines)
+        message(STATUS "Toolchain supports intel_gpu_cri architecture")
+        list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_HAS_INTEL_GPU_CRI)
+      else()
+        message(
+          STATUS
+            "Toolchain lacks intel_gpu_cri; is_xe3p_arch() will use intel_gpu_nvl_p only"
+        )
+      endif()
+    endif()
+    # Xe3p can use 512-GRF per thread on newer toolchains, but pin to 256-GRF
+    # for now so the XE3 kernels build consistently across oneAPI releases.
+    set(VLLM_XPU_XE3P_GRF_SIZE 256)
+    if(MOE_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/grouped_gemm/xe_3)
+      list(APPEND GROUPED_GEMM_LIB_NAME "grouped_gemm_xe_3")
+    endif()
+    if(FA2_KERNELS_ENABLED)
+      add_subdirectory(csrc/xpu/attn/xe_3)
+      list(APPEND ATTN_KERNEL_LIB_NAME "attn_kernels_xe_3")
+    endif()
+    list(APPEND SYCL_TLA_COMPILE_OPTIONS -DVLLM_XPU_ENABLE_XE3P)
   endif()
   list(APPEND VLLM_GPU_COMPILE_FLAGS ${SYCL_TLA_COMPILE_OPTIONS})
 
@@ -546,7 +600,8 @@ if(BASIC_KERNELS_ENABLED)
       "csrc/utils/mem_cpy.cpp"
       "csrc/utils/host_register.cpp"
       "csrc/utils/mem_info.cpp"
-      "csrc/topk_per_row.cpp")
+      "csrc/topk_per_row.cpp"
+      "csrc/ngram_embedding_kernels.cpp")
   include_directories("/usr/include")
 
   define_gpu_extension_target(
@@ -622,19 +677,23 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
       "csrc/xpu/lora/lora_expand.cpp"
       "csrc/xpu/lora/lora_ops.cpp"
       "csrc/xpu/sampler/topk_topp_sampler.cpp"
+      "csrc/xpu/sampler/compact_sampling_mask.cpp"
       "csrc/xpu/sycl/deepseek_scaling_rope.cpp"
       "csrc/xpu/sycl/deepseek_qnorm_rope_kv_insert.cpp"
       "csrc/xpu/sycl/deepseek_inv_rope_bf16.cpp"
       "csrc/xpu/sycl/deepseek_inv_rope_fp8_quant.cpp"
       "csrc/xpu/sycl/deepseek_fused_indexer_q_rope_fp8.cpp"
       "csrc/xpu/sycl/deepseek_fused_indexer_q_rope_mxfp4.cpp"
+      "csrc/xpu/sycl/fused_input_norm.cpp"
+      "csrc/xpu/sycl/fused_kv_compress_norm_rope_insert_sparse_attn.cpp"
       "csrc/xpu/sycl/multimodal_rope.cpp"
       "csrc/xpu/sycl/apply_rotary_emb.cpp"
       "csrc/xpu/rand/exponential.cpp"
       "csrc/xpu/utils.cpp")
   if(MOE_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC
-         "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp")
+         "csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp"
+         "csrc/xpu/grouped_gemm/moe_shared_fused_interface.cpp")
   endif()
   if(GDN_KERNELS_ENABLED)
     list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/gdn_attn/gdn_attn_interface.cpp")
@@ -646,14 +705,23 @@ if(XPU_SPECIFIC_KERNELS_ENABLED)
   # TODO: check if we need this flags list(APPEND VLLM_GPU_FLAGS
   # "-gline-tables-only")
 
-  if(ONEDNN_FOUND)
-    set(_ONEDNN_SRC)
-    file(GLOB _ONEDNN_SRC csrc/xpu/onednn/*.cpp)
-    list(APPEND VLLM_EXT_XPU_SRC ${_ONEDNN_SRC})
-    include_directories(${ONEDNN_INCLUDE_DIR})
-    link_libraries(${ONEDNN_LIBRARY})
+  if(VLLM_XPU_ENABLE_ONEDNN)
+    if(ONEDNN_FOUND)
+      set(_ONEDNN_SRC)
+      file(GLOB _ONEDNN_SRC csrc/xpu/onednn/*.cpp)
+      # The stub only backs the disabled build; drop it here.
+      list(REMOVE_ITEM _ONEDNN_SRC
+           "${CMAKE_CURRENT_SOURCE_DIR}/csrc/xpu/onednn/onednn_stub.cpp")
+      list(APPEND VLLM_EXT_XPU_SRC ${_ONEDNN_SRC})
+      include_directories(${ONEDNN_INCLUDE_DIR})
+      link_libraries(${ONEDNN_LIBRARY})
+    else()
+      message(FATAL_ERROR "oneDNN not found!")
+    endif()
   else()
-    message(FATAL_ERROR "oneDNN not found!")
+    # oneDNN disabled: build stub ops that raise a runtime error when called so
+    # the torch ops stay registered.
+    list(APPEND VLLM_EXT_XPU_SRC "csrc/xpu/onednn/onednn_stub.cpp")
   endif()
 
   define_gpu_extension_target(

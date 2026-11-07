@@ -17,6 +17,46 @@ void fused_add_rms_norm(
     std::optional<torch::Tensor> weight,
     double epsilon);
 
+void gemma_rms_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    double epsilon);
+
+void fused_add_gemma_rms_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    double epsilon);
+
+void layer_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    std::optional<torch::Tensor> weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
+void fused_add_layer_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    std::optional<torch::Tensor> weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
+void nemotron_layer_norm(
+    torch::Tensor& out,
+    torch::Tensor& input,
+    torch::Tensor& weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
+void fused_add_nemotron_layer_norm(
+    torch::Tensor& input,
+    torch::Tensor& residual,
+    torch::Tensor& weight,
+    std::optional<torch::Tensor> bias,
+    double epsilon);
+
 // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8 output).
 void rms_norm_dynamic_per_token_quant(
     torch::Tensor& out,
@@ -76,7 +116,8 @@ void silu_and_mul_per_block_quant(
     int64_t group_size,
     std::optional<torch::Tensor> scale_ub,
     bool is_scale_transposed,
-    bool scale_ue8m0);
+    bool scale_ue8m0,
+    std::optional<torch::Tensor> expert_scale_desc);
 
 void silu_and_mul_mxfp4_quant(
     torch::Tensor& out,
@@ -151,7 +192,8 @@ void concat_and_cache_mla(
     torch::Tensor& kv_cache,
     torch::Tensor& slot_mapping,
     const std::string& kv_cache_dtype,
-    torch::Tensor& scale);
+    torch::Tensor& scale,
+    bool skip_scale);
 
 void gather_cache(
     torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
@@ -160,6 +202,25 @@ void gather_cache(
     torch::Tensor const& cu_seq_lens,  // [BATCH+1]
     int64_t batch_size,
     std::optional<torch::Tensor> seq_starts = std::nullopt);
+
+void cp_gather_cache(
+    torch::Tensor const& src_cache,
+    torch::Tensor const& dst,
+    torch::Tensor const& block_table,
+    torch::Tensor const& cu_seq_lens,
+    int64_t batch_size,
+    std::optional<torch::Tensor> seq_starts = std::nullopt);
+
+void cp_gather_and_upconvert_fp8_kv_cache(
+    torch::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
+    torch::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size,
+    std::optional<torch::Tensor> seq_starts = std::nullopt,
+    std::optional<torch::Tensor> host_cache = std::nullopt,
+    std::optional<torch::Tensor> host_row_ids = std::nullopt,
+    std::optional<torch::Tensor> device_row_ids = std::nullopt);
 
 void indexer_k_quant_and_cache(
     torch::Tensor& k,             // [num_tokens, head_dim]
@@ -212,14 +273,16 @@ void per_token_group_quant_fp8(
     double fp8_max,
     bool scale_ue8m0,
     bool dummy_is_scale_transposed = false,
-    bool dummy_is_tma_aligned = false);
+    bool dummy_is_tma_aligned = false,
+    const c10::optional<torch::Tensor>& expert_scale_desc = c10::nullopt);
 
 void per_token_group_quant_mxfp4(
     const torch::Tensor& input,
     torch::Tensor& output_q,
     torch::Tensor& output_s,
     int64_t group_size,
-    double eps);
+    double eps,
+    const c10::optional<torch::Tensor>& expert_scale_desc = c10::nullopt);
 
 void swigluoai_and_mul(
     torch::Tensor& out,
@@ -279,14 +342,9 @@ void xpu_memcpy_sync(
     int64_t kind,
     int64_t device = -1);
 
-// ptr is a single-element uint64 tensor holding the raw address. A scalar
-// int64 op argument cannot losslessly carry every 64-bit pointer bit
-// pattern (addresses with bit 63 set overflow the signed range and fail to
-// cast from Python), so the address is passed via a uint64 Tensor instead,
-// matching the pattern used by swap_blocks_batch.
-bool xpu_host_register(const torch::Tensor& ptr, int64_t n_bytes);
+bool xpu_host_register(int64_t ptr, int64_t n_bytes);
 
-bool xpu_host_unregister(const torch::Tensor& ptr);
+bool xpu_host_unregister(int64_t ptr);
 
 void merge_attn_states(
     torch::Tensor& output,
@@ -297,5 +355,18 @@ void merge_attn_states(
     const torch::Tensor& suffix_lse,
     std::optional<int64_t> prefill_tokens_with_context = std::nullopt,
     const std::optional<torch::Tensor>& output_scale = std::nullopt);
+
+// LongCat n-gram embedding index kernel (see ngram_embedding_kernels.cpp).
+void ngram_compute_n_gram_ids(
+    int64_t ne_n,
+    int64_t ne_k,
+    torch::Tensor& ne_weights,
+    torch::Tensor& ne_mods,
+    torch::Tensor& exclusive_ne_embedder_size_sums,
+    torch::Tensor& exclusive_req_len_sums,
+    torch::Tensor& ne_token_table,
+    torch::Tensor& row_indices,
+    torch::Tensor& column_starts,
+    torch::Tensor& n_gram_ids);
 
 std::tuple<int64_t, int64_t> getMemoryInfo(int64_t device_index);

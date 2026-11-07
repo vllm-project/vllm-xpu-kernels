@@ -575,7 +575,7 @@ class grouped_topk_fused_kernel_impl {
         lane_id,
         num_experts_per_group);
 
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     // --- Phase 2: sub_group 0 selects groups and experts ---
     if (warp_id != 0) {

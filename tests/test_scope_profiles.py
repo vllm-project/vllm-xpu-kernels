@@ -150,7 +150,7 @@ _LLAMA4_PROFILE = {
     },
     # ---- TopK routing: softmax, top-1, 16 experts, use torch.topk, ignore ----
     # ---- Fused MoE: 16 experts, top-1 ----
-    "tests/fused_moe/test_fused_moe.py": {
+    "tests/fused_moe/test_fused_moe_xe2.py": {
         "test_fused_moe": {
             "m,n,k": [(1, LLAMA4_INTERMEDIATE_SIZE, LLAMA4_HIDDEN_SIZE),
                       (128, LLAMA4_INTERMEDIATE_SIZE, LLAMA4_HIDDEN_SIZE)],
@@ -161,7 +161,7 @@ _LLAMA4_PROFILE = {
         },
     },
     # ---- Grouped GEMM: 16 experts, top-1 ----
-    "tests/fused_moe/test_grouped_gemm.py": {
+    "tests/fused_moe/test_grouped_gemm_xe2.py": {
         "test_grouped_gemm": {
             "m,n,k": [(1, LLAMA4_INTERMEDIATE_SIZE, LLAMA4_HIDDEN_SIZE),
                       (128, LLAMA4_INTERMEDIATE_SIZE, LLAMA4_HIDDEN_SIZE)],
@@ -321,7 +321,7 @@ _DEEPSEEK_PROFILE = {
             "scoring_func": ["softmax"],
         },
     },
-    "tests/fused_moe/test_fused_moe.py": {
+    "tests/fused_moe/test_fused_moe_xe2.py": {
         "test_fused_moe": {
             "m,n,k": [(1, 5120, 7168), (128, 5120, 7168)],
             "e": [256],
@@ -330,7 +330,7 @@ _DEEPSEEK_PROFILE = {
             "has_bias": [True],
         },
     },
-    "tests/fused_moe/test_grouped_gemm.py": {
+    "tests/fused_moe/test_grouped_gemm_xe2.py": {
         "test_grouped_gemm": {
             "m,n,k": [(1, 5120, 7168), (128, 5120, 7168)],
             "e": [256],
@@ -451,7 +451,7 @@ _QWEN3_30B_A3B_PROFILE = {
         },
     },
     # ---- Fused MoE: 128 experts, top-8 ----
-    "tests/fused_moe/test_fused_moe.py": {
+    "tests/fused_moe/test_fused_moe_xe2.py": {
         "test_fused_moe": {
             "m,n,k": [
                 (1, QWEN3_30B_MOE_INTERMEDIATE_SIZE, QWEN3_30B_HIDDEN_SIZE),
@@ -464,7 +464,7 @@ _QWEN3_30B_A3B_PROFILE = {
         },
     },
     # ---- Grouped GEMM: 128 experts, top-8 ----
-    "tests/fused_moe/test_grouped_gemm.py": {
+    "tests/fused_moe/test_grouped_gemm_xe2.py": {
         "test_grouped_gemm": {
             "m,n,k": [
                 (1, QWEN3_30B_MOE_INTERMEDIATE_SIZE, QWEN3_30B_HIDDEN_SIZE),
@@ -627,7 +627,7 @@ _QWEN3_235B_A22B_PROFILE = {
         },
     },
     # ---- Fused MoE: 128 experts, top-8 ----
-    "tests/fused_moe/test_fused_moe.py": {
+    "tests/fused_moe/test_fused_moe_xe2.py": {
         "test_fused_moe": {
             "m,n,k": [
                 (1, QWEN3_235B_MOE_INTERMEDIATE_SIZE, QWEN3_235B_HIDDEN_SIZE),
@@ -641,7 +641,7 @@ _QWEN3_235B_A22B_PROFILE = {
         },
     },
     # ---- Grouped GEMM: 128 experts, top-8 ----
-    "tests/fused_moe/test_grouped_gemm.py": {
+    "tests/fused_moe/test_grouped_gemm_xe2.py": {
         "test_grouped_gemm": {
             "m,n,k": [
                 (1, QWEN3_235B_MOE_INTERMEDIATE_SIZE, QWEN3_235B_HIDDEN_SIZE),

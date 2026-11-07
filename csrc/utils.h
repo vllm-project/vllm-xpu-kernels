@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include <cctype>
 #include <memory>
 #include <ATen/ATen.h>
 #include <c10/xpu/XPUStream.h>
@@ -85,18 +87,54 @@ static inline bool is_xe3_arch(at::DeviceIndex device_index = -1) {
          arch == syclex::architecture::intel_gpu_wcl;
 }
 
+// Individual Xe3p parts. intel_gpu_cri only exists on CRI-enabled oneAPI
+// toolchains, so is_cri() reports false when the toolchain lacks it.
+static inline bool is_cri(at::DeviceIndex device_index = -1) {
+#ifdef VLLM_XPU_HAS_INTEL_GPU_CRI
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_cri;
+#else
+  (void)device_index;
+  return false;
+#endif
+}
+
+static inline bool is_nvl_p(at::DeviceIndex device_index = -1) {
+  return get_device_architecture(device_index) ==
+         syclex::architecture::intel_gpu_nvl_p;
+}
+
+// Xe3p (CRI / Nova Lake P) architecture check used to dispatch the XE3
+// attention kernels. The intel_gpu_cri architecture enumerator only exists on
+// CRI-enabled oneAPI toolchains, so it is referenced only when the build system
+// detects it (VLLM_XPU_HAS_INTEL_GPU_CRI). intel_gpu_nvl_p is available on the
+// baseline toolchain, so the check still compiles without CRI support.
+static inline bool is_xe3p_arch(at::DeviceIndex device_index = -1) {
+  auto arch = get_device_architecture(device_index);
+  return
+#ifdef VLLM_XPU_HAS_INTEL_GPU_CRI
+      arch == syclex::architecture::intel_gpu_cri ||
+#endif
+      arch == syclex::architecture::intel_gpu_nvl_p;
+}
+
 static inline std::optional<std::string> getEnv(const char* name) {
   if (const char* val = std::getenv(name)) return val;
   return std::nullopt;
 }
 
-static inline bool force_xe_default_kernel() {
-  auto env_val = getEnv("VLLM_XPU_FORCE_XE_DEFAULT_KERNEL");
-  if (env_val.has_value()) {
-    return env_val.value() == "1" || env_val.value() == "true" ||
-           env_val.value() == "TRUE";
-  }
-  return false;
+// Set FORCE_XE3P_KERNEL to 1/ON/TRUE/YES/Y to bypass architecture dispatch.
+static inline bool force_xe3p_kernel() {
+  auto env_value = getEnv("FORCE_XE3P_KERNEL");
+  if (!env_value.has_value()) return false;
+
+  auto value = env_value.value();
+  std::transform(
+      value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+      });
+  return value == "1" || value == "ON" || value == "TRUE" || value == "YES" ||
+         value == "Y";
 }
 
 // Control whether MHC kernels use the TF32 DPAS GEMM path (split-K).

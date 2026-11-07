@@ -35,6 +35,47 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kXPU, &fused_add_rms_norm);
 
+  // Gemma RMS Normalization: out = (x / rms(x)) * (1 + weight), folding the
+  // Gemma unit-offset and fp32 weighted multiply into the kernel.
+  ops.def(
+      "gemma_rms_norm(Tensor! result, Tensor! input, Tensor! weight, "
+      "float epsilon) -> ()");
+  ops.impl("gemma_rms_norm", torch::kXPU, &gemma_rms_norm);
+
+  // In-place fused Add and Gemma RMS Normalization.
+  ops.def(
+      "fused_add_gemma_rms_norm(Tensor! input, Tensor! residual, "
+      "Tensor! weight, float epsilon) -> ()");
+  ops.impl("fused_add_gemma_rms_norm", torch::kXPU, &fused_add_gemma_rms_norm);
+
+  // Standard (non-RMS) LayerNorm: mean-centered, optional weight and bias.
+  ops.def(
+      "layer_norm(Tensor! result, Tensor input, Tensor? weight, Tensor? bias, "
+      "float epsilon) -> ()");
+  ops.impl("layer_norm", torch::kXPU, &layer_norm);
+
+  // In-place fused Add and LayerNorm.
+  ops.def(
+      "fused_add_layer_norm(Tensor! input, Tensor! residual, Tensor? weight, "
+      "Tensor? bias, float epsilon) -> ()");
+  ops.impl("fused_add_layer_norm", torch::kXPU, &fused_add_layer_norm);
+
+  // Nemotron LayerNorm: out = layer_norm(x) * (1 + weight) + bias, folding
+  // the +1 weight offset into the kernel (same trick as gemma_rms_norm).
+  ops.def(
+      "nemotron_layer_norm(Tensor! result, Tensor input, Tensor weight, "
+      "Tensor? bias, float epsilon) -> ()");
+  ops.impl("nemotron_layer_norm", torch::kXPU, &nemotron_layer_norm);
+
+  // In-place fused Add and Nemotron LayerNorm.
+  ops.def(
+      "fused_add_nemotron_layer_norm(Tensor! input, Tensor! residual, "
+      "Tensor weight, Tensor? bias, float epsilon) -> ()");
+  ops.impl(
+      "fused_add_nemotron_layer_norm",
+      torch::kXPU,
+      &fused_add_nemotron_layer_norm);
+
   // Fused RMSNorm + dynamic per-token quantization (FP8 or INT8).
   ops.def(
       "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
@@ -94,7 +135,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int group_size, "
       "Tensor? scale_ub=None, "
       "bool is_scale_transposed=False, "
-      "bool scale_ue8m0=False) -> ()");
+      "bool scale_ue8m0=False, "
+      "Tensor? expert_scale_desc=None) -> ()");
   ops.impl(
       "silu_and_mul_per_block_quant",
       torch::kXPU,
@@ -176,7 +218,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "per_token_group_fp8_quant(Tensor input, Tensor! output_q, Tensor! "
       "output_s, "
       "int group_size, float eps, float fp8_min, float fp8_max, bool "
-      "scale_ue8m0, bool dummy_is_scale_transposed, bool dummy_is_tma_aligned "
+      "scale_ue8m0, bool dummy_is_scale_transposed, bool dummy_is_tma_aligned, "
+      "Tensor? expert_scale_desc=None"
       ") -> ()");
   ops.impl(
       "per_token_group_fp8_quant", torch::kXPU, &per_token_group_quant_fp8);
@@ -184,7 +227,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Compute per-token-group MXFP4 quantized tensor and scaling factor.
   ops.def(
       "per_token_group_quant_mxfp4(Tensor input, Tensor! output_q, Tensor! "
-      "output_s, int group_size, float eps) -> ()");
+      "output_s, int group_size, float eps, Tensor? expert_scale_desc=None) "
+      "-> ()");
   ops.impl(
       "per_token_group_quant_mxfp4", torch::kXPU, &per_token_group_quant_mxfp4);
 
@@ -237,9 +281,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // memory outside the caching host allocator (e.g. a shared mmap region) has
   // no other way to become pinned. Returns false if registration is
   // unsupported, in which case transfers remain correct but slower.
-  ops.def("xpu_host_register(Tensor ptr, int n_bytes) -> bool");
+  ops.def("xpu_host_register(int ptr, int n_bytes) -> bool");
   ops.impl("xpu_host_register", &xpu_host_register);
-  ops.def("xpu_host_unregister(Tensor ptr) -> bool");
+  ops.def("xpu_host_unregister(int ptr) -> bool");
   ops.impl("xpu_host_unregister", &xpu_host_unregister);
 
   // Merge attn states
@@ -256,6 +300,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int? prefill_tokens_with_context=None,"
       "    Tensor? output_scale=None) -> ()");
   ops.impl("merge_attn_states", torch::kXPU, &merge_attn_states);
+
+  // LongCat n-gram embedding index kernel. Schema mirrors upstream vLLM.
+  ops.def(
+      "ngram_compute_n_gram_ids(int ne_n, int ne_k, Tensor(a!) ne_weights, "
+      "Tensor(b!) ne_mods, Tensor(c!) exclusive_ne_embedder_size_sums, "
+      "Tensor(d!) exclusive_req_len_sums, Tensor(e!) ne_token_table, "
+      "Tensor(f!) row_indices, Tensor(g!) column_starts, "
+      "Tensor(h!) n_gram_ids) -> ()");
+  ops.impl("ngram_compute_n_gram_ids", torch::kXPU, &ngram_compute_n_gram_ids);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
@@ -285,7 +338,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                     Tensor! kv_cache,"
       "                     Tensor slot_mapping,"
       "                     str kv_cache_dtype,"
-      "                     Tensor scale) -> ()");
+      "                     Tensor scale,"
+      "                     bool skip_scale=False) -> ()");
   cache_ops.impl("concat_and_cache_mla", torch::kXPU, &concat_and_cache_mla);
 
   // Gather cache blocks from src_cache to dst.
@@ -293,6 +347,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("gather_cache", torch::kXPU, &gather_cache);
+
+  cache_ops.def(
+      "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
+      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts=None) -> ()");
+  cache_ops.impl("cp_gather_cache", torch::kXPU, &cp_gather_cache);
+
+  // Gather DSV3.2 packed fp8_ds_mla entries into a dense BF16 workspace.
+  cache_ops.def(
+      "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor workspace_starts, int batch_size, "
+      "Tensor? seq_starts, Tensor? host_cache=None, Tensor? host_row_ids=None, "
+      "Tensor? device_row_ids=None) -> ()");
+  cache_ops.impl(
+      "cp_gather_and_upconvert_fp8_kv_cache",
+      torch::kXPU,
+      &cp_gather_and_upconvert_fp8_kv_cache);
 
   // Convert between FP8 and FP16/BF16/FP32 formats with scaling
   cache_ops.def(

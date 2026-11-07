@@ -5,8 +5,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // Calculate the result of moe by summing up the partial results
   // from all selected experts.
   m.def(
-      "moe_sum(Tensor input, Tensor! output, Tensor? topk_ids, "
-      "Tensor? expert_map) -> ()");
+      "moe_sum(Tensor input, Tensor! output, Tensor? topk_ids=None, "
+      "Tensor? expert_map=None) -> ()");
   m.impl("moe_sum", torch::kXPU, &moe_sum);
 
   // Aligning the number of tokens to be processed by each expert such
@@ -16,7 +16,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     int block_size, Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad,"
-      "                     Tensor? maybe_expert_map) -> ()");
+      "                     Tensor? maybe_expert_map,"
+      "                     Tensor(a!)? scatter_idx=None) -> ()");
   m.impl("moe_align_block_size", torch::kXPU, &moe_align_block_size);
 
   // Aligning the number of tokens to be processed by each expert such
@@ -75,7 +76,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "topk_softplus_sqrt(Tensor! topk_weights, Tensor! topk_indices, "
       "Tensor! token_expert_indices, Tensor gating_output, bool renormalize, "
       "float routed_scaling_factor, Tensor? correction_bias=None, Tensor? "
-      "input_ids=None, Tensor? tid2eid=None, Tensor? is_padding=None) -> ()");
+      "input_ids=None, Tensor? tid2eid=None, Tensor? is_padding=None, Tensor? "
+      "bias_vl=None, int image_sentinel_lo=0) -> ()");
   m.impl("topk_softplus_sqrt", torch::kXPU, &topk_softplus_sqrt);
   // Apply topk softmax to the gating outputs.
   m.def(
@@ -96,7 +98,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor? expert_map, Tensor rows_per_expert,"
       "Tensor unpermuted_row_to_permuted_row, Tensor topk_ids,"
       "int total_experts_num, int "
-      "local_experts_num) -> "
+      "local_experts_num, Tensor? expert_scale_desc=None) -> "
       "()");
   m.impl("remap_hidden_states", torch::kXPU, &remap_hidden_states);
 

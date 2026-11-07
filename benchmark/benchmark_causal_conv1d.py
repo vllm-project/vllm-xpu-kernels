@@ -75,6 +75,7 @@ def estimate_bytes_moved(kwargs):
     ba_per_tok = nk * (2 * nv // nk)
     qkv_per_tok = nk * (2 * hk + hv * nv // nk)
     z_per_tok = nv * hv
+    conv_state_len = kwargs["conv_state"].shape[1]
     # {q,k,v} (=qkv_per_tok) plus b, a (2*nv) intermediates written out.
     inter_per_tok = qkv_per_tok + 2 * nv
 
@@ -85,7 +86,7 @@ def estimate_bytes_moved(kwargs):
     bytes_in = n_tok * (qkvz_per_tok + ba_per_tok) * bpe_in
     bytes_z = n_tok * z_per_tok * bpe_out
     bytes_inter = n_tok * inter_per_tok * bpe_out
-    bytes_conv_state = batch * (width - 1) * qkv_per_tok * bpe_in * 2  # RW
+    bytes_conv_state = batch * conv_state_len * qkv_per_tok * bpe_in * 2
     bytes_weights = qkv_per_tok * width * bpe_in
     # Bias is only read when conv_bias is provided.
     bytes_bias = qkv_per_tok * bpe_in if kwargs["conv_bias"] is not None else 0
@@ -126,34 +127,55 @@ def benchmark_causal_conv1d(shape_name, workload_name, dtype_str, provider,
 
     kwargs = make_inputs(shape, workload, dtype)
 
-    def _run():
-        torch.ops._xpu_C.causal_conv1d(
-            kwargs["z"],
-            kwargs["projected_states_qkvz"],
-            kwargs["projected_states_ba"],
-            kwargs["num_k_heads"],
-            kwargs["num_v_heads"],
-            kwargs["head_k_dim"],
-            kwargs["head_v_dim"],
-            conv_state=kwargs["conv_state"],
-            conv_weights=kwargs["conv_weights"],
-            conv_bias=kwargs["conv_bias"],
-            activation=kwargs["activation"],
-            num_prefills=kwargs["num_prefills"],
-            num_decodes=kwargs["num_decodes"],
-            num_spec_decodes=kwargs["num_spec_decodes"],
-            has_initial_state=kwargs["has_initial_state"],
-            non_spec_query_start_loc=kwargs["non_spec_query_start_loc"],
-            non_spec_token_indx=kwargs["non_spec_token_indx"],
-            non_spec_state_indices_tensor=kwargs[
-                "non_spec_state_indices_tensor"],
-            spec_query_start_loc=kwargs["spec_query_start_loc"],
-            spec_token_indx=kwargs["spec_token_indx"],
-            spec_state_indices_tensor=kwargs["spec_state_indices_tensor"],
-            num_accepted_tokens=kwargs["num_accepted_tokens"],
-            num_actual_tokens=kwargs["num_actual_tokens"],
-            tp_size=kwargs["tp_size"],
-            reorder_input=kwargs["reorder_input"])
+    if kwargs["num_spec_decodes"] > 0:
+        def _run():
+            torch.ops._xpu_C.causal_conv1d_spec(
+                kwargs["z"],
+                kwargs["projected_states_qkvz"],
+                kwargs["projected_states_ba"],
+                kwargs["num_k_heads"],
+                kwargs["num_v_heads"],
+                kwargs["head_k_dim"],
+                kwargs["head_v_dim"],
+                conv_state=kwargs["conv_state"],
+                conv_weights=kwargs["conv_weights"],
+                conv_bias=kwargs["conv_bias"],
+                activation=kwargs["activation"],
+                num_prefills=kwargs["num_prefills"],
+                num_decodes=kwargs["num_decodes"],
+                num_spec_decodes=kwargs["num_spec_decodes"],
+                spec_query_start_loc=kwargs["spec_query_start_loc"],
+                spec_token_indx=kwargs["spec_token_indx"],
+                spec_state_indices_tensor=kwargs["spec_state_indices_tensor"],
+                num_accepted_tokens=kwargs["num_accepted_tokens"],
+                num_actual_tokens=kwargs["num_actual_tokens"],
+                tp_size=kwargs["tp_size"],
+                reorder_input=kwargs["reorder_input"])
+    else:
+        def _run():
+            torch.ops._xpu_C.causal_conv1d_non_spec(
+                kwargs["z"],
+                kwargs["projected_states_qkvz"],
+                kwargs["projected_states_ba"],
+                kwargs["num_k_heads"],
+                kwargs["num_v_heads"],
+                kwargs["head_k_dim"],
+                kwargs["head_v_dim"],
+                conv_state=kwargs["conv_state"],
+                conv_weights=kwargs["conv_weights"],
+                conv_bias=kwargs["conv_bias"],
+                activation=kwargs["activation"],
+                num_prefills=kwargs["num_prefills"],
+                num_decodes=kwargs["num_decodes"],
+                num_spec_decodes=kwargs["num_spec_decodes"],
+                has_initial_state=kwargs["has_initial_state"],
+                non_spec_query_start_loc=kwargs["non_spec_query_start_loc"],
+                non_spec_token_indx=kwargs["non_spec_token_indx"],
+                non_spec_state_indices_tensor=kwargs[
+                    "non_spec_state_indices_tensor"],
+                num_actual_tokens=kwargs["num_actual_tokens"],
+                tp_size=kwargs["tp_size"],
+                reorder_input=kwargs["reorder_input"])
 
     # warmup
     for _ in range(5):

@@ -71,7 +71,7 @@ class MoeSoftmax {
     if (local_id_x == 0) {
       *float_max = maxElem;
     }
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     threadData = 0;
 
@@ -85,7 +85,7 @@ class MoeSoftmax {
     if (local_id_x == 0) {
       *normalizing_factor = 1.f / Z;
     }
-    item.barrier(sycl::access::fence_space::local_space);
+    sycl::group_barrier(item.get_group());
 
     for (int ii = local_id_x; ii < num_cols; ii += TPB) {
       const int idx = thread_row_offset + ii;
@@ -239,7 +239,7 @@ class MoeTopK {
         assert(is_pad_row || indices[idx] >= 0);
         source_rows[idx] = k_idx * num_rows + block_row;
       }
-      item.barrier(sycl::access::fence_space::local_space);
+      sycl::group_barrier(item.get_group());
     }
 
     if (local_id_x == 0) {
