@@ -3,6 +3,7 @@
 
 #ifdef VLLM_XPU_ENABLE_XE2
   #include "xe_2/moe_shared_fused_decode_xe2.h"
+  #include "xe_2/moe_shared_fused_decode_int4_xe2.h"
 #endif
 
 // Routed rows (num_tokens * top_k) up to which the 8-row GEMM tile is used
@@ -57,4 +58,60 @@ void moe_shared_fused_decode_interface(
 #endif
   }
   TORCH_CHECK(false, "moe_shared_fused_decode: unsupported device arch.");
+}
+
+void moe_shared_fused_decode_int4_interface(
+    torch::Tensor& output,
+    const torch::Tensor& x,
+    const torch::Tensor& topk_ids,
+    const torch::Tensor& topk_weights,
+    const torch::Tensor& w13,
+    const torch::Tensor& w13_scale,
+    const torch::Tensor& w2,
+    const torch::Tensor& w2_scale,
+    const c10::optional<torch::Tensor>& shared_w13,
+    const c10::optional<torch::Tensor>& shared_w13_scale,
+    const c10::optional<torch::Tensor>& shared_w2,
+    const c10::optional<torch::Tensor>& shared_w2_scale,
+    const c10::optional<torch::Tensor>& shared_gate,
+    torch::Tensor& ws,
+    int64_t tile_m) {
+  TORCH_CHECK(x.is_xpu(), "x must be an XPU tensor");
+  TORCH_CHECK(
+      x.dim() == 2 && topk_ids.dim() == 2, "x and topk_ids must be rank two");
+  TORCH_CHECK(
+      x.size(0) > 0 && topk_ids.size(1) > 0,
+      "token and top-k counts must be positive");
+  const auto device_index = x.get_device();
+  if (vllm::xpu::is_xe2_arch(device_index) ||
+      vllm::xpu::is_xe3_arch(device_index)) {
+#ifdef VLLM_XPU_ENABLE_XE2
+    // Xe3 reuses the Xe2 implementation, as the grouped GEMM does.
+    if (tile_m == 0) {
+      tile_m = x.size(0) <= kMoeSharedFusedTileM8MaxRows / topk_ids.size(1)
+                   ? kMoeSharedFusedTileM8
+                   : kMoeSharedFusedTileM16;
+    }
+    moe_shared_fused_decode_int4_xe2(
+        output,
+        x,
+        topk_ids,
+        topk_weights,
+        w13,
+        w13_scale,
+        w2,
+        w2_scale,
+        shared_w13.value_or(torch::Tensor()),
+        shared_w13_scale.value_or(torch::Tensor()),
+        shared_w2.value_or(torch::Tensor()),
+        shared_w2_scale.value_or(torch::Tensor()),
+        shared_gate.value_or(torch::Tensor()),
+        ws,
+        tile_m);
+    return;
+#else
+    TORCH_CHECK(false, "XE2 kernels are not enabled in this build.");
+#endif
+  }
+  TORCH_CHECK(false, "moe_shared_fused_decode_int4: unsupported device arch.");
 }

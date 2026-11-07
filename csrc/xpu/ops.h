@@ -102,6 +102,22 @@ void moe_shared_fused_decode_interface(
     const torch::Tensor& shared_gate,
     torch::Tensor& ws,
     int64_t tile_m);
+void moe_shared_fused_decode_int4_interface(
+    torch::Tensor& output,
+    const torch::Tensor& x,
+    const torch::Tensor& topk_ids,
+    const torch::Tensor& topk_weights,
+    const torch::Tensor& w13,
+    const torch::Tensor& w13_scale,
+    const torch::Tensor& w2,
+    const torch::Tensor& w2_scale,
+    const c10::optional<torch::Tensor>& shared_w13,
+    const c10::optional<torch::Tensor>& shared_w13_scale,
+    const c10::optional<torch::Tensor>& shared_w2,
+    const c10::optional<torch::Tensor>& shared_w2_scale,
+    const c10::optional<torch::Tensor>& shared_gate,
+    torch::Tensor& ws,
+    int64_t tile_m);
 void moe_int4_gemv(
     const torch::Tensor& A,
     const torch::Tensor& B,

@@ -78,6 +78,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "moe_shared_fused_decode_interface",
       torch::kXPU,
       &moe_shared_fused_decode_interface);
+  // Fused routed + shared-expert MoE for small-M decode, INT4-AWQ recipe
+  // (int8-packed 4-bit weights, per-group scales). tile_m = 0 selects the
+  // tile by M. Shared experts are optional (pass None for all five to run
+  // routed-only; the caller then runs the dense shared MLP separately).
+  // Padding expert IDs (-1) contribute zero to routed experts.
+#ifdef VLLM_XPU_ENABLE_XE2
+  xpu_ops.def(
+      "moe_shared_fused_decode_int4_interface(Tensor(a!) output, Tensor x, "
+      "Tensor topk_ids, Tensor topk_weights, Tensor w13, Tensor w13_scale, "
+      "Tensor w2, Tensor w2_scale, Tensor? shared_w13, Tensor? "
+      "shared_w13_scale, Tensor? shared_w2, Tensor? "
+      "shared_w2_scale, Tensor? shared_gate, Tensor(b!) ws, "
+      "int tile_m=0) -> ()");
+  xpu_ops.impl(
+      "moe_shared_fused_decode_int4_interface",
+      torch::kXPU,
+      &moe_shared_fused_decode_int4_interface);
+#endif
   xpu_ops.def(
       "moe_int4_gemv(Tensor A, Tensor B, Tensor B_scale, "
       "Tensor rows_per_expert, Tensor! D, int N, int K, int num_experts) -> "
