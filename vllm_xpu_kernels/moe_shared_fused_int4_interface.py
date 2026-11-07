@@ -114,6 +114,112 @@ def moe_shared_fused_int4_workspace_bytes(
         (rows + num_tokens) * w2_k + rows * hidden_size +
         num_tokens * hidden_size)
 
+# Symmetric-AutoRound/GPTQ repack adapter. Converts the checkpoint layout
+# that vLLM's moe_wna16 GPTQ branch consumes into the grid's int8-packed
+# signed nibbles + per-group scales. AWQ checkpoints need no adapter (the
+# grid already indexes their standard form).
+_AUTOROUND_GROUP_SIZES = (32, 64, 128, 256)
+
+
+def _autoround_zeros_symmetric(qzeros_2d: torch.Tensor, ng: int, n: int) -> None:
+    if qzeros_2d.shape != (ng, n // 8):
+        raise ValueError("autoround qzeros must be [K/G, N/8]")
+    # Symmetric quant stores 7 in every nibble; the stock loader adds 1 to
+    # align with AWQ (effective zero 8), which the XOR below folds in.
+    zu = qzeros_2d.to(torch.int64) & 0xFFFFFFFF
+    for k in range(8):
+        if not bool((((zu >> (4 * k)) & 0xF) == 7).all()):
+            raise ValueError(
+                "autoround qzeros must be symmetric (all nibbles 7)")
+
+
+def _autoround_order(g_idx: torch.Tensor, k: int,
+                     group_size: int) -> torch.Tensor | None:
+    if g_idx.dim() != 1 or g_idx.shape[0] != k:
+        raise ValueError("autoround g_idx must be [K]")
+    want = torch.arange(k, dtype=g_idx.dtype, device=g_idx.device) // group_size
+    if torch.equal(g_idx, want):
+        return None  # Identity groups: K already ordered (Ornith shape).
+    order = torch.argsort(g_idx, stable=True)
+    if not torch.equal(g_idx[order], want):
+        raise ValueError("autoround g_idx must partition K into full groups")
+    return order
+
+
+def autoround_to_grid(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    g_idx: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert one symmetric-AutoRound/GPTQ linear to grid int4 tensors.
+
+    Accepts a single [K/8, N] int32 linear or E-stacked [E, K/8, N];
+    qzeros/g_idx may be shared ([K/G, N/8] / [K]) or stacked like qweight.
+    Returns (w [N, K/2] (or [E, N, K/2]) int8-packed signed nibbles with
+    the low nibble holding the even-K element, scales [N, K/G] (or
+    [E, N, K/G]) transposed but otherwise untouched, same dtype/device).
+    Raises ValueError on asymmetric zeros, group sizes outside the grid's
+    (32, 64, 128, 256) set, or unexpected shapes/dtypes; the caller sees
+    the stock loader's layout otherwise.
+    """
+    batched = qweight.dim() == 3
+    if not batched and qweight.dim() != 2:
+        raise ValueError("autoround qweight must be [K/8, N] or [E, K/8, N]")
+    if qweight.dtype != torch.int32:
+        raise ValueError("autoround qweight must be int32-packed")
+    e = qweight.shape[0] if batched else None
+    k_packed, n = qweight.shape[-2], qweight.shape[-1]
+    k = k_packed * 8
+    if n % 8:
+        raise ValueError("autoround N must be a multiple of 8")
+    # The group size is inferred from the scales, as in the stock loader.
+    ng_hint = scales.shape[-2] if scales.dim() in (2, 3) else 0
+    group_size = k // ng_hint if ng_hint and not k % ng_hint else 0
+    if group_size not in _AUTOROUND_GROUP_SIZES or k % group_size:
+        raise ValueError("autoround scales must imply a grid group size "
+                         "of 32, 64, 128 or 256")
+    ng = k // group_size
+    flat_qw = qweight.reshape(-1, k_packed, n) if batched else qweight.unsqueeze(0)
+    if scales.dim() == 2:
+        if scales.shape != (ng, n):
+            raise ValueError("autoround scales must be [K/G, N]")
+        if scales.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("autoround scales must be fp16 or bf16")
+        flat_sc = scales.unsqueeze(0).expand(flat_qw.shape[0], ng, n)
+    elif scales.dim() == 3 and (e is None or scales.shape[0] == flat_qw.shape[0]):
+        if scales.shape[-2:] != (ng, n):
+            raise ValueError("autoround scales must be [K/G, N] per expert")
+        if scales.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("autoround scales must be fp16 or bf16")
+        flat_sc = scales
+    else:
+        raise ValueError("autoround scales must be [K/G, N] or [E, K/G, N]")
+    if qzeros.dim() == 2:
+        _autoround_zeros_symmetric(qzeros, ng, n)
+    elif qzeros.dim() == 3 and qzeros.shape[0] == flat_qw.shape[0]:
+        for i in range(qzeros.shape[0]):
+            _autoround_zeros_symmetric(qzeros[i], ng, n)
+    else:
+        raise ValueError("autoround qzeros must be [K/G, N/8] or [E, K/G, N/8]")
+    order = _autoround_order(g_idx, k, group_size)
+    # Stock GPTQ branch: qweight.T viewed as bytes is already the AWQ
+    # standard (low nibble = even k); XOR 0x88 folds the -8 zero point
+    # into plain 4-bit two's-complement signed nibbles for the grid.
+    u8 = flat_qw.transpose(-1, -2).contiguous().view(torch.uint8)
+    u8 = u8.reshape(flat_qw.shape[0], n, k // 2)
+    if order is not None:
+        lo = (u8 & 0xF)
+        hi = ((u8 >> 4) & 0xF)
+        u = torch.stack([lo, hi], dim=-1).reshape(flat_qw.shape[0], n, k)
+        u = u[:, :, order]
+        u8 = (u[:, :, 0::2] | (u[:, :, 1::2] << 4)).to(torch.uint8)
+    w = (u8 ^ 0x88).to(torch.int8)
+    s = flat_sc.transpose(-1, -2).contiguous()
+    if not batched:
+        w, s = w[0], s[0]
+    return w, s
+
 
 class XpuMoESharedFusedDecodeInt4:
     """Holds the weights of one MoE block and a per-M persistent workspace.
@@ -275,6 +381,103 @@ class XpuMoESharedFusedDecodeInt4:
         self.router_weight = router_weight
         self.renormalize = renormalize
         self._routing: dict[int, tuple[torch.Tensor, ...]] = {}
+
+
+    @classmethod
+    def from_autoround(
+        cls,
+        gate_qweight: torch.Tensor,
+        gate_scales: torch.Tensor,
+        gate_qzeros: torch.Tensor,
+        gate_g_idx: torch.Tensor,
+        up_qweight: torch.Tensor,
+        up_scales: torch.Tensor,
+        up_qzeros: torch.Tensor,
+        up_g_idx: torch.Tensor,
+        down_qweight: torch.Tensor,
+        down_scales: torch.Tensor,
+        down_qzeros: torch.Tensor,
+        down_g_idx: torch.Tensor,
+        shared_gate_qweight: torch.Tensor | None = None,
+        shared_gate_scales: torch.Tensor | None = None,
+        shared_gate_qzeros: torch.Tensor | None = None,
+        shared_gate_g_idx: torch.Tensor | None = None,
+        shared_up_qweight: torch.Tensor | None = None,
+        shared_up_scales: torch.Tensor | None = None,
+        shared_up_qzeros: torch.Tensor | None = None,
+        shared_up_g_idx: torch.Tensor | None = None,
+        shared_down_qweight: torch.Tensor | None = None,
+        shared_down_scales: torch.Tensor | None = None,
+        shared_down_qzeros: torch.Tensor | None = None,
+        shared_down_g_idx: torch.Tensor | None = None,
+        shared_gate: torch.Tensor | None = None,
+        router_weight: torch.Tensor | None = None,
+        top_k: int = 8,
+        tile_m: int = 0,
+        renormalize: bool = True,
+        device: torch.device | None = None,
+    ) -> "XpuMoESharedFusedDecodeInt4":
+        # Build a routed-path instance from E-stacked AutoRound tensors.
+        # gate/up_qweight [E, H/8, I], down_qweight [E, I/8, H], scales
+        # [E, K/G, N] (or shared 2D); each linear carries its own
+        # qzeros/g_idx, shared or stacked (see autoround_to_grid). Shared
+        # experts convert the same way when all twelve shared quantized
+        # tensors plus the dense shared_gate are given, or all None for
+        # routed-only. Converted weights move to `device` (default:
+        # router_weight's device, else the converted device, which must be
+        # XPU); alignment/dtype/shape checks stay in __init__.
+        w_gate, s_gate = autoround_to_grid(gate_qweight, gate_scales,
+                                           gate_qzeros, gate_g_idx)
+        w_up, s_up = autoround_to_grid(up_qweight, up_scales,
+                                       up_qzeros, up_g_idx)
+        w_down, s_down = autoround_to_grid(down_qweight, down_scales,
+                                           down_qzeros, down_g_idx)
+        w13 = torch.cat([w_gate, w_up], dim=-2).contiguous()
+        s13 = torch.cat([s_gate, s_up], dim=-2).contiguous()
+        shared_q = (shared_gate_qweight, shared_gate_scales,
+                    shared_gate_qzeros, shared_gate_g_idx,
+                    shared_up_qweight, shared_up_scales,
+                    shared_up_qzeros, shared_up_g_idx,
+                    shared_down_qweight, shared_down_scales,
+                    shared_down_qzeros, shared_down_g_idx)
+        if all(t is None for t in shared_q) and shared_gate is None:
+            sw13 = ss13 = sw2 = ss2 = gate = None
+        elif any(t is None for t in (*shared_q, shared_gate)):
+            raise ValueError(
+                "shared experts are all-or-none: pass all twelve quantized "
+                "tensors plus the dense shared_gate, or None for routed-only")
+        else:
+            sw_gate, ss_gate = autoround_to_grid(
+                shared_gate_qweight, shared_gate_scales,
+                shared_gate_qzeros, shared_gate_g_idx)
+            sw_up, ss_up = autoround_to_grid(
+                shared_up_qweight, shared_up_scales,
+                shared_up_qzeros, shared_up_g_idx)
+            sw_down, ss_down = autoround_to_grid(
+                shared_down_qweight, shared_down_scales,
+                shared_down_qzeros, shared_down_g_idx)
+            if sw_gate.dim() != 2:
+                raise ValueError("shared quantized tensors must be 2D")
+            sw13 = torch.cat([sw_gate, sw_up], dim=-2).contiguous()
+            ss13 = torch.cat([ss_gate, ss_up], dim=-2).unsqueeze(0)
+            ss13 = ss13.contiguous()
+            sw2 = sw_down.contiguous()
+            ss2 = ss_down.unsqueeze(0).contiguous()
+            gate = shared_gate
+        if device is None:
+            device = (router_weight.device if router_weight is not None
+                      else w13.device)
+        if device.type != "xpu":
+            raise ValueError("from_autoround target device must be XPU")
+        return cls(w13.to(device), s13.to(device), w_down.to(device),
+                   s_down.to(device),
+                   None if sw13 is None else sw13.to(device),
+                   None if ss13 is None else ss13.to(device),
+                   None if sw2 is None else sw2.to(device),
+                   None if ss2 is None else ss2.to(device),
+                   None if gate is None else gate.to(device),
+                   top_k, tile_m=tile_m,
+                   router_weight=router_weight, renormalize=renormalize)
 
     def workspace(self, num_tokens: int) -> torch.Tensor:
         """Return persistent scratch on this instance's weights' device."""
