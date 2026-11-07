@@ -224,6 +224,39 @@ def test_moe_int4_workspace_rejects_invalid_dimensions(shape):
 
 
 @requires_moe_kernel
+@pytest.mark.parametrize("m", [1, 2, 6])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_moe_shared_fused_decode_int4_forward_routed(m, dtype):
+    torch.manual_seed(0)
+    inter = 512
+    weights = make_weights(inter, dtype=dtype)
+    (w13, s13, w2, s2, _, _, _, _, _, deq) = weights
+    gatew = (torch.randn(NUM_EXPERTS, HIDDEN, device=DEVICE) * 0.02).to(dtype)
+    # renormalize=False to match the plain softmax+topk reference
+    # (vLLM passes its own renormalize flag at serve time).
+    op = XpuMoESharedFusedDecodeInt4(
+        w13, s13, w2, s2, None, None, None, None, None, TOP_K,
+        router_weight=gatew, renormalize=False)
+    x = (torch.randn(m, HIDDEN, device=DEVICE) / 4).to(dtype)
+    # Reference routing on CPU: oneDNN has no fp32 XPU primitive for some
+    # shapes, same reason ref_moe_shared runs on CPU below.
+    ref_logits = torch.nn.functional.linear(x.float().cpu(),
+                                            gatew.float().cpu())
+    ref_w = torch.softmax(ref_logits, -1)
+    ref_v, ref_i = torch.topk(ref_w, TOP_K, dim=-1)
+    topk_weights, topk_ids = op.route(x)
+    assert topk_weights.dtype == torch.float32
+    assert topk_ids.dtype == torch.int32
+    assert torch.equal(topk_ids.long().sort(-1)[0],
+                       ref_i.to(topk_ids.device).sort(-1)[0])
+    out, routed_ids = op.forward_routed(torch.empty_like(x), x)
+    assert torch.equal(routed_ids, topk_ids)
+    w13d, w2d, _, _ = deq
+    ref = ref_moe_shared(x, (w13d, w2d, None, None), None, ref_v,
+                         ref_i.to(torch.int32), inter, with_shared=False)
+    torch.testing.assert_close(out.float(), ref, rtol=1e-2, atol=1e-2)
+
+
 @pytest.mark.parametrize("m", [2, 8])
 @pytest.mark.parametrize("ids_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("all_padding", [False, True])

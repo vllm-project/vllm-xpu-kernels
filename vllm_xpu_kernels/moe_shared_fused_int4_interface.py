@@ -17,6 +17,10 @@ to the caller).
 
 import torch
 
+from vllm_xpu_kernels.moe_shared_fused_interface import (
+    router_supports as _router_supports,
+)
+
 # Xe block-2D descriptors use 24-bit byte widths/pitches.
 _MAX_BLOCK_2D_BYTES = (1 << 24) - 1
 # Group sizes the fused int4 mainloop instantiates.
@@ -296,6 +300,7 @@ class XpuMoESharedFusedDecodeInt4:
         topk_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Writes routed + gated shared (per-rank partial sum) into output."""
+        import vllm_xpu_kernels._xpu_C  # noqa: F401  (fused grid op)
         if hidden_states.device != self.device:
             raise ValueError(
                 "hidden_states must be on the same XPU device as w13")
@@ -318,3 +323,59 @@ class XpuMoESharedFusedDecodeInt4:
             self.tile_m,
         )
         return output
+
+    def route(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Softmax top-k routing via the shared router op (1 launch).
+
+        Returns (topk_weights fp32, topk_ids int32), [M, top_k] each;
+        buffers are reused across calls with the same M. Only shapes the
+        shared _moe_C router supports are accepted.
+        """
+        if self.router_weight is None:
+            raise ValueError("no router_weight given")
+        import vllm_xpu_kernels._moe_C  # noqa: F401  (router op)
+        if not _router_supports(
+            self.router_weight.dtype,
+            self.num_experts,
+            self.top_k,
+            hidden_states.shape[1],
+        ):
+            raise ValueError("router op does not support this shape")
+        logits, topk_weights, topk_ids = self._routing_buffers(
+            hidden_states.shape[0], hidden_states.device
+        )
+        torch.ops._moe_C.router_gemv_topk_softmax(
+            hidden_states,
+            self.router_weight,
+            logits,
+            topk_weights,
+            topk_ids,
+            self.renormalize,
+        )
+        return topk_weights, topk_ids
+
+    def _routing_buffers(
+        self, m: int, device: torch.device
+    ) -> tuple[torch.Tensor, ...]:
+        bufs = self._routing.get(m)
+        if bufs is None:
+            bufs = (
+                torch.empty(m,
+                            self.num_experts,
+                            dtype=torch.float32,
+                            device=device),
+                torch.empty(m, self.top_k, dtype=torch.float32, device=device),
+                torch.empty(m, self.top_k, dtype=torch.int32, device=device),
+            )
+            self._routing[m] = bufs
+        return bufs
+
+    def forward_routed(
+        self, output: torch.Tensor, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """route() + forward(); returns (output, topk_ids)."""
+        topk_weights, topk_ids = self.route(hidden_states)
+        out = self.forward(output, hidden_states, topk_weights, topk_ids)
+        return out, topk_ids
