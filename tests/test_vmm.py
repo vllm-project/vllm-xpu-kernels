@@ -76,3 +76,8 @@ def test_vmm_reports_errors() -> None:
         ops.vmm_map(0, 1, -1)
     with pytest.raises(RuntimeError, match="must be positive"):
         ops.vmm_reserve(0)
+    for device in (-1, len(DEVICES), 256, -256):
+        with pytest.raises(RuntimeError, match="Invalid XPU device index"):
+            ops.vmm_granularity(device)
+        with pytest.raises(RuntimeError, match="Invalid XPU device index"):
+            ops.vmm_tensor_from_ptr(0, 0, device)

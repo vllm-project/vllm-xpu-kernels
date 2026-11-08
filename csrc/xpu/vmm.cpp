@@ -36,7 +36,11 @@ int64_t g_next_handle = 1;
 const sycl::context& vmm_context() { return c10::xpu::get_device_context(); }
 
 sycl::device& vmm_device(int64_t device_index) {
-  c10::xpu::check_device_index(static_cast<c10::DeviceIndex>(device_index));
+  TORCH_CHECK(
+      device_index >= 0 && device_index < c10::xpu::device_count(),
+      "Invalid XPU device index ",
+      device_index,
+      ".");
   return c10::xpu::get_raw_device(static_cast<c10::DeviceIndex>(device_index));
 }
 
