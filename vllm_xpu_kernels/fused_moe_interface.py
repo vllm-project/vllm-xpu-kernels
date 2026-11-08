@@ -28,6 +28,14 @@ NATIVE_BLOCK_FP8_ENV = "VLLM_XPU_FUSED_MOE_NATIVE_BLOCK_FP8"
 # VLLM_XPU_FUSED_MOE_INT4_GEMV=0.
 INT4_GEMV_ENV = "VLLM_XPU_FUSED_MOE_INT4_GEMV"
 INT4_GEMV_MAX_ROWS = 8
+# Decode calls with at most INT4_GRID_MAX_M rows run the fused int4 grid
+# instead of the grouped GEMMs. Disable with VLLM_XPU_FUSED_MOE_INT4_GRID=0.
+INT4_GRID_ENV = "VLLM_XPU_FUSED_MOE_INT4_GRID"
+# The fused int4 grid was validated for small decode batches only; wider
+# token counts stay on the grouped-GEMM path until re-validated.
+INT4_GRID_MAX_M = 6
+# Must match the C++ MAX_R bound (num_tokens * top_k routing rows).
+INT4_GRID_MAX_R = 512
 
 def _is_env_enabled(env_name: str, default: str = "0") -> bool:
     value = os.environ.get(env_name, default).strip().upper()
@@ -280,6 +288,12 @@ class XpuFusedMoe:
         self.is_int4 = is_int4
         self._use_int4_gemv = is_int4 and _env_native_default_on(
             INT4_GEMV_ENV)
+        # Lazily built fused int4 grid (routed-only, shared=None). The
+        # instance binds the rewritten weights by reference; construction
+        # is validated once and a rejection stays sticky (the
+        # grouped-GEMM path covers all shapes).
+        self._int4_grid = None
+        self._int4_grid_blocked = False
         self.is_mxfp4 = is_mxfp4
         self.is_mxfp8 = is_mxfp8
         self.is_block_fp8 = is_block_fp8
@@ -369,6 +383,155 @@ class XpuFusedMoe:
                             expert_map=expert_map,
                             a1q_scale=a1q_scale)
 
+    def _int4_grid_eligible(self, output, hidden_states, topk_weights,
+                              topk_ids, expert_map=None, a1q_scale=None):
+        """Whether the fused int4 grid may take this call.
+
+        Every fall-through keeps the grouped-GEMM path, which supports
+        the full feature set. The checks below mirror the C++ entry, so
+        an accepted call cannot fail inside the op.
+        """
+        if not _env_native_default_on(INT4_GRID_ENV):
+            return False
+        if not self.is_int4 or self._use_ref:
+            return False
+        # Weights must have gone through the in-place signed-4-bit
+        # rewrite in __init__.
+        if not getattr(self.w13, "xpu_fused_moe", False):
+            return False
+        # The grid fuses SiLU only and has no bias, clamp, or
+        # activation-scale inputs.
+        if self.activation != "silu":
+            return False
+        if self.w13_bias is not None or self.w2_bias is not None:
+            return False
+        if (self.gemm1_clamp_limit is not None
+                and self.gemm1_clamp_limit > 0):
+            return False
+        if a1q_scale is not None:
+            return False
+        # No expert-parallel routing map: the grid routes by plain IDs.
+        if (expert_map is not None or self.ep_size > 1
+                or self.expert_map is not None):
+            return False
+        if topk_ids.dim() != 2 or topk_weights.shape != topk_ids.shape:
+            return False
+        if topk_ids.dtype not in (torch.int32, torch.int64):
+            return False
+        if hidden_states.dim() != 2:
+            return False
+        num_tokens, top_k = topk_ids.shape
+        if num_tokens != hidden_states.shape[0]:
+            return False
+        if (not 1 <= num_tokens <= INT4_GRID_MAX_M
+                or top_k != self.n_experts_per_token
+                or not 1 <= top_k <= self.num_experts
+                or num_tokens * top_k > INT4_GRID_MAX_R):
+            return False
+        act_dtype = hidden_states.dtype
+        if act_dtype not in (torch.float16, torch.bfloat16):
+            return False
+        if (not hidden_states.is_contiguous()
+                or hidden_states.data_ptr() % 64):
+            return False
+        if (output.dtype != act_dtype
+                or output.shape != hidden_states.shape
+                or not output.is_contiguous()):
+            return False
+        if (topk_ids.device != hidden_states.device
+                or topk_weights.device != hidden_states.device):
+            return False
+        if (self.w13.dtype != torch.int8 or self.w2.dtype != torch.int8
+                or not self.w13.is_contiguous()
+                or not self.w2.is_contiguous()
+                or self.w13.data_ptr() % 64 or self.w2.data_ptr() % 64):
+            return False
+        w13_scales = self.gemm1_wei_scales
+        w2_scales = self.gemm2_wei_scales
+        if (w13_scales is None or w2_scales is None
+                or w13_scales.dtype != act_dtype
+                or w2_scales.dtype != act_dtype
+                or not w13_scales.is_contiguous()
+                or not w2_scales.is_contiguous()
+                or w13_scales.dim() != 3 or w2_scales.dim() != 3):
+            return False
+        hidden_size = hidden_states.shape[1]
+        w13_n, w13_k2 = self.w13.shape[1], self.w13.shape[2]
+        w2_n, w2_k2 = self.w2.shape[1], self.w2.shape[2]
+        if not (w13_k2 * 2 == hidden_size and w2_n == hidden_size
+                and w13_n == 4 * w2_k2):
+            return False
+        if (w13_scales.shape[0] != self.num_experts
+                or w2_scales.shape[0] != self.num_experts
+                or w13_scales.shape[1] != w13_n
+                or w2_scales.shape[1] != w2_n):
+            return False
+        ngroups = w13_scales.shape[2]
+        if (ngroups == 0 or (w13_k2 * 2) % ngroups
+                or (w2_k2 * 2) % w2_scales.shape[2]):
+            return False
+        group_size = (w13_k2 * 2) // ngroups
+        if group_size != (w2_k2 * 2) // w2_scales.shape[2]:
+            return False
+        try:
+            from .moe_shared_fused_int4_interface import (
+                _VALID_GROUP_SIZES,
+                is_available,
+                supports,
+            )
+        except ImportError:
+            return False
+        if group_size not in _VALID_GROUP_SIZES:
+            return False
+        if not is_available():
+            return False
+        return supports(act_dtype, top_k, hidden_size, self.inter_size,
+                        group_size, device=hidden_states.device)
+
+    def _apply_int4_grid(self, output, hidden_states, topk_weights,
+                         topk_ids):
+        """Run the fused int4 grid; the caller checked eligibility.
+
+        Returns True on success, False to stay on the grouped-GEMM path.
+        """
+        if self._int4_grid is None and not self._int4_grid_blocked:
+            try:
+                from .moe_shared_fused_int4_interface import (
+                    XpuMoESharedFusedDecodeInt4,
+                )
+                # Routed-only: the caller routes before apply and runs
+                # the shared expert in its own module.
+                self._int4_grid = XpuMoESharedFusedDecodeInt4(
+                    self.w13, self.gemm1_wei_scales, self.w2,
+                    self.gemm2_wei_scales, None, None, None, None, None,
+                    self.n_experts_per_token)
+            except ValueError:
+                # The rewritten weights fail grid validation (e.g. base
+                # alignment); the grouped-GEMM path covers all shapes.
+                self._int4_grid_blocked = True
+        if self._int4_grid is None:
+            return False
+        # Persistent per-M scratch, allocated once; calls with the same
+        # M share it and must be ordered as usual for one stream.
+        workspace = self._int4_grid.workspace(hidden_states.shape[0])
+        if workspace.data_ptr() % 64:
+            return False
+        self._int4_grid.forward(
+            output, hidden_states,
+            topk_weights.to(torch.float32).contiguous(),
+            topk_ids.to(torch.int32).contiguous())
+        return True
+
+    def _try_int4_grid(self, output, hidden_states, topk_weights,
+                       topk_ids, expert_map=None, a1q_scale=None):
+        """Fused int4 grid fast path; False means use grouped GEMMs."""
+        if not self._int4_grid_eligible(output, hidden_states,
+                                       topk_weights, topk_ids, expert_map,
+                                       a1q_scale):
+            return False
+        return self._apply_int4_grid(output, hidden_states, topk_weights,
+                                     topk_ids)
+
     def _grouped_gemm(self, A, A_scale, B, B_scale, bias, D,
                       rows_per_expert, N, K):
         if (self._use_int4_gemv and A_scale is None and bias is None
@@ -402,6 +565,9 @@ class XpuFusedMoe:
         expert_map=None,
         a1q_scale=None,
     ):
+        if self._try_int4_grid(output, hidden_states, topk_weights,
+                               topk_ids, expert_map, a1q_scale):
+            return
         num_rows, hidden_size = hidden_states.shape
         num_moe_inputs = self.n_experts_per_token * num_rows
         act_quant = a1q_scale is not None
