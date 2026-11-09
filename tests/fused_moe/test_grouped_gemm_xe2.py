@@ -458,6 +458,87 @@ def test_xe_grouped_gemm_mxfp4(m, n, k, e, topk, dtype, has_bias):
     torch.testing.assert_close(output, ref, rtol=1e-2, atol=1e-2)
 
 
+@pytest.mark.parametrize(
+    "weight_format,k,group_size,scale_pitch_bytes",
+    [
+        # Scale row pitch (group_num * sizeof(scale)) below, unaligned to and
+        # at multiples of the 2D block I/O limits.
+        ("int4", 256, 128, 4),
+        ("int4", 1408, 128, 22),
+        ("int4", 3072, 128, 48),
+        ("int4", 4224, 128, 66),
+        ("int4", 4096, 128, 64),
+        ("int4", 5120, 128, 80),
+        # MXFP4 uses one-byte E8M0 scales.
+        ("mxfp4", 704, 32, 22),
+        ("mxfp4", 2048, 32, 64),
+    ],
+)
+def test_xe_grouped_gemm_scale_pitch(weight_format, k, group_size,
+                                     scale_pitch_bytes):
+    """Check INT4/MXFP4 grouped GEMM across scale row pitches on Xe2."""
+    if not torch.xpu.is_available():
+        pytest.skip("XPU required")
+
+    seed_everything(7)
+    num_experts, m, n = 2, 1, 256
+    group_num = k // group_size
+    scale_element_size = 2 if weight_format == "int4" else 1
+    assert group_num * scale_element_size == scale_pitch_bytes
+
+    input_a = torch.randn((num_experts * m, k), dtype=torch.float16,
+                          device=DEVICE).contiguous() / 8
+    num_rows_per_expert = torch.full((num_experts, ),
+                                     m,
+                                     dtype=torch.int32,
+                                     device=DEVICE)
+
+    if weight_format == "int4":
+        packed_weight = torch.randint(0,
+                                      0xFF,
+                                      (num_experts, n, k // 2),
+                                      dtype=torch.uint8,
+                                      device=DEVICE)
+        scales = torch.pow(
+            2.0,
+            torch.randint(-3,
+                          4,
+                          (num_experts, n, group_num),
+                          device=DEVICE).float()).to(torch.float16)
+        weight = implement_zp(packed_weight).to(torch.int8)
+        dequantized_weight = torch.stack([
+            dequantize_uint4(packed_weight[i], scales[i], group_size)
+            for i in range(num_experts)
+        ])
+    else:
+        packed_weight = torch.randint(0,
+                                      0xFF,
+                                      (num_experts, n, k // 2),
+                                      dtype=torch.uint8,
+                                      device=DEVICE)
+        scales = torch.randint(120,
+                               128,
+                               (num_experts, n, group_num),
+                               dtype=torch.uint8,
+                               device=DEVICE)
+        weight = packed_weight.view(torch.float4_e2m1fn_x2)
+        dequantized_weight = torch.stack([
+            dequantize_mxfp4(packed_weight[i], scales[i], group_size,
+                              torch.float16) for i in range(num_experts)
+        ])
+
+    output = torch.empty((num_experts * m, n), dtype=torch.float16,
+                         device=DEVICE)
+    cutlass_grouped_gemm_xe2(input_a, weight, scales, None, output,
+                             num_rows_per_expert, n, k, num_experts)
+
+    reference = torch.stack([
+        input_a[i].to(torch.float32) @ dequantized_weight[i].to(
+            torch.float32).T for i in range(num_experts)
+    ]).to(torch.float16)
+    torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+
+
 def dequantize_mxfp8_wei_kn(wei, wei_scale, group_size=32):
     """Dequant MXFP8 weight [K, N] with scales [K/group, N] (E8M0 bits)."""
     scale_f = wei_scale.view(torch.float8_e8m0fnu).to(torch.float32)
