@@ -99,7 +99,8 @@ void MoEGEMMLauncher(
     const int* rows_per_expert,
     const int num_experts,
     const int group_size,
-    int32_t* atomic_buffer) {
+    int32_t* atomic_buffer,
+    const uint8_t* zps = nullptr) {
   using ElementA_non_CV = cutlass::platform::remove_cv_t<ElementA>;
   auto op = XE_DPAS_TT<8, float, ElementA_non_CV>{};
 
@@ -161,6 +162,7 @@ void MoEGEMMLauncher(
               weights,
               scales,
               bias,
+              zps,
               outputs,
               mma,
               rows_per_expert,
@@ -183,7 +185,8 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
     at::Tensor& rows_per_expert,
     int64_t N,
     int64_t K,
-    int64_t num_experts) {
+    int64_t num_experts,
+    const c10::optional<at::Tensor>& ptr_B_zp) {
   auto& dpcpp_queue =
       at::xpu::getCurrentXPUStream(ptr_A.device().index()).queue();
   auto A_dtype = ptr_A.dtype();
@@ -279,7 +282,10 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
       reinterpret_cast<int*>(rows_per_expert.data_ptr()),                      \
       num_experts,                                                             \
       group_size,                                                              \
-      static_cast<int*>(atomic_buffer.data_ptr()));
+      static_cast<int*>(atomic_buffer.data_ptr()),                             \
+      ptr_B_zp.has_value() ? reinterpret_cast<const uint8_t*>(                \
+                                 ptr_B_zp->data_ptr())                        \
+                           : static_cast<const uint8_t*>(nullptr));
 
   if (is_B_int4 || is_B_mxfp4) {
     TORCH_CHECK(ptr_scales.has_value(), "w8a16 grouped gemm must have scales");
@@ -302,6 +308,22 @@ at::Tensor cutlass_grouped_gemm_xe2_impl(
         group_size == 32 || group_size == 64 || group_size == 128 ||
             group_size == 256,
         "group_size must be 32, 64, 128 or 256");
+
+    // Asymmetric zero-points (optional): raw uint8 [E, N, K/G] matching
+    // the scales geometry. Only the INT4 path consumes them.
+    TORCH_CHECK(
+        !ptr_B_zp.has_value() || is_B_int4,
+        "ptr_B_zp needs int4 weights");
+    if (ptr_B_zp.has_value()) {
+      TORCH_CHECK(
+          ptr_B_zp->is_contiguous(), "ptr_B_zp must be contiguous");
+      TORCH_CHECK(
+          ptr_B_zp->scalar_type() == at::kByte && ptr_B_zp->dim() == 3 &&
+              ptr_B_zp->size(0) == num_experts && ptr_B_zp->size(1) == N &&
+              ptr_B_zp->size(2) == group_num,
+          "ptr_B_zp must be uint8 [num_experts, N, K/group_size] matching "
+          "the scales");
+    }
 
 #define W4A16LauncherCallER(policy)    \
   if (is_B_int4) {                     \

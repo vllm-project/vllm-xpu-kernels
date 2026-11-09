@@ -19,9 +19,15 @@ torch::Tensor cutlass_grouped_gemm_interface(
     torch::Tensor rows_per_expert,
     int64_t N,
     int64_t K,
-    int64_t num_experts) {
+    int64_t num_experts,
+    const c10::optional<at::Tensor>& ptr_B_zp) {
   if (vllm::xpu::force_xe_default_kernel()) {
 #ifdef VLLM_XPU_ENABLE_XE_DEFAULT
+    // The default-arch kernel has no zero-point path; refusing loudly
+    // beats silently ignoring the correction.
+    TORCH_CHECK(
+        !ptr_B_zp.has_value(),
+        "cutlass_grouped_gemm_interface: ptr_B_zp needs the Xe2 kernel");
     int64_t groups = num_experts;
     return cutlass_grouped_gemm_xe_default(
         ptr_A, ptr_B, ptr_bias, ptr_D, rows_per_expert, N, K, groups);
@@ -47,12 +53,16 @@ torch::Tensor cutlass_grouped_gemm_interface(
         rows_per_expert,
         N,
         K,
-        num_experts);
+        num_experts,
+        ptr_B_zp);
 #else
     TORCH_CHECK(false, "XE2 cutlass kernel is not enabled in this build.");
 #endif
   } else {
 #ifdef VLLM_XPU_ENABLE_XE_DEFAULT
+    TORCH_CHECK(
+        !ptr_B_zp.has_value(),
+        "cutlass_grouped_gemm_interface: ptr_B_zp needs the Xe2 kernel");
     int64_t groups = num_experts;
     return cutlass_grouped_gemm_xe_default(
         ptr_A, ptr_B, ptr_bias, ptr_D, rows_per_expert, N, K, groups);

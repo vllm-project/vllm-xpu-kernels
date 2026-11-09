@@ -78,6 +78,7 @@ CUTE_DEVICE void MoEGEMM(
     const ElementB* Weights,
     const ElementS* Scales,
     const ElementBI* Bias,
+    const uint8_t* Zps,
     ElementD* Outputs,
     TiledMMA const& mma,
     const int* rows_per_expert,
@@ -152,6 +153,16 @@ CUTE_DEVICE void MoEGEMM(
     if (Bias != static_cast<ElementBI*>(nullptr)) {
       ptr_Bias_curr_batch = const_cast<ElementBI*>(Bias) + expert_id * gemm_n;
     }
+    // Asymmetric zero-points for the INT4 path, one [N, K/group_size]
+    // uint8 plane per expert with the same offset math as Scales. Null
+    // selects the symmetric instantiation (today's code unchanged).
+    [[maybe_unused]] const uint8_t* ptr_Zps_curr_batch = nullptr;
+    if constexpr (TENSOR_B_DTYPE == B_DTYPE::INT4) {
+      if (Zps != nullptr) {
+        ptr_Zps_curr_batch = Zps + static_cast<int64_t>(expert_id) *
+                                       gemm_n * (gemm_k / group_size);
+      }
+    }
 
     auto A_tensor = make_moe_tensor<ElementA, LayoutKindA>(
         ptr_A_curr_batch, gemm_m, gemm_k);
@@ -181,20 +192,25 @@ CUTE_DEVICE void MoEGEMM(
         // MXFP8 reuses the 4-bit block-scale mainloop (E8M0 decode + per-K
         // group B scaling) with float_e4m3/e5m2 weights instead of packed
         // 4-bit. Scale layout must be [N, K/group_size] per expert.
-#define XE_GEMM_4BITS_CALLER(GroupSize) \
-  xe_gemm_4bits<                        \
-      GmemTiledCopyA,                   \
-      GmemTiledCopyB,                   \
-      GmemTiledCopyD,                   \
-      TENSOR_B_DTYPE,                   \
-      GroupSize>(                       \
-      A_tensor,                         \
-      B_tensor,                         \
-      ptr_Scales_curr_batch,            \
-      ptr_Bias_curr_batch,              \
-      D_tensor,                         \
-      tile_coord,                       \
-      mma);
+#define XE_GEMM_4BITS_CALLER(GroupSize)                                       \
+  if constexpr (TENSOR_B_DTYPE == B_DTYPE::INT4) {                            \
+    if (ptr_Zps_curr_batch != nullptr) {                                      \
+      xe_gemm_4bits<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD,           \
+                    TENSOR_B_DTYPE, GroupSize, true>(                         \
+          A_tensor, B_tensor, ptr_Scales_curr_batch, ptr_Bias_curr_batch,     \
+          D_tensor, tile_coord, mma, ptr_Zps_curr_batch);                     \
+    } else {                                                                  \
+      xe_gemm_4bits<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD,           \
+                    TENSOR_B_DTYPE, GroupSize, false>(                        \
+          A_tensor, B_tensor, ptr_Scales_curr_batch, ptr_Bias_curr_batch,     \
+          D_tensor, tile_coord, mma);                                        \
+    }                                                                         \
+  } else {                                                                    \
+    xe_gemm_4bits<GmemTiledCopyA, GmemTiledCopyB, GmemTiledCopyD,             \
+                  TENSOR_B_DTYPE, GroupSize, false>(                          \
+        A_tensor, B_tensor, ptr_Scales_curr_batch, ptr_Bias_curr_batch,       \
+        D_tensor, tile_coord, mma);                                          \
+  }
         if (group_size == 32) {
           XE_GEMM_4BITS_CALLER(32)
         } else if (group_size == 64) {

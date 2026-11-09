@@ -11,7 +11,8 @@ torch::Tensor cutlass_grouped_gemm_xe2(
     torch::Tensor rows_per_expert,
     int64_t N,
     int64_t K,
-    int64_t num_experts) {
+    int64_t num_experts,
+    const c10::optional<at::Tensor>& ptr_B_zp) {
   return MoE::cutlass_grouped_gemm_xe2_impl(
       ptr_A,
       ptr_B,
@@ -21,5 +22,6 @@ torch::Tensor cutlass_grouped_gemm_xe2(
       rows_per_expert,
       N,
       K,
-      num_experts);
+      num_experts,
+      ptr_B_zp);
 }
