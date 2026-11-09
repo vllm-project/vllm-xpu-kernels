@@ -259,6 +259,8 @@ def ref_fused_moe(recipe,
                   ep_size=1,
                   expert_map=None,
                   a1q_scale=None,
+                  w13_zps=None,
+                  w2_zps=None,
 ):
     """
     Reference fused MoE implementation with quantization simulation.
@@ -274,6 +276,10 @@ def ref_fused_moe(recipe,
     NOT supported (raise NotImplementedError):
         int4
 
+    Asymmetric zero-points are refused loudly: the reference has no
+    int4 path, so a layer carrying zps must never land here. Callers
+    route int4 layers to the native kernels instead.
+
     Dimension constraints per recipe:
         fp8block: hidden_size % 128 == 0 (act quant group=128)
         mxfp8:    hidden_size % 32 == 0  (act quant block=32)
@@ -283,7 +289,11 @@ def ref_fused_moe(recipe,
     """
     assert recipe in ("bf16", "fp8block", "mxfp8", "mxfp4", \
         "mxfp4_fp8", "fp8"), f"Unsupported recipe: {recipe}"
-    
+    if w13_zps is not None or w2_zps is not None:
+        raise NotImplementedError(
+            "ref_fused_moe has no asymmetric int4 path: zero-points need "
+            "the native Xe2 kernels")
+
     num_rows, hidden_size = hidden_states.shape
     if recipe in ("mxfp4", "mxfp4_fp8"):
         inter_size = w13.shape[-2] // 2

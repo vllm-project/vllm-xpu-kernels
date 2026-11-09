@@ -118,7 +118,8 @@ def cutlass_grouped_gemm(input_A, input_A_scale, input_B, input_B_scale, bias,
 
 
 def cutlass_grouped_gemm_xe2(input_A, input_B, scales, bias, output,
-                             num_rows_per_expert, n, k, num_experts):
+                             num_rows_per_expert, n, k, num_experts,
+                             B_zp=None):
     torch.ops._xpu_C.cutlass_grouped_gemm_interface(
         ptr_A=input_A,
         ptr_A_scale=None,
@@ -129,7 +130,8 @@ def cutlass_grouped_gemm_xe2(input_A, input_B, scales, bias, output,
         rows_per_expert=num_rows_per_expert,
         N=n,
         K=k,
-        num_experts=num_experts)
+        num_experts=num_experts,
+        ptr_B_zp=B_zp)
 
 
 def ceilDiv(a, b):
@@ -215,6 +217,8 @@ class XpuFusedMoe:
         gemm1_clamp_limit: Optional[float]=None,
         activation_situ_beta: Optional[float]=None,
         activation_situ_linear_beta: Optional[float]=None,
+        w13_zps=None,
+        w2_zps=None,
     ):
         assert w13.is_contiguous() and w2.is_contiguous()
 
@@ -262,6 +266,12 @@ class XpuFusedMoe:
         else:
             self.gemm1_wei_scales = w13_scales
             self.gemm2_wei_scales = w2_scales
+
+        # Optional asymmetric zero-points for int4 weights (raw uint8
+        # [E, N, K/G] alongside the scales). Only int4 layers are ever
+        # constructed with zps; other recipes keep None.
+        self.w13_zps = w13_zps
+        self.w2_zps = w2_zps
 
         self.w13_bias = w13_bias
         self.w2_bias = w2_bias
@@ -381,7 +391,9 @@ class XpuFusedMoe:
                             ep_rank=self.ep_rank,
                             ep_size=self.ep_size,
                             expert_map=expert_map,
-                            a1q_scale=a1q_scale)
+                            a1q_scale=a1q_scale,
+                            w13_zps=self.w13_zps,
+                            w2_zps=self.w2_zps)
 
     def _int4_grid_eligible(self, output, hidden_states, topk_weights,
                               topk_ids, expert_map=None, a1q_scale=None):
@@ -455,6 +467,22 @@ class XpuFusedMoe:
                 or not w2_scales.is_contiguous()
                 or w13_scales.dim() != 3 or w2_scales.dim() != 3):
             return False
+        # Zero-points ride the same op build, so no extra availability
+        # probe: the C++ entry re-validates the planes it consumes.
+        w13_zps = self.w13_zps
+        w2_zps = self.w2_zps
+        if w13_zps is None or w2_zps is None:
+            if w13_zps is not None or w2_zps is not None:
+                return False
+        elif (w13_zps.dtype != torch.uint8 or w2_zps.dtype != torch.uint8
+                or not w13_zps.is_contiguous()
+                or not w2_zps.is_contiguous()
+                or w13_zps.dim() != 3 or w2_zps.dim() != 3
+                or w13_zps.shape != w13_scales.shape
+                or w2_zps.shape != w2_scales.shape
+                or w13_zps.device != hidden_states.device
+                or w2_zps.device != hidden_states.device):
+            return False
         hidden_size = hidden_states.shape[1]
         w13_n, w13_k2 = self.w13.shape[1], self.w13.shape[2]
         w2_n, w2_k2 = self.w2.shape[1], self.w2.shape[2]
@@ -504,7 +532,8 @@ class XpuFusedMoe:
                 self._int4_grid = XpuMoESharedFusedDecodeInt4(
                     self.w13, self.gemm1_wei_scales, self.w2,
                     self.gemm2_wei_scales, None, None, None, None, None,
-                    self.n_experts_per_token)
+                    self.n_experts_per_token, w13_zps=self.w13_zps,
+                    w2_zps=self.w2_zps)
             except ValueError:
                 # The rewritten weights fail grid validation (e.g. base
                 # alignment); the grouped-GEMM path covers all shapes.
@@ -533,8 +562,11 @@ class XpuFusedMoe:
                                      topk_ids)
 
     def _grouped_gemm(self, A, A_scale, B, B_scale, bias, D,
-                      rows_per_expert, N, K):
-        if (self._use_int4_gemv and A_scale is None and bias is None
+                      rows_per_expert, N, K, B_zp=None):
+        # moe_int4_gemv has no zero-point path; layers with zps stay on
+        # the grouped GEMM, which applies the correction in-kernel.
+        if (B_zp is None and self._use_int4_gemv and A_scale is None
+                and bias is None
                 and A.shape[0] <= INT4_GEMV_MAX_ROWS
                 and A.dtype in (torch.float16, torch.bfloat16)
                 and B.dtype == torch.int8
@@ -554,7 +586,8 @@ class XpuFusedMoe:
             rows_per_expert=rows_per_expert,
             N=N,
             K=K,
-            num_experts=self.num_experts)
+            num_experts=self.num_experts,
+            ptr_B_zp=B_zp)
 
     def _apply_kernel(
         self,
@@ -625,7 +658,8 @@ class XpuFusedMoe:
                                 device=output.device)
         self._grouped_gemm(remapped_hidden_states, remapped_scales, self.w13,
                            self.gemm1_wei_scales, self.w13_bias, gemm1_output,
-                           rows_per_expert, 2 * self.inter_size, hidden_size)
+                           rows_per_expert, 2 * self.inter_size, hidden_size,
+                           B_zp=self.w13_zps)
 
         # Apply swiglu_limit clamping before activation
         if self.gemm1_clamp_limit is not None and self.gemm1_clamp_limit > 0:
@@ -672,7 +706,8 @@ class XpuFusedMoe:
         self._grouped_gemm(act_output, gemm2_act_scale, self.w2,
                            self.gemm2_wei_scales, self.w2_bias, gemm2_output,
                            rows_per_expert, hidden_size,
-                           self.inter_size * self.inter_size_scale)
+                           self.inter_size * self.inter_size_scale,
+                           B_zp=self.w2_zps)
 
         torch.ops._moe_C.moe_gather(output, gemm2_output, topk_weights,
                                     unpermuted_row_to_permuted_row,

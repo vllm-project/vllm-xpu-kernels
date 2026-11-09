@@ -27,6 +27,127 @@ _MAX_BLOCK_2D_BYTES = (1 << 24) - 1
 _VALID_GROUP_SIZES = (32, 64, 128, 256)
 
 
+def repack_awq_moe_for_grid(qweight, qzeros, scales, group_size, *,
+                            target_dtype=None):
+    """Repack one AWQ-quantized MoE linear for the fused int4 grid.
+
+    Loader layout, per expert with K rows and N columns:
+      qweight [E, K, N/8] int32, AWQ column-packed bit order
+      qzeros  [E, G, N/8] int32, same packing, G = K / group_size
+      scales  [E, G, N] in the quant dtype
+    Grid layout (canonical, N-first):
+      weight [E, N, K/2] int8, signed-nibble pairs (implement_zp output)
+      new_scales [E, N, G] contiguous, target_dtype (default: scales dtype)
+      zps [E, N, G] uint8 contiguous, raw zero-points in 0..15
+
+    Experts are repacked one at a time to bound peak memory (unpack
+    materializes one int8 element per stored bit). The caller stacks
+    gate/up linears along N before calling. Values are validated
+    here; the grid constructor re-validates shapes and alignment.
+    """
+    from .fused_moe_interface import implement_zp
+
+    if target_dtype is None:
+        target_dtype = scales.dtype
+    if not isinstance(group_size, int) or group_size not in _VALID_GROUP_SIZES:
+        raise ValueError(
+            "group_size must be one of 32, 64, 128, 256, got "
+            f"{group_size!r}")
+    if (qweight.dtype != torch.int32 or qzeros.dtype != torch.int32
+            or qweight.dim() != 3 or qzeros.dim() != 3
+            or scales.dim() != 3):
+        raise ValueError(
+            "AWQ loader tensors must be int32/int32/any batched [E, ...]")
+    num_experts, k, n_packed = qweight.shape
+    n = n_packed * 8
+    if k % 2 or k % group_size or n % 8:
+        raise ValueError(
+            f"K ({k}) must be even and divisible by group_size "
+            f"({group_size}), N ({n}) a multiple of 8")
+    num_groups = k // group_size
+    if (qzeros.shape != (num_experts, num_groups, n_packed)
+            or scales.shape != (num_experts, num_groups, n)):
+        raise ValueError(
+            "qzeros must be [E, K/G, N/8] and scales [E, K/G, N] for "
+            f"qweight [E, K, N/8], got {tuple(qweight.shape)}, "
+            f"{tuple(qzeros.shape)}, {tuple(scales.shape)}")
+    weight = torch.empty((num_experts, n, k // 2),
+                         dtype=torch.int8,
+                         device=qweight.device)
+    new_scales = torch.empty((num_experts, n, num_groups),
+                             dtype=target_dtype,
+                             device=scales.device)
+    zps = torch.empty((num_experts, n, num_groups),
+                      dtype=torch.uint8,
+                      device=qzeros.device)
+    for e in range(num_experts):
+        # Column-packed AWQ bit order -> logical u4 -> N-first.
+        qw = _awq_column_to_logical(qweight[e])
+        qw = qw.t().contiguous().to(torch.uint8)
+        # Pair packing matches the kernel convention (element 2j sits
+        # in the low nibble); implement_zp folds the symmetric part.
+        packed = qw[..., 0::2] | (qw[..., 1::2] << 4)
+        weight[e] = implement_zp(packed.contiguous())
+        new_scales[e] = scales[e].t().contiguous().to(target_dtype)
+        zp = _awq_column_to_logical(qzeros[e])
+        zp = zp.t().contiguous().to(torch.uint8)
+        if bool((zp > 15).any()):
+            raise ValueError("zero-points must fit in 4 bits")
+        zps[e] = zp
+    return (weight.contiguous(), new_scales.contiguous(), zps.contiguous())
+
+
+def _awq_column_to_logical(packed_int32):
+    """Unpack AWQ column-packed int32 to the logical u4 matrix.
+
+    Unpacks with AWQUtils (column) and undoes the AWQ bit order,
+    returning logical [K, N] u4 values. Only the column branch is
+    used: the row branch reshapes multi-row matrices incorrectly,
+    so grid repacks never build on it.
+    """
+    from .quantization._quantize_convert import AWQUtils
+    u4 = AWQUtils.unpack(packed_int32, direction="column")
+    return AWQUtils.apply_order(
+        u4, direction="column", order=AWQUtils.REVERSE_AWQ_PACK_ORDER)
+
+
+def _check_zp_plane(name, zp, ref):
+    """Check one zp plane: uint8 with the scales' geometry, 4-bit values."""
+    if (zp.dtype != torch.uint8 or zp.dim() != 3 or zp.shape != ref.shape
+            or zp.device != ref.device):
+        raise ValueError(
+            f"{name} must be uint8 {tuple(ref.shape)} on the scales' device")
+    if bool((zp > 15).any()):
+        raise ValueError(f"{name} values must fit in 4 bits")
+
+
+def _check_zps(has_shared, w13_zps, w2_zps, shared_w13_zps, shared_w2_zps,
+               w13_scales, w2_scales, shared_w13_scale, shared_w2_scale):
+    """Validate optional asymmetric zero-points against the scales.
+
+    Raw uint8 planes with the scales' geometry ([E, N, K/G] routed,
+    [1, N, K/G] shared). When any zp is given, every supplied weight
+    set needs its pair; values must fit in 4 bits.
+    """
+    if (w13_zps is None and w2_zps is None and shared_w13_zps is None
+            and shared_w2_zps is None):
+        return
+    if w13_zps is None or w2_zps is None:
+        raise ValueError(
+            "routed zero-points must be both defined or both undefined")
+    _check_zp_plane("w13_zps", w13_zps, w13_scales)
+    _check_zp_plane("w2_zps", w2_zps, w2_scales)
+    if has_shared:
+        if shared_w13_zps is None or shared_w2_zps is None:
+            raise ValueError(
+                "shared zero-points must be defined exactly when routed "
+                "ones are")
+        _check_zp_plane("shared_w13_zps", shared_w13_zps, shared_w13_scale)
+        _check_zp_plane("shared_w2_zps", shared_w2_zps, shared_w2_scale)
+    elif shared_w13_zps is not None or shared_w2_zps is not None:
+        raise ValueError("routed-only runs take no shared zero-points")
+
+
 def is_available() -> bool:
     """Whether this build provides the int4 fused decode op."""
     try:
@@ -126,6 +247,10 @@ class XpuMoESharedFusedDecodeInt4:
       shared_w13 [2I, H/2] int8-packed, shared_w13_scale [1, 2I, H/G]
       shared_w2  [H, I/2]  int8-packed, shared_w2_scale  [1, H, I/G]
       shared_gate [H] or [1, H] with the activation dtype
+    Asymmetric zero-points are optional raw-uint8 planes alongside the
+    scales (w13_zps [E, 2I, H/G], w2_zps [E, H, I/G], plus the shared
+    pair when shared experts are present). When any zp is given, every
+    supplied weight set needs its pair; values must fit in 4 bits.
 
     Matrices require 64-byte-aligned base addresses; shared_gate requires
     32-byte alignment. Contiguous storage-offset views do not necessarily
@@ -157,6 +282,10 @@ class XpuMoESharedFusedDecodeInt4:
         tile_m: int = 0,
         router_weight: torch.Tensor | None = None,
         renormalize: bool = True,
+        w13_zps: torch.Tensor | None = None,
+        w2_zps: torch.Tensor | None = None,
+        shared_w13_zps: torch.Tensor | None = None,
+        shared_w2_zps: torch.Tensor | None = None,
     ):
         if tile_m not in (0, 8, 16):
             raise ValueError("tile_m must be 0 (auto), 8 or 16")
@@ -247,8 +376,16 @@ class XpuMoESharedFusedDecodeInt4:
         if any(not t.is_contiguous() for t in (w13, w13_scales, w2, w2_scales)
                + (() if not self.has_shared else
                   (shared_w13, shared_w13_scale, shared_w2, shared_w2_scale,
-                   shared_gate))):
+                   shared_gate))
+               + (() if w13_zps is None else
+                  ((w13_zps, w2_zps) if not self.has_shared else
+                   (w13_zps, w2_zps, shared_w13_zps, shared_w2_zps)))):
             raise ValueError("prepared weights and scales must be contiguous")
+        # Zero-points ride scalar loads, so they skip the 64-byte
+        # alignment rule that covers the block-2D weight matrices.
+        _check_zps(self.has_shared, w13_zps, w2_zps, shared_w13_zps,
+                   shared_w2_zps, w13_scales, w2_scales, shared_w13_scale,
+                   shared_w2_scale)
         # GEMM matrices use 64-byte-aligned block-2D loads. The shared gate
         # dot-product loads alignas(32) vectors of 16 FP16/BF16 elements.
         if any(t.data_ptr() % 64 for t in (w13, w2)
@@ -263,6 +400,10 @@ class XpuMoESharedFusedDecodeInt4:
         self.w13_scales = w13_scales
         self.w2 = w2
         self.w2_scales = w2_scales
+        self.w13_zps = w13_zps
+        self.w2_zps = w2_zps
+        self.shared_w13_zps = shared_w13_zps
+        self.shared_w2_zps = shared_w2_zps
         self.shared_w13 = shared_w13
         self.shared_w13_scale = shared_w13_scale
         self.shared_w2 = shared_w2
@@ -321,6 +462,10 @@ class XpuMoESharedFusedDecodeInt4:
             self.shared_gate,
             ws,
             self.tile_m,
+            w13_zps=self.w13_zps,
+            w2_zps=self.w2_zps,
+            shared_w13_zps=self.shared_w13_zps,
+            shared_w2_zps=self.shared_w2_zps,
         )
         return output
 
