@@ -75,7 +75,11 @@ void moe_shared_fused_decode_int4_interface(
     const c10::optional<torch::Tensor>& shared_w2_scale,
     const c10::optional<torch::Tensor>& shared_gate,
     torch::Tensor& ws,
-    int64_t tile_m) {
+    int64_t tile_m,
+    const c10::optional<torch::Tensor>& w13_zps,
+    const c10::optional<torch::Tensor>& w2_zps,
+    const c10::optional<torch::Tensor>& shared_w13_zps,
+    const c10::optional<torch::Tensor>& shared_w2_zps) {
   TORCH_CHECK(x.is_xpu(), "x must be an XPU tensor");
   TORCH_CHECK(
       x.dim() == 2 && topk_ids.dim() == 2, "x and topk_ids must be rank two");
@@ -106,6 +110,10 @@ void moe_shared_fused_decode_int4_interface(
         shared_w2.value_or(torch::Tensor()),
         shared_w2_scale.value_or(torch::Tensor()),
         shared_gate.value_or(torch::Tensor()),
+        w13_zps.value_or(torch::Tensor()),
+        w2_zps.value_or(torch::Tensor()),
+        shared_w13_zps.value_or(torch::Tensor()),
+        shared_w2_zps.value_or(torch::Tensor()),
         ws,
         tile_m);
     return;

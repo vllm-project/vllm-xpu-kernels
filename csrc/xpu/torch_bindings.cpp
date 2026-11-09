@@ -90,7 +90,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, xpu_ops) {
       "Tensor w2, Tensor w2_scale, Tensor? shared_w13, Tensor? "
       "shared_w13_scale, Tensor? shared_w2, Tensor? "
       "shared_w2_scale, Tensor? shared_gate, Tensor(b!) ws, "
-      "int tile_m=0) -> ()");
+      "int tile_m=0, Tensor? w13_zps=None, Tensor? w2_zps=None, Tensor? "
+      "shared_w13_zps=None, Tensor? shared_w2_zps=None) -> ()");
   xpu_ops.impl(
       "moe_shared_fused_decode_int4_interface",
       torch::kXPU,

@@ -252,6 +252,7 @@ template <
     class GmemTiledCopyC,
     B_DTYPE TENSOR_B_DTYPE,
     int GroupSize,
+    bool HasZp,
     class ATensor,
     class BTensor,
     class DTensor,
@@ -265,9 +266,13 @@ CUTE_DEVICE void xe_gemm_4bits(
     const ElementBI* Bias,
     DTensor& C,  // (M,N)
     Coord<int, int, cute::Underscore, int> blk_coord,
-    TiledMMA const& mma) {
+    TiledMMA const& mma,
+    const uint8_t* Zps = nullptr) {
   using TA = typename ATensor::element_type;
   using TB = typename BTensor::element_type;
+  static_assert(
+      !HasZp || std::is_same_v<TB, int4_t>,
+      "asymmetric zero-points only apply to the INT4 path");
   static constexpr int group_size = GroupSize;
   static constexpr int sg_local_range = 16;
   auto item = sycl::ext::oneapi::this_work_item::get_nd_item<3>();
@@ -358,6 +363,11 @@ CUTE_DEVICE void xe_gemm_4bits(
 
   using scaleStoreType = conditional_t<is_same_v<TA, half_t>, half_t, float>;
   scaleStoreType scales[thr_N * channel_num];
+  // Zero-point correction (8 - zp) per N lane and group, in tCrB units.
+  // Loaded once at each group boundary, added on every k-tile below.
+  // Only the asymmetric INT4 path fills it; the symmetric path keeps
+  // today's code (HasZp=false discards every use at compile time).
+  [[maybe_unused]] TA zp_corr[thr_N * channel_num];
 
   // A workgroup tile never straddles a 128-wide N block (tile_n is 64 or 128
   // and n_tile_start is a multiple of tile_n), so for block-fp8 the scale is a
@@ -430,6 +440,16 @@ CUTE_DEVICE void xe_gemm_4bits(
             }
 
             scales[n * channel_num + c] = scale;
+            if constexpr (HasZp) {
+              // Stored nibbles hold (q - 8); adding (8 - zp) recovers
+              // (q - zp) before the scale multiply below. zp == 8 adds
+              // exactly zero, so uniform-zp-8 weights stay bit-exact.
+              uint8_t zp = Zps[(n_tile_start + n_sg_start + sg_local_n) *
+                                   group_num +
+                               group_idx];
+              zp_corr[n * channel_num + c] =
+                  static_cast<TA>(8 - static_cast<int>(zp));
+            }
           }
         }
       }
@@ -452,11 +472,25 @@ CUTE_DEVICE void xe_gemm_4bits(
           CUTLASS_PRAGMA_UNROLL
           for (int i = 0; i < tCrB.size() / thr_N / channel_num; ++i) {
             if constexpr (std::is_same_v<TA, half_t>) {
-              tCrB(cute::tuple(c, _), n, _)[i] *= scales[n * channel_num + c];
+              if constexpr (HasZp) {
+                tCrB(cute::tuple(c, _), n, _)[i] =
+                    (tCrB(cute::tuple(c, _), n, _)[i] +
+                     zp_corr[n * channel_num + c]) *
+                    scales[n * channel_num + c];
+              } else {
+                tCrB(cute::tuple(c, _), n, _)[i] *= scales[n * channel_num + c];
+              }
             } else {
-              tCrB(cute::tuple(c, _), n, _)[i] = apply_scale(
-                  tCrB(cute::tuple(c, _), n, _)[i],
-                  scales[n * channel_num + c]);
+              if constexpr (HasZp) {
+                TA unscaled = tCrB(cute::tuple(c, _), n, _)[i] +
+                              zp_corr[n * channel_num + c];
+                tCrB(cute::tuple(c, _), n, _)[i] =
+                    apply_scale(unscaled, scales[n * channel_num + c]);
+              } else {
+                tCrB(cute::tuple(c, _), n, _)[i] = apply_scale(
+                    tCrB(cute::tuple(c, _), n, _)[i],
+                    scales[n * channel_num + c]);
+              }
             }
           }
         }

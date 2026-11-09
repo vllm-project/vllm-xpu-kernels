@@ -21,5 +21,9 @@ void moe_shared_fused_decode_int4_xe2(
     const torch::Tensor& shared_w2,
     const torch::Tensor& shared_w2_scale,
     const torch::Tensor& shared_gate,
+    const torch::Tensor& w13_zps,
+    const torch::Tensor& w2_zps,
+    const torch::Tensor& shared_w13_zps,
+    const torch::Tensor& shared_w2_zps,
     torch::Tensor& ws,
     int64_t tile_m);

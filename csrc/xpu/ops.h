@@ -117,7 +117,11 @@ void moe_shared_fused_decode_int4_interface(
     const c10::optional<torch::Tensor>& shared_w2_scale,
     const c10::optional<torch::Tensor>& shared_gate,
     torch::Tensor& ws,
-    int64_t tile_m);
+    int64_t tile_m,
+    const c10::optional<torch::Tensor>& w13_zps,
+    const c10::optional<torch::Tensor>& w2_zps,
+    const c10::optional<torch::Tensor>& shared_w13_zps,
+    const c10::optional<torch::Tensor>& shared_w2_zps);
 void moe_int4_gemv(
     const torch::Tensor& A,
     const torch::Tensor& B,

@@ -303,7 +303,9 @@ void launch_sp_gemm_merged_int4(
     int N,
     int K,
     bool has_shared,
-    int64_t group_size) {
+    int64_t group_size,
+    const uint8_t* zps_routed = nullptr,
+    const uint8_t* zps_shared = nullptr) {
   auto op = XE_DPAS_TT<8, float, ElementA>{};
   using WGTile = typename Policy::WGTile;
   using SGLayout = typename Policy::SGLayout;
@@ -369,18 +371,62 @@ void launch_sp_gemm_merged_int4(
           auto tile_coord = make_coord(0, n_tile, _, 0);
 
           const ElementA* sc_e = sc_base + (int64_t)e * N * ngroups;
+          // Asymmetric zero-points ride alongside the scales ([E, N, K/G]
+          // raw uint8, same indexing). A null segment pointer selects the
+          // symmetric instantiation, which is today's code unchanged.
+          const uint8_t* zp_base = is_routed ? zps_routed : zps_shared;
+          const uint8_t* zp_e =
+              (zp_base == nullptr)
+                  ? nullptr
+                  : zp_base + (int64_t)(is_routed ? e : 0) * N * ngroups;
           if (group_size == 32) {
-            MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 32>(
-                A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord, mma);
+            if (zp_e != nullptr) {
+              MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 32,
+                                 true>(
+                  A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord,
+                  mma, zp_e);
+            } else {
+              MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 32,
+                                 false>(
+                  A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord,
+                  mma);
+            }
           } else if (group_size == 64) {
-            MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 64>(
-                A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord, mma);
+            if (zp_e != nullptr) {
+              MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 64,
+                                 true>(
+                  A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord,
+                  mma, zp_e);
+            } else {
+              MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 64,
+                                 false>(
+                  A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord,
+                  mma);
+            }
           } else if (group_size == 128) {
-            MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 128>(
-                A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord, mma);
+            if (zp_e != nullptr) {
+              MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 128,
+                                 true>(
+                  A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord,
+                  mma, zp_e);
+            } else {
+              MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 128,
+                                 false>(
+                  A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord,
+                  mma);
+            }
           } else {
-            MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 256>(
-                A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord, mma);
+            if (zp_e != nullptr) {
+              MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 256,
+                                 true>(
+                  A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord,
+                  mma, zp_e);
+            } else {
+              MoE::xe_gemm_4bits<void, void, void, MoE::B_DTYPE::INT4, 256,
+                                 false>(
+                  A_t, B_t, sc_e, (const ElementA*)nullptr, D_t, tile_coord,
+                  mma);
+            }
           }
         });
   });
@@ -551,6 +597,10 @@ void moe_shared_fused_decode_int4_xe2_impl(
     const torch::Tensor& shared_w2_t,
     const torch::Tensor& shared_w2_scale_t,
     const torch::Tensor& shared_gate_t,
+    const torch::Tensor& w13_zps,
+    const torch::Tensor& w2_zps,
+    const torch::Tensor& shared_w13_zps,
+    const torch::Tensor& shared_w2_zps,
     torch::Tensor& ws,
     int64_t tile_m) {
   using namespace moe_shared_fused_int4;
@@ -634,6 +684,53 @@ void moe_shared_fused_decode_int4_xe2_impl(
            shared_w2_scale_t.size(2) == w2_scale.size(2)),
       kRecipe,
       "shared scales must be [1, N, K/G] in the activation dtype");
+  // Asymmetric zero-points ride alongside the scales (raw uint8, same
+  // [E, N, K/G] geometry). Mixed setups are rejected: when any zp is
+  // given, every supplied weight set needs its pair.
+  const bool has_zps = w13_zps.defined();
+  TORCH_CHECK(
+      has_zps == w2_zps.defined(),
+      kRecipe,
+      "routed zero-points must be both defined or both undefined");
+  TORCH_CHECK(
+      has_shared ? (has_zps == shared_w13_zps.defined() &&
+                    has_zps == shared_w2_zps.defined())
+                 : (!shared_w13_zps.defined() &&
+                    !shared_w2_zps.defined()),
+      kRecipe,
+      "shared zero-points must be defined exactly when routed ones are "
+      "(routed-only runs take no shared zero-points)");
+  if (has_zps) {
+    check_device(w13_zps, "w13_zps");
+    check_device(w2_zps, "w2_zps");
+    TORCH_CHECK(
+        w13_zps.scalar_type() == at::kByte && w13_zps.dim() == 3 &&
+            w13_zps.sizes() == w13_scale.sizes() &&
+            w2_zps.scalar_type() == at::kByte && w2_zps.dim() == 3 &&
+            w2_zps.sizes() == w2_scale.sizes(),
+        kRecipe,
+        "routed zero-points must be uint8 [E, N, K/G] matching the scales");
+    TORCH_CHECK(
+        w13_zps.is_contiguous() && w2_zps.is_contiguous(),
+        "routed zero-points must be contiguous");
+    if (has_shared) {
+      check_device(shared_w13_zps, "shared_w13_zps");
+      check_device(shared_w2_zps, "shared_w2_zps");
+      TORCH_CHECK(
+          shared_w13_zps.scalar_type() == at::kByte &&
+              shared_w13_zps.dim() == 3 &&
+              shared_w13_zps.sizes() == shared_w13_scale_t.sizes() &&
+              shared_w2_zps.scalar_type() == at::kByte &&
+              shared_w2_zps.dim() == 3 &&
+              shared_w2_zps.sizes() == shared_w2_scale_t.sizes(),
+          kRecipe,
+          "shared zero-points must be uint8 [1, N, K/G] matching the "
+          "scales");
+      TORCH_CHECK(
+          shared_w13_zps.is_contiguous() && shared_w2_zps.is_contiguous(),
+          "shared zero-points must be contiguous");
+    }
+  }
   TORCH_CHECK(
       !has_shared || shared_gate_t.scalar_type() == x.scalar_type(),
       kRecipe,
@@ -763,6 +860,14 @@ void moe_shared_fused_decode_int4_xe2_impl(
       has_shared
           ? reinterpret_cast<const ElementA*>(shared_w2_scale_t.data_ptr())
           : reinterpret_cast<const ElementA*>(w2_scale.data_ptr());
+  // Null selects the symmetric instantiation in the merged launcher.
+  const uint8_t* w13_zps_ptr =
+      has_zps ? w13_zps.data_ptr<uint8_t>() : nullptr;
+  const uint8_t* w2_zps_ptr = has_zps ? w2_zps.data_ptr<uint8_t>() : nullptr;
+  const uint8_t* shared_w13_zps_ptr =
+      (has_shared && has_zps) ? shared_w13_zps.data_ptr<uint8_t>() : nullptr;
+  const uint8_t* shared_w2_zps_ptr =
+      (has_shared && has_zps) ? shared_w2_zps.data_ptr<uint8_t>() : nullptr;
 
   // Each routed row can require its own tile; skewed routes may exceed E.
   const int umt = R;
@@ -856,7 +961,9 @@ void moe_shared_fused_decode_int4_xe2_impl(
         N1,
         K1,
         has_shared,
-        group_size);
+        group_size,
+        w13_zps_ptr,
+        shared_w13_zps_ptr);
   } else {
     launch_sp_gemm_merged_int4<
         MoE::w4a16_policy_m_16,
@@ -879,7 +986,9 @@ void moe_shared_fused_decode_int4_xe2_impl(
         N1,
         K1,
         has_shared,
-        group_size);
+        group_size,
+        w13_zps_ptr,
+        shared_w13_zps_ptr);
   }
 
   // 4: combined activation (routed rows + shared rows)
@@ -919,7 +1028,9 @@ void moe_shared_fused_decode_int4_xe2_impl(
         N2,
         K2,
         has_shared,
-        group_size);
+        group_size,
+        w2_zps_ptr,
+        shared_w2_zps_ptr);
   } else {
     launch_sp_gemm_merged_int4<
         MoE::w4a16_policy_m_16,
@@ -942,7 +1053,9 @@ void moe_shared_fused_decode_int4_xe2_impl(
         N2,
         K2,
         has_shared,
-        group_size);
+        group_size,
+        w2_zps_ptr,
+        shared_w2_zps_ptr);
   }
 
   // 6: finalize (pure weighted sum + gated shared add) into output
@@ -974,6 +1087,10 @@ void moe_shared_fused_decode_int4_xe2(
     const torch::Tensor& shared_w2_t,
     const torch::Tensor& shared_w2_scale_t,
     const torch::Tensor& shared_gate_t,
+    const torch::Tensor& w13_zps,
+    const torch::Tensor& w2_zps,
+    const torch::Tensor& shared_w13_zps,
+    const torch::Tensor& shared_w2_zps,
     torch::Tensor& ws,
     int64_t tile_m) {
   if (x.scalar_type() == at::kBFloat16)
@@ -991,6 +1108,10 @@ void moe_shared_fused_decode_int4_xe2(
         shared_w2_t,
         shared_w2_scale_t,
         shared_gate_t,
+        w13_zps,
+        w2_zps,
+        shared_w13_zps,
+        shared_w2_zps,
         ws,
         tile_m);
   return moe_shared_fused_decode_int4_xe2_impl<cutlass::half_t>(
@@ -1007,6 +1128,10 @@ void moe_shared_fused_decode_int4_xe2(
       shared_w2_t,
       shared_w2_scale_t,
       shared_gate_t,
+      w13_zps,
+      w2_zps,
+      shared_w13_zps,
+      shared_w2_zps,
       ws,
       tile_m);
 }
