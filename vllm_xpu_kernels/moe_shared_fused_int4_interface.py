@@ -373,6 +373,13 @@ class XpuMoESharedFusedDecodeInt4:
                     not in (torch.float16, torch.bfloat16)):
                 raise ValueError(
                     "shared_gate must be [H] or [1, H] in fp16 or bf16")
+        # Zero-points ride scalar loads, so they skip the 64-byte
+        # alignment rule that covers the block-2D weight matrices.
+        # Validated before the contiguity probe below so a mixed setup
+        # reports which plane is missing instead of tripping on None.
+        _check_zps(self.has_shared, w13_zps, w2_zps, shared_w13_zps,
+                   shared_w2_zps, w13_scales, w2_scales, shared_w13_scale,
+                   shared_w2_scale)
         if any(not t.is_contiguous() for t in (w13, w13_scales, w2, w2_scales)
                + (() if not self.has_shared else
                   (shared_w13, shared_w13_scale, shared_w2, shared_w2_scale,
@@ -381,11 +388,6 @@ class XpuMoESharedFusedDecodeInt4:
                   ((w13_zps, w2_zps) if not self.has_shared else
                    (w13_zps, w2_zps, shared_w13_zps, shared_w2_zps)))):
             raise ValueError("prepared weights and scales must be contiguous")
-        # Zero-points ride scalar loads, so they skip the 64-byte
-        # alignment rule that covers the block-2D weight matrices.
-        _check_zps(self.has_shared, w13_zps, w2_zps, shared_w13_zps,
-                   shared_w2_zps, w13_scales, w2_scales, shared_w13_scale,
-                   shared_w2_scale)
         # GEMM matrices use 64-byte-aligned block-2D loads. The shared gate
         # dot-product loads alignas(32) vectors of 16 FP16/BF16 elements.
         if any(t.data_ptr() % 64 for t in (w13, w2)
