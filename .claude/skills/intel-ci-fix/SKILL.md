@@ -11,10 +11,11 @@ When the user provides a Buildkite build link (e.g. `https://buildkite.com/vllm/
 
 Do not read full raw logs into context; only look at the scanner summaries below, and run bounded `grep`s on the saved logs when you need details.
 
-1. **Generate the scanner** (once per session). It has three modes:
-   - Scan mode: for each build, fetch build metadata and the job list, filter jobs by a name regex, download and clean the logs (strip ANSI, `\r`, and `\x1b_bk;t=...\x07` timestamps), and print one JSON line per job (including every retry within the same build).
-   - `table`: print the JSON lines from stdin as a compact table. By default it keeps only jobs that have a non-PASS attempt; `table all` keeps everything.
-   - `local <LOG>`: summarize a local log (e.g. a repro log) with the same rules.
+**Generate the scanner** (once per session). It has three modes:
+
+- Scan mode: for each build, fetch build metadata and the job list, filter jobs by a name regex, download and clean the logs (strip ANSI, `\r`, and `\x1b_bk;t=...\x07` timestamps), and print one JSON line per job (including every retry within the same build).
+- `table`: print the JSON lines from stdin as a compact table. By default it keeps only jobs that have a non-PASS attempt; `table all` keeps everything.
+- `local <LOG>`: summarize a local log (e.g. a repro log) with the same rules.
 
 ```bash
 mkdir -p /tmp/intel-ci-fix && cat > /tmp/intel-ci-fix/bk_scan.py <<'EOF'
@@ -154,7 +155,7 @@ with ThreadPoolExecutor(8) as ex:
 EOF
 ```
 
-2. **Fetch the failed jobs of the target build** (parse `<ORG>/<PIPELINE>/<BUILD>` from the URL, e.g. `vllm intel-ci 17266`):
+1. **Fetch the failed jobs of the target build** (parse `<ORG>/<PIPELINE>/<BUILD>` from the URL, e.g. `vllm intel-ci 17266`):
 
    ```bash
    mkdir -p /tmp/ci-<BUILD>
@@ -170,7 +171,7 @@ EOF
    - `bk_error` (the Buildkite `🚨 Error:` line), `infra` (environment errors such as DNS, docker daemon, device lost, insufficient memory at startup, HF gated repo), `last_log_line` (the last timestamped log line, used to locate where a run hung), `tail` (the last 12 lines of the log).
    - `mask` (`ZE_AFFINITY_MASK`; number of commas + 1 is the card count), `gpu_gib` (total memory per card: 15.13 GiB ≈ B50 16 GB card, 22.71 GiB ≈ B60 24 GB card), `agent` (e.g. `B50-cicd01-6_7` encodes card type, machine, and card IDs), `shard_items` (number of test items in a parallel shard; the full list is in the log line `Running N items in this shard:`).
 
-3. **Pull the image in the background right away**: as soon as you have `image`, start the pull in the background and do not wait for it (a pull usually takes several minutes). If the job is clearly an Infra failure where tests never started (see step 5), you can skip the pull for now. Only newly pulled images are recorded in `pulled_images.txt`; Phase 5 deletes only those images, so images that already existed locally are kept.
+2. **Pull the image in the background right away**: as soon as you have `image`, start the pull in the background and do not wait for it (a pull usually takes several minutes). If the job is clearly an Infra failure where tests never started (see step 4), you can skip the pull for now. Only newly pulled images are recorded in `pulled_images.txt`; Phase 5 deletes only those images, so images that already existed locally are kept.
 
    ```bash
    if ! docker image inspect <IMAGE> >/dev/null 2>&1; then
@@ -179,7 +180,7 @@ EOF
    fi
    ```
 
-4. **Scan the job history**: for each failed job, use the stable part of its name as the regex (escape `+ ( )`), and scan about 30 builds back and 10 builds forward. `FAIL` downloads only non-passing logs; use `ALL` when you need passing logs for comparison.
+3. **Scan the job history**: for each failed job, use the stable part of its name as the regex (escape `+ ( )`), and scan about 30 builds back and 10 builds forward. `FAIL` downloads only non-passing logs; use `ALL` when you need passing logs for comparison.
 
    ```bash
    python3 /tmp/intel-ci-fix/bk_scan.py <ORG> <PIPELINE> <BUILD> 'Sample \+ Logits' 30 10 FAIL /tmp/ci-<BUILD>/history \
@@ -190,7 +191,7 @@ EOF
    - Explain **every other** non-PASS record in the history too (including `TIMEOUT`s hidden by automatic retries), not just the target build.
    - For the target failing tests, download passing logs with `ALL` and `grep` whether each test was `PASSED` or `SKIPPED` (a skipped "pass" is not evidence that the test passes).
 
-5. **Classify** (give one conclusion with evidence for each failing test or failing job):
+4. **Classify** (give one conclusion with evidence for each failing test or failing job):
    - **Deterministic (regression)**: on `main`, fails consistently from some build onward across different agents and card types, and passed consistently before. Record the commits of the last passing and first failing builds, and run `git log --oneline <PASS_COMMIT>..<FAIL_COMMIT> -- <relevant paths>` to list suspect PRs.
    - **Flaky**: passes and fails on the same commit or adjacent builds; or the same test fails sporadically on different cards with different values or line numbers each time; or it passes on retry.
    - **Hang / Timeout**: `status=TIMEOUT`, or `minutes` far above the normal duration. Compare `last_log_line` across runs: if several runs (especially across card types) hang at the same point, it is a real hang. Treat it as Flaky, require a stress repro, and report it even if the automatic retry passed.
@@ -199,7 +200,7 @@ EOF
    - Builds on PR branches (`branch != main`) are for reference only; decide based on `main`. A failure that appears only on a single PR branch was usually introduced by that PR.
    - **Early exit**: if a failed job is Infra, and the same job later passed on `main` (ideally on the same agent), **skip Phase 2/3** for that job and go straight to the Phase 4 Infra template. All other categories still need to be reproduced.
 
-6. **Summary table** (output to the user):
+5. **Summary table** (output to the user):
 
    | Failed Job | Image | Failed Test / Pytest Command | Status (try/duration) | Error Type | History (fails/total on main) | Category | Key Evidence (card type/count/agent/hang point) |
    |---|---|---|---|---|---|---|---|
@@ -208,7 +209,7 @@ EOF
    - Deterministic: reproduce directly;
    - Flaky / Hang: stress-test to reproduce;
    - Hardware related: match card type and count, or simulate CI's memory headroom;
-   - Infra: early exit as described in step 5.
+   - Infra: early exit as described in step 4.
 
 ## Phase 2: Preflight & Reproduce
 
@@ -217,19 +218,24 @@ EOF
    - **Card type**: match the local card type (Device Name in `xpu-smi discovery`) to the CI `agent` prefix (B50/B60) and `gpu_gib`. If they differ, treat memory-related conclusions as reference only.
    - **Credentials and network**: `[ -n "$HF_TOKEN" ] || echo "HF_TOKEN missing"`. Without `HF_TOKEN`, gated models (e.g. `meta-llama/*`) fail with `Cannot access gated repo`; such failures do not count as a repro or a regression. If gated models are needed, ask the user for a token first; otherwise list those tests separately in the results and exclude them. Also confirm `http_proxy`/`https_proxy`/`no_proxy` are set.
    - **Image**: wait for the background pull from Phase 1 to finish:
+
      ```bash
      until docker image inspect <IMAGE> >/dev/null 2>&1; do
        pgrep -f "docker pull <IMAGE>" >/dev/null || { echo PULL_EXITED; tail -3 /tmp/ci-<BUILD>/pull.log; break; }
        sleep 15
      done
      ```
+
 2. **Code version**: the image is built from the failing CI commit, so **reproduce in a separate worktree at the failing commit** (do not touch the current workspace). This keeps the code consistent with the dependencies and build artifacts in the image:
+
    ```bash
    git fetch origin <COMMIT> && git worktree add --detach /tmp/ci-<BUILD>/wt <COMMIT>
    ```
+
    Then use `git log --oneline <COMMIT>..origin/main -- <relevant paths>` to check whether `main` already has a related fix.
 3. Narrow the failure down to a **single minimal failing op or test function** (e.g. narrow `pytest tests/kernels/` to `pytest tests/kernels/test_attention.py -k "test_xxx"`).
 4. Run that minimal test on XPU (referred to below as the "repro command"). Do not add `-t`; otherwise the log contains `\r` and color codes that break `grep`:
+
    ```bash
    TEST_CMD='cd tests && pytest -v -s <MINIMAL_TEST>'
    docker run --rm --label intel-ci-fix=<BUILD> --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host \
@@ -241,6 +247,7 @@ EOF
      > /tmp/ci-<BUILD>/repro.log 2>&1; echo EXIT=$?
    python3 /tmp/intel-ci-fix/bk_scan.py local /tmp/ci-<BUILD>/repro.log
    ```
+
    - Copy environment variables from the CI command (e.g. `VLLM_WORKER_MULTIPROC_METHOD=spawn`) into `TEST_CMD` verbatim.
    - `<TIMEOUT>`: use `30m` for a minimal test; for a full suite use 1.5× the `minutes` of passing runs in the history (at least `30m`).
    - **Flaky**: run in a loop (e.g. 10 times) and count the failures.
@@ -254,12 +261,15 @@ EOF
    - Every container created in this phase must carry `--label intel-ci-fix=<BUILD>` (including stress loops and ad-hoc debug containers), so Phase 5 can find and remove containers left behind by timeouts or interruptions. The repro worktree is cleaned up in Phase 5.
 
 ## Phase 3: Diagnose & Fix
+
 1. Locate the relevant source code in the host repository.
 2. Before writing a fix, check for existing work to avoid duplicates:
+
    ```bash
    gh pr list --repo vllm-project/vllm --state open --search "<failing test name or keywords>"
    gh issue list --repo vllm-project/vllm --state open --search "<failing test name or keywords>"
    ```
+
    If an existing PR or issue already covers it, cite it in the report instead of writing another fix.
 3. If the problem likely comes from PyTorch, the underlying driver, or oneCCL, try to provide a minimal PyTorch repro script that does not depend on vLLM, keeping only the ops or distributed communication needed to trigger the problem. Run it with the same image and XPU environment, and attach the script, the run command, relevant component versions, and actual results to the report. If it cannot be reproduced independently, state the limitation and do not attribute the problem to the lower layer directly.
 4. If it is confirmed to be a vLLM problem, write a minimal fix patch, **within these safety boundaries**:
@@ -268,6 +278,7 @@ EOF
    - Make at most **3** fix iterations; if the problem is still unsolved after 3, keep detailed diagnostic logs and roll back changes that did not work.
 
 ## Phase 4: Report
+
 Every report includes the **build overview and Failed Jobs summary table** (including anomalies such as TIMEOUTs hidden by retries in the history) and **environment information** (image tag, local card type and cards used, and preflight differences from CI such as `HF_TOKEN`). Choose the rest of the content by category:
 
 - **Infra (early exit)**: root-cause evidence (verbatim `bk_error`/`infra`), the later passing build and agent, and the recommended action (retry the job, or forward the agent's DNS/network/disk problem to the infra team). No repro or patch needed.
@@ -276,4 +287,5 @@ Every report includes the **build overview and Failed Jobs summary table** (incl
 - **Cannot Reproduce**: commands and results of the minimal test and the full suite, differences from the CI environment, and suggested next steps.
 
 ## Phase 5: Cleanup
+
 After the report is produced, remove the images pulled, containers created, and worktree used in this session. Keep the log directory `/tmp/ci-<BUILD>` for the report to reference. If the user asks to keep the image or environment for further debugging, skip the corresponding steps.
