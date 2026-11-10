@@ -159,6 +159,9 @@ class XeFMHAFwdKernel {
 
     // per-batch mask: true = prefill, false = decode; nullptr = process all
     const bool* is_prefill;
+    // Per-sequence mask: nonzero = causal, zero = bidirectional. When absent,
+    // all sequences follow the compile-time CausalMask setting.
+    const int* dynamic_causal;
   };
   using KernelParams = KernelArguments;
 
@@ -277,15 +280,22 @@ class XeFMHAFwdKernel {
       int seq_coord =
           cute::min(seq_len_qo, (blk_q * get<0>(TileShapeQK{}) + q_offset_sg));
 
+      const bool seq_is_causal = CausalMask && (p.dynamic_causal == nullptr ||
+                                                p.dynamic_causal[idx_b] != 0);
+
       // calc sg level seq_len_kv
+      const int sg_causal_seq_len =
+          cute::min(seq_len_kv, full_tile_offset + seq_coord + q_sg_tile);
+      // Dynamic causal batches pass a symmetric local window, so a causal
+      // sequence must also stop at the causal bound to skip fully masked
+      // KV blocks to the right of the diagonal.
       const int sg_seq_len =
           LocalMask ? cute::min(
-                          seq_len_kv,
+                          seq_is_causal ? sg_causal_seq_len : seq_len_kv,
                           full_tile_offset + seq_coord + q_sg_tile +
                               params.mainloop.local_right)
-          : CausalMask
-              ? cute::min(seq_len_kv, full_tile_offset + seq_coord + q_sg_tile)
-              : seq_len_kv;
+          : seq_is_causal ? sg_causal_seq_len
+                          : seq_len_kv;
       const int sg_k_block0 =
           LocalMask
               ? cute::max(
@@ -295,8 +305,8 @@ class XeFMHAFwdKernel {
               : 0;
       const int sg_k_blocks = cute::ceil_div(sg_seq_len, get<1>(TileShapeQK{}));
       const int sg_k_blocks_causal =
-          CausalMask ? (seq_coord + full_tile_offset) / get<1>(TileShapeQK{})
-                     : 0;
+          seq_is_causal ? (seq_coord + full_tile_offset) / get<1>(TileShapeQK{})
+                        : sg_k_blocks;
       const int sg_k_block_local_l_safe =
           LocalMask ? cute::ceil_div(
                           cute::max(
@@ -339,9 +349,9 @@ class XeFMHAFwdKernel {
                                           wg, sg_seq_len, sycl::maximum<int>{})
                                     : sg_seq_len;
       const int k_blocks_causal =
-          CausalMask ? sycl::reduce_over_group(
-                           wg, sg_k_blocks_causal, sycl::minimum<int>{})
-                     : 0;
+          seq_is_causal ? sycl::reduce_over_group(
+                              wg, sg_k_blocks_causal, sycl::minimum<int>{})
+                        : k_blocks;
       const int k_block_local_l_safe =
           LocalMask ? sycl::reduce_over_group(
                           wg, sg_k_block_local_l_safe, sycl::maximum<int>{})
