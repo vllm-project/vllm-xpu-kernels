@@ -213,7 +213,7 @@ EOF
 ## Phase 2: Preflight & Reproduce
 
 1. **Preflight**. Note any unmet item in the report; for items that affect the conclusion, confirm with the user via `ask_user` first:
-   - **Available cards**: if the user specified available cards (e.g. "the first four cards"), choose only from those; otherwise list devices with `xpu-smi discovery` and confirm the target cards are idle with `xpu-smi stats -d <ID>`. Match the card count to CI's `mask`.
+   - **Available cards and HF cache (read from host environment variables)**: the host's `ZE_AFFINITY_MASK` (e.g. `0,1,2,3`) is the list of available cards; `HF_HOME` is the HF cache directory, defaulting to `~/.cache/huggingface` when unset. From the available cards, pick as many as CI's `mask` uses as `<MASK>` (e.g. `0` for a single-card CI job, `0,1` for two cards).
    - **Card type**: match the local card type (Device Name in `xpu-smi discovery`) to the CI `agent` prefix (B50/B60) and `gpu_gib`. If they differ, treat memory-related conclusions as reference only.
    - **Credentials and network**: `[ -n "$HF_TOKEN" ] || echo "HF_TOKEN missing"`. Without `HF_TOKEN`, gated models (e.g. `meta-llama/*`) fail with `Cannot access gated repo`; such failures do not count as a repro or a regression. If gated models are needed, ask the user for a token first; otherwise list those tests separately in the results and exclude them. Also confirm `http_proxy`/`https_proxy`/`no_proxy` are set.
    - **Image**: wait for the background pull from Phase 1 to finish:
@@ -234,8 +234,9 @@ EOF
    TEST_CMD='cd tests && pytest -v -s <MINIMAL_TEST>'
    docker run --rm --label intel-ci-fix=<BUILD> --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host \
      -e http_proxy -e https_proxy -e no_proxy -e HF_TOKEN -e PY_COLORS=0 \
-     -e ZE_AFFINITY_MASK=<ZE_AFFINITY_MASK> \
-     -v <HF_HOME>:/root/.cache/huggingface -v /tmp/ci-<BUILD>/wt:/workspace/vllm -w /workspace/vllm \
+     -e ZE_AFFINITY_MASK=<MASK> \
+     -v <HF_HOME>:/root/.cache/huggingface \
+     -v /tmp/ci-<BUILD>/wt:/workspace/vllm -w /workspace/vllm \
      --entrypoint timeout <IMAGE> --kill-after=30s <TIMEOUT> bash -c "$TEST_CMD" \
      > /tmp/ci-<BUILD>/repro.log 2>&1; echo EXIT=$?
    python3 /tmp/intel-ci-fix/bk_scan.py local /tmp/ci-<BUILD>/repro.log
