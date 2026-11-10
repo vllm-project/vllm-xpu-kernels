@@ -465,8 +465,8 @@ class XeFMHAFwdSplitKVKernel {
       CollectiveMainloop mainloop(params.mainloop, shared_storage.mainloop);
       // INT8 KV builds one 2D surface per KV block (page_size rows), so the
       // 2^24-row surface split never applies to it.
-      bool has_large_surface = !CollectiveMainloop::Int8KV &&
-                               kXeMaxSurfaceRows < total_seqlen_kv;
+      bool has_large_surface =
+          !CollectiveMainloop::Int8KV && kXeMaxSurfaceRows < total_seqlen_kv;
       if (has_large_surface) {
         mainloop.template operator()<true>(
             Q(_, _, head, l_coord),

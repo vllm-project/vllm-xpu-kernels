@@ -4,18 +4,21 @@
 
 The cache uses the block-local split layout: per block
 [int8 K|V data for all (slot, head) | K scales fp32 | V scales fp32], i.e. the
-same bytes per block as vLLM's inline per-token-head layout. INT8 KV is
-supported by the paged decode kernel, including uniform speculative-decode
-batches (which the interface runs through the decode kernel); prefill / mixed
-batches are rejected (callers dequantize the referenced blocks and use the
-fp16/bf16 path). The kernel output is compared with an fp32 reference
-computed on the same quantized cache.
+same bytes per block as vLLM's inline per-token-head layout (a block may be
+padded at its tail, as hybrid models' unified pages are). INT8 KV is
+supported by the paged decode kernel, including small causal multi-query
+batches (speculative-decode verification, uniform or ragged), which the
+interface runs through the decode kernel; batches routed to chunk prefill are
+rejected (callers dequantize the referenced blocks and use the fp16/bf16
+path). The kernel output is compared with an fp32 reference computed on the
+same quantized cache.
 """
 import pytest
 import torch
 
 from tests.utils import format_tc
-from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
+from vllm_xpu_kernels.flash_attn_interface import (_SPEC_DECODE_MAX_QLEN,
+                                                   flash_attn_varlen_func)
 
 NUM_HEADS = [(8, 8), (16, 4), (32, 4), (24, 2)]
 HEAD_SIZES = [64, 128, 192, 256, 512]
@@ -23,7 +26,7 @@ BLOCK_SIZES = [16, 32, 64, 128]
 DTYPES = [torch.half, torch.bfloat16]
 SLIDING_WINDOWS = [None, 128]
 SINK = [False, True]
-MODES = ["decode", "spec_decode"]
+MODES = ["decode", "spec_decode", "spec_decode_ragged"]
 
 MINI_PYTEST_PARAMS = {
     "default": {
@@ -31,6 +34,10 @@ MINI_PYTEST_PARAMS = {
         "head_size": [128, 256],
         "block_size": [64],
         "window": [None],
+    },
+    "test_varlen_int8_kv_padded_page": {
+        "num_heads": [(16, 2)],
+        "block_size": [64],
     },
 }
 
@@ -47,17 +54,16 @@ def quantize_per_token_head(x: torch.Tensor):
 
 def split_layout_views(raw, block_size, num_kv_heads, head_size):
     """K/V int8 views [nb, B, H, D] and scale views [nb, B, H] over raw
-    [num_blocks, page_bytes] uint8."""
-    nb = raw.shape[0]
+    [num_blocks, page_bytes] uint8 (the page may be padded at its tail)."""
+    nb, page = raw.shape
     data = block_size * num_kv_heads * 2 * head_size
-    page = raw.shape[1]
-    assert page == 2 * (head_size + 4) * num_kv_heads * block_size
+    sb = block_size * num_kv_heads * 4
+    assert page >= data + 2 * sb and page % 64 == 0
     d = torch.as_strided(raw.view(torch.int8),
                          (nb, block_size, num_kv_heads, 2 * head_size),
                          (page, num_kv_heads * 2 * head_size, 2 * head_size,
                           1))
     f = raw.view(torch.float32)
-    sb = block_size * num_kv_heads * 4
 
     def scales(off):
         return torch.as_strided(f, (nb, block_size, num_kv_heads),
@@ -86,29 +92,21 @@ def ref_attn(q, k, v, scale, q_pos, window, sinks):
     return torch.einsum("hqk,khd->qhd", p, v)
 
 
-@pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("window", SLIDING_WINDOWS)
-@pytest.mark.parametrize("is_sink", SINK)
-@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
-@torch.inference_mode()
-def test_varlen_int8_kv(mode, num_heads, head_size, block_size, window,
-                        is_sink, dtype):
-    torch.manual_seed(0)
-    dev = "xpu"
-    hq, hkv = num_heads
-    # spec_decode: every sequence has the same q_len (<= seq_len).
-    seq_lens = [17, 64, 200, 1 if mode == "decode" else 3, 129]
-    q_lens = {
-        "decode": [1] * 5,
-        "spec_decode": [3] * 5,
-    }[mode]
+def build_int8_cache(seq_lens, block_size, hkv, head_size, dtype, dev,
+                     pad_bytes=0, fill=None):
+    """Quantize random K/V into a split-layout cache with random block
+    placement. Returns the views, the block table and the dequantized
+    per-sequence K/V for the reference."""
     nblk = [(L + block_size - 1) // block_size for L in seq_lens]
     num_blocks = sum(nblk) + 3
-    page = 2 * (head_size + 4) * hkv * block_size
-    raw = torch.full((num_blocks, page), 0x7F, dtype=torch.uint8, device=dev)
+    page = 2 * (head_size + 4) * hkv * block_size + pad_bytes
+    if fill is None:
+        # Garbage in unused slots, scales and page padding.
+        raw = torch.randint(0, 256, (num_blocks, page),
+                            dtype=torch.uint8).to(dev)
+    else:
+        raw = torch.full((num_blocks, page), fill, dtype=torch.uint8,
+                         device=dev)
     kc, vc, ks, vs = split_layout_views(raw, block_size, hkv, head_size)
     perm = (torch.randperm(num_blocks - 1, device=dev) + 1).to(torch.int32)
     block_table = torch.zeros(len(seq_lens), max(nblk), dtype=torch.int32,
@@ -128,12 +126,17 @@ def test_varlen_int8_kv(mode, num_heads, head_size, block_size, window,
         kc[b, o], vc[b, o], ks[b, o], vs[b, o] = kq, vq, kscale, vscale
         keys.append(kq.float() * kscale[..., None])
         values.append(vq.float() * vscale[..., None])
+    return kc, vc, ks, vs, block_table, keys, values
 
+
+def run_and_check(q_lens, seq_lens, hq, hkv, head_size, block_size, window,
+                  sinks, dtype, dev, pad_bytes=0, fill=None):
+    kc, vc, ks, vs, block_table, keys, values = build_int8_cache(
+        seq_lens, block_size, hkv, head_size, dtype, dev, pad_bytes, fill)
     q = torch.randn(sum(q_lens), hq, head_size, device=dev).to(dtype)
     cu_q = torch.tensor([0] + torch.tensor(q_lens).cumsum(0).tolist(),
                         dtype=torch.int32, device=dev)
     seqused_k = torch.tensor(seq_lens, dtype=torch.int32, device=dev)
-    sinks = (torch.randn(hq, device=dev) * 2).to(dtype) if is_sink else None
     scale = head_size**-0.5
     out = torch.empty_like(q)
     flash_attn_varlen_func(q,
@@ -163,9 +166,54 @@ def test_varlen_int8_kv(mode, num_heads, head_size, block_size, window,
                                rtol=1.5e-2)
 
 
-@pytest.mark.parametrize("q_lens", [[33], [1, 4]])
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("is_sink", SINK)
+@pytest.mark.parametrize("dtype", DTYPES, ids=format_tc)
+@torch.inference_mode()
+def test_varlen_int8_kv(mode, num_heads, head_size, block_size, window,
+                        is_sink, dtype):
+    if mode != "decode" and _SPEC_DECODE_MAX_QLEN < 5:
+        pytest.skip("speculative-decode route disabled "
+                    "(VLLM_XPU_SPEC_DECODE_MAX_QLEN)")
+    torch.manual_seed(0)
+    dev = "xpu"
+    hq, hkv = num_heads
+    seq_lens = [17, 64, 200, 1 if mode == "decode" else 3, 129]
+    q_lens = {
+        "decode": [1] * 5,
+        # Every sequence has the same q_len (<= seq_len).
+        "spec_decode": [3] * 5,
+        # Adaptive verification: per-sequence q_len.
+        "spec_decode_ragged": [3, 1, 5, 2, 4],
+    }[mode]
+    sinks = (torch.randn(hq, device=dev) * 2).to(dtype) if is_sink else None
+    run_and_check(q_lens, seq_lens, hq, hkv, head_size, block_size, window,
+                  sinks, dtype, dev, fill=0x7F)
+
+
+@pytest.mark.parametrize("num_heads", [(16, 2), (24, 4)])
+@pytest.mark.parametrize("block_size", [64, 832])
+@pytest.mark.parametrize("pad_bytes", [0, 1024])
+@torch.inference_mode()
+def test_varlen_int8_kv_padded_page(num_heads, block_size, pad_bytes):
+    """Large and padded pages (hybrid models unify the page size across
+    attention and state layers), garbage in every unused byte."""
+    torch.manual_seed(0)
+    hq, hkv = num_heads
+    run_and_check([1] * 4, [1, 700, 1500, 3000], hq, hkv, 256, block_size,
+                  None, None, torch.bfloat16, "xpu", pad_bytes)
+
+
+@pytest.mark.parametrize("q_lens", [[33], [1, 33]])
 def test_varlen_int8_kv_rejects_prefill(q_lens):
-    """Batches routed to chunk prefill (non-uniform or long q) are rejected."""
+    """Batches routed to chunk prefill (q_len above the speculative-decode
+    route) are rejected."""
+    if max(q_lens) <= _SPEC_DECODE_MAX_QLEN:
+        pytest.skip("q_len within the speculative-decode route")
     dev = "xpu"
     hq, hkv, head_size, block_size = 16, 4, 128, 64
     page = 2 * (head_size + 4) * hkv * block_size
@@ -193,3 +241,29 @@ def test_varlen_int8_kv_rejects_prefill(q_lens):
                                                       device=dev),
                                k_descale=ks,
                                v_descale=vs)
+
+
+def test_varlen_int8_kv_requires_scales():
+    dev = "xpu"
+    raw = torch.zeros((4, 2 * (128 + 4) * 4 * 64),
+                      dtype=torch.uint8,
+                      device=dev)
+    kc, vc, _, _ = split_layout_views(raw, 64, 4, 128)
+    q = torch.randn(2, 16, 128, device=dev, dtype=torch.half)
+    with pytest.raises(ValueError, match="scale"):
+        flash_attn_varlen_func(q,
+                               kc,
+                               vc,
+                               1,
+                               torch.tensor([0, 1, 2],
+                                            dtype=torch.int32,
+                                            device=dev),
+                               64,
+                               seqused_k=torch.full((2, ),
+                                                    64,
+                                                    dtype=torch.int32,
+                                                    device=dev),
+                               causal=True,
+                               block_table=torch.ones((2, 1),
+                                                      dtype=torch.int32,
+                                                      device=dev))

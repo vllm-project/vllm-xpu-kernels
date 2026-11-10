@@ -663,20 +663,24 @@ void decode_policy_dispatch_impl(
           float_e5m2_t,
           half_t>::kernel_dispatch(queue, args);
     } else if (cuQKType.k_type == CutlassDType::int8) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          half_t,
-          int8_t,
-          int8_t,
-          half_t>::kernel_dispatch(queue, args);
+      // INT8 per-token-head KV: only head sizes whose K/V surfaces stay
+      // 64-byte aligned in the block-local split layout (head_size % 64 == 0).
+      if constexpr (decode_policy::HeadDim::value % 64 == 0) {
+        return PagedDecodeConfig<
+            typename decode_policy::ShapeQK,
+            typename decode_policy::ShapePV,
+            typename decode_policy::ShapeOut,
+            typename decode_policy::SubgroupLayoutQK,
+            void,
+            PipelineStages,
+            Causal,
+            Local,
+            Sink,
+            half_t,
+            int8_t,
+            int8_t,
+            half_t>::kernel_dispatch(queue, args);
+      }
     }
   } else if (cuQKType.q_type == CutlassDType::bfloat16) {
     if (cuQKType.k_type == CutlassDType::bfloat16) {
@@ -725,20 +729,24 @@ void decode_policy_dispatch_impl(
           float_e5m2_t,
           bfloat16_t>::kernel_dispatch(queue, args);
     } else if (cuQKType.k_type == CutlassDType::int8) {
-      return PagedDecodeConfig<
-          typename decode_policy::ShapeQK,
-          typename decode_policy::ShapePV,
-          typename decode_policy::ShapeOut,
-          typename decode_policy::SubgroupLayoutQK,
-          void,
-          PipelineStages,
-          Causal,
-          Local,
-          Sink,
-          bfloat16_t,
-          int8_t,
-          int8_t,
-          bfloat16_t>::kernel_dispatch(queue, args);
+      // INT8 per-token-head KV: only head sizes whose K/V surfaces stay
+      // 64-byte aligned in the block-local split layout (head_size % 64 == 0).
+      if constexpr (decode_policy::HeadDim::value % 64 == 0) {
+        return PagedDecodeConfig<
+            typename decode_policy::ShapeQK,
+            typename decode_policy::ShapePV,
+            typename decode_policy::ShapeOut,
+            typename decode_policy::SubgroupLayoutQK,
+            void,
+            PipelineStages,
+            Causal,
+            Local,
+            Sink,
+            bfloat16_t,
+            int8_t,
+            int8_t,
+            bfloat16_t>::kernel_dispatch(queue, args);
+      }
     }
   }
   TORCH_CHECK(
