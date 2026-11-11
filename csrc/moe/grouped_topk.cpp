@@ -709,13 +709,25 @@ class grouped_topk_fused_kernel_impl {
     expert_sel.done(sg, local_id);
 
     // Compute unbiased routing weights + optional renorm.
+    // A selected candidate is "finite" only if its selection score is not
+    // -inf (i.e. it was a real, non-masked expert). This mirrors Path 1's
+    // write_outputs: when every selected candidate is invalid and renormalize
+    // is set, emit uniform 1/topk weights instead of all-zero, so masked /
+    // empty-selection tokens are handled identically across all paths.
     float lane_unbiased = 0.0f;
     IdxT lane_idx = 0;
+    bool finite_selection = false;
     if (lane_id < topk_i32) {
       lane_idx = static_cast<IdxT>(expert_sel.get_idx(0));
-      T in = scores_token[static_cast<int32_t>(lane_idx)];
-      lane_unbiased = apply_scoring_f32<SF, T>(in);
+      finite_selection = (expert_sel.get_val(0) != -INFINITY);
+      if (finite_selection) {
+        T in = scores_token[static_cast<int32_t>(lane_idx)];
+        lane_unbiased = apply_scoring_f32<SF, T>(in);
+      }
     }
+
+    int const finite_count = sycl::reduce_over_group(
+        sg, finite_selection ? 1 : 0, sycl::plus<int>());
 
     float topk_sum = 1e-20f;
     if (renormalize) {
@@ -729,8 +741,14 @@ class grouped_topk_fused_kernel_impl {
     }
 
     if (lane_id < topk_i32) {
+      float output;
+      if (finite_count == 0) {
+        output = renormalize ? 1.0f / static_cast<float>(topk_i32) : 0.0f;
+      } else {
+        output = finite_selection ? lane_unbiased * scale : 0.0f;
+      }
       topk_indices_token[lane_id] = lane_idx;
-      topk_values_token[lane_id] = lane_unbiased * scale;
+      topk_values_token[lane_id] = output;
     }
   }
 
@@ -1957,10 +1975,16 @@ void invokeNoAuxTcFused(
   }
 
   // Path 2: register-resident small-expert-count kernel.
+  // topk == MaxSupportedTopExperts (22) is only valid for the 512-expert
+  // Nemotron specialization, whose register arrays are sized for 22. Any
+  // smaller expert count with topk > DefaultMaxNumTopExperts must fall through
+  // to WarpSelect (path 3); otherwise it would reach a path-2 tier whose
+  // capacity is only 8 and overrun topScores/topExperts.
   bool const is_single_group =
       (n_group == 1) && (topk_group == 1) &&
       (num_experts <= MaxSupportedExpertCount) &&
-      (topk <= DefaultMaxNumTopExperts || topk == MaxSupportedTopExperts);
+      (topk <= DefaultMaxNumTopExperts ||
+       (topk == MaxSupportedTopExperts && num_experts == NumNemotronExperts));
 
   int64_t const experts_per_group = num_experts / n_group;
   bool const is_multi_group =

@@ -222,3 +222,85 @@ def test_grouped_topk_warpselect_fallback(n_token: int, n_expert: int,
                    scoring_func=scoring_func,
                    routed_scaling_factor=1.0,
                    dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# Regression: masked / empty-selection handling must match across dispatch
+# paths. With all-(-inf) logits and sigmoid scoring every candidate scores 0
+# and no finite expert can be selected. Path 1 emits uniform 1/topk weights
+# when renormalize is set; the WarpSelect fallback (reached when the matching
+# Path 1 tier is compiled out, e.g. 512 experts / topk 8) must do the same
+# instead of returning all-zero weights.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("n_token", [1, 8])
+@pytest.mark.parametrize("n_expert", [128, 256, 512])
+@pytest.mark.parametrize("topk", [8])
+@pytest.mark.parametrize("renormalize", [True, False])
+@pytest.mark.parametrize("dtype",
+                         [torch.float16, torch.bfloat16, torch.float32])
+def test_grouped_topk_all_masked_uniform(n_token: int, n_expert: int,
+                                         topk: int, renormalize: bool,
+                                         dtype: torch.dtype):
+    seed_everything(0)
+    neg_inf = float("-inf")
+    gating_output = torch.full((n_token, n_expert),
+                               neg_inf,
+                               dtype=dtype,
+                               device=DEVICE)
+    e_score_correction_bias = torch.zeros((n_expert, ),
+                                          dtype=torch.float32,
+                                          device=DEVICE)
+
+    test_topk_weights, test_topk_ids = fused_grouped_topk(
+        hidden_states=_to_kernel(gating_output),
+        gating_output=_to_kernel(gating_output),
+        topk=topk,
+        renormalize=renormalize,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="sigmoid",
+        routed_scaling_factor=1.0,
+        e_score_correction_bias=_to_kernel(e_score_correction_bias))
+    test_topk_weights = test_topk_weights.to(DEVICE)
+
+    assert not torch.isnan(test_topk_weights).any(), "weights must not be NaN"
+    if renormalize:
+        expected = torch.full_like(test_topk_weights, 1.0 / topk)
+        torch.testing.assert_close(test_topk_weights,
+                                   expected,
+                                   atol=2e-2,
+                                   rtol=0)
+    else:
+        torch.testing.assert_close(test_topk_weights,
+                                   torch.zeros_like(test_topk_weights),
+                                   atol=0,
+                                   rtol=0)
+
+
+# ---------------------------------------------------------------------------
+# Regression: single-group topk == 22 with num_experts < 512 must not reach a
+# Path 2 tier whose register capacity is only 8 (which would overrun
+# topScores/topExperts). It must fall through to WarpSelect and produce correct
+# results. The topk == 22 fast path is reserved for the 512-expert Nemotron
+# specialization only.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("n_token", [1, 33])
+@pytest.mark.parametrize("n_expert", [256, 384])
+@pytest.mark.parametrize("topk", [22])
+@pytest.mark.parametrize("renormalize", [True, False])
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+@pytest.mark.parametrize("dtype",
+                         [torch.float16, torch.bfloat16, torch.float32])
+def test_grouped_topk_single_group_topk22(n_token: int, n_expert: int,
+                                          topk: int, renormalize: bool,
+                                          scoring_func: str,
+                                          dtype: torch.dtype):
+    _run_and_check(n_token=n_token,
+                   n_expert=n_expert,
+                   topk=topk,
+                   renormalize=renormalize,
+                   num_expert_group=1,
+                   topk_group=1,
+                   scoring_func=scoring_func,
+                   routed_scaling_factor=1.0,
+                   dtype=dtype)
