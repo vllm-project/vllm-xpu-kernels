@@ -26,6 +26,22 @@ static constexpr int DefaultMaxNumTopExperts = 8;
 static constexpr int MaxSupportedTopExperts = 22;
 static constexpr int MaxNumTopGroups = 4;
 
+// Path 2 (grouped_topk_fused_small_expert_count) tier enable switches.
+// Each switch gates one expert-count specialization; every specialization
+// instantiates a heavy, fully unrolled SYCL kernel per (scoring_func x dtype),
+// each AOT-compiled for every target device, so disabled tiers directly shrink
+// the wheel. A disabled tier is NOT instantiated: a matching request logs a
+// one-time hint and falls back to the (correct but slower) path 3 WarpSelect
+// kernel. Flip a switch to 1 and rebuild to re-enable a tier.
+// Shipped models: DeepSeek-V3.2 (multi-group 256/topk8) -> MULTI_GROUP;
+// GLM-5-next (288/topk7), Hunyuan-V3 (192/topk8), Hunyuan-V4 (256/topk8)
+// single-group -> SINGLE_384; <=128 experts single-group -> SINGLE_128.
+#define SG_P2_ENABLE_MULTI_GROUP 1      // UseGroups=true, 256 experts
+#define SG_P2_ENABLE_SINGLE_128 1       // single-group, experts <= 128
+#define SG_P2_ENABLE_SINGLE_384 1       // single-group, 128 < experts <= 384
+#define SG_P2_ENABLE_SINGLE_512 0       // single-group, 384 < experts <= 512
+#define SG_P2_ENABLE_SINGLE_NEMOTRON 0  // single-group, 512 experts, topk 22
+
 // Scoring function enums (mirror CUDA version)
 enum ScoringFunc {
   SCORING_NONE = 0,    // no activation function
@@ -1120,7 +1136,7 @@ void submitSmallExpertCount(
 }
 
 template <typename T, typename BiasT, typename IdxT, ScoringFunc SF>
-void launchSmallExpertCount(
+bool launchSmallExpertCount(
     sycl::queue& queue,
     T* scores,
     float* topk_values,
@@ -1137,95 +1153,150 @@ void launchSmallExpertCount(
   int64_t const experts_per_group = num_experts / n_group;
   if (!is_single_group) {
     // Multi-group path: UseGroups=true, bounded by NumDeepseekExperts threads.
-    submitSmallExpertCount<T, BiasT, IdxT, SF, NumDeepseekExperts, true>(
-        queue,
-        scores,
-        topk_values,
-        topk_indices,
-        bias,
-        num_tokens,
-        n_group,
-        topk_group,
-        topk,
-        num_experts,
-        experts_per_group,
-        renormalize,
-        routed_scaling_factor);
-    return;
+    if constexpr (SG_P2_ENABLE_MULTI_GROUP) {
+      submitSmallExpertCount<T, BiasT, IdxT, SF, NumDeepseekExperts, true>(
+          queue,
+          scores,
+          topk_values,
+          topk_indices,
+          bias,
+          num_tokens,
+          n_group,
+          topk_group,
+          topk,
+          num_experts,
+          experts_per_group,
+          renormalize,
+          routed_scaling_factor);
+      return true;
+    } else {
+      TORCH_WARN_ONCE(
+          "grouped_topk: path-2 multi-group tier (256 experts) is not "
+          "compiled in this build; falling back to a slower path. To enable "
+          "it, set SG_P2_ENABLE_MULTI_GROUP to 1 in "
+          "csrc/moe/grouped_topk.cpp and rebuild.");
+      return false;
+    }
   }
 
   // Single-group path: UseGroups=false, tier by expert count.
   if (num_experts == NumNemotronExperts && n_group == 1 &&
       topk == MaxSupportedTopExperts) {
-    submitSmallExpertCount<
-        T,
-        BiasT,
-        IdxT,
-        SF,
-        NumNemotronExperts,
-        false,
-        MaxSupportedTopExperts>(
-        queue,
-        scores,
-        topk_values,
-        topk_indices,
-        bias,
-        num_tokens,
-        n_group,
-        topk_group,
-        topk,
-        num_experts,
-        experts_per_group,
-        renormalize,
-        routed_scaling_factor);
+    if constexpr (SG_P2_ENABLE_SINGLE_NEMOTRON) {
+      submitSmallExpertCount<
+          T,
+          BiasT,
+          IdxT,
+          SF,
+          NumNemotronExperts,
+          false,
+          MaxSupportedTopExperts>(
+          queue,
+          scores,
+          topk_values,
+          topk_indices,
+          bias,
+          num_tokens,
+          n_group,
+          topk_group,
+          topk,
+          num_experts,
+          experts_per_group,
+          renormalize,
+          routed_scaling_factor);
+      return true;
+    } else {
+      TORCH_WARN_ONCE(
+          "grouped_topk: path-2 single-group Nemotron tier (512 experts, "
+          "topk 22) is not compiled in this build; falling back to a slower "
+          "path. To enable it, set SG_P2_ENABLE_SINGLE_NEMOTRON to 1 in "
+          "csrc/moe/grouped_topk.cpp and rebuild.");
+      return false;
+    }
   } else if (
       num_experts > NumKimiK2Experts &&
       num_experts <= MaxSupportedExpertCount) {
-    submitSmallExpertCount<T, BiasT, IdxT, SF, MaxSupportedExpertCount, false>(
-        queue,
-        scores,
-        topk_values,
-        topk_indices,
-        bias,
-        num_tokens,
-        n_group,
-        topk_group,
-        topk,
-        num_experts,
-        experts_per_group,
-        renormalize,
-        routed_scaling_factor);
+    if constexpr (SG_P2_ENABLE_SINGLE_512) {
+      submitSmallExpertCount<
+          T,
+          BiasT,
+          IdxT,
+          SF,
+          MaxSupportedExpertCount,
+          false>(
+          queue,
+          scores,
+          topk_values,
+          topk_indices,
+          bias,
+          num_tokens,
+          n_group,
+          topk_group,
+          topk,
+          num_experts,
+          experts_per_group,
+          renormalize,
+          routed_scaling_factor);
+      return true;
+    } else {
+      TORCH_WARN_ONCE(
+          "grouped_topk: path-2 single-group tier (experts in (384, 512]) is "
+          "not compiled in this build; falling back to a slower path. To "
+          "enable it, set SG_P2_ENABLE_SINGLE_512 to 1 in "
+          "csrc/moe/grouped_topk.cpp and rebuild.");
+      return false;
+    }
   } else if (
       num_experts > MaxNumExpertsUnit && num_experts <= NumKimiK2Experts) {
-    submitSmallExpertCount<T, BiasT, IdxT, SF, NumKimiK2Experts, false>(
-        queue,
-        scores,
-        topk_values,
-        topk_indices,
-        bias,
-        num_tokens,
-        n_group,
-        topk_group,
-        topk,
-        num_experts,
-        experts_per_group,
-        renormalize,
-        routed_scaling_factor);
+    if constexpr (SG_P2_ENABLE_SINGLE_384) {
+      submitSmallExpertCount<T, BiasT, IdxT, SF, NumKimiK2Experts, false>(
+          queue,
+          scores,
+          topk_values,
+          topk_indices,
+          bias,
+          num_tokens,
+          n_group,
+          topk_group,
+          topk,
+          num_experts,
+          experts_per_group,
+          renormalize,
+          routed_scaling_factor);
+      return true;
+    } else {
+      TORCH_WARN_ONCE(
+          "grouped_topk: path-2 single-group tier (experts in (128, 384]) is "
+          "not compiled in this build; falling back to a slower path. To "
+          "enable it, set SG_P2_ENABLE_SINGLE_384 to 1 in "
+          "csrc/moe/grouped_topk.cpp and rebuild.");
+      return false;
+    }
   } else {
-    submitSmallExpertCount<T, BiasT, IdxT, SF, MaxNumExpertsUnit, false>(
-        queue,
-        scores,
-        topk_values,
-        topk_indices,
-        bias,
-        num_tokens,
-        n_group,
-        topk_group,
-        topk,
-        num_experts,
-        experts_per_group,
-        renormalize,
-        routed_scaling_factor);
+    if constexpr (SG_P2_ENABLE_SINGLE_128) {
+      submitSmallExpertCount<T, BiasT, IdxT, SF, MaxNumExpertsUnit, false>(
+          queue,
+          scores,
+          topk_values,
+          topk_indices,
+          bias,
+          num_tokens,
+          n_group,
+          topk_group,
+          topk,
+          num_experts,
+          experts_per_group,
+          renormalize,
+          routed_scaling_factor);
+      return true;
+    } else {
+      TORCH_WARN_ONCE(
+          "grouped_topk: path-2 single-group tier (experts <= 128) is not "
+          "compiled in this build; falling back to a slower path. To enable "
+          "it, set SG_P2_ENABLE_SINGLE_128 to 1 in "
+          "csrc/moe/grouped_topk.cpp and rebuild.");
+      return false;
+    }
   }
 }
 
@@ -1685,14 +1756,25 @@ void launch_tier(
     int64_t topk,
     bool renormalize,
     double routed_scaling_factor) {
+  // Only instantiate the kernel(s) a tier can actually reach. Some selection
+  // predicates are compile-time constant per tier, so we skip emitting (and AOT
+  // compiling) kernels that are provably never launched, with no behavior
+  // change:
+  //   * block-only when use_tuned_block_path() or MaxNumExperts > 1024.
+  //   * warp-only  when MaxNumExperts < 256 (the runtime predicates
+  //     num_experts >= 1024 / >= 256 can never hold since num_experts <=
+  //     MaxNumExperts for this tier).
+  constexpr bool kBlockOnly =
+      use_tuned_block_path<MaxNumExperts, MaxNumTopExperts>() ||
+      MaxNumExperts > 1024;
+  constexpr bool kWarpOnly = !kBlockOnly && MaxNumExperts < 256;
+  float const scale = static_cast<float>(routed_scaling_factor);
   // One work-group per token only pays off for small batches: on both BMG
   // and CRI the warp kernel is faster from ~128 tokens on.
-  bool const use_block_kernel =
-      use_tuned_block_path<MaxNumExperts, MaxNumTopExperts>() ||
-      MaxNumExperts > 1024 || num_experts >= 1024 ||
-      (num_experts >= 256 && num_tokens <= 64);
-  float const scale = static_cast<float>(routed_scaling_factor);
-  if (use_block_kernel) {
+  bool const use_block_kernel = kBlockOnly || num_experts >= 1024 ||
+                                (num_experts >= 256 && num_tokens <= 64);
+
+  auto submit_block = [&]() {
     sycl::range<1> grid(static_cast<size_t>(num_tokens));
     sycl::range<1> block(static_cast<size_t>(BlockDim));
     vllm::xpu::sycl_kernel_submit(
@@ -1713,7 +1795,8 @@ void launch_tier(
             topk,
             renormalize,
             scale));
-  } else {
+  };
+  auto submit_warp = [&]() {
     using WarpConfig = WarpTopKLaunchConfig<MaxNumExperts>;
     sycl::range<1> grid(static_cast<size_t>(WarpConfig::grid_dim(num_tokens)));
     sycl::range<1> block(static_cast<size_t>(WarpConfig::BlockDim));
@@ -1736,6 +1819,18 @@ void launch_tier(
             topk,
             renormalize,
             scale));
+  };
+
+  if constexpr (kBlockOnly) {
+    submit_block();
+  } else if constexpr (kWarpOnly) {
+    submit_warp();
+  } else {
+    if (use_block_kernel) {
+      submit_block();
+    } else {
+      submit_warp();
+    }
   }
 }
 
@@ -1751,46 +1846,75 @@ bool invoke(
     int64_t topk,
     bool renormalize,
     double routed_scaling_factor) {
-#define SG_TRY_TIER(E, TK)                      \
-  if (num_experts <= (E) && topk <= (TK)) {     \
-    launch_tier<T, BiasT, IdxT, SF, (E), (TK)>( \
-        queue,                                  \
-        scores,                                 \
-        topk_values,                            \
-        topk_indices,                           \
-        bias,                                   \
-        num_tokens,                             \
-        num_experts,                            \
-        topk,                                   \
-        renormalize,                            \
-        routed_scaling_factor);                 \
-    return true;                                \
+  // Tiered (experts, topk) dispatch table. Each tier is an (E, TK)
+  // specialization that instantiates heavy, fully unrolled SYCL kernels and is
+  // AOT-compiled for every target device, so binary size grows roughly
+  // linearly with the number of ENABLED tiers. We compile only the tiers our
+  // shipped models exercise; the rest stay in the table as disabled entry
+  // points so the dispatch never silently loses a case.
+  //
+  // SG_TIER(ENABLED, E, TK):
+  //   ENABLED == 1 : compiled; a matching request launches it.
+  //   ENABLED == 0 : NOT compiled (no kernel instantiated). A matching request
+  //                  logs a one-time hint naming the tier, then returns false
+  //                  so the caller falls back to the (correct but slower)
+  //                  path 2 / path 3 kernels. Behavior stays correct.
+  //
+  // To (re-)enable a tier for a new model: set its flag to 1 and rebuild.
+#define SG_TIER(ENABLED, E, TK)                                        \
+  if (num_experts <= (E) && topk <= (TK)) {                            \
+    if constexpr ((ENABLED) != 0) {                                    \
+      launch_tier<T, BiasT, IdxT, SF, (E), (TK)>(                      \
+          queue,                                                       \
+          scores,                                                      \
+          topk_values,                                                 \
+          topk_indices,                                                \
+          bias,                                                        \
+          num_tokens,                                                  \
+          num_experts,                                                 \
+          topk,                                                        \
+          renormalize,                                                 \
+          routed_scaling_factor);                                      \
+      return true;                                                     \
+    } else {                                                           \
+      TORCH_WARN_ONCE(                                                 \
+          "grouped_topk: single-group fast-path tier (experts<=" #E    \
+          ", topk<=" #TK                                               \
+          ") is not compiled in this build; falling "                  \
+          "back to a slower path. To enable it, set its SG_TIER flag " \
+          "to 1 in csrc/moe/grouped_topk.cpp and rebuild.");           \
+      return false;                                                    \
+    }                                                                  \
   }
   if constexpr (SF == SCORING_SIGMOID) {
-    SG_TRY_TIER(128, 8)
-    SG_TRY_TIER(256, 8)
-    SG_TRY_TIER(384, 8)
-    SG_TRY_TIER(512, 8)
-    SG_TRY_TIER(512, 22)
-    SG_TRY_TIER(768, 16)
-    SG_TRY_TIER(896, 16)
-    SG_TRY_TIER(1024, 16)
+    // Shipped sigmoid single-group models: GLM-5-next (288/topk7),
+    // Hunyuan-V3 (192/topk8), Hunyuan-V4 (256/topk8), DeepSeek (256/topk8).
+    SG_TIER(1, 128, 8)
+    SG_TIER(1, 256, 8)
+    SG_TIER(1, 384, 8)
+    SG_TIER(0, 512, 8)
+    SG_TIER(0, 512, 22)
+    SG_TIER(0, 768, 16)
+    SG_TIER(0, 896, 16)
+    SG_TIER(0, 1024, 16)
   } else {
-    SG_TRY_TIER(128, 4)
-    SG_TRY_TIER(128, 8)
-    SG_TRY_TIER(160, 8)
-    SG_TRY_TIER(256, 8)
-    SG_TRY_TIER(256, 16)
-    SG_TRY_TIER(512, 8)
-    SG_TRY_TIER(512, 16)
-    SG_TRY_TIER(512, 22)
-    SG_TRY_TIER(512, 32)
-    SG_TRY_TIER(576, 8)
-    SG_TRY_TIER(768, 16)
-    SG_TRY_TIER(896, 16)
-    SG_TRY_TIER(1024, 16)
+    // No shipped model currently uses the softmax (SCORING_NONE) single-group
+    // fast path, so every tier here is a disabled entry point.
+    SG_TIER(0, 128, 4)
+    SG_TIER(0, 128, 8)
+    SG_TIER(0, 160, 8)
+    SG_TIER(0, 256, 8)
+    SG_TIER(0, 256, 16)
+    SG_TIER(0, 512, 8)
+    SG_TIER(0, 512, 16)
+    SG_TIER(0, 512, 22)
+    SG_TIER(0, 512, 32)
+    SG_TIER(0, 576, 8)
+    SG_TIER(0, 768, 16)
+    SG_TIER(0, 896, 16)
+    SG_TIER(0, 1024, 16)
   }
-#undef SG_TRY_TIER
+#undef SG_TIER
   return false;
 }
 
@@ -1845,21 +1969,21 @@ void invokeNoAuxTcFused(
       (experts_per_group * topk_group <= MaxNumExpertsUnit) &&
       (topk <= DefaultMaxNumTopExperts) && (topk_group <= MaxNumTopGroups);
 
-  if (is_single_group || is_multi_group) {
-    launchSmallExpertCount<T, BiasT, IdxT, SF>(
-        queue,
-        scores,
-        topk_values,
-        topk_indices,
-        bias,
-        num_tokens,
-        n_group,
-        topk_group,
-        topk,
-        num_experts,
-        renormalize,
-        routed_scaling_factor,
-        is_single_group);
+  if ((is_single_group || is_multi_group) &&
+      launchSmallExpertCount<T, BiasT, IdxT, SF>(
+          queue,
+          scores,
+          topk_values,
+          topk_indices,
+          bias,
+          num_tokens,
+          n_group,
+          topk_group,
+          topk,
+          num_experts,
+          renormalize,
+          routed_scaling_factor,
+          is_single_group)) {
     return;
   }
 
@@ -1894,40 +2018,18 @@ void invokeNoAuxTcFused(
       double const routed_scaling_factor,               \
       sycl::queue& queue);
 
+// The correction bias (e_score_correction_bias) is always float32 in every
+// caller, and every kernel converts it to float on first use, so BiasT is
+// fixed to float. This avoids a 3x template-instantiation blow-up (and the
+// corresponding AOT binary size increase) over bias dtype.
 INSTANTIATE_NOAUX_TC_FUSED(float, float, int32_t, SCORING_SIGMOID);
-INSTANTIATE_NOAUX_TC_FUSED(float, sycl::half, int32_t, SCORING_SIGMOID);
-INSTANTIATE_NOAUX_TC_FUSED(
-    float, sycl::ext::oneapi::bfloat16, int32_t, SCORING_SIGMOID);
 INSTANTIATE_NOAUX_TC_FUSED(sycl::half, float, int32_t, SCORING_SIGMOID);
-INSTANTIATE_NOAUX_TC_FUSED(sycl::half, sycl::half, int32_t, SCORING_SIGMOID);
-INSTANTIATE_NOAUX_TC_FUSED(
-    sycl::half, sycl::ext::oneapi::bfloat16, int32_t, SCORING_SIGMOID);
 INSTANTIATE_NOAUX_TC_FUSED(
     sycl::ext::oneapi::bfloat16, float, int32_t, SCORING_SIGMOID);
-INSTANTIATE_NOAUX_TC_FUSED(
-    sycl::ext::oneapi::bfloat16, sycl::half, int32_t, SCORING_SIGMOID);
-INSTANTIATE_NOAUX_TC_FUSED(
-    sycl::ext::oneapi::bfloat16,
-    sycl::ext::oneapi::bfloat16,
-    int32_t,
-    SCORING_SIGMOID);
 INSTANTIATE_NOAUX_TC_FUSED(float, float, int32_t, SCORING_NONE);
-INSTANTIATE_NOAUX_TC_FUSED(float, sycl::half, int32_t, SCORING_NONE);
-INSTANTIATE_NOAUX_TC_FUSED(
-    float, sycl::ext::oneapi::bfloat16, int32_t, SCORING_NONE);
 INSTANTIATE_NOAUX_TC_FUSED(sycl::half, float, int32_t, SCORING_NONE);
-INSTANTIATE_NOAUX_TC_FUSED(sycl::half, sycl::half, int32_t, SCORING_NONE);
-INSTANTIATE_NOAUX_TC_FUSED(
-    sycl::half, sycl::ext::oneapi::bfloat16, int32_t, SCORING_NONE);
 INSTANTIATE_NOAUX_TC_FUSED(
     sycl::ext::oneapi::bfloat16, float, int32_t, SCORING_NONE);
-INSTANTIATE_NOAUX_TC_FUSED(
-    sycl::ext::oneapi::bfloat16, sycl::half, int32_t, SCORING_NONE);
-INSTANTIATE_NOAUX_TC_FUSED(
-    sycl::ext::oneapi::bfloat16,
-    sycl::ext::oneapi::bfloat16,
-    int32_t,
-    SCORING_NONE);
 
 }  // end namespace moe
 }  // namespace vllm
@@ -2016,23 +2118,15 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
     }                                                                       \
   } while (0)
 
-#define LAUNCH_FUSED(T, IdxT)                                                \
-  do {                                                                       \
-    switch (bias_type) {                                                     \
-      case torch::kFloat16:                                                  \
-        LAUNCH_FUSED_SF(T, sycl::half, IdxT);                                \
-        break;                                                               \
-      case torch::kFloat32:                                                  \
-        LAUNCH_FUSED_SF(T, float, IdxT);                                     \
-        break;                                                               \
-      case torch::kBFloat16:                                                 \
-        LAUNCH_FUSED_SF(T, sycl::ext::oneapi::bfloat16, IdxT);               \
-        break;                                                               \
-      default:                                                               \
-        throw std::invalid_argument(                                         \
-            "Invalid bias dtype, only supports float16, float32, bfloat16"); \
-        break;                                                               \
-    }                                                                        \
+#define LAUNCH_FUSED(T, IdxT)                                           \
+  do {                                                                  \
+    /* The correction bias is always float32 (every caller allocates it \
+     * as float32 and the kernels immediately cast it to float), so     \
+     * only the float BiasT specialization is instantiated. */          \
+    TORCH_CHECK(                                                        \
+        bias_type == torch::kFloat32,                                   \
+        "Invalid bias dtype, grouped_topk only supports float32 bias"); \
+    LAUNCH_FUSED_SF(T, float, IdxT);                                    \
   } while (0)
 
   switch (data_type) {

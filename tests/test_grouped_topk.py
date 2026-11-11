@@ -43,8 +43,10 @@ def test_grouped_topk(n_token: int, n_hidden: int, n_expert: int, topk: int,
     seed_everything(0)
     hidden_states = torch.randn((n_token, n_hidden), dtype=dtype, device="xpu")
     gating_output = torch.randn((n_token, n_expert), dtype=dtype, device="xpu")
+    # The correction bias is always float32 (matches real-world callers and
+    # the kernel, which only instantiates the float32 bias specialization).
     e_score_correction_bias = torch.randn((n_expert, ),
-                                          dtype=dtype,
+                                          dtype=torch.float32,
                                           device="xpu")
 
     baseline_topk_weights, baseline_topk_ids = grouped_topk(
@@ -88,8 +90,10 @@ def _run_and_check(n_token: int, n_expert: int, topk: int, renormalize: bool,
     seed_everything(0)
     hidden_states = torch.randn((n_token, n_expert), dtype=dtype, device=DEVICE)
     gating_output = torch.randn((n_token, n_expert), dtype=dtype, device=DEVICE)
+    # The correction bias is always float32 (matches real-world callers and
+    # the kernel, which only instantiates the float32 bias specialization).
     e_score_correction_bias = torch.randn((n_expert, ),
-                                          dtype=dtype,
+                                          dtype=torch.float32,
                                           device=DEVICE)
 
     baseline_topk_weights, baseline_topk_ids = grouped_topk(
