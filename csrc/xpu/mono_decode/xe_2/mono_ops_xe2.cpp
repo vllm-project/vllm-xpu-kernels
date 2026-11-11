@@ -261,14 +261,43 @@ struct Layer {
   Ptrs P{};
   Scratch S{};
   ScratchB SB{};
-  void* scratch = nullptr;
-  void* scratch_b = nullptr;
+  void* scratch = nullptr;    // shared by the layers of a device (shared_scratch)
+  void* scratch_b = nullptr;  // shared (shared_scratch)
+  void* cnt_mem = nullptr;    // this layer's counters and mailbox tags
   int device = -1;
 };
 std::unordered_map<int64_t, Layer> g_layers;
 // batched attention chunk partials, one buffer per device shared by all
 // attention layers (they run one at a time on the device's queue)
 std::unordered_map<int, void*> g_attn_part;
+
+// The layers' intermediates (scratch, scratch_b) are one pair of buffers per
+// device shared by all layers: the layers' kernels run one at a time on the
+// device's queue, and each kernel writes an intermediate before it reads it.
+// Only the counters (stage arrival counts, epoch, mailbox tags) are the layer's
+// own: they carry state from one step to the next (zero when allocated).
+struct SharedScratch {
+  void* scratch = nullptr;
+  void* scratch_b = nullptr;
+};
+std::unordered_map<int, SharedScratch> g_shared_scratch;
+SharedScratch& shared_scratch(int device, sycl::queue& q) {
+  SharedScratch& sh = g_shared_scratch[device];
+  if (!sh.scratch) {
+    sh.scratch = sycl::malloc_device(::mono_decode::scratch_bytes(), q);
+    TORCH_CHECK(sh.scratch, "mono: device allocation of the scratch failed");
+    q.memset(sh.scratch, 0, ::mono_decode::scratch_bytes()).wait();
+    sh.scratch_b = sycl::malloc_device(::mono_decode::scratch_b_bytes(), q);
+    TORCH_CHECK(
+        sh.scratch_b, "mono: device allocation of the batched scratch failed");
+    q.memset(sh.scratch_b, 0, ::mono_decode::scratch_b_bytes()).wait();
+  }
+  return sh;
+}
+// the counter block of scratch_carve (its first piece)
+constexpr size_t cnt_bytes() {
+  return (((size_t)::mono_decode::EPOCH + 32) * 4 + 255) & ~size_t(255);
+}
 
 const void* ptr_of(const torch::Tensor& t) { return t.data_ptr(); }
 
@@ -455,16 +484,17 @@ void mono_register_layer(
   }
   sycl::queue& q = c10::xpu::getCurrentXPUStream().queue();
   auto it = g_layers.find(layer);
+  SharedScratch& sh = shared_scratch(L.device, q);
+  L.scratch = sh.scratch;
+  L.scratch_b = sh.scratch_b;
   if (it != g_layers.end() &&
-      it->second.scratch) {  // re-registration (new KV cache binding): keep the
-                             // scratch
-    L.scratch = it->second.scratch;
-    L.scratch_b = it->second.scratch_b;
+      it->second.cnt_mem) {  // re-registration (new KV cache binding): keep the
+                             // counters (mailbox tags)
+    L.cnt_mem = it->second.cnt_mem;
   } else {
-    L.scratch = sycl::malloc_device(scratch_bytes(), q);
-    q.memset(L.scratch, 0, scratch_bytes()).wait();
-    L.scratch_b = sycl::malloc_device(scratch_b_bytes(), q);
-    q.memset(L.scratch_b, 0, scratch_b_bytes()).wait();
+    L.cnt_mem = sycl::malloc_device(cnt_bytes(), q);
+    TORCH_CHECK(L.cnt_mem, "mono: device allocation of the counters failed");
+    q.memset(L.cnt_mem, 0, cnt_bytes()).wait();
   }
   L.SB = scratch_b_carve(L.scratch_b);
   if (attn) {
@@ -478,6 +508,7 @@ void mono_register_layer(
       L.scratch,
       reinterpret_cast<uint64_t*>(mbox),
       reinterpret_cast<uint64_t*>(peer));
+  L.S.cnt = static_cast<uint32_t*>(L.cnt_mem);  // the layer's own counters
   set_health(q, L);
   g_layers[layer] = L;
 }
