@@ -9,7 +9,7 @@ Your output is a verified local fix branch in an isolated worktree, a ready-to-u
 
 ## Hard Constraints
 
-- NEVER push branches, open PRs, comment on PRs or issues, or retrigger CI automatically. Prepare the local commit and put the push / PR creation commands in **Next step for the user**.
+- Do NOT push branches or open PRs unless the user explicitly asks; when asked, push to the user's fork and open a **draft** PR (`gh pr create --draft`). Otherwise prepare the local commit and put the push / PR creation commands in **Next step for the user**. Never open a ready-for-review PR, comment on PRs or issues, or retrigger CI automatically.
 - Only commit a verified fix (fails before, passes after). Otherwise report it under **Not fixed**.
 - DO NOT delete or stop docker images or containers that you did not create. This machine is shared.
 - DO NOT modify the user's main working tree. Work in a separate `git worktree` under `/tmp/ci-fix-<slug>`.
@@ -26,10 +26,10 @@ Your output is a verified local fix branch in an isolated worktree, a ready-to-u
 
 ### 1. Fetch the failed jobs
 
-Run [scripts/ci-fetch-log.sh](./scripts/ci-fetch-log.sh) directly from the repository root. By default it saves cleaned logs to `/tmp/ci-<build>-<job>.log`:
+If the prompt already provides a pre-built context with the failed job logs, use that file and skip re-fetching logs. Otherwise run [scripts/ci-fetch-log.sh](./scripts/ci-fetch-log.sh) from the repository root (saves cleaned logs to `/tmp/ci-<build>-<job>.log`):
 
 ```bash
-bash .agents/skills/intel-ci-fix/scripts/ci-fetch-log.sh --metadata "https://buildkite.com/vllm/intel-ci/builds/<build>"
+bash .claude/skills/intel-ci-fix/scripts/ci-fetch-log.sh --metadata "https://buildkite.com/vllm/intel-ci/builds/<build>"
 ```
 
 From each failed job log, extract:
