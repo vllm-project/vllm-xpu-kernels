@@ -3,6 +3,7 @@
 #include "../utils.h"
 #include "../dispatch_utils.h"
 #include "sycl_launch.h"
+#include "utils/dpcpp.h"
 
 namespace vllm {
 namespace moe {
@@ -33,14 +34,24 @@ class MoeGather {
   static constexpr int MaxGroupWorkItem = 1024;
   static constexpr int WARP_SIZE = 16;
 
+  // The compiler may give register-heavy instances (e.g. TOPK=16 with 16-bit
+  // types on Xe3P) a large GRF, which lowers their work-group limit below
+  // MaxGroupWorkItem.
+  static inline int max_group_work_item() {
+    static const int limit = static_cast<int>(std::min<int64_t>(
+        MaxGroupWorkItem, vllm::xpu::getMaxWorkGroupSize<MoeGather>()));
+    return limit;
+  }
+
   static inline int get_lanes_per_token(const int hidden_size) {
     const int vecs = hidden_size / ElemsPerItem;
-    return vecs < MaxGroupWorkItem ? vecs : MaxGroupWorkItem;
+    const int max_wg = max_group_work_item();
+    return vecs < max_wg ? vecs : max_wg;
   }
 
   static inline sycl::nd_range<1>
   get_nd_range(const int num_tokens, const int lanes_per_token) {
-    const int tokens_per_wg = MaxGroupWorkItem / lanes_per_token;
+    const int tokens_per_wg = max_group_work_item() / lanes_per_token;
     const int num_wgs = (num_tokens + tokens_per_wg - 1) / tokens_per_wg;
     sycl::range<1> local(lanes_per_token * tokens_per_wg);
     sycl::range<1> group(num_wgs);

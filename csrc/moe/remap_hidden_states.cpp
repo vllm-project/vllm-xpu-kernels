@@ -267,7 +267,8 @@ class RemapHiddenStates {
       int* unpermuted_row_to_permuted_row,
       const int hidden_size,
       const int block_k,
-      int* expert_scale_desc)
+      int* expert_scale_desc,
+      const int topk)
       : hidden_states(hidden_states),
         hidden_states_scales(hidden_states_scales),
         remapped_hidden_states(remapped_hidden_states),
@@ -275,7 +276,8 @@ class RemapHiddenStates {
         unpermuted_row_to_permuted_row(unpermuted_row_to_permuted_row),
         hidden_size(hidden_size),
         block_k(block_k),
-        expert_scale_desc(expert_scale_desc) {}
+        expert_scale_desc(expert_scale_desc),
+        topk(topk) {}
 
   static constexpr int GroupWorkItem = 256;
   static constexpr int WARP_SIZE = FanOut ? 16 : 32;
@@ -285,7 +287,7 @@ class RemapHiddenStates {
       CopyWords * sizeof(uint32_t) / sizeof(TA);
 
   static inline sycl::nd_range<3>
-  get_nd_range(const int num_rows, const int hidden_size) {
+  get_nd_range(const int num_rows, const int hidden_size, const int topk) {
     int local_num = GroupWorkItem;
     if (local_num * CopyElemsPerItem > hidden_size) {
       local_num = sycl::max(
@@ -295,7 +297,7 @@ class RemapHiddenStates {
               WARP_SIZE);
     }
     sycl::range<3> local(1, 1, local_num);
-    sycl::range<3> group(1, 1, FanOut ? num_rows : num_rows * TopK);
+    sycl::range<3> group(1, 1, FanOut ? num_rows : num_rows * topk);
     return sycl::nd_range<3>(local * group, local);
   }
 
@@ -308,7 +310,7 @@ class RemapHiddenStates {
 
     // FinalizeRowMapping has made the map read-only.
     constexpr int NumOut = FanOut ? TopK : 1;
-    const int row = FanOut ? group_id : group_id / TopK;
+    const int row = FanOut ? group_id : group_id / topk;
     const int first_route = FanOut ? row * TopK : group_id;
     int output_row[NumOut];
     bool any_live = false;
@@ -426,6 +428,7 @@ class RemapHiddenStates {
   const int hidden_size;
   const int block_k;
   int* expert_scale_desc;
+  const int topk;
 };
 
 // Fused 2-kernel path (RowsPerExpertCount + this). Computes the expert cumsum
@@ -883,7 +886,9 @@ void RemapHiddenStatesLauncher(
   // Tuned on BMG and CRI: the per-route grid is faster for 2-byte
   // activations, while 1-byte (fp8/mxfp) rows are short enough that reading
   // each token once and fanning it out wins.
-  using RemapKernel = RemapHiddenStates<TA, TS, TopK, sizeof(TA) == 1>;
+  // Only the fan-out variant needs TopK at compile time.
+  constexpr bool FanOut = sizeof(TA) == 1;
+  using RemapKernel = RemapHiddenStates<TA, TS, FanOut ? TopK : 1, FanOut>;
 
   // The cumsum kernels keep two (local_experts_num + 1)-entry prefix tables
   // in SLM, which is more than RowsPerExpertCount needs.
@@ -969,7 +974,7 @@ void RemapHiddenStatesLauncher(
 
   vllm::xpu::sycl_kernel_submit(
       queue,
-      RemapKernel::get_nd_range(num_rows, hidden_size),
+      RemapKernel::get_nd_range(num_rows, hidden_size, TopK),
       RemapKernel{
           hidden_states,
           hidden_states_scales,
@@ -978,7 +983,8 @@ void RemapHiddenStatesLauncher(
           unpermuted_row_to_permuted_row,
           hidden_size,
           block_k,
-          expert_scale_desc});
+          expert_scale_desc,
+          TopK});
 
   if (expert_scale_desc != nullptr) {
     int64_t scaled_hidden_size = hidden_size / block_k;
@@ -1181,11 +1187,10 @@ void remap_hidden_states(
     throw std::runtime_error("Unsupported TopK value"); \
   }
 
-  if (hidden_states.scalar_type() == torch::kFloat16) {
-    using scalar_t = sycl::half;
-    DISPATCH_TOPK_LAUNCH(scalar_t, float, TopK);
-  } else if (hidden_states.scalar_type() == torch::kBFloat16) {
-    using scalar_t = sycl::ext::oneapi::bfloat16;
+  // Activations are only copied, so fp16 and bf16 share the 16-bit kernels.
+  if (hidden_states.scalar_type() == torch::kFloat16 ||
+      hidden_states.scalar_type() == torch::kBFloat16) {
+    using scalar_t = uint16_t;
     DISPATCH_TOPK_LAUNCH(scalar_t, float, TopK);
   } else if (hidden_states.scalar_type() == torch::kFloat32) {
     using scalar_t = float;
