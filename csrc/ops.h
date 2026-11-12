@@ -192,7 +192,8 @@ void concat_and_cache_mla(
     torch::Tensor& kv_cache,
     torch::Tensor& slot_mapping,
     const std::string& kv_cache_dtype,
-    torch::Tensor& scale);
+    torch::Tensor& scale,
+    bool skip_scale);
 
 void gather_cache(
     torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
@@ -201,6 +202,25 @@ void gather_cache(
     torch::Tensor const& cu_seq_lens,  // [BATCH+1]
     int64_t batch_size,
     std::optional<torch::Tensor> seq_starts = std::nullopt);
+
+void cp_gather_cache(
+    torch::Tensor const& src_cache,
+    torch::Tensor const& dst,
+    torch::Tensor const& block_table,
+    torch::Tensor const& cu_seq_lens,
+    int64_t batch_size,
+    std::optional<torch::Tensor> seq_starts = std::nullopt);
+
+void cp_gather_and_upconvert_fp8_kv_cache(
+    torch::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
+    torch::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size,
+    std::optional<torch::Tensor> seq_starts = std::nullopt,
+    std::optional<torch::Tensor> host_cache = std::nullopt,
+    std::optional<torch::Tensor> host_row_ids = std::nullopt,
+    std::optional<torch::Tensor> device_row_ids = std::nullopt);
 
 void indexer_k_quant_and_cache(
     torch::Tensor& k,             // [num_tokens, head_dim]

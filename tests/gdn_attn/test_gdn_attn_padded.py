@@ -71,7 +71,7 @@ def _build_inputs(num_actual_tokens, padded_size, dtype, device):
                                             device=device)
     has_initial_state = torch.ones(batch_size, dtype=torch.bool, device=device)
     non_spec_state_indices_tensor = torch.tensor(
-        random.sample(range(cache_batch_size), batch_size),
+        random.sample(range(1, cache_batch_size), batch_size),
         device=device, dtype=torch.int32)
 
     return dict(

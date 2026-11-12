@@ -89,8 +89,11 @@ def _uses_xe2_grouped_gemm(weight):
     """Mirrors the routing in csrc/xpu/grouped_gemm/grouped_gemm_interface.cpp.
 
     BMG / PVC / LNL and the XE3 client parts run the xe_2 kernel; only CRI and
-    NVL-P run the xe_3 one.
+    NVL-P run the xe_3 one. FORCE_XE3P_KERNEL also selects xe_3 layouts and
+    preserves block-scaled activations for the forced Xe3 path.
     """
+    if _is_env_enabled("FORCE_XE3P_KERNEL"):
+        return False
     device_index = -1 if weight.device.index is None else weight.device.index
     return bool(torch.ops._xpu_C.is_xe2_arch(device_index)
                 or torch.ops._xpu_C.is_xe3_arch(device_index))
@@ -499,19 +502,6 @@ class XpuFusedMoe:
             (num_rows * self.n_experts_per_token, hidden_size),
             dtype=hidden_states.dtype,
             device=hidden_states.device)
-
-        # DP padding rows carry an all-negative top-k route. The native
-        # remap_hidden_states kernel maps those to expert 0, so the garbage
-        # activations in padding rows reach a real expert and produce NaNs that
-        # poison the whole MoE output. Zero them before the native remap.
-        # masked_fill has no XPU kernel for the fp8 / packed-fp4 activation
-        # dtypes, so 1-byte activations are cleared through a uint8 view (an
-        # all-zero bit pattern is +0 in every one of those formats).
-        invalid_padding_rows = (topk_ids < 0).all(dim=1)
-        fill_view = hidden_states.view(torch.uint8) \
-            if hidden_states.element_size() == 1 else hidden_states
-        hidden_states = fill_view.masked_fill(
-            invalid_padding_rows.unsqueeze(1), 0).view(hidden_states.dtype)
 
         rows_per_expert = torch.zeros((self.num_experts),
                                                 dtype=torch.int32,

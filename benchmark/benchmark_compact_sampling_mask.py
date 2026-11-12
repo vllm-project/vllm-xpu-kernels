@@ -15,6 +15,10 @@ Scenarios (per batch/vocab size):
 - dense: (almost) all logits finite
 - sparse: only a small fraction of logits finite (post top_k/top_p filtering)
 - half_inactive: half the rows have no sampled token (num_sampled_tokens == 0)
+
+All scenarios use ordinary sampling (rows_per_request == 1, one source logits
+row per request); the op wrappers supply the default request-major
+cu_num_logits internally.
 """
 
 import argparse

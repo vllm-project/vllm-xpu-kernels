@@ -269,10 +269,11 @@ def concat_and_cache_mla(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
     scale: torch.Tensor,
+    skip_scale: bool = False,
 ) -> None:
     torch.ops._C_cache_ops.concat_and_cache_mla(kv_c, k_pe, kv_cache,
                                                 slot_mapping, kv_cache_dtype,
-                                                scale)
+                                                scale, skip_scale)
 
 
 def gather_cache(src_cache: torch.Tensor,
@@ -283,6 +284,28 @@ def gather_cache(src_cache: torch.Tensor,
                  seq_starts: Optional[torch.Tensor] = None) -> None:
     torch.ops._C_cache_ops.gather_cache(src_cache, dst, block_table,
                                         cu_seq_lens, batch_size, seq_starts)
+
+
+def cp_gather_cache(src_cache: torch.Tensor,
+                    dst: torch.Tensor,
+                    block_table: torch.Tensor,
+                    cu_seq_lens: torch.Tensor,
+                    batch_size: int,
+                    seq_starts: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C_cache_ops.cp_gather_cache(src_cache, dst, block_table,
+                                          cu_seq_lens, batch_size, seq_starts)
+
+
+def cp_gather_and_upconvert_fp8_kv_cache(
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    workspace_starts: torch.Tensor,
+    batch_size: int,
+    seq_starts: Optional[torch.Tensor] = None,
+) -> None:
+    torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
+        src_cache, dst, block_table, workspace_starts, batch_size, seq_starts)
 
 
 def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor,

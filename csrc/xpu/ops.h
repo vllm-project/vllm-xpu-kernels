@@ -85,6 +85,23 @@ torch::Tensor cutlass_grouped_gemm_interface(
     int64_t N,
     int64_t K,
     int64_t num_experts);
+
+void moe_shared_fused_decode_interface(
+    torch::Tensor& output,
+    const torch::Tensor& x,
+    const torch::Tensor& topk_ids,
+    const torch::Tensor& topk_weights,
+    const torch::Tensor& w13,
+    const torch::Tensor& w13_scale,
+    const torch::Tensor& w2,
+    const torch::Tensor& w2_scale,
+    const torch::Tensor& shared_w13,
+    const torch::Tensor& shared_w13_scale,
+    const torch::Tensor& shared_w2,
+    const torch::Tensor& shared_w2_scale,
+    const torch::Tensor& shared_gate,
+    torch::Tensor& ws,
+    int64_t tile_m);
 #endif
 
 std::tuple<at::Tensor, at::Tensor> deepseek_scaling_rope(
@@ -433,6 +450,8 @@ void fused_input_norm(
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compact_sampling_mask(
     const torch::Tensor& logits,
+    const torch::Tensor& cu_num_logits,
     const torch::Tensor& num_sampled_tokens,
     int64_t max_num_kept,
-    int64_t max_compact_support);
+    int64_t max_compact_support,
+    int64_t rows_per_request);

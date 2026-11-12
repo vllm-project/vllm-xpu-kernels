@@ -338,7 +338,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                     Tensor! kv_cache,"
       "                     Tensor slot_mapping,"
       "                     str kv_cache_dtype,"
-      "                     Tensor scale) -> ()");
+      "                     Tensor scale,"
+      "                     bool skip_scale=False) -> ()");
   cache_ops.impl("concat_and_cache_mla", torch::kXPU, &concat_and_cache_mla);
 
   // Gather cache blocks from src_cache to dst.
@@ -346,6 +347,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("gather_cache", torch::kXPU, &gather_cache);
+
+  cache_ops.def(
+      "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
+      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts=None) -> ()");
+  cache_ops.impl("cp_gather_cache", torch::kXPU, &cp_gather_cache);
+
+  // Gather DSV3.2 packed fp8_ds_mla entries into a dense BF16 workspace.
+  cache_ops.def(
+      "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor workspace_starts, int batch_size, "
+      "Tensor? seq_starts, Tensor? host_cache=None, Tensor? host_row_ids=None, "
+      "Tensor? device_row_ids=None) -> ()");
+  cache_ops.impl(
+      "cp_gather_and_upconvert_fp8_kv_cache",
+      torch::kXPU,
+      &cp_gather_and_upconvert_fp8_kv_cache);
 
   // Convert between FP8 and FP16/BF16/FP32 formats with scaling
   cache_ops.def(
