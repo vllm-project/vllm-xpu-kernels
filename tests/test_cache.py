@@ -51,6 +51,76 @@ DEFAULT_OPCHECK_TEST_UTILS: tuple[str, ...] = (
     "test_faketensor",
 )
 
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("use_seq_starts", [False, True])
+@pytest.mark.parametrize(
+    "lengths,total_tokens",
+    [
+        pytest.param([0, 0, 0, 0], 0, id="empty"),
+        pytest.param([0, 1, 69, 0], 70, id="full"),
+        pytest.param([0, 1, 69, 0], 18, id="clipped"),
+    ],
+)
+@pytest.mark.parametrize(
+    "entry_size,padding,offset",
+    [
+        pytest.param(576, 0, 0, id="contiguous-vectorized"),
+        pytest.param(36, 0, 1, id="contiguous-byte"),
+        pytest.param(576, 16, 16, id="strided-vectorized"),
+        pytest.param(36, 1, 1, id="strided-byte"),
+    ],
+)
+@torch.inference_mode()
+def test_cp_gather_cache(dtype, use_seq_starts, lengths, total_tokens,
+                         entry_size, padding, offset):
+    """All four page-copy paths preserve bytes and destination guards."""
+    device = "xpu"
+    block_size, num_blocks = 16, 8
+    batch_size = len(lengths)
+    seed_everything(0)
+    row_size = entry_size + padding
+    storage = torch.empty(num_blocks * block_size * row_size + offset,
+                          dtype=dtype,
+                          device=device)
+    storage.view(torch.uint8).random_(0, 256)
+    src = storage[offset:].view(num_blocks, block_size, row_size)
+    src = src[..., :entry_size].view(num_blocks, block_size, 4,
+                                     entry_size // 4)
+    starts = torch.tensor([3, 5, 17, 1], dtype=torch.int32, device=device)
+    seq_starts = starts if use_seq_starts else None
+    offsets = [0, *np.cumsum(lengths).tolist()]
+    cu_seq_lens = torch.tensor(offsets, dtype=torch.int32, device=device)
+    table_storage = torch.stack(
+        [torch.randperm(num_blocks, device=device) for _ in lengths])
+    block_table = table_storage.to(torch.int32).repeat_interleave(2, 1)[:, ::2]
+    dst_storage = torch.zeros((total_tokens + 1) * row_size + offset,
+                              dtype=dtype,
+                              device=device)
+    dst = dst_storage[offset:].view(-1, row_size)[1:, :entry_size]
+    expected = []
+    for req, length in enumerate(lengths):
+        length = max(min(length, total_tokens - offsets[req]), 0)
+        start = [3, 5, 17, 1][req] if use_seq_starts else 0
+        tokens = torch.arange(start, start + length, device=device)
+        blocks = block_table[req, tokens // block_size].long()
+        expected.append(src[blocks, tokens % block_size].reshape(
+            length, entry_size).view(torch.uint8))
+    expected_bytes = torch.cat(expected)
+    expected_storage = dst_storage.clone()
+    expected_dst = expected_storage[offset:].view(-1,
+                                                  row_size)[1:, :entry_size]
+    expected_dst.view(torch.uint8).copy_(expected_bytes)
+    ops.cp_gather_cache(src, dst, block_table, cu_seq_lens, batch_size,
+                        seq_starts)
+    torch.testing.assert_close(dst_storage.view(torch.uint8),
+                               expected_storage.view(torch.uint8),
+                               rtol=0,
+                               atol=0)
+    opcheck(torch.ops._C_cache_ops.cp_gather_cache,
+            (src, dst, block_table, cu_seq_lens, batch_size, seq_starts),
+            test_utils=DEFAULT_OPCHECK_TEST_UTILS)
+
+
 #override pytest parameters when enable mini pytest
 MINI_PYTEST_PARAMS = {
     "default": {
@@ -408,6 +478,7 @@ def _fill_mla_cache(cache: torch.Tensor, kv_cache_dtype: str):
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE_ALL)
+@pytest.mark.parametrize("skip_scale", [False, True])
 @torch.inference_mode()
 def test_concat_and_cache_mla(
     kv_lora_rank: int,
@@ -419,6 +490,7 @@ def test_concat_and_cache_mla(
     seed: int,
     device: str,
     kv_cache_dtype: str,
+    skip_scale: bool,
 ) -> None:
     seed_everything(seed)
     torch.set_default_device(device)
@@ -437,6 +509,8 @@ def test_concat_and_cache_mla(
     entry_size = kv_lora_rank + qk_rope_head_dim
 
     scale = torch.tensor(0.1, dtype=torch.float32, device=device)
+    # skip_scale means a cast-only conversion, i.e. unit scale.
+    ref_scale = 1.0 if skip_scale else scale.item()
     kv_cache = _create_mla_cache(num_blocks, block_size, entry_size, dtype,
                                  kv_cache_dtype, device)
     ref_temp = torch.zeros(*kv_cache.shape, dtype=dtype, device=device)
@@ -452,30 +526,31 @@ def test_concat_and_cache_mla(
         ref_kv_cache = torch.empty_like(ref_temp, dtype=kv_cache.dtype)
         ops.convert_fp8(ref_kv_cache,
                         ref_temp,
-                        scale.item(),
+                        ref_scale,
                         kv_dtype=kv_cache_dtype)
     else:
         ref_kv_cache = ref_temp
 
     opcheck(
         torch.ops._C_cache_ops.concat_and_cache_mla,
-        (kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale),
+        (kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale,
+         skip_scale),
         # test_utils=DEFAULT_OPCHECK_TEST_UTILS,
     )
 
     ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping,
-                             kv_cache_dtype, scale)
+                             kv_cache_dtype, scale, skip_scale)
 
     if kv_cache_dtype == "fp8":
         result_temp = torch.empty_like(kv_cache, dtype=torch.float16)
         ops.convert_fp8(result_temp,
                         kv_cache.contiguous(),
-                        scale.item(),
+                        ref_scale,
                         kv_dtype=kv_cache_dtype)
         expected_temp = torch.empty_like(ref_kv_cache, dtype=torch.float16)
         ops.convert_fp8(expected_temp,
                         ref_kv_cache,
-                        scale.item(),
+                        ref_scale,
                         kv_dtype=kv_cache_dtype)
         torch.testing.assert_close(result_temp,
                                    expected_temp,
