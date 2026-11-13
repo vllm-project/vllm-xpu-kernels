@@ -392,6 +392,13 @@ std::vector<at::Tensor> mha_varlen_fwd(
     // Output shape uses V's head_dim (may differ from Q/K for MLA).
     // For fp8 query the output cannot be fp8; default to fp16 (matches the
     // compute dtype inferred by the Python wrapper for fp8 inputs).
+    //
+    // XPUGraph / piecewise capture invariant: q/k/v/out shapes and the
+    // effective num_kv_splits must be fixed for the captured graph. Prefer
+    // a caller-provided `out_` and an explicit `num_splits` so workspace
+    // tensors (tmp_out / max_logits / exp_sums) have stable sizes. The
+    // Python wrapper refuses capture when `out` is None
+    // (VLLM_XPU_ATTN_CAPTURE_STRICT semantics).
     if (!out_.has_value()) {
       auto out_dtype = q_is_fp8 ? at::kHalf : q_type;
       out = torch::empty(
