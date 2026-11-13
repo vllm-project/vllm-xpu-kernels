@@ -261,7 +261,7 @@ struct Layer {
   Ptrs P{};
   Scratch S{};
   ScratchB SB{};
-  void* scratch = nullptr;    // shared by the layers of a device (shared_scratch)
+  void* scratch = nullptr;  // shared by the layers of a device (shared_scratch)
   void* scratch_b = nullptr;  // shared (shared_scratch)
   void* cnt_mem = nullptr;    // this layer's counters and mailbox tags
   int device = -1;
