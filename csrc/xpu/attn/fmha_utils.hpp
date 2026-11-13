@@ -114,10 +114,24 @@ struct chunk_policy_head192 {
 };
 
 struct chunk_policy_head256 {
+#ifdef VLLM_XPU_ENABLE_XE3P
+  // Xe3 tiles: a 512-row tile for non-causal and a 128-row "throughput" tile
+  // for causal.
+  using ShapeQK = Shape<_512, _16, _64>;
+  using ShapePV = Shape<_512, _64, _16>;
+  using ShapeOut = Shape<_512, _256>;
+  using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
+
+  using ShapeQK_Causal = Shape<_128, _16, _64>;
+  using ShapePV_Causal = Shape<_128, _64, _16>;
+  using ShapeOut_Causal = Shape<_128, _256>;
+  using SubgroupLayoutQK_Causal = Layout<Shape<_8, _1, _1>>;
+#else
   using ShapeQK = Shape<_256, _32, _32>;
   using ShapePV = Shape<_256, _32, _32>;
   using ShapeOut = Shape<_256, _256>;
   using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
+#endif
 };
 
 struct chunk_policy_head512 {
@@ -126,54 +140,6 @@ struct chunk_policy_head512 {
   using ShapeOut = Shape<_256, _256>;
   using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
 };
-
-// -----------------------------------------------------------------------------
-// Full-FP8 chunk_prefill tile policies (TUNE THESE DIRECTLY).
-//
-// The full-fp8 attention path (fp8 Q/K/V) is tuned INDEPENDENTLY of the
-// half/bf16 path. fp8's 1-byte K/V/P fragments leave register headroom that the
-// 2-byte half/bf16 fragments lack, so the fp8 path can afford a larger KV (or
-// Q) tile without register spills. Edit the structs below to retune the fp8
-// tiles; the half/bf16 policies (chunk_policy_head*) are unaffected.
-//
-// Tile-shape mode semantics (shared by all three shapes in a policy):
-//   ShapeQK  = <Q_tile,  KV_block,  headdim_contract>
-//   ShapePV  = <Q_tile,  V_headdim, KV_contract>
-//   ShapeOut = <Q_tile,  head_size>
-// Constraints the tuner MUST preserve (enforced by static_asserts in
-// FMHAConfig):
-//   * get<0>(ShapeQK) == get<0>(ShapePV) == get<0>(ShapeOut)   (Q tile match)
-//   * get<1>(ShapeOut) == head_size  (output head dim; do NOT scale with the KV
-//     tile -- e.g. head128 keeps ShapeOut = <Q_tile, 128>)
-//   * get<1>(ShapeQK) (the KV block) must divide the paged block_size, so a
-//     KV block of 128 requires the paged block_size to be a multiple of 128.
-//   * get<1>(ShapeQK) == get<2>(ShapePV)  (both are the KV block/contract, so a
-//     KV=128 tile is ShapeQK=<Q,128,d>, ShapePV=<Q,Vsub,128>)
-//
-// These initially mirror the corresponding chunk_policy_head* shapes, so the
-// default behavior is identical to the half/bf16 path until you change them.
-// -----------------------------------------------------------------------------
-struct fp8_chunk_policy_head128 {
-  using ShapeQK = Shape<_512, _64, _128>;
-  using ShapePV = Shape<_512, _128, _64>;
-  using ShapeOut = Shape<_512, _128>;
-  using SubgroupLayoutQK = Layout<Shape<_32, _1, _1>>;
-};
-
-// Maps a standard (half/bf16) chunk_policy to the isolated full-fp8 policy used
-// by the full-fp8 dispatch branch. The primary template defaults to identity so
-// any policy without a dedicated fp8 counterpart (e.g. the *_b16 block_size==16
-// policies) keeps its existing tile shapes.
-template <typename StdPolicy>
-struct fp8_policy_of {
-  using type = StdPolicy;
-};
-template <>
-struct fp8_policy_of<chunk_policy_head128> {
-  using type = fp8_chunk_policy_head128;
-};
-template <typename StdPolicy>
-using fp8_policy_of_t = typename fp8_policy_of<StdPolicy>::type;
 
 // chunk_prefill policies with TileShapeQK[1] = 16 (for block_size = 16).
 // These mirror the head-size policies above but halve the K-dim sub-tile so
@@ -279,17 +245,25 @@ struct chunk_policy_head512_b16 {
 // Note head_dim here is the *Q/K* head size bucket; the V split is driven by
 // the runtime head_size_vo, which differs for MLA (head_size_qk 576 with
 // head_size_vo 512).
+//
+// XE3P keeps the full head dim per work-group: its decode dispatcher routes
+// head dims above 128 to the 8-row tile, and its tuned decode paths and fp8
+// head-dim checks key on ShapeOut's V extent.
 static constexpr int kDecodeMaxShapeOutV = 256;
 static constexpr int kDecodeAccBudget = 2048;
 
 template <typename q_packed, typename head_dim>
 constexpr int decode_shapeout_v_value() {
+#ifdef VLLM_XPU_ENABLE_XE3P
+  return head_dim::value;
+#else
   if constexpr (head_dim::value <= kDecodeMaxShapeOutV) {
     return head_dim::value;
   } else {
     constexpr int budgeted = kDecodeAccBudget / q_packed::value;
     return budgeted < kDecodeMaxShapeOutV ? budgeted : kDecodeMaxShapeOutV;
   }
+#endif
 }
 
 template <typename q_packed, typename head_dim>

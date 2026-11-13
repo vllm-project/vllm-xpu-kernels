@@ -118,11 +118,10 @@ function(fmha_forward_configure FILENAME_SUFFIX)
         foreach(IMPL_KISCAUSAL ${L_BOOLS})
           foreach(IMPL_KISLOCAL ${L_BOOLS})
             foreach(IMPL_KISSINK ${L_BOOLS})
-              # LSE constraint
+              # LSE is supported for paged and non-paged global attention.
               set(LSE_BOOLS "false")
-              if(IMPL_KISPAGED STREQUAL "false"
-                 AND IMPL_KISLOCAL STREQUAL "false"
-                 AND IMPL_KISSINK STREQUAL "false")
+              if(IMPL_KISLOCAL STREQUAL "false" AND IMPL_KISSINK STREQUAL
+                                                    "false")
                 set(LSE_BOOLS ${L_BOOLS})
               endif()
               foreach(IMPL_KISLSE ${LSE_BOOLS})
@@ -177,18 +176,14 @@ function(fmha_forward_configure FILENAME_SUFFIX)
           continue()
         endif()
 
-        # Validate LSE constraint
-        if(_lse STREQUAL "true")
-          if(NOT
-             (_paged STREQUAL "false"
-              AND _local STREQUAL "false"
-              AND _sink STREQUAL "false"))
-            message(
-              WARNING
-                "Skipping invalid config: lse=true requires paged=false,local=false,sink=false: ${_entry}"
-            )
-            continue()
-          endif()
+        # Local/Sink LSE tuples remain unsupported.
+        if(_lse STREQUAL "true" AND (_local STREQUAL "true" OR _sink STREQUAL
+                                                               "true"))
+          message(
+            WARNING
+              "Skipping invalid config: lse=true requires local=false,sink=false: ${_entry}"
+          )
+          continue()
         endif()
 
         # Generate for both standard and b16 policies. The b16 policy is
@@ -204,15 +199,14 @@ function(fmha_forward_configure FILENAME_SUFFIX)
           "${b16_policy_${_headsize}}|${_paged}|${_causal}|${_local}|${_sink}|${_lse}"
         )
       else()
-        # No booleans specified: generate all 18 valid combinations
+        # No booleans specified: generate all 20 valid combinations.
         foreach(IMPL_KISPAGED ${L_BOOLS})
           foreach(IMPL_KISCAUSAL ${L_BOOLS})
             foreach(IMPL_KISLOCAL ${L_BOOLS})
               foreach(IMPL_KISSINK ${L_BOOLS})
                 set(LSE_BOOLS "false")
-                if(IMPL_KISPAGED STREQUAL "false"
-                   AND IMPL_KISLOCAL STREQUAL "false"
-                   AND IMPL_KISSINK STREQUAL "false")
+                if(IMPL_KISLOCAL STREQUAL "false" AND IMPL_KISSINK STREQUAL
+                                                      "false")
                   set(LSE_BOOLS ${L_BOOLS})
                 endif()
                 foreach(IMPL_KISLSE ${LSE_BOOLS})
@@ -254,22 +248,16 @@ function(fmha_forward_configure FILENAME_SUFFIX)
     # Track enabled policies
     list(APPEND ENABLED_POLICIES "${IMPL_POLICY}")
 
-    foreach(IMPL_FULL_FP8 ${L_BOOLS})
-      set(FILE_SUFFIX "${IMPL_POLICY}")
-      if(IMPL_FULL_FP8)
-        set(FILE_SUFFIX "${FILE_SUFFIX}_fp8")
-      endif()
-      set(FILE_SUFFIX "${FILE_SUFFIX}_")
-      set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISPAGED}}")
-      set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
-      set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
-      set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
-      set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLSE}}")
-      configure_file(${FILENAME_SUFFIX}.cpp.in
-                     "${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
-      list(APPEND GEN_KERNEL_SRCS
-           "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
-    endforeach()
+    set(FILE_SUFFIX "${IMPL_POLICY}_")
+    set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISPAGED}}")
+    set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISCAUSAL}}")
+    set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISSINK}}")
+    set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLOCAL}}")
+    set(FILE_SUFFIX "${FILE_SUFFIX}${BOOL_FLAG_${IMPL_KISLSE}}")
+    configure_file(${FILENAME_SUFFIX}.cpp.in
+                   "${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
+    list(APPEND GEN_KERNEL_SRCS
+         "${CMAKE_CURRENT_BINARY_DIR}/${FILENAME_SUFFIX}_${FILE_SUFFIX}.cpp")
   endforeach()
 
   # =============================================================================
