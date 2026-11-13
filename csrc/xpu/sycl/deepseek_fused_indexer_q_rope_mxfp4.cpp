@@ -5,6 +5,7 @@
 
 #include <sycl/sycl.hpp>
 #include "utils.h"
+#include "quantization/fp4/mxfp4_quant.h"
 #include <cstdint>
 #include <torch/all.h>
 
@@ -13,40 +14,6 @@ namespace vllm {
 using bf16_t = sycl::ext::oneapi::bfloat16;
 
 static constexpr int SG_SIZE = 16;
-static constexpr float FP4_MAX = 6.0f;
-static constexpr float INV_FP4_MAX = 1.0f / 6.0f;
-
-// Staircase FP4 E2M1 encoder: maps float -> 4-bit code (sign|mantissa).
-inline uint8_t encode_fp4(float x) {
-  uint8_t sign = (x < 0.0f) ? 0x8u : 0x0u;
-  float a = sycl::fabs(x);
-  uint8_t code = (a > 0.25f) + (a > 0.75f) + (a > 1.25f) + (a > 1.75f) +
-                 (a > 2.5f) + (a > 3.5f) + (a > 5.0f);
-  return code | sign;
-}
-
-// Compute 1/scale and ue8m0 scale byte directly from amax.
-// scale = 2^ceil(log2(amax/FP4_MAX)), always power-of-2.
-// inv = 2^(127-k), computed via bit manipulation (no division).
-inline float fast_inv_scale(float amax, uint8_t& ue8m0) {
-  float ratio = amax * INV_FP4_MAX;
-  uint32_t bits;
-  __builtin_memcpy(&bits, &ratio, 4);
-  if ((bits & 0x7F800000u) == 0) bits = 0x00800000u;
-  if (bits & 0x7FFFFFu) bits = (bits + 0x800000u) & 0xFF800000u;
-  ue8m0 = static_cast<uint8_t>((bits >> 23) & 0xFFu);
-  const uint32_t inv_bits = 0x7F000000u - bits;
-  float inv;
-  __builtin_memcpy(&inv, &inv_bits, 4);
-  return inv;
-}
-
-// Quantize a pair of floats to packed MXFP4 byte (lo=bits[3:0], hi=bits[7:4]).
-inline uint8_t quant_pair(float x0, float x1, float inv_s) {
-  float q0 = sycl::fmax(-FP4_MAX, sycl::fmin(x0 * inv_s, FP4_MAX));
-  float q1 = sycl::fmax(-FP4_MAX, sycl::fmin(x1 * inv_s, FP4_MAX));
-  return ((encode_fp4(q1) & 0xFu) << 4) | (encode_fp4(q0) & 0xFu);
-}
 
 template <int HEAD_DIM_, int ROPE_DIM_, int HEADS_COARSEN_ = 4>
 class deepseek_fused_indexer_q_rope_mxfp4_kernel {
@@ -166,16 +133,19 @@ class deepseek_fused_indexer_q_rope_mxfp4_kernel {
       am3 = sycl::reduce_over_group(sg, am3, sycl::maximum<float>());
 
       // Scale + quantize all 4 blocks
-      uint8_t ue0, ue1, ue2, ue3;
-      float inv0 = fast_inv_scale(am0, ue0);
-      float inv1 = fast_inv_scale(am1, ue1);
-      float inv2 = fast_inv_scale(am2, ue2);
-      float inv3 = fast_inv_scale(am3, ue3);
+      auto s0 = vllm::mxfp4::compute_ue8m0_scale(am0);
+      auto s1 = vllm::mxfp4::compute_ue8m0_scale(am1);
+      auto s2 = vllm::mxfp4::compute_ue8m0_scale(am2);
+      auto s3 = vllm::mxfp4::compute_ue8m0_scale(am3);
+      float inv0 = 1.0f / s0.scale;
+      float inv1 = 1.0f / s1.scale;
+      float inv2 = 1.0f / s2.scale;
+      float inv3 = 1.0f / s3.scale;
 
-      uint8_t p0 = quant_pair(n0_lo, n0_hi, inv0);
-      uint8_t p1 = quant_pair(n1_lo, n1_hi, inv1);
-      uint8_t p2 = quant_pair(r0_er, r0_or, inv2);
-      uint8_t p3 = quant_pair(r1_er, r1_or, inv3);
+      uint8_t p0 = vllm::mxfp4::quantize_pair_to_mxfp4(n0_lo, n0_hi, inv0);
+      uint8_t p1 = vllm::mxfp4::quantize_pair_to_mxfp4(n1_lo, n1_hi, inv1);
+      uint8_t p2 = vllm::mxfp4::quantize_pair_to_mxfp4(r0_er, r0_or, inv2);
+      uint8_t p3 = vllm::mxfp4::quantize_pair_to_mxfp4(r1_er, r1_or, inv3);
 
       // Batched writes
       pd[lane] = p0;
@@ -184,8 +154,8 @@ class deepseek_fused_indexer_q_rope_mxfp4_kernel {
       pd[NOPE_DIM / 2 + HALF_BLOCK + lane] = p3;
 
       if (lane == 0) {
-        uint32_t sp = (uint32_t)ue0 | ((uint32_t)ue1 << 8) |
-                      ((uint32_t)ue2 << 16) | ((uint32_t)ue3 << 24);
+        uint32_t sp = (uint32_t)s0.ue8m0 | ((uint32_t)s1.ue8m0 << 8) |
+                      ((uint32_t)s2.ue8m0 << 16) | ((uint32_t)s3.ue8m0 << 24);
         *reinterpret_cast<uint32_t*>(sd) = sp;
         wo_[tok * H_ + h] =
             static_cast<float>(w_[tok * H_ + h]) * combined_scale_;
