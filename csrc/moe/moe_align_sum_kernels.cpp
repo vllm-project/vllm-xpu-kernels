@@ -6,6 +6,7 @@
 
 #include "utils.h"
 #include "dispatch_utils.h"
+#include "sycl_launch.h"
 
 #define CEILDIV(x, y) (((x) + (y) - 1) / (y))
 
@@ -1207,21 +1208,19 @@ void moe_align_block_size(
           sycl::range<2> global_range2(global_size_x, global_size_y);
           sycl::range<2> local_range2(block_threads, 1);
 
-          queue.submit([&](sycl::handler& cgh) {
-            vllm::moe::count_and_sort_expert_tokens_kernel<scalar_t> kfn(
-                topk_ids.data_ptr<scalar_t>(),
-                sorted_token_ids.data_ptr<int32_t>(),
-                cumsum_buffer.data_ptr<int32_t>(),
-                expert_map.data_ptr<int32_t>(),
-                topk_ids.numel(),
-                num_experts,
-                sorted_token_ids.size(0),
-                topk_ids.size(1),
-                has_expert_map,
-                scatter_ptr);
-            cgh.parallel_for(
-                sycl::nd_range<2>(global_range2, local_range2), kfn);
-          });
+          vllm::moe::count_and_sort_expert_tokens_kernel<scalar_t> kfn(
+              topk_ids.data_ptr<scalar_t>(),
+              sorted_token_ids.data_ptr<int32_t>(),
+              cumsum_buffer.data_ptr<int32_t>(),
+              expert_map.data_ptr<int32_t>(),
+              topk_ids.numel(),
+              num_experts,
+              sorted_token_ids.size(0),
+              topk_ids.size(1),
+              has_expert_map,
+              scatter_ptr);
+          vllm::xpu::sycl_kernel_submit(
+              queue, sycl::nd_range<2>(global_range2, local_range2), kfn);
         }
       });
 }
@@ -1347,24 +1346,22 @@ void moe_sum(
     if (pad_aware) {                                                        \
       AT_DISPATCH_INDEX_TYPES(topk_ids->scalar_type(), "moe_sum_idx", [&] { \
         const auto* tk_ptr = topk_ids->data_ptr<index_t>();                 \
-        queue.submit([&](sycl::handler& cgh) {                              \
-          cgh.parallel_for(                                                 \
-              sycl::nd_range<1>(global_range, local_range),                 \
-              vllm::moe::moe_sum_kernel<scalar_t, index_t, TOPK_VAL, true>( \
-                  out_ptr, in_ptr, hidden_size, tk_ptr, expert_map_ptr));   \
-        });                                                                 \
+        vllm::xpu::sycl_kernel_submit(                                      \
+            queue,                                                          \
+            sycl::nd_range<1>(global_range, local_range),                   \
+            vllm::moe::moe_sum_kernel<scalar_t, index_t, TOPK_VAL, true>(   \
+                out_ptr, in_ptr, hidden_size, tk_ptr, expert_map_ptr));     \
       });                                                                   \
     } else {                                                                \
-      queue.submit([&](sycl::handler& cgh) {                                \
-        cgh.parallel_for(                                                   \
-            sycl::nd_range<1>(global_range, local_range),                   \
-            vllm::moe::moe_sum_kernel<scalar_t, int32_t, TOPK_VAL, false>(  \
-                out_ptr,                                                    \
-                in_ptr,                                                     \
-                hidden_size,                                                \
-                static_cast<const int32_t*>(nullptr),                       \
-                nullptr));                                                  \
-      });                                                                   \
+      vllm::xpu::sycl_kernel_submit(                                        \
+          queue,                                                            \
+          sycl::nd_range<1>(global_range, local_range),                     \
+          vllm::moe::moe_sum_kernel<scalar_t, int32_t, TOPK_VAL, false>(    \
+              out_ptr,                                                      \
+              in_ptr,                                                       \
+              hidden_size,                                                  \
+              static_cast<const int32_t*>(nullptr),                         \
+              nullptr));                                                    \
     }                                                                       \
   })
 
@@ -1573,23 +1570,22 @@ void moe_lora_align_block_size(
           sycl::range<2> global_range(global_size_x, global_size_y);
           sycl::range<2> local_range(block_threads, 1);
 
-          queue.submit([&](sycl::handler& h) {
-            vllm::moe::lora_count_and_sort_expert_tokens_kernel<scalar_t> kfn(
-                topk_ids.data_ptr<scalar_t>(),
-                sorted_token_ids.data_ptr<int32_t>(),
-                cumsum.data_ptr<int32_t>(),
-                expert_map.data_ptr<int32_t>(),
-                topk_ids.numel(),
-                num_experts,
-                max_num_tokens_padded,
-                topk_num,
-                token_mask.data_ptr<int32_t>(),
-                max_loras,
-                adapter_enabled.data_ptr<int32_t>(),
-                lora_ids.data_ptr<int32_t>(),
-                has_expert_map);
-            h.parallel_for(sycl::nd_range<2>(global_range, local_range), kfn);
-          });
+          vllm::moe::lora_count_and_sort_expert_tokens_kernel<scalar_t> kfn(
+              topk_ids.data_ptr<scalar_t>(),
+              sorted_token_ids.data_ptr<int32_t>(),
+              cumsum.data_ptr<int32_t>(),
+              expert_map.data_ptr<int32_t>(),
+              topk_ids.numel(),
+              num_experts,
+              max_num_tokens_padded,
+              topk_num,
+              token_mask.data_ptr<int32_t>(),
+              max_loras,
+              adapter_enabled.data_ptr<int32_t>(),
+              lora_ids.data_ptr<int32_t>(),
+              has_expert_map);
+          vllm::xpu::sycl_kernel_submit(
+              queue, sycl::nd_range<2>(global_range, local_range), kfn);
         }
       });
 }
