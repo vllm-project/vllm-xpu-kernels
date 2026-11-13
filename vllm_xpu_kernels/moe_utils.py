@@ -660,11 +660,17 @@ def mxfp_scale_padded_rows(num_rows, num_experts):
     return num_rows + 3 * num_experts
 
 
-def reorder_mxfp_scales(A_scales, rows_per_expert):
+def reorder_mxfp_scales(A_scales, rows_per_expert, expert_scale_desc=None):
     # Pad each expert's M up to a multiple of 4 with zeros so the cumulative
     # scale offsets used by the grouped-gemm kernel (sum of round_up_4(rows))
     # remain aligned.
+    #
+    # When ``expert_scale_desc`` (int32 ``[2, num_experts + 1]``) is given it
+    # is filled with the same descriptor ``remap_hidden_states`` publishes, so
+    # callers that permute elsewhere can feed it to ``fused_act_quant_xpu``
+    # and get gemm2's scales in GEMM layout without a second reorder.
     num_experts = rows_per_expert.shape[0]
     total_padded = mxfp_scale_padded_rows(A_scales.shape[0], num_experts)
     return torch.ops._moe_C.reorder_mxfp_scales(A_scales, rows_per_expert,
-                                                total_padded)
+                                                total_padded,
+                                                expert_scale_desc)
