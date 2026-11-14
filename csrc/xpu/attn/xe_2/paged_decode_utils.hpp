@@ -160,8 +160,9 @@ inline void dispatch_by_head_size(
           queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     case 6:
+      // Split-V applies only to the MLA bucket.
       decode_policy_dispatch_func<
-          decode_policy_qpacked_head<QGroup, _576, PageSize>>(
+          decode_policy_maybe_splitv<QGroup, _576, PageSize>>(
           queue, cuQKType, args, args.is_causal, args.is_local, args.is_sink);
       break;
     default:
