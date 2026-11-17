@@ -597,7 +597,8 @@ if(VLLM_XPU_ENABLE_XE3P
   target_compile_options(quant_asm_xe_3 PRIVATE ${VLLM_GPU_COMPILE_FLAGS} -fPIC)
   # The asm headers key on VLLM_XPU_ENABLE_XE3; define it for this library only.
   target_compile_definitions(quant_asm_xe_3 PRIVATE VLLM_XPU_ENABLE_XE3=1)
-  target_include_directories(quant_asm_xe_3 PRIVATE csrc ${VLLM_XPU_INCLUDE_DIR})
+  target_include_directories(quant_asm_xe_3 PRIVATE csrc
+                                                    ${VLLM_XPU_INCLUDE_DIR})
 
   target_link_libraries(quant_asm_xe_3 PRIVATE torch ${TORCH_LIBRARIES})
 
@@ -612,9 +613,9 @@ if(VLLM_XPU_ENABLE_XE3P
 
   # Ship alongside the extensions; global rpath is already $ORIGIN.
   set_target_properties(quant_asm_xe_3 PROPERTIES LIBRARY_OUTPUT_DIRECTORY
-                                                 "${CMAKE_BINARY_DIR}/")
+                                                  "${CMAKE_BINARY_DIR}/")
   install(TARGETS quant_asm_xe_3 LIBRARY DESTINATION vllm_xpu_kernels
-                                        COMPONENT quant_asm_xe_3)
+                                         COMPONENT quant_asm_xe_3)
 endif()
 
 #
@@ -665,8 +666,8 @@ if(BASIC_KERNELS_ENABLED)
     3
     WITH_SOABI)
 
-  target_compile_definitions(
-    _C PRIVATE VLLM_FP8_QUANT_DISABLE_ASM=1 VLLM_MXFP4_QUANT_DISABLE_ASM=1)
+  target_compile_definitions(_C PRIVATE VLLM_FP8_QUANT_DISABLE_ASM=1
+                                        VLLM_MXFP4_QUANT_DISABLE_ASM=1)
 
   if(VLLM_XPU_ENABLE_XE3P AND TARGET quant_asm_xe_3)
     target_link_libraries(_C PRIVATE quant_asm_xe_3)
