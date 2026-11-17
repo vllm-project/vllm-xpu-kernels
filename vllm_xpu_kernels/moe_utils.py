@@ -88,9 +88,11 @@ def quant_mxfp_act_xpu(x, recipe, expert_scale_desc=None, scale_rows=0):
 def _alloc_mx_act_scale(x, scale_k, expert_scale_desc, scale_rows,
                         e8m0=False):
     # Without a MoE descriptor the kernel writes float32 scales that the
-    # caller converts to e8m0. With one it writes the padded MN-major e8m0
-    # surface the mxfp grouped-GEMM mainloop indexes directly, which removes
-    # both the conversion pass and the separate reorder pass.
+    # caller converts to e8m0, or e8m0 directly when ``e8m0`` is set (the
+    # kernels support that for half/bfloat16 input only). With one it writes
+    # the padded MN-major e8m0 surface the mxfp grouped-GEMM mainloop indexes
+    # directly, which removes both the conversion pass and the separate
+    # reorder pass.
     if expert_scale_desc is None:
         return torch.empty(
             x.shape[:-1] + (scale_k, ),
@@ -101,14 +103,20 @@ def _alloc_mx_act_scale(x, scale_k, expert_scale_desc, scale_rows,
                        dtype=torch.float8_e8m0fnu)
 
 
+def _mx_direct_e8m0(x, expert_scale_desc):
+    return expert_scale_desc is None and x.dtype in (torch.float16,
+                                                     torch.bfloat16)
+
+
 def _quant_mxfp8_act_xpu(x, expert_scale_desc=None, scale_rows=0):
     MXFP8_BLOCK_SIZE = 32
     assert x.shape[-1] % MXFP8_BLOCK_SIZE == 0
 
     eps = 1e-10
     x_q = torch.empty_like(x, device=x.device, dtype=torch.float8_e4m3fn)
+    direct_e8m0 = _mx_direct_e8m0(x, expert_scale_desc)
     x_s = _alloc_mx_act_scale(x, x.shape[-1] // MXFP8_BLOCK_SIZE,
-                              expert_scale_desc, scale_rows, e8m0=True)
+                              expert_scale_desc, scale_rows, direct_e8m0)
     torch.ops._C.per_token_group_fp8_quant(
         x,
         x_q,
@@ -122,6 +130,8 @@ def _quant_mxfp8_act_xpu(x, expert_scale_desc=None, scale_rows=0):
         False,  # dummy_is_scale_transposed, dummy_is_tma_aligned
         expert_scale_desc,
     )
+    if expert_scale_desc is None and not direct_e8m0:
+        x_s = x_s.to(torch.float8_e8m0fnu)
     return x_q, x_s
 
 def _quant_mxfp4_act_xpu(x, expert_scale_desc=None, scale_rows=0):
@@ -130,13 +140,17 @@ def _quant_mxfp4_act_xpu(x, expert_scale_desc=None, scale_rows=0):
     M, N = x.shape
     # Packed FP4 output: two nibbles per byte
     x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
+    direct_e8m0 = _mx_direct_e8m0(x, expert_scale_desc)
     x_s = _alloc_mx_act_scale(x, N // MXFP4_BLOCK_SIZE, expert_scale_desc,
-                              scale_rows, e8m0=True)
+                              scale_rows, direct_e8m0)
 
     torch.ops._C.per_token_group_quant_mxfp4(x, x_q, x_s, MXFP4_BLOCK_SIZE,
                                              eps, expert_scale_desc)
 
     x_q = x_q.view(torch.float4_e2m1fn_x2)
+    if expert_scale_desc is None and not direct_e8m0:
+        x_s = x_s.to(dtype=torch.float8_e8m0fnu,
+                     memory_format=torch.preserve_format)
     return x_q, x_s
 
 def qdq_fp8_act(x):
